@@ -128,12 +128,13 @@ jobs:
           chmod 600 "$path/.env"
 
       - name: Build image on Macmini
+        timeout-minutes: 20
         env:
           IMAGE_REPO: vnpy-web-bridge
           IMAGE_TAG: sha-${{ github.sha }}
         run: |
           export PATH="/Applications/Docker.app/Contents/Resources/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
-          docker build -t "${IMAGE_REPO}:${IMAGE_TAG}" -t "${IMAGE_REPO}:latest" .
+          docker build --progress=plain -t "${IMAGE_REPO}:${IMAGE_TAG}" -t "${IMAGE_REPO}:latest" .
 
       - name: Deploy via docker compose
         env:
