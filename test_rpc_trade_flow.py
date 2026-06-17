@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 import time
 from dataclasses import asdict, is_dataclass
@@ -11,11 +12,11 @@ from vnpy.trader.event import EVENT_ORDER, EVENT_TICK, EVENT_TRADE
 from vnpy.trader.object import CancelRequest, OrderData, OrderRequest, SubscribeRequest, TickData
 
 
-REQ_ADDRESS = "tcp://192.168.100.187:2014"
-PUB_ADDRESS = "tcp://192.168.100.187:4102"
-GATEWAY_NAME = "CTP"
-SYMBOL = "rb2610"
-EXCHANGE = Exchange.SHFE
+REQ_ADDRESS = os.getenv("VNPY_RPC_REQ_ADDRESS", "tcp://127.0.0.1:2014")
+PUB_ADDRESS = os.getenv("VNPY_RPC_PUB_ADDRESS", "tcp://127.0.0.1:4102")
+GATEWAY_NAME = os.getenv("VNPY_GATEWAY_NAME", "CTP")
+SYMBOL = os.getenv("VNPY_TEST_SYMBOL", "rb2610")
+EXCHANGE = Exchange(os.getenv("VNPY_TEST_EXCHANGE", "SHFE"))
 
 
 class TestClient(RpcClient):
