@@ -32,7 +32,7 @@ def test_rpc_status_is_available_without_rpc_server(monkeypatch) -> None:
     monkeypatch.setattr(rpc_service, "status", lambda probe=False: {"connected": False, "last_error": "offline"})
 
     with client_without_rpc(monkeypatch) as client:
-        response = client.get("/api/rpc/status")
+        response = client.get("/api/rpc/status", headers=auth_headers("viewer"))
 
     assert response.status_code == 200
     body = response.json()
@@ -42,7 +42,7 @@ def test_rpc_status_is_available_without_rpc_server(monkeypatch) -> None:
 
 def test_validation_errors_use_unified_error_payload(monkeypatch) -> None:
     with client_without_rpc(monkeypatch) as client:
-        response = client.post("/api/market/subscribe", json={})
+        response = client.post("/api/market/subscribe", headers=auth_headers("viewer"), json={})
 
     assert response.status_code == 422
     body = response.json()
@@ -52,9 +52,10 @@ def test_validation_errors_use_unified_error_payload(monkeypatch) -> None:
 
 def test_websocket_sends_gateway_status_and_pong(monkeypatch) -> None:
     monkeypatch.setattr(rpc_service, "status", lambda probe=False: {"connected": False, "last_error": "offline"})
+    token = create_access_token(CurrentUser("viewer", "viewer"))
 
     with client_without_rpc(monkeypatch) as client:
-        with client.websocket_connect("/ws/events") as websocket:
+        with client.websocket_connect(f"/ws/events?token={token}") as websocket:
             initial = websocket.receive_json()
             websocket.send_text("ping")
             pong = websocket.receive_json()
@@ -64,15 +65,42 @@ def test_websocket_sends_gateway_status_and_pong(monkeypatch) -> None:
     assert pong["type"] == "pong"
 
 
+def test_websocket_rejects_missing_token(monkeypatch) -> None:
+    from starlette.websockets import WebSocketDisconnect
+
+    with client_without_rpc(monkeypatch) as client:
+        try:
+            with client.websocket_connect("/ws/events"):
+                raise AssertionError("websocket should not connect")
+        except WebSocketDisconnect as exc:
+            assert exc.code == 1008
+
+
 def test_trade_config_returns_safe_default(monkeypatch) -> None:
     risk_service.disable_trade()
     with client_without_rpc(monkeypatch) as client:
-        response = client.get("/api/trade/config")
+        response = client.get("/api/trade/config", headers=auth_headers("viewer"))
 
     assert response.status_code == 200
     body = response.json()
     assert body["ok"] is True
     assert body["data"]["web_trade_enabled"] is False
+
+
+def test_market_bars_requires_auth_and_returns_rows(monkeypatch) -> None:
+    monkeypatch.setattr(
+        rpc_service,
+        "get_bars",
+        lambda symbol, exchange, interval, limit: [{"vt_symbol": f"{symbol}.{exchange}", "interval": interval, "close_price": 3000}],
+    )
+
+    with client_without_rpc(monkeypatch) as client:
+        unauthenticated = client.get("/api/market/bars?symbol=rb2610&exchange=SHFE")
+        response = client.get("/api/market/bars?symbol=rb2610&exchange=SHFE", headers=auth_headers("viewer"))
+
+    assert unauthenticated.status_code == 401
+    assert response.status_code == 200
+    assert response.json()["data"][0]["vt_symbol"] == "rb2610.SHFE"
 
 
 def test_create_order_validation_error_uses_unified_payload(monkeypatch) -> None:
@@ -264,7 +292,8 @@ def test_admin_emergency_stop_disables_trade(monkeypatch) -> None:
 
 def test_risk_change_pushes_websocket_alert(monkeypatch) -> None:
     with client_without_rpc(monkeypatch) as client:
-        with client.websocket_connect("/ws/events") as websocket:
+        token = create_access_token(CurrentUser("viewer", "viewer"))
+        with client.websocket_connect(f"/ws/events?token={token}") as websocket:
             assert websocket.receive_json()["type"] == "gateway_status"
             response = client.post("/api/risk/trade/enable", headers=auth_headers("admin"))
             message = websocket.receive_json()

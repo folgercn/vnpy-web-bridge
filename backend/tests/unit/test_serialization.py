@@ -41,3 +41,9 @@ def test_to_plain_dict_normalizes_order_status() -> None:
     data = to_plain_dict({"status": "未成交"})
 
     assert data["status"] == "not_traded"
+
+
+def test_to_plain_dict_normalizes_trade_enums() -> None:
+    data = to_plain_dict({"direction": "多", "offset": "平今", "type": "限价"})
+
+    assert data == {"direction": "long", "offset": "closetoday", "type": "limit"}

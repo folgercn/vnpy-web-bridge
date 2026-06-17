@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
+from threading import RLock
+from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -15,16 +16,16 @@ from app.ws.manager import ws_manager
 
 try:
     from vnpy.rpc import RpcClient
-    from vnpy.trader.constant import Exchange
+    from vnpy.trader.constant import Exchange, Interval
     from vnpy.trader.event import EVENT_ORDER, EVENT_TICK, EVENT_TRADE
-    from vnpy.trader.object import CancelRequest, OrderRequest, SubscribeRequest
+    from vnpy.trader.object import CancelRequest, HistoryRequest, OrderRequest, SubscribeRequest
 except ImportError:  # pragma: no cover - covered in deployments with vn.py installed
     RpcClient = object  # type: ignore[assignment,misc]
-    Exchange = None  # type: ignore[assignment]
+    Exchange = Interval = None  # type: ignore[assignment]
     EVENT_ORDER = "eOrder"
     EVENT_TICK = "eTick"
     EVENT_TRADE = "eTrade"
-    CancelRequest = None  # type: ignore[assignment]
+    CancelRequest = HistoryRequest = None  # type: ignore[assignment]
     OrderRequest = None  # type: ignore[assignment]
     SubscribeRequest = None  # type: ignore[assignment]
 
@@ -48,6 +49,7 @@ class VnpyRpcService:
         self.last_connected_at: datetime | None = None
         self.last_error: str | None = None
         self.loop: asyncio.AbstractEventLoop | None = None
+        self._call_lock = RLock()
 
     def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         self.loop = loop
@@ -86,7 +88,7 @@ class VnpyRpcService:
     def status(self, *, probe: bool = False) -> dict[str, Any]:
         if probe and self.started and self.client:
             try:
-                self.call("get_all_contracts", timeout=1_000)
+                self.call("get_all_accounts", timeout=1_000)
             except Exception as exc:
                 self.started = False
                 self.last_error = str(exc)
@@ -106,8 +108,9 @@ class VnpyRpcService:
 
         call_timeout = timeout or self.settings.vnpy_rpc_timeout_ms
         try:
-            method = getattr(self.client, name)
-            return method(*args, timeout=call_timeout, **kwargs)
+            with self._call_lock:
+                method = getattr(self.client, name)
+                return method(*args, timeout=call_timeout, **kwargs)
         except TimeoutError as exc:
             self.last_error = str(exc)
             raise RpcTimeoutError(detail={"method": name, "timeout_ms": call_timeout}) from exc
@@ -142,6 +145,20 @@ class VnpyRpcService:
     def get_trades(self) -> list[dict[str, Any]]:
         return to_plain_list(self.call_first(["get_all_trades"]))
 
+    def get_bars(self, symbol: str, exchange: str, interval: str = "1m", limit: int = 300) -> list[dict[str, Any]]:
+        if HistoryRequest is not None and Exchange is not None and Interval is not None:
+            try:
+                exchange_value = self._parse_exchange(exchange)
+                interval_value = self._parse_interval(interval)
+                end = datetime.now(ZoneInfo("Asia/Shanghai"))
+                start = end - timedelta(minutes=max(limit, 1) * _interval_minutes(interval))
+                request = HistoryRequest(symbol=symbol, exchange=exchange_value, interval=interval_value, start=start, end=end)
+                return to_plain_list(self.call("query_history", request, self.settings.vnpy_gateway_name))
+            except RpcCallError:
+                pass
+
+        return to_plain_list(self.call("get_bars", symbol, exchange, interval, limit))
+
     def get_order_raw(self, vt_orderid: str) -> Any:
         return self.call("get_order", vt_orderid)
 
@@ -159,17 +176,35 @@ class VnpyRpcService:
         if SubscribeRequest is None or Exchange is None:
             raise RpcUnavailableError("vn.py 未安装")
 
-        try:
-            exchange_value = Exchange(exchange)
-        except ValueError:
-            try:
-                exchange_value = Exchange[exchange]
-            except KeyError as exc:
-                raise RpcCallError("交易所代码无效", detail={"exchange": exchange}) from exc
+        exchange_value = self._parse_exchange(exchange)
 
         req = SubscribeRequest(symbol=symbol, exchange=exchange_value)
         self.call("subscribe", req, self.settings.vnpy_gateway_name)
         return {"symbol": symbol, "exchange": exchange_value.value, "vt_symbol": f"{symbol}.{exchange_value.value}"}
+
+    def _parse_exchange(self, exchange: str) -> Any:
+        if Exchange is None:
+            raise RpcUnavailableError("vn.py 未安装")
+        try:
+            return Exchange(exchange)
+        except ValueError:
+            try:
+                return Exchange[exchange]
+            except KeyError as exc:
+                raise RpcCallError("交易所代码无效", detail={"exchange": exchange}) from exc
+
+    def _parse_interval(self, interval: str) -> Any:
+        if Interval is None:
+            raise RpcUnavailableError("vn.py 未安装")
+        value_map = {"1m": "MINUTE", "1h": "HOUR", "1d": "DAILY", "1w": "WEEKLY"}
+        name = value_map.get(interval, interval).upper()
+        try:
+            return Interval(interval)
+        except ValueError:
+            try:
+                return Interval[name]
+            except KeyError as exc:
+                raise RpcCallError("K线周期无效", detail={"interval": interval}) from exc
 
     def handle_event(self, topic: str, event: Any) -> None:
         event_type = getattr(event, "type", topic)
@@ -195,3 +230,7 @@ class VnpyRpcService:
 
 
 rpc_service = VnpyRpcService()
+
+
+def _interval_minutes(interval: str) -> int:
+    return {"1m": 1, "1h": 60, "1d": 1440, "1w": 10080}.get(interval, 1)

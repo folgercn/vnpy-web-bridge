@@ -16,7 +16,7 @@ router = APIRouter()
 
 
 @router.get("/risk/status")
-def risk_status() -> dict:
+def risk_status(_: CurrentUser = Depends(require_roles("viewer", "trader", "admin"))) -> dict:
     return ok(risk_service.status())
 
 
@@ -88,6 +88,7 @@ async def emergency_stop(
                 CancelAllRequestDTO(),
                 source_ip=request.client.host if request.client else None,
                 operator=user.username,
+                bypass_trade_check=True,
             )
         finally:
             risk_service.web_trade_enabled = previous

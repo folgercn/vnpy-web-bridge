@@ -47,6 +47,11 @@ def make_service() -> RiskService:
 def allow_rpc(monkeypatch) -> None:
     monkeypatch.setattr(rpc_service, "status", lambda: {"connected": True})
     monkeypatch.setattr(rpc_service, "get_positions", lambda: [])
+    monkeypatch.setattr(
+        rpc_service,
+        "get_contracts",
+        lambda: [{"symbol": "rb2610", "exchange": "SHFE", "vt_symbol": "rb2610.SHFE", "pricetick": 1}],
+    )
 
 
 def test_trade_disabled() -> None:
@@ -96,3 +101,28 @@ def test_price_protection(monkeypatch) -> None:
 
     with pytest.raises(RiskPriceProtectionError):
         service.check_order(make_order(price=3300))
+
+
+def test_missing_contract_rejects_order(monkeypatch) -> None:
+    service = make_service()
+    allow_rpc(monkeypatch)
+    monkeypatch.setattr(rpc_service, "get_contracts", lambda: [])
+
+    with pytest.raises(RiskSymbolBlockedError):
+        service.check_order(make_order())
+
+
+def test_close_order_does_not_apply_position_limit(monkeypatch) -> None:
+    service = make_service()
+    allow_rpc(monkeypatch)
+    monkeypatch.setattr(rpc_service, "get_positions", lambda: [{"vt_symbol": "rb2610.SHFE", "volume": 5}])
+
+    service.check_order(make_order(offset="close"))
+
+
+def test_price_must_match_contract_tick(monkeypatch) -> None:
+    service = make_service()
+    allow_rpc(monkeypatch)
+
+    with pytest.raises(RiskPriceProtectionError):
+        service.check_order(make_order(price=3000.5))

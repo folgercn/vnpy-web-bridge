@@ -23,13 +23,13 @@ import { reactive } from 'vue'
 import { useDialog, useMessage } from 'naive-ui'
 import DataPanel from '../components/common/DataPanel.vue'
 import { sendOrder } from '../api/trade'
+import { exchangeOptions } from '../constants/exchanges'
 import { useTerminalStore } from '../stores/terminal'
 
 const dialog = useDialog()
 const message = useMessage()
 const terminal = useTerminalStore()
 const form = reactive({ symbol: 'rb2610', exchange: 'SHFE', direction: 'long' as const, offset: 'open' as const, price: 3000, volume: 1 })
-const exchangeOptions = ['SHFE', 'DCE', 'CZCE', 'CFFEX', 'INE', 'GFEX'].map((value) => ({ label: value, value }))
 const offsetOptions = [
   { label: '开仓', value: 'open' },
   { label: '平仓', value: 'close' },

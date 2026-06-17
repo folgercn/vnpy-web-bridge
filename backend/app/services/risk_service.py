@@ -96,11 +96,16 @@ class RiskService:
         if allowed_symbols and payload.symbol not in allowed_symbols and vt_symbol not in allowed_symbols:
             raise RiskSymbolBlockedError("合约不在白名单", detail={"symbol": payload.symbol, "vt_symbol": vt_symbol})
 
+        contract = self._get_contract(vt_symbol)
+        if contract is None:
+            raise RiskSymbolBlockedError("合约不存在", detail={"vt_symbol": vt_symbol})
+
         if payload.volume > self.rules["max_order_volume"]:
             raise RiskMaxOrderVolumeError(
                 detail={"volume": payload.volume, "max_order_volume": self.rules["max_order_volume"]}
             )
 
+        self._check_contract_constraints(payload, contract)
         self._check_symbol_position(payload)
         self._check_price_protection(payload)
         self._check_daily_loss()
@@ -108,7 +113,7 @@ class RiskService:
 
     def _check_symbol_position(self, payload: OrderRequestDTO) -> None:
         max_position = self.rules["max_symbol_position"]
-        if max_position <= 0:
+        if max_position <= 0 or payload.offset != "open":
             return
         vt_symbol = f"{payload.symbol}.{payload.exchange}"
         positions = rpc_service.get_positions()
@@ -121,6 +126,21 @@ class RiskService:
             raise RiskMaxSymbolPositionError(
                 detail={"vt_symbol": vt_symbol, "current_volume": current_volume, "order_volume": payload.volume}
             )
+
+    def _get_contract(self, vt_symbol: str) -> dict[str, Any] | None:
+        for contract in rpc_service.get_contracts():
+            contract_vt_symbol = contract.get("vt_symbol") or f"{contract.get('symbol')}.{contract.get('exchange')}"
+            if contract_vt_symbol == vt_symbol:
+                return contract
+        return None
+
+    def _check_contract_constraints(self, payload: OrderRequestDTO, contract: dict[str, Any]) -> None:
+        price_tick = float(contract.get("pricetick") or contract.get("price_tick") or 0)
+        if price_tick > 0 and not _is_multiple(payload.price, price_tick):
+            raise RiskPriceProtectionError(detail={"price": payload.price, "pricetick": price_tick})
+        min_volume = float(contract.get("min_volume") or 0)
+        if min_volume > 0 and not _is_multiple(payload.volume, min_volume):
+            raise RiskMaxOrderVolumeError(detail={"volume": payload.volume, "min_volume": min_volume})
 
     def _check_price_protection(self, payload: OrderRequestDTO) -> None:
         percent = self.rules["price_protection_percent"]
@@ -157,6 +177,10 @@ class RiskService:
 
 def _csv(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _is_multiple(value: float, step: float) -> bool:
+    return abs(round(value / step) * step - value) < 1e-8
 
 
 risk_service = RiskService()

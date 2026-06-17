@@ -15,6 +15,25 @@ STATUS_VALUE_MAP = {
     "拒单": "rejected",
 }
 
+ENUM_VALUE_MAP = {
+    "多": "long",
+    "空": "short",
+    "开": "open",
+    "平": "close",
+    "平今": "closetoday",
+    "平昨": "closeyesterday",
+    "限价": "limit",
+    "市价": "market",
+    "SHFE": "SHFE",
+    "DCE": "DCE",
+    "CZCE": "CZCE",
+    "CFFEX": "CFFEX",
+    "INE": "INE",
+    "GFEX": "GFEX",
+}
+
+NORMALIZED_FIELDS = {"direction", "offset", "type", "status"}
+
 
 def enum_to_string(value: Any) -> Any:
     if isinstance(value, Enum):
@@ -56,9 +75,16 @@ def to_plain_dict(obj: Any) -> dict[str, Any]:
         raw = getattr(obj, "__dict__", {"value": obj})
 
     data = {str(k): to_plain_value(v) for k, v in raw.items() if not str(k).startswith("_")}
-    if "status" in data:
-        data["status"] = STATUS_VALUE_MAP.get(str(data["status"]), str(data["status"]).lower())
+    for key in NORMALIZED_FIELDS & data.keys():
+        data[key] = normalize_enum_field(key, data[key])
     return data
+
+
+def normalize_enum_field(key: str, value: Any) -> Any:
+    raw = str(value)
+    if key == "status":
+        return STATUS_VALUE_MAP.get(raw, raw.lower())
+    return ENUM_VALUE_MAP.get(raw, raw.lower())
 
 
 def to_plain_list(items: Any) -> list[dict[str, Any]]:

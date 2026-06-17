@@ -12,7 +12,8 @@ jobs:
     name: Detect changed areas
     runs-on: ubuntu-latest
     outputs:
-      python_changed: ${{ steps.filter.outputs.python_changed }}
+      backend_changed: ${{ steps.filter.outputs.backend_changed }}
+      frontend_changed: ${{ steps.filter.outputs.frontend_changed }}
       docker_changed: ${{ steps.filter.outputs.docker_changed }}
     steps:
       - name: Checkout
@@ -29,7 +30,8 @@ jobs:
           CURRENT_SHA: ${{ github.sha }}
         run: |
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            echo "python_changed=true" >> "$GITHUB_OUTPUT"
+            echo "backend_changed=true" >> "$GITHUB_OUTPUT"
+            echo "frontend_changed=true" >> "$GITHUB_OUTPUT"
             echo "docker_changed=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -43,14 +45,18 @@ jobs:
             changed_files="$(git ls-tree -r --name-only "$CURRENT_SHA")"
           fi
 
-          python_changed=false
+          backend_changed=false
+          frontend_changed=false
           docker_changed=false
 
           while IFS= read -r file; do
             [ -z "$file" ] && continue
             case "$file" in
-              *.py|requirements.txt|.github/workflows/ci.yml)
-                python_changed=true
+              backend/*|requirements.txt|.github/workflows/ci.yml)
+                backend_changed=true
+                ;;
+              frontend/*|.github/workflows/ci.yml)
+                frontend_changed=true
                 ;;
               Dockerfile|.dockerignore|deployments/*|scripts/deploy.sh|requirements.txt|.github/workflows/ci.yml)
                 docker_changed=true
@@ -60,13 +66,14 @@ jobs:
           $changed_files
           EOF
 
-          echo "python_changed=$python_changed" >> "$GITHUB_OUTPUT"
+          echo "backend_changed=$backend_changed" >> "$GITHUB_OUTPUT"
+          echo "frontend_changed=$frontend_changed" >> "$GITHUB_OUTPUT"
           echo "docker_changed=$docker_changed" >> "$GITHUB_OUTPUT"
 
-  python:
-    name: Python checks
+  backend:
+    name: Backend tests
     needs: changes
-    if: needs.changes.outputs.python_changed == 'true'
+    if: needs.changes.outputs.backend_changed == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -77,8 +84,39 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Compile scripts
-        run: python -m py_compile test_rpc_readonly.py test_rpc_trade_flow.py
+      - name: Install backend dependencies
+        run: pip install -r backend/requirements.txt
+
+      - name: Run backend unit tests
+        run: PYTHONPATH=backend pytest backend/tests/unit
+
+  frontend:
+    name: Frontend build and tests
+    needs: changes
+    if: needs.changes.outputs.frontend_changed == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Run frontend tests
+        run: npm test
+
+      - name: Build frontend
+        run: npm run build
 
   docker:
     name: Docker build validation

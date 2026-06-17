@@ -153,10 +153,12 @@ class TradeService:
         *,
         source_ip: str | None = None,
         operator: str = "anonymous",
+        bypass_trade_check: bool = False,
     ) -> dict[str, Any]:
         request_data = payload.model_dump()
         self.audit.record(action="cancel_all_request", request=request_data, operator=operator, source_ip=source_ip)
-        self.risk.check_trade_allowed(confirm=True)
+        if not bypass_trade_check:
+            self.risk.check_trade_allowed(confirm=True)
         orders = [order for order in rpc_service.get_active_orders_raw() if self._matches_filter(order, payload)]
         items: list[dict[str, Any]] = []
 

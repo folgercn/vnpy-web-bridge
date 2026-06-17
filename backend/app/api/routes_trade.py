@@ -13,13 +13,13 @@ router = APIRouter()
 
 
 @router.get("/orders")
-def orders() -> dict:
+def orders(_: CurrentUser = Depends(require_roles("viewer", "trader", "admin"))) -> dict:
     orders_data = rpc_service.get_orders()
     return ok(orders_data if orders_data else memory_store.orders())
 
 
 @router.get("/trades")
-def trades() -> dict:
+def trades(_: CurrentUser = Depends(require_roles("viewer", "trader", "admin"))) -> dict:
     trades_data = rpc_service.get_trades()
     return ok(trades_data if trades_data else memory_store.trades())
 

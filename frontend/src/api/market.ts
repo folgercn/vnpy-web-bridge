@@ -7,3 +7,7 @@ export const subscribeMarket = (symbol: string, exchange: string) =>
     body: JSON.stringify({ symbol, exchange })
   })
 export const getTick = (vtSymbol: string) => request<Record<string, unknown>>(`/api/market/tick/${vtSymbol}`)
+export const getMarketBars = (symbol: string, exchange: string, interval = '1m', limit = 300) =>
+  request<Record<string, unknown>[]>(
+    `/api/market/bars?symbol=${encodeURIComponent(symbol)}&exchange=${encodeURIComponent(exchange)}&interval=${encodeURIComponent(interval)}&limit=${limit}`
+  )

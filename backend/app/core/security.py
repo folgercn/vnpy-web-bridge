@@ -4,6 +4,7 @@ import base64
 import hashlib
 import hmac
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any, Literal
 
@@ -17,6 +18,12 @@ Role = Literal["viewer", "trader", "admin"]
 
 def sha256_password(password: str) -> str:
     return hashlib.sha256(password.encode("utf-8")).hexdigest()
+
+
+def pbkdf2_password(password: str, *, salt: str | None = None) -> str:
+    salt = salt or base64.urlsafe_b64encode(os.urandom(16)).decode("ascii").rstrip("=")
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 200_000)
+    return f"pbkdf2_sha256${salt}${_b64_bytes(digest)}"
 
 
 class CurrentUser:
@@ -38,9 +45,9 @@ def configured_users(settings: Settings | None = None) -> dict[str, dict[str, st
     for user in users:
         username = str(user.get("username", ""))
         role = str(user.get("role", "viewer"))
-        password_hash = str(user.get("password_sha256", ""))
+        password_hash = str(user.get("password_hash") or user.get("password_sha256") or "")
         if username and role in {"viewer", "trader", "admin"} and password_hash:
-            result[username] = {"role": role, "password_sha256": password_hash}
+            result[username] = {"role": role, "password_hash": password_hash}
     return result
 
 
@@ -48,9 +55,19 @@ def authenticate_user(username: str, password: str, settings: Settings | None = 
     user = configured_users(settings).get(username)
     if not user:
         return None
-    if not hmac.compare_digest(user["password_sha256"], sha256_password(password)):
+    if not verify_password(password, user["password_hash"]):
         return None
     return CurrentUser(username=username, role=user["role"])  # type: ignore[arg-type]
+
+
+def verify_password(password: str, password_hash: str) -> bool:
+    if password_hash.startswith("pbkdf2_sha256$"):
+        try:
+            _, salt, expected = password_hash.split("$", 2)
+        except ValueError:
+            return False
+        return hmac.compare_digest(pbkdf2_password(password, salt=salt), password_hash)
+    return hmac.compare_digest(password_hash, sha256_password(password))
 
 
 def create_access_token(user: CurrentUser, settings: Settings | None = None) -> str:

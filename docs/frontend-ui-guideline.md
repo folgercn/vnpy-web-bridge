@@ -1,6 +1,6 @@
 # 前端 UI 开发规范草案
 
-本文档用于明确 `vnpy-web-bridge` 前端开发原则：统一现代风格，尽量复用成熟开源中后台模板，不重复造轮子。
+本文档用于明确 `vnpy-web-bridge` 前端开发原则：统一后台基线，复用现有组件边界，不重复造轮子。
 
 ---
 
@@ -22,26 +22,25 @@
 - API 请求封装
 - WebSocket 状态提示基础组件
 
-项目应基于成熟开源 Admin 模板搭建，在此基础上只开发交易业务页面和 vn.py 业务适配。
+当前项目已形成 `Vue 3 + Vite + TypeScript + Naive UI + Pinia` 的业务后台壳。除非单独立项做完整迁移，否则继续以当前后台壳为长期基线，不再并行引入第二套 Admin 模板。
 
 ---
 
 ## 2. 推荐前端基线
 
-第一候选：
+当前固定基线：
 
 ```text
-Vue 3 + Vite + TypeScript + Vue Vben Admin
+Vue 3 + Vite + TypeScript + Naive UI + Pinia
 ```
 
 采用原因：
 
-- 面向中后台系统，适合交易终端形态。
-- 已包含现代后台布局、路由、权限、主题、国际化等基础设施。
-- 技术栈符合 Vue 3 / Vite / TypeScript 方向。
-- 可以减少大量通用后台页面和组件开发。
+- 现有 `AppLayout`、路由守卫、登录态、API client、WebSocket client 已覆盖当前交易终端最小后台能力。
+- Naive UI 已用于表单、表格、卡片、弹窗、消息提示，继续沿用可减少迁移成本。
+- 业务页面应只扩展 vn.py 交易、行情、风控、策略能力，不重新搭一套后台框架。
 
-备选方案：
+可单独评估的迁移候选：
 
 ```text
 React + Ant Design Pro
@@ -51,7 +50,8 @@ React / Vue + Arco Design Pro
 
 选择原则：
 
-- 优先选择完整 Admin 模板，而不是只选择 UI 组件库。
+- 默认不迁移；迁移必须覆盖布局、权限、路由、主题、请求封装、WebSocket 状态和所有业务页面。
+- 如迁移，优先选择完整 Admin 模板，而不是只选择 UI 组件库。
 - 优先选择有权限、路由、主题、请求封装的模板。
 - 优先选择 TypeScript 支持完善的方案。
 - 避免同时混用多个 UI 体系。
