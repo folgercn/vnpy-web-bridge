@@ -25,12 +25,14 @@ async def events(websocket: WebSocket) -> None:
         await websocket.close(code=1008)
         return
 
-    await ws_manager.connect(websocket)
-    await websocket.send_json(ws_message("gateway_status", rpc_service.status()))
     try:
+        await ws_manager.connect(websocket)
+        await websocket.send_json(ws_message("gateway_status", rpc_service.status()))
         while True:
             message = await websocket.receive_text()
             if message == "ping":
                 await websocket.send_json(ws_message("pong", {}))
     except WebSocketDisconnect:
+        pass
+    finally:
         await ws_manager.disconnect(websocket)

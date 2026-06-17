@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from fastapi import WebSocket
+from fastapi import WebSocket, WebSocketDisconnect
 
 
 class WebSocketManager:
@@ -28,7 +28,7 @@ class WebSocketManager:
         for websocket in connections:
             try:
                 await websocket.send_json(message)
-            except RuntimeError:
+            except (RuntimeError, WebSocketDisconnect):
                 stale.append(websocket)
 
         if stale:
