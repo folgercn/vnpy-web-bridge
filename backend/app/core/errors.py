@@ -75,6 +75,60 @@ class OrderNotCancelableError(AppError):
     message = "委托当前状态不可撤"
 
 
+class AuthRequiredError(AppError):
+    status_code = 401
+    code = "AUTH_REQUIRED"
+    message = "未登录"
+
+
+class PermissionDeniedError(AppError):
+    status_code = 403
+    code = "PERMISSION_DENIED"
+    message = "权限不足"
+
+
+class RiskSymbolBlockedError(AppError):
+    status_code = 400
+    code = "RISK_SYMBOL_BLOCKED"
+    message = "合约被禁止"
+
+
+class RiskExchangeNotAllowedError(AppError):
+    status_code = 400
+    code = "RISK_EXCHANGE_NOT_ALLOWED"
+    message = "交易所不允许"
+
+
+class RiskMaxOrderVolumeError(AppError):
+    status_code = 400
+    code = "RISK_MAX_ORDER_VOLUME"
+    message = "超过单笔手数限制"
+
+
+class RiskMaxSymbolPositionError(AppError):
+    status_code = 400
+    code = "RISK_MAX_SYMBOL_POSITION"
+    message = "超过单合约持仓限制"
+
+
+class RiskPriceProtectionError(AppError):
+    status_code = 400
+    code = "RISK_PRICE_PROTECTION"
+    message = "超过价格保护范围"
+
+
+class RiskDailyLossLimitError(AppError):
+    status_code = 400
+    code = "RISK_DAILY_LOSS_LIMIT"
+    message = "超过每日亏损限制"
+
+
+class RiskTradingTimeError(AppError):
+    status_code = 400
+    code = "RISK_TRADING_TIME"
+    message = "非允许交易时间"
+
+
 def ok(data: Any = None) -> dict[str, Any]:
     return {"ok": True, "data": data if data is not None else {}}
 

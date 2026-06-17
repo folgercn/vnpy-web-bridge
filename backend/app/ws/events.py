@@ -14,6 +14,10 @@ EVENT_TYPES = {
     "log",
     "gateway_status",
     "pong",
+    "risk_alert",
+    "strategy_status",
+    "strategy_log",
+    "strategy_variable",
 }
 
 

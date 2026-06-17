@@ -21,6 +21,19 @@ class Settings(BaseSettings):
     order_confirm_required: bool = True
     trade_reference_prefix: str = "web_bridge"
 
+    jwt_secret_key: str = "change-me-in-production"
+    access_token_expire_minutes: int = Field(default=480, ge=1)
+    auth_users_json: str = "[]"
+
+    risk_max_order_volume: float = Field(default=1, gt=0)
+    risk_max_symbol_position: float = Field(default=5, ge=0)
+    risk_max_daily_loss: float = Field(default=1000, ge=0)
+    risk_price_protection_percent: float = Field(default=3, ge=0)
+    risk_allowed_exchanges: str = "SHFE,DCE,CZCE,CFFEX,INE,GFEX"
+    risk_allowed_symbols: str = ""
+    risk_blocked_symbols: str = ""
+    risk_trading_time_check_enabled: bool = False
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
 

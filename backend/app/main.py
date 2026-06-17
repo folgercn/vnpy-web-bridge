@@ -6,7 +6,7 @@ import logging
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 
-from app.api import routes_account, routes_market, routes_status, routes_trade, routes_ws
+from app.api import routes_account, routes_auth, routes_market, routes_risk, routes_status, routes_trade, routes_ws
 from app.core.config import get_settings
 from app.core.errors import AppError, app_error_handler, unhandled_error_handler, validation_error_handler
 from app.core.logging import configure_logging
@@ -22,9 +22,11 @@ app.add_exception_handler(RequestValidationError, validation_error_handler)
 app.add_exception_handler(Exception, unhandled_error_handler)
 
 app.include_router(routes_status.router, prefix="/api")
+app.include_router(routes_auth.router, prefix="/api")
 app.include_router(routes_market.router, prefix="/api")
 app.include_router(routes_account.router, prefix="/api")
 app.include_router(routes_trade.router, prefix="/api")
+app.include_router(routes_risk.router, prefix="/api")
 app.include_router(routes_ws.router)
 
 

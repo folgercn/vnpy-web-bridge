@@ -1,18 +1,162 @@
 from __future__ import annotations
 
+from datetime import datetime
+from typing import Any
+
 from app.core.config import Settings, get_settings
-from app.core.errors import OrderConfirmRequiredError, TradeDisabledError
+from app.core.errors import (
+    OrderConfirmRequiredError,
+    RiskDailyLossLimitError,
+    RiskExchangeNotAllowedError,
+    RiskMaxOrderVolumeError,
+    RiskMaxSymbolPositionError,
+    RiskPriceProtectionError,
+    RiskSymbolBlockedError,
+    RiskTradingTimeError,
+    RpcUnavailableError,
+    TradeDisabledError,
+)
+from app.schemas.risk import RiskRulesPatchDTO
+from app.schemas.trade import OrderRequestDTO
+from app.services.vnpy_rpc_service import rpc_service
+from app.stores.memory_store import memory_store
 
 
 class RiskService:
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
+        self.web_trade_enabled = self.settings.web_trade_enabled
+        self.emergency_stopped = False
+        self.rules_version = 1
+        self.rules = {
+            "max_order_volume": self.settings.risk_max_order_volume,
+            "max_symbol_position": self.settings.risk_max_symbol_position,
+            "max_daily_loss": self.settings.risk_max_daily_loss,
+            "price_protection_percent": self.settings.risk_price_protection_percent,
+            "allowed_exchanges": _csv(self.settings.risk_allowed_exchanges),
+            "allowed_symbols": _csv(self.settings.risk_allowed_symbols),
+            "blocked_symbols": _csv(self.settings.risk_blocked_symbols),
+            "trading_time_check_enabled": self.settings.risk_trading_time_check_enabled,
+        }
+
+    def status(self) -> dict[str, Any]:
+        return {
+            "risk_enabled": True,
+            "web_trade_enabled": self.web_trade_enabled,
+            "emergency_stopped": self.emergency_stopped,
+            "rules_version": self.rules_version,
+        }
+
+    def get_rules(self) -> dict[str, Any]:
+        return dict(self.rules)
+
+    def update_rules(self, patch: RiskRulesPatchDTO) -> dict[str, Any]:
+        data = patch.model_dump(exclude_none=True)
+        if data:
+            self.rules.update(data)
+            self.rules_version += 1
+        return self.get_rules()
+
+    def enable_trade(self) -> dict[str, Any]:
+        self.web_trade_enabled = True
+        self.emergency_stopped = False
+        return self.status()
+
+    def disable_trade(self) -> dict[str, Any]:
+        self.web_trade_enabled = False
+        return self.status()
+
+    def emergency_stop(self) -> dict[str, Any]:
+        self.web_trade_enabled = False
+        self.emergency_stopped = True
+        return self.status()
 
     def check_trade_allowed(self, *, confirm: bool) -> None:
-        if not self.settings.web_trade_enabled:
+        if not self.web_trade_enabled or self.emergency_stopped:
             raise TradeDisabledError()
         if self.settings.order_confirm_required and not confirm:
             raise OrderConfirmRequiredError()
+
+    def check_order(self, payload: OrderRequestDTO) -> None:
+        self.check_trade_allowed(confirm=payload.confirm)
+        if not rpc_service.status()["connected"]:
+            raise RpcUnavailableError()
+
+        exchange = payload.exchange
+        vt_symbol = f"{payload.symbol}.{payload.exchange}"
+
+        allowed_exchanges = self.rules["allowed_exchanges"]
+        if allowed_exchanges and exchange not in allowed_exchanges:
+            raise RiskExchangeNotAllowedError(detail={"exchange": exchange})
+
+        if payload.symbol in self.rules["blocked_symbols"] or vt_symbol in self.rules["blocked_symbols"]:
+            raise RiskSymbolBlockedError(detail={"symbol": payload.symbol, "vt_symbol": vt_symbol})
+
+        allowed_symbols = self.rules["allowed_symbols"]
+        if allowed_symbols and payload.symbol not in allowed_symbols and vt_symbol not in allowed_symbols:
+            raise RiskSymbolBlockedError("合约不在白名单", detail={"symbol": payload.symbol, "vt_symbol": vt_symbol})
+
+        if payload.volume > self.rules["max_order_volume"]:
+            raise RiskMaxOrderVolumeError(
+                detail={"volume": payload.volume, "max_order_volume": self.rules["max_order_volume"]}
+            )
+
+        self._check_symbol_position(payload)
+        self._check_price_protection(payload)
+        self._check_daily_loss()
+        self._check_trading_time()
+
+    def _check_symbol_position(self, payload: OrderRequestDTO) -> None:
+        max_position = self.rules["max_symbol_position"]
+        if max_position <= 0:
+            return
+        vt_symbol = f"{payload.symbol}.{payload.exchange}"
+        positions = rpc_service.get_positions()
+        current_volume = 0.0
+        for position in positions:
+            symbol = position.get("vt_symbol") or f"{position.get('symbol')}.{position.get('exchange')}"
+            if symbol == vt_symbol:
+                current_volume += float(position.get("volume") or 0)
+        if current_volume + payload.volume > max_position:
+            raise RiskMaxSymbolPositionError(
+                detail={"vt_symbol": vt_symbol, "current_volume": current_volume, "order_volume": payload.volume}
+            )
+
+    def _check_price_protection(self, payload: OrderRequestDTO) -> None:
+        percent = self.rules["price_protection_percent"]
+        if percent <= 0:
+            return
+        tick = memory_store.get_tick(f"{payload.symbol}.{payload.exchange}")
+        if not tick:
+            return
+        last_price = float(tick.get("last_price") or 0)
+        if last_price <= 0:
+            return
+        limit = last_price * percent / 100
+        if abs(payload.price - last_price) > limit:
+            raise RiskPriceProtectionError(
+                detail={"price": payload.price, "last_price": last_price, "price_protection_percent": percent}
+            )
+
+    def _check_daily_loss(self) -> None:
+        max_loss = self.rules["max_daily_loss"]
+        if max_loss <= 0:
+            return
+        positions = rpc_service.get_positions()
+        total_pnl = sum(float(position.get("pnl") or 0) for position in positions)
+        if total_pnl < 0 and abs(total_pnl) > max_loss:
+            raise RiskDailyLossLimitError(detail={"daily_loss": abs(total_pnl), "max_daily_loss": max_loss})
+
+    def _check_trading_time(self) -> None:
+        if not self.rules["trading_time_check_enabled"]:
+            return
+        now = datetime.now()
+        if now.weekday() >= 5:
+            raise RiskTradingTimeError()
+
+
+def _csv(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
 
 
 risk_service = RiskService()
