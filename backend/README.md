@@ -39,6 +39,15 @@ VNPY_RPC_TIMEOUT_MS=10000
 - `POST /api/risk/trade/enable`
 - `POST /api/risk/trade/disable`
 - `POST /api/risk/emergency-stop`
+- `GET /api/strategies`
+- `GET /api/strategies/{strategy_name}`
+- `GET /api/strategies/{strategy_name}/setting`
+- `PATCH /api/strategies/{strategy_name}/setting`
+- `GET /api/strategies/{strategy_name}/variables`
+- `POST /api/strategies/{strategy_name}/init`
+- `POST /api/strategies/{strategy_name}/start`
+- `POST /api/strategies/{strategy_name}/stop`
+- `GET /api/strategies/{strategy_name}/logs`
 - `GET /api/contracts`
 - `GET /api/account`
 - `GET /api/positions`
