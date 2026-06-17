@@ -8,7 +8,7 @@
       <n-layout-header bordered class="topbar">
         <div class="toolbar">
           <status-badge label="RPC" :active="Boolean(terminal.rpcStatus.connected)" />
-          <status-badge label="WS" :active="eventSocket.status === 'connected'" />
+          <status-badge label="WS" :active="eventSocket.status.value === 'connected'" />
           <status-badge label="Trade" :active="terminal.webTradeEnabled" />
           <n-tag type="info">{{ auth.user?.role }}</n-tag>
         </div>

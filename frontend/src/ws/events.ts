@@ -1,4 +1,5 @@
 import { useTerminalStore } from '../stores/terminal'
+import { ref } from 'vue'
 
 export const wsUrl = import.meta.env.VITE_WS_URL || 'ws://127.0.0.1:8000/ws/events'
 
@@ -9,15 +10,15 @@ export interface WsEvent {
 }
 
 export class EventSocket {
-  status: 'disconnected' | 'connecting' | 'connected' | 'reconnecting' = 'disconnected'
+  status = ref<'disconnected' | 'connecting' | 'connected' | 'reconnecting'>('disconnected')
   private socket: WebSocket | null = null
   private reconnectTimer = 0
 
   connect() {
-    this.status = this.socket ? 'reconnecting' : 'connecting'
+    this.status.value = this.socket ? 'reconnecting' : 'connecting'
     this.socket = new WebSocket(wsUrl)
     this.socket.onopen = () => {
-      this.status = 'connected'
+      this.status.value = 'connected'
       window.clearTimeout(this.reconnectTimer)
     }
     this.socket.onmessage = (message) => this.handleMessage(message.data)
@@ -29,7 +30,7 @@ export class EventSocket {
     window.clearTimeout(this.reconnectTimer)
     this.socket?.close()
     this.socket = null
-    this.status = 'disconnected'
+    this.status.value = 'disconnected'
   }
 
   handleMessage(raw: string) {
@@ -38,8 +39,8 @@ export class EventSocket {
   }
 
   private scheduleReconnect() {
-    if (this.status === 'disconnected') return
-    this.status = 'reconnecting'
+    if (this.status.value === 'disconnected') return
+    this.status.value = 'reconnecting'
     window.clearTimeout(this.reconnectTimer)
     this.reconnectTimer = window.setTimeout(() => this.connect(), 2000)
   }
