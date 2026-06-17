@@ -129,6 +129,48 @@ class RiskTradingTimeError(AppError):
     message = "非允许交易时间"
 
 
+class StrategyNotFoundError(AppError):
+    status_code = 404
+    code = "STRATEGY_NOT_FOUND"
+    message = "策略不存在"
+
+
+class StrategyRpcMethodNotAvailableError(AppError):
+    status_code = 501
+    code = "STRATEGY_RPC_METHOD_NOT_AVAILABLE"
+    message = "Windows 侧 RPC 未暴露策略方法"
+
+
+class StrategyInvalidSettingError(AppError):
+    status_code = 400
+    code = "STRATEGY_INVALID_SETTING"
+    message = "策略参数非法"
+
+
+class StrategyOperationFailedError(AppError):
+    status_code = 502
+    code = "STRATEGY_OPERATION_FAILED"
+    message = "策略操作失败"
+
+
+class StrategyNotInitializedError(AppError):
+    status_code = 409
+    code = "STRATEGY_NOT_INITIALIZED"
+    message = "策略未初始化"
+
+
+class StrategyAlreadyRunningError(AppError):
+    status_code = 409
+    code = "STRATEGY_ALREADY_RUNNING"
+    message = "策略已运行"
+
+
+class StrategyNotRunningError(AppError):
+    status_code = 409
+    code = "STRATEGY_NOT_RUNNING"
+    message = "策略未运行"
+
+
 def ok(data: Any = None) -> dict[str, Any]:
     return {"ok": True, "data": data if data is not None else {}}
 
