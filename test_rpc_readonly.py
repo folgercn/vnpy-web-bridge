@@ -2,10 +2,19 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 from pprint import pprint
 
 import zmq
 
+try:
+    from dotenv import load_dotenv
+except ImportError:  # pragma: no cover
+    load_dotenv = None
+
+if load_dotenv:
+    load_dotenv(Path(__file__).resolve().parent / "backend" / ".env")
+    load_dotenv(Path(__file__).resolve().parent / ".env")
 
 REQ_ADDRESS = os.getenv("VNPY_RPC_REQ_ADDRESS", "tcp://127.0.0.1:2014")
 TIMEOUT_MS = int(os.getenv("VNPY_RPC_TIMEOUT_MS", "10000"))

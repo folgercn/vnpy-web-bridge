@@ -11,6 +11,7 @@
   - 只读 RPC 验证：`get_all_contracts`、`get_all_accounts`、`get_all_positions`
   - 默认连接 `VNPY_RPC_REQ_ADDRESS=tcp://127.0.0.1:2014`
   - 可在已启动 vn.py RPC 服务时运行
+  - 优先用本目录虚拟环境运行：`.venv/bin/python test_rpc_readonly.py`
 
 - `test_rpc_trade_flow.py`
   - 真实交易链路 smoke：订阅行情、等待 tick、发一笔远离成交价的限价单、查询委托、撤单
@@ -21,6 +22,7 @@
     - `VNPY_TEST_SYMBOL=rb2610`
     - `VNPY_TEST_EXCHANGE=SHFE`
   - 必须显式设置 `VNPY_ALLOW_TRADE_TEST=true` 或传 `--allow-trade` 才会执行真实下单/撤单。
+  - 优先用本目录虚拟环境运行：`.venv/bin/python test_rpc_trade_flow.py --allow-trade`
 
 如果 PR 涉及交易链路、RPC、行情订阅或风控：
 
