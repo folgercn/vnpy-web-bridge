@@ -46,3 +46,19 @@ def test_authenticate_user_supports_salted_hash() -> None:
 def test_production_rejects_default_jwt_secret() -> None:
     with pytest.raises(ValueError):
         Settings(app_env="production")
+
+
+def test_production_requires_long_jwt_secret() -> None:
+    with pytest.raises(ValueError):
+        Settings(app_env="production", jwt_secret_key="short", auth_users_json='[{"username":"admin","role":"admin","password_hash":"x"}]')
+
+
+def test_production_requires_admin_user() -> None:
+    with pytest.raises(ValueError):
+        Settings(app_env="production", jwt_secret_key="x" * 32, auth_users_json='[{"username":"viewer","role":"viewer","password_hash":"x"}]')
+
+
+def test_production_accepts_admin_and_long_secret() -> None:
+    settings = Settings(app_env="production", jwt_secret_key="x" * 32, auth_users_json='[{"username":"admin","role":"admin","password_hash":"x"}]')
+
+    assert settings.app_env == "production"

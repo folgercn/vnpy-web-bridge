@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from threading import RLock
 from datetime import datetime, timedelta
+from threading import RLock
+from time import monotonic
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -50,6 +51,8 @@ class VnpyRpcService:
         self.last_error: str | None = None
         self.loop: asyncio.AbstractEventLoop | None = None
         self._call_lock = RLock()
+        self._last_probe_at = 0.0
+        self._probe_ttl_seconds = 5.0
 
     def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         self.loop = loop
@@ -87,11 +90,14 @@ class VnpyRpcService:
 
     def status(self, *, probe: bool = False) -> dict[str, Any]:
         if probe and self.started and self.client:
-            try:
-                self.call("get_all_accounts", timeout=1_000)
-            except Exception as exc:
-                self.started = False
-                self.last_error = str(exc)
+            now = monotonic()
+            if now - self._last_probe_at >= self._probe_ttl_seconds:
+                self._last_probe_at = now
+                try:
+                    self.call("get_all_accounts", timeout=1_000)
+                except Exception as exc:
+                    self.started = False
+                    self.last_error = str(exc)
 
         return {
             "connected": self.started,

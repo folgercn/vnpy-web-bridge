@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from functools import lru_cache
 
 from pydantic import Field, model_validator
@@ -38,8 +39,18 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_production_secrets(self) -> "Settings":
-        if self.app_env.lower() == "production" and self.jwt_secret_key == "change-me-in-production":
+        if self.app_env.lower() != "production":
+            return self
+        if self.jwt_secret_key == "change-me-in-production":
             raise ValueError("JWT_SECRET_KEY must be set in production")
+        if len(self.jwt_secret_key) < 32:
+            raise ValueError("JWT_SECRET_KEY must be at least 32 characters in production")
+        try:
+            users = json.loads(self.auth_users_json)
+        except json.JSONDecodeError as exc:
+            raise ValueError("AUTH_USERS_JSON must be valid JSON in production") from exc
+        if not any(user.get("role") == "admin" for user in users if isinstance(user, dict)):
+            raise ValueError("At least one admin user is required in production")
         return self
 
 

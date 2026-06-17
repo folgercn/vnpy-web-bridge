@@ -19,6 +19,11 @@ def status() -> dict:
 
 @router.get("/rpc/status")
 def rpc_status(_: CurrentUser = Depends(require_roles("viewer", "trader", "admin"))) -> dict:
+    return ok(rpc_service.status())
+
+
+@router.get("/rpc/probe")
+def rpc_probe(_: CurrentUser = Depends(require_roles("viewer", "trader", "admin"))) -> dict:
     return ok(rpc_service.status(probe=True))
 
 

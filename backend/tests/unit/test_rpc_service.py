@@ -16,6 +16,15 @@ class BrokenClient:
         raise RuntimeError("boom")
 
 
+class ProbeClient:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def get_all_accounts(self, *, timeout: int):
+        self.calls += 1
+        return []
+
+
 def test_rpc_call_timeout_is_normalized() -> None:
     service = VnpyRpcService()
     service.started = True
@@ -43,3 +52,15 @@ def test_rpc_status_probe_marks_connection_false_on_probe_failure() -> None:
 
     assert status["connected"] is False
     assert status["last_error"]
+
+
+def test_rpc_status_probe_uses_ttl() -> None:
+    service = VnpyRpcService()
+    client = ProbeClient()
+    service.started = True
+    service.client = client  # type: ignore[assignment]
+
+    service.status(probe=True)
+    service.status(probe=True)
+
+    assert client.calls == 1

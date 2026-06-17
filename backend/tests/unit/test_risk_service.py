@@ -4,6 +4,7 @@ import pytest
 
 from app.core.config import Settings
 from app.core.errors import (
+    ClosePositionNotEnoughError,
     RiskExchangeNotAllowedError,
     RiskMaxOrderVolumeError,
     RiskPriceProtectionError,
@@ -32,11 +33,11 @@ def make_order(**kwargs) -> OrderRequestDTO:
     return OrderRequestDTO(**data)
 
 
-def make_service() -> RiskService:
+def make_service(*, max_order_volume: int = 1) -> RiskService:
     return RiskService(
         Settings(
             web_trade_enabled=True,
-            risk_max_order_volume=1,
+            risk_max_order_volume=max_order_volume,
             risk_allowed_exchanges="SHFE",
             risk_blocked_symbols="bad",
             risk_price_protection_percent=3,
@@ -94,6 +95,11 @@ def test_max_order_volume(monkeypatch) -> None:
         service.check_order(make_order(volume=2))
 
 
+def test_fractional_volume_is_rejected_by_schema() -> None:
+    with pytest.raises(ValueError):
+        make_order(volume=1.5)
+
+
 def test_price_protection(monkeypatch) -> None:
     service = make_service()
     allow_rpc(monkeypatch)
@@ -115,9 +121,29 @@ def test_missing_contract_rejects_order(monkeypatch) -> None:
 def test_close_order_does_not_apply_position_limit(monkeypatch) -> None:
     service = make_service()
     allow_rpc(monkeypatch)
-    monkeypatch.setattr(rpc_service, "get_positions", lambda: [{"vt_symbol": "rb2610.SHFE", "volume": 5}])
+    monkeypatch.setattr(rpc_service, "get_positions", lambda: [{"vt_symbol": "rb2610.SHFE", "direction": "空", "volume": 5}])
 
     service.check_order(make_order(offset="close"))
+
+
+def test_close_order_rejects_when_position_not_enough(monkeypatch) -> None:
+    service = make_service(max_order_volume=5)
+    allow_rpc(monkeypatch)
+    monkeypatch.setattr(rpc_service, "get_positions", lambda: [{"vt_symbol": "rb2610.SHFE", "direction": "空", "volume": 1}])
+
+    with pytest.raises(ClosePositionNotEnoughError):
+        service.check_order(make_order(offset="close", volume=2))
+
+
+def test_close_today_checks_today_position(monkeypatch) -> None:
+    service = make_service(max_order_volume=5)
+    allow_rpc(monkeypatch)
+    monkeypatch.setattr(rpc_service, "get_positions", lambda: [{"vt_symbol": "rb2610.SHFE", "direction": "空", "volume": 3, "yd_volume": 2}])
+
+    service.check_order(make_order(offset="closetoday", volume=1))
+
+    with pytest.raises(ClosePositionNotEnoughError):
+        service.check_order(make_order(offset="closetoday", volume=2))
 
 
 def test_price_must_match_contract_tick(monkeypatch) -> None:

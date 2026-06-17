@@ -40,6 +40,22 @@ def test_rpc_status_is_available_without_rpc_server(monkeypatch) -> None:
     assert "connected" in body["data"]
 
 
+def test_rpc_probe_runs_explicit_probe(monkeypatch) -> None:
+    calls: list[bool] = []
+
+    def status(probe=False):
+        calls.append(probe)
+        return {"connected": False, "last_error": "offline"}
+
+    monkeypatch.setattr(rpc_service, "status", status)
+
+    with client_without_rpc(monkeypatch) as client:
+        response = client.get("/api/rpc/probe", headers=auth_headers("viewer"))
+
+    assert response.status_code == 200
+    assert calls == [True]
+
+
 def test_validation_errors_use_unified_error_payload(monkeypatch) -> None:
     with client_without_rpc(monkeypatch) as client:
         response = client.post("/api/market/subscribe", headers=auth_headers("viewer"), json={})

@@ -1,4 +1,5 @@
 import { useTerminalStore } from '../stores/terminal'
+import { useAuthStore } from '../stores/auth'
 import { ref } from 'vue'
 
 export const wsUrl = import.meta.env.VITE_WS_URL || 'ws://127.0.0.1:8000/ws/events'
@@ -27,7 +28,7 @@ export class EventSocket {
       void useTerminalStore().refreshSnapshots()
     }
     this.socket.onmessage = (message) => this.handleMessage(message.data)
-    this.socket.onclose = () => this.scheduleReconnect()
+    this.socket.onclose = (event) => this.scheduleReconnect(event)
     this.socket.onerror = () => this.scheduleReconnect()
   }
 
@@ -48,7 +49,15 @@ export class EventSocket {
     }
   }
 
-  private scheduleReconnect() {
+  private scheduleReconnect(event?: CloseEvent) {
+    this.socket = null
+    if (event?.code === 1008) {
+      useAuthStore().logout()
+      this.status.value = 'disconnected'
+      window.clearTimeout(this.reconnectTimer)
+      if (window.location.pathname !== '/login') window.location.assign('/login')
+      return
+    }
     if (this.status.value === 'disconnected') return
     this.status.value = 'reconnecting'
     window.clearTimeout(this.reconnectTimer)
