@@ -12,6 +12,13 @@ class TickQuery(BaseModel):
     vt_symbol: str
 
 
+class BarQueryDto(BaseModel):
+    symbol: str = Field(min_length=1)
+    exchange: str = Field(min_length=1)
+    interval: str = "1m"
+    limit: int = Field(default=300, ge=1, le=2000)
+
+
 class ContractDto(BaseModel):
     symbol: str | None = None
     exchange: str | None = None
@@ -34,4 +41,18 @@ class TickDto(BaseModel):
     open_interest: float | int | None = None
     bid_price_1: float | int | None = None
     ask_price_1: float | int | None = None
+    gateway_name: str | None = None
+
+
+class BarDto(BaseModel):
+    symbol: str | None = None
+    exchange: str | None = None
+    vt_symbol: str | None = None
+    datetime: str | None = None
+    interval: str | None = None
+    volume: float | int | None = None
+    open_price: float | int | None = None
+    high_price: float | int | None = None
+    low_price: float | int | None = None
+    close_price: float | int | None = None
     gateway_name: str | None = None

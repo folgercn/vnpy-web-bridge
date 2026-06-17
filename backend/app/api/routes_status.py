@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
 from app.core.config import get_settings
 from app.core.errors import ok
+from app.core.security import CurrentUser, require_roles
 from app.services.risk_service import risk_service
 from app.services.vnpy_rpc_service import rpc_service
 
@@ -17,12 +18,17 @@ def status() -> dict:
 
 
 @router.get("/rpc/status")
-def rpc_status() -> dict:
+def rpc_status(_: CurrentUser = Depends(require_roles("viewer", "trader", "admin"))) -> dict:
+    return ok(rpc_service.status())
+
+
+@router.get("/rpc/probe")
+def rpc_probe(_: CurrentUser = Depends(require_roles("viewer", "trader", "admin"))) -> dict:
     return ok(rpc_service.status(probe=True))
 
 
 @router.get("/gateway/status")
-def gateway_status() -> dict:
+def gateway_status(_: CurrentUser = Depends(require_roles("viewer", "trader", "admin"))) -> dict:
     rpc_status_data = rpc_service.status()
     return ok(
         {
@@ -34,7 +40,7 @@ def gateway_status() -> dict:
 
 
 @router.get("/trade/config")
-def trade_config() -> dict:
+def trade_config(_: CurrentUser = Depends(require_roles("viewer", "trader", "admin"))) -> dict:
     settings = get_settings()
     risk_status_data = risk_service.status()
     return ok(

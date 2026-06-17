@@ -4,7 +4,17 @@ import os
 import sys
 import time
 from dataclasses import asdict, is_dataclass
+from pathlib import Path
 from queue import Empty, Queue
+
+try:
+    from dotenv import load_dotenv
+except ImportError:  # pragma: no cover
+    load_dotenv = None
+
+if load_dotenv:
+    load_dotenv(Path(__file__).resolve().parent / "backend" / ".env")
+    load_dotenv(Path(__file__).resolve().parent / ".env")
 
 from vnpy.rpc import RpcClient
 from vnpy.trader.constant import Direction, Exchange, Offset, OrderType, Status

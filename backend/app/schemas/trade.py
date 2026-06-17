@@ -50,7 +50,7 @@ class OrderRequestDTO(BaseModel):
     offset: Literal["open", "close", "closetoday", "closeyesterday"]
     type: Literal["limit"] = "limit"
     price: float = Field(gt=0)
-    volume: float = Field(gt=0)
+    volume: int = Field(gt=0)
     gateway_name: str | None = None
     reference: str | None = None
     confirm: bool = False

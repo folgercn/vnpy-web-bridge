@@ -111,6 +111,12 @@ class RiskMaxSymbolPositionError(AppError):
     message = "超过单合约持仓限制"
 
 
+class ClosePositionNotEnoughError(AppError):
+    status_code = 400
+    code = "CLOSE_POSITION_NOT_ENOUGH"
+    message = "可平仓位不足"
+
+
 class RiskPriceProtectionError(AppError):
     status_code = 400
     code = "RISK_PRICE_PROTECTION"

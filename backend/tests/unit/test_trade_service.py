@@ -96,6 +96,7 @@ def test_send_order_returns_vt_orderid(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(rpc_service, "send_order", lambda *_: "CTP.123")
     monkeypatch.setattr(rpc_service, "status", lambda: {"connected": True})
     monkeypatch.setattr(rpc_service, "get_positions", lambda: [])
+    monkeypatch.setattr(rpc_service, "get_contracts", lambda: [{"vt_symbol": "rb2610.SHFE", "pricetick": 1}])
 
     result = service.send_order(make_order())
 
@@ -142,3 +143,12 @@ def test_cancel_all_returns_partial_failures(monkeypatch, tmp_path) -> None:
     assert result["success"] == 1
     assert result["failed"] == 1
     assert result["items"][1]["error"] == "cancel failed"
+
+
+def test_cancel_all_can_bypass_trade_check_for_emergency_stop(monkeypatch, tmp_path) -> None:
+    service = make_service(tmp_path, enabled=False)
+    monkeypatch.setattr(rpc_service, "get_active_orders_raw", lambda: [])
+
+    result = service.cancel_all(CancelAllRequestDTO(), bypass_trade_check=True)
+
+    assert result["requested"] == 0
