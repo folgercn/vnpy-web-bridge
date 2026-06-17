@@ -146,6 +146,7 @@ jobs:
           IMAGE_REPO: vnpy-web-bridge
           IMAGE_TAG: sha-${{ github.sha }}
         run: |
+          export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
           : "${DEPLOY_SSH_PASSWORD:?Missing DEPLOY_SSH_PASSWORD secret}"
           host="${DEPLOY_SSH_HOST:-192.168.100.89}"
           port="${DEPLOY_SSH_PORT:-22}"
@@ -166,6 +167,7 @@ jobs:
           DEPLOY_SERVICES: ${{ needs.changes.outputs.deploy_services }}
           DEPLOY_SKIP_PULL: "true"
         run: |
+          export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
           : "${DEPLOY_SSH_PASSWORD:?Missing DEPLOY_SSH_PASSWORD secret}"
           host="${DEPLOY_SSH_HOST:-192.168.100.89}"
           port="${DEPLOY_SSH_PORT:-22}"
