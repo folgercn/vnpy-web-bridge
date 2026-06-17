@@ -23,7 +23,7 @@ on:
 jobs:
   changes:
     name: Detect changed areas
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, macOS, ARM64, vnpy-web-bridge]
     outputs:
       image_changed: ${{ steps.filter.outputs.image_changed }}
       deploy_services: ${{ steps.filter.outputs.deploy_services }}
@@ -90,57 +90,13 @@ jobs:
           echo "image_changed=$image_changed" >> "$GITHUB_OUTPUT"
           echo "deploy_services=$deploy_services" >> "$GITHUB_OUTPUT"
 
-  docker:
-    name: Build and publish image
-    needs: changes
-    if: github.ref == 'refs/heads/main' && needs.changes.outputs.image_changed == 'true'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract Docker metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/${{ github.repository_owner }}/vnpy-web-bridge-app
-          tags: |
-            type=ref,event=branch
-            type=raw,value=sha-${{ github.sha }}
-            type=sha,prefix=sha-
-            type=raw,value=latest,enable={{is_default_branch}}
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build and push
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ./Dockerfile
-          push: true
-          platforms: linux/amd64,linux/arm64
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-
   deploy:
-    name: Deploy to Macmini over SSH
-    needs: [changes, docker]
-    if: github.ref == 'refs/heads/main' && needs.changes.outputs.image_changed == 'true' && needs.changes.outputs.deploy_services != '' && needs.docker.result == 'success'
+    name: Build and deploy on Macmini
+    needs: changes
+    if: github.ref == 'refs/heads/main' && needs.changes.outputs.image_changed == 'true' && needs.changes.outputs.deploy_services != ''
     runs-on: [self-hosted, macOS, ARM64, vnpy-web-bridge]
     permissions:
       contents: read
-      packages: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -159,44 +115,33 @@ jobs:
           fi
           chmod 600 .deploy.env
 
-      - name: Sync deployment files
+      - name: Prepare deployment directory
         env:
-          DEPLOY_SSH_HOST: ${{ secrets.DEPLOY_SSH_HOST }}
-          DEPLOY_SSH_PORT: ${{ secrets.DEPLOY_SSH_PORT }}
-          DEPLOY_SSH_USER: ${{ secrets.DEPLOY_SSH_USER }}
-          DEPLOY_SSH_PASSWORD: ${{ secrets.DEPLOY_SSH_PASSWORD }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
         run: |
-          : "${DEPLOY_SSH_PASSWORD:?Missing DEPLOY_SSH_PASSWORD secret}"
-          host="${DEPLOY_SSH_HOST:-192.168.100.89}"
-          port="${DEPLOY_SSH_PORT:-22}"
-          user="${DEPLOY_SSH_USER:-fujun}"
           path="${DEPLOY_PATH:-/Users/fujun/services/vnpy-web-bridge}"
-          ssh_base=(sshpass -p "$DEPLOY_SSH_PASSWORD" ssh -p "$port" -o StrictHostKeyChecking=accept-new "$user@$host")
-          scp_base=(sshpass -p "$DEPLOY_SSH_PASSWORD" scp -P "$port" -o StrictHostKeyChecking=accept-new)
-          "${ssh_base[@]}" "mkdir -p '$path/deployments' '$path/scripts' '$path/logs'"
-          "${scp_base[@]}" deployments/docker-compose.prod.yml "$user@$host:$path/deployments/docker-compose.prod.yml"
-          "${scp_base[@]}" scripts/deploy.sh "$user@$host:$path/scripts/deploy.sh"
-          "${scp_base[@]}" .deploy.env "$user@$host:$path/.env"
-          "${ssh_base[@]}" "chmod +x '$path/scripts/deploy.sh' && chmod 600 '$path/.env'"
+          mkdir -p "$path/deployments" "$path/scripts" "$path/logs"
+          cp deployments/docker-compose.prod.yml "$path/deployments/docker-compose.prod.yml"
+          cp scripts/deploy.sh "$path/scripts/deploy.sh"
+          cp .deploy.env "$path/.env"
+          chmod +x "$path/scripts/deploy.sh"
+          chmod 600 "$path/.env"
+
+      - name: Build image on Macmini
+        env:
+          IMAGE_REPO: vnpy-web-bridge
+          IMAGE_TAG: sha-${{ github.sha }}
+        run: |
+          export PATH="/Applications/Docker.app/Contents/Resources/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
+          docker build -t "${IMAGE_REPO}:${IMAGE_TAG}" -t "${IMAGE_REPO}:latest" .
 
       - name: Deploy via docker compose
         env:
-          DEPLOY_SSH_HOST: ${{ secrets.DEPLOY_SSH_HOST }}
-          DEPLOY_SSH_PORT: ${{ secrets.DEPLOY_SSH_PORT }}
-          DEPLOY_SSH_USER: ${{ secrets.DEPLOY_SSH_USER }}
-          DEPLOY_SSH_PASSWORD: ${{ secrets.DEPLOY_SSH_PASSWORD }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
-          IMAGE_REPO: ghcr.io/${{ github.repository_owner }}/vnpy-web-bridge-app
+          IMAGE_REPO: vnpy-web-bridge
           IMAGE_TAG: sha-${{ github.sha }}
           DEPLOY_SERVICES: ${{ needs.changes.outputs.deploy_services }}
-          GHCR_USERNAME: ${{ github.actor }}
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEPLOY_SKIP_PULL: "true"
         run: |
-          : "${DEPLOY_SSH_PASSWORD:?Missing DEPLOY_SSH_PASSWORD secret}"
-          host="${DEPLOY_SSH_HOST:-192.168.100.89}"
-          port="${DEPLOY_SSH_PORT:-22}"
-          user="${DEPLOY_SSH_USER:-fujun}"
           path="${DEPLOY_PATH:-/Users/fujun/services/vnpy-web-bridge}"
-          sshpass -p "$DEPLOY_SSH_PASSWORD" ssh -p "$port" -o StrictHostKeyChecking=accept-new "$user@$host" \
-            "DEPLOY_PATH='$path' IMAGE_REPO='$IMAGE_REPO' IMAGE_TAG='$IMAGE_TAG' DEPLOY_SERVICES='$DEPLOY_SERVICES' GHCR_USERNAME='$GHCR_USERNAME' GHCR_TOKEN='$GHCR_TOKEN' bash '$path/scripts/deploy.sh'"
+          DEPLOY_PATH="$path" IMAGE_REPO="$IMAGE_REPO" IMAGE_TAG="$IMAGE_TAG" DEPLOY_SERVICES="$DEPLOY_SERVICES" DEPLOY_SKIP_PULL="$DEPLOY_SKIP_PULL" bash "$path/scripts/deploy.sh"
