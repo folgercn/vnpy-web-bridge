@@ -13,6 +13,7 @@ body {
 .page {
   display: grid;
   gap: 16px;
+  min-width: 0;
 }
 
 .grid-4 {
@@ -32,6 +33,7 @@ body {
   flex-wrap: wrap;
   align-items: center;
   gap: 10px;
+  min-width: 0;
 }
 
 .muted {
@@ -42,9 +44,42 @@ body {
   font-family: "SFMono-Regular", Consolas, monospace;
 }
 
+.toolbar-control-sm {
+  max-width: 180px;
+}
+
+.toolbar-control-md {
+  max-width: 220px;
+}
+
 @media (max-width: 980px) {
   .grid-4,
   .grid-2 {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 640px) {
+  .page {
+    gap: 10px;
+  }
+
+  .grid-4,
+  .grid-2 {
+    gap: 10px;
+  }
+
+  .toolbar {
+    align-items: stretch;
+  }
+
+  .toolbar > .n-input,
+  .toolbar > .n-input-number,
+  .toolbar > .n-select,
+  .toolbar > .n-button,
+  .toolbar > .n-radio-group {
+    width: 100% !important;
+    max-width: none !important;
+    min-width: 0 !important;
   }
 }

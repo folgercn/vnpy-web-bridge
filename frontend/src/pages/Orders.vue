@@ -2,13 +2,13 @@
   <div class="page">
     <n-card size="small">
       <div class="toolbar">
-        <n-select v-model:value="status" :options="statusOptions" style="max-width: 180px" />
+        <n-select v-model:value="status" :options="statusOptions" class="toolbar-control-sm" />
         <n-button :disabled="!terminal.webTradeEnabled" type="warning" @click="submitCancelAll">全撤</n-button>
         <n-button @click="terminal.refreshSnapshots">刷新</n-button>
       </div>
     </n-card>
     <n-card title="委托" size="small">
-      <n-data-table size="small" :columns="columns" :data="rows" :pagination="{ pageSize: 14 }" />
+      <n-data-table size="small" :columns="columns" :data="rows" :pagination="{ pageSize: 14 }" :scroll-x="1120" />
     </n-card>
   </div>
 </template>

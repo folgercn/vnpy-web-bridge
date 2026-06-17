@@ -3,7 +3,7 @@
     <n-alert v-if="!terminal.webTradeEnabled" type="warning">Web 交易关闭，不能下单、撤单或全撤。</n-alert>
     <div class="grid-2">
       <n-card title="限价下单" size="small">
-        <n-form :model="form" label-placement="left" label-width="90">
+        <n-form :model="form" :label-placement="isMobile ? 'top' : 'left'" label-width="90">
           <n-form-item label="合约"><n-input v-model:value="form.symbol" /></n-form-item>
           <n-form-item label="交易所"><n-select v-model:value="form.exchange" :options="exchangeOptions" /></n-form-item>
           <n-form-item label="方向"><n-radio-group v-model:value="form.direction"><n-radio-button value="long">多</n-radio-button><n-radio-button value="short">空</n-radio-button></n-radio-group></n-form-item>
@@ -24,11 +24,13 @@ import { useDialog, useMessage } from 'naive-ui'
 import DataPanel from '../components/common/DataPanel.vue'
 import { sendOrder } from '../api/trade'
 import { exchangeOptions } from '../constants/exchanges'
+import { useMediaQuery } from '../composables/useMediaQuery'
 import { useTerminalStore } from '../stores/terminal'
 
 const dialog = useDialog()
 const message = useMessage()
 const terminal = useTerminalStore()
+const isMobile = useMediaQuery('(max-width: 640px)')
 const form = reactive({ symbol: 'rb2610', exchange: 'SHFE', direction: 'long' as const, offset: 'open' as const, price: 3000, volume: 1 })
 const offsetOptions = [
   { label: '开仓', value: 'open' },

@@ -8,11 +8,11 @@
           filterable
           clearable
           placeholder="搜索合约"
-          style="min-width: 260px"
+          class="market-contract-select"
           @update:value="selectContract"
         />
-        <n-input v-model:value="symbol" placeholder="rb2610" style="max-width: 160px" />
-        <n-select v-model:value="exchange" :options="exchangeOptions" style="max-width: 160px" />
+        <n-input v-model:value="symbol" placeholder="rb2610" class="market-short-control" />
+        <n-select v-model:value="exchange" :options="exchangeOptions" class="market-short-control" />
         <n-button type="primary" @click="subscribe">订阅</n-button>
         <n-button @click="terminal.refreshContracts">刷新合约</n-button>
       </div>
@@ -41,6 +41,7 @@ import {
 } from 'lightweight-charts'
 import DataPanel from '../components/common/DataPanel.vue'
 import { exchangeOptions, formatExchange } from '../constants/exchanges'
+import { useMediaQuery } from '../composables/useMediaQuery'
 import { useTerminalStore } from '../stores/terminal'
 
 const message = useMessage()
@@ -49,6 +50,7 @@ const symbol = ref('rb2610')
 const exchange = ref('SHFE')
 const selectedVtSymbol = ref('rb2610.SHFE')
 const chartEl = ref<HTMLElement | null>(null)
+const isMobile = useMediaQuery('(max-width: 640px)')
 let chart: IChartApi | null = null
 let candleSeries: ISeriesApi<'Candlestick'> | null = null
 const candleData: CandlestickData[] = []
@@ -146,7 +148,7 @@ function cols(keys: string[]) {
 function setupChart() {
   if (!chartEl.value) return
   chart = createChart(chartEl.value, {
-    height: 280,
+    height: isMobile.value ? 220 : 280,
     layout: { background: { color: '#11141c' }, textColor: '#d7dde5' },
     grid: { vertLines: { color: '#222631' }, horzLines: { color: '#222631' } },
     rightPriceScale: { borderColor: '#303642' },
@@ -162,6 +164,11 @@ function setupChart() {
   })
 }
 
+watch(isMobile, (mobile) => {
+  chart?.applyOptions({ height: mobile ? 220 : 280 })
+  chart?.timeScale().fitContent()
+})
+
 function toMinuteTimestamp(value: unknown): UTCTimestamp {
   const parsed = value ? new Date(String(value)).getTime() : Date.now()
   const fallback = Number.isFinite(parsed) ? parsed : Date.now()
@@ -175,11 +182,32 @@ function toMinuteTimestamp(value: unknown): UTCTimestamp {
   height: 280px;
 }
 
+.market-contract-select {
+  min-width: 260px;
+}
+
+.market-short-control {
+  max-width: 160px;
+}
+
 .chart-empty {
   margin-top: -160px;
   height: 160px;
   display: grid;
   place-items: center;
   pointer-events: none;
+}
+
+@media (max-width: 640px) {
+  .chart {
+    height: 220px;
+  }
+
+  .chart-empty {
+    margin-top: -130px;
+    height: 130px;
+    padding: 0 16px;
+    text-align: center;
+  }
 }
 </style>

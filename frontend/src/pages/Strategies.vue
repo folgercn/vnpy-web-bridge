@@ -6,7 +6,7 @@
       </div>
     </n-card>
     <n-card title="策略" size="small">
-      <n-data-table size="small" :columns="columns" :data="strategies" :pagination="{ pageSize: 12 }" />
+      <n-data-table size="small" :columns="columns" :data="strategies" :pagination="{ pageSize: 12 }" :scroll-x="980" />
       <n-alert v-if="error" type="warning" style="margin-top: 12px">{{ error }}</n-alert>
     </n-card>
   </div>
