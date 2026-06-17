@@ -17,13 +17,15 @@ try:
     from vnpy.rpc import RpcClient
     from vnpy.trader.constant import Exchange
     from vnpy.trader.event import EVENT_ORDER, EVENT_TICK, EVENT_TRADE
-    from vnpy.trader.object import SubscribeRequest
+    from vnpy.trader.object import CancelRequest, OrderRequest, SubscribeRequest
 except ImportError:  # pragma: no cover - covered in deployments with vn.py installed
     RpcClient = object  # type: ignore[assignment,misc]
     Exchange = None  # type: ignore[assignment]
     EVENT_ORDER = "eOrder"
     EVENT_TICK = "eTick"
     EVENT_TRADE = "eTrade"
+    CancelRequest = None  # type: ignore[assignment]
+    OrderRequest = None  # type: ignore[assignment]
     SubscribeRequest = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
@@ -139,6 +141,19 @@ class VnpyRpcService:
 
     def get_trades(self) -> list[dict[str, Any]]:
         return to_plain_list(self.call_first(["get_all_trades"]))
+
+    def get_order_raw(self, vt_orderid: str) -> Any:
+        return self.call("get_order", vt_orderid)
+
+    def get_active_orders_raw(self) -> list[Any]:
+        orders = self.call_first(["get_all_active_orders", "get_all_orders"])
+        return list(orders or [])
+
+    def send_order(self, order_request: "OrderRequest", gateway_name: str) -> Any:
+        return self.call("send_order", order_request, gateway_name)
+
+    def cancel_order(self, cancel_request: "CancelRequest", gateway_name: str) -> Any:
+        return self.call("cancel_order", cancel_request, gateway_name)
 
     def subscribe_market(self, symbol: str, exchange: str) -> dict[str, Any]:
         if SubscribeRequest is None or Exchange is None:

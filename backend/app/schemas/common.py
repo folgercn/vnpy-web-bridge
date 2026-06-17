@@ -6,6 +6,16 @@ from enum import Enum
 from typing import Any
 
 
+STATUS_VALUE_MAP = {
+    "提交中": "submitting",
+    "未成交": "not_traded",
+    "部分成交": "part_traded",
+    "全部成交": "all_traded",
+    "已撤销": "cancelled",
+    "拒单": "rejected",
+}
+
+
 def enum_to_string(value: Any) -> Any:
     if isinstance(value, Enum):
         return value.value
@@ -45,7 +55,10 @@ def to_plain_dict(obj: Any) -> dict[str, Any]:
     else:
         raw = getattr(obj, "__dict__", {"value": obj})
 
-    return {str(k): to_plain_value(v) for k, v in raw.items() if not str(k).startswith("_")}
+    data = {str(k): to_plain_value(v) for k, v in raw.items() if not str(k).startswith("_")}
+    if "status" in data:
+        data["status"] = STATUS_VALUE_MAP.get(str(data["status"]), str(data["status"]).lower())
+    return data
 
 
 def to_plain_list(items: Any) -> list[dict[str, Any]]:

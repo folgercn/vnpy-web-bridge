@@ -29,14 +29,20 @@ VNPY_RPC_TIMEOUT_MS=10000
 - `GET /api/status`
 - `GET /api/rpc/status`
 - `GET /api/gateway/status`
+- `GET /api/trade/config`
 - `GET /api/contracts`
 - `GET /api/account`
 - `GET /api/positions`
 - `GET /api/orders`
 - `GET /api/trades`
+- `POST /api/orders`
+- `POST /api/orders/{vt_orderid}/cancel`
+- `POST /api/orders/cancel-all`
 - `POST /api/market/subscribe`
 - `GET /api/market/tick/{vt_symbol}`
 - `GET /ws/events`
+
+交易 API 默认关闭。必须设置 `WEB_TRADE_ENABLED=true`，且在默认 `ORDER_CONFIRM_REQUIRED=true` 时请求体传入 `confirm: true`，才会调用真实交易 RPC。
 
 返回格式统一为：
 

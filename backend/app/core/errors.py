@@ -41,8 +41,38 @@ class RpcTimeoutError(AppError):
 
 class RpcCallError(AppError):
     status_code = 502
-    code = "RPC_CALL_FAILED"
+    code = "RPC_ERROR"
     message = "RPC 调用失败"
+
+
+class TradeDisabledError(AppError):
+    status_code = 403
+    code = "TRADE_DISABLED"
+    message = "Web 交易开关关闭"
+
+
+class OrderConfirmRequiredError(AppError):
+    status_code = 400
+    code = "ORDER_CONFIRM_REQUIRED"
+    message = "下单需要二次确认"
+
+
+class InvalidOrderRequestError(AppError):
+    status_code = 400
+    code = "INVALID_ORDER_REQUEST"
+    message = "下单参数非法"
+
+
+class OrderNotFoundError(AppError):
+    status_code = 404
+    code = "ORDER_NOT_FOUND"
+    message = "委托不存在"
+
+
+class OrderNotCancelableError(AppError):
+    status_code = 409
+    code = "ORDER_NOT_CANCELABLE"
+    message = "委托当前状态不可撤"
 
 
 def ok(data: Any = None) -> dict[str, Any]:
