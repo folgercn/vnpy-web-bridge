@@ -30,6 +30,15 @@ VNPY_RPC_TIMEOUT_MS=10000
 - `GET /api/rpc/status`
 - `GET /api/gateway/status`
 - `GET /api/trade/config`
+- `POST /api/auth/login`
+- `POST /api/auth/logout`
+- `GET /api/auth/me`
+- `GET /api/risk/status`
+- `GET /api/risk/rules`
+- `PATCH /api/risk/rules`
+- `POST /api/risk/trade/enable`
+- `POST /api/risk/trade/disable`
+- `POST /api/risk/emergency-stop`
 - `GET /api/contracts`
 - `GET /api/account`
 - `GET /api/positions`

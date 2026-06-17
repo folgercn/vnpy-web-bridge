@@ -94,6 +94,8 @@ def test_confirm_required_rejects_before_rpc(monkeypatch, tmp_path) -> None:
 def test_send_order_returns_vt_orderid(monkeypatch, tmp_path) -> None:
     service = make_service(tmp_path)
     monkeypatch.setattr(rpc_service, "send_order", lambda *_: "CTP.123")
+    monkeypatch.setattr(rpc_service, "status", lambda: {"connected": True})
+    monkeypatch.setattr(rpc_service, "get_positions", lambda: [])
 
     result = service.send_order(make_order())
 

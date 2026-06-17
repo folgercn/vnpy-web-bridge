@@ -4,6 +4,7 @@ from fastapi import APIRouter
 
 from app.core.config import get_settings
 from app.core.errors import ok
+from app.services.risk_service import risk_service
 from app.services.vnpy_rpc_service import rpc_service
 
 router = APIRouter()
@@ -35,11 +36,13 @@ def gateway_status() -> dict:
 @router.get("/trade/config")
 def trade_config() -> dict:
     settings = get_settings()
+    risk_status_data = risk_service.status()
     return ok(
         {
-            "web_trade_enabled": settings.web_trade_enabled,
+            "web_trade_enabled": risk_status_data["web_trade_enabled"],
             "default_gateway_name": settings.default_gateway_name,
             "order_confirm_required": settings.order_confirm_required,
             "trade_reference_prefix": settings.trade_reference_prefix,
+            "emergency_stopped": risk_status_data["emergency_stopped"],
         }
     )

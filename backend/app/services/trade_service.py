@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Any
 
 from app.core.config import Settings, get_settings
-from app.core.errors import InvalidOrderRequestError, OrderNotCancelableError, OrderNotFoundError
+from app.core.errors import AppError, InvalidOrderRequestError, OrderNotCancelableError, OrderNotFoundError
 from app.schemas.common import STATUS_VALUE_MAP, to_plain_dict
 from app.schemas.trade import CancelAllRequestDTO, CancelRequestDTO, OrderRequestDTO
 from app.services.audit_service import AuditService, audit_service
@@ -68,7 +68,7 @@ class TradeService:
         request_data = payload.model_dump()
         self.audit.record(action="order_request", request=request_data, operator=operator, source_ip=source_ip)
         try:
-            self.risk.check_trade_allowed(confirm=payload.confirm)
+            self.risk.check_order(payload)
             order_request = self.to_vnpy_order_request(payload)
             gateway_name = payload.gateway_name or self.settings.default_gateway_name
             vt_orderid = rpc_service.send_order(order_request, gateway_name)
@@ -82,10 +82,21 @@ class TradeService:
             )
             return result
         except Exception as exc:
+            if isinstance(exc, AppError) and exc.code.startswith("RISK_"):
+                self.audit.record(
+                    action="risk_reject",
+                    request=request_data,
+                    error_code=exc.code,
+                    error_message=exc.message,
+                    operator=operator,
+                    source_ip=source_ip,
+                )
             self.audit.record(
                 action="order_failed",
                 request=request_data,
                 error=str(exc),
+                error_code=getattr(exc, "code", None),
+                error_message=getattr(exc, "message", str(exc)),
                 operator=operator,
                 source_ip=source_ip,
             )
@@ -129,6 +140,8 @@ class TradeService:
                 action="cancel_failed",
                 request=request_data,
                 error=str(exc),
+                error_code=getattr(exc, "code", None),
+                error_message=getattr(exc, "message", str(exc)),
                 operator=operator,
                 source_ip=source_ip,
             )

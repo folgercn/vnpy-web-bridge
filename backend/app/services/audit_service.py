@@ -20,16 +20,26 @@ class AuditService:
         request: dict[str, Any] | None = None,
         result: dict[str, Any] | None = None,
         error: str | None = None,
+        error_code: str | None = None,
+        error_message: str | None = None,
         operator: str = "anonymous",
+        user_id: str | None = None,
+        role: str | None = None,
         source_ip: str | None = None,
     ) -> None:
         payload = {
+            "timestamp": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="milliseconds"),
             "ts": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="milliseconds"),
+            "user_id": user_id or operator,
+            "role": role,
+            "client_ip": source_ip,
             "operator": operator,
             "action": action,
             "request": self._sanitize(request or {}),
             "result": self._sanitize(result or {}),
             "error": error,
+            "error_code": error_code,
+            "error_message": error_message or error,
             "source_ip": source_ip,
         }
         line = json.dumps(payload, ensure_ascii=False, default=str)
