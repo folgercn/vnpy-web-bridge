@@ -1,13 +1,14 @@
 from __future__ import annotations
 
+import os
 import sys
 from pprint import pprint
 
 import zmq
 
 
-REQ_ADDRESS = "tcp://192.168.100.187:2014"
-TIMEOUT_MS = 10_000
+REQ_ADDRESS = os.getenv("VNPY_RPC_REQ_ADDRESS", "tcp://127.0.0.1:2014")
+TIMEOUT_MS = int(os.getenv("VNPY_RPC_TIMEOUT_MS", "10000"))
 
 
 def rpc_call(socket: zmq.Socket, name: str, *args, **kwargs):
