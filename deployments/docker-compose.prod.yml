@@ -1,0 +1,11 @@
+services:
+  web-bridge:
+    image: ${IMAGE_REPO:-ghcr.io/folgercn/vnpy-web-bridge-app}:${IMAGE_TAG:-latest}
+    container_name: vnpy-web-bridge
+    restart: "no"
+    environment:
+      VNPY_RPC_REQ_ADDRESS: ${VNPY_RPC_REQ_ADDRESS:-tcp://192.168.100.187:2014}
+      VNPY_RPC_PUB_ADDRESS: ${VNPY_RPC_PUB_ADDRESS:-tcp://192.168.100.187:4102}
+    ports:
+      - "8080:8080"
+    command: ["python", "-m", "http.server", "8080"]

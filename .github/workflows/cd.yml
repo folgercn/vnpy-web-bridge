@@ -1,0 +1,168 @@
+name: CD
+
+on:
+  workflow_dispatch:
+    inputs:
+      deploy_services:
+        description: "Space-separated compose services to deploy. Empty uses safe defaults."
+        required: false
+        default: ""
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/cd.yml"
+      - ".dockerignore"
+      - "Dockerfile"
+      - "requirements.txt"
+      - "test_rpc_readonly.py"
+      - "test_rpc_trade_flow.py"
+      - "deployments/**"
+      - "scripts/deploy.sh"
+
+jobs:
+  changes:
+    name: Detect changed areas
+    runs-on: ubuntu-latest
+    outputs:
+      image_changed: ${{ steps.filter.outputs.image_changed }}
+      deploy_services: ${{ steps.filter.outputs.deploy_services }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect changed files
+        id: filter
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          CURRENT_SHA: ${{ github.sha }}
+          INPUT_DEPLOY_SERVICES: ${{ inputs.deploy_services }}
+        run: |
+          validate_deploy_services() {
+            for service in $1; do
+              case "$service" in
+                web-bridge) ;;
+                *)
+                  echo "Unsupported deploy_services entry: $service" >&2
+                  echo "Allowed services: web-bridge" >&2
+                  exit 2
+                  ;;
+              esac
+            done
+          }
+
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            if [ -n "${INPUT_DEPLOY_SERVICES:-}" ]; then
+              validate_deploy_services "$INPUT_DEPLOY_SERVICES"
+              deploy_services="$INPUT_DEPLOY_SERVICES"
+            else
+              deploy_services="web-bridge"
+            fi
+            echo "image_changed=true" >> "$GITHUB_OUTPUT"
+            echo "deploy_services=$deploy_services" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ -z "$BEFORE_SHA" ] || [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ]; then
+            changed_files="$(git ls-tree -r --name-only "$CURRENT_SHA")"
+          else
+            changed_files="$(git diff --name-only "$BEFORE_SHA" "$CURRENT_SHA")"
+          fi
+
+          image_changed=false
+          deploy_services=""
+
+          while IFS= read -r file; do
+            [ -z "$file" ] && continue
+            case "$file" in
+              Dockerfile|.dockerignore|requirements.txt|test_rpc_readonly.py|test_rpc_trade_flow.py|deployments/*|scripts/deploy.sh|.github/workflows/cd.yml)
+                image_changed=true
+                deploy_services="web-bridge"
+                ;;
+            esac
+          done <<EOF
+          $changed_files
+          EOF
+
+          echo "image_changed=$image_changed" >> "$GITHUB_OUTPUT"
+          echo "deploy_services=$deploy_services" >> "$GITHUB_OUTPUT"
+
+  docker:
+    name: Build and publish image
+    needs: changes
+    if: github.ref == 'refs/heads/main' && needs.changes.outputs.image_changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/vnpy-web-bridge-app
+          tags: |
+            type=ref,event=branch
+            type=raw,value=sha-${{ github.sha }}
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+  deploy:
+    name: Deploy on Macmini runner
+    needs: [changes, docker]
+    if: github.ref == 'refs/heads/main' && needs.changes.outputs.image_changed == 'true' && needs.changes.outputs.deploy_services != '' && needs.docker.result == 'success'
+    runs-on: [self-hosted, macOS, ARM64, vnpy-web-bridge]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare deployment directory
+        run: |
+          mkdir -p /Users/fujun/services/vnpy-web-bridge/deployments
+          mkdir -p /Users/fujun/services/vnpy-web-bridge/scripts
+          cp deployments/docker-compose.prod.yml /Users/fujun/services/vnpy-web-bridge/deployments/docker-compose.prod.yml
+          cp scripts/deploy.sh /Users/fujun/services/vnpy-web-bridge/scripts/deploy.sh
+          chmod +x /Users/fujun/services/vnpy-web-bridge/scripts/deploy.sh
+
+      - name: Validate deploy secrets
+        env:
+          GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
+          GHCR_TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
+        run: |
+          test -n "$GHCR_USERNAME" || { echo "Missing secret: GHCR_USERNAME" >&2; exit 1; }
+          test -n "$GHCR_TOKEN" || { echo "Missing secret: GHCR_READ_TOKEN" >&2; exit 1; }
+
+      - name: Deploy via docker compose
+        env:
+          DEPLOY_PATH: /Users/fujun/services/vnpy-web-bridge
+          IMAGE_REPO: ghcr.io/${{ github.repository_owner }}/vnpy-web-bridge-app
+          IMAGE_TAG: sha-${{ github.sha }}
+          DEPLOY_SERVICES: ${{ needs.changes.outputs.deploy_services }}
+          GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
+          GHCR_TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
+        run: bash /Users/fujun/services/vnpy-web-bridge/scripts/deploy.sh
