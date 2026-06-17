@@ -120,29 +120,56 @@ jobs:
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
         run: |
           path="${DEPLOY_PATH:-/Users/fujun/services/vnpy-web-bridge}"
-          mkdir -p "$path/deployments" "$path/scripts" "$path/logs"
+          mkdir -p "$path/deployments" "$path/scripts" "$path/logs" "$path/source"
           cp deployments/docker-compose.prod.yml "$path/deployments/docker-compose.prod.yml"
           cp scripts/deploy.sh "$path/scripts/deploy.sh"
           cp .deploy.env "$path/.env"
+          rsync -az --delete \
+            --exclude .git \
+            --exclude .venv \
+            --exclude node_modules \
+            --exclude frontend/dist \
+            --exclude __pycache__ \
+            --exclude .pytest_cache \
+            ./ "$path/source/"
           chmod +x "$path/scripts/deploy.sh"
           chmod 600 "$path/.env"
 
       - name: Build image on Macmini
         timeout-minutes: 20
         env:
+          DEPLOY_SSH_HOST: ${{ secrets.DEPLOY_SSH_HOST }}
+          DEPLOY_SSH_PORT: ${{ secrets.DEPLOY_SSH_PORT }}
+          DEPLOY_SSH_USER: ${{ secrets.DEPLOY_SSH_USER }}
+          DEPLOY_SSH_PASSWORD: ${{ secrets.DEPLOY_SSH_PASSWORD }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
           IMAGE_REPO: vnpy-web-bridge
           IMAGE_TAG: sha-${{ github.sha }}
         run: |
-          export PATH="/Applications/Docker.app/Contents/Resources/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
-          docker build --progress=plain -t "${IMAGE_REPO}:${IMAGE_TAG}" -t "${IMAGE_REPO}:latest" .
+          : "${DEPLOY_SSH_PASSWORD:?Missing DEPLOY_SSH_PASSWORD secret}"
+          host="${DEPLOY_SSH_HOST:-192.168.100.89}"
+          port="${DEPLOY_SSH_PORT:-22}"
+          user="${DEPLOY_SSH_USER:-fujun}"
+          path="${DEPLOY_PATH:-/Users/fujun/services/vnpy-web-bridge}"
+          sshpass -p "$DEPLOY_SSH_PASSWORD" ssh -p "$port" -o StrictHostKeyChecking=accept-new "$user@$host" \
+            "cd '$path/source' && PATH='/Applications/Docker.app/Contents/Resources/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin' docker build --progress=plain -t '$IMAGE_REPO:$IMAGE_TAG' -t '$IMAGE_REPO:latest' ."
 
       - name: Deploy via docker compose
         env:
+          DEPLOY_SSH_HOST: ${{ secrets.DEPLOY_SSH_HOST }}
+          DEPLOY_SSH_PORT: ${{ secrets.DEPLOY_SSH_PORT }}
+          DEPLOY_SSH_USER: ${{ secrets.DEPLOY_SSH_USER }}
+          DEPLOY_SSH_PASSWORD: ${{ secrets.DEPLOY_SSH_PASSWORD }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
           IMAGE_REPO: vnpy-web-bridge
           IMAGE_TAG: sha-${{ github.sha }}
           DEPLOY_SERVICES: ${{ needs.changes.outputs.deploy_services }}
           DEPLOY_SKIP_PULL: "true"
         run: |
+          : "${DEPLOY_SSH_PASSWORD:?Missing DEPLOY_SSH_PASSWORD secret}"
+          host="${DEPLOY_SSH_HOST:-192.168.100.89}"
+          port="${DEPLOY_SSH_PORT:-22}"
+          user="${DEPLOY_SSH_USER:-fujun}"
           path="${DEPLOY_PATH:-/Users/fujun/services/vnpy-web-bridge}"
-          DEPLOY_PATH="$path" IMAGE_REPO="$IMAGE_REPO" IMAGE_TAG="$IMAGE_TAG" DEPLOY_SERVICES="$DEPLOY_SERVICES" DEPLOY_SKIP_PULL="$DEPLOY_SKIP_PULL" bash "$path/scripts/deploy.sh"
+          sshpass -p "$DEPLOY_SSH_PASSWORD" ssh -p "$port" -o StrictHostKeyChecking=accept-new "$user@$host" \
+            "DEPLOY_PATH='$path' IMAGE_REPO='$IMAGE_REPO' IMAGE_TAG='$IMAGE_TAG' DEPLOY_SERVICES='$DEPLOY_SERVICES' DEPLOY_SKIP_PULL='$DEPLOY_SKIP_PULL' bash '$path/scripts/deploy.sh'"
