@@ -137,6 +137,9 @@ jobs:
     needs: [changes, docker]
     if: github.ref == 'refs/heads/main' && needs.changes.outputs.image_changed == 'true' && needs.changes.outputs.deploy_services != '' && needs.docker.result == 'success'
     runs-on: [self-hosted, macOS, ARM64, vnpy-web-bridge]
+    permissions:
+      contents: read
+      packages: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -149,20 +152,12 @@ jobs:
           cp scripts/deploy.sh /Users/fujun/services/vnpy-web-bridge/scripts/deploy.sh
           chmod +x /Users/fujun/services/vnpy-web-bridge/scripts/deploy.sh
 
-      - name: Validate deploy secrets
-        env:
-          GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
-          GHCR_TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
-        run: |
-          test -n "$GHCR_USERNAME" || { echo "Missing secret: GHCR_USERNAME" >&2; exit 1; }
-          test -n "$GHCR_TOKEN" || { echo "Missing secret: GHCR_READ_TOKEN" >&2; exit 1; }
-
       - name: Deploy via docker compose
         env:
           DEPLOY_PATH: /Users/fujun/services/vnpy-web-bridge
           IMAGE_REPO: ghcr.io/${{ github.repository_owner }}/vnpy-web-bridge-app
           IMAGE_TAG: sha-${{ github.sha }}
           DEPLOY_SERVICES: ${{ needs.changes.outputs.deploy_services }}
-          GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
-          GHCR_TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
+          GHCR_USERNAME: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash /Users/fujun/services/vnpy-web-bridge/scripts/deploy.sh
