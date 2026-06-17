@@ -16,6 +16,11 @@ class Settings(BaseSettings):
     vnpy_gateway_name: str = Field(default="CTP")
     vnpy_rpc_timeout_ms: int = Field(default=10_000, ge=1_000)
 
+    web_trade_enabled: bool = False
+    default_gateway_name: str = "CTP"
+    order_confirm_required: bool = True
+    trade_reference_prefix: str = "web_bridge"
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
 

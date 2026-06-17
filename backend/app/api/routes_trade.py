@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 
 from app.core.errors import ok
+from app.schemas.trade import CancelAllRequestDTO, CancelRequestDTO, OrderRequestDTO
+from app.services.trade_service import trade_service
 from app.services.vnpy_rpc_service import rpc_service
 from app.stores.memory_store import memory_store
 
@@ -19,3 +21,19 @@ def orders() -> dict:
 def trades() -> dict:
     trades_data = rpc_service.get_trades()
     return ok(trades_data if trades_data else memory_store.trades())
+
+
+@router.post("/orders")
+def create_order(payload: OrderRequestDTO, request: Request) -> dict:
+    return ok(trade_service.send_order(payload, source_ip=request.client.host if request.client else None))
+
+
+@router.post("/orders/cancel-all")
+def cancel_all_orders(payload: CancelAllRequestDTO, request: Request) -> dict:
+    return ok(trade_service.cancel_all(payload, source_ip=request.client.host if request.client else None))
+
+
+@router.post("/orders/{vt_orderid}/cancel")
+def cancel_order(vt_orderid: str, request: Request, payload: CancelRequestDTO | None = None) -> dict:
+    source_ip = request.client.host if request.client else None
+    return ok(trade_service.cancel_order(vt_orderid, payload, source_ip=source_ip))

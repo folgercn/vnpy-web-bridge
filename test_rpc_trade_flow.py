@@ -101,6 +101,10 @@ def drain_order_events(client: TestClient, seconds: int = 5) -> None:
 
 
 def main() -> int:
+    if os.getenv("VNPY_ALLOW_TRADE_TEST") != "true" and "--allow-trade" not in sys.argv:
+        print("skip: set VNPY_ALLOW_TRADE_TEST=true or pass --allow-trade to run real trade flow")
+        return 0
+
     vt_symbol = f"{SYMBOL}.{EXCHANGE.value}"
     client = TestClient()
     client.subscribe_topic("")

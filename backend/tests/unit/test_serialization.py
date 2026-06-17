@@ -35,3 +35,9 @@ def test_to_plain_dict_serializes_enum_datetime_and_numbers() -> None:
         "price": 12.5,
         "volume": 2,
     }
+
+
+def test_to_plain_dict_normalizes_order_status() -> None:
+    data = to_plain_dict({"status": "未成交"})
+
+    assert data["status"] == "not_traded"

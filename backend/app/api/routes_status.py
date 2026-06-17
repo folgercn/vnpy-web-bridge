@@ -30,3 +30,16 @@ def gateway_status() -> dict:
             "status": "connected" if rpc_status_data["connected"] else "disconnected",
         }
     )
+
+
+@router.get("/trade/config")
+def trade_config() -> dict:
+    settings = get_settings()
+    return ok(
+        {
+            "web_trade_enabled": settings.web_trade_enabled,
+            "default_gateway_name": settings.default_gateway_name,
+            "order_confirm_required": settings.order_confirm_required,
+            "trade_reference_prefix": settings.trade_reference_prefix,
+        }
+    )
