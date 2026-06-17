@@ -58,7 +58,7 @@ jobs:
               frontend/*|.github/workflows/ci.yml)
                 frontend_changed=true
                 ;;
-              Dockerfile|.dockerignore|deployments/*|scripts/deploy.sh|requirements.txt|.github/workflows/ci.yml)
+              Dockerfile|.dockerignore|backend/*|frontend/*|deployments/*|scripts/deploy.sh|.github/workflows/ci.yml)
                 docker_changed=true
                 ;;
             esac

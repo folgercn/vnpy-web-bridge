@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 
 from app.api import (
     routes_account,
@@ -49,6 +51,24 @@ app.include_router(routes_trade.router, prefix="/api")
 app.include_router(routes_risk.router, prefix="/api")
 app.include_router(routes_strategy.router, prefix="/api")
 app.include_router(routes_ws.router)
+
+frontend_dist = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+
+
+if frontend_dist.exists():
+
+    @app.get("/")
+    async def serve_frontend_index() -> FileResponse:
+        return FileResponse(frontend_dist / "index.html")
+
+    @app.get("/{path:path}")
+    async def serve_frontend(path: str) -> FileResponse:
+        if path.startswith("api/"):
+            raise HTTPException(status_code=404, detail="Not Found")
+        requested = (frontend_dist / path).resolve()
+        if requested.is_file() and requested.is_relative_to(frontend_dist):
+            return FileResponse(requested)
+        return FileResponse(frontend_dist / "index.html")
 
 
 @app.on_event("startup")

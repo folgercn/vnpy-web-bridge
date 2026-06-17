@@ -2,7 +2,9 @@ import { useTerminalStore } from '../stores/terminal'
 import { useAuthStore } from '../stores/auth'
 import { ref } from 'vue'
 
-export const wsUrl = import.meta.env.VITE_WS_URL || 'ws://127.0.0.1:8000/ws/events'
+export const wsUrl =
+  import.meta.env.VITE_WS_URL ||
+  `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}/ws/events`
 
 export interface WsEvent {
   type: string

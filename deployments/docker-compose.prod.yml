@@ -2,10 +2,14 @@ services:
   web-bridge:
     image: ${IMAGE_REPO:-ghcr.io/folgercn/vnpy-web-bridge-app}:${IMAGE_TAG:-latest}
     container_name: vnpy-web-bridge
-    restart: "no"
-    environment:
-      VNPY_RPC_REQ_ADDRESS: ${VNPY_RPC_REQ_ADDRESS:-tcp://192.168.100.187:2014}
-      VNPY_RPC_PUB_ADDRESS: ${VNPY_RPC_PUB_ADDRESS:-tcp://192.168.100.187:4102}
+    restart: unless-stopped
+    env_file:
+      - ../.env
     ports:
       - "8080:8080"
-    command: ["python", "-m", "http.server", "8080"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/api/status', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s

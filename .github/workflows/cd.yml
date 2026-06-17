@@ -13,7 +13,8 @@ on:
       - ".github/workflows/cd.yml"
       - ".dockerignore"
       - "Dockerfile"
-      - "requirements.txt"
+      - "backend/**"
+      - "frontend/**"
       - "test_rpc_readonly.py"
       - "test_rpc_trade_flow.py"
       - "deployments/**"
@@ -77,7 +78,7 @@ jobs:
           while IFS= read -r file; do
             [ -z "$file" ] && continue
             case "$file" in
-              Dockerfile|.dockerignore|requirements.txt|test_rpc_readonly.py|test_rpc_trade_flow.py|deployments/*|scripts/deploy.sh|.github/workflows/cd.yml)
+              Dockerfile|.dockerignore|backend/*|frontend/*|test_rpc_readonly.py|test_rpc_trade_flow.py|deployments/*|scripts/deploy.sh|.github/workflows/cd.yml)
                 image_changed=true
                 deploy_services="web-bridge"
                 ;;
@@ -133,7 +134,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
 
   deploy:
-    name: Deploy on Macmini runner
+    name: Deploy to Macmini over SSH
     needs: [changes, docker]
     if: github.ref == 'refs/heads/main' && needs.changes.outputs.image_changed == 'true' && needs.changes.outputs.deploy_services != '' && needs.docker.result == 'success'
     runs-on: [self-hosted, macOS, ARM64, vnpy-web-bridge]
@@ -144,20 +145,58 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Prepare deployment directory
+      - name: Prepare env file
+        env:
+          DEPLOY_ENV_FILE: ${{ secrets.DEPLOY_ENV_FILE }}
         run: |
-          mkdir -p /Users/fujun/services/vnpy-web-bridge/deployments
-          mkdir -p /Users/fujun/services/vnpy-web-bridge/scripts
-          cp deployments/docker-compose.prod.yml /Users/fujun/services/vnpy-web-bridge/deployments/docker-compose.prod.yml
-          cp scripts/deploy.sh /Users/fujun/services/vnpy-web-bridge/scripts/deploy.sh
-          chmod +x /Users/fujun/services/vnpy-web-bridge/scripts/deploy.sh
+          if [ -n "${DEPLOY_ENV_FILE:-}" ]; then
+            printf '%s\n' "$DEPLOY_ENV_FILE" > .deploy.env
+          elif [ -f backend/.env ]; then
+            cp backend/.env .deploy.env
+          else
+            echo "Missing deploy env. Add GitHub secret DEPLOY_ENV_FILE or keep backend/.env on the self-hosted runner." >&2
+            exit 1
+          fi
+          chmod 600 .deploy.env
+
+      - name: Sync deployment files
+        env:
+          DEPLOY_SSH_HOST: ${{ secrets.DEPLOY_SSH_HOST }}
+          DEPLOY_SSH_PORT: ${{ secrets.DEPLOY_SSH_PORT }}
+          DEPLOY_SSH_USER: ${{ secrets.DEPLOY_SSH_USER }}
+          DEPLOY_SSH_PASSWORD: ${{ secrets.DEPLOY_SSH_PASSWORD }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+        run: |
+          : "${DEPLOY_SSH_PASSWORD:?Missing DEPLOY_SSH_PASSWORD secret}"
+          host="${DEPLOY_SSH_HOST:-192.168.100.89}"
+          port="${DEPLOY_SSH_PORT:-22}"
+          user="${DEPLOY_SSH_USER:-fujun}"
+          path="${DEPLOY_PATH:-/Users/fujun/services/vnpy-web-bridge}"
+          ssh_base=(sshpass -p "$DEPLOY_SSH_PASSWORD" ssh -p "$port" -o StrictHostKeyChecking=accept-new "$user@$host")
+          scp_base=(sshpass -p "$DEPLOY_SSH_PASSWORD" scp -P "$port" -o StrictHostKeyChecking=accept-new)
+          "${ssh_base[@]}" "mkdir -p '$path/deployments' '$path/scripts' '$path/logs'"
+          "${scp_base[@]}" deployments/docker-compose.prod.yml "$user@$host:$path/deployments/docker-compose.prod.yml"
+          "${scp_base[@]}" scripts/deploy.sh "$user@$host:$path/scripts/deploy.sh"
+          "${scp_base[@]}" .deploy.env "$user@$host:$path/.env"
+          "${ssh_base[@]}" "chmod +x '$path/scripts/deploy.sh' && chmod 600 '$path/.env'"
 
       - name: Deploy via docker compose
         env:
-          DEPLOY_PATH: /Users/fujun/services/vnpy-web-bridge
+          DEPLOY_SSH_HOST: ${{ secrets.DEPLOY_SSH_HOST }}
+          DEPLOY_SSH_PORT: ${{ secrets.DEPLOY_SSH_PORT }}
+          DEPLOY_SSH_USER: ${{ secrets.DEPLOY_SSH_USER }}
+          DEPLOY_SSH_PASSWORD: ${{ secrets.DEPLOY_SSH_PASSWORD }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
           IMAGE_REPO: ghcr.io/${{ github.repository_owner }}/vnpy-web-bridge-app
           IMAGE_TAG: sha-${{ github.sha }}
           DEPLOY_SERVICES: ${{ needs.changes.outputs.deploy_services }}
           GHCR_USERNAME: ${{ github.actor }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: bash /Users/fujun/services/vnpy-web-bridge/scripts/deploy.sh
+        run: |
+          : "${DEPLOY_SSH_PASSWORD:?Missing DEPLOY_SSH_PASSWORD secret}"
+          host="${DEPLOY_SSH_HOST:-192.168.100.89}"
+          port="${DEPLOY_SSH_PORT:-22}"
+          user="${DEPLOY_SSH_USER:-fujun}"
+          path="${DEPLOY_PATH:-/Users/fujun/services/vnpy-web-bridge}"
+          sshpass -p "$DEPLOY_SSH_PASSWORD" ssh -p "$port" -o StrictHostKeyChecking=accept-new "$user@$host" \
+            "DEPLOY_PATH='$path' IMAGE_REPO='$IMAGE_REPO' IMAGE_TAG='$IMAGE_TAG' DEPLOY_SERVICES='$DEPLOY_SERVICES' GHCR_USERNAME='$GHCR_USERNAME' GHCR_TOKEN='$GHCR_TOKEN' bash '$path/scripts/deploy.sh'"
