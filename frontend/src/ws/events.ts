@@ -41,7 +41,7 @@ export class EventSocket {
   handleMessage(raw: string) {
     try {
       const event = JSON.parse(raw) as WsEvent
-      if (!event || typeof event.type !== 'string' || typeof event.data !== 'object') return
+      if (!event || typeof event.type !== 'string' || !event.data || typeof event.data !== 'object' || Array.isArray(event.data)) return
       useTerminalStore().applyEvent(event.type, event.data)
     } catch {
       useTerminalStore().applyEvent('log', { level: 'warn', message: 'invalid websocket message' })
