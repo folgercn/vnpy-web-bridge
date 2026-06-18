@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.vnpy-web-bridge.watchdog</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>/Users/fujun/services/vnpy-web-bridge/scripts/watchdog.py</string>
+    <string>--env-file</string>
+    <string>/Users/fujun/services/vnpy-web-bridge/.env</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/fujun/services/vnpy-web-bridge</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/Users/fujun/services/vnpy-web-bridge/logs/watchdog/stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/fujun/services/vnpy-web-bridge/logs/watchdog/stderr.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/Applications/Docker.app/Contents/Resources/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>WATCHDOG_ENABLED</key>
+    <string>true</string>
+  </dict>
+</dict>
+</plist>
