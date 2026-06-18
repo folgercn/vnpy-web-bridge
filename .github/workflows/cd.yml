@@ -106,6 +106,10 @@ jobs:
       - name: Prepare env file
         env:
           DEPLOY_ENV_FILE: ${{ secrets.DEPLOY_ENV_FILE }}
+          MONITOR_ENABLED_SECRET: ${{ secrets.MONITOR_ENABLED }}
+          TELEGRAM_ENABLED_SECRET: ${{ secrets.TELEGRAM_ENABLED }}
+          TELEGRAM_BOT_TOKEN_SECRET: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID_SECRET: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           if [ -n "${DEPLOY_ENV_FILE:-}" ]; then
             printf '%s\n' "$DEPLOY_ENV_FILE" > .deploy.env
@@ -114,6 +118,41 @@ jobs:
           else
             echo "Missing deploy env. Add GitHub secret DEPLOY_ENV_FILE or keep backend/.env on the self-hosted runner." >&2
             exit 1
+          fi
+          if [ -n "${TELEGRAM_BOT_TOKEN_SECRET:-}" ] && [ -n "${TELEGRAM_CHAT_ID_SECRET:-}" ]; then
+            python3 - .deploy.env <<'PY'
+          from __future__ import annotations
+
+          import os
+          import sys
+          from pathlib import Path
+
+          env_path = Path(sys.argv[1])
+          managed_keys = {
+              "MONITOR_ENABLED",
+              "TELEGRAM_ENABLED",
+              "TELEGRAM_BOT_TOKEN",
+              "TELEGRAM_CHAT_ID",
+          }
+          lines = env_path.read_text(encoding="utf-8").splitlines()
+          kept = []
+          for line in lines:
+              stripped = line.strip()
+              key = stripped.split("=", 1)[0].strip() if "=" in stripped and not stripped.startswith("#") else ""
+              if key in managed_keys:
+                  continue
+              kept.append(line)
+
+          overlay = {
+              "MONITOR_ENABLED": os.getenv("MONITOR_ENABLED_SECRET") or "true",
+              "TELEGRAM_ENABLED": os.getenv("TELEGRAM_ENABLED_SECRET") or "true",
+              "TELEGRAM_BOT_TOKEN": os.environ["TELEGRAM_BOT_TOKEN_SECRET"],
+              "TELEGRAM_CHAT_ID": os.environ["TELEGRAM_CHAT_ID_SECRET"],
+          }
+          output = "\n".join(kept).rstrip() + "\n\n"
+          output += "\n".join(f"{key}={value}" for key, value in overlay.items()) + "\n"
+          env_path.write_text(output, encoding="utf-8")
+          PY
           fi
           chmod 600 .deploy.env
 
