@@ -22,7 +22,10 @@ VNPY_RPC_REQ_ADDRESS=tcp://127.0.0.1:2014
 VNPY_RPC_PUB_ADDRESS=tcp://127.0.0.1:4102
 VNPY_GATEWAY_NAME=CTP
 VNPY_RPC_TIMEOUT_MS=10000
+QUESTDB_PG_DSN=postgresql://admin:quest@127.0.0.1:8812/qdb
 ```
+
+`QUESTDB_PG_DSN` 为空时不写入时序库。配置后，后端启动会自动创建 `market_ticks` 表，实时 tick 会写入 QuestDB，`GET /api/market/bars` 会优先从 QuestDB 聚合 K 线。
 
 ## 接口
 
@@ -57,7 +60,9 @@ VNPY_RPC_TIMEOUT_MS=10000
 - `POST /api/orders/{vt_orderid}/cancel`
 - `POST /api/orders/cancel-all`
 - `POST /api/market/subscribe`
+- `POST /api/market/unsubscribe`
 - `GET /api/market/tick/{vt_symbol}`
+- `GET /api/market/bars`
 - `GET /ws/events`
 
 交易 API 默认关闭。必须设置 `WEB_TRADE_ENABLED=true`，且在默认 `ORDER_CONFIRM_REQUIRED=true` 时请求体传入 `confirm: true`，才会调用真实交易 RPC。

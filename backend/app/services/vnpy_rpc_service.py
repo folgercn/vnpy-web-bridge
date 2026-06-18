@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 from app.core.config import Settings, get_settings
 from app.core.errors import RpcCallError, RpcTimeoutError, RpcUnavailableError
 from app.schemas.common import to_plain_dict, to_plain_list
+from app.services.market_data_service import market_data_service
 from app.stores.memory_store import memory_store
 from app.ws.events import ws_message
 from app.ws.manager import ws_manager
@@ -154,6 +155,10 @@ class VnpyRpcService:
         return to_plain_list(self.call_first(["get_all_trades"]))
 
     def get_bars(self, symbol: str, exchange: str, interval: str = "1m", limit: int = 300) -> list[dict[str, Any]]:
+        local_bars = market_data_service.get_bars(symbol, exchange, interval, limit)
+        if local_bars:
+            return local_bars
+
         if HistoryRequest is not None and Exchange is not None and Interval is not None:
             try:
                 exchange_value = self._parse_exchange(exchange)
@@ -241,6 +246,8 @@ class VnpyRpcService:
         if event_type.startswith(EVENT_TICK):
             ws_type = "tick"
             vt_symbol = payload.get("vt_symbol")
+            if vt_symbol:
+                market_data_service.save_tick(payload)
             if not vt_symbol or not self._is_market_subscribed(str(vt_symbol)):
                 return
             memory_store.save_tick(str(vt_symbol), payload)

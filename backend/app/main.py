@@ -22,6 +22,7 @@ from app.api import (
 from app.core.config import get_settings
 from app.core.errors import AppError, app_error_handler, unhandled_error_handler, validation_error_handler
 from app.core.logging import configure_logging
+from app.services.market_data_service import market_data_service
 from app.services.vnpy_rpc_service import rpc_service
 
 settings = get_settings()
@@ -73,6 +74,11 @@ if frontend_dist.exists():
 
 @app.on_event("startup")
 async def startup() -> None:
+    try:
+        market_data_service.start()
+    except Exception as exc:
+        logger.warning("backend started without QuestDB market store: %s", exc)
+
     rpc_service.bind_loop(asyncio.get_running_loop())
     try:
         rpc_service.start()
@@ -83,3 +89,4 @@ async def startup() -> None:
 @app.on_event("shutdown")
 async def shutdown() -> None:
     rpc_service.stop()
+    market_data_service.stop()

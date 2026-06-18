@@ -106,6 +106,16 @@ def test_handle_tick_event_ignores_unsubscribed_symbol() -> None:
     assert memory_store.get_tick("UNIT999.SHFE") is None
 
 
+def test_handle_tick_event_persists_unsubscribed_symbol_to_questdb(monkeypatch) -> None:
+    saved: list[dict] = []
+    monkeypatch.setattr("app.services.vnpy_rpc_service.market_data_service.save_tick", saved.append)
+    service = VnpyRpcService()
+
+    service.handle_event("", TickEvent())
+
+    assert saved[0]["vt_symbol"] == "UNIT999.SHFE"
+
+
 def test_unsubscribe_market_removes_subscription_and_tick() -> None:
     service = VnpyRpcService()
     service._market_subscriptions.add("UNIT999.SHFE")

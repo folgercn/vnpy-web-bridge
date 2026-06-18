@@ -1,10 +1,25 @@
 services:
+  questdb:
+    image: questdb/questdb:latest
+    container_name: vnpy-web-bridge-questdb
+    restart: unless-stopped
+    ports:
+      - "9000:9000"
+      - "8812:8812"
+      - "9009:9009"
+    volumes:
+      - questdb-data:/var/lib/questdb
+
   web-bridge:
     image: ${IMAGE_REPO:-ghcr.io/folgercn/vnpy-web-bridge-app}:${IMAGE_TAG:-latest}
     container_name: vnpy-web-bridge
     restart: unless-stopped
     env_file:
       - ../.env
+    environment:
+      QUESTDB_PG_DSN: ${QUESTDB_PG_DSN:-postgresql://admin:quest@questdb:8812/qdb}
+    depends_on:
+      - questdb
     ports:
       - "8080:8080"
     healthcheck:
@@ -13,3 +28,6 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
+
+volumes:
+  questdb-data:

@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     jwt_secret_key: str = "change-me-in-production"
     access_token_expire_minutes: int = Field(default=480, ge=1)
     auth_users_json: str = "[]"
+    questdb_pg_dsn: str = ""
 
     risk_max_order_volume: float = Field(default=1, gt=0)
     risk_max_symbol_position: float = Field(default=5, ge=0)
