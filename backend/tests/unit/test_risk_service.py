@@ -8,6 +8,7 @@ from app.core.errors import (
     RiskExchangeNotAllowedError,
     RiskMaxOrderVolumeError,
     RiskPriceProtectionError,
+    RiskTradingTimeError,
     RiskSymbolBlockedError,
     TradeDisabledError,
 )
@@ -152,3 +153,21 @@ def test_price_must_match_contract_tick(monkeypatch) -> None:
 
     with pytest.raises(RiskPriceProtectionError):
         service.check_order(make_order(price=3000.5))
+
+
+def test_trading_time_check_rejects_legal_holiday(monkeypatch) -> None:
+    service = make_service()
+    service.update_rules(RiskRulesPatchDTO(trading_time_check_enabled=True))
+    allow_rpc(monkeypatch)
+    monkeypatch.setattr(
+        "app.services.risk_service.calendar_service.get_day",
+        lambda target: {
+            "date": "2026-02-16",
+            "is_trading_day": False,
+            "holiday_name": "春节",
+            "source": "国办发明电〔2025〕7号",
+        },
+    )
+
+    with pytest.raises(RiskTradingTimeError):
+        service.check_order(make_order())
