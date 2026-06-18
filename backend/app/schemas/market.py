@@ -28,6 +28,32 @@ class MarketDataQueryDto(BaseModel):
     limit: int = Field(default=200, ge=1, le=5000)
 
 
+class MarketDataStatusDto(BaseModel):
+    enabled: bool
+    running: bool
+    connected: bool
+    received_total: int
+    valid_total: int
+    invalid_total: int
+    persisted_total: int
+    retry_total: int
+    failed_total: int
+    dropped_total: int
+    queue_depth: int
+    queue_capacity: int
+    spool_rows: int
+    spool_bytes: int
+    spool_max_bytes: int
+    spool_disk_total_bytes: int
+    spool_disk_used_bytes: int
+    spool_disk_free_bytes: int
+    spool_disk_used_percent: float | None = None
+    last_received_at: str | None = None
+    last_persisted_at: str | None = None
+    persistence_lag_seconds: float | None = None
+    last_error: str | None = None
+
+
 class WatchlistCreateDto(BaseModel):
     vt_symbol: str = Field(min_length=1)
     symbol: str = Field(min_length=1)

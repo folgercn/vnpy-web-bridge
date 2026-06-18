@@ -280,6 +280,7 @@ GET    /api/market/bars
 
 ```http
 GET  /api/market/data/overview
+GET  /api/market/data/status
 GET  /api/market/data/ticks
 GET  /api/market/data/export
 POST /api/market/data/import

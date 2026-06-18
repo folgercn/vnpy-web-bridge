@@ -215,6 +215,44 @@ def test_market_bars_requires_auth_and_returns_rows(monkeypatch) -> None:
     assert response.json()["data"][0]["vt_symbol"] == "rb2610.SHFE"
 
 
+def test_market_data_status_requires_auth_and_returns_pipeline_snapshot(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.api.routes_market.tick_persistence_service.snapshot",
+        lambda: {
+            "enabled": True,
+            "running": True,
+            "connected": True,
+            "received_total": 1,
+            "valid_total": 1,
+            "invalid_total": 0,
+            "persisted_total": 1,
+            "retry_total": 0,
+            "failed_total": 0,
+            "dropped_total": 0,
+            "queue_depth": 0,
+            "queue_capacity": 100,
+            "spool_rows": 0,
+            "spool_bytes": 0,
+            "last_received_at": "2026-06-18T02:00:00+00:00",
+            "last_persisted_at": "2026-06-18T02:00:01+00:00",
+            "persistence_lag_seconds": 0.0,
+            "last_error": None,
+        },
+    )
+
+    with client_without_rpc(monkeypatch) as client:
+        unauthenticated = client.get("/api/market/data/status")
+        response = client.get("/api/market/data/status", headers=auth_headers("viewer"))
+
+    assert unauthenticated.status_code == 401
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["data"]["enabled"] is True
+    assert body["data"]["received_total"] == 1
+    assert body["data"]["queue_depth"] == 0
+
+
 def test_market_unsubscribe_requires_auth_and_returns_result(monkeypatch) -> None:
     monkeypatch.setattr(
         rpc_service,

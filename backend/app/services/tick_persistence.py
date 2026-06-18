@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import json
 import logging
 from pathlib import Path
 from queue import Empty, Full, Queue
+import shutil
 from threading import Event, Lock, Thread
 import time
 from typing import Any, Iterable
@@ -29,6 +31,8 @@ class TickPersistenceStats:
     failed_total: int = 0
     dropped_total: int = 0
     spooled_total: int = 0
+    last_received_at: datetime | None = None
+    last_persisted_at: datetime | None = None
     last_error: str | None = None
 
 
@@ -85,6 +89,10 @@ class JsonlTickSpool:
             with self.path.open("r", encoding="utf-8") as file:
                 return sum(1 for line in file if line.strip())
 
+    def disk_usage(self) -> Any:
+        self.directory.mkdir(parents=True, exist_ok=True)
+        return shutil.disk_usage(self.directory)
+
 
 class TickPersistenceService:
     def __init__(
@@ -105,6 +113,7 @@ class TickPersistenceService:
         self._thread: Thread | None = None
         self._running = False
         self._backoff_seconds = 1.0
+        self._last_error_log_at = 0.0
 
     @property
     def enabled(self) -> bool:
@@ -127,6 +136,7 @@ class TickPersistenceService:
 
     def enqueue_tick(self, tick: dict[str, Any]) -> bool:
         self._inc("received_total")
+        self._set_last_received()
         if not self.enabled:
             return False
 
@@ -153,14 +163,33 @@ class TickPersistenceService:
     def snapshot(self) -> dict[str, Any]:
         with self._stats_lock:
             data = self.stats.__dict__.copy()
+        last_received_at = data.pop("last_received_at")
+        last_persisted_at = data.pop("last_persisted_at")
+        queue_depth = self.queue.qsize()
+        spool_rows = self.spool.row_count()
+        spool_bytes = self.spool.size_bytes()
+        disk = self.spool.disk_usage()
         data.update(
             {
                 "enabled": self.enabled,
                 "running": self._running,
-                "queue_depth": self.queue.qsize(),
+                "connected": bool(getattr(self.market_store, "connected", False)),
+                "queue_depth": queue_depth,
                 "queue_capacity": self.queue.maxsize,
-                "spool_rows": self.spool.row_count(),
-                "spool_bytes": self.spool.size_bytes(),
+                "spool_rows": spool_rows,
+                "spool_bytes": spool_bytes,
+                "spool_max_bytes": self.settings.questdb_tick_spool_max_bytes,
+                "spool_disk_total_bytes": disk.total,
+                "spool_disk_used_bytes": disk.used,
+                "spool_disk_free_bytes": disk.free,
+                "spool_disk_used_percent": round((disk.used / disk.total) * 100, 2) if disk.total else None,
+                "last_received_at": _format_datetime(last_received_at),
+                "last_persisted_at": _format_datetime(last_persisted_at),
+                "persistence_lag_seconds": _persistence_lag_seconds(
+                    last_received_at,
+                    last_persisted_at,
+                    pending=queue_depth + spool_rows > 0,
+                ),
             }
         )
         return data
@@ -202,6 +231,7 @@ class TickPersistenceService:
         try:
             self.market_store.save_tick_rows_or_raise(rows)
             self._inc("persisted_total", len(rows))
+            self._set_last_persisted()
             self._backoff_seconds = 1.0
         except Exception as exc:
             self._record_error(exc, row_count=len(rows))
@@ -216,6 +246,7 @@ class TickPersistenceService:
             self.market_store.save_tick_rows_or_raise(rows)
             self.spool.clear()
             self._inc("persisted_total", len(rows))
+            self._set_last_persisted()
             self._backoff_seconds = 1.0
         except Exception as exc:
             self._record_error(exc, row_count=len(rows))
@@ -236,7 +267,10 @@ class TickPersistenceService:
         self._inc("retry_total")
         self._inc("failed_total", row_count)
         self._set_error(str(exc))
-        logger.warning("tick persistence write failed for %s rows: %s", row_count, exc)
+        now = time.monotonic()
+        if now - self._last_error_log_at >= self.settings.questdb_tick_error_log_interval_seconds:
+            self._last_error_log_at = now
+            logger.warning("tick persistence write failed for %s rows: %s", row_count, exc)
 
     def _sleep_backoff(self) -> None:
         delay = min(self._backoff_seconds, float(self.settings.questdb_tick_retry_max_seconds))
@@ -251,5 +285,27 @@ class TickPersistenceService:
         with self._stats_lock:
             self.stats.last_error = message
 
+    def _set_last_received(self) -> None:
+        with self._stats_lock:
+            self.stats.last_received_at = datetime.now(timezone.utc)
+
+    def _set_last_persisted(self) -> None:
+        with self._stats_lock:
+            self.stats.last_persisted_at = datetime.now(timezone.utc)
+
 
 tick_persistence_service = TickPersistenceService()
+
+
+def _format_datetime(value: datetime | None) -> str | None:
+    return value.isoformat() if value else None
+
+
+def _persistence_lag_seconds(last_received_at: datetime | None, last_persisted_at: datetime | None, *, pending: bool) -> float | None:
+    if not last_received_at:
+        return None
+    if pending:
+        return max(0.0, (datetime.now(timezone.utc) - last_received_at).total_seconds())
+    if not last_persisted_at:
+        return None
+    return max(0.0, (last_received_at - last_persisted_at).total_seconds())

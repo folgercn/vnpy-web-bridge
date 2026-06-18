@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     questdb_tick_retry_max_seconds: int = Field(default=60, ge=1)
     questdb_tick_spool_dir: str = "logs/tick-spool"
     questdb_tick_spool_max_bytes: int = Field(default=10 * 1024 * 1024 * 1024, ge=1)
+    questdb_tick_error_log_interval_seconds: int = Field(default=60, ge=1)
     database_url: str = ""
 
     monitor_enabled: bool = False
