@@ -53,6 +53,15 @@ QUESTDB_TICK_ERROR_LOG_INTERVAL_SECONDS=60
 
 生产 compose 会将 `QUESTDB_TICK_SPOOL_DIR` 覆盖为 `/app/tick-spool`，并挂载到独立 `tick-spool` volume；QuestDB 数据保存在 `questdb-data` volume。备份和恢复步骤见 `docs/deployment.md`。
 
+可重复执行 tick persistence smoke：
+
+```bash
+QUESTDB_PG_DSN=postgresql://admin:quest@127.0.0.1:8812/qdb \
+PYTHONPATH=backend .venv/bin/python scripts/tick_persistence_smoke.py --count 10
+```
+
+脚本会输出 `received`、`persisted`、`questdb_rows`、`diff`、`dropped`、`lag_seconds` 和 `spool_rows`。
+
 ## 接口
 
 - `GET /api/status`
