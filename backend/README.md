@@ -26,13 +26,15 @@ QUESTDB_PG_DSN=postgresql://admin:quest@127.0.0.1:8812/qdb
 DATABASE_URL=postgresql://vnpy:vnpy@127.0.0.1:5432/vnpy
 ```
 
-`QUESTDB_PG_DSN` 为空时不写入时序库。配置后，后端启动会自动创建 `market_ticks` 表，实时 tick 会写入 QuestDB，`GET /api/market/bars` 会优先从 QuestDB 聚合 K 线。
+`QUESTDB_PG_DSN` 为空时不写入时序库。配置后，后端启动会自动创建或升级 `market_ticks` 表，实时 tick 会写入 QuestDB，`GET /api/market/bars` 会优先从 QuestDB 聚合 K 线。
 
 前端【数据管理】页面可查看 QuestDB 中已保存数据的合约、时间范围和行数，并支持按 `symbol`、`exchange`、`vt_symbol`、起止时间筛选 Tick 数据。CSV 导入/导出字段：
 
 ```csv
-datetime,vt_symbol,symbol,exchange,gateway_name,last_price,volume,turnover,open_interest,bid_price_1,ask_price_1,bid_volume_1,ask_volume_1
+datetime,received_at,ingest_id,schema_version,vt_symbol,symbol,exchange,gateway_name,name,trading_day,action_day,last_price,last_volume,volume,turnover,open_interest,open_price,high_price,low_price,pre_close,limit_up,limit_down,bid_price_1,bid_price_2,bid_price_3,bid_price_4,bid_price_5,ask_price_1,ask_price_2,ask_price_3,ask_price_4,ask_price_5,bid_volume_1,bid_volume_2,bid_volume_3,bid_volume_4,bid_volume_5,ask_volume_1,ask_volume_2,ask_volume_3,ask_volume_4,ask_volume_5
 ```
+
+`market_ticks` schema v2 使用 UTC `ts` 作为 QuestDB 时间戳，额外保存 `received_at`、`schema_version` 和稳定内容哈希 `ingest_id`，并启用 `DEDUP UPSERT KEYS(ts, ingest_id)`，重试同一 tick 时保持幂等。`raw_json` 保留原始 TickData 字段，结构化列覆盖 vn.py `TickData` 的合约名、价格、成交量、成交额、持仓、涨跌停、开高低昨收和买卖 1-5 档；`extra` 保留在 `raw_json` 中。
 
 ## 接口
 

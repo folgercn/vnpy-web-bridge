@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-import json
-import logging
 from csv import DictReader
 from datetime import datetime, timedelta, timezone
+from hashlib import sha256
 from io import StringIO
+import json
+import logging
 from threading import RLock
 from typing import Any, Iterable
 
@@ -16,6 +17,104 @@ except ImportError:  # pragma: no cover - covered in deployments with QuestDB en
     psycopg = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
+
+SCHEMA_VERSION = 2
+
+TICK_NUMERIC_FIELDS = [
+    "last_price",
+    "last_volume",
+    "volume",
+    "turnover",
+    "open_interest",
+    "open_price",
+    "high_price",
+    "low_price",
+    "pre_close",
+    "limit_up",
+    "limit_down",
+    "bid_price_1",
+    "bid_price_2",
+    "bid_price_3",
+    "bid_price_4",
+    "bid_price_5",
+    "ask_price_1",
+    "ask_price_2",
+    "ask_price_3",
+    "ask_price_4",
+    "ask_price_5",
+    "bid_volume_1",
+    "bid_volume_2",
+    "bid_volume_3",
+    "bid_volume_4",
+    "bid_volume_5",
+    "ask_volume_1",
+    "ask_volume_2",
+    "ask_volume_3",
+    "ask_volume_4",
+    "ask_volume_5",
+]
+
+TICK_SELECT_FIELDS = [
+    "ts",
+    "received_at",
+    "ingest_id",
+    "schema_version",
+    "vt_symbol",
+    "symbol",
+    "exchange",
+    "gateway_name",
+    "name",
+    "trading_day",
+    "action_day",
+    *TICK_NUMERIC_FIELDS,
+]
+
+TICK_CSV_HEADERS = [
+    "datetime",
+    "received_at",
+    "ingest_id",
+    "schema_version",
+    "vt_symbol",
+    "symbol",
+    "exchange",
+    "gateway_name",
+    "name",
+    "trading_day",
+    "action_day",
+    *TICK_NUMERIC_FIELDS,
+]
+
+SCHEMA_COLUMNS: list[tuple[str, str]] = [
+    ("received_at", "TIMESTAMP"),
+    ("ingest_id", "STRING"),
+    ("schema_version", "INT"),
+    ("name", "STRING"),
+    ("trading_day", "STRING"),
+    ("action_day", "STRING"),
+    ("last_volume", "DOUBLE"),
+    ("open_price", "DOUBLE"),
+    ("high_price", "DOUBLE"),
+    ("low_price", "DOUBLE"),
+    ("pre_close", "DOUBLE"),
+    ("limit_up", "DOUBLE"),
+    ("limit_down", "DOUBLE"),
+    ("bid_price_2", "DOUBLE"),
+    ("bid_price_3", "DOUBLE"),
+    ("bid_price_4", "DOUBLE"),
+    ("bid_price_5", "DOUBLE"),
+    ("ask_price_2", "DOUBLE"),
+    ("ask_price_3", "DOUBLE"),
+    ("ask_price_4", "DOUBLE"),
+    ("ask_price_5", "DOUBLE"),
+    ("bid_volume_2", "DOUBLE"),
+    ("bid_volume_3", "DOUBLE"),
+    ("bid_volume_4", "DOUBLE"),
+    ("bid_volume_5", "DOUBLE"),
+    ("ask_volume_2", "DOUBLE"),
+    ("ask_volume_3", "DOUBLE"),
+    ("ask_volume_4", "DOUBLE"),
+    ("ask_volume_5", "DOUBLE"),
+]
 
 
 class QuestDbMarketDataService:
@@ -43,51 +142,33 @@ class QuestDbMarketDataService:
             self._conn = None
             self._initialized = False
 
-    def save_tick(self, tick: dict[str, Any]) -> None:
+    def save_tick(self, tick: dict[str, Any]) -> bool:
         if not self.enabled:
-            return
+            return False
 
-        vt_symbol = str(tick.get("vt_symbol") or "")
-        last_price = _number(tick.get("last_price"))
-        if not vt_symbol or last_price is None:
-            return
+        row = _normalize_tick(tick)
+        if row is None:
+            return False
 
-        symbol = str(tick.get("symbol") or vt_symbol.split(".", 1)[0])
-        exchange = str(tick.get("exchange") or vt_symbol.split(".", 1)[-1])
-        timestamp = _parse_datetime(tick.get("datetime"))
-        params = (
-            timestamp,
-            vt_symbol,
-            symbol,
-            exchange,
-            _string_or_none(tick.get("gateway_name")),
-            last_price,
-            _number(tick.get("volume")),
-            _number(tick.get("turnover")),
-            _number(tick.get("open_interest")),
-            _number(tick.get("bid_price_1")),
-            _number(tick.get("ask_price_1")),
-            _number(tick.get("bid_volume_1")),
-            _number(tick.get("ask_volume_1")),
-            json.dumps(tick, ensure_ascii=False, default=str),
-        )
+        columns = [*TICK_SELECT_FIELDS, "raw_json"]
+        placeholders = ", ".join(["%s"] * len(columns))
+        params = tuple(row[key] for key in TICK_SELECT_FIELDS) + (row["raw_json"],)
 
         try:
             with self._lock:
                 conn = self._connect()
                 conn.execute(
-                    """
-                    INSERT INTO market_ticks (
-                        ts, vt_symbol, symbol, exchange, gateway_name,
-                        last_price, volume, turnover, open_interest,
-                        bid_price_1, ask_price_1, bid_volume_1, ask_volume_1, raw_json
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    f"""
+                    INSERT INTO market_ticks ({", ".join(columns)})
+                    VALUES ({placeholders})
                     """,
                     params,
                 )
+            return True
         except Exception as exc:
             logger.warning("QuestDB tick write failed: %s", exc)
             self._drop_connection()
+            return False
 
     def get_bars(self, symbol: str, exchange: str, interval: str = "1m", limit: int = 300) -> list[dict[str, Any]]:
         if not self.enabled:
@@ -212,10 +293,7 @@ class QuestDbMarketDataService:
                 self._init_schema()
                 rows = conn.execute(
                     f"""
-                    SELECT
-                        ts, vt_symbol, symbol, exchange, gateway_name,
-                        last_price, volume, turnover, open_interest,
-                        bid_price_1, ask_price_1, bid_volume_1, ask_volume_1
+                    SELECT {", ".join(TICK_SELECT_FIELDS)}
                     FROM market_ticks
                     {where}
                     ORDER BY ts DESC
@@ -244,32 +322,17 @@ class QuestDbMarketDataService:
                 skipped += 1
                 continue
             before = imported
-            self.save_tick(tick)
-            imported += 1
+            if self.save_tick(tick):
+                imported += 1
             if imported == before:
                 skipped += 1
         return {"imported": imported, "skipped": skipped, "enabled": True}
 
     def export_ticks_csv(self, rows: Iterable[dict[str, Any]]) -> str:
-        headers = [
-            "datetime",
-            "vt_symbol",
-            "symbol",
-            "exchange",
-            "gateway_name",
-            "last_price",
-            "volume",
-            "turnover",
-            "open_interest",
-            "bid_price_1",
-            "ask_price_1",
-            "bid_volume_1",
-            "ask_volume_1",
-        ]
         output = StringIO()
-        output.write(",".join(headers) + "\n")
+        output.write(",".join(TICK_CSV_HEADERS) + "\n")
         for row in rows:
-            values = [_csv_escape(row.get(key, "")) for key in headers]
+            values = [_csv_escape(row.get(key, "")) for key in TICK_CSV_HEADERS]
             output.write(",".join(values) + "\n")
         return output.getvalue()
 
@@ -290,23 +353,67 @@ class QuestDbMarketDataService:
             """
             CREATE TABLE IF NOT EXISTS market_ticks (
                 ts TIMESTAMP,
+                received_at TIMESTAMP,
+                ingest_id STRING,
+                schema_version INT,
                 vt_symbol SYMBOL CAPACITY 10000 CACHE,
                 symbol SYMBOL CAPACITY 10000 CACHE,
                 exchange SYMBOL CAPACITY 64 CACHE,
                 gateway_name SYMBOL CAPACITY 64 CACHE,
+                name STRING,
+                trading_day STRING,
+                action_day STRING,
                 last_price DOUBLE,
+                last_volume DOUBLE,
                 volume DOUBLE,
                 turnover DOUBLE,
                 open_interest DOUBLE,
+                open_price DOUBLE,
+                high_price DOUBLE,
+                low_price DOUBLE,
+                pre_close DOUBLE,
+                limit_up DOUBLE,
+                limit_down DOUBLE,
                 bid_price_1 DOUBLE,
+                bid_price_2 DOUBLE,
+                bid_price_3 DOUBLE,
+                bid_price_4 DOUBLE,
+                bid_price_5 DOUBLE,
                 ask_price_1 DOUBLE,
+                ask_price_2 DOUBLE,
+                ask_price_3 DOUBLE,
+                ask_price_4 DOUBLE,
+                ask_price_5 DOUBLE,
                 bid_volume_1 DOUBLE,
+                bid_volume_2 DOUBLE,
+                bid_volume_3 DOUBLE,
+                bid_volume_4 DOUBLE,
+                bid_volume_5 DOUBLE,
                 ask_volume_1 DOUBLE,
+                ask_volume_2 DOUBLE,
+                ask_volume_3 DOUBLE,
+                ask_volume_4 DOUBLE,
+                ask_volume_5 DOUBLE,
                 raw_json STRING
             ) TIMESTAMP(ts) PARTITION BY DAY WAL
+            DEDUP UPSERT KEYS(ts, ingest_id)
             """
         )
+        self._ensure_schema_columns(conn)
+        self._enable_dedup(conn)
         self._initialized = True
+
+    def _ensure_schema_columns(self, conn: Any) -> None:
+        for name, data_type in SCHEMA_COLUMNS:
+            try:
+                conn.execute(f"ALTER TABLE market_ticks ADD COLUMN {name} {data_type}")
+            except Exception as exc:
+                message = str(exc).lower()
+                if "exists" not in message and "duplicate" not in message:
+                    raise RuntimeError(f"QuestDB schema upgrade failed for column {name}: {exc}") from exc
+
+    def _enable_dedup(self, conn: Any) -> None:
+        conn.execute("ALTER TABLE market_ticks DEDUP ENABLE UPSERT KEYS(ts, ingest_id)")
 
     def _drop_connection(self) -> None:
         with self._lock:
@@ -333,6 +440,60 @@ def _parse_datetime(value: Any) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def _normalize_tick(tick: dict[str, Any]) -> dict[str, Any] | None:
+    timestamp_value = tick.get("datetime") or tick.get("ts")
+    if not timestamp_value:
+        return None
+
+    vt_symbol = _string_or_none(tick.get("vt_symbol"))
+    symbol = _string_or_none(tick.get("symbol"))
+    exchange = _string_or_none(tick.get("exchange"))
+    if not vt_symbol and symbol and exchange:
+        vt_symbol = f"{symbol}.{exchange}"
+    if vt_symbol and not symbol:
+        symbol = vt_symbol.split(".", 1)[0]
+    if vt_symbol and not exchange and "." in vt_symbol:
+        exchange = vt_symbol.split(".", 1)[1]
+
+    timestamp = _parse_datetime(timestamp_value)
+    last_price = _number(tick.get("last_price"))
+    if not vt_symbol or not symbol or not exchange or last_price is None:
+        return None
+
+    raw_json = json.dumps(tick, ensure_ascii=False, default=str, sort_keys=True)
+    schema_version = _int_or_default(tick.get("schema_version"), SCHEMA_VERSION)
+    received_at = _parse_datetime(tick.get("received_at") or tick.get("localtime") or timestamp)
+    row: dict[str, Any] = {
+        "ts": timestamp,
+        "received_at": received_at,
+        "schema_version": schema_version,
+        "vt_symbol": vt_symbol,
+        "symbol": symbol,
+        "exchange": exchange,
+        "gateway_name": _string_or_none(tick.get("gateway_name")),
+        "name": _string_or_none(tick.get("name")),
+        "trading_day": _string_or_none(tick.get("trading_day")),
+        "action_day": _string_or_none(tick.get("action_day")),
+        "raw_json": raw_json,
+    }
+    for field in TICK_NUMERIC_FIELDS:
+        row[field] = _number(tick.get(field))
+
+    row["last_price"] = last_price
+    row["ingest_id"] = _string_or_none(tick.get("ingest_id")) or _build_ingest_id(row)
+    return row
+
+
+def _build_ingest_id(row: dict[str, Any]) -> str:
+    stable_fields = {
+        key: (_format_datetime(value) if isinstance(value, datetime) else value)
+        for key, value in row.items()
+        if key != "ingest_id"
+    }
+    digest = sha256(json.dumps(stable_fields, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+    return digest[:32]
+
+
 def _number(value: Any) -> float | None:
     if value in (None, ""):
         return None
@@ -342,15 +503,26 @@ def _number(value: Any) -> float | None:
         return None
 
 
+def _int_or_default(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _string_or_none(value: Any) -> str | None:
     if value in (None, ""):
         return None
+    if hasattr(value, "value"):
+        return str(value.value)
     return str(value)
 
 
 def _format_datetime(value: Any) -> str | None:
     if value is None:
         return None
+    if isinstance(value, datetime) and value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
     return value.isoformat() if hasattr(value, "isoformat") else str(value)
 
 
@@ -384,21 +556,10 @@ def _build_tick_filters(
 
 
 def _tick_row_to_dict(row: Any) -> dict[str, Any]:
-    return {
-        "datetime": _format_datetime(row[0]),
-        "vt_symbol": row[1],
-        "symbol": row[2],
-        "exchange": row[3],
-        "gateway_name": row[4],
-        "last_price": row[5],
-        "volume": row[6],
-        "turnover": row[7],
-        "open_interest": row[8],
-        "bid_price_1": row[9],
-        "ask_price_1": row[10],
-        "bid_volume_1": row[11],
-        "ask_volume_1": row[12],
-    }
+    data = dict(zip(TICK_SELECT_FIELDS, row, strict=False))
+    data["datetime"] = _format_datetime(data.pop("ts", None))
+    data["received_at"] = _format_datetime(data.get("received_at"))
+    return data
 
 
 def _csv_row_to_tick(row: dict[str, str]) -> dict[str, Any] | None:
@@ -414,14 +575,24 @@ def _csv_row_to_tick(row: dict[str, str]) -> dict[str, Any] | None:
         "symbol": symbol,
         "exchange": exchange,
         "gateway_name": row.get("gateway_name"),
+        "name": row.get("name"),
+        "received_at": row.get("received_at"),
+        "ingest_id": row.get("ingest_id"),
+        "schema_version": row.get("schema_version"),
         "last_price": last_price,
+        "last_volume": _number(row.get("last_volume")),
         "volume": _number(row.get("volume")),
         "turnover": _number(row.get("turnover")),
         "open_interest": _number(row.get("open_interest")),
-        "bid_price_1": _number(row.get("bid_price_1")),
-        "ask_price_1": _number(row.get("ask_price_1")),
-        "bid_volume_1": _number(row.get("bid_volume_1")),
-        "ask_volume_1": _number(row.get("ask_volume_1")),
+        "open_price": _number(row.get("open_price")),
+        "high_price": _number(row.get("high_price")),
+        "low_price": _number(row.get("low_price")),
+        "pre_close": _number(row.get("pre_close")),
+        "limit_up": _number(row.get("limit_up")),
+        "limit_down": _number(row.get("limit_down")),
+        "trading_day": row.get("trading_day"),
+        "action_day": row.get("action_day"),
+        **{field: _number(row.get(field)) for field in TICK_NUMERIC_FIELDS if field.startswith(("bid_", "ask_"))},
     }
 
 
