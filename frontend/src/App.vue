@@ -1,5 +1,5 @@
 <template>
-  <n-config-provider :theme="darkTheme">
+  <n-config-provider :theme="theme.isDark ? darkTheme : null">
     <n-message-provider>
       <n-dialog-provider>
         <router-view />
@@ -10,4 +10,8 @@
 
 <script setup lang="ts">
 import { darkTheme } from 'naive-ui'
+import { useThemeStore } from './stores/theme'
+
+const theme = useThemeStore()
+theme.init()
 </script>
