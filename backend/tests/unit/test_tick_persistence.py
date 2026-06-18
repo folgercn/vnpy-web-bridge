@@ -46,7 +46,7 @@ class FakeMarketStore:
         return restored
 
 
-def make_service(tmp_path, *, queue_size: int = 10, batch_size: int = 10) -> tuple[TickPersistenceService, FakeMarketStore]:
+def make_service(tmp_path, *, queue_size: int = 10, batch_size: int = 10, spool_fsync: bool = False) -> tuple[TickPersistenceService, FakeMarketStore]:
     store = FakeMarketStore()
     settings = Settings(
         questdb_pg_dsn="postgresql://admin:quest@127.0.0.1:8812/qdb",
@@ -56,6 +56,7 @@ def make_service(tmp_path, *, queue_size: int = 10, batch_size: int = 10) -> tup
         questdb_tick_retry_max_seconds=1,
         questdb_tick_spool_dir=str(tmp_path),
         questdb_tick_spool_max_bytes=1024 * 1024,
+        questdb_tick_spool_fsync=spool_fsync,
     )
     service = TickPersistenceService(settings, store, sleep_func=lambda _: None)  # type: ignore[arg-type]
     return service, store
@@ -195,6 +196,23 @@ def test_spool_replay_ack_does_not_delete_new_active_rows(tmp_path) -> None:
 
     assert service.spool.row_count() == 1
     assert [row["ingest_id"] for row in service.spool.iter_active_rows_for_test()] == ["new"]
+
+
+def test_spool_fsync_policy_is_configurable(tmp_path, monkeypatch) -> None:
+    calls: list[int] = []
+    monkeypatch.setattr("app.services.tick_persistence.os.fsync", lambda fd: calls.append(fd))
+    service, _ = make_service(tmp_path, spool_fsync=True)
+    row = service.market_store.normalize_tick({"ingest_id": "durable", "received_at": "2026-06-18T02:00:01+00:00"})
+    assert row
+
+    service.spool.append_rows([row])
+    segment = service.spool.claim_replay_segment()
+    assert segment
+    service.spool.ack_replay_segment(segment)
+
+    assert service.spool.fsync is True
+    assert calls
+    assert not list(tmp_path.glob("*.tmp"))
 
 
 def test_worker_starts_without_opening_database(tmp_path) -> None:
