@@ -74,6 +74,16 @@ PYTHONPATH=backend .venv/bin/python scripts/tick_persistence_fault_smoke.py --co
 
 脚本会输出 `outage_spool_rows_before_restart`、`replay_persisted`、`questdb_rows`、`diff`、`dropped`、`spool_rows` 和 `write_protocol`。
 
+合成负载 smoke 用于验证 RPC callback 侧快速入队和最终落库计数。生产验收时将 `--count` 设为实测峰值窗口的至少 2 倍：
+
+```bash
+QUESTDB_PG_DSN=postgresql://admin:quest@127.0.0.1:8812/qdb \
+QUESTDB_ILP_CONF='http::addr=127.0.0.1:9000;' \
+PYTHONPATH=backend .venv/bin/python scripts/tick_persistence_load_smoke.py --count 2000 --batch-size 1000
+```
+
+脚本会输出 `enqueue_p95_ms`、`enqueue_tps`、`persist_tps`、`questdb_rows`、`diff`、`dropped`、`spool_rows` 和 `write_protocol`；默认要求 `enqueue_p95_ms <= 10`、`diff = 0`、`dropped = 0`。
+
 ## 接口
 
 - `GET /api/status`
