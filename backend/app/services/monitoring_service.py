@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from datetime import datetime, time, timedelta, timezone
+import json
 import logging
+from pathlib import Path
 from threading import Lock
 from typing import Any, Callable
 
@@ -48,6 +50,7 @@ class MonitoringService:
         self.risk = risk or risk_service
         self.store = store or memory_store
         self.now_func = now_func or (lambda: datetime.now(timezone.utc))
+        self.started_at = self.now_func()
         self._lock = Lock()
         self._last_snapshot: dict[str, Any] = {"checks": [], "checked_at": None}
         self._http_5xx: deque[WindowEvent] = deque()
@@ -77,23 +80,45 @@ class MonitoringService:
         now = self.now_func()
         checks: list[dict[str, Any]] = []
         suppressed: list[dict[str, Any]] = []
-        rpc_connected = self._check_rpc(checks, now, probe=probe_rpc)
-        if rpc_connected:
-            self._check_gateway(checks, now)
-            self._check_strategies(checks, now)
-            self._check_daily_loss(checks, now)
-            self._check_tick_freshness(checks, suppressed, now)
-        else:
+        quiet_reason = self._quiet_runtime_reason(now)
+        if quiet_reason:
+            checks.append(
+                {
+                    "name": quiet_reason["name"],
+                    "healthy": True,
+                    "status": "quiet",
+                    "summary": quiet_reason["summary"],
+                    "details": quiet_reason.get("details", {}),
+                }
+            )
             suppressed.extend(
                 [
-                    {"rule_id": "gateway_disconnected", "scope_id": self.settings.vnpy_gateway_name, "suppressed_by": "rpc_unavailable"},
-                    {"rule_id": "tick_stale", "scope_id": "market_ticks", "suppressed_by": "rpc_unavailable"},
-                    {"rule_id": "strategy_unexpected_stop", "scope_id": "*", "suppressed_by": "rpc_unavailable"},
+                    {"rule_id": "rpc_unavailable", "scope_id": self.settings.vnpy_gateway_name, "suppressed_by": quiet_reason["name"]},
+                    {"rule_id": "gateway_disconnected", "scope_id": self.settings.vnpy_gateway_name, "suppressed_by": quiet_reason["name"]},
+                    {"rule_id": "tick_stale", "scope_id": "market_ticks", "suppressed_by": quiet_reason["name"]},
+                    {"rule_id": "strategy_unexpected_stop", "scope_id": "*", "suppressed_by": quiet_reason["name"]},
+                    {"rule_id": "questdb_unavailable", "scope_id": "market_ticks", "suppressed_by": quiet_reason["name"]},
+                    {"rule_id": "postgres_unavailable", "scope_id": "watchlist", "suppressed_by": quiet_reason["name"]},
                 ]
             )
+        else:
+            rpc_connected = self._check_rpc(checks, now, probe=probe_rpc)
+            if rpc_connected:
+                self._check_gateway(checks, now)
+                self._check_strategies(checks, now)
+                self._check_daily_loss(checks, now)
+                self._check_tick_freshness(checks, suppressed, now)
+            else:
+                suppressed.extend(
+                    [
+                        {"rule_id": "gateway_disconnected", "scope_id": self.settings.vnpy_gateway_name, "suppressed_by": "rpc_unavailable"},
+                        {"rule_id": "tick_stale", "scope_id": "market_ticks", "suppressed_by": "rpc_unavailable"},
+                        {"rule_id": "strategy_unexpected_stop", "scope_id": "*", "suppressed_by": "rpc_unavailable"},
+                    ]
+                )
 
-        self._check_questdb(checks, now)
-        self._check_postgres(checks, now)
+            self._check_questdb(checks, now)
+            self._check_postgres(checks, now)
         self._check_risk(checks, now)
         self._check_http_5xx(checks, now)
         self._check_trade_failures(checks, now)
@@ -431,6 +456,38 @@ class MonitoringService:
     def _expected_strategies(self) -> list[str]:
         return [item.strip() for item in self.settings.monitor_expected_strategies.split(",") if item.strip()]
 
+    def _quiet_runtime_reason(self, now: datetime) -> dict[str, Any] | None:
+        maintenance = self._maintenance(now)
+        if maintenance and maintenance.get("active"):
+            return {
+                "name": "deployment_maintenance",
+                "summary": "deployment maintenance window active",
+                "details": _safe_details(maintenance),
+            }
+        grace_seconds = self.settings.monitor_startup_grace_seconds
+        if grace_seconds <= 0:
+            return None
+        elapsed = (now - self.started_at).total_seconds()
+        if elapsed < grace_seconds:
+            return {
+                "name": "startup_grace",
+                "summary": "monitor startup grace active",
+                "details": {"elapsed_seconds": max(0, round(elapsed, 3)), "grace_seconds": grace_seconds},
+            }
+        return None
+
+    def _maintenance(self, now: datetime) -> dict[str, Any] | None:
+        try:
+            data = json.loads(Path(self.settings.monitor_maintenance_path).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(data, dict):
+            return None
+        expires_at = _parse_datetime(str(data.get("expires_at") or ""), fallback=now)
+        data["active"] = data.get("status") == "running" and expires_at > now
+        data["expired"] = expires_at <= now
+        return data
+
     def _trim_window(self, events: deque[WindowEvent], now: datetime, seconds: int) -> None:
         cutoff = now - timedelta(seconds=seconds)
         while events and events[0][0] < cutoff:
@@ -466,11 +523,21 @@ def _parse_tick_time(tick: dict[str, Any]) -> datetime | None:
         parsed = value
     elif value:
         try:
-            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            parsed = _parse_datetime(str(value).replace("Z", "+00:00"))
         except ValueError:
             return None
     else:
         return None
+    return parsed
+
+
+def _parse_datetime(value: str, fallback: datetime | None = None) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        if fallback is None:
+            raise
+        return fallback
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)

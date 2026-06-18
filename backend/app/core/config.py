@@ -49,6 +49,7 @@ class Settings(BaseSettings):
     monitor_critical_reminder_minutes: int = Field(default=0, ge=0)
     monitor_state_path: str = "/app/logs/monitor/state.json"
     monitor_events_path: str = "/app/logs/monitor/events.jsonl"
+    monitor_maintenance_path: str = "/app/logs/watchdog/maintenance.json"
     monitor_max_silence_seconds: int = Field(default=86_400, ge=60)
     monitor_tick_stale_seconds: int = Field(default=120, ge=10)
     monitor_http_5xx_threshold: int = Field(default=5, ge=1)
