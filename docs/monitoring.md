@@ -49,6 +49,7 @@ Never commit real bot tokens, chat IDs, database DSNs, or RPC addresses into the
 - Stable recovery sends one `resolved` message.
 - Manual silences keep updating incident state but suppress delivery until expiry.
 - RPC root-cause failures suppress Gateway, tick, and strategy-derived alerts.
+- Trading-session checks use the shared profile in `shared/trading_session_profiles.json`; do not maintain separate backend/frontend session tables.
 
 ## Operations
 

@@ -289,13 +289,16 @@ class MonitoringService:
 
     def _check_tick_freshness(self, checks: list[dict[str, Any]], suppressed: list[dict[str, Any]], now: datetime) -> None:
         subscriptions = self.rpc.market_subscriptions()
-        if not subscriptions or not self._trading_session_active(now, subscriptions):
+        session_symbols = calendar_service.split_trading_session_symbols(now, subscriptions)
+        active_subscriptions = session_symbols["active"]
+        quiet_subscriptions = session_symbols["quiet"]
+        if not active_subscriptions:
             checks.append({"name": "tick_freshness", "healthy": True, "status": "quiet", "summary": "No active tick freshness requirement"})
             return
         ticks = self.store.ticks()
         stale: list[str] = []
         missing: list[str] = []
-        for vt_symbol in subscriptions:
+        for vt_symbol in active_subscriptions:
             tick = ticks.get(vt_symbol)
             if not tick:
                 missing.append(vt_symbol)
@@ -311,7 +314,13 @@ class MonitoringService:
             healthy=not unhealthy,
             severity="critical" if self._expected_strategies() else "warning",
             summary=summary,
-            details={"stale": stale[:20], "missing": missing[:20], "subscription_count": len(subscriptions)},
+            details={
+                "stale": stale[:20],
+                "missing": missing[:20],
+                "active_subscription_count": len(active_subscriptions),
+                "quiet_subscription_count": len(quiet_subscriptions),
+                "subscription_count": len(subscriptions),
+            },
             now=now,
         )
         checks.append(_check("tick_freshness", not unhealthy, summary, incident))

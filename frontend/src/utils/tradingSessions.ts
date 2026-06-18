@@ -1,3 +1,5 @@
+import sessionProfiles from '../../../shared/trading_session_profiles.json'
+
 type SessionWindow = {
   label: string
   start: string
@@ -30,79 +32,7 @@ export type TradingSessionStatus = {
   currentSessionText: string
 }
 
-const commodityDaySessions: SessionWindow[] = [
-  { label: '上午盘', start: '09:00', end: '10:15' },
-  { label: '上午盘', start: '10:30', end: '11:30' },
-  { label: '下午盘', start: '13:30', end: '15:00' }
-]
-
-const cffexDaySessions: SessionWindow[] = [
-  { label: '上午盘', start: '09:30', end: '11:30' },
-  { label: '下午盘', start: '13:00', end: '15:00' }
-]
-
-const nightCloseByExchange: Record<string, Record<string, string>> = {
-  SHFE: {
-    au: '02:30',
-    ag: '02:30',
-    cu: '01:00',
-    al: '01:00',
-    zn: '01:00',
-    pb: '01:00',
-    ni: '01:00',
-    sn: '01:00',
-    ao: '01:00',
-    ad: '01:00',
-    ss: '01:00',
-    rb: '23:00',
-    hc: '23:00',
-    wr: '23:00',
-    ru: '23:00',
-    br: '23:00',
-    fu: '23:00',
-    sp: '23:00',
-    bu: '23:00'
-  },
-  INE: {
-    sc: '02:30',
-    bc: '01:00',
-    lu: '23:00',
-    nr: '23:00'
-  },
-  DCE: {
-    a: '23:00',
-    b: '23:00',
-    c: '23:00',
-    cs: '23:00',
-    m: '23:00',
-    y: '23:00',
-    p: '23:00',
-    i: '23:00',
-    j: '23:00',
-    jm: '23:00',
-    l: '23:00',
-    v: '23:00',
-    pp: '23:00',
-    eg: '23:00',
-    rr: '23:00',
-    eb: '23:00',
-    pg: '23:00'
-  },
-  CZCE: {
-    rm: '23:00',
-    oi: '23:00',
-    cf: '23:00',
-    ta: '23:00',
-    px: '23:00',
-    sr: '23:00',
-    ma: '23:00',
-    fg: '23:00',
-    zc: '23:00',
-    sa: '23:00',
-    pf: '23:00',
-    pr: '23:00'
-  }
-}
+type TradingSessionProfiles = typeof sessionProfiles
 
 export function getTradingSessionStatus(exchangeValue: unknown, symbolValue?: unknown, now = new Date()): TradingSessionStatus {
   const exchange = String(exchangeValue || '').toUpperCase()
@@ -130,8 +60,8 @@ export function symbolRoot(value: unknown) {
 
 function concreteSessions(exchange: string, product: string, now: Date) {
   const result: ConcreteSession[] = []
-  const daySessions = exchange === 'CFFEX' ? cffexDaySessions : commodityDaySessions
-  const nightClose = nightCloseByExchange[exchange]?.[product]
+  const daySessions = daySessionWindows(exchange)
+  const nightClose = nightCloseTime(exchange, product)
   const today = chinaDateParts(now)
 
   for (let offset = -1; offset <= 7; offset += 1) {
@@ -143,6 +73,17 @@ function concreteSessions(exchange: string, product: string, now: Date) {
   }
 
   return result.sort((a, b) => a.start.getTime() - b.start.getTime())
+}
+
+function daySessionWindows(exchange: string): SessionWindow[] {
+  const profile = sessionProfiles as TradingSessionProfiles
+  const profileName = profile.exchange_day_session[exchange as keyof typeof profile.exchange_day_session] || 'commodity'
+  return profile.day_sessions[profileName as keyof typeof profile.day_sessions]
+}
+
+function nightCloseTime(exchange: string, product: string) {
+  const exchangeMap = sessionProfiles.night_sessions[exchange as keyof typeof sessionProfiles.night_sessions]
+  return exchangeMap?.[product as keyof typeof exchangeMap]
 }
 
 function toConcreteSession(date: ChinaDateParts, session: SessionWindow): ConcreteSession {

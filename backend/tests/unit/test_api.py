@@ -580,3 +580,13 @@ def test_calendar_month_returns_holiday_and_adjusted_workday(monkeypatch) -> Non
     assert rows["2026-02-16"]["is_trading_day"] is False
     assert rows["2026-02-14"]["is_adjusted_workday"] is True
     assert rows["2026-02-14"]["is_trading_day"] is False
+
+
+def test_calendar_trading_session_profiles_returns_shared_profile(monkeypatch) -> None:
+    with client_without_rpc(monkeypatch) as client:
+        response = client.get("/api/calendar/trading-session-profiles", headers=auth_headers("viewer"))
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["exchange_day_session"]["CFFEX"] == "cffex"
+    assert data["night_sessions"]["SHFE"]["ad"] == "01:00"
