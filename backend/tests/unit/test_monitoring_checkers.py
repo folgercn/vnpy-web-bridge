@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import json
+from threading import Lock
+import time
 
 from app.core.config import Settings
 from app.services.alert_service import AlertService
@@ -16,6 +19,21 @@ class FakeTelegram:
 
     def send_incident(self, incident: dict, *, event: str) -> dict:
         return {"sent": False, "skipped": "disabled"}
+
+
+class SelectiveTelegram:
+    def __init__(self) -> None:
+        self.sent: list[tuple[str, str, str]] = []
+
+    def config_status(self) -> dict:
+        return {"enabled": True, "configured": True, "send_levels": ["critical", "warning"]}
+
+    def send_incident(self, incident: dict, *, event: str) -> dict:
+        severity = str(incident.get("severity") or "info").lower()
+        if severity not in {"critical", "warning"}:
+            return {"sent": False, "skipped": "level_disabled"}
+        self.sent.append((incident["incident_id"], event, severity))
+        return {"sent": True, "message_id": len(self.sent)}
 
 
 class FakeRpc:
@@ -38,6 +56,25 @@ class FakeRpc:
 
     def get_positions(self) -> list[dict]:
         return self.positions
+
+
+class SlowRpc(FakeRpc):
+    def __init__(self) -> None:
+        super().__init__(connected=True)
+        self.calls = 0
+        self.active = 0
+        self.max_active = 0
+        self._lock = Lock()
+
+    def status(self, *, probe: bool = False) -> dict:
+        with self._lock:
+            self.calls += 1
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+        time.sleep(0.05)
+        with self._lock:
+            self.active -= 1
+        return super().status(probe=probe)
 
 
 class HealthyMarketStore:
@@ -148,6 +185,51 @@ def test_rpc_failure_suppresses_derived_checks(tmp_path) -> None:
     assert any(item["suppressed_by"] == "rpc_unavailable" for item in snapshot["suppressed"])
     incident = next(item for item in snapshot["incidents"] if item["incident_id"] == "rpc_unavailable:CTP")
     assert incident["status"] == "firing"
+    assert incident["severity"] == "info"
+
+
+def test_monitoring_run_checks_is_single_flight(tmp_path) -> None:
+    now = datetime(2026, 6, 18, 2, 0, tzinfo=timezone.utc)
+    rpc = SlowRpc()
+    service = build_service(tmp_path, now=now, rpc=rpc)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        snapshots = list(pool.map(lambda _: service.run_checks(), range(2)))
+
+    assert len(snapshots) == 2
+    assert rpc.calls == 2
+    assert rpc.max_active == 1
+
+
+def test_non_production_rpc_warning_does_not_send_telegram_by_default(tmp_path) -> None:
+    now = datetime(2026, 6, 18, 8, 0, tzinfo=timezone.utc)  # 16:00 Asia/Shanghai, no expected strategy and web trade disabled.
+    settings = Settings(
+        monitor_failure_threshold=1,
+        monitor_recovery_threshold=1,
+        monitor_startup_grace_seconds=0,
+        monitor_flap_send_grace_seconds=0,
+        monitor_flap_recovery_grace_seconds=0,
+        monitor_state_path=str(tmp_path / "state.json"),
+        monitor_events_path=str(tmp_path / "events.jsonl"),
+        telegram_enabled=True,
+        telegram_bot_token="token",
+        telegram_chat_id="chat",
+        telegram_send_levels="critical,warning",
+    )
+    telegram = SelectiveTelegram()
+    alerts = AlertService(
+        settings=settings,
+        store=AlertStateStore(settings.monitor_state_path, settings.monitor_events_path),
+        telegram=telegram,
+    )
+    service = build_service(tmp_path, now=now, settings=settings, alerts=alerts, rpc=FakeRpc(connected=False))
+
+    snapshot = service.run_checks()
+
+    incident = next(item for item in snapshot["incidents"] if item["incident_id"] == "rpc_unavailable:CTP")
+    assert incident["severity"] == "info"
+    assert incident["delivery"]["firing"]["result"]["skipped"] == "level_disabled"
+    assert telegram.sent == []
 
 
 def test_startup_grace_suppresses_runtime_dependency_checks(tmp_path) -> None:

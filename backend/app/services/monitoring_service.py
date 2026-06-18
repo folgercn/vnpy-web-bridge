@@ -53,6 +53,7 @@ class MonitoringService:
         self.now_func = now_func or (lambda: datetime.now(timezone.utc))
         self.started_at = self.now_func()
         self._lock = Lock()
+        self._cycle_lock = Lock()
         self._last_snapshot: dict[str, Any] = {"checks": [], "checked_at": None}
         self._http_5xx: deque[WindowEvent] = deque()
         self._trade_failures: deque[WindowEvent] = deque()
@@ -78,6 +79,10 @@ class MonitoringService:
             return dict(self._last_snapshot)
 
     def run_checks(self, *, probe_rpc: bool = True) -> dict[str, Any]:
+        with self._cycle_lock:
+            return self._run_checks(probe_rpc=probe_rpc)
+
+    def _run_checks(self, *, probe_rpc: bool = True) -> dict[str, Any]:
         now = self.now_func()
         checks: list[dict[str, Any]] = []
         suppressed: list[dict[str, Any]] = []
@@ -161,7 +166,7 @@ class MonitoringService:
         try:
             status = self.rpc.status(probe=probe)
             connected = bool(status.get("connected"))
-            severity = "critical" if self._production_context_active(now) else "warning"
+            severity = "critical" if self._production_context_active(now) else "info"
             summary = "RPC connected" if connected else str(status.get("last_error") or "RPC unavailable")
             incident = self.alerts.record_check(
                 rule_id="rpc_unavailable",
@@ -179,7 +184,7 @@ class MonitoringService:
                 rule_id="rpc_unavailable",
                 scope_id=self.settings.vnpy_gateway_name,
                 healthy=False,
-                severity="critical" if self._production_context_active(now) else "warning",
+                severity="critical" if self._production_context_active(now) else "info",
                 summary=f"RPC probe failed: {exc.__class__.__name__}",
                 details={"type": exc.__class__.__name__},
                 now=now,
