@@ -59,6 +59,23 @@ class StoppedTickPersistence:
         return {"enabled": True, "running": False, "worker_alive": False, "last_error": None, "queue_depth": 0, "spool_rows": 0, "persistence_lag_seconds": 0}
 
 
+class CorruptTickPersistence:
+    def snapshot(self) -> dict:
+        return {
+            "enabled": True,
+            "running": True,
+            "worker_alive": True,
+            "last_error": "quarantined corrupt tick spool segment",
+            "queue_depth": 0,
+            "spool_rows": 1,
+            "spool_bytes": 128,
+            "corrupt_total": 1,
+            "quarantined_rows": 1,
+            "quarantined_bytes": 128,
+            "persistence_lag_seconds": 0,
+        }
+
+
 class FakeStrategies:
     def __init__(self, rows: list[dict] | None = None) -> None:
         self.rows = rows or []
@@ -219,3 +236,16 @@ def test_tick_persistence_worker_stop_records_incident(tmp_path) -> None:
     assert incident["status"] == "firing"
     assert incident["summary"] == "tick persistence writer stopped"
     assert incident["details"]["worker_alive"] is False
+
+
+def test_tick_persistence_corruption_records_incident(tmp_path) -> None:
+    now = datetime(2026, 6, 18, 2, 0, tzinfo=timezone.utc)
+    service = build_service(tmp_path, now=now, tick_persistence=CorruptTickPersistence())
+
+    snapshot = service.run_checks()
+
+    incident = next(item for item in snapshot["incidents"] if item["incident_id"] == "questdb_tick_persistence_lag:market_ticks")
+    assert incident["status"] == "firing"
+    assert incident["summary"] == "quarantined corrupt tick spool segment"
+    assert incident["details"]["corrupt_total"] == 1
+    assert incident["details"]["quarantined_rows"] == 1

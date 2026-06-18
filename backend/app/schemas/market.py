@@ -40,6 +40,9 @@ class MarketDataStatusDto(BaseModel):
     retry_total: int
     failed_total: int
     dropped_total: int
+    corrupt_total: int | None = None
+    quarantined_rows: int | None = None
+    quarantined_bytes: int | None = None
     queue_depth: int
     queue_capacity: int
     spool_rows: int

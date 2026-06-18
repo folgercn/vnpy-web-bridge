@@ -5,7 +5,7 @@ import logging
 from typing import Any
 
 from app.core.config import Settings
-from app.services.tick_persistence import TickPersistenceService
+from app.services.tick_persistence import SpoolCorruptionReport, TickPersistenceService
 
 
 class FakeMarketStore:
@@ -238,6 +238,27 @@ def test_spool_ignores_truncated_last_record(tmp_path) -> None:
 
     assert segment
     assert [item["ingest_id"] for item in segment.rows] == ["ok"]
+    assert segment.corrupt_rows == 1
+    assert segment.error
+
+
+def test_truncated_spool_record_is_counted_as_dropped(tmp_path) -> None:
+    service, store = make_service(tmp_path)
+    row = service.market_store.normalize_tick({"ingest_id": "ok", "received_at": "2026-06-18T02:00:01+00:00"})
+    assert row
+    service.spool.append_rows([row])
+    with service.spool.path.open("a", encoding="utf-8") as file:
+        file.write('{"partial":')
+
+    service.drain_once()
+    snapshot = service.snapshot()
+
+    assert [item["ingest_id"] for item in store.saved] == ["ok"]
+    assert snapshot["persisted_total"] == 1
+    assert snapshot["corrupt_total"] == 1
+    assert snapshot["invalid_total"] == 1
+    assert snapshot["dropped_total"] == 1
+    assert snapshot["last_error"]
 
 
 def test_spool_quarantines_corrupt_middle_record(tmp_path) -> None:
@@ -251,5 +272,32 @@ def test_spool_quarantines_corrupt_middle_record(tmp_path) -> None:
 
     segment = service.spool.claim_replay_segment()
 
-    assert segment is None
+    assert isinstance(segment, SpoolCorruptionReport)
+    assert segment.corrupt_rows == 1
+    assert segment.quarantined_rows == 1
+    assert segment.quarantined_bytes > 0
     assert list(tmp_path.glob("*.bad"))
+
+
+def test_corrupt_middle_record_is_quarantined_and_reported(tmp_path) -> None:
+    service, store = make_service(tmp_path)
+    row = service.market_store.normalize_tick({"ingest_id": "ok", "received_at": "2026-06-18T02:00:01+00:00"})
+    assert row
+    service.spool.append_rows([row])
+    with service.spool.path.open("a", encoding="utf-8") as file:
+        file.write('{"broken":\n')
+        file.write('{"valid": true}\n')
+
+    service.drain_once()
+    snapshot = service.snapshot()
+
+    assert store.saved == []
+    assert list(tmp_path.glob("*.bad"))
+    assert snapshot["corrupt_total"] == 1
+    assert snapshot["invalid_total"] == 1
+    assert snapshot["dropped_total"] == 1
+    assert snapshot["quarantined_rows"] == 1
+    assert snapshot["quarantined_bytes"] > 0
+    assert snapshot["spool_rows"] == 1
+    assert snapshot["spool_bytes"] >= snapshot["quarantined_bytes"]
+    assert "quarantined corrupt tick spool segment" in snapshot["last_error"]

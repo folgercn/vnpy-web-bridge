@@ -32,6 +32,9 @@ class TickPersistenceStats:
     retry_total: int = 0
     failed_total: int = 0
     dropped_total: int = 0
+    corrupt_total: int = 0
+    quarantined_rows: int = 0
+    quarantined_bytes: int = 0
     spooled_total: int = 0
     last_received_at: datetime | None = None
     last_persisted_at: datetime | None = None
@@ -47,6 +50,19 @@ class ReplaySegment:
     path: Path
     rows: list[dict[str, Any]]
     row_count: int
+    corrupt_rows: int = 0
+    quarantined_rows: int = 0
+    quarantined_bytes: int = 0
+    error: str | None = None
+
+
+@dataclass
+class SpoolCorruptionReport:
+    path: Path
+    corrupt_rows: int
+    quarantined_rows: int
+    quarantined_bytes: int
+    error: str
 
 
 class JsonlTickSpool:
@@ -90,7 +106,7 @@ class JsonlTickSpool:
             self._update_active_meta_locked(len(serialized), serialized)
         return len(serialized)
 
-    def claim_replay_segment(self) -> ReplaySegment | None:
+    def claim_replay_segment(self) -> ReplaySegment | SpoolCorruptionReport | None:
         with self._lock:
             self._rotate_active_locked()
             segment_path = self._oldest_replay_file_locked()
@@ -109,12 +125,25 @@ class JsonlTickSpool:
                     row_count += 1
                 except (json.JSONDecodeError, ValueError) as exc:
                     if index == len(lines) - 1:
-                        logger.warning("ignored truncated tick spool record in %s: %s", segment_path, exc)
+                        message = f"truncated tick spool record in {segment_path}: {exc}"
+                        logger.warning("ignored %s", message)
+                        return ReplaySegment(segment_path, rows, row_count, corrupt_rows=1, error=message)
                         continue
                     bad_path = segment_path.with_suffix(segment_path.suffix + ".bad")
                     segment_path.rename(bad_path)
-                    logger.error("quarantined corrupt tick spool segment %s: %s", bad_path, exc)
-                    return None
+                    if self.fsync:
+                        self._fsync_directory_locked()
+                    quarantined_rows = max(self._row_count_from_replay_path(bad_path), 1)
+                    quarantined_bytes = bad_path.stat().st_size if bad_path.exists() else 0
+                    message = f"quarantined corrupt tick spool segment {bad_path}: {exc}"
+                    logger.error(message)
+                    return SpoolCorruptionReport(
+                        path=bad_path,
+                        corrupt_rows=1,
+                        quarantined_rows=quarantined_rows,
+                        quarantined_bytes=quarantined_bytes,
+                        error=message,
+                    )
             return ReplaySegment(segment_path, rows, row_count)
 
     def ack_replay_segment(self, segment: ReplaySegment) -> None:
@@ -131,13 +160,26 @@ class JsonlTickSpool:
     def size_bytes_locked(self) -> int:
         total = self.path.stat().st_size if self.path.exists() else 0
         total += sum(path.stat().st_size for path in self._replay_files_locked())
+        total += sum(path.stat().st_size for path in self._bad_files_locked())
         return total
 
     def row_count(self) -> int:
         with self._lock:
             rows = self._read_active_meta_locked().get("rows", 0)
             rows += sum(self._row_count_from_replay_path(path) for path in self._replay_files_locked())
+            rows += self.quarantined_rows_locked()
             return rows
+
+    def quarantined_rows(self) -> int:
+        with self._lock:
+            return self.quarantined_rows_locked()
+
+    def quarantined_rows_locked(self) -> int:
+        return sum(self._row_count_from_replay_path(path) for path in self._bad_files_locked())
+
+    def quarantined_bytes(self) -> int:
+        with self._lock:
+            return sum(path.stat().st_size for path in self._bad_files_locked())
 
     def oldest_received_at(self) -> datetime | None:
         with self._lock:
@@ -170,6 +212,9 @@ class JsonlTickSpool:
 
     def _replay_files_locked(self) -> list[Path]:
         return sorted(self.directory.glob("ticks.replaying.*.jsonl"))
+
+    def _bad_files_locked(self) -> list[Path]:
+        return sorted(self.directory.glob("ticks.replaying.*.jsonl.bad"))
 
     def _row_count_from_replay_path(self, path: Path) -> int:
         parts = path.name.split(".")
@@ -220,11 +265,11 @@ class JsonlTickSpool:
 
     def load_rows(self) -> list[dict[str, Any]]:
         segment = self.claim_replay_segment()
-        return segment.rows if segment else []
+        return segment.rows if isinstance(segment, ReplaySegment) else []
 
     def clear(self) -> None:
         segment = self.claim_replay_segment()
-        if segment:
+        if isinstance(segment, ReplaySegment):
             self.ack_replay_segment(segment)
 
     def iter_active_rows_for_test(self) -> list[dict[str, Any]]:
@@ -333,8 +378,12 @@ class TickPersistenceService:
         queue_depth = self.queue.qsize()
         spool_rows = self.spool.row_count()
         spool_bytes = self.spool.size_bytes()
+        quarantined_rows = self.spool.quarantined_rows()
+        quarantined_bytes = self.spool.quarantined_bytes()
         disk = self.spool.disk_usage()
         oldest_pending_received_at = oldest_pending_received_at or self.spool.oldest_received_at()
+        data["quarantined_rows"] = max(int(data.get("quarantined_rows") or 0), quarantined_rows)
+        data["quarantined_bytes"] = max(int(data.get("quarantined_bytes") or 0), quarantined_bytes)
         data.update(
             {
                 "enabled": self.enabled,
@@ -415,11 +464,26 @@ class TickPersistenceService:
         segment = self.spool.claim_replay_segment()
         if not segment:
             return
+        if isinstance(segment, SpoolCorruptionReport):
+            self._record_spool_corruption(
+                segment.error,
+                corrupt_rows=segment.corrupt_rows,
+                dropped_rows=segment.quarantined_rows,
+                quarantined_rows=segment.quarantined_rows,
+                quarantined_bytes=segment.quarantined_bytes,
+            )
+            return
         try:
             self.market_store.save_tick_rows_or_raise(segment.rows)
             self.spool.ack_replay_segment(segment)
             self._inc("persisted_total", segment.row_count)
             self._record_success()
+            if segment.corrupt_rows:
+                self._record_spool_corruption(
+                    segment.error or f"ignored {segment.corrupt_rows} corrupt tick spool rows",
+                    corrupt_rows=segment.corrupt_rows,
+                    dropped_rows=segment.corrupt_rows,
+                )
             self._backoff_seconds = 1.0
         except Exception as exc:
             self._record_error(exc, row_count=segment.row_count)
@@ -447,6 +511,25 @@ class TickPersistenceService:
         if now - self._last_error_log_at >= self.settings.questdb_tick_error_log_interval_seconds:
             self._last_error_log_at = now
             logger.warning("tick persistence write failed for %s rows: %s", row_count, exc)
+
+    def _record_spool_corruption(
+        self,
+        message: str,
+        *,
+        corrupt_rows: int,
+        dropped_rows: int = 0,
+        quarantined_rows: int = 0,
+        quarantined_bytes: int = 0,
+    ) -> None:
+        with self._stats_lock:
+            self.stats.corrupt_total += corrupt_rows
+            self.stats.dropped_total += dropped_rows
+            self.stats.invalid_total += corrupt_rows
+            self.stats.quarantined_rows += quarantined_rows
+            self.stats.quarantined_bytes += quarantined_bytes
+            self.stats.last_failure_at = datetime.now(timezone.utc)
+            self.stats.last_error = message
+        logger.error("tick spool corruption recorded: %s", message)
 
     def _sleep_backoff(self) -> None:
         delay = min(self._backoff_seconds, float(self.settings.questdb_tick_retry_max_seconds))
