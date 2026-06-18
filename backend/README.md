@@ -65,6 +65,15 @@ PYTHONPATH=backend .venv/bin/python scripts/tick_persistence_smoke.py --count 10
 
 脚本会输出 `received`、`persisted`、`questdb_rows`、`diff`、`dropped`、`lag_seconds` 和 `spool_rows`。
 
+故障注入 smoke 会先用不可达 QuestDB DSN 触发写入失败，把 tick 落到 JSONL spool，再用真实 QuestDB DSN 和同一 spool 目录启动新的 writer 实例回放，模拟 Web Bridge 重启后的补写路径：
+
+```bash
+QUESTDB_PG_DSN=postgresql://admin:quest@127.0.0.1:8812/qdb \
+PYTHONPATH=backend .venv/bin/python scripts/tick_persistence_fault_smoke.py --count 10
+```
+
+脚本会输出 `outage_spool_rows_before_restart`、`replay_persisted`、`questdb_rows`、`diff`、`dropped`、`spool_rows` 和 `write_protocol`。
+
 ## 接口
 
 - `GET /api/status`
