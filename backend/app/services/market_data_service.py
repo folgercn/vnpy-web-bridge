@@ -16,6 +16,11 @@ try:
 except ImportError:  # pragma: no cover - covered in deployments with QuestDB enabled
     psycopg = None  # type: ignore[assignment]
 
+try:
+    from questdb.ingress import Sender as QuestDbSender
+except ImportError:  # pragma: no cover - covered in deployments with QuestDB ILP enabled
+    QuestDbSender = None  # type: ignore[assignment]
+
 logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 2
@@ -121,8 +126,10 @@ class QuestDbMarketDataService:
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
         self.dsn = self.settings.questdb_pg_dsn
+        self.ilp_conf = self.settings.questdb_ilp_conf
         self._lock = RLock()
         self._conn: Any | None = None
+        self._ilp_sender: Any | None = None
         self._initialized = False
 
     @property
@@ -132,6 +139,10 @@ class QuestDbMarketDataService:
     @property
     def connected(self) -> bool:
         return bool(self._conn and not self._conn.closed)
+
+    @property
+    def write_protocol(self) -> str:
+        return "ilp" if self.ilp_conf else "pgwire"
 
     def start(self) -> None:
         if not self.enabled:
@@ -143,7 +154,10 @@ class QuestDbMarketDataService:
         with self._lock:
             if self._conn:
                 self._conn.close()
+            if self._ilp_sender:
+                self._ilp_sender.close()
             self._conn = None
+            self._ilp_sender = None
             self._initialized = False
 
     def health_check(self) -> dict[str, Any]:
@@ -185,7 +199,10 @@ class QuestDbMarketDataService:
             with self._lock:
                 conn = self._connect()
                 self._init_schema()
-                _execute_many(conn, sql, params)
+                if self.ilp_conf:
+                    self._write_rows_ilp(prepared_rows)
+                else:
+                    _execute_many(conn, sql, params)
             return True
         except Exception as exc:
             logger.warning("QuestDB tick write failed: %s", exc)
@@ -213,14 +230,17 @@ class QuestDbMarketDataService:
             with self._lock:
                 conn = self._connect()
                 self._init_schema()
-                _execute_many(
-                    conn,
-                    f"""
-                    INSERT INTO market_ticks ({", ".join(columns)})
-                    VALUES ({placeholders})
-                    """,
-                    [tuple(row[key] for key in TICK_SELECT_FIELDS) + (row["raw_json"],) for row in prepared_rows],
-                )
+                if self.ilp_conf:
+                    self._write_rows_ilp(prepared_rows)
+                else:
+                    _execute_many(
+                        conn,
+                        f"""
+                        INSERT INTO market_ticks ({", ".join(columns)})
+                        VALUES ({placeholders})
+                        """,
+                        [tuple(row[key] for key in TICK_SELECT_FIELDS) + (row["raw_json"],) for row in prepared_rows],
+                    )
         except Exception:
             self._drop_connection()
             raise
@@ -400,6 +420,28 @@ class QuestDbMarketDataService:
         self._initialized = False
         return self._conn
 
+    def _connect_ilp(self) -> Any:
+        if not self.ilp_conf:
+            return None
+        if QuestDbSender is None:
+            raise RuntimeError("questdb Python client 未安装，无法使用 QuestDB ILP 写入")
+        if self._ilp_sender is None:
+            self._ilp_sender = QuestDbSender.from_conf(self.ilp_conf)
+            self._ilp_sender.establish()
+        return self._ilp_sender
+
+    def _write_rows_ilp(self, rows: list[dict[str, Any]]) -> None:
+        sender = self._connect_ilp()
+        buffer = sender.new_buffer()
+        for row in rows:
+            buffer.row(
+                "market_ticks",
+                symbols=_ilp_symbols(row),
+                columns=_ilp_columns(row),
+                at=row["ts"],
+            )
+        sender.flush(buffer, transactional=_is_ilp_http(self.ilp_conf))
+
     def _init_schema(self) -> None:
         if self._initialized:
             return
@@ -477,7 +519,13 @@ class QuestDbMarketDataService:
                     self._conn.close()
                 except Exception:
                     pass
+            if self._ilp_sender:
+                try:
+                    self._ilp_sender.close()
+                except Exception:
+                    pass
             self._conn = None
+            self._ilp_sender = None
             self._initialized = False
 
 
@@ -577,6 +625,34 @@ def _execute_many(conn: Any, sql: str, params: list[tuple[Any, ...]]) -> None:
         return
     for row_params in params:
         conn.execute(sql, row_params)
+
+
+def _ilp_symbols(row: dict[str, Any]) -> dict[str, str]:
+    return {
+        key: str(row[key])
+        for key in ("vt_symbol", "symbol", "exchange", "gateway_name")
+        if row.get(key) not in (None, "")
+    }
+
+
+def _ilp_columns(row: dict[str, Any]) -> dict[str, Any]:
+    columns: dict[str, Any] = {
+        "received_at": row["received_at"],
+        "ingest_id": row["ingest_id"],
+        "schema_version": row["schema_version"],
+        "raw_json": row["raw_json"],
+    }
+    for key in ("name", "trading_day", "action_day"):
+        if row.get(key) not in (None, ""):
+            columns[key] = row[key]
+    for key in TICK_NUMERIC_FIELDS:
+        if row.get(key) is not None:
+            columns[key] = row[key]
+    return columns
+
+
+def _is_ilp_http(conf: str) -> bool:
+    return conf.strip().lower().startswith(("http::", "https::"))
 
 
 def _number(value: Any) -> float | None:

@@ -4,6 +4,7 @@ pydantic-settings==2.7.1
 python-dotenv==1.0.1
 python-multipart==0.0.20
 psycopg[binary]==3.2.3
+questdb==4.1.0
 pyzmq==27.1.0
 vnpy==4.4.0
 pytest==8.3.4

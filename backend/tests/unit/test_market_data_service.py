@@ -42,6 +42,42 @@ class BrokenAlterConnection(FakeConnection):
         return FakeResult(self.rows)
 
 
+class FakeIlpBuffer:
+    def __init__(self) -> None:
+        self.rows: list[dict] = []
+
+    def row(self, table_name: str, *, symbols: dict, columns: dict, at: datetime) -> None:
+        self.rows.append({"table_name": table_name, "symbols": symbols, "columns": columns, "at": at})
+
+
+class FakeIlpSender:
+    created: list["FakeIlpSender"] = []
+
+    def __init__(self, conf: str) -> None:
+        self.conf = conf
+        self.established = False
+        self.closed = False
+        self.flushes: list[dict] = []
+
+    @classmethod
+    def from_conf(cls, conf: str) -> "FakeIlpSender":
+        sender = cls(conf)
+        cls.created.append(sender)
+        return sender
+
+    def establish(self) -> None:
+        self.established = True
+
+    def new_buffer(self) -> FakeIlpBuffer:
+        return FakeIlpBuffer()
+
+    def flush(self, buffer: FakeIlpBuffer, *, transactional: bool = False) -> None:
+        self.flushes.append({"rows": buffer.rows, "transactional": transactional})
+
+    def close(self) -> None:
+        self.closed = True
+
+
 def test_market_data_service_is_noop_without_dsn() -> None:
     service = QuestDbMarketDataService(Settings(questdb_pg_dsn=""))
 
@@ -106,6 +142,55 @@ def test_save_tick_writes_to_questdb_connection() -> None:
     assert params[TICK_SELECT_FIELDS.index("last_volume")] == 2.0
     assert params[TICK_SELECT_FIELDS.index("bid_price_5")] == 3121.0
     assert params[TICK_SELECT_FIELDS.index("ask_volume_5")] == 7.0
+
+
+def test_save_tick_uses_ilp_batch_when_configured(monkeypatch) -> None:
+    FakeIlpSender.created = []
+    monkeypatch.setattr("app.services.market_data_service.QuestDbSender", FakeIlpSender)
+    service = QuestDbMarketDataService(
+        Settings(
+            questdb_pg_dsn="postgresql://admin:quest@questdb:8812/qdb",
+            questdb_ilp_conf="http::addr=questdb:9000;",
+        )
+    )
+    connection = FakeConnection()
+    service._conn = connection
+    service._initialized = True
+
+    saved = service.save_tick(
+        {
+            "vt_symbol": "rb2610.SHFE",
+            "symbol": "rb2610",
+            "exchange": "SHFE",
+            "gateway_name": "CTP",
+            "datetime": "2026-06-18T10:00:00+08:00",
+            "received_at": "2026-06-18T10:00:01+08:00",
+            "ingest_id": "event-1",
+            "last_price": 3126,
+            "volume": 100,
+        }
+    )
+
+    assert saved is True
+    assert service.write_protocol == "ilp"
+    assert len(FakeIlpSender.created) == 1
+    sender = FakeIlpSender.created[0]
+    assert sender.conf == "http::addr=questdb:9000;"
+    assert sender.established is True
+    assert sender.flushes[0]["transactional"] is True
+    row = sender.flushes[0]["rows"][0]
+    assert row["table_name"] == "market_ticks"
+    assert row["symbols"] == {
+        "vt_symbol": "rb2610.SHFE",
+        "symbol": "rb2610",
+        "exchange": "SHFE",
+        "gateway_name": "CTP",
+    }
+    assert row["columns"]["ingest_id"] == "event-1"
+    assert row["columns"]["last_price"] == 3126.0
+    assert row["columns"]["volume"] == 100.0
+    assert row["at"] == datetime(2026, 6, 18, 2, 0, tzinfo=timezone.utc)
+    assert not any("INSERT INTO market_ticks" in call[0] for call in connection.calls)
 
 
 def test_save_tick_rejects_tick_without_datetime_or_price() -> None:
