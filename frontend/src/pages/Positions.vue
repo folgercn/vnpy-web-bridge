@@ -2,7 +2,7 @@
   <div class="page">
     <n-card size="small">
       <div class="toolbar">
-        <n-input v-model:value="filter" placeholder="按合约过滤" style="max-width: 220px" />
+        <n-input v-model:value="filter" placeholder="按合约过滤" class="toolbar-control-md" />
         <n-button @click="terminal.refreshSnapshots">刷新</n-button>
       </div>
     </n-card>

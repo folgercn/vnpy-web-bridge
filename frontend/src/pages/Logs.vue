@@ -2,7 +2,7 @@
   <div class="page">
     <n-card size="small">
       <div class="toolbar">
-        <n-select v-model:value="type" :options="typeOptions" style="max-width: 180px" />
+        <n-select v-model:value="type" :options="typeOptions" class="toolbar-control-sm" />
         <n-button @click="terminal.clearLogs">清空前端日志</n-button>
       </div>
     </n-card>
