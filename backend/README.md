@@ -84,6 +84,14 @@ PYTHONPATH=backend .venv/bin/python scripts/tick_persistence_load_smoke.py --cou
 
 脚本会输出 `enqueue_p95_ms`、`enqueue_tps`、`persist_tps`、`questdb_rows`、`diff`、`dropped`、`spool_rows` 和 `write_protocol`；默认要求 `enqueue_p95_ms <= 10`、`diff = 0`、`dropped = 0`。
 
+队列满 overflow smoke 用于验证 callback 线程同步写 spool 时的 P95/P99 影响。将 `--queue-size` 设置为小于 `--count` 即可强制触发 overflow；输出中的 `spool_rows_before_drain` 和 `spooled_total_before_drain` 必须大于 0，才说明压到了 overflow/spool 路径：
+
+```bash
+QUESTDB_PG_DSN=postgresql://admin:quest@127.0.0.1:8812/qdb \
+QUESTDB_ILP_CONF='http::addr=127.0.0.1:9000;' \
+PYTHONPATH=backend .venv/bin/python scripts/tick_persistence_load_smoke.py --count 2000 --batch-size 1000 --queue-size 100
+```
+
 ## 接口
 
 - `GET /api/status`
