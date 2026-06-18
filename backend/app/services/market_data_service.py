@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 from csv import DictReader
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from hashlib import sha256
 from io import StringIO
 import json
 import logging
 from threading import RLock
 from typing import Any, Iterable
+from zoneinfo import ZoneInfo
 
 from app.core.config import Settings, get_settings
+from app.services.calendar_service import calendar_service
 
 try:
     import psycopg
@@ -24,6 +26,8 @@ except ImportError:  # pragma: no cover - covered in deployments with QuestDB IL
 logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 2
+CHINA_TZ = ZoneInfo("Asia/Shanghai")
+NIGHT_TRADING_EXCHANGES = {"SHFE", "DCE", "CZCE", "INE", "GFEX"}
 
 TICK_NUMERIC_FIELDS = [
     "last_price",
@@ -566,6 +570,8 @@ def _normalize_tick(tick: dict[str, Any]) -> dict[str, Any] | None:
     raw_json = json.dumps(tick, ensure_ascii=False, default=str, sort_keys=True)
     schema_version = _int_or_default(tick.get("schema_version"), SCHEMA_VERSION)
     received_at = _parse_datetime(tick.get("received_at") or tick.get("localtime") or timestamp)
+    action_day = _string_or_none(tick.get("action_day")) or _infer_action_day(timestamp)
+    trading_day = _string_or_none(tick.get("trading_day")) or _infer_trading_day(timestamp, exchange)
     row: dict[str, Any] = {
         "ts": timestamp,
         "received_at": received_at,
@@ -575,8 +581,8 @@ def _normalize_tick(tick: dict[str, Any]) -> dict[str, Any] | None:
         "exchange": exchange,
         "gateway_name": _string_or_none(tick.get("gateway_name")),
         "name": _string_or_none(tick.get("name")),
-        "trading_day": _string_or_none(tick.get("trading_day")),
-        "action_day": _string_or_none(tick.get("action_day")),
+        "trading_day": trading_day,
+        "action_day": action_day,
         "raw_json": raw_json,
     }
     for field in TICK_NUMERIC_FIELDS:
@@ -685,6 +691,19 @@ def _format_datetime(value: Any) -> str | None:
     if isinstance(value, datetime) and value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     return value.isoformat() if hasattr(value, "isoformat") else str(value)
+
+
+def _infer_action_day(timestamp: datetime) -> str:
+    local_ts = timestamp.astimezone(CHINA_TZ)
+    return local_ts.strftime("%Y%m%d")
+
+
+def _infer_trading_day(timestamp: datetime, exchange: str | None) -> str:
+    local_ts = timestamp.astimezone(CHINA_TZ)
+    trading_date = local_ts.date()
+    if exchange and exchange.upper() in NIGHT_TRADING_EXCHANGES and local_ts.hour >= 20:
+        trading_date = date.fromisoformat(calendar_service.next_trading_day(trading_date)["date"])
+    return trading_date.strftime("%Y%m%d")
 
 
 def _build_tick_filters(
