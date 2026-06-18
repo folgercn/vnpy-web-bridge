@@ -24,6 +24,7 @@ class FakeMarketStore:
             "ts": datetime(2026, 6, 18, 2, 0, tzinfo=timezone.utc),
             "received_at": datetime.fromisoformat(tick["received_at"]) if tick.get("received_at") else datetime(2026, 6, 18, 2, 0, 1, tzinfo=timezone.utc),
             "ingest_id": tick.get("ingest_id", "row-1"),
+            "ingest_seq": tick.get("ingest_seq", 0),
             "schema_version": 2,
             "vt_symbol": tick.get("vt_symbol", "rb2610.SHFE"),
             "raw_json": "{}",
@@ -117,6 +118,16 @@ def test_drain_once_flushes_batch(tmp_path) -> None:
 
     assert [row["ingest_id"] for row in store.saved] == ["row-1", "row-2"]
     assert service.snapshot()["persisted_total"] == 2
+
+
+def test_enqueue_tick_assigns_monotonic_ingest_seq(tmp_path) -> None:
+    service, store = make_service(tmp_path, batch_size=2)
+    service.enqueue_tick({"ingest_id": "row-1"})
+    service.enqueue_tick({"ingest_id": "row-2"})
+
+    service.drain_once()
+
+    assert [(row["ingest_id"], row["ingest_seq"]) for row in store.saved] == [("row-1", 1), ("row-2", 2)]
 
 
 def test_queue_full_spools_without_silent_drop(tmp_path) -> None:

@@ -32,10 +32,10 @@ DATABASE_URL=postgresql://vnpy:vnpy@127.0.0.1:5432/vnpy
 前端【数据管理】页面可查看 QuestDB 中已保存数据的合约、时间范围和行数，并支持按 `symbol`、`exchange`、`vt_symbol`、起止时间筛选 Tick 数据。CSV 导入/导出字段：
 
 ```csv
-datetime,received_at,ingest_id,schema_version,vt_symbol,symbol,exchange,gateway_name,name,trading_day,action_day,last_price,last_volume,volume,turnover,open_interest,open_price,high_price,low_price,pre_close,limit_up,limit_down,bid_price_1,bid_price_2,bid_price_3,bid_price_4,bid_price_5,ask_price_1,ask_price_2,ask_price_3,ask_price_4,ask_price_5,bid_volume_1,bid_volume_2,bid_volume_3,bid_volume_4,bid_volume_5,ask_volume_1,ask_volume_2,ask_volume_3,ask_volume_4,ask_volume_5
+datetime,received_at,ingest_id,ingest_seq,schema_version,vt_symbol,symbol,exchange,gateway_name,name,trading_day,action_day,last_price,last_volume,volume,turnover,open_interest,open_price,high_price,low_price,pre_close,limit_up,limit_down,bid_price_1,bid_price_2,bid_price_3,bid_price_4,bid_price_5,ask_price_1,ask_price_2,ask_price_3,ask_price_4,ask_price_5,bid_volume_1,bid_volume_2,bid_volume_3,bid_volume_4,bid_volume_5,ask_volume_1,ask_volume_2,ask_volume_3,ask_volume_4,ask_volume_5
 ```
 
-`market_ticks` schema v2 使用 UTC `ts` 作为 QuestDB 时间戳，额外保存 `received_at`、`schema_version` 和事件级 `ingest_id`，并启用 `DEDUP UPSERT KEYS(ts, ingest_id)`，重试同一 tick 时保持幂等。`raw_json` 保留原始 TickData 字段，结构化列覆盖 vn.py `TickData` 的合约名、价格、成交量、成交额、持仓、涨跌停、开高低昨收和买卖 1-5 档；`extra` 保留在 `raw_json` 中。若 CTP payload 没有 `action_day`/`trading_day`，Web Bridge 会按北京时间推导 `action_day`，并对 SHFE/DCE/CZCE/INE/GFEX 的 20:00 后夜盘 tick 将 `trading_day` 推到下一交易日；原始字段存在时始终优先保留原值。
+`market_ticks` schema v2 使用 UTC `ts` 作为 QuestDB 时间戳，额外保存 `received_at`、`schema_version`、事件级 `ingest_id` 和接收进程内单调递增的 `ingest_seq`，并启用 `DEDUP UPSERT KEYS(ts, ingest_id)`，重试同一 tick 时保持幂等。同一 `ts` 下查询按 `ingest_seq` 稳定排序；`ingest_seq` 用于单进程接收顺序，不承诺跨进程重启全局连续。`raw_json` 保留原始 TickData 字段，结构化列覆盖 vn.py `TickData` 的合约名、价格、成交量、成交额、持仓、涨跌停、开高低昨收和买卖 1-5 档；`extra` 保留在 `raw_json` 中。若 CTP payload 没有 `action_day`/`trading_day`，Web Bridge 会按北京时间推导 `action_day`，并对 SHFE/DCE/CZCE/INE/GFEX 的 20:00 后夜盘 tick 将 `trading_day` 推到下一交易日；原始字段存在时始终优先保留原值。
 
 实时 tick 持久化由后台 writer 完成，RPC callback 只做标准化和有界入队，不直接访问 QuestDB。相关配置：
 
