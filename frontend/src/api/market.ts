@@ -1,6 +1,27 @@
 import { request } from './client'
 
+export interface MarketWatchlistItem {
+  watch_type: 'product' | 'contract'
+  watch_key: string
+  vt_symbol?: string
+  symbol?: string
+  exchange?: string
+  display_name: string
+  product_codes: string[]
+  exchange_codes: string[]
+}
+
 export const getContracts = () => request<Record<string, unknown>[]>('/api/contracts')
+export const getMarketWatchlist = () => request<MarketWatchlistItem[]>('/api/market/watchlist')
+export const addMarketWatchlistItem = (item: { vt_symbol: string; symbol: string; exchange: string; display_name: string }) =>
+  request<MarketWatchlistItem>('/api/market/watchlist', {
+    method: 'POST',
+    body: JSON.stringify(item)
+  })
+export const removeMarketWatchlistItem = (watchKey: string) =>
+  request<{ removed: boolean; watch_key: string }>(`/api/market/watchlist/${encodeURIComponent(watchKey)}`, {
+    method: 'DELETE'
+  })
 export const subscribeMarket = (symbol: string, exchange: string) =>
   request<Record<string, unknown>>('/api/market/subscribe', {
     method: 'POST',

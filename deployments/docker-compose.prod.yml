@@ -1,10 +1,31 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: vnpy-web-bridge-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-vnpy}
+      POSTGRES_USER: ${POSTGRES_USER:-vnpy}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-vnpy}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   web-bridge:
     image: ${IMAGE_REPO:-ghcr.io/folgercn/vnpy-web-bridge-app}:${IMAGE_TAG:-latest}
     container_name: vnpy-web-bridge
     restart: unless-stopped
     env_file:
       - ../.env
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://vnpy:vnpy@postgres:5432/vnpy}
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
       - "8080:8080"
     healthcheck:
@@ -13,3 +34,6 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
+
+volumes:
+  postgres-data:

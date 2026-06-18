@@ -4,7 +4,8 @@ from fastapi import APIRouter, Depends
 
 from app.core.errors import ok
 from app.core.security import CurrentUser, require_roles
-from app.schemas.market import BarQueryDto, SubscribeRequestDto
+from app.schemas.market import BarQueryDto, SubscribeRequestDto, WatchlistCreateDto
+from app.services.watchlist_service import watchlist_service
 from app.services.vnpy_rpc_service import rpc_service
 from app.stores.memory_store import memory_store
 
@@ -14,6 +15,24 @@ router = APIRouter()
 @router.get("/contracts")
 def contracts(_: CurrentUser = Depends(require_roles("viewer", "trader", "admin"))) -> dict:
     return ok(rpc_service.get_contracts())
+
+
+@router.get("/market/watchlist")
+def watchlist(user: CurrentUser = Depends(require_roles("viewer", "trader", "admin"))) -> dict:
+    return ok(watchlist_service.list_items(user.username))
+
+
+@router.post("/market/watchlist")
+def add_watchlist_item(
+    payload: WatchlistCreateDto,
+    user: CurrentUser = Depends(require_roles("viewer", "trader", "admin")),
+) -> dict:
+    return ok(watchlist_service.add_contract(user.username, payload.model_dump()))
+
+
+@router.delete("/market/watchlist/{watch_key:path}")
+def remove_watchlist_item(watch_key: str, user: CurrentUser = Depends(require_roles("viewer", "trader", "admin"))) -> dict:
+    return ok(watchlist_service.remove_item(user.username, watch_key))
 
 
 @router.post("/market/subscribe")
