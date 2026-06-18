@@ -8,24 +8,7 @@ from pathlib import Path
 from typing import Any
 
 CHINA_TZ = timezone(timedelta(hours=8))
-DAY_SESSIONS = ((time(9, 0), time(10, 15)), (time(10, 30), time(11, 30)), (time(13, 30), time(15, 0)))
-CFFEX_DAY_SESSIONS = (*DAY_SESSIONS, (time(15, 0), time(15, 15)))
-NIGHT_SESSION_ENDS = {
-    "AU": time(2, 30),
-    "AG": time(2, 30),
-    "SC": time(2, 30),
-    "CU": time(1, 0),
-    "AL": time(1, 0),
-    "ZN": time(1, 0),
-    "PB": time(1, 0),
-    "NI": time(1, 0),
-    "SN": time(1, 0),
-    "SS": time(1, 0),
-    "AO": time(1, 0),
-    "BC": time(1, 0),
-}
-NO_NIGHT_EXCHANGES = {"CFFEX"}
-DEFAULT_NIGHT_END = time(23, 0)
+SESSION_PROFILE_PATH = Path(__file__).resolve().parents[3] / "shared" / "trading_session_profiles.json"
 
 
 @dataclass(frozen=True)
@@ -36,9 +19,11 @@ class HolidayRange:
 
 
 class CalendarService:
-    def __init__(self, data_path: Path | None = None) -> None:
+    def __init__(self, data_path: Path | None = None, session_profile_path: Path | None = None) -> None:
         self.data_path = data_path or Path(__file__).resolve().parents[1] / "data" / "holiday_2026.json"
+        self.session_profile_path = session_profile_path or SESSION_PROFILE_PATH
         self._data = self._load_data()
+        self._session_profiles = self._load_session_profiles()
         self.year = int(self._data["year"])
         self.source = str(self._data["source"])
         self.holiday_ranges = [
@@ -80,18 +65,31 @@ class CalendarService:
         return bool(self.get_day(target)["is_trading_day"])
 
     def is_trading_session_active(self, now: datetime, symbols: list[str] | None = None) -> bool:
+        return bool(self.split_trading_session_symbols(now, symbols or [])["active"])
+
+    def split_trading_session_symbols(self, now: datetime, symbols: list[str]) -> dict[str, list[str]]:
+        active: list[str] = []
+        quiet: list[str] = []
+        for symbol in symbols:
+            if self._is_symbol_session_active(now, symbol):
+                active.append(symbol)
+            else:
+                quiet.append(symbol)
+        return {"active": active, "quiet": quiet}
+
+    def session_profiles(self) -> dict[str, Any]:
+        return self._session_profiles
+
+    def _is_symbol_session_active(self, now: datetime, symbol: str) -> bool:
         local = _to_china_time(now)
-        items = [_parse_symbol(item) for item in (symbols or [])]
-        if not items:
-            items = [("", "")]
+        product, exchange = _parse_symbol(symbol)
         current = local.time()
         if time(9, 0) <= current <= time(15, 15):
-            return self.is_trading_day(local.date()) and any(_in_day_session(current, exchange) for _, exchange in items)
+            return self.is_trading_day(local.date()) and self._in_day_session(current, exchange)
         if current >= time(21, 0):
-            return self.is_trading_day(local.date()) and any(_in_night_session(current, product, exchange) for product, exchange in items)
+            return self.is_trading_day(local.date() + timedelta(days=1)) and self._in_night_session(current, product, exchange)
         if current <= time(2, 30):
-            previous = local.date() - timedelta(days=1)
-            return self.is_trading_day(previous) and any(_in_night_session(current, product, exchange) for product, exchange in items)
+            return self.is_trading_day(local.date()) and self._in_night_session(current, product, exchange)
         return False
 
     def next_trading_day(self, target: date) -> dict[str, Any]:
@@ -108,6 +106,9 @@ class CalendarService:
     def _load_data(self) -> dict[str, Any]:
         return json.loads(self.data_path.read_text(encoding="utf-8"))
 
+    def _load_session_profiles(self) -> dict[str, Any]:
+        return json.loads(self.session_profile_path.read_text(encoding="utf-8"))
+
     def _expand_holidays(self) -> dict[date, str]:
         holidays: dict[date, str] = {}
         for item in self.holiday_ranges:
@@ -116,6 +117,21 @@ class CalendarService:
                 holidays[current] = item.name
                 current += timedelta(days=1)
         return holidays
+
+    def _in_day_session(self, current: time, exchange: str) -> bool:
+        profiles = self._session_profiles["day_sessions"]
+        profile_name = self._session_profiles.get("exchange_day_session", {}).get(exchange, "commodity")
+        sessions = profiles.get(profile_name, profiles["commodity"])
+        return any(_parse_time(item["start"]) <= current <= _parse_time(item["end"]) for item in sessions)
+
+    def _in_night_session(self, current: time, product: str, exchange: str) -> bool:
+        close_text = self._session_profiles.get("night_sessions", {}).get(exchange, {}).get(product.lower())
+        if not close_text:
+            return False
+        end = _parse_time(close_text)
+        if current >= time(21, 0):
+            return end < time(21, 0) or current <= end
+        return current <= end
 
 
 calendar_service = CalendarService()
@@ -129,19 +145,10 @@ def _to_china_time(value: datetime) -> datetime:
 
 def _parse_symbol(vt_symbol: str) -> tuple[str, str]:
     symbol, _, exchange = vt_symbol.partition(".")
-    product = "".join(char for char in symbol if char.isalpha()).upper()
+    product = "".join(char for char in symbol if char.isalpha()).lower()
     return product, exchange.upper()
 
 
-def _in_day_session(current: time, exchange: str) -> bool:
-    sessions = CFFEX_DAY_SESSIONS if exchange == "CFFEX" else DAY_SESSIONS
-    return any(start <= current <= end for start, end in sessions)
-
-
-def _in_night_session(current: time, product: str, exchange: str) -> bool:
-    if exchange in NO_NIGHT_EXCHANGES:
-        return False
-    end = NIGHT_SESSION_ENDS.get(product, DEFAULT_NIGHT_END)
-    if current >= time(21, 0):
-        return end < time(21, 0) or current <= end
-    return current <= end
+def _parse_time(value: str) -> time:
+    hour, minute = value.split(":", 1)
+    return time(int(hour), int(minute))

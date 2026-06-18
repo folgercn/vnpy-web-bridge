@@ -11,6 +11,14 @@ describe('trading session status', () => {
     expect(status.statusText).toBe('上午盘进行中')
   })
 
+  it('uses the shared CFFEX day session profile', () => {
+    const beforeOpen = getTradingSessionStatus('CFFEX', 'IF2606', chinaTime('2026-06-18T09:15:00'))
+    const afterOpen = getTradingSessionStatus('CFFEX', 'IF2606', chinaTime('2026-06-18T09:45:00'))
+
+    expect(beforeOpen.isOpen).toBe(false)
+    expect(afterOpen.isOpen).toBe(true)
+  })
+
   it('detects product night session', () => {
     const status = getTradingSessionStatus('CZCE', 'ma609', chinaTime('2026-06-18T21:30:00'))
 
@@ -50,6 +58,15 @@ describe('trading session status', () => {
     expect(wr.isOpen).toBe(true)
     expect(ss.isOpen).toBe(true)
     expect(ss.currentSessionText).toBe('21:00-01:00')
+  })
+
+  it('uses shared night product allowlist without defaulting unknown products', () => {
+    const ad = getTradingSessionStatus('SHFE', 'ad2607', chinaTime('2026-06-19T00:30:00'))
+    const unknown = getTradingSessionStatus('SHFE', 'zz2607', chinaTime('2026-06-18T21:30:00'))
+
+    expect(ad.isOpen).toBe(true)
+    expect(ad.currentSessionText).toBe('21:00-01:00')
+    expect(unknown.isOpen).toBe(false)
   })
 
   it('does not add night sessions for GFEX products by default', () => {

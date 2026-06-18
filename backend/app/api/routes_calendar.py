@@ -39,3 +39,8 @@ def calendar_next_trading_day(
     _: CurrentUser = Depends(require_roles("viewer", "trader", "admin")),
 ) -> dict:
     return ok(calendar_service.next_trading_day(target_date))
+
+
+@router.get("/calendar/trading-session-profiles")
+def calendar_trading_session_profiles(_: CurrentUser = Depends(require_roles("viewer", "trader", "admin"))) -> dict:
+    return ok(calendar_service.session_profiles())

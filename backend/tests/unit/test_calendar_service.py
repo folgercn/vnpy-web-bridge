@@ -35,15 +35,39 @@ def test_trading_session_rejects_legal_holiday() -> None:
 
 
 def test_trading_session_uses_product_night_end() -> None:
-    late_night = datetime(2026, 6, 18, 15, 30, tzinfo=timezone.utc)  # 23:30 Asia/Shanghai
-    after_midnight = datetime(2026, 6, 18, 18, 0, tzinfo=timezone.utc)  # 02:00 Asia/Shanghai, Jun 19
+    late_night = datetime(2026, 6, 16, 15, 30, tzinfo=timezone.utc)  # 23:30 Asia/Shanghai
+    after_midnight = datetime(2026, 6, 16, 18, 0, tzinfo=timezone.utc)  # 02:00 Asia/Shanghai, Jun 17
 
     assert calendar_service.is_trading_session_active(late_night, ["rb2610.SHFE"]) is False
     assert calendar_service.is_trading_session_active(late_night, ["au2612.SHFE"]) is True
     assert calendar_service.is_trading_session_active(after_midnight, ["au2612.SHFE"]) is True
 
 
+def test_unknown_product_has_no_default_night_session() -> None:
+    night = datetime(2026, 6, 18, 13, 30, tzinfo=timezone.utc)  # 21:30 Asia/Shanghai
+
+    assert calendar_service.is_trading_session_active(night, ["zz2609.SHFE"]) is False
+
+
 def test_cffex_has_no_night_session() -> None:
     night = datetime(2026, 6, 18, 13, 30, tzinfo=timezone.utc)  # 21:30 Asia/Shanghai
 
     assert calendar_service.is_trading_session_active(night, ["IF2606.CFFEX"]) is False
+
+
+def test_cffex_uses_profile_day_session() -> None:
+    before_open = datetime(2026, 6, 18, 1, 15, tzinfo=timezone.utc)  # 09:15 Asia/Shanghai
+    after_open = datetime(2026, 6, 18, 1, 45, tzinfo=timezone.utc)  # 09:45 Asia/Shanghai
+
+    assert calendar_service.is_trading_session_active(before_open, ["IF2606.CFFEX"]) is False
+    assert calendar_service.is_trading_session_active(after_open, ["IF2606.CFFEX"]) is True
+
+
+def test_night_session_requires_next_calendar_day_trading() -> None:
+    friday_night = datetime(2026, 6, 19, 13, 30, tzinfo=timezone.utc)  # Friday 21:30 Asia/Shanghai
+    sunday_night = datetime(2026, 6, 21, 13, 30, tzinfo=timezone.utc)  # Sunday 21:30 Asia/Shanghai
+    pre_holiday_night = datetime(2026, 2, 13, 13, 30, tzinfo=timezone.utc)  # Friday before Spring Festival
+
+    assert calendar_service.is_trading_session_active(friday_night, ["au2612.SHFE"]) is False
+    assert calendar_service.is_trading_session_active(sunday_night, ["au2612.SHFE"]) is True
+    assert calendar_service.is_trading_session_active(pre_holiday_night, ["au2612.SHFE"]) is False
