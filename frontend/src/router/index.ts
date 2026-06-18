@@ -11,6 +11,7 @@ import Trades from '../pages/Trades.vue'
 import Account from '../pages/Account.vue'
 import Strategies from '../pages/Strategies.vue'
 import Logs from '../pages/Logs.vue'
+import DataManagement from '../pages/DataManagement.vue'
 
 const routes: RouteRecordRaw[] = [
   { path: '/login', component: Login },
@@ -28,6 +29,7 @@ const routes: RouteRecordRaw[] = [
       { path: 'trades', component: Trades, meta: { title: '成交' } },
       { path: 'account', component: Account, meta: { title: '资金' } },
       { path: 'strategies', component: Strategies, meta: { title: '策略' } },
+      { path: 'data', component: DataManagement, meta: { title: '数据管理' } },
       { path: 'logs', component: Logs, meta: { title: '日志' } }
     ]
   }

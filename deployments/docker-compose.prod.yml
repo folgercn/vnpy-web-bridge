@@ -1,4 +1,15 @@
 services:
+  questdb:
+    image: questdb/questdb:latest
+    container_name: vnpy-web-bridge-questdb
+    restart: unless-stopped
+    ports:
+      - "9000:9000"
+      - "8812:8812"
+      - "9009:9009"
+    volumes:
+      - questdb-data:/var/lib/questdb
+
   postgres:
     image: postgres:16-alpine
     container_name: vnpy-web-bridge-postgres
@@ -22,8 +33,11 @@ services:
     env_file:
       - ../.env
     environment:
+      QUESTDB_PG_DSN: ${QUESTDB_PG_DSN:-postgresql://admin:quest@questdb:8812/qdb}
       DATABASE_URL: ${DATABASE_URL:-postgresql://vnpy:vnpy@postgres:5432/vnpy}
     depends_on:
+      questdb:
+        condition: service_started
       postgres:
         condition: service_healthy
     ports:
@@ -36,4 +50,5 @@ services:
       start_period: 20s
 
 volumes:
+  questdb-data:
   postgres-data:

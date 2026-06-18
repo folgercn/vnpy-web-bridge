@@ -200,7 +200,9 @@ GET /api/rpc/status
 ```http
 GET  /api/contracts
 POST /api/market/subscribe
+POST /api/market/unsubscribe
 GET  /api/market/tick/{vt_symbol}
+GET  /api/market/bars
 ```
 
 ### 账户
