@@ -73,3 +73,25 @@ Deployments write `logs/watchdog/maintenance.json` before restarting containers.
 - Stop the web container: expect watchdog `container_not_running:vnpy-web-bridge`.
 - Run deploy smoke failure: expect one `deployment_smoke_failed:web-bridge`.
 - Block Telegram temporarily: active incidents should keep state and not block API/trading paths.
+
+## Production Drill Record
+
+Recorded on 2026-06-18 against `https://trade.sunnywifi.cn:3088` with `APP_ENV=production`.
+Telegram evidence is the delivery result returned by the Bot API; tokens, chat IDs, RPC addresses, and DSNs are intentionally omitted.
+
+| Time (Asia/Shanghai) | Drill | Incident | Result |
+|---|---|---|---|
+| 16:49 | Host disk pressure detected by watchdog | `disk_space_high:logs` | Fired once, Telegram message `4733`. Root cause was an unused Docker volume `deployments_postgres_data` with `LINKS=0`; current PostgreSQL uses `deployments_postgres-data`. Removed the orphan volume and build cache, disk dropped from 98% to 61%, resolved once with message `4741`. |
+| 16:52 | Stopped `vnpy-web-bridge` container | `container_not_running:vnpy-web-bridge` and `app_liveness_failed:web-bridge` | Watchdog fired once per root symptom with messages `4735` and `4736`. After container start, recovery messages were `4737` and `4738`. Public `/api/health/live` returned 200 with `env=production`. |
+| 16:56 | Stopped QuestDB container | `questdb_unavailable:market_ticks` | App monitor fired one aggregated warning, message `4739`. No per-symbol alert flood was observed. After QuestDB restart and stable checks, recovery message was `4740`. |
+| 17:02 | Stopped PostgreSQL container | `postgres_unavailable:watchlist` | App monitor state stayed file-backed under `logs/monitor/state.json`. Fired once with message `4742`; after PostgreSQL restart and stable checks, recovery message was `4743`. |
+| 17:06 | Temporarily pointed app RPC env at an unused port and recreated only `web-bridge` under a watchdog maintenance window | `rpc_unavailable:CTP` | Fired once with message `4744`; Gateway, tick, and strategy-derived checks were suppressed by the RPC root cause. Restored the original `.env`, recreated `web-bridge`, and received one recovery message `4745`. |
+
+Final verification:
+
+- `GET /api/health/live` returned 200 with `env=production`.
+- `GET /api/status` returned 200 with `env=production`.
+- `logs/monitor/state.json` had no active `pending`, `firing`, `acknowledged`, or `recovering` incident.
+- `logs/watchdog/state.json` had no active `pending`, `firing`, `acknowledged`, or `recovering` incident.
+- `vnpy-web-bridge`, `vnpy-web-bridge-questdb`, and `vnpy-web-bridge-postgres` were all Docker healthy.
+- `test_rpc_readonly.py` against the production RPC returned 18253 contracts, 1 account, and 1 position.
