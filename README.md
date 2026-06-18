@@ -2,19 +2,19 @@
 
 基于 **vn.py / VeighNa** 的远程 Web 交易桥接服务。
 
-本项目目标是把本地/远程运行的 vn.py 交易服务，通过统一的 Web API 和 WebSocket 推送能力暴露给前端页面，用于行情订阅、账户查询、持仓查询、委托成交、下单撤单、策略管理和风控扩展。
+本项目把本地或远程运行的 vn.py 交易服务，通过统一的 Web API 和 WebSocket 推送能力暴露给浏览器前端，用于行情订阅、账户查询、持仓查询、委托成交、下单撤单、策略管理、风控和行情数据管理。
 
-> 当前项目处于初始开发阶段，优先完成最小可用闭环：行情订阅、账户/持仓/委托查询、下单、撤单、WebSocket 推送。
+当前已形成一套可运行的 **FastAPI 后端 + Vue 3 前端 + vn.py RPC 桥接层**。交易能力默认关闭，必须显式开启 Web 交易开关并通过权限、风控和二次确认后才会触发真实交易 RPC。
 
 ---
 
-## 项目背景
+## 当前状态
 
-当前已验证链路：
+已验证的底层链路：
 
 ```text
-Mac 开发机
-  -> RPC
+Mac / Web Backend
+  -> vn.py RPC
   -> Windows vn.py 服务
   -> CTP
   -> SimNow
@@ -31,7 +31,19 @@ Mac 开发机
 撤单 OK
 ```
 
-后续开发重点是将这条链路产品化，形成稳定的 Web 交易桥接层。
+当前产品化能力：
+
+- Web 登录、JWT 鉴权、角色权限。
+- RPC / Gateway / WebSocket / Web 交易开关状态展示。
+- 合约查询、行情订阅、tick 快照、K 线查询、WebSocket tick 推送。
+- 行情关注列表、合约搜索、品种别名搜索、交易时段状态和下次开市倒计时。
+- 账户、持仓、委托、成交查询。
+- 限价下单、撤单、全撤、下单二次确认。
+- Web 交易开关、紧急停止、基础风控规则、审计日志。
+- CTA 策略列表、参数、变量、初始化、启动、停止、策略日志。
+- QuestDB 行情数据概览、查询、CSV 导入导出。
+- Vue 3 + Vite + Naive UI 前端交易终端，支持桌面和移动端宽度。
+- GitHub Actions CI/CD，部署路径面向 Macmini 自托管 runner。
 
 ---
 
@@ -39,14 +51,14 @@ Mac 开发机
 
 ```text
 Web Frontend
-  Vue / React / Next.js
+  Vue 3 / Vite / Naive UI
         |
         | REST API + WebSocket
         v
 Web Backend
   FastAPI / Python
         |
-        | RPC
+        | vn.py RPC
         v
 Windows Trading Server
   vn.py / VeighNa
@@ -61,73 +73,127 @@ CTP / SimNow / 实盘柜台
 - 前端不直接理解 vn.py 内部对象。
 - 前端不直接连接 CTP 或 vn.py RPC。
 - 后端统一封装交易、查询、推送、权限、风控和日志。
-- 下单、撤单等交易能力必须经过后端风控检查。
-- Web 交易能力默认不暴露公网。
+- 下单、撤单等交易能力必须经过后端权限、开关、二次确认和风控检查。
+- Web 交易能力默认关闭，生产环境必须配置强 JWT secret 和管理员账号。
+- 敏感配置只放本地环境变量或部署环境，不提交仓库。
 
 ---
 
-## 功能规划
+## 功能清单
 
 ### Phase 1：只读能力
 
-- [ ] 服务状态查询
-- [ ] RPC 连接状态
-- [ ] 合约查询
-- [ ] 行情订阅
-- [ ] Tick 推送
-- [ ] 账户资金查询
-- [ ] 持仓查询
-- [ ] 委托查询
-- [ ] 成交查询
-- [ ] 日志推送
+- [x] 服务状态查询
+- [x] RPC 连接状态
+- [x] RPC probe
+- [x] Gateway 状态
+- [x] 合约查询
+- [x] 行情订阅
+- [x] 行情取消订阅
+- [x] Tick 快照查询
+- [x] Tick WebSocket 推送
+- [x] K 线查询
+- [x] 账户资金查询
+- [x] 持仓查询
+- [x] 委托查询
+- [x] 成交查询
+- [x] 日志推送和日志页面
 
 ### Phase 2：基础交易
 
-- [ ] 限价单下单
-- [ ] 撤单
-- [ ] 全撤
-- [ ] 买入 / 卖出 / 开仓 / 平仓参数封装
-- [ ] 下单前二次确认
-- [ ] Web 交易开关
-- [ ] 操作日志记录
+- [x] 限价单下单
+- [x] 撤单
+- [x] 全撤
+- [x] 买入 / 卖出 / 开仓 / 平仓参数封装
+- [x] 下单前二次确认
+- [x] Web 交易开关
+- [x] 操作日志记录
+- [x] 交易 API 默认关闭
+- [x] 真实交易 smoke 脚本
 
 ### Phase 3：风控
 
-- [ ] 单笔最大手数限制
-- [ ] 单合约最大持仓限制
-- [ ] 每日最大亏损限制
-- [ ] 交易时间检查
-- [ ] 价格保护检查
-- [ ] 只读用户 / 交易用户 / 管理员权限分离
-- [ ] 一键关闭交易
+- [x] 单笔最大手数限制
+- [x] 单合约最大持仓限制
+- [x] 每日最大亏损限制配置
+- [x] 交易时间检查开关和配置项
+- [x] 价格保护检查
+- [x] 允许 / 禁止交易所限制
+- [x] 允许 / 禁止合约限制
+- [x] 只读用户 / 交易用户 / 管理员权限分离
+- [x] 一键关闭交易
+- [x] 紧急停止并可选择全撤
+- [x] 风控状态 WebSocket 推送
+- [ ] 交易日历和法定节假日表
 
 ### Phase 4：策略管理
 
-- [ ] CTA 策略列表
-- [ ] 策略参数查看
-- [ ] 策略参数修改
-- [ ] 初始化策略
-- [ ] 启动策略
-- [ ] 停止策略
-- [ ] 策略变量推送
-- [ ] 策略日志推送
+- [x] CTA 策略列表
+- [x] 策略详情查看
+- [x] 策略参数查看
+- [x] 策略参数修改
+- [x] 策略变量查看
+- [x] 初始化策略
+- [x] 启动策略
+- [x] 停止策略
+- [x] 策略日志查询
+- [x] 策略操作审计
+- [ ] 策略状态 WebSocket 实时推送
 
 ### Phase 5：前端交易终端
 
-- [ ] 登录页
-- [ ] Dashboard
-- [ ] 行情页
-- [ ] 下单面板
-- [ ] 持仓页
-- [ ] 委托页
-- [ ] 成交页
-- [ ] 资金页
-- [ ] 策略管理页
-- [ ] 系统日志页
+- [x] 登录页
+- [x] 路由守卫和登录态恢复
+- [x] 桌面侧边栏布局
+- [x] 移动端抽屉菜单和表格横向滚动
+- [x] 顶部状态栏：RPC / WS / Trade / 当前用户
+- [x] 亮色 / 暗色 / 跟随系统主题
+- [x] Dashboard
+- [x] Dashboard 交易时段状态
+- [x] 行情页
+- [x] 合约搜索和品种别名搜索
+- [x] 行情关注列表管理
+- [x] 当前合约交易时段和下次开市倒计时
+- [x] K 线图
+- [x] 最新 tick 表格
+- [x] 下单面板
+- [x] 持仓页
+- [x] 委托页
+- [x] 成交页
+- [x] 资金页
+- [x] 策略管理页
+- [x] 数据管理页
+- [x] 系统日志页
+- [x] 前端构建分包，消除 Vite chunk warning
+
+### Phase 6：行情数据管理
+
+- [x] QuestDB 连接配置
+- [x] 行情数据概览
+- [x] tick 数据查询
+- [x] tick CSV 导出
+- [x] tick CSV 导入
+- [x] 数据管理前端页面
+- [ ] 自动落库所有实时 tick 的完整生产验证
+- [ ] 数据保留策略和分区清理
+
+### Phase 7：交付和运维
+
+- [x] Dockerfile
+- [x] 生产 docker compose 配置
+- [x] 部署脚本
+- [x] GitHub Actions CI
+- [x] GitHub Actions CD
+- [x] Macmini 自托管 runner 部署路径
+- [x] 前端 build 验证
+- [x] 后端单元测试
+- [x] RPC 只读 smoke 脚本
+- [x] RPC 真实交易 smoke 脚本
+- [ ] 完整生产监控和告警
 
 ---
 
-## 目录规划
+## 目录结构
 
 ```text
 vnpy-web-bridge/
@@ -135,74 +201,88 @@ vnpy-web-bridge/
 │   ├── app/
 │   │   ├── main.py
 │   │   ├── api/
+│   │   │   ├── routes_auth.py
 │   │   │   ├── routes_status.py
 │   │   │   ├── routes_market.py
 │   │   │   ├── routes_trade.py
 │   │   │   ├── routes_account.py
-│   │   │   └── routes_strategy.py
+│   │   │   ├── routes_risk.py
+│   │   │   ├── routes_strategy.py
+│   │   │   └── routes_ws.py
 │   │   ├── core/
-│   │   │   ├── config.py
-│   │   │   ├── security.py
-│   │   │   └── logging.py
-│   │   ├── services/
-│   │   │   ├── vnpy_rpc_service.py
-│   │   │   ├── market_service.py
-│   │   │   ├── trade_service.py
-│   │   │   ├── account_service.py
-│   │   │   ├── risk_service.py
-│   │   │   └── strategy_service.py
 │   │   ├── schemas/
-│   │   │   ├── market.py
-│   │   │   ├── trade.py
-│   │   │   ├── account.py
-│   │   │   └── strategy.py
+│   │   ├── services/
+│   │   ├── stores/
 │   │   └── ws/
-│   │       ├── manager.py
-│   │       └── events.py
 │   ├── tests/
-│   ├── requirements.txt
-│   └── README.md
-│
+│   └── requirements.txt
 ├── frontend/
 │   ├── src/
+│   │   ├── api/
+│   │   ├── components/
+│   │   ├── pages/
+│   │   ├── router/
+│   │   ├── stores/
+│   │   ├── test/
+│   │   ├── utils/
+│   │   └── ws/
 │   ├── package.json
-│   └── README.md
-│
-├── scripts/
-│   ├── test_rpc_readonly.py
-│   └── test_rpc_trade_flow.py
-│
-├── docs/
-│   ├── architecture.md
-│   ├── api.md
-│   ├── risk.md
-│   └── deployment.md
-│
-├── .gitignore
-├── README.md
-└── LICENSE
+│   └── vite.config.ts
+├── deployments/
+│   └── docker-compose.prod.yml
+├── .github/workflows/
+│   ├── ci.yml
+│   └── cd.yml
+├── test_rpc_readonly.py
+├── test_rpc_trade_flow.py
+├── Dockerfile
+└── README.md
 ```
 
 ---
 
-## API 设计草案
+## API
+
+所有交易、行情、账户、策略和风控 API 除 `/api/status` 外均需要 Bearer token。
+
+### 认证
+
+```http
+POST /api/auth/login
+POST /api/auth/logout
+GET  /api/auth/me
+```
 
 ### 状态
 
 ```http
 GET /api/status
-GET /api/gateway/status
 GET /api/rpc/status
+GET /api/rpc/probe
+GET /api/gateway/status
+GET /api/trade/config
 ```
 
 ### 行情
 
 ```http
-GET  /api/contracts
-POST /api/market/subscribe
-POST /api/market/unsubscribe
-GET  /api/market/tick/{vt_symbol}
-GET  /api/market/bars
+GET    /api/contracts
+GET    /api/market/watchlist
+POST   /api/market/watchlist
+DELETE /api/market/watchlist/{watch_key}
+POST   /api/market/subscribe
+POST   /api/market/unsubscribe
+GET    /api/market/tick/{vt_symbol}
+GET    /api/market/bars
+```
+
+### 行情数据
+
+```http
+GET  /api/market/data/overview
+GET  /api/market/data/ticks
+GET  /api/market/data/export
+POST /api/market/data/import
 ```
 
 ### 账户
@@ -222,15 +302,29 @@ POST /api/orders/{vt_orderid}/cancel
 POST /api/orders/cancel-all
 ```
 
+### 风控
+
+```http
+GET   /api/risk/status
+GET   /api/risk/rules
+PATCH /api/risk/rules
+POST  /api/risk/trade/enable
+POST  /api/risk/trade/disable
+POST  /api/risk/emergency-stop
+```
+
 ### 策略
 
 ```http
-GET  /api/strategies
-GET  /api/strategies/{strategy_name}
-POST /api/strategies/{strategy_name}/init
-POST /api/strategies/{strategy_name}/start
-POST /api/strategies/{strategy_name}/stop
+GET   /api/strategies
+GET   /api/strategies/{strategy_name}
+GET   /api/strategies/{strategy_name}/setting
 PATCH /api/strategies/{strategy_name}/setting
+GET   /api/strategies/{strategy_name}/variables
+POST  /api/strategies/{strategy_name}/init
+POST  /api/strategies/{strategy_name}/start
+POST  /api/strategies/{strategy_name}/stop
+GET   /api/strategies/{strategy_name}/logs
 ```
 
 ### WebSocket
@@ -243,12 +337,12 @@ GET /ws/events
 
 ```json
 {
-  "type": "order",
+  "type": "tick",
   "data": {}
 }
 ```
 
-计划支持的事件类型：
+已支持或预留的事件类型：
 
 ```text
 tick
@@ -264,19 +358,9 @@ risk_alert
 
 ---
 
-## 开发环境规划
+## 本地开发
 
 ### 后端
-
-计划使用：
-
-- Python 3.10+
-- FastAPI
-- Uvicorn
-- Pydantic
-- vn.py / VeighNa RPC Client
-
-启动方式草案：
 
 ```bash
 cd backend
@@ -286,17 +370,15 @@ pip install -r requirements.txt
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-Windows 侧运行 vn.py RPC 服务，Mac 侧后端通过 RPC 连接 Windows 交易服务。
+默认 RPC 地址：
+
+```text
+VNPY_RPC_REQ_ADDRESS=tcp://127.0.0.1:2014
+VNPY_RPC_PUB_ADDRESS=tcp://127.0.0.1:4102
+VNPY_GATEWAY_NAME=CTP
+```
 
 ### 前端
-
-备选技术栈：
-
-- Vue 3 + Vite + Naive UI / Element Plus
-- React + Vite / Next.js + Ant Design
-- TradingView Lightweight Charts / KLineCharts / ECharts
-
-启动方式草案：
 
 ```bash
 cd frontend
@@ -304,43 +386,111 @@ npm install
 npm run dev
 ```
 
+前端技术栈：
+
+- Vue 3
+- Vite
+- TypeScript
+- Naive UI
+- Pinia
+- Vue Router
+- TradingView Lightweight Charts
+
+### 测试
+
+后端：
+
+```bash
+cd backend
+pytest
+```
+
+前端：
+
+```bash
+cd frontend
+npm test -- --run
+npm run build
+```
+
+RPC 只读 smoke：
+
+```bash
+.venv/bin/python test_rpc_readonly.py
+```
+
+真实交易链路 smoke：
+
+```bash
+VNPY_ALLOW_TRADE_TEST=true .venv/bin/python test_rpc_trade_flow.py --allow-trade
+```
+
+真实交易 smoke 会订阅行情、等待 tick、发送一笔远离成交价的限价单、查询委托并撤单。必须显式设置 `VNPY_ALLOW_TRADE_TEST=true` 或传 `--allow-trade` 才会执行。
+
 ---
 
-## 配置文件草案
+## 配置
 
-后端计划使用 `.env` 管理本地配置：
+后端通过 `.env` 或环境变量配置：
 
 ```env
 APP_ENV=development
-APP_HOST=0.0.0.0
-APP_PORT=8000
+LOG_LEVEL=INFO
 
-VNPY_RPC_HOST=127.0.0.1
-VNPY_RPC_PORT=2014
-VNPY_RPC_PUSH_PORT=2016
+VNPY_RPC_REQ_ADDRESS=tcp://127.0.0.1:2014
+VNPY_RPC_PUB_ADDRESS=tcp://127.0.0.1:4102
+VNPY_GATEWAY_NAME=CTP
+VNPY_RPC_TIMEOUT_MS=10000
 
-JWT_SECRET_KEY=change-me
 WEB_TRADE_ENABLED=false
+DEFAULT_GATEWAY_NAME=CTP
+ORDER_CONFIRM_REQUIRED=true
+TRADE_REFERENCE_PREFIX=web_bridge
+
+JWT_SECRET_KEY=change-me-in-production
+ACCESS_TOKEN_EXPIRE_MINUTES=480
+AUTH_USERS_JSON=[]
+
+DATABASE_URL=
+QUESTDB_PG_DSN=
+
+RISK_MAX_ORDER_VOLUME=1
+RISK_MAX_SYMBOL_POSITION=5
+RISK_MAX_DAILY_LOSS=1000
+RISK_PRICE_PROTECTION_PERCENT=3
+RISK_ALLOWED_EXCHANGES=SHFE,DCE,CZCE,CFFEX,INE,GFEX
+RISK_ALLOWED_SYMBOLS=
+RISK_BLOCKED_SYMBOLS=
+RISK_TRADING_TIME_CHECK_ENABLED=false
 ```
 
-敏感配置不得提交到 GitHub。
+生产环境要求：
+
+- `APP_ENV=production`
+- `JWT_SECRET_KEY` 必须更换，长度至少 32 字符。
+- `AUTH_USERS_JSON` 必须配置至少一个 `admin` 用户。
+- 敏感配置不得提交到 GitHub。
 
 ---
 
 ## 安全要求
 
-Web 端具备交易能力后，必须满足以下要求：
+Web 端具备交易能力后，必须满足：
 
-- 登录认证
-- 权限分级
-- HTTPS
-- IP 白名单
-- 下单二次确认
-- Web 交易总开关
-- 后端风控校验
-- 操作日志审计
-- 一键关闭交易
-- 敏感配置本地化，不提交仓库
+- [x] 登录认证
+- [x] JWT token
+- [x] 角色权限分级
+- [x] 交易 API 角色限制
+- [x] 下单二次确认
+- [x] Web 交易总开关
+- [x] 后端风控校验
+- [x] 操作日志审计
+- [x] 一键关闭交易
+- [x] 紧急停止
+- [x] 生产环境 secret 校验
+- [ ] HTTPS 终止配置
+- [ ] IP 白名单
+- [ ] 完整生产监控告警
 
 默认建议：
 
@@ -352,17 +502,23 @@ Web 端具备交易能力后，必须满足以下要求：
 
 ---
 
-## 开发路线
+## 交付
 
-### 当前优先级
+当前仓库包含：
 
-1. 初始化后端 FastAPI 项目。
-2. 封装 vn.py RPC Client。
-3. 实现只读 API：状态、合约、资金、持仓、委托、成交。
-4. 实现行情订阅和 WebSocket 推送。
-5. 实现下单、撤单、全撤。
-6. 增加基础风控。
-7. 再开始做完整前端页面。
+- `Dockerfile`
+- `deployments/docker-compose.prod.yml`
+- `scripts/deploy.sh`
+- `.github/workflows/ci.yml`
+- `.github/workflows/cd.yml`
+
+部署自动化主要面向 Macmini 自托管 runner。生产部署前应确认：
+
+- vn.py RPC 服务可达。
+- `.env` 中认证、RPC、交易开关、风控和数据库配置正确。
+- 前端构建通过。
+- 后端测试通过。
+- 如涉及交易链路，先执行 RPC smoke。
 
 ---
 
