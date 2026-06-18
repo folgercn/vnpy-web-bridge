@@ -9,6 +9,7 @@ from app.core.errors import AppError, InvalidOrderRequestError, OrderNotCancelab
 from app.schemas.common import STATUS_VALUE_MAP, to_plain_dict
 from app.schemas.trade import CancelAllRequestDTO, CancelRequestDTO, OrderRequestDTO
 from app.services.audit_service import AuditService, audit_service
+from app.services.monitoring_service import monitoring_service
 from app.services.risk_service import RiskService, risk_service
 from app.services.vnpy_rpc_service import rpc_service
 
@@ -100,6 +101,7 @@ class TradeService:
                 operator=operator,
                 source_ip=source_ip,
             )
+            monitoring_service.record_trade_failure("order", str(getattr(exc, "code", exc.__class__.__name__)))
             raise
 
     def cancel_order(
@@ -145,6 +147,7 @@ class TradeService:
                 operator=operator,
                 source_ip=source_ip,
             )
+            monitoring_service.record_trade_failure("cancel", str(getattr(exc, "code", exc.__class__.__name__)))
             raise
 
     def cancel_all(
@@ -174,6 +177,7 @@ class TradeService:
                 items.append({"vt_orderid": vt_orderid, "cancel_requested": True, "error": None})
             except Exception as exc:
                 items.append({"vt_orderid": vt_orderid, "cancel_requested": False, "error": str(exc)})
+                monitoring_service.record_trade_failure("cancel_all", str(getattr(exc, "code", exc.__class__.__name__)))
 
         result = {
             "requested": len(items),

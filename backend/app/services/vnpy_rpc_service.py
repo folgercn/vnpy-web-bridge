@@ -213,6 +213,10 @@ class VnpyRpcService:
             "rpc_unsubscribe_supported": False,
         }
 
+    def market_subscriptions(self) -> list[str]:
+        with self._subscription_lock:
+            return sorted(self._market_subscriptions)
+
     def _parse_exchange(self, exchange: str) -> Any:
         if Exchange is None:
             raise RpcUnavailableError("vn.py 未安装")
