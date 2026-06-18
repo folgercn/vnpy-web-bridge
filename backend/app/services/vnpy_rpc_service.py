@@ -12,6 +12,7 @@ from app.core.config import Settings, get_settings
 from app.core.errors import RpcCallError, RpcTimeoutError, RpcUnavailableError
 from app.schemas.common import to_plain_dict, to_plain_list
 from app.services.market_data_service import market_data_service
+from app.services.tick_persistence import tick_persistence_service
 from app.stores.memory_store import memory_store
 from app.ws.events import ws_message
 from app.ws.manager import ws_manager
@@ -247,7 +248,7 @@ class VnpyRpcService:
             ws_type = "tick"
             vt_symbol = payload.get("vt_symbol")
             if vt_symbol:
-                market_data_service.save_tick(payload)
+                tick_persistence_service.enqueue_tick(payload)
             if not vt_symbol or not self._is_market_subscribed(str(vt_symbol)):
                 return
             memory_store.save_tick(str(vt_symbol), payload)

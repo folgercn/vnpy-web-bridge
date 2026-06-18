@@ -146,29 +146,71 @@ class QuestDbMarketDataService:
         if not self.enabled:
             return False
 
-        row = _normalize_tick(tick)
+        row = self.normalize_tick(tick)
         if row is None:
             return False
 
-        columns = [*TICK_SELECT_FIELDS, "raw_json"]
-        placeholders = ", ".join(["%s"] * len(columns))
-        params = tuple(row[key] for key in TICK_SELECT_FIELDS) + (row["raw_json"],)
+        return self.save_tick_rows([row])
 
+    def normalize_tick(self, tick: dict[str, Any]) -> dict[str, Any] | None:
+        return _normalize_tick(tick)
+
+    def save_tick_rows(self, rows: Iterable[dict[str, Any]]) -> bool:
+        if not self.enabled:
+            return False
+
+        prepared_rows = [_prepare_tick_row(row) for row in rows]
+        if not prepared_rows:
+            return True
+
+        columns = [*TICK_SELECT_FIELDS, "raw_json"]
+        sql = f"""
+            INSERT INTO market_ticks ({", ".join(columns)})
+            VALUES ({", ".join(["%s"] * len(columns))})
+        """
+        params = [tuple(row[key] for key in TICK_SELECT_FIELDS) + (row["raw_json"],) for row in prepared_rows]
         try:
             with self._lock:
                 conn = self._connect()
-                conn.execute(
-                    f"""
-                    INSERT INTO market_ticks ({", ".join(columns)})
-                    VALUES ({placeholders})
-                    """,
-                    params,
-                )
+                for row_params in params:
+                    conn.execute(sql, row_params)
             return True
         except Exception as exc:
             logger.warning("QuestDB tick write failed: %s", exc)
             self._drop_connection()
             return False
+
+    def insert_tick_row(self, row: dict[str, Any]) -> bool:
+        return self.save_tick_rows([row])
+
+    def serialize_tick_row(self, row: dict[str, Any]) -> dict[str, Any]:
+        return _serialize_tick_row(row)
+
+    def deserialize_tick_row(self, row: dict[str, Any]) -> dict[str, Any]:
+        return _prepare_tick_row(row)
+
+    def save_tick_rows_or_raise(self, rows: Iterable[dict[str, Any]]) -> None:
+        if not self.enabled:
+            return
+        prepared_rows = [_prepare_tick_row(row) for row in rows]
+        if not prepared_rows:
+            return
+        columns = [*TICK_SELECT_FIELDS, "raw_json"]
+        placeholders = ", ".join(["%s"] * len(columns))
+        try:
+            with self._lock:
+                conn = self._connect()
+                for row in prepared_rows:
+                    conn.execute(
+                        f"""
+                        INSERT INTO market_ticks ({", ".join(columns)})
+                        VALUES ({placeholders})
+                        """,
+                        tuple(row[key] for key in TICK_SELECT_FIELDS) + (row["raw_json"],),
+                    )
+        except Exception:
+            self._drop_connection()
+            raise
 
     def get_bars(self, symbol: str, exchange: str, interval: str = "1m", limit: int = 300) -> list[dict[str, Any]]:
         if not self.enabled:
@@ -492,6 +534,25 @@ def _build_ingest_id(row: dict[str, Any]) -> str:
     }
     digest = sha256(json.dumps(stable_fields, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")).hexdigest()
     return digest[:32]
+
+
+def _prepare_tick_row(row: dict[str, Any]) -> dict[str, Any]:
+    prepared = dict(row)
+    prepared["ts"] = _parse_datetime(prepared.get("ts") or prepared.get("datetime"))
+    prepared["received_at"] = _parse_datetime(prepared.get("received_at") or prepared["ts"])
+    prepared["schema_version"] = _int_or_default(prepared.get("schema_version"), SCHEMA_VERSION)
+    if not prepared.get("raw_json"):
+        prepared["raw_json"] = json.dumps(prepared, ensure_ascii=False, default=str, sort_keys=True)
+    for field in TICK_NUMERIC_FIELDS:
+        prepared[field] = _number(prepared.get(field))
+    return prepared
+
+
+def _serialize_tick_row(row: dict[str, Any]) -> dict[str, Any]:
+    serialized = dict(row)
+    for key in ("ts", "received_at"):
+        serialized[key] = _format_datetime(serialized.get(key))
+    return serialized
 
 
 def _number(value: Any) -> float | None:

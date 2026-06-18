@@ -36,6 +36,20 @@ datetime,received_at,ingest_id,schema_version,vt_symbol,symbol,exchange,gateway_
 
 `market_ticks` schema v2 使用 UTC `ts` 作为 QuestDB 时间戳，额外保存 `received_at`、`schema_version` 和稳定内容哈希 `ingest_id`，并启用 `DEDUP UPSERT KEYS(ts, ingest_id)`，重试同一 tick 时保持幂等。`raw_json` 保留原始 TickData 字段，结构化列覆盖 vn.py `TickData` 的合约名、价格、成交量、成交额、持仓、涨跌停、开高低昨收和买卖 1-5 档；`extra` 保留在 `raw_json` 中。
 
+实时 tick 持久化由后台 writer 完成，RPC callback 只做标准化和有界入队，不直接访问 QuestDB。相关配置：
+
+```env
+QUESTDB_TICK_PERSIST_ENABLED=true
+QUESTDB_TICK_QUEUE_SIZE=100000
+QUESTDB_TICK_BATCH_SIZE=1000
+QUESTDB_TICK_FLUSH_INTERVAL_MS=500
+QUESTDB_TICK_RETRY_MAX_SECONDS=60
+QUESTDB_TICK_SPOOL_DIR=logs/tick-spool
+QUESTDB_TICK_SPOOL_MAX_BYTES=10737418240
+```
+
+当 QuestDB 短暂不可用或内存队列满时，合法 tick 会写入本地 JSONL spool；后台 writer 恢复后按文件顺序补写。spool 超过上限时会显式计入 dropped 并写 error 日志，不静默丢弃。
+
 ## 接口
 
 - `GET /api/status`

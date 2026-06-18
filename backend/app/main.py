@@ -24,6 +24,7 @@ from app.core.config import get_settings
 from app.core.errors import AppError, app_error_handler, unhandled_error_handler, validation_error_handler
 from app.core.logging import configure_logging
 from app.services.market_data_service import market_data_service
+from app.services.tick_persistence import tick_persistence_service
 from app.services.vnpy_rpc_service import rpc_service
 
 settings = get_settings()
@@ -78,6 +79,7 @@ if frontend_dist.exists():
 async def startup() -> None:
     try:
         market_data_service.start()
+        tick_persistence_service.start()
     except Exception as exc:
         logger.warning("backend started without QuestDB market store: %s", exc)
 
@@ -91,4 +93,5 @@ async def startup() -> None:
 @app.on_event("shutdown")
 async def shutdown() -> None:
     rpc_service.stop()
+    tick_persistence_service.stop()
     market_data_service.stop()
