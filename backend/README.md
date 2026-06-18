@@ -22,6 +22,7 @@ VNPY_RPC_REQ_ADDRESS=tcp://127.0.0.1:2014
 VNPY_RPC_PUB_ADDRESS=tcp://127.0.0.1:4102
 VNPY_GATEWAY_NAME=CTP
 VNPY_RPC_TIMEOUT_MS=10000
+DATABASE_URL=postgresql://vnpy:vnpy@127.0.0.1:5432/vnpy
 ```
 
 ## 接口
@@ -49,6 +50,9 @@ VNPY_RPC_TIMEOUT_MS=10000
 - `POST /api/strategies/{strategy_name}/stop`
 - `GET /api/strategies/{strategy_name}/logs`
 - `GET /api/contracts`
+- `GET /api/market/watchlist`
+- `POST /api/market/watchlist`
+- `DELETE /api/market/watchlist/{watch_key}`
 - `GET /api/account`
 - `GET /api/positions`
 - `GET /api/orders`
