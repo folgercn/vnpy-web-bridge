@@ -80,6 +80,15 @@ PY
   return 1
 }
 
+dump_deploy_debug() {
+  echo "Compose status after failed smoke:" >&2
+  "${COMPOSE_CMD[@]}" -f "$COMPOSE_FILE" ps >&2 || true
+  for service in "${deploy_args[@]}"; do
+    echo "Recent logs for $service:" >&2
+    "${COMPOSE_CMD[@]}" -f "$COMPOSE_FILE" logs --no-color --tail=200 "$service" >&2 || true
+  done
+}
+
 trap 'on_error $LINENO' ERR
 
 if ! command -v docker >/dev/null 2>&1; then
@@ -152,6 +161,7 @@ else
   trap - ERR
   write_maintenance failed "deploy smoke failed: $DEPLOY_SMOKE_URL"
   echo "Deploy smoke failed: $DEPLOY_SMOKE_URL" >&2
+  dump_deploy_debug
   exit 1
 fi
 
