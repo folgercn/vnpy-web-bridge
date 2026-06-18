@@ -216,6 +216,7 @@ class VnpyRpcService:
         event_type = getattr(event, "type", topic)
         data = getattr(event, "data", event)
         payload = to_plain_dict(data)
+        self._merge_computed_fields(payload, data, ("vt_symbol", "vt_orderid", "vt_tradeid"))
 
         ws_type: str | None = None
         if event_type.startswith(EVENT_TICK):
@@ -233,6 +234,14 @@ class VnpyRpcService:
         if ws_type and self.loop:
             message = ws_message(ws_type, payload)
             self.loop.call_soon_threadsafe(asyncio.create_task, ws_manager.broadcast(message))
+
+    def _merge_computed_fields(self, payload: dict[str, Any], data: Any, fields: tuple[str, ...]) -> None:
+        for field in fields:
+            if payload.get(field):
+                continue
+            value = getattr(data, field, None)
+            if value:
+                payload[field] = to_plain_dict({"value": value})["value"]
 
 
 rpc_service = VnpyRpcService()
