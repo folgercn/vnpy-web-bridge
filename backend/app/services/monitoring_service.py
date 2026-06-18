@@ -200,11 +200,14 @@ class MonitoringService:
         tick_status = self.tick_persistence.snapshot()
         lag = tick_status.get("persistence_lag_seconds")
         worker_alive = bool(tick_status.get("worker_alive", tick_status.get("running")))
-        tick_healthy = not tick_status.get("enabled") or (worker_alive and not tick_status.get("last_error"))
+        has_corruption = bool(tick_status.get("corrupt_total") or tick_status.get("quarantined_rows"))
+        tick_healthy = not tick_status.get("enabled") or (worker_alive and not tick_status.get("last_error") and not has_corruption)
         if isinstance(lag, (int, float)) and lag >= 300:
             tick_healthy = False
         if not worker_alive and tick_status.get("enabled"):
             summary = "tick persistence writer stopped"
+        elif has_corruption:
+            summary = str(tick_status.get("last_error") or "tick spool corruption detected")
         elif tick_status.get("last_error"):
             summary = str(tick_status.get("last_error"))
         else:
@@ -223,6 +226,10 @@ class MonitoringService:
                     "worker_alive",
                     "queue_depth",
                     "spool_rows",
+                    "spool_bytes",
+                    "corrupt_total",
+                    "quarantined_rows",
+                    "quarantined_bytes",
                     "oldest_pending_received_at",
                     "persistence_lag_seconds",
                     "consecutive_failures",
