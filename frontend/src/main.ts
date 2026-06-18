@@ -32,7 +32,7 @@ import { router } from './router'
 import './styles/app.css'
 
 const app = createApp(App)
-const naiveComponents = [
+const naiveComponents = {
   NAlert,
   NButton,
   NCard,
@@ -58,10 +58,8 @@ const naiveComponents = [
   NSelect,
   NStatistic,
   NTag
-]
-
-for (const component of naiveComponents) {
-  if (component.name) app.component(component.name, component)
 }
+
+for (const [name, component] of Object.entries(naiveComponents)) app.component(name, component)
 
 app.use(createPinia()).use(router).mount('#app')
