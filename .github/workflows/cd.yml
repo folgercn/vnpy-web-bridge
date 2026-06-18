@@ -225,3 +225,20 @@ jobs:
           test -f "$key" || { echo "Missing deploy SSH key: $key" >&2; exit 1; }
           ssh -i "$key" -p "$port" -o BatchMode=yes -o StrictHostKeyChecking=accept-new "$user@$host" \
             "DEPLOY_PATH='$path' IMAGE_REPO='$IMAGE_REPO' IMAGE_TAG='$IMAGE_TAG' DEPLOY_SERVICES='$DEPLOY_SERVICES' DEPLOY_SKIP_PULL='$DEPLOY_SKIP_PULL' bash '$path/scripts/deploy.sh'"
+
+      - name: Install host watchdog
+        env:
+          DEPLOY_SSH_HOST: ${{ secrets.DEPLOY_SSH_HOST }}
+          DEPLOY_SSH_PORT: ${{ secrets.DEPLOY_SSH_PORT }}
+          DEPLOY_SSH_USER: ${{ secrets.DEPLOY_SSH_USER }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+        run: |
+          export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
+          host="${DEPLOY_SSH_HOST:-127.0.0.1}"
+          port="${DEPLOY_SSH_PORT:-22}"
+          user="${DEPLOY_SSH_USER:-fujun}"
+          path="${DEPLOY_PATH:-/Users/fujun/services/vnpy-web-bridge}"
+          key="$path/.ssh/deploy_ed25519"
+          test -f "$key" || { echo "Missing deploy SSH key: $key" >&2; exit 1; }
+          ssh -i "$key" -p "$port" -o BatchMode=yes -o StrictHostKeyChecking=accept-new "$user@$host" \
+            "DEPLOY_PATH='$path' bash '$path/scripts/install-watchdog.sh' install && DEPLOY_PATH='$path' bash '$path/scripts/install-watchdog.sh' status | sed -n '1,80p'"
