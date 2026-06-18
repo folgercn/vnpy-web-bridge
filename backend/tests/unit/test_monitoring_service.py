@@ -12,8 +12,9 @@ from app.stores.alert_state_store import AlertStateStore
 
 
 class FakeTelegram:
-    def __init__(self, *, fail: bool = False) -> None:
+    def __init__(self, *, fail: bool = False, fail_events: list[str] | None = None) -> None:
         self.fail = fail
+        self.fail_events = fail_events or []
         self.sent: list[tuple[str, str]] = []
 
     def config_status(self) -> dict:
@@ -22,11 +23,14 @@ class FakeTelegram:
     def send_incident(self, incident: dict, *, event: str) -> dict:
         if self.fail:
             raise TelegramDeliveryError("offline")
+        if event in self.fail_events:
+            self.fail_events.remove(event)
+            raise TelegramDeliveryError("offline")
         self.sent.append((incident["incident_id"], event))
         return {"sent": True, "message_id": len(self.sent)}
 
 
-def build_service(tmp_path, *, fail_telegram: bool = False) -> tuple[AlertService, FakeTelegram]:
+def build_service(tmp_path, *, fail_telegram: bool = False, fail_events: list[str] | None = None) -> tuple[AlertService, FakeTelegram]:
     settings = Settings(
         monitor_failure_threshold=3,
         monitor_recovery_threshold=2,
@@ -38,7 +42,7 @@ def build_service(tmp_path, *, fail_telegram: bool = False) -> tuple[AlertServic
         telegram_bot_token="token",
         telegram_chat_id="chat",
     )
-    telegram = FakeTelegram(fail=fail_telegram)
+    telegram = FakeTelegram(fail=fail_telegram, fail_events=fail_events)
     store = AlertStateStore(settings.monitor_state_path, settings.monitor_events_path)
     return AlertService(settings=settings, store=store, telegram=telegram), telegram
 
@@ -148,6 +152,56 @@ def test_recovery_sends_once_after_success_threshold_and_grace(tmp_path) -> None
         now=start + timedelta(seconds=150),
     )
     assert len(telegram.sent) == 2
+
+
+def test_recovery_delivery_failure_retries_until_sent(tmp_path) -> None:
+    service, telegram = build_service(tmp_path, fail_events=["resolved"])
+    start = datetime(2026, 6, 18, 9, 0, tzinfo=timezone.utc)
+
+    for seconds in (0, 20, 46):
+        service.record_check(
+            rule_id="questdb_unavailable",
+            scope_id="market_ticks",
+            healthy=False,
+            severity="warning",
+            summary="QuestDB offline",
+            now=start + timedelta(seconds=seconds),
+        )
+    service.record_check(
+        rule_id="questdb_unavailable",
+        scope_id="market_ticks",
+        healthy=True,
+        severity="warning",
+        summary="QuestDB ok",
+        now=start + timedelta(seconds=70),
+    )
+    incident = service.record_check(
+        rule_id="questdb_unavailable",
+        scope_id="market_ticks",
+        healthy=True,
+        severity="warning",
+        summary="QuestDB stable",
+        now=start + timedelta(seconds=131),
+    )
+
+    assert incident["status"] == "resolved"
+    assert incident["delivery"]["resolved"]["sent"] is False
+    assert telegram.sent == [("questdb_unavailable:market_ticks", "firing")]
+
+    incident = service.record_check(
+        rule_id="questdb_unavailable",
+        scope_id="market_ticks",
+        healthy=True,
+        severity="warning",
+        summary="QuestDB still stable",
+        now=start + timedelta(seconds=192),
+    )
+
+    assert incident["status"] == "healthy"
+    assert telegram.sent == [
+        ("questdb_unavailable:market_ticks", "firing"),
+        ("questdb_unavailable:market_ticks", "resolved"),
+    ]
 
 
 def test_delivery_state_survives_service_restart(tmp_path) -> None:
