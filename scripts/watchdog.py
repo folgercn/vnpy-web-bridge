@@ -15,6 +15,8 @@ from typing import Any, Callable
 import urllib.error
 import urllib.request
 
+RETRY_SECONDS = [60, 300, 900]
+
 
 @dataclass
 class CheckResult:
@@ -97,13 +99,14 @@ class Watchdog:
                     safe_details(maintenance),
                 )
             ]
-        return [
-            self._docker_daemon_check(),
-            self._container_check(),
-            self._liveness_check(),
-            self._log_dir_check(),
-            self._disk_check(),
-        ]
+        checks = [self._docker_daemon_check()]
+        if checks[0].healthy:
+            container = self._container_check()
+            checks.append(container)
+            if container.healthy:
+                checks.append(self._liveness_check())
+        checks.extend([self._log_dir_check(), self._disk_check()])
+        return checks
 
     def _docker_daemon_check(self) -> CheckResult:
         result = self.runner(["docker", "info"], capture_output=True, text=True, timeout=5)
@@ -221,20 +224,50 @@ class Watchdog:
         incident["failure_count"] = int(incident.get("failure_count") or 0) + 1
         incident["success_count"] = 0
         if incident.get("status") in {"healthy", "resolved"}:
+            self._start_episode(incident, now)
             incident["status"] = "pending"
-            incident["first_seen"] = now.isoformat(timespec="seconds")
+            incident["fired_at"] = None
+            incident["resolved_at"] = None
+            incident["delivery"] = {}
         if incident["failure_count"] >= self.config.failure_threshold:
             incident["status"] = "firing"
             incident.setdefault("fired_at", now.isoformat(timespec="seconds"))
             self._notify_once(state, incident, "firing", now)
 
     def _notify_once(self, state: dict[str, Any], incident: dict[str, Any], event: str, now: datetime) -> None:
-        key = f"{incident['incident_id']}:{event}"
+        key = self._delivery_key(incident, event)
         if key in state.setdefault("deliveries", {}):
             return
+        if not self._should_attempt_delivery(incident, event, now):
+            return
         result = self._send_telegram(incident, event=event)
-        state["deliveries"][key] = {"sent_at": now.isoformat(timespec="seconds"), "result": result}
+        incident.setdefault("delivery", {})[event] = {"sent": bool(result.get("sent")), "result": result, "at": now.isoformat(timespec="seconds")}
+        if result.get("sent"):
+            state["deliveries"][key] = {"sent_at": now.isoformat(timespec="seconds"), "result": result}
+        else:
+            attempts = int(incident.setdefault("delivery", {}).get("attempts", 0)) + 1
+            retry_after = RETRY_SECONDS[min(attempts - 1, len(RETRY_SECONDS) - 1)]
+            incident["delivery"].update({"attempts": attempts, "next_retry_at": (now + timedelta(seconds=retry_after)).isoformat(timespec="seconds")})
         append_jsonl(self.config.events_path, {"timestamp": now.isoformat(timespec="seconds"), "type": event, "incident_id": incident["incident_id"], "delivery": result})
+
+    def _should_attempt_delivery(self, incident: dict[str, Any], event: str, now: datetime) -> bool:
+        event_delivery = incident.get("delivery", {}).get(event)
+        if not event_delivery:
+            return True
+        next_retry_at = incident.get("delivery", {}).get("next_retry_at")
+        if next_retry_at:
+            return parse_time(str(next_retry_at), fallback=now) <= now
+        return False
+
+    def _start_episode(self, incident: dict[str, Any], now: datetime) -> None:
+        episode_seq = int(incident.get("episode_seq") or 0) + 1
+        incident["episode_seq"] = episode_seq
+        incident["episode_id"] = f"{incident['incident_id']}:{episode_seq}"
+        incident["first_seen"] = now.isoformat(timespec="seconds")
+
+    def _delivery_key(self, incident: dict[str, Any], event: str) -> str:
+        episode_id = incident.get("episode_id") or f"{incident['incident_id']}:{int(incident.get('episode_seq') or 0)}"
+        return f"{episode_id}:{event}"
 
     def _send_telegram(self, incident: dict[str, Any], *, event: str) -> dict[str, Any]:
         if not self.config.telegram_enabled:
