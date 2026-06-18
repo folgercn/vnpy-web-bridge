@@ -131,6 +131,9 @@ class JsonlTickSpool:
                         continue
                     bad_path = segment_path.with_suffix(segment_path.suffix + ".bad")
                     segment_path.rename(bad_path)
+                    replay_meta_path = self._replay_meta_path(segment_path)
+                    if replay_meta_path.exists():
+                        replay_meta_path.unlink()
                     if self.fsync:
                         self._fsync_directory_locked()
                     quarantined_rows = max(self._row_count_from_replay_path(bad_path), 1)
@@ -150,8 +153,11 @@ class JsonlTickSpool:
         with self._lock:
             if segment.path.exists():
                 segment.path.unlink()
-                if self.fsync:
-                    self._fsync_directory_locked()
+            replay_meta_path = self._replay_meta_path(segment.path)
+            if replay_meta_path.exists():
+                replay_meta_path.unlink()
+            if self.fsync:
+                self._fsync_directory_locked()
 
     def size_bytes(self) -> int:
         with self._lock:
@@ -161,6 +167,7 @@ class JsonlTickSpool:
         total = self.path.stat().st_size if self.path.exists() else 0
         total += sum(path.stat().st_size for path in self._replay_files_locked())
         total += sum(path.stat().st_size for path in self._bad_files_locked())
+        total += sum(path.stat().st_size for path in self._meta_files_locked())
         return total
 
     def row_count(self) -> int:
@@ -187,6 +194,10 @@ class JsonlTickSpool:
             active_oldest = self._read_active_meta_locked().get("oldest_received_at")
             if active_oldest:
                 candidates.append(_parse_datetime(active_oldest))
+            for replay_path in self._replay_files_locked():
+                replay_oldest = self._read_replay_meta_locked(replay_path).get("oldest_received_at")
+                if replay_oldest:
+                    candidates.append(_parse_datetime(replay_oldest))
             return min(candidates) if candidates else None
 
     def disk_usage(self) -> Any:
@@ -200,6 +211,8 @@ class JsonlTickSpool:
         rows = int(meta.get("rows") or 0)
         replay_path = self.directory / f"ticks.replaying.{time.time_ns()}.{rows}.jsonl"
         self.path.rename(replay_path)
+        if meta:
+            self._write_json_locked(self._replay_meta_path(replay_path), meta)
         if self.meta_path.exists():
             self.meta_path.unlink()
         if self.fsync:
@@ -215,6 +228,12 @@ class JsonlTickSpool:
 
     def _bad_files_locked(self) -> list[Path]:
         return sorted(self.directory.glob("ticks.replaying.*.jsonl.bad"))
+
+    def _meta_files_locked(self) -> list[Path]:
+        return sorted(self.directory.glob("ticks.replaying.*.jsonl.meta.json"))
+
+    def _replay_meta_path(self, replay_path: Path) -> Path:
+        return replay_path.with_suffix(replay_path.suffix + ".meta.json")
 
     def _row_count_from_replay_path(self, path: Path) -> int:
         parts = path.name.split(".")
@@ -235,13 +254,16 @@ class JsonlTickSpool:
                 if value:
                     meta["oldest_received_at"] = value
                     break
-        tmp_path = self.meta_path.with_suffix(self.meta_path.suffix + f".{time.time_ns()}.tmp")
+        self._write_json_locked(self.meta_path, meta)
+
+    def _write_json_locked(self, path: Path, payload: dict[str, Any]) -> None:
+        tmp_path = path.with_suffix(path.suffix + f".{time.time_ns()}.tmp")
         with tmp_path.open("w", encoding="utf-8") as file:
-            file.write(json.dumps(meta, ensure_ascii=False, sort_keys=True))
+            file.write(json.dumps(payload, ensure_ascii=False, sort_keys=True))
             file.flush()
             if self.fsync:
                 os.fsync(file.fileno())
-        tmp_path.replace(self.meta_path)
+        tmp_path.replace(path)
         if self.fsync:
             self._fsync_directory_locked()
 
@@ -252,6 +274,15 @@ class JsonlTickSpool:
             return json.loads(self.meta_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             return {"rows": 0, "oldest_received_at": None}
+
+    def _read_replay_meta_locked(self, replay_path: Path) -> dict[str, Any]:
+        replay_meta_path = self._replay_meta_path(replay_path)
+        if not replay_meta_path.exists():
+            return {"rows": self._row_count_from_replay_path(replay_path), "oldest_received_at": None}
+        try:
+            return json.loads(replay_meta_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return {"rows": self._row_count_from_replay_path(replay_path), "oldest_received_at": None}
 
     def _fsync_directory_locked(self) -> None:
         try:
