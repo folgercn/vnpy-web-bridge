@@ -226,6 +226,20 @@ def test_tick_freshness_records_stale_subscription(tmp_path) -> None:
     assert incident["details"]["stale"] == ["rb2610.SHFE"]
 
 
+def test_tick_freshness_quiet_after_product_night_session(tmp_path) -> None:
+    now = datetime(2026, 6, 18, 15, 30, tzinfo=timezone.utc)  # 23:30 Asia/Shanghai
+    rpc = FakeRpc()
+    rpc.subscriptions = ["rb2610.SHFE"]
+    service = build_service(tmp_path, now=now, rpc=rpc)
+
+    snapshot = service.run_checks()
+
+    tick_check = next(item for item in snapshot["checks"] if item["name"] == "tick_freshness")
+    assert tick_check["healthy"] is True
+    assert tick_check["status"] == "quiet"
+    assert not any(item["incident_id"] == "tick_stale:market_ticks" for item in snapshot["incidents"])
+
+
 def test_expected_strategy_stop_records_incident(tmp_path) -> None:
     now = datetime(2026, 6, 18, 2, 0, tzinfo=timezone.utc)
     settings = Settings(
