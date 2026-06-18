@@ -6,6 +6,33 @@
       <n-card title="Gateway" size="small">{{ terminal.gatewayStatus.gateway_name || '-' }}</n-card>
       <n-card title="Trade" size="small">{{ terminal.webTradeEnabled ? 'enabled' : 'disabled' }}</n-card>
     </div>
+    <div class="grid-4">
+      <n-card title="Monitor" size="small">
+        <n-statistic label="Active" :value="monitorSummary.active_count ?? 0" />
+      </n-card>
+      <n-card title="Severity" size="small">
+        <n-tag :type="severityTagType(String(monitorSummary.highest_severity || 'info'))" round>
+          {{ monitorSummary.highest_severity || 'info' }}
+        </n-tag>
+      </n-card>
+      <n-card title="Telegram" size="small">
+        <n-space size="small">
+          <n-tag :type="telegramConfig.enabled ? 'success' : 'default'" round>{{ telegramConfig.enabled ? 'enabled' : 'disabled' }}</n-tag>
+          <n-tag :type="telegramConfig.configured ? 'success' : 'warning'" round>{{ telegramConfig.configured ? 'configured' : 'missing' }}</n-tag>
+        </n-space>
+      </n-card>
+      <n-card title="Last Check" size="small">
+        <div class="card-line">
+          <span>{{ lastCheckText }}</span>
+          <n-button size="small" quaternary circle :loading="monitorLoading" @click="refreshMonitoring">
+            <template #icon><n-icon><ReloadOutlined /></n-icon></template>
+          </n-button>
+        </div>
+      </n-card>
+    </div>
+    <n-card title="Active Incidents" size="small">
+      <n-data-table :columns="incidentColumns" :data="monitorIncidents" :pagination="false" :scroll-x="980" size="small" />
+    </n-card>
     <n-card title="交易时段" size="small">
       <n-data-table :columns="sessionColumns" :data="sessionRows" :pagination="false" :scroll-x="1030" size="small" />
     </n-card>
@@ -25,8 +52,10 @@
 
 <script setup lang="ts">
 import { computed, h, onBeforeUnmount, onMounted, ref } from 'vue'
-import { NTag, type DataTableColumns } from 'naive-ui'
+import { NButton, NIcon, NSpace, NTag, type DataTableColumns } from 'naive-ui'
+import { ReloadOutlined } from '@vicons/antd'
 import DataPanel from '../components/common/DataPanel.vue'
+import { getMonitorIncidents, getMonitorSummary, getTelegramConfig, type MonitorIncident, type MonitorSummary } from '../api/monitoring'
 import { useTerminalStore } from '../stores/terminal'
 import { getTradingSessionStatus, symbolRoot } from '../utils/tradingSessions'
 import { isResolvedMainContract, preferredMainContract, vtSymbolOf, type ContractRow } from '../utils/marketContracts'
@@ -36,6 +65,10 @@ const now = ref(new Date())
 const accountColumns = cols(['accountid', 'balance', 'available', 'frozen'])
 const positionColumns = cols(['vt_symbol', 'direction', 'volume', 'price', 'pnl'])
 const logColumns = cols(['type', 'action', 'message'])
+const monitorSummary = ref<MonitorSummary>({})
+const monitorIncidents = ref<MonitorIncident[]>([])
+const telegramConfig = ref<Record<string, unknown>>({})
+const monitorLoading = ref(false)
 let timer: number | undefined
 const sessionItems = computed(() => {
   return defaultSessionContracts.map((item) => {
@@ -93,6 +126,23 @@ const sessionColumns: DataTableColumns = [
   { title: '下次开市', key: 'next_open', width: 120 },
   { title: '倒计时', key: 'countdown', width: 110 }
 ]
+const incidentColumns: DataTableColumns<MonitorIncident> = [
+  { title: 'Incident', key: 'incident_id', width: 240, fixed: 'left', ellipsis: { tooltip: true } },
+  {
+    title: 'Severity',
+    key: 'severity',
+    width: 110,
+    render: (row) => h(NTag, { type: severityTagType(row.severity), round: true }, { default: () => row.severity })
+  },
+  { title: 'Status', key: 'status', width: 120 },
+  { title: 'Scope', key: 'scope_id', width: 160, ellipsis: { tooltip: true } },
+  { title: 'Summary', key: 'summary', width: 300, ellipsis: { tooltip: true } },
+  { title: 'Last Seen', key: 'last_seen', width: 190 }
+]
+const lastCheckText = computed(() => {
+  const lastCheck = monitorSummary.value.last_check as Record<string, unknown> | undefined
+  return String(lastCheck?.checked_at || monitorSummary.value.last_updated_at || '-')
+})
 
 const defaultSessionContracts = [
   { name: '天然橡胶', root: 'ru', symbol: 'ru2609', exchange: 'SHFE' },
@@ -104,6 +154,7 @@ const defaultSessionContracts = [
 
 onMounted(() => {
   if (!terminal.contracts.length) terminal.refreshContracts().catch(() => undefined)
+  refreshMonitoring().catch(() => undefined)
   timer = window.setInterval(() => {
     now.value = new Date()
   }, 30000)
@@ -115,5 +166,27 @@ onBeforeUnmount(() => {
 
 function cols(keys: string[]) {
   return keys.map((key) => ({ title: key, key }))
+}
+
+async function refreshMonitoring() {
+  monitorLoading.value = true
+  try {
+    const [summary, incidents, telegram] = await Promise.all([
+      getMonitorSummary(),
+      getMonitorIncidents(false),
+      getTelegramConfig()
+    ])
+    monitorSummary.value = summary
+    monitorIncidents.value = incidents
+    telegramConfig.value = telegram
+  } finally {
+    monitorLoading.value = false
+  }
+}
+
+function severityTagType(severity: string) {
+  if (severity === 'critical') return 'error'
+  if (severity === 'warning') return 'warning'
+  return 'default'
 }
 </script>
