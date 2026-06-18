@@ -1,6 +1,6 @@
 services:
   questdb:
-    image: questdb/questdb:latest
+    image: questdb/questdb:9.4.3
     container_name: vnpy-web-bridge-questdb
     restart: unless-stopped
     ports:
@@ -9,6 +9,12 @@ services:
       - "9009:9009"
     volumes:
       - questdb-data:/var/lib/questdb
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 3 bash -lc '</dev/tcp/127.0.0.1/8812'"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
 
   postgres:
     image: postgres:16-alpine
@@ -34,16 +40,18 @@ services:
       - ../.env
     environment:
       QUESTDB_PG_DSN: ${QUESTDB_PG_DSN:-postgresql://admin:quest@questdb:8812/qdb}
+      QUESTDB_TICK_SPOOL_DIR: ${QUESTDB_TICK_SPOOL_DIR:-/app/tick-spool}
       DATABASE_URL: ${DATABASE_URL:-postgresql://vnpy:vnpy@postgres:5432/vnpy}
     depends_on:
       questdb:
-        condition: service_started
+        condition: service_healthy
       postgres:
         condition: service_healthy
     ports:
       - "8080:8080"
     volumes:
       - ../logs:/app/logs
+      - tick-spool:/app/tick-spool
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/api/health/live', timeout=3)"]
       interval: 30s
@@ -53,4 +61,5 @@ services:
 
 volumes:
   questdb-data:
+  tick-spool:
   postgres-data:

@@ -175,7 +175,7 @@ CTP / SimNow / 实盘柜台
 - [x] tick CSV 导入
 - [x] 数据管理前端页面
 - [ ] 自动落库所有实时 tick 的完整生产验证
-- [ ] 数据保留策略和分区清理
+- [x] 历史 Tick 长期保留（不自动清理）
 
 ### Phase 7：交付和运维
 
@@ -509,6 +509,7 @@ Web 端具备交易能力后，必须满足：
 
 - `Dockerfile`
 - `deployments/docker-compose.prod.yml`
+- `docs/deployment.md`
 - `scripts/deploy.sh`
 - `.github/workflows/ci.yml`
 - `.github/workflows/cd.yml`
@@ -520,6 +521,7 @@ Web 端具备交易能力后，必须满足：
 - 前端构建通过。
 - 后端测试通过。
 - 如涉及交易链路，先执行 RPC smoke。
+- QuestDB 和 tick spool 使用持久化 volume；备份恢复步骤见 `docs/deployment.md`。
 
 ---
 
