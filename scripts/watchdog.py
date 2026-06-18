@@ -217,7 +217,12 @@ class Watchdog:
                 incident["status"] = "resolved"
                 incident["resolved_at"] = now.isoformat(timespec="seconds")
                 self._notify_once(state, incident, "resolved", now)
-            elif incident.get("status") in {"healthy", "resolved"}:
+            elif incident.get("status") == "resolved":
+                if self._should_attempt_delivery(incident, "resolved", now):
+                    self._notify_once(state, incident, "resolved", now)
+                if self._delivery_complete(state, incident, "resolved"):
+                    incident["status"] = "healthy"
+            elif incident.get("status") in {"healthy", "pending"}:
                 incident["status"] = "healthy"
             return
 
@@ -258,6 +263,19 @@ class Watchdog:
         if next_retry_at:
             return parse_time(str(next_retry_at), fallback=now) <= now
         return False
+
+    def _delivery_complete(self, state: dict[str, Any], incident: dict[str, Any], event: str) -> bool:
+        if self._delivery_key(incident, event) in state.get("deliveries", {}):
+            return True
+        event_delivery = incident.get("delivery", {}).get(event)
+        if not event_delivery:
+            return False
+        if event_delivery.get("sent"):
+            return True
+        if incident.get("delivery", {}).get("next_retry_at"):
+            return False
+        result = event_delivery.get("result") or {}
+        return result.get("skipped") == "disabled"
 
     def _start_episode(self, incident: dict[str, Any], now: datetime) -> None:
         episode_seq = int(incident.get("episode_seq") or 0) + 1
