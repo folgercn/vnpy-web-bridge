@@ -37,30 +37,31 @@ class AlertService:
         now: datetime | None = None,
     ) -> dict[str, Any]:
         now = now or datetime.now(timezone.utc)
-        state = self.store.load()
-        self._expire_silences(state, now)
-        incident_id = fingerprint(rule_id, scope_id)
-        incident = state["incidents"].get(incident_id)
-        if incident is None:
-            incident = self._new_incident(rule_id, scope_id, severity, summary, details, now)
-            state["incidents"][incident_id] = incident
 
-        incident.update(
-            {
-                "severity": severity,
-                "summary": summary,
-                "details": details or {},
-                "last_seen": iso(now),
-            }
-        )
+        def mutate(state: dict[str, Any]) -> dict[str, Any]:
+            self._expire_silences(state, now)
+            incident_id = fingerprint(rule_id, scope_id)
+            incident = state["incidents"].get(incident_id)
+            if incident is None:
+                incident = self._new_incident(rule_id, scope_id, severity, summary, details, now)
+                state["incidents"][incident_id] = incident
 
-        if healthy:
-            self._apply_success(state, incident, now)
-        else:
-            self._apply_failure(state, incident, now)
+            incident.update(
+                {
+                    "severity": severity,
+                    "summary": summary,
+                    "details": details or {},
+                    "last_seen": iso(now),
+                }
+            )
 
-        self.store.save(state)
-        return incident
+            if healthy:
+                self._apply_success(state, incident, now)
+            else:
+                self._apply_failure(state, incident, now)
+            return dict(incident)
+
+        return self.store.update(mutate)
 
     def list_incidents(self, *, include_resolved: bool = True) -> list[dict[str, Any]]:
         state = self.store.load()
@@ -86,15 +87,17 @@ class AlertService:
 
     def ack(self, incident_id: str, *, operator: str, now: datetime | None = None) -> dict[str, Any]:
         now = now or datetime.now(timezone.utc)
-        state = self.store.load()
-        incident = self._require_incident(state, incident_id)
-        if incident.get("status") in {"firing", "recovering"}:
-            incident["status"] = "acknowledged"
-        incident["acknowledged_by"] = operator
-        incident["acknowledged_at"] = iso(now)
-        self.store.append_event({"type": "ack", "incident_id": incident_id, "operator": operator})
-        self.store.save(state)
-        return incident
+
+        def mutate(state: dict[str, Any]) -> dict[str, Any]:
+            incident = self._require_incident(state, incident_id)
+            if incident.get("status") in {"firing", "recovering"}:
+                incident["status"] = "acknowledged"
+            incident["acknowledged_by"] = operator
+            incident["acknowledged_at"] = iso(now)
+            self.store.append_event({"type": "ack", "incident_id": incident_id, "operator": operator})
+            return dict(incident)
+
+        return self.store.update(mutate)
 
     def create_silence(
         self,
@@ -120,37 +123,40 @@ class AlertService:
         if rule_id in NON_SILENCEABLE_RULES:
             raise ValueError(f"{rule_id} cannot be silenced")
 
-        state = self.store.load()
-        if incident_id:
-            incident = self._require_incident(state, incident_id)
-            rule_id = str(incident["rule_id"])
-            scope_id = str(incident["scope_id"])
-            if rule_id in NON_SILENCEABLE_RULES:
-                raise ValueError(f"{rule_id} cannot be silenced")
-        silence_id = f"sil_{uuid4().hex[:12]}"
-        silence = {
-            "silence_id": silence_id,
-            "rule_id": rule_id,
-            "scope_id": scope_id,
-            "incident_id": incident_id,
-            "reason": reason.strip(),
-            "created_by": operator,
-            "created_at": iso(now),
-            "expires_at": iso(expires_at),
-        }
-        state["silences"][silence_id] = silence
-        self.store.append_event({"type": "silence_created", "silence_id": silence_id, "operator": operator})
-        self.store.save(state)
-        return silence
+        def mutate(state: dict[str, Any]) -> dict[str, Any]:
+            nonlocal rule_id, scope_id
+            if incident_id:
+                incident = self._require_incident(state, incident_id)
+                rule_id = str(incident["rule_id"])
+                scope_id = str(incident["scope_id"])
+                if rule_id in NON_SILENCEABLE_RULES:
+                    raise ValueError(f"{rule_id} cannot be silenced")
+            silence_id = f"sil_{uuid4().hex[:12]}"
+            silence = {
+                "silence_id": silence_id,
+                "rule_id": rule_id,
+                "scope_id": scope_id,
+                "incident_id": incident_id,
+                "reason": reason.strip(),
+                "created_by": operator,
+                "created_at": iso(now),
+                "expires_at": iso(expires_at),
+            }
+            state["silences"][silence_id] = silence
+            self.store.append_event({"type": "silence_created", "silence_id": silence_id, "operator": operator})
+            return silence
+
+        return self.store.update(mutate)
 
     def delete_silence(self, silence_id: str, *, operator: str) -> dict[str, Any]:
-        state = self.store.load()
-        silence = state["silences"].pop(silence_id, None)
-        if silence is None:
-            raise KeyError(silence_id)
-        self.store.append_event({"type": "silence_deleted", "silence_id": silence_id, "operator": operator})
-        self.store.save(state)
-        return silence
+        def mutate(state: dict[str, Any]) -> dict[str, Any]:
+            silence = state["silences"].pop(silence_id, None)
+            if silence is None:
+                raise KeyError(silence_id)
+            self.store.append_event({"type": "silence_deleted", "silence_id": silence_id, "operator": operator})
+            return silence
+
+        return self.store.update(mutate)
 
     def _apply_failure(self, state: dict[str, Any], incident: dict[str, Any], now: datetime) -> None:
         if incident.get("status") in {"healthy", "resolved"}:
