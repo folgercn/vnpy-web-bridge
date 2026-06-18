@@ -26,6 +26,17 @@ class ProbeClient:
         return []
 
 
+class FlakyProbeClient:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def get_all_accounts(self, *, timeout: int):
+        self.calls += 1
+        if self.calls == 1:
+            raise TimeoutError("timeout")
+        return []
+
+
 class TickEvent:
     type = "eTick.UNIT999.SHFE"
 
@@ -70,7 +81,25 @@ def test_rpc_status_probe_marks_connection_false_on_probe_failure() -> None:
     status = service.status(probe=True)
 
     assert status["connected"] is False
+    assert service.started is True
     assert status["last_error"]
+
+
+def test_rpc_status_probe_recovers_after_single_timeout() -> None:
+    service = VnpyRpcService()
+    client = FlakyProbeClient()
+    service.started = True
+    service.client = client  # type: ignore[assignment]
+    service._probe_ttl_seconds = 0
+
+    failed = service.status(probe=True)
+    recovered = service.status(probe=True)
+
+    assert failed["connected"] is False
+    assert recovered["connected"] is True
+    assert recovered["last_error"] is None
+    assert service.started is True
+    assert client.calls == 2
 
 
 def test_rpc_status_probe_uses_ttl() -> None:
