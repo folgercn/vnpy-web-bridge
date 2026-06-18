@@ -6,6 +6,7 @@ COPY frontend/package*.json ./
 RUN npm ci
 
 COPY frontend/ ./
+COPY shared /app/shared
 RUN npm run build
 
 FROM python:3.12-slim
@@ -19,6 +20,7 @@ COPY backend/requirements.txt ./backend/requirements.txt
 RUN pip install --no-cache-dir -r backend/requirements.txt
 
 COPY backend ./backend
+COPY shared ./shared
 COPY test_rpc_readonly.py test_rpc_trade_flow.py ./
 COPY --from=frontend-build /app/frontend/dist ./frontend/dist
 
