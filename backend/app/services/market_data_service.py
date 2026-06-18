@@ -67,6 +67,7 @@ TICK_SELECT_FIELDS = [
     "ts",
     "received_at",
     "ingest_id",
+    "ingest_seq",
     "schema_version",
     "vt_symbol",
     "symbol",
@@ -82,6 +83,7 @@ TICK_CSV_HEADERS = [
     "datetime",
     "received_at",
     "ingest_id",
+    "ingest_seq",
     "schema_version",
     "vt_symbol",
     "symbol",
@@ -96,6 +98,7 @@ TICK_CSV_HEADERS = [
 SCHEMA_COLUMNS: list[tuple[str, str]] = [
     ("received_at", "TIMESTAMP"),
     ("ingest_id", "STRING"),
+    ("ingest_seq", "LONG"),
     ("schema_version", "INT"),
     ("name", "STRING"),
     ("trading_day", "STRING"),
@@ -375,7 +378,7 @@ class QuestDbMarketDataService:
                     SELECT {", ".join(TICK_SELECT_FIELDS)}
                     FROM market_ticks
                     {where}
-                    ORDER BY ts DESC
+                    ORDER BY ts DESC, ingest_seq DESC
                     LIMIT {safe_limit}
                     """,
                     params,
@@ -456,6 +459,7 @@ class QuestDbMarketDataService:
                 ts TIMESTAMP,
                 received_at TIMESTAMP,
                 ingest_id STRING,
+                ingest_seq LONG,
                 schema_version INT,
                 vt_symbol SYMBOL CAPACITY 10000 CACHE,
                 symbol SYMBOL CAPACITY 10000 CACHE,
@@ -575,6 +579,7 @@ def _normalize_tick(tick: dict[str, Any]) -> dict[str, Any] | None:
     row: dict[str, Any] = {
         "ts": timestamp,
         "received_at": received_at,
+        "ingest_seq": _int_or_default(tick.get("ingest_seq"), 0),
         "schema_version": schema_version,
         "vt_symbol": vt_symbol,
         "symbol": symbol,
@@ -607,6 +612,7 @@ def _prepare_tick_row(row: dict[str, Any]) -> dict[str, Any]:
     prepared = dict(row)
     prepared["ts"] = _parse_datetime(prepared.get("ts") or prepared.get("datetime"))
     prepared["received_at"] = _parse_datetime(prepared.get("received_at") or prepared["ts"])
+    prepared["ingest_seq"] = _int_or_default(prepared.get("ingest_seq"), 0)
     prepared["schema_version"] = _int_or_default(prepared.get("schema_version"), SCHEMA_VERSION)
     if not prepared.get("raw_json"):
         prepared["raw_json"] = json.dumps(prepared, ensure_ascii=False, default=str, sort_keys=True)
@@ -645,6 +651,7 @@ def _ilp_columns(row: dict[str, Any]) -> dict[str, Any]:
     columns: dict[str, Any] = {
         "received_at": row["received_at"],
         "ingest_id": row["ingest_id"],
+        "ingest_seq": row["ingest_seq"],
         "schema_version": row["schema_version"],
         "raw_json": row["raw_json"],
     }
@@ -758,6 +765,7 @@ def _csv_row_to_tick(row: dict[str, str]) -> dict[str, Any] | None:
         "name": row.get("name"),
         "received_at": row.get("received_at"),
         "ingest_id": row.get("ingest_id"),
+        "ingest_seq": row.get("ingest_seq"),
         "schema_version": row.get("schema_version"),
         "last_price": last_price,
         "last_volume": _number(row.get("last_volume")),

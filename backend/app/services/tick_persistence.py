@@ -310,6 +310,8 @@ class TickPersistenceService:
         self._stop_event = Event()
         self._thread: Thread | None = None
         self._running = False
+        self._ingest_seq = 0
+        self._ingest_seq_lock = Lock()
         self._inflight_lock = Lock()
         self._inflight_batch: list[dict[str, Any]] = []
         self._inflight_spooled = False
@@ -363,6 +365,7 @@ class TickPersistenceService:
         tick_payload = dict(tick)
         tick_payload["received_at"] = received_at.isoformat()
         tick_payload["ingest_id"] = tick_payload.get("ingest_id") or f"{received_at.strftime('%Y%m%dT%H%M%S%fZ')}-{uuid4().hex}"
+        tick_payload["ingest_seq"] = tick_payload.get("ingest_seq") or self._next_ingest_seq()
         row = self.market_store.normalize_tick(tick_payload)
         if row is None:
             self._inc("invalid_total")
@@ -555,6 +558,11 @@ class TickPersistenceService:
         with self._inflight_lock:
             self._inflight_batch = list(rows)
             self._inflight_spooled = False
+
+    def _next_ingest_seq(self) -> int:
+        with self._ingest_seq_lock:
+            self._ingest_seq += 1
+            return self._ingest_seq
 
     def _clear_inflight_batch(self) -> None:
         with self._inflight_lock:

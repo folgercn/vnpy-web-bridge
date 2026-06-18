@@ -89,6 +89,7 @@ class TickDto(BaseModel):
     datetime: str | None = None
     received_at: str | None = None
     ingest_id: str | None = None
+    ingest_seq: int | None = None
     schema_version: int | None = None
     trading_day: str | None = None
     action_day: str | None = None

@@ -135,6 +135,7 @@ def test_save_tick_writes_to_questdb_connection() -> None:
     assert params[TICK_SELECT_FIELDS.index("vt_symbol")] == "rb2610.SHFE"
     assert params[TICK_SELECT_FIELDS.index("ts")] == datetime(2026, 6, 18, 2, 0, tzinfo=timezone.utc)
     assert params[TICK_SELECT_FIELDS.index("received_at")] == datetime(2026, 6, 18, 2, 0, 1, tzinfo=timezone.utc)
+    assert params[TICK_SELECT_FIELDS.index("ingest_seq")] == 0
     assert params[TICK_SELECT_FIELDS.index("schema_version")] == 2
     assert params[TICK_SELECT_FIELDS.index("name")] == "螺纹钢"
     assert len(params[TICK_SELECT_FIELDS.index("ingest_id")]) == 32
@@ -166,6 +167,7 @@ def test_save_tick_uses_ilp_batch_when_configured(monkeypatch) -> None:
             "datetime": "2026-06-18T10:00:00+08:00",
             "received_at": "2026-06-18T10:00:01+08:00",
             "ingest_id": "event-1",
+            "ingest_seq": 42,
             "last_price": 3126,
             "volume": 100,
         }
@@ -187,6 +189,7 @@ def test_save_tick_uses_ilp_batch_when_configured(monkeypatch) -> None:
         "gateway_name": "CTP",
     }
     assert row["columns"]["ingest_id"] == "event-1"
+    assert row["columns"]["ingest_seq"] == 42
     assert row["columns"]["last_price"] == 3126.0
     assert row["columns"]["volume"] == 100.0
     assert row["at"] == datetime(2026, 6, 18, 2, 0, tzinfo=timezone.utc)
@@ -223,6 +226,7 @@ def test_normalize_tick_builds_stable_ingest_id() -> None:
     assert first["name"] == "螺纹钢"
     assert first["ts"] == datetime(2026, 6, 18, 2, 0, tzinfo=timezone.utc)
     assert first["received_at"] == first["ts"]
+    assert first["ingest_seq"] == 0
     assert first["ingest_id"] == second["ingest_id"]
 
 
@@ -320,6 +324,8 @@ def test_query_ticks_returns_schema_v2_fields() -> None:
             row.append(datetime(2026, 6, 18, 2, 0, 1, tzinfo=timezone.utc))
         elif field == "ingest_id":
             row.append("abc123")
+        elif field == "ingest_seq":
+            row.append(42)
         elif field == "schema_version":
             row.append(2)
         elif field == "vt_symbol":
@@ -346,10 +352,12 @@ def test_query_ticks_returns_schema_v2_fields() -> None:
     assert ticks[0]["datetime"] == "2026-06-18T02:00:00+00:00"
     assert ticks[0]["received_at"] == "2026-06-18T02:00:01+00:00"
     assert ticks[0]["ingest_id"] == "abc123"
+    assert ticks[0]["ingest_seq"] == 42
     assert ticks[0]["schema_version"] == 2
     assert ticks[0]["name"] == "螺纹钢"
     assert ticks[0]["bid_price_5"] == 1.0
-    assert "SELECT ts, received_at, ingest_id" in connection.calls[0][0]
+    assert "SELECT ts, received_at, ingest_id, ingest_seq" in connection.calls[0][0]
+    assert "ORDER BY ts DESC, ingest_seq DESC" in connection.calls[0][0]
 
 
 def test_init_schema_is_idempotent_for_existing_v1_table() -> None:
@@ -362,6 +370,7 @@ def test_init_schema_is_idempotent_for_existing_v1_table() -> None:
     assert service._initialized is True
     assert any("CREATE TABLE IF NOT EXISTS market_ticks" in call[0] for call in connection.calls)
     assert any("ALTER TABLE market_ticks ADD COLUMN received_at TIMESTAMP" in call[0] for call in connection.calls)
+    assert any("ALTER TABLE market_ticks ADD COLUMN ingest_seq LONG" in call[0] for call in connection.calls)
     assert any("ALTER TABLE market_ticks DEDUP ENABLE UPSERT KEYS(ts, ingest_id)" in call[0] for call in connection.calls)
 
 
@@ -403,6 +412,7 @@ def test_csv_export_import_preserves_schema_v2_identity() -> None:
                 "datetime": "2026-06-18T02:00:00+00:00",
                 "received_at": "2026-06-18T02:00:01+00:00",
                 "ingest_id": "stable-id",
+                "ingest_seq": 7,
                 "schema_version": 2,
                 "vt_symbol": "rb2610.SHFE",
                 "symbol": "rb2610",
@@ -423,4 +433,5 @@ def test_csv_export_import_preserves_schema_v2_identity() -> None:
     params = connection.calls[0][1]
     assert params
     assert params[TICK_SELECT_FIELDS.index("ingest_id")] == "stable-id"
+    assert params[TICK_SELECT_FIELDS.index("ingest_seq")] == 7
     assert params[TICK_SELECT_FIELDS.index("received_at")] == datetime(2026, 6, 18, 2, 0, 1, tzinfo=timezone.utc)
