@@ -258,6 +258,40 @@ def test_spool_replay_ack_does_not_delete_new_active_rows(tmp_path) -> None:
     assert [row["ingest_id"] for row in service.spool.iter_active_rows_for_test()] == ["new"]
 
 
+def test_replay_segment_preserves_oldest_received_at_after_restart(tmp_path) -> None:
+    service, _ = make_service(tmp_path)
+    row = service.market_store.normalize_tick({"ingest_id": "old", "received_at": "2026-06-18T01:00:00+00:00"})
+    assert row
+    service.spool.append_rows([row])
+    segment = service.spool.claim_replay_segment()
+    assert segment
+    replay_meta_path = service.spool._replay_meta_path(segment.path)
+    assert replay_meta_path.exists()
+
+    restarted, _ = make_service(tmp_path)
+    snapshot = restarted.snapshot()
+
+    assert snapshot["spool_rows"] == 1
+    assert snapshot["oldest_pending_received_at"] == "2026-06-18T01:00:00+00:00"
+    assert snapshot["persistence_lag_seconds"] > 0
+
+
+def test_replay_ack_removes_sidecar_meta(tmp_path) -> None:
+    service, _ = make_service(tmp_path)
+    row = service.market_store.normalize_tick({"ingest_id": "old", "received_at": "2026-06-18T01:00:00+00:00"})
+    assert row
+    service.spool.append_rows([row])
+    segment = service.spool.claim_replay_segment()
+    assert segment
+    replay_meta_path = service.spool._replay_meta_path(segment.path)
+    assert replay_meta_path.exists()
+
+    service.spool.ack_replay_segment(segment)
+
+    assert not segment.path.exists()
+    assert not replay_meta_path.exists()
+
+
 def test_spool_fsync_policy_is_configurable(tmp_path, monkeypatch) -> None:
     calls: list[int] = []
     monkeypatch.setattr("app.services.tick_persistence.os.fsync", lambda fd: calls.append(fd))
