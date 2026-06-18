@@ -226,6 +226,64 @@ def test_normalize_tick_builds_stable_ingest_id() -> None:
     assert first["ingest_id"] == second["ingest_id"]
 
 
+def test_normalize_tick_infers_action_and_trading_day_for_day_session() -> None:
+    row = _normalize_tick(
+        {
+            "vt_symbol": "rb2610.SHFE",
+            "datetime": "2026-06-18T10:00:00+08:00",
+            "last_price": 3126,
+        }
+    )
+
+    assert row
+    assert row["action_day"] == "20260618"
+    assert row["trading_day"] == "20260618"
+
+
+def test_normalize_tick_infers_next_trading_day_for_night_session() -> None:
+    row = _normalize_tick(
+        {
+            "vt_symbol": "rb2610.SHFE",
+            "datetime": "2026-06-12T21:00:00+08:00",
+            "last_price": 3126,
+        }
+    )
+
+    assert row
+    assert row["action_day"] == "20260612"
+    assert row["trading_day"] == "20260615"
+
+
+def test_normalize_tick_keeps_explicit_ctp_trading_day() -> None:
+    row = _normalize_tick(
+        {
+            "vt_symbol": "rb2610.SHFE",
+            "datetime": "2026-06-12T21:00:00+08:00",
+            "last_price": 3126,
+            "action_day": "20260612",
+            "trading_day": "20260616",
+        }
+    )
+
+    assert row
+    assert row["action_day"] == "20260612"
+    assert row["trading_day"] == "20260616"
+
+
+def test_normalize_tick_does_not_shift_cffex_evening_timestamp() -> None:
+    row = _normalize_tick(
+        {
+            "vt_symbol": "IF2606.CFFEX",
+            "datetime": "2026-06-12T21:00:00+08:00",
+            "last_price": 4000,
+        }
+    )
+
+    assert row
+    assert row["action_day"] == "20260612"
+    assert row["trading_day"] == "20260612"
+
+
 def test_get_bars_reads_questdb_sampled_rows() -> None:
     service = QuestDbMarketDataService(Settings(questdb_pg_dsn="postgresql://admin:quest@questdb:8812/qdb", vnpy_gateway_name="CTP"))
     connection = FakeConnection(rows=[(datetime(2026, 6, 18, 2, 0, tzinfo=timezone.utc), 1.0, 3.0, 0.5, 2.0, 10.0, 20.0)])

@@ -35,7 +35,7 @@ DATABASE_URL=postgresql://vnpy:vnpy@127.0.0.1:5432/vnpy
 datetime,received_at,ingest_id,schema_version,vt_symbol,symbol,exchange,gateway_name,name,trading_day,action_day,last_price,last_volume,volume,turnover,open_interest,open_price,high_price,low_price,pre_close,limit_up,limit_down,bid_price_1,bid_price_2,bid_price_3,bid_price_4,bid_price_5,ask_price_1,ask_price_2,ask_price_3,ask_price_4,ask_price_5,bid_volume_1,bid_volume_2,bid_volume_3,bid_volume_4,bid_volume_5,ask_volume_1,ask_volume_2,ask_volume_3,ask_volume_4,ask_volume_5
 ```
 
-`market_ticks` schema v2 使用 UTC `ts` 作为 QuestDB 时间戳，额外保存 `received_at`、`schema_version` 和事件级 `ingest_id`，并启用 `DEDUP UPSERT KEYS(ts, ingest_id)`，重试同一 tick 时保持幂等。`raw_json` 保留原始 TickData 字段，结构化列覆盖 vn.py `TickData` 的合约名、价格、成交量、成交额、持仓、涨跌停、开高低昨收和买卖 1-5 档；`extra` 保留在 `raw_json` 中。
+`market_ticks` schema v2 使用 UTC `ts` 作为 QuestDB 时间戳，额外保存 `received_at`、`schema_version` 和事件级 `ingest_id`，并启用 `DEDUP UPSERT KEYS(ts, ingest_id)`，重试同一 tick 时保持幂等。`raw_json` 保留原始 TickData 字段，结构化列覆盖 vn.py `TickData` 的合约名、价格、成交量、成交额、持仓、涨跌停、开高低昨收和买卖 1-5 档；`extra` 保留在 `raw_json` 中。若 CTP payload 没有 `action_day`/`trading_day`，Web Bridge 会按北京时间推导 `action_day`，并对 SHFE/DCE/CZCE/INE/GFEX 的 20:00 后夜盘 tick 将 `trading_day` 推到下一交易日；原始字段存在时始终优先保留原值。
 
 实时 tick 持久化由后台 writer 完成，RPC callback 只做标准化和有界入队，不直接访问 QuestDB。相关配置：
 
