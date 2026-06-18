@@ -31,6 +31,7 @@ class MarketDataQueryDto(BaseModel):
 class MarketDataStatusDto(BaseModel):
     enabled: bool
     running: bool
+    worker_alive: bool | None = None
     connected: bool
     received_total: int
     valid_total: int
@@ -50,7 +51,11 @@ class MarketDataStatusDto(BaseModel):
     spool_disk_used_percent: float | None = None
     last_received_at: str | None = None
     last_persisted_at: str | None = None
+    last_failure_at: str | None = None
+    last_success_at: str | None = None
+    oldest_pending_received_at: str | None = None
     persistence_lag_seconds: float | None = None
+    consecutive_failures: int | None = None
     last_error: str | None = None
 
 

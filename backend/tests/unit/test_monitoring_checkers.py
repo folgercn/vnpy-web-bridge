@@ -51,7 +51,12 @@ class HealthyPostgres:
 
 class HealthyTickPersistence:
     def snapshot(self) -> dict:
-        return {"enabled": True, "running": True, "last_error": None, "queue_depth": 0, "spool_rows": 0, "persistence_lag_seconds": 0}
+        return {"enabled": True, "running": True, "worker_alive": True, "last_error": None, "queue_depth": 0, "spool_rows": 0, "persistence_lag_seconds": 0}
+
+
+class StoppedTickPersistence:
+    def snapshot(self) -> dict:
+        return {"enabled": True, "running": False, "worker_alive": False, "last_error": None, "queue_depth": 0, "spool_rows": 0, "persistence_lag_seconds": 0}
 
 
 class FakeStrategies:
@@ -202,3 +207,15 @@ def test_dependency_health_error_records_incident(tmp_path) -> None:
     incident = next(item for item in snapshot["incidents"] if item["incident_id"] == "postgres_unavailable:watchlist")
     assert incident["status"] == "firing"
     assert incident["details"]["type"] == "RuntimeError"
+
+
+def test_tick_persistence_worker_stop_records_incident(tmp_path) -> None:
+    now = datetime(2026, 6, 18, 2, 0, tzinfo=timezone.utc)
+    service = build_service(tmp_path, now=now, tick_persistence=StoppedTickPersistence())
+
+    snapshot = service.run_checks()
+
+    incident = next(item for item in snapshot["incidents"] if item["incident_id"] == "questdb_tick_persistence_lag:market_ticks")
+    assert incident["status"] == "firing"
+    assert incident["summary"] == "tick persistence writer stopped"
+    assert incident["details"]["worker_alive"] is False

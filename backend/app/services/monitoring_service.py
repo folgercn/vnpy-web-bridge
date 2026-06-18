@@ -199,16 +199,36 @@ class MonitoringService:
 
         tick_status = self.tick_persistence.snapshot()
         lag = tick_status.get("persistence_lag_seconds")
-        tick_healthy = not tick_status.get("enabled") or not tick_status.get("last_error")
+        worker_alive = bool(tick_status.get("worker_alive", tick_status.get("running")))
+        tick_healthy = not tick_status.get("enabled") or (worker_alive and not tick_status.get("last_error"))
         if isinstance(lag, (int, float)) and lag >= 300:
             tick_healthy = False
+        if not worker_alive and tick_status.get("enabled"):
+            summary = "tick persistence writer stopped"
+        elif tick_status.get("last_error"):
+            summary = str(tick_status.get("last_error"))
+        else:
+            summary = f"lag {lag}s"
         tick_incident = self.alerts.record_check(
             rule_id="questdb_tick_persistence_lag",
             scope_id="market_ticks",
             healthy=tick_healthy,
             severity="critical" if isinstance(lag, (int, float)) and lag >= 300 else "warning",
-            summary="Tick persistence healthy" if tick_healthy else str(tick_status.get("last_error") or f"lag {lag}s"),
-            details={key: tick_status.get(key) for key in ("enabled", "running", "queue_depth", "spool_rows", "persistence_lag_seconds", "last_error")},
+            summary="Tick persistence healthy" if tick_healthy else summary,
+            details={
+                key: tick_status.get(key)
+                for key in (
+                    "enabled",
+                    "running",
+                    "worker_alive",
+                    "queue_depth",
+                    "spool_rows",
+                    "oldest_pending_received_at",
+                    "persistence_lag_seconds",
+                    "consecutive_failures",
+                    "last_error",
+                )
+            },
             now=now,
         )
         checks.append(_check("tick_persistence", tick_healthy, str(tick_incident.get("summary")), tick_incident))

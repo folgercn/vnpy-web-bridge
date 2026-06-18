@@ -21,7 +21,7 @@ class FakeMarketStore:
             return None
         return {
             "ts": datetime(2026, 6, 18, 2, 0, tzinfo=timezone.utc),
-            "received_at": datetime(2026, 6, 18, 2, 0, 1, tzinfo=timezone.utc),
+            "received_at": datetime.fromisoformat(tick["received_at"]) if tick.get("received_at") else datetime(2026, 6, 18, 2, 0, 1, tzinfo=timezone.utc),
             "ingest_id": tick.get("ingest_id", "row-1"),
             "schema_version": 2,
             "vt_symbol": tick.get("vt_symbol", "rb2610.SHFE"),
@@ -99,11 +99,11 @@ def test_queue_full_spools_without_silent_drop(tmp_path) -> None:
     assert service.enqueue_tick({"ingest_id": "spooled"}) is True
 
     assert store.saved == []
-    assert service.queue.qsize() == 0
-    assert service.snapshot()["spooled_total"] == 2
+    assert service.queue.qsize() == 1
+    assert service.snapshot()["spooled_total"] == 1
     assert service.snapshot()["dropped_total"] == 0
-    assert service.spool.row_count() == 2
-    assert [row["ingest_id"] for row in service.spool.load_rows()] == ["queued", "spooled"]
+    assert service.spool.row_count() == 1
+    assert [row["ingest_id"] for row in service.spool.load_rows()] == ["spooled"]
 
 
 def test_failed_flush_spools_and_replays_later(tmp_path) -> None:
@@ -161,6 +161,8 @@ def test_snapshot_exposes_required_observability_fields(tmp_path) -> None:
     assert after_drain["persisted_total"] == 1
     assert after_drain["last_persisted_at"]
     assert after_drain["persistence_lag_seconds"] == 0.0
+    assert after_drain["last_error"] is None
+    assert after_drain["consecutive_failures"] == 0
 
 
 def test_write_error_logs_are_rate_limited(tmp_path, caplog) -> None:
@@ -175,3 +177,61 @@ def test_write_error_logs_are_rate_limited(tmp_path, caplog) -> None:
 
     messages = [record.message for record in caplog.records if "tick persistence write failed" in record.message]
     assert len(messages) == 1
+
+
+def test_spool_replay_ack_does_not_delete_new_active_rows(tmp_path) -> None:
+    service, _ = make_service(tmp_path)
+    first = service.market_store.normalize_tick({"ingest_id": "old", "received_at": "2026-06-18T02:00:01+00:00"})
+    second = service.market_store.normalize_tick({"ingest_id": "new", "received_at": "2026-06-18T02:00:02+00:00"})
+    assert first and second
+
+    service.spool.append_rows([first])
+    segment = service.spool.claim_replay_segment()
+    assert segment
+    assert [row["ingest_id"] for row in segment.rows] == ["old"]
+
+    service.spool.append_rows([second])
+    service.spool.ack_replay_segment(segment)
+
+    assert service.spool.row_count() == 1
+    assert [row["ingest_id"] for row in service.spool.iter_active_rows_for_test()] == ["new"]
+
+
+def test_worker_starts_without_opening_database(tmp_path) -> None:
+    service, store = make_service(tmp_path)
+    store.fail = True
+
+    service.start()
+    try:
+        assert service.running is True
+    finally:
+        service.stop(timeout=2)
+
+
+def test_spool_ignores_truncated_last_record(tmp_path) -> None:
+    service, _ = make_service(tmp_path)
+    row = service.market_store.normalize_tick({"ingest_id": "ok", "received_at": "2026-06-18T02:00:01+00:00"})
+    assert row
+    service.spool.append_rows([row])
+    with service.spool.path.open("a", encoding="utf-8") as file:
+        file.write('{"partial":')
+
+    segment = service.spool.claim_replay_segment()
+
+    assert segment
+    assert [item["ingest_id"] for item in segment.rows] == ["ok"]
+
+
+def test_spool_quarantines_corrupt_middle_record(tmp_path) -> None:
+    service, _ = make_service(tmp_path)
+    row = service.market_store.normalize_tick({"ingest_id": "ok", "received_at": "2026-06-18T02:00:01+00:00"})
+    assert row
+    service.spool.append_rows([row])
+    with service.spool.path.open("a", encoding="utf-8") as file:
+        file.write('{"broken":\n')
+        file.write('{"valid": true}\n')
+
+    segment = service.spool.claim_replay_segment()
+
+    assert segment is None
+    assert list(tmp_path.glob("*.bad"))
