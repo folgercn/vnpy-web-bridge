@@ -76,6 +76,15 @@ class WatchlistService:
             conn.commit()
         return {"removed": bool(deleted), "watch_key": watch_key}
 
+    def health_check(self) -> dict[str, Any]:
+        if not self.settings.database_url:
+            return {"configured": False, "connected": False, "status": "disabled"}
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+                cur.fetchone()
+        return {"configured": True, "connected": True, "status": "ok"}
+
     def _ensure_user_defaults(self, username: str) -> None:
         self._ensure_schema()
         with self._connect() as conn:

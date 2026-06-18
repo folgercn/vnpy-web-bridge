@@ -7,19 +7,30 @@ from app.core.security import CurrentUser, require_roles
 from app.schemas.monitoring import SilenceCreateDTO
 from app.services.alert_service import alert_service
 from app.services.audit_service import audit_service
+from app.services.monitoring_service import monitoring_service
 from app.services.telegram_service import TelegramDeliveryError, telegram_service
 
 router = APIRouter()
 
 
 @router.get("/health/dependencies")
-def health_dependencies(_: CurrentUser = Depends(require_roles("viewer", "trader", "admin"))) -> dict:
-    return ok(alert_service.summary())
+def health_dependencies(
+    probe: bool = False,
+    _: CurrentUser = Depends(require_roles("viewer", "trader", "admin")),
+) -> dict:
+    if probe:
+        return ok(monitoring_service.run_checks(probe_rpc=True))
+    snapshot = monitoring_service.snapshot()
+    if snapshot.get("checked_at"):
+        return ok(snapshot)
+    return ok(monitoring_service.run_checks(probe_rpc=False))
 
 
 @router.get("/monitor/summary")
 def monitor_summary(_: CurrentUser = Depends(require_roles("viewer", "trader", "admin"))) -> dict:
-    return ok(alert_service.summary())
+    summary = alert_service.summary()
+    summary["last_check"] = monitoring_service.snapshot()
+    return ok(summary)
 
 
 @router.get("/monitor/incidents")

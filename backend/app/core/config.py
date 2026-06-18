@@ -47,6 +47,12 @@ class Settings(BaseSettings):
     monitor_state_path: str = "/app/logs/monitor/state.json"
     monitor_events_path: str = "/app/logs/monitor/events.jsonl"
     monitor_max_silence_seconds: int = Field(default=86_400, ge=60)
+    monitor_tick_stale_seconds: int = Field(default=120, ge=10)
+    monitor_http_5xx_threshold: int = Field(default=5, ge=1)
+    monitor_http_5xx_window_seconds: int = Field(default=300, ge=10)
+    monitor_trade_failure_threshold: int = Field(default=3, ge=1)
+    monitor_trade_failure_window_seconds: int = Field(default=300, ge=10)
+    monitor_expected_strategies: str = ""
 
     telegram_enabled: bool = False
     telegram_bot_token: str = ""

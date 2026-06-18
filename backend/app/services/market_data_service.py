@@ -146,6 +146,14 @@ class QuestDbMarketDataService:
             self._conn = None
             self._initialized = False
 
+    def health_check(self) -> dict[str, Any]:
+        if not self.enabled:
+            return {"configured": False, "connected": False, "status": "disabled"}
+        with self._lock:
+            conn = self._connect()
+            conn.execute("SELECT 1")
+        return {"configured": True, "connected": True, "status": "ok"}
+
     def save_tick(self, tick: dict[str, Any]) -> bool:
         if not self.enabled:
             return False

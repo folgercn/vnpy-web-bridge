@@ -22,6 +22,10 @@ class MemoryStore:
         with self._lock:
             return self._ticks.get(vt_symbol)
 
+    def ticks(self) -> dict[str, dict[str, Any]]:
+        with self._lock:
+            return dict(self._ticks)
+
     def delete_tick(self, vt_symbol: str) -> None:
         with self._lock:
             self._ticks.pop(vt_symbol, None)
