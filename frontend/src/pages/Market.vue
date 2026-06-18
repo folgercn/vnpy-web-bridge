@@ -27,6 +27,10 @@
         <n-button @click="showWatchManager = !showWatchManager">管理</n-button>
         <n-button @click="terminal.refreshContracts">刷新</n-button>
       </div>
+      <div class="market-session">
+        <trading-session-badge :exchange="exchange" :symbol="symbol" compact />
+        <span class="muted">交易时段按品种优先，交易所兜底</span>
+      </div>
       <div v-if="showWatchManager" class="watch-manager">
         <div class="toolbar watch-manager-toolbar">
           <n-select
@@ -78,13 +82,12 @@ import {
   type UTCTimestamp
 } from 'lightweight-charts'
 import DataPanel from '../components/common/DataPanel.vue'
-import { formatExchange } from '../constants/exchanges'
+import TradingSessionBadge from '../components/common/TradingSessionBadge.vue'
+import { contractSearchText, formatContractTitle, normalizeKeyword, productNameForRow, symbolMonth, symbolRoot, vtSymbolOf, type ContractRow } from '../utils/marketContracts'
 import { useMediaQuery } from '../composables/useMediaQuery'
 import { addMarketWatchlistItem, getMarketWatchlist, removeMarketWatchlistItem, type MarketWatchlistItem } from '../api/market'
 import { useTerminalStore } from '../stores/terminal'
 import { useThemeStore } from '../stores/theme'
-
-type ContractRow = Record<string, unknown>
 
 const message = useMessage()
 const terminal = useTerminalStore()
@@ -396,43 +399,17 @@ function watchedLabel(item: MarketWatchlistItem) {
 
 function contractOption(row: ContractRow) {
   const value = vtSymbolOf(row)
-  return { label: formatContractTitle(row, productLabelForRow(row)), value }
+  return { label: formatContractTitle(row, productLabelForRow(row) || productNameForRow(row)), value }
 }
 
 function contractMatchesKeyword(row: ContractRow, keyword: string) {
-  return normalizeKeyword(`${formatContractTitle(row)} ${vtSymbolOf(row)} ${row.symbol || ''} ${row.name || ''}`).includes(keyword)
-}
-
-function normalizeKeyword(value: string) {
-  return value.trim().toLowerCase()
-}
-
-function vtSymbolOf(row: ContractRow) {
-  return String(row.vt_symbol || `${row.symbol}.${row.exchange}`)
+  return contractSearchText(row).includes(keyword)
 }
 
 function displayContractForVtSymbol(value: unknown) {
   const vtSymbol = String(value || '')
   const row = terminal.contracts.find((item) => vtSymbolOf(item) === vtSymbol)
-  return row ? formatContractTitle(row, productLabelForRow(row)) : vtSymbol
-}
-
-function symbolRoot(row: ContractRow) {
-  return String(row.symbol || '').toLowerCase().replace(/\d+.*$/, '')
-}
-
-function symbolMonth(row: ContractRow) {
-  return String(row.symbol || '').match(/\d+$/)?.[0] || ''
-}
-
-function formatContractTitle(row: ContractRow, fallbackProductName = '') {
-  const symbol = String(row.symbol || '').toUpperCase()
-  const name = String(row.name || '')
-  const month = symbolMonth(row)
-  const exchangeText = formatExchange(row.exchange).replace(`${String(row.exchange || '')} - `, '')
-  const rawName = fallbackProductName || (name && name.toLowerCase() !== String(row.symbol || '').toLowerCase() ? name : '')
-  const readableName = rawName && month && !rawName.includes(month) ? `${rawName}${month}` : rawName || symbol
-  return `${readableName} / ${symbol} · ${exchangeText}`
+  return row ? formatContractTitle(row, productLabelForRow(row) || productNameForRow(row)) : vtSymbol
 }
 
 function compareContracts(a: ContractRow, b: ContractRow) {
@@ -593,6 +570,14 @@ function toMinuteTimestamp(value: unknown): UTCTimestamp {
   gap: 10px;
 }
 
+.market-session {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 16px;
+  margin-top: 12px;
+}
+
 .watch-manager-toolbar {
   flex-wrap: nowrap;
 }
@@ -629,6 +614,10 @@ function toMinuteTimestamp(value: unknown): UTCTimestamp {
 
   .watch-manager-toolbar {
     flex-wrap: wrap;
+  }
+
+  .market-session {
+    align-items: flex-start;
   }
 
   .market-contract-select,
