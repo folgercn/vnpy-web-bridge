@@ -1,5 +1,9 @@
 # 部署说明
 
+## CD 环境覆盖
+
+CD 会始终把 `APP_ENV`、`JWT_SECRET_KEY`、`MONITOR_ENABLED` 写入最终 `.env`。`TELEGRAM_BOT_TOKEN` 和 `TELEGRAM_CHAT_ID` 只在两个 secret 同时存在时覆盖；只配置其中一个会让部署提前失败，避免半配置告警。
+
 ## QuestDB
 
 生产 compose 固定 QuestDB 为 `questdb/questdb:9.4.3`。生产环境不要使用 `latest`，否则 tick schema、WAL 和 dedup 行为不可复现。

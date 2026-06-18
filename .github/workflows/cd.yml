@@ -121,8 +121,7 @@ jobs:
             echo "Missing deploy env. Add GitHub secret DEPLOY_ENV_FILE or keep backend/.env on the self-hosted runner." >&2
             exit 1
           fi
-          if [ -n "${TELEGRAM_BOT_TOKEN_SECRET:-}" ] && [ -n "${TELEGRAM_CHAT_ID_SECRET:-}" ]; then
-            python3 - .deploy.env <<'PY'
+          python3 - .deploy.env <<'PY'
           from __future__ import annotations
 
           import os
@@ -140,26 +139,49 @@ jobs:
           }
           lines = env_path.read_text(encoding="utf-8").splitlines()
           kept = []
+          current = {}
           for line in lines:
               stripped = line.strip()
               key = stripped.split("=", 1)[0].strip() if "=" in stripped and not stripped.startswith("#") else ""
               if key in managed_keys:
+                  current[key] = stripped.split("=", 1)[1] if "=" in stripped else ""
                   continue
               kept.append(line)
 
+          jwt_secret = os.getenv("JWT_SECRET_KEY_SECRET") or current.get("JWT_SECRET_KEY")
+          if not jwt_secret:
+              print("Missing JWT_SECRET_KEY. Add GitHub secret JWT_SECRET_KEY or keep JWT_SECRET_KEY in the deploy env file.", file=sys.stderr)
+              raise SystemExit(1)
+
           overlay = {
-              "APP_ENV": os.getenv("APP_ENV_SECRET") or "production",
-              "JWT_SECRET_KEY": os.environ["JWT_SECRET_KEY_SECRET"],
-              "MONITOR_ENABLED": os.getenv("MONITOR_ENABLED_SECRET") or "true",
-              "TELEGRAM_ENABLED": os.getenv("TELEGRAM_ENABLED_SECRET") or "true",
-              "TELEGRAM_BOT_TOKEN": os.environ["TELEGRAM_BOT_TOKEN_SECRET"],
-              "TELEGRAM_CHAT_ID": os.environ["TELEGRAM_CHAT_ID_SECRET"],
+              "APP_ENV": os.getenv("APP_ENV_SECRET") or current.get("APP_ENV") or "production",
+              "JWT_SECRET_KEY": jwt_secret,
+              "MONITOR_ENABLED": os.getenv("MONITOR_ENABLED_SECRET") or current.get("MONITOR_ENABLED") or "true",
           }
+          telegram_token = os.getenv("TELEGRAM_BOT_TOKEN_SECRET")
+          telegram_chat_id = os.getenv("TELEGRAM_CHAT_ID_SECRET")
+          if bool(telegram_token) != bool(telegram_chat_id):
+              print("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID secrets must be set together.", file=sys.stderr)
+              raise SystemExit(1)
+          if telegram_token and telegram_chat_id:
+              overlay.update(
+                  {
+                      "TELEGRAM_ENABLED": os.getenv("TELEGRAM_ENABLED_SECRET") or current.get("TELEGRAM_ENABLED") or "true",
+                      "TELEGRAM_BOT_TOKEN": telegram_token,
+                      "TELEGRAM_CHAT_ID": telegram_chat_id,
+                  }
+              )
+          else:
+              if os.getenv("TELEGRAM_ENABLED_SECRET"):
+                  overlay["TELEGRAM_ENABLED"] = os.environ["TELEGRAM_ENABLED_SECRET"]
+              for key in ("TELEGRAM_ENABLED", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"):
+                  if key not in overlay and current.get(key):
+                      overlay[key] = current[key]
+
           output = "\n".join(kept).rstrip() + "\n\n"
           output += "\n".join(f"{key}={value}" for key, value in overlay.items()) + "\n"
           env_path.write_text(output, encoding="utf-8")
           PY
-          fi
           chmod 600 .deploy.env
 
       - name: Prepare deployment directory
