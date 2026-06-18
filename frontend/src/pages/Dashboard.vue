@@ -7,12 +7,7 @@
       <n-card title="Trade" size="small">{{ terminal.webTradeEnabled ? 'enabled' : 'disabled' }}</n-card>
     </div>
     <n-card title="交易时段" size="small">
-      <div class="session-grid">
-        <div v-for="item in sessionItems" :key="item.symbol" class="session-item">
-          <div class="session-name">{{ item.name }}</div>
-          <trading-session-badge :exchange="item.exchange" :symbol="item.symbol" />
-        </div>
-      </div>
+      <n-data-table :columns="sessionColumns" :data="sessionRows" :pagination="false" :scroll-x="1030" size="small" />
     </n-card>
     <div class="grid-2">
       <data-panel title="资金摘要" :columns="accountColumns" :rows="terminal.accounts" />
@@ -29,28 +24,75 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted } from 'vue'
+import { computed, h, onBeforeUnmount, onMounted, ref } from 'vue'
+import { NTag, type DataTableColumns } from 'naive-ui'
 import DataPanel from '../components/common/DataPanel.vue'
-import TradingSessionBadge from '../components/common/TradingSessionBadge.vue'
 import { useTerminalStore } from '../stores/terminal'
-import { symbolRoot } from '../utils/tradingSessions'
+import { getTradingSessionStatus, symbolRoot } from '../utils/tradingSessions'
+import { isResolvedMainContract, preferredMainContract, vtSymbolOf, type ContractRow } from '../utils/marketContracts'
 
 const terminal = useTerminalStore()
+const now = ref(new Date())
 const accountColumns = cols(['accountid', 'balance', 'available', 'frozen'])
 const positionColumns = cols(['vt_symbol', 'direction', 'volume', 'price', 'pnl'])
 const logColumns = cols(['type', 'action', 'message'])
+let timer: number | undefined
 const sessionItems = computed(() => {
   return defaultSessionContracts.map((item) => {
-    const contract = terminal.contracts.find(
+    const contracts = terminal.contracts.filter(
       (row) => symbolRoot(row.symbol) === item.root && String(row.exchange || '').toUpperCase() === item.exchange
     )
+    const contract = preferredMainContract(contracts as ContractRow[])
     return {
       name: item.name,
       symbol: String(contract?.symbol || item.symbol),
-      exchange: String(contract?.exchange || item.exchange)
+      exchange: String(contract?.exchange || item.exchange),
+      vt_symbol: contract ? vtSymbolOf(contract) : `${item.symbol}.${item.exchange}`,
+      is_main: contract ? isResolvedMainContract(contract, contracts as ContractRow[]) : true
     }
   })
 })
+const sessionRows = computed(() =>
+  sessionItems.value.map((item) => {
+    const status = getTradingSessionStatus(item.exchange, item.symbol, now.value)
+    return {
+      ...item,
+      key: item.vt_symbol,
+      status_label: status.label,
+      status_type: status.isOpen ? 'success' : 'warning',
+      status_text: status.statusText,
+      session_text: status.currentSessionText,
+      next_open: status.isOpen ? '-' : status.nextOpenText,
+      countdown: status.isOpen ? '-' : status.countdownText
+    }
+  })
+)
+const sessionColumns: DataTableColumns = [
+  { title: '品种', key: 'name', width: 120, fixed: 'left' },
+  { title: '主力合约', key: 'symbol', width: 120 },
+  { title: '交易所', key: 'exchange', width: 90 },
+  {
+    title: '标识',
+    key: 'role',
+    width: 90,
+    render: (row) => (row.is_main ? h(NTag, { type: 'success', round: true }, { default: () => '主力' }) : '-')
+  },
+  {
+    title: '状态',
+    key: 'status_label',
+    width: 90,
+    render: (row) =>
+      h(
+        NTag,
+        { round: true, type: row.status_type as 'success' | 'warning' },
+        { default: () => String(row.status_label || '-') }
+      )
+  },
+  { title: '当前', key: 'status_text', width: 130 },
+  { title: '时段', key: 'session_text', width: 150 },
+  { title: '下次开市', key: 'next_open', width: 120 },
+  { title: '倒计时', key: 'countdown', width: 110 }
+]
 
 const defaultSessionContracts = [
   { name: '天然橡胶', root: 'ru', symbol: 'ru2609', exchange: 'SHFE' },
@@ -62,27 +104,16 @@ const defaultSessionContracts = [
 
 onMounted(() => {
   if (!terminal.contracts.length) terminal.refreshContracts().catch(() => undefined)
+  timer = window.setInterval(() => {
+    now.value = new Date()
+  }, 30000)
+})
+
+onBeforeUnmount(() => {
+  if (timer) window.clearInterval(timer)
 })
 
 function cols(keys: string[]) {
   return keys.map((key) => ({ title: key, key }))
 }
 </script>
-
-<style scoped>
-.session-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 12px;
-}
-
-.session-item {
-  min-width: 0;
-  padding: 10px 0;
-}
-
-.session-name {
-  margin-bottom: 8px;
-  font-weight: 600;
-}
-</style>
