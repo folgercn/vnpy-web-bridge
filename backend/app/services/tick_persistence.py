@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 import logging
+import os
 from pathlib import Path
 from queue import Empty, Full, Queue
 import shutil
@@ -49,11 +50,20 @@ class ReplaySegment:
 
 
 class JsonlTickSpool:
-    def __init__(self, directory: str | Path, max_bytes: int, segment_bytes: int, market_store: QuestDbMarketDataService) -> None:
+    def __init__(
+        self,
+        directory: str | Path,
+        max_bytes: int,
+        segment_bytes: int,
+        market_store: QuestDbMarketDataService,
+        *,
+        fsync: bool = False,
+    ) -> None:
         self.directory = Path(directory)
         self.max_bytes = max_bytes
         self.segment_bytes = segment_bytes
         self.market_store = market_store
+        self.fsync = fsync
         self.path = self.directory / "ticks.active.jsonl"
         self.meta_path = self.directory / "ticks.active.meta.json"
         self._lock = Lock()
@@ -74,6 +84,9 @@ class JsonlTickSpool:
                 self._rotate_active_locked()
             with self.path.open("a", encoding="utf-8") as file:
                 file.write(payload)
+                file.flush()
+                if self.fsync:
+                    os.fsync(file.fileno())
             self._update_active_meta_locked(len(serialized), serialized)
         return len(serialized)
 
@@ -108,6 +121,8 @@ class JsonlTickSpool:
         with self._lock:
             if segment.path.exists():
                 segment.path.unlink()
+                if self.fsync:
+                    self._fsync_directory_locked()
 
     def size_bytes(self) -> int:
         with self._lock:
@@ -145,6 +160,8 @@ class JsonlTickSpool:
         self.path.rename(replay_path)
         if self.meta_path.exists():
             self.meta_path.unlink()
+        if self.fsync:
+            self._fsync_directory_locked()
         return replay_path
 
     def _oldest_replay_file_locked(self) -> Path | None:
@@ -173,7 +190,15 @@ class JsonlTickSpool:
                 if value:
                     meta["oldest_received_at"] = value
                     break
-        self.meta_path.write_text(json.dumps(meta, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+        tmp_path = self.meta_path.with_suffix(self.meta_path.suffix + f".{time.time_ns()}.tmp")
+        with tmp_path.open("w", encoding="utf-8") as file:
+            file.write(json.dumps(meta, ensure_ascii=False, sort_keys=True))
+            file.flush()
+            if self.fsync:
+                os.fsync(file.fileno())
+        tmp_path.replace(self.meta_path)
+        if self.fsync:
+            self._fsync_directory_locked()
 
     def _read_active_meta_locked(self) -> dict[str, Any]:
         if not self.meta_path.exists():
@@ -182,6 +207,16 @@ class JsonlTickSpool:
             return json.loads(self.meta_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             return {"rows": 0, "oldest_received_at": None}
+
+    def _fsync_directory_locked(self) -> None:
+        try:
+            fd = os.open(self.directory, os.O_RDONLY)
+        except OSError:
+            return
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
 
     def load_rows(self) -> list[dict[str, Any]]:
         segment = self.claim_replay_segment()
@@ -223,6 +258,7 @@ class TickPersistenceService:
             self.settings.questdb_tick_spool_max_bytes,
             self.settings.questdb_tick_spool_segment_bytes,
             self.market_store,
+            fsync=self.settings.questdb_tick_spool_fsync,
         )
         self.stats = TickPersistenceStats()
         self._stats_lock = Lock()
