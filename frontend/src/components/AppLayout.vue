@@ -20,7 +20,17 @@
           <status-badge label="Trade" :active="terminal.webTradeEnabled" />
           <n-tag type="info">{{ auth.user?.role }}</n-tag>
         </div>
-        <n-button size="small" @click="logout">退出</n-button>
+        <div class="topbar-actions">
+          <n-dropdown trigger="click" :options="themeOptions" @select="theme.setMode">
+            <n-button size="small" quaternary :circle="isMobile" class="theme-button" aria-label="主题设置">
+              <template #icon>
+                <n-icon><setting-outlined /></n-icon>
+              </template>
+              <span v-if="!isMobile">{{ themeLabel }}</span>
+            </n-button>
+          </n-dropdown>
+          <n-button size="small" @click="logout">退出</n-button>
+        </div>
       </n-layout-header>
       <n-layout-content class="content">
         <router-view />
@@ -35,30 +45,35 @@
 </template>
 
 <script setup lang="ts">
-import { h, onMounted, ref } from 'vue'
+import { computed, h, onMounted, ref } from 'vue'
 import { NIcon } from 'naive-ui'
 import {
   AccountBookOutlined,
   AreaChartOutlined,
+  BulbOutlined,
   DashboardOutlined,
   DatabaseOutlined,
+  DesktopOutlined,
   FileTextOutlined,
   LineChartOutlined,
   MenuOutlined,
   OrderedListOutlined,
   SecurityScanOutlined,
+  SettingOutlined,
   SwapOutlined
 } from '@vicons/antd'
 import { useRouter } from 'vue-router'
 import StatusBadge from './common/StatusBadge.vue'
 import { useAuthStore } from '../stores/auth'
 import { useTerminalStore } from '../stores/terminal'
+import { useThemeStore, type ThemeMode } from '../stores/theme'
 import { eventSocket } from '../ws/events'
 import { useMediaQuery } from '../composables/useMediaQuery'
 
 const router = useRouter()
 const auth = useAuthStore()
 const terminal = useTerminalStore()
+const theme = useThemeStore()
 const isMobile = useMediaQuery('(max-width: 760px)')
 const mobileMenuOpen = ref(false)
 
@@ -73,6 +88,16 @@ const menuOptions = [
   item('策略', '/strategies', SecurityScanOutlined),
   item('日志', '/logs', FileTextOutlined)
 ]
+const themeOptions = [
+  themeItem('跟随系统', 'system', DesktopOutlined),
+  themeItem('亮色', 'light', BulbOutlined),
+  themeItem('暗色', 'dark', SettingOutlined)
+]
+const themeLabel = computed(() => {
+  if (theme.mode === 'light') return '亮色'
+  if (theme.mode === 'dark') return '暗色'
+  return '跟随系统'
+})
 
 onMounted(async () => {
   await terminal.refreshStatus().catch(() => undefined)
@@ -81,6 +106,10 @@ onMounted(async () => {
 })
 
 function item(label: string, key: string, icon: unknown) {
+  return { label, key, icon: () => h(NIcon, null, { default: () => h(icon as never) }) }
+}
+
+function themeItem(label: string, key: ThemeMode, icon: unknown) {
   return { label, key, icon: () => h(NIcon, null, { default: () => h(icon as never) }) }
 }
 
@@ -120,10 +149,19 @@ function logout() {
 }
 
 .topbar-main,
-.topbar-status {
+.topbar-status,
+.topbar-actions {
   display: flex;
   align-items: center;
   gap: 10px;
+}
+
+.topbar-actions {
+  flex-shrink: 0;
+}
+
+.theme-button {
+  flex-shrink: 0;
 }
 
 .mobile-title {
@@ -146,12 +184,25 @@ function logout() {
     gap: 6px;
   }
 
+  .topbar-actions {
+    gap: 6px;
+  }
+
+  .theme-button {
+    width: 28px;
+    min-width: 28px;
+  }
+
   .content {
     padding: 10px;
   }
 }
 
 @media (max-width: 420px) {
+  .mobile-title {
+    display: none;
+  }
+
   .topbar-status :deep(.n-tag:first-child) {
     display: none;
   }
