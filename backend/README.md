@@ -23,6 +23,7 @@ VNPY_RPC_PUB_ADDRESS=tcp://127.0.0.1:4102
 VNPY_GATEWAY_NAME=CTP
 VNPY_RPC_TIMEOUT_MS=10000
 QUESTDB_PG_DSN=postgresql://admin:quest@127.0.0.1:8812/qdb
+DATABASE_URL=postgresql://vnpy:vnpy@127.0.0.1:5432/vnpy
 ```
 
 `QUESTDB_PG_DSN` 为空时不写入时序库。配置后，后端启动会自动创建 `market_ticks` 表，实时 tick 会写入 QuestDB，`GET /api/market/bars` 会优先从 QuestDB 聚合 K 线。
@@ -58,6 +59,9 @@ datetime,vt_symbol,symbol,exchange,gateway_name,last_price,volume,turnover,open_
 - `POST /api/strategies/{strategy_name}/stop`
 - `GET /api/strategies/{strategy_name}/logs`
 - `GET /api/contracts`
+- `GET /api/market/watchlist`
+- `POST /api/market/watchlist`
+- `DELETE /api/market/watchlist/{watch_key}`
 - `GET /api/account`
 - `GET /api/positions`
 - `GET /api/orders`

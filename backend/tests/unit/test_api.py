@@ -18,6 +18,35 @@ def auth_headers(role: str = "trader") -> dict[str, str]:
     return {"Authorization": f"Bearer {create_access_token(CurrentUser(role, role))}"}
 
 
+def auth_headers_for(username: str, role: str = "viewer") -> dict[str, str]:
+    return {"Authorization": f"Bearer {create_access_token(CurrentUser(username, role))}"}
+
+
+class FakeWatchlistService:
+    def __init__(self) -> None:
+        self.rows: dict[str, list[dict]] = {}
+
+    def list_items(self, username: str) -> list[dict]:
+        return self.rows.get(username, [])
+
+    def add_contract(self, username: str, item: dict) -> dict:
+        row = {
+            "watch_type": "contract",
+            "watch_key": f"contract:{item['vt_symbol']}",
+            "product_codes": [],
+            "exchange_codes": [],
+            **item,
+        }
+        self.rows.setdefault(username, []).append(row)
+        return row
+
+    def remove_item(self, username: str, watch_key: str) -> dict:
+        rows = self.rows.get(username, [])
+        before = len(rows)
+        self.rows[username] = [row for row in rows if row["watch_key"] != watch_key]
+        return {"removed": len(self.rows[username]) != before, "watch_key": watch_key}
+
+
 def test_status_returns_unified_success_payload(monkeypatch) -> None:
     with client_without_rpc(monkeypatch) as client:
         response = client.get("/api/status")
@@ -197,6 +226,43 @@ def test_market_data_import_requires_admin(monkeypatch) -> None:
     assert viewer.status_code == 403
     assert admin.status_code == 200
     assert admin.json()["data"]["imported"] == 1
+
+
+def test_watchlist_is_scoped_by_username(monkeypatch) -> None:
+    from app.api import routes_market
+
+    fake = FakeWatchlistService()
+    monkeypatch.setattr(routes_market, "watchlist_service", fake)
+
+    with client_without_rpc(monkeypatch) as client:
+        alice_add = client.post(
+            "/api/market/watchlist",
+            headers=auth_headers_for("alice"),
+            json={"vt_symbol": "ru2609.SHFE", "symbol": "ru2609", "exchange": "SHFE", "display_name": "天然橡胶2609 / RU2609 · 上期所"},
+        )
+        bob_list = client.get("/api/market/watchlist", headers=auth_headers_for("bob"))
+        alice_list = client.get("/api/market/watchlist", headers=auth_headers_for("alice"))
+
+    assert alice_add.status_code == 200
+    assert bob_list.status_code == 200
+    assert bob_list.json()["data"] == []
+    assert alice_list.json()["data"][0]["vt_symbol"] == "ru2609.SHFE"
+
+
+def test_watchlist_delete_uses_authenticated_username(monkeypatch) -> None:
+    from app.api import routes_market
+
+    fake = FakeWatchlistService()
+    fake.rows["alice"] = [{"watch_type": "contract", "watch_key": "contract:ru2609.SHFE", "vt_symbol": "ru2609.SHFE"}]
+    fake.rows["bob"] = [{"watch_type": "contract", "watch_key": "contract:ru2609.SHFE", "vt_symbol": "ru2609.SHFE"}]
+    monkeypatch.setattr(routes_market, "watchlist_service", fake)
+
+    with client_without_rpc(monkeypatch) as client:
+        response = client.delete("/api/market/watchlist/contract:ru2609.SHFE", headers=auth_headers_for("alice"))
+
+    assert response.status_code == 200
+    assert fake.rows["alice"] == []
+    assert fake.rows["bob"][0]["vt_symbol"] == "ru2609.SHFE"
 
 
 def test_create_order_validation_error_uses_unified_payload(monkeypatch) -> None:

@@ -10,6 +10,22 @@ services:
     volumes:
       - questdb-data:/var/lib/questdb
 
+  postgres:
+    image: postgres:16-alpine
+    container_name: vnpy-web-bridge-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-vnpy}
+      POSTGRES_USER: ${POSTGRES_USER:-vnpy}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-vnpy}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   web-bridge:
     image: ${IMAGE_REPO:-ghcr.io/folgercn/vnpy-web-bridge-app}:${IMAGE_TAG:-latest}
     container_name: vnpy-web-bridge
@@ -18,8 +34,12 @@ services:
       - ../.env
     environment:
       QUESTDB_PG_DSN: ${QUESTDB_PG_DSN:-postgresql://admin:quest@questdb:8812/qdb}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://vnpy:vnpy@postgres:5432/vnpy}
     depends_on:
-      - questdb
+      questdb:
+        condition: service_started
+      postgres:
+        condition: service_healthy
     ports:
       - "8080:8080"
     healthcheck:
@@ -31,3 +51,4 @@ services:
 
 volumes:
   questdb-data:
+  postgres-data:

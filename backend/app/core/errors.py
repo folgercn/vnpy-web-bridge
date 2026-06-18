@@ -87,6 +87,12 @@ class PermissionDeniedError(AppError):
     message = "权限不足"
 
 
+class DatabaseUnavailableError(AppError):
+    status_code = 503
+    code = "DATABASE_UNAVAILABLE"
+    message = "数据库不可用"
+
+
 class RiskSymbolBlockedError(AppError):
     status_code = 400
     code = "RISK_SYMBOL_BLOCKED"

@@ -1,13 +1,13 @@
 <template>
   <div class="page">
     <n-card title="行情订阅" size="small">
-      <div class="toolbar">
+      <div class="toolbar market-subscribe-toolbar">
         <n-select
           v-model:value="selectedVtSymbol"
-          :options="contractOptions"
+          :options="subscribeOptions"
           filterable
           clearable
-          placeholder="搜索合约"
+          placeholder="选择关注合约"
           class="market-contract-select"
           @update:value="selectContract"
         />
@@ -16,17 +16,43 @@
         <n-button type="primary" @click="subscribe">订阅</n-button>
         <n-button :disabled="!isCurrentSubscribed" @click="unsubscribe">取消订阅</n-button>
         <n-button @click="resetChartView">重置视图</n-button>
-        <n-button @click="terminal.refreshContracts">刷新合约</n-button>
+        <n-button @click="showWatchManager = !showWatchManager">管理</n-button>
+        <n-button @click="terminal.refreshContracts">刷新</n-button>
+      </div>
+      <div v-if="showWatchManager" class="watch-manager">
+        <div class="toolbar watch-manager-toolbar">
+          <n-select
+            v-model:value="candidateVtSymbol"
+            :options="contractOptions"
+            filterable
+            remote
+            clearable
+            placeholder="输入中文名或代码搜索"
+            class="market-contract-select"
+            @search="searchKeyword = $event"
+          />
+          <n-button type="primary" @click="addWatchedContract">添加关注</n-button>
+        </div>
+        <div class="watch-tags">
+          <n-tag
+            v-for="item in watchedItems"
+            :key="item.key"
+            :closable="item.removable"
+            @close="removeWatched(item.key)"
+          >
+            {{ item.label }}
+          </n-tag>
+        </div>
       </div>
     </n-card>
-    <n-card :title="`${currentContractLabel} 1分钟K线`" size="small">
+    <n-card :title="`${selectedContractLabel} 1分钟K线`" size="small">
       <div ref="chartEl" class="chart"></div>
       <div v-if="!candleCount" class="muted chart-empty">
         {{ historyError || '订阅后等待 tick，K线会自动更新。' }}
       </div>
     </n-card>
     <div class="grid-2">
-      <data-panel title="合约" :columns="contractColumns" :rows="filteredContracts.slice(0, 200)" />
+      <data-panel title="关注合约" :columns="contractColumns" :rows="focusedContracts.slice(0, 200)" />
       <data-panel title="最新 Tick" :columns="tickColumns" :rows="Object.values(terminal.ticks)" />
     </div>
   </div>
@@ -46,15 +72,22 @@ import {
 import DataPanel from '../components/common/DataPanel.vue'
 import { exchangeOptions, formatExchange } from '../constants/exchanges'
 import { useMediaQuery } from '../composables/useMediaQuery'
+import { addMarketWatchlistItem, getMarketWatchlist, removeMarketWatchlistItem, type MarketWatchlistItem } from '../api/market'
 import { useTerminalStore } from '../stores/terminal'
 import { useThemeStore } from '../stores/theme'
+
+type ContractRow = Record<string, unknown>
 
 const message = useMessage()
 const terminal = useTerminalStore()
 const theme = useThemeStore()
-const symbol = ref('rb2610')
+const symbol = ref('ru2609')
 const exchange = ref('SHFE')
-const selectedVtSymbol = ref('rb2610.SHFE')
+const selectedVtSymbol = ref('ru2609.SHFE')
+const candidateVtSymbol = ref<string | null>(null)
+const searchKeyword = ref('')
+const showWatchManager = ref(false)
+const watchlistItems = ref<MarketWatchlistItem[]>([])
 const chartEl = ref<HTMLElement | null>(null)
 const isMobile = useMediaQuery('(max-width: 640px)')
 const historyError = ref('')
@@ -64,8 +97,9 @@ let chart: IChartApi | null = null
 let candleSeries: ISeriesApi<'Candlestick'> | null = null
 const candleData: CandlestickData[] = []
 const contractColumns = [
-  { title: 'vt_symbol', key: 'vt_symbol' },
-  { title: 'name', key: 'name' },
+  { title: '合约', key: 'display_name', render: (row: ContractRow) => formatContractTitle(row) },
+  { title: '代码', key: 'vt_symbol', render: (row: ContractRow) => String(row.vt_symbol || vtSymbolOf(row)) },
+  { title: '名称', key: 'name' },
   { title: 'exchange', key: 'exchange', render: (row: Record<string, unknown>) => formatExchange(row.exchange) },
   { title: 'product', key: 'product' },
   { title: 'gateway_name', key: 'gateway_name' }
@@ -74,28 +108,37 @@ const tickColumns = cols(['vt_symbol', 'last_price', 'bid_price_1', 'ask_price_1
 const vtSymbol = computed(() => `${symbol.value}.${exchange.value}`)
 const currentTick = computed(() => terminal.ticks[vtSymbol.value])
 const isCurrentSubscribed = computed(() => Boolean(terminal.subscribedVtSymbols[vtSymbol.value]))
-const currentContract = computed(() => terminal.contracts.find((row) => String(row.vt_symbol || `${row.symbol}.${row.exchange}`) === vtSymbol.value))
-const currentContractLabel = computed(() => {
-  const name = currentContract.value?.name ? ` ${String(currentContract.value.name)}` : ''
-  return `${vtSymbol.value}${name}`
+const selectedContract = computed(() => terminal.contracts.find((row) => vtSymbolOf(row) === vtSymbol.value))
+const selectedContractLabel = computed(() => (selectedContract.value ? formatContractTitle(selectedContract.value) : vtSymbol.value))
+const contractOptions = computed(() => {
+  const keyword = normalizeKeyword(searchKeyword.value)
+  if (!keyword) return []
+  return terminal.contracts
+    .filter((row) => contractMatchesKeyword(row, keyword))
+    .slice(0, 80)
+    .map(contractOption)
 })
-const contractOptions = computed(() =>
-  terminal.contracts.map((row) => {
-    const value = String(row.vt_symbol || `${row.symbol}.${row.exchange}`)
-    const name = row.name ? ` ${String(row.name)}` : ''
-    return { label: `${value}${name}`, value }
-  })
+const subscribeOptions = computed(() => focusedContracts.value.map(contractOption))
+const focusedContracts = computed(() => {
+  const rows = new Map<string, ContractRow>()
+  for (const item of watchlistItems.value) {
+    for (const row of contractsForWatchItem(item)) rows.set(vtSymbolOf(row), row)
+  }
+  return Array.from(rows.values()).sort(compareContracts)
+})
+const watchedItems = computed(() =>
+  watchlistItems.value.map((item) => ({
+    key: item.watch_key,
+    removable: item.watch_type === 'contract',
+    label: watchedLabel(item)
+  }))
 )
-const filteredContracts = computed(() => {
-  const keyword = symbol.value.trim().toLowerCase()
-  if (!keyword) return terminal.contracts
-  return terminal.contracts.filter((row) => String(row.vt_symbol || row.symbol || '').toLowerCase().includes(keyword))
-})
 
 onMounted(async () => {
   setupChart()
+  await loadWatchlist()
   if (!terminal.contracts.length) await terminal.refreshContracts().catch(() => undefined)
-  selectInitialContract()
+  selectFirstFocusedContract()
   await loadHistory().catch((exc) => setHistoryError(exc))
   await loadTickSnapshot()
 })
@@ -134,11 +177,8 @@ async function unsubscribe() {
 
 function selectContract(value: string | null) {
   if (!value) return
-  const [nextSymbol, nextExchange] = value.split('.')
-  if (!nextSymbol || !nextExchange) return
   const changed = value !== vtSymbol.value
-  symbol.value = nextSymbol
-  exchange.value = nextExchange
+  applyVtSymbol(value)
   selectedVtSymbol.value = value
   if (changed) {
     historyError.value = ''
@@ -146,11 +186,27 @@ function selectContract(value: string | null) {
   }
 }
 
-function selectInitialContract() {
-  const defaultValue = terminal.contracts.find((row) => String(row.vt_symbol || `${row.symbol}.${row.exchange}`) === selectedVtSymbol.value)
-  const firstContract = defaultValue || terminal.contracts[0]
-  const value = firstContract ? String(firstContract.vt_symbol || `${firstContract.symbol}.${firstContract.exchange}`) : selectedVtSymbol.value
-  selectContract(value)
+async function addWatchedContract() {
+  if (!candidateVtSymbol.value) return
+  const row = terminal.contracts.find((item) => vtSymbolOf(item) === candidateVtSymbol.value)
+  if (!row) return
+  await addMarketWatchlistItem({
+    vt_symbol: vtSymbolOf(row),
+    symbol: String(row.symbol || ''),
+    exchange: String(row.exchange || ''),
+    display_name: formatContractTitle(row)
+  })
+  await loadWatchlist()
+  applyVtSymbol(candidateVtSymbol.value)
+  selectedVtSymbol.value = candidateVtSymbol.value
+  candidateVtSymbol.value = null
+  searchKeyword.value = ''
+}
+
+async function removeWatched(key: string) {
+  await removeMarketWatchlistItem(key)
+  await loadWatchlist()
+  selectFirstFocusedContract()
 }
 
 async function loadHistory() {
@@ -220,6 +276,95 @@ function clearCandles() {
 
 function cols(keys: string[]) {
   return keys.map((key) => ({ title: key, key }))
+}
+
+async function loadWatchlist() {
+  try {
+    watchlistItems.value = await getMarketWatchlist()
+  } catch {
+    message.error('关注合约加载失败，请检查 PostgreSQL 配置')
+  }
+}
+
+function applyVtSymbol(value: string) {
+  const [nextSymbol, nextExchange] = value.split('.')
+  if (!nextSymbol || !nextExchange) return
+  symbol.value = nextSymbol
+  exchange.value = nextExchange
+}
+
+function selectFirstFocusedContract() {
+  if (focusedContracts.value.some((row) => vtSymbolOf(row) === vtSymbol.value)) return
+  const first = focusedContracts.value[0]
+  if (!first) return
+  const next = vtSymbolOf(first)
+  applyVtSymbol(next)
+  selectedVtSymbol.value = next
+}
+
+function contractsForWatchItem(item: MarketWatchlistItem) {
+  if (item.watch_type === 'contract' && item.vt_symbol) {
+    const vtSymbol = item.vt_symbol
+    return terminal.contracts.filter((row) => vtSymbolOf(row) === vtSymbol)
+  }
+  return terminal.contracts.filter((row) => productMatches(row, item))
+}
+
+function productMatches(row: ContractRow, product: MarketWatchlistItem) {
+  const symbolCode = symbolRoot(row)
+  const exchangeCode = String(row.exchange || '').toUpperCase()
+  const name = String(row.name || '')
+  return (
+    ((product.product_codes || []).includes(symbolCode) || name.includes(product.display_name)) &&
+    (!(product.exchange_codes || []).length || product.exchange_codes.includes(exchangeCode))
+  )
+}
+
+function watchedLabel(item: MarketWatchlistItem) {
+  if (item.watch_type === 'contract' && item.vt_symbol) {
+    const vtSymbol = item.vt_symbol
+    const row = terminal.contracts.find((item) => vtSymbolOf(item) === vtSymbol)
+    return row ? formatContractTitle(row) : vtSymbol
+  }
+  return item.display_name
+}
+
+function contractOption(row: ContractRow) {
+  const value = vtSymbolOf(row)
+  return { label: formatContractTitle(row), value }
+}
+
+function contractMatchesKeyword(row: ContractRow, keyword: string) {
+  return normalizeKeyword(`${formatContractTitle(row)} ${vtSymbolOf(row)} ${row.symbol || ''} ${row.name || ''}`).includes(keyword)
+}
+
+function normalizeKeyword(value: string) {
+  return value.trim().toLowerCase()
+}
+
+function vtSymbolOf(row: ContractRow) {
+  return String(row.vt_symbol || `${row.symbol}.${row.exchange}`)
+}
+
+function symbolRoot(row: ContractRow) {
+  return String(row.symbol || '').toLowerCase().replace(/\d+.*$/, '')
+}
+
+function symbolMonth(row: ContractRow) {
+  return String(row.symbol || '').match(/\d+$/)?.[0] || ''
+}
+
+function formatContractTitle(row: ContractRow) {
+  const symbol = String(row.symbol || '').toUpperCase()
+  const name = String(row.name || '')
+  const month = symbolMonth(row)
+  const exchangeText = formatExchange(row.exchange).replace(`${String(row.exchange || '')} - `, '')
+  const readableName = name && month && !name.includes(month) ? `${name}${month}` : name || symbol
+  return `${readableName} / ${symbol} · ${exchangeText}`
+}
+
+function compareContracts(a: ContractRow, b: ContractRow) {
+  return formatContractTitle(a).localeCompare(formatContractTitle(b), 'zh-Hans-CN')
 }
 
 function setupChart() {
@@ -299,12 +444,46 @@ function toMinuteTimestamp(value: unknown): UTCTimestamp {
   height: 280px;
 }
 
+.page :deep(.n-card) {
+  min-width: 0;
+}
+
 .market-contract-select {
+  flex: 0 1 420px;
+  width: 420px;
   min-width: 260px;
+  max-width: 420px;
 }
 
 .market-short-control {
+  flex: 0 0 160px;
+  width: 160px;
   max-width: 160px;
+}
+
+.market-subscribe-toolbar {
+  flex-wrap: nowrap;
+  width: 100%;
+}
+
+.market-subscribe-toolbar :deep(.n-button) {
+  flex: 0 0 auto;
+}
+
+.watch-manager {
+  margin-top: 12px;
+  display: grid;
+  gap: 10px;
+}
+
+.watch-manager-toolbar {
+  flex-wrap: nowrap;
+}
+
+.watch-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .chart-empty {
@@ -325,6 +504,30 @@ function toMinuteTimestamp(value: unknown): UTCTimestamp {
     height: 130px;
     padding: 0 16px;
     text-align: center;
+  }
+
+  .market-subscribe-toolbar {
+    flex-wrap: wrap;
+  }
+
+  .watch-manager-toolbar {
+    flex-wrap: wrap;
+  }
+
+  .market-contract-select,
+  .market-short-control {
+    flex: 1 1 100%;
+    width: 100%;
+    max-width: none;
+    min-width: 0;
+  }
+
+  .market-subscribe-toolbar :deep(.n-button) {
+    flex: 1 1 100%;
+  }
+
+  .watch-manager-toolbar :deep(.n-button) {
+    flex: 1 1 100%;
   }
 }
 </style>

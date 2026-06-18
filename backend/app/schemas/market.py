@@ -28,6 +28,13 @@ class MarketDataQueryDto(BaseModel):
     limit: int = Field(default=200, ge=1, le=5000)
 
 
+class WatchlistCreateDto(BaseModel):
+    vt_symbol: str = Field(min_length=1)
+    symbol: str = Field(min_length=1)
+    exchange: str = Field(min_length=1)
+    display_name: str = Field(min_length=1)
+
+
 class ContractDto(BaseModel):
     symbol: str | None = None
     exchange: str | None = None
