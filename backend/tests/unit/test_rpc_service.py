@@ -87,6 +87,7 @@ def test_rpc_status_probe_uses_ttl() -> None:
 
 def test_handle_tick_event_saves_computed_vt_symbol() -> None:
     service = VnpyRpcService()
+    service._market_subscriptions.add("UNIT999.SHFE")
 
     service.handle_event("", TickEvent())
 
@@ -94,3 +95,25 @@ def test_handle_tick_event_saves_computed_vt_symbol() -> None:
     assert tick
     assert tick["vt_symbol"] == "UNIT999.SHFE"
     assert tick["last_price"] == 3126
+
+
+def test_handle_tick_event_ignores_unsubscribed_symbol() -> None:
+    service = VnpyRpcService()
+    memory_store.delete_tick("UNIT999.SHFE")
+
+    service.handle_event("", TickEvent())
+
+    assert memory_store.get_tick("UNIT999.SHFE") is None
+
+
+def test_unsubscribe_market_removes_subscription_and_tick() -> None:
+    service = VnpyRpcService()
+    service._market_subscriptions.add("UNIT999.SHFE")
+    memory_store.save_tick("UNIT999.SHFE", {"vt_symbol": "UNIT999.SHFE"})
+
+    result = service.unsubscribe_market("UNIT999", "SHFE")
+
+    assert result["subscribed"] is False
+    assert result["vt_symbol"] == "UNIT999.SHFE"
+    assert memory_store.get_tick("UNIT999.SHFE") is None
+    assert "UNIT999.SHFE" not in service._market_subscriptions

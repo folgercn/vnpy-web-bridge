@@ -119,6 +119,26 @@ def test_market_bars_requires_auth_and_returns_rows(monkeypatch) -> None:
     assert response.json()["data"][0]["vt_symbol"] == "rb2610.SHFE"
 
 
+def test_market_unsubscribe_requires_auth_and_returns_result(monkeypatch) -> None:
+    monkeypatch.setattr(
+        rpc_service,
+        "unsubscribe_market",
+        lambda symbol, exchange: {"vt_symbol": f"{symbol}.{exchange}", "subscribed": False},
+    )
+
+    with client_without_rpc(monkeypatch) as client:
+        unauthenticated = client.post("/api/market/unsubscribe", json={"symbol": "rb2610", "exchange": "SHFE"})
+        response = client.post(
+            "/api/market/unsubscribe",
+            headers=auth_headers("viewer"),
+            json={"symbol": "rb2610", "exchange": "SHFE"},
+        )
+
+    assert unauthenticated.status_code == 401
+    assert response.status_code == 200
+    assert response.json()["data"] == {"vt_symbol": "rb2610.SHFE", "subscribed": False}
+
+
 def test_create_order_validation_error_uses_unified_payload(monkeypatch) -> None:
     with client_without_rpc(monkeypatch) as client:
         response = client.post(

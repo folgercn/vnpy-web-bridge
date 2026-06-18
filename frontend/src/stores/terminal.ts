@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { getAccount, getPositions } from '../api/account'
-import { getContracts, getMarketBars, getTick, subscribeMarket } from '../api/market'
+import { getContracts, getMarketBars, getTick, subscribeMarket, unsubscribeMarket } from '../api/market'
 import { getRiskStatus } from '../api/risk'
 import { getGatewayStatus, getRpcStatus, getStatus, getTradeConfig } from '../api/status'
 import { getOrders, getTrades } from '../api/trade'
@@ -14,6 +14,7 @@ export const useTerminalStore = defineStore('terminal', () => {
   const riskStatus = ref<Record<string, unknown>>({})
   const contracts = ref<Record<string, unknown>[]>([])
   const ticks = ref<Record<string, Record<string, unknown>>>({})
+  const subscribedVtSymbols = ref<Record<string, boolean>>({})
   const accounts = ref<Record<string, unknown>[]>([])
   const positions = ref<Record<string, unknown>[]>([])
   const orders = ref<Record<string, unknown>[]>([])
@@ -55,7 +56,18 @@ export const useTerminalStore = defineStore('terminal', () => {
   }
 
   async function subscribe(symbol: string, exchange: string) {
-    return subscribeMarket(symbol, exchange)
+    const result = await subscribeMarket(symbol, exchange)
+    const vtSymbol = String(result.vt_symbol || `${symbol}.${exchange}`)
+    subscribedVtSymbols.value[vtSymbol] = true
+    return result
+  }
+
+  async function unsubscribe(symbol: string, exchange: string) {
+    const result = await unsubscribeMarket(symbol, exchange)
+    const vtSymbol = String(result.vt_symbol || `${symbol}.${exchange}`)
+    delete subscribedVtSymbols.value[vtSymbol]
+    delete ticks.value[vtSymbol]
+    return result
   }
 
   async function loadBars(symbol: string, exchange: string, interval = '1m', limit = 300) {
@@ -94,6 +106,7 @@ export const useTerminalStore = defineStore('terminal', () => {
     riskStatus,
     contracts,
     ticks,
+    subscribedVtSymbols,
     accounts,
     positions,
     orders,
@@ -104,6 +117,7 @@ export const useTerminalStore = defineStore('terminal', () => {
     refreshSnapshots,
     refreshContracts,
     subscribe,
+    unsubscribe,
     loadBars,
     refreshTick,
     applyEvent,
