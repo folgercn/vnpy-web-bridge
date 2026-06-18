@@ -51,6 +51,8 @@ class VnpyRpcService:
         self.last_error: str | None = None
         self.loop: asyncio.AbstractEventLoop | None = None
         self._call_lock = RLock()
+        self._subscription_lock = RLock()
+        self._market_subscriptions: set[str] = set()
         self._last_probe_at = 0.0
         self._probe_ttl_seconds = 5.0
 
@@ -186,7 +188,24 @@ class VnpyRpcService:
 
         req = SubscribeRequest(symbol=symbol, exchange=exchange_value)
         self.call("subscribe", req, self.settings.vnpy_gateway_name)
-        return {"symbol": symbol, "exchange": exchange_value.value, "vt_symbol": f"{symbol}.{exchange_value.value}"}
+        vt_symbol = f"{symbol}.{exchange_value.value}"
+        with self._subscription_lock:
+            self._market_subscriptions.add(vt_symbol)
+        return {"symbol": symbol, "exchange": exchange_value.value, "vt_symbol": vt_symbol, "subscribed": True}
+
+    def unsubscribe_market(self, symbol: str, exchange: str) -> dict[str, Any]:
+        exchange_value = self._parse_exchange(exchange)
+        vt_symbol = f"{symbol}.{exchange_value.value}"
+        with self._subscription_lock:
+            self._market_subscriptions.discard(vt_symbol)
+        memory_store.delete_tick(vt_symbol)
+        return {
+            "symbol": symbol,
+            "exchange": exchange_value.value,
+            "vt_symbol": vt_symbol,
+            "subscribed": False,
+            "rpc_unsubscribe_supported": False,
+        }
 
     def _parse_exchange(self, exchange: str) -> Any:
         if Exchange is None:
@@ -222,8 +241,9 @@ class VnpyRpcService:
         if event_type.startswith(EVENT_TICK):
             ws_type = "tick"
             vt_symbol = payload.get("vt_symbol")
-            if vt_symbol:
-                memory_store.save_tick(str(vt_symbol), payload)
+            if not vt_symbol or not self._is_market_subscribed(str(vt_symbol)):
+                return
+            memory_store.save_tick(str(vt_symbol), payload)
         elif event_type.startswith(EVENT_ORDER):
             ws_type = "order"
             memory_store.save_order(payload)
@@ -242,6 +262,10 @@ class VnpyRpcService:
             value = getattr(data, field, None)
             if value:
                 payload[field] = to_plain_dict({"value": value})["value"]
+
+    def _is_market_subscribed(self, vt_symbol: str) -> bool:
+        with self._subscription_lock:
+            return vt_symbol in self._market_subscriptions
 
 
 rpc_service = VnpyRpcService()

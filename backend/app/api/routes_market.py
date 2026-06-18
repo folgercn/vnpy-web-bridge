@@ -21,6 +21,11 @@ def subscribe_market(payload: SubscribeRequestDto, _: CurrentUser = Depends(requ
     return ok(rpc_service.subscribe_market(payload.symbol, payload.exchange))
 
 
+@router.post("/market/unsubscribe")
+def unsubscribe_market(payload: SubscribeRequestDto, _: CurrentUser = Depends(require_roles("viewer", "trader", "admin"))) -> dict:
+    return ok(rpc_service.unsubscribe_market(payload.symbol, payload.exchange))
+
+
 @router.get("/market/tick/{vt_symbol}")
 def tick_snapshot(vt_symbol: str, _: CurrentUser = Depends(require_roles("viewer", "trader", "admin"))) -> dict:
     return ok(memory_store.get_tick(vt_symbol) or {})

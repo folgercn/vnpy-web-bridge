@@ -14,6 +14,8 @@
         <n-input v-model:value="symbol" placeholder="rb2610" class="market-short-control" />
         <n-select v-model:value="exchange" :options="exchangeOptions" class="market-short-control" />
         <n-button type="primary" @click="subscribe">订阅</n-button>
+        <n-button :disabled="!isCurrentSubscribed" @click="unsubscribe">取消订阅</n-button>
+        <n-button @click="resetChartView">重置视图</n-button>
         <n-button @click="terminal.refreshContracts">刷新合约</n-button>
       </div>
     </n-card>
@@ -69,6 +71,7 @@ const contractColumns = [
 const tickColumns = cols(['vt_symbol', 'last_price', 'bid_price_1', 'ask_price_1', 'volume', 'open_interest', 'limit_up', 'limit_down'])
 const vtSymbol = computed(() => `${symbol.value}.${exchange.value}`)
 const currentTick = computed(() => terminal.ticks[vtSymbol.value])
+const isCurrentSubscribed = computed(() => Boolean(terminal.subscribedVtSymbols[vtSymbol.value]))
 const currentContract = computed(() => terminal.contracts.find((row) => String(row.vt_symbol || `${row.symbol}.${row.exchange}`) === vtSymbol.value))
 const currentContractLabel = computed(() => {
   const name = currentContract.value?.name ? ` ${String(currentContract.value.name)}` : ''
@@ -113,6 +116,17 @@ async function subscribe() {
     message.success('订阅请求已发送')
   } catch (exc) {
     message.error(exc instanceof Error ? exc.message : '订阅失败')
+  }
+}
+
+async function unsubscribe() {
+  try {
+    await terminal.unsubscribe(symbol.value, exchange.value)
+    if (chartVtSymbol.value === vtSymbol.value) clearCandles()
+    historyError.value = '已取消订阅'
+    message.success('订阅已取消')
+  } catch (exc) {
+    message.error(exc instanceof Error ? exc.message : '取消订阅失败')
   }
 }
 
@@ -177,18 +191,22 @@ function appendTickToCandle(tick: Record<string, unknown>) {
   if (!price || !candleSeries) return
   const time = toMinuteTimestamp(tick.datetime)
   const last = candleData[candleData.length - 1]
+  const wasEmpty = candleData.length === 0
+  let candle: CandlestickData
   if (last?.time === time) {
     last.high = Math.max(last.high, price)
     last.low = Math.min(last.low, price)
     last.close = price
+    candle = last
   } else {
-    candleData.push({ time, open: price, high: price, low: price, close: price })
+    candle = { time, open: price, high: price, low: price, close: price }
+    candleData.push(candle)
   }
   chartVtSymbol.value = vtSymbol.value
   historyError.value = ''
   candleCount.value = candleData.length
-  candleSeries.setData(candleData)
-  chart?.timeScale().fitContent()
+  candleSeries.update(candle)
+  if (wasEmpty) resetChartView()
 }
 
 function clearCandles() {
@@ -219,6 +237,10 @@ function setupChart() {
     wickUpColor: '#12d7b0',
     wickDownColor: '#ff4d6d'
   })
+}
+
+function resetChartView() {
+  chart?.timeScale().fitContent()
 }
 
 function setHistoryError(exc: unknown) {

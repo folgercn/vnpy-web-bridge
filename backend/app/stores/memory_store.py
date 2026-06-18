@@ -22,6 +22,10 @@ class MemoryStore:
         with self._lock:
             return self._ticks.get(vt_symbol)
 
+    def delete_tick(self, vt_symbol: str) -> None:
+        with self._lock:
+            self._ticks.pop(vt_symbol, None)
+
     def save_order(self, data: dict[str, Any]) -> None:
         with self._lock:
             key = str(data.get("vt_orderid") or data.get("orderid") or "")
