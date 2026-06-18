@@ -171,3 +171,24 @@ def test_trading_time_check_rejects_legal_holiday(monkeypatch) -> None:
 
     with pytest.raises(RiskTradingTimeError):
         service.check_order(make_order())
+
+
+def test_trading_time_check_rejects_inactive_symbol_session(monkeypatch) -> None:
+    service = make_service()
+    service.update_rules(RiskRulesPatchDTO(trading_time_check_enabled=True))
+    allow_rpc(monkeypatch)
+    monkeypatch.setattr(
+        "app.services.risk_service.calendar_service.get_day",
+        lambda target: {
+            "date": "2026-06-18",
+            "is_trading_day": True,
+            "holiday_name": None,
+            "source": "国办发明电〔2025〕7号",
+        },
+    )
+    monkeypatch.setattr("app.services.risk_service.calendar_service.is_trading_session_active", lambda now, symbols: False)
+
+    with pytest.raises(RiskTradingTimeError) as exc:
+        service.check_order(make_order())
+
+    assert exc.value.detail["session_active"] is False

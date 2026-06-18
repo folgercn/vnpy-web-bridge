@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
-from datetime import datetime, time, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import logging
 from pathlib import Path
@@ -12,6 +12,7 @@ from typing import Any, Callable
 from app.core.config import Settings, get_settings
 from app.core.errors import AppError
 from app.services.alert_service import AlertService, alert_service
+from app.services.calendar_service import calendar_service
 from app.services.market_data_service import QuestDbMarketDataService, market_data_service
 from app.services.risk_service import RiskService, risk_service
 from app.services.strategy_service import StrategyService, strategy_service
@@ -288,7 +289,7 @@ class MonitoringService:
 
     def _check_tick_freshness(self, checks: list[dict[str, Any]], suppressed: list[dict[str, Any]], now: datetime) -> None:
         subscriptions = self.rpc.market_subscriptions()
-        if not subscriptions or not self._trading_session_active(now):
+        if not subscriptions or not self._trading_session_active(now, subscriptions):
             checks.append({"name": "tick_freshness", "healthy": True, "status": "quiet", "summary": "No active tick freshness requirement"})
             return
         ticks = self.store.ticks()
@@ -442,16 +443,8 @@ class MonitoringService:
             return True
         return self._trading_session_active(now)
 
-    def _trading_session_active(self, now: datetime) -> bool:
-        local = now.astimezone(timezone(timedelta(hours=8)))
-        if local.weekday() >= 5:
-            return False
-        current = local.time()
-        return (
-            time(9, 0) <= current <= time(11, 30)
-            or time(13, 30) <= current <= time(15, 15)
-            or time(21, 0) <= current <= time(23, 59)
-        )
+    def _trading_session_active(self, now: datetime, symbols: list[str] | None = None) -> bool:
+        return calendar_service.is_trading_session_active(now, symbols)
 
     def _expected_strategies(self) -> list[str]:
         return [item.strip() for item in self.settings.monitor_expected_strategies.split(",") if item.strip()]
