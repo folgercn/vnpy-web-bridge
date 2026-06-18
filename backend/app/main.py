@@ -94,9 +94,9 @@ if frontend_dist.exists():
 async def startup() -> None:
     try:
         market_data_service.start()
-        tick_persistence_service.start()
     except Exception as exc:
         logger.warning("backend started without QuestDB market store: %s", exc)
+    tick_persistence_service.start()
 
     rpc_service.bind_loop(asyncio.get_running_loop())
     try:

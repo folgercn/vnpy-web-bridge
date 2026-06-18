@@ -46,10 +46,11 @@ QUESTDB_TICK_FLUSH_INTERVAL_MS=500
 QUESTDB_TICK_RETRY_MAX_SECONDS=60
 QUESTDB_TICK_SPOOL_DIR=logs/tick-spool
 QUESTDB_TICK_SPOOL_MAX_BYTES=10737418240
+QUESTDB_TICK_SPOOL_SEGMENT_BYTES=67108864
 QUESTDB_TICK_ERROR_LOG_INTERVAL_SECONDS=60
 ```
 
-当 QuestDB 短暂不可用或内存队列满时，合法 tick 会写入本地 JSONL spool；后台 writer 恢复后按文件顺序补写。spool 超过上限时会显式计入 dropped 并写 error 日志，不静默丢弃。`GET /api/market/data/status` 可查看 received、valid、invalid、persisted、retry、failed、dropped、队列深度、spool 积压、持久化延迟、最近错误和 spool 所在磁盘容量。
+每条 tick 入队时由 Web Bridge 生成事件级 `ingest_id` 和 `received_at`，重试、spool 和补写过程中保持不变。当 QuestDB 短暂不可用或内存队列满时，合法 tick 会写入本地 JSONL spool；spool 使用 `ticks.active.jsonl` 追加和 `ticks.replaying.*.jsonl` 原子轮转，后台 writer 恢复后只删除已成功回放的 replaying 文件，避免新追加 tick 被误删。spool 超过上限时会显式计入 dropped 并写 error 日志，不静默丢弃。`GET /api/market/data/status` 可查看 received、valid、invalid、persisted、retry、failed、dropped、worker_alive、队列深度、spool 积压、最旧 pending 时间、持久化延迟、最近错误和 spool 所在磁盘容量。
 
 生产 compose 会将 `QUESTDB_TICK_SPOOL_DIR` 覆盖为 `/app/tick-spool`，并挂载到独立 `tick-spool` volume；QuestDB 数据保存在 `questdb-data` volume。备份和恢复步骤见 `docs/deployment.md`。
 

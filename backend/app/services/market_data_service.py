@@ -184,8 +184,8 @@ class QuestDbMarketDataService:
         try:
             with self._lock:
                 conn = self._connect()
-                for row_params in params:
-                    conn.execute(sql, row_params)
+                self._init_schema()
+                _execute_many(conn, sql, params)
             return True
         except Exception as exc:
             logger.warning("QuestDB tick write failed: %s", exc)
@@ -212,14 +212,15 @@ class QuestDbMarketDataService:
         try:
             with self._lock:
                 conn = self._connect()
-                for row in prepared_rows:
-                    conn.execute(
-                        f"""
-                        INSERT INTO market_ticks ({", ".join(columns)})
-                        VALUES ({placeholders})
-                        """,
-                        tuple(row[key] for key in TICK_SELECT_FIELDS) + (row["raw_json"],),
-                    )
+                self._init_schema()
+                _execute_many(
+                    conn,
+                    f"""
+                    INSERT INTO market_ticks ({", ".join(columns)})
+                    VALUES ({placeholders})
+                    """,
+                    [tuple(row[key] for key in TICK_SELECT_FIELDS) + (row["raw_json"],) for row in prepared_rows],
+                )
         except Exception:
             self._drop_connection()
             raise
@@ -565,6 +566,17 @@ def _serialize_tick_row(row: dict[str, Any]) -> dict[str, Any]:
     for key in ("ts", "received_at"):
         serialized[key] = _format_datetime(serialized.get(key))
     return serialized
+
+
+def _execute_many(conn: Any, sql: str, params: list[tuple[Any, ...]]) -> None:
+    if not params:
+        return
+    if hasattr(conn, "cursor"):
+        with conn.cursor() as cursor:
+            cursor.executemany(sql, params)
+        return
+    for row_params in params:
+        conn.execute(sql, row_params)
 
 
 def _number(value: Any) -> float | None:
