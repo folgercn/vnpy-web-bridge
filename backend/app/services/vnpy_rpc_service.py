@@ -56,6 +56,7 @@ class VnpyRpcService:
         self._subscription_lock = RLock()
         self._market_subscriptions: set[str] = set()
         self._last_probe_at = 0.0
+        self._last_probe_connected: bool | None = None
         self._probe_ttl_seconds = 5.0
 
     def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
@@ -93,18 +94,23 @@ class VnpyRpcService:
         self.client = None
 
     def status(self, *, probe: bool = False) -> dict[str, Any]:
+        connected = self.started
         if probe and self.started and self.client:
             now = monotonic()
             if now - self._last_probe_at >= self._probe_ttl_seconds:
                 self._last_probe_at = now
                 try:
                     self.call("get_all_accounts", timeout=1_000)
+                    self._last_probe_connected = True
+                    self.last_error = None
                 except Exception as exc:
-                    self.started = False
+                    self._last_probe_connected = False
                     self.last_error = str(exc)
+            if self._last_probe_connected is False:
+                connected = False
 
         return {
-            "connected": self.started,
+            "connected": connected,
             "req_address": self.settings.vnpy_rpc_req_address,
             "pub_address": self.settings.vnpy_rpc_pub_address,
             "gateway_name": self.settings.vnpy_gateway_name,
