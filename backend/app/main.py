@@ -113,5 +113,8 @@ async def startup() -> None:
 async def shutdown() -> None:
     await monitoring_service.stop()
     rpc_service.stop()
-    tick_persistence_service.stop()
-    market_data_service.stop()
+    tick_writer_stopped = tick_persistence_service.stop()
+    if tick_writer_stopped:
+        market_data_service.stop()
+    else:
+        logger.warning("skip QuestDB market store shutdown because tick persistence writer is still alive")

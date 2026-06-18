@@ -310,8 +310,11 @@ class TickPersistenceService:
         self._stop_event = Event()
         self._thread: Thread | None = None
         self._running = False
+        self._inflight_lock = Lock()
+        self._inflight_batch: list[dict[str, Any]] = []
+        self._inflight_spooled = False
         self._backoff_seconds = 1.0
-        self._last_error_log_at = 0.0
+        self._last_error_log_at = float("-inf")
 
     @property
     def enabled(self) -> bool:
@@ -329,14 +332,26 @@ class TickPersistenceService:
         self._thread = Thread(target=self._run, name="tick-persistence-writer", daemon=True)
         self._thread.start()
 
-    def stop(self, timeout: float | None = None) -> None:
+    def stop(self, timeout: float | None = None) -> bool:
         self._stop_event.set()
         if self._thread:
             self._thread.join(timeout=timeout or max(5.0, self.settings.questdb_tick_retry_max_seconds + 1.0))
+            if self._thread.is_alive():
+                spooled_inflight = self._spool_inflight_once()
+                if self.queue.qsize():
+                    self._spool_or_drop(self._drain_queue_nowait())
+                message = "tick persistence writer did not stop before timeout"
+                if spooled_inflight:
+                    message += f"; spooled {spooled_inflight} inflight rows for recovery"
+                self._set_error(message)
+                logger.warning(message)
+                return False
         if self.queue.qsize():
             self._spool_or_drop(self._drain_queue_nowait())
         self._running = False
         self._thread = None
+        self._clear_inflight_batch()
+        return True
 
     def enqueue_tick(self, tick: dict[str, Any]) -> bool:
         self._inc("received_total")
@@ -376,6 +391,7 @@ class TickPersistenceService:
         last_success_at = data.pop("last_success_at")
         oldest_pending_received_at = data.pop("oldest_pending_received_at")
         queue_depth = self.queue.qsize()
+        inflight_batch_size = self._inflight_size()
         spool_rows = self.spool.row_count()
         spool_bytes = self.spool.size_bytes()
         quarantined_rows = self.spool.quarantined_rows()
@@ -392,6 +408,7 @@ class TickPersistenceService:
                 "connected": bool(getattr(self.market_store, "connected", False)),
                 "queue_depth": queue_depth,
                 "queue_capacity": self.queue.maxsize,
+                "inflight_batch_size": inflight_batch_size,
                 "spool_rows": spool_rows,
                 "spool_bytes": spool_bytes,
                 "spool_max_bytes": self.settings.questdb_tick_spool_max_bytes,
@@ -450,6 +467,7 @@ class TickPersistenceService:
                 return rows
 
     def _flush_batch(self, rows: list[dict[str, Any]]) -> None:
+        self._set_inflight_batch(rows)
         try:
             self.market_store.save_tick_rows_or_raise(rows)
             self._inc("persisted_total", len(rows))
@@ -459,6 +477,8 @@ class TickPersistenceService:
             self._record_error(exc, row_count=len(rows))
             self._spool_or_drop(rows)
             self._sleep_backoff()
+        finally:
+            self._clear_inflight_batch()
 
     def _flush_spool(self) -> None:
         segment = self.spool.claim_replay_segment()
@@ -530,6 +550,28 @@ class TickPersistenceService:
             self.stats.last_failure_at = datetime.now(timezone.utc)
             self.stats.last_error = message
         logger.error("tick spool corruption recorded: %s", message)
+
+    def _set_inflight_batch(self, rows: list[dict[str, Any]]) -> None:
+        with self._inflight_lock:
+            self._inflight_batch = list(rows)
+            self._inflight_spooled = False
+
+    def _clear_inflight_batch(self) -> None:
+        with self._inflight_lock:
+            self._inflight_batch = []
+            self._inflight_spooled = False
+
+    def _inflight_size(self) -> int:
+        with self._inflight_lock:
+            return len(self._inflight_batch)
+
+    def _spool_inflight_once(self) -> int:
+        with self._inflight_lock:
+            if self._inflight_spooled or not self._inflight_batch:
+                return 0
+            rows = list(self._inflight_batch)
+            self._inflight_spooled = True
+        return len(rows) if self._spool_or_drop(rows) else 0
 
     def _sleep_backoff(self) -> None:
         delay = min(self._backoff_seconds, float(self.settings.questdb_tick_retry_max_seconds))
