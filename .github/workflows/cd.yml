@@ -106,6 +106,7 @@ jobs:
       - name: Prepare env file
         env:
           DEPLOY_ENV_FILE: ${{ secrets.DEPLOY_ENV_FILE }}
+          APP_ENV_SECRET: ${{ secrets.APP_ENV }}
           MONITOR_ENABLED_SECRET: ${{ secrets.MONITOR_ENABLED }}
           TELEGRAM_ENABLED_SECRET: ${{ secrets.TELEGRAM_ENABLED }}
           TELEGRAM_BOT_TOKEN_SECRET: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -129,6 +130,7 @@ jobs:
 
           env_path = Path(sys.argv[1])
           managed_keys = {
+              "APP_ENV",
               "MONITOR_ENABLED",
               "TELEGRAM_ENABLED",
               "TELEGRAM_BOT_TOKEN",
@@ -144,6 +146,7 @@ jobs:
               kept.append(line)
 
           overlay = {
+              "APP_ENV": os.getenv("APP_ENV_SECRET") or "production",
               "MONITOR_ENABLED": os.getenv("MONITOR_ENABLED_SECRET") or "true",
               "TELEGRAM_ENABLED": os.getenv("TELEGRAM_ENABLED_SECRET") or "true",
               "TELEGRAM_BOT_TOKEN": os.environ["TELEGRAM_BOT_TOKEN_SECRET"],
