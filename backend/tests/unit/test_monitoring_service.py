@@ -251,6 +251,57 @@ def test_non_silenceable_rule_is_rejected(tmp_path) -> None:
         )
 
 
+def test_emergency_stop_ignores_global_silence_and_sends_immediately(tmp_path) -> None:
+    service, telegram = build_service(tmp_path)
+    start = datetime(2026, 6, 18, 9, 0, tzinfo=timezone.utc)
+    service.create_silence(
+        reason="maintenance",
+        operator="admin",
+        expires_at=start + timedelta(hours=1),
+        now=start,
+    )
+
+    incident = service.record_check(
+        rule_id="emergency_stop",
+        scope_id="global",
+        healthy=False,
+        severity="critical",
+        summary="Emergency stop active",
+        now=start,
+    )
+
+    assert incident["status"] == "firing"
+    assert incident["failure_count"] == 1
+    assert incident["delivery"]["firing"]["sent"] is True
+    assert telegram.sent == [("emergency_stop:global", "firing")]
+
+
+def test_daily_loss_limit_ignores_scope_silence_and_sends_immediately(tmp_path) -> None:
+    service, telegram = build_service(tmp_path)
+    start = datetime(2026, 6, 18, 9, 0, tzinfo=timezone.utc)
+    service.create_silence(
+        scope_id="global",
+        reason="maintenance",
+        operator="admin",
+        expires_at=start + timedelta(hours=1),
+        now=start,
+    )
+
+    incident = service.record_check(
+        rule_id="daily_loss_limit",
+        scope_id="global",
+        healthy=False,
+        severity="critical",
+        summary="Daily loss limit breached",
+        now=start,
+    )
+
+    assert incident["status"] == "firing"
+    assert incident["failure_count"] == 1
+    assert incident["delivery"]["firing"]["sent"] is True
+    assert telegram.sent == [("daily_loss_limit:global", "firing")]
+
+
 def test_telegram_failure_records_retry_without_raising(tmp_path) -> None:
     service, _ = build_service(tmp_path, fail_telegram=True)
     start = datetime(2026, 6, 18, 9, 0, tzinfo=timezone.utc)
