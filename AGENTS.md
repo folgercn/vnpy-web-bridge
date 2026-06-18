@@ -3,6 +3,7 @@
 - 喊我付哥，回答问题的时候不要啰嗦，简洁回答。
 - 如果是提交 PR 更新，需要同步添加评论。
 - 本机已安装 Colima。以后涉及 SQL/数据库的改动，先在本机用 Colima 启动对应数据库并完成本地验证，再提交结论。
+- 新建 git worktree 后必须先同步并核对本地运行环境：`.env`、`backend/.env`、`frontend/.env` 都是 ignored 文件，不会随 worktree 自动带过去。涉及 RPC、行情、交易、数据库或页面联调时，必须先确认当前 worktree 的 `.env` 与真实本地环境一致，不能直接使用 `.env.example` 或默认 `127.0.0.1` 地址做结论。
 
 ## RPC / SimNow smoke tests
 

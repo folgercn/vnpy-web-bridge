@@ -71,8 +71,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { useMessage } from 'naive-ui'
+import { computed, h, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { NTag, useMessage } from 'naive-ui'
 import {
   CandlestickSeries,
   createChart,
@@ -82,8 +82,19 @@ import {
   type UTCTimestamp
 } from 'lightweight-charts'
 import DataPanel from '../components/common/DataPanel.vue'
-import TradingSessionBadge from '../components/common/TradingSessionBadge.vue'
-import { contractSearchText, formatContractTitle, normalizeKeyword, productNameForRow, symbolMonth, symbolRoot, vtSymbolOf, type ContractRow } from '../utils/marketContracts'
+import {
+  compareContractMonths,
+  contractSearchText,
+  formatContractTitle,
+  isMainContract,
+  mainContracts,
+  normalizeKeyword,
+  preferredMainContract,
+  productNameForRow,
+  symbolRoot,
+  vtSymbolOf,
+  type ContractRow
+} from '../utils/marketContracts'
 import { useMediaQuery } from '../composables/useMediaQuery'
 import { addMarketWatchlistItem, getMarketWatchlist, removeMarketWatchlistItem, type MarketWatchlistItem } from '../api/market'
 import { useTerminalStore } from '../stores/terminal'
@@ -111,6 +122,12 @@ const candleData: CandlestickData[] = []
 const marketColumns = [
   { title: '品种', key: 'product_name' },
   { title: '默认合约', key: 'contract_label' },
+  {
+    title: '标识',
+    key: 'contract_role',
+    render: (row: ContractRow) =>
+      row.contract_role === '主力' ? h(NTag, { type: 'success', round: true }, { default: () => '主力' }) : '-'
+  },
   { title: '最新', key: 'last_price', render: (row: ContractRow) => formatMarketValue(row.last_price) },
   { title: '买一', key: 'bid_price_1', render: (row: ContractRow) => formatMarketValue(row.bid_price_1) },
   { title: '卖一', key: 'ask_price_1', render: (row: ContractRow) => formatMarketValue(row.ask_price_1) },
@@ -133,7 +150,7 @@ const selectedContractLabel = computed(() => (selectedContract.value ? formatCon
 const contractOptions = computed(() => {
   const keyword = normalizeKeyword(searchKeyword.value)
   if (!keyword) return []
-  return terminal.contracts
+  return mainContracts(terminal.contracts)
     .filter(isFuturesContract)
     .filter((row) => contractMatchesKeyword(row, keyword))
     .slice(0, 80)
@@ -143,19 +160,20 @@ const watchedProductItems = computed(() => watchlistItems.value.filter((item) =>
 const activeProduct = computed(() => watchlistItems.value.find((item) => item.watch_key === activeWatchKey.value) || watchedProductItems.value[0])
 const activeProductContracts = computed(() => {
   if (!activeProduct.value) return []
-  return contractsForWatchItem(activeProduct.value).filter(isFuturesContract).sort(compareContractMonths)
+  return mainContracts(contractsForWatchItem(activeProduct.value).filter(isFuturesContract)).sort(compareContractMonths)
 })
 const explicitWatchedContracts = computed(() =>
   watchlistItems.value
     .filter((item) => item.watch_type === 'contract' && item.vt_symbol)
-    .flatMap((item) => terminal.contracts.filter((row) => vtSymbolOf(row) === item.vt_symbol && isFuturesContract(row)))
+    .flatMap((item) => terminal.contracts.filter((row) => vtSymbolOf(row) === item.vt_symbol && isFuturesContract(row) && isMainContract(row)))
 )
 const selectableContracts = computed(() => uniqueContracts([...activeProductContracts.value, ...explicitWatchedContracts.value]))
 const activeProductContractOptions = computed(() => selectableContracts.value.map(contractOption))
 const focusedContracts = computed(() => {
   const rows = new Map<string, ContractRow>()
   for (const item of watchlistItems.value) {
-    for (const row of contractsForWatchItem(item).filter(isFuturesContract)) rows.set(vtSymbolOf(row), row)
+    const row = preferredContractForWatchItem(item)
+    if (row) rows.set(vtSymbolOf(row), row)
   }
   return Array.from(rows.values()).sort(compareContractMonths)
 })
@@ -173,7 +191,8 @@ const watchedMarketRows = computed(() =>
     const tick = vtSymbol ? terminal.ticks[vtSymbol] || {} : {}
     return {
       product_name: item.display_name,
-      contract_label: contract ? formatContractTitle(contract, item.display_name) : '暂无期货合约',
+      contract_label: contract ? formatContractTitle(contract, item.display_name, { main: true }) : '暂无主力合约',
+      contract_role: contract ? '主力' : '-',
       ...tick
     }
   })
@@ -375,7 +394,7 @@ function contractsForWatchItem(item: MarketWatchlistItem) {
 
 function preferredContractForWatchItem(item: MarketWatchlistItem) {
   const rows = contractsForWatchItem(item).filter(isFuturesContract).sort(compareContractMonths)
-  return rows.find(isCurrentOrFutureContract) || rows[0]
+  return preferredMainContract(rows)
 }
 
 function productMatches(row: ContractRow, product: MarketWatchlistItem) {
@@ -399,7 +418,7 @@ function watchedLabel(item: MarketWatchlistItem) {
 
 function contractOption(row: ContractRow) {
   const value = vtSymbolOf(row)
-  return { label: formatContractTitle(row, productLabelForRow(row) || productNameForRow(row)), value }
+  return { label: formatContractTitle(row, productLabelForRow(row) || productNameForRow(row), { main: isMainContract(row) }), value }
 }
 
 function contractMatchesKeyword(row: ContractRow, keyword: string) {
@@ -409,11 +428,7 @@ function contractMatchesKeyword(row: ContractRow, keyword: string) {
 function displayContractForVtSymbol(value: unknown) {
   const vtSymbol = String(value || '')
   const row = terminal.contracts.find((item) => vtSymbolOf(item) === vtSymbol)
-  return row ? formatContractTitle(row, productLabelForRow(row) || productNameForRow(row)) : vtSymbol
-}
-
-function compareContracts(a: ContractRow, b: ContractRow) {
-  return formatContractTitle(a).localeCompare(formatContractTitle(b), 'zh-Hans-CN')
+  return row ? formatContractTitle(row, productLabelForRow(row) || productNameForRow(row), { main: isMainContract(row) }) : vtSymbol
 }
 
 function uniqueContracts(rows: ContractRow[]) {
@@ -428,21 +443,6 @@ function isFuturesContract(row: ContractRow) {
   const isOptionProduct = product === '期权' || product === 'option'
   const hasOptionStrike = /\d+[CP]\d+$/i.test(symbol)
   return !isOptionProduct && !hasOptionStrike
-}
-
-function isCurrentOrFutureContract(row: ContractRow) {
-  const month = Number(symbolMonth(row))
-  return Number.isFinite(month) && month >= currentYearMonth()
-}
-
-function currentYearMonth() {
-  const now = new Date()
-  return Number(`${String(now.getFullYear()).slice(-2)}${String(now.getMonth() + 1).padStart(2, '0')}`)
-}
-
-function compareContractMonths(a: ContractRow, b: ContractRow) {
-  const monthDiff = Number(symbolMonth(a) || 0) - Number(symbolMonth(b) || 0)
-  return monthDiff || vtSymbolOf(a).localeCompare(vtSymbolOf(b))
 }
 
 function productLabelForRow(row: ContractRow) {
