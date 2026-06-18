@@ -4,6 +4,7 @@ import pytest
 
 from app.core.errors import RpcCallError, RpcTimeoutError
 from app.services.vnpy_rpc_service import VnpyRpcService
+from app.stores.memory_store import memory_store
 
 
 class TimeoutClient:
@@ -23,6 +24,24 @@ class ProbeClient:
     def get_all_accounts(self, *, timeout: int):
         self.calls += 1
         return []
+
+
+class TickEvent:
+    type = "eTick.UNIT999.SHFE"
+
+    def __init__(self) -> None:
+        self.data = TickPayload()
+
+
+class TickPayload:
+    def __init__(self) -> None:
+        self.symbol = "UNIT999"
+        self.exchange = "SHFE"
+        self.last_price = 3126
+
+    @property
+    def vt_symbol(self) -> str:
+        return f"{self.symbol}.{self.exchange}"
 
 
 def test_rpc_call_timeout_is_normalized() -> None:
@@ -64,3 +83,14 @@ def test_rpc_status_probe_uses_ttl() -> None:
     service.status(probe=True)
 
     assert client.calls == 1
+
+
+def test_handle_tick_event_saves_computed_vt_symbol() -> None:
+    service = VnpyRpcService()
+
+    service.handle_event("", TickEvent())
+
+    tick = memory_store.get_tick("UNIT999.SHFE")
+    assert tick
+    assert tick["vt_symbol"] == "UNIT999.SHFE"
+    assert tick["last_price"] == 3126
