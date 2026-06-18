@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import logging
+from csv import DictReader
 from datetime import datetime, timedelta, timezone
+from io import StringIO
 from threading import RLock
-from typing import Any
+from typing import Any, Iterable
 
 from app.core.config import Settings, get_settings
 
@@ -148,6 +150,129 @@ class QuestDbMarketDataService:
         ]
         return bars
 
+    def get_overview(self, limit: int = 500) -> list[dict[str, Any]]:
+        if not self.enabled:
+            return []
+
+        safe_limit = min(max(int(limit), 1), 5000)
+        try:
+            with self._lock:
+                conn = self._connect()
+                self._init_schema()
+                rows = conn.execute(
+                    f"""
+                    SELECT
+                        vt_symbol,
+                        symbol,
+                        exchange,
+                        count() AS row_count,
+                        min(ts) AS start_time,
+                        max(ts) AS end_time
+                    FROM market_ticks
+                    GROUP BY vt_symbol, symbol, exchange
+                    ORDER BY end_time DESC
+                    LIMIT {safe_limit}
+                    """
+                ).fetchall()
+        except Exception as exc:
+            logger.warning("QuestDB overview query failed: %s", exc)
+            self._drop_connection()
+            return []
+
+        return [
+            {
+                "vt_symbol": row[0],
+                "symbol": row[1],
+                "exchange": row[2],
+                "row_count": row[3],
+                "start_time": _format_datetime(row[4]),
+                "end_time": _format_datetime(row[5]),
+            }
+            for row in rows
+        ]
+
+    def query_ticks(
+        self,
+        symbol: str | None = None,
+        exchange: str | None = None,
+        vt_symbol: str | None = None,
+        start: str | None = None,
+        end: str | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        if not self.enabled:
+            return []
+
+        where, params = _build_tick_filters(symbol=symbol, exchange=exchange, vt_symbol=vt_symbol, start=start, end=end)
+        safe_limit = min(max(int(limit), 1), 5000)
+
+        try:
+            with self._lock:
+                conn = self._connect()
+                self._init_schema()
+                rows = conn.execute(
+                    f"""
+                    SELECT
+                        ts, vt_symbol, symbol, exchange, gateway_name,
+                        last_price, volume, turnover, open_interest,
+                        bid_price_1, ask_price_1, bid_volume_1, ask_volume_1
+                    FROM market_ticks
+                    {where}
+                    ORDER BY ts DESC
+                    LIMIT {safe_limit}
+                    """,
+                    params,
+                ).fetchall()
+        except Exception as exc:
+            logger.warning("QuestDB tick query failed: %s", exc)
+            self._drop_connection()
+            return []
+
+        return [_tick_row_to_dict(row) for row in rows]
+
+    def import_ticks_csv(self, content: bytes) -> dict[str, Any]:
+        if not self.enabled:
+            return {"imported": 0, "skipped": 0, "enabled": False}
+
+        text = content.decode("utf-8-sig")
+        reader = DictReader(StringIO(text))
+        imported = 0
+        skipped = 0
+        for row in reader:
+            tick = _csv_row_to_tick(row)
+            if not tick:
+                skipped += 1
+                continue
+            before = imported
+            self.save_tick(tick)
+            imported += 1
+            if imported == before:
+                skipped += 1
+        return {"imported": imported, "skipped": skipped, "enabled": True}
+
+    def export_ticks_csv(self, rows: Iterable[dict[str, Any]]) -> str:
+        headers = [
+            "datetime",
+            "vt_symbol",
+            "symbol",
+            "exchange",
+            "gateway_name",
+            "last_price",
+            "volume",
+            "turnover",
+            "open_interest",
+            "bid_price_1",
+            "ask_price_1",
+            "bid_volume_1",
+            "ask_volume_1",
+        ]
+        output = StringIO()
+        output.write(",".join(headers) + "\n")
+        for row in rows:
+            values = [_csv_escape(row.get(key, "")) for key in headers]
+            output.write(",".join(values) + "\n")
+        return output.getvalue()
+
     def _connect(self) -> Any:
         if psycopg is None:
             raise RuntimeError("psycopg 未安装，无法连接 QuestDB")
@@ -221,6 +346,92 @@ def _string_or_none(value: Any) -> str | None:
     if value in (None, ""):
         return None
     return str(value)
+
+
+def _format_datetime(value: Any) -> str | None:
+    if value is None:
+        return None
+    return value.isoformat() if hasattr(value, "isoformat") else str(value)
+
+
+def _build_tick_filters(
+    symbol: str | None = None,
+    exchange: str | None = None,
+    vt_symbol: str | None = None,
+    start: str | None = None,
+    end: str | None = None,
+) -> tuple[str, tuple[Any, ...]]:
+    clauses: list[str] = []
+    params: list[Any] = []
+    if vt_symbol:
+        clauses.append("vt_symbol = %s")
+        params.append(vt_symbol)
+    if symbol:
+        clauses.append("symbol = %s")
+        params.append(symbol)
+    if exchange:
+        clauses.append("exchange = %s")
+        params.append(exchange)
+    if start:
+        clauses.append("ts >= %s")
+        params.append(_parse_datetime(start))
+    if end:
+        clauses.append("ts <= %s")
+        params.append(_parse_datetime(end))
+    if not clauses:
+        return "", tuple(params)
+    return "WHERE " + " AND ".join(clauses), tuple(params)
+
+
+def _tick_row_to_dict(row: Any) -> dict[str, Any]:
+    return {
+        "datetime": _format_datetime(row[0]),
+        "vt_symbol": row[1],
+        "symbol": row[2],
+        "exchange": row[3],
+        "gateway_name": row[4],
+        "last_price": row[5],
+        "volume": row[6],
+        "turnover": row[7],
+        "open_interest": row[8],
+        "bid_price_1": row[9],
+        "ask_price_1": row[10],
+        "bid_volume_1": row[11],
+        "ask_volume_1": row[12],
+    }
+
+
+def _csv_row_to_tick(row: dict[str, str]) -> dict[str, Any] | None:
+    vt_symbol = row.get("vt_symbol") or ""
+    symbol = row.get("symbol") or vt_symbol.split(".", 1)[0]
+    exchange = row.get("exchange") or (vt_symbol.split(".", 1)[1] if "." in vt_symbol else "")
+    last_price = _number(row.get("last_price"))
+    if not symbol or not exchange or last_price is None:
+        return None
+    return {
+        "datetime": row.get("datetime") or row.get("ts"),
+        "vt_symbol": vt_symbol or f"{symbol}.{exchange}",
+        "symbol": symbol,
+        "exchange": exchange,
+        "gateway_name": row.get("gateway_name"),
+        "last_price": last_price,
+        "volume": _number(row.get("volume")),
+        "turnover": _number(row.get("turnover")),
+        "open_interest": _number(row.get("open_interest")),
+        "bid_price_1": _number(row.get("bid_price_1")),
+        "ask_price_1": _number(row.get("ask_price_1")),
+        "bid_volume_1": _number(row.get("bid_volume_1")),
+        "ask_volume_1": _number(row.get("ask_volume_1")),
+    }
+
+
+def _csv_escape(value: Any) -> str:
+    if value is None:
+        return ""
+    text = str(value)
+    if any(char in text for char in [",", "\n", '"']):
+        return '"' + text.replace('"', '""') + '"'
+    return text
 
 
 def _sample_by(interval: str) -> str | None:

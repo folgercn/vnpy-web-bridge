@@ -139,6 +139,66 @@ def test_market_unsubscribe_requires_auth_and_returns_result(monkeypatch) -> Non
     assert response.json()["data"] == {"vt_symbol": "rb2610.SHFE", "subscribed": False}
 
 
+def test_market_data_overview_requires_auth(monkeypatch) -> None:
+    from app.api import routes_market
+
+    monkeypatch.setattr(
+        routes_market.market_data_service,
+        "get_overview",
+        lambda limit=500: [{"vt_symbol": "rb2610.SHFE", "row_count": 2}],
+    )
+
+    with client_without_rpc(monkeypatch) as client:
+        unauthenticated = client.get("/api/market/data/overview")
+        response = client.get("/api/market/data/overview", headers=auth_headers("viewer"))
+
+    assert unauthenticated.status_code == 401
+    assert response.status_code == 200
+    assert response.json()["data"][0]["vt_symbol"] == "rb2610.SHFE"
+
+
+def test_market_data_ticks_uses_filters(monkeypatch) -> None:
+    from app.api import routes_market
+
+    calls: list[dict[str, object]] = []
+
+    def query_ticks(**kwargs):
+        calls.append(kwargs)
+        return [{"vt_symbol": kwargs["vt_symbol"], "last_price": 3126}]
+
+    monkeypatch.setattr(routes_market.market_data_service, "query_ticks", query_ticks)
+
+    with client_without_rpc(monkeypatch) as client:
+        response = client.get(
+            "/api/market/data/ticks?vt_symbol=rb2610.SHFE&limit=20",
+            headers=auth_headers("viewer"),
+        )
+
+    assert response.status_code == 200
+    assert response.json()["data"][0]["last_price"] == 3126
+    assert calls[0]["vt_symbol"] == "rb2610.SHFE"
+    assert calls[0]["limit"] == 20
+
+
+def test_market_data_import_requires_admin(monkeypatch) -> None:
+    from app.api import routes_market
+
+    monkeypatch.setattr(
+        routes_market.market_data_service,
+        "import_ticks_csv",
+        lambda content: {"imported": 1, "skipped": 0},
+    )
+    files = {"file": ("ticks.csv", b"vt_symbol,last_price\nrb2610.SHFE,3126\n", "text/csv")}
+
+    with client_without_rpc(monkeypatch) as client:
+        viewer = client.post("/api/market/data/import", headers=auth_headers("viewer"), files=files)
+        admin = client.post("/api/market/data/import", headers=auth_headers("admin"), files=files)
+
+    assert viewer.status_code == 403
+    assert admin.status_code == 200
+    assert admin.json()["data"]["imported"] == 1
+
+
 def test_create_order_validation_error_uses_unified_payload(monkeypatch) -> None:
     with client_without_rpc(monkeypatch) as client:
         response = client.post(
