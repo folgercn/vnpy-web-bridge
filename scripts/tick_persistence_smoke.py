@@ -101,6 +101,7 @@ def main() -> int:
             "dropped": snapshot["dropped_total"],
             "lag_seconds": snapshot["persistence_lag_seconds"],
             "spool_rows": snapshot["spool_rows"],
+            "write_protocol": market.write_protocol,
         }
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
         return 0 if result["diff"] == 0 and result["dropped"] == 0 else 1

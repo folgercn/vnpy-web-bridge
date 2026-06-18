@@ -40,6 +40,7 @@ services:
       - ../.env
     environment:
       QUESTDB_PG_DSN: ${QUESTDB_PG_DSN:-postgresql://admin:quest@questdb:8812/qdb}
+      QUESTDB_ILP_CONF: ${QUESTDB_ILP_CONF:-http::addr=questdb:9000;}
       QUESTDB_TICK_SPOOL_DIR: ${QUESTDB_TICK_SPOOL_DIR:-/app/tick-spool}
       DATABASE_URL: ${DATABASE_URL:-postgresql://vnpy:vnpy@postgres:5432/vnpy}
     depends_on:

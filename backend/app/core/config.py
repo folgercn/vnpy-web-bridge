@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = Field(default=480, ge=1)
     auth_users_json: str = "[]"
     questdb_pg_dsn: str = ""
+    questdb_ilp_conf: str = ""
     questdb_tick_persist_enabled: bool = True
     questdb_tick_queue_size: int = Field(default=100_000, ge=1)
     questdb_tick_batch_size: int = Field(default=1_000, ge=1)
