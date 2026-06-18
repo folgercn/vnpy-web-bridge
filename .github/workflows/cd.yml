@@ -19,6 +19,8 @@ on:
       - "test_rpc_trade_flow.py"
       - "deployments/**"
       - "scripts/deploy.sh"
+      - "scripts/install-watchdog.sh"
+      - "scripts/watchdog.py"
 
 jobs:
   changes:
@@ -78,7 +80,7 @@ jobs:
           while IFS= read -r file; do
             [ -z "$file" ] && continue
             case "$file" in
-              Dockerfile|.dockerignore|backend/*|frontend/*|test_rpc_readonly.py|test_rpc_trade_flow.py|deployments/*|scripts/deploy.sh|.github/workflows/cd.yml)
+              Dockerfile|.dockerignore|backend/*|frontend/*|test_rpc_readonly.py|test_rpc_trade_flow.py|deployments/*|scripts/deploy.sh|scripts/install-watchdog.sh|scripts/watchdog.py|.github/workflows/cd.yml)
                 image_changed=true
                 deploy_services="web-bridge"
                 ;;
@@ -120,9 +122,12 @@ jobs:
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
         run: |
           path="${DEPLOY_PATH:-/Users/fujun/services/vnpy-web-bridge}"
-          mkdir -p "$path/deployments" "$path/scripts" "$path/logs" "$path/source"
+          mkdir -p "$path/deployments" "$path/scripts" "$path/logs/watchdog" "$path/source"
           cp deployments/docker-compose.prod.yml "$path/deployments/docker-compose.prod.yml"
+          cp deployments/com.vnpy-web-bridge.watchdog.plist "$path/deployments/com.vnpy-web-bridge.watchdog.plist"
           cp scripts/deploy.sh "$path/scripts/deploy.sh"
+          cp scripts/install-watchdog.sh "$path/scripts/install-watchdog.sh"
+          cp scripts/watchdog.py "$path/scripts/watchdog.py"
           cp .deploy.env "$path/.env"
           rsync -az --delete \
             --exclude .git \
@@ -132,7 +137,7 @@ jobs:
             --exclude __pycache__ \
             --exclude .pytest_cache \
             ./ "$path/source/"
-          chmod +x "$path/scripts/deploy.sh"
+          chmod +x "$path/scripts/deploy.sh" "$path/scripts/install-watchdog.sh" "$path/scripts/watchdog.py"
           chmod 600 "$path/.env"
 
       - name: Build image on Macmini
