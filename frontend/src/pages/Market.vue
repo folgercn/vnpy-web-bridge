@@ -444,9 +444,11 @@ function uniqueContracts(rows: ContractRow[]) {
 }
 
 function isFuturesContract(row: ContractRow) {
-  const product = String(row.product || '')
+  const product = String(row.product || '').toLowerCase()
   const symbol = String(row.symbol || '')
-  return product !== '期权' && !/[CP]\d+$/i.test(symbol)
+  const isOptionProduct = product === '期权' || product === 'option'
+  const hasOptionStrike = /\d+[CP]\d+$/i.test(symbol)
+  return !isOptionProduct && !hasOptionStrike
 }
 
 function isCurrentOrFutureContract(row: ContractRow) {
