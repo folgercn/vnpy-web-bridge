@@ -47,9 +47,11 @@ import DataPanel from '../components/common/DataPanel.vue'
 import { exchangeOptions, formatExchange } from '../constants/exchanges'
 import { useMediaQuery } from '../composables/useMediaQuery'
 import { useTerminalStore } from '../stores/terminal'
+import { useThemeStore } from '../stores/theme'
 
 const message = useMessage()
 const terminal = useTerminalStore()
+const theme = useThemeStore()
 const symbol = ref('rb2610')
 const exchange = ref('SHFE')
 const selectedVtSymbol = ref('rb2610.SHFE')
@@ -222,12 +224,13 @@ function cols(keys: string[]) {
 
 function setupChart() {
   if (!chartEl.value) return
+  const colors = chartColors()
   chart = createChart(chartEl.value, {
     height: isMobile.value ? 220 : 280,
-    layout: { background: { color: '#11141c' }, textColor: '#d7dde5' },
-    grid: { vertLines: { color: '#222631' }, horzLines: { color: '#222631' } },
-    rightPriceScale: { borderColor: '#303642' },
-    timeScale: { borderColor: '#303642' }
+    layout: { background: { color: colors.background }, textColor: colors.text },
+    grid: { vertLines: { color: colors.grid }, horzLines: { color: colors.grid } },
+    rightPriceScale: { borderColor: colors.border },
+    timeScale: { borderColor: colors.border }
   })
   candleSeries = chart.addSeries(CandlestickSeries, {
     upColor: '#12d7b0',
@@ -237,6 +240,34 @@ function setupChart() {
     wickUpColor: '#12d7b0',
     wickDownColor: '#ff4d6d'
   })
+}
+
+function applyChartTheme() {
+  if (!chart) return
+  const colors = chartColors()
+  chart.applyOptions({
+    layout: { background: { color: colors.background }, textColor: colors.text },
+    grid: { vertLines: { color: colors.grid }, horzLines: { color: colors.grid } },
+    rightPriceScale: { borderColor: colors.border },
+    timeScale: { borderColor: colors.border }
+  })
+}
+
+function chartColors() {
+  if (theme.effectiveTheme === 'dark') {
+    return {
+      background: '#11141c',
+      text: '#d7dde5',
+      grid: '#222631',
+      border: '#303642'
+    }
+  }
+  return {
+    background: '#ffffff',
+    text: '#334155',
+    grid: '#e5e7eb',
+    border: '#d7dde5'
+  }
 }
 
 function resetChartView() {
@@ -252,6 +283,8 @@ watch(isMobile, (mobile) => {
   chart?.applyOptions({ height: mobile ? 220 : 280 })
   chart?.timeScale().fitContent()
 })
+
+watch(() => theme.effectiveTheme, applyChartTheme)
 
 function toMinuteTimestamp(value: unknown): UTCTimestamp {
   const parsed = value ? new Date(String(value)).getTime() : Date.now()
