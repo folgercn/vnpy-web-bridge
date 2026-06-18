@@ -18,8 +18,10 @@ MONITOR_ENABLED=true
 MONITOR_INTERVAL_SECONDS=15
 MONITOR_FAILURE_THRESHOLD=3
 MONITOR_RECOVERY_THRESHOLD=2
+MONITOR_STARTUP_GRACE_SECONDS=120
 MONITOR_STATE_PATH=/app/logs/monitor/state.json
 MONITOR_EVENTS_PATH=/app/logs/monitor/events.jsonl
+MONITOR_MAINTENANCE_PATH=/app/logs/watchdog/maintenance.json
 MONITOR_EXPECTED_STRATEGIES=
 
 TELEGRAM_ENABLED=true
@@ -63,7 +65,7 @@ Run one manual watchdog cycle:
 scripts/watchdog.py --env-file /Users/fujun/services/vnpy-web-bridge/.env --once
 ```
 
-Deployments write `logs/watchdog/maintenance.json` before restarting containers. Successful liveness smoke removes the file. Failed smoke leaves a `deployment_smoke_failed:web-bridge` watchdog incident.
+Deployments write `logs/watchdog/maintenance.json` before restarting containers. The backend reads the same file through `MONITOR_MAINTENANCE_PATH` and suppresses runtime dependency checks during an active deployment window. Successful liveness smoke removes the file. Failed smoke leaves a `deployment_smoke_failed:web-bridge` watchdog incident.
 
 ## Drill Checklist
 

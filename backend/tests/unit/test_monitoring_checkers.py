@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import json
 
 from app.core.config import Settings
 from app.services.alert_service import AlertService
@@ -47,6 +48,11 @@ class HealthyMarketStore:
 class HealthyPostgres:
     def health_check(self) -> dict:
         return {"configured": True, "connected": True, "status": "ok"}
+
+
+class BrokenPostgres:
+    def health_check(self) -> dict:
+        raise RuntimeError("postgres down")
 
 
 class HealthyTickPersistence:
@@ -101,6 +107,7 @@ def build_service(tmp_path, *, now: datetime, settings: Settings | None = None, 
     settings = settings or Settings(
         monitor_failure_threshold=1,
         monitor_recovery_threshold=1,
+        monitor_startup_grace_seconds=0,
         monitor_flap_send_grace_seconds=0,
         monitor_flap_recovery_grace_seconds=0,
         monitor_state_path=str(tmp_path / "state.json"),
@@ -143,6 +150,66 @@ def test_rpc_failure_suppresses_derived_checks(tmp_path) -> None:
     assert incident["status"] == "firing"
 
 
+def test_startup_grace_suppresses_runtime_dependency_checks(tmp_path) -> None:
+    now = datetime(2026, 6, 18, 2, 0, tzinfo=timezone.utc)
+    settings = Settings(
+        monitor_failure_threshold=1,
+        monitor_recovery_threshold=1,
+        monitor_startup_grace_seconds=120,
+        monitor_flap_send_grace_seconds=0,
+        monitor_flap_recovery_grace_seconds=0,
+        monitor_state_path=str(tmp_path / "state.json"),
+        monitor_events_path=str(tmp_path / "events.jsonl"),
+        monitor_expected_strategies="demo_strategy",
+    )
+    service = build_service(tmp_path, now=now, settings=settings, rpc=FakeRpc(connected=False), postgres=BrokenPostgres())
+
+    snapshot = service.run_checks()
+
+    names = {item["name"] for item in snapshot["checks"]}
+    assert "startup_grace" in names
+    assert "rpc" not in names
+    assert "postgres" not in names
+    assert any(item["suppressed_by"] == "startup_grace" for item in snapshot["suppressed"])
+    assert not any(item["incident_id"] == "rpc_unavailable:CTP" for item in snapshot["incidents"])
+
+
+def test_deployment_maintenance_suppresses_runtime_dependency_checks(tmp_path) -> None:
+    now = datetime(2026, 6, 18, 2, 0, tzinfo=timezone.utc)
+    maintenance_path = tmp_path / "maintenance.json"
+    maintenance_path.write_text(
+        json.dumps(
+            {
+                "status": "running",
+                "reason": "deploy in progress",
+                "expires_at": (now + timedelta(minutes=5)).isoformat(timespec="seconds"),
+            }
+        ),
+        encoding="utf-8",
+    )
+    settings = Settings(
+        monitor_failure_threshold=1,
+        monitor_recovery_threshold=1,
+        monitor_startup_grace_seconds=0,
+        monitor_flap_send_grace_seconds=0,
+        monitor_flap_recovery_grace_seconds=0,
+        monitor_state_path=str(tmp_path / "state.json"),
+        monitor_events_path=str(tmp_path / "events.jsonl"),
+        monitor_maintenance_path=str(maintenance_path),
+        monitor_expected_strategies="demo_strategy",
+    )
+    service = build_service(tmp_path, now=now, settings=settings, rpc=FakeRpc(connected=False), postgres=BrokenPostgres())
+
+    snapshot = service.run_checks()
+
+    names = {item["name"] for item in snapshot["checks"]}
+    assert "deployment_maintenance" in names
+    assert "rpc" not in names
+    assert "postgres" not in names
+    assert any(item["suppressed_by"] == "deployment_maintenance" for item in snapshot["suppressed"])
+    assert not any(item["incident_id"] == "rpc_unavailable:CTP" for item in snapshot["incidents"])
+
+
 def test_tick_freshness_records_stale_subscription(tmp_path) -> None:
     now = datetime(2026, 6, 18, 2, 30, tzinfo=timezone.utc)  # 10:30 Asia/Shanghai
     rpc = FakeRpc()
@@ -164,6 +231,7 @@ def test_expected_strategy_stop_records_incident(tmp_path) -> None:
     settings = Settings(
         monitor_failure_threshold=1,
         monitor_recovery_threshold=1,
+        monitor_startup_grace_seconds=0,
         monitor_flap_send_grace_seconds=0,
         monitor_flap_recovery_grace_seconds=0,
         monitor_state_path=str(tmp_path / "state.json"),
@@ -212,10 +280,6 @@ def test_trade_failure_window_records_aggregate_incident(tmp_path) -> None:
 
 
 def test_dependency_health_error_records_incident(tmp_path) -> None:
-    class BrokenPostgres:
-        def health_check(self) -> dict:
-            raise RuntimeError("postgres down")
-
     now = datetime(2026, 6, 18, 2, 0, tzinfo=timezone.utc)
     service = build_service(tmp_path, now=now, postgres=BrokenPostgres())
 
