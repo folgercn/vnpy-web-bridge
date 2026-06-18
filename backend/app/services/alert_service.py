@@ -166,9 +166,15 @@ class AlertService:
 
         failure_started_at = parse_time(str(incident.get("failure_started_at") or incident.get("first_seen")), now)
         failure_age = (now - failure_started_at).total_seconds()
+        send_now = incident["rule_id"] in NON_SILENCEABLE_RULES
         if (
-            incident["failure_count"] >= self.settings.monitor_failure_threshold
-            and failure_age >= self.settings.monitor_flap_send_grace_seconds
+            (
+                send_now
+                or (
+                    incident["failure_count"] >= self.settings.monitor_failure_threshold
+                    and failure_age >= self.settings.monitor_flap_send_grace_seconds
+                )
+            )
             and incident.get("status") == "pending"
         ):
             incident["status"] = "firing"
@@ -251,6 +257,8 @@ class AlertService:
         return f"{episode_id}:{event}"
 
     def _matching_silence(self, state: dict[str, Any], incident: dict[str, Any], now: datetime) -> dict[str, Any] | None:
+        if incident.get("rule_id") in NON_SILENCEABLE_RULES:
+            return None
         for silence in state["silences"].values():
             expires_at = parse_time(str(silence.get("expires_at")), now)
             if expires_at <= now:
