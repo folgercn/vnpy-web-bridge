@@ -129,6 +129,10 @@ class QuestDbMarketDataService:
     def enabled(self) -> bool:
         return bool(self.dsn)
 
+    @property
+    def connected(self) -> bool:
+        return bool(self._conn and not self._conn.closed)
+
     def start(self) -> None:
         if not self.enabled:
             return

@@ -7,6 +7,7 @@ from app.core.errors import ok
 from app.core.security import CurrentUser, require_roles
 from app.schemas.market import BarQueryDto, MarketDataQueryDto, SubscribeRequestDto, WatchlistCreateDto
 from app.services.market_data_service import market_data_service
+from app.services.tick_persistence import tick_persistence_service
 from app.services.watchlist_service import watchlist_service
 from app.services.vnpy_rpc_service import rpc_service
 from app.stores.memory_store import memory_store
@@ -66,6 +67,11 @@ def data_overview(
     _: CurrentUser = Depends(require_roles("viewer", "trader", "admin")),
 ) -> dict:
     return ok(market_data_service.get_overview(limit))
+
+
+@router.get("/market/data/status")
+def data_status(_: CurrentUser = Depends(require_roles("viewer", "trader", "admin"))) -> dict:
+    return ok(tick_persistence_service.snapshot())
 
 
 @router.get("/market/data/ticks")

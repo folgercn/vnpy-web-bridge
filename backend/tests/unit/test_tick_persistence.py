@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import logging
 from typing import Any
 
 from app.core.config import Settings
@@ -9,6 +10,7 @@ from app.services.tick_persistence import TickPersistenceService
 
 class FakeMarketStore:
     enabled = True
+    connected = True
 
     def __init__(self) -> None:
         self.saved: list[dict[str, Any]] = []
@@ -132,3 +134,44 @@ def test_stop_drains_queued_ticks(tmp_path) -> None:
     service.stop(timeout=2)
 
     assert [row["ingest_id"] for row in store.saved] == ["row-1"]
+
+
+def test_snapshot_exposes_required_observability_fields(tmp_path) -> None:
+    service, store = make_service(tmp_path)
+    service.enqueue_tick({"ingest_id": "row-1"})
+    before_drain = service.snapshot()
+
+    assert before_drain["enabled"] is True
+    assert before_drain["connected"] is True
+    assert before_drain["received_total"] == 1
+    assert before_drain["valid_total"] == 1
+    assert before_drain["invalid_total"] == 0
+    assert before_drain["queue_depth"] == 1
+    assert before_drain["queue_capacity"] == 10
+    assert before_drain["spool_rows"] == 0
+    assert before_drain["spool_bytes"] == 0
+    assert before_drain["last_received_at"]
+    assert before_drain["persistence_lag_seconds"] is not None
+    assert before_drain["spool_disk_free_bytes"] > 0
+
+    service.drain_once()
+    after_drain = service.snapshot()
+
+    assert len(store.saved) == 1
+    assert after_drain["persisted_total"] == 1
+    assert after_drain["last_persisted_at"]
+    assert after_drain["persistence_lag_seconds"] == 0.0
+
+
+def test_write_error_logs_are_rate_limited(tmp_path, caplog) -> None:
+    service, store = make_service(tmp_path)
+    store.fail = True
+    service.enqueue_tick({"ingest_id": "row-1"})
+    service.enqueue_tick({"ingest_id": "row-2"})
+
+    with caplog.at_level(logging.WARNING):
+        service.drain_once()
+        service.drain_once()
+
+    messages = [record.message for record in caplog.records if "tick persistence write failed" in record.message]
+    assert len(messages) == 1

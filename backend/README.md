@@ -46,9 +46,10 @@ QUESTDB_TICK_FLUSH_INTERVAL_MS=500
 QUESTDB_TICK_RETRY_MAX_SECONDS=60
 QUESTDB_TICK_SPOOL_DIR=logs/tick-spool
 QUESTDB_TICK_SPOOL_MAX_BYTES=10737418240
+QUESTDB_TICK_ERROR_LOG_INTERVAL_SECONDS=60
 ```
 
-当 QuestDB 短暂不可用或内存队列满时，合法 tick 会写入本地 JSONL spool；后台 writer 恢复后按文件顺序补写。spool 超过上限时会显式计入 dropped 并写 error 日志，不静默丢弃。
+当 QuestDB 短暂不可用或内存队列满时，合法 tick 会写入本地 JSONL spool；后台 writer 恢复后按文件顺序补写。spool 超过上限时会显式计入 dropped 并写 error 日志，不静默丢弃。`GET /api/market/data/status` 可查看 received、valid、invalid、persisted、retry、failed、dropped、队列深度、spool 积压、持久化延迟、最近错误和 spool 所在磁盘容量。
 
 ## 接口
 
@@ -90,6 +91,7 @@ QUESTDB_TICK_SPOOL_MAX_BYTES=10737418240
 - `GET /api/market/tick/{vt_symbol}`
 - `GET /api/market/bars`
 - `GET /api/market/data/overview`
+- `GET /api/market/data/status`
 - `GET /api/market/data/ticks`
 - `GET /api/market/data/export`
 - `POST /api/market/data/import`
