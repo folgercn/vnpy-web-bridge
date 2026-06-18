@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { getAccount, getPositions } from '../api/account'
-import { getContracts, getMarketBars, subscribeMarket } from '../api/market'
+import { getContracts, getMarketBars, getTick, subscribeMarket } from '../api/market'
 import { getRiskStatus } from '../api/risk'
 import { getGatewayStatus, getRpcStatus, getStatus, getTradeConfig } from '../api/status'
 import { getOrders, getTrades } from '../api/trade'
@@ -62,6 +62,12 @@ export const useTerminalStore = defineStore('terminal', () => {
     return getMarketBars(symbol, exchange, interval, limit)
   }
 
+  async function refreshTick(vtSymbol: string) {
+    const tick = await getTick(vtSymbol)
+    if (tick.vt_symbol) ticks.value[String(tick.vt_symbol)] = tick
+    return tick
+  }
+
   function applyEvent(type: string, data: Record<string, unknown>) {
     if (type === 'tick' && data.vt_symbol) ticks.value[String(data.vt_symbol)] = data
     if (type === 'order') upsert(orders.value, data, 'vt_orderid')
@@ -99,6 +105,7 @@ export const useTerminalStore = defineStore('terminal', () => {
     refreshContracts,
     subscribe,
     loadBars,
+    refreshTick,
     applyEvent,
     clearLogs
   }
