@@ -154,9 +154,8 @@ class AlertService:
 
     def _apply_failure(self, state: dict[str, Any], incident: dict[str, Any], now: datetime) -> None:
         if incident.get("status") in {"healthy", "resolved"}:
+            self._start_episode(incident, now)
             incident["status"] = "pending"
-            incident["first_seen"] = iso(now)
-            incident["failure_started_at"] = iso(now)
             incident["fired_at"] = None
             incident["resolved_at"] = None
             incident["delivery"] = {}
@@ -202,7 +201,7 @@ class AlertService:
             incident["status"] = "healthy"
 
     def _deliver(self, state: dict[str, Any], incident: dict[str, Any], *, event: str, now: datetime) -> None:
-        delivery_key = f"{incident['incident_id']}:{event}"
+        delivery_key = self._delivery_key(incident, event)
         if delivery_key in state["deliveries"]:
             return
         if self._matching_silence(state, incident, now):
@@ -221,12 +220,13 @@ class AlertService:
                 }
             )
             return
-        state["deliveries"][delivery_key] = {"sent_at": iso(now), "result": result}
+        if result.get("sent"):
+            state["deliveries"][delivery_key] = {"sent_at": iso(now), "result": result}
         incident.setdefault("delivery", {})[event] = {"sent": bool(result.get("sent")), "result": result, "at": iso(now)}
         self.store.append_event({"type": f"incident_{event}", "incident_id": incident["incident_id"], "delivery": result})
 
     def _should_attempt_delivery(self, state: dict[str, Any], incident: dict[str, Any], event: str, now: datetime) -> bool:
-        if f"{incident['incident_id']}:{event}" in state["deliveries"]:
+        if self._delivery_key(incident, event) in state["deliveries"]:
             return False
         event_delivery = incident.get("delivery", {}).get(event)
         if not event_delivery:
@@ -237,6 +237,18 @@ class AlertService:
         if next_retry_at:
             return parse_time(str(next_retry_at), now) <= now
         return False
+
+    def _start_episode(self, incident: dict[str, Any], now: datetime) -> None:
+        episode_seq = int(incident.get("episode_seq") or 0) + 1
+        incident["episode_seq"] = episode_seq
+        incident["episode_id"] = f"{incident['incident_id']}:{episode_seq}"
+        incident["first_seen"] = iso(now)
+        incident["failure_started_at"] = iso(now)
+        incident["recovery_started_at"] = None
+
+    def _delivery_key(self, incident: dict[str, Any], event: str) -> str:
+        episode_id = incident.get("episode_id") or f"{incident['incident_id']}:{int(incident.get('episode_seq') or 0)}"
+        return f"{episode_id}:{event}"
 
     def _matching_silence(self, state: dict[str, Any], incident: dict[str, Any], now: datetime) -> dict[str, Any] | None:
         for silence in state["silences"].values():
@@ -287,6 +299,8 @@ class AlertService:
             "resolved_at": None,
             "failure_count": 0,
             "success_count": 0,
+            "episode_seq": 0,
+            "episode_id": None,
             "delivery": {},
         }
 

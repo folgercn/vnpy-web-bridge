@@ -154,6 +154,27 @@ def test_delivery_state_survives_service_restart(tmp_path) -> None:
     assert telegram.sent == [("rpc_unavailable:CTP", "firing")]
 
 
+def test_new_episode_sends_after_previous_resolution(tmp_path) -> None:
+    service, telegram = build_service(tmp_path)
+    start = datetime(2026, 6, 18, 9, 0, tzinfo=timezone.utc)
+
+    for offset in (0, 20, 46):
+        service.record_check(rule_id="rpc_unavailable", scope_id="CTP", healthy=False, severity="critical", summary="RPC offline", now=start + timedelta(seconds=offset))
+    for offset in (70, 131):
+        service.record_check(rule_id="rpc_unavailable", scope_id="CTP", healthy=True, severity="critical", summary="RPC connected", now=start + timedelta(seconds=offset))
+    for offset in (200, 220, 246):
+        service.record_check(rule_id="rpc_unavailable", scope_id="CTP", healthy=False, severity="critical", summary="RPC offline again", now=start + timedelta(seconds=offset))
+    for offset in (270, 331):
+        service.record_check(rule_id="rpc_unavailable", scope_id="CTP", healthy=True, severity="critical", summary="RPC connected again", now=start + timedelta(seconds=offset))
+
+    assert telegram.sent == [
+        ("rpc_unavailable:CTP", "firing"),
+        ("rpc_unavailable:CTP", "resolved"),
+        ("rpc_unavailable:CTP", "firing"),
+        ("rpc_unavailable:CTP", "resolved"),
+    ]
+
+
 def test_silence_updates_incident_without_sending(tmp_path) -> None:
     service, telegram = build_service(tmp_path)
     start = datetime(2026, 6, 18, 9, 0, tzinfo=timezone.utc)

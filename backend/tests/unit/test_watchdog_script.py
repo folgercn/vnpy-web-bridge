@@ -40,7 +40,9 @@ def build_config(tmp_path, monkeypatch):
     monkeypatch.setenv("WATCHDOG_MAINTENANCE_FILE", str(tmp_path / "maintenance.json"))
     monkeypatch.setenv("WATCHDOG_FAILURE_THRESHOLD", "1")
     monkeypatch.setenv("WATCHDOG_RECOVERY_THRESHOLD", "1")
-    monkeypatch.setenv("TELEGRAM_ENABLED", "false")
+    monkeypatch.setenv("TELEGRAM_ENABLED", "true")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "chat")
     return watchdog_script.WatchdogConfig()
 
 
@@ -67,7 +69,7 @@ def test_watchdog_records_single_firing_delivery(tmp_path, monkeypatch) -> None:
     incident = state["incidents"]["container_not_running:vnpy-web-bridge"]
     assert incident["status"] == "firing"
     assert list(key for key in state["deliveries"] if key.startswith("container_not_running:")) == [
-        "container_not_running:vnpy-web-bridge:firing"
+        "container_not_running:vnpy-web-bridge:1:firing"
     ]
 
 
@@ -89,7 +91,80 @@ def test_watchdog_sends_recovery_once(tmp_path, monkeypatch) -> None:
 
     state = watchdog_script.load_json(config.state_path, default={})
     assert state["incidents"]["container_not_running:vnpy-web-bridge"]["status"] == "healthy"
-    assert "container_not_running:vnpy-web-bridge:resolved" in state["deliveries"]
+    assert "container_not_running:vnpy-web-bridge:1:resolved" in state["deliveries"]
+
+
+def test_watchdog_new_episode_sends_after_resolution(tmp_path, monkeypatch) -> None:
+    config = build_config(tmp_path, monkeypatch)
+    values = iter(["false\n", "true\n", "false\n", "true\n"])
+
+    def runner(cmd, **_kwargs):
+        if cmd[:2] == ["docker", "inspect"]:
+            return completed(0, next(values))
+        return completed(0, "ok\n")
+
+    watchdog = watchdog_script.Watchdog(config, runner=runner, opener=lambda *args, **kwargs: FakeResponse())
+
+    for _ in range(4):
+        watchdog.run_once()
+
+    state = watchdog_script.load_json(config.state_path, default={})
+    assert "container_not_running:vnpy-web-bridge:1:firing" in state["deliveries"]
+    assert "container_not_running:vnpy-web-bridge:1:resolved" in state["deliveries"]
+    assert "container_not_running:vnpy-web-bridge:2:firing" in state["deliveries"]
+    assert "container_not_running:vnpy-web-bridge:2:resolved" in state["deliveries"]
+
+
+def test_watchdog_container_failure_suppresses_liveness_check(tmp_path, monkeypatch) -> None:
+    config = build_config(tmp_path, monkeypatch)
+    opener_calls = {"count": 0}
+
+    def runner(cmd, **_kwargs):
+        if cmd[:2] == ["docker", "inspect"]:
+            return completed(0, "false\n")
+        return completed(0, "ok\n")
+
+    def opener(*args, **kwargs):
+        opener_calls["count"] += 1
+        return FakeResponse()
+
+    watchdog = watchdog_script.Watchdog(config, runner=runner, opener=opener)
+    snapshot = watchdog.run_once()
+
+    rule_ids = [check["rule_id"] for check in snapshot["checks"]]
+    assert "container_not_running" in rule_ids
+    assert "app_liveness_failed" not in rule_ids
+    assert opener_calls["count"] == 1
+
+
+def test_watchdog_telegram_failure_retries_current_incident(tmp_path, monkeypatch) -> None:
+    config = build_config(tmp_path, monkeypatch)
+    current = {"now": datetime(2026, 6, 18, 9, 0, tzinfo=timezone.utc)}
+    calls = {"count": 0}
+
+    def runner(cmd, **_kwargs):
+        if cmd[:2] == ["docker", "inspect"]:
+            return completed(0, "false\n")
+        return completed(0, "ok\n")
+
+    def opener(*args, **kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise TimeoutError("telegram timeout")
+        return FakeResponse()
+
+    monkeypatch.setattr(watchdog_script, "utc_now", lambda: current["now"])
+    watchdog = watchdog_script.Watchdog(config, runner=runner, opener=opener)
+
+    watchdog.run_once()
+    state = watchdog_script.load_json(config.state_path, default={})
+    assert state["deliveries"] == {}
+    assert state["incidents"]["container_not_running:vnpy-web-bridge"]["delivery"]["firing"]["sent"] is False
+
+    current["now"] = current["now"] + timedelta(seconds=61)
+    watchdog.run_once()
+    state = watchdog_script.load_json(config.state_path, default={})
+    assert "container_not_running:vnpy-web-bridge:1:firing" in state["deliveries"]
 
 
 def test_active_maintenance_suppresses_runtime_checks(tmp_path, monkeypatch) -> None:
