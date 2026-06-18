@@ -12,6 +12,7 @@ from fastapi.responses import FileResponse
 from app.api import (
     routes_account,
     routes_auth,
+    routes_calendar,
     routes_market,
     routes_risk,
     routes_status,
@@ -47,6 +48,7 @@ app.add_exception_handler(Exception, unhandled_error_handler)
 app.include_router(routes_status.router, prefix="/api")
 app.include_router(routes_auth.router, prefix="/api")
 app.include_router(routes_market.router, prefix="/api")
+app.include_router(routes_calendar.router, prefix="/api")
 app.include_router(routes_account.router, prefix="/api")
 app.include_router(routes_trade.router, prefix="/api")
 app.include_router(routes_risk.router, prefix="/api")

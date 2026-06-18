@@ -463,3 +463,15 @@ def test_risk_change_pushes_websocket_alert(monkeypatch) -> None:
     assert response.status_code == 200
     assert message["type"] == "risk_alert"
     assert message["data"]["action"] == "trade_enable"
+
+
+def test_calendar_month_returns_holiday_and_adjusted_workday(monkeypatch) -> None:
+    with client_without_rpc(monkeypatch) as client:
+        response = client.get("/api/calendar/month?year=2026&month=2", headers=auth_headers("viewer"))
+
+    assert response.status_code == 200
+    rows = {item["date"]: item for item in response.json()["data"]["days"]}
+    assert rows["2026-02-16"]["holiday_name"] == "春节"
+    assert rows["2026-02-16"]["is_trading_day"] is False
+    assert rows["2026-02-14"]["is_adjusted_workday"] is True
+    assert rows["2026-02-14"]["is_trading_day"] is False

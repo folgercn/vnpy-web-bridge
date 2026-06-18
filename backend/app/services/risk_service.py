@@ -19,6 +19,7 @@ from app.core.errors import (
 )
 from app.schemas.risk import RiskRulesPatchDTO
 from app.schemas.trade import OrderRequestDTO
+from app.services.calendar_service import calendar_service
 from app.services.vnpy_rpc_service import rpc_service
 from app.stores.memory_store import memory_store
 
@@ -111,7 +112,7 @@ class RiskService:
         self._check_close_position_available(payload)
         self._check_price_protection(payload)
         self._check_daily_loss()
-        self._check_trading_time()
+        self._check_trading_time(payload)
 
     def _check_symbol_position(self, payload: OrderRequestDTO) -> None:
         max_position = self.rules["max_symbol_position"]
@@ -203,12 +204,21 @@ class RiskService:
         if total_pnl < 0 and abs(total_pnl) > max_loss:
             raise RiskDailyLossLimitError(detail={"daily_loss": abs(total_pnl), "max_daily_loss": max_loss})
 
-    def _check_trading_time(self) -> None:
+    def _check_trading_time(self, payload: OrderRequestDTO) -> None:
         if not self.rules["trading_time_check_enabled"]:
             return
         now = datetime.now()
-        if now.weekday() >= 5:
-            raise RiskTradingTimeError()
+        calendar_day = calendar_service.get_day(now.date())
+        if not calendar_day["is_trading_day"]:
+            raise RiskTradingTimeError(
+                detail={
+                    "date": calendar_day["date"],
+                    "symbol": payload.symbol,
+                    "exchange": payload.exchange,
+                    "holiday_name": calendar_day["holiday_name"],
+                    "source": calendar_day["source"],
+                }
+            )
 
 
 def _csv(value: str) -> list[str]:
