@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import logging
+from threading import Event
 from typing import Any
 
 from app.core.config import Settings
@@ -46,6 +47,18 @@ class FakeMarketStore:
         return restored
 
 
+class BlockingMarketStore(FakeMarketStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = Event()
+        self.release = Event()
+
+    def save_tick_rows_or_raise(self, rows) -> None:
+        self.started.set()
+        self.release.wait(timeout=5)
+        super().save_tick_rows_or_raise(rows)
+
+
 def make_service(tmp_path, *, queue_size: int = 10, batch_size: int = 10, spool_fsync: bool = False) -> tuple[TickPersistenceService, FakeMarketStore]:
     store = FakeMarketStore()
     settings = Settings(
@@ -60,6 +73,19 @@ def make_service(tmp_path, *, queue_size: int = 10, batch_size: int = 10, spool_
     )
     service = TickPersistenceService(settings, store, sleep_func=lambda _: None)  # type: ignore[arg-type]
     return service, store
+
+
+def make_service_with_store(tmp_path, store: FakeMarketStore, *, queue_size: int = 10, batch_size: int = 10) -> TickPersistenceService:
+    settings = Settings(
+        questdb_pg_dsn="postgresql://admin:quest@127.0.0.1:8812/qdb",
+        questdb_tick_queue_size=queue_size,
+        questdb_tick_batch_size=batch_size,
+        questdb_tick_flush_interval_ms=10,
+        questdb_tick_retry_max_seconds=1,
+        questdb_tick_spool_dir=str(tmp_path),
+        questdb_tick_spool_max_bytes=1024 * 1024,
+    )
+    return TickPersistenceService(settings, store, sleep_func=lambda _: None)  # type: ignore[arg-type]
 
 
 def test_enqueue_tick_only_queues_without_db_write(tmp_path) -> None:
@@ -135,6 +161,29 @@ def test_stop_drains_queued_ticks(tmp_path) -> None:
     service.stop(timeout=2)
 
     assert [row["ingest_id"] for row in store.saved] == ["row-1"]
+
+
+def test_stop_timeout_spools_inflight_batch_once(tmp_path) -> None:
+    store = BlockingMarketStore()
+    service = make_service_with_store(tmp_path, store)
+    service.start()
+    service.enqueue_tick({"ingest_id": "inflight"})
+    assert store.started.wait(timeout=2)
+
+    stopped = service.stop(timeout=0.05)
+    second_stopped = service.stop(timeout=0.05)
+    snapshot = service.snapshot()
+
+    assert stopped is False
+    assert second_stopped is False
+    assert snapshot["running"] is True
+    assert snapshot["inflight_batch_size"] == 1
+    assert snapshot["spool_rows"] == 1
+    assert snapshot["spooled_total"] == 1
+    assert "did not stop before timeout" in snapshot["last_error"]
+
+    store.release.set()
+    assert service.stop(timeout=2) is True
 
 
 def test_snapshot_exposes_required_observability_fields(tmp_path) -> None:

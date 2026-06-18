@@ -225,6 +225,7 @@ class MonitoringService:
                     "running",
                     "worker_alive",
                     "queue_depth",
+                    "inflight_batch_size",
                     "spool_rows",
                     "spool_bytes",
                     "corrupt_total",

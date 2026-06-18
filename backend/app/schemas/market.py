@@ -45,6 +45,7 @@ class MarketDataStatusDto(BaseModel):
     quarantined_bytes: int | None = None
     queue_depth: int
     queue_capacity: int
+    inflight_batch_size: int | None = None
     spool_rows: int
     spool_bytes: int
     spool_max_bytes: int
