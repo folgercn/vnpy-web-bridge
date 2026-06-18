@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest'
-import { contractYearMonth, isMainContract, mainContracts, nextMainContractYearMonth, preferredMainContract } from '../utils/marketContracts'
+import {
+  availableMainContractYearMonth,
+  contractYearMonth,
+  isMainContract,
+  isResolvedMainContract,
+  mainContracts,
+  nextMainContractYearMonth,
+  preferredMainContract
+} from '../utils/marketContracts'
 
 const now = new Date('2026-06-18T12:00:00+08:00')
 
@@ -27,5 +35,28 @@ describe('main contract helpers', () => {
 
     expect(mainContracts(rows, now).map((row) => row.symbol)).toEqual(['bu2609'])
     expect(preferredMainContract(rows, now)?.symbol).toBe('bu2609')
+  })
+
+  it('uses the next available main month when the current main contract is gone', () => {
+    const rows = [
+      { symbol: 'bu2610', exchange: 'SHFE' },
+      { symbol: 'bu2612', exchange: 'SHFE' },
+      { symbol: 'bu2701', exchange: 'SHFE' }
+    ]
+
+    expect(availableMainContractYearMonth(rows, now)).toBe(2701)
+    expect(mainContracts(rows, now).map((row) => row.symbol)).toEqual(['bu2701'])
+    expect(preferredMainContract(rows, now)?.symbol).toBe('bu2701')
+  })
+
+  it('falls back to an available contract without marking it as main', () => {
+    const rows = [
+      { symbol: 'bu2607', exchange: 'SHFE' },
+      { symbol: 'bu2608', exchange: 'SHFE' }
+    ]
+
+    expect(mainContracts(rows, now)).toEqual([])
+    expect(preferredMainContract(rows, now)?.symbol).toBe('bu2607')
+    expect(isResolvedMainContract(rows[0], rows, now)).toBe(false)
   })
 })

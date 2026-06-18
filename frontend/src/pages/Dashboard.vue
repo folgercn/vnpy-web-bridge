@@ -29,7 +29,7 @@ import { NTag, type DataTableColumns } from 'naive-ui'
 import DataPanel from '../components/common/DataPanel.vue'
 import { useTerminalStore } from '../stores/terminal'
 import { getTradingSessionStatus, symbolRoot } from '../utils/tradingSessions'
-import { preferredMainContract, vtSymbolOf, type ContractRow } from '../utils/marketContracts'
+import { isResolvedMainContract, preferredMainContract, vtSymbolOf, type ContractRow } from '../utils/marketContracts'
 
 const terminal = useTerminalStore()
 const now = ref(new Date())
@@ -47,7 +47,8 @@ const sessionItems = computed(() => {
       name: item.name,
       symbol: String(contract?.symbol || item.symbol),
       exchange: String(contract?.exchange || item.exchange),
-      vt_symbol: contract ? vtSymbolOf(contract) : `${item.symbol}.${item.exchange}`
+      vt_symbol: contract ? vtSymbolOf(contract) : `${item.symbol}.${item.exchange}`,
+      is_main: contract ? isResolvedMainContract(contract, contracts as ContractRow[]) : true
     }
   })
 })
@@ -70,7 +71,12 @@ const sessionColumns: DataTableColumns = [
   { title: '品种', key: 'name', width: 120, fixed: 'left' },
   { title: '主力合约', key: 'symbol', width: 120 },
   { title: '交易所', key: 'exchange', width: 90 },
-  { title: '标识', key: 'role', width: 90, render: () => h(NTag, { type: 'success', round: true }, { default: () => '主力' }) },
+  {
+    title: '标识',
+    key: 'role',
+    width: 90,
+    render: (row) => (row.is_main ? h(NTag, { type: 'success', round: true }, { default: () => '主力' }) : '-')
+  },
   {
     title: '状态',
     key: 'status_label',

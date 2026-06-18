@@ -86,7 +86,7 @@ import {
   compareContractMonths,
   contractSearchText,
   formatContractTitle,
-  isMainContract,
+  isResolvedMainContract,
   mainContracts,
   normalizeKeyword,
   preferredMainContract,
@@ -150,8 +150,8 @@ const selectedContractLabel = computed(() => (selectedContract.value ? formatCon
 const contractOptions = computed(() => {
   const keyword = normalizeKeyword(searchKeyword.value)
   if (!keyword) return []
-  return mainContracts(terminal.contracts)
-    .filter(isFuturesContract)
+  const futures = terminal.contracts.filter(isFuturesContract)
+  return mainOrFallbackContracts(futures)
     .filter((row) => contractMatchesKeyword(row, keyword))
     .slice(0, 80)
     .map(contractOption)
@@ -160,12 +160,12 @@ const watchedProductItems = computed(() => watchlistItems.value.filter((item) =>
 const activeProduct = computed(() => watchlistItems.value.find((item) => item.watch_key === activeWatchKey.value) || watchedProductItems.value[0])
 const activeProductContracts = computed(() => {
   if (!activeProduct.value) return []
-  return mainContracts(contractsForWatchItem(activeProduct.value).filter(isFuturesContract)).sort(compareContractMonths)
+  return mainOrFallbackContracts(contractsForWatchItem(activeProduct.value).filter(isFuturesContract)).sort(compareContractMonths)
 })
 const explicitWatchedContracts = computed(() =>
   watchlistItems.value
     .filter((item) => item.watch_type === 'contract' && item.vt_symbol)
-    .flatMap((item) => terminal.contracts.filter((row) => vtSymbolOf(row) === item.vt_symbol && isFuturesContract(row) && isMainContract(row)))
+    .flatMap((item) => mainOrFallbackContracts(terminal.contracts.filter((row) => vtSymbolOf(row) === item.vt_symbol && isFuturesContract(row))))
 )
 const selectableContracts = computed(() => uniqueContracts([...activeProductContracts.value, ...explicitWatchedContracts.value]))
 const activeProductContractOptions = computed(() => selectableContracts.value.map(contractOption))
@@ -187,12 +187,14 @@ const watchedItems = computed(() =>
 const watchedMarketRows = computed(() =>
   watchedProductItems.value.map((item) => {
     const contract = preferredContractForWatchItem(item)
+    const productContracts = contractsForWatchItem(item).filter(isFuturesContract)
+    const isMain = contract ? isResolvedMainContract(contract, productContracts) : false
     const vtSymbol = contract ? vtSymbolOf(contract) : ''
     const tick = vtSymbol ? terminal.ticks[vtSymbol] || {} : {}
     return {
       product_name: item.display_name,
-      contract_label: contract ? formatContractTitle(contract, item.display_name, { main: true }) : '暂无主力合约',
-      contract_role: contract ? '主力' : '-',
+      contract_label: contract ? formatContractTitle(contract, item.display_name, { main: isMain }) : '暂无可用合约',
+      contract_role: isMain ? '主力' : '-',
       ...tick
     }
   })
@@ -418,7 +420,8 @@ function watchedLabel(item: MarketWatchlistItem) {
 
 function contractOption(row: ContractRow) {
   const value = vtSymbolOf(row)
-  return { label: formatContractTitle(row, productLabelForRow(row) || productNameForRow(row), { main: isMainContract(row) }), value }
+  const peers = terminal.contracts.filter((item) => symbolRoot(item) === symbolRoot(row) && String(item.exchange || '') === String(row.exchange || '') && isFuturesContract(item))
+  return { label: formatContractTitle(row, productLabelForRow(row) || productNameForRow(row), { main: isResolvedMainContract(row, peers) }), value }
 }
 
 function contractMatchesKeyword(row: ContractRow, keyword: string) {
@@ -428,13 +431,20 @@ function contractMatchesKeyword(row: ContractRow, keyword: string) {
 function displayContractForVtSymbol(value: unknown) {
   const vtSymbol = String(value || '')
   const row = terminal.contracts.find((item) => vtSymbolOf(item) === vtSymbol)
-  return row ? formatContractTitle(row, productLabelForRow(row) || productNameForRow(row), { main: isMainContract(row) }) : vtSymbol
+  if (!row) return vtSymbol
+  const peers = terminal.contracts.filter((item) => symbolRoot(item) === symbolRoot(row) && String(item.exchange || '') === String(row.exchange || '') && isFuturesContract(item))
+  return formatContractTitle(row, productLabelForRow(row) || productNameForRow(row), { main: isResolvedMainContract(row, peers) })
 }
 
 function uniqueContracts(rows: ContractRow[]) {
   const values = new Map<string, ContractRow>()
   for (const row of rows) values.set(vtSymbolOf(row), row)
   return Array.from(values.values()).sort(compareContractMonths)
+}
+
+function mainOrFallbackContracts(rows: ContractRow[]) {
+  const mains = mainContracts(rows)
+  return mains.length ? mains : rows
 }
 
 function isFuturesContract(row: ContractRow) {

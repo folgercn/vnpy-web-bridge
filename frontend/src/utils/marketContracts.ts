@@ -52,12 +52,18 @@ export function isMainContract(row: ContractRow, now = new Date()) {
 }
 
 export function mainContracts(rows: ContractRow[], now = new Date()) {
-  return rows.filter((row) => isMainContract(row, now))
+  const target = availableMainContractYearMonth(rows, now)
+  return target ? rows.filter((row) => contractYearMonth(row, now) === target) : []
 }
 
 export function preferredMainContract(rows: ContractRow[], now = new Date()) {
   const sorted = rows.slice().sort((a, b) => compareContractMonths(a, b, now))
-  return sorted.find((row) => isMainContract(row, now)) || sorted.find((row) => contractYearMonth(row, now) >= currentChinaYearMonth(now)) || sorted[0]
+  return mainContracts(sorted, now)[0] || sorted.find((row) => contractYearMonth(row, now) >= currentChinaYearMonth(now)) || sorted[0]
+}
+
+export function isResolvedMainContract(row: ContractRow, rows: ContractRow[], now = new Date()) {
+  const target = availableMainContractYearMonth(rows, now)
+  return Boolean(target && contractYearMonth(row, now) === target)
 }
 
 export function formatContractTitle(row: ContractRow, fallbackProductName = '', options: { main?: boolean } = {}) {
@@ -103,4 +109,16 @@ export function nextMainContractYearMonth(now = new Date()) {
   const nextMonth = mainContractMonths.find((item) => item >= month)
   if (nextMonth) return year * 100 + nextMonth
   return (year + 1) * 100 + mainContractMonths[0]
+}
+
+export function availableMainContractYearMonth(rows: ContractRow[], now = new Date()) {
+  const current = currentChinaYearMonth(now)
+  const months = Array.from(
+    new Set(
+      rows
+        .map((row) => contractYearMonth(row, now))
+        .filter((month) => Number.isFinite(month) && month >= current && mainContractMonths.includes(month % 100))
+    )
+  ).sort((a, b) => a - b)
+  return months[0]
 }
