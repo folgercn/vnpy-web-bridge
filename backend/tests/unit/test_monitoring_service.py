@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -40,6 +41,27 @@ def build_service(tmp_path, *, fail_telegram: bool = False) -> tuple[AlertServic
     telegram = FakeTelegram(fail=fail_telegram)
     store = AlertStateStore(settings.monitor_state_path, settings.monitor_events_path)
     return AlertService(settings=settings, store=store, telegram=telegram), telegram
+
+
+def test_alert_state_store_update_keeps_concurrent_mutations(tmp_path) -> None:
+    store = AlertStateStore(tmp_path / "state.json", tmp_path / "events.jsonl")
+
+    def add_incident(index: int) -> None:
+        def mutate(state: dict) -> None:
+            state["incidents"][f"test_rule:{index}"] = {
+                "incident_id": f"test_rule:{index}",
+                "rule_id": "test_rule",
+                "scope_id": str(index),
+                "status": "healthy",
+            }
+
+        store.update(mutate)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(add_incident, range(50)))
+
+    state = store.load()
+    assert len(state["incidents"]) == 50
 
 
 def test_incident_sends_once_after_threshold_and_grace(tmp_path) -> None:
