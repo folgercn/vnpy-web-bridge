@@ -26,6 +26,13 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = Field(default=480, ge=1)
     auth_users_json: str = "[]"
     questdb_pg_dsn: str = ""
+    questdb_tick_persist_enabled: bool = True
+    questdb_tick_queue_size: int = Field(default=100_000, ge=1)
+    questdb_tick_batch_size: int = Field(default=1_000, ge=1)
+    questdb_tick_flush_interval_ms: int = Field(default=500, ge=10)
+    questdb_tick_retry_max_seconds: int = Field(default=60, ge=1)
+    questdb_tick_spool_dir: str = "logs/tick-spool"
+    questdb_tick_spool_max_bytes: int = Field(default=10 * 1024 * 1024 * 1024, ge=1)
     database_url: str = ""
 
     risk_max_order_volume: float = Field(default=1, gt=0)
