@@ -17,6 +17,12 @@ def status() -> dict:
     return ok({"app": settings.app_name, "env": settings.app_env, "status": "ok"})
 
 
+@router.get("/health/live")
+def health_live() -> dict:
+    settings = get_settings()
+    return ok({"app": settings.app_name, "env": settings.app_env, "status": "live"})
+
+
 @router.get("/rpc/status")
 def rpc_status(_: CurrentUser = Depends(require_roles("viewer", "trader", "admin"))) -> dict:
     return ok(rpc_service.status())

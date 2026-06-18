@@ -57,6 +57,17 @@ def test_status_returns_unified_success_payload(monkeypatch) -> None:
     assert body["data"]["status"] == "ok"
 
 
+def test_health_live_is_public_and_minimal(monkeypatch) -> None:
+    with client_without_rpc(monkeypatch) as client:
+        response = client.get("/api/health/live")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["data"]["status"] == "live"
+    assert "rpc" not in body["data"]
+
+
 def test_rpc_status_is_available_without_rpc_server(monkeypatch) -> None:
     monkeypatch.setattr(rpc_service, "status", lambda probe=False: {"connected": False, "last_error": "offline"})
 
@@ -67,6 +78,62 @@ def test_rpc_status_is_available_without_rpc_server(monkeypatch) -> None:
     body = response.json()
     assert body["ok"] is True
     assert "connected" in body["data"]
+
+
+def test_monitor_routes_require_auth_and_hide_telegram_secret(monkeypatch) -> None:
+    from app.api import routes_monitoring
+
+    monkeypatch.setattr(
+        routes_monitoring.telegram_service,
+        "config_status",
+        lambda: {
+            "enabled": True,
+            "configured": True,
+            "send_levels": ["warning", "critical"],
+            "timeout_seconds": 8,
+        },
+    )
+
+    with client_without_rpc(monkeypatch) as client:
+        unauthenticated = client.get("/api/monitor/summary")
+        response = client.get("/api/monitor/telegram/config", headers=auth_headers("viewer"))
+
+    assert unauthenticated.status_code == 401
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["configured"] is True
+    assert "token" not in str(data).lower()
+    assert "chat_id" not in data
+
+
+def test_admin_can_ack_and_create_silence(monkeypatch) -> None:
+    from datetime import datetime, timedelta, timezone
+    from app.api import routes_monitoring
+
+    class FakeAlertService:
+        def ack(self, incident_id, *, operator):
+            return {"incident_id": incident_id, "status": "acknowledged", "acknowledged_by": operator}
+
+        def create_silence(self, **kwargs):
+            return {"silence_id": "sil_1", "reason": kwargs["reason"], "created_by": kwargs["operator"]}
+
+    monkeypatch.setattr(routes_monitoring, "alert_service", FakeAlertService())
+
+    expires_at = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()
+    with client_without_rpc(monkeypatch) as client:
+        viewer_ack = client.post("/api/monitor/incidents/rpc_unavailable:CTP/ack", headers=auth_headers("viewer"))
+        admin_ack = client.post("/api/monitor/incidents/rpc_unavailable:CTP/ack", headers=auth_headers("admin"))
+        silence = client.post(
+            "/api/monitor/silences",
+            headers=auth_headers("admin"),
+            json={"rule_id": "rpc_unavailable", "scope_id": "CTP", "expires_at": expires_at, "reason": "maintenance"},
+        )
+
+    assert viewer_ack.status_code == 403
+    assert admin_ack.status_code == 200
+    assert admin_ack.json()["data"]["status"] == "acknowledged"
+    assert silence.status_code == 200
+    assert silence.json()["data"]["silence_id"] == "sil_1"
 
 
 def test_rpc_probe_runs_explicit_probe(monkeypatch) -> None:

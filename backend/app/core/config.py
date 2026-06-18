@@ -35,6 +35,25 @@ class Settings(BaseSettings):
     questdb_tick_spool_max_bytes: int = Field(default=10 * 1024 * 1024 * 1024, ge=1)
     database_url: str = ""
 
+    monitor_enabled: bool = False
+    monitor_interval_seconds: int = Field(default=15, ge=5)
+    monitor_failure_threshold: int = Field(default=3, ge=1)
+    monitor_recovery_threshold: int = Field(default=2, ge=1)
+    monitor_startup_grace_seconds: int = Field(default=120, ge=0)
+    monitor_flap_send_grace_seconds: int = Field(default=45, ge=0)
+    monitor_flap_recovery_grace_seconds: int = Field(default=60, ge=0)
+    monitor_critical_reminder_minutes: int = Field(default=0, ge=0)
+    monitor_state_path: str = "/app/logs/monitor/state.json"
+    monitor_events_path: str = "/app/logs/monitor/events.jsonl"
+    monitor_max_silence_seconds: int = Field(default=86_400, ge=60)
+
+    telegram_enabled: bool = False
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+    telegram_send_levels: str = "critical,warning"
+    telegram_http_timeout_seconds: int = Field(default=8, ge=1)
+    telegram_trade_events_enabled: bool = False
+
     risk_max_order_volume: float = Field(default=1, gt=0)
     risk_max_symbol_position: float = Field(default=5, ge=0)
     risk_max_daily_loss: float = Field(default=1000, ge=0)
@@ -54,6 +73,12 @@ class Settings(BaseSettings):
             raise ValueError("JWT_SECRET_KEY must be set in production")
         if len(self.jwt_secret_key) < 32:
             raise ValueError("JWT_SECRET_KEY must be at least 32 characters in production")
+        if self.telegram_enabled and (not self.telegram_bot_token or not self.telegram_chat_id):
+            raise ValueError("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set when Telegram is enabled")
+        allowed_levels = {"info", "warning", "critical"}
+        levels = {item.strip().lower() for item in self.telegram_send_levels.split(",") if item.strip()}
+        if not levels or levels - allowed_levels:
+            raise ValueError("TELEGRAM_SEND_LEVELS must contain only info, warning, critical")
         try:
             users = json.loads(self.auth_users_json)
         except json.JSONDecodeError as exc:

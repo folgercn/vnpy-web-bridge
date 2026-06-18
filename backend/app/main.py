@@ -14,6 +14,7 @@ from app.api import (
     routes_auth,
     routes_calendar,
     routes_market,
+    routes_monitoring,
     routes_risk,
     routes_status,
     routes_strategy,
@@ -49,6 +50,7 @@ app.add_exception_handler(Exception, unhandled_error_handler)
 app.include_router(routes_status.router, prefix="/api")
 app.include_router(routes_auth.router, prefix="/api")
 app.include_router(routes_market.router, prefix="/api")
+app.include_router(routes_monitoring.router, prefix="/api")
 app.include_router(routes_calendar.router, prefix="/api")
 app.include_router(routes_account.router, prefix="/api")
 app.include_router(routes_trade.router, prefix="/api")
