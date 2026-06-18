@@ -107,6 +107,7 @@ jobs:
         env:
           DEPLOY_ENV_FILE: ${{ secrets.DEPLOY_ENV_FILE }}
           APP_ENV_SECRET: ${{ secrets.APP_ENV }}
+          JWT_SECRET_KEY_SECRET: ${{ secrets.JWT_SECRET_KEY }}
           MONITOR_ENABLED_SECRET: ${{ secrets.MONITOR_ENABLED }}
           TELEGRAM_ENABLED_SECRET: ${{ secrets.TELEGRAM_ENABLED }}
           TELEGRAM_BOT_TOKEN_SECRET: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -131,6 +132,7 @@ jobs:
           env_path = Path(sys.argv[1])
           managed_keys = {
               "APP_ENV",
+              "JWT_SECRET_KEY",
               "MONITOR_ENABLED",
               "TELEGRAM_ENABLED",
               "TELEGRAM_BOT_TOKEN",
@@ -147,6 +149,7 @@ jobs:
 
           overlay = {
               "APP_ENV": os.getenv("APP_ENV_SECRET") or "production",
+              "JWT_SECRET_KEY": os.environ["JWT_SECRET_KEY_SECRET"],
               "MONITOR_ENABLED": os.getenv("MONITOR_ENABLED_SECRET") or "true",
               "TELEGRAM_ENABLED": os.getenv("TELEGRAM_ENABLED_SECRET") or "true",
               "TELEGRAM_BOT_TOKEN": os.environ["TELEGRAM_BOT_TOKEN_SECRET"],
