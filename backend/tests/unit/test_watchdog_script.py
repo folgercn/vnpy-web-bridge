@@ -302,6 +302,120 @@ def test_watchdog_telegram_failure_retries_current_incident(tmp_path, monkeypatc
     assert "container_not_running:vnpy-web-bridge:1:firing" in state["deliveries"]
 
 
+def test_watchdog_log_dir_failure_does_not_abort_disk_check(tmp_path, monkeypatch) -> None:
+    config = build_config(tmp_path, monkeypatch)
+    config.log_dir.write_text("not a directory", encoding="utf-8")
+
+    watchdog = watchdog_script.Watchdog(config, runner=healthy_runner, opener=lambda *args, **kwargs: FakeResponse())
+    snapshot = watchdog.run_once()
+
+    checks = {item["rule_id"]: item for item in snapshot["checks"]}
+    assert checks["log_dir_not_writable"]["healthy"] is False
+    assert checks["disk_space_high"]["healthy"] is False
+    assert checks["disk_space_high"]["summary"] == "disk check failed: FileExistsError"
+
+    state = watchdog_script.load_json(config.state_path, default={})
+    assert state["incidents"]["log_dir_not_writable:logs"]["status"] == "firing"
+    assert state["incidents"]["disk_space_high:logs"]["status"] == "firing"
+
+
+def test_watchdog_checker_exception_becomes_incident(tmp_path, monkeypatch) -> None:
+    config = build_config(tmp_path, monkeypatch)
+    watchdog = watchdog_script.Watchdog(config, runner=healthy_runner, opener=lambda *args, **kwargs: FakeResponse())
+
+    def broken_liveness():
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(watchdog, "_liveness_check", broken_liveness)
+    snapshot = watchdog.run_once()
+
+    incident = watchdog_script.load_json(config.state_path, default={})["incidents"]["watchdog_checker_failed:web-bridge"]
+    assert incident["status"] == "firing"
+    assert incident["details"]["type"] == "RuntimeError"
+    assert any(item["rule_id"] == "watchdog_checker_failed" for item in snapshot["checks"])
+
+
+def test_watchdog_state_write_failure_uses_in_memory_fallback(tmp_path, monkeypatch) -> None:
+    config = build_config(tmp_path, monkeypatch)
+    telegram_calls = {"count": 0}
+
+    def runner(cmd, **_kwargs):
+        if cmd[:2] == ["docker", "inspect"]:
+            return completed(0, "false\n")
+        return completed(0, "ok\n")
+
+    def opener(*args, **kwargs):
+        telegram_calls["count"] += 1
+        return FakeResponse()
+
+    def fail_save(*_args, **_kwargs):
+        raise OSError("state disk read-only")
+
+    monkeypatch.setattr(watchdog_script, "save_json", fail_save)
+    watchdog = watchdog_script.Watchdog(config, runner=runner, opener=opener)
+
+    watchdog.run_once()
+    watchdog.run_once()
+
+    assert telegram_calls["count"] == 1
+    assert not config.state_path.exists()
+    assert watchdog._fallback_state is not None
+    assert "container_not_running:vnpy-web-bridge:1:firing" in watchdog._fallback_state["deliveries"]
+
+
+def test_watchdog_event_write_failure_does_not_duplicate_delivery(tmp_path, monkeypatch) -> None:
+    config = build_config(tmp_path, monkeypatch)
+    telegram_calls = {"count": 0}
+
+    def runner(cmd, **_kwargs):
+        if cmd[:2] == ["docker", "inspect"]:
+            return completed(0, "false\n")
+        return completed(0, "ok\n")
+
+    def opener(*args, **kwargs):
+        telegram_calls["count"] += 1
+        return FakeResponse()
+
+    def fail_append(*_args, **_kwargs):
+        raise OSError("events disk read-only")
+
+    monkeypatch.setattr(watchdog_script, "append_jsonl", fail_append)
+    watchdog = watchdog_script.Watchdog(config, runner=runner, opener=opener)
+
+    watchdog.run_once()
+    watchdog.run_once()
+
+    state = watchdog_script.load_json(config.state_path, default={})
+    assert telegram_calls["count"] == 1
+    assert "container_not_running:vnpy-web-bridge:1:firing" in state["deliveries"]
+    assert len(watchdog._pending_events) == 1
+
+
+def test_watchdog_run_forever_continues_after_cycle_exception(tmp_path, monkeypatch) -> None:
+    config = build_config(tmp_path, monkeypatch)
+    watchdog = watchdog_script.Watchdog(config, runner=healthy_runner, opener=lambda *args, **kwargs: FakeResponse())
+    calls = {"run": 0, "sleep": 0}
+
+    def run_once():
+        calls["run"] += 1
+        if calls["run"] == 1:
+            raise RuntimeError("cycle failed")
+        raise KeyboardInterrupt()
+
+    def sleep(_seconds):
+        calls["sleep"] += 1
+
+    monkeypatch.setattr(watchdog, "run_once", run_once)
+    monkeypatch.setattr(watchdog_script.time, "sleep", sleep)
+
+    try:
+        watchdog.run_forever()
+    except KeyboardInterrupt:
+        pass
+
+    assert calls == {"run": 2, "sleep": 1}
+
+
 def test_active_maintenance_suppresses_runtime_checks(tmp_path, monkeypatch) -> None:
     config = build_config(tmp_path, monkeypatch)
     now = datetime.now(timezone.utc)
