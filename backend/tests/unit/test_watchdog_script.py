@@ -197,6 +197,81 @@ def test_watchdog_container_failure_suppresses_liveness_check(tmp_path, monkeypa
     assert opener_calls["count"] == 1
 
 
+def test_watchdog_docker_info_timeout_records_incident(tmp_path, monkeypatch) -> None:
+    config = build_config(tmp_path, monkeypatch)
+    calls = {"inspect": 0, "opener": 0}
+
+    def runner(cmd, **kwargs):
+        if cmd[:2] == ["docker", "info"]:
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout"))
+        if cmd[:2] == ["docker", "inspect"]:
+            calls["inspect"] += 1
+        return completed(0, "ok\n")
+
+    def opener(*args, **kwargs):
+        calls["opener"] += 1
+        return FakeResponse()
+
+    watchdog = watchdog_script.Watchdog(config, runner=runner, opener=opener)
+    snapshot = watchdog.run_once()
+
+    docker_check = next(item for item in snapshot["checks"] if item["rule_id"] == "docker_daemon_unavailable")
+    assert docker_check["healthy"] is False
+    assert docker_check["details"]["type"] == "TimeoutExpired"
+    assert calls == {"inspect": 0, "opener": 1}
+
+    state = watchdog_script.load_json(config.state_path, default={})
+    incident = state["incidents"]["docker_daemon_unavailable:docker"]
+    assert incident["status"] == "firing"
+    assert incident["summary"] == "Docker command failed: TimeoutExpired"
+
+
+def test_watchdog_docker_binary_missing_records_incident(tmp_path, monkeypatch) -> None:
+    config = build_config(tmp_path, monkeypatch)
+
+    def runner(cmd, **_kwargs):
+        if cmd[:2] == ["docker", "info"]:
+            raise FileNotFoundError("docker")
+        return completed(0, "ok\n")
+
+    watchdog = watchdog_script.Watchdog(config, runner=runner, opener=lambda *args, **kwargs: FakeResponse())
+
+    watchdog.run_once()
+
+    state = watchdog_script.load_json(config.state_path, default={})
+    incident = state["incidents"]["docker_daemon_unavailable:docker"]
+    assert incident["status"] == "firing"
+    assert incident["details"]["type"] == "FileNotFoundError"
+
+
+def test_watchdog_inspect_timeout_records_container_incident(tmp_path, monkeypatch) -> None:
+    config = build_config(tmp_path, monkeypatch)
+    opener_calls = {"count": 0}
+
+    def runner(cmd, **kwargs):
+        if cmd[:2] == ["docker", "inspect"]:
+            raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout"))
+        return completed(0, "ok\n")
+
+    def opener(*args, **kwargs):
+        opener_calls["count"] += 1
+        return FakeResponse()
+
+    watchdog = watchdog_script.Watchdog(config, runner=runner, opener=opener)
+    snapshot = watchdog.run_once()
+
+    rule_ids = [check["rule_id"] for check in snapshot["checks"]]
+    assert "container_not_running" in rule_ids
+    assert "app_liveness_failed" not in rule_ids
+    assert opener_calls["count"] == 1
+
+    state = watchdog_script.load_json(config.state_path, default={})
+    incident = state["incidents"]["container_not_running:vnpy-web-bridge"]
+    assert incident["status"] == "firing"
+    assert incident["summary"] == "container status query failed: TimeoutExpired"
+    assert incident["details"]["type"] == "TimeoutExpired"
+
+
 def test_watchdog_telegram_failure_retries_current_incident(tmp_path, monkeypatch) -> None:
     config = build_config(tmp_path, monkeypatch)
     current = {"now": datetime(2026, 6, 18, 9, 0, tzinfo=timezone.utc)}

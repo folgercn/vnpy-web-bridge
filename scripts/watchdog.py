@@ -109,7 +109,9 @@ class Watchdog:
         return checks
 
     def _docker_daemon_check(self) -> CheckResult:
-        result = self.runner(["docker", "info"], capture_output=True, text=True, timeout=5)
+        result = self._run_docker_command(["docker", "info"], timeout=5)
+        if isinstance(result, CheckResult):
+            return result
         healthy = result.returncode == 0
         return CheckResult(
             "docker_daemon_unavailable",
@@ -121,7 +123,15 @@ class Watchdog:
         )
 
     def _container_check(self) -> CheckResult:
-        result = self.runner(["docker", "inspect", "-f", "{{.State.Running}}", self.config.container_name], capture_output=True, text=True, timeout=5)
+        result = self._run_docker_command(
+            ["docker", "inspect", "-f", "{{.State.Running}}", self.config.container_name],
+            timeout=5,
+            failure_rule_id="container_not_running",
+            failure_scope_id=self.config.container_name,
+            failure_summary="container status query failed",
+        )
+        if isinstance(result, CheckResult):
+            return result
         running = result.returncode == 0 and result.stdout.strip().lower() == "true"
         return CheckResult(
             "container_not_running",
@@ -131,6 +141,45 @@ class Watchdog:
             "container running" if running else "container missing or stopped",
             {"returncode": result.returncode, "stdout": result.stdout.strip(), "stderr": (result.stderr or "")[-500:]},
         )
+
+    def _run_docker_command(
+        self,
+        cmd: list[str],
+        *,
+        timeout: float,
+        failure_rule_id: str = "docker_daemon_unavailable",
+        failure_scope_id: str = "docker",
+        failure_summary: str = "Docker command failed",
+    ) -> subprocess.CompletedProcess | CheckResult:
+        try:
+            return self.runner(cmd, capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            return CheckResult(
+                failure_rule_id,
+                failure_scope_id,
+                False,
+                "critical",
+                f"{failure_summary}: TimeoutExpired",
+                {"type": "TimeoutExpired", "timeout": exc.timeout, "cmd": cmd[:2]},
+            )
+        except FileNotFoundError as exc:
+            return CheckResult(
+                failure_rule_id,
+                failure_scope_id,
+                False,
+                "critical",
+                f"{failure_summary}: FileNotFoundError",
+                {"type": "FileNotFoundError", "error": str(exc), "cmd": cmd[:2]},
+            )
+        except Exception as exc:
+            return CheckResult(
+                failure_rule_id,
+                failure_scope_id,
+                False,
+                "critical",
+                f"{failure_summary}: {exc.__class__.__name__}",
+                {"type": exc.__class__.__name__, "error": str(exc), "cmd": cmd[:2]},
+            )
 
     def _liveness_check(self) -> CheckResult:
         try:
