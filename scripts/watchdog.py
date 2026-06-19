@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import json
@@ -60,20 +61,25 @@ class Watchdog:
         self.config = config
         self.runner = runner
         self.opener = opener
+        self._fallback_state: dict[str, Any] | None = None
+        self._pending_events: list[dict[str, Any]] = []
 
     def run_forever(self) -> None:
         while True:
-            self.run_once()
+            try:
+                self.run_once()
+            except Exception as exc:
+                print(f"watchdog cycle failed: {exc.__class__.__name__}: {exc}", file=sys.stderr)
             time.sleep(self.config.interval_seconds)
 
     def run_once(self) -> dict[str, Any]:
         now = utc_now()
-        state = load_json(self.config.state_path, default={"incidents": {}, "deliveries": {}})
+        state = self._load_state()
         maintenance = self._maintenance(now)
         checks = self.collect_checks(maintenance=maintenance)
         for check in checks:
             self._apply_check(state, check, now, maintenance=maintenance)
-        save_json(self.config.state_path, state)
+        self._save_state(state)
         return {"checked_at": now.isoformat(timespec="seconds"), "checks": [check.__dict__ for check in checks], "maintenance": maintenance}
 
     def collect_checks(self, *, maintenance: dict[str, Any] | None = None) -> list[CheckResult]:
@@ -99,14 +105,32 @@ class Watchdog:
                     safe_details(maintenance),
                 )
             ]
-        checks = [self._docker_daemon_check()]
+        checks = [self._safe_check("watchdog_checker_failed", "docker", self._docker_daemon_check)]
         if checks[0].healthy:
-            container = self._container_check()
+            container = self._safe_check("watchdog_checker_failed", self.config.container_name, self._container_check)
             checks.append(container)
             if container.healthy:
-                checks.append(self._liveness_check())
-        checks.extend([self._log_dir_check(), self._disk_check()])
+                checks.append(self._safe_check("watchdog_checker_failed", "web-bridge", self._liveness_check))
+        checks.extend(
+            [
+                self._safe_check("watchdog_checker_failed", "logs", self._log_dir_check),
+                self._safe_check("watchdog_checker_failed", "logs", self._disk_check),
+            ]
+        )
         return checks
+
+    def _safe_check(self, rule_id: str, scope_id: str, checker: Callable[[], CheckResult]) -> CheckResult:
+        try:
+            return checker()
+        except Exception as exc:
+            return CheckResult(
+                rule_id,
+                scope_id,
+                False,
+                "critical",
+                f"{checker.__name__} failed: {exc.__class__.__name__}",
+                {"type": exc.__class__.__name__, "error": str(exc)},
+            )
 
     def _docker_daemon_check(self) -> CheckResult:
         result = self._run_docker_command(["docker", "info"], timeout=5)
@@ -221,8 +245,18 @@ class Watchdog:
         )
 
     def _disk_check(self) -> CheckResult:
-        self.config.log_dir.mkdir(parents=True, exist_ok=True)
-        disk = shutil.disk_usage(self.config.log_dir)
+        try:
+            self.config.log_dir.mkdir(parents=True, exist_ok=True)
+            disk = shutil.disk_usage(self.config.log_dir)
+        except Exception as exc:
+            return CheckResult(
+                "disk_space_high",
+                "logs",
+                False,
+                "critical",
+                f"disk check failed: {exc.__class__.__name__}",
+                {"path": str(self.config.log_dir), "type": exc.__class__.__name__, "error": str(exc)},
+            )
         used_percent = round((disk.used / disk.total) * 100, 2) if disk.total else 0
         severity = "critical" if used_percent >= self.config.disk_critical_percent else "warning"
         healthy = used_percent < self.config.disk_warning_percent
@@ -302,7 +336,32 @@ class Watchdog:
             attempts = int(incident.setdefault("delivery", {}).get("attempts", 0)) + 1
             retry_after = RETRY_SECONDS[min(attempts - 1, len(RETRY_SECONDS) - 1)]
             incident["delivery"].update({"attempts": attempts, "next_retry_at": (now + timedelta(seconds=retry_after)).isoformat(timespec="seconds")})
-        append_jsonl(self.config.events_path, {"timestamp": now.isoformat(timespec="seconds"), "type": event, "incident_id": incident["incident_id"], "delivery": result})
+        self._append_event({"timestamp": now.isoformat(timespec="seconds"), "type": event, "incident_id": incident["incident_id"], "delivery": result})
+
+    def _load_state(self) -> dict[str, Any]:
+        if self._fallback_state is not None:
+            return deepcopy(self._fallback_state)
+        return load_json(self.config.state_path, default={"incidents": {}, "deliveries": {}})
+
+    def _save_state(self, state: dict[str, Any]) -> None:
+        try:
+            save_json(self.config.state_path, state)
+        except Exception as exc:
+            self._fallback_state = deepcopy(state)
+            print(f"watchdog state write failed: {exc.__class__.__name__}: {exc}", file=sys.stderr)
+            return
+        self._fallback_state = None
+
+    def _append_event(self, event: dict[str, Any]) -> None:
+        events = [*self._pending_events, event]
+        self._pending_events = []
+        for item in events:
+            try:
+                append_jsonl(self.config.events_path, item)
+            except Exception as exc:
+                self._pending_events.append(item)
+                print(f"watchdog event write failed: {exc.__class__.__name__}: {exc}", file=sys.stderr)
+                return
 
     def _should_attempt_delivery(self, incident: dict[str, Any], event: str, now: datetime) -> bool:
         event_delivery = incident.get("delivery", {}).get(event)
