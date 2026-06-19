@@ -232,6 +232,87 @@ def test_non_production_rpc_warning_does_not_send_telegram_by_default(tmp_path) 
     assert telegram.sent == []
 
 
+def test_rpc_failure_uses_active_subscription_context(tmp_path) -> None:
+    now = datetime(2026, 6, 18, 2, 0, tzinfo=timezone.utc)  # 10:00 Asia/Shanghai, SHFE day session.
+    settings = Settings(
+        monitor_failure_threshold=1,
+        monitor_recovery_threshold=1,
+        monitor_startup_grace_seconds=0,
+        monitor_flap_send_grace_seconds=0,
+        monitor_flap_recovery_grace_seconds=0,
+        monitor_state_path=str(tmp_path / "state.json"),
+        monitor_events_path=str(tmp_path / "events.jsonl"),
+        telegram_enabled=True,
+        telegram_bot_token="token",
+        telegram_chat_id="chat",
+        telegram_send_levels="critical,warning",
+    )
+    telegram = SelectiveTelegram()
+    alerts = AlertService(
+        settings=settings,
+        store=AlertStateStore(settings.monitor_state_path, settings.monitor_events_path),
+        telegram=telegram,
+    )
+    rpc = FakeRpc(connected=False)
+    rpc.subscriptions = ["rb2610.SHFE"]
+    service = build_service(tmp_path, now=now, settings=settings, alerts=alerts, rpc=rpc)
+
+    snapshot = service.run_checks()
+
+    incident = next(item for item in snapshot["incidents"] if item["incident_id"] == "rpc_unavailable:CTP")
+    assert incident["severity"] == "critical"
+    assert telegram.sent == [("rpc_unavailable:CTP", "firing", "critical")]
+
+
+def test_rpc_level_disabled_delivery_retries_after_critical_escalation(tmp_path) -> None:
+    current = {"now": datetime(2026, 6, 16, 8, 0, tzinfo=timezone.utc)}  # 16:00 Asia/Shanghai, off session.
+    settings = Settings(
+        monitor_failure_threshold=1,
+        monitor_recovery_threshold=1,
+        monitor_startup_grace_seconds=0,
+        monitor_flap_send_grace_seconds=0,
+        monitor_flap_recovery_grace_seconds=0,
+        monitor_state_path=str(tmp_path / "state.json"),
+        monitor_events_path=str(tmp_path / "events.jsonl"),
+        telegram_enabled=True,
+        telegram_bot_token="token",
+        telegram_chat_id="chat",
+        telegram_send_levels="critical,warning",
+    )
+    telegram = SelectiveTelegram()
+    alerts = AlertService(
+        settings=settings,
+        store=AlertStateStore(settings.monitor_state_path, settings.monitor_events_path),
+        telegram=telegram,
+    )
+    rpc = FakeRpc(connected=False)
+    rpc.subscriptions = ["rb2610.SHFE"]
+    service = build_service(
+        tmp_path,
+        now=current["now"],
+        settings=settings,
+        alerts=alerts,
+        rpc=rpc,
+        now_func=lambda: current["now"],
+    )
+
+    snapshot = service.run_checks()
+    incident = next(item for item in snapshot["incidents"] if item["incident_id"] == "rpc_unavailable:CTP")
+    assert incident["severity"] == "info"
+    assert incident["delivery"]["firing"]["severity"] == "info"
+    assert incident["delivery"]["firing"]["result"]["skipped"] == "level_disabled"
+    assert telegram.sent == []
+
+    current["now"] = datetime(2026, 6, 16, 13, 30, tzinfo=timezone.utc)  # 21:30 Asia/Shanghai, rb night session.
+    snapshot = service.run_checks()
+
+    incident = next(item for item in snapshot["incidents"] if item["incident_id"] == "rpc_unavailable:CTP")
+    assert incident["severity"] == "critical"
+    assert incident["delivery"]["firing"]["sent"] is True
+    assert incident["delivery"]["firing"]["severity"] == "critical"
+    assert telegram.sent == [("rpc_unavailable:CTP", "firing", "critical")]
+
+
 def test_startup_grace_suppresses_runtime_dependency_checks(tmp_path) -> None:
     now = datetime(2026, 6, 18, 2, 0, tzinfo=timezone.utc)
     settings = Settings(
