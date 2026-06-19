@@ -78,6 +78,7 @@ Deployments write `logs/watchdog/maintenance.json` before restarting containers.
 - Stop QuestDB: expect aggregated `questdb_unavailable:market_ticks` or tick persistence incident.
 - Stop PostgreSQL: expect `postgres_unavailable:watchlist` while monitor state remains file-backed.
 - Stop the web container: expect watchdog `container_not_running:vnpy-web-bridge`.
+- Break Docker CLI or daemon access: expect watchdog `docker_daemon_unavailable:docker`; an `inspect` timeout becomes `container_not_running:<container>` and suppresses liveness.
 - Run deploy smoke failure: expect one `deployment_smoke_failed:web-bridge`.
 - Block Telegram temporarily: active incidents should keep state and not block API/trading paths.
 
