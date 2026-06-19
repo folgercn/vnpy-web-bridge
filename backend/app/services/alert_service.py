@@ -85,6 +85,46 @@ class AlertService:
             "telegram": self.telegram.config_status(),
         }
 
+    def resolve_suppressed(
+        self,
+        *,
+        rule_id: str,
+        scope_id: str,
+        suppressed_by: str,
+        now: datetime | None = None,
+    ) -> dict[str, Any] | None:
+        now = now or datetime.now(timezone.utc)
+
+        def mutate(state: dict[str, Any]) -> dict[str, Any] | None:
+            incident_id = fingerprint(rule_id, scope_id)
+            incident = state["incidents"].get(incident_id)
+            if incident is None or incident.get("status") not in ACTIVE_STATUSES:
+                return None
+            previous_summary = incident.get("summary")
+            incident["status"] = "resolved"
+            incident["resolved_at"] = iso(now)
+            incident["last_seen"] = iso(now)
+            incident["summary"] = f"suppressed by {suppressed_by}"
+            incident["details"] = {"suppressed_by": suppressed_by, "previous_summary": previous_summary}
+            incident["failure_count"] = 0
+            incident["success_count"] = max(int(incident.get("success_count") or 0), self.settings.monitor_recovery_threshold)
+            incident.setdefault("delivery", {})["resolved"] = {
+                "sent": False,
+                "skipped": "suppressed",
+                "suppressed_by": suppressed_by,
+                "at": iso(now),
+            }
+            self.store.append_event(
+                {
+                    "type": "incident_suppressed",
+                    "incident_id": incident_id,
+                    "suppressed_by": suppressed_by,
+                }
+            )
+            return dict(incident)
+
+        return self.store.update(mutate)
+
     def ack(self, incident_id: str, *, operator: str, now: datetime | None = None) -> dict[str, Any]:
         now = now or datetime.now(timezone.utc)
 

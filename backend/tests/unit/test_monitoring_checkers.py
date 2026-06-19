@@ -188,6 +188,66 @@ def test_rpc_failure_suppresses_derived_checks(tmp_path) -> None:
     assert incident["severity"] == "info"
 
 
+def test_rpc_suppression_resolves_existing_gateway_incident(tmp_path) -> None:
+    current = {"now": datetime(2026, 6, 18, 2, 0, tzinfo=timezone.utc)}
+    rpc = FakeRpc(connected=True, gateway_connected=False)
+    service = build_service(tmp_path, now=current["now"], rpc=rpc, now_func=lambda: current["now"])
+
+    snapshot = service.run_checks()
+    incident = next(item for item in snapshot["incidents"] if item["incident_id"] == "gateway_disconnected:CTP")
+    assert incident["status"] == "firing"
+
+    current["now"] = current["now"] + timedelta(seconds=15)
+    rpc.connected = False
+    snapshot = service.run_checks()
+
+    assert any(item["rule_id"] == "gateway_disconnected" and item["suppressed_by"] == "rpc_unavailable" for item in snapshot["suppressed"])
+    assert not any(item["incident_id"] == "gateway_disconnected:CTP" for item in snapshot["incidents"])
+    state = service.alerts.store.load()
+    incident = state["incidents"]["gateway_disconnected:CTP"]
+    assert incident["status"] == "resolved"
+    assert incident["summary"] == "suppressed by rpc_unavailable"
+    assert incident["delivery"]["resolved"]["skipped"] == "suppressed"
+
+
+def test_rpc_suppression_resolves_existing_strategy_incident_by_wildcard(tmp_path) -> None:
+    current = {"now": datetime(2026, 6, 18, 2, 0, tzinfo=timezone.utc)}
+    settings = Settings(
+        monitor_failure_threshold=1,
+        monitor_recovery_threshold=1,
+        monitor_startup_grace_seconds=0,
+        monitor_flap_send_grace_seconds=0,
+        monitor_flap_recovery_grace_seconds=0,
+        monitor_state_path=str(tmp_path / "state.json"),
+        monitor_events_path=str(tmp_path / "events.jsonl"),
+        monitor_expected_strategies="demo_strategy",
+    )
+    rpc = FakeRpc(connected=True)
+    service = build_service(
+        tmp_path,
+        now=current["now"],
+        settings=settings,
+        rpc=rpc,
+        strategies=FakeStrategies([{"strategy_name": "demo_strategy", "status": "stopped"}]),
+        now_func=lambda: current["now"],
+    )
+
+    snapshot = service.run_checks()
+    incident = next(item for item in snapshot["incidents"] if item["incident_id"] == "strategy_unexpected_stop:demo_strategy")
+    assert incident["status"] == "firing"
+
+    current["now"] = current["now"] + timedelta(seconds=15)
+    rpc.connected = False
+    snapshot = service.run_checks()
+
+    assert any(item["rule_id"] == "strategy_unexpected_stop" and item["scope_id"] == "*" for item in snapshot["suppressed"])
+    assert not any(item["incident_id"] == "strategy_unexpected_stop:demo_strategy" for item in snapshot["incidents"])
+    state = service.alerts.store.load()
+    incident = state["incidents"]["strategy_unexpected_stop:demo_strategy"]
+    assert incident["status"] == "resolved"
+    assert incident["details"]["suppressed_by"] == "rpc_unavailable"
+
+
 def test_monitoring_run_checks_is_single_flight(tmp_path) -> None:
     now = datetime(2026, 6, 18, 2, 0, tzinfo=timezone.utc)
     rpc = SlowRpc()
