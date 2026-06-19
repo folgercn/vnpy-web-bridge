@@ -14,6 +14,7 @@ jobs:
     outputs:
       backend_changed: ${{ steps.filter.outputs.backend_changed }}
       frontend_changed: ${{ steps.filter.outputs.frontend_changed }}
+      image_changed: ${{ steps.filter.outputs.image_changed }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -31,6 +32,7 @@ jobs:
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
             echo "backend_changed=true" >> "$GITHUB_OUTPUT"
             echo "frontend_changed=true" >> "$GITHUB_OUTPUT"
+            echo "image_changed=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -45,15 +47,29 @@ jobs:
 
           backend_changed=false
           frontend_changed=false
+          image_changed=false
 
           while IFS= read -r file; do
             [ -z "$file" ] && continue
             case "$file" in
-              backend/*|requirements.txt|.github/workflows/ci.yml)
+              .github/workflows/*)
+                backend_changed=true
+                frontend_changed=true
+                image_changed=true
+                continue
+                ;;
+            esac
+            case "$file" in
+              backend/*|shared/*|requirements.txt)
                 backend_changed=true
                 ;;
-              frontend/*|.github/workflows/ci.yml)
+              frontend/*|shared/*)
                 frontend_changed=true
+                ;;
+            esac
+            case "$file" in
+              Dockerfile|.dockerignore|backend/*|frontend/*|shared/*|test_rpc_readonly.py|test_rpc_trade_flow.py|deployments/*|scripts/deploy.sh|scripts/install-watchdog.sh|scripts/watchdog.py)
+                image_changed=true
                 ;;
             esac
           done <<EOF
@@ -62,6 +78,7 @@ jobs:
 
           echo "backend_changed=$backend_changed" >> "$GITHUB_OUTPUT"
           echo "frontend_changed=$frontend_changed" >> "$GITHUB_OUTPUT"
+          echo "image_changed=$image_changed" >> "$GITHUB_OUTPUT"
 
   backend:
     name: Backend tests
@@ -110,3 +127,15 @@ jobs:
 
       - name: Build frontend
         run: npm run build
+
+  docker:
+    name: Production image build
+    needs: changes
+    if: needs.changes.outputs.image_changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build production image
+        run: docker build --progress=plain -t vnpy-web-bridge:ci-${{ github.sha }} .
