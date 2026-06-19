@@ -48,7 +48,7 @@ Never commit real bot tokens, chat IDs, database DSNs, or RPC addresses into the
 - Repeated failures update the same `rule_id:scope_id` fingerprint.
 - Stable recovery sends one `resolved` message; failed recovery delivery keeps retrying with backoff until sent or explicitly skipped by delivery config.
 - Manual silences keep updating incident state but suppress delivery until expiry.
-- RPC root-cause failures suppress Gateway, tick, and strategy-derived alerts.
+- RPC root-cause failures suppress Gateway, tick, and strategy-derived alerts. Existing active derived incidents are marked resolved with suppressed delivery so stale downstream alerts do not remain active while the root cause is firing.
 - Trading-session checks use the shared profile in `shared/trading_session_profiles.json`; do not maintain separate backend/frontend session tables.
 - Backend monitor cycles are single-flight; manual probes wait for an in-progress cycle instead of running a concurrent full check.
 - RPC unavailable outside production context is recorded as `info`, so default Telegram levels (`critical,warning`) do not send off-hours RPC noise.

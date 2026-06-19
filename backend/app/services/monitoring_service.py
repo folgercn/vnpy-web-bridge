@@ -128,6 +128,7 @@ class MonitoringService:
         self._check_risk(checks, now)
         self._check_http_5xx(checks, now)
         self._check_trade_failures(checks, now)
+        self._resolve_suppressed_incidents(suppressed, now)
 
         snapshot = {
             "checked_at": iso(now),
@@ -469,6 +470,31 @@ class MonitoringService:
             return self.rpc.market_subscriptions()
         except Exception:
             return []
+
+    def _resolve_suppressed_incidents(self, suppressed: list[dict[str, Any]], now: datetime) -> None:
+        if not suppressed:
+            return
+        active = self.alerts.list_incidents(include_resolved=False)
+        active_by_rule = {}
+        for incident in active:
+            active_by_rule.setdefault(str(incident.get("rule_id")), []).append(incident)
+        for item in suppressed:
+            rule_id = str(item.get("rule_id") or "")
+            scope_id = str(item.get("scope_id") or "")
+            suppressed_by = str(item.get("suppressed_by") or "suppressed")
+            if not rule_id or not scope_id:
+                continue
+            if scope_id == "*":
+                matches = active_by_rule.get(rule_id, [])
+            else:
+                matches = [incident for incident in active_by_rule.get(rule_id, []) if str(incident.get("scope_id")) == scope_id]
+            for incident in matches:
+                self.alerts.resolve_suppressed(
+                    rule_id=rule_id,
+                    scope_id=str(incident.get("scope_id")),
+                    suppressed_by=suppressed_by,
+                    now=now,
+                )
 
     def _quiet_runtime_reason(self, now: datetime) -> dict[str, Any] | None:
         maintenance = self._maintenance(now)
