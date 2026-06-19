@@ -71,3 +71,14 @@ def test_night_session_requires_next_calendar_day_trading() -> None:
     assert calendar_service.is_trading_session_active(friday_night, ["au2612.SHFE"]) is False
     assert calendar_service.is_trading_session_active(sunday_night, ["au2612.SHFE"]) is True
     assert calendar_service.is_trading_session_active(pre_holiday_night, ["au2612.SHFE"]) is False
+
+
+def test_trading_session_status_reports_night_trading_day() -> None:
+    sunday_night = datetime(2026, 6, 21, 13, 30, tzinfo=timezone.utc)  # Sunday 21:30 Asia/Shanghai
+
+    status = calendar_service.trading_session_status(sunday_night, ["au2612.SHFE"])
+
+    assert status["active"] is True
+    assert status["trading_day"] == "2026-06-22"
+    assert status["session"] == "night"
+    assert status["reason"] == "next_trading_day"

@@ -66,10 +66,11 @@ function concreteSessions(exchange: string, product: string, now: Date) {
 
   for (let offset = -1; offset <= 7; offset += 1) {
     const date = addChinaDays(today, offset)
-    if (!isWeekday(date)) continue
 
-    for (const session of daySessions) result.push(toConcreteSession(date, session))
-    if (nightClose) result.push(toConcreteSession(date, { label: '夜盘', start: '21:00', end: nightClose }))
+    if (isWeekday(date)) {
+      for (const session of daySessions) result.push(toConcreteSession(date, session))
+    }
+    if (nightClose && isWeekday(addChinaDays(date, 1))) result.push(toConcreteSession(date, { label: '夜盘', start: '21:00', end: nightClose }))
   }
 
   return result.sort((a, b) => a.start.getTime() - b.start.getTime())

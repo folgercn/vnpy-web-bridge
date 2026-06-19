@@ -208,26 +208,18 @@ class RiskService:
         if not self.rules["trading_time_check_enabled"]:
             return
         now = datetime.now(timezone.utc)
-        calendar_day = calendar_service.get_day(now.astimezone(CHINA_TZ).date())
-        if not calendar_day["is_trading_day"]:
-            raise RiskTradingTimeError(
-                detail={
-                    "date": calendar_day["date"],
-                    "symbol": payload.symbol,
-                    "exchange": payload.exchange,
-                    "holiday_name": calendar_day["holiday_name"],
-                    "source": calendar_day["source"],
-                }
-            )
         vt_symbol = f"{payload.symbol}.{payload.exchange}"
-        if not calendar_service.is_trading_session_active(now, [vt_symbol]):
+        session_status = calendar_service.trading_session_status(now, [vt_symbol])
+        if not session_status["active"]:
             raise RiskTradingTimeError(
                 detail={
-                    "date": calendar_day["date"],
+                    "date": session_status.get("trading_day") or now.astimezone(CHINA_TZ).date().isoformat(),
                     "symbol": payload.symbol,
                     "exchange": payload.exchange,
                     "session_active": False,
-                    "source": calendar_day["source"],
+                    "session": session_status.get("session"),
+                    "reason": session_status.get("reason"),
+                    "source": calendar_service.source,
                 }
             )
 

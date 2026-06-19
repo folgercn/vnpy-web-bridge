@@ -75,4 +75,18 @@ describe('trading session status', () => {
     expect(status.isOpen).toBe(false)
     expect(status.nextOpenText).toBe('明天 09:00')
   })
+
+  it('treats Sunday night as the next trading day night session', () => {
+    const status = getTradingSessionStatus('SHFE', 'au2612', chinaTime('2026-06-21T21:30:00'))
+
+    expect(status.isOpen).toBe(true)
+    expect(status.statusText).toBe('夜盘进行中')
+    expect(status.currentSessionText).toBe('21:00-02:30')
+  })
+
+  it('does not open Friday night when the next calendar day is not a trading day', () => {
+    const status = getTradingSessionStatus('SHFE', 'au2612', chinaTime('2026-06-19T21:30:00'))
+
+    expect(status.isOpen).toBe(false)
+  })
 })

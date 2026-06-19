@@ -71,26 +71,76 @@ class CalendarService:
         active: list[str] = []
         quiet: list[str] = []
         for symbol in symbols:
-            if self._is_symbol_session_active(now, symbol):
+            if self.trading_session_status(now, [symbol])["active"]:
                 active.append(symbol)
             else:
                 quiet.append(symbol)
         return {"active": active, "quiet": quiet}
 
+    def trading_session_status(self, now: datetime, symbols: list[str]) -> dict[str, Any]:
+        statuses = [self._symbol_session_status(now, symbol) for symbol in symbols]
+        active = [item for item in statuses if item["active"]]
+        reference = active[0] if active else statuses[0] if statuses else self._empty_session_status(now)
+        return {
+            "active": bool(active),
+            "trading_day": reference.get("trading_day"),
+            "session": reference.get("session"),
+            "reason": reference.get("reason"),
+            "symbols": statuses,
+            "active_symbols": [item["symbol"] for item in active],
+            "quiet_symbols": [item["symbol"] for item in statuses if not item["active"]],
+        }
+
     def session_profiles(self) -> dict[str, Any]:
         return self._session_profiles
 
     def _is_symbol_session_active(self, now: datetime, symbol: str) -> bool:
+        return bool(self._symbol_session_status(now, symbol)["active"])
+
+    def _symbol_session_status(self, now: datetime, symbol: str) -> dict[str, Any]:
         local = _to_china_time(now)
         product, exchange = _parse_symbol(symbol)
         current = local.time()
+        status = {
+            "symbol": symbol,
+            "exchange": exchange,
+            "product": product,
+            "active": False,
+            "trading_day": None,
+            "session": None,
+            "reason": "closed",
+        }
         if time(9, 0) <= current <= time(15, 15):
-            return self.is_trading_day(local.date()) and self._in_day_session(current, exchange)
+            status["trading_day"] = local.date().isoformat()
+            status["session"] = "day"
+            status["reason"] = "current_trading_day"
+            status["active"] = self.is_trading_day(local.date()) and self._in_day_session(current, exchange)
+            return status
         if current >= time(21, 0):
-            return self.is_trading_day(local.date() + timedelta(days=1)) and self._in_night_session(current, product, exchange)
+            trading_day = local.date() + timedelta(days=1)
+            status["trading_day"] = trading_day.isoformat()
+            status["session"] = "night"
+            status["reason"] = "next_trading_day"
+            status["active"] = self.is_trading_day(trading_day) and self._in_night_session(current, product, exchange)
+            return status
         if current <= time(2, 30):
-            return self.is_trading_day(local.date()) and self._in_night_session(current, product, exchange)
-        return False
+            status["trading_day"] = local.date().isoformat()
+            status["session"] = "night"
+            status["reason"] = "current_trading_day"
+            status["active"] = self.is_trading_day(local.date()) and self._in_night_session(current, product, exchange)
+            return status
+        return status
+
+    def _empty_session_status(self, now: datetime) -> dict[str, Any]:
+        return {
+            "active": False,
+            "trading_day": _to_china_time(now).date().isoformat(),
+            "session": None,
+            "reason": "no_symbols",
+            "symbols": [],
+            "active_symbols": [],
+            "quiet_symbols": [],
+        }
 
     def next_trading_day(self, target: date) -> dict[str, Any]:
         current = target + timedelta(days=1)

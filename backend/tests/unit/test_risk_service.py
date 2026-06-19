@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import pytest
 
 from app.core.config import Settings
@@ -46,13 +48,13 @@ def make_service(*, max_order_volume: int = 1) -> RiskService:
     )
 
 
-def allow_rpc(monkeypatch) -> None:
+def allow_rpc(monkeypatch, *, contracts: list[dict] | None = None) -> None:
     monkeypatch.setattr(rpc_service, "status", lambda: {"connected": True})
     monkeypatch.setattr(rpc_service, "get_positions", lambda: [])
     monkeypatch.setattr(
         rpc_service,
         "get_contracts",
-        lambda: [{"symbol": "rb2610", "exchange": "SHFE", "vt_symbol": "rb2610.SHFE", "pricetick": 1}],
+        lambda: contracts or [{"symbol": "rb2610", "exchange": "SHFE", "vt_symbol": "rb2610.SHFE", "pricetick": 1}],
     )
 
 
@@ -160,13 +162,8 @@ def test_trading_time_check_rejects_legal_holiday(monkeypatch) -> None:
     service.update_rules(RiskRulesPatchDTO(trading_time_check_enabled=True))
     allow_rpc(monkeypatch)
     monkeypatch.setattr(
-        "app.services.risk_service.calendar_service.get_day",
-        lambda target: {
-            "date": "2026-02-16",
-            "is_trading_day": False,
-            "holiday_name": "春节",
-            "source": "国办发明电〔2025〕7号",
-        },
+        "app.services.risk_service.calendar_service.trading_session_status",
+        lambda now, symbols: {"active": False, "trading_day": "2026-02-16", "session": "day", "reason": "holiday"},
     )
 
     with pytest.raises(RiskTradingTimeError):
@@ -178,17 +175,53 @@ def test_trading_time_check_rejects_inactive_symbol_session(monkeypatch) -> None
     service.update_rules(RiskRulesPatchDTO(trading_time_check_enabled=True))
     allow_rpc(monkeypatch)
     monkeypatch.setattr(
-        "app.services.risk_service.calendar_service.get_day",
-        lambda target: {
-            "date": "2026-06-18",
-            "is_trading_day": True,
-            "holiday_name": None,
-            "source": "国办发明电〔2025〕7号",
-        },
+        "app.services.risk_service.calendar_service.trading_session_status",
+        lambda now, symbols: {"active": False, "trading_day": "2026-06-18", "session": None, "reason": "closed"},
     )
-    monkeypatch.setattr("app.services.risk_service.calendar_service.is_trading_session_active", lambda now, symbols: False)
 
     with pytest.raises(RiskTradingTimeError) as exc:
         service.check_order(make_order())
 
     assert exc.value.detail["session_active"] is False
+
+
+def test_trading_time_check_allows_sunday_night_for_next_trading_day(monkeypatch) -> None:
+    service = make_service()
+    service.update_rules(RiskRulesPatchDTO(trading_time_check_enabled=True))
+    allow_rpc(
+        monkeypatch,
+        contracts=[{"symbol": "au2612", "exchange": "SHFE", "vt_symbol": "au2612.SHFE", "pricetick": 1}],
+    )
+    fixed_now = datetime(2026, 6, 21, 13, 30, tzinfo=timezone.utc)  # Sunday 21:30 Asia/Shanghai
+
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed_now.astimezone(tz) if tz else fixed_now
+
+    monkeypatch.setattr("app.services.risk_service.datetime", FixedDatetime)
+
+    service.check_order(make_order(symbol="au2612"))
+
+
+def test_trading_time_check_rejects_friday_night_without_next_trading_day(monkeypatch) -> None:
+    service = make_service()
+    service.update_rules(RiskRulesPatchDTO(trading_time_check_enabled=True))
+    allow_rpc(
+        monkeypatch,
+        contracts=[{"symbol": "au2612", "exchange": "SHFE", "vt_symbol": "au2612.SHFE", "pricetick": 1}],
+    )
+    fixed_now = datetime(2026, 6, 19, 13, 30, tzinfo=timezone.utc)  # Friday 21:30 Asia/Shanghai
+
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return fixed_now.astimezone(tz) if tz else fixed_now
+
+    monkeypatch.setattr("app.services.risk_service.datetime", FixedDatetime)
+
+    with pytest.raises(RiskTradingTimeError) as exc:
+        service.check_order(make_order(symbol="au2612"))
+
+    assert exc.value.detail["date"] == "2026-06-20"
+    assert exc.value.detail["reason"] == "next_trading_day"
