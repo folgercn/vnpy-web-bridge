@@ -455,13 +455,20 @@ class MonitoringService:
             return True
         if self._expected_strategies():
             return True
-        return self._trading_session_active(now)
+        subscriptions = self._active_market_subscriptions()
+        return bool(subscriptions) and self._trading_session_active(now, subscriptions)
 
     def _trading_session_active(self, now: datetime, symbols: list[str] | None = None) -> bool:
         return calendar_service.is_trading_session_active(now, symbols)
 
     def _expected_strategies(self) -> list[str]:
         return [item.strip() for item in self.settings.monitor_expected_strategies.split(",") if item.strip()]
+
+    def _active_market_subscriptions(self) -> list[str]:
+        try:
+            return self.rpc.market_subscriptions()
+        except Exception:
+            return []
 
     def _quiet_runtime_reason(self, now: datetime) -> dict[str, Any] | None:
         maintenance = self._maintenance(now)

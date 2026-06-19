@@ -222,7 +222,12 @@ class AlertService:
         if delivery_key in state["deliveries"]:
             return
         if self._matching_silence(state, incident, now):
-            incident.setdefault("delivery", {})[event] = {"sent": False, "skipped": "silenced", "at": iso(now)}
+            incident.setdefault("delivery", {})[event] = {
+                "sent": False,
+                "skipped": "silenced",
+                "severity": incident.get("severity"),
+                "at": iso(now),
+            }
             return
         try:
             result = self.telegram.send_incident(incident, event=event)
@@ -231,7 +236,12 @@ class AlertService:
             retry_after = RETRY_SECONDS[min(attempts - 1, len(RETRY_SECONDS) - 1)]
             incident["delivery"].update(
                 {
-                    event: {"sent": False, "error": str(exc), "at": iso(now)},
+                    event: {
+                        "sent": False,
+                        "error": str(exc),
+                        "severity": incident.get("severity"),
+                        "at": iso(now),
+                    },
                     "attempts": attempts,
                     "next_retry_at": iso(now + timedelta(seconds=retry_after)),
                 }
@@ -239,7 +249,12 @@ class AlertService:
             return
         if result.get("sent"):
             state["deliveries"][delivery_key] = {"sent_at": iso(now), "result": result}
-        incident.setdefault("delivery", {})[event] = {"sent": bool(result.get("sent")), "result": result, "at": iso(now)}
+        incident.setdefault("delivery", {})[event] = {
+            "sent": bool(result.get("sent")),
+            "result": result,
+            "severity": incident.get("severity"),
+            "at": iso(now),
+        }
         self.store.append_event({"type": f"incident_{event}", "incident_id": incident["incident_id"], "delivery": result})
 
     def _should_attempt_delivery(self, state: dict[str, Any], incident: dict[str, Any], event: str, now: datetime) -> bool:
@@ -250,6 +265,12 @@ class AlertService:
             return True
         if event_delivery.get("skipped") == "silenced":
             return self._matching_silence(state, incident, now) is None
+        if (
+            self._delivery_was_level_disabled(event_delivery)
+            and self._delivery_level_changed(event_delivery, incident)
+            and self._delivery_level_enabled(incident)
+        ):
+            return True
         next_retry_at = incident.get("delivery", {}).get("next_retry_at")
         if next_retry_at:
             return parse_time(str(next_retry_at), now) <= now
@@ -266,6 +287,25 @@ class AlertService:
         if incident.get("delivery", {}).get("next_retry_at"):
             return False
         return event_delivery.get("skipped") != "silenced"
+
+    def _delivery_was_level_disabled(self, event_delivery: dict[str, Any]) -> bool:
+        result = event_delivery.get("result")
+        return event_delivery.get("skipped") == "level_disabled" or (
+            isinstance(result, dict) and result.get("skipped") == "level_disabled"
+        )
+
+    def _delivery_level_changed(self, event_delivery: dict[str, Any], incident: dict[str, Any]) -> bool:
+        previous = str(event_delivery.get("severity") or "").lower()
+        current = str(incident.get("severity") or "").lower()
+        return bool(current) and previous != current
+
+    def _delivery_level_enabled(self, incident: dict[str, Any]) -> bool:
+        try:
+            status = self.telegram.config_status()
+        except Exception:
+            return False
+        levels = {str(item).strip().lower() for item in status.get("send_levels", []) if str(item).strip()}
+        return bool(status.get("enabled", True)) and str(incident.get("severity") or "").lower() in levels
 
     def _start_episode(self, incident: dict[str, Any], now: datetime) -> None:
         episode_seq = int(incident.get("episode_seq") or 0) + 1

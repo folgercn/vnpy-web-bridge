@@ -52,6 +52,8 @@ Never commit real bot tokens, chat IDs, database DSNs, or RPC addresses into the
 - Trading-session checks use the shared profile in `shared/trading_session_profiles.json`; do not maintain separate backend/frontend session tables.
 - Backend monitor cycles are single-flight; manual probes wait for an in-progress cycle instead of running a concurrent full check.
 - RPC unavailable outside production context is recorded as `info`, so default Telegram levels (`critical,warning`) do not send off-hours RPC noise.
+  Production context includes enabled web trading, expected strategies, or active subscribed symbols in their trading session.
+  If an `info` firing was skipped by Telegram level filtering, the same episode retries delivery after later escalating to an enabled level.
 
 ## Operations
 
