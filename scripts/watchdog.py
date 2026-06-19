@@ -17,6 +17,7 @@ import urllib.error
 import urllib.request
 
 RETRY_SECONDS = [60, 300, 900]
+ACTIVE_STATUSES = {"pending", "firing"}
 
 
 @dataclass
@@ -79,6 +80,7 @@ class Watchdog:
         checks = self.collect_checks(maintenance=maintenance)
         for check in checks:
             self._apply_check(state, check, now, maintenance=maintenance)
+        self._resolve_suppressed_incidents(state, checks, now)
         self._save_state(state)
         return {"checked_at": now.isoformat(timespec="seconds"), "checks": [check.__dict__ for check in checks], "maintenance": maintenance}
 
@@ -363,6 +365,57 @@ class Watchdog:
                 print(f"watchdog event write failed: {exc.__class__.__name__}: {exc}", file=sys.stderr)
                 return
 
+    def _resolve_suppressed_incidents(self, state: dict[str, Any], checks: list[CheckResult], now: datetime) -> None:
+        by_rule = {check.rule_id: check for check in checks}
+        docker = by_rule.get("docker_daemon_unavailable")
+        if docker and not docker.healthy:
+            self._resolve_suppressed_incident(state, "container_not_running", self.config.container_name, "docker_daemon_unavailable", now)
+            self._resolve_suppressed_incident(state, "app_liveness_failed", "web-bridge", "docker_daemon_unavailable", now)
+            return
+
+        container = by_rule.get("container_not_running")
+        if container and not container.healthy:
+            self._resolve_suppressed_incident(state, "app_liveness_failed", "web-bridge", "container_not_running", now)
+
+    def _resolve_suppressed_incident(
+        self,
+        state: dict[str, Any],
+        rule_id: str,
+        scope_id: str,
+        suppressed_by: str,
+        now: datetime,
+    ) -> None:
+        incident_id = f"{rule_id}:{scope_id}"
+        incident = state.setdefault("incidents", {}).get(incident_id)
+        if not incident or incident.get("status") not in ACTIVE_STATUSES:
+            return
+        previous_summary = incident.get("summary")
+        incident.update(
+            {
+                "status": "resolved",
+                "resolved_at": now.isoformat(timespec="seconds"),
+                "last_seen": now.isoformat(timespec="seconds"),
+                "summary": f"suppressed by {suppressed_by}",
+                "details": {"suppressed_by": suppressed_by, "previous_summary": previous_summary},
+                "failure_count": 0,
+                "success_count": max(int(incident.get("success_count") or 0), self.config.recovery_threshold),
+            }
+        )
+        incident.setdefault("delivery", {})["resolved"] = {
+            "sent": False,
+            "result": {"sent": False, "skipped": "suppressed"},
+            "suppressed_by": suppressed_by,
+            "at": now.isoformat(timespec="seconds"),
+        }
+        self._append_event(
+            {
+                "timestamp": now.isoformat(timespec="seconds"),
+                "type": "suppressed",
+                "incident_id": incident_id,
+                "suppressed_by": suppressed_by,
+            }
+        )
+
     def _should_attempt_delivery(self, incident: dict[str, Any], event: str, now: datetime) -> bool:
         event_delivery = incident.get("delivery", {}).get(event)
         if not event_delivery:
@@ -383,7 +436,7 @@ class Watchdog:
         if incident.get("delivery", {}).get("next_retry_at"):
             return False
         result = event_delivery.get("result") or {}
-        return result.get("skipped") == "disabled"
+        return result.get("skipped") in {"disabled", "suppressed"}
 
     def _start_episode(self, incident: dict[str, Any], now: datetime) -> None:
         episode_seq = int(incident.get("episode_seq") or 0) + 1

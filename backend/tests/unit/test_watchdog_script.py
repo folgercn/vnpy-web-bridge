@@ -197,6 +197,105 @@ def test_watchdog_container_failure_suppresses_liveness_check(tmp_path, monkeypa
     assert opener_calls["count"] == 1
 
 
+def test_watchdog_container_root_resolves_existing_liveness_incident(tmp_path, monkeypatch) -> None:
+    config = build_config(tmp_path, monkeypatch)
+    current = {"now": datetime(2026, 6, 18, 9, 0, tzinfo=timezone.utc)}
+    inspect_values = iter(["true\n", "false\n", "true\n"])
+    telegram_calls: list[str] = []
+
+    def runner(cmd, **_kwargs):
+        if cmd[:2] == ["docker", "inspect"]:
+            return completed(0, next(inspect_values))
+        return completed(0, "ok\n")
+
+    def opener(*args, **kwargs):
+        target = args[0]
+        if hasattr(target, "full_url"):
+            telegram_calls.append("telegram")
+            return FakeResponse()
+        if current["now"] == datetime(2026, 6, 18, 9, 0, tzinfo=timezone.utc):
+            raise TimeoutError("liveness timeout")
+        return FakeResponse()
+
+    monkeypatch.setattr(watchdog_script, "utc_now", lambda: current["now"])
+    watchdog = watchdog_script.Watchdog(config, runner=runner, opener=opener)
+
+    watchdog.run_once()
+    state = watchdog_script.load_json(config.state_path, default={})
+    assert state["incidents"]["app_liveness_failed:web-bridge"]["status"] == "firing"
+
+    current["now"] = current["now"] + timedelta(seconds=15)
+    snapshot = watchdog.run_once()
+    rule_ids = [check["rule_id"] for check in snapshot["checks"]]
+    assert "container_not_running" in rule_ids
+    assert "app_liveness_failed" not in rule_ids
+
+    state = watchdog_script.load_json(config.state_path, default={})
+    liveness = state["incidents"]["app_liveness_failed:web-bridge"]
+    assert liveness["status"] == "resolved"
+    assert liveness["delivery"]["resolved"]["result"]["skipped"] == "suppressed"
+    assert liveness["details"]["suppressed_by"] == "container_not_running"
+    assert "app_liveness_failed:web-bridge:1:resolved" not in state["deliveries"]
+    assert telegram_calls == ["telegram", "telegram"]
+
+    current["now"] = current["now"] + timedelta(seconds=15)
+    watchdog.run_once()
+    state = watchdog_script.load_json(config.state_path, default={})
+    assert state["incidents"]["app_liveness_failed:web-bridge"]["status"] == "healthy"
+    assert telegram_calls == ["telegram", "telegram", "telegram"]
+
+
+def test_watchdog_docker_root_resolves_existing_container_and_liveness_incidents(tmp_path, monkeypatch) -> None:
+    config = build_config(tmp_path, monkeypatch)
+    current = {"now": datetime(2026, 6, 18, 9, 0, tzinfo=timezone.utc)}
+    inspect_values = iter(["true\n", "false\n"])
+    telegram_calls: list[str] = []
+
+    def runner(cmd, **_kwargs):
+        if cmd[:2] == ["docker", "info"] and current["now"] >= datetime(2026, 6, 18, 9, 0, 30, tzinfo=timezone.utc):
+            return completed(1, "", "docker down")
+        if cmd[:2] == ["docker", "inspect"]:
+            return completed(0, next(inspect_values))
+        return completed(0, "ok\n")
+
+    def opener(*args, **kwargs):
+        target = args[0]
+        if hasattr(target, "full_url"):
+            telegram_calls.append("telegram")
+            return FakeResponse()
+        if current["now"] == datetime(2026, 6, 18, 9, 0, tzinfo=timezone.utc):
+            raise TimeoutError("liveness timeout")
+        return FakeResponse()
+
+    monkeypatch.setattr(watchdog_script, "utc_now", lambda: current["now"])
+    watchdog = watchdog_script.Watchdog(config, runner=runner, opener=opener)
+
+    watchdog.run_once()
+    current["now"] = current["now"] + timedelta(seconds=15)
+    watchdog.run_once()
+    state = watchdog_script.load_json(config.state_path, default={})
+    assert state["incidents"]["app_liveness_failed:web-bridge"]["status"] == "resolved"
+    assert state["incidents"]["container_not_running:vnpy-web-bridge"]["status"] == "firing"
+
+    current["now"] = current["now"] + timedelta(seconds=15)
+    snapshot = watchdog.run_once()
+    rule_ids = [check["rule_id"] for check in snapshot["checks"]]
+    assert "docker_daemon_unavailable" in rule_ids
+    assert "container_not_running" not in rule_ids
+    assert "app_liveness_failed" not in rule_ids
+
+    state = watchdog_script.load_json(config.state_path, default={})
+    container = state["incidents"]["container_not_running:vnpy-web-bridge"]
+    liveness = state["incidents"]["app_liveness_failed:web-bridge"]
+    assert container["status"] == "resolved"
+    assert container["delivery"]["resolved"]["result"]["skipped"] == "suppressed"
+    assert container["details"]["suppressed_by"] == "docker_daemon_unavailable"
+    assert liveness["status"] == "resolved"
+    assert "container_not_running:vnpy-web-bridge:1:resolved" not in state["deliveries"]
+    assert "app_liveness_failed:web-bridge:1:resolved" not in state["deliveries"]
+    assert telegram_calls == ["telegram", "telegram", "telegram"]
+
+
 def test_watchdog_docker_info_timeout_records_incident(tmp_path, monkeypatch) -> None:
     config = build_config(tmp_path, monkeypatch)
     calls = {"inspect": 0, "opener": 0}
