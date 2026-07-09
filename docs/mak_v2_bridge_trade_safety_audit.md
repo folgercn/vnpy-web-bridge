@@ -4,13 +4,28 @@ This document tracks PR-B/T1 readiness for controlled MAK v2 testnet execution.
 
 ## Current Packet
 
-This packet adds a read-only safety audit endpoint:
+Merged PR-B/T1 safety evidence includes the read-only safety audit endpoint:
 
 ```text
 POST /api/mak-v2/testnet-observer/safety-audit
 ```
 
-The endpoint does not call `/api/orders`, `trade_service.send_order`, vn.py RPC `send_order`, or any broker adapter order method.
+and read-only runtime inspection endpoints:
+
+```text
+GET /api/mak-v2/testnet-observer/safety-audit/latest
+GET /api/mak-v2/testnet-observer/safety-audits?limit=...
+```
+
+These endpoints do not call `/api/orders`, `trade_service.send_order`, vn.py RPC `send_order`, or any broker adapter order method.
+
+Remote collection is handled by:
+
+```text
+scripts/mak_v2_collect_safety_audit.py
+```
+
+The collector reads the admin token only from an environment variable and writes JSON/CSV evidence artifacts under the selected output directory.
 
 ## Default Mode
 
@@ -30,6 +45,7 @@ Use exact contracts that are actually tradable in the remote SimNow/testnet sess
 ## Required T1 Evidence
 
 - testnet account identified
+- hashed account summary captured in collector artifacts
 - forbidden production account markers absent
 - risk status readable
 - emergency stop clear
@@ -39,6 +55,20 @@ Use exact contracts that are actually tradable in the remote SimNow/testnet sess
 - `order_endpoint_touched = false`
 - GFEX exact contracts available
 - no active MAK v2 `lc/ps` positions before smoke
+- safety-audit latest/history endpoints can inspect the completed remote run
+- collector output is archived with the deployed commit/release identifier
+
+## Current Stop Line
+
+The merged work is ready to collect remote read-only safety evidence after CI/CD deploys it. It is not yet a single-order testnet execution implementation.
+
+Do not add order wiring until a separate PR explicitly defines and tests:
+
+- one-lot testnet submit path
+- cancel/timeout path
+- position reconciliation before and after the smoke
+- flatten rollback procedure
+- audit trail that links signal, decision, order request, ack, fill/cancel, and reconciliation
 
 ## Boundary
 
