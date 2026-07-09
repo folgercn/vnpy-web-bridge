@@ -20,6 +20,7 @@ class MakV2ObserverEventStore:
         self.horizon_exits: deque[dict[str, Any]] = deque(maxlen=max_rows)
         self.pnl_comparisons: deque[dict[str, Any]] = deque(maxlen=max_rows)
         self.guardrails: deque[dict[str, Any]] = deque(maxlen=max_rows)
+        self.safety_audits: deque[dict[str, Any]] = deque(maxlen=max_rows)
         self.daily_summaries: dict[str, dict[str, Any]] = {}
 
     def append_signal(self, row: dict[str, Any]) -> None:
@@ -38,10 +39,18 @@ class MakV2ObserverEventStore:
         with self._lock:
             self.guardrails.appendleft(row)
 
+    def append_safety_audit(self, row: dict[str, Any]) -> None:
+        with self._lock:
+            self.safety_audits.appendleft(row)
+
     def list_rows(self, name: str, *, limit: int = 200) -> list[dict[str, Any]]:
         with self._lock:
             rows = list(getattr(self, name))
         return rows[:limit]
+
+    def latest_safety_audit(self) -> dict[str, Any] | None:
+        with self._lock:
+            return self.safety_audits[0] if self.safety_audits else None
 
     def update_daily_summary(self, trading_day: date | str) -> dict[str, Any]:
         day = trading_day.isoformat() if isinstance(trading_day, date) else str(trading_day)

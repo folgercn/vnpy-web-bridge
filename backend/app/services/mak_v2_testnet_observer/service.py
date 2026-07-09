@@ -301,6 +301,12 @@ class MakV2TestnetObserverService:
     def list_guardrails(self, limit: int = 200) -> list[dict[str, Any]]:
         return self.store.list_rows("guardrails", limit=limit)
 
+    def list_safety_audits(self, limit: int = 200) -> list[dict[str, Any]]:
+        return self.store.list_rows("safety_audits", limit=limit)
+
+    def latest_safety_audit(self) -> dict[str, Any] | None:
+        return self.store.latest_safety_audit()
+
     def daily_summary(self) -> list[dict[str, Any]]:
         return self.store.latest_daily_summaries()
 
@@ -313,6 +319,7 @@ class MakV2TestnetObserverService:
         source_ip: str | None,
     ) -> dict[str, Any]:
         result = self.safety_audit_service.audit(payload, self.status())
+        self.store.append_safety_audit(result)
         self.audit.record(
             action="mak_v2_safety_audit",
             user_id=operator,
