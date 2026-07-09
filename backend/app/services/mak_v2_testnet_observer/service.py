@@ -10,10 +10,12 @@ from app.schemas.mak_v2_observer import (
     MakV2DryRunSignalRequestDTO,
     MakV2ObserverDisableRequestDTO,
     MakV2ObserverEnableRequestDTO,
+    MakV2SafetyAuditRequestDTO,
 )
 from app.services.audit_service import AuditService, audit_service
 from app.services.mak_v2_testnet_observer.event_store import MakV2ObserverEventStore
 from app.services.mak_v2_testnet_observer.risk_gate import MakV2ObserverLimits, MakV2RiskGate
+from app.services.mak_v2_testnet_observer.safety_audit import MakV2SafetyAuditService, mak_v2_safety_audit_service
 from app.services.risk_service import RiskService, risk_service
 
 CHINA_TZ = ZoneInfo("Asia/Shanghai")
@@ -35,11 +37,13 @@ class MakV2TestnetObserverService:
         gate: MakV2RiskGate | None = None,
         risk: RiskService | None = None,
         audit: AuditService | None = None,
+        safety_audit: MakV2SafetyAuditService | None = None,
     ) -> None:
         self.store = store or MakV2ObserverEventStore()
         self.gate = gate or MakV2RiskGate()
         self.risk = risk or risk_service
         self.audit = audit or audit_service
+        self.safety_audit_service = safety_audit or mak_v2_safety_audit_service
         self.enabled = False
         self.manual_approval = False
         self.testnet_mode = False
@@ -299,6 +303,25 @@ class MakV2TestnetObserverService:
 
     def daily_summary(self) -> list[dict[str, Any]]:
         return self.store.latest_daily_summaries()
+
+    def safety_audit(
+        self,
+        payload: MakV2SafetyAuditRequestDTO,
+        *,
+        operator: str,
+        role: str | None,
+        source_ip: str | None,
+    ) -> dict[str, Any]:
+        result = self.safety_audit_service.audit(payload, self.status())
+        self.audit.record(
+            action="mak_v2_safety_audit",
+            user_id=operator,
+            role=role,
+            request=payload.model_dump(),
+            result=result,
+            source_ip=source_ip,
+        )
+        return result
 
     def _guardrail(
         self,

@@ -1,0 +1,6 @@
+field,status,evidence,notes
+production_account_absent,TO_BE_FILLED_BY_REMOTE_SAFETY_AUDIT,,No prod/production/real/mainnet/生产/实盘 marker in account identity
+production_order_endpoint_touched,FAIL_IF_TRUE,false,MAK v2 audit must not touch order endpoint
+production_allowed,FAIL_IF_TRUE,false,Observer must keep production_allowed=false
+real_money_order_authorized,FAIL_IF_TRUE,false,No real-money authorization in PR-B/T1
+auto_runtime_promotion_authorized,FAIL_IF_TRUE,false,No runtime promotion from testnet evidence

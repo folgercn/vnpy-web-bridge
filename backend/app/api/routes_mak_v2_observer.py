@@ -8,6 +8,7 @@ from app.schemas.mak_v2_observer import (
     MakV2DryRunSignalRequestDTO,
     MakV2ObserverDisableRequestDTO,
     MakV2ObserverEnableRequestDTO,
+    MakV2SafetyAuditRequestDTO,
 )
 from app.services.mak_v2_testnet_observer import mak_v2_observer_service
 from app.ws.events import ws_message
@@ -56,6 +57,21 @@ def guardrails(
     _: CurrentUser = Depends(require_roles("viewer", "trader", "admin")),
 ) -> dict:
     return ok(mak_v2_observer_service.list_guardrails(limit=limit))
+
+
+@router.post("/safety-audit")
+def safety_audit(
+    payload: MakV2SafetyAuditRequestDTO,
+    request: Request,
+    user: CurrentUser = Depends(require_roles("admin")),
+) -> dict:
+    result = mak_v2_observer_service.safety_audit(
+        payload,
+        operator=user.username,
+        role=user.role,
+        source_ip=request.client.host if request.client else None,
+    )
+    return ok(result)
 
 
 @router.post("/enable")
