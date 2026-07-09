@@ -36,6 +36,45 @@
       </div>
     </n-card>
 
+    <n-card title="Safety Audit" size="small">
+      <div class="toolbar audit-toolbar">
+        <n-checkbox v-model:checked="auditForm.probe_rpc">probe RPC</n-checkbox>
+        <n-checkbox v-model:checked="auditForm.collect_rpc_snapshot">collect snapshot</n-checkbox>
+        <n-checkbox v-model:checked="auditForm.require_rpc_connected">require RPC</n-checkbox>
+        <n-input
+          v-model:value="auditContractsText"
+          type="textarea"
+          placeholder="GFEX.ps2609&#10;GFEX.lc2609"
+          class="audit-contracts"
+          :autosize="{ minRows: 1, maxRows: 3 }"
+        />
+        <n-button type="primary" :loading="auditLoading" @click="submitSafetyAudit">Run audit</n-button>
+      </div>
+      <div v-if="auditResult" class="audit-summary">
+        <n-space size="small">
+          <n-tag :type="auditTagType(auditResult.overall)" round>{{ auditResult.overall }}</n-tag>
+          <n-tag :type="auditResult.single_order_smoke_allowed ? 'success' : 'warning'" round>
+            smoke {{ auditResult.single_order_smoke_allowed ? 'allowed' : 'blocked' }}
+          </n-tag>
+          <n-tag :type="auditResult.rpc.connected ? 'success' : 'warning'" round>
+            RPC {{ auditResult.rpc.connected ? 'connected' : 'not connected' }}
+          </n-tag>
+        </n-space>
+        <div class="muted mono">{{ auditResult.audit_time_utc }}</div>
+      </div>
+      <n-data-table
+        :columns="auditCheckColumns"
+        :data="auditResult?.checks ?? []"
+        :pagination="{ pageSize: 10 }"
+        :scroll-x="920"
+        size="small"
+      />
+      <div v-if="auditResult" class="grid-2 audit-grid">
+        <n-data-table :columns="snapshotColumns" :data="auditResult.snapshot.accounts" :pagination="false" :scroll-x="720" size="small" />
+        <n-data-table :columns="snapshotColumns" :data="auditResult.snapshot.gfex_contracts" :pagination="false" :scroll-x="720" size="small" />
+      </div>
+    </n-card>
+
     <n-card title="Dry-run Signal" size="small">
       <n-form :model="signalForm" :label-placement="isMobile ? 'top' : 'left'" label-width="120">
         <div class="form-grid">
@@ -90,14 +129,19 @@ import {
   getMakV2Orders,
   getMakV2Signals,
   getMakV2Status,
+  runMakV2SafetyAudit,
   type MakV2DryRunSignalPayload,
-  type MakV2ObserverStatus
+  type MakV2ObserverStatus,
+  type MakV2SafetyAuditCheck,
+  type MakV2SafetyAuditResult
 } from '../api/makV2Observer'
 
 const message = useMessage()
 const isMobile = useMediaQuery('(max-width: 640px)')
 const loading = ref(false)
+const auditLoading = ref(false)
 const status = ref<Partial<MakV2ObserverStatus>>({})
+const auditResult = ref<MakV2SafetyAuditResult | null>(null)
 const signals = ref<Record<string, unknown>[]>([])
 const orders = ref<Record<string, unknown>[]>([])
 const guardrails = ref<Record<string, unknown>[]>([])
@@ -111,6 +155,12 @@ const enableForm = reactive({
   confirm_max_one_lot: false,
   confirm_no_auto_promotion: false
 })
+const auditForm = reactive({
+  probe_rpc: false,
+  collect_rpc_snapshot: false,
+  require_rpc_connected: false
+})
+const auditContractsText = ref('GFEX.ps2609\nGFEX.lc2609')
 const signalForm = reactive<MakV2DryRunSignalPayload>({
   instrument: 'ps',
   exact_contract: 'GFEX.ps2609',
@@ -152,6 +202,17 @@ const signalColumns = cols([
 const intentColumns = cols(['intent_time', 'instrument', 'exact_contract', 'side', 'requested_lots', 'limit_price', 'dry_run_only', 'trace_id'])
 const guardrailColumns = cols(['trigger_time', 'guard_name', 'severity', 'action', 'threshold', 'trace_id'])
 const summaryColumns = cols(['date', 'signals_total', 'eligible_signals', 'dry_run_intents', 'guardrail_triggers', 'daily_decision'])
+const snapshotColumns = cols(['account_tail', 'account_hash', 'vt_symbol', 'symbol', 'exchange', 'pricetick', 'size', 'gateway_name'])
+const auditCheckColumns: DataTableColumns<MakV2SafetyAuditCheck> = [
+  { title: 'check', key: 'name', ellipsis: { tooltip: true } },
+  { title: 'status', key: 'status', ellipsis: { tooltip: true } },
+  {
+    title: 'observed',
+    key: 'observed',
+    ellipsis: { tooltip: true },
+    render: (row) => formatAuditValue(row.observed)
+  }
+]
 
 onMounted(() => {
   refresh().catch(() => undefined)
@@ -231,6 +292,25 @@ async function submitFlatten() {
   }
 }
 
+async function submitSafetyAudit() {
+  auditLoading.value = true
+  try {
+    auditResult.value = await runMakV2SafetyAudit({
+      ...auditForm,
+      expected_exact_contracts: parseAuditContracts()
+    })
+    if (auditResult.value.overall === 'PASS') {
+      message.success('safety audit passed')
+    } else {
+      message.warning(`safety audit ${auditResult.value.overall.toLowerCase()}`)
+    }
+  } catch (exc) {
+    message.error(exc instanceof Error ? exc.message : 'safety audit failed')
+  } finally {
+    auditLoading.value = false
+  }
+}
+
 async function submitDryRun() {
   try {
     await dryRunMakV2Signal(signalForm)
@@ -240,6 +320,25 @@ async function submitDryRun() {
     message.error(exc instanceof Error ? exc.message : 'dry-run failed')
   }
 }
+
+function parseAuditContracts() {
+  return auditContractsText.value
+    .split(/[\n,]/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+}
+
+function auditTagType(statusValue: string) {
+  if (statusValue === 'PASS') return 'success'
+  if (statusValue === 'FAIL') return 'error'
+  return 'warning'
+}
+
+function formatAuditValue(value: unknown) {
+  if (value === null || value === undefined) return '-'
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return String(value)
+  return JSON.stringify(value)
+}
 </script>
 
 <style scoped>
@@ -247,6 +346,20 @@ async function submitDryRun() {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 10px 14px;
+}
+
+.audit-toolbar {
+  align-items: flex-start;
+}
+
+.audit-contracts {
+  min-width: 240px;
+  max-width: 360px;
+}
+
+.audit-summary,
+.audit-grid {
+  margin-top: 12px;
 }
 
 @media (max-width: 1100px) {
