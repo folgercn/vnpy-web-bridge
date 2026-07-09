@@ -50,28 +50,51 @@
         />
         <n-button type="primary" :loading="auditLoading" @click="submitSafetyAudit">Run audit</n-button>
       </div>
-      <div v-if="auditResult" class="audit-summary">
+      <div class="audit-summary">
         <n-space size="small">
-          <n-tag :type="auditTagType(auditResult.overall)" round>{{ auditResult.overall }}</n-tag>
-          <n-tag :type="auditResult.single_order_smoke_allowed ? 'success' : 'warning'" round>
-            smoke {{ auditResult.single_order_smoke_allowed ? 'allowed' : 'blocked' }}
+          <n-tag :type="latestAuditResult ? auditTagType(latestAuditResult.overall) : 'default'" round>
+            latest {{ latestAuditResult?.overall ?? 'none' }}
           </n-tag>
-          <n-tag :type="auditResult.rpc.connected ? 'success' : 'warning'" round>
-            RPC {{ auditResult.rpc.connected ? 'connected' : 'not connected' }}
+          <n-tag v-if="latestAuditResult" :type="latestAuditResult.single_order_smoke_allowed ? 'success' : 'warning'" round>
+            smoke {{ latestAuditResult.single_order_smoke_allowed ? 'allowed' : 'blocked' }}
+          </n-tag>
+          <n-tag v-if="latestAuditResult" :type="auditRpcConnected(latestAuditResult) ? 'success' : 'warning'" round>
+            RPC {{ auditRpcLabel(latestAuditResult) }}
           </n-tag>
         </n-space>
-        <div class="muted mono">{{ auditResult.audit_time_utc }}</div>
+        <div class="muted mono">{{ latestAuditResult?.audit_time_utc ?? 'No recorded safety audit' }}</div>
+      </div>
+      <n-data-table
+        class="audit-history"
+        :columns="auditHistoryColumns"
+        :data="safetyAudits"
+        :loading="auditHistoryLoading"
+        :pagination="{ pageSize: 5 }"
+        :scroll-x="980"
+        size="small"
+      />
+      <div v-if="displayedAudit" class="audit-summary">
+        <n-space size="small">
+          <n-tag :type="auditTagType(displayedAudit.overall)" round>{{ displayedAudit.overall }}</n-tag>
+          <n-tag :type="displayedAudit.single_order_smoke_allowed ? 'success' : 'warning'" round>
+            smoke {{ displayedAudit.single_order_smoke_allowed ? 'allowed' : 'blocked' }}
+          </n-tag>
+          <n-tag :type="auditRpcConnected(displayedAudit) ? 'success' : 'warning'" round>
+            RPC {{ auditRpcLabel(displayedAudit) }}
+          </n-tag>
+        </n-space>
+        <div class="muted mono">{{ displayedAudit.audit_time_utc }}</div>
       </div>
       <n-data-table
         :columns="auditCheckColumns"
-        :data="auditResult?.checks ?? []"
+        :data="displayedAudit?.checks ?? []"
         :pagination="{ pageSize: 10 }"
         :scroll-x="920"
         size="small"
       />
-      <div v-if="auditResult" class="grid-2 audit-grid">
-        <n-data-table :columns="snapshotColumns" :data="auditResult.snapshot.accounts" :pagination="false" :scroll-x="720" size="small" />
-        <n-data-table :columns="snapshotColumns" :data="auditResult.snapshot.gfex_contracts" :pagination="false" :scroll-x="720" size="small" />
+      <div v-if="displayedAudit" class="grid-2 audit-grid">
+        <n-data-table :columns="snapshotColumns" :data="displayedAudit.snapshot.accounts" :pagination="false" :scroll-x="720" size="small" />
+        <n-data-table :columns="snapshotColumns" :data="displayedAudit.snapshot.gfex_contracts" :pagination="false" :scroll-x="720" size="small" />
       </div>
     </n-card>
 
@@ -116,7 +139,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { useMessage, type DataTableColumns } from 'naive-ui'
 import { useMediaQuery } from '../composables/useMediaQuery'
 import {
@@ -127,12 +150,15 @@ import {
   getMakV2DailySummary,
   getMakV2Guardrails,
   getMakV2Orders,
+  getMakV2SafetyAuditLatest,
   getMakV2Signals,
   getMakV2Status,
+  listMakV2SafetyAudits,
   runMakV2SafetyAudit,
   type MakV2DryRunSignalPayload,
   type MakV2ObserverStatus,
   type MakV2SafetyAuditCheck,
+  type MakV2SafetyAuditLatest,
   type MakV2SafetyAuditResult
 } from '../api/makV2Observer'
 
@@ -140,12 +166,17 @@ const message = useMessage()
 const isMobile = useMediaQuery('(max-width: 640px)')
 const loading = ref(false)
 const auditLoading = ref(false)
+const auditHistoryLoading = ref(false)
 const status = ref<Partial<MakV2ObserverStatus>>({})
 const auditResult = ref<MakV2SafetyAuditResult | null>(null)
+const latestAudit = ref<MakV2SafetyAuditLatest>({})
+const safetyAudits = ref<MakV2SafetyAuditResult[]>([])
 const signals = ref<Record<string, unknown>[]>([])
 const orders = ref<Record<string, unknown>[]>([])
 const guardrails = ref<Record<string, unknown>[]>([])
 const dailySummary = ref<Record<string, unknown>[]>([])
+const latestAuditResult = computed(() => (isSafetyAuditResult(latestAudit.value) ? latestAudit.value : null))
+const displayedAudit = computed(() => auditResult.value ?? latestAuditResult.value)
 const enableForm = reactive({
   manual_approval: false,
   testnet_mode: false,
@@ -203,6 +234,29 @@ const intentColumns = cols(['intent_time', 'instrument', 'exact_contract', 'side
 const guardrailColumns = cols(['trigger_time', 'guard_name', 'severity', 'action', 'threshold', 'trace_id'])
 const summaryColumns = cols(['date', 'signals_total', 'eligible_signals', 'dry_run_intents', 'guardrail_triggers', 'daily_decision'])
 const snapshotColumns = cols(['account_tail', 'account_hash', 'vt_symbol', 'symbol', 'exchange', 'pricetick', 'size', 'gateway_name'])
+const auditHistoryColumns: DataTableColumns<MakV2SafetyAuditResult> = [
+  { title: 'audit_time_utc', key: 'audit_time_utc', ellipsis: { tooltip: true } },
+  { title: 'overall', key: 'overall', ellipsis: { tooltip: true } },
+  { title: 'mode', key: 'mode', ellipsis: { tooltip: true } },
+  {
+    title: 'smoke',
+    key: 'single_order_smoke_allowed',
+    ellipsis: { tooltip: true },
+    render: (row) => (row.single_order_smoke_allowed ? 'allowed' : 'blocked')
+  },
+  {
+    title: 'rpc',
+    key: 'rpc',
+    ellipsis: { tooltip: true },
+    render: (row) => auditRpcLabel(row)
+  },
+  {
+    title: 'next_actions',
+    key: 'next_actions',
+    ellipsis: { tooltip: true },
+    render: (row) => formatAuditActions(row.next_actions)
+  }
+]
 const auditCheckColumns: DataTableColumns<MakV2SafetyAuditCheck> = [
   { title: 'check', key: 'name', ellipsis: { tooltip: true } },
   { title: 'status', key: 'status', ellipsis: { tooltip: true } },
@@ -238,21 +292,44 @@ function syncContract(value: 'lc' | 'ps') {
 
 async function refresh() {
   loading.value = true
+  auditHistoryLoading.value = true
   try {
-    const [statusResult, signalRows, orderRows, guardrailRows, summaryRows] = await Promise.all([
+    const [statusResult, signalRows, orderRows, guardrailRows, summaryRows, latestAuditRow, auditRows] = await Promise.all([
       getMakV2Status(),
       getMakV2Signals(),
       getMakV2Orders(),
       getMakV2Guardrails(),
-      getMakV2DailySummary()
+      getMakV2DailySummary(),
+      getMakV2SafetyAuditLatest(),
+      listMakV2SafetyAudits()
     ])
     status.value = statusResult
     signals.value = signalRows
     orders.value = orderRows
     guardrails.value = guardrailRows
     dailySummary.value = summaryRows
+    applyAuditHistory(latestAuditRow, auditRows)
   } finally {
     loading.value = false
+    auditHistoryLoading.value = false
+  }
+}
+
+async function refreshSafetyAudits() {
+  auditHistoryLoading.value = true
+  try {
+    const [latestAuditRow, auditRows] = await Promise.all([getMakV2SafetyAuditLatest(), listMakV2SafetyAudits()])
+    applyAuditHistory(latestAuditRow, auditRows)
+  } finally {
+    auditHistoryLoading.value = false
+  }
+}
+
+function applyAuditHistory(latestAuditRow: MakV2SafetyAuditLatest, auditRows: MakV2SafetyAuditResult[]) {
+  latestAudit.value = latestAuditRow
+  safetyAudits.value = auditRows
+  if (!auditResult.value && isSafetyAuditResult(latestAuditRow)) {
+    auditResult.value = latestAuditRow
   }
 }
 
@@ -304,6 +381,8 @@ async function submitSafetyAudit() {
     } else {
       message.warning(`safety audit ${auditResult.value.overall.toLowerCase()}`)
     }
+    latestAudit.value = auditResult.value
+    await refreshSafetyAudits()
   } catch (exc) {
     message.error(exc instanceof Error ? exc.message : 'safety audit failed')
   } finally {
@@ -334,6 +413,22 @@ function auditTagType(statusValue: string) {
   return 'warning'
 }
 
+function auditRpcConnected(audit: MakV2SafetyAuditResult) {
+  return audit.rpc.connected === true
+}
+
+function auditRpcLabel(audit: MakV2SafetyAuditResult) {
+  return auditRpcConnected(audit) ? 'connected' : 'not connected'
+}
+
+function isSafetyAuditResult(value: MakV2SafetyAuditLatest): value is MakV2SafetyAuditResult {
+  return typeof value.audit_time_utc === 'string' && typeof value.overall === 'string'
+}
+
+function formatAuditActions(actions: string[]) {
+  return actions.length > 0 ? actions.join('; ') : '-'
+}
+
 function formatAuditValue(value: unknown) {
   if (value === null || value === undefined) return '-'
   if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return String(value)
@@ -358,6 +453,7 @@ function formatAuditValue(value: unknown) {
 }
 
 .audit-summary,
+.audit-history,
 .audit-grid {
   margin-top: 12px;
 }
