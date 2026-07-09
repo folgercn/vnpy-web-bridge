@@ -50,6 +50,7 @@ export interface MakV2ObserverStatus {
   blocked_signals_total: number
   guardrail_events_total: number
   order_endpoint_touched: boolean
+  enable_rejected?: boolean
 }
 
 export const getMakV2Status = () => request<MakV2ObserverStatus>('/api/mak-v2/testnet-observer/status')

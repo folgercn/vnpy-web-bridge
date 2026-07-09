@@ -42,6 +42,7 @@ class MakV2RiskGate:
         tick_size: float,
         exact_contract_valid: bool,
     ) -> dict[str, Any]:
+        locked_or_crossed_quote = payload.ask_price_1 <= payload.bid_price_1
         spread_ticks = (payload.ask_price_1 - payload.bid_price_1) / tick_size if tick_size > 0 else 999_999
         top_lot = min(payload.bid_volume_1, payload.ask_volume_1)
         blockers: list[str] = []
@@ -56,6 +57,8 @@ class MakV2RiskGate:
             blockers.append("instrument_not_allowed")
         if not exact_contract_valid:
             blockers.append("exact_contract_invalid")
+        if locked_or_crossed_quote:
+            blockers.append("locked_or_crossed_quote")
         if payload.quote_age_ms > self.limits.max_quote_age_ms:
             blockers.append("stale_tick")
         if spread_ticks > self.limits.max_spread_ticks:
@@ -84,7 +87,7 @@ class MakV2RiskGate:
             "blockers": blockers,
             "spread_ticks": spread_ticks,
             "top_lot": top_lot,
-            "spread_gate_pass": spread_ticks <= self.limits.max_spread_ticks,
+            "spread_gate_pass": not locked_or_crossed_quote and spread_ticks <= self.limits.max_spread_ticks,
             "top_lot_gate_pass": top_lot >= self.limits.min_top_lot,
             "cooldown_gate_pass": "cooldown_active" not in blockers,
             "lc_watch_gate_pass": payload.instrument != "lc" or self.limits.max_order_lots <= 1,

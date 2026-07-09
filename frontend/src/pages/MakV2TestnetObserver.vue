@@ -197,8 +197,13 @@ async function refresh() {
 
 async function submitEnable() {
   try {
-    status.value = await enableMakV2Observer(enableForm)
-    message.success('observer enabled')
+    const result = await enableMakV2Observer(enableForm)
+    status.value = result
+    if (result.enabled === true) {
+      message.success('observer enabled')
+    } else {
+      message.warning(result.enable_rejected ? 'enable rejected: waiver incomplete' : 'observer not enabled')
+    }
     await refresh()
   } catch (exc) {
     message.error(exc instanceof Error ? exc.message : 'enable failed')

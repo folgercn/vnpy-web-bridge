@@ -113,6 +113,28 @@ def test_cooldown_blocks_duplicate_signal_after_intent() -> None:
     assert result["order_intent"] is None
 
 
+def test_locked_or_crossed_quote_blocks_intent() -> None:
+    service = make_service()
+    service.enable(enable_payload(), operator="admin", role="admin", source_ip=None)
+
+    locked = service.dry_run_signal(
+        ps_signal(cluster_id="locked", bid_price_1=39150, ask_price_1=39150),
+        operator="admin",
+        role="admin",
+    )
+    crossed = service.dry_run_signal(
+        ps_signal(cluster_id="crossed", bid_price_1=39160, ask_price_1=39155),
+        operator="admin",
+        role="admin",
+    )
+
+    for result in (locked, crossed):
+        assert result["signal"]["eligible_for_testnet"] is False
+        assert result["decision"]["spread_gate_pass"] is False
+        assert "locked_or_crossed_quote" in result["decision"]["decision_reason"]
+        assert result["order_intent"] is None
+
+
 def test_continuous_contract_symbol_is_not_order_eligible() -> None:
     service = make_service()
     service.enable(enable_payload(), operator="admin", role="admin", source_ip=None)
