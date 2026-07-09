@@ -89,3 +89,16 @@ def test_admin_enable_then_trader_dry_run_signal_creates_intent(monkeypatch) -> 
     assert data["order_intent"]["dry_run_only"] is True
     assert data["order_intent"]["order_endpoint_touched"] is False
     assert orders.json()["data"][0]["intent_id"] == data["order_intent"]["intent_id"]
+
+
+def test_safety_audit_requires_admin_and_defaults_to_watch(monkeypatch) -> None:
+    install_observer(monkeypatch)
+    with client_without_rpc(monkeypatch) as client:
+        forbidden = client.post("/api/mak-v2/testnet-observer/safety-audit", headers=auth_headers("viewer"), json={})
+        result = client.post("/api/mak-v2/testnet-observer/safety-audit", headers=auth_headers("admin"), json={})
+
+    assert forbidden.status_code == 403
+    assert result.status_code == 200
+    data = result.json()["data"]
+    assert data["overall"] == "WATCH"
+    assert data["single_order_smoke_allowed"] is False

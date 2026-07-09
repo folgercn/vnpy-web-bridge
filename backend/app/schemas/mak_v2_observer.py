@@ -67,3 +67,12 @@ class MakV2ObserverStatusDTO(BaseModel):
     blocked_signals_total: int
     guardrail_events_total: int
     order_endpoint_touched: bool
+
+
+class MakV2SafetyAuditRequestDTO(BaseModel):
+    probe_rpc: bool = False
+    collect_rpc_snapshot: bool = False
+    require_rpc_connected: bool = False
+    expected_exact_contracts: list[str] = Field(default_factory=list)
+    testnet_account_markers: list[str] = Field(default_factory=lambda: ["sim", "test", "testnet", "simnow", "模拟", "仿真"])
+    forbidden_production_account_markers: list[str] = Field(default_factory=lambda: ["prod", "production", "real", "mainnet", "生产", "实盘"])

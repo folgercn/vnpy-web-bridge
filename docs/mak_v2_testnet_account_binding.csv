@@ -1,0 +1,8 @@
+field,status,evidence,notes
+testnet_account_identified,TO_BE_FILLED_BY_REMOTE_SAFETY_AUDIT,,Run /api/mak-v2/testnet-observer/safety-audit with collect_rpc_snapshot=true
+account_hash,TO_BE_FILLED_BY_REMOTE_SAFETY_AUDIT,,Use hashed account summary from safety audit output
+gateway_name,TO_BE_FILLED_BY_REMOTE_SAFETY_AUDIT,,Expected SimNow/testnet gateway only
+rpc_connected,TO_BE_FILLED_BY_REMOTE_SAFETY_AUDIT,,Must be true for PR-B single-order smoke
+gfex_ps_contract,TO_BE_FILLED_BY_REMOTE_SAFETY_AUDIT,,Exact tradable contract required
+gfex_lc_contract,TO_BE_FILLED_BY_REMOTE_SAFETY_AUDIT,,Exact tradable contract required
+no_active_mak_positions,TO_BE_FILLED_BY_REMOTE_SAFETY_AUDIT,,Must be true before smoke
