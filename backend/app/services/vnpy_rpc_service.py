@@ -34,6 +34,27 @@ except ImportError:  # pragma: no cover - covered in deployments with vn.py inst
 
 logger = logging.getLogger(__name__)
 
+RETRYABLE_RPC_METHODS = {
+    "get_all_accounts",
+    "get_all_contracts",
+    "get_all_positions",
+    "get_all_orders",
+    "get_all_active_orders",
+    "get_all_trades",
+    "get_all_strategy_status",
+    "get_strategy_status",
+    "get_all_strategies",
+    "get_strategy_parameters",
+    "get_strategy_setting",
+    "get_strategy_config",
+    "get_strategy_variables",
+    "get_strategy_variable",
+    "get_gateway_status",
+    "get_order",
+    "get_bars",
+    "query_history",
+}
+
 
 class BridgeRpcClient(RpcClient):  # type: ignore[misc,valid-type]
     def __init__(self, service: "VnpyRpcService") -> None:
@@ -92,6 +113,8 @@ class VnpyRpcService:
             self.client.join()
         self.started = False
         self.client = None
+        self._last_probe_at = 0.0
+        self._last_probe_connected = None
 
     def status(self, *, probe: bool = False) -> dict[str, Any]:
         connected = self.started
@@ -125,17 +148,94 @@ class VnpyRpcService:
         call_timeout = timeout or self.settings.vnpy_rpc_timeout_ms
         try:
             with self._call_lock:
-                method = getattr(self.client, name)
-                return method(*args, timeout=call_timeout, **kwargs)
+                return self._call_client(name, *args, timeout=call_timeout, **kwargs)
         except TimeoutError as exc:
             self.last_error = str(exc)
+            self._rebuild_client_after_failure(name, str(exc))
             raise RpcTimeoutError(detail={"method": name, "timeout_ms": call_timeout}) from exc
         except Exception as exc:
             self.last_error = str(exc)
             message = str(exc)
             if "timeout" in message.lower():
+                self._rebuild_client_after_failure(name, message)
                 raise RpcTimeoutError(detail={"method": name, "timeout_ms": call_timeout}) from exc
+            if self._is_recoverable_client_state_error(message):
+                return self._reconnect_and_maybe_retry(name, *args, timeout=call_timeout, original_error=message, **kwargs)
             raise RpcCallError(detail={"method": name, "error": message}) from exc
+
+    def _call_client(self, name: str, *args: Any, timeout: int, **kwargs: Any) -> Any:
+        if not self.client:
+            raise RpcUnavailableError()
+        method = getattr(self.client, name)
+        return method(*args, timeout=timeout, **kwargs)
+
+    def _reconnect_and_maybe_retry(self, name: str, *args: Any, timeout: int, original_error: str, **kwargs: Any) -> Any:
+        logger.warning("vn.py RPC client state error, reconnecting before handling %s: %s", name, original_error)
+        try:
+            with self._call_lock:
+                self._restart_client()
+                if name not in RETRYABLE_RPC_METHODS:
+                    raise RpcCallError(
+                        detail={
+                            "method": name,
+                            "error": original_error,
+                            "client_rebuilt": True,
+                            "retry_suppressed": "non_idempotent_method",
+                        }
+                    )
+                result = self._call_client(name, *args, timeout=timeout, **kwargs)
+                self.last_error = None
+                return result
+        except TimeoutError as exc:
+            self.last_error = str(exc)
+            raise RpcTimeoutError(detail={"method": name, "timeout_ms": timeout, "retried_after_reconnect": True}) from exc
+        except RpcUnavailableError:
+            raise
+        except RpcCallError:
+            raise
+        except Exception as exc:
+            self.last_error = str(exc)
+            message = str(exc)
+            if "timeout" in message.lower():
+                raise RpcTimeoutError(detail={"method": name, "timeout_ms": timeout, "retried_after_reconnect": True}) from exc
+            raise RpcCallError(
+                detail={
+                    "method": name,
+                    "error": message,
+                    "original_error": original_error,
+                    "client_rebuilt": True,
+                    "retried_after_reconnect": True,
+                }
+            ) from exc
+
+    def _rebuild_client_after_failure(self, name: str, error: str) -> None:
+        logger.warning("vn.py RPC call failed, rebuilding client before next request %s: %s", name, error)
+        try:
+            with self._call_lock:
+                self._restart_client()
+        except Exception:
+            logger.warning("vn.py RPC client rebuild failed after %s error", name, exc_info=True)
+
+    def _restart_client(self) -> None:
+        old_client = self.client
+        if old_client:
+            try:
+                old_client.stop()
+            except Exception:
+                logger.warning("vn.py RPC client stop failed during reconnect", exc_info=True)
+            try:
+                old_client.join()
+            except Exception:
+                logger.warning("vn.py RPC client join failed during reconnect", exc_info=True)
+
+        self.started = False
+        self.client = None
+        self._last_probe_at = 0.0
+        self._last_probe_connected = None
+        self.start()
+
+    def _is_recoverable_client_state_error(self, message: str) -> bool:
+        return "operation cannot be accomplished in current state" in message.lower()
 
     def call_first(self, names: list[str]) -> Any:
         errors: list[str] = []
