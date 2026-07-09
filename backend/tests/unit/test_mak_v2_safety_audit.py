@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.schemas.mak_v2_observer import MakV2SafetyAuditRequestDTO
+from app.schemas.mak_v2_observer import MakV2ObserverEnableRequestDTO, MakV2SafetyAuditRequestDTO
 from app.services.mak_v2_testnet_observer.event_store import MakV2ObserverEventStore
 from app.services.mak_v2_testnet_observer.safety_audit import MakV2SafetyAuditService
 from app.services.mak_v2_testnet_observer.service import MakV2TestnetObserverService
@@ -61,8 +61,21 @@ def make_observer(*, rpc: FakeRpc) -> MakV2TestnetObserverService:
     return MakV2TestnetObserverService(store=MakV2ObserverEventStore(), risk=FakeRisk(), audit=FakeAudit(), safety_audit=safety)  # type: ignore[arg-type]
 
 
+def enable_payload() -> MakV2ObserverEnableRequestDTO:
+    return MakV2ObserverEnableRequestDTO(
+        manual_approval=True,
+        testnet_mode=True,
+        reason="manual controlled testnet observer waiver",
+        confirm_testnet_only=True,
+        confirm_no_production=True,
+        confirm_max_one_lot=True,
+        confirm_no_auto_promotion=True,
+    )
+
+
 def test_safety_audit_passes_with_testnet_account_contracts_and_flat_positions() -> None:
     service = make_observer(rpc=FakeRpc())
+    service.enable(enable_payload(), operator="admin", role="admin", source_ip=None)
 
     result = service.safety_audit(
         MakV2SafetyAuditRequestDTO(
@@ -81,8 +94,29 @@ def test_safety_audit_passes_with_testnet_account_contracts_and_flat_positions()
     assert result["snapshot"]["accounts"][0]["account_tail"] == "-001"
 
 
+def test_safety_audit_fails_without_manual_waiver_even_when_rpc_snapshot_is_healthy() -> None:
+    service = make_observer(rpc=FakeRpc())
+
+    result = service.safety_audit(
+        MakV2SafetyAuditRequestDTO(
+            collect_rpc_snapshot=True,
+            require_rpc_connected=True,
+            expected_exact_contracts=["GFEX.ps2609", "GFEX.lc2609"],
+        ),
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+
+    failed = {row["name"] for row in result["checks"] if row["status"] == "FAIL"}
+    assert result["overall"] == "FAIL"
+    assert result["single_order_smoke_allowed"] is False
+    assert {"observer_enabled", "manual_approval_active", "testnet_mode_active"} <= failed
+
+
 def test_safety_audit_fails_when_production_marker_is_seen() -> None:
     service = make_observer(rpc=FakeRpc(accounts=[{"accountid": "prod-mainnet-001", "gateway_name": "CTP"}]))
+    service.enable(enable_payload(), operator="admin", role="admin", source_ip=None)
 
     result = service.safety_audit(
         MakV2SafetyAuditRequestDTO(collect_rpc_snapshot=True, require_rpc_connected=True),
@@ -98,6 +132,7 @@ def test_safety_audit_fails_when_production_marker_is_seen() -> None:
 
 def test_safety_audit_without_snapshot_is_watch_not_pass() -> None:
     service = make_observer(rpc=FakeRpc(connected=False))
+    service.enable(enable_payload(), operator="admin", role="admin", source_ip=None)
 
     result = service.safety_audit(
         MakV2SafetyAuditRequestDTO(),

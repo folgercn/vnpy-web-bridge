@@ -35,6 +35,7 @@ Use exact contracts that are actually tradable in the remote SimNow/testnet sess
 - emergency stop clear
 - order confirmation required
 - observer remains dry-run only until PR-B order wiring
+- observer is enabled with manual waiver and testnet mode active
 - `order_endpoint_touched = false`
 - GFEX exact contracts available
 - no active MAK v2 `lc/ps` positions before smoke
