@@ -237,7 +237,11 @@ def normalize_status(status: Any) -> str:
     if status is None:
         return "unknown"
     raw = getattr(status, "value", status)
-    return STATUS_VALUE_MAP.get(str(raw), str(raw).lower())
+    raw_text = str(raw)
+    mapped = STATUS_VALUE_MAP.get(raw_text)
+    if mapped:
+        return mapped
+    return raw_text.strip().lower().replace(" ", "_").replace("-", "_")
 
 
 def is_cancelable_status(status: Any) -> bool:

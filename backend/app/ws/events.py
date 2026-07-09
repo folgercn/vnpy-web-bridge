@@ -18,6 +18,15 @@ EVENT_TYPES = {
     "strategy_status",
     "strategy_log",
     "strategy_variable",
+    "mak_v2_signal",
+    "mak_v2_order_intent",
+    "mak_v2_order_ack",
+    "mak_v2_order_status",
+    "mak_v2_fill",
+    "mak_v2_exit",
+    "mak_v2_position_reconcile",
+    "mak_v2_guardrail",
+    "mak_v2_daily_summary",
 }
 
 
