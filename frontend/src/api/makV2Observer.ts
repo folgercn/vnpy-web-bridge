@@ -53,6 +53,38 @@ export interface MakV2ObserverStatus {
   enable_rejected?: boolean
 }
 
+export interface MakV2SafetyAuditPayload {
+  probe_rpc: boolean
+  collect_rpc_snapshot: boolean
+  require_rpc_connected: boolean
+  expected_exact_contracts: string[]
+}
+
+export interface MakV2SafetyAuditCheck {
+  name: string
+  status: 'PASS' | 'WATCH' | 'FAIL'
+  observed: unknown
+}
+
+export interface MakV2SafetyAuditResult {
+  audit_time_utc: string
+  mode: string
+  overall: 'PASS' | 'WATCH' | 'FAIL'
+  single_order_smoke_allowed: boolean
+  checks: MakV2SafetyAuditCheck[]
+  observer: Record<string, unknown>
+  risk: Record<string, unknown>
+  trade_config: Record<string, unknown>
+  rpc: Record<string, unknown>
+  snapshot: {
+    accounts: Record<string, unknown>[]
+    mak_positions: Record<string, unknown>[]
+    gfex_contracts: Record<string, unknown>[]
+    errors: Record<string, unknown>
+  }
+  next_actions: string[]
+}
+
 export const getMakV2Status = () => request<MakV2ObserverStatus>('/api/mak-v2/testnet-observer/status')
 export const getMakV2Signals = () => request<Record<string, unknown>[]>('/api/mak-v2/testnet-observer/signals')
 export const getMakV2Orders = () => request<Record<string, unknown>[]>('/api/mak-v2/testnet-observer/orders')
@@ -71,3 +103,6 @@ export const flattenMakV2Testnet = () =>
 
 export const dryRunMakV2Signal = (payload: MakV2DryRunSignalPayload) =>
   request<Record<string, unknown>>('/api/mak-v2/testnet-observer/dry-run/signal', { method: 'POST', body: JSON.stringify(payload) })
+
+export const runMakV2SafetyAudit = (payload: MakV2SafetyAuditPayload) =>
+  request<MakV2SafetyAuditResult>('/api/mak-v2/testnet-observer/safety-audit', { method: 'POST', body: JSON.stringify(payload) })
