@@ -90,6 +90,7 @@ export const useTerminalStore = defineStore('terminal', () => {
       riskStatus.value = (data.status as Record<string, unknown>) || riskStatus.value
       logs.value.unshift({ type, ...data })
     }
+    if (type.startsWith('mak_v2_')) logs.value.unshift({ type, ...data })
     if (type.endsWith('log') || type === 'log') logs.value.unshift({ type, ...data })
     logs.value = logs.value.slice(0, 500)
   }

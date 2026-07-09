@@ -40,6 +40,8 @@ def build_config(tmp_path, monkeypatch):
     monkeypatch.setenv("WATCHDOG_MAINTENANCE_FILE", str(tmp_path / "maintenance.json"))
     monkeypatch.setenv("WATCHDOG_FAILURE_THRESHOLD", "1")
     monkeypatch.setenv("WATCHDOG_RECOVERY_THRESHOLD", "1")
+    monkeypatch.setenv("WATCHDOG_DISK_WARNING_PERCENT", "101")
+    monkeypatch.setenv("WATCHDOG_DISK_CRITICAL_PERCENT", "102")
     monkeypatch.setenv("TELEGRAM_ENABLED", "true")
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "token")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "chat")
