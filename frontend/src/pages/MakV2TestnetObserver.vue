@@ -422,7 +422,14 @@ function auditRpcLabel(audit: MakV2SafetyAuditResult) {
 }
 
 function isSafetyAuditResult(value: MakV2SafetyAuditLatest): value is MakV2SafetyAuditResult {
-  return typeof value.audit_time_utc === 'string' && typeof value.overall === 'string'
+  return Boolean(
+    value &&
+      typeof value === 'object' &&
+      'audit_time_utc' in value &&
+      'overall' in value &&
+      typeof value.audit_time_utc === 'string' &&
+      typeof value.overall === 'string'
+  )
 }
 
 function formatAuditActions(actions: string[]) {

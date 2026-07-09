@@ -85,7 +85,7 @@ export interface MakV2SafetyAuditResult {
   next_actions: string[]
 }
 
-export type MakV2SafetyAuditLatest = Partial<MakV2SafetyAuditResult>
+export type MakV2SafetyAuditLatest = MakV2SafetyAuditResult | Record<string, never>
 
 export const getMakV2Status = () => request<MakV2ObserverStatus>('/api/mak-v2/testnet-observer/status')
 export const getMakV2Signals = () => request<Record<string, unknown>[]>('/api/mak-v2/testnet-observer/signals')
