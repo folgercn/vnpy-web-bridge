@@ -328,9 +328,7 @@ async function refreshSafetyAudits() {
 function applyAuditHistory(latestAuditRow: MakV2SafetyAuditLatest, auditRows: MakV2SafetyAuditResult[]) {
   latestAudit.value = latestAuditRow
   safetyAudits.value = auditRows
-  if (!auditResult.value && isSafetyAuditResult(latestAuditRow)) {
-    auditResult.value = latestAuditRow
-  }
+  auditResult.value = isSafetyAuditResult(latestAuditRow) ? latestAuditRow : null
 }
 
 async function submitEnable() {
