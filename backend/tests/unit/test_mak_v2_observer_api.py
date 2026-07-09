@@ -104,3 +104,26 @@ def test_safety_audit_requires_admin_and_defaults_to_fail_until_waived(monkeypat
     assert data["single_order_smoke_allowed"] is False
     failed = {row["name"] for row in data["checks"] if row["status"] == "FAIL"}
     assert {"observer_enabled", "manual_approval_active", "testnet_mode_active"} <= failed
+
+
+def test_safety_audit_history_is_readable_by_all_observer_roles(monkeypatch) -> None:
+    install_observer(monkeypatch)
+    with client_without_rpc(monkeypatch) as client:
+        created = client.post("/api/mak-v2/testnet-observer/safety-audit", headers=auth_headers("admin"), json={})
+        for role in ("admin", "viewer", "trader"):
+            history = client.get("/api/mak-v2/testnet-observer/safety-audits", headers=auth_headers(role))
+            latest = client.get("/api/mak-v2/testnet-observer/safety-audit/latest", headers=auth_headers(role))
+
+            assert history.status_code == 200
+            assert latest.status_code == 200
+            assert history.json()["data"][0] == created.json()["data"]
+            assert latest.json()["data"] == created.json()["data"]
+
+
+def test_latest_safety_audit_is_empty_before_first_audit(monkeypatch) -> None:
+    install_observer(monkeypatch)
+    with client_without_rpc(monkeypatch) as client:
+        result = client.get("/api/mak-v2/testnet-observer/safety-audit/latest", headers=auth_headers("viewer"))
+
+    assert result.status_code == 200
+    assert result.json()["data"] == {}

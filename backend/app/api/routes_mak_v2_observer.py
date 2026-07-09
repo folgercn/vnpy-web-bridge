@@ -59,6 +59,19 @@ def guardrails(
     return ok(mak_v2_observer_service.list_guardrails(limit=limit))
 
 
+@router.get("/safety-audits")
+def safety_audits(
+    limit: int = Query(default=200, ge=1, le=1000),
+    _: CurrentUser = Depends(require_roles("viewer", "trader", "admin")),
+) -> dict:
+    return ok(mak_v2_observer_service.list_safety_audits(limit=limit))
+
+
+@router.get("/safety-audit/latest")
+def latest_safety_audit(_: CurrentUser = Depends(require_roles("viewer", "trader", "admin"))) -> dict:
+    return ok(mak_v2_observer_service.latest_safety_audit())
+
+
 @router.post("/safety-audit")
 def safety_audit(
     payload: MakV2SafetyAuditRequestDTO,
