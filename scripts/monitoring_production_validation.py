@@ -20,6 +20,10 @@ CONFIRMATION = "ISSUE45_PRODUCTION"
 TESTING_CONFIRMATION = "ISSUE45_TESTING"
 ACTIVE_STATUSES = {"pending", "firing", "acknowledged", "recovering"}
 SHANGHAI = ZoneInfo("Asia/Shanghai")
+DIAGNOSTIC_LOG_PATTERN = re.compile(
+    r"traceback|error|exception|failed|warning|critical|startup|uvicorn|rpc|health|address already in use|bind",
+    re.IGNORECASE,
+)
 
 
 class ValidationError(RuntimeError):
@@ -92,6 +96,7 @@ class MonitoringProductionValidation:
             "status": "running",
             "preflight": {},
             "scenarios": [],
+            "diagnostics": [],
             "recovery": {},
         }
 
@@ -119,11 +124,14 @@ class MonitoringProductionValidation:
             failure = exc
             self.report["status"] = "failed"
             self.report["error"] = {"type": exc.__class__.__name__, "message": sanitize_text(str(exc))[:500]}
+            if self.mutation_started:
+                self.report["diagnostics"].append(self._safe_failure_diagnostics("scenario_failure"))
         finally:
             self.report["recovery"] = self._recover_production() if self.mutation_started else {"ok": True, "skipped": True, "actions": []}
             if not self.report["recovery"].get("ok"):
                 self.report["status"] = "failed"
                 self.report.setdefault("error", {"type": "RecoveryError", "message": "production recovery was incomplete"})
+                self.report["diagnostics"].append(self._safe_failure_diagnostics("post_recovery"))
             self.report["finished_at"] = self._iso_now()
             self._write_evidence()
         if failure:
@@ -456,6 +464,88 @@ class MonitoringProductionValidation:
             actions.append({"action": "verify_no_active_incidents", "ok": False, "error": exc.__class__.__name__})
         return {"actions": actions, "ok": all(item["ok"] for item in actions)}
 
+    def _safe_failure_diagnostics(self, phase: str) -> dict[str, Any]:
+        try:
+            return self._failure_diagnostics(phase)
+        except BaseException as exc:
+            return {
+                "phase": phase,
+                "collected_at": self._iso_now(),
+                "collection_error": {
+                    "type": exc.__class__.__name__,
+                    "message": sanitize_text(str(exc))[:500],
+                },
+            }
+
+    def _failure_diagnostics(self, phase: str) -> dict[str, Any]:
+        containers = {
+            name: self._container_diagnostic(name)
+            for name in ("vnpy-web-bridge", "vnpy-web-bridge-questdb", "vnpy-web-bridge-postgres")
+        }
+        return {
+            "phase": phase,
+            "collected_at": self._iso_now(),
+            "liveness": self._liveness_diagnostic(),
+            "containers": containers,
+            "web_bridge_log_tail": self._web_bridge_diagnostic_logs(),
+        }
+
+    def _container_diagnostic(self, name: str) -> dict[str, Any]:
+        result = self._docker("inspect", "--format", "{{json .State}}", name, timeout=15, check=False)
+        try:
+            state = json.loads(result.stdout.strip())
+        except json.JSONDecodeError:
+            return {
+                "status": "missing",
+                "error": sanitize_text(result.stderr.strip() or result.stdout.strip() or "inspect returned no state")[:500],
+            }
+
+        health = state.get("Health") or {}
+        health_logs = []
+        for item in (health.get("Log") or [])[-3:]:
+            health_logs.append(
+                {
+                    "exit_code": int(item.get("ExitCode") or 0),
+                    "output": sanitize_text(str(item.get("Output") or ""))[:1000],
+                }
+            )
+        return {
+            "status": str(state.get("Status") or "unknown"),
+            "running": bool(state.get("Running")),
+            "restarting": bool(state.get("Restarting")),
+            "exit_code": int(state.get("ExitCode") or 0),
+            "oom_killed": bool(state.get("OOMKilled")),
+            "error": sanitize_text(str(state.get("Error") or ""))[:500],
+            "health": {
+                "status": str(health.get("Status") or "not_configured"),
+                "failing_streak": int(health.get("FailingStreak") or 0),
+                "checks": health_logs,
+            },
+        }
+
+    def _liveness_diagnostic(self) -> dict[str, Any]:
+        try:
+            with urllib.request.urlopen("http://127.0.0.1:8080/api/health/live", timeout=3) as response:
+                payload = response.read(2000).decode("utf-8", errors="replace")
+            return {"status": int(response.status), "body": sanitize_text(payload)[:2000]}
+        except Exception as exc:
+            return {"status": "unreachable", "error": sanitize_text(f"{exc.__class__.__name__}: {exc}")[:500]}
+
+    def _web_bridge_diagnostic_logs(self) -> list[str]:
+        result = self._docker(
+            "logs",
+            "--since",
+            "15m",
+            "--tail",
+            "300",
+            "vnpy-web-bridge",
+            timeout=30,
+            check=False,
+        )
+        lines = (result.stdout + "\n" + result.stderr).splitlines()
+        selected = [line for line in lines if DIAGNOSTIC_LOG_PATTERN.search(line)]
+        return [sanitize_text(line)[:1000] for line in selected[-120:]]
+
     def _rpc_exposure(self) -> dict[str, int]:
         code = (
             "import json; "
@@ -639,6 +729,18 @@ class MonitoringProductionValidation:
         lines.extend(f"| `{item['name']}` | {item['status']} |" for item in self.report.get("scenarios", []))
         if self.report.get("error"):
             lines.extend(["", "## Error", "", f"`{self.report['error']['type']}: {self.report['error']['message']}`"])
+        if self.report.get("diagnostics"):
+            lines.extend(["", "## Failure diagnostics", ""])
+            for item in self.report["diagnostics"]:
+                container_states = ", ".join(
+                    f"{name}={details.get('status', 'unknown')}"
+                    for name, details in (item.get("containers") or {}).items()
+                )
+                lines.append(
+                    f"- `{item.get('phase')}`: liveness=`{(item.get('liveness') or {}).get('status', 'unknown')}`; "
+                    f"containers: {container_states or 'unavailable'}; filtered log lines: "
+                    f"`{len(item.get('web_bridge_log_tail') or [])}`"
+                )
         self.markdown_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     def _iso_now(self) -> str:
@@ -719,6 +821,17 @@ def sanitize_text(value: str) -> str:
     result = re.sub(r"https://api\.telegram\.org/bot[^/\s]+", "https://api.telegram.org/bot[redacted]", value)
     result = re.sub(r"\b(?:tcp|ipc)://[^\s,;]+", "[rpc-address-redacted]", result)
     result = re.sub(r"\b(?:postgresql|postgres)://[^\s]+", "[dsn-redacted]", result)
+    result = re.sub(
+        r"(?i)\b(password|passwd|token|secret|api[_-]?key|chat[_-]?id)\s*[:=]\s*[^\s,;]+",
+        lambda match: f"{match.group(1)}=[redacted]",
+        result,
+    )
+    result = re.sub(
+        r"(?i)(\b(?:account(?:id|_id)?|symbol|vt_symbol|order(?:id|_id)|trade(?:id|_id))\s*[:=]\s*)[^\s,;]+",
+        lambda match: f"{match.group(1)}[redacted]",
+        result,
+    )
+    result = re.sub(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?::\d+)?", "[ip-redacted]", result)
     return result
 
 

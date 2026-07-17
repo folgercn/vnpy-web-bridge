@@ -15,6 +15,8 @@ The final Phase 7 drill runs only through the owner-only `Issue 45 Production Mo
 
 The script uses the existing production `.env` only for runtime configuration. Secrets, addresses, DSNs, account data, symbols, and balances are excluded from artifacts and logs.
 
+When a drill or automatic recovery fails, the JSON artifact also records two bounded diagnostic snapshots: container state and health-check output plus error-filtered Web Bridge log lines. Transport addresses, credentials, IP addresses, account identifiers, symbols, order identifiers, and trade identifiers are redacted before the artifact is written.
+
 ## Scenarios
 
 1. Restart Web Bridge under the deployment maintenance window and verify no watchdog episode is created.

@@ -168,6 +168,7 @@ def test_full_mode_recovers_and_persists_failure_evidence(tmp_path: Path, monkey
     subject = validation(tmp_path)
     monkeypatch.setattr(subject, "_preflight", lambda **kwargs: None)
     monkeypatch.setattr(subject, "_maintenance_restart", lambda: (_ for _ in ()).throw(module.ValidationError("boom")))
+    monkeypatch.setattr(subject, "_failure_diagnostics", lambda phase: {"phase": phase})
     monkeypatch.setattr(subject, "_recover_production", lambda: {"ok": True, "actions": [{"action": "restore", "ok": True}]})
 
     with pytest.raises(module.ValidationError, match="boom"):
@@ -176,8 +177,73 @@ def test_full_mode_recovers_and_persists_failure_evidence(tmp_path: Path, monkey
     assert subject.report["status"] == "failed"
     assert subject.report["scenarios"][0]["name"] == "maintenance_restart"
     assert subject.report["scenarios"][0]["status"] == "failed"
+    assert subject.report["diagnostics"] == [{"phase": "scenario_failure"}]
     assert subject.report["recovery"]["ok"] is True
     assert "boom" in subject.markdown_path.read_text(encoding="utf-8")
+
+
+def test_failure_diagnostics_capture_sanitized_container_state_and_error_logs(tmp_path: Path, monkeypatch) -> None:
+    state = {
+        "Status": "running",
+        "Running": True,
+        "Restarting": False,
+        "ExitCode": 0,
+        "OOMKilled": False,
+        "Error": "",
+        "Health": {
+            "Status": "unhealthy",
+            "FailingStreak": 3,
+            "Log": [{"ExitCode": 1, "Output": "RPC tcp://10.0.0.8:2014 failed token=abc"}],
+        },
+    }
+
+    def runner(args, **kwargs):
+        if args[1] == "inspect":
+            return module.CommandResult(stdout=module.json.dumps(state))
+        if args[1] == "logs":
+            return module.CommandResult(
+                stderr=(
+                    "INFO routine request account_id=visible-if-context-leaks\n"
+                    "ERROR RPC tcp://10.0.0.8:2014 failed password=hunter2 symbol=rb2510 account_id=123\n"
+                    "Traceback: boom\n"
+                )
+            )
+        raise AssertionError(args)
+
+    subject = module.MonitoringProductionValidation(
+        deploy_path=tmp_path / "Users/fujun/services/vnpy-web-bridge",
+        output_path=tmp_path / "result.json",
+        markdown_path=tmp_path / "result.md",
+        runner=runner,
+    )
+    monkeypatch.setattr(subject, "_liveness_diagnostic", lambda: {"status": "unreachable"})
+
+    result = subject._failure_diagnostics("scenario_failure")
+    serialized = module.json.dumps(result)
+
+    assert result["containers"]["vnpy-web-bridge"]["health"]["status"] == "unhealthy"
+    assert result["containers"]["vnpy-web-bridge"]["health"]["failing_streak"] == 3
+    assert result["web_bridge_log_tail"]
+    assert "10.0.0.8" not in serialized
+    assert "hunter2" not in serialized
+    assert "abc" not in serialized
+    assert "visible-if-context-leaks" not in serialized
+    assert "rb2510" not in serialized
+    assert "123" not in serialized
+
+
+def test_diagnostic_collection_failure_never_masks_validation_error(tmp_path: Path, monkeypatch) -> None:
+    subject = validation(tmp_path)
+    monkeypatch.setattr(subject, "_preflight", lambda **kwargs: None)
+    monkeypatch.setattr(subject, "_maintenance_restart", lambda: (_ for _ in ()).throw(module.ValidationError("primary")))
+    monkeypatch.setattr(subject, "_failure_diagnostics", lambda phase: (_ for _ in ()).throw(RuntimeError("diagnostic")))
+    monkeypatch.setattr(subject, "_recover_production", lambda: {"ok": True, "actions": []})
+
+    with pytest.raises(module.ValidationError, match="primary"):
+        subject.run(mode="full", confirmation=module.CONFIRMATION)
+
+    assert subject.report["error"]["message"] == "primary"
+    assert subject.report["diagnostics"][0]["collection_error"]["message"] == "diagnostic"
 
 
 def test_clear_maintenance_preserves_foreign_file(tmp_path: Path) -> None:
@@ -202,10 +268,21 @@ def test_delivery_helpers_support_backend_and_watchdog_shapes() -> None:
 
 
 def test_sanitize_text_removes_transport_secrets_and_addresses() -> None:
-    value = "https://api.telegram.org/bot123:secret/sendMessage tcp://10.0.0.1:2014 postgresql://u:p@db/vnpy"
+    value = (
+        "https://api.telegram.org/bot123:secret/sendMessage tcp://10.0.0.1:2014 "
+        "postgresql://u:p@db/vnpy password=hunter2 token=abc client=192.168.1.5 "
+        "account_id=123 symbol=rb2510 order_id=456 tradeid=789"
+    )
 
     sanitized = module.sanitize_text(value)
 
     assert "secret" not in sanitized
     assert "10.0.0.1" not in sanitized
     assert "u:p" not in sanitized
+    assert "hunter2" not in sanitized
+    assert "abc" not in sanitized
+    assert "192.168.1.5" not in sanitized
+    assert "rb2510" not in sanitized
+    assert "123" not in sanitized
+    assert "456" not in sanitized
+    assert "789" not in sanitized
