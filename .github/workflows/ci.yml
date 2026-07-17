@@ -60,7 +60,7 @@ jobs:
                 ;;
             esac
             case "$file" in
-              backend/*|shared/*|requirements.txt)
+              backend/*|shared/*|requirements.txt|scripts/tick_*.py)
                 backend_changed=true
                 ;;
               frontend/*|shared/*)
