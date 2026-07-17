@@ -265,9 +265,10 @@ class CommandResult:
 
 
 class DockerHost:
-    def __init__(self, *, web_container: str, questdb_container: str) -> None:
+    def __init__(self, *, web_container: str, questdb_container: str, deploy_path: Path | None = None) -> None:
         self.web_container = web_container
         self.questdb_container = questdb_container
+        self.deploy_path = deploy_path.resolve() if deploy_path else None
 
     def run(self, args: list[str], *, input_text: str | None = None, check: bool = True, timeout: float = 180) -> CommandResult:
         result = subprocess.run(args, input=input_text, text=True, capture_output=True, timeout=timeout)
@@ -308,12 +309,53 @@ class DockerHost:
         raise ValidationError(f"container did not recover: {container}; last_state={last}")
 
     def ensure_started(self) -> None:
-        for container in (self.questdb_container, self.web_container):
-            state = self.container_state(container)
-            if not state.get("Running"):
-                self.docker("start", container)
+        questdb_state = self.container_state(self.questdb_container)
+        if not questdb_state.get("Running"):
+            self.docker("start", self.questdb_container)
         self.wait_container(self.questdb_container, healthy=True)
+
+        web_state = self.container_state(self.web_container)
+        web_health = (web_state.get("Health") or {}).get("Status")
+        if web_state.get("Restarting") or web_health == "unhealthy":
+            self.restore_production_web()
+        elif not web_state.get("Running"):
+            self.docker("start", self.web_container)
         self.wait_container(self.web_container, healthy=True)
+
+    def restore_production_web(self) -> None:
+        if self.deploy_path is None:
+            raise ValidationError("deploy path is required to recover an unhealthy Web Bridge")
+        compose_file = self.deploy_path / "deployments/docker-compose.prod.yml"
+        env_file = self.deploy_path / ".env"
+        if not compose_file.is_file() or not env_file.is_file():
+            raise ValidationError("production compose or env file is missing")
+
+        override = self.deploy_path / "logs/watchdog/issue45-rpc-override.yml"
+        override.unlink(missing_ok=True)
+        maintenance = self.deploy_path / "logs/watchdog/maintenance.json"
+        try:
+            payload = json.loads(maintenance.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError):
+            payload = {}
+        if payload.get("source") == "issue45-production-validation":
+            maintenance.unlink(missing_ok=True)
+
+        self.run(
+            [
+                "docker",
+                "compose",
+                "--env-file",
+                str(env_file),
+                "-f",
+                str(compose_file),
+                "up",
+                "-d",
+                "--no-deps",
+                "--force-recreate",
+                "web-bridge",
+            ],
+            timeout=180,
+        )
 
     def resource_snapshot(self) -> dict[str, Any]:
         stats = self.docker(
@@ -788,6 +830,7 @@ def main() -> int:
     parser.add_argument("--markdown-output", type=Path, default=Path("artifacts/issue-79-production-validation.md"))
     parser.add_argument("--web-container", default=os.getenv("WEB_CONTAINER", "vnpy-web-bridge"))
     parser.add_argument("--questdb-container", default=os.getenv("QUESTDB_CONTAINER", "vnpy-web-bridge-questdb"))
+    parser.add_argument("--deploy-path", type=Path)
     parser.add_argument("--outage-seconds", type=int, default=int(os.getenv("ISSUE79_OUTAGE_SECONDS", "50")))
     parser.add_argument("--recovery-timeout", type=int, default=int(os.getenv("ISSUE79_RECOVERY_TIMEOUT", "240")))
     args = parser.parse_args()
@@ -795,7 +838,11 @@ def main() -> int:
         print(f"error: --confirm {CONFIRMATION} is required for production fault injection", file=sys.stderr)
         return 2
 
-    host = DockerHost(web_container=args.web_container, questdb_container=args.questdb_container)
+    host = DockerHost(
+        web_container=args.web_container,
+        questdb_container=args.questdb_container,
+        deploy_path=args.deploy_path,
+    )
     validation = ProductionValidation(host, outage_seconds=args.outage_seconds, recovery_timeout=args.recovery_timeout)
     try:
         result = validation.run(destructive=args.mode == "full")

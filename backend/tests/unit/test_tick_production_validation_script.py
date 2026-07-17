@@ -17,6 +17,32 @@ def test_command_result_preserves_nonzero_exit_code() -> None:
     assert result.returncode == 7
 
 
+def test_restore_production_web_clears_interrupted_issue45_override(tmp_path: Path) -> None:
+    compose = tmp_path / "deployments/docker-compose.prod.yml"
+    compose.parent.mkdir(parents=True)
+    compose.write_text("services: {}\n", encoding="utf-8")
+    (tmp_path / ".env").write_text("APP_ENV=production\n", encoding="utf-8")
+    watchdog = tmp_path / "logs/watchdog"
+    watchdog.mkdir(parents=True)
+    override = watchdog / "issue45-rpc-override.yml"
+    override.write_text("services: {}\n", encoding="utf-8")
+    maintenance = watchdog / "maintenance.json"
+    maintenance.write_text('{"source":"issue45-production-validation"}', encoding="utf-8")
+
+    host = MODULE["DockerHost"](
+        web_container="web",
+        questdb_container="questdb",
+        deploy_path=tmp_path,
+    )
+    calls: list[list[str]] = []
+    host.run = lambda args, **kwargs: calls.append(args) or MODULE["CommandResult"]("", "", 0)
+    host.restore_production_web()
+
+    assert not override.exists()
+    assert not maintenance.exists()
+    assert calls[0][-4:] == ["-d", "--no-deps", "--force-recreate", "web-bridge"]
+
+
 def test_select_complete_trading_day_requires_night_and_day() -> None:
     selected = MODULE["select_complete_trading_day"](
         [

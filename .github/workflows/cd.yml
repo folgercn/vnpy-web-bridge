@@ -138,10 +138,12 @@ jobs:
       - name: Run production validation and fault drills
         env:
           PATH: /Applications/Docker.app/Contents/Resources/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
         run: |
           python3 scripts/tick_production_validation.py \
             --mode full \
             --confirm ISSUE79_PRODUCTION \
+            --deploy-path "${DEPLOY_PATH:-/Users/fujun/services/vnpy-web-bridge}" \
             --output artifacts/issue-79-production-validation.json \
             --markdown-output artifacts/issue-79-production-validation.md
 
