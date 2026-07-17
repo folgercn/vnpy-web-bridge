@@ -517,6 +517,7 @@ class ProductionValidation:
         self.host.wait_container(self.host.questdb_container, healthy=True, timeout=self.recovery_timeout)
         time.sleep(0.25)
         self.host.docker("kill", "--signal", "KILL", self.host.web_container)
+        self.host.docker("start", self.host.web_container)
         self.host.wait_container(self.host.web_container, healthy=True, timeout=self.recovery_timeout)
         after_replay_kill = self.host.probe("status")
         recovered = self.wait_status(
