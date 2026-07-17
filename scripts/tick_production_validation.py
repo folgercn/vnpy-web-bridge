@@ -215,6 +215,9 @@ def drop_partition(partition_day):
 action = sys.argv[1]
 if action == "status":
     output(api_get("/api/market/data/status"))
+elif action == "rpc":
+    rpc = api_get("/api/rpc/probe")
+    output({"connected": bool(rpc.get("connected")), "gateway_name": rpc.get("gateway_name")})
 elif action == "monitor":
     output({"summary": api_get("/api/monitor/summary"), "incidents": api_get("/api/monitor/incidents")})
 elif action == "history_candidates":
@@ -404,6 +407,20 @@ class ProductionValidation:
         state = self.host.probe("status")
         self.record("preflight_worker_alive", bool(state.get("worker_alive")), status=state)
         self.record("preflight_no_drops", int(state.get("dropped_total") or 0) == 0, dropped_total=state.get("dropped_total"))
+        rpc = self.host.probe("rpc")
+        self.record("preflight_rpc_connected", bool(rpc.get("connected")), rpc=rpc)
+        baseline_received = int(state.get("received_total") or 0)
+        live_status = self.wait_status(
+            lambda value: int(value.get("received_total") or 0) > baseline_received,
+            "live RPC Tick flow",
+            90,
+        )
+        self.record(
+            "preflight_live_ticks",
+            int(live_status.get("received_total") or 0) > baseline_received,
+            before=baseline_received,
+            after=live_status.get("received_total"),
+        )
         self.result["preflight"] = state
         images = {}
         for container in (self.host.web_container, self.host.questdb_container):
