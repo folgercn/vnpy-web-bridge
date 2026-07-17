@@ -6,6 +6,7 @@ from datetime import datetime
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import time
@@ -15,6 +16,7 @@ from zoneinfo import ZoneInfo
 
 CONFIRMATION = "ISSUE79_PRODUCTION"
 ACTIVE_STATES = {"pending", "firing", "acknowledged", "recovering"}
+SENSITIVE_KEY_PARTS = ("password", "passwd", "secret", "token", "chat_id", "dsn", "rpc_address")
 PROBE_SOURCE = r'''
 from __future__ import annotations
 
@@ -399,6 +401,43 @@ def _as_shanghai_datetime(value: Any) -> datetime:
     return parsed.astimezone(ZoneInfo("Asia/Shanghai"))
 
 
+def is_active_incident(item: dict[str, Any]) -> bool:
+    return str(item.get("state") or item.get("status") or "").lower() in ACTIVE_STATES
+
+
+def is_spool_clean(status: dict[str, Any], spool_files: dict[str, Any]) -> bool:
+    return (
+        int(status.get("spool_rows") or 0) == 0
+        and int(spool_files.get("active_bytes") or 0) == 0
+        and int(spool_files.get("bad_files") or 0) == 0
+        and int(spool_files.get("replay_files") or 0) == 0
+    )
+
+
+def sanitize_evidence(value: Any) -> Any:
+    if isinstance(value, dict):
+        sanitized: dict[str, Any] = {}
+        for key, item in value.items():
+            lowered = str(key).lower()
+            sanitized[key] = (
+                "[redacted]"
+                if any(part in lowered for part in SENSITIVE_KEY_PARTS)
+                else sanitize_evidence(item)
+            )
+        return sanitized
+    if isinstance(value, list):
+        return [sanitize_evidence(item) for item in value]
+    if isinstance(value, str):
+        sanitized = re.sub(
+            r"\b(?:https?|postgres(?:ql)?|tcp)://[^\s]+",
+            "[redacted-url]",
+            value,
+            flags=re.IGNORECASE,
+        )
+        return re.sub(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])", "[redacted-host]", sanitized)
+    return value
+
+
 class ProductionValidation:
     def __init__(self, host: DockerHost, *, outage_seconds: int, recovery_timeout: int) -> None:
         self.host = host
@@ -639,7 +678,7 @@ class ProductionValidation:
             incidents = monitor.get("incidents") or []
             if isinstance(incidents, dict):
                 incidents = incidents.get("incidents") or []
-            active = [item for item in incidents if item.get("state") in ACTIVE_STATES]
+            active = [item for item in incidents if is_active_incident(item)]
             if not active:
                 break
             time.sleep(5)
@@ -656,7 +695,7 @@ class ProductionValidation:
             corrupt_total=status.get("corrupt_total"),
             quarantined_rows=status.get("quarantined_rows"),
         )
-        self.record("final_spool_clean", int(status.get("spool_rows") or 0) == 0 and int(spool_files.get("bad_files") or 0) == 0, spool_files=spool_files)
+        self.record("final_spool_clean", is_spool_clean(status, spool_files), spool_files=spool_files)
         self.record("final_no_active_incidents", not active, active_incidents=active)
         self.result["resources_after"] = self.sample_resources("final")
         self.result["resource_peaks"] = summarize_resource_peaks(self.result["resource_samples"])
@@ -770,16 +809,18 @@ def main() -> int:
             print(f"emergency recovery failed: {recovery_exc}", file=sys.stderr)
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.markdown_output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(json.dumps(validation.result, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
-        args.markdown_output.write_text(render_markdown(validation.result), encoding="utf-8")
-        print(f"validation failed: {exc}", file=sys.stderr)
+        safe_result = sanitize_evidence(validation.result)
+        args.output.write_text(json.dumps(safe_result, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+        args.markdown_output.write_text(render_markdown(safe_result), encoding="utf-8")
+        print(f"validation failed: {sanitize_evidence(str(exc))}", file=sys.stderr)
         return 1
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.markdown_output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
-    args.markdown_output.write_text(render_markdown(result), encoding="utf-8")
-    print(render_markdown(result))
+    safe_result = sanitize_evidence(result)
+    args.output.write_text(json.dumps(safe_result, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    args.markdown_output.write_text(render_markdown(safe_result), encoding="utf-8")
+    print(render_markdown(safe_result))
     return 0
 
 

@@ -57,6 +57,35 @@ def test_render_markdown_is_sanitized_summary() -> None:
     assert "must-not-render" not in markdown
 
 
+def test_incident_and_spool_final_checks_cover_real_payload_fields() -> None:
+    assert MODULE["is_active_incident"]({"status": "firing"})
+    assert MODULE["is_active_incident"]({"state": "recovering"})
+    assert not MODULE["is_active_incident"]({"status": "resolved"})
+    assert MODULE["is_spool_clean"](
+        {"spool_rows": 0},
+        {"active_bytes": 0, "bad_files": 0, "replay_files": 0},
+    )
+    assert not MODULE["is_spool_clean"](
+        {"spool_rows": 0},
+        {"active_bytes": 0, "bad_files": 0, "replay_files": 1},
+    )
+
+
+def test_sanitize_evidence_removes_secrets_and_internal_addresses() -> None:
+    sanitized = MODULE["sanitize_evidence"](
+        {
+            "last_error": "connect http://questdb:9000/write at 198.18.0.146",
+            "questdb_pg_dsn": "postgresql://user:pass@questdb:8812/qdb",
+            "telegram_chat_id": "123456",
+        }
+    )
+    rendered = str(sanitized)
+    assert "198.18.0.146" not in rendered
+    assert "questdb:9000" not in rendered
+    assert "user:pass" not in rendered
+    assert "123456" not in rendered
+
+
 def test_summarize_resource_peaks() -> None:
     peaks = MODULE["summarize_resource_peaks"](
         [
