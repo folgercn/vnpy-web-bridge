@@ -11,9 +11,14 @@ class FakeCommoditySimNowService:
     def __init__(self) -> None:
         self.enabled = False
         self.preview_calls = 0
+        self.template_start_calls = 0
 
     def status(self) -> dict:
-        return {"configured": True, "enabled": self.enabled, "production_allowed": False}
+        return {
+            "configured": True,
+            "enabled": self.enabled,
+            "production_allowed": False,
+        }
 
     def plan(self) -> dict:
         return {}
@@ -28,6 +33,11 @@ class FakeCommoditySimNowService:
     def disable(self, payload, **kwargs) -> dict:
         self.enabled = False
         return self.status()
+
+    def start_template(self, payload, **kwargs) -> dict:
+        self.enabled = True
+        self.template_start_calls += 1
+        return {"action": "strategy_template_started", **self.status()}
 
     def preview(self, batch, **kwargs) -> dict:
         self.preview_calls += 1
@@ -102,6 +112,33 @@ def test_admin_can_enable_controller(monkeypatch) -> None:
     assert response.status_code == 200
     assert response.json()["data"]["enabled"] is True
     assert service.enabled is True
+
+
+def test_one_click_template_start_requires_admin(monkeypatch) -> None:
+    service = install_service(monkeypatch)
+    payload = {
+        "reason": "one-click STATIC_CORE_EQUAL route test",
+        "confirm_strategy_template": True,
+        "confirm_simnow_only": True,
+        "confirm_auto_dispatch": True,
+        "confirm_no_production": True,
+    }
+    with client_without_rpc(monkeypatch) as client:
+        forbidden = client.post(
+            "/api/commodity-simnow/template/start",
+            headers=auth_headers("trader"),
+            json=payload,
+        )
+        response = client.post(
+            "/api/commodity-simnow/template/start",
+            headers=auth_headers("admin"),
+            json=payload,
+        )
+
+    assert forbidden.status_code == 403
+    assert response.status_code == 200
+    assert response.json()["data"]["action"] == "strategy_template_started"
+    assert service.template_start_calls == 1
 
 
 def test_commodity_routes_require_authentication(monkeypatch) -> None:

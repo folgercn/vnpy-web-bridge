@@ -90,6 +90,9 @@ class Settings(BaseSettings):
     commodity_simnow_auto_dispatch_enabled: bool = True
     commodity_simnow_auto_dispatch_interval_seconds: float = Field(default=1.0, ge=0.25, le=60)
     commodity_simnow_auto_dispatch_reconcile_grace_seconds: int = Field(default=30, ge=5, le=300)
+    commodity_simnow_template_batch_path: str = ""
+    commodity_simnow_delivery_month_cutoff_day: int = Field(default=1, ge=1, le=15)
+    commodity_simnow_sc_pre_delivery_cutoff_day: int = Field(default=15, ge=1, le=25)
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

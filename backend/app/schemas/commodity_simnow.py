@@ -29,6 +29,14 @@ class CommoditySimNowDisableRequestDTO(StrictModel):
     reason: str = Field(min_length=3, max_length=500)
 
 
+class CommodityTemplateStartRequestDTO(StrictModel):
+    reason: str = Field(min_length=8, max_length=500)
+    confirm_strategy_template: bool
+    confirm_simnow_only: bool
+    confirm_auto_dispatch: bool
+    confirm_no_production: bool
+
+
 class CommodityCandidateWeightsDTO(StrictModel):
     C: float
     D: float

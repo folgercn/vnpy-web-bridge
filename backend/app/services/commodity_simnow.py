@@ -8,7 +8,7 @@ import json
 import logging
 import math
 import re
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from functools import wraps
 from pathlib import Path
 from threading import RLock
@@ -29,6 +29,7 @@ from app.schemas.commodity_simnow import (
     CommodityPlanExecuteRequestDTO,
     CommoditySimNowDisableRequestDTO,
     CommoditySimNowEnableRequestDTO,
+    CommodityTemplateStartRequestDTO,
     CommodityTargetBatchDTO,
 )
 from app.schemas.common import STATUS_VALUE_MAP
@@ -124,6 +125,17 @@ def _product_from_symbol(symbol: str) -> str:
     return match.group(1).lower() if match else ""
 
 
+def _delivery_year_month(exact_contract: str) -> tuple[int, int]:
+    match = re.fullmatch(r"[A-Z]+\.[A-Za-z]+(\d{2})(\d{2})", exact_contract)
+    if not match:
+        raise ValueError("exact contract has no four-digit delivery month")
+    year = 2000 + int(match.group(1))
+    month = int(match.group(2))
+    if not 1 <= month <= 12:
+        raise ValueError("invalid delivery month")
+    return year, month
+
+
 def _round_price(price: float, tick: float) -> float:
     decimals = max(0, len(f"{tick:.10f}".rstrip("0").split(".")[1]) if "." in f"{tick:.10f}".rstrip("0") else 0)
     return round(round(price / tick) * tick, decimals)
@@ -158,6 +170,7 @@ class CommoditySimNowService:
         self.manual_approval = False
         self.simnow_mode = False
         self.auto_dispatch_authorized = False
+        self.template_authorized = False
         self.order_endpoint_touched = False
         self.current_plan: dict[str, Any] | None = None
         self.events: list[dict[str, Any]] = []
@@ -170,6 +183,7 @@ class CommoditySimNowService:
     def status(self) -> dict[str, Any]:
         auto_dispatch_allowed = self._auto_dispatch_allowed()
         worker_alive = bool(self._task and not self._task.done())
+        template_path = self.settings.commodity_simnow_template_batch_path.strip()
         return {
             "mode": self.mode,
             "scheduler_id": self.scheduler_id,
@@ -187,6 +201,21 @@ class CommoditySimNowService:
             "auto_dispatch_reconcile_grace_seconds": (
                 self.settings.commodity_simnow_auto_dispatch_reconcile_grace_seconds
             ),
+            "strategy_template": {
+                "template_id": "STATIC_CORE_EQUAL_AUTO_V1",
+                "configured": bool(template_path and Path(template_path).expanduser().is_file()),
+                "authorized": self.template_authorized,
+                "products": sorted(PRODUCT_SPECS),
+                "rebalance_cycle": "monthly",
+                "contract_selection": "PIT_OI_MAIN_FROM_SIGNED_TARGET",
+                "target_source": "SIGNED_FROZEN_RESEARCH_PIPELINE",
+                "roll_policy": "SIGNED_MAIN_CHANGE_CLOSE_RECONCILE_OPEN",
+                "delivery_month_cutoff_day": self.settings.commodity_simnow_delivery_month_cutoff_day,
+                "sc_pre_delivery_cutoff_day": (self.settings.commodity_simnow_sc_pre_delivery_cutoff_day),
+                "manual_product_selection": False,
+                "manual_cycle_selection": False,
+                "manual_contract_selection": False,
+            },
             "order_endpoint_touched": self.order_endpoint_touched,
             "plan_status": self.current_plan.get("status") if self.current_plan else "IDLE",
             "plan_hash": self.current_plan.get("plan_hash") if self.current_plan else None,
@@ -220,6 +249,7 @@ class CommoditySimNowService:
     @_serialized
     def _revoke_auto_dispatch(self) -> None:
         self.auto_dispatch_authorized = False
+        self.template_authorized = False
 
     @_serialized
     def enable(
@@ -279,10 +309,108 @@ class CommoditySimNowService:
         self.manual_approval = False
         self.simnow_mode = False
         self.auto_dispatch_authorized = False
+        self.template_authorized = False
         result = {**self.status(), "reason": payload.reason}
         self._event("disabled", result={"reason": payload.reason})
         self.audit.record(
             action="commodity_simnow_disable",
+            user_id=operator,
+            role=role,
+            request=payload.model_dump(),
+            result=result,
+            source_ip=source_ip,
+        )
+        return result
+
+    @_serialized
+    def start_template(
+        self,
+        payload: CommodityTemplateStartRequestDTO,
+        *,
+        operator: str,
+        role: str | None,
+        source_ip: str | None,
+    ) -> dict[str, Any]:
+        confirmations = (
+            payload.confirm_strategy_template,
+            payload.confirm_simnow_only,
+            payload.confirm_auto_dispatch,
+            payload.confirm_no_production,
+        )
+        if not all(confirmations):
+            raise CommoditySimNowSafetyError("一键策略模板授权确认不完整")
+        if not self.settings.commodity_simnow_template_batch_path.strip():
+            raise CommoditySimNowBatchError(
+                "一键策略模板目标文件未配置",
+                detail={"required_setting": "COMMODITY_SIMNOW_TEMPLATE_BATCH_PATH"},
+            )
+        if self.current_plan and self.current_plan.get("status") not in {"COMPLETE"}:
+            raise CommoditySimNowStateError(
+                "存在未完成委托计划，不允许重新启动模板",
+                detail={
+                    "status": self.current_plan.get("status"),
+                    "plan_hash": self.current_plan.get("plan_hash"),
+                },
+            )
+
+        self.enable(
+            CommoditySimNowEnableRequestDTO(
+                manual_approval=True,
+                simnow_mode=True,
+                reason=payload.reason,
+                confirm_simnow_only=True,
+                confirm_no_production=True,
+                confirm_cold_start_or_reconciled_state=True,
+                confirm_manual_two_phase_dispatch=True,
+                confirm_auto_dispatch=True,
+                confirm_no_auto_promotion=True,
+            ),
+            operator=operator,
+            role=role,
+            source_ip=source_ip,
+        )
+        self.template_authorized = True
+        try:
+            prepared = self.auto_template_advance(
+                operator=operator,
+                role=role,
+                source_ip=source_ip,
+            )
+            if prepared.get("action") == "halted":
+                raise CommoditySimNowSafetyError(
+                    "一键策略模板触发合约到期保护，未启动自动派单",
+                    detail={"prepared": prepared},
+                )
+            dispatched = self.auto_advance(
+                operator=operator,
+                role=role,
+                source_ip=source_ip,
+            )
+        except Exception:
+            self.enabled = False
+            self.manual_approval = False
+            self.simnow_mode = False
+            self.template_authorized = False
+            self.auto_dispatch_authorized = False
+            self._event("strategy_template_start_failed", result={"reason": payload.reason})
+            raise
+
+        result = {
+            "action": "strategy_template_started",
+            "prepared": prepared,
+            "dispatched": dispatched,
+            **self.status(),
+        }
+        self._event(
+            "strategy_template_started",
+            plan_hash=self.current_plan.get("plan_hash") if self.current_plan else None,
+            result={
+                "prepared_action": prepared.get("action"),
+                "dispatch_action": dispatched.get("action"),
+            },
+        )
+        self.audit.record(
+            action="commodity_simnow_strategy_template_start",
             user_id=operator,
             role=role,
             request=payload.model_dump(),
@@ -331,6 +459,7 @@ class CommoditySimNowService:
                 detail={"close_orders": len(close_orders), "open_orders": len(open_orders), "limit": limit},
             )
         previous_positions = self._signed_positions(positions)
+        roll_products = sorted(row.product for row in batch.targets if row.previous_exact_contract and row.previous_exact_contract != row.exact_contract and (row.previous_target_quantity or row.target_quantity))
         plan_core = {
             "batch_hash": batch_hash,
             "batch_id": batch.batch_id,
@@ -343,6 +472,7 @@ class CommoditySimNowService:
             "close_orders": close_orders,
             "open_orders": open_orders,
             "quote_snapshot_hash": quote_hash,
+            "roll_products": roll_products,
         }
         plan_hash = _sha256_json(plan_core)
         if close_orders:
@@ -464,7 +594,7 @@ class CommoditySimNowService:
             plan["status"] = f"{payload.phase.upper()}_SUBMISSION_PARTIAL"
             plan["submitted"][payload.phase].extend(submitted)
             if dispatch_mode == "auto":
-                self.auto_dispatch_authorized = False
+                self._revoke_auto_dispatch()
             self._event(
                 "submission_partial",
                 plan_hash=plan["plan_hash"],
@@ -558,7 +688,7 @@ class CommoditySimNowService:
             )
             if age >= self.settings.commodity_simnow_auto_dispatch_reconcile_grace_seconds:
                 plan["status"] = f"{phase.upper()}_RECONCILIATION_MISMATCH"
-                self.auto_dispatch_authorized = False
+                self._revoke_auto_dispatch()
                 reconciliation_mismatch = True
         if matched and phase == "close":
             plan["status"] = "READY_OPEN" if plan["open_orders"] else "COMPLETE"
@@ -605,7 +735,7 @@ class CommoditySimNowService:
         plan = self.current_plan
         status = plan["status"]
         if status in {"CLOSE_SUBMISSION_PARTIAL", "OPEN_SUBMISSION_PARTIAL"}:
-            self.auto_dispatch_authorized = False
+            self._revoke_auto_dispatch()
             self._event(
                 "auto_dispatch_halted",
                 plan_hash=plan["plan_hash"],
@@ -662,13 +792,178 @@ class CommoditySimNowService:
 
         return {"action": "idle", "reason": f"plan_status_{status.lower()}", **self.status()}
 
+    @_serialized
+    def auto_template_advance(
+        self,
+        *,
+        operator: str = "commodity-simnow-template",
+        role: str | None = "system",
+        source_ip: str | None = None,
+    ) -> dict[str, Any]:
+        if not self.template_authorized:
+            return {"action": "idle", "reason": "strategy_template_not_authorized"}
+        if not self._auto_dispatch_allowed():
+            return {"action": "idle", "reason": "auto_dispatch_not_active"}
+        local_today = self.clock().astimezone(CHINA_TZ).date()
+        if self.current_plan and self.current_plan.get("status") != "COMPLETE":
+            execution_day = datetime.fromisoformat(self.current_plan["execution_day"]).date()
+            if execution_day != local_today:
+                self._revoke_auto_dispatch()
+                result = {
+                    "action": "halted",
+                    "reason": "active_plan_execution_day_expired",
+                    "execution_day": execution_day.isoformat(),
+                    "local_today": local_today.isoformat(),
+                    "status": self.current_plan.get("status"),
+                    "plan_hash": self.current_plan.get("plan_hash"),
+                }
+                self._event(
+                    "strategy_template_active_plan_expired",
+                    plan_hash=self.current_plan.get("plan_hash"),
+                    result=result,
+                )
+                return result
+            return {
+                "action": "idle",
+                "reason": "plan_active",
+                "status": self.current_plan.get("status"),
+                "plan_hash": self.current_plan.get("plan_hash"),
+            }
+
+        batch = self._load_template_batch()
+        if batch.execution_day > local_today:
+            expiry_halt = self._halt_if_delivery_guard_breached(local_today)
+            if expiry_halt:
+                return expiry_halt
+            return {
+                "action": "waiting",
+                "reason": "target_execution_day_not_reached",
+                "execution_day": batch.execution_day.isoformat(),
+            }
+        if batch.execution_day < local_today:
+            expiry_halt = self._halt_if_delivery_guard_breached(local_today)
+            if expiry_halt:
+                return expiry_halt
+            return {
+                "action": "waiting",
+                "reason": "target_file_stale",
+                "execution_day": batch.execution_day.isoformat(),
+            }
+
+        payload = batch.model_dump(mode="json", exclude={"signature"})
+        batch_hash = hashlib.sha256(_canonical_json(payload)).hexdigest()
+        if self.current_plan and self.current_plan.get("batch_hash") == batch_hash:
+            expiry_halt = self._halt_if_delivery_guard_breached(local_today)
+            if expiry_halt:
+                return expiry_halt
+            return {
+                "action": "idle",
+                "reason": "target_already_loaded",
+                "status": self.current_plan.get("status"),
+                "plan_hash": self.current_plan.get("plan_hash"),
+            }
+        if self._completed_state.get("last_completed_batch_hash") == batch_hash:
+            expiry_halt = self._halt_if_delivery_guard_breached(local_today)
+            if expiry_halt:
+                return expiry_halt
+            return {"action": "idle", "reason": "target_already_completed"}
+
+        try:
+            plan = self.preview(
+                batch,
+                operator=operator,
+                role=role,
+                source_ip=source_ip,
+            )
+        except Exception as exc:
+            self._revoke_auto_dispatch()
+            self._event(
+                "strategy_template_target_rejected",
+                result={
+                    "error_type": exc.__class__.__name__,
+                    "error_code": getattr(exc, "code", None),
+                },
+            )
+            raise
+        return {
+            "action": "target_loaded",
+            "execution_lane": plan["execution_lane"],
+            "countable_forward": plan["countable_forward"],
+            "status": plan["status"],
+            "plan_hash": plan["plan_hash"],
+        }
+
     async def _run_auto_dispatch_loop(self) -> None:
         while True:
             try:
+                if self.template_authorized:
+                    await asyncio.to_thread(self.auto_template_advance)
                 await asyncio.to_thread(self.auto_advance)
             except Exception:
                 logger.exception("commodity SimNow auto-dispatch cycle failed")
             await asyncio.sleep(self.settings.commodity_simnow_auto_dispatch_interval_seconds)
+
+    def _load_template_batch(self) -> CommodityTargetBatchDTO:
+        path = Path(self.settings.commodity_simnow_template_batch_path).expanduser()
+        try:
+            if not path.is_file():
+                raise FileNotFoundError(path)
+            if path.stat().st_size > 2 * 1024 * 1024:
+                raise ValueError("target file exceeds 2 MiB")
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("target file must contain one JSON object")
+            return CommodityTargetBatchDTO.model_validate(payload)
+        except Exception as exc:
+            self.template_authorized = False
+            self.auto_dispatch_authorized = False
+            self._event(
+                "strategy_template_target_rejected",
+                result={"error_type": exc.__class__.__name__},
+            )
+            raise CommoditySimNowBatchError(
+                "一键策略模板目标文件无效",
+                detail={"error_type": exc.__class__.__name__},
+            ) from exc
+
+    def _halt_if_delivery_guard_breached(self, local_today: date) -> dict[str, Any] | None:
+        violations: list[dict[str, Any]] = []
+        try:
+            positions = self._position_snapshot()
+        except Exception as exc:
+            self._revoke_auto_dispatch()
+            result = {
+                "action": "halted",
+                "reason": "delivery_guard_position_snapshot_failed",
+                "error_type": exc.__class__.__name__,
+            }
+            self._event("strategy_template_delivery_guard_halted", result=result)
+            return result
+        for vt_symbol, row in positions.items():
+            if not row.get("signed_quantity"):
+                continue
+            symbol, exchange = _split_vt(vt_symbol)
+            exact_contract = f"{exchange}.{symbol}"
+            try:
+                self._verify_target_delivery(exact_contract, local_today)
+            except CommoditySimNowBatchError as exc:
+                violations.append(
+                    {
+                        "vt_symbol": vt_symbol,
+                        "signed_quantity": row["signed_quantity"],
+                        "detail": exc.detail,
+                    }
+                )
+        if not violations:
+            return None
+        self._revoke_auto_dispatch()
+        result = {
+            "action": "halted",
+            "reason": "delivery_guard_breached_without_current_roll_target",
+            "violations": violations,
+        }
+        self._event("strategy_template_delivery_guard_halted", result=result)
+        return result
 
     @_serialized
     def plan(self) -> dict[str, Any]:
@@ -830,6 +1125,8 @@ class CommoditySimNowService:
                 )
         for row in batch.targets:
             self._verify_target_row(row.model_dump())
+            if row.target_quantity:
+                self._verify_target_delivery(row.exact_contract, local_today)
         self._verify_weight_caps(batch)
         self._verify_completed_chain(batch)
         return hashlib.sha256(canonical).hexdigest()
@@ -856,6 +1153,43 @@ class CommoditySimNowService:
         buffered_weight = float(row["buffered_target_weight"])
         if target_quantity and (not buffered_weight or math.copysign(1, target_quantity) != math.copysign(1, buffered_weight)):
             raise CommoditySimNowBatchError("整数目标方向与 buffered target 不一致", detail={"product": product})
+
+    def _verify_target_delivery(self, exact_contract: str, local_today: date) -> None:
+        try:
+            delivery_year, delivery_month = _delivery_year_month(exact_contract)
+        except ValueError as exc:
+            raise CommoditySimNowBatchError(
+                "目标合约交割月份无法识别",
+                detail={"exact_contract": exact_contract},
+            ) from exc
+        delivery_value = delivery_year * 100 + delivery_month
+        current_value = local_today.year * 100 + local_today.month
+        cutoff = self.settings.commodity_simnow_delivery_month_cutoff_day
+        product = _product_from_symbol(exact_contract.split(".", 1)[1])
+        if delivery_month == 1:
+            preceding_year, preceding_month = delivery_year - 1, 12
+        else:
+            preceding_year, preceding_month = delivery_year, delivery_month - 1
+        sc_cutoff = self.settings.commodity_simnow_sc_pre_delivery_cutoff_day
+        if product == "sc" and (local_today.year, local_today.month) == (preceding_year, preceding_month) and local_today.day >= sc_cutoff:
+            raise CommoditySimNowBatchError(
+                "原油目标合约已进入交割前月到期保护区间",
+                detail={
+                    "exact_contract": exact_contract,
+                    "local_date": local_today.isoformat(),
+                    "pre_delivery_cutoff_day": sc_cutoff,
+                },
+            )
+        if delivery_value < current_value or (delivery_value == current_value and local_today.day >= cutoff):
+            raise CommoditySimNowBatchError(
+                "目标合约已进入交割风险截止区间",
+                detail={
+                    "exact_contract": exact_contract,
+                    "delivery_year_month": delivery_value,
+                    "local_date": local_today.isoformat(),
+                    "cutoff_day": cutoff,
+                },
+            )
 
     def _verify_weight_caps(self, batch: CommodityTargetBatchDTO) -> None:
         rows = [row.model_dump() for row in batch.targets]
@@ -991,10 +1325,12 @@ class CommoditySimNowService:
         for row in sorted(batch.targets, key=lambda item: item.product):
             previous_vt = _exact_to_vt(row.previous_exact_contract) if row.previous_exact_contract else None
             target_vt = _exact_to_vt(row.exact_contract)
-            for vt_symbol in {item for item in (previous_vt, target_vt) if item}:
-                self._verify_contract(vt_symbol, row.product, contracts)
             previous_quantity = row.previous_target_quantity
             target_quantity = row.target_quantity
+            if previous_vt and previous_quantity:
+                self._verify_contract(previous_vt, row.product, contracts)
+            if target_quantity:
+                self._verify_contract(target_vt, row.product, contracts)
             if previous_vt and previous_vt != target_vt:
                 if previous_quantity:
                     close_orders.extend(
@@ -1337,6 +1673,7 @@ class CommoditySimNowService:
             "countable_forward": plan["countable_forward"],
             "source_month": plan["source_month"],
             "execution_day": plan["execution_day"],
+            "roll_products": plan.get("roll_products", []),
             "targets": [
                 {
                     "product": row["product"],

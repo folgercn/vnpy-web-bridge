@@ -9,6 +9,7 @@ from app.schemas.commodity_simnow import (
     CommodityPlanReconcileRequestDTO,
     CommoditySimNowDisableRequestDTO,
     CommoditySimNowEnableRequestDTO,
+    CommodityTemplateStartRequestDTO,
     CommodityTargetPreviewRequestDTO,
 )
 from app.services.commodity_simnow import commodity_simnow_service
@@ -59,6 +60,22 @@ def disable(
 ) -> dict:
     return ok(
         commodity_simnow_service.disable(
+            payload,
+            operator=user.username,
+            role=user.role,
+            source_ip=request.client.host if request.client else None,
+        )
+    )
+
+
+@router.post("/template/start")
+def start_template(
+    payload: CommodityTemplateStartRequestDTO,
+    request: Request,
+    user: CurrentUser = Depends(require_roles("admin")),
+) -> dict:
+    return ok(
+        commodity_simnow_service.start_template(
             payload,
             operator=user.username,
             role=user.role,

@@ -337,13 +337,14 @@ GET  /api/commodity-simnow/plan
 GET  /api/commodity-simnow/events
 POST /api/commodity-simnow/enable
 POST /api/commodity-simnow/disable
+POST /api/commodity-simnow/template/start
 POST /api/commodity-simnow/preview
 POST /api/commodity-simnow/execute
 POST /api/commodity-simnow/reconcile
 POST /api/commodity-simnow/auto-advance
 ```
 
-该控制器只接受研究侧 Ed25519 签名的冻结整数目标。白名单 SimNow 账户显式授权后，`simnow_shakedown` 批次可在部署当天立即自动发单并记录真实成交/滑点，但不计入正式 forward；`official_forward` 继续遵守冻结月份边界。生产执行仍被硬关闭。配置、签名与验收步骤见 [STATIC_CORE_EQUAL 商品组合 SimNow 接入](docs/commodity-static-core-simnow.md)。
+策略页提供固定十品种、月度周期、PIT OI 主力链的一键启动，不需要手选品种、周期或合约。控制器只接受研究侧 Ed25519 签名的冻结整数目标；主力变化固定先平旧约并对账，再开新约，过期或漏换月目标会撤销自动授权。白名单 SimNow 账户显式授权后，`simnow_shakedown` 批次可在部署当天立即自动发单并记录真实成交/滑点，但不计入正式 forward；`official_forward` 继续遵守冻结月份边界。生产执行仍被硬关闭。配置、签名与验收步骤见 [STATIC_CORE_EQUAL 商品组合 SimNow 接入](docs/commodity-static-core-simnow.md)。
 
 ### WebSocket
 
@@ -489,6 +490,9 @@ COMMODITY_SIMNOW_STATE_PATH=logs/commodity-simnow/state.json
 COMMODITY_SIMNOW_AUTO_DISPATCH_ENABLED=true
 COMMODITY_SIMNOW_AUTO_DISPATCH_INTERVAL_SECONDS=1
 COMMODITY_SIMNOW_AUTO_DISPATCH_RECONCILE_GRACE_SECONDS=30
+COMMODITY_SIMNOW_TEMPLATE_BATCH_PATH=/absolute/path/to/current-signed-target.json
+COMMODITY_SIMNOW_DELIVERY_MONTH_CUTOFF_DAY=1
+COMMODITY_SIMNOW_SC_PRE_DELIVERY_CUTOFF_DAY=15
 ```
 
 生产环境要求：

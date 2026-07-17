@@ -20,6 +20,7 @@ from app.schemas.commodity_simnow import (
     CommodityPlanExecuteRequestDTO,
     CommoditySimNowDisableRequestDTO,
     CommoditySimNowEnableRequestDTO,
+    CommodityTemplateStartRequestDTO,
     CommodityTargetBatchDTO,
 )
 from app.services.commodity_simnow import (
@@ -37,11 +38,12 @@ ACCOUNT_HASH = hashlib.sha256(ACCOUNT_ID.encode()).hexdigest()
 
 
 class FakeRpc:
-    def __init__(self) -> None:
+    def __init__(self, contract_months: tuple[str, ...] = ("2610",)) -> None:
         self.positions: list[dict[str, Any]] = []
         self.orders: list[dict[str, Any]] = []
         self.trades: list[dict[str, Any]] = []
         self.subscriptions: list[str] = []
+        self.contract_months = contract_months
 
     def status(self, *, probe: bool = False) -> dict[str, Any]:
         return {"connected": True, "gateway_name": "CTP"}
@@ -53,17 +55,18 @@ class FakeRpc:
         rows = []
         for product, spec in PRODUCT_SPECS.items():
             exchange = spec["exchange"]
-            symbol = f"{product}2609"
-            rows.append(
-                {
-                    "symbol": symbol,
-                    "exchange": exchange,
-                    "vt_symbol": f"{symbol}.{exchange}",
-                    "size": spec["multiplier"],
-                    "pricetick": spec["price_tick"],
-                    "gateway_name": "CTP",
-                }
-            )
+            for contract_month in self.contract_months:
+                symbol = f"{product}{contract_month}"
+                rows.append(
+                    {
+                        "symbol": symbol,
+                        "exchange": exchange,
+                        "vt_symbol": f"{symbol}.{exchange}",
+                        "size": spec["multiplier"],
+                        "pricetick": spec["price_tick"],
+                        "gateway_name": "CTP",
+                    }
+                )
         return rows
 
     def get_positions(self) -> list[dict[str, Any]]:
@@ -110,21 +113,26 @@ class FakeAudit:
 
 
 class FakeTickStore:
-    def __init__(self, now: datetime = NOW) -> None:
+    def __init__(
+        self,
+        now: datetime = NOW,
+        contract_months: tuple[str, ...] = ("2610",),
+    ) -> None:
         self.ticks: dict[str, dict[str, Any]] = {}
         for index, (product, spec) in enumerate(PRODUCT_SPECS.items(), start=1):
             exchange = spec["exchange"]
-            vt_symbol = f"{product}2609.{exchange}"
             tick = float(spec["price_tick"])
             mid = 1000.0 + index * 100.0
             bid = round(mid / tick) * tick
-            self.ticks[vt_symbol] = {
-                "bid_price_1": bid,
-                "ask_price_1": bid + tick,
-                "bid_volume_1": 50,
-                "ask_volume_1": 50,
-                "received_at": now.isoformat(),
-            }
+            for contract_month in contract_months:
+                vt_symbol = f"{product}{contract_month}.{exchange}"
+                self.ticks[vt_symbol] = {
+                    "bid_price_1": bid,
+                    "ask_price_1": bid + tick,
+                    "bid_volume_1": 50,
+                    "ask_volume_1": 50,
+                    "received_at": now.isoformat(),
+                }
 
     def get_tick(self, vt_symbol: str) -> dict[str, Any] | None:
         return self.ticks.get(vt_symbol)
@@ -168,15 +176,25 @@ def enable_payload() -> CommoditySimNowEnableRequestDTO:
     )
 
 
-def exact_contract(product: str) -> str:
-    return f"{PRODUCT_SPECS[product]['exchange']}.{product}2609"
+def template_start_payload() -> CommodityTemplateStartRequestDTO:
+    return CommodityTemplateStartRequestDTO(
+        reason="one-click STATIC_CORE_EQUAL SimNow integration test",
+        confirm_strategy_template=True,
+        confirm_simnow_only=True,
+        confirm_auto_dispatch=True,
+        confirm_no_production=True,
+    )
 
 
-def completed_targets(quantities: dict[str, int]) -> list[dict[str, Any]]:
+def exact_contract(product: str, contract_month: str = "2610") -> str:
+    return f"{PRODUCT_SPECS[product]['exchange']}.{product}{contract_month}"
+
+
+def completed_targets(quantities: dict[str, int], contract_month: str = "2610") -> list[dict[str, Any]]:
     return [
         {
             "product": product,
-            "exact_contract": exact_contract(product),
+            "exact_contract": exact_contract(product, contract_month),
             "target_quantity": quantities.get(product, 0),
         }
         for product in PRODUCT_SPECS
@@ -196,6 +214,8 @@ def make_batch(
     execution_lane: str = "official_forward",
     source_month: str = "2026-08",
     execution_day: str = "2026-09-01",
+    target_contract_month: str = "2610",
+    previous_contract_month: str | None = None,
 ) -> CommodityTargetBatchDTO:
     targets = targets or {"ag": 2, "al": -1}
     previous = previous or {}
@@ -213,9 +233,9 @@ def make_batch(
         rows.append(
             {
                 "product": product,
-                "previous_exact_contract": exact_contract(product) if previous_batch_hash else None,
+                "previous_exact_contract": (exact_contract(product, previous_contract_month or target_contract_month) if previous_batch_hash else None),
                 "previous_target_quantity": previous_quantity,
-                "exact_contract": exact_contract(product),
+                "exact_contract": exact_contract(product, target_contract_month),
                 "target_quantity": targets.get(product, 0),
                 "source_target_weight": weights[product],
                 "buffered_target_weight": weights[product],
@@ -255,12 +275,23 @@ def make_batch(
     return CommodityTargetBatchDTO.model_validate(data)
 
 
-def make_service(tmp_path: Path, *, trade: FakeTrade | None = None, now: datetime = NOW):
+def make_service(
+    tmp_path: Path,
+    *,
+    trade: FakeTrade | None = None,
+    now: datetime = NOW,
+    contract_months: tuple[str, ...] = ("2610",),
+    auto_enable: bool = True,
+    template_batch_path: Path | None = None,
+):
     private_key = make_key()
-    rpc = FakeRpc()
-    tick_store = FakeTickStore(now)
+    rpc = FakeRpc(contract_months)
+    tick_store = FakeTickStore(now, contract_months)
+    settings = make_settings(tmp_path, private_key)
+    if template_batch_path is not None:
+        settings = settings.model_copy(update={"commodity_simnow_template_batch_path": str(template_batch_path)})
     service = CommoditySimNowService(
-        settings=make_settings(tmp_path, private_key),
+        settings=settings,
         rpc=rpc,  # type: ignore[arg-type]
         trade=trade or FakeTrade(),  # type: ignore[arg-type]
         risk=FakeRisk(),  # type: ignore[arg-type]
@@ -268,12 +299,19 @@ def make_service(tmp_path: Path, *, trade: FakeTrade | None = None, now: datetim
         tick_store=tick_store,
         clock=lambda: now,
     )
-    service.enable(enable_payload(), operator="admin", role="admin", source_ip="127.0.0.1")
+    if auto_enable:
+        service.enable(enable_payload(), operator="admin", role="admin", source_ip="127.0.0.1")
     return service, private_key, rpc
 
 
-def position(product: str, quantity: int, *, today: int = 0) -> dict[str, Any]:
-    exact = exact_contract(product)
+def position(
+    product: str,
+    quantity: int,
+    *,
+    today: int = 0,
+    contract_month: str = "2610",
+) -> dict[str, Any]:
+    exact = exact_contract(product, contract_month)
     exchange, symbol = exact.split(".", 1)
     return {
         "symbol": symbol,
@@ -307,6 +345,13 @@ def fills_for_requests(requests: list[Any]) -> list[dict[str, Any]]:
     ]
 
 
+def write_batch(path: Path, batch: CommodityTargetBatchDTO) -> None:
+    path.write_text(
+        json.dumps(batch.model_dump(mode="json"), ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
 def test_cold_start_preview_creates_open_only_plan(tmp_path: Path) -> None:
     service, private_key, _ = make_service(tmp_path)
 
@@ -325,7 +370,204 @@ def test_cold_start_preview_creates_open_only_plan(tmp_path: Path) -> None:
     assert plan["countable_forward"] is True
 
 
-def test_shakedown_batch_can_trade_before_official_forward_window(tmp_path: Path) -> None:
+def test_one_click_template_loads_signed_target_and_dispatches(tmp_path: Path) -> None:
+    target_path = tmp_path / "signed-target.json"
+    trade = FakeTrade()
+    service, private_key, _ = make_service(
+        tmp_path,
+        trade=trade,
+        auto_enable=False,
+        template_batch_path=target_path,
+    )
+    write_batch(target_path, make_batch(private_key))
+
+    result = service.start_template(
+        template_start_payload(),
+        operator="admin",
+        role="admin",
+        source_ip="127.0.0.1",
+    )
+
+    assert result["action"] == "strategy_template_started"
+    assert result["prepared"]["action"] == "target_loaded"
+    assert result["dispatched"]["action"] == "open_submitted"
+    assert service.status()["strategy_template"]["authorized"] is True
+    assert service.plan()["status"] == "OPEN_SUBMITTED"
+    assert len(trade.requests) == 2
+
+
+def test_one_click_template_invalid_target_fails_closed(tmp_path: Path) -> None:
+    target_path = tmp_path / "missing-target.json"
+    service, _, _ = make_service(
+        tmp_path,
+        auto_enable=False,
+        template_batch_path=target_path,
+    )
+
+    with pytest.raises(CommoditySimNowBatchError, match="目标文件无效"):
+        service.start_template(
+            template_start_payload(),
+            operator="admin",
+            role="admin",
+            source_ip=None,
+        )
+
+    assert service.status()["auto_dispatch_allowed"] is False
+    assert service.status()["strategy_template"]["authorized"] is False
+    assert service.status()["enabled"] is False
+
+
+def test_main_contract_roll_closes_old_then_opens_new(tmp_path: Path) -> None:
+    trade = FakeTrade()
+    service, private_key, rpc = make_service(
+        tmp_path,
+        trade=trade,
+        contract_months=("2609", "2610"),
+    )
+    previous_hash = "e" * 64
+    previous = {"ag": 2, "al": -1}
+    service._completed_state = {
+        "last_completed_batch_hash": previous_hash,
+        "targets": completed_targets(previous, "2609"),
+    }
+    rpc.positions = [
+        position("ag", 2, contract_month="2609"),
+        position("al", -1, contract_month="2609"),
+    ]
+    batch = make_batch(
+        private_key,
+        targets=previous,
+        previous=previous,
+        previous_batch_hash=previous_hash,
+        previous_contract_month="2609",
+        target_contract_month="2610",
+    )
+
+    plan = service.preview(batch, operator="admin", role="admin", source_ip=None)
+
+    assert plan["status"] == "READY_CLOSE"
+    assert plan["roll_products"] == ["ag", "al"]
+    assert {row["vt_symbol"] for row in plan["close_orders"]} == {
+        "ag2609.SHFE",
+        "al2609.SHFE",
+    }
+    assert {row["vt_symbol"] for row in plan["open_orders"]} == {
+        "ag2610.SHFE",
+        "al2610.SHFE",
+    }
+
+    assert service.auto_advance()["action"] == "close_submitted"
+    rpc.positions = []
+    assert service.auto_advance()["action"] == "close_reconciled_open_submitted"
+    rpc.positions = [position("ag", 2), position("al", -1)]
+    assert service.auto_advance()["status"] == "COMPLETE"
+    assert [request.symbol for request in trade.requests] == [
+        "ag2609",
+        "al2609",
+        "ag2610",
+        "al2610",
+    ]
+
+
+def test_delivery_month_target_is_rejected_from_first_day(tmp_path: Path) -> None:
+    service, private_key, _ = make_service(tmp_path)
+    batch = make_batch(private_key, target_contract_month="2609")
+
+    with pytest.raises(CommoditySimNowBatchError, match="交割风险截止区间"):
+        service.preview(batch, operator="admin", role="admin", source_ip=None)
+
+
+def test_signed_zero_target_can_flatten_delivery_month_holding(tmp_path: Path) -> None:
+    service, private_key, rpc = make_service(
+        tmp_path,
+        contract_months=("2609",),
+    )
+    previous_hash = "f" * 64
+    previous = {"ag": 2}
+    service._completed_state = {
+        "last_completed_batch_hash": previous_hash,
+        "targets": completed_targets(previous, "2609"),
+    }
+    rpc.positions = [position("ag", 2, contract_month="2609")]
+    batch = make_batch(
+        private_key,
+        targets={product: 0 for product in PRODUCT_SPECS},
+        previous=previous,
+        previous_batch_hash=previous_hash,
+        previous_contract_month="2609",
+        target_contract_month="2609",
+    )
+
+    plan = service.preview(batch, operator="admin", role="admin", source_ip=None)
+
+    assert plan["status"] == "READY_CLOSE"
+    assert plan["open_orders"] == []
+    assert [(row["vt_symbol"], row["volume"]) for row in plan["close_orders"]] == [
+        ("ag2609.SHFE", 2)
+    ]
+
+
+def test_sc_target_is_rejected_in_pre_delivery_cutoff(tmp_path: Path) -> None:
+    now = datetime(2026, 9, 15, 1, 0, tzinfo=timezone.utc)
+    service, private_key, _ = make_service(tmp_path, now=now)
+    batch = make_batch(
+        private_key,
+        targets={"ag": -1, "sc": 1},
+        execution_day="2026-09-15",
+        target_contract_month="2610",
+    )
+
+    with pytest.raises(CommoditySimNowBatchError, match="原油目标合约"):
+        service.preview(batch, operator="admin", role="admin", source_ip=None)
+
+
+def test_stale_target_with_expiring_holding_halts_template(tmp_path: Path) -> None:
+    target_path = tmp_path / "stale-target.json"
+    service, private_key, rpc = make_service(
+        tmp_path,
+        contract_months=("2609", "2610"),
+        template_batch_path=target_path,
+    )
+    stale = make_batch(
+        private_key,
+        execution_lane="simnow_shakedown",
+        source_month="2026-08",
+        execution_day="2026-08-31",
+        target_contract_month="2610",
+    )
+    write_batch(target_path, stale)
+    rpc.positions = [position("ag", 2, contract_month="2609")]
+    service.template_authorized = True
+
+    result = service.auto_template_advance()
+
+    assert result["action"] == "halted"
+    assert result["reason"] == "delivery_guard_breached_without_current_roll_target"
+    assert service.status()["auto_dispatch_allowed"] is False
+    assert service.status()["strategy_template"]["authorized"] is False
+
+
+def test_active_plan_cannot_roll_into_next_execution_day(tmp_path: Path) -> None:
+    target_path = tmp_path / "signed-target.json"
+    service, private_key, _ = make_service(
+        tmp_path,
+        template_batch_path=target_path,
+    )
+    write_batch(target_path, make_batch(private_key))
+    service.template_authorized = True
+    service.preview(make_batch(private_key), operator="admin", role="admin", source_ip=None)
+    service.clock = lambda: NOW + timedelta(days=1)
+
+    result = service.auto_template_advance()
+
+    assert result["action"] == "halted"
+    assert result["reason"] == "active_plan_execution_day_expired"
+    assert service.status()["auto_dispatch_allowed"] is False
+
+
+def test_shakedown_batch_can_trade_before_official_forward_window(
+    tmp_path: Path,
+) -> None:
     service, private_key, rpc = make_service(tmp_path, now=SHAKEDOWN_NOW)
     batch = make_batch(
         private_key,
@@ -396,7 +638,10 @@ def test_signed_reversal_runs_close_reconcile_open_reconcile(tmp_path: Path) -> 
 
     plan = service.preview(batch, operator="admin", role="admin", source_ip=None)
     assert plan["status"] == "READY_CLOSE"
-    assert [row["offset"] for row in plan["close_orders"]] == ["closeyesterday", "closeyesterday"]
+    assert [row["offset"] for row in plan["close_orders"]] == [
+        "closeyesterday",
+        "closeyesterday",
+    ]
     assert [row["offset"] for row in plan["open_orders"]] == ["open", "open"]
 
     service.execute(
@@ -459,9 +704,7 @@ def test_execution_lane_is_covered_by_signature(tmp_path: Path) -> None:
 
 def test_unallowlisted_account_blocks_enable(tmp_path: Path) -> None:
     private_key = make_key()
-    settings = make_settings(tmp_path, private_key).model_copy(
-        update={"commodity_simnow_account_hashes": "b" * 64}
-    )
+    settings = make_settings(tmp_path, private_key).model_copy(update={"commodity_simnow_account_hashes": "b" * 64})
     service = CommoditySimNowService(
         settings=settings,
         rpc=FakeRpc(),  # type: ignore[arg-type]
@@ -681,7 +924,9 @@ def test_auto_dispatch_worker_starts_and_stops(tmp_path: Path) -> None:
     asyncio.run(exercise())
 
 
-def test_auto_dispatch_halts_after_terminal_reconciliation_mismatch(tmp_path: Path) -> None:
+def test_auto_dispatch_halts_after_terminal_reconciliation_mismatch(
+    tmp_path: Path,
+) -> None:
     service, private_key, _ = make_service(tmp_path)
     service.preview(make_batch(private_key), operator="admin", role="admin", source_ip=None)
     service.auto_advance()
