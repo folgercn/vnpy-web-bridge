@@ -37,7 +37,7 @@ def output(value):
     print(json.dumps(value, ensure_ascii=False, default=lambda item: item.isoformat() if hasattr(item, "isoformat") else str(item)))
 
 
-def api_get(path):
+def api_request(path, method="GET", payload=None):
     settings = Settings()
     users = configured_users(settings)
     username = next((name for name, item in users.items() if item["role"] == "admin"), None)
@@ -46,10 +46,16 @@ def api_get(path):
     token = create_access_token(CurrentUser(username, "admin"), settings)
     request = urllib.request.Request(
         "http://127.0.0.1:8080" + path,
-        headers={"Authorization": "Bearer " + token},
+        method=method,
+        data=json.dumps(payload).encode("utf-8") if payload is not None else None,
+        headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"},
     )
     with urllib.request.urlopen(request, timeout=10) as response:
         return json.load(response)["data"]
+
+
+def api_get(path):
+    return api_request(path)
 
 
 def connect():
@@ -89,6 +95,10 @@ def day_details(trading_day):
         ).fetchone()
         exchanges = conn.execute(
             "SELECT exchange, count(), count_distinct(vt_symbol) FROM market_ticks WHERE trading_day = %s GROUP BY exchange ORDER BY exchange",
+            (trading_day,),
+        ).fetchall()
+        contracts = conn.execute(
+            "SELECT vt_symbol, symbol, exchange, count() AS row_count FROM market_ticks WHERE trading_day = %s GROUP BY vt_symbol, symbol, exchange ORDER BY row_count DESC LIMIT 20",
             (trading_day,),
         ).fetchall()
         samples = conn.execute(
@@ -166,6 +176,10 @@ def day_details(trading_day):
             "exchange_count": int(summary[4]),
             "duplicate_ingest_ids": int(summary[0]) - int(summary[5]),
             "exchanges": [{"exchange": row[0], "rows": int(row[1]), "symbols": int(row[2])} for row in exchanges],
+            "contracts": [
+                {"vt_symbol": row[0], "symbol": row[1], "exchange": row[2], "rows": int(row[3])}
+                for row in contracts
+            ],
             "active_seconds": len(tps_values),
             "peak_tps": max(tps_values) if tps_values else 0,
             "average_active_tps": round(statistics.fmean(tps_values), 2) if tps_values else 0,
@@ -218,6 +232,10 @@ if action == "status":
 elif action == "rpc":
     rpc = api_get("/api/rpc/probe")
     output({"connected": bool(rpc.get("connected")), "gateway_name": rpc.get("gateway_name")})
+elif action == "subscribe":
+    payload = json.loads(sys.argv[2])
+    result = api_request("/api/market/subscribe", method="POST", payload=payload)
+    output({"vt_symbol": result.get("vt_symbol"), "subscribed": bool(result.get("subscribed"))})
 elif action == "monitor":
     output({"summary": api_get("/api/monitor/summary"), "incidents": api_get("/api/monitor/incidents")})
 elif action == "history_candidates":
@@ -409,18 +427,6 @@ class ProductionValidation:
         self.record("preflight_no_drops", int(state.get("dropped_total") or 0) == 0, dropped_total=state.get("dropped_total"))
         rpc = self.host.probe("rpc")
         self.record("preflight_rpc_connected", bool(rpc.get("connected")), rpc=rpc)
-        baseline_received = int(state.get("received_total") or 0)
-        live_status = self.wait_status(
-            lambda value: int(value.get("received_total") or 0) > baseline_received,
-            "live RPC Tick flow",
-            90,
-        )
-        self.record(
-            "preflight_live_ticks",
-            int(live_status.get("received_total") or 0) > baseline_received,
-            before=baseline_received,
-            after=live_status.get("received_total"),
-        )
         self.result["preflight"] = state
         images = {}
         for container in (self.host.web_container, self.host.questdb_container):
@@ -439,6 +445,39 @@ class ProductionValidation:
         self.record("historical_order", bool(details["stable_ts_ingest_seq_order"]))
         self.record("historical_dedup", int(details["duplicate_ingest_ids"]) == 0, duplicate_ingest_ids=details["duplicate_ingest_ids"])
         self.record("historical_query_export_bars", details["history_query_rows"] > 0 and details["csv_header_ok"] and details["bar_rows"] > 0, history_query_rows=details["history_query_rows"], bar_rows=details["bar_rows"])
+
+    def ensure_live_tick_flow(self) -> None:
+        state = self.host.probe("status")
+        baseline_received = int(state.get("received_total") or 0)
+        subscriptions: list[dict[str, Any]] = []
+        try:
+            live_status = self.wait_status(
+                lambda value: int(value.get("received_total") or 0) > baseline_received,
+                "existing live RPC Tick flow",
+                15,
+            )
+        except ValidationError:
+            contracts = (self.result.get("historical_day") or {}).get("contracts") or []
+            for contract in contracts:
+                subscriptions.append(
+                    self.host.probe(
+                        "subscribe",
+                        json.dumps({"symbol": contract["symbol"], "exchange": contract["exchange"]}),
+                    )
+                )
+            self.record("preflight_contract_subscriptions", bool(subscriptions) and all(item["subscribed"] for item in subscriptions), subscriptions=subscriptions)
+            live_status = self.wait_status(
+                lambda value: int(value.get("received_total") or 0) > baseline_received,
+                "live RPC Tick flow after subscription",
+                90,
+            )
+        self.record(
+            "preflight_live_ticks",
+            int(live_status.get("received_total") or 0) > baseline_received,
+            before=baseline_received,
+            after=live_status.get("received_total"),
+            subscriptions=subscriptions,
+        )
 
     def capacity_validation(self) -> None:
         peak_tps = int(self.result["historical_day"].get("peak_tps") or 0)
@@ -606,6 +645,7 @@ class ProductionValidation:
     def run(self, *, destructive: bool) -> dict[str, Any]:
         self.preflight()
         self.audit_history()
+        self.ensure_live_tick_flow()
         self.capacity_validation()
         if destructive:
             try:
