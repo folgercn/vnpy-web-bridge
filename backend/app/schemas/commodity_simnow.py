@@ -21,6 +21,7 @@ class CommoditySimNowEnableRequestDTO(StrictModel):
     confirm_no_production: bool
     confirm_cold_start_or_reconciled_state: bool
     confirm_manual_two_phase_dispatch: bool
+    confirm_auto_dispatch: bool
     confirm_no_auto_promotion: bool
 
 

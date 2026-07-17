@@ -24,8 +24,14 @@ from app.api import (
     routes_ws,
 )
 from app.core.config import get_settings
-from app.core.errors import AppError, app_error_handler, unhandled_error_handler, validation_error_handler
+from app.core.errors import (
+    AppError,
+    app_error_handler,
+    unhandled_error_handler,
+    validation_error_handler,
+)
 from app.core.logging import configure_logging
+from app.services.commodity_simnow import commodity_simnow_service
 from app.services.market_data_service import market_data_service
 from app.services.monitoring_service import monitoring_service
 from app.services.tick_persistence import tick_persistence_service
@@ -111,10 +117,12 @@ async def startup() -> None:
         monitoring_service.start()
     except Exception as exc:
         logger.warning("backend started without monitoring worker: %s", exc)
+    commodity_simnow_service.start()
 
 
 @app.on_event("shutdown")
 async def shutdown() -> None:
+    await commodity_simnow_service.stop()
     await monitoring_service.stop()
     rpc_service.stop()
     tick_writer_stopped = tick_persistence_service.stop()

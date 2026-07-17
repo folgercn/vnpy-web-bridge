@@ -39,6 +39,9 @@ class FakeCommoditySimNowService:
     def reconcile(self, plan_hash, **kwargs) -> dict:
         return {"status": "COMPLETE", "plan_hash": plan_hash}
 
+    def auto_advance(self, **kwargs) -> dict:
+        return {"action": "open_submitted", "auto_dispatch_allowed": True}
+
 
 def auth_headers(role: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {create_access_token(CurrentUser(role, role))}"}
@@ -67,6 +70,7 @@ def enable_payload() -> dict:
         "confirm_no_production": True,
         "confirm_cold_start_or_reconciled_state": True,
         "confirm_manual_two_phase_dispatch": True,
+        "confirm_auto_dispatch": True,
         "confirm_no_auto_promotion": True,
     }
 
@@ -108,3 +112,20 @@ def test_commodity_routes_require_authentication(monkeypatch) -> None:
 
     assert status.status_code == 401
     assert plan.status_code == 401
+
+
+def test_auto_advance_requires_admin(monkeypatch) -> None:
+    install_service(monkeypatch)
+    with client_without_rpc(monkeypatch) as client:
+        forbidden = client.post(
+            "/api/commodity-simnow/auto-advance",
+            headers=auth_headers("trader"),
+        )
+        result = client.post(
+            "/api/commodity-simnow/auto-advance",
+            headers=auth_headers("admin"),
+        )
+
+    assert forbidden.status_code == 403
+    assert result.status_code == 200
+    assert result.json()["data"]["action"] == "open_submitted"

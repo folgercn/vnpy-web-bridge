@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import hashlib
 import json
+import logging
 import math
 import re
 from datetime import datetime, timezone
+from functools import wraps
 from pathlib import Path
+from threading import RLock
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
@@ -35,7 +39,7 @@ from app.services.trade_service import TradeService, trade_service
 from app.services.vnpy_rpc_service import VnpyRpcService, rpc_service
 from app.stores.memory_store import memory_store
 
-
+logger = logging.getLogger(__name__)
 CHINA_TZ = ZoneInfo("Asia/Shanghai")
 REFERENCE_PREFIX = "commodity_static_core"
 ACTIVE_ORDER_STATUSES = {"submitting", "not_traded", "part_traded", "submitting_order"}
@@ -52,6 +56,15 @@ PRODUCT_SPECS: dict[str, dict[str, Any]] = {
     "sp": {"exchange": "SHFE", "sector": "agriculture", "multiplier": 10, "price_tick": 2.0},
     "zn": {"exchange": "SHFE", "sector": "nonferrous", "multiplier": 5, "price_tick": 5.0},
 }
+
+
+def _serialized(method):
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        with self._cycle_lock:
+            return method(self, *args, **kwargs)
+
+    return wrapped
 
 
 def _canonical_json(value: Any) -> bytes:
@@ -117,11 +130,10 @@ def _round_price(price: float, tick: float) -> float:
 
 
 class CommoditySimNowService:
-    mode = "SIMNOW_MANUAL_TWO_PHASE"
+    mode = "SIMNOW_AUTO_TWO_PHASE"
     scheduler_id = "STATIC_CORE_EQUAL"
     source_combination_arm = "CORE_EQUAL_TARGET"
     production_allowed = False
-    auto_dispatch_allowed = False
     virtual_nav_cny = 20_000_000
 
     def __init__(
@@ -145,13 +157,19 @@ class CommoditySimNowService:
         self.enabled = False
         self.manual_approval = False
         self.simnow_mode = False
+        self.auto_dispatch_authorized = False
         self.order_endpoint_touched = False
         self.current_plan: dict[str, Any] | None = None
         self.events: list[dict[str, Any]] = []
+        self._cycle_lock = RLock()
+        self._task: asyncio.Task[Any] | None = None
         self._state_load_error: str | None = None
         self._completed_state = self._load_completed_state()
 
+    @_serialized
     def status(self) -> dict[str, Any]:
+        auto_dispatch_allowed = self._auto_dispatch_allowed()
+        worker_alive = bool(self._task and not self._task.done())
         return {
             "mode": self.mode,
             "scheduler_id": self.scheduler_id,
@@ -161,7 +179,14 @@ class CommoditySimNowService:
             "manual_approval": self.manual_approval,
             "simnow_mode": self.simnow_mode,
             "production_allowed": self.production_allowed,
-            "auto_dispatch_allowed": self.auto_dispatch_allowed,
+            "auto_dispatch_configured": self.settings.commodity_simnow_auto_dispatch_enabled,
+            "auto_dispatch_allowed": auto_dispatch_allowed,
+            "auto_dispatch_active": auto_dispatch_allowed and worker_alive,
+            "auto_dispatch_worker_alive": worker_alive,
+            "auto_dispatch_interval_seconds": self.settings.commodity_simnow_auto_dispatch_interval_seconds,
+            "auto_dispatch_reconcile_grace_seconds": (
+                self.settings.commodity_simnow_auto_dispatch_reconcile_grace_seconds
+            ),
             "order_endpoint_touched": self.order_endpoint_touched,
             "plan_status": self.current_plan.get("status") if self.current_plan else "IDLE",
             "plan_hash": self.current_plan.get("plan_hash") if self.current_plan else None,
@@ -172,6 +197,31 @@ class CommoditySimNowService:
             "min_source_month": self.settings.commodity_simnow_min_source_month,
         }
 
+    def start(self) -> None:
+        if (
+            self._task
+            or not self.settings.commodity_simnow_enabled
+            or not self.settings.commodity_simnow_auto_dispatch_enabled
+        ):
+            return
+        self._task = asyncio.create_task(self._run_auto_dispatch_loop())
+
+    async def stop(self) -> None:
+        if not self._task:
+            return
+        await asyncio.to_thread(self._revoke_auto_dispatch)
+        self._task.cancel()
+        try:
+            await self._task
+        except asyncio.CancelledError:
+            pass
+        self._task = None
+
+    @_serialized
+    def _revoke_auto_dispatch(self) -> None:
+        self.auto_dispatch_authorized = False
+
+    @_serialized
     def enable(
         self,
         payload: CommoditySimNowEnableRequestDTO,
@@ -195,10 +245,15 @@ class CommoditySimNowService:
         )
         if not all(confirmations):
             raise CommoditySimNowSafetyError("SimNow 人工授权确认不完整")
+        if self.settings.commodity_simnow_auto_dispatch_enabled and not payload.confirm_auto_dispatch:
+            raise CommoditySimNowSafetyError("SimNow 自动派单授权确认不完整")
         snapshot = self._safety_snapshot(require_trade_enabled=True)
         self.enabled = True
         self.manual_approval = True
         self.simnow_mode = True
+        self.auto_dispatch_authorized = (
+            self.settings.commodity_simnow_auto_dispatch_enabled and payload.confirm_auto_dispatch
+        )
         result = {**self.status(), "safety": snapshot, "reason": payload.reason}
         self._event("enabled", result={"account_hash": snapshot["account_hash"]})
         self.audit.record(
@@ -211,6 +266,7 @@ class CommoditySimNowService:
         )
         return result
 
+    @_serialized
     def disable(
         self,
         payload: CommoditySimNowDisableRequestDTO,
@@ -222,6 +278,7 @@ class CommoditySimNowService:
         self.enabled = False
         self.manual_approval = False
         self.simnow_mode = False
+        self.auto_dispatch_authorized = False
         result = {**self.status(), "reason": payload.reason}
         self._event("disabled", result={"reason": payload.reason})
         self.audit.record(
@@ -234,6 +291,7 @@ class CommoditySimNowService:
         )
         return result
 
+    @_serialized
     def preview(
         self,
         batch: CommodityTargetBatchDTO,
@@ -250,6 +308,8 @@ class CommoditySimNowService:
             "OPEN_SUBMITTED",
             "CLOSE_SUBMISSION_PARTIAL",
             "OPEN_SUBMISSION_PARTIAL",
+            "CLOSE_RECONCILIATION_MISMATCH",
+            "OPEN_RECONCILIATION_MISMATCH",
         }:
             raise CommoditySimNowStateError(
                 "存在未完成委托计划，不允许覆盖",
@@ -298,6 +358,7 @@ class CommoditySimNowService:
             "execution_day": batch.execution_day.isoformat(),
             "targets": [row.model_dump(mode="json") for row in batch.targets],
             "submitted": {"close": [], "open": []},
+            "submitted_at_utc": {"close": None, "open": None},
         }
         if status == "COMPLETE":
             self._save_completed_state(self.current_plan)
@@ -313,6 +374,7 @@ class CommoditySimNowService:
         )
         return result
 
+    @_serialized
     def execute(
         self,
         payload: CommodityPlanExecuteRequestDTO,
@@ -320,9 +382,15 @@ class CommoditySimNowService:
         operator: str,
         role: str | None,
         source_ip: str | None,
+        dispatch_mode: str = "manual",
     ) -> dict[str, Any]:
         self._require_enabled()
-        if not (payload.confirm and payload.confirm_simnow_only and payload.confirm_manual_one_shot):
+        if dispatch_mode not in {"manual", "auto"}:
+            raise CommoditySimNowSafetyError("未知派单模式")
+        if dispatch_mode == "auto":
+            if not self._auto_dispatch_allowed():
+                raise CommoditySimNowSafetyError("SimNow 自动派单未授权")
+        elif not (payload.confirm and payload.confirm_simnow_only and payload.confirm_manual_one_shot):
             raise CommoditySimNowSafetyError("执行确认不完整")
         plan = self._require_plan(payload.plan_hash)
         execution_day = datetime.fromisoformat(plan["execution_day"]).date()
@@ -373,21 +441,40 @@ class CommoditySimNowService:
                     confirm=True,
                 )
                 result = self.trade.send_order(request, source_ip=source_ip, operator=operator)
-                submitted.append({**repriced, **result})
+                submitted.append(
+                    {
+                        **repriced,
+                        "decision_price": order["price"],
+                        "dispatch_mode": dispatch_mode,
+                        **result,
+                    }
+                )
                 self.order_endpoint_touched = True
         except Exception as exc:
             plan["status"] = f"{payload.phase.upper()}_SUBMISSION_PARTIAL"
             plan["submitted"][payload.phase].extend(submitted)
+            if dispatch_mode == "auto":
+                self.auto_dispatch_authorized = False
             self._event(
                 "submission_partial",
                 plan_hash=plan["plan_hash"],
-                result={"phase": payload.phase, "submitted": len(submitted), "error": exc.__class__.__name__},
+                result={
+                    "phase": payload.phase,
+                    "dispatch_mode": dispatch_mode,
+                    "submitted": len(submitted),
+                    "error": exc.__class__.__name__,
+                },
             )
             self.audit.record(
                 action="commodity_simnow_execute_partial",
                 user_id=operator,
                 role=role,
-                request={"plan_hash": plan["plan_hash"], "phase": payload.phase, "reason": payload.reason},
+                request={
+                    "plan_hash": plan["plan_hash"],
+                    "phase": payload.phase,
+                    "dispatch_mode": dispatch_mode,
+                    "reason": payload.reason,
+                },
                 result={"submitted": submitted, "status": plan["status"]},
                 error=str(exc),
                 error_code=getattr(exc, "code", None),
@@ -399,23 +486,34 @@ class CommoditySimNowService:
             ) from exc
 
         plan["submitted"][payload.phase].extend(submitted)
+        plan["submitted_at_utc"][payload.phase] = self.clock().astimezone(timezone.utc).isoformat()
         plan["status"] = f"{payload.phase.upper()}_SUBMITTED"
         result = self.plan()
         self._event(
             "phase_submitted",
             plan_hash=plan["plan_hash"],
-            result={"phase": payload.phase, "order_count": len(submitted)},
+            result={
+                "phase": payload.phase,
+                "dispatch_mode": dispatch_mode,
+                "order_count": len(submitted),
+            },
         )
         self.audit.record(
             action="commodity_simnow_execute_phase",
             user_id=operator,
             role=role,
-            request={"plan_hash": plan["plan_hash"], "phase": payload.phase, "reason": payload.reason},
+            request={
+                "plan_hash": plan["plan_hash"],
+                "phase": payload.phase,
+                "dispatch_mode": dispatch_mode,
+                "reason": payload.reason,
+            },
             result={"submitted": submitted, "status": plan["status"]},
             source_ip=source_ip,
         )
         return result
 
+    @_serialized
     def reconcile(
         self,
         plan_hash: str,
@@ -423,6 +521,7 @@ class CommoditySimNowService:
         operator: str,
         role: str | None,
         source_ip: str | None,
+        dispatch_mode: str = "manual",
     ) -> dict[str, Any]:
         self._require_enabled()
         plan = self._require_plan(plan_hash)
@@ -435,9 +534,22 @@ class CommoditySimNowService:
             )
         active = self._active_strategy_orders()
         observed = self._signed_positions(self._position_snapshot())
+        plan["execution"] = self._execution_snapshot(plan)
         phase = "close" if plan["status"] == "CLOSE_SUBMITTED" else "open"
         expected = plan["expected_after_close"] if phase == "close" else plan["expected_final_positions"]
         matched = not active and observed == expected
+        reconciliation_mismatch = False
+        if not matched and not active and dispatch_mode == "auto":
+            submitted_at = _parse_datetime(plan["submitted_at_utc"].get(phase))
+            age = (
+                (self.clock().astimezone(timezone.utc) - submitted_at).total_seconds()
+                if submitted_at
+                else float("inf")
+            )
+            if age >= self.settings.commodity_simnow_auto_dispatch_reconcile_grace_seconds:
+                plan["status"] = f"{phase.upper()}_RECONCILIATION_MISMATCH"
+                self.auto_dispatch_authorized = False
+                reconciliation_mismatch = True
         if matched and phase == "close":
             plan["status"] = "READY_OPEN" if plan["open_orders"] else "COMPLETE"
         elif matched:
@@ -452,27 +564,121 @@ class CommoditySimNowService:
                 "active_order_ids": active,
                 "expected_positions": expected,
                 "observed_positions": observed,
+                "mismatch_halted": reconciliation_mismatch,
             },
         }
-        self._event("reconciled", plan_hash=plan_hash, result=result["reconciliation"])
-        self.audit.record(
-            action="commodity_simnow_reconcile",
-            user_id=operator,
-            role=role,
-            request={"plan_hash": plan_hash},
-            result=result,
-            source_ip=source_ip,
-        )
+        if dispatch_mode == "manual" or matched or reconciliation_mismatch:
+            self._event("reconciled", plan_hash=plan_hash, result=result["reconciliation"])
+            self.audit.record(
+                action="commodity_simnow_reconcile",
+                user_id=operator,
+                role=role,
+                request={"plan_hash": plan_hash, "dispatch_mode": dispatch_mode},
+                result=result,
+                source_ip=source_ip,
+            )
         return result
 
+    @_serialized
+    def auto_advance(
+        self,
+        *,
+        operator: str = "commodity-simnow-auto",
+        role: str | None = "system",
+        source_ip: str | None = None,
+    ) -> dict[str, Any]:
+        if not self._auto_dispatch_allowed():
+            return {"action": "idle", "reason": "auto_dispatch_not_active", **self.status()}
+        if not self.current_plan:
+            return {"action": "idle", "reason": "no_plan", **self.status()}
+
+        plan = self.current_plan
+        status = plan["status"]
+        if status in {"CLOSE_SUBMISSION_PARTIAL", "OPEN_SUBMISSION_PARTIAL"}:
+            self.auto_dispatch_authorized = False
+            self._event(
+                "auto_dispatch_halted",
+                plan_hash=plan["plan_hash"],
+                result={"reason": "partial_submission", "status": status},
+            )
+            return {"action": "halted", "reason": "partial_submission", **self.status()}
+
+        if status in {"READY_CLOSE", "READY_OPEN"}:
+            phase = "close" if status == "READY_CLOSE" else "open"
+            result = self.execute(
+                CommodityPlanExecuteRequestDTO(
+                    plan_hash=plan["plan_hash"],
+                    phase=phase,
+                    confirm=True,
+                    confirm_simnow_only=True,
+                    confirm_manual_one_shot=True,
+                    reason=f"authorized SimNow automatic {phase} dispatch",
+                ),
+                operator=operator,
+                role=role,
+                source_ip=source_ip,
+                dispatch_mode="auto",
+            )
+            return {"action": f"{phase}_submitted", **result}
+
+        if status in {"CLOSE_SUBMITTED", "OPEN_SUBMITTED"}:
+            phase = "close" if status == "CLOSE_SUBMITTED" else "open"
+            result = self.reconcile(
+                plan["plan_hash"],
+                operator=operator,
+                role=role,
+                source_ip=source_ip,
+                dispatch_mode="auto",
+            )
+            if result["reconciliation"]["mismatch_halted"]:
+                return {"action": f"{phase}_reconciliation_mismatch", **result}
+            if result["status"] == "READY_OPEN":
+                submitted = self.execute(
+                    CommodityPlanExecuteRequestDTO(
+                        plan_hash=plan["plan_hash"],
+                        phase="open",
+                        confirm=True,
+                        confirm_simnow_only=True,
+                        confirm_manual_one_shot=True,
+                        reason="authorized SimNow automatic open after close reconciliation",
+                    ),
+                    operator=operator,
+                    role=role,
+                    source_ip=source_ip,
+                    dispatch_mode="auto",
+                )
+                return {"action": "close_reconciled_open_submitted", **submitted}
+            return {"action": f"{phase}_reconciled", **result}
+
+        return {"action": "idle", "reason": f"plan_status_{status.lower()}", **self.status()}
+
+    async def _run_auto_dispatch_loop(self) -> None:
+        while True:
+            try:
+                await asyncio.to_thread(self.auto_advance)
+            except Exception:
+                logger.exception("commodity SimNow auto-dispatch cycle failed")
+            await asyncio.sleep(self.settings.commodity_simnow_auto_dispatch_interval_seconds)
+
+    @_serialized
     def plan(self) -> dict[str, Any]:
         if not self.current_plan:
             return {}
         plan = json.loads(json.dumps(self.current_plan, ensure_ascii=False, default=str))
         return plan
 
+    @_serialized
     def list_events(self, limit: int = 200) -> list[dict[str, Any]]:
         return list(reversed(self.events[-max(1, min(limit, 1000)) :]))
+
+    def _auto_dispatch_allowed(self) -> bool:
+        return bool(
+            self.settings.commodity_simnow_auto_dispatch_enabled
+            and self.enabled
+            and self.manual_approval
+            and self.simnow_mode
+            and self.auto_dispatch_authorized
+        )
 
     def _require_enabled(self) -> None:
         if not (self.settings.commodity_simnow_enabled and self.enabled and self.manual_approval and self.simnow_mode):
@@ -959,6 +1165,111 @@ class CommoditySimNowService:
                 active.append(str(order.get("vt_orderid") or order.get("orderid") or "unknown"))
         return sorted(active)
 
+    def _execution_snapshot(self, plan: dict[str, Any]) -> dict[str, Any]:
+        try:
+            orders = self.rpc.get_orders()
+            trades = self.rpc.get_trades()
+        except Exception as exc:
+            return {
+                "captured_at_utc": self.clock().astimezone(timezone.utc).isoformat(),
+                "available": False,
+                "error_type": exc.__class__.__name__,
+                "orders": [],
+            }
+
+        order_by_id: dict[str, dict[str, Any]] = {}
+        for order in orders:
+            for order_id in self._order_ids(order):
+                order_by_id[order_id] = order
+
+        rows: list[dict[str, Any]] = []
+        expected_volume = 0
+        filled_volume = 0.0
+        adverse_slippage_ticks_volume = 0.0
+        slippage_cny = 0.0
+        for phase in ("close", "open"):
+            for submitted in plan["submitted"][phase]:
+                expected = int(submitted["volume"])
+                expected_volume += expected
+                ids = self._order_ids(submitted)
+                matching_trades = [
+                    trade for trade in trades if ids.intersection(self._order_ids(trade))
+                ]
+                fill_volume = sum(float(trade.get("volume") or 0) for trade in matching_trades)
+                fill_notional = sum(
+                    float(trade.get("price") or 0) * float(trade.get("volume") or 0)
+                    for trade in matching_trades
+                )
+                average_fill_price = fill_notional / fill_volume if fill_volume else None
+                decision_price = float(submitted["decision_price"])
+                tick = float(PRODUCT_SPECS[submitted["product"]]["price_tick"])
+                multiplier = float(PRODUCT_SPECS[submitted["product"]]["multiplier"])
+                direction_factor = 1.0 if submitted["direction"] == "long" else -1.0
+                adverse_ticks = (
+                    direction_factor * (average_fill_price - decision_price) / tick
+                    if average_fill_price is not None
+                    else None
+                )
+                order = next((order_by_id[order_id] for order_id in ids if order_id in order_by_id), {})
+                rows.append(
+                    {
+                        "phase": phase,
+                        "vt_orderid": submitted.get("vt_orderid"),
+                        "product": submitted["product"],
+                        "vt_symbol": submitted["vt_symbol"],
+                        "direction": submitted["direction"],
+                        "offset": submitted["offset"],
+                        "expected_volume": expected,
+                        "filled_volume": fill_volume,
+                        "fill_ratio": min(fill_volume / expected, 1.0) if expected else 0.0,
+                        "decision_price": decision_price,
+                        "submit_price": float(submitted["price"]),
+                        "average_fill_price": average_fill_price,
+                        "adverse_slippage_ticks": adverse_ticks,
+                        "slippage_cny": (
+                            direction_factor
+                            * (average_fill_price - decision_price)
+                            * multiplier
+                            * fill_volume
+                            if average_fill_price is not None
+                            else None
+                        ),
+                        "trade_count": len(matching_trades),
+                        "order_status": _normalize_status(order.get("status")) if order else "unknown",
+                    }
+                )
+                filled_volume += fill_volume
+                if adverse_ticks is not None:
+                    adverse_slippage_ticks_volume += adverse_ticks * fill_volume
+                    slippage_cny += (
+                        direction_factor
+                        * (average_fill_price - decision_price)
+                        * multiplier
+                        * fill_volume
+                    )
+
+        return {
+            "captured_at_utc": self.clock().astimezone(timezone.utc).isoformat(),
+            "available": True,
+            "expected_volume": expected_volume,
+            "filled_volume": filled_volume,
+            "fill_ratio": min(filled_volume / expected_volume, 1.0) if expected_volume else 1.0,
+            "average_adverse_slippage_ticks": (
+                adverse_slippage_ticks_volume / filled_volume if filled_volume else None
+            ),
+            "slippage_cny": slippage_cny if filled_volume else None,
+            "orders": rows,
+        }
+
+    def _order_ids(self, row: dict[str, Any]) -> set[str]:
+        ids = {
+            str(value)
+            for value in (row.get("vt_orderid"), row.get("orderid"))
+            if value is not None and str(value)
+        }
+        ids.update(value.rsplit(".", 1)[-1] for value in list(ids) if "." in value)
+        return ids
+
     def _load_completed_state(self) -> dict[str, Any]:
         path = Path(self.settings.commodity_simnow_state_path)
         if not path.exists():
@@ -1007,6 +1318,7 @@ class CommoditySimNowService:
                 }
                 for row in plan["targets"]
             ],
+            "execution": plan.get("execution"),
         }
         path = Path(self.settings.commodity_simnow_state_path)
         path.parent.mkdir(parents=True, exist_ok=True)

@@ -40,7 +40,7 @@ Mac / Web Backend
 - 账户、持仓、委托、成交查询。
 - 限价下单、撤单、全撤、下单二次确认。
 - Web 交易开关、紧急停止、基础风控规则、审计日志。
-- 冻结 `STATIC_CORE_EQUAL` 商品组合的 SimNow 专用签名目标、两阶段人工执行和逐阶段持仓对账。
+- 冻结 `STATIC_CORE_EQUAL` 商品组合的 SimNow 专用签名目标、自动两阶段派单、逐阶段持仓对账和真实成交滑点快照。
 - CTA 策略列表、参数、变量、初始化、启动、停止、策略日志。
 - QuestDB 行情数据概览、查询、CSV 导入导出。
 - Vue 3 + Vite + Naive UI 前端交易终端，支持桌面和移动端宽度。
@@ -340,9 +340,10 @@ POST /api/commodity-simnow/disable
 POST /api/commodity-simnow/preview
 POST /api/commodity-simnow/execute
 POST /api/commodity-simnow/reconcile
+POST /api/commodity-simnow/auto-advance
 ```
 
-该控制器只接受研究侧 Ed25519 签名的冻结月度整数目标，且只允许白名单 SimNow 账户人工分阶段执行。配置、签名与验收步骤见 [STATIC_CORE_EQUAL 商品组合 SimNow 接入](docs/commodity-static-core-simnow.md)。
+该控制器只接受研究侧 Ed25519 签名的冻结月度整数目标。白名单 SimNow 账户显式授权后，后台 worker 自动执行平仓、对账、开仓、对账，并记录真实成交和滑点；生产执行仍被硬关闭。配置、签名与验收步骤见 [STATIC_CORE_EQUAL 商品组合 SimNow 接入](docs/commodity-static-core-simnow.md)。
 
 ### WebSocket
 
@@ -485,6 +486,9 @@ COMMODITY_SIMNOW_GATEWAY_NAME=CTP
 COMMODITY_SIMNOW_ACCOUNT_HASHES=
 COMMODITY_SIMNOW_TRUSTED_PUBLIC_KEYS_JSON={}
 COMMODITY_SIMNOW_STATE_PATH=logs/commodity-simnow/state.json
+COMMODITY_SIMNOW_AUTO_DISPATCH_ENABLED=true
+COMMODITY_SIMNOW_AUTO_DISPATCH_INTERVAL_SECONDS=1
+COMMODITY_SIMNOW_AUTO_DISPATCH_RECONCILE_GRACE_SECONDS=30
 ```
 
 生产环境要求：

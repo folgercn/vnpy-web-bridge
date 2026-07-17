@@ -1,16 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 import pytest
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-
 from app.core.config import Settings
 from app.core.errors import (
     CommoditySimNowBatchError,
@@ -29,7 +27,8 @@ from app.services.commodity_simnow import (
     CommoditySimNowService,
     _canonical_json,
 )
-
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 NOW = datetime(2026, 9, 1, 1, 0, tzinfo=timezone.utc)
 ACCOUNT_ID = "simnow-test-account"
@@ -40,6 +39,7 @@ class FakeRpc:
     def __init__(self) -> None:
         self.positions: list[dict[str, Any]] = []
         self.orders: list[dict[str, Any]] = []
+        self.trades: list[dict[str, Any]] = []
         self.subscriptions: list[str] = []
 
     def status(self, *, probe: bool = False) -> dict[str, Any]:
@@ -70,6 +70,9 @@ class FakeRpc:
 
     def get_orders(self) -> list[dict[str, Any]]:
         return list(self.orders)
+
+    def get_trades(self) -> list[dict[str, Any]]:
+        return list(self.trades)
 
     def subscribe_market(self, symbol: str, exchange: str) -> dict[str, Any]:
         self.subscriptions.append(f"{symbol}.{exchange}")
@@ -159,6 +162,7 @@ def enable_payload() -> CommoditySimNowEnableRequestDTO:
         confirm_no_production=True,
         confirm_cold_start_or_reconciled_state=True,
         confirm_manual_two_phase_dispatch=True,
+        confirm_auto_dispatch=True,
         confirm_no_auto_promotion=True,
     )
 
@@ -277,6 +281,27 @@ def position(product: str, quantity: int, *, today: int = 0) -> dict[str, Any]:
     }
 
 
+def move_quotes_against_orders(service: CommoditySimNowService, orders: list[dict[str, Any]]) -> None:
+    for order in orders:
+        quote = service.tick_store.ticks[order["vt_symbol"]]
+        tick = float(PRODUCT_SPECS[order["product"]]["price_tick"])
+        shift = tick if order["direction"] == "long" else -tick
+        quote["bid_price_1"] += shift
+        quote["ask_price_1"] += shift
+
+
+def fills_for_requests(requests: list[Any]) -> list[dict[str, Any]]:
+    return [
+        {
+            "vt_tradeid": f"CTP.T{index}",
+            "vt_orderid": f"CTP.{index}",
+            "price": request.price,
+            "volume": request.volume,
+        }
+        for index, request in enumerate(requests, start=1)
+    ]
+
+
 def test_cold_start_preview_creates_open_only_plan(tmp_path: Path) -> None:
     service, private_key, _ = make_service(tmp_path)
 
@@ -289,7 +314,8 @@ def test_cold_start_preview_creates_open_only_plan(tmp_path: Path) -> None:
         ("al", "short", "open", 1),
     }
     assert service.status()["production_allowed"] is False
-    assert service.status()["auto_dispatch_allowed"] is False
+    assert service.status()["auto_dispatch_allowed"] is True
+    assert service.status()["auto_dispatch_active"] is False
 
 
 def test_signed_reversal_runs_close_reconcile_open_reconcile(tmp_path: Path) -> None:
@@ -484,3 +510,141 @@ def test_corrupt_completed_state_blocks_enable(tmp_path: Path) -> None:
 
     with pytest.raises(CommoditySimNowSafetyError, match="持久化状态损坏"):
         service.enable(enable_payload(), operator="admin", role="admin", source_ip=None)
+
+
+def test_auto_dispatch_reversal_records_fills_and_slippage(tmp_path: Path) -> None:
+    trade = FakeTrade()
+    service, private_key, rpc = make_service(tmp_path, trade=trade)
+    previous_hash = "d" * 64
+    previous = {"ag": 2, "al": -1}
+    service._completed_state = {
+        "last_completed_batch_hash": previous_hash,
+        "targets": completed_targets(previous),
+    }
+    rpc.positions = [position("ag", 2), position("al", -1)]
+    plan = service.preview(
+        make_batch(
+            private_key,
+            targets={"ag": -1, "al": 1},
+            previous=previous,
+            previous_batch_hash=previous_hash,
+        ),
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+    move_quotes_against_orders(service, plan["close_orders"])
+
+    close_result = service.auto_advance()
+
+    assert close_result["action"] == "close_submitted"
+    assert service.plan()["status"] == "CLOSE_SUBMITTED"
+    assert all(row["dispatch_mode"] == "auto" for row in service.plan()["submitted"]["close"])
+
+    rpc.trades = fills_for_requests(trade.requests)
+    rpc.positions = []
+    open_result = service.auto_advance()
+
+    assert open_result["action"] == "close_reconciled_open_submitted"
+    assert service.plan()["status"] == "OPEN_SUBMITTED"
+    assert len(trade.requests) == 4
+
+    rpc.trades = fills_for_requests(trade.requests)
+    rpc.positions = [position("ag", -1, today=1), position("al", 1, today=1)]
+    completed = service.auto_advance()
+
+    assert completed["action"] == "open_reconciled"
+    assert completed["status"] == "COMPLETE"
+    execution = completed["execution"]
+    assert execution["fill_ratio"] == 1.0
+    assert execution["filled_volume"] == 5
+    assert execution["average_adverse_slippage_ticks"] == pytest.approx(1.0)
+    assert execution["slippage_cny"] > 0
+    persisted = json.loads((tmp_path / "commodity-state.json").read_text(encoding="utf-8"))
+    assert persisted["execution"]["fill_ratio"] == 1.0
+
+
+def test_auto_dispatch_partial_submission_revokes_authorization(tmp_path: Path) -> None:
+    service, private_key, _ = make_service(tmp_path, trade=FakeTrade(fail_after=1))
+    service.preview(make_batch(private_key), operator="admin", role="admin", source_ip=None)
+
+    with pytest.raises(CommoditySimNowStateError, match="部分提交"):
+        service.auto_advance()
+
+    assert service.plan()["status"] == "OPEN_SUBMISSION_PARTIAL"
+    assert service.status()["auto_dispatch_allowed"] is False
+    assert service.auto_advance()["reason"] == "auto_dispatch_not_active"
+
+
+def test_auto_dispatch_requires_explicit_enable_confirmation(tmp_path: Path) -> None:
+    private_key = make_key()
+    service = CommoditySimNowService(
+        settings=make_settings(tmp_path, private_key),
+        rpc=FakeRpc(),  # type: ignore[arg-type]
+        trade=FakeTrade(),  # type: ignore[arg-type]
+        risk=FakeRisk(),  # type: ignore[arg-type]
+        audit=FakeAudit(),  # type: ignore[arg-type]
+        tick_store=FakeTickStore(),
+        clock=lambda: NOW,
+    )
+
+    with pytest.raises(CommoditySimNowSafetyError, match="自动派单授权"):
+        service.enable(
+            enable_payload().model_copy(update={"confirm_auto_dispatch": False}),
+            operator="admin",
+            role="admin",
+            source_ip=None,
+        )
+
+
+def test_auto_dispatch_worker_starts_and_stops(tmp_path: Path) -> None:
+    service, _, _ = make_service(tmp_path)
+
+    async def exercise() -> None:
+        service.start()
+        await asyncio.sleep(0)
+        assert service.status()["auto_dispatch_worker_alive"] is True
+        assert service.status()["auto_dispatch_active"] is True
+        await service.stop()
+        assert service.status()["auto_dispatch_worker_alive"] is False
+        assert service.status()["auto_dispatch_active"] is False
+        assert service.status()["auto_dispatch_allowed"] is False
+
+    asyncio.run(exercise())
+
+
+def test_auto_dispatch_halts_after_terminal_reconciliation_mismatch(tmp_path: Path) -> None:
+    service, private_key, _ = make_service(tmp_path)
+    service.preview(make_batch(private_key), operator="admin", role="admin", source_ip=None)
+    service.auto_advance()
+    service.clock = lambda: NOW + timedelta(seconds=31)
+
+    result = service.auto_advance()
+
+    assert result["action"] == "open_reconciliation_mismatch"
+    assert result["status"] == "OPEN_RECONCILIATION_MISMATCH"
+    assert result["reconciliation"]["mismatch_halted"] is True
+    assert service.status()["auto_dispatch_allowed"] is False
+
+
+def test_auto_dispatch_waits_while_partial_order_is_active(tmp_path: Path) -> None:
+    service, private_key, rpc = make_service(tmp_path)
+    service.preview(make_batch(private_key), operator="admin", role="admin", source_ip=None)
+    service.auto_advance()
+    submitted = service.plan()["submitted"]["open"][0]
+    rpc.orders = [
+        {
+            "vt_orderid": submitted["vt_orderid"],
+            "reference": submitted["reference"],
+            "status": "部分成交",
+        }
+    ]
+    service.clock = lambda: NOW + timedelta(seconds=31)
+
+    result = service.auto_advance()
+
+    assert result["action"] == "open_reconciled"
+    assert result["status"] == "OPEN_SUBMITTED"
+    assert result["reconciliation"]["active_order_ids"] == [submitted["vt_orderid"]]
+    assert result["reconciliation"]["mismatch_halted"] is False
+    assert service.status()["auto_dispatch_allowed"] is True

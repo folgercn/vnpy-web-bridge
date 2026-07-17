@@ -87,6 +87,9 @@ class Settings(BaseSettings):
     commodity_simnow_max_orders_per_phase: int = Field(default=128, ge=1, le=500)
     commodity_simnow_max_quote_age_seconds: int = Field(default=5, ge=1, le=60)
     commodity_simnow_max_spread_ticks: float = Field(default=4, gt=0, le=20)
+    commodity_simnow_auto_dispatch_enabled: bool = True
+    commodity_simnow_auto_dispatch_interval_seconds: float = Field(default=1.0, ge=0.25, le=60)
+    commodity_simnow_auto_dispatch_reconcile_grace_seconds: int = Field(default=30, ge=5, le=300)
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

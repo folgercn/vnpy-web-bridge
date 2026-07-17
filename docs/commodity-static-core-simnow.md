@@ -6,9 +6,9 @@ Web Bridge 接入的是已冻结的商品组合执行控制面，不在运行时
 
 1. 校验冻结策略、签名、批次链、合约规格、敞口和当前持仓。
 2. 用新鲜盘口生成限价拆单计划。
-3. 人工确认平仓阶段，等待委托结束并对账。
-4. 人工确认开仓阶段，等待委托结束并对账。
-5. 仅在最终持仓完全匹配后原子保存完成状态。
+3. 在一次显式 SimNow 自动派单授权后，后台 worker 自动提交平仓阶段。
+4. 委托结束且持仓对账通过后，自动提交开仓阶段。
+5. 最终持仓完全匹配后保存完成状态和真实成交/滑点快照。
 
 控制器固定为：
 
@@ -21,7 +21,7 @@ Web Bridge 接入的是已冻结的商品组合执行控制面，不在运行时
 - 冻结品种：`ag, al, au, bu, cu, rb, ru, sc, sp, zn`
 - 第一个可计数 source month：`2026-08`，对应执行月份 `2026-09`
 
-它不支持自动调仓、自动晋级或生产账户；`production_allowed` 和 `auto_dispatch_allowed` 永远为 `false`。`CTP` gateway 名称本身不能证明是 SimNow，账户 SHA256 白名单才是执行边界。
+它不在运行时自动生成信号、目标或晋级到生产账户；`production_allowed` 永远为 `false`。白名单 SimNow 账户完成 `/enable` 的自动派单确认后，`auto_dispatch_allowed=true`，禁用控制器、紧急停止或部分提交都会停止自动推进。`CTP` gateway 名称本身不能证明是 SimNow，账户 SHA256 白名单才是执行边界。
 
 ## 环境配置
 
@@ -90,6 +90,9 @@ COMMODITY_SIMNOW_MAX_CHILD_ORDER_LOTS=10
 COMMODITY_SIMNOW_MAX_ORDERS_PER_PHASE=128
 COMMODITY_SIMNOW_MAX_QUOTE_AGE_SECONDS=5
 COMMODITY_SIMNOW_MAX_SPREAD_TICKS=4
+COMMODITY_SIMNOW_AUTO_DISPATCH_ENABLED=true
+COMMODITY_SIMNOW_AUTO_DISPATCH_INTERVAL_SECONDS=1
+COMMODITY_SIMNOW_AUTO_DISPATCH_RECONCILE_GRACE_SECONDS=30
 ```
 
 通用风控仍然生效。`RISK_MAX_ORDER_VOLUME` 必须不小于计划中的单笔拆单手数，`RISK_MAX_SYMBOL_POSITION` 必须覆盖签名目标；不要为了通过执行而关闭交易所、价格、持仓或日亏损校验。
@@ -122,21 +125,40 @@ PYTHONPATH=backend .venv/bin/python scripts/commodity_simnow_sign_target_batch.p
 
 脚本拒绝权限宽于 `0600` 的私钥，只输出目标路径和批次哈希，不输出私钥。
 
-## 人工执行顺序
+## 自动执行顺序
 
 所有变更接口只允许 `admin`；`viewer/trader/admin` 均可读取状态、计划和事件。
 
 ```text
 POST /api/commodity-simnow/enable
 POST /api/commodity-simnow/preview
-POST /api/commodity-simnow/execute     phase=close（如计划需要）
-POST /api/commodity-simnow/reconcile
-POST /api/commodity-simnow/execute     phase=open
-POST /api/commodity-simnow/reconcile
+后台 worker：READY_CLOSE -> CLOSE_SUBMITTED -> 对账
+后台 worker：READY_OPEN  -> OPEN_SUBMITTED  -> 对账 -> COMPLETE
+POST /api/commodity-simnow/auto-advance（可选，管理员立即触发一次推进）
 POST /api/commodity-simnow/disable
 ```
 
-每次 `execute` 都必须提交 `plan_hash`、阶段、原因以及三个显式确认字段。发生部分提交时状态进入 `*_SUBMISSION_PARTIAL`，不会自动重试或继续下一阶段；必须人工检查 SimNow 委托和持仓。进程重启会丢弃未完成的内存计划，已完成批次链保留在状态文件中，重启后必须重新 preview。
+`enable` 必须显式提交 `confirm_auto_dispatch=true`，示例：
+
+```json
+{
+  "manual_approval": true,
+  "simnow_mode": true,
+  "reason": "authorize frozen commodity targets on allowlisted SimNow account",
+  "confirm_simnow_only": true,
+  "confirm_no_production": true,
+  "confirm_cold_start_or_reconciled_state": true,
+  "confirm_manual_two_phase_dispatch": true,
+  "confirm_auto_dispatch": true,
+  "confirm_no_auto_promotion": true
+}
+```
+
+`preview` 只接受当日有效的签名目标；成功后 worker 以一秒间隔自动推进。平仓委托未全部结束、持仓未达到 `expected_after_close` 时不会开仓。发生部分提交时状态进入 `*_SUBMISSION_PARTIAL`，自动派单授权立即撤销。若活动委托已消失但持仓在 30 秒宽限期后仍不匹配，则进入 `*_RECONCILIATION_MISMATCH` 并停止自动推进。两种情况都不会自动重试或进入下一阶段，必须人工检查 SimNow 委托和持仓。
+
+`GET /api/commodity-simnow/plan` 的 `execution` 包含每笔订单的实际成交量、成交均价、决策价、提交价、adverse slippage ticks、滑点金额和总 fill ratio。负的 adverse slippage 表示价格改善。成交快照来自 vn.py 的真实 order/trade 查询；如果 RPC 不提供成交查询，会明确返回 `available=false`，但仍以活动委托和权威持仓决定是否完成对账。
+
+手工 `execute/reconcile` 接口保留为运维回退路径。进程重启会丢弃未完成的内存计划并撤销内存中的自动授权，已完成批次链保留在状态文件中；重启后必须重新 enable 和 preview。
 
 ## 验收
 

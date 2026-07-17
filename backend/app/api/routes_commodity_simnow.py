@@ -113,3 +113,17 @@ def reconcile(
             source_ip=request.client.host if request.client else None,
         )
     )
+
+
+@router.post("/auto-advance")
+def auto_advance(
+    request: Request,
+    user: CurrentUser = Depends(require_roles("admin")),
+) -> dict:
+    return ok(
+        commodity_simnow_service.auto_advance(
+            operator=user.username,
+            role=user.role,
+            source_ip=request.client.host if request.client else None,
+        )
+    )
