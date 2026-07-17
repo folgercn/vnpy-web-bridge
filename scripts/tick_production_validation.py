@@ -174,7 +174,7 @@ def day_details(trading_day):
             "required_field_nulls": required_nulls,
             "stable_ts_ingest_seq_order": ordered,
             "history_query_rows": len(query_rows),
-            "csv_header_ok": csv_text.startswith("ts,received_at,ingest_id,ingest_seq,"),
+            "csv_header_ok": csv_text.startswith("datetime,received_at,ingest_id,ingest_seq,"),
             "bar_rows": len(bars),
         })
     finally:
