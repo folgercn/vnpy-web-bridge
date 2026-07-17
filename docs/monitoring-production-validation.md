@@ -4,13 +4,14 @@ The final Phase 7 drill runs only through the owner-only `Issue 45 Production Mo
 
 ## Safety gates
 
-- Exact confirmation: `ISSUE45_PRODUCTION`.
+- Production-stage confirmation: `ISSUE45_PRODUCTION`.
+- Testing-stage override: select `testing` and type `ISSUE45_TESTING`. This explicitly allows any time window and records active-order rows without blocking, while still requiring zero non-zero positions, healthy containers, zero active incidents, owner-only dispatch, and full automatic recovery.
 - Repository owner and actor must both be `folgercn`.
 - Weekday window: 15:30–19:30 Asia/Shanghai; weekend window: 04:00–19:30. The early cutoff keeps the bounded workflow clear of the 21:00 night session.
 - `APP_ENV=production`, monitoring, and Telegram must be enabled.
 - Web Bridge, QuestDB, and PostgreSQL must be healthy before the drill.
 - Backend and watchdog states must have zero active incidents.
-- Real RPC must report zero non-zero positions and zero active orders.
+- Real RPC must report zero non-zero positions. Production stage also requires zero active orders; testing stage records but does not block on active-order rows.
 
 The script uses the existing production `.env` only for runtime configuration. Secrets, addresses, DSNs, account data, symbols, and balances are excluded from artifacts and logs.
 
@@ -36,4 +37,4 @@ python3 scripts/monitoring_production_validation.py \
   --markdown-output artifacts/issue-45-production-validation.md
 ```
 
-The full mode must be launched through GitHub Actions after reviewing the current production exposure and time window.
+The full mode must be launched through GitHub Actions after reviewing the current exposure. Use the testing-stage override only while the entire environment is explicitly operating as a test system.
