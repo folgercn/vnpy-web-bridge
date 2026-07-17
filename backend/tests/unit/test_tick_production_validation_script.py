@@ -54,6 +54,7 @@ def test_summarize_resource_peaks() -> None:
     peaks = MODULE["summarize_resource_peaks"](
         [
             {"questdb_data_kb": 100, "containers": [{"Name": "web", "CPUPerc": "1.5%", "MemUsage": "10MiB / 1GiB"}]},
+            {"questdb_data_kb": None, "containers": [{"Name": "web", "CPUPerc": "2.0%", "MemUsage": "11MiB / 1GiB"}]},
             {"questdb_data_kb": 140, "containers": [{"Name": "web", "CPUPerc": "3.0%", "MemUsage": "12MiB / 1GiB"}]},
         ]
     )

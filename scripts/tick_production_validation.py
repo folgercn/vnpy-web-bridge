@@ -321,10 +321,17 @@ class DockerHost:
             self.web_container,
             self.questdb_container,
         ).stdout.splitlines()
-        questdb_kb = self.docker("exec", self.questdb_container, "du", "-sk", "/var/lib/questdb").stdout.split()[0]
+        questdb_size = self.docker(
+            "exec", self.questdb_container, "du", "-sk", "/var/lib/questdb", check=False
+        )
+        questdb_kb = (
+            int(questdb_size.stdout.split()[0])
+            if questdb_size.returncode == 0 and questdb_size.stdout.split()
+            else None
+        )
         return {
             "containers": [json.loads(line) for line in stats if line.strip()],
-            "questdb_data_kb": int(questdb_kb),
+            "questdb_data_kb": questdb_kb,
         }
 
     def run_load_smoke(
@@ -712,7 +719,11 @@ def summarize_resource_peaks(samples: list[dict[str, Any]]) -> dict[str, Any]:
             memory = str(container.get("MemUsage") or "0").split("/", 1)[0].strip()
             item["cpu_percent"] = max(item["cpu_percent"], cpu)
             item["memory_bytes"] = max(item["memory_bytes"], _parse_size_bytes(memory))
-    questdb_sizes = [int(sample.get("questdb_data_kb") or 0) for sample in samples]
+    questdb_sizes = [
+        int(sample["questdb_data_kb"])
+        for sample in samples
+        if sample.get("questdb_data_kb") is not None
+    ]
     return {
         "containers": peaks,
         "questdb_data_kb_min": min(questdb_sizes) if questdb_sizes else 0,
