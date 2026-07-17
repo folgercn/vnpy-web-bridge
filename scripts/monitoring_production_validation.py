@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 
 
 CONFIRMATION = "ISSUE45_PRODUCTION"
+TESTING_CONFIRMATION = "ISSUE45_TESTING"
 ACTIVE_STATUSES = {"pending", "firing", "acknowledged", "recovering"}
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 
@@ -83,6 +84,8 @@ class MonitoringProductionValidation:
         self.manual_watchdog_maintenance = self.deploy_path / "logs/watchdog/issue45-manual-maintenance.json"
         self.mutation_started = False
         self.rpc_override_active = False
+        self.environment_stage = "production"
+        self.allow_active_orders = False
         self.report: dict[str, Any] = {
             "issue": 45,
             "started_at": self._iso_now(),
@@ -92,11 +95,17 @@ class MonitoringProductionValidation:
             "recovery": {},
         }
 
-    def run(self, *, mode: str, confirmation: str) -> dict[str, Any]:
+    def run(self, *, mode: str, confirmation: str, environment_stage: str = "production") -> dict[str, Any]:
         failure: BaseException | None = None
         try:
-            self._require_confirmation(mode, confirmation)
-            self._preflight(require_safe_window=mode == "full")
+            self.environment_stage = environment_stage
+            self.allow_active_orders = environment_stage == "testing"
+            self.report["environment_stage"] = environment_stage
+            self._require_confirmation(mode, confirmation, environment_stage)
+            self._preflight(
+                require_safe_window=mode == "full" and environment_stage == "production",
+                allow_active_orders=self.allow_active_orders,
+            )
             if mode == "full":
                 self.mutation_started = True
                 self._run_scenario("maintenance_restart", self._maintenance_restart)
@@ -121,11 +130,14 @@ class MonitoringProductionValidation:
             raise failure
         return self.report
 
-    def _require_confirmation(self, mode: str, confirmation: str) -> None:
-        if mode == "full" and confirmation != CONFIRMATION:
-            raise ValidationError(f"full mode requires --confirm {CONFIRMATION}")
+    def _require_confirmation(self, mode: str, confirmation: str, environment_stage: str) -> None:
+        if environment_stage not in {"production", "testing"}:
+            raise ValidationError("environment stage must be production or testing")
+        expected = TESTING_CONFIRMATION if environment_stage == "testing" else CONFIRMATION
+        if mode == "full" and confirmation != expected:
+            raise ValidationError(f"full {environment_stage} mode requires --confirm {expected}")
 
-    def _preflight(self, *, require_safe_window: bool) -> None:
+    def _preflight(self, *, require_safe_window: bool, allow_active_orders: bool) -> None:
         if self.deploy_path == Path("/") or len(self.deploy_path.parts) < 4:
             raise ValidationError("unsafe deployment path")
         for path in (self.deploy_path, self.compose_file, self.env_file, self.watchdog_script):
@@ -155,7 +167,7 @@ class MonitoringProductionValidation:
         if active:
             raise ValidationError(f"active incidents must be cleared first: {', '.join(active)}")
         exposure = self._rpc_exposure()
-        if exposure["nonzero_positions"] or exposure["active_orders"]:
+        if exposure["nonzero_positions"] or (exposure["active_orders"] and not allow_active_orders):
             raise ValidationError("production exposure is active; refusing fault drills")
 
         self.report["preflight"] = {
@@ -164,6 +176,7 @@ class MonitoringProductionValidation:
             "containers": containers,
             "active_incident_count": 0,
             "rpc": exposure,
+            "active_orders_allowed": allow_active_orders,
             "monitor_enabled": True,
             "telegram_enabled": True,
         }
@@ -367,7 +380,7 @@ class MonitoringProductionValidation:
             timeout=360,
         )
         exposure = self._rpc_exposure()
-        if exposure["nonzero_positions"] or exposure["active_orders"]:
+        if exposure["nonzero_positions"] or (exposure["active_orders"] and not self.allow_active_orders):
             raise ValidationError("RPC recovered with active exposure")
         return {
             "incident_id": root_id,
@@ -388,7 +401,7 @@ class MonitoringProductionValidation:
         self._wait_liveness(timeout=180)
         self._wait_for(lambda: not self._active_incident_ids(), timeout=360, description="all incidents to resolve")
         exposure = self._rpc_exposure()
-        if exposure["nonzero_positions"] or exposure["active_orders"]:
+        if exposure["nonzero_positions"] or (exposure["active_orders"] and not self.allow_active_orders):
             raise ValidationError("final RPC exposure is active")
         return {
             "containers": containers,
@@ -447,6 +460,7 @@ class MonitoringProductionValidation:
         code = (
             "import json; "
             "from app.services.vnpy_rpc_service import rpc_service; "
+            "rpc_service.start(); "
             "positions=rpc_service.get_positions(); "
             "orders=list(rpc_service.call('get_all_active_orders') or []); "
             "nonzero=sum(1 for p in positions if abs(float(p.get('volume') or 0)) > 0); "
@@ -711,6 +725,7 @@ def sanitize_text(value: str) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Issue #45 production monitoring validation")
     parser.add_argument("--mode", choices=("preflight", "full"), default="preflight")
+    parser.add_argument("--environment-stage", choices=("production", "testing"), default="production")
     parser.add_argument("--confirm", default="")
     parser.add_argument("--deploy-path", default="/Users/fujun/services/vnpy-web-bridge")
     parser.add_argument("--output", default="artifacts/issue-45-production-validation.json")
@@ -722,7 +737,7 @@ def main() -> int:
         markdown_path=Path(args.markdown_output),
     )
     try:
-        validation.run(mode=args.mode, confirmation=args.confirm)
+        validation.run(mode=args.mode, confirmation=args.confirm, environment_stage=args.environment_stage)
     except BaseException as exc:
         print(f"validation failed: {exc.__class__.__name__}: {exc}", file=sys.stderr)
         return 1
