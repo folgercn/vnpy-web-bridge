@@ -460,6 +460,7 @@ class MonitoringProductionValidation:
         code = (
             "import json; "
             "from app.services.vnpy_rpc_service import rpc_service; "
+            "rpc_service.start(); "
             "positions=rpc_service.get_positions(); "
             "orders=list(rpc_service.call('get_all_active_orders') or []); "
             "nonzero=sum(1 for p in positions if abs(float(p.get('volume') or 0)) > 0); "

@@ -143,6 +143,27 @@ def test_testing_preflight_still_blocks_nonzero_positions(tmp_path: Path, monkey
         subject._preflight(require_safe_window=False, allow_active_orders=True)
 
 
+def test_rpc_exposure_starts_isolated_rpc_client(tmp_path: Path) -> None:
+    calls: list[list[str]] = []
+
+    def runner(args, **kwargs):
+        calls.append(args)
+        return module.CommandResult(stdout='{"positions": 1, "nonzero_positions": 0, "active_orders": 1}\n')
+
+    subject = module.MonitoringProductionValidation(
+        deploy_path=tmp_path / "Users/fujun/services/vnpy-web-bridge",
+        output_path=tmp_path / "result.json",
+        markdown_path=tmp_path / "result.md",
+        runner=runner,
+    )
+
+    result = subject._rpc_exposure()
+
+    probe = calls[0][-1]
+    assert probe.index("rpc_service.start()") < probe.index("rpc_service.get_positions()")
+    assert result == {"positions": 1, "nonzero_positions": 0, "active_orders": 1}
+
+
 def test_full_mode_recovers_and_persists_failure_evidence(tmp_path: Path, monkeypatch) -> None:
     subject = validation(tmp_path)
     monkeypatch.setattr(subject, "_preflight", lambda **kwargs: None)
