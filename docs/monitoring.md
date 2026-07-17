@@ -19,6 +19,7 @@ MONITOR_INTERVAL_SECONDS=15
 MONITOR_FAILURE_THRESHOLD=3
 MONITOR_RECOVERY_THRESHOLD=2
 MONITOR_STARTUP_GRACE_SECONDS=120
+MONITOR_CRITICAL_REMINDER_MINUTES=0
 MONITOR_STATE_PATH=/app/logs/monitor/state.json
 MONITOR_EVENTS_PATH=/app/logs/monitor/events.jsonl
 MONITOR_MAINTENANCE_PATH=/app/logs/watchdog/maintenance.json
@@ -46,9 +47,11 @@ Never commit real bot tokens, chat IDs, database DSNs, or RPC addresses into the
 - First failures enter `pending`.
 - After failure threshold and grace, the incident becomes `firing` and sends one Telegram message.
 - Repeated failures update the same `rule_id:scope_id` fingerprint.
+- Critical reminders are disabled when `MONITOR_CRITICAL_REMINDER_MINUTES=0`; when enabled, one reminder is allowed per configured interval and remains scoped to the current episode.
 - Stable recovery sends one `resolved` message; failed recovery delivery keeps retrying with backoff until sent or explicitly skipped by delivery config.
 - Manual silences keep updating incident state but suppress delivery until expiry.
 - RPC root-cause failures suppress Gateway, tick, and strategy-derived alerts. Existing active derived incidents are marked resolved with suppressed delivery so stale downstream alerts do not remain active while the root cause is firing.
+- QuestDB root-cause failures suppress the derived tick-persistence incident, so one dependency outage does not produce two Telegram messages.
 - Host watchdog root-cause failures follow the same pattern: Docker daemon failures suppress existing container and liveness incidents, and container failures suppress existing liveness incidents without recovery Telegram noise.
 - Trading-session checks use the shared profile in `shared/trading_session_profiles.json`; do not maintain separate backend/frontend session tables.
 - Backend monitor cycles are single-flight; manual probes wait for an in-progress cycle instead of running a concurrent full check.
@@ -76,7 +79,7 @@ Deployments write `logs/watchdog/maintenance.json` before restarting containers.
 ## Drill Checklist
 
 - Stop Windows vn.py RPC: expect one `rpc_unavailable:CTP` firing and one recovery.
-- Stop QuestDB: expect aggregated `questdb_unavailable:market_ticks` or tick persistence incident.
+- Stop QuestDB: expect only the aggregated `questdb_unavailable:market_ticks`; the tick-persistence incident is suppressed by this root cause.
 - Stop PostgreSQL: expect `postgres_unavailable:watchlist` while monitor state remains file-backed.
 - Stop the web container: expect watchdog `container_not_running:vnpy-web-bridge`.
 - Break Docker CLI or daemon access: expect watchdog `docker_daemon_unavailable:docker`; an `inspect` timeout becomes `container_not_running:<container>` and suppresses liveness.
