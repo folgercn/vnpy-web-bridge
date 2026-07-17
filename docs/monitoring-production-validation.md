@@ -28,6 +28,8 @@ When a drill or automatic recovery fails, the JSON artifact also records two bou
 
 Every mutation is wrapped in a recovery path that starts QuestDB and PostgreSQL, restores Web Bridge from the original Compose file, removes only the validation-owned override/maintenance files, and verifies liveness. Evidence is uploaded even when a scenario fails.
 
+Before any mutation, the validator reads the image reference from the running Web Bridge container. Every Compose recreation and automatic recovery is pinned to that exact repository and tag, so CI-injected deployment tags cannot fall back to the Compose default image.
+
 ## Manual preflight
 
 The preflight mode performs no fault injection or recovery mutation:
