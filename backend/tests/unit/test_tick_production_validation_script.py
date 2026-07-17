@@ -48,3 +48,14 @@ def test_render_markdown_is_sanitized_summary() -> None:
     assert "final_no_drops" in markdown
     assert "questdb_outage" in markdown
     assert "must-not-render" not in markdown
+
+
+def test_summarize_resource_peaks() -> None:
+    peaks = MODULE["summarize_resource_peaks"](
+        [
+            {"questdb_data_kb": 100, "containers": [{"Name": "web", "CPUPerc": "1.5%", "MemUsage": "10MiB / 1GiB"}]},
+            {"questdb_data_kb": 140, "containers": [{"Name": "web", "CPUPerc": "3.0%", "MemUsage": "12MiB / 1GiB"}]},
+        ]
+    )
+    assert peaks["containers"]["web"] == {"cpu_percent": 3.0, "memory_bytes": 12 * 1024**2}
+    assert peaks["questdb_data_growth_kb"] == 40

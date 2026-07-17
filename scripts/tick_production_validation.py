@@ -400,12 +400,18 @@ class ProductionValidation:
             "started_at": datetime.now().astimezone().isoformat(),
             "checks": [],
             "faults": [],
+            "resource_samples": [],
         }
 
     def record(self, name: str, ok: bool, **details: Any) -> None:
         self.result["checks"].append({"name": name, "ok": ok, **details})
         if not ok:
             raise ValidationError(f"validation failed: {name}: {details}")
+
+    def sample_resources(self, label: str) -> dict[str, Any]:
+        snapshot = {"label": label, "at": datetime.now().astimezone().isoformat(), **self.host.resource_snapshot()}
+        self.result["resource_samples"].append(snapshot)
+        return snapshot
 
     def wait_status(self, predicate: Callable[[dict[str, Any]], bool], description: str, timeout: float | None = None) -> dict[str, Any]:
         deadline = time.time() + (timeout or self.recovery_timeout)
@@ -432,7 +438,7 @@ class ProductionValidation:
         for container in (self.host.web_container, self.host.questdb_container):
             images[container] = self.host.docker("inspect", container, "--format", "{{.Config.Image}}").stdout.strip()
         self.result["images"] = images
-        self.result["resources_before"] = self.host.resource_snapshot()
+        self.result["resources_before"] = self.sample_resources("preflight")
 
     def audit_history(self) -> None:
         candidates = self.host.probe("history_candidates")
@@ -536,6 +542,7 @@ class ProductionValidation:
             "overflow": overflow,
             "cleanup": cleanup,
         }
+        self.sample_resources("capacity_complete")
 
     def _wait_for_spool(self, baseline: int) -> dict[str, Any]:
         return self.wait_status(lambda value: int(value.get("spool_rows") or 0) > baseline, "tick spool growth", self.outage_seconds + 90)
@@ -557,7 +564,9 @@ class ProductionValidation:
         outage = self._wait_for_spool(baseline)
         time.sleep(self.outage_seconds)
         files = self.host.probe("spool_files")
+        self.sample_resources("questdb_outage")
         recovered = self._recover_questdb_and_drain("questdb_outage")
+        self.sample_resources("questdb_outage_recovered")
         self.result["faults"].append({"name": "questdb_outage", "started_at": started, "outage": outage, "spool_files": files, "recovered": recovered})
 
     def web_restart_with_backlog(self) -> None:
@@ -568,6 +577,7 @@ class ProductionValidation:
         self.host.docker("restart", "--time", "5", self.host.web_container, timeout=60)
         self.host.wait_container(self.host.web_container, healthy=True, timeout=self.recovery_timeout)
         after_restart = self.host.probe("status")
+        self.sample_resources("web_restart_with_backlog")
         self.record("web_restart_preserved_backlog", int(after_restart.get("spool_rows") or 0) > 0, before=before_restart, after=after_restart)
         self.host.docker("start", self.host.questdb_container)
         self.host.wait_container(self.host.questdb_container, healthy=True, timeout=self.recovery_timeout)
@@ -581,6 +591,7 @@ class ProductionValidation:
             "replay kill backlog drain",
         )
         self.record("replay_kill_drained", int(recovered.get("dropped_total") or 0) == 0, status=recovered)
+        self.sample_resources("replay_kill_recovered")
         self.result["faults"].append(
             {
                 "name": "web_restart_with_backlog_and_replay_kill",
@@ -598,6 +609,7 @@ class ProductionValidation:
         self.host.wait_container(self.host.questdb_container, healthy=True, timeout=self.recovery_timeout)
         recovered = self.wait_status(lambda value: bool(value.get("worker_alive")) and int(value.get("spool_rows") or 0) == 0, "QuestDB restart recovery")
         self.record("questdb_restart_recovered", int(recovered.get("dropped_total") or 0) == 0, status=recovered)
+        self.sample_resources("questdb_restart_recovered")
         self.result["faults"].append({"name": "questdb_restart", "started_at": started, "recovered": recovered})
 
     def final_checks(self) -> None:
@@ -638,7 +650,8 @@ class ProductionValidation:
         )
         self.record("final_spool_clean", int(status.get("spool_rows") or 0) == 0 and int(spool_files.get("bad_files") or 0) == 0, spool_files=spool_files)
         self.record("final_no_active_incidents", not active, active_incidents=active)
-        self.result["resources_after"] = self.host.resource_snapshot()
+        self.result["resources_after"] = self.sample_resources("final")
+        self.result["resource_peaks"] = summarize_resource_peaks(self.result["resource_samples"])
         self.result["final"] = {"status": status, "spool_files": spool_files, "monitor": monitor, "active_incidents": active}
         self.result["finished_at"] = datetime.now().astimezone().isoformat()
 
@@ -687,6 +700,33 @@ def render_markdown(result: dict[str, Any]) -> str:
         "",
     ])
     return "\n".join(lines)
+
+
+def summarize_resource_peaks(samples: list[dict[str, Any]]) -> dict[str, Any]:
+    peaks: dict[str, dict[str, float]] = {}
+    for sample in samples:
+        for container in sample.get("containers") or []:
+            name = str(container.get("Name") or container.get("Container") or "unknown")
+            item = peaks.setdefault(name, {"cpu_percent": 0.0, "memory_bytes": 0.0})
+            cpu = float(str(container.get("CPUPerc") or "0").rstrip("%"))
+            memory = str(container.get("MemUsage") or "0").split("/", 1)[0].strip()
+            item["cpu_percent"] = max(item["cpu_percent"], cpu)
+            item["memory_bytes"] = max(item["memory_bytes"], _parse_size_bytes(memory))
+    questdb_sizes = [int(sample.get("questdb_data_kb") or 0) for sample in samples]
+    return {
+        "containers": peaks,
+        "questdb_data_kb_min": min(questdb_sizes) if questdb_sizes else 0,
+        "questdb_data_kb_max": max(questdb_sizes) if questdb_sizes else 0,
+        "questdb_data_growth_kb": (questdb_sizes[-1] - questdb_sizes[0]) if questdb_sizes else 0,
+    }
+
+
+def _parse_size_bytes(value: str) -> float:
+    units = {"B": 1, "KiB": 1024, "MiB": 1024**2, "GiB": 1024**3}
+    for suffix in ("GiB", "MiB", "KiB", "B"):
+        if value.endswith(suffix):
+            return float(value[: -len(suffix)]) * units[suffix]
+    return float(value or 0)
 
 
 def main() -> int:
