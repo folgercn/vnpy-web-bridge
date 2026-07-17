@@ -270,8 +270,24 @@ class DockerHost:
         self.questdb_container = questdb_container
         self.deploy_path = deploy_path.resolve() if deploy_path else None
 
-    def run(self, args: list[str], *, input_text: str | None = None, check: bool = True, timeout: float = 180) -> CommandResult:
-        result = subprocess.run(args, input=input_text, text=True, capture_output=True, timeout=timeout)
+    def run(
+        self,
+        args: list[str],
+        *,
+        input_text: str | None = None,
+        check: bool = True,
+        timeout: float = 180,
+        env: dict[str, str] | None = None,
+    ) -> CommandResult:
+        process_env = {**os.environ, **env} if env else None
+        result = subprocess.run(
+            args,
+            input=input_text,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            env=process_env,
+        )
         if check and result.returncode:
             raise ValidationError(f"command failed ({result.returncode}): {' '.join(args)}: {result.stderr.strip()}")
         return CommandResult(result.stdout, result.stderr, result.returncode)
@@ -340,6 +356,18 @@ class DockerHost:
         if payload.get("source") == "issue45-production-validation":
             maintenance.unlink(missing_ok=True)
 
+        images = self.docker(
+            "image",
+            "ls",
+            "--format",
+            "{{.Repository}}:{{.Tag}}",
+            "vnpy-web-bridge:sha-*",
+        ).stdout.splitlines()
+        image = next((item.strip() for item in images if item.strip()), "")
+        if not re.fullmatch(r"vnpy-web-bridge:sha-[0-9a-f]+", image):
+            raise ValidationError("no validated vnpy-web-bridge sha image is available for recovery")
+        image_repo, image_tag = image.rsplit(":", 1)
+
         self.run(
             [
                 "docker",
@@ -355,6 +383,7 @@ class DockerHost:
                 "web-bridge",
             ],
             timeout=180,
+            env={"IMAGE_REPO": image_repo, "IMAGE_TAG": image_tag},
         )
 
     def resource_snapshot(self) -> dict[str, Any]:

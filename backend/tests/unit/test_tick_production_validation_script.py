@@ -34,13 +34,22 @@ def test_restore_production_web_clears_interrupted_issue45_override(tmp_path: Pa
         questdb_container="questdb",
         deploy_path=tmp_path,
     )
-    calls: list[list[str]] = []
-    host.run = lambda args, **kwargs: calls.append(args) or MODULE["CommandResult"]("", "", 0)
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def fake_run(args: list[str], **kwargs: object):
+        calls.append((args, kwargs))
+        if args[:3] == ["docker", "image", "ls"]:
+            return MODULE["CommandResult"]("vnpy-web-bridge:sha-abc123\n", "", 0)
+        return MODULE["CommandResult"]("", "", 0)
+
+    host.run = fake_run
     host.restore_production_web()
 
     assert not override.exists()
     assert not maintenance.exists()
-    assert calls[0][-4:] == ["-d", "--no-deps", "--force-recreate", "web-bridge"]
+    compose_args, compose_kwargs = calls[-1]
+    assert compose_args[-4:] == ["-d", "--no-deps", "--force-recreate", "web-bridge"]
+    assert compose_kwargs["env"] == {"IMAGE_REPO": "vnpy-web-bridge", "IMAGE_TAG": "sha-abc123"}
 
 
 def test_select_complete_trading_day_requires_night_and_day() -> None:
