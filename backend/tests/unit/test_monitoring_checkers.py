@@ -82,6 +82,11 @@ class HealthyMarketStore:
         return {"configured": True, "connected": True, "status": "ok"}
 
 
+class BrokenMarketStore:
+    def health_check(self) -> dict:
+        raise RuntimeError("questdb down")
+
+
 class HealthyPostgres:
     def health_check(self) -> dict:
         return {"configured": True, "connected": True, "status": "ok"}
@@ -125,6 +130,11 @@ class FakeStrategies:
 
     def list_strategies(self) -> list[dict]:
         return self.rows
+
+
+class BrokenStrategies:
+    def list_strategies(self) -> list[dict]:
+        raise RuntimeError("strategy rpc failed")
 
 
 class FakeRisk:
@@ -244,6 +254,42 @@ def test_rpc_suppression_resolves_existing_strategy_incident_by_wildcard(tmp_pat
     assert not any(item["incident_id"] == "strategy_unexpected_stop:demo_strategy" for item in snapshot["incidents"])
     state = service.alerts.store.load()
     incident = state["incidents"]["strategy_unexpected_stop:demo_strategy"]
+    assert incident["status"] == "resolved"
+    assert incident["details"]["suppressed_by"] == "rpc_unavailable"
+
+
+def test_rpc_suppression_resolves_existing_strategy_rpc_error(tmp_path) -> None:
+    current = {"now": datetime(2026, 6, 18, 2, 0, tzinfo=timezone.utc)}
+    settings = Settings(
+        monitor_failure_threshold=1,
+        monitor_recovery_threshold=1,
+        monitor_startup_grace_seconds=0,
+        monitor_flap_send_grace_seconds=0,
+        monitor_flap_recovery_grace_seconds=0,
+        monitor_state_path=str(tmp_path / "state.json"),
+        monitor_events_path=str(tmp_path / "events.jsonl"),
+        monitor_expected_strategies="demo_strategy",
+    )
+    rpc = FakeRpc(connected=True)
+    service = build_service(
+        tmp_path,
+        now=current["now"],
+        settings=settings,
+        rpc=rpc,
+        strategies=BrokenStrategies(),
+        now_func=lambda: current["now"],
+    )
+
+    snapshot = service.run_checks()
+    incident = next(item for item in snapshot["incidents"] if item["incident_id"] == "strategy_rpc_error:expected_strategies")
+    assert incident["status"] == "firing"
+
+    current["now"] = current["now"] + timedelta(seconds=15)
+    rpc.connected = False
+    snapshot = service.run_checks()
+
+    assert not any(item["incident_id"] == "strategy_rpc_error:expected_strategies" for item in snapshot["incidents"])
+    incident = service.alerts.store.load()["incidents"]["strategy_rpc_error:expected_strategies"]
     assert incident["status"] == "resolved"
     assert incident["details"]["suppressed_by"] == "rpc_unavailable"
 
@@ -540,6 +586,27 @@ def test_dependency_health_error_records_incident(tmp_path) -> None:
     incident = next(item for item in snapshot["incidents"] if item["incident_id"] == "postgres_unavailable:watchlist")
     assert incident["status"] == "firing"
     assert incident["details"]["type"] == "RuntimeError"
+
+
+def test_questdb_failure_suppresses_tick_persistence_derived_incident(tmp_path) -> None:
+    now = datetime(2026, 6, 18, 2, 0, tzinfo=timezone.utc)
+    service = build_service(
+        tmp_path,
+        now=now,
+        market_store=BrokenMarketStore(),
+        tick_persistence=StoppedTickPersistence(),
+    )
+
+    snapshot = service.run_checks()
+
+    assert any(item["incident_id"] == "questdb_unavailable:market_ticks" for item in snapshot["incidents"])
+    assert not any(item["incident_id"] == "questdb_tick_persistence_lag:market_ticks" for item in snapshot["incidents"])
+    tick_check = next(item for item in snapshot["checks"] if item["name"] == "tick_persistence")
+    assert tick_check["status"] == "suppressed"
+    assert any(
+        item["rule_id"] == "questdb_tick_persistence_lag" and item["suppressed_by"] == "questdb_unavailable"
+        for item in snapshot["suppressed"]
+    )
 
 
 def test_tick_persistence_worker_stop_records_incident(tmp_path) -> None:

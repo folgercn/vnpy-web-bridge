@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
@@ -12,6 +13,7 @@ from app.stores.alert_state_store import AlertStateStore
 ACTIVE_STATUSES = {"pending", "firing", "acknowledged", "recovering"}
 NON_SILENCEABLE_RULES = {"emergency_stop", "daily_loss_limit"}
 RETRY_SECONDS = [60, 300, 900]
+logger = logging.getLogger(__name__)
 
 
 class AlertService:
@@ -114,7 +116,7 @@ class AlertService:
                 "suppressed_by": suppressed_by,
                 "at": iso(now),
             }
-            self.store.append_event(
+            self._append_event(
                 {
                     "type": "incident_suppressed",
                     "incident_id": incident_id,
@@ -134,7 +136,7 @@ class AlertService:
                 incident["status"] = "acknowledged"
             incident["acknowledged_by"] = operator
             incident["acknowledged_at"] = iso(now)
-            self.store.append_event({"type": "ack", "incident_id": incident_id, "operator": operator})
+            self._append_event({"type": "ack", "incident_id": incident_id, "operator": operator})
             return dict(incident)
 
         return self.store.update(mutate)
@@ -183,7 +185,7 @@ class AlertService:
                 "expires_at": iso(expires_at),
             }
             state["silences"][silence_id] = silence
-            self.store.append_event({"type": "silence_created", "silence_id": silence_id, "operator": operator})
+            self._append_event({"type": "silence_created", "silence_id": silence_id, "operator": operator})
             return silence
 
         return self.store.update(mutate)
@@ -193,7 +195,7 @@ class AlertService:
             silence = state["silences"].pop(silence_id, None)
             if silence is None:
                 raise KeyError(silence_id)
-            self.store.append_event({"type": "silence_deleted", "silence_id": silence_id, "operator": operator})
+            self._append_event({"type": "silence_deleted", "silence_id": silence_id, "operator": operator})
             return silence
 
         return self.store.update(mutate)
@@ -228,6 +230,8 @@ class AlertService:
             self._deliver(state, incident, event="firing", now=now)
         elif incident.get("status") in {"firing", "acknowledged"} and self._should_attempt_delivery(state, incident, "firing", now):
             self._deliver(state, incident, event="firing", now=now)
+        if incident.get("status") in {"firing", "acknowledged"}:
+            self._maybe_deliver_critical_reminder(state, incident, now)
 
     def _apply_success(self, state: dict[str, Any], incident: dict[str, Any], now: datetime) -> None:
         incident["success_count"] = int(incident.get("success_count") or 0) + 1
@@ -289,13 +293,50 @@ class AlertService:
             return
         if result.get("sent"):
             state["deliveries"][delivery_key] = {"sent_at": iso(now), "result": result}
-        incident.setdefault("delivery", {})[event] = {
+        delivery = incident.setdefault("delivery", {})
+        delivery[event] = {
             "sent": bool(result.get("sent")),
             "result": result,
             "severity": incident.get("severity"),
             "at": iso(now),
         }
-        self.store.append_event({"type": f"incident_{event}", "incident_id": incident["incident_id"], "delivery": result})
+        if result.get("sent"):
+            delivery.pop("next_retry_at", None)
+            delivery["attempts"] = 0
+            if event == "firing" or event.startswith("reminder_"):
+                incident["last_critical_notification_at"] = iso(now)
+        self._append_event({"type": f"incident_{event}", "incident_id": incident["incident_id"], "delivery": result})
+
+    def _maybe_deliver_critical_reminder(self, state: dict[str, Any], incident: dict[str, Any], now: datetime) -> None:
+        interval_minutes = self.settings.monitor_critical_reminder_minutes
+        if interval_minutes <= 0 or str(incident.get("severity")).lower() != "critical":
+            return
+        if self._delivery_key(incident, "firing") not in state["deliveries"]:
+            return
+
+        pending_event = incident.get("pending_reminder_event")
+        if pending_event:
+            event = str(pending_event)
+            if self._should_attempt_delivery(state, incident, event, now):
+                self._deliver(state, incident, event=event, now=now)
+            if self._delivery_key(incident, event) in state["deliveries"]:
+                incident["pending_reminder_event"] = None
+            return
+
+        last_notification_at = parse_time(
+            str(incident.get("last_critical_notification_at") or incident.get("fired_at")),
+            now,
+        )
+        if now - last_notification_at < timedelta(minutes=interval_minutes):
+            return
+
+        reminder_seq = int(incident.get("reminder_seq") or 0) + 1
+        event = f"reminder_{reminder_seq}"
+        incident["reminder_seq"] = reminder_seq
+        incident["pending_reminder_event"] = event
+        self._deliver(state, incident, event=event, now=now)
+        if self._delivery_key(incident, event) in state["deliveries"]:
+            incident["pending_reminder_event"] = None
 
     def _should_attempt_delivery(self, state: dict[str, Any], incident: dict[str, Any], event: str, now: datetime) -> bool:
         if self._delivery_key(incident, event) in state["deliveries"]:
@@ -354,6 +395,9 @@ class AlertService:
         incident["first_seen"] = iso(now)
         incident["failure_started_at"] = iso(now)
         incident["recovery_started_at"] = None
+        incident["reminder_seq"] = 0
+        incident["pending_reminder_event"] = None
+        incident["last_critical_notification_at"] = None
 
     def _delivery_key(self, incident: dict[str, Any], event: str) -> str:
         episode_id = incident.get("episode_id") or f"{incident['incident_id']}:{int(incident.get('episode_seq') or 0)}"
@@ -412,8 +456,17 @@ class AlertService:
             "success_count": 0,
             "episode_seq": 0,
             "episode_id": None,
+            "reminder_seq": 0,
+            "pending_reminder_event": None,
+            "last_critical_notification_at": None,
             "delivery": {},
         }
+
+    def _append_event(self, event: dict[str, Any]) -> None:
+        try:
+            self.store.append_event(event)
+        except Exception as exc:
+            logger.warning("monitor event append failed: %s: %s", exc.__class__.__name__, exc)
 
     def _require_incident(self, state: dict[str, Any], incident_id: str) -> dict[str, Any]:
         incident = state["incidents"].get(incident_id)
