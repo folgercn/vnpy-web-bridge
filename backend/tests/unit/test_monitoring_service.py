@@ -7,7 +7,7 @@ import pytest
 
 from app.core.config import Settings
 from app.services.alert_service import AlertService
-from app.services.telegram_service import TelegramDeliveryError
+from app.services.telegram_service import TelegramDeliveryError, TelegramService
 from app.stores.alert_state_store import AlertStateStore
 
 
@@ -105,6 +105,87 @@ def test_incident_sends_once_after_threshold_and_grace(tmp_path) -> None:
         )
 
     assert telegram.sent == [("rpc_unavailable:CTP", "firing")]
+
+
+def test_critical_reminder_respects_configured_interval(tmp_path) -> None:
+    service, telegram = build_service(tmp_path)
+    service.settings.monitor_critical_reminder_minutes = 1
+    start = datetime(2026, 6, 18, 9, 0, tzinfo=timezone.utc)
+
+    for seconds in (0, 20, 46):
+        service.record_check(
+            rule_id="rpc_unavailable",
+            scope_id="CTP",
+            healthy=False,
+            severity="critical",
+            summary="RPC offline",
+            now=start + timedelta(seconds=seconds),
+        )
+
+    service.record_check(
+        rule_id="rpc_unavailable",
+        scope_id="CTP",
+        healthy=False,
+        severity="critical",
+        summary="RPC still offline",
+        now=start + timedelta(seconds=105),
+    )
+    assert telegram.sent == [("rpc_unavailable:CTP", "firing")]
+
+    service.record_check(
+        rule_id="rpc_unavailable",
+        scope_id="CTP",
+        healthy=False,
+        severity="critical",
+        summary="RPC still offline",
+        now=start + timedelta(seconds=107),
+    )
+    service.record_check(
+        rule_id="rpc_unavailable",
+        scope_id="CTP",
+        healthy=False,
+        severity="critical",
+        summary="RPC still offline",
+        now=start + timedelta(seconds=168),
+    )
+
+    assert telegram.sent == [
+        ("rpc_unavailable:CTP", "firing"),
+        ("rpc_unavailable:CTP", "reminder_1"),
+        ("rpc_unavailable:CTP", "reminder_2"),
+    ]
+
+
+def test_failed_critical_reminder_retries_same_event(tmp_path) -> None:
+    service, telegram = build_service(tmp_path, fail_events=["reminder_1"])
+    service.settings.monitor_critical_reminder_minutes = 1
+    start = datetime(2026, 6, 18, 9, 0, tzinfo=timezone.utc)
+
+    for seconds in (0, 20, 46, 107):
+        service.record_check(
+            rule_id="rpc_unavailable",
+            scope_id="CTP",
+            healthy=False,
+            severity="critical",
+            summary="RPC offline",
+            now=start + timedelta(seconds=seconds),
+        )
+
+    incident = service.record_check(
+        rule_id="rpc_unavailable",
+        scope_id="CTP",
+        healthy=False,
+        severity="critical",
+        summary="RPC still offline",
+        now=start + timedelta(seconds=168),
+    )
+
+    assert telegram.sent == [
+        ("rpc_unavailable:CTP", "firing"),
+        ("rpc_unavailable:CTP", "reminder_1"),
+    ]
+    assert incident["pending_reminder_event"] is None
+    assert "rpc_unavailable:CTP:1:reminder_1" in service.store.load()["deliveries"]
 
 
 def test_recovery_sends_once_after_success_threshold_and_grace(tmp_path) -> None:
@@ -397,3 +478,43 @@ def test_telegram_failure_records_retry_without_raising(tmp_path) -> None:
     assert incident["status"] == "firing"
     assert incident["delivery"]["firing"]["sent"] is False
     assert incident["delivery"]["next_retry_at"]
+
+
+def test_event_log_failure_does_not_duplicate_delivery(tmp_path, monkeypatch) -> None:
+    service, telegram = build_service(tmp_path)
+    start = datetime(2026, 6, 18, 9, 0, tzinfo=timezone.utc)
+
+    def fail_append(_event: dict) -> None:
+        raise OSError("events read-only")
+
+    monkeypatch.setattr(service.store, "append_event", fail_append)
+    for seconds in (0, 20, 46, 60):
+        service.record_check(
+            rule_id="rpc_unavailable",
+            scope_id="CTP",
+            healthy=False,
+            severity="critical",
+            summary="RPC offline",
+            now=start + timedelta(seconds=seconds),
+        )
+
+    state = service.store.load()
+    assert telegram.sent == [("rpc_unavailable:CTP", "firing")]
+    assert "rpc_unavailable:CTP:1:firing" in state["deliveries"]
+
+
+def test_telegram_unexpected_transport_error_is_wrapped(monkeypatch) -> None:
+    settings = Settings(
+        telegram_enabled=True,
+        telegram_bot_token="token",
+        telegram_chat_id="chat",
+    )
+    service = TelegramService(settings)
+
+    def fail_open(*_args, **_kwargs):
+        raise RuntimeError("transport failure")
+
+    monkeypatch.setattr("app.services.telegram_service.urllib.request.urlopen", fail_open)
+
+    with pytest.raises(TelegramDeliveryError, match="RuntimeError"):
+        service.send_message("test")

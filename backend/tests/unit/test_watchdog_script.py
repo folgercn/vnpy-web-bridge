@@ -403,6 +403,27 @@ def test_watchdog_telegram_failure_retries_current_incident(tmp_path, monkeypatc
     assert "container_not_running:vnpy-web-bridge:1:firing" in state["deliveries"]
 
 
+def test_watchdog_unexpected_telegram_error_does_not_abort_cycle(tmp_path, monkeypatch) -> None:
+    config = build_config(tmp_path, monkeypatch)
+
+    def runner(cmd, **_kwargs):
+        if cmd[:2] == ["docker", "inspect"]:
+            return completed(0, "false\n")
+        return completed(0, "ok\n")
+
+    def fail_open(*_args, **_kwargs):
+        raise RuntimeError("transport failure")
+
+    watchdog = watchdog_script.Watchdog(config, runner=runner, opener=fail_open)
+    snapshot = watchdog.run_once()
+
+    assert any(item["rule_id"] == "container_not_running" for item in snapshot["checks"])
+    incident = watchdog_script.load_json(config.state_path, default={})["incidents"]["container_not_running:vnpy-web-bridge"]
+    assert incident["status"] == "firing"
+    assert incident["delivery"]["firing"]["result"]["error"] == "RuntimeError"
+    assert incident["delivery"]["next_retry_at"]
+
+
 def test_watchdog_log_dir_failure_does_not_abort_disk_check(tmp_path, monkeypatch) -> None:
     config = build_config(tmp_path, monkeypatch)
     config.log_dir.write_text("not a directory", encoding="utf-8")

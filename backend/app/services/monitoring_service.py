@@ -103,7 +103,9 @@ class MonitoringService:
                     {"rule_id": "gateway_disconnected", "scope_id": self.settings.vnpy_gateway_name, "suppressed_by": quiet_reason["name"]},
                     {"rule_id": "tick_stale", "scope_id": "market_ticks", "suppressed_by": quiet_reason["name"]},
                     {"rule_id": "strategy_unexpected_stop", "scope_id": "*", "suppressed_by": quiet_reason["name"]},
+                    {"rule_id": "strategy_rpc_error", "scope_id": "expected_strategies", "suppressed_by": quiet_reason["name"]},
                     {"rule_id": "questdb_unavailable", "scope_id": "market_ticks", "suppressed_by": quiet_reason["name"]},
+                    {"rule_id": "questdb_tick_persistence_lag", "scope_id": "market_ticks", "suppressed_by": quiet_reason["name"]},
                     {"rule_id": "postgres_unavailable", "scope_id": "watchlist", "suppressed_by": quiet_reason["name"]},
                 ]
             )
@@ -120,10 +122,11 @@ class MonitoringService:
                         {"rule_id": "gateway_disconnected", "scope_id": self.settings.vnpy_gateway_name, "suppressed_by": "rpc_unavailable"},
                         {"rule_id": "tick_stale", "scope_id": "market_ticks", "suppressed_by": "rpc_unavailable"},
                         {"rule_id": "strategy_unexpected_stop", "scope_id": "*", "suppressed_by": "rpc_unavailable"},
+                        {"rule_id": "strategy_rpc_error", "scope_id": "expected_strategies", "suppressed_by": "rpc_unavailable"},
                     ]
                 )
 
-            self._check_questdb(checks, now)
+            self._check_questdb(checks, suppressed, now)
             self._check_postgres(checks, now)
         self._check_risk(checks, now)
         self._check_http_5xx(checks, now)
@@ -207,7 +210,7 @@ class MonitoringService:
         )
         checks.append(_check("gateway", connected, status["summary"], incident))
 
-    def _check_questdb(self, checks: list[dict[str, Any]], now: datetime) -> None:
+    def _check_questdb(self, checks: list[dict[str, Any]], suppressed: list[dict[str, Any]], now: datetime) -> None:
         try:
             status = self.market_store.health_check()
             healthy = not status.get("configured") or bool(status.get("connected"))
@@ -228,6 +231,24 @@ class MonitoringService:
             now=now,
         )
         checks.append(_check("questdb", healthy, summary, incident))
+
+        if not healthy:
+            suppressed.append(
+                {
+                    "rule_id": "questdb_tick_persistence_lag",
+                    "scope_id": "market_ticks",
+                    "suppressed_by": "questdb_unavailable",
+                }
+            )
+            checks.append(
+                {
+                    "name": "tick_persistence",
+                    "healthy": True,
+                    "status": "suppressed",
+                    "summary": "Suppressed by QuestDB root cause",
+                }
+            )
+            return
 
         tick_status = self.tick_persistence.snapshot()
         lag = tick_status.get("persistence_lag_seconds")

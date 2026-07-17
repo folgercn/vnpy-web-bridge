@@ -1,0 +1,64 @@
+name: Issue 45 Production Monitoring Validation
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: "Type ISSUE45_PRODUCTION after confirming non-trading time and zero exposure"
+        required: true
+        default: ""
+
+concurrency:
+  group: vnpy-web-bridge-production-validation
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Run guarded production monitoring drills
+    runs-on: [self-hosted, macOS, ARM64, vnpy-web-bridge]
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - name: Require repository owner and explicit confirmation
+        env:
+          ACTOR: ${{ github.actor }}
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          test "$REPOSITORY_OWNER" = "folgercn" || {
+            echo "repository owner is not allowed" >&2
+            exit 2
+          }
+          test "$ACTOR" = "folgercn" || {
+            echo "workflow actor is not allowed" >&2
+            exit 2
+          }
+          test "$CONFIRMATION" = "ISSUE45_PRODUCTION" || {
+            echo "confirmation must equal ISSUE45_PRODUCTION" >&2
+            exit 2
+          }
+
+      - name: Checkout validation revision
+        uses: actions/checkout@v4
+
+      - name: Run production validation and fault drills
+        env:
+          PATH: /Applications/Docker.app/Contents/Resources/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+        run: |
+          python3 scripts/monitoring_production_validation.py \
+            --mode full \
+            --confirm ISSUE45_PRODUCTION \
+            --deploy-path "${DEPLOY_PATH:-/Users/fujun/services/vnpy-web-bridge}" \
+            --output artifacts/issue-45-production-validation.json \
+            --markdown-output artifacts/issue-45-production-validation.md
+
+      - name: Upload sanitized validation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: issue-45-production-validation-${{ github.run_id }}
+          path: artifacts/issue-45-production-validation.*
+          if-no-files-found: warn
+          retention-days: 30

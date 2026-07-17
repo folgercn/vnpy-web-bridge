@@ -68,6 +68,8 @@ class TelegramService:
             raise TelegramDeliveryError(str(exc.reason)) from exc
         except TimeoutError as exc:
             raise TelegramDeliveryError("Telegram request timed out") from exc
+        except Exception as exc:
+            raise TelegramDeliveryError(f"Telegram request failed: {exc.__class__.__name__}") from exc
 
         try:
             data = json.loads(body)
@@ -78,7 +80,7 @@ class TelegramService:
         return {"sent": True, "telegram_message_id": data.get("result", {}).get("message_id")}
 
     def _format_incident_message(self, incident: dict[str, Any], *, event: str) -> str:
-        event_label = "RECOVERED" if event == "resolved" else "ALERT"
+        event_label = "RECOVERED" if event == "resolved" else "REMINDER" if event.startswith("reminder_") else "ALERT"
         severity = str(incident.get("severity", "warning")).upper()
         first_seen = str(incident.get("first_seen") or "-")
         duration = _duration_text(first_seen, str(incident.get("resolved_at") or incident.get("last_seen") or ""))

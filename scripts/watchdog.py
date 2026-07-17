@@ -468,7 +468,7 @@ class Watchdog:
         try:
             with self.opener(request, timeout=self.config.http_timeout_seconds) as response:
                 data = json.loads(response.read().decode("utf-8"))
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        except Exception as exc:
             return {"sent": False, "error": exc.__class__.__name__}
         return {"sent": bool(data.get("ok")), "message_id": data.get("result", {}).get("message_id")}
 
