@@ -31,6 +31,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 NOW = datetime(2026, 9, 1, 1, 0, tzinfo=timezone.utc)
+SHAKEDOWN_NOW = datetime(2026, 7, 17, 1, 0, tzinfo=timezone.utc)
 ACCOUNT_ID = "simnow-test-account"
 ACCOUNT_HASH = hashlib.sha256(ACCOUNT_ID.encode()).hexdigest()
 
@@ -109,7 +110,7 @@ class FakeAudit:
 
 
 class FakeTickStore:
-    def __init__(self) -> None:
+    def __init__(self, now: datetime = NOW) -> None:
         self.ticks: dict[str, dict[str, Any]] = {}
         for index, (product, spec) in enumerate(PRODUCT_SPECS.items(), start=1):
             exchange = spec["exchange"]
@@ -122,7 +123,7 @@ class FakeTickStore:
                 "ask_price_1": bid + tick,
                 "bid_volume_1": 50,
                 "ask_volume_1": 50,
-                "received_at": NOW.isoformat(),
+                "received_at": now.isoformat(),
             }
 
     def get_tick(self, vt_symbol: str) -> dict[str, Any] | None:
@@ -192,6 +193,9 @@ def make_batch(
     targets: dict[str, int] | None = None,
     previous: dict[str, int] | None = None,
     previous_batch_hash: str | None = None,
+    execution_lane: str = "official_forward",
+    source_month: str = "2026-08",
+    execution_day: str = "2026-09-01",
 ) -> CommodityTargetBatchDTO:
     targets = targets or {"ag": 2, "al": -1}
     previous = previous or {}
@@ -221,12 +225,13 @@ def make_batch(
             }
         )
     data = {
-        "schema_version": "commodity_static_core_equal_target_batch_v1",
-        "batch_id": "batch-2026-09-static-core",
+        "schema_version": "commodity_static_core_equal_target_batch_v2",
+        "batch_id": f"batch-{execution_day}-static-core",
         "scheduler_id": "STATIC_CORE_EQUAL",
         "source_combination_arm": "CORE_EQUAL_TARGET",
-        "source_month": "2026-08",
-        "execution_day": "2026-09-01",
+        "execution_lane": execution_lane,
+        "source_month": source_month,
+        "execution_day": execution_day,
         "virtual_nav_cny": 20_000_000,
         "candidate_weights": {"C": 0.5, "D": 0.5},
         "guardband": {"product": 0.12, "sector": 0.27, "gross": 0.8, "target_net": 0.0},
@@ -250,10 +255,10 @@ def make_batch(
     return CommodityTargetBatchDTO.model_validate(data)
 
 
-def make_service(tmp_path: Path, *, trade: FakeTrade | None = None):
+def make_service(tmp_path: Path, *, trade: FakeTrade | None = None, now: datetime = NOW):
     private_key = make_key()
     rpc = FakeRpc()
-    tick_store = FakeTickStore()
+    tick_store = FakeTickStore(now)
     service = CommoditySimNowService(
         settings=make_settings(tmp_path, private_key),
         rpc=rpc,  # type: ignore[arg-type]
@@ -261,7 +266,7 @@ def make_service(tmp_path: Path, *, trade: FakeTrade | None = None):
         risk=FakeRisk(),  # type: ignore[arg-type]
         audit=FakeAudit(),  # type: ignore[arg-type]
         tick_store=tick_store,
-        clock=lambda: NOW,
+        clock=lambda: now,
     )
     service.enable(enable_payload(), operator="admin", role="admin", source_ip="127.0.0.1")
     return service, private_key, rpc
@@ -316,6 +321,60 @@ def test_cold_start_preview_creates_open_only_plan(tmp_path: Path) -> None:
     assert service.status()["production_allowed"] is False
     assert service.status()["auto_dispatch_allowed"] is True
     assert service.status()["auto_dispatch_active"] is False
+    assert plan["execution_lane"] == "official_forward"
+    assert plan["countable_forward"] is True
+
+
+def test_shakedown_batch_can_trade_before_official_forward_window(tmp_path: Path) -> None:
+    service, private_key, rpc = make_service(tmp_path, now=SHAKEDOWN_NOW)
+    batch = make_batch(
+        private_key,
+        execution_lane="simnow_shakedown",
+        source_month="2026-07",
+        execution_day="2026-07-17",
+    )
+
+    plan = service.preview(batch, operator="admin", role="admin", source_ip=None)
+    submitted = service.auto_advance()
+
+    assert plan["execution_lane"] == "simnow_shakedown"
+    assert plan["countable_forward"] is False
+    assert submitted["action"] == "open_submitted"
+    assert service.plan()["status"] == "OPEN_SUBMITTED"
+
+    rpc.positions = [position("ag", 2, today=2), position("al", -1, today=1)]
+    completed = service.auto_advance()
+    persisted = json.loads((tmp_path / "commodity-state.json").read_text(encoding="utf-8"))
+
+    assert completed["status"] == "COMPLETE"
+    assert persisted["execution_lane"] == "simnow_shakedown"
+    assert persisted["countable_forward"] is False
+
+
+def test_shakedown_batch_rejects_future_source_month(tmp_path: Path) -> None:
+    service, private_key, _ = make_service(tmp_path, now=SHAKEDOWN_NOW)
+    batch = make_batch(
+        private_key,
+        execution_lane="simnow_shakedown",
+        source_month="2026-08",
+        execution_day="2026-07-17",
+    )
+
+    with pytest.raises(CommoditySimNowBatchError, match="未来 source month"):
+        service.preview(batch, operator="admin", role="admin", source_ip=None)
+
+
+def test_official_forward_still_rejects_pre_freeze_source_month(tmp_path: Path) -> None:
+    service, private_key, _ = make_service(tmp_path, now=SHAKEDOWN_NOW)
+    batch = make_batch(
+        private_key,
+        execution_lane="official_forward",
+        source_month="2026-07",
+        execution_day="2026-07-17",
+    )
+
+    with pytest.raises(CommoditySimNowBatchError, match="official forward source month"):
+        service.preview(batch, operator="admin", role="admin", source_ip=None)
 
 
 def test_signed_reversal_runs_close_reconcile_open_reconcile(tmp_path: Path) -> None:
@@ -384,6 +443,15 @@ def test_invalid_signature_is_rejected_before_plan(tmp_path: Path) -> None:
     service, private_key, _ = make_service(tmp_path)
     batch = make_batch(private_key)
     tampered = batch.model_copy(update={"signature": base64.b64encode(bytes(64)).decode()})
+
+    with pytest.raises(CommoditySimNowBatchError, match="签名无效"):
+        service.preview(tampered, operator="admin", role="admin", source_ip=None)
+
+
+def test_execution_lane_is_covered_by_signature(tmp_path: Path) -> None:
+    service, private_key, _ = make_service(tmp_path)
+    batch = make_batch(private_key)
+    tampered = batch.model_copy(update={"execution_lane": "simnow_shakedown"})
 
     with pytest.raises(CommoditySimNowBatchError, match="签名无效"):
         service.preview(tampered, operator="admin", role="admin", source_ip=None)

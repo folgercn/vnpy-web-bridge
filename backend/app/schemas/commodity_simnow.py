@@ -65,10 +65,11 @@ class CommodityTargetRowDTO(StrictModel):
 
 
 class CommodityTargetBatchDTO(StrictModel):
-    schema_version: Literal["commodity_static_core_equal_target_batch_v1"]
+    schema_version: Literal["commodity_static_core_equal_target_batch_v2"]
     batch_id: str = Field(pattern=r"^[A-Za-z0-9._-]{8,128}$")
     scheduler_id: Literal["STATIC_CORE_EQUAL"]
     source_combination_arm: Literal["CORE_EQUAL_TARGET"]
+    execution_lane: Literal["simnow_shakedown", "official_forward"]
     source_month: str = Field(pattern=r"^\d{4}-\d{2}$")
     execution_day: date
     virtual_nav_cny: Literal[20_000_000]

@@ -343,7 +343,7 @@ POST /api/commodity-simnow/reconcile
 POST /api/commodity-simnow/auto-advance
 ```
 
-该控制器只接受研究侧 Ed25519 签名的冻结月度整数目标。白名单 SimNow 账户显式授权后，后台 worker 自动执行平仓、对账、开仓、对账，并记录真实成交和滑点；生产执行仍被硬关闭。配置、签名与验收步骤见 [STATIC_CORE_EQUAL 商品组合 SimNow 接入](docs/commodity-static-core-simnow.md)。
+该控制器只接受研究侧 Ed25519 签名的冻结整数目标。白名单 SimNow 账户显式授权后，`simnow_shakedown` 批次可在部署当天立即自动发单并记录真实成交/滑点，但不计入正式 forward；`official_forward` 继续遵守冻结月份边界。生产执行仍被硬关闭。配置、签名与验收步骤见 [STATIC_CORE_EQUAL 商品组合 SimNow 接入](docs/commodity-static-core-simnow.md)。
 
 ### WebSocket
 

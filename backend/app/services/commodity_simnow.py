@@ -334,6 +334,8 @@ class CommoditySimNowService:
         plan_core = {
             "batch_hash": batch_hash,
             "batch_id": batch.batch_id,
+            "execution_lane": batch.execution_lane,
+            "countable_forward": batch.execution_lane == "official_forward",
             "account_hash": safety["account_hash"],
             "previous_positions": previous_positions,
             "expected_after_close": after_close,
@@ -363,7 +365,15 @@ class CommoditySimNowService:
         if status == "COMPLETE":
             self._save_completed_state(self.current_plan)
         result = self.plan()
-        self._event("plan_previewed", plan_hash=plan_hash, result={"status": status})
+        self._event(
+            "plan_previewed",
+            plan_hash=plan_hash,
+            result={
+                "status": status,
+                "execution_lane": batch.execution_lane,
+                "countable_forward": batch.execution_lane == "official_forward",
+            },
+        )
         self.audit.record(
             action="commodity_simnow_plan_preview",
             user_id=operator,
@@ -789,22 +799,35 @@ class CommoditySimNowService:
         products = [row.product for row in batch.targets]
         if set(products) != set(PRODUCT_SPECS) or len(products) != len(set(products)):
             raise CommoditySimNowBatchError("目标批次必须且只能包含冻结十品种")
-        if batch.source_month < self.settings.commodity_simnow_min_source_month:
-            raise CommoditySimNowBatchError(
-                "source month 早于允许边界",
-                detail={"source_month": batch.source_month, "minimum": self.settings.commodity_simnow_min_source_month},
-            )
-        source_year, source_month = (int(item) for item in batch.source_month.split("-"))
-        expected_year = source_year + (1 if source_month == 12 else 0)
-        expected_month = 1 if source_month == 12 else source_month + 1
-        if (batch.execution_day.year, batch.execution_day.month) != (expected_year, expected_month):
-            raise CommoditySimNowBatchError("execution day 必须位于 source month 的下一个自然月")
         local_today = self.clock().astimezone(CHINA_TZ).date()
         if batch.execution_day != local_today:
             raise CommoditySimNowBatchError(
                 "目标批次只能在 execution day 当日预览和执行",
                 detail={"execution_day": batch.execution_day.isoformat(), "local_today": local_today.isoformat()},
             )
+        if batch.execution_lane == "official_forward":
+            if batch.source_month < self.settings.commodity_simnow_min_source_month:
+                raise CommoditySimNowBatchError(
+                    "official forward source month 早于允许边界",
+                    detail={
+                        "source_month": batch.source_month,
+                        "minimum": self.settings.commodity_simnow_min_source_month,
+                    },
+                )
+            source_year, source_month = (int(item) for item in batch.source_month.split("-"))
+            expected_year = source_year + (1 if source_month == 12 else 0)
+            expected_month = 1 if source_month == 12 else source_month + 1
+            if (batch.execution_day.year, batch.execution_day.month) != (expected_year, expected_month):
+                raise CommoditySimNowBatchError(
+                    "official forward execution day 必须位于 source month 的下一个自然月"
+                )
+        else:
+            current_month = local_today.strftime("%Y-%m")
+            if batch.source_month > current_month:
+                raise CommoditySimNowBatchError(
+                    "SimNow shakedown 不得使用未来 source month",
+                    detail={"source_month": batch.source_month, "current_month": current_month},
+                )
         for row in batch.targets:
             self._verify_target_row(row.model_dump())
         self._verify_weight_caps(batch)
@@ -1310,6 +1333,10 @@ class CommoditySimNowService:
             "schema_version": "commodity_static_core_equal_completed_state_v1",
             "last_completed_batch_hash": plan["batch_hash"],
             "updated_at_utc": self.clock().astimezone(timezone.utc).isoformat(),
+            "execution_lane": plan["execution_lane"],
+            "countable_forward": plan["countable_forward"],
+            "source_month": plan["source_month"],
+            "execution_day": plan["execution_day"],
             "targets": [
                 {
                     "product": row["product"],

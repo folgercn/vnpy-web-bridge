@@ -19,7 +19,8 @@ Web Bridge 接入的是已冻结的商品组合执行控制面，不在运行时
 - 分配器 `FINITE_NEIGHBOURHOOD_BEAM_V1`：半径 `2`、beam `2048`、净敞口惩罚 `1`
 - 虚拟 NAV：`20,000,000 CNY`
 - 冻结品种：`ag, al, au, bu, cu, rb, ru, sc, sp, zn`
-- 第一个可计数 source month：`2026-08`，对应执行月份 `2026-09`
+- `simnow_shakedown`：部署后可用当日签名目标立即真实发单，永远标记 `countable_forward=false`
+- `official_forward`：第一个可计数 source month 为 `2026-08`，对应执行月份 `2026-09`
 
 它不在运行时自动生成信号、目标或晋级到生产账户；`production_allowed` 永远为 `false`。白名单 SimNow 账户完成 `/enable` 的自动派单确认后，`auto_dispatch_allowed=true`，禁用控制器、紧急停止或部分提交都会停止自动推进。`CTP` gateway 名称本身不能证明是 SimNow，账户 SHA256 白名单才是执行边界。
 
@@ -102,13 +103,14 @@ COMMODITY_SIMNOW_AUTO_DISPATCH_RECONCILE_GRACE_SECONDS=30
 研究侧无签名 JSON 必须包含十个冻结品种，并使用以下 schema：
 
 ```text
-commodity_static_core_equal_target_batch_v1
+commodity_static_core_equal_target_batch_v2
 ```
 
 关键约束：
 
-- `source_month` 不得早于 `2026-08`。
-- `execution_day` 必须在 source month 的下一个自然月，且只能当天预览/执行。
+- `execution_lane=simnow_shakedown` 时，`execution_day` 可以是部署或运行当天；`source_month` 只要求不晚于当天所在月份，计划和完成状态均明确标记 `countable_forward=false`。
+- `execution_lane=official_forward` 时，`source_month` 不得早于 `2026-08`，且 `execution_day` 必须在 source month 的下一个自然月；计划标记 `countable_forward=true`。
+- 两条通道都只能在 `execution_day` 当天预览和执行，且都使用相同的签名、SimNow 账户白名单、风控、两阶段派单与持仓对账。
 - 冷启动十个 `previous_target_quantity` 都为 `0`，`previous_batch_hash=null`。
 - 后续批次必须逐品种携带上一个完成状态的 `previous_exact_contract` 和手数，包括零手品种。
 - `exact_contract` 使用 `SHFE.ag2609` 形式；API 下单前转换为 vn.py 的 `ag2609.SHFE`。
@@ -154,7 +156,7 @@ POST /api/commodity-simnow/disable
 }
 ```
 
-`preview` 只接受当日有效的签名目标；成功后 worker 以一秒间隔自动推进。平仓委托未全部结束、持仓未达到 `expected_after_close` 时不会开仓。发生部分提交时状态进入 `*_SUBMISSION_PARTIAL`，自动派单授权立即撤销。若活动委托已消失但持仓在 30 秒宽限期后仍不匹配，则进入 `*_RECONCILIATION_MISMATCH` 并停止自动推进。两种情况都不会自动重试或进入下一阶段，必须人工检查 SimNow 委托和持仓。
+`preview` 只接受当日有效的签名目标；需要部署后立即成交时，研究侧签发当日 `execution_lane=simnow_shakedown` 批次即可，不需要等到 2026-09。成功后 worker 以一秒间隔自动推进。平仓委托未全部结束、持仓未达到 `expected_after_close` 时不会开仓。发生部分提交时状态进入 `*_SUBMISSION_PARTIAL`，自动派单授权立即撤销。若活动委托已消失但持仓在 30 秒宽限期后仍不匹配，则进入 `*_RECONCILIATION_MISMATCH` 并停止自动推进。两种情况都不会自动重试或进入下一阶段，必须人工检查 SimNow 委托和持仓。
 
 `GET /api/commodity-simnow/plan` 的 `execution` 包含每笔订单的实际成交量、成交均价、决策价、提交价、adverse slippage ticks、滑点金额和总 fill ratio。负的 adverse slippage 表示价格改善。成交快照来自 vn.py 的真实 order/trade 查询；如果 RPC 不提供成交查询，会明确返回 `available=false`，但仍以活动委托和权威持仓决定是否完成对账。
 
@@ -169,4 +171,4 @@ PYTHONPATH=backend .venv/bin/python -m pytest -q backend/tests/unit/test_commodi
 PYTHONPATH=backend .venv/bin/python -m pytest -q backend/tests/unit/test_commodity_simnow_api.py
 ```
 
-真实 SimNow 验收必须在本地 RPC 地址、账户哈希、公钥和当月合法签名目标都配置完成后执行。未满足这些条件时，只能声明控制器和测试已就绪，不能声明真实 SimNow 已运行。
+真实 SimNow 验收必须在本地 RPC 地址、账户哈希、公钥和当日合法签名目标都配置完成后执行。部署验收使用 `simnow_shakedown`，立即产生真实 SimNow 委托和成交；只有 `official_forward` 结果可以计入冻结策略的正式 forward 证据。未满足运行配置时，只能声明控制器和测试已就绪，不能声明真实 SimNow 已运行。
