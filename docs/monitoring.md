@@ -78,6 +78,8 @@ Deployments write `logs/watchdog/maintenance.json` before restarting containers.
 
 ## Drill Checklist
 
+The guarded production workflow and evidence format are documented in [Issue #45 Production Validation](monitoring-production-validation.md).
+
 - Stop Windows vn.py RPC: expect one `rpc_unavailable:CTP` firing and one recovery.
 - Stop QuestDB: expect only the aggregated `questdb_unavailable:market_ticks`; the tick-persistence incident is suppressed by this root cause.
 - Stop PostgreSQL: expect `postgres_unavailable:watchlist` while monitor state remains file-backed.
