@@ -192,19 +192,22 @@ def spool_files():
     })
 
 
-def delete_symbol(vt_symbol):
+def drop_partition(partition_day):
     _, conn = connect()
     try:
-        before = conn.execute("SELECT count() FROM market_ticks WHERE vt_symbol = %s", (vt_symbol,)).fetchone()[0]
-        conn.execute("DELETE FROM market_ticks WHERE vt_symbol = %s", (vt_symbol,))
+        parsed = datetime.strptime(partition_day, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        end = parsed + timedelta(days=1)
+        before = conn.execute("SELECT count() FROM market_ticks WHERE ts >= %s AND ts < %s", (parsed, end)).fetchone()[0]
+        if before:
+            conn.execute(f"ALTER TABLE market_ticks DROP PARTITION LIST '{partition_day}'")
         deadline = datetime.now(timezone.utc) + timedelta(seconds=30)
         remaining = before
         while datetime.now(timezone.utc) < deadline:
-            remaining = conn.execute("SELECT count() FROM market_ticks WHERE vt_symbol = %s", (vt_symbol,)).fetchone()[0]
+            remaining = conn.execute("SELECT count() FROM market_ticks WHERE ts >= %s AND ts < %s", (parsed, end)).fetchone()[0]
             if remaining == 0:
                 break
             time.sleep(0.25)
-        output({"vt_symbol": vt_symbol, "deleted": int(before), "remaining": int(remaining)})
+        output({"partition_day": partition_day, "deleted": int(before), "remaining": int(remaining)})
     finally:
         conn.close()
 
@@ -220,8 +223,8 @@ elif action == "day_details":
     day_details(sys.argv[2])
 elif action == "spool_files":
     spool_files()
-elif action == "delete_symbol":
-    delete_symbol(sys.argv[2])
+elif action == "drop_partition":
+    drop_partition(sys.argv[2])
 else:
     raise RuntimeError("unknown probe action: " + action)
 '''
@@ -303,7 +306,15 @@ class DockerHost:
             "questdb_data_kb": int(questdb_kb),
         }
 
-    def run_load_smoke(self, *, count: int, queue_size: int, vt_symbol: str, spool_dir: str) -> dict[str, Any]:
+    def run_load_smoke(
+        self,
+        *,
+        count: int,
+        queue_size: int,
+        vt_symbol: str,
+        spool_dir: str,
+        base_time: str,
+    ) -> dict[str, Any]:
         repo_root = Path(__file__).resolve().parents[1]
         for name in ("tick_persistence_smoke.py", "tick_persistence_load_smoke.py"):
             self.docker("cp", str(repo_root / "scripts" / name), f"{self.web_container}:/tmp/{name}")
@@ -324,6 +335,8 @@ class DockerHost:
             vt_symbol,
             "--spool-dir",
             spool_dir,
+            "--base-time",
+            base_time,
             "--timeout",
             "120",
             timeout=180,
@@ -415,52 +428,57 @@ class ProductionValidation:
         required_tps = max(1, peak_tps * 2)
         count = max(2000, min(100_000, required_tps))
         run_id = str(int(time.time()))
-        normal = self.host.run_load_smoke(
-            count=count,
-            queue_size=count + 1,
-            vt_symbol=f"ISSUE79NORMAL{run_id}.LOCAL",
-            spool_dir=f"/tmp/issue79-normal-{run_id}",
-        )
-        normal_cleanup = self.host.probe("delete_symbol", normal["vt_symbol"])
-        self.record(
-            "capacity_normal_2x_peak",
-            normal["diff"] == 0
-            and normal["dropped"] == 0
-            and normal["spool_rows"] == 0
-            and float(normal["enqueue_p95_ms"]) <= 10
-            and float(normal["enqueue_tps"]) >= required_tps
-            and float(normal["persist_tps"]) >= required_tps
-            and float(normal["persistence_seconds"]) <= 2,
-            required_tps=required_tps,
-            result=normal,
-            cleanup=normal_cleanup,
-        )
-        self.record("capacity_normal_cleanup", int(normal_cleanup["remaining"]) == 0, cleanup=normal_cleanup)
+        partition_day = "2099-12-31"
+        base_time = f"{partition_day}T00:00:00+00:00"
+        self.host.probe("drop_partition", partition_day)
+        normal: dict[str, Any] = {}
+        overflow: dict[str, Any] = {}
+        cleanup: dict[str, Any] = {}
+        try:
+            normal = self.host.run_load_smoke(
+                count=count,
+                queue_size=count + 1,
+                vt_symbol=f"ISSUE79NORMAL{run_id}.LOCAL",
+                spool_dir=f"/tmp/issue79-normal-{run_id}",
+                base_time=base_time,
+            )
+            self.record(
+                "capacity_normal_2x_peak",
+                normal["diff"] == 0
+                and normal["dropped"] == 0
+                and normal["spool_rows"] == 0
+                and float(normal["enqueue_p95_ms"]) <= 10
+                and float(normal["enqueue_tps"]) >= required_tps
+                and float(normal["persist_tps"]) >= required_tps
+                and float(normal["persistence_seconds"]) <= 2,
+                required_tps=required_tps,
+                result=normal,
+            )
 
-        overflow = self.host.run_load_smoke(
-            count=count,
-            queue_size=max(1, count // 20),
-            vt_symbol=f"ISSUE79OVERFLOW{run_id}.LOCAL",
-            spool_dir=f"/tmp/issue79-overflow-{run_id}",
-        )
-        overflow_cleanup = self.host.probe("delete_symbol", overflow["vt_symbol"])
-        self.record(
-            "capacity_overflow_spool",
-            overflow["diff"] == 0
-            and overflow["dropped"] == 0
-            and overflow["spool_rows"] == 0
-            and int(overflow["spooled_total_before_drain"]) > 0
-            and float(overflow["enqueue_p95_ms"]) <= 10,
-            result=overflow,
-            cleanup=overflow_cleanup,
-        )
-        self.record("capacity_overflow_cleanup", int(overflow_cleanup["remaining"]) == 0, cleanup=overflow_cleanup)
+            overflow = self.host.run_load_smoke(
+                count=count,
+                queue_size=max(1, count // 20),
+                vt_symbol=f"ISSUE79OVERFLOW{run_id}.LOCAL",
+                spool_dir=f"/tmp/issue79-overflow-{run_id}",
+                base_time=base_time,
+            )
+            self.record(
+                "capacity_overflow_spool",
+                overflow["diff"] == 0
+                and overflow["dropped"] == 0
+                and overflow["spool_rows"] == 0
+                and int(overflow["spooled_total_before_drain"]) > 0
+                and float(overflow["enqueue_p95_ms"]) <= 10,
+                result=overflow,
+            )
+        finally:
+            cleanup = self.host.probe("drop_partition", partition_day)
+        self.record("capacity_partition_cleanup", int(cleanup["remaining"]) == 0, cleanup=cleanup)
         self.result["capacity"] = {
             "required_tps": required_tps,
             "normal": normal,
-            "normal_cleanup": normal_cleanup,
             "overflow": overflow,
-            "overflow_cleanup": overflow_cleanup,
+            "cleanup": cleanup,
         }
 
     def _wait_for_spool(self, baseline: int) -> dict[str, Any]:

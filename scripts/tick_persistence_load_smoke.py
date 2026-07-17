@@ -75,6 +75,7 @@ def main() -> int:
     parser.add_argument("--queue-size", type=int, default=int(os.getenv("TICK_LOAD_SMOKE_QUEUE_SIZE", "0")) or None)
     parser.add_argument("--vt-symbol", default=os.getenv("TICK_LOAD_SMOKE_VT_SYMBOL"))
     parser.add_argument("--spool-dir", default=os.getenv("TICK_LOAD_SMOKE_SPOOL_DIR"))
+    parser.add_argument("--base-time", default=os.getenv("TICK_LOAD_SMOKE_BASE_TIME"))
     parser.add_argument("--timeout", type=float, default=float(os.getenv("TICK_LOAD_SMOKE_TIMEOUT_SECONDS", "30")))
     parser.add_argument("--max-enqueue-p95-ms", type=float, default=float(os.getenv("TICK_LOAD_SMOKE_MAX_ENQUEUE_P95_MS", "10")))
     args = parser.parse_args()
@@ -85,7 +86,9 @@ def main() -> int:
         return 2
 
     vt_symbol = args.vt_symbol or f"LOAD{int(time.time())}.LOCAL"
-    base_time = datetime.now(timezone.utc)
+    base_time = datetime.fromisoformat(args.base_time.replace("Z", "+00:00")) if args.base_time else datetime.now(timezone.utc)
+    if base_time.tzinfo is None:
+        base_time = base_time.replace(tzinfo=timezone.utc)
     market = QuestDbMarketDataService(settings)
     pipeline = TickPersistenceService(settings, market, sleep_func=lambda _: None)
     enqueue_ms: list[float] = []
