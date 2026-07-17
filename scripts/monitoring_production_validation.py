@@ -88,6 +88,7 @@ class MonitoringProductionValidation:
         self.manual_watchdog_maintenance = self.deploy_path / "logs/watchdog/issue45-manual-maintenance.json"
         self.mutation_started = False
         self.rpc_override_active = False
+        self.web_bridge_image = ""
         self.environment_stage = "production"
         self.allow_active_orders = False
         self.report: dict[str, Any] = {
@@ -169,6 +170,7 @@ class MonitoringProductionValidation:
         unhealthy = [name for name, status in containers.items() if status not in {"healthy", "running"}]
         if unhealthy:
             raise ValidationError(f"containers are not healthy: {', '.join(unhealthy)}")
+        self.web_bridge_image = self._container_image("vnpy-web-bridge")
         if self.maintenance_file.exists():
             raise ValidationError("an existing deployment maintenance file must be cleared before validation")
         active = self._active_incident_ids()
@@ -185,6 +187,7 @@ class MonitoringProductionValidation:
             "active_incident_count": 0,
             "rpc": exposure,
             "active_orders_allowed": allow_active_orders,
+            "compose_image_pinned": True,
             "monitor_enabled": True,
             "telegram_enabled": True,
         }
@@ -649,6 +652,13 @@ class MonitoringProductionValidation:
         )
         return result.stdout.strip() or "missing"
 
+    def _container_image(self, name: str) -> str:
+        result = self._docker("inspect", "--format", "{{.Config.Image}}", name, timeout=15)
+        image = result.stdout.strip()
+        if not image:
+            raise ValidationError(f"container image reference is missing: {name}")
+        return image
+
     def _watchdog_threshold(self, key: str, default: int) -> int:
         return max(1, int(load_env(self.env_file).get(key, str(default))))
 
@@ -684,6 +694,7 @@ class MonitoringProductionValidation:
         return self.runner(
             ["docker", "compose", "--env-file", str(self.env_file), "-f", str(self.compose_file), *args],
             cwd=self.deploy_path,
+            env=self._compose_environment(),
             timeout=timeout,
             check=check,
         )
@@ -702,9 +713,17 @@ class MonitoringProductionValidation:
                 *args,
             ],
             cwd=self.deploy_path,
+            env=self._compose_environment(),
             timeout=timeout,
             check=check,
         )
+
+    def _compose_environment(self) -> dict[str, str]:
+        repository, tag = split_image_reference(self.web_bridge_image)
+        environment = dict(os.environ)
+        environment["IMAGE_REPO"] = repository
+        environment["IMAGE_TAG"] = tag
+        return environment
 
     def _docker(self, *args: str, timeout: int, check: bool = True) -> CommandResult:
         return self.runner(["docker", *args], cwd=self.deploy_path, timeout=timeout, check=check)
@@ -753,6 +772,20 @@ def is_safe_drill_window(value: datetime) -> bool:
     if local.weekday() < 5:
         return 15 * 60 + 30 <= minute <= 19 * 60 + 30
     return 4 * 60 <= minute <= 19 * 60 + 30
+
+
+def split_image_reference(value: str) -> tuple[str, str]:
+    image = value.strip()
+    if not image or "@" in image:
+        raise ValidationError("current Web Bridge image must use a tagged reference")
+    separator = image.rfind(":")
+    if separator > image.rfind("/"):
+        repository, tag = image[:separator], image[separator + 1 :]
+    else:
+        repository, tag = image, "latest"
+    if not repository or not tag:
+        raise ValidationError("current Web Bridge image reference is invalid")
+    return repository, tag
 
 
 def load_env(path: Path) -> dict[str, str]:

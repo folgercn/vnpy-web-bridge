@@ -112,6 +112,7 @@ def test_testing_preflight_allows_active_orders(tmp_path: Path, monkeypatch) -> 
     subject = validation(tmp_path)
     prepare_preflight(subject)
     monkeypatch.setattr(subject, "_container_health", lambda: {"web": "healthy"})
+    monkeypatch.setattr(subject, "_container_image", lambda name: "vnpy-web-bridge:sha-test")
     monkeypatch.setattr(subject, "_active_incident_ids", lambda: [])
     monkeypatch.setattr(subject, "_rpc_exposure", lambda: {"positions": 1, "nonzero_positions": 0, "active_orders": 1})
 
@@ -119,12 +120,14 @@ def test_testing_preflight_allows_active_orders(tmp_path: Path, monkeypatch) -> 
 
     assert subject.report["preflight"]["active_orders_allowed"] is True
     assert subject.report["preflight"]["rpc"]["active_orders"] == 1
+    assert subject.report["preflight"]["compose_image_pinned"] is True
 
 
 def test_production_preflight_blocks_active_orders(tmp_path: Path, monkeypatch) -> None:
     subject = validation(tmp_path)
     prepare_preflight(subject)
     monkeypatch.setattr(subject, "_container_health", lambda: {"web": "healthy"})
+    monkeypatch.setattr(subject, "_container_image", lambda name: "vnpy-web-bridge:sha-test")
     monkeypatch.setattr(subject, "_active_incident_ids", lambda: [])
     monkeypatch.setattr(subject, "_rpc_exposure", lambda: {"positions": 1, "nonzero_positions": 0, "active_orders": 1})
 
@@ -136,6 +139,7 @@ def test_testing_preflight_still_blocks_nonzero_positions(tmp_path: Path, monkey
     subject = validation(tmp_path)
     prepare_preflight(subject)
     monkeypatch.setattr(subject, "_container_health", lambda: {"web": "healthy"})
+    monkeypatch.setattr(subject, "_container_image", lambda name: "vnpy-web-bridge:sha-test")
     monkeypatch.setattr(subject, "_active_incident_ids", lambda: [])
     monkeypatch.setattr(subject, "_rpc_exposure", lambda: {"positions": 1, "nonzero_positions": 1, "active_orders": 0})
 
@@ -162,6 +166,41 @@ def test_rpc_exposure_starts_isolated_rpc_client(tmp_path: Path) -> None:
     probe = calls[0][-1]
     assert probe.index("rpc_service.start()") < probe.index("rpc_service.get_positions()")
     assert result == {"positions": 1, "nonzero_positions": 0, "active_orders": 1}
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("vnpy-web-bridge:sha-abc", ("vnpy-web-bridge", "sha-abc")),
+        ("registry.example:5000/team/app:release", ("registry.example:5000/team/app", "release")),
+        ("team/app", ("team/app", "latest")),
+    ],
+)
+def test_split_image_reference(value: str, expected: tuple[str, str]) -> None:
+    assert module.split_image_reference(value) == expected
+
+
+def test_compose_rebuilds_pin_current_runtime_image(tmp_path: Path) -> None:
+    calls: list[tuple[list[str], dict]] = []
+
+    def runner(args, **kwargs):
+        calls.append((args, kwargs))
+        return module.CommandResult()
+
+    subject = module.MonitoringProductionValidation(
+        deploy_path=tmp_path / "Users/fujun/services/vnpy-web-bridge",
+        output_path=tmp_path / "result.json",
+        markdown_path=tmp_path / "result.md",
+        runner=runner,
+    )
+    subject.web_bridge_image = "registry.example:5000/team/app:sha-current"
+
+    subject._compose("up", "web-bridge", timeout=30)
+    subject._compose_with_override("up", "web-bridge", timeout=30)
+
+    for _, kwargs in calls:
+        assert kwargs["env"]["IMAGE_REPO"] == "registry.example:5000/team/app"
+        assert kwargs["env"]["IMAGE_TAG"] == "sha-current"
 
 
 def test_full_mode_recovers_and_persists_failure_evidence(tmp_path: Path, monkeypatch) -> None:
