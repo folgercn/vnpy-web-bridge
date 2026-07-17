@@ -3,8 +3,16 @@ name: Issue 45 Production Monitoring Validation
 on:
   workflow_dispatch:
     inputs:
+      environment_stage:
+        description: "Environment lifecycle stage"
+        required: true
+        type: choice
+        options:
+          - production
+          - testing
+        default: production
       confirmation:
-        description: "Type ISSUE45_PRODUCTION after confirming non-trading time and zero exposure"
+        description: "Type ISSUE45_PRODUCTION, or ISSUE45_TESTING for the explicit testing-stage override"
         required: true
         default: ""
 
@@ -24,6 +32,7 @@ jobs:
         env:
           ACTOR: ${{ github.actor }}
           REPOSITORY_OWNER: ${{ github.repository_owner }}
+          ENVIRONMENT_STAGE: ${{ inputs.environment_stage }}
           CONFIRMATION: ${{ inputs.confirmation }}
         run: |
           test "$REPOSITORY_OWNER" = "folgercn" || {
@@ -34,8 +43,13 @@ jobs:
             echo "workflow actor is not allowed" >&2
             exit 2
           }
-          test "$CONFIRMATION" = "ISSUE45_PRODUCTION" || {
-            echo "confirmation must equal ISSUE45_PRODUCTION" >&2
+          case "$ENVIRONMENT_STAGE" in
+            production) expected="ISSUE45_PRODUCTION" ;;
+            testing) expected="ISSUE45_TESTING" ;;
+            *) echo "unsupported environment stage" >&2; exit 2 ;;
+          esac
+          test "$CONFIRMATION" = "$expected" || {
+            echo "confirmation does not match environment stage" >&2
             exit 2
           }
 
@@ -46,10 +60,13 @@ jobs:
         env:
           PATH: /Applications/Docker.app/Contents/Resources/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          ENVIRONMENT_STAGE: ${{ inputs.environment_stage }}
+          CONFIRMATION: ${{ inputs.confirmation }}
         run: |
           python3 scripts/monitoring_production_validation.py \
             --mode full \
-            --confirm ISSUE45_PRODUCTION \
+            --environment-stage "$ENVIRONMENT_STAGE" \
+            --confirm "$CONFIRMATION" \
             --deploy-path "${DEPLOY_PATH:-/Users/fujun/services/vnpy-web-bridge}" \
             --output artifacts/issue-45-production-validation.json \
             --markdown-output artifacts/issue-45-production-validation.md
