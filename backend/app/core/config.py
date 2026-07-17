@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import json
+import re
 from functools import lru_cache
 
 from pydantic import Field, model_validator
@@ -74,6 +77,17 @@ class Settings(BaseSettings):
     risk_blocked_symbols: str = ""
     risk_trading_time_check_enabled: bool = False
 
+    commodity_simnow_enabled: bool = False
+    commodity_simnow_gateway_name: str = "CTP"
+    commodity_simnow_account_hashes: str = ""
+    commodity_simnow_trusted_public_keys_json: str = "{}"
+    commodity_simnow_state_path: str = "logs/commodity-simnow/state.json"
+    commodity_simnow_min_source_month: str = "2026-08"
+    commodity_simnow_max_child_order_lots: int = Field(default=10, ge=1, le=100)
+    commodity_simnow_max_orders_per_phase: int = Field(default=128, ge=1, le=500)
+    commodity_simnow_max_quote_age_seconds: int = Field(default=5, ge=1, le=60)
+    commodity_simnow_max_spread_ticks: float = Field(default=4, gt=0, le=20)
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
     @model_validator(mode="after")
@@ -86,6 +100,28 @@ class Settings(BaseSettings):
             raise ValueError("JWT_SECRET_KEY must be at least 32 characters in production")
         if self.telegram_enabled and (not self.telegram_bot_token or not self.telegram_chat_id):
             raise ValueError("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be set when Telegram is enabled")
+        if self.commodity_simnow_enabled:
+            account_hashes = {
+                item.strip().lower()
+                for item in self.commodity_simnow_account_hashes.split(",")
+                if item.strip()
+            }
+            if not account_hashes or any(not re.fullmatch(r"[0-9a-f]{64}", item) for item in account_hashes):
+                raise ValueError("COMMODITY_SIMNOW_ACCOUNT_HASHES must be set when commodity SimNow is enabled")
+            try:
+                trusted_keys = json.loads(self.commodity_simnow_trusted_public_keys_json)
+            except json.JSONDecodeError as exc:
+                raise ValueError("COMMODITY_SIMNOW_TRUSTED_PUBLIC_KEYS_JSON must be valid JSON") from exc
+            if not isinstance(trusted_keys, dict) or not trusted_keys:
+                raise ValueError(
+                    "COMMODITY_SIMNOW_TRUSTED_PUBLIC_KEYS_JSON must contain at least one Ed25519 public key"
+                )
+            try:
+                public_keys = [base64.b64decode(str(value), validate=True) for value in trusted_keys.values()]
+            except (ValueError, binascii.Error) as exc:
+                raise ValueError("COMMODITY_SIMNOW_TRUSTED_PUBLIC_KEYS_JSON contains invalid base64") from exc
+            if any(len(value) != 32 for value in public_keys):
+                raise ValueError("COMMODITY_SIMNOW_TRUSTED_PUBLIC_KEYS_JSON must contain 32-byte Ed25519 keys")
         allowed_levels = {"info", "warning", "critical"}
         levels = {item.strip().lower() for item in self.telegram_send_levels.split(",") if item.strip()}
         if not levels or levels - allowed_levels:

@@ -13,6 +13,7 @@ from app.api import (
     routes_account,
     routes_auth,
     routes_calendar,
+    routes_commodity_simnow,
     routes_mak_v2_observer,
     routes_market,
     routes_monitoring,
@@ -64,6 +65,7 @@ async def monitor_http_errors(request: Request, call_next):
 app.include_router(routes_status.router, prefix="/api")
 app.include_router(routes_auth.router, prefix="/api")
 app.include_router(routes_market.router, prefix="/api")
+app.include_router(routes_commodity_simnow.router, prefix="/api")
 app.include_router(routes_mak_v2_observer.router, prefix="/api")
 app.include_router(routes_monitoring.router, prefix="/api")
 app.include_router(routes_calendar.router, prefix="/api")
