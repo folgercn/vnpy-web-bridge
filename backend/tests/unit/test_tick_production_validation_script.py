@@ -2,12 +2,19 @@ from __future__ import annotations
 
 from pathlib import Path
 import runpy
+import sys
 
 import pytest
 
 
 SCRIPT = Path(__file__).resolve().parents[3] / "scripts" / "tick_production_validation.py"
 MODULE = runpy.run_path(str(SCRIPT), run_name="tick_production_validation")
+
+
+def test_command_result_preserves_nonzero_exit_code() -> None:
+    host = MODULE["DockerHost"](web_container="unused", questdb_container="unused")
+    result = host.run([sys.executable, "-c", "raise SystemExit(7)"], check=False)
+    assert result.returncode == 7
 
 
 def test_select_complete_trading_day_requires_night_and_day() -> None:

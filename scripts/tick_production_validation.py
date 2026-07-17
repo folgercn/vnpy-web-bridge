@@ -259,6 +259,7 @@ class ValidationError(RuntimeError):
 class CommandResult:
     stdout: str
     stderr: str
+    returncode: int
 
 
 class DockerHost:
@@ -270,7 +271,7 @@ class DockerHost:
         result = subprocess.run(args, input=input_text, text=True, capture_output=True, timeout=timeout)
         if check and result.returncode:
             raise ValidationError(f"command failed ({result.returncode}): {' '.join(args)}: {result.stderr.strip()}")
-        return CommandResult(result.stdout, result.stderr)
+        return CommandResult(result.stdout, result.stderr, result.returncode)
 
     def docker(self, *args: str, check: bool = True, timeout: float = 180) -> CommandResult:
         return self.run(["docker", *args], check=check, timeout=timeout)
