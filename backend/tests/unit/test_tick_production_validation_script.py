@@ -13,8 +13,8 @@ MODULE = runpy.run_path(str(SCRIPT), run_name="tick_production_validation")
 def test_select_complete_trading_day_requires_night_and_day() -> None:
     selected = MODULE["select_complete_trading_day"](
         [
-            {"trading_day": "20260717", "rows": 100, "start": "2026-07-17T09:00:00", "end": "2026-07-17T15:00:00"},
-            {"trading_day": "20260716", "rows": 200, "start": "2026-07-15T21:00:00", "end": "2026-07-16T15:00:00"},
+            {"trading_day": "20260717", "rows": 100, "start": "2026-07-17T01:00:00", "end": "2026-07-17T07:00:00"},
+            {"trading_day": "20260716", "rows": 200, "start": "2026-07-15T13:00:00", "end": "2026-07-16T07:00:00"},
         ]
     )
     assert selected["trading_day"] == "20260716"
@@ -23,7 +23,7 @@ def test_select_complete_trading_day_requires_night_and_day() -> None:
 def test_select_complete_trading_day_fails_without_full_session() -> None:
     with pytest.raises(MODULE["ValidationError"]):
         MODULE["select_complete_trading_day"](
-            [{"trading_day": "20260717", "rows": 100, "start": "2026-07-17T09:00:00", "end": "2026-07-17T15:00:00"}]
+            [{"trading_day": "20260717", "rows": 100, "start": "2026-07-17T01:00:00", "end": "2026-07-17T07:00:00"}]
         )
 
 

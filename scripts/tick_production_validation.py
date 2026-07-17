@@ -10,6 +10,7 @@ import subprocess
 import sys
 import time
 from typing import Any, Callable
+from zoneinfo import ZoneInfo
 
 
 CONFIRMATION = "ISSUE79_PRODUCTION"
@@ -338,8 +339,8 @@ def select_complete_trading_day(candidates: list[dict[str, Any]]) -> dict[str, A
         raw_day = str(item.get("trading_day") or "")
         try:
             trading_day = datetime.strptime(raw_day, "%Y%m%d")
-            start = datetime.fromisoformat(str(item["start"]).replace("Z", "+00:00")).replace(tzinfo=None)
-            end = datetime.fromisoformat(str(item["end"]).replace("Z", "+00:00")).replace(tzinfo=None)
+            start = _as_shanghai_datetime(item["start"])
+            end = _as_shanghai_datetime(item["end"])
         except (TypeError, ValueError):
             continue
         covers_night = start.date() < trading_day.date() and start.hour >= 20
@@ -347,6 +348,13 @@ def select_complete_trading_day(candidates: list[dict[str, Any]]) -> dict[str, A
         if covers_night and covers_day_close and int(item.get("rows") or 0) > 0:
             return item
     raise ValidationError("no historical trading_day covers both night and day sessions")
+
+
+def _as_shanghai_datetime(value: Any) -> datetime:
+    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=ZoneInfo("UTC"))
+    return parsed.astimezone(ZoneInfo("Asia/Shanghai"))
 
 
 class ProductionValidation:
@@ -392,6 +400,7 @@ class ProductionValidation:
 
     def audit_history(self) -> None:
         candidates = self.host.probe("history_candidates")
+        self.result["historical_candidates"] = candidates
         selected = select_complete_trading_day(candidates)
         details = self.host.probe("day_details", selected["trading_day"])
         self.result["historical_day"] = details
