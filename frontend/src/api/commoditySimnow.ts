@@ -25,10 +25,58 @@ export interface CommoditySimNowStatus {
   plan_status?: string
   plan_hash?: string | null
   strategy_template?: CommodityStrategyTemplateStatus
+  position_manager_shadow?: CommodityPositionManagerShadowStatus
+}
+
+export interface CommodityPositionManagerShadowTarget {
+  product: string
+  exact_contract: string
+  baseline_target_quantity: number
+  shadow_target_quantity: number
+  baseline_source_target_weight: number
+  shadow_source_target_weight: number
+  baseline_buffered_target_weight: number
+  shadow_buffered_target_weight: number
+}
+
+export interface CommodityPositionManagerShadowStatus {
+  configured?: boolean
+  valid?: boolean
+  snapshot_hash?: string
+  snapshot_id?: string
+  position_manager_id?: string
+  sector_map_id?: string
+  mode?: string
+  baseline_scheduler_id?: string
+  baseline_batch_hash?: string
+  baseline_link_state?: 'active' | 'completed' | 'unlinked'
+  source_month?: string
+  execution_day?: string
+  input_cutoff_day?: string
+  fast_lookback_days?: number
+  slow_lookback_days?: number
+  fast_annual_vol?: number
+  slow_annual_vol?: number
+  raw_scale?: number
+  continuity_mode?: 'genesis' | 'linked'
+  previous_snapshot_hash?: string | null
+  continuity_state?: 'genesis' | 'verified' | 'unlinked'
+  continuity_verified?: boolean
+  previous_smoothed_scale?: number
+  smoothed_scale?: number
+  target_change_count?: number
+  maximum_abs_target_quantity_delta?: number
+  authority_granted?: boolean
+  dispatch_allowed?: boolean
+  error_type?: string
+  targets?: CommodityPositionManagerShadowTarget[]
 }
 
 export const getCommoditySimNowStatus = () =>
   request<CommoditySimNowStatus>('/api/commodity-simnow/status')
+
+export const getCommodityPositionManagerShadow = () =>
+  request<CommodityPositionManagerShadowStatus>('/api/commodity-simnow/position-manager-shadow')
 
 export const startCommodityStrategyTemplate = () =>
   request<Record<string, unknown>>('/api/commodity-simnow/template/start', {

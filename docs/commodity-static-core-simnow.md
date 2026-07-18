@@ -104,11 +104,15 @@ COMMODITY_SIMNOW_ACCEPTANCE_PASSIVE_LIMIT_TTL_SECONDS=15
 COMMODITY_SIMNOW_ACCEPTANCE_MAX_TOTAL_ORDERS=2
 COMMODITY_SIMNOW_ACCEPTANCE_MAX_TOTAL_LOTS=2
 COMMODITY_SIMNOW_TEMPLATE_BATCH_PATH=/absolute/path/to/current-signed-target.json
+COMMODITY_POSITION_MANAGER_SHADOW_PATH=/absolute/path/to/current-signed-position-manager-shadow.json
+COMMODITY_POSITION_MANAGER_SHADOW_STATE_PATH=/absolute/path/to/position-manager-shadow-state.json
 COMMODITY_SIMNOW_DELIVERY_MONTH_CUTOFF_DAY=1
 COMMODITY_SIMNOW_SC_PRE_DELIVERY_CUTOFF_DAY=15
 ```
 
 研究流水线必须先写临时文件并用同文件系统的原子 rename 替换 `COMMODITY_SIMNOW_TEMPLATE_BATCH_PATH`，不要原地覆盖。控制器只读取单个不超过 2 MiB 的 v2 JSON；文件缺失、半写、schema 错误、签名错误、批次链错误或合约到期保护失败都会撤销本次模板和自动派单授权。
+
+`COMMODITY_POSITION_MANAGER_SHADOW_PATH` 是独立的只读候选快照。它不会参与目标批次加载、委托生成或自动派单；即使快照无效，冻结 baseline 仍按原安全边界运行。服务按 `baseline_batch_hash` 查找已验证的 active/completed baseline，并逐项核对日期、合约、权重、整数手数、参考价与合约规格；无法取得完整 baseline 时标记为 `unlinked`。shadow 使用独立的 `POSITION_MANAGER_SECTOR_MAP_V1`，不会修改 baseline 的 `PRODUCT_SPECS` 或执行校验口径。策略页和 `GET /api/commodity-simnow/position-manager-shadow` 只展示通过 Ed25519、公式、guardband 与整数目标硬上限校验后的审计信息。
 
 通用风控仍然生效。`RISK_MAX_ORDER_VOLUME` 必须不小于计划中的单笔拆单手数；控制器会在阶段零提交之前，按当前持仓、已有活动开仓委托和本阶段全部子单累计校验 `RISK_MAX_SYMBOL_POSITION`，拆单不能绕过单合约上限。不要为了通过执行而关闭交易所、价格、持仓或日亏损校验。
 
@@ -130,6 +134,37 @@ commodity_static_core_equal_target_batch_v2
 - 后续批次必须逐品种携带上一个完成状态的 `previous_exact_contract` 和手数，包括零手品种。
 - `exact_contract` 使用 `SHFE.ag2609` 形式；API 下单前转换为 vn.py 的 `ag2609.SHFE`。
 - 目标手数、方向、参考开盘价、乘数、最小跳动和权重全部包含在签名中。
+
+## 相对波动仓位管理 Shadow
+
+当前接入的唯一仓位管理候选为 `MONTHLY_RELATIVE_VOL_THERMOSTAT_V1`，固定规则为：
+
+```text
+raw_scale = clip(sqrt(lagged_vol126 / lagged_vol21), 0.80, 1.20)
+smoothed_scale = 0.5 * raw_scale + 0.5 * previous_smoothed_scale
+```
+
+快照必须满足：
+
+- schema 使用 `commodity_relative_vol_position_manager_shadow_v2`，并冻结 `sector_map_id=POSITION_MANAGER_SECTOR_MAP_V1`；
+- `mode=shadow_only`、`authority_granted=false`、`dispatch_allowed=false`；
+- `source_month` 必须是合法年月，`input_cutoff_day` 必须等于该月最后一个自然日，`execution_day` 必须位于下一自然月；
+- 所有波动率、scale、权重、参考价和 price tick 必须是有限数；
+- 冻结首期 `source_month=2026-08` 必须声明 `continuity_mode=genesis`、`previous_snapshot_hash=null`、`previous_smoothed_scale=1.0`；已有连续性状态时禁止重新 genesis；后续必须声明 `linked` 并匹配本地保存的上一期 hash、月份及 smoothed scale；证据不可取得时显示 `continuity_state=unlinked`，不会声称完整月度链已验证；
+- 十品种 baseline/shadow buffered weights 均通过 12%/27%/80%/零净敞口 guardband；
+- baseline/shadow 整数目标均通过严格 15%/35%/100%/10% 暴露硬上限；
+- `baseline_batch_hash` 只用于逐字段验证 active/completed/unlinked 关联，不会让 shadow 获得执行权。
+
+研究侧用与目标批次相同的受控 Ed25519 私钥签署：
+
+```bash
+PYTHONPATH=backend .venv/bin/python scripts/commodity_position_manager_shadow_sign.py \
+  --input /path/to/unsigned-position-manager-shadow.json \
+  --output /path/to/signed-position-manager-shadow.json \
+  --private-key-file ~/.config/vnpy-web-bridge/commodity-simnow-ed25519.pem
+```
+
+私钥权限必须为 `0600` 或更严格。签名快照可以原子更新，但 Web Bridge 永远不会把其中的 `shadow_target_quantity` 送到交易接口。
 
 ## 主力切换与到期保护
 

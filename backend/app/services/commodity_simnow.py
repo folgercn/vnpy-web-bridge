@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import calendar
 import hashlib
 import json
 import logging
@@ -28,6 +29,7 @@ from app.core.errors import (
 )
 from app.schemas.commodity_simnow import (
     CommodityPlanExecuteRequestDTO,
+    CommodityPositionManagerShadowDTO,
     CommoditySimNowDisableRequestDTO,
     CommoditySimNowEnableRequestDTO,
     CommodityTemplateStartRequestDTO,
@@ -59,6 +61,20 @@ PRODUCT_SPECS: dict[str, dict[str, Any]] = {
     "sp": {"exchange": "SHFE", "sector": "agriculture", "multiplier": 10, "price_tick": 2.0},
     "zn": {"exchange": "SHFE", "sector": "nonferrous", "multiplier": 5, "price_tick": 5.0},
 }
+
+POSITION_MANAGER_SECTOR_MAP_V1: dict[str, str] = {
+    "ag": "precious",
+    "al": "nonferrous",
+    "au": "precious",
+    "bu": "energy_chemical",
+    "cu": "nonferrous",
+    "rb": "ferrous",
+    "ru": "energy_chemical",
+    "sc": "energy",
+    "sp": "light_industry",
+    "zn": "nonferrous",
+}
+POSITION_MANAGER_GENESIS_SOURCE_MONTH = "2026-08"
 
 
 def _serialized(method):
@@ -233,6 +249,9 @@ class CommoditySimNowService:
                 "manual_cycle_selection": False,
                 "manual_contract_selection": False,
             },
+            "position_manager_shadow": self._position_manager_shadow_snapshot(
+                include_targets=False
+            ),
             "order_endpoint_touched": self.order_endpoint_touched,
             "plan_status": self.current_plan.get("status") if self.current_plan else "IDLE",
             "plan_hash": self.current_plan.get("plan_hash") if self.current_plan else None,
@@ -1214,6 +1233,613 @@ class CommoditySimNowService:
                 "一键策略模板目标文件无效",
                 detail={"error_type": exc.__class__.__name__},
             ) from exc
+
+    @_serialized
+    def position_manager_shadow(self) -> dict[str, Any]:
+        return self._position_manager_shadow_snapshot(include_targets=True)
+
+    def _position_manager_shadow_snapshot(self, *, include_targets: bool) -> dict[str, Any]:
+        path_text = self.settings.commodity_position_manager_shadow_path.strip()
+        if not path_text:
+            return {
+                "configured": False,
+                "valid": False,
+                "mode": "shadow_only",
+                "authority_granted": False,
+                "dispatch_allowed": False,
+            }
+        path = Path(path_text).expanduser()
+        try:
+            if not path.is_file():
+                raise FileNotFoundError(path)
+            if path.stat().st_size > 2 * 1024 * 1024:
+                raise ValueError("shadow snapshot exceeds 2 MiB")
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                raise ValueError("shadow snapshot must contain one JSON object")
+            snapshot = CommodityPositionManagerShadowDTO.model_validate(raw)
+            snapshot_hash = self._verify_position_manager_shadow(snapshot)
+            linked_state, baseline = self._position_manager_linked_baseline(
+                snapshot.baseline_batch_hash
+            )
+            if baseline is not None:
+                self._verify_position_manager_baseline(snapshot, baseline)
+            continuity_state = self._verify_position_manager_continuity(
+                snapshot, snapshot_hash
+            )
+            if baseline is not None:
+                self._save_position_manager_shadow_state(
+                    snapshot, snapshot_hash, continuity_state
+                )
+            targets = [row.model_dump(mode="json") for row in snapshot.targets]
+            result: dict[str, Any] = {
+                "configured": True,
+                "valid": True,
+                "snapshot_hash": snapshot_hash,
+                "snapshot_id": snapshot.snapshot_id,
+                "position_manager_id": snapshot.position_manager_id,
+                "sector_map_id": snapshot.sector_map_id,
+                "mode": snapshot.mode,
+                "baseline_scheduler_id": snapshot.baseline_scheduler_id,
+                "baseline_batch_hash": snapshot.baseline_batch_hash,
+                "baseline_link_state": linked_state,
+                "source_month": snapshot.source_month,
+                "execution_day": snapshot.execution_day.isoformat(),
+                "input_cutoff_day": snapshot.input_cutoff_day.isoformat(),
+                "fast_lookback_days": snapshot.fast_lookback_days,
+                "slow_lookback_days": snapshot.slow_lookback_days,
+                "fast_annual_vol": snapshot.fast_annual_vol,
+                "slow_annual_vol": snapshot.slow_annual_vol,
+                "raw_scale": snapshot.raw_scale,
+                "continuity_mode": snapshot.continuity_mode,
+                "previous_snapshot_hash": snapshot.previous_snapshot_hash,
+                "continuity_state": continuity_state,
+                "continuity_verified": continuity_state in {"genesis", "verified"},
+                "previous_smoothed_scale": snapshot.previous_smoothed_scale,
+                "smoothed_scale": snapshot.smoothed_scale,
+                "target_change_count": sum(
+                    row["baseline_target_quantity"] != row["shadow_target_quantity"]
+                    for row in targets
+                ),
+                "maximum_abs_target_quantity_delta": max(
+                    abs(row["shadow_target_quantity"] - row["baseline_target_quantity"])
+                    for row in targets
+                ),
+                "authority_granted": False,
+                "dispatch_allowed": False,
+            }
+            if include_targets:
+                result["targets"] = targets
+            return result
+        except Exception as exc:
+            return {
+                "configured": True,
+                "valid": False,
+                "mode": "shadow_only",
+                "error_type": exc.__class__.__name__,
+                "authority_granted": False,
+                "dispatch_allowed": False,
+            }
+
+    def _position_manager_linked_baseline(
+        self, baseline_batch_hash: str
+    ) -> tuple[str, dict[str, Any] | None]:
+        candidates = (
+            ("active", self.current_plan, "batch_hash"),
+            ("completed", self._completed_state, "last_completed_batch_hash"),
+        )
+        for state, candidate, hash_field in candidates:
+            if not candidate or candidate.get(hash_field) != baseline_batch_hash:
+                continue
+            if self._position_manager_baseline_is_complete(candidate):
+                return state, candidate
+            return "unlinked", None
+        return "unlinked", None
+
+    @staticmethod
+    def _position_manager_baseline_is_complete(baseline: dict[str, Any]) -> bool:
+        if not all(baseline.get(field) for field in ("source_month", "execution_day")):
+            return False
+        targets = baseline.get("targets")
+        required = {
+            "product",
+            "exact_contract",
+            "target_quantity",
+            "source_target_weight",
+            "buffered_target_weight",
+            "reference_open_price",
+            "multiplier",
+            "price_tick",
+        }
+        return bool(
+            isinstance(targets, list)
+            and len(targets) == len(PRODUCT_SPECS)
+            and all(isinstance(row, dict) and required <= row.keys() for row in targets)
+        )
+
+    def _verify_position_manager_baseline(
+        self,
+        snapshot: CommodityPositionManagerShadowDTO,
+        baseline: dict[str, Any],
+    ) -> None:
+        expected_header = {
+            "baseline_scheduler_id": self.scheduler_id,
+            "source_month": baseline["source_month"],
+            "execution_day": baseline["execution_day"],
+        }
+        observed_header = {
+            "baseline_scheduler_id": snapshot.baseline_scheduler_id,
+            "source_month": snapshot.source_month,
+            "execution_day": snapshot.execution_day.isoformat(),
+        }
+        for field, expected in expected_header.items():
+            if observed_header[field] != expected:
+                raise CommoditySimNowBatchError(
+                    "仓位管理 shadow baseline 批次头不一致",
+                    detail={"field": field, "expected": expected},
+                )
+
+        baseline_targets = {row["product"]: row for row in baseline["targets"]}
+        for row in snapshot.targets:
+            expected = baseline_targets.get(row.product)
+            if expected is None:
+                raise CommoditySimNowBatchError(
+                    "仓位管理 shadow baseline 品种不完整",
+                    detail={"product": row.product},
+                )
+            comparisons = {
+                "exact_contract": (row.exact_contract, expected["exact_contract"]),
+                "target_quantity": (
+                    row.baseline_target_quantity,
+                    expected["target_quantity"],
+                ),
+                "source_target_weight": (
+                    row.baseline_source_target_weight,
+                    expected["source_target_weight"],
+                ),
+                "buffered_target_weight": (
+                    row.baseline_buffered_target_weight,
+                    expected["buffered_target_weight"],
+                ),
+                "reference_open_price": (
+                    row.reference_open_price,
+                    expected["reference_open_price"],
+                ),
+                "multiplier": (row.multiplier, expected["multiplier"]),
+                "price_tick": (row.price_tick, expected["price_tick"]),
+            }
+            for field, (observed, expected_value) in comparisons.items():
+                matches = (
+                    math.isclose(
+                        float(observed),
+                        float(expected_value),
+                        rel_tol=0,
+                        abs_tol=1e-12,
+                    )
+                    if isinstance(observed, float) or isinstance(expected_value, float)
+                    else observed == expected_value
+                )
+                if not matches:
+                    raise CommoditySimNowBatchError(
+                        "仓位管理 shadow baseline 目标字段不一致",
+                        detail={
+                            "product": row.product,
+                            "field": field,
+                            "expected": expected_value,
+                        },
+                    )
+
+    @staticmethod
+    def _position_manager_month(source_month: str) -> tuple[int, int]:
+        try:
+            year_text, month_text = source_month.split("-", 1)
+            year = int(year_text)
+            month = int(month_text)
+            if source_month != f"{year:04d}-{month:02d}" or not 1 <= month <= 12:
+                raise ValueError("invalid source month")
+            date(year, month, 1)
+            return year, month
+        except (TypeError, ValueError) as exc:
+            raise CommoditySimNowBatchError(
+                "仓位管理 shadow source month 无效"
+            ) from exc
+
+    @staticmethod
+    def _position_manager_next_month(source_month: str) -> str:
+        year, month = CommoditySimNowService._position_manager_month(source_month)
+        if month == 12:
+            return f"{year + 1:04d}-01"
+        return f"{year:04d}-{month + 1:02d}"
+
+    def _verify_position_manager_continuity(
+        self,
+        snapshot: CommodityPositionManagerShadowDTO,
+        snapshot_hash: str,
+    ) -> str:
+        previous = self._load_position_manager_shadow_state()
+        if previous and previous["snapshot_hash"] == snapshot_hash:
+            return str(previous["continuity_state"])
+
+        if snapshot.continuity_mode == "genesis":
+            if (
+                previous is not None
+                or snapshot.source_month != POSITION_MANAGER_GENESIS_SOURCE_MONTH
+                or snapshot.previous_snapshot_hash is not None
+                or not math.isclose(
+                    snapshot.previous_smoothed_scale, 1.0, rel_tol=0, abs_tol=1e-12
+                )
+            ):
+                raise CommoditySimNowBatchError(
+                    "仓位管理 shadow genesis 连续性声明无效"
+                )
+            return "genesis"
+
+        if snapshot.previous_snapshot_hash is None:
+            raise CommoditySimNowBatchError(
+                "仓位管理 shadow linked 快照缺少 previous snapshot hash"
+            )
+        if previous is None:
+            return "unlinked"
+        if snapshot.previous_snapshot_hash != previous["snapshot_hash"]:
+            raise CommoditySimNowBatchError(
+                "仓位管理 shadow previous snapshot hash 不一致"
+            )
+        if snapshot.source_month != self._position_manager_next_month(
+            str(previous["source_month"])
+        ):
+            raise CommoditySimNowBatchError(
+                "仓位管理 shadow source month 未按月连续"
+            )
+        if not math.isclose(
+            snapshot.previous_smoothed_scale,
+            float(previous["smoothed_scale"]),
+            rel_tol=0,
+            abs_tol=1e-12,
+        ):
+            raise CommoditySimNowBatchError(
+                "仓位管理 shadow previous scale 与上一期不一致"
+            )
+        return "verified" if previous["continuity_verified"] else "unlinked"
+
+    def _load_position_manager_shadow_state(self) -> dict[str, Any] | None:
+        path = Path(
+            self.settings.commodity_position_manager_shadow_state_path
+        ).expanduser()
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                raise ValueError("invalid continuity state")
+            if raw.get("schema_version") != (
+                "commodity_relative_vol_position_manager_shadow_state_v1"
+            ):
+                raise ValueError("invalid continuity state schema")
+            if not re.fullmatch(r"[0-9a-f]{64}", str(raw.get("snapshot_hash", ""))):
+                raise ValueError("invalid continuity snapshot hash")
+            self._position_manager_month(str(raw.get("source_month", "")))
+            smoothed_scale = float(raw.get("smoothed_scale"))
+            if not math.isfinite(smoothed_scale) or not 0.8 <= smoothed_scale <= 1.2:
+                raise ValueError("invalid continuity scale")
+            if raw.get("continuity_state") not in {"genesis", "verified", "unlinked"}:
+                raise ValueError("invalid continuity status")
+            if not isinstance(raw.get("continuity_verified"), bool):
+                raise ValueError("invalid continuity verified flag")
+            if raw["continuity_verified"] != (
+                raw["continuity_state"] in {"genesis", "verified"}
+            ):
+                raise ValueError("inconsistent continuity status")
+            return raw
+        except (
+            CommoditySimNowBatchError,
+            OSError,
+            TypeError,
+            ValueError,
+            json.JSONDecodeError,
+        ):
+            return None
+
+    def _save_position_manager_shadow_state(
+        self,
+        snapshot: CommodityPositionManagerShadowDTO,
+        snapshot_hash: str,
+        continuity_state: str,
+    ) -> None:
+        payload = {
+            "schema_version": "commodity_relative_vol_position_manager_shadow_state_v1",
+            "snapshot_hash": snapshot_hash,
+            "source_month": snapshot.source_month,
+            "smoothed_scale": snapshot.smoothed_scale,
+            "continuity_state": continuity_state,
+            "continuity_verified": continuity_state in {"genesis", "verified"},
+        }
+        path = Path(
+            self.settings.commodity_position_manager_shadow_state_path
+        ).expanduser()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(f"{path.suffix}.tmp")
+        temporary.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(path)
+
+    def _verify_position_manager_shadow(
+        self, snapshot: CommodityPositionManagerShadowDTO
+    ) -> str:
+        key = self._trusted_keys().get(snapshot.signer_key_id)
+        if key is None:
+            raise CommoditySimNowBatchError("仓位管理 shadow 签名 key_id 不在信任集")
+        payload = snapshot.model_dump(mode="json", exclude={"signature"})
+        canonical = _canonical_json(payload)
+        try:
+            signature = base64.b64decode(snapshot.signature, validate=True)
+            key.verify(signature, canonical)
+        except (InvalidSignature, ValueError, binascii.Error) as exc:
+            raise CommoditySimNowBatchError("仓位管理 shadow Ed25519 签名无效") from exc
+
+        source_year, source_month = self._position_manager_month(snapshot.source_month)
+        expected_cutoff = date(
+            source_year,
+            source_month,
+            calendar.monthrange(source_year, source_month)[1],
+        )
+        if snapshot.input_cutoff_day != expected_cutoff:
+            raise CommoditySimNowBatchError(
+                "仓位管理 shadow 输入截止日不符合 source month PIT 边界",
+                detail={"expected_input_cutoff_day": expected_cutoff.isoformat()},
+            )
+        if snapshot.execution_day.strftime("%Y-%m") != self._position_manager_next_month(
+            snapshot.source_month
+        ):
+            raise CommoditySimNowBatchError(
+                "仓位管理 shadow execution day 必须位于 source month 下一月"
+            )
+        numeric_inputs = {
+            "fast_annual_vol": snapshot.fast_annual_vol,
+            "slow_annual_vol": snapshot.slow_annual_vol,
+            "raw_scale": snapshot.raw_scale,
+            "previous_smoothed_scale": snapshot.previous_smoothed_scale,
+            "smoothed_scale": snapshot.smoothed_scale,
+        }
+        if not all(math.isfinite(value) for value in numeric_inputs.values()):
+            raise CommoditySimNowBatchError(
+                "仓位管理 shadow 波动率或 scale 不是有限数"
+            )
+        expected_raw = float(
+            min(
+                snapshot.scale_max,
+                max(
+                    snapshot.scale_min,
+                    math.sqrt(snapshot.slow_annual_vol / snapshot.fast_annual_vol),
+                ),
+            )
+        )
+        if not math.isclose(snapshot.raw_scale, expected_raw, rel_tol=0, abs_tol=1e-10):
+            raise CommoditySimNowBatchError(
+                "仓位管理 shadow raw scale 与冻结公式不一致",
+                detail={"expected_raw_scale": expected_raw},
+            )
+        expected_smoothed = float(
+            min(
+                snapshot.scale_max,
+                max(
+                    snapshot.scale_min,
+                    snapshot.smoothing_alpha * snapshot.raw_scale
+                    + (1.0 - snapshot.smoothing_alpha) * snapshot.previous_smoothed_scale,
+                ),
+            )
+        )
+        if not math.isclose(
+            snapshot.smoothed_scale, expected_smoothed, rel_tol=0, abs_tol=1e-10
+        ):
+            raise CommoditySimNowBatchError(
+                "仓位管理 shadow smoothed scale 与冻结公式不一致",
+                detail={"expected_smoothed_scale": expected_smoothed},
+            )
+
+        rows = [row.model_dump(mode="json") for row in snapshot.targets]
+        products = [row["product"] for row in rows]
+        if set(products) != set(PRODUCT_SPECS) or len(products) != len(set(products)):
+            raise CommoditySimNowBatchError("仓位管理 shadow 必须且只能包含冻结十品种")
+        for row in rows:
+            self._verify_position_manager_shadow_target(row)
+        baseline_source = {
+            row["product"]: float(row["baseline_source_target_weight"])
+            for row in rows
+        }
+        shadow_source = {
+            row["product"]: float(row["shadow_source_target_weight"])
+            for row in rows
+        }
+        self._verify_position_manager_source_weights(baseline_source)
+        for product in PRODUCT_SPECS:
+            expected_shadow_source = baseline_source[product] * snapshot.smoothed_scale
+            if not math.isclose(
+                shadow_source[product], expected_shadow_source, rel_tol=0, abs_tol=1e-10
+            ):
+                raise CommoditySimNowBatchError(
+                    "仓位管理 shadow source target 未按冻结 scale 生成",
+                    detail={"product": product},
+                )
+        expected_buffers = {
+            "baseline": self._position_manager_guardband(baseline_source),
+            "shadow": self._position_manager_guardband(shadow_source),
+        }
+        for prefix, expected in expected_buffers.items():
+            for row in rows:
+                observed = float(row[f"{prefix}_buffered_target_weight"])
+                if not math.isclose(
+                    observed, expected[row["product"]], rel_tol=0, abs_tol=1e-10
+                ):
+                    raise CommoditySimNowBatchError(
+                        f"仓位管理 shadow {prefix} buffered target 与冻结 guardband 不一致",
+                        detail={"product": row["product"]},
+                    )
+        for prefix in ("baseline", "shadow"):
+            self._verify_position_manager_shadow_portfolio(rows, prefix)
+        return hashlib.sha256(canonical).hexdigest()
+
+    def _verify_position_manager_shadow_target(self, row: dict[str, Any]) -> None:
+        product = row["product"]
+        spec = PRODUCT_SPECS[product]
+        finite_fields = (
+            "baseline_source_target_weight",
+            "shadow_source_target_weight",
+            "baseline_buffered_target_weight",
+            "shadow_buffered_target_weight",
+            "reference_open_price",
+            "price_tick",
+        )
+        if not all(math.isfinite(float(row[field])) for field in finite_fields):
+            raise CommoditySimNowBatchError(
+                "仓位管理 shadow 权重或价格不是有限数",
+                detail={"product": product},
+            )
+        expected_prefix = f"{spec['exchange']}.{product}"
+        if not re.fullmatch(rf"{re.escape(expected_prefix)}\d{{4}}", row["exact_contract"]):
+            raise CommoditySimNowBatchError(
+                "仓位管理 shadow exact contract 与品种不一致",
+                detail={"product": product},
+            )
+        if row["multiplier"] != spec["multiplier"] or not math.isclose(
+            row["price_tick"], spec["price_tick"], rel_tol=0, abs_tol=1e-12
+        ):
+            raise CommoditySimNowBatchError(
+                "仓位管理 shadow 合约规格不一致", detail={"product": product}
+            )
+        for prefix in ("baseline", "shadow"):
+            quantity = int(row[f"{prefix}_target_quantity"])
+            weight = float(row[f"{prefix}_buffered_target_weight"])
+            if abs(quantity) > 500:
+                raise CommoditySimNowBatchError(
+                    "仓位管理 shadow 目标手数超过安全上限",
+                    detail={"product": product, "path": prefix},
+                )
+            if not math.isfinite(weight):
+                raise CommoditySimNowBatchError(
+                    "仓位管理 shadow 权重不是有限数",
+                    detail={"product": product, "path": prefix},
+                )
+            if quantity and (
+                not weight or math.copysign(1, quantity) != math.copysign(1, weight)
+            ):
+                raise CommoditySimNowBatchError(
+                    "仓位管理 shadow 整数目标方向与权重不一致",
+                    detail={"product": product, "path": prefix},
+                )
+
+    def _verify_position_manager_source_weights(
+        self, weights: dict[str, float]
+    ) -> None:
+        if set(weights) != set(PRODUCT_SPECS) or not all(
+            math.isfinite(value) for value in weights.values()
+        ):
+            raise CommoditySimNowBatchError("仓位管理 baseline source target 不完整")
+        if max(abs(value) for value in weights.values()) > 0.20 + 1e-12:
+            raise CommoditySimNowBatchError("仓位管理 baseline source target 超过产品上限")
+        if sum(abs(value) for value in weights.values()) > 1.0 + 1e-12:
+            raise CommoditySimNowBatchError("仓位管理 baseline source target 超过 gross 上限")
+        if abs(sum(weights.values())) > 1e-10:
+            raise CommoditySimNowBatchError("仓位管理 baseline source target 不是净额零")
+        for sector in set(POSITION_MANAGER_SECTOR_MAP_V1.values()):
+            gross = sum(
+                abs(weights[product])
+                for product in PRODUCT_SPECS
+                if POSITION_MANAGER_SECTOR_MAP_V1[product] == sector
+            )
+            if gross > 0.35 + 1e-12:
+                raise CommoditySimNowBatchError(
+                    "仓位管理 baseline source target 超过板块上限",
+                    detail={"sector": sector},
+                )
+
+    def _position_manager_guardband(
+        self, source: dict[str, float]
+    ) -> dict[str, float]:
+        weights = {
+            product: float(min(0.12, max(-0.12, source[product])))
+            for product in PRODUCT_SPECS
+        }
+        for sector in sorted(set(POSITION_MANAGER_SECTOR_MAP_V1.values())):
+            members = [
+                product
+                for product in PRODUCT_SPECS
+                if POSITION_MANAGER_SECTOR_MAP_V1[product] == sector
+            ]
+            sector_gross = sum(abs(weights[product]) for product in members)
+            if sector_gross > 0.27:
+                scale = 0.27 / sector_gross
+                for product in members:
+                    weights[product] *= scale
+        gross = sum(abs(value) for value in weights.values())
+        if gross > 0.80:
+            scale = 0.80 / gross
+            weights = {product: value * scale for product, value in weights.items()}
+        positive = sum(max(value, 0.0) for value in weights.values())
+        negative = sum(max(-value, 0.0) for value in weights.values())
+        if min(positive, negative) <= 1e-14:
+            return {product: 0.0 for product in PRODUCT_SPECS}
+        if positive > negative:
+            scale = negative / positive
+            return {
+                product: value * scale if value > 0 else value
+                for product, value in weights.items()
+            }
+        if negative > positive:
+            scale = positive / negative
+            return {
+                product: value * scale if value < 0 else value
+                for product, value in weights.items()
+            }
+        return weights
+
+    def _verify_position_manager_shadow_portfolio(
+        self, rows: list[dict[str, Any]], prefix: str
+    ) -> None:
+        weights = {
+            row["product"]: float(row[f"{prefix}_buffered_target_weight"])
+            for row in rows
+        }
+        if max(abs(value) for value in weights.values()) > 0.12 + 1e-12:
+            raise CommoditySimNowBatchError(f"仓位管理 shadow {prefix} 超过产品 buffer")
+        if sum(abs(value) for value in weights.values()) > 0.8 + 1e-12:
+            raise CommoditySimNowBatchError(f"仓位管理 shadow {prefix} 超过 gross buffer")
+        if abs(sum(weights.values())) > 1e-10:
+            raise CommoditySimNowBatchError(f"仓位管理 shadow {prefix} 不是净额零")
+        for sector in set(POSITION_MANAGER_SECTOR_MAP_V1.values()):
+            gross = sum(
+                abs(weights[product])
+                for product in PRODUCT_SPECS
+                if POSITION_MANAGER_SECTOR_MAP_V1[product] == sector
+            )
+            if gross > 0.27 + 1e-12:
+                raise CommoditySimNowBatchError(
+                    f"仓位管理 shadow {prefix} 超过板块 buffer",
+                    detail={"sector": sector},
+                )
+        exposures = {
+            row["product"]: int(row[f"{prefix}_target_quantity"])
+            * float(row["reference_open_price"])
+            * int(row["multiplier"])
+            / self.virtual_nav_cny
+            for row in rows
+        }
+        if max(abs(value) for value in exposures.values()) >= 0.15:
+            raise CommoditySimNowBatchError(f"仓位管理 shadow {prefix} 超过产品硬上限")
+        if sum(abs(value) for value in exposures.values()) >= 1.0:
+            raise CommoditySimNowBatchError(f"仓位管理 shadow {prefix} 超过 gross 硬上限")
+        if abs(sum(exposures.values())) >= 0.10:
+            raise CommoditySimNowBatchError(f"仓位管理 shadow {prefix} 超过净敞口硬上限")
+        for sector in set(POSITION_MANAGER_SECTOR_MAP_V1.values()):
+            gross = sum(
+                abs(exposures[product])
+                for product in PRODUCT_SPECS
+                if POSITION_MANAGER_SECTOR_MAP_V1[product] == sector
+            )
+            if gross >= 0.35:
+                raise CommoditySimNowBatchError(
+                    f"仓位管理 shadow {prefix} 超过板块硬上限",
+                    detail={"sector": sector},
+                )
 
     def _halt_if_delivery_guard_breached(self, trading_day: date) -> dict[str, Any] | None:
         violations: list[dict[str, Any]] = []
@@ -2780,14 +3406,7 @@ class CommoditySimNowService:
             "source_month": plan["source_month"],
             "execution_day": plan["execution_day"],
             "roll_products": plan.get("roll_products", []),
-            "targets": [
-                {
-                    "product": row["product"],
-                    "exact_contract": row["exact_contract"],
-                    "target_quantity": row["target_quantity"],
-                }
-                for row in plan["targets"]
-            ],
+            "targets": plan["targets"],
             "execution": plan.get("execution"),
         }
         path = Path(self.settings.commodity_simnow_state_path)
