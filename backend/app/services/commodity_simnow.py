@@ -20,6 +20,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from app.core.config import Settings, get_settings
 from app.core.errors import (
+    AppError,
     CommoditySimNowBatchError,
     CommoditySimNowDisabledError,
     CommoditySimNowSafetyError,
@@ -202,6 +203,12 @@ class CommoditySimNowService:
             "auto_dispatch_interval_seconds": self.settings.commodity_simnow_auto_dispatch_interval_seconds,
             "auto_dispatch_reconcile_grace_seconds": (
                 self.settings.commodity_simnow_auto_dispatch_reconcile_grace_seconds
+            ),
+            "submission_outcome_grace_seconds": (
+                self.settings.commodity_simnow_submission_outcome_grace_seconds
+            ),
+            "submission_outcome_min_empty_snapshots": (
+                self.settings.commodity_simnow_submission_outcome_min_empty_snapshots
             ),
             "strategy_template": {
                 "template_id": "STATIC_CORE_EQUAL_AUTO_V1",
@@ -468,6 +475,7 @@ class CommoditySimNowService:
             "CLOSE_RECONCILIATION_MISMATCH",
             "OPEN_RECONCILIATION_MISMATCH",
             "CANCEL_PENDING",
+            "SUBMISSION_OUTCOME_UNKNOWN",
             "HALTED_RECONCILE_REQUIRED",
             "HALTED_RECONCILED",
             "HALTED_PRE_SUBMIT_SAFE",
@@ -622,6 +630,7 @@ class CommoditySimNowService:
         plan["status"] = f"SUBMITTING_{payload.phase.upper()}"
         self._persist_active_plan()
         submitted: list[dict[str, Any]] = []
+        current_intent: dict[str, Any] | None = None
         try:
             for order, repriced in zip(orders, repriced_orders, strict=True):
                 intent = {
@@ -642,6 +651,7 @@ class CommoditySimNowService:
                     existing_intent.clear()
                     existing_intent.update(intent)
                     intent = existing_intent
+                current_intent = intent
                 self._persist_active_plan()
                 request = OrderRequestDTO(
                     symbol=repriced["symbol"],
@@ -676,7 +686,16 @@ class CommoditySimNowService:
                 self._persist_active_plan()
                 self.order_endpoint_touched = True
         except Exception as exc:
+            if current_intent is not None:
+                deterministic_rejection = self._is_deterministic_pre_rpc_rejection(exc)
+                current_intent["intent_status"] = (
+                    "REJECTED_PRE_RPC" if deterministic_rejection else "OUTCOME_UNKNOWN"
+                )
+                current_intent["error_type"] = exc.__class__.__name__
+                current_intent["error_code"] = getattr(exc, "code", None)
+                current_intent["failed_at_utc"] = self.clock().astimezone(timezone.utc).isoformat()
             plan["status"] = f"{payload.phase.upper()}_SUBMISSION_PARTIAL"
+            self._persist_active_plan()
             halt = self._begin_safe_halt(
                 "partial_submission",
                 operator=operator,
@@ -709,8 +728,17 @@ class CommoditySimNowService:
                 source_ip=source_ip,
             )
             raise CommoditySimNowStateError(
-                "委托部分提交，必须人工检查并处理",
-                detail={"phase": payload.phase, "submitted_order_ids": [row.get("vt_orderid") for row in submitted]},
+                (
+                    "委托部分提交，必须人工检查并处理"
+                    if submitted
+                    else "首单提交结果已进入 send-intent outcome 确认"
+                ),
+                detail={
+                    "phase": payload.phase,
+                    "submitted_order_ids": [row.get("vt_orderid") for row in submitted],
+                    "intent_status": current_intent.get("intent_status") if current_intent else None,
+                    "plan_status": plan.get("status"),
+                },
             ) from exc
 
         plan["submitted_at_utc"][payload.phase] = self.clock().astimezone(timezone.utc).isoformat()
@@ -847,7 +875,10 @@ class CommoditySimNowService:
         role: str | None = "system",
         source_ip: str | None = None,
     ) -> dict[str, Any]:
-        if self.current_plan and self.current_plan.get("status") == "CANCEL_PENDING":
+        if self.current_plan and self.current_plan.get("status") in {
+            "CANCEL_PENDING",
+            "SUBMISSION_OUTCOME_UNKNOWN",
+        }:
             return self._advance_cancel_pending(
                 operator=operator,
                 source_ip=source_ip,
@@ -1158,6 +1189,7 @@ class CommoditySimNowService:
         previous_status = str(plan.get("status") or "")
         continuing_halt = previous_status in {
             "CANCEL_PENDING",
+            "SUBMISSION_OUTCOME_UNKNOWN",
             "HALTED_RECONCILE_REQUIRED",
             "HALTED_RECONCILED",
             "HALTED_PRE_SUBMIT_SAFE",
@@ -1174,9 +1206,10 @@ class CommoditySimNowService:
         halt["requested_at_utc"] = self.clock().astimezone(timezone.utc).isoformat()
         submission_recovery_status = (
             previous_status
-            if previous_status in {"SUBMITTING_CLOSE", "SUBMITTING_OPEN"}
+            if self._submission_recovery_phase(previous_status)
             else str(halt.get("previous_status") or "")
         )
+        submission_recovery_phase = self._submission_recovery_phase(submission_recovery_status)
         if previous_status in {"READY_CLOSE", "READY_OPEN", "HALTED_PRE_SUBMIT_SAFE"}:
             resume_status = str(halt.get("resume_status") or previous_status)
             if resume_status == "HALTED_PRE_SUBMIT_SAFE":
@@ -1218,53 +1251,108 @@ class CommoditySimNowService:
 
         orders_snapshot: list[dict[str, Any]] | None = None
         try:
-            if submission_recovery_status in {"SUBMITTING_CLOSE", "SUBMITTING_OPEN"}:
+            if submission_recovery_phase:
                 orders_snapshot = self.rpc.get_orders()
                 trades_snapshot = self.rpc.get_trades()
                 evidence_references = self._recover_send_intent_evidence(
                     plan,
                     orders_snapshot,
                     trades_snapshot,
+                    phases=(submission_recovery_phase,),
                 )
                 halt["submission_evidence_references"] = evidence_references
                 self._persist_active_plan()
-                submitting_phase = "close" if submission_recovery_status == "SUBMITTING_CLOSE" else "open"
                 active_before = self._active_plan_orders_from_snapshot(plan, orders_snapshot)
-                has_persisted_submission = bool(plan.get("submitted", {}).get(submitting_phase))
+                has_persisted_submission = bool(plan.get("submitted", {}).get(submission_recovery_phase))
                 if not evidence_references and not has_persisted_submission and not active_before:
-                    pre_phase_expected = self._phase_pre_positions(plan, submitting_phase)
+                    pre_phase_expected = self._phase_pre_positions(plan, submission_recovery_phase)
                     observed = self._signed_positions(self._position_snapshot())
                     if observed == pre_phase_expected:
-                        for intent in plan.get("send_intents", {}).get(submitting_phase, []):
-                            intent["intent_status"] = "NO_EVIDENCE_SAFE"
-                            intent["checked_at_utc"] = self.clock().astimezone(timezone.utc).isoformat()
+                        intents = plan.get("send_intents", {}).get(submission_recovery_phase, [])
+                        deterministic_no_send = not intents or all(
+                            intent.get("intent_status") == "REJECTED_PRE_RPC" for intent in intents
+                        )
+                        now_utc = self.clock().astimezone(timezone.utc)
+                        checks = halt.setdefault("empty_submission_snapshots", [])
+                        snapshot = {
+                            "captured_at_utc": now_utc.isoformat(),
+                            "positions_hash": _sha256_json(observed),
+                        }
+                        if not checks or checks[-1] != snapshot:
+                            checks.append(snapshot)
+                        halt.setdefault("first_empty_snapshot_at_utc", now_utc.isoformat())
+                        first_empty = _parse_datetime(halt["first_empty_snapshot_at_utc"])
+                        elapsed = (now_utc - first_empty).total_seconds() if first_empty else 0.0
+                        enough_stable_snapshots = (
+                            len(checks)
+                            >= self.settings.commodity_simnow_submission_outcome_min_empty_snapshots
+                            and elapsed
+                            >= self.settings.commodity_simnow_submission_outcome_grace_seconds
+                            and len({row["positions_hash"] for row in checks}) == 1
+                        )
+                        if deterministic_no_send or enough_stable_snapshots:
+                            for intent in intents:
+                                if intent.get("intent_status") != "REJECTED_PRE_RPC":
+                                    intent["intent_status"] = "NO_EVIDENCE_STABLE"
+                                intent["checked_at_utc"] = now_utc.isoformat()
+                            halt.update(
+                                {
+                                    "phase": submission_recovery_phase,
+                                    "resume_status": f"READY_{submission_recovery_phase.upper()}",
+                                    "pre_phase_expected_positions": pre_phase_expected,
+                                    "active_order_ids": [],
+                                    "orders_snapshot_available": True,
+                                    "trades_snapshot_available": True,
+                                }
+                            )
+                            plan["status"] = "HALTED_PRE_SUBMIT_SAFE"
+                            self._persist_active_plan()
+                            result = {
+                                "required": False,
+                                "reason": reason,
+                                "status": plan["status"],
+                                "phase": submission_recovery_phase,
+                                "resume_status": halt["resume_status"],
+                                "pre_phase_expected_positions": pre_phase_expected,
+                                "cancel_requested_order_ids": [],
+                                "active_order_ids": [],
+                                "orders_snapshot_available": True,
+                                "trades_snapshot_available": True,
+                                "submission_evidence_references": [],
+                                "empty_snapshot_count": len(checks),
+                                "outcome_grace_elapsed_seconds": elapsed,
+                            }
+                            self._event(
+                                "safe_halt_submitting_without_evidence",
+                                plan_hash=plan.get("plan_hash"),
+                                result=result,
+                            )
+                            return result
+                        plan["status"] = "SUBMISSION_OUTCOME_UNKNOWN"
                         halt.update(
                             {
-                                "phase": submitting_phase,
-                                "resume_status": f"READY_{submitting_phase.upper()}",
-                                "pre_phase_expected_positions": pre_phase_expected,
+                                "phase": submission_recovery_phase,
                                 "active_order_ids": [],
                                 "orders_snapshot_available": True,
                                 "trades_snapshot_available": True,
                             }
                         )
-                        plan["status"] = "HALTED_PRE_SUBMIT_SAFE"
                         self._persist_active_plan()
                         result = {
-                            "required": False,
+                            "required": True,
                             "reason": reason,
                             "status": plan["status"],
-                            "phase": submitting_phase,
-                            "resume_status": halt["resume_status"],
-                            "pre_phase_expected_positions": pre_phase_expected,
+                            "phase": submission_recovery_phase,
                             "cancel_requested_order_ids": [],
                             "active_order_ids": [],
                             "orders_snapshot_available": True,
                             "trades_snapshot_available": True,
                             "submission_evidence_references": [],
+                            "empty_snapshot_count": len(checks),
+                            "outcome_grace_elapsed_seconds": elapsed,
                         }
                         self._event(
-                            "safe_halt_submitting_without_evidence",
+                            "submission_outcome_unknown",
                             plan_hash=plan.get("plan_hash"),
                             result=result,
                         )
@@ -1290,7 +1378,7 @@ class CommoditySimNowService:
             return result
 
         halt["orders_snapshot_available"] = True
-        if submission_recovery_status in {"SUBMITTING_CLOSE", "SUBMITTING_OPEN"}:
+        if submission_recovery_phase:
             halt["trades_snapshot_available"] = True
         halt.pop("last_rpc_error_type", None)
         halt.pop("last_rpc_error_at_utc", None)
@@ -1358,6 +1446,12 @@ class CommoditySimNowService:
             operator=operator,
             source_ip=source_ip,
         )
+        if halt.get("status") == "SUBMISSION_OUTCOME_UNKNOWN":
+            return {
+                "action": "submission_outcome_unknown",
+                "halt": halt,
+                **self.status(),
+            }
         if halt.get("status") == "CANCEL_PENDING":
             return {
                 "action": "cancel_pending",
@@ -1365,6 +1459,8 @@ class CommoditySimNowService:
                 "halt": halt,
                 **self.status(),
             }
+        if halt.get("status") == "HALTED_PRE_SUBMIT_SAFE":
+            return {"action": "halted_pre_submit_safe", "halt": halt, **self.status()}
         self._event(
             "safe_halt_cancellations_complete",
             plan_hash=plan.get("plan_hash"),
@@ -1407,14 +1503,33 @@ class CommoditySimNowService:
     def _phase_pre_positions(self, plan: dict[str, Any], phase: str) -> dict[str, int]:
         return plan["previous_positions"] if phase == "close" else plan["expected_after_close"]
 
+    def _is_deterministic_pre_rpc_rejection(self, exc: Exception) -> bool:
+        if not isinstance(exc, AppError):
+            return False
+        code = str(exc.code or "")
+        return code.startswith("RISK_") or code in {
+            "TRADE_DISABLED",
+            "ORDER_CONFIRM_REQUIRED",
+            "INVALID_ORDER_REQUEST",
+        }
+
+    def _submission_recovery_phase(self, status: str) -> str | None:
+        if status in {"SUBMITTING_CLOSE", "CLOSE_SUBMISSION_PARTIAL"}:
+            return "close"
+        if status in {"SUBMITTING_OPEN", "OPEN_SUBMISSION_PARTIAL"}:
+            return "open"
+        return None
+
     def _recover_send_intent_evidence(
         self,
         plan: dict[str, Any],
         orders: list[dict[str, Any]],
         trades: list[dict[str, Any]],
+        *,
+        phases: tuple[str, ...] = ("close", "open"),
     ) -> list[str]:
         evidence_references: set[str] = set()
-        for phase in ("close", "open"):
+        for phase in phases:
             submitted = plan.setdefault("submitted", {}).setdefault(phase, [])
             submitted_references = {
                 str(row.get("reference") or "") for row in submitted if row.get("reference")
@@ -1490,7 +1605,8 @@ class CommoditySimNowService:
         current_status = str(plan.get("status") or "")
         status = (
             str(plan.get("halt", {}).get("resume_status") or plan.get("halt", {}).get("previous_status") or "")
-            if current_status.startswith("HALTED") or current_status == "CANCEL_PENDING"
+            if current_status.startswith("HALTED")
+            or current_status in {"CANCEL_PENDING", "SUBMISSION_OUTCOME_UNKNOWN"}
             else current_status
         )
         if "CLOSE" in status:
@@ -1524,6 +1640,53 @@ class CommoditySimNowService:
             halt = plan.get("halt", {})
             resume_status = str(halt.get("resume_status") or "")
             expected = halt.get("pre_phase_expected_positions")
+            phase = "close" if resume_status == "READY_CLOSE" else "open"
+            intents = plan.get("send_intents", {}).get(phase, [])
+            uncertain_intents = [
+                intent for intent in intents if intent.get("intent_status") != "REJECTED_PRE_RPC"
+            ]
+            if uncertain_intents:
+                try:
+                    orders = self.rpc.get_orders()
+                    trades = self.rpc.get_trades()
+                    evidence = self._recover_send_intent_evidence(
+                        plan,
+                        orders,
+                        trades,
+                        phases=(phase,),
+                    )
+                except Exception as exc:
+                    plan["status"] = "SUBMISSION_OUTCOME_UNKNOWN"
+                    halt["previous_status"] = f"SUBMITTING_{phase.upper()}"
+                    halt["last_rpc_error_type"] = exc.__class__.__name__
+                    halt["last_rpc_error_at_utc"] = self.clock().astimezone(timezone.utc).isoformat()
+                    self._persist_active_plan()
+                    self._revoke_auto_dispatch()
+                    self.enabled = False
+                    self.manual_approval = False
+                    self.simnow_mode = False
+                    raise CommoditySimNowStateError(
+                        "重新授权前无法确认历史 send intent 结果",
+                        detail={"phase": phase, "rpc_error_type": exc.__class__.__name__},
+                    ) from exc
+                if evidence:
+                    halt["previous_status"] = f"SUBMITTING_{phase.upper()}"
+                    halt["submission_evidence_references"] = evidence
+                    plan["status"] = "CANCEL_PENDING"
+                    self._persist_active_plan()
+                    halt_result = self._begin_safe_halt(
+                        "late_submission_evidence_before_reauthorization",
+                        operator="commodity-simnow-reauthorization",
+                        source_ip=None,
+                        phase=phase,
+                    )
+                    self.enabled = False
+                    self.manual_approval = False
+                    self.simnow_mode = False
+                    raise CommoditySimNowStateError(
+                        "重新授权前发现迟到委托或成交证据，已进入撤单收口",
+                        detail={"phase": phase, "evidence_references": evidence, "halt": halt_result},
+                    )
             observed = self._signed_positions(self._position_snapshot())
             if resume_status not in {"READY_CLOSE", "READY_OPEN"} or observed != expected:
                 plan["status"] = "HALTED_RECONCILE_REQUIRED"
