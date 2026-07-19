@@ -4,11 +4,12 @@
 
 Web Bridge 接入的是已冻结的商品组合执行控制面，不在运行时重新搜索参数或计算研究信号。研究侧每月输出一个 Ed25519 签名的 exact-contract 整数目标批次，Web Bridge 只在已核验的 SimNow 账户上完成：
 
-1. 校验冻结策略、签名、批次链、合约规格、敞口和当前持仓。
+1. 校验冻结策略、签名、批次链、合约规格、签名参考价敞口和当前持仓。
 2. 用新鲜盘口生成限价拆单计划。
-3. 在一次显式 SimNow 自动派单授权后，后台 worker 自动提交平仓阶段。
-4. 委托结束且持仓对账通过后，自动提交开仓阶段。
-5. 最终持仓完全匹配后保存完成状态和真实成交/滑点快照。
+3. 用实时可成交保护价重新核算完整目标组合敞口，并按“持仓 + 活动开仓单 + 本阶段全部子单”校验单合约上限。
+4. 在一次显式 SimNow 自动派单授权后，后台 worker 自动提交平仓阶段。
+5. 委托结束且持仓对账通过后，自动提交开仓阶段。
+6. 最终持仓完全匹配后保存完成状态和真实成交/滑点快照。
 
 策略页提供 `一键启动`。运行参数不是由用户临时选择：品种固定为十品种、再平衡周期固定为月度，主力 exact contract 由冻结研究流水线按 PIT 持仓量链生成并写入签名目标文件。部署环境配置一次目标文件路径后，日常启动不需要手选品种、周期或合约。
 
@@ -103,7 +104,7 @@ COMMODITY_SIMNOW_SC_PRE_DELIVERY_CUTOFF_DAY=15
 
 研究流水线必须先写临时文件并用同文件系统的原子 rename 替换 `COMMODITY_SIMNOW_TEMPLATE_BATCH_PATH`，不要原地覆盖。控制器只读取单个不超过 2 MiB 的 v2 JSON；文件缺失、半写、schema 错误、签名错误、批次链错误或合约到期保护失败都会撤销本次模板和自动派单授权。
 
-通用风控仍然生效。`RISK_MAX_ORDER_VOLUME` 必须不小于计划中的单笔拆单手数，`RISK_MAX_SYMBOL_POSITION` 必须覆盖签名目标；不要为了通过执行而关闭交易所、价格、持仓或日亏损校验。
+通用风控仍然生效。`RISK_MAX_ORDER_VOLUME` 必须不小于计划中的单笔拆单手数；控制器会在阶段零提交之前，按当前持仓、已有活动开仓委托和本阶段全部子单累计校验 `RISK_MAX_SYMBOL_POSITION`，拆单不能绕过单合约上限。不要为了通过执行而关闭交易所、价格、持仓或日亏损校验。
 
 ## 目标批次与签名
 
@@ -117,7 +118,8 @@ commodity_static_core_equal_target_batch_v2
 
 - `execution_lane=simnow_shakedown` 时，`execution_day` 可以是部署或运行当天；`source_month` 只要求不晚于当天所在月份，计划和完成状态均明确标记 `countable_forward=false`。
 - `execution_lane=official_forward` 时，`source_month` 不得早于 `2026-08`，且 `execution_day` 必须在 source month 的下一个自然月；计划标记 `countable_forward=true`。
-- 两条通道都只能在 `execution_day` 当天预览和执行，且都使用相同的签名、SimNow 账户白名单、风控、两阶段派单与持仓对账。
+- `execution_day` 使用期货交易日语义，不是上海自然日；夜盘 21:00 后及跨午夜后的同一夜盘归属同一个 trading day。
+- 两条通道都只能在 `execution_day` 对应交易日预览和执行，且都使用相同的签名、SimNow 账户白名单、风控、两阶段派单与持仓对账。
 - 冷启动十个 `previous_target_quantity` 都为 `0`，`previous_batch_hash=null`。
 - 后续批次必须逐品种携带上一个完成状态的 `previous_exact_contract` 和手数，包括零手品种。
 - `exact_contract` 使用 `SHFE.ag2609` 形式；API 下单前转换为 vn.py 的 `ag2609.SHFE`。
@@ -137,7 +139,7 @@ commodity_static_core_equal_target_batch_v2
 
 - SHFE 冻结品种默认从交割月第 1 个自然日起拒绝继续持有或新开该交割月合约。
 - INE 原油 `sc` 的最后交易日在交割月之前，默认从交割前月第 15 个自然日起拒绝该月合约。
-- worker 发现目标仍是旧文件、未来文件或已消费文件，同时账户还持有进入保护区间的合约，会撤销模板和自动派单授权并记录 `strategy_template_delivery_guard_halted`。
+- worker 发现目标仍是旧文件、未来文件或已消费文件，同时账户还持有进入保护区间的合约，会进入安全停机、定向撤销本计划活动委托，并记录 `strategy_template_delivery_guard_halted`。
 
 保护触发后不会绕过签名擅自生成清仓目标，也不会静默换到一个未经研究流水线确认的合约；必须检查目标生产任务、委托和持仓后，发布新的已签名换月或目标归零批次再重新一键启动。目标归零批次允许只平旧到期合约且不再开仓。[上期所交割管理办法](https://www.shfe.com.cn/regulation/exchangerules/otherrules/202508/t20250807_828519.html)要求自然人持仓在最后交易日前第五个交易日收盘后归零；[能源中心风险控制管理细则](https://www.ine.cn/regulation/ineregulation/rules/202606/t20260622_832199.html)要求不能交收发票的原油个人客户在最后交易日前第八个交易日收盘后归零。因此这里使用更早的日历硬截止，而不是把交易所强平日当作策略换月日。
 
@@ -182,11 +184,19 @@ POST /api/commodity-simnow/disable
 }
 ```
 
-`preview` 只接受当日有效的签名目标；需要部署后立即成交时，研究侧签发当日 `execution_lane=simnow_shakedown` 批次即可，不需要等到 2026-09。成功后 worker 以一秒间隔自动推进。平仓委托未全部结束、持仓未达到 `expected_after_close` 时不会开仓。发生部分提交时状态进入 `*_SUBMISSION_PARTIAL`，自动派单授权立即撤销。若活动委托已消失但持仓在 30 秒宽限期后仍不匹配，则进入 `*_RECONCILIATION_MISMATCH` 并停止自动推进。两种情况都不会自动重试或进入下一阶段，必须人工检查 SimNow 委托和持仓。
+`preview` 只接受当前期货交易日有效的签名目标；需要部署后立即成交时，研究侧签发当日 `execution_lane=simnow_shakedown` 批次即可，不需要等到 2026-09。preview 和每个开仓阶段提交前都会按最新盘口保护价重新核算完整 `expected_final_positions` 的产品、板块、gross 和净敞口；超限时整阶段零提交。成功后 worker 以一秒间隔自动推进，平仓委托未全部结束、持仓未达到 `expected_after_close` 时不会开仓。
+
+人工 disable、emergency stop、跨交易日、到期保护、部分提交或终态对账超时都会进入统一安全停机：
+
+```text
+CANCEL_PENDING -> 定向撤销本计划活动委托 -> HALTED_RECONCILE_REQUIRED
+```
+
+撤单完成前保留计划、submitted order ids 和取消记录；即使自动派单和 Web 交易开关已经关闭，`reconcile` 仍允许执行只读收口对账。持仓匹配后状态为 `HALTED_RECONCILED`；不匹配时保持 `HALTED_RECONCILE_REQUIRED`，绝不会自动进入下一阶段。若停机发生在平仓阶段，只有重新提交完整 SimNow 授权后才会恢复为 `READY_OPEN`。
 
 `GET /api/commodity-simnow/plan` 的 `execution` 包含每笔订单的实际成交量、成交均价、决策价、提交价、adverse slippage ticks、滑点金额和总 fill ratio。负的 adverse slippage 表示价格改善。成交快照来自 vn.py 的真实 order/trade 查询；如果 RPC 不提供成交查询，会明确返回 `available=false`，但仍以活动委托和权威持仓决定是否完成对账。
 
-手工 `execute/reconcile` 接口保留为运维回退路径。进程重启会丢弃未完成的内存计划并撤销内存中的自动授权，已完成批次链保留在状态文件中；重启后在策略页重新一键启动即可，不需要重新选择品种、周期或主力合约。
+手工 `execute/reconcile` 接口保留为运维回退路径。未完成计划会原子保存到 `COMMODITY_SIMNOW_STATE_PATH` 同目录的 `*.active.json`，包括状态、submitted order ids 和停机撤单记录。进程重启后控制器恢复该计划，保持自动授权关闭，先定向撤销仍活动的计划委托，再进入 `HALTED_RECONCILE_REQUIRED`；完成只读收口对账后才能加载新目标。已完成批次链继续保存在配置的状态文件中。
 
 ## 验收
 
@@ -197,4 +207,4 @@ PYTHONPATH=backend .venv/bin/python -m pytest -q backend/tests/unit/test_commodi
 PYTHONPATH=backend .venv/bin/python -m pytest -q backend/tests/unit/test_commodity_simnow_api.py
 ```
 
-真实 SimNow 验收必须在本地 RPC 地址、账户哈希、公钥和当日合法签名目标都配置完成后执行。部署验收使用 `simnow_shakedown`，立即产生真实 SimNow 委托和成交；只有 `official_forward` 结果可以计入冻结策略的正式 forward 证据。未满足运行配置时，只能声明控制器和测试已就绪，不能声明真实 SimNow 已运行。
+真实 SimNow 验收必须在本地 RPC 地址、账户哈希、公钥和当日合法签名目标都配置完成后执行。至少覆盖：账户哈希核验、签名零目标/no-op、最小平衡手数真实下单、部分成交与撤单、进程重启恢复、紧急停止及活动订单收口。部署验收使用 `simnow_shakedown`；只有 `official_forward` 结果可以计入冻结策略的正式 forward 证据。未满足运行配置时，只能声明控制器和测试已就绪，不能声明真实 SimNow 已运行。

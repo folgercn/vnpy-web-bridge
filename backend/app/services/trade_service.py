@@ -111,12 +111,14 @@ class TradeService:
         *,
         source_ip: str | None = None,
         operator: str = "anonymous",
+        bypass_trade_check: bool = False,
     ) -> dict[str, Any]:
         payload = payload or CancelRequestDTO()
         request_data = {"vt_orderid": vt_orderid, **payload.model_dump()}
         self.audit.record(action="cancel_request", request=request_data, operator=operator, source_ip=source_ip)
         try:
-            self.risk.check_trade_allowed(confirm=True)
+            if not bypass_trade_check:
+                self.risk.check_trade_allowed(confirm=True)
             order = rpc_service.get_order_raw(vt_orderid)
             if not order:
                 raise OrderNotFoundError(detail={"vt_orderid": vt_orderid})

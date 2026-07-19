@@ -126,6 +126,22 @@ def test_cancel_order_not_cancelable(monkeypatch, tmp_path) -> None:
         service.cancel_order("CTP.done", CancelRequestDTO())
 
 
+def test_cancel_order_can_bypass_trade_check_for_emergency_stop(monkeypatch, tmp_path) -> None:
+    service = make_service(tmp_path, enabled=False)
+    monkeypatch.setattr(rpc_service, "get_order_raw", lambda _: FakeOrder())
+    calls = []
+    monkeypatch.setattr(
+        rpc_service,
+        "cancel_order",
+        lambda request, gateway: calls.append((request, gateway)),
+    )
+
+    result = service.cancel_order("CTP.1", bypass_trade_check=True)
+
+    assert result["cancel_requested"] is True
+    assert calls == [({"vt_orderid": "CTP.1"}, "CTP")]
+
+
 def test_cancel_all_returns_partial_failures(monkeypatch, tmp_path) -> None:
     service = make_service(tmp_path)
     orders = [FakeOrder(vt_orderid="CTP.1"), FakeOrder(vt_orderid="CTP.2")]
