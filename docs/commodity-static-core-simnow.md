@@ -118,7 +118,7 @@ commodity_static_core_equal_target_batch_v2
 
 - `execution_lane=simnow_shakedown` 时，`execution_day` 可以是部署或运行当天；`source_month` 只要求不晚于当天所在月份，计划和完成状态均明确标记 `countable_forward=false`。
 - `execution_lane=official_forward` 时，`source_month` 不得早于 `2026-08`，且 `execution_day` 必须在 source month 的下一个自然月；计划标记 `countable_forward=true`。
-- `execution_day` 使用期货交易日语义，不是上海自然日；夜盘 21:00 后及跨午夜后的同一夜盘归属同一个 trading day。
+- `execution_day`、shakedown source month 和全部到期保护统一使用期货交易日语义，不是上海自然日；夜盘 21:00 后及跨午夜后的同一夜盘归属同一个 trading day。
 - 两条通道都只能在 `execution_day` 对应交易日预览和执行，且都使用相同的签名、SimNow 账户白名单、风控、两阶段派单与持仓对账。
 - 冷启动十个 `previous_target_quantity` 都为 `0`，`previous_batch_hash=null`。
 - 后续批次必须逐品种携带上一个完成状态的 `previous_exact_contract` 和手数，包括零手品种。
@@ -137,8 +137,8 @@ commodity_static_core_equal_target_batch_v2
 
 硬到期保护比交易所强平边界更保守：
 
-- SHFE 冻结品种默认从交割月第 1 个自然日起拒绝继续持有或新开该交割月合约。
-- INE 原油 `sc` 的最后交易日在交割月之前，默认从交割前月第 15 个自然日起拒绝该月合约。
+- SHFE 冻结品种在所属交易日进入交割月后即拒绝继续持有或新开该交割月合约；月末夜盘按下一交易日判断。
+- INE 原油 `sc` 的最后交易日在交割月之前，所属交易日日期达到交割前月 15 日后拒绝该月合约；夜盘同样按所属交易日判断。
 - worker 发现目标仍是旧文件、未来文件或已消费文件，同时账户还持有进入保护区间的合约，会进入安全停机、定向撤销本计划活动委托，并记录 `strategy_template_delivery_guard_halted`。
 
 保护触发后不会绕过签名擅自生成清仓目标，也不会静默换到一个未经研究流水线确认的合约；必须检查目标生产任务、委托和持仓后，发布新的已签名换月或目标归零批次再重新一键启动。目标归零批次允许只平旧到期合约且不再开仓。[上期所交割管理办法](https://www.shfe.com.cn/regulation/exchangerules/otherrules/202508/t20250807_828519.html)要求自然人持仓在最后交易日前第五个交易日收盘后归零；[能源中心风险控制管理细则](https://www.ine.cn/regulation/ineregulation/rules/202606/t20260622_832199.html)要求不能交收发票的原油个人客户在最后交易日前第八个交易日收盘后归零。因此这里使用更早的日历硬截止，而不是把交易所强平日当作策略换月日。
@@ -186,17 +186,23 @@ POST /api/commodity-simnow/disable
 
 `preview` 只接受当前期货交易日有效的签名目标；需要部署后立即成交时，研究侧签发当日 `execution_lane=simnow_shakedown` 批次即可，不需要等到 2026-09。preview 和每个开仓阶段提交前都会按最新盘口保护价重新核算完整 `expected_final_positions` 的产品、板块、gross 和净敞口；超限时整阶段零提交。成功后 worker 以一秒间隔自动推进，平仓委托未全部结束、持仓未达到 `expected_after_close` 时不会开仓。
 
-人工 disable、emergency stop、跨交易日、到期保护、部分提交或终态对账超时都会进入统一安全停机：
+人工 disable、emergency stop、跨交易日、到期保护、部分提交或终态对账超时都会进入安全停机。尚未发送任何订单的 `READY_CLOSE/READY_OPEN` 计划进入：
+
+```text
+HALTED_PRE_SUBMIT_SAFE --重新完整授权且阶段前持仓未变化--> 原 READY_CLOSE/READY_OPEN
+```
+
+该状态保存 `resume_status` 和 `pre_phase_expected_positions`，不要求账户先交易到阶段后目标；preview 后重启、首单前 disable 和一键启动的 pre-submit 风控失败都可安全重试。已经开始提交或存在潜在活动委托时进入：
 
 ```text
 CANCEL_PENDING -> 定向撤销本计划活动委托 -> HALTED_RECONCILE_REQUIRED
 ```
 
-撤单完成前保留计划、submitted order ids 和取消记录；即使自动派单和 Web 交易开关已经关闭，`reconcile` 仍允许执行只读收口对账。持仓匹配后状态为 `HALTED_RECONCILED`；不匹配时保持 `HALTED_RECONCILE_REQUIRED`，绝不会自动进入下一阶段。若停机发生在平仓阶段，只有重新提交完整 SimNow 授权后才会恢复为 `READY_OPEN`。
+撤单意图会先以 `CANCEL_PENDING` 原子落盘，再查询 RPC 和发撤单；RPC 暂时不可用不会阻止后端启动或 disable，而是记录错误并由 worker/`auto-advance` 在 RPC 恢复后重试。撤单完成前保留计划、submitted order ids 和取消记录；即使自动派单和 Web 交易开关已经关闭，`reconcile` 仍允许执行只读收口对账。持仓匹配后状态为 `HALTED_RECONCILED`；不匹配时保持 `HALTED_RECONCILE_REQUIRED`，绝不会自动进入下一阶段。若停机发生在平仓阶段，只有重新提交完整 SimNow 授权后才会恢复为 `READY_OPEN`。
 
 `GET /api/commodity-simnow/plan` 的 `execution` 包含每笔订单的实际成交量、成交均价、决策价、提交价、adverse slippage ticks、滑点金额和总 fill ratio。负的 adverse slippage 表示价格改善。成交快照来自 vn.py 的真实 order/trade 查询；如果 RPC 不提供成交查询，会明确返回 `available=false`，但仍以活动委托和权威持仓决定是否完成对账。
 
-手工 `execute/reconcile` 接口保留为运维回退路径。未完成计划会原子保存到 `COMMODITY_SIMNOW_STATE_PATH` 同目录的 `*.active.json`，包括状态、submitted order ids 和停机撤单记录。进程重启后控制器恢复该计划，保持自动授权关闭，先定向撤销仍活动的计划委托，再进入 `HALTED_RECONCILE_REQUIRED`；完成只读收口对账后才能加载新目标。已完成批次链继续保存在配置的状态文件中。
+手工 `execute/reconcile` 接口保留为运维回退路径。未完成计划会原子保存到 `COMMODITY_SIMNOW_STATE_PATH` 同目录的 `*.active.json`，包括状态、submitted order ids 和停机撤单记录。进程重启后控制器恢复该计划并保持自动授权关闭：尚未提交的 `READY_*` 进入 `HALTED_PRE_SUBMIT_SAFE`；已开始提交的计划先持久化 `CANCEL_PENDING` 并在 RPC 恢复后定向撤单，再进入收口对账。已完成批次链继续保存在配置的状态文件中。
 
 ## 验收
 

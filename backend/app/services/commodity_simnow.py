@@ -363,7 +363,11 @@ class CommoditySimNowService:
                 "一键策略模板目标文件未配置",
                 detail={"required_setting": "COMMODITY_SIMNOW_TEMPLATE_BATCH_PATH"},
             )
-        if self.current_plan and self.current_plan.get("status") not in {"COMPLETE", "HALTED_RECONCILED"}:
+        if self.current_plan and self.current_plan.get("status") not in {
+            "COMPLETE",
+            "HALTED_RECONCILED",
+            "HALTED_PRE_SUBMIT_SAFE",
+        }:
             raise CommoditySimNowStateError(
                 "存在未完成委托计划，不允许重新启动模板",
                 detail={
@@ -406,6 +410,12 @@ class CommoditySimNowService:
                 source_ip=source_ip,
             )
         except Exception:
+            if self.current_plan and self.current_plan.get("status") in {"READY_CLOSE", "READY_OPEN"}:
+                self._begin_safe_halt(
+                    "strategy_template_start_failed",
+                    operator=operator,
+                    source_ip=source_ip,
+                )
             self.enabled = False
             self.manual_approval = False
             self.simnow_mode = False
@@ -460,6 +470,7 @@ class CommoditySimNowService:
             "CANCEL_PENDING",
             "HALTED_RECONCILE_REQUIRED",
             "HALTED_RECONCILED",
+            "HALTED_PRE_SUBMIT_SAFE",
         }:
             raise CommoditySimNowStateError(
                 "存在未完成委托计划，不允许覆盖",
@@ -903,7 +914,6 @@ class CommoditySimNowService:
             return {"action": "idle", "reason": "strategy_template_not_authorized"}
         if not self._auto_dispatch_allowed():
             return {"action": "idle", "reason": "auto_dispatch_not_active"}
-        local_today = self.clock().astimezone(CHINA_TZ).date()
         current_trading_day = self._current_trading_day(
             self._plan_symbols(self.current_plan) if self.current_plan else None
         )
@@ -930,7 +940,7 @@ class CommoditySimNowService:
                     result=result,
                 )
                 return result
-            expiry_halt = self._halt_if_delivery_guard_breached(local_today)
+            expiry_halt = self._halt_if_delivery_guard_breached(current_trading_day)
             if expiry_halt:
                 return expiry_halt
             return {
@@ -945,7 +955,7 @@ class CommoditySimNowService:
             [_exact_to_vt(row.exact_contract) for row in batch.targets]
         )
         if batch.execution_day > batch_trading_day:
-            expiry_halt = self._halt_if_delivery_guard_breached(local_today)
+            expiry_halt = self._halt_if_delivery_guard_breached(batch_trading_day)
             if expiry_halt:
                 return expiry_halt
             return {
@@ -954,7 +964,7 @@ class CommoditySimNowService:
                 "execution_day": batch.execution_day.isoformat(),
             }
         if batch.execution_day < batch_trading_day:
-            expiry_halt = self._halt_if_delivery_guard_breached(local_today)
+            expiry_halt = self._halt_if_delivery_guard_breached(batch_trading_day)
             if expiry_halt:
                 return expiry_halt
             return {
@@ -966,7 +976,7 @@ class CommoditySimNowService:
         payload = batch.model_dump(mode="json", exclude={"signature"})
         batch_hash = hashlib.sha256(_canonical_json(payload)).hexdigest()
         if self.current_plan and self.current_plan.get("batch_hash") == batch_hash:
-            expiry_halt = self._halt_if_delivery_guard_breached(local_today)
+            expiry_halt = self._halt_if_delivery_guard_breached(batch_trading_day)
             if expiry_halt:
                 return expiry_halt
             return {
@@ -976,7 +986,7 @@ class CommoditySimNowService:
                 "plan_hash": self.current_plan.get("plan_hash"),
             }
         if self._completed_state.get("last_completed_batch_hash") == batch_hash:
-            expiry_halt = self._halt_if_delivery_guard_breached(local_today)
+            expiry_halt = self._halt_if_delivery_guard_breached(batch_trading_day)
             if expiry_halt:
                 return expiry_halt
             return {"action": "idle", "reason": "target_already_completed"}
@@ -1039,7 +1049,7 @@ class CommoditySimNowService:
                 detail={"error_type": exc.__class__.__name__},
             ) from exc
 
-    def _halt_if_delivery_guard_breached(self, local_today: date) -> dict[str, Any] | None:
+    def _halt_if_delivery_guard_breached(self, trading_day: date) -> dict[str, Any] | None:
         violations: list[dict[str, Any]] = []
         try:
             positions = self._position_snapshot()
@@ -1063,7 +1073,7 @@ class CommoditySimNowService:
             symbol, exchange = _split_vt(vt_symbol)
             exact_contract = f"{exchange}.{symbol}"
             try:
-                self._verify_target_delivery(exact_contract, local_today)
+                self._verify_target_delivery(exact_contract, trading_day)
             except CommoditySimNowBatchError as exc:
                 violations.append(
                     {
@@ -1099,6 +1109,7 @@ class CommoditySimNowService:
     def list_events(self, limit: int = 200) -> list[dict[str, Any]]:
         return list(reversed(self.events[-max(1, min(limit, 1000)) :]))
 
+    @_serialized
     def _begin_safe_halt(
         self,
         reason: str,
@@ -1118,11 +1129,71 @@ class CommoditySimNowService:
         halt["reason"] = reason
         halt["phase"] = phase or halt.get("phase") or self._infer_plan_phase(plan)
         halt["requested_at_utc"] = self.clock().astimezone(timezone.utc).isoformat()
+        if previous_status in {"READY_CLOSE", "READY_OPEN", "HALTED_PRE_SUBMIT_SAFE"}:
+            resume_status = str(halt.get("resume_status") or previous_status)
+            if resume_status == "HALTED_PRE_SUBMIT_SAFE":
+                resume_status = str(halt.get("previous_status") or "")
+            if resume_status not in {"READY_CLOSE", "READY_OPEN"}:
+                raise CommoditySimNowStateError(
+                    "未提交计划缺少可恢复状态",
+                    detail={"status": previous_status, "resume_status": resume_status},
+                )
+            pre_phase_expected = (
+                plan["previous_positions"]
+                if resume_status == "READY_CLOSE"
+                else plan["expected_after_close"]
+            )
+            halt["resume_status"] = resume_status
+            halt["pre_phase_expected_positions"] = pre_phase_expected
+            halt["active_order_ids"] = []
+            plan["status"] = "HALTED_PRE_SUBMIT_SAFE"
+            self._persist_active_plan()
+            result = {
+                "required": False,
+                "reason": reason,
+                "status": plan["status"],
+                "phase": halt["phase"],
+                "resume_status": resume_status,
+                "pre_phase_expected_positions": pre_phase_expected,
+                "cancel_requested_order_ids": [],
+                "active_order_ids": [],
+                "orders_snapshot_available": True,
+            }
+            self._event("safe_halt_pre_submit", plan_hash=plan.get("plan_hash"), result=result)
+            return result
+
         requested = set(halt.get("cancel_requested_order_ids", []))
+        plan["status"] = "CANCEL_PENDING"
+        halt["active_order_ids"] = halt.get("active_order_ids", [])
+        halt["orders_snapshot_available"] = False
+        self._persist_active_plan()
+
+        try:
+            active_before = self._active_plan_orders(plan)
+        except Exception as exc:
+            halt["last_rpc_error_type"] = exc.__class__.__name__
+            halt["last_rpc_error_at_utc"] = self.clock().astimezone(timezone.utc).isoformat()
+            self._persist_active_plan()
+            result = {
+                "required": True,
+                "reason": reason,
+                "status": "CANCEL_PENDING",
+                "phase": halt["phase"],
+                "cancel_requested_order_ids": sorted(requested),
+                "active_order_ids": list(halt.get("active_order_ids", [])),
+                "attempts": [],
+                "orders_snapshot_available": False,
+                "rpc_error_type": exc.__class__.__name__,
+            }
+            self._event("safe_halt_rpc_unavailable", plan_hash=plan.get("plan_hash"), result=result)
+            return result
+
+        halt["orders_snapshot_available"] = True
+        halt.pop("last_rpc_error_type", None)
+        halt.pop("last_rpc_error_at_utc", None)
         candidates = set(self._submitted_order_ids(plan))
-        candidates.update(row["vt_orderid"] for row in self._active_plan_orders(plan))
+        candidates.update(row["vt_orderid"] for row in active_before)
         attempts: list[dict[str, Any]] = []
-        plan["status"] = "CANCEL_PENDING" if candidates else "HALTED_RECONCILE_REQUIRED"
         for vt_orderid in sorted(candidates - requested):
             try:
                 result = self.trade.cancel_order(
@@ -1143,8 +1214,18 @@ class CommoditySimNowService:
                 )
         halt["cancel_requested_order_ids"] = sorted(requested)
         halt["cancel_attempts"] = [*halt.get("cancel_attempts", []), *attempts]
-        active = [row["vt_orderid"] for row in self._active_plan_orders(plan)]
-        plan["status"] = "CANCEL_PENDING" if active else "HALTED_RECONCILE_REQUIRED"
+        try:
+            active = [row["vt_orderid"] for row in self._active_plan_orders(plan)]
+        except Exception as exc:
+            active = [row["vt_orderid"] for row in active_before]
+            halt["orders_snapshot_available"] = False
+            halt["last_rpc_error_type"] = exc.__class__.__name__
+            halt["last_rpc_error_at_utc"] = self.clock().astimezone(timezone.utc).isoformat()
+        plan["status"] = (
+            "CANCEL_PENDING"
+            if active or not halt["orders_snapshot_available"]
+            else "HALTED_RECONCILE_REQUIRED"
+        )
         halt["active_order_ids"] = active
         result = {
             "required": True,
@@ -1154,6 +1235,7 @@ class CommoditySimNowService:
             "cancel_requested_order_ids": sorted(requested),
             "active_order_ids": active,
             "attempts": attempts,
+            "orders_snapshot_available": halt["orders_snapshot_available"],
         }
         self._persist_active_plan()
         self._event("safe_halt", plan_hash=plan.get("plan_hash"), result=result)
@@ -1168,22 +1250,18 @@ class CommoditySimNowService:
         plan = self.current_plan
         if not plan:
             return {"action": "idle", "reason": "no_plan"}
-        active = [row["vt_orderid"] for row in self._active_plan_orders(plan)]
-        if active:
-            halt = self._begin_safe_halt(
-                str(plan.get("halt", {}).get("reason") or "cancel_pending_retry"),
-                operator=operator,
-                source_ip=source_ip,
-            )
+        halt = self._begin_safe_halt(
+            str(plan.get("halt", {}).get("reason") or "cancel_pending_retry"),
+            operator=operator,
+            source_ip=source_ip,
+        )
+        if halt.get("status") == "CANCEL_PENDING":
             return {
                 "action": "cancel_pending",
-                "active_order_ids": halt["active_order_ids"],
+                "active_order_ids": halt.get("active_order_ids", []),
                 "halt": halt,
                 **self.status(),
             }
-        plan["status"] = "HALTED_RECONCILE_REQUIRED"
-        plan.setdefault("halt", {})["active_order_ids"] = []
-        self._persist_active_plan()
         self._event(
             "safe_halt_cancellations_complete",
             plan_hash=plan.get("plan_hash"),
@@ -1222,7 +1300,12 @@ class CommoditySimNowService:
         )
 
     def _infer_plan_phase(self, plan: dict[str, Any]) -> str:
-        status = str(plan.get("status") or plan.get("halt", {}).get("previous_status") or "")
+        current_status = str(plan.get("status") or "")
+        status = (
+            str(plan.get("halt", {}).get("resume_status") or plan.get("halt", {}).get("previous_status") or "")
+            if current_status.startswith("HALTED") or current_status == "CANCEL_PENDING"
+            else current_status
+        )
         if "CLOSE" in status:
             return "close"
         if plan.get("submitted", {}).get("open"):
@@ -1246,7 +1329,35 @@ class CommoditySimNowService:
 
     def _resume_halted_plan_after_authorization(self) -> None:
         plan = self.current_plan
-        if not plan or plan.get("status") != "HALTED_RECONCILED":
+        if not plan or plan.get("status") not in {"HALTED_RECONCILED", "HALTED_PRE_SUBMIT_SAFE"}:
+            return
+        if plan["status"] == "HALTED_PRE_SUBMIT_SAFE":
+            halt = plan.get("halt", {})
+            resume_status = str(halt.get("resume_status") or "")
+            expected = halt.get("pre_phase_expected_positions")
+            observed = self._signed_positions(self._position_snapshot())
+            if resume_status not in {"READY_CLOSE", "READY_OPEN"} or observed != expected:
+                plan["status"] = "HALTED_RECONCILE_REQUIRED"
+                self._persist_active_plan()
+                self._revoke_auto_dispatch()
+                self.enabled = False
+                self.manual_approval = False
+                self.simnow_mode = False
+                raise CommoditySimNowStateError(
+                    "未提交计划在重新授权前持仓发生变化",
+                    detail={
+                        "resume_status": resume_status,
+                        "expected_positions": expected,
+                        "observed_positions": observed,
+                    },
+                )
+            plan["status"] = resume_status
+            self._persist_active_plan()
+            self._event(
+                "pre_submit_plan_reauthorized",
+                plan_hash=plan.get("plan_hash"),
+                result={"status": resume_status},
+            )
             return
         active = self._active_plan_orders(plan)
         phase = str(plan.get("halt", {}).get("phase") or self._infer_plan_phase(plan))
@@ -1391,7 +1502,6 @@ class CommoditySimNowService:
         products = [row.product for row in batch.targets]
         if set(products) != set(PRODUCT_SPECS) or len(products) != len(set(products)):
             raise CommoditySimNowBatchError("目标批次必须且只能包含冻结十品种")
-        local_today = self.clock().astimezone(CHINA_TZ).date()
         current_trading_day = self._current_trading_day(
             [_exact_to_vt(row.exact_contract) for row in batch.targets]
         )
@@ -1420,7 +1530,7 @@ class CommoditySimNowService:
                     "official forward execution day 必须位于 source month 的下一个自然月"
                 )
         else:
-            current_month = local_today.strftime("%Y-%m")
+            current_month = current_trading_day.strftime("%Y-%m")
             if batch.source_month > current_month:
                 raise CommoditySimNowBatchError(
                     "SimNow shakedown 不得使用未来 source month",
@@ -1429,7 +1539,7 @@ class CommoditySimNowService:
         for row in batch.targets:
             self._verify_target_row(row.model_dump())
             if row.target_quantity:
-                self._verify_target_delivery(row.exact_contract, local_today)
+                self._verify_target_delivery(row.exact_contract, current_trading_day)
         self._verify_weight_caps(batch)
         self._verify_completed_chain(batch)
         return hashlib.sha256(canonical).hexdigest()
@@ -1457,7 +1567,7 @@ class CommoditySimNowService:
         if target_quantity and (not buffered_weight or math.copysign(1, target_quantity) != math.copysign(1, buffered_weight)):
             raise CommoditySimNowBatchError("整数目标方向与 buffered target 不一致", detail={"product": product})
 
-    def _verify_target_delivery(self, exact_contract: str, local_today: date) -> None:
+    def _verify_target_delivery(self, exact_contract: str, trading_day: date) -> None:
         try:
             delivery_year, delivery_month = _delivery_year_month(exact_contract)
         except ValueError as exc:
@@ -1466,7 +1576,7 @@ class CommoditySimNowService:
                 detail={"exact_contract": exact_contract},
             ) from exc
         delivery_value = delivery_year * 100 + delivery_month
-        current_value = local_today.year * 100 + local_today.month
+        current_value = trading_day.year * 100 + trading_day.month
         cutoff = self.settings.commodity_simnow_delivery_month_cutoff_day
         product = _product_from_symbol(exact_contract.split(".", 1)[1])
         if delivery_month == 1:
@@ -1474,22 +1584,22 @@ class CommoditySimNowService:
         else:
             preceding_year, preceding_month = delivery_year, delivery_month - 1
         sc_cutoff = self.settings.commodity_simnow_sc_pre_delivery_cutoff_day
-        if product == "sc" and (local_today.year, local_today.month) == (preceding_year, preceding_month) and local_today.day >= sc_cutoff:
+        if product == "sc" and (trading_day.year, trading_day.month) == (preceding_year, preceding_month) and trading_day.day >= sc_cutoff:
             raise CommoditySimNowBatchError(
                 "原油目标合约已进入交割前月到期保护区间",
                 detail={
                     "exact_contract": exact_contract,
-                    "local_date": local_today.isoformat(),
+                    "trading_day": trading_day.isoformat(),
                     "pre_delivery_cutoff_day": sc_cutoff,
                 },
             )
-        if delivery_value < current_value or (delivery_value == current_value and local_today.day >= cutoff):
+        if delivery_value < current_value or (delivery_value == current_value and trading_day.day >= cutoff):
             raise CommoditySimNowBatchError(
                 "目标合约已进入交割风险截止区间",
                 detail={
                     "exact_contract": exact_contract,
                     "delivery_year_month": delivery_value,
-                    "local_date": local_today.isoformat(),
+                    "trading_day": trading_day.isoformat(),
                     "cutoff_day": cutoff,
                 },
             )

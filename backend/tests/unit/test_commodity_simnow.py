@@ -43,6 +43,7 @@ class FakeRpc:
         self.trades: list[dict[str, Any]] = []
         self.subscriptions: list[str] = []
         self.contract_months = contract_months
+        self.get_orders_error: Exception | None = None
 
     def status(self, *, probe: bool = False) -> dict[str, Any]:
         return {"connected": True, "gateway_name": "CTP"}
@@ -72,6 +73,8 @@ class FakeRpc:
         return list(self.positions)
 
     def get_orders(self) -> list[dict[str, Any]]:
+        if self.get_orders_error is not None:
+            raise self.get_orders_error
         return list(self.orders)
 
     def get_trades(self) -> list[dict[str, Any]]:
@@ -564,6 +567,33 @@ def test_stale_target_with_expiring_holding_halts_template(tmp_path: Path) -> No
     assert service.status()["strategy_template"]["authorized"] is False
 
 
+def test_existing_position_delivery_guard_uses_month_end_night_trading_day(tmp_path: Path) -> None:
+    month_end_night = datetime(2026, 8, 31, 13, 30, tzinfo=timezone.utc)  # 21:30 Shanghai
+    target_path = tmp_path / "future-target.json"
+    service, private_key, rpc = make_service(
+        tmp_path,
+        now=month_end_night,
+        contract_months=("2609", "2610"),
+        template_batch_path=target_path,
+    )
+    write_batch(
+        target_path,
+        make_batch(
+            private_key,
+            execution_lane="simnow_shakedown",
+            source_month="2026-09",
+            execution_day="2026-09-02",
+        ),
+    )
+    rpc.positions = [position("ag", 1, contract_month="2609")]
+    service.template_authorized = True
+
+    result = service.auto_template_advance()
+
+    assert result["action"] == "halted"
+    assert result["reason"] == "delivery_guard_breached_without_current_roll_target"
+
+
 def test_delivery_guard_cancels_active_plan_orders(tmp_path: Path) -> None:
     target_path = tmp_path / "roll-target.json"
     service, private_key, rpc = make_service(
@@ -673,6 +703,55 @@ def test_night_session_crossing_midnight_keeps_same_execution_trading_day(tmp_pa
     assert result["action"] == "idle"
     assert result["reason"] == "plan_active"
     assert service.status()["auto_dispatch_allowed"] is True
+
+
+def test_month_end_night_uses_next_trading_month_for_shakedown_source(tmp_path: Path) -> None:
+    month_end_night = datetime(2026, 8, 31, 13, 30, tzinfo=timezone.utc)  # 21:30 Shanghai
+    service, private_key, _ = make_service(tmp_path, now=month_end_night)
+    batch = make_batch(
+        private_key,
+        execution_lane="simnow_shakedown",
+        source_month="2026-09",
+        execution_day="2026-09-01",
+    )
+
+    plan = service.preview(batch, operator="admin", role="admin", source_ip=None)
+
+    assert plan["execution_day"] == "2026-09-01"
+
+
+def test_month_end_night_applies_shfe_delivery_guard_on_next_trading_day(tmp_path: Path) -> None:
+    month_end_night = datetime(2026, 8, 31, 13, 30, tzinfo=timezone.utc)  # 21:30 Shanghai
+    service, private_key, _ = make_service(
+        tmp_path,
+        now=month_end_night,
+        contract_months=("2609",),
+    )
+    batch = make_batch(
+        private_key,
+        execution_lane="simnow_shakedown",
+        source_month="2026-09",
+        execution_day="2026-09-01",
+        target_contract_month="2609",
+    )
+
+    with pytest.raises(CommoditySimNowBatchError, match="交割风险截止区间"):
+        service.preview(batch, operator="admin", role="admin", source_ip=None)
+
+
+def test_sc_cutoff_uses_next_trading_day_at_night(tmp_path: Path) -> None:
+    cutoff_night = datetime(2026, 9, 14, 13, 30, tzinfo=timezone.utc)  # 21:30 Shanghai
+    service, private_key, _ = make_service(tmp_path, now=cutoff_night)
+    batch = make_batch(
+        private_key,
+        targets={"ag": -1, "sc": 1},
+        execution_lane="simnow_shakedown",
+        source_month="2026-09",
+        execution_day="2026-09-15",
+    )
+
+    with pytest.raises(CommoditySimNowBatchError, match="原油目标合约"):
+        service.preview(batch, operator="admin", role="admin", source_ip=None)
 
 
 def test_shakedown_batch_can_trade_before_official_forward_window(
@@ -995,6 +1074,60 @@ def test_disable_cancels_active_orders_and_allows_halted_reconcile(tmp_path: Pat
     assert reconciled["status"] == "HALTED_RECONCILE_REQUIRED"
 
 
+def test_ready_open_disable_is_safely_resumable(tmp_path: Path) -> None:
+    service, private_key, _ = make_service(tmp_path)
+    plan = service.preview(make_batch(private_key), operator="admin", role="admin", source_ip=None)
+
+    disabled = service.disable(
+        CommoditySimNowDisableRequestDTO(reason="stop before first open order"),
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+
+    assert disabled["halt"]["status"] == "HALTED_PRE_SUBMIT_SAFE"
+    assert disabled["halt"]["resume_status"] == "READY_OPEN"
+    assert service.plan()["status"] == "HALTED_PRE_SUBMIT_SAFE"
+    enabled = service.enable(enable_payload(), operator="admin", role="admin", source_ip=None)
+    assert enabled["plan_status"] == "READY_OPEN"
+    assert service.plan()["plan_hash"] == plan["plan_hash"]
+
+
+def test_ready_close_disable_is_safely_resumable(tmp_path: Path) -> None:
+    service, private_key, rpc = make_service(tmp_path)
+    previous_hash = "1" * 64
+    previous = {"ag": 2, "al": -1}
+    service._completed_state = {
+        "last_completed_batch_hash": previous_hash,
+        "targets": completed_targets(previous),
+    }
+    rpc.positions = [position("ag", 2), position("al", -1)]
+    plan = service.preview(
+        make_batch(
+            private_key,
+            targets={"ag": -1, "al": 1},
+            previous=previous,
+            previous_batch_hash=previous_hash,
+        ),
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+
+    service.disable(
+        CommoditySimNowDisableRequestDTO(reason="stop before first close order"),
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+
+    assert service.plan()["status"] == "HALTED_PRE_SUBMIT_SAFE"
+    assert service.plan()["halt"]["resume_status"] == "READY_CLOSE"
+    enabled = service.enable(enable_payload(), operator="admin", role="admin", source_ip=None)
+    assert enabled["plan_status"] == "READY_CLOSE"
+    assert service.plan()["plan_hash"] == plan["plan_hash"]
+
+
 def test_disable_stays_cancel_pending_until_exchange_order_is_terminal(tmp_path: Path) -> None:
     trade = FakeTrade(complete_cancel=False)
     service, private_key, rpc = make_service(tmp_path, trade=trade)
@@ -1034,6 +1167,52 @@ def test_disable_stays_cancel_pending_until_exchange_order_is_terminal(tmp_path:
     assert service.auto_advance()["action"] == "cancel_pending"
     rpc.orders[0]["status"] = "cancelled"
     assert service.auto_advance()["action"] == "halted_reconcile_required"
+    assert service.plan()["status"] == "HALTED_RECONCILE_REQUIRED"
+
+
+def test_disable_persists_cancel_pending_when_rpc_orders_are_unavailable(tmp_path: Path) -> None:
+    service, private_key, rpc = make_service(tmp_path)
+    plan = service.preview(make_batch(private_key), operator="admin", role="admin", source_ip=None)
+    service.execute(
+        CommodityPlanExecuteRequestDTO(
+            plan_hash=plan["plan_hash"],
+            phase="open",
+            confirm=True,
+            confirm_simnow_only=True,
+            confirm_manual_one_shot=True,
+            reason="rpc unavailable disable test",
+        ),
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+    submitted = service.plan()["submitted"]["open"][0]
+    rpc.orders = [
+        {
+            "vt_orderid": submitted["vt_orderid"],
+            "reference": submitted["reference"],
+            "status": "not_traded",
+            "offset": "open",
+            "volume": submitted["volume"],
+        }
+    ]
+    rpc.get_orders_error = RuntimeError("RPC unavailable")
+
+    disabled = service.disable(
+        CommoditySimNowDisableRequestDTO(reason="rpc unavailable"),
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+
+    assert disabled["halt"]["status"] == "CANCEL_PENDING"
+    assert disabled["halt"]["orders_snapshot_available"] is False
+    active_path = tmp_path / "commodity-state.active.json"
+    persisted = json.loads(active_path.read_text(encoding="utf-8"))
+    assert persisted["plan"]["status"] == "CANCEL_PENDING"
+    rpc.get_orders_error = None
+    recovered = service.auto_advance()
+    assert recovered["action"] == "halted_reconcile_required"
     assert service.plan()["status"] == "HALTED_RECONCILE_REQUIRED"
 
 
@@ -1298,6 +1477,113 @@ def test_process_restart_restores_plan_and_cancels_active_orders(tmp_path: Path)
         await recovered.stop()
 
     asyncio.run(exercise())
+
+
+def test_process_restart_restores_ready_plan_as_pre_submit_safe(tmp_path: Path) -> None:
+    service, private_key, rpc = make_service(tmp_path)
+    plan = service.preview(make_batch(private_key), operator="admin", role="admin", source_ip=None)
+    recovered = CommoditySimNowService(
+        settings=service.settings,
+        rpc=rpc,  # type: ignore[arg-type]
+        trade=FakeTrade(),  # type: ignore[arg-type]
+        risk=FakeRisk(),  # type: ignore[arg-type]
+        audit=FakeAudit(),  # type: ignore[arg-type]
+        tick_store=service.tick_store,
+        clock=lambda: NOW,
+    )
+
+    async def exercise() -> None:
+        recovered.start()
+        assert recovered.plan()["status"] == "HALTED_PRE_SUBMIT_SAFE"
+        enabled = recovered.enable(enable_payload(), operator="admin", role="admin", source_ip=None)
+        assert enabled["plan_status"] == "READY_OPEN"
+        assert recovered.plan()["plan_hash"] == plan["plan_hash"]
+        await recovered.stop()
+
+    asyncio.run(exercise())
+
+
+def test_process_restart_survives_rpc_unavailable_and_retries_cancel(tmp_path: Path) -> None:
+    service, private_key, rpc = make_service(tmp_path)
+    plan = service.preview(make_batch(private_key), operator="admin", role="admin", source_ip=None)
+    service.execute(
+        CommodityPlanExecuteRequestDTO(
+            plan_hash=plan["plan_hash"],
+            phase="open",
+            confirm=True,
+            confirm_simnow_only=True,
+            confirm_manual_one_shot=True,
+            reason="restart rpc unavailable test",
+        ),
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+    submitted = service.plan()["submitted"]["open"][0]
+    rpc.orders = [
+        {
+            "vt_orderid": submitted["vt_orderid"],
+            "reference": submitted["reference"],
+            "status": "not_traded",
+            "offset": "open",
+            "volume": submitted["volume"],
+        }
+    ]
+    rpc.get_orders_error = RuntimeError("RPC unavailable")
+    recovered_trade = FakeTrade()
+    recovered_trade.rpc = rpc
+    recovered = CommoditySimNowService(
+        settings=service.settings,
+        rpc=rpc,  # type: ignore[arg-type]
+        trade=recovered_trade,  # type: ignore[arg-type]
+        risk=FakeRisk(),  # type: ignore[arg-type]
+        audit=FakeAudit(),  # type: ignore[arg-type]
+        tick_store=service.tick_store,
+        clock=lambda: NOW,
+    )
+
+    async def exercise() -> None:
+        recovered.start()
+        assert recovered.plan()["status"] == "CANCEL_PENDING"
+        assert recovered.plan()["halt"]["orders_snapshot_available"] is False
+        rpc.get_orders_error = None
+        result = recovered.auto_advance()
+        assert result["action"] == "halted_reconcile_required"
+        assert recovered_trade.cancel_requests == sorted(
+            row["vt_orderid"] for row in recovered.plan()["submitted"]["open"]
+        )
+        await recovered.stop()
+
+    asyncio.run(exercise())
+
+
+def test_template_start_can_retry_after_pre_submit_risk_failure(tmp_path: Path) -> None:
+    target_path = tmp_path / "retry-target.json"
+    service, private_key, _ = make_service(
+        tmp_path,
+        auto_enable=False,
+        template_batch_path=target_path,
+    )
+    write_batch(target_path, make_batch(private_key))
+    service.risk.rules["max_symbol_position"] = 1
+
+    with pytest.raises(CommoditySimNowSafetyError, match="拆单累计量"):
+        service.start_template(
+            template_start_payload(),
+            operator="admin",
+            role="admin",
+            source_ip=None,
+        )
+
+    assert service.plan()["status"] == "HALTED_PRE_SUBMIT_SAFE"
+    service.risk.rules["max_symbol_position"] = 500
+    retried = service.start_template(
+        template_start_payload(),
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+    assert retried["dispatched"]["action"] == "open_submitted"
 
 
 def test_auto_dispatch_halts_after_terminal_reconciliation_mismatch(
