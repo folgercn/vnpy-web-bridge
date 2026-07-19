@@ -4,7 +4,7 @@ This document tracks PR-B/T1 readiness for controlled MAK v2 testnet execution.
 
 ## Current Packet
 
-Merged PR-B/T1 safety evidence includes the read-only safety audit endpoint:
+Merged work through PR #101 includes the read-only safety audit endpoint:
 
 ```text
 POST /api/mak-v2/testnet-observer/safety-audit
@@ -25,7 +25,9 @@ Remote collection is handled by:
 scripts/mak_v2_collect_safety_audit.py
 ```
 
-The collector reads the admin token only from an environment variable and writes JSON/CSV evidence artifacts under the selected output directory.
+The collector reads the admin token only from an environment variable and writes JSON/CSV evidence artifacts under the selected output directory. It can optionally collect the latest/history read endpoints after the POST audit and archive those responses as separate JSON/CSV artifacts.
+
+The frontend page at `/mak-v2-observer` displays the latest audit and recent history. Latest/history read failures are isolated from the core Observer data, and a history refresh failure after a successful POST does not reclassify the audit execution as failed.
 
 ## Default Mode
 
