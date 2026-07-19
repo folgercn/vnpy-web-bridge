@@ -292,26 +292,27 @@ function syncContract(value: 'lc' | 'ps') {
 
 async function refresh() {
   loading.value = true
-  auditHistoryLoading.value = true
   try {
-    const [statusResult, signalRows, orderRows, guardrailRows, summaryRows, latestAuditRow, auditRows] = await Promise.all([
+    const [statusResult, signalRows, orderRows, guardrailRows, summaryRows] = await Promise.all([
       getMakV2Status(),
       getMakV2Signals(),
       getMakV2Orders(),
       getMakV2Guardrails(),
-      getMakV2DailySummary(),
-      getMakV2SafetyAuditLatest(),
-      listMakV2SafetyAudits()
+      getMakV2DailySummary()
     ])
     status.value = statusResult
     signals.value = signalRows
     orders.value = orderRows
     guardrails.value = guardrailRows
     dailySummary.value = summaryRows
-    applyAuditHistory(latestAuditRow, auditRows)
   } finally {
     loading.value = false
-    auditHistoryLoading.value = false
+  }
+
+  try {
+    await refreshSafetyAudits()
+  } catch (exc) {
+    message.warning(exc instanceof Error ? `safety audit history refresh failed: ${exc.message}` : 'safety audit history refresh failed')
   }
 }
 
@@ -380,11 +381,19 @@ async function submitSafetyAudit() {
       message.warning(`safety audit ${auditResult.value.overall.toLowerCase()}`)
     }
     latestAudit.value = auditResult.value
-    await refreshSafetyAudits()
   } catch (exc) {
     message.error(exc instanceof Error ? exc.message : 'safety audit failed')
+    return
   } finally {
     auditLoading.value = false
+  }
+
+  try {
+    await refreshSafetyAudits()
+  } catch (exc) {
+    message.warning(
+      exc instanceof Error ? `audit completed, but history refresh failed: ${exc.message}` : 'audit completed, but history refresh failed'
+    )
   }
 }
 
