@@ -528,6 +528,7 @@ class CommoditySimNowService:
             "execution_day": batch.execution_day.isoformat(),
             "targets": [row.model_dump(mode="json") for row in batch.targets],
             "submitted": {"close": [], "open": []},
+            "send_intents": {"close": [], "open": []},
             "submitted_at_utc": {"close": None, "open": None},
             "latest_exposure_snapshot": exposure_snapshot,
         }
@@ -617,11 +618,31 @@ class CommoditySimNowService:
                 price_overrides=prices,
             )
 
+        plan.pop("halt", None)
         plan["status"] = f"SUBMITTING_{payload.phase.upper()}"
         self._persist_active_plan()
         submitted: list[dict[str, Any]] = []
         try:
             for order, repriced in zip(orders, repriced_orders, strict=True):
+                intent = {
+                    **repriced,
+                    "decision_price": order["price"],
+                    "dispatch_mode": dispatch_mode,
+                    "intent_status": "PENDING_SEND",
+                    "intent_at_utc": self.clock().astimezone(timezone.utc).isoformat(),
+                }
+                intents = plan.setdefault("send_intents", {}).setdefault(payload.phase, [])
+                existing_intent = next(
+                    (row for row in intents if row.get("reference") == repriced["reference"]),
+                    None,
+                )
+                if existing_intent is None:
+                    intents.append(intent)
+                else:
+                    existing_intent.clear()
+                    existing_intent.update(intent)
+                    intent = existing_intent
+                self._persist_active_plan()
                 request = OrderRequestDTO(
                     symbol=repriced["symbol"],
                     exchange=repriced["exchange"],
@@ -636,11 +657,20 @@ class CommoditySimNowService:
                 )
                 result = self.trade.send_order(request, source_ip=source_ip, operator=operator)
                 submitted_row = {
-                        **repriced,
-                        "decision_price": order["price"],
-                        "dispatch_mode": dispatch_mode,
-                        **result,
+                    **repriced,
+                    "decision_price": order["price"],
+                    "dispatch_mode": dispatch_mode,
+                    **result,
+                }
+                intent["intent_status"] = "ACKNOWLEDGED"
+                intent["acknowledged_at_utc"] = self.clock().astimezone(timezone.utc).isoformat()
+                intent.update(
+                    {
+                        key: value
+                        for key, value in result.items()
+                        if key in {"vt_orderid", "orderid", "accepted"}
                     }
+                )
                 submitted.append(submitted_row)
                 plan["submitted"][payload.phase].append(submitted_row)
                 self._persist_active_plan()
@@ -777,8 +807,10 @@ class CommoditySimNowService:
         if not halted_reconcile:
             if matched and phase == "close":
                 plan["status"] = "READY_OPEN" if plan["open_orders"] else "COMPLETE"
+                plan.pop("halt", None)
             elif matched:
                 plan["status"] = "COMPLETE"
+                plan.pop("halt", None)
         if plan["status"] == "COMPLETE":
             self._save_completed_state(plan)
         else:
@@ -1124,11 +1156,27 @@ class CommoditySimNowService:
             return {"required": False, "reason": reason, "cancel_requested_order_ids": []}
 
         previous_status = str(plan.get("status") or "")
-        halt = plan.setdefault("halt", {})
-        halt.setdefault("previous_status", previous_status)
+        continuing_halt = previous_status in {
+            "CANCEL_PENDING",
+            "HALTED_RECONCILE_REQUIRED",
+            "HALTED_RECONCILED",
+            "HALTED_PRE_SUBMIT_SAFE",
+        }
+        if continuing_halt:
+            halt = plan.setdefault("halt", {})
+        else:
+            halt = {}
+            plan["halt"] = halt
+        if not continuing_halt:
+            halt["previous_status"] = previous_status
         halt["reason"] = reason
-        halt["phase"] = phase or halt.get("phase") or self._infer_plan_phase(plan)
+        halt["phase"] = phase or (halt.get("phase") if continuing_halt else None) or self._infer_plan_phase(plan)
         halt["requested_at_utc"] = self.clock().astimezone(timezone.utc).isoformat()
+        submission_recovery_status = (
+            previous_status
+            if previous_status in {"SUBMITTING_CLOSE", "SUBMITTING_OPEN"}
+            else str(halt.get("previous_status") or "")
+        )
         if previous_status in {"READY_CLOSE", "READY_OPEN", "HALTED_PRE_SUBMIT_SAFE"}:
             resume_status = str(halt.get("resume_status") or previous_status)
             if resume_status == "HALTED_PRE_SUBMIT_SAFE":
@@ -1168,8 +1216,61 @@ class CommoditySimNowService:
         halt["orders_snapshot_available"] = False
         self._persist_active_plan()
 
+        orders_snapshot: list[dict[str, Any]] | None = None
         try:
-            active_before = self._active_plan_orders(plan)
+            if submission_recovery_status in {"SUBMITTING_CLOSE", "SUBMITTING_OPEN"}:
+                orders_snapshot = self.rpc.get_orders()
+                trades_snapshot = self.rpc.get_trades()
+                evidence_references = self._recover_send_intent_evidence(
+                    plan,
+                    orders_snapshot,
+                    trades_snapshot,
+                )
+                halt["submission_evidence_references"] = evidence_references
+                self._persist_active_plan()
+                submitting_phase = "close" if submission_recovery_status == "SUBMITTING_CLOSE" else "open"
+                active_before = self._active_plan_orders_from_snapshot(plan, orders_snapshot)
+                has_persisted_submission = bool(plan.get("submitted", {}).get(submitting_phase))
+                if not evidence_references and not has_persisted_submission and not active_before:
+                    pre_phase_expected = self._phase_pre_positions(plan, submitting_phase)
+                    observed = self._signed_positions(self._position_snapshot())
+                    if observed == pre_phase_expected:
+                        for intent in plan.get("send_intents", {}).get(submitting_phase, []):
+                            intent["intent_status"] = "NO_EVIDENCE_SAFE"
+                            intent["checked_at_utc"] = self.clock().astimezone(timezone.utc).isoformat()
+                        halt.update(
+                            {
+                                "phase": submitting_phase,
+                                "resume_status": f"READY_{submitting_phase.upper()}",
+                                "pre_phase_expected_positions": pre_phase_expected,
+                                "active_order_ids": [],
+                                "orders_snapshot_available": True,
+                                "trades_snapshot_available": True,
+                            }
+                        )
+                        plan["status"] = "HALTED_PRE_SUBMIT_SAFE"
+                        self._persist_active_plan()
+                        result = {
+                            "required": False,
+                            "reason": reason,
+                            "status": plan["status"],
+                            "phase": submitting_phase,
+                            "resume_status": halt["resume_status"],
+                            "pre_phase_expected_positions": pre_phase_expected,
+                            "cancel_requested_order_ids": [],
+                            "active_order_ids": [],
+                            "orders_snapshot_available": True,
+                            "trades_snapshot_available": True,
+                            "submission_evidence_references": [],
+                        }
+                        self._event(
+                            "safe_halt_submitting_without_evidence",
+                            plan_hash=plan.get("plan_hash"),
+                            result=result,
+                        )
+                        return result
+            else:
+                active_before = self._active_plan_orders(plan)
         except Exception as exc:
             halt["last_rpc_error_type"] = exc.__class__.__name__
             halt["last_rpc_error_at_utc"] = self.clock().astimezone(timezone.utc).isoformat()
@@ -1189,6 +1290,8 @@ class CommoditySimNowService:
             return result
 
         halt["orders_snapshot_available"] = True
+        if submission_recovery_status in {"SUBMITTING_CLOSE", "SUBMITTING_OPEN"}:
+            halt["trades_snapshot_available"] = True
         halt.pop("last_rpc_error_type", None)
         halt.pop("last_rpc_error_at_utc", None)
         candidates = set(self._submitted_order_ids(plan))
@@ -1270,14 +1373,27 @@ class CommoditySimNowService:
         return {"action": "halted_reconcile_required", **self.status()}
 
     def _active_plan_orders(self, plan: dict[str, Any]) -> list[dict[str, str]]:
+        return self._active_plan_orders_from_snapshot(plan, self.rpc.get_orders())
+
+    def _active_plan_orders_from_snapshot(
+        self,
+        plan: dict[str, Any],
+        orders: list[dict[str, Any]],
+    ) -> list[dict[str, str]]:
         references = {
             str(order.get("reference") or "")
             for phase in ("close", "open")
             for order in plan.get(f"{phase}_orders", [])
         }
+        references.update(
+            str(intent.get("reference") or "")
+            for phase in ("close", "open")
+            for intent in plan.get("send_intents", {}).get(phase, [])
+        )
+        references.discard("")
         submitted_ids = set(self._submitted_order_ids(plan))
         active: list[dict[str, str]] = []
-        for order in self.rpc.get_orders():
+        for order in orders:
             if _normalize_status(order.get("status")) not in ACTIVE_ORDER_STATUSES:
                 continue
             ids = self._order_ids(order)
@@ -1287,6 +1403,77 @@ class CommoditySimNowService:
             vt_orderid = str(order.get("vt_orderid") or order.get("orderid") or "unknown")
             active.append({"vt_orderid": vt_orderid, "reference": reference})
         return sorted(active, key=lambda row: row["vt_orderid"])
+
+    def _phase_pre_positions(self, plan: dict[str, Any], phase: str) -> dict[str, int]:
+        return plan["previous_positions"] if phase == "close" else plan["expected_after_close"]
+
+    def _recover_send_intent_evidence(
+        self,
+        plan: dict[str, Any],
+        orders: list[dict[str, Any]],
+        trades: list[dict[str, Any]],
+    ) -> list[str]:
+        evidence_references: set[str] = set()
+        for phase in ("close", "open"):
+            submitted = plan.setdefault("submitted", {}).setdefault(phase, [])
+            submitted_references = {
+                str(row.get("reference") or "") for row in submitted if row.get("reference")
+            }
+            for intent in plan.setdefault("send_intents", {}).setdefault(phase, []):
+                reference = str(intent.get("reference") or "")
+                if not reference:
+                    continue
+                matching_orders = [
+                    order for order in orders if str(order.get("reference") or "") == reference
+                ]
+                order_ids = {
+                    order_id
+                    for order in matching_orders
+                    for order_id in self._order_ids(order)
+                }
+                matching_trades = [
+                    trade
+                    for trade in trades
+                    if str(trade.get("reference") or "") == reference
+                    or bool(order_ids.intersection(self._order_ids(trade)))
+                ]
+                if not matching_orders and not matching_trades:
+                    continue
+                evidence_references.add(reference)
+                intent["intent_status"] = "EVIDENCE_RECOVERED"
+                intent["evidence_checked_at_utc"] = self.clock().astimezone(timezone.utc).isoformat()
+                recovered_ids = {
+                    order_id
+                    for row in [*matching_orders, *matching_trades]
+                    for order_id in self._order_ids(row)
+                }
+                if reference in submitted_references:
+                    continue
+                primary_order = matching_orders[-1] if matching_orders else matching_trades[-1]
+                vt_orderid = str(
+                    primary_order.get("vt_orderid")
+                    or primary_order.get("orderid")
+                    or next(iter(sorted(recovered_ids)), "")
+                )
+                recovered_row = {
+                    key: value
+                    for key, value in intent.items()
+                    if key
+                    not in {
+                        "intent_status",
+                        "intent_at_utc",
+                        "acknowledged_at_utc",
+                        "checked_at_utc",
+                        "evidence_checked_at_utc",
+                        "accepted",
+                    }
+                }
+                if vt_orderid:
+                    recovered_row["vt_orderid"] = vt_orderid
+                recovered_row["recovered_from_reference"] = True
+                submitted.append(recovered_row)
+                submitted_references.add(reference)
+        return sorted(evidence_references)
 
     def _submitted_order_ids(self, plan: dict[str, Any]) -> list[str]:
         return sorted(
@@ -1308,6 +1495,8 @@ class CommoditySimNowService:
         )
         if "CLOSE" in status:
             return "close"
+        if "OPEN" in status:
+            return "open"
         if plan.get("submitted", {}).get("open"):
             return "open"
         if plan.get("submitted", {}).get("close"):
@@ -1352,6 +1541,7 @@ class CommoditySimNowService:
                     },
                 )
             plan["status"] = resume_status
+            plan.pop("halt", None)
             self._persist_active_plan()
             self._event(
                 "pre_submit_plan_reauthorized",
@@ -1382,6 +1572,7 @@ class CommoditySimNowService:
             plan["status"] = "READY_OPEN" if plan["open_orders"] else "COMPLETE"
         else:
             plan["status"] = "COMPLETE"
+        plan.pop("halt", None)
         if plan["status"] == "COMPLETE":
             self._save_completed_state(plan)
         else:

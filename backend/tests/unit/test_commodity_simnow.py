@@ -124,6 +124,28 @@ class FakeTrade:
         return {"vt_orderid": vt_orderid, "cancel_requested": True}
 
 
+class CrashBeforeSendTrade(FakeTrade):
+    def send_order(self, request, **kwargs) -> dict[str, Any]:
+        raise SystemExit("simulated process crash before RPC send")
+
+
+class CrashAfterAcceptTrade(FakeTrade):
+    def send_order(self, request, **kwargs) -> dict[str, Any]:
+        self.requests.append(request)
+        vt_orderid = f"CTP.{len(self.requests)}"
+        assert self.rpc is not None
+        self.rpc.orders.append(
+            {
+                "vt_orderid": vt_orderid,
+                "reference": request.reference,
+                "status": "not_traded",
+                "offset": request.offset,
+                "volume": request.volume,
+            }
+        )
+        raise SystemExit("simulated process crash after exchange acceptance")
+
+
 class FakeAudit:
     def record(self, **kwargs) -> None:
         return None
@@ -1501,6 +1523,229 @@ def test_process_restart_restores_ready_plan_as_pre_submit_safe(tmp_path: Path) 
         await recovered.stop()
 
     asyncio.run(exercise())
+
+
+def test_process_restart_recovers_submitting_open_without_order_evidence(tmp_path: Path) -> None:
+    service, private_key, rpc = make_service(tmp_path, trade=CrashBeforeSendTrade())
+    plan = service.preview(make_batch(private_key), operator="admin", role="admin", source_ip=None)
+
+    with pytest.raises(SystemExit, match="before RPC send"):
+        service.execute(
+            CommodityPlanExecuteRequestDTO(
+                plan_hash=plan["plan_hash"],
+                phase="open",
+                confirm=True,
+                confirm_simnow_only=True,
+                confirm_manual_one_shot=True,
+                reason="crash before first send",
+            ),
+            operator="admin",
+            role="admin",
+            source_ip=None,
+        )
+
+    persisted = json.loads(
+        (tmp_path / "commodity-state.active.json").read_text(encoding="utf-8")
+    )["plan"]
+    assert persisted["status"] == "SUBMITTING_OPEN"
+    assert persisted["submitted"]["open"] == []
+    assert persisted["send_intents"]["open"][0]["intent_status"] == "PENDING_SEND"
+
+    recovered_trade = FakeTrade()
+    recovered_trade.rpc = rpc
+    recovered = CommoditySimNowService(
+        settings=service.settings,
+        rpc=rpc,  # type: ignore[arg-type]
+        trade=recovered_trade,  # type: ignore[arg-type]
+        risk=FakeRisk(),  # type: ignore[arg-type]
+        audit=FakeAudit(),  # type: ignore[arg-type]
+        tick_store=service.tick_store,
+        clock=lambda: NOW,
+    )
+    async def exercise() -> None:
+        recovered.start()
+        assert recovered.plan()["status"] == "HALTED_PRE_SUBMIT_SAFE"
+        assert recovered.plan()["halt"]["resume_status"] == "READY_OPEN"
+        assert recovered.plan()["send_intents"]["open"][0]["intent_status"] == "NO_EVIDENCE_SAFE"
+        enabled = recovered.enable(enable_payload(), operator="admin", role="admin", source_ip=None)
+        assert enabled["plan_status"] == "READY_OPEN"
+        assert "halt" not in recovered.plan()
+        await recovered.stop()
+
+    asyncio.run(exercise())
+
+
+def test_process_restart_recovers_accepted_order_by_send_intent_reference(tmp_path: Path) -> None:
+    crashed_trade = CrashAfterAcceptTrade()
+    service, private_key, rpc = make_service(tmp_path, trade=crashed_trade)
+    plan = service.preview(make_batch(private_key), operator="admin", role="admin", source_ip=None)
+
+    with pytest.raises(SystemExit, match="after exchange acceptance"):
+        service.execute(
+            CommodityPlanExecuteRequestDTO(
+                plan_hash=plan["plan_hash"],
+                phase="open",
+                confirm=True,
+                confirm_simnow_only=True,
+                confirm_manual_one_shot=True,
+                reason="crash after first order acceptance",
+            ),
+            operator="admin",
+            role="admin",
+            source_ip=None,
+        )
+
+    persisted = json.loads(
+        (tmp_path / "commodity-state.active.json").read_text(encoding="utf-8")
+    )["plan"]
+    assert persisted["status"] == "SUBMITTING_OPEN"
+    assert persisted["submitted"]["open"] == []
+    reference = persisted["send_intents"]["open"][0]["reference"]
+
+    recovered_trade = FakeTrade()
+    recovered_trade.rpc = rpc
+    recovered = CommoditySimNowService(
+        settings=service.settings,
+        rpc=rpc,  # type: ignore[arg-type]
+        trade=recovered_trade,  # type: ignore[arg-type]
+        risk=FakeRisk(),  # type: ignore[arg-type]
+        audit=FakeAudit(),  # type: ignore[arg-type]
+        tick_store=service.tick_store,
+        clock=lambda: NOW,
+    )
+    async def exercise() -> None:
+        recovered.start()
+        recovered_plan = recovered.plan()
+        assert recovered_plan["status"] == "HALTED_RECONCILE_REQUIRED"
+        assert recovered_plan["halt"]["submission_evidence_references"] == [reference]
+        assert recovered_plan["submitted"]["open"][0]["reference"] == reference
+        assert recovered_plan["submitted"]["open"][0]["recovered_from_reference"] is True
+        assert recovered_trade.cancel_requests == ["CTP.1"]
+        assert recovered_trade.requests == []
+        await recovered.stop()
+
+    asyncio.run(exercise())
+
+
+def test_process_restart_recovers_trade_only_evidence_by_send_intent_reference(tmp_path: Path) -> None:
+    crashed_trade = CrashAfterAcceptTrade()
+    service, private_key, rpc = make_service(tmp_path, trade=crashed_trade)
+    plan = service.preview(make_batch(private_key), operator="admin", role="admin", source_ip=None)
+
+    with pytest.raises(SystemExit, match="after exchange acceptance"):
+        service.execute(
+            CommodityPlanExecuteRequestDTO(
+                plan_hash=plan["plan_hash"],
+                phase="open",
+                confirm=True,
+                confirm_simnow_only=True,
+                confirm_manual_one_shot=True,
+                reason="crash before trade evidence persistence",
+            ),
+            operator="admin",
+            role="admin",
+            source_ip=None,
+        )
+
+    reference = rpc.orders[0]["reference"]
+    rpc.orders = []
+    rpc.trades = [
+        {
+            "vt_tradeid": "CTP.T1",
+            "vt_orderid": "CTP.1",
+            "reference": reference,
+            "price": service.plan()["send_intents"]["open"][0]["price"],
+            "volume": 1,
+        }
+    ]
+    recovered_trade = FakeTrade()
+    recovered_trade.rpc = rpc
+    recovered = CommoditySimNowService(
+        settings=service.settings,
+        rpc=rpc,  # type: ignore[arg-type]
+        trade=recovered_trade,  # type: ignore[arg-type]
+        risk=FakeRisk(),  # type: ignore[arg-type]
+        audit=FakeAudit(),  # type: ignore[arg-type]
+        tick_store=service.tick_store,
+        clock=lambda: NOW,
+    )
+
+    async def exercise() -> None:
+        recovered.start()
+        recovered_plan = recovered.plan()
+        assert recovered_plan["status"] == "HALTED_RECONCILE_REQUIRED"
+        assert recovered_plan["halt"]["submission_evidence_references"] == [reference]
+        assert recovered_plan["submitted"]["open"][0]["vt_orderid"] == "CTP.1"
+        assert recovered_trade.requests == []
+        await recovered.stop()
+
+    asyncio.run(exercise())
+
+
+def test_halt_metadata_is_cleared_before_next_phase_halt(tmp_path: Path) -> None:
+    service, private_key, rpc = make_service(tmp_path)
+    previous_hash = "9" * 64
+    previous = {"ag": 2, "al": -1}
+    service._completed_state = {
+        "last_completed_batch_hash": previous_hash,
+        "targets": completed_targets(previous),
+    }
+    rpc.positions = [position("ag", 2), position("al", -1)]
+    plan = service.preview(
+        make_batch(
+            private_key,
+            targets={"ag": -1, "al": 1},
+            previous=previous,
+            previous_batch_hash=previous_hash,
+        ),
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+
+    service.disable(
+        CommoditySimNowDisableRequestDTO(reason="first pre-close halt"),
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+    service.enable(enable_payload(), operator="admin", role="admin", source_ip=None)
+    assert service.plan()["status"] == "READY_CLOSE"
+    assert "halt" not in service.plan()
+
+    service.execute(
+        CommodityPlanExecuteRequestDTO(
+            plan_hash=plan["plan_hash"],
+            phase="close",
+            confirm=True,
+            confirm_simnow_only=True,
+            confirm_manual_one_shot=True,
+            reason="complete close before second halt",
+        ),
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+    rpc.positions = []
+    reconciled = service.reconcile(
+        plan["plan_hash"], operator="admin", role="admin", source_ip=None
+    )
+    assert reconciled["status"] == "READY_OPEN"
+
+    service.disable(
+        CommoditySimNowDisableRequestDTO(reason="second pre-open halt"),
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+    halted = service.plan()
+    assert halted["status"] == "HALTED_PRE_SUBMIT_SAFE"
+    assert halted["halt"]["phase"] == "open"
+    assert halted["halt"]["resume_status"] == "READY_OPEN"
+    assert halted["halt"]["pre_phase_expected_positions"] == {}
+    enabled = service.enable(enable_payload(), operator="admin", role="admin", source_ip=None)
+    assert enabled["plan_status"] == "READY_OPEN"
+    assert "halt" not in service.plan()
 
 
 def test_process_restart_survives_rpc_unavailable_and_retries_cancel(tmp_path: Path) -> None:

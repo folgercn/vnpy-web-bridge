@@ -192,17 +192,19 @@ POST /api/commodity-simnow/disable
 HALTED_PRE_SUBMIT_SAFE --重新完整授权且阶段前持仓未变化--> 原 READY_CLOSE/READY_OPEN
 ```
 
-该状态保存 `resume_status` 和 `pre_phase_expected_positions`，不要求账户先交易到阶段后目标；preview 后重启、首单前 disable 和一键启动的 pre-submit 风控失败都可安全重试。已经开始提交或存在潜在活动委托时进入：
+该状态保存 `resume_status` 和 `pre_phase_expected_positions`，不要求账户先交易到阶段后目标；preview 后重启、首单前 disable 和一键启动的 pre-submit 风控失败都可安全重试。成功恢复及阶段推进时会清除旧 `halt` 控制字段，下一阶段停机不会复用旧 phase/resume 状态。已经开始提交或存在潜在活动委托时进入：
 
 ```text
 CANCEL_PENDING -> 定向撤销本计划活动委托 -> HALTED_RECONCILE_REQUIRED
 ```
 
-撤单意图会先以 `CANCEL_PENDING` 原子落盘，再查询 RPC 和发撤单；RPC 暂时不可用不会阻止后端启动或 disable，而是记录错误并由 worker/`auto-advance` 在 RPC 恢复后重试。撤单完成前保留计划、submitted order ids 和取消记录；即使自动派单和 Web 交易开关已经关闭，`reconcile` 仍允许执行只读收口对账。持仓匹配后状态为 `HALTED_RECONCILED`；不匹配时保持 `HALTED_RECONCILE_REQUIRED`，绝不会自动进入下一阶段。若停机发生在平仓阶段，只有重新提交完整 SimNow 授权后才会恢复为 `READY_OPEN`。
+每个 child order 调用 `send_order()` 前都会先原子持久化包含唯一 reference、价格、数量和方向的 send intent；RPC 返回后再将 order id 与 intent 一并确认为 submitted。若进程停在两次落盘之间，重启会按 reference 查询全部订单和成交，而不是只依赖 submitted id 或活动订单：没有任何提交证据且阶段前持仓未变化时进入 `HALTED_PRE_SUBMIT_SAFE`；发现订单/成交证据时补回 submitted 记录并进入撤单/收口路径，禁止重复下单。
+
+撤单意图会先以 `CANCEL_PENDING` 原子落盘，再查询 RPC 和发撤单；RPC 暂时不可用不会阻止后端启动或 disable，而是记录错误并由 worker/`auto-advance` 在 RPC 恢复后重试。撤单完成前保留计划、send intents、submitted order ids 和取消记录；即使自动派单和 Web 交易开关已经关闭，`reconcile` 仍允许执行只读收口对账。持仓匹配后状态为 `HALTED_RECONCILED`；不匹配时保持 `HALTED_RECONCILE_REQUIRED`，绝不会自动进入下一阶段。若停机发生在平仓阶段，只有重新提交完整 SimNow 授权后才会恢复为 `READY_OPEN`。
 
 `GET /api/commodity-simnow/plan` 的 `execution` 包含每笔订单的实际成交量、成交均价、决策价、提交价、adverse slippage ticks、滑点金额和总 fill ratio。负的 adverse slippage 表示价格改善。成交快照来自 vn.py 的真实 order/trade 查询；如果 RPC 不提供成交查询，会明确返回 `available=false`，但仍以活动委托和权威持仓决定是否完成对账。
 
-手工 `execute/reconcile` 接口保留为运维回退路径。未完成计划会原子保存到 `COMMODITY_SIMNOW_STATE_PATH` 同目录的 `*.active.json`，包括状态、submitted order ids 和停机撤单记录。进程重启后控制器恢复该计划并保持自动授权关闭：尚未提交的 `READY_*` 进入 `HALTED_PRE_SUBMIT_SAFE`；已开始提交的计划先持久化 `CANCEL_PENDING` 并在 RPC 恢复后定向撤单，再进入收口对账。已完成批次链继续保存在配置的状态文件中。
+手工 `execute/reconcile` 接口保留为运维回退路径。未完成计划会原子保存到 `COMMODITY_SIMNOW_STATE_PATH` 同目录的 `*.active.json`，包括状态、send intents、submitted order ids 和停机撤单记录。进程重启后控制器恢复该计划并保持自动授权关闭：尚未提交的 `READY_*` 进入 `HALTED_PRE_SUBMIT_SAFE`；`SUBMITTING_*` 先按 intent reference 恢复全部订单/成交证据，再选择安全恢复或 `CANCEL_PENDING`；已有提交证据的计划在 RPC 恢复后定向撤单并进入收口对账。已完成批次链继续保存在配置的状态文件中。
 
 ## 验收
 
