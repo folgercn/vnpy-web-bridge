@@ -4,6 +4,8 @@
 
 ```text
 POST /api/mak-v2/testnet-observer/safety-audit
+GET  /api/mak-v2/testnet-observer/safety-audit/latest
+GET  /api/mak-v2/testnet-observer/safety-audits?limit=...
 ```
 
 禁止调用 `/api/orders`、`/api/mak-v2/testnet-observer/dry-run/signal`、`/api/mak-v2/testnet-observer/flatten-testnet` 或任何真实下单/撤单接口。
@@ -37,7 +39,10 @@ python scripts/mak_v2_collect_safety_audit.py \
   --collect-rpc-snapshot \
   --require-rpc-connected \
   --contract GFEX.ps2609 \
-  --contract GFEX.lc2609
+  --contract GFEX.lc2609 \
+  --collect-latest \
+  --collect-history \
+  --history-limit 20
 ```
 
 脚本会把 JSON 审计结果输出到 stdout，并在 `--output-dir` 生成：
@@ -46,8 +51,40 @@ python scripts/mak_v2_collect_safety_audit.py \
 - `mak_v2_safety_audit_checks.csv`
 - `mak_v2_safety_audit_accounts.csv`
 - `mak_v2_safety_audit_contracts.csv`
+- `mak_v2_safety_audit_latest.json`（仅在 `--collect-latest` 时生成）
+- `mak_v2_safety_audit_history.json`（仅在 `--collect-history` 时生成）
+- `mak_v2_safety_audit_history.csv`（仅在 `--collect-history` 时生成）
 
 脚本只读取 token env，不会打印 token。HTTP/API 失败会非零退出。接口返回成功但 `overall != PASS` 时也会非零退出，同时保留已写出的 artifact。
+
+`--collect-latest` 与 `--collect-history` 是可选增强；不传这两个参数时，脚本保持旧行为，只 POST `/safety-audit` 并写入单次审计 artifact。传入后，脚本会在 POST 完成后继续读取只读 latest/history 接口。POST 仍需要 admin token；latest/history endpoint 本身是只读核对面，不会触发订单、dry-run signal 或 flatten。
+
+## 核对 latest/history
+
+采集完成后，先核对当前审计文件：
+
+```bash
+python - <<'PY'
+import json
+from pathlib import Path
+
+out = Path("替换为本次 --output-dir")
+audit = json.loads((out / "mak_v2_safety_audit.json").read_text())
+latest = json.loads((out / "mak_v2_safety_audit_latest.json").read_text())
+history = json.loads((out / "mak_v2_safety_audit_history.json").read_text())
+
+print("audit overall:", audit.get("overall"), audit.get("audit_time_utc"))
+print("latest overall:", latest.get("overall"), latest.get("audit_time_utc"))
+print("history rows:", len(history))
+print("history[0] overall:", history[0].get("overall") if history else None)
+PY
+```
+
+人工核对要点：
+
+1. `mak_v2_safety_audit_latest.json` 应与本次 `mak_v2_safety_audit.json` 的 `audit_time_utc`、`overall`、关键 `checks` 一致。
+2. `mak_v2_safety_audit_history.json` 第一条应是本次 POST 后的 latest 记录；`mak_v2_safety_audit_history.csv` 用于快速扫 `overall`、`failed_checks`、`watched_checks`。
+3. 如果 `overall != PASS`，保留整目录 artifact 作为失败/待补证据，不要继续订单 smoke 或任何交易链路动作。
 
 ## 结果解读
 

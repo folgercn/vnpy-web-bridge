@@ -85,12 +85,18 @@ export interface MakV2SafetyAuditResult {
   next_actions: string[]
 }
 
+export type MakV2SafetyAuditLatest = MakV2SafetyAuditResult | Record<string, never>
+
 export const getMakV2Status = () => request<MakV2ObserverStatus>('/api/mak-v2/testnet-observer/status')
 export const getMakV2Signals = () => request<Record<string, unknown>[]>('/api/mak-v2/testnet-observer/signals')
 export const getMakV2Orders = () => request<Record<string, unknown>[]>('/api/mak-v2/testnet-observer/orders')
 export const getMakV2Fills = () => request<Record<string, unknown>[]>('/api/mak-v2/testnet-observer/fills')
 export const getMakV2DailySummary = () => request<Record<string, unknown>[]>('/api/mak-v2/testnet-observer/daily-summary')
 export const getMakV2Guardrails = () => request<Record<string, unknown>[]>('/api/mak-v2/testnet-observer/guardrails')
+export const getMakV2SafetyAuditLatest = () =>
+  request<MakV2SafetyAuditLatest>('/api/mak-v2/testnet-observer/safety-audit/latest')
+export const listMakV2SafetyAudits = (limit = 50) =>
+  request<MakV2SafetyAuditResult[]>(`/api/mak-v2/testnet-observer/safety-audits?limit=${encodeURIComponent(String(limit))}`)
 
 export const enableMakV2Observer = (payload: MakV2EnablePayload) =>
   request<MakV2ObserverStatus>('/api/mak-v2/testnet-observer/enable', { method: 'POST', body: JSON.stringify(payload) })
