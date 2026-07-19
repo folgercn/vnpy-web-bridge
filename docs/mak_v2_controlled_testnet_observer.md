@@ -4,7 +4,7 @@ This document tracks the vnpy-web-bridge implementation boundary for MAK v2 GFEX
 
 ## Current Scope
 
-Merged scope through PR #98 is instrumentation-first plus read-only PR-B/T1 safety evidence:
+Merged scope through PR #101 is instrumentation-first plus read-only PR-B/T1 safety evidence:
 
 - REST endpoints under `/api/mak-v2/testnet-observer/*`
 - deterministic manual-waiver state
@@ -17,6 +17,8 @@ Merged scope through PR #98 is instrumentation-first plus read-only PR-B/T1 safe
 - read-only safety-audit endpoint and dashboard safety panel
 - remote safety-audit collector and runbook
 - in-memory safety-audit history/latest endpoints
+- optional collector artifacts for latest/history inspection
+- frontend latest/history display with audit-history error isolation
 
 No live order path is connected in the merged implementation.
 
@@ -29,6 +31,9 @@ No live order path is connected in the merged implementation.
 | #96 | Safety audit dashboard | Dashboard can run and inspect the safety audit. | UI action still calls only the safety-audit endpoint. |
 | #97 | Remote collector/runbook | Token-env collector writes JSON/CSV evidence artifacts. | Collector does not read `.env` or call order/dry-run/flatten endpoints. |
 | #98 | Safety audit history | Latest/history read endpoints are merged for post-run inspection. | History is in-memory runtime evidence, not a durable trading authorization store. |
+| #99 | Phase safety-state documentation | Documents the post-merge scope, ledger, evidence requirements, and order-wiring stop line through PR #101. | Docs-only; no runtime or order-path change. |
+| #100 | Audit history collector artifacts | Collector can optionally fetch latest/history after POST and archive JSON/CSV evidence. | Optional read-only collection; default collector behavior and order boundary remain unchanged. |
+| #101 | Safety audit history UI | Frontend displays latest/history and isolates read failures from core Observer refresh and successful audit execution. | Frontend-only; no backend, RPC, order, dry-run, or flatten path is added. |
 
 ## CI/CD And Environment Boundary
 
