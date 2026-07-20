@@ -606,6 +606,15 @@ def test_acceptance_passive_limit_ttl_cancels_and_halts(tmp_path: Path) -> None:
     assert service.plan()["status"] == "HALTED_RECONCILE_REQUIRED"
     assert trade.cancel_requests == ["CTP.1", "CTP.2"]
 
+    reconciled = service.reconcile(
+        plan["plan_hash"], operator="admin", role="admin", source_ip=None
+    )
+
+    assert reconciled["status"] == "HALTED_RECONCILED"
+    assert reconciled["reconciliation"]["expected_positions"] == {}
+    assert reconciled["reconciliation"]["observed_positions"] == {}
+    assert service.plan()["halt"]["resume_status"] == "READY_OPEN"
+
 
 def test_acceptance_passive_limit_ttl_persists_cancel_pending_when_rpc_unavailable(tmp_path: Path) -> None:
     now = [SHAKEDOWN_NOW]
@@ -1393,7 +1402,7 @@ def test_disable_cancels_active_orders_and_allows_halted_reconcile(tmp_path: Pat
         plan["plan_hash"], operator="admin", role="admin", source_ip=None
     )
     assert reconciled["reconciliation"]["halted_reconcile"] is True
-    assert reconciled["status"] == "HALTED_RECONCILE_REQUIRED"
+    assert reconciled["status"] == "HALTED_RECONCILED"
 
 
 def test_ready_open_disable_is_safely_resumable(tmp_path: Path) -> None:

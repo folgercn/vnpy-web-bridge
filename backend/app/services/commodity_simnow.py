@@ -838,13 +838,28 @@ class CommoditySimNowService:
             phase = str(plan.get("halt", {}).get("phase") or self._infer_plan_phase(plan))
         else:
             phase = "close" if plan["status"] == "CLOSE_SUBMITTED" else "open"
-        expected = plan["expected_after_close"] if phase == "close" else plan["expected_final_positions"]
-        matched = not active and observed == expected
+        nominal_expected = plan["expected_after_close"] if phase == "close" else plan["expected_final_positions"]
+        if halted_reconcile:
+            confirmed_expected = self._halt_reconciliation_expected_positions(plan, phase)
+            candidates = [candidate for candidate in (confirmed_expected, nominal_expected) if candidate is not None]
+            expected = next((candidate for candidate in candidates if observed == candidate), confirmed_expected)
+            matched = not active and expected is not None and observed == expected
+        else:
+            expected = nominal_expected
+            matched = not active and observed == expected
         reconciliation_mismatch = False
         if halted_reconcile:
             plan["status"] = "CANCEL_PENDING" if active else (
                 "HALTED_RECONCILED" if matched else "HALTED_RECONCILE_REQUIRED"
             )
+            if matched:
+                halt = plan.setdefault("halt", {})
+                halt["reconciliation_expected_positions"] = expected
+                pre_phase_expected = self._phase_pre_positions(plan, phase)
+                if expected == pre_phase_expected:
+                    halt["resume_status"] = f"READY_{phase.upper()}"
+                else:
+                    halt.pop("resume_status", None)
         elif not matched and not active and dispatch_mode == "auto":
             submitted_at = _parse_datetime(plan["submitted_at_utc"].get(phase))
             age = (
@@ -1591,6 +1606,40 @@ class CommoditySimNowService:
     def _phase_pre_positions(self, plan: dict[str, Any], phase: str) -> dict[str, int]:
         return plan["previous_positions"] if phase == "close" else plan["expected_after_close"]
 
+    def _halt_reconciliation_expected_positions(
+        self,
+        plan: dict[str, Any],
+        phase: str,
+    ) -> dict[str, int] | None:
+        """Rebuild the halted phase result from confirmed trades, never from submitted size.
+
+        A cancellation can legitimately leave none (or only part) of a phase filled.  Using
+        only the signed final target in that case makes a clean cancel impossible to reconcile.
+        The caller also permits the exact nominal phase result: that is independently proven by
+        the account position snapshot when an exchange trade callback is late or unavailable.
+        Any other partial or malformed result remains fail-closed.
+        """
+        execution = plan.get("execution") or {}
+        if not execution.get("available"):
+            return None
+        phase_orders: list[dict[str, Any]] = []
+        for row in execution.get("orders", []):
+            if row.get("phase") != phase:
+                continue
+            filled = float(row.get("filled_volume") or 0)
+            expected = float(row.get("expected_volume") or 0)
+            if filled < 0 or filled > expected or not filled.is_integer():
+                return None
+            if filled:
+                phase_orders.append(
+                    {
+                        "vt_symbol": str(row["vt_symbol"]),
+                        "direction": str(row["direction"]),
+                        "volume": int(filled),
+                    }
+                )
+        return self._apply_orders(self._phase_pre_positions(plan, phase), phase_orders)
+
     def _is_deterministic_pre_rpc_rejection(self, exc: Exception) -> bool:
         if not isinstance(exc, AppError):
             return False
@@ -1800,9 +1849,12 @@ class CommoditySimNowService:
                 result={"status": resume_status},
             )
             return
+        halt = plan.get("halt", {})
         active = self._active_plan_orders(plan)
-        phase = str(plan.get("halt", {}).get("phase") or self._infer_plan_phase(plan))
-        expected = plan["expected_after_close"] if phase == "close" else plan["expected_final_positions"]
+        phase = str(halt.get("phase") or self._infer_plan_phase(plan))
+        expected = halt.get("reconciliation_expected_positions")
+        if expected is None:
+            expected = plan["expected_after_close"] if phase == "close" else plan["expected_final_positions"]
         observed = self._signed_positions(self._position_snapshot())
         if active or observed != expected:
             plan["status"] = "CANCEL_PENDING" if active else "HALTED_RECONCILE_REQUIRED"
@@ -1819,7 +1871,10 @@ class CommoditySimNowService:
                     "observed_positions": observed,
                 },
             )
-        if phase == "close":
+        resume_status = str(halt.get("resume_status") or "")
+        if resume_status in {"READY_CLOSE", "READY_OPEN"}:
+            plan["status"] = resume_status
+        elif phase == "close":
             plan["status"] = "READY_OPEN" if plan["open_orders"] else "COMPLETE"
         else:
             plan["status"] = "COMPLETE"
