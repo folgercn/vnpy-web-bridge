@@ -1111,9 +1111,16 @@ class CommoditySimNowService:
         while True:
             try:
                 await asyncio.to_thread(self._acceptance_passive_ttl_advance)
-                if self.settings.commodity_simnow_auto_dispatch_enabled and self.template_authorized:
+                recovery_pending = bool(
+                    self.current_plan
+                    and self.current_plan.get("status")
+                    in {"CANCEL_PENDING", "SUBMISSION_OUTCOME_UNKNOWN"}
+                )
+                if recovery_pending:
+                    await asyncio.to_thread(self.auto_advance)
+                elif self.settings.commodity_simnow_auto_dispatch_enabled and self.template_authorized:
                     await asyncio.to_thread(self.auto_template_advance)
-                if self.settings.commodity_simnow_auto_dispatch_enabled:
+                elif self.settings.commodity_simnow_auto_dispatch_enabled:
                     await asyncio.to_thread(self.auto_advance)
             except Exception:
                 logger.exception("commodity SimNow auto-dispatch cycle failed")

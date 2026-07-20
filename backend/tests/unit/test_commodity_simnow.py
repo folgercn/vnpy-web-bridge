@@ -649,6 +649,69 @@ def test_acceptance_passive_limit_ttl_persists_cancel_pending_when_rpc_unavailab
     assert service.plan()["status"] == "CANCEL_PENDING"
 
 
+def test_recovery_worker_retries_acceptance_cancel_when_auto_dispatch_is_disabled(tmp_path: Path) -> None:
+    now = [SHAKEDOWN_NOW]
+    trade = FakeTrade()
+    service, private_key, rpc = make_service(tmp_path, now=SHAKEDOWN_NOW, trade=trade)
+    service.clock = lambda: now[0]
+    service.settings = service.settings.model_copy(
+        update={
+            "commodity_simnow_auto_dispatch_enabled": False,
+            "commodity_simnow_auto_dispatch_interval_seconds": 0.25,
+            "commodity_simnow_acceptance_passive_limit_enabled": True,
+            "commodity_simnow_acceptance_passive_limit_ttl_seconds": 5,
+        }
+    )
+    batch = make_batch(
+        private_key,
+        targets={"ag": 1, "al": -1},
+        execution_lane="simnow_shakedown",
+        source_month="2026-07",
+        execution_day="2026-07-17",
+    )
+    plan = service.preview(batch, operator="admin", role="admin", source_ip=None)
+    service.execute(
+        CommodityPlanExecuteRequestDTO(
+            plan_hash=plan["plan_hash"],
+            phase="open",
+            confirm=True,
+            confirm_simnow_only=True,
+            confirm_manual_one_shot=True,
+            acceptance_passive_limit=True,
+            confirm_acceptance_passive_limit=True,
+            reason="SimNow passive limit acceptance test",
+        ),
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+    rpc.orders = [
+        {
+            "vt_orderid": f"CTP.{index}",
+            "reference": request.reference,
+            "status": "not_traded",
+            "offset": request.offset,
+            "volume": request.volume,
+        }
+        for index, request in enumerate(trade.requests, start=1)
+    ]
+    now[0] = SHAKEDOWN_NOW + timedelta(seconds=5)
+    rpc.get_orders_error = RuntimeError("SimNow RPC unavailable")
+    service._acceptance_passive_ttl_advance()
+    assert service.plan()["status"] == "CANCEL_PENDING"
+    rpc.get_orders_error = None
+
+    async def exercise() -> None:
+        service.start()
+        await asyncio.sleep(0.35)
+        assert service.plan()["status"] == "HALTED_RECONCILE_REQUIRED"
+        assert trade.cancel_requests == ["CTP.1", "CTP.2"]
+        assert len(trade.requests) == 2
+        await service.stop()
+
+    asyncio.run(exercise())
+
+
 def test_one_click_template_loads_signed_target_and_dispatches(tmp_path: Path) -> None:
     target_path = tmp_path / "signed-target.json"
     trade = FakeTrade()

@@ -239,7 +239,7 @@ SUBMISSION_OUTCOME_UNKNOWN
 }
 ```
 
-买单以买一、卖单以卖一提交，但这不是 post-only 保证：盘口变化、排队和对手盘都可能造成全成或部分成交。操作前必须选择允许真实成交的最小平衡目标，并预先准备平今/持仓对账。提交后控制器会在 `COMMODITY_SIMNOW_ACCEPTANCE_PASSIVE_LIMIT_TTL_SECONDS` 到期时自动进入 `CANCEL_PENDING`，按 reference 定向撤单并进入只读收口对账；RPC 暂不可用或进程重启时保留同一撤单意图并继续恢复。撤单成功不等于验收完成，必须以实际成交和最终持仓为准：有任何成交时先 flatten，再确认持仓与活动委托均为零。
+买单以买一、卖单以卖一提交，但这不是 post-only 保证：盘口变化、排队和对手盘都可能造成全成或部分成交。操作前必须选择允许真实成交的最小平衡目标，并预先准备平今/持仓对账。提交后控制器会在 `COMMODITY_SIMNOW_ACCEPTANCE_PASSIVE_LIMIT_TTL_SECONDS` 到期时自动进入 `CANCEL_PENDING`，按 reference 定向撤单并进入只读收口对账；即使 `COMMODITY_SIMNOW_AUTO_DISPATCH_ENABLED=false`，安全 worker 仍会持续推进 `CANCEL_PENDING` 和 `SUBMISSION_OUTCOME_UNKNOWN`，但绝不提交新的 READY 阶段订单。RPC 暂不可用或进程重启时保留同一撤单意图并继续恢复。撤单成功不等于验收完成，必须以实际成交和最终持仓为准：有任何成交时先 flatten，再确认持仓与活动委托均为零。
 
 ## 验收
 
