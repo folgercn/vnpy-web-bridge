@@ -40,6 +40,7 @@ Mac / Web Backend
 - 账户、持仓、委托、成交查询。
 - 限价下单、撤单、全撤、下单二次确认。
 - Web 交易开关、紧急停止、基础风控规则、审计日志。
+- 冻结 `STATIC_CORE_EQUAL` 商品组合的 SimNow 专用签名目标、自动两阶段派单、逐阶段持仓对账和真实成交滑点快照。
 - CTA 策略列表、参数、变量、初始化、启动、停止、策略日志。
 - QuestDB 行情数据概览、查询、CSV 导入导出。
 - Vue 3 + Vite + Naive UI 前端交易终端，支持桌面和移动端宽度。
@@ -328,6 +329,23 @@ POST  /api/strategies/{strategy_name}/stop
 GET   /api/strategies/{strategy_name}/logs
 ```
 
+### 商品组合 SimNow
+
+```http
+GET  /api/commodity-simnow/status
+GET  /api/commodity-simnow/plan
+GET  /api/commodity-simnow/events
+POST /api/commodity-simnow/enable
+POST /api/commodity-simnow/disable
+POST /api/commodity-simnow/template/start
+POST /api/commodity-simnow/preview
+POST /api/commodity-simnow/execute
+POST /api/commodity-simnow/reconcile
+POST /api/commodity-simnow/auto-advance
+```
+
+策略页提供固定十品种、月度周期、PIT OI 主力链的一键启动，不需要手选品种、周期或合约。控制器只接受研究侧 Ed25519 签名的冻结整数目标；开仓前按实时盘口重算完整组合敞口并累计校验拆单持仓上限，停机时定向撤单且保留只读收口对账。执行日、source month 与到期保护统一使用期货交易日语义；每个子单发送前先持久化唯一 reference 的 send intent，结果不明时进入 `SUBMISSION_OUTCOME_UNKNOWN`，经过宽限期和多次稳定空快照且重新授权前再次核验 reference 后才允许恢复。白名单 SimNow 账户显式授权后，`simnow_shakedown` 批次可在部署当天立即自动发单并记录真实成交/滑点，但不计入正式 forward；`official_forward` 继续遵守冻结月份边界。生产执行仍被硬关闭。配置、签名与验收步骤见 [STATIC_CORE_EQUAL 商品组合 SimNow 接入](docs/commodity-static-core-simnow.md)。
+
 ### WebSocket
 
 ```http
@@ -463,6 +481,20 @@ RISK_ALLOWED_EXCHANGES=SHFE,DCE,CZCE,CFFEX,INE,GFEX
 RISK_ALLOWED_SYMBOLS=
 RISK_BLOCKED_SYMBOLS=
 RISK_TRADING_TIME_CHECK_ENABLED=false
+
+COMMODITY_SIMNOW_ENABLED=false
+COMMODITY_SIMNOW_GATEWAY_NAME=CTP
+COMMODITY_SIMNOW_ACCOUNT_HASHES=
+COMMODITY_SIMNOW_TRUSTED_PUBLIC_KEYS_JSON={}
+COMMODITY_SIMNOW_STATE_PATH=logs/commodity-simnow/state.json
+COMMODITY_SIMNOW_AUTO_DISPATCH_ENABLED=true
+COMMODITY_SIMNOW_AUTO_DISPATCH_INTERVAL_SECONDS=1
+COMMODITY_SIMNOW_AUTO_DISPATCH_RECONCILE_GRACE_SECONDS=30
+COMMODITY_SIMNOW_SUBMISSION_OUTCOME_GRACE_SECONDS=30
+COMMODITY_SIMNOW_SUBMISSION_OUTCOME_MIN_EMPTY_SNAPSHOTS=3
+COMMODITY_SIMNOW_TEMPLATE_BATCH_PATH=/absolute/path/to/current-signed-target.json
+COMMODITY_SIMNOW_DELIVERY_MONTH_CUTOFF_DAY=1
+COMMODITY_SIMNOW_SC_PRE_DELIVERY_CUTOFF_DAY=15
 ```
 
 生产环境要求：

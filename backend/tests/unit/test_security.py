@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+
 from app.core.config import Settings
 import pytest
 
@@ -62,3 +64,28 @@ def test_production_accepts_admin_and_long_secret() -> None:
     settings = Settings(app_env="production", jwt_secret_key="x" * 32, auth_users_json='[{"username":"admin","role":"admin","password_hash":"x"}]')
 
     assert settings.app_env == "production"
+
+
+def test_production_rejects_enabled_commodity_simnow_without_trust_config() -> None:
+    with pytest.raises(ValueError, match="COMMODITY_SIMNOW_ACCOUNT_HASHES"):
+        Settings(
+            app_env="production",
+            jwt_secret_key="x" * 32,
+            auth_users_json='[{"username":"admin","role":"admin","password_hash":"x"}]',
+            commodity_simnow_enabled=True,
+        )
+
+
+def test_production_accepts_enabled_commodity_simnow_with_trust_config() -> None:
+    settings = Settings(
+        app_env="production",
+        jwt_secret_key="x" * 32,
+        auth_users_json='[{"username":"admin","role":"admin","password_hash":"x"}]',
+        commodity_simnow_enabled=True,
+        commodity_simnow_account_hashes="a" * 64,
+        commodity_simnow_trusted_public_keys_json=(
+            '{"research-key":"' + base64.b64encode(bytes(32)).decode("ascii") + '"}'
+        ),
+    )
+
+    assert settings.commodity_simnow_enabled is True

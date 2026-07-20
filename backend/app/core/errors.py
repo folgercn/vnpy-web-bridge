@@ -183,6 +183,30 @@ class StrategyNotRunningError(AppError):
     message = "策略未运行"
 
 
+class CommoditySimNowDisabledError(AppError):
+    status_code = 403
+    code = "COMMODITY_SIMNOW_DISABLED"
+    message = "商品组合 SimNow 控制器未启用"
+
+
+class CommoditySimNowSafetyError(AppError):
+    status_code = 409
+    code = "COMMODITY_SIMNOW_SAFETY_FAILED"
+    message = "商品组合 SimNow 安全校验失败"
+
+
+class CommoditySimNowBatchError(AppError):
+    status_code = 422
+    code = "COMMODITY_SIMNOW_BATCH_INVALID"
+    message = "商品组合目标批次无效"
+
+
+class CommoditySimNowStateError(AppError):
+    status_code = 409
+    code = "COMMODITY_SIMNOW_STATE_CONFLICT"
+    message = "商品组合 SimNow 状态不允许该操作"
+
+
 def ok(data: Any = None) -> dict[str, Any]:
     return {"ok": True, "data": data if data is not None else {}}
 
