@@ -99,6 +99,10 @@ COMMODITY_SIMNOW_AUTO_DISPATCH_INTERVAL_SECONDS=1
 COMMODITY_SIMNOW_AUTO_DISPATCH_RECONCILE_GRACE_SECONDS=30
 COMMODITY_SIMNOW_SUBMISSION_OUTCOME_GRACE_SECONDS=30
 COMMODITY_SIMNOW_SUBMISSION_OUTCOME_MIN_EMPTY_SNAPSHOTS=3
+COMMODITY_SIMNOW_ACCEPTANCE_PASSIVE_LIMIT_ENABLED=false
+COMMODITY_SIMNOW_ACCEPTANCE_PASSIVE_LIMIT_TTL_SECONDS=15
+COMMODITY_SIMNOW_ACCEPTANCE_MAX_TOTAL_ORDERS=2
+COMMODITY_SIMNOW_ACCEPTANCE_MAX_TOTAL_LOTS=2
 COMMODITY_SIMNOW_TEMPLATE_BATCH_PATH=/absolute/path/to/current-signed-target.json
 COMMODITY_SIMNOW_DELIVERY_MONTH_CUTOFF_DAY=1
 COMMODITY_SIMNOW_SC_PRE_DELIVERY_CUTOFF_DAY=15
@@ -215,6 +219,27 @@ SUBMISSION_OUTCOME_UNKNOWN
 `GET /api/commodity-simnow/plan` 的 `execution` 包含每笔订单的实际成交量、成交均价、决策价、提交价、adverse slippage ticks、滑点金额和总 fill ratio。负的 adverse slippage 表示价格改善。成交快照来自 vn.py 的真实 order/trade 查询；如果 RPC 不提供成交查询，会明确返回 `available=false`，但仍以活动委托和权威持仓决定是否完成对账。
 
 手工 `execute/reconcile` 接口保留为运维回退路径。未完成计划会原子保存到 `COMMODITY_SIMNOW_STATE_PATH` 同目录的 `*.active.json`，包括状态、send intents、submitted order ids 和停机撤单记录。进程重启后控制器恢复该计划并保持自动授权关闭：尚未提交的 `READY_*` 进入 `HALTED_PRE_SUBMIT_SAFE`；`SUBMITTING_*` 或零成功 `*_SUBMISSION_PARTIAL` 先进入 outcome 分类，未知结果保持 `SUBMISSION_OUTCOME_UNKNOWN`；已有提交证据的计划在 RPC 恢复后定向撤单并进入收口对账。已完成批次链继续保存在配置的状态文件中。
+
+### 被动限价验收（仅 SimNow）
+
+`COMMODITY_SIMNOW_ACCEPTANCE_PASSIVE_LIMIT_ENABLED` 默认必须保持 `false`。启用后仍只允许人工、`simnow_shakedown`、双确认的 `execute`；自动派单和 `official_forward` 会被拒绝。每个阶段还会在任何订单发送前校验 `COMMODITY_SIMNOW_ACCEPTANCE_MAX_TOTAL_ORDERS` 和 `COMMODITY_SIMNOW_ACCEPTANCE_MAX_TOTAL_LOTS`，超过任一上限即整阶段零提交。
+
+请求必须显式声明模式：
+
+```json
+{
+  "plan_hash": "<preview 返回的 hash>",
+  "phase": "open",
+  "confirm": true,
+  "confirm_simnow_only": true,
+  "confirm_manual_one_shot": true,
+  "acceptance_passive_limit": true,
+  "confirm_acceptance_passive_limit": true,
+  "reason": "SimNow passive acceptance"
+}
+```
+
+买单以买一、卖单以卖一提交，但这不是 post-only 保证：盘口变化、排队和对手盘都可能造成全成或部分成交。操作前必须选择允许真实成交的最小平衡目标，并预先准备平今/持仓对账。提交后控制器会在 `COMMODITY_SIMNOW_ACCEPTANCE_PASSIVE_LIMIT_TTL_SECONDS` 到期时自动进入 `CANCEL_PENDING`，按 reference 定向撤单并进入只读收口对账；RPC 暂不可用或进程重启时保留同一撤单意图并继续恢复。撤单成功不等于验收完成，必须以实际成交和最终持仓为准：有任何成交时先 flatten，再确认持仓与活动委托均为零。
 
 ## 验收
 

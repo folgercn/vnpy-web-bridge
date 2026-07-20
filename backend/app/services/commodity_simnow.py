@@ -213,6 +213,11 @@ class CommoditySimNowService:
             "acceptance_passive_limit_enabled": (
                 self.settings.commodity_simnow_acceptance_passive_limit_enabled
             ),
+            "acceptance_passive_limit_ttl_seconds": (
+                self.settings.commodity_simnow_acceptance_passive_limit_ttl_seconds
+            ),
+            "acceptance_max_total_orders": self.settings.commodity_simnow_acceptance_max_total_orders,
+            "acceptance_max_total_lots": self.settings.commodity_simnow_acceptance_max_total_lots,
             "strategy_template": {
                 "template_id": "STATIC_CORE_EQUAL_AUTO_V1",
                 "configured": bool(template_path and Path(template_path).expanduser().is_file()),
@@ -245,11 +250,7 @@ class CommoditySimNowService:
                 operator="commodity-simnow-recovery",
                 source_ip=None,
             )
-        if (
-            self._task
-            or not self.settings.commodity_simnow_enabled
-            or not self.settings.commodity_simnow_auto_dispatch_enabled
-        ):
+        if self._task or not self.settings.commodity_simnow_enabled:
             return
         self._task = asyncio.create_task(self._run_auto_dispatch_loop())
 
@@ -632,6 +633,8 @@ class CommoditySimNowService:
         repriced_orders = [
             self._reprice_order(order, passive=use_acceptance_passive_limit) for order in orders
         ]
+        if use_acceptance_passive_limit:
+            self._verify_acceptance_passive_limits(repriced_orders)
         self._verify_phase_symbol_position_limit(repriced_orders, self._position_snapshot())
         if payload.phase == "open":
             prices = {order["vt_symbol"]: float(order["price"]) for order in repriced_orders}
@@ -759,6 +762,14 @@ class CommoditySimNowService:
             ) from exc
 
         plan["submitted_at_utc"][payload.phase] = self.clock().astimezone(timezone.utc).isoformat()
+        if use_acceptance_passive_limit:
+            plan["acceptance_passive"] = {
+                "phase": payload.phase,
+                "submitted_at_utc": plan["submitted_at_utc"][payload.phase],
+                "ttl_seconds": self.settings.commodity_simnow_acceptance_passive_limit_ttl_seconds,
+                "max_total_orders": self.settings.commodity_simnow_acceptance_max_total_orders,
+                "max_total_lots": self.settings.commodity_simnow_acceptance_max_total_lots,
+            }
         plan["status"] = f"{payload.phase.upper()}_SUBMITTED"
         self._persist_active_plan()
         result = self.plan()
@@ -1099,12 +1110,65 @@ class CommoditySimNowService:
     async def _run_auto_dispatch_loop(self) -> None:
         while True:
             try:
-                if self.template_authorized:
+                await asyncio.to_thread(self._acceptance_passive_ttl_advance)
+                if self.settings.commodity_simnow_auto_dispatch_enabled and self.template_authorized:
                     await asyncio.to_thread(self.auto_template_advance)
-                await asyncio.to_thread(self.auto_advance)
+                if self.settings.commodity_simnow_auto_dispatch_enabled:
+                    await asyncio.to_thread(self.auto_advance)
             except Exception:
                 logger.exception("commodity SimNow auto-dispatch cycle failed")
             await asyncio.sleep(self.settings.commodity_simnow_auto_dispatch_interval_seconds)
+
+    @_serialized
+    def _acceptance_passive_ttl_advance(self) -> dict[str, Any]:
+        plan = self.current_plan
+        if not plan or plan.get("status") not in {"CLOSE_SUBMITTED", "OPEN_SUBMITTED"}:
+            return {"action": "idle", "reason": "no_active_acceptance_passive_plan"}
+        acceptance = plan.get("acceptance_passive")
+        if not isinstance(acceptance, dict):
+            return {"action": "idle", "reason": "not_acceptance_passive"}
+        submitted_at = _parse_datetime(acceptance.get("submitted_at_utc"))
+        if submitted_at is None:
+            raise CommoditySimNowStateError("被动限价验收计划缺少提交时间")
+        ttl_seconds = int(acceptance.get("ttl_seconds") or 0)
+        if ttl_seconds <= 0:
+            raise CommoditySimNowStateError("被动限价验收计划 TTL 无效")
+        elapsed = (self.clock().astimezone(timezone.utc) - submitted_at).total_seconds()
+        if elapsed < ttl_seconds:
+            return {
+                "action": "idle",
+                "reason": "acceptance_passive_ttl_not_expired",
+                "remaining_seconds": max(0.0, round(ttl_seconds - elapsed, 3)),
+            }
+        phase = str(acceptance.get("phase") or self._infer_plan_phase(plan))
+        halt = self._begin_safe_halt(
+            "acceptance_passive_ttl_expired",
+            operator="commodity-simnow-acceptance-ttl",
+            source_ip=None,
+            phase=phase,
+        )
+        self._event(
+            "acceptance_passive_ttl_expired",
+            plan_hash=plan.get("plan_hash"),
+            result={"phase": phase, "ttl_seconds": ttl_seconds, "halt": halt},
+        )
+        return {"action": "halted", "reason": "acceptance_passive_ttl_expired", "halt": halt}
+
+    def _verify_acceptance_passive_limits(self, orders: list[dict[str, Any]]) -> None:
+        total_orders = len(orders)
+        total_lots = sum(int(order["volume"]) for order in orders)
+        maximum_orders = self.settings.commodity_simnow_acceptance_max_total_orders
+        maximum_lots = self.settings.commodity_simnow_acceptance_max_total_lots
+        if total_orders > maximum_orders or total_lots > maximum_lots:
+            raise CommoditySimNowSafetyError(
+                "被动限价验收规模超过硬上限",
+                detail={
+                    "total_orders": total_orders,
+                    "max_total_orders": maximum_orders,
+                    "total_lots": total_lots,
+                    "max_total_lots": maximum_lots,
+                },
+            )
 
     def _load_template_batch(self) -> CommodityTargetBatchDTO:
         path = Path(self.settings.commodity_simnow_template_batch_path).expanduser()
