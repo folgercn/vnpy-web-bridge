@@ -28,6 +28,13 @@ def plan(_: CurrentUser = Depends(require_roles("viewer", "trader", "admin"))) -
     return ok(commodity_simnow_service.plan())
 
 
+@router.get("/position-manager-shadow")
+def position_manager_shadow(
+    _: CurrentUser = Depends(require_roles("viewer", "trader", "admin")),
+) -> dict:
+    return ok(commodity_simnow_service.position_manager_shadow())
+
+
 @router.get("/events")
 def events(
     limit: int = Query(default=200, ge=1, le=1000),

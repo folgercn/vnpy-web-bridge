@@ -94,6 +94,55 @@ class CommodityTargetPreviewRequestDTO(StrictModel):
     batch: CommodityTargetBatchDTO
 
 
+class CommodityPositionManagerShadowTargetDTO(StrictModel):
+    product: Product
+    exact_contract: str = Field(min_length=8, max_length=32)
+    baseline_target_quantity: int
+    shadow_target_quantity: int
+    baseline_source_target_weight: float
+    shadow_source_target_weight: float
+    baseline_buffered_target_weight: float
+    shadow_buffered_target_weight: float
+    reference_open_price: float = Field(gt=0)
+    multiplier: int = Field(gt=0)
+    price_tick: float = Field(gt=0)
+
+
+class CommodityPositionManagerShadowDTO(StrictModel):
+    schema_version: Literal["commodity_relative_vol_position_manager_shadow_v2"]
+    snapshot_id: str = Field(pattern=r"^[A-Za-z0-9._-]{8,128}$")
+    position_manager_id: Literal["MONTHLY_RELATIVE_VOL_THERMOSTAT_V1"]
+    sector_map_id: Literal["POSITION_MANAGER_SECTOR_MAP_V1"]
+    mode: Literal["shadow_only"]
+    baseline_scheduler_id: Literal["STATIC_CORE_EQUAL"]
+    baseline_batch_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    source_month: str = Field(pattern=r"^\d{4}-\d{2}$")
+    execution_day: date
+    input_cutoff_day: date
+    fast_lookback_days: Literal[21]
+    slow_lookback_days: Literal[126]
+    annualization_days: Literal[252]
+    fast_annual_vol: float = Field(gt=0)
+    slow_annual_vol: float = Field(gt=0)
+    scale_min: Literal[0.8]
+    scale_max: Literal[1.2]
+    raw_scale: float = Field(ge=0.8, le=1.2)
+    continuity_mode: Literal["genesis", "linked"]
+    previous_snapshot_hash: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    previous_smoothed_scale: float = Field(ge=0.8, le=1.2)
+    smoothing_alpha: Literal[0.5]
+    smoothed_scale: float = Field(ge=0.8, le=1.2)
+    daily_auto_reweight: Literal[False]
+    guardband_reapplied: Literal[True]
+    authority_granted: Literal[False]
+    dispatch_allowed: Literal[False]
+    targets: list[CommodityPositionManagerShadowTargetDTO] = Field(min_length=10, max_length=10)
+    signer_key_id: str = Field(pattern=r"^[A-Za-z0-9._-]{1,128}$")
+    signature: str = Field(min_length=40, max_length=256)
+
+
 class CommodityPlanExecuteRequestDTO(StrictModel):
     plan_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     phase: Literal["close", "open"]

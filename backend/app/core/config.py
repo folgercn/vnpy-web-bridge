@@ -97,6 +97,10 @@ class Settings(BaseSettings):
     commodity_simnow_acceptance_max_total_orders: int = Field(default=2, ge=1, le=20)
     commodity_simnow_acceptance_max_total_lots: int = Field(default=2, ge=1, le=20)
     commodity_simnow_template_batch_path: str = ""
+    commodity_position_manager_shadow_path: str = ""
+    commodity_position_manager_shadow_state_path: str = (
+        "logs/commodity-simnow/position-manager-shadow-state.json"
+    )
     commodity_simnow_delivery_month_cutoff_day: int = Field(default=1, ge=1, le=15)
     commodity_simnow_sc_pre_delivery_cutoff_day: int = Field(default=15, ge=1, le=25)
 

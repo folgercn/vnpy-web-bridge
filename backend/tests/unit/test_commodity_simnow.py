@@ -19,12 +19,14 @@ from app.core.errors import (
 )
 from app.schemas.commodity_simnow import (
     CommodityPlanExecuteRequestDTO,
+    CommodityPositionManagerShadowDTO,
     CommoditySimNowDisableRequestDTO,
     CommoditySimNowEnableRequestDTO,
     CommodityTemplateStartRequestDTO,
     CommodityTargetBatchDTO,
 )
 from app.services.commodity_simnow import (
+    POSITION_MANAGER_SECTOR_MAP_V1,
     PRODUCT_SPECS,
     CommoditySimNowService,
     _canonical_json,
@@ -207,6 +209,9 @@ def make_settings(tmp_path: Path, private_key: Ed25519PrivateKey) -> Settings:
         commodity_simnow_account_hashes=ACCOUNT_HASH,
         commodity_simnow_trusted_public_keys_json=public_key_json(private_key),
         commodity_simnow_state_path=str(tmp_path / "commodity-state.json"),
+        commodity_position_manager_shadow_state_path=str(
+            tmp_path / "position-manager-shadow-state.json"
+        ),
         commodity_simnow_max_child_order_lots=10,
         commodity_simnow_max_orders_per_phase=128,
         web_trade_enabled=True,
@@ -326,6 +331,92 @@ def make_batch(
     return CommodityTargetBatchDTO.model_validate(data)
 
 
+def make_position_manager_shadow(
+    private_key: Ed25519PrivateKey,
+    *,
+    baseline_batch_hash: str,
+    raw_scale: float | None = None,
+    previous_scale: float = 1.0,
+    continuity_mode: str = "genesis",
+    previous_snapshot_hash: str | None = None,
+    source_month: str = "2026-08",
+    execution_day: str = "2026-09-01",
+    input_cutoff_day: str = "2026-08-31",
+) -> CommodityPositionManagerShadowDTO:
+    fast_vol = 0.04
+    slow_vol = 0.05
+    calculated_raw = (slow_vol / fast_vol) ** 0.5
+    effective_raw = calculated_raw if raw_scale is None else raw_scale
+    smoothed_scale = 0.5 * effective_raw + 0.5 * previous_scale
+    rows = []
+    baseline_quantities = {"ag": 2, "al": -1}
+    shadow_quantities = {"ag": 3, "al": -2}
+    baseline_weights = {product: 0.0 for product in PRODUCT_SPECS}
+    shadow_weights = {product: 0.0 for product in PRODUCT_SPECS}
+    baseline_weights.update({"ag": 0.05, "al": -0.05})
+    shadow_weights.update({"ag": 0.05 * smoothed_scale, "al": -0.05 * smoothed_scale})
+    for product, spec in PRODUCT_SPECS.items():
+        rows.append(
+            {
+                "product": product,
+                "exact_contract": exact_contract(product),
+                "baseline_target_quantity": baseline_quantities.get(product, 0),
+                "shadow_target_quantity": shadow_quantities.get(product, 0),
+                "baseline_source_target_weight": baseline_weights[product],
+                "shadow_source_target_weight": baseline_weights[product] * smoothed_scale,
+                "baseline_buffered_target_weight": baseline_weights[product],
+                "shadow_buffered_target_weight": shadow_weights[product],
+                "reference_open_price": reference_price(product),
+                "multiplier": spec["multiplier"],
+                "price_tick": spec["price_tick"],
+            }
+        )
+    data = {
+        "schema_version": "commodity_relative_vol_position_manager_shadow_v2",
+        "snapshot_id": "shadow-2026-09-static-core",
+        "position_manager_id": "MONTHLY_RELATIVE_VOL_THERMOSTAT_V1",
+        "sector_map_id": "POSITION_MANAGER_SECTOR_MAP_V1",
+        "mode": "shadow_only",
+        "baseline_scheduler_id": "STATIC_CORE_EQUAL",
+        "baseline_batch_hash": baseline_batch_hash,
+        "source_month": source_month,
+        "execution_day": execution_day,
+        "input_cutoff_day": input_cutoff_day,
+        "fast_lookback_days": 21,
+        "slow_lookback_days": 126,
+        "annualization_days": 252,
+        "fast_annual_vol": fast_vol,
+        "slow_annual_vol": slow_vol,
+        "scale_min": 0.8,
+        "scale_max": 1.2,
+        "raw_scale": effective_raw,
+        "continuity_mode": continuity_mode,
+        "previous_snapshot_hash": previous_snapshot_hash,
+        "previous_smoothed_scale": previous_scale,
+        "smoothing_alpha": 0.5,
+        "smoothed_scale": smoothed_scale,
+        "daily_auto_reweight": False,
+        "guardband_reapplied": True,
+        "authority_granted": False,
+        "dispatch_allowed": False,
+        "targets": rows,
+        "signer_key_id": "research-key",
+        "signature": base64.b64encode(bytes(64)).decode(),
+    }
+    return sign_position_manager_shadow_payload(data, private_key)
+
+
+def sign_position_manager_shadow_payload(
+    data: dict[str, Any], private_key: Ed25519PrivateKey
+) -> CommodityPositionManagerShadowDTO:
+    payload = json.loads(json.dumps(data))
+    payload["signature"] = base64.b64encode(bytes(64)).decode()
+    draft = CommodityPositionManagerShadowDTO.model_validate(payload)
+    canonical = _canonical_json(draft.model_dump(mode="json", exclude={"signature"}))
+    payload["signature"] = base64.b64encode(private_key.sign(canonical)).decode()
+    return CommodityPositionManagerShadowDTO.model_validate(payload)
+
+
 def make_service(
     tmp_path: Path,
     *,
@@ -402,6 +493,15 @@ def fills_for_requests(requests: list[Any]) -> list[dict[str, Any]]:
 def write_batch(path: Path, batch: CommodityTargetBatchDTO) -> None:
     path.write_text(
         json.dumps(batch.model_dump(mode="json"), ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+def write_position_manager_shadow(
+    path: Path, snapshot: CommodityPositionManagerShadowDTO
+) -> None:
+    path.write_text(
+        json.dumps(snapshot.model_dump(mode="json"), ensure_ascii=False),
         encoding="utf-8",
     )
 
@@ -719,6 +819,375 @@ def test_recovery_worker_retries_acceptance_cancel_when_auto_dispatch_is_disable
         await service.stop()
 
     asyncio.run(exercise())
+
+
+def test_position_manager_shadow_is_verified_and_never_dispatched(tmp_path: Path) -> None:
+    service, private_key, _ = make_service(tmp_path)
+    plan = service.preview(make_batch(private_key), operator="admin", role="admin", source_ip=None)
+    path = tmp_path / "position-manager-shadow.json"
+    write_position_manager_shadow(
+        path,
+        make_position_manager_shadow(private_key, baseline_batch_hash=plan["batch_hash"]),
+    )
+    service.settings = service.settings.model_copy(
+        update={"commodity_position_manager_shadow_path": str(path)}
+    )
+
+    snapshot = service.position_manager_shadow()
+
+    assert snapshot["valid"] is True
+    assert snapshot["baseline_link_state"] == "active"
+    assert snapshot["sector_map_id"] == "POSITION_MANAGER_SECTOR_MAP_V1"
+    assert snapshot["continuity_state"] == "genesis"
+    assert snapshot["continuity_verified"] is True
+    assert snapshot["target_change_count"] == 2
+    assert snapshot["maximum_abs_target_quantity_delta"] == 1
+    assert snapshot["authority_granted"] is False
+    assert snapshot["dispatch_allowed"] is False
+    assert len(snapshot["targets"]) == 10
+    assert {(row["product"], row["volume"]) for row in plan["open_orders"]} == {
+        ("ag", 2),
+        ("al", 1),
+    }
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("source_month", "2026-07"),
+        ("baseline_target_quantity", 3),
+    ],
+)
+def test_position_manager_shadow_rejects_mismatched_linked_baseline(
+    tmp_path: Path,
+    field: str,
+    value: Any,
+) -> None:
+    service, private_key, _ = make_service(tmp_path)
+    plan = service.preview(make_batch(private_key), operator="admin", role="admin", source_ip=None)
+    path = tmp_path / "mismatched-linked-shadow.json"
+    data = make_position_manager_shadow(
+        private_key, baseline_batch_hash=plan["batch_hash"]
+    ).model_dump(mode="json")
+    if field == "baseline_target_quantity":
+        data["targets"][0][field] = value
+    else:
+        data[field] = value
+    write_position_manager_shadow(
+        path,
+        sign_position_manager_shadow_payload(data, private_key),
+    )
+    service.settings = service.settings.model_copy(
+        update={"commodity_position_manager_shadow_path": str(path)}
+    )
+
+    snapshot = service.position_manager_shadow()
+
+    assert snapshot["valid"] is False
+    assert snapshot["error_type"] == "CommoditySimNowBatchError"
+
+
+def test_position_manager_shadow_marks_unavailable_baseline_unlinked(tmp_path: Path) -> None:
+    service, private_key, _ = make_service(tmp_path)
+    path = tmp_path / "unlinked-position-manager-shadow.json"
+    write_position_manager_shadow(
+        path,
+        make_position_manager_shadow(private_key, baseline_batch_hash="c" * 64),
+    )
+    service.settings = service.settings.model_copy(
+        update={"commodity_position_manager_shadow_path": str(path)}
+    )
+
+    snapshot = service.position_manager_shadow()
+
+    assert snapshot["valid"] is True
+    assert snapshot["baseline_link_state"] == "unlinked"
+
+
+def test_baseline_sector_mapping_remains_identical_to_main() -> None:
+    assert {product: spec["sector"] for product, spec in PRODUCT_SPECS.items()} == {
+        "ag": "precious",
+        "al": "nonferrous",
+        "au": "precious",
+        "bu": "energy",
+        "cu": "nonferrous",
+        "rb": "ferrous",
+        "ru": "chemicals",
+        "sc": "energy",
+        "sp": "agriculture",
+        "zn": "nonferrous",
+    }
+
+
+def test_shadow_sector_map_does_not_change_baseline_weight_acceptance(tmp_path: Path) -> None:
+    service, private_key, _ = make_service(tmp_path)
+    batch = make_batch(
+        private_key,
+        targets={"bu": 1, "ru": 1, "ag": -1, "al": -1},
+    )
+    source_weights = {"bu": 0.2, "ru": 0.2, "ag": -0.2, "al": -0.2}
+    buffered_weights = {"bu": 0.1, "ru": 0.1, "ag": -0.1, "al": -0.1}
+    batch = batch.model_copy(
+        update={
+            "targets": [
+                row.model_copy(
+                    update={
+                        "source_target_weight": source_weights.get(row.product, 0.0),
+                        "buffered_target_weight": buffered_weights.get(row.product, 0.0),
+                    }
+                )
+                for row in batch.targets
+            ]
+        }
+    )
+
+    service._verify_weight_caps(batch)
+
+    baseline_sector_gross = {
+        sector: sum(
+            abs(source_weights.get(product, 0.0))
+            for product, spec in PRODUCT_SPECS.items()
+            if spec["sector"] == sector
+        )
+        for sector in {spec["sector"] for spec in PRODUCT_SPECS.values()}
+    }
+    shadow_energy_chemical_gross = sum(
+        abs(source_weights.get(product, 0.0))
+        for product, sector in POSITION_MANAGER_SECTOR_MAP_V1.items()
+        if sector == "energy_chemical"
+    )
+    assert max(baseline_sector_gross.values()) == pytest.approx(0.2)
+    assert shadow_energy_chemical_gross == pytest.approx(0.4)
+
+
+def test_position_manager_shadow_verifies_monthly_continuity(tmp_path: Path) -> None:
+    service, private_key, _ = make_service(tmp_path)
+    plan = service.preview(make_batch(private_key), operator="admin", role="admin", source_ip=None)
+    path = tmp_path / "position-manager-shadow.json"
+    write_position_manager_shadow(
+        path,
+        make_position_manager_shadow(private_key, baseline_batch_hash=plan["batch_hash"]),
+    )
+    service.settings = service.settings.model_copy(
+        update={"commodity_position_manager_shadow_path": str(path)}
+    )
+    genesis = service.position_manager_shadow()
+    service.current_plan["source_month"] = "2026-09"
+    service.current_plan["execution_day"] = "2026-10-01"
+    write_position_manager_shadow(
+        path,
+        make_position_manager_shadow(
+            private_key,
+            baseline_batch_hash=plan["batch_hash"],
+            previous_scale=genesis["smoothed_scale"],
+            continuity_mode="linked",
+            previous_snapshot_hash=genesis["snapshot_hash"],
+            source_month="2026-09",
+            execution_day="2026-10-01",
+            input_cutoff_day="2026-09-30",
+        ),
+    )
+
+    snapshot = service.position_manager_shadow()
+
+    assert snapshot["valid"] is True
+    assert snapshot["continuity_state"] == "verified"
+    assert snapshot["continuity_verified"] is True
+
+
+def test_position_manager_shadow_rejects_genesis_reset(tmp_path: Path) -> None:
+    service, private_key, _ = make_service(tmp_path)
+    plan = service.preview(make_batch(private_key), operator="admin", role="admin", source_ip=None)
+    path = tmp_path / "position-manager-shadow.json"
+    write_position_manager_shadow(
+        path,
+        make_position_manager_shadow(private_key, baseline_batch_hash=plan["batch_hash"]),
+    )
+    service.settings = service.settings.model_copy(
+        update={"commodity_position_manager_shadow_path": str(path)}
+    )
+    assert service.position_manager_shadow()["continuity_state"] == "genesis"
+    service.current_plan["source_month"] = "2026-09"
+    service.current_plan["execution_day"] = "2026-10-01"
+    write_position_manager_shadow(
+        path,
+        make_position_manager_shadow(
+            private_key,
+            baseline_batch_hash=plan["batch_hash"],
+            source_month="2026-09",
+            execution_day="2026-10-01",
+            input_cutoff_day="2026-09-30",
+        ),
+    )
+
+    snapshot = service.position_manager_shadow()
+
+    assert snapshot["valid"] is False
+    assert snapshot["error_type"] == "CommoditySimNowBatchError"
+
+
+@pytest.mark.parametrize("continuity_error", ["hash", "month", "scale"])
+def test_position_manager_shadow_rejects_broken_monthly_continuity(
+    tmp_path: Path,
+    continuity_error: str,
+) -> None:
+    service, private_key, _ = make_service(tmp_path)
+    plan = service.preview(make_batch(private_key), operator="admin", role="admin", source_ip=None)
+    path = tmp_path / "position-manager-shadow.json"
+    write_position_manager_shadow(
+        path,
+        make_position_manager_shadow(private_key, baseline_batch_hash=plan["batch_hash"]),
+    )
+    service.settings = service.settings.model_copy(
+        update={"commodity_position_manager_shadow_path": str(path)}
+    )
+    genesis = service.position_manager_shadow()
+    source_month = "2026-10" if continuity_error == "month" else "2026-09"
+    execution_day = "2026-11-01" if continuity_error == "month" else "2026-10-01"
+    input_cutoff_day = "2026-10-31" if continuity_error == "month" else "2026-09-30"
+    service.current_plan["source_month"] = source_month
+    service.current_plan["execution_day"] = execution_day
+    write_position_manager_shadow(
+        path,
+        make_position_manager_shadow(
+            private_key,
+            baseline_batch_hash=plan["batch_hash"],
+            previous_scale=(
+                0.9 if continuity_error == "scale" else genesis["smoothed_scale"]
+            ),
+            continuity_mode="linked",
+            previous_snapshot_hash=(
+                "f" * 64
+                if continuity_error == "hash"
+                else genesis["snapshot_hash"]
+            ),
+            source_month=source_month,
+            execution_day=execution_day,
+            input_cutoff_day=input_cutoff_day,
+        ),
+    )
+
+    snapshot = service.position_manager_shadow()
+
+    assert snapshot["valid"] is False
+    assert snapshot["error_type"] == "CommoditySimNowBatchError"
+
+
+def test_position_manager_shadow_marks_missing_continuity_evidence_unlinked(
+    tmp_path: Path,
+) -> None:
+    service, private_key, _ = make_service(tmp_path)
+    plan = service.preview(make_batch(private_key), operator="admin", role="admin", source_ip=None)
+    path = tmp_path / "position-manager-shadow.json"
+    write_position_manager_shadow(
+        path,
+        make_position_manager_shadow(
+            private_key,
+            baseline_batch_hash=plan["batch_hash"],
+            continuity_mode="linked",
+            previous_snapshot_hash="d" * 64,
+        ),
+    )
+    service.settings = service.settings.model_copy(
+        update={"commodity_position_manager_shadow_path": str(path)}
+    )
+
+    snapshot = service.position_manager_shadow()
+
+    assert snapshot["valid"] is True
+    assert snapshot["continuity_state"] == "unlinked"
+    assert snapshot["continuity_verified"] is False
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("source_month", "2026-99"),
+        ("input_cutoff_day", "2026-07-31"),
+        ("input_cutoff_day", "2024-08-31"),
+        ("fast_annual_vol", float("inf")),
+        ("reference_open_price", float("inf")),
+        ("baseline_source_target_weight", float("inf")),
+    ],
+)
+def test_position_manager_shadow_rejects_invalid_time_or_nonfinite_number(
+    tmp_path: Path,
+    field: str,
+    value: Any,
+) -> None:
+    service, private_key, _ = make_service(tmp_path)
+    path = tmp_path / "invalid-position-manager-shadow.json"
+    data = make_position_manager_shadow(
+        private_key, baseline_batch_hash="e" * 64
+    ).model_dump(mode="json")
+    if field in {"reference_open_price", "baseline_source_target_weight"}:
+        data["targets"][2][field] = value
+    else:
+        data[field] = value
+    write_position_manager_shadow(
+        path,
+        sign_position_manager_shadow_payload(data, private_key),
+    )
+    service.settings = service.settings.model_copy(
+        update={"commodity_position_manager_shadow_path": str(path)}
+    )
+
+    snapshot = service.position_manager_shadow()
+
+    assert snapshot["valid"] is False
+    assert snapshot["error_type"] == "CommoditySimNowBatchError"
+
+
+def test_position_manager_shadow_bad_formula_fails_closed_without_stopping_baseline(
+    tmp_path: Path,
+) -> None:
+    service, private_key, _ = make_service(tmp_path)
+    path = tmp_path / "bad-position-manager-shadow.json"
+    write_position_manager_shadow(
+        path,
+        make_position_manager_shadow(
+            private_key,
+            baseline_batch_hash="a" * 64,
+            raw_scale=1.01,
+        ),
+    )
+    service.settings = service.settings.model_copy(
+        update={"commodity_position_manager_shadow_path": str(path)}
+    )
+
+    snapshot = service.position_manager_shadow()
+
+    assert snapshot["configured"] is True
+    assert snapshot["valid"] is False
+    assert snapshot["error_type"] == "CommoditySimNowBatchError"
+    assert snapshot["authority_granted"] is False
+    assert snapshot["dispatch_allowed"] is False
+    assert service.status()["auto_dispatch_allowed"] is True
+
+
+def test_position_manager_shadow_rejects_signed_target_not_derived_from_scale(
+    tmp_path: Path,
+) -> None:
+    service, private_key, _ = make_service(tmp_path)
+    path = tmp_path / "mismatched-position-manager-shadow.json"
+    data = make_position_manager_shadow(
+        private_key, baseline_batch_hash="b" * 64
+    ).model_dump(mode="json")
+    data["targets"][0]["shadow_source_target_weight"] += 0.001
+    write_position_manager_shadow(
+        path,
+        sign_position_manager_shadow_payload(data, private_key),
+    )
+    service.settings = service.settings.model_copy(
+        update={"commodity_position_manager_shadow_path": str(path)}
+    )
+
+    snapshot = service.position_manager_shadow()
+
+    assert snapshot["valid"] is False
+    assert snapshot["error_type"] == "CommoditySimNowBatchError"
+    assert snapshot["authority_granted"] is False
+    assert snapshot["dispatch_allowed"] is False
 
 
 def test_one_click_template_loads_signed_target_and_dispatches(tmp_path: Path) -> None:

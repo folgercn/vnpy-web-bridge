@@ -23,6 +23,15 @@ class FakeCommoditySimNowService:
     def plan(self) -> dict:
         return {}
 
+    def position_manager_shadow(self) -> dict:
+        return {
+            "configured": True,
+            "valid": True,
+            "mode": "shadow_only",
+            "authority_granted": False,
+            "dispatch_allowed": False,
+        }
+
     def list_events(self, limit: int) -> list[dict]:
         return []
 
@@ -98,6 +107,24 @@ def test_viewer_can_read_status_but_cannot_enable(monkeypatch) -> None:
     assert status.status_code == 200
     assert status.json()["data"]["production_allowed"] is False
     assert forbidden.status_code == 403
+
+
+def test_viewer_can_read_position_manager_shadow(monkeypatch) -> None:
+    install_service(monkeypatch)
+    with client_without_rpc(monkeypatch) as client:
+        response = client.get(
+            "/api/commodity-simnow/position-manager-shadow",
+            headers=auth_headers("viewer"),
+        )
+
+    assert response.status_code == 200
+    assert response.json()["data"] == {
+        "configured": True,
+        "valid": True,
+        "mode": "shadow_only",
+        "authority_granted": False,
+        "dispatch_allowed": False,
+    }
 
 
 def test_admin_can_enable_controller(monkeypatch) -> None:

@@ -50,6 +50,36 @@
         部署环境需配置 COMMODITY_SIMNOW_TEMPLATE_BATCH_PATH；目标文件由冻结研究流水线自动更新，页面不允许手选品种、周期或合约。
       </n-alert>
     </n-card>
+    <n-card title="仓位管理候选 · 只读 Shadow" size="small">
+      <div class="template-grid">
+        <div><span class="muted">候选</span><strong>{{ positionManager.position_manager_id || 'MONTHLY_RELATIVE_VOL_THERMOSTAT_V1' }}</strong></div>
+        <div><span class="muted">状态</span><strong>{{ positionManagerStatusText }}</strong></div>
+        <div><span class="muted">月度 scale</span><strong>{{ formatScale(positionManager.smoothed_scale) }}</strong></div>
+        <div><span class="muted">基线关联</span><strong>{{ positionManager.baseline_link_state || '-' }}</strong></div>
+        <div><span class="muted">平滑链</span><strong>{{ positionManager.continuity_state || '-' }}</strong></div>
+        <div><span class="muted">板块映射</span><strong>{{ positionManager.sector_map_id || '-' }}</strong></div>
+        <div><span class="muted">21 日波动</span><strong>{{ formatPercent(positionManager.fast_annual_vol) }}</strong></div>
+        <div><span class="muted">126 日波动</span><strong>{{ formatPercent(positionManager.slow_annual_vol) }}</strong></div>
+        <div><span class="muted">输入截止日</span><strong>{{ positionManager.input_cutoff_day || '-' }}</strong></div>
+        <div>
+          <span class="muted">整数手差异</span>
+          <strong>{{ positionManager.target_change_count ?? 0 }} 个品种 / 最大 {{ positionManager.maximum_abs_target_quantity_delta ?? 0 }} 手</strong>
+        </div>
+      </div>
+      <n-space size="small" style="margin-top: 12px">
+        <n-tag :type="positionManager.valid ? 'success' : positionManager.configured ? 'error' : 'default'" round>
+          {{ positionManager.valid ? '签名与公式已核验' : positionManager.configured ? '快照无效' : '未配置快照' }}
+        </n-tag>
+        <n-tag :type="positionManager.continuity_verified ? 'success' : 'warning'" round>
+          {{ positionManager.continuity_verified ? '月度链已核验' : '月度链未关联' }}
+        </n-tag>
+        <n-tag type="warning" round>不发单</n-tag>
+        <n-tag type="default" round>authority=false</n-tag>
+      </n-space>
+      <n-alert type="info" style="margin-top: 12px">
+        候选仅与冻结基线并行观测；Web Bridge 不会用 shadow 目标生成委托，也不会自动晋级或替换 STATIC_CORE_EQUAL。
+      </n-alert>
+    </n-card>
     <n-card size="small">
       <div class="toolbar">
         <n-button @click="load">刷新</n-button>
@@ -81,6 +111,12 @@ const error = ref('')
 const commodityStatus = ref<CommoditySimNowStatus>({})
 const commodityLoading = ref(false)
 const commodityTemplate = computed(() => commodityStatus.value.strategy_template || {})
+const positionManager = computed(() => commodityStatus.value.position_manager_shadow || {})
+const positionManagerStatusText = computed(() => {
+  if (!positionManager.value.configured) return '未配置'
+  if (!positionManager.value.valid) return `无效 (${positionManager.value.error_type || 'validation'})`
+  return '只读 shadow'
+})
 const columns = [
   ...['strategy_name', 'class_name', 'vt_symbol', 'status', 'inited', 'trading'].map((key) => ({ title: key, key })),
   {
@@ -157,6 +193,14 @@ async function operate(fn: (name: string) => Promise<unknown>, name: string) {
   } catch (exc) {
     message.error(exc instanceof Error ? exc.message : '操作失败')
   }
+}
+
+function formatPercent(value?: number) {
+  return typeof value === 'number' && Number.isFinite(value) ? `${(value * 100).toFixed(2)}%` : '-'
+}
+
+function formatScale(value?: number) {
+  return typeof value === 'number' && Number.isFinite(value) ? value.toFixed(4) : '-'
 }
 </script>
 
