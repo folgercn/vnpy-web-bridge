@@ -100,6 +100,8 @@ class CommodityPlanExecuteRequestDTO(StrictModel):
     confirm: bool
     confirm_simnow_only: bool
     confirm_manual_one_shot: bool
+    acceptance_passive_limit: bool = False
+    confirm_acceptance_passive_limit: bool = False
     reason: str = Field(min_length=8, max_length=500)
 
 

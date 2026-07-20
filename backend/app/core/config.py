@@ -92,6 +92,7 @@ class Settings(BaseSettings):
     commodity_simnow_auto_dispatch_reconcile_grace_seconds: int = Field(default=30, ge=5, le=300)
     commodity_simnow_submission_outcome_grace_seconds: int = Field(default=30, ge=5, le=300)
     commodity_simnow_submission_outcome_min_empty_snapshots: int = Field(default=3, ge=2, le=10)
+    commodity_simnow_acceptance_passive_limit_enabled: bool = False
     commodity_simnow_template_batch_path: str = ""
     commodity_simnow_delivery_month_cutoff_day: int = Field(default=1, ge=1, le=15)
     commodity_simnow_sc_pre_delivery_cutoff_day: int = Field(default=15, ge=1, le=25)

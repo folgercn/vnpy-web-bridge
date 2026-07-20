@@ -424,6 +424,102 @@ def test_cold_start_preview_creates_open_only_plan(tmp_path: Path) -> None:
     assert plan["countable_forward"] is True
 
 
+def test_acceptance_passive_limit_is_explicit_and_uses_touch_price(tmp_path: Path) -> None:
+    service, private_key, _ = make_service(tmp_path, now=SHAKEDOWN_NOW)
+    service.settings = service.settings.model_copy(
+        update={"commodity_simnow_acceptance_passive_limit_enabled": True}
+    )
+    batch = make_batch(
+        private_key,
+        execution_lane="simnow_shakedown",
+        source_month="2026-07",
+        execution_day="2026-07-17",
+    )
+    plan = service.preview(batch, operator="admin", role="admin", source_ip=None)
+
+    service.execute(
+        CommodityPlanExecuteRequestDTO(
+            plan_hash=plan["plan_hash"],
+            phase="open",
+            confirm=True,
+            confirm_simnow_only=True,
+            confirm_manual_one_shot=True,
+            acceptance_passive_limit=True,
+            confirm_acceptance_passive_limit=True,
+            reason="SimNow passive limit acceptance test",
+        ),
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+
+    requests = service.trade.requests
+    assert requests[0].price == service.tick_store.ticks["ag2610.SHFE"]["bid_price_1"]
+    assert requests[1].price == service.tick_store.ticks["al2610.SHFE"]["ask_price_1"]
+    assert service.plan()["submitted"]["open"][0]["price_mode"] == "acceptance_passive"
+
+
+def test_acceptance_passive_limit_rejects_official_forward_plan(tmp_path: Path) -> None:
+    service, private_key, _ = make_service(tmp_path)
+    service.settings = service.settings.model_copy(
+        update={"commodity_simnow_acceptance_passive_limit_enabled": True}
+    )
+    plan = service.preview(make_batch(private_key), operator="admin", role="admin", source_ip=None)
+
+    with pytest.raises(CommoditySimNowSafetyError, match="只允许 SimNow shakedown"):
+        service.execute(
+            CommodityPlanExecuteRequestDTO(
+                plan_hash=plan["plan_hash"],
+                phase="open",
+                confirm=True,
+                confirm_simnow_only=True,
+                confirm_manual_one_shot=True,
+                acceptance_passive_limit=True,
+                confirm_acceptance_passive_limit=True,
+                reason="SimNow passive limit acceptance test",
+            ),
+            operator="admin",
+            role="admin",
+            source_ip=None,
+        )
+
+
+def test_acceptance_passive_limit_requires_config_and_manual_dispatch(tmp_path: Path) -> None:
+    service, private_key, _ = make_service(tmp_path, now=SHAKEDOWN_NOW)
+    batch = make_batch(
+        private_key,
+        execution_lane="simnow_shakedown",
+        source_month="2026-07",
+        execution_day="2026-07-17",
+    )
+    plan = service.preview(batch, operator="admin", role="admin", source_ip=None)
+    payload = CommodityPlanExecuteRequestDTO(
+        plan_hash=plan["plan_hash"],
+        phase="open",
+        confirm=True,
+        confirm_simnow_only=True,
+        confirm_manual_one_shot=True,
+        acceptance_passive_limit=True,
+        confirm_acceptance_passive_limit=True,
+        reason="SimNow passive limit acceptance test",
+    )
+
+    with pytest.raises(CommoditySimNowSafetyError, match="未启用"):
+        service.execute(payload, operator="admin", role="admin", source_ip=None)
+
+    service.settings = service.settings.model_copy(
+        update={"commodity_simnow_acceptance_passive_limit_enabled": True}
+    )
+    with pytest.raises(CommoditySimNowSafetyError, match="只允许人工单次派单"):
+        service.execute(
+            payload,
+            operator="admin",
+            role="admin",
+            source_ip=None,
+            dispatch_mode="auto",
+        )
+
+
 def test_one_click_template_loads_signed_target_and_dispatches(tmp_path: Path) -> None:
     target_path = tmp_path / "signed-target.json"
     trade = FakeTrade()

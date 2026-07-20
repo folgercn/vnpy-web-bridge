@@ -210,6 +210,9 @@ class CommoditySimNowService:
             "submission_outcome_min_empty_snapshots": (
                 self.settings.commodity_simnow_submission_outcome_min_empty_snapshots
             ),
+            "acceptance_passive_limit_enabled": (
+                self.settings.commodity_simnow_acceptance_passive_limit_enabled
+            ),
             "strategy_template": {
                 "template_id": "STATIC_CORE_EQUAL_AUTO_V1",
                 "configured": bool(template_path and Path(template_path).expanduser().is_file()),
@@ -582,6 +585,16 @@ class CommoditySimNowService:
         elif not (payload.confirm and payload.confirm_simnow_only and payload.confirm_manual_one_shot):
             raise CommoditySimNowSafetyError("执行确认不完整")
         plan = self._require_plan(payload.plan_hash)
+        use_acceptance_passive_limit = payload.acceptance_passive_limit
+        if use_acceptance_passive_limit:
+            if dispatch_mode != "manual":
+                raise CommoditySimNowSafetyError("被动限价验收模式只允许人工单次派单")
+            if not payload.confirm_acceptance_passive_limit:
+                raise CommoditySimNowSafetyError("被动限价验收确认不完整")
+            if not self.settings.commodity_simnow_acceptance_passive_limit_enabled:
+                raise CommoditySimNowSafetyError("被动限价验收模式未启用")
+            if plan["execution_lane"] != "simnow_shakedown":
+                raise CommoditySimNowSafetyError("被动限价验收模式只允许 SimNow shakedown")
         execution_day = datetime.fromisoformat(plan["execution_day"]).date()
         current_trading_day = self._current_trading_day(self._plan_symbols(plan))
         if execution_day != current_trading_day:
@@ -616,7 +629,9 @@ class CommoditySimNowService:
         if not orders:
             raise CommoditySimNowStateError("该阶段没有待提交委托")
 
-        repriced_orders = [self._reprice_order(order) for order in orders]
+        repriced_orders = [
+            self._reprice_order(order, passive=use_acceptance_passive_limit) for order in orders
+        ]
         self._verify_phase_symbol_position_limit(repriced_orders, self._position_snapshot())
         if payload.phase == "open":
             prices = {order["vt_symbol"]: float(order["price"]) for order in repriced_orders}
@@ -637,6 +652,7 @@ class CommoditySimNowService:
                     **repriced,
                     "decision_price": order["price"],
                     "dispatch_mode": dispatch_mode,
+                    "price_mode": "acceptance_passive" if use_acceptance_passive_limit else "protected",
                     "intent_status": "PENDING_SEND",
                     "intent_at_utc": self.clock().astimezone(timezone.utc).isoformat(),
                 }
@@ -670,6 +686,7 @@ class CommoditySimNowService:
                     **repriced,
                     "decision_price": order["price"],
                     "dispatch_mode": dispatch_mode,
+                    "price_mode": "acceptance_passive" if use_acceptance_passive_limit else "protected",
                     **result,
                 }
                 intent["intent_status"] = "ACKNOWLEDGED"
@@ -2408,10 +2425,14 @@ class CommoditySimNowService:
         raw = quote["ask_price_1"] + tick if direction == "long" else quote["bid_price_1"] - tick
         return _round_price(raw, tick)
 
-    def _reprice_order(self, order: dict[str, Any]) -> dict[str, Any]:
+    def _reprice_order(self, order: dict[str, Any], *, passive: bool = False) -> dict[str, Any]:
         tick = PRODUCT_SPECS[order["product"]]["price_tick"]
         quote = self._quote(order["vt_symbol"], tick)
-        return {**order, "price": self._protected_price(order["direction"], quote, tick)}
+        if passive:
+            price = quote["bid_price_1"] if order["direction"] == "long" else quote["ask_price_1"]
+        else:
+            price = self._protected_price(order["direction"], quote, tick)
+        return {**order, "price": _round_price(price, tick)}
 
     def _signed_positions(self, positions: dict[str, dict[str, Any]]) -> dict[str, int]:
         return {vt: int(row["signed_quantity"]) for vt, row in sorted(positions.items()) if row["signed_quantity"]}
