@@ -101,6 +101,14 @@ class Settings(BaseSettings):
     commodity_position_manager_shadow_state_path: str = (
         "logs/commodity-simnow/position-manager-shadow-state.json"
     )
+    commodity_position_manager_simnow_shakedown_enabled: bool = False
+    commodity_position_manager_simnow_state_path: str = (
+        "logs/commodity-simnow/position-manager-shakedown.json"
+    )
+    commodity_position_manager_simnow_max_selected_products: int = Field(
+        default=10, ge=1, le=10
+    )
+    commodity_position_manager_simnow_auto_dispatch_enabled: bool = False
     commodity_simnow_delivery_month_cutoff_day: int = Field(default=1, ge=1, le=15)
     commodity_simnow_sc_pre_delivery_cutoff_day: int = Field(default=15, ge=1, le=25)
 

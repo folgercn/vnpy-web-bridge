@@ -1238,6 +1238,249 @@ class CommoditySimNowService:
     def position_manager_shadow(self) -> dict[str, Any]:
         return self._position_manager_shadow_snapshot(include_targets=True)
 
+    @_serialized
+    def position_manager_shakedown_status(self) -> dict[str, Any]:
+        """Return the separately persisted, non-executing candidate test session."""
+        session = self._load_position_manager_shakedown_state()
+        return {
+            "configured": self.settings.commodity_position_manager_simnow_shakedown_enabled,
+            "execution_enabled": False,
+            "auto_dispatch_enabled": self.settings.commodity_position_manager_simnow_auto_dispatch_enabled,
+            "execution_lane": "simnow_shakedown",
+            "countable_forward": False,
+            "session": session,
+        }
+
+    @_serialized
+    def preview_position_manager_shakedown(
+        self,
+        selected_products: list[str],
+        *,
+        operator: str,
+        role: str | None,
+        source_ip: str | None,
+    ) -> dict[str, Any]:
+        """Persist a read-only execution mask; C1 deliberately never creates orders."""
+        if not self.settings.commodity_position_manager_simnow_shakedown_enabled:
+            raise CommoditySimNowDisabledError(
+                detail={"required_setting": "COMMODITY_POSITION_MANAGER_SIMNOW_SHAKEDOWN_ENABLED=true"}
+            )
+        selected = sorted(set(selected_products))
+        if (
+            len(selected) != len(selected_products)
+            or len(selected)
+            > self.settings.commodity_position_manager_simnow_max_selected_products
+        ):
+            raise CommoditySimNowSafetyError("测试品种选择无效")
+        shadow = self._position_manager_shadow_snapshot(include_targets=True)
+        if (
+            not shadow.get("valid")
+            or shadow.get("baseline_link_state") not in {"active", "completed"}
+            or shadow.get("continuity_state") not in {"genesis", "verified"}
+        ):
+            raise CommoditySimNowSafetyError("Shadow、baseline 关联或连续性未通过，禁止生成测试预览")
+        rows = {str(row["product"]): row for row in shadow.get("targets", [])}
+        if set(rows) != set(PRODUCT_SPECS) or any(product not in rows for product in selected):
+            raise CommoditySimNowSafetyError("签名候选缺少固定十品种目标")
+        chosen = []
+        for product in selected:
+            row = rows[product]
+            delta = int(row["shadow_target_quantity"]) - int(row["baseline_target_quantity"])
+            if not delta:
+                raise CommoditySimNowSafetyError("零目标差异品种不可用于候选测试", detail={"product": product})
+            chosen.append({
+                "product": product,
+                "exact_contract": row["exact_contract"],
+                "baseline_target_quantity": row["baseline_target_quantity"],
+                "shadow_target_quantity": row["shadow_target_quantity"],
+                "target_delta": delta,
+                "reference_open_price": row["reference_open_price"],
+                "multiplier": row["multiplier"],
+                "price_tick": row["price_tick"],
+            })
+        plan = self._build_position_manager_shakedown_plan(chosen)
+        session_core = {
+            "execution_lane": "simnow_shakedown",
+            "countable_forward": False,
+            "candidate_id": "MONTHLY_RELATIVE_VOL_THERMOSTAT_V1",
+            "baseline_scheduler_id": "STATIC_CORE_EQUAL",
+            "source_snapshot_hash": shadow["snapshot_hash"],
+            "baseline_batch_hash": shadow["baseline_batch_hash"],
+            "selected_products": selected,
+            "targets": chosen,
+            "plan": plan,
+        }
+        plan_hash = _sha256_json(session_core)
+        session = {
+            "schema_version": "commodity_relative_vol_simnow_shakedown_session_v1",
+            "session_id": f"pm-shakedown-{plan_hash[:16]}",
+            **session_core,
+            "plan_hash": plan_hash,
+            "status": "PREVIEW_READY",
+            "started_by": operator,
+            "previewed_at_utc": self.clock().astimezone(timezone.utc).isoformat(),
+        }
+        self._save_position_manager_shakedown_state(session)
+        result = {**self.position_manager_shakedown_status(), "preview": session}
+        self._event(
+            "position_manager_shakedown_previewed",
+            plan_hash=plan_hash,
+            result={"selected_products": selected},
+        )
+        self.audit.record(
+            action="commodity_position_manager_shakedown_preview",
+            user_id=operator,
+            role=role,
+            request={"selected_products": selected},
+            result=result,
+            source_ip=source_ip,
+        )
+        return result
+
+    def _build_position_manager_shakedown_plan(
+        self, targets: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        """Adapt candidate targets to the verified two-phase plan shape without dispatching."""
+        positions = self._position_snapshot()
+        contracts = self._contract_snapshot()
+        active_orders = self._active_strategy_orders()
+        if active_orders:
+            raise CommoditySimNowStateError(
+                "存在活动策略委托，不允许生成候选测试计划",
+                detail={"active_order_ids": active_orders},
+            )
+        selected = {str(row["product"]) for row in targets}
+        by_product: dict[str, list[tuple[str, int]]] = {product: [] for product in selected}
+        for vt_symbol, row in positions.items():
+            symbol, _ = _split_vt(vt_symbol)
+            product = _product_from_symbol(symbol)
+            if product in selected:
+                by_product[product].append((vt_symbol, int(row["signed_quantity"])))
+
+        close_orders: list[dict[str, Any]] = []
+        open_orders: list[dict[str, Any]] = []
+        quote_rows: list[dict[str, Any]] = []
+        details: list[dict[str, Any]] = []
+        for row in sorted(targets, key=lambda item: str(item["product"])):
+            product = str(row["product"])
+            target_vt = _exact_to_vt(str(row["exact_contract"]))
+            target_quantity = int(row["shadow_target_quantity"])
+            self._verify_target_delivery(str(row["exact_contract"]), self._current_trading_day([target_vt]))
+            self._verify_contract(target_vt, product, contracts)
+            existing = sorted(by_product[product])
+            current_quantity = sum(quantity for _, quantity in existing)
+            same_contract = next((quantity for vt_symbol, quantity in existing if vt_symbol == target_vt), 0)
+            for vt_symbol, quantity in existing:
+                if vt_symbol != target_vt:
+                    self._verify_contract(vt_symbol, product, contracts)
+                    close_orders.extend(
+                        self._orders_for_leg(
+                            "position-manager-shakedown",
+                            product,
+                            vt_symbol,
+                            -quantity,
+                            "closeyesterday",
+                            quote_rows,
+                        )
+                    )
+            delta = target_quantity - same_contract
+            if same_contract and target_quantity and same_contract * target_quantity < 0:
+                close_orders.extend(
+                    self._orders_for_leg(
+                        "position-manager-shakedown", product, target_vt, -same_contract,
+                        "closeyesterday", quote_rows,
+                    )
+                )
+                open_orders.extend(
+                    self._orders_for_leg(
+                        "position-manager-shakedown", product, target_vt, target_quantity,
+                        "open", quote_rows,
+                    )
+                )
+            elif same_contract and abs(target_quantity) < abs(same_contract):
+                close_orders.extend(
+                    self._orders_for_leg(
+                        "position-manager-shakedown", product, target_vt, delta,
+                        "closeyesterday", quote_rows,
+                    )
+                )
+            elif delta:
+                open_orders.extend(
+                    self._orders_for_leg(
+                        "position-manager-shakedown", product, target_vt, delta,
+                        "open", quote_rows,
+                    )
+                )
+            details.append({
+                **row,
+                "current_position": current_quantity,
+                "planned_delta": target_quantity - current_quantity,
+            })
+        close_orders = self._number_position_manager_shakedown_references(close_orders, "close")
+        open_orders = self._number_position_manager_shakedown_references(open_orders, "open")
+        start = self._signed_positions(positions)
+        after_close = self._apply_orders(start, close_orders)
+        final_positions = self._apply_orders(after_close, open_orders)
+        return {
+            "phase_status": "READY_CLOSE" if close_orders else "READY_OPEN" if open_orders else "COMPLETE",
+            "close_orders": close_orders,
+            "open_orders": open_orders,
+            "order_count": len(close_orders) + len(open_orders),
+            "total_lots": sum(int(order["volume"]) for order in close_orders + open_orders),
+            "expected_after_close": after_close,
+            "expected_final_positions": final_positions,
+            "quote_snapshot_hash": _sha256_json(quote_rows),
+            "targets": details,
+        }
+
+    def _number_position_manager_shakedown_references(
+        self, orders: list[dict[str, Any]], phase: str
+    ) -> list[dict[str, Any]]:
+        for index, order in enumerate(orders, start=1):
+            order["reference"] = f"commodity_position_manager:shakedown:{phase[0]}:{index}"
+        return orders
+
+    def _position_manager_shakedown_state_path(self) -> Path:
+        return Path(self.settings.commodity_position_manager_simnow_state_path).expanduser()
+
+    def _load_position_manager_shakedown_state(self) -> dict[str, Any] | None:
+        path = self._position_manager_shakedown_state_path()
+        if not path.exists():
+            return None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if (
+                not isinstance(payload, dict)
+                or payload.get("schema_version")
+                != "commodity_relative_vol_simnow_shakedown_session_v1"
+            ):
+                raise ValueError("invalid shakedown session")
+            core = {
+                key: value
+                for key, value in payload.items()
+                if key
+                not in {
+                    "schema_version",
+                    "session_id",
+                    "plan_hash",
+                    "status",
+                    "started_by",
+                    "previewed_at_utc",
+                }
+            }
+            if _sha256_json(core) != payload.get("plan_hash"):
+                raise ValueError("shakedown plan checksum mismatch")
+            return payload
+        except Exception as exc:
+            return {"status": "RESULT_UNKNOWN", "error_type": exc.__class__.__name__}
+
+    def _save_position_manager_shakedown_state(self, session: dict[str, Any]) -> None:
+        path = self._position_manager_shakedown_state_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(f"{path.suffix}.tmp")
+        temporary.write_text(json.dumps(session, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        temporary.replace(path)
+
     def _position_manager_shadow_snapshot(self, *, include_targets: bool) -> dict[str, Any]:
         path_text = self.settings.commodity_position_manager_shadow_path.strip()
         if not path_text:

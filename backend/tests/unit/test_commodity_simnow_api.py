@@ -32,6 +32,20 @@ class FakeCommoditySimNowService:
             "dispatch_allowed": False,
         }
 
+    def position_manager_shakedown_status(self) -> dict:
+        return {"configured": True, "execution_enabled": False, "session": None}
+
+    def preview_position_manager_shakedown(self, selected_products, **kwargs) -> dict:
+        return {
+            "configured": True,
+            "execution_enabled": False,
+            "preview": {
+                "status": "PREVIEW_READY",
+                "selected_products": selected_products,
+                "countable_forward": False,
+            },
+        }
+
     def list_events(self, limit: int) -> list[dict]:
         return []
 
@@ -124,6 +138,33 @@ def test_viewer_can_read_position_manager_shadow(monkeypatch) -> None:
         "mode": "shadow_only",
         "authority_granted": False,
         "dispatch_allowed": False,
+    }
+
+
+def test_position_manager_shakedown_preview_is_admin_only(monkeypatch) -> None:
+    install_service(monkeypatch)
+    with client_without_rpc(monkeypatch) as client:
+        status = client.get(
+            "/api/commodity-simnow/position-manager-shakedown/status",
+            headers=auth_headers("viewer"),
+        )
+        forbidden = client.post(
+            "/api/commodity-simnow/position-manager-shakedown/preview",
+            headers=auth_headers("trader"),
+            json={"selected_products": ["ag"]},
+        )
+        response = client.post(
+            "/api/commodity-simnow/position-manager-shakedown/preview",
+            headers=auth_headers("admin"),
+            json={"selected_products": ["ag"]},
+        )
+
+    assert status.json()["data"]["execution_enabled"] is False
+    assert forbidden.status_code == 403
+    assert response.json()["data"]["preview"] == {
+        "status": "PREVIEW_READY",
+        "selected_products": ["ag"],
+        "countable_forward": False,
     }
 
 

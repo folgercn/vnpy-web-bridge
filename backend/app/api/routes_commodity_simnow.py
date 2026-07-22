@@ -6,6 +6,7 @@ from app.core.errors import ok
 from app.core.security import CurrentUser, require_roles
 from app.schemas.commodity_simnow import (
     CommodityPlanExecuteRequestDTO,
+    CommodityPositionManagerShakedownPreviewRequestDTO,
     CommodityPlanReconcileRequestDTO,
     CommoditySimNowDisableRequestDTO,
     CommoditySimNowEnableRequestDTO,
@@ -33,6 +34,29 @@ def position_manager_shadow(
     _: CurrentUser = Depends(require_roles("viewer", "trader", "admin")),
 ) -> dict:
     return ok(commodity_simnow_service.position_manager_shadow())
+
+
+@router.get("/position-manager-shakedown/status")
+def position_manager_shakedown_status(
+    _: CurrentUser = Depends(require_roles("viewer", "trader", "admin")),
+) -> dict:
+    return ok(commodity_simnow_service.position_manager_shakedown_status())
+
+
+@router.post("/position-manager-shakedown/preview")
+def position_manager_shakedown_preview(
+    payload: CommodityPositionManagerShakedownPreviewRequestDTO,
+    request: Request,
+    user: CurrentUser = Depends(require_roles("admin")),
+) -> dict:
+    return ok(
+        commodity_simnow_service.preview_position_manager_shakedown(
+            payload.selected_products,
+            operator=user.username,
+            role=user.role,
+            source_ip=request.client.host if request.client else None,
+        )
+    )
 
 
 @router.get("/events")

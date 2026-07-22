@@ -851,6 +851,52 @@ def test_position_manager_shadow_is_verified_and_never_dispatched(tmp_path: Path
     }
 
 
+def test_position_manager_shakedown_preview_builds_non_executing_two_phase_plan(
+    tmp_path: Path,
+) -> None:
+    service, private_key, rpc = make_service(tmp_path)
+    baseline = service.preview(
+        make_batch(private_key), operator="admin", role="admin", source_ip=None
+    )
+    shadow_path = tmp_path / "position-manager-shadow.json"
+    write_position_manager_shadow(
+        shadow_path,
+        make_position_manager_shadow(
+            private_key, baseline_batch_hash=baseline["batch_hash"]
+        ),
+    )
+    service.settings = service.settings.model_copy(
+        update={
+            "commodity_position_manager_shadow_path": str(shadow_path),
+            "commodity_position_manager_simnow_shakedown_enabled": True,
+            "commodity_position_manager_simnow_state_path": str(
+                tmp_path / "position-manager-shakedown.json"
+            ),
+        }
+    )
+    rpc.positions = [position("ag", 2), position("al", -1)]
+
+    result = service.preview_position_manager_shakedown(
+        ["ag", "al"], operator="admin", role="admin", source_ip=None
+    )
+
+    session = result["session"]
+    assert result["execution_enabled"] is False
+    assert session["status"] == "PREVIEW_READY"
+    assert session["countable_forward"] is False
+    assert session["plan"]["phase_status"] == "READY_OPEN"
+    assert session["plan"]["close_orders"] == []
+    assert {(row["product"], row["direction"], row["volume"]) for row in session["plan"]["open_orders"]} == {
+        ("ag", "long", 1),
+        ("al", "short", 1),
+    }
+    assert {row["reference"] for row in session["plan"]["open_orders"]} == {
+        "commodity_position_manager:shakedown:o:1",
+        "commodity_position_manager:shakedown:o:2",
+    }
+    assert service.trade.requests == []
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [

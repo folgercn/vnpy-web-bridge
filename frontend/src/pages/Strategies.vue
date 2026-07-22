@@ -79,6 +79,29 @@
       <n-alert type="info" style="margin-top: 12px">
         候选仅与冻结基线并行观测；Web Bridge 不会用 shadow 目标生成委托，也不会自动晋级或替换 STATIC_CORE_EQUAL。
       </n-alert>
+      <n-divider />
+      <n-space vertical size="small">
+        <strong>SimNow 候选测试预览（非正式、不可计数）</strong>
+        <n-checkbox-group v-model:value="selectedPositionManagerProducts">
+          <n-space>
+            <n-checkbox v-for="row in positionManager.targets || []" :key="row.product" :value="row.product" :disabled="row.shadow_target_quantity === row.baseline_target_quantity">
+              {{ row.product }} · {{ row.exact_contract }} · Δ{{ row.shadow_target_quantity - row.baseline_target_quantity }}
+            </n-checkbox>
+          </n-space>
+        </n-checkbox-group>
+        <n-space>
+          <n-button type="primary" :loading="positionManagerLoading" :disabled="!positionManagerPreviewAllowed" @click="previewPositionManagerShakedown">准备预览</n-button>
+          <n-tag type="warning" round>{{ positionManagerShakedown.session?.status || '未创建会话' }}</n-tag>
+        </n-space>
+        <span v-if="positionManagerShakedown.session?.plan_hash" class="muted">plan hash: {{ positionManagerShakedown.session.plan_hash }}</span>
+        <div v-if="positionManagerShakedown.session?.plan" class="template-grid">
+          <div><span class="muted">阶段</span><strong>{{ positionManagerShakedown.session.plan.phase_status }}</strong></div>
+          <div><span class="muted">平仓委托</span><strong>{{ positionManagerShakedown.session.plan.close_orders?.length || 0 }}</strong></div>
+          <div><span class="muted">开仓委托</span><strong>{{ positionManagerShakedown.session.plan.open_orders?.length || 0 }}</strong></div>
+          <div><span class="muted">总手数</span><strong>{{ positionManagerShakedown.session.plan.total_lots || 0 }}</strong></div>
+        </div>
+        <n-alert type="info">本阶段只固化选择和计划哈希，不会调用订单接口；启动、停止与自动执行在后续受控实现中接入。</n-alert>
+      </n-space>
     </n-card>
     <n-card size="small">
       <div class="toolbar">
@@ -97,9 +120,12 @@ import { computed, h, onMounted, ref } from 'vue'
 import { NButton, useMessage } from 'naive-ui'
 import {
   getCommoditySimNowStatus,
+  getCommodityPositionManagerShakedownStatus,
+  previewCommodityPositionManagerShakedown,
   startCommodityStrategyTemplate,
   stopCommodityStrategyTemplate,
-  type CommoditySimNowStatus
+  type CommoditySimNowStatus,
+  type CommodityPositionManagerShakedownStatus
 } from '../api/commoditySimnow'
 import { getStrategies, initStrategy, startStrategy, stopStrategy } from '../api/strategy'
 import { useAuthStore } from '../stores/auth'
@@ -110,6 +136,9 @@ const strategies = ref<Record<string, unknown>[]>([])
 const error = ref('')
 const commodityStatus = ref<CommoditySimNowStatus>({})
 const commodityLoading = ref(false)
+const positionManagerLoading = ref(false)
+const positionManagerShakedown = ref<CommodityPositionManagerShakedownStatus>({})
+const selectedPositionManagerProducts = ref<string[]>([])
 const commodityTemplate = computed(() => commodityStatus.value.strategy_template || {})
 const positionManager = computed(() => commodityStatus.value.position_manager_shadow || {})
 const positionManagerStatusText = computed(() => {
@@ -117,6 +146,7 @@ const positionManagerStatusText = computed(() => {
   if (!positionManager.value.valid) return `无效 (${positionManager.value.error_type || 'validation'})`
   return '只读 shadow'
 })
+const positionManagerPreviewAllowed = computed(() => auth.role === 'admin' && positionManagerShakedown.value.configured && positionManager.value.valid && ['active', 'completed'].includes(positionManager.value.baseline_link_state || '') && ['genesis', 'verified'].includes(positionManager.value.continuity_state || '') && selectedPositionManagerProducts.value.length > 0)
 const columns = [
   ...['strategy_name', 'class_name', 'vt_symbol', 'status', 'inited', 'trading'].map((key) => ({ title: key, key })),
   {
@@ -137,6 +167,7 @@ const columns = [
 onMounted(() => {
   load().catch(() => undefined)
   loadCommodity().catch(() => undefined)
+  loadPositionManagerShakedown().catch(() => undefined)
 })
 
 async function load() {
@@ -156,6 +187,22 @@ async function loadCommodity() {
     message.error(exc instanceof Error ? exc.message : '商品策略状态不可用')
   } finally {
     commodityLoading.value = false
+  }
+}
+
+async function loadPositionManagerShakedown() {
+  positionManagerShakedown.value = await getCommodityPositionManagerShakedownStatus()
+}
+
+async function previewPositionManagerShakedown() {
+  positionManagerLoading.value = true
+  try {
+    positionManagerShakedown.value = await previewCommodityPositionManagerShakedown(selectedPositionManagerProducts.value)
+    message.success('候选测试预览已固化；未发送订单')
+  } catch (exc) {
+    message.error(exc instanceof Error ? exc.message : '候选测试预览失败')
+  } finally {
+    positionManagerLoading.value = false
   }
 }
 
