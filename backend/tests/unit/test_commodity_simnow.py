@@ -977,6 +977,18 @@ def test_position_manager_shakedown_preview_rejects_unattributed_or_today_positi
         )
 
 
+def test_position_manager_shakedown_preview_rejects_unselected_baseline_drift(
+    tmp_path: Path,
+) -> None:
+    service, rpc = prepare_position_manager_shakedown(tmp_path)
+    rpc.positions = [position("ag", 2), position("al", -2)]
+
+    with pytest.raises(CommoditySimNowSafetyError, match="完整证明属于关联 baseline"):
+        service.preview_position_manager_shakedown(
+            ["ag"], operator="admin", role="admin", source_ip=None
+        )
+
+
 def test_position_manager_shakedown_preview_uses_unique_session_references(
     tmp_path: Path,
 ) -> None:

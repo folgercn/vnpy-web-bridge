@@ -1368,6 +1368,25 @@ class CommoditySimNowService:
         baseline_targets = {
             str(row["product"]): row for row in baseline.get("targets", [])
         }
+        expected_baseline_positions = {
+            _exact_to_vt(str(row["exact_contract"])): int(row["target_quantity"])
+            for row in baseline_targets.values()
+            if int(row["target_quantity"])
+        }
+        observed_baseline_positions = self._signed_positions(positions)
+        if any(int(row["today_quantity"]) for row in positions.values()):
+            raise CommoditySimNowSafetyError(
+                "存在今日持仓，无法完整证明属于关联 baseline",
+                detail={"observed": observed_baseline_positions},
+            )
+        if observed_baseline_positions != expected_baseline_positions:
+            raise CommoditySimNowSafetyError(
+                "账户持仓无法完整证明属于关联 baseline",
+                detail={
+                    "expected": expected_baseline_positions,
+                    "observed": observed_baseline_positions,
+                },
+            )
         effective_targets = {
             product: dict(row) for product, row in baseline_targets.items()
         }
@@ -1489,6 +1508,19 @@ class CommoditySimNowService:
         start = self._signed_positions(positions)
         after_close = self._apply_orders(start, close_orders)
         final_positions = self._apply_orders(after_close, open_orders)
+        expected_final_positions = {
+            _exact_to_vt(str(row["exact_contract"])): int(row["target_quantity"])
+            for row in effective_targets.values()
+            if int(row["target_quantity"])
+        }
+        if final_positions != expected_final_positions:
+            raise CommoditySimNowSafetyError(
+                "候选测试最终持仓未收敛到完整混合目标",
+                detail={
+                    "expected": expected_final_positions,
+                    "observed": final_positions,
+                },
+            )
         exposure_snapshot = self._verify_realtime_exposures(
             list(effective_targets.values()),
             final_positions,
