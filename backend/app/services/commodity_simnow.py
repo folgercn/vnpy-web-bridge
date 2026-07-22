@@ -609,6 +609,8 @@ class CommoditySimNowService:
         elif not (payload.confirm and payload.confirm_simnow_only and payload.confirm_manual_one_shot):
             raise CommoditySimNowSafetyError("执行确认不完整")
         plan = self._require_plan(payload.plan_hash)
+        if plan.get("position_manager_shakedown_session_id"):
+            self._verify_position_manager_shakedown_execution_trust(plan)
         use_acceptance_passive_limit = payload.acceptance_passive_limit
         if use_acceptance_passive_limit:
             if dispatch_mode != "manual":
@@ -649,6 +651,14 @@ class CommoditySimNowService:
         active = self._active_strategy_orders()
         if active:
             raise CommoditySimNowStateError("仍有活动策略委托", detail={"active_order_ids": active})
+        if plan.get("position_manager_shakedown_session_id"):
+            conflicts = self._position_manager_shakedown_external_active_orders(plan)
+            if conflicts:
+                self._begin_safe_halt(
+                    "external_active_order", operator=operator, source_ip=source_ip,
+                    phase=payload.phase,
+                )
+                raise CommoditySimNowStateError("存在外部活动委托，候选测试已安全停机", detail={"active_orders": conflicts})
         orders = list(plan[f"{payload.phase}_orders"])
         if not orders:
             raise CommoditySimNowStateError("该阶段没有待提交委托")
@@ -859,6 +869,15 @@ class CommoditySimNowService:
             raise CommoditySimNowStateError(
                 "当前状态不允许对账", detail={"status": plan["status"]}
             )
+        if plan.get("position_manager_shakedown_session_id"):
+            conflicts = self._position_manager_shakedown_external_active_orders(plan)
+            if conflicts:
+                self._begin_safe_halt(
+                    "external_active_order", operator=operator, source_ip=source_ip
+                )
+                raise CommoditySimNowStateError(
+                    "存在外部活动委托，候选测试已安全停机", detail={"active_orders": conflicts}
+                )
         active = [row["vt_orderid"] for row in self._active_plan_orders(plan)]
         observed = self._signed_positions(self._position_snapshot())
         plan["execution"] = self._execution_snapshot(plan)
@@ -911,7 +930,15 @@ class CommoditySimNowService:
                 plan["status"] = "COMPLETE"
                 plan.pop("halt", None)
         if plan["status"] == "COMPLETE":
-            self._save_completed_state(plan)
+            if plan.get("position_manager_shakedown_session_id"):
+                self._complete_position_manager_shakedown(plan, result={
+                    "phase": phase,
+                    "expected_positions": expected,
+                    "observed_positions": observed,
+                    "active_order_ids": active,
+                })
+            else:
+                self._save_completed_state(plan)
         else:
             self._persist_active_plan()
         result = {
@@ -1050,8 +1077,11 @@ class CommoditySimNowService:
         status = str(plan.get("status"))
         if status in {"CANCEL_PENDING", "SUBMISSION_OUTCOME_UNKNOWN"}:
             return self._advance_cancel_pending(operator=operator, source_ip=source_ip)
-        if status in {"COMPLETE", "HALTED_RECONCILED", "HALTED_RECONCILE_REQUIRED", "HALTED_PRE_SUBMIT_SAFE"}:
+        if status in {"COMPLETE", "HALTED_RECONCILED", "HALTED_PRE_SUBMIT_SAFE"}:
             return {"action": "idle", "reason": f"shakedown_status_{status.lower()}", **self.position_manager_shakedown_status()}
+        if status == "HALTED_RECONCILE_REQUIRED":
+            result = self.reconcile(plan["plan_hash"], operator=operator, role=role, source_ip=source_ip, dispatch_mode="auto")
+            return {"action": "halted_reconciled" if result["status"] == "HALTED_RECONCILED" else "halted_reconcile_required", **result}
         if self.risk.status().get("emergency_stopped"):
             halt = self._begin_safe_halt("emergency_stop", operator=operator, source_ip=source_ip)
             return {"action": "halted", "reason": "emergency_stop", "halt": halt}
@@ -1340,6 +1370,16 @@ class CommoditySimNowService:
             raise CommoditySimNowDisabledError(
                 detail={"required_setting": "COMMODITY_POSITION_MANAGER_SIMNOW_SHAKEDOWN_ENABLED=true"}
             )
+        existing = self._load_position_manager_shakedown_state()
+        if (
+            self.current_plan
+            and self.current_plan.get("position_manager_shakedown_session_id")
+            and self.current_plan.get("status") not in {"COMPLETE", "HALTED_RECONCILED"}
+        ) or (
+            existing
+            and existing.get("status") not in {"PREVIEW_READY", "COMPLETE", "HALTED_RECONCILED"}
+        ):
+            raise CommoditySimNowStateError("存在未收口的候选测试会话，禁止覆盖预览")
         selected = sorted(set(selected_products))
         if (
             len(selected) != len(selected_products)
@@ -1363,6 +1403,12 @@ class CommoditySimNowService:
         )
         if baseline is None:
             raise CommoditySimNowSafetyError("已关联 baseline 不可读取")
+        conflicts = self._position_manager_shakedown_active_orders(set(PRODUCT_SPECS))
+        if conflicts:
+            raise CommoditySimNowStateError(
+                "存在固定十品种的活动策略委托，禁止启动候选测试",
+                detail={"active_orders": conflicts},
+            )
         chosen = []
         for product in selected:
             row = rows[product]
@@ -1453,6 +1499,8 @@ class CommoditySimNowService:
             not shadow.get("valid")
             or shadow.get("snapshot_hash") != session.get("source_snapshot_hash")
             or shadow.get("baseline_batch_hash") != session.get("baseline_batch_hash")
+            or shadow.get("continuity_state") not in {"genesis", "verified"}
+            or shadow.get("baseline_link_state") not in {"active", "completed"}
         ):
             raise CommoditySimNowSafetyError("Shadow 快照或 baseline 在 preview 后发生变化")
         safety = self._safety_snapshot(require_trade_enabled=True)
@@ -1485,6 +1533,8 @@ class CommoditySimNowService:
             "position_manager_shakedown_session_id": session["session_id"],
             "plan_hash": plan_hash,
             "account_hash": safety["account_hash"],
+            "source_snapshot_hash": session["source_snapshot_hash"],
+            "baseline_batch_hash": session["baseline_batch_hash"],
             "execution_lane": "simnow_shakedown",
             "countable_forward": False,
             "execution_day": execution_day.isoformat(),
@@ -1771,6 +1821,65 @@ class CommoditySimNowService:
             })
         return sorted(conflicts, key=lambda row: row["vt_orderid"])
 
+    def _position_manager_shakedown_external_active_orders(
+        self, plan: dict[str, Any]
+    ) -> list[dict[str, str]]:
+        session_references = {
+            str(order.get("reference") or "")
+            for phase in ("close", "open")
+            for order in plan.get(f"{phase}_orders", [])
+        }
+        conflicts: list[dict[str, str]] = []
+        for order in self.rpc.get_orders():
+            if _normalize_status(order.get("status")) not in ACTIVE_ORDER_STATUSES:
+                continue
+            symbol = str(order.get("symbol") or str(order.get("vt_symbol") or "").split(".", 1)[0])
+            if _product_from_symbol(symbol) not in PRODUCT_SPECS:
+                continue
+            reference = str(order.get("reference") or "")
+            if reference in session_references:
+                continue
+            conflicts.append({
+                "vt_orderid": str(order.get("vt_orderid") or order.get("orderid") or "unknown"),
+                "reference": reference,
+                "symbol": symbol,
+            })
+        return sorted(conflicts, key=lambda row: row["vt_orderid"])
+
+    def _verify_position_manager_shakedown_execution_trust(self, plan: dict[str, Any]) -> None:
+        shadow = self._position_manager_shadow_snapshot(include_targets=True)
+        if (
+            not shadow.get("valid")
+            or shadow.get("snapshot_hash") != plan.get("source_snapshot_hash")
+            or shadow.get("baseline_batch_hash") != plan.get("baseline_batch_hash")
+            or shadow.get("continuity_state") not in {"genesis", "verified"}
+            or shadow.get("baseline_link_state") not in {"active", "completed"}
+        ):
+            raise CommoditySimNowSafetyError("候选测试运行时 Shadow 信任链校验失败")
+        _, baseline = self._position_manager_linked_baseline(
+            str(plan.get("baseline_batch_hash") or ""), require_settled=True
+        )
+        if baseline is None:
+            raise CommoditySimNowSafetyError("候选测试运行时 baseline 不可用")
+        safety = self._safety_snapshot(require_trade_enabled=True)
+        if safety["account_hash"] != plan.get("account_hash"):
+            raise CommoditySimNowSafetyError("候选测试运行时 SimNow 账户发生变化")
+
+    def _complete_position_manager_shakedown(self, plan: dict[str, Any], *, result: dict[str, Any]) -> None:
+        session = self._load_position_manager_shakedown_state()
+        if not session or session.get("session_id") != plan.get("position_manager_shakedown_session_id"):
+            raise CommoditySimNowStateError("候选测试完成时会话证据缺失")
+        session["status"] = "COMPLETE"
+        session["completed_at_utc"] = self.clock().astimezone(timezone.utc).isoformat()
+        session["execution"] = {
+            "submitted": plan.get("submitted", {}),
+            "send_intents": plan.get("send_intents", {}),
+            "reconciliation": result,
+            "final_positions": self._signed_positions(self._position_snapshot()),
+            "execution_snapshot": self._execution_snapshot(plan),
+        }
+        self._save_position_manager_shakedown_state(session)
+
     def _position_manager_shakedown_state_path(self) -> Path:
         return Path(self.settings.commodity_position_manager_simnow_state_path).expanduser()
 
@@ -1796,6 +1905,8 @@ class CommoditySimNowService:
                     "status",
                     "started_by",
                     "previewed_at_utc",
+                    "completed_at_utc",
+                    "execution",
                 }
             }
             if _sha256_json(core) != payload.get("plan_hash"):
