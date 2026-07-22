@@ -511,6 +511,9 @@ def prepare_position_manager_shakedown(tmp_path: Path):
     baseline = service.preview(
         make_batch(private_key), operator="admin", role="admin", source_ip=None
     )
+    service.current_plan["status"] = "COMPLETE"
+    service._save_completed_state(service.current_plan)
+    service.current_plan = None
     shadow_path = tmp_path / "position-manager-shadow.json"
     write_position_manager_shadow(
         shadow_path,
@@ -906,6 +909,32 @@ def test_position_manager_shakedown_preview_rejects_account_change(tmp_path: Pat
     )
 
     with pytest.raises(CommoditySimNowSafetyError, match="白名单"):
+        service.preview_position_manager_shakedown(
+            ["ag"], operator="admin", role="admin", source_ip=None
+        )
+
+
+def test_position_manager_shakedown_preview_rejects_unfinished_baseline(
+    tmp_path: Path,
+) -> None:
+    service, private_key, rpc = make_service(tmp_path)
+    baseline = service.preview(
+        make_batch(private_key), operator="admin", role="admin", source_ip=None
+    )
+    shadow_path = tmp_path / "position-manager-shadow.json"
+    write_position_manager_shadow(
+        shadow_path,
+        make_position_manager_shadow(private_key, baseline_batch_hash=baseline["batch_hash"]),
+    )
+    service.settings = service.settings.model_copy(
+        update={
+            "commodity_position_manager_shadow_path": str(shadow_path),
+            "commodity_position_manager_simnow_shakedown_enabled": True,
+        }
+    )
+    rpc.positions = [position("ag", 2), position("al", -1)]
+
+    with pytest.raises(CommoditySimNowSafetyError, match="baseline"):
         service.preview_position_manager_shakedown(
             ["ag"], operator="admin", role="admin", source_ip=None
         )

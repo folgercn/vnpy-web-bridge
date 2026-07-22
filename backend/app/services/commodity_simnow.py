@@ -1285,7 +1285,7 @@ class CommoditySimNowService:
             raise CommoditySimNowSafetyError("签名候选缺少固定十品种目标")
         safety = self._safety_snapshot(require_trade_enabled=True)
         _, baseline = self._position_manager_linked_baseline(
-            str(shadow["baseline_batch_hash"])
+            str(shadow["baseline_batch_hash"]), require_settled=True
         )
         if baseline is None:
             raise CommoditySimNowSafetyError("已关联 baseline 不可读取")
@@ -1638,7 +1638,7 @@ class CommoditySimNowService:
             }
 
     def _position_manager_linked_baseline(
-        self, baseline_batch_hash: str
+        self, baseline_batch_hash: str, *, require_settled: bool = False
     ) -> tuple[str, dict[str, Any] | None]:
         candidates = (
             ("active", self.current_plan, "batch_hash"),
@@ -1647,6 +1647,11 @@ class CommoditySimNowService:
         for state, candidate, hash_field in candidates:
             if not candidate or candidate.get(hash_field) != baseline_batch_hash:
                 continue
+            if require_settled and state == "active" and candidate.get("status") != "COMPLETE":
+                # A structurally valid plan can still have unsubmitted or live
+                # baseline work.  It is not a safe ownership source for a
+                # shakedown session until that plan has closed successfully.
+                return "unlinked", None
             if self._position_manager_baseline_is_complete(candidate):
                 return state, candidate
             return "unlinked", None
