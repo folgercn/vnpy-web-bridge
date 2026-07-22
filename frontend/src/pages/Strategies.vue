@@ -91,6 +91,8 @@
         </n-checkbox-group>
         <n-space>
           <n-button type="primary" :loading="positionManagerLoading" :disabled="!positionManagerPreviewAllowed" @click="previewPositionManagerShakedown">准备预览</n-button>
+          <n-button type="error" :loading="positionManagerLoading" :disabled="!positionManagerStartAllowed" @click="startPositionManagerShakedown">启动 SimNow 候选测试</n-button>
+          <n-button secondary type="warning" :loading="positionManagerLoading" :disabled="!positionManagerStopAllowed" @click="stopPositionManagerShakedown">停止测试</n-button>
           <n-tag type="warning" round>{{ positionManagerShakedown.session?.status || '未创建会话' }}</n-tag>
         </n-space>
         <span v-if="positionManagerShakedown.session?.plan_hash" class="muted">plan hash: {{ positionManagerShakedown.session.plan_hash }}</span>
@@ -100,7 +102,7 @@
           <div><span class="muted">开仓委托</span><strong>{{ positionManagerShakedown.session.plan.open_orders?.length || 0 }}</strong></div>
           <div><span class="muted">总手数</span><strong>{{ positionManagerShakedown.session.plan.total_lots || 0 }}</strong></div>
         </div>
-        <n-alert type="info">本阶段只固化选择和计划哈希，不会调用订单接口；启动、停止与自动执行在后续受控实现中接入。</n-alert>
+        <n-alert type="warning">非正式、不可计数。启动后由后端自动推进；停止只撤销本会话 reference，并进入只读对账。</n-alert>
       </n-space>
     </n-card>
     <n-card size="small">
@@ -122,6 +124,8 @@ import {
   getCommoditySimNowStatus,
   getCommodityPositionManagerShakedownStatus,
   previewCommodityPositionManagerShakedown,
+  startCommodityPositionManagerShakedown,
+  stopCommodityPositionManagerShakedown,
   startCommodityStrategyTemplate,
   stopCommodityStrategyTemplate,
   type CommoditySimNowStatus,
@@ -147,6 +151,8 @@ const positionManagerStatusText = computed(() => {
   return '只读 shadow'
 })
 const positionManagerPreviewAllowed = computed(() => auth.role === 'admin' && positionManagerShakedown.value.configured && positionManager.value.valid && ['active', 'completed'].includes(positionManager.value.baseline_link_state || '') && ['genesis', 'verified'].includes(positionManager.value.continuity_state || '') && selectedPositionManagerProducts.value.length > 0)
+const positionManagerStartAllowed = computed(() => auth.role === 'admin' && positionManagerShakedown.value.execution_enabled && positionManagerShakedown.value.session?.status === 'PREVIEW_READY' && Boolean(positionManagerShakedown.value.session?.plan_hash))
+const positionManagerStopAllowed = computed(() => auth.role === 'admin' && ['READY_CLOSE', 'READY_OPEN', 'CLOSE_SUBMITTED', 'OPEN_SUBMITTED', 'CANCEL_PENDING', 'SUBMISSION_OUTCOME_UNKNOWN'].includes(positionManagerShakedown.value.session?.status || ''))
 const columns = [
   ...['strategy_name', 'class_name', 'vt_symbol', 'status', 'inited', 'trading'].map((key) => ({ title: key, key })),
   {
@@ -201,6 +207,32 @@ async function previewPositionManagerShakedown() {
     message.success('候选测试预览已固化；未发送订单')
   } catch (exc) {
     message.error(exc instanceof Error ? exc.message : '候选测试预览失败')
+  } finally {
+    positionManagerLoading.value = false
+  }
+}
+
+async function startPositionManagerShakedown() {
+  const planHash = positionManagerShakedown.value.session?.plan_hash
+  if (!planHash) return
+  positionManagerLoading.value = true
+  try {
+    positionManagerShakedown.value = await startCommodityPositionManagerShakedown(planHash)
+    message.success('候选测试已启动，后端正在自动推进')
+  } catch (exc) {
+    message.error(exc instanceof Error ? exc.message : '候选测试启动失败')
+  } finally {
+    positionManagerLoading.value = false
+  }
+}
+
+async function stopPositionManagerShakedown() {
+  positionManagerLoading.value = true
+  try {
+    positionManagerShakedown.value = await stopCommodityPositionManagerShakedown('operator requested candidate shakedown stop')
+    message.success('已停止新单并开始定向撤单/对账')
+  } catch (exc) {
+    message.error(exc instanceof Error ? exc.message : '停止候选测试失败')
   } finally {
     positionManagerLoading.value = false
   }

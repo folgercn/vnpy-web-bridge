@@ -7,6 +7,8 @@ from app.core.security import CurrentUser, require_roles
 from app.schemas.commodity_simnow import (
     CommodityPlanExecuteRequestDTO,
     CommodityPositionManagerShakedownPreviewRequestDTO,
+    CommodityPositionManagerShakedownStartRequestDTO,
+    CommodityPositionManagerShakedownStopRequestDTO,
     CommodityPlanReconcileRequestDTO,
     CommoditySimNowDisableRequestDTO,
     CommoditySimNowEnableRequestDTO,
@@ -52,6 +54,38 @@ def position_manager_shakedown_preview(
     return ok(
         commodity_simnow_service.preview_position_manager_shakedown(
             payload.selected_products,
+            operator=user.username,
+            role=user.role,
+            source_ip=request.client.host if request.client else None,
+        )
+    )
+
+
+@router.post("/position-manager-shakedown/start")
+def position_manager_shakedown_start(
+    payload: CommodityPositionManagerShakedownStartRequestDTO,
+    request: Request,
+    user: CurrentUser = Depends(require_roles("admin")),
+) -> dict:
+    return ok(
+        commodity_simnow_service.start_position_manager_shakedown(
+            payload.plan_hash,
+            operator=user.username,
+            role=user.role,
+            source_ip=request.client.host if request.client else None,
+        )
+    )
+
+
+@router.post("/position-manager-shakedown/stop")
+def position_manager_shakedown_stop(
+    payload: CommodityPositionManagerShakedownStopRequestDTO,
+    request: Request,
+    user: CurrentUser = Depends(require_roles("admin")),
+) -> dict:
+    return ok(
+        commodity_simnow_service.stop_position_manager_shakedown(
+            payload.reason,
             operator=user.username,
             role=user.role,
             source_ip=request.client.host if request.client else None,

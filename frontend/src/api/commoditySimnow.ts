@@ -109,6 +109,16 @@ export const previewCommodityPositionManagerShakedown = (selected_products: stri
     method: 'POST', body: JSON.stringify({ selected_products })
   })
 
+export const startCommodityPositionManagerShakedown = (plan_hash: string) =>
+  request<CommodityPositionManagerShakedownStatus>('/api/commodity-simnow/position-manager-shakedown/start', {
+    method: 'POST', body: JSON.stringify({ plan_hash })
+  })
+
+export const stopCommodityPositionManagerShakedown = (reason: string) =>
+  request<CommodityPositionManagerShakedownStatus>('/api/commodity-simnow/position-manager-shakedown/stop', {
+    method: 'POST', body: JSON.stringify({ reason })
+  })
+
 export const startCommodityStrategyTemplate = () =>
   request<Record<string, unknown>>('/api/commodity-simnow/template/start', {
     method: 'POST',
