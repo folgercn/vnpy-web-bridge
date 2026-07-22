@@ -999,9 +999,12 @@ def test_position_manager_shakedown_preview_checks_complete_mixed_portfolio(
     service, _ = prepare_position_manager_shakedown(tmp_path)
     captured: dict[str, Any] = {}
 
-    def verify(targets: list[dict[str, Any]], positions: dict[str, int]) -> dict[str, Any]:
+    def verify(
+        targets: list[dict[str, Any]], positions: dict[str, int], *, sector_map: dict[str, str] | None = None
+    ) -> dict[str, Any]:
         captured["targets"] = targets
         captured["positions"] = positions
+        captured["sector_map"] = sector_map
         return {"snapshot_hash": "risk-snapshot"}
 
     monkeypatch.setattr(service, "_verify_realtime_exposures", verify)
@@ -1012,6 +1015,7 @@ def test_position_manager_shakedown_preview_checks_complete_mixed_portfolio(
     assert {row["product"] for row in captured["targets"]} == set(PRODUCT_SPECS)
     assert next(row for row in captured["targets"] if row["product"] == "ag")["target_quantity"] == 3
     assert next(row for row in captured["targets"] if row["product"] == "al")["target_quantity"] == -1
+    assert captured["sector_map"] == POSITION_MANAGER_SECTOR_MAP_V1
     assert result["session"]["plan"]["preview_exposure_snapshot"] == {"snapshot_hash": "risk-snapshot"}
 
 

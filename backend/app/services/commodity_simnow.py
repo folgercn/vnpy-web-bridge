@@ -1490,7 +1490,9 @@ class CommoditySimNowService:
         after_close = self._apply_orders(start, close_orders)
         final_positions = self._apply_orders(after_close, open_orders)
         exposure_snapshot = self._verify_realtime_exposures(
-            list(effective_targets.values()), final_positions
+            list(effective_targets.values()),
+            final_positions,
+            sector_map=POSITION_MANAGER_SECTOR_MAP_V1,
         )
         limit = self.settings.commodity_simnow_max_orders_per_phase
         if len(close_orders) > limit or len(open_orders) > limit:
@@ -3125,6 +3127,7 @@ class CommoditySimNowService:
         expected_positions: dict[str, int],
         *,
         price_overrides: dict[str, float] | None = None,
+        sector_map: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         target_by_vt = {
             _exact_to_vt(str(row["exact_contract"])): row
@@ -3156,7 +3159,12 @@ class CommoditySimNowService:
                 / self.virtual_nav_cny
             )
 
-        self._verify_exposure_weights(weights, error_type=CommoditySimNowSafetyError, prefix="实时")
+        self._verify_exposure_weights(
+            weights,
+            error_type=CommoditySimNowSafetyError,
+            prefix="实时",
+            sector_map=sector_map,
+        )
         return {
             "captured_at_utc": self.clock().astimezone(timezone.utc).isoformat(),
             "prices": prices,
@@ -3170,6 +3178,7 @@ class CommoditySimNowService:
         *,
         error_type: type[CommoditySimNowSafetyError],
         prefix: str,
+        sector_map: dict[str, str] | None = None,
     ) -> None:
         if max((abs(value) for value in weights.values()), default=0.0) >= 0.15:
             raise error_type(f"{prefix}整数目标超过严格 15% 产品硬上限")
@@ -3177,11 +3186,17 @@ class CommoditySimNowService:
             raise error_type(f"{prefix}整数目标超过严格 100% gross 硬上限")
         if abs(sum(weights.values())) >= 0.10:
             raise error_type(f"{prefix}整数目标超过严格 10% 净敞口硬上限")
-        for sector in {spec["sector"] for spec in PRODUCT_SPECS.values()}:
+        effective_sector_map = sector_map or {
+            product: str(spec["sector"])
+            for product, spec in PRODUCT_SPECS.items()
+        }
+        if set(effective_sector_map) != set(PRODUCT_SPECS):
+            raise error_type(f"{prefix}板块映射不完整")
+        for sector in set(effective_sector_map.values()):
             gross = sum(
                 abs(weights[product])
-                for product, spec in PRODUCT_SPECS.items()
-                if spec["sector"] == sector
+                for product in PRODUCT_SPECS
+                if effective_sector_map[product] == sector
             )
             if gross >= 0.35:
                 raise error_type(
