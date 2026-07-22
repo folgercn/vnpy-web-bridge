@@ -939,6 +939,8 @@ class CommoditySimNowService:
                 })
             else:
                 self._save_completed_state(plan)
+        elif plan.get("position_manager_shakedown_session_id") and plan["status"] == "HALTED_RECONCILED":
+            self._archive_position_manager_shakedown_terminal(plan)
         else:
             self._persist_active_plan()
         result = {
@@ -1090,6 +1092,11 @@ class CommoditySimNowService:
             return {"action": "halted", "reason": "shakedown_auto_dispatch_not_active", "halt": halt}
         if status in {"READY_CLOSE", "READY_OPEN"}:
             phase = "close" if status == "READY_CLOSE" else "open"
+            try:
+                self._verify_position_manager_shakedown_execution_trust(plan)
+            except CommoditySimNowSafetyError as exc:
+                halt = self._begin_safe_halt("shakedown_execution_trust_failed", operator=operator, source_ip=source_ip, phase=phase)
+                return {"action": "halted", "reason": "shakedown_execution_trust_failed", "halt": halt, "error_type": exc.__class__.__name__}
             result = self.execute(
                 CommodityPlanExecuteRequestDTO(
                     plan_hash=plan["plan_hash"], phase=phase, confirm=True,
@@ -1525,7 +1532,11 @@ class CommoditySimNowService:
             "close_orders", "open_orders", "expected_after_close", "expected_final_positions",
             "risk_targets", "sector_map_id",
         )
-        if any(rechecked.get(key) != stored_plan.get(key) for key in comparable_keys):
+        if any(rechecked.get(key) != stored_plan.get(key) for key in comparable_keys if key not in {"close_orders", "open_orders"}) or any(
+            self._position_manager_shakedown_order_shape(rechecked.get(key, []))
+            != self._position_manager_shakedown_order_shape(stored_plan.get(key, []))
+            for key in ("close_orders", "open_orders")
+        ):
             raise CommoditySimNowSafetyError("候选测试预览已失效，请重新生成计划")
         execution_day = self._current_trading_day(self._plan_symbols_from_orders(stored_plan))
         plan = {
@@ -1793,6 +1804,9 @@ class CommoditySimNowService:
             for order in plan.get(f"{phase}_orders", [])
         ]
 
+    def _position_manager_shakedown_order_shape(self, orders: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [{key: value for key, value in order.items() if key != "price"} for order in orders]
+
     def _number_position_manager_shakedown_references(
         self, orders: list[dict[str, Any]], session_id: str, phase: str
     ) -> list[dict[str, Any]]:
@@ -1878,6 +1892,15 @@ class CommoditySimNowService:
             "final_positions": self._signed_positions(self._position_snapshot()),
             "execution_snapshot": self._execution_snapshot(plan),
         }
+        self._save_position_manager_shakedown_state(session)
+
+    def _archive_position_manager_shakedown_terminal(self, plan: dict[str, Any]) -> None:
+        session = self._load_position_manager_shakedown_state()
+        if not session or session.get("session_id") != plan.get("position_manager_shakedown_session_id"):
+            raise CommoditySimNowStateError("候选测试终态会话证据缺失")
+        session["status"] = str(plan["status"])
+        session["completed_at_utc"] = self.clock().astimezone(timezone.utc).isoformat()
+        session["execution"] = {"submitted": plan.get("submitted", {}), "send_intents": plan.get("send_intents", {}), "halt": plan.get("halt"), "final_positions": self._signed_positions(self._position_snapshot())}
         self._save_position_manager_shakedown_state(session)
 
     def _position_manager_shakedown_state_path(self) -> Path:
@@ -4056,7 +4079,7 @@ class CommoditySimNowService:
     def _persist_active_plan(self) -> None:
         path = self._active_state_path()
         plan = self.current_plan
-        if not plan or plan.get("status") == "COMPLETE":
+        if not plan or plan.get("status") in {"COMPLETE", "HALTED_RECONCILED"}:
             path.unlink(missing_ok=True)
             return
         payload = {
