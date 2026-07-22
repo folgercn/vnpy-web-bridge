@@ -1368,6 +1368,9 @@ class CommoditySimNowService:
         baseline_targets = {
             str(row["product"]): row for row in baseline.get("targets", [])
         }
+        effective_targets = {
+            product: dict(row) for product, row in baseline_targets.items()
+        }
         by_product: dict[str, list[tuple[str, dict[str, Any]]]] = {
             product: [] for product in selected
         }
@@ -1392,6 +1395,18 @@ class CommoditySimNowService:
                 raise CommoditySimNowSafetyError("关联 baseline 缺少测试品种", detail={"product": product})
             baseline_vt = _exact_to_vt(str(baseline_row["exact_contract"]))
             baseline_quantity = int(baseline_row["target_quantity"])
+            # The session changes only selected products.  Realtime risk must
+            # nevertheless be evaluated against the complete mixed portfolio:
+            # selected products at their shadow target and every other product
+            # at the settled baseline target.
+            effective_targets[product] = {
+                **baseline_row,
+                "exact_contract": str(row["exact_contract"]),
+                "target_quantity": target_quantity,
+                "reference_open_price": row["reference_open_price"],
+                "multiplier": row["multiplier"],
+                "price_tick": row["price_tick"],
+            }
             existing = sorted(by_product[product], key=lambda item: item[0])
             current_quantity = sum(int(item[1]["signed_quantity"]) for item in existing)
             if any(int(position["today_quantity"]) for _, position in existing):
@@ -1474,6 +1489,19 @@ class CommoditySimNowService:
         start = self._signed_positions(positions)
         after_close = self._apply_orders(start, close_orders)
         final_positions = self._apply_orders(after_close, open_orders)
+        exposure_snapshot = self._verify_realtime_exposures(
+            list(effective_targets.values()), final_positions
+        )
+        limit = self.settings.commodity_simnow_max_orders_per_phase
+        if len(close_orders) > limit or len(open_orders) > limit:
+            raise CommoditySimNowSafetyError(
+                "拆单数量超过单阶段上限",
+                detail={
+                    "close_orders": len(close_orders),
+                    "open_orders": len(open_orders),
+                    "limit": limit,
+                },
+            )
         return {
             "phase_status": "READY_CLOSE" if close_orders else "READY_OPEN" if open_orders else "COMPLETE",
             "close_orders": close_orders,
@@ -1483,6 +1511,7 @@ class CommoditySimNowService:
             "expected_after_close": after_close,
             "expected_final_positions": final_positions,
             "quote_snapshot_hash": _sha256_json(quote_rows),
+            "preview_exposure_snapshot": exposure_snapshot,
             "targets": details,
         }
 

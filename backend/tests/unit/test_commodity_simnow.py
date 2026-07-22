@@ -993,6 +993,40 @@ def test_position_manager_shakedown_preview_uses_unique_session_references(
     assert first_references.isdisjoint(second_references)
 
 
+def test_position_manager_shakedown_preview_checks_complete_mixed_portfolio(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _ = prepare_position_manager_shakedown(tmp_path)
+    captured: dict[str, Any] = {}
+
+    def verify(targets: list[dict[str, Any]], positions: dict[str, int]) -> dict[str, Any]:
+        captured["targets"] = targets
+        captured["positions"] = positions
+        return {"snapshot_hash": "risk-snapshot"}
+
+    monkeypatch.setattr(service, "_verify_realtime_exposures", verify)
+    result = service.preview_position_manager_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )
+
+    assert {row["product"] for row in captured["targets"]} == set(PRODUCT_SPECS)
+    assert next(row for row in captured["targets"] if row["product"] == "ag")["target_quantity"] == 3
+    assert next(row for row in captured["targets"] if row["product"] == "al")["target_quantity"] == -1
+    assert result["session"]["plan"]["preview_exposure_snapshot"] == {"snapshot_hash": "risk-snapshot"}
+
+
+def test_position_manager_shakedown_preview_checks_phase_order_limit(tmp_path: Path) -> None:
+    service, _ = prepare_position_manager_shakedown(tmp_path)
+    service.settings = service.settings.model_copy(
+        update={"commodity_simnow_max_orders_per_phase": 1}
+    )
+
+    with pytest.raises(CommoditySimNowSafetyError, match="拆单数量超过单阶段上限"):
+        service.preview_position_manager_shakedown(
+            ["ag", "al"], operator="admin", role="admin", source_ip=None
+        )
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
