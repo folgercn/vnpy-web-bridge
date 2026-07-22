@@ -9,6 +9,7 @@ import json
 import logging
 import math
 import re
+import uuid
 from datetime import date, datetime, timezone
 from functools import wraps
 from pathlib import Path
@@ -1282,6 +1283,12 @@ class CommoditySimNowService:
         rows = {str(row["product"]): row for row in shadow.get("targets", [])}
         if set(rows) != set(PRODUCT_SPECS) or any(product not in rows for product in selected):
             raise CommoditySimNowSafetyError("签名候选缺少固定十品种目标")
+        safety = self._safety_snapshot(require_trade_enabled=True)
+        _, baseline = self._position_manager_linked_baseline(
+            str(shadow["baseline_batch_hash"])
+        )
+        if baseline is None:
+            raise CommoditySimNowSafetyError("已关联 baseline 不可读取")
         chosen = []
         for product in selected:
             row = rows[product]
@@ -1298,14 +1305,19 @@ class CommoditySimNowService:
                 "multiplier": row["multiplier"],
                 "price_tick": row["price_tick"],
             })
-        plan = self._build_position_manager_shakedown_plan(chosen)
+        session_id = f"pm-shakedown-{uuid.uuid4().hex}"
+        plan = self._build_position_manager_shakedown_plan(
+            chosen, baseline=baseline, session_id=session_id
+        )
         session_core = {
+            "session_id": session_id,
             "execution_lane": "simnow_shakedown",
             "countable_forward": False,
             "candidate_id": "MONTHLY_RELATIVE_VOL_THERMOSTAT_V1",
             "baseline_scheduler_id": "STATIC_CORE_EQUAL",
             "source_snapshot_hash": shadow["snapshot_hash"],
             "baseline_batch_hash": shadow["baseline_batch_hash"],
+            "account_hash": safety["account_hash"],
             "selected_products": selected,
             "targets": chosen,
             "plan": plan,
@@ -1313,7 +1325,6 @@ class CommoditySimNowService:
         plan_hash = _sha256_json(session_core)
         session = {
             "schema_version": "commodity_relative_vol_simnow_shakedown_session_v1",
-            "session_id": f"pm-shakedown-{plan_hash[:16]}",
             **session_core,
             "plan_hash": plan_hash,
             "status": "PREVIEW_READY",
@@ -1338,24 +1349,33 @@ class CommoditySimNowService:
         return result
 
     def _build_position_manager_shakedown_plan(
-        self, targets: list[dict[str, Any]]
+        self,
+        targets: list[dict[str, Any]],
+        *,
+        baseline: dict[str, Any],
+        session_id: str,
     ) -> dict[str, Any]:
         """Adapt candidate targets to the verified two-phase plan shape without dispatching."""
         positions = self._position_snapshot()
         contracts = self._contract_snapshot()
-        active_orders = self._active_strategy_orders()
+        selected = {str(row["product"]) for row in targets}
+        active_orders = self._position_manager_shakedown_active_orders(selected)
         if active_orders:
             raise CommoditySimNowStateError(
                 "存在活动策略委托，不允许生成候选测试计划",
                 detail={"active_order_ids": active_orders},
             )
-        selected = {str(row["product"]) for row in targets}
-        by_product: dict[str, list[tuple[str, int]]] = {product: [] for product in selected}
+        baseline_targets = {
+            str(row["product"]): row for row in baseline.get("targets", [])
+        }
+        by_product: dict[str, list[tuple[str, dict[str, Any]]]] = {
+            product: [] for product in selected
+        }
         for vt_symbol, row in positions.items():
             symbol, _ = _split_vt(vt_symbol)
             product = _product_from_symbol(symbol)
             if product in selected:
-                by_product[product].append((vt_symbol, int(row["signed_quantity"])))
+                by_product[product].append((vt_symbol, row))
 
         close_orders: list[dict[str, Any]] = []
         open_orders: list[dict[str, Any]] = []
@@ -1367,10 +1387,39 @@ class CommoditySimNowService:
             target_quantity = int(row["shadow_target_quantity"])
             self._verify_target_delivery(str(row["exact_contract"]), self._current_trading_day([target_vt]))
             self._verify_contract(target_vt, product, contracts)
-            existing = sorted(by_product[product])
-            current_quantity = sum(quantity for _, quantity in existing)
-            same_contract = next((quantity for vt_symbol, quantity in existing if vt_symbol == target_vt), 0)
-            for vt_symbol, quantity in existing:
+            baseline_row = baseline_targets.get(product)
+            if not isinstance(baseline_row, dict):
+                raise CommoditySimNowSafetyError("关联 baseline 缺少测试品种", detail={"product": product})
+            baseline_vt = _exact_to_vt(str(baseline_row["exact_contract"]))
+            baseline_quantity = int(baseline_row["target_quantity"])
+            existing = sorted(by_product[product], key=lambda item: item[0])
+            current_quantity = sum(int(item[1]["signed_quantity"]) for item in existing)
+            if any(int(position["today_quantity"]) for _, position in existing):
+                raise CommoditySimNowSafetyError(
+                    "存在今日持仓，候选测试预览 fail closed",
+                    detail={"product": product},
+                )
+            if len(existing) > 1 or (existing and (
+                existing[0][0] != baseline_vt
+                or int(existing[0][1]["signed_quantity"]) != baseline_quantity
+            )) or (not existing and baseline_quantity):
+                raise CommoditySimNowSafetyError(
+                    "所选品种持仓无法证明属于关联 baseline",
+                    detail={
+                        "product": product,
+                        "expected": {baseline_vt: baseline_quantity},
+                        "observed": {
+                            vt_symbol: int(position["signed_quantity"])
+                            for vt_symbol, position in existing
+                        },
+                    },
+                )
+            same_contract = next(
+                (int(position["signed_quantity"]) for vt_symbol, position in existing if vt_symbol == target_vt),
+                0,
+            )
+            for vt_symbol, position in existing:
+                quantity = int(position["signed_quantity"])
                 if vt_symbol != target_vt:
                     self._verify_contract(vt_symbol, product, contracts)
                     close_orders.extend(
@@ -1416,8 +1465,12 @@ class CommoditySimNowService:
                 "current_position": current_quantity,
                 "planned_delta": target_quantity - current_quantity,
             })
-        close_orders = self._number_position_manager_shakedown_references(close_orders, "close")
-        open_orders = self._number_position_manager_shakedown_references(open_orders, "open")
+        close_orders = self._number_position_manager_shakedown_references(
+            close_orders, session_id, "close"
+        )
+        open_orders = self._number_position_manager_shakedown_references(
+            open_orders, session_id, "open"
+        )
         start = self._signed_positions(positions)
         after_close = self._apply_orders(start, close_orders)
         final_positions = self._apply_orders(after_close, open_orders)
@@ -1434,11 +1487,32 @@ class CommoditySimNowService:
         }
 
     def _number_position_manager_shakedown_references(
-        self, orders: list[dict[str, Any]], phase: str
+        self, orders: list[dict[str, Any]], session_id: str, phase: str
     ) -> list[dict[str, Any]]:
+        nonce = session_id.rsplit("-", 1)[-1][:16]
         for index, order in enumerate(orders, start=1):
-            order["reference"] = f"commodity_position_manager:shakedown:{phase[0]}:{index}"
+            order["reference"] = f"commodity_pm:sh:{nonce}:{phase[0]}:{index}"
         return orders
+
+    def _position_manager_shakedown_active_orders(
+        self, selected_products: set[str]
+    ) -> list[dict[str, str]]:
+        conflicts: list[dict[str, str]] = []
+        for order in self.rpc.get_orders():
+            if _normalize_status(order.get("status")) not in ACTIVE_ORDER_STATUSES:
+                continue
+            symbol = str(order.get("symbol") or "")
+            if not symbol:
+                vt_symbol = str(order.get("vt_symbol") or "")
+                symbol = vt_symbol.split(".", 1)[0]
+            if _product_from_symbol(symbol) not in selected_products:
+                continue
+            conflicts.append({
+                "vt_orderid": str(order.get("vt_orderid") or order.get("orderid") or "unknown"),
+                "reference": str(order.get("reference") or ""),
+                "symbol": symbol,
+            })
+        return sorted(conflicts, key=lambda row: row["vt_orderid"])
 
     def _position_manager_shakedown_state_path(self) -> Path:
         return Path(self.settings.commodity_position_manager_simnow_state_path).expanduser()
@@ -1461,7 +1535,6 @@ class CommoditySimNowService:
                 if key
                 not in {
                     "schema_version",
-                    "session_id",
                     "plan_hash",
                     "status",
                     "started_by",

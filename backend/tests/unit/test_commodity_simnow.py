@@ -506,6 +506,29 @@ def write_position_manager_shadow(
     )
 
 
+def prepare_position_manager_shakedown(tmp_path: Path):
+    service, private_key, rpc = make_service(tmp_path)
+    baseline = service.preview(
+        make_batch(private_key), operator="admin", role="admin", source_ip=None
+    )
+    shadow_path = tmp_path / "position-manager-shadow.json"
+    write_position_manager_shadow(
+        shadow_path,
+        make_position_manager_shadow(private_key, baseline_batch_hash=baseline["batch_hash"]),
+    )
+    service.settings = service.settings.model_copy(
+        update={
+            "commodity_position_manager_shadow_path": str(shadow_path),
+            "commodity_position_manager_simnow_shakedown_enabled": True,
+            "commodity_position_manager_simnow_state_path": str(
+                tmp_path / "position-manager-shakedown.json"
+            ),
+        }
+    )
+    rpc.positions = [position("ag", 2), position("al", -1)]
+    return service, rpc
+
+
 def test_cold_start_preview_creates_open_only_plan(tmp_path: Path) -> None:
     service, private_key, _ = make_service(tmp_path)
 
@@ -854,27 +877,7 @@ def test_position_manager_shadow_is_verified_and_never_dispatched(tmp_path: Path
 def test_position_manager_shakedown_preview_builds_non_executing_two_phase_plan(
     tmp_path: Path,
 ) -> None:
-    service, private_key, rpc = make_service(tmp_path)
-    baseline = service.preview(
-        make_batch(private_key), operator="admin", role="admin", source_ip=None
-    )
-    shadow_path = tmp_path / "position-manager-shadow.json"
-    write_position_manager_shadow(
-        shadow_path,
-        make_position_manager_shadow(
-            private_key, baseline_batch_hash=baseline["batch_hash"]
-        ),
-    )
-    service.settings = service.settings.model_copy(
-        update={
-            "commodity_position_manager_shadow_path": str(shadow_path),
-            "commodity_position_manager_simnow_shakedown_enabled": True,
-            "commodity_position_manager_simnow_state_path": str(
-                tmp_path / "position-manager-shakedown.json"
-            ),
-        }
-    )
-    rpc.positions = [position("ag", 2), position("al", -1)]
+    service, _ = prepare_position_manager_shakedown(tmp_path)
 
     result = service.preview_position_manager_shakedown(
         ["ag", "al"], operator="admin", role="admin", source_ip=None
@@ -890,11 +893,75 @@ def test_position_manager_shakedown_preview_builds_non_executing_two_phase_plan(
         ("ag", "long", 1),
         ("al", "short", 1),
     }
-    assert {row["reference"] for row in session["plan"]["open_orders"]} == {
-        "commodity_position_manager:shakedown:o:1",
-        "commodity_position_manager:shakedown:o:2",
-    }
+    references = {row["reference"] for row in session["plan"]["open_orders"]}
+    assert len(references) == 2
+    assert all(reference.startswith("commodity_pm:sh:") for reference in references)
     assert service.trade.requests == []
+
+
+def test_position_manager_shakedown_preview_rejects_account_change(tmp_path: Path) -> None:
+    service, _ = prepare_position_manager_shakedown(tmp_path)
+    service.settings = service.settings.model_copy(
+        update={"commodity_simnow_account_hashes": "b" * 64}
+    )
+
+    with pytest.raises(CommoditySimNowSafetyError, match="白名单"):
+        service.preview_position_manager_shakedown(
+            ["ag"], operator="admin", role="admin", source_ip=None
+        )
+
+
+def test_position_manager_shakedown_preview_rejects_conflicting_active_order(
+    tmp_path: Path,
+) -> None:
+    service, rpc = prepare_position_manager_shakedown(tmp_path)
+    rpc.orders = [{
+        "vt_orderid": "CTP.conflict",
+        "symbol": "ag2610",
+        "exchange": "SHFE",
+        "reference": "manual-order",
+        "status": "not_traded",
+    }]
+
+    with pytest.raises(CommoditySimNowStateError, match="活动策略委托"):
+        service.preview_position_manager_shakedown(
+            ["ag"], operator="admin", role="admin", source_ip=None
+        )
+
+
+@pytest.mark.parametrize(
+    "bad_position",
+    [
+        position("ag", 1),
+        position("ag", 2, today=1),
+    ],
+)
+def test_position_manager_shakedown_preview_rejects_unattributed_or_today_position(
+    tmp_path: Path, bad_position: dict[str, Any]
+) -> None:
+    service, rpc = prepare_position_manager_shakedown(tmp_path)
+    rpc.positions = [bad_position, position("al", -1)]
+
+    with pytest.raises(CommoditySimNowSafetyError):
+        service.preview_position_manager_shakedown(
+            ["ag"], operator="admin", role="admin", source_ip=None
+        )
+
+
+def test_position_manager_shakedown_preview_uses_unique_session_references(
+    tmp_path: Path,
+) -> None:
+    service, _ = prepare_position_manager_shakedown(tmp_path)
+    first = service.preview_position_manager_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )
+    second = service.preview_position_manager_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )
+
+    first_references = {row["reference"] for row in first["session"]["plan"]["open_orders"]}
+    second_references = {row["reference"] for row in second["session"]["plan"]["open_orders"]}
+    assert first_references.isdisjoint(second_references)
 
 
 @pytest.mark.parametrize(
