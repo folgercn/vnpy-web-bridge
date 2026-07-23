@@ -910,6 +910,7 @@ class CommoditySimNowService:
                 raise CommoditySimNowStateError(
                     "存在外部活动委托，候选测试已安全停机", detail={"active_orders": conflicts}
                 )
+        status_before_reconcile = str(plan["status"])
         active = [row["vt_orderid"] for row in self._active_plan_orders(plan)]
         observed = self._signed_positions(self._position_snapshot())
         plan["execution"] = self._execution_snapshot(plan)
@@ -974,21 +975,36 @@ class CommoditySimNowService:
             json.dumps(plan, ensure_ascii=False, default=str)
         )
         finalized_shakedown = False
-        if plan["status"] == "COMPLETE":
-            if plan.get("position_manager_shakedown_session_id"):
-                self._complete_position_manager_shakedown(
-                    plan, result=reconciliation
+        try:
+            if plan["status"] == "COMPLETE":
+                if plan.get("position_manager_shakedown_session_id"):
+                    self._complete_position_manager_shakedown(
+                        plan, result=reconciliation
+                    )
+                    finalized_shakedown = True
+                else:
+                    self._save_completed_state(plan)
+            elif plan.get("position_manager_shakedown_session_id") and plan["status"] == "HALTED_RECONCILED":
+                self._archive_position_manager_shakedown_terminal(
+                    plan, reconciliation=reconciliation
                 )
                 finalized_shakedown = True
             else:
-                self._save_completed_state(plan)
-        elif plan.get("position_manager_shakedown_session_id") and plan["status"] == "HALTED_RECONCILED":
-            self._archive_position_manager_shakedown_terminal(
-                plan, reconciliation=reconciliation
-            )
-            finalized_shakedown = True
-        else:
-            self._persist_active_plan()
+                self._persist_active_plan()
+        except Exception as exc:
+            if plan.get("position_manager_shakedown_session_id"):
+                plan["status"] = status_before_reconcile
+                halt = plan.setdefault("halt", {})
+                halt["terminal_finalize_error_type"] = exc.__class__.__name__
+                halt["terminal_finalize_failed_at_utc"] = (
+                    self.clock().astimezone(timezone.utc).isoformat()
+                )
+                self._revoke_auto_dispatch("shakedown")
+                try:
+                    self._persist_active_plan()
+                except Exception:
+                    pass
+            raise
         result = {
             **(plan_snapshot if finalized_shakedown else self.plan()),
             "reconciliation": reconciliation,
@@ -1660,12 +1676,18 @@ class CommoditySimNowService:
             "status": stored_plan["phase_status"],
             "started_at_utc": self.clock().astimezone(timezone.utc).isoformat(),
         }
+        previous_plan = self.current_plan
+        self.current_plan = plan
+        try:
+            self._persist_active_plan()
+        except Exception:
+            self.current_plan = previous_plan
+            self._revoke_auto_dispatch("shakedown")
+            raise
         self.enabled = True
         self.manual_approval = True
         self.simnow_mode = True
         self.shakedown_auto_dispatch_authorized = True
-        self.current_plan = plan
-        self._persist_active_plan()
         try:
             execution = self.auto_position_manager_shakedown_advance(
                 operator=operator, role=role, source_ip=source_ip
@@ -1741,7 +1763,25 @@ class CommoditySimNowService:
             for intent in current_intents
         ):
             return None
-        if plan.get("submitted", {}).get(phase) or self._active_plan_orders(plan):
+        try:
+            orders = self.rpc.get_orders()
+            trades = self.rpc.get_trades()
+            late_evidence = self._recover_send_intent_evidence(
+                plan, orders, trades, phases=(phase,)
+            )
+        except Exception:
+            return None
+        if late_evidence:
+            halt = plan.setdefault("halt", {})
+            halt["previous_status"] = f"SUBMITTING_{phase.upper()}"
+            halt["submission_evidence_references"] = late_evidence
+            plan["status"] = "CANCEL_PENDING"
+            self._persist_active_plan()
+            return None
+        if (
+            plan.get("submitted", {}).get(phase)
+            or self._active_plan_orders_from_snapshot(plan, orders)
+        ):
             return None
         expected = (
             plan["previous_positions"]
@@ -1768,20 +1808,37 @@ class CommoditySimNowService:
             "abandoned_pre_submit": True,
             "operator": operator,
         }
+        previous_halt = plan.get("halt")
         plan["halt"] = halt
         plan["status"] = "HALTED_RECONCILED"
-        self._finalize_position_manager_shakedown(
-            plan,
-            status="HALTED_RECONCILED",
-            reconciliation={
-                "halted_reconcile": True,
-                "abandoned_pre_submit": True,
-                "phase": phase,
-                "expected_positions": expected,
-                "observed_positions": observed,
-                "active_order_ids": [],
-            },
-        )
+        try:
+            self._finalize_position_manager_shakedown(
+                plan,
+                status="HALTED_RECONCILED",
+                reconciliation={
+                    "halted_reconcile": True,
+                    "abandoned_pre_submit": True,
+                    "phase": phase,
+                    "expected_positions": expected,
+                    "observed_positions": observed,
+                    "active_order_ids": [],
+                },
+            )
+        except Exception as exc:
+            plan["status"] = status
+            if previous_halt is None:
+                plan.pop("halt", None)
+            else:
+                plan["halt"] = previous_halt
+            self._revoke_auto_dispatch("shakedown")
+            try:
+                self._persist_active_plan()
+            except Exception:
+                pass
+            raise CommoditySimNowStateError(
+                "候选测试终态证据写入失败，保留活动计划等待恢复",
+                detail={"error_type": exc.__class__.__name__},
+            ) from exc
         self._event(
             "position_manager_shakedown_abandoned_pre_submit",
             plan_hash=plan.get("plan_hash"),

@@ -1223,6 +1223,129 @@ def test_position_manager_shakedown_restart_resumes_via_dedicated_start_only(
     assert recovered.auto_dispatch_authorized is False
 
 
+def test_position_manager_shakedown_initial_state_write_failure_cannot_dispatch_later(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _ = prepare_position_manager_shakedown(tmp_path)
+    service.settings = service.settings.model_copy(
+        update={"commodity_position_manager_simnow_auto_dispatch_enabled": True}
+    )
+    preview = service.preview_position_manager_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )
+
+    def fail_persist() -> None:
+        raise OSError("disk unavailable")
+
+    monkeypatch.setattr(service, "_persist_active_plan", fail_persist)
+    with pytest.raises(OSError, match="disk unavailable"):
+        service.start_position_manager_shakedown(
+            preview["preview"]["plan_hash"],
+            operator="admin",
+            role="admin",
+            source_ip=None,
+        )
+
+    assert service.current_plan is None
+    assert service.shakedown_auto_dispatch_authorized is False
+    assert service.auto_position_manager_shakedown_advance()["action"] == "idle"
+    assert service.trade.requests == []
+
+
+def test_position_manager_shakedown_pre_submit_stop_rechecks_late_trade_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, rpc = prepare_position_manager_shakedown(tmp_path)
+    service.settings = service.settings.model_copy(
+        update={"commodity_position_manager_simnow_auto_dispatch_enabled": True}
+    )
+    preview = service.preview_position_manager_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )
+
+    def fail_before_submit(**kwargs):
+        raise CommoditySimNowStateError("simulated pre-submit failure")
+
+    monkeypatch.setattr(
+        service, "auto_position_manager_shakedown_advance", fail_before_submit
+    )
+    with pytest.raises(CommoditySimNowStateError, match="simulated pre-submit"):
+        service.start_position_manager_shakedown(
+            preview["preview"]["plan_hash"],
+            operator="admin",
+            role="admin",
+            source_ip=None,
+        )
+    plan = service.current_plan
+    assert plan is not None
+    reference = plan["open_orders"][0]["reference"]
+    plan["send_intents"]["open"] = [{
+        **plan["open_orders"][0],
+        "reference": reference,
+        "intent_status": "NO_EVIDENCE_STABLE",
+    }]
+    service._persist_active_plan()
+    rpc.trades = [{
+        "vt_tradeid": "CTP.LATE",
+        "vt_orderid": "CTP.99",
+        "reference": reference,
+        "price": plan["open_orders"][0]["price"],
+        "volume": plan["open_orders"][0]["volume"],
+    }]
+
+    stopped = service.stop_position_manager_shakedown(
+        "operator abandons after stable no-evidence",
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+
+    assert stopped["halt"]["status"] == "HALTED_RECONCILE_REQUIRED"
+    assert service.current_plan is not None
+    assert service.plan()["status"] == "HALTED_RECONCILE_REQUIRED"
+    assert service.plan()["halt"]["submission_evidence_references"] == [reference]
+
+
+def test_position_manager_shakedown_terminal_write_failure_preserves_active_plan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, rpc = prepare_position_manager_shakedown(tmp_path)
+    service.settings = service.settings.model_copy(
+        update={"commodity_position_manager_simnow_auto_dispatch_enabled": True}
+    )
+    preview = service.preview_position_manager_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )
+    service.start_position_manager_shakedown(
+        preview["preview"]["plan_hash"],
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+    rpc.positions = [position("ag", 3), position("al", -1)]
+
+    def fail_terminal_write(session: dict[str, Any]) -> None:
+        raise OSError("terminal evidence disk failure")
+
+    monkeypatch.setattr(
+        service, "_save_position_manager_shakedown_state", fail_terminal_write
+    )
+    with pytest.raises(OSError, match="terminal evidence disk failure"):
+        service.reconcile(
+            preview["preview"]["plan_hash"],
+            operator="admin",
+            role="admin",
+            source_ip=None,
+            dispatch_mode="auto",
+        )
+
+    assert service.current_plan is not None
+    assert service.plan()["status"] == "OPEN_SUBMITTED"
+    assert service.plan()["halt"]["terminal_finalize_error_type"] == "OSError"
+    assert service.shakedown_auto_dispatch_authorized is False
+    assert service._active_state_path().exists()
+
+
 def test_generic_entrypoints_cannot_resume_or_dispatch_halted_shakedown(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
