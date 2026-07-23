@@ -513,6 +513,17 @@ class CommoditySimNowService:
         source_ip: str | None,
     ) -> dict[str, Any]:
         self._require_enabled()
+        if (
+            self.current_plan
+            and self.current_plan.get("position_manager_shakedown_session_id")
+        ):
+            raise CommoditySimNowStateError(
+                "候选测试计划必须通过专用入口收口，正式预览不得覆盖",
+                detail={
+                    "status": self.current_plan.get("status"),
+                    "plan_hash": self.current_plan.get("plan_hash"),
+                },
+            )
         if self.current_plan and self.current_plan.get("status") in {
             "SUBMITTING_CLOSE",
             "SUBMITTING_OPEN",
@@ -1837,7 +1848,29 @@ class CommoditySimNowService:
             if resume_status == "READY_CLOSE"
             else plan["expected_after_close"]
         )
-        observed = self._signed_positions(self._position_snapshot())
+        try:
+            observed = self._signed_positions(self._position_snapshot())
+        except Exception as exc:
+            halt = plan.setdefault("halt", {})
+            halt.update(
+                {
+                    "reason": reason,
+                    "phase": phase,
+                    "resume_status": resume_status,
+                    "pre_phase_expected_positions": expected,
+                    "abandon_pre_submit_requested": True,
+                    "orders_snapshot_available": True,
+                    "trades_snapshot_available": True,
+                    "positions_snapshot_available": False,
+                    "last_rpc_error_type": exc.__class__.__name__,
+                    "last_rpc_error_at_utc": self.clock().astimezone(timezone.utc).isoformat(),
+                }
+            )
+            if current_intents:
+                halt["previous_status"] = f"SUBMITTING_{phase.upper()}"
+            plan["status"] = "CANCEL_PENDING"
+            self._persist_active_plan()
+            return None
         if observed != expected:
             halt = plan.setdefault("halt", {})
             halt.update(
