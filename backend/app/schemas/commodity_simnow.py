@@ -143,6 +143,18 @@ class CommodityPositionManagerShadowDTO(StrictModel):
     signature: str = Field(min_length=40, max_length=256)
 
 
+class CommodityPositionManagerShakedownPreviewRequestDTO(StrictModel):
+    selected_products: list[Product] = Field(min_length=1, max_length=10)
+
+
+class CommodityPositionManagerShakedownStartRequestDTO(StrictModel):
+    plan_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class CommodityPositionManagerShakedownStopRequestDTO(StrictModel):
+    reason: str = Field(min_length=8, max_length=500)
+
+
 class CommodityPlanExecuteRequestDTO(StrictModel):
     plan_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     phase: Literal["close", "open"]

@@ -72,11 +72,53 @@ export interface CommodityPositionManagerShadowStatus {
   targets?: CommodityPositionManagerShadowTarget[]
 }
 
+export interface CommodityPositionManagerShakedownSession {
+  session_id?: string
+  plan_hash?: string
+  status?: string
+  selected_products?: string[]
+  targets?: CommodityPositionManagerShadowTarget[]
+  plan?: {
+    phase_status?: string
+    order_count?: number
+    total_lots?: number
+    close_orders?: Record<string, unknown>[]
+    open_orders?: Record<string, unknown>[]
+  }
+}
+
+export interface CommodityPositionManagerShakedownStatus {
+  configured?: boolean
+  execution_enabled?: boolean
+  execution_authorized?: boolean
+  auto_dispatch_enabled?: boolean
+  session?: CommodityPositionManagerShakedownSession | null
+  preview?: CommodityPositionManagerShakedownSession
+}
+
 export const getCommoditySimNowStatus = () =>
   request<CommoditySimNowStatus>('/api/commodity-simnow/status')
 
 export const getCommodityPositionManagerShadow = () =>
   request<CommodityPositionManagerShadowStatus>('/api/commodity-simnow/position-manager-shadow')
+
+export const getCommodityPositionManagerShakedownStatus = () =>
+  request<CommodityPositionManagerShakedownStatus>('/api/commodity-simnow/position-manager-shakedown/status')
+
+export const previewCommodityPositionManagerShakedown = (selected_products: string[]) =>
+  request<CommodityPositionManagerShakedownStatus>('/api/commodity-simnow/position-manager-shakedown/preview', {
+    method: 'POST', body: JSON.stringify({ selected_products })
+  })
+
+export const startCommodityPositionManagerShakedown = (plan_hash: string) =>
+  request<CommodityPositionManagerShakedownStatus>('/api/commodity-simnow/position-manager-shakedown/start', {
+    method: 'POST', body: JSON.stringify({ plan_hash })
+  })
+
+export const stopCommodityPositionManagerShakedown = (reason: string) =>
+  request<CommodityPositionManagerShakedownStatus>('/api/commodity-simnow/position-manager-shakedown/stop', {
+    method: 'POST', body: JSON.stringify({ reason })
+  })
 
 export const startCommodityStrategyTemplate = () =>
   request<Record<string, unknown>>('/api/commodity-simnow/template/start', {

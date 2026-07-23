@@ -48,6 +48,7 @@ class FakeRpc:
         self.subscriptions: list[str] = []
         self.contract_months = contract_months
         self.get_orders_error: Exception | None = None
+        self.get_positions_error: Exception | None = None
 
     def status(self, *, probe: bool = False) -> dict[str, Any]:
         return {"connected": True, "gateway_name": "CTP"}
@@ -74,6 +75,8 @@ class FakeRpc:
         return rows
 
     def get_positions(self) -> list[dict[str, Any]]:
+        if self.get_positions_error is not None:
+            raise self.get_positions_error
         return list(self.positions)
 
     def get_orders(self) -> list[dict[str, Any]]:
@@ -506,6 +509,32 @@ def write_position_manager_shadow(
     )
 
 
+def prepare_position_manager_shakedown(tmp_path: Path):
+    service, private_key, rpc = make_service(tmp_path)
+    baseline = service.preview(
+        make_batch(private_key), operator="admin", role="admin", source_ip=None
+    )
+    service.current_plan["status"] = "COMPLETE"
+    service._save_completed_state(service.current_plan)
+    service.current_plan = None
+    shadow_path = tmp_path / "position-manager-shadow.json"
+    write_position_manager_shadow(
+        shadow_path,
+        make_position_manager_shadow(private_key, baseline_batch_hash=baseline["batch_hash"]),
+    )
+    service.settings = service.settings.model_copy(
+        update={
+            "commodity_position_manager_shadow_path": str(shadow_path),
+            "commodity_position_manager_simnow_shakedown_enabled": True,
+            "commodity_position_manager_simnow_state_path": str(
+                tmp_path / "position-manager-shakedown.json"
+            ),
+        }
+    )
+    rpc.positions = [position("ag", 2), position("al", -1)]
+    return service, rpc
+
+
 def test_cold_start_preview_creates_open_only_plan(tmp_path: Path) -> None:
     service, private_key, _ = make_service(tmp_path)
 
@@ -849,6 +878,954 @@ def test_position_manager_shadow_is_verified_and_never_dispatched(tmp_path: Path
         ("ag", 2),
         ("al", 1),
     }
+
+
+def test_position_manager_shakedown_preview_builds_non_executing_two_phase_plan(
+    tmp_path: Path,
+) -> None:
+    service, _ = prepare_position_manager_shakedown(tmp_path)
+
+    result = service.preview_position_manager_shakedown(
+        ["ag", "al"], operator="admin", role="admin", source_ip=None
+    )
+
+    session = result["session"]
+    assert result["execution_enabled"] is False
+    assert session["status"] == "PREVIEW_READY"
+    assert session["countable_forward"] is False
+    assert session["plan"]["phase_status"] == "READY_OPEN"
+    assert session["plan"]["close_orders"] == []
+    assert {(row["product"], row["direction"], row["volume"]) for row in session["plan"]["open_orders"]} == {
+        ("ag", "long", 1),
+        ("al", "short", 1),
+    }
+    references = {row["reference"] for row in session["plan"]["open_orders"]}
+    assert len(references) == 2
+    assert all(reference.startswith("commodity_pm:sh:") for reference in references)
+    assert service.trade.requests == []
+
+
+def test_position_manager_shakedown_preview_rejects_account_change(tmp_path: Path) -> None:
+    service, _ = prepare_position_manager_shakedown(tmp_path)
+    service.settings = service.settings.model_copy(
+        update={"commodity_simnow_account_hashes": "b" * 64}
+    )
+
+    with pytest.raises(CommoditySimNowSafetyError, match="白名单"):
+        service.preview_position_manager_shakedown(
+            ["ag"], operator="admin", role="admin", source_ip=None
+        )
+
+
+def test_position_manager_shakedown_preview_rejects_unfinished_baseline(
+    tmp_path: Path,
+) -> None:
+    service, private_key, rpc = make_service(tmp_path)
+    baseline = service.preview(
+        make_batch(private_key), operator="admin", role="admin", source_ip=None
+    )
+    shadow_path = tmp_path / "position-manager-shadow.json"
+    write_position_manager_shadow(
+        shadow_path,
+        make_position_manager_shadow(private_key, baseline_batch_hash=baseline["batch_hash"]),
+    )
+    service.settings = service.settings.model_copy(
+        update={
+            "commodity_position_manager_shadow_path": str(shadow_path),
+            "commodity_position_manager_simnow_shakedown_enabled": True,
+        }
+    )
+    rpc.positions = [position("ag", 2), position("al", -1)]
+
+    with pytest.raises(CommoditySimNowStateError, match="正式 SimNow 计划占用"):
+        service.preview_position_manager_shakedown(
+            ["ag"], operator="admin", role="admin", source_ip=None
+        )
+
+
+def test_position_manager_shakedown_preview_rejects_conflicting_active_order(
+    tmp_path: Path,
+) -> None:
+    service, rpc = prepare_position_manager_shakedown(tmp_path)
+    rpc.orders = [{
+        "vt_orderid": "CTP.conflict",
+        "symbol": "ag2610",
+        "exchange": "SHFE",
+        "reference": "manual-order",
+        "status": "not_traded",
+    }]
+
+    with pytest.raises(CommoditySimNowStateError, match="活动策略委托"):
+        service.preview_position_manager_shakedown(
+            ["ag"], operator="admin", role="admin", source_ip=None
+        )
+
+
+@pytest.mark.parametrize(
+    "bad_position",
+    [
+        position("ag", 1),
+        position("ag", 2, today=1),
+    ],
+)
+def test_position_manager_shakedown_preview_rejects_unattributed_or_today_position(
+    tmp_path: Path, bad_position: dict[str, Any]
+) -> None:
+    service, rpc = prepare_position_manager_shakedown(tmp_path)
+    rpc.positions = [bad_position, position("al", -1)]
+
+    with pytest.raises(CommoditySimNowSafetyError):
+        service.preview_position_manager_shakedown(
+            ["ag"], operator="admin", role="admin", source_ip=None
+        )
+
+
+def test_position_manager_shakedown_preview_rejects_unselected_baseline_drift(
+    tmp_path: Path,
+) -> None:
+    service, rpc = prepare_position_manager_shakedown(tmp_path)
+    rpc.positions = [position("ag", 2), position("al", -2)]
+
+    with pytest.raises(CommoditySimNowSafetyError, match="完整证明属于关联 baseline"):
+        service.preview_position_manager_shakedown(
+            ["ag"], operator="admin", role="admin", source_ip=None
+        )
+
+
+def test_position_manager_shakedown_preview_uses_unique_session_references(
+    tmp_path: Path,
+) -> None:
+    service, _ = prepare_position_manager_shakedown(tmp_path)
+    first = service.preview_position_manager_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )
+    second = service.preview_position_manager_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )
+
+    first_references = {row["reference"] for row in first["session"]["plan"]["open_orders"]}
+    second_references = {row["reference"] for row in second["session"]["plan"]["open_orders"]}
+    assert first_references.isdisjoint(second_references)
+
+
+def test_position_manager_shakedown_preview_checks_complete_mixed_portfolio(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _ = prepare_position_manager_shakedown(tmp_path)
+    captured: dict[str, Any] = {}
+
+    def verify(
+        targets: list[dict[str, Any]], positions: dict[str, int], *, sector_map: dict[str, str] | None = None
+    ) -> dict[str, Any]:
+        captured["targets"] = targets
+        captured["positions"] = positions
+        captured["sector_map"] = sector_map
+        return {"snapshot_hash": "risk-snapshot"}
+
+    monkeypatch.setattr(service, "_verify_realtime_exposures", verify)
+    result = service.preview_position_manager_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )
+
+    assert {row["product"] for row in captured["targets"]} == set(PRODUCT_SPECS)
+    assert next(row for row in captured["targets"] if row["product"] == "ag")["target_quantity"] == 3
+    assert next(row for row in captured["targets"] if row["product"] == "al")["target_quantity"] == -1
+    assert captured["sector_map"] == POSITION_MANAGER_SECTOR_MAP_V1
+    assert result["session"]["plan"]["preview_exposure_snapshot"] == {"snapshot_hash": "risk-snapshot"}
+
+
+def test_position_manager_shakedown_preview_checks_phase_order_limit(tmp_path: Path) -> None:
+    service, _ = prepare_position_manager_shakedown(tmp_path)
+    service.settings = service.settings.model_copy(
+        update={"commodity_simnow_max_orders_per_phase": 1}
+    )
+
+    with pytest.raises(CommoditySimNowSafetyError, match="拆单数量超过单阶段上限"):
+        service.preview_position_manager_shakedown(
+            ["ag", "al"], operator="admin", role="admin", source_ip=None
+        )
+
+
+def test_position_manager_shakedown_start_auto_submits_previewed_phase(tmp_path: Path) -> None:
+    service, _ = prepare_position_manager_shakedown(tmp_path)
+    service.settings = service.settings.model_copy(
+        update={"commodity_position_manager_simnow_auto_dispatch_enabled": True}
+    )
+    service.enabled = False
+    service.manual_approval = False
+    service.simnow_mode = False
+    service.auto_dispatch_authorized = False
+    service.template_authorized = False
+    preview = service.preview_position_manager_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )
+
+    result = service.start_position_manager_shakedown(
+        preview["preview"]["plan_hash"], operator="admin", role="admin", source_ip=None
+    )
+
+    assert result["action"] == "open_submitted"
+    assert service.current_plan is not None
+    assert service.current_plan["position_manager_shakedown_session_id"] == preview["preview"]["session_id"]
+    assert service.current_plan["status"] == "OPEN_SUBMITTED"
+    assert len(service.trade.requests) == 1
+    assert service.trade.requests[0].reference.startswith("commodity_pm:sh:")
+    assert service.enabled is True
+    assert service.manual_approval is True
+    assert service.simnow_mode is True
+    assert service.auto_dispatch_authorized is False
+
+
+def test_position_manager_shakedown_start_rejects_changed_account_or_plan_hash(tmp_path: Path) -> None:
+    service, _ = prepare_position_manager_shakedown(tmp_path)
+    service.settings = service.settings.model_copy(
+        update={"commodity_position_manager_simnow_auto_dispatch_enabled": True}
+    )
+    service.enable(enable_payload(), operator="admin", role="admin", source_ip=None)
+    preview = service.preview_position_manager_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )
+
+    with pytest.raises(CommoditySimNowStateError, match="哈希不匹配"):
+        service.start_position_manager_shakedown(
+            "0" * 64, operator="admin", role="admin", source_ip=None
+        )
+
+    service.settings = service.settings.model_copy(
+        update={"commodity_simnow_account_hashes": "b" * 64}
+    )
+    with pytest.raises(CommoditySimNowSafetyError, match="白名单"):
+        service.start_position_manager_shakedown(
+            preview["preview"]["plan_hash"], operator="admin", role="admin", source_ip=None
+        )
+
+
+def test_position_manager_shakedown_stop_only_cancels_session_reference(tmp_path: Path) -> None:
+    service, rpc = prepare_position_manager_shakedown(tmp_path)
+    service.settings = service.settings.model_copy(
+        update={"commodity_position_manager_simnow_auto_dispatch_enabled": True}
+    )
+    service.enable(enable_payload(), operator="admin", role="admin", source_ip=None)
+    preview = service.preview_position_manager_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )
+    service.start_position_manager_shakedown(
+        preview["preview"]["plan_hash"], operator="admin", role="admin", source_ip=None
+    )
+    request = service.trade.requests[0]
+    rpc.orders = [
+        {
+            "vt_orderid": "CTP.1", "symbol": request.symbol, "exchange": request.exchange,
+            "reference": request.reference, "status": "not_traded",
+        },
+        {
+            "vt_orderid": "CTP.manual", "symbol": "al2610", "exchange": "SHFE",
+            "reference": "manual-order", "status": "not_traded",
+        },
+    ]
+
+    stopped = service.stop_position_manager_shakedown(
+        "operator requested stop", operator="admin", role="admin", source_ip=None
+    )
+
+    assert service.trade.cancel_requests == ["CTP.1"]
+    assert stopped["halt"]["status"] == "HALTED_RECONCILE_REQUIRED"
+
+
+def test_position_manager_shakedown_pre_submit_stop_archives_and_unblocks_preview(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _ = prepare_position_manager_shakedown(tmp_path)
+    service.settings = service.settings.model_copy(
+        update={"commodity_position_manager_simnow_auto_dispatch_enabled": True}
+    )
+    preview = service.preview_position_manager_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )
+
+    def fail_before_submit(**kwargs):
+        raise CommoditySimNowStateError("simulated pre-submit failure")
+
+    monkeypatch.setattr(
+        service, "auto_position_manager_shakedown_advance", fail_before_submit
+    )
+    with pytest.raises(CommoditySimNowStateError, match="simulated pre-submit"):
+        service.start_position_manager_shakedown(
+            preview["preview"]["plan_hash"],
+            operator="admin",
+            role="admin",
+            source_ip=None,
+        )
+
+    stopped = service.stop_position_manager_shakedown(
+        "operator abandons pre-submit shakedown",
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+
+    assert stopped["halt"]["status"] == "HALTED_RECONCILED"
+    assert stopped["halt"]["abandoned_pre_submit"] is True
+    assert service.current_plan is None
+    assert not service._active_state_path().exists()
+    replacement = service.preview_position_manager_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )
+    assert replacement["session"]["status"] == "PREVIEW_READY"
+
+
+def test_position_manager_shakedown_restart_resumes_via_dedicated_start_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, rpc = prepare_position_manager_shakedown(tmp_path)
+    service.settings = service.settings.model_copy(
+        update={"commodity_position_manager_simnow_auto_dispatch_enabled": True}
+    )
+    preview = service.preview_position_manager_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )
+
+    def fail_before_submit(**kwargs):
+        raise CommoditySimNowStateError("simulated pre-submit failure")
+
+    monkeypatch.setattr(
+        service, "auto_position_manager_shakedown_advance", fail_before_submit
+    )
+    with pytest.raises(CommoditySimNowStateError, match="simulated pre-submit"):
+        service.start_position_manager_shakedown(
+            preview["preview"]["plan_hash"],
+            operator="admin",
+            role="admin",
+            source_ip=None,
+        )
+
+    recovered_trade = FakeTrade()
+    recovered_trade.rpc = rpc
+    recovered = CommoditySimNowService(
+        settings=service.settings,
+        rpc=rpc,  # type: ignore[arg-type]
+        trade=recovered_trade,  # type: ignore[arg-type]
+        risk=FakeRisk(),  # type: ignore[arg-type]
+        audit=FakeAudit(),  # type: ignore[arg-type]
+        tick_store=service.tick_store,
+        clock=lambda: NOW,
+    )
+
+    assert recovered.position_manager_shakedown_status()["execution_enabled"] is True
+    assert recovered.enabled is False
+    resumed = recovered.start_position_manager_shakedown(
+        preview["preview"]["plan_hash"],
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+
+    assert resumed["action"] == "open_submitted"
+    assert recovered.plan()["status"] == "OPEN_SUBMITTED"
+    assert len(recovered_trade.requests) == 1
+    assert recovered.auto_dispatch_authorized is False
+
+
+def test_position_manager_shakedown_initial_state_write_failure_cannot_dispatch_later(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _ = prepare_position_manager_shakedown(tmp_path)
+    service.settings = service.settings.model_copy(
+        update={"commodity_position_manager_simnow_auto_dispatch_enabled": True}
+    )
+    preview = service.preview_position_manager_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )
+
+    def fail_persist() -> None:
+        raise OSError("disk unavailable")
+
+    monkeypatch.setattr(service, "_persist_active_plan", fail_persist)
+    with pytest.raises(OSError, match="disk unavailable"):
+        service.start_position_manager_shakedown(
+            preview["preview"]["plan_hash"],
+            operator="admin",
+            role="admin",
+            source_ip=None,
+        )
+
+    assert service.current_plan is None
+    assert service.shakedown_auto_dispatch_authorized is False
+    assert service.auto_position_manager_shakedown_advance()["action"] == "idle"
+    assert service.trade.requests == []
+
+
+@pytest.mark.parametrize("formal_status", ["COMPLETE", "HALTED_RECONCILED"])
+def test_position_manager_shakedown_cannot_overwrite_formal_terminal_plan(
+    tmp_path: Path, formal_status: str
+) -> None:
+    service, _ = prepare_position_manager_shakedown(tmp_path)
+    service.settings = service.settings.model_copy(
+        update={"commodity_position_manager_simnow_auto_dispatch_enabled": True}
+    )
+    preview = service.preview_position_manager_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )
+    formal_plan = {
+        "status": formal_status,
+        "plan_hash": "f" * 64,
+        "execution_lane": "official_forward",
+    }
+    service.current_plan = formal_plan
+
+    with pytest.raises(CommoditySimNowStateError, match="正式 SimNow 计划占用"):
+        service.preview_position_manager_shakedown(
+            ["ag"], operator="admin", role="admin", source_ip=None
+        )
+    with pytest.raises(CommoditySimNowStateError, match="禁止候选测试覆盖"):
+        service.start_position_manager_shakedown(
+            preview["preview"]["plan_hash"],
+            operator="admin",
+            role="admin",
+            source_ip=None,
+        )
+
+    assert service.current_plan is formal_plan
+    assert service.shakedown_auto_dispatch_authorized is False
+    assert service.trade.requests == []
+
+
+def test_formal_preview_cannot_overwrite_ready_shakedown_plan(
+    tmp_path: Path,
+) -> None:
+    service, private_key, _ = make_service(tmp_path)
+    shakedown_plan = {
+        "position_manager_shakedown_session_id": "pm-shakedown-test",
+        "status": "READY_OPEN",
+        "plan_hash": "e" * 64,
+    }
+    service.current_plan = shakedown_plan
+
+    with pytest.raises(CommoditySimNowStateError, match="正式预览不得覆盖"):
+        service.preview(
+            make_batch(private_key),
+            operator="admin",
+            role="admin",
+            source_ip=None,
+        )
+
+    assert service.current_plan is shakedown_plan
+    assert service.trade.requests == []
+
+
+def test_position_manager_shakedown_pre_submit_stop_rechecks_late_trade_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, rpc = prepare_position_manager_shakedown(tmp_path)
+    service.settings = service.settings.model_copy(
+        update={"commodity_position_manager_simnow_auto_dispatch_enabled": True}
+    )
+    preview = service.preview_position_manager_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )
+
+    def fail_before_submit(**kwargs):
+        raise CommoditySimNowStateError("simulated pre-submit failure")
+
+    monkeypatch.setattr(
+        service, "auto_position_manager_shakedown_advance", fail_before_submit
+    )
+    with pytest.raises(CommoditySimNowStateError, match="simulated pre-submit"):
+        service.start_position_manager_shakedown(
+            preview["preview"]["plan_hash"],
+            operator="admin",
+            role="admin",
+            source_ip=None,
+        )
+    plan = service.current_plan
+    assert plan is not None
+    reference = plan["open_orders"][0]["reference"]
+    plan["send_intents"]["open"] = [{
+        **plan["open_orders"][0],
+        "reference": reference,
+        "intent_status": "NO_EVIDENCE_STABLE",
+    }]
+    service._persist_active_plan()
+    rpc.trades = [{
+        "vt_tradeid": "CTP.LATE",
+        "vt_orderid": "CTP.99",
+        "reference": reference,
+        "price": plan["open_orders"][0]["price"],
+        "volume": plan["open_orders"][0]["volume"],
+    }]
+
+    stopped = service.stop_position_manager_shakedown(
+        "operator abandons after stable no-evidence",
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+
+    assert stopped["halt"]["status"] == "HALTED_RECONCILE_REQUIRED"
+    assert service.current_plan is not None
+    assert service.plan()["status"] == "HALTED_RECONCILE_REQUIRED"
+    assert service.plan()["halt"]["submission_evidence_references"] == [reference]
+
+
+def test_position_manager_shakedown_pre_submit_stop_retries_rpc_then_archives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, rpc = prepare_position_manager_shakedown(tmp_path)
+    service.settings = service.settings.model_copy(
+        update={"commodity_position_manager_simnow_auto_dispatch_enabled": True}
+    )
+    preview = service.preview_position_manager_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )
+
+    def fail_before_submit(**kwargs):
+        raise CommoditySimNowStateError("simulated pre-submit failure")
+
+    monkeypatch.setattr(
+        service, "auto_position_manager_shakedown_advance", fail_before_submit
+    )
+    with pytest.raises(CommoditySimNowStateError, match="simulated pre-submit"):
+        service.start_position_manager_shakedown(
+            preview["preview"]["plan_hash"],
+            operator="admin",
+            role="admin",
+            source_ip=None,
+        )
+    monkeypatch.undo()
+    rpc.get_orders_error = RuntimeError("RPC unavailable")
+
+    stopped = service.stop_position_manager_shakedown(
+        "operator abandons while RPC unavailable",
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+
+    assert stopped["halt"]["status"] == "CANCEL_PENDING"
+    assert service.plan()["status"] == "CANCEL_PENDING"
+    assert service.plan()["halt"]["orders_snapshot_available"] is False
+    assert service.plan()["halt"]["abandon_pre_submit_requested"] is True
+    rpc.get_orders_error = None
+    retried = service.auto_position_manager_shakedown_advance()
+    assert retried["action"] == "halted_reconcile_required"
+    reconciled = service.auto_position_manager_shakedown_advance()
+    assert reconciled["action"] == "halted_reconciled"
+    assert service.current_plan is None
+
+
+def test_position_manager_shakedown_pre_submit_stop_routes_position_drift_to_reconcile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, rpc = prepare_position_manager_shakedown(tmp_path)
+    service.settings = service.settings.model_copy(
+        update={"commodity_position_manager_simnow_auto_dispatch_enabled": True}
+    )
+    preview = service.preview_position_manager_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )
+
+    def fail_before_submit(**kwargs):
+        raise CommoditySimNowStateError("simulated pre-submit failure")
+
+    monkeypatch.setattr(
+        service, "auto_position_manager_shakedown_advance", fail_before_submit
+    )
+    with pytest.raises(CommoditySimNowStateError, match="simulated pre-submit"):
+        service.start_position_manager_shakedown(
+            preview["preview"]["plan_hash"],
+            operator="admin",
+            role="admin",
+            source_ip=None,
+        )
+    rpc.positions = [position("ag", 3), position("al", -1)]
+
+    stopped = service.stop_position_manager_shakedown(
+        "operator abandons after position drift",
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+
+    assert stopped["halt"]["status"] == "HALTED_RECONCILE_REQUIRED"
+    assert stopped["halt"]["pre_submit_position_mismatch"] is True
+    assert service.plan()["status"] == "HALTED_RECONCILE_REQUIRED"
+    assert service.plan()["halt"]["observed_positions"] == {
+        "ag2610.SHFE": 3,
+        "al2610.SHFE": -1,
+    }
+
+
+def test_position_manager_shakedown_pre_submit_stop_retries_position_rpc_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, rpc = prepare_position_manager_shakedown(tmp_path)
+    service.settings = service.settings.model_copy(
+        update={"commodity_position_manager_simnow_auto_dispatch_enabled": True}
+    )
+    preview = service.preview_position_manager_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )
+
+    def fail_before_submit(**kwargs):
+        raise CommoditySimNowStateError("simulated pre-submit failure")
+
+    monkeypatch.setattr(
+        service, "auto_position_manager_shakedown_advance", fail_before_submit
+    )
+    with pytest.raises(CommoditySimNowStateError, match="simulated pre-submit"):
+        service.start_position_manager_shakedown(
+            preview["preview"]["plan_hash"],
+            operator="admin",
+            role="admin",
+            source_ip=None,
+        )
+    monkeypatch.undo()
+    rpc.get_positions_error = RuntimeError("positions RPC unavailable")
+
+    stopped = service.stop_position_manager_shakedown(
+        "operator abandons while positions RPC unavailable",
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+
+    assert stopped["halt"]["status"] == "HALTED_RECONCILE_REQUIRED"
+    assert service.plan()["status"] == "HALTED_RECONCILE_REQUIRED"
+    assert service.plan()["halt"]["positions_snapshot_available"] is False
+    assert service.plan()["halt"]["abandon_pre_submit_requested"] is True
+    rpc.get_positions_error = None
+    reconciled = service.auto_position_manager_shakedown_advance()
+    assert reconciled["action"] == "halted_reconciled"
+    assert service.current_plan is None
+
+
+def test_position_manager_shakedown_terminal_write_failure_preserves_active_plan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, rpc = prepare_position_manager_shakedown(tmp_path)
+    service.settings = service.settings.model_copy(
+        update={"commodity_position_manager_simnow_auto_dispatch_enabled": True}
+    )
+    preview = service.preview_position_manager_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )
+    service.start_position_manager_shakedown(
+        preview["preview"]["plan_hash"],
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+    rpc.positions = [position("ag", 3), position("al", -1)]
+
+    def fail_terminal_write(session: dict[str, Any]) -> None:
+        raise OSError("terminal evidence disk failure")
+
+    monkeypatch.setattr(
+        service, "_save_position_manager_shakedown_state", fail_terminal_write
+    )
+    with pytest.raises(OSError, match="terminal evidence disk failure"):
+        service.reconcile(
+            preview["preview"]["plan_hash"],
+            operator="admin",
+            role="admin",
+            source_ip=None,
+            dispatch_mode="auto",
+        )
+
+    assert service.current_plan is not None
+    assert service.plan()["status"] == "OPEN_SUBMITTED"
+    assert service.plan()["halt"]["terminal_finalize_error_type"] == "OSError"
+    assert service.shakedown_auto_dispatch_authorized is False
+    assert service._active_state_path().exists()
+
+
+def test_generic_entrypoints_cannot_resume_or_dispatch_halted_shakedown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, _ = prepare_position_manager_shakedown(tmp_path)
+    service.settings = service.settings.model_copy(
+        update={"commodity_position_manager_simnow_auto_dispatch_enabled": True}
+    )
+    service.enable(enable_payload(), operator="admin", role="admin", source_ip=None)
+    preview = service.preview_position_manager_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )
+    original_advance = service.auto_position_manager_shakedown_advance
+
+    def fail_before_submit(**kwargs):
+        raise CommoditySimNowStateError("simulated pre-submit failure")
+
+    monkeypatch.setattr(
+        service, "auto_position_manager_shakedown_advance", fail_before_submit
+    )
+    with pytest.raises(CommoditySimNowStateError, match="simulated pre-submit"):
+        service.start_position_manager_shakedown(
+            preview["preview"]["plan_hash"],
+            operator="admin",
+            role="admin",
+            source_ip=None,
+        )
+
+    assert service.plan()["status"] == "HALTED_PRE_SUBMIT_SAFE"
+    assert service.shakedown_auto_dispatch_authorized is False
+    service.enable(enable_payload(), operator="admin", role="admin", source_ip=None)
+    assert service.plan()["status"] == "HALTED_PRE_SUBMIT_SAFE"
+    with pytest.raises(CommoditySimNowStateError, match="通用自动派单"):
+        service.auto_advance()
+    with pytest.raises(CommoditySimNowStateError, match="正式模板不得恢复"):
+        service.start_template(
+            template_start_payload(),
+            operator="admin",
+            role="admin",
+            source_ip=None,
+        )
+    with pytest.raises(CommoditySimNowSafetyError, match="专用自动派单模式"):
+        service.execute(
+            CommodityPlanExecuteRequestDTO(
+                plan_hash=preview["preview"]["plan_hash"],
+                phase="open",
+                confirm=True,
+                confirm_simnow_only=True,
+                confirm_manual_one_shot=True,
+                reason="generic dispatch must be rejected",
+            ),
+            operator="admin",
+            role="admin",
+            source_ip=None,
+            dispatch_mode="auto",
+        )
+    assert service.trade.requests == []
+
+    monkeypatch.setattr(
+        service, "auto_position_manager_shakedown_advance", original_advance
+    )
+    resumed = service.start_position_manager_shakedown(
+        preview["preview"]["plan_hash"],
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+    assert resumed["action"] == "open_submitted"
+    assert len(service.trade.requests) == 1
+
+
+def test_failed_shakedown_start_cannot_submit_later_after_conflict_clears(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service, rpc = prepare_position_manager_shakedown(tmp_path)
+    service.settings = service.settings.model_copy(
+        update={"commodity_position_manager_simnow_auto_dispatch_enabled": True}
+    )
+    service.enable(enable_payload(), operator="admin", role="admin", source_ip=None)
+    preview = service.preview_position_manager_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )
+    monkeypatch.setattr(
+        service, "_position_manager_shakedown_active_orders", lambda products: []
+    )
+    rpc.orders = [{
+        "vt_orderid": "CTP.formal",
+        "symbol": "ag2610",
+        "exchange": "SHFE",
+        "reference": "commodity_static_core:formal",
+        "status": "not_traded",
+    }]
+
+    with pytest.raises(CommoditySimNowStateError, match="外部活动委托"):
+        service.start_position_manager_shakedown(
+            preview["preview"]["plan_hash"],
+            operator="admin",
+            role="admin",
+            source_ip=None,
+        )
+
+    assert service.plan()["status"] == "HALTED_PRE_SUBMIT_SAFE"
+    assert service.shakedown_auto_dispatch_authorized is False
+    assert service.trade.requests == []
+    rpc.orders = []
+    idle = service.auto_position_manager_shakedown_advance()
+    assert idle["action"] == "idle"
+    assert service.trade.requests == []
+
+
+def test_completed_shakedown_atomically_archives_and_clears_active_plan(
+    tmp_path: Path,
+) -> None:
+    service, rpc = prepare_position_manager_shakedown(tmp_path)
+    service.settings = service.settings.model_copy(
+        update={"commodity_position_manager_simnow_auto_dispatch_enabled": True}
+    )
+    service.enable(enable_payload(), operator="admin", role="admin", source_ip=None)
+    service.auto_dispatch_authorized = True
+    service.template_authorized = True
+    preview = service.preview_position_manager_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )
+    service.start_position_manager_shakedown(
+        preview["preview"]["plan_hash"],
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+    rpc.positions = [position("ag", 3), position("al", -1)]
+
+    result = service.reconcile(
+        preview["preview"]["plan_hash"],
+        operator="admin",
+        role="admin",
+        source_ip=None,
+        dispatch_mode="auto",
+    )
+
+    assert result["status"] == "COMPLETE"
+    assert service.current_plan is None
+    assert not service._active_state_path().exists()
+    assert service.auto_dispatch_authorized is True
+    assert service.template_authorized is True
+    assert service.shakedown_auto_dispatch_authorized is False
+    session = service.position_manager_shakedown_status()["session"]
+    assert session["status"] == "COMPLETE"
+    assert session["execution"]["reconciliation"]["matched"] is True
+    assert session["execution"]["execution_snapshot"] is not None
+    assert len(session["execution"]["state_checksum"]) == 64
+    assert len(session["terminal_checksum"]) == 64
+
+
+def test_halted_shakedown_preserves_template_authorization_and_full_evidence(
+    tmp_path: Path,
+) -> None:
+    service, rpc = prepare_position_manager_shakedown(tmp_path)
+    service.settings = service.settings.model_copy(
+        update={"commodity_position_manager_simnow_auto_dispatch_enabled": True}
+    )
+    service.enable(enable_payload(), operator="admin", role="admin", source_ip=None)
+    service.auto_dispatch_authorized = True
+    service.template_authorized = True
+    preview = service.preview_position_manager_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )
+    service.start_position_manager_shakedown(
+        preview["preview"]["plan_hash"],
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+    request = service.trade.requests[0]
+    rpc.orders = [{
+        "vt_orderid": "CTP.1",
+        "symbol": request.symbol,
+        "exchange": request.exchange,
+        "reference": request.reference,
+        "status": "not_traded",
+        "offset": request.offset,
+        "volume": request.volume,
+    }]
+
+    service.stop_position_manager_shakedown(
+        "operator requested stop",
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+    assert service.auto_dispatch_authorized is True
+    assert service.template_authorized is True
+    assert service.shakedown_auto_dispatch_authorized is False
+
+    result = service.reconcile(
+        preview["preview"]["plan_hash"],
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+
+    assert result["status"] == "HALTED_RECONCILED"
+    assert service.current_plan is None
+    session = service.position_manager_shakedown_status()["session"]
+    execution = session["execution"]
+    assert execution["reconciliation"]["matched"] is True
+    assert execution["execution_snapshot"] is not None
+    assert execution["halt"]["reason"] == "operator requested stop"
+    assert len(execution["state_checksum"]) == 64
+    assert len(session["terminal_checksum"]) == 64
+
+
+def test_terminal_shakedown_evidence_checksum_detects_tampering(
+    tmp_path: Path,
+) -> None:
+    service, rpc = prepare_position_manager_shakedown(tmp_path)
+    service.settings = service.settings.model_copy(
+        update={"commodity_position_manager_simnow_auto_dispatch_enabled": True}
+    )
+    service.enable(enable_payload(), operator="admin", role="admin", source_ip=None)
+    preview = service.preview_position_manager_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )
+    service.start_position_manager_shakedown(
+        preview["preview"]["plan_hash"],
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+    rpc.positions = [position("ag", 3), position("al", -1)]
+    service.reconcile(
+        preview["preview"]["plan_hash"],
+        operator="admin",
+        role="admin",
+        source_ip=None,
+        dispatch_mode="auto",
+    )
+    state_path = Path(
+        service.settings.commodity_position_manager_simnow_state_path
+    )
+    payload = json.loads(state_path.read_text(encoding="utf-8"))
+    payload["execution"]["final_positions"]["ag2610.SHFE"] = 999
+    state_path.write_text(
+        json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+    )
+
+    status = service.position_manager_shakedown_status()
+
+    assert status["session"]["status"] == "RESULT_UNKNOWN"
+    assert status["session"]["error_type"] == "ValueError"
+
+
+def test_terminal_shakedown_envelope_checksum_detects_status_tampering(
+    tmp_path: Path,
+) -> None:
+    service, rpc = prepare_position_manager_shakedown(tmp_path)
+    service.settings = service.settings.model_copy(
+        update={"commodity_position_manager_simnow_auto_dispatch_enabled": True}
+    )
+    preview = service.preview_position_manager_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )
+    service.start_position_manager_shakedown(
+        preview["preview"]["plan_hash"],
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+    rpc.positions = [position("ag", 3), position("al", -1)]
+    service.reconcile(
+        preview["preview"]["plan_hash"],
+        operator="admin",
+        role="admin",
+        source_ip=None,
+        dispatch_mode="auto",
+    )
+    state_path = Path(
+        service.settings.commodity_position_manager_simnow_state_path
+    )
+    payload = json.loads(state_path.read_text(encoding="utf-8"))
+    payload["status"] = "HALTED_RECONCILED"
+    state_path.write_text(
+        json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+    )
+
+    status = service.position_manager_shakedown_status()
+
+    assert status["session"]["status"] == "RESULT_UNKNOWN"
+    assert status["session"]["error_type"] == "ValueError"
 
 
 @pytest.mark.parametrize(
