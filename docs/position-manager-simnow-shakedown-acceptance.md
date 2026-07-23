@@ -11,8 +11,8 @@
   `dispatch_allowed=false`。派单权只来自独立 shakedown 会话。
 - 页面只能选择品种；exact contract、目标方向和手数必须来自有效的已签名
   Shadow 快照，不能手改。
-- 每次实际点击“启动 SimNow 候选测试”前，必须取得当次明确的下单授权。
-  只读预检、部署和 preview 不构成下单授权。
+- 只允许在预先批准的 SimNow 测试窗口执行；页面点击“启动 SimNow 候选测试”
+  即为本次会话的执行确认，不需要逐单或另行等待站外授权。
 - 会话开始后，不得修改 selected products、snapshot hash 或 plan hash；主力
   合约变化时停止并完成对账，再重新 preview。
 
@@ -58,7 +58,7 @@ GET /api/commodity-simnow/events?limit=200
 
 ## T3：单品种自动 shakedown
 
-仅在当次明确授权后，按以下最小范围执行：
+在已批准的 SimNow 测试窗口内，按以下最小范围执行：
 
 1. 启用 SimNow 专用开关、账户白名单和 shakedown 自动派单；不要启用生产账户
    或修改 Shadow 的安全 Literal。

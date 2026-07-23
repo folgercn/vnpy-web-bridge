@@ -2558,14 +2558,14 @@ class CommoditySimNowService:
             # chain.  Target-level linkage remains exact below.
         else:
             expected_header = {
-            "baseline_scheduler_id": self.scheduler_id,
-            "source_month": baseline["source_month"],
-            "execution_day": baseline["execution_day"],
+                "baseline_scheduler_id": self.scheduler_id,
+                "source_month": baseline["source_month"],
+                "execution_day": baseline["execution_day"],
             }
             observed_header = {
-            "baseline_scheduler_id": snapshot.baseline_scheduler_id,
-            "source_month": snapshot.source_month,
-            "execution_day": snapshot.execution_day.isoformat(),
+                "baseline_scheduler_id": snapshot.baseline_scheduler_id,
+                "source_month": snapshot.source_month,
+                "execution_day": snapshot.execution_day.isoformat(),
             }
             for field, expected in expected_header.items():
                 if observed_header[field] != expected:
