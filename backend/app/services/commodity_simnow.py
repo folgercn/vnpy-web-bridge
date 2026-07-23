@@ -282,6 +282,7 @@ class CommoditySimNowService:
             "service_stop",
             operator="commodity-simnow-shutdown",
             source_ip=None,
+            revoke_scope="all",
         )
         if not self._task:
             return
@@ -293,10 +294,14 @@ class CommoditySimNowService:
         self._task = None
 
     @_serialized
-    def _revoke_auto_dispatch(self) -> None:
-        self.auto_dispatch_authorized = False
-        self.shakedown_auto_dispatch_authorized = False
-        self.template_authorized = False
+    def _revoke_auto_dispatch(self, scope: str = "all") -> None:
+        if scope not in {"all", "generic", "shakedown"}:
+            raise ValueError(f"unknown auto-dispatch authorization scope: {scope}")
+        if scope in {"all", "generic"}:
+            self.auto_dispatch_authorized = False
+            self.template_authorized = False
+        if scope in {"all", "shakedown"}:
+            self.shakedown_auto_dispatch_authorized = False
 
     @_serialized
     def enable(
@@ -322,10 +327,7 @@ class CommoditySimNowService:
         )
         if not all(confirmations):
             raise CommoditySimNowSafetyError("SimNow 人工授权确认不完整")
-        if (
-            self.settings.commodity_simnow_auto_dispatch_enabled
-            or self.settings.commodity_position_manager_simnow_auto_dispatch_enabled
-        ) and not payload.confirm_auto_dispatch:
+        if self.settings.commodity_simnow_auto_dispatch_enabled and not payload.confirm_auto_dispatch:
             raise CommoditySimNowSafetyError("SimNow 自动派单授权确认不完整")
         snapshot = self._safety_snapshot(require_trade_enabled=True)
         self.enabled = True
@@ -334,11 +336,11 @@ class CommoditySimNowService:
         self.auto_dispatch_authorized = (
             self.settings.commodity_simnow_auto_dispatch_enabled and payload.confirm_auto_dispatch
         )
-        self.shakedown_auto_dispatch_authorized = (
-            self.settings.commodity_position_manager_simnow_auto_dispatch_enabled
-            and payload.confirm_auto_dispatch
-        )
-        self._resume_halted_plan_after_authorization()
+        if not (
+            self.current_plan
+            and self.current_plan.get("position_manager_shakedown_session_id")
+        ):
+            self._resume_halted_plan_after_authorization()
         result = {**self.status(), "safety": snapshot, "reason": payload.reason}
         self._event("enabled", result={"account_hash": snapshot["account_hash"]})
         self.audit.record(
@@ -364,6 +366,7 @@ class CommoditySimNowService:
             payload.reason,
             operator=operator,
             source_ip=source_ip,
+            revoke_scope="all",
         )
         self.enabled = False
         self.manual_approval = False
@@ -399,6 +402,17 @@ class CommoditySimNowService:
         )
         if not all(confirmations):
             raise CommoditySimNowSafetyError("一键策略模板授权确认不完整")
+        if (
+            self.current_plan
+            and self.current_plan.get("position_manager_shakedown_session_id")
+        ):
+            raise CommoditySimNowStateError(
+                "候选测试计划必须通过专用入口收口，正式模板不得恢复或派发",
+                detail={
+                    "status": self.current_plan.get("status"),
+                    "plan_hash": self.current_plan.get("plan_hash"),
+                },
+            )
         if not self.settings.commodity_simnow_template_batch_path.strip():
             raise CommoditySimNowBatchError(
                 "一键策略模板目标文件未配置",
@@ -619,7 +633,12 @@ class CommoditySimNowService:
         elif not (payload.confirm and payload.confirm_simnow_only and payload.confirm_manual_one_shot):
             raise CommoditySimNowSafetyError("执行确认不完整")
         plan = self._require_plan(payload.plan_hash)
-        if plan.get("position_manager_shakedown_session_id"):
+        shakedown_plan = bool(plan.get("position_manager_shakedown_session_id"))
+        if shakedown_plan and dispatch_mode != "shakedown_auto":
+            raise CommoditySimNowSafetyError("候选测试只允许专用自动派单模式")
+        if not shakedown_plan and dispatch_mode == "shakedown_auto":
+            raise CommoditySimNowSafetyError("正式计划不得使用候选测试派单模式")
+        if shakedown_plan:
             self._verify_position_manager_shakedown_execution_trust(plan)
         use_acceptance_passive_limit = payload.acceptance_passive_limit
         if use_acceptance_passive_limit:
@@ -658,10 +677,7 @@ class CommoditySimNowService:
                 "执行前持仓与计划不一致",
                 detail={"expected": expected_positions, "observed": observed_positions},
             )
-        active = self._active_strategy_orders()
-        if active:
-            raise CommoditySimNowStateError("仍有活动策略委托", detail={"active_order_ids": active})
-        if plan.get("position_manager_shakedown_session_id"):
+        if shakedown_plan:
             conflicts = self._position_manager_shakedown_external_active_orders(plan)
             if conflicts:
                 self._begin_safe_halt(
@@ -669,6 +685,12 @@ class CommoditySimNowService:
                     phase=payload.phase,
                 )
                 raise CommoditySimNowStateError("存在外部活动委托，候选测试已安全停机", detail={"active_orders": conflicts})
+        else:
+            active = self._active_strategy_orders()
+            if active:
+                raise CommoditySimNowStateError(
+                    "仍有活动策略委托", detail={"active_order_ids": active}
+                )
         orders = list(plan[f"{payload.phase}_orders"])
         if not orders:
             raise CommoditySimNowStateError("该阶段没有待提交委托")
@@ -939,31 +961,37 @@ class CommoditySimNowService:
             elif matched:
                 plan["status"] = "COMPLETE"
                 plan.pop("halt", None)
+        reconciliation = {
+            "phase": phase,
+            "matched": matched,
+            "active_order_ids": active,
+            "expected_positions": expected,
+            "observed_positions": observed,
+            "mismatch_halted": reconciliation_mismatch,
+            "halted_reconcile": halted_reconcile,
+        }
+        plan_snapshot = json.loads(
+            json.dumps(plan, ensure_ascii=False, default=str)
+        )
+        finalized_shakedown = False
         if plan["status"] == "COMPLETE":
             if plan.get("position_manager_shakedown_session_id"):
-                self._complete_position_manager_shakedown(plan, result={
-                    "phase": phase,
-                    "expected_positions": expected,
-                    "observed_positions": observed,
-                    "active_order_ids": active,
-                })
+                self._complete_position_manager_shakedown(
+                    plan, result=reconciliation
+                )
+                finalized_shakedown = True
             else:
                 self._save_completed_state(plan)
         elif plan.get("position_manager_shakedown_session_id") and plan["status"] == "HALTED_RECONCILED":
-            self._archive_position_manager_shakedown_terminal(plan)
+            self._archive_position_manager_shakedown_terminal(
+                plan, reconciliation=reconciliation
+            )
+            finalized_shakedown = True
         else:
             self._persist_active_plan()
         result = {
-            **self.plan(),
-            "reconciliation": {
-                "phase": phase,
-                "matched": matched,
-                "active_order_ids": active,
-                "expected_positions": expected,
-                "observed_positions": observed,
-                "mismatch_halted": reconciliation_mismatch,
-                "halted_reconcile": halted_reconcile,
-            },
+            **(plan_snapshot if finalized_shakedown else self.plan()),
+            "reconciliation": reconciliation,
         }
         if dispatch_mode == "manual" or matched or reconciliation_mismatch:
             self._event("reconciled", plan_hash=plan_hash, result=result["reconciliation"])
@@ -985,6 +1013,11 @@ class CommoditySimNowService:
         role: str | None = "system",
         source_ip: str | None = None,
     ) -> dict[str, Any]:
+        if (
+            self.current_plan
+            and self.current_plan.get("position_manager_shakedown_session_id")
+        ):
+            raise CommoditySimNowStateError("通用自动派单不得推进候选测试计划")
         if self.current_plan and self.current_plan.get("status") in {
             "CANCEL_PENDING",
             "SUBMISSION_OUTCOME_UNKNOWN",
@@ -1003,6 +1036,7 @@ class CommoditySimNowService:
                 "emergency_stop",
                 operator=operator,
                 source_ip=source_ip,
+                revoke_scope="all",
             )
             return {"action": "halted", "reason": "emergency_stop", "halt": halt, **self.status()}
         if not self._auto_dispatch_allowed():
@@ -1095,7 +1129,12 @@ class CommoditySimNowService:
             result = self.reconcile(plan["plan_hash"], operator=operator, role=role, source_ip=source_ip, dispatch_mode="auto")
             return {"action": "halted_reconciled" if result["status"] == "HALTED_RECONCILED" else "halted_reconcile_required", **result}
         if self.risk.status().get("emergency_stopped"):
-            halt = self._begin_safe_halt("emergency_stop", operator=operator, source_ip=source_ip)
+            halt = self._begin_safe_halt(
+                "emergency_stop",
+                operator=operator,
+                source_ip=source_ip,
+                revoke_scope="all",
+            )
             return {"action": "halted", "reason": "emergency_stop", "halt": halt}
         if not self._position_manager_shakedown_auto_dispatch_allowed():
             halt = self._begin_safe_halt("shakedown_auto_dispatch_not_active", operator=operator, source_ip=source_ip)
@@ -1107,14 +1146,29 @@ class CommoditySimNowService:
             except CommoditySimNowSafetyError as exc:
                 halt = self._begin_safe_halt("shakedown_execution_trust_failed", operator=operator, source_ip=source_ip, phase=phase)
                 return {"action": "halted", "reason": "shakedown_execution_trust_failed", "halt": halt, "error_type": exc.__class__.__name__}
-            result = self.execute(
-                CommodityPlanExecuteRequestDTO(
-                    plan_hash=plan["plan_hash"], phase=phase, confirm=True,
-                    confirm_simnow_only=True, confirm_manual_one_shot=True,
-                    reason=f"authorized position-manager shakedown {phase} dispatch",
-                ),
-                operator=operator, role=role, source_ip=source_ip, dispatch_mode="shakedown_auto",
-            )
+            try:
+                result = self.execute(
+                    CommodityPlanExecuteRequestDTO(
+                        plan_hash=plan["plan_hash"], phase=phase, confirm=True,
+                        confirm_simnow_only=True, confirm_manual_one_shot=True,
+                        reason=f"authorized position-manager shakedown {phase} dispatch",
+                    ),
+                    operator=operator, role=role, source_ip=source_ip,
+                    dispatch_mode="shakedown_auto",
+                )
+            except Exception:
+                if self.current_plan and self.current_plan.get("status") in {
+                    "READY_CLOSE",
+                    "READY_OPEN",
+                }:
+                    self._begin_safe_halt(
+                        "shakedown_pre_submit_failed",
+                        operator=operator,
+                        source_ip=source_ip,
+                        phase=phase,
+                        revoke_scope="shakedown",
+                    )
+                raise
             return {"action": f"{phase}_submitted", **result}
         if status in {"CLOSE_SUBMITTED", "OPEN_SUBMITTED"}:
             phase = "close" if status == "CLOSE_SUBMITTED" else "open"
@@ -1135,6 +1189,11 @@ class CommoditySimNowService:
         role: str | None = "system",
         source_ip: str | None = None,
     ) -> dict[str, Any]:
+        if (
+            self.current_plan
+            and self.current_plan.get("position_manager_shakedown_session_id")
+        ):
+            raise CommoditySimNowStateError("正式模板不得推进候选测试计划")
         if not self.template_authorized:
             return {"action": "idle", "reason": "strategy_template_not_authorized"}
         if not self._auto_dispatch_allowed():
@@ -1353,6 +1412,7 @@ class CommoditySimNowService:
             session
             and active
             and active.get("position_manager_shakedown_session_id") == session.get("session_id")
+            and active.get("status") not in {"COMPLETE", "HALTED_RECONCILED"}
         ):
             session = {
                 **session,
@@ -1366,7 +1426,15 @@ class CommoditySimNowService:
             }
         return {
             "configured": self.settings.commodity_position_manager_simnow_shakedown_enabled,
-            "execution_enabled": self._position_manager_shakedown_auto_dispatch_allowed(),
+            "execution_enabled": bool(
+                self.settings.commodity_position_manager_simnow_shakedown_enabled
+                and self.settings.commodity_position_manager_simnow_auto_dispatch_enabled
+                and self.settings.commodity_simnow_enabled
+                and self.enabled
+                and self.manual_approval
+                and self.simnow_mode
+            ),
+            "execution_authorized": self.shakedown_auto_dispatch_authorized,
             "auto_dispatch_enabled": self.settings.commodity_position_manager_simnow_auto_dispatch_enabled,
             "execution_lane": "simnow_shakedown",
             "countable_forward": False,
@@ -1500,9 +1568,12 @@ class CommoditySimNowService:
                 detail={"required_setting": "COMMODITY_POSITION_MANAGER_SIMNOW_SHAKEDOWN_ENABLED=true"}
             )
         self._require_enabled()
-        if not self._position_manager_shakedown_auto_dispatch_allowed():
+        if not self.settings.commodity_position_manager_simnow_auto_dispatch_enabled:
             raise CommoditySimNowDisabledError(
-                detail={"required_setting": "explicit SimNow shakedown auto-dispatch authorization"}
+                detail={
+                    "required_setting":
+                    "COMMODITY_POSITION_MANAGER_SIMNOW_AUTO_DISPATCH_ENABLED=true"
+                }
             )
         session = self._load_position_manager_shakedown_state()
         if not session or session.get("status") != "PREVIEW_READY":
@@ -1514,10 +1585,15 @@ class CommoditySimNowService:
             and self.current_plan.get("position_manager_shakedown_session_id") == session.get("session_id")
             and self.current_plan.get("status") == "HALTED_PRE_SUBMIT_SAFE"
         ):
-            self._resume_halted_plan_after_authorization()
-            return self.auto_position_manager_shakedown_advance(
-                operator=operator, role=role, source_ip=source_ip
-            )
+            self.shakedown_auto_dispatch_authorized = True
+            try:
+                self._resume_halted_plan_after_authorization(allow_shakedown=True)
+                return self.auto_position_manager_shakedown_advance(
+                    operator=operator, role=role, source_ip=source_ip
+                )
+            except Exception:
+                self.shakedown_auto_dispatch_authorized = False
+                raise
         if self.current_plan and self.current_plan.get("status") not in {"COMPLETE", "HALTED_RECONCILED"}:
             raise CommoditySimNowStateError("存在未收口的 SimNow 计划")
         shadow = self._position_manager_shadow_snapshot(include_targets=True)
@@ -1581,11 +1657,28 @@ class CommoditySimNowService:
             "status": stored_plan["phase_status"],
             "started_at_utc": self.clock().astimezone(timezone.utc).isoformat(),
         }
+        self.shakedown_auto_dispatch_authorized = True
         self.current_plan = plan
         self._persist_active_plan()
-        execution = self.auto_position_manager_shakedown_advance(
-            operator=operator, role=role, source_ip=source_ip
-        )
+        try:
+            execution = self.auto_position_manager_shakedown_advance(
+                operator=operator, role=role, source_ip=source_ip
+            )
+        except Exception:
+            if (
+                self.current_plan
+                and self.current_plan.get("position_manager_shakedown_session_id")
+                and self.current_plan.get("status") in {"READY_CLOSE", "READY_OPEN"}
+            ):
+                self._begin_safe_halt(
+                    "shakedown_start_failed",
+                    operator=operator,
+                    source_ip=source_ip,
+                    revoke_scope="shakedown",
+                )
+            else:
+                self.shakedown_auto_dispatch_authorized = False
+            raise
         result = {
             **self.position_manager_shakedown_status(),
             "action": execution.get("action"),
@@ -1899,28 +1992,53 @@ class CommoditySimNowService:
             raise CommoditySimNowSafetyError("候选测试运行时 SimNow 账户发生变化")
 
     def _complete_position_manager_shakedown(self, plan: dict[str, Any], *, result: dict[str, Any]) -> None:
-        session = self._load_position_manager_shakedown_state()
-        if not session or session.get("session_id") != plan.get("position_manager_shakedown_session_id"):
-            raise CommoditySimNowStateError("候选测试完成时会话证据缺失")
-        session["status"] = "COMPLETE"
-        session["completed_at_utc"] = self.clock().astimezone(timezone.utc).isoformat()
-        session["execution"] = {
-            "submitted": plan.get("submitted", {}),
-            "send_intents": plan.get("send_intents", {}),
-            "reconciliation": result,
-            "final_positions": self._signed_positions(self._position_snapshot()),
-            "execution_snapshot": self._execution_snapshot(plan),
-        }
-        self._save_position_manager_shakedown_state(session)
+        self._finalize_position_manager_shakedown(
+            plan, status="COMPLETE", reconciliation=result
+        )
 
-    def _archive_position_manager_shakedown_terminal(self, plan: dict[str, Any]) -> None:
+    def _archive_position_manager_shakedown_terminal(
+        self,
+        plan: dict[str, Any],
+        *,
+        reconciliation: dict[str, Any] | None = None,
+    ) -> None:
+        self._finalize_position_manager_shakedown(
+            plan,
+            status=str(plan["status"]),
+            reconciliation=reconciliation,
+        )
+
+    def _finalize_position_manager_shakedown(
+        self,
+        plan: dict[str, Any],
+        *,
+        status: str,
+        reconciliation: dict[str, Any] | None,
+    ) -> None:
         session = self._load_position_manager_shakedown_state()
         if not session or session.get("session_id") != plan.get("position_manager_shakedown_session_id"):
             raise CommoditySimNowStateError("候选测试终态会话证据缺失")
-        session["status"] = str(plan["status"])
+        execution = {
+            "schema_version": "commodity_simnow_shakedown_evidence_v2",
+            "started_at_utc": plan.get("started_at_utc"),
+            "submitted": plan.get("submitted", {}),
+            "send_intents": plan.get("send_intents", {}),
+            "halt": plan.get("halt"),
+            "reconciliation": reconciliation
+            or (plan.get("execution") or {}).get("reconciliation"),
+            "final_positions": self._signed_positions(self._position_snapshot()),
+            "execution_snapshot": plan.get("execution")
+            or self._execution_snapshot(plan),
+        }
+        execution["state_checksum"] = _sha256_json(execution)
+        session["status"] = status
         session["completed_at_utc"] = self.clock().astimezone(timezone.utc).isoformat()
-        session["execution"] = {"submitted": plan.get("submitted", {}), "send_intents": plan.get("send_intents", {}), "halt": plan.get("halt"), "final_positions": self._signed_positions(self._position_snapshot())}
+        session["execution"] = execution
         self._save_position_manager_shakedown_state(session)
+        self._active_state_path().unlink(missing_ok=True)
+        self.shakedown_auto_dispatch_authorized = False
+        if self.current_plan is plan:
+            self.current_plan = None
 
     def _position_manager_shakedown_state_path(self) -> Path:
         return Path(self.settings.commodity_position_manager_simnow_state_path).expanduser()
@@ -1966,6 +2084,22 @@ class CommoditySimNowService:
             }
             if _sha256_json(core) != payload.get("plan_hash"):
                 raise ValueError("shakedown plan checksum mismatch")
+            execution = payload.get("execution")
+            if isinstance(execution, dict):
+                state_checksum = execution.get("state_checksum")
+                execution_core = {
+                    key: value
+                    for key, value in execution.items()
+                    if key != "state_checksum"
+                }
+                if (
+                    execution.get("schema_version")
+                    == "commodity_simnow_shakedown_evidence_v2"
+                    and not state_checksum
+                ):
+                    raise ValueError("terminal shakedown evidence checksum missing")
+                if state_checksum and _sha256_json(execution_core) != state_checksum:
+                    raise ValueError("terminal shakedown evidence checksum mismatch")
             return payload
         except Exception as exc:
             return {"status": "RESULT_UNKNOWN", "error_type": exc.__class__.__name__}
@@ -2653,9 +2787,15 @@ class CommoditySimNowService:
         operator: str,
         source_ip: str | None,
         phase: str | None = None,
+        revoke_scope: str | None = None,
     ) -> dict[str, Any]:
-        self._revoke_auto_dispatch()
         plan = self.current_plan
+        scope = revoke_scope or (
+            "shakedown"
+            if plan and plan.get("position_manager_shakedown_session_id")
+            else "generic"
+        )
+        self._revoke_auto_dispatch(scope)
         if not plan or plan.get("status") in {"COMPLETE", "HALTED_RECONCILED"}:
             return {"required": False, "reason": reason, "cancel_requested_order_ids": []}
 
@@ -3150,21 +3290,29 @@ class CommoditySimNowService:
         if not (self.settings.commodity_simnow_enabled and self.enabled and self.manual_approval and self.simnow_mode):
             raise CommoditySimNowDisabledError()
 
-    def _resume_halted_plan_after_authorization(self) -> None:
+    def _resume_halted_plan_after_authorization(
+        self, *, allow_shakedown: bool = False
+    ) -> None:
         plan = self.current_plan
         if not plan or plan.get("status") not in {"HALTED_RECONCILED", "HALTED_PRE_SUBMIT_SAFE"}:
             return
         if plan.get("position_manager_shakedown_session_id"):
+            if not allow_shakedown:
+                return
             # Shakedown terminal states are evidence, never a formal monthly
             # baseline resume path.  A pre-submit halt can only be resumed by
             # the dedicated start flow with explicit shakedown authorization.
             if plan.get("status") == "HALTED_RECONCILED":
                 self._archive_position_manager_shakedown_terminal(plan)
-                self._persist_active_plan()
                 return
             self._verify_position_manager_shakedown_execution_trust(plan)
             if self._position_manager_shakedown_external_active_orders(plan):
                 raise CommoditySimNowStateError("重新授权前存在外部活动委托")
+        revoke_scope = (
+            "shakedown"
+            if plan.get("position_manager_shakedown_session_id")
+            else "generic"
+        )
         if plan["status"] == "HALTED_PRE_SUBMIT_SAFE":
             halt = plan.get("halt", {})
             resume_status = str(halt.get("resume_status") or "")
@@ -3190,7 +3338,7 @@ class CommoditySimNowService:
                     halt["last_rpc_error_type"] = exc.__class__.__name__
                     halt["last_rpc_error_at_utc"] = self.clock().astimezone(timezone.utc).isoformat()
                     self._persist_active_plan()
-                    self._revoke_auto_dispatch()
+                    self._revoke_auto_dispatch(revoke_scope)
                     self.enabled = False
                     self.manual_approval = False
                     self.simnow_mode = False
@@ -3220,7 +3368,7 @@ class CommoditySimNowService:
             if resume_status not in {"READY_CLOSE", "READY_OPEN"} or observed != expected:
                 plan["status"] = "HALTED_RECONCILE_REQUIRED"
                 self._persist_active_plan()
-                self._revoke_auto_dispatch()
+                self._revoke_auto_dispatch(revoke_scope)
                 self.enabled = False
                 self.manual_approval = False
                 self.simnow_mode = False
@@ -3251,7 +3399,7 @@ class CommoditySimNowService:
         if active or observed != expected:
             plan["status"] = "CANCEL_PENDING" if active else "HALTED_RECONCILE_REQUIRED"
             self._persist_active_plan()
-            self._revoke_auto_dispatch()
+            self._revoke_auto_dispatch(revoke_scope)
             self.enabled = False
             self.manual_approval = False
             self.simnow_mode = False

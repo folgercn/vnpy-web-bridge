@@ -90,6 +90,7 @@ export interface CommodityPositionManagerShakedownSession {
 export interface CommodityPositionManagerShakedownStatus {
   configured?: boolean
   execution_enabled?: boolean
+  execution_authorized?: boolean
   auto_dispatch_enabled?: boolean
   session?: CommodityPositionManagerShakedownSession | null
   preview?: CommodityPositionManagerShakedownSession
