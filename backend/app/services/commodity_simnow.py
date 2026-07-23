@@ -1500,15 +1500,24 @@ class CommoditySimNowService:
                 detail={"required_setting": "COMMODITY_POSITION_MANAGER_SIMNOW_SHAKEDOWN_ENABLED=true"}
             )
         self._require_enabled()
-        if not self.settings.commodity_position_manager_simnow_auto_dispatch_enabled:
+        if not self._position_manager_shakedown_auto_dispatch_allowed():
             raise CommoditySimNowDisabledError(
-                detail={"required_setting": "COMMODITY_POSITION_MANAGER_SIMNOW_AUTO_DISPATCH_ENABLED=true"}
+                detail={"required_setting": "explicit SimNow shakedown auto-dispatch authorization"}
             )
         session = self._load_position_manager_shakedown_state()
         if not session or session.get("status") != "PREVIEW_READY":
             raise CommoditySimNowStateError("不存在可启动的候选测试预览")
         if session.get("plan_hash") != plan_hash:
             raise CommoditySimNowStateError("候选测试计划哈希不匹配")
+        if (
+            self.current_plan
+            and self.current_plan.get("position_manager_shakedown_session_id") == session.get("session_id")
+            and self.current_plan.get("status") == "HALTED_PRE_SUBMIT_SAFE"
+        ):
+            self._resume_halted_plan_after_authorization()
+            return self.auto_position_manager_shakedown_advance(
+                operator=operator, role=role, source_ip=source_ip
+            )
         if self.current_plan and self.current_plan.get("status") not in {"COMPLETE", "HALTED_RECONCILED"}:
             raise CommoditySimNowStateError("存在未收口的 SimNow 计划")
         shadow = self._position_manager_shadow_snapshot(include_targets=True)
@@ -3152,7 +3161,10 @@ class CommoditySimNowService:
             if plan.get("status") == "HALTED_RECONCILED":
                 self._archive_position_manager_shakedown_terminal(plan)
                 self._persist_active_plan()
-            return
+                return
+            self._verify_position_manager_shakedown_execution_trust(plan)
+            if self._position_manager_shakedown_external_active_orders(plan):
+                raise CommoditySimNowStateError("重新授权前存在外部活动委托")
         if plan["status"] == "HALTED_PRE_SUBMIT_SAFE":
             halt = plan.get("halt", {})
             resume_status = str(halt.get("resume_status") or "")
