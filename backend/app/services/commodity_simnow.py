@@ -1430,9 +1430,6 @@ class CommoditySimNowService:
                 self.settings.commodity_position_manager_simnow_shakedown_enabled
                 and self.settings.commodity_position_manager_simnow_auto_dispatch_enabled
                 and self.settings.commodity_simnow_enabled
-                and self.enabled
-                and self.manual_approval
-                and self.simnow_mode
             ),
             "execution_authorized": self.shakedown_auto_dispatch_authorized,
             "auto_dispatch_enabled": self.settings.commodity_position_manager_simnow_auto_dispatch_enabled,
@@ -1567,7 +1564,10 @@ class CommoditySimNowService:
             raise CommoditySimNowDisabledError(
                 detail={"required_setting": "COMMODITY_POSITION_MANAGER_SIMNOW_SHAKEDOWN_ENABLED=true"}
             )
-        self._require_enabled()
+        if not self.settings.commodity_simnow_enabled:
+            raise CommoditySimNowDisabledError(
+                detail={"required_setting": "COMMODITY_SIMNOW_ENABLED=true"}
+            )
         if not self.settings.commodity_position_manager_simnow_auto_dispatch_enabled:
             raise CommoditySimNowDisabledError(
                 detail={
@@ -1585,6 +1585,9 @@ class CommoditySimNowService:
             and self.current_plan.get("position_manager_shakedown_session_id") == session.get("session_id")
             and self.current_plan.get("status") == "HALTED_PRE_SUBMIT_SAFE"
         ):
+            self.enabled = True
+            self.manual_approval = True
+            self.simnow_mode = True
             self.shakedown_auto_dispatch_authorized = True
             try:
                 self._resume_halted_plan_after_authorization(allow_shakedown=True)
@@ -1657,6 +1660,9 @@ class CommoditySimNowService:
             "status": stored_plan["phase_status"],
             "started_at_utc": self.clock().astimezone(timezone.utc).isoformat(),
         }
+        self.enabled = True
+        self.manual_approval = True
+        self.simnow_mode = True
         self.shakedown_auto_dispatch_authorized = True
         self.current_plan = plan
         self._persist_active_plan()
@@ -1698,13 +1704,90 @@ class CommoditySimNowService:
         plan = self.current_plan
         if not plan or not plan.get("position_manager_shakedown_session_id"):
             raise CommoditySimNowStateError("不存在运行中的候选测试会话")
-        halt = self._begin_safe_halt(reason, operator=operator, source_ip=source_ip)
+        halt = self._finalize_pre_submit_shakedown_stop(
+            plan, reason=reason, operator=operator
+        )
+        if halt is None:
+            halt = self._begin_safe_halt(reason, operator=operator, source_ip=source_ip)
         result = {**self.position_manager_shakedown_status(), "halt": halt}
         self.audit.record(
             action="commodity_position_manager_shakedown_stop", user_id=operator, role=role,
             request={"reason": reason}, result=result, source_ip=source_ip,
         )
         return result
+
+    def _finalize_pre_submit_shakedown_stop(
+        self,
+        plan: dict[str, Any],
+        *,
+        reason: str,
+        operator: str,
+    ) -> dict[str, Any] | None:
+        """Abandon an unsubmitted shakedown only when live state still proves it safe."""
+        status = str(plan.get("status") or "")
+        if status not in {"READY_CLOSE", "READY_OPEN", "HALTED_PRE_SUBMIT_SAFE"}:
+            return None
+        resume_status = (
+            str(plan.get("halt", {}).get("resume_status") or "")
+            if status == "HALTED_PRE_SUBMIT_SAFE"
+            else status
+        )
+        if resume_status not in {"READY_CLOSE", "READY_OPEN"}:
+            return None
+        phase = "close" if resume_status == "READY_CLOSE" else "open"
+        current_intents = plan.get("send_intents", {}).get(phase, [])
+        if any(
+            intent.get("intent_status") not in {"REJECTED_PRE_RPC", "NO_EVIDENCE_STABLE"}
+            for intent in current_intents
+        ):
+            return None
+        if plan.get("submitted", {}).get(phase) or self._active_plan_orders(plan):
+            return None
+        expected = (
+            plan["previous_positions"]
+            if resume_status == "READY_CLOSE"
+            else plan["expected_after_close"]
+        )
+        observed = self._signed_positions(self._position_snapshot())
+        if observed != expected:
+            return None
+        now = self.clock().astimezone(timezone.utc).isoformat()
+        halt = {
+            "required": False,
+            "reason": reason,
+            "status": "HALTED_RECONCILED",
+            "phase": phase,
+            "resume_status": resume_status,
+            "requested_at_utc": now,
+            "completed_at_utc": now,
+            "pre_phase_expected_positions": expected,
+            "observed_positions": observed,
+            "active_order_ids": [],
+            "cancel_requested_order_ids": [],
+            "orders_snapshot_available": True,
+            "abandoned_pre_submit": True,
+            "operator": operator,
+        }
+        plan["halt"] = halt
+        plan["status"] = "HALTED_RECONCILED"
+        self._finalize_position_manager_shakedown(
+            plan,
+            status="HALTED_RECONCILED",
+            reconciliation={
+                "halted_reconcile": True,
+                "abandoned_pre_submit": True,
+                "phase": phase,
+                "expected_positions": expected,
+                "observed_positions": observed,
+                "active_order_ids": [],
+            },
+        )
+        self._event(
+            "position_manager_shakedown_abandoned_pre_submit",
+            plan_hash=plan.get("plan_hash"),
+            result=halt,
+        )
+        return halt
 
     def _build_position_manager_shakedown_plan(
         self,
@@ -2034,6 +2117,7 @@ class CommoditySimNowService:
         session["status"] = status
         session["completed_at_utc"] = self.clock().astimezone(timezone.utc).isoformat()
         session["execution"] = execution
+        session["terminal_checksum"] = self._position_manager_shakedown_terminal_checksum(session)
         self._save_position_manager_shakedown_state(session)
         self._active_state_path().unlink(missing_ok=True)
         self.shakedown_auto_dispatch_authorized = False
@@ -2052,6 +2136,7 @@ class CommoditySimNowService:
             session
             and session.get("session_id") == plan.get("position_manager_shakedown_session_id")
             and session.get("status") in {"COMPLETE", "HALTED_RECONCILED"}
+            and self._position_manager_shakedown_terminal_checksum_valid(session)
         ):
             self.current_plan = None
             self._active_state_path().unlink(missing_ok=True)
@@ -2080,6 +2165,7 @@ class CommoditySimNowService:
                     "previewed_at_utc",
                     "completed_at_utc",
                     "execution",
+                    "terminal_checksum",
                 }
             }
             if _sha256_json(core) != payload.get("plan_hash"):
@@ -2100,6 +2186,9 @@ class CommoditySimNowService:
                     raise ValueError("terminal shakedown evidence checksum missing")
                 if state_checksum and _sha256_json(execution_core) != state_checksum:
                     raise ValueError("terminal shakedown evidence checksum mismatch")
+            terminal_checksum = payload.get("terminal_checksum")
+            if terminal_checksum and not self._position_manager_shakedown_terminal_checksum_valid(payload):
+                raise ValueError("terminal shakedown envelope checksum mismatch")
             return payload
         except Exception as exc:
             return {"status": "RESULT_UNKNOWN", "error_type": exc.__class__.__name__}
@@ -2110,6 +2199,32 @@ class CommoditySimNowService:
         temporary = path.with_suffix(f"{path.suffix}.tmp")
         temporary.write_text(json.dumps(session, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         temporary.replace(path)
+
+    @staticmethod
+    def _position_manager_shakedown_terminal_checksum(session: dict[str, Any]) -> str:
+        execution = session.get("execution")
+        return _sha256_json(
+            {
+                "session_id": session.get("session_id"),
+                "plan_hash": session.get("plan_hash"),
+                "status": session.get("status"),
+                "completed_at_utc": session.get("completed_at_utc"),
+                "execution_state_checksum": (
+                    execution.get("state_checksum")
+                    if isinstance(execution, dict)
+                    else None
+                ),
+            }
+        )
+
+    def _position_manager_shakedown_terminal_checksum_valid(
+        self, session: dict[str, Any]
+    ) -> bool:
+        checksum = session.get("terminal_checksum")
+        return bool(
+            isinstance(checksum, str)
+            and checksum == self._position_manager_shakedown_terminal_checksum(session)
+        )
 
     def _position_manager_shadow_snapshot(self, *, include_targets: bool) -> dict[str, Any]:
         path_text = self.settings.commodity_position_manager_shadow_path.strip()
@@ -3290,6 +3405,13 @@ class CommoditySimNowService:
         if not (self.settings.commodity_simnow_enabled and self.enabled and self.manual_approval and self.simnow_mode):
             raise CommoditySimNowDisabledError()
 
+    def _revoke_after_resume_failure(self, scope: str) -> None:
+        self._revoke_auto_dispatch(scope)
+        if scope != "shakedown":
+            self.enabled = False
+            self.manual_approval = False
+            self.simnow_mode = False
+
     def _resume_halted_plan_after_authorization(
         self, *, allow_shakedown: bool = False
     ) -> None:
@@ -3338,10 +3460,7 @@ class CommoditySimNowService:
                     halt["last_rpc_error_type"] = exc.__class__.__name__
                     halt["last_rpc_error_at_utc"] = self.clock().astimezone(timezone.utc).isoformat()
                     self._persist_active_plan()
-                    self._revoke_auto_dispatch(revoke_scope)
-                    self.enabled = False
-                    self.manual_approval = False
-                    self.simnow_mode = False
+                    self._revoke_after_resume_failure(revoke_scope)
                     raise CommoditySimNowStateError(
                         "重新授权前无法确认历史 send intent 结果",
                         detail={"phase": phase, "rpc_error_type": exc.__class__.__name__},
@@ -3357,9 +3476,6 @@ class CommoditySimNowService:
                         source_ip=None,
                         phase=phase,
                     )
-                    self.enabled = False
-                    self.manual_approval = False
-                    self.simnow_mode = False
                     raise CommoditySimNowStateError(
                         "重新授权前发现迟到委托或成交证据，已进入撤单收口",
                         detail={"phase": phase, "evidence_references": evidence, "halt": halt_result},
@@ -3368,10 +3484,7 @@ class CommoditySimNowService:
             if resume_status not in {"READY_CLOSE", "READY_OPEN"} or observed != expected:
                 plan["status"] = "HALTED_RECONCILE_REQUIRED"
                 self._persist_active_plan()
-                self._revoke_auto_dispatch(revoke_scope)
-                self.enabled = False
-                self.manual_approval = False
-                self.simnow_mode = False
+                self._revoke_after_resume_failure(revoke_scope)
                 raise CommoditySimNowStateError(
                     "未提交计划在重新授权前持仓发生变化",
                     detail={
@@ -3399,10 +3512,7 @@ class CommoditySimNowService:
         if active or observed != expected:
             plan["status"] = "CANCEL_PENDING" if active else "HALTED_RECONCILE_REQUIRED"
             self._persist_active_plan()
-            self._revoke_auto_dispatch(revoke_scope)
-            self.enabled = False
-            self.manual_approval = False
-            self.simnow_mode = False
+            self._revoke_after_resume_failure(revoke_scope)
             raise CommoditySimNowStateError(
                 "停机计划状态在重新授权前发生变化",
                 detail={

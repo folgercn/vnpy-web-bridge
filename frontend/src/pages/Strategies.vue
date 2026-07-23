@@ -92,7 +92,7 @@
         <n-space>
           <n-button type="primary" :loading="positionManagerLoading" :disabled="!positionManagerPreviewAllowed" @click="previewPositionManagerShakedown">准备预览</n-button>
           <n-button type="error" :loading="positionManagerLoading" :disabled="!positionManagerStartAllowed" @click="startPositionManagerShakedown">{{ positionManagerStartText }}</n-button>
-          <n-button secondary type="warning" :loading="positionManagerLoading" :disabled="!positionManagerStopAllowed" @click="stopPositionManagerShakedown">停止测试</n-button>
+          <n-button secondary type="warning" :loading="positionManagerLoading" :disabled="!positionManagerStopAllowed" @click="stopPositionManagerShakedown">{{ positionManagerStopText }}</n-button>
           <n-tag type="warning" round>{{ positionManagerShakedown.session?.status || '未创建会话' }}</n-tag>
         </n-space>
         <span v-if="positionManagerShakedown.session?.plan_hash" class="muted">plan hash: {{ positionManagerShakedown.session.plan_hash }}</span>
@@ -153,7 +153,8 @@ const positionManagerStatusText = computed(() => {
 const positionManagerPreviewAllowed = computed(() => auth.role === 'admin' && positionManagerShakedown.value.configured && positionManager.value.valid && ['active', 'completed'].includes(positionManager.value.baseline_link_state || '') && ['genesis', 'verified'].includes(positionManager.value.continuity_state || '') && selectedPositionManagerProducts.value.length > 0)
 const positionManagerStartAllowed = computed(() => auth.role === 'admin' && positionManagerShakedown.value.execution_enabled && ['PREVIEW_READY', 'HALTED_PRE_SUBMIT_SAFE'].includes(positionManagerShakedown.value.session?.status || '') && Boolean(positionManagerShakedown.value.session?.plan_hash))
 const positionManagerStartText = computed(() => positionManagerShakedown.value.session?.status === 'HALTED_PRE_SUBMIT_SAFE' ? '重新授权并恢复' : '启动 SimNow 候选测试')
-const positionManagerStopAllowed = computed(() => auth.role === 'admin' && ['READY_CLOSE', 'READY_OPEN', 'CLOSE_SUBMITTED', 'OPEN_SUBMITTED', 'CANCEL_PENDING', 'SUBMISSION_OUTCOME_UNKNOWN'].includes(positionManagerShakedown.value.session?.status || ''))
+const positionManagerStopAllowed = computed(() => auth.role === 'admin' && ['READY_CLOSE', 'READY_OPEN', 'CLOSE_SUBMITTED', 'OPEN_SUBMITTED', 'CANCEL_PENDING', 'SUBMISSION_OUTCOME_UNKNOWN', 'HALTED_PRE_SUBMIT_SAFE'].includes(positionManagerShakedown.value.session?.status || ''))
+const positionManagerStopText = computed(() => positionManagerShakedown.value.session?.status === 'HALTED_PRE_SUBMIT_SAFE' ? '放弃并收口' : '停止测试')
 const positionManagerActiveStatuses = new Set(['READY_CLOSE', 'READY_OPEN', 'CLOSE_SUBMITTED', 'OPEN_SUBMITTED', 'CANCEL_PENDING', 'SUBMISSION_OUTCOME_UNKNOWN', 'HALTED_RECONCILE_REQUIRED'])
 let positionManagerPollTimer: ReturnType<typeof setInterval> | undefined
 const columns = [
