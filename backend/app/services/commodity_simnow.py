@@ -2426,7 +2426,7 @@ class CommoditySimNowService:
             continuity_state = self._verify_position_manager_continuity(
                 snapshot, snapshot_hash
             )
-            if baseline is not None:
+            if baseline is not None and snapshot.execution_lane == "official_forward":
                 self._save_position_manager_shadow_state(
                     snapshot, snapshot_hash, continuity_state
                 )
@@ -2439,6 +2439,8 @@ class CommoditySimNowService:
                 "position_manager_id": snapshot.position_manager_id,
                 "sector_map_id": snapshot.sector_map_id,
                 "mode": snapshot.mode,
+                "execution_lane": snapshot.execution_lane,
+                "countable_forward": snapshot.countable_forward,
                 "baseline_scheduler_id": snapshot.baseline_scheduler_id,
                 "baseline_batch_hash": snapshot.baseline_batch_hash,
                 "baseline_link_state": linked_state,
@@ -2526,22 +2528,29 @@ class CommoditySimNowService:
         snapshot: CommodityPositionManagerShadowDTO,
         baseline: dict[str, Any],
     ) -> None:
-        expected_header = {
+        if snapshot.execution_lane == "simnow_shakedown":
+            if snapshot.countable_forward:
+                raise CommoditySimNowBatchError("SimNow shakedown 不可标记为正式 forward")
+            # A pre-forward shakedown deliberately reuses the complete signed
+            # baseline targets, but its PIT month can precede the formal monthly
+            # chain.  Target-level linkage remains exact below.
+        else:
+            expected_header = {
             "baseline_scheduler_id": self.scheduler_id,
             "source_month": baseline["source_month"],
             "execution_day": baseline["execution_day"],
-        }
-        observed_header = {
+            }
+            observed_header = {
             "baseline_scheduler_id": snapshot.baseline_scheduler_id,
             "source_month": snapshot.source_month,
             "execution_day": snapshot.execution_day.isoformat(),
-        }
-        for field, expected in expected_header.items():
-            if observed_header[field] != expected:
-                raise CommoditySimNowBatchError(
-                    "仓位管理 shadow baseline 批次头不一致",
-                    detail={"field": field, "expected": expected},
-                )
+            }
+            for field, expected in expected_header.items():
+                if observed_header[field] != expected:
+                    raise CommoditySimNowBatchError(
+                        "仓位管理 shadow baseline 批次头不一致",
+                        detail={"field": field, "expected": expected},
+                    )
 
         baseline_targets = {row["product"]: row for row in baseline["targets"]}
         for row in snapshot.targets:
@@ -2620,6 +2629,16 @@ class CommoditySimNowService:
         snapshot: CommodityPositionManagerShadowDTO,
         snapshot_hash: str,
     ) -> str:
+        if snapshot.execution_lane == "simnow_shakedown":
+            if snapshot.countable_forward or snapshot.continuity_mode != "genesis" or snapshot.previous_snapshot_hash is not None:
+                raise CommoditySimNowBatchError("SimNow shakedown 连续性声明无效")
+            if not math.isclose(snapshot.previous_smoothed_scale, 1.0, rel_tol=0, abs_tol=1e-12):
+                raise CommoditySimNowBatchError("SimNow shakedown 初始平滑 scale 无效")
+            # Do not read or write the formal forward continuity chain.
+            return "genesis"
+
+        if not snapshot.countable_forward:
+            raise CommoditySimNowBatchError("正式 Shadow 必须标记为可计数 forward")
         previous = self._load_position_manager_shadow_state()
         if previous and previous["snapshot_hash"] == snapshot_hash:
             return str(previous["continuity_state"])

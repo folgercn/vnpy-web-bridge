@@ -114,6 +114,8 @@ class CommodityPositionManagerShadowDTO(StrictModel):
     position_manager_id: Literal["MONTHLY_RELATIVE_VOL_THERMOSTAT_V1"]
     sector_map_id: Literal["POSITION_MANAGER_SECTOR_MAP_V1"]
     mode: Literal["shadow_only"]
+    execution_lane: Literal["simnow_shakedown", "official_forward"] = "official_forward"
+    countable_forward: bool = True
     baseline_scheduler_id: Literal["STATIC_CORE_EQUAL"]
     baseline_batch_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     source_month: str = Field(pattern=r"^\d{4}-\d{2}$")

@@ -1881,6 +1881,33 @@ def test_position_manager_shadow_marks_unavailable_baseline_unlinked(tmp_path: P
     assert snapshot["baseline_link_state"] == "unlinked"
 
 
+def test_simnow_shakedown_shadow_does_not_pollute_formal_continuity(tmp_path: Path) -> None:
+    service, private_key, _ = make_service(tmp_path)
+    baseline = service.preview(make_batch(private_key), operator="admin", role="admin", source_ip=None)
+    path = tmp_path / "position-manager-shakedown-shadow.json"
+    payload = make_position_manager_shadow(
+        private_key,
+        baseline_batch_hash=baseline["batch_hash"],
+        source_month="2026-07",
+        execution_day="2026-08-01",
+        input_cutoff_day="2026-07-31",
+    ).model_dump(mode="json")
+    payload["execution_lane"] = "simnow_shakedown"
+    payload["countable_forward"] = False
+    write_position_manager_shadow(path, sign_position_manager_shadow_payload(payload, private_key))
+    service.settings = service.settings.model_copy(
+        update={"commodity_position_manager_shadow_path": str(path)}
+    )
+
+    snapshot = service.position_manager_shadow()
+
+    assert snapshot["valid"] is True
+    assert snapshot["execution_lane"] == "simnow_shakedown"
+    assert snapshot["countable_forward"] is False
+    assert snapshot["continuity_state"] == "genesis"
+    assert not Path(service.settings.commodity_position_manager_shadow_state_path).exists()
+
+
 def test_baseline_sector_mapping_remains_identical_to_main() -> None:
     assert {product: spec["sector"] for product, spec in PRODUCT_SPECS.items()} == {
         "ag": "precious",
