@@ -189,6 +189,7 @@ class CommoditySimNowService:
         self.manual_approval = False
         self.simnow_mode = False
         self.auto_dispatch_authorized = False
+        self.shakedown_auto_dispatch_authorized = False
         self.template_authorized = False
         self.order_endpoint_touched = False
         self.current_plan: dict[str, Any] | None = None
@@ -198,6 +199,7 @@ class CommoditySimNowService:
         self._state_load_error: str | None = None
         self._completed_state = self._load_completed_state()
         self.current_plan = self._load_active_plan()
+        self._cleanup_terminal_shakedown_active_plan()
 
     @_serialized
     def status(self) -> dict[str, Any]:
@@ -293,6 +295,7 @@ class CommoditySimNowService:
     @_serialized
     def _revoke_auto_dispatch(self) -> None:
         self.auto_dispatch_authorized = False
+        self.shakedown_auto_dispatch_authorized = False
         self.template_authorized = False
 
     @_serialized
@@ -319,7 +322,10 @@ class CommoditySimNowService:
         )
         if not all(confirmations):
             raise CommoditySimNowSafetyError("SimNow 人工授权确认不完整")
-        if self.settings.commodity_simnow_auto_dispatch_enabled and not payload.confirm_auto_dispatch:
+        if (
+            self.settings.commodity_simnow_auto_dispatch_enabled
+            or self.settings.commodity_position_manager_simnow_auto_dispatch_enabled
+        ) and not payload.confirm_auto_dispatch:
             raise CommoditySimNowSafetyError("SimNow 自动派单授权确认不完整")
         snapshot = self._safety_snapshot(require_trade_enabled=True)
         self.enabled = True
@@ -327,6 +333,10 @@ class CommoditySimNowService:
         self.simnow_mode = True
         self.auto_dispatch_authorized = (
             self.settings.commodity_simnow_auto_dispatch_enabled and payload.confirm_auto_dispatch
+        )
+        self.shakedown_auto_dispatch_authorized = (
+            self.settings.commodity_position_manager_simnow_auto_dispatch_enabled
+            and payload.confirm_auto_dispatch
         )
         self._resume_halted_plan_after_authorization()
         result = {**self.status(), "safety": snapshot, "reason": payload.reason}
@@ -1906,6 +1916,19 @@ class CommoditySimNowService:
     def _position_manager_shakedown_state_path(self) -> Path:
         return Path(self.settings.commodity_position_manager_simnow_state_path).expanduser()
 
+    def _cleanup_terminal_shakedown_active_plan(self) -> None:
+        plan = self.current_plan
+        if not plan or not plan.get("position_manager_shakedown_session_id"):
+            return
+        session = self._load_position_manager_shakedown_state()
+        if (
+            session
+            and session.get("session_id") == plan.get("position_manager_shakedown_session_id")
+            and session.get("status") in {"COMPLETE", "HALTED_RECONCILED"}
+        ):
+            self.current_plan = None
+            self._active_state_path().unlink(missing_ok=True)
+
     def _load_position_manager_shakedown_state(self) -> dict[str, Any] | None:
         path = self._position_manager_shakedown_state_path()
         if not path.exists():
@@ -3111,6 +3134,7 @@ class CommoditySimNowService:
             and self.enabled
             and self.manual_approval
             and self.simnow_mode
+            and self.shakedown_auto_dispatch_authorized
         )
 
     def _require_enabled(self) -> None:
@@ -3120,6 +3144,14 @@ class CommoditySimNowService:
     def _resume_halted_plan_after_authorization(self) -> None:
         plan = self.current_plan
         if not plan or plan.get("status") not in {"HALTED_RECONCILED", "HALTED_PRE_SUBMIT_SAFE"}:
+            return
+        if plan.get("position_manager_shakedown_session_id"):
+            # Shakedown terminal states are evidence, never a formal monthly
+            # baseline resume path.  A pre-submit halt can only be resumed by
+            # the dedicated start flow with explicit shakedown authorization.
+            if plan.get("status") == "HALTED_RECONCILED":
+                self._archive_position_manager_shakedown_terminal(plan)
+                self._persist_active_plan()
             return
         if plan["status"] == "HALTED_PRE_SUBMIT_SAFE":
             halt = plan.get("halt", {})

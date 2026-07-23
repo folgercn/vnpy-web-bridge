@@ -1048,6 +1048,7 @@ def test_position_manager_shakedown_start_auto_submits_previewed_phase(tmp_path:
     service.settings = service.settings.model_copy(
         update={"commodity_position_manager_simnow_auto_dispatch_enabled": True}
     )
+    service.enable(enable_payload(), operator="admin", role="admin", source_ip=None)
     preview = service.preview_position_manager_shakedown(
         ["ag"], operator="admin", role="admin", source_ip=None
     )
@@ -1069,6 +1070,7 @@ def test_position_manager_shakedown_start_rejects_changed_account_or_plan_hash(t
     service.settings = service.settings.model_copy(
         update={"commodity_position_manager_simnow_auto_dispatch_enabled": True}
     )
+    service.enable(enable_payload(), operator="admin", role="admin", source_ip=None)
     preview = service.preview_position_manager_shakedown(
         ["ag"], operator="admin", role="admin", source_ip=None
     )
@@ -1092,6 +1094,7 @@ def test_position_manager_shakedown_stop_only_cancels_session_reference(tmp_path
     service.settings = service.settings.model_copy(
         update={"commodity_position_manager_simnow_auto_dispatch_enabled": True}
     )
+    service.enable(enable_payload(), operator="admin", role="admin", source_ip=None)
     preview = service.preview_position_manager_shakedown(
         ["ag"], operator="admin", role="admin", source_ip=None
     )
