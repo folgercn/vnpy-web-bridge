@@ -980,6 +980,20 @@ def test_position_manager_shakedown_preview_rejects_unattributed_or_today_positi
         )
 
 
+def test_position_manager_shakedown_allows_exact_completed_baseline_today_position(
+    tmp_path: Path,
+) -> None:
+    service, rpc = prepare_position_manager_shakedown(tmp_path)
+    rpc.positions = [position("ag", 2, today=2), position("al", -1, today=1)]
+
+    result = service.preview_position_manager_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )
+
+    assert result["preview"]["plan"]["phase_status"] == "READY_OPEN"
+    assert result["preview"]["plan"]["open_orders"][0]["volume"] == 1
+
+
 def test_position_manager_shakedown_preview_rejects_unselected_baseline_drift(
     tmp_path: Path,
 ) -> None:
