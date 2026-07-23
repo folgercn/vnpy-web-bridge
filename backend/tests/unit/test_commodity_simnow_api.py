@@ -46,6 +46,12 @@ class FakeCommoditySimNowService:
             },
         }
 
+    def start_position_manager_shakedown(self, plan_hash, **kwargs) -> dict:
+        return {"execution_enabled": True, "action": "open_submitted", "session": {"plan_hash": plan_hash}}
+
+    def stop_position_manager_shakedown(self, reason, **kwargs) -> dict:
+        return {"execution_enabled": True, "halt": {"reason": reason, "status": "CANCEL_PENDING"}}
+
     def list_events(self, limit: int) -> list[dict]:
         return []
 
@@ -166,6 +172,28 @@ def test_position_manager_shakedown_preview_is_admin_only(monkeypatch) -> None:
         "selected_products": ["ag"],
         "countable_forward": False,
     }
+
+
+def test_position_manager_shakedown_start_and_stop_are_admin_only(monkeypatch) -> None:
+    install_service(monkeypatch)
+    plan_hash = "a" * 64
+    with client_without_rpc(monkeypatch) as client:
+        forbidden = client.post(
+            "/api/commodity-simnow/position-manager-shakedown/start",
+            headers=auth_headers("trader"), json={"plan_hash": plan_hash},
+        )
+        started = client.post(
+            "/api/commodity-simnow/position-manager-shakedown/start",
+            headers=auth_headers("admin"), json={"plan_hash": plan_hash},
+        )
+        stopped = client.post(
+            "/api/commodity-simnow/position-manager-shakedown/stop",
+            headers=auth_headers("admin"), json={"reason": "operator requested stop"},
+        )
+
+    assert forbidden.status_code == 403
+    assert started.json()["data"]["action"] == "open_submitted"
+    assert stopped.json()["data"]["halt"]["status"] == "CANCEL_PENDING"
 
 
 def test_admin_can_enable_controller(monkeypatch) -> None:

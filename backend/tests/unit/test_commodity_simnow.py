@@ -1043,6 +1043,84 @@ def test_position_manager_shakedown_preview_checks_phase_order_limit(tmp_path: P
         )
 
 
+def test_position_manager_shakedown_start_auto_submits_previewed_phase(tmp_path: Path) -> None:
+    service, _ = prepare_position_manager_shakedown(tmp_path)
+    service.settings = service.settings.model_copy(
+        update={"commodity_position_manager_simnow_auto_dispatch_enabled": True}
+    )
+    service.enable(enable_payload(), operator="admin", role="admin", source_ip=None)
+    preview = service.preview_position_manager_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )
+
+    result = service.start_position_manager_shakedown(
+        preview["preview"]["plan_hash"], operator="admin", role="admin", source_ip=None
+    )
+
+    assert result["action"] == "open_submitted"
+    assert service.current_plan is not None
+    assert service.current_plan["position_manager_shakedown_session_id"] == preview["preview"]["session_id"]
+    assert service.current_plan["status"] == "OPEN_SUBMITTED"
+    assert len(service.trade.requests) == 1
+    assert service.trade.requests[0].reference.startswith("commodity_pm:sh:")
+
+
+def test_position_manager_shakedown_start_rejects_changed_account_or_plan_hash(tmp_path: Path) -> None:
+    service, _ = prepare_position_manager_shakedown(tmp_path)
+    service.settings = service.settings.model_copy(
+        update={"commodity_position_manager_simnow_auto_dispatch_enabled": True}
+    )
+    service.enable(enable_payload(), operator="admin", role="admin", source_ip=None)
+    preview = service.preview_position_manager_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )
+
+    with pytest.raises(CommoditySimNowStateError, match="哈希不匹配"):
+        service.start_position_manager_shakedown(
+            "0" * 64, operator="admin", role="admin", source_ip=None
+        )
+
+    service.settings = service.settings.model_copy(
+        update={"commodity_simnow_account_hashes": "b" * 64}
+    )
+    with pytest.raises(CommoditySimNowSafetyError, match="白名单"):
+        service.start_position_manager_shakedown(
+            preview["preview"]["plan_hash"], operator="admin", role="admin", source_ip=None
+        )
+
+
+def test_position_manager_shakedown_stop_only_cancels_session_reference(tmp_path: Path) -> None:
+    service, rpc = prepare_position_manager_shakedown(tmp_path)
+    service.settings = service.settings.model_copy(
+        update={"commodity_position_manager_simnow_auto_dispatch_enabled": True}
+    )
+    service.enable(enable_payload(), operator="admin", role="admin", source_ip=None)
+    preview = service.preview_position_manager_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )
+    service.start_position_manager_shakedown(
+        preview["preview"]["plan_hash"], operator="admin", role="admin", source_ip=None
+    )
+    request = service.trade.requests[0]
+    rpc.orders = [
+        {
+            "vt_orderid": "CTP.1", "symbol": request.symbol, "exchange": request.exchange,
+            "reference": request.reference, "status": "not_traded",
+        },
+        {
+            "vt_orderid": "CTP.manual", "symbol": "al2610", "exchange": "SHFE",
+            "reference": "manual-order", "status": "not_traded",
+        },
+    ]
+
+    stopped = service.stop_position_manager_shakedown(
+        "operator requested stop", operator="admin", role="admin", source_ip=None
+    )
+
+    assert service.trade.cancel_requests == ["CTP.1"]
+    assert stopped["halt"]["status"] == "HALTED_RECONCILE_REQUIRED"
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
