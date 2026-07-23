@@ -1471,6 +1471,14 @@ class CommoditySimNowService:
         existing = self._load_position_manager_shakedown_state()
         if (
             self.current_plan
+            and not self.current_plan.get("position_manager_shakedown_session_id")
+            and not self._formal_plan_releasable_for_shakedown(self.current_plan)
+        ):
+            raise CommoditySimNowStateError(
+                "共享执行槽仍由正式 SimNow 计划占用，禁止生成候选测试预览"
+            )
+        if (
+            self.current_plan
             and self.current_plan.get("position_manager_shakedown_session_id")
             and self.current_plan.get("status") not in {"COMPLETE", "HALTED_RECONCILED"}
         ) or (
@@ -1613,8 +1621,16 @@ class CommoditySimNowService:
             except Exception:
                 self.shakedown_auto_dispatch_authorized = False
                 raise
-        if self.current_plan and self.current_plan.get("status") not in {"COMPLETE", "HALTED_RECONCILED"}:
-            raise CommoditySimNowStateError("存在未收口的 SimNow 计划")
+        if (
+            self.current_plan
+            and not self.current_plan.get("position_manager_shakedown_session_id")
+            and self._formal_plan_releasable_for_shakedown(self.current_plan)
+        ):
+            self.current_plan = None
+        if self.current_plan:
+            raise CommoditySimNowStateError(
+                "共享执行槽已有 SimNow 计划，禁止候选测试覆盖"
+            )
         shadow = self._position_manager_shadow_snapshot(include_targets=True)
         if (
             not shadow.get("valid")
@@ -1719,6 +1735,17 @@ class CommoditySimNowService:
         )
         return result
 
+    def _formal_plan_releasable_for_shakedown(
+        self, plan: dict[str, Any]
+    ) -> bool:
+        return bool(
+            plan.get("status") == "COMPLETE"
+            and not self._active_state_path().exists()
+            and plan.get("batch_hash")
+            and plan.get("batch_hash")
+            == self._completed_state.get("last_completed_batch_hash")
+        )
+
     @_serialized
     def stop_position_manager_shakedown(
         self, reason: str, *, operator: str, role: str | None, source_ip: str | None
@@ -1769,7 +1796,29 @@ class CommoditySimNowService:
             late_evidence = self._recover_send_intent_evidence(
                 plan, orders, trades, phases=(phase,)
             )
-        except Exception:
+        except Exception as exc:
+            halt = plan.setdefault("halt", {})
+            halt.update(
+                {
+                    "reason": reason,
+                    "phase": phase,
+                    "resume_status": resume_status,
+                    "pre_phase_expected_positions": (
+                        plan["previous_positions"]
+                        if resume_status == "READY_CLOSE"
+                        else plan["expected_after_close"]
+                    ),
+                    "abandon_pre_submit_requested": True,
+                    "orders_snapshot_available": False,
+                    "trades_snapshot_available": False,
+                    "last_rpc_error_type": exc.__class__.__name__,
+                    "last_rpc_error_at_utc": self.clock().astimezone(timezone.utc).isoformat(),
+                }
+            )
+            if current_intents:
+                halt["previous_status"] = f"SUBMITTING_{phase.upper()}"
+            plan["status"] = "CANCEL_PENDING"
+            self._persist_active_plan()
             return None
         if late_evidence:
             halt = plan.setdefault("halt", {})
@@ -1790,7 +1839,39 @@ class CommoditySimNowService:
         )
         observed = self._signed_positions(self._position_snapshot())
         if observed != expected:
-            return None
+            halt = plan.setdefault("halt", {})
+            halt.update(
+                {
+                    "reason": reason,
+                    "status": "HALTED_RECONCILE_REQUIRED",
+                    "phase": phase,
+                    "resume_status": resume_status,
+                    "pre_phase_expected_positions": expected,
+                    "expected_positions": expected,
+                    "observed_positions": observed,
+                    "pre_submit_position_mismatch": True,
+                    "abandon_pre_submit_requested": True,
+                    "active_order_ids": [],
+                    "orders_snapshot_available": True,
+                    "trades_snapshot_available": True,
+                }
+            )
+            plan["status"] = "HALTED_RECONCILE_REQUIRED"
+            self._revoke_auto_dispatch("shakedown")
+            self._persist_active_plan()
+            return {
+                "required": True,
+                "reason": reason,
+                "status": plan["status"],
+                "phase": phase,
+                "expected_positions": expected,
+                "observed_positions": observed,
+                "pre_submit_position_mismatch": True,
+                "cancel_requested_order_ids": [],
+                "active_order_ids": [],
+                "orders_snapshot_available": True,
+                "trades_snapshot_available": True,
+            }
         now = self.clock().astimezone(timezone.utc).isoformat()
         halt = {
             "required": False,
@@ -3245,6 +3326,33 @@ class CommoditySimNowService:
                 **self.status(),
             }
         if halt.get("status") == "HALTED_PRE_SUBMIT_SAFE":
+            if (
+                plan.get("position_manager_shakedown_session_id")
+                and plan.get("halt", {}).get("abandon_pre_submit_requested")
+            ):
+                finalized = self._finalize_pre_submit_shakedown_stop(
+                    plan,
+                    reason=str(plan.get("halt", {}).get("reason") or "operator requested stop"),
+                    operator=operator,
+                )
+                if finalized is not None:
+                    return {
+                        "action": "halted_reconciled",
+                        "halt": finalized,
+                        **self.position_manager_shakedown_status(),
+                    }
+                if plan.get("status") == "CANCEL_PENDING":
+                    return {
+                        "action": "cancel_pending",
+                        "halt": plan.get("halt"),
+                        **self.status(),
+                    }
+                if plan.get("status") == "HALTED_RECONCILE_REQUIRED":
+                    return {
+                        "action": "halted_reconcile_required",
+                        "halt": plan.get("halt"),
+                        **self.status(),
+                    }
             return {"action": "halted_pre_submit_safe", "halt": halt, **self.status()}
         self._event(
             "safe_halt_cancellations_complete",
