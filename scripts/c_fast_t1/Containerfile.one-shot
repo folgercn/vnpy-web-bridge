@@ -31,6 +31,9 @@ COPY docs/schemas/commodity-c-fast-t1-terminal-seal-v1.schema.json ./docs/schema
 RUN python -m py_compile \
       scripts/commodity_c_fast_t1_one_shot.py \
       scripts/commodity_c_fast_l1_l5_audit.py \
+    && find /opt/c-fast-t1 -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete \
+    && find /opt/c-fast-t1 -type d -name '__pycache__' -empty -delete \
+    && test -z "$(find /opt/c-fast-t1 -type f \( -name '*.pyc' -o -name '*.pyo' \) -print -quit)" \
     && chmod -R a-w /opt/c-fast-t1
 
 USER 65532:65532

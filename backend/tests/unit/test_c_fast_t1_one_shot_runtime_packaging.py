@@ -150,6 +150,23 @@ def test_rejects_missing_cryptography_dependency(tmp_path: Path) -> None:
         subject.validate_runtime(template, containerfile)
 
 
+def test_rejects_missing_compiled_bytecode_cleanup(tmp_path: Path) -> None:
+    template, containerfile = _copy_artifacts(tmp_path)
+    text = containerfile.read_text(encoding="utf-8")
+    text = text.replace(
+        "    && find /opt/c-fast-t1 -type f "
+        "\\( -name '*.pyc' -o -name '*.pyo' \\) -delete \\\n",
+        "",
+    )
+    containerfile.write_text(text, encoding="utf-8")
+
+    with pytest.raises(
+        subject.RuntimeValidationError,
+        match="instruction sequence",
+    ):
+        subject.validate_runtime(template, containerfile)
+
+
 def test_rejects_writer_dsn_or_trade_capability(tmp_path: Path) -> None:
     template, containerfile = _copy_artifacts(tmp_path)
     payload = _load_template(template)

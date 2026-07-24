@@ -11,8 +11,10 @@
     },
     "platform": "linux/amd64"
   },
-  "capture_kind": "registry_manifest_and_image_export_v1",
+  "capture_kind": "unsigned_external_oci_layout_capture_v1",
   "captured_at": "2026-07-25T00:00:00Z",
+  "build_provenance_verified": false,
+  "registry_provenance_verified": false,
   "image": {
     "bundle_files": {
       "/opt/c-fast-t1/docs/schemas/commodity-c-fast-l1-l5-audit-manifest-v2.schema.json": "3333333333333333333333333333333333333333333333333333333333333333",

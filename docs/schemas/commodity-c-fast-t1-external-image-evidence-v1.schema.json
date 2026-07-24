@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:vnpy-web-bridge:schema:commodity-c-fast-t1-external-image-evidence-v1",
-  "title": "C_FAST T1 external OCI image evidence v1",
+  "title": "C_FAST T1 unsigned external OCI layout claims v1",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -9,6 +9,8 @@
     "capture_kind",
     "captured_at",
     "producer",
+    "build_provenance_verified",
+    "registry_provenance_verified",
     "source_commit_sha",
     "source_archive_sha256",
     "build",
@@ -19,7 +21,7 @@
       "const": "commodity_c_fast_t1_external_image_evidence_v1"
     },
     "capture_kind": {
-      "const": "registry_manifest_and_image_export_v1"
+      "const": "unsigned_external_oci_layout_capture_v1"
     },
     "captured_at": {
       "type": "string",
@@ -46,6 +48,12 @@
           "pattern": "^[A-Za-z0-9._+-]+$"
         }
       }
+    },
+    "build_provenance_verified": {
+      "const": false
+    },
+    "registry_provenance_verified": {
+      "const": false
     },
     "source_commit_sha": {
       "type": "string",
@@ -136,130 +144,16 @@
           "type": "array",
           "minItems": 1,
           "maxItems": 256,
+          "uniqueItems": true,
           "items": {
             "$ref": "#/$defs/ociDigest"
           }
         },
         "config": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "user",
-            "working_dir",
-            "entrypoint",
-            "relevant_environment",
-            "labels"
-          ],
-          "properties": {
-            "user": {
-              "const": "65532:65532"
-            },
-            "working_dir": {
-              "const": "/opt/c-fast-t1"
-            },
-            "entrypoint": {
-              "type": "array",
-              "prefixItems": [
-                {
-                  "const": "python"
-                },
-                {
-                  "const": "-I"
-                },
-                {
-                  "const": "/opt/c-fast-t1/scripts/commodity_c_fast_t1_one_shot.py"
-                }
-              ],
-              "items": false,
-              "minItems": 3,
-              "maxItems": 3
-            },
-            "relevant_environment": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": [
-                "PYTHONDONTWRITEBYTECODE",
-                "PYTHONUNBUFFERED"
-              ],
-              "properties": {
-                "PYTHONDONTWRITEBYTECODE": {
-                  "const": "1"
-                },
-                "PYTHONUNBUFFERED": {
-                  "const": "1"
-                }
-              }
-            },
-            "labels": {
-              "type": "object",
-              "additionalProperties": false,
-              "required": [
-                "io.vnpy-web-bridge.c-fast-t1.authority-granted",
-                "io.vnpy-web-bridge.c-fast-t1.one-shot-runtime",
-                "org.opencontainers.image.revision",
-                "org.opencontainers.image.title"
-              ],
-              "properties": {
-                "io.vnpy-web-bridge.c-fast-t1.authority-granted": {
-                  "const": "false"
-                },
-                "io.vnpy-web-bridge.c-fast-t1.one-shot-runtime": {
-                  "const": "true"
-                },
-                "org.opencontainers.image.revision": {
-                  "type": "string",
-                  "pattern": "^[0-9a-f]{40}$"
-                },
-                "org.opencontainers.image.title": {
-                  "const": "vnpy-web-bridge C_FAST T1 one-shot runner"
-                }
-              }
-            }
-          }
+          "$ref": "#/$defs/config"
         },
         "bundle_files": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "/opt/c-fast-t1/docs/schemas/commodity-c-fast-l1-l5-audit-manifest-v2.schema.json",
-            "/opt/c-fast-t1/docs/schemas/commodity-c-fast-l1-l5-audit-v1.schema.json",
-            "/opt/c-fast-t1/docs/schemas/commodity-c-fast-l1-l5-audit-v2.schema.json",
-            "/opt/c-fast-t1/docs/schemas/commodity-c-fast-questdb-readonly-proof-v1.schema.json",
-            "/opt/c-fast-t1/docs/schemas/commodity-c-fast-t1-consume-v1.schema.json",
-            "/opt/c-fast-t1/docs/schemas/commodity-c-fast-t1-one-shot-release-v1.schema.json",
-            "/opt/c-fast-t1/docs/schemas/commodity-c-fast-t1-terminal-seal-v1.schema.json",
-            "/opt/c-fast-t1/scripts/commodity_c_fast_l1_l5_audit.py",
-            "/opt/c-fast-t1/scripts/commodity_c_fast_t1_one_shot.py"
-          ],
-          "properties": {
-            "/opt/c-fast-t1/docs/schemas/commodity-c-fast-l1-l5-audit-manifest-v2.schema.json": {
-              "$ref": "#/$defs/sha256"
-            },
-            "/opt/c-fast-t1/docs/schemas/commodity-c-fast-l1-l5-audit-v1.schema.json": {
-              "$ref": "#/$defs/sha256"
-            },
-            "/opt/c-fast-t1/docs/schemas/commodity-c-fast-l1-l5-audit-v2.schema.json": {
-              "$ref": "#/$defs/sha256"
-            },
-            "/opt/c-fast-t1/docs/schemas/commodity-c-fast-questdb-readonly-proof-v1.schema.json": {
-              "$ref": "#/$defs/sha256"
-            },
-            "/opt/c-fast-t1/docs/schemas/commodity-c-fast-t1-consume-v1.schema.json": {
-              "$ref": "#/$defs/sha256"
-            },
-            "/opt/c-fast-t1/docs/schemas/commodity-c-fast-t1-one-shot-release-v1.schema.json": {
-              "$ref": "#/$defs/sha256"
-            },
-            "/opt/c-fast-t1/docs/schemas/commodity-c-fast-t1-terminal-seal-v1.schema.json": {
-              "$ref": "#/$defs/sha256"
-            },
-            "/opt/c-fast-t1/scripts/commodity_c_fast_l1_l5_audit.py": {
-              "$ref": "#/$defs/sha256"
-            },
-            "/opt/c-fast-t1/scripts/commodity_c_fast_t1_one_shot.py": {
-              "$ref": "#/$defs/sha256"
-            }
-          }
+          "$ref": "#/$defs/runtimeBundle"
         },
         "forbidden_path_matches": {
           "type": "array",
@@ -284,6 +178,107 @@
     "ociDigest": {
       "type": "string",
       "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "config": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "user",
+        "working_dir",
+        "entrypoint",
+        "relevant_environment",
+        "labels"
+      ],
+      "properties": {
+        "user": {
+          "const": "65532:65532"
+        },
+        "working_dir": {
+          "const": "/opt/c-fast-t1"
+        },
+        "entrypoint": {
+          "const": [
+            "python",
+            "-I",
+            "/opt/c-fast-t1/scripts/commodity_c_fast_t1_one_shot.py"
+          ]
+        },
+        "relevant_environment": {
+          "const": {
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONUNBUFFERED": "1"
+          }
+        },
+        "labels": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "io.vnpy-web-bridge.c-fast-t1.authority-granted",
+            "io.vnpy-web-bridge.c-fast-t1.one-shot-runtime",
+            "org.opencontainers.image.revision",
+            "org.opencontainers.image.title"
+          ],
+          "properties": {
+            "io.vnpy-web-bridge.c-fast-t1.authority-granted": {
+              "const": "false"
+            },
+            "io.vnpy-web-bridge.c-fast-t1.one-shot-runtime": {
+              "const": "true"
+            },
+            "org.opencontainers.image.revision": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{40}$"
+            },
+            "org.opencontainers.image.title": {
+              "const": "vnpy-web-bridge C_FAST T1 one-shot runner"
+            }
+          }
+        }
+      }
+    },
+    "runtimeBundle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "/opt/c-fast-t1/docs/schemas/commodity-c-fast-l1-l5-audit-manifest-v2.schema.json",
+        "/opt/c-fast-t1/docs/schemas/commodity-c-fast-l1-l5-audit-v1.schema.json",
+        "/opt/c-fast-t1/docs/schemas/commodity-c-fast-l1-l5-audit-v2.schema.json",
+        "/opt/c-fast-t1/docs/schemas/commodity-c-fast-questdb-readonly-proof-v1.schema.json",
+        "/opt/c-fast-t1/docs/schemas/commodity-c-fast-t1-consume-v1.schema.json",
+        "/opt/c-fast-t1/docs/schemas/commodity-c-fast-t1-one-shot-release-v1.schema.json",
+        "/opt/c-fast-t1/docs/schemas/commodity-c-fast-t1-terminal-seal-v1.schema.json",
+        "/opt/c-fast-t1/scripts/commodity_c_fast_l1_l5_audit.py",
+        "/opt/c-fast-t1/scripts/commodity_c_fast_t1_one_shot.py"
+      ],
+      "properties": {
+        "/opt/c-fast-t1/docs/schemas/commodity-c-fast-l1-l5-audit-manifest-v2.schema.json": {
+          "$ref": "#/$defs/sha256"
+        },
+        "/opt/c-fast-t1/docs/schemas/commodity-c-fast-l1-l5-audit-v1.schema.json": {
+          "$ref": "#/$defs/sha256"
+        },
+        "/opt/c-fast-t1/docs/schemas/commodity-c-fast-l1-l5-audit-v2.schema.json": {
+          "$ref": "#/$defs/sha256"
+        },
+        "/opt/c-fast-t1/docs/schemas/commodity-c-fast-questdb-readonly-proof-v1.schema.json": {
+          "$ref": "#/$defs/sha256"
+        },
+        "/opt/c-fast-t1/docs/schemas/commodity-c-fast-t1-consume-v1.schema.json": {
+          "$ref": "#/$defs/sha256"
+        },
+        "/opt/c-fast-t1/docs/schemas/commodity-c-fast-t1-one-shot-release-v1.schema.json": {
+          "$ref": "#/$defs/sha256"
+        },
+        "/opt/c-fast-t1/docs/schemas/commodity-c-fast-t1-terminal-seal-v1.schema.json": {
+          "$ref": "#/$defs/sha256"
+        },
+        "/opt/c-fast-t1/scripts/commodity_c_fast_l1_l5_audit.py": {
+          "$ref": "#/$defs/sha256"
+        },
+        "/opt/c-fast-t1/scripts/commodity_c_fast_t1_one_shot.py": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
     }
   }
 }
