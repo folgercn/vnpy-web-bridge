@@ -1,0 +1,170 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vnpy-web-bridge:schema:commodity-c-fast-readonly-deployment-receipt-v1",
+  "title": "C_FAST readonly deployment offline verification receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "candidate_id",
+    "release_id",
+    "attempt_id",
+    "release_raw_sha256",
+    "release_canonical_sha256",
+    "consume_marker_raw_sha256",
+    "evidence_bundle_index_sha256",
+    "verified_at",
+    "signer_key_id",
+    "signer_key_purpose",
+    "signature_verified",
+    "receipt_authority_state",
+    "receipt_is_authority",
+    "raw_signed_release_required_for_any_action",
+    "authority_granted",
+    "replay_allowed",
+    "deployment_executed",
+    "readonly_principal_deployment_authorized",
+    "readonly_secret_file_installation_authorized",
+    "questdb_restart_authorized",
+    "questdb_recreate_authorized",
+    "network_mutation_authorized",
+    "unscoped_deployment_mutation_authorized",
+    "production_query_authorized",
+    "readonly_query_authorized",
+    "collection_authorized",
+    "write_probe_authorized",
+    "database_mutation_authorized",
+    "order_authorized",
+    "position_mutation_authorized",
+    "dispatch_authorized",
+    "trading_authorized",
+    "strategy_activation_authorized",
+    "automatic_promotion_authorized",
+    "web_bridge_deployment_authorized"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "commodity_c_fast_readonly_deployment_receipt_v1"
+    },
+    "candidate_id": {
+      "const": "C_FAST_CROSS_SECTION_NEUTRAL"
+    },
+    "release_id": {
+      "$ref": "#/$defs/id"
+    },
+    "attempt_id": {
+      "type": "string",
+      "pattern": "^attempt-[0-9a-f]{64}$"
+    },
+    "release_raw_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "release_canonical_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "consume_marker_raw_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "evidence_bundle_index_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "verified_at": {
+      "$ref": "#/$defs/dateTime"
+    },
+    "signer_key_id": {
+      "$ref": "#/$defs/id"
+    },
+    "signer_key_purpose": {
+      "const": "readonly_deployment_release_signer"
+    },
+    "signature_verified": {
+      "const": true
+    },
+    "receipt_authority_state": {
+      "const": "NON_AUTHORITATIVE_OFFLINE_VERIFICATION_RECEIPT"
+    },
+    "receipt_is_authority": {
+      "const": false
+    },
+    "raw_signed_release_required_for_any_action": {
+      "const": true
+    },
+    "authority_granted": {
+      "const": false
+    },
+    "replay_allowed": {
+      "const": false
+    },
+    "deployment_executed": {
+      "const": false
+    },
+    "readonly_principal_deployment_authorized": {
+      "const": false
+    },
+    "readonly_secret_file_installation_authorized": {
+      "const": false
+    },
+    "questdb_restart_authorized": {
+      "const": false
+    },
+    "questdb_recreate_authorized": {
+      "const": false
+    },
+    "network_mutation_authorized": {
+      "const": false
+    },
+    "unscoped_deployment_mutation_authorized": {
+      "const": false
+    },
+    "production_query_authorized": {
+      "const": false
+    },
+    "readonly_query_authorized": {
+      "const": false
+    },
+    "collection_authorized": {
+      "const": false
+    },
+    "write_probe_authorized": {
+      "const": false
+    },
+    "database_mutation_authorized": {
+      "const": false
+    },
+    "order_authorized": {
+      "const": false
+    },
+    "position_mutation_authorized": {
+      "const": false
+    },
+    "dispatch_authorized": {
+      "const": false
+    },
+    "trading_authorized": {
+      "const": false
+    },
+    "strategy_activation_authorized": {
+      "const": false
+    },
+    "automatic_promotion_authorized": {
+      "const": false
+    },
+    "web_bridge_deployment_authorized": {
+      "const": false
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{8,128}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "dateTime": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}
