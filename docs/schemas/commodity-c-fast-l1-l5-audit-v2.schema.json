@@ -1,0 +1,472 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vnpy-web-bridge:schema:commodity-c-fast-l1-l5-audit-v2",
+  "title": "C_FAST L1-L5 Audit Evidence v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "candidate_id",
+    "snapshot_id",
+    "manifest_sha256",
+    "generated_at",
+    "read_only",
+    "database_mutations",
+    "audit_window",
+    "thresholds",
+    "query_limits",
+    "summary",
+    "products",
+    "contracts",
+    "execution_windows",
+    "quality_breakdowns",
+    "blockers",
+    "limitations"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "commodity_c_fast_l1_l5_audit_v2"
+    },
+    "candidate_id": {
+      "const": "C_FAST_CROSS_SECTION_NEUTRAL"
+    },
+    "snapshot_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{8,128}$"
+    },
+    "manifest_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "read_only": {
+      "const": true
+    },
+    "database_mutations": {
+      "const": 0
+    },
+    "audit_window": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "start",
+        "end_exclusive",
+        "trading_day",
+        "display_timezone"
+      ],
+      "properties": {
+        "start": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "end_exclusive": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "trading_day": {
+          "type": "string",
+          "pattern": "^[0-9]{8}$"
+        },
+        "display_timezone": {
+          "const": "Asia/Shanghai"
+        }
+      }
+    },
+    "thresholds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "min_l1_complete_ratio",
+        "min_l5_complete_ratio",
+        "max_transport_stale_ratio",
+        "max_clock_skew_ratio",
+        "max_crossed_ratio",
+        "max_locked_ratio",
+        "max_inverted_depth_ratio",
+        "transport_stale_seconds",
+        "clock_skew_seconds",
+        "cadence_gap_seconds",
+        "max_continuous_gap_seconds",
+        "max_execution_window_gap_seconds",
+        "min_rows_per_required_session",
+        "min_rows_per_execution_window",
+        "max_required_session_gap_seconds",
+        "min_positive_volume_deltas_for_semantics",
+        "min_last_volume_match_ratio"
+      ],
+      "properties": {
+        "min_l1_complete_ratio": {
+          "const": 0.995
+        },
+        "min_l5_complete_ratio": {
+          "const": 0.95
+        },
+        "max_transport_stale_ratio": {
+          "const": 0.01
+        },
+        "max_clock_skew_ratio": {
+          "const": 0.001
+        },
+        "max_crossed_ratio": {
+          "const": 0.0001
+        },
+        "max_locked_ratio": {
+          "const": 0.05
+        },
+        "max_inverted_depth_ratio": {
+          "const": 0.001
+        },
+        "transport_stale_seconds": {
+          "const": 5.0
+        },
+        "clock_skew_seconds": {
+          "const": 1.0
+        },
+        "cadence_gap_seconds": {
+          "const": 5.0
+        },
+        "max_continuous_gap_seconds": {
+          "const": 300.0
+        },
+        "max_execution_window_gap_seconds": {
+          "const": 5.0
+        },
+        "min_rows_per_required_session": {
+          "const": 20.0
+        },
+        "min_rows_per_execution_window": {
+          "const": 11.0
+        },
+        "max_required_session_gap_seconds": {
+          "const": 5.0
+        },
+        "min_positive_volume_deltas_for_semantics": {
+          "const": 10.0
+        },
+        "min_last_volume_match_ratio": {
+          "const": 0.95
+        }
+      }
+    },
+    "query_limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_rows_per_contract",
+        "sql_limit_per_contract"
+      ],
+      "properties": {
+        "max_rows_per_contract": {
+          "const": 500000
+        },
+        "sql_limit_per_contract": {
+          "const": 500001
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "expected_products",
+        "observed_products",
+        "contracts",
+        "rows",
+        "scanned_rows",
+        "max_contract_rows_observed",
+        "classification_counts",
+        "overall_conclusion",
+        "p0_pass"
+      ],
+      "properties": {
+        "expected_products": {
+          "const": 10
+        },
+        "observed_products": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10
+        },
+        "contracts": {
+          "type": "integer",
+          "minimum": 10,
+          "maximum": 20
+        },
+        "rows": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "scanned_rows": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "max_contract_rows_observed": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 500000
+        },
+        "classification_counts": {
+          "$ref": "urn:vnpy-web-bridge:schema:commodity-c-fast-l1-l5-audit-v1#/$defs/classificationCounts"
+        },
+        "overall_conclusion": {
+          "$ref": "urn:vnpy-web-bridge:schema:commodity-c-fast-l1-l5-audit-v1#/$defs/classification"
+        },
+        "p0_pass": {
+          "type": "boolean"
+        }
+      }
+    },
+    "products": {
+      "type": "array",
+      "minItems": 10,
+      "maxItems": 10,
+      "items": {
+        "$ref": "urn:vnpy-web-bridge:schema:commodity-c-fast-l1-l5-audit-v1#/$defs/product"
+      }
+    },
+    "contracts": {
+      "type": "array",
+      "minItems": 10,
+      "maxItems": 20,
+      "items": {
+        "$ref": "#/$defs/contract"
+      }
+    },
+    "execution_windows": {
+      "type": "array",
+      "items": {
+        "$ref": "urn:vnpy-web-bridge:schema:commodity-c-fast-l1-l5-audit-v1#/$defs/executionWindow"
+      }
+    },
+    "quality_breakdowns": {
+      "type": "array",
+      "minItems": 50,
+      "items": {
+        "$ref": "#/$defs/qualityBreakdown"
+      }
+    },
+    "blockers": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "limitations": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "$defs": {
+    "qualityBreakdown": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "record_type",
+        "product",
+        "role",
+        "vt_symbol",
+        "segment",
+        "depth_quality",
+        "volume_semantics_quality",
+        "combined_classification"
+      ],
+      "properties": {
+        "record_type": {
+          "enum": [
+            "contract_segment",
+            "execution_window"
+          ]
+        },
+        "product": {
+          "type": "string"
+        },
+        "role": {
+          "enum": [
+            "current",
+            "previous",
+            "window"
+          ]
+        },
+        "vt_symbol": {
+          "type": "string"
+        },
+        "segment": {
+          "type": "string",
+          "minLength": 1
+        },
+        "depth_quality": {
+          "enum": [
+            "L5_USABLE",
+            "L1_ONLY",
+            "UNUSABLE"
+          ]
+        },
+        "volume_semantics_quality": {
+          "enum": [
+            "VALIDATED",
+            "INSUFFICIENT",
+            "INCONSISTENT"
+          ]
+        },
+        "combined_classification": {
+          "$ref": "urn:vnpy-web-bridge:schema:commodity-c-fast-l1-l5-audit-v1#/$defs/classification"
+        }
+      }
+    },
+    "contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "product",
+        "role",
+        "exact_contract",
+        "vt_symbol",
+        "scanned_rows",
+        "classification",
+        "all",
+        "sessions",
+        "session_coverage"
+      ],
+      "properties": {
+        "product": {
+          "type": "string"
+        },
+        "role": {
+          "enum": [
+            "current",
+            "previous"
+          ]
+        },
+        "exact_contract": {
+          "type": "string"
+        },
+        "vt_symbol": {
+          "type": "string"
+        },
+        "scanned_rows": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 500000
+        },
+        "classification": {
+          "$ref": "urn:vnpy-web-bridge:schema:commodity-c-fast-l1-l5-audit-v1#/$defs/classification"
+        },
+        "all": {
+          "$ref": "urn:vnpy-web-bridge:schema:commodity-c-fast-l1-l5-audit-v1#/$defs/metrics"
+        },
+        "sessions": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "night_open",
+            "night_session",
+            "day_open",
+            "day_session"
+          ],
+          "properties": {
+            "night_open": {
+              "$ref": "urn:vnpy-web-bridge:schema:commodity-c-fast-l1-l5-audit-v1#/$defs/metrics"
+            },
+            "night_session": {
+              "$ref": "urn:vnpy-web-bridge:schema:commodity-c-fast-l1-l5-audit-v1#/$defs/metrics"
+            },
+            "day_open": {
+              "$ref": "urn:vnpy-web-bridge:schema:commodity-c-fast-l1-l5-audit-v1#/$defs/metrics"
+            },
+            "day_session": {
+              "$ref": "urn:vnpy-web-bridge:schema:commodity-c-fast-l1-l5-audit-v1#/$defs/metrics"
+            }
+          }
+        },
+        "session_coverage": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "night_open",
+            "night_session",
+            "day_open",
+            "day_session"
+          ],
+          "properties": {
+            "night_open": {
+              "$ref": "#/$defs/sessionCoverage"
+            },
+            "night_session": {
+              "$ref": "#/$defs/sessionCoverage"
+            },
+            "day_open": {
+              "$ref": "#/$defs/sessionCoverage"
+            },
+            "day_session": {
+              "$ref": "#/$defs/sessionCoverage"
+            }
+          }
+        }
+      }
+    },
+    "sessionCoverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "start",
+        "end_exclusive",
+        "start_boundary_gap_seconds",
+        "end_boundary_gap_seconds",
+        "max_observed_tick_gap_seconds",
+        "max_gap_seconds",
+        "boundary_coverage_complete",
+        "classification"
+      ],
+      "properties": {
+        "start": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "end_exclusive": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "start_boundary_gap_seconds": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "end_boundary_gap_seconds": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "max_observed_tick_gap_seconds": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "max_gap_seconds": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "boundary_coverage_complete": {
+          "type": "boolean"
+        },
+        "classification": {
+          "$ref": "urn:vnpy-web-bridge:schema:commodity-c-fast-l1-l5-audit-v1#/$defs/classification"
+        }
+      }
+    }
+  }
+}

@@ -19,6 +19,26 @@ MODULE = runpy.run_path(
 )
 PRODUCTS = MODULE["FROZEN_PRODUCTS"]
 EXCHANGES = MODULE["PRODUCT_EXCHANGES"]
+AUDIT_START = datetime(2026, 8, 31, 12, tzinfo=timezone.utc)
+AUDIT_END = datetime(2026, 9, 1, 8, tzinfo=timezone.utc)
+SESSION_BOUNDS = {
+    "night_open": (
+        datetime(2026, 8, 31, 13, 0, tzinfo=timezone.utc),
+        datetime(2026, 8, 31, 13, 2, 5, tzinfo=timezone.utc),
+    ),
+    "night_session": (
+        datetime(2026, 8, 31, 13, 10, tzinfo=timezone.utc),
+        datetime(2026, 8, 31, 13, 20, tzinfo=timezone.utc),
+    ),
+    "day_open": (
+        datetime(2026, 9, 1, 1, 0, tzinfo=timezone.utc),
+        datetime(2026, 9, 1, 1, 2, 5, tzinfo=timezone.utc),
+    ),
+    "day_session": (
+        datetime(2026, 9, 1, 1, 10, tzinfo=timezone.utc),
+        datetime(2026, 9, 1, 1, 20, tzinfo=timezone.utc),
+    ),
+}
 
 
 def manifest_payload() -> dict:
@@ -26,6 +46,18 @@ def manifest_payload() -> dict:
         "schema_version": MODULE["MANIFEST_SCHEMA_VERSION"],
         "candidate_id": MODULE["CANDIDATE_ID"],
         "snapshot_id": "c-fast-p0-test-a01",
+        "audit_window": {
+            "start": AUDIT_START.isoformat(),
+            "end_exclusive": AUDIT_END.isoformat(),
+            "trading_day": "20260901",
+        },
+        "session_windows": {
+            name: {
+                "start": start.isoformat(),
+                "end_exclusive": end.isoformat(),
+            }
+            for name, (start, end) in SESSION_BOUNDS.items()
+        },
         "targets": [
             {
                 "product": product,
@@ -87,46 +119,48 @@ def add_row(accumulator, row: dict) -> None:
 
 
 def complete_session_rows(execution_time: datetime) -> list[dict]:
-    return session_rows(
-        execution_time,
-        range(-60, 61, 5),
-    )
+    del execution_time
+    timestamps = [
+        timestamp
+        for start, end in SESSION_BOUNDS.values()
+        for timestamp in (
+            start + timedelta(seconds=offset)
+            for offset in range(
+                0,
+                int((end - start).total_seconds()),
+                5,
+            )
+        )
+    ]
+    return rows_for_timestamps(timestamps)
 
 
 def concentrated_execution_window_rows(
     execution_time: datetime,
 ) -> list[dict]:
-    return session_rows(
-        execution_time,
-        range(-10, 10),
-    )
-
-
-def session_rows(
-    execution_time: datetime,
-    window_offsets: range,
-) -> list[dict]:
     timestamps = [
         *[
-            datetime(2026, 8, 31, 13, 0, tzinfo=timezone.utc)
-            + timedelta(seconds=index)
-            for index in range(20)
-        ],
-        *[
-            datetime(2026, 8, 31, 13, 10, tzinfo=timezone.utc)
-            + timedelta(seconds=index)
-            for index in range(20)
+            start + timedelta(seconds=offset)
+            for name, (start, end) in SESSION_BOUNDS.items()
+            if name != "day_open"
+            for offset in range(0, int((end - start).total_seconds()), 5)
         ],
         *[
             execution_time + timedelta(seconds=offset)
-            for offset in window_offsets
-        ],
-        *[
-            datetime(2026, 9, 1, 1, 10, tzinfo=timezone.utc)
-            + timedelta(seconds=index)
-            for index in range(20)
+            for offset in range(-10, 10)
         ],
     ]
+    return rows_for_timestamps(sorted(timestamps))
+
+
+def session_window_specs() -> list:
+    return [
+        MODULE["SessionWindow"](name=name, start=start, end=end)
+        for name, (start, end) in SESSION_BOUNDS.items()
+    ]
+
+
+def rows_for_timestamps(timestamps: list[datetime]) -> list[dict]:
     return [
         tick_row(
             ts,
@@ -137,6 +171,27 @@ def session_rows(
         )
         for index, ts in enumerate(timestamps)
     ]
+
+
+def fragmented_session_rows(execution_time: datetime) -> list[dict]:
+    rows = complete_session_rows(execution_time)
+    start, _ = SESSION_BOUNDS["night_session"]
+    replacement = [
+        start + timedelta(seconds=index * 10)
+        for index in range(20)
+    ]
+    kept = [
+        row
+        for row in rows
+        if not (
+            SESSION_BOUNDS["night_session"][0]
+            <= row["ts"]
+            < SESSION_BOUNDS["night_session"][1]
+        )
+    ]
+    return rows_for_timestamps(
+        sorted([row["ts"] for row in kept] + replacement)
+    )
 
 
 class FakeCursor:
@@ -170,7 +225,7 @@ def test_manifest_rejects_missing_frozen_product(tmp_path: Path) -> None:
     payload = manifest_payload()
     payload["targets"].pop()
 
-    with pytest.raises(MODULE["AuditError"], match="exactly ten"):
+    with pytest.raises(MODULE["AuditError"], match="schema validation failed"):
         MODULE["load_manifest"](write_manifest(tmp_path, payload))
 
 
@@ -187,6 +242,176 @@ def test_manifest_rejects_roll_without_previous_contract(
         MODULE["load_manifest"](write_manifest(tmp_path, payload))
 
 
+def test_manifest_rejects_noncanonical_session_window(
+    tmp_path: Path,
+) -> None:
+    payload = manifest_payload()
+    payload["session_windows"]["night_session"]["end_exclusive"] = (
+        datetime(2026, 8, 31, 13, 11, 40, tzinfo=timezone.utc).isoformat()
+    )
+
+    with pytest.raises(MODULE["AuditError"], match="canonical China time"):
+        MODULE["load_manifest"](write_manifest(tmp_path, payload))
+
+
+def test_manifest_rejects_invalid_calendar_trading_day(
+    tmp_path: Path,
+) -> None:
+    payload = manifest_payload()
+    payload["audit_window"]["trading_day"] = "20261340"
+
+    with pytest.raises(MODULE["AuditError"], match="valid calendar date"):
+        MODULE["load_manifest"](write_manifest(tmp_path, payload))
+
+
+def test_manifest_allows_friday_night_for_monday_trading_day(
+    tmp_path: Path,
+) -> None:
+    payload = manifest_payload()
+    payload["audit_window"] = {
+        "start": "2026-09-04T12:00:00+00:00",
+        "end_exclusive": "2026-09-07T08:00:00+00:00",
+        "trading_day": "20260907",
+    }
+    payload["session_windows"] = {
+        "night_open": {
+            "start": "2026-09-04T13:00:00+00:00",
+            "end_exclusive": "2026-09-04T13:02:05+00:00",
+        },
+        "night_session": {
+            "start": "2026-09-04T13:10:00+00:00",
+            "end_exclusive": "2026-09-04T13:20:00+00:00",
+        },
+        "day_open": {
+            "start": "2026-09-07T01:00:00+00:00",
+            "end_exclusive": "2026-09-07T01:02:05+00:00",
+        },
+        "day_session": {
+            "start": "2026-09-07T01:10:00+00:00",
+            "end_exclusive": "2026-09-07T01:20:00+00:00",
+        },
+    }
+
+    _, _, sessions, _ = MODULE["load_manifest"](
+        write_manifest(tmp_path, payload)
+    )
+
+    assert sessions[0].start.weekday() == 4
+    assert sessions[-1].start.weekday() == 0
+
+
+def test_manifest_strict_reader_rejects_duplicate_keys_nan_and_symlink(
+    tmp_path: Path,
+) -> None:
+    payload_text = json.dumps(manifest_payload())
+    duplicate_path = tmp_path / "duplicate.json"
+    duplicate_path.write_text(
+        payload_text.replace(
+            '"snapshot_id":',
+            '"snapshot_id": "duplicate-id", "snapshot_id":',
+            1,
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(MODULE["AuditError"], match="duplicate JSON key"):
+        MODULE["load_manifest"](duplicate_path)
+
+    nan_path = tmp_path / "nan.json"
+    nan_path.write_text(
+        payload_text[:-1] + ', "probe": NaN}',
+        encoding="utf-8",
+    )
+    with pytest.raises(MODULE["AuditError"], match="non-finite JSON number"):
+        MODULE["load_manifest"](nan_path)
+
+    target = write_manifest(tmp_path, manifest_payload())
+    symlink_path = tmp_path / "manifest-link.json"
+    symlink_path.symlink_to(target)
+    with pytest.raises(MODULE["AuditError"], match="must not be a symlink"):
+        MODULE["load_manifest"](symlink_path)
+
+
+def test_manifest_strict_reader_detects_change_between_fd_reads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = write_manifest(tmp_path, manifest_payload())
+    original = path.read_text(encoding="utf-8")
+    replacement = original.replace(
+        "c-fast-p0-test-a01",
+        "c-fast-p0-test-a02",
+        1,
+    )
+    assert len(replacement.encode()) == len(original.encode())
+    original_lseek = MODULE["os"].lseek
+    mutated = False
+
+    def mutate_after_rewind(
+        descriptor: int,
+        offset: int,
+        whence: int,
+    ) -> int:
+        nonlocal mutated
+        result = original_lseek(descriptor, offset, whence)
+        if not mutated:
+            mutated = True
+            path.write_text(replacement, encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(MODULE["os"], "lseek", mutate_after_rewind)
+
+    with pytest.raises(MODULE["AuditError"], match="changed while"):
+        MODULE["load_manifest"](path)
+
+
+def test_manifest_strict_reader_ignores_metadata_only_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = write_manifest(tmp_path, manifest_payload())
+    original_lseek = MODULE["os"].lseek
+    touched = False
+
+    def touch_after_rewind(
+        descriptor: int,
+        offset: int,
+        whence: int,
+    ) -> int:
+        nonlocal touched
+        result = original_lseek(descriptor, offset, whence)
+        if not touched:
+            touched = True
+            path.touch()
+        return result
+
+    monkeypatch.setattr(MODULE["os"], "lseek", touch_after_rewind)
+
+    manifest, _, _, _ = MODULE["load_manifest"](path)
+
+    assert manifest["snapshot_id"] == "c-fast-p0-test-a01"
+
+
+def test_schema_validator_denies_external_resource_retrieval(
+    tmp_path: Path,
+) -> None:
+    schema_path = tmp_path / "external-ref.schema.json"
+    schema_path.write_text(
+        json.dumps(
+            {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "$ref": "https://example.invalid/external.schema.json",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        MODULE["AuditError"],
+        match="schema validation failed",
+    ):
+        MODULE["validate_json_schema"]({}, schema_path, "external-ref test")
+
+
 def test_manifest_normalizes_exact_contract_and_binds_execution_window(
     tmp_path: Path,
 ) -> None:
@@ -196,12 +421,12 @@ def test_manifest_normalizes_exact_contract_and_binds_execution_window(
             "window_id": "ag-window-a01",
             "product": "ag",
             "exact_contract": "ag2609.SHFE",
-            "execution_time": "2026-09-01T01:00:00+00:00",
+            "execution_time": "2026-09-01T01:01:00+00:00",
             "window_seconds": 60,
         }
     ]
 
-    _, contracts, windows = MODULE["load_manifest"](
+    _, contracts, session_windows, windows = MODULE["load_manifest"](
         write_manifest(tmp_path, payload)
     )
 
@@ -209,6 +434,12 @@ def test_manifest_normalizes_exact_contract_and_binds_execution_window(
     assert contracts[0].vt_symbol == "ag2609.SHFE"
     assert windows[0].vt_symbol == "ag2609.SHFE"
     assert windows[0].execution_time.tzinfo == timezone.utc
+    assert [item.name for item in session_windows] == [
+        "night_open",
+        "night_session",
+        "day_open",
+        "day_session",
+    ]
 
 
 def test_five_level_rows_are_l5_usable() -> None:
@@ -232,6 +463,73 @@ def test_five_level_rows_are_l5_usable() -> None:
     assert result["l1_complete_ratio"] == 1
     assert result["l5_complete_ratio"] == 1
     assert result["volume_semantics"]["last_volume_match_ratio"] == 1
+
+
+def test_nonempty_wrong_trading_day_is_degraded() -> None:
+    accumulator = MODULE["MetricsAccumulator"](
+        dict(MODULE["THRESHOLDS"]),
+        expected_trading_day="20260901",
+    )
+    start = datetime(2026, 9, 1, 1, 0, tzinfo=timezone.utc)
+    for index in range(20):
+        row = tick_row(
+            start + timedelta(seconds=index),
+            ingest_id=f"tick-{index}",
+            ingest_seq=index + 1,
+            volume=10 + index,
+            last_volume=1 if index else 0,
+        )
+        row["trading_day"] = "20260831"
+        add_row(accumulator, row)
+
+    result = accumulator.result()
+
+    assert result["classification"] == "DEGRADED"
+    assert result["anomalies"]["missing_trading_day_rows"] == 20
+
+
+def test_volume_semantics_require_enough_matching_positive_deltas() -> None:
+    start = datetime(2026, 9, 1, 1, 0, tzinfo=timezone.utc)
+    too_short = MODULE["MetricsAccumulator"](dict(MODULE["THRESHOLDS"]))
+    for index in range(5):
+        add_row(
+            too_short,
+            tick_row(
+                start + timedelta(seconds=index),
+                ingest_id=f"short-{index}",
+                ingest_seq=index + 1,
+                volume=10 + index,
+                last_volume=1 if index else 0,
+            ),
+        )
+    short_result = too_short.result()
+    assert short_result["classification"] == "DEGRADED"
+    assert MODULE["classify_depth_quality"](short_result) == "L5_USABLE"
+    assert (
+        MODULE["classify_volume_semantics_quality"](short_result)
+        == "INSUFFICIENT"
+    )
+
+    mismatched = MODULE["MetricsAccumulator"](dict(MODULE["THRESHOLDS"]))
+    for index in range(20):
+        add_row(
+            mismatched,
+            tick_row(
+                start + timedelta(seconds=index),
+                ingest_id=f"mismatch-{index}",
+                ingest_seq=index + 1,
+                volume=10 + index,
+                last_volume=2 if index else 0,
+            ),
+        )
+    result = mismatched.result()
+    assert result["classification"] == "DEGRADED"
+    assert result["volume_semantics"]["last_volume_match_ratio"] == 0
+    assert MODULE["classify_depth_quality"](result) == "L5_USABLE"
+    assert (
+        MODULE["classify_volume_semantics_quality"](result)
+        == "INCONSISTENT"
+    )
 
 
 def test_missing_deeper_levels_cannot_fall_back_to_l5() -> None:
@@ -362,7 +660,7 @@ def test_missing_required_identity_fields_degrade_instead_of_crashing() -> None:
 
 
 def test_contract_audit_is_select_only_and_covers_execution_window() -> None:
-    execution_time = datetime(2026, 9, 1, 1, 0, tzinfo=timezone.utc)
+    execution_time = datetime(2026, 9, 1, 1, 1, tzinfo=timezone.utc)
     connection = FakeConnection(complete_session_rows(execution_time))
     contract = MODULE["ContractSpec"](
         product="ag",
@@ -381,9 +679,11 @@ def test_contract_audit_is_select_only_and_covers_execution_window() -> None:
     result, window_results = MODULE["audit_contract"](
         connection,
         contract,
+        session_window_specs(),
         [window],
-        datetime(2026, 8, 31, 12, tzinfo=timezone.utc),
-        datetime(2026, 9, 1, 8, tzinfo=timezone.utc),
+        AUDIT_START,
+        AUDIT_END,
+        "20260901",
     )
 
     assert connection.sql.lstrip().upper().startswith("SELECT")
@@ -404,7 +704,7 @@ def test_contract_audit_is_select_only_and_covers_execution_window() -> None:
 
 
 def test_execution_window_requires_full_boundary_coverage() -> None:
-    execution_time = datetime(2026, 9, 1, 1, 0, tzinfo=timezone.utc)
+    execution_time = datetime(2026, 9, 1, 1, 1, tzinfo=timezone.utc)
     connection = FakeConnection(
         concentrated_execution_window_rows(execution_time)
     )
@@ -425,9 +725,11 @@ def test_execution_window_requires_full_boundary_coverage() -> None:
     _, window_results = MODULE["audit_contract"](
         connection,
         contract,
+        session_window_specs(),
         [window],
-        datetime(2026, 8, 31, 12, tzinfo=timezone.utc),
-        datetime(2026, 9, 1, 8, tzinfo=timezone.utc),
+        AUDIT_START,
+        AUDIT_END,
+        "20260901",
     )
 
     result = window_results[0]
@@ -439,8 +741,76 @@ def test_execution_window_requires_full_boundary_coverage() -> None:
     assert result["boundary_coverage_complete"] is False
 
 
-def test_full_ten_product_audit_can_reach_p0_pass(tmp_path: Path) -> None:
-    execution_time = datetime(2026, 9, 1, 1, 0, tzinfo=timezone.utc)
+def test_contract_query_row_limit_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    start = SESSION_BOUNDS["night_open"][0]
+    rows = rows_for_timestamps(
+        [start + timedelta(seconds=index) for index in range(6)]
+    )
+    connection = FakeConnection(rows)
+    contract = MODULE["ContractSpec"](
+        product="ag",
+        role="current",
+        exact_contract="SHFE.ag2609",
+        vt_symbol="ag2609.SHFE",
+    )
+    monkeypatch.setitem(
+        MODULE["audit_contract"].__globals__,
+        "MAX_ROWS_PER_CONTRACT",
+        5,
+    )
+
+    with pytest.raises(MODULE["AuditError"], match="5 row query limit"):
+        MODULE["audit_contract"](
+            connection,
+            contract,
+            session_window_specs(),
+            [],
+            AUDIT_START,
+            AUDIT_END,
+            "20260901",
+        )
+
+    assert "LIMIT 6" in connection.sql
+
+
+def test_required_session_rejects_fragmented_twenty_row_sample() -> None:
+    execution_time = datetime(2026, 9, 1, 1, 1, tzinfo=timezone.utc)
+    connection = FakeConnection(fragmented_session_rows(execution_time))
+    contract = MODULE["ContractSpec"](
+        product="ag",
+        role="current",
+        exact_contract="SHFE.ag2609",
+        vt_symbol="ag2609.SHFE",
+    )
+
+    result, _ = MODULE["audit_contract"](
+        connection,
+        contract,
+        session_window_specs(),
+        [],
+        AUDIT_START,
+        AUDIT_END,
+        "20260901",
+    )
+
+    assert result["classification"] == "DEGRADED"
+    assert (
+        result["sessions"]["night_session"]["classification"]
+        == "DEGRADED"
+    )
+    assert (
+        result["session_coverage"]["night_session"]["max_gap_seconds"]
+        > MODULE["THRESHOLDS"]["max_required_session_gap_seconds"]
+    )
+
+
+def test_full_ten_product_audit_can_reach_p0_pass(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    execution_time = datetime(2026, 9, 1, 1, 1, tzinfo=timezone.utc)
     payload = manifest_payload()
     payload["execution_windows"] = [
         {
@@ -452,7 +822,7 @@ def test_full_ten_product_audit_can_reach_p0_pass(tmp_path: Path) -> None:
         }
         for product in PRODUCTS
     ]
-    manifest, contracts, windows = MODULE["load_manifest"](
+    manifest, contracts, session_windows, windows = MODULE["load_manifest"](
         write_manifest(tmp_path, payload)
     )
     connection = FakeConnection(complete_session_rows(execution_time))
@@ -461,9 +831,10 @@ def test_full_ten_product_audit_can_reach_p0_pass(tmp_path: Path) -> None:
         connection,
         manifest,
         contracts,
+        session_windows,
         windows,
-        datetime(2026, 8, 31, 12, tzinfo=timezone.utc),
-        datetime(2026, 9, 1, 8, tzinfo=timezone.utc),
+        AUDIT_START,
+        AUDIT_END,
     )
 
     assert evidence["summary"]["p0_pass"] is True
@@ -472,27 +843,48 @@ def test_full_ten_product_audit_can_reach_p0_pass(tmp_path: Path) -> None:
     assert evidence["blockers"] == []
     assert len(evidence["contracts"]) == 10
     assert len(evidence["execution_windows"]) == 10
+    assert evidence["summary"]["scanned_rows"] == evidence["summary"]["rows"]
+    assert evidence["summary"]["max_contract_rows_observed"] > 0
+    assert evidence["query_limits"]["max_rows_per_contract"] == 500_000
+    assert len(evidence["quality_breakdowns"]) == 60
+    assert all(
+        item["depth_quality"] == "L5_USABLE"
+        and item["volume_semantics_quality"] == "VALIDATED"
+        for item in evidence["quality_breakdowns"]
+    )
     assert len(json.dumps(evidence, ensure_ascii=False)) > 1000
+    MODULE["validate_json_schema"](
+        evidence,
+        MODULE["EVIDENCE_SCHEMA_PATH"],
+        "test evidence",
+    )
+    schema_text = MODULE["EVIDENCE_SCHEMA_PATH"].read_text(encoding="utf-8")
+    assert "https://github.com" not in schema_text
 
+    def reject_any_retrieval(uri: str):
+        raise AssertionError(f"unexpected external schema retrieval: {uri}")
 
-def test_session_bucket_uses_china_market_windows() -> None:
-    utc = timezone.utc
-    assert (
-        MODULE["session_bucket"](datetime(2026, 8, 31, 13, 0, tzinfo=utc))
-        == "night_open"
+    monkeypatch.setitem(
+        MODULE["validate_json_schema"].__globals__,
+        "_deny_external_schema_retrieval",
+        reject_any_retrieval,
     )
-    assert (
-        MODULE["session_bucket"](datetime(2026, 8, 31, 14, 0, tzinfo=utc))
-        == "night_session"
+    MODULE["validate_json_schema"](
+        evidence,
+        MODULE["EVIDENCE_SCHEMA_PATH"],
+        "offline test evidence",
     )
-    assert (
-        MODULE["session_bucket"](datetime(2026, 9, 1, 1, 0, tzinfo=utc))
-        == "day_open"
-    )
-    assert (
-        MODULE["session_bucket"](datetime(2026, 9, 1, 2, 0, tzinfo=utc))
-        == "day_session"
-    )
+
+    with pytest.raises(MODULE["AuditError"], match="CLI start does not match"):
+        MODULE["audit"](
+            connection,
+            manifest,
+            contracts,
+            session_windows,
+            windows,
+            AUDIT_START + timedelta(seconds=1),
+            AUDIT_END,
+        )
 
 
 def test_missing_execution_windows_and_sessions_remain_blockers() -> None:
@@ -542,11 +934,18 @@ def test_rendered_report_and_csv_do_not_include_dsn(
         "audit_window": {
             "start": "2026-08-31T12:00:00+00:00",
             "end_exclusive": "2026-09-01T08:00:00+00:00",
+            "trading_day": "20260901",
+        },
+        "query_limits": {
+            "max_rows_per_contract": 500_000,
+            "sql_limit_per_contract": 500_001,
         },
         "summary": {
             "p0_pass": False,
             "overall_conclusion": "UNUSABLE",
             "rows": 0,
+            "scanned_rows": 0,
+            "max_contract_rows_observed": 0,
             "contracts": 1,
         },
         "products": [
@@ -570,9 +969,34 @@ def test_rendered_report_and_csv_do_not_include_dsn(
                     name: metrics
                     for name in MODULE["REQUIRED_CURRENT_SESSIONS"]
                 },
+                "session_coverage": {
+                    name: {
+                        "start": SESSION_BOUNDS[name][0].isoformat(),
+                        "end_exclusive": SESSION_BOUNDS[name][1].isoformat(),
+                        "start_boundary_gap_seconds": None,
+                        "end_boundary_gap_seconds": None,
+                        "max_observed_tick_gap_seconds": None,
+                        "max_gap_seconds": None,
+                        "boundary_coverage_complete": False,
+                        "classification": "UNUSABLE",
+                    }
+                    for name in MODULE["REQUIRED_CURRENT_SESSIONS"]
+                },
             }
         ],
         "execution_windows": [],
+        "quality_breakdowns": [
+            {
+                "record_type": "contract_segment",
+                "product": "ag",
+                "role": "current",
+                "vt_symbol": "ag2609.SHFE",
+                "segment": "all",
+                "depth_quality": "UNUSABLE",
+                "volume_semantics_quality": "INSUFFICIENT",
+                "combined_classification": "UNUSABLE",
+            }
+        ],
         "blockers": ["ag:no_rows"],
         "limitations": ["no passive point probability"],
     }
