@@ -1,0 +1,332 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vnpy-web-bridge:schema:commodity-c-fast-p0-acceptance-v1",
+  "title": "C_FAST independently signed P0 terminal acceptance v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "purpose",
+    "candidate_id",
+    "issue_number",
+    "acceptance_id",
+    "accepted_at",
+    "signer_key_id",
+    "signer_type",
+    "reviewer_role",
+    "human_signature",
+    "acceptance_keyring_sha256",
+    "release_id",
+    "attempt_id",
+    "source_commit_sha",
+    "runtime_image_digest",
+    "t1_trusted_keyring_sha256",
+    "t1_release_raw_sha256",
+    "t1_release_canonical_sha256",
+    "manifest_raw_sha256",
+    "manifest_canonical_sha256",
+    "consume_marker_raw_sha256",
+    "terminal_seal_raw_sha256",
+    "terminal_seal_canonical_sha256",
+    "artifact_sha256",
+    "bundle_index_sha256",
+    "snapshot_id",
+    "audit_window",
+    "endpoint_identity_sha256",
+    "questdb_build_sha256",
+    "consumed_at",
+    "started_at",
+    "ended_at",
+    "external_archive",
+    "terminal_state",
+    "p0_pass",
+    "proof_verified",
+    "write_probe_attempted",
+    "database_mutations",
+    "orders_sent",
+    "positions_modified",
+    "dispatch_changed",
+    "p0_accepted",
+    "p0_acceptance_scope",
+    "source_terminal_integrity_scope",
+    "collection_authorized",
+    "runtime_activation_authorized",
+    "order_authorized",
+    "position_mutation_authorized",
+    "dispatch_authorized",
+    "replacement_authorized",
+    "production_authorized",
+    "automatic_promotion_authorized",
+    "signature"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "commodity_c_fast_p0_acceptance_v1"
+    },
+    "purpose": {
+      "const": "c_fast_p0_terminal_acceptance"
+    },
+    "candidate_id": {
+      "const": "C_FAST_CROSS_SECTION_NEUTRAL"
+    },
+    "issue_number": {
+      "const": 114
+    },
+    "acceptance_id": {
+      "$ref": "#/$defs/id"
+    },
+    "accepted_at": {
+      "$ref": "#/$defs/dateTime"
+    },
+    "signer_key_id": {
+      "$ref": "#/$defs/id"
+    },
+    "signer_type": {
+      "const": "human"
+    },
+    "reviewer_role": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "human_signature": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "acceptance_keyring_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "release_id": {
+      "$ref": "#/$defs/id"
+    },
+    "attempt_id": {
+      "type": "string",
+      "pattern": "^attempt-[0-9a-f]{64}$"
+    },
+    "source_commit_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "runtime_image_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "t1_trusted_keyring_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "t1_release_raw_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "t1_release_canonical_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "manifest_raw_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "manifest_canonical_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "consume_marker_raw_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "terminal_seal_raw_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "terminal_seal_canonical_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "artifact_sha256": {
+      "$ref": "#/$defs/artifactHashes"
+    },
+    "bundle_index_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "snapshot_id": {
+      "$ref": "#/$defs/id"
+    },
+    "audit_window": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "start",
+        "end_exclusive",
+        "trading_day"
+      ],
+      "properties": {
+        "start": {
+          "$ref": "#/$defs/dateTime"
+        },
+        "end_exclusive": {
+          "$ref": "#/$defs/dateTime"
+        },
+        "trading_day": {
+          "type": "string",
+          "pattern": "^[0-9]{8}$"
+        }
+      }
+    },
+    "endpoint_identity_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "questdb_build_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "consumed_at": {
+      "$ref": "#/$defs/dateTime"
+    },
+    "started_at": {
+      "$ref": "#/$defs/dateTime"
+    },
+    "ended_at": {
+      "$ref": "#/$defs/dateTime"
+    },
+    "external_archive": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "custody_id",
+        "archive_type",
+        "archive_locator_sha256",
+        "custody_identity_raw_sha256",
+        "custody_identity_canonical_sha256",
+        "archived_bundle_index_sha256",
+        "archived_at",
+        "independent_custody_asserted",
+        "immutability_asserted"
+      ],
+      "properties": {
+        "custody_id": {
+          "$ref": "#/$defs/id"
+        },
+        "archive_type": {
+          "enum": [
+            "WORM",
+            "APPEND_ONLY"
+          ]
+        },
+        "archive_locator_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "custody_identity_raw_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "custody_identity_canonical_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "archived_bundle_index_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "archived_at": {
+          "$ref": "#/$defs/dateTime"
+        },
+        "independent_custody_asserted": {
+          "const": true
+        },
+        "immutability_asserted": {
+          "const": true
+        }
+      }
+    },
+    "terminal_state": {
+      "const": "SUCCEEDED_P0_PASS"
+    },
+    "p0_pass": {
+      "const": true
+    },
+    "proof_verified": {
+      "const": true
+    },
+    "write_probe_attempted": {
+      "const": false
+    },
+    "database_mutations": {
+      "const": 0
+    },
+    "orders_sent": {
+      "const": 0
+    },
+    "positions_modified": {
+      "const": 0
+    },
+    "dispatch_changed": {
+      "const": false
+    },
+    "p0_accepted": {
+      "const": true
+    },
+    "p0_acceptance_scope": {
+      "const": "INDEPENDENT_SIGNED_HUMAN_ACCEPTANCE"
+    },
+    "source_terminal_integrity_scope": {
+      "const": "CREATE_ONLY_LOCAL_RECORD_REQUIRES_EXTERNAL_CUSTODY"
+    },
+    "collection_authorized": {
+      "const": false
+    },
+    "runtime_activation_authorized": {
+      "const": false
+    },
+    "order_authorized": {
+      "const": false
+    },
+    "position_mutation_authorized": {
+      "const": false
+    },
+    "dispatch_authorized": {
+      "const": false
+    },
+    "replacement_authorized": {
+      "const": false
+    },
+    "production_authorized": {
+      "const": false
+    },
+    "automatic_promotion_authorized": {
+      "const": false
+    },
+    "signature": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{8,128}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "dateTime": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "artifactHashes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "audit_json",
+        "audit_csv",
+        "audit_markdown",
+        "readonly_proof"
+      ],
+      "properties": {
+        "audit_json": {
+          "$ref": "#/$defs/sha256"
+        },
+        "audit_csv": {
+          "$ref": "#/$defs/sha256"
+        },
+        "audit_markdown": {
+          "$ref": "#/$defs/sha256"
+        },
+        "readonly_proof": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    }
+  }
+}
