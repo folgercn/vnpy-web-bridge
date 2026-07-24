@@ -39,9 +39,15 @@ production_allowed=false
 snapshot_producer_status=NOT_IMPLEMENTED_REQUIRES_SEPARATE_AUTHORITY
 ```
 
-`valid=true` 只表示输入快照通过 schema、签名、自洽性、连续性和 RPC 合约规格校验，不表示正式 forward producer 已实现或已获得授权。未来 producer 必须走独立 authority 与 schema 变更。
+状态语义刻意拆分：
 
-`GET /status` 只返回内存快照，不读文件、不写连续性状态、不调用 RPC。只有 admin `POST /reload` 会读取并重新验证签名快照；失败时当前状态变为 invalid，但不会覆盖最后一次已接受的独立 C_FAST state。`COMMODITY_C_FAST_SHADOW_ENABLED=false` 时 reload 只做 preview validation，不写 state/evidence；启用后才可接受快照。三条 C_FAST 路径必须互异，且不得与 baseline、position-manager snapshot/state/session 路径重合。
+- `validation_valid=true`：输入通过 schema、签名、自洽性、连续性和 RPC 合约规格校验；
+- `valid=true`：上述校验通过，并且服务已启用、快照已进入 authoritative state；
+- `accepted=true`：当前返回对应已接受的 state receipt。
+
+三者都不表示正式 forward producer 已实现或已获得授权。未来 producer 必须走独立 authority 与 schema 变更。
+
+`GET /status` 只返回内存快照，不读文件、不写连续性状态、不调用 RPC。只有 admin `POST /reload` 会读取并重新验证签名快照；失败时当前状态变为 invalid，但不会覆盖最后一次已接受的独立 C_FAST state。`COMMODITY_C_FAST_SHADOW_ENABLED=false` 时 reload 只做 preview validation，返回 `validation_valid=true, valid=false, accepted=false`，且不写 state/evidence；启用后才可接受快照。三条 C_FAST 路径必须互异，且不得与 baseline、position-manager snapshot/state/session 路径重合。
 
 ## 配置
 
@@ -50,10 +56,10 @@ COMMODITY_C_FAST_SHADOW_ENABLED=false
 COMMODITY_C_FAST_SHADOW_SNAPSHOT_PATH=
 COMMODITY_C_FAST_SHADOW_STATE_PATH=logs/commodity-c-fast-shadow/state.json
 COMMODITY_C_FAST_SHADOW_EVIDENCE_PATH=logs/commodity-c-fast-shadow/evidence.jsonl
-COMMODITY_C_FAST_SHADOW_TRUSTED_PUBLIC_KEYS_JSON={}
+COMMODITY_C_FAST_SHADOW_TRUSTED_PUBLIC_KEYS_JSON={"c-fast-research-1":{"public_key_base64":"<base64-32-byte-ed25519-public-key>","purpose":"research_snapshot_signer"}}
 ```
 
-生产环境启用时，snapshot path 和 C_FAST 专用 Ed25519 公钥集必须同时存在。该开关不依赖 `WEB_TRADE_ENABLED`，也不会改变该开关。
+生产环境启用时，snapshot path 和 C_FAST 专用 Ed25519 公钥集必须同时存在。每个 trusted key entry 只允许 `public_key_base64` 和 `purpose`，且 purpose 必须严格等于 `research_snapshot_signer`；其他用途的 Ed25519 key 会 fail closed。该开关不依赖 `WEB_TRADE_ENABLED`，也不会改变该开关。
 
 ## 验证内容
 
@@ -61,7 +67,7 @@ reload 全部通过后才原子接受快照：
 
 1. strict schema，未知字段 fail closed，NaN/Inf 禁止；
 2. C_FAST 身份、冻结规则哈希和所有 authority literal；
-3. Ed25519 signer key 与签名；
+3. Ed25519 signer key、`research_snapshot_signer` purpose 与签名；
 4. Bridge 重算的 `formula_target_binding_sha256`；
 5. source month/day、input cutoff、snapshot created time、reference observed time、服务 wall clock 与 next-month execution 的可证明因果/月界；
 6. 十品种完整唯一、固定 sector、exact contract 格式；
@@ -90,7 +96,7 @@ contract_alignment=RPC_SPEC_VERIFIED
 
 `reference_open_price` 只允许在 execution day official open 已观测后签入；因此 PR-B 是零订单 Shadow 输入验证，不是“在同一开盘价之前生成并发单”的授权。
 
-独立 state 文件包含 checksum，是接受事实的 authoritative receipt；JSONL reload evidence 为附加审计记录，写入失败会在 status 中显式显示，但不会反向赋予或撤销任何执行权。
+独立 state 文件包含 checksum，是接受事实的 authoritative receipt；JSONL reload evidence 为附加审计记录，写入失败会在 status 中显式显示，但不会反向赋予或撤销任何执行权。state 加载失败时，status 和失败 evidence 会保留结构化根因，例如 `STATE_JSON_INVALID`、`STATE_SCHEMA_INVALID`、`STATE_CHECKSUM_MISMATCH` 或 `STATE_TARGET_UNIVERSE_INVALID`；reload 总体仍以 `CONTINUITY_STATE_CORRUPT` fail closed。
 
 ## 签名
 

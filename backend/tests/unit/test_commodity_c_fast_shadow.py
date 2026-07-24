@@ -76,7 +76,14 @@ def public_key_json(private_key: Ed25519PrivateKey) -> str:
             format=serialization.PublicFormat.Raw,
         )
     ).decode("ascii")
-    return json.dumps({"c-fast-research-1": encoded})
+    return json.dumps(
+        {
+            "c-fast-research-1": {
+                "public_key_base64": encoded,
+                "purpose": "research_snapshot_signer",
+            }
+        }
+    )
 
 
 def settings(
@@ -322,6 +329,36 @@ def accepted_targets(state_path: Path) -> dict[str, dict]:
     return {row["product"]: row for row in state["targets"]}
 
 
+def rewrite_state(path: Path, mutator) -> None:
+    state = json.loads(path.read_text(encoding="utf-8"))
+    mutator(state)
+    path.write_text(json.dumps(state), encoding="utf-8")
+
+
+def corrupt_state_json(path: Path) -> None:
+    path.write_text("{", encoding="utf-8")
+
+
+def corrupt_state_schema(path: Path) -> None:
+    rewrite_state(path, lambda state: state.pop("snapshot_id"))
+
+
+def corrupt_state_checksum(path: Path) -> None:
+    rewrite_state(
+        path,
+        lambda state: state["targets"][0].update(
+            {"target_quantity": state["targets"][0]["target_quantity"] + 1}
+        ),
+    )
+
+
+def corrupt_state_universe(path: Path) -> None:
+    rewrite_state(
+        path,
+        lambda state: state["targets"][-1].update({"product": "ag"}),
+    )
+
+
 def test_valid_genesis_reload_is_read_only_and_persists_independent_state(
     tmp_path: Path,
 ) -> None:
@@ -342,6 +379,7 @@ def test_valid_genesis_reload_is_read_only_and_persists_independent_state(
 
     assert before["loaded"] is False
     assert result["valid"] is True
+    assert result["validation_valid"] is True
     assert result["accepted"] is True
     assert result["snapshot_hash"] == snapshot_hash
     assert result["continuity_state"] == "genesis"
@@ -606,6 +644,38 @@ def test_bad_signature_fails_before_acceptance(tmp_path: Path) -> None:
     assert result["error_code"] == "SIGNATURE_INVALID"
 
 
+def test_signer_key_requires_research_snapshot_purpose(
+    tmp_path: Path,
+) -> None:
+    private_key = Ed25519PrivateKey.generate()
+    snapshot_path = tmp_path / "snapshot.json"
+    signed, _ = sign_payload(unsigned_payload(), private_key)
+    write_snapshot(snapshot_path, signed)
+    configured = settings(tmp_path, private_key, snapshot_path)
+    trusted = json.loads(
+        configured.commodity_c_fast_shadow_trusted_public_keys_json
+    )
+    trusted["c-fast-research-1"]["purpose"] = "execution_release_signer"
+    configured = configured.model_copy(
+        update={
+            "commodity_c_fast_shadow_trusted_public_keys_json": json.dumps(
+                trusted
+            )
+        }
+    )
+    service = CommodityCFastShadowService(
+        settings=configured,
+        contract_loader=contract_loader,
+        clock=fixed_clock,
+    )
+
+    result = service.reload(operator="admin", role="admin", source_ip=None)
+
+    assert result["valid"] is False
+    assert result["validation_valid"] is False
+    assert result["error_code"] == "TRUSTED_KEY_PURPOSE_INVALID"
+
+
 def test_disabled_reload_validates_without_mutating_state_or_evidence(
     tmp_path: Path,
 ) -> None:
@@ -624,12 +694,47 @@ def test_disabled_reload_validates_without_mutating_state_or_evidence(
 
     result = service.reload(operator="admin", role="admin", source_ip=None)
 
-    assert result["valid"] is True
+    assert result["valid"] is False
+    assert result["validation_valid"] is True
     assert result["accepted"] is False
     assert not Path(disabled_settings.commodity_c_fast_shadow_state_path).exists()
     assert not Path(
         disabled_settings.commodity_c_fast_shadow_evidence_path
     ).exists()
+
+
+def test_disabled_reload_does_not_reactivate_existing_receipt(
+    tmp_path: Path,
+) -> None:
+    private_key = Ed25519PrivateKey.generate()
+    snapshot_path = tmp_path / "snapshot.json"
+    signed, snapshot_hash = sign_payload(unsigned_payload(), private_key)
+    write_snapshot(snapshot_path, signed)
+    configured = settings(tmp_path, private_key, snapshot_path)
+    enabled = CommodityCFastShadowService(
+        settings=configured,
+        contract_loader=contract_loader,
+        clock=fixed_clock,
+    )
+    assert enabled.reload(
+        operator="admin", role="admin", source_ip=None
+    )["accepted"]
+    disabled = CommodityCFastShadowService(
+        settings=configured.model_copy(
+            update={"commodity_c_fast_shadow_enabled": False}
+        ),
+        contract_loader=contract_loader,
+        clock=lambda: POST_GENESIS_NOW,
+    )
+
+    result = disabled.reload(
+        operator="admin", role="admin", source_ip=None
+    )
+
+    assert result["valid"] is False
+    assert result["validation_valid"] is True
+    assert result["accepted"] is False
+    assert result["last_accepted"]["snapshot_hash"] == snapshot_hash
 
 
 def test_enabled_paths_must_be_isolated_even_after_model_copy(
@@ -695,7 +800,18 @@ def test_linked_snapshot_with_wrong_previous_hash_is_rejected(
     assert result["error_code"] == "PREVIOUS_SNAPSHOT_HASH_MISMATCH"
 
 
-def test_corrupt_state_checksum_blocks_reload(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("mutator", "expected_state_error"),
+    [
+        (corrupt_state_json, "STATE_JSON_INVALID"),
+        (corrupt_state_schema, "STATE_SCHEMA_INVALID"),
+        (corrupt_state_checksum, "STATE_CHECKSUM_MISMATCH"),
+        (corrupt_state_universe, "STATE_TARGET_UNIVERSE_INVALID"),
+    ],
+)
+def test_corrupt_state_reason_is_preserved_in_status_and_evidence(
+    tmp_path: Path, mutator, expected_state_error: str
+) -> None:
     private_key = Ed25519PrivateKey.generate()
     snapshot_path = tmp_path / "snapshot.json"
     signed, _ = sign_payload(unsigned_payload(), private_key)
@@ -710,9 +826,7 @@ def test_corrupt_state_checksum_blocks_reload(tmp_path: Path) -> None:
         operator="admin", role="admin", source_ip=None
     )["valid"]
     state_path = Path(configured.commodity_c_fast_shadow_state_path)
-    state = json.loads(state_path.read_text())
-    state["targets"][0]["target_quantity"] += 1
-    state_path.write_text(json.dumps(state), encoding="utf-8")
+    mutator(state_path)
 
     recovered = CommodityCFastShadowService(
         settings=configured,
@@ -724,7 +838,17 @@ def test_corrupt_state_checksum_blocks_reload(tmp_path: Path) -> None:
     )
 
     assert result["valid"] is False
+    assert result["validation_valid"] is False
     assert result["error_code"] == "CONTINUITY_STATE_CORRUPT"
+    assert result["state_load_error"] == expected_state_error
+    evidence = [
+        json.loads(line)
+        for line in Path(
+            configured.commodity_c_fast_shadow_evidence_path
+        ).read_text(encoding="utf-8").splitlines()
+    ]
+    assert evidence[-1]["error_code"] == "CONTINUITY_STATE_CORRUPT"
+    assert evidence[-1]["state_load_error"] == expected_state_error
 
 
 def test_state_receipt_remains_authoritative_when_reload_log_is_unavailable(
@@ -888,6 +1012,29 @@ def test_production_enabled_shadow_requires_dedicated_trust_set(
         match="COMMODITY_C_FAST_SHADOW_TRUSTED_PUBLIC_KEYS_JSON",
     ):
         Settings(**common)
+
+
+def test_production_enabled_shadow_rejects_wrong_key_purpose(
+    tmp_path: Path,
+) -> None:
+    private_key = Ed25519PrivateKey.generate()
+    trusted = json.loads(public_key_json(private_key))
+    trusted["c-fast-research-1"]["purpose"] = "execution_release_signer"
+    with pytest.raises(ValueError, match="purpose must be"):
+        Settings(
+            app_env="production",
+            jwt_secret_key="x" * 32,
+            auth_users_json=json.dumps(
+                [{"username": "admin", "role": "admin"}]
+            ),
+            commodity_c_fast_shadow_enabled=True,
+            commodity_c_fast_shadow_snapshot_path=str(
+                tmp_path / "snapshot.json"
+            ),
+            commodity_c_fast_shadow_trusted_public_keys_json=json.dumps(
+                trusted
+            ),
+        )
 
 
 def test_enabled_shadow_rejects_path_collision_at_config_load(

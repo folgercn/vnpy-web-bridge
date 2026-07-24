@@ -16,6 +16,8 @@ class FakeCFastShadowService:
             "configured": True,
             "enabled": True,
             "valid": True,
+            "validation_valid": True,
+            "accepted": True,
             "candidate_id": "C_FAST_CROSS_SECTION_NEUTRAL",
             "mode": "shadow_only",
             "authority_granted": False,

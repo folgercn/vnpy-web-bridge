@@ -168,7 +168,9 @@ class CommodityCFastShadowService:
                         snapshot,
                         snapshot_hash,
                         continuity_state,
-                        accepted=True,
+                        accepted=(
+                            self.settings.commodity_c_fast_shadow_enabled
+                        ),
                         idempotent=True,
                         reload_evidence_persisted=None,
                     )
@@ -236,7 +238,9 @@ class CommodityCFastShadowService:
                             "operator": operator,
                             "role": role,
                             "valid": False,
+                            "validation_valid": False,
                             "error_code": code,
+                            "state_load_error": self._state_load_error,
                             "authority_granted": False,
                             "dispatch_allowed": False,
                             "replacement_allowed": False,
@@ -253,6 +257,8 @@ class CommodityCFastShadowService:
             "enabled": self.settings.commodity_c_fast_shadow_enabled,
             "loaded": False,
             "valid": False,
+            "validation_valid": False,
+            "accepted": False,
             "candidate_id": "C_FAST_CROSS_SECTION_NEUTRAL",
             "mode": "shadow_only",
             "read_only": True,
@@ -277,7 +283,8 @@ class CommodityCFastShadowService:
             "configured": True,
             "enabled": self.settings.commodity_c_fast_shadow_enabled,
             "loaded": True,
-            "valid": True,
+            "valid": accepted,
+            "validation_valid": True,
             "candidate_id": snapshot.candidate_id,
             "frozen_rule_id": snapshot.frozen_rule_id,
             "frozen_rule_sha256": snapshot.frozen_rule_sha256,
@@ -331,6 +338,8 @@ class CommodityCFastShadowService:
             "enabled": self.settings.commodity_c_fast_shadow_enabled,
             "loaded": loaded,
             "valid": False,
+            "validation_valid": False,
+            "accepted": False,
             "candidate_id": "C_FAST_CROSS_SECTION_NEUTRAL",
             "mode": "shadow_only",
             "read_only": True,
@@ -364,6 +373,7 @@ class CommodityCFastShadowService:
             "operator": operator,
             "role": role,
             "valid": valid,
+            "validation_valid": valid,
             "snapshot_id": snapshot.snapshot_id,
             "snapshot_hash": snapshot_hash,
             "source_month": snapshot.source_month,
@@ -462,9 +472,18 @@ class CommodityCFastShadowService:
         if not isinstance(raw, dict) or not raw:
             raise CFastShadowInvalidError("TRUSTED_KEYS_EMPTY")
         result: dict[str, Ed25519PublicKey] = {}
-        for key_id, encoded in raw.items():
+        for key_id, entry in raw.items():
+            if not isinstance(entry, dict) or set(entry) != {
+                "public_key_base64",
+                "purpose",
+            }:
+                raise CFastShadowInvalidError("TRUSTED_KEY_ENTRY_INVALID")
+            if entry["purpose"] != "research_snapshot_signer":
+                raise CFastShadowInvalidError("TRUSTED_KEY_PURPOSE_INVALID")
             try:
-                key_bytes = base64.b64decode(str(encoded), validate=True)
+                key_bytes = base64.b64decode(
+                    str(entry["public_key_base64"]), validate=True
+                )
                 if len(key_bytes) != 32:
                     raise ValueError
                 result[str(key_id)] = Ed25519PublicKey.from_public_bytes(
@@ -782,27 +801,35 @@ class CommodityCFastShadowService:
         if not path.exists():
             return None
         try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-            state = CommodityCFastShadowStateDTO.model_validate(raw)
-            products = tuple(
-                sorted(row.product for row in state.targets)
-            )
-            if products != PRODUCTS:
-                raise ValueError
-            core = state.model_dump(
-                mode="json", exclude={"state_checksum"}
-            )
-            if state.state_checksum != sha256_json(core):
-                raise ValueError
-            if (
-                state.accepted_at_utc.tzinfo is None
-                or state.accepted_at_utc.utcoffset() is None
-            ):
-                raise ValueError
-            return state.model_dump(mode="json")
-        except Exception as exc:
-            self._state_load_error = exc.__class__.__name__
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            self._state_load_error = "STATE_READ_FAILED"
             return None
+        try:
+            raw = json.loads(text)
+        except json.JSONDecodeError:
+            self._state_load_error = "STATE_JSON_INVALID"
+            return None
+        try:
+            state = CommodityCFastShadowStateDTO.model_validate(raw)
+        except ValidationError:
+            self._state_load_error = "STATE_SCHEMA_INVALID"
+            return None
+        products = tuple(sorted(row.product for row in state.targets))
+        if products != PRODUCTS:
+            self._state_load_error = "STATE_TARGET_UNIVERSE_INVALID"
+            return None
+        core = state.model_dump(mode="json", exclude={"state_checksum"})
+        if state.state_checksum != sha256_json(core):
+            self._state_load_error = "STATE_CHECKSUM_MISMATCH"
+            return None
+        if (
+            state.accepted_at_utc.tzinfo is None
+            or state.accepted_at_utc.utcoffset() is None
+        ):
+            self._state_load_error = "STATE_ACCEPTED_TIMEZONE_MISSING"
+            return None
+        return state.model_dump(mode="json")
 
     def _verify_path_isolation(self) -> None:
         c_paths = {

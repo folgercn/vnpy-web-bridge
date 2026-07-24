@@ -201,19 +201,30 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "COMMODITY_C_FAST_SHADOW_TRUSTED_PUBLIC_KEYS_JSON must contain at least one Ed25519 public key"
                 )
-            try:
-                public_keys = [
-                    base64.b64decode(str(value), validate=True)
-                    for value in trusted_keys.values()
-                ]
-            except (ValueError, binascii.Error) as exc:
-                raise ValueError(
-                    "COMMODITY_C_FAST_SHADOW_TRUSTED_PUBLIC_KEYS_JSON contains invalid base64"
-                ) from exc
-            if any(len(value) != 32 for value in public_keys):
-                raise ValueError(
-                    "COMMODITY_C_FAST_SHADOW_TRUSTED_PUBLIC_KEYS_JSON must contain 32-byte Ed25519 keys"
-                )
+            for entry in trusted_keys.values():
+                if not isinstance(entry, dict) or set(entry) != {
+                    "public_key_base64",
+                    "purpose",
+                }:
+                    raise ValueError(
+                        "COMMODITY_C_FAST_SHADOW_TRUSTED_PUBLIC_KEYS_JSON entries must contain only public_key_base64 and purpose"
+                    )
+                if entry["purpose"] != "research_snapshot_signer":
+                    raise ValueError(
+                        "COMMODITY_C_FAST_SHADOW_TRUSTED_PUBLIC_KEYS_JSON purpose must be research_snapshot_signer"
+                    )
+                try:
+                    public_key = base64.b64decode(
+                        str(entry["public_key_base64"]), validate=True
+                    )
+                except (ValueError, binascii.Error) as exc:
+                    raise ValueError(
+                        "COMMODITY_C_FAST_SHADOW_TRUSTED_PUBLIC_KEYS_JSON contains invalid base64"
+                    ) from exc
+                if len(public_key) != 32:
+                    raise ValueError(
+                        "COMMODITY_C_FAST_SHADOW_TRUSTED_PUBLIC_KEYS_JSON must contain 32-byte Ed25519 keys"
+                    )
         allowed_levels = {"info", "warning", "critical"}
         levels = {item.strip().lower() for item in self.telegram_send_levels.split(",") if item.strip()}
         if not levels or levels - allowed_levels:
