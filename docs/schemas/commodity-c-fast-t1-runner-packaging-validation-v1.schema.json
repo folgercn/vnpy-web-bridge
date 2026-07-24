@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vnpy-web-bridge:schema:commodity-c-fast-t1-runner-packaging-validation-v1",
+  "title": "C_FAST T1 runner packaging validation v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "status",
+    "template_sha256",
+    "containerfile_sha256",
+    "checks",
+    "activation_allowed",
+    "authority_granted",
+    "production_queried",
+    "database_mutations",
+    "orders_sent"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "commodity_c_fast_t1_runner_packaging_validation_v1"
+    },
+    "status": {
+      "const": "PASS"
+    },
+    "template_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "containerfile_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "checks": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "preparation_metadata_frozen",
+        "dedicated_readonly_user_file_secret",
+        "global_readonly_forbidden",
+        "writer_dsn_absent",
+        "runner_non_activatable",
+        "runner_network_disabled",
+        "runner_hardening_frozen",
+        "runner_image_digest_required",
+        "containerfile_base_digest_pinned",
+        "containerfile_minimal_inputs",
+        "containerfile_non_activatable"
+      ],
+      "properties": {
+        "preparation_metadata_frozen": {
+          "const": true
+        },
+        "dedicated_readonly_user_file_secret": {
+          "const": true
+        },
+        "global_readonly_forbidden": {
+          "const": true
+        },
+        "writer_dsn_absent": {
+          "const": true
+        },
+        "runner_non_activatable": {
+          "const": true
+        },
+        "runner_network_disabled": {
+          "const": true
+        },
+        "runner_hardening_frozen": {
+          "const": true
+        },
+        "runner_image_digest_required": {
+          "const": true
+        },
+        "containerfile_base_digest_pinned": {
+          "const": true
+        },
+        "containerfile_minimal_inputs": {
+          "const": true
+        },
+        "containerfile_non_activatable": {
+          "const": true
+        }
+      }
+    },
+    "activation_allowed": {
+      "const": false
+    },
+    "authority_granted": {
+      "const": false
+    },
+    "production_queried": {
+      "const": false
+    },
+    "database_mutations": {
+      "const": 0
+    },
+    "orders_sent": {
+      "const": 0
+    }
+  }
+}

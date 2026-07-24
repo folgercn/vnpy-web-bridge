@@ -1,0 +1,33 @@
+FROM python:3.12-slim@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de
+
+ARG SOURCE_REVISION=UNSET
+
+LABEL org.opencontainers.image.title="vnpy-web-bridge C_FAST T1 audit runner" \
+      org.opencontainers.image.revision="${SOURCE_REVISION}" \
+      io.vnpy-web-bridge.c-fast-t1.packaging-only="true" \
+      io.vnpy-web-bridge.c-fast-t1.authority-granted="false"
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /opt/c-fast-t1
+
+RUN python -m pip install --no-cache-dir --disable-pip-version-check \
+      "psycopg[binary]==3.2.3" \
+      "jsonschema==4.26.0" \
+      "referencing==0.37.0"
+
+COPY scripts/commodity_c_fast_l1_l5_audit.py ./scripts/commodity_c_fast_l1_l5_audit.py
+COPY docs/schemas/commodity-c-fast-l1-l5-audit-manifest-v2.schema.json ./docs/schemas/commodity-c-fast-l1-l5-audit-manifest-v2.schema.json
+COPY docs/schemas/commodity-c-fast-l1-l5-audit-v1.schema.json ./docs/schemas/commodity-c-fast-l1-l5-audit-v1.schema.json
+COPY docs/schemas/commodity-c-fast-l1-l5-audit-v2.schema.json ./docs/schemas/commodity-c-fast-l1-l5-audit-v2.schema.json
+COPY docs/schemas/commodity-c-fast-questdb-readonly-proof-v1.schema.json ./docs/schemas/commodity-c-fast-questdb-readonly-proof-v1.schema.json
+
+RUN python -m py_compile scripts/commodity_c_fast_l1_l5_audit.py \
+    && chmod -R a-w /opt/c-fast-t1
+
+USER 65532:65532
+
+# Packaging-only invariant. The future signed one-shot executor must provide the
+# audited command and mounts; this image cannot query anything by default.
+ENTRYPOINT ["/bin/false"]
