@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vnpy-web-bridge:schema:commodity-c-fast-t1-one-shot-runtime-validation-v1",
+  "title": "C_FAST T1 one-shot runtime validation v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "status",
+    "template_sha256",
+    "containerfile_sha256",
+    "checks",
+    "deployment_mutation_authorized",
+    "production_query_authorized",
+    "database_mutations",
+    "orders_sent",
+    "positions_modified",
+    "dispatch_changed"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "commodity_c_fast_t1_one_shot_runtime_validation_v1"
+    },
+    "status": {
+      "const": "PASS"
+    },
+    "template_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "containerfile_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "checks": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "runtime_metadata_frozen",
+        "signed_release_entrypoint_frozen",
+        "non_root_read_only_runtime",
+        "fixed_pin_input_dsn_custody_mounts",
+        "external_network_reference_frozen",
+        "trading_and_writer_capabilities_absent",
+        "containerfile_base_digest_pinned",
+        "containerfile_dependencies_pinned",
+        "containerfile_runtime_bundle_complete",
+        "containerfile_signer_absent",
+        "containerfile_entrypoint_frozen"
+      ],
+      "properties": {
+        "runtime_metadata_frozen": {
+          "const": true
+        },
+        "signed_release_entrypoint_frozen": {
+          "const": true
+        },
+        "non_root_read_only_runtime": {
+          "const": true
+        },
+        "fixed_pin_input_dsn_custody_mounts": {
+          "const": true
+        },
+        "external_network_reference_frozen": {
+          "const": true
+        },
+        "trading_and_writer_capabilities_absent": {
+          "const": true
+        },
+        "containerfile_base_digest_pinned": {
+          "const": true
+        },
+        "containerfile_dependencies_pinned": {
+          "const": true
+        },
+        "containerfile_runtime_bundle_complete": {
+          "const": true
+        },
+        "containerfile_signer_absent": {
+          "const": true
+        },
+        "containerfile_entrypoint_frozen": {
+          "const": true
+        }
+      }
+    },
+    "deployment_mutation_authorized": {
+      "const": false
+    },
+    "production_query_authorized": {
+      "const": false
+    },
+    "database_mutations": {
+      "const": 0
+    },
+    "orders_sent": {
+      "const": 0
+    },
+    "positions_modified": {
+      "const": 0
+    },
+    "dispatch_changed": {
+      "const": false
+    }
+  }
+}

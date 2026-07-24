@@ -147,6 +147,10 @@ docker image inspect \
 本 preparation validator 不校验这些运行期字段；它们属于独立 one-shot authority
 契约。
 
+one-shot runner 已有独立的 code-only 集成合同，见
+`docs/operations/c-fast-t1-one-shot-runtime-runbook.md`。该文件不会改变本模板
+的 `/bin/false + network_mode=none` 边界，也不构成部署或查询授权。
+
 ## 6. 人工授权边界
 
 ### L1/L2：只做离线准备

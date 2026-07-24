@@ -1,0 +1,106 @@
+{
+  "x-c-fast-t1-one-shot-runtime": {
+    "schema_version": "commodity_c_fast_t1_one_shot_runtime_template_v1",
+    "code_only_template": true,
+    "deployment_mutation_authorized": false,
+    "production_query_authorized": false,
+    "requires_l3_readonly_deployment_release": true,
+    "requires_signed_one_shot_release": true
+  },
+  "services": {
+    "c-fast-t1-one-shot": {
+      "profiles": [
+        "manual-c-fast-t1-one-shot"
+      ],
+      "image": "${C_FAST_T1_RUNTIME_IMAGE_REPOSITORY:?required_repository}@${C_FAST_T1_RUNTIME_IMAGE_DIGEST:?required_sha256_digest}",
+      "entrypoint": [
+        "python",
+        "-I",
+        "/opt/c-fast-t1/scripts/commodity_c_fast_t1_one_shot.py"
+      ],
+      "command": [
+        "--release",
+        "/run/c-fast-t1-input/release.json",
+        "--trusted-keyring",
+        "/run/c-fast-t1-input/trusted-keyring.json",
+        "--manifest",
+        "/run/c-fast-t1-input/manifest.json",
+        "--dsn-file",
+        "/run/secrets/c-fast-t1-readonly.dsn",
+        "--custody-dir",
+        "/var/lib/c-fast-t1-custody",
+        "--source-commit-sha",
+        "${C_FAST_T1_SOURCE_COMMIT_SHA:?required_exact_40_char_sha}",
+        "--runtime-image-digest",
+        "${C_FAST_T1_RUNTIME_IMAGE_DIGEST:?required_sha256_digest}"
+      ],
+      "networks": [
+        "c-fast-t1-questdb-only"
+      ],
+      "read_only": true,
+      "user": "65532:65532",
+      "cap_drop": [
+        "ALL"
+      ],
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "restart": "no",
+      "pids_limit": 64,
+      "mem_limit": "1g",
+      "cpus": 1.0,
+      "tmpfs": [
+        "/tmp:rw,noexec,nosuid,nodev,size=64m"
+      ],
+      "environment": {
+        "C_FAST_T1_DEPLOYMENT_MUTATION_AUTHORIZED": "false",
+        "C_FAST_T1_ORDER_AUTHORIZED": "false",
+        "C_FAST_T1_POSITION_MUTATION_AUTHORIZED": "false",
+        "C_FAST_T1_DISPATCH_AUTHORIZED": "false"
+      },
+      "volumes": [
+        {
+          "type": "bind",
+          "source": "${C_FAST_T1_PINS_DIR:?required_root_owned_readonly_directory}",
+          "target": "/run/c-fast-t1-pins",
+          "read_only": true
+        },
+        {
+          "type": "bind",
+          "source": "${C_FAST_T1_RELEASE_FILE:?required_signed_release_file}",
+          "target": "/run/c-fast-t1-input/release.json",
+          "read_only": true
+        },
+        {
+          "type": "bind",
+          "source": "${C_FAST_T1_TRUSTED_KEYRING_FILE:?required_uid_65532_mode_0600_file}",
+          "target": "/run/c-fast-t1-input/trusted-keyring.json",
+          "read_only": true
+        },
+        {
+          "type": "bind",
+          "source": "${C_FAST_T1_MANIFEST_FILE:?required_frozen_manifest_file}",
+          "target": "/run/c-fast-t1-input/manifest.json",
+          "read_only": true
+        },
+        {
+          "type": "bind",
+          "source": "${C_FAST_T1_READONLY_DSN_FILE:?required_uid_65532_mode_0600_file}",
+          "target": "/run/secrets/c-fast-t1-readonly.dsn",
+          "read_only": true
+        },
+        {
+          "type": "bind",
+          "source": "/var/lib/c-fast-t1-custody",
+          "target": "/var/lib/c-fast-t1-custody"
+        }
+      ]
+    }
+  },
+  "networks": {
+    "c-fast-t1-questdb-only": {
+      "external": true,
+      "name": "${C_FAST_T1_QUESTDB_NETWORK:?required_preapproved_isolated_network}"
+    }
+  }
+}
