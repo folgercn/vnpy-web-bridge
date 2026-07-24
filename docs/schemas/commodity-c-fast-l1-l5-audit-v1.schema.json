@@ -1,0 +1,683 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/folgercn/vnpy-web-bridge/docs/schemas/commodity-c-fast-l1-l5-audit-v1.schema.json",
+  "title": "C_FAST L1-L5 Audit Evidence v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "candidate_id",
+    "snapshot_id",
+    "manifest_sha256",
+    "generated_at",
+    "read_only",
+    "database_mutations",
+    "audit_window",
+    "thresholds",
+    "summary",
+    "products",
+    "contracts",
+    "execution_windows",
+    "blockers",
+    "limitations"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "commodity_c_fast_l1_l5_audit_v1"
+    },
+    "candidate_id": {
+      "const": "C_FAST_CROSS_SECTION_NEUTRAL"
+    },
+    "snapshot_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{8,128}$"
+    },
+    "manifest_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "read_only": {
+      "const": true
+    },
+    "database_mutations": {
+      "const": 0
+    },
+    "audit_window": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "start",
+        "end_exclusive",
+        "display_timezone"
+      ],
+      "properties": {
+        "start": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "end_exclusive": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "display_timezone": {
+          "const": "Asia/Shanghai"
+        }
+      }
+    },
+    "thresholds": {
+      "type": "object"
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "expected_products",
+        "observed_products",
+        "contracts",
+        "rows",
+        "classification_counts",
+        "overall_conclusion",
+        "p0_pass"
+      ],
+      "properties": {
+        "expected_products": {
+          "const": 10
+        },
+        "observed_products": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10
+        },
+        "contracts": {
+          "type": "integer",
+          "minimum": 10,
+          "maximum": 20
+        },
+        "rows": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "classification_counts": {
+          "$ref": "#/$defs/classificationCounts"
+        },
+        "overall_conclusion": {
+          "$ref": "#/$defs/classification"
+        },
+        "p0_pass": {
+          "type": "boolean"
+        }
+      }
+    },
+    "products": {
+      "type": "array",
+      "minItems": 10,
+      "maxItems": 10,
+      "items": {
+        "$ref": "#/$defs/product"
+      }
+    },
+    "contracts": {
+      "type": "array",
+      "minItems": 10,
+      "maxItems": 20,
+      "items": {
+        "$ref": "#/$defs/contract"
+      }
+    },
+    "execution_windows": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/executionWindow"
+      }
+    },
+    "blockers": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "limitations": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "$defs": {
+    "classification": {
+      "enum": [
+        "L1_ONLY",
+        "L5_USABLE",
+        "DEGRADED",
+        "UNUSABLE"
+      ]
+    },
+    "classificationCounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "L1_ONLY",
+        "L5_USABLE",
+        "DEGRADED",
+        "UNUSABLE"
+      ],
+      "properties": {
+        "L1_ONLY": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "L5_USABLE": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "DEGRADED": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "UNUSABLE": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "product": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "product",
+        "rows",
+        "contracts",
+        "execution_windows",
+        "missing_sessions",
+        "insufficient_sessions",
+        "classification"
+      ],
+      "properties": {
+        "product": {
+          "enum": [
+            "ag",
+            "al",
+            "au",
+            "bu",
+            "cu",
+            "rb",
+            "ru",
+            "sc",
+            "sp",
+            "zn"
+          ]
+        },
+        "rows": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "contracts": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2
+        },
+        "execution_windows": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "missing_sessions": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "night_open",
+              "night_session",
+              "day_open",
+              "day_session"
+            ]
+          }
+        },
+        "insufficient_sessions": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "night_open",
+              "night_session",
+              "day_open",
+              "day_session"
+            ]
+          }
+        },
+        "classification": {
+          "$ref": "#/$defs/classification"
+        }
+      }
+    },
+    "contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "product",
+        "role",
+        "exact_contract",
+        "vt_symbol",
+        "classification",
+        "all",
+        "sessions"
+      ],
+      "properties": {
+        "product": {
+          "type": "string"
+        },
+        "role": {
+          "enum": [
+            "current",
+            "previous"
+          ]
+        },
+        "exact_contract": {
+          "type": "string"
+        },
+        "vt_symbol": {
+          "type": "string"
+        },
+        "classification": {
+          "$ref": "#/$defs/classification"
+        },
+        "all": {
+          "$ref": "#/$defs/metrics"
+        },
+        "sessions": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "night_open",
+            "night_session",
+            "day_open",
+            "day_session"
+          ],
+          "properties": {
+            "night_open": {
+              "$ref": "#/$defs/metrics"
+            },
+            "night_session": {
+              "$ref": "#/$defs/metrics"
+            },
+            "day_open": {
+              "$ref": "#/$defs/metrics"
+            },
+            "day_session": {
+              "$ref": "#/$defs/metrics"
+            }
+          }
+        }
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rows",
+        "l1_complete_rows",
+        "l1_complete_ratio",
+        "l5_complete_rows",
+        "l5_complete_ratio",
+        "depth_levels",
+        "transport_latency_ms",
+        "tick_interval_ms",
+        "cadence_gap_count",
+        "session_break_gap_count",
+        "volume_semantics",
+        "anomalies",
+        "classification"
+      ],
+      "properties": {
+        "rows": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "l1_complete_rows": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "l1_complete_ratio": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "l5_complete_rows": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "l5_complete_ratio": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "depth_levels": {
+          "type": "array",
+          "minItems": 5,
+          "maxItems": 5,
+          "items": {
+            "$ref": "#/$defs/depthLevel"
+          }
+        },
+        "transport_latency_ms": {
+          "$ref": "#/$defs/distribution"
+        },
+        "tick_interval_ms": {
+          "$ref": "#/$defs/distribution"
+        },
+        "cadence_gap_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "session_break_gap_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "volume_semantics": {
+          "$ref": "#/$defs/volumeSemantics"
+        },
+        "anomalies": {
+          "$ref": "#/$defs/anomalies"
+        },
+        "classification": {
+          "$ref": "#/$defs/classification"
+        }
+      }
+    },
+    "depthLevel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "level",
+        "bid_price_nonzero_ratio",
+        "bid_volume_nonzero_ratio",
+        "bid_pair_nonzero_ratio",
+        "ask_price_nonzero_ratio",
+        "ask_volume_nonzero_ratio",
+        "ask_pair_nonzero_ratio"
+      ],
+      "properties": {
+        "level": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5
+        },
+        "bid_price_nonzero_ratio": {
+          "$ref": "#/$defs/ratio"
+        },
+        "bid_volume_nonzero_ratio": {
+          "$ref": "#/$defs/ratio"
+        },
+        "bid_pair_nonzero_ratio": {
+          "$ref": "#/$defs/ratio"
+        },
+        "ask_price_nonzero_ratio": {
+          "$ref": "#/$defs/ratio"
+        },
+        "ask_volume_nonzero_ratio": {
+          "$ref": "#/$defs/ratio"
+        },
+        "ask_pair_nonzero_ratio": {
+          "$ref": "#/$defs/ratio"
+        }
+      }
+    },
+    "ratio": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "distribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "samples",
+        "p50",
+        "p95",
+        "p99",
+        "max"
+      ],
+      "properties": {
+        "samples": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "p50": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "p95": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "p99": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "max": {
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      }
+    },
+    "volumeSemantics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cumulative_volume_decreases",
+        "positive_volume_deltas",
+        "last_volume_matches_positive_delta",
+        "last_volume_match_ratio",
+        "volume_change_without_last_volume",
+        "last_volume_without_volume_change"
+      ],
+      "properties": {
+        "cumulative_volume_decreases": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "positive_volume_deltas": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "last_volume_matches_positive_delta": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "last_volume_match_ratio": {
+          "$ref": "#/$defs/ratio"
+        },
+        "volume_change_without_last_volume": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "last_volume_without_volume_change": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "anomalies": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "crossed_rows",
+        "crossed_ratio",
+        "locked_rows",
+        "locked_ratio",
+        "bid_inverted_rows",
+        "bid_inverted_ratio",
+        "ask_inverted_rows",
+        "ask_inverted_ratio",
+        "transport_stale_rows",
+        "transport_stale_ratio",
+        "clock_skew_rows",
+        "clock_skew_ratio",
+        "missing_received_at_rows",
+        "missing_ingest_id_rows",
+        "missing_ingest_seq_rows",
+        "missing_trading_day_rows",
+        "missing_last_price_rows",
+        "duplicate_ingest_ids",
+        "duplicate_exchange_timestamps",
+        "same_ts_duplicate_ingest_seq"
+      ],
+      "properties": {
+        "crossed_rows": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "crossed_ratio": {
+          "$ref": "#/$defs/ratio"
+        },
+        "locked_rows": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "locked_ratio": {
+          "$ref": "#/$defs/ratio"
+        },
+        "bid_inverted_rows": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "bid_inverted_ratio": {
+          "$ref": "#/$defs/ratio"
+        },
+        "ask_inverted_rows": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "ask_inverted_ratio": {
+          "$ref": "#/$defs/ratio"
+        },
+        "transport_stale_rows": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "transport_stale_ratio": {
+          "$ref": "#/$defs/ratio"
+        },
+        "clock_skew_rows": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "clock_skew_ratio": {
+          "$ref": "#/$defs/ratio"
+        },
+        "missing_received_at_rows": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "missing_ingest_id_rows": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "missing_ingest_seq_rows": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "missing_trading_day_rows": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "missing_last_price_rows": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "duplicate_ingest_ids": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "duplicate_exchange_timestamps": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "same_ts_duplicate_ingest_seq": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "executionWindow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "window_id",
+        "product",
+        "vt_symbol",
+        "execution_time",
+        "window_seconds",
+        "rows_before",
+        "rows_after",
+        "last_before_delay_ms",
+        "first_after_delay_ms",
+        "max_gap_seconds",
+        "classification",
+        "metrics"
+      ],
+      "properties": {
+        "window_id": {
+          "type": "string"
+        },
+        "product": {
+          "type": "string"
+        },
+        "vt_symbol": {
+          "type": "string"
+        },
+        "execution_time": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "window_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3600
+        },
+        "rows_before": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "rows_after": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "last_before_delay_ms": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "first_after_delay_ms": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "max_gap_seconds": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "classification": {
+          "$ref": "#/$defs/classification"
+        },
+        "metrics": {
+          "$ref": "#/$defs/metrics"
+        }
+      }
+    }
+  }
+}
