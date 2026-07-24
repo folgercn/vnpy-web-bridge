@@ -72,6 +72,9 @@ TRUSTED_KEY_PURPOSE = "readonly_deployment_release_signer"
 CUSTODY_IDENTITY_VERSION = (
     "commodity_c_fast_readonly_deployment_custody_identity_v1"
 )
+ISOLATED_NETWORK_ATTESTATION_VERSION = (
+    "commodity_c_fast_readonly_isolated_network_attestation_v1"
+)
 CUSTODY_IDENTITY_FILENAME = "readonly-deployment-custody-identity.json"
 MAX_RELEASE_TTL = timedelta(hours=2)
 MAX_EVIDENCE_BYTES = 8 * 1024 * 1024
@@ -79,6 +82,69 @@ MAX_JSON_BYTES = 2 * 1024 * 1024
 ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{8,128}$")
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 IMAGE_DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+RELEASE_REQUIRED_TRUE_FIELDS = (
+    "secret_file_regular_file_required",
+    "principal_must_differ_from_admin",
+    "writer_continuity_required",
+    "post_restart_health_required",
+    "backlog_drain_required",
+    "rollback_required",
+    "isolated_network_required",
+    "isolated_network_internal_required",
+    "readonly_principal_deployment_authorized",
+    "readonly_secret_file_installation_authorized",
+    "questdb_restart_authorized",
+)
+RELEASE_REQUIRED_FALSE_FIELDS = (
+    "secret_file_symlink_allowed",
+    "secret_content_read_authorized",
+    "global_pgwire_readonly_allowed",
+    "instance_readonly_allowed",
+    "isolated_network_unexpected_members_allowed",
+    "isolated_network_docker_socket_connectivity_allowed",
+    "isolated_network_rpc_connectivity_allowed",
+    "isolated_network_trading_connectivity_allowed",
+    "questdb_recreate_authorized",
+    "questdb_image_change_authorized",
+    "writer_identity_mutation_authorized",
+    "writer_secret_mutation_authorized",
+    "network_mutation_authorized",
+    "unscoped_deployment_mutation_authorized",
+    "production_query_authorized",
+    "readonly_query_authorized",
+    "collection_authorized",
+    "write_probe_authorized",
+    "database_mutation_authorized",
+    "order_authorized",
+    "position_mutation_authorized",
+    "dispatch_authorized",
+    "trading_authorized",
+    "strategy_activation_authorized",
+    "automatic_promotion_authorized",
+    "web_bridge_deployment_authorized",
+    "replay_allowed",
+    "receipt_is_authority",
+)
+RECEIPT_REQUIRED_FALSE_FIELDS = (
+    *RELEASE_REQUIRED_FALSE_FIELDS,
+    "authority_granted",
+    "deployment_executed",
+    "readonly_principal_deployment_authorized",
+    "readonly_secret_file_installation_authorized",
+    "questdb_restart_authorized",
+    "deployment_mutation_authorized",
+    "runtime_activation_authorized",
+    "dynamic_selection_allowed",
+    "replacement_authorized",
+    "production_authorized",
+    "dispatch_changed",
+)
+RECEIPT_REQUIRED_ZERO_FIELDS = (
+    "database_mutations",
+    "orders_sent",
+    "positions_modified",
+)
 
 DEPLOYMENT_PIN_ROOT = Path(
     "/run/c-fast-readonly-deployment-pins"
@@ -267,6 +333,18 @@ def _parse_time(value: Any, label: str) -> datetime:
         raise DeploymentReleaseError(str(exc)) from exc
 
 
+def _require_aware_datetime(value: datetime, label: str) -> datetime:
+    if (
+        not isinstance(value, datetime)
+        or value.tzinfo is None
+        or value.utcoffset() is None
+    ):
+        raise DeploymentReleaseError(
+            f"{label} must be timezone-aware"
+        )
+    return value
+
+
 def _load_trusted_public_key(
     keyring: dict[str, Any],
     key_id: str,
@@ -374,7 +452,10 @@ def validate_release_semantics(
         raise DeploymentReleaseError(
             "deployment release TTL cannot exceed 2 hours"
         )
-    normalized_now = now.astimezone(timezone.utc)
+    normalized_now = _require_aware_datetime(
+        now,
+        "now",
+    ).astimezone(timezone.utc)
     if normalized_now < not_before:
         raise DeploymentReleaseError(
             "deployment release is not active yet"
@@ -395,6 +476,7 @@ def validate_release_semantics(
         "issue_number",
         "secret_file_expected_owner_uid",
         "secret_file_expected_owner_gid",
+        "isolated_network_expected_member_count",
         "max_deployment_seconds",
         "allowed_restart_count",
         "rollback_deadline_seconds",
@@ -404,49 +486,17 @@ def validate_release_semantics(
                 f"{field} must be an integer JSON literal"
             )
 
-    required_true = (
-        "secret_file_regular_file_required",
-        "principal_must_differ_from_admin",
-        "writer_continuity_required",
-        "post_restart_health_required",
-        "backlog_drain_required",
-        "rollback_required",
-        "isolated_network_required",
-        "readonly_principal_deployment_authorized",
-        "readonly_secret_file_installation_authorized",
-        "questdb_restart_authorized",
-    )
-    required_false = (
-        "secret_file_symlink_allowed",
-        "secret_content_read_authorized",
-        "global_pgwire_readonly_allowed",
-        "instance_readonly_allowed",
-        "questdb_recreate_authorized",
-        "questdb_image_change_authorized",
-        "writer_identity_mutation_authorized",
-        "writer_secret_mutation_authorized",
-        "network_mutation_authorized",
-        "unscoped_deployment_mutation_authorized",
-        "production_query_authorized",
-        "readonly_query_authorized",
-        "collection_authorized",
-        "write_probe_authorized",
-        "database_mutation_authorized",
-        "order_authorized",
-        "position_mutation_authorized",
-        "dispatch_authorized",
-        "trading_authorized",
-        "strategy_activation_authorized",
-        "automatic_promotion_authorized",
-        "web_bridge_deployment_authorized",
-        "replay_allowed",
-        "receipt_is_authority",
-    )
-    if any(payload[field] is not True for field in required_true):
+    if any(
+        payload[field] is not True
+        for field in RELEASE_REQUIRED_TRUE_FIELDS
+    ):
         raise DeploymentReleaseError(
             "release is missing a mandatory readonly deployment guard"
         )
-    if any(payload[field] is not False for field in required_false):
+    if any(
+        payload[field] is not False
+        for field in RELEASE_REQUIRED_FALSE_FIELDS
+    ):
         raise DeploymentReleaseError(
             "release attempts to grant forbidden authority"
         )
@@ -527,7 +577,7 @@ def validate_identity_attestations(
         {
             "schema_version",
             "attestation_id",
-            "source_commit_sha",
+            "contract_source_commit_sha",
             "questdb_image_digest",
             "questdb_target_identity_sha256",
             "questdb_build_sha256",
@@ -539,7 +589,8 @@ def validate_identity_attestations(
         image["schema_version"]
         != "commodity_c_fast_questdb_image_attestation_v1"
         or ID_PATTERN.fullmatch(str(image["attestation_id"])) is None
-        or image["source_commit_sha"] != release["source_commit_sha"]
+        or image["contract_source_commit_sha"]
+        != release["source_commit_sha"]
         or image["questdb_image_digest"]
         != release["questdb_image_digest"]
         or image["questdb_target_identity_sha256"]
@@ -625,6 +676,60 @@ def validate_identity_attestations(
             "secret file identity attestation bindings are invalid"
         )
 
+    network = evidence["isolated_network_attestation"]
+    _require_exact_fields(
+        network,
+        {
+            "schema_version",
+            "attestation_id",
+            "isolated_network_identity_sha256",
+            "driver",
+            "internal",
+            "runner_member_identity_sha256",
+            "questdb_member_identity_sha256",
+            "member_count",
+            "unexpected_member_identity_sha256s",
+            "docker_socket_connectivity",
+            "rpc_connectivity",
+            "trading_connectivity",
+        },
+        "isolated network attestation",
+    )
+    runner_identity = network["runner_member_identity_sha256"]
+    questdb_identity = network["questdb_member_identity_sha256"]
+    if (
+        network["schema_version"]
+        != ISOLATED_NETWORK_ATTESTATION_VERSION
+        or ID_PATTERN.fullmatch(
+            str(network["attestation_id"])
+        )
+        is None
+        or network["isolated_network_identity_sha256"]
+        != release["isolated_network_identity_sha256"]
+        or network["driver"]
+        != release["isolated_network_driver_required"]
+        or network["internal"] is not True
+        or runner_identity
+        != release[
+            "isolated_network_runner_member_identity_sha256"
+        ]
+        or questdb_identity
+        != release[
+            "isolated_network_questdb_member_identity_sha256"
+        ]
+        or runner_identity == questdb_identity
+        or type(network["member_count"]) is not int
+        or network["member_count"]
+        != release["isolated_network_expected_member_count"]
+        or network["unexpected_member_identity_sha256s"] != []
+        or network["docker_socket_connectivity"] is not False
+        or network["rpc_connectivity"] is not False
+        or network["trading_connectivity"] is not False
+    ):
+        raise DeploymentReleaseError(
+            "isolated network attestation bindings are invalid"
+        )
+
 
 def verify_release(
     release_path: Path,
@@ -636,7 +741,11 @@ def verify_release(
     pinned_keyring_sha256: str,
     now: datetime | None = None,
 ) -> VerifiedDeploymentRelease:
-    current_time = now or datetime.now(timezone.utc)
+    current_time = (
+        datetime.now(timezone.utc)
+        if now is None
+        else _require_aware_datetime(now, "now")
+    )
     release_raw, release = _load_json(
         release_path,
         "signed readonly deployment release",
@@ -778,7 +887,11 @@ def consume_release(
     pinned_keyring_sha256: str | None = None,
     pinned_custody_path: Path | None = None,
 ) -> dict[str, Any]:
-    current_time = now or datetime.now(timezone.utc)
+    current_time = (
+        datetime.now(timezone.utc)
+        if now is None
+        else _require_aware_datetime(now, "now")
+    )
     try:
         if pinned_keyring_sha256 is None or pinned_custody_path is None:
             pin_root_identity = validate_pin_root_identity()
@@ -929,10 +1042,23 @@ def consume_release(
             "authority_granted": False,
             "replay_allowed": False,
             "deployment_executed": False,
+            "secret_file_symlink_allowed": False,
+            "secret_content_read_authorized": False,
+            "global_pgwire_readonly_allowed": False,
+            "instance_readonly_allowed": False,
+            "isolated_network_unexpected_members_allowed": False,
+            "isolated_network_docker_socket_connectivity_allowed": (
+                False
+            ),
+            "isolated_network_rpc_connectivity_allowed": False,
+            "isolated_network_trading_connectivity_allowed": False,
             "readonly_principal_deployment_authorized": False,
             "readonly_secret_file_installation_authorized": False,
             "questdb_restart_authorized": False,
             "questdb_recreate_authorized": False,
+            "questdb_image_change_authorized": False,
+            "writer_identity_mutation_authorized": False,
+            "writer_secret_mutation_authorized": False,
             "network_mutation_authorized": False,
             "unscoped_deployment_mutation_authorized": False,
             "production_query_authorized": False,
@@ -947,6 +1073,15 @@ def consume_release(
             "strategy_activation_authorized": False,
             "automatic_promotion_authorized": False,
             "web_bridge_deployment_authorized": False,
+            "deployment_mutation_authorized": False,
+            "runtime_activation_authorized": False,
+            "dynamic_selection_allowed": False,
+            "replacement_authorized": False,
+            "production_authorized": False,
+            "database_mutations": 0,
+            "orders_sent": 0,
+            "positions_modified": 0,
+            "dispatch_changed": False,
         }
         try:
             write_json_create_only_at(

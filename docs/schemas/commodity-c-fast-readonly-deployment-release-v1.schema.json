@@ -49,6 +49,16 @@
     "root_pin_identity_attestation_raw_sha256",
     "custody_path_identity_attestation_raw_sha256",
     "isolated_network_attestation_raw_sha256",
+    "isolated_network_identity_sha256",
+    "isolated_network_runner_member_identity_sha256",
+    "isolated_network_questdb_member_identity_sha256",
+    "isolated_network_expected_member_count",
+    "isolated_network_driver_required",
+    "isolated_network_internal_required",
+    "isolated_network_unexpected_members_allowed",
+    "isolated_network_docker_socket_connectivity_allowed",
+    "isolated_network_rpc_connectivity_allowed",
+    "isolated_network_trading_connectivity_allowed",
     "deployment_plan_raw_sha256",
     "evidence_bundle_index_sha256",
     "max_deployment_seconds",
@@ -227,6 +237,36 @@
     },
     "isolated_network_attestation_raw_sha256": {
       "$ref": "#/$defs/sha256"
+    },
+    "isolated_network_identity_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "isolated_network_runner_member_identity_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "isolated_network_questdb_member_identity_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "isolated_network_expected_member_count": {
+      "const": 2
+    },
+    "isolated_network_driver_required": {
+      "const": "bridge"
+    },
+    "isolated_network_internal_required": {
+      "const": true
+    },
+    "isolated_network_unexpected_members_allowed": {
+      "const": false
+    },
+    "isolated_network_docker_socket_connectivity_allowed": {
+      "const": false
+    },
+    "isolated_network_rpc_connectivity_allowed": {
+      "const": false
+    },
+    "isolated_network_trading_connectivity_allowed": {
+      "const": false
     },
     "deployment_plan_raw_sha256": {
       "$ref": "#/$defs/sha256"

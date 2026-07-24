@@ -23,10 +23,21 @@
     "authority_granted",
     "replay_allowed",
     "deployment_executed",
+    "secret_file_symlink_allowed",
+    "secret_content_read_authorized",
+    "global_pgwire_readonly_allowed",
+    "instance_readonly_allowed",
+    "isolated_network_unexpected_members_allowed",
+    "isolated_network_docker_socket_connectivity_allowed",
+    "isolated_network_rpc_connectivity_allowed",
+    "isolated_network_trading_connectivity_allowed",
     "readonly_principal_deployment_authorized",
     "readonly_secret_file_installation_authorized",
     "questdb_restart_authorized",
     "questdb_recreate_authorized",
+    "questdb_image_change_authorized",
+    "writer_identity_mutation_authorized",
+    "writer_secret_mutation_authorized",
     "network_mutation_authorized",
     "unscoped_deployment_mutation_authorized",
     "production_query_authorized",
@@ -40,7 +51,16 @@
     "trading_authorized",
     "strategy_activation_authorized",
     "automatic_promotion_authorized",
-    "web_bridge_deployment_authorized"
+    "web_bridge_deployment_authorized",
+    "deployment_mutation_authorized",
+    "runtime_activation_authorized",
+    "dynamic_selection_allowed",
+    "replacement_authorized",
+    "production_authorized",
+    "database_mutations",
+    "orders_sent",
+    "positions_modified",
+    "dispatch_changed"
   ],
   "properties": {
     "schema_version": {
@@ -98,6 +118,30 @@
     "deployment_executed": {
       "const": false
     },
+    "secret_file_symlink_allowed": {
+      "const": false
+    },
+    "secret_content_read_authorized": {
+      "const": false
+    },
+    "global_pgwire_readonly_allowed": {
+      "const": false
+    },
+    "instance_readonly_allowed": {
+      "const": false
+    },
+    "isolated_network_unexpected_members_allowed": {
+      "const": false
+    },
+    "isolated_network_docker_socket_connectivity_allowed": {
+      "const": false
+    },
+    "isolated_network_rpc_connectivity_allowed": {
+      "const": false
+    },
+    "isolated_network_trading_connectivity_allowed": {
+      "const": false
+    },
     "readonly_principal_deployment_authorized": {
       "const": false
     },
@@ -108,6 +152,15 @@
       "const": false
     },
     "questdb_recreate_authorized": {
+      "const": false
+    },
+    "questdb_image_change_authorized": {
+      "const": false
+    },
+    "writer_identity_mutation_authorized": {
+      "const": false
+    },
+    "writer_secret_mutation_authorized": {
       "const": false
     },
     "network_mutation_authorized": {
@@ -150,6 +203,33 @@
       "const": false
     },
     "web_bridge_deployment_authorized": {
+      "const": false
+    },
+    "deployment_mutation_authorized": {
+      "const": false
+    },
+    "runtime_activation_authorized": {
+      "const": false
+    },
+    "dynamic_selection_allowed": {
+      "const": false
+    },
+    "replacement_authorized": {
+      "const": false
+    },
+    "production_authorized": {
+      "const": false
+    },
+    "database_mutations": {
+      "const": 0
+    },
+    "orders_sent": {
+      "const": 0
+    },
+    "positions_modified": {
+      "const": 0
+    },
+    "dispatch_changed": {
       "const": false
     }
   },

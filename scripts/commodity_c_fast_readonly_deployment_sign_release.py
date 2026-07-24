@@ -25,6 +25,7 @@ from commodity_c_fast_readonly_deployment_release import (
     DeploymentReleaseError,
     _load_json,
     _load_trusted_public_key,
+    _require_aware_datetime,
     _validate_schema,
     add_evidence_arguments,
     canonical_json,
@@ -132,7 +133,11 @@ def sign_release(
     )
     validate_release_semantics(
         payload,
-        now=now or datetime.now(timezone.utc),
+        now=(
+            datetime.now(timezone.utc)
+            if now is None
+            else _require_aware_datetime(now, "now")
+        ),
     )
     validate_runtime_file_bindings(payload)
     verify_evidence_bundle(payload, evidence_paths)

@@ -116,7 +116,7 @@ def build_fixture(tmp_path: Path) -> Fixture:
             "commodity_c_fast_questdb_image_attestation_v1"
         ),
         "attestation_id": "questdb-image-attestation-a01",
-        "source_commit_sha": SOURCE_COMMIT_SHA,
+        "contract_source_commit_sha": SOURCE_COMMIT_SHA,
         "questdb_image_digest": QUESTDB_IMAGE_DIGEST,
         "questdb_target_identity_sha256": "c" * 64,
         "questdb_build_sha256": "d" * 64,
@@ -148,6 +148,31 @@ def build_fixture(tmp_path: Path) -> Fixture:
         "regular_file": True,
         "symlink": False,
         "secret_content_included": False,
+    }
+    isolated_network_identity_sha256 = "1" * 64
+    runner_member_identity_sha256 = "2" * 64
+    questdb_member_identity_sha256 = "3" * 64
+    evidence_values["isolated_network_attestation"] = {
+        "schema_version": (
+            "commodity_c_fast_readonly_isolated_network_attestation_v1"
+        ),
+        "attestation_id": "isolated-network-attestation-a01",
+        "isolated_network_identity_sha256": (
+            isolated_network_identity_sha256
+        ),
+        "driver": "bridge",
+        "internal": True,
+        "runner_member_identity_sha256": (
+            runner_member_identity_sha256
+        ),
+        "questdb_member_identity_sha256": (
+            questdb_member_identity_sha256
+        ),
+        "member_count": 2,
+        "unexpected_member_identity_sha256s": [],
+        "docker_socket_connectivity": False,
+        "rpc_connectivity": False,
+        "trading_connectivity": False,
     }
     evidence_files = {
         name: write_json(tmp_path / f"{name}.json", payload)
@@ -233,6 +258,22 @@ def build_fixture(tmp_path: Path) -> Fixture:
         "secret_file_regular_file_required": True,
         "secret_file_symlink_allowed": False,
         "secret_content_read_authorized": False,
+        "isolated_network_identity_sha256": (
+            isolated_network_identity_sha256
+        ),
+        "isolated_network_runner_member_identity_sha256": (
+            runner_member_identity_sha256
+        ),
+        "isolated_network_questdb_member_identity_sha256": (
+            questdb_member_identity_sha256
+        ),
+        "isolated_network_expected_member_count": 2,
+        "isolated_network_driver_required": "bridge",
+        "isolated_network_internal_required": True,
+        "isolated_network_unexpected_members_allowed": False,
+        "isolated_network_docker_socket_connectivity_allowed": False,
+        "isolated_network_rpc_connectivity_allowed": False,
+        "isolated_network_trading_connectivity_allowed": False,
         "evidence_bundle_index_sha256": evidence_bundle_index,
         "max_deployment_seconds": 1800,
         "allowed_restart_count": 1,
@@ -298,6 +339,20 @@ def sign_fixture(
     )
 
 
+def draft_with_current_evidence(fixture: Fixture) -> dict:
+    evidence_hashes = {
+        name: hashlib.sha256(path.read_bytes()).hexdigest()
+        for name, path in fixture.evidence_paths.as_dict().items()
+    }
+    draft = dict(fixture.draft)
+    for name, release_field in release_module.EVIDENCE_FILE_FIELDS:
+        draft[release_field] = evidence_hashes[name]
+    draft["evidence_bundle_index_sha256"] = hashlib.sha256(
+        release_module.canonical_json(evidence_hashes)
+    ).hexdigest()
+    return draft
+
+
 def execution_args(
     fixture: Fixture,
     release_path: Path,
@@ -349,30 +404,10 @@ def test_signed_release_consumes_once_and_receipt_has_no_authority(
     assert receipt["receipt_authority_state"] == (
         "NON_AUTHORITATIVE_OFFLINE_VERIFICATION_RECEIPT"
     )
-    for field in (
-        "receipt_is_authority",
-        "authority_granted",
-        "replay_allowed",
-        "readonly_principal_deployment_authorized",
-        "readonly_secret_file_installation_authorized",
-        "questdb_restart_authorized",
-        "questdb_recreate_authorized",
-        "network_mutation_authorized",
-        "unscoped_deployment_mutation_authorized",
-        "production_query_authorized",
-        "readonly_query_authorized",
-        "collection_authorized",
-        "write_probe_authorized",
-        "database_mutation_authorized",
-        "order_authorized",
-        "position_mutation_authorized",
-        "dispatch_authorized",
-        "trading_authorized",
-        "strategy_activation_authorized",
-        "automatic_promotion_authorized",
-        "web_bridge_deployment_authorized",
-    ):
+    for field in release_module.RECEIPT_REQUIRED_FALSE_FIELDS:
         assert receipt[field] is False
+    for field in release_module.RECEIPT_REQUIRED_ZERO_FIELDS:
+        assert receipt[field] == 0
 
     consume_path = fixture.custody_dir / (
         f"{signed['attempt_id']}.deployment-consumed.json"
@@ -576,19 +611,7 @@ def test_attestation_content_must_match_signed_expectations(
     )
     secret_attestation["mode"] = "0644"
     write_json(secret_path, secret_attestation)
-    evidence_hashes = {
-        name: hashlib.sha256(path.read_bytes()).hexdigest()
-        for name, path in fixture.evidence_paths.as_dict().items()
-    }
-    draft = {
-        **fixture.draft,
-        "secret_file_identity_attestation_raw_sha256": (
-            evidence_hashes["secret_file_identity_attestation"]
-        ),
-        "evidence_bundle_index_sha256": hashlib.sha256(
-            release_module.canonical_json(evidence_hashes)
-        ).hexdigest(),
-    }
+    draft = draft_with_current_evidence(fixture)
 
     with pytest.raises(
         release_module.DeploymentReleaseError,
@@ -604,6 +627,183 @@ def test_attestation_content_must_match_signed_expectations(
             questdb_image_digest=QUESTDB_IMAGE_DIGEST,
             now=NOW,
         )
+
+
+def test_image_attestation_uses_contract_source_name(
+    tmp_path: Path,
+) -> None:
+    fixture = build_fixture(tmp_path)
+    image_path = fixture.evidence_paths.questdb_image_attestation
+    image = json.loads(image_path.read_text(encoding="utf-8"))
+    image["source_commit_sha"] = image.pop(
+        "contract_source_commit_sha"
+    )
+    write_json(image_path, image)
+
+    with pytest.raises(
+        release_module.DeploymentReleaseError,
+        match="QuestDB image attestation fields",
+    ):
+        signer_module.sign_release(
+            draft_with_current_evidence(fixture),
+            fixture.private_key,
+            fixture.evidence_paths,
+            fixture.keyring_path,
+            expected_keyring_sha256=fixture.keyring_sha256,
+            source_commit_sha=SOURCE_COMMIT_SHA,
+            questdb_image_digest=QUESTDB_IMAGE_DIGEST,
+            now=NOW,
+        )
+
+
+def test_image_attestation_contract_source_is_release_bound(
+    tmp_path: Path,
+) -> None:
+    fixture = build_fixture(tmp_path)
+    image_path = fixture.evidence_paths.questdb_image_attestation
+    image = json.loads(image_path.read_text(encoding="utf-8"))
+    image["contract_source_commit_sha"] = "f" * 40
+    write_json(image_path, image)
+
+    with pytest.raises(
+        release_module.DeploymentReleaseError,
+        match="QuestDB image attestation bindings",
+    ):
+        signer_module.sign_release(
+            draft_with_current_evidence(fixture),
+            fixture.private_key,
+            fixture.evidence_paths,
+            fixture.keyring_path,
+            expected_keyring_sha256=fixture.keyring_sha256,
+            source_commit_sha=SOURCE_COMMIT_SHA,
+            questdb_image_digest=QUESTDB_IMAGE_DIGEST,
+            now=NOW,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("schema_version", "wrong_network_attestation_v1"),
+        ("unexpected_extra", False),
+        ("driver", "host"),
+        ("internal", False),
+        (
+            "unexpected_member_identity_sha256s",
+            ["4" * 64],
+        ),
+        ("docker_socket_connectivity", True),
+        ("rpc_connectivity", True),
+        ("trading_connectivity", True),
+        ("isolated_network_identity_sha256", "4" * 64),
+        ("runner_member_identity_sha256", "3" * 64),
+    ],
+)
+def test_isolated_network_attestation_fails_closed(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    fixture = build_fixture(tmp_path)
+    network_path = fixture.evidence_paths.isolated_network_attestation
+    network = json.loads(network_path.read_text(encoding="utf-8"))
+    network[field] = value
+    write_json(network_path, network)
+
+    with pytest.raises(
+        release_module.DeploymentReleaseError,
+        match="isolated network attestation",
+    ):
+        signer_module.sign_release(
+            draft_with_current_evidence(fixture),
+            fixture.private_key,
+            fixture.evidence_paths,
+            fixture.keyring_path,
+            expected_keyring_sha256=fixture.keyring_sha256,
+            source_commit_sha=SOURCE_COMMIT_SHA,
+            questdb_image_digest=QUESTDB_IMAGE_DIGEST,
+            now=NOW,
+        )
+
+
+def test_naive_now_is_rejected(
+    tmp_path: Path,
+) -> None:
+    fixture = build_fixture(tmp_path)
+    naive_now = datetime(2026, 9, 1, 0, 0)
+    with pytest.raises(
+        release_module.DeploymentReleaseError,
+        match="now must be timezone-aware",
+    ):
+        signer_module.sign_release(
+            fixture.draft,
+            fixture.private_key,
+            fixture.evidence_paths,
+            fixture.keyring_path,
+            expected_keyring_sha256=fixture.keyring_sha256,
+            source_commit_sha=SOURCE_COMMIT_SHA,
+            questdb_image_digest=QUESTDB_IMAGE_DIGEST,
+            now=naive_now,
+        )
+
+    signed = sign_fixture(fixture)
+    release_path = write_json(tmp_path / "signed-release.json", signed)
+    with pytest.raises(
+        release_module.DeploymentReleaseError,
+        match="now must be timezone-aware",
+    ):
+        release_module.verify_release(
+            release_path,
+            fixture.keyring_path,
+            fixture.evidence_paths,
+            source_commit_sha=SOURCE_COMMIT_SHA,
+            questdb_image_digest=QUESTDB_IMAGE_DIGEST,
+            pinned_keyring_sha256=fixture.keyring_sha256,
+            now=naive_now,
+        )
+    with pytest.raises(
+        release_module.DeploymentReleaseError,
+        match="now must be timezone-aware",
+    ):
+        release_module.consume_release(
+            execution_args(fixture, release_path),
+            now=naive_now,
+            pinned_keyring_sha256=fixture.keyring_sha256,
+            pinned_custody_path=fixture.custody_dir,
+        )
+
+
+def test_receipt_schema_covers_every_release_false_literal() -> None:
+    release_schema = json.loads(
+        release_module.RELEASE_SCHEMA_PATH.read_text(
+            encoding="utf-8"
+        )
+    )
+    receipt_schema = json.loads(
+        release_module.RECEIPT_SCHEMA_PATH.read_text(
+            encoding="utf-8"
+        )
+    )
+    release_false_fields = {
+        field
+        for field, definition in release_schema["properties"].items()
+        if definition.get("const") is False
+    }
+    receipt_false_fields = {
+        field
+        for field, definition in receipt_schema["properties"].items()
+        if definition.get("const") is False
+    }
+    assert release_false_fields <= receipt_false_fields
+    assert set(release_module.RECEIPT_REQUIRED_FALSE_FIELDS) == (
+        receipt_false_fields
+    )
+    assert set(release_module.RECEIPT_REQUIRED_ZERO_FIELDS) == {
+        field
+        for field, definition in receipt_schema["properties"].items()
+        if definition.get("const") == 0
+        and definition.get("const") is not False
+    }
 
 
 def test_expired_release_and_forbidden_capability_fail_closed(
