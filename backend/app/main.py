@@ -13,6 +13,7 @@ from app.api import (
     routes_account,
     routes_auth,
     routes_calendar,
+    routes_commodity_c_fast_shadow,
     routes_commodity_simnow,
     routes_mak_v2_observer,
     routes_market,
@@ -32,6 +33,10 @@ from app.core.errors import (
 )
 from app.core.logging import configure_logging
 from app.services.commodity_simnow import commodity_simnow_service
+from app.services.commodity_c_fast_shadow import (
+    commodity_c_fast_shadow_service,
+    normalize_rpc_contracts,
+)
 from app.services.market_data_service import market_data_service
 from app.services.monitoring_service import monitoring_service
 from app.services.tick_persistence import tick_persistence_service
@@ -72,6 +77,7 @@ app.include_router(routes_status.router, prefix="/api")
 app.include_router(routes_auth.router, prefix="/api")
 app.include_router(routes_market.router, prefix="/api")
 app.include_router(routes_commodity_simnow.router, prefix="/api")
+app.include_router(routes_commodity_c_fast_shadow.router, prefix="/api")
 app.include_router(routes_mak_v2_observer.router, prefix="/api")
 app.include_router(routes_monitoring.router, prefix="/api")
 app.include_router(routes_calendar.router, prefix="/api")
@@ -113,6 +119,12 @@ async def startup() -> None:
         rpc_service.start()
     except AppError as exc:
         logger.warning("backend started without RPC connection: %s", exc.message)
+    commodity_c_fast_shadow_service.bind_contract_loader(
+        lambda required: normalize_rpc_contracts(
+            rpc_service.get_contracts(), required
+        )
+    )
+    commodity_c_fast_shadow_service.start()
     try:
         monitoring_service.start()
     except Exception as exc:

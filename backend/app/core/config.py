@@ -5,6 +5,7 @@ import binascii
 import json
 import re
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -109,6 +110,15 @@ class Settings(BaseSettings):
         default=10, ge=1, le=10
     )
     commodity_position_manager_simnow_auto_dispatch_enabled: bool = False
+    commodity_c_fast_shadow_enabled: bool = False
+    commodity_c_fast_shadow_snapshot_path: str = ""
+    commodity_c_fast_shadow_state_path: str = (
+        "logs/commodity-c-fast-shadow/state.json"
+    )
+    commodity_c_fast_shadow_evidence_path: str = (
+        "logs/commodity-c-fast-shadow/evidence.jsonl"
+    )
+    commodity_c_fast_shadow_trusted_public_keys_json: str = "{}"
     commodity_simnow_delivery_month_cutoff_day: int = Field(default=1, ge=1, le=15)
     commodity_simnow_sc_pre_delivery_cutoff_day: int = Field(default=15, ge=1, le=25)
 
@@ -116,6 +126,38 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_production_secrets(self) -> "Settings":
+        if self.commodity_c_fast_shadow_enabled:
+            if not self.commodity_c_fast_shadow_snapshot_path.strip():
+                raise ValueError(
+                    "COMMODITY_C_FAST_SHADOW_SNAPSHOT_PATH must be set when C_FAST Shadow is enabled"
+                )
+            c_paths = {
+                Path(value).expanduser().resolve()
+                for value in (
+                    self.commodity_c_fast_shadow_snapshot_path,
+                    self.commodity_c_fast_shadow_state_path,
+                    self.commodity_c_fast_shadow_evidence_path,
+                )
+            }
+            if len(c_paths) != 3:
+                raise ValueError(
+                    "COMMODITY_C_FAST_SHADOW snapshot/state/evidence paths must be distinct"
+                )
+            protected = {
+                Path(value).expanduser().resolve()
+                for value in (
+                    self.commodity_simnow_state_path,
+                    self.commodity_simnow_template_batch_path,
+                    self.commodity_position_manager_shadow_path,
+                    self.commodity_position_manager_shadow_state_path,
+                    self.commodity_position_manager_simnow_state_path,
+                )
+                if value.strip()
+            }
+            if c_paths & protected:
+                raise ValueError(
+                    "COMMODITY_C_FAST_SHADOW paths must not overlap existing commodity paths"
+                )
         if self.app_env.lower() != "production":
             return self
         if self.jwt_secret_key == "change-me-in-production":
@@ -146,6 +188,32 @@ class Settings(BaseSettings):
                 raise ValueError("COMMODITY_SIMNOW_TRUSTED_PUBLIC_KEYS_JSON contains invalid base64") from exc
             if any(len(value) != 32 for value in public_keys):
                 raise ValueError("COMMODITY_SIMNOW_TRUSTED_PUBLIC_KEYS_JSON must contain 32-byte Ed25519 keys")
+        if self.commodity_c_fast_shadow_enabled:
+            try:
+                trusted_keys = json.loads(
+                    self.commodity_c_fast_shadow_trusted_public_keys_json
+                )
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    "COMMODITY_C_FAST_SHADOW_TRUSTED_PUBLIC_KEYS_JSON must be valid JSON"
+                ) from exc
+            if not isinstance(trusted_keys, dict) or not trusted_keys:
+                raise ValueError(
+                    "COMMODITY_C_FAST_SHADOW_TRUSTED_PUBLIC_KEYS_JSON must contain at least one Ed25519 public key"
+                )
+            try:
+                public_keys = [
+                    base64.b64decode(str(value), validate=True)
+                    for value in trusted_keys.values()
+                ]
+            except (ValueError, binascii.Error) as exc:
+                raise ValueError(
+                    "COMMODITY_C_FAST_SHADOW_TRUSTED_PUBLIC_KEYS_JSON contains invalid base64"
+                ) from exc
+            if any(len(value) != 32 for value in public_keys):
+                raise ValueError(
+                    "COMMODITY_C_FAST_SHADOW_TRUSTED_PUBLIC_KEYS_JSON must contain 32-byte Ed25519 keys"
+                )
         allowed_levels = {"info", "warning", "critical"}
         levels = {item.strip().lower() for item in self.telegram_send_levels.split(",") if item.strip()}
         if not levels or levels - allowed_levels:
