@@ -1,0 +1,170 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vnpy-web-bridge:schema:commodity-c-fast-questdb-readonly-proof-v1",
+  "title": "C_FAST QuestDB dedicated readonly principal proof v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "candidate_id",
+    "snapshot_id",
+    "manifest_sha256",
+    "audit_evidence_sha256",
+    "generated_at",
+    "proof_method",
+    "same_connection",
+    "observable_readonly_metadata_stable",
+    "requested_statement_timeout_ms",
+    "connect_timeout_seconds",
+    "write_probe_attempted",
+    "database_mutations",
+    "preflight",
+    "postflight",
+    "limitations"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "commodity_c_fast_questdb_readonly_proof_v1"
+    },
+    "candidate_id": {
+      "const": "C_FAST_CROSS_SECTION_NEUTRAL"
+    },
+    "snapshot_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{8,128}$"
+    },
+    "manifest_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "audit_evidence_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "proof_method": {
+      "const": "questdb_builtin_pgwire_readonly_user_configuration"
+    },
+    "same_connection": {
+      "const": true
+    },
+    "observable_readonly_metadata_stable": {
+      "const": true
+    },
+    "requested_statement_timeout_ms": {
+      "const": 60000
+    },
+    "connect_timeout_seconds": {
+      "const": 10
+    },
+    "write_probe_attempted": {
+      "const": false
+    },
+    "database_mutations": {
+      "const": 0
+    },
+    "preflight": {
+      "$ref": "#/$defs/snapshot"
+    },
+    "postflight": {
+      "$ref": "#/$defs/snapshot"
+    },
+    "limitations": {
+      "type": "array",
+      "minItems": 3,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 512
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "configurationSource": {
+      "type": "string",
+      "enum": [
+        "default",
+        "conf",
+        "env",
+        "file"
+      ]
+    },
+    "snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "questdb_build",
+        "readonly_user_enabled",
+        "principal_matches_readonly_user",
+        "principal_differs_admin",
+        "global_pgwire_readonly",
+        "instance_readonly",
+        "configuration_sources"
+      ],
+      "properties": {
+        "questdb_build": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "readonly_user_enabled": {
+          "const": true
+        },
+        "principal_matches_readonly_user": {
+          "const": true
+        },
+        "principal_differs_admin": {
+          "const": true
+        },
+        "global_pgwire_readonly": {
+          "const": false
+        },
+        "instance_readonly": {
+          "const": false
+        },
+        "configuration_sources": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "pg.readonly.user.enabled",
+            "pg.readonly.user",
+            "pg.readonly.password",
+            "pg.user",
+            "pg.security.readonly",
+            "readonly"
+          ],
+          "properties": {
+            "pg.readonly.user.enabled": {
+              "$ref": "#/$defs/configurationSource"
+            },
+            "pg.readonly.user": {
+              "$ref": "#/$defs/configurationSource"
+            },
+            "pg.readonly.password": {
+              "type": "string",
+              "enum": [
+                "conf",
+                "env",
+                "file"
+              ]
+            },
+            "pg.user": {
+              "$ref": "#/$defs/configurationSource"
+            },
+            "pg.security.readonly": {
+              "$ref": "#/$defs/configurationSource"
+            },
+            "readonly": {
+              "$ref": "#/$defs/configurationSource"
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -31,10 +31,16 @@ except ImportError:  # pragma: no cover - deployment dependency
 
 SCHEMA_VERSION = "commodity_c_fast_l1_l5_audit_v2"
 MANIFEST_SCHEMA_VERSION = "commodity_c_fast_l1_l5_audit_manifest_v2"
+READONLY_PROOF_SCHEMA_VERSION = (
+    "commodity_c_fast_questdb_readonly_proof_v1"
+)
 CANDIDATE_ID = "C_FAST_CROSS_SECTION_NEUTRAL"
 MAX_AUDIT_WINDOW_HOURS = 96
 MAX_JSON_BYTES = 2 * 1024 * 1024
+MAX_DSN_BYTES = 64 * 1024
 MAX_ROWS_PER_CONTRACT = 500_000
+QUESTDB_CONNECT_TIMEOUT_SECONDS = 10
+QUESTDB_STATEMENT_TIMEOUT_MS = 60_000
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_SCHEMA_PATH = (
     ROOT
@@ -42,6 +48,10 @@ MANIFEST_SCHEMA_PATH = (
 )
 EVIDENCE_SCHEMA_PATH = (
     ROOT / "docs/schemas/commodity-c-fast-l1-l5-audit-v2.schema.json"
+)
+READONLY_PROOF_SCHEMA_PATH = (
+    ROOT
+    / "docs/schemas/commodity-c-fast-questdb-readonly-proof-v1.schema.json"
 )
 LEGACY_EVIDENCE_SCHEMA_PATH = (
     ROOT / "docs/schemas/commodity-c-fast-l1-l5-audit-v1.schema.json"
@@ -117,6 +127,58 @@ THRESHOLDS: dict[str, float] = {
 VT_SYMBOL_PATTERN = re.compile(r"^(?P<symbol>[A-Za-z]+[0-9]{3,4})\.(?P<exchange>[A-Z]+)$")
 EXACT_CONTRACT_PATTERN = re.compile(r"^(?P<exchange>[A-Z]+)\.(?P<symbol>[A-Za-z]+[0-9]{3,4})$")
 ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{8,128}$")
+READONLY_PARAMETER_KEYS = (
+    "pg.readonly.password",
+    "pg.readonly.user",
+    "pg.readonly.user.enabled",
+    "pg.security.readonly",
+    "pg.user",
+    "readonly",
+)
+READONLY_IDENTITY_SQL = "SELECT current_user(), build()"
+READONLY_PARAMETERS_SQL = (
+    "(SHOW PARAMETERS) WHERE property_path IN "
+    "('pg.readonly.password', 'pg.readonly.user', "
+    "'pg.readonly.user.enabled', 'pg.security.readonly', 'pg.user', "
+    "'readonly') "
+    "ORDER BY property_path"
+)
+
+
+@dataclass(frozen=True)
+class ReadonlyProofSnapshot:
+    principal: str
+    readonly_user: str
+    admin_user: str
+    questdb_build: str
+    readonly_user_enabled_source: str
+    readonly_user_source: str
+    readonly_password_source: str
+    admin_user_source: str
+    global_pgwire_readonly_source: str
+    instance_readonly_source: str
+
+    def evidence(self) -> dict[str, Any]:
+        return {
+            "questdb_build": self.questdb_build,
+            "readonly_user_enabled": True,
+            "principal_matches_readonly_user": True,
+            "principal_differs_admin": True,
+            "global_pgwire_readonly": False,
+            "instance_readonly": False,
+            "configuration_sources": {
+                "pg.readonly.user.enabled": (
+                    self.readonly_user_enabled_source
+                ),
+                "pg.readonly.user": self.readonly_user_source,
+                "pg.readonly.password": self.readonly_password_source,
+                "pg.user": self.admin_user_source,
+                "pg.security.readonly": (
+                    self.global_pgwire_readonly_source
+                ),
+                "readonly": self.instance_readonly_source,
+            },
+        }
 
 
 class AuditError(RuntimeError):
@@ -1354,88 +1416,146 @@ def write_csv(path: Path, evidence: dict[str, Any]) -> None:
         "boundary_coverage_complete",
         "classification",
     ]
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    with temporary.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fields)
-        writer.writeheader()
-        for contract in evidence["contracts"]:
-            for segment, metrics in (
-                ("all", contract["all"]),
-                *contract["sessions"].items(),
-            ):
-                row = _csv_metric_row(
-                    "contract_segment",
-                    contract["product"],
-                    contract["role"],
-                    contract["vt_symbol"],
-                    segment,
-                    metrics,
-                )
-                coverage = contract.get("session_coverage", {}).get(segment)
-                if coverage:
-                    row.update(
-                        {
-                            "max_gap_seconds": coverage["max_gap_seconds"],
-                            "start_boundary_gap_seconds": coverage[
-                                "start_boundary_gap_seconds"
-                            ],
-                            "end_boundary_gap_seconds": coverage[
-                                "end_boundary_gap_seconds"
-                            ],
-                            "max_observed_tick_gap_seconds": coverage[
-                                "max_observed_tick_gap_seconds"
-                            ],
-                            "boundary_coverage_complete": coverage[
-                                "boundary_coverage_complete"
-                            ],
-                        }
+    temporary, descriptor = _create_private_temp(path)
+    try:
+        with os.fdopen(
+            descriptor,
+            "w",
+            encoding="utf-8",
+            newline="",
+        ) as handle:
+            writer = csv.DictWriter(handle, fieldnames=fields)
+            writer.writeheader()
+            for contract in evidence["contracts"]:
+                for segment, metrics in (
+                    ("all", contract["all"]),
+                    *contract["sessions"].items(),
+                ):
+                    row = _csv_metric_row(
+                        "contract_segment",
+                        contract["product"],
+                        contract["role"],
+                        contract["vt_symbol"],
+                        segment,
+                        metrics,
                     )
+                    coverage = contract.get("session_coverage", {}).get(segment)
+                    if coverage:
+                        row.update(
+                            {
+                                "max_gap_seconds": coverage["max_gap_seconds"],
+                                "start_boundary_gap_seconds": coverage[
+                                    "start_boundary_gap_seconds"
+                                ],
+                                "end_boundary_gap_seconds": coverage[
+                                    "end_boundary_gap_seconds"
+                                ],
+                                "max_observed_tick_gap_seconds": coverage[
+                                    "max_observed_tick_gap_seconds"
+                                ],
+                                "boundary_coverage_complete": coverage[
+                                    "boundary_coverage_complete"
+                                ],
+                            }
+                        )
+                    writer.writerow(row)
+            for item in evidence["execution_windows"]:
+                row = _csv_metric_row(
+                    "execution_window",
+                    item["product"],
+                    "window",
+                    item["vt_symbol"],
+                    item["window_id"],
+                    item["metrics"],
+                )
+                row.update(
+                    {
+                        "rows_before": item["rows_before"],
+                        "rows_after": item["rows_after"],
+                        "max_gap_seconds": item["max_gap_seconds"],
+                        "start_boundary_gap_seconds": item[
+                            "start_boundary_gap_seconds"
+                        ],
+                        "end_boundary_gap_seconds": item[
+                            "end_boundary_gap_seconds"
+                        ],
+                        "max_observed_tick_gap_seconds": item[
+                            "max_observed_tick_gap_seconds"
+                        ],
+                        "boundary_coverage_complete": item[
+                            "boundary_coverage_complete"
+                        ],
+                        "classification": item["classification"],
+                    }
+                )
                 writer.writerow(row)
-        for item in evidence["execution_windows"]:
-            row = _csv_metric_row(
-                "execution_window",
-                item["product"],
-                "window",
-                item["vt_symbol"],
-                item["window_id"],
-                item["metrics"],
-            )
-            row.update(
-                {
-                    "rows_before": item["rows_before"],
-                    "rows_after": item["rows_after"],
-                    "max_gap_seconds": item["max_gap_seconds"],
-                    "start_boundary_gap_seconds": item[
-                        "start_boundary_gap_seconds"
-                    ],
-                    "end_boundary_gap_seconds": item[
-                        "end_boundary_gap_seconds"
-                    ],
-                    "max_observed_tick_gap_seconds": item[
-                        "max_observed_tick_gap_seconds"
-                    ],
-                    "boundary_coverage_complete": item[
-                        "boundary_coverage_complete"
-                    ],
-                    "classification": item["classification"],
-                }
-            )
-            writer.writerow(row)
-        handle.flush()
-        os.fsync(handle.fileno())
-    temporary.replace(path)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _publish_temp_create_only(temporary, path)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
 
 
 def write_text_atomic(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    with temporary.open("w", encoding="utf-8") as handle:
-        handle.write(content)
-        if not content.endswith("\n"):
-            handle.write("\n")
-        handle.flush()
-        os.fsync(handle.fileno())
-    temporary.replace(path)
+    temporary, descriptor = _create_private_temp(path)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(content)
+            if not content.endswith("\n"):
+                handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        _publish_temp_create_only(temporary, path)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def _create_private_temp(path: Path) -> tuple[Path, int]:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    for _ in range(32):
+        token = os.urandom(16).hex()
+        temporary = path.with_name(f".{path.name}.{token}.tmp")
+        try:
+            return temporary, os.open(temporary, flags, 0o600)
+        except FileExistsError:
+            continue
+    raise AuditError("cannot allocate private audit output temporary file")
+
+
+def _publish_temp_create_only(temporary: Path, path: Path) -> None:
+    published = False
+    try:
+        os.link(temporary, path, follow_symlinks=False)
+        published = True
+        _fsync_directory(path.parent)
+    except FileExistsError as exc:
+        raise AuditError("audit output already exists") from exc
+    except OSError as exc:
+        if published:
+            try:
+                path.unlink()
+                _fsync_directory(path.parent)
+            except OSError:
+                pass
+        raise AuditError("cannot publish audit output") from exc
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _fsync_directory(path: Path) -> None:
+    directory_descriptor = os.open(
+        path,
+        os.O_RDONLY | getattr(os, "O_CLOEXEC", 0),
+    )
+    try:
+        os.fsync(directory_descriptor)
+    finally:
+        os.close(directory_descriptor)
 
 
 def _csv_metric_row(
@@ -1948,16 +2068,281 @@ def _markdown_number(value: Any) -> str:
     return str(value)
 
 
-def connect_read_only(dsn_env: str) -> Any:
+def _read_secret_text_file(path: Path, label: str) -> str:
+    try:
+        path_stat = path.lstat()
+        if stat.S_ISLNK(path_stat.st_mode):
+            raise AuditError(f"{label} must not be a symlink")
+        if not stat.S_ISREG(path_stat.st_mode):
+            raise AuditError(f"{label} must be a regular file")
+        if stat.S_IMODE(path_stat.st_mode) & 0o077:
+            raise AuditError(f"{label} permissions must be 0600 or stricter")
+        if path_stat.st_uid != os.geteuid():
+            raise AuditError(f"{label} must be owned by the current user")
+        if path_stat.st_size > MAX_DSN_BYTES:
+            raise AuditError(f"{label} exceeds {MAX_DSN_BYTES} byte safety limit")
+        flags = os.O_RDONLY
+        flags |= getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        try:
+            before = os.fstat(descriptor)
+            if not stat.S_ISREG(before.st_mode):
+                raise AuditError(f"{label} must be a regular file")
+            first = _read_secret_fd(descriptor, label)
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            second = _read_secret_fd(descriptor, label)
+            after = os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+        path_after = path.lstat()
+    except AuditError:
+        raise
+    except OSError as exc:
+        raise AuditError(f"cannot read {label}") from exc
+
+    identity = (
+        path_stat.st_dev,
+        path_stat.st_ino,
+        path_stat.st_size,
+        stat.S_IFMT(path_stat.st_mode),
+        path_stat.st_uid,
+        stat.S_IMODE(path_stat.st_mode),
+    )
+    fd_before_identity = (
+        before.st_dev,
+        before.st_ino,
+        before.st_size,
+        stat.S_IFMT(before.st_mode),
+        before.st_uid,
+        stat.S_IMODE(before.st_mode),
+    )
+    fd_after_identity = (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+        stat.S_IFMT(after.st_mode),
+        after.st_uid,
+        stat.S_IMODE(after.st_mode),
+    )
+    path_after_identity = (
+        path_after.st_dev,
+        path_after.st_ino,
+        path_after.st_size,
+        stat.S_IFMT(path_after.st_mode),
+        path_after.st_uid,
+        stat.S_IMODE(path_after.st_mode),
+    )
+    if (
+        identity != fd_before_identity
+        or fd_before_identity != fd_after_identity
+        or fd_after_identity != path_after_identity
+        or first != second
+        or len(first) != before.st_size
+        or fd_before_identity[4] != os.geteuid()
+        or fd_before_identity[5] & 0o077
+    ):
+        raise AuditError(f"{label} changed while it was being read")
+    try:
+        value = first.decode("utf-8").strip()
+    except UnicodeDecodeError as exc:
+        raise AuditError(f"{label} must be UTF-8") from exc
+    if not value:
+        raise AuditError(f"{label} must not be empty")
+    if "\x00" in value:
+        raise AuditError(f"{label} must not contain NUL bytes")
+    return value
+
+
+def _read_secret_fd(descriptor: int, label: str) -> bytes:
+    chunks: list[bytes] = []
+    remaining = MAX_DSN_BYTES + 1
+    while remaining > 0:
+        chunk = os.read(descriptor, min(65536, remaining))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    raw = b"".join(chunks)
+    if len(raw) > MAX_DSN_BYTES:
+        raise AuditError(f"{label} exceeds {MAX_DSN_BYTES} byte safety limit")
+    return raw
+
+
+def connect_server_enforced_readonly(dsn_file: Path) -> Any:
     if psycopg is None:
         raise AuditError("psycopg is not installed")
-    dsn = os.getenv(dsn_env, "")
-    if not dsn:
-        raise AuditError(f"{dsn_env} is not configured")
+    dsn = _read_secret_text_file(dsn_file, "QuestDB readonly DSN file")
     try:
-        return psycopg.connect(dsn, autocommit=True)
+        return psycopg.connect(
+            dsn,
+            autocommit=True,
+            connect_timeout=QUESTDB_CONNECT_TIMEOUT_SECONDS,
+            options=f"-c statement_timeout={QUESTDB_STATEMENT_TIMEOUT_MS}",
+        )
     except Exception as exc:
-        raise AuditError("cannot connect to QuestDB using configured DSN") from exc
+        raise AuditError(
+            "cannot connect to QuestDB using readonly DSN file"
+        ) from exc
+
+
+def _fetch_all(cursor: Any) -> list[tuple[Any, ...]]:
+    fetchall = getattr(cursor, "fetchall", None)
+    if callable(fetchall):
+        return list(fetchall())
+    rows: list[tuple[Any, ...]] = []
+    while True:
+        batch = cursor.fetchmany(1024)
+        if not batch:
+            return rows
+        rows.extend(batch)
+
+
+def _parse_questdb_bool(value: Any, label: str) -> bool:
+    normalized = str(value).strip().lower()
+    if normalized == "true":
+        return True
+    if normalized == "false":
+        return False
+    raise AuditError(f"{label} must be true or false")
+
+
+def collect_readonly_proof_snapshot(conn: Any) -> ReadonlyProofSnapshot:
+    try:
+        identity_rows = _fetch_all(conn.execute(READONLY_IDENTITY_SQL))
+        parameter_rows = _fetch_all(conn.execute(READONLY_PARAMETERS_SQL))
+    except Exception as exc:
+        raise AuditError(
+            "cannot query QuestDB readonly identity metadata"
+        ) from exc
+
+    if len(identity_rows) != 1 or len(identity_rows[0]) < 2:
+        raise AuditError("QuestDB readonly identity query must return one row")
+    principal = str(identity_rows[0][0] or "").strip()
+    questdb_build = str(identity_rows[0][1] or "").strip()
+    if not principal or not questdb_build:
+        raise AuditError("QuestDB readonly identity metadata is incomplete")
+
+    parameters: dict[str, tuple[Any, str, bool]] = {}
+    for row in parameter_rows:
+        if len(row) < 6:
+            raise AuditError("QuestDB SHOW PARAMETERS row is incomplete")
+        key = str(row[0] or "").strip()
+        if key not in READONLY_PARAMETER_KEYS:
+            raise AuditError("QuestDB SHOW PARAMETERS returned an unexpected key")
+        if key in parameters:
+            raise AuditError(f"QuestDB SHOW PARAMETERS duplicated {key}")
+        parameters[key] = (
+            row[2],
+            str(row[3] or "").strip(),
+            _parse_questdb_bool(
+                row[4],
+                f"{key}.sensitive",
+            ),
+        )
+    missing = set(READONLY_PARAMETER_KEYS) - set(parameters)
+    if missing:
+        raise AuditError(
+            "QuestDB SHOW PARAMETERS is missing required readonly metadata"
+        )
+
+    readonly_enabled = _parse_questdb_bool(
+        parameters["pg.readonly.user.enabled"][0],
+        "pg.readonly.user.enabled",
+    )
+    global_readonly = _parse_questdb_bool(
+        parameters["pg.security.readonly"][0],
+        "pg.security.readonly",
+    )
+    instance_readonly = _parse_questdb_bool(
+        parameters["readonly"][0],
+        "readonly",
+    )
+    readonly_user = str(parameters["pg.readonly.user"][0] or "").strip()
+    admin_user = str(parameters["pg.user"][0] or "").strip()
+    if not readonly_enabled:
+        raise AuditError("QuestDB dedicated readonly user is not enabled")
+    if global_readonly:
+        raise AuditError(
+            "QuestDB proof must not rely on global PGWire readonly mode"
+        )
+    if instance_readonly:
+        raise AuditError(
+            "QuestDB proof must not rely on instance-wide readonly mode"
+        )
+    if not readonly_user or not admin_user:
+        raise AuditError("QuestDB readonly/admin user metadata is incomplete")
+    if principal != readonly_user:
+        raise AuditError(
+            "connected QuestDB principal is not the dedicated readonly user"
+        )
+    if principal == admin_user:
+        raise AuditError(
+            "QuestDB readonly principal must differ from the admin user"
+        )
+    password_source = parameters["pg.readonly.password"][1]
+    if not parameters["pg.readonly.password"][2]:
+        raise AuditError("pg.readonly.password must be marked sensitive")
+    if password_source not in {"conf", "env", "file"}:
+        raise AuditError(
+            "pg.readonly.password must not use its default value"
+        )
+    for key, (_, source, _) in parameters.items():
+        if not source:
+            raise AuditError(f"QuestDB parameter source is missing for {key}")
+
+    return ReadonlyProofSnapshot(
+        principal=principal,
+        readonly_user=readonly_user,
+        admin_user=admin_user,
+        questdb_build=questdb_build,
+        readonly_user_enabled_source=parameters[
+            "pg.readonly.user.enabled"
+        ][1],
+        readonly_user_source=parameters["pg.readonly.user"][1],
+        readonly_password_source=password_source,
+        admin_user_source=parameters["pg.user"][1],
+        global_pgwire_readonly_source=parameters[
+            "pg.security.readonly"
+        ][1],
+        instance_readonly_source=parameters["readonly"][1],
+    )
+
+
+def build_readonly_proof(
+    evidence: dict[str, Any],
+    audit_evidence_sha256: str,
+    preflight: ReadonlyProofSnapshot,
+    postflight: ReadonlyProofSnapshot,
+) -> dict[str, Any]:
+    if preflight != postflight:
+        raise AuditError(
+            "QuestDB readonly identity/configuration changed during audit"
+        )
+    return {
+        "schema_version": READONLY_PROOF_SCHEMA_VERSION,
+        "candidate_id": CANDIDATE_ID,
+        "snapshot_id": evidence["snapshot_id"],
+        "manifest_sha256": evidence["manifest_sha256"],
+        "audit_evidence_sha256": audit_evidence_sha256,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "proof_method": (
+            "questdb_builtin_pgwire_readonly_user_configuration"
+        ),
+        "same_connection": True,
+        "observable_readonly_metadata_stable": True,
+        "requested_statement_timeout_ms": QUESTDB_STATEMENT_TIMEOUT_MS,
+        "connect_timeout_seconds": QUESTDB_CONNECT_TIMEOUT_SECONDS,
+        "write_probe_attempted": False,
+        "database_mutations": 0,
+        "preflight": preflight.evidence(),
+        "postflight": postflight.evidence(),
+        "limitations": [
+            "只读证明来自同一连接上的 QuestDB 身份和配置元数据；未执行任何 DDL、DML 或试写语句。",
+            "statement timeout 是 PGWire 客户端请求值；proof 不读取或保存 readonly password 内容，只核对其配置来源。",
+            "该证明不替代 one-shot 人工 release、隔离运行器或产物终态封存。",
+        ],
+    }
 
 
 def parse_args() -> argparse.Namespace:
@@ -1977,9 +2362,10 @@ def parse_args() -> argparse.Namespace:
         help="optional assertion matching signed manifest exclusive end",
     )
     parser.add_argument(
-        "--dsn-env",
-        default="QUESTDB_PG_DSN",
-        help="environment variable containing QuestDB PGWire DSN",
+        "--dsn-file",
+        type=Path,
+        required=True,
+        help="0600 file containing the dedicated QuestDB readonly PGWire DSN",
     )
     parser.add_argument(
         "--json-output",
@@ -1996,13 +2382,44 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("artifacts/commodity-c-fast-l1-l5-audit.md"),
     )
+    parser.add_argument(
+        "--readonly-proof-output",
+        type=Path,
+        default=Path(
+            "artifacts/commodity-c-fast-questdb-readonly-proof.json"
+        ),
+    )
     return parser.parse_args()
+
+
+def validate_artifact_paths(args: argparse.Namespace) -> None:
+    input_paths = {
+        args.manifest.expanduser().resolve(),
+        args.dsn_file.expanduser().resolve(),
+    }
+    raw_outputs = (
+        args.json_output,
+        args.csv_output,
+        args.markdown_output,
+        args.readonly_proof_output,
+    )
+    output_paths = {
+        path.expanduser().resolve()
+        for path in raw_outputs
+    }
+    if len(output_paths) != len(raw_outputs):
+        raise AuditError("audit output paths must be distinct")
+    if input_paths & output_paths:
+        raise AuditError("audit output paths must not overlap input files")
+    if any(path.exists() or path.is_symlink() for path in raw_outputs):
+        raise AuditError("audit output paths must not already exist")
 
 
 def main() -> int:
     args = parse_args()
     conn = None
     try:
+        validate_artifact_paths(args)
         manifest, contracts, session_windows, windows = load_manifest(
             args.manifest
         )
@@ -2016,7 +2433,8 @@ def main() -> int:
             if args.end is not None
             else None
         )
-        conn = connect_read_only(args.dsn_env)
+        conn = connect_server_enforced_readonly(args.dsn_file)
+        preflight = collect_readonly_proof_snapshot(conn)
         evidence = audit(
             conn,
             manifest,
@@ -2026,31 +2444,65 @@ def main() -> int:
             start,
             end,
         )
+        postflight = collect_readonly_proof_snapshot(conn)
+        try:
+            conn.close()
+        except Exception as exc:
+            raise AuditError("cannot close QuestDB readonly connection") from exc
+        conn = None
         validate_json_schema(evidence, EVIDENCE_SCHEMA_PATH, "audit evidence")
+        evidence_text = json.dumps(
+            evidence,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+            allow_nan=False,
+        )
+        if not evidence_text.endswith("\n"):
+            evidence_text += "\n"
+        proof = build_readonly_proof(
+            evidence,
+            hashlib.sha256(evidence_text.encode("utf-8")).hexdigest(),
+            preflight,
+            postflight,
+        )
+        validate_json_schema(
+            proof,
+            READONLY_PROOF_SCHEMA_PATH,
+            "QuestDB readonly proof",
+        )
         write_text_atomic(
             args.json_output,
+            evidence_text,
+        )
+        write_csv(args.csv_output, evidence)
+        report = render_markdown(evidence)
+        write_text_atomic(args.markdown_output, report)
+        write_text_atomic(
+            args.readonly_proof_output,
             json.dumps(
-                evidence,
+                proof,
                 ensure_ascii=False,
                 indent=2,
                 sort_keys=True,
                 allow_nan=False,
             ),
         )
-        write_csv(args.csv_output, evidence)
-        report = render_markdown(evidence)
-        write_text_atomic(args.markdown_output, report)
     except (AuditError, OSError) as exc:
         print(f"audit failed: {exc}", file=sys.stderr)
         return 2
     finally:
         if conn is not None:
-            conn.close()
+            try:
+                conn.close()
+            except Exception:
+                pass
 
     print(report)
     print(f"json: {args.json_output}")
     print(f"csv: {args.csv_output}")
     print(f"markdown: {args.markdown_output}")
+    print(f"readonly proof: {args.readonly_proof_output}")
     return 0 if evidence["summary"]["p0_pass"] else 1
 
 
