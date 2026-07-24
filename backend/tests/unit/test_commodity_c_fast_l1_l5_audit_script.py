@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 from pathlib import Path
 import runpy
@@ -1150,6 +1151,7 @@ def test_readonly_proof_binds_audit_hash_without_principal_leakage() -> None:
         "b" * 64,
         snapshot,
         snapshot,
+        "c" * 64,
     )
     MODULE["validate_json_schema"](
         proof,
@@ -1165,6 +1167,8 @@ def test_readonly_proof_binds_audit_hash_without_principal_leakage() -> None:
     assert proof["database_mutations"] == 0
     assert proof["observable_readonly_metadata_stable"] is True
     assert proof["requested_statement_timeout_ms"] == 60_000
+    assert proof["endpoint_identity_sha256"] == "c" * 64
+    assert proof["endpoint_binding_verified"] is True
 
 
 def test_readonly_proof_rejects_pre_post_drift() -> None:
@@ -1186,7 +1190,78 @@ def test_readonly_proof_rejects_pre_post_drift() -> None:
             "b" * 64,
             preflight,
             postflight,
+            "c" * 64,
         )
+
+
+def test_established_endpoint_identity_is_canonical_and_fail_closed() -> None:
+    class Info:
+        host = "questdb.internal"
+        port = 8812
+        dbname = "qdb"
+
+    class Connection:
+        info = Info()
+
+    expected = hashlib.sha256(
+        b'{"dbname":"qdb","host":"questdb.internal","port":8812}'
+    ).hexdigest()
+    assert (
+        MODULE["connected_endpoint_identity_sha256"](Connection())
+        == expected
+    )
+
+    Info.host = ""
+    with pytest.raises(MODULE["AuditError"], match="incomplete"):
+        MODULE["connected_endpoint_identity_sha256"](Connection())
+
+
+def test_signed_manifest_hash_is_checked_before_database_connection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = write_manifest(tmp_path, manifest_payload())
+    dsn = tmp_path / "readonly.dsn"
+    dsn.write_text("not-read", encoding="utf-8")
+    dsn.chmod(0o600)
+    connected = False
+
+    def connect(_path: Path):
+        nonlocal connected
+        connected = True
+        raise AssertionError("database connection must not be attempted")
+
+    monkeypatch.setitem(
+        MODULE["main"].__globals__,
+        "connect_server_enforced_readonly",
+        connect,
+    )
+    monkeypatch.setattr(
+        MODULE["sys"],
+        "argv",
+        [
+            str(SCRIPT),
+            "--manifest",
+            str(manifest),
+            "--dsn-file",
+            str(dsn),
+            "--expected-endpoint-identity-sha256",
+            "a" * 64,
+            "--expected-manifest-sha256",
+            "b" * 64,
+            "--json-output",
+            str(tmp_path / "audit.json"),
+            "--csv-output",
+            str(tmp_path / "audit.csv"),
+            "--markdown-output",
+            str(tmp_path / "audit.md"),
+            "--readonly-proof-output",
+            str(tmp_path / "proof.json"),
+        ],
+    )
+
+    assert MODULE["main"]() == 2
+    assert connected is False
 
 
 def test_readonly_dsn_file_is_private_and_connection_timeouts_are_fixed(
