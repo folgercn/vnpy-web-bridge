@@ -234,7 +234,7 @@ def _collection_policy(parent: CFastExecutionPolicyFreezeDTO) -> dict:
             ),
             "l5_usable_metric_mask": (
                 "SPREAD_PROTECTED_PRICE_COUNTERFACTUAL_MARKOUT_L1_COVERAGE_"
-                "AND_L5_BOOK_WALK"
+                "L5_BOOK_WALK_AND_PASSIVE_FILL_BOUNDS_WHEN_IDENTIFIED"
             ),
             "missing_l1_state": "UNUSABLE_NO_EXECUTION_METRICS",
             "missing_or_invalid_l2_l5_state": (
@@ -630,6 +630,32 @@ def test_v2_before_validators_reject_float_literals(
     payload["policy_hash"] = sha256_json(payload["policy"])
 
     with pytest.raises(ValidationError, match="binary float"):
+        CFastExecutionPolicyFreezeV2DTO.model_validate(
+            {**payload, "signature": PLACEHOLDER_SIGNATURE}
+        )
+
+
+@pytest.mark.parametrize(
+    ("path", "replacement"),
+    [
+        (("human_reviewed",), 1),
+        (("policy", "collection_authorized"), 0),
+        (("policy", "passive_fill_bounds", "bounds_only"), 1),
+    ],
+)
+def test_v2_before_validators_reject_integer_boolean_literals(
+    path: tuple[str, ...],
+    replacement: int,
+) -> None:
+    _private_key, parent, _child = _signed_chain()
+    payload = _unsigned_v2_payload(parent)
+    target = payload
+    for segment in path[:-1]:
+        target = target[segment]
+    target[path[-1]] = replacement
+    payload["policy_hash"] = sha256_json(payload["policy"])
+
+    with pytest.raises(ValidationError, match="JSON boolean literal"):
         CFastExecutionPolicyFreezeV2DTO.model_validate(
             {**payload, "signature": PLACEHOLDER_SIGNATURE}
         )

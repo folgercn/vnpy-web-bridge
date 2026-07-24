@@ -186,7 +186,8 @@ CLOCK_INVALID > STALE > CROSSED > LOCKED > MISSING_L1 > L1_ONLY > L5_USABLE
 metric mask 也被冻结：CLOCK_INVALID/STALE/CROSSED/MISSING_L1 仅记录 quality
 state 和 diagnostics；LOCKED 仅允许 markout；L1_ONLY 仅允许 spread、
 protected-price counterfactual、markout 和 L1 coverage；只有 L5_USABLE
-才允许 L5 book-walk。quality precedence 先选唯一状态，再应用对应 mask，
+才允许 L5 book-walk，并且只有满足 volume unit 绑定且区间 volume 可识别时才
+允许 passive fill bounds。quality precedence 先选唯一状态，再应用对应 mask，
 禁止指标各自绕过 quality 判定。
 
 L1 缺失时不产生 execution metrics。L1 有效但 L2–L5 缺失或异常时，只能标记：
@@ -258,8 +259,8 @@ raw-chain file verifier 对 v1、v2、keyring 也使用 non-symlink、同一 FD
 双读和 path/FD identity 检查；keyring 必须由当前用户所有且为 `0600` 或更
 严格，并在验签前匹配独立 pin。parser 拒绝重复 key、`NaN`、`Infinity`、
 unknown/extra fields、numeric timestamp、float 形式的 integer literal、
-schedule reorder/truncate/duplicate、非 UTC `frozen_at_utc`、错误 policy
-hash 和未知 schema version。
+用 `0/1` 冒充 JSON boolean、schedule reorder/truncate/duplicate、非 UTC
+`frozen_at_utc`、错误 policy hash 和未知 schema version。
 
 ## 尚未授予的下一步
 

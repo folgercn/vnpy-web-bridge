@@ -35,6 +35,48 @@ def _reject_float_literals(value: Any) -> None:
             _reject_float_literals(item)
 
 
+V2_BOOLEAN_FIELDS = frozenset(
+    {
+        "absent_level_synthesis_allowed",
+        "all_level_price_grid_required",
+        "authority_granted",
+        "automatic_promotion_authorized",
+        "bounds_only",
+        "calibrated_point_probability_allowed",
+        "collection_authorized",
+        "counterfactual_only",
+        "database_mutation_authorized",
+        "deployment_mutation_authorized",
+        "dispatch_allowed",
+        "dynamic_selection_allowed",
+        "human_reviewed",
+        "offline_policy_only",
+        "optimistic_l1_to_l5_fallback_allowed",
+        "order_authorized",
+        "order_price_authorized",
+        "p0_pass_required_before_collection",
+        "policy_frozen",
+        "position_mutation_authorized",
+        "prior_quote_carry_forward_allowed",
+        "production_allowed",
+        "replacement_allowed",
+        "runtime_activation_authorized",
+        "separate_collection_release_required",
+    }
+)
+
+
+def _reject_coercive_boolean_literals(value: Any) -> None:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key in V2_BOOLEAN_FIELDS and type(item) is not bool:
+                raise ValueError(f"{key} must be a true JSON boolean literal")
+            _reject_coercive_boolean_literals(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _reject_coercive_boolean_literals(item)
+
+
 class CFastExecutionPolicyFreezeDTO(StrictFoundationModel):
     schema_version: Literal["commodity_c_fast_execution_policy_freeze_v1"]
     freeze_id: str = Field(pattern=r"^[A-Za-z0-9._-]{8,128}$")
@@ -208,7 +250,7 @@ class CFastBookQualityRulesV2DTO(StrictFoundationModel):
         "SPREAD_PROTECTED_PRICE_COUNTERFACTUAL_MARKOUT_AND_L1_COVERAGE_ONLY"
     ]
     l5_usable_metric_mask: Literal[
-        "SPREAD_PROTECTED_PRICE_COUNTERFACTUAL_MARKOUT_L1_COVERAGE_AND_L5_BOOK_WALK"
+        "SPREAD_PROTECTED_PRICE_COUNTERFACTUAL_MARKOUT_L1_COVERAGE_L5_BOOK_WALK_AND_PASSIVE_FILL_BOUNDS_WHEN_IDENTIFIED"
     ]
     missing_l1_state: Literal["UNUSABLE_NO_EXECUTION_METRICS"]
     missing_or_invalid_l2_l5_state: Literal[
@@ -369,6 +411,7 @@ class CFastExecutionPolicyFreezeV2DTO(StrictFoundationModel):
         ):
             raise ValueError("frozen_at_utc must not be a numeric timestamp")
         _reject_float_literals(value)
+        _reject_coercive_boolean_literals(value)
         return value
 
     @model_validator(mode="after")
