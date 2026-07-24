@@ -27,6 +27,9 @@
 - `replacement_authorized`
 - `production_authorized`
 - `automatic_promotion_authorized`
+- `dynamic_selection_allowed`
+- `database_mutation_authorized`
+- `deployment_mutation_authorized`
 
 因此，`p0_accepted=true` 只表示独立人工接受了一个符合约束的历史 P0 证据包，不代表可以进入数据采集、shadow runtime、自动 dispatch、testnet 或 production。后续每个阶段仍需单独的权限、冻结策略和激活流程。
 

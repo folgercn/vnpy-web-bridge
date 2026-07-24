@@ -672,6 +672,9 @@ def acceptance_draft(
         "replacement_authorized": False,
         "production_authorized": False,
         "automatic_promotion_authorized": False,
+        "dynamic_selection_allowed": False,
+        "database_mutation_authorized": False,
+        "deployment_mutation_authorized": False,
     }
 
 
@@ -730,6 +733,9 @@ def test_historical_expired_release_can_receive_offline_p0_acceptance(
     assert accepted["runtime_activation_authorized"] is False
     assert accepted["dispatch_authorized"] is False
     assert accepted["production_authorized"] is False
+    assert accepted["dynamic_selection_allowed"] is False
+    assert accepted["database_mutation_authorized"] is False
+    assert accepted["deployment_mutation_authorized"] is False
     assert digest == acceptance_module.acceptance_sha256(accepted)
     assert (
         accepted["bundle_index_sha256"]
@@ -861,12 +867,29 @@ def test_child_invocation_exact_bytes_and_fixed_argv_are_required(
         )
 
 
+@pytest.mark.parametrize(
+    "authority_field",
+    [
+        "collection_authorized",
+        "runtime_activation_authorized",
+        "order_authorized",
+        "position_mutation_authorized",
+        "dispatch_authorized",
+        "replacement_authorized",
+        "production_authorized",
+        "automatic_promotion_authorized",
+        "dynamic_selection_allowed",
+        "database_mutation_authorized",
+        "deployment_mutation_authorized",
+    ],
+)
 def test_acceptance_authority_literals_cannot_be_enabled(
     tmp_path: Path,
+    authority_field: str,
 ) -> None:
     fixture = build_fixture(tmp_path)
     signed, _verified = sign_fixture(fixture)
-    signed["collection_authorized"] = True
+    signed[authority_field] = True
     acceptance_path = write_json(
         tmp_path / "tampered-acceptance.json",
         signed,

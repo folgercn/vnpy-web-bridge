@@ -59,6 +59,9 @@
     "replacement_authorized",
     "production_authorized",
     "automatic_promotion_authorized",
+    "dynamic_selection_allowed",
+    "database_mutation_authorized",
+    "deployment_mutation_authorized",
     "signature"
   ],
   "properties": {
@@ -291,6 +294,15 @@
       "const": false
     },
     "automatic_promotion_authorized": {
+      "const": false
+    },
+    "dynamic_selection_allowed": {
+      "const": false
+    },
+    "database_mutation_authorized": {
+      "const": false
+    },
+    "deployment_mutation_authorized": {
       "const": false
     },
     "signature": {
