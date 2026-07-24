@@ -1,0 +1,192 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/folgercn/vnpy-web-bridge/docs/schemas/commodity-c-fast-l1-l5-audit-manifest-v2.schema.json",
+  "title": "C_FAST L1-L5 Audit Manifest v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "candidate_id",
+    "snapshot_id",
+    "audit_window",
+    "session_windows",
+    "targets",
+    "execution_windows"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "commodity_c_fast_l1_l5_audit_manifest_v2"
+    },
+    "candidate_id": {
+      "const": "C_FAST_CROSS_SECTION_NEUTRAL"
+    },
+    "snapshot_id": {
+      "$ref": "#/$defs/id"
+    },
+    "audit_window": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "start",
+        "end_exclusive",
+        "trading_day"
+      ],
+      "properties": {
+        "start": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "end_exclusive": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "trading_day": {
+          "type": "string",
+          "pattern": "^[0-9]{8}$"
+        }
+      }
+    },
+    "session_windows": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "night_open",
+        "night_session",
+        "day_open",
+        "day_session"
+      ],
+      "properties": {
+        "night_open": {
+          "$ref": "#/$defs/sessionWindow"
+        },
+        "night_session": {
+          "$ref": "#/$defs/sessionWindow"
+        },
+        "day_open": {
+          "$ref": "#/$defs/sessionWindow"
+        },
+        "day_session": {
+          "$ref": "#/$defs/sessionWindow"
+        }
+      }
+    },
+    "targets": {
+      "type": "array",
+      "minItems": 10,
+      "maxItems": 10,
+      "items": {
+        "$ref": "#/$defs/target"
+      }
+    },
+    "execution_windows": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/executionWindow"
+      }
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{8,128}$"
+    },
+    "product": {
+      "enum": [
+        "ag",
+        "al",
+        "au",
+        "bu",
+        "cu",
+        "rb",
+        "ru",
+        "sc",
+        "sp",
+        "zn"
+      ]
+    },
+    "contract": {
+      "type": "string",
+      "pattern": "^(?:[A-Z]+\\.[A-Za-z]+[0-9]{3,4}|[A-Za-z]+[0-9]{3,4}\\.[A-Z]+)$"
+    },
+    "sessionWindow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "start",
+        "end_exclusive"
+      ],
+      "properties": {
+        "start": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "end_exclusive": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "product",
+        "exact_contract",
+        "previous_exact_contract",
+        "roll_expected"
+      ],
+      "properties": {
+        "product": {
+          "$ref": "#/$defs/product"
+        },
+        "exact_contract": {
+          "$ref": "#/$defs/contract"
+        },
+        "previous_exact_contract": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/contract"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "roll_expected": {
+          "type": "boolean"
+        }
+      }
+    },
+    "executionWindow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "window_id",
+        "product",
+        "exact_contract",
+        "execution_time",
+        "window_seconds"
+      ],
+      "properties": {
+        "window_id": {
+          "$ref": "#/$defs/id"
+        },
+        "product": {
+          "$ref": "#/$defs/product"
+        },
+        "exact_contract": {
+          "$ref": "#/$defs/contract"
+        },
+        "execution_time": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "window_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3600
+        }
+      }
+    }
+  }
+}

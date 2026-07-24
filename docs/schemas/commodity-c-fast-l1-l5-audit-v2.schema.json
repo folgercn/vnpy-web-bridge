@@ -1,0 +1,374 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/folgercn/vnpy-web-bridge/docs/schemas/commodity-c-fast-l1-l5-audit-v2.schema.json",
+  "title": "C_FAST L1-L5 Audit Evidence v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "candidate_id",
+    "snapshot_id",
+    "manifest_sha256",
+    "generated_at",
+    "read_only",
+    "database_mutations",
+    "audit_window",
+    "thresholds",
+    "summary",
+    "products",
+    "contracts",
+    "execution_windows",
+    "blockers",
+    "limitations"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "commodity_c_fast_l1_l5_audit_v2"
+    },
+    "candidate_id": {
+      "const": "C_FAST_CROSS_SECTION_NEUTRAL"
+    },
+    "snapshot_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{8,128}$"
+    },
+    "manifest_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "read_only": {
+      "const": true
+    },
+    "database_mutations": {
+      "const": 0
+    },
+    "audit_window": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "start",
+        "end_exclusive",
+        "trading_day",
+        "display_timezone"
+      ],
+      "properties": {
+        "start": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "end_exclusive": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "trading_day": {
+          "type": "string",
+          "pattern": "^[0-9]{8}$"
+        },
+        "display_timezone": {
+          "const": "Asia/Shanghai"
+        }
+      }
+    },
+    "thresholds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "min_l1_complete_ratio",
+        "min_l5_complete_ratio",
+        "max_transport_stale_ratio",
+        "max_clock_skew_ratio",
+        "max_crossed_ratio",
+        "max_locked_ratio",
+        "max_inverted_depth_ratio",
+        "transport_stale_seconds",
+        "clock_skew_seconds",
+        "cadence_gap_seconds",
+        "max_continuous_gap_seconds",
+        "max_execution_window_gap_seconds",
+        "min_rows_per_required_session",
+        "min_rows_per_execution_window",
+        "max_required_session_gap_seconds",
+        "min_positive_volume_deltas_for_semantics",
+        "min_last_volume_match_ratio"
+      ],
+      "properties": {
+        "min_l1_complete_ratio": {
+          "const": 0.995
+        },
+        "min_l5_complete_ratio": {
+          "const": 0.95
+        },
+        "max_transport_stale_ratio": {
+          "const": 0.01
+        },
+        "max_clock_skew_ratio": {
+          "const": 0.001
+        },
+        "max_crossed_ratio": {
+          "const": 0.0001
+        },
+        "max_locked_ratio": {
+          "const": 0.05
+        },
+        "max_inverted_depth_ratio": {
+          "const": 0.001
+        },
+        "transport_stale_seconds": {
+          "const": 5.0
+        },
+        "clock_skew_seconds": {
+          "const": 1.0
+        },
+        "cadence_gap_seconds": {
+          "const": 5.0
+        },
+        "max_continuous_gap_seconds": {
+          "const": 300.0
+        },
+        "max_execution_window_gap_seconds": {
+          "const": 5.0
+        },
+        "min_rows_per_required_session": {
+          "const": 20.0
+        },
+        "min_rows_per_execution_window": {
+          "const": 11.0
+        },
+        "max_required_session_gap_seconds": {
+          "const": 5.0
+        },
+        "min_positive_volume_deltas_for_semantics": {
+          "const": 10.0
+        },
+        "min_last_volume_match_ratio": {
+          "const": 0.95
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "expected_products",
+        "observed_products",
+        "contracts",
+        "rows",
+        "classification_counts",
+        "overall_conclusion",
+        "p0_pass"
+      ],
+      "properties": {
+        "expected_products": {
+          "const": 10
+        },
+        "observed_products": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10
+        },
+        "contracts": {
+          "type": "integer",
+          "minimum": 10,
+          "maximum": 20
+        },
+        "rows": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "classification_counts": {
+          "$ref": "https://github.com/folgercn/vnpy-web-bridge/docs/schemas/commodity-c-fast-l1-l5-audit-v1.schema.json#/$defs/classificationCounts"
+        },
+        "overall_conclusion": {
+          "$ref": "https://github.com/folgercn/vnpy-web-bridge/docs/schemas/commodity-c-fast-l1-l5-audit-v1.schema.json#/$defs/classification"
+        },
+        "p0_pass": {
+          "type": "boolean"
+        }
+      }
+    },
+    "products": {
+      "type": "array",
+      "minItems": 10,
+      "maxItems": 10,
+      "items": {
+        "$ref": "https://github.com/folgercn/vnpy-web-bridge/docs/schemas/commodity-c-fast-l1-l5-audit-v1.schema.json#/$defs/product"
+      }
+    },
+    "contracts": {
+      "type": "array",
+      "minItems": 10,
+      "maxItems": 20,
+      "items": {
+        "$ref": "#/$defs/contract"
+      }
+    },
+    "execution_windows": {
+      "type": "array",
+      "items": {
+        "$ref": "https://github.com/folgercn/vnpy-web-bridge/docs/schemas/commodity-c-fast-l1-l5-audit-v1.schema.json#/$defs/executionWindow"
+      }
+    },
+    "blockers": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "limitations": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "$defs": {
+    "contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "product",
+        "role",
+        "exact_contract",
+        "vt_symbol",
+        "classification",
+        "all",
+        "sessions",
+        "session_coverage"
+      ],
+      "properties": {
+        "product": {
+          "type": "string"
+        },
+        "role": {
+          "enum": [
+            "current",
+            "previous"
+          ]
+        },
+        "exact_contract": {
+          "type": "string"
+        },
+        "vt_symbol": {
+          "type": "string"
+        },
+        "classification": {
+          "$ref": "https://github.com/folgercn/vnpy-web-bridge/docs/schemas/commodity-c-fast-l1-l5-audit-v1.schema.json#/$defs/classification"
+        },
+        "all": {
+          "$ref": "https://github.com/folgercn/vnpy-web-bridge/docs/schemas/commodity-c-fast-l1-l5-audit-v1.schema.json#/$defs/metrics"
+        },
+        "sessions": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "night_open",
+            "night_session",
+            "day_open",
+            "day_session"
+          ],
+          "properties": {
+            "night_open": {
+              "$ref": "https://github.com/folgercn/vnpy-web-bridge/docs/schemas/commodity-c-fast-l1-l5-audit-v1.schema.json#/$defs/metrics"
+            },
+            "night_session": {
+              "$ref": "https://github.com/folgercn/vnpy-web-bridge/docs/schemas/commodity-c-fast-l1-l5-audit-v1.schema.json#/$defs/metrics"
+            },
+            "day_open": {
+              "$ref": "https://github.com/folgercn/vnpy-web-bridge/docs/schemas/commodity-c-fast-l1-l5-audit-v1.schema.json#/$defs/metrics"
+            },
+            "day_session": {
+              "$ref": "https://github.com/folgercn/vnpy-web-bridge/docs/schemas/commodity-c-fast-l1-l5-audit-v1.schema.json#/$defs/metrics"
+            }
+          }
+        },
+        "session_coverage": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "night_open",
+            "night_session",
+            "day_open",
+            "day_session"
+          ],
+          "properties": {
+            "night_open": {
+              "$ref": "#/$defs/sessionCoverage"
+            },
+            "night_session": {
+              "$ref": "#/$defs/sessionCoverage"
+            },
+            "day_open": {
+              "$ref": "#/$defs/sessionCoverage"
+            },
+            "day_session": {
+              "$ref": "#/$defs/sessionCoverage"
+            }
+          }
+        }
+      }
+    },
+    "sessionCoverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "start",
+        "end_exclusive",
+        "start_boundary_gap_seconds",
+        "end_boundary_gap_seconds",
+        "max_observed_tick_gap_seconds",
+        "max_gap_seconds",
+        "boundary_coverage_complete",
+        "classification"
+      ],
+      "properties": {
+        "start": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "end_exclusive": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "start_boundary_gap_seconds": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "end_boundary_gap_seconds": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "max_observed_tick_gap_seconds": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "max_gap_seconds": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "boundary_coverage_complete": {
+          "type": "boolean"
+        },
+        "classification": {
+          "$ref": "https://github.com/folgercn/vnpy-web-bridge/docs/schemas/commodity-c-fast-l1-l5-audit-v1.schema.json#/$defs/classification"
+        }
+      }
+    }
+  }
+}
