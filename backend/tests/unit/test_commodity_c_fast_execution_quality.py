@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 import ast
+import base64
 import json
 from datetime import date, datetime, timezone
 from pathlib import Path
 
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from pydantic import ValidationError
 
+from app.schemas.commodity_c_fast_execution_policy import (
+    CFastExecutionPolicyFreezeDTO,
+)
 from app.schemas.commodity_c_fast_execution_quality import (
     CFastVirtualIntentDTO,
     CFastVirtualIntentPlanDTO,
@@ -15,10 +21,16 @@ from app.schemas.commodity_c_fast_execution_quality import (
 )
 from app.schemas.commodity_c_fast_shadow import CommodityCFastShadowDTO
 from app.services import commodity_c_fast_execution_quality as execution_quality
+from app.services.commodity_c_fast_execution_policy import (
+    PLACEHOLDER_SIGNATURE,
+    unsigned_execution_policy_freeze_payload,
+    verify_execution_policy_freeze,
+)
 from app.services.commodity_c_fast_execution_quality import (
     CFastExecutionQualityFoundationError,
     compile_virtual_intent_plan,
     reload_and_verify_virtual_intent_plan,
+    virtual_intent_policy_hash,
     virtual_intent_plan_hash,
 )
 from app.services.commodity_c_fast_shadow import (
@@ -27,6 +39,7 @@ from app.services.commodity_c_fast_shadow import (
     PRODUCTS,
 )
 from app.services.commodity_c_fast_shadow_common import (
+    canonical_json,
     formula_target_binding_sha256,
     sha256_json,
     unsigned_snapshot_payload,
@@ -52,6 +65,75 @@ def policy(*, maximum: int = 3) -> CFastVirtualIntentPolicyDTO:
         replacement_allowed=False,
         production_allowed=False,
     )
+
+
+def test_verified_policy_freeze_still_compiles_non_activatable_plan() -> None:
+    private_key = Ed25519PrivateKey.generate()
+    frozen_policy = policy()
+    core = {
+        "schema_version": "commodity_c_fast_execution_policy_freeze_v1",
+        "freeze_id": "c-fast-policy-freeze-integration-v1",
+        "candidate_id": "C_FAST_CROSS_SECTION_NEUTRAL",
+        "policy_scope": "EXECUTION_QUALITY_SHADOW_FOUNDATION_ONLY",
+        "policy": frozen_policy.model_dump(mode="json"),
+        "policy_hash": virtual_intent_policy_hash(frozen_policy),
+        "frozen_at_utc": "2026-07-24T15:30:00Z",
+        "reviewer_role": "human_execution_policy_reviewer",
+        "human_reviewed": True,
+        "policy_frozen": True,
+        "protected_price_rule_state": "DEFERRED_NOT_COLLECTION_READY",
+        "p0_pass_required_before_collection": True,
+        "foundation_only": True,
+        "collection_authorized": False,
+        "runtime_activation_authorized": False,
+        "authority_granted": False,
+        "dispatch_allowed": False,
+        "replacement_allowed": False,
+        "production_allowed": False,
+        "signer_key_id": "c-fast-policy-freeze-signer-1",
+        "signature": PLACEHOLDER_SIGNATURE,
+    }
+    draft = CFastExecutionPolicyFreezeDTO.model_validate(core)
+    signed = draft.model_dump(mode="json")
+    signed["signature"] = base64.b64encode(
+        private_key.sign(
+            canonical_json(
+                unsigned_execution_policy_freeze_payload(draft)
+            )
+        )
+    ).decode("ascii")
+    freeze = CFastExecutionPolicyFreezeDTO.model_validate(signed)
+    public_key = base64.b64encode(
+        private_key.public_key().public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
+    ).decode("ascii")
+    receipt = verify_execution_policy_freeze(
+        freeze,
+        trusted_public_keys={
+            freeze.signer_key_id: {
+                "public_key_base64": public_key,
+                "purpose": "execution_quality_policy_freeze_signer",
+            }
+        },
+    )
+    accepted_snapshot, snapshot_hash = snapshot(
+        {"cu": (None, 0, "SHFE.cu2612", 4)}
+    )
+
+    plan = compile_virtual_intent_plan(
+        snapshot=accepted_snapshot,
+        snapshot_hash=snapshot_hash,
+        policy=freeze.policy,
+    )
+
+    assert receipt.policy_hash == plan.policy_hash
+    assert receipt.policy_frozen is True
+    assert receipt.collection_authorized is False
+    assert plan.activation_state == "FOUNDATION_ONLY_NOT_ACTIVATABLE"
+    assert plan.collection_authorized is False
+    assert plan.dispatch_allowed is False
 
 
 def snapshot(
