@@ -1146,6 +1146,43 @@ def test_position_manager_shakedown_stop_only_cancels_session_reference(tmp_path
     assert stopped["halt"]["status"] == "HALTED_RECONCILE_REQUIRED"
 
 
+def test_position_manager_shakedown_recognizes_own_active_order_without_reference(
+    tmp_path: Path,
+) -> None:
+    service, rpc = prepare_position_manager_shakedown(tmp_path)
+    plan = {
+        "close_orders": [],
+        "open_orders": [{"reference": "commodity_pm:sh:session:o:1"}],
+        "submitted": {
+            "close": [],
+            "open": [{"vt_orderid": "CTP.own"}],
+        },
+        "send_intents": {"close": [], "open": []},
+    }
+    rpc.orders = [
+        {
+            "vt_orderid": "CTP.own",
+            "symbol": "ag2610",
+            "status": "submitting",
+        },
+        {
+            "vt_orderid": "CTP.external",
+            "symbol": "al2610",
+            "status": "not_traded",
+        },
+    ]
+
+    conflicts = service._position_manager_shakedown_external_active_orders(plan)
+
+    assert conflicts == [
+        {
+            "vt_orderid": "CTP.external",
+            "reference": "",
+            "symbol": "al2610",
+        }
+    ]
+
+
 def test_position_manager_shakedown_pre_submit_stop_archives_and_unblocks_preview(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
