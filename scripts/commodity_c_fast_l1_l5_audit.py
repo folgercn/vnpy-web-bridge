@@ -21,6 +21,7 @@ from zoneinfo import ZoneInfo
 from jsonschema import Draft202012Validator, FormatChecker
 from jsonschema.exceptions import SchemaError
 from referencing import Registry, Resource
+from referencing.exceptions import NoSuchResource, Unresolvable
 
 try:
     import psycopg
@@ -33,6 +34,7 @@ MANIFEST_SCHEMA_VERSION = "commodity_c_fast_l1_l5_audit_manifest_v2"
 CANDIDATE_ID = "C_FAST_CROSS_SECTION_NEUTRAL"
 MAX_AUDIT_WINDOW_HOURS = 96
 MAX_JSON_BYTES = 2 * 1024 * 1024
+MAX_ROWS_PER_CONTRACT = 500_000
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_SCHEMA_PATH = (
     ROOT
@@ -43,6 +45,9 @@ EVIDENCE_SCHEMA_PATH = (
 )
 LEGACY_EVIDENCE_SCHEMA_PATH = (
     ROOT / "docs/schemas/commodity-c-fast-l1-l5-audit-v1.schema.json"
+)
+LEGACY_EVIDENCE_RESOURCE_URI = (
+    "urn:vnpy-web-bridge:schema:commodity-c-fast-l1-l5-audit-v1"
 )
 FROZEN_PRODUCTS = ("ag", "al", "au", "bu", "cu", "rb", "ru", "sc", "sp", "zn")
 PRODUCT_EXCHANGES = {
@@ -458,40 +463,11 @@ def classify_metrics(
     thresholds: dict[str, float] | None = None,
 ) -> str:
     limits = thresholds or THRESHOLDS
-    rows = int(metrics.get("rows") or 0)
-    if rows == 0:
-        return "UNUSABLE"
-    if float(metrics.get("l1_complete_ratio") or 0) < limits[
-        "min_l1_complete_ratio"
-    ]:
-        return "UNUSABLE"
-    if float(metrics.get("l5_complete_ratio") or 0) < limits[
-        "min_l5_complete_ratio"
-    ]:
-        return "L1_ONLY"
+    depth_quality = classify_depth_quality(metrics, limits)
+    if depth_quality != "L5_USABLE":
+        return depth_quality
 
     anomalies = metrics.get("anomalies") or {}
-    volume_semantics = metrics.get("volume_semantics") or {}
-    positive_volume_deltas = int(
-        volume_semantics.get("positive_volume_deltas") or 0
-    )
-    volume_semantics_failed = (
-        positive_volume_deltas
-        < int(limits["min_positive_volume_deltas_for_semantics"])
-        or int(volume_semantics.get("cumulative_volume_decreases") or 0) > 0
-        or int(volume_semantics.get("volume_change_without_last_volume") or 0)
-        > 0
-        or int(volume_semantics.get("last_volume_without_volume_change") or 0)
-        > 0
-        or (
-            positive_volume_deltas
-            >= int(limits["min_positive_volume_deltas_for_semantics"])
-            and float(
-                volume_semantics.get("last_volume_match_ratio") or 0
-            )
-            < limits["min_last_volume_match_ratio"]
-        )
-    )
     quality_failed = (
         float(anomalies.get("transport_stale_ratio") or 0)
         > limits["max_transport_stale_ratio"]
@@ -514,9 +490,66 @@ def classify_metrics(
         or int(anomalies.get("non_positive_ingest_seq_rows") or 0) > 0
         or int(anomalies.get("ingest_seq_non_increasing_rows") or 0) > 0
         or int(anomalies.get("same_ts_duplicate_ingest_seq") or 0) > 0
-        or volume_semantics_failed
+        or classify_volume_semantics_quality(metrics, limits) != "VALIDATED"
     )
     return "DEGRADED" if quality_failed else "L5_USABLE"
+
+
+def classify_depth_quality(
+    metrics: dict[str, Any],
+    thresholds: dict[str, float] | None = None,
+) -> str:
+    limits = thresholds or THRESHOLDS
+    rows = int(metrics.get("rows") or 0)
+    if rows == 0:
+        return "UNUSABLE"
+    if float(metrics.get("l1_complete_ratio") or 0) < limits[
+        "min_l1_complete_ratio"
+    ]:
+        return "UNUSABLE"
+    if float(metrics.get("l5_complete_ratio") or 0) < limits[
+        "min_l5_complete_ratio"
+    ]:
+        return "L1_ONLY"
+    return "L5_USABLE"
+
+
+def classify_volume_semantics_quality(
+    metrics: dict[str, Any],
+    thresholds: dict[str, float] | None = None,
+) -> str:
+    limits = thresholds or THRESHOLDS
+    volume_semantics = metrics.get("volume_semantics") or {}
+    positive_volume_deltas = int(
+        volume_semantics.get("positive_volume_deltas") or 0
+    )
+    if positive_volume_deltas < int(
+        limits["min_positive_volume_deltas_for_semantics"]
+    ):
+        return "INSUFFICIENT"
+    inconsistent = (
+        int(volume_semantics.get("cumulative_volume_decreases") or 0) > 0
+        or int(volume_semantics.get("volume_change_without_last_volume") or 0)
+        > 0
+        or int(volume_semantics.get("last_volume_without_volume_change") or 0)
+        > 0
+        or float(volume_semantics.get("last_volume_match_ratio") or 0)
+        < limits["min_last_volume_match_ratio"]
+    )
+    return "INCONSISTENT" if inconsistent else "VALIDATED"
+
+
+def quality_breakdown(
+    metrics: dict[str, Any],
+    combined_classification: str | None = None,
+) -> dict[str, str]:
+    return {
+        "depth_quality": classify_depth_quality(metrics),
+        "volume_semantics_quality": classify_volume_semantics_quality(metrics),
+        "combined_classification": (
+            combined_classification or str(metrics["classification"])
+        ),
+    }
 
 
 def load_manifest(
@@ -728,7 +761,7 @@ def audit(
             end,
             trading_day,
         )
-        all_rows += int(result["all"]["rows"])
+        all_rows += int(result["scanned_rows"])
         contracts_result.append(result)
         window_results.extend(contract_window_results)
 
@@ -744,6 +777,36 @@ def audit(
         [item["classification"] for item in products_result]
     )
     p0_pass = overall == "L5_USABLE" and not blockers
+    quality_breakdowns: list[dict[str, Any]] = []
+    for contract_result in contracts_result:
+        for segment, metrics in (
+            ("all", contract_result["all"]),
+            *contract_result["sessions"].items(),
+        ):
+            quality_breakdowns.append(
+                {
+                    "record_type": "contract_segment",
+                    "product": contract_result["product"],
+                    "role": contract_result["role"],
+                    "vt_symbol": contract_result["vt_symbol"],
+                    "segment": segment,
+                    **quality_breakdown(metrics),
+                }
+            )
+    for window_result in window_results:
+        quality_breakdowns.append(
+            {
+                "record_type": "execution_window",
+                "product": window_result["product"],
+                "role": "window",
+                "vt_symbol": window_result["vt_symbol"],
+                "segment": window_result["window_id"],
+                **quality_breakdown(
+                    window_result["metrics"],
+                    window_result["classification"],
+                ),
+            }
+        )
     canonical_manifest = json.dumps(
         {
             key: value
@@ -769,6 +832,10 @@ def audit(
             "display_timezone": "Asia/Shanghai",
         },
         "thresholds": dict(THRESHOLDS),
+        "query_limits": {
+            "max_rows_per_contract": MAX_ROWS_PER_CONTRACT,
+            "sql_limit_per_contract": MAX_ROWS_PER_CONTRACT + 1,
+        },
         "summary": {
             "expected_products": len(FROZEN_PRODUCTS),
             "observed_products": sum(
@@ -776,6 +843,14 @@ def audit(
             ),
             "contracts": len(contracts_result),
             "rows": all_rows,
+            "scanned_rows": all_rows,
+            "max_contract_rows_observed": max(
+                (
+                    int(item["scanned_rows"])
+                    for item in contracts_result
+                ),
+                default=0,
+            ),
             "classification_counts": counts,
             "overall_conclusion": overall,
             "p0_pass": p0_pass,
@@ -783,6 +858,7 @@ def audit(
         "products": products_result,
         "contracts": contracts_result,
         "execution_windows": window_results,
+        "quality_breakdowns": quality_breakdowns,
         "blockers": blockers,
         "limitations": [
             "五档聚合快照不能识别订单队列位置或撤单身份。",
@@ -832,7 +908,9 @@ def audit_contract(
         FROM market_ticks
         WHERE vt_symbol = %s AND ts >= %s AND ts < %s
         ORDER BY ts, ingest_seq
+        LIMIT {MAX_ROWS_PER_CONTRACT + 1}
     """
+    scanned_rows = 0
     try:
         cursor = conn.execute(sql, (contract.vt_symbol, start, end))
         while True:
@@ -840,6 +918,12 @@ def audit_contract(
             if not batch:
                 break
             for raw in batch:
+                scanned_rows += 1
+                if scanned_rows > MAX_ROWS_PER_CONTRACT:
+                    raise AuditError(
+                        f"{contract.vt_symbol} exceeds "
+                        f"{MAX_ROWS_PER_CONTRACT} row query limit"
+                    )
                 row = dict(zip(QUERY_COLUMNS, raw))
                 overall.add(row)
                 row_ts = _as_utc_datetime(row["ts"], "market_ticks.ts")
@@ -851,6 +935,8 @@ def audit_contract(
                     if window.start <= row_ts <= window.end:
                         window_accumulators[window.window_id].add(row)
                         window_times[window.window_id].append(row_ts)
+    except AuditError:
+        raise
     except Exception as exc:
         raise AuditError(
             f"read-only market_ticks query failed for {contract.vt_symbol}: {exc}"
@@ -901,6 +987,7 @@ def audit_contract(
         "role": contract.role,
         "exact_contract": contract.exact_contract,
         "vt_symbol": contract.vt_symbol,
+        "scanned_rows": scanned_rows,
         "classification": contract_classification,
         "all": all_result,
         "sessions": session_results,
@@ -1104,7 +1191,9 @@ def render_markdown(evidence: dict[str, Any]) -> str:
         "",
         f"- P0 通过：`{str(summary['p0_pass']).lower()}`",
         f"- 总体结论：`{summary['overall_conclusion']}`",
-        f"- 行数：`{summary['rows']}`；合约数：`{summary['contracts']}`",
+        f"- 扫描行数：`{summary['scanned_rows']}`；合约数：`{summary['contracts']}`",
+        f"- 单合约最大观测行数：`{summary['max_contract_rows_observed']}`；"
+        f"硬上限：`{evidence['query_limits']['max_rows_per_contract']}`",
         "",
         "| 品种 | 行数 | 合约数 | 执行窗口 | 缺失时段 | 样本不足时段 | 结论 |",
         "|---|---:|---:|---:|---|---|---|",
@@ -1116,6 +1205,24 @@ def render_markdown(evidence: dict[str, Any]) -> str:
             f"| {item['product']} | {item['rows']} | {item['contracts']} | "
             f"{item['execution_windows']} | {missing} | {insufficient} | "
             f"{item['classification']} |"
+        )
+
+    lines.extend(
+        [
+            "",
+            "## 深度与成交量语义分解",
+            "",
+            "| 类型 | 品种 | 角色 | 合约 | 时段/窗口 | 深度质量 | "
+            "成交量语义 | 综合结论 |",
+            "|---|---|---|---|---|---|---|---|",
+        ]
+    )
+    for item in evidence["quality_breakdowns"]:
+        lines.append(
+            f"| {item['record_type']} | {item['product']} | "
+            f"{item['role']} | {item['vt_symbol']} | {item['segment']} | "
+            f"{item['depth_quality']} | {item['volume_semantics_quality']} | "
+            f"{item['combined_classification']} |"
         )
 
     lines.extend(
@@ -1218,6 +1325,8 @@ def write_csv(path: Path, evidence: dict[str, Any]) -> None:
         "rows_after",
         "l1_complete_ratio",
         "l5_complete_ratio",
+        "depth_quality",
+        "volume_semantics_quality",
         "transport_stale_ratio",
         "crossed_ratio",
         "locked_ratio",
@@ -1349,6 +1458,8 @@ def _csv_metric_row(
         "rows_after": "",
         "l1_complete_ratio": metrics["l1_complete_ratio"],
         "l5_complete_ratio": metrics["l5_complete_ratio"],
+        "depth_quality": classify_depth_quality(metrics),
+        "volume_semantics_quality": classify_volume_semantics_quality(metrics),
         "transport_stale_ratio": anomalies["transport_stale_ratio"],
         "crossed_ratio": anomalies["crossed_ratio"],
         "locked_ratio": anomalies["locked_ratio"],
@@ -1686,6 +1797,27 @@ def _reject_json_constant(value: str) -> None:
     raise ValueError(f"non-finite JSON number is not allowed: {value}")
 
 
+def _deny_external_schema_retrieval(uri: str) -> Resource[Any]:
+    raise NoSuchResource(ref=uri)
+
+
+def _read_json_fd(descriptor: int, label: str) -> bytes:
+    chunks: list[bytes] = []
+    remaining = MAX_JSON_BYTES + 1
+    while remaining > 0:
+        chunk = os.read(descriptor, min(65536, remaining))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    raw = b"".join(chunks)
+    if len(raw) > MAX_JSON_BYTES:
+        raise AuditError(
+            f"{label} exceeds {MAX_JSON_BYTES} byte safety limit"
+        )
+    return raw
+
+
 def _load_json_strict(path: Path, label: str) -> Any:
     try:
         path_stat = path.lstat()
@@ -1705,19 +1837,9 @@ def _load_json_strict(path: Path, label: str) -> Any:
                 raise AuditError(
                     f"{label} exceeds {MAX_JSON_BYTES} byte safety limit"
                 )
-            chunks: list[bytes] = []
-            remaining = MAX_JSON_BYTES + 1
-            while remaining > 0:
-                chunk = os.read(descriptor, min(65536, remaining))
-                if not chunk:
-                    break
-                chunks.append(chunk)
-                remaining -= len(chunk)
-            raw = b"".join(chunks)
-            if len(raw) > MAX_JSON_BYTES:
-                raise AuditError(
-                    f"{label} exceeds {MAX_JSON_BYTES} byte safety limit"
-                )
+            raw = _read_json_fd(descriptor, label)
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            verification_raw = _read_json_fd(descriptor, label)
             after = os.fstat(descriptor)
         finally:
             os.close(descriptor)
@@ -1731,35 +1853,32 @@ def _load_json_strict(path: Path, label: str) -> Any:
         before.st_dev,
         before.st_ino,
         before.st_size,
-        before.st_mtime_ns,
-        before.st_ctime_ns,
+        stat.S_IFMT(before.st_mode),
     )
     identity_after = (
         after.st_dev,
         after.st_ino,
         after.st_size,
-        after.st_mtime_ns,
-        after.st_ctime_ns,
+        stat.S_IFMT(after.st_mode),
     )
     path_identity = (
         path_stat.st_dev,
         path_stat.st_ino,
         path_stat.st_size,
-        path_stat.st_mtime_ns,
-        path_stat.st_ctime_ns,
+        stat.S_IFMT(path_stat.st_mode),
     )
     path_identity_after = (
         path_after_stat.st_dev,
         path_after_stat.st_ino,
         path_after_stat.st_size,
-        path_after_stat.st_mtime_ns,
-        path_after_stat.st_ctime_ns,
+        stat.S_IFMT(path_after_stat.st_mode),
     )
     if (
         path_identity != identity_before
         or identity_before != identity_after
         or identity_after != path_identity_after
         or len(raw) != before.st_size
+        or raw != verification_raw
     ):
         raise AuditError(f"{label} changed while it was being read")
     try:
@@ -1782,14 +1901,14 @@ def validate_json_schema(
     try:
         json.dumps(payload, allow_nan=False)
         Draft202012Validator.check_schema(schema)
-        registry = Registry()
+        registry = Registry(retrieve=_deny_external_schema_retrieval)
         if schema_path == EVIDENCE_SCHEMA_PATH:
             legacy_schema = _load_json_strict(
                 LEGACY_EVIDENCE_SCHEMA_PATH,
                 "legacy audit evidence schema",
             )
             registry = registry.with_resource(
-                legacy_schema["$id"],
+                LEGACY_EVIDENCE_RESOURCE_URI,
                 Resource.from_contents(legacy_schema),
             )
         validator = Draft202012Validator(
@@ -1801,7 +1920,7 @@ def validate_json_schema(
             validator.iter_errors(payload),
             key=lambda item: [str(part) for part in item.absolute_path],
         )
-    except (SchemaError, TypeError, ValueError) as exc:
+    except (SchemaError, TypeError, Unresolvable, ValueError) as exc:
         raise AuditError(f"{label} schema validation failed: {exc}") from exc
     if errors:
         error = errors[0]

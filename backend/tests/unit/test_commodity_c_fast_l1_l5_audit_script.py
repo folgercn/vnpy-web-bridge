@@ -331,7 +331,7 @@ def test_manifest_strict_reader_rejects_duplicate_keys_nan_and_symlink(
         MODULE["load_manifest"](symlink_path)
 
 
-def test_manifest_strict_reader_detects_same_size_same_mtime_rewrite(
+def test_manifest_strict_reader_detects_change_between_fd_reads(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -343,25 +343,73 @@ def test_manifest_strict_reader_detects_same_size_same_mtime_rewrite(
         1,
     )
     assert len(replacement.encode()) == len(original.encode())
-    original_stat = path.stat()
-    original_read = MODULE["os"].read
+    original_lseek = MODULE["os"].lseek
     mutated = False
 
-    def mutate_before_first_read(descriptor: int, size: int) -> bytes:
+    def mutate_after_rewind(
+        descriptor: int,
+        offset: int,
+        whence: int,
+    ) -> int:
         nonlocal mutated
+        result = original_lseek(descriptor, offset, whence)
         if not mutated:
             mutated = True
             path.write_text(replacement, encoding="utf-8")
-            MODULE["os"].utime(
-                path,
-                ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
-            )
-        return original_read(descriptor, size)
+        return result
 
-    monkeypatch.setattr(MODULE["os"], "read", mutate_before_first_read)
+    monkeypatch.setattr(MODULE["os"], "lseek", mutate_after_rewind)
 
     with pytest.raises(MODULE["AuditError"], match="changed while"):
         MODULE["load_manifest"](path)
+
+
+def test_manifest_strict_reader_ignores_metadata_only_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = write_manifest(tmp_path, manifest_payload())
+    original_lseek = MODULE["os"].lseek
+    touched = False
+
+    def touch_after_rewind(
+        descriptor: int,
+        offset: int,
+        whence: int,
+    ) -> int:
+        nonlocal touched
+        result = original_lseek(descriptor, offset, whence)
+        if not touched:
+            touched = True
+            path.touch()
+        return result
+
+    monkeypatch.setattr(MODULE["os"], "lseek", touch_after_rewind)
+
+    manifest, _, _, _ = MODULE["load_manifest"](path)
+
+    assert manifest["snapshot_id"] == "c-fast-p0-test-a01"
+
+
+def test_schema_validator_denies_external_resource_retrieval(
+    tmp_path: Path,
+) -> None:
+    schema_path = tmp_path / "external-ref.schema.json"
+    schema_path.write_text(
+        json.dumps(
+            {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "$ref": "https://example.invalid/external.schema.json",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        MODULE["AuditError"],
+        match="schema validation failed",
+    ):
+        MODULE["validate_json_schema"]({}, schema_path, "external-ref test")
 
 
 def test_manifest_normalizes_exact_contract_and_binds_execution_window(
@@ -454,7 +502,13 @@ def test_volume_semantics_require_enough_matching_positive_deltas() -> None:
                 last_volume=1 if index else 0,
             ),
         )
-    assert too_short.result()["classification"] == "DEGRADED"
+    short_result = too_short.result()
+    assert short_result["classification"] == "DEGRADED"
+    assert MODULE["classify_depth_quality"](short_result) == "L5_USABLE"
+    assert (
+        MODULE["classify_volume_semantics_quality"](short_result)
+        == "INSUFFICIENT"
+    )
 
     mismatched = MODULE["MetricsAccumulator"](dict(MODULE["THRESHOLDS"]))
     for index in range(20):
@@ -471,6 +525,11 @@ def test_volume_semantics_require_enough_matching_positive_deltas() -> None:
     result = mismatched.result()
     assert result["classification"] == "DEGRADED"
     assert result["volume_semantics"]["last_volume_match_ratio"] == 0
+    assert MODULE["classify_depth_quality"](result) == "L5_USABLE"
+    assert (
+        MODULE["classify_volume_semantics_quality"](result)
+        == "INCONSISTENT"
+    )
 
 
 def test_missing_deeper_levels_cannot_fall_back_to_l5() -> None:
@@ -682,6 +741,40 @@ def test_execution_window_requires_full_boundary_coverage() -> None:
     assert result["boundary_coverage_complete"] is False
 
 
+def test_contract_query_row_limit_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    start = SESSION_BOUNDS["night_open"][0]
+    rows = rows_for_timestamps(
+        [start + timedelta(seconds=index) for index in range(6)]
+    )
+    connection = FakeConnection(rows)
+    contract = MODULE["ContractSpec"](
+        product="ag",
+        role="current",
+        exact_contract="SHFE.ag2609",
+        vt_symbol="ag2609.SHFE",
+    )
+    monkeypatch.setitem(
+        MODULE["audit_contract"].__globals__,
+        "MAX_ROWS_PER_CONTRACT",
+        5,
+    )
+
+    with pytest.raises(MODULE["AuditError"], match="5 row query limit"):
+        MODULE["audit_contract"](
+            connection,
+            contract,
+            session_window_specs(),
+            [],
+            AUDIT_START,
+            AUDIT_END,
+            "20260901",
+        )
+
+    assert "LIMIT 6" in connection.sql
+
+
 def test_required_session_rejects_fragmented_twenty_row_sample() -> None:
     execution_time = datetime(2026, 9, 1, 1, 1, tzinfo=timezone.utc)
     connection = FakeConnection(fragmented_session_rows(execution_time))
@@ -713,7 +806,10 @@ def test_required_session_rejects_fragmented_twenty_row_sample() -> None:
     )
 
 
-def test_full_ten_product_audit_can_reach_p0_pass(tmp_path: Path) -> None:
+def test_full_ten_product_audit_can_reach_p0_pass(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     execution_time = datetime(2026, 9, 1, 1, 1, tzinfo=timezone.utc)
     payload = manifest_payload()
     payload["execution_windows"] = [
@@ -747,11 +843,36 @@ def test_full_ten_product_audit_can_reach_p0_pass(tmp_path: Path) -> None:
     assert evidence["blockers"] == []
     assert len(evidence["contracts"]) == 10
     assert len(evidence["execution_windows"]) == 10
+    assert evidence["summary"]["scanned_rows"] == evidence["summary"]["rows"]
+    assert evidence["summary"]["max_contract_rows_observed"] > 0
+    assert evidence["query_limits"]["max_rows_per_contract"] == 500_000
+    assert len(evidence["quality_breakdowns"]) == 60
+    assert all(
+        item["depth_quality"] == "L5_USABLE"
+        and item["volume_semantics_quality"] == "VALIDATED"
+        for item in evidence["quality_breakdowns"]
+    )
     assert len(json.dumps(evidence, ensure_ascii=False)) > 1000
     MODULE["validate_json_schema"](
         evidence,
         MODULE["EVIDENCE_SCHEMA_PATH"],
         "test evidence",
+    )
+    schema_text = MODULE["EVIDENCE_SCHEMA_PATH"].read_text(encoding="utf-8")
+    assert "https://github.com" not in schema_text
+
+    def reject_any_retrieval(uri: str):
+        raise AssertionError(f"unexpected external schema retrieval: {uri}")
+
+    monkeypatch.setitem(
+        MODULE["validate_json_schema"].__globals__,
+        "_deny_external_schema_retrieval",
+        reject_any_retrieval,
+    )
+    MODULE["validate_json_schema"](
+        evidence,
+        MODULE["EVIDENCE_SCHEMA_PATH"],
+        "offline test evidence",
     )
 
     with pytest.raises(MODULE["AuditError"], match="CLI start does not match"):
@@ -815,10 +936,16 @@ def test_rendered_report_and_csv_do_not_include_dsn(
             "end_exclusive": "2026-09-01T08:00:00+00:00",
             "trading_day": "20260901",
         },
+        "query_limits": {
+            "max_rows_per_contract": 500_000,
+            "sql_limit_per_contract": 500_001,
+        },
         "summary": {
             "p0_pass": False,
             "overall_conclusion": "UNUSABLE",
             "rows": 0,
+            "scanned_rows": 0,
+            "max_contract_rows_observed": 0,
             "contracts": 1,
         },
         "products": [
@@ -858,6 +985,18 @@ def test_rendered_report_and_csv_do_not_include_dsn(
             }
         ],
         "execution_windows": [],
+        "quality_breakdowns": [
+            {
+                "record_type": "contract_segment",
+                "product": "ag",
+                "role": "current",
+                "vt_symbol": "ag2609.SHFE",
+                "segment": "all",
+                "depth_quality": "UNUSABLE",
+                "volume_semantics_quality": "INSUFFICIENT",
+                "combined_classification": "UNUSABLE",
+            }
+        ],
         "blockers": ["ag:no_rows"],
         "limitations": ["no passive point probability"],
     }
