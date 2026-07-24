@@ -2231,6 +2231,13 @@ class CommoditySimNowService:
             for phase in ("close", "open")
             for order in plan.get(f"{phase}_orders", [])
         }
+        session_order_ids = {
+            str(order.get("vt_orderid") or order.get("orderid") or "")
+            for collection in ("submitted", "send_intents")
+            for phase in ("close", "open")
+            for order in plan.get(collection, {}).get(phase, [])
+            if order.get("vt_orderid") or order.get("orderid")
+        }
         conflicts: list[dict[str, str]] = []
         for order in self.rpc.get_orders():
             if _normalize_status(order.get("status")) not in ACTIVE_ORDER_STATUSES:
@@ -2239,10 +2246,11 @@ class CommoditySimNowService:
             if _product_from_symbol(symbol) not in PRODUCT_SPECS:
                 continue
             reference = str(order.get("reference") or "")
-            if reference in session_references:
+            vt_orderid = str(order.get("vt_orderid") or order.get("orderid") or "unknown")
+            if reference in session_references or vt_orderid in session_order_ids:
                 continue
             conflicts.append({
-                "vt_orderid": str(order.get("vt_orderid") or order.get("orderid") or "unknown"),
+                "vt_orderid": vt_orderid,
                 "reference": reference,
                 "symbol": symbol,
             })
