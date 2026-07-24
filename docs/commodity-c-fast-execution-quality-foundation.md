@@ -85,6 +85,14 @@ policy_authority_state=UNSIGNED_FOUNDATION_INPUT_REQUIRES_SEPARATE_FREEZE
 凭本地测试中的数值开始 forward 收集。运行前需由独立人工 authority
 冻结 policy ID、child lots 和后续价格规则。
 
+独立的 signed policy-freeze foundation 见
+[`commodity-c-fast-execution-policy-freeze.md`](commodity-c-fast-execution-policy-freeze.md)。
+它可以签名冻结当前 foundation policy 的完整内容，但因为
+`protected_price_rule=DEFERRED_TO_DECISION_SNAPSHOT`，固定保持
+`collection_authorized=false` 和
+`runtime_activation_authorized=false`。签名 freeze 不替代 P0，也不能
+单独激活 sidecar。
+
 ## 与 T1/P0 的依赖
 
 可以与 QuestDB server-enforced readonly proof 和 one-shot T1 authority
