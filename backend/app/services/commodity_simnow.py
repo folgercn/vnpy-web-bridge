@@ -129,6 +129,16 @@ def _csv_set(value: str) -> set[str]:
     return {item.strip().lower() for item in value.split(",") if item.strip()}
 
 
+def _order_id_aliases(value: Any) -> set[str]:
+    text = str(value or "")
+    if not text:
+        return set()
+    aliases = {text}
+    if "." in text:
+        aliases.add(text.split(".", 1)[1])
+    return aliases
+
+
 def _exact_to_vt(exact_contract: str) -> str:
     exchange, symbol = exact_contract.split(".", 1)
     return f"{symbol}.{exchange}"
@@ -2231,13 +2241,16 @@ class CommoditySimNowService:
             for phase in ("close", "open")
             for order in plan.get(f"{phase}_orders", [])
         }
-        session_order_ids = {
-            str(order.get("vt_orderid") or order.get("orderid") or "")
-            for collection in ("submitted", "send_intents")
-            for phase in ("close", "open")
-            for order in plan.get(collection, {}).get(phase, [])
-            if order.get("vt_orderid") or order.get("orderid")
-        }
+        session_order_ids: set[str] = set()
+        for collection in ("submitted", "send_intents"):
+            for phase in ("close", "open"):
+                for order in plan.get(collection, {}).get(phase, []):
+                    session_order_ids.update(
+                        _order_id_aliases(order.get("vt_orderid"))
+                    )
+                    session_order_ids.update(
+                        _order_id_aliases(order.get("orderid"))
+                    )
         conflicts: list[dict[str, str]] = []
         for order in self.rpc.get_orders():
             if _normalize_status(order.get("status")) not in ACTIVE_ORDER_STATUSES:
@@ -2247,7 +2260,14 @@ class CommoditySimNowService:
                 continue
             reference = str(order.get("reference") or "")
             vt_orderid = str(order.get("vt_orderid") or order.get("orderid") or "unknown")
-            if reference in session_references or vt_orderid in session_order_ids:
+            observed_order_ids = (
+                _order_id_aliases(order.get("vt_orderid"))
+                | _order_id_aliases(order.get("orderid"))
+            )
+            if (
+                reference in session_references
+                or observed_order_ids & session_order_ids
+            ):
                 continue
             conflicts.append({
                 "vt_orderid": vt_orderid,
@@ -4443,7 +4463,7 @@ class CommoditySimNowService:
                 "盘口已过期", detail={"vt_symbol": vt_symbol, "quote_age_seconds": round(age, 3)}
             )
         spread_ticks = (ask - bid) / tick
-        if spread_ticks > self.settings.commodity_simnow_max_spread_ticks + 1e-12:
+        if spread_ticks > self.settings.commodity_simnow_max_spread_ticks + 1e-9:
             raise CommoditySimNowSafetyError(
                 "盘口价差超过 SimNow 上限",
                 detail={"vt_symbol": vt_symbol, "spread_ticks": spread_ticks},
