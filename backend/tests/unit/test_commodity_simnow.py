@@ -980,6 +980,20 @@ def test_position_manager_shakedown_preview_rejects_unattributed_or_today_positi
         )
 
 
+def test_position_manager_shakedown_allows_exact_completed_baseline_today_position(
+    tmp_path: Path,
+) -> None:
+    service, rpc = prepare_position_manager_shakedown(tmp_path)
+    rpc.positions = [position("ag", 2, today=2), position("al", -1, today=1)]
+
+    result = service.preview_position_manager_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )
+
+    assert result["preview"]["plan"]["phase_status"] == "READY_OPEN"
+    assert result["preview"]["plan"]["open_orders"][0]["volume"] == 1
+
+
 def test_position_manager_shakedown_preview_rejects_unselected_baseline_drift(
     tmp_path: Path,
 ) -> None:
@@ -1879,6 +1893,33 @@ def test_position_manager_shadow_marks_unavailable_baseline_unlinked(tmp_path: P
 
     assert snapshot["valid"] is True
     assert snapshot["baseline_link_state"] == "unlinked"
+
+
+def test_simnow_shakedown_shadow_does_not_pollute_formal_continuity(tmp_path: Path) -> None:
+    service, private_key, _ = make_service(tmp_path)
+    baseline = service.preview(make_batch(private_key), operator="admin", role="admin", source_ip=None)
+    path = tmp_path / "position-manager-shakedown-shadow.json"
+    payload = make_position_manager_shadow(
+        private_key,
+        baseline_batch_hash=baseline["batch_hash"],
+        source_month="2026-07",
+        execution_day="2026-08-01",
+        input_cutoff_day="2026-07-31",
+    ).model_dump(mode="json")
+    payload["execution_lane"] = "simnow_shakedown"
+    payload["countable_forward"] = False
+    write_position_manager_shadow(path, sign_position_manager_shadow_payload(payload, private_key))
+    service.settings = service.settings.model_copy(
+        update={"commodity_position_manager_shadow_path": str(path)}
+    )
+
+    snapshot = service.position_manager_shadow()
+
+    assert snapshot["valid"] is True
+    assert snapshot["execution_lane"] == "simnow_shakedown"
+    assert snapshot["countable_forward"] is False
+    assert snapshot["continuity_state"] == "genesis"
+    assert not Path(service.settings.commodity_position_manager_shadow_state_path).exists()
 
 
 def test_baseline_sector_mapping_remains_identical_to_main() -> None:

@@ -1515,7 +1515,7 @@ class CommoditySimNowService:
         if set(rows) != set(PRODUCT_SPECS) or any(product not in rows for product in selected):
             raise CommoditySimNowSafetyError("签名候选缺少固定十品种目标")
         safety = self._safety_snapshot(require_trade_enabled=True)
-        _, baseline = self._position_manager_linked_baseline(
+        baseline_link_state, baseline = self._position_manager_linked_baseline(
             str(shadow["baseline_batch_hash"]), require_settled=True
         )
         if baseline is None:
@@ -1544,7 +1544,10 @@ class CommoditySimNowService:
             })
         session_id = f"pm-shakedown-{uuid.uuid4().hex}"
         plan = self._build_position_manager_shakedown_plan(
-            chosen, baseline=baseline, session_id=session_id
+            chosen,
+            baseline=baseline,
+            session_id=session_id,
+            allow_today_baseline_positions=baseline_link_state == "completed",
         )
         session_core = {
             "session_id": session_id,
@@ -1654,7 +1657,7 @@ class CommoditySimNowService:
         safety = self._safety_snapshot(require_trade_enabled=True)
         if safety["account_hash"] != session.get("account_hash"):
             raise CommoditySimNowSafetyError("SimNow 账户在 preview 后发生变化")
-        _, baseline = self._position_manager_linked_baseline(
+        baseline_link_state, baseline = self._position_manager_linked_baseline(
             str(session["baseline_batch_hash"]), require_settled=True
         )
         if baseline is None:
@@ -1668,6 +1671,7 @@ class CommoditySimNowService:
             list(session.get("targets") or []),
             baseline=baseline,
             session_id=str(session["session_id"]),
+            allow_today_baseline_positions=baseline_link_state == "completed",
         )
         comparable_keys = (
             "close_orders", "open_orders", "expected_after_close", "expected_final_positions",
@@ -1966,6 +1970,7 @@ class CommoditySimNowService:
         *,
         baseline: dict[str, Any],
         session_id: str,
+        allow_today_baseline_positions: bool = False,
     ) -> dict[str, Any]:
         """Adapt candidate targets to the verified two-phase plan shape without dispatching."""
         positions = self._position_snapshot()
@@ -1986,11 +1991,6 @@ class CommoditySimNowService:
             if int(row["target_quantity"])
         }
         observed_baseline_positions = self._signed_positions(positions)
-        if any(int(row["today_quantity"]) for row in positions.values()):
-            raise CommoditySimNowSafetyError(
-                "存在今日持仓，无法完整证明属于关联 baseline",
-                detail={"observed": observed_baseline_positions},
-            )
         if observed_baseline_positions != expected_baseline_positions:
             raise CommoditySimNowSafetyError(
                 "账户持仓无法完整证明属于关联 baseline",
@@ -1999,6 +1999,16 @@ class CommoditySimNowService:
                     "observed": observed_baseline_positions,
                 },
             )
+        if any(int(row["today_quantity"]) for row in positions.values()):
+            fully_today = all(
+                int(row["today_quantity"]) == abs(int(row["signed_quantity"]))
+                for row in positions.values()
+            )
+            if not allow_today_baseline_positions or not fully_today:
+                raise CommoditySimNowSafetyError(
+                    "存在今日持仓，无法完整证明属于关联 baseline",
+                    detail={"observed": observed_baseline_positions},
+                )
         effective_targets = {
             product: dict(row) for product, row in baseline_targets.items()
         }
@@ -2040,7 +2050,10 @@ class CommoditySimNowService:
             }
             existing = sorted(by_product[product], key=lambda item: item[0])
             current_quantity = sum(int(item[1]["signed_quantity"]) for item in existing)
-            if any(int(position["today_quantity"]) for _, position in existing):
+            has_today_position = any(
+                int(position["today_quantity"]) for _, position in existing
+            )
+            if has_today_position and not allow_today_baseline_positions:
                 raise CommoditySimNowSafetyError(
                     "存在今日持仓，候选测试预览 fail closed",
                     detail={"product": product},
@@ -2059,6 +2072,15 @@ class CommoditySimNowService:
                             for vt_symbol, position in existing
                         },
                     },
+                )
+            if has_today_position and (
+                not target_quantity
+                or target_quantity * baseline_quantity <= 0
+                or abs(target_quantity) < abs(baseline_quantity)
+            ):
+                raise CommoditySimNowSafetyError(
+                    "今日 baseline 持仓仅允许同方向增仓候选测试",
+                    detail={"product": product},
                 )
             same_contract = next(
                 (int(position["signed_quantity"]) for vt_symbol, position in existing if vt_symbol == target_vt),
@@ -2426,7 +2448,7 @@ class CommoditySimNowService:
             continuity_state = self._verify_position_manager_continuity(
                 snapshot, snapshot_hash
             )
-            if baseline is not None:
+            if baseline is not None and snapshot.execution_lane == "official_forward":
                 self._save_position_manager_shadow_state(
                     snapshot, snapshot_hash, continuity_state
                 )
@@ -2439,6 +2461,8 @@ class CommoditySimNowService:
                 "position_manager_id": snapshot.position_manager_id,
                 "sector_map_id": snapshot.sector_map_id,
                 "mode": snapshot.mode,
+                "execution_lane": snapshot.execution_lane,
+                "countable_forward": snapshot.countable_forward,
                 "baseline_scheduler_id": snapshot.baseline_scheduler_id,
                 "baseline_batch_hash": snapshot.baseline_batch_hash,
                 "baseline_link_state": linked_state,
@@ -2526,22 +2550,29 @@ class CommoditySimNowService:
         snapshot: CommodityPositionManagerShadowDTO,
         baseline: dict[str, Any],
     ) -> None:
-        expected_header = {
-            "baseline_scheduler_id": self.scheduler_id,
-            "source_month": baseline["source_month"],
-            "execution_day": baseline["execution_day"],
-        }
-        observed_header = {
-            "baseline_scheduler_id": snapshot.baseline_scheduler_id,
-            "source_month": snapshot.source_month,
-            "execution_day": snapshot.execution_day.isoformat(),
-        }
-        for field, expected in expected_header.items():
-            if observed_header[field] != expected:
-                raise CommoditySimNowBatchError(
-                    "仓位管理 shadow baseline 批次头不一致",
-                    detail={"field": field, "expected": expected},
-                )
+        if snapshot.execution_lane == "simnow_shakedown":
+            if snapshot.countable_forward:
+                raise CommoditySimNowBatchError("SimNow shakedown 不可标记为正式 forward")
+            # A pre-forward shakedown deliberately reuses the complete signed
+            # baseline targets, but its PIT month can precede the formal monthly
+            # chain.  Target-level linkage remains exact below.
+        else:
+            expected_header = {
+                "baseline_scheduler_id": self.scheduler_id,
+                "source_month": baseline["source_month"],
+                "execution_day": baseline["execution_day"],
+            }
+            observed_header = {
+                "baseline_scheduler_id": snapshot.baseline_scheduler_id,
+                "source_month": snapshot.source_month,
+                "execution_day": snapshot.execution_day.isoformat(),
+            }
+            for field, expected in expected_header.items():
+                if observed_header[field] != expected:
+                    raise CommoditySimNowBatchError(
+                        "仓位管理 shadow baseline 批次头不一致",
+                        detail={"field": field, "expected": expected},
+                    )
 
         baseline_targets = {row["product"]: row for row in baseline["targets"]}
         for row in snapshot.targets:
@@ -2620,6 +2651,16 @@ class CommoditySimNowService:
         snapshot: CommodityPositionManagerShadowDTO,
         snapshot_hash: str,
     ) -> str:
+        if snapshot.execution_lane == "simnow_shakedown":
+            if snapshot.countable_forward or snapshot.continuity_mode != "genesis" or snapshot.previous_snapshot_hash is not None:
+                raise CommoditySimNowBatchError("SimNow shakedown 连续性声明无效")
+            if not math.isclose(snapshot.previous_smoothed_scale, 1.0, rel_tol=0, abs_tol=1e-12):
+                raise CommoditySimNowBatchError("SimNow shakedown 初始平滑 scale 无效")
+            # Do not read or write the formal forward continuity chain.
+            return "genesis"
+
+        if not snapshot.countable_forward:
+            raise CommoditySimNowBatchError("正式 Shadow 必须标记为可计数 forward")
         previous = self._load_position_manager_shadow_state()
         if previous and previous["snapshot_hash"] == snapshot_hash:
             return str(previous["continuity_state"])
