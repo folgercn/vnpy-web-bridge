@@ -1,0 +1,59 @@
+{
+  "x-c-fast-t1-preparation-only": {
+    "schema_version": "commodity_c_fast_t1_runner_packaging_v1",
+    "activation_allowed": false,
+    "authority_granted": false,
+    "production_query_authorized": false,
+    "requires_separate_signed_one_shot_release": true
+  },
+  "services": {
+    "questdb": {
+      "environment": {
+        "QDB_PG_READONLY_USER_ENABLED": "true",
+        "QDB_PG_READONLY_USER": "${C_FAST_T1_QUESTDB_READONLY_USER:?required_non_admin_principal}",
+        "QDB_PG_READONLY_PASSWORD_FILE": "/run/secrets/c_fast_t1_questdb_readonly_password"
+      },
+      "secrets": [
+        {
+          "source": "c_fast_t1_questdb_readonly_password",
+          "target": "c_fast_t1_questdb_readonly_password",
+          "mode": 256
+        }
+      ]
+    },
+    "c-fast-t1-audit-package": {
+      "profiles": [
+        "manual-c-fast-t1-preparation-only"
+      ],
+      "image": "${C_FAST_T1_AUDIT_IMAGE:?required_immutable_digest}",
+      "entrypoint": [
+        "/bin/false"
+      ],
+      "network_mode": "none",
+      "read_only": true,
+      "user": "65532:65532",
+      "cap_drop": [
+        "ALL"
+      ],
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "pids_limit": 64,
+      "mem_limit": "1g",
+      "cpus": 1.0,
+      "tmpfs": [
+        "/tmp:rw,noexec,nosuid,nodev,size=64m"
+      ],
+      "environment": {
+        "C_FAST_T1_PACKAGING_ONLY": "true",
+        "C_FAST_T1_AUTHORITY_GRANTED": "false",
+        "C_FAST_T1_PRODUCTION_QUERY_AUTHORIZED": "false"
+      }
+    }
+  },
+  "secrets": {
+    "c_fast_t1_questdb_readonly_password": {
+      "file": "${C_FAST_T1_QUESTDB_READONLY_PASSWORD_FILE:?required_0600_secret_file}"
+    }
+  }
+}
