@@ -65,6 +65,7 @@ CONSUME_SCHEMA_VERSION = "commodity_c_fast_t1_consume_v1"
 TERMINAL_SCHEMA_VERSION = "commodity_c_fast_t1_terminal_seal_v1"
 RELEASE_PURPOSE = "c_fast_l1_l5_t1_readonly_audit"
 TRUSTED_KEY_PURPOSE = "t1_audit_release_signer"
+CHILD_INVOCATION_RELATIVE_PATH = Path("release/child-invocation.json")
 MAX_JSON_BYTES = 2 * 1024 * 1024
 MAX_ARTIFACT_BYTES = 64 * 1024 * 1024
 MAX_RELEASE_TTL = timedelta(hours=24)
@@ -284,6 +285,36 @@ def parse_json_bytes(raw: bytes, label: str) -> dict[str, Any]:
         raise OneShotError(f"cannot parse {label}: {exc}") from exc
     if not isinstance(payload, dict):
         raise OneShotError(f"{label} must contain one JSON object")
+    return payload
+
+
+def parse_child_invocation_bytes(
+    raw: bytes,
+    label: str = "child invocation",
+) -> list[str]:
+    try:
+        payload = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_object_keys,
+            parse_constant=_reject_json_constant,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise OneShotError(f"cannot parse {label}: {exc}") from exc
+    if (
+        not isinstance(payload, list)
+        or not payload
+        or any(
+            not isinstance(value, str)
+            or not value
+            or "\x00" in value
+            for value in payload
+        )
+    ):
+        raise OneShotError(
+            f"{label} must contain one non-empty JSON string array"
+        )
+    if canonical_json(payload) != raw:
+        raise OneShotError(f"{label} must use exact canonical JSON bytes")
     return payload
 
 
@@ -927,7 +958,8 @@ def write_bytes_create_only(path: Path, raw: bytes, mode: int) -> None:
 def stage_verified_audit_bundle(
     verified: VerifiedRelease,
     attempt_dir: Path,
-) -> tuple[Path, Path, Path, Path]:
+    child_invocation: list[str],
+) -> tuple[Path, Path, Path, Path, Path]:
     bundle_root = attempt_dir / "verified-bundle"
     artifacts_dir = attempt_dir / "artifacts"
     scripts_dir = bundle_root / "scripts"
@@ -953,6 +985,14 @@ def stage_verified_audit_bundle(
             canonical_json(verified.manifest) + b"\n",
             0o400,
         )
+        child_invocation_path = (
+            bundle_root / CHILD_INVOCATION_RELATIVE_PATH
+        )
+        write_bytes_create_only(
+            child_invocation_path,
+            canonical_json(child_invocation),
+            0o400,
+        )
         for directory in (
             scripts_dir,
             schemas_dir,
@@ -971,12 +1011,14 @@ def stage_verified_audit_bundle(
         scripts_dir / "commodity_c_fast_l1_l5_audit.py",
         manifest_path,
         artifacts_dir,
+        child_invocation_path,
     )
 
 
 def verify_staged_audit_bundle(
     verified: VerifiedRelease,
     bundle_root: Path,
+    expected_child_invocation: list[str],
 ) -> None:
     for relative_name, expected_raw in verified.bundle_files.items():
         actual_raw = read_regular_file_strict(
@@ -1002,6 +1044,16 @@ def verify_staged_audit_bundle(
         ).digest(),
     ):
         raise OneShotError("staged audit manifest changed")
+    invocation_raw = read_regular_file_strict(
+        bundle_root / CHILD_INVOCATION_RELATIVE_PATH,
+        "staged child invocation",
+    )
+    invocation = parse_child_invocation_bytes(
+        invocation_raw,
+        "staged child invocation",
+    )
+    if invocation != expected_child_invocation:
+        raise OneShotError("staged child invocation changed")
 
 
 def artifact_hashes(paths: ArtifactPaths) -> dict[str, str | None]:
@@ -1149,29 +1201,29 @@ def build_child_invocation(
     paths: ArtifactPaths,
 ) -> list[str]:
     return [
-        sys.executable,
+        str(Path(sys.executable).resolve(strict=True)),
         "-I",
-        str(audit_script_path),
+        str(audit_script_path.resolve()),
         "--manifest",
-        str(manifest_path),
+        str(manifest_path.resolve()),
         "--start",
         release["audit_window"]["start"],
         "--end",
         release["audit_window"]["end_exclusive"],
         "--dsn-file",
-        str(dsn_path),
+        str(dsn_path.resolve(strict=True)),
         "--expected-endpoint-identity-sha256",
         release["endpoint_identity_sha256"],
         "--expected-manifest-sha256",
         release["manifest_sha256"],
         "--json-output",
-        str(paths.audit_json),
+        str(paths.audit_json.resolve()),
         "--csv-output",
-        str(paths.audit_csv),
+        str(paths.audit_csv.resolve()),
         "--markdown-output",
-        str(paths.audit_markdown),
+        str(paths.audit_markdown.resolve()),
         "--readonly-proof-output",
-        str(paths.readonly_proof),
+        str(paths.readonly_proof.resolve()),
     ]
 
 
@@ -1343,6 +1395,24 @@ def validate_existing_terminal(
         "SUCCEEDED_P0_PASS",
         "COMPLETED_P0_BLOCKED",
     }:
+        child_invocation_raw = read_regular_file_strict(
+            guard.path
+            / release["attempt_id"]
+            / "verified-bundle"
+            / CHILD_INVOCATION_RELATIVE_PATH,
+            "existing child invocation",
+        )
+        parse_child_invocation_bytes(
+            child_invocation_raw,
+            "existing child invocation",
+        )
+        if not hmac.compare_digest(
+            hashlib.sha256(child_invocation_raw).hexdigest(),
+            terminal["child_invocation_sha256"],
+        ):
+            raise OneShotError(
+                "existing terminal does not bind exact child invocation bytes"
+            )
         artifacts_dir = (
             guard.path / release["attempt_id"] / "artifacts"
         )
@@ -1558,15 +1628,26 @@ def execute_once(
             actual_staged_audit_script,
             actual_staged_manifest,
             actual_artifacts_dir,
-        ) = stage_verified_audit_bundle(verified, attempt_dir)
+            actual_child_invocation_path,
+        ) = stage_verified_audit_bundle(
+            verified,
+            attempt_dir,
+            invocation,
+        )
         if (
             actual_staged_audit_script != staged_audit_script
             or actual_staged_manifest != staged_manifest
             or actual_artifacts_dir != artifacts_dir
+            or actual_child_invocation_path
+            != bundle_root / CHILD_INVOCATION_RELATIVE_PATH
         ):
             raise OneShotError("staged audit bundle paths are inconsistent")
         guard.assert_path_identity()
-        verify_staged_audit_bundle(verified, bundle_root)
+        verify_staged_audit_bundle(
+            verified,
+            bundle_root,
+            invocation,
+        )
     except OneShotError:
         terminal = _new_terminal(
             verified,
@@ -1590,7 +1671,7 @@ def execute_once(
         )
         guard.close()
         return 2, terminal
-    started_at = datetime.now(timezone.utc)
+    started_at = current_time
     terminal: dict[str, Any]
     result: subprocess.CompletedProcess[str] | None = None
     try:
@@ -1706,7 +1787,11 @@ def execute_once(
     try:
         guard.assert_path_identity()
         try:
-            verify_staged_audit_bundle(verified, bundle_root)
+            verify_staged_audit_bundle(
+                verified,
+                bundle_root,
+                invocation,
+            )
         except OneShotError:
             completed_audit_exit = (
                 result.returncode

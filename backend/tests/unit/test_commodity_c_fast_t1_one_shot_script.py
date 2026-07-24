@@ -329,6 +329,14 @@ def test_consume_is_fsynced_before_child_and_release_cannot_replay(
         assert "--expected-endpoint-identity-sha256" in argv
         assert "--expected-manifest-sha256" in argv
         assert "verified-bundle" in argv[2]
+        invocation_path = (
+            Path(argv[2]).parents[1]
+            / MODULE["CHILD_INVOCATION_RELATIVE_PATH"]
+        )
+        assert invocation_path.exists()
+        assert MODULE["parse_child_invocation_bytes"](
+            invocation_path.read_bytes()
+        ) == argv
         for flag, content in (
             ("--json-output", b"json"),
             ("--csv-output", b"csv"),
@@ -355,6 +363,20 @@ def test_consume_is_fsynced_before_child_and_release_cannot_replay(
     assert exit_code == 0
     assert terminal["terminal_state"] == "SUCCEEDED_P0_PASS"
     assert terminal["proof_verified"] is True
+    consume_path = args.custody_dir / (
+        f"{release['attempt_id']}.consumed.json"
+    )
+    consume_payload = json.loads(consume_path.read_text(encoding="utf-8"))
+    assert terminal["started_at"] == consume_payload["consumed_at"]
+    child_invocation_path = (
+        args.custody_dir
+        / release["attempt_id"]
+        / "verified-bundle"
+        / MODULE["CHILD_INVOCATION_RELATIVE_PATH"]
+    )
+    assert terminal["child_invocation_sha256"] == hashlib.sha256(
+        child_invocation_path.read_bytes()
+    ).hexdigest()
     assert calls == 1
 
     replay_code, replay_terminal = execute(
@@ -386,9 +408,6 @@ def test_consume_is_fsynced_before_child_and_release_cannot_replay(
     terminal_path.write_bytes(original_terminal_raw)
     terminal_path.chmod(0o600)
 
-    consume_path = args.custody_dir / (
-        f"{release['attempt_id']}.consumed.json"
-    )
     original_consume_raw = consume_path.read_bytes()
     consume_payload = json.loads(original_consume_raw)
     consume_path.write_text(
@@ -405,6 +424,24 @@ def test_consume_is_fsynced_before_child_and_release_cannot_replay(
         )
     consume_path.write_bytes(original_consume_raw)
     consume_path.chmod(0o600)
+
+    original_invocation_raw = child_invocation_path.read_bytes()
+    child_invocation_path.chmod(0o600)
+    child_invocation_path.write_bytes(original_invocation_raw + b" ")
+    child_invocation_path.chmod(0o400)
+    with pytest.raises(
+        MODULE["OneShotError"],
+        match="child invocation",
+    ):
+        execute(
+            args,
+            runner=runner,
+            output_validator=validator,
+            now=NOW,
+        )
+    child_invocation_path.chmod(0o600)
+    child_invocation_path.write_bytes(original_invocation_raw)
+    child_invocation_path.chmod(0o400)
 
     terminal_path.unlink()
     with pytest.raises(
@@ -443,6 +480,33 @@ def test_attacker_controlled_keyring_cannot_replace_deployment_trust_root(
             pinned_keyring_sha256=honest_args.pinned_keyring_sha256,
             now=NOW,
         )
+
+
+def test_child_invocation_is_reverified_after_child(
+    tmp_path: Path,
+) -> None:
+    args, release = signed_inputs(tmp_path)
+
+    def runner(argv, **_kwargs):
+        invocation_path = (
+            Path(argv[2]).parents[1]
+            / MODULE["CHILD_INVOCATION_RELATIVE_PATH"]
+        )
+        invocation_path.chmod(0o600)
+        invocation_path.write_bytes(
+            MODULE["canonical_json"]([*argv, "--unexpected"])
+        )
+        invocation_path.chmod(0o400)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    exit_code, terminal = execute(args, runner=runner, now=NOW)
+
+    assert exit_code == 2
+    assert terminal["terminal_state"] == "FAILED_OUTPUT_VALIDATION"
+    assert terminal["error_code"] == "STAGED_BUNDLE_CHANGED"
+    assert terminal["child_exit_code"] == 0
+    assert terminal["started_at"] == NOW.isoformat()
+    assert terminal["attempt_id"] == release["attempt_id"]
 
 
 def test_runtime_pin_file_must_be_root_owned_and_not_cli_environment(
