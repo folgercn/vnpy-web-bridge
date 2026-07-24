@@ -264,6 +264,42 @@ def test_manifest_rejects_invalid_calendar_trading_day(
         MODULE["load_manifest"](write_manifest(tmp_path, payload))
 
 
+def test_manifest_allows_friday_night_for_monday_trading_day(
+    tmp_path: Path,
+) -> None:
+    payload = manifest_payload()
+    payload["audit_window"] = {
+        "start": "2026-09-04T12:00:00+00:00",
+        "end_exclusive": "2026-09-07T08:00:00+00:00",
+        "trading_day": "20260907",
+    }
+    payload["session_windows"] = {
+        "night_open": {
+            "start": "2026-09-04T13:00:00+00:00",
+            "end_exclusive": "2026-09-04T13:02:05+00:00",
+        },
+        "night_session": {
+            "start": "2026-09-04T13:10:00+00:00",
+            "end_exclusive": "2026-09-04T13:20:00+00:00",
+        },
+        "day_open": {
+            "start": "2026-09-07T01:00:00+00:00",
+            "end_exclusive": "2026-09-07T01:02:05+00:00",
+        },
+        "day_session": {
+            "start": "2026-09-07T01:10:00+00:00",
+            "end_exclusive": "2026-09-07T01:20:00+00:00",
+        },
+    }
+
+    _, _, sessions, _ = MODULE["load_manifest"](
+        write_manifest(tmp_path, payload)
+    )
+
+    assert sessions[0].start.weekday() == 4
+    assert sessions[-1].start.weekday() == 0
+
+
 def test_manifest_strict_reader_rejects_duplicate_keys_nan_and_symlink(
     tmp_path: Path,
 ) -> None:

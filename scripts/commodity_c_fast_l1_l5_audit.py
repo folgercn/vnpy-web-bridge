@@ -31,7 +31,7 @@ except ImportError:  # pragma: no cover - deployment dependency
 SCHEMA_VERSION = "commodity_c_fast_l1_l5_audit_v2"
 MANIFEST_SCHEMA_VERSION = "commodity_c_fast_l1_l5_audit_manifest_v2"
 CANDIDATE_ID = "C_FAST_CROSS_SECTION_NEUTRAL"
-MAX_AUDIT_WINDOW_HOURS = 36
+MAX_AUDIT_WINDOW_HOURS = 96
 MAX_JSON_BYTES = 2 * 1024 * 1024
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_SCHEMA_PATH = (
