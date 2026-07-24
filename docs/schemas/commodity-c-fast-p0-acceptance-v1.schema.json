@@ -28,6 +28,7 @@
     "consume_marker_raw_sha256",
     "terminal_seal_raw_sha256",
     "terminal_seal_canonical_sha256",
+    "child_invocation_raw_sha256",
     "artifact_sha256",
     "bundle_index_sha256",
     "snapshot_id",
@@ -38,6 +39,7 @@
     "started_at",
     "ended_at",
     "external_archive",
+    "external_archive_verification_state",
     "terminal_state",
     "p0_pass",
     "proof_verified",
@@ -136,6 +138,9 @@
     "terminal_seal_canonical_sha256": {
       "$ref": "#/$defs/sha256"
     },
+    "child_invocation_raw_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
     "artifact_sha256": {
       "$ref": "#/$defs/artifactHashes"
     },
@@ -186,7 +191,7 @@
       "additionalProperties": false,
       "required": [
         "custody_id",
-        "archive_type",
+        "asserted_archive_type",
         "archive_locator_sha256",
         "custody_identity_raw_sha256",
         "custody_identity_canonical_sha256",
@@ -199,10 +204,10 @@
         "custody_id": {
           "$ref": "#/$defs/id"
         },
-        "archive_type": {
+        "asserted_archive_type": {
           "enum": [
-            "WORM",
-            "APPEND_ONLY"
+            "ASSERTED_WORM",
+            "ASSERTED_APPEND_ONLY"
           ]
         },
         "archive_locator_sha256": {
@@ -227,6 +232,9 @@
           "const": true
         }
       }
+    },
+    "external_archive_verification_state": {
+      "const": "HUMAN_ASSERTION_NOT_MACHINE_VERIFIED"
     },
     "terminal_state": {
       "const": "SUCCEEDED_P0_PASS"

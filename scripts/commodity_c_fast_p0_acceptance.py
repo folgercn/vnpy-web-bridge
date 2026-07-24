@@ -10,12 +10,14 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 import hashlib
 import hmac
+import os
 from pathlib import Path
 import re
 import sys
 from typing import Any
 
 from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from commodity_c_fast_t1_one_shot import (
@@ -35,6 +37,7 @@ from commodity_c_fast_t1_one_shot import (
     assert_audit_windows_equal,
     canonical_json,
     load_json_strict,
+    parse_child_invocation_bytes,
     parse_datetime,
     parse_json_bytes,
     read_regular_file_strict,
@@ -71,6 +74,7 @@ BUNDLE_FILE_ORDER = (
     "manifest",
     "consume_marker",
     "terminal_seal",
+    "child_invocation",
     "audit_json",
     "audit_csv",
     "audit_markdown",
@@ -89,6 +93,7 @@ class P0BundlePaths:
     manifest: Path
     consume_marker: Path
     terminal_seal: Path
+    child_invocation: Path
     audit_json: Path
     audit_csv: Path
     audit_markdown: Path
@@ -108,6 +113,7 @@ class VerifiedP0Bundle:
     artifact_sha256: dict[str, str]
     bundle_index_sha256: str
     t1_keyring_sha256: str
+    t1_authority_public_key_bytes: tuple[bytes, ...]
     external_custody_identity: dict[str, Any]
     external_custody_identity_raw_sha256: str
     external_custody_identity_canonical_sha256: str
@@ -265,13 +271,172 @@ def _verify_ed25519(
         raise P0AcceptanceError(f"{label} signature is invalid") from exc
 
 
+def _public_key_bytes(public_key: Ed25519PublicKey) -> bytes:
+    return public_key.public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+
+
+def _authorized_public_key_bytes(
+    keyring: dict[str, Any],
+    *,
+    required_purpose: str,
+) -> tuple[bytes, ...]:
+    authorized: list[bytes] = []
+    for entry in keyring["keys"]:
+        if entry["purpose"] != required_purpose:
+            continue
+        try:
+            raw = base64.b64decode(
+                str(entry["public_key_base64"]),
+                validate=True,
+            )
+            if len(raw) != 32:
+                raise ValueError
+            Ed25519PublicKey.from_public_bytes(raw)
+        except (ValueError, binascii.Error) as exc:
+            raise P0AcceptanceError(
+                "trusted Ed25519 public key is invalid"
+            ) from exc
+        authorized.append(raw)
+    if not authorized:
+        raise P0AcceptanceError(
+            f"trusted keyring has no key for purpose {required_purpose}"
+        )
+    return tuple(authorized)
+
+
+def require_independent_acceptance_signer(
+    t1_authority_public_key_bytes: tuple[bytes, ...],
+    acceptance_signer: Ed25519PublicKey,
+) -> None:
+    acceptance_public_key_bytes = _public_key_bytes(acceptance_signer)
+    if any(
+        hmac.compare_digest(t1_key, acceptance_public_key_bytes)
+        for t1_key in t1_authority_public_key_bytes
+    ):
+        raise P0AcceptanceError(
+            "P0 acceptance signer must be cryptographically distinct "
+            "from every T1 audit release authority"
+        )
+
+
+def _validate_child_invocation(
+    invocation: list[str],
+    release: dict[str, Any],
+) -> None:
+    flags = (
+        "--manifest",
+        "--start",
+        "--end",
+        "--dsn-file",
+        "--expected-endpoint-identity-sha256",
+        "--expected-manifest-sha256",
+        "--json-output",
+        "--csv-output",
+        "--markdown-output",
+        "--readonly-proof-output",
+    )
+    if len(invocation) != 3 + 2 * len(flags):
+        raise P0AcceptanceError(
+            "child invocation has unexpected or missing arguments"
+        )
+    python_path = Path(invocation[0])
+    if (
+        not python_path.is_absolute()
+        or re.fullmatch(
+            r"python(?:3(?:\.[0-9]+)?)?",
+            python_path.name,
+        )
+        is None
+        or invocation[1] != "-I"
+    ):
+        raise P0AcceptanceError(
+            "child invocation must use an absolute Python -I executable"
+        )
+    audit_script = Path(invocation[2])
+    if (
+        not audit_script.is_absolute()
+        or ".." in audit_script.parts
+        or audit_script.name != "commodity_c_fast_l1_l5_audit.py"
+    ):
+        raise P0AcceptanceError(
+            "child invocation staged audit script is invalid"
+        )
+    values: dict[str, str] = {}
+    for index, flag in enumerate(flags):
+        offset = 3 + index * 2
+        if invocation[offset] != flag:
+            raise P0AcceptanceError(
+                "child invocation argument order is invalid"
+            )
+        values[flag] = invocation[offset + 1]
+
+    bundle_root = audit_script.parents[1]
+    attempt_dir = bundle_root.parent
+    if (
+        bundle_root.name != "verified-bundle"
+        or attempt_dir.name != release["attempt_id"]
+        or audit_script
+        != bundle_root / "scripts/commodity_c_fast_l1_l5_audit.py"
+        or Path(values["--manifest"])
+        != bundle_root / "release/manifest.json"
+    ):
+        raise P0AcceptanceError(
+            "child invocation verified-bundle paths are invalid"
+        )
+    expected_scalars = {
+        "--start": release["audit_window"]["start"],
+        "--end": release["audit_window"]["end_exclusive"],
+        "--expected-endpoint-identity-sha256": (
+            release["endpoint_identity_sha256"]
+        ),
+        "--expected-manifest-sha256": release["manifest_sha256"],
+    }
+    for flag, expected in expected_scalars.items():
+        if values[flag] != expected:
+            raise P0AcceptanceError(
+                f"child invocation {flag} binding mismatch"
+            )
+    dsn_path = Path(values["--dsn-file"])
+    if not dsn_path.is_absolute() or ".." in dsn_path.parts:
+        raise P0AcceptanceError(
+            "child invocation DSN path must be absolute and normalized"
+        )
+    artifacts_dir = attempt_dir / "artifacts"
+    expected_outputs = {
+        "--json-output": artifacts_dir / "audit.json",
+        "--csv-output": artifacts_dir / "audit.csv",
+        "--markdown-output": artifacts_dir / "audit.md",
+        "--readonly-proof-output": artifacts_dir / "readonly-proof.json",
+    }
+    for flag, expected in expected_outputs.items():
+        actual = Path(values[flag])
+        if (
+            not actual.is_absolute()
+            or ".." in actual.parts
+            or actual != expected
+        ):
+            raise P0AcceptanceError(
+                f"child invocation {flag} path is invalid"
+            )
+    if (
+        Path(os.path.normpath(str(audit_script))) != audit_script
+        or Path(os.path.normpath(str(dsn_path))) != dsn_path
+    ):
+        raise P0AcceptanceError(
+            "child invocation paths must be normalized"
+        )
+
+
 def _validate_external_custody_identity(
     payload: dict[str, Any],
 ) -> None:
     expected = {
         "schema_version",
         "custody_id",
-        "archive_type",
+        "asserted_archive_type",
         "archive_locator_sha256",
         "independent_from_t1_runner",
         "immutability_asserted",
@@ -286,8 +451,13 @@ def _validate_external_custody_identity(
         )
     if ID_PATTERN.fullmatch(str(payload["custody_id"])) is None:
         raise P0AcceptanceError("external custody_id is invalid")
-    if payload["archive_type"] not in {"WORM", "APPEND_ONLY"}:
-        raise P0AcceptanceError("external archive type is invalid")
+    if payload["asserted_archive_type"] not in {
+        "ASSERTED_WORM",
+        "ASSERTED_APPEND_ONLY",
+    }:
+        raise P0AcceptanceError(
+            "external asserted archive type is invalid"
+        )
     _validate_sha256(
         str(payload["archive_locator_sha256"]),
         "external archive locator",
@@ -327,6 +497,7 @@ def _read_bundle_raw(paths: P0BundlePaths) -> dict[str, bytes]:
         "manifest": MAX_JSON_BYTES,
         "consume_marker": MAX_JSON_BYTES,
         "terminal_seal": MAX_JSON_BYTES,
+        "child_invocation": MAX_JSON_BYTES,
         "audit_json": MAX_ARTIFACT_BYTES,
         "audit_csv": MAX_ARTIFACT_BYTES,
         "audit_markdown": MAX_ARTIFACT_BYTES,
@@ -365,6 +536,9 @@ def verify_t1_bundle(
     terminal = parse_json_bytes(
         raw_files["terminal_seal"],
         "terminal seal",
+    )
+    child_invocation = parse_child_invocation_bytes(
+        raw_files["child_invocation"],
     )
     proof = parse_json_bytes(
         raw_files["readonly_proof"],
@@ -405,6 +579,10 @@ def verify_t1_bundle(
         release["signature"],
         canonical_json(unsigned_release_payload(release)),
         "T1 release",
+    )
+    t1_authority_public_key_bytes = _authorized_public_key_bytes(
+        t1_keyring,
+        required_purpose="t1_audit_release_signer",
     )
 
     manifest_canonical_sha256 = _hash_bytes(canonical_json(manifest))
@@ -483,6 +661,12 @@ def verify_t1_bundle(
         terminal["consume_marker_sha256"],
         "terminal exact consume bytes",
     )
+    _compare(
+        _hash_bytes(raw_files["child_invocation"]),
+        terminal["child_invocation_sha256"],
+        "terminal exact child invocation bytes",
+    )
+    _validate_child_invocation(child_invocation, release)
     if (
         terminal["terminal_state"] != "SUCCEEDED_P0_PASS"
         or terminal["p0_pass"] is not True
@@ -520,7 +704,11 @@ def verify_t1_bundle(
         raise P0AcceptanceError(
             "consume marker was not created inside the original release window"
         )
-    if not consumed_at <= started_at < expires_at:
+    if started_at != consumed_at:
+        raise P0AcceptanceError(
+            "terminal start must equal the release consumption time"
+        )
+    if not_before > started_at or started_at >= expires_at:
         raise P0AcceptanceError(
             "terminal start is outside the consumed release window"
         )
@@ -624,6 +812,7 @@ def verify_t1_bundle(
         artifact_sha256=artifact_hashes,
         bundle_index_sha256=_bundle_index_sha256(raw_files),
         t1_keyring_sha256=t1_keyring_sha256,
+        t1_authority_public_key_bytes=t1_authority_public_key_bytes,
         external_custody_identity=external_identity,
         external_custody_identity_raw_sha256=_hash_bytes(external_raw),
         external_custody_identity_canonical_sha256=_hash_bytes(
@@ -690,6 +879,9 @@ def validate_acceptance_bindings(
         "terminal_seal_canonical_sha256": (
             verified.canonical_sha256["terminal_seal"]
         ),
+        "child_invocation_raw_sha256": (
+            verified.raw_sha256["child_invocation"]
+        ),
         "bundle_index_sha256": verified.bundle_index_sha256,
         "snapshot_id": release["snapshot_id"],
         "endpoint_identity_sha256": release["endpoint_identity_sha256"],
@@ -730,7 +922,7 @@ def validate_acceptance_bindings(
     archive = acceptance["external_archive"]
     expected_archive = {
         "custody_id": identity["custody_id"],
-        "archive_type": identity["archive_type"],
+        "asserted_archive_type": identity["asserted_archive_type"],
         "archive_locator_sha256": identity[
             "archive_locator_sha256"
         ],
@@ -749,6 +941,13 @@ def validate_acceptance_bindings(
             raise P0AcceptanceError(
                 f"external archive {field} binding mismatch"
             )
+    if (
+        acceptance["external_archive_verification_state"]
+        != "HUMAN_ASSERTION_NOT_MACHINE_VERIFIED"
+    ):
+        raise P0AcceptanceError(
+            "external archive verification state is invalid"
+        )
     accepted_at = parse_datetime(
         acceptance["accepted_at"],
         "accepted_at",
@@ -817,6 +1016,10 @@ def verify_signed_acceptance(
         expected_sha256=expected_acceptance_keyring_sha256,
         key_id=str(acceptance["signer_key_id"]),
     )
+    require_independent_acceptance_signer(
+        verified.t1_authority_public_key_bytes,
+        public_key,
+    )
     _compare(
         keyring_sha256,
         acceptance["acceptance_keyring_sha256"],
@@ -837,6 +1040,7 @@ def add_bundle_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--consume-marker", type=Path, required=True)
     parser.add_argument("--terminal-seal", type=Path, required=True)
+    parser.add_argument("--child-invocation", type=Path, required=True)
     parser.add_argument("--audit-json", type=Path, required=True)
     parser.add_argument("--audit-csv", type=Path, required=True)
     parser.add_argument("--audit-markdown", type=Path, required=True)
@@ -859,6 +1063,7 @@ def paths_from_args(args: argparse.Namespace) -> P0BundlePaths:
         manifest=args.manifest,
         consume_marker=args.consume_marker,
         terminal_seal=args.terminal_seal,
+        child_invocation=args.child_invocation,
         audit_json=args.audit_json,
         audit_csv=args.audit_csv,
         audit_markdown=args.audit_markdown,

@@ -20,6 +20,7 @@ from commodity_c_fast_p0_acceptance import (
     add_bundle_arguments,
     canonical_json,
     paths_from_args,
+    require_independent_acceptance_signer,
     unsigned_acceptance_payload,
     validate_acceptance_bindings,
     validate_json_schema,
@@ -60,6 +61,10 @@ def sign_acceptance(
         raise P0AcceptanceError(
             "P0 acceptance keyring binding mismatch"
         )
+    require_independent_acceptance_signer(
+        verified.t1_authority_public_key_bytes,
+        public_key,
+    )
     expected_public = public_key.public_bytes(
         encoding=serialization.Encoding.Raw,
         format=serialization.PublicFormat.Raw,

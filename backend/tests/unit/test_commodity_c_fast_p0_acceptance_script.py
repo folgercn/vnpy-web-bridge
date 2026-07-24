@@ -208,12 +208,18 @@ class Fixture:
     acceptance_keyring_path: Path
     acceptance_keyring_sha256: str
     acceptance_private_key: Ed25519PrivateKey
+    t1_private_key: Ed25519PrivateKey
     release: dict
     consume: dict
     terminal: dict
 
 
-def build_fixture(tmp_path: Path) -> Fixture:
+def build_fixture(
+    tmp_path: Path,
+    *,
+    reserved_t1_authority_key: Ed25519PrivateKey | None = None,
+    acceptance_private_key: Ed25519PrivateKey | None = None,
+) -> Fixture:
     manifest_path = write_json(
         tmp_path / "manifest.json",
         manifest_payload(),
@@ -293,6 +299,16 @@ def build_fixture(tmp_path: Path) -> Fixture:
             }
         ],
     }
+    if reserved_t1_authority_key is not None:
+        t1_keyring["keys"].append(
+            {
+                "key_id": "c-fast-t1-release-key-reserved",
+                "purpose": "t1_audit_release_signer",
+                "public_key_base64": public_key_base64(
+                    reserved_t1_authority_key
+                ),
+            }
+        )
     t1_keyring_path = write_json(
         tmp_path / "t1-keyring.json",
         t1_keyring,
@@ -417,7 +433,30 @@ def build_fixture(tmp_path: Path) -> Fixture:
             proof_path.read_bytes()
         ).hexdigest(),
     }
-    started_at = consumed_at + timedelta(seconds=1)
+    started_at = consumed_at
+    attempt_dir = tmp_path / release["attempt_id"]
+    bundle_root = attempt_dir / "verified-bundle"
+    invocation_artifacts = t1_module.ArtifactPaths(
+        audit_json=attempt_dir / "artifacts/audit.json",
+        audit_csv=attempt_dir / "artifacts/audit.csv",
+        audit_markdown=attempt_dir / "artifacts/audit.md",
+        readonly_proof=attempt_dir / "artifacts/readonly-proof.json",
+    )
+    dsn_path = write_bytes(
+        tmp_path / "readonly.dsn",
+        b"postgresql://readonly@example.invalid:8812/qdb",
+    )
+    child_invocation = t1_module.build_child_invocation(
+        release,
+        bundle_root / "scripts/commodity_c_fast_l1_l5_audit.py",
+        bundle_root / "release/manifest.json",
+        dsn_path,
+        invocation_artifacts,
+    )
+    child_invocation_path = write_bytes(
+        tmp_path / "child-invocation.json",
+        t1_module.canonical_json(child_invocation),
+    )
     terminal = {
         "schema_version": "commodity_c_fast_t1_terminal_seal_v1",
         "candidate_id": "C_FAST_CROSS_SECTION_NEUTRAL",
@@ -429,7 +468,9 @@ def build_fixture(tmp_path: Path) -> Fixture:
         "consume_marker_sha256": hashlib.sha256(
             consume_path.read_bytes()
         ).hexdigest(),
-        "child_invocation_sha256": "f" * 64,
+        "child_invocation_sha256": hashlib.sha256(
+            child_invocation_path.read_bytes()
+        ).hexdigest(),
         "child_exit_code": 0,
         "started_at": started_at.isoformat(),
         "ended_at": (started_at + timedelta(seconds=30)).isoformat(),
@@ -459,7 +500,7 @@ def build_fixture(tmp_path: Path) -> Fixture:
             "commodity_c_fast_p0_external_custody_identity_v1"
         ),
         "custody_id": "c-fast-p0-external-custody-a01",
-        "archive_type": "WORM",
+        "asserted_archive_type": "ASSERTED_WORM",
         "archive_locator_sha256": "1" * 64,
         "independent_from_t1_runner": True,
         "immutability_asserted": True,
@@ -468,7 +509,8 @@ def build_fixture(tmp_path: Path) -> Fixture:
         tmp_path / "external-custody-identity.json",
         external_identity,
     )
-    acceptance_private_key = Ed25519PrivateKey.generate()
+    if acceptance_private_key is None:
+        acceptance_private_key = Ed25519PrivateKey.generate()
     acceptance_keyring = {
         "schema_version": (
             "commodity_c_fast_p0_acceptance_trusted_keys_v1"
@@ -494,6 +536,7 @@ def build_fixture(tmp_path: Path) -> Fixture:
             manifest=manifest_path,
             consume_marker=consume_path,
             terminal_seal=terminal_path,
+            child_invocation=child_invocation_path,
             audit_json=audit_json_path,
             audit_csv=audit_csv_path,
             audit_markdown=audit_markdown_path,
@@ -506,6 +549,7 @@ def build_fixture(tmp_path: Path) -> Fixture:
             acceptance_keyring
         ),
         acceptance_private_key=acceptance_private_key,
+        t1_private_key=t1_private_key,
         release=release,
         consume=consume,
         terminal=terminal,
@@ -561,6 +605,9 @@ def acceptance_draft(
         "terminal_seal_canonical_sha256": (
             verified.canonical_sha256["terminal_seal"]
         ),
+        "child_invocation_raw_sha256": (
+            verified.raw_sha256["child_invocation"]
+        ),
         "artifact_sha256": verified.artifact_sha256,
         "bundle_index_sha256": verified.bundle_index_sha256,
         "snapshot_id": verified.release["snapshot_id"],
@@ -578,8 +625,10 @@ def acceptance_draft(
             "custody_id": (
                 verified.external_custody_identity["custody_id"]
             ),
-            "archive_type": (
-                verified.external_custody_identity["archive_type"]
+            "asserted_archive_type": (
+                verified.external_custody_identity[
+                    "asserted_archive_type"
+                ]
             ),
             "archive_locator_sha256": (
                 verified.external_custody_identity[
@@ -599,6 +648,9 @@ def acceptance_draft(
             "independent_custody_asserted": True,
             "immutability_asserted": True,
         },
+        "external_archive_verification_state": (
+            "HUMAN_ASSERTION_NOT_MACHINE_VERIFIED"
+        ),
         "terminal_state": "SUCCEEDED_P0_PASS",
         "p0_pass": True,
         "proof_verified": True,
@@ -702,13 +754,7 @@ def test_consume_must_be_inside_original_release_window(
     terminal["consume_marker_sha256"] = hashlib.sha256(
         fixture.paths.consume_marker.read_bytes()
     ).hexdigest()
-    terminal["started_at"] = (
-        t1_module.parse_datetime(
-            consume["consumed_at"],
-            "consumed_at",
-        )
-        + timedelta(seconds=1)
-    ).isoformat()
+    terminal["started_at"] = consume["consumed_at"]
     terminal["ended_at"] = (
         t1_module.parse_datetime(terminal["started_at"], "started_at")
         + timedelta(seconds=30)
@@ -718,6 +764,28 @@ def test_consume_must_be_inside_original_release_window(
     with pytest.raises(
         acceptance_module.P0AcceptanceError,
         match="original release window",
+    ):
+        acceptance_module.verify_t1_bundle(
+            fixture.paths,
+            expected_t1_keyring_sha256=fixture.t1_keyring_sha256,
+        )
+
+
+def test_terminal_start_must_equal_consume_time(tmp_path: Path) -> None:
+    fixture = build_fixture(tmp_path)
+    terminal = dict(fixture.terminal)
+    terminal["started_at"] = (
+        t1_module.parse_datetime(
+            fixture.consume["consumed_at"],
+            "consumed_at",
+        )
+        + timedelta(milliseconds=1)
+    ).isoformat()
+    write_json(fixture.paths.terminal_seal, terminal, indent=2)
+
+    with pytest.raises(
+        acceptance_module.P0AcceptanceError,
+        match="must equal",
     ):
         acceptance_module.verify_t1_bundle(
             fixture.paths,
@@ -758,6 +826,34 @@ def test_exact_artifact_bytes_are_bound_by_terminal(
     with pytest.raises(
         acceptance_module.P0AcceptanceError,
         match="artifact hashes",
+    ):
+        acceptance_module.verify_t1_bundle(
+            fixture.paths,
+            expected_t1_keyring_sha256=fixture.t1_keyring_sha256,
+        )
+
+
+def test_child_invocation_exact_bytes_and_fixed_argv_are_required(
+    tmp_path: Path,
+) -> None:
+    fixture = build_fixture(tmp_path)
+    invocation = json.loads(
+        fixture.paths.child_invocation.read_text(encoding="utf-8")
+    )
+    invocation.extend(["--unexpected-option", "forbidden"])
+    write_bytes(
+        fixture.paths.child_invocation,
+        t1_module.canonical_json(invocation),
+    )
+    terminal = dict(fixture.terminal)
+    terminal["child_invocation_sha256"] = hashlib.sha256(
+        fixture.paths.child_invocation.read_bytes()
+    ).hexdigest()
+    write_json(fixture.paths.terminal_seal, terminal, indent=2)
+
+    with pytest.raises(
+        acceptance_module.P0AcceptanceError,
+        match="unexpected or missing arguments",
     ):
         acceptance_module.verify_t1_bundle(
             fixture.paths,
@@ -815,6 +911,128 @@ def test_acceptance_signer_key_purpose_isolated(
             fixture.acceptance_keyring_path,
             fixture.paths,
             expected_acceptance_keyring_sha256=wrong_hash,
+            expected_t1_keyring_sha256=fixture.t1_keyring_sha256,
+        )
+
+
+def test_same_key_material_is_rejected_across_distinct_ids_purposes_and_pins(
+    tmp_path: Path,
+) -> None:
+    fixture = build_fixture(tmp_path)
+    acceptance_keyring = {
+        "schema_version": (
+            "commodity_c_fast_p0_acceptance_trusted_keys_v1"
+        ),
+        "keys": [
+            {
+                "key_id": "independent-looking-acceptance-key",
+                "purpose": "c_fast_p0_acceptance_signer",
+                "public_key_base64": public_key_base64(
+                    fixture.t1_private_key
+                ),
+            }
+        ],
+    }
+    write_json(fixture.acceptance_keyring_path, acceptance_keyring)
+    acceptance_pin = canonical_sha256(acceptance_keyring)
+    assert acceptance_pin != fixture.t1_keyring_sha256
+    verified = acceptance_module.verify_t1_bundle(
+        fixture.paths,
+        expected_t1_keyring_sha256=fixture.t1_keyring_sha256,
+    )
+    draft = acceptance_draft(fixture, verified)
+    draft["signer_key_id"] = "independent-looking-acceptance-key"
+    draft["acceptance_keyring_sha256"] = acceptance_pin
+
+    with pytest.raises(
+        acceptance_module.P0AcceptanceError,
+        match="cryptographically distinct",
+    ):
+        signer_module.sign_acceptance(
+            draft,
+            fixture.t1_private_key,
+            fixture.acceptance_keyring_path,
+            fixture.paths,
+            expected_acceptance_keyring_sha256=acceptance_pin,
+            expected_t1_keyring_sha256=fixture.t1_keyring_sha256,
+        )
+
+    signed = {
+        **draft,
+        "signature": base64.b64encode(
+            fixture.t1_private_key.sign(
+                t1_module.canonical_json(draft)
+            )
+        ).decode("ascii"),
+    }
+    acceptance_path = write_json(
+        tmp_path / "same-key-acceptance.json",
+        signed,
+    )
+    with pytest.raises(
+        acceptance_module.P0AcceptanceError,
+        match="cryptographically distinct",
+    ):
+        acceptance_module.verify_signed_acceptance(
+            acceptance_path,
+            fixture.acceptance_keyring_path,
+            fixture.paths,
+            expected_acceptance_keyring_sha256=acceptance_pin,
+            expected_t1_keyring_sha256=fixture.t1_keyring_sha256,
+        )
+
+
+def test_acceptance_key_cannot_match_unused_t1_authority(
+    tmp_path: Path,
+) -> None:
+    shared_key = Ed25519PrivateKey.generate()
+    fixture = build_fixture(
+        tmp_path,
+        reserved_t1_authority_key=shared_key,
+        acceptance_private_key=shared_key,
+    )
+    verified = acceptance_module.verify_t1_bundle(
+        fixture.paths,
+        expected_t1_keyring_sha256=fixture.t1_keyring_sha256,
+    )
+    draft = acceptance_draft(fixture, verified)
+
+    with pytest.raises(
+        acceptance_module.P0AcceptanceError,
+        match="every T1 audit release authority",
+    ):
+        signer_module.sign_acceptance(
+            draft,
+            shared_key,
+            fixture.acceptance_keyring_path,
+            fixture.paths,
+            expected_acceptance_keyring_sha256=(
+                fixture.acceptance_keyring_sha256
+            ),
+            expected_t1_keyring_sha256=fixture.t1_keyring_sha256,
+        )
+
+    signed = {
+        **draft,
+        "signature": base64.b64encode(
+            shared_key.sign(t1_module.canonical_json(draft))
+        ).decode("ascii"),
+    }
+    acceptance_path = write_json(
+        tmp_path / "reserved-key-acceptance.json",
+        signed,
+    )
+    with pytest.raises(
+        acceptance_module.P0AcceptanceError,
+        match="every T1 audit release authority",
+    ):
+        acceptance_module.verify_signed_acceptance(
+            acceptance_path,
+            fixture.acceptance_keyring_path,
+            fixture.paths,
+            expected_acceptance_keyring_sha256=(
+                fixture.acceptance_keyring_sha256
+            ),
             expected_t1_keyring_sha256=fixture.t1_keyring_sha256,
         )
 
