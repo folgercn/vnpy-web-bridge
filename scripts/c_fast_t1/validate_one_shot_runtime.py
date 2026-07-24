@@ -236,6 +236,11 @@ EXPECTED_INSTRUCTIONS = (
         "RUN python -m py_compile "
         "scripts/commodity_c_fast_t1_one_shot.py "
         "scripts/commodity_c_fast_l1_l5_audit.py "
+        "&& find /opt/c-fast-t1 -type f "
+        "\\( -name '*.pyc' -o -name '*.pyo' \\) -delete "
+        "&& find /opt/c-fast-t1 -type d -name '__pycache__' -empty -delete "
+        '&& test -z "$(find /opt/c-fast-t1 -type f '
+        "\\( -name '*.pyc' -o -name '*.pyo' \\) -print -quit)\" "
         "&& chmod -R a-w /opt/c-fast-t1"
     ),
     "USER 65532:65532",
@@ -254,6 +259,7 @@ FORBIDDEN_CONTAINERFILE_FRAGMENTS = (
     "commodity_c_fast_t1_sign_release.py",
     "QUESTDB_PG_DSN",
     "QDB_PG_READONLY_PASSWORD",
+    "__pycache__/",
 )
 FORBIDDEN_TEMPLATE_FRAGMENTS = (
     "env_file",
