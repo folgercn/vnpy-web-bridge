@@ -1183,6 +1183,50 @@ def test_position_manager_shakedown_recognizes_own_active_order_without_referenc
     ]
 
 
+def test_position_manager_shakedown_recognizes_gateway_prefixed_order_by_raw_orderid(
+    tmp_path: Path,
+) -> None:
+    service, rpc = prepare_position_manager_shakedown(tmp_path)
+    plan = {
+        "close_orders": [],
+        "open_orders": [{"reference": "commodity_pm:sh:session:o:1"}],
+        "submitted": {
+            "close": [],
+            "open": [{"vt_orderid": "CTP.1_session_25"}],
+        },
+        "send_intents": {"close": [], "open": []},
+    }
+    rpc.orders = [
+        {
+            "orderid": "1_session_25",
+            "symbol": "zn2609",
+            "status": "not_traded",
+        }
+    ]
+
+    assert service._position_manager_shakedown_external_active_orders(plan) == []
+
+
+def test_quote_accepts_exact_spread_limit_with_floating_point_noise(
+    tmp_path: Path,
+) -> None:
+    service, _, _ = make_service(tmp_path)
+    service.settings = service.settings.model_copy(
+        update={"commodity_simnow_max_spread_ticks": 4}
+    )
+    service.tick_store.ticks["au2610.SHFE"] = {
+        "bid_price_1": 886.36,
+        "ask_price_1": 886.4400000000001,
+        "bid_volume_1": 1,
+        "ask_volume_1": 1,
+        "datetime": service.clock().isoformat(),
+    }
+
+    quote = service._quote("au2610.SHFE", 0.02)
+
+    assert quote["spread_ticks"] == pytest.approx(4)
+
+
 def test_position_manager_shakedown_pre_submit_stop_archives_and_unblocks_preview(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
