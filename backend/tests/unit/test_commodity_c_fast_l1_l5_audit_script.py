@@ -221,6 +221,54 @@ class FakeConnection:
         return FakeCursor(tuples)
 
 
+def readonly_parameter_rows(
+    **overrides: tuple[object, str, bool],
+) -> list[tuple]:
+    values = {
+        "pg.readonly.password": ("****", "file", True),
+        "pg.readonly.user": ("c_fast_audit_reader", "env", False),
+        "pg.readonly.user.enabled": ("true", "env", False),
+        "pg.security.readonly": ("false", "default", False),
+        "pg.user": ("bridge_writer", "env", False),
+        "readonly": ("false", "default", False),
+    }
+    values.update(overrides)
+    return [
+        (
+            key,
+            f"QDB_{key.upper().replace('.', '_')}",
+            value,
+            source,
+            sensitive,
+            True,
+        )
+        for key, (value, source, sensitive) in sorted(values.items())
+    ]
+
+
+class ReadonlyMetadataConnection:
+    def __init__(
+        self,
+        *,
+        principal: str = "c_fast_audit_reader",
+        build: str = "Build Information: QuestDB 9.4.3",
+        parameters: list[tuple] | None = None,
+    ) -> None:
+        self.principal = principal
+        self.build = build
+        self.parameters = parameters or readonly_parameter_rows()
+        self.sql: list[str] = []
+
+    def execute(self, sql: str, params: tuple = ()) -> FakeCursor:
+        assert params == ()
+        self.sql.append(sql)
+        if sql == MODULE["READONLY_IDENTITY_SQL"]:
+            return FakeCursor([(self.principal, self.build)])
+        if sql == MODULE["READONLY_PARAMETERS_SQL"]:
+            return FakeCursor(self.parameters)
+        raise AssertionError(f"unexpected SQL: {sql}")
+
+
 def test_manifest_rejects_missing_frozen_product(tmp_path: Path) -> None:
     payload = manifest_payload()
     payload["targets"].pop()
@@ -1008,3 +1056,274 @@ def test_rendered_report_and_csv_do_not_include_dsn(
     assert "postgresql://" not in rendered
     assert "password" not in rendered
     assert "ag:no_rows" in report
+
+
+def test_collect_readonly_proof_uses_only_metadata_queries() -> None:
+    connection = ReadonlyMetadataConnection()
+
+    snapshot = MODULE["collect_readonly_proof_snapshot"](connection)
+
+    assert snapshot.principal == "c_fast_audit_reader"
+    assert snapshot.readonly_user == snapshot.principal
+    assert snapshot.admin_user == "bridge_writer"
+    assert connection.sql == [
+        MODULE["READONLY_IDENTITY_SQL"],
+        MODULE["READONLY_PARAMETERS_SQL"],
+    ]
+    assert all(
+        sql.lstrip().upper().startswith(("SELECT", "(SHOW"))
+        for sql in connection.sql
+    )
+
+
+@pytest.mark.parametrize(
+    ("principal", "overrides", "message"),
+    [
+        (
+            "c_fast_audit_reader",
+            {"pg.readonly.user.enabled": ("false", "env", False)},
+            "not enabled",
+        ),
+        (
+            "bridge_writer",
+            {},
+            "not the dedicated readonly user",
+        ),
+        (
+            "bridge_writer",
+            {"pg.readonly.user": ("bridge_writer", "env", False)},
+            "must differ from the admin",
+        ),
+        (
+            "c_fast_audit_reader",
+            {"pg.security.readonly": ("true", "env", False)},
+            "must not rely on global",
+        ),
+        (
+            "c_fast_audit_reader",
+            {"readonly": ("true", "env", False)},
+            "must not rely on instance-wide",
+        ),
+        (
+            "c_fast_audit_reader",
+            {"pg.readonly.password": ("****", "default", True)},
+            "must not use its default",
+        ),
+    ],
+)
+def test_collect_readonly_proof_fails_closed(
+    principal: str,
+    overrides: dict[str, tuple[object, str, bool]],
+    message: str,
+) -> None:
+    connection = ReadonlyMetadataConnection(
+        principal=principal,
+        parameters=readonly_parameter_rows(**overrides),
+    )
+
+    with pytest.raises(MODULE["AuditError"], match=message):
+        MODULE["collect_readonly_proof_snapshot"](connection)
+
+
+def test_collect_readonly_proof_rejects_missing_and_duplicate_parameters() -> None:
+    rows = readonly_parameter_rows()
+    missing = ReadonlyMetadataConnection(parameters=rows[:-1])
+    duplicate = ReadonlyMetadataConnection(parameters=[*rows, rows[0]])
+
+    with pytest.raises(MODULE["AuditError"], match="missing required"):
+        MODULE["collect_readonly_proof_snapshot"](missing)
+    with pytest.raises(MODULE["AuditError"], match="duplicated"):
+        MODULE["collect_readonly_proof_snapshot"](duplicate)
+
+
+def test_readonly_proof_binds_audit_hash_without_principal_leakage() -> None:
+    snapshot = MODULE["collect_readonly_proof_snapshot"](
+        ReadonlyMetadataConnection()
+    )
+    evidence = {
+        "snapshot_id": "c-fast-p0-test-a01",
+        "manifest_sha256": "a" * 64,
+    }
+
+    proof = MODULE["build_readonly_proof"](
+        evidence,
+        "b" * 64,
+        snapshot,
+        snapshot,
+    )
+    MODULE["validate_json_schema"](
+        proof,
+        MODULE["READONLY_PROOF_SCHEMA_PATH"],
+        "test readonly proof",
+    )
+
+    rendered = json.dumps(proof, sort_keys=True)
+    assert "c_fast_audit_reader" not in rendered
+    assert "bridge_writer" not in rendered
+    assert "postgresql://" not in rendered
+    assert '"write_probe_attempted": false' in rendered
+    assert proof["database_mutations"] == 0
+    assert proof["observable_readonly_metadata_stable"] is True
+    assert proof["requested_statement_timeout_ms"] == 60_000
+
+
+def test_readonly_proof_rejects_pre_post_drift() -> None:
+    preflight = MODULE["collect_readonly_proof_snapshot"](
+        ReadonlyMetadataConnection()
+    )
+    postflight = MODULE["collect_readonly_proof_snapshot"](
+        ReadonlyMetadataConnection(
+            build="Build Information: QuestDB 9.4.4"
+        )
+    )
+
+    with pytest.raises(MODULE["AuditError"], match="changed during audit"):
+        MODULE["build_readonly_proof"](
+            {
+                "snapshot_id": "c-fast-p0-test-a01",
+                "manifest_sha256": "a" * 64,
+            },
+            "b" * 64,
+            preflight,
+            postflight,
+        )
+
+
+def test_readonly_dsn_file_is_private_and_connection_timeouts_are_fixed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dsn_path = tmp_path / "readonly.dsn"
+    dsn_path.write_text(
+        "postgresql://reader:secret@questdb:8812/qdb",
+        encoding="utf-8",
+    )
+    dsn_path.chmod(0o600)
+    calls: list[tuple[str, dict]] = []
+
+    class FakePsycopg:
+        @staticmethod
+        def connect(dsn: str, **kwargs):
+            calls.append((dsn, kwargs))
+            return object()
+
+    monkeypatch.setitem(
+        MODULE["connect_server_enforced_readonly"].__globals__,
+        "psycopg",
+        FakePsycopg,
+    )
+
+    MODULE["connect_server_enforced_readonly"](dsn_path)
+
+    assert calls == [
+        (
+            "postgresql://reader:secret@questdb:8812/qdb",
+            {
+                "autocommit": True,
+                "connect_timeout": 10,
+                "options": "-c statement_timeout=60000",
+            },
+        )
+    ]
+
+
+def test_readonly_dsn_file_rejects_empty_symlink_and_broad_permissions(
+    tmp_path: Path,
+) -> None:
+    empty = tmp_path / "empty.dsn"
+    empty.write_text("", encoding="utf-8")
+    empty.chmod(0o600)
+    broad = tmp_path / "broad.dsn"
+    broad.write_text("postgresql://reader:secret@questdb/qdb", encoding="utf-8")
+    broad.chmod(0o640)
+    target = tmp_path / "target.dsn"
+    target.write_text(
+        "postgresql://reader:secret@questdb/qdb",
+        encoding="utf-8",
+    )
+    target.chmod(0o600)
+    symlink = tmp_path / "link.dsn"
+    symlink.symlink_to(target)
+
+    with pytest.raises(MODULE["AuditError"], match="must not be empty"):
+        MODULE["_read_secret_text_file"](empty, "test DSN")
+    with pytest.raises(MODULE["AuditError"], match="0600"):
+        MODULE["_read_secret_text_file"](broad, "test DSN")
+    with pytest.raises(MODULE["AuditError"], match="must not be a symlink"):
+        MODULE["_read_secret_text_file"](symlink, "test DSN")
+
+
+def test_audit_artifact_paths_cannot_overlap_inputs_or_each_other(
+    tmp_path: Path,
+) -> None:
+    manifest = tmp_path / "manifest.json"
+    dsn = tmp_path / "readonly.dsn"
+    common = {
+        "manifest": manifest,
+        "dsn_file": dsn,
+        "json_output": tmp_path / "audit.json",
+        "csv_output": tmp_path / "audit.csv",
+        "markdown_output": tmp_path / "audit.md",
+        "readonly_proof_output": tmp_path / "readonly-proof.json",
+    }
+    MODULE["validate_artifact_paths"](MODULE["argparse"].Namespace(**common))
+
+    with pytest.raises(MODULE["AuditError"], match="must be distinct"):
+        MODULE["validate_artifact_paths"](
+            MODULE["argparse"].Namespace(
+                **{
+                    **common,
+                    "readonly_proof_output": common["json_output"],
+                }
+            )
+        )
+    with pytest.raises(MODULE["AuditError"], match="overlap input"):
+        MODULE["validate_artifact_paths"](
+            MODULE["argparse"].Namespace(
+                **{
+                    **common,
+                    "json_output": manifest,
+                }
+            )
+        )
+
+    common["json_output"].write_text("stale", encoding="utf-8")
+    with pytest.raises(MODULE["AuditError"], match="must not already exist"):
+        MODULE["validate_artifact_paths"](
+            MODULE["argparse"].Namespace(**common)
+        )
+
+
+def test_create_only_writer_does_not_overwrite_existing_artifact(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "evidence.json"
+    MODULE["write_text_atomic"](path, "first")
+
+    with pytest.raises(MODULE["AuditError"], match="already exists"):
+        MODULE["write_text_atomic"](path, "second")
+
+    assert path.read_text(encoding="utf-8") == "first\n"
+    assert not list(tmp_path.glob(".*.tmp"))
+
+
+def test_create_only_writer_removes_published_artifact_when_fsync_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "evidence.json"
+
+    def fail_directory_fsync(_path: Path) -> None:
+        raise OSError("simulated directory fsync failure")
+
+    monkeypatch.setitem(
+        MODULE["_publish_temp_create_only"].__globals__,
+        "_fsync_directory",
+        fail_directory_fsync,
+    )
+
+    with pytest.raises(MODULE["AuditError"], match="cannot publish"):
+        MODULE["write_text_atomic"](path, "must-not-survive")
+
+    assert not path.exists()
+    assert not list(tmp_path.glob(".*.tmp"))

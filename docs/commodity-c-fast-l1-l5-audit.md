@@ -99,23 +99,30 @@ strict reader 只依赖普通文件类型、同一设备/inode/size、路径与 
 
 ## 执行
 
-QuestDB DSN 只通过环境变量注入，不作为命令行参数，避免出现在 shell history 或进程列表：
+QuestDB DSN 只从隔离运行器挂载的 `0600` 普通文件读取，不作为命令行值或环境变量注入，避免出现在 shell history、进程参数和常驻 backend 环境中。文件必须由当前用户持有、不是符号链接，并在同一已打开 FD 上双读一致：
 
 ```bash
 PYTHONPATH=backend .venv/bin/python scripts/commodity_c_fast_l1_l5_audit.py \
   --manifest /path/to/c-fast-audit-manifest.json \
+  --dsn-file /run/secrets/c-fast-t1-readonly.dsn \
   --json-output artifacts/commodity-c-fast-l1-l5-audit.json \
   --csv-output artifacts/commodity-c-fast-l1-l5-audit.csv \
-  --markdown-output artifacts/commodity-c-fast-l1-l5-audit.md
+  --markdown-output artifacts/commodity-c-fast-l1-l5-audit.md \
+  --readonly-proof-output artifacts/commodity-c-fast-questdb-readonly-proof.json
 ```
 
 `--start` / `--end` 仅是可选的一致性断言；传入时必须逐值等于 signed manifest，不能覆盖它。
 
-使用非默认环境变量名时只传变量名：
+连接固定 `connect_timeout=10s` 和 PGWire `statement_timeout=60000ms`，DSN 文件中的更宽值不能覆盖这两个上限。正式 T1 必须使用 QuestDB 内建的独立 PGWire readonly principal：
 
-```bash
-... --dsn-env ISSUE114_QUESTDB_PG_DSN
-```
+- `pg.readonly.user.enabled=true`；
+- 当前 `current_user()` 必须等于 `pg.readonly.user`；
+- 当前 principal 必须不同于 `pg.user`；
+- `pg.readonly.password` 必须来自 `conf`、`env` 或 `file`，不能使用默认值；
+- `pg.security.readonly=false`，证明保护来自独立 readonly principal，而不是会同时影响 writer 的全局 PGWire 禁写。
+- QuestDB 实例级 `readonly=false`，避免把实例整体只读误归因于 dedicated principal。
+
+脚本在同一连接上于审计前后各执行一次 `SELECT current_user(), build()` 和固定 allowlist 的 `SHOW PARAMETERS` 查询。principal、QuestDB build 或相关可观测配置发生漂移都会 fail closed。四个输出必须使用全新路径且 create-only；JSON、CSV、Markdown 全部成功并关闭数据库连接后才最后发布 readonly proof，失败或重复运行不会覆盖旧 proof。证明过程不执行 `INSERT`、`UPDATE`、DDL 或“试写后期待失败”的权限探针。
 
 脚本退出码：
 
@@ -180,8 +187,27 @@ manifest_sha256=<输入清单规范 JSON 的 SHA256>
 - PR/部署 SHA 与镜像；
 - 审计 UTC 时间窗和对应中国期货交易日；
 - 输入清单 SHA256；
-- 三个产物的归档位置；
+- JSON/CSV/Markdown 与 readonly proof 四个产物的归档位置；
 - 十品种分类和全部 blockers。
+
+readonly companion proof 由
+`docs/schemas/commodity-c-fast-questdb-readonly-proof-v1.schema.json`
+约束，并绑定 `snapshot_id`、manifest SHA256 和实际 JSON audit evidence
+文件 SHA256。proof 不保存 principal/readonly/admin 用户名、其无盐哈希、DSN 或密码；固定声明：
+
+```text
+proof_method=questdb_builtin_pgwire_readonly_user_configuration
+same_connection=true
+observable_readonly_metadata_stable=true
+requested_statement_timeout_ms=60000
+write_probe_attempted=false
+database_mutations=0
+```
+
+`requested_statement_timeout_ms` 是客户端在 PGWire 连接中请求的查询上限，不伪称为服务器回读值。proof 不保存 principal/admin/readonly 用户名或其可字典反推的无盐哈希，也不读取密码内容；`observable_readonly_metadata_stable` 只表示上述 allowlist 元数据在审计前后稳定，不能证明同一配置来源内部的敏感密码内容没有轮换。
+
+该 companion proof 仍不等于 T1 authority。正式执行还必须有独立 one-shot 人工签名 release、隔离 runner、镜像/代码哈希绑定和不可复用的终态封存。启用 QuestDB readonly 用户属于另一个需要人工主审的部署 release；本脚本不会修改 QuestDB 配置，不会替换现有 writer DSN，也不得要求设置 `QDB_PG_SECURITY_READONLY=true` 或实例级 `QDB_READONLY=true`。
+companion proof 单独也不绑定目标 endpoint、容器或镜像；这些目标实例事实必须由后续 signed one-shot release 绑定并在 terminal seal 中归档。
 
 本 PR 只交付审计器、evidence schema、测试与 runbook；在真实 QuestDB 上运行前不得宣称 P0 已通过。
 
