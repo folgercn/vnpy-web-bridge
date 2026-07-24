@@ -68,6 +68,11 @@ closed。
 继续固定全部运行权限为 `false`。未来如需持久化或启动 sidecar，必须
 重新验证原始 signed freeze，不能只信任一个可自行构造的 receipt JSON。
 
+后续 collection-policy v2 在保留本 v1 ancestry 的前提下冻结完整盘口规则，
+见
+[`commodity-c-fast-execution-policy-freeze-v2.md`](commodity-c-fast-execution-policy-freeze-v2.md)。
+v2 的规则完整状态同样不授予 collection 或 runtime authority。
+
 ## 严格 JSON 与签名工具
 
 parser 固定：
