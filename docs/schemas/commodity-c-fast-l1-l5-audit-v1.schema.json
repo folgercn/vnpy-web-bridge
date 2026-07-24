@@ -529,6 +529,11 @@
         "missing_trading_day_rows",
         "missing_last_price_rows",
         "duplicate_ingest_ids",
+        "non_positive_ingest_seq_rows",
+        "ingest_seq_non_increasing_rows",
+        "ingest_seq_regression_rows",
+        "ingest_seq_repeat_across_timestamp_rows",
+        "ingest_seq_reset_candidates",
         "duplicate_exchange_timestamps",
         "same_ts_duplicate_ingest_seq"
       ],
@@ -599,6 +604,26 @@
           "type": "integer",
           "minimum": 0
         },
+        "non_positive_ingest_seq_rows": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "ingest_seq_non_increasing_rows": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "ingest_seq_regression_rows": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "ingest_seq_repeat_across_timestamp_rows": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "ingest_seq_reset_candidates": {
+          "type": "integer",
+          "minimum": 0
+        },
         "duplicate_exchange_timestamps": {
           "type": "integer",
           "minimum": 0
@@ -622,7 +647,11 @@
         "rows_after",
         "last_before_delay_ms",
         "first_after_delay_ms",
+        "start_boundary_gap_seconds",
+        "end_boundary_gap_seconds",
+        "max_observed_tick_gap_seconds",
         "max_gap_seconds",
+        "boundary_coverage_complete",
         "classification",
         "metrics"
       ],
@@ -665,11 +694,36 @@
             "null"
           ]
         },
+        "start_boundary_gap_seconds": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "end_boundary_gap_seconds": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "max_observed_tick_gap_seconds": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
         "max_gap_seconds": {
           "type": [
             "number",
             "null"
-          ]
+          ],
+          "minimum": 0
+        },
+        "boundary_coverage_complete": {
+          "type": "boolean"
         },
         "classification": {
           "$ref": "#/$defs/classification"

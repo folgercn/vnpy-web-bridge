@@ -87,6 +87,25 @@ def add_row(accumulator, row: dict) -> None:
 
 
 def complete_session_rows(execution_time: datetime) -> list[dict]:
+    return session_rows(
+        execution_time,
+        range(-60, 61, 5),
+    )
+
+
+def concentrated_execution_window_rows(
+    execution_time: datetime,
+) -> list[dict]:
+    return session_rows(
+        execution_time,
+        range(-10, 10),
+    )
+
+
+def session_rows(
+    execution_time: datetime,
+    window_offsets: range,
+) -> list[dict]:
     timestamps = [
         *[
             datetime(2026, 8, 31, 13, 0, tzinfo=timezone.utc)
@@ -99,9 +118,8 @@ def complete_session_rows(execution_time: datetime) -> list[dict]:
             for index in range(20)
         ],
         *[
-            execution_time - timedelta(seconds=10)
-            + timedelta(seconds=index)
-            for index in range(20)
+            execution_time + timedelta(seconds=offset)
+            for offset in window_offsets
         ],
         *[
             datetime(2026, 9, 1, 1, 10, tzinfo=timezone.utc)
@@ -113,7 +131,7 @@ def complete_session_rows(execution_time: datetime) -> list[dict]:
         tick_row(
             ts,
             ingest_id=f"tick-{index}",
-            ingest_seq=index,
+            ingest_seq=index + 1,
             volume=10 + index,
             last_volume=1 if index else 0,
         )
@@ -202,7 +220,7 @@ def test_five_level_rows_are_l5_usable() -> None:
             tick_row(
                 start + timedelta(milliseconds=500 * index),
                 ingest_id=f"tick-{index}",
-                ingest_seq=index,
+                ingest_seq=index + 1,
                 volume=10 + index,
                 last_volume=1 if index else 0,
             ),
@@ -225,7 +243,7 @@ def test_missing_deeper_levels_cannot_fall_back_to_l5() -> None:
             tick_row(
                 start + timedelta(seconds=index),
                 ingest_id=f"tick-{index}",
-                ingest_seq=index,
+                ingest_seq=index + 1,
                 levels=1,
             ),
         )
@@ -246,7 +264,7 @@ def test_crossed_and_stale_rows_degrade_complete_depth() -> None:
             tick_row(
                 start + timedelta(seconds=index),
                 ingest_id=f"tick-{index}",
-                ingest_seq=index,
+                ingest_seq=index + 1,
                 crossed=index < 2,
                 received_delay=6 if index < 2 else 0.1,
             ),
@@ -276,6 +294,51 @@ def test_duplicate_ingest_identity_is_failure_path() -> None:
 
     assert result["classification"] == "DEGRADED"
     assert result["anomalies"]["duplicate_ingest_ids"] == 1
+
+
+def test_constant_zero_ingest_seq_is_degraded() -> None:
+    accumulator = MODULE["MetricsAccumulator"](dict(MODULE["THRESHOLDS"]))
+    start = datetime(2026, 9, 1, 1, 0, tzinfo=timezone.utc)
+    for index in range(20):
+        add_row(
+            accumulator,
+            tick_row(
+                start + timedelta(seconds=index),
+                ingest_id=f"tick-{index}",
+                ingest_seq=0,
+            ),
+        )
+
+    result = accumulator.result()
+
+    assert result["classification"] == "DEGRADED"
+    assert result["anomalies"]["non_positive_ingest_seq_rows"] == 20
+    assert result["anomalies"]["ingest_seq_non_increasing_rows"] == 19
+    assert (
+        result["anomalies"]["ingest_seq_repeat_across_timestamp_rows"]
+        == 19
+    )
+
+
+def test_ingest_seq_regression_exposes_reset_candidate() -> None:
+    accumulator = MODULE["MetricsAccumulator"](dict(MODULE["THRESHOLDS"]))
+    start = datetime(2026, 9, 1, 1, 0, tzinfo=timezone.utc)
+    for index, ingest_seq in enumerate((100, 101, 1, 2)):
+        add_row(
+            accumulator,
+            tick_row(
+                start + timedelta(seconds=index),
+                ingest_id=f"tick-{index}",
+                ingest_seq=ingest_seq,
+            ),
+        )
+
+    result = accumulator.result()
+
+    assert result["classification"] == "DEGRADED"
+    assert result["anomalies"]["ingest_seq_non_increasing_rows"] == 1
+    assert result["anomalies"]["ingest_seq_regression_rows"] == 1
+    assert result["anomalies"]["ingest_seq_reset_candidates"] == 1
 
 
 def test_missing_required_identity_fields_degrade_instead_of_crashing() -> None:
@@ -331,8 +394,49 @@ def test_contract_audit_is_select_only_and_covers_execution_window() -> None:
     assert connection.params[0] == "ag2609.SHFE"
     assert result["classification"] == "L5_USABLE"
     assert window_results[0]["classification"] == "L5_USABLE"
-    assert window_results[0]["rows_before"] == 10
-    assert window_results[0]["rows_after"] == 10
+    assert window_results[0]["rows_before"] == 12
+    assert window_results[0]["rows_after"] == 13
+    assert window_results[0]["start_boundary_gap_seconds"] == 0
+    assert window_results[0]["end_boundary_gap_seconds"] == 0
+    assert window_results[0]["max_observed_tick_gap_seconds"] == 5
+    assert window_results[0]["max_gap_seconds"] == 5
+    assert window_results[0]["boundary_coverage_complete"] is True
+
+
+def test_execution_window_requires_full_boundary_coverage() -> None:
+    execution_time = datetime(2026, 9, 1, 1, 0, tzinfo=timezone.utc)
+    connection = FakeConnection(
+        concentrated_execution_window_rows(execution_time)
+    )
+    contract = MODULE["ContractSpec"](
+        product="ag",
+        role="current",
+        exact_contract="SHFE.ag2609",
+        vt_symbol="ag2609.SHFE",
+    )
+    window = MODULE["ExecutionWindow"](
+        window_id="ag-window-a01",
+        product="ag",
+        vt_symbol="ag2609.SHFE",
+        execution_time=execution_time,
+        window_seconds=60,
+    )
+
+    _, window_results = MODULE["audit_contract"](
+        connection,
+        contract,
+        [window],
+        datetime(2026, 8, 31, 12, tzinfo=timezone.utc),
+        datetime(2026, 9, 1, 8, tzinfo=timezone.utc),
+    )
+
+    result = window_results[0]
+    assert result["classification"] == "DEGRADED"
+    assert result["start_boundary_gap_seconds"] == 50
+    assert result["end_boundary_gap_seconds"] == 51
+    assert result["max_observed_tick_gap_seconds"] == 1
+    assert result["max_gap_seconds"] == 51
+    assert result["boundary_coverage_complete"] is False
 
 
 def test_full_ten_product_audit_can_reach_p0_pass(tmp_path: Path) -> None:

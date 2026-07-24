@@ -135,6 +135,11 @@ class MetricsAccumulator:
     missing_trading_day_rows: int = 0
     missing_last_price_rows: int = 0
     duplicate_ingest_ids: int = 0
+    non_positive_ingest_seq_rows: int = 0
+    ingest_seq_non_increasing_rows: int = 0
+    ingest_seq_regression_rows: int = 0
+    ingest_seq_repeat_across_timestamp_rows: int = 0
+    ingest_seq_reset_candidates: int = 0
     same_ts_duplicate_ingest_seq: int = 0
     duplicate_exchange_timestamps: int = 0
     cadence_gap_count: int = 0
@@ -157,6 +162,7 @@ class MetricsAccumulator:
     interval_ms: list[float] = field(default_factory=list)
     seen_ingest_ids: set[str] = field(default_factory=set)
     _last_ts: datetime | None = None
+    _last_ingest_seq: int | None = None
     _last_ts_ingest_seqs: set[int] = field(default_factory=set)
     _last_trading_day: str | None = None
     _last_cumulative_volume: float | None = None
@@ -184,9 +190,30 @@ class MetricsAccumulator:
             self.missing_ingest_id_rows += 1
 
         ingest_seq_value = row.get("ingest_seq")
-        if ingest_seq_value is None or ingest_seq_value == "":
+        ingest_seq_present = ingest_seq_value is not None and ingest_seq_value != ""
+        if not ingest_seq_present:
             self.missing_ingest_seq_rows += 1
         ingest_seq = _as_int(ingest_seq_value, default=0)
+        if ingest_seq_present and ingest_seq <= 0:
+            self.non_positive_ingest_seq_rows += 1
+
+        previous_ts = self._last_ts
+        previous_ingest_seq = self._last_ingest_seq
+        if (
+            ingest_seq_present
+            and previous_ingest_seq is not None
+            and previous_ts is not None
+            and ts > previous_ts
+            and ingest_seq <= previous_ingest_seq
+        ):
+            self.ingest_seq_non_increasing_rows += 1
+            if ingest_seq < previous_ingest_seq:
+                self.ingest_seq_regression_rows += 1
+                if ingest_seq <= 1:
+                    self.ingest_seq_reset_candidates += 1
+            else:
+                self.ingest_seq_repeat_across_timestamp_rows += 1
+
         if self._last_ts == ts:
             self.duplicate_exchange_timestamps += 1
             if ingest_seq in self._last_ts_ingest_seqs:
@@ -207,6 +234,7 @@ class MetricsAccumulator:
                         self.session_break_gap_count += 1
             self._last_ts = ts
             self._last_ts_ingest_seqs = {ingest_seq}
+        self._last_ingest_seq = ingest_seq if ingest_seq_present else None
 
         if received_at is not None:
             latency = (received_at - ts).total_seconds()
@@ -319,6 +347,11 @@ class MetricsAccumulator:
             "missing_trading_day_rows": self.missing_trading_day_rows,
             "missing_last_price_rows": self.missing_last_price_rows,
             "duplicate_ingest_ids": self.duplicate_ingest_ids,
+            "non_positive_ingest_seq_rows": self.non_positive_ingest_seq_rows,
+            "ingest_seq_non_increasing_rows": self.ingest_seq_non_increasing_rows,
+            "ingest_seq_regression_rows": self.ingest_seq_regression_rows,
+            "ingest_seq_repeat_across_timestamp_rows": self.ingest_seq_repeat_across_timestamp_rows,
+            "ingest_seq_reset_candidates": self.ingest_seq_reset_candidates,
             "duplicate_exchange_timestamps": self.duplicate_exchange_timestamps,
             "same_ts_duplicate_ingest_seq": self.same_ts_duplicate_ingest_seq,
         }
@@ -416,6 +449,8 @@ def classify_metrics(
         or int(anomalies.get("missing_trading_day_rows") or 0) > 0
         or int(anomalies.get("missing_last_price_rows") or 0) > 0
         or int(anomalies.get("duplicate_ingest_ids") or 0) > 0
+        or int(anomalies.get("non_positive_ingest_seq_rows") or 0) > 0
+        or int(anomalies.get("ingest_seq_non_increasing_rows") or 0) > 0
         or int(anomalies.get("same_ts_duplicate_ingest_seq") or 0) > 0
     )
     return "DEGRADED" if quality_failed else "L5_USABLE"
@@ -746,13 +781,43 @@ def audit_contract(
         timestamps = window_times[window.window_id]
         before = [item for item in timestamps if item < window.execution_time]
         after = [item for item in timestamps if item >= window.execution_time]
-        max_gap_seconds = _max_gap_seconds(timestamps)
+        observed_gap_seconds = _max_gap_seconds(timestamps)
+        start_boundary_gap_seconds = (
+            round((min(timestamps) - window.start).total_seconds(), 6)
+            if timestamps
+            else None
+        )
+        end_boundary_gap_seconds = (
+            round((window.end - max(timestamps)).total_seconds(), 6)
+            if timestamps
+            else None
+        )
+        gap_candidates = [
+            value
+            for value in (
+                observed_gap_seconds,
+                start_boundary_gap_seconds,
+                end_boundary_gap_seconds,
+            )
+            if value is not None
+        ]
+        max_gap_seconds = max(gap_candidates) if gap_candidates else None
+        boundary_coverage_complete = bool(
+            timestamps
+            and start_boundary_gap_seconds is not None
+            and end_boundary_gap_seconds is not None
+            and start_boundary_gap_seconds
+            <= THRESHOLDS["max_execution_window_gap_seconds"]
+            and end_boundary_gap_seconds
+            <= THRESHOLDS["max_execution_window_gap_seconds"]
+        )
         classification = metrics["classification"]
         if (
             not before
             or not after
             or int(metrics["rows"])
             < int(THRESHOLDS["min_rows_per_execution_window"])
+            or not boundary_coverage_complete
             or max_gap_seconds is None
             or max_gap_seconds
             > THRESHOLDS["max_execution_window_gap_seconds"]
@@ -787,7 +852,11 @@ def audit_contract(
                     if after
                     else None
                 ),
+                "start_boundary_gap_seconds": start_boundary_gap_seconds,
+                "end_boundary_gap_seconds": end_boundary_gap_seconds,
+                "max_observed_tick_gap_seconds": observed_gap_seconds,
                 "max_gap_seconds": max_gap_seconds,
+                "boundary_coverage_complete": boundary_coverage_complete,
                 "classification": classification,
                 "metrics": metrics,
             }
@@ -976,9 +1045,9 @@ def render_markdown(evidence: dict[str, Any]) -> str:
             "",
             "## 月度执行窗口（前后固定秒数）",
             "",
-            "| 窗口 | 品种 | 合约 | 前/后行数 | 最大间隔(s) | L1 完整率 | "
-            "L5 完整率 | 结论 |",
-            "|---|---|---|---:|---:|---:|---:|---|",
+            "| 窗口 | 品种 | 合约 | 前/后行数 | 起/止边界间隔(s) | "
+            "最大间隔(s) | L1 完整率 | L5 完整率 | 结论 |",
+            "|---|---|---|---:|---:|---:|---:|---:|---|",
         ]
     )
     if evidence["execution_windows"]:
@@ -987,13 +1056,15 @@ def render_markdown(evidence: dict[str, Any]) -> str:
             lines.append(
                 f"| {item['window_id']} | {item['product']} | "
                 f"{item['vt_symbol']} | {item['rows_before']}/{item['rows_after']} | "
+                f"{_markdown_number(item['start_boundary_gap_seconds'])}/"
+                f"{_markdown_number(item['end_boundary_gap_seconds'])} | "
                 f"{_markdown_number(item['max_gap_seconds'])} | "
                 f"{metrics['l1_complete_ratio']:.6f} | "
                 f"{metrics['l5_complete_ratio']:.6f} | "
                 f"{item['classification']} |"
             )
     else:
-        lines.append("| - | - | - | 0/0 | - | - | - | UNASSESSED |")
+        lines.append("| - | - | - | 0/0 | - | - | - | - | UNASSESSED |")
 
     lines.extend(["", "## Blockers", ""])
     if evidence["blockers"]:
@@ -1032,6 +1103,11 @@ def write_csv(path: Path, evidence: dict[str, Any]) -> None:
         "ask_inverted_ratio",
         "duplicate_ingest_ids",
         "same_ts_duplicate_ingest_seq",
+        "non_positive_ingest_seq_rows",
+        "ingest_seq_non_increasing_rows",
+        "ingest_seq_regression_rows",
+        "ingest_seq_repeat_across_timestamp_rows",
+        "ingest_seq_reset_candidates",
         "missing_received_at_rows",
         "missing_ingest_id_rows",
         "missing_ingest_seq_rows",
@@ -1041,6 +1117,10 @@ def write_csv(path: Path, evidence: dict[str, Any]) -> None:
         "latency_p99_ms",
         "interval_p95_ms",
         "max_gap_seconds",
+        "start_boundary_gap_seconds",
+        "end_boundary_gap_seconds",
+        "max_observed_tick_gap_seconds",
+        "boundary_coverage_complete",
         "classification",
     ]
     temporary = path.with_suffix(path.suffix + ".tmp")
@@ -1076,6 +1156,18 @@ def write_csv(path: Path, evidence: dict[str, Any]) -> None:
                     "rows_before": item["rows_before"],
                     "rows_after": item["rows_after"],
                     "max_gap_seconds": item["max_gap_seconds"],
+                    "start_boundary_gap_seconds": item[
+                        "start_boundary_gap_seconds"
+                    ],
+                    "end_boundary_gap_seconds": item[
+                        "end_boundary_gap_seconds"
+                    ],
+                    "max_observed_tick_gap_seconds": item[
+                        "max_observed_tick_gap_seconds"
+                    ],
+                    "boundary_coverage_complete": item[
+                        "boundary_coverage_complete"
+                    ],
                     "classification": item["classification"],
                 }
             )
@@ -1126,6 +1218,21 @@ def _csv_metric_row(
         "same_ts_duplicate_ingest_seq": anomalies[
             "same_ts_duplicate_ingest_seq"
         ],
+        "non_positive_ingest_seq_rows": anomalies[
+            "non_positive_ingest_seq_rows"
+        ],
+        "ingest_seq_non_increasing_rows": anomalies[
+            "ingest_seq_non_increasing_rows"
+        ],
+        "ingest_seq_regression_rows": anomalies[
+            "ingest_seq_regression_rows"
+        ],
+        "ingest_seq_repeat_across_timestamp_rows": anomalies[
+            "ingest_seq_repeat_across_timestamp_rows"
+        ],
+        "ingest_seq_reset_candidates": anomalies[
+            "ingest_seq_reset_candidates"
+        ],
         "missing_received_at_rows": anomalies["missing_received_at_rows"],
         "missing_ingest_id_rows": anomalies["missing_ingest_id_rows"],
         "missing_ingest_seq_rows": anomalies["missing_ingest_seq_rows"],
@@ -1135,6 +1242,10 @@ def _csv_metric_row(
         "latency_p99_ms": metrics["transport_latency_ms"]["p99"],
         "interval_p95_ms": metrics["tick_interval_ms"]["p95"],
         "max_gap_seconds": "",
+        "start_boundary_gap_seconds": "",
+        "end_boundary_gap_seconds": "",
+        "max_observed_tick_gap_seconds": "",
+        "boundary_coverage_complete": "",
         "classification": metrics["classification"],
     }
 

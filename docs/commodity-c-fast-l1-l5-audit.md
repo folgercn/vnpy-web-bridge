@@ -92,9 +92,10 @@ PYTHONPATH=backend .venv/bin/python scripts/commodity_c_fast_l1_l5_audit.py \
 - `received_at - ts` 的 P50/P95/P99/最大值；
 - `received_at / ingest_id / ingest_seq / trading_day / last_price` 缺失计数；
 - Tick 间隔、重复 exchange timestamp、重复 `ingest_id` 和同 timestamp 重复 `ingest_seq`；
+- `ingest_seq <= 0`、跨递增 timestamp 的非递增、回退、重复值和疑似进程重启 reset；
 - stale、clock skew、crossed、locked、买卖档位倒挂；
 - 累计 `volume` 回退、正差分与 `last_volume` 的匹配关系；
-- execution window 前后行数、首末 Tick 距离和窗口内最大间隔。
+- execution window 前后行数、`window.start→首 Tick`、Tick 内部、`末 Tick→window.end` 三段最大间隔。
 
 阈值在脚本和 JSON evidence 中同时固化。核心分类：
 
@@ -107,6 +108,7 @@ PYTHONPATH=backend .venv/bin/python scripts/commodity_c_fast_l1_l5_audit.py \
 
 `cadence_gap_count` 只记录同一时段内 5–300 秒间隔；大于 300 秒记为 session break，不直接伪装为网络 stale。传输 stale 只按 `received_at - ts > 5s` 判断。
 每个必需日/夜盘时段至少需要 20 行，每个 execution window 至少需要 10 行且执行时点前后均有 Tick；低于样本下限时保持 `DEGRADED`，不能凭极少数完整快照宣称 P0 通过。
+execution window 的起止边界和内部相邻 Tick 间隔都必须不超过 5 秒；只在执行时点附近存在少量 Tick 不构成完整 `±window_seconds` 覆盖。`ingest_seq` 是进程内序列，生产进程重启可能导致 reset；由于当前表没有独立的进程 generation ID，审计会把 reset candidate 明确计入 evidence 并降级，不会静默分段后宣称全窗稳定。
 
 ## 证据产物
 
