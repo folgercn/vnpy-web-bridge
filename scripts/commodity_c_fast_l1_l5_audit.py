@@ -8,6 +8,7 @@ import csv
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 import hashlib
+import hmac
 import json
 import math
 import os
@@ -869,21 +870,11 @@ def audit(
                 ),
             }
         )
-    canonical_manifest = json.dumps(
-        {
-            key: value
-            for key, value in manifest.items()
-            if key != "roll_expected"
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
     return {
         "schema_version": SCHEMA_VERSION,
         "candidate_id": CANDIDATE_ID,
         "snapshot_id": manifest["snapshot_id"],
-        "manifest_sha256": hashlib.sha256(canonical_manifest).hexdigest(),
+        "manifest_sha256": canonical_manifest_sha256(manifest),
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "read_only": True,
         "database_mutations": 0,
@@ -1913,6 +1904,21 @@ def _reject_duplicate_object_keys(
     return result
 
 
+def canonical_manifest_sha256(manifest: dict[str, Any]) -> str:
+    canonical = json.dumps(
+        {
+            key: value
+            for key, value in manifest.items()
+            if key != "roll_expected"
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
 def _reject_json_constant(value: str) -> None:
     raise ValueError(f"non-finite JSON number is not allowed: {value}")
 
@@ -2186,6 +2192,31 @@ def connect_server_enforced_readonly(dsn_file: Path) -> Any:
         ) from exc
 
 
+def connected_endpoint_identity_sha256(conn: Any) -> str:
+    """Hash the endpoint identity reported by the established PGWire connection."""
+    try:
+        info = conn.info
+        host = str(info.host or "").strip()
+        port = int(info.port)
+        dbname = str(info.dbname or "").strip()
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise AuditError(
+            "cannot determine the established QuestDB endpoint identity"
+        ) from exc
+    if not host or not dbname or port < 1 or port > 65535:
+        raise AuditError(
+            "established QuestDB endpoint identity is incomplete"
+        )
+    canonical = json.dumps(
+        {"dbname": dbname, "host": host, "port": port},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
 def _fetch_all(cursor: Any) -> list[tuple[Any, ...]]:
     fetchall = getattr(cursor, "fetchall", None)
     if callable(fetchall):
@@ -2314,17 +2345,22 @@ def build_readonly_proof(
     audit_evidence_sha256: str,
     preflight: ReadonlyProofSnapshot,
     postflight: ReadonlyProofSnapshot,
+    endpoint_identity_sha256: str,
 ) -> dict[str, Any]:
     if preflight != postflight:
         raise AuditError(
             "QuestDB readonly identity/configuration changed during audit"
         )
+    if not re.fullmatch(r"[0-9a-f]{64}", endpoint_identity_sha256):
+        raise AuditError("QuestDB endpoint identity SHA256 is invalid")
     return {
         "schema_version": READONLY_PROOF_SCHEMA_VERSION,
         "candidate_id": CANDIDATE_ID,
         "snapshot_id": evidence["snapshot_id"],
         "manifest_sha256": evidence["manifest_sha256"],
         "audit_evidence_sha256": audit_evidence_sha256,
+        "endpoint_identity_sha256": endpoint_identity_sha256,
+        "endpoint_binding_verified": True,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "proof_method": (
             "questdb_builtin_pgwire_readonly_user_configuration"
@@ -2366,6 +2402,19 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         required=True,
         help="0600 file containing the dedicated QuestDB readonly PGWire DSN",
+    )
+    parser.add_argument(
+        "--expected-endpoint-identity-sha256",
+        required=True,
+        help=(
+            "SHA256 of canonical established endpoint identity "
+            '{"dbname":...,"host":...,"port":...}'
+        ),
+    )
+    parser.add_argument(
+        "--expected-manifest-sha256",
+        required=True,
+        help="signed canonical audit manifest SHA256",
     )
     parser.add_argument(
         "--json-output",
@@ -2423,6 +2472,13 @@ def main() -> int:
         manifest, contracts, session_windows, windows = load_manifest(
             args.manifest
         )
+        if not hmac.compare_digest(
+            canonical_manifest_sha256(manifest),
+            args.expected_manifest_sha256,
+        ):
+            raise AuditError(
+                "audit manifest does not match the signed SHA256 expectation"
+            )
         start = (
             _parse_cli_datetime(args.start, "start")
             if args.start is not None
@@ -2434,6 +2490,15 @@ def main() -> int:
             else None
         )
         conn = connect_server_enforced_readonly(args.dsn_file)
+        endpoint_identity_sha256 = connected_endpoint_identity_sha256(conn)
+        if not hmac.compare_digest(
+            endpoint_identity_sha256,
+            args.expected_endpoint_identity_sha256,
+        ):
+            raise AuditError(
+                "established QuestDB endpoint identity does not match "
+                "the signed expectation"
+            )
         preflight = collect_readonly_proof_snapshot(conn)
         evidence = audit(
             conn,
@@ -2465,6 +2530,7 @@ def main() -> int:
             hashlib.sha256(evidence_text.encode("utf-8")).hexdigest(),
             preflight,
             postflight,
+            endpoint_identity_sha256,
         )
         validate_json_schema(
             proof,

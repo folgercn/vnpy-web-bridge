@@ -1,0 +1,280 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vnpy-web-bridge:schema:commodity-c-fast-t1-terminal-seal-v1",
+  "title": "C_FAST T1 one-shot terminal seal v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "candidate_id",
+    "release_id",
+    "attempt_id",
+    "terminal_state",
+    "error_code",
+    "release_sha256",
+    "consume_marker_sha256",
+    "child_invocation_sha256",
+    "child_exit_code",
+    "started_at",
+    "ended_at",
+    "artifact_sha256",
+    "manifest_sha256",
+    "endpoint_identity_sha256",
+    "p0_pass",
+    "proof_verified",
+    "write_probe_attempted",
+    "database_mutations",
+    "orders_sent",
+    "positions_modified",
+    "dispatch_changed",
+    "replay_allowed",
+    "p0_acceptance_authorized",
+    "terminal_integrity_scope"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "commodity_c_fast_t1_terminal_seal_v1"
+    },
+    "candidate_id": {
+      "const": "C_FAST_CROSS_SECTION_NEUTRAL"
+    },
+    "release_id": {
+      "$ref": "#/$defs/id"
+    },
+    "attempt_id": {
+      "type": "string",
+      "pattern": "^attempt-[0-9a-f]{64}$"
+    },
+    "terminal_state": {
+      "enum": [
+        "SUCCEEDED_P0_PASS",
+        "COMPLETED_P0_BLOCKED",
+        "FAILED_CHILD",
+        "FAILED_OUTPUT_VALIDATION",
+        "TIMED_OUT",
+        "INTERRUPTED"
+      ]
+    },
+    "error_code": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^[A-Z0-9_]{3,96}$"
+    },
+    "release_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "consume_marker_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "child_invocation_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "child_exit_code": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": -255,
+      "maximum": 255
+    },
+    "started_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "ended_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "artifact_sha256": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "audit_json",
+        "audit_csv",
+        "audit_markdown",
+        "readonly_proof"
+      ],
+      "properties": {
+        "audit_json": {
+          "$ref": "#/$defs/nullableSha256"
+        },
+        "audit_csv": {
+          "$ref": "#/$defs/nullableSha256"
+        },
+        "audit_markdown": {
+          "$ref": "#/$defs/nullableSha256"
+        },
+        "readonly_proof": {
+          "$ref": "#/$defs/nullableSha256"
+        }
+      }
+    },
+    "manifest_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "endpoint_identity_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "p0_pass": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "proof_verified": {
+      "type": "boolean"
+    },
+    "write_probe_attempted": {
+      "const": false
+    },
+    "database_mutations": {
+      "const": 0
+    },
+    "orders_sent": {
+      "const": 0
+    },
+    "positions_modified": {
+      "const": 0
+    },
+    "dispatch_changed": {
+      "const": false
+    },
+    "replay_allowed": {
+      "const": false
+    },
+    "p0_acceptance_authorized": {
+      "const": false
+    },
+    "terminal_integrity_scope": {
+      "const": "CREATE_ONLY_LOCAL_RECORD_REQUIRES_EXTERNAL_CUSTODY"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "terminal_state": {
+            "const": "SUCCEEDED_P0_PASS"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "error_code": {
+            "type": "null"
+          },
+          "child_exit_code": {
+            "const": 0
+          },
+          "p0_pass": {
+            "const": true
+          },
+          "proof_verified": {
+            "const": true
+          },
+          "artifact_sha256": {
+            "$ref": "#/$defs/completeArtifactHashes"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "terminal_state": {
+            "const": "COMPLETED_P0_BLOCKED"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "error_code": {
+            "type": "null"
+          },
+          "child_exit_code": {
+            "const": 1
+          },
+          "p0_pass": {
+            "const": false
+          },
+          "proof_verified": {
+            "const": true
+          },
+          "artifact_sha256": {
+            "$ref": "#/$defs/completeArtifactHashes"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "terminal_state": {
+            "enum": [
+              "FAILED_CHILD",
+              "FAILED_OUTPUT_VALIDATION",
+              "TIMED_OUT",
+              "INTERRUPTED"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "error_code": {
+            "type": "string"
+          },
+          "p0_pass": {
+            "type": "null"
+          },
+          "proof_verified": {
+            "const": false
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{8,128}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "nullableSha256": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "completeArtifactHashes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "audit_json",
+        "audit_csv",
+        "audit_markdown",
+        "readonly_proof"
+      ],
+      "properties": {
+        "audit_json": {
+          "$ref": "#/$defs/sha256"
+        },
+        "audit_csv": {
+          "$ref": "#/$defs/sha256"
+        },
+        "audit_markdown": {
+          "$ref": "#/$defs/sha256"
+        },
+        "readonly_proof": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    }
+  }
+}

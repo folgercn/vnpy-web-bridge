@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vnpy-web-bridge:schema:commodity-c-fast-t1-consume-v1",
+  "title": "C_FAST T1 one-shot consume marker v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "candidate_id",
+    "release_id",
+    "attempt_id",
+    "release_sha256",
+    "consumed_at",
+    "manifest_sha256",
+    "endpoint_identity_sha256",
+    "source_commit_sha",
+    "runtime_image_digest",
+    "runner_sha256",
+    "audit_script_sha256",
+    "trusted_keyring_sha256",
+    "custody_identity_sha256",
+    "custody_path_sha256",
+    "replay_allowed"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "commodity_c_fast_t1_consume_v1"
+    },
+    "candidate_id": {
+      "const": "C_FAST_CROSS_SECTION_NEUTRAL"
+    },
+    "release_id": {
+      "$ref": "#/$defs/id"
+    },
+    "attempt_id": {
+      "type": "string",
+      "pattern": "^attempt-[0-9a-f]{64}$"
+    },
+    "release_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "consumed_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "manifest_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "endpoint_identity_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "source_commit_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "runtime_image_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "runner_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "audit_script_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "trusted_keyring_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "custody_identity_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "custody_path_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "replay_allowed": {
+      "const": false
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{8,128}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

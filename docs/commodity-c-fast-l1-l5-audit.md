@@ -105,6 +105,8 @@ QuestDB DSN 只从隔离运行器挂载的 `0600` 普通文件读取，不作为
 PYTHONPATH=backend .venv/bin/python scripts/commodity_c_fast_l1_l5_audit.py \
   --manifest /path/to/c-fast-audit-manifest.json \
   --dsn-file /run/secrets/c-fast-t1-readonly.dsn \
+  --expected-endpoint-identity-sha256 <signed-endpoint-sha256> \
+  --expected-manifest-sha256 <signed-manifest-sha256> \
   --json-output artifacts/commodity-c-fast-l1-l5-audit.json \
   --csv-output artifacts/commodity-c-fast-l1-l5-audit.csv \
   --markdown-output artifacts/commodity-c-fast-l1-l5-audit.md \
@@ -123,6 +125,13 @@ PYTHONPATH=backend .venv/bin/python scripts/commodity_c_fast_l1_l5_audit.py \
 - QuestDB 实例级 `readonly=false`，避免把实例整体只读误归因于 dedicated principal。
 
 脚本在同一连接上于审计前后各执行一次 `SELECT current_user(), build()` 和固定 allowlist 的 `SHOW PARAMETERS` 查询。principal、QuestDB build 或相关可观测配置发生漂移都会 fail closed。四个输出必须使用全新路径且 create-only；JSON、CSV、Markdown 全部成功并关闭数据库连接后才最后发布 readonly proof，失败或重复运行不会覆盖旧 proof。证明过程不执行 `INSERT`、`UPDATE`、DDL 或“试写后期待失败”的权限探针。
+
+建立 PGWire 连接后，脚本从连接对象读取 `host/port/dbname`，按
+`{"dbname":...,"host":...,"port":...}` 的 canonical JSON 计算 SHA256，
+并与 signed release 的 endpoint expectation 做常量时间比较。proof 只保存
+该 SHA256 和 `endpoint_binding_verified=true`，不保存 DSN 或密码。这里绑定的
+是 libpq/psycopg 报告的已建立连接参数，不应被表述为网络层 peer
+attestation。
 
 脚本退出码：
 
@@ -207,7 +216,12 @@ database_mutations=0
 `requested_statement_timeout_ms` 是客户端在 PGWire 连接中请求的查询上限，不伪称为服务器回读值。proof 不保存 principal/admin/readonly 用户名或其可字典反推的无盐哈希，也不读取密码内容；`observable_readonly_metadata_stable` 只表示上述 allowlist 元数据在审计前后稳定，不能证明同一配置来源内部的敏感密码内容没有轮换。
 
 该 companion proof 仍不等于 T1 authority。正式执行还必须有独立 one-shot 人工签名 release、隔离 runner、镜像/代码哈希绑定和不可复用的终态封存。启用 QuestDB readonly 用户属于另一个需要人工主审的部署 release；本脚本不会修改 QuestDB 配置，不会替换现有 writer DSN，也不得要求设置 `QDB_PG_SECURITY_READONLY=true` 或实例级 `QDB_READONLY=true`。
-companion proof 单独也不绑定目标 endpoint、容器或镜像；这些目标实例事实必须由后续 signed one-shot release 绑定并在 terminal seal 中归档。
+companion proof 会记录并核对命令行给定的 endpoint hash，但单独运行时该
+expectation 尚未获得签名授权，也不绑定容器或镜像；这些事实必须由后续
+signed one-shot release 绑定并在 terminal seal 中归档。
+
+one-shot authority、consume marker、terminal seal 和人工签署步骤见
+[`commodity-c-fast-t1-one-shot.md`](commodity-c-fast-t1-one-shot.md)。
 
 本 PR 只交付审计器、evidence schema、测试与 runbook；在真实 QuestDB 上运行前不得宣称 P0 已通过。
 

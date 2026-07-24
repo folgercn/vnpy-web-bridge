@@ -39,6 +39,12 @@
     "audit_evidence_sha256": {
       "$ref": "#/$defs/sha256"
     },
+    "endpoint_identity_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "endpoint_binding_verified": {
+      "const": true
+    },
     "generated_at": {
       "type": "string",
       "format": "date-time"

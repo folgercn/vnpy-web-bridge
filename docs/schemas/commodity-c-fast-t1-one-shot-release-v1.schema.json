@@ -1,0 +1,222 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vnpy-web-bridge:schema:commodity-c-fast-t1-one-shot-release-v1",
+  "title": "C_FAST T1 one-shot readonly audit release v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "purpose",
+    "candidate_id",
+    "issue_number",
+    "release_id",
+    "attempt_id",
+    "issued_at",
+    "not_before",
+    "expires_at",
+    "signer_key_id",
+    "signer_type",
+    "reviewer_role",
+    "human_signature",
+    "trusted_keyring_sha256",
+    "custody_identity_sha256",
+    "custody_path_sha256",
+    "source_commit_sha",
+    "runtime_image_digest",
+    "runner_sha256",
+    "audit_script_sha256",
+    "manifest_schema_sha256",
+    "evidence_schema_sha256",
+    "legacy_evidence_schema_sha256",
+    "readonly_proof_schema_sha256",
+    "snapshot_id",
+    "manifest_sha256",
+    "audit_window",
+    "endpoint_identity_sha256",
+    "questdb_build_sha256",
+    "connect_timeout_seconds",
+    "statement_timeout_ms",
+    "max_rows_per_contract",
+    "max_runtime_seconds",
+    "network_authorized",
+    "readonly_production_query_authorized",
+    "write_probe_authorized",
+    "database_mutation_authorized",
+    "order_authorized",
+    "position_mutation_authorized",
+    "dispatch_authorized",
+    "deployment_mutation_authorized",
+    "signature"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "commodity_c_fast_t1_one_shot_release_v1"
+    },
+    "purpose": {
+      "const": "c_fast_l1_l5_t1_readonly_audit"
+    },
+    "candidate_id": {
+      "const": "C_FAST_CROSS_SECTION_NEUTRAL"
+    },
+    "issue_number": {
+      "const": 114
+    },
+    "release_id": {
+      "$ref": "#/$defs/id"
+    },
+    "attempt_id": {
+      "type": "string",
+      "pattern": "^attempt-[0-9a-f]{64}$"
+    },
+    "issued_at": {
+      "$ref": "#/$defs/dateTime"
+    },
+    "not_before": {
+      "$ref": "#/$defs/dateTime"
+    },
+    "expires_at": {
+      "$ref": "#/$defs/dateTime"
+    },
+    "signer_key_id": {
+      "$ref": "#/$defs/id"
+    },
+    "signer_type": {
+      "const": "human"
+    },
+    "reviewer_role": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "human_signature": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "trusted_keyring_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "custody_identity_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "custody_path_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "source_commit_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "runtime_image_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "runner_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "audit_script_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "manifest_schema_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "evidence_schema_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "legacy_evidence_schema_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "readonly_proof_schema_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "snapshot_id": {
+      "$ref": "#/$defs/id"
+    },
+    "manifest_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "audit_window": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "start",
+        "end_exclusive",
+        "trading_day"
+      ],
+      "properties": {
+        "start": {
+          "$ref": "#/$defs/dateTime"
+        },
+        "end_exclusive": {
+          "$ref": "#/$defs/dateTime"
+        },
+        "trading_day": {
+          "type": "string",
+          "pattern": "^[0-9]{8}$"
+        }
+      }
+    },
+    "endpoint_identity_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "questdb_build_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "connect_timeout_seconds": {
+      "const": 10
+    },
+    "statement_timeout_ms": {
+      "const": 60000
+    },
+    "max_rows_per_contract": {
+      "const": 500000
+    },
+    "max_runtime_seconds": {
+      "type": "integer",
+      "minimum": 60,
+      "maximum": 1800
+    },
+    "network_authorized": {
+      "const": true
+    },
+    "readonly_production_query_authorized": {
+      "const": true
+    },
+    "write_probe_authorized": {
+      "const": false
+    },
+    "database_mutation_authorized": {
+      "const": false
+    },
+    "order_authorized": {
+      "const": false
+    },
+    "position_mutation_authorized": {
+      "const": false
+    },
+    "dispatch_authorized": {
+      "const": false
+    },
+    "deployment_mutation_authorized": {
+      "const": false
+    },
+    "signature": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{8,128}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "dateTime": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}
