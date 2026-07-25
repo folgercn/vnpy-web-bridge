@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import inspect
 import json
+import os
 from pathlib import Path
 import stat
 import subprocess
@@ -542,6 +543,13 @@ def audit_gate_fixture(
     tmp_path: Path,
 ) -> tuple[Path, Path, list[str], str, str]:
     current_readiness = readiness()
+    custody_identity = {
+        "schema_version": "commodity_c_fast_t1_custody_identity_v1",
+        "custody_id": "query-v3-gate-test-custody",
+    }
+    custody_identity_path = tmp_path / "custody-identity.json"
+    custody_identity_path.write_bytes(canonical_json(custody_identity))
+    custody_identity_path.chmod(0o600)
     readiness_path = tmp_path / "gate-readiness.json"
     readiness_path.write_bytes(canonical_json(current_readiness.payload))
     readiness_path.chmod(0o400)
@@ -556,13 +564,48 @@ def audit_gate_fixture(
     release["audit_script_sha256"] = hashlib.sha256(
         Path(audit_module.__file__).read_bytes()
     ).hexdigest()
+    release["query_child_sha256"] = hashlib.sha256(
+        Path(child_module.__file__).read_bytes()
+    ).hexdigest()
     release["manifest_raw_sha256"] = hashlib.sha256(
         manifest_path.read_bytes()
     ).hexdigest()
     release["manifest_canonical_sha256"] = manifest_canonical_sha256
+    release["custody_identity_sha256"] = hashlib.sha256(
+        canonical_json(custody_identity)
+    ).hexdigest()
+    release["custody_path_sha256"] = query_module.custody_path_sha256(
+        tmp_path
+    )
     release_path = tmp_path / "gate-release.json"
     release_path.write_bytes(canonical_json(release))
     release_path.chmod(0o400)
+    release_raw_sha256 = hashlib.sha256(
+        release_path.read_bytes()
+    ).hexdigest()
+    release_canonical_sha256 = hashlib.sha256(
+        canonical_json(release)
+    ).hexdigest()
+    consume = query_module._consume_payload(
+        SimpleNamespace(
+            payload=release,
+            raw_sha256=release_raw_sha256,
+            canonical_sha256=release_canonical_sha256,
+            keyring_sha256=H2,
+        ),
+        NOW,
+    )
+    consume_path = (
+        tmp_path / f"{release['attempt_id']}.query-consumed-v3.json"
+    )
+    consume_path.write_bytes(canonical_json(consume))
+    consume_path.chmod(0o600)
+    consume_raw_sha256 = hashlib.sha256(
+        consume_path.read_bytes()
+    ).hexdigest()
+    consume_canonical_sha256 = hashlib.sha256(
+        canonical_json(consume)
+    ).hexdigest()
     gate_path = tmp_path / "gate.json"
     invocation_path = tmp_path / "gate-invocation.json"
     values = {
@@ -598,12 +641,8 @@ def audit_gate_fixture(
             canonical_json(invocation_core)
         ).hexdigest(),
         "release_path": str(release_path),
-        "release_raw_sha256": hashlib.sha256(
-            release_path.read_bytes()
-        ).hexdigest(),
-        "release_canonical_sha256": hashlib.sha256(
-            canonical_json(release)
-        ).hexdigest(),
+        "release_raw_sha256": release_raw_sha256,
+        "release_canonical_sha256": release_canonical_sha256,
         "readiness_path": str(readiness_path),
         "readiness_raw_sha256": hashlib.sha256(
             readiness_path.read_bytes()
@@ -614,6 +653,8 @@ def audit_gate_fixture(
         "manifest_source_path": str(manifest_path),
         "manifest_raw_sha256": release["manifest_raw_sha256"],
         "manifest_canonical_sha256": manifest_canonical_sha256,
+        "consume_marker_raw_sha256": consume_raw_sha256,
+        "consume_marker_canonical_sha256": consume_canonical_sha256,
         "provenance_keyring_sha256": H,
         "t1_authority_keyring_sha256": H2,
         "query_v3_authority_keyring_sha256": H2,
@@ -640,6 +681,67 @@ def audit_gate_fixture(
         invocation,
         gate_raw_sha256,
         gate_canonical_sha256,
+    )
+
+
+def claim_audit_gate_launch(
+    gate_path: Path,
+    capability: bytes,
+) -> tuple[dict, dict]:
+    gate = json.loads(gate_path.read_text())
+    release = json.loads(Path(gate["release_path"]).read_text())
+    child_module.claim_query_child_launch(
+        Path(gate["packet_custody_path"]),
+        release_id=release["release_id"],
+        attempt_id=release["attempt_id"],
+        release_raw_sha256=gate["release_raw_sha256"],
+        release_canonical_sha256=gate["release_canonical_sha256"],
+        consume_raw_sha256=gate["consume_marker_raw_sha256"],
+        consume_canonical_sha256=gate[
+            "consume_marker_canonical_sha256"
+        ],
+        query_v3_keyring_sha256=gate[
+            "query_v3_authority_keyring_sha256"
+        ],
+        launch_capability_sha256=hashlib.sha256(capability).hexdigest(),
+    )
+    return gate, release
+
+
+def patch_audit_active_pins(
+    monkeypatch: pytest.MonkeyPatch,
+    gate: dict,
+) -> None:
+    class PinRoot:
+        def lstat(self):
+            return SimpleNamespace(
+                st_mode=stat.S_IFDIR | 0o755,
+                st_uid=0,
+            )
+
+        def __truediv__(self, filename):
+            return Path(filename)
+
+    observed = {
+        filename: gate[field]
+        for field, filename in audit_module.QUERY_V3_PIN_NAMES.items()
+    }
+    monkeypatch.setattr(audit_module, "QUERY_V3_PIN_ROOT", PinRoot())
+    monkeypatch.setattr(
+        audit_module,
+        "_read_query_gate_root_pin",
+        lambda path, _label: observed[path.name],
+    )
+
+
+def install_launch_capability(
+    monkeypatch: pytest.MonkeyPatch,
+    capability: bytes,
+) -> None:
+    descriptor = child_module._launch_capability_pipe(capability)
+    monkeypatch.setenv(
+        child_module.LAUNCH_CAPABILITY_FD_ENV,
+        str(descriptor),
     )
 
 
@@ -680,6 +782,7 @@ def with_launch_claim(child_executor):
                 "--expected-consume-canonical-sha256"
             ],
             query_v3_keyring_sha256=values["--expected-query-v3-pin"],
+            launch_capability_sha256=H5,
         )
         return child_executor(invocation, *args, **kwargs)
 
@@ -1394,6 +1497,7 @@ def test_two_concurrent_children_only_one_claims_launch_before_network(
             consume_raw_sha256=consume_raw_sha256,
             consume_canonical_sha256=consume_canonical_sha256,
             query_v3_keyring_sha256=current.keyring_sha256,
+            launch_capability_sha256=H5,
         )
 
     with ThreadPoolExecutor(max_workers=2) as executor:
@@ -1462,6 +1566,7 @@ def test_child_rejects_consume_exact_tamper_before_launch(
             consume_raw_sha256=consume_raw_sha256,
             consume_canonical_sha256=consume_canonical_sha256,
             query_v3_keyring_sha256=current.keyring_sha256,
+            launch_capability_sha256=H5,
         )
     assert not list(
         pins.packet_custody_path.glob("*.query-child-started-v3.json")
@@ -1494,6 +1599,7 @@ def test_existing_terminal_blocks_child_before_launch_claim(
             consume_raw_sha256=consume_raw_sha256,
             consume_canonical_sha256=consume_canonical_sha256,
             query_v3_keyring_sha256=current.keyring_sha256,
+            launch_capability_sha256=H5,
         )
     assert not list(
         pins.packet_custody_path.glob("*.query-child-started-v3.json")
@@ -1550,9 +1656,20 @@ def test_staged_child_replay_after_post_claim_failure_is_pre_network_blocked(
         lambda *_args, **_kwargs: pins.packet_custody_path,
     )
     exec_calls: list[list[str]] = []
+    capability_digests: list[str] = []
 
-    def fail_after_claim(_python, invocation, _environment):
+    def fail_after_claim(_python, invocation, environment):
         exec_calls.append(invocation)
+        descriptor_text = environment[
+            child_module.LAUNCH_CAPABILITY_FD_ENV
+        ]
+        assert descriptor_text.isdecimal()
+        capability = os.read(
+            int(descriptor_text),
+            child_module.LAUNCH_CAPABILITY_BYTES + 1,
+        )
+        assert len(capability) == child_module.LAUNCH_CAPABILITY_BYTES
+        capability_digests.append(hashlib.sha256(capability).hexdigest())
         raise OSError("simulated failure after launch claim")
 
     monkeypatch.setattr(child_module.os, "execve", fail_after_claim)
@@ -1561,6 +1678,150 @@ def test_staged_child_replay_after_post_claim_failure_is_pre_network_blocked(
     assert not list(pins.packet_custody_path.glob("*/artifacts/*"))
     assert child_module.main() == 78
     assert exec_calls == [audit_invocation]
+    launch_path = next(
+        pins.packet_custody_path.glob("*.query-child-started-v3.json")
+    )
+    launch = json.loads(launch_path.read_text())
+    assert capability_digests == [launch["launch_capability_sha256"]]
+
+
+def test_direct_staged_audit_without_bootstrap_is_pre_dsn_blocked(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (
+        gate_path,
+        _invocation_path,
+        invocation,
+        _gate_raw_sha256,
+        _gate_canonical_sha256,
+    ) = audit_gate_fixture(tmp_path)
+    gate = json.loads(gate_path.read_text())
+    patch_audit_active_pins(monkeypatch, gate)
+    monkeypatch.delenv(
+        child_module.LAUNCH_CAPABILITY_FD_ENV,
+        raising=False,
+    )
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return NOW if tz is not None else NOW.replace(tzinfo=None)
+
+    monkeypatch.setattr(audit_module, "datetime", FrozenDateTime)
+    monkeypatch.setattr(sys, "argv", invocation[2:])
+    monkeypatch.setattr(
+        audit_module,
+        "connect_server_enforced_readonly",
+        lambda _path: pytest.fail("direct audit replay must not read the DSN"),
+    )
+    assert audit_module.main() == 2
+    assert not list(tmp_path.glob("*.query-child-started-v3.json"))
+
+
+def test_two_direct_audit_replays_cannot_cross_launch_capability(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (
+        gate_path,
+        _invocation_path,
+        invocation,
+        gate_raw_sha256,
+        gate_canonical_sha256,
+    ) = audit_gate_fixture(tmp_path)
+    capability = b"c" * child_module.LAUNCH_CAPABILITY_BYTES
+    gate, _release = claim_audit_gate_launch(gate_path, capability)
+    patch_audit_active_pins(monkeypatch, gate)
+    monkeypatch.delenv(
+        child_module.LAUNCH_CAPABILITY_FD_ENV,
+        raising=False,
+    )
+
+    def direct_replay() -> None:
+        audit_module.verify_pre_connect_query_gate(
+            gate_path,
+            expected_gate_raw_sha256=gate_raw_sha256,
+            expected_gate_canonical_sha256=gate_canonical_sha256,
+            actual_invocation=invocation,
+            now=NOW,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(direct_replay) for _ in range(2)]
+    failures = []
+    for future in futures:
+        with pytest.raises(audit_module.AuditError) as caught:
+            future.result()
+        failures.append(caught.value)
+    assert len(failures) == 2
+    assert all("launch capability" in str(error) for error in failures)
+
+
+def test_consumed_launch_capability_blocks_post_claim_audit_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (
+        gate_path,
+        _invocation_path,
+        invocation,
+        gate_raw_sha256,
+        gate_canonical_sha256,
+    ) = audit_gate_fixture(tmp_path)
+    capability = b"k" * child_module.LAUNCH_CAPABILITY_BYTES
+    gate, _release = claim_audit_gate_launch(gate_path, capability)
+    patch_audit_active_pins(monkeypatch, gate)
+    install_launch_capability(monkeypatch, capability)
+    audit_module.verify_pre_connect_query_gate(
+        gate_path,
+        expected_gate_raw_sha256=gate_raw_sha256,
+        expected_gate_canonical_sha256=gate_canonical_sha256,
+        actual_invocation=invocation,
+        now=NOW,
+    )
+    assert child_module.LAUNCH_CAPABILITY_FD_ENV not in os.environ
+    with pytest.raises(
+        audit_module.AuditError,
+        match="launch capability",
+    ):
+        audit_module.verify_pre_connect_query_gate(
+            gate_path,
+            expected_gate_raw_sha256=gate_raw_sha256,
+            expected_gate_canonical_sha256=gate_canonical_sha256,
+            actual_invocation=invocation,
+            now=NOW,
+        )
+
+
+def test_wrong_inherited_launch_capability_is_pre_dsn_blocked(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (
+        gate_path,
+        _invocation_path,
+        invocation,
+        gate_raw_sha256,
+        gate_canonical_sha256,
+    ) = audit_gate_fixture(tmp_path)
+    expected = b"e" * child_module.LAUNCH_CAPABILITY_BYTES
+    gate, _release = claim_audit_gate_launch(gate_path, expected)
+    patch_audit_active_pins(monkeypatch, gate)
+    install_launch_capability(
+        monkeypatch,
+        b"x" * child_module.LAUNCH_CAPABILITY_BYTES,
+    )
+    with pytest.raises(
+        audit_module.AuditError,
+        match="launch capability",
+    ):
+        audit_module.verify_pre_connect_query_gate(
+            gate_path,
+            expected_gate_raw_sha256=gate_raw_sha256,
+            expected_gate_canonical_sha256=gate_canonical_sha256,
+            actual_invocation=invocation,
+            now=NOW,
+        )
 
 
 def test_query_gate_tamper_is_blocked_before_active_pin_access(
@@ -1616,6 +1877,8 @@ def test_query_gate_tamper_is_blocked_before_active_pin_access(
         "manifest_canonical_sha256": hashlib.sha256(
             canonical_json({"value": 1})
         ).hexdigest(),
+        "consume_marker_raw_sha256": H,
+        "consume_marker_canonical_sha256": H2,
         "provenance_keyring_sha256": H,
         "t1_authority_keyring_sha256": H2,
         "query_v3_authority_keyring_sha256": H2,
@@ -2212,6 +2475,8 @@ def test_real_isolated_audit_invocation_preserves_dash_i_binding(
         "manifest_source_path": str(manifest_path),
         "manifest_raw_sha256": release["manifest_raw_sha256"],
         "manifest_canonical_sha256": release["manifest_canonical_sha256"],
+        "consume_marker_raw_sha256": H,
+        "consume_marker_canonical_sha256": H2,
         "provenance_keyring_sha256": H,
         "t1_authority_keyring_sha256": H2,
         "query_v3_authority_keyring_sha256": H2,

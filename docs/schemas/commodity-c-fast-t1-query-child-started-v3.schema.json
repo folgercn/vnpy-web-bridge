@@ -11,7 +11,8 @@
     "readiness_packet_raw_sha256", "readiness_packet_canonical_sha256",
     "manifest_raw_sha256", "manifest_canonical_sha256",
     "trusted_keyring_sha256", "custody_identity_sha256",
-    "custody_path_sha256", "launch_claim_precedes_network", "query_started",
+    "custody_path_sha256", "launch_capability_sha256",
+    "launch_claim_precedes_network", "query_started",
     "production_queried", "launch_claim_is_authority", "replay_allowed"
   ],
   "properties": {
@@ -31,6 +32,7 @@
     "trusted_keyring_sha256": {"$ref": "#/$defs/sha256"},
     "custody_identity_sha256": {"$ref": "#/$defs/sha256"},
     "custody_path_sha256": {"$ref": "#/$defs/sha256"},
+    "launch_capability_sha256": {"$ref": "#/$defs/sha256"},
     "launch_claim_precedes_network": {"const": true},
     "query_started": {"const": false},
     "production_queried": {"const": false},

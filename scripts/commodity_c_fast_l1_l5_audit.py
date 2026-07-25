@@ -16,6 +16,7 @@ from pathlib import Path
 import re
 import stat
 import sys
+from types import ModuleType
 from typing import Any, Iterable
 from zoneinfo import ZoneInfo
 
@@ -2314,6 +2315,55 @@ def _read_query_gate_root_pin(path: Path, label: str) -> str:
     return value
 
 
+def _verify_query_v3_launch_capability(
+    gate: dict[str, Any],
+    release: dict[str, Any],
+    custody: Path,
+) -> None:
+    child_path = Path(__file__).with_name(
+        "commodity_c_fast_t1_query_child_v3.py"
+    )
+    child_raw = _read_query_gate_regular_bytes(
+        child_path,
+        "frozen query-v3 bootstrap",
+    )
+    if not hmac.compare_digest(
+        hashlib.sha256(child_raw).hexdigest(),
+        str(release.get("query_child_sha256", "")),
+    ):
+        raise AuditError("frozen query-v3 bootstrap changed before connect")
+    child_module = ModuleType("_frozen_commodity_c_fast_t1_query_child_v3")
+    child_module.__file__ = str(child_path)
+    try:
+        exec(
+            compile(child_raw, str(child_path), "exec", dont_inherit=True),
+            child_module.__dict__,
+        )
+    except Exception as exc:
+        raise AuditError(
+            "cannot load the frozen query-v3 launch verifier"
+        ) from exc
+    try:
+        child_module.verify_query_child_launch_capability(
+            custody,
+            release_id=release["release_id"],
+            attempt_id=release["attempt_id"],
+            release_raw_sha256=gate["release_raw_sha256"],
+            release_canonical_sha256=gate["release_canonical_sha256"],
+            consume_raw_sha256=gate["consume_marker_raw_sha256"],
+            consume_canonical_sha256=(
+                gate["consume_marker_canonical_sha256"]
+            ),
+            query_v3_keyring_sha256=(
+                gate["query_v3_authority_keyring_sha256"]
+            ),
+        )
+    except (KeyError, TypeError, child_module.QueryChildError) as exc:
+        raise AuditError(
+            "query-v3 launch capability is invalid before connect"
+        ) from exc
+
+
 def verify_pre_connect_query_gate(
     gate_path: Path,
     *,
@@ -2368,6 +2418,8 @@ def verify_pre_connect_query_gate(
         "manifest_source_path",
         "manifest_raw_sha256",
         "manifest_canonical_sha256",
+        "consume_marker_raw_sha256",
+        "consume_marker_canonical_sha256",
         *QUERY_V3_PIN_NAMES,
     }
     if not isinstance(gate, dict) or set(gate) != required:
@@ -2455,6 +2507,8 @@ def verify_pre_connect_query_gate(
         != gate["manifest_raw_sha256"]
         or release.get("manifest_canonical_sha256")
         != gate["manifest_canonical_sha256"]
+        or release.get("trusted_keyring_sha256")
+        != gate["query_v3_authority_keyring_sha256"]
         or not isinstance(release.get("readiness"), dict)
         or release["readiness"].get("packet_raw_sha256")
         != gate["readiness_raw_sha256"]
@@ -2563,6 +2617,11 @@ def verify_pre_connect_query_gate(
         raise AuditError("query-v3 active custody cannot be resolved") from exc
     if observed_custody != expected_custody:
         raise AuditError("active custody changed at the final query boundary")
+    _verify_query_v3_launch_capability(
+        gate,
+        release,
+        expected_custody,
+    )
 
 
 def connected_endpoint_identity_sha256(conn: Any) -> str:

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import hmac
 import json
 import os
 from pathlib import Path
@@ -33,6 +34,8 @@ ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{8,128}$")
 ATTEMPT_ID_PATTERN = re.compile(r"^attempt-[0-9a-f]{64}$")
 MAX_INVOCATION_BYTES = 64 * 1024
 MAX_CUSTODY_JSON_BYTES = 1024 * 1024
+LAUNCH_CAPABILITY_BYTES = 32
+LAUNCH_CAPABILITY_FD_ENV = "BK_C_FAST_QUERY_V3_LAUNCH_CAPABILITY_FD"
 CONSUME_FIELDS = frozenset(
     {
         "schema_version",
@@ -417,7 +420,13 @@ def _entry_exists_at(custody_fd: int, name: str) -> bool:
     return True
 
 
-def _launch_payload(consume: dict[str, Any]) -> dict[str, Any]:
+def _launch_payload(
+    consume: dict[str, Any],
+    *,
+    launch_capability_sha256: str,
+) -> dict[str, Any]:
+    if SHA256_PATTERN.fullmatch(launch_capability_sha256) is None:
+        raise QueryChildError("launch capability SHA256 is invalid")
     return {
         "schema_version": "commodity_c_fast_t1_query_child_started_v3",
         "purpose": "c_fast_t1_one_shot_child_launch_claim_before_network",
@@ -439,6 +448,7 @@ def _launch_payload(consume: dict[str, Any]) -> dict[str, Any]:
         "trusted_keyring_sha256": consume["trusted_keyring_sha256"],
         "custody_identity_sha256": consume["custody_identity_sha256"],
         "custody_path_sha256": consume["custody_path_sha256"],
+        "launch_capability_sha256": launch_capability_sha256,
         "launch_claim_precedes_network": True,
         "query_started": False,
         "production_queried": False,
@@ -523,6 +533,7 @@ def claim_query_child_launch(
     consume_raw_sha256: str,
     consume_canonical_sha256: str,
     query_v3_keyring_sha256: str,
+    launch_capability_sha256: str,
 ) -> tuple[str, str]:
     if (
         ID_PATTERN.fullmatch(release_id) is None
@@ -535,6 +546,7 @@ def claim_query_child_launch(
                 consume_raw_sha256,
                 consume_canonical_sha256,
                 query_v3_keyring_sha256,
+                launch_capability_sha256,
             )
         )
     ):
@@ -574,7 +586,10 @@ def claim_query_child_launch(
         )
         if _entry_exists_at(custody_fd, terminal_name):
             raise QueryChildError("query terminal already exists")
-        launch = _launch_payload(consume)
+        launch = _launch_payload(
+            consume,
+            launch_capability_sha256=launch_capability_sha256,
+        )
         consume.pop("_raw_sha256")
         consume.pop("_canonical_sha256")
         rendered = json.dumps(
@@ -633,6 +648,173 @@ def claim_query_child_launch(
         os.close(custody_fd)
 
 
+def _read_launch_capability_from_environment() -> bytes:
+    descriptor_text = os.environ.pop(LAUNCH_CAPABILITY_FD_ENV, None)
+    if (
+        descriptor_text is None
+        or not descriptor_text.isascii()
+        or not descriptor_text.isdecimal()
+        or len(descriptor_text) > 10
+    ):
+        raise QueryChildError("query launch capability is unavailable")
+    descriptor = int(descriptor_text)
+    if descriptor < 3:
+        raise QueryChildError("query launch capability descriptor is invalid")
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISFIFO(info.st_mode):
+            raise QueryChildError("query launch capability is not a pipe")
+        chunks: list[bytes] = []
+        observed = 0
+        while True:
+            chunk = os.read(
+                descriptor,
+                LAUNCH_CAPABILITY_BYTES + 1 - observed,
+            )
+            if not chunk:
+                break
+            chunks.append(chunk)
+            observed += len(chunk)
+            if observed > LAUNCH_CAPABILITY_BYTES:
+                raise QueryChildError("query launch capability is oversized")
+    except OSError as exc:
+        raise QueryChildError("query launch capability cannot be read") from exc
+    finally:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+    capability = b"".join(chunks)
+    if len(capability) != LAUNCH_CAPABILITY_BYTES:
+        raise QueryChildError("query launch capability length is invalid")
+    return capability
+
+
+def verify_query_child_launch_capability(
+    custody: Path,
+    *,
+    release_id: str,
+    attempt_id: str,
+    release_raw_sha256: str,
+    release_canonical_sha256: str,
+    consume_raw_sha256: str,
+    consume_canonical_sha256: str,
+    query_v3_keyring_sha256: str,
+) -> tuple[str, str]:
+    custody_fd, resolved_custody = _open_pinned_custody(custody)
+    consume_name = f"{attempt_id}.query-consumed-v3.json"
+    launch_name = f"{attempt_id}.query-child-started-v3.json"
+    terminal_name = f"{attempt_id}.query-terminal-v3.json"
+    try:
+        consume_raw = _read_regular_file_at(
+            custody_fd,
+            consume_name,
+            "query consume marker",
+        )
+        consume = _parse_json_object(consume_raw, "query consume marker")
+        observed_consume_raw_sha256 = hashlib.sha256(consume_raw).hexdigest()
+        observed_consume_canonical_sha256 = hashlib.sha256(
+            _canonical_json(consume)
+        ).hexdigest()
+        if (
+            observed_consume_raw_sha256 != consume_raw_sha256
+            or observed_consume_canonical_sha256
+            != consume_canonical_sha256
+        ):
+            raise QueryChildError("consume marker exact binding changed")
+        _validate_consume(
+            consume,
+            release_id=release_id,
+            attempt_id=attempt_id,
+            release_raw_sha256=release_raw_sha256,
+            release_canonical_sha256=release_canonical_sha256,
+            consume_raw_sha256=consume_raw_sha256,
+            consume_canonical_sha256=consume_canonical_sha256,
+            query_v3_keyring_sha256=query_v3_keyring_sha256,
+            custody=resolved_custody,
+            custody_fd=custody_fd,
+        )
+        if _entry_exists_at(custody_fd, terminal_name):
+            raise QueryChildError("query terminal already exists")
+        launch_raw = _read_regular_file_at(
+            custody_fd,
+            launch_name,
+            "query child launch marker",
+        )
+        launch = _parse_json_object(
+            launch_raw,
+            "query child launch marker",
+        )
+        capability_sha256 = launch.get("launch_capability_sha256")
+        if (
+            not isinstance(capability_sha256, str)
+            or SHA256_PATTERN.fullmatch(capability_sha256) is None
+        ):
+            raise QueryChildError("launch capability binding is invalid")
+        expected_launch = _launch_payload(
+            consume,
+            launch_capability_sha256=capability_sha256,
+        )
+        consume.pop("_raw_sha256")
+        consume.pop("_canonical_sha256")
+        if launch != expected_launch:
+            raise QueryChildError("query child launch marker binding is invalid")
+        capability = _read_launch_capability_from_environment()
+        if not hmac.compare_digest(
+            hashlib.sha256(capability).hexdigest(),
+            capability_sha256,
+        ):
+            raise QueryChildError("query launch capability binding changed")
+        consume_after = _read_regular_file_at(
+            custody_fd,
+            consume_name,
+            "query consume marker",
+        )
+        launch_after = _read_regular_file_at(
+            custody_fd,
+            launch_name,
+            "query child launch marker",
+        )
+        if consume_after != consume_raw or launch_after != launch_raw:
+            raise QueryChildError(
+                "query launch custody markers changed before network"
+            )
+        if _entry_exists_at(custody_fd, terminal_name):
+            raise QueryChildError("query terminal appeared before network")
+        return (
+            hashlib.sha256(launch_raw).hexdigest(),
+            hashlib.sha256(_canonical_json(launch)).hexdigest(),
+        )
+    finally:
+        os.close(custody_fd)
+
+
+def _launch_capability_pipe(capability: bytes) -> int:
+    if len(capability) != LAUNCH_CAPABILITY_BYTES:
+        raise QueryChildError("query launch capability length is invalid")
+    read_descriptor, write_descriptor = os.pipe()
+    try:
+        os.set_inheritable(read_descriptor, True)
+        written = 0
+        while written < len(capability):
+            written += os.write(write_descriptor, capability[written:])
+        os.close(write_descriptor)
+        write_descriptor = -1
+        return read_descriptor
+    except BaseException:
+        try:
+            os.close(read_descriptor)
+        except OSError:
+            pass
+        raise
+    finally:
+        if write_descriptor >= 0:
+            try:
+                os.close(write_descriptor)
+            except OSError:
+                pass
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--audit-invocation", type=Path, required=True)
@@ -680,6 +862,7 @@ def main() -> int:
             != args.expected_release_canonical_sha256
         ):
             raise QueryChildError("gate release binding changed before claim")
+        launch_capability = os.urandom(LAUNCH_CAPABILITY_BYTES)
         claim_query_child_launch(
             custody,
             release_id=args.expected_release_id,
@@ -689,8 +872,20 @@ def main() -> int:
             consume_raw_sha256=args.expected_consume_raw_sha256,
             consume_canonical_sha256=args.expected_consume_canonical_sha256,
             query_v3_keyring_sha256=args.expected_query_v3_pin,
+            launch_capability_sha256=hashlib.sha256(
+                launch_capability
+            ).hexdigest(),
         )
-        os.execve(invocation[0], invocation, child_environment())
+        capability_descriptor = _launch_capability_pipe(launch_capability)
+        environment = child_environment()
+        environment[LAUNCH_CAPABILITY_FD_ENV] = str(capability_descriptor)
+        try:
+            os.execve(invocation[0], invocation, environment)
+        finally:
+            try:
+                os.close(capability_descriptor)
+            except OSError:
+                pass
     except (OSError, QueryChildError) as exc:
         print(f"T1 query child blocked before network: {exc}", file=sys.stderr)
         return 78

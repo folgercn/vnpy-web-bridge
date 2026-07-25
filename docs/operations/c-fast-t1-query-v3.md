@@ -85,9 +85,13 @@ initial full verify
   -> final full release/readiness revalidation
   -> parent active-pin re-read
   -> child bootstrap reopens exact consume through pinned custody dirfd
+  -> child creates a random launch capability in memory
   -> child atomically creates attempt-level launch claim (O_EXCL + fsync)
+     containing only capability SHA256
   -> child rejects existing launch claim or terminal before network
-  -> audit internal last gate
+  -> child passes the capability only through an inherited pipe FD
+  -> audit internal last gate reopens exact consume/launch markers
+  -> audit consumes and closes the one-time capability FD
   -> read DSN / connect / readonly SELECT
   -> exact output validation
   -> create-only terminal
@@ -105,6 +109,13 @@ SHA256 后，才可以 `O_EXCL` 创建 `0600` claim，并对文件和 custody �
 timeout、interrupt、exec failure 或无产物后再次运行，也必须在 DSN/网络之前
 拒绝。terminal 已存在同样必须 pre-query 拒绝。
 
+launch marker 只保存随机 capability 的 SHA256，不保存 capability 原文。32-byte
+capability 只存在于 bootstrap 内存和一个继承的匿名 pipe FD；它不进入 frozen
+audit argv、环境值、gate、terminal 或日志。audit 会在最后 gate 中读取一次、
+核对 marker SHA256、关闭 FD 并从环境删除 FD 编号。因此直接执行持久化的
+`child-invocation.json`、并发直接执行 audit，或在 bootstrap 已认领但无产物失败
+后重放 audit invocation，都不能取得 capability，必须在 DSN 读取前失败。
+
 ## 最后的 active-pin 边界
 
 外层 parent 和 bootstrap child 的 pin check 是纵深防御，不是最后事实边界。
@@ -119,6 +130,8 @@ path identity 重验：
 - exact query release raw/canonical bytes；
 - exact readiness raw/canonical bytes；
 - exact manifest source raw/canonical bytes；
+- exact consume marker raw/canonical bytes；
+- exact child launch marker、terminal absence 与瞬态 launch capability；
 - provenance/T1/query-v3/L3/outcome 五个 active keyring pins；
 - resolved active custody path。
 
@@ -130,7 +143,8 @@ path identity 重验：
 gate 返回后下一步就是 `_read_secret_text_file()` 和 connect，中间没有 artifact
 写入、插件、回调或动态配置读取。任何 pin、custody、script、invocation、
 release、readiness、manifest 或 gate late replacement 都会在 DSN 读取和网络连接
-之前 fail closed。
+之前 fail closed。bootstrap 只是纵深校验层；即使调用者绕过 bootstrap 而直接
+执行冻结的 audit invocation，缺少未持久化 capability 也无法越过最后 gate。
 
 consume marker、child launch claim、pre-connect gate、audit invocation 和
 query-child invocation 都作为 create-only exact artifacts 保存，并把各自的
@@ -173,7 +187,8 @@ replay_allowed=false
 本身被第二次中断，也不会先写 terminal 并遗留 child。即使进程已终止，也不从
 进程状态推断 SQL 是否完成或数据库 mutation 为零。
 
-只有 child 已持有 exact launch claim、exit 0/1、四份产物完整且 readonly proof、
+只有 child 已持有 exact launch claim、audit 已消费匹配的瞬态 capability、
+exit 0/1、四份产物完整且 readonly proof、
 endpoint、QuestDB build、manifest、release、readiness、consume、gate 和两层
 invocation exact bindings 全部通过，
 才可写 `COMPLETED_EVIDENCE_*`。即使该状态为 P0 pass，terminal 仍固定

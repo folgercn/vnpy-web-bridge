@@ -913,6 +913,7 @@ def _expected_child_launch_payload(
     *,
     consume_raw_sha256: str,
     consume_canonical_sha256: str,
+    launch_capability_sha256: str,
 ) -> dict[str, Any]:
     return {
         "schema_version": "commodity_c_fast_t1_query_child_started_v3",
@@ -935,6 +936,7 @@ def _expected_child_launch_payload(
         "trusted_keyring_sha256": consume["trusted_keyring_sha256"],
         "custody_identity_sha256": consume["custody_identity_sha256"],
         "custody_path_sha256": consume["custody_path_sha256"],
+        "launch_capability_sha256": launch_capability_sha256,
         "launch_claim_precedes_network": True,
         "query_started": False,
         "production_queried": False,
@@ -946,7 +948,10 @@ def _expected_child_launch_payload(
 def _read_child_launch_marker(
     guard,
     name: str,
-    expected: dict[str, Any],
+    consume: dict[str, Any],
+    *,
+    consume_raw_sha256: str,
+    consume_canonical_sha256: str,
 ) -> tuple[str | None, str | None]:
     if not custody_entry_exists(guard, name):
         return None, None
@@ -967,6 +972,15 @@ def _read_child_launch_marker(
         )
     except OneShotError as exc:
         raise QueryV3Error(str(exc)) from exc
+    capability_sha256 = payload.get("launch_capability_sha256")
+    if not isinstance(capability_sha256, str):
+        raise QueryV3Error("query child launch capability binding is invalid")
+    expected = _expected_child_launch_payload(
+        consume,
+        consume_raw_sha256=consume_raw_sha256,
+        consume_canonical_sha256=consume_canonical_sha256,
+        launch_capability_sha256=capability_sha256,
+    )
     if payload != expected:
         raise QueryV3Error("query child launch marker binding is invalid")
     return _hash(raw), _hash(canonical_json(payload))
@@ -981,6 +995,8 @@ def build_pre_connect_gate(
     release_path: Path,
     readiness_path: Path,
     manifest_source_path: Path,
+    consume_raw_sha256: str,
+    consume_canonical_sha256: str,
 ) -> dict[str, Any]:
     invocation_core_raw = canonical_json(audit_invocation_core)
     return {
@@ -1003,6 +1019,8 @@ def build_pre_connect_gate(
         "manifest_canonical_sha256": verified.payload[
             "manifest_canonical_sha256"
         ],
+        "consume_marker_raw_sha256": consume_raw_sha256,
+        "consume_marker_canonical_sha256": consume_canonical_sha256,
         "provenance_keyring_sha256": pins.provenance_keyring_sha256,
         "t1_authority_keyring_sha256": pins.t1_authority_keyring_sha256,
         "query_v3_authority_keyring_sha256": verified.keyring_sha256,
@@ -1190,11 +1208,6 @@ def execute_verified_query(
         query_invocation_canonical_sha256: str | None = None
         child_launch_raw_sha256: str | None = None
         child_launch_canonical_sha256: str | None = None
-        expected_child_launch = _expected_child_launch_payload(
-            consume,
-            consume_raw_sha256=consume_raw_sha256,
-            consume_canonical_sha256=consume_canonical_sha256,
-        )
         final_at: datetime | None = None
         execution_legacy = verified.legacy
         attempt_dir = custody / release["attempt_id"]
@@ -1253,6 +1266,8 @@ def execute_verified_query(
                 release_path=staged_release,
                 readiness_path=staged_readiness,
                 manifest_source_path=staged_manifest_source,
+                consume_raw_sha256=consume_raw_sha256,
+                consume_canonical_sha256=consume_canonical_sha256,
             )
             gate_bytes = canonical_json(gate)
             gate_raw_sha256 = _hash(gate_bytes)
@@ -1553,7 +1568,9 @@ def execute_verified_query(
         ) = _read_child_launch_marker(
             guard,
             launch_name,
-            expected_child_launch,
+            consume,
+            consume_raw_sha256=consume_raw_sha256,
+            consume_canonical_sha256=consume_canonical_sha256,
         )
         if (
             child_launch_raw_sha256 is None
