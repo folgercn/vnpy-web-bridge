@@ -51,9 +51,9 @@ query authority 不复用 readiness 的 T1 audit keyring。它使用独立
 
 parent 的 initial/pre-consume/final verify、bootstrap child 和 audit 内部最后
 gate 都会重读该 pin；原 `t1-authority-keyring.sha256` 仍作为 upstream
-readiness pin 单独重读。query-v3 keyring 的全部 key material 还必须与 upstream
-T1 authority keyring 的全部 key（包括未使用 key）互斥；provenance/outcome
-actual signer 的既有 domain separation 检查继续保留。
+readiness pin 单独重读。query-v3 keyring 的全部 key material 还必须与
+provenance、T1、L3 release、outcome 四个 pinned upstream keyring 的全部 key
+（包括未使用 key）互斥。
 
 release 最长 TTL 为十分钟，不能早于 readiness 生成时间，也不能晚于 exact
 readiness expiry。它只允许以下四项为 `true`：
@@ -183,14 +183,20 @@ release ID。离线签署命令为：
 PYTHONPATH=scripts .venv/bin/python \
   scripts/commodity_c_fast_t1_query_v3_sign_release.py \
   --input /secure/query-v3.unsigned.json \
+  --trusted-keyring /secure/query-v3-keyring.json \
   --readiness-packet /secure/readiness-v2.json \
   --private-key-file /secure/query-v3-ed25519.pem \
+  <与 query runner 相同的完整 readiness-v2 raw/source/post 参数> \
   --output /secure/query-v3.signed.json
 ```
 
 signer 自动生成或核对
 `attempt-<sha256(release_id UTF-8)>`，私钥必须为当前用户所有、`0600`、
-非 symlink，输出为 create-only。
+非 symlink，输出为 create-only。signer 会先完整重放 readiness-v2 真链、重读
+四个 upstream pins 与独立 query-v3 pin，验证 query keyring schema/purpose、
+`signer_key_id` 和私钥对应 public bytes，并执行五个 key domain 的全 keyset
+互斥检查；schema-only 或伪造 readiness packet 不能进入私钥加载/签署阶段。
+完整参数以 `commodity_c_fast_t1_query_v3_sign_release.py --help` 为准。
 
 ## 运行门禁
 

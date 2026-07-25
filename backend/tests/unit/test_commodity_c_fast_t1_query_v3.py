@@ -205,6 +205,38 @@ def release_payload(current_readiness: VerifiedReadinessPacket) -> dict:
     return payload
 
 
+def signer_fixture() -> tuple[
+    VerifiedReadinessPacket,
+    Ed25519PrivateKey,
+    dict,
+    str,
+    dict,
+]:
+    current_readiness = readiness()
+    private_key = Ed25519PrivateKey.generate()
+    public_raw = private_key.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    keyring = {
+        "schema_version": "commodity_c_fast_t1_query_v3_trusted_keys_v1",
+        "keys": [
+            {
+                "key_id": "query-v3-signer-key",
+                "purpose": query_module.TRUSTED_KEY_PURPOSE,
+                "public_key_base64": base64.b64encode(public_raw).decode(
+                    "ascii"
+                ),
+            }
+        ],
+    }
+    keyring_sha256 = hashlib.sha256(canonical_json(keyring)).hexdigest()
+    draft = release_payload(current_readiness)
+    draft.pop("signature")
+    draft["trusted_keyring_sha256"] = keyring_sha256
+    return current_readiness, private_key, keyring, keyring_sha256, draft
+
+
 def verified(tmp_path: Path) -> tuple[
     query_module.VerifiedQueryRelease,
     ReadinessPins,
@@ -272,7 +304,7 @@ def signed_release_inputs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
-    reuse_query_material_in_upstream_unused: bool = False,
+    overlap_upstream_domain: str | None = None,
 ) -> tuple[
     Path,
     Path,
@@ -314,36 +346,68 @@ def signed_release_inputs(
     keyring_path.write_bytes(canonical_json(keyring))
     keyring_path.chmod(0o600)
     keyring_sha256 = hashlib.sha256(canonical_json(keyring)).hexdigest()
-    upstream_entries = [
-        {
-            "key_id": "upstream-t1-primary-key",
-            "purpose": "t1_audit_release_signer",
-            "public_key_base64": base64.b64encode(bytes(range(32))).decode(
-                "ascii"
-            ),
-        }
-    ]
-    if reuse_query_material_in_upstream_unused:
-        upstream_entries.append(
-            {
-                "key_id": "upstream-t1-unused-key",
-                "purpose": "t1_audit_release_signer",
-                "public_key_base64": base64.b64encode(public_raw).decode(
-                    "ascii"
-                ),
-            }
-        )
-    upstream_t1_keyring = {
-        "schema_version": "commodity_c_fast_t1_trusted_keys_v1",
-        "keys": upstream_entries,
+    domain_specs = {
+        "provenance": (
+            query_module.PROVENANCE_KEYRING_VERSION,
+            query_module.PROVENANCE_KEY_PURPOSE,
+            bytes(range(32)),
+        ),
+        "t1": (
+            "commodity_c_fast_t1_trusted_keys_v1",
+            "t1_audit_release_signer",
+            bytes(range(1, 33)),
+        ),
+        "l3": (
+            query_module.L3_KEYRING_VERSION,
+            query_module.L3_KEY_PURPOSE,
+            bytes(range(2, 34)),
+        ),
+        "outcome": (
+            query_module.OUTCOME_KEYRING_VERSION,
+            query_module.OUTCOME_KEY_PURPOSE,
+            bytes(range(3, 35)),
+        ),
     }
-    upstream_t1_keyring_path = tmp_path / "upstream-t1-keyring.json"
-    upstream_t1_keyring_path.write_bytes(canonical_json(upstream_t1_keyring))
-    upstream_t1_keyring_path.chmod(0o600)
-    upstream_t1_keyring_sha256 = hashlib.sha256(
-        canonical_json(upstream_t1_keyring)
-    ).hexdigest()
-    pins = ReadinessPins(H, upstream_t1_keyring_sha256, H3, H5, custody)
+    upstream_paths: dict[str, Path] = {}
+    upstream_hashes: dict[str, str] = {}
+    for domain, (version, purpose, primary_material) in domain_specs.items():
+        entries = [
+            {
+                "key_id": f"upstream-{domain}-primary-key",
+                "purpose": purpose,
+                "public_key_base64": base64.b64encode(
+                    primary_material
+                ).decode("ascii"),
+            }
+        ]
+        if overlap_upstream_domain == domain:
+            entries.append(
+                {
+                    "key_id": f"upstream-{domain}-unused-key",
+                    "purpose": purpose,
+                    "public_key_base64": base64.b64encode(public_raw).decode(
+                        "ascii"
+                    ),
+                }
+            )
+        upstream_keyring = {
+            "schema_version": version,
+            "keys": entries,
+        }
+        upstream_path = tmp_path / f"upstream-{domain}-keyring.json"
+        upstream_path.write_bytes(canonical_json(upstream_keyring))
+        upstream_path.chmod(0o600)
+        upstream_paths[domain] = upstream_path
+        upstream_hashes[domain] = hashlib.sha256(
+            canonical_json(upstream_keyring)
+        ).hexdigest()
+    pins = ReadinessPins(
+        upstream_hashes["provenance"],
+        upstream_hashes["t1"],
+        upstream_hashes["l3"],
+        upstream_hashes["outcome"],
+        custody,
+    )
 
     readiness_path = custody / "readiness-v2.json"
     readiness_path.write_bytes(canonical_json(current_readiness.payload))
@@ -363,8 +427,13 @@ def signed_release_inputs(
     )
     l3_release_path.chmod(0o600)
     readiness_inputs = SimpleNamespace(
-        outcome_source=SimpleNamespace(release=l3_release_path),
-        t1_keyring=upstream_t1_keyring_path,
+        provenance_keyring=upstream_paths["provenance"],
+        t1_keyring=upstream_paths["t1"],
+        outcome_keyring=upstream_paths["outcome"],
+        outcome_source=SimpleNamespace(
+            release=l3_release_path,
+            release_keyring=upstream_paths["l3"],
+        ),
     )
 
     draft = release_payload(current_readiness)
@@ -416,6 +485,8 @@ def signed_release_inputs(
         draft,
         current_readiness,
         private_key,
+        keyring,
+        keyring_sha256,
         now=NOW,
     )
     release_path = custody / "query-v3-signed.json"
@@ -579,6 +650,11 @@ def execute(
         "verify_active_readiness_pins",
         lambda _pins: None,
     )
+    monkeypatch.setattr(
+        query_module,
+        "read_root_owned_deployment_pin",
+        lambda *_args, **_kwargs: current.keyring_sha256,
+    )
     return query_module.execute_verified_query(
         current,
         pins,
@@ -591,6 +667,17 @@ def execute(
     )
 
 
+def assert_terminal_safety_invariants(terminal: dict) -> None:
+    assert terminal["terminal_is_authority"] is False
+    assert terminal["p0_acceptance_authorized"] is False
+    assert terminal["write_probe_attempted"] is False
+    assert terminal["web_bridge_rpc_calls"] == 0
+    assert terminal["orders_sent"] == 0
+    assert terminal["positions_modified"] == 0
+    assert terminal["dispatch_changed"] is False
+    assert terminal["replay_allowed"] is False
+
+
 def test_release_schema_allows_only_narrow_readonly_authority() -> None:
     current = readiness()
     payload = release_payload(current)
@@ -598,6 +685,46 @@ def test_release_schema_allows_only_narrow_readonly_authority() -> None:
     payload["dispatch_authorized"] = True
     with pytest.raises((OneShotError, query_module.QueryV3Error)):
         query_module.validate_release_semantics(payload, current, now=NOW)
+
+
+def test_release_identity_ttl_and_complete_deny_matrix() -> None:
+    current = readiness()
+    for field in query_module.TRUE_AUTHORITY_FIELDS:
+        payload = release_payload(current)
+        payload[field] = False
+        with pytest.raises(query_module.QueryV3Error):
+            query_module.validate_release_semantics(payload, current, now=NOW)
+    for field in query_module.FALSE_AUTHORITY_FIELDS:
+        payload = release_payload(current)
+        payload[field] = True
+        with pytest.raises((OneShotError, query_module.QueryV3Error)):
+            query_module.validate_release_semantics(payload, current, now=NOW)
+    for field, value in (
+        ("purpose", "wrong-query-purpose"),
+        ("candidate_id", "WRONG_CANDIDATE"),
+    ):
+        payload = release_payload(current)
+        payload[field] = value
+        with pytest.raises((OneShotError, query_module.QueryV3Error)):
+            query_module.validate_release_semantics(payload, current, now=NOW)
+    long_payload = dict(current.payload)
+    long_payload["expires_at"] = (NOW + timedelta(minutes=20)).isoformat()
+    long_raw = canonical_json(long_payload)
+    long_readiness = VerifiedReadinessPacket(
+        payload=long_payload,
+        raw_sha256=hashlib.sha256(long_raw).hexdigest(),
+        canonical_sha256=hashlib.sha256(long_raw).hexdigest(),
+    )
+    payload = release_payload(long_readiness)
+    payload["issued_at"] = (NOW - timedelta(seconds=30)).isoformat()
+    payload["not_before"] = (NOW - timedelta(seconds=15)).isoformat()
+    payload["expires_at"] = (NOW + timedelta(minutes=10)).isoformat()
+    with pytest.raises(query_module.QueryV3Error, match="TTL"):
+        query_module.validate_release_semantics(
+            payload,
+            long_readiness,
+            now=NOW,
+        )
 
 
 @pytest.mark.parametrize(
@@ -641,6 +768,72 @@ def test_offline_signed_release_passes_complete_verifier(
     assert result.raw_sha256 == hashlib.sha256(
         release_path.read_bytes()
     ).hexdigest()
+
+
+@pytest.mark.parametrize(
+    "failure",
+    ("wrong_private", "wrong_id", "wrong_purpose", "wrong_pin"),
+)
+def test_offline_signer_rejects_mismatched_authority(
+    failure: str,
+) -> None:
+    current, private_key, keyring, keyring_sha256, draft = signer_fixture()
+    if failure == "wrong_private":
+        private_key = Ed25519PrivateKey.generate()
+    elif failure == "wrong_id":
+        draft["signer_key_id"] = "query-v3-unknown-key"
+    elif failure == "wrong_purpose":
+        keyring["keys"][0]["purpose"] = "t1_audit_release_signer"
+        keyring_sha256 = hashlib.sha256(canonical_json(keyring)).hexdigest()
+        draft["trusted_keyring_sha256"] = keyring_sha256
+    elif failure == "wrong_pin":
+        keyring_sha256 = H
+    with pytest.raises((OneShotError, query_module.QueryV3Error)):
+        sign_module.sign_release(
+            draft,
+            current,
+            private_key,
+            keyring,
+            keyring_sha256,
+            now=NOW,
+        )
+
+
+def test_offline_signer_blocks_forged_readiness_before_private_key_use(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    args = SimpleNamespace(
+        input=tmp_path / "draft.json",
+        trusted_keyring=tmp_path / "keyring.json",
+        private_key_file=tmp_path / "private.pem",
+        output=tmp_path / "signed.json",
+        readiness_packet=tmp_path / "forged-readiness.json",
+    )
+    monkeypatch.setattr(sign_module, "parse_args", lambda: args)
+    monkeypatch.setattr(
+        sign_module,
+        "_read_production_pins",
+        lambda: ReadinessPins(H, H2, H3, H4, tmp_path),
+    )
+    monkeypatch.setattr(
+        sign_module,
+        "inputs_from_args",
+        lambda _args: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        sign_module,
+        "verify_existing_readiness_packet",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            ReadinessV2Error("forged readiness")
+        ),
+    )
+    monkeypatch.setattr(
+        sign_module,
+        "load_private_key",
+        lambda _path: pytest.fail("private key must not be loaded"),
+    )
+    assert sign_module.main() == 2
 
 
 def test_complete_verifier_rejects_wrong_signature(
@@ -705,9 +898,14 @@ def test_complete_verifier_rejects_wrong_query_v3_pin(
         )
 
 
-def test_complete_verifier_rejects_unused_upstream_t1_key_reuse(
+@pytest.mark.parametrize(
+    "domain",
+    ("provenance", "t1", "l3", "outcome"),
+)
+def test_complete_verifier_rejects_unused_upstream_key_reuse(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    domain: str,
 ) -> None:
     (
         release_path,
@@ -720,11 +918,11 @@ def test_complete_verifier_rejects_unused_upstream_t1_key_reuse(
     ) = signed_release_inputs(
         tmp_path,
         monkeypatch,
-        reuse_query_material_in_upstream_unused=True,
+        overlap_upstream_domain=domain,
     )
     with pytest.raises(
         query_module.QueryV3Error,
-        match="reuses upstream T1 authority",
+        match="reuses upstream authority",
     ):
         query_module.verify_query_release(
             release_path,
@@ -751,6 +949,36 @@ def test_active_pin_rotation_before_consume_does_not_burn_attempt(
         ),
     )
     with pytest.raises(ReadinessV2Error):
+        query_module.execute_verified_query(
+            current,
+            pins,
+            dsn,
+            lambda _at: current,
+            clock=times(0, 1),
+            child_executor=lambda *_args, **_kwargs: pytest.fail(
+                "child must not launch"
+            ),
+            require_root_owned_parent=False,
+        )
+    assert not list(pins.packet_custody_path.glob("*.query-consumed-v3.json"))
+
+
+def test_query_pin_rotation_before_consume_does_not_burn_attempt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current, pins, dsn = verified(tmp_path)
+    monkeypatch.setattr(
+        query_module,
+        "verify_active_readiness_pins",
+        lambda _pins: None,
+    )
+    monkeypatch.setattr(
+        query_module,
+        "read_root_owned_deployment_pin",
+        lambda *_args, **_kwargs: H,
+    )
+    with pytest.raises(query_module.QueryV3Error, match="pin changed"):
         query_module.execute_verified_query(
             current,
             pins,
@@ -792,6 +1020,113 @@ def test_final_revalidation_failure_burns_attempt_without_child(
     assert code == 2
     assert terminal["terminal_state"] == "BLOCKED_FINAL_REVALIDATION_PRE_CHILD"
     assert terminal["production_query_attempted"] is False
+
+
+def test_consume_replay_is_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current, pins, dsn = verified(tmp_path)
+    monkeypatch.setattr(
+        query_module,
+        "verify_active_readiness_pins",
+        lambda _pins: None,
+    )
+    monkeypatch.setattr(
+        query_module,
+        "read_root_owned_deployment_pin",
+        lambda *_args, **_kwargs: current.keyring_sha256,
+    )
+    code, _terminal = query_module.execute_verified_query(
+        current,
+        pins,
+        dsn,
+        lambda _at: current,
+        clock=times(0, 1, 2, 3),
+        child_executor=lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            [],
+            0,
+        ),
+        output_validator=lambda *_args: (
+            True,
+            {
+                "audit_json": H,
+                "audit_csv": H2,
+                "audit_markdown": H3,
+                "readonly_proof": H4,
+            },
+        ),
+        require_root_owned_parent=False,
+    )
+    assert code == 0
+    with pytest.raises(query_module.QueryV3Error, match="already consumed"):
+        query_module.execute_verified_query(
+            current,
+            pins,
+            dsn,
+            lambda _at: current,
+            clock=times(4),
+            child_executor=lambda *_args, **_kwargs: pytest.fail(
+                "replay child must not launch"
+            ),
+            require_root_owned_parent=False,
+        )
+
+
+def test_exit_one_is_evidence_blocked_not_pass(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    code, terminal = execute(
+        tmp_path,
+        monkeypatch,
+        child_executor=lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            [],
+            1,
+        ),
+        output_validator=lambda *_args: (
+            False,
+            {
+                "audit_json": H,
+                "audit_csv": H2,
+                "audit_markdown": H3,
+                "readonly_proof": H4,
+            },
+        ),
+    )
+    assert code == 1
+    assert terminal["terminal_state"] == "COMPLETED_EVIDENCE_P0_BLOCKED"
+    assert terminal["p0_pass"] is False
+    assert_terminal_safety_invariants(terminal)
+
+
+def test_terminal_write_failure_cannot_create_success_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = query_module.write_json_create_only_at
+
+    def fail_terminal(guard, name, payload, schema, label):
+        if label == "T1 query v3 terminal":
+            raise OSError("terminal fsync failed")
+        return original(guard, name, payload, schema, label)
+
+    monkeypatch.setattr(
+        query_module,
+        "write_json_create_only_at",
+        fail_terminal,
+    )
+    with pytest.raises(OSError, match="terminal fsync failed"):
+        execute(
+            tmp_path,
+            monkeypatch,
+            child_executor=lambda *_args, **_kwargs: (
+                subprocess.CompletedProcess([], 0)
+            ),
+        )
+    custody = tmp_path / "custody"
+    assert list(custody.glob("*.query-consumed-v3.json"))
+    assert not list(custody.glob("*.query-terminal-v3.json"))
 
 
 @pytest.mark.parametrize(
@@ -836,6 +1171,7 @@ def test_prequery_and_unknown_terminal_semantics(
     else:
         assert terminal["query_execution_state"] == "NOT_STARTED"
         assert terminal["production_query_attempted"] is False
+    assert_terminal_safety_invariants(terminal)
 
 
 def test_clock_rollback_cannot_emit_pass(
@@ -872,6 +1208,7 @@ def test_success_binds_gate_and_both_invocations(
     )
     assert code == 0
     assert terminal["terminal_state"] == "COMPLETED_EVIDENCE_P0_PASS"
+    assert_terminal_safety_invariants(terminal)
     for field in (
         "pre_connect_gate_raw_sha256",
         "pre_connect_gate_canonical_sha256",
@@ -1188,6 +1525,68 @@ def test_expired_release_is_blocked_before_active_pins(
             actual_invocation=invocation,
             now=NOW + timedelta(minutes=6),
         )
+
+
+def test_symlink_and_oversize_frozen_artifacts_are_rejected(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "target.json"
+    target.write_text('{"value":1}', encoding="utf-8")
+    symlink = tmp_path / "artifact.json"
+    symlink.symlink_to(target)
+    with pytest.raises(OneShotError):
+        query_module.read_regular_file_strict(symlink, "frozen artifact")
+    oversized = tmp_path / "oversized.json"
+    oversized.write_bytes(b"x" * 17)
+    with pytest.raises(OneShotError):
+        query_module.read_regular_file_strict(
+            oversized,
+            "frozen artifact",
+            limit=16,
+        )
+
+
+def test_custody_path_replacement_is_rejected(tmp_path: Path) -> None:
+    custody = tmp_path / "custody"
+    custody.mkdir(mode=0o700)
+    guard = query_module.open_custody_guard(
+        custody,
+        require_root_owned_parent=False,
+    )
+    moved = tmp_path / "old-custody"
+    custody.rename(moved)
+    custody.mkdir(mode=0o700)
+    try:
+        with pytest.raises(OneShotError, match="identity changed"):
+            guard.assert_path_identity()
+    finally:
+        guard.close()
+
+
+def test_partial_outputs_and_child_secret_cannot_leak_or_pass(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "postgresql://readonly:super-secret@questdb/db"
+    code, terminal = execute(
+        tmp_path,
+        monkeypatch,
+        child_executor=lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            [],
+            0,
+            stdout=secret,
+            stderr=f"password={secret}",
+        ),
+        output_validator=lambda *_args: (_ for _ in ()).throw(
+            OneShotError("partial output set")
+        ),
+    )
+    assert code == 2
+    assert terminal["terminal_state"] == "FAILED_OUTPUT_VALIDATION"
+    assert terminal["p0_pass"] is None
+    assert secret not in json.dumps(terminal)
+    assert "password=" not in json.dumps(terminal)
+    assert_terminal_safety_invariants(terminal)
 
 
 def test_audit_calls_gate_immediately_before_dsn_access(

@@ -21,8 +21,18 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from commodity_c_fast_readonly_deployment_outcome import (
+    OUTCOME_KEYRING_VERSION,
+    OUTCOME_KEY_PURPOSE,
     add_post_arguments,
     add_source_arguments,
+)
+from commodity_c_fast_readonly_deployment_release import (
+    TRUSTED_KEYRING_VERSION as L3_KEYRING_VERSION,
+    TRUSTED_KEY_PURPOSE as L3_KEY_PURPOSE,
+)
+from commodity_c_fast_t1_build_registry_provenance import (
+    KEYRING_VERSION as PROVENANCE_KEYRING_VERSION,
+    KEY_PURPOSE as PROVENANCE_KEY_PURPOSE,
 )
 from commodity_c_fast_t1_one_shot import (
     AUDIT_SCRIPT_PATH,
@@ -232,40 +242,43 @@ def _load_query_public_key(
     )
 
 
-def _load_upstream_t1_public_materials(
+def _load_pinned_public_materials(
     path: Path,
     expected_canonical_sha256: str,
+    *,
+    expected_schema_version: str,
+    expected_purpose: str,
+    label: str,
 ) -> frozenset[bytes]:
     try:
         raw = read_regular_file_strict(
             path,
-            "upstream T1 authority keyring",
+            label,
             private=True,
         )
-        keyring = parse_json_bytes(raw, "upstream T1 authority keyring")
+        keyring = parse_json_bytes(raw, label)
     except OneShotError as exc:
         raise QueryV3Error(str(exc)) from exc
     if (
         set(keyring) != {"schema_version", "keys"}
-        or keyring["schema_version"]
-        != "commodity_c_fast_t1_trusted_keys_v1"
+        or keyring["schema_version"] != expected_schema_version
         or not isinstance(keyring["keys"], list)
         or not keyring["keys"]
         or _hash(canonical_json(keyring)) != expected_canonical_sha256
     ):
-        raise QueryV3Error("upstream T1 authority keyring is invalid")
+        raise QueryV3Error(f"{label} is invalid")
     materials: set[bytes] = set()
     seen_ids: set[str] = set()
     for entry in keyring["keys"]:
         if (
             not isinstance(entry, dict)
             or set(entry) != {"key_id", "purpose", "public_key_base64"}
-            or entry["purpose"] != "t1_audit_release_signer"
+            or entry["purpose"] != expected_purpose
         ):
-            raise QueryV3Error("upstream T1 authority key entry is invalid")
+            raise QueryV3Error(f"{label} key entry is invalid")
         key_id = str(entry["key_id"])
         if key_id in seen_ids:
-            raise QueryV3Error("upstream T1 keyring contains duplicate key_id")
+            raise QueryV3Error(f"{label} contains duplicate key_id")
         seen_ids.add(key_id)
         try:
             current = base64.b64decode(
@@ -276,10 +289,68 @@ def _load_upstream_t1_public_materials(
                 raise ValueError("wrong public key length")
         except (TypeError, ValueError) as exc:
             raise QueryV3Error(
-                "upstream T1 authority public key is invalid"
+                f"{label} public key is invalid"
             ) from exc
         materials.add(current)
     return frozenset(materials)
+
+
+def verify_query_key_domain_separation(
+    query_public_materials: frozenset[bytes],
+    readiness_inputs: ReadinessInputs,
+    pins: ReadinessPins,
+) -> None:
+    upstream_domains = (
+        (
+            readiness_inputs.provenance_keyring,
+            pins.provenance_keyring_sha256,
+            PROVENANCE_KEYRING_VERSION,
+            PROVENANCE_KEY_PURPOSE,
+            "upstream provenance authority keyring",
+        ),
+        (
+            readiness_inputs.t1_keyring,
+            pins.t1_authority_keyring_sha256,
+            "commodity_c_fast_t1_trusted_keys_v1",
+            "t1_audit_release_signer",
+            "upstream T1 authority keyring",
+        ),
+        (
+            readiness_inputs.outcome_source.release_keyring,
+            pins.l3_authority_keyring_sha256,
+            L3_KEYRING_VERSION,
+            L3_KEY_PURPOSE,
+            "upstream L3 release authority keyring",
+        ),
+        (
+            readiness_inputs.outcome_keyring,
+            pins.outcome_keyring_sha256,
+            OUTCOME_KEYRING_VERSION,
+            OUTCOME_KEY_PURPOSE,
+            "upstream outcome authority keyring",
+        ),
+    )
+    upstream_public_materials: set[bytes] = set()
+    for (
+        upstream_path,
+        upstream_pin,
+        upstream_version,
+        upstream_purpose,
+        upstream_label,
+    ) in upstream_domains:
+        upstream_public_materials.update(
+            _load_pinned_public_materials(
+                upstream_path,
+                upstream_pin,
+                expected_schema_version=upstream_version,
+                expected_purpose=upstream_purpose,
+                label=upstream_label,
+            )
+        )
+    if query_public_materials & upstream_public_materials:
+        raise QueryV3Error(
+            "query-v3 keyring reuses upstream authority key material"
+        )
 
 
 def validate_release_semantics(
@@ -436,14 +507,11 @@ def verify_query_release(
         keyring,
         release["signer_key_id"],
     )
-    upstream_t1_public_materials = _load_upstream_t1_public_materials(
-        readiness_inputs.t1_keyring,
-        pins.t1_authority_keyring_sha256,
+    verify_query_key_domain_separation(
+        query_public_materials,
+        readiness_inputs,
+        pins,
     )
-    if query_public_materials & upstream_t1_public_materials:
-        raise QueryV3Error(
-            "query-v3 keyring reuses upstream T1 authority key material"
-        )
     try:
         signature = base64.b64decode(release["signature"], validate=True)
         if len(signature) != 64:
@@ -758,6 +826,25 @@ def _assert_same(
         raise QueryV3Error("release/readiness changed during protected use")
 
 
+def verify_active_query_v3_pins(
+    pins: ReadinessPins,
+    expected_query_v3_keyring_sha256: str,
+) -> None:
+    verify_active_readiness_pins(pins)
+    try:
+        observed_query_pin = read_root_owned_deployment_pin(
+            QUERY_V3_AUTHORITY_PIN_PATH,
+            "query-v3 authority keyring",
+        )
+    except OneShotError as exc:
+        raise QueryV3Error(str(exc)) from exc
+    if not hmac.compare_digest(
+        observed_query_pin,
+        expected_query_v3_keyring_sha256,
+    ):
+        raise QueryV3Error("active query-v3 authority pin changed")
+
+
 def build_query_child_invocation(
     pins: ReadinessPins,
     query_v3_authority_keyring_sha256: str,
@@ -960,7 +1047,7 @@ def execute_verified_query(
             preconsume.readiness,
             now=consumed_at,
         )
-        verify_active_readiness_pins(pins)
+        verify_active_query_v3_pins(pins, verified.keyring_sha256)
         consume = _consume_payload(preconsume, consumed_at)
         consume_raw_sha256 = write_json_create_only_at(
             guard,
@@ -1183,7 +1270,7 @@ def execute_verified_query(
                 bundle_root,
                 audit_invocation,
             )
-            verify_active_readiness_pins(pins)
+            verify_active_query_v3_pins(pins, verified.keyring_sha256)
         except (
             OSError,
             OneShotError,
@@ -1439,12 +1526,9 @@ def verify_and_execute_query(
     )
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--query-release", type=Path, required=True)
-    parser.add_argument("--trusted-keyring", type=Path, required=True)
-    parser.add_argument("--manifest", type=Path, required=True)
-    parser.add_argument("--dsn-file", type=Path, required=True)
+def add_readiness_verification_arguments(
+    parser: argparse.ArgumentParser,
+) -> None:
     parser.add_argument("--readiness-packet", type=Path, required=True)
     parser.add_argument("--external-image-evidence", type=Path, required=True)
     parser.add_argument("--oci-layout-archive", type=Path, required=True)
@@ -1465,6 +1549,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--expected-questdb-image-digest", required=True)
     add_source_arguments(parser)
     add_post_arguments(parser)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--query-release", type=Path, required=True)
+    parser.add_argument("--trusted-keyring", type=Path, required=True)
+    parser.add_argument("--manifest", type=Path, required=True)
+    parser.add_argument("--dsn-file", type=Path, required=True)
+    add_readiness_verification_arguments(parser)
     return parser.parse_args()
 
 
