@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vnpy-web-bridge:schema:commodity-c-fast-readonly-deployment-writer-post-v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "evidence_id", "candidate_id", "release_id", "attempt_id",
+    "release_raw_sha256", "consume_marker_raw_sha256", "receipt_raw_sha256",
+    "writer_continuity_pre_evidence_raw_sha256",
+    "writer_continuity_post_contract_raw_sha256",
+    "questdb_target_identity_sha256", "captured_at", "capture_method",
+    "writer_identity_sha256", "writer_last_commit_id_sha256",
+    "commit_progress_state", "writer_last_commit_lag_seconds",
+    "writer_queue_depth", "writer_queue_depth_delta", "writer_state",
+    "secret_content_included"
+  ],
+  "properties": {
+    "schema_version": {"const": "commodity_c_fast_readonly_deployment_writer_post_v1"},
+    "evidence_id": {"$ref": "#/$defs/id"},
+    "candidate_id": {"const": "C_FAST_CROSS_SECTION_NEUTRAL"},
+    "release_id": {"$ref": "#/$defs/id"},
+    "attempt_id": {"$ref": "#/$defs/attemptId"},
+    "release_raw_sha256": {"$ref": "#/$defs/sha256"},
+    "consume_marker_raw_sha256": {"$ref": "#/$defs/sha256"},
+    "receipt_raw_sha256": {"$ref": "#/$defs/sha256"},
+    "writer_continuity_pre_evidence_raw_sha256": {"$ref": "#/$defs/sha256"},
+    "writer_continuity_post_contract_raw_sha256": {"$ref": "#/$defs/sha256"},
+    "questdb_target_identity_sha256": {"$ref": "#/$defs/sha256"},
+    "captured_at": {"$ref": "#/$defs/dateTime"},
+    "capture_method": {"const": "same_writer_identity_and_non_regressing_commit_v1"},
+    "writer_identity_sha256": {"$ref": "#/$defs/sha256"},
+    "writer_last_commit_id_sha256": {"$ref": "#/$defs/sha256"},
+    "commit_progress_state": {"const": "SAME"},
+    "writer_last_commit_lag_seconds": {"type": "integer", "minimum": 0, "maximum": 60},
+    "writer_queue_depth": {"type": "integer", "minimum": 0},
+    "writer_queue_depth_delta": {"type": "integer", "minimum": -10000000, "maximum": 10000},
+    "writer_state": {"const": "HEALTHY"},
+    "secret_content_included": {"const": false}
+  },
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[A-Za-z0-9._-]{8,128}$"},
+    "attemptId": {"type": "string", "pattern": "^attempt-[0-9a-f]{64}$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "dateTime": {"type": "string", "format": "date-time"}
+  }
+}
