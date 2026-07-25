@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 from datetime import datetime, timedelta, timezone
 import hashlib
+import inspect
 import json
 from pathlib import Path
 import stat
@@ -2169,6 +2170,67 @@ def test_pending_sigterm_during_popen_is_delivered_after_handle_publish(
         "reaped-published-handle",
         "mask-restored-finally",
     ]
+
+
+def test_sigterm_at_mask_restore_to_communicate_line_reaps_child(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Process:
+        def communicate(self, *, timeout):
+            pytest.fail(
+                f"SIGTERM at line boundary must precede communicate({timeout})"
+            )
+
+    process = Process()
+    monkeypatch.setattr(
+        query_module.subprocess,
+        "Popen",
+        lambda *_args, **_kwargs: process,
+    )
+    cleanup_calls: list[object] = []
+    monkeypatch.setattr(
+        query_module,
+        "_terminate_query_process_group",
+        lambda current: cleanup_calls.append(current),
+    )
+    source, start_line = inspect.getsourcelines(
+        query_module.run_query_child
+    )
+    communicate_line = start_line + next(
+        index
+        for index, line in enumerate(source)
+        if "stdout, stderr = process.communicate" in line
+    )
+    injected = False
+
+    def inject_at_boundary(frame, event, _arg):
+        nonlocal injected
+        if (
+            not injected
+            and frame.f_code is query_module.run_query_child.__code__
+            and event == "line"
+            and frame.f_lineno == communicate_line
+        ):
+            injected = True
+            query_module.os.kill(
+                query_module.os.getpid(),
+                query_module.signal.SIGTERM,
+            )
+        return inject_at_boundary
+
+    sys.settrace(inject_at_boundary)
+    try:
+        with pytest.raises(KeyboardInterrupt, match="received signal"):
+            query_module.run_query_child(
+                ["child"],
+                cwd=tmp_path,
+                timeout=11,
+            )
+    finally:
+        sys.settrace(None)
+    assert injected is True
+    assert cleanup_calls == [process]
 
 
 def test_query_bootstrap_explicitly_unmasks_control_signals(

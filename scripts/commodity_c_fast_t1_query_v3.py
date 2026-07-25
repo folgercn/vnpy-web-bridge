@@ -979,10 +979,6 @@ def run_query_child(
             ) from exc
         try:
             signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
-        except BaseException:
-            _terminate_query_process_group(process)
-            raise
-        try:
             stdout, stderr = process.communicate(timeout=timeout)
         except BaseException:
             _terminate_query_process_group(process)
