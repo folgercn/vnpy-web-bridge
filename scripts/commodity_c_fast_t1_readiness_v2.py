@@ -39,6 +39,7 @@ from commodity_c_fast_t1_one_shot import (
     open_custody_guard,
     parse_datetime,
     parse_json_bytes,
+    read_regular_file_at,
     read_regular_file_strict,
     read_root_owned_deployment_pin,
     validate_json_schema,
@@ -159,6 +160,13 @@ class ReadinessInputs:
     questdb_image_digest: str
 
 
+@dataclass(frozen=True)
+class VerifiedReadinessPacket:
+    payload: dict[str, Any]
+    raw_sha256: str
+    canonical_sha256: str
+
+
 def _hash_bytes(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
@@ -267,6 +275,41 @@ def _read_production_pins() -> ReadinessPins:
     )
     _validate_pins(pins)
     return pins
+
+
+def _reload_and_match_active_pins(
+    derived_pins: ReadinessPins,
+) -> tuple[ReadinessPins, Path]:
+    active_pins = _read_production_pins()
+    _validate_pins(active_pins)
+    try:
+        derived_custody = derived_pins.packet_custody_path.resolve(
+            strict=True
+        )
+        active_custody = active_pins.packet_custody_path.resolve(strict=True)
+    except OSError as exc:
+        raise ReadinessV2Error("packet custody cannot be resolved") from exc
+    if (
+        derived_pins.provenance_keyring_sha256
+        != active_pins.provenance_keyring_sha256
+        or derived_pins.t1_authority_keyring_sha256
+        != active_pins.t1_authority_keyring_sha256
+        or derived_pins.l3_authority_keyring_sha256
+        != active_pins.l3_authority_keyring_sha256
+        or derived_pins.outcome_keyring_sha256
+        != active_pins.outcome_keyring_sha256
+        or derived_custody != active_custody
+    ):
+        raise ReadinessV2Error(
+            "active readiness pins changed before protected use"
+        )
+    return active_pins, active_custody
+
+
+def verify_active_readiness_pins(derived_pins: ReadinessPins) -> None:
+    """Fail closed unless the derived pins still match the active pins."""
+    _validate_pins(derived_pins)
+    _reload_and_match_active_pins(derived_pins)
 
 
 def _validate_packet(packet: dict[str, Any]) -> None:
@@ -686,27 +729,7 @@ def write_packet_create_only(
         raise ReadinessV2Error(
             "readiness packet is not current at create-only write time"
         )
-    active_pins = _read_production_pins()
-    _validate_pins(active_pins)
-    try:
-        derived_custody = pins.packet_custody_path.resolve(strict=True)
-        active_custody = active_pins.packet_custody_path.resolve(strict=True)
-    except OSError as exc:
-        raise ReadinessV2Error("packet custody cannot be resolved") from exc
-    if (
-        pins.provenance_keyring_sha256
-        != active_pins.provenance_keyring_sha256
-        or pins.t1_authority_keyring_sha256
-        != active_pins.t1_authority_keyring_sha256
-        or pins.l3_authority_keyring_sha256
-        != active_pins.l3_authority_keyring_sha256
-        or pins.outcome_keyring_sha256
-        != active_pins.outcome_keyring_sha256
-        or derived_custody != active_custody
-    ):
-        raise ReadinessV2Error(
-            "active readiness pins changed before create-only write"
-        )
+    active_pins, active_custody = _reload_and_match_active_pins(pins)
     expected_name = f"{packet['packet_id']}.json"
     try:
         pinned = active_custody
@@ -758,6 +781,111 @@ def write_packet_create_only(
     except (OneShotError, FileExistsError) as exc:
         raise ReadinessV2Error(str(exc)) from exc
     return raw_sha256
+
+
+def verify_existing_readiness_packet(
+    inputs: ReadinessInputs,
+    pins: ReadinessPins,
+    packet_path: Path,
+    *,
+    now: datetime | None = None,
+    require_root_owned_parent: bool = True,
+) -> VerifiedReadinessPacket:
+    """Re-derive and validate one exact, current readiness packet."""
+    _validate_pins(pins)
+    active_pins, pinned = _reload_and_match_active_pins(pins)
+    current_time = _require_aware(
+        datetime.now(timezone.utc) if now is None else now,
+        "verification time",
+    )
+    try:
+        supplied_parent = packet_path.parent.resolve(strict=True)
+    except OSError as exc:
+        raise ReadinessV2Error("packet custody cannot be resolved") from exc
+    if supplied_parent != pinned:
+        raise ReadinessV2Error(
+            "readiness packet is outside the exact pinned custody"
+        )
+    try:
+        guard = open_custody_guard(
+            pinned,
+            require_root_owned_parent=require_root_owned_parent,
+        )
+        try:
+            raw = read_regular_file_at(
+                guard,
+                packet_path.name,
+                "existing T1 readiness v2 packet",
+            )
+        finally:
+            guard.close()
+        packet = parse_json_bytes(raw, "existing T1 readiness v2 packet")
+    except OneShotError as exc:
+        raise ReadinessV2Error(str(exc)) from exc
+    _validate_packet(packet)
+    if packet_path.name != f"{packet['packet_id']}.json":
+        raise ReadinessV2Error(
+            "readiness packet filename does not match packet ID"
+        )
+    if (
+        packet["packet_custody_path_sha256"]
+        != custody_path_sha256(pinned)
+        or packet["build_registry_provenance"][
+            "provenance_keyring_sha256"
+        ]
+        != active_pins.provenance_keyring_sha256
+        or packet["build_registry_provenance"][
+            "t1_authority_keyring_sha256"
+        ]
+        != active_pins.t1_authority_keyring_sha256
+        or packet["build_registry_provenance"][
+            "l3_authority_keyring_sha256"
+        ]
+        != active_pins.l3_authority_keyring_sha256
+        or packet["readonly_deployment_outcome"][
+            "outcome_keyring_sha256"
+        ]
+        != active_pins.outcome_keyring_sha256
+    ):
+        raise ReadinessV2Error(
+            "readiness packet does not match active pins and custody"
+        )
+    try:
+        generated_at = parse_datetime(packet["generated_at"], "generated_at")
+        expires_at = parse_datetime(packet["expires_at"], "expires_at")
+        outcome_issued_at = parse_datetime(
+            packet["readonly_deployment_outcome"]["outcome_issued_at"],
+            "outcome_issued_at",
+        )
+        deployment_ended_at = parse_datetime(
+            packet["readonly_deployment_outcome"]["deployment_ended_at"],
+            "deployment_ended_at",
+        )
+    except OneShotError as exc:
+        raise ReadinessV2Error(str(exc)) from exc
+    if not generated_at <= current_time < expires_at:
+        raise ReadinessV2Error("readiness packet is not currently active")
+    if (
+        current_time - outcome_issued_at > MAX_OUTCOME_AGE
+        or current_time - deployment_ended_at > MAX_OUTCOME_AGE
+    ):
+        raise ReadinessV2Error(
+            "deployment outcome is stale at readiness consumption"
+        )
+    regenerated = derive_readiness_packet(
+        inputs,
+        active_pins,
+        now=generated_at,
+    )
+    if regenerated != packet:
+        raise ReadinessV2Error(
+            "existing readiness packet is not the exact re-derived object"
+        )
+    return VerifiedReadinessPacket(
+        payload=packet,
+        raw_sha256=_hash_bytes(raw),
+        canonical_sha256=_hash_bytes(canonical_json(packet)),
+    )
 
 
 def inputs_from_args(args: argparse.Namespace) -> ReadinessInputs:
