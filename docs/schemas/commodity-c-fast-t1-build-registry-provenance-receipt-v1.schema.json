@@ -1,0 +1,241 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vnpy-web-bridge:schema:commodity-c-fast-t1-build-registry-provenance-receipt-v1",
+  "title": "C_FAST T1 build and registry provenance verification receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "status",
+    "provenance_id",
+    "verified_at",
+    "signed_provenance_raw_sha256",
+    "signed_provenance_canonical_sha256",
+    "content_attestation_raw_sha256",
+    "content_attestation_canonical_sha256",
+    "trusted_keyring_sha256",
+    "excluded_authority_keyring_sha256s",
+    "excluded_authority_public_key_sha256s",
+    "signer_key_id",
+    "signer_public_key_sha256",
+    "runtime_source_commit_sha",
+    "image_reference",
+    "image_digest",
+    "signed_build_assertion_verified",
+    "signed_registry_assertion_verified",
+    "external_facts_independently_reverified",
+    "receipt_is_authority",
+    "sensitive_material_present",
+    "authority_granted",
+    "readiness_authorized",
+    "ready_for_human_t1_release_signature_only",
+    "network_authorized",
+    "network_query_authorized",
+    "readonly_production_query_authorized",
+    "production_query_authorized",
+    "write_probe_authorized",
+    "database_mutation_authorized",
+    "deployment_mutation_authorized",
+    "collection_authorized",
+    "execution_quality_collection_authorized",
+    "runtime_activation_authorized",
+    "order_authorized",
+    "order_submission_authorized",
+    "position_mutation_authorized",
+    "dispatch_authorized",
+    "replacement_authorized",
+    "production_authorized",
+    "dynamic_selection_allowed",
+    "automatic_promotion_authorized",
+    "t1_executed",
+    "production_queried",
+    "database_mutations",
+    "orders_sent",
+    "positions_modified",
+    "dispatch_changed"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "commodity_c_fast_t1_build_registry_provenance_receipt_v1"
+    },
+    "status": {
+      "const": "SIGNED_BUILD_REGISTRY_ASSERTIONS_VERIFIED_NO_RUNTIME_AUTHORITY"
+    },
+    "provenance_id": {
+      "$ref": "#/$defs/id"
+    },
+    "verified_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "signed_provenance_raw_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "signed_provenance_canonical_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "content_attestation_raw_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "content_attestation_canonical_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "trusted_keyring_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "excluded_authority_keyring_sha256s": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "t1_release_keyring_sha256",
+        "l3_release_keyring_sha256"
+      ],
+      "properties": {
+        "t1_release_keyring_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "l3_release_keyring_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "excluded_authority_public_key_sha256s": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 128,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/sha256"
+      }
+    },
+    "signer_key_id": {
+      "$ref": "#/$defs/id"
+    },
+    "signer_public_key_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "runtime_source_commit_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "image_reference": {
+      "type": "string",
+      "pattern": "^[^@\\s]+@sha256:[0-9a-f]{64}$"
+    },
+    "image_digest": {
+      "$ref": "#/$defs/ociDigest"
+    },
+    "signed_build_assertion_verified": {
+      "const": true
+    },
+    "signed_registry_assertion_verified": {
+      "const": true
+    },
+    "external_facts_independently_reverified": {
+      "const": false
+    },
+    "receipt_is_authority": {
+      "const": false
+    },
+    "sensitive_material_present": {
+      "const": false
+    },
+    "authority_granted": {
+      "const": false
+    },
+    "readiness_authorized": {
+      "const": false
+    },
+    "ready_for_human_t1_release_signature_only": {
+      "const": false
+    },
+    "network_authorized": {
+      "const": false
+    },
+    "network_query_authorized": {
+      "const": false
+    },
+    "readonly_production_query_authorized": {
+      "const": false
+    },
+    "production_query_authorized": {
+      "const": false
+    },
+    "write_probe_authorized": {
+      "const": false
+    },
+    "database_mutation_authorized": {
+      "const": false
+    },
+    "deployment_mutation_authorized": {
+      "const": false
+    },
+    "collection_authorized": {
+      "const": false
+    },
+    "execution_quality_collection_authorized": {
+      "const": false
+    },
+    "runtime_activation_authorized": {
+      "const": false
+    },
+    "order_authorized": {
+      "const": false
+    },
+    "order_submission_authorized": {
+      "const": false
+    },
+    "position_mutation_authorized": {
+      "const": false
+    },
+    "dispatch_authorized": {
+      "const": false
+    },
+    "replacement_authorized": {
+      "const": false
+    },
+    "production_authorized": {
+      "const": false
+    },
+    "dynamic_selection_allowed": {
+      "const": false
+    },
+    "automatic_promotion_authorized": {
+      "const": false
+    },
+    "t1_executed": {
+      "const": false
+    },
+    "production_queried": {
+      "const": false
+    },
+    "database_mutations": {
+      "const": 0
+    },
+    "orders_sent": {
+      "const": 0
+    },
+    "positions_modified": {
+      "const": 0
+    },
+    "dispatch_changed": {
+      "const": false
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 8,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._-]+$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "ociDigest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    }
+  }
+}
