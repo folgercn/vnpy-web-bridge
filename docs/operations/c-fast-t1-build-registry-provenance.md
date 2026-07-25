@@ -187,7 +187,10 @@ PYTHONPATH=scripts .venv/bin/python \
 verifier 使用 strict JSON parser，拒绝 duplicate key、NaN/Infinity、symlink、
 超限输入、读取期间发生的替换、extra fields、错误签名、错误 pin、任一
 exact-byte/canonical/digest/time 绑定不一致和任何 authority=true。receipt
-同样采用 create-only 写入且没有 authority。
+同样采用 create-only 写入且没有 authority。receipt 中的
+`signer_public_key_sha256` 是本次实际完成 Ed25519 验签的 32-byte raw public
+key 的 SHA256；它与 `signer_key_id`、`trusted_keyring_sha256` 一起保留精确的
+签名者身份事实，不从 provenance 的声明字段复制。
 
 ## 后续顺序
 

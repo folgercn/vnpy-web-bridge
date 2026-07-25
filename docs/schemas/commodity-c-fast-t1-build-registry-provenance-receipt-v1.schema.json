@@ -17,6 +17,7 @@
     "excluded_authority_keyring_sha256s",
     "excluded_authority_public_key_sha256s",
     "signer_key_id",
+    "signer_public_key_sha256",
     "runtime_source_commit_sha",
     "image_reference",
     "image_digest",
@@ -109,6 +110,9 @@
     },
     "signer_key_id": {
       "$ref": "#/$defs/id"
+    },
+    "signer_public_key_sha256": {
+      "$ref": "#/$defs/sha256"
     },
     "runtime_source_commit_sha": {
       "type": "string",

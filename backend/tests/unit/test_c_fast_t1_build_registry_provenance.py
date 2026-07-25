@@ -430,6 +430,7 @@ def verify_fixture(
 def test_signed_provenance_binds_content_build_registry_and_no_authority(
     tmp_path: Path,
 ) -> None:
+    provenance_key = Ed25519PrivateKey.generate()
     (
         signed,
         provenance_path,
@@ -437,7 +438,7 @@ def test_signed_provenance_binds_content_build_registry_and_no_authority(
         keyring_sha256,
         content_path,
         excluded,
-    ) = sign_fixture(tmp_path)
+    ) = sign_fixture(tmp_path, provenance_key=provenance_key)
 
     receipt = verify_fixture(
         provenance_path,
@@ -460,6 +461,9 @@ def test_signed_provenance_binds_content_build_registry_and_no_authority(
     )
     assert receipt["excluded_authority_public_key_sha256s"] == (
         signed["excluded_authority_public_key_sha256s"]
+    )
+    assert receipt["signer_public_key_sha256"] == public_key_sha256(
+        provenance_key
     )
     assert all(
         receipt[field] is False
@@ -485,6 +489,68 @@ def test_signed_provenance_binds_content_build_registry_and_no_authority(
                 ).iter_errors(payload)
             )
             == []
+        )
+
+
+def test_receipt_schema_rejects_forged_signer_public_key_hash(
+    tmp_path: Path,
+) -> None:
+    (
+        _signed,
+        provenance_path,
+        keyring_path,
+        keyring_sha256,
+        content_path,
+        excluded,
+    ) = sign_fixture(tmp_path)
+    receipt = verify_fixture(
+        provenance_path,
+        keyring_path,
+        keyring_sha256,
+        content_path,
+        excluded,
+    )
+    forged = dict(receipt)
+    forged["signer_public_key_sha256"] = "FORGED"
+
+    with pytest.raises(
+        subject.BuildRegistryProvenanceError,
+        match="schema validation failed",
+    ):
+        subject._validate_schema(
+            forged,
+            subject.RECEIPT_SCHEMA_PATH,
+            "forged receipt",
+        )
+
+
+def test_forged_signer_keyring_cannot_produce_receipt(
+    tmp_path: Path,
+) -> None:
+    (
+        _signed,
+        provenance_path,
+        keyring_path,
+        _keyring_sha256,
+        content_path,
+        excluded,
+    ) = sign_fixture(tmp_path)
+    forged_keyring = keyring_for(Ed25519PrivateKey.generate())
+    write_json(keyring_path, forged_keyring)
+    forged_keyring_sha256 = hashlib.sha256(
+        canonical_bytes(forged_keyring)
+    ).hexdigest()
+
+    with pytest.raises(
+        subject.BuildRegistryProvenanceError,
+        match="provenance trusted keyring binding mismatch",
+    ):
+        verify_fixture(
+            provenance_path,
+            keyring_path,
+            forged_keyring_sha256,
+            content_path,
+            excluded,
         )
 
 

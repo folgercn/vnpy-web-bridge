@@ -756,6 +756,7 @@ def verify_provenance(
         keyring,
         str(provenance["signer_key_id"]),
     )
+    signer_public_key_sha256 = _hash_bytes(public_key.public_bytes_raw())
     _validate_signer_independence(
         provenance,
         public_key,
@@ -809,6 +810,7 @@ def verify_provenance(
             provenance["excluded_authority_public_key_sha256s"]
         ),
         "signer_key_id": provenance["signer_key_id"],
+        "signer_public_key_sha256": signer_public_key_sha256,
         "runtime_source_commit_sha": (
             provenance["runtime_source_commit_sha"]
         ),
