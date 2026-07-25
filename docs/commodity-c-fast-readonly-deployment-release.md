@@ -115,7 +115,15 @@ consume marker 时固定报
 也 fail closed。复制 release 到另一 custody 会因为 root pin、path hash 和
 identity hash 不一致而失败。TTL 最长两小时，单次变更时间最多 1,800 秒，只允许
 一次 restart。签署、验证和 consume 的运行时 `now` 必须携带明确 timezone；
-naive datetime 一律 fail closed，不能隐式套用控制机本地时区。
+naive datetime 一律 fail closed，不能隐式套用控制机本地时区。同时强制：
+
+```text
+max_deployment_seconds <= expires_at - not_before
+rollback_deadline_seconds <= max_deployment_seconds
+consume 时 expires_at - now >= max_deployment_seconds
+```
+
+因此不能用只剩几十秒的 release 声称仍有完整的部署或回滚预算。
 
 ## exact evidence bundle
 
@@ -137,10 +145,38 @@ index：
 11. isolated network attestation；
 12. exact deployment plan。
 
+这十二个 object 不再只做哈希绑定。签署和 consume 都会重新读取原始 bytes，
+执行 exact-field validator、目标/source/identity 交叉绑定和时间检查。八个部署
+专用合同固定如下：
+
+| 文件 | schema version | 强制语义 |
+|---|---|---|
+| writer pre | `commodity_c_fast_readonly_writer_continuity_pre_evidence_v1` | 一小时内采集、target/source、writer identity/commit/lag/queue、`HEALTHY` |
+| writer post contract | `commodity_c_fast_readonly_writer_continuity_post_contract_v1` | 绑定 writer-pre raw SHA256、同一 writer identity、60 秒 lag、10,000 queue delta 和固定失败条件 |
+| health | `commodity_c_fast_readonly_health_pre_evidence_v1` | 一小时内 HTTP health 采集、200/`HEALTHY`、120 秒 post-restart 恢复阈值 |
+| backlog | `commodity_c_fast_readonly_backlog_pre_evidence_v1` | 一小时内 writer backlog 采集、无 corrupt spool/drop、post-restart 必须 drain 到 0 |
+| rollback | `commodity_c_fast_readonly_rollback_plan_v1` | deadline 等于 release、固定 trigger/steps，不在本 release 中暗授第二次 restart |
+| root pin | `commodity_c_fast_readonly_root_pin_identity_attestation_v1` | 固定 pin-root path hash、root:root、0755、directory/non-symlink、`lstat` |
+| custody | `commodity_c_fast_readonly_custody_path_identity_attestation_v1` | path/identity hash、verifier owner、0700、directory/non-symlink、`lstat` |
+| deployment plan | `commodity_c_fast_readonly_exact_deployment_plan_v1` | 精确 image/target/principal/secret/network、一次 restart、固定步骤/失败条件/禁止能力 |
+
+pre evidence 和各 plan/contract 的 `captured_at` 或 `frozen_at` 必须落在
+`issued_at` 前一小时内，避免陈旧准备材料被重新包装进新 release。
+
+所有十二个 object 都必须显式包含
+`secret_content_included=false`。validator 还会递归拒绝 PostgreSQL DSN、
+password/token 赋值和 private-key marker；extra field 也因 exact-field
+合同失败。因此 signer 不会把通用 `{}`、调试 DSN 或凭证明文当成有效 evidence
+读取后签入归档。
+
 `writer_continuity_post_evidence` 在授权前冻结的是 post-check 的 exact
 接受合同、基线和采集办法，不得伪称已经发生的生产 post outcome。真实 restart
 后的 writer continuity、health 和 backlog outcome 仍必须在 L3 变更窗口中另行
-create-only 归档；不满足时按已绑定 rollback plan 回滚。
+create-only 归档；不满足时按已绑定 rollback plan 停止。由于本 release 只允许
+一次部署 restart，rollback plan 明确
+`rollback_restart_authorized=false` 和
+`requires_separate_rollback_restart_release=true`，不得借“回滚”名义隐式执行
+第二次 restart。
 
 image attestation 是外部事实的 exact raw bytes；verifier 不把容器内 CLI 参数
 比较描述为供应链证明。attestation 使用
@@ -183,7 +219,8 @@ isolated network attestation 必须只有以下 exact fields：
   "unexpected_member_identity_sha256s": [],
   "docker_socket_connectivity": false,
   "rpc_connectivity": false,
-  "trading_connectivity": false
+  "trading_connectivity": false,
+  "secret_content_included": false
 }
 ```
 

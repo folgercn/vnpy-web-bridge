@@ -99,11 +99,30 @@ def build_fixture(tmp_path: Path) -> Fixture:
         release_module.canonical_json(keyring)
     ).hexdigest()
 
+    custody_dir = tmp_path / "custody"
+    custody_dir.mkdir(mode=0o700)
+    custody_identity = {
+        "schema_version": (
+            "commodity_c_fast_readonly_deployment_custody_identity_v1"
+        ),
+        "custody_id": "c-fast-readonly-deployment-custody-a01",
+    }
+    write_json(
+        custody_dir
+        / release_module.CUSTODY_IDENTITY_FILENAME,
+        custody_identity,
+    )
+    custody_identity_sha256 = hashlib.sha256(
+        release_module.canonical_json(custody_identity)
+    ).hexdigest()
+    custody_path_sha256 = t1_module.custody_path_sha256(custody_dir)
+    evidence_captured_at = (NOW - timedelta(minutes=10)).isoformat()
+
     evidence_values: dict[str, dict] = {
         name: {
             "schema_version": f"test_{name}_v1",
             "artifact_id": f"{name}-a01",
-            "secret_value_included": False,
+            "secret_content_included": False,
         }
         for name, _field in release_module.EVIDENCE_FILE_FIELDS
     }
@@ -121,6 +140,7 @@ def build_fixture(tmp_path: Path) -> Fixture:
         "questdb_target_identity_sha256": "c" * 64,
         "questdb_build_sha256": "d" * 64,
         "external_verification_asserted": True,
+        "secret_content_included": False,
     }
     evidence_values[
         "readonly_principal_identity_attestation"
@@ -135,6 +155,7 @@ def build_fixture(tmp_path: Path) -> Fixture:
         "principal_differs_from_admin": True,
         "principal_name_included": False,
         "secret_included": False,
+        "secret_content_included": False,
     }
     evidence_values["secret_file_identity_attestation"] = {
         "schema_version": (
@@ -173,6 +194,141 @@ def build_fixture(tmp_path: Path) -> Fixture:
         "docker_socket_connectivity": False,
         "rpc_connectivity": False,
         "trading_connectivity": False,
+        "secret_content_included": False,
+    }
+    evidence_values["writer_continuity_pre_evidence"] = {
+        "schema_version": (
+            release_module.WRITER_CONTINUITY_PRE_EVIDENCE_VERSION
+        ),
+        "evidence_id": "writer-continuity-pre-evidence-a01",
+        "contract_source_commit_sha": SOURCE_COMMIT_SHA,
+        "questdb_target_identity_sha256": "c" * 64,
+        "captured_at": evidence_captured_at,
+        "capture_method": "questdb_writer_pre_restart_snapshot_v1",
+        "writer_identity_sha256": "4" * 64,
+        "writer_last_commit_id_sha256": "5" * 64,
+        "writer_last_commit_lag_seconds": 1,
+        "writer_queue_depth": 0,
+        "writer_state": "HEALTHY",
+        "secret_content_included": False,
+    }
+    writer_pre_raw_sha256 = hashlib.sha256(
+        release_module.canonical_json(
+            evidence_values["writer_continuity_pre_evidence"]
+        )
+    ).hexdigest()
+    evidence_values["writer_continuity_post_evidence"] = {
+        "schema_version": (
+            release_module.WRITER_CONTINUITY_POST_CONTRACT_VERSION
+        ),
+        "contract_id": "writer-continuity-post-contract-a01",
+        "contract_source_commit_sha": SOURCE_COMMIT_SHA,
+        "questdb_target_identity_sha256": "c" * 64,
+        "frozen_at": evidence_captured_at,
+        "evaluation_method": (
+            "same_writer_identity_and_non_regressing_commit_v1"
+        ),
+        "writer_continuity_pre_evidence_raw_sha256": (
+            writer_pre_raw_sha256
+        ),
+        "expected_writer_identity_sha256": "4" * 64,
+        "max_commit_lag_seconds": 60,
+        "max_queue_depth_delta": 10_000,
+        "required_writer_state": "HEALTHY",
+        "failure_conditions": list(
+            release_module.WRITER_FAILURE_CONDITIONS
+        ),
+        "secret_content_included": False,
+    }
+    evidence_values["health_evidence"] = {
+        "schema_version": release_module.HEALTH_EVIDENCE_VERSION,
+        "evidence_id": "questdb-health-pre-evidence-a01",
+        "contract_source_commit_sha": SOURCE_COMMIT_SHA,
+        "questdb_target_identity_sha256": "c" * 64,
+        "captured_at": evidence_captured_at,
+        "capture_method": "questdb_http_health_pre_restart_v1",
+        "health_state": "HEALTHY",
+        "http_status_code": 200,
+        "max_post_restart_recovery_seconds": 120,
+        "secret_content_included": False,
+    }
+    evidence_values["backlog_evidence"] = {
+        "schema_version": release_module.BACKLOG_EVIDENCE_VERSION,
+        "evidence_id": "tick-writer-backlog-pre-evidence-a01",
+        "contract_source_commit_sha": SOURCE_COMMIT_SHA,
+        "questdb_target_identity_sha256": "c" * 64,
+        "captured_at": evidence_captured_at,
+        "capture_method": "tick_writer_backlog_pre_restart_snapshot_v1",
+        "pending_rows": 0,
+        "corrupt_spool_files": 0,
+        "dropped_total": 0,
+        "required_post_restart_pending_rows": 0,
+        "secret_content_included": False,
+    }
+    evidence_values["rollback_plan"] = {
+        "schema_version": release_module.ROLLBACK_PLAN_VERSION,
+        "plan_id": "c-fast-readonly-rollback-plan-a01",
+        "contract_source_commit_sha": SOURCE_COMMIT_SHA,
+        "questdb_target_identity_sha256": "c" * 64,
+        "frozen_at": evidence_captured_at,
+        "rollback_deadline_seconds": 900,
+        "trigger_conditions": list(
+            release_module.ROLLBACK_TRIGGER_CONDITIONS
+        ),
+        "steps": list(release_module.ROLLBACK_STEPS),
+        "rollback_restart_authorized": False,
+        "requires_separate_rollback_restart_release": True,
+        "secret_content_included": False,
+    }
+    evidence_values["root_pin_identity_attestation"] = {
+        "schema_version": release_module.ROOT_PIN_IDENTITY_VERSION,
+        "attestation_id": "root-pin-identity-attestation-a01",
+        "pin_root_path_sha256": release_module.pin_root_path_sha256(),
+        "captured_at": evidence_captured_at,
+        "capture_method": "lstat_no_follow_v1",
+        "owner_uid": 0,
+        "owner_gid": 0,
+        "mode": "0755",
+        "directory": True,
+        "symlink": False,
+        "secret_content_included": False,
+    }
+    evidence_values["custody_path_identity_attestation"] = {
+        "schema_version": release_module.CUSTODY_PATH_IDENTITY_VERSION,
+        "attestation_id": "custody-path-identity-attestation-a01",
+        "custody_path_sha256": custody_path_sha256,
+        "custody_identity_sha256": custody_identity_sha256,
+        "captured_at": evidence_captured_at,
+        "capture_method": "lstat_no_follow_v1",
+        "owner_matches_verifier_uid": True,
+        "mode": "0700",
+        "directory": True,
+        "symlink": False,
+        "secret_content_included": False,
+    }
+    evidence_values["deployment_plan"] = {
+        "schema_version": release_module.DEPLOYMENT_PLAN_VERSION,
+        "plan_id": "c-fast-readonly-deployment-plan-a01",
+        "contract_source_commit_sha": SOURCE_COMMIT_SHA,
+        "questdb_target_identity_sha256": "c" * 64,
+        "questdb_image_digest": QUESTDB_IMAGE_DIGEST,
+        "readonly_principal_identity_sha256": (
+            principal_identity_sha256
+        ),
+        "secret_file_path_sha256": secret_file_path_sha256,
+        "isolated_network_identity_sha256": (
+            isolated_network_identity_sha256
+        ),
+        "frozen_at": evidence_captured_at,
+        "allowed_restart_count": 1,
+        "steps": list(release_module.DEPLOYMENT_STEPS),
+        "failure_conditions": list(
+            release_module.DEPLOYMENT_FAILURE_CONDITIONS
+        ),
+        "forbidden_capabilities": list(
+            release_module.DEPLOYMENT_FORBIDDEN_CAPABILITIES
+        ),
+        "secret_content_included": False,
     }
     evidence_files = {
         name: write_json(tmp_path / f"{name}.json", payload)
@@ -187,23 +343,6 @@ def build_fixture(tmp_path: Path) -> Fixture:
     }
     evidence_bundle_index = hashlib.sha256(
         release_module.canonical_json(evidence_hashes)
-    ).hexdigest()
-
-    custody_dir = tmp_path / "custody"
-    custody_dir.mkdir(mode=0o700)
-    custody_identity = {
-        "schema_version": (
-            "commodity_c_fast_readonly_deployment_custody_identity_v1"
-        ),
-        "custody_id": "c-fast-readonly-deployment-custody-a01",
-    }
-    write_json(
-        custody_dir
-        / release_module.CUSTODY_IDENTITY_FILENAME,
-        custody_identity,
-    )
-    custody_identity_sha256 = hashlib.sha256(
-        release_module.canonical_json(custody_identity)
     ).hexdigest()
 
     release_id = "c-fast-readonly-deployment-release-a01"
@@ -629,6 +768,187 @@ def test_attestation_content_must_match_signed_expectations(
         )
 
 
+@pytest.mark.parametrize(
+    "evidence_name",
+    [
+        "writer_continuity_pre_evidence",
+        "writer_continuity_post_evidence",
+        "health_evidence",
+        "backlog_evidence",
+        "rollback_plan",
+        "root_pin_identity_attestation",
+        "custody_path_identity_attestation",
+        "deployment_plan",
+    ],
+)
+def test_required_deployment_evidence_cannot_be_empty_object(
+    tmp_path: Path,
+    evidence_name: str,
+) -> None:
+    fixture = build_fixture(tmp_path)
+    write_json(
+        fixture.evidence_paths.as_dict()[evidence_name],
+        {},
+    )
+
+    with pytest.raises(
+        release_module.DeploymentReleaseError,
+        match="secret_content_included=false",
+    ):
+        signer_module.sign_release(
+            draft_with_current_evidence(fixture),
+            fixture.private_key,
+            fixture.evidence_paths,
+            fixture.keyring_path,
+            expected_keyring_sha256=fixture.keyring_sha256,
+            source_commit_sha=SOURCE_COMMIT_SHA,
+            questdb_image_digest=QUESTDB_IMAGE_DIGEST,
+            now=NOW,
+        )
+
+
+@pytest.mark.parametrize(
+    ("evidence_name", "field", "value", "message"),
+    [
+        (
+            "writer_continuity_pre_evidence",
+            "writer_state",
+            "UNKNOWN",
+            "writer continuity pre evidence bindings",
+        ),
+        (
+            "writer_continuity_pre_evidence",
+            "writer_last_commit_lag_seconds",
+            61,
+            "writer continuity post contract bindings",
+        ),
+        (
+            "writer_continuity_post_evidence",
+            "writer_continuity_pre_evidence_raw_sha256",
+            "f" * 64,
+            "writer continuity post contract bindings",
+        ),
+        (
+            "health_evidence",
+            "http_status_code",
+            500,
+            "health evidence bindings",
+        ),
+        (
+            "backlog_evidence",
+            "corrupt_spool_files",
+            1,
+            "backlog evidence bindings",
+        ),
+        (
+            "rollback_plan",
+            "rollback_deadline_seconds",
+            899,
+            "rollback plan bindings",
+        ),
+        (
+            "root_pin_identity_attestation",
+            "mode",
+            "0777",
+            "root pin identity attestation bindings",
+        ),
+        (
+            "custody_path_identity_attestation",
+            "symlink",
+            True,
+            "custody path identity attestation bindings",
+        ),
+        (
+            "deployment_plan",
+            "steps",
+            ["restart_questdb_without_checks"],
+            "exact deployment plan bindings",
+        ),
+    ],
+)
+def test_deployment_evidence_semantics_fail_closed(
+    tmp_path: Path,
+    evidence_name: str,
+    field: str,
+    value: object,
+    message: str,
+) -> None:
+    fixture = build_fixture(tmp_path)
+    path = fixture.evidence_paths.as_dict()[evidence_name]
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload[field] = value
+    write_json(path, payload)
+
+    with pytest.raises(
+        release_module.DeploymentReleaseError,
+        match=message,
+    ):
+        signer_module.sign_release(
+            draft_with_current_evidence(fixture),
+            fixture.private_key,
+            fixture.evidence_paths,
+            fixture.keyring_path,
+            expected_keyring_sha256=fixture.keyring_sha256,
+            source_commit_sha=SOURCE_COMMIT_SHA,
+            questdb_image_digest=QUESTDB_IMAGE_DIGEST,
+            now=NOW,
+        )
+
+
+def test_all_evidence_contracts_reject_sensitive_material(
+    tmp_path: Path,
+) -> None:
+    fixture = build_fixture(tmp_path)
+    path = fixture.evidence_paths.health_evidence
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["debug_connection"] = (
+        "postgresql://readonly-user:secret@example.invalid/qdb"
+    )
+    write_json(path, payload)
+
+    with pytest.raises(
+        release_module.DeploymentReleaseError,
+        match="forbidden sensitive material",
+    ):
+        signer_module.sign_release(
+            draft_with_current_evidence(fixture),
+            fixture.private_key,
+            fixture.evidence_paths,
+            fixture.keyring_path,
+            expected_keyring_sha256=fixture.keyring_sha256,
+            source_commit_sha=SOURCE_COMMIT_SHA,
+            questdb_image_digest=QUESTDB_IMAGE_DIGEST,
+            now=NOW,
+        )
+
+
+def test_stale_evidence_is_rejected(
+    tmp_path: Path,
+) -> None:
+    fixture = build_fixture(tmp_path)
+    path = fixture.evidence_paths.health_evidence
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["captured_at"] = (
+        NOW - timedelta(hours=2)
+    ).isoformat()
+    write_json(path, payload)
+
+    with pytest.raises(
+        release_module.DeploymentReleaseError,
+        match="within one hour before issued_at",
+    ):
+        signer_module.sign_release(
+            draft_with_current_evidence(fixture),
+            fixture.private_key,
+            fixture.evidence_paths,
+            fixture.keyring_path,
+            expected_keyring_sha256=fixture.keyring_sha256,
+            source_commit_sha=SOURCE_COMMIT_SHA,
+            questdb_image_digest=QUESTDB_IMAGE_DIGEST,
+            now=NOW,
+        )
+
+
 def test_image_attestation_uses_contract_source_name(
     tmp_path: Path,
 ) -> None:
@@ -867,4 +1187,73 @@ def test_expired_release_and_forbidden_capability_fail_closed(
             source_commit_sha=SOURCE_COMMIT_SHA,
             questdb_image_digest=QUESTDB_IMAGE_DIGEST,
             now=NOW,
+        )
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        (
+            {
+                "not_before": (NOW - timedelta(minutes=1)).isoformat(),
+                "expires_at": (NOW + timedelta(minutes=10)).isoformat(),
+                "max_deployment_seconds": 1800,
+            },
+            "max_deployment_seconds exceeds the signed active window",
+        ),
+        (
+            {
+                "max_deployment_seconds": 600,
+                "rollback_deadline_seconds": 900,
+            },
+            "rollback_deadline_seconds exceeds max_deployment_seconds",
+        ),
+    ],
+)
+def test_deployment_and_rollback_budgets_fit_signed_window(
+    tmp_path: Path,
+    overrides: dict[str, object],
+    message: str,
+) -> None:
+    fixture = build_fixture(tmp_path)
+    draft = {**fixture.draft, **overrides}
+
+    with pytest.raises(
+        release_module.DeploymentReleaseError,
+        match=message,
+    ):
+        signer_module.sign_release(
+            draft,
+            fixture.private_key,
+            fixture.evidence_paths,
+            fixture.keyring_path,
+            expected_keyring_sha256=fixture.keyring_sha256,
+            source_commit_sha=SOURCE_COMMIT_SHA,
+            questdb_image_digest=QUESTDB_IMAGE_DIGEST,
+            now=NOW,
+        )
+
+
+def test_consume_requires_remaining_window_for_full_deployment_budget(
+    tmp_path: Path,
+) -> None:
+    fixture = build_fixture(tmp_path)
+    signed = sign_fixture(fixture)
+    release_path = write_json(
+        tmp_path / "signed-release.json",
+        signed,
+    )
+
+    with pytest.raises(
+        release_module.DeploymentReleaseError,
+        match="remaining release window",
+    ):
+        release_module.verify_release(
+            release_path,
+            fixture.keyring_path,
+            fixture.evidence_paths,
+            source_commit_sha=SOURCE_COMMIT_SHA,
+            questdb_image_digest=QUESTDB_IMAGE_DIGEST,
+            pinned_keyring_sha256=fixture.keyring_sha256,
+            now=NOW + timedelta(seconds=1),
         )

@@ -75,13 +75,94 @@ CUSTODY_IDENTITY_VERSION = (
 ISOLATED_NETWORK_ATTESTATION_VERSION = (
     "commodity_c_fast_readonly_isolated_network_attestation_v1"
 )
+WRITER_CONTINUITY_PRE_EVIDENCE_VERSION = (
+    "commodity_c_fast_readonly_writer_continuity_pre_evidence_v1"
+)
+WRITER_CONTINUITY_POST_CONTRACT_VERSION = (
+    "commodity_c_fast_readonly_writer_continuity_post_contract_v1"
+)
+HEALTH_EVIDENCE_VERSION = (
+    "commodity_c_fast_readonly_health_pre_evidence_v1"
+)
+BACKLOG_EVIDENCE_VERSION = (
+    "commodity_c_fast_readonly_backlog_pre_evidence_v1"
+)
+ROLLBACK_PLAN_VERSION = (
+    "commodity_c_fast_readonly_rollback_plan_v1"
+)
+ROOT_PIN_IDENTITY_VERSION = (
+    "commodity_c_fast_readonly_root_pin_identity_attestation_v1"
+)
+CUSTODY_PATH_IDENTITY_VERSION = (
+    "commodity_c_fast_readonly_custody_path_identity_attestation_v1"
+)
+DEPLOYMENT_PLAN_VERSION = (
+    "commodity_c_fast_readonly_exact_deployment_plan_v1"
+)
 CUSTODY_IDENTITY_FILENAME = "readonly-deployment-custody-identity.json"
 MAX_RELEASE_TTL = timedelta(hours=2)
+MAX_EVIDENCE_AGE = timedelta(hours=1)
 MAX_EVIDENCE_BYTES = 8 * 1024 * 1024
 MAX_JSON_BYTES = 2 * 1024 * 1024
 ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{8,128}$")
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 IMAGE_DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
+SENSITIVE_VALUE_MARKERS = (
+    "postgresql://",
+    "postgres://",
+    "password=",
+    "passwd=",
+    "token=",
+    "-----begin private key-----",
+    "-----begin encrypted private key-----",
+    "-----begin rsa private key-----",
+    "-----begin ec private key-----",
+    "-----begin openssh private key-----",
+)
+WRITER_FAILURE_CONDITIONS = [
+    "writer_identity_changed",
+    "writer_state_not_healthy",
+    "commit_lag_threshold_exceeded",
+    "queue_depth_delta_threshold_exceeded",
+]
+ROLLBACK_TRIGGER_CONDITIONS = [
+    "questdb_restart_failed",
+    "writer_continuity_failed",
+    "post_restart_health_failed",
+    "backlog_drain_failed",
+]
+ROLLBACK_STEPS = [
+    "stop_without_starting_readonly_runner",
+    "remove_unactivated_readonly_secret_file",
+    "restore_predeployment_questdb_configuration",
+    "halt_and_require_separate_rollback_restart_authority",
+]
+DEPLOYMENT_STEPS = [
+    "validate_exact_predeployment_evidence_bundle",
+    "install_dedicated_readonly_principal_configuration",
+    "install_dedicated_readonly_secret_file",
+    "restart_existing_questdb_once",
+    "capture_post_restart_outcome_without_query",
+    "halt_without_activating_readonly_runner",
+]
+DEPLOYMENT_FAILURE_CONDITIONS = [
+    "evidence_binding_failed",
+    "principal_or_secret_identity_mismatch",
+    "restart_count_exceeded",
+    "writer_continuity_failed",
+    "health_or_backlog_failed",
+]
+DEPLOYMENT_FORBIDDEN_CAPABILITIES = [
+    "production_query",
+    "readonly_query",
+    "collection",
+    "database_mutation",
+    "order",
+    "position_mutation",
+    "dispatch",
+    "trading",
+    "strategy_activation",
+]
 
 RELEASE_REQUIRED_TRUE_FIELDS = (
     "secret_file_regular_file_required",
@@ -485,6 +566,27 @@ def validate_release_semantics(
             raise DeploymentReleaseError(
                 f"{field} must be an integer JSON literal"
             )
+    active_window_seconds = int(
+        (expires_at - not_before).total_seconds()
+    )
+    remaining_window_seconds = int(
+        (expires_at - normalized_now).total_seconds()
+    )
+    if payload["max_deployment_seconds"] > active_window_seconds:
+        raise DeploymentReleaseError(
+            "max_deployment_seconds exceeds the signed active window"
+        )
+    if (
+        payload["rollback_deadline_seconds"]
+        > payload["max_deployment_seconds"]
+    ):
+        raise DeploymentReleaseError(
+            "rollback_deadline_seconds exceeds max_deployment_seconds"
+        )
+    if payload["max_deployment_seconds"] > remaining_window_seconds:
+        raise DeploymentReleaseError(
+            "remaining release window cannot cover max_deployment_seconds"
+        )
 
     if any(
         payload[field] is not True
@@ -552,7 +654,7 @@ def verify_evidence_bundle(
         raise DeploymentReleaseError(
             "evidence bundle index does not match release"
         )
-    validate_identity_attestations(release, evidence_payloads)
+    validate_evidence_contracts(release, evidence_payloads)
     return actual_hashes, bundle_index
 
 
@@ -567,10 +669,72 @@ def _require_exact_fields(
         )
 
 
-def validate_identity_attestations(
+def _require_evidence_id(
+    payload: dict[str, Any],
+    field: str,
+    label: str,
+) -> None:
+    if ID_PATTERN.fullmatch(str(payload[field])) is None:
+        raise DeploymentReleaseError(f"{label} {field} is invalid")
+
+
+def _require_sha256_value(
+    value: Any,
+    label: str,
+) -> None:
+    if (
+        not isinstance(value, str)
+        or SHA256_PATTERN.fullmatch(value) is None
+    ):
+        raise DeploymentReleaseError(f"{label} SHA256 is invalid")
+
+
+def _validate_evidence_timestamp(
+    release: dict[str, Any],
+    value: Any,
+    label: str,
+) -> None:
+    captured_at = _parse_time(value, label)
+    issued_at = _parse_time(release["issued_at"], "issued_at")
+    if not issued_at - MAX_EVIDENCE_AGE <= captured_at <= issued_at:
+        raise DeploymentReleaseError(
+            f"{label} must be within one hour before issued_at"
+        )
+
+
+def _contains_sensitive_value(value: Any) -> bool:
+    if isinstance(value, dict):
+        return any(
+            _contains_sensitive_value(item)
+            for item in value.values()
+        )
+    if isinstance(value, list):
+        return any(_contains_sensitive_value(item) for item in value)
+    if not isinstance(value, str):
+        return False
+    lowered = value.lower()
+    return any(marker in lowered for marker in SENSITIVE_VALUE_MARKERS)
+
+
+def _require_secret_free_evidence(
+    evidence: dict[str, dict[str, Any]],
+) -> None:
+    for name, payload in evidence.items():
+        if payload.get("secret_content_included") is not False:
+            raise DeploymentReleaseError(
+                f"{name} must assert secret_content_included=false"
+            )
+        if _contains_sensitive_value(payload):
+            raise DeploymentReleaseError(
+                f"{name} contains forbidden sensitive material"
+            )
+
+
+def validate_evidence_contracts(
     release: dict[str, Any],
     evidence: dict[str, dict[str, Any]],
 ) -> None:
+    _require_secret_free_evidence(evidence)
     image = evidence["questdb_image_attestation"]
     _require_exact_fields(
         image,
@@ -582,6 +746,7 @@ def validate_identity_attestations(
             "questdb_target_identity_sha256",
             "questdb_build_sha256",
             "external_verification_asserted",
+            "secret_content_included",
         },
         "QuestDB image attestation",
     )
@@ -598,6 +763,7 @@ def validate_identity_attestations(
         or image["questdb_build_sha256"]
         != release["questdb_build_sha256"]
         or image["external_verification_asserted"] is not True
+        or image["secret_content_included"] is not False
     ):
         raise DeploymentReleaseError(
             "QuestDB image attestation bindings are invalid"
@@ -615,6 +781,7 @@ def validate_identity_attestations(
             "principal_differs_from_admin",
             "principal_name_included",
             "secret_included",
+            "secret_content_included",
         },
         "readonly principal identity attestation",
     )
@@ -630,6 +797,7 @@ def validate_identity_attestations(
         or principal["principal_differs_from_admin"] is not True
         or principal["principal_name_included"] is not False
         or principal["secret_included"] is not False
+        or principal["secret_content_included"] is not False
     ):
         raise DeploymentReleaseError(
             "readonly principal identity attestation bindings are invalid"
@@ -692,6 +860,7 @@ def validate_identity_attestations(
             "docker_socket_connectivity",
             "rpc_connectivity",
             "trading_connectivity",
+            "secret_content_included",
         },
         "isolated network attestation",
     )
@@ -725,9 +894,406 @@ def validate_identity_attestations(
         or network["docker_socket_connectivity"] is not False
         or network["rpc_connectivity"] is not False
         or network["trading_connectivity"] is not False
+        or network["secret_content_included"] is not False
     ):
         raise DeploymentReleaseError(
             "isolated network attestation bindings are invalid"
+        )
+
+    writer_pre = evidence["writer_continuity_pre_evidence"]
+    _require_exact_fields(
+        writer_pre,
+        {
+            "schema_version",
+            "evidence_id",
+            "contract_source_commit_sha",
+            "questdb_target_identity_sha256",
+            "captured_at",
+            "capture_method",
+            "writer_identity_sha256",
+            "writer_last_commit_id_sha256",
+            "writer_last_commit_lag_seconds",
+            "writer_queue_depth",
+            "writer_state",
+            "secret_content_included",
+        },
+        "writer continuity pre evidence",
+    )
+    _require_evidence_id(
+        writer_pre,
+        "evidence_id",
+        "writer continuity pre evidence",
+    )
+    _require_sha256_value(
+        writer_pre["writer_identity_sha256"],
+        "writer identity",
+    )
+    _require_sha256_value(
+        writer_pre["writer_last_commit_id_sha256"],
+        "writer last commit identity",
+    )
+    _validate_evidence_timestamp(
+        release,
+        writer_pre["captured_at"],
+        "writer continuity pre captured_at",
+    )
+    if (
+        writer_pre["schema_version"]
+        != WRITER_CONTINUITY_PRE_EVIDENCE_VERSION
+        or writer_pre["contract_source_commit_sha"]
+        != release["source_commit_sha"]
+        or writer_pre["questdb_target_identity_sha256"]
+        != release["questdb_target_identity_sha256"]
+        or writer_pre["capture_method"]
+        != "questdb_writer_pre_restart_snapshot_v1"
+        or type(writer_pre["writer_last_commit_lag_seconds"]) is not int
+        or writer_pre["writer_last_commit_lag_seconds"] < 0
+        or type(writer_pre["writer_queue_depth"]) is not int
+        or writer_pre["writer_queue_depth"] < 0
+        or writer_pre["writer_state"] != "HEALTHY"
+    ):
+        raise DeploymentReleaseError(
+            "writer continuity pre evidence bindings are invalid"
+        )
+
+    writer_post = evidence["writer_continuity_post_evidence"]
+    _require_exact_fields(
+        writer_post,
+        {
+            "schema_version",
+            "contract_id",
+            "contract_source_commit_sha",
+            "questdb_target_identity_sha256",
+            "frozen_at",
+            "evaluation_method",
+            "writer_continuity_pre_evidence_raw_sha256",
+            "expected_writer_identity_sha256",
+            "max_commit_lag_seconds",
+            "max_queue_depth_delta",
+            "required_writer_state",
+            "failure_conditions",
+            "secret_content_included",
+        },
+        "writer continuity post contract",
+    )
+    _require_evidence_id(
+        writer_post,
+        "contract_id",
+        "writer continuity post contract",
+    )
+    _validate_evidence_timestamp(
+        release,
+        writer_post["frozen_at"],
+        "writer continuity post frozen_at",
+    )
+    if (
+        writer_post["schema_version"]
+        != WRITER_CONTINUITY_POST_CONTRACT_VERSION
+        or writer_post["contract_source_commit_sha"]
+        != release["source_commit_sha"]
+        or writer_post["questdb_target_identity_sha256"]
+        != release["questdb_target_identity_sha256"]
+        or writer_post["evaluation_method"]
+        != "same_writer_identity_and_non_regressing_commit_v1"
+        or writer_post[
+            "writer_continuity_pre_evidence_raw_sha256"
+        ]
+        != release["writer_continuity_pre_evidence_raw_sha256"]
+        or writer_post["expected_writer_identity_sha256"]
+        != writer_pre["writer_identity_sha256"]
+        or type(writer_post["max_commit_lag_seconds"]) is not int
+        or writer_post["max_commit_lag_seconds"] != 60
+        or writer_pre["writer_last_commit_lag_seconds"]
+        > writer_post["max_commit_lag_seconds"]
+        or type(writer_post["max_queue_depth_delta"]) is not int
+        or writer_post["max_queue_depth_delta"] != 10_000
+        or writer_post["required_writer_state"] != "HEALTHY"
+        or writer_post["failure_conditions"]
+        != WRITER_FAILURE_CONDITIONS
+    ):
+        raise DeploymentReleaseError(
+            "writer continuity post contract bindings are invalid"
+        )
+
+    health = evidence["health_evidence"]
+    _require_exact_fields(
+        health,
+        {
+            "schema_version",
+            "evidence_id",
+            "contract_source_commit_sha",
+            "questdb_target_identity_sha256",
+            "captured_at",
+            "capture_method",
+            "health_state",
+            "http_status_code",
+            "max_post_restart_recovery_seconds",
+            "secret_content_included",
+        },
+        "health evidence",
+    )
+    _require_evidence_id(health, "evidence_id", "health evidence")
+    _validate_evidence_timestamp(
+        release,
+        health["captured_at"],
+        "health evidence captured_at",
+    )
+    if (
+        health["schema_version"] != HEALTH_EVIDENCE_VERSION
+        or health["contract_source_commit_sha"]
+        != release["source_commit_sha"]
+        or health["questdb_target_identity_sha256"]
+        != release["questdb_target_identity_sha256"]
+        or health["capture_method"]
+        != "questdb_http_health_pre_restart_v1"
+        or health["health_state"] != "HEALTHY"
+        or type(health["http_status_code"]) is not int
+        or health["http_status_code"] != 200
+        or type(health["max_post_restart_recovery_seconds"])
+        is not int
+        or health["max_post_restart_recovery_seconds"] != 120
+    ):
+        raise DeploymentReleaseError(
+            "health evidence bindings are invalid"
+        )
+
+    backlog = evidence["backlog_evidence"]
+    _require_exact_fields(
+        backlog,
+        {
+            "schema_version",
+            "evidence_id",
+            "contract_source_commit_sha",
+            "questdb_target_identity_sha256",
+            "captured_at",
+            "capture_method",
+            "pending_rows",
+            "corrupt_spool_files",
+            "dropped_total",
+            "required_post_restart_pending_rows",
+            "secret_content_included",
+        },
+        "backlog evidence",
+    )
+    _require_evidence_id(backlog, "evidence_id", "backlog evidence")
+    _validate_evidence_timestamp(
+        release,
+        backlog["captured_at"],
+        "backlog evidence captured_at",
+    )
+    if (
+        backlog["schema_version"] != BACKLOG_EVIDENCE_VERSION
+        or backlog["contract_source_commit_sha"]
+        != release["source_commit_sha"]
+        or backlog["questdb_target_identity_sha256"]
+        != release["questdb_target_identity_sha256"]
+        or backlog["capture_method"]
+        != "tick_writer_backlog_pre_restart_snapshot_v1"
+        or type(backlog["pending_rows"]) is not int
+        or backlog["pending_rows"] < 0
+        or type(backlog["corrupt_spool_files"]) is not int
+        or backlog["corrupt_spool_files"] != 0
+        or type(backlog["dropped_total"]) is not int
+        or backlog["dropped_total"] != 0
+        or type(backlog["required_post_restart_pending_rows"])
+        is not int
+        or backlog["required_post_restart_pending_rows"] != 0
+    ):
+        raise DeploymentReleaseError(
+            "backlog evidence bindings are invalid"
+        )
+
+    rollback = evidence["rollback_plan"]
+    _require_exact_fields(
+        rollback,
+        {
+            "schema_version",
+            "plan_id",
+            "contract_source_commit_sha",
+            "questdb_target_identity_sha256",
+            "frozen_at",
+            "rollback_deadline_seconds",
+            "trigger_conditions",
+            "steps",
+            "rollback_restart_authorized",
+            "requires_separate_rollback_restart_release",
+            "secret_content_included",
+        },
+        "rollback plan",
+    )
+    _require_evidence_id(rollback, "plan_id", "rollback plan")
+    _validate_evidence_timestamp(
+        release,
+        rollback["frozen_at"],
+        "rollback plan frozen_at",
+    )
+    if (
+        rollback["schema_version"] != ROLLBACK_PLAN_VERSION
+        or rollback["contract_source_commit_sha"]
+        != release["source_commit_sha"]
+        or rollback["questdb_target_identity_sha256"]
+        != release["questdb_target_identity_sha256"]
+        or type(rollback["rollback_deadline_seconds"]) is not int
+        or rollback["rollback_deadline_seconds"]
+        != release["rollback_deadline_seconds"]
+        or rollback["trigger_conditions"]
+        != ROLLBACK_TRIGGER_CONDITIONS
+        or rollback["steps"] != ROLLBACK_STEPS
+        or rollback["rollback_restart_authorized"] is not False
+        or rollback[
+            "requires_separate_rollback_restart_release"
+        ]
+        is not True
+    ):
+        raise DeploymentReleaseError(
+            "rollback plan bindings are invalid"
+        )
+
+    root_pin = evidence["root_pin_identity_attestation"]
+    _require_exact_fields(
+        root_pin,
+        {
+            "schema_version",
+            "attestation_id",
+            "pin_root_path_sha256",
+            "captured_at",
+            "capture_method",
+            "owner_uid",
+            "owner_gid",
+            "mode",
+            "directory",
+            "symlink",
+            "secret_content_included",
+        },
+        "root pin identity attestation",
+    )
+    _require_evidence_id(
+        root_pin,
+        "attestation_id",
+        "root pin identity attestation",
+    )
+    _validate_evidence_timestamp(
+        release,
+        root_pin["captured_at"],
+        "root pin identity captured_at",
+    )
+    if (
+        root_pin["schema_version"] != ROOT_PIN_IDENTITY_VERSION
+        or root_pin["pin_root_path_sha256"]
+        != release["pin_root_path_sha256"]
+        or root_pin["capture_method"] != "lstat_no_follow_v1"
+        or type(root_pin["owner_uid"]) is not int
+        or root_pin["owner_uid"] != 0
+        or type(root_pin["owner_gid"]) is not int
+        or root_pin["owner_gid"] != 0
+        or root_pin["mode"] != "0755"
+        or root_pin["directory"] is not True
+        or root_pin["symlink"] is not False
+    ):
+        raise DeploymentReleaseError(
+            "root pin identity attestation bindings are invalid"
+        )
+
+    custody = evidence["custody_path_identity_attestation"]
+    _require_exact_fields(
+        custody,
+        {
+            "schema_version",
+            "attestation_id",
+            "custody_path_sha256",
+            "custody_identity_sha256",
+            "captured_at",
+            "capture_method",
+            "owner_matches_verifier_uid",
+            "mode",
+            "directory",
+            "symlink",
+            "secret_content_included",
+        },
+        "custody path identity attestation",
+    )
+    _require_evidence_id(
+        custody,
+        "attestation_id",
+        "custody path identity attestation",
+    )
+    _validate_evidence_timestamp(
+        release,
+        custody["captured_at"],
+        "custody path identity captured_at",
+    )
+    if (
+        custody["schema_version"] != CUSTODY_PATH_IDENTITY_VERSION
+        or custody["custody_path_sha256"]
+        != release["custody_path_sha256"]
+        or custody["custody_identity_sha256"]
+        != release["custody_identity_sha256"]
+        or custody["capture_method"] != "lstat_no_follow_v1"
+        or custody["owner_matches_verifier_uid"] is not True
+        or custody["mode"] != "0700"
+        or custody["directory"] is not True
+        or custody["symlink"] is not False
+    ):
+        raise DeploymentReleaseError(
+            "custody path identity attestation bindings are invalid"
+        )
+
+    deployment = evidence["deployment_plan"]
+    _require_exact_fields(
+        deployment,
+        {
+            "schema_version",
+            "plan_id",
+            "contract_source_commit_sha",
+            "questdb_target_identity_sha256",
+            "questdb_image_digest",
+            "readonly_principal_identity_sha256",
+            "secret_file_path_sha256",
+            "isolated_network_identity_sha256",
+            "frozen_at",
+            "allowed_restart_count",
+            "steps",
+            "failure_conditions",
+            "forbidden_capabilities",
+            "secret_content_included",
+        },
+        "exact deployment plan",
+    )
+    _require_evidence_id(
+        deployment,
+        "plan_id",
+        "exact deployment plan",
+    )
+    _validate_evidence_timestamp(
+        release,
+        deployment["frozen_at"],
+        "exact deployment plan frozen_at",
+    )
+    if (
+        deployment["schema_version"] != DEPLOYMENT_PLAN_VERSION
+        or deployment["contract_source_commit_sha"]
+        != release["source_commit_sha"]
+        or deployment["questdb_target_identity_sha256"]
+        != release["questdb_target_identity_sha256"]
+        or deployment["questdb_image_digest"]
+        != release["questdb_image_digest"]
+        or deployment["readonly_principal_identity_sha256"]
+        != release["readonly_principal_identity_sha256"]
+        or deployment["secret_file_path_sha256"]
+        != release["secret_file_path_sha256"]
+        or deployment["isolated_network_identity_sha256"]
+        != release["isolated_network_identity_sha256"]
+        or type(deployment["allowed_restart_count"]) is not int
+        or deployment["allowed_restart_count"]
+        != release["allowed_restart_count"]
+        or deployment["steps"] != DEPLOYMENT_STEPS
+        or deployment["failure_conditions"]
+        != DEPLOYMENT_FAILURE_CONDITIONS
+        or deployment["forbidden_capabilities"]
+        != DEPLOYMENT_FORBIDDEN_CAPABILITIES
+    ):
+        raise DeploymentReleaseError(
+            "exact deployment plan bindings are invalid"
         )
 
 
