@@ -16,7 +16,7 @@
     "evidence_schema_sha256",
     "attestation_schema_sha256",
     "base_image_digest",
-    "installed_dependencies",
+    "installed_dependency_metadata_versions",
     "oci_layout_archive_sha256",
     "image_reference",
     "image_digest",
@@ -91,7 +91,7 @@
     "base_image_digest": {
       "$ref": "#/$defs/ociDigest"
     },
-    "installed_dependencies": {
+    "installed_dependency_metadata_versions": {
       "const": {
         "cryptography": "48.0.0",
         "jsonschema": "4.26.0",
@@ -134,7 +134,7 @@
         "containerfile_digest_matched",
         "base_image_pin_present_in_exact_containerfile",
         "dependency_pins_present_in_exact_containerfile",
-        "installed_dependency_versions_recomputed",
+        "installed_dependency_metadata_versions_recomputed",
         "oci_archive_sha256_recomputed",
         "oci_manifest_digest_recomputed",
         "oci_config_digest_recomputed",
@@ -142,7 +142,11 @@
         "immutable_image_reference_matched",
         "oci_revision_matched",
         "non_root_entrypoint_matched",
+        "absolute_interpreter_regular_executable_present",
+        "oci_runtime_hooks_neutralized",
         "runtime_files_recomputed_from_layers",
+        "runtime_file_modes_readable",
+        "runtime_directory_modes_traversable",
         "forbidden_and_signer_paths_absent",
         "build_provenance_verified",
         "registry_provenance_verified"
@@ -163,7 +167,7 @@
         "dependency_pins_present_in_exact_containerfile": {
           "const": true
         },
-        "installed_dependency_versions_recomputed": {
+        "installed_dependency_metadata_versions_recomputed": {
           "const": true
         },
         "oci_archive_sha256_recomputed": {
@@ -187,7 +191,19 @@
         "non_root_entrypoint_matched": {
           "const": true
         },
+        "absolute_interpreter_regular_executable_present": {
+          "const": true
+        },
+        "oci_runtime_hooks_neutralized": {
+          "const": true
+        },
         "runtime_files_recomputed_from_layers": {
+          "const": true
+        },
+        "runtime_file_modes_readable": {
+          "const": true
+        },
+        "runtime_directory_modes_traversable": {
           "const": true
         },
         "forbidden_and_signer_paths_absent": {

@@ -46,22 +46,51 @@ digest、commit、时间和 producer 均为假值。
   所有 blob path/digest，无未引用 blob；
 - 从原始字节重算 archive、manifest、config 和有序 compressed layer digest；
 - 校验 config `rootfs.diff_ids` 与 plain/gzip layer 的 uncompressed digest；
-- 从实际 config 解析 User、WorkingDir、Entrypoint、labels 和 Env，拒绝敏感
-  environment；
+- 从实际 config 同时校验顶层 `os=linux`、`architecture=amd64`，解析
+  User、WorkingDir、绝对 Entrypoint、labels 和 Env；Env 必须精确等于 pinned
+  官方 Python base 的四个继承项加 Containerfile 冻结的三个项，拒绝
+  `LD_PRELOAD` 等任意额外环境注入；
+- 要求 image `Cmd` absent/null/empty、Healthcheck absent/null、
+  Volumes/OnBuild absent/empty，避免 compose 启动前继承 image 内的命令或
+  hook；
 - 按顺序在内存虚拟文件系统中应用 plain/gzip layers、whiteout 和 opaque
-  whiteout，不向宿主文件系统 extract；
+  whiteout，不向宿主文件系统 extract；每个 entry/whiteout 都拒绝已有的
+  non-directory ancestor，link target 会在 image root 内安全规范化并拒绝
+  越界 traversal；每层 entry 数和最终 filesystem entry 数都有固定上限，
+  whiteout 仅接受 size=0 的 regular entry；
 - 从最终 layer filesystem 重算两个脚本和七份 schema 的 SHA256；
 - 要求 `/opt/c-fast-t1` 最终只能包含这九个普通文件，禁止 `.pyc/.pyo`、
-  `__pycache__`、signer、private-key marker 或任何额外 runtime file；
-- 从最终 filesystem 的 `*.dist-info/METADATA` 实算
-  `cryptography/jsonschema/psycopg/psycopg-binary/referencing` 版本；
+  `__pycache__`、signer、private-key marker、额外 runtime file 或额外空目录；
+  九个文件均按 uid/gid 65532 权限模型检查 read bit；
+- 要求 `/opt/c-fast-t1` 及 bundle 的全部父目录按 uid/gid 65532 权限模型
+  具有 traverse bit；解释器的 `/usr`、`/usr/local`、`/usr/local/bin` 父目录
+  同样必须可 traverse；
+- 要求绝对解释器 `/usr/local/bin/python3.12` 是 non-empty、regular 且按
+  uid/gid 65532 权限模型具有 execute bit；这只验证路径、类型、长度与权限位，
+  不证明解释器代码 bytes 的来源或完整性；
+- 从最终 filesystem 的 `*.dist-info/METADATA` 重算其中自报的
+  `cryptography/jsonschema/psycopg/psycopg-binary/referencing` 版本字段；
 - 要求 immutable reference 的 digest 等于实际 manifest digest。
 - 要求当前运行的 verifier 与两份 schema 的 SHA256 等于 exact source commit
   中对应 blob，并把三者 hash 写入 report。
 
 `base_image_digest` 只表示 exact Containerfile 中存在固定 base pin；在没有
 可信 build provenance 时，它不证明实际 layer 的 base lineage。Containerfile
-中的直接依赖 pin 与镜像内实际安装版本分别报告，不能混称。
+中的直接依赖 pin 与镜像内 exact
+`/usr/local/lib/python3.12/site-packages/<name>-<version>.dist-info/METADATA`
+路径自报的 metadata 版本分别报告，不能
+混称。`installed_dependency_metadata_versions_recomputed=true` 不校验 package
+payload、module code、transitive dependency pins 或 `RECORD`，因此不证明
+这些 package bytes 的完整性；伪造或漂移的 package payload 仍属于 build
+provenance gap，报告状态不会因此升格，也不能进入
+`READY_FOR_HUMAN_SIGNATURE_ONLY`。
+
+Containerfile 与正式 runtime template 都使用绝对
+`/usr/local/bin/python3.12`，并冻结 PATH；template 还显式禁用 healthcheck。
+Containerfile 不设置 `CMD`；Docker/BuildKit 在设置 `ENTRYPOINT` 时应把基础
+镜像继承的默认参数重置为 absent/null，verifier 也兼容语义等价的空数组。
+正式 template 的 frozen `command` 负责提供 one-shot 参数。二者都不授予
+authority，也不代表无需 runner 内部的 signed-release 校验。
 
 Git 读取固定禁用 replace objects，并隔离可能改变 object lookup 的环境变量。
 Containerfile 在 `py_compile` 自检后必须删除所有 `.pyc/.pyo` 和空

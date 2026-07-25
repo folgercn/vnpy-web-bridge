@@ -196,6 +196,34 @@ def test_rejects_network_or_custody_mount_drift(tmp_path: Path) -> None:
         subject.validate_runtime(template, containerfile)
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("healthcheck", {"disable": False, "test": ["CMD", "/evil/check"]}),
+        ("environment", {"PATH": "/evil"}),
+    ],
+)
+def test_rejects_healthcheck_or_path_drift(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    template, containerfile = _copy_artifacts(tmp_path)
+    payload = _load_template(template)
+    service = payload["services"]["c-fast-t1-one-shot"]
+    if field == "environment":
+        service["environment"].update(value)
+    else:
+        service[field] = value
+    _write_template(template, payload)
+
+    with pytest.raises(
+        subject.RuntimeValidationError,
+        match="one-shot service",
+    ):
+        subject.validate_runtime(template, containerfile)
+
+
 def test_rejects_independent_image_reference_and_digest(
     tmp_path: Path,
 ) -> None:

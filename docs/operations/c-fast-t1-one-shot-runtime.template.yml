@@ -14,7 +14,7 @@
       ],
       "image": "${C_FAST_T1_RUNTIME_IMAGE_REPOSITORY:?required_repository}@${C_FAST_T1_RUNTIME_IMAGE_DIGEST:?required_sha256_digest}",
       "entrypoint": [
-        "python",
+        "/usr/local/bin/python3.12",
         "-I",
         "/opt/c-fast-t1/scripts/commodity_c_fast_t1_one_shot.py"
       ],
@@ -46,6 +46,9 @@
         "no-new-privileges:true"
       ],
       "restart": "no",
+      "healthcheck": {
+        "disable": true
+      },
       "pids_limit": 64,
       "mem_limit": "1g",
       "cpus": 1.0,
@@ -53,6 +56,7 @@
         "/tmp:rw,noexec,nosuid,nodev,size=64m"
       ],
       "environment": {
+        "PATH": "/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin",
         "C_FAST_T1_DEPLOYMENT_MUTATION_AUTHORIZED": "false",
         "C_FAST_T1_ORDER_AUTHORIZED": "false",
         "C_FAST_T1_POSITION_MUTATION_AUTHORIZED": "false",

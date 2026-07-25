@@ -31,6 +31,8 @@ MAX_ARCHIVE_BYTES = 256 * 1024 * 1024
 MAX_LAYER_UNPACKED_BYTES = 512 * 1024 * 1024
 MAX_LAYER_FILE_BYTES = 128 * 1024 * 1024
 MAX_BLOBS = 512
+MAX_LAYER_ENTRIES = 100_000
+MAX_FILESYSTEM_ENTRIES = 100_000
 ROOT = Path(__file__).resolve().parents[2]
 EVIDENCE_SCHEMA_PATH = (
     ROOT / "docs/schemas/commodity-c-fast-t1-external-image-evidence-v1.schema.json"
@@ -46,8 +48,21 @@ EVIDENCE_SCHEMA_SOURCE_PATH = (
 ATTESTATION_SCHEMA_SOURCE_PATH = (
     "docs/schemas/commodity-c-fast-t1-image-attestation-v1.schema.json"
 )
+FROZEN_PATH = "/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin"
+EXPECTED_ENVIRONMENT = {
+    "PATH": FROZEN_PATH,
+    "LANG": "C.UTF-8",
+    "GPG_KEY": "7169605F62C751356D054A26A821E680E5FA6305",
+    "PYTHON_VERSION": "3.12.13",
+    "PYTHON_SHA256": (
+        "c08bc65a81971c1dd5783182826503369466c7e67374d1646519adf05207b684"
+    ),
+    "PYTHONDONTWRITEBYTECODE": "1",
+    "PYTHONUNBUFFERED": "1",
+}
+INTERPRETER_PATH = "usr/local/bin/python3.12"
 ENTRYPOINT = [
-    "python",
+    "/" + INTERPRETER_PATH,
     "-I",
     "/opt/c-fast-t1/scripts/commodity_c_fast_t1_one_shot.py",
 ]
@@ -117,6 +132,9 @@ class FileSystemEntry:
     kind: str
     sha256: str | None = None
     size: int = 0
+    mode: int = 0
+    uid: int = 0
+    gid: int = 0
     link_target: str | None = None
     contains_private_key_marker: bool = False
     package_metadata: bytes | None = None
@@ -429,6 +447,24 @@ def _parse_containerfile(raw: bytes) -> tuple[str, dict[str, str]]:
     )
     if text.count(required_cleanup) != 1:
         raise ImageAttestationError("one-shot Containerfile bytecode cleanup drifted")
+    frozen_instructions = (
+        f"ENV PATH={FROZEN_PATH} \\",
+        "RUN /usr/local/bin/python3.12 -m pip install ",
+        "RUN /usr/local/bin/python3.12 -m py_compile \\",
+        (
+            'ENTRYPOINT ["/usr/local/bin/python3.12", "-I", '
+            '"/opt/c-fast-t1/scripts/commodity_c_fast_t1_one_shot.py"]'
+        ),
+    )
+    for instruction in frozen_instructions:
+        if text.count(instruction) != 1:
+            raise ImageAttestationError(
+                "one-shot Containerfile interpreter/runtime defaults drifted"
+            )
+    if any(line.upper().startswith("CMD ") for line in text.splitlines()):
+        raise ImageAttestationError(
+            "one-shot Containerfile must not set a default command"
+        )
     return base_digest, copy_map
 
 
@@ -693,18 +729,139 @@ def _remove_path(
         filesystem.pop(path, None)
 
 
+def _remove_directory_path(
+    directories: dict[str, FileSystemEntry],
+    target: str,
+    *,
+    lower_paths: set[str] | None = None,
+    created_paths: set[str] | None = None,
+    descendants_only: bool = False,
+) -> None:
+    prefix = target + "/"
+    for path in list(directories):
+        if target:
+            if descendants_only:
+                if not path.startswith(prefix):
+                    continue
+            elif path != target and not path.startswith(prefix):
+                continue
+        if (
+            lower_paths is not None
+            and path not in lower_paths
+            or created_paths is not None
+            and path in created_paths
+        ):
+            continue
+        directories.pop(path, None)
+
+
+def _add_directory_ancestors(
+    filesystem: dict[str, FileSystemEntry],
+    directories: dict[str, FileSystemEntry],
+    path: str,
+    created_directories: set[str],
+    *,
+    include_path: bool,
+) -> None:
+    parts = PurePosixPath(path).parts
+    upper_bound = len(parts) + (1 if include_path else 0)
+    for depth in range(1, upper_bound):
+        directory = "/".join(parts[:depth])
+        if directory in filesystem:
+            raise ImageAttestationError(
+                f"path has a non-directory ancestor: {directory}"
+            )
+        if directory not in directories:
+            directories[directory] = FileSystemEntry(
+                kind="directory",
+                mode=0o755,
+                uid=0,
+                gid=0,
+            )
+        created_directories.add(directory)
+
+
+def _enforce_filesystem_entry_limit(
+    filesystem: dict[str, FileSystemEntry],
+    directories: dict[str, FileSystemEntry],
+    label: str,
+) -> None:
+    if len(filesystem) + len(directories) > MAX_FILESYSTEM_ENTRIES:
+        raise ImageAttestationError(
+            f"{label} exceeds final filesystem entry limit"
+        )
+
+
+def _reject_non_directory_ancestor(
+    filesystem: dict[str, FileSystemEntry],
+    path: str,
+    label: str,
+) -> None:
+    parts = PurePosixPath(path).parts
+    for depth in range(1, len(parts)):
+        ancestor = "/".join(parts[:depth])
+        if ancestor in filesystem:
+            raise ImageAttestationError(
+                f"{label} path has a non-directory ancestor: {ancestor}"
+            )
+
+
+def _normalize_link_target(
+    link_path: str,
+    target: str,
+    label: str,
+    *,
+    symlink: bool,
+) -> str:
+    if (
+        not isinstance(target, str)
+        or not target
+        or "\x00" in target
+        or "\\" in target
+    ):
+        raise ImageAttestationError(f"{label} link target is invalid")
+    if symlink and not target.startswith("/"):
+        parent = PurePosixPath(link_path).parent
+        resolved = [] if str(parent) == "." else list(parent.parts)
+    else:
+        resolved = []
+    for part in target.split("/"):
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            if not resolved:
+                raise ImageAttestationError(
+                    f"{label} link target contains path traversal"
+                )
+            resolved.pop()
+            continue
+        resolved.append(part)
+    return "/".join(resolved)
+
+
 def _apply_layer(
     filesystem: dict[str, FileSystemEntry],
     raw: bytes,
     label: str,
+    directories: dict[str, FileSystemEntry] | None = None,
 ) -> None:
+    if directories is None:
+        directories = {}
     lower_paths = set(filesystem)
+    lower_directories = set(directories)
     created_paths: set[str] = set()
+    created_directories: set[str] = set()
     seen: set[str] = set()
     total = 0
+    entry_count = 0
     try:
         with tarfile.open(fileobj=io.BytesIO(raw), mode="r:") as archive:
             for member in archive:
+                entry_count += 1
+                if entry_count > MAX_LAYER_ENTRIES:
+                    raise ImageAttestationError(
+                        f"{label} exceeds layer entry limit"
+                    )
                 name = _normalize_tar_path(member.name, label)
                 if not name:
                     if member.isdir():
@@ -718,19 +875,18 @@ def _apply_layer(
                 total += max(member.size, 0)
                 if total > MAX_LAYER_UNPACKED_BYTES:
                     raise ImageAttestationError(f"{label} exceeds unpacked size limit")
+                _reject_non_directory_ancestor(filesystem, name, label)
                 path = PurePosixPath(name)
                 basename = path.name
                 parent = "" if str(path.parent) == "." else str(path.parent)
                 if basename.startswith(".wh."):
-                    valid_whiteout = member.isreg() or (
-                        member.ischr() and member.devmajor == 0 and member.devminor == 0
-                    )
-                    if not valid_whiteout:
+                    if not member.isreg() or member.size != 0:
                         raise ImageAttestationError(
                             f"{label} whiteout entry is invalid"
                         )
                     if basename == ".wh..wh..opq":
                         target = parent
+                        opaque = True
                     else:
                         target_name = basename.removeprefix(".wh.")
                         if not target_name:
@@ -738,17 +894,56 @@ def _apply_layer(
                                 f"{label} whiteout target is invalid"
                             )
                         target = f"{parent}/{target_name}" if parent else target_name
+                        opaque = False
                     _remove_path(
                         filesystem,
                         target,
                         lower_paths=lower_paths,
                         created_paths=created_paths,
                     )
+                    _remove_directory_path(
+                        directories,
+                        target,
+                        lower_paths=lower_directories,
+                        created_paths=created_directories,
+                        descendants_only=opaque,
+                    )
+                    _enforce_filesystem_entry_limit(
+                        filesystem,
+                        directories,
+                        label,
+                    )
                     continue
                 if member.isdir():
                     filesystem.pop(name, None)
+                    _add_directory_ancestors(
+                        filesystem,
+                        directories,
+                        name,
+                        created_directories,
+                        include_path=True,
+                    )
+                    directories[name] = FileSystemEntry(
+                        kind="directory",
+                        mode=member.mode & 0o7777,
+                        uid=member.uid,
+                        gid=member.gid,
+                    )
+                    _enforce_filesystem_entry_limit(
+                        filesystem,
+                        directories,
+                        label,
+                    )
                     continue
                 _remove_path(filesystem, name)
+                _remove_directory_path(directories, name)
+                _add_directory_ancestors(
+                    filesystem,
+                    directories,
+                    name,
+                    created_directories,
+                    include_path=False,
+                )
                 if member.isreg():
                     content = _read_tar_member(
                         archive,
@@ -767,6 +962,9 @@ def _apply_layer(
                         kind="regular",
                         sha256=hashlib.sha256(content).hexdigest(),
                         size=len(content),
+                        mode=member.mode & 0o7777,
+                        uid=member.uid,
+                        gid=member.gid,
                         contains_private_key_marker=any(
                             marker in content for marker in PRIVATE_KEY_CONTENT_MARKERS
                         ),
@@ -775,17 +973,28 @@ def _apply_layer(
                         ),
                     )
                 elif member.issym() or member.islnk():
-                    if "\x00" in member.linkname:
-                        raise ImageAttestationError(f"{label} link target is invalid")
                     filesystem[name] = FileSystemEntry(
                         kind="symlink" if member.issym() else "hardlink",
-                        link_target=member.linkname,
+                        mode=member.mode & 0o7777,
+                        uid=member.uid,
+                        gid=member.gid,
+                        link_target=_normalize_link_target(
+                            name,
+                            member.linkname,
+                            label,
+                            symlink=member.issym(),
+                        ),
                     )
                 else:
                     raise ImageAttestationError(
                         f"{label} contains unsupported special file: {name}"
                     )
                 created_paths.add(name)
+                _enforce_filesystem_entry_limit(
+                    filesystem,
+                    directories,
+                    label,
+                )
     except ImageAttestationError:
         raise
     except (OSError, tarfile.TarError) as exc:
@@ -817,18 +1026,39 @@ def _environment_facts(config: dict[str, Any]) -> dict[str, str]:
                 "OCI config contains sensitive environment material"
             )
         parsed[name] = value
-    expected = {
-        "PYTHONDONTWRITEBYTECODE": "1",
-        "PYTHONUNBUFFERED": "1",
-    }
-    for name, value in expected.items():
-        if parsed.get(name) != value:
-            raise ImageAttestationError(f"OCI config environment drifted: {name}")
-    return expected
+    if parsed != EXPECTED_ENVIRONMENT:
+        unexpected = sorted(set(parsed) - set(EXPECTED_ENVIRONMENT))
+        missing = sorted(set(EXPECTED_ENVIRONMENT) - set(parsed))
+        drifted = sorted(
+            name
+            for name in set(parsed) & set(EXPECTED_ENVIRONMENT)
+            if parsed[name] != EXPECTED_ENVIRONMENT[name]
+        )
+        raise ImageAttestationError(
+            "OCI config environment must match the exact frozen allowlist; "
+            f"unexpected={unexpected}, missing={missing}, drifted={drifted}"
+        )
+    return dict(EXPECTED_ENVIRONMENT)
+
+
+def _mode_allows(
+    entry: FileSystemEntry,
+    *,
+    uid: int,
+    gid: int,
+    owner_bit: int,
+    group_bit: int,
+    other_bit: int,
+) -> bool:
+    required_bit = (
+        owner_bit if entry.uid == uid else group_bit if entry.gid == gid else other_bit
+    )
+    return entry.mode & required_bit != 0
 
 
 def _runtime_scan(
     filesystem: dict[str, FileSystemEntry],
+    directories: dict[str, FileSystemEntry],
     expected_paths: set[str],
 ) -> tuple[dict[str, str], list[str], list[str], list[str]]:
     runtime_prefix = "opt/c-fast-t1/"
@@ -836,7 +1066,39 @@ def _runtime_scan(
         path for path in filesystem if path.startswith(runtime_prefix)
     }
     expected_relative = {path.removeprefix("/") for path in expected_paths}
-    unexpected = sorted(actual_runtime_paths - expected_relative)
+    expected_directories = {"opt/c-fast-t1"}
+    for path in expected_relative:
+        parent = PurePosixPath(path).parent
+        while str(parent).startswith("opt/c-fast-t1"):
+            expected_directories.add(str(parent))
+            parent = parent.parent
+    actual_runtime_directories = {
+        path
+        for path in directories
+        if path == "opt/c-fast-t1" or path.startswith(runtime_prefix)
+    }
+    unexpected = sorted(
+        actual_runtime_paths - expected_relative
+        | actual_runtime_directories - expected_directories
+    )
+    for directory in sorted(expected_directories):
+        entry = directories.get(directory)
+        if (
+            entry is None
+            or entry.kind != "directory"
+            or not _mode_allows(
+                entry,
+                uid=65532,
+                gid=65532,
+                owner_bit=0o100,
+                group_bit=0o010,
+                other_bit=0o001,
+            )
+        ):
+            raise ImageAttestationError(
+                "runtime bundle directory is not traversable by uid 65532: "
+                f"/{directory}"
+            )
     bundle: dict[str, str] = {}
     for expected in sorted(expected_paths):
         relative = expected.removeprefix("/")
@@ -845,13 +1107,30 @@ def _runtime_scan(
             raise ImageAttestationError(
                 f"runtime bundle file is missing or non-regular: {expected}"
             )
+        if not _mode_allows(
+            entry,
+            uid=65532,
+            gid=65532,
+            owner_bit=0o400,
+            group_bit=0o040,
+            other_bit=0o004,
+        ):
+            raise ImageAttestationError(
+                f"runtime bundle file is not readable by uid 65532: {expected}"
+            )
         bundle[expected] = entry.sha256
     signer_paths: list[str] = []
     forbidden_paths: list[str] = []
-    for path, entry in filesystem.items():
+    all_paths = {
+        **{path: entry for path, entry in filesystem.items()},
+        **{path: entry for path, entry in directories.items()},
+    }
+    for path, entry in all_paths.items():
         lowered = path.lower()
         basename = PurePosixPath(lowered).name
-        lowered_target = (entry.link_target or "").lower()
+        lowered_target = (
+            (entry.link_target or "").lower() if entry is not None else ""
+        )
         if (
             "commodity_c_fast_t1_sign_release" in lowered
             or "signer" in lowered
@@ -859,7 +1138,8 @@ def _runtime_scan(
             or "private_key" in lowered_target
             or "signer" in lowered_target
             or basename in {"id_rsa", "id_ed25519"}
-            or entry.contains_private_key_marker
+            or entry is not None
+            and entry.contains_private_key_marker
         ):
             signer_paths.append("/" + path)
         if not path.startswith(runtime_prefix):
@@ -876,17 +1156,17 @@ def _runtime_scan(
     )
 
 
-def _installed_dependency_versions(
+def _installed_dependency_metadata_versions(
     filesystem: dict[str, FileSystemEntry],
 ) -> dict[str, str]:
     installed: dict[str, str] = {}
     for path, entry in filesystem.items():
-        if (
-            not path.startswith("usr/local/lib/python")
-            or not path.endswith(".dist-info/METADATA")
-            or entry.package_metadata is None
-        ):
+        if not path.endswith(".dist-info/METADATA"):
             continue
+        if entry.package_metadata is None:
+            raise ImageAttestationError(
+                "installed dependency METADATA entry is not regular"
+            )
         try:
             metadata = BytesParser(policy=policy.default).parsebytes(
                 entry.package_metadata
@@ -908,6 +1188,15 @@ def _installed_dependency_versions(
         normalized_version = version.strip()
         if normalized_name not in EXPECTED_INSTALLED_DEPENDENCIES:
             continue
+        expected_path = (
+            "usr/local/lib/python3.12/site-packages/"
+            f"{normalized_name.replace('-', '_')}-{normalized_version}"
+            ".dist-info/METADATA"
+        )
+        if path != expected_path:
+            raise ImageAttestationError(
+                f"installed dependency METADATA path is invalid: {path}"
+            )
         if normalized_name in installed:
             raise ImageAttestationError(
                 f"installed dependency is duplicated: {normalized_name}"
@@ -915,7 +1204,7 @@ def _installed_dependency_versions(
         installed[normalized_name] = normalized_version
     if installed != EXPECTED_INSTALLED_DEPENDENCIES:
         raise ImageAttestationError(
-            "installed dependency versions do not match frozen runtime"
+            "installed dependency METADATA versions do not match frozen runtime"
         )
     return installed
 
@@ -983,6 +1272,11 @@ def derive_oci_facts(
         "OCI config",
     )
     config_document = _parse_json_bytes(config_raw, "OCI config")
+    if (
+        config_document.get("architecture") != "amd64"
+        or config_document.get("os") != "linux"
+    ):
+        raise ImageAttestationError("OCI config platform must be linux/amd64")
     config = config_document.get("config")
     if not isinstance(config, dict):
         raise ImageAttestationError("OCI config.config must be an object")
@@ -990,6 +1284,7 @@ def derive_oci_facts(
     layer_digests: list[str] = []
     diff_ids: list[str] = []
     filesystem: dict[str, FileSystemEntry] = {}
+    directories: dict[str, FileSystemEntry] = {}
     total_unpacked = 0
     referenced_blob_paths = {
         "blobs/sha256/" + manifest_digest.removeprefix("sha256:"),
@@ -1021,6 +1316,7 @@ def derive_oci_facts(
             filesystem,
             uncompressed,
             f"OCI layer {index_number}",
+            directories,
         )
         referenced_blob_paths.add("blobs/sha256/" + digest.removeprefix("sha256:"))
     actual_blob_paths = {name for name in files if BLOB_PATH_RE.fullmatch(name)}
@@ -1042,15 +1338,64 @@ def derive_oci_facts(
         raise ImageAttestationError("OCI working directory drifted")
     if config.get("Entrypoint") != ENTRYPOINT:
         raise ImageAttestationError("OCI entrypoint drifted")
+    if config.get("Cmd") not in (None, []):
+        raise ImageAttestationError("OCI default command must be absent, null, or empty")
+    if config.get("Healthcheck") is not None:
+        raise ImageAttestationError("OCI config Healthcheck must be absent or null")
+    for field, empty_values in (
+        ("Volumes", (None, {})),
+        ("OnBuild", (None, [])),
+    ):
+        if config.get(field) not in empty_values:
+            raise ImageAttestationError(
+                f"OCI config {field} must be absent or empty"
+            )
     relevant_environment = _environment_facts(config)
+    interpreter = filesystem.get(INTERPRETER_PATH)
+    if (
+        interpreter is None
+        or interpreter.kind != "regular"
+        or interpreter.size <= 0
+        or not _mode_allows(
+            interpreter,
+            uid=65532,
+            gid=65532,
+            owner_bit=0o100,
+            group_bit=0o010,
+            other_bit=0o001,
+        )
+    ):
+        raise ImageAttestationError(
+            "OCI interpreter must be a non-empty executable regular file"
+        )
+    for directory in ("usr", "usr/local", "usr/local/bin"):
+        entry = directories.get(directory)
+        if (
+            entry is None
+            or entry.kind != "directory"
+            or not _mode_allows(
+                entry,
+                uid=65532,
+                gid=65532,
+                owner_bit=0o100,
+                group_bit=0o010,
+                other_bit=0o001,
+            )
+        ):
+            raise ImageAttestationError(
+                "OCI interpreter directory is not traversable by uid 65532: "
+                f"/{directory}"
+            )
 
     (
         bundle_files,
         forbidden_paths,
         unexpected_paths,
         signer_paths,
-    ) = _runtime_scan(filesystem, expected_runtime_paths)
-    installed_dependencies = _installed_dependency_versions(filesystem)
+    ) = _runtime_scan(filesystem, directories, expected_runtime_paths)
+    installed_dependency_metadata_versions = (
+        _installed_dependency_metadata_versions(filesystem)
+    )
     return {
         "archive_sha256": hashlib.sha256(archive_raw).hexdigest(),
         "manifest_digest": manifest_digest,
@@ -1064,7 +1409,9 @@ def derive_oci_facts(
             "labels": labels,
         },
         "bundle_files": bundle_files,
-        "installed_dependencies": installed_dependencies,
+        "installed_dependency_metadata_versions": (
+            installed_dependency_metadata_versions
+        ),
         "forbidden_path_matches": forbidden_paths,
         "unexpected_bundle_paths": unexpected_paths,
         "signer_or_private_key_paths": signer_paths,
@@ -1196,7 +1543,9 @@ def verify_image_evidence(
         "evidence_schema_sha256": source_facts["evidence_schema_sha256"],
         "attestation_schema_sha256": source_facts["attestation_schema_sha256"],
         "base_image_digest": source_facts["base_image_digest"],
-        "installed_dependencies": oci_facts["installed_dependencies"],
+        "installed_dependency_metadata_versions": (
+            oci_facts["installed_dependency_metadata_versions"]
+        ),
         "oci_layout_archive_sha256": oci_facts["archive_sha256"],
         "image_reference": image["reference"],
         "image_digest": oci_facts["manifest_digest"],
@@ -1209,7 +1558,7 @@ def verify_image_evidence(
             "containerfile_digest_matched": True,
             "base_image_pin_present_in_exact_containerfile": True,
             "dependency_pins_present_in_exact_containerfile": True,
-            "installed_dependency_versions_recomputed": True,
+            "installed_dependency_metadata_versions_recomputed": True,
             "oci_archive_sha256_recomputed": True,
             "oci_manifest_digest_recomputed": True,
             "oci_config_digest_recomputed": True,
@@ -1217,7 +1566,11 @@ def verify_image_evidence(
             "immutable_image_reference_matched": True,
             "oci_revision_matched": True,
             "non_root_entrypoint_matched": True,
+            "absolute_interpreter_regular_executable_present": True,
+            "oci_runtime_hooks_neutralized": True,
             "runtime_files_recomputed_from_layers": True,
+            "runtime_file_modes_readable": True,
+            "runtime_directory_modes_traversable": True,
             "forbidden_and_signer_paths_absent": True,
             "build_provenance_verified": False,
             "registry_provenance_verified": False,

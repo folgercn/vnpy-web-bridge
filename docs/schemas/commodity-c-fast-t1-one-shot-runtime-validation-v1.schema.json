@@ -38,6 +38,7 @@
       "required": [
         "runtime_metadata_frozen",
         "signed_release_entrypoint_frozen",
+        "runtime_path_and_healthcheck_frozen",
         "non_root_read_only_runtime",
         "fixed_pin_input_dsn_custody_mounts",
         "external_network_reference_frozen",
@@ -46,13 +47,17 @@
         "containerfile_dependencies_pinned",
         "containerfile_runtime_bundle_complete",
         "containerfile_signer_absent",
-        "containerfile_entrypoint_frozen"
+        "containerfile_entrypoint_frozen",
+        "containerfile_default_command_absent"
       ],
       "properties": {
         "runtime_metadata_frozen": {
           "const": true
         },
         "signed_release_entrypoint_frozen": {
+          "const": true
+        },
+        "runtime_path_and_healthcheck_frozen": {
           "const": true
         },
         "non_root_read_only_runtime": {
@@ -80,6 +85,9 @@
           "const": true
         },
         "containerfile_entrypoint_frozen": {
+          "const": true
+        },
+        "containerfile_default_command_absent": {
           "const": true
         }
       }
