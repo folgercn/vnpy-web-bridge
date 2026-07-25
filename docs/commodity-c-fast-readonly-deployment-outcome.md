@@ -76,6 +76,11 @@ closed。outcome signer 的原始 32-byte public key 必须同时不同于：
 
 只改 key ID、purpose 或 keyring 文件不能构成独立信任域。
 
+`verify_signed_outcome()` 的验证结果同时返回实际 outcome signer 原始
+32-byte Ed25519 public key 的 `outcome_signer_public_key_sha256`。后续
+readiness verifier 可用它做跨 witness 的原始 key 隔离；该 hash 只是已验签
+signer identity，不授予任何 authority。
+
 正式 verifier 不从 CLI 或 outcome 自身接受三项 keyring pin。它只读取固定、
 root-owned、group/world 不可写的目录：
 

@@ -402,6 +402,9 @@ def test_independent_signed_success_outcome_verifies_and_grants_nothing(
     assert verified.raw_sha256 == hashlib.sha256(
         outcome_path.read_bytes()
     ).hexdigest()
+    assert verified.outcome_signer_public_key_sha256 == hashlib.sha256(
+        base64.b64decode(public_key_base64(values["outcome_private"]))
+    ).hexdigest()
     assert verified.payload["deployment_executed"] is True
     assert verified.payload["restart_count"] == 1
     for field in outcome_module.OUTCOME_FALSE_FIELDS:

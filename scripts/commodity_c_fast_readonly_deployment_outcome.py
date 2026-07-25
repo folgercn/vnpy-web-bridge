@@ -203,6 +203,7 @@ class VerifiedDeploymentOutcome:
     payload: dict[str, Any]
     raw_sha256: str
     canonical_sha256: str
+    outcome_signer_public_key_sha256: str
     source: VerifiedSourceChain
     post: VerifiedPostBundle
 
@@ -1114,6 +1115,9 @@ def verify_signed_outcome(
         raw_sha256=hashlib.sha256(_raw).hexdigest(),
         canonical_sha256=hashlib.sha256(
             canonical_json(payload)
+        ).hexdigest(),
+        outcome_signer_public_key_sha256=hashlib.sha256(
+            outcome_public
         ).hexdigest(),
         source=source,
         post=post,
