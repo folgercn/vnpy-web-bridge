@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 from pathlib import Path
@@ -88,6 +88,11 @@ def build_fixture(
         l3_authority_keyring_sha256="b" * 64,
         outcome_keyring_sha256="c" * 64,
         packet_custody_path=custody,
+    )
+    monkeypatch.setattr(
+        readiness_module,
+        "_read_production_pins",
+        lambda: pins,
     )
     outcome_source_paths = SimpleNamespace(
         release_keyring=tmp_path / "l3-keyring.json",
@@ -502,6 +507,36 @@ def test_old_deployment_with_fresh_delayed_signature_fails_closed(
         derive(values)
 
 
+@pytest.mark.parametrize("age_minutes", [46, 59])
+def test_packet_ttl_cannot_extend_46_to_59_minute_old_outcome(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    age_minutes: int,
+) -> None:
+    values = build_fixture(tmp_path, monkeypatch)
+    captured_at = NOW - timedelta(minutes=age_minutes)
+    captured_at_text = captured_at.isoformat()
+    values["outcome"].payload["issued_at"] = captured_at_text
+    values["outcome"].payload["deployment_ended_at"] = captured_at_text
+    with pytest.raises(
+        readiness_module.ReadinessV2Error,
+        match="stale or has an invalid time relation",
+    ):
+        derive(values)
+
+
+def test_45_minute_old_outcome_covers_exact_packet_window_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    values = build_fixture(tmp_path, monkeypatch)
+    captured_at_text = (NOW - timedelta(minutes=45)).isoformat()
+    values["outcome"].payload["issued_at"] = captured_at_text
+    values["outcome"].payload["deployment_ended_at"] = captured_at_text
+    packet = derive(values)
+    assert packet["expires_at"] == (NOW + timedelta(minutes=15)).isoformat()
+
+
 def test_invalid_pin_and_naive_time_fail_closed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -614,7 +649,7 @@ def test_packet_is_create_only_in_exact_pinned_custody(
     alternate_output = alternate_custody / f"{packet['packet_id']}.json"
     with pytest.raises(
         readiness_module.ReadinessV2Error,
-        match="does not bind the active pins and custody",
+        match="active readiness pins changed",
     ):
         readiness_module.write_packet_create_only(
             packet,
@@ -631,7 +666,7 @@ def test_packet_is_create_only_in_exact_pinned_custody(
     )
     with pytest.raises(
         readiness_module.ReadinessV2Error,
-        match="does not bind the active pins and custody",
+        match="active readiness pins changed",
     ):
         readiness_module.write_packet_create_only(
             packet,
@@ -661,5 +696,37 @@ def test_expired_packet_cannot_be_written(
             output,
             require_root_owned_parent=False,
             now=NOW + readiness_module.PACKET_TTL,
+        )
+    assert not output.exists()
+
+
+def test_rotated_active_pins_block_old_packet_before_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    values = build_fixture(tmp_path, monkeypatch)
+    packet = derive(values)
+    output = values["pins"].packet_custody_path / (
+        f"{packet['packet_id']}.json"
+    )
+    rotated_pins = replace(
+        values["pins"],
+        outcome_keyring_sha256="e" * 64,
+    )
+    monkeypatch.setattr(
+        readiness_module,
+        "_read_production_pins",
+        lambda: rotated_pins,
+    )
+    with pytest.raises(
+        readiness_module.ReadinessV2Error,
+        match="active readiness pins changed",
+    ):
+        readiness_module.write_packet_create_only(
+            packet,
+            values["pins"],
+            output,
+            require_root_owned_parent=False,
+            now=NOW,
         )
     assert not output.exists()

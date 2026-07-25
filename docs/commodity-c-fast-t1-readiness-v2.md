@@ -86,10 +86,11 @@ release keyring、consume、receipt、十二份 pre evidence、六份 post evide
 独立 outcome signature。consume/receipt 仍必须
 `deployment_executed=false`；真实完成事实只来自 signed outcome。
 
-outcome 和真实 deployment completion 都必须在 readiness 生成前一小时内，且
-`deployment_ended_at <= outcome.issued_at <= readiness.generated_at`。即使 outcome
-签署者在 #132 允许的 24 小时窗口末端才签署，也不能把旧的
-QuestDB/principal/network 状态复用为当前 readiness。packet 自身固定 15 分钟 TTL。
+outcome 和真实 deployment completion 必须覆盖 readiness 的完整有效窗口：
+`deployment_ended_at <= outcome.issued_at <= readiness.generated_at`，并且
+`readiness.expires_at` 距二者都不得超过一小时。packet 固定 15 分钟 TTL，因此
+生成时二者最多只能已有 45 分钟。即使 outcome 签署者在 #132 允许的 24 小时窗口
+末端才签署，也不能把旧的 QuestDB/principal/network 状态复用为当前 readiness。
 
 ## namespace 隔离
 
@@ -136,7 +137,9 @@ SHA256。输出只能是：
 不能通过改变时间或输出路径覆盖 packet；重新派生会得到一个新 ID，后续 release
 v2 必须绑定选中的 exact raw bytes。packet validator 会重新计算 ID、15 分钟 TTL、
 outcome freshness relation 和当前 verifier/schema hashes；create-only 写入还会再次
-检查 `generated_at <= write_time < expires_at`，过期或未来 packet 不会落盘。
+检查 `generated_at <= write_time < expires_at`。写入前还会重新读取 root-owned
+active pins，并要求四个 keyring pin 和 resolved custody path 与派生时 pins、
+packet 内绑定全部一致；验证期间发生 pin 轮换时旧 packet 不会落盘。
 
 ## 运行
 

@@ -217,6 +217,22 @@ def _validate_expected_namespaces(inputs: ReadinessInputs) -> None:
             raise ReadinessV2Error(f"{field} is invalid")
 
 
+def _validate_outcome_freshness_for_packet_window(
+    generated_at: datetime,
+    expires_at: datetime,
+    outcome_issued_at: datetime,
+    deployment_ended_at: datetime,
+) -> None:
+    if (
+        not deployment_ended_at <= outcome_issued_at <= generated_at
+        or expires_at - outcome_issued_at > MAX_OUTCOME_AGE
+        or expires_at - deployment_ended_at > MAX_OUTCOME_AGE
+    ):
+        raise ReadinessV2Error(
+            "deployment outcome is stale or has an invalid time relation"
+        )
+
+
 def _read_production_pins() -> ReadinessPins:
     try:
         info = PIN_ROOT.lstat()
@@ -284,14 +300,12 @@ def _validate_packet(packet: dict[str, Any]) -> None:
         raise ReadinessV2Error(str(exc)) from exc
     if expires_at - generated_at != PACKET_TTL:
         raise ReadinessV2Error("readiness packet TTL is not exactly 15 minutes")
-    if (
-        not deployment_ended_at <= outcome_issued_at <= generated_at
-        or generated_at - outcome_issued_at > MAX_OUTCOME_AGE
-        or generated_at - deployment_ended_at > MAX_OUTCOME_AGE
-    ):
-        raise ReadinessV2Error(
-            "readiness packet outcome freshness relation is invalid"
-        )
+    _validate_outcome_freshness_for_packet_window(
+        generated_at,
+        expires_at,
+        outcome_issued_at,
+        deployment_ended_at,
+    )
     identity = _packet_identity(packet)
     expected_id = "readiness-v2-" + _hash_bytes(canonical_json(identity))
     if packet["packet_id"] != expected_id:
@@ -476,14 +490,13 @@ def derive_readiness_packet(
         )
     except OneShotError as exc:
         raise ReadinessV2Error(str(exc)) from exc
-    if (
-        not deployment_ended_at <= outcome_issued_at <= generated_at
-        or generated_at - outcome_issued_at > MAX_OUTCOME_AGE
-        or generated_at - deployment_ended_at > MAX_OUTCOME_AGE
-    ):
-        raise ReadinessV2Error(
-            "deployment outcome is stale or has an invalid time relation"
-        )
+    expires_at = generated_at + PACKET_TTL
+    _validate_outcome_freshness_for_packet_window(
+        generated_at,
+        expires_at,
+        outcome_issued_at,
+        deployment_ended_at,
+    )
 
     verifier_sha256 = _hash_bytes(_read(VERIFIER_PATH, "readiness verifier"))
     schema_sha256 = _hash_bytes(_read(SCHEMA_PATH, "readiness schema"))
@@ -568,7 +581,7 @@ def derive_readiness_packet(
     packet_custody_sha256 = custody_path_sha256(pins.packet_custody_path)
     identity = {
         "generated_at": generated_at.isoformat(),
-        "expires_at": (generated_at + PACKET_TTL).isoformat(),
+        "expires_at": expires_at.isoformat(),
         "verifier_sha256": verifier_sha256,
         "schema_sha256": schema_sha256,
         "pin_root_path_sha256": pin_root_path_sha256(),
@@ -673,9 +686,30 @@ def write_packet_create_only(
         raise ReadinessV2Error(
             "readiness packet is not current at create-only write time"
         )
+    active_pins = _read_production_pins()
+    _validate_pins(active_pins)
+    try:
+        derived_custody = pins.packet_custody_path.resolve(strict=True)
+        active_custody = active_pins.packet_custody_path.resolve(strict=True)
+    except OSError as exc:
+        raise ReadinessV2Error("packet custody cannot be resolved") from exc
+    if (
+        pins.provenance_keyring_sha256
+        != active_pins.provenance_keyring_sha256
+        or pins.t1_authority_keyring_sha256
+        != active_pins.t1_authority_keyring_sha256
+        or pins.l3_authority_keyring_sha256
+        != active_pins.l3_authority_keyring_sha256
+        or pins.outcome_keyring_sha256
+        != active_pins.outcome_keyring_sha256
+        or derived_custody != active_custody
+    ):
+        raise ReadinessV2Error(
+            "active readiness pins changed before create-only write"
+        )
     expected_name = f"{packet['packet_id']}.json"
     try:
-        pinned = pins.packet_custody_path.resolve(strict=True)
+        pinned = active_custody
         output_parent = output.parent.resolve(strict=True)
     except OSError as exc:
         raise ReadinessV2Error("packet custody cannot be resolved") from exc
@@ -685,19 +719,19 @@ def write_packet_create_only(
         or packet["build_registry_provenance"][
             "provenance_keyring_sha256"
         ]
-        != pins.provenance_keyring_sha256
+        != active_pins.provenance_keyring_sha256
         or packet["build_registry_provenance"][
             "t1_authority_keyring_sha256"
         ]
-        != pins.t1_authority_keyring_sha256
+        != active_pins.t1_authority_keyring_sha256
         or packet["build_registry_provenance"][
             "l3_authority_keyring_sha256"
         ]
-        != pins.l3_authority_keyring_sha256
+        != active_pins.l3_authority_keyring_sha256
         or packet["readonly_deployment_outcome"][
             "outcome_keyring_sha256"
         ]
-        != pins.outcome_keyring_sha256
+        != active_pins.outcome_keyring_sha256
     ):
         raise ReadinessV2Error(
             "readiness packet does not bind the active pins and custody"
