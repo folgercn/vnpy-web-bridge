@@ -730,3 +730,71 @@ def test_rotated_active_pins_block_old_packet_before_write(
             now=NOW,
         )
     assert not output.exists()
+
+
+def test_existing_packet_is_rederived_from_exact_raw_inputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    values = build_fixture(tmp_path, monkeypatch)
+    packet = derive(values)
+    output = values["pins"].packet_custody_path / (
+        f"{packet['packet_id']}.json"
+    )
+    raw_sha256 = readiness_module.write_packet_create_only(
+        packet,
+        values["pins"],
+        output,
+        require_root_owned_parent=False,
+        now=NOW,
+    )
+    verified = readiness_module.verify_existing_readiness_packet(
+        values["inputs"],
+        values["pins"],
+        output,
+        require_root_owned_parent=False,
+        now=NOW,
+    )
+    assert verified.payload == packet
+    assert verified.raw_sha256 == raw_sha256
+    assert verified.canonical_sha256 == sha256(
+        readiness_module.canonical_json(packet)
+    )
+
+    rotated_pins = replace(
+        values["pins"],
+        outcome_keyring_sha256="e" * 64,
+    )
+    monkeypatch.setattr(
+        readiness_module,
+        "_read_production_pins",
+        lambda: rotated_pins,
+    )
+    with pytest.raises(
+        readiness_module.ReadinessV2Error,
+        match="active readiness pins changed",
+    ):
+        readiness_module.verify_existing_readiness_packet(
+            values["inputs"],
+            values["pins"],
+            output,
+            require_root_owned_parent=False,
+            now=NOW,
+        )
+    monkeypatch.setattr(
+        readiness_module,
+        "_read_production_pins",
+        lambda: values["pins"],
+    )
+
+    with pytest.raises(
+        readiness_module.ReadinessV2Error,
+        match="not currently active",
+    ):
+        readiness_module.verify_existing_readiness_packet(
+            values["inputs"],
+            values["pins"],
+            output,
+            require_root_owned_parent=False,
+            now=NOW + readiness_module.PACKET_TTL,
+        )

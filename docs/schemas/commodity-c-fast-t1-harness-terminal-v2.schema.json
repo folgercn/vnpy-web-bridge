@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vnpy-web-bridge:schema:commodity-c-fast-t1-harness-terminal-v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "purpose", "candidate_id", "release_id", "attempt_id",
+    "terminal_state", "error_code", "release_raw_sha256",
+    "release_canonical_sha256", "consume_marker_raw_sha256",
+    "consume_marker_canonical_sha256", "readiness_packet_raw_sha256",
+    "readiness_packet_canonical_sha256",
+    "content_attestation_raw_sha256",
+    "content_attestation_canonical_sha256",
+    "provenance_raw_sha256", "provenance_canonical_sha256",
+    "outcome_raw_sha256", "outcome_canonical_sha256",
+    "readiness_source_bundle_index_sha256",
+    "manifest_raw_sha256", "manifest_canonical_sha256",
+    "started_at", "ended_at",
+    "final_revalidation_completed_at", "query_execution_state",
+    "child_launched", "production_queried", "write_probe_attempted",
+    "database_mutations", "web_bridge_rpc_calls", "orders_sent",
+    "positions_modified", "dispatch_changed", "terminal_is_authority",
+    "harness_result_is_t1_success", "harness_result_is_p0_success",
+    "query_terminal_compatible", "p0_acceptance_authorized",
+    "replay_allowed"
+  ],
+  "properties": {
+    "schema_version": {"const": "commodity_c_fast_t1_harness_terminal_v2"},
+    "purpose": {"const": "c_fast_t1_release_v2_foundation_harness_no_query"},
+    "candidate_id": {"const": "C_FAST_CROSS_SECTION_NEUTRAL"},
+    "release_id": {"$ref": "#/$defs/id"},
+    "attempt_id": {"$ref": "#/$defs/attemptId"},
+    "terminal_state": {
+      "enum": [
+        "HARNESS_REVALIDATED_NO_QUERY",
+        "FAILED_FINAL_READINESS_REVALIDATION_NO_QUERY"
+      ]
+    },
+    "error_code": {"type": ["string", "null"], "pattern": "^[A-Z0-9_]{3,96}$"},
+    "release_raw_sha256": {"$ref": "#/$defs/sha256"},
+    "release_canonical_sha256": {"$ref": "#/$defs/sha256"},
+    "consume_marker_raw_sha256": {"$ref": "#/$defs/sha256"},
+    "consume_marker_canonical_sha256": {"$ref": "#/$defs/sha256"},
+    "readiness_packet_raw_sha256": {"$ref": "#/$defs/sha256"},
+    "readiness_packet_canonical_sha256": {"$ref": "#/$defs/sha256"},
+    "content_attestation_raw_sha256": {"$ref": "#/$defs/sha256"},
+    "content_attestation_canonical_sha256": {"$ref": "#/$defs/sha256"},
+    "provenance_raw_sha256": {"$ref": "#/$defs/sha256"},
+    "provenance_canonical_sha256": {"$ref": "#/$defs/sha256"},
+    "outcome_raw_sha256": {"$ref": "#/$defs/sha256"},
+    "outcome_canonical_sha256": {"$ref": "#/$defs/sha256"},
+    "readiness_source_bundle_index_sha256": {"$ref": "#/$defs/sha256"},
+    "manifest_raw_sha256": {"$ref": "#/$defs/sha256"},
+    "manifest_canonical_sha256": {"$ref": "#/$defs/sha256"},
+    "started_at": {"$ref": "#/$defs/dateTime"},
+    "ended_at": {"$ref": "#/$defs/dateTime"},
+    "final_revalidation_completed_at": {"type": ["string", "null"], "format": "date-time"},
+    "query_execution_state": {"const": "NOT_STARTED"},
+    "child_launched": {"const": false},
+    "production_queried": {"const": false},
+    "write_probe_attempted": {"const": false},
+    "database_mutations": {"const": 0},
+    "web_bridge_rpc_calls": {"const": 0},
+    "orders_sent": {"const": 0},
+    "positions_modified": {"const": 0},
+    "dispatch_changed": {"const": false},
+    "terminal_is_authority": {"const": false},
+    "harness_result_is_t1_success": {"const": false},
+    "harness_result_is_p0_success": {"const": false},
+    "query_terminal_compatible": {"const": false},
+    "p0_acceptance_authorized": {"const": false},
+    "replay_allowed": {"const": false}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"terminal_state": {"const": "HARNESS_REVALIDATED_NO_QUERY"}}},
+      "then": {
+        "properties": {
+          "error_code": {"type": "null"},
+          "final_revalidation_completed_at": {"type": "string", "format": "date-time"}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"terminal_state": {"const": "FAILED_FINAL_READINESS_REVALIDATION_NO_QUERY"}}},
+      "then": {
+        "properties": {
+          "error_code": {"type": "string"},
+          "final_revalidation_completed_at": {"type": "null"}
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[A-Za-z0-9._-]{8,128}$"},
+    "attemptId": {"type": "string", "pattern": "^attempt-[0-9a-f]{64}$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "dateTime": {"type": "string", "format": "date-time"}
+  }
+}
