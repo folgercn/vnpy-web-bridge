@@ -76,6 +76,8 @@ def write_keyring(
 
 def build_source(
     tmp_path: Path,
+    *,
+    extra_release_private: Ed25519PrivateKey | None = None,
 ) -> tuple[
     release_helpers.Fixture,
     outcome_module.OutcomeSourcePaths,
@@ -83,6 +85,22 @@ def build_source(
 ]:
     (tmp_path / "release").mkdir(parents=True)
     fixture = release_helpers.build_fixture(tmp_path / "release")
+    if extra_release_private is not None:
+        keyring = json.loads(fixture.keyring_path.read_text())
+        keyring["keys"].append(
+            {
+                "key_id": "c-fast-readonly-deployment-key-unused-a02",
+                "purpose": release_module.TRUSTED_KEY_PURPOSE,
+                "public_key_base64": public_key_base64(
+                    extra_release_private
+                ),
+            }
+        )
+        release_helpers.write_json(fixture.keyring_path, keyring)
+        fixture.keyring_sha256 = hashlib.sha256(
+            release_module.canonical_json(keyring)
+        ).hexdigest()
+        fixture.draft["trusted_keyring_sha256"] = fixture.keyring_sha256
     signed = release_helpers.sign_fixture(fixture)
     release_path = release_helpers.write_json(
         tmp_path / "signed-release.json",
@@ -305,11 +323,22 @@ def build_post(
     )
 
 
-def build_all(tmp_path: Path) -> dict:
-    fixture, source_paths, signed_release = build_source(tmp_path)
+def build_all(
+    tmp_path: Path,
+    *,
+    extra_release_private: Ed25519PrivateKey | None = None,
+    outcome_private: Ed25519PrivateKey | None = None,
+    t1_private: Ed25519PrivateKey | None = None,
+) -> dict:
+    fixture, source_paths, signed_release = build_source(
+        tmp_path,
+        extra_release_private=extra_release_private,
+    )
     post_paths = build_post(tmp_path, source_paths, signed_release)
-    outcome_private = Ed25519PrivateKey.generate()
-    t1_private = Ed25519PrivateKey.generate()
+    if outcome_private is None:
+        outcome_private = Ed25519PrivateKey.generate()
+    if t1_private is None:
+        t1_private = Ed25519PrivateKey.generate()
     outcome_keyring, outcome_pin = write_keyring(
         tmp_path / "outcome-keyring.json",
         version=outcome_module.OUTCOME_KEYRING_VERSION,
@@ -449,6 +478,64 @@ def test_outcome_signer_must_differ_from_release_and_t1(
         match="independent from release and T1",
     ):
         sign(values)
+
+
+def test_outcome_signer_cannot_reuse_unused_release_authority_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shared_private = Ed25519PrivateKey.generate()
+    values = build_all(
+        tmp_path,
+        extra_release_private=shared_private,
+        outcome_private=shared_private,
+    )
+    with pytest.raises(
+        outcome_module.DeploymentOutcomeError,
+        match="independent from release and T1",
+    ):
+        sign(values)
+    with monkeypatch.context() as context:
+        context.setattr(
+            signer_module,
+            "validate_signer_domain_separation",
+            lambda *_args: None,
+        )
+        externally_signed = sign(values)
+    with pytest.raises(
+        outcome_module.DeploymentOutcomeError,
+        match="independent from release and T1",
+    ):
+        verify(values, externally_signed)
+
+
+def test_unused_release_authority_key_cannot_overlap_t1_keyring(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shared_private = Ed25519PrivateKey.generate()
+    values = build_all(
+        tmp_path,
+        extra_release_private=shared_private,
+        t1_private=shared_private,
+    )
+    with pytest.raises(
+        outcome_module.DeploymentOutcomeError,
+        match="keyrings must use disjoint public keys",
+    ):
+        sign(values)
+    with monkeypatch.context() as context:
+        context.setattr(
+            signer_module,
+            "validate_signer_domain_separation",
+            lambda *_args: None,
+        )
+        externally_signed = sign(values)
+    with pytest.raises(
+        outcome_module.DeploymentOutcomeError,
+        match="keyrings must use disjoint public keys",
+    ):
+        verify(values, externally_signed)
 
 
 def test_exact_receipt_and_post_evidence_bytes_are_required(

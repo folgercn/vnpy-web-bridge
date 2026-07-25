@@ -71,10 +71,12 @@ outcome keyring 只能使用：
 keyring 中出现其他 purpose、重复 key ID 或非 32-byte Ed25519 key 均 fail
 closed。outcome signer 的原始 32-byte public key 必须同时不同于：
 
-1. 实际签署 readonly deployment release 的 key；
+1. pinned readonly deployment release keyring 内全部 authority key；
 2. T1 keyring 内所有 `t1_audit_release_signer` key。
 
-只改 key ID、purpose 或 keyring 文件不能构成独立信任域。
+完整 L3 release authority key 集合与完整 T1 authority key 集合也必须完全
+不相交；不只是检查本次实际使用的 release signer。只改 key ID、purpose 或
+keyring 文件不能构成独立信任域。
 
 `verify_signed_outcome()` 的验证结果同时返回实际 outcome signer 原始
 32-byte Ed25519 public key 的 `outcome_signer_public_key_sha256`。后续

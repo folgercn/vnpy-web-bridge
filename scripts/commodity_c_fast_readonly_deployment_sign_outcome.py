@@ -33,6 +33,7 @@ from commodity_c_fast_readonly_deployment_outcome import (
     unsigned_outcome_payload,
     validate_outcome_custody_path,
     validate_outcome_semantics,
+    validate_signer_domain_separation,
     verify_post_bundle,
     write_signed_outcome_create_only,
 )
@@ -134,13 +135,7 @@ def sign_outcome(
         raise DeploymentOutcomeError(
             "private key does not match trusted outcome signer"
         )
-    if actual_public in {
-        source.release_signer_public_bytes,
-        *t1_keys.values(),
-    }:
-        raise DeploymentOutcomeError(
-            "outcome signer must be independent from release and T1 signers"
-        )
+    validate_signer_domain_separation(source, t1_keys, actual_public)
     payload["signature"] = base64.b64encode(
         private_key.sign(canonical_json(unsigned_outcome_payload(payload)))
     ).decode("ascii")

@@ -187,7 +187,7 @@ class VerifiedSourceChain:
     receipt_raw_sha256: str
     pre_evidence_raw_sha256: dict[str, str]
     pre_evidence_bundle_index_sha256: str
-    release_signer_public_bytes: bytes
+    release_authority_public_keys: frozenset[bytes]
     consume_marker_path: Path
 
 
@@ -365,6 +365,25 @@ def _read_json_raw(path: Path, label: str) -> tuple[bytes, dict[str, Any]]:
     return raw, payload
 
 
+def validate_signer_domain_separation(
+    source: VerifiedSourceChain,
+    t1_keys: dict[str, bytes],
+    outcome_public: bytes,
+) -> None:
+    t1_authority_public_keys = frozenset(t1_keys.values())
+    if source.release_authority_public_keys & t1_authority_public_keys:
+        raise DeploymentOutcomeError(
+            "release and T1 authority keyrings must use disjoint public keys"
+        )
+    forbidden_public_keys = (
+        source.release_authority_public_keys | t1_authority_public_keys
+    )
+    if outcome_public in forbidden_public_keys:
+        raise DeploymentOutcomeError(
+            "outcome signer must be independent from release and T1 signers"
+        )
+
+
 def _validate_receipt_chain(
     source: OutcomeSourcePaths,
     *,
@@ -540,12 +559,10 @@ def _validate_receipt_chain(
         purpose=release_module.TRUSTED_KEY_PURPOSE,
         label="readonly deployment release keyring",
     )
-    try:
-        release_signer_public = release_keys[str(release["signer_key_id"])]
-    except KeyError as exc:
+    if str(release["signer_key_id"]) not in release_keys:
         raise DeploymentOutcomeError(
             "release signer is absent from pinned release keyring"
-        ) from exc
+        )
     return VerifiedSourceChain(
         release=release,
         consume=consume,
@@ -558,7 +575,7 @@ def _validate_receipt_chain(
         pre_evidence_bundle_index_sha256=(
             verified.evidence_bundle_index_sha256
         ),
-        release_signer_public_bytes=release_signer_public,
+        release_authority_public_keys=frozenset(release_keys.values()),
         consume_marker_path=source.consume_marker,
     )
 
@@ -1090,14 +1107,7 @@ def verify_signed_outcome(
         raise DeploymentOutcomeError(
             "outcome signer is absent from pinned outcome keyring"
         ) from exc
-    forbidden_public_keys = {
-        source.release_signer_public_bytes,
-        *t1_keys.values(),
-    }
-    if outcome_public in forbidden_public_keys:
-        raise DeploymentOutcomeError(
-            "outcome signer must be independent from release and T1 signers"
-        )
+    validate_signer_domain_separation(source, t1_keys, outcome_public)
     try:
         signature = base64.b64decode(payload["signature"], validate=True)
         if len(signature) != 64:
