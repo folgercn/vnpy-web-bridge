@@ -84,7 +84,9 @@ initial full verify
   -> create-only frozen bundle/gate/invocations
   -> final full release/readiness revalidation
   -> parent active-pin re-read
-  -> child bootstrap gate
+  -> child bootstrap reopens exact consume through pinned custody dirfd
+  -> child atomically creates attempt-level launch claim (O_EXCL + fsync)
+  -> child rejects existing launch claim or terminal before network
   -> audit internal last gate
   -> read DSN / connect / readonly SELECT
   -> exact output validation
@@ -94,6 +96,14 @@ initial full verify
 consume 成功后 attempt 永久烧毁。任何失败、timeout、interrupt、
 `CONSUMED_WITHOUT_TERMINAL` 或 terminal 写入失败都必须使用全新人工 release；
 不能删除 marker、补写成功 terminal 或 replay。
+
+`<attempt_id>.query-child-started-v3.json` 是 child/DSN 边界的唯一 launch
+claim。bootstrap 必须从 root-pinned custody 以 `dirfd + O_NOFOLLOW + fstat +
+双读`重开 exact consume marker，验证 release/attempt/custody 及 raw/canonical
+SHA256 后，才可以 `O_EXCL` 创建 `0600` claim，并对文件和 custody 目录执行
+`fsync`。两个并发 child 只有一个能认领；已认领的 staged invocation 即使在
+timeout、interrupt、exec failure 或无产物后再次运行，也必须在 DSN/网络之前
+拒绝。terminal 已存在同样必须 pre-query 拒绝。
 
 ## 最后的 active-pin 边界
 
@@ -122,9 +132,12 @@ gate 返回后下一步就是 `_read_secret_text_file()` 和 connect，中间没
 release、readiness、manifest 或 gate late replacement 都会在 DSN 读取和网络连接
 之前 fail closed。
 
-pre-connect gate、audit invocation 和 query-child invocation 都作为 create-only
-exact artifacts 保存，并把 raw/canonical SHA256 写入 query terminal，供 #136
-离线 acceptance 直接绑定，而不是依赖路径或隐式传递。
+consume marker、child launch claim、pre-connect gate、audit invocation 和
+query-child invocation 都作为 create-only exact artifacts 保存，并把各自的
+raw/canonical SHA256 写入 query terminal，供 #136 离线 acceptance 直接绑定，
+而不是依赖路径或隐式传递。launch claim 的结构由
+[`commodity-c-fast-t1-query-child-started-v3.schema.json`](../schemas/commodity-c-fast-t1-query-child-started-v3.schema.json)
+冻结，其 schema hash 也必须包含在人工签署的 query release 中。
 
 ## terminal 与 outcome unknown
 
@@ -160,8 +173,9 @@ replay_allowed=false
 本身被第二次中断，也不会先写 terminal 并遗留 child。即使进程已终止，也不从
 进程状态推断 SQL 是否完成或数据库 mutation 为零。
 
-只有 child exit 0/1、四份产物完整且 readonly proof、endpoint、QuestDB build、
-manifest、release、readiness、gate 和两层 invocation exact bindings 全部通过，
+只有 child 已持有 exact launch claim、exit 0/1、四份产物完整且 readonly proof、
+endpoint、QuestDB build、manifest、release、readiness、consume、gate 和两层
+invocation exact bindings 全部通过，
 才可写 `COMPLETED_EVIDENCE_*`。即使该状态为 P0 pass，terminal 仍固定
 `p0_acceptance_authorized=false`，外部 acceptance 属于独立 Issue #136。
 

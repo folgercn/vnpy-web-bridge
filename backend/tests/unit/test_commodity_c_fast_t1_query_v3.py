@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import hashlib
 import inspect
@@ -9,6 +10,7 @@ from pathlib import Path
 import stat
 import subprocess
 import sys
+import threading
 from types import SimpleNamespace
 
 from cryptography.hazmat.primitives import serialization
@@ -167,6 +169,7 @@ def release_payload(current_readiness: VerifiedReadinessPacket) -> dict:
         "query_child_sha256": H,
         "release_schema_sha256": H,
         "consume_schema_sha256": H,
+        "child_started_schema_sha256": H,
         "terminal_schema_sha256": H,
         "readiness_verifier_sha256": H,
         "readiness_schema_sha256": H,
@@ -278,6 +281,23 @@ def verified(tmp_path: Path) -> tuple[
     )
     custody = tmp_path / "custody"
     custody.mkdir(mode=0o700)
+    identity = {
+        "schema_version": "commodity_c_fast_t1_custody_identity_v1",
+        "custody_id": "query-v3-test-custody",
+    }
+    identity_path = custody / "custody-identity.json"
+    identity_path.write_bytes(canonical_json(identity))
+    identity_path.chmod(0o600)
+    payload["custody_identity_sha256"] = hashlib.sha256(
+        canonical_json(identity)
+    ).hexdigest()
+    payload["custody_path_sha256"] = query_module.custody_path_sha256(custody)
+    legacy_payload.update(
+        {
+            "custody_identity_sha256": payload["custody_identity_sha256"],
+            "custody_path_sha256": payload["custody_path_sha256"],
+        }
+    )
     pins = ReadinessPins(H, H2, H3, H5, custody)
     dsn = tmp_path / "readonly.dsn"
     dsn.write_text("postgresql://readonly:secret@invalid/qdb", encoding="utf-8")
@@ -463,6 +483,9 @@ def signed_release_inputs(
         "query_child_sha256": query_module.QUERY_CHILD_PATH,
         "release_schema_sha256": query_module.RELEASE_SCHEMA_PATH,
         "consume_schema_sha256": query_module.CONSUME_SCHEMA_PATH,
+        "child_started_schema_sha256": (
+            query_module.CHILD_STARTED_SCHEMA_PATH
+        ),
         "terminal_schema_sha256": query_module.TERMINAL_SCHEMA_PATH,
         "readiness_verifier_sha256": query_module.READINESS_VERIFIER_PATH,
         "readiness_schema_sha256": query_module.READINESS_SCHEMA_PATH,
@@ -632,6 +655,79 @@ def times(*offsets: int) -> Clock:
     return Clock([NOW + timedelta(seconds=value) for value in offsets])
 
 
+def child_invocation_values(invocation: list[str]) -> dict[str, str]:
+    assert invocation[1] == "-I"
+    assert len(invocation[3:]) % 2 == 0
+    return {
+        invocation[index]: invocation[index + 1]
+        for index in range(3, len(invocation), 2)
+    }
+
+
+def with_launch_claim(child_executor):
+    def claiming_executor(invocation, *args, **kwargs):
+        values = child_invocation_values(invocation)
+        child_module.claim_query_child_launch(
+            Path(values["--expected-custody"]),
+            release_id=values["--expected-release-id"],
+            attempt_id=values["--expected-attempt-id"],
+            release_raw_sha256=values["--expected-release-raw-sha256"],
+            release_canonical_sha256=values[
+                "--expected-release-canonical-sha256"
+            ],
+            consume_raw_sha256=values["--expected-consume-raw-sha256"],
+            consume_canonical_sha256=values[
+                "--expected-consume-canonical-sha256"
+            ],
+            query_v3_keyring_sha256=values["--expected-query-v3-pin"],
+        )
+        return child_executor(invocation, *args, **kwargs)
+
+    return claiming_executor
+
+
+def child_claim_fixture(
+    tmp_path: Path,
+) -> tuple[
+    query_module.VerifiedQueryRelease,
+    ReadinessPins,
+    dict,
+    str,
+    str,
+]:
+    current, pins, _dsn = verified(tmp_path)
+    consume = query_module._consume_payload(current, NOW)
+    guard = query_module.open_custody_guard(
+        pins.packet_custody_path,
+        require_root_owned_parent=False,
+    )
+    consume_name = f"{current.payload['attempt_id']}.query-consumed-v3.json"
+    try:
+        consume_raw_sha256 = query_module.write_json_create_only_at(
+            guard,
+            consume_name,
+            consume,
+            query_module.CONSUME_SCHEMA_PATH,
+            "test query consume",
+        )
+        assert hashlib.sha256(
+            query_module.read_regular_file_at(
+                guard,
+                consume_name,
+                "test query consume",
+            )
+        ).hexdigest() == consume_raw_sha256
+    finally:
+        guard.close()
+    return (
+        current,
+        pins,
+        consume,
+        consume_raw_sha256,
+        hashlib.sha256(canonical_json(consume)).hexdigest(),
+    )
+
+
 def execute(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -661,9 +757,13 @@ def execute(
         current,
         pins,
         dsn,
-        revalidator or (lambda _at: current),
+        (
+            (lambda at: revalidator(current, at))
+            if revalidator is not None
+            else (lambda _at: current)
+        ),
         clock=clock or times(0, 1, 2, 3),
-        child_executor=child_executor,
+        child_executor=with_launch_claim(child_executor),
         output_validator=output_validator,
         require_root_owned_parent=False,
     )
@@ -1029,12 +1129,9 @@ def test_final_revalidation_failure_burns_attempt_without_child(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    seed = tmp_path / "seed"
-    seed.mkdir()
-    current, _, _ = verified(seed)
     calls = 0
 
-    def revalidator(_at):
+    def revalidator(current, _at):
         nonlocal calls
         calls += 1
         if calls == 2:
@@ -1075,9 +1172,8 @@ def test_consume_replay_is_rejected(
         dsn,
         lambda _at: current,
         clock=times(0, 1, 2, 3),
-        child_executor=lambda *_args, **_kwargs: subprocess.CompletedProcess(
-            [],
-            0,
+        child_executor=with_launch_claim(
+            lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0)
         ),
         output_validator=lambda *_args: (
             True,
@@ -1242,6 +1338,8 @@ def test_success_binds_gate_and_both_invocations(
     assert terminal["terminal_state"] == "COMPLETED_EVIDENCE_P0_PASS"
     assert_terminal_safety_invariants(terminal)
     for field in (
+        "query_child_launch_marker_raw_sha256",
+        "query_child_launch_marker_canonical_sha256",
         "pre_connect_gate_raw_sha256",
         "pre_connect_gate_canonical_sha256",
         "audit_child_invocation_raw_sha256",
@@ -1250,6 +1348,19 @@ def test_success_binds_gate_and_both_invocations(
         "query_child_invocation_canonical_sha256",
     ):
         assert terminal[field] is not None
+    attempt_id = terminal["attempt_id"]
+    launch_path = (
+        tmp_path
+        / "custody"
+        / f"{attempt_id}.query-child-started-v3.json"
+    )
+    launch = json.loads(launch_path.read_text())
+    assert terminal["query_child_launch_marker_raw_sha256"] == hashlib.sha256(
+        launch_path.read_bytes()
+    ).hexdigest()
+    assert terminal[
+        "query_child_launch_marker_canonical_sha256"
+    ] == hashlib.sha256(canonical_json(launch)).hexdigest()
     invalid = dict(terminal)
     invalid["pre_connect_gate_raw_sha256"] = None
     with pytest.raises(OneShotError):
@@ -1258,6 +1369,198 @@ def test_success_binds_gate_and_both_invocations(
             query_module.TERMINAL_SCHEMA_PATH,
             "invalid completed terminal",
         )
+
+
+def test_two_concurrent_children_only_one_claims_launch_before_network(
+    tmp_path: Path,
+) -> None:
+    (
+        current,
+        pins,
+        _consume,
+        consume_raw_sha256,
+        consume_canonical_sha256,
+    ) = child_claim_fixture(tmp_path)
+    barrier = threading.Barrier(2)
+
+    def claim() -> tuple[str, str]:
+        barrier.wait()
+        return child_module.claim_query_child_launch(
+            pins.packet_custody_path,
+            release_id=current.payload["release_id"],
+            attempt_id=current.payload["attempt_id"],
+            release_raw_sha256=current.raw_sha256,
+            release_canonical_sha256=current.canonical_sha256,
+            consume_raw_sha256=consume_raw_sha256,
+            consume_canonical_sha256=consume_canonical_sha256,
+            query_v3_keyring_sha256=current.keyring_sha256,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(claim) for _ in range(2)]
+    successes: list[tuple[str, str]] = []
+    failures: list[BaseException] = []
+    for future in futures:
+        try:
+            successes.append(future.result())
+        except BaseException as exc:
+            failures.append(exc)
+    assert len(successes) == 1
+    assert len(failures) == 1
+    assert isinstance(failures[0], child_module.QueryChildError)
+    assert "already claimed" in str(failures[0])
+    launch_path = (
+        pins.packet_custody_path
+        / f"{current.payload['attempt_id']}.query-child-started-v3.json"
+    )
+    assert stat.S_IMODE(launch_path.stat().st_mode) == 0o600
+    launch = json.loads(launch_path.read_text())
+    query_module.validate_json_schema(
+        launch,
+        query_module.CHILD_STARTED_SCHEMA_PATH,
+        "concurrent launch marker",
+    )
+    assert successes[0] == (
+        hashlib.sha256(launch_path.read_bytes()).hexdigest(),
+        hashlib.sha256(canonical_json(launch)).hexdigest(),
+    )
+
+
+@pytest.mark.parametrize("tamper_kind", ("raw", "canonical"))
+def test_child_rejects_consume_exact_tamper_before_launch(
+    tmp_path: Path,
+    tamper_kind: str,
+) -> None:
+    (
+        current,
+        pins,
+        consume,
+        consume_raw_sha256,
+        consume_canonical_sha256,
+    ) = child_claim_fixture(tmp_path)
+    consume_path = (
+        pins.packet_custody_path
+        / f"{current.payload['attempt_id']}.query-consumed-v3.json"
+    )
+    if tamper_kind == "raw":
+        consume_path.write_text(
+            json.dumps(consume, ensure_ascii=False, indent=4, sort_keys=True)
+            + "\n",
+            encoding="utf-8",
+        )
+    else:
+        consume["manifest_raw_sha256"] = H5
+        consume_path.write_bytes(canonical_json(consume))
+    consume_path.chmod(0o600)
+    with pytest.raises(child_module.QueryChildError, match="exact binding"):
+        child_module.claim_query_child_launch(
+            pins.packet_custody_path,
+            release_id=current.payload["release_id"],
+            attempt_id=current.payload["attempt_id"],
+            release_raw_sha256=current.raw_sha256,
+            release_canonical_sha256=current.canonical_sha256,
+            consume_raw_sha256=consume_raw_sha256,
+            consume_canonical_sha256=consume_canonical_sha256,
+            query_v3_keyring_sha256=current.keyring_sha256,
+        )
+    assert not list(
+        pins.packet_custody_path.glob("*.query-child-started-v3.json")
+    )
+
+
+def test_existing_terminal_blocks_child_before_launch_claim(
+    tmp_path: Path,
+) -> None:
+    (
+        current,
+        pins,
+        _consume,
+        consume_raw_sha256,
+        consume_canonical_sha256,
+    ) = child_claim_fixture(tmp_path)
+    terminal_path = (
+        pins.packet_custody_path
+        / f"{current.payload['attempt_id']}.query-terminal-v3.json"
+    )
+    terminal_path.write_text("{}\n", encoding="utf-8")
+    terminal_path.chmod(0o600)
+    with pytest.raises(child_module.QueryChildError, match="terminal"):
+        child_module.claim_query_child_launch(
+            pins.packet_custody_path,
+            release_id=current.payload["release_id"],
+            attempt_id=current.payload["attempt_id"],
+            release_raw_sha256=current.raw_sha256,
+            release_canonical_sha256=current.canonical_sha256,
+            consume_raw_sha256=consume_raw_sha256,
+            consume_canonical_sha256=consume_canonical_sha256,
+            query_v3_keyring_sha256=current.keyring_sha256,
+        )
+    assert not list(
+        pins.packet_custody_path.glob("*.query-child-started-v3.json")
+    )
+
+
+def test_staged_child_replay_after_post_claim_failure_is_pre_network_blocked(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (
+        current,
+        pins,
+        _consume,
+        consume_raw_sha256,
+        consume_canonical_sha256,
+    ) = child_claim_fixture(tmp_path)
+    args = SimpleNamespace(
+        audit_invocation=tmp_path / "staged-child-invocation.json",
+        expected_provenance_pin=H,
+        expected_t1_pin=H2,
+        expected_query_v3_pin=current.keyring_sha256,
+        expected_l3_pin=H3,
+        expected_outcome_pin=H5,
+        expected_custody=str(pins.packet_custody_path),
+        expected_release_id=current.payload["release_id"],
+        expected_attempt_id=current.payload["attempt_id"],
+        expected_release_raw_sha256=current.raw_sha256,
+        expected_release_canonical_sha256=current.canonical_sha256,
+        expected_consume_raw_sha256=consume_raw_sha256,
+        expected_consume_canonical_sha256=consume_canonical_sha256,
+        expected_gate_raw_sha256=H,
+        expected_gate_canonical_sha256=H2,
+    )
+    audit_invocation = [str(Path(sys.executable).resolve()), "-I", "audit.py"]
+    monkeypatch.setattr(child_module, "parse_args", lambda: args)
+    monkeypatch.setattr(child_module, "unblock_control_signals", lambda: None)
+    monkeypatch.setattr(
+        child_module,
+        "load_audit_invocation",
+        lambda _path: audit_invocation,
+    )
+    monkeypatch.setattr(
+        child_module,
+        "verify_gate_binding",
+        lambda *_args: {
+            "release_raw_sha256": current.raw_sha256,
+            "release_canonical_sha256": current.canonical_sha256,
+        },
+    )
+    monkeypatch.setattr(
+        child_module,
+        "verify_active_pins",
+        lambda *_args, **_kwargs: pins.packet_custody_path,
+    )
+    exec_calls: list[list[str]] = []
+
+    def fail_after_claim(_python, invocation, _environment):
+        exec_calls.append(invocation)
+        raise OSError("simulated failure after launch claim")
+
+    monkeypatch.setattr(child_module.os, "execve", fail_after_claim)
+    assert child_module.main() == 78
+    assert not list(pins.packet_custody_path.glob("*.query-terminal-v3.json"))
+    assert not list(pins.packet_custody_path.glob("*/artifacts/*"))
+    assert child_module.main() == 78
+    assert exec_calls == [audit_invocation]
 
 
 def test_query_gate_tamper_is_blocked_before_active_pin_access(
@@ -2012,6 +2315,12 @@ def test_query_bootstrap_invocation_is_isolated(tmp_path: Path) -> None:
         tmp_path / "audit-invocation.json",
         H,
         H2,
+        release_id="query-v3-test-release-0001",
+        attempt_id=release_attempt_id("query-v3-test-release-0001"),
+        release_raw_sha256=H,
+        release_canonical_sha256=H2,
+        consume_raw_sha256=H3,
+        consume_canonical_sha256=H4,
     )
     assert invocation[:3] == [
         str(Path(sys.executable).resolve(strict=True)),

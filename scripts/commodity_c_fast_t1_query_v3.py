@@ -90,6 +90,10 @@ RELEASE_SCHEMA_PATH = (
 CONSUME_SCHEMA_PATH = (
     ROOT / "docs/schemas/commodity-c-fast-t1-query-consume-v3.schema.json"
 )
+CHILD_STARTED_SCHEMA_PATH = (
+    ROOT
+    / "docs/schemas/commodity-c-fast-t1-query-child-started-v3.schema.json"
+)
 TERMINAL_SCHEMA_PATH = (
     ROOT / "docs/schemas/commodity-c-fast-t1-query-terminal-v3.schema.json"
 )
@@ -534,6 +538,7 @@ def verify_query_release(
         "query_child_sha256": QUERY_CHILD_PATH,
         "release_schema_sha256": RELEASE_SCHEMA_PATH,
         "consume_schema_sha256": CONSUME_SCHEMA_PATH,
+        "child_started_schema_sha256": CHILD_STARTED_SCHEMA_PATH,
         "terminal_schema_sha256": TERMINAL_SCHEMA_PATH,
         "readiness_verifier_sha256": READINESS_VERIFIER_PATH,
         "readiness_schema_sha256": READINESS_SCHEMA_PATH,
@@ -697,6 +702,8 @@ def _terminal(
     *,
     consume_raw_sha256: str,
     consume_canonical_sha256: str,
+    child_launch_raw_sha256: str | None,
+    child_launch_canonical_sha256: str | None,
     audit_invocation_raw_sha256: str | None,
     audit_invocation_canonical_sha256: str | None,
     pre_connect_gate_raw_sha256: str | None,
@@ -743,6 +750,10 @@ def _terminal(
         "release_canonical_sha256": verified.canonical_sha256,
         "consume_marker_raw_sha256": consume_raw_sha256,
         "consume_marker_canonical_sha256": consume_canonical_sha256,
+        "query_child_launch_marker_raw_sha256": child_launch_raw_sha256,
+        "query_child_launch_marker_canonical_sha256": (
+            child_launch_canonical_sha256
+        ),
         "readiness_packet_raw_sha256": release["readiness"][
             "packet_raw_sha256"
         ],
@@ -852,6 +863,13 @@ def build_query_child_invocation(
     audit_invocation_path: Path,
     gate_raw_sha256: str,
     gate_canonical_sha256: str,
+    *,
+    release_id: str,
+    attempt_id: str,
+    release_raw_sha256: str,
+    release_canonical_sha256: str,
+    consume_raw_sha256: str,
+    consume_canonical_sha256: str,
 ) -> list[str]:
     return [
         str(Path(sys.executable).resolve(strict=True)),
@@ -871,11 +889,87 @@ def build_query_child_invocation(
         pins.outcome_keyring_sha256,
         "--expected-custody",
         str(pins.packet_custody_path.resolve(strict=True)),
+        "--expected-release-id",
+        release_id,
+        "--expected-attempt-id",
+        attempt_id,
+        "--expected-release-raw-sha256",
+        release_raw_sha256,
+        "--expected-release-canonical-sha256",
+        release_canonical_sha256,
+        "--expected-consume-raw-sha256",
+        consume_raw_sha256,
+        "--expected-consume-canonical-sha256",
+        consume_canonical_sha256,
         "--expected-gate-raw-sha256",
         gate_raw_sha256,
         "--expected-gate-canonical-sha256",
         gate_canonical_sha256,
     ]
+
+
+def _expected_child_launch_payload(
+    consume: dict[str, Any],
+    *,
+    consume_raw_sha256: str,
+    consume_canonical_sha256: str,
+) -> dict[str, Any]:
+    return {
+        "schema_version": "commodity_c_fast_t1_query_child_started_v3",
+        "purpose": "c_fast_t1_one_shot_child_launch_claim_before_network",
+        "candidate_id": CANDIDATE_ID,
+        "release_id": consume["release_id"],
+        "attempt_id": consume["attempt_id"],
+        "release_raw_sha256": consume["release_raw_sha256"],
+        "release_canonical_sha256": consume["release_canonical_sha256"],
+        "consume_marker_raw_sha256": consume_raw_sha256,
+        "consume_marker_canonical_sha256": consume_canonical_sha256,
+        "readiness_packet_raw_sha256": consume[
+            "readiness_packet_raw_sha256"
+        ],
+        "readiness_packet_canonical_sha256": consume[
+            "readiness_packet_canonical_sha256"
+        ],
+        "manifest_raw_sha256": consume["manifest_raw_sha256"],
+        "manifest_canonical_sha256": consume["manifest_canonical_sha256"],
+        "trusted_keyring_sha256": consume["trusted_keyring_sha256"],
+        "custody_identity_sha256": consume["custody_identity_sha256"],
+        "custody_path_sha256": consume["custody_path_sha256"],
+        "launch_claim_precedes_network": True,
+        "query_started": False,
+        "production_queried": False,
+        "launch_claim_is_authority": False,
+        "replay_allowed": False,
+    }
+
+
+def _read_child_launch_marker(
+    guard,
+    name: str,
+    expected: dict[str, Any],
+) -> tuple[str | None, str | None]:
+    if not custody_entry_exists(guard, name):
+        return None, None
+    try:
+        raw = read_regular_file_at(
+            guard,
+            name,
+            "T1 query v3 child launch marker",
+        )
+        payload = parse_json_bytes(
+            raw,
+            "T1 query v3 child launch marker",
+        )
+        validate_json_schema(
+            payload,
+            CHILD_STARTED_SCHEMA_PATH,
+            "T1 query v3 child launch marker",
+        )
+    except OneShotError as exc:
+        raise QueryV3Error(str(exc)) from exc
+    if payload != expected:
+        raise QueryV3Error("query child launch marker binding is invalid")
+    return _hash(raw), _hash(canonical_json(payload))
 
 
 def build_pre_connect_gate(
@@ -1045,6 +1139,7 @@ def execute_verified_query(
     )
     release = verified.payload
     consume_name = f"{release['attempt_id']}.query-consumed-v3.json"
+    launch_name = f"{release['attempt_id']}.query-child-started-v3.json"
     terminal_name = f"{release['attempt_id']}.query-terminal-v3.json"
     try:
         if custody_entry_exists(guard, consume_name):
@@ -1093,6 +1188,13 @@ def execute_verified_query(
         pre_connect_gate_canonical_sha256: str | None = None
         query_invocation_raw_sha256: str | None = None
         query_invocation_canonical_sha256: str | None = None
+        child_launch_raw_sha256: str | None = None
+        child_launch_canonical_sha256: str | None = None
+        expected_child_launch = _expected_child_launch_payload(
+            consume,
+            consume_raw_sha256=consume_raw_sha256,
+            consume_canonical_sha256=consume_canonical_sha256,
+        )
         final_at: datetime | None = None
         execution_legacy = verified.legacy
         attempt_dir = custody / release["attempt_id"]
@@ -1169,6 +1271,12 @@ def execute_verified_query(
                 audit_invocation_path,
                 gate_raw_sha256,
                 gate_canonical_sha256,
+                release_id=release["release_id"],
+                attempt_id=release["attempt_id"],
+                release_raw_sha256=verified.raw_sha256,
+                release_canonical_sha256=verified.canonical_sha256,
+                consume_raw_sha256=consume_raw_sha256,
+                consume_canonical_sha256=consume_canonical_sha256,
             )
             derived_files = dict(verified.legacy.bundle_files)
             derived_files.update(
@@ -1232,6 +1340,8 @@ def execute_verified_query(
                 verified,
                 consume_raw_sha256=consume_raw_sha256,
                 consume_canonical_sha256=consume_canonical_sha256,
+                child_launch_raw_sha256=None,
+                child_launch_canonical_sha256=None,
                 audit_invocation_raw_sha256=(
                     audit_invocation_raw_sha256
                 ),
@@ -1302,6 +1412,8 @@ def execute_verified_query(
                 verified,
                 consume_raw_sha256=consume_raw_sha256,
                 consume_canonical_sha256=consume_canonical_sha256,
+                child_launch_raw_sha256=None,
+                child_launch_canonical_sha256=None,
                 audit_invocation_raw_sha256=(
                     audit_invocation_raw_sha256
                 ),
@@ -1435,6 +1547,25 @@ def execute_verified_query(
             p0_pass = None
             proof_verified = False
             exit_code = 2
+        (
+            child_launch_raw_sha256,
+            child_launch_canonical_sha256,
+        ) = _read_child_launch_marker(
+            guard,
+            launch_name,
+            expected_child_launch,
+        )
+        if (
+            child_launch_raw_sha256 is None
+            and state != "FAILED_CHILD_LAUNCH_PRE_QUERY"
+        ):
+            state = "FAILED_CHILD_LAUNCH_PRE_QUERY"
+            error = "CHILD_LAUNCH_CLAIM_MISSING_PRE_QUERY"
+            child_code = None
+            hashes = artifact_hashes(paths)
+            p0_pass = None
+            proof_verified = False
+            exit_code = 2
         observed_end = _utc(clock(), "terminal time")
         if final_at is None:
             raise QueryV3Error("child path lacks final revalidation time")
@@ -1455,6 +1586,10 @@ def execute_verified_query(
             verified,
             consume_raw_sha256=consume_raw_sha256,
             consume_canonical_sha256=consume_canonical_sha256,
+            child_launch_raw_sha256=child_launch_raw_sha256,
+            child_launch_canonical_sha256=(
+                child_launch_canonical_sha256
+            ),
             audit_invocation_raw_sha256=audit_invocation_raw_sha256,
             audit_invocation_canonical_sha256=(
                 audit_invocation_canonical_sha256

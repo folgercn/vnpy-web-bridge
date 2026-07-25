@@ -29,7 +29,41 @@ PIN_NAMES = {
     "custody": "packet-custody.path",
 }
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{8,128}$")
+ATTEMPT_ID_PATTERN = re.compile(r"^attempt-[0-9a-f]{64}$")
 MAX_INVOCATION_BYTES = 64 * 1024
+MAX_CUSTODY_JSON_BYTES = 1024 * 1024
+CONSUME_FIELDS = frozenset(
+    {
+        "schema_version",
+        "purpose",
+        "candidate_id",
+        "release_id",
+        "attempt_id",
+        "release_raw_sha256",
+        "release_canonical_sha256",
+        "consumed_at",
+        "readiness_packet_id",
+        "readiness_packet_raw_sha256",
+        "readiness_packet_canonical_sha256",
+        "content_attestation_raw_sha256",
+        "content_attestation_canonical_sha256",
+        "provenance_raw_sha256",
+        "provenance_canonical_sha256",
+        "outcome_raw_sha256",
+        "outcome_canonical_sha256",
+        "manifest_raw_sha256",
+        "manifest_canonical_sha256",
+        "trusted_keyring_sha256",
+        "custody_identity_sha256",
+        "custody_path_sha256",
+        "consume_precedes_final_revalidation",
+        "query_started",
+        "production_queried",
+        "consume_is_authority",
+        "replay_allowed",
+    }
+)
 AUDIT_FLAGS = (
     "--manifest",
     "--start",
@@ -104,7 +138,7 @@ def verify_active_pins(
     expected: dict[str, str],
     *,
     pin_root: Path = PIN_ROOT,
-) -> None:
+) -> Path:
     try:
         info = pin_root.lstat()
     except OSError as exc:
@@ -132,6 +166,7 @@ def verify_active_pins(
         raise QueryChildError("active custody cannot be resolved") from exc
     if observed_custody != expected_custody:
         raise QueryChildError("active custody changed before query boundary")
+    return observed_custody
 
 
 def _reject_constant(value: str) -> None:
@@ -184,7 +219,7 @@ def verify_gate_binding(
     invocation: list[str],
     expected_raw_sha256: str,
     expected_canonical_sha256: str,
-) -> None:
+) -> dict[str, Any]:
     expected_suffix = [
         GATE_HASH_FLAGS[0],
         expected_raw_sha256,
@@ -242,6 +277,360 @@ def verify_gate_binding(
         != hashlib.sha256(core_raw).hexdigest()
     ):
         raise QueryChildError("audit invocation core binding changed before exec")
+    return payload
+
+
+def _canonical_json(value: Any) -> bytes:
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def _parse_json_object(raw: bytes, label: str) -> dict[str, Any]:
+    def reject_duplicate_keys(
+        pairs: list[tuple[str, Any]],
+    ) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise QueryChildError(f"{label} has duplicate keys")
+            result[key] = value
+        return result
+
+    try:
+        payload = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=reject_duplicate_keys,
+            parse_constant=_reject_constant,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise QueryChildError(f"{label} JSON is invalid") from exc
+    if not isinstance(payload, dict):
+        raise QueryChildError(f"{label} must contain one JSON object")
+    return payload
+
+
+def _read_fd_bounded(
+    descriptor: int,
+    label: str,
+    *,
+    limit: int = MAX_CUSTODY_JSON_BYTES,
+) -> bytes:
+    chunks: list[bytes] = []
+    observed = 0
+    while True:
+        chunk = os.read(descriptor, min(65536, limit + 1 - observed))
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
+        observed += len(chunk)
+        if observed > limit:
+            raise QueryChildError(f"{label} is oversized")
+
+
+def _open_pinned_custody(path: Path) -> tuple[int, Path]:
+    try:
+        resolved = path.resolve(strict=True)
+        before = resolved.lstat()
+    except OSError as exc:
+        raise QueryChildError("pinned custody is unavailable") from exc
+    if (
+        stat.S_ISLNK(before.st_mode)
+        or not stat.S_ISDIR(before.st_mode)
+        or before.st_uid != os.geteuid()
+        or stat.S_IMODE(before.st_mode) & 0o077
+    ):
+        raise QueryChildError("pinned custody metadata is unsafe")
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(resolved, flags)
+        opened = os.fstat(descriptor)
+        after = resolved.lstat()
+    except OSError as exc:
+        if "descriptor" in locals():
+            os.close(descriptor)
+        raise QueryChildError("pinned custody cannot be opened") from exc
+    identities = {
+        (
+            current.st_dev,
+            current.st_ino,
+            current.st_uid,
+            stat.S_IMODE(current.st_mode),
+            stat.S_IFMT(current.st_mode),
+        )
+        for current in (before, opened, after)
+    }
+    if len(identities) != 1:
+        os.close(descriptor)
+        raise QueryChildError("pinned custody changed while opening")
+    return descriptor, resolved
+
+
+def _read_regular_file_at(
+    custody_fd: int,
+    name: str,
+    label: str,
+) -> bytes:
+    if "/" in name or name in {"", ".", ".."}:
+        raise QueryChildError(f"{label} filename is invalid")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(name, flags, dir_fd=custody_fd)
+        before = os.fstat(descriptor)
+        first = _read_fd_bounded(descriptor, label)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        second = _read_fd_bounded(descriptor, label)
+        after = os.fstat(descriptor)
+    except OSError as exc:
+        raise QueryChildError(f"{label} is unavailable") from exc
+    finally:
+        if "descriptor" in locals():
+            os.close(descriptor)
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or before.st_dev != after.st_dev
+        or before.st_ino != after.st_ino
+        or before.st_size != after.st_size
+        or len(first) != before.st_size
+        or first != second
+        or before.st_uid != os.geteuid()
+        or stat.S_IMODE(before.st_mode) & 0o077
+    ):
+        raise QueryChildError(f"{label} metadata or bytes are unsafe")
+    return first
+
+
+def _entry_exists_at(custody_fd: int, name: str) -> bool:
+    try:
+        os.stat(name, dir_fd=custody_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise QueryChildError("custody entry cannot be inspected") from exc
+    return True
+
+
+def _launch_payload(consume: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": "commodity_c_fast_t1_query_child_started_v3",
+        "purpose": "c_fast_t1_one_shot_child_launch_claim_before_network",
+        "candidate_id": "C_FAST_CROSS_SECTION_NEUTRAL",
+        "release_id": consume["release_id"],
+        "attempt_id": consume["attempt_id"],
+        "release_raw_sha256": consume["release_raw_sha256"],
+        "release_canonical_sha256": consume["release_canonical_sha256"],
+        "consume_marker_raw_sha256": consume["_raw_sha256"],
+        "consume_marker_canonical_sha256": consume["_canonical_sha256"],
+        "readiness_packet_raw_sha256": consume[
+            "readiness_packet_raw_sha256"
+        ],
+        "readiness_packet_canonical_sha256": consume[
+            "readiness_packet_canonical_sha256"
+        ],
+        "manifest_raw_sha256": consume["manifest_raw_sha256"],
+        "manifest_canonical_sha256": consume["manifest_canonical_sha256"],
+        "trusted_keyring_sha256": consume["trusted_keyring_sha256"],
+        "custody_identity_sha256": consume["custody_identity_sha256"],
+        "custody_path_sha256": consume["custody_path_sha256"],
+        "launch_claim_precedes_network": True,
+        "query_started": False,
+        "production_queried": False,
+        "launch_claim_is_authority": False,
+        "replay_allowed": False,
+    }
+
+
+def _validate_consume(
+    consume: dict[str, Any],
+    *,
+    release_id: str,
+    attempt_id: str,
+    release_raw_sha256: str,
+    release_canonical_sha256: str,
+    consume_raw_sha256: str,
+    consume_canonical_sha256: str,
+    query_v3_keyring_sha256: str,
+    custody: Path,
+    custody_fd: int,
+) -> None:
+    if set(consume) != CONSUME_FIELDS:
+        raise QueryChildError("consume marker fields are invalid")
+    if (
+        consume.get("schema_version")
+        != "commodity_c_fast_t1_query_consume_v3"
+        or consume.get("purpose")
+        != "c_fast_t1_query_v3_consume_before_final_revalidation"
+        or consume.get("candidate_id") != "C_FAST_CROSS_SECTION_NEUTRAL"
+        or consume.get("release_id") != release_id
+        or consume.get("attempt_id") != attempt_id
+        or consume.get("release_raw_sha256") != release_raw_sha256
+        or consume.get("release_canonical_sha256")
+        != release_canonical_sha256
+        or consume.get("trusted_keyring_sha256")
+        != query_v3_keyring_sha256
+        or consume.get("consume_precedes_final_revalidation") is not True
+        or consume.get("query_started") is not False
+        or consume.get("production_queried") is not False
+        or consume.get("consume_is_authority") is not False
+        or consume.get("replay_allowed") is not False
+    ):
+        raise QueryChildError("consume marker binding is invalid")
+    for key, value in consume.items():
+        if key.endswith("_sha256") and (
+            not isinstance(value, str)
+            or SHA256_PATTERN.fullmatch(value) is None
+        ):
+            raise QueryChildError("consume marker SHA256 is invalid")
+    if (
+        hashlib.sha256(str(custody).encode("utf-8")).hexdigest()
+        != consume["custody_path_sha256"]
+    ):
+        raise QueryChildError("consume marker custody path binding is invalid")
+    identity_raw = _read_regular_file_at(
+        custody_fd,
+        "custody-identity.json",
+        "custody identity",
+    )
+    identity = _parse_json_object(identity_raw, "custody identity")
+    if (
+        set(identity) != {"schema_version", "custody_id"}
+        or identity.get("schema_version")
+        != "commodity_c_fast_t1_custody_identity_v1"
+        or not isinstance(identity.get("custody_id"), str)
+        or ID_PATTERN.fullmatch(identity["custody_id"]) is None
+        or hashlib.sha256(_canonical_json(identity)).hexdigest()
+        != consume["custody_identity_sha256"]
+    ):
+        raise QueryChildError("consume marker custody identity binding is invalid")
+    consume["_raw_sha256"] = consume_raw_sha256
+    consume["_canonical_sha256"] = consume_canonical_sha256
+
+
+def claim_query_child_launch(
+    custody: Path,
+    *,
+    release_id: str,
+    attempt_id: str,
+    release_raw_sha256: str,
+    release_canonical_sha256: str,
+    consume_raw_sha256: str,
+    consume_canonical_sha256: str,
+    query_v3_keyring_sha256: str,
+) -> tuple[str, str]:
+    if (
+        ID_PATTERN.fullmatch(release_id) is None
+        or ATTEMPT_ID_PATTERN.fullmatch(attempt_id) is None
+        or any(
+            SHA256_PATTERN.fullmatch(value) is None
+            for value in (
+                release_raw_sha256,
+                release_canonical_sha256,
+                consume_raw_sha256,
+                consume_canonical_sha256,
+                query_v3_keyring_sha256,
+            )
+        )
+    ):
+        raise QueryChildError("launch claim expectations are invalid")
+    custody_fd, resolved_custody = _open_pinned_custody(custody)
+    consume_name = f"{attempt_id}.query-consumed-v3.json"
+    launch_name = f"{attempt_id}.query-child-started-v3.json"
+    terminal_name = f"{attempt_id}.query-terminal-v3.json"
+    try:
+        consume_raw = _read_regular_file_at(
+            custody_fd,
+            consume_name,
+            "query consume marker",
+        )
+        consume = _parse_json_object(consume_raw, "query consume marker")
+        observed_consume_raw_sha256 = hashlib.sha256(consume_raw).hexdigest()
+        observed_consume_canonical_sha256 = hashlib.sha256(
+            _canonical_json(consume)
+        ).hexdigest()
+        if (
+            observed_consume_raw_sha256 != consume_raw_sha256
+            or observed_consume_canonical_sha256
+            != consume_canonical_sha256
+        ):
+            raise QueryChildError("consume marker exact binding changed")
+        _validate_consume(
+            consume,
+            release_id=release_id,
+            attempt_id=attempt_id,
+            release_raw_sha256=release_raw_sha256,
+            release_canonical_sha256=release_canonical_sha256,
+            consume_raw_sha256=consume_raw_sha256,
+            consume_canonical_sha256=consume_canonical_sha256,
+            query_v3_keyring_sha256=query_v3_keyring_sha256,
+            custody=resolved_custody,
+            custody_fd=custody_fd,
+        )
+        if _entry_exists_at(custody_fd, terminal_name):
+            raise QueryChildError("query terminal already exists")
+        launch = _launch_payload(consume)
+        consume.pop("_raw_sha256")
+        consume.pop("_canonical_sha256")
+        rendered = json.dumps(
+            launch,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+            allow_nan=False,
+        ).encode("utf-8") + b"\n"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        flags |= getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(
+                launch_name,
+                flags,
+                0o600,
+                dir_fd=custody_fd,
+            )
+        except FileExistsError as exc:
+            raise QueryChildError("query child launch is already claimed") from exc
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(rendered)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except BaseException:
+            try:
+                os.unlink(launch_name, dir_fd=custody_fd)
+                os.fsync(custody_fd)
+            except OSError:
+                pass
+            raise
+        os.fsync(custody_fd)
+        launch_raw = _read_regular_file_at(
+            custody_fd,
+            launch_name,
+            "query child launch marker",
+        )
+        if launch_raw != rendered:
+            raise QueryChildError("query child launch marker changed after claim")
+        consume_after = _read_regular_file_at(
+            custody_fd,
+            consume_name,
+            "query consume marker",
+        )
+        if consume_after != consume_raw:
+            raise QueryChildError("consume marker changed after launch claim")
+        if _entry_exists_at(custody_fd, terminal_name):
+            raise QueryChildError("query terminal appeared before network")
+        return (
+            hashlib.sha256(launch_raw).hexdigest(),
+            hashlib.sha256(_canonical_json(launch)).hexdigest(),
+        )
+    finally:
+        os.close(custody_fd)
 
 
 def parse_args() -> argparse.Namespace:
@@ -253,6 +642,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--expected-l3-pin", required=True)
     parser.add_argument("--expected-outcome-pin", required=True)
     parser.add_argument("--expected-custody", required=True)
+    parser.add_argument("--expected-release-id", required=True)
+    parser.add_argument("--expected-attempt-id", required=True)
+    parser.add_argument("--expected-release-raw-sha256", required=True)
+    parser.add_argument("--expected-release-canonical-sha256", required=True)
+    parser.add_argument("--expected-consume-raw-sha256", required=True)
+    parser.add_argument("--expected-consume-canonical-sha256", required=True)
     parser.add_argument("--expected-gate-raw-sha256", required=True)
     parser.add_argument("--expected-gate-canonical-sha256", required=True)
     return parser.parse_args()
@@ -263,12 +658,12 @@ def main() -> int:
     try:
         unblock_control_signals()
         invocation = load_audit_invocation(args.audit_invocation)
-        verify_gate_binding(
+        gate = verify_gate_binding(
             invocation,
             args.expected_gate_raw_sha256,
             args.expected_gate_canonical_sha256,
         )
-        verify_active_pins(
+        custody = verify_active_pins(
             {
                 "provenance": args.expected_provenance_pin,
                 "t1": args.expected_t1_pin,
@@ -277,6 +672,23 @@ def main() -> int:
                 "outcome": args.expected_outcome_pin,
                 "custody": args.expected_custody,
             }
+        )
+        if (
+            gate.get("release_raw_sha256")
+            != args.expected_release_raw_sha256
+            or gate.get("release_canonical_sha256")
+            != args.expected_release_canonical_sha256
+        ):
+            raise QueryChildError("gate release binding changed before claim")
+        claim_query_child_launch(
+            custody,
+            release_id=args.expected_release_id,
+            attempt_id=args.expected_attempt_id,
+            release_raw_sha256=args.expected_release_raw_sha256,
+            release_canonical_sha256=args.expected_release_canonical_sha256,
+            consume_raw_sha256=args.expected_consume_raw_sha256,
+            consume_canonical_sha256=args.expected_consume_canonical_sha256,
+            query_v3_keyring_sha256=args.expected_query_v3_pin,
         )
         os.execve(invocation[0], invocation, child_environment())
     except (OSError, QueryChildError) as exc:

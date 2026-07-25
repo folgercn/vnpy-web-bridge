@@ -21,6 +21,7 @@
   "query_child_sha256": "PENDING_QUERY_V3_CHILD_SHA256",
   "release_schema_sha256": "PENDING_QUERY_V3_RELEASE_SCHEMA_SHA256",
   "consume_schema_sha256": "PENDING_QUERY_V3_CONSUME_SCHEMA_SHA256",
+  "child_started_schema_sha256": "PENDING_QUERY_V3_CHILD_STARTED_SCHEMA_SHA256",
   "terminal_schema_sha256": "PENDING_QUERY_V3_TERMINAL_SCHEMA_SHA256",
   "readiness_verifier_sha256": "PENDING_READINESS_V2_VERIFIER_SHA256",
   "readiness_schema_sha256": "PENDING_READINESS_V2_SCHEMA_SHA256",
