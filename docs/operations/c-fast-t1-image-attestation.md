@@ -62,9 +62,9 @@ digest、commit、时间和 producer 均为假值。
 - 要求 `/opt/c-fast-t1` 最终只能包含这九个普通文件，禁止 `.pyc/.pyo`、
   `__pycache__`、signer、private-key marker、额外 runtime file 或额外空目录；
   九个文件均按 uid/gid 65532 权限模型检查 read bit；
-- 要求 `/opt/c-fast-t1` 及 bundle 的全部父目录按 uid/gid 65532 权限模型
-  具有 traverse bit；解释器的 `/usr`、`/usr/local`、`/usr/local/bin` 父目录
-  同样必须可 traverse；
+- 要求 `/opt`、`/opt/c-fast-t1` 及 bundle 的全部父目录按 uid/gid 65532
+  权限模型具有 traverse bit；解释器的 `/usr`、`/usr/local`、
+  `/usr/local/bin` 父目录同样必须可 traverse；
 - 要求绝对解释器 `/usr/local/bin/python3.12` 是 non-empty、regular 且按
   uid/gid 65532 权限模型具有 execute bit；这只验证路径、类型、长度与权限位，
   不证明解释器代码 bytes 的来源或完整性；
@@ -92,7 +92,9 @@ Containerfile 不设置 `CMD`；Docker/BuildKit 在设置 `ENTRYPOINT` 时应把
 正式 template 的 frozen `command` 负责提供 one-shot 参数。二者都不授予
 authority，也不代表无需 runner 内部的 signed-release 校验。
 
-Git 读取固定禁用 replace objects，并隔离可能改变 object lookup 的环境变量。
+Git 读取使用仅含固定 system PATH、locale 和三项 fail-closed Git 配置的最小
+环境，固定禁用 replace objects；调用方的 `GIT_*`、HOME/XDG、动态加载器等
+环境变量不会进入 source trust-root 子进程。
 Containerfile 在 `py_compile` 自检后必须删除所有 `.pyc/.pyo` 和空
 `__pycache__`；runtime packaging validator 冻结了这条指令。
 

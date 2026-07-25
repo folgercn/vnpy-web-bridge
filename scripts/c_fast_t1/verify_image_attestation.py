@@ -49,6 +49,7 @@ ATTESTATION_SCHEMA_SOURCE_PATH = (
     "docs/schemas/commodity-c-fast-t1-image-attestation-v1.schema.json"
 )
 FROZEN_PATH = "/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin"
+GIT_SAFE_PATH = "/usr/bin:/bin"
 EXPECTED_ENVIRONMENT = {
     "PATH": FROZEN_PATH,
     "LANG": "C.UTF-8",
@@ -279,23 +280,14 @@ def _validate_schema(
 
 
 def _git_environment() -> dict[str, str]:
-    environment = os.environ.copy()
-    for name in (
-        "GIT_DIR",
-        "GIT_WORK_TREE",
-        "GIT_INDEX_FILE",
-        "GIT_OBJECT_DIRECTORY",
-        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-    ):
-        environment.pop(name, None)
-    environment.update(
-        {
-            "GIT_NO_REPLACE_OBJECTS": "1",
-            "GIT_CONFIG_NOSYSTEM": "1",
-            "GIT_CONFIG_GLOBAL": os.devnull,
-        }
-    )
-    return environment
+    return {
+        "PATH": GIT_SAFE_PATH,
+        "LANG": "C",
+        "LC_ALL": "C",
+        "GIT_NO_REPLACE_OBJECTS": "1",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+    }
 
 
 def _git_command(source_root: Path, arguments: list[str]) -> list[str]:
@@ -1066,7 +1058,7 @@ def _runtime_scan(
         path for path in filesystem if path.startswith(runtime_prefix)
     }
     expected_relative = {path.removeprefix("/") for path in expected_paths}
-    expected_directories = {"opt/c-fast-t1"}
+    expected_directories = {"opt", "opt/c-fast-t1"}
     for path in expected_relative:
         parent = PurePosixPath(path).parent
         while str(parent).startswith("opt/c-fast-t1"):

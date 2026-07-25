@@ -1028,6 +1028,13 @@ def test_interpreter_must_be_nonempty_executable_regular_file(
         ),
         (
             {
+                "base_directories": ("opt",),
+                "base_directory_modes": {"opt": 0o000},
+            },
+            "runtime bundle directory.*traversable",
+        ),
+        (
+            {
                 "base_directories": ("usr/local/bin",),
                 "base_directory_modes": {"usr/local/bin": 0o000},
             },
@@ -1347,6 +1354,49 @@ def test_git_replace_objects_are_ignored(tmp_path: Path) -> None:
     raw = subject._git_blob(repository, original_sha, "value.txt")
 
     assert raw == b"original\n"
+
+
+def test_git_source_reads_ignore_process_environment_injection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    _git(repository, "init", "-q")
+    _git(repository, "config", "user.name", "Test")
+    _git(repository, "config", "user.email", "test@example.invalid")
+    (repository / "value.txt").write_text("trusted\n", encoding="utf-8")
+    _git(repository, "add", "value.txt")
+    _git(repository, "commit", "-q", "-m", "trusted")
+    commit_sha = _git(repository, "rev-parse", "HEAD")
+    for name, value in {
+        "GIT_COMMON_DIR": str(tmp_path / "evil-common"),
+        "GIT_NAMESPACE": "evil",
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "core.pager",
+        "GIT_CONFIG_VALUE_0": "false",
+        "GIT_CONFIG_PARAMETERS": "'core.pager=false'",
+        "GIT_EXEC_PATH": str(tmp_path / "evil-exec"),
+        "GIT_CEILING_DIRECTORIES": str(tmp_path),
+        "HOME": str(tmp_path / "evil-home"),
+        "XDG_CONFIG_HOME": str(tmp_path / "evil-xdg"),
+        "DYLD_INSERT_LIBRARIES": str(tmp_path / "evil.dylib"),
+        "LD_PRELOAD": str(tmp_path / "evil.so"),
+    }.items():
+        monkeypatch.setenv(name, value)
+
+    environment = subject._git_environment()
+    raw = subject._git_blob(repository, commit_sha, "value.txt")
+
+    assert raw == b"trusted\n"
+    assert environment == {
+        "PATH": subject.GIT_SAFE_PATH,
+        "LANG": "C",
+        "LC_ALL": "C",
+        "GIT_NO_REPLACE_OBJECTS": "1",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+    }
 
 
 def test_duplicate_nonfinite_symlink_and_read_change_are_rejected(
