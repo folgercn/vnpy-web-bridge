@@ -237,6 +237,28 @@ def custody_pins(path: Path) -> ReadinessPins:
     )
 
 
+def keep_active_pins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        release_module,
+        "verify_active_readiness_pins",
+        lambda _pins: None,
+    )
+
+
+def assert_zero_query_effects(terminal: dict) -> None:
+    assert terminal["query_execution_state"] == "NOT_STARTED"
+    assert terminal["child_launched"] is False
+    assert terminal["production_queried"] is False
+    assert terminal["write_probe_attempted"] is False
+    assert terminal["database_mutations"] == 0
+    assert terminal["web_bridge_rpc_calls"] == 0
+    assert terminal["orders_sent"] == 0
+    assert terminal["positions_modified"] == 0
+    assert terminal["dispatch_changed"] is False
+
+
 def test_schema_keeps_plans_separate_from_actual_authority() -> None:
     current_readiness = readiness()
     signed = sign_for_test(
@@ -427,38 +449,49 @@ def parse_time(value: str) -> datetime:
 
 def test_consume_is_durable_before_final_revalidation_and_cannot_replay(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     current_readiness = readiness()
     pins = custody_pins(tmp_path / "custody")
     verified = verified_release(current_readiness)
     attempt_id = verified.payload["attempt_id"]
     calls: list[str] = []
+    keep_active_pins(monkeypatch)
 
-    def revalidate(at: datetime) -> VerifiedReadinessPacket:
+    def preconsume_revalidate(_: datetime) -> release_module.VerifiedReleaseV2:
+        calls.append("revalidate_before_consume")
+        return verified
+
+    def final_revalidate(at: datetime) -> release_module.VerifiedReleaseV2:
         consume_path = pins.packet_custody_path / (
             f"{attempt_id}.consumed-v2.json"
         )
         marker = json.loads(consume_path.read_text(encoding="utf-8"))
         assert marker["consumed_at"] <= at.isoformat()
         calls.append("revalidate_after_consume")
-        return current_readiness
+        return verified
 
     times = iter(
         (
             NOW,
             NOW + timedelta(seconds=1),
             NOW + timedelta(seconds=2),
+            NOW + timedelta(seconds=3),
         )
     )
     exit_code, terminal = release_module._execute_no_query_harness(
         verified,
         pins,
-        revalidate,
+        preconsume_revalidate,
+        final_revalidate,
         clock=lambda: next(times),
         require_root_owned_parent=False,
     )
     assert exit_code == 0
-    assert calls == ["revalidate_after_consume"]
+    assert calls == [
+        "revalidate_before_consume",
+        "revalidate_after_consume",
+    ]
     assert terminal["terminal_state"] == "HARNESS_REVALIDATED_NO_QUERY"
     assert terminal["query_execution_state"] == "NOT_STARTED"
     assert terminal["harness_result_is_t1_success"] is False
@@ -472,7 +505,8 @@ def test_consume_is_durable_before_final_revalidation_and_cannot_replay(
         release_module._execute_no_query_harness(
             verified,
             pins,
-            revalidate,
+            preconsume_revalidate,
+            final_revalidate,
             clock=lambda: NOW,
             require_root_owned_parent=False,
         )
@@ -492,12 +526,14 @@ def test_public_harness_path_verifies_before_and_after_consume(
         return verified
 
     monkeypatch.setattr(release_module, "verify_release", verify)
+    keep_active_pins(monkeypatch)
     times = iter(
         (
             NOW,
             NOW + timedelta(seconds=1),
             NOW + timedelta(seconds=2),
             NOW + timedelta(seconds=3),
+            NOW + timedelta(seconds=4),
         )
     )
     exit_code, terminal = (
@@ -514,22 +550,92 @@ def test_public_harness_path_verifies_before_and_after_consume(
     )
     assert exit_code == 0
     assert terminal["terminal_state"] == "HARNESS_REVALIDATED_NO_QUERY"
+    assert terminal["started_at"] == (
+        NOW + timedelta(seconds=2)
+    ).isoformat()
+    assert terminal["final_revalidation_completed_at"] == (
+        NOW + timedelta(seconds=3)
+    ).isoformat()
+    assert terminal["ended_at"] == (
+        NOW + timedelta(seconds=4)
+    ).isoformat()
     assert verification_times == [
         NOW,
-        NOW + timedelta(seconds=2),
+        NOW + timedelta(seconds=1),
+        NOW + timedelta(seconds=3),
     ]
 
 
-def test_failed_final_revalidation_burns_attempt_without_query(
+def test_release_expiring_at_actual_consume_time_is_not_consumed(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current_readiness = readiness()
+    pins = custody_pins(tmp_path / "custody")
+    verified = verified_release(current_readiness)
+    expiry = parse_time(verified.payload["expires_at"])
+    verification_times: list[datetime] = []
+
+    def verify(*_args, now: datetime, **_kwargs):
+        verification_times.append(now)
+        return verified
+
+    monkeypatch.setattr(release_module, "verify_release", verify)
+    times = iter((NOW, NOW + timedelta(seconds=1), expiry))
+
+    with pytest.raises(
+        release_module.ReleaseV2FoundationError,
+        match="release is not currently active",
+    ):
+        release_module.verify_and_execute_no_query_harness(
+            tmp_path / "release.json",
+            tmp_path / "keyring.json",
+            tmp_path / "manifest.json",
+            tmp_path / "readiness.json",
+            SimpleNamespace(),
+            pins,
+            clock=lambda: next(times),
+            require_root_owned_parent=False,
+        )
+
+    attempt_id = verified.payload["attempt_id"]
+    assert verification_times == [
+        NOW,
+        NOW + timedelta(seconds=1),
+    ]
+    assert not (
+        pins.packet_custody_path / f"{attempt_id}.consumed-v2.json"
+    ).exists()
+    assert not (
+        pins.packet_custody_path
+        / f"{attempt_id}.harness-terminal-v2.json"
+    ).exists()
+
+
+def test_active_pin_rotation_before_consume_does_not_burn_attempt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     current_readiness = readiness()
     pins = custody_pins(tmp_path / "custody")
     verified = verified_release(current_readiness)
 
-    def fail_revalidation(_: datetime) -> VerifiedReadinessPacket:
-        raise ReadinessV2Error("readiness expired")
+    monkeypatch.setattr(
+        release_module,
+        "verify_release",
+        lambda *_args, **_kwargs: verified,
+    )
 
+    def reject_rotated_pins(_pins: ReadinessPins) -> None:
+        raise ReadinessV2Error(
+            "active readiness pins changed before protected use"
+        )
+
+    monkeypatch.setattr(
+        release_module,
+        "verify_active_readiness_pins",
+        reject_rotated_pins,
+    )
     times = iter(
         (
             NOW,
@@ -537,9 +643,126 @@ def test_failed_final_revalidation_burns_attempt_without_query(
             NOW + timedelta(seconds=2),
         )
     )
+
+    with pytest.raises(
+        release_module.ReleaseV2FoundationError,
+        match="active readiness pins changed",
+    ):
+        release_module.verify_and_execute_no_query_harness(
+            tmp_path / "release.json",
+            tmp_path / "keyring.json",
+            tmp_path / "manifest.json",
+            tmp_path / "readiness.json",
+            SimpleNamespace(),
+            pins,
+            clock=lambda: next(times),
+            require_root_owned_parent=False,
+        )
+
+    attempt_id = verified.payload["attempt_id"]
+    assert not (
+        pins.packet_custody_path / f"{attempt_id}.consumed-v2.json"
+    ).exists()
+    assert not (
+        pins.packet_custody_path
+        / f"{attempt_id}.harness-terminal-v2.json"
+    ).exists()
+
+
+@pytest.mark.parametrize(
+    ("final_offset", "ended_offset"),
+    (
+        (1, 3),
+        (3, 1),
+    ),
+)
+def test_inverse_clock_after_consume_fails_without_query_effects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    final_offset: int,
+    ended_offset: int,
+) -> None:
+    current_readiness = readiness()
+    pins = custody_pins(tmp_path / "custody")
+    verified = verified_release(current_readiness)
+    verification_times: list[datetime] = []
+
+    def verify(*_args, now: datetime, **_kwargs):
+        verification_times.append(now)
+        return verified
+
+    monkeypatch.setattr(release_module, "verify_release", verify)
+    keep_active_pins(monkeypatch)
+    times = iter(
+        (
+            NOW,
+            NOW + timedelta(seconds=1),
+            NOW + timedelta(seconds=2),
+            NOW + timedelta(seconds=final_offset),
+            NOW + timedelta(seconds=ended_offset),
+        )
+    )
+
+    exit_code, terminal = (
+        release_module.verify_and_execute_no_query_harness(
+            tmp_path / "release.json",
+            tmp_path / "keyring.json",
+            tmp_path / "manifest.json",
+            tmp_path / "readiness.json",
+            SimpleNamespace(),
+            pins,
+            clock=lambda: next(times),
+            require_root_owned_parent=False,
+        )
+    )
+
+    assert exit_code == 2
+    assert terminal["terminal_state"] == (
+        "FAILED_FINAL_READINESS_REVALIDATION_NO_QUERY"
+    )
+    assert terminal["error_code"] == "NON_MONOTONIC_CLOCK"
+    assert terminal["final_revalidation_completed_at"] is None
+    assert parse_time(terminal["started_at"]) <= parse_time(
+        terminal["ended_at"]
+    )
+    assert_zero_query_effects(terminal)
+    if final_offset < 2:
+        assert verification_times == [
+            NOW,
+            NOW + timedelta(seconds=1),
+        ]
+    else:
+        assert verification_times == [
+            NOW,
+            NOW + timedelta(seconds=1),
+            NOW + timedelta(seconds=3),
+        ]
+
+
+def test_failed_final_revalidation_burns_attempt_without_query(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current_readiness = readiness()
+    pins = custody_pins(tmp_path / "custody")
+    verified = verified_release(current_readiness)
+    keep_active_pins(monkeypatch)
+
+    def fail_revalidation(_: datetime) -> release_module.VerifiedReleaseV2:
+        raise ReadinessV2Error("readiness expired")
+
+    times = iter(
+        (
+            NOW,
+            NOW + timedelta(seconds=1),
+            NOW + timedelta(seconds=2),
+            NOW + timedelta(seconds=3),
+        )
+    )
     exit_code, terminal = release_module._execute_no_query_harness(
         verified,
         pins,
+        lambda _at: verified,
         fail_revalidation,
         clock=lambda: next(times),
         require_root_owned_parent=False,
@@ -563,6 +786,7 @@ def test_harness_terminal_cannot_claim_p0_success() -> None:
         H4,
         started_at=NOW,
         ended_at=NOW + timedelta(seconds=1),
+        final_revalidation_at=NOW + timedelta(milliseconds=500),
         success=True,
     )
     validate_json_schema(

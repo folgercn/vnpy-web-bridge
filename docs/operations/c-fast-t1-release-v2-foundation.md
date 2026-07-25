@@ -86,8 +86,14 @@ NO_QUERY
 [`commodity-c-fast-t1-one-shot-release-v2.schema.json`](../schemas/commodity-c-fast-t1-one-shot-release-v2.schema.json)，
 不能传给 release consumer，也不能被“补一个签名”后直接投入运行。
 
-当前切片没有 signer，只包含严格先后两次完成全链验证的 `NO_QUERY`
-foundation consumer；它只会 create-only 消费 attempt、重验 readiness 和
+当前切片没有 signer，只包含严格执行“初验 → 消费前全链重验 → 真实消费时间
+轻量时效检查和 active pins 重载 → create-only consume → 消费后最终全链重验”
+的 `NO_QUERY` foundation consumer。消费前任何一步失败都不会烧掉 attempt；
+消费后的最终重验失败才会留下 `NOT_STARTED`、零副作用的失败 terminal。
+`started_at`、最终重验时间和 `ended_at` 还必须保持单调，检测到时钟回拨时
+只允许输出 `NON_MONOTONIC_CLOCK` 失败 terminal，不得宣称重验成功。
+
+该 consumer 只会消费 attempt、重验 readiness 和
 release/manifest/keyring/runtime 原始绑定并生成 harness terminal，不包含
 child/query callback，也没有生产 query runner。任何人都不得
 通过手工删除 `PENDING_`、复制 v1 signature、修改 schema 或绕过 validator

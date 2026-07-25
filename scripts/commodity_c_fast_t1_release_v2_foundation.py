@@ -34,6 +34,7 @@ from commodity_c_fast_t1_readiness_v2 import (
     ReadinessPins,
     ReadinessV2Error,
     VerifiedReadinessPacket,
+    verify_active_readiness_pins,
     verify_existing_readiness_packet,
 )
 
@@ -473,8 +474,19 @@ def _terminal_payload(
     *,
     started_at: datetime,
     ended_at: datetime,
+    final_revalidation_at: datetime | None,
     success: bool,
+    error_code: str | None = None,
 ) -> dict[str, Any]:
+    if success:
+        if final_revalidation_at is None or error_code is not None:
+            raise ReleaseV2FoundationError(
+                "successful terminal requires one final revalidation time"
+            )
+    elif final_revalidation_at is not None or error_code is None:
+        raise ReleaseV2FoundationError(
+            "failed terminal requires one error and no final revalidation time"
+        )
     release = verified.payload
     readiness = release["readiness"]
     return {
@@ -488,7 +500,7 @@ def _terminal_payload(
             if success
             else "FAILED_FINAL_READINESS_REVALIDATION_NO_QUERY"
         ),
-        "error_code": None if success else "READINESS_REVALIDATION_FAILED",
+        "error_code": error_code,
         "release_raw_sha256": verified.raw_sha256,
         "release_canonical_sha256": verified.canonical_sha256,
         "consume_marker_raw_sha256": consume_raw_sha256,
@@ -523,7 +535,12 @@ def _terminal_payload(
         "started_at": _utc(started_at, "start time").isoformat(),
         "ended_at": _utc(ended_at, "end time").isoformat(),
         "final_revalidation_completed_at": (
-            _utc(ended_at, "end time").isoformat() if success else None
+            _utc(
+                final_revalidation_at,
+                "final revalidation time",
+            ).isoformat()
+            if final_revalidation_at is not None
+            else None
         ),
         "query_execution_state": "NOT_STARTED",
         "child_launched": False,
@@ -543,10 +560,53 @@ def _terminal_payload(
     }
 
 
+def _validate_terminal_timeline(terminal: dict[str, Any]) -> None:
+    try:
+        started_at = parse_datetime(terminal["started_at"], "started_at")
+        ended_at = parse_datetime(terminal["ended_at"], "ended_at")
+        final_value = terminal["final_revalidation_completed_at"]
+        final_at = (
+            parse_datetime(
+                final_value,
+                "final_revalidation_completed_at",
+            )
+            if final_value is not None
+            else None
+        )
+    except OneShotError as exc:
+        raise ReleaseV2FoundationError(str(exc)) from exc
+    if ended_at < started_at:
+        raise ReleaseV2FoundationError(
+            "terminal timeline ends before consumption"
+        )
+    if terminal["terminal_state"] == "HARNESS_REVALIDATED_NO_QUERY":
+        if final_at is None or not started_at <= final_at <= ended_at:
+            raise ReleaseV2FoundationError(
+                "successful terminal has a non-monotonic timeline"
+            )
+    elif final_at is not None:
+        raise ReleaseV2FoundationError(
+            "failed terminal cannot claim final revalidation completion"
+        )
+
+
+def _assert_same_verified_release(
+    expected: VerifiedReleaseV2,
+    actual: VerifiedReleaseV2,
+    *,
+    phase: str,
+) -> None:
+    if actual != expected:
+        raise ReleaseV2FoundationError(
+            f"release or exact readiness changed before {phase}"
+        )
+
+
 def _execute_no_query_harness(
     verified: VerifiedReleaseV2,
     pins: ReadinessPins,
-    final_revalidator: Callable[[datetime], VerifiedReadinessPacket],
+    preconsume_revalidator: Callable[[datetime], VerifiedReleaseV2],
+    final_revalidator: Callable[[datetime], VerifiedReleaseV2],
     *,
     clock: Callable[[], datetime],
     require_root_owned_parent: bool = True,
@@ -570,8 +630,30 @@ def _execute_no_query_harness(
             raise ReleaseV2FoundationError(
                 "harness terminal exists without a consume marker"
             )
+
+        preconsume_time = _utc(clock(), "pre-consume verification time")
+        consumption_verified = preconsume_revalidator(preconsume_time)
+        _assert_same_verified_release(
+            verified,
+            consumption_verified,
+            phase="consumption",
+        )
         started_at = _utc(clock(), "consume time")
-        consume = _consume_payload(verified, consumed_at=started_at)
+        if started_at < preconsume_time:
+            raise ReleaseV2FoundationError(
+                "consume time precedes pre-consume verification"
+            )
+        validate_release_semantics(
+            consumption_verified.payload,
+            consumption_verified.readiness,
+            now=started_at,
+        )
+        verify_active_readiness_pins(pins)
+
+        consume = _consume_payload(
+            consumption_verified,
+            consumed_at=started_at,
+        )
         consume_raw_sha256 = write_json_create_only_at(
             guard,
             consume_name,
@@ -595,37 +677,49 @@ def _execute_no_query_harness(
         consume_canonical_sha256 = _hash(canonical_json(consume))
         final_time = _utc(clock(), "final revalidation time")
         success = False
-        try:
-            final = final_revalidator(final_time)
-            success = (
-                final.payload == verified.readiness.payload
-                and final.raw_sha256 == verified.readiness.raw_sha256
-                and final.canonical_sha256
-                == verified.readiness.canonical_sha256
-            )
-            if success:
+        error_code = "READINESS_REVALIDATION_FAILED"
+        if final_time < started_at:
+            error_code = "NON_MONOTONIC_CLOCK"
+        else:
+            try:
+                final_verified = final_revalidator(final_time)
+                _assert_same_verified_release(
+                    consumption_verified,
+                    final_verified,
+                    phase="final harness revalidation",
+                )
                 validate_release_semantics(
-                    verified.payload,
-                    final,
+                    final_verified.payload,
+                    final_verified.readiness,
                     now=final_time,
                 )
-        except (
-            OneShotError,
-            ReadinessV2Error,
-            ReleaseV2FoundationError,
-            OSError,
-            ValueError,
-        ):
+                success = True
+                error_code = None
+            except (
+                OneShotError,
+                ReadinessV2Error,
+                ReleaseV2FoundationError,
+                OSError,
+                ValueError,
+            ):
+                success = False
+
+        observed_ended_at = _utc(clock(), "terminal time")
+        if observed_ended_at < max(started_at, final_time):
             success = False
-        ended_at = _utc(clock(), "terminal time")
+            error_code = "NON_MONOTONIC_CLOCK"
+        ended_at = max(started_at, final_time, observed_ended_at)
         terminal = _terminal_payload(
-            verified,
+            consumption_verified,
             consume_raw_sha256,
             consume_canonical_sha256,
             started_at=started_at,
             ended_at=ended_at,
+            final_revalidation_at=final_time if success else None,
             success=success,
+            error_code=error_code,
         )
+        _validate_terminal_timeline(terminal)
         write_json_create_only_at(
             guard,
             terminal_name,
@@ -634,7 +728,7 @@ def _execute_no_query_harness(
             "T1 release v2 harness terminal",
         )
         return (0 if success else 2), terminal
-    except (OneShotError, FileExistsError) as exc:
+    except (OneShotError, ReadinessV2Error, FileExistsError) as exc:
         raise ReleaseV2FoundationError(str(exc)) from exc
     finally:
         guard.close()
@@ -663,8 +757,8 @@ def verify_and_execute_no_query_harness(
         require_root_owned_parent=require_root_owned_parent,
     )
 
-    def final_revalidator(at: datetime) -> VerifiedReadinessPacket:
-        final_verified = verify_release(
+    def revalidator(at: datetime) -> VerifiedReleaseV2:
+        current_verified = verify_release(
             release_path,
             keyring_path,
             manifest_path,
@@ -674,20 +768,18 @@ def verify_and_execute_no_query_harness(
             now=at,
             require_root_owned_parent=require_root_owned_parent,
         )
-        if (
-            final_verified.raw_sha256 != verified.raw_sha256
-            or final_verified.canonical_sha256
-            != verified.canonical_sha256
-        ):
-            raise ReleaseV2FoundationError(
-                "release changed before final harness revalidation"
-            )
-        return final_verified.readiness
+        _assert_same_verified_release(
+            verified,
+            current_verified,
+            phase="harness revalidation",
+        )
+        return current_verified
 
     return _execute_no_query_harness(
         verified,
         pins,
-        final_revalidator,
+        revalidator,
+        revalidator,
         clock=clock,
         require_root_owned_parent=require_root_owned_parent,
     )

@@ -306,6 +306,12 @@ def _reload_and_match_active_pins(
     return active_pins, active_custody
 
 
+def verify_active_readiness_pins(derived_pins: ReadinessPins) -> None:
+    """Fail closed unless the derived pins still match the active pins."""
+    _validate_pins(derived_pins)
+    _reload_and_match_active_pins(derived_pins)
+
+
 def _validate_packet(packet: dict[str, Any]) -> None:
     try:
         validate_json_schema(packet, SCHEMA_PATH, "T1 readiness v2 packet")
