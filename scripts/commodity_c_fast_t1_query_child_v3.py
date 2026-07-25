@@ -22,6 +22,7 @@ PIN_ROOT = Path("/run/c-fast-t1-readiness-v2-pins")
 PIN_NAMES = {
     "provenance": "provenance-keyring.sha256",
     "t1": "t1-authority-keyring.sha256",
+    "query_v3": "query-v3-authority-keyring.sha256",
     "l3": "l3-authority-keyring.sha256",
     "outcome": "outcome-keyring.sha256",
     "custody": "packet-custody.path",
@@ -40,6 +41,12 @@ AUDIT_FLAGS = (
     "--markdown-output",
     "--readonly-proof-output",
     "--pre-connect-query-gate",
+    "--expected-pre-connect-gate-raw-sha256",
+    "--expected-pre-connect-gate-canonical-sha256",
+)
+GATE_HASH_FLAGS = (
+    "--expected-pre-connect-gate-raw-sha256",
+    "--expected-pre-connect-gate-canonical-sha256",
 )
 
 
@@ -94,7 +101,7 @@ def verify_active_pins(
         key: _read_root_pin(pin_root / name, key)
         for key, name in PIN_NAMES.items()
     }
-    for key in ("provenance", "t1", "l3", "outcome"):
+    for key in ("provenance", "t1", "query_v3", "l3", "outcome"):
         if SHA256_PATTERN.fullmatch(expected[key]) is None:
             raise QueryChildError(f"expected {key} pin is invalid")
         if observed[key] != expected[key]:
@@ -159,6 +166,17 @@ def verify_gate_binding(
     expected_raw_sha256: str,
     expected_canonical_sha256: str,
 ) -> None:
+    expected_suffix = [
+        GATE_HASH_FLAGS[0],
+        expected_raw_sha256,
+        GATE_HASH_FLAGS[1],
+        expected_canonical_sha256,
+    ]
+    if invocation[-len(expected_suffix) :] != expected_suffix:
+        raise QueryChildError(
+            "audit invocation gate expectations are not bootstrap-bound"
+        )
+    invocation_core = invocation[: -len(expected_suffix)]
     try:
         index = invocation.index("--pre-connect-query-gate")
         gate_path = Path(invocation[index + 1])
@@ -189,6 +207,22 @@ def verify_gate_binding(
         != expected_canonical_sha256
     ):
         raise QueryChildError("query gate binding changed before exec")
+    if not isinstance(payload, dict):
+        raise QueryChildError("query gate is invalid")
+    core_raw = json.dumps(
+        invocation_core,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    if (
+        payload.get("audit_invocation_core_raw_sha256")
+        != hashlib.sha256(core_raw).hexdigest()
+        or payload.get("audit_invocation_core_canonical_sha256")
+        != hashlib.sha256(core_raw).hexdigest()
+    ):
+        raise QueryChildError("audit invocation core binding changed before exec")
 
 
 def parse_args() -> argparse.Namespace:
@@ -196,6 +230,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--audit-invocation", type=Path, required=True)
     parser.add_argument("--expected-provenance-pin", required=True)
     parser.add_argument("--expected-t1-pin", required=True)
+    parser.add_argument("--expected-query-v3-pin", required=True)
     parser.add_argument("--expected-l3-pin", required=True)
     parser.add_argument("--expected-outcome-pin", required=True)
     parser.add_argument("--expected-custody", required=True)
@@ -217,6 +252,7 @@ def main() -> int:
             {
                 "provenance": args.expected_provenance_pin,
                 "t1": args.expected_t1_pin,
+                "query_v3": args.expected_query_v3_pin,
                 "l3": args.expected_l3_pin,
                 "outcome": args.expected_outcome_pin,
                 "custody": args.expected_custody,

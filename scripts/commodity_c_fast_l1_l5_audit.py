@@ -46,6 +46,9 @@ QUERY_V3_PIN_ROOT = Path("/run/c-fast-t1-readiness-v2-pins")
 QUERY_V3_PIN_NAMES = {
     "provenance_keyring_sha256": "provenance-keyring.sha256",
     "t1_authority_keyring_sha256": "t1-authority-keyring.sha256",
+    "query_v3_authority_keyring_sha256": (
+        "query-v3-authority-keyring.sha256"
+    ),
     "l3_authority_keyring_sha256": "l3-authority-keyring.sha256",
     "outcome_keyring_sha256": "outcome-keyring.sha256",
     "packet_custody_path": "packet-custody.path",
@@ -2314,24 +2317,48 @@ def _read_query_gate_root_pin(path: Path, label: str) -> str:
 def verify_pre_connect_query_gate(
     gate_path: Path,
     *,
+    expected_gate_raw_sha256: str,
+    expected_gate_canonical_sha256: str,
     actual_invocation: list[str],
+    now: datetime | None = None,
 ) -> None:
     """Perform the query-v3 last gate immediately before DSN access."""
     gate_raw = _read_query_gate_regular_bytes(
         gate_path,
         "query-v3 pre-connect gate",
     )
+    if not hmac.compare_digest(
+        hashlib.sha256(gate_raw).hexdigest(),
+        expected_gate_raw_sha256,
+    ):
+        raise AuditError(
+            "query-v3 pre-connect gate exact raw binding changed"
+        )
     gate = _parse_query_gate_json(
         gate_raw,
         "query-v3 pre-connect gate",
     )
+    gate_canonical = json.dumps(
+        gate,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    if not hmac.compare_digest(
+        hashlib.sha256(gate_canonical).hexdigest(),
+        expected_gate_canonical_sha256,
+    ):
+        raise AuditError(
+            "query-v3 pre-connect gate canonical binding changed"
+        )
     required = {
         "schema_version",
         "purpose",
         "audit_script_raw_sha256",
         "audit_invocation_path",
-        "audit_invocation_raw_sha256",
-        "audit_invocation_canonical_sha256",
+        "audit_invocation_core_raw_sha256",
+        "audit_invocation_core_canonical_sha256",
         "release_path",
         "release_raw_sha256",
         "release_canonical_sha256",
@@ -2371,24 +2398,37 @@ def verify_pre_connect_query_gate(
     )
     if (
         frozen_invocation != actual_invocation
-        or not hmac.compare_digest(
-            hashlib.sha256(invocation_raw).hexdigest(),
-            gate["audit_invocation_raw_sha256"],
-        )
-        or not hmac.compare_digest(
-            hashlib.sha256(
-                json.dumps(
-                    frozen_invocation,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                    ensure_ascii=False,
-                    allow_nan=False,
-                ).encode("utf-8")
-            ).hexdigest(),
-            gate["audit_invocation_canonical_sha256"],
-        )
     ):
         raise AuditError("frozen audit invocation changed before connect")
+    expected_suffix = [
+        "--expected-pre-connect-gate-raw-sha256",
+        expected_gate_raw_sha256,
+        "--expected-pre-connect-gate-canonical-sha256",
+        expected_gate_canonical_sha256,
+    ]
+    if actual_invocation[-len(expected_suffix) :] != expected_suffix:
+        raise AuditError(
+            "query-v3 invocation gate expectations are not bootstrap-bound"
+        )
+    invocation_core = actual_invocation[: -len(expected_suffix)]
+    invocation_core_raw = json.dumps(
+        invocation_core,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    if (
+        not hmac.compare_digest(
+            hashlib.sha256(invocation_core_raw).hexdigest(),
+            gate["audit_invocation_core_raw_sha256"],
+        )
+        or not hmac.compare_digest(
+            hashlib.sha256(invocation_core_raw).hexdigest(),
+            gate["audit_invocation_core_canonical_sha256"],
+        )
+    ):
+        raise AuditError("frozen audit invocation core changed before connect")
     bound_payloads: dict[str, Any] = {}
     for prefix in ("release", "readiness", "manifest"):
         path_key = (
@@ -2401,8 +2441,10 @@ def verify_pre_connect_query_gate(
             f"query-v3 {prefix}",
         )
     release = bound_payloads["release"]
+    readiness = bound_payloads["readiness"]
     if (
         not isinstance(release, dict)
+        or not isinstance(readiness, dict)
         or release.get("schema_version")
         != "commodity_c_fast_t1_one_shot_query_release_v3"
         or release.get("purpose")
@@ -2420,6 +2462,50 @@ def verify_pre_connect_query_gate(
         != gate["readiness_canonical_sha256"]
     ):
         raise AuditError("query-v3 release gate bindings are inconsistent")
+    current = datetime.now(timezone.utc) if now is None else now
+    if current.tzinfo is None or current.utcoffset() is None:
+        raise AuditError("query-v3 final gate time must be timezone-aware")
+    current = current.astimezone(timezone.utc)
+    try:
+        issued_at = _parse_cli_datetime(
+            str(release["issued_at"]),
+            "query-v3 release issued_at",
+        )
+        not_before = _parse_cli_datetime(
+            str(release["not_before"]),
+            "query-v3 release not_before",
+        )
+        release_expires_at = _parse_cli_datetime(
+            str(release["expires_at"]),
+            "query-v3 release expires_at",
+        )
+        readiness_generated_at = _parse_cli_datetime(
+            str(readiness["generated_at"]),
+            "query-v3 readiness generated_at",
+        )
+        readiness_expires_at = _parse_cli_datetime(
+            str(readiness["expires_at"]),
+            "query-v3 readiness expires_at",
+        )
+    except (KeyError, TypeError) as exc:
+        raise AuditError(
+            "query-v3 final gate lifecycle fields are invalid"
+        ) from exc
+    release_readiness = release["readiness"]
+    if (
+        not isinstance(release_readiness, dict)
+        or release_readiness.get("generated_at")
+        != readiness.get("generated_at")
+        or release_readiness.get("expires_at")
+        != readiness.get("expires_at")
+        or not issued_at <= not_before <= current < release_expires_at
+        or not readiness_generated_at <= current < readiness_expires_at
+        or readiness_generated_at > issued_at
+        or release_expires_at > readiness_expires_at
+    ):
+        raise AuditError(
+            "query-v3 release/readiness is not active at final query boundary"
+        )
     try:
         manifest_hash_index = actual_invocation.index(
             "--expected-manifest-sha256"
@@ -2457,6 +2543,7 @@ def verify_pre_connect_query_gate(
     for pin_field in (
         "provenance_keyring_sha256",
         "t1_authority_keyring_sha256",
+        "query_v3_authority_keyring_sha256",
         "l3_authority_keyring_sha256",
         "outcome_keyring_sha256",
     ):
@@ -2733,6 +2820,16 @@ def parse_args() -> argparse.Namespace:
             "verified immediately before DSN access"
         ),
     )
+    parser.add_argument(
+        "--expected-pre-connect-gate-raw-sha256",
+        default=None,
+        help="query-v3 create-only gate raw-byte SHA256",
+    )
+    parser.add_argument(
+        "--expected-pre-connect-gate-canonical-sha256",
+        default=None,
+        help="query-v3 create-only gate canonical JSON SHA256",
+    )
     return parser.parse_args()
 
 
@@ -2785,8 +2882,21 @@ def main() -> int:
             else None
         )
         if args.pre_connect_query_gate is not None:
+            if (
+                args.expected_pre_connect_gate_raw_sha256 is None
+                or args.expected_pre_connect_gate_canonical_sha256 is None
+            ):
+                raise AuditError(
+                    "query-v3 gate requires exact raw/canonical expectations"
+                )
             verify_pre_connect_query_gate(
                 args.pre_connect_query_gate,
+                expected_gate_raw_sha256=(
+                    args.expected_pre_connect_gate_raw_sha256
+                ),
+                expected_gate_canonical_sha256=(
+                    args.expected_pre_connect_gate_canonical_sha256
+                ),
                 actual_invocation=[
                     os.path.abspath(sys.executable),
                     "-I",

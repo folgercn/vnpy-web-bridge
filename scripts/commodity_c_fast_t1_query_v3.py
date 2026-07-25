@@ -14,6 +14,7 @@ from pathlib import Path
 import signal
 import subprocess
 import sys
+import threading
 from typing import Any, Callable
 
 from cryptography.exceptions import InvalidSignature
@@ -43,6 +44,7 @@ from commodity_c_fast_t1_one_shot import (
     parse_json_bytes,
     read_regular_file_at,
     read_regular_file_strict,
+    read_root_owned_deployment_pin,
     release_attempt_id,
     stage_verified_audit_bundle,
     validate_completed_outputs,
@@ -86,6 +88,13 @@ READINESS_VERIFIER_PATH = (
 )
 READINESS_SCHEMA_PATH = (
     ROOT / "docs/schemas/commodity-c-fast-t1-readiness-v2.schema.json"
+)
+QUERY_KEYRING_SCHEMA_PATH = (
+    ROOT
+    / "docs/schemas/commodity-c-fast-t1-query-v3-trusted-keys-v1.schema.json"
+)
+QUERY_V3_AUTHORITY_PIN_PATH = Path(
+    "/run/c-fast-t1-readiness-v2-pins/query-v3-authority-keyring.sha256"
 )
 
 RELEASE_SCHEMA_VERSION = "commodity_c_fast_t1_one_shot_query_release_v3"
@@ -172,16 +181,20 @@ def unsigned_release_payload(payload: dict[str, Any]) -> dict[str, Any]:
 def _load_query_public_key(
     keyring: dict[str, Any],
     key_id: str,
-) -> tuple[Ed25519PublicKey, bytes]:
+) -> tuple[Ed25519PublicKey, bytes, frozenset[bytes]]:
     if set(keyring) != {"schema_version", "keys"}:
         raise QueryV3Error("query keyring fields are invalid")
-    if keyring["schema_version"] != "commodity_c_fast_t1_trusted_keys_v1":
+    if (
+        keyring["schema_version"]
+        != "commodity_c_fast_t1_query_v3_trusted_keys_v1"
+    ):
         raise QueryV3Error("query keyring schema version is invalid")
     entries = keyring["keys"]
     if not isinstance(entries, list) or not entries:
         raise QueryV3Error("query keyring must contain at least one key")
-    match: dict[str, Any] | None = None
+    match: tuple[dict[str, Any], bytes] | None = None
     seen: set[str] = set()
+    seen_materials: set[bytes] = set()
     for entry in entries:
         if not isinstance(entry, dict) or set(entry) != {
             "key_id",
@@ -193,17 +206,80 @@ def _load_query_public_key(
         if current_id in seen:
             raise QueryV3Error("query keyring contains duplicate key_id")
         seen.add(current_id)
+        try:
+            public_raw = base64.b64decode(
+                entry["public_key_base64"],
+                validate=True,
+            )
+            if len(public_raw) != 32:
+                raise ValueError("wrong public key length")
+        except (TypeError, ValueError) as exc:
+            raise QueryV3Error("query Ed25519 public key is invalid") from exc
+        if public_raw in seen_materials:
+            raise QueryV3Error(
+                "query keyring reuses public-key material across key IDs"
+            )
+        seen_materials.add(public_raw)
         if current_id == key_id:
-            match = entry
-    if match is None or match["purpose"] != TRUSTED_KEY_PURPOSE:
+            match = (entry, public_raw)
+    if match is None or match[0]["purpose"] != TRUSTED_KEY_PURPOSE:
         raise QueryV3Error("query release signer purpose is not authorized")
+    raw = match[1]
+    return (
+        Ed25519PublicKey.from_public_bytes(raw),
+        raw,
+        frozenset(seen_materials),
+    )
+
+
+def _load_upstream_t1_public_materials(
+    path: Path,
+    expected_canonical_sha256: str,
+) -> frozenset[bytes]:
     try:
-        raw = base64.b64decode(match["public_key_base64"], validate=True)
-        if len(raw) != 32:
-            raise ValueError("wrong public key length")
-        return Ed25519PublicKey.from_public_bytes(raw), raw
-    except (TypeError, ValueError) as exc:
-        raise QueryV3Error("query Ed25519 public key is invalid") from exc
+        raw = read_regular_file_strict(
+            path,
+            "upstream T1 authority keyring",
+            private=True,
+        )
+        keyring = parse_json_bytes(raw, "upstream T1 authority keyring")
+    except OneShotError as exc:
+        raise QueryV3Error(str(exc)) from exc
+    if (
+        set(keyring) != {"schema_version", "keys"}
+        or keyring["schema_version"]
+        != "commodity_c_fast_t1_trusted_keys_v1"
+        or not isinstance(keyring["keys"], list)
+        or not keyring["keys"]
+        or _hash(canonical_json(keyring)) != expected_canonical_sha256
+    ):
+        raise QueryV3Error("upstream T1 authority keyring is invalid")
+    materials: set[bytes] = set()
+    seen_ids: set[str] = set()
+    for entry in keyring["keys"]:
+        if (
+            not isinstance(entry, dict)
+            or set(entry) != {"key_id", "purpose", "public_key_base64"}
+            or entry["purpose"] != "t1_audit_release_signer"
+        ):
+            raise QueryV3Error("upstream T1 authority key entry is invalid")
+        key_id = str(entry["key_id"])
+        if key_id in seen_ids:
+            raise QueryV3Error("upstream T1 keyring contains duplicate key_id")
+        seen_ids.add(key_id)
+        try:
+            current = base64.b64decode(
+                entry["public_key_base64"],
+                validate=True,
+            )
+            if len(current) != 32:
+                raise ValueError("wrong public key length")
+        except (TypeError, ValueError) as exc:
+            raise QueryV3Error(
+                "upstream T1 authority public key is invalid"
+            ) from exc
+        materials.add(current)
+    return frozenset(materials)
 
 
 def validate_release_semantics(
@@ -227,10 +303,13 @@ def validate_release_semantics(
         release_attempt_id(payload["release_id"]),
     ):
         raise QueryV3Error("attempt_id does not match release_id")
+    human_signature = str(payload["human_signature"]).strip()
+    reviewer_role = str(payload["reviewer_role"]).strip()
     if (
-        not str(payload["human_signature"]).strip()
-        or str(payload["human_signature"]).startswith("PENDING_")
-        or not str(payload["reviewer_role"]).strip()
+        not human_signature
+        or human_signature.startswith("PENDING_")
+        or not reviewer_role
+        or reviewer_role.startswith("PENDING_")
     ):
         raise QueryV3Error("final human review fields are required")
     current = _utc(now, "verification time")
@@ -332,16 +411,39 @@ def verify_query_release(
         manifest = parse_json_bytes(manifest_raw, "T1 audit manifest")
     except (OneShotError, OSError) as exc:
         raise QueryV3Error(str(exc)) from exc
+    try:
+        validate_json_schema(
+            keyring,
+            QUERY_KEYRING_SCHEMA_PATH,
+            "T1 query v3 keyring",
+        )
+    except OneShotError as exc:
+        raise QueryV3Error(str(exc)) from exc
     keyring_sha256 = _hash(canonical_json(keyring))
+    try:
+        query_v3_authority_pin = read_root_owned_deployment_pin(
+            QUERY_V3_AUTHORITY_PIN_PATH,
+            "query-v3 authority keyring",
+        )
+    except OneShotError as exc:
+        raise QueryV3Error(str(exc)) from exc
     if (
-        keyring_sha256 != pins.t1_authority_keyring_sha256
+        keyring_sha256 != query_v3_authority_pin
         or keyring_sha256 != release["trusted_keyring_sha256"]
     ):
-        raise QueryV3Error("query keyring does not match active T1 pin")
-    public_key, public_raw = _load_query_public_key(
+        raise QueryV3Error("query keyring does not match active query-v3 pin")
+    public_key, public_raw, query_public_materials = _load_query_public_key(
         keyring,
         release["signer_key_id"],
     )
+    upstream_t1_public_materials = _load_upstream_t1_public_materials(
+        readiness_inputs.t1_keyring,
+        pins.t1_authority_keyring_sha256,
+    )
+    if query_public_materials & upstream_t1_public_materials:
+        raise QueryV3Error(
+            "query-v3 keyring reuses upstream T1 authority key material"
+        )
     try:
         signature = base64.b64decode(release["signature"], validate=True)
         if len(signature) != 64:
@@ -367,6 +469,7 @@ def verify_query_release(
         "terminal_schema_sha256": TERMINAL_SCHEMA_PATH,
         "readiness_verifier_sha256": READINESS_VERIFIER_PATH,
         "readiness_schema_sha256": READINESS_SCHEMA_PATH,
+        "query_keyring_schema_sha256": QUERY_KEYRING_SCHEMA_PATH,
         "audit_script_sha256": AUDIT_SCRIPT_PATH,
         "manifest_schema_sha256": MANIFEST_SCHEMA_PATH,
         "evidence_schema_sha256": EVIDENCE_SCHEMA_PATH,
@@ -657,6 +760,7 @@ def _assert_same(
 
 def build_query_child_invocation(
     pins: ReadinessPins,
+    query_v3_authority_keyring_sha256: str,
     staged_child: Path,
     audit_invocation_path: Path,
     gate_raw_sha256: str,
@@ -664,6 +768,7 @@ def build_query_child_invocation(
 ) -> list[str]:
     return [
         str(Path(sys.executable).resolve(strict=True)),
+        "-I",
         str(staged_child.resolve(strict=False)),
         "--audit-invocation",
         str(audit_invocation_path.resolve(strict=False)),
@@ -671,6 +776,8 @@ def build_query_child_invocation(
         pins.provenance_keyring_sha256,
         "--expected-t1-pin",
         pins.t1_authority_keyring_sha256,
+        "--expected-query-v3-pin",
+        query_v3_authority_keyring_sha256,
         "--expected-l3-pin",
         pins.l3_authority_keyring_sha256,
         "--expected-outcome-pin",
@@ -688,21 +795,21 @@ def build_pre_connect_gate(
     verified: VerifiedQueryRelease,
     pins: ReadinessPins,
     *,
-    audit_invocation: list[str],
+    audit_invocation_core: list[str],
     audit_invocation_path: Path,
     release_path: Path,
     readiness_path: Path,
     manifest_source_path: Path,
 ) -> dict[str, Any]:
-    invocation_raw = canonical_json(audit_invocation)
+    invocation_core_raw = canonical_json(audit_invocation_core)
     return {
         "schema_version": "commodity_c_fast_t1_pre_connect_gate_v3",
         "purpose": "c_fast_t1_last_active_pin_gate_before_dsn",
         "audit_script_raw_sha256": verified.payload["audit_script_sha256"],
         "audit_invocation_path": str(audit_invocation_path),
-        "audit_invocation_raw_sha256": _hash(invocation_raw),
-        "audit_invocation_canonical_sha256": _hash(
-            canonical_json(audit_invocation)
+        "audit_invocation_core_raw_sha256": _hash(invocation_core_raw),
+        "audit_invocation_core_canonical_sha256": _hash(
+            canonical_json(audit_invocation_core)
         ),
         "release_path": str(release_path),
         "release_raw_sha256": verified.raw_sha256,
@@ -717,6 +824,7 @@ def build_pre_connect_gate(
         ],
         "provenance_keyring_sha256": pins.provenance_keyring_sha256,
         "t1_authority_keyring_sha256": pins.t1_authority_keyring_sha256,
+        "query_v3_authority_keyring_sha256": verified.keyring_sha256,
         "l3_authority_keyring_sha256": pins.l3_authority_keyring_sha256,
         "outcome_keyring_sha256": pins.outcome_keyring_sha256,
         "packet_custody_path": str(
@@ -731,36 +839,57 @@ def run_query_child(
     cwd: Path,
     timeout: int,
 ) -> subprocess.CompletedProcess[str]:
+    previous_handlers: dict[signal.Signals, Any] = {}
+
+    def interrupt_for_shutdown(
+        signum: int,
+        _frame: Any,
+    ) -> None:
+        raise KeyboardInterrupt(f"query runner received signal {signum}")
+
+    if threading.current_thread() is threading.main_thread():
+        controlled_signals = [
+            current
+            for current in (
+                getattr(signal, "SIGTERM", None),
+                getattr(signal, "SIGHUP", None),
+            )
+            if current is not None
+        ]
+        for current in controlled_signals:
+            previous_handlers[current] = signal.getsignal(current)
+            signal.signal(current, interrupt_for_shutdown)
     try:
-        process = subprocess.Popen(
+        try:
+            process = subprocess.Popen(
+                invocation,
+                cwd=cwd,
+                env=child_environment(),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                shell=False,
+                start_new_session=True,
+            )
+        except OSError as exc:
+            raise QueryChildLaunchError(
+                "query child could not be created"
+            ) from exc
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except BaseException:
+            _terminate_query_process_group(process)
+            raise
+        return subprocess.CompletedProcess(
             invocation,
-            cwd=cwd,
-            env=child_environment(),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            shell=False,
-            start_new_session=True,
+            process.returncode,
+            stdout,
+            stderr,
         )
-    except OSError as exc:
-        raise QueryChildLaunchError(
-            "query child could not be created"
-        ) from exc
-    try:
-        stdout, stderr = process.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        _terminate_query_process_group(process)
-        raise
-    except KeyboardInterrupt:
-        _terminate_query_process_group(process)
-        raise
-    return subprocess.CompletedProcess(
-        invocation,
-        process.returncode,
-        stdout,
-        stderr,
-    )
+    finally:
+        for current, previous in previous_handlers.items():
+            signal.signal(current, previous)
 
 
 def _terminate_query_process_group(process: subprocess.Popen[str]) -> None:
@@ -768,16 +897,25 @@ def _terminate_query_process_group(process: subprocess.Popen[str]) -> None:
         return
     try:
         os.killpg(process.pid, signal.SIGTERM)
-    except ProcessLookupError:
+    except BaseException:
         pass
     try:
         process.wait(timeout=2)
-    except subprocess.TimeoutExpired:
+        return
+    except BaseException:
+        pass
+    while process.poll() is None:
         try:
             os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        process.wait()
+            break
+        except BaseException:
+            continue
+    while True:
+        try:
+            process.wait()
+            return
+        except BaseException:
+            continue
 
 
 def execute_verified_query(
@@ -888,33 +1026,43 @@ def execute_verified_query(
             staged_child = (
                 bundle_root / "scripts/commodity_c_fast_t1_query_child_v3.py"
             )
-            audit_invocation = build_child_invocation(
+            audit_invocation_core = build_child_invocation(
                 verified.legacy.payload,
                 staged_audit,
                 staged_manifest,
                 dsn_file,
                 paths,
             )
-            audit_invocation[0] = os.path.abspath(sys.executable)
-            audit_invocation.extend(
+            audit_invocation_core[0] = os.path.abspath(sys.executable)
+            audit_invocation_core.extend(
                 ["--pre-connect-query-gate", str(gate_path)]
             )
             gate = build_pre_connect_gate(
                 verified,
                 pins,
-                audit_invocation=audit_invocation,
+                audit_invocation_core=audit_invocation_core,
                 audit_invocation_path=audit_invocation_path,
                 release_path=staged_release,
                 readiness_path=staged_readiness,
                 manifest_source_path=staged_manifest_source,
             )
             gate_bytes = canonical_json(gate)
+            gate_raw_sha256 = _hash(gate_bytes)
+            gate_canonical_sha256 = _hash(canonical_json(gate))
+            audit_invocation = [
+                *audit_invocation_core,
+                "--expected-pre-connect-gate-raw-sha256",
+                gate_raw_sha256,
+                "--expected-pre-connect-gate-canonical-sha256",
+                gate_canonical_sha256,
+            ]
             query_invocation = build_query_child_invocation(
                 pins,
+                verified.keyring_sha256,
                 staged_child,
                 audit_invocation_path,
-                _hash(gate_bytes),
-                _hash(canonical_json(gate)),
+                gate_raw_sha256,
+                gate_canonical_sha256,
             )
             derived_files = dict(verified.legacy.bundle_files)
             derived_files.update(

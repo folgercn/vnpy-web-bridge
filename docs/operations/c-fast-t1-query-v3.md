@@ -41,6 +41,20 @@ P0 acceptance v2。
 t1_exact_readonly_query_v3_release_signer
 ```
 
+query authority 不复用 readiness 的 T1 audit keyring。它使用独立
+[`commodity-c-fast-t1-query-v3-trusted-keys-v1.schema.json`](../schemas/commodity-c-fast-t1-query-v3-trusted-keys-v1.schema.json)
+和 root-owned 固定 pin：
+
+```text
+/run/c-fast-t1-readiness-v2-pins/query-v3-authority-keyring.sha256
+```
+
+parent 的 initial/pre-consume/final verify、bootstrap child 和 audit 内部最后
+gate 都会重读该 pin；原 `t1-authority-keyring.sha256` 仍作为 upstream
+readiness pin 单独重读。query-v3 keyring 的全部 key material 还必须与 upstream
+T1 authority keyring 的全部 key（包括未使用 key）互斥；provenance/outcome
+actual signer 的既有 domain separation 检查继续保留。
+
 release 最长 TTL 为十分钟，不能早于 readiness 生成时间，也不能晚于 exact
 readiness expiry。它只允许以下四项为 `true`：
 
@@ -90,12 +104,18 @@ consume 成功后 attempt 永久烧毁。任何失败、timeout、interrupt、
 path identity 重验：
 
 - exact audit script；
-- exact audit invocation raw/canonical bytes；
+- gate 绑定的 exact audit invocation core raw/canonical bytes；
+- bootstrap 内存中的 gate hash 后缀与 audit 重新打开的完整 invocation；
 - exact query release raw/canonical bytes；
 - exact readiness raw/canonical bytes；
 - exact manifest source raw/canonical bytes；
-- provenance/T1/L3/outcome 四个 active keyring pins；
+- provenance/T1/query-v3/L3/outcome 五个 active keyring pins；
 - resolved active custody path。
+
+最后 gate 还会用当前 UTC 重新检查 signed release 的
+`issued_at <= not_before <= now < expires_at` 和 exact readiness 的
+`generated_at <= now < expires_at`。因此 parent 调度或 child 启动暂停导致 TTL
+过期时，不会继续读取 DSN。
 
 gate 返回后下一步就是 `_read_secret_text_file()` 和 connect，中间没有 artifact
 写入、插件、回调或动态配置读取。任何 pin、custody、script、invocation、
@@ -134,9 +154,11 @@ p0_acceptance_authorized=false
 replay_allowed=false
 ```
 
-默认 executor 使用独立 process group。timeout 或人工中断会先 `SIGTERM`，
-等待后再 `SIGKILL` 并 `wait`，然后才写 unknown terminal；即使进程已终止，也不
-从进程状态推断 SQL 是否完成或数据库 mutation 为零。
+默认 executor 使用 `-I` 隔离的 bootstrap 和独立 process group。timeout、
+`SIGINT`、`SIGTERM` 或 `SIGHUP` 会先 `SIGTERM`，等待后再 `SIGKILL` 并强制
+`wait`/reap，恢复原 signal handler 后才写 unknown terminal；即使 cleanup
+本身被第二次中断，也不会先写 terminal 并遗留 child。即使进程已终止，也不从
+进程状态推断 SQL 是否完成或数据库 mutation 为零。
 
 只有 child exit 0/1、四份产物完整且 readonly proof、endpoint、QuestDB build、
 manifest、release、readiness、gate 和两层 invocation exact bindings 全部通过，
@@ -181,5 +203,6 @@ PYTHONPATH=scripts .venv/bin/python \
   scripts/commodity_c_fast_t1_query_v3.py --help
 ```
 
-本 PR 的测试全部注入 fake child；没有运行真实 CLI、读取凭证、连接 QuestDB、
-执行 SQL、部署、重启、采集或交易。
+本 PR 的执行器测试注入 fake child；另有一个 `-I` 隔离的 audit subprocess
+只验证 gate 并在 active-pin 边界停止。测试没有读取凭证、连接 QuestDB、执行
+SQL、部署、重启、采集或交易。
