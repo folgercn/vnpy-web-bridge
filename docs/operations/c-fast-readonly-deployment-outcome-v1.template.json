@@ -1,0 +1,8 @@
+{
+  "issued_at": "PENDING_UTC_datetime_after_all_post_checks",
+  "signer_key_id": "PENDING_independent_outcome_signer_key_id",
+  "signer_key_purpose": "readonly_deployment_outcome_signer",
+  "signer_type": "human",
+  "reviewer_role": "human_l3_readonly_deployment_outcome_reviewer",
+  "human_signature": "PENDING_replace_with_final_human_post_outcome_attestation"
+}

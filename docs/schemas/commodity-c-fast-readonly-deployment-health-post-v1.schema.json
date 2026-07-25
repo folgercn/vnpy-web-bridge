@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vnpy-web-bridge:schema:commodity-c-fast-readonly-deployment-health-post-v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "evidence_id", "candidate_id", "release_id", "attempt_id",
+    "release_raw_sha256", "consume_marker_raw_sha256", "receipt_raw_sha256",
+    "questdb_target_identity_sha256", "captured_at", "capture_method",
+    "health_state", "http_status_code", "recovery_seconds",
+    "consecutive_successes", "secret_content_included"
+  ],
+  "properties": {
+    "schema_version": {"const": "commodity_c_fast_readonly_deployment_health_post_v1"},
+    "evidence_id": {"$ref": "#/$defs/id"},
+    "candidate_id": {"const": "C_FAST_CROSS_SECTION_NEUTRAL"},
+    "release_id": {"$ref": "#/$defs/id"},
+    "attempt_id": {"$ref": "#/$defs/attemptId"},
+    "release_raw_sha256": {"$ref": "#/$defs/sha256"},
+    "consume_marker_raw_sha256": {"$ref": "#/$defs/sha256"},
+    "receipt_raw_sha256": {"$ref": "#/$defs/sha256"},
+    "questdb_target_identity_sha256": {"$ref": "#/$defs/sha256"},
+    "captured_at": {"$ref": "#/$defs/dateTime"},
+    "capture_method": {"const": "questdb_http_health_post_restart_v1"},
+    "health_state": {"const": "HEALTHY"},
+    "http_status_code": {"const": 200},
+    "recovery_seconds": {"type": "integer", "minimum": 0, "maximum": 120},
+    "consecutive_successes": {"type": "integer", "minimum": 3},
+    "secret_content_included": {"const": false}
+  },
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[A-Za-z0-9._-]{8,128}$"},
+    "attemptId": {"type": "string", "pattern": "^attempt-[0-9a-f]{64}$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "dateTime": {"type": "string", "format": "date-time"}
+  }
+}
