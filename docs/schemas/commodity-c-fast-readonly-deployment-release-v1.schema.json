@@ -1,0 +1,406 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vnpy-web-bridge:schema:commodity-c-fast-readonly-deployment-release-v1",
+  "title": "C_FAST QuestDB readonly-principal deployment release v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "purpose",
+    "candidate_id",
+    "issue_number",
+    "release_id",
+    "attempt_id",
+    "issued_at",
+    "not_before",
+    "expires_at",
+    "signer_key_id",
+    "signer_type",
+    "reviewer_role",
+    "human_signature",
+    "trusted_keyring_sha256",
+    "pin_root_path_sha256",
+    "custody_identity_sha256",
+    "custody_path_sha256",
+    "source_commit_sha",
+    "verifier_sha256",
+    "release_schema_sha256",
+    "consume_schema_sha256",
+    "receipt_schema_sha256",
+    "questdb_image_attestation_raw_sha256",
+    "questdb_image_digest",
+    "questdb_target_identity_sha256",
+    "questdb_build_sha256",
+    "readonly_principal_identity_attestation_raw_sha256",
+    "readonly_principal_identity_sha256",
+    "secret_file_identity_attestation_raw_sha256",
+    "secret_file_path_sha256",
+    "secret_file_expected_owner_uid",
+    "secret_file_expected_owner_gid",
+    "secret_file_expected_mode",
+    "secret_file_regular_file_required",
+    "secret_file_symlink_allowed",
+    "secret_content_read_authorized",
+    "writer_continuity_pre_evidence_raw_sha256",
+    "writer_continuity_post_evidence_raw_sha256",
+    "health_evidence_raw_sha256",
+    "backlog_evidence_raw_sha256",
+    "rollback_plan_raw_sha256",
+    "root_pin_identity_attestation_raw_sha256",
+    "custody_path_identity_attestation_raw_sha256",
+    "isolated_network_attestation_raw_sha256",
+    "isolated_network_identity_sha256",
+    "isolated_network_runner_member_identity_sha256",
+    "isolated_network_questdb_member_identity_sha256",
+    "isolated_network_expected_member_count",
+    "isolated_network_driver_required",
+    "isolated_network_internal_required",
+    "isolated_network_unexpected_members_allowed",
+    "isolated_network_docker_socket_connectivity_allowed",
+    "isolated_network_rpc_connectivity_allowed",
+    "isolated_network_trading_connectivity_allowed",
+    "deployment_plan_raw_sha256",
+    "evidence_bundle_index_sha256",
+    "max_deployment_seconds",
+    "allowed_restart_count",
+    "rollback_deadline_seconds",
+    "principal_must_differ_from_admin",
+    "readonly_password_value_source_required",
+    "global_pgwire_readonly_allowed",
+    "instance_readonly_allowed",
+    "writer_continuity_required",
+    "post_restart_health_required",
+    "backlog_drain_required",
+    "rollback_required",
+    "isolated_network_required",
+    "readonly_principal_deployment_authorized",
+    "readonly_secret_file_installation_authorized",
+    "questdb_restart_authorized",
+    "questdb_recreate_authorized",
+    "questdb_image_change_authorized",
+    "writer_identity_mutation_authorized",
+    "writer_secret_mutation_authorized",
+    "network_mutation_authorized",
+    "unscoped_deployment_mutation_authorized",
+    "production_query_authorized",
+    "readonly_query_authorized",
+    "collection_authorized",
+    "write_probe_authorized",
+    "database_mutation_authorized",
+    "order_authorized",
+    "position_mutation_authorized",
+    "dispatch_authorized",
+    "trading_authorized",
+    "strategy_activation_authorized",
+    "automatic_promotion_authorized",
+    "web_bridge_deployment_authorized",
+    "replay_allowed",
+    "receipt_is_authority",
+    "signature"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "commodity_c_fast_readonly_deployment_release_v1"
+    },
+    "purpose": {
+      "const": "c_fast_questdb_readonly_principal_deployment"
+    },
+    "candidate_id": {
+      "const": "C_FAST_CROSS_SECTION_NEUTRAL"
+    },
+    "issue_number": {
+      "const": 114
+    },
+    "release_id": {
+      "$ref": "#/$defs/id"
+    },
+    "attempt_id": {
+      "type": "string",
+      "pattern": "^attempt-[0-9a-f]{64}$"
+    },
+    "issued_at": {
+      "$ref": "#/$defs/dateTime"
+    },
+    "not_before": {
+      "$ref": "#/$defs/dateTime"
+    },
+    "expires_at": {
+      "$ref": "#/$defs/dateTime"
+    },
+    "signer_key_id": {
+      "$ref": "#/$defs/id"
+    },
+    "signer_type": {
+      "const": "human"
+    },
+    "reviewer_role": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "human_signature": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "trusted_keyring_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "pin_root_path_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "custody_identity_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "custody_path_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "source_commit_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "verifier_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "release_schema_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "consume_schema_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "receipt_schema_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "questdb_image_attestation_raw_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "questdb_image_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "questdb_target_identity_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "questdb_build_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "readonly_principal_identity_attestation_raw_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "readonly_principal_identity_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "secret_file_identity_attestation_raw_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "secret_file_path_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "secret_file_expected_owner_uid": {
+      "const": 65532
+    },
+    "secret_file_expected_owner_gid": {
+      "const": 65532
+    },
+    "secret_file_expected_mode": {
+      "const": "0600"
+    },
+    "secret_file_regular_file_required": {
+      "const": true
+    },
+    "secret_file_symlink_allowed": {
+      "const": false
+    },
+    "secret_content_read_authorized": {
+      "const": false
+    },
+    "writer_continuity_pre_evidence_raw_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "writer_continuity_post_evidence_raw_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "health_evidence_raw_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "backlog_evidence_raw_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "rollback_plan_raw_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "root_pin_identity_attestation_raw_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "custody_path_identity_attestation_raw_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "isolated_network_attestation_raw_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "isolated_network_identity_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "isolated_network_runner_member_identity_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "isolated_network_questdb_member_identity_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "isolated_network_expected_member_count": {
+      "const": 2
+    },
+    "isolated_network_driver_required": {
+      "const": "bridge"
+    },
+    "isolated_network_internal_required": {
+      "const": true
+    },
+    "isolated_network_unexpected_members_allowed": {
+      "const": false
+    },
+    "isolated_network_docker_socket_connectivity_allowed": {
+      "const": false
+    },
+    "isolated_network_rpc_connectivity_allowed": {
+      "const": false
+    },
+    "isolated_network_trading_connectivity_allowed": {
+      "const": false
+    },
+    "deployment_plan_raw_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "evidence_bundle_index_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "max_deployment_seconds": {
+      "type": "integer",
+      "minimum": 60,
+      "maximum": 1800
+    },
+    "allowed_restart_count": {
+      "const": 1
+    },
+    "rollback_deadline_seconds": {
+      "type": "integer",
+      "minimum": 60,
+      "maximum": 900
+    },
+    "principal_must_differ_from_admin": {
+      "const": true
+    },
+    "readonly_password_value_source_required": {
+      "const": "file"
+    },
+    "global_pgwire_readonly_allowed": {
+      "const": false
+    },
+    "instance_readonly_allowed": {
+      "const": false
+    },
+    "writer_continuity_required": {
+      "const": true
+    },
+    "post_restart_health_required": {
+      "const": true
+    },
+    "backlog_drain_required": {
+      "const": true
+    },
+    "rollback_required": {
+      "const": true
+    },
+    "isolated_network_required": {
+      "const": true
+    },
+    "readonly_principal_deployment_authorized": {
+      "const": true
+    },
+    "readonly_secret_file_installation_authorized": {
+      "const": true
+    },
+    "questdb_restart_authorized": {
+      "const": true
+    },
+    "questdb_recreate_authorized": {
+      "const": false
+    },
+    "questdb_image_change_authorized": {
+      "const": false
+    },
+    "writer_identity_mutation_authorized": {
+      "const": false
+    },
+    "writer_secret_mutation_authorized": {
+      "const": false
+    },
+    "network_mutation_authorized": {
+      "const": false
+    },
+    "unscoped_deployment_mutation_authorized": {
+      "const": false
+    },
+    "production_query_authorized": {
+      "const": false
+    },
+    "readonly_query_authorized": {
+      "const": false
+    },
+    "collection_authorized": {
+      "const": false
+    },
+    "write_probe_authorized": {
+      "const": false
+    },
+    "database_mutation_authorized": {
+      "const": false
+    },
+    "order_authorized": {
+      "const": false
+    },
+    "position_mutation_authorized": {
+      "const": false
+    },
+    "dispatch_authorized": {
+      "const": false
+    },
+    "trading_authorized": {
+      "const": false
+    },
+    "strategy_activation_authorized": {
+      "const": false
+    },
+    "automatic_promotion_authorized": {
+      "const": false
+    },
+    "web_bridge_deployment_authorized": {
+      "const": false
+    },
+    "replay_allowed": {
+      "const": false
+    },
+    "receipt_is_authority": {
+      "const": false
+    },
+    "signature": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{8,128}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "dateTime": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}
