@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 from pathlib import Path
+import stat
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -700,8 +701,13 @@ def test_release_identity_ttl_and_complete_deny_matrix() -> None:
         with pytest.raises((OneShotError, query_module.QueryV3Error)):
             query_module.validate_release_semantics(payload, current, now=NOW)
     for field, value in (
+        ("schema_version", "wrong-schema"),
         ("purpose", "wrong-query-purpose"),
         ("candidate_id", "WRONG_CANDIDATE"),
+        ("attempt_id", f"attempt-{H}"),
+        ("not_before", (NOW + timedelta(seconds=1)).isoformat()),
+        ("expires_at", NOW.isoformat()),
+        ("expires_at", (NOW + timedelta(seconds=20)).isoformat()),
     ):
         payload = release_payload(current)
         payload[field] = value
@@ -985,6 +991,31 @@ def test_query_pin_rotation_before_consume_does_not_burn_attempt(
             dsn,
             lambda _at: current,
             clock=times(0, 1),
+            child_executor=lambda *_args, **_kwargs: pytest.fail(
+                "child must not launch"
+            ),
+            require_root_owned_parent=False,
+        )
+    assert not list(pins.packet_custody_path.glob("*.query-consumed-v3.json"))
+
+
+def test_consumed_at_expiry_reads_no_pins_and_writes_no_consume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current, pins, dsn = verified(tmp_path)
+    monkeypatch.setattr(
+        query_module,
+        "verify_active_query_v3_pins",
+        lambda *_args: pytest.fail("expired release must not read pins"),
+    )
+    with pytest.raises(query_module.QueryV3Error, match="not currently active"):
+        query_module.execute_verified_query(
+            current,
+            pins,
+            dsn,
+            lambda _at: current,
+            clock=times(0, 301),
             child_executor=lambda *_args, **_kwargs: pytest.fail(
                 "child must not launch"
             ),
@@ -1527,6 +1558,100 @@ def test_expired_release_is_blocked_before_active_pins(
         )
 
 
+@pytest.mark.parametrize("prefix", ("release", "readiness", "manifest"))
+@pytest.mark.parametrize("tamper_kind", ("raw", "canonical"))
+def test_gate_rejects_all_exact_binding_tamper_before_active_pins(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    prefix: str,
+    tamper_kind: str,
+) -> None:
+    (
+        gate_path,
+        _invocation_path,
+        invocation,
+        gate_raw_sha256,
+        gate_canonical_sha256,
+    ) = audit_gate_fixture(tmp_path)
+    gate = json.loads(gate_path.read_text())
+    path_key = (
+        "manifest_source_path" if prefix == "manifest" else f"{prefix}_path"
+    )
+    bound_path = Path(gate[path_key])
+    payload = json.loads(bound_path.read_text())
+    bound_path.chmod(0o600)
+    if tamper_kind == "raw":
+        bound_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    else:
+        payload["tampered"] = True
+        bound_path.write_bytes(canonical_json(payload))
+    bound_path.chmod(0o400)
+    monkeypatch.setattr(
+        audit_module,
+        "QUERY_V3_PIN_ROOT",
+        SimpleNamespace(
+            lstat=lambda: pytest.fail("active pins must not be read")
+        ),
+    )
+    with pytest.raises(audit_module.AuditError, match="exact binding changed"):
+        audit_module.verify_pre_connect_query_gate(
+            gate_path,
+            expected_gate_raw_sha256=gate_raw_sha256,
+            expected_gate_canonical_sha256=gate_canonical_sha256,
+            actual_invocation=invocation,
+            now=NOW,
+        )
+
+
+def test_child_query_v3_pin_rotation_is_directly_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pin_root = tmp_path / "pins"
+    observed = {
+        "provenance": H,
+        "t1": H2,
+        "query_v3": H,
+        "l3": H3,
+        "outcome": H4,
+        "custody": str(tmp_path),
+    }
+    monkeypatch.setattr(
+        child_module,
+        "_read_root_pin",
+        lambda path, _label: observed[
+            next(
+                key
+                for key, filename in child_module.PIN_NAMES.items()
+                if filename == path.name
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        Path,
+        "lstat",
+        lambda _path: SimpleNamespace(
+            st_mode=stat.S_IFDIR | 0o755,
+            st_uid=0,
+        ),
+    )
+    with pytest.raises(child_module.QueryChildError, match="pins changed"):
+        child_module.verify_active_pins(
+            {
+                "provenance": H,
+                "t1": H2,
+                "query_v3": H2,
+                "l3": H3,
+                "outcome": H4,
+                "custody": str(tmp_path),
+            },
+            pin_root=pin_root,
+        )
+
+
 def test_symlink_and_oversize_frozen_artifacts_are_rejected(
     tmp_path: Path,
 ) -> None:
@@ -1929,6 +2054,7 @@ def test_run_query_child_sigterm_cleans_up_and_restores_handlers(
     old_handlers = {
         query_module.signal.SIGTERM: object(),
         query_module.signal.SIGHUP: object(),
+        query_module.signal.SIGINT: object(),
     }
     handlers = dict(old_handlers)
 
@@ -1971,6 +2097,102 @@ def test_run_query_child_sigterm_cleans_up_and_restores_handlers(
         query_module.run_query_child(["child"], cwd=tmp_path, timeout=7)
     assert cleaned == [process]
     assert handlers == old_handlers
+
+
+def test_pending_sigterm_during_popen_is_delivered_after_handle_publish(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    handlers = {
+        query_module.signal.SIGTERM: object(),
+        query_module.signal.SIGHUP: object(),
+        query_module.signal.SIGINT: object(),
+    }
+    restore_calls = 0
+
+    def set_handler(current, handler):
+        previous = handlers[current]
+        handlers[current] = handler
+        return previous
+
+    def pthread_sigmask(operation, _signals):
+        nonlocal restore_calls
+        if operation == query_module.signal.SIG_BLOCK:
+            events.append("blocked")
+            return frozenset()
+        restore_calls += 1
+        if restore_calls > 1:
+            events.append("mask-restored-finally")
+            return frozenset()
+        events.append("unblocked-after-popen")
+        handlers[query_module.signal.SIGTERM](
+            query_module.signal.SIGTERM,
+            None,
+        )
+        pytest.fail("pending signal must interrupt mask restoration")
+
+    class Process:
+        pass
+
+    process = Process()
+
+    def popen(*_args, **_kwargs):
+        events.append("popen-returned")
+        return process
+
+    monkeypatch.setattr(
+        query_module.signal,
+        "getsignal",
+        lambda current: handlers[current],
+    )
+    monkeypatch.setattr(query_module.signal, "signal", set_handler)
+    monkeypatch.setattr(
+        query_module.signal,
+        "pthread_sigmask",
+        pthread_sigmask,
+    )
+    monkeypatch.setattr(query_module.subprocess, "Popen", popen)
+    monkeypatch.setattr(
+        query_module,
+        "_terminate_query_process_group",
+        lambda current: events.append(
+            "reaped-published-handle" if current is process else "wrong-handle"
+        ),
+    )
+    with pytest.raises(KeyboardInterrupt, match="received signal"):
+        query_module.run_query_child(["child"], cwd=tmp_path, timeout=7)
+    assert events == [
+        "blocked",
+        "popen-returned",
+        "unblocked-after-popen",
+        "reaped-published-handle",
+        "mask-restored-finally",
+    ]
+
+
+def test_query_bootstrap_explicitly_unmasks_control_signals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[object, tuple[object, ...]]] = []
+    monkeypatch.setattr(
+        child_module.signal,
+        "pthread_sigmask",
+        lambda operation, signals: calls.append(
+            (operation, tuple(signals))
+        ),
+    )
+    child_module.unblock_control_signals()
+    assert calls == [
+        (
+            child_module.signal.SIG_UNBLOCK,
+            (
+                child_module.signal.SIGTERM,
+                child_module.signal.SIGHUP,
+                child_module.signal.SIGINT,
+            ),
+        )
+    ]
 
 
 def test_terminate_process_group_escalates_to_kill(

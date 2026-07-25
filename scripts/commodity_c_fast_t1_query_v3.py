@@ -926,7 +926,30 @@ def run_query_child(
     cwd: Path,
     timeout: int,
 ) -> subprocess.CompletedProcess[str]:
+    if (
+        threading.current_thread() is not threading.main_thread()
+        or not hasattr(signal, "pthread_sigmask")
+        or not hasattr(signal, "SIG_BLOCK")
+        or not hasattr(signal, "SIG_SETMASK")
+    ):
+        raise QueryChildLaunchError(
+            "query child requires main-thread POSIX signal masking"
+        )
     previous_handlers: dict[signal.Signals, Any] = {}
+    controlled_signals = tuple(
+        current
+        for current in (
+            getattr(signal, "SIGTERM", None),
+            getattr(signal, "SIGHUP", None),
+            getattr(signal, "SIGINT", None),
+        )
+        if current is not None
+    )
+    previous_mask = signal.pthread_sigmask(
+        signal.SIG_BLOCK,
+        controlled_signals,
+    )
+    process: subprocess.Popen[str] | None = None
 
     def interrupt_for_shutdown(
         signum: int,
@@ -934,19 +957,10 @@ def run_query_child(
     ) -> None:
         raise KeyboardInterrupt(f"query runner received signal {signum}")
 
-    if threading.current_thread() is threading.main_thread():
-        controlled_signals = [
-            current
-            for current in (
-                getattr(signal, "SIGTERM", None),
-                getattr(signal, "SIGHUP", None),
-            )
-            if current is not None
-        ]
+    try:
         for current in controlled_signals:
             previous_handlers[current] = signal.getsignal(current)
             signal.signal(current, interrupt_for_shutdown)
-    try:
         try:
             process = subprocess.Popen(
                 invocation,
@@ -964,6 +978,11 @@ def run_query_child(
                 "query child could not be created"
             ) from exc
         try:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+        except BaseException:
+            _terminate_query_process_group(process)
+            raise
+        try:
             stdout, stderr = process.communicate(timeout=timeout)
         except BaseException:
             _terminate_query_process_group(process)
@@ -977,6 +996,10 @@ def run_query_child(
     finally:
         for current, previous in previous_handlers.items():
             signal.signal(current, previous)
+        try:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+        except BaseException:
+            pass
 
 
 def _terminate_query_process_group(process: subprocess.Popen[str]) -> None:

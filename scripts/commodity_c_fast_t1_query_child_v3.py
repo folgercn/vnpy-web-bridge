@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import stat
 import sys
 from typing import Any
@@ -52,6 +53,24 @@ GATE_HASH_FLAGS = (
 
 class QueryChildError(RuntimeError):
     """Expected pre-network bootstrap failure."""
+
+
+def unblock_control_signals() -> None:
+    if (
+        not hasattr(signal, "pthread_sigmask")
+        or not hasattr(signal, "SIG_UNBLOCK")
+    ):
+        raise QueryChildError("query bootstrap requires POSIX signal unmasking")
+    controlled = tuple(
+        current
+        for current in (
+            getattr(signal, "SIGTERM", None),
+            getattr(signal, "SIGHUP", None),
+            getattr(signal, "SIGINT", None),
+        )
+        if current is not None
+    )
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, controlled)
 
 
 def _read_root_pin(path: Path, label: str) -> str:
@@ -242,6 +261,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     try:
+        unblock_control_signals()
         invocation = load_audit_invocation(args.audit_invocation)
         verify_gate_binding(
             invocation,
