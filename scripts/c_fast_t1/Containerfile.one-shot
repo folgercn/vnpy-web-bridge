@@ -7,12 +7,13 @@ LABEL org.opencontainers.image.title="vnpy-web-bridge C_FAST T1 one-shot runner"
       io.vnpy-web-bridge.c-fast-t1.one-shot-runtime="true" \
       io.vnpy-web-bridge.c-fast-t1.authority-granted="false"
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
+ENV PATH=/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin \
+    PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
 WORKDIR /opt/c-fast-t1
 
-RUN python -m pip install --no-cache-dir --disable-pip-version-check \
+RUN /usr/local/bin/python3.12 -m pip install --no-cache-dir --disable-pip-version-check \
       "psycopg[binary]==3.2.3" \
       "cryptography==48.0.0" \
       "jsonschema==4.26.0" \
@@ -28,13 +29,16 @@ COPY docs/schemas/commodity-c-fast-t1-one-shot-release-v1.schema.json ./docs/sch
 COPY docs/schemas/commodity-c-fast-t1-consume-v1.schema.json ./docs/schemas/commodity-c-fast-t1-consume-v1.schema.json
 COPY docs/schemas/commodity-c-fast-t1-terminal-seal-v1.schema.json ./docs/schemas/commodity-c-fast-t1-terminal-seal-v1.schema.json
 
-RUN python -m py_compile \
+RUN /usr/local/bin/python3.12 -m py_compile \
       scripts/commodity_c_fast_t1_one_shot.py \
       scripts/commodity_c_fast_l1_l5_audit.py \
+    && find /opt/c-fast-t1 -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete \
+    && find /opt/c-fast-t1 -type d -name '__pycache__' -empty -delete \
+    && test -z "$(find /opt/c-fast-t1 -type f \( -name '*.pyc' -o -name '*.pyo' \) -print -quit)" \
     && chmod -R a-w /opt/c-fast-t1
 
 USER 65532:65532
 
 # The image is executable but carries no authority. Without a valid signed
 # release and the deployment-pinned mounts it fails before reading a DSN.
-ENTRYPOINT ["python", "-I", "/opt/c-fast-t1/scripts/commodity_c_fast_t1_one_shot.py"]
+ENTRYPOINT ["/usr/local/bin/python3.12", "-I", "/opt/c-fast-t1/scripts/commodity_c_fast_t1_one_shot.py"]

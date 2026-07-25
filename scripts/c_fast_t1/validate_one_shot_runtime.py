@@ -21,6 +21,7 @@ DEFAULT_TEMPLATE = (
     ROOT / "docs/operations/c-fast-t1-one-shot-runtime.template.yml"
 )
 DEFAULT_CONTAINERFILE = ROOT / "scripts/c_fast_t1/Containerfile.one-shot"
+FROZEN_PATH = "/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 RUNTIME_METADATA = {
     "schema_version": "commodity_c_fast_t1_one_shot_runtime_template_v1",
@@ -31,7 +32,7 @@ RUNTIME_METADATA = {
     "requires_signed_one_shot_release": True,
 }
 ENTRYPOINT = [
-    "python",
+    "/usr/local/bin/python3.12",
     "-I",
     "/opt/c-fast-t1/scripts/commodity_c_fast_t1_one_shot.py",
 ]
@@ -52,6 +53,7 @@ COMMAND = [
     "${C_FAST_T1_RUNTIME_IMAGE_DIGEST:?required_sha256_digest}",
 ]
 ENVIRONMENT = {
+    "PATH": FROZEN_PATH,
     "C_FAST_T1_DEPLOYMENT_MUTATION_AUTHORIZED": "false",
     "C_FAST_T1_ORDER_AUTHORIZED": "false",
     "C_FAST_T1_POSITION_MUTATION_AUTHORIZED": "false",
@@ -125,6 +127,7 @@ RUNNER = {
     "cap_drop": ["ALL"],
     "security_opt": ["no-new-privileges:true"],
     "restart": "no",
+    "healthcheck": {"disable": True},
     "pids_limit": 64,
     "mem_limit": "1g",
     "cpus": 1.0,
@@ -164,7 +167,7 @@ REQUIRED_CONTAINERFILE_LINES = {
     ),
     "USER 65532:65532",
     (
-        'ENTRYPOINT ["python", "-I", '
+        'ENTRYPOINT ["/usr/local/bin/python3.12", "-I", '
         '"/opt/c-fast-t1/scripts/commodity_c_fast_t1_one_shot.py"]'
     ),
 }
@@ -189,10 +192,14 @@ EXPECTED_INSTRUCTIONS = (
         'io.vnpy-web-bridge.c-fast-t1.one-shot-runtime="true" '
         'io.vnpy-web-bridge.c-fast-t1.authority-granted="false"'
     ),
-    "ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1",
+    (
+        f"ENV PATH={FROZEN_PATH} PYTHONDONTWRITEBYTECODE=1 "
+        "PYTHONUNBUFFERED=1"
+    ),
     "WORKDIR /opt/c-fast-t1",
     (
-        "RUN python -m pip install --no-cache-dir --disable-pip-version-check "
+        "RUN /usr/local/bin/python3.12 -m pip install "
+        "--no-cache-dir --disable-pip-version-check "
         '"psycopg[binary]==3.2.3" "cryptography==48.0.0" '
         '"jsonschema==4.26.0" "referencing==0.37.0"'
     ),
@@ -233,14 +240,19 @@ EXPECTED_INSTRUCTIONS = (
         "./docs/schemas/commodity-c-fast-t1-terminal-seal-v1.schema.json"
     ),
     (
-        "RUN python -m py_compile "
+        "RUN /usr/local/bin/python3.12 -m py_compile "
         "scripts/commodity_c_fast_t1_one_shot.py "
         "scripts/commodity_c_fast_l1_l5_audit.py "
+        "&& find /opt/c-fast-t1 -type f "
+        "\\( -name '*.pyc' -o -name '*.pyo' \\) -delete "
+        "&& find /opt/c-fast-t1 -type d -name '__pycache__' -empty -delete "
+        '&& test -z "$(find /opt/c-fast-t1 -type f '
+        "\\( -name '*.pyc' -o -name '*.pyo' \\) -print -quit)\" "
         "&& chmod -R a-w /opt/c-fast-t1"
     ),
     "USER 65532:65532",
     (
-        'ENTRYPOINT ["python", "-I", '
+        'ENTRYPOINT ["/usr/local/bin/python3.12", "-I", '
         '"/opt/c-fast-t1/scripts/commodity_c_fast_t1_one_shot.py"]'
     ),
 )
@@ -254,6 +266,7 @@ FORBIDDEN_CONTAINERFILE_FRAGMENTS = (
     "commodity_c_fast_t1_sign_release.py",
     "QUESTDB_PG_DSN",
     "QDB_PG_READONLY_PASSWORD",
+    "__pycache__/",
 )
 FORBIDDEN_TEMPLATE_FRAGMENTS = (
     "env_file",
@@ -408,6 +421,7 @@ def _validate_template(
     return {
         "runtime_metadata_frozen": True,
         "signed_release_entrypoint_frozen": True,
+        "runtime_path_and_healthcheck_frozen": True,
         "non_root_read_only_runtime": True,
         "fixed_pin_input_dsn_custody_mounts": True,
         "external_network_reference_frozen": True,
@@ -470,6 +484,10 @@ def _validate_containerfile(text: str) -> dict[str, bool]:
         raise RuntimeValidationError(
             "Containerfile must contain exactly one ENTRYPOINT"
         )
+    if text.count("CMD") != 0:
+        raise RuntimeValidationError(
+            "Containerfile must not set CMD; ENTRYPOINT resets the inherited CMD"
+        )
     copy_sources = [
         line.split()[1]
         for line in text.splitlines()
@@ -492,6 +510,7 @@ def _validate_containerfile(text: str) -> dict[str, bool]:
         "containerfile_runtime_bundle_complete": True,
         "containerfile_signer_absent": True,
         "containerfile_entrypoint_frozen": True,
+        "containerfile_default_command_absent": True,
     }
 
 
