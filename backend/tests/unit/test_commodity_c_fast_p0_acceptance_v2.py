@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import hashlib
 import importlib.util
@@ -59,6 +60,9 @@ query_helpers = load_helper(
 p0_v1_helpers = load_helper(
     "acceptance_v2_p0_v1_helpers",
     "test_commodity_c_fast_p0_acceptance_script.py",
+)
+ORIGINAL_DEPLOYMENT_FIXTURE_BUILDER = (
+    outcome_helpers.release_helpers.build_fixture
 )
 
 
@@ -157,7 +161,37 @@ def build_fixture(
     *,
     acceptance_private: Ed25519PrivateKey | None = None,
     acceptance_unused: Ed25519PrivateKey | None = None,
+    query_release_overrides: dict | None = None,
 ) -> Fixture:
+    questdb_build_sha256 = sha256(
+        p0_v1_helpers.QUESTDB_BUILD.encode("utf-8")
+    )
+
+    def build_deployment_fixture(path: Path):
+        fixture = ORIGINAL_DEPLOYMENT_FIXTURE_BUILDER(path)
+        image_path = fixture.evidence_paths.questdb_image_attestation
+        image = json.loads(image_path.read_text(encoding="utf-8"))
+        image["questdb_build_sha256"] = questdb_build_sha256
+        write_json(image_path, image)
+        evidence_hashes = {
+            name: sha256(getattr(fixture.evidence_paths, name).read_bytes())
+            for name, _field in (
+                outcome_helpers.release_module.EVIDENCE_FILE_FIELDS
+            )
+        }
+        for name, field in outcome_helpers.release_module.EVIDENCE_FILE_FIELDS:
+            fixture.draft[field] = evidence_hashes[name]
+        fixture.draft["evidence_bundle_index_sha256"] = sha256(
+            canonical_json(evidence_hashes)
+        )
+        fixture.draft["questdb_build_sha256"] = questdb_build_sha256
+        return fixture
+
+    monkeypatch.setattr(
+        outcome_helpers.release_helpers,
+        "build_fixture",
+        build_deployment_fixture,
+    )
     t1_private = Ed25519PrivateKey.generate()
     outcome_values = outcome_helpers.build_all(
         tmp_path / "deployment",
@@ -374,6 +408,7 @@ def build_fixture(
             for field, path in runtime_paths.items()
         }
     )
+    release.update(query_release_overrides or {})
     release["signature"] = base64.b64encode(
         query_private.sign(
             canonical_json(query_module.unsigned_release_payload(release))
@@ -678,6 +713,28 @@ def acceptance_draft(
     return draft
 
 
+def exact_source_inputs(
+    fixture: Fixture,
+) -> tuple[dict, dict[str, str], dict[str, str]]:
+    raw_files = acceptance_module._read_bundle_raw(fixture.paths)
+    payloads = acceptance_module._parse_payloads(raw_files)
+    raw_sha256 = {
+        name: sha256(raw)
+        for name, raw in raw_files.items()
+    }
+    canonical_sha256 = {
+        name: sha256(canonical_json(payloads[name]))
+        for name in acceptance_module.JSON_BUNDLE_FILES
+    }
+    return payloads, raw_sha256, canonical_sha256
+
+
+def rebind_readiness_packet_id(packet: dict) -> None:
+    packet["packet_id"] = "readiness-v2-" + sha256(
+        canonical_json(readiness_module._packet_identity(packet))
+    )
+
+
 def test_query_v3_exact_bundle_and_signed_acceptance_pass(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -709,6 +766,163 @@ def test_query_v3_exact_bundle_and_signed_acceptance_pass(
     )
     assert observed == signed
     assert digest == acceptance_module.acceptance_sha256(signed)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("endpoint_identity_sha256", "e" * 64),
+        ("questdb_build_sha256", "f" * 64),
+    ],
+)
+def test_query_release_target_and_build_must_match_readiness_l3_chain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    value: str,
+) -> None:
+    fixture = build_fixture(
+        tmp_path,
+        monkeypatch,
+        query_release_overrides={field: value},
+    )
+    with pytest.raises(
+        acceptance_module.P0AcceptanceV2Error,
+        match="deployment target/build binding mismatch",
+    ):
+        acceptance_module.verify_query_v3_bundle(
+            fixture.paths,
+            expected_keyring_sha256=fixture.pins,
+        )
+
+
+def test_two_valid_fixture_upstream_and_query_chain_splice_is_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = build_fixture(tmp_path / "first", monkeypatch)
+    second = build_fixture(tmp_path / "second", monkeypatch)
+    acceptance_module.verify_query_v3_bundle(
+        first.paths,
+        expected_keyring_sha256=first.pins,
+    )
+    acceptance_module.verify_query_v3_bundle(
+        second.paths,
+        expected_keyring_sha256=second.pins,
+    )
+    mixed_paths = replace(
+        first.paths,
+        readiness_packet=second.paths.readiness_packet,
+        content_attestation=second.paths.content_attestation,
+        provenance=second.paths.provenance,
+        provenance_trusted_keyring=second.paths.provenance_trusted_keyring,
+        t1_trusted_keyring=second.paths.t1_trusted_keyring,
+        l3_trusted_keyring=second.paths.l3_trusted_keyring,
+        l3_release=second.paths.l3_release,
+        outcome=second.paths.outcome,
+        outcome_trusted_keyring=second.paths.outcome_trusted_keyring,
+    )
+    mixed_pins = {
+        "query": first.pins["query"],
+        "provenance": second.pins["provenance"],
+        "t1": second.pins["t1"],
+        "l3": second.pins["l3"],
+        "outcome": second.pins["outcome"],
+    }
+    with pytest.raises(
+        acceptance_module.P0AcceptanceV2Error,
+        match="release does not bind exact readiness",
+    ):
+        acceptance_module.verify_query_v3_bundle(
+            mixed_paths,
+            expected_keyring_sha256=mixed_pins,
+        )
+
+
+@pytest.mark.parametrize(
+    ("case", "message"),
+    [
+        ("packet_id", "packet ID does not bind exact facts"),
+        ("ttl", "TTL is not exactly 15 minutes"),
+        ("freshness", "deployment outcome is stale"),
+        ("runtime", "readiness runtime binding is invalid"),
+    ],
+)
+def test_historical_readiness_structural_and_time_invariants_are_replayed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+    message: str,
+) -> None:
+    fixture = build_fixture(tmp_path, monkeypatch)
+    payloads, raw_sha256, canonical_sha256 = exact_source_inputs(fixture)
+    readiness = payloads["readiness_packet"]
+    generated_at = datetime.fromisoformat(readiness["generated_at"])
+    if case == "packet_id":
+        readiness["packet_id"] = "readiness-v2-" + "f" * 64
+    elif case == "ttl":
+        readiness["expires_at"] = (
+            generated_at + timedelta(minutes=16)
+        ).isoformat()
+    elif case == "freshness":
+        readiness["readonly_deployment_outcome"][
+            "deployment_ended_at"
+        ] = (generated_at - timedelta(hours=2)).isoformat()
+    else:
+        readiness["verifier_sha256"] = "f" * 64
+        rebind_readiness_packet_id(readiness)
+    with pytest.raises(
+        acceptance_module.P0AcceptanceV2Error,
+        match=message,
+    ):
+        acceptance_module._validate_exact_sources(
+            payloads,
+            raw_sha256,
+            canonical_sha256,
+        )
+
+
+def test_readiness_deployment_exact_fact_splice_is_rejected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = build_fixture(tmp_path, monkeypatch)
+    payloads, raw_sha256, canonical_sha256 = exact_source_inputs(fixture)
+    readiness = payloads["readiness_packet"]
+    readiness["readonly_deployment_outcome"]["release_id"] = (
+        "different-valid-deployment-release"
+    )
+    rebind_readiness_packet_id(readiness)
+    with pytest.raises(
+        acceptance_module.P0AcceptanceV2Error,
+        match="deployment outcome exact fact mismatch",
+    ):
+        acceptance_module._validate_exact_sources(
+            payloads,
+            raw_sha256,
+            canonical_sha256,
+        )
+
+
+def test_historical_consume_requires_full_launch_margin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = build_fixture(
+        tmp_path,
+        monkeypatch,
+        query_release_overrides={
+            "expires_at": (QUERY_NOW + timedelta(seconds=20)).isoformat(),
+        },
+    )
+    with pytest.raises(
+        acceptance_module.P0AcceptanceV2Error,
+        match="insufficient launch margin",
+    ):
+        acceptance_module.verify_query_v3_bundle(
+            fixture.paths,
+            expected_keyring_sha256=fixture.pins,
+        )
 
 
 @pytest.mark.parametrize(

@@ -69,6 +69,10 @@ from commodity_c_fast_t1_query_v3 import (
     TRUE_AUTHORITY_FIELDS as QUERY_TRUE_AUTHORITY_FIELDS,
     TRUSTED_KEY_PURPOSE as QUERY_KEY_PURPOSE,
 )
+from commodity_c_fast_t1_readiness_v2 import (
+    ReadinessV2Error,
+    _validate_packet as validate_historical_readiness_packet,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -660,6 +664,12 @@ def _validate_exact_sources(
         OUTCOME_SCHEMA_PATH,
         "signed deployment outcome",
     )
+    try:
+        validate_historical_readiness_packet(readiness)
+    except ReadinessV2Error as exc:
+        raise P0AcceptanceV2Error(
+            f"historical readiness packet is invalid: {exc}"
+        ) from exc
     runtime = readiness["t1_runtime"]
     provenance_binding = readiness["build_registry_provenance"]
     outcome_binding = readiness["readonly_deployment_outcome"]
@@ -699,6 +709,90 @@ def _validate_exact_sources(
     }
     for label, (actual, expected) in pairs.items():
         _compare(actual, expected, label)
+    expected_runtime = {
+        "content_attestation_raw_sha256": raw_sha256[
+            "content_attestation"
+        ],
+        "content_attestation_canonical_sha256": canonical_sha256[
+            "content_attestation"
+        ],
+        "external_image_evidence_raw_sha256": content[
+            "external_evidence_sha256"
+        ],
+        "oci_layout_archive_raw_sha256": content[
+            "oci_layout_archive_sha256"
+        ],
+        "image_reference": content["image_reference"],
+        "image_id": content["image_id"],
+        "runtime_bundle_index_sha256": _hash(
+            canonical_json(content["runtime_bundle_sha256"])
+        ),
+        "content_verifier_sha256": content["verifier_sha256"],
+    }
+    if runtime != expected_runtime:
+        raise P0AcceptanceV2Error(
+            "readiness T1 runtime exact fact mismatch"
+        )
+    expected_provenance = {
+        "signed_provenance_raw_sha256": raw_sha256["provenance"],
+        "signed_provenance_canonical_sha256": canonical_sha256[
+            "provenance"
+        ],
+        "provenance_keyring_sha256": provenance[
+            "trusted_keyring_sha256"
+        ],
+        "t1_authority_keyring_sha256": provenance[
+            "excluded_authority_keyring_sha256s"
+        ]["t1_release_keyring_sha256"],
+        "l3_authority_keyring_sha256": provenance[
+            "excluded_authority_keyring_sha256s"
+        ]["l3_release_keyring_sha256"],
+        "signer_key_id": provenance["signer_key_id"],
+        "signer_public_key_sha256": provenance_binding[
+            "signer_public_key_sha256"
+        ],
+        "signed_build_assertion_verified": True,
+        "signed_registry_assertion_verified": True,
+        "external_facts_independently_reverified": False,
+    }
+    if provenance_binding != expected_provenance:
+        raise P0AcceptanceV2Error(
+            "readiness provenance exact fact mismatch"
+        )
+    expected_outcome = {
+        "signed_outcome_raw_sha256": raw_sha256["outcome"],
+        "signed_outcome_canonical_sha256": canonical_sha256["outcome"],
+        "outcome_keyring_sha256": outcome["outcome_keyring_sha256"],
+        "signer_key_id": outcome["signer_key_id"],
+        "signer_public_key_sha256": outcome_binding[
+            "signer_public_key_sha256"
+        ],
+        "release_raw_sha256": raw_sha256["l3_release"],
+        "release_canonical_sha256": canonical_sha256["l3_release"],
+        "consume_marker_raw_sha256": outcome[
+            "consume_marker_raw_sha256"
+        ],
+        "receipt_raw_sha256": outcome["receipt_raw_sha256"],
+        "pre_evidence_bundle_index_sha256": outcome[
+            "pre_evidence_bundle_index_sha256"
+        ],
+        "post_evidence_bundle_index_sha256": outcome[
+            "post_evidence_bundle_index_sha256"
+        ],
+        "release_id": outcome["release_id"],
+        "attempt_id": outcome["attempt_id"],
+        "questdb_target_identity_sha256": outcome[
+            "questdb_target_identity_sha256"
+        ],
+        "outcome_issued_at": outcome["issued_at"],
+        "deployment_ended_at": outcome["deployment_ended_at"],
+        "deployment_executed": outcome["deployment_executed"],
+        "restart_count": outcome["restart_count"],
+    }
+    if outcome_binding != expected_outcome:
+        raise P0AcceptanceV2Error(
+            "readiness deployment outcome exact fact mismatch"
+        )
     for field in (
         "content_attestation_raw_sha256",
         "content_attestation_canonical_sha256",
@@ -731,6 +825,18 @@ def _validate_exact_sources(
         != outcome["questdb_target_identity_sha256"]
     ):
         raise P0AcceptanceV2Error("readiness exact source namespace mismatch")
+    query_release = payloads["query_release"]
+    if (
+        query_release["endpoint_identity_sha256"]
+        != outcome_binding["questdb_target_identity_sha256"]
+        or query_release["endpoint_identity_sha256"]
+        != l3_release["questdb_target_identity_sha256"]
+        or query_release["questdb_build_sha256"]
+        != l3_release["questdb_build_sha256"]
+    ):
+        raise P0AcceptanceV2Error(
+            "query-v3 deployment target/build binding mismatch"
+        )
 
 
 def _verify_key_domains(
@@ -1066,6 +1172,14 @@ def _validate_consume_and_terminal(
         "terminal.final_revalidation_at",
     )
     ended_at = parse_datetime(terminal["ended_at"], "terminal.ended_at")
+    if (
+        consumed_at
+        + timedelta(seconds=release["minimum_launch_margin_seconds"])
+        >= expires_at
+    ):
+        raise P0AcceptanceV2Error(
+            "query-v3 historical consume has insufficient launch margin"
+        )
     if (
         not not_before <= consumed_at < expires_at
         or started_at != consumed_at
