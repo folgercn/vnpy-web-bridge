@@ -7,6 +7,7 @@ from app.core.security import CurrentUser, require_roles
 from app.schemas.risk import EmergencyStopRequestDTO, RiskRulesPatchDTO
 from app.schemas.trade import CancelAllRequestDTO
 from app.services.audit_service import audit_service
+from app.services.commodity_simnow import commodity_simnow_service
 from app.services.risk_service import risk_service
 from app.services.trade_service import trade_service
 from app.ws.events import ws_message
@@ -61,6 +62,12 @@ async def enable_trade(request: Request, user: CurrentUser = Depends(require_rol
 @router.post("/risk/trade/disable")
 async def disable_trade(request: Request, user: CurrentUser = Depends(require_roles("admin"))) -> dict:
     result = risk_service.disable_trade()
+    commodity_halt = commodity_simnow_service.revoke_all_execution_authority(
+        "risk_trade_disabled",
+        operator=user.username,
+        source_ip=request.client.host if request.client else None,
+    )
+    result = {**result, "commodity_simnow": commodity_halt}
     audit_service.record(
         action="trade_disable",
         user_id=user.username,
@@ -79,6 +86,11 @@ async def emergency_stop(
     user: CurrentUser = Depends(require_roles("admin")),
 ) -> dict:
     status = risk_service.emergency_stop()
+    commodity_halt = commodity_simnow_service.revoke_all_execution_authority(
+        "risk_emergency_stop",
+        operator=user.username,
+        source_ip=request.client.host if request.client else None,
+    )
     cancel_result = None
     if payload.cancel_all:
         previous = risk_service.web_trade_enabled
@@ -94,7 +106,11 @@ async def emergency_stop(
             risk_service.web_trade_enabled = previous
             risk_service.emergency_stop()
 
-    result = {"status": status, "cancel_all": cancel_result}
+    result = {
+        "status": status,
+        "cancel_all": cancel_result,
+        "commodity_simnow": commodity_halt,
+    }
     audit_service.record(
         action="emergency_stop",
         user_id=user.username,

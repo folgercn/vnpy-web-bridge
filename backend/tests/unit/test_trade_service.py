@@ -103,6 +103,33 @@ def test_send_order_returns_vt_orderid(monkeypatch, tmp_path) -> None:
     assert result == {"vt_orderid": "CTP.123", "accepted": True}
 
 
+def test_pre_rpc_guard_runs_after_risk_and_immediately_before_send(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    service = make_service(tmp_path)
+    events: list[str] = []
+    monkeypatch.setattr(
+        service.risk,
+        "check_order",
+        lambda _payload: events.append("risk"),
+    )
+    monkeypatch.setattr(
+        rpc_service,
+        "send_order",
+        lambda *_args: (
+            events.append("send") or "CTP.123"
+        ),
+    )
+
+    service.send_order(
+        make_order(),
+        pre_rpc_guard=lambda: events.append("guard"),
+    )
+
+    assert events == ["risk", "guard", "send"]
+
+
 def test_status_mapping_and_cancelable_status() -> None:
     assert normalize_status(Status.NOTTRADED) == "not_traded"
     assert normalize_status(Status.CANCELLED) == "cancelled"

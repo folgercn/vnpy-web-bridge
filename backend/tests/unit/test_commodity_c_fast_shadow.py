@@ -9,15 +9,13 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-
 from app.core.config import Settings
 from app.schemas.commodity_c_fast_shadow import CommodityCFastShadowDTO
 from app.services.commodity_c_fast_shadow import (
     C_FAST_PRODUCT_SPECS_V1,
     C_FAST_SECTOR_MAP_V1,
     PRODUCTS,
+    CFastShadowInvalidError,
     CommodityCFastShadowService,
     normalize_rpc_contracts,
 )
@@ -26,7 +24,8 @@ from app.services.commodity_c_fast_shadow_common import (
     formula_target_binding_sha256,
     unsigned_snapshot_payload,
 )
-
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 PRICES = {
     "ag": 7500.0,
@@ -1047,3 +1046,28 @@ def test_enabled_shadow_rejects_path_collision_at_config_load(
             commodity_c_fast_shadow_snapshot_path=shared,
             commodity_c_fast_shadow_state_path=shared,
         )
+
+
+def test_control_snapshot_requires_current_accepted_file(
+    tmp_path: Path,
+) -> None:
+    private_key = Ed25519PrivateKey.generate()
+    snapshot_path = tmp_path / "snapshot.json"
+    signed, snapshot_hash = sign_payload(unsigned_payload(), private_key)
+    write_snapshot(snapshot_path, signed)
+    service = CommodityCFastShadowService(
+        settings=settings(tmp_path, private_key, snapshot_path),
+        contract_loader=contract_loader,
+        clock=fixed_clock,
+    )
+    service.reload(operator="admin", role="admin", source_ip=None)
+
+    snapshot, observed_hash = service.accepted_snapshot_for_control()
+
+    assert snapshot.snapshot_id == signed["snapshot_id"]
+    assert observed_hash == snapshot_hash
+    tampered = copy.deepcopy(signed)
+    tampered["targets"][0]["target_quantity"] += 1
+    write_snapshot(snapshot_path, tampered)
+    with pytest.raises(CFastShadowInvalidError):
+        service.accepted_snapshot_for_control()

@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from fastapi.testclient import TestClient
-
 from app.core.security import CurrentUser, create_access_token
 from app.main import app
 from app.services.vnpy_rpc_service import rpc_service
+from fastapi.testclient import TestClient
 
 
 class FakeCommoditySimNowService:
@@ -51,6 +50,50 @@ class FakeCommoditySimNowService:
 
     def stop_position_manager_shakedown(self, reason, **kwargs) -> dict:
         return {"execution_enabled": True, "halt": {"reason": reason, "status": "CANCEL_PENDING"}}
+
+    def c_fast_shakedown_status(self) -> dict:
+        return {
+            "configured": True,
+            "execution_enabled": False,
+            "countable_forward": False,
+            "production_allowed": False,
+            "session": None,
+        }
+
+    def c_fast_shakedown_events(self, limit: int) -> list[dict]:
+        return []
+
+    def c_fast_shakedown_history(self, limit: int) -> list[dict]:
+        return []
+
+    def c_fast_shakedown_pnl(self) -> dict:
+        return {
+            "status": "UNAVAILABLE",
+            "countable_forward": False,
+        }
+
+    def preview_c_fast_shakedown(self, selected_products, **kwargs) -> dict:
+        return {
+            "preview": {
+                "status": "PREVIEW_READY",
+                "selected_products": selected_products,
+                "countable_forward": False,
+            }
+        }
+
+    def start_c_fast_shakedown(self, plan_hash, **kwargs) -> dict:
+        return {
+            "action": "open_submitted",
+            "session": {"plan_hash": plan_hash},
+        }
+
+    def stop_c_fast_shakedown(self, reason, **kwargs) -> dict:
+        return {
+            "halt": {
+                "reason": reason,
+                "status": "CANCEL_PENDING",
+            }
+        }
 
     def list_events(self, limit: int) -> list[dict]:
         return []
@@ -192,6 +235,55 @@ def test_position_manager_shakedown_start_and_stop_are_admin_only(monkeypatch) -
         )
 
     assert forbidden.status_code == 403
+    assert started.json()["data"]["action"] == "open_submitted"
+    assert stopped.json()["data"]["halt"]["status"] == "CANCEL_PENDING"
+
+
+def test_c_fast_shakedown_reads_and_mutations_use_expected_rbac(
+    monkeypatch,
+) -> None:
+    install_service(monkeypatch)
+    plan_hash = "b" * 64
+    with client_without_rpc(monkeypatch) as client:
+        status = client.get(
+            "/api/commodity-simnow/c-fast-shakedown/status",
+            headers=auth_headers("viewer"),
+        )
+        pnl = client.get(
+            "/api/commodity-simnow/c-fast-shakedown/pnl",
+            headers=auth_headers("trader"),
+        )
+        sessions = client.get(
+            "/api/commodity-simnow/c-fast-shakedown/sessions",
+            headers=auth_headers("viewer"),
+        )
+        forbidden = client.post(
+            "/api/commodity-simnow/c-fast-shakedown/preview",
+            headers=auth_headers("trader"),
+            json={"selected_products": ["ag"]},
+        )
+        preview = client.post(
+            "/api/commodity-simnow/c-fast-shakedown/preview",
+            headers=auth_headers("admin"),
+            json={"selected_products": ["ag"]},
+        )
+        started = client.post(
+            "/api/commodity-simnow/c-fast-shakedown/start",
+            headers=auth_headers("admin"),
+            json={"plan_hash": plan_hash},
+        )
+        stopped = client.post(
+            "/api/commodity-simnow/c-fast-shakedown/stop",
+            headers=auth_headers("admin"),
+            json={"reason": "operator requested stop"},
+        )
+
+    assert status.status_code == 200
+    assert status.json()["data"]["production_allowed"] is False
+    assert pnl.status_code == 200
+    assert sessions.status_code == 200
+    assert forbidden.status_code == 403
+    assert preview.json()["data"]["preview"]["selected_products"] == ["ag"]
     assert started.json()["data"]["action"] == "open_submitted"
     assert stopped.json()["data"]["halt"]["status"] == "CANCEL_PENDING"
 

@@ -5,7 +5,7 @@ import logging
 from datetime import datetime, timedelta
 from threading import RLock
 from time import monotonic
-from typing import Any
+from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 from app.core.config import Settings, get_settings
@@ -258,6 +258,10 @@ class VnpyRpcService:
     def get_orders(self) -> list[dict[str, Any]]:
         return to_plain_list(self.call_first(["get_all_orders", "get_all_active_orders"]))
 
+    def get_all_orders(self) -> list[dict[str, Any]]:
+        """Return complete order history without active-only fallback."""
+        return to_plain_list(self.call("get_all_orders"))
+
     def get_trades(self) -> list[dict[str, Any]]:
         return to_plain_list(self.call_first(["get_all_trades"]))
 
@@ -288,6 +292,17 @@ class VnpyRpcService:
 
     def send_order(self, order_request: "OrderRequest", gateway_name: str) -> Any:
         return self.call("send_order", order_request, gateway_name)
+
+    def send_order_guarded(
+        self,
+        order_request: "OrderRequest",
+        gateway_name: str,
+        guard: Callable[[], Any],
+    ) -> Any:
+        """Run the final fact guard and non-idempotent send under one RPC lock."""
+        with self._call_lock:
+            guard()
+            return self.send_order(order_request, gateway_name)
 
     def cancel_order(self, cancel_request: "CancelRequest", gateway_name: str) -> Any:
         return self.call("cancel_order", cancel_request, gateway_name)

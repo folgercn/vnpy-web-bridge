@@ -5,7 +5,6 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-
 Product = Literal["ag", "al", "au", "bu", "cu", "rb", "ru", "sc", "sp", "zn"]
 
 
@@ -154,6 +153,18 @@ class CommodityPositionManagerShakedownStartRequestDTO(StrictModel):
 
 
 class CommodityPositionManagerShakedownStopRequestDTO(StrictModel):
+    reason: str = Field(min_length=8, max_length=500)
+
+
+class CommodityCFastShakedownPreviewRequestDTO(StrictModel):
+    selected_products: list[Product] = Field(min_length=1, max_length=2)
+
+
+class CommodityCFastShakedownStartRequestDTO(StrictModel):
+    plan_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class CommodityCFastShakedownStopRequestDTO(StrictModel):
     reason: str = Field(min_length=8, max_length=500)
 
 

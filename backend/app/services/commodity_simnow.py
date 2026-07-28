@@ -10,11 +10,12 @@ import logging
 import math
 import re
 import uuid
+from collections.abc import Callable
 from datetime import date, datetime, timezone
 from functools import wraps
 from pathlib import Path
-from threading import RLock
-from typing import Any, Callable
+from threading import Lock, RLock, local
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from cryptography.exceptions import InvalidSignature
@@ -28,18 +29,20 @@ from app.core.errors import (
     CommoditySimNowSafetyError,
     CommoditySimNowStateError,
 )
+from app.schemas.commodity_c_fast_shadow import CommodityCFastShadowDTO
 from app.schemas.commodity_simnow import (
     CommodityPlanExecuteRequestDTO,
     CommodityPositionManagerShadowDTO,
     CommoditySimNowDisableRequestDTO,
     CommoditySimNowEnableRequestDTO,
-    CommodityTemplateStartRequestDTO,
     CommodityTargetBatchDTO,
+    CommodityTemplateStartRequestDTO,
 )
 from app.schemas.common import STATUS_VALUE_MAP
 from app.schemas.trade import OrderRequestDTO
 from app.services.audit_service import AuditService, audit_service
 from app.services.calendar_service import calendar_service
+from app.services.commodity_c_fast_shadow import C_FAST_SECTOR_MAP_V1
 from app.services.risk_service import RiskService, risk_service
 from app.services.trade_service import TradeService, trade_service
 from app.services.vnpy_rpc_service import VnpyRpcService, rpc_service
@@ -49,6 +52,10 @@ logger = logging.getLogger(__name__)
 CHINA_TZ = ZoneInfo("Asia/Shanghai")
 REFERENCE_PREFIX = "commodity_static_core"
 ACTIVE_ORDER_STATUSES = {"submitting", "not_traded", "part_traded", "submitting_order"}
+TERMINAL_ORDER_STATUSES = {"all_traded", "cancelled", "rejected"}
+KNOWN_ORDER_STATUSES = (
+    ACTIVE_ORDER_STATUSES | TERMINAL_ORDER_STATUSES
+)
 
 PRODUCT_SPECS: dict[str, dict[str, Any]] = {
     "ag": {"exchange": "SHFE", "sector": "precious", "multiplier": 15, "price_tick": 1.0},
@@ -81,8 +88,51 @@ POSITION_MANAGER_GENESIS_SOURCE_MONTH = "2026-08"
 def _serialized(method):
     @wraps(method)
     def wrapped(self, *args, **kwargs):
-        with self._cycle_lock:
-            return method(self, *args, **kwargs)
+        context = self._dispatch_operation_context
+        depth = int(getattr(context, "depth", 0))
+        if depth == 0:
+            (
+                context.entry_abort_epoch,
+                context.entry_pending_halt_epochs,
+            ) = (
+                self._dispatch_epoch_state_snapshot()
+            )
+        entry_abort_epoch = int(
+            context.entry_abort_epoch
+        )
+        entry_pending_halt_epochs = frozenset(
+            context.entry_pending_halt_epochs
+        )
+        requested_abort_epoch: int | None = None
+        if method.__name__ in {
+            "disable",
+            "stop_c_fast_shakedown",
+            "stop_position_manager_shakedown",
+        }:
+            requested_abort_epoch = self._request_dispatch_abort()
+        if method.__name__ in {
+            "enable",
+            "start_c_fast_shakedown",
+            "start_position_manager_shakedown",
+        }:
+            kwargs["_dispatch_entry_abort_epoch"] = entry_abort_epoch
+            kwargs["_dispatch_entry_pending_halt_epochs"] = (
+                entry_pending_halt_epochs
+            )
+        context.depth = depth + 1
+        try:
+            with self._cycle_lock:
+                result = method(self, *args, **kwargs)
+                if requested_abort_epoch is not None:
+                    self._complete_dispatch_halt(
+                        requested_abort_epoch
+                    )
+                return result
+        finally:
+            context.depth = depth
+            if depth == 0:
+                del context.entry_abort_epoch
+                del context.entry_pending_halt_epochs
 
     return wrapped
 
@@ -191,6 +241,20 @@ class CommoditySimNowService:
         self.settings = settings or get_settings()
         self.rpc = rpc or rpc_service
         self.trade = trade or trade_service
+        if (
+            isinstance(self.trade, TradeService)
+            and self.trade.rpc is not self.rpc
+        ):
+            if trade is not None:
+                raise ValueError(
+                    "CommoditySimNowService and TradeService must share RPC"
+                )
+            self.trade = TradeService(
+                settings=self.settings,
+                audit=audit or audit_service,
+                risk=risk or risk_service,
+                rpc=self.rpc,
+            )
         self.risk = risk or risk_service
         self.audit = audit or audit_service
         self.tick_store = tick_store or memory_store
@@ -200,16 +264,88 @@ class CommoditySimNowService:
         self.simnow_mode = False
         self.auto_dispatch_authorized = False
         self.shakedown_auto_dispatch_authorized = False
+        self.c_fast_shakedown_auto_dispatch_authorized = False
+        self.c_fast_continuous_authorized = False
         self.template_authorized = False
         self.order_endpoint_touched = False
         self.current_plan: dict[str, Any] | None = None
         self.events: list[dict[str, Any]] = []
         self._cycle_lock = RLock()
+        self._c_fast_snapshot_provider: (
+            Callable[[], tuple[CommodityCFastShadowDTO, str]] | None
+        ) = None
         self._task: asyncio.Task[Any] | None = None
         self._state_load_error: str | None = None
+        self._c_fast_authority_persist_error: str | None = None
+        self._dispatch_abort_requested = False
+        self._dispatch_abort_epoch = 0
+        self._dispatch_pending_halt_epochs: set[int] = set()
+        self._dispatch_abort_lock = Lock()
+        self._dispatch_operation_context = local()
         self._completed_state = self._load_completed_state()
         self.current_plan = self._load_active_plan()
         self._cleanup_terminal_shakedown_active_plan()
+
+    def bind_c_fast_snapshot_provider(
+        self,
+        provider: Callable[[], tuple[CommodityCFastShadowDTO, str]],
+    ) -> None:
+        with self._cycle_lock:
+            self._c_fast_snapshot_provider = provider
+
+    def _dispatch_epoch_snapshot(self) -> int:
+        with self._dispatch_abort_lock:
+            return self._dispatch_abort_epoch
+
+    def _dispatch_epoch_state_snapshot(
+        self,
+    ) -> tuple[int, frozenset[int]]:
+        with self._dispatch_abort_lock:
+            return (
+                self._dispatch_abort_epoch,
+                frozenset(self._dispatch_pending_halt_epochs),
+            )
+
+    def _request_dispatch_abort(self) -> int:
+        with self._dispatch_abort_lock:
+            self._dispatch_abort_epoch += 1
+            self._dispatch_abort_requested = True
+            self._dispatch_pending_halt_epochs.add(
+                self._dispatch_abort_epoch
+            )
+            return self._dispatch_abort_epoch
+
+    def _complete_dispatch_halt(self, abort_epoch: int) -> None:
+        with self._dispatch_abort_lock:
+            if abort_epoch not in self._dispatch_pending_halt_epochs:
+                raise RuntimeError(
+                    "halt epoch is not pending"
+                )
+            self._dispatch_pending_halt_epochs.remove(abort_epoch)
+
+    def _begin_dispatch_epoch(
+        self,
+        expected_epoch: int,
+        expected_pending_halt_epochs: frozenset[int],
+    ) -> int:
+        with self._dispatch_abort_lock:
+            if (
+                expected_pending_halt_epochs
+                or self._dispatch_abort_epoch != expected_epoch
+                or self._dispatch_pending_halt_epochs
+            ):
+                raise CommoditySimNowSafetyError(
+                    "授权等待期间收到 stop/disable/shutdown，拒绝派单"
+                )
+            self._dispatch_abort_requested = False
+            return self._dispatch_abort_epoch
+
+    def _dispatch_aborted(self, epoch: int) -> bool:
+        with self._dispatch_abort_lock:
+            return bool(
+                self._dispatch_abort_requested
+                or self._dispatch_abort_epoch != epoch
+            )
 
     @_serialized
     def status(self) -> dict[str, Any]:
@@ -276,42 +412,90 @@ class CommoditySimNowService:
         }
 
     def start(self) -> None:
+        if (
+            self.current_plan
+            and self.current_plan.get("status") == "NOOP_FINALIZING"
+            and self.current_plan.get("c_fast_shakedown_session_id")
+        ):
+            try:
+                self._complete_c_fast_noop_plan(self.current_plan)
+            except Exception as exc:
+                self._revoke_auto_dispatch("c_fast_shakedown")
+                halt = self.current_plan.setdefault("halt", {})
+                halt.update(
+                    {
+                        "reason": "noop_restart_recovery_failed",
+                        "noop_recovery_error_type":
+                        exc.__class__.__name__,
+                        "noop_recovery_failed_at_utc":
+                        self.clock().astimezone(timezone.utc).isoformat(),
+                    }
+                )
+                self._persist_active_plan_during_halt(halt)
         if self.current_plan and self.current_plan.get("status") != "COMPLETE":
-            self._begin_safe_halt(
-                "process_restart_recovery",
-                operator="commodity-simnow-recovery",
-                source_ip=None,
-            )
+            if self.current_plan.get("status") != "NOOP_FINALIZING":
+                self._begin_safe_halt(
+                    "process_restart_recovery",
+                    operator="commodity-simnow-recovery",
+                    source_ip=None,
+                )
         if self._task or not self.settings.commodity_simnow_enabled:
             return
         self._task = asyncio.create_task(self._run_auto_dispatch_loop())
 
     async def stop(self) -> None:
-        await asyncio.to_thread(
-            self._begin_safe_halt,
-            "service_stop",
-            operator="commodity-simnow-shutdown",
-            source_ip=None,
-            revoke_scope="all",
-        )
-        if not self._task:
-            return
-        self._task.cancel()
+        abort_epoch = self._request_dispatch_abort()
+        halt_error: Exception | None = None
         try:
-            await self._task
-        except asyncio.CancelledError:
-            pass
-        self._task = None
+            await asyncio.to_thread(
+                self._begin_safe_halt,
+                "service_stop",
+                operator="commodity-simnow-shutdown",
+                source_ip=None,
+                revoke_scope="all",
+            )
+        except Exception as exc:
+            halt_error = exc
+        finally:
+            if self._task:
+                self._task.cancel()
+                try:
+                    await self._task
+                except asyncio.CancelledError:
+                    pass
+                self._task = None
+        if halt_error is not None:
+            raise halt_error
+        self._complete_dispatch_halt(abort_epoch)
 
     @_serialized
     def _revoke_auto_dispatch(self, scope: str = "all") -> None:
-        if scope not in {"all", "generic", "shakedown"}:
+        if scope not in {"all", "generic", "shakedown", "c_fast_shakedown"}:
             raise ValueError(f"unknown auto-dispatch authorization scope: {scope}")
         if scope in {"all", "generic"}:
             self.auto_dispatch_authorized = False
             self.template_authorized = False
         if scope in {"all", "shakedown"}:
             self.shakedown_auto_dispatch_authorized = False
+        if scope in {"all", "c_fast_shakedown"}:
+            self.c_fast_shakedown_auto_dispatch_authorized = False
+            self.c_fast_continuous_authorized = False
+            try:
+                self._set_c_fast_continuous_authorized(False)
+            except Exception as exc:
+                self._c_fast_authority_persist_error = (
+                    exc.__class__.__name__
+                )
+                self._event(
+                    "c_fast_authority_revocation_persist_failed",
+                    result={
+                        "error_type": exc.__class__.__name__,
+                        "memory_authority_revoked": True,
+                    },
+                )
+                logger.exception(
+                    "failed to persist revoked C_FAST continuous authority"
+                )
 
     @_serialized
     def enable(
@@ -321,7 +505,18 @@ class CommoditySimNowService:
         operator: str,
         role: str | None,
         source_ip: str | None,
+        _dispatch_entry_abort_epoch: int | None = None,
+        _dispatch_entry_pending_halt_epochs:
+        frozenset[int] | None = None,
     ) -> dict[str, Any]:
+        if (
+            _dispatch_entry_abort_epoch is not None
+            and _dispatch_entry_pending_halt_epochs is not None
+        ):
+            self._begin_dispatch_epoch(
+                _dispatch_entry_abort_epoch,
+                _dispatch_entry_pending_halt_epochs,
+            )
         if not self.settings.commodity_simnow_enabled:
             raise CommoditySimNowDisabledError(
                 detail={"required_setting": "COMMODITY_SIMNOW_ENABLED=true"}
@@ -346,10 +541,7 @@ class CommoditySimNowService:
         self.auto_dispatch_authorized = (
             self.settings.commodity_simnow_auto_dispatch_enabled and payload.confirm_auto_dispatch
         )
-        if not (
-            self.current_plan
-            and self.current_plan.get("position_manager_shakedown_session_id")
-        ):
+        if not self._is_shakedown_plan(self.current_plan):
             self._resume_halted_plan_after_authorization()
         result = {**self.status(), "safety": snapshot, "reason": payload.reason}
         self._event("enabled", result={"account_hash": snapshot["account_hash"]})
@@ -396,6 +588,40 @@ class CommoditySimNowService:
         return result
 
     @_serialized
+    def revoke_all_execution_authority(
+        self,
+        reason: str,
+        *,
+        operator: str,
+        source_ip: str | None,
+    ) -> dict[str, Any]:
+        """Fail closed on a global risk event, even if evidence persistence fails."""
+        self._revoke_auto_dispatch("all")
+        try:
+            halt = self._begin_safe_halt(
+                reason,
+                operator=operator,
+                source_ip=source_ip,
+                revoke_scope="all",
+            )
+            return {"authority_revoked": True, "halt": halt}
+        except Exception as exc:
+            logger.exception("global CommoditySimNow authority revocation failed")
+            return {
+                "authority_revoked": True,
+                "halt": {
+                    "required": bool(self.current_plan),
+                    "reason": reason,
+                    "status": (
+                        self.current_plan.get("status")
+                        if self.current_plan
+                        else None
+                    ),
+                    "error_type": exc.__class__.__name__,
+                },
+            }
+
+    @_serialized
     def start_template(
         self,
         payload: CommodityTemplateStartRequestDTO,
@@ -412,10 +638,11 @@ class CommoditySimNowService:
         )
         if not all(confirmations):
             raise CommoditySimNowSafetyError("一键策略模板授权确认不完整")
-        if (
-            self.current_plan
-            and self.current_plan.get("position_manager_shakedown_session_id")
-        ):
+        if self.c_fast_continuous_authorized:
+            raise CommoditySimNowStateError(
+                "C_FAST 持续运行授权占用执行权，正式模板不得启动"
+            )
+        if self._is_shakedown_plan(self.current_plan):
             raise CommoditySimNowStateError(
                 "候选测试计划必须通过专用入口收口，正式模板不得恢复或派发",
                 detail={
@@ -523,10 +750,11 @@ class CommoditySimNowService:
         source_ip: str | None,
     ) -> dict[str, Any]:
         self._require_enabled()
-        if (
-            self.current_plan
-            and self.current_plan.get("position_manager_shakedown_session_id")
-        ):
+        if self.c_fast_continuous_authorized:
+            raise CommoditySimNowStateError(
+                "C_FAST 持续运行授权占用执行权，正式预览不得覆盖"
+            )
+        if self._is_shakedown_plan(self.current_plan):
             raise CommoditySimNowStateError(
                 "候选测试计划必须通过专用入口收口，正式预览不得覆盖",
                 detail={
@@ -643,24 +871,24 @@ class CommoditySimNowService:
         dispatch_mode: str = "manual",
     ) -> dict[str, Any]:
         self._require_enabled()
+        plan = self._require_plan(payload.plan_hash)
         if dispatch_mode not in {"manual", "auto", "shakedown_auto"}:
             raise CommoditySimNowSafetyError("未知派单模式")
         if dispatch_mode == "auto":
             if not self._auto_dispatch_allowed():
                 raise CommoditySimNowSafetyError("SimNow 自动派单未授权")
         elif dispatch_mode == "shakedown_auto":
-            if not self._position_manager_shakedown_auto_dispatch_allowed():
+            if not self._candidate_shakedown_auto_dispatch_allowed(plan):
                 raise CommoditySimNowSafetyError("候选 SimNow 自动派单未授权")
         elif not (payload.confirm and payload.confirm_simnow_only and payload.confirm_manual_one_shot):
             raise CommoditySimNowSafetyError("执行确认不完整")
-        plan = self._require_plan(payload.plan_hash)
-        shakedown_plan = bool(plan.get("position_manager_shakedown_session_id"))
+        shakedown_plan = self._is_shakedown_plan(plan)
         if shakedown_plan and dispatch_mode != "shakedown_auto":
             raise CommoditySimNowSafetyError("候选测试只允许专用自动派单模式")
         if not shakedown_plan and dispatch_mode == "shakedown_auto":
             raise CommoditySimNowSafetyError("正式计划不得使用候选测试派单模式")
         if shakedown_plan:
-            self._verify_position_manager_shakedown_execution_trust(plan)
+            self._verify_candidate_shakedown_execution_trust(plan)
         use_acceptance_passive_limit = payload.acceptance_passive_limit
         if use_acceptance_passive_limit:
             if dispatch_mode != "manual":
@@ -699,7 +927,9 @@ class CommoditySimNowService:
                 detail={"expected": expected_positions, "observed": observed_positions},
             )
         if shakedown_plan:
-            conflicts = self._position_manager_shakedown_external_active_orders(plan)
+            conflicts = self._candidate_shakedown_external_active_orders(
+                plan
+            )
             if conflicts:
                 self._begin_safe_halt(
                     "external_active_order", operator=operator, source_ip=source_ip,
@@ -712,6 +942,10 @@ class CommoditySimNowService:
                 raise CommoditySimNowStateError(
                     "仍有活动策略委托", detail={"active_order_ids": active}
                 )
+        if plan.get("c_fast_shakedown_session_id"):
+            self._verify_c_fast_pre_send_fact_guard(
+                plan, payload.phase
+            )
         orders = list(plan[f"{payload.phase}_orders"])
         if not orders:
             raise CommoditySimNowStateError("该阶段没有待提交委托")
@@ -722,6 +956,10 @@ class CommoditySimNowService:
         if use_acceptance_passive_limit:
             self._verify_acceptance_passive_limits(repriced_orders)
         self._verify_phase_symbol_position_limit(repriced_orders, self._position_snapshot())
+        if plan.get("c_fast_shakedown_session_id"):
+            self._verify_c_fast_pre_send_fact_guard(
+                plan, payload.phase
+            )
         if payload.phase == "open":
             prices = {order["vt_symbol"]: float(order["price"]) for order in repriced_orders}
             plan["latest_exposure_snapshot"] = self._verify_realtime_exposures(
@@ -731,17 +969,58 @@ class CommoditySimNowService:
                 sector_map=(
                     POSITION_MANAGER_SECTOR_MAP_V1
                     if plan.get("risk_sector_map_id") == "POSITION_MANAGER_SECTOR_MAP_V1"
+                    else C_FAST_SECTOR_MAP_V1
+                    if plan.get("risk_sector_map_id") == "C_FAST_SECTOR_MAP_V1"
                     else None
                 ),
             )
 
+        historical_intents = (
+            plan.get("send_intents", {}).get(payload.phase, [])
+        )
+        if historical_intents:
+            self._begin_safe_halt(
+                "historical_send_intent_before_dispatch",
+                operator=operator,
+                source_ip=source_ip,
+                phase=payload.phase,
+            )
+            raise CommoditySimNowStateError(
+                "存在历史 send intent，禁止覆盖或重放",
+                detail={
+                    "phase": payload.phase,
+                    "references": [
+                        row.get("reference")
+                        for row in historical_intents
+                    ],
+                },
+            )
         plan.pop("halt", None)
         plan["status"] = f"SUBMITTING_{payload.phase.upper()}"
         self._persist_active_plan()
+        dispatch_abort_epoch = self._dispatch_epoch_snapshot()
         submitted: list[dict[str, Any]] = []
         current_intent: dict[str, Any] | None = None
         try:
             for order, repriced in zip(orders, repriced_orders, strict=True):
+                if (
+                    self._dispatch_aborted(dispatch_abort_epoch)
+                    or self.risk.status().get("emergency_stopped")
+                ):
+                    raise CommoditySimNowSafetyError(
+                        "派单已被 stop/disable/emergency 抢占"
+                    )
+                pre_intent_guard = None
+                if plan.get("c_fast_shakedown_session_id"):
+                    pre_intent_guard = (
+                        self._verify_c_fast_pre_send_fact_guard(
+                            plan,
+                            payload.phase,
+                            current_reference=str(
+                                repriced["reference"]
+                            ),
+                        )
+                    )
                 intent = {
                     **repriced,
                     "decision_price": order["price"],
@@ -749,6 +1028,7 @@ class CommoditySimNowService:
                     "price_mode": "acceptance_passive" if use_acceptance_passive_limit else "protected",
                     "intent_status": "PENDING_SEND",
                     "intent_at_utc": self.clock().astimezone(timezone.utc).isoformat(),
+                    "pre_intent_fact_guard": pre_intent_guard,
                 }
                 intents = plan.setdefault("send_intents", {}).setdefault(payload.phase, [])
                 existing_intent = next(
@@ -758,11 +1038,35 @@ class CommoditySimNowService:
                 if existing_intent is None:
                     intents.append(intent)
                 else:
-                    existing_intent.clear()
-                    existing_intent.update(intent)
-                    intent = existing_intent
+                    raise CommoditySimNowStateError(
+                        "历史 send intent 不允许覆盖或重放",
+                        detail={
+                            "reference": repriced["reference"],
+                            "intent_status":
+                            existing_intent.get("intent_status"),
+                        },
+                    )
                 current_intent = intent
                 self._persist_active_plan()
+                if (
+                    self._dispatch_aborted(dispatch_abort_epoch)
+                    or self.risk.status().get(
+                        "emergency_stopped"
+                    )
+                ):
+                    raise CommoditySimNowSafetyError(
+                        "派单已被 stop/disable/emergency 抢占"
+                    )
+                if plan.get("c_fast_shakedown_session_id"):
+                    intent["pre_send_fact_guard"] = (
+                        self._verify_c_fast_pre_send_fact_guard(
+                            plan,
+                            payload.phase,
+                            current_reference=str(
+                                repriced["reference"]
+                            ),
+                        )
+                    )
                 request = OrderRequestDTO(
                     symbol=repriced["symbol"],
                     exchange=repriced["exchange"],
@@ -775,7 +1079,42 @@ class CommoditySimNowService:
                     reference=repriced["reference"],
                     confirm=True,
                 )
-                result = self.trade.send_order(request, source_ip=source_ip, operator=operator)
+                def pre_rpc_guard() -> None:
+                    if (
+                        self._dispatch_aborted(
+                            dispatch_abort_epoch
+                        )
+                        or self.risk.status().get(
+                            "emergency_stopped"
+                        )
+                    ):
+                        raise CommoditySimNowSafetyError(
+                            "派单已被 stop/disable/emergency 抢占"
+                        )
+                    if plan.get(
+                        "c_fast_shakedown_session_id"
+                    ):
+                        intent["pre_send_binding_guard"] = (
+                            self._verify_c_fast_final_dispatch_binding(
+                                plan
+                            )
+                        )
+                        intent["pre_send_fact_guard"] = (
+                            self._verify_c_fast_pre_send_fact_guard(
+                                plan,
+                                payload.phase,
+                                current_reference=str(
+                                    repriced["reference"]
+                                ),
+                            )
+                        )
+
+                result = self.trade.send_order(
+                    request,
+                    source_ip=source_ip,
+                    operator=operator,
+                    pre_rpc_guard=pre_rpc_guard,
+                )
                 submitted_row = {
                     **repriced,
                     "decision_price": order["price"],
@@ -798,21 +1137,42 @@ class CommoditySimNowService:
                 self.order_endpoint_touched = True
         except Exception as exc:
             if current_intent is not None:
-                deterministic_rejection = self._is_deterministic_pre_rpc_rejection(exc)
-                current_intent["intent_status"] = (
-                    "REJECTED_PRE_RPC" if deterministic_rejection else "OUTCOME_UNKNOWN"
+                rpc_acknowledged = (
+                    current_intent.get("intent_status")
+                    == "ACKNOWLEDGED"
                 )
+                deterministic_rejection = (
+                    not rpc_acknowledged
+                    and self._is_deterministic_pre_rpc_rejection(exc)
+                )
+                if not rpc_acknowledged:
+                    current_intent["intent_status"] = (
+                        "REJECTED_PRE_RPC"
+                        if deterministic_rejection
+                        else "OUTCOME_UNKNOWN"
+                    )
                 current_intent["error_type"] = exc.__class__.__name__
                 current_intent["error_code"] = getattr(exc, "code", None)
                 current_intent["failed_at_utc"] = self.clock().astimezone(timezone.utc).isoformat()
             plan["status"] = f"{payload.phase.upper()}_SUBMISSION_PARTIAL"
-            self._persist_active_plan()
+            evidence_persist_error: str | None = None
+            try:
+                self._persist_active_plan()
+            except Exception as persist_exc:
+                evidence_persist_error = persist_exc.__class__.__name__
             halt = self._begin_safe_halt(
                 "partial_submission",
                 operator=operator,
                 source_ip=source_ip,
                 phase=payload.phase,
             )
+            if evidence_persist_error:
+                plan.setdefault("halt", {})[
+                    "submission_evidence_persistence_error"
+                ] = evidence_persist_error
+                self._persist_active_plan_during_halt(
+                    plan["halt"]
+                )
             self._event(
                 "submission_partial",
                 plan_hash=plan["plan_hash"],
@@ -899,6 +1259,65 @@ class CommoditySimNowService:
         dispatch_mode: str = "manual",
     ) -> dict[str, Any]:
         plan = self._require_plan(plan_hash)
+        status_before = str(plan.get("status") or "")
+        try:
+            return self._reconcile_impl(
+                plan_hash,
+                operator=operator,
+                role=role,
+                source_ip=source_ip,
+                dispatch_mode=dispatch_mode,
+            )
+        except Exception as exc:
+            if not plan.get("c_fast_shakedown_session_id"):
+                raise
+            self._revoke_auto_dispatch(
+                self._candidate_revoke_scope(plan)
+            )
+            if self._c_fast_terminal_archive_committed(plan):
+                raise
+            halted_during_call = bool(
+                status_before
+                in {"CLOSE_SUBMITTED", "OPEN_SUBMITTED"}
+                and plan.get("status")
+                in {
+                    "CANCEL_PENDING",
+                    "SUBMISSION_OUTCOME_UNKNOWN",
+                    "HALTED_RECONCILE_REQUIRED",
+                    "HALTED_RECONCILED",
+                }
+                and plan.get("halt")
+            )
+            if not halted_during_call:
+                self._begin_safe_halt(
+                    "shakedown_reconcile_failed",
+                    operator=operator,
+                    source_ip=source_ip,
+                    phase=self._infer_plan_phase(plan),
+                    revoke_scope=self._candidate_revoke_scope(plan),
+                )
+            halt = plan.setdefault("halt", {})
+            halt.update(
+                {
+                    "reconcile_error_type":
+                    exc.__class__.__name__,
+                    "reconcile_failed_at_utc":
+                    self.clock().astimezone(timezone.utc).isoformat(),
+                }
+            )
+            self._persist_active_plan_during_halt(halt)
+            raise
+
+    def _reconcile_impl(
+        self,
+        plan_hash: str,
+        *,
+        operator: str,
+        role: str | None,
+        source_ip: str | None,
+        dispatch_mode: str,
+    ) -> dict[str, Any]:
+        plan = self._require_plan(plan_hash)
         halted_reconcile = plan["status"] in {
             "CANCEL_PENDING",
             "HALTED_RECONCILE_REQUIRED",
@@ -922,8 +1341,37 @@ class CommoditySimNowService:
             raise CommoditySimNowStateError(
                 "当前状态不允许对账", detail={"status": plan["status"]}
             )
-        if plan.get("position_manager_shakedown_session_id"):
-            conflicts = self._position_manager_shakedown_external_active_orders(plan)
+        if plan.get("c_fast_shakedown_session_id"):
+            outside_scope = self._c_fast_outside_scope_positions()
+            if outside_scope:
+                self._revoke_auto_dispatch("c_fast_shakedown")
+                halt_result = self._begin_safe_halt(
+                    "c_fast_outside_scope_position",
+                    operator=operator,
+                    source_ip=source_ip,
+                    phase=self._infer_plan_phase(plan),
+                    revoke_scope="c_fast_shakedown",
+                )
+                halt = plan.setdefault("halt", {})
+                halt.update(
+                    {
+                        "recovery_blocker":
+                        "OUTSIDE_C_FAST_POSITION_SCOPE",
+                        "outside_scope_positions": outside_scope,
+                    }
+                )
+                self._persist_active_plan_during_halt(halt)
+                raise CommoditySimNowSafetyError(
+                    "账户存在 C_FAST 固定十品种范围外持仓",
+                    detail={
+                        "symbols": outside_scope,
+                        "halt": halt_result,
+                    },
+                )
+        if self._is_shakedown_plan(plan):
+            conflicts = self._candidate_shakedown_external_active_orders(
+                plan
+            )
             if conflicts:
                 self._begin_safe_halt(
                     "external_active_order", operator=operator, source_ip=source_ip
@@ -998,29 +1446,40 @@ class CommoditySimNowService:
         finalized_shakedown = False
         try:
             if plan["status"] == "COMPLETE":
-                if plan.get("position_manager_shakedown_session_id"):
-                    self._complete_position_manager_shakedown(
+                if self._is_shakedown_plan(plan):
+                    self._complete_candidate_shakedown(
                         plan, result=reconciliation
                     )
                     finalized_shakedown = True
                 else:
                     self._save_completed_state(plan)
-            elif plan.get("position_manager_shakedown_session_id") and plan["status"] == "HALTED_RECONCILED":
-                self._archive_position_manager_shakedown_terminal(
+            elif self._is_shakedown_plan(plan) and plan["status"] == "HALTED_RECONCILED":
+                self._archive_candidate_shakedown_terminal(
                     plan, reconciliation=reconciliation
                 )
                 finalized_shakedown = True
             else:
                 self._persist_active_plan()
         except Exception as exc:
-            if plan.get("position_manager_shakedown_session_id"):
-                plan["status"] = status_before_reconcile
+            if self._is_shakedown_plan(plan):
                 halt = plan.setdefault("halt", {})
+                plan["status"] = (
+                    "HALTED_RECONCILE_REQUIRED"
+                    if (
+                        halt.get("terminal_guard", {}).get("state")
+                        == "BLOCKED"
+                    )
+                    else status_before_reconcile
+                )
                 halt["terminal_finalize_error_type"] = exc.__class__.__name__
                 halt["terminal_finalize_failed_at_utc"] = (
                     self.clock().astimezone(timezone.utc).isoformat()
                 )
-                self._revoke_auto_dispatch("shakedown")
+                self._revoke_auto_dispatch(
+                    "c_fast_shakedown"
+                    if plan.get("c_fast_shakedown_session_id")
+                    else "shakedown"
+                )
                 try:
                     self._persist_active_plan()
                 except Exception:
@@ -1050,10 +1509,7 @@ class CommoditySimNowService:
         role: str | None = "system",
         source_ip: str | None = None,
     ) -> dict[str, Any]:
-        if (
-            self.current_plan
-            and self.current_plan.get("position_manager_shakedown_session_id")
-        ):
+        if self._is_shakedown_plan(self.current_plan):
             raise CommoditySimNowStateError("通用自动派单不得推进候选测试计划")
         if self.current_plan and self.current_plan.get("status") in {
             "CANCEL_PENDING",
@@ -1147,23 +1603,43 @@ class CommoditySimNowService:
         return {"action": "idle", "reason": f"plan_status_{status.lower()}", **self.status()}
 
     @_serialized
-    def auto_position_manager_shakedown_advance(
+    def auto_candidate_shakedown_advance(
         self,
         *,
-        operator: str = "commodity-position-manager-shakedown-auto",
+        operator: str = "commodity-candidate-shakedown-auto",
         role: str | None = "system",
         source_ip: str | None = None,
     ) -> dict[str, Any]:
         plan = self.current_plan
-        if not plan or not plan.get("position_manager_shakedown_session_id"):
+        if not self._is_shakedown_plan(plan):
             return {"action": "idle", "reason": "no_shakedown_plan"}
         status = str(plan.get("status"))
         if status in {"CANCEL_PENDING", "SUBMISSION_OUTCOME_UNKNOWN"}:
             return self._advance_cancel_pending(operator=operator, source_ip=source_ip)
+        if (
+            status == "NOOP_FINALIZING"
+            and plan.get("c_fast_shakedown_session_id")
+        ):
+            reconciliation = self._complete_c_fast_noop_plan(plan)
+            return {
+                "action": "noop_reconciled",
+                "reconciliation": reconciliation,
+                **self.c_fast_shakedown_status(),
+            }
         if status in {"COMPLETE", "HALTED_RECONCILED", "HALTED_PRE_SUBMIT_SAFE"}:
-            return {"action": "idle", "reason": f"shakedown_status_{status.lower()}", **self.position_manager_shakedown_status()}
+            return {
+                "action": "idle",
+                "reason": f"shakedown_status_{status.lower()}",
+                **self._candidate_shakedown_status(plan),
+            }
         if status == "HALTED_RECONCILE_REQUIRED":
-            result = self.reconcile(plan["plan_hash"], operator=operator, role=role, source_ip=source_ip, dispatch_mode="auto")
+            result = self.reconcile(
+                plan["plan_hash"],
+                operator=operator,
+                role=role,
+                source_ip=source_ip,
+                dispatch_mode="auto",
+            )
             return {"action": "halted_reconciled" if result["status"] == "HALTED_RECONCILED" else "halted_reconcile_required", **result}
         if self.risk.status().get("emergency_stopped"):
             halt = self._begin_safe_halt(
@@ -1173,13 +1649,21 @@ class CommoditySimNowService:
                 revoke_scope="all",
             )
             return {"action": "halted", "reason": "emergency_stop", "halt": halt}
-        if not self._position_manager_shakedown_auto_dispatch_allowed():
-            halt = self._begin_safe_halt("shakedown_auto_dispatch_not_active", operator=operator, source_ip=source_ip)
-            return {"action": "halted", "reason": "shakedown_auto_dispatch_not_active", "halt": halt}
         if status in {"READY_CLOSE", "READY_OPEN"}:
             phase = "close" if status == "READY_CLOSE" else "open"
+            if not self._candidate_shakedown_auto_dispatch_allowed(plan):
+                halt = self._begin_safe_halt(
+                    "shakedown_auto_dispatch_not_active",
+                    operator=operator,
+                    source_ip=source_ip,
+                )
+                return {
+                    "action": "halted",
+                    "reason": "shakedown_auto_dispatch_not_active",
+                    "halt": halt,
+                }
             try:
-                self._verify_position_manager_shakedown_execution_trust(plan)
+                self._verify_candidate_shakedown_execution_trust(plan)
             except CommoditySimNowSafetyError as exc:
                 halt = self._begin_safe_halt("shakedown_execution_trust_failed", operator=operator, source_ip=source_ip, phase=phase)
                 return {"action": "halted", "reason": "shakedown_execution_trust_failed", "halt": halt, "error_type": exc.__class__.__name__}
@@ -1203,20 +1687,162 @@ class CommoditySimNowService:
                         operator=operator,
                         source_ip=source_ip,
                         phase=phase,
-                        revoke_scope="shakedown",
+                        revoke_scope=self._candidate_revoke_scope(plan),
                     )
                 raise
             return {"action": f"{phase}_submitted", **result}
         if status in {"CLOSE_SUBMITTED", "OPEN_SUBMITTED"}:
             phase = "close" if status == "CLOSE_SUBMITTED" else "open"
-            result = self.reconcile(plan["plan_hash"], operator=operator, role=role, source_ip=source_ip, dispatch_mode="auto")
+            if plan.get("c_fast_shakedown_session_id"):
+                try:
+                    self._verify_c_fast_active_plan_chain(plan)
+                except CommoditySimNowSafetyError:
+                    halt = self._begin_safe_halt(
+                        "c_fast_archive_chain_failed",
+                        operator=operator,
+                        source_ip=source_ip,
+                        phase=phase,
+                        revoke_scope="c_fast_shakedown",
+                    )
+                    return {
+                        "action": "halted",
+                        "reason": "c_fast_archive_chain_failed",
+                        "halt": halt,
+                    }
+            result = self.reconcile(
+                plan["plan_hash"],
+                operator=operator,
+                role=role,
+                source_ip=source_ip,
+                dispatch_mode="auto",
+            )
             if result["status"] == "READY_OPEN":
-                return self.auto_position_manager_shakedown_advance(
+                return self.auto_candidate_shakedown_advance(
                     operator=operator, role=role, source_ip=source_ip
                 )
             return {"action": f"{phase}_reconciled", **result}
         halt = self._begin_safe_halt("unexpected_shakedown_plan_status", operator=operator, source_ip=source_ip)
         return {"action": "halted", "halt": halt}
+
+    @_serialized
+    def auto_position_manager_shakedown_advance(
+        self,
+        *,
+        operator: str = "commodity-position-manager-shakedown-auto",
+        role: str | None = "system",
+        source_ip: str | None = None,
+    ) -> dict[str, Any]:
+        return self.auto_candidate_shakedown_advance(
+            operator=operator, role=role, source_ip=source_ip
+        )
+
+    @_serialized
+    def auto_c_fast_continuous_advance(
+        self,
+        *,
+        operator: str = "commodity-c-fast-continuous-auto",
+        role: str | None = "system",
+        source_ip: str | None = None,
+    ) -> dict[str, Any]:
+        if not self.c_fast_continuous_authorized:
+            return {
+                "action": "idle",
+                "reason": "continuous_authorization_not_active",
+            }
+        if self.current_plan:
+            return {"action": "idle", "reason": "execution_slot_occupied"}
+        if not (
+            self.settings.commodity_c_fast_simnow_shakedown_enabled
+            and self.settings.commodity_c_fast_simnow_auto_dispatch_enabled
+            and self.settings.commodity_simnow_enabled
+            and self.enabled
+            and self.manual_approval
+            and self.simnow_mode
+        ):
+            self._revoke_auto_dispatch("c_fast_shakedown")
+            return {
+                "action": "halted",
+                "reason": "continuous_runtime_gate_not_active",
+            }
+        snapshot_hash: str | None = None
+        try:
+            safety = self._safety_snapshot(require_trade_enabled=True)
+            self._verify_c_fast_account(str(safety["account_hash"]))
+            previous_session = self._load_c_fast_shakedown_state()
+            if (
+                not isinstance(previous_session, dict)
+                or previous_session.get("status") != "COMPLETE"
+                or not previous_session.get("continuous_authorized")
+            ):
+                raise CommoditySimNowSafetyError(
+                    "C_FAST 连续运行前序终态证据无效"
+                )
+            snapshot, snapshot_hash = self._c_fast_snapshot()
+            if snapshot_hash == previous_session.get(
+                "source_snapshot_hash"
+            ):
+                return {
+                    "action": "idle",
+                    "reason": "snapshot_already_completed",
+                }
+            execution_day = self._current_trading_day(
+                [_exact_to_vt(row.exact_contract) for row in snapshot.targets]
+            )
+            if snapshot.execution_day > execution_day:
+                return {
+                    "action": "waiting",
+                    "reason": "signed_execution_day_not_reached",
+                    "signed_execution_day":
+                    snapshot.execution_day.isoformat(),
+                    "current_trading_day": execution_day.isoformat(),
+                }
+            if snapshot.execution_day < execution_day:
+                raise CommoditySimNowSafetyError(
+                    "C_FAST 连续运行签名 execution_day 已过期"
+                )
+            selected_scope = list(
+                previous_session.get("selected_products") or []
+            )
+            rows = {row.product: row for row in snapshot.targets}
+            selected = [
+                product
+                for product in selected_scope
+                if product in rows
+                and (
+                    rows[product].target_quantity
+                    != rows[product].previous_target_quantity
+                    or rows[product].exact_contract
+                    != rows[product].previous_exact_contract
+                )
+            ]
+            if not selected:
+                return {
+                    "action": "idle",
+                    "reason": "no_selected_target_delta",
+                    "source_snapshot_hash": snapshot_hash,
+                }
+            preview = self.preview_c_fast_shakedown(
+                selected,
+                operator=operator,
+                role=role,
+                source_ip=source_ip,
+            )["preview"]
+            return self.start_c_fast_shakedown(
+                str(preview["plan_hash"]),
+                operator=operator,
+                role=role,
+                source_ip=source_ip,
+            )
+        except Exception as exc:
+            self._revoke_auto_dispatch("c_fast_shakedown")
+            self._event(
+                "c_fast_continuous_halted",
+                result={
+                    "error_type": exc.__class__.__name__,
+                    "source_snapshot_hash": snapshot_hash,
+                },
+            )
+            raise
 
     @_serialized
     def auto_template_advance(
@@ -1226,10 +1852,7 @@ class CommoditySimNowService:
         role: str | None = "system",
         source_ip: str | None = None,
     ) -> dict[str, Any]:
-        if (
-            self.current_plan
-            and self.current_plan.get("position_manager_shakedown_session_id")
-        ):
+        if self._is_shakedown_plan(self.current_plan):
             raise CommoditySimNowStateError("正式模板不得推进候选测试计划")
         if not self.template_authorized:
             return {"action": "idle", "reason": "strategy_template_not_authorized"}
@@ -1347,13 +1970,18 @@ class CommoditySimNowService:
                     in {"CANCEL_PENDING", "SUBMISSION_OUTCOME_UNKNOWN"}
                 )
                 shakedown_plan = bool(
-                    self.current_plan
-                    and self.current_plan.get("position_manager_shakedown_session_id")
+                    self._is_shakedown_plan(self.current_plan)
                 )
                 if shakedown_plan:
-                    await asyncio.to_thread(self.auto_position_manager_shakedown_advance)
+                    await asyncio.to_thread(
+                        self.auto_candidate_shakedown_advance
+                    )
                 elif recovery_pending:
                     await asyncio.to_thread(self.auto_advance)
+                elif self.c_fast_continuous_authorized:
+                    await asyncio.to_thread(
+                        self.auto_c_fast_continuous_advance
+                    )
                 elif self.settings.commodity_simnow_auto_dispatch_enabled and self.template_authorized:
                     await asyncio.to_thread(self.auto_template_advance)
                 elif self.settings.commodity_simnow_auto_dispatch_enabled:
@@ -1436,6 +2064,938 @@ class CommoditySimNowService:
                 detail={"error_type": exc.__class__.__name__},
             ) from exc
 
+    def _c_fast_snapshot(self) -> tuple[CommodityCFastShadowDTO, str]:
+        provider = self._c_fast_snapshot_provider
+        if provider is None:
+            raise CommoditySimNowSafetyError(
+                "C_FAST Control Plane 快照源未绑定"
+            )
+        try:
+            return provider()
+        except Exception as exc:
+            raise CommoditySimNowSafetyError(
+                "C_FAST 签名快照未通过当前 Control Plane 验证",
+                detail={
+                    "error_type": exc.__class__.__name__,
+                    "error_code": getattr(exc, "code", None),
+                },
+            ) from exc
+
+    def _verify_c_fast_account(self, account_hash: str) -> None:
+        allowed = _csv_set(
+            self.settings.commodity_c_fast_simnow_account_hashes
+        )
+        if (
+            not re.fullmatch(r"[0-9a-f]{64}", account_hash)
+            or account_hash not in allowed
+        ):
+            raise CommoditySimNowSafetyError(
+                "当前账户不在 C_FAST SimNow 专用白名单"
+            )
+
+    @_serialized
+    def c_fast_shakedown_status(self) -> dict[str, Any]:
+        session = self._load_c_fast_shakedown_state()
+        active = self.current_plan
+        if (
+            session
+            and active
+            and active.get("c_fast_shakedown_session_id")
+            == session.get("session_id")
+            and active.get("status") not in {"COMPLETE", "HALTED_RECONCILED"}
+        ):
+            session = {
+                **session,
+                "status": active.get("status"),
+                "execution": {
+                    "started_at_utc": active.get("started_at_utc"),
+                    "submitted": active.get("submitted", {}),
+                    "send_intents": active.get("send_intents", {}),
+                    "halt": active.get("halt"),
+                    "pnl": self._c_fast_pnl(active),
+                },
+            }
+        return {
+            "configured":
+            self.settings.commodity_c_fast_simnow_shakedown_enabled,
+            "execution_enabled": bool(
+                self.settings.commodity_c_fast_simnow_shakedown_enabled
+                and self.settings.commodity_c_fast_simnow_auto_dispatch_enabled
+                and self.settings.commodity_simnow_enabled
+            ),
+            "execution_authorized":
+            (
+                self.c_fast_shakedown_auto_dispatch_authorized
+                or self.c_fast_continuous_authorized
+            ),
+            "continuous_authorized":
+            self.c_fast_continuous_authorized,
+            "authority_persistence_error":
+            self._c_fast_authority_persist_error,
+            "auto_dispatch_enabled":
+            self.settings.commodity_c_fast_simnow_auto_dispatch_enabled,
+            "candidate_id": "C_FAST_CROSS_SECTION_NEUTRAL",
+            "execution_lane": "simnow_shakedown",
+            "countable_forward": False,
+            "authority_granted": False,
+            "production_allowed": False,
+            "automatic_promotion_allowed": False,
+            "session": session,
+        }
+
+    @_serialized
+    def preview_c_fast_shakedown(
+        self,
+        selected_products: list[str],
+        *,
+        operator: str,
+        role: str | None,
+        source_ip: str | None,
+    ) -> dict[str, Any]:
+        if not self.settings.commodity_c_fast_simnow_shakedown_enabled:
+            raise CommoditySimNowDisabledError(
+                detail={
+                    "required_setting":
+                    "COMMODITY_C_FAST_SIMNOW_SHAKEDOWN_ENABLED=true"
+                }
+            )
+        existing = self._load_c_fast_shakedown_state()
+        if (
+            self.current_plan
+            and not self._is_shakedown_plan(self.current_plan)
+            and not self._formal_plan_releasable_for_shakedown(
+                self.current_plan
+            )
+        ):
+            raise CommoditySimNowStateError(
+                "共享执行槽仍由正式 SimNow 计划占用"
+            )
+        if (
+            self.current_plan
+            and self._is_shakedown_plan(self.current_plan)
+            and self.current_plan.get("status")
+            not in {"COMPLETE", "HALTED_RECONCILED"}
+        ) or (
+            existing
+            and existing.get("status")
+            not in {"PREVIEW_READY", "COMPLETE", "HALTED_RECONCILED"}
+        ):
+            raise CommoditySimNowStateError(
+                "存在未收口的候选测试会话，禁止覆盖预览"
+            )
+        previous_terminal_checksum = None
+        chain, chain_state = self._c_fast_terminal_chain()
+        if chain_state != "VALID":
+            raise CommoditySimNowStateError(
+                "C_FAST 终态 archive chain 无效，禁止生成预览"
+            )
+        chain_tail_checksum = (
+            chain[-1].get("terminal_checksum") if chain else None
+        )
+        if existing is None and chain:
+            raise CommoditySimNowStateError(
+                "C_FAST current pointer 缺失但终态 archive 非空"
+            )
+        if existing and existing.get("status") in {
+            "COMPLETE",
+            "HALTED_RECONCILED",
+        }:
+            if not self._c_fast_shakedown_terminal_checksum_valid(
+                existing
+            ):
+                raise CommoditySimNowStateError(
+                    "前序 C_FAST 终态证据校验失败"
+                )
+            self._archive_c_fast_terminal_session(existing)
+            previous_terminal_checksum = existing["terminal_checksum"]
+            if previous_terminal_checksum != chain_tail_checksum:
+                raise CommoditySimNowStateError(
+                    "C_FAST current pointer 不是 archive chain 尾部"
+                )
+        elif existing and existing.get("status") == "PREVIEW_READY":
+            previous_terminal_checksum = existing.get(
+                "previous_terminal_checksum"
+            )
+            if previous_terminal_checksum != chain_tail_checksum:
+                raise CommoditySimNowStateError(
+                    "C_FAST 预览 predecessor 已失效"
+                )
+        else:
+            previous_terminal_checksum = chain_tail_checksum
+        selected = sorted(set(selected_products))
+        if (
+            len(selected) != len(selected_products)
+            or not selected
+            or any(product not in PRODUCT_SPECS for product in selected)
+            or len(selected)
+            > self.settings.commodity_c_fast_simnow_max_selected_products
+        ):
+            raise CommoditySimNowSafetyError("C_FAST 测试品种选择无效")
+
+        snapshot, snapshot_hash = self._c_fast_snapshot()
+        rows = {row.product: row for row in snapshot.targets}
+        if set(rows) != set(PRODUCT_SPECS):
+            raise CommoditySimNowSafetyError(
+                "C_FAST 签名快照缺少固定十品种目标"
+            )
+        for product in selected:
+            row = rows[product]
+            if (
+                row.target_quantity == row.previous_target_quantity
+                and row.exact_contract == row.previous_exact_contract
+            ):
+                raise CommoditySimNowSafetyError(
+                    "零目标差异品种不可用于 C_FAST 测试",
+                    detail={"product": product},
+                )
+        safety = self._safety_snapshot(require_trade_enabled=True)
+        self._verify_c_fast_account(str(safety["account_hash"]))
+        self._verify_c_fast_known_order_statuses()
+        conflicts = self._position_manager_shakedown_active_orders(
+            set(PRODUCT_SPECS)
+        )
+        if conflicts:
+            raise CommoditySimNowStateError(
+                "存在固定十品种活动委托，禁止启动 C_FAST 测试",
+                detail={"active_orders": conflicts},
+            )
+        session_id = f"cfast-shakedown-{uuid.uuid4().hex}"
+        plan = self._build_c_fast_shakedown_plan(
+            snapshot,
+            selected_products=selected,
+            session_id=session_id,
+        )
+        session_core = {
+            "session_id": session_id,
+            "session_nonce": session_id.rsplit("-", 1)[-1],
+            "candidate_id": "C_FAST_CROSS_SECTION_NEUTRAL",
+            "execution_lane": "simnow_shakedown",
+            "countable_forward": False,
+            "production_allowed": False,
+            "automatic_promotion_allowed": False,
+            "source_snapshot_id": snapshot.snapshot_id,
+            "source_snapshot_hash": snapshot_hash,
+            "formula_target_binding_sha256":
+            snapshot.formula_target_binding_sha256,
+            "source_month": snapshot.source_month,
+            "signed_execution_day": snapshot.execution_day.isoformat(),
+            "account_hash": safety["account_hash"],
+            "selected_products": selected,
+            "plan": plan,
+            "previous_terminal_checksum":
+            previous_terminal_checksum,
+        }
+        plan_hash = _sha256_json(session_core)
+        session = {
+            "schema_version":
+            "commodity_c_fast_simnow_shakedown_session_v1",
+            **session_core,
+            "plan_hash": plan_hash,
+            "status": "PREVIEW_READY",
+            "continuous_authorized":
+            self.c_fast_continuous_authorized,
+            "started_by": operator,
+            "previewed_at_utc":
+            self.clock().astimezone(timezone.utc).isoformat(),
+        }
+        self._save_c_fast_shakedown_state(session)
+        result = {**self.c_fast_shakedown_status(), "preview": session}
+        self._event(
+            "c_fast_shakedown_previewed",
+            plan_hash=plan_hash,
+            result={
+                "selected_products": selected,
+                "source_snapshot_hash": snapshot_hash,
+            },
+        )
+        self.audit.record(
+            action="commodity_c_fast_shakedown_preview",
+            user_id=operator,
+            role=role,
+            request={"selected_products": selected},
+            result=result,
+            source_ip=source_ip,
+        )
+        return result
+
+    @_serialized
+    def start_c_fast_shakedown(
+        self,
+        plan_hash: str,
+        *,
+        operator: str,
+        role: str | None,
+        source_ip: str | None,
+        _dispatch_entry_abort_epoch: int | None = None,
+        _dispatch_entry_pending_halt_epochs:
+        frozenset[int] | None = None,
+    ) -> dict[str, Any]:
+        if (
+            _dispatch_entry_abort_epoch is not None
+            and _dispatch_entry_pending_halt_epochs is not None
+        ):
+            self._begin_dispatch_epoch(
+                _dispatch_entry_abort_epoch,
+                _dispatch_entry_pending_halt_epochs,
+            )
+        if not self.settings.commodity_c_fast_simnow_shakedown_enabled:
+            raise CommoditySimNowDisabledError(
+                detail={
+                    "required_setting":
+                    "COMMODITY_C_FAST_SIMNOW_SHAKEDOWN_ENABLED=true"
+                }
+            )
+        if not self.settings.commodity_c_fast_simnow_auto_dispatch_enabled:
+            raise CommoditySimNowDisabledError(
+                detail={
+                    "required_setting":
+                    "COMMODITY_C_FAST_SIMNOW_AUTO_DISPATCH_ENABLED=true"
+                }
+            )
+        session = self._load_c_fast_shakedown_state()
+        if not session or session.get("status") != "PREVIEW_READY":
+            raise CommoditySimNowStateError(
+                "不存在可启动的 C_FAST 测试预览"
+            )
+        if session.get("plan_hash") != plan_hash:
+            raise CommoditySimNowStateError("C_FAST 测试计划哈希不匹配")
+        self._verify_c_fast_archive_predecessor(
+            session.get("previous_terminal_checksum")
+        )
+        if (
+            self.current_plan
+            and self.current_plan.get("c_fast_shakedown_session_id")
+            == session.get("session_id")
+            and self.current_plan.get("status") == "HALTED_PRE_SUBMIT_SAFE"
+        ):
+            self.enabled = True
+            self.manual_approval = True
+            self.simnow_mode = True
+            self.c_fast_shakedown_auto_dispatch_authorized = True
+            try:
+                self._resume_halted_plan_after_authorization(
+                    allow_shakedown=True
+                )
+                return self.auto_candidate_shakedown_advance(
+                    operator=operator, role=role, source_ip=source_ip
+                )
+            except Exception:
+                self.c_fast_shakedown_auto_dispatch_authorized = False
+                raise
+        if (
+            self.current_plan
+            and not self._is_shakedown_plan(self.current_plan)
+            and self._formal_plan_releasable_for_shakedown(
+                self.current_plan
+            )
+        ):
+            self.current_plan = None
+        if self.current_plan:
+            raise CommoditySimNowStateError(
+                "共享执行槽已有 SimNow 计划，禁止 C_FAST 测试覆盖"
+            )
+        snapshot, snapshot_hash = self._c_fast_snapshot()
+        if (
+            snapshot_hash != session.get("source_snapshot_hash")
+            or snapshot.snapshot_id != session.get("source_snapshot_id")
+            or snapshot.formula_target_binding_sha256
+            != session.get("formula_target_binding_sha256")
+        ):
+            raise CommoditySimNowSafetyError(
+                "C_FAST 签名快照在 preview 后发生变化"
+            )
+        safety = self._safety_snapshot(require_trade_enabled=True)
+        self._verify_c_fast_account(str(safety["account_hash"]))
+        if safety["account_hash"] != session.get("account_hash"):
+            raise CommoditySimNowSafetyError(
+                "C_FAST SimNow 账户在 preview 后发生变化"
+            )
+        stored_plan = session.get("plan")
+        if not isinstance(stored_plan, dict):
+            raise CommoditySimNowStateError("C_FAST 测试计划无效")
+        terminal_fact_watermark_before = (
+            self._c_fast_terminal_fact_watermark()
+        )
+        rechecked = self._build_c_fast_shakedown_plan(
+            snapshot,
+            selected_products=list(session["selected_products"]),
+            session_id=str(session["session_id"]),
+            previous_effective_targets=list(
+                stored_plan.get("previous_risk_targets") or []
+            ),
+        )
+        comparable = (
+            "previous_positions",
+            "expected_after_close",
+            "expected_final_positions",
+            "previous_risk_targets",
+            "risk_targets",
+            "sector_map_id",
+        )
+        if any(
+            rechecked.get(key) != stored_plan.get(key) for key in comparable
+        ) or any(
+            self._position_manager_shakedown_order_shape(
+                rechecked.get(key, [])
+            )
+            != self._position_manager_shakedown_order_shape(
+                stored_plan.get(key, [])
+            )
+            for key in ("close_orders", "open_orders")
+        ):
+            raise CommoditySimNowSafetyError(
+                "C_FAST 测试预览已失效，请重新生成计划"
+            )
+        execution_day = self._current_trading_day(
+            self._plan_symbols_from_orders(stored_plan)
+        )
+        if execution_day.isoformat() != session.get("signed_execution_day"):
+            raise CommoditySimNowSafetyError(
+                "当前交易日与 C_FAST 签名 execution_day 不一致"
+            )
+        terminal_fact_watermark = (
+            self._c_fast_terminal_fact_watermark()
+        )
+        if (
+            terminal_fact_watermark_before["facts_fingerprint"]
+            != terminal_fact_watermark["facts_fingerprint"]
+        ):
+            raise CommoditySimNowSafetyError(
+                "C_FAST start 前账户、连接、订单或成交事实不稳定"
+            )
+        final_start_positions = self._signed_positions(
+            self._position_snapshot()
+        )
+        if final_start_positions != rechecked["previous_positions"]:
+            raise CommoditySimNowSafetyError(
+                "C_FAST start 持仓在计划重建后发生变化",
+                detail={
+                    "expected": rechecked["previous_positions"],
+                    "observed": final_start_positions,
+                },
+            )
+        terminal_fact_watermark[
+            "verified_from_utc"
+        ] = terminal_fact_watermark_before[
+            "captured_at_utc"
+        ]
+        plan = {
+            "schema_version": "commodity_simnow_active_plan_v1",
+            "c_fast_shakedown_session_id": session["session_id"],
+            "plan_hash": plan_hash,
+            "account_hash": safety["account_hash"],
+            "source_snapshot_hash": snapshot_hash,
+            "previous_terminal_checksum":
+            session.get("previous_terminal_checksum"),
+            "formula_target_binding_sha256":
+            snapshot.formula_target_binding_sha256,
+            "execution_lane": "simnow_shakedown",
+            "countable_forward": False,
+            "production_allowed": False,
+            "execution_day": execution_day.isoformat(),
+            "previous_positions":
+            rechecked["previous_positions"],
+            "expected_after_close": stored_plan["expected_after_close"],
+            "expected_final_positions":
+            stored_plan["expected_final_positions"],
+            "close_orders": stored_plan["close_orders"],
+            "open_orders": stored_plan["open_orders"],
+            "targets": stored_plan["risk_targets"],
+            "risk_sector_map_id": stored_plan["sector_map_id"],
+            "selected_products": list(session["selected_products"]),
+            "submitted": {"close": [], "open": []},
+            "send_intents": {"close": [], "open": []},
+            "submitted_at_utc": {"close": None, "open": None},
+            "terminal_fact_watermark":
+            terminal_fact_watermark,
+            "dispatch_rpc_generation":
+            terminal_fact_watermark["rpc_generation"],
+            "status": (
+                "NOOP_FINALIZING"
+                if stored_plan["phase_status"] == "COMPLETE"
+                else stored_plan["phase_status"]
+            ),
+            "started_at_utc":
+            self.clock().astimezone(timezone.utc).isoformat(),
+        }
+        previous_plan = self.current_plan
+        self.current_plan = plan
+        try:
+            self._persist_active_plan()
+            session["continuous_authorized"] = True
+            self._save_c_fast_shakedown_state(session)
+        except Exception:
+            self.current_plan = previous_plan
+            self._active_state_path().unlink(missing_ok=True)
+            self._revoke_auto_dispatch("c_fast_shakedown")
+            raise
+        self.c_fast_continuous_authorized = True
+        self.enabled = True
+        self.manual_approval = True
+        self.simnow_mode = True
+        self.c_fast_shakedown_auto_dispatch_authorized = True
+        try:
+            if plan["status"] == "NOOP_FINALIZING":
+                reconciliation = self._complete_c_fast_noop_plan(plan)
+                execution = {
+                    "action": "noop_reconciled",
+                    "reconciliation": reconciliation,
+                }
+            else:
+                execution = self.auto_candidate_shakedown_advance(
+                    operator=operator, role=role, source_ip=source_ip
+                )
+        except Exception:
+            self._revoke_auto_dispatch("c_fast_shakedown")
+            if (
+                self.current_plan
+                and self.current_plan.get("c_fast_shakedown_session_id")
+                and self.current_plan.get("status")
+                in {"READY_CLOSE", "READY_OPEN"}
+            ):
+                self._begin_safe_halt(
+                    "c_fast_shakedown_start_failed",
+                    operator=operator,
+                    source_ip=source_ip,
+                    revoke_scope="c_fast_shakedown",
+                )
+            raise
+        result = {
+            **self.c_fast_shakedown_status(),
+            "action": execution.get("action"),
+            "execution": execution,
+        }
+        self._event(
+            "c_fast_shakedown_started",
+            plan_hash=plan_hash,
+            result={"action": execution.get("action")},
+        )
+        self.audit.record(
+            action="commodity_c_fast_shakedown_start",
+            user_id=operator,
+            role=role,
+            request={"plan_hash": plan_hash},
+            result=result,
+            source_ip=source_ip,
+        )
+        return result
+
+    @_serialized
+    def stop_c_fast_shakedown(
+        self,
+        reason: str,
+        *,
+        operator: str,
+        role: str | None,
+        source_ip: str | None,
+    ) -> dict[str, Any]:
+        plan = self.current_plan
+        if not plan or not plan.get("c_fast_shakedown_session_id"):
+            session = self._load_c_fast_shakedown_state()
+            continuous_was_authorized = (
+                self.c_fast_continuous_authorized
+            )
+            self._revoke_auto_dispatch("c_fast_shakedown")
+            result = {
+                **self.c_fast_shakedown_status(),
+                "action": (
+                    "continuous_authorization_revoked"
+                    if continuous_was_authorized
+                    else "already_stopped"
+                ),
+                "halt": {
+                    "required": False,
+                    "reason": reason,
+                    "status": (
+                        session.get("status")
+                        if isinstance(session, dict)
+                        else "IDLE"
+                    ),
+                },
+            }
+            self.audit.record(
+                action="commodity_c_fast_shakedown_stop",
+                user_id=operator,
+                role=role,
+                request={"reason": reason},
+                result=result,
+                source_ip=source_ip,
+            )
+            return result
+        self._revoke_auto_dispatch("c_fast_shakedown")
+        halt = self._finalize_pre_submit_shakedown_stop(
+            plan, reason=reason, operator=operator
+        )
+        if halt is None:
+            halt = self._begin_safe_halt(
+                reason,
+                operator=operator,
+                source_ip=source_ip,
+                revoke_scope="c_fast_shakedown",
+            )
+        result = {**self.c_fast_shakedown_status(), "halt": halt}
+        self.audit.record(
+            action="commodity_c_fast_shakedown_stop",
+            user_id=operator,
+            role=role,
+            request={"reason": reason},
+            result=result,
+            source_ip=source_ip,
+        )
+        return result
+
+    def _build_c_fast_shakedown_plan(
+        self,
+        snapshot: CommodityCFastShadowDTO,
+        *,
+        selected_products: list[str],
+        session_id: str,
+        previous_effective_targets: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        self._verify_c_fast_account_position_scope()
+        positions = self._position_snapshot()
+        contracts = self._contract_snapshot()
+        selected = set(selected_products)
+        if self._c_fast_external_active_orders(None):
+            raise CommoditySimNowStateError(
+                "存在活动策略委托，不允许生成 C_FAST 测试计划"
+            )
+        rows = {row.product: row for row in snapshot.targets}
+        previous_targets: dict[str, dict[str, Any]] = {}
+        effective_targets: dict[str, dict[str, Any]] = {}
+        if previous_effective_targets is None:
+            prior_session = self._load_c_fast_shakedown_state()
+            prior_plan = (
+                prior_session.get("plan")
+                if isinstance(prior_session, dict)
+                and prior_session.get("status") == "COMPLETE"
+                and prior_session.get("source_snapshot_id")
+                != snapshot.snapshot_id
+                else None
+            )
+            previous_effective_targets = (
+                prior_plan.get("risk_targets")
+                if isinstance(prior_plan, dict)
+                else None
+            )
+        prior_by_product = {
+            str(row["product"]): dict(row)
+            for row in (previous_effective_targets or [])
+            if isinstance(row, dict) and row.get("product") in PRODUCT_SPECS
+        }
+        if prior_by_product and set(prior_by_product) != set(PRODUCT_SPECS):
+            raise CommoditySimNowSafetyError(
+                "C_FAST previous execution mask 不完整"
+            )
+        for product, row in rows.items():
+            if row.previous_target_quantity and not row.previous_exact_contract:
+                raise CommoditySimNowSafetyError(
+                    "C_FAST previous target 缺少 exact contract",
+                    detail={"product": product},
+                )
+            previous_exact = (
+                row.previous_exact_contract or row.exact_contract
+            )
+            base = {
+                "product": product,
+                "reference_open_price": row.reference_open_price,
+                "multiplier": row.multiplier,
+                "price_tick": row.price_tick,
+            }
+            previous_targets[product] = (
+                prior_by_product.get(product)
+                or {
+                    **base,
+                    "exact_contract": previous_exact,
+                    "target_quantity": row.previous_target_quantity,
+                }
+            )
+            effective_targets[product] = {
+                **base,
+                "exact_contract":
+                row.exact_contract
+                if product in selected
+                else previous_targets[product]["exact_contract"],
+                "target_quantity":
+                row.target_quantity
+                if product in selected
+                else previous_targets[product]["target_quantity"],
+            }
+        expected_previous = {
+            _exact_to_vt(str(row["exact_contract"])):
+            int(row["target_quantity"])
+            for row in previous_targets.values()
+            if int(row["target_quantity"])
+        }
+        observed = self._signed_positions(positions)
+        if observed != expected_previous:
+            raise CommoditySimNowSafetyError(
+                "账户持仓无法完整证明属于 C_FAST signed previous target",
+                detail={
+                    "expected": expected_previous,
+                    "observed": observed,
+                },
+            )
+        by_product: dict[str, list[tuple[str, dict[str, Any]]]] = {
+            product: [] for product in selected
+        }
+        for vt_symbol, position in positions.items():
+            symbol, _ = _split_vt(vt_symbol)
+            product = _product_from_symbol(symbol)
+            if product in selected:
+                by_product[product].append((vt_symbol, position))
+
+        close_orders: list[dict[str, Any]] = []
+        open_orders: list[dict[str, Any]] = []
+        quote_rows: list[dict[str, Any]] = []
+        details: list[dict[str, Any]] = []
+        for product in sorted(selected):
+            row = rows[product]
+            target_vt = _exact_to_vt(row.exact_contract)
+            target_quantity = int(row.target_quantity)
+            self._verify_target_delivery(
+                row.exact_contract,
+                self._current_trading_day([target_vt]),
+            )
+            self._verify_contract(target_vt, product, contracts)
+            existing = sorted(
+                by_product[product], key=lambda item: item[0]
+            )
+            if any(
+                int(position["today_quantity"])
+                for _, position in existing
+            ):
+                raise CommoditySimNowSafetyError(
+                    "C_FAST 测试不猜测今昨仓，存在今日持仓时 fail closed",
+                    detail={"product": product},
+                )
+            current_quantity = sum(
+                int(position["signed_quantity"])
+                for _, position in existing
+            )
+            same_contract = next(
+                (
+                    int(position["signed_quantity"])
+                    for vt_symbol, position in existing
+                    if vt_symbol == target_vt
+                ),
+                0,
+            )
+            for vt_symbol, position in existing:
+                quantity = int(position["signed_quantity"])
+                if vt_symbol != target_vt:
+                    self._verify_contract(vt_symbol, product, contracts)
+                    close_orders.extend(
+                        self._orders_for_leg(
+                            "c-fast-shakedown",
+                            product,
+                            vt_symbol,
+                            -quantity,
+                            "closeyesterday",
+                            quote_rows,
+                        )
+                    )
+            delta = target_quantity - same_contract
+            if (
+                same_contract
+                and target_quantity
+                and same_contract * target_quantity < 0
+            ):
+                close_orders.extend(
+                    self._orders_for_leg(
+                        "c-fast-shakedown",
+                        product,
+                        target_vt,
+                        -same_contract,
+                        "closeyesterday",
+                        quote_rows,
+                    )
+                )
+                open_orders.extend(
+                    self._orders_for_leg(
+                        "c-fast-shakedown",
+                        product,
+                        target_vt,
+                        target_quantity,
+                        "open",
+                        quote_rows,
+                    )
+                )
+            elif (
+                same_contract
+                and abs(target_quantity) < abs(same_contract)
+                and same_contract * target_quantity >= 0
+            ):
+                close_orders.extend(
+                    self._orders_for_leg(
+                        "c-fast-shakedown",
+                        product,
+                        target_vt,
+                        delta,
+                        "closeyesterday",
+                        quote_rows,
+                    )
+                )
+            elif delta:
+                open_orders.extend(
+                    self._orders_for_leg(
+                        "c-fast-shakedown",
+                        product,
+                        target_vt,
+                        delta,
+                        "open",
+                        quote_rows,
+                    )
+                )
+            details.append(
+                {
+                    "product": product,
+                    "previous_exact_contract":
+                    row.previous_exact_contract,
+                    "previous_target_quantity":
+                    row.previous_target_quantity,
+                    "exact_contract": row.exact_contract,
+                    "target_quantity": row.target_quantity,
+                    "current_position": current_quantity,
+                    "planned_delta":
+                    row.target_quantity - current_quantity,
+                }
+            )
+        close_orders = self._number_c_fast_shakedown_references(
+            close_orders, session_id, "close"
+        )
+        open_orders = self._number_c_fast_shakedown_references(
+            open_orders, session_id, "open"
+        )
+        after_close = self._apply_orders(observed, close_orders)
+        final_positions = self._apply_orders(after_close, open_orders)
+        expected_final = {
+            _exact_to_vt(str(row["exact_contract"])):
+            int(row["target_quantity"])
+            for row in effective_targets.values()
+            if int(row["target_quantity"])
+        }
+        if final_positions != expected_final:
+            raise CommoditySimNowSafetyError(
+                "C_FAST 测试最终持仓未收敛到 masked signed target",
+                detail={
+                    "expected": expected_final,
+                    "observed": final_positions,
+                },
+            )
+        exposure = self._verify_realtime_exposures(
+            list(effective_targets.values()),
+            final_positions,
+            sector_map=C_FAST_SECTOR_MAP_V1,
+        )
+        limit = self.settings.commodity_simnow_max_orders_per_phase
+        if len(close_orders) > limit or len(open_orders) > limit:
+            raise CommoditySimNowSafetyError(
+                "C_FAST 拆单数量超过单阶段上限"
+            )
+        return {
+            "phase_status":
+            "READY_CLOSE"
+            if close_orders
+            else "READY_OPEN"
+            if open_orders
+            else "COMPLETE",
+            "close_orders": close_orders,
+            "open_orders": open_orders,
+            "order_count": len(close_orders) + len(open_orders),
+            "total_lots": sum(
+                int(order["volume"])
+                for order in close_orders + open_orders
+            ),
+            "expected_after_close": after_close,
+            "expected_final_positions": final_positions,
+            "previous_positions": observed,
+            "quote_snapshot_hash": _sha256_json(quote_rows),
+            "preview_exposure_snapshot": exposure,
+            "targets": details,
+            "previous_risk_targets": list(previous_targets.values()),
+            "risk_targets": list(effective_targets.values()),
+            "sector_map_id": "C_FAST_SECTOR_MAP_V1",
+        }
+
+    def _number_c_fast_shakedown_references(
+        self,
+        orders: list[dict[str, Any]],
+        session_id: str,
+        phase: str,
+    ) -> list[dict[str, Any]]:
+        nonce = session_id.rsplit("-", 1)[-1][:16]
+        for index, order in enumerate(orders, start=1):
+            order["reference"] = (
+                f"commodity_cf:sh:{nonce}:{phase[0]}:{index}"
+            )
+        return orders
+
+    def _verify_c_fast_shakedown_execution_trust(
+        self, plan: dict[str, Any]
+    ) -> None:
+        self._verify_c_fast_active_plan_chain(plan)
+        self._verify_c_fast_account_position_scope()
+        self._verify_c_fast_known_order_statuses()
+        snapshot, snapshot_hash = self._c_fast_snapshot()
+        if (
+            snapshot_hash != plan.get("source_snapshot_hash")
+            or snapshot.formula_target_binding_sha256
+            != plan.get("formula_target_binding_sha256")
+        ):
+            raise CommoditySimNowSafetyError(
+                "C_FAST 测试运行时签名快照信任链校验失败"
+            )
+        safety = self._safety_snapshot(require_trade_enabled=True)
+        self._verify_c_fast_account(str(safety["account_hash"]))
+        if safety["account_hash"] != plan.get("account_hash"):
+            raise CommoditySimNowSafetyError(
+                "C_FAST 测试运行时 SimNow 账户发生变化"
+            )
+        observed_generation = str(
+            safety.get("rpc_last_connected_at") or ""
+        )
+        if observed_generation != str(
+            plan.get("dispatch_rpc_generation") or ""
+        ):
+            raise CommoditySimNowSafetyError(
+                "C_FAST 测试运行时 RPC connection generation 发生变化",
+                detail={
+                    "expected":
+                    plan.get("dispatch_rpc_generation"),
+                    "observed": observed_generation,
+                },
+            )
+
+    def _verify_c_fast_account_position_scope(self) -> None:
+        outside_scope = self._c_fast_outside_scope_positions()
+        if outside_scope:
+            raise CommoditySimNowSafetyError(
+                "账户存在 C_FAST 固定十品种范围外持仓",
+                detail={"symbols": outside_scope},
+            )
+
+    def _c_fast_outside_scope_positions(
+        self,
+        positions: list[dict[str, Any]] | None = None,
+    ) -> list[str]:
+        outside_scope: list[str] = []
+        for position in (
+            positions
+            if positions is not None
+            else self.rpc.get_positions()
+        ):
+            volume = float(position.get("volume") or 0)
+            if volume <= 0:
+                continue
+            symbol = str(position.get("symbol") or "")
+            if not symbol:
+                vt_symbol = str(position.get("vt_symbol") or "")
+                symbol = vt_symbol.split(".", 1)[0]
+            if _product_from_symbol(symbol) not in PRODUCT_SPECS:
+                outside_scope.append(symbol or "unknown")
+        return sorted(set(outside_scope))
+
     @_serialized
     def position_manager_shadow(self) -> dict[str, Any]:
         return self._position_manager_shadow_snapshot(include_targets=True)
@@ -1485,6 +3045,10 @@ class CommoditySimNowService:
         source_ip: str | None,
     ) -> dict[str, Any]:
         """Persist a read-only execution mask; C1 deliberately never creates orders."""
+        if self.c_fast_continuous_authorized:
+            raise CommoditySimNowStateError(
+                "C_FAST 持续运行授权占用执行权，禁止候选测试预览"
+            )
         if not self.settings.commodity_position_manager_simnow_shakedown_enabled:
             raise CommoditySimNowDisabledError(
                 detail={"required_setting": "COMMODITY_POSITION_MANAGER_SIMNOW_SHAKEDOWN_ENABLED=true"}
@@ -1606,8 +3170,19 @@ class CommoditySimNowService:
         operator: str,
         role: str | None,
         source_ip: str | None,
+        _dispatch_entry_abort_epoch: int | None = None,
+        _dispatch_entry_pending_halt_epochs:
+        frozenset[int] | None = None,
     ) -> dict[str, Any]:
         """Start one pre-previewed SimNow shakedown without per-order approval."""
+        if (
+            _dispatch_entry_abort_epoch is not None
+            and _dispatch_entry_pending_halt_epochs is not None
+        ):
+            self._begin_dispatch_epoch(
+                _dispatch_entry_abort_epoch,
+                _dispatch_entry_pending_halt_epochs,
+            )
         if not self.settings.commodity_position_manager_simnow_shakedown_enabled:
             raise CommoditySimNowDisabledError(
                 detail={"required_setting": "COMMODITY_POSITION_MANAGER_SIMNOW_SHAKEDOWN_ENABLED=true"}
@@ -1622,6 +3197,10 @@ class CommoditySimNowService:
                     "required_setting":
                     "COMMODITY_POSITION_MANAGER_SIMNOW_AUTO_DISPATCH_ENABLED=true"
                 }
+            )
+        if self.c_fast_continuous_authorized:
+            raise CommoditySimNowStateError(
+                "C_FAST 持续运行授权占用执行权，候选测试不得启动"
             )
         session = self._load_position_manager_shakedown_state()
         if not session or session.get("status") != "PREVIEW_READY":
@@ -1723,7 +3302,11 @@ class CommoditySimNowService:
             self._persist_active_plan()
         except Exception:
             self.current_plan = previous_plan
-            self._revoke_auto_dispatch("shakedown")
+            self._revoke_auto_dispatch(
+                "c_fast_shakedown"
+                if plan.get("c_fast_shakedown_session_id")
+                else "shakedown"
+            )
             raise
         self.enabled = True
         self.manual_approval = True
@@ -1777,7 +3360,25 @@ class CommoditySimNowService:
     ) -> dict[str, Any]:
         plan = self.current_plan
         if not plan or not plan.get("position_manager_shakedown_session_id"):
-            raise CommoditySimNowStateError("不存在运行中的候选测试会话")
+            self._revoke_auto_dispatch("shakedown")
+            result = {
+                **self.position_manager_shakedown_status(),
+                "action": "already_stopped",
+                "halt": {
+                    "required": False,
+                    "reason": reason,
+                    "status": "IDLE",
+                },
+            }
+            self.audit.record(
+                action="commodity_position_manager_shakedown_stop",
+                user_id=operator,
+                role=role,
+                request={"reason": reason},
+                result=result,
+                source_ip=source_ip,
+            )
+            return result
         halt = self._finalize_pre_submit_shakedown_stop(
             plan, reason=reason, operator=operator
         )
@@ -1816,7 +3417,11 @@ class CommoditySimNowService:
         ):
             return None
         try:
-            orders = self.rpc.get_orders()
+            orders = (
+                self._c_fast_all_orders()
+                if plan.get("c_fast_shakedown_session_id")
+                else self.rpc.get_orders()
+            )
             trades = self.rpc.get_trades()
             late_evidence = self._recover_send_intent_evidence(
                 plan, orders, trades, phases=(phase,)
@@ -1856,6 +3461,29 @@ class CommoditySimNowService:
             plan.get("submitted", {}).get(phase)
             or self._active_plan_orders_from_snapshot(plan, orders)
         ):
+            return None
+        external_active = (
+            self._candidate_shakedown_external_active_orders_from_snapshot(
+                plan, orders
+            )
+        )
+        if external_active:
+            halt = plan.setdefault("halt", {})
+            halt.update(
+                {
+                    "reason": reason,
+                    "phase": phase,
+                    "resume_status": resume_status,
+                    "abandon_pre_submit_requested": True,
+                    "orders_snapshot_available": True,
+                    "trades_snapshot_available": True,
+                    "recovery_blocker":
+                    "UNATTRIBUTED_FIXED_SCOPE_ACTIVE_ORDERS",
+                    "unattributed_active_orders": external_active,
+                }
+            )
+            plan["status"] = "SUBMISSION_OUTCOME_UNKNOWN"
+            self._persist_active_plan()
             return None
         expected = (
             plan["previous_positions"]
@@ -1904,7 +3532,9 @@ class CommoditySimNowService:
                 }
             )
             plan["status"] = "HALTED_RECONCILE_REQUIRED"
-            self._revoke_auto_dispatch("shakedown")
+            self._revoke_auto_dispatch(
+                self._candidate_revoke_scope(plan)
+            )
             self._persist_active_plan()
             return {
                 "required": True,
@@ -1940,9 +3570,8 @@ class CommoditySimNowService:
         plan["halt"] = halt
         plan["status"] = "HALTED_RECONCILED"
         try:
-            self._finalize_position_manager_shakedown(
+            self._archive_candidate_shakedown_terminal(
                 plan,
-                status="HALTED_RECONCILED",
                 reconciliation={
                     "halted_reconcile": True,
                     "abandoned_pre_submit": True,
@@ -1958,7 +3587,9 @@ class CommoditySimNowService:
                 plan.pop("halt", None)
             else:
                 plan["halt"] = previous_halt
-            self._revoke_auto_dispatch("shakedown")
+            self._revoke_auto_dispatch(
+                self._candidate_revoke_scope(plan)
+            )
             try:
                 self._persist_active_plan()
             except Exception:
@@ -1968,7 +3599,11 @@ class CommoditySimNowService:
                 detail={"error_type": exc.__class__.__name__},
             ) from exc
         self._event(
-            "position_manager_shakedown_abandoned_pre_submit",
+            (
+                "c_fast_shakedown_abandoned_pre_submit"
+                if plan.get("c_fast_shakedown_session_id")
+                else "position_manager_shakedown_abandoned_pre_submit"
+            ),
             plan_hash=plan.get("plan_hash"),
             result=halt,
         )
@@ -2276,6 +3911,129 @@ class CommoditySimNowService:
             })
         return sorted(conflicts, key=lambda row: row["vt_orderid"])
 
+    def _c_fast_external_active_orders(
+        self, plan: dict[str, Any] | None
+    ) -> list[dict[str, str]]:
+        orders = self._c_fast_all_orders()
+        self._verify_c_fast_known_order_statuses(orders)
+        session_references = {
+            str(order.get("reference") or "")
+            for phase in ("close", "open")
+            for order in (plan or {}).get(f"{phase}_orders", [])
+        }
+        session_order_ids: set[str] = set()
+        for collection in ("submitted", "send_intents"):
+            for phase in ("close", "open"):
+                for order in (
+                    (plan or {}).get(collection, {}).get(phase, [])
+                ):
+                    session_order_ids.update(
+                        _order_id_aliases(order.get("vt_orderid"))
+                    )
+                    session_order_ids.update(
+                        _order_id_aliases(order.get("orderid"))
+                    )
+        conflicts: list[dict[str, str]] = []
+        for order in orders:
+            if (
+                _normalize_status(order.get("status"))
+                not in ACTIVE_ORDER_STATUSES
+            ):
+                continue
+            reference = str(order.get("reference") or "")
+            observed_ids = (
+                _order_id_aliases(order.get("vt_orderid"))
+                | _order_id_aliases(order.get("orderid"))
+            )
+            if (
+                reference in session_references
+                or observed_ids & session_order_ids
+            ):
+                continue
+            conflicts.append(
+                {
+                    "vt_orderid": str(
+                        order.get("vt_orderid")
+                        or order.get("orderid")
+                        or "unknown"
+                    ),
+                    "reference": reference,
+                    "symbol": str(
+                        order.get("symbol")
+                        or str(order.get("vt_symbol") or "").split(".", 1)[0]
+                    ),
+                }
+            )
+        return sorted(conflicts, key=lambda row: row["vt_orderid"])
+
+    def _candidate_shakedown_external_active_orders(
+        self, plan: dict[str, Any]
+    ) -> list[dict[str, str]]:
+        if plan.get("c_fast_shakedown_session_id"):
+            return self._c_fast_external_active_orders(plan)
+        return self._position_manager_shakedown_external_active_orders(plan)
+
+    def _candidate_shakedown_external_active_orders_from_snapshot(
+        self,
+        plan: dict[str, Any],
+        orders: list[dict[str, Any]],
+    ) -> list[dict[str, str]]:
+        if plan.get("c_fast_shakedown_session_id"):
+            self._verify_c_fast_known_order_statuses(orders)
+        session_references = {
+            str(order.get("reference") or "")
+            for phase in ("close", "open")
+            for order in plan.get(f"{phase}_orders", [])
+        }
+        session_order_ids: set[str] = set()
+        for collection in ("submitted", "send_intents"):
+            for phase in ("close", "open"):
+                for order in plan.get(collection, {}).get(phase, []):
+                    session_order_ids.update(
+                        _order_id_aliases(order.get("vt_orderid"))
+                    )
+                    session_order_ids.update(
+                        _order_id_aliases(order.get("orderid"))
+                    )
+        conflicts: list[dict[str, str]] = []
+        for order in orders:
+            if (
+                _normalize_status(order.get("status"))
+                not in ACTIVE_ORDER_STATUSES
+            ):
+                continue
+            symbol = str(
+                order.get("symbol")
+                or str(order.get("vt_symbol") or "").split(".", 1)[0]
+            )
+            if (
+                not plan.get("c_fast_shakedown_session_id")
+                and _product_from_symbol(symbol) not in PRODUCT_SPECS
+            ):
+                continue
+            reference = str(order.get("reference") or "")
+            observed_ids = (
+                _order_id_aliases(order.get("vt_orderid"))
+                | _order_id_aliases(order.get("orderid"))
+            )
+            if (
+                reference in session_references
+                or observed_ids & session_order_ids
+            ):
+                continue
+            conflicts.append(
+                {
+                    "vt_orderid": str(
+                        order.get("vt_orderid")
+                        or order.get("orderid")
+                        or "unknown"
+                    ),
+                    "reference": reference,
+                    "symbol": symbol,
+                }
+            )
+        return sorted(conflicts, key=lambda row: row["vt_orderid"])
+
     def _verify_position_manager_shakedown_execution_trust(self, plan: dict[str, Any]) -> None:
         shadow = self._position_manager_shadow_snapshot(include_targets=True)
         if (
@@ -2299,6 +4057,79 @@ class CommoditySimNowService:
         self._finalize_position_manager_shakedown(
             plan, status="COMPLETE", reconciliation=result
         )
+
+    def _complete_candidate_shakedown(
+        self, plan: dict[str, Any], *, result: dict[str, Any]
+    ) -> None:
+        if plan.get("c_fast_shakedown_session_id"):
+            self._finalize_c_fast_shakedown(
+                plan, status="COMPLETE", reconciliation=result
+            )
+        else:
+            self._complete_position_manager_shakedown(
+                plan, result=result
+            )
+
+    def _complete_c_fast_noop_plan(
+        self, plan: dict[str, Any]
+    ) -> dict[str, Any]:
+        if (
+            plan.get("status") != "NOOP_FINALIZING"
+            or not plan.get("c_fast_shakedown_session_id")
+            or any(plan.get(f"{phase}_orders") for phase in ("close", "open"))
+            or any(plan.get("submitted", {}).get(phase) for phase in ("close", "open"))
+            or any(plan.get("send_intents", {}).get(phase) for phase in ("close", "open"))
+        ):
+            raise CommoditySimNowStateError(
+                "C_FAST no-op 计划状态或委托证据无效"
+            )
+        self._verify_c_fast_active_plan_chain(plan)
+        self._verify_c_fast_account_position_scope()
+        conflicts = self._candidate_shakedown_external_active_orders(plan)
+        if conflicts:
+            raise CommoditySimNowStateError(
+                "C_FAST no-op 终态存在外部活动委托",
+                detail={"active_orders": conflicts},
+            )
+        observed = self._signed_positions(self._position_snapshot())
+        expected = plan["expected_final_positions"]
+        if observed != expected:
+            raise CommoditySimNowSafetyError(
+                "C_FAST no-op 终态持仓不匹配",
+                detail={"expected": expected, "observed": observed},
+            )
+        reconciliation = {
+            "phase": "noop",
+            "matched": True,
+            "active_order_ids": [],
+            "expected_positions": expected,
+            "observed_positions": observed,
+            "mismatch_halted": False,
+            "halted_reconcile": False,
+            "no_order_session": True,
+        }
+        plan["execution"] = self._execution_snapshot(plan)
+        self._complete_candidate_shakedown(
+            plan, result=reconciliation
+        )
+        return reconciliation
+
+    def _archive_candidate_shakedown_terminal(
+        self,
+        plan: dict[str, Any],
+        *,
+        reconciliation: dict[str, Any] | None = None,
+    ) -> None:
+        if plan.get("c_fast_shakedown_session_id"):
+            self._finalize_c_fast_shakedown(
+                plan,
+                status=str(plan["status"]),
+                reconciliation=reconciliation,
+            )
+        else:
+            self._archive_position_manager_shakedown_terminal(
+                plan, reconciliation=reconciliation
+            )
 
     def _archive_position_manager_shakedown_terminal(
         self,
@@ -2348,19 +4179,1706 @@ class CommoditySimNowService:
     def _position_manager_shakedown_state_path(self) -> Path:
         return Path(self.settings.commodity_position_manager_simnow_state_path).expanduser()
 
+    def _finalize_c_fast_shakedown(
+        self,
+        plan: dict[str, Any],
+        *,
+        status: str,
+        reconciliation: dict[str, Any] | None,
+    ) -> None:
+        session_id = str(
+            plan.get("c_fast_shakedown_session_id") or ""
+        )
+        archived = self._load_c_fast_terminal_archive(session_id)
+        if archived is not None:
+            chain, chain_state = self._c_fast_terminal_chain()
+            if (
+                chain_state != "VALID"
+                or not chain
+                or chain[-1].get("terminal_checksum")
+                != archived.get("terminal_checksum")
+            ):
+                raise CommoditySimNowSafetyError(
+                    "C_FAST 已归档终态不是有效 archive chain 尾部"
+                )
+            if (
+                archived.get("plan_hash") != plan.get("plan_hash")
+                or archived.get("status") != status
+            ):
+                raise CommoditySimNowStateError(
+                    "C_FAST 终态归档与活动计划冲突"
+                )
+            session = archived
+        else:
+            terminal_guard = self._c_fast_terminal_guard(
+                plan, reconciliation=reconciliation
+            )
+            terminal_execution_snapshot = (
+                terminal_guard.pop(
+                    "_terminal_execution_snapshot"
+                )
+            )
+            self._verify_c_fast_archive_predecessor(
+                plan.get("previous_terminal_checksum")
+            )
+            session = self._load_c_fast_shakedown_state()
+            if (
+                not session
+                or session.get("session_id") != session_id
+            ):
+                raise CommoditySimNowStateError(
+                    "C_FAST 测试终态会话证据缺失"
+                )
+            execution_snapshot = terminal_execution_snapshot
+            execution = {
+                "schema_version":
+                "commodity_c_fast_simnow_shakedown_evidence_v1",
+                "started_at_utc": plan.get("started_at_utc"),
+                "submitted": plan.get("submitted", {}),
+                "send_intents": plan.get("send_intents", {}),
+                "halt": plan.get("halt"),
+                "reconciliation":
+                reconciliation
+                or (plan.get("execution") or {}).get("reconciliation"),
+                "final_positions":
+                terminal_guard["final_positions"],
+                "terminal_guard": terminal_guard,
+                "execution_snapshot":
+                execution_snapshot,
+                "pnl": self._c_fast_pnl(
+                    plan, execution=execution_snapshot
+                ),
+            }
+            execution["state_checksum"] = _sha256_json(execution)
+            session["status"] = status
+            session["completed_at_utc"] = (
+                self.clock().astimezone(timezone.utc).isoformat()
+            )
+            session["execution"] = execution
+            session["terminal_checksum"] = (
+                self._c_fast_shakedown_terminal_checksum(session)
+            )
+            self._archive_c_fast_terminal_session(session)
+        self._save_c_fast_shakedown_state(session)
+        self._active_state_path().unlink(missing_ok=True)
+        self.c_fast_shakedown_auto_dispatch_authorized = False
+        if self.current_plan is plan:
+            self.current_plan = None
+
+    def _c_fast_terminal_guard(
+        self,
+        plan: dict[str, Any],
+        *,
+        reconciliation: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        evidence = reconciliation or (
+            plan.get("execution") or {}
+        ).get("reconciliation")
+        expected = (
+            evidence.get("expected_positions")
+            if isinstance(evidence, dict)
+            else None
+        )
+        first = self._c_fast_terminal_fact_snapshot(plan)
+        second = self._c_fast_terminal_fact_snapshot(plan)
+        account_hash_before = str(first["account_hash_before"])
+        account_hash_after = str(second["account_hash_after"])
+        gateway_before = str(first["gateway_before"])
+        gateway_after = str(second["gateway_after"])
+        account_valid = bool(
+            first["account_binding_stable"]
+            and second["account_binding_stable"]
+            and account_hash_before
+            == account_hash_after
+            == plan.get("account_hash")
+        )
+        gateway_valid = bool(
+            first["gateway_binding_stable"]
+            and second["gateway_binding_stable"]
+            and gateway_before
+            == gateway_after
+            == self.settings.commodity_simnow_gateway_name
+        )
+        for account_hash in set(
+            first["account_hashes"] + second["account_hashes"]
+        ):
+            try:
+                self._verify_c_fast_account(account_hash)
+            except CommoditySimNowSafetyError:
+                account_valid = False
+        facts_stable = bool(
+            first["snapshot_fingerprint"]
+            == second["snapshot_fingerprint"]
+        )
+        final_positions = second["final_positions"]
+        outside_scope = second["outside_scope_positions"]
+        active_plan_orders = second["active_plan_orders"]
+        external_active_orders = second["external_active_orders"]
+        unknown_status_orders = second["unknown_status_orders"]
+        new_external_order_facts = sorted(
+            {
+                row["fact_key"]: row
+                for row in [
+                    *first["new_external_order_facts"],
+                    *second["new_external_order_facts"],
+                ]
+            }.values(),
+            key=lambda row: row["fact_key"],
+        )
+        new_external_trade_facts = sorted(
+            {
+                row["fact_key"]: row
+                for row in [
+                    *first["new_external_trade_facts"],
+                    *second["new_external_trade_facts"],
+                ]
+            }.values(),
+            key=lambda row: row["fact_key"],
+        )
+        generation_valid = bool(
+            first["rpc_generation_stable"]
+            and second["rpc_generation_stable"]
+            and first["rpc_generation_before"]
+            == second["rpc_generation_after"]
+        )
+        conflicting_order_identities = sorted(
+            {
+                row["identity"]: row
+                for row in [
+                    *first["conflicting_order_identities"],
+                    *second["conflicting_order_identities"],
+                ]
+            }.values(),
+            key=lambda row: row["identity"],
+        )
+        conflicting_trade_identities = sorted(
+            {
+                row["identity"]: row
+                for row in [
+                    *first["conflicting_trade_identities"],
+                    *second["conflicting_trade_identities"],
+                ]
+            }.values(),
+            key=lambda row: row["identity"],
+        )
+        untrusted_intent_facts = sorted(
+            {
+                (
+                    row["kind"],
+                    row["reference"],
+                    row["identity"],
+                ): row
+                for row in [
+                    *first["untrusted_intent_facts"],
+                    *second["untrusted_intent_facts"],
+                ]
+            }.values(),
+            key=lambda row: (
+                row["kind"],
+                row["reference"],
+                row["identity"],
+            ),
+        )
+        unresolved_intent_references = {
+            str(intent.get("reference") or "")
+            for phase in ("close", "open")
+            for intent in plan.get(
+                "send_intents", {}
+            ).get(phase, [])
+            if intent.get("intent_status")
+            not in {"ACKNOWLEDGED", "EVIDENCE_RECOVERED"}
+            and str(intent.get("reference") or "")
+        }
+        unresolved_intent_order_facts = [
+            {
+                "reference": str(
+                    order.get("reference") or ""
+                ),
+                "vt_orderid": str(
+                    order.get("vt_orderid")
+                    or order.get("orderid")
+                    or "unknown"
+                ),
+            }
+            for order in second["_raw_orders"]
+            if str(order.get("reference") or "")
+            in unresolved_intent_references
+        ]
+        unresolved_intent_trade_facts = [
+            {
+                "reference": str(
+                    trade.get("reference") or ""
+                ),
+                "vt_tradeid": str(
+                    trade.get("vt_tradeid")
+                    or trade.get("tradeid")
+                    or "unknown"
+                ),
+            }
+            for trade in second["_raw_trades"]
+            if str(trade.get("reference") or "")
+            in unresolved_intent_references
+        ]
+        terminal_execution = self._execution_snapshot_from_facts(
+            plan,
+            second["_raw_orders"],
+            second["_raw_trades"],
+        )
+        inconsistent_trade_rows = [
+            row
+            for row in terminal_execution.get("orders", [])
+            if row.get("trade_evidence_state")
+            == "INCONSISTENT"
+        ]
+        blockers: list[str] = []
+        if not facts_stable:
+            blockers.append("UNSTABLE_TERMINAL_SNAPSHOT")
+        if not account_valid:
+            blockers.append("ACCOUNT_HASH_MISMATCH")
+        if not gateway_valid:
+            blockers.append("GATEWAY_MISMATCH")
+        if not generation_valid:
+            blockers.append("RPC_GENERATION_MISMATCH")
+        if outside_scope:
+            blockers.append("OUTSIDE_C_FAST_POSITION_SCOPE")
+        if expected is None or final_positions != expected:
+            blockers.append("FINAL_POSITION_MISMATCH")
+        if active_plan_orders:
+            blockers.append("ACTIVE_SESSION_ORDERS")
+        if external_active_orders:
+            blockers.append("EXTERNAL_ACTIVE_ORDERS")
+        if unknown_status_orders:
+            blockers.append("UNKNOWN_ORDER_STATUS")
+        if new_external_order_facts:
+            blockers.append("NEW_EXTERNAL_ORDER_FACTS")
+        if new_external_trade_facts:
+            blockers.append("NEW_EXTERNAL_TRADE_FACTS")
+        if inconsistent_trade_rows:
+            blockers.append("INCONSISTENT_SESSION_TRADE_EVIDENCE")
+        if conflicting_order_identities:
+            blockers.append("CONFLICTING_ORDER_IDENTITIES")
+        if conflicting_trade_identities:
+            blockers.append("CONFLICTING_TRADE_IDENTITIES")
+        if untrusted_intent_facts:
+            blockers.append("UNTRUSTED_HISTORICAL_INTENT_FACTS")
+        if (
+            unresolved_intent_order_facts
+            or unresolved_intent_trade_facts
+        ):
+            blockers.append("UNRESOLVED_INTENT_FACTS")
+        if not plan.get("terminal_fact_watermark"):
+            blockers.append("MISSING_TERMINAL_FACT_WATERMARK")
+        captured_at = self.clock().astimezone(timezone.utc).isoformat()
+        guard = {
+            "captured_at_utc": captured_at,
+            "expected_account_hash": plan.get("account_hash"),
+            "account_hash_before": account_hash_before,
+            "account_hash_after": account_hash_after,
+            "observed_account_hash": account_hash_after,
+            "account_hash_valid": account_valid,
+            "gateway_before": gateway_before,
+            "gateway_after": gateway_after,
+            "gateway_valid": gateway_valid,
+            "rpc_generation_before":
+            first["rpc_generation_before"],
+            "rpc_generation_after":
+            second["rpc_generation_after"],
+            "rpc_generation_valid": generation_valid,
+            "final_positions": final_positions,
+            "expected_positions": expected,
+            "outside_scope_positions": outside_scope,
+            "active_plan_orders": active_plan_orders,
+            "external_active_orders": external_active_orders,
+            "unknown_status_orders": unknown_status_orders,
+            "new_external_order_facts":
+            new_external_order_facts,
+            "new_external_trade_facts":
+            new_external_trade_facts,
+            "inconsistent_trade_rows":
+            inconsistent_trade_rows,
+            "conflicting_order_identities":
+            conflicting_order_identities,
+            "conflicting_trade_identities":
+            conflicting_trade_identities,
+            "untrusted_intent_facts":
+            untrusted_intent_facts,
+            "unresolved_intent_order_facts":
+            unresolved_intent_order_facts,
+            "unresolved_intent_trade_facts":
+            unresolved_intent_trade_facts,
+            "first_snapshot": first["evidence"],
+            "second_snapshot": second["evidence"],
+            "facts_stable": facts_stable,
+            "state": "VALID" if not blockers else "BLOCKED",
+            "blockers": blockers,
+        }
+        if blockers:
+            halt = plan.setdefault("halt", {})
+            halt.update(
+                {
+                    "reason": "c_fast_terminal_guard_failed",
+                    "recovery_blocker": blockers[0],
+                    "terminal_guard": guard,
+                }
+            )
+            if outside_scope:
+                halt["outside_scope_positions"] = outside_scope
+            plan["status"] = "HALTED_RECONCILE_REQUIRED"
+            self._revoke_auto_dispatch("c_fast_shakedown")
+            self._persist_active_plan_during_halt(halt)
+            raise CommoditySimNowSafetyError(
+                "C_FAST 终态 guard 校验失败",
+                detail=guard,
+            )
+        guard["_terminal_execution_snapshot"] = (
+            terminal_execution
+        )
+        return guard
+
+    def _c_fast_terminal_fact_watermark(
+        self,
+    ) -> dict[str, Any]:
+        safety_before = self._safety_snapshot(
+            require_trade_enabled=True
+        )
+        orders = self._c_fast_all_orders()
+        self._verify_c_fast_known_order_statuses(orders)
+        trades = self.rpc.get_trades()
+        safety_after = self._safety_snapshot(
+            require_trade_enabled=True
+        )
+        accounts = [
+            str(safety_before["account_hash"]),
+            str(safety_after["account_hash"]),
+        ]
+        gateways = [
+            str(safety_before.get("gateway_name") or ""),
+            str(safety_after.get("gateway_name") or ""),
+        ]
+        generations = [
+            str(safety_before.get("rpc_last_connected_at") or ""),
+            str(safety_after.get("rpc_last_connected_at") or ""),
+        ]
+        if (
+            len(set(accounts)) != 1
+            or len(set(gateways)) != 1
+            or len(set(generations)) != 1
+        ):
+            raise CommoditySimNowSafetyError(
+                "C_FAST watermark 采集期间账户或 RPC 连接发生变化",
+                detail={
+                    "account_hashes": accounts,
+                    "gateways": gateways,
+                    "rpc_generations": generations,
+                },
+            )
+        facts = {
+            "account_hash": accounts[0],
+            "gateway": gateways[0],
+            "rpc_generation": generations[0],
+            "orders_hash": self._unordered_rows_hash(orders),
+            "trades_hash": self._unordered_rows_hash(trades),
+        }
+        return {
+            "captured_at_utc":
+            self.clock().astimezone(timezone.utc).isoformat(),
+            **facts,
+            "facts_fingerprint": _sha256_json(facts),
+            "orders_snapshot_scope": "ALL",
+            "order_fact_keys": sorted(
+                self._c_fast_order_fact_key(order)
+                for order in orders
+            ),
+            "trade_fact_keys": sorted(
+                self._c_fast_trade_fact_key(trade)
+                for trade in trades
+            ),
+        }
+
+    @staticmethod
+    def _unordered_rows_hash(
+        rows: list[dict[str, Any]],
+    ) -> str:
+        return _sha256_json(
+            sorted(_sha256_json(row) for row in rows)
+        )
+
+    def _c_fast_all_orders(self) -> list[dict[str, Any]]:
+        getter = getattr(self.rpc, "get_all_orders", None)
+        if not callable(getter):
+            raise CommoditySimNowSafetyError(
+                "C_FAST 要求 RPC 支持完整订单快照",
+                detail={"orders_snapshot_scope": "UNAVAILABLE"},
+            )
+        return list(getter())
+
+    def _verify_c_fast_known_order_statuses(
+        self,
+        orders: list[dict[str, Any]] | None = None,
+    ) -> None:
+        unknown = [
+            {
+                "vt_orderid": str(
+                    order.get("vt_orderid")
+                    or order.get("orderid")
+                    or "unknown"
+                ),
+                "reference": str(order.get("reference") or ""),
+                "symbol": str(
+                    order.get("symbol")
+                    or str(order.get("vt_symbol") or "").split(".", 1)[0]
+                ),
+                "status": _normalize_status(order.get("status")),
+            }
+            for order in (
+                orders
+                if orders is not None
+                else self._c_fast_all_orders()
+            )
+            if _normalize_status(order.get("status"))
+            not in KNOWN_ORDER_STATUSES
+        ]
+        if unknown:
+            raise CommoditySimNowSafetyError(
+                "账户存在状态未知的委托，禁止 C_FAST 派单",
+                detail={"unknown_status_orders": unknown},
+            )
+
+    def _c_fast_terminal_fact_snapshot(
+        self, plan: dict[str, Any]
+    ) -> dict[str, Any]:
+        safety_before = self._safety_snapshot(
+            require_trade_enabled=False,
+            allow_emergency_stopped=True,
+        )
+        raw_positions = self.rpc.get_positions()
+        orders = self._c_fast_all_orders()
+        trades = self.rpc.get_trades()
+        safety_after = self._safety_snapshot(
+            require_trade_enabled=False,
+            allow_emergency_stopped=True,
+        )
+        account_hashes = [
+            str(safety_before["account_hash"]),
+            str(safety_after["account_hash"]),
+        ]
+        gateways = [
+            str(safety_before.get("gateway_name") or ""),
+            str(safety_after.get("gateway_name") or ""),
+        ]
+        generations = [
+            str(
+                safety_before.get("rpc_last_connected_at")
+                or ""
+            ),
+            str(
+                safety_after.get("rpc_last_connected_at")
+                or ""
+            ),
+        ]
+        positions_hash = self._unordered_rows_hash(raw_positions)
+        orders_hash = self._unordered_rows_hash(orders)
+        trades_hash = self._unordered_rows_hash(trades)
+        conflicting_order_identities = (
+            self._c_fast_identity_conflicts(
+                orders, identity_kind="order"
+            )
+        )
+        conflicting_trade_identities = (
+            self._c_fast_identity_conflicts(
+                trades, identity_kind="trade"
+            )
+        )
+        untrusted_intent_facts = (
+            self._c_fast_untrusted_intent_facts(
+                plan, orders, trades
+            )
+        )
+        outside_scope = self._c_fast_outside_scope_positions(
+            raw_positions
+        )
+        final_positions = self._signed_positions(
+            self._position_snapshot(raw_positions)
+        )
+        active_plan_orders = self._active_plan_orders_from_snapshot(
+            plan, orders
+        )
+        external_active_orders = (
+            self._candidate_shakedown_external_active_orders_from_snapshot(
+                plan, orders
+            )
+        )
+        unknown_status_orders = [
+            {
+                "vt_orderid": str(
+                    order.get("vt_orderid")
+                    or order.get("orderid")
+                    or "unknown"
+                ),
+                "reference":
+                str(order.get("reference") or ""),
+                "symbol": str(
+                    order.get("symbol")
+                    or str(
+                        order.get("vt_symbol") or ""
+                    ).split(".", 1)[0]
+                ),
+                "status":
+                _normalize_status(order.get("status")),
+            }
+            for order in orders
+            if _normalize_status(order.get("status"))
+            not in KNOWN_ORDER_STATUSES
+        ]
+        watermark = plan.get("terminal_fact_watermark") or {}
+        baseline_order_keys = set(
+            watermark.get("order_fact_keys") or []
+        )
+        baseline_trade_keys = set(
+            watermark.get("trade_fact_keys") or []
+        )
+        new_external_order_facts = [
+            {
+                "fact_key": fact_key,
+                "vt_orderid": str(
+                    order.get("vt_orderid")
+                    or order.get("orderid")
+                    or "unknown"
+                ),
+                "status": _normalize_status(
+                    order.get("status")
+                ),
+            }
+            for order in orders
+            for fact_key in [self._c_fast_order_fact_key(order)]
+            if fact_key not in baseline_order_keys
+            and not self._c_fast_order_belongs_to_plan(
+                plan, order
+            )
+        ]
+        new_external_trade_facts = [
+            {
+                "fact_key": fact_key,
+                "vt_tradeid": str(
+                    trade.get("vt_tradeid")
+                    or trade.get("tradeid")
+                    or "unknown"
+                ),
+            }
+            for trade in trades
+            for fact_key in [self._c_fast_trade_fact_key(trade)]
+            if fact_key not in baseline_trade_keys
+            and not self._c_fast_trade_belongs_to_plan(
+                plan, trade
+            )
+        ]
+        fingerprint_payload = {
+            "account_hashes": account_hashes,
+            "gateways": gateways,
+            "generations": generations,
+            "positions_hash": positions_hash,
+            "orders_hash": orders_hash,
+            "trades_hash": trades_hash,
+        }
+        return {
+            "account_hash_before": account_hashes[0],
+            "account_hash_after": account_hashes[1],
+            "account_hashes": account_hashes,
+            "account_binding_stable":
+            len(set(account_hashes)) == 1,
+            "gateway_before": gateways[0],
+            "gateway_after": gateways[1],
+            "gateway_binding_stable":
+            len(set(gateways)) == 1,
+            "rpc_generation_before": generations[0],
+            "rpc_generation_after": generations[1],
+            "rpc_generation_stable":
+            len(set(generations)) == 1,
+            "final_positions": final_positions,
+            "outside_scope_positions": outside_scope,
+            "active_plan_orders": active_plan_orders,
+            "external_active_orders": external_active_orders,
+            "unknown_status_orders": unknown_status_orders,
+            "conflicting_order_identities":
+            conflicting_order_identities,
+            "conflicting_trade_identities":
+            conflicting_trade_identities,
+            "untrusted_intent_facts":
+            untrusted_intent_facts,
+            "new_external_order_facts":
+            new_external_order_facts,
+            "new_external_trade_facts":
+            new_external_trade_facts,
+            "_raw_orders": orders,
+            "_raw_trades": trades,
+            "snapshot_fingerprint":
+            _sha256_json(fingerprint_payload),
+            "evidence": {
+                "captured_at_utc":
+                self.clock().astimezone(timezone.utc).isoformat(),
+                **fingerprint_payload,
+            },
+        }
+
+    def _c_fast_untrusted_intent_facts(
+        self,
+        plan: dict[str, Any],
+        orders: list[dict[str, Any]],
+        trades: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        untrusted_references = {
+            str(intent.get("reference") or "")
+            for phase in ("close", "open")
+            for intent in (
+                plan.get("send_intents", {}).get(phase, [])
+            )
+            if intent.get("intent_status")
+            not in {"ACKNOWLEDGED", "EVIDENCE_RECOVERED"}
+            and str(intent.get("reference") or "")
+        }
+        facts = [
+            {
+                "kind": kind,
+                "reference": reference,
+                "identity": (
+                    str(row.get("vt_orderid") or row.get("orderid") or "")
+                    if kind == "order"
+                    else str(row.get("vt_tradeid") or row.get("tradeid") or "")
+                ),
+            }
+            for kind, rows in (("order", orders), ("trade", trades))
+            for row in rows
+            for reference in [str(row.get("reference") or "")]
+            if reference in untrusted_references
+        ]
+        return sorted(
+            facts,
+            key=lambda row: (
+                row["kind"],
+                row["reference"],
+                row["identity"],
+            ),
+        )
+
+    def _c_fast_identity_conflicts(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        identity_kind: str,
+    ) -> list[dict[str, Any]]:
+        identities: dict[str, set[str]] = {}
+        for row in rows:
+            gateway = self._row_gateway(row)
+            if identity_kind == "trade":
+                row_id = str(
+                    row.get("vt_tradeid")
+                    or row.get("tradeid")
+                    or ""
+                )
+            else:
+                row_id = str(
+                    row.get("vt_orderid")
+                    or row.get("orderid")
+                    or ""
+                )
+            if not row_id:
+                continue
+            if gateway and row_id.startswith(f"{gateway}."):
+                row_id = row_id.split(".", 1)[1]
+            identity = f"{gateway}:{row_id}"
+            identities.setdefault(identity, set()).add(
+                _sha256_json(row)
+            )
+        return [
+            {
+                "identity": identity,
+                "payload_hashes": sorted(payload_hashes),
+            }
+            for identity, payload_hashes in sorted(
+                identities.items()
+            )
+            if len(payload_hashes) > 1
+        ]
+
+    def _c_fast_positions_explained_by_trades(
+        self,
+        plan: dict[str, Any],
+        phase: str,
+        trades: list[dict[str, Any]],
+    ) -> dict[str, int]:
+        expected = dict(
+            plan["previous_positions"]
+            if phase == "close"
+            else plan["expected_after_close"]
+        )
+        children = [
+            submitted
+            for submitted in plan.get("submitted", {}).get(
+                phase, []
+            )
+        ]
+        filled_by_child = [0.0 for _ in children]
+        seen: dict[str, str] = {}
+        for trade in trades:
+            trade_key = self._c_fast_trade_fact_key(trade)
+            canonical_hash = _sha256_json(trade)
+            if (
+                trade_key in seen
+                and seen[trade_key] != canonical_hash
+            ):
+                raise CommoditySimNowSafetyError(
+                    "同一 C_FAST trade identity 存在冲突回报",
+                    detail={"trade_identity": trade_key},
+                )
+            if trade_key in seen:
+                continue
+            seen[trade_key] = canonical_hash
+            states = [
+                self._trade_child_match_state(trade, child)
+                for child in children
+            ]
+            matches = [
+                index
+                for index, state in enumerate(states)
+                if state == "MATCH"
+            ]
+            if len(matches) != 1 or any(
+                state == "INCONSISTENT" for state in states
+            ):
+                continue
+            index = matches[0]
+            child = children[index]
+            volume = float(trade.get("volume") or 0)
+            filled_by_child[index] += volume
+            if (
+                volume <= 0
+                or not volume.is_integer()
+                or filled_by_child[index] > int(child["volume"])
+            ):
+                raise CommoditySimNowSafetyError(
+                    "C_FAST child 成交证据无法唯一解释持仓"
+                )
+            delta = int(volume) * (
+                1
+                if _normalize_direction(
+                    child.get("direction")
+                ) == "long"
+                else -1
+            )
+            vt_symbol = str(child["vt_symbol"])
+            expected[vt_symbol] = (
+                expected.get(vt_symbol, 0) + delta
+            )
+            if expected[vt_symbol] == 0:
+                expected.pop(vt_symbol)
+        return dict(sorted(expected.items()))
+
+    def _verify_c_fast_final_dispatch_binding(
+        self,
+        plan: dict[str, Any],
+    ) -> dict[str, Any]:
+        session = self._load_c_fast_shakedown_state()
+        snapshot, snapshot_hash = self._c_fast_snapshot()
+        current_trading_day = self._current_trading_day(
+            self._plan_symbols(plan)
+        ).isoformat()
+        expected = {
+            "session_id":
+            plan.get("c_fast_shakedown_session_id"),
+            "plan_hash": plan.get("plan_hash"),
+            "source_snapshot_hash":
+            plan.get("source_snapshot_hash"),
+            "source_snapshot_id":
+            (
+                session.get("source_snapshot_id")
+                if isinstance(session, dict)
+                else None
+            ),
+            "formula_target_binding_sha256":
+            plan.get("formula_target_binding_sha256"),
+            "execution_day": plan.get("execution_day"),
+        }
+        observed = {
+            "session_id":
+            (
+                session.get("session_id")
+                if isinstance(session, dict)
+                else None
+            ),
+            "plan_hash":
+            (
+                session.get("plan_hash")
+                if isinstance(session, dict)
+                else None
+            ),
+            "source_snapshot_hash": snapshot_hash,
+            "source_snapshot_id": snapshot.snapshot_id,
+            "formula_target_binding_sha256":
+            snapshot.formula_target_binding_sha256,
+            "execution_day": snapshot.execution_day.isoformat(),
+            "session_signed_execution_day":
+            (
+                session.get("signed_execution_day")
+                if isinstance(session, dict)
+                else None
+            ),
+            "current_trading_day": current_trading_day,
+            "active_plan_hash":
+            (
+                self.current_plan.get("plan_hash")
+                if isinstance(self.current_plan, dict)
+                else None
+            ),
+        }
+        if (
+            not isinstance(session, dict)
+            or session.get("status") == "RESULT_UNKNOWN"
+            or any(
+                observed[field] != expected[field]
+                for field in (
+                    "session_id",
+                    "plan_hash",
+                    "source_snapshot_hash",
+                    "source_snapshot_id",
+                    "formula_target_binding_sha256",
+                    "execution_day",
+                )
+            )
+            or observed["session_signed_execution_day"]
+            != expected["execution_day"]
+            or observed["current_trading_day"]
+            != expected["execution_day"]
+            or observed["active_plan_hash"]
+            != expected["plan_hash"]
+        ):
+            raise CommoditySimNowSafetyError(
+                "C_FAST child 最终发送绑定已失效",
+                detail={
+                    "expected": expected,
+                    "observed": observed,
+                },
+            )
+        return {
+            "captured_at_utc":
+            self.clock().astimezone(timezone.utc).isoformat(),
+            "plan_hash": expected["plan_hash"],
+            "source_snapshot_hash":
+            expected["source_snapshot_hash"],
+            "execution_day": expected["execution_day"],
+            "current_trading_day": current_trading_day,
+        }
+
+    def _verify_c_fast_pre_send_fact_guard(
+        self,
+        plan: dict[str, Any],
+        phase: str,
+        *,
+        current_reference: str | None = None,
+    ) -> dict[str, Any]:
+        snapshot = self._c_fast_terminal_fact_snapshot(plan)
+        raw_orders = snapshot.pop("_raw_orders")
+        raw_trades = snapshot.pop("_raw_trades")
+        expected_positions = (
+            self._c_fast_positions_explained_by_trades(
+                plan, phase, raw_trades
+            )
+        )
+        blockers: list[str] = []
+        if (
+            not snapshot["account_binding_stable"]
+            or snapshot["account_hash_before"]
+            != plan.get("account_hash")
+        ):
+            blockers.append("ACCOUNT_BINDING_MISMATCH")
+        if (
+            not snapshot["gateway_binding_stable"]
+            or snapshot["gateway_before"]
+            != self.settings.commodity_simnow_gateway_name
+        ):
+            blockers.append("GATEWAY_BINDING_MISMATCH")
+        if (
+            not snapshot["rpc_generation_stable"]
+            or snapshot["rpc_generation_before"]
+            != str(plan.get("dispatch_rpc_generation") or "")
+        ):
+            blockers.append("RPC_GENERATION_MISMATCH")
+        if snapshot["outside_scope_positions"]:
+            blockers.append("OUTSIDE_C_FAST_POSITION_SCOPE")
+        if snapshot["unknown_status_orders"]:
+            blockers.append("UNKNOWN_ORDER_STATUS")
+        if snapshot["external_active_orders"]:
+            blockers.append("EXTERNAL_ACTIVE_ORDERS")
+        if snapshot["new_external_order_facts"]:
+            blockers.append("NEW_EXTERNAL_ORDER_FACTS")
+        if snapshot["new_external_trade_facts"]:
+            blockers.append("NEW_EXTERNAL_TRADE_FACTS")
+        if snapshot["conflicting_order_identities"]:
+            blockers.append("CONFLICTING_ORDER_IDENTITIES")
+        if snapshot["conflicting_trade_identities"]:
+            blockers.append("CONFLICTING_TRADE_IDENTITIES")
+        if current_reference:
+            if any(
+                str(order.get("reference") or "")
+                == current_reference
+                for order in raw_orders
+            ):
+                blockers.append(
+                    "HISTORICAL_CURRENT_CHILD_ORDER_FACT"
+                )
+            if any(
+                str(trade.get("reference") or "")
+                == current_reference
+                for trade in raw_trades
+            ):
+                blockers.append(
+                    "HISTORICAL_CURRENT_CHILD_TRADE_FACT"
+                )
+        if snapshot["final_positions"] != expected_positions:
+            blockers.append("UNEXPLAINED_POSITION_CHANGE")
+        evidence = {
+            "captured_at_utc":
+            self.clock().astimezone(timezone.utc).isoformat(),
+            "phase": phase,
+            "snapshot_fingerprint":
+            snapshot["snapshot_fingerprint"],
+            "expected_positions": expected_positions,
+            "observed_positions": snapshot["final_positions"],
+            "rpc_generation":
+            snapshot["rpc_generation_before"],
+            "orders_snapshot_scope": "ALL",
+            "blockers": blockers,
+        }
+        if blockers:
+            raise CommoditySimNowSafetyError(
+                "C_FAST 派单前最终事实 guard 校验失败",
+                detail=evidence,
+            )
+        return evidence
+
+    @staticmethod
+    def _c_fast_order_fact_key(
+        order: dict[str, Any]
+    ) -> str:
+        return _sha256_json(
+            {
+                "gateway": str(
+                    order.get("gateway_name")
+                    or order.get("gateway")
+                    or ""
+                ),
+                "vt_orderid": str(
+                    order.get("vt_orderid") or ""
+                ),
+                "orderid": str(order.get("orderid") or ""),
+                "reference": str(
+                    order.get("reference") or ""
+                ),
+                "vt_symbol": str(
+                    order.get("vt_symbol") or ""
+                ),
+                "symbol": str(order.get("symbol") or ""),
+                "direction": _normalize_direction(
+                    order.get("direction")
+                ),
+                "offset": _value(
+                    order.get("offset") or ""
+                ).lower(),
+                "status": _normalize_status(order.get("status")),
+                "volume": float(order.get("volume") or 0),
+                "traded": float(
+                    order.get("traded")
+                    or order.get("traded_volume")
+                    or 0
+                ),
+            }
+        )
+
+    @staticmethod
+    def _c_fast_trade_fact_key(
+        trade: dict[str, Any]
+    ) -> str:
+        gateway = str(
+            trade.get("gateway_name")
+            or trade.get("gateway")
+            or ""
+        )
+        trade_id = str(
+            trade.get("vt_tradeid")
+            or trade.get("tradeid")
+            or ""
+        )
+        return (
+            f"{gateway}:{trade_id}"
+            if trade_id
+            else _sha256_json(trade)
+        )
+
+    def _c_fast_order_belongs_to_plan(
+        self,
+        plan: dict[str, Any],
+        order: dict[str, Any],
+    ) -> bool:
+        references = {
+            str(row.get("reference") or "")
+            for phase in ("close", "open")
+            for collection in (
+                f"{phase}_orders",
+            )
+            for row in plan.get(collection, [])
+        }
+        references.update(
+            str(row.get("reference") or "")
+            for phase in ("close", "open")
+            for row in plan.get("send_intents", {}).get(
+                phase, []
+            )
+        )
+        references.discard("")
+        submitted_ids = {
+            alias
+            for order_id in self._submitted_order_ids(plan)
+            for alias in _order_id_aliases(order_id)
+        }
+        return bool(
+            str(order.get("reference") or "") in references
+            or self._order_ids(order).intersection(submitted_ids)
+        )
+
+    def _c_fast_trade_belongs_to_plan(
+        self,
+        plan: dict[str, Any],
+        trade: dict[str, Any],
+    ) -> bool:
+        states = [
+            self._trade_child_match_state(trade, submitted)
+            for phase in ("close", "open")
+            for submitted in plan.get("submitted", {}).get(
+                phase, []
+            )
+        ]
+        return (
+            sum(state == "MATCH" for state in states) == 1
+            and not any(
+                state == "INCONSISTENT" for state in states
+            )
+        )
+
+    def _c_fast_shakedown_state_path(self) -> Path:
+        return Path(
+            self.settings.commodity_c_fast_simnow_state_path
+        ).expanduser()
+
+    def _c_fast_terminal_archive_dir(self) -> Path:
+        path = self._c_fast_shakedown_state_path()
+        return path.with_name(f"{path.stem}.sessions")
+
+    def _c_fast_terminal_archive_path(
+        self, session_id: str
+    ) -> Path:
+        if not re.fullmatch(r"cfast-shakedown-[0-9a-f]{32}", session_id):
+            raise CommoditySimNowStateError(
+                "C_FAST 终态归档 session id 无效"
+            )
+        return self._c_fast_terminal_archive_dir() / f"{session_id}.json"
+
+    def _archive_c_fast_terminal_session(
+        self, session: dict[str, Any]
+    ) -> None:
+        if not self._c_fast_shakedown_terminal_checksum_valid(session):
+            raise CommoditySimNowStateError(
+                "C_FAST 终态归档 checksum 无效"
+            )
+        path = self._c_fast_terminal_archive_path(
+            str(session.get("session_id") or "")
+        )
+        if path.exists():
+            try:
+                existing = json.loads(path.read_text(encoding="utf-8"))
+            except Exception as exc:
+                raise CommoditySimNowStateError(
+                    "C_FAST 终态归档已存在但不可读取"
+                ) from exc
+            if (
+                not isinstance(existing, dict)
+                or existing.get("session_id")
+                != session.get("session_id")
+                or existing.get("terminal_checksum")
+                != session.get("terminal_checksum")
+                or not self._c_fast_plan_checksum_valid(existing)
+                or not self._c_fast_execution_checksum_valid(existing)
+                or not self._c_fast_shakedown_terminal_checksum_valid(
+                    existing
+                )
+            ):
+                raise CommoditySimNowStateError(
+                    "C_FAST 终态归档冲突，禁止覆盖"
+                )
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(f"{path.suffix}.tmp")
+        temporary.write_text(
+            json.dumps(session, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(path)
+
+    def _load_c_fast_terminal_archive(
+        self, session_id: str
+    ) -> dict[str, Any] | None:
+        path = self._c_fast_terminal_archive_path(session_id)
+        if not path.exists():
+            return None
+        try:
+            session = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise CommoditySimNowStateError(
+                "C_FAST 终态归档不可读取"
+            ) from exc
+        if (
+            not isinstance(session, dict)
+            or session.get("session_id") != session_id
+            or not self._c_fast_plan_checksum_valid(session)
+            or not self._c_fast_execution_checksum_valid(session)
+            or not self._c_fast_shakedown_terminal_checksum_valid(
+                session
+            )
+        ):
+            raise CommoditySimNowStateError(
+                "C_FAST 终态归档校验失败"
+            )
+        return session
+
+    def _c_fast_terminal_chain(
+        self,
+    ) -> tuple[list[dict[str, Any]], str]:
+        archive_dir = self._c_fast_terminal_archive_dir()
+        if not archive_dir.exists():
+            return [], "VALID"
+        sessions = [
+            self._load_c_fast_terminal_archive(path.stem)
+            for path in archive_dir.glob("cfast-shakedown-*.json")
+        ]
+        rows = [session for session in sessions if session is not None]
+        if not rows:
+            return [], "VALID"
+        by_previous: dict[str | None, list[dict[str, Any]]] = {}
+        for session in rows:
+            previous = session.get("previous_terminal_checksum")
+            if previous is not None and not re.fullmatch(
+                r"[0-9a-f]{64}", str(previous)
+            ):
+                return rows, "CHAIN_BROKEN"
+            by_previous.setdefault(previous, []).append(session)
+        roots = by_previous.get(None, [])
+        if len(roots) != 1:
+            return rows, "CHAIN_BROKEN"
+        ordered = [roots[0]]
+        visited = {str(roots[0].get("terminal_checksum"))}
+        while True:
+            checksum = str(ordered[-1].get("terminal_checksum"))
+            children = by_previous.get(checksum, [])
+            if not children:
+                break
+            if len(children) != 1:
+                return rows, "CHAIN_BROKEN"
+            child = children[0]
+            child_checksum = str(child.get("terminal_checksum"))
+            if child_checksum in visited:
+                return rows, "CHAIN_BROKEN"
+            visited.add(child_checksum)
+            ordered.append(child)
+        if len(ordered) != len(rows):
+            return rows, "CHAIN_BROKEN"
+        return ordered, "VALID"
+
+    def _verify_c_fast_archive_predecessor(
+        self, previous_terminal_checksum: Any
+    ) -> None:
+        chain, chain_state = self._c_fast_terminal_chain()
+        if chain_state != "VALID":
+            raise CommoditySimNowSafetyError(
+                "C_FAST 终态 archive chain 无效"
+            )
+        tail_checksum = (
+            chain[-1].get("terminal_checksum") if chain else None
+        )
+        if previous_terminal_checksum != tail_checksum:
+            raise CommoditySimNowSafetyError(
+                "C_FAST 会话 predecessor 不是当前 archive chain 尾部",
+                detail={
+                    "expected_previous_terminal_checksum":
+                    tail_checksum,
+                    "observed_previous_terminal_checksum":
+                    previous_terminal_checksum,
+                },
+            )
+
+    def _verify_c_fast_active_plan_chain(
+        self, plan: dict[str, Any]
+    ) -> None:
+        session_id = str(
+            plan.get("c_fast_shakedown_session_id") or ""
+        )
+        archived = self._load_c_fast_terminal_archive(session_id)
+        if archived is None:
+            self._verify_c_fast_archive_predecessor(
+                plan.get("previous_terminal_checksum")
+            )
+            return
+        chain, chain_state = self._c_fast_terminal_chain()
+        if (
+            archived.get("plan_hash") != plan.get("plan_hash")
+            or chain_state != "VALID"
+            or not chain
+            or chain[-1].get("terminal_checksum")
+            != archived.get("terminal_checksum")
+        ):
+            raise CommoditySimNowSafetyError(
+                "C_FAST 活动计划的已归档终态无效"
+            )
+
+    @_serialized
+    def c_fast_shakedown_history(
+        self, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        try:
+            rows, chain_state = self._c_fast_terminal_chain()
+        except Exception as exc:
+            return [
+                {
+                    "status": "RESULT_UNKNOWN",
+                    "chain_state": "CHAIN_BROKEN",
+                    "error_type": exc.__class__.__name__,
+                }
+            ]
+        bounded = max(1, min(limit, 1000))
+        return [
+            {**session, "chain_state": chain_state}
+            for session in reversed(rows)
+        ][:bounded]
+
+    def _load_c_fast_shakedown_state(self) -> dict[str, Any] | None:
+        path = self._c_fast_shakedown_state_path()
+        if not path.exists():
+            return None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if (
+                not isinstance(payload, dict)
+                or payload.get("schema_version")
+                != "commodity_c_fast_simnow_shakedown_session_v1"
+            ):
+                raise ValueError("invalid C_FAST shakedown session")
+            if not self._c_fast_plan_checksum_valid(payload):
+                raise ValueError(
+                    "C_FAST shakedown plan checksum mismatch"
+                )
+            execution = payload.get("execution")
+            if isinstance(execution, dict):
+                checksum = execution.get("state_checksum")
+                execution_core = {
+                    key: value
+                    for key, value in execution.items()
+                    if key != "state_checksum"
+                }
+                if not checksum or _sha256_json(execution_core) != checksum:
+                    raise ValueError(
+                        "C_FAST terminal evidence checksum mismatch"
+                    )
+            if payload.get("terminal_checksum") and not (
+                self._c_fast_shakedown_terminal_checksum_valid(payload)
+            ):
+                raise ValueError(
+                    "C_FAST terminal envelope checksum mismatch"
+                )
+            if payload.get("status") in {
+                "COMPLETE",
+                "HALTED_RECONCILED",
+            }:
+                if (
+                    not self._c_fast_execution_checksum_valid(payload)
+                    or not self._c_fast_shakedown_terminal_checksum_valid(
+                        payload
+                    )
+                ):
+                    raise ValueError(
+                        "C_FAST terminal evidence is incomplete"
+                    )
+                archived = self._load_c_fast_terminal_archive(
+                    str(payload.get("session_id") or "")
+                )
+                if (
+                    archived is None
+                    or archived.get("plan_hash")
+                    != payload.get("plan_hash")
+                    or archived.get("terminal_checksum")
+                    != payload.get("terminal_checksum")
+                ):
+                    raise ValueError(
+                        "C_FAST terminal pointer/archive mismatch"
+                    )
+                chain, chain_state = self._c_fast_terminal_chain()
+                if (
+                    chain_state != "VALID"
+                    or not chain
+                    or chain[-1].get("terminal_checksum")
+                    != payload.get("terminal_checksum")
+                ):
+                    raise ValueError(
+                        "C_FAST terminal archive chain invalid"
+                    )
+            return payload
+        except Exception as exc:
+            return {
+                "status": "RESULT_UNKNOWN",
+                "error_type": exc.__class__.__name__,
+            }
+
+    def _save_c_fast_shakedown_state(
+        self, session: dict[str, Any]
+    ) -> None:
+        path = self._c_fast_shakedown_state_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(f"{path.suffix}.tmp")
+        temporary.write_text(
+            json.dumps(session, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(path)
+
+    def _set_c_fast_continuous_authorized(self, value: bool) -> None:
+        self.c_fast_continuous_authorized = value
+        if not value:
+            self.c_fast_shakedown_auto_dispatch_authorized = False
+        session = self._load_c_fast_shakedown_state()
+        if (
+            not isinstance(session, dict)
+            or session.get("status") == "RESULT_UNKNOWN"
+        ):
+            return
+        session["continuous_authorized"] = value
+        self._save_c_fast_shakedown_state(session)
+        self._c_fast_authority_persist_error = None
+
+    @staticmethod
+    def _c_fast_plan_checksum_valid(
+        session: dict[str, Any]
+    ) -> bool:
+        core = {
+            key: value
+            for key, value in session.items()
+            if key
+            not in {
+                "schema_version",
+                "plan_hash",
+                "status",
+                "started_by",
+                "previewed_at_utc",
+                "completed_at_utc",
+                "execution",
+                "terminal_checksum",
+                "continuous_authorized",
+            }
+        }
+        return bool(
+            isinstance(session.get("plan_hash"), str)
+            and _sha256_json(core) == session.get("plan_hash")
+        )
+
+    @staticmethod
+    def _c_fast_execution_checksum_valid(
+        session: dict[str, Any]
+    ) -> bool:
+        execution = session.get("execution")
+        if not isinstance(execution, dict):
+            return False
+        checksum = execution.get("state_checksum")
+        execution_core = {
+            key: value
+            for key, value in execution.items()
+            if key != "state_checksum"
+        }
+        return bool(
+            isinstance(checksum, str)
+            and checksum
+            and checksum == _sha256_json(execution_core)
+        )
+
+    @staticmethod
+    def _c_fast_shakedown_terminal_checksum(
+        session: dict[str, Any]
+    ) -> str:
+        execution = session.get("execution")
+        return _sha256_json(
+            {
+                "session_id": session.get("session_id"),
+                "plan_hash": session.get("plan_hash"),
+                "status": session.get("status"),
+                "completed_at_utc": session.get("completed_at_utc"),
+                "execution_state_checksum": (
+                    execution.get("state_checksum")
+                    if isinstance(execution, dict)
+                    else None
+                ),
+            }
+        )
+
+    def _c_fast_shakedown_terminal_checksum_valid(
+        self, session: dict[str, Any]
+    ) -> bool:
+        checksum = session.get("terminal_checksum")
+        return bool(
+            isinstance(checksum, str)
+            and checksum
+            == self._c_fast_shakedown_terminal_checksum(session)
+        )
+
+    def _c_fast_pnl(
+        self,
+        plan: dict[str, Any],
+        *,
+        execution: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        execution = execution or self._execution_snapshot(plan)
+        if not execution.get("available"):
+            return {
+                "schema_version": "commodity_c_fast_simnow_pnl_v1",
+                "captured_at_utc":
+                self.clock().astimezone(timezone.utc).isoformat(),
+                "countable_forward": False,
+                "production_allowed": False,
+                "mark_source": "CURRENT_L1_MID",
+                "mark_state": "UNAVAILABLE",
+                "mark_prices": {},
+                "mark_errors": {},
+                "trade_cashflow_cny": None,
+                "inventory_change_mark_cny": None,
+                "execution_mark_to_market_pnl_cny": None,
+                "adverse_slippage_cny": None,
+                "fees_state": "UNAVAILABLE",
+                "fees_cny": None,
+                "net_pnl_state": "UNAVAILABLE",
+                "execution_snapshot_available": False,
+                "execution_error_type": execution.get("error_type"),
+                "trade_evidence_state": "UNAVAILABLE",
+                "execution_captured_at_utc":
+                execution.get("captured_at_utc"),
+                "expected_volume": None,
+                "filled_volume": None,
+            }
+        expected_volume = float(execution.get("expected_volume") or 0)
+        filled_volume = float(execution.get("filled_volume") or 0)
+        child_evidence_states = {
+            str(row.get("trade_evidence_state") or "INCOMPLETE")
+            for row in execution.get("orders", [])
+        }
+        inconsistent_child = "INCONSISTENT" in child_evidence_states
+        incomplete_child = any(
+            state != "COMPLETE"
+            for state in child_evidence_states
+        )
+        recovery_blocker = str(
+            plan.get("halt", {}).get("recovery_blocker") or ""
+        )
+        if (
+            filled_volume != expected_volume
+            or incomplete_child
+            or recovery_blocker
+            in {
+                "UNATTRIBUTED_FIXED_SCOPE_ACTIVE_ORDERS",
+                "UNRESOLVED_SEND_INTENTS",
+            }
+        ):
+            return {
+                "schema_version": "commodity_c_fast_simnow_pnl_v1",
+                "captured_at_utc":
+                self.clock().astimezone(timezone.utc).isoformat(),
+                "countable_forward": False,
+                "production_allowed": False,
+                "mark_source": "CURRENT_L1_MID",
+                "mark_state": "UNAVAILABLE",
+                "mark_prices": {},
+                "mark_errors": {},
+                "trade_cashflow_cny": None,
+                "inventory_change_mark_cny": None,
+                "execution_mark_to_market_pnl_cny": None,
+                "adverse_slippage_cny": None,
+                "fees_state": "UNAVAILABLE",
+                "fees_cny": None,
+                "net_pnl_state": "UNAVAILABLE",
+                "execution_snapshot_available": True,
+                "trade_evidence_state": (
+                    "INCONSISTENT"
+                    if inconsistent_child
+                    or filled_volume > expected_volume
+                    else "INCOMPLETE"
+                ),
+                "execution_captured_at_utc":
+                execution.get("captured_at_utc"),
+                "expected_volume": expected_volume,
+                "filled_volume": filled_volume,
+                "recovery_blocker": recovery_blocker or None,
+            }
+        rows = execution.get("orders", [])
+        mark_by_symbol: dict[str, float] = {}
+        mark_errors: dict[str, str] = {}
+        cashflow = 0.0
+        marked_inventory = 0.0
+        unmarked_fill = False
+        for row in rows:
+            fill_volume = float(row.get("filled_volume") or 0)
+            fill_price = row.get("average_fill_price")
+            if not fill_volume or fill_price is None:
+                continue
+            product = str(row["product"])
+            multiplier = float(PRODUCT_SPECS[product]["multiplier"])
+            direction = 1.0 if row["direction"] == "long" else -1.0
+            vt_symbol = str(row["vt_symbol"])
+            signed_volume = direction * fill_volume
+            cashflow -= (
+                signed_volume * float(fill_price) * multiplier
+            )
+            if (
+                vt_symbol not in mark_by_symbol
+                and vt_symbol not in mark_errors
+            ):
+                try:
+                    quote = self._quote(
+                        vt_symbol,
+                        float(PRODUCT_SPECS[product]["price_tick"]),
+                    )
+                    mark_by_symbol[vt_symbol] = (
+                        float(quote["bid_price_1"])
+                        + float(quote["ask_price_1"])
+                    ) / 2.0
+                except Exception as exc:
+                    mark_errors[vt_symbol] = exc.__class__.__name__
+            if vt_symbol not in mark_by_symbol:
+                unmarked_fill = True
+                continue
+            marked_inventory += (
+                signed_volume
+                * mark_by_symbol[vt_symbol]
+                * multiplier
+            )
+        return {
+            "schema_version": "commodity_c_fast_simnow_pnl_v1",
+            "captured_at_utc":
+            self.clock().astimezone(timezone.utc).isoformat(),
+            "countable_forward": False,
+            "production_allowed": False,
+            "mark_source": "CURRENT_L1_MID",
+            "mark_state":
+            "UNAVAILABLE"
+            if unmarked_fill
+            else "AVAILABLE",
+            "mark_prices": mark_by_symbol,
+            "mark_errors": mark_errors,
+            "trade_cashflow_cny": cashflow,
+            "inventory_change_mark_cny": marked_inventory,
+            "execution_mark_to_market_pnl_cny":
+            None
+            if unmarked_fill
+            else cashflow + marked_inventory,
+            "adverse_slippage_cny": execution.get("slippage_cny"),
+            "fees_state": "UNBOUND_NOT_ASSUMED_ZERO",
+            "fees_cny": None,
+            "net_pnl_state": "UNAVAILABLE_UNTIL_FEES_BOUND",
+            "execution_snapshot_available":
+            execution.get("available", False),
+            "trade_evidence_state": "COMPLETE",
+            "execution_captured_at_utc":
+            execution.get("captured_at_utc"),
+            "expected_volume": expected_volume,
+            "filled_volume": filled_volume,
+        }
+
     def _cleanup_terminal_shakedown_active_plan(self) -> None:
         plan = self.current_plan
-        if not plan or not plan.get("position_manager_shakedown_session_id"):
+        if not self._is_shakedown_plan(plan):
             return
-        session = self._load_position_manager_shakedown_state()
+        is_c_fast = bool(plan.get("c_fast_shakedown_session_id"))
+        session = (
+            self._load_c_fast_shakedown_state()
+            if is_c_fast
+            else self._load_position_manager_shakedown_state()
+        )
+        session_id = (
+            plan.get("c_fast_shakedown_session_id")
+            if is_c_fast
+            else plan.get("position_manager_shakedown_session_id")
+        )
+        checksum_valid = (
+            self._c_fast_shakedown_terminal_checksum_valid(session)
+            if is_c_fast and session
+            else self._position_manager_shakedown_terminal_checksum_valid(
+                session
+            )
+            if session
+            else False
+        )
+        if is_c_fast and session_id:
+            try:
+                archived = self._load_c_fast_terminal_archive(
+                    str(session_id)
+                )
+                chain, chain_state = self._c_fast_terminal_chain()
+            except Exception:
+                archived = None
+                chain = []
+                chain_state = "CHAIN_BROKEN"
+            if (
+                archived
+                and archived.get("plan_hash")
+                == plan.get("plan_hash")
+                and chain_state == "VALID"
+                and chain
+                and chain[-1].get("terminal_checksum")
+                == archived.get("terminal_checksum")
+            ):
+                try:
+                    self._save_c_fast_shakedown_state(archived)
+                except Exception as exc:
+                    self._state_load_error = (
+                        "c_fast_terminal_commit_recovery:"
+                        f"{exc.__class__.__name__}"
+                    )
+                    return
+                self.current_plan = None
+                self._active_state_path().unlink(missing_ok=True)
+                return
         if (
             session
-            and session.get("session_id") == plan.get("position_manager_shakedown_session_id")
+            and session.get("session_id") == session_id
             and session.get("status") in {"COMPLETE", "HALTED_RECONCILED"}
-            and self._position_manager_shakedown_terminal_checksum_valid(session)
+            and checksum_valid
         ):
             self.current_plan = None
             self._active_state_path().unlink(missing_ok=True)
+
+    def _c_fast_terminal_archive_committed(
+        self, plan: dict[str, Any]
+    ) -> bool:
+        session_id = str(
+            plan.get("c_fast_shakedown_session_id") or ""
+        )
+        if not session_id:
+            return False
+        try:
+            archived = self._load_c_fast_terminal_archive(
+                session_id
+            )
+            chain, chain_state = self._c_fast_terminal_chain()
+        except Exception:
+            return False
+        return bool(
+            archived
+            and archived.get("plan_hash") == plan.get("plan_hash")
+            and chain_state == "VALID"
+            and chain
+            and chain[-1].get("terminal_checksum")
+            == archived.get("terminal_checksum")
+        )
 
     def _load_position_manager_shakedown_state(self) -> dict[str, Any] | None:
         path = self._position_manager_shakedown_state_path()
@@ -3135,6 +6653,45 @@ class CommoditySimNowService:
         return list(reversed(self.events[-max(1, min(limit, 1000)) :]))
 
     @_serialized
+    def c_fast_shakedown_events(
+        self, limit: int = 200
+    ) -> list[dict[str, Any]]:
+        bounded = max(1, min(limit, 1000))
+        rows = [
+            row
+            for row in self.events
+            if str(row.get("event_type") or "").startswith("c_fast_")
+            or (
+                self.current_plan
+                and row.get("plan_hash")
+                == self.current_plan.get("plan_hash")
+                and self.current_plan.get("c_fast_shakedown_session_id")
+            )
+        ]
+        return list(reversed(rows[-bounded:]))
+
+    @_serialized
+    def c_fast_shakedown_pnl(self) -> dict[str, Any]:
+        if (
+            self.current_plan
+            and self.current_plan.get("c_fast_shakedown_session_id")
+        ):
+            return self._c_fast_pnl(self.current_plan)
+        session = self._load_c_fast_shakedown_state()
+        execution = (
+            session.get("execution")
+            if isinstance(session, dict)
+            else None
+        )
+        pnl = execution.get("pnl") if isinstance(execution, dict) else None
+        return pnl or {
+            "schema_version": "commodity_c_fast_simnow_pnl_v1",
+            "status": "UNAVAILABLE",
+            "countable_forward": False,
+            "production_allowed": False,
+        }
+
+    @_serialized
     def _begin_safe_halt(
         self,
         reason: str,
@@ -3146,7 +6703,9 @@ class CommoditySimNowService:
     ) -> dict[str, Any]:
         plan = self.current_plan
         scope = revoke_scope or (
-            "shakedown"
+            "c_fast_shakedown"
+            if plan and plan.get("c_fast_shakedown_session_id")
+            else "shakedown"
             if plan and plan.get("position_manager_shakedown_session_id")
             else "generic"
         )
@@ -3196,7 +6755,9 @@ class CommoditySimNowService:
             halt["pre_phase_expected_positions"] = pre_phase_expected
             halt["active_order_ids"] = []
             plan["status"] = "HALTED_PRE_SUBMIT_SAFE"
-            self._persist_active_plan()
+            active_state_persisted = (
+                self._persist_active_plan_during_halt(halt)
+            )
             result = {
                 "required": False,
                 "reason": reason,
@@ -3207,6 +6768,9 @@ class CommoditySimNowService:
                 "cancel_requested_order_ids": [],
                 "active_order_ids": [],
                 "orders_snapshot_available": True,
+                "active_state_persisted": active_state_persisted,
+                "active_state_persistence_error":
+                halt.get("active_state_persistence_error"),
             }
             self._event("safe_halt_pre_submit", plan_hash=plan.get("plan_hash"), result=result)
             return result
@@ -3215,12 +6779,16 @@ class CommoditySimNowService:
         plan["status"] = "CANCEL_PENDING"
         halt["active_order_ids"] = halt.get("active_order_ids", [])
         halt["orders_snapshot_available"] = False
-        self._persist_active_plan()
+        self._persist_active_plan_during_halt(halt)
 
         orders_snapshot: list[dict[str, Any]] | None = None
         try:
             if submission_recovery_phase:
-                orders_snapshot = self.rpc.get_orders()
+                orders_snapshot = (
+                    self._c_fast_all_orders()
+                    if plan.get("c_fast_shakedown_session_id")
+                    else self.rpc.get_orders()
+                )
                 trades_snapshot = self.rpc.get_trades()
                 evidence_references = self._recover_send_intent_evidence(
                     plan,
@@ -3229,10 +6797,161 @@ class CommoditySimNowService:
                     phases=(submission_recovery_phase,),
                 )
                 halt["submission_evidence_references"] = evidence_references
-                self._persist_active_plan()
+                self._persist_active_plan_during_halt(halt)
                 active_before = self._active_plan_orders_from_snapshot(plan, orders_snapshot)
-                has_persisted_submission = bool(plan.get("submitted", {}).get(submission_recovery_phase))
+                unresolved_intents = self._unresolved_send_intents(
+                    plan, submission_recovery_phase
+                )
+                has_persisted_submission = bool(
+                    plan.get("submitted", {}).get(
+                        submission_recovery_phase
+                    )
+                )
+                external_active = (
+                    self._candidate_shakedown_external_active_orders_from_snapshot(
+                        plan, orders_snapshot
+                    )
+                    if self._is_shakedown_plan(plan)
+                    else []
+                )
+                recovery_observed: dict[str, int] | None = None
+                recovery_positions_changed = False
+                if (
+                    unresolved_intents
+                    and self._is_shakedown_plan(plan)
+                ):
+                    recovery_observed = self._signed_positions(
+                        self._position_snapshot()
+                    )
+                    recovery_positions_changed = (
+                        recovery_observed
+                        != self._phase_pre_positions(
+                            plan, submission_recovery_phase
+                        )
+                    )
+                if not unresolved_intents:
+                    halt.pop("recovery_blocker", None)
+                    halt.pop("unattributed_active_orders", None)
+                    halt.pop("unresolved_send_intent_references", None)
+                elif (
+                    self._is_shakedown_plan(plan)
+                    and (
+                        has_persisted_submission
+                        or external_active
+                        or recovery_positions_changed
+                        or halt.get("recovery_blocker")
+                        in {
+                            "UNATTRIBUTED_FIXED_SCOPE_ACTIVE_ORDERS",
+                            "UNRESOLVED_SEND_INTENTS",
+                        }
+                    )
+                ):
+                    blocker = (
+                        "UNATTRIBUTED_FIXED_SCOPE_ACTIVE_ORDERS"
+                        if external_active
+                        or halt.get("recovery_blocker")
+                        == "UNATTRIBUTED_FIXED_SCOPE_ACTIVE_ORDERS"
+                        else "UNRESOLVED_SEND_INTENTS"
+                    )
+                    plan["status"] = "SUBMISSION_OUTCOME_UNKNOWN"
+                    halt.update(
+                        {
+                            "phase": submission_recovery_phase,
+                            "active_order_ids": [],
+                            "orders_snapshot_available": True,
+                            "trades_snapshot_available": True,
+                            "recovery_blocker": blocker,
+                            "unattributed_active_orders":
+                            external_active,
+                            "unresolved_send_intent_references": [
+                                str(intent.get("reference") or "")
+                                for intent in unresolved_intents
+                            ],
+                            "observed_positions":
+                            recovery_observed,
+                        }
+                    )
+                    active_state_persisted = (
+                        self._persist_active_plan_during_halt(halt)
+                    )
+                    result = {
+                        "required": True,
+                        "reason": reason,
+                        "status": plan["status"],
+                        "phase": submission_recovery_phase,
+                        "cancel_requested_order_ids": sorted(requested),
+                        "active_order_ids": [],
+                        "orders_snapshot_available": True,
+                        "trades_snapshot_available": True,
+                        "submission_evidence_references":
+                        evidence_references,
+                        "recovery_blocker":
+                        halt["recovery_blocker"],
+                        "unattributed_active_orders":
+                        external_active,
+                        "unresolved_send_intent_references":
+                        halt["unresolved_send_intent_references"],
+                        "active_state_persisted":
+                        active_state_persisted,
+                        "active_state_persistence_error":
+                        halt.get("active_state_persistence_error"),
+                    }
+                    self._event(
+                        "submission_outcome_unknown",
+                        plan_hash=plan.get("plan_hash"),
+                        result=result,
+                    )
+                    return result
                 if not evidence_references and not has_persisted_submission and not active_before:
+                    external_active = (
+                        self._candidate_shakedown_external_active_orders_from_snapshot(
+                            plan, orders_snapshot
+                        )
+                        if self._is_shakedown_plan(plan)
+                        else []
+                    )
+                    if external_active:
+                        plan["status"] = "SUBMISSION_OUTCOME_UNKNOWN"
+                        halt.update(
+                            {
+                                "phase": submission_recovery_phase,
+                                "active_order_ids": [],
+                                "orders_snapshot_available": True,
+                                "trades_snapshot_available": True,
+                                "recovery_blocker":
+                                "UNATTRIBUTED_FIXED_SCOPE_ACTIVE_ORDERS",
+                                "unattributed_active_orders":
+                                external_active,
+                            }
+                        )
+                        active_state_persisted = (
+                            self._persist_active_plan_during_halt(halt)
+                        )
+                        result = {
+                            "required": True,
+                            "reason": reason,
+                            "status": plan["status"],
+                            "phase": submission_recovery_phase,
+                            "cancel_requested_order_ids": [],
+                            "active_order_ids": [],
+                            "orders_snapshot_available": True,
+                            "trades_snapshot_available": True,
+                            "submission_evidence_references": [],
+                            "recovery_blocker":
+                            halt["recovery_blocker"],
+                            "unattributed_active_orders":
+                            external_active,
+                            "active_state_persisted":
+                            active_state_persisted,
+                            "active_state_persistence_error":
+                            halt.get("active_state_persistence_error"),
+                        }
+                        self._event(
+                            "submission_outcome_unknown",
+                            plan_hash=plan.get("plan_hash"),
+                            result=result,
+                        )
+                        return result
                     pre_phase_expected = self._phase_pre_positions(plan, submission_recovery_phase)
                     observed = self._signed_positions(self._position_snapshot())
                     if observed == pre_phase_expected:
@@ -3274,7 +6993,11 @@ class CommoditySimNowService:
                                 }
                             )
                             plan["status"] = "HALTED_PRE_SUBMIT_SAFE"
-                            self._persist_active_plan()
+                            active_state_persisted = (
+                                self._persist_active_plan_during_halt(
+                                    halt
+                                )
+                            )
                             result = {
                                 "required": False,
                                 "reason": reason,
@@ -3289,6 +7012,12 @@ class CommoditySimNowService:
                                 "submission_evidence_references": [],
                                 "empty_snapshot_count": len(checks),
                                 "outcome_grace_elapsed_seconds": elapsed,
+                                "active_state_persisted":
+                                active_state_persisted,
+                                "active_state_persistence_error":
+                                halt.get(
+                                    "active_state_persistence_error"
+                                ),
                             }
                             self._event(
                                 "safe_halt_submitting_without_evidence",
@@ -3305,7 +7034,9 @@ class CommoditySimNowService:
                                 "trades_snapshot_available": True,
                             }
                         )
-                        self._persist_active_plan()
+                        active_state_persisted = (
+                            self._persist_active_plan_during_halt(halt)
+                        )
                         result = {
                             "required": True,
                             "reason": reason,
@@ -3318,6 +7049,10 @@ class CommoditySimNowService:
                             "submission_evidence_references": [],
                             "empty_snapshot_count": len(checks),
                             "outcome_grace_elapsed_seconds": elapsed,
+                            "active_state_persisted":
+                            active_state_persisted,
+                            "active_state_persistence_error":
+                            halt.get("active_state_persistence_error"),
                         }
                         self._event(
                             "submission_outcome_unknown",
@@ -3330,7 +7065,9 @@ class CommoditySimNowService:
         except Exception as exc:
             halt["last_rpc_error_type"] = exc.__class__.__name__
             halt["last_rpc_error_at_utc"] = self.clock().astimezone(timezone.utc).isoformat()
-            self._persist_active_plan()
+            active_state_persisted = (
+                self._persist_active_plan_during_halt(halt)
+            )
             result = {
                 "required": True,
                 "reason": reason,
@@ -3341,6 +7078,9 @@ class CommoditySimNowService:
                 "attempts": [],
                 "orders_snapshot_available": False,
                 "rpc_error_type": exc.__class__.__name__,
+                "active_state_persisted": active_state_persisted,
+                "active_state_persistence_error":
+                halt.get("active_state_persistence_error"),
             }
             self._event("safe_halt_rpc_unavailable", plan_hash=plan.get("plan_hash"), result=result)
             return result
@@ -3396,9 +7136,59 @@ class CommoditySimNowService:
             "attempts": attempts,
             "orders_snapshot_available": halt["orders_snapshot_available"],
         }
-        self._persist_active_plan()
+        active_state_persisted = (
+            self._persist_active_plan_during_halt(halt)
+        )
+        result["active_state_persisted"] = active_state_persisted
+        result["active_state_persistence_error"] = halt.get(
+            "active_state_persistence_error"
+        )
         self._event("safe_halt", plan_hash=plan.get("plan_hash"), result=result)
         return result
+
+    def _persist_active_plan_during_halt(
+        self, halt: dict[str, Any]
+    ) -> bool:
+        recovery_marker_added = bool(
+            halt.get("active_state_persistence_error")
+            and not halt.get(
+                "active_state_persistence_recovered_at_utc"
+            )
+        )
+        if recovery_marker_added:
+            halt["active_state_persistence_recovered_at_utc"] = (
+                self.clock().astimezone(timezone.utc).isoformat()
+            )
+        try:
+            self._persist_active_plan()
+        except Exception as exc:
+            if recovery_marker_added:
+                halt.pop(
+                    "active_state_persistence_recovered_at_utc", None
+                )
+            halt["active_state_persistence_error"] = (
+                exc.__class__.__name__
+            )
+            halt["active_state_persistence_failed_at_utc"] = (
+                self.clock().astimezone(timezone.utc).isoformat()
+            )
+            self._event(
+                "safe_halt_active_state_persist_failed",
+                plan_hash=(
+                    self.current_plan.get("plan_hash")
+                    if self.current_plan
+                    else None
+                ),
+                result={
+                    "error_type": exc.__class__.__name__,
+                    "live_cancellation_continued": True,
+                },
+            )
+            logger.exception(
+                "failed to persist active plan during safe halt"
+            )
+            return False
+        return True
 
     def _advance_cancel_pending(
         self,
@@ -3429,7 +7219,7 @@ class CommoditySimNowService:
             }
         if halt.get("status") == "HALTED_PRE_SUBMIT_SAFE":
             if (
-                plan.get("position_manager_shakedown_session_id")
+                self._is_shakedown_plan(plan)
                 and plan.get("halt", {}).get("abandon_pre_submit_requested")
             ):
                 finalized = self._finalize_pre_submit_shakedown_stop(
@@ -3441,7 +7231,7 @@ class CommoditySimNowService:
                     return {
                         "action": "halted_reconciled",
                         "halt": finalized,
-                        **self.position_manager_shakedown_status(),
+                        **self._candidate_shakedown_status(plan),
                     }
                 if plan.get("status") == "CANCEL_PENDING":
                     return {
@@ -3584,6 +7374,13 @@ class CommoditySimNowService:
                 if not matching_orders and not matching_trades:
                     continue
                 evidence_references.add(reference)
+                if (
+                    plan.get("c_fast_shakedown_session_id")
+                    and not intent.get("pre_send_fact_guard")
+                ):
+                    intent["final_guard_evidence_state"] = (
+                        "LOST_DUE_TO_CRASH_BEFORE_ACK_PERSIST"
+                    )
                 intent["intent_status"] = "EVIDENCE_RECOVERED"
                 intent["evidence_checked_at_utc"] = self.clock().astimezone(timezone.utc).isoformat()
                 recovered_ids = {
@@ -3618,6 +7415,22 @@ class CommoditySimNowService:
                 submitted.append(recovered_row)
                 submitted_references.add(reference)
         return sorted(evidence_references)
+
+    @staticmethod
+    def _unresolved_send_intents(
+        plan: dict[str, Any], phase: str
+    ) -> list[dict[str, Any]]:
+        resolved_statuses = {
+            "ACKNOWLEDGED",
+            "EVIDENCE_RECOVERED",
+            "REJECTED_PRE_RPC",
+            "NO_EVIDENCE_STABLE",
+        }
+        return [
+            intent
+            for intent in plan.get("send_intents", {}).get(phase, [])
+            if intent.get("intent_status") not in resolved_statuses
+        ]
 
     def _submitted_order_ids(self, plan: dict[str, Any]) -> list[str]:
         return sorted(
@@ -3657,6 +7470,54 @@ class CommoditySimNowService:
             and self.auto_dispatch_authorized
         )
 
+    @staticmethod
+    def _is_shakedown_plan(plan: dict[str, Any] | None) -> bool:
+        return bool(
+            plan
+            and (
+                plan.get("position_manager_shakedown_session_id")
+                or plan.get("c_fast_shakedown_session_id")
+            )
+        )
+
+    def _candidate_shakedown_status(
+        self, plan: dict[str, Any] | None
+    ) -> dict[str, Any]:
+        if plan and plan.get("c_fast_shakedown_session_id"):
+            return self.c_fast_shakedown_status()
+        return self.position_manager_shakedown_status()
+
+    @staticmethod
+    def _candidate_revoke_scope(plan: dict[str, Any] | None) -> str:
+        return (
+            "c_fast_shakedown"
+            if plan and plan.get("c_fast_shakedown_session_id")
+            else "shakedown"
+        )
+
+    def _candidate_shakedown_auto_dispatch_allowed(
+        self, plan: dict[str, Any] | None
+    ) -> bool:
+        if plan and plan.get("c_fast_shakedown_session_id"):
+            return bool(
+                self.settings.commodity_c_fast_simnow_shakedown_enabled
+                and self.settings.commodity_c_fast_simnow_auto_dispatch_enabled
+                and self.settings.commodity_simnow_enabled
+                and self.enabled
+                and self.manual_approval
+                and self.simnow_mode
+                and self.c_fast_shakedown_auto_dispatch_authorized
+            )
+        return self._position_manager_shakedown_auto_dispatch_allowed()
+
+    def _verify_candidate_shakedown_execution_trust(
+        self, plan: dict[str, Any]
+    ) -> None:
+        if plan.get("c_fast_shakedown_session_id"):
+            self._verify_c_fast_shakedown_execution_trust(plan)
+        else:
+            self._verify_position_manager_shakedown_execution_trust(plan)
+
     def _position_manager_shakedown_auto_dispatch_allowed(self) -> bool:
         return bool(
             self.settings.commodity_position_manager_simnow_shakedown_enabled
@@ -3674,7 +7535,7 @@ class CommoditySimNowService:
 
     def _revoke_after_resume_failure(self, scope: str) -> None:
         self._revoke_auto_dispatch(scope)
-        if scope != "shakedown":
+        if scope not in {"shakedown", "c_fast_shakedown"}:
             self.enabled = False
             self.manual_approval = False
             self.simnow_mode = False
@@ -3685,20 +7546,22 @@ class CommoditySimNowService:
         plan = self.current_plan
         if not plan or plan.get("status") not in {"HALTED_RECONCILED", "HALTED_PRE_SUBMIT_SAFE"}:
             return
-        if plan.get("position_manager_shakedown_session_id"):
+        if self._is_shakedown_plan(plan):
             if not allow_shakedown:
                 return
             # Shakedown terminal states are evidence, never a formal monthly
             # baseline resume path.  A pre-submit halt can only be resumed by
             # the dedicated start flow with explicit shakedown authorization.
             if plan.get("status") == "HALTED_RECONCILED":
-                self._archive_position_manager_shakedown_terminal(plan)
+                self._archive_candidate_shakedown_terminal(plan)
                 return
-            self._verify_position_manager_shakedown_execution_trust(plan)
-            if self._position_manager_shakedown_external_active_orders(plan):
+            self._verify_candidate_shakedown_execution_trust(plan)
+            if self._candidate_shakedown_external_active_orders(plan):
                 raise CommoditySimNowStateError("重新授权前存在外部活动委托")
         revoke_scope = (
-            "shakedown"
+            "c_fast_shakedown"
+            if plan.get("c_fast_shakedown_session_id")
+            else "shakedown"
             if plan.get("position_manager_shakedown_session_id")
             else "generic"
         )
@@ -3713,7 +7576,13 @@ class CommoditySimNowService:
             ]
             if uncertain_intents:
                 try:
-                    orders = self.rpc.get_orders()
+                    orders = (
+                        self._c_fast_all_orders()
+                        if plan.get(
+                            "c_fast_shakedown_session_id"
+                        )
+                        else self.rpc.get_orders()
+                    )
                     trades = self.rpc.get_trades()
                     evidence = self._recover_send_intent_evidence(
                         plan,
@@ -3797,7 +7666,18 @@ class CommoditySimNowService:
             plan["status"] = "COMPLETE"
         plan.pop("halt", None)
         if plan["status"] == "COMPLETE":
-            self._save_completed_state(plan)
+            if self._is_shakedown_plan(plan):
+                self._complete_candidate_shakedown(
+                    plan,
+                    result={
+                        "halted_reconcile": True,
+                        "phase": phase,
+                        "expected_positions": expected,
+                        "observed_positions": observed,
+                    },
+                )
+            else:
+                self._save_completed_state(plan)
         else:
             self._persist_active_plan()
         self._event(
@@ -3838,6 +7718,8 @@ class CommoditySimNowService:
         return {
             "rpc_connected": True,
             "gateway_name": gateway,
+            "rpc_last_connected_at":
+            status.get("last_connected_at"),
             "account_hash": account_hash,
             "web_trade_enabled": bool(risk_status.get("web_trade_enabled")),
             "emergency_stopped": bool(risk_status.get("emergency_stopped")),
@@ -4246,9 +8128,16 @@ class CommoditySimNowService:
             result[vt_symbol] = contract
         return result
 
-    def _position_snapshot(self) -> dict[str, dict[str, Any]]:
+    def _position_snapshot(
+        self,
+        positions: list[dict[str, Any]] | None = None,
+    ) -> dict[str, dict[str, Any]]:
         result: dict[str, dict[str, Any]] = {}
-        for position in self.rpc.get_positions():
+        for position in (
+            positions
+            if positions is not None
+            else self.rpc.get_positions()
+        ):
             symbol = str(position.get("symbol") or "")
             exchange = _value(position.get("exchange") or "")
             vt_symbol = str(position.get("vt_symbol") or f"{symbol}.{exchange}")
@@ -4511,9 +8400,92 @@ class CommoditySimNowService:
                 active.append(str(order.get("vt_orderid") or order.get("orderid") or "unknown"))
         return sorted(active)
 
-    def _execution_snapshot(self, plan: dict[str, Any]) -> dict[str, Any]:
+    def _trade_child_match_state(
+        self,
+        trade: dict[str, Any],
+        submitted: dict[str, Any],
+    ) -> str:
+        if not self._order_ids(trade).intersection(
+            self._order_ids(submitted)
+        ):
+            return "NO_MATCH"
+        gateway = self._row_gateway(trade)
+        submitted_gateway = self._row_gateway(submitted)
+        if (
+            not gateway
+            or not submitted_gateway
+            or gateway != submitted_gateway
+            or gateway
+            != self.settings.commodity_simnow_gateway_name
+        ):
+            return "INCONSISTENT"
+        vt_symbol = self._row_vt_symbol(trade)
+        submitted_vt_symbol = self._row_vt_symbol(submitted)
+        if (
+            not vt_symbol
+            or not submitted_vt_symbol
+            or vt_symbol != submitted_vt_symbol
+        ):
+            return "INCONSISTENT"
+        direction = _normalize_direction(trade.get("direction"))
+        submitted_direction = _normalize_direction(
+            submitted.get("direction")
+        )
+        offset = _value(trade.get("offset") or "").lower()
+        submitted_offset = _value(
+            submitted.get("offset") or ""
+        ).lower()
+        if (
+            not direction
+            or direction != submitted_direction
+            or not offset
+            or offset != submitted_offset
+        ):
+            return "INCONSISTENT"
+        reference = str(trade.get("reference") or "")
+        if (
+            reference
+            and reference
+            != str(submitted.get("reference") or "")
+        ):
+            return "INCONSISTENT"
+        return "MATCH"
+
+    @staticmethod
+    def _row_gateway(row: dict[str, Any]) -> str:
+        gateway = str(
+            row.get("gateway_name")
+            or row.get("gateway")
+            or ""
+        )
+        if gateway:
+            return gateway
+        vt_orderid = str(row.get("vt_orderid") or "")
+        return (
+            vt_orderid.split(".", 1)[0]
+            if "." in vt_orderid
+            else ""
+        )
+
+    @staticmethod
+    def _row_vt_symbol(row: dict[str, Any]) -> str:
+        vt_symbol = str(row.get("vt_symbol") or "")
+        if vt_symbol:
+            return vt_symbol
+        symbol = str(row.get("symbol") or "")
+        exchange = _value(row.get("exchange") or "")
+        return f"{symbol}.{exchange}" if symbol and exchange else ""
+
+    def _execution_snapshot(
+        self,
+        plan: dict[str, Any],
+    ) -> dict[str, Any]:
         try:
-            orders = self.rpc.get_orders()
+            orders = (
+                self._c_fast_all_orders()
+                if plan.get("c_fast_shakedown_session_id")
+                else self.rpc.get_orders()
+            )
             trades = self.rpc.get_trades()
         except Exception as exc:
             return {
@@ -4522,32 +8494,109 @@ class CommoditySimNowService:
                 "error_type": exc.__class__.__name__,
                 "orders": [],
             }
+        return self._execution_snapshot_from_facts(
+            plan, orders, trades
+        )
 
+    def _execution_snapshot_from_facts(
+        self,
+        plan: dict[str, Any],
+        orders: list[dict[str, Any]],
+        trades: list[dict[str, Any]],
+    ) -> dict[str, Any]:
         order_by_id: dict[str, dict[str, Any]] = {}
         for order in orders:
             for order_id in self._order_ids(order):
                 order_by_id[order_id] = order
+        unique_trades: list[tuple[str, dict[str, Any]]] = []
+        seen_trade_keys: dict[str, str] = {}
+        conflicting_trades: list[dict[str, Any]] = []
+        for trade in trades:
+            trade_id = str(
+                trade.get("vt_tradeid")
+                or trade.get("tradeid")
+                or ""
+            )
+            gateway = self._row_gateway(trade)
+            trade_key = (
+                f"{gateway}:{trade_id}"
+                if trade_id
+                else _sha256_json(trade)
+            )
+            canonical_hash = _sha256_json(trade)
+            if (
+                trade_key in seen_trade_keys
+                and seen_trade_keys[trade_key] != canonical_hash
+            ):
+                conflicting_trades.append(trade)
+                continue
+            if trade_key in seen_trade_keys:
+                continue
+            seen_trade_keys[trade_key] = canonical_hash
+            unique_trades.append((trade_key, trade))
+
+        children = [
+            (phase, submitted)
+            for phase in ("close", "open")
+            for submitted in plan["submitted"][phase]
+        ]
+        trades_by_child: dict[
+            int, list[dict[str, Any]]
+        ] = {index: [] for index in range(len(children))}
+        inconsistent_children: set[int] = set()
+        for trade in conflicting_trades:
+            states = [
+                self._trade_child_match_state(trade, submitted)
+                for _, submitted in children
+            ]
+            inconsistent_children.update(
+                index
+                for index, state in enumerate(states)
+                if state in {"MATCH", "INCONSISTENT"}
+            )
+        for _, trade in unique_trades:
+            states = [
+                self._trade_child_match_state(trade, submitted)
+                for _, submitted in children
+            ]
+            matches = [
+                index
+                for index, state in enumerate(states)
+                if state == "MATCH"
+            ]
+            inconsistent = [
+                index
+                for index, state in enumerate(states)
+                if state == "INCONSISTENT"
+            ]
+            if len(matches) == 1 and not inconsistent:
+                trades_by_child[matches[0]].append(trade)
+            elif matches or inconsistent:
+                inconsistent_children.update(
+                    [*matches, *inconsistent]
+                )
 
         rows: list[dict[str, Any]] = []
         expected_volume = 0
         filled_volume = 0.0
         adverse_slippage_ticks_volume = 0.0
         slippage_cny = 0.0
-        for phase in ("close", "open"):
-            for submitted in plan["submitted"][phase]:
+        for child_index, (phase, submitted) in enumerate(children):
                 expected = int(submitted["volume"])
                 expected_volume += expected
                 ids = self._order_ids(submitted)
-                matching_trades = [
-                    trade for trade in trades if ids.intersection(self._order_ids(trade))
-                ]
+                matching_trades = trades_by_child[child_index]
                 fill_volume = sum(float(trade.get("volume") or 0) for trade in matching_trades)
                 fill_notional = sum(
                     float(trade.get("price") or 0) * float(trade.get("volume") or 0)
                     for trade in matching_trades
                 )
                 average_fill_price = fill_notional / fill_volume if fill_volume else None
-                decision_price = float(submitted["decision_price"])
+                decision_price = float(
+                    submitted.get(
+                        "decision_price", submitted["price"]
+                    )
+                )
                 tick = float(PRODUCT_SPECS[submitted["product"]]["price_tick"])
                 multiplier = float(PRODUCT_SPECS[submitted["product"]]["multiplier"])
                 direction_factor = 1.0 if submitted["direction"] == "long" else -1.0
@@ -4568,6 +8617,14 @@ class CommoditySimNowService:
                         "expected_volume": expected,
                         "filled_volume": fill_volume,
                         "fill_ratio": min(fill_volume / expected, 1.0) if expected else 0.0,
+                        "trade_evidence_state": (
+                            "INCONSISTENT"
+                            if child_index in inconsistent_children
+                            or fill_volume > expected
+                            else "COMPLETE"
+                            if fill_volume == expected
+                            else "INCOMPLETE"
+                        ),
                         "decision_price": decision_price,
                         "submit_price": float(submitted["price"]),
                         "average_fill_price": average_fill_price,

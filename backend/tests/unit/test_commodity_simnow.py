@@ -49,9 +49,14 @@ class FakeRpc:
         self.contract_months = contract_months
         self.get_orders_error: Exception | None = None
         self.get_positions_error: Exception | None = None
+        self.last_connected_at = "fake-generation-A"
 
     def status(self, *, probe: bool = False) -> dict[str, Any]:
-        return {"connected": True, "gateway_name": "CTP"}
+        return {
+            "connected": True,
+            "gateway_name": "CTP",
+            "last_connected_at": self.last_connected_at,
+        }
 
     def get_accounts(self) -> list[dict[str, Any]]:
         return [{"accountid": ACCOUNT_ID, "gateway_name": "CTP"}]
@@ -83,6 +88,9 @@ class FakeRpc:
         if self.get_orders_error is not None:
             raise self.get_orders_error
         return list(self.orders)
+
+    def get_all_orders(self) -> list[dict[str, Any]]:
+        return self.get_orders()
 
     def get_trades(self) -> list[dict[str, Any]]:
         return list(self.trades)
@@ -486,6 +494,22 @@ def fills_for_requests(requests: list[Any]) -> list[dict[str, Any]]:
         {
             "vt_tradeid": f"CTP.T{index}",
             "vt_orderid": f"CTP.{index}",
+            "gateway_name": str(request.gateway_name),
+            "symbol": str(request.symbol),
+            "exchange": str(
+                getattr(request.exchange, "value", request.exchange)
+            ),
+            "vt_symbol": (
+                f"{request.symbol}."
+                f"{getattr(request.exchange, 'value', request.exchange)}"
+            ),
+            "direction": str(
+                getattr(request.direction, "value", request.direction)
+            ),
+            "offset": str(
+                getattr(request.offset, "value", request.offset)
+            ),
+            "reference": str(request.reference),
             "price": request.price,
             "volume": request.volume,
         }
@@ -1237,6 +1261,7 @@ def test_position_manager_shakedown_pre_submit_stop_archives_and_unblocks_previe
     preview = service.preview_position_manager_shakedown(
         ["ag"], operator="admin", role="admin", source_ip=None
     )
+    advance = service.auto_position_manager_shakedown_advance
 
     def fail_before_submit(**kwargs):
         raise CommoditySimNowStateError("simulated pre-submit failure")
@@ -1267,6 +1292,23 @@ def test_position_manager_shakedown_pre_submit_stop_archives_and_unblocks_previe
         ["ag"], operator="admin", role="admin", source_ip=None
     )
     assert replacement["session"]["status"] == "PREVIEW_READY"
+    monkeypatch.setattr(
+        service,
+        "auto_position_manager_shakedown_advance",
+        advance,
+    )
+
+    restarted = service.start_position_manager_shakedown(
+        replacement["preview"]["plan_hash"],
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+
+    assert restarted["action"] in {
+        "close_submitted",
+        "open_submitted",
+    }
 
 
 def test_position_manager_shakedown_restart_resumes_via_dedicated_start_only(
