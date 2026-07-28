@@ -86,6 +86,8 @@ session nonce/reference 和已确认 order id 定向撤单；会话空闲时 sto
 safe-halt、定向撤单和只读 reconcile 仍继续。固定十品种内出现无法用
 reference/order id 唯一归属的活动委托时，状态保持
 `SUBMISSION_OUTCOME_UNKNOWN`，禁止声明无证据、禁止归档或重发。
+归属按每个 send intent 独立判定；同阶段其他子单已 ACK 或已有 evidence，
+不能掩盖另一个 unresolved timeout 子单。
 共享 active-plan 落盘失败同样不得阻断 live RPC 查询和撤单，结果会显式记录
 `active_state_persistence_error`；服务 shutdown 使用 finally 保证 worker
 一定停止。
@@ -96,6 +98,9 @@ reference/order id 唯一归属的活动委托时，状态保持
 重启后按链顺序枚举和校验历史终态；缺失 predecessor、分叉、循环或单文件
 checksum 错误会返回 `CHAIN_BROKEN`。archive 成功但 current pointer 写失败时，
 终态重试复用原 archive，不重新生成完成时间、PnL 或 checksum。
+chain 校验也是 preview、start、每次 READY 派单和 terminal append 的执行信任
+条件；pointer 缺失但 archive 非空、predecessor 被删除或链已断裂时禁止新委托，
+已提交计划只允许撤单和只读对账，不能删除 active plan。
 
 ## PnL 证据
 
@@ -111,6 +116,9 @@ net_pnl_state=UNAVAILABLE_UNTIL_FEES_BOUND
 不得把未绑定费用当作零，也不得把 shakedown PnL 并入正式 forward PnL。
 如果 orders/trades execution snapshot 不可用，成交现金流、库存估值和
 execution PnL 全部返回 `None`，不得把未知成交事实推导为零。
+RPC 可用但 `expected_volume > filled_volume` 时同样返回
+`trade_evidence_state=INCOMPLETE`，所有金额字段为 `None`；权威持仓可用于
+安全收口，但不能把迟到的 trade callback 当作零成交或零 PnL。
 
 ## 本地验证
 

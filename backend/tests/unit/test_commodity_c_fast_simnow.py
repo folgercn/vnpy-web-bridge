@@ -53,6 +53,43 @@ class AcceptedWithoutIdentityTimeoutTrade(FakeTrade):
         raise RpcTimeoutError()
 
 
+class PartialAcceptedWithoutIdentityTimeoutTrade(FakeTrade):
+    def send_order(self, request, **kwargs):
+        assert self.rpc is not None
+        if not self.requests:
+            self.requests.append(request)
+            self.rpc.orders.append(
+                {
+                    "vt_orderid": "CTP.1",
+                    "orderid": "1",
+                    "reference": request.reference,
+                    "symbol": request.symbol,
+                    "vt_symbol": f"{request.symbol}.{request.exchange}",
+                    "direction": request.direction,
+                    "offset": request.offset,
+                    "volume": request.volume,
+                    "price": request.price,
+                    "status": "not_traded",
+                }
+            )
+            return {"vt_orderid": "CTP.1", "accepted": True}
+        self.rpc.orders.append(
+            {
+                "vt_orderid": "CTP.unattributed",
+                "orderid": "unattributed",
+                "reference": "",
+                "symbol": request.symbol,
+                "vt_symbol": f"{request.symbol}.{request.exchange}",
+                "direction": request.direction,
+                "offset": request.offset,
+                "volume": request.volume,
+                "price": request.price,
+                "status": "not_traded",
+            }
+        )
+        raise RpcTimeoutError()
+
+
 def prepare_c_fast_shakedown(
     tmp_path: Path,
     *,
@@ -88,6 +125,65 @@ def prepare_c_fast_shakedown(
         lambda: (snapshot.model_copy(deep=True), snapshot_hash)
     )
     return service, rpc, snapshot, snapshot_hash
+
+
+def complete_c_fast_ag_session(
+    service: CommoditySimNowService,
+    rpc,
+    snapshot: CommodityCFastShadowDTO,
+) -> dict:
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    service.start_c_fast_shakedown(
+        preview["plan_hash"],
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+    ag = next(row for row in snapshot.targets if row.product == "ag")
+    rpc.positions = [
+        position("ag", ag.target_quantity, contract_month="2612")
+    ]
+    rpc.trades = fills_for_requests(list(service.trade.requests))
+    service.auto_candidate_shakedown_advance()
+    return preview
+
+
+def install_next_c_fast_snapshot(
+    service: CommoditySimNowService,
+    rpc,
+    first_snapshot: CommodityCFastShadowDTO,
+    first_hash: str,
+) -> tuple[CommodityCFastShadowDTO, str]:
+    previous_targets = {
+        row.product: {
+            "exact_contract": row.exact_contract,
+            "target_quantity": row.target_quantity,
+        }
+        for row in first_snapshot.targets
+    }
+    payload = unsigned_payload(
+        snapshot_id="c-fast-2026-09-chain-test",
+        source_month="2026-09",
+        source_day="2026-09-30",
+        execution_day="2026-10-01",
+        input_cutoff="2026-09-30T07:00:00Z",
+        previous_snapshot_hash=first_hash,
+        previous_targets=previous_targets,
+    )
+    payload["targets"][0]["target_quantity"] += 1
+    signed, snapshot_hash = sign_payload(payload, make_key())
+    snapshot = CommodityCFastShadowDTO.model_validate(signed)
+    service.bind_c_fast_snapshot_provider(
+        lambda: (snapshot.model_copy(deep=True), snapshot_hash)
+    )
+    next_now = datetime(2026, 10, 1, 2, tzinfo=timezone.utc)
+    service.clock = lambda: next_now
+    for tick in service.tick_store.ticks.values():
+        tick["received_at"] = next_now.isoformat()
+    rpc.trades = []
+    return snapshot, snapshot_hash
 
 
 def test_c_fast_preview_builds_masked_signed_target_plan(
@@ -631,6 +727,13 @@ def test_c_fast_stop_cancels_when_first_active_state_persist_fails(
         stopped["halt"]["active_state_persistence_error"]
         == "OSError"
     )
+    persisted = json.loads(
+        service._active_state_path().read_text(encoding="utf-8")
+    )
+    persisted_halt = persisted["plan"]["halt"]
+    assert (
+        persisted_halt["active_state_persistence_recovered_at_utc"]
+    )
     before = len(service.trade.requests)
     rpc.positions = []
     rpc.trades = fills_for_requests(list(service.trade.requests))
@@ -828,6 +931,52 @@ def test_position_manager_start_rejects_stale_preview_during_c_fast_authority(
         )
 
 
+def test_c_fast_partial_ack_does_not_hide_unattributed_timeout_child(
+    tmp_path: Path,
+) -> None:
+    trade = PartialAcceptedWithoutIdentityTimeoutTrade()
+    service, rpc, snapshot, _ = prepare_c_fast_shakedown(
+        tmp_path, trade=trade
+    )
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    assert len(preview["plan"]["open_orders"]) >= 2
+
+    with pytest.raises(CommoditySimNowStateError):
+        service.start_c_fast_shakedown(
+            preview["plan_hash"],
+            operator="admin",
+            role="admin",
+            source_ip=None,
+        )
+
+    plan = service.current_plan
+    assert plan is not None
+    assert len(plan["submitted"]["open"]) == 1
+    assert (
+        plan["halt"]["recovery_blocker"]
+        == "UNATTRIBUTED_FIXED_SCOPE_ACTIVE_ORDERS"
+    )
+    assert len(plan["halt"]["unresolved_send_intent_references"]) == 1
+    ag = next(row for row in snapshot.targets if row.product == "ag")
+    rpc.orders = []
+    rpc.positions = [
+        position("ag", ag.target_quantity, contract_month="2612")
+    ]
+    first_request = service.trade.requests[0]
+    rpc.trades = fills_for_requests([first_request])
+
+    advanced = service.auto_candidate_shakedown_advance()
+
+    assert advanced["action"] == "submission_outcome_unknown"
+    assert service.current_plan is not None
+    assert service.current_plan["status"] == "SUBMISSION_OUTCOME_UNKNOWN"
+    assert not service._c_fast_terminal_archive_path(
+        preview["session_id"]
+    ).exists()
+
+
 def test_c_fast_terminal_archive_survives_next_preview_start_failure(
     tmp_path: Path,
 ) -> None:
@@ -906,6 +1055,128 @@ def test_c_fast_terminal_archive_survives_next_preview_start_failure(
     )
 
 
+def test_c_fast_preview_rejects_missing_pointer_with_existing_archive(
+    tmp_path: Path,
+) -> None:
+    service, rpc, snapshot, _ = prepare_c_fast_shakedown(tmp_path)
+    complete_c_fast_ag_session(service, rpc, snapshot)
+    service._c_fast_shakedown_state_path().unlink()
+
+    with pytest.raises(
+        CommoditySimNowStateError,
+        match="current pointer 缺失",
+    ):
+        service.preview_c_fast_shakedown(
+            ["ag"], operator="admin", role="admin", source_ip=None
+        )
+
+
+def test_c_fast_start_rejects_deleted_predecessor_archive(
+    tmp_path: Path,
+) -> None:
+    service, rpc, first_snapshot, first_hash = (
+        prepare_c_fast_shakedown(tmp_path)
+    )
+    first = complete_c_fast_ag_session(
+        service, rpc, first_snapshot
+    )
+    install_next_c_fast_snapshot(
+        service, rpc, first_snapshot, first_hash
+    )
+    second = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    service._c_fast_terminal_archive_path(first["session_id"]).unlink()
+    before = len(service.trade.requests)
+
+    with pytest.raises(CommoditySimNowSafetyError):
+        service.start_c_fast_shakedown(
+            second["plan_hash"],
+            operator="admin",
+            role="admin",
+            source_ip=None,
+        )
+
+    assert len(service.trade.requests) == before
+
+
+def test_c_fast_ready_dispatch_rejects_deleted_predecessor_archive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, rpc, first_snapshot, first_hash = (
+        prepare_c_fast_shakedown(tmp_path)
+    )
+    first = complete_c_fast_ag_session(
+        service, rpc, first_snapshot
+    )
+    install_next_c_fast_snapshot(
+        service, rpc, first_snapshot, first_hash
+    )
+    second = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    advance = service.auto_candidate_shakedown_advance
+    monkeypatch.setattr(
+        service,
+        "auto_candidate_shakedown_advance",
+        lambda **_kwargs: {"action": "paused"},
+    )
+    service.start_c_fast_shakedown(
+        second["plan_hash"],
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+    monkeypatch.setattr(
+        service, "auto_candidate_shakedown_advance", advance
+    )
+    service._c_fast_terminal_archive_path(first["session_id"]).unlink()
+    before = len(service.trade.requests)
+
+    halted = service.auto_candidate_shakedown_advance()
+
+    assert halted["action"] == "halted"
+    assert len(service.trade.requests) == before
+    assert service.current_plan is not None
+    assert not service._c_fast_terminal_archive_path(
+        second["session_id"]
+    ).exists()
+
+
+def test_c_fast_submitted_plan_halts_when_predecessor_archive_disappears(
+    tmp_path: Path,
+) -> None:
+    service, rpc, first_snapshot, first_hash = (
+        prepare_c_fast_shakedown(tmp_path)
+    )
+    first = complete_c_fast_ag_session(
+        service, rpc, first_snapshot
+    )
+    install_next_c_fast_snapshot(
+        service, rpc, first_snapshot, first_hash
+    )
+    second = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    service.start_c_fast_shakedown(
+        second["plan_hash"],
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+    service._c_fast_terminal_archive_path(first["session_id"]).unlink()
+
+    halted = service.auto_candidate_shakedown_advance()
+
+    assert halted["action"] == "halted"
+    assert service.current_plan is not None
+    assert service.c_fast_continuous_authorized is False
+    assert not service._c_fast_terminal_archive_path(
+        second["session_id"]
+    ).exists()
+
+
 def test_c_fast_terminal_retry_reuses_archive_after_pointer_write_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -982,6 +1253,37 @@ def test_c_fast_pnl_is_unavailable_when_execution_snapshot_fails(
     assert pnl["execution_mark_to_market_pnl_cny"] is None
     assert pnl["execution_snapshot_available"] is False
     assert pnl["execution_error_type"] == "RuntimeError"
+
+
+def test_c_fast_terminal_pnl_is_incomplete_when_trade_callback_lags(
+    tmp_path: Path,
+) -> None:
+    service, rpc, snapshot, _ = prepare_c_fast_shakedown(tmp_path)
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    service.start_c_fast_shakedown(
+        preview["plan_hash"],
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+    ag = next(row for row in snapshot.targets if row.product == "ag")
+    rpc.positions = [
+        position("ag", ag.target_quantity, contract_month="2612")
+    ]
+    rpc.orders = []
+    rpc.trades = []
+
+    service.auto_candidate_shakedown_advance()
+
+    pnl = service.c_fast_shakedown_status()["session"]["execution"]["pnl"]
+    assert pnl["execution_snapshot_available"] is True
+    assert pnl["trade_evidence_state"] == "INCOMPLETE"
+    assert pnl["mark_state"] == "UNAVAILABLE"
+    assert pnl["trade_cashflow_cny"] is None
+    assert pnl["inventory_change_mark_cny"] is None
+    assert pnl["execution_mark_to_market_pnl_cny"] is None
 
 
 @pytest.mark.parametrize(
