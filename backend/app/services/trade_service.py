@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, is_dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Callable
 
 from app.core.config import Settings, get_settings
 from app.core.errors import AppError, InvalidOrderRequestError, OrderNotCancelableError, OrderNotFoundError
@@ -11,7 +11,7 @@ from app.schemas.trade import CancelAllRequestDTO, CancelRequestDTO, OrderReques
 from app.services.audit_service import AuditService, audit_service
 from app.services.monitoring_service import monitoring_service
 from app.services.risk_service import RiskService, risk_service
-from app.services.vnpy_rpc_service import rpc_service
+from app.services.vnpy_rpc_service import VnpyRpcService, rpc_service
 
 try:
     from vnpy.trader.constant import Direction, Exchange, Offset, OrderType, Status
@@ -46,10 +46,12 @@ class TradeService:
         settings: Settings | None = None,
         audit: AuditService | None = None,
         risk: RiskService | None = None,
+        rpc: VnpyRpcService | None = None,
     ) -> None:
         self.settings = settings or get_settings()
         self.audit = audit or audit_service
         self.risk = risk or risk_service
+        self.rpc = rpc or rpc_service
 
     def config_status(self) -> dict[str, Any]:
         return {
@@ -65,6 +67,7 @@ class TradeService:
         *,
         source_ip: str | None = None,
         operator: str = "anonymous",
+        pre_rpc_guard: Callable[[], Any] | None = None,
     ) -> dict[str, Any]:
         request_data = payload.model_dump()
         self.audit.record(action="order_request", request=request_data, operator=operator, source_ip=source_ip)
@@ -72,7 +75,23 @@ class TradeService:
             self.risk.check_order(payload)
             order_request = self.to_vnpy_order_request(payload)
             gateway_name = payload.gateway_name or self.settings.default_gateway_name
-            vt_orderid = rpc_service.send_order(order_request, gateway_name)
+            if pre_rpc_guard is None:
+                vt_orderid = self.rpc.send_order(
+                    order_request, gateway_name
+                )
+            else:
+                guarded_send = getattr(
+                    self.rpc, "send_order_guarded", None
+                )
+                if not callable(guarded_send):
+                    raise RuntimeError(
+                        "guarded non-idempotent RPC unavailable"
+                    )
+                vt_orderid = guarded_send(
+                    order_request,
+                    gateway_name,
+                    pre_rpc_guard,
+                )
             result = {"vt_orderid": vt_orderid, "accepted": True}
             self.audit.record(
                 action="order_response",
@@ -119,7 +138,7 @@ class TradeService:
         try:
             if not bypass_trade_check:
                 self.risk.check_trade_allowed(confirm=True)
-            order = rpc_service.get_order_raw(vt_orderid)
+            order = self.rpc.get_order_raw(vt_orderid)
             if not order:
                 raise OrderNotFoundError(detail={"vt_orderid": vt_orderid})
 
@@ -129,7 +148,7 @@ class TradeService:
 
             cancel_request = order.create_cancel_request()
             gateway_name = payload.gateway_name or getattr(order, "gateway_name", None) or self.settings.default_gateway_name
-            rpc_service.cancel_order(cancel_request, gateway_name)
+            self.rpc.cancel_order(cancel_request, gateway_name)
             result = {"vt_orderid": vt_orderid, "cancel_requested": True, "status": status}
             self.audit.record(
                 action="cancel_response",
@@ -164,7 +183,7 @@ class TradeService:
         self.audit.record(action="cancel_all_request", request=request_data, operator=operator, source_ip=source_ip)
         if not bypass_trade_check:
             self.risk.check_trade_allowed(confirm=True)
-        orders = [order for order in rpc_service.get_active_orders_raw() if self._matches_filter(order, payload)]
+        orders = [order for order in self.rpc.get_active_orders_raw() if self._matches_filter(order, payload)]
         items: list[dict[str, Any]] = []
 
         for order in orders:
@@ -175,7 +194,7 @@ class TradeService:
                     raise OrderNotCancelableError(detail={"vt_orderid": vt_orderid, "status": status})
                 cancel_request = order.create_cancel_request()
                 gateway_name = payload.gateway_name or getattr(order, "gateway_name", None) or self.settings.default_gateway_name
-                rpc_service.cancel_order(cancel_request, gateway_name)
+                self.rpc.cancel_order(cancel_request, gateway_name)
                 items.append({"vt_orderid": vt_orderid, "cancel_requested": True, "error": None})
             except Exception as exc:
                 items.append({"vt_orderid": vt_orderid, "cancel_requested": False, "error": str(exc)})

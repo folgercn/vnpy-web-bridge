@@ -1261,6 +1261,7 @@ def test_position_manager_shakedown_pre_submit_stop_archives_and_unblocks_previe
     preview = service.preview_position_manager_shakedown(
         ["ag"], operator="admin", role="admin", source_ip=None
     )
+    advance = service.auto_position_manager_shakedown_advance
 
     def fail_before_submit(**kwargs):
         raise CommoditySimNowStateError("simulated pre-submit failure")
@@ -1291,6 +1292,23 @@ def test_position_manager_shakedown_pre_submit_stop_archives_and_unblocks_previe
         ["ag"], operator="admin", role="admin", source_ip=None
     )
     assert replacement["session"]["status"] == "PREVIEW_READY"
+    monkeypatch.setattr(
+        service,
+        "auto_position_manager_shakedown_advance",
+        advance,
+    )
+
+    restarted = service.start_position_manager_shakedown(
+        replacement["preview"]["plan_hash"],
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+
+    assert restarted["action"] in {
+        "close_submitted",
+        "open_submitted",
+    }
 
 
 def test_position_manager_shakedown_restart_resumes_via_dedicated_start_only(

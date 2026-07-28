@@ -167,6 +167,14 @@ class BlockingAfterFirstChildTrade(FakeTrade):
         return result
 
 
+class ProductionWindowGenerationChangeTrade(FakeTrade):
+    def send_order(self, request, **kwargs):
+        assert self.rpc is not None
+        self.rpc.last_connected_at = "fake-generation-B"
+        kwargs["pre_rpc_guard"]()
+        pytest.fail("non-idempotent RPC must not be reached")
+
+
 def fills_for_submitted(plan: dict) -> list[dict]:
     rows: list[dict] = []
     for phase in ("close", "open"):
@@ -845,6 +853,111 @@ def test_c_fast_identical_duplicate_trade_is_idempotent(
     ).exists()
 
 
+@pytest.mark.parametrize("reverse_rows", [False, True])
+def test_c_fast_late_conflicting_trade_blocks_terminal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reverse_rows: bool,
+) -> None:
+    service, rpc, snapshot, _ = prepare_c_fast_shakedown(tmp_path)
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    service.start_c_fast_shakedown(
+        preview["plan_hash"],
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+    ag = next(
+        row for row in snapshot.targets if row.product == "ag"
+    )
+    rpc.positions = [
+        position(
+            "ag", ag.target_quantity, contract_month="2612"
+        )
+    ]
+    fills = fills_for_submitted(service.current_plan)
+    rpc.trades = fills
+    execution_snapshot = service._execution_snapshot
+    injected = {"done": False}
+
+    def snapshot_then_inject(plan, **kwargs):
+        result = execution_snapshot(plan, **kwargs)
+        if not kwargs and not injected["done"]:
+            injected["done"] = True
+            conflict = {
+                **fills[0],
+                "price": float(fills[0]["price"]) + 1,
+            }
+            pair = [fills[0], conflict]
+            if reverse_rows:
+                pair.reverse()
+            rpc.trades = [*pair, *fills[1:]]
+        return result
+
+    monkeypatch.setattr(
+        service, "_execution_snapshot", snapshot_then_inject
+    )
+
+    with pytest.raises(CommoditySimNowSafetyError):
+        service.auto_candidate_shakedown_advance()
+
+    assert (
+        "CONFLICTING_TRADE_IDENTITIES"
+        in service.current_plan["halt"]["terminal_guard"][
+            "blockers"
+        ]
+    )
+    assert not service._c_fast_terminal_archive_path(
+        preview["session_id"]
+    ).exists()
+
+
+@pytest.mark.parametrize("reverse_rows", [False, True])
+def test_c_fast_conflicting_same_order_id_blocks_terminal(
+    tmp_path: Path,
+    reverse_rows: bool,
+) -> None:
+    service, rpc, snapshot, _ = prepare_c_fast_shakedown(tmp_path)
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    service.start_c_fast_shakedown(
+        preview["plan_hash"],
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+    ag = next(
+        row for row in snapshot.targets if row.product == "ag"
+    )
+    rpc.positions = [
+        position(
+            "ag", ag.target_quantity, contract_month="2612"
+        )
+    ]
+    rpc.trades = fills_for_submitted(service.current_plan)
+    submitted = service.current_plan["submitted"]["open"][0]
+    rows = [
+        {**submitted, "status": "all_traded"},
+        {**submitted, "status": "cancelled"},
+    ]
+    if reverse_rows:
+        rows.reverse()
+    rpc.orders = rows
+
+    with pytest.raises(CommoditySimNowSafetyError):
+        service.auto_candidate_shakedown_advance()
+
+    assert (
+        "CONFLICTING_ORDER_IDENTITIES"
+        in service.current_plan["halt"]["terminal_guard"][
+            "blockers"
+        ]
+    )
+
+
 @pytest.mark.parametrize(
     "trade_type",
     [
@@ -1000,6 +1113,79 @@ def test_c_fast_queued_stop_epoch_cannot_be_cleared_by_start(
     assert not trade.requests
 
 
+def test_c_fast_continuous_nested_start_inherits_epoch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, rpc, first_snapshot, first_hash = (
+        prepare_c_fast_shakedown(tmp_path)
+    )
+    complete_c_fast_ag_session(
+        service, rpc, first_snapshot
+    )
+    install_next_c_fast_snapshot(
+        service, rpc, first_snapshot, first_hash
+    )
+    before = len(service.trade.requests)
+    preview = service.preview_c_fast_shakedown
+    preview_ready = Event()
+    release_preview = Event()
+
+    def blocking_preview(*args, **kwargs):
+        result = preview(*args, **kwargs)
+        preview_ready.set()
+        assert release_preview.wait(5)
+        return result
+
+    monkeypatch.setattr(
+        service,
+        "preview_c_fast_shakedown",
+        blocking_preview,
+    )
+    continuous_errors: list[Exception] = []
+    stop_errors: list[Exception] = []
+    continuous_thread = Thread(
+        target=lambda: _capture_thread_error(
+            continuous_errors,
+            service.auto_c_fast_continuous_advance,
+        )
+    )
+    continuous_thread.start()
+    assert preview_ready.wait(5)
+    epoch_before_stop = service._dispatch_epoch_snapshot()
+    stop_thread = Thread(
+        target=lambda: _capture_thread_error(
+            stop_errors,
+            lambda: service.stop_c_fast_shakedown(
+                "stop nested continuous start",
+                operator="admin",
+                role="admin",
+                source_ip=None,
+            ),
+        )
+    )
+    stop_thread.start()
+    deadline = monotonic() + 5
+    while (
+        service._dispatch_epoch_snapshot()
+        == epoch_before_stop
+        and monotonic() < deadline
+    ):
+        sleep(0.01)
+    assert (
+        service._dispatch_epoch_snapshot()
+        > epoch_before_stop
+    )
+    release_preview.set()
+    continuous_thread.join(5)
+    stop_thread.join(5)
+
+    assert continuous_errors
+    assert len(service.trade.requests) == before
+    assert service.c_fast_continuous_authorized is False
+    assert service.current_plan is None
+
+
 def _capture_thread_error(
     errors: list[Exception],
     callback,
@@ -1062,6 +1248,28 @@ def test_c_fast_final_guard_runs_after_pending_intent_persist(
     assert not trade.requests
 
 
+def test_c_fast_trade_service_window_rechecks_generation(
+    tmp_path: Path,
+) -> None:
+    trade = ProductionWindowGenerationChangeTrade()
+    service, _, _, _ = prepare_c_fast_shakedown(
+        tmp_path, trade=trade
+    )
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+
+    with pytest.raises(CommoditySimNowStateError):
+        service.start_c_fast_shakedown(
+            preview["plan_hash"],
+            operator="admin",
+            role="admin",
+            source_ip=None,
+        )
+
+    assert not trade.requests
+
+
 @pytest.mark.parametrize("with_late_order", [False, True])
 def test_c_fast_historical_intent_is_never_overwritten_or_replayed(
     tmp_path: Path,
@@ -1113,6 +1321,67 @@ def test_c_fast_historical_intent_is_never_overwritten_or_replayed(
     intents = service.current_plan["send_intents"]["open"]
     assert len(intents) == 1
     assert intents[0]["intent_status"] == "NO_EVIDENCE_STABLE"
+
+
+def test_c_fast_pre_submit_stop_uses_strict_full_orders(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, rpc, _, _ = prepare_c_fast_shakedown(tmp_path)
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    monkeypatch.setattr(
+        service,
+        "auto_candidate_shakedown_advance",
+        lambda **_kwargs: {"action": "held_for_test"},
+    )
+    service.start_c_fast_shakedown(
+        preview["plan_hash"],
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+    child = service.current_plan["open_orders"][0]
+    service.current_plan["send_intents"]["open"].append(
+        {
+            **child,
+            "intent_status": "NO_EVIDENCE_STABLE",
+        }
+    )
+    service.current_plan["status"] = "HALTED_PRE_SUBMIT_SAFE"
+    service.current_plan["halt"] = {
+        "resume_status": "READY_OPEN",
+    }
+    late = {
+        **child,
+        "vt_orderid": "CTP.late-terminal",
+        "orderid": "late-terminal",
+        "status": "all_traded",
+        "traded": child["volume"],
+        "gateway_name": "CTP",
+    }
+    monkeypatch.setattr(rpc, "get_orders", lambda: [])
+    monkeypatch.setattr(
+        rpc, "get_all_orders", lambda: [late]
+    )
+
+    service.stop_c_fast_shakedown(
+        "strict stop check",
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+
+    assert service.current_plan is not None
+    assert service.current_plan["status"] in {
+        "CANCEL_PENDING",
+        "SUBMISSION_OUTCOME_UNKNOWN",
+        "HALTED_RECONCILE_REQUIRED",
+    }
+    assert not service._c_fast_terminal_archive_path(
+        preview["session_id"]
+    ).exists()
 
 
 def test_c_fast_reprice_position_drift_sends_no_child(

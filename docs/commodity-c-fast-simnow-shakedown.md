@@ -168,9 +168,13 @@ active-only。stop、disable、shutdown 和 emergency 可在 child 间抢占批�
 抢占使用单调 epoch：已排队的 stop/disable/shutdown 不能被随后取得锁的
 start/enable 清除；只有停机完成后的新显式授权才能开始新的派单代次。
 每个 `PENDING_SEND` intent 必须先落盘，再执行紧邻 `send_order` 的最终事实
-guard，中间不得再有持久化或 RPC I/O。历史 intent 不可覆盖或重放；恢复和
+guard；生产 `TradeService` 会先完成审计、风控和请求构造，再在同一个 RPC
+call lock 内执行最终 guard 与非幂等 send，中间不得再有持久化或 RPC I/O。
+历史 intent 不可覆盖或重放；恢复和
 重新授权也必须使用完整订单历史。相同 gateway/trade-id 只有 canonical payload
-完全一致时才能幂等去重，冲突回报一律标记 `INCONSISTENT` 并禁止 COMPLETE。
+完全一致时才能幂等去重；terminal commit 会用同一份 raw orders/trades
+重新生成 execution evidence，并阻断 order/trade identity 冲突和未确认 intent
+的迟到事实。冲突回报一律标记 `INCONSISTENT` 并禁止 COMPLETE。
 session trade 归属除 order id 外还必须绑定 CTP gateway、exact contract、
 direction、offset，并在回报提供 reference 时要求 reference 一致；裸 ID
 碰撞、语义缺失或多 child 歧义均标记 `INCONSISTENT`，并阻止 COMPLETE 归档。

@@ -14,7 +14,7 @@ from collections.abc import Callable
 from datetime import date, datetime, timezone
 from functools import wraps
 from pathlib import Path
-from threading import Lock, RLock
+from threading import Lock, RLock, local
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -88,17 +88,35 @@ POSITION_MANAGER_GENESIS_SOURCE_MONTH = "2026-08"
 def _serialized(method):
     @wraps(method)
     def wrapped(self, *args, **kwargs):
-        entry_abort_epoch = self._dispatch_epoch_snapshot()
+        context = self._dispatch_operation_context
+        depth = int(getattr(context, "depth", 0))
+        if depth == 0:
+            context.entry_abort_epoch = (
+                self._dispatch_epoch_snapshot()
+            )
+        entry_abort_epoch = int(
+            context.entry_abort_epoch
+        )
         if method.__name__ in {
             "disable",
             "stop_c_fast_shakedown",
             "stop_position_manager_shakedown",
         }:
             self._request_dispatch_abort()
-        if method.__name__ in {"enable", "start_c_fast_shakedown"}:
+        if method.__name__ in {
+            "enable",
+            "start_c_fast_shakedown",
+            "start_position_manager_shakedown",
+        }:
             kwargs["_dispatch_entry_abort_epoch"] = entry_abort_epoch
-        with self._cycle_lock:
-            return method(self, *args, **kwargs)
+        context.depth = depth + 1
+        try:
+            with self._cycle_lock:
+                return method(self, *args, **kwargs)
+        finally:
+            context.depth = depth
+            if depth == 0:
+                del context.entry_abort_epoch
 
     return wrapped
 
@@ -207,6 +225,20 @@ class CommoditySimNowService:
         self.settings = settings or get_settings()
         self.rpc = rpc or rpc_service
         self.trade = trade or trade_service
+        if (
+            isinstance(self.trade, TradeService)
+            and self.trade.rpc is not self.rpc
+        ):
+            if trade is not None:
+                raise ValueError(
+                    "CommoditySimNowService and TradeService must share RPC"
+                )
+            self.trade = TradeService(
+                settings=self.settings,
+                audit=audit or audit_service,
+                risk=risk or risk_service,
+                rpc=self.rpc,
+            )
         self.risk = risk or risk_service
         self.audit = audit or audit_service
         self.tick_store = tick_store or memory_store
@@ -232,6 +264,7 @@ class CommoditySimNowService:
         self._dispatch_abort_requested = False
         self._dispatch_abort_epoch = 0
         self._dispatch_abort_lock = Lock()
+        self._dispatch_operation_context = local()
         self._completed_state = self._load_completed_state()
         self.current_plan = self._load_active_plan()
         self._cleanup_terminal_shakedown_active_plan()
@@ -994,7 +1027,37 @@ class CommoditySimNowService:
                     reference=repriced["reference"],
                     confirm=True,
                 )
-                result = self.trade.send_order(request, source_ip=source_ip, operator=operator)
+                def pre_rpc_guard() -> None:
+                    if (
+                        self._dispatch_aborted(
+                            dispatch_abort_epoch
+                        )
+                        or self.risk.status().get(
+                            "emergency_stopped"
+                        )
+                    ):
+                        raise CommoditySimNowSafetyError(
+                            "派单已被 stop/disable/emergency 抢占"
+                        )
+                    if plan.get(
+                        "c_fast_shakedown_session_id"
+                    ):
+                        intent["pre_send_fact_guard"] = (
+                            self._verify_c_fast_pre_send_fact_guard(
+                                plan,
+                                payload.phase,
+                                current_reference=str(
+                                    repriced["reference"]
+                                ),
+                            )
+                        )
+
+                result = self.trade.send_order(
+                    request,
+                    source_ip=source_ip,
+                    operator=operator,
+                    pre_rpc_guard=pre_rpc_guard,
+                )
                 submitted_row = {
                     **repriced,
                     "decision_price": order["price"],
@@ -3041,8 +3104,13 @@ class CommoditySimNowService:
         operator: str,
         role: str | None,
         source_ip: str | None,
+        _dispatch_entry_abort_epoch: int | None = None,
     ) -> dict[str, Any]:
         """Start one pre-previewed SimNow shakedown without per-order approval."""
+        if _dispatch_entry_abort_epoch is not None:
+            self._begin_dispatch_epoch(
+                _dispatch_entry_abort_epoch
+            )
         if not self.settings.commodity_position_manager_simnow_shakedown_enabled:
             raise CommoditySimNowDisabledError(
                 detail={"required_setting": "COMMODITY_POSITION_MANAGER_SIMNOW_SHAKEDOWN_ENABLED=true"}
@@ -3259,7 +3327,11 @@ class CommoditySimNowService:
         ):
             return None
         try:
-            orders = self.rpc.get_orders()
+            orders = (
+                self._c_fast_all_orders()
+                if plan.get("c_fast_shakedown_session_id")
+                else self.rpc.get_orders()
+            )
             trades = self.rpc.get_trades()
             late_evidence = self._recover_send_intent_evidence(
                 plan, orders, trades, phases=(phase,)
@@ -4051,6 +4123,11 @@ class CommoditySimNowService:
             terminal_guard = self._c_fast_terminal_guard(
                 plan, reconciliation=reconciliation
             )
+            terminal_execution_snapshot = (
+                terminal_guard.pop(
+                    "_terminal_execution_snapshot"
+                )
+            )
             self._verify_c_fast_archive_predecessor(
                 plan.get("previous_terminal_checksum")
             )
@@ -4062,10 +4139,7 @@ class CommoditySimNowService:
                 raise CommoditySimNowStateError(
                     "C_FAST 测试终态会话证据缺失"
                 )
-            execution_snapshot = (
-                plan.get("execution")
-                or self._execution_snapshot(plan)
-            )
+            execution_snapshot = terminal_execution_snapshot
             execution = {
                 "schema_version":
                 "commodity_c_fast_simnow_shakedown_evidence_v1",
@@ -4177,11 +4251,92 @@ class CommoditySimNowService:
             and first["rpc_generation_before"]
             == second["rpc_generation_after"]
         )
+        conflicting_order_identities = sorted(
+            {
+                row["identity"]: row
+                for row in [
+                    *first["conflicting_order_identities"],
+                    *second["conflicting_order_identities"],
+                ]
+            }.values(),
+            key=lambda row: row["identity"],
+        )
+        conflicting_trade_identities = sorted(
+            {
+                row["identity"]: row
+                for row in [
+                    *first["conflicting_trade_identities"],
+                    *second["conflicting_trade_identities"],
+                ]
+            }.values(),
+            key=lambda row: row["identity"],
+        )
+        untrusted_intent_facts = sorted(
+            {
+                (
+                    row["kind"],
+                    row["reference"],
+                    row["identity"],
+                ): row
+                for row in [
+                    *first["untrusted_intent_facts"],
+                    *second["untrusted_intent_facts"],
+                ]
+            }.values(),
+            key=lambda row: (
+                row["kind"],
+                row["reference"],
+                row["identity"],
+            ),
+        )
+        unresolved_intent_references = {
+            str(intent.get("reference") or "")
+            for phase in ("close", "open")
+            for intent in plan.get(
+                "send_intents", {}
+            ).get(phase, [])
+            if intent.get("intent_status")
+            not in {"ACKNOWLEDGED", "EVIDENCE_RECOVERED"}
+            and str(intent.get("reference") or "")
+        }
+        unresolved_intent_order_facts = [
+            {
+                "reference": str(
+                    order.get("reference") or ""
+                ),
+                "vt_orderid": str(
+                    order.get("vt_orderid")
+                    or order.get("orderid")
+                    or "unknown"
+                ),
+            }
+            for order in second["_raw_orders"]
+            if str(order.get("reference") or "")
+            in unresolved_intent_references
+        ]
+        unresolved_intent_trade_facts = [
+            {
+                "reference": str(
+                    trade.get("reference") or ""
+                ),
+                "vt_tradeid": str(
+                    trade.get("vt_tradeid")
+                    or trade.get("tradeid")
+                    or "unknown"
+                ),
+            }
+            for trade in second["_raw_trades"]
+            if str(trade.get("reference") or "")
+            in unresolved_intent_references
+        ]
+        terminal_execution = self._execution_snapshot_from_facts(
+            plan,
+            second["_raw_orders"],
+            second["_raw_trades"],
+        )
         inconsistent_trade_rows = [
             row
-            for row in (plan.get("execution") or {}).get(
-                "orders", []
-            )
+            for row in terminal_execution.get("orders", [])
             if row.get("trade_evidence_state")
             == "INCONSISTENT"
         ]
@@ -4210,6 +4365,17 @@ class CommoditySimNowService:
             blockers.append("NEW_EXTERNAL_TRADE_FACTS")
         if inconsistent_trade_rows:
             blockers.append("INCONSISTENT_SESSION_TRADE_EVIDENCE")
+        if conflicting_order_identities:
+            blockers.append("CONFLICTING_ORDER_IDENTITIES")
+        if conflicting_trade_identities:
+            blockers.append("CONFLICTING_TRADE_IDENTITIES")
+        if untrusted_intent_facts:
+            blockers.append("UNTRUSTED_HISTORICAL_INTENT_FACTS")
+        if (
+            unresolved_intent_order_facts
+            or unresolved_intent_trade_facts
+        ):
+            blockers.append("UNRESOLVED_INTENT_FACTS")
         if not plan.get("terminal_fact_watermark"):
             blockers.append("MISSING_TERMINAL_FACT_WATERMARK")
         captured_at = self.clock().astimezone(timezone.utc).isoformat()
@@ -4240,6 +4406,16 @@ class CommoditySimNowService:
             new_external_trade_facts,
             "inconsistent_trade_rows":
             inconsistent_trade_rows,
+            "conflicting_order_identities":
+            conflicting_order_identities,
+            "conflicting_trade_identities":
+            conflicting_trade_identities,
+            "untrusted_intent_facts":
+            untrusted_intent_facts,
+            "unresolved_intent_order_facts":
+            unresolved_intent_order_facts,
+            "unresolved_intent_trade_facts":
+            unresolved_intent_trade_facts,
             "first_snapshot": first["evidence"],
             "second_snapshot": second["evidence"],
             "facts_stable": facts_stable,
@@ -4264,6 +4440,9 @@ class CommoditySimNowService:
                 "C_FAST 终态 guard 校验失败",
                 detail=guard,
             )
+        guard["_terminal_execution_snapshot"] = (
+            terminal_execution
+        )
         return guard
 
     def _c_fast_terminal_fact_watermark(
@@ -4410,6 +4589,21 @@ class CommoditySimNowService:
         positions_hash = self._unordered_rows_hash(raw_positions)
         orders_hash = self._unordered_rows_hash(orders)
         trades_hash = self._unordered_rows_hash(trades)
+        conflicting_order_identities = (
+            self._c_fast_identity_conflicts(
+                orders, identity_kind="order"
+            )
+        )
+        conflicting_trade_identities = (
+            self._c_fast_identity_conflicts(
+                trades, identity_kind="trade"
+            )
+        )
+        untrusted_intent_facts = (
+            self._c_fast_untrusted_intent_facts(
+                plan, orders, trades
+            )
+        )
         outside_scope = self._c_fast_outside_scope_positions(
             raw_positions
         )
@@ -4515,6 +4709,12 @@ class CommoditySimNowService:
             "active_plan_orders": active_plan_orders,
             "external_active_orders": external_active_orders,
             "unknown_status_orders": unknown_status_orders,
+            "conflicting_order_identities":
+            conflicting_order_identities,
+            "conflicting_trade_identities":
+            conflicting_trade_identities,
+            "untrusted_intent_facts":
+            untrusted_intent_facts,
             "new_external_order_facts":
             new_external_order_facts,
             "new_external_trade_facts":
@@ -4529,6 +4729,86 @@ class CommoditySimNowService:
                 **fingerprint_payload,
             },
         }
+
+    def _c_fast_untrusted_intent_facts(
+        self,
+        plan: dict[str, Any],
+        orders: list[dict[str, Any]],
+        trades: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        untrusted_references = {
+            str(intent.get("reference") or "")
+            for phase in ("close", "open")
+            for intent in (
+                plan.get("send_intents", {}).get(phase, [])
+            )
+            if intent.get("intent_status")
+            not in {"ACKNOWLEDGED", "EVIDENCE_RECOVERED"}
+            and str(intent.get("reference") or "")
+        }
+        facts = [
+            {
+                "kind": kind,
+                "reference": reference,
+                "identity": (
+                    str(row.get("vt_orderid") or row.get("orderid") or "")
+                    if kind == "order"
+                    else str(row.get("vt_tradeid") or row.get("tradeid") or "")
+                ),
+            }
+            for kind, rows in (("order", orders), ("trade", trades))
+            for row in rows
+            for reference in [str(row.get("reference") or "")]
+            if reference in untrusted_references
+        ]
+        return sorted(
+            facts,
+            key=lambda row: (
+                row["kind"],
+                row["reference"],
+                row["identity"],
+            ),
+        )
+
+    def _c_fast_identity_conflicts(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        identity_kind: str,
+    ) -> list[dict[str, Any]]:
+        identities: dict[str, set[str]] = {}
+        for row in rows:
+            gateway = self._row_gateway(row)
+            if identity_kind == "trade":
+                row_id = str(
+                    row.get("vt_tradeid")
+                    or row.get("tradeid")
+                    or ""
+                )
+            else:
+                row_id = str(
+                    row.get("vt_orderid")
+                    or row.get("orderid")
+                    or ""
+                )
+            if not row_id:
+                continue
+            if gateway and row_id.startswith(f"{gateway}."):
+                row_id = row_id.split(".", 1)[1]
+            identity = f"{gateway}:{row_id}"
+            identities.setdefault(identity, set()).add(
+                _sha256_json(row)
+            )
+        return [
+            {
+                "identity": identity,
+                "payload_hashes": sorted(payload_hashes),
+            }
+            for identity, payload_hashes in sorted(
+                identities.items()
+            )
+            if len(payload_hashes) > 1
+        ]
 
     def _c_fast_positions_explained_by_trades(
         self,
@@ -4647,6 +4927,10 @@ class CommoditySimNowService:
             blockers.append("NEW_EXTERNAL_ORDER_FACTS")
         if snapshot["new_external_trade_facts"]:
             blockers.append("NEW_EXTERNAL_TRADE_FACTS")
+        if snapshot["conflicting_order_identities"]:
+            blockers.append("CONFLICTING_ORDER_IDENTITIES")
+        if snapshot["conflicting_trade_identities"]:
+            blockers.append("CONFLICTING_TRADE_IDENTITIES")
         if current_reference:
             if any(
                 str(order.get("reference") or "")
@@ -6905,6 +7189,13 @@ class CommoditySimNowService:
                 if not matching_orders and not matching_trades:
                     continue
                 evidence_references.add(reference)
+                if (
+                    plan.get("c_fast_shakedown_session_id")
+                    and not intent.get("pre_send_fact_guard")
+                ):
+                    intent["final_guard_evidence_state"] = (
+                        "LOST_DUE_TO_CRASH_BEFORE_ACK_PERSIST"
+                    )
                 intent["intent_status"] = "EVIDENCE_RECOVERED"
                 intent["evidence_checked_at_utc"] = self.clock().astimezone(timezone.utc).isoformat()
                 recovered_ids = {
@@ -8000,9 +8291,16 @@ class CommoditySimNowService:
         exchange = _value(row.get("exchange") or "")
         return f"{symbol}.{exchange}" if symbol and exchange else ""
 
-    def _execution_snapshot(self, plan: dict[str, Any]) -> dict[str, Any]:
+    def _execution_snapshot(
+        self,
+        plan: dict[str, Any],
+    ) -> dict[str, Any]:
         try:
-            orders = self.rpc.get_orders()
+            orders = (
+                self._c_fast_all_orders()
+                if plan.get("c_fast_shakedown_session_id")
+                else self.rpc.get_orders()
+            )
             trades = self.rpc.get_trades()
         except Exception as exc:
             return {
@@ -8011,7 +8309,16 @@ class CommoditySimNowService:
                 "error_type": exc.__class__.__name__,
                 "orders": [],
             }
+        return self._execution_snapshot_from_facts(
+            plan, orders, trades
+        )
 
+    def _execution_snapshot_from_facts(
+        self,
+        plan: dict[str, Any],
+        orders: list[dict[str, Any]],
+        trades: list[dict[str, Any]],
+    ) -> dict[str, Any]:
         order_by_id: dict[str, dict[str, Any]] = {}
         for order in orders:
             for order_id in self._order_ids(order):
@@ -8100,7 +8407,11 @@ class CommoditySimNowService:
                     for trade in matching_trades
                 )
                 average_fill_price = fill_notional / fill_volume if fill_volume else None
-                decision_price = float(submitted["decision_price"])
+                decision_price = float(
+                    submitted.get(
+                        "decision_price", submitted["price"]
+                    )
+                )
                 tick = float(PRODUCT_SPECS[submitted["product"]]["price_tick"])
                 multiplier = float(PRODUCT_SPECS[submitted["product"]]["multiplier"])
                 direction_factor = 1.0 if submitted["direction"] == "long" else -1.0
