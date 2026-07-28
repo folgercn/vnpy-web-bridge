@@ -15,6 +15,7 @@ from app.services.commodity_c_fast_shadow import (
 )
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from pydantic import ValidationError
 from test_commodity_c_fast_shadow import contract_loader, unsigned_payload
 
 SCRIPT = (
@@ -71,22 +72,22 @@ def research_bundle() -> dict:
             {
                 "name": "research-manifest.json",
                 "kind": "research_manifest",
-                "sha256": "1" * 64,
+                "sha256": "c" * 64,
             },
             {
                 "name": "allocation.json",
                 "kind": "allocation",
-                "sha256": "2" * 64,
+                "sha256": "a" * 64,
             },
             {
                 "name": "daily-roll.json",
                 "kind": "daily_roll",
-                "sha256": "3" * 64,
+                "sha256": "b" * 64,
             },
             {
                 "name": "official-open.json",
                 "kind": "reference_price",
-                "sha256": "4" * 64,
+                "sha256": "f" * 64,
             },
         ],
         "snapshot": snapshot,
@@ -254,15 +255,52 @@ def test_research_and_control_must_use_distinct_keys(
     tmp_path: Path,
 ) -> None:
     shared_key = Ed25519PrivateKey.generate()
-    payload = signed_artifact(shared_key, shared_key)
+    with pytest.raises(ValueError, match="must be distinct"):
+        signed_artifact(shared_key, shared_key)
 
-    rejected = service(
-        tmp_path, payload, shared_key, shared_key
-    ).reload(operator="admin", role="admin", source_ip=None)
+    trusted = json.dumps(
+        {
+            "c-fast-research-1": key_entry(
+                shared_key, "research_snapshot_signer"
+            ),
+            "c-fast-control-1": key_entry(
+                shared_key, "simnow_shakedown_control_signer"
+            ),
+        }
+    )
+    with pytest.raises(ValidationError, match="must be distinct"):
+        Settings(
+            app_env="production",
+            jwt_secret_key="x" * 32,
+            commodity_c_fast_shadow_enabled=True,
+            commodity_c_fast_shadow_snapshot_path=str(
+                tmp_path / "config-snapshot.json"
+            ),
+            commodity_c_fast_shadow_state_path=str(
+                tmp_path / "config-state.json"
+            ),
+            commodity_c_fast_shadow_evidence_path=str(
+                tmp_path / "config-evidence.jsonl"
+            ),
+            commodity_c_fast_shadow_trusted_public_keys_json=trusted,
+        )
 
-    assert (
-        rejected["error_code"]
-        == "RESEARCH_CONTROL_SIGNERS_NOT_DISTINCT"
+    research_key = Ed25519PrivateKey.generate()
+    control_key = Ed25519PrivateKey.generate()
+    payload = signed_artifact(research_key, control_key)
+    instance = service(
+        tmp_path, payload, research_key, control_key
+    )
+    instance.settings = instance.settings.model_copy(
+        update={
+            "commodity_c_fast_shadow_trusted_public_keys_json": trusted,
+        }
+    )
+    rejected = instance.reload(
+        operator="admin", role="admin", source_ip=None
+    )
+    assert rejected["error_code"] == (
+        "RESEARCH_CONTROL_SIGNERS_NOT_DISTINCT"
     )
 
 
@@ -342,6 +380,47 @@ def test_producer_rejects_missing_evidence_and_owned_fields() -> None:
     controlled["snapshot"]["account_sha256"] = ACCOUNT_HASH
     with pytest.raises(ValueError, match="producer/control-owned"):
         ARTIFACT.produce(controlled)
+
+
+@pytest.mark.parametrize(
+    "kind",
+    sorted(ARTIFACT.REQUIRED_EVIDENCE_KINDS),
+)
+def test_producer_requires_exact_unique_evidence_kinds(kind: str) -> None:
+    missing = research_bundle()
+    missing["evidence"] = [
+        row for row in missing["evidence"] if row["kind"] != kind
+    ]
+    with pytest.raises(ValueError, match="exact and unique"):
+        ARTIFACT.produce(missing)
+
+    duplicate = research_bundle()
+    duplicate["evidence"].append(copy.deepcopy(duplicate["evidence"][0]))
+    duplicate["evidence"][-1]["name"] = "duplicate.json"
+    with pytest.raises(ValueError, match="exact and unique"):
+        ARTIFACT.produce(duplicate)
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ["research_manifest", "allocation", "daily_roll"],
+)
+def test_producer_binds_research_evidence_hashes(kind: str) -> None:
+    bundle = research_bundle()
+    next(
+        row for row in bundle["evidence"] if row["kind"] == kind
+    )["sha256"] = "0" * 64
+    with pytest.raises(ValueError, match="does not match bindings"):
+        ARTIFACT.produce(bundle)
+
+
+def test_producer_binds_reference_price_to_every_target() -> None:
+    bundle = research_bundle()
+    bundle["snapshot"]["targets"][0][
+        "reference_price_source_sha256"
+    ] = "0" * 64
+    with pytest.raises(ValueError, match="does not bind every target"):
+        ARTIFACT.produce(bundle)
 
 
 def test_installer_is_create_only(tmp_path: Path) -> None:

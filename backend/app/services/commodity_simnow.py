@@ -8,6 +8,7 @@ import hashlib
 import json
 import logging
 import math
+import os
 import re
 import uuid
 from collections.abc import Callable
@@ -2253,6 +2254,11 @@ class CommoditySimNowService:
             raise CommoditySimNowSafetyError("C_FAST 测试品种选择无效")
 
         snapshot, snapshot_hash = self._c_fast_snapshot()
+        self._verify_c_fast_execution_permit_available(
+            snapshot,
+            current_session=existing,
+            terminal_chain=chain,
+        )
         if isinstance(snapshot, CommodityCFastShakedownSnapshotDTO):
             if len(selected) > snapshot.max_selected_products:
                 raise CommoditySimNowSafetyError(
@@ -2311,6 +2317,8 @@ class CommoditySimNowService:
             "automatic_promotion_allowed": False,
             "source_snapshot_id": snapshot.snapshot_id,
             "source_snapshot_hash": snapshot_hash,
+            "control_acceptance_id": snapshot.control_acceptance_id,
+            "execution_permit_id": snapshot.execution_permit_id,
             "formula_target_binding_sha256":
             snapshot.formula_target_binding_sha256,
             "source_month": snapshot.source_month,
@@ -2434,6 +2442,10 @@ class CommoditySimNowService:
         if (
             snapshot_hash != session.get("source_snapshot_hash")
             or snapshot.snapshot_id != session.get("source_snapshot_id")
+            or snapshot.control_acceptance_id
+            != session.get("control_acceptance_id")
+            or snapshot.execution_permit_id
+            != session.get("execution_permit_id")
             or snapshot.formula_target_binding_sha256
             != session.get("formula_target_binding_sha256")
         ):
@@ -2515,12 +2527,21 @@ class CommoditySimNowService:
         ] = terminal_fact_watermark_before[
             "captured_at_utc"
         ]
+        permit_receipt = self._consume_c_fast_execution_permit(
+            snapshot,
+            session_id=str(session["session_id"]),
+            source_snapshot_hash=snapshot_hash,
+        )
         plan = {
             "schema_version": "commodity_simnow_active_plan_v1",
             "c_fast_shakedown_session_id": session["session_id"],
             "plan_hash": plan_hash,
             "account_hash": safety["account_hash"],
             "source_snapshot_hash": snapshot_hash,
+            "control_acceptance_id": snapshot.control_acceptance_id,
+            "execution_permit_id": snapshot.execution_permit_id,
+            "permit_consumption_receipt_checksum":
+            permit_receipt["receipt_checksum"],
             "previous_terminal_checksum":
             session.get("previous_terminal_checksum"),
             "formula_target_binding_sha256":
@@ -2976,6 +2997,10 @@ class CommoditySimNowService:
         snapshot, snapshot_hash = self._c_fast_snapshot()
         if (
             snapshot_hash != plan.get("source_snapshot_hash")
+            or snapshot.control_acceptance_id
+            != plan.get("control_acceptance_id")
+            or snapshot.execution_permit_id
+            != plan.get("execution_permit_id")
             or snapshot.formula_target_binding_sha256
             != plan.get("formula_target_binding_sha256")
         ):
@@ -5024,6 +5049,10 @@ class CommoditySimNowService:
             "plan_hash": plan.get("plan_hash"),
             "source_snapshot_hash":
             plan.get("source_snapshot_hash"),
+            "control_acceptance_id":
+            plan.get("control_acceptance_id"),
+            "execution_permit_id":
+            plan.get("execution_permit_id"),
             "source_snapshot_id":
             (
                 session.get("source_snapshot_id")
@@ -5048,6 +5077,10 @@ class CommoditySimNowService:
                 else None
             ),
             "source_snapshot_hash": snapshot_hash,
+            "control_acceptance_id":
+            snapshot.control_acceptance_id,
+            "execution_permit_id":
+            snapshot.execution_permit_id,
             "source_snapshot_id": snapshot.snapshot_id,
             "formula_target_binding_sha256":
             snapshot.formula_target_binding_sha256,
@@ -5075,6 +5108,8 @@ class CommoditySimNowService:
                     "session_id",
                     "plan_hash",
                     "source_snapshot_hash",
+                    "control_acceptance_id",
+                    "execution_permit_id",
                     "source_snapshot_id",
                     "formula_target_binding_sha256",
                     "execution_day",
@@ -5303,6 +5338,132 @@ class CommoditySimNowService:
         return Path(
             self.settings.commodity_c_fast_simnow_state_path
         ).expanduser()
+
+    def _c_fast_permit_receipt_path(self, permit_id: str) -> Path:
+        if not re.fullmatch(
+            r"cfast-permit-[A-Za-z0-9._-]{8,96}", permit_id
+        ):
+            raise CommoditySimNowSafetyError(
+                "C_FAST Execution Permit id 无效"
+            )
+        digest = hashlib.sha256(permit_id.encode("utf-8")).hexdigest()
+        state_path = self._c_fast_shakedown_state_path()
+        return state_path.with_name(
+            f"{state_path.stem}.permits"
+        ) / f"{digest}.json"
+
+    def _load_c_fast_permit_receipt(
+        self, permit_id: str
+    ) -> dict[str, Any] | None:
+        path = self._c_fast_permit_receipt_path(permit_id)
+        if not path.exists():
+            return None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise CommoditySimNowSafetyError(
+                "C_FAST Execution Permit 消费凭证不可读取"
+            ) from exc
+        if not isinstance(payload, dict) or set(payload) != {
+            "schema_version",
+            "execution_permit_id",
+            "source_snapshot_hash",
+            "session_id",
+            "consumed_at_utc",
+            "receipt_checksum",
+        }:
+            raise CommoditySimNowSafetyError(
+                "C_FAST Execution Permit 消费凭证结构无效"
+            )
+        core = {
+            key: value
+            for key, value in payload.items()
+            if key != "receipt_checksum"
+        }
+        if (
+            payload["schema_version"]
+            != "commodity_c_fast_execution_permit_consumption_v1"
+            or payload["execution_permit_id"] != permit_id
+            or payload["receipt_checksum"] != _sha256_json(core)
+        ):
+            raise CommoditySimNowSafetyError(
+                "C_FAST Execution Permit 消费凭证校验失败"
+            )
+        return payload
+
+    def _verify_c_fast_execution_permit_available(
+        self,
+        snapshot: CommodityCFastShakedownSnapshotDTO,
+        *,
+        current_session: dict[str, Any] | None,
+        terminal_chain: list[dict[str, Any]],
+    ) -> None:
+        permit_id = snapshot.execution_permit_id
+        if self._load_c_fast_permit_receipt(permit_id) is not None:
+            raise CommoditySimNowSafetyError(
+                "C_FAST Execution Permit 已消费，禁止重放"
+            )
+        if (
+            isinstance(current_session, dict)
+            and current_session.get("execution_permit_id") == permit_id
+        ):
+            raise CommoditySimNowStateError(
+                "C_FAST Execution Permit 已绑定现有预览或会话"
+            )
+        if any(
+            row.get("execution_permit_id") == permit_id
+            for row in terminal_chain
+        ):
+            raise CommoditySimNowSafetyError(
+                "C_FAST Execution Permit 已归档，禁止重放"
+            )
+
+    def _consume_c_fast_execution_permit(
+        self,
+        snapshot: CommodityCFastShakedownSnapshotDTO,
+        *,
+        session_id: str,
+        source_snapshot_hash: str,
+    ) -> dict[str, Any]:
+        permit_id = snapshot.execution_permit_id
+        path = self._c_fast_permit_receipt_path(permit_id)
+        if self._load_c_fast_permit_receipt(permit_id) is not None:
+            raise CommoditySimNowSafetyError(
+                "C_FAST Execution Permit 已消费，禁止再次启动"
+            )
+        core = {
+            "schema_version":
+            "commodity_c_fast_execution_permit_consumption_v1",
+            "execution_permit_id": permit_id,
+            "source_snapshot_hash": source_snapshot_hash,
+            "session_id": session_id,
+            "consumed_at_utc":
+            self.clock().astimezone(timezone.utc).isoformat(),
+        }
+        payload = {
+            **core,
+            "receipt_checksum": _sha256_json(core),
+        }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            fd = os.open(
+                path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+            )
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False, indent=2)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+        except FileExistsError as exc:
+            raise CommoditySimNowSafetyError(
+                "C_FAST Execution Permit 已消费，禁止并发重放"
+            ) from exc
+        except Exception:
+            path.unlink(missing_ok=True)
+            raise
+        return payload
 
     def _c_fast_terminal_archive_dir(self) -> Path:
         path = self._c_fast_shakedown_state_path()

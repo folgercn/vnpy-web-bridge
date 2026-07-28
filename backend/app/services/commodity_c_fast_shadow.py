@@ -560,6 +560,10 @@ class CommodityCFastShadowService:
         if not isinstance(raw, dict) or not raw:
             raise CFastShadowInvalidError("TRUSTED_KEYS_EMPTY")
         result: dict[str, tuple[Ed25519PublicKey, str]] = {}
+        keys_by_purpose: dict[str, set[bytes]] = {
+            "research_snapshot_signer": set(),
+            "simnow_shakedown_control_signer": set(),
+        }
         for key_id, entry in raw.items():
             if not isinstance(entry, dict) or set(entry) != {
                 "public_key_base64",
@@ -581,8 +585,16 @@ class CommodityCFastShadowService:
                     Ed25519PublicKey.from_public_bytes(key_bytes),
                     str(entry["purpose"]),
                 )
+                keys_by_purpose[str(entry["purpose"])].add(key_bytes)
             except (ValueError, binascii.Error) as exc:
                 raise CFastShadowInvalidError("TRUSTED_KEY_INVALID") from exc
+        if (
+            keys_by_purpose["research_snapshot_signer"]
+            & keys_by_purpose["simnow_shakedown_control_signer"]
+        ):
+            raise CFastShadowInvalidError(
+                "RESEARCH_CONTROL_SIGNERS_NOT_DISTINCT"
+            )
         return result
 
     def _verify_timing(

@@ -51,6 +51,9 @@ from test_commodity_simnow import (
 
 def sign_payload(payload: dict, private_key) -> tuple[dict, str]:
     signed, _ = official_sign_payload(payload, private_key)
+    identity = hashlib.sha256(
+        signed["snapshot_id"].encode("utf-8")
+    ).hexdigest()[:16]
     bindings = signed["research_bindings"]
     bindings["snapshot_producer_status"] = (
         "IMPLEMENTED_HUMAN_CONFIRMED_BUNDLE_V1"
@@ -77,8 +80,8 @@ def sign_payload(payload: dict, private_key) -> tuple[dict, str]:
                 "snapshot_created_at_utc"
             ],
             "research_signature": signed["signature"],
-            "control_acceptance_id": "cfast-accept-testfixture1",
-            "execution_permit_id": "cfast-permit-testfixture1",
+            "control_acceptance_id": f"cfast-accept-test{identity}",
+            "execution_permit_id": f"cfast-permit-test{identity}",
             "accepted_at_utc": signed["snapshot_created_at_utc"],
             "expires_at_utc": (
                 datetime.fromisoformat(
@@ -439,6 +442,16 @@ def test_c_fast_start_auto_dispatches_and_archives_reconciled_pnl(
     assert started["action"] == "open_submitted"
     requests = list(service.trade.requests)
     assert requests
+    receipt = service._load_c_fast_permit_receipt(
+        snapshot.execution_permit_id
+    )
+    assert receipt is not None
+    assert service.current_plan["execution_permit_id"] == (
+        snapshot.execution_permit_id
+    )
+    assert service.current_plan[
+        "permit_consumption_receipt_checksum"
+    ] == receipt["receipt_checksum"]
     ag = next(row for row in snapshot.targets if row.product == "ag")
     rpc.positions = [position("ag", ag.target_quantity, contract_month="2612")]
     rpc.trades = fills_for_requests(requests)
@@ -456,6 +469,48 @@ def test_c_fast_start_auto_dispatches_and_archives_reconciled_pnl(
         status["session"]["execution"]["pnl"]["fees_state"]
         == "UNBOUND_NOT_ASSUMED_ZERO"
     )
+
+
+def test_c_fast_one_shot_permit_is_consumed_before_plan_persist(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, _, snapshot, _ = prepare_c_fast_shakedown(tmp_path)
+    preview = service.preview_c_fast_shakedown(
+        ["ag"],
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )["preview"]
+
+    def fail_persist() -> None:
+        raise OSError("forced active-plan persistence failure")
+
+    monkeypatch.setattr(service, "_persist_active_plan", fail_persist)
+    with pytest.raises(OSError, match="forced active-plan"):
+        service.start_c_fast_shakedown(
+            preview["plan_hash"],
+            operator="admin",
+            role="admin",
+            source_ip=None,
+        )
+
+    assert service.trade.requests == []
+    assert service._load_c_fast_permit_receipt(
+        snapshot.execution_permit_id
+    ) is not None
+
+    restarted, _, _, _ = prepare_c_fast_shakedown(tmp_path)
+    with pytest.raises(
+        CommoditySimNowSafetyError,
+        match="Permit 已消费",
+    ):
+        restarted.preview_c_fast_shakedown(
+            ["ag"],
+            operator="admin",
+            role="admin",
+            source_ip=None,
+        )
 
 
 def test_c_fast_terminal_reconciliation_survives_unavailable_pnl_mark(

@@ -56,6 +56,12 @@ INPUT_KEYS = {
     "snapshot",
 }
 EVIDENCE_KEYS = {"name", "kind", "sha256"}
+REQUIRED_EVIDENCE_KINDS = {
+    "research_manifest",
+    "allocation",
+    "daily_roll",
+    "reference_price",
+}
 PROTECTED_SNAPSHOT_KEYS = {
     "schema_version",
     "mode",
@@ -145,8 +151,7 @@ def produce(bundle: dict[str, Any]) -> dict[str, Any]:
             or set(row) != EVIDENCE_KEYS
             or not isinstance(row["name"], str)
             or not row["name"]
-            or row["kind"]
-            not in {"research_manifest", "allocation", "daily_roll", "reference_price"}
+            or row["kind"] not in REQUIRED_EVIDENCE_KINDS
             or not isinstance(row["sha256"], str)
             or len(row["sha256"]) != 64
             or any(ch not in "0123456789abcdef" for ch in row["sha256"])
@@ -156,6 +161,12 @@ def produce(bundle: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("research evidence list is invalid")
     if len({row["name"] for row in evidence}) != len(evidence):
         raise ValueError("research evidence names must be unique")
+    evidence_by_kind = {row["kind"]: row for row in evidence}
+    if (
+        len(evidence_by_kind) != len(evidence)
+        or set(evidence_by_kind) != REQUIRED_EVIDENCE_KINDS
+    ):
+        raise ValueError("research evidence kinds must be exact and unique")
     snapshot = bundle["snapshot"]
     if not isinstance(snapshot, dict) or set(snapshot) & PROTECTED_SNAPSHOT_KEYS:
         raise ValueError("snapshot contains producer/control-owned fields")
@@ -170,6 +181,30 @@ def produce(bundle: dict[str, Any]) -> dict[str, Any]:
     ):
         if key in bindings:
             raise ValueError(f"research input may not set {key}")
+    expected_evidence_hashes = {
+        "research_manifest": bindings.get("research_manifest_sha256"),
+        "allocation": bindings.get("allocation_evidence_sha256"),
+        "daily_roll": bindings.get("daily_roll_evidence_sha256"),
+    }
+    if any(
+        evidence_by_kind[kind]["sha256"] != expected
+        for kind, expected in expected_evidence_hashes.items()
+    ):
+        raise ValueError("research evidence hash does not match bindings")
+    targets = snapshot.get("targets")
+    reference_hashes = {
+        row.get("reference_price_source_sha256")
+        for row in targets
+        if isinstance(row, dict)
+    } if isinstance(targets, list) else set()
+    if (
+        len(reference_hashes) != 1
+        or evidence_by_kind["reference_price"]["sha256"]
+        not in reference_hashes
+    ):
+        raise ValueError(
+            "reference-price evidence does not bind every target"
+        )
     input_hash = hashlib.sha256(canonical_json(bundle)).hexdigest()
     core = {
         **snapshot,
@@ -221,6 +256,13 @@ def load_public_key(path: Path) -> Ed25519PublicKey:
     return Ed25519PublicKey.from_public_bytes(decoded)
 
 
+def public_key_bytes(key: Ed25519PublicKey) -> bytes:
+    return key.public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    )
+
+
 def sign_research(
     core: dict[str, Any], private_key: Ed25519PrivateKey
 ) -> dict[str, Any]:
@@ -249,6 +291,11 @@ def issue_permit(
     max_selected_products: int,
     control_signer_key_id: str,
 ) -> dict[str, Any]:
+    control_public_key = control_private_key.public_key()
+    if public_key_bytes(research_public_key) == public_key_bytes(
+        control_public_key
+    ):
+        raise ValueError("Research and Control keys must be distinct")
     payload = {
         **research,
         "control_acceptance_id": acceptance_id,
@@ -282,6 +329,8 @@ def verify(
     research_key: Ed25519PublicKey,
     control_key: Ed25519PublicKey,
 ) -> CommodityCFastShakedownSnapshotDTO:
+    if public_key_bytes(research_key) == public_key_bytes(control_key):
+        raise ValueError("Research and Control keys must be distinct")
     snapshot = CommodityCFastShakedownSnapshotDTO.model_validate(payload)
     if formula_target_binding_sha256(snapshot) != snapshot.formula_target_binding_sha256:
         raise ValueError("formula/target binding mismatch")

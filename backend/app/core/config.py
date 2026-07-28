@@ -283,6 +283,10 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "COMMODITY_C_FAST_SHADOW_TRUSTED_PUBLIC_KEYS_JSON must contain at least one Ed25519 public key"
                 )
+            keys_by_purpose: dict[str, set[bytes]] = {
+                "research_snapshot_signer": set(),
+                "simnow_shakedown_control_signer": set(),
+            }
             for entry in trusted_keys.values():
                 if not isinstance(entry, dict) or set(entry) != {
                     "public_key_base64",
@@ -310,6 +314,14 @@ class Settings(BaseSettings):
                     raise ValueError(
                         "COMMODITY_C_FAST_SHADOW_TRUSTED_PUBLIC_KEYS_JSON must contain 32-byte Ed25519 keys"
                     )
+                keys_by_purpose[str(entry["purpose"])].add(public_key)
+            if (
+                keys_by_purpose["research_snapshot_signer"]
+                & keys_by_purpose["simnow_shakedown_control_signer"]
+            ):
+                raise ValueError(
+                    "C_FAST Research and Control public keys must be distinct"
+                )
         allowed_levels = {"info", "warning", "critical"}
         levels = {item.strip().lower() for item in self.telegram_send_levels.split(",") if item.strip()}
         if not levels or levels - allowed_levels:
