@@ -1296,7 +1296,9 @@ def test_c_fast_restart_adopts_archive_after_pointer_write_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    service, rpc, snapshot, _ = prepare_c_fast_shakedown(tmp_path)
+    service, rpc, snapshot, snapshot_hash = (
+        prepare_c_fast_shakedown(tmp_path)
+    )
     preview = service.preview_c_fast_shakedown(
         ["ag"], operator="admin", role="admin", source_ip=None
     )["preview"]
@@ -1740,6 +1742,40 @@ def test_c_fast_pnl_requires_complete_evidence_per_child(
     )
 
 
+def test_c_fast_pnl_marks_child_overfill_inconsistent(
+    tmp_path: Path,
+) -> None:
+    service, rpc, _, _ = prepare_c_fast_shakedown(tmp_path)
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    service.start_c_fast_shakedown(
+        preview["plan_hash"],
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+    request = service.trade.requests[0]
+    rpc.trades = [
+        {
+            "vt_tradeid": "CTP.OVERFILL",
+            "vt_orderid": "CTP.1",
+            "price": request.price,
+            "volume": request.volume + 1,
+        }
+    ]
+
+    pnl = service.c_fast_shakedown_pnl()
+
+    assert pnl["trade_evidence_state"] == "INCONSISTENT"
+    assert pnl["trade_cashflow_cny"] is None
+    execution = service._execution_snapshot(service.current_plan)
+    assert (
+        execution["orders"][0]["trade_evidence_state"]
+        == "INCONSISTENT"
+    )
+
+
 def test_c_fast_finalize_rechecks_outside_scope_position(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1891,6 +1927,48 @@ def test_c_fast_submitted_reconcile_error_enters_cancel_recovery(
     )
 
 
+def test_c_fast_manual_reconcile_error_enters_cancel_recovery(
+    tmp_path: Path,
+) -> None:
+    service, rpc, _, _ = prepare_c_fast_shakedown(tmp_path)
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    service.start_c_fast_shakedown(
+        preview["plan_hash"],
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+    rpc.orders = [
+        {
+            **submitted,
+            "status": "not_traded",
+        }
+        for submitted in service.current_plan["submitted"]["open"]
+    ]
+    rpc.get_positions_error = RuntimeError("positions unavailable")
+
+    with pytest.raises(RuntimeError):
+        service.reconcile(
+            preview["plan_hash"],
+            operator="admin",
+            role="admin",
+            source_ip=None,
+            dispatch_mode="manual",
+        )
+
+    assert service.trade.cancel_requests == sorted(
+        row["vt_orderid"]
+        for row in service.current_plan["submitted"]["open"]
+    )
+    assert service.current_plan is not None
+    assert service.current_plan["status"] in {
+        "CANCEL_PENDING",
+        "HALTED_RECONCILE_REQUIRED",
+    }
+
+
 def test_c_fast_submitted_reconcile_and_orders_failure_persists_cancel_pending(
     tmp_path: Path,
 ) -> None:
@@ -1921,6 +1999,68 @@ def test_c_fast_submitted_reconcile_and_orders_failure_persists_cancel_pending(
     )["plan"]
     assert persisted["status"] == "CANCEL_PENDING"
     assert persisted["halt"]["reconcile_error_type"] == "RuntimeError"
+
+    rpc.get_positions_error = None
+    rpc.get_orders_error = None
+    submitted = service.current_plan["submitted"]["open"][0]
+    rpc.orders = [{**submitted, "status": "not_traded"}]
+
+    advanced = service.auto_candidate_shakedown_advance()
+
+    assert advanced["action"] == "halted_reconcile_required"
+    assert service.trade.cancel_requests == sorted(
+        row["vt_orderid"]
+        for row in service.current_plan["submitted"]["open"]
+    )
+    assert (
+        service.current_plan["status"]
+        == "HALTED_RECONCILE_REQUIRED"
+    )
+
+
+def test_c_fast_account_change_during_reconcile_enters_cancel_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, rpc, _, _ = prepare_c_fast_shakedown(tmp_path)
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    service.start_c_fast_shakedown(
+        preview["plan_hash"],
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+    submitted = service.current_plan["submitted"]["open"][0]
+    rpc.orders = [{**submitted, "status": "not_traded"}]
+    monkeypatch.setattr(
+        rpc,
+        "get_accounts",
+        lambda: [
+            {
+                "accountid": "different-account",
+                "gateway_name": "CTP",
+            }
+        ],
+    )
+
+    with pytest.raises(CommoditySimNowSafetyError):
+        service.auto_candidate_shakedown_advance()
+
+    assert service.trade.cancel_requests == sorted(
+        row["vt_orderid"]
+        for row in service.current_plan["submitted"]["open"]
+    )
+    assert service.current_plan is not None
+    assert service.current_plan["status"] in {
+        "CANCEL_PENDING",
+        "HALTED_RECONCILE_REQUIRED",
+    }
+    assert (
+        service.current_plan["halt"]["reconcile_error_type"]
+        == "CommoditySimNowSafetyError"
+    )
 
 
 def test_c_fast_ack_persistence_failure_still_cancels(

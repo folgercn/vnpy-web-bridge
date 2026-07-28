@@ -1004,6 +1004,65 @@ class CommoditySimNowService:
         dispatch_mode: str = "manual",
     ) -> dict[str, Any]:
         plan = self._require_plan(plan_hash)
+        status_before = str(plan.get("status") or "")
+        try:
+            return self._reconcile_impl(
+                plan_hash,
+                operator=operator,
+                role=role,
+                source_ip=source_ip,
+                dispatch_mode=dispatch_mode,
+            )
+        except Exception as exc:
+            if not plan.get("c_fast_shakedown_session_id"):
+                raise
+            self._revoke_auto_dispatch(
+                self._candidate_revoke_scope(plan)
+            )
+            if self._c_fast_terminal_archive_committed(plan):
+                raise
+            halted_during_call = bool(
+                status_before
+                in {"CLOSE_SUBMITTED", "OPEN_SUBMITTED"}
+                and plan.get("status")
+                in {
+                    "CANCEL_PENDING",
+                    "SUBMISSION_OUTCOME_UNKNOWN",
+                    "HALTED_RECONCILE_REQUIRED",
+                    "HALTED_RECONCILED",
+                }
+                and plan.get("halt")
+            )
+            if not halted_during_call:
+                self._begin_safe_halt(
+                    "shakedown_reconcile_failed",
+                    operator=operator,
+                    source_ip=source_ip,
+                    phase=self._infer_plan_phase(plan),
+                    revoke_scope=self._candidate_revoke_scope(plan),
+                )
+            halt = plan.setdefault("halt", {})
+            halt.update(
+                {
+                    "reconcile_error_type":
+                    exc.__class__.__name__,
+                    "reconcile_failed_at_utc":
+                    self.clock().astimezone(timezone.utc).isoformat(),
+                }
+            )
+            self._persist_active_plan_during_halt(halt)
+            raise
+
+    def _reconcile_impl(
+        self,
+        plan_hash: str,
+        *,
+        operator: str,
+        role: str | None,
+        source_ip: str | None,
+        dispatch_mode: str,
+    ) -> dict[str, Any]:
+        plan = self._require_plan(plan_hash)
         halted_reconcile = plan["status"] in {
             "CANCEL_PENDING",
             "HALTED_RECONCILE_REQUIRED",
@@ -1319,32 +1378,13 @@ class CommoditySimNowService:
                 **self._candidate_shakedown_status(plan),
             }
         if status == "HALTED_RECONCILE_REQUIRED":
-            phase = self._infer_plan_phase(plan)
-            try:
-                result = self.reconcile(plan["plan_hash"], operator=operator, role=role, source_ip=source_ip, dispatch_mode="auto")
-            except Exception as exc:
-                self._revoke_auto_dispatch(
-                    self._candidate_revoke_scope(plan)
-                )
-                self._begin_safe_halt(
-                    "shakedown_reconcile_failed",
-                    operator=operator,
-                    source_ip=source_ip,
-                    phase=phase,
-                    revoke_scope=self._candidate_revoke_scope(plan),
-                )
-                plan.setdefault("halt", {}).update(
-                    {
-                        "reconcile_error_type":
-                        exc.__class__.__name__,
-                        "reconcile_failed_at_utc":
-                        self.clock().astimezone(timezone.utc).isoformat(),
-                    }
-                )
-                self._persist_active_plan_during_halt(
-                    plan["halt"]
-                )
-                raise
+            result = self.reconcile(
+                plan["plan_hash"],
+                operator=operator,
+                role=role,
+                source_ip=source_ip,
+                dispatch_mode="auto",
+            )
             return {"action": "halted_reconciled" if result["status"] == "HALTED_RECONCILED" else "halted_reconcile_required", **result}
         if self.risk.status().get("emergency_stopped"):
             halt = self._begin_safe_halt(
@@ -1414,53 +1454,13 @@ class CommoditySimNowService:
                         "reason": "c_fast_archive_chain_failed",
                         "halt": halt,
                     }
-            try:
-                result = self.reconcile(plan["plan_hash"], operator=operator, role=role, source_ip=source_ip, dispatch_mode="auto")
-            except Exception as exc:
-                self._revoke_auto_dispatch(
-                    self._candidate_revoke_scope(plan)
-                )
-                if plan.get("c_fast_shakedown_session_id"):
-                    try:
-                        archived = self._load_c_fast_terminal_archive(
-                            str(plan["c_fast_shakedown_session_id"])
-                        )
-                        chain, chain_state = (
-                            self._c_fast_terminal_chain()
-                        )
-                    except Exception:
-                        archived = None
-                        chain = []
-                        chain_state = "CHAIN_BROKEN"
-                    if (
-                        archived
-                        and archived.get("plan_hash")
-                        == plan.get("plan_hash")
-                        and chain_state == "VALID"
-                        and chain
-                        and chain[-1].get("terminal_checksum")
-                        == archived.get("terminal_checksum")
-                    ):
-                        raise
-                self._begin_safe_halt(
-                    "shakedown_reconcile_failed",
-                    operator=operator,
-                    source_ip=source_ip,
-                    phase=phase,
-                    revoke_scope=self._candidate_revoke_scope(plan),
-                )
-                plan.setdefault("halt", {}).update(
-                    {
-                        "reconcile_error_type":
-                        exc.__class__.__name__,
-                        "reconcile_failed_at_utc":
-                        self.clock().astimezone(timezone.utc).isoformat(),
-                    }
-                )
-                self._persist_active_plan_during_halt(
-                    plan["halt"]
-                )
-                raise
+            result = self.reconcile(
+                plan["plan_hash"],
+                operator=operator,
+                role=role,
+                source_ip=source_ip,
+                dispatch_mode="auto",
+            )
             if result["status"] == "READY_OPEN":
                 return self.auto_candidate_shakedown_advance(
                     operator=operator, role=role, source_ip=source_ip
@@ -4567,6 +4567,30 @@ class CommoditySimNowService:
         ):
             self.current_plan = None
             self._active_state_path().unlink(missing_ok=True)
+
+    def _c_fast_terminal_archive_committed(
+        self, plan: dict[str, Any]
+    ) -> bool:
+        session_id = str(
+            plan.get("c_fast_shakedown_session_id") or ""
+        )
+        if not session_id:
+            return False
+        try:
+            archived = self._load_c_fast_terminal_archive(
+                session_id
+            )
+            chain, chain_state = self._c_fast_terminal_chain()
+        except Exception:
+            return False
+        return bool(
+            archived
+            and archived.get("plan_hash") == plan.get("plan_hash")
+            and chain_state == "VALID"
+            and chain
+            and chain[-1].get("terminal_checksum")
+            == archived.get("terminal_checksum")
+        )
 
     def _load_position_manager_shakedown_state(self) -> dict[str, Any] | None:
         path = self._position_manager_shakedown_state_path()

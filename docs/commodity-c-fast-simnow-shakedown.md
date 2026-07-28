@@ -92,6 +92,9 @@ reference/order id 唯一归属的活动委托时，状态保持
 仍没有回报，也必须保持 `UNRESOLVED_SEND_INTENTS`，禁止按目标持仓误判完成。
 submitted、halted reconcile 和 terminal finalize 都会重新读取原始账户持仓；
 发现固定十品种范围外持仓时撤权并保留 active plan，禁止生成终态归档。
+submitted/halted reconcile 的账户、持仓或 RPC 校验异常会立即撤销对应 lane
+授权并进入 safe-halt；orders 可用时定向撤单，不可用时持久化
+`CANCEL_PENDING` 并由 worker 重试。
 目标手数均为零、仅 exact contract 变化的合法 snapshot 会直接生成可重启恢复的
 no-op 终态证据，不发送委托，也不占用共享执行槽。
 终态 archive 已写而 current pointer 尚未写入时，启动恢复以通过 checksum 和
@@ -108,9 +111,16 @@ chain-tail 校验的 archive 为事实源，修复 pointer 并释放 active plan
 重启后按链顺序枚举和校验历史终态；缺失 predecessor、分叉、循环或单文件
 checksum 错误会返回 `CHAIN_BROKEN`。archive 成功但 current pointer 写失败时，
 终态重试复用原 archive，不重新生成完成时间、PnL 或 checksum。
+如果进程在 archive 写成功、current pointer 写入前崩溃，启动恢复会校验该
+session 的 plan、execution、terminal checksum 与唯一 chain tail，以 archive
+为终态事实源修复 pointer，并删除旧 active plan；不会用旧 active 状态生成冲突
+终态。
 chain 校验也是 preview、start、每次 READY 派单和 terminal append 的执行信任
 条件；pointer 缺失但 archive 非空、predecessor 被删除或链已断裂时禁止新委托，
 已提交计划只允许撤单和只读对账，不能删除 active plan。
+archive commit 前的最后一道 guard 使用同一次原始 positions 采集校验固定范围与
+精确 expected positions，并再次确认 session 和固定范围内外部活动委托均为零；
+guard 的时间、positions hash、orders hash 和 blocker 会写入终态或 halt evidence。
 
 ## PnL 证据
 
@@ -131,6 +141,9 @@ RPC 可用但 `expected_volume > filled_volume` 时同样返回
 安全收口，但不能把迟到的 trade callback 当作零成交或零 PnL。
 终态 `execution_snapshot` 与 PnL 的成交量、成交现金流和滑点来自同一次
 orders/trades 采集，并记录相同的 `execution_captured_at_utc`。
+成交回报按 gateway 与 trade id 去重，并且逐 child 验证完整性；任一 child
+欠成交时为 `INCOMPLETE`，超额或矛盾证据为 `INCONSISTENT`，两者金额字段均为
+`None`。
 terminal commit 还会最终复验原始持仓、精确 expected positions、session
 活动委托和外部活动委托，并把快照 hash 写入 `terminal_guard`。成交回报按
 gateway/trade id 去重且逐 child 要求完整；任一 child 缺失或超额时，PnL
