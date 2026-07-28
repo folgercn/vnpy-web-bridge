@@ -14,7 +14,7 @@ from collections.abc import Callable
 from datetime import date, datetime, timezone
 from functools import wraps
 from pathlib import Path
-from threading import RLock
+from threading import Lock, RLock
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -88,12 +88,15 @@ POSITION_MANAGER_GENESIS_SOURCE_MONTH = "2026-08"
 def _serialized(method):
     @wraps(method)
     def wrapped(self, *args, **kwargs):
+        entry_abort_epoch = self._dispatch_epoch_snapshot()
         if method.__name__ in {
             "disable",
             "stop_c_fast_shakedown",
             "stop_position_manager_shakedown",
         }:
-            self._dispatch_abort_requested = True
+            self._request_dispatch_abort()
+        if method.__name__ in {"enable", "start_c_fast_shakedown"}:
+            kwargs["_dispatch_entry_abort_epoch"] = entry_abort_epoch
         with self._cycle_lock:
             return method(self, *args, **kwargs)
 
@@ -227,6 +230,8 @@ class CommoditySimNowService:
         self._state_load_error: str | None = None
         self._c_fast_authority_persist_error: str | None = None
         self._dispatch_abort_requested = False
+        self._dispatch_abort_epoch = 0
+        self._dispatch_abort_lock = Lock()
         self._completed_state = self._load_completed_state()
         self.current_plan = self._load_active_plan()
         self._cleanup_terminal_shakedown_active_plan()
@@ -237,6 +242,32 @@ class CommoditySimNowService:
     ) -> None:
         with self._cycle_lock:
             self._c_fast_snapshot_provider = provider
+
+    def _dispatch_epoch_snapshot(self) -> int:
+        with self._dispatch_abort_lock:
+            return self._dispatch_abort_epoch
+
+    def _request_dispatch_abort(self) -> int:
+        with self._dispatch_abort_lock:
+            self._dispatch_abort_epoch += 1
+            self._dispatch_abort_requested = True
+            return self._dispatch_abort_epoch
+
+    def _begin_dispatch_epoch(self, expected_epoch: int) -> int:
+        with self._dispatch_abort_lock:
+            if self._dispatch_abort_epoch != expected_epoch:
+                raise CommoditySimNowSafetyError(
+                    "授权等待期间收到 stop/disable/shutdown，拒绝派单"
+                )
+            self._dispatch_abort_requested = False
+            return self._dispatch_abort_epoch
+
+    def _dispatch_aborted(self, epoch: int) -> bool:
+        with self._dispatch_abort_lock:
+            return bool(
+                self._dispatch_abort_requested
+                or self._dispatch_abort_epoch != epoch
+            )
 
     @_serialized
     def status(self) -> dict[str, Any]:
@@ -335,7 +366,7 @@ class CommoditySimNowService:
         self._task = asyncio.create_task(self._run_auto_dispatch_loop())
 
     async def stop(self) -> None:
-        self._dispatch_abort_requested = True
+        self._request_dispatch_abort()
         halt_error: Exception | None = None
         try:
             await asyncio.to_thread(
@@ -395,7 +426,12 @@ class CommoditySimNowService:
         operator: str,
         role: str | None,
         source_ip: str | None,
+        _dispatch_entry_abort_epoch: int | None = None,
     ) -> dict[str, Any]:
+        if _dispatch_entry_abort_epoch is not None:
+            self._begin_dispatch_epoch(
+                _dispatch_entry_abort_epoch
+            )
         if not self.settings.commodity_simnow_enabled:
             raise CommoditySimNowDisabledError(
                 detail={"required_setting": "COMMODITY_SIMNOW_ENABLED=true"}
@@ -417,7 +453,6 @@ class CommoditySimNowService:
         self.enabled = True
         self.manual_approval = True
         self.simnow_mode = True
-        self._dispatch_abort_requested = False
         self.auto_dispatch_authorized = (
             self.settings.commodity_simnow_auto_dispatch_enabled and payload.confirm_auto_dispatch
         )
@@ -855,15 +890,36 @@ class CommoditySimNowService:
                 ),
             )
 
+        historical_intents = (
+            plan.get("send_intents", {}).get(payload.phase, [])
+        )
+        if historical_intents:
+            self._begin_safe_halt(
+                "historical_send_intent_before_dispatch",
+                operator=operator,
+                source_ip=source_ip,
+                phase=payload.phase,
+            )
+            raise CommoditySimNowStateError(
+                "存在历史 send intent，禁止覆盖或重放",
+                detail={
+                    "phase": payload.phase,
+                    "references": [
+                        row.get("reference")
+                        for row in historical_intents
+                    ],
+                },
+            )
         plan.pop("halt", None)
         plan["status"] = f"SUBMITTING_{payload.phase.upper()}"
         self._persist_active_plan()
+        dispatch_abort_epoch = self._dispatch_epoch_snapshot()
         submitted: list[dict[str, Any]] = []
         current_intent: dict[str, Any] | None = None
         try:
             for order, repriced in zip(orders, repriced_orders, strict=True):
                 if (
-                    self._dispatch_abort_requested
+                    self._dispatch_aborted(dispatch_abort_epoch)
                     or self.risk.status().get("emergency_stopped")
                 ):
                     raise CommoditySimNowSafetyError(
@@ -873,7 +929,11 @@ class CommoditySimNowService:
                 if plan.get("c_fast_shakedown_session_id"):
                     pre_intent_guard = (
                         self._verify_c_fast_pre_send_fact_guard(
-                            plan, payload.phase
+                            plan,
+                            payload.phase,
+                            current_reference=str(
+                                repriced["reference"]
+                            ),
                         )
                     )
                 intent = {
@@ -893,13 +953,18 @@ class CommoditySimNowService:
                 if existing_intent is None:
                     intents.append(intent)
                 else:
-                    existing_intent.clear()
-                    existing_intent.update(intent)
-                    intent = existing_intent
+                    raise CommoditySimNowStateError(
+                        "历史 send intent 不允许覆盖或重放",
+                        detail={
+                            "reference": repriced["reference"],
+                            "intent_status":
+                            existing_intent.get("intent_status"),
+                        },
+                    )
                 current_intent = intent
                 self._persist_active_plan()
                 if (
-                    self._dispatch_abort_requested
+                    self._dispatch_aborted(dispatch_abort_epoch)
                     or self.risk.status().get(
                         "emergency_stopped"
                     )
@@ -910,10 +975,13 @@ class CommoditySimNowService:
                 if plan.get("c_fast_shakedown_session_id"):
                     intent["pre_send_fact_guard"] = (
                         self._verify_c_fast_pre_send_fact_guard(
-                            plan, payload.phase
+                            plan,
+                            payload.phase,
+                            current_reference=str(
+                                repriced["reference"]
+                            ),
                         )
                     )
-                    self._persist_active_plan()
                 request = OrderRequestDTO(
                     symbol=repriced["symbol"],
                     exchange=repriced["exchange"],
@@ -2138,8 +2206,12 @@ class CommoditySimNowService:
         operator: str,
         role: str | None,
         source_ip: str | None,
+        _dispatch_entry_abort_epoch: int | None = None,
     ) -> dict[str, Any]:
-        self._dispatch_abort_requested = False
+        if _dispatch_entry_abort_epoch is not None:
+            self._begin_dispatch_epoch(
+                _dispatch_entry_abort_epoch
+            )
         if not self.settings.commodity_c_fast_simnow_shakedown_enabled:
             raise CommoditySimNowDisabledError(
                 detail={
@@ -4447,6 +4519,7 @@ class CommoditySimNowService:
             new_external_order_facts,
             "new_external_trade_facts":
             new_external_trade_facts,
+            "_raw_orders": orders,
             "_raw_trades": trades,
             "snapshot_fingerprint":
             _sha256_json(fingerprint_payload),
@@ -4475,12 +4548,21 @@ class CommoditySimNowService:
             )
         ]
         filled_by_child = [0.0 for _ in children]
-        seen: set[str] = set()
+        seen: dict[str, str] = {}
         for trade in trades:
             trade_key = self._c_fast_trade_fact_key(trade)
+            canonical_hash = _sha256_json(trade)
+            if (
+                trade_key in seen
+                and seen[trade_key] != canonical_hash
+            ):
+                raise CommoditySimNowSafetyError(
+                    "同一 C_FAST trade identity 存在冲突回报",
+                    detail={"trade_identity": trade_key},
+                )
             if trade_key in seen:
                 continue
-            seen.add(trade_key)
+            seen[trade_key] = canonical_hash
             states = [
                 self._trade_child_match_state(trade, child)
                 for child in children
@@ -4525,11 +4607,15 @@ class CommoditySimNowService:
         self,
         plan: dict[str, Any],
         phase: str,
+        *,
+        current_reference: str | None = None,
     ) -> dict[str, Any]:
         snapshot = self._c_fast_terminal_fact_snapshot(plan)
+        raw_orders = snapshot.pop("_raw_orders")
+        raw_trades = snapshot.pop("_raw_trades")
         expected_positions = (
             self._c_fast_positions_explained_by_trades(
-                plan, phase, snapshot.pop("_raw_trades")
+                plan, phase, raw_trades
             )
         )
         blockers: list[str] = []
@@ -4561,6 +4647,23 @@ class CommoditySimNowService:
             blockers.append("NEW_EXTERNAL_ORDER_FACTS")
         if snapshot["new_external_trade_facts"]:
             blockers.append("NEW_EXTERNAL_TRADE_FACTS")
+        if current_reference:
+            if any(
+                str(order.get("reference") or "")
+                == current_reference
+                for order in raw_orders
+            ):
+                blockers.append(
+                    "HISTORICAL_CURRENT_CHILD_ORDER_FACT"
+                )
+            if any(
+                str(trade.get("reference") or "")
+                == current_reference
+                for trade in raw_trades
+            ):
+                blockers.append(
+                    "HISTORICAL_CURRENT_CHILD_TRADE_FACT"
+                )
         if snapshot["final_positions"] != expected_positions:
             blockers.append("UNEXPLAINED_POSITION_CHANGE")
         evidence = {
@@ -6212,7 +6315,11 @@ class CommoditySimNowService:
         orders_snapshot: list[dict[str, Any]] | None = None
         try:
             if submission_recovery_phase:
-                orders_snapshot = self.rpc.get_orders()
+                orders_snapshot = (
+                    self._c_fast_all_orders()
+                    if plan.get("c_fast_shakedown_session_id")
+                    else self.rpc.get_orders()
+                )
                 trades_snapshot = self.rpc.get_trades()
                 evidence_references = self._recover_send_intent_evidence(
                     plan,
@@ -6993,7 +7100,13 @@ class CommoditySimNowService:
             ]
             if uncertain_intents:
                 try:
-                    orders = self.rpc.get_orders()
+                    orders = (
+                        self._c_fast_all_orders()
+                        if plan.get(
+                            "c_fast_shakedown_session_id"
+                        )
+                        else self.rpc.get_orders()
+                    )
                     trades = self.rpc.get_trades()
                     evidence = self._recover_send_intent_evidence(
                         plan,
@@ -7904,7 +8017,8 @@ class CommoditySimNowService:
             for order_id in self._order_ids(order):
                 order_by_id[order_id] = order
         unique_trades: list[tuple[str, dict[str, Any]]] = []
-        seen_trade_keys: set[str] = set()
+        seen_trade_keys: dict[str, str] = {}
+        conflicting_trades: list[dict[str, Any]] = []
         for trade in trades:
             trade_id = str(
                 trade.get("vt_tradeid")
@@ -7917,9 +8031,16 @@ class CommoditySimNowService:
                 if trade_id
                 else _sha256_json(trade)
             )
+            canonical_hash = _sha256_json(trade)
+            if (
+                trade_key in seen_trade_keys
+                and seen_trade_keys[trade_key] != canonical_hash
+            ):
+                conflicting_trades.append(trade)
+                continue
             if trade_key in seen_trade_keys:
                 continue
-            seen_trade_keys.add(trade_key)
+            seen_trade_keys[trade_key] = canonical_hash
             unique_trades.append((trade_key, trade))
 
         children = [
@@ -7931,6 +8052,16 @@ class CommoditySimNowService:
             int, list[dict[str, Any]]
         ] = {index: [] for index in range(len(children))}
         inconsistent_children: set[int] = set()
+        for trade in conflicting_trades:
+            states = [
+                self._trade_child_match_state(trade, submitted)
+                for _, submitted in children
+            ]
+            inconsistent_children.update(
+                index
+                for index, state in enumerate(states)
+                if state in {"MATCH", "INCONSISTENT"}
+            )
         for _, trade in unique_trades:
             states = [
                 self._trade_child_match_state(trade, submitted)

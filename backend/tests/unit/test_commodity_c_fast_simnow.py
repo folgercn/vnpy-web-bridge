@@ -764,6 +764,87 @@ def test_c_fast_rpc_timeout_never_replays_send_intent(
     assert len(service.trade.requests) == 0
 
 
+@pytest.mark.parametrize("reverse_rows", [False, True])
+def test_c_fast_conflicting_same_trade_id_blocks_terminal(
+    tmp_path: Path,
+    reverse_rows: bool,
+) -> None:
+    service, rpc, snapshot, _ = prepare_c_fast_shakedown(tmp_path)
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    service.start_c_fast_shakedown(
+        preview["plan_hash"],
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+    ag = next(
+        row for row in snapshot.targets if row.product == "ag"
+    )
+    rpc.positions = [
+        position(
+            "ag", ag.target_quantity, contract_month="2612"
+        )
+    ]
+    fills = fills_for_submitted(service.current_plan)
+    conflict = {
+        **fills[0],
+        "price": float(fills[0]["price"]) + 1,
+    }
+    pair = [fills[0], conflict]
+    if reverse_rows:
+        pair.reverse()
+    rpc.trades = [*pair, *fills[1:]]
+
+    with pytest.raises(CommoditySimNowSafetyError):
+        service.auto_candidate_shakedown_advance()
+
+    assert service.current_plan is not None
+    assert (
+        "INCONSISTENT_SESSION_TRADE_EVIDENCE"
+        in service.current_plan["halt"]["terminal_guard"][
+            "blockers"
+        ]
+    )
+    assert not service._c_fast_terminal_archive_path(
+        preview["session_id"]
+    ).exists()
+
+
+def test_c_fast_identical_duplicate_trade_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    service, rpc, snapshot, _ = prepare_c_fast_shakedown(tmp_path)
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    service.start_c_fast_shakedown(
+        preview["plan_hash"],
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+    ag = next(
+        row for row in snapshot.targets if row.product == "ag"
+    )
+    rpc.positions = [
+        position(
+            "ag", ag.target_quantity, contract_month="2612"
+        )
+    ]
+    fills = fills_for_submitted(service.current_plan)
+    rpc.trades = [fills[0], dict(fills[0]), *fills[1:]]
+
+    result = service.auto_candidate_shakedown_advance()
+
+    assert result["action"] == "open_reconciled"
+    assert service.current_plan is None
+    assert service._c_fast_terminal_archive_path(
+        preview["session_id"]
+    ).exists()
+
+
 @pytest.mark.parametrize(
     "trade_type",
     [
@@ -863,6 +944,175 @@ def test_c_fast_stop_preempts_blocked_child_loop(
         service.c_fast_shakedown_auto_dispatch_authorized
         is False
     )
+
+
+def test_c_fast_queued_stop_epoch_cannot_be_cleared_by_start(
+    tmp_path: Path,
+) -> None:
+    trade = FakeTrade()
+    service, _, _, _ = prepare_c_fast_shakedown(
+        tmp_path, trade=trade
+    )
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    start_error: list[Exception] = []
+    stop_error: list[Exception] = []
+
+    service._cycle_lock.acquire()
+    try:
+        start_thread = Thread(
+            target=lambda: _capture_thread_error(
+                start_error,
+                lambda: service.start_c_fast_shakedown(
+                    preview["plan_hash"],
+                    operator="admin",
+                    role="admin",
+                    source_ip=None,
+                ),
+            )
+        )
+        start_thread.start()
+        sleep(0.05)
+        stop_thread = Thread(
+            target=lambda: _capture_thread_error(
+                stop_error,
+                lambda: service.stop_c_fast_shakedown(
+                    "queued stop", operator="admin",
+                    role="admin", source_ip=None
+                ),
+            )
+        )
+        stop_thread.start()
+        deadline = monotonic() + 5
+        while (
+            service._dispatch_abort_epoch == 0
+            and monotonic() < deadline
+        ):
+            sleep(0.01)
+        assert service._dispatch_abort_epoch > 0
+    finally:
+        service._cycle_lock.release()
+
+    start_thread.join(5)
+    stop_thread.join(5)
+    assert start_error
+    assert not trade.requests
+
+
+def _capture_thread_error(
+    errors: list[Exception],
+    callback,
+) -> None:
+    try:
+        callback()
+    except Exception as exc:
+        errors.append(exc)
+
+
+def test_c_fast_final_guard_runs_after_pending_intent_persist(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, rpc, _, _ = prepare_c_fast_shakedown(tmp_path)
+    trade = service.trade
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    original_persist = service._persist_active_plan
+    injected = False
+
+    def persist_and_inject():
+        nonlocal injected
+        original_persist()
+        intents = (
+            (service.current_plan or {})
+            .get("send_intents", {})
+            .get("open", [])
+        )
+        if intents and not injected:
+            injected = True
+            rpc.orders.append(
+                {
+                    "vt_orderid": "CTP.external-terminal",
+                    "orderid": "external-terminal",
+                    "reference": "",
+                    "symbol": "IF2609",
+                    "vt_symbol": "IF2609.CFFEX",
+                    "direction": "long",
+                    "offset": "open",
+                    "volume": 1,
+                    "traded": 1,
+                    "status": "all_traded",
+                    "gateway_name": "CTP",
+                }
+            )
+
+    monkeypatch.setattr(
+        service, "_persist_active_plan", persist_and_inject
+    )
+    with pytest.raises(CommoditySimNowStateError):
+        service.start_c_fast_shakedown(
+            preview["plan_hash"],
+            operator="admin",
+            role="admin",
+            source_ip=None,
+        )
+    assert injected
+    assert not trade.requests
+
+
+@pytest.mark.parametrize("with_late_order", [False, True])
+def test_c_fast_historical_intent_is_never_overwritten_or_replayed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    with_late_order: bool,
+) -> None:
+    service, rpc, _, _ = prepare_c_fast_shakedown(tmp_path)
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    advance = service.auto_candidate_shakedown_advance
+    monkeypatch.setattr(
+        service,
+        "auto_candidate_shakedown_advance",
+        lambda **_kwargs: {"action": "held_for_test"},
+    )
+    service.start_c_fast_shakedown(
+        preview["plan_hash"],
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+    monkeypatch.setattr(
+        service, "auto_candidate_shakedown_advance", advance
+    )
+    child = service.current_plan["open_orders"][0]
+    service.current_plan["send_intents"]["open"].append(
+        {
+            **child,
+            "intent_status": "NO_EVIDENCE_STABLE",
+        }
+    )
+    if with_late_order:
+        rpc.orders = [
+            {
+                **child,
+                "vt_orderid": "CTP.late-original",
+                "orderid": "late-original",
+                "status": "all_traded",
+                "traded": child["volume"],
+                "gateway_name": "CTP",
+            }
+        ]
+
+    with pytest.raises(CommoditySimNowStateError):
+        service.auto_candidate_shakedown_advance()
+
+    assert not service.trade.requests
+    intents = service.current_plan["send_intents"]["open"]
+    assert len(intents) == 1
+    assert intents[0]["intent_status"] == "NO_EVIDENCE_STABLE"
 
 
 def test_c_fast_reprice_position_drift_sends_no_child(
@@ -2442,11 +2692,11 @@ def test_c_fast_pnl_requires_complete_evidence_per_child(
 
     pnl = service.c_fast_shakedown_pnl()
 
-    assert pnl["trade_evidence_state"] == "INCOMPLETE"
+    assert pnl["trade_evidence_state"] == "INCONSISTENT"
     assert pnl["trade_cashflow_cny"] is None
     execution = service._execution_snapshot(service.current_plan)
     assert any(
-        row["trade_evidence_state"] == "INCOMPLETE"
+        row["trade_evidence_state"] == "INCONSISTENT"
         for row in execution["orders"]
     )
 

@@ -165,6 +165,12 @@ preview、start 和每次 READY 派单前均拒绝未知 order status。列表�
 connection generation 与 watermark-bound 全事实屏障；新增外部 order/trade
 会中止剩余 child。C_FAST 必须使用 `get_all_orders` 完整订单缓存，禁止回退
 active-only。stop、disable、shutdown 和 emergency 可在 child 间抢占批量派单。
+抢占使用单调 epoch：已排队的 stop/disable/shutdown 不能被随后取得锁的
+start/enable 清除；只有停机完成后的新显式授权才能开始新的派单代次。
+每个 `PENDING_SEND` intent 必须先落盘，再执行紧邻 `send_order` 的最终事实
+guard，中间不得再有持久化或 RPC I/O。历史 intent 不可覆盖或重放；恢复和
+重新授权也必须使用完整订单历史。相同 gateway/trade-id 只有 canonical payload
+完全一致时才能幂等去重，冲突回报一律标记 `INCONSISTENT` 并禁止 COMPLETE。
 session trade 归属除 order id 外还必须绑定 CTP gateway、exact contract、
 direction、offset，并在回报提供 reference 时要求 reference 一致；裸 ID
 碰撞、语义缺失或多 child 歧义均标记 `INCONSISTENT`，并阻止 COMPLETE 归档。
