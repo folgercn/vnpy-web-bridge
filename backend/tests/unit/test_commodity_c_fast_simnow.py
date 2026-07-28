@@ -407,9 +407,11 @@ def test_c_fast_start_rejects_snapshot_change_after_preview(
 
 
 @pytest.mark.parametrize("stage", ["preview", "start"])
+@pytest.mark.parametrize("status", ["future_gateway_state", "pending_cancel", ""])
 def test_c_fast_rejects_unknown_order_status_before_dispatch(
     tmp_path: Path,
     stage: str,
+    status: str,
 ) -> None:
     service, rpc, _, _ = prepare_c_fast_shakedown(tmp_path)
     preview = None
@@ -424,7 +426,7 @@ def test_c_fast_rejects_unknown_order_status_before_dispatch(
             "reference": "",
             "symbol": "IF2609",
             "vt_symbol": "IF2609.CFFEX",
-            "status": "future_gateway_state",
+            "status": status,
         }
     ]
 
@@ -486,8 +488,8 @@ def test_c_fast_start_binds_previous_positions_to_rebuilt_plan(
     )
 
     with pytest.raises(
-        CommoditySimNowStateError,
-        match="执行前持仓与计划不一致",
+        CommoditySimNowSafetyError,
+        match="start 持仓在计划重建后发生变化",
     ):
         service.start_c_fast_shakedown(
             preview["plan_hash"],
@@ -496,9 +498,178 @@ def test_c_fast_start_binds_previous_positions_to_rebuilt_plan(
             source_ip=None,
         )
 
-    assert service.current_plan is not None
-    assert service.current_plan["previous_positions"] == {}
+    assert service.current_plan is None
     assert not service.trade.requests
+
+
+@pytest.mark.parametrize("status", ["pending_cancel", ""])
+def test_c_fast_order_scan_rejects_unknown_status(
+    tmp_path: Path,
+    status: str,
+) -> None:
+    service, rpc, _, _ = prepare_c_fast_shakedown(tmp_path)
+    rpc.orders = [
+        {
+            "vt_orderid": "CTP.uncertain",
+            "orderid": "uncertain",
+            "reference": "",
+            "symbol": "ag2612",
+            "vt_symbol": "ag2612.SHFE",
+            "status": status,
+        }
+    ]
+
+    with pytest.raises(
+        CommoditySimNowSafetyError,
+        match="状态未知",
+    ):
+        service._c_fast_external_active_orders(None)
+
+    assert not service.trade.requests
+
+
+@pytest.mark.parametrize("status", ["pending_cancel", ""])
+def test_c_fast_start_rebuild_rejects_new_unknown_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+) -> None:
+    service, rpc, _, _ = prepare_c_fast_shakedown(tmp_path)
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    unknown = {
+        "vt_orderid": "CTP.uncertain-during-start",
+        "orderid": "uncertain-during-start",
+        "reference": "",
+        "symbol": "ag2612",
+        "vt_symbol": "ag2612.SHFE",
+        "status": status,
+    }
+    calls = {"count": 0}
+
+    def changing_orders():
+        calls["count"] += 1
+        return [] if calls["count"] == 1 else [unknown]
+
+    monkeypatch.setattr(rpc, "get_orders", changing_orders)
+
+    with pytest.raises(
+        CommoditySimNowSafetyError,
+        match="状态未知",
+    ):
+        service.start_c_fast_shakedown(
+            preview["plan_hash"],
+            operator="admin",
+            role="admin",
+            source_ip=None,
+        )
+
+    assert service.current_plan is None
+    assert not service.trade.requests
+
+
+@pytest.mark.parametrize("status", ["pending_cancel", ""])
+def test_c_fast_ready_dispatch_rejects_unknown_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+) -> None:
+    service, rpc, _, _ = prepare_c_fast_shakedown(tmp_path)
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    advance = service.auto_candidate_shakedown_advance
+    monkeypatch.setattr(
+        service,
+        "auto_candidate_shakedown_advance",
+        lambda **_kwargs: {"action": "held_for_test"},
+    )
+    service.start_c_fast_shakedown(
+        preview["plan_hash"],
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+    monkeypatch.setattr(
+        service, "auto_candidate_shakedown_advance", advance
+    )
+    rpc.orders = [
+        {
+            "vt_orderid": "CTP.uncertain-ready",
+            "orderid": "uncertain-ready",
+            "reference": "",
+            "symbol": "ag2612",
+            "vt_symbol": "ag2612.SHFE",
+            "status": status,
+        }
+    ]
+
+    result = service.auto_candidate_shakedown_advance()
+
+    assert result["action"] == "halted"
+    assert result["reason"] == "shakedown_execution_trust_failed"
+    assert not service.trade.requests
+
+
+@pytest.mark.parametrize("status", ["pending_cancel", ""])
+def test_c_fast_ready_open_rejects_unknown_status_after_close_reconcile(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+) -> None:
+    service, rpc, _, _ = prepare_c_fast_shakedown(tmp_path)
+    payload = unsigned_payload()
+    ag = next(
+        row for row in payload["targets"] if row["product"] == "ag"
+    )
+    ag["previous_exact_contract"] = "SHFE.ag2612"
+    ag["previous_target_quantity"] = 2
+    ag["target_quantity"] = -1
+    signed, snapshot_hash = sign_payload(payload, make_key())
+    snapshot = CommodityCFastShadowDTO.model_validate(signed)
+    service.bind_c_fast_snapshot_provider(
+        lambda: (snapshot.model_copy(deep=True), snapshot_hash)
+    )
+    rpc.positions = [
+        position("ag", 2, contract_month="2612")
+    ]
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    service.start_c_fast_shakedown(
+        preview["plan_hash"],
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+    close_request_count = len(service.trade.requests)
+    rpc.positions = []
+    rpc.orders = []
+    rpc.trades = fills_for_submitted(service.current_plan)
+    reconcile = service.reconcile
+
+    def reconcile_then_inject(*args, **kwargs):
+        result = reconcile(*args, **kwargs)
+        rpc.orders = [
+            {
+                "vt_orderid": "CTP.uncertain-ready-open",
+                "orderid": "uncertain-ready-open",
+                "reference": "",
+                "symbol": "ag2612",
+                "vt_symbol": "ag2612.SHFE",
+                "status": status,
+            }
+        ]
+        return result
+
+    monkeypatch.setattr(service, "reconcile", reconcile_then_inject)
+
+    result = service.auto_candidate_shakedown_advance()
+
+    assert result["action"] == "halted"
+    assert result["reason"] == "shakedown_execution_trust_failed"
+    assert len(service.trade.requests) == close_request_count
 
 
 def test_c_fast_rpc_timeout_never_replays_send_intent(
@@ -2087,10 +2258,17 @@ def test_c_fast_terminal_guard_rejects_last_moment_drift(
         service.current_plan["status"]
         == "HALTED_RECONCILE_REQUIRED"
     )
-    assert (
-        service.current_plan["halt"]["terminal_guard"]["state"]
-        == "BLOCKED"
-    )
+    if drift == "unknown_status_order":
+        assert (
+            service.current_plan["halt"]["reconcile_error_type"]
+            == "CommoditySimNowSafetyError"
+        )
+        assert "terminal_guard" not in service.current_plan["halt"]
+    else:
+        assert (
+            service.current_plan["halt"]["terminal_guard"]["state"]
+            == "BLOCKED"
+        )
     assert not service._c_fast_terminal_archive_path(
         preview["session_id"]
     ).exists()

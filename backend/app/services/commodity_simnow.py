@@ -2218,6 +2218,17 @@ class CommoditySimNowService:
             raise CommoditySimNowSafetyError(
                 "C_FAST start 前订单或成交事实不稳定"
             )
+        final_start_positions = self._signed_positions(
+            self._position_snapshot()
+        )
+        if final_start_positions != rechecked["previous_positions"]:
+            raise CommoditySimNowSafetyError(
+                "C_FAST start 持仓在计划重建后发生变化",
+                detail={
+                    "expected": rechecked["previous_positions"],
+                    "observed": final_start_positions,
+                },
+            )
         terminal_fact_watermark[
             "verified_from_utc"
         ] = terminal_fact_watermark_before[
@@ -3606,6 +3617,8 @@ class CommoditySimNowService:
     def _c_fast_external_active_orders(
         self, plan: dict[str, Any] | None
     ) -> list[dict[str, str]]:
+        orders = self.rpc.get_orders()
+        self._verify_c_fast_known_order_statuses(orders)
         session_references = {
             str(order.get("reference") or "")
             for phase in ("close", "open")
@@ -3624,7 +3637,7 @@ class CommoditySimNowService:
                         _order_id_aliases(order.get("orderid"))
                     )
         conflicts: list[dict[str, str]] = []
-        for order in self.rpc.get_orders():
+        for order in orders:
             if (
                 _normalize_status(order.get("status"))
                 not in ACTIVE_ORDER_STATUSES
@@ -3668,6 +3681,8 @@ class CommoditySimNowService:
         plan: dict[str, Any],
         orders: list[dict[str, Any]],
     ) -> list[dict[str, str]]:
+        if plan.get("c_fast_shakedown_session_id"):
+            self._verify_c_fast_known_order_statuses(orders)
         session_references = {
             str(order.get("reference") or "")
             for phase in ("close", "open")
