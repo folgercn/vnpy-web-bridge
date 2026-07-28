@@ -287,9 +287,12 @@ class Settings(BaseSettings):
                     raise ValueError(
                         "COMMODITY_C_FAST_SHADOW_TRUSTED_PUBLIC_KEYS_JSON entries must contain only public_key_base64 and purpose"
                     )
-                if entry["purpose"] != "research_snapshot_signer":
+                if entry["purpose"] not in {
+                    "research_snapshot_signer",
+                    "simnow_shakedown_control_signer",
+                }:
                     raise ValueError(
-                        "COMMODITY_C_FAST_SHADOW_TRUSTED_PUBLIC_KEYS_JSON purpose must be research_snapshot_signer"
+                        "COMMODITY_C_FAST_SHADOW_TRUSTED_PUBLIC_KEYS_JSON purpose must be research_snapshot_signer or simnow_shakedown_control_signer"
                     )
                 try:
                     public_key = base64.b64decode(

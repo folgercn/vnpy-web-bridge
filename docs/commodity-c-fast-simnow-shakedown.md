@@ -1,6 +1,6 @@
 # C_FAST SimNow Shakedown Adapter
 
-本文档对应 Issue #148。该适配器位于 M2 Control Plane，只消费已被
+本文档对应 Issue #148/#153。该适配器位于 M2 Control Plane，只消费已被
 `CommodityCFastShadowService` 接受并再次验证的完整十品种签名快照。
 C_FAST Shadow 本身仍无 `TradeService`、下单或撤单能力；Windows 仍只负责
 CTP RPC 执行与事实回传。
@@ -18,6 +18,10 @@ CTP RPC 执行与事实回传。
 - preview 固化 snapshot hash、execution day、selected products、session nonce
   和 plan hash；start 前用实时 RPC、持仓、合约和盘口重新构建并比对计划。
 - send intent 先于 RPC 调用落盘；timeout/未知结果只允许恢复和对账，不得重发。
+- `commodity_c_fast_simnow_shakedown_snapshot_v1` 使用两个不同用途的签名：
+  Research signer 只签人工确认的真实 Research bundle，Control signer 再签
+  绑定账户、交易日、到期时间、1–2 品种上限和 1 手 child 上限的 permit。
+- 该一次性 schema 不改变 `official_forward` 月度 schema 的时间边界或含义。
 
 ## 配置
 
@@ -47,6 +51,38 @@ signed C_FAST snapshot
   -> Windows CTP RPC
   -> order/trade/position reconciliation and SimNow PnL evidence
 ```
+
+## Research → Control artifact
+
+禁止把测试 fixture、synthetic target、执行账户持仓或成交反推结果作为输入。
+Research 输入不足时 `produce` 必须失败，且不得调用签名或安装步骤。
+
+```bash
+PYTHONPATH=backend python scripts/commodity_c_fast_shakedown_artifact.py \
+  produce --input research-input.json --output research-core.json
+
+PYTHONPATH=backend python scripts/commodity_c_fast_shakedown_artifact.py \
+  sign-research --input research-core.json --output research-signed.json \
+  --research-private-key-file /secure/research-ed25519
+
+PYTHONPATH=backend python scripts/commodity_c_fast_shakedown_artifact.py \
+  issue-permit --input research-signed.json --output permit.json \
+  --research-public-key-file /secure/research-ed25519.pub \
+  --control-private-key-file /secure/control-ed25519 \
+  --acceptance-id cfast-accept-... --permit-id cfast-permit-... \
+  --account-sha256 '<allowlisted sha256>' \
+  --accepted-at-utc '<UTC timestamp>' --expires-at-utc '<UTC timestamp>' \
+  --max-selected-products 1 --control-signer-key-id c-fast-control-1
+
+PYTHONPATH=backend python scripts/commodity_c_fast_shakedown_artifact.py \
+  install --input permit.json --destination /private/runtime/snapshot.json \
+  --research-public-key-file /secure/research-ed25519.pub \
+  --control-public-key-file /secure/control-ed25519.pub
+```
+
+所有输出以 `0600` create-only 写入；destination 和 checksum 已存在时拒绝覆盖。
+私钥只用于离线签署，M2 运行时仅保存公钥。安装后仍需由 Bridge 使用 RPC
+合约目录独立复核 exact contract、multiplier 和 price tick。
 
 完整十品种 signed previous target 必须与账户持仓完全相同，才能生成预览。
 未选择品种保持 signed previous target；所选品种必须原样收敛到

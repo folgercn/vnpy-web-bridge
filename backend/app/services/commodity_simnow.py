@@ -29,7 +29,10 @@ from app.core.errors import (
     CommoditySimNowSafetyError,
     CommoditySimNowStateError,
 )
-from app.schemas.commodity_c_fast_shadow import CommodityCFastShadowDTO
+from app.schemas.commodity_c_fast_shadow import (
+    CommodityCFastRuntimeSnapshotDTO,
+    CommodityCFastShakedownSnapshotDTO,
+)
 from app.schemas.commodity_simnow import (
     CommodityPlanExecuteRequestDTO,
     CommodityPositionManagerShadowDTO,
@@ -272,7 +275,7 @@ class CommoditySimNowService:
         self.events: list[dict[str, Any]] = []
         self._cycle_lock = RLock()
         self._c_fast_snapshot_provider: (
-            Callable[[], tuple[CommodityCFastShadowDTO, str]] | None
+            Callable[[], tuple[CommodityCFastRuntimeSnapshotDTO, str]] | None
         ) = None
         self._task: asyncio.Task[Any] | None = None
         self._state_load_error: str | None = None
@@ -288,7 +291,9 @@ class CommoditySimNowService:
 
     def bind_c_fast_snapshot_provider(
         self,
-        provider: Callable[[], tuple[CommodityCFastShadowDTO, str]],
+        provider: Callable[
+            [], tuple[CommodityCFastRuntimeSnapshotDTO, str]
+        ],
     ) -> None:
         with self._cycle_lock:
             self._c_fast_snapshot_provider = provider
@@ -2064,7 +2069,9 @@ class CommoditySimNowService:
                 detail={"error_type": exc.__class__.__name__},
             ) from exc
 
-    def _c_fast_snapshot(self) -> tuple[CommodityCFastShadowDTO, str]:
+    def _c_fast_snapshot(
+        self,
+    ) -> tuple[CommodityCFastRuntimeSnapshotDTO, str]:
         provider = self._c_fast_snapshot_provider
         if provider is None:
             raise CommoditySimNowSafetyError(
@@ -2233,6 +2240,15 @@ class CommoditySimNowService:
             raise CommoditySimNowSafetyError("C_FAST 测试品种选择无效")
 
         snapshot, snapshot_hash = self._c_fast_snapshot()
+        if isinstance(snapshot, CommodityCFastShakedownSnapshotDTO):
+            if len(selected) > snapshot.max_selected_products:
+                raise CommoditySimNowSafetyError(
+                    "C_FAST Execution Permit 品种范围超限"
+                )
+            if snapshot.max_child_order_lots != 1:
+                raise CommoditySimNowSafetyError(
+                    "C_FAST Execution Permit child 上限无效"
+                )
         rows = {row.product: row for row in snapshot.targets}
         if set(rows) != set(PRODUCT_SPECS):
             raise CommoditySimNowSafetyError(
@@ -2250,6 +2266,13 @@ class CommoditySimNowService:
                 )
         safety = self._safety_snapshot(require_trade_enabled=True)
         self._verify_c_fast_account(str(safety["account_hash"]))
+        if (
+            isinstance(snapshot, CommodityCFastShakedownSnapshotDTO)
+            and snapshot.account_sha256 != str(safety["account_hash"])
+        ):
+            raise CommoditySimNowSafetyError(
+                "C_FAST Execution Permit 账户绑定不匹配"
+            )
         self._verify_c_fast_known_order_statuses()
         conflicts = self._position_manager_shakedown_active_orders(
             set(PRODUCT_SPECS)
@@ -2646,7 +2669,7 @@ class CommoditySimNowService:
 
     def _build_c_fast_shakedown_plan(
         self,
-        snapshot: CommodityCFastShadowDTO,
+        snapshot: CommodityCFastRuntimeSnapshotDTO,
         *,
         selected_products: list[str],
         session_id: str,
