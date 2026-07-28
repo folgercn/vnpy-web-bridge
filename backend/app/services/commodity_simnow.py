@@ -52,6 +52,10 @@ logger = logging.getLogger(__name__)
 CHINA_TZ = ZoneInfo("Asia/Shanghai")
 REFERENCE_PREFIX = "commodity_static_core"
 ACTIVE_ORDER_STATUSES = {"submitting", "not_traded", "part_traded", "submitting_order"}
+TERMINAL_ORDER_STATUSES = {"all_traded", "cancelled", "rejected"}
+KNOWN_ORDER_STATUSES = (
+    ACTIVE_ORDER_STATUSES | TERMINAL_ORDER_STATUSES
+)
 
 PRODUCT_SPECS: dict[str, dict[str, Any]] = {
     "ag": {"exchange": "SHFE", "sector": "precious", "multiplier": 15, "price_tick": 1.0},
@@ -3927,18 +3931,16 @@ class CommoditySimNowService:
         *,
         reconciliation: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        safety = self._safety_snapshot(
+        safety_before = self._safety_snapshot(
             require_trade_enabled=False,
             allow_emergency_stopped=True,
         )
-        observed_account_hash = str(safety["account_hash"])
-        account_valid = (
-            observed_account_hash == plan.get("account_hash")
+        account_hash_before = str(
+            safety_before["account_hash"]
         )
-        try:
-            self._verify_c_fast_account(observed_account_hash)
-        except CommoditySimNowSafetyError:
-            account_valid = False
+        gateway_before = str(
+            safety_before.get("gateway_name") or ""
+        )
         raw_positions = self.rpc.get_positions()
         outside_scope = self._c_fast_outside_scope_positions(
             raw_positions
@@ -3963,9 +3965,59 @@ class CommoditySimNowService:
                 plan, orders
             )
         )
+        unknown_status_orders = [
+            {
+                "vt_orderid": str(
+                    order.get("vt_orderid")
+                    or order.get("orderid")
+                    or "unknown"
+                ),
+                "reference":
+                str(order.get("reference") or ""),
+                "symbol": str(
+                    order.get("symbol")
+                    or str(
+                        order.get("vt_symbol") or ""
+                    ).split(".", 1)[0]
+                ),
+                "status":
+                _normalize_status(order.get("status")),
+            }
+            for order in orders
+            if _normalize_status(order.get("status"))
+            not in KNOWN_ORDER_STATUSES
+        ]
+        safety_after = self._safety_snapshot(
+            require_trade_enabled=False,
+            allow_emergency_stopped=True,
+        )
+        account_hash_after = str(safety_after["account_hash"])
+        gateway_after = str(
+            safety_after.get("gateway_name") or ""
+        )
+        account_valid = bool(
+            account_hash_before
+            == account_hash_after
+            == plan.get("account_hash")
+        )
+        gateway_valid = bool(
+            gateway_before
+            == gateway_after
+            == self.settings.commodity_simnow_gateway_name
+        )
+        for account_hash in {
+            account_hash_before,
+            account_hash_after,
+        }:
+            try:
+                self._verify_c_fast_account(account_hash)
+            except CommoditySimNowSafetyError:
+                account_valid = False
         blockers: list[str] = []
         if not account_valid:
             blockers.append("ACCOUNT_HASH_MISMATCH")
+        if not gateway_valid:
+            blockers.append("GATEWAY_MISMATCH")
         if outside_scope:
             blockers.append("OUTSIDE_C_FAST_POSITION_SCOPE")
         if expected is None or final_positions != expected:
@@ -3974,17 +4026,25 @@ class CommoditySimNowService:
             blockers.append("ACTIVE_SESSION_ORDERS")
         if external_active_orders:
             blockers.append("EXTERNAL_ACTIVE_ORDERS")
+        if unknown_status_orders:
+            blockers.append("UNKNOWN_ORDER_STATUS")
         captured_at = self.clock().astimezone(timezone.utc).isoformat()
         guard = {
             "captured_at_utc": captured_at,
             "expected_account_hash": plan.get("account_hash"),
-            "observed_account_hash": observed_account_hash,
+            "account_hash_before": account_hash_before,
+            "account_hash_after": account_hash_after,
+            "observed_account_hash": account_hash_after,
             "account_hash_valid": account_valid,
+            "gateway_before": gateway_before,
+            "gateway_after": gateway_after,
+            "gateway_valid": gateway_valid,
             "final_positions": final_positions,
             "expected_positions": expected,
             "outside_scope_positions": outside_scope,
             "active_plan_orders": active_plan_orders,
             "external_active_orders": external_active_orders,
+            "unknown_status_orders": unknown_status_orders,
             "positions_hash": _sha256_json(raw_positions),
             "orders_hash": _sha256_json(orders),
             "state": "VALID" if not blockers else "BLOCKED",

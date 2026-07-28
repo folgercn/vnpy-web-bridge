@@ -1627,7 +1627,12 @@ def test_c_fast_noop_rpc_failure_does_not_abort_service_start(
         )
     rpc.get_positions_error = RuntimeError("positions unavailable")
     recovered = CommoditySimNowService(
-        settings=service.settings,
+        settings=service.settings.model_copy(
+            update={
+                "commodity_simnow_auto_dispatch_interval_seconds":
+                0.25,
+            }
+        ),
         rpc=rpc,
         trade=service.trade,
         risk=service.risk,
@@ -1651,10 +1656,8 @@ def test_c_fast_noop_rpc_failure_does_not_abort_service_start(
             == "RuntimeError"
         )
         rpc.get_positions_error = None
-        result = await asyncio.to_thread(
-            recovered.auto_candidate_shakedown_advance
-        )
-        assert result["action"] == "noop_reconciled"
+        await asyncio.sleep(0.4)
+        assert recovered.current_plan is None
         await recovered.stop()
 
     asyncio.run(exercise())
@@ -1900,6 +1903,7 @@ def test_c_fast_finalize_rechecks_outside_scope_position(
         "external_order",
         "outside_scope_order",
         "unknown_symbol_order",
+        "unknown_status_order",
     ],
 )
 def test_c_fast_terminal_guard_rejects_last_moment_drift(
@@ -1953,6 +1957,8 @@ def test_c_fast_terminal_guard_rejects_last_moment_drift(
                     "status": "not_traded",
                 }
             )
+            if drift == "unknown_status_order":
+                rpc.orders[-1]["status"] = "mystery_state"
         return result
 
     monkeypatch.setattr(
@@ -2035,6 +2041,63 @@ def test_c_fast_terminal_guard_revalidates_account_hash(
     assert guard["blockers"][0] == "ACCOUNT_HASH_MISMATCH"
     assert guard["expected_account_hash"] == ACCOUNT_HASH
     assert guard["observed_account_hash"] == changed_hash
+    assert not service._c_fast_terminal_archive_path(
+        preview["session_id"]
+    ).exists()
+
+
+def test_c_fast_terminal_guard_rejects_account_change_during_capture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, rpc, snapshot, _ = prepare_c_fast_shakedown(tmp_path)
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    service.start_c_fast_shakedown(
+        preview["plan_hash"],
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+    ag = next(row for row in snapshot.targets if row.product == "ag")
+    rpc.positions = [
+        position("ag", ag.target_quantity, contract_month="2612")
+    ]
+    rpc.orders = []
+    rpc.trades = fills_for_requests(list(service.trade.requests))
+    changed_hash = hashlib.sha256(
+        b"changed-during-terminal-capture"
+    ).hexdigest()
+    service.settings = service.settings.model_copy(
+        update={
+            "commodity_c_fast_simnow_account_hashes":
+            f"{ACCOUNT_HASH},{changed_hash}",
+        }
+    )
+    safety_snapshot = service._safety_snapshot
+    calls = {"count": 0}
+
+    def changing_safety_snapshot(**kwargs):
+        calls["count"] += 1
+        result = safety_snapshot(**kwargs)
+        if calls["count"] == 3:
+            result = {**result, "account_hash": changed_hash}
+        return result
+
+    monkeypatch.setattr(
+        service, "_safety_snapshot", changing_safety_snapshot
+    )
+
+    with pytest.raises(CommoditySimNowSafetyError):
+        service.auto_candidate_shakedown_advance()
+
+    assert service.current_plan is not None
+    guard = service.current_plan["halt"]["terminal_guard"]
+    assert guard["state"] == "BLOCKED"
+    assert guard["account_hash_before"] == ACCOUNT_HASH
+    assert guard["account_hash_after"] == changed_hash
+    assert guard["account_hash_valid"] is False
     assert not service._c_fast_terminal_archive_path(
         preview["session_id"]
     ).exists()
