@@ -185,6 +185,57 @@ def test_rejects_signing_tools_in_runtime(
         subject.validate_containerfile(containerfile)
 
 
+@pytest.mark.parametrize(
+    ("injected_instruction", "error"),
+    [
+        (
+            (
+                "ADD scripts/commodity_c_fast_t1_query_v3_sign_release.py "
+                "/opt/c-fast-t1/scripts/"
+            ),
+            "instruction is forbidden: ADD",
+        ),
+        (
+            "ADD private.key /opt/c-fast-t1/private.key",
+            "instruction is forbidden: ADD",
+        ),
+        (
+            f"FROM {subject.BASE_IMAGE}",
+            "requires exactly one FROM",
+        ),
+        (
+            (
+                "RUN --mount=type=bind,source=.,target=/build "
+                "cp /build/private.key /opt/c-fast-t1/private.key"
+            ),
+            "RUN --mount is forbidden",
+        ),
+        (
+            "RUN printf secret > /opt/c-fast-t1/private.key",
+            "instruction allowlist/order drifted",
+        ),
+        (
+            "# syntax=docker/dockerfile:1-labs",
+            "parser directives are forbidden",
+        ),
+    ],
+)
+def test_rejects_non_copy_build_context_and_instruction_bypasses(
+    tmp_path: Path,
+    injected_instruction: str,
+    error: str,
+) -> None:
+    containerfile, _template = _copy_artifacts(tmp_path)
+    with containerfile.open("a", encoding="utf-8") as handle:
+        handle.write(f"\n{injected_instruction}\n")
+
+    with pytest.raises(
+        subject.QueryV3PackagingError,
+        match=error,
+    ):
+        subject.validate_containerfile(containerfile)
+
+
 def test_rejects_legacy_or_direct_script_entrypoint(tmp_path: Path) -> None:
     containerfile, _template = _copy_artifacts(tmp_path)
     expected = "ENTRYPOINT " + json.dumps(subject.ENTRYPOINT)

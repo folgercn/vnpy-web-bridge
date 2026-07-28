@@ -115,7 +115,9 @@ python scripts/c_fast_t1/validate_query_v3_runtime.py \
 
 validator 固定检查：
 
-- base digest、Python dependency pin、COPY allowlist/order；
+- 完整规范化 Containerfile instruction 序列、唯一 base digest、指令顺序和参数；
+- Python dependency pin、COPY allowlist/order，并拒绝 `ADD`、第二个 `FROM`、
+  `RUN --mount`、任意额外 `RUN` 或改变 Dockerfile 语义的 parser directive；
 - runtime 不包含 query release signer、P0 signer、private key 或 secret；
 - query-v3 parent/child/schema closure；
 - `-I`、固定 system `.pth`、non-root user、只读 runtime；

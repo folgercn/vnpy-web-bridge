@@ -89,6 +89,39 @@ FORBIDDEN_COPY_MARKERS = (
     ".pem",
     ".key",
 )
+ALLOWED_CONTAINERFILE_INSTRUCTIONS = frozenset(
+    {
+        "ARG",
+        "COPY",
+        "ENTRYPOINT",
+        "ENV",
+        "FROM",
+        "LABEL",
+        "RUN",
+        "USER",
+        "WORKDIR",
+    }
+)
+EXPECTED_CONTAINERFILE_INSTRUCTION_KEYWORDS = (
+    "FROM",
+    "ARG",
+    "LABEL",
+    "ENV",
+    "WORKDIR",
+    "RUN",
+    *(("COPY",) * len(EXPECTED_COPY_SOURCES)),
+    "RUN",
+    "RUN",
+    "RUN",
+    "USER",
+    "ENTRYPOINT",
+)
+# SHA256 of the complete normalized logical-instruction sequence. Comments and
+# formatting whitespace are ignored, but every instruction, argument, order,
+# and shell command is frozen.
+EXPECTED_CONTAINERFILE_INSTRUCTION_SHA256 = (
+    "bcb8a47d18a79441c3e04cf665fd64ec5a15c8d5d4a8b74bd9576f473780fa8f"
+)
 
 COMMAND_FLAGS = (
     "--query-release",
@@ -320,14 +353,80 @@ def _copy_map(text: str) -> dict[str, str]:
     return result
 
 
+def _logical_instructions(text: str) -> tuple[str, ...]:
+    instructions: list[str] = []
+    current = ""
+    for raw_line in text.splitlines():
+        stripped = raw_line.strip()
+        if re.match(
+            r"^#\s*(?:syntax|escape|check)\s*=",
+            stripped,
+            flags=re.IGNORECASE,
+        ):
+            raise QueryV3PackagingError(
+                "Containerfile parser directives are forbidden"
+            )
+        if not current and (not stripped or stripped.startswith("#")):
+            continue
+        current = f"{current} {stripped}".strip()
+        if current.endswith("\\"):
+            current = current[:-1].rstrip()
+            continue
+        instructions.append(re.sub(r"\s+", " ", current))
+        current = ""
+    if current:
+        raise QueryV3PackagingError(
+            "Containerfile has an unterminated continuation"
+        )
+    return tuple(instructions)
+
+
+def _validate_instruction_allowlist(text: str) -> str:
+    instructions = _logical_instructions(text)
+    keywords = tuple(
+        instruction.split(maxsplit=1)[0].upper()
+        for instruction in instructions
+    )
+    unsupported = sorted(
+        set(keywords) - ALLOWED_CONTAINERFILE_INSTRUCTIONS
+    )
+    if unsupported:
+        raise QueryV3PackagingError(
+            "Containerfile instruction is forbidden: "
+            + ", ".join(unsupported)
+        )
+    if keywords.count("FROM") != 1:
+        raise QueryV3PackagingError(
+            "query-v3 Containerfile requires exactly one FROM"
+        )
+    if instructions[0] != f"FROM {BASE_IMAGE}":
+        raise QueryV3PackagingError("query-v3 base image digest drifted")
+    if any(
+        keyword == "RUN"
+        and re.search(r"(^|\s)--mount(?:=|\s)", instruction) is not None
+        for keyword, instruction in zip(keywords, instructions)
+    ):
+        raise QueryV3PackagingError(
+            "Containerfile RUN --mount is forbidden"
+        )
+    if keywords != EXPECTED_CONTAINERFILE_INSTRUCTION_KEYWORDS:
+        raise QueryV3PackagingError(
+            "Containerfile instruction allowlist/order drifted"
+        )
+    digest = _sha256("\n".join(instructions).encode("utf-8"))
+    if digest != EXPECTED_CONTAINERFILE_INSTRUCTION_SHA256:
+        raise QueryV3PackagingError(
+            "Containerfile normalized instruction sequence drifted"
+        )
+    return digest
+
+
 def validate_containerfile(path: Path = DEFAULT_CONTAINERFILE) -> dict[str, Any]:
     raw = _read_regular(path, "query-v3 Containerfile")
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise QueryV3PackagingError("Containerfile is not UTF-8") from exc
-    if text.count(f"FROM {BASE_IMAGE}") != 1:
-        raise QueryV3PackagingError("query-v3 base image digest drifted")
     if text.count("ENTRYPOINT") != 1 or any(
         line.upper().startswith("CMD ") for line in text.splitlines()
     ):
@@ -385,8 +484,10 @@ def validate_containerfile(path: Path = DEFAULT_CONTAINERFILE) -> dict[str, Any]
         raise QueryV3PackagingError("runtime Containerfile adds external capability")
     if "commodity_c_fast_t1_build_registry_provenance_sign.py" in text:
         raise QueryV3PackagingError("provenance signing tool must not enter runtime")
+    instruction_digest = _validate_instruction_allowlist(text)
     return {
         "containerfile_sha256": _sha256(raw),
+        "normalized_instruction_sha256": instruction_digest,
         "copy_source_count": len(copies),
         "runtime_source_count": len(RUNTIME_SOURCES),
         "schema_source_count": len(SCHEMA_SOURCES),
