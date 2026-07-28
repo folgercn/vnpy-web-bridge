@@ -21,6 +21,7 @@ from pydantic import ValidationError
 
 from app.core.config import Settings, get_settings
 from app.schemas.commodity_c_fast_shadow import (
+    CommodityCFastShakedownStateDTO,
     CommodityCFastShadowDTO,
     CommodityCFastShadowStateDTO,
 )
@@ -350,6 +351,15 @@ class CommodityCFastShadowService:
             "last_accepted": self._accepted_summary(),
             "state_load_error": None,
             **self._fixed_safety_status(),
+            "snapshot_producer_status": (
+                snapshot.research_bindings.snapshot_producer_status
+            ),
+            "countable_forward": snapshot.countable_forward,
+            "expires_at_utc": (
+                snapshot.expires_at_utc.isoformat()
+                if snapshot.expires_at_utc is not None
+                else None
+            ),
         }
 
     def _invalid_status(
@@ -521,6 +531,9 @@ class CommodityCFastShadowService:
         return result
 
     def _verify_timing(self, snapshot: CommodityCFastShadowDTO) -> None:
+        if snapshot.execution_lane == "simnow_shakedown":
+            self._verify_shakedown_timing(snapshot)
+            return
         _month(snapshot.source_month)
         if snapshot.source_month < GENESIS_SOURCE_MONTH:
             raise CFastShadowInvalidError("SOURCE_MONTH_BEFORE_FORWARD_BOUNDARY")
@@ -551,6 +564,46 @@ class CommodityCFastShadowService:
             raise CFastShadowInvalidError("SERVICE_CLOCK_TIMEZONE_MISSING")
         if created > now + MAX_CLOCK_SKEW:
             raise CFastShadowInvalidError("SNAPSHOT_CREATED_IN_FUTURE")
+        if any(
+            row.reference_price_observed_at_utc > now + MAX_CLOCK_SKEW
+            for row in snapshot.targets
+        ):
+            raise CFastShadowInvalidError("REFERENCE_PRICE_OBSERVED_IN_FUTURE")
+
+    def _verify_shakedown_timing(
+        self, snapshot: CommodityCFastShadowDTO
+    ) -> None:
+        _month(snapshot.source_month)
+        if snapshot.source_official_day.strftime("%Y-%m") != snapshot.source_month:
+            raise CFastShadowInvalidError("SOURCE_DAY_MONTH_MISMATCH")
+        if snapshot.execution_day <= snapshot.source_official_day:
+            raise CFastShadowInvalidError("EXECUTION_NOT_AFTER_SOURCE")
+        cutoff = snapshot.input_cutoff_at_utc
+        created = snapshot.snapshot_created_at_utc
+        expires = snapshot.expires_at_utc
+        if any(
+            value is None
+            or value.tzinfo is None
+            or value.utcoffset() is None
+            for value in (cutoff, created, expires)
+        ):
+            raise CFastShadowInvalidError("SHAKEDOWN_TIMEZONE_MISSING")
+        assert expires is not None
+        if cutoff.astimezone(CHINA_TZ).date() != snapshot.source_official_day:
+            raise CFastShadowInvalidError("INPUT_CUTOFF_DAY_MISMATCH")
+        if created < cutoff:
+            raise CFastShadowInvalidError("SNAPSHOT_CREATED_BEFORE_INPUT_CUTOFF")
+        if created.astimezone(CHINA_TZ).date() != snapshot.execution_day:
+            raise CFastShadowInvalidError("SNAPSHOT_CREATED_DAY_MISMATCH")
+        if expires <= created or expires - created > timedelta(hours=24):
+            raise CFastShadowInvalidError("SHAKEDOWN_EXPIRY_INVALID")
+        now = self._clock()
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise CFastShadowInvalidError("SERVICE_CLOCK_TIMEZONE_MISSING")
+        if created > now + MAX_CLOCK_SKEW:
+            raise CFastShadowInvalidError("SNAPSHOT_CREATED_IN_FUTURE")
+        if now >= expires:
+            raise CFastShadowInvalidError("SHAKEDOWN_SNAPSHOT_EXPIRED")
         if any(
             row.reference_price_observed_at_utc > now + MAX_CLOCK_SKEW
             for row in snapshot.targets
@@ -769,6 +822,8 @@ class CommodityCFastShadowService:
         previous = self._accepted_state
         if previous and previous.get("snapshot_hash") == snapshot_hash:
             return str(previous["continuity_state"])
+        if snapshot.execution_lane == "simnow_shakedown":
+            return self._verify_shakedown_continuity(snapshot, previous)
         if previous is None:
             if (
                 snapshot.source_month != GENESIS_SOURCE_MONTH
@@ -789,14 +844,60 @@ class CommodityCFastShadowService:
             raise CFastShadowInvalidError("PREVIOUS_SNAPSHOT_HASH_MISMATCH")
         return "verified"
 
+    @staticmethod
+    def _verify_shakedown_continuity(
+        snapshot: CommodityCFastShadowDTO,
+        previous: dict[str, Any] | None,
+    ) -> str:
+        if previous is None:
+            if (
+                snapshot.previous_snapshot_hash is not None
+                or any(
+                    row.previous_exact_contract is not None
+                    or row.previous_target_quantity != 0
+                    for row in snapshot.targets
+                )
+            ):
+                raise CFastShadowInvalidError("GENESIS_CONTINUITY_INVALID")
+            return "genesis"
+        if previous.get("execution_lane") != "simnow_shakedown":
+            raise CFastShadowInvalidError("CONTINUITY_LANE_MISMATCH")
+        if snapshot.previous_snapshot_hash != previous.get("snapshot_hash"):
+            raise CFastShadowInvalidError("PREVIOUS_SNAPSHOT_HASH_MISMATCH")
+        previous_day = str(previous.get("execution_day"))
+        if snapshot.execution_day.isoformat() <= previous_day:
+            raise CFastShadowInvalidError("SNAPSHOT_STALE_OR_REPLAYED")
+        prior_targets = {
+            str(row["product"]): row
+            for row in previous.get("targets", [])
+            if isinstance(row, dict)
+        }
+        if set(prior_targets) != set(PRODUCTS):
+            raise CFastShadowInvalidError("CONTINUITY_STATE_CORRUPT")
+        for row in snapshot.targets:
+            prior = prior_targets[row.product]
+            if (
+                row.previous_exact_contract != prior["exact_contract"]
+                or row.previous_target_quantity != prior["target_quantity"]
+            ):
+                raise CFastShadowInvalidError(
+                    "PREVIOUS_TARGET_CONTINUITY_MISMATCH"
+                )
+        return "verified"
+
     def _state_payload(
         self,
         snapshot: CommodityCFastShadowDTO,
         snapshot_hash: str,
         continuity_state: str,
     ) -> dict[str, Any]:
+        shakedown = snapshot.execution_lane == "simnow_shakedown"
         core = {
-            "schema_version": "commodity_c_fast_shadow_state_v1",
+            "schema_version": (
+                "commodity_c_fast_shakedown_state_v1"
+                if shakedown
+                else "commodity_c_fast_shadow_state_v1"
+            ),
             "snapshot_id": snapshot.snapshot_id,
             "snapshot_hash": snapshot_hash,
             "source_month": snapshot.source_month,
@@ -816,10 +917,16 @@ class CommodityCFastShadowService:
                 for row in sorted(snapshot.targets, key=lambda item: item.product)
             ],
         }
+        if shakedown:
+            core["execution_lane"] = "simnow_shakedown"
+            core["expires_at_utc"] = snapshot.expires_at_utc.isoformat()
         payload = {**core, "state_checksum": sha256_json(core)}
-        return CommodityCFastShadowStateDTO.model_validate(payload).model_dump(
-            mode="json"
+        state_type = (
+            CommodityCFastShakedownStateDTO
+            if shakedown
+            else CommodityCFastShadowStateDTO
         )
+        return state_type.model_validate(payload).model_dump(mode="json")
 
     def _load_state(self) -> dict[str, Any] | None:
         path = Path(
@@ -837,8 +944,15 @@ class CommodityCFastShadowService:
         except json.JSONDecodeError:
             self._state_load_error = "STATE_JSON_INVALID"
             return None
+        state_type = (
+            CommodityCFastShakedownStateDTO
+            if isinstance(raw, dict)
+            and raw.get("schema_version")
+            == "commodity_c_fast_shakedown_state_v1"
+            else CommodityCFastShadowStateDTO
+        )
         try:
-            state = CommodityCFastShadowStateDTO.model_validate(raw)
+            state = state_type.model_validate(raw)
         except ValidationError:
             self._state_load_error = "STATE_SCHEMA_INVALID"
             return None

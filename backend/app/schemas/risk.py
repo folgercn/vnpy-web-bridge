@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field
 
 
 class RiskRulesDTO(BaseModel):
-    max_order_volume: float = Field(gt=0)
+    max_order_volume: float = Field(ge=0)
     max_symbol_position: float = Field(ge=0)
     max_daily_loss: float = Field(ge=0)
     price_protection_percent: float = Field(ge=0)
@@ -15,7 +15,7 @@ class RiskRulesDTO(BaseModel):
 
 
 class RiskRulesPatchDTO(BaseModel):
-    max_order_volume: float | None = Field(default=None, gt=0)
+    max_order_volume: float | None = Field(default=None, ge=0)
     max_symbol_position: float | None = Field(default=None, ge=0)
     max_daily_loss: float | None = Field(default=None, ge=0)
     price_protection_percent: float | None = Field(default=None, ge=0)

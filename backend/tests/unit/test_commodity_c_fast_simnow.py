@@ -22,7 +22,10 @@ from app.schemas.commodity_simnow import (
 from app.services.commodity_simnow import CommoditySimNowService
 from app.services.vnpy_rpc_service import RpcTimeoutError
 from pydantic import ValidationError
-from test_commodity_c_fast_shadow import sign_payload, unsigned_payload
+from test_commodity_c_fast_shadow import (
+    sign_payload,
+    unsigned_payload as official_unsigned_payload,
+)
 from test_commodity_simnow import (
     ACCOUNT_HASH,
     NOW,
@@ -36,6 +39,40 @@ from test_commodity_simnow import (
     make_settings,
     position,
 )
+
+
+def as_shakedown_payload(payload: dict) -> dict:
+    payload = json.loads(json.dumps(payload))
+    payload["schema_version"] = (
+        "commodity_c_fast_cross_section_neutral_simnow_shakedown_v1"
+    )
+    payload["mode"] = "simnow_shakedown_only"
+    payload["execution_lane"] = "simnow_shakedown"
+    payload["source_is_month_last_official_day"] = False
+    payload["execution_is_next_cross_month_official_day"] = False
+    payload["countable_forward"] = False
+    created = datetime.fromisoformat(
+        payload["snapshot_created_at_utc"].replace("Z", "+00:00")
+    )
+    payload["expires_at_utc"] = (
+        created + timedelta(hours=12)
+    ).isoformat()
+    bindings = payload["research_bindings"]
+    bindings["snapshot_producer_status"] = (
+        "IMPLEMENTED_HUMAN_CONFIRMED_SIMNOW_RESEARCH_BUNDLE_V1"
+    )
+    bindings["research_input_bundle_sha256"] = "1" * 64
+    bindings["research_evidence_manifest_sha256"] = "2" * 64
+    bindings["snapshot_producer_id"] = (
+        "commodity_c_fast_simnow_snapshot_producer_v1"
+    )
+    return payload
+
+
+def unsigned_payload(*args, **kwargs) -> dict:
+    return as_shakedown_payload(
+        official_unsigned_payload(*args, **kwargs)
+    )
 
 
 class AcceptedWithoutIdentityTimeoutTrade(FakeTrade):
@@ -234,7 +271,9 @@ def prepare_c_fast_shakedown(
         contract_months=("2612",),
     )
     private_key = make_key()
-    signed, snapshot_hash = sign_payload(unsigned_payload(), private_key)
+    signed, snapshot_hash = sign_payload(
+        as_shakedown_payload(unsigned_payload()), private_key
+    )
     snapshot = CommodityCFastShadowDTO.model_validate(signed)
     service.settings = service.settings.model_copy(
         update={
@@ -290,7 +329,7 @@ def install_next_c_fast_snapshot(
         }
         for row in first_snapshot.targets
     }
-    payload = unsigned_payload(
+    payload = as_shakedown_payload(unsigned_payload(
         snapshot_id="c-fast-2026-09-chain-test",
         source_month="2026-09",
         source_day="2026-09-30",
@@ -298,7 +337,7 @@ def install_next_c_fast_snapshot(
         input_cutoff="2026-09-30T07:00:00Z",
         previous_snapshot_hash=first_hash,
         previous_targets=previous_targets,
-    )
+    ))
     payload["targets"][0]["target_quantity"] += 1
     signed, snapshot_hash = sign_payload(payload, make_key())
     snapshot = CommodityCFastShadowDTO.model_validate(signed)
@@ -344,6 +383,25 @@ def test_c_fast_preview_builds_masked_signed_target_plan(
     )
     assert preview["countable_forward"] is False
     assert preview["production_allowed"] is False
+
+
+def test_c_fast_zero_child_limit_keeps_signed_leg_as_one_order(
+    tmp_path: Path,
+) -> None:
+    service, _, snapshot, _ = prepare_c_fast_shakedown(tmp_path)
+    service.settings = service.settings.model_copy(
+        update={"commodity_simnow_max_child_order_lots": 0}
+    )
+
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+
+    ag = next(row for row in snapshot.targets if row.product == "ag")
+    assert len(preview["plan"]["open_orders"]) == 1
+    assert preview["plan"]["open_orders"][0]["volume"] == abs(
+        ag.target_quantity
+    )
 
 
 def test_c_fast_start_auto_dispatches_and_archives_reconciled_pnl(

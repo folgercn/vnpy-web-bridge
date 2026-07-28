@@ -643,6 +643,33 @@ def test_bad_signature_fails_before_acceptance(tmp_path: Path) -> None:
     assert result["error_code"] == "SIGNATURE_INVALID"
 
 
+def test_legacy_official_snapshot_without_new_optional_fields_still_verifies(
+    tmp_path: Path,
+) -> None:
+    private_key = Ed25519PrivateKey.generate()
+    snapshot_path = tmp_path / "snapshot.json"
+    signed, _ = sign_payload(unsigned_payload(), private_key)
+    signed.pop("countable_forward", None)
+    signed.pop("expires_at_utc", None)
+    bindings = signed["research_bindings"]
+    bindings.pop("research_input_bundle_sha256", None)
+    bindings.pop("research_evidence_manifest_sha256", None)
+    bindings.pop("snapshot_producer_id", None)
+    write_snapshot(snapshot_path, signed)
+    service = CommodityCFastShadowService(
+        settings=settings(tmp_path, private_key, snapshot_path),
+        contract_loader=contract_loader,
+        clock=fixed_clock,
+    )
+
+    result = service.reload(
+        operator="admin", role="admin", source_ip=None
+    )
+
+    assert result["valid"] is True
+    assert result["execution_lane"] == "official_forward"
+
+
 def test_signer_key_requires_research_snapshot_purpose(
     tmp_path: Path,
 ) -> None:

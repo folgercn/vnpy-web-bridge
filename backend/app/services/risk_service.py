@@ -102,9 +102,13 @@ class RiskService:
         if contract is None:
             raise RiskSymbolBlockedError("合约不存在", detail={"vt_symbol": vt_symbol})
 
-        if payload.volume > self.rules["max_order_volume"]:
+        max_order_volume = self.rules["max_order_volume"]
+        if max_order_volume > 0 and payload.volume > max_order_volume:
             raise RiskMaxOrderVolumeError(
-                detail={"volume": payload.volume, "max_order_volume": self.rules["max_order_volume"]}
+                detail={
+                    "volume": payload.volume,
+                    "max_order_volume": max_order_volume,
+                }
             )
 
         self._check_contract_constraints(payload, contract)

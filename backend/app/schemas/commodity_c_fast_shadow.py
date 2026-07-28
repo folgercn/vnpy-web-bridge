@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 Product = Literal["ag", "al", "au", "bu", "cu", "rb", "ru", "sc", "sp", "zn"]
@@ -36,8 +36,18 @@ class CFastResearchBindingsDTO(StrictFiniteModel):
         "7e75ad73a8b037b80937cb449b863305753ec7b2860568422906fd55bb2a2fbe"
     ]
     snapshot_producer_status: Literal[
-        "NOT_IMPLEMENTED_REQUIRES_SEPARATE_AUTHORITY"
+        "NOT_IMPLEMENTED_REQUIRES_SEPARATE_AUTHORITY",
+        "IMPLEMENTED_HUMAN_CONFIRMED_SIMNOW_RESEARCH_BUNDLE_V1",
     ]
+    research_input_bundle_sha256: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    research_evidence_manifest_sha256: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    snapshot_producer_id: Literal[
+        "commodity_c_fast_simnow_snapshot_producer_v1"
+    ] | None = None
     research_manifest_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     calendar_authority_sha256: Literal[
         "57b5341b45cb92d7e991f028d780580ab712e87c9cc86c7036917b638cddc76f"
@@ -111,15 +121,18 @@ class CFastShadowTargetDTO(StrictFiniteModel):
 
 
 class CommodityCFastShadowDTO(StrictFiniteModel):
-    schema_version: Literal["commodity_c_fast_cross_section_neutral_shadow_v1"]
+    schema_version: Literal[
+        "commodity_c_fast_cross_section_neutral_shadow_v1",
+        "commodity_c_fast_cross_section_neutral_simnow_shakedown_v1",
+    ]
     snapshot_id: str = Field(pattern=r"^[A-Za-z0-9._-]{8,128}$")
     candidate_id: Literal["C_FAST_CROSS_SECTION_NEUTRAL"]
     frozen_rule_id: Literal["commodity_fast_tsmom_forward_freeze_v1"]
     frozen_rule_sha256: Literal[
         "d9a6ef4ffb6d74fe0feee8ac8935acbeb79abd4686581611f14135eb5c41040a"
     ]
-    mode: Literal["shadow_only"]
-    execution_lane: Literal["official_forward"]
+    mode: Literal["shadow_only", "simnow_shakedown_only"]
+    execution_lane: Literal["official_forward", "simnow_shakedown"]
     frequency: Literal["MONTHLY"]
     pit_main_definition: Literal["DAILY_PIT_OI_MAIN"]
     trend_horizons_official_days: tuple[Literal[21], Literal[63], Literal[126]]
@@ -131,9 +144,11 @@ class CommodityCFastShadowDTO(StrictFiniteModel):
     execution_day: date
     input_cutoff_at_utc: datetime
     snapshot_created_at_utc: datetime
-    source_is_month_last_official_day: Literal[True]
-    execution_is_next_cross_month_official_day: Literal[True]
+    source_is_month_last_official_day: bool
+    execution_is_next_cross_month_official_day: bool
     input_cutoff_after_source_close: Literal[True]
+    countable_forward: bool | None = None
+    expires_at_utc: datetime | None = None
     calendar_alignment: Literal["SIGNED_ASSERTION_NOT_RUNTIME_VERIFIED"]
     allocator_output_validation: Literal[
         "SIGNED_ALLOCATOR_OUTPUT_NOT_RECOMPUTED"
@@ -157,6 +172,42 @@ class CommodityCFastShadowDTO(StrictFiniteModel):
     signer_key_id: str = Field(pattern=r"^[A-Za-z0-9._-]{1,128}$")
     signature: str = Field(min_length=40, max_length=256)
 
+    @model_validator(mode="after")
+    def validate_lane_contract(self) -> CommodityCFastShadowDTO:
+        bindings = self.research_bindings
+        producer_fields = (
+            bindings.research_input_bundle_sha256,
+            bindings.research_evidence_manifest_sha256,
+            bindings.snapshot_producer_id,
+        )
+        if self.schema_version == "commodity_c_fast_cross_section_neutral_shadow_v1":
+            if (
+                self.mode != "shadow_only"
+                or self.execution_lane != "official_forward"
+                or self.source_is_month_last_official_day is not True
+                or self.execution_is_next_cross_month_official_day is not True
+                or self.countable_forward is not None
+                or self.expires_at_utc is not None
+                or bindings.snapshot_producer_status
+                != "NOT_IMPLEMENTED_REQUIRES_SEPARATE_AUTHORITY"
+                or any(value is not None for value in producer_fields)
+            ):
+                raise ValueError("official-forward contract fields mismatch")
+            return self
+        if (
+            self.mode != "simnow_shakedown_only"
+            or self.execution_lane != "simnow_shakedown"
+            or self.source_is_month_last_official_day is not False
+            or self.execution_is_next_cross_month_official_day is not False
+            or self.countable_forward is not False
+            or self.expires_at_utc is None
+            or bindings.snapshot_producer_status
+            != "IMPLEMENTED_HUMAN_CONFIRMED_SIMNOW_RESEARCH_BUNDLE_V1"
+            or any(value is None for value in producer_fields)
+        ):
+            raise ValueError("SimNow shakedown contract fields mismatch")
+        return self
+
 
 class CFastShadowStateTargetDTO(StrictFiniteModel):
     product: Product
@@ -171,6 +222,23 @@ class CommodityCFastShadowStateDTO(StrictFiniteModel):
     source_month: str = Field(pattern=r"^\d{4}-\d{2}$")
     source_official_day: date
     execution_day: date
+    continuity_state: Literal["genesis", "verified"]
+    accepted_at_utc: datetime
+    targets: list[CFastShadowStateTargetDTO] = Field(
+        min_length=10, max_length=10
+    )
+    state_checksum: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class CommodityCFastShakedownStateDTO(StrictFiniteModel):
+    schema_version: Literal["commodity_c_fast_shakedown_state_v1"]
+    snapshot_id: str = Field(pattern=r"^[A-Za-z0-9._-]{8,128}$")
+    snapshot_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    execution_lane: Literal["simnow_shakedown"]
+    source_month: str = Field(pattern=r"^\d{4}-\d{2}$")
+    source_official_day: date
+    execution_day: date
+    expires_at_utc: datetime
     continuity_state: Literal["genesis", "verified"]
     accepted_at_utc: datetime
     targets: list[CFastShadowStateTargetDTO] = Field(

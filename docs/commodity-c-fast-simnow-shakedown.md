@@ -5,6 +5,11 @@
 C_FAST Shadow 本身仍无 `TradeService`、下单或撤单能力；Windows 仍只负责
 CTP RPC 执行与事实回传。
 
+Issue #153 起，适配器只接受独立的
+`commodity_c_fast_cross_section_neutral_simnow_shakedown_v1`。
+旧 `official_forward` Shadow 快照会 fail closed；Research bundle、签名、
+验证和安装流程见 `docs/commodity-c-fast-simnow-snapshot.md`。
+
 ## 固定安全边界
 
 - `candidate_id=C_FAST_CROSS_SECTION_NEUTRAL`
@@ -24,10 +29,13 @@ CTP RPC 执行与事实回传。
 ```env
 COMMODITY_C_FAST_SHADOW_ENABLED=true
 COMMODITY_C_FAST_SIMNOW_SHAKEDOWN_ENABLED=false
+COMMODITY_C_FAST_SIMNOW_ENVIRONMENT=simnow
 COMMODITY_C_FAST_SIMNOW_ACCOUNT_HASHES=<dedicated-simnow-account-sha256>
 COMMODITY_C_FAST_SIMNOW_STATE_PATH=logs/commodity-c-fast-shadow/shakedown-session.json
 COMMODITY_C_FAST_SIMNOW_AUTO_DISPATCH_ENABLED=false
 COMMODITY_C_FAST_SIMNOW_MAX_SELECTED_PRODUCTS=2
+RISK_MAX_ORDER_VOLUME=0
+COMMODITY_SIMNOW_MAX_CHILD_ORDER_LOTS=0
 ```
 
 部署默认必须保持两个 shakedown 开关为 `false`。启用前还必须配置并验证现有
@@ -97,6 +105,8 @@ submitted/halted reconcile 的账户、持仓或 RPC 校验异常会立即撤销
 `CANCEL_PENDING` 并由 worker 重试。
 目标手数均为零、仅 exact contract 变化的合法 snapshot 会直接生成可重启恢复的
 no-op 终态证据，不发送委托，也不占用共享执行槽。
+手数配置为 `0` 时不设置单笔上限、不拆分 signed leg；最终目标仍不得超出签名
+snapshot 的整数目标和组合硬风险边界。
 终态 archive 已写而 current pointer 尚未写入时，启动恢复以通过 checksum 和
 chain-tail 校验的 archive 为事实源，修复 pointer 并释放 active plan；不会把
 原 COMPLETE 终态降级成冲突的 HALTED 终态。submitted reconcile 的任意 RPC、

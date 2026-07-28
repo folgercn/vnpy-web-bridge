@@ -90,4 +90,6 @@ def test_reload_is_admin_only_and_has_no_execution_route(monkeypatch) -> None:
     assert reloaded.status_code == 200
     assert reloaded.json()["data"]["reloaded_by"] == "admin"
     assert service.reload_calls == 1
-    assert no_execute.status_code == 404
+    # The frontend GET catch-all makes an unknown POST return 405 rather than
+    # 404; either way, no C_FAST Shadow execution route exists.
+    assert no_execute.status_code in {404, 405}

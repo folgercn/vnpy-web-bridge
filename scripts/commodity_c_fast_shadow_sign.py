@@ -68,7 +68,7 @@ def sign_snapshot(
     )
     snapshot = CommodityCFastShadowDTO.model_validate(draft)
     canonical = canonical_json(unsigned_snapshot_payload(snapshot))
-    signed = snapshot.model_dump(mode="json")
+    signed = snapshot.model_dump(mode="json", exclude_none=True)
     signed["signature"] = base64.b64encode(
         private_key.sign(canonical)
     ).decode("ascii")

@@ -69,7 +69,9 @@ class Settings(BaseSettings):
     telegram_http_timeout_seconds: int = Field(default=8, ge=1)
     telegram_trade_events_enabled: bool = False
 
-    risk_max_order_volume: float = Field(default=1, gt=0)
+    # Zero explicitly disables only the per-order volume ceiling. Portfolio,
+    # position, price, session, account, and emergency gates remain active.
+    risk_max_order_volume: float = Field(default=1, ge=0)
     risk_max_symbol_position: float = Field(default=5, ge=0)
     risk_max_daily_loss: float = Field(default=1000, ge=0)
     risk_price_protection_percent: float = Field(default=3, ge=0)
@@ -84,7 +86,10 @@ class Settings(BaseSettings):
     commodity_simnow_trusted_public_keys_json: str = "{}"
     commodity_simnow_state_path: str = "logs/commodity-simnow/state.json"
     commodity_simnow_min_source_month: str = "2026-08"
-    commodity_simnow_max_child_order_lots: int = Field(default=10, ge=1, le=100)
+    # Zero keeps each signed leg intact instead of splitting it into children.
+    commodity_simnow_max_child_order_lots: int = Field(
+        default=10, ge=0, le=500
+    )
     commodity_simnow_max_orders_per_phase: int = Field(default=128, ge=1, le=500)
     commodity_simnow_max_quote_age_seconds: int = Field(default=5, ge=1, le=60)
     commodity_simnow_max_spread_ticks: float = Field(default=4, gt=0, le=20)
@@ -120,6 +125,7 @@ class Settings(BaseSettings):
     )
     commodity_c_fast_shadow_trusted_public_keys_json: str = "{}"
     commodity_c_fast_simnow_shakedown_enabled: bool = False
+    commodity_c_fast_simnow_environment: str = "disabled"
     commodity_c_fast_simnow_account_hashes: str = ""
     commodity_c_fast_simnow_state_path: str = (
         "logs/commodity-c-fast-shadow/shakedown-session.json"
@@ -168,6 +174,10 @@ class Settings(BaseSettings):
                     "COMMODITY_C_FAST_SHADOW paths must not overlap existing commodity paths"
                 )
         if self.commodity_c_fast_simnow_shakedown_enabled:
+            if self.commodity_c_fast_simnow_environment != "simnow":
+                raise ValueError(
+                    "COMMODITY_C_FAST_SIMNOW_ENVIRONMENT must be exactly simnow"
+                )
             if not self.commodity_c_fast_shadow_enabled:
                 raise ValueError(
                     "COMMODITY_C_FAST_SHADOW_ENABLED must be true when C_FAST SimNow shakedown is enabled"

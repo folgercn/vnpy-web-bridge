@@ -23,7 +23,7 @@ def sha256_json(value: Any) -> str:
 def formula_target_binding_payload(
     snapshot: CommodityCFastShadowDTO,
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "schema_version": snapshot.schema_version,
         "candidate_id": snapshot.candidate_id,
         "frozen_rule_id": snapshot.frozen_rule_id,
@@ -56,7 +56,9 @@ def formula_target_binding_payload(
         "allocator_output_validation": snapshot.allocator_output_validation,
         "daily_roll_alignment": snapshot.daily_roll_alignment,
         "previous_snapshot_hash": snapshot.previous_snapshot_hash,
-        "research_bindings": snapshot.research_bindings.model_dump(mode="json"),
+        "research_bindings": snapshot.research_bindings.model_dump(
+            mode="json", exclude_none=True
+        ),
         "guardrails": snapshot.guardrails.model_dump(mode="json"),
         "allocator": snapshot.allocator.model_dump(mode="json"),
         "targets": [
@@ -64,6 +66,16 @@ def formula_target_binding_payload(
             for target in sorted(snapshot.targets, key=lambda row: row.product)
         ],
     }
+    if snapshot.execution_lane == "simnow_shakedown":
+        payload.update(
+            {
+                "mode": snapshot.mode,
+                "execution_lane": snapshot.execution_lane,
+                "countable_forward": snapshot.countable_forward,
+                "expires_at_utc": snapshot.expires_at_utc.isoformat(),
+            }
+        )
+    return payload
 
 
 def formula_target_binding_sha256(snapshot: CommodityCFastShadowDTO) -> str:
@@ -71,4 +83,6 @@ def formula_target_binding_sha256(snapshot: CommodityCFastShadowDTO) -> str:
 
 
 def unsigned_snapshot_payload(snapshot: CommodityCFastShadowDTO) -> dict[str, Any]:
-    return snapshot.model_dump(mode="json", exclude={"signature"})
+    return snapshot.model_dump(
+        mode="json", exclude={"signature"}, exclude_none=True
+    )

@@ -2071,7 +2071,7 @@ class CommoditySimNowService:
                 "C_FAST Control Plane 快照源未绑定"
             )
         try:
-            return provider()
+            snapshot, snapshot_hash = provider()
         except Exception as exc:
             raise CommoditySimNowSafetyError(
                 "C_FAST 签名快照未通过当前 Control Plane 验证",
@@ -2080,6 +2080,18 @@ class CommoditySimNowService:
                     "error_code": getattr(exc, "code", None),
                 },
             ) from exc
+        if (
+            snapshot.schema_version
+            != "commodity_c_fast_cross_section_neutral_simnow_shakedown_v1"
+            or snapshot.execution_lane != "simnow_shakedown"
+            or snapshot.mode != "simnow_shakedown_only"
+            or snapshot.countable_forward is not False
+            or snapshot.production_allowed is not False
+        ):
+            raise CommoditySimNowSafetyError(
+                "C_FAST Control Plane 输入不是独立非计数 SimNow 合同"
+            )
+        return snapshot, snapshot_hash
 
     def _verify_c_fast_account(self, account_hash: str) -> None:
         allowed = _csv_set(
@@ -8305,6 +8317,8 @@ class CommoditySimNowService:
         price = self._protected_price(direction, quote, PRODUCT_SPECS[product]["price_tick"])
         maximum = self.settings.commodity_simnow_max_child_order_lots
         remaining = abs(signed_delta)
+        if maximum == 0:
+            maximum = remaining
         orders: list[dict[str, Any]] = []
         while remaining:
             volume = min(remaining, maximum)
