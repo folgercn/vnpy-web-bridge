@@ -109,6 +109,31 @@ class FilledWithoutEvidenceTimeoutTrade(FakeTrade):
         raise RpcTimeoutError()
 
 
+def fills_for_submitted(plan: dict) -> list[dict]:
+    rows: list[dict] = []
+    for phase in ("close", "open"):
+        for index, submitted in enumerate(
+            plan["submitted"][phase],
+            start=len(rows) + 1,
+        ):
+            rows.append(
+                {
+                    "vt_tradeid": f"CTP.S{index}",
+                    "vt_orderid": submitted["vt_orderid"],
+                    "gateway_name": "CTP",
+                    "symbol": submitted["symbol"],
+                    "exchange": submitted["exchange"],
+                    "vt_symbol": submitted["vt_symbol"],
+                    "direction": submitted["direction"],
+                    "offset": submitted["offset"],
+                    "reference": submitted["reference"],
+                    "price": submitted["price"],
+                    "volume": submitted["volume"],
+                }
+            )
+    return rows
+
+
 def prepare_c_fast_shakedown(
     tmp_path: Path,
     *,
@@ -164,7 +189,7 @@ def complete_c_fast_ag_session(
     rpc.positions = [
         position("ag", ag.target_quantity, contract_month="2612")
     ]
-    rpc.trades = fills_for_requests(list(service.trade.requests))
+    rpc.trades = fills_for_submitted(service.current_plan)
     service.auto_candidate_shakedown_advance()
     return preview
 
@@ -541,7 +566,7 @@ def test_c_fast_one_start_continues_with_next_accepted_snapshot(
             contract_month="2612",
         )
     ]
-    rpc.trades = fills_for_requests(list(service.trade.requests))
+    rpc.trades = fills_for_submitted(service.current_plan)
     service.auto_candidate_shakedown_advance()
     history = service.c_fast_shakedown_history()
     assert len(history) == 2
@@ -1797,15 +1822,9 @@ def test_c_fast_pnl_requires_complete_evidence_per_child(
     )
     requests = list(service.trade.requests)
     assert len(requests) >= 2
-    rpc.trades = [
-        {
-            "vt_tradeid": "CTP.DUPLICATE",
-            "vt_orderid": f"CTP.{index}",
-            "price": request.price,
-            "volume": request.volume,
-        }
-        for index, request in enumerate(requests[:2], start=1)
-    ]
+    rpc.trades = fills_for_requests(requests[:2])
+    for trade in rpc.trades:
+        trade["vt_tradeid"] = "CTP.DUPLICATE"
 
     pnl = service.c_fast_shakedown_pnl()
 
@@ -1872,7 +1891,7 @@ def test_c_fast_finalize_rechecks_outside_scope_position(
     ]
     rpc.orders = []
     rpc.trades = fills_for_requests(list(service.trade.requests))
-    snapshots = [[], ["IF2609"]]
+    snapshots = [[], [], ["IF2609"]]
     monkeypatch.setattr(
         service,
         "_c_fast_outside_scope_positions",
@@ -2096,7 +2115,9 @@ def test_c_fast_terminal_guard_rejects_account_change_during_capture(
     guard = service.current_plan["halt"]["terminal_guard"]
     assert guard["state"] == "BLOCKED"
     assert guard["account_hash_before"] == ACCOUNT_HASH
-    assert guard["account_hash_after"] == changed_hash
+    assert changed_hash in guard["first_snapshot"][
+        "account_hashes"
+    ]
     assert guard["account_hash_valid"] is False
     assert not service._c_fast_terminal_archive_path(
         preview["session_id"]
@@ -2156,10 +2177,324 @@ def test_c_fast_terminal_guard_rejects_unstable_position_order_window(
     guard = service.current_plan["halt"]["terminal_guard"]
     assert guard["state"] == "BLOCKED"
     assert guard["blockers"][0] == "UNSTABLE_TERMINAL_SNAPSHOT"
-    assert guard["positions_stable"] is False
+    assert guard["facts_stable"] is False
     assert not service._c_fast_terminal_archive_path(
         preview["session_id"]
     ).exists()
+
+
+def test_c_fast_terminal_guard_rejects_external_fill_between_snapshots(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, rpc, snapshot, _ = prepare_c_fast_shakedown(tmp_path)
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    service.start_c_fast_shakedown(
+        preview["plan_hash"],
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+    ag = next(row for row in snapshot.targets if row.product == "ag")
+    settled = [
+        position("ag", ag.target_quantity, contract_month="2612")
+    ]
+    drifted = [
+        position(
+            "ag",
+            ag.target_quantity + 1,
+            contract_month="2612",
+        )
+    ]
+    rpc.positions = settled
+    rpc.orders = []
+    rpc.trades = fills_for_submitted(service.current_plan)
+    execution_snapshot = service._execution_snapshot
+
+    def inject_after_execution(plan):
+        result = execution_snapshot(plan)
+        external_order = {
+            "vt_orderid": "CTP.EXTERNAL-FILL",
+            "orderid": "EXTERNAL-FILL",
+            "gateway_name": "CTP",
+            "symbol": "ag2612",
+            "exchange": "SHFE",
+            "vt_symbol": "ag2612.SHFE",
+            "direction": "long",
+            "offset": "open",
+            "reference": "manual-external",
+            "status": "all_traded",
+        }
+        external_trade = {
+            **external_order,
+            "vt_tradeid": "CTP.T-EXTERNAL-FILL",
+            "price": 10_000,
+            "volume": 1,
+        }
+        calls = {"count": 0}
+
+        def racing_orders():
+            calls["count"] += 1
+            if calls["count"] == 1:
+                rpc.positions = drifted
+                rpc.trades = [
+                    *rpc.trades,
+                    external_trade,
+                ]
+            return [external_order]
+
+        monkeypatch.setattr(rpc, "get_orders", racing_orders)
+        return result
+
+    monkeypatch.setattr(
+        service, "_execution_snapshot", inject_after_execution
+    )
+
+    with pytest.raises(CommoditySimNowSafetyError):
+        service.auto_candidate_shakedown_advance()
+
+    guard = service.current_plan["halt"]["terminal_guard"]
+    assert guard["state"] == "BLOCKED"
+    assert "UNSTABLE_TERMINAL_SNAPSHOT" in guard["blockers"]
+    assert "NEW_EXTERNAL_ORDER_FACTS" in guard["blockers"]
+    assert "NEW_EXTERNAL_TRADE_FACTS" in guard["blockers"]
+    assert not service._c_fast_terminal_archive_path(
+        preview["session_id"]
+    ).exists()
+
+
+def test_c_fast_terminal_guard_rejects_net_neutral_external_facts(
+    tmp_path: Path,
+) -> None:
+    service, rpc, snapshot, _ = prepare_c_fast_shakedown(tmp_path)
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    service.start_c_fast_shakedown(
+        preview["plan_hash"],
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+    ag = next(row for row in snapshot.targets if row.product == "ag")
+    rpc.positions = [
+        position("ag", ag.target_quantity, contract_month="2612")
+    ]
+    rpc.orders = [
+        {
+            "vt_orderid": f"CTP.EXTERNAL-{index}",
+            "orderid": f"EXTERNAL-{index}",
+            "gateway_name": "CTP",
+            "symbol": "ag2612",
+            "exchange": "SHFE",
+            "vt_symbol": "ag2612.SHFE",
+            "direction": direction,
+            "offset": "open",
+            "reference": "manual-external",
+            "status": "all_traded",
+        }
+        for index, direction in enumerate(
+            ("long", "short"), start=1
+        )
+    ]
+    rpc.trades = [
+        *fills_for_submitted(service.current_plan),
+        *[
+            {
+                **order,
+                "vt_tradeid": f"CTP.T-EXTERNAL-{index}",
+                "price": 10_000,
+                "volume": 1,
+            }
+            for index, order in enumerate(rpc.orders, start=1)
+        ],
+    ]
+
+    with pytest.raises(CommoditySimNowSafetyError):
+        service.auto_candidate_shakedown_advance()
+
+    guard = service.current_plan["halt"]["terminal_guard"]
+    assert guard["facts_stable"] is True
+    assert "NEW_EXTERNAL_ORDER_FACTS" in guard["blockers"]
+    assert "NEW_EXTERNAL_TRADE_FACTS" in guard["blockers"]
+    assert not service._c_fast_terminal_archive_path(
+        preview["session_id"]
+    ).exists()
+
+
+def test_c_fast_terminal_guard_rejects_order_after_first_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, rpc, snapshot, _ = prepare_c_fast_shakedown(tmp_path)
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    service.start_c_fast_shakedown(
+        preview["plan_hash"],
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+    ag = next(row for row in snapshot.targets if row.product == "ag")
+    rpc.positions = [
+        position("ag", ag.target_quantity, contract_month="2612")
+    ]
+    rpc.orders = []
+    rpc.trades = fills_for_submitted(service.current_plan)
+    execution_snapshot = service._execution_snapshot
+
+    def inject_after_execution(plan):
+        result = execution_snapshot(plan)
+        calls = {"count": 0}
+        active = {
+            "vt_orderid": "CTP.EXTERNAL-LATE",
+            "orderid": "EXTERNAL-LATE",
+            "gateway_name": "CTP",
+            "symbol": "IF2609",
+            "exchange": "CFFEX",
+            "vt_symbol": "IF2609.CFFEX",
+            "direction": "long",
+            "offset": "open",
+            "reference": "manual-external",
+            "status": "not_traded",
+        }
+
+        def racing_orders():
+            calls["count"] += 1
+            return [] if calls["count"] == 1 else [active]
+
+        monkeypatch.setattr(rpc, "get_orders", racing_orders)
+        return result
+
+    monkeypatch.setattr(
+        service, "_execution_snapshot", inject_after_execution
+    )
+
+    with pytest.raises(CommoditySimNowSafetyError):
+        service.auto_candidate_shakedown_advance()
+
+    guard = service.current_plan["halt"]["terminal_guard"]
+    assert guard["facts_stable"] is False
+    assert "EXTERNAL_ACTIVE_ORDERS" in guard["blockers"]
+
+
+def test_c_fast_terminal_guard_rejects_rpc_generation_aba(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, rpc, snapshot, _ = prepare_c_fast_shakedown(tmp_path)
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    service.start_c_fast_shakedown(
+        preview["plan_hash"],
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+    ag = next(row for row in snapshot.targets if row.product == "ag")
+    rpc.positions = [
+        position("ag", ag.target_quantity, contract_month="2612")
+    ]
+    rpc.orders = []
+    rpc.trades = fills_for_submitted(service.current_plan)
+    safety_snapshot = service._safety_snapshot
+    calls = {"count": 0}
+    generations = ["A", "A", "B", "A", "A"]
+
+    def changing_generation(**kwargs):
+        result = safety_snapshot(**kwargs)
+        generation = generations[min(
+            calls["count"], len(generations) - 1
+        )]
+        calls["count"] += 1
+        return {
+            **result,
+            "rpc_last_connected_at": generation,
+        }
+
+    monkeypatch.setattr(
+        service, "_safety_snapshot", changing_generation
+    )
+
+    with pytest.raises(CommoditySimNowSafetyError):
+        service.auto_candidate_shakedown_advance()
+
+    guard = service.current_plan["halt"]["terminal_guard"]
+    assert guard["rpc_generation_valid"] is False
+    assert "RPC_GENERATION_MISMATCH" in guard["blockers"]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("gateway_name", "OTHER"),
+        ("vt_symbol", "al2612.SHFE"),
+        ("direction", "short"),
+        ("offset", "close"),
+        ("reference", "different-reference"),
+    ],
+)
+def test_c_fast_trade_evidence_rejects_semantic_mismatch(
+    tmp_path: Path,
+    field: str,
+    value: str,
+) -> None:
+    service, rpc, _, _ = prepare_c_fast_shakedown(tmp_path)
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    service.start_c_fast_shakedown(
+        preview["plan_hash"],
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+    trade = fills_for_submitted(service.current_plan)[0]
+    trade[field] = value
+    if field == "gateway_name":
+        trade["vt_orderid"] = trade["vt_orderid"].replace(
+            "CTP.", "OTHER."
+        )
+        trade["orderid"] = trade["vt_orderid"].split(".", 1)[-1]
+    rpc.trades = [trade]
+
+    pnl = service.c_fast_shakedown_pnl()
+
+    assert pnl["trade_evidence_state"] == "INCONSISTENT"
+    assert pnl["trade_cashflow_cny"] is None
+
+
+def test_c_fast_trade_evidence_rejects_missing_semantics(
+    tmp_path: Path,
+) -> None:
+    service, rpc, _, _ = prepare_c_fast_shakedown(tmp_path)
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    service.start_c_fast_shakedown(
+        preview["plan_hash"],
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+    submitted = service.current_plan["submitted"]["open"][0]
+    rpc.trades = [
+        {
+            "vt_tradeid": "CTP.MISSING-SEMANTICS",
+            "vt_orderid": submitted["vt_orderid"],
+            "price": submitted["price"],
+            "volume": submitted["volume"],
+        }
+    ]
+
+    pnl = service.c_fast_shakedown_pnl()
+
+    assert pnl["trade_evidence_state"] == "INCONSISTENT"
+    assert pnl["trade_cashflow_cny"] is None
 
 
 def test_c_fast_submitted_reconcile_error_enters_cancel_recovery(

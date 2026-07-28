@@ -486,6 +486,22 @@ def fills_for_requests(requests: list[Any]) -> list[dict[str, Any]]:
         {
             "vt_tradeid": f"CTP.T{index}",
             "vt_orderid": f"CTP.{index}",
+            "gateway_name": str(request.gateway_name),
+            "symbol": str(request.symbol),
+            "exchange": str(
+                getattr(request.exchange, "value", request.exchange)
+            ),
+            "vt_symbol": (
+                f"{request.symbol}."
+                f"{getattr(request.exchange, 'value', request.exchange)}"
+            ),
+            "direction": str(
+                getattr(request.direction, "value", request.direction)
+            ),
+            "offset": str(
+                getattr(request.offset, "value", request.offset)
+            ),
+            "reference": str(request.reference),
             "price": request.price,
             "volume": request.volume,
         }

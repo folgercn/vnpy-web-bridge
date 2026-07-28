@@ -2165,6 +2165,9 @@ class CommoditySimNowService:
         stored_plan = session.get("plan")
         if not isinstance(stored_plan, dict):
             raise CommoditySimNowStateError("C_FAST 测试计划无效")
+        terminal_fact_watermark_before = (
+            self._c_fast_terminal_fact_watermark()
+        )
         rechecked = self._build_c_fast_shakedown_plan(
             snapshot,
             selected_products=list(session["selected_products"]),
@@ -2201,6 +2204,23 @@ class CommoditySimNowService:
             raise CommoditySimNowSafetyError(
                 "当前交易日与 C_FAST 签名 execution_day 不一致"
             )
+        terminal_fact_watermark = (
+            self._c_fast_terminal_fact_watermark()
+        )
+        if (
+            terminal_fact_watermark_before["order_fact_keys"]
+            != terminal_fact_watermark["order_fact_keys"]
+            or terminal_fact_watermark_before["trade_fact_keys"]
+            != terminal_fact_watermark["trade_fact_keys"]
+        ):
+            raise CommoditySimNowSafetyError(
+                "C_FAST start 前订单或成交事实不稳定"
+            )
+        terminal_fact_watermark[
+            "verified_from_utc"
+        ] = terminal_fact_watermark_before[
+            "captured_at_utc"
+        ]
         plan = {
             "schema_version": "commodity_simnow_active_plan_v1",
             "c_fast_shakedown_session_id": session["session_id"],
@@ -2228,6 +2248,8 @@ class CommoditySimNowService:
             "submitted": {"close": [], "open": []},
             "send_intents": {"close": [], "open": []},
             "submitted_at_utc": {"close": None, "open": None},
+            "terminal_fact_watermark":
+            terminal_fact_watermark,
             "status": (
                 "NOOP_FINALIZING"
                 if stored_plan["phase_status"] == "COMPLETE"
@@ -3931,17 +3953,6 @@ class CommoditySimNowService:
         *,
         reconciliation: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        safety_before = self._safety_snapshot(
-            require_trade_enabled=False,
-            allow_emergency_stopped=True,
-        )
-        account_hash_before = str(
-            safety_before["account_hash"]
-        )
-        gateway_before = str(
-            safety_before.get("gateway_name") or ""
-        )
-        raw_positions_before = self.rpc.get_positions()
         evidence = reconciliation or (
             plan.get("execution") or {}
         ).get("reconciliation")
@@ -3950,17 +3961,198 @@ class CommoditySimNowService:
             if isinstance(evidence, dict)
             else None
         )
-        orders_before = self.rpc.get_orders()
+        first = self._c_fast_terminal_fact_snapshot(plan)
+        second = self._c_fast_terminal_fact_snapshot(plan)
+        account_hash_before = str(first["account_hash_before"])
+        account_hash_after = str(second["account_hash_after"])
+        gateway_before = str(first["gateway_before"])
+        gateway_after = str(second["gateway_after"])
+        account_valid = bool(
+            first["account_binding_stable"]
+            and second["account_binding_stable"]
+            and account_hash_before
+            == account_hash_after
+            == plan.get("account_hash")
+        )
+        gateway_valid = bool(
+            first["gateway_binding_stable"]
+            and second["gateway_binding_stable"]
+            and gateway_before
+            == gateway_after
+            == self.settings.commodity_simnow_gateway_name
+        )
+        for account_hash in set(
+            first["account_hashes"] + second["account_hashes"]
+        ):
+            try:
+                self._verify_c_fast_account(account_hash)
+            except CommoditySimNowSafetyError:
+                account_valid = False
+        facts_stable = bool(
+            first["snapshot_fingerprint"]
+            == second["snapshot_fingerprint"]
+        )
+        final_positions = second["final_positions"]
+        outside_scope = second["outside_scope_positions"]
+        active_plan_orders = second["active_plan_orders"]
+        external_active_orders = second["external_active_orders"]
+        unknown_status_orders = second["unknown_status_orders"]
+        new_external_order_facts = sorted(
+            {
+                row["fact_key"]: row
+                for row in [
+                    *first["new_external_order_facts"],
+                    *second["new_external_order_facts"],
+                ]
+            }.values(),
+            key=lambda row: row["fact_key"],
+        )
+        new_external_trade_facts = sorted(
+            {
+                row["fact_key"]: row
+                for row in [
+                    *first["new_external_trade_facts"],
+                    *second["new_external_trade_facts"],
+                ]
+            }.values(),
+            key=lambda row: row["fact_key"],
+        )
+        generation_valid = bool(
+            first["rpc_generation_stable"]
+            and second["rpc_generation_stable"]
+            and first["rpc_generation_before"]
+            == second["rpc_generation_after"]
+        )
+        blockers: list[str] = []
+        if not facts_stable:
+            blockers.append("UNSTABLE_TERMINAL_SNAPSHOT")
+        if not account_valid:
+            blockers.append("ACCOUNT_HASH_MISMATCH")
+        if not gateway_valid:
+            blockers.append("GATEWAY_MISMATCH")
+        if not generation_valid:
+            blockers.append("RPC_GENERATION_MISMATCH")
+        if outside_scope:
+            blockers.append("OUTSIDE_C_FAST_POSITION_SCOPE")
+        if expected is None or final_positions != expected:
+            blockers.append("FINAL_POSITION_MISMATCH")
+        if active_plan_orders:
+            blockers.append("ACTIVE_SESSION_ORDERS")
+        if external_active_orders:
+            blockers.append("EXTERNAL_ACTIVE_ORDERS")
+        if unknown_status_orders:
+            blockers.append("UNKNOWN_ORDER_STATUS")
+        if new_external_order_facts:
+            blockers.append("NEW_EXTERNAL_ORDER_FACTS")
+        if new_external_trade_facts:
+            blockers.append("NEW_EXTERNAL_TRADE_FACTS")
+        if not plan.get("terminal_fact_watermark"):
+            blockers.append("MISSING_TERMINAL_FACT_WATERMARK")
+        captured_at = self.clock().astimezone(timezone.utc).isoformat()
+        guard = {
+            "captured_at_utc": captured_at,
+            "expected_account_hash": plan.get("account_hash"),
+            "account_hash_before": account_hash_before,
+            "account_hash_after": account_hash_after,
+            "observed_account_hash": account_hash_after,
+            "account_hash_valid": account_valid,
+            "gateway_before": gateway_before,
+            "gateway_after": gateway_after,
+            "gateway_valid": gateway_valid,
+            "rpc_generation_before":
+            first["rpc_generation_before"],
+            "rpc_generation_after":
+            second["rpc_generation_after"],
+            "rpc_generation_valid": generation_valid,
+            "final_positions": final_positions,
+            "expected_positions": expected,
+            "outside_scope_positions": outside_scope,
+            "active_plan_orders": active_plan_orders,
+            "external_active_orders": external_active_orders,
+            "unknown_status_orders": unknown_status_orders,
+            "new_external_order_facts":
+            new_external_order_facts,
+            "new_external_trade_facts":
+            new_external_trade_facts,
+            "first_snapshot": first["evidence"],
+            "second_snapshot": second["evidence"],
+            "facts_stable": facts_stable,
+            "state": "VALID" if not blockers else "BLOCKED",
+            "blockers": blockers,
+        }
+        if blockers:
+            halt = plan.setdefault("halt", {})
+            halt.update(
+                {
+                    "reason": "c_fast_terminal_guard_failed",
+                    "recovery_blocker": blockers[0],
+                    "terminal_guard": guard,
+                }
+            )
+            if outside_scope:
+                halt["outside_scope_positions"] = outside_scope
+            plan["status"] = "HALTED_RECONCILE_REQUIRED"
+            self._revoke_auto_dispatch("c_fast_shakedown")
+            self._persist_active_plan_during_halt(halt)
+            raise CommoditySimNowSafetyError(
+                "C_FAST 终态 guard 校验失败",
+                detail=guard,
+            )
+        return guard
+
+    def _c_fast_terminal_fact_watermark(
+        self,
+    ) -> dict[str, Any]:
+        orders = self.rpc.get_orders()
+        trades = self.rpc.get_trades()
+        return {
+            "captured_at_utc":
+            self.clock().astimezone(timezone.utc).isoformat(),
+            "order_fact_keys": sorted(
+                self._c_fast_order_fact_key(order)
+                for order in orders
+            ),
+            "trade_fact_keys": sorted(
+                self._c_fast_trade_fact_key(trade)
+                for trade in trades
+            ),
+        }
+
+    def _c_fast_terminal_fact_snapshot(
+        self, plan: dict[str, Any]
+    ) -> dict[str, Any]:
+        safety_before = self._safety_snapshot(
+            require_trade_enabled=False,
+            allow_emergency_stopped=True,
+        )
         raw_positions = self.rpc.get_positions()
         orders = self.rpc.get_orders()
-        positions_stable = (
-            _sha256_json(raw_positions_before)
-            == _sha256_json(raw_positions)
+        trades = self.rpc.get_trades()
+        safety_after = self._safety_snapshot(
+            require_trade_enabled=False,
+            allow_emergency_stopped=True,
         )
-        orders_stable = (
-            _sha256_json(orders_before)
-            == _sha256_json(orders)
-        )
+        account_hashes = [
+            str(safety_before["account_hash"]),
+            str(safety_after["account_hash"]),
+        ]
+        gateways = [
+            str(safety_before.get("gateway_name") or ""),
+            str(safety_after.get("gateway_name") or ""),
+        ]
+        generations = [
+            str(
+                safety_before.get("rpc_last_connected_at")
+                or ""
+            ),
+            str(
+                safety_after.get("rpc_last_connected_at")
+                or ""
+            ),
+        ]
+        positions_hash = _sha256_json(raw_positions)
+        orders_hash = _sha256_json(orders)
+        trades_hash = _sha256_json(trades)
         outside_scope = self._c_fast_outside_scope_positions(
             raw_positions
         )
@@ -3997,95 +4189,183 @@ class CommoditySimNowService:
             if _normalize_status(order.get("status"))
             not in KNOWN_ORDER_STATUSES
         ]
-        safety_after = self._safety_snapshot(
-            require_trade_enabled=False,
-            allow_emergency_stopped=True,
+        watermark = plan.get("terminal_fact_watermark") or {}
+        baseline_order_keys = set(
+            watermark.get("order_fact_keys") or []
         )
-        account_hash_after = str(safety_after["account_hash"])
-        gateway_after = str(
-            safety_after.get("gateway_name") or ""
+        baseline_trade_keys = set(
+            watermark.get("trade_fact_keys") or []
         )
-        account_valid = bool(
-            account_hash_before
-            == account_hash_after
-            == plan.get("account_hash")
-        )
-        gateway_valid = bool(
-            gateway_before
-            == gateway_after
-            == self.settings.commodity_simnow_gateway_name
-        )
-        for account_hash in {
-            account_hash_before,
-            account_hash_after,
-        }:
-            try:
-                self._verify_c_fast_account(account_hash)
-            except CommoditySimNowSafetyError:
-                account_valid = False
-        blockers: list[str] = []
-        if not positions_stable or not orders_stable:
-            blockers.append("UNSTABLE_TERMINAL_SNAPSHOT")
-        if not account_valid:
-            blockers.append("ACCOUNT_HASH_MISMATCH")
-        if not gateway_valid:
-            blockers.append("GATEWAY_MISMATCH")
-        if outside_scope:
-            blockers.append("OUTSIDE_C_FAST_POSITION_SCOPE")
-        if expected is None or final_positions != expected:
-            blockers.append("FINAL_POSITION_MISMATCH")
-        if active_plan_orders:
-            blockers.append("ACTIVE_SESSION_ORDERS")
-        if external_active_orders:
-            blockers.append("EXTERNAL_ACTIVE_ORDERS")
-        if unknown_status_orders:
-            blockers.append("UNKNOWN_ORDER_STATUS")
-        captured_at = self.clock().astimezone(timezone.utc).isoformat()
-        guard = {
-            "captured_at_utc": captured_at,
-            "expected_account_hash": plan.get("account_hash"),
-            "account_hash_before": account_hash_before,
-            "account_hash_after": account_hash_after,
-            "observed_account_hash": account_hash_after,
-            "account_hash_valid": account_valid,
-            "gateway_before": gateway_before,
-            "gateway_after": gateway_after,
-            "gateway_valid": gateway_valid,
+        new_external_order_facts = [
+            {
+                "fact_key": fact_key,
+                "vt_orderid": str(
+                    order.get("vt_orderid")
+                    or order.get("orderid")
+                    or "unknown"
+                ),
+                "status": _normalize_status(
+                    order.get("status")
+                ),
+            }
+            for order in orders
+            for fact_key in [self._c_fast_order_fact_key(order)]
+            if fact_key not in baseline_order_keys
+            and not self._c_fast_order_belongs_to_plan(
+                plan, order
+            )
+        ]
+        new_external_trade_facts = [
+            {
+                "fact_key": fact_key,
+                "vt_tradeid": str(
+                    trade.get("vt_tradeid")
+                    or trade.get("tradeid")
+                    or "unknown"
+                ),
+            }
+            for trade in trades
+            for fact_key in [self._c_fast_trade_fact_key(trade)]
+            if fact_key not in baseline_trade_keys
+            and not self._c_fast_trade_belongs_to_plan(
+                plan, trade
+            )
+        ]
+        fingerprint_payload = {
+            "account_hashes": account_hashes,
+            "gateways": gateways,
+            "generations": generations,
+            "positions_hash": positions_hash,
+            "orders_hash": orders_hash,
+            "trades_hash": trades_hash,
+        }
+        return {
+            "account_hash_before": account_hashes[0],
+            "account_hash_after": account_hashes[1],
+            "account_hashes": account_hashes,
+            "account_binding_stable":
+            len(set(account_hashes)) == 1,
+            "gateway_before": gateways[0],
+            "gateway_after": gateways[1],
+            "gateway_binding_stable":
+            len(set(gateways)) == 1,
+            "rpc_generation_before": generations[0],
+            "rpc_generation_after": generations[1],
+            "rpc_generation_stable":
+            len(set(generations)) == 1,
             "final_positions": final_positions,
-            "expected_positions": expected,
             "outside_scope_positions": outside_scope,
             "active_plan_orders": active_plan_orders,
             "external_active_orders": external_active_orders,
             "unknown_status_orders": unknown_status_orders,
-            "positions_hash_before":
-            _sha256_json(raw_positions_before),
-            "positions_hash_after": _sha256_json(raw_positions),
-            "orders_hash_before": _sha256_json(orders_before),
-            "orders_hash_after": _sha256_json(orders),
-            "positions_stable": positions_stable,
-            "orders_stable": orders_stable,
-            "state": "VALID" if not blockers else "BLOCKED",
-            "blockers": blockers,
+            "new_external_order_facts":
+            new_external_order_facts,
+            "new_external_trade_facts":
+            new_external_trade_facts,
+            "snapshot_fingerprint":
+            _sha256_json(fingerprint_payload),
+            "evidence": {
+                "captured_at_utc":
+                self.clock().astimezone(timezone.utc).isoformat(),
+                **fingerprint_payload,
+            },
         }
-        if blockers:
-            halt = plan.setdefault("halt", {})
-            halt.update(
-                {
-                    "reason": "c_fast_terminal_guard_failed",
-                    "recovery_blocker": blockers[0],
-                    "terminal_guard": guard,
-                }
+
+    @staticmethod
+    def _c_fast_order_fact_key(
+        order: dict[str, Any]
+    ) -> str:
+        return _sha256_json(
+            {
+                "gateway": str(
+                    order.get("gateway_name")
+                    or order.get("gateway")
+                    or ""
+                ),
+                "vt_orderid": str(
+                    order.get("vt_orderid") or ""
+                ),
+                "orderid": str(order.get("orderid") or ""),
+                "reference": str(
+                    order.get("reference") or ""
+                ),
+                "vt_symbol": str(
+                    order.get("vt_symbol") or ""
+                ),
+                "symbol": str(order.get("symbol") or ""),
+                "direction": _normalize_direction(
+                    order.get("direction")
+                ),
+                "offset": _value(
+                    order.get("offset") or ""
+                ).lower(),
+            }
+        )
+
+    @staticmethod
+    def _c_fast_trade_fact_key(
+        trade: dict[str, Any]
+    ) -> str:
+        gateway = str(
+            trade.get("gateway_name")
+            or trade.get("gateway")
+            or ""
+        )
+        trade_id = str(
+            trade.get("vt_tradeid")
+            or trade.get("tradeid")
+            or ""
+        )
+        return (
+            f"{gateway}:{trade_id}"
+            if trade_id
+            else _sha256_json(trade)
+        )
+
+    def _c_fast_order_belongs_to_plan(
+        self,
+        plan: dict[str, Any],
+        order: dict[str, Any],
+    ) -> bool:
+        references = {
+            str(row.get("reference") or "")
+            for phase in ("close", "open")
+            for collection in (
+                f"{phase}_orders",
             )
-            if outside_scope:
-                halt["outside_scope_positions"] = outside_scope
-            plan["status"] = "HALTED_RECONCILE_REQUIRED"
-            self._revoke_auto_dispatch("c_fast_shakedown")
-            self._persist_active_plan_during_halt(halt)
-            raise CommoditySimNowSafetyError(
-                "C_FAST 终态 guard 校验失败",
-                detail=guard,
+            for row in plan.get(collection, [])
+        }
+        references.update(
+            str(row.get("reference") or "")
+            for phase in ("close", "open")
+            for row in plan.get("send_intents", {}).get(
+                phase, []
             )
-        return guard
+        )
+        references.discard("")
+        submitted_ids = {
+            alias
+            for order_id in self._submitted_order_ids(plan)
+            for alias in _order_id_aliases(order_id)
+        }
+        return bool(
+            str(order.get("reference") or "") in references
+            or self._order_ids(order).intersection(submitted_ids)
+        )
+
+    def _c_fast_trade_belongs_to_plan(
+        self,
+        plan: dict[str, Any],
+        trade: dict[str, Any],
+    ) -> bool:
+        return any(
+            self._trade_child_match_state(trade, submitted)
+            == "MATCH"
+            for phase in ("close", "open")
+            for submitted in plan.get("submitted", {}).get(
+                phase, []
+            )
+        )
 
     def _c_fast_shakedown_state_path(self) -> Path:
         return Path(
@@ -6525,6 +6805,8 @@ class CommoditySimNowService:
         return {
             "rpc_connected": True,
             "gateway_name": gateway,
+            "rpc_last_connected_at":
+            status.get("last_connected_at"),
             "account_hash": account_hash,
             "web_trade_enabled": bool(risk_status.get("web_trade_enabled")),
             "emergency_stopped": bool(risk_status.get("emergency_stopped")),
@@ -7205,6 +7487,82 @@ class CommoditySimNowService:
                 active.append(str(order.get("vt_orderid") or order.get("orderid") or "unknown"))
         return sorted(active)
 
+    def _trade_child_match_state(
+        self,
+        trade: dict[str, Any],
+        submitted: dict[str, Any],
+    ) -> str:
+        if not self._order_ids(trade).intersection(
+            self._order_ids(submitted)
+        ):
+            return "NO_MATCH"
+        gateway = self._row_gateway(trade)
+        submitted_gateway = self._row_gateway(submitted)
+        if (
+            not gateway
+            or not submitted_gateway
+            or gateway != submitted_gateway
+            or gateway
+            != self.settings.commodity_simnow_gateway_name
+        ):
+            return "INCONSISTENT"
+        vt_symbol = self._row_vt_symbol(trade)
+        submitted_vt_symbol = self._row_vt_symbol(submitted)
+        if (
+            not vt_symbol
+            or not submitted_vt_symbol
+            or vt_symbol != submitted_vt_symbol
+        ):
+            return "INCONSISTENT"
+        direction = _normalize_direction(trade.get("direction"))
+        submitted_direction = _normalize_direction(
+            submitted.get("direction")
+        )
+        offset = _value(trade.get("offset") or "").lower()
+        submitted_offset = _value(
+            submitted.get("offset") or ""
+        ).lower()
+        if (
+            not direction
+            or direction != submitted_direction
+            or not offset
+            or offset != submitted_offset
+        ):
+            return "INCONSISTENT"
+        reference = str(trade.get("reference") or "")
+        if (
+            reference
+            and reference
+            != str(submitted.get("reference") or "")
+        ):
+            return "INCONSISTENT"
+        return "MATCH"
+
+    @staticmethod
+    def _row_gateway(row: dict[str, Any]) -> str:
+        gateway = str(
+            row.get("gateway_name")
+            or row.get("gateway")
+            or ""
+        )
+        if gateway:
+            return gateway
+        vt_orderid = str(row.get("vt_orderid") or "")
+        return (
+            vt_orderid.split(".", 1)[0]
+            if "." in vt_orderid
+            else ""
+        )
+
+    @staticmethod
+    def _row_vt_symbol(row: dict[str, Any]) -> str:
+        vt_symbol = str(row.get("vt_symbol") or "")
+        if vt_symbol:
+            return vt_symbol
+        symbol = str(row.get("symbol") or "")
+        exchange = _value(row.get("exchange") or "")
+        return f"{symbol}.{exchange}" if symbol and exchange else ""
+
     def _execution_snapshot(self, plan: dict[str, Any]) -> dict[str, Any]:
         try:
             orders = self.rpc.get_orders()
@@ -7229,7 +7587,7 @@ class CommoditySimNowService:
                 or trade.get("tradeid")
                 or ""
             )
-            gateway = str(trade.get("gateway_name") or "")
+            gateway = self._row_gateway(trade)
             trade_key = (
                 f"{gateway}:{trade_id}"
                 if trade_id
@@ -7240,30 +7598,47 @@ class CommoditySimNowService:
             seen_trade_keys.add(trade_key)
             unique_trades.append((trade_key, trade))
 
+        children = [
+            (phase, submitted)
+            for phase in ("close", "open")
+            for submitted in plan["submitted"][phase]
+        ]
+        trades_by_child: dict[
+            int, list[dict[str, Any]]
+        ] = {index: [] for index in range(len(children))}
+        inconsistent_children: set[int] = set()
+        for _, trade in unique_trades:
+            states = [
+                self._trade_child_match_state(trade, submitted)
+                for _, submitted in children
+            ]
+            matches = [
+                index
+                for index, state in enumerate(states)
+                if state == "MATCH"
+            ]
+            inconsistent = [
+                index
+                for index, state in enumerate(states)
+                if state == "INCONSISTENT"
+            ]
+            if len(matches) == 1 and not inconsistent:
+                trades_by_child[matches[0]].append(trade)
+            elif matches or inconsistent:
+                inconsistent_children.update(
+                    [*matches, *inconsistent]
+                )
+
         rows: list[dict[str, Any]] = []
-        assigned_trade_keys: set[str] = set()
         expected_volume = 0
         filled_volume = 0.0
         adverse_slippage_ticks_volume = 0.0
         slippage_cny = 0.0
-        for phase in ("close", "open"):
-            for submitted in plan["submitted"][phase]:
+        for child_index, (phase, submitted) in enumerate(children):
                 expected = int(submitted["volume"])
                 expected_volume += expected
                 ids = self._order_ids(submitted)
-                matching_trade_rows = [
-                    (trade_key, trade)
-                    for trade_key, trade in unique_trades
-                    if trade_key not in assigned_trade_keys
-                    and ids.intersection(self._order_ids(trade))
-                ]
-                assigned_trade_keys.update(
-                    trade_key
-                    for trade_key, _ in matching_trade_rows
-                )
-                matching_trades = [
-                    trade for _, trade in matching_trade_rows
-                ]
+                matching_trades = trades_by_child[child_index]
                 fill_volume = sum(float(trade.get("volume") or 0) for trade in matching_trades)
                 fill_notional = sum(
                     float(trade.get("price") or 0) * float(trade.get("volume") or 0)
@@ -7293,7 +7668,8 @@ class CommoditySimNowService:
                         "fill_ratio": min(fill_volume / expected, 1.0) if expected else 0.0,
                         "trade_evidence_state": (
                             "INCONSISTENT"
-                            if fill_volume > expected
+                            if child_index in inconsistent_children
+                            or fill_volume > expected
                             else "COMPLETE"
                             if fill_volume == expected
                             else "INCOMPLETE"

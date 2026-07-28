@@ -153,6 +153,13 @@ terminal commit 还会最终复验原始持仓、精确 expected positions、ses
 hash 写入 `terminal_guard`。成交回报按
 gateway/trade id 去重且逐 child 要求完整；任一 child 缺失或超额时，PnL
 分别标记 `INCOMPLETE` 或 `INCONSISTENT`，金额字段保持 `None`。
+start 会在实时计划重建前后保存稳定的 order/trade watermark。terminal commit
+连续采集两组完整的 account/gateway/connection generation、positions、orders
+和 trades 快照；两组完整事实 hash 必须相同。watermark 后出现的任何非本
+session order/trade fact（包括已完成且净持仓往返为零）都会阻止归档。
+session trade 归属除 order id 外还必须绑定 CTP gateway、exact contract、
+direction、offset，并在回报提供 reference 时要求 reference 一致；裸 ID
+碰撞、语义缺失或多 child 歧义均标记 `INCONSISTENT`。
 遗留 `NOOP_FINALIZING` 在启动时遇到 RPC 暂时不可用只记录恢复错误并保持
 fail-closed，后端和 worker 仍会启动，RPC 恢复后自动重试 no-op 终态提交。
 
