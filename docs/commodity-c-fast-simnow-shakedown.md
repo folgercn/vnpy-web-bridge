@@ -94,6 +94,10 @@ submitted、halted reconcile 和 terminal finalize 都会重新读取原始账�
 发现固定十品种范围外持仓时撤权并保留 active plan，禁止生成终态归档。
 目标手数均为零、仅 exact contract 变化的合法 snapshot 会直接生成可重启恢复的
 no-op 终态证据，不发送委托，也不占用共享执行槽。
+终态 archive 已写而 current pointer 尚未写入时，启动恢复以通过 checksum 和
+chain-tail 校验的 archive 为事实源，修复 pointer 并释放 active plan；不会把
+原 COMPLETE 终态降级成冲突的 HALTED 终态。submitted reconcile 的任意 RPC、
+账户或安全异常都会先撤权并进入定向撤单/`CANCEL_PENDING` 收口。
 共享 active-plan 落盘失败同样不得阻断 live RPC 查询和撤单，结果会显式记录
 `active_state_persistence_error`；服务 shutdown 使用 finally 保证 worker
 一定停止。
@@ -127,6 +131,10 @@ RPC 可用但 `expected_volume > filled_volume` 时同样返回
 安全收口，但不能把迟到的 trade callback 当作零成交或零 PnL。
 终态 `execution_snapshot` 与 PnL 的成交量、成交现金流和滑点来自同一次
 orders/trades 采集，并记录相同的 `execution_captured_at_utc`。
+terminal commit 还会最终复验原始持仓、精确 expected positions、session
+活动委托和外部活动委托，并把快照 hash 写入 `terminal_guard`。成交回报按
+gateway/trade id 去重且逐 child 要求完整；任一 child 缺失或超额时，PnL
+分别标记 `INCOMPLETE` 或 `INCONSISTENT`，金额字段保持 `None`。
 
 ## 本地验证
 

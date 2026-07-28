@@ -292,6 +292,12 @@ class CommoditySimNowService:
         }
 
     def start(self) -> None:
+        if (
+            self.current_plan
+            and self.current_plan.get("status") == "NOOP_FINALIZING"
+            and self.current_plan.get("c_fast_shakedown_session_id")
+        ):
+            self._complete_c_fast_noop_plan(self.current_plan)
         if self.current_plan and self.current_plan.get("status") != "COMPLETE":
             self._begin_safe_halt(
                 "process_restart_recovery",
@@ -876,21 +882,42 @@ class CommoditySimNowService:
                 self.order_endpoint_touched = True
         except Exception as exc:
             if current_intent is not None:
-                deterministic_rejection = self._is_deterministic_pre_rpc_rejection(exc)
-                current_intent["intent_status"] = (
-                    "REJECTED_PRE_RPC" if deterministic_rejection else "OUTCOME_UNKNOWN"
+                rpc_acknowledged = (
+                    current_intent.get("intent_status")
+                    == "ACKNOWLEDGED"
                 )
+                deterministic_rejection = (
+                    not rpc_acknowledged
+                    and self._is_deterministic_pre_rpc_rejection(exc)
+                )
+                if not rpc_acknowledged:
+                    current_intent["intent_status"] = (
+                        "REJECTED_PRE_RPC"
+                        if deterministic_rejection
+                        else "OUTCOME_UNKNOWN"
+                    )
                 current_intent["error_type"] = exc.__class__.__name__
                 current_intent["error_code"] = getattr(exc, "code", None)
                 current_intent["failed_at_utc"] = self.clock().astimezone(timezone.utc).isoformat()
             plan["status"] = f"{payload.phase.upper()}_SUBMISSION_PARTIAL"
-            self._persist_active_plan()
+            evidence_persist_error: str | None = None
+            try:
+                self._persist_active_plan()
+            except Exception as persist_exc:
+                evidence_persist_error = persist_exc.__class__.__name__
             halt = self._begin_safe_halt(
                 "partial_submission",
                 operator=operator,
                 source_ip=source_ip,
                 phase=payload.phase,
             )
+            if evidence_persist_error:
+                plan.setdefault("halt", {})[
+                    "submission_evidence_persistence_error"
+                ] = evidence_persist_error
+                self._persist_active_plan_during_halt(
+                    plan["halt"]
+                )
             self._event(
                 "submission_partial",
                 plan_hash=plan["plan_hash"],
@@ -1124,8 +1151,10 @@ class CommoditySimNowService:
                 halt = plan.setdefault("halt", {})
                 plan["status"] = (
                     "HALTED_RECONCILE_REQUIRED"
-                    if halt.get("recovery_blocker")
-                    == "OUTSIDE_C_FAST_POSITION_SCOPE"
+                    if (
+                        halt.get("terminal_guard", {}).get("state")
+                        == "BLOCKED"
+                    )
                     else status_before_reconcile
                 )
                 halt["terminal_finalize_error_type"] = exc.__class__.__name__
@@ -1290,11 +1319,30 @@ class CommoditySimNowService:
                 **self._candidate_shakedown_status(plan),
             }
         if status == "HALTED_RECONCILE_REQUIRED":
+            phase = self._infer_plan_phase(plan)
             try:
                 result = self.reconcile(plan["plan_hash"], operator=operator, role=role, source_ip=source_ip, dispatch_mode="auto")
-            except Exception:
+            except Exception as exc:
                 self._revoke_auto_dispatch(
                     self._candidate_revoke_scope(plan)
+                )
+                self._begin_safe_halt(
+                    "shakedown_reconcile_failed",
+                    operator=operator,
+                    source_ip=source_ip,
+                    phase=phase,
+                    revoke_scope=self._candidate_revoke_scope(plan),
+                )
+                plan.setdefault("halt", {}).update(
+                    {
+                        "reconcile_error_type":
+                        exc.__class__.__name__,
+                        "reconcile_failed_at_utc":
+                        self.clock().astimezone(timezone.utc).isoformat(),
+                    }
+                )
+                self._persist_active_plan_during_halt(
+                    plan["halt"]
                 )
                 raise
             return {"action": "halted_reconciled" if result["status"] == "HALTED_RECONCILED" else "halted_reconcile_required", **result}
@@ -1368,9 +1416,49 @@ class CommoditySimNowService:
                     }
             try:
                 result = self.reconcile(plan["plan_hash"], operator=operator, role=role, source_ip=source_ip, dispatch_mode="auto")
-            except Exception:
+            except Exception as exc:
                 self._revoke_auto_dispatch(
                     self._candidate_revoke_scope(plan)
+                )
+                if plan.get("c_fast_shakedown_session_id"):
+                    try:
+                        archived = self._load_c_fast_terminal_archive(
+                            str(plan["c_fast_shakedown_session_id"])
+                        )
+                        chain, chain_state = (
+                            self._c_fast_terminal_chain()
+                        )
+                    except Exception:
+                        archived = None
+                        chain = []
+                        chain_state = "CHAIN_BROKEN"
+                    if (
+                        archived
+                        and archived.get("plan_hash")
+                        == plan.get("plan_hash")
+                        and chain_state == "VALID"
+                        and chain
+                        and chain[-1].get("terminal_checksum")
+                        == archived.get("terminal_checksum")
+                    ):
+                        raise
+                self._begin_safe_halt(
+                    "shakedown_reconcile_failed",
+                    operator=operator,
+                    source_ip=source_ip,
+                    phase=phase,
+                    revoke_scope=self._candidate_revoke_scope(plan),
+                )
+                plan.setdefault("halt", {}).update(
+                    {
+                        "reconcile_error_type":
+                        exc.__class__.__name__,
+                        "reconcile_failed_at_utc":
+                        self.clock().astimezone(timezone.utc).isoformat(),
+                    }
+                )
+                self._persist_active_plan_during_halt(
+                    plan["halt"]
                 )
                 raise
             if result["status"] == "READY_OPEN":
@@ -2567,9 +2655,16 @@ class CommoditySimNowService:
                 detail={"symbols": outside_scope},
             )
 
-    def _c_fast_outside_scope_positions(self) -> list[str]:
+    def _c_fast_outside_scope_positions(
+        self,
+        positions: list[dict[str, Any]] | None = None,
+    ) -> list[str]:
         outside_scope: list[str] = []
-        for position in self.rpc.get_positions():
+        for position in (
+            positions
+            if positions is not None
+            else self.rpc.get_positions()
+        ):
             volume = float(position.get("volume") or 0)
             if volume <= 0:
                 continue
@@ -3731,24 +3826,6 @@ class CommoditySimNowService:
         status: str,
         reconciliation: dict[str, Any] | None,
     ) -> None:
-        outside_scope = self._c_fast_outside_scope_positions()
-        if outside_scope:
-            halt = plan.setdefault("halt", {})
-            halt.update(
-                {
-                    "reason": "c_fast_outside_scope_position",
-                    "recovery_blocker":
-                    "OUTSIDE_C_FAST_POSITION_SCOPE",
-                    "outside_scope_positions": outside_scope,
-                }
-            )
-            plan["status"] = "HALTED_RECONCILE_REQUIRED"
-            self._revoke_auto_dispatch("c_fast_shakedown")
-            self._persist_active_plan_during_halt(halt)
-            raise CommoditySimNowSafetyError(
-                "账户存在 C_FAST 固定十品种范围外持仓",
-                detail={"symbols": outside_scope},
-            )
         session_id = str(
             plan.get("c_fast_shakedown_session_id") or ""
         )
@@ -3773,6 +3850,9 @@ class CommoditySimNowService:
                 )
             session = archived
         else:
+            terminal_guard = self._c_fast_terminal_guard(
+                plan, reconciliation=reconciliation
+            )
             self._verify_c_fast_archive_predecessor(
                 plan.get("previous_terminal_checksum")
             )
@@ -3799,7 +3879,8 @@ class CommoditySimNowService:
                 reconciliation
                 or (plan.get("execution") or {}).get("reconciliation"),
                 "final_positions":
-                self._signed_positions(self._position_snapshot()),
+                terminal_guard["final_positions"],
+                "terminal_guard": terminal_guard,
                 "execution_snapshot":
                 execution_snapshot,
                 "pnl": self._c_fast_pnl(
@@ -3821,6 +3902,78 @@ class CommoditySimNowService:
         self.c_fast_shakedown_auto_dispatch_authorized = False
         if self.current_plan is plan:
             self.current_plan = None
+
+    def _c_fast_terminal_guard(
+        self,
+        plan: dict[str, Any],
+        *,
+        reconciliation: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        raw_positions = self.rpc.get_positions()
+        outside_scope = self._c_fast_outside_scope_positions(
+            raw_positions
+        )
+        final_positions = self._signed_positions(
+            self._position_snapshot(raw_positions)
+        )
+        evidence = reconciliation or (
+            plan.get("execution") or {}
+        ).get("reconciliation")
+        expected = (
+            evidence.get("expected_positions")
+            if isinstance(evidence, dict)
+            else None
+        )
+        orders = self.rpc.get_orders()
+        active_plan_orders = self._active_plan_orders_from_snapshot(
+            plan, orders
+        )
+        external_active_orders = (
+            self._candidate_shakedown_external_active_orders_from_snapshot(
+                plan, orders
+            )
+        )
+        blockers: list[str] = []
+        if outside_scope:
+            blockers.append("OUTSIDE_C_FAST_POSITION_SCOPE")
+        if expected is None or final_positions != expected:
+            blockers.append("FINAL_POSITION_MISMATCH")
+        if active_plan_orders:
+            blockers.append("ACTIVE_SESSION_ORDERS")
+        if external_active_orders:
+            blockers.append("EXTERNAL_ACTIVE_ORDERS")
+        captured_at = self.clock().astimezone(timezone.utc).isoformat()
+        guard = {
+            "captured_at_utc": captured_at,
+            "final_positions": final_positions,
+            "expected_positions": expected,
+            "outside_scope_positions": outside_scope,
+            "active_plan_orders": active_plan_orders,
+            "external_active_orders": external_active_orders,
+            "positions_hash": _sha256_json(raw_positions),
+            "orders_hash": _sha256_json(orders),
+            "state": "VALID" if not blockers else "BLOCKED",
+            "blockers": blockers,
+        }
+        if blockers:
+            halt = plan.setdefault("halt", {})
+            halt.update(
+                {
+                    "reason": "c_fast_terminal_guard_failed",
+                    "recovery_blocker": blockers[0],
+                    "terminal_guard": guard,
+                }
+            )
+            if outside_scope:
+                halt["outside_scope_positions"] = outside_scope
+            plan["status"] = "HALTED_RECONCILE_REQUIRED"
+            self._revoke_auto_dispatch("c_fast_shakedown")
+            self._persist_active_plan_during_halt(halt)
+            raise CommoditySimNowSafetyError(
+                "C_FAST 终态 guard 校验失败",
+                detail=guard,
+            )
+        return guard
 
     def _c_fast_shakedown_state_path(self) -> Path:
         return Path(
@@ -4227,11 +4380,21 @@ class CommoditySimNowService:
             }
         expected_volume = float(execution.get("expected_volume") or 0)
         filled_volume = float(execution.get("filled_volume") or 0)
+        child_evidence_states = {
+            str(row.get("trade_evidence_state") or "INCOMPLETE")
+            for row in execution.get("orders", [])
+        }
+        inconsistent_child = "INCONSISTENT" in child_evidence_states
+        incomplete_child = any(
+            state != "COMPLETE"
+            for state in child_evidence_states
+        )
         recovery_blocker = str(
             plan.get("halt", {}).get("recovery_blocker") or ""
         )
         if (
-            filled_volume < expected_volume
+            filled_volume != expected_volume
+            or incomplete_child
             or recovery_blocker
             in {
                 "UNATTRIBUTED_FIXED_SCOPE_ACTIVE_ORDERS",
@@ -4256,7 +4419,12 @@ class CommoditySimNowService:
                 "fees_cny": None,
                 "net_pnl_state": "UNAVAILABLE",
                 "execution_snapshot_available": True,
-                "trade_evidence_state": "INCOMPLETE",
+                "trade_evidence_state": (
+                    "INCONSISTENT"
+                    if inconsistent_child
+                    or filled_volume > expected_volume
+                    else "INCOMPLETE"
+                ),
                 "execution_captured_at_utc":
                 execution.get("captured_at_utc"),
                 "expected_volume": expected_volume,
@@ -4361,6 +4529,36 @@ class CommoditySimNowService:
             if session
             else False
         )
+        if is_c_fast and session_id:
+            try:
+                archived = self._load_c_fast_terminal_archive(
+                    str(session_id)
+                )
+                chain, chain_state = self._c_fast_terminal_chain()
+            except Exception:
+                archived = None
+                chain = []
+                chain_state = "CHAIN_BROKEN"
+            if (
+                archived
+                and archived.get("plan_hash")
+                == plan.get("plan_hash")
+                and chain_state == "VALID"
+                and chain
+                and chain[-1].get("terminal_checksum")
+                == archived.get("terminal_checksum")
+            ):
+                try:
+                    self._save_c_fast_shakedown_state(archived)
+                except Exception as exc:
+                    self._state_load_error = (
+                        "c_fast_terminal_commit_recovery:"
+                        f"{exc.__class__.__name__}"
+                    )
+                    return
+                self.current_plan = None
+                self._active_state_path().unlink(missing_ok=True)
+                return
         if (
             session
             and session.get("session_id") == session_id
@@ -6599,9 +6797,16 @@ class CommoditySimNowService:
             result[vt_symbol] = contract
         return result
 
-    def _position_snapshot(self) -> dict[str, dict[str, Any]]:
+    def _position_snapshot(
+        self,
+        positions: list[dict[str, Any]] | None = None,
+    ) -> dict[str, dict[str, Any]]:
         result: dict[str, dict[str, Any]] = {}
-        for position in self.rpc.get_positions():
+        for position in (
+            positions
+            if positions is not None
+            else self.rpc.get_positions()
+        ):
             symbol = str(position.get("symbol") or "")
             exchange = _value(position.get("exchange") or "")
             vt_symbol = str(position.get("vt_symbol") or f"{symbol}.{exchange}")
@@ -6880,8 +7085,27 @@ class CommoditySimNowService:
         for order in orders:
             for order_id in self._order_ids(order):
                 order_by_id[order_id] = order
+        unique_trades: list[tuple[str, dict[str, Any]]] = []
+        seen_trade_keys: set[str] = set()
+        for trade in trades:
+            trade_id = str(
+                trade.get("vt_tradeid")
+                or trade.get("tradeid")
+                or ""
+            )
+            gateway = str(trade.get("gateway_name") or "")
+            trade_key = (
+                f"{gateway}:{trade_id}"
+                if trade_id
+                else _sha256_json(trade)
+            )
+            if trade_key in seen_trade_keys:
+                continue
+            seen_trade_keys.add(trade_key)
+            unique_trades.append((trade_key, trade))
 
         rows: list[dict[str, Any]] = []
+        assigned_trade_keys: set[str] = set()
         expected_volume = 0
         filled_volume = 0.0
         adverse_slippage_ticks_volume = 0.0
@@ -6891,8 +7115,18 @@ class CommoditySimNowService:
                 expected = int(submitted["volume"])
                 expected_volume += expected
                 ids = self._order_ids(submitted)
+                matching_trade_rows = [
+                    (trade_key, trade)
+                    for trade_key, trade in unique_trades
+                    if trade_key not in assigned_trade_keys
+                    and ids.intersection(self._order_ids(trade))
+                ]
+                assigned_trade_keys.update(
+                    trade_key
+                    for trade_key, _ in matching_trade_rows
+                )
                 matching_trades = [
-                    trade for trade in trades if ids.intersection(self._order_ids(trade))
+                    trade for _, trade in matching_trade_rows
                 ]
                 fill_volume = sum(float(trade.get("volume") or 0) for trade in matching_trades)
                 fill_notional = sum(
@@ -6921,6 +7155,13 @@ class CommoditySimNowService:
                         "expected_volume": expected,
                         "filled_volume": fill_volume,
                         "fill_ratio": min(fill_volume / expected, 1.0) if expected else 0.0,
+                        "trade_evidence_state": (
+                            "INCONSISTENT"
+                            if fill_volume > expected
+                            else "COMPLETE"
+                            if fill_volume == expected
+                            else "INCOMPLETE"
+                        ),
                         "decision_price": decision_price,
                         "submit_price": float(submitted["price"]),
                         "average_fill_price": average_fill_price,
