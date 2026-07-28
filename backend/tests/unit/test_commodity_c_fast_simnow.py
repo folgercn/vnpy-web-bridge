@@ -2103,6 +2103,65 @@ def test_c_fast_terminal_guard_rejects_account_change_during_capture(
     ).exists()
 
 
+def test_c_fast_terminal_guard_rejects_unstable_position_order_window(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, rpc, snapshot, _ = prepare_c_fast_shakedown(tmp_path)
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    service.start_c_fast_shakedown(
+        preview["plan_hash"],
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+    ag = next(row for row in snapshot.targets if row.product == "ag")
+    settled = [
+        position("ag", ag.target_quantity, contract_month="2612")
+    ]
+    drifted = [
+        *settled,
+        position("al", 1, contract_month="2612"),
+    ]
+    rpc.positions = settled
+    rpc.orders = []
+    rpc.trades = fills_for_requests(list(service.trade.requests))
+    execution_snapshot = service._execution_snapshot
+
+    def inject_fill_between_terminal_snapshots(plan):
+        result = execution_snapshot(plan)
+        calls = {"count": 0}
+
+        def racing_positions():
+            calls["count"] += 1
+            return list(
+                settled if calls["count"] == 1 else drifted
+            )
+
+        monkeypatch.setattr(rpc, "get_positions", racing_positions)
+        return result
+
+    monkeypatch.setattr(
+        service,
+        "_execution_snapshot",
+        inject_fill_between_terminal_snapshots,
+    )
+
+    with pytest.raises(CommoditySimNowSafetyError):
+        service.auto_candidate_shakedown_advance()
+
+    assert service.current_plan is not None
+    guard = service.current_plan["halt"]["terminal_guard"]
+    assert guard["state"] == "BLOCKED"
+    assert guard["blockers"][0] == "UNSTABLE_TERMINAL_SNAPSHOT"
+    assert guard["positions_stable"] is False
+    assert not service._c_fast_terminal_archive_path(
+        preview["session_id"]
+    ).exists()
+
+
 def test_c_fast_submitted_reconcile_error_enters_cancel_recovery(
     tmp_path: Path,
 ) -> None:

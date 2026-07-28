@@ -3941,13 +3941,7 @@ class CommoditySimNowService:
         gateway_before = str(
             safety_before.get("gateway_name") or ""
         )
-        raw_positions = self.rpc.get_positions()
-        outside_scope = self._c_fast_outside_scope_positions(
-            raw_positions
-        )
-        final_positions = self._signed_positions(
-            self._position_snapshot(raw_positions)
-        )
+        raw_positions_before = self.rpc.get_positions()
         evidence = reconciliation or (
             plan.get("execution") or {}
         ).get("reconciliation")
@@ -3956,7 +3950,23 @@ class CommoditySimNowService:
             if isinstance(evidence, dict)
             else None
         )
+        orders_before = self.rpc.get_orders()
+        raw_positions = self.rpc.get_positions()
         orders = self.rpc.get_orders()
+        positions_stable = (
+            _sha256_json(raw_positions_before)
+            == _sha256_json(raw_positions)
+        )
+        orders_stable = (
+            _sha256_json(orders_before)
+            == _sha256_json(orders)
+        )
+        outside_scope = self._c_fast_outside_scope_positions(
+            raw_positions
+        )
+        final_positions = self._signed_positions(
+            self._position_snapshot(raw_positions)
+        )
         active_plan_orders = self._active_plan_orders_from_snapshot(
             plan, orders
         )
@@ -4014,6 +4024,8 @@ class CommoditySimNowService:
             except CommoditySimNowSafetyError:
                 account_valid = False
         blockers: list[str] = []
+        if not positions_stable or not orders_stable:
+            blockers.append("UNSTABLE_TERMINAL_SNAPSHOT")
         if not account_valid:
             blockers.append("ACCOUNT_HASH_MISMATCH")
         if not gateway_valid:
@@ -4045,8 +4057,13 @@ class CommoditySimNowService:
             "active_plan_orders": active_plan_orders,
             "external_active_orders": external_active_orders,
             "unknown_status_orders": unknown_status_orders,
-            "positions_hash": _sha256_json(raw_positions),
-            "orders_hash": _sha256_json(orders),
+            "positions_hash_before":
+            _sha256_json(raw_positions_before),
+            "positions_hash_after": _sha256_json(raw_positions),
+            "orders_hash_before": _sha256_json(orders_before),
+            "orders_hash_after": _sha256_json(orders),
+            "positions_stable": positions_stable,
+            "orders_stable": orders_stable,
             "state": "VALID" if not blockers else "BLOCKED",
             "blockers": blockers,
         }

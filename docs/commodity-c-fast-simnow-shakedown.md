@@ -118,9 +118,11 @@ session 的 plan、execution、terminal checksum 与唯一 chain tail，以 arch
 chain 校验也是 preview、start、每次 READY 派单和 terminal append 的执行信任
 条件；pointer 缺失但 archive 非空、predecessor 被删除或链已断裂时禁止新委托，
 已提交计划只允许撤单和只读对账，不能删除 active plan。
-archive commit 前的最后一道 guard 使用同一次原始 positions 采集校验固定范围与
-精确 expected positions，并再次确认 session 和固定范围内外部活动委托均为零；
-guard 的时间、positions hash、orders hash 和 blocker 会写入终态或 halt evidence。
+archive commit 前的最后一道 guard 连续采集两轮 positions/orders，分别要求
+hash 稳定，再校验固定范围、精确 expected positions、session 和全账户外部
+活动委托均为零；两轮之间发生成交或状态推进时标记
+`UNSTABLE_TERMINAL_SNAPSHOT` 并等待重试。guard 的时间、前后快照 hash 和
+blocker 会写入终态或 halt evidence。
 
 ## PnL 证据
 
