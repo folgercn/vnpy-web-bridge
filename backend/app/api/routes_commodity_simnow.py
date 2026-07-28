@@ -5,18 +5,20 @@ from fastapi import APIRouter, Depends, Query, Request
 from app.core.errors import ok
 from app.core.security import CurrentUser, require_roles
 from app.schemas.commodity_simnow import (
+    CommodityCFastShakedownPreviewRequestDTO,
+    CommodityCFastShakedownStartRequestDTO,
+    CommodityCFastShakedownStopRequestDTO,
     CommodityPlanExecuteRequestDTO,
+    CommodityPlanReconcileRequestDTO,
     CommodityPositionManagerShakedownPreviewRequestDTO,
     CommodityPositionManagerShakedownStartRequestDTO,
     CommodityPositionManagerShakedownStopRequestDTO,
-    CommodityPlanReconcileRequestDTO,
     CommoditySimNowDisableRequestDTO,
     CommoditySimNowEnableRequestDTO,
-    CommodityTemplateStartRequestDTO,
     CommodityTargetPreviewRequestDTO,
+    CommodityTemplateStartRequestDTO,
 )
 from app.services.commodity_simnow import commodity_simnow_service
-
 
 router = APIRouter(prefix="/commodity-simnow")
 
@@ -43,6 +45,92 @@ def position_manager_shakedown_status(
     _: CurrentUser = Depends(require_roles("viewer", "trader", "admin")),
 ) -> dict:
     return ok(commodity_simnow_service.position_manager_shakedown_status())
+
+
+@router.get("/c-fast-shakedown/status")
+def c_fast_shakedown_status(
+    _: CurrentUser = Depends(require_roles("viewer", "trader", "admin")),
+) -> dict:
+    return ok(commodity_simnow_service.c_fast_shakedown_status())
+
+
+@router.get("/c-fast-shakedown/events")
+def c_fast_shakedown_events(
+    limit: int = Query(default=200, ge=1, le=1000),
+    _: CurrentUser = Depends(require_roles("viewer", "trader", "admin")),
+) -> dict:
+    return ok(commodity_simnow_service.c_fast_shakedown_events(limit))
+
+
+@router.get("/c-fast-shakedown/pnl")
+def c_fast_shakedown_pnl(
+    _: CurrentUser = Depends(require_roles("viewer", "trader", "admin")),
+) -> dict:
+    return ok(commodity_simnow_service.c_fast_shakedown_pnl())
+
+
+@router.post("/c-fast-shakedown/preview")
+def c_fast_shakedown_preview(
+    payload: CommodityCFastShakedownPreviewRequestDTO,
+    request: Request,
+    user: CurrentUser = Depends(require_roles("admin")),
+) -> dict:
+    return ok(
+        commodity_simnow_service.preview_c_fast_shakedown(
+            payload.selected_products,
+            operator=user.username,
+            role=user.role,
+            source_ip=request.client.host if request.client else None,
+        )
+    )
+
+
+@router.post("/c-fast-shakedown/start")
+def c_fast_shakedown_start(
+    payload: CommodityCFastShakedownStartRequestDTO,
+    request: Request,
+    user: CurrentUser = Depends(require_roles("admin")),
+) -> dict:
+    return ok(
+        commodity_simnow_service.start_c_fast_shakedown(
+            payload.plan_hash,
+            operator=user.username,
+            role=user.role,
+            source_ip=request.client.host if request.client else None,
+        )
+    )
+
+
+@router.post("/c-fast-shakedown/stop")
+def c_fast_shakedown_stop(
+    payload: CommodityCFastShakedownStopRequestDTO,
+    request: Request,
+    user: CurrentUser = Depends(require_roles("admin")),
+) -> dict:
+    return ok(
+        commodity_simnow_service.stop_c_fast_shakedown(
+            payload.reason,
+            operator=user.username,
+            role=user.role,
+            source_ip=request.client.host if request.client else None,
+        )
+    )
+
+
+@router.post("/c-fast-shakedown/reconcile")
+def c_fast_shakedown_reconcile(
+    payload: CommodityPlanReconcileRequestDTO,
+    request: Request,
+    user: CurrentUser = Depends(require_roles("admin")),
+) -> dict:
+    return ok(
+        commodity_simnow_service.reconcile(
+            payload.plan_hash,
+            operator=user.username,
+            role=user.role,
+            source_ip=request.client.host if request.client else None,
+        )
+    )
 
 
 @router.post("/position-manager-shakedown/preview")

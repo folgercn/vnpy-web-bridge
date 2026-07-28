@@ -8,10 +8,11 @@ import math
 import os
 import re
 import uuid
+from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import RLock
-from typing import Any, Callable, Mapping
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from cryptography.exceptions import InvalidSignature
@@ -29,7 +30,6 @@ from app.services.commodity_c_fast_shadow_common import (
     sha256_json,
     unsigned_snapshot_payload,
 )
-
 
 CHINA_TZ = ZoneInfo("Asia/Shanghai")
 GENESIS_SOURCE_MONTH = "2026-08"
@@ -131,6 +131,33 @@ class CommodityCFastShadowService:
     def status(self) -> dict[str, Any]:
         with self._lock:
             return copy.deepcopy(self._status)
+
+    def accepted_snapshot_for_control(
+        self,
+    ) -> tuple[CommodityCFastShadowDTO, str]:
+        """Return a freshly verified accepted snapshot without execution rights."""
+        with self._lock:
+            if not self.settings.commodity_c_fast_shadow_enabled:
+                raise CFastShadowInvalidError("SHADOW_DISABLED")
+            path_text = self.settings.commodity_c_fast_shadow_snapshot_path.strip()
+            if not path_text:
+                raise CFastShadowInvalidError("SNAPSHOT_PATH_NOT_CONFIGURED")
+            self._verify_path_isolation()
+            snapshot = self._load_snapshot(Path(path_text).expanduser())
+            snapshot_hash = self._verify_snapshot(snapshot)
+            accepted = self._accepted_state
+            if (
+                not isinstance(accepted, dict)
+                or accepted.get("snapshot_hash") != snapshot_hash
+                or accepted.get("snapshot_id") != snapshot.snapshot_id
+                or self._status.get("snapshot_hash") != snapshot_hash
+                or not self._status.get("accepted")
+                or not self._status.get("valid")
+            ):
+                raise CFastShadowInvalidError(
+                    "SNAPSHOT_NOT_CURRENTLY_ACCEPTED"
+                )
+            return snapshot.model_copy(deep=True), snapshot_hash
 
     def reload(
         self,

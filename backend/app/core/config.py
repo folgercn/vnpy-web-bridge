@@ -119,13 +119,22 @@ class Settings(BaseSettings):
         "logs/commodity-c-fast-shadow/evidence.jsonl"
     )
     commodity_c_fast_shadow_trusted_public_keys_json: str = "{}"
+    commodity_c_fast_simnow_shakedown_enabled: bool = False
+    commodity_c_fast_simnow_account_hashes: str = ""
+    commodity_c_fast_simnow_state_path: str = (
+        "logs/commodity-c-fast-shadow/shakedown-session.json"
+    )
+    commodity_c_fast_simnow_auto_dispatch_enabled: bool = False
+    commodity_c_fast_simnow_max_selected_products: int = Field(
+        default=2, ge=1, le=10
+    )
     commodity_simnow_delivery_month_cutoff_day: int = Field(default=1, ge=1, le=15)
     commodity_simnow_sc_pre_delivery_cutoff_day: int = Field(default=15, ge=1, le=25)
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
     @model_validator(mode="after")
-    def validate_production_secrets(self) -> "Settings":
+    def validate_production_secrets(self) -> Settings:
         if self.commodity_c_fast_shadow_enabled:
             if not self.commodity_c_fast_shadow_snapshot_path.strip():
                 raise ValueError(
@@ -157,6 +166,48 @@ class Settings(BaseSettings):
             if c_paths & protected:
                 raise ValueError(
                     "COMMODITY_C_FAST_SHADOW paths must not overlap existing commodity paths"
+                )
+        if self.commodity_c_fast_simnow_shakedown_enabled:
+            if not self.commodity_c_fast_shadow_enabled:
+                raise ValueError(
+                    "COMMODITY_C_FAST_SHADOW_ENABLED must be true when C_FAST SimNow shakedown is enabled"
+                )
+            if not self.commodity_simnow_enabled:
+                raise ValueError(
+                    "COMMODITY_SIMNOW_ENABLED must be true when C_FAST SimNow shakedown is enabled"
+                )
+            account_hashes = {
+                item.strip().lower()
+                for item in self.commodity_c_fast_simnow_account_hashes.split(",")
+                if item.strip()
+            }
+            if not account_hashes or any(
+                not re.fullmatch(r"[0-9a-f]{64}", item)
+                for item in account_hashes
+            ):
+                raise ValueError(
+                    "COMMODITY_C_FAST_SIMNOW_ACCOUNT_HASHES must contain SHA256 account hashes"
+                )
+            c_fast_session_path = Path(
+                self.commodity_c_fast_simnow_state_path
+            ).expanduser().resolve()
+            protected_paths = {
+                Path(value).expanduser().resolve()
+                for value in (
+                    self.commodity_simnow_state_path,
+                    self.commodity_simnow_template_batch_path,
+                    self.commodity_position_manager_shadow_path,
+                    self.commodity_position_manager_shadow_state_path,
+                    self.commodity_position_manager_simnow_state_path,
+                    self.commodity_c_fast_shadow_snapshot_path,
+                    self.commodity_c_fast_shadow_state_path,
+                    self.commodity_c_fast_shadow_evidence_path,
+                )
+                if value.strip()
+            }
+            if c_fast_session_path in protected_paths:
+                raise ValueError(
+                    "COMMODITY_C_FAST_SIMNOW_STATE_PATH must not overlap existing commodity paths"
                 )
         if self.app_env.lower() != "production":
             return self

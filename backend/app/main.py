@@ -32,11 +32,11 @@ from app.core.errors import (
     validation_error_handler,
 )
 from app.core.logging import configure_logging
-from app.services.commodity_simnow import commodity_simnow_service
 from app.services.commodity_c_fast_shadow import (
     commodity_c_fast_shadow_service,
     normalize_rpc_contracts,
 )
+from app.services.commodity_simnow import commodity_simnow_service
 from app.services.market_data_service import market_data_service
 from app.services.monitoring_service import monitoring_service
 from app.services.tick_persistence import tick_persistence_service
@@ -125,6 +125,9 @@ async def startup() -> None:
         )
     )
     commodity_c_fast_shadow_service.start()
+    commodity_simnow_service.bind_c_fast_snapshot_provider(
+        commodity_c_fast_shadow_service.accepted_snapshot_for_control
+    )
     try:
         monitoring_service.start()
     except Exception as exc:
