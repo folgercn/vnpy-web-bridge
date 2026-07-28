@@ -93,15 +93,15 @@ def _serialized(method):
         if depth == 0:
             (
                 context.entry_abort_epoch,
-                context.entry_completed_halt_epoch,
+                context.entry_pending_halt_epochs,
             ) = (
                 self._dispatch_epoch_state_snapshot()
             )
         entry_abort_epoch = int(
             context.entry_abort_epoch
         )
-        entry_completed_halt_epoch = int(
-            context.entry_completed_halt_epoch
+        entry_pending_halt_epochs = frozenset(
+            context.entry_pending_halt_epochs
         )
         requested_abort_epoch: int | None = None
         if method.__name__ in {
@@ -116,8 +116,8 @@ def _serialized(method):
             "start_position_manager_shakedown",
         }:
             kwargs["_dispatch_entry_abort_epoch"] = entry_abort_epoch
-            kwargs["_dispatch_entry_completed_halt_epoch"] = (
-                entry_completed_halt_epoch
+            kwargs["_dispatch_entry_pending_halt_epochs"] = (
+                entry_pending_halt_epochs
             )
         context.depth = depth + 1
         try:
@@ -132,7 +132,7 @@ def _serialized(method):
             context.depth = depth
             if depth == 0:
                 del context.entry_abort_epoch
-                del context.entry_completed_halt_epoch
+                del context.entry_pending_halt_epochs
 
     return wrapped
 
@@ -279,7 +279,7 @@ class CommoditySimNowService:
         self._c_fast_authority_persist_error: str | None = None
         self._dispatch_abort_requested = False
         self._dispatch_abort_epoch = 0
-        self._dispatch_completed_halt_epoch = 0
+        self._dispatch_pending_halt_epochs: set[int] = set()
         self._dispatch_abort_lock = Lock()
         self._dispatch_operation_context = local()
         self._completed_state = self._load_completed_state()
@@ -299,41 +299,40 @@ class CommoditySimNowService:
 
     def _dispatch_epoch_state_snapshot(
         self,
-    ) -> tuple[int, int]:
+    ) -> tuple[int, frozenset[int]]:
         with self._dispatch_abort_lock:
             return (
                 self._dispatch_abort_epoch,
-                self._dispatch_completed_halt_epoch,
+                frozenset(self._dispatch_pending_halt_epochs),
             )
 
     def _request_dispatch_abort(self) -> int:
         with self._dispatch_abort_lock:
             self._dispatch_abort_epoch += 1
             self._dispatch_abort_requested = True
+            self._dispatch_pending_halt_epochs.add(
+                self._dispatch_abort_epoch
+            )
             return self._dispatch_abort_epoch
 
     def _complete_dispatch_halt(self, abort_epoch: int) -> None:
         with self._dispatch_abort_lock:
-            if abort_epoch > self._dispatch_abort_epoch:
+            if abort_epoch not in self._dispatch_pending_halt_epochs:
                 raise RuntimeError(
-                    "completed halt epoch exceeds requested abort epoch"
+                    "halt epoch is not pending"
                 )
-            self._dispatch_completed_halt_epoch = max(
-                self._dispatch_completed_halt_epoch,
-                abort_epoch,
-            )
+            self._dispatch_pending_halt_epochs.remove(abort_epoch)
 
     def _begin_dispatch_epoch(
         self,
         expected_epoch: int,
-        expected_completed_halt_epoch: int,
+        expected_pending_halt_epochs: frozenset[int],
     ) -> int:
         with self._dispatch_abort_lock:
             if (
-                expected_epoch != expected_completed_halt_epoch
+                expected_pending_halt_epochs
                 or self._dispatch_abort_epoch != expected_epoch
-                or self._dispatch_completed_halt_epoch
-                != expected_completed_halt_epoch
+                or self._dispatch_pending_halt_epochs
             ):
                 raise CommoditySimNowSafetyError(
                     "授权等待期间收到 stop/disable/shutdown，拒绝派单"
@@ -507,15 +506,16 @@ class CommoditySimNowService:
         role: str | None,
         source_ip: str | None,
         _dispatch_entry_abort_epoch: int | None = None,
-        _dispatch_entry_completed_halt_epoch: int | None = None,
+        _dispatch_entry_pending_halt_epochs:
+        frozenset[int] | None = None,
     ) -> dict[str, Any]:
         if (
             _dispatch_entry_abort_epoch is not None
-            and _dispatch_entry_completed_halt_epoch is not None
+            and _dispatch_entry_pending_halt_epochs is not None
         ):
             self._begin_dispatch_epoch(
                 _dispatch_entry_abort_epoch,
-                _dispatch_entry_completed_halt_epoch,
+                _dispatch_entry_pending_halt_epochs,
             )
         if not self.settings.commodity_simnow_enabled:
             raise CommoditySimNowDisabledError(
@@ -2327,15 +2327,16 @@ class CommoditySimNowService:
         role: str | None,
         source_ip: str | None,
         _dispatch_entry_abort_epoch: int | None = None,
-        _dispatch_entry_completed_halt_epoch: int | None = None,
+        _dispatch_entry_pending_halt_epochs:
+        frozenset[int] | None = None,
     ) -> dict[str, Any]:
         if (
             _dispatch_entry_abort_epoch is not None
-            and _dispatch_entry_completed_halt_epoch is not None
+            and _dispatch_entry_pending_halt_epochs is not None
         ):
             self._begin_dispatch_epoch(
                 _dispatch_entry_abort_epoch,
-                _dispatch_entry_completed_halt_epoch,
+                _dispatch_entry_pending_halt_epochs,
             )
         if not self.settings.commodity_c_fast_simnow_shakedown_enabled:
             raise CommoditySimNowDisabledError(
@@ -2591,22 +2592,25 @@ class CommoditySimNowService:
         plan = self.current_plan
         if not plan or not plan.get("c_fast_shakedown_session_id"):
             session = self._load_c_fast_shakedown_state()
-            if (
-                not self.c_fast_continuous_authorized
-                or not isinstance(session, dict)
-                or session.get("status") == "RESULT_UNKNOWN"
-            ):
-                raise CommoditySimNowStateError(
-                    "不存在运行中的 C_FAST 测试会话"
-                )
+            continuous_was_authorized = (
+                self.c_fast_continuous_authorized
+            )
             self._revoke_auto_dispatch("c_fast_shakedown")
             result = {
                 **self.c_fast_shakedown_status(),
-                "action": "continuous_authorization_revoked",
+                "action": (
+                    "continuous_authorization_revoked"
+                    if continuous_was_authorized
+                    else "already_stopped"
+                ),
                 "halt": {
                     "required": False,
                     "reason": reason,
-                    "status": session.get("status"),
+                    "status": (
+                        session.get("status")
+                        if isinstance(session, dict)
+                        else "IDLE"
+                    ),
                 },
             }
             self.audit.record(
@@ -3167,16 +3171,17 @@ class CommoditySimNowService:
         role: str | None,
         source_ip: str | None,
         _dispatch_entry_abort_epoch: int | None = None,
-        _dispatch_entry_completed_halt_epoch: int | None = None,
+        _dispatch_entry_pending_halt_epochs:
+        frozenset[int] | None = None,
     ) -> dict[str, Any]:
         """Start one pre-previewed SimNow shakedown without per-order approval."""
         if (
             _dispatch_entry_abort_epoch is not None
-            and _dispatch_entry_completed_halt_epoch is not None
+            and _dispatch_entry_pending_halt_epochs is not None
         ):
             self._begin_dispatch_epoch(
                 _dispatch_entry_abort_epoch,
-                _dispatch_entry_completed_halt_epoch,
+                _dispatch_entry_pending_halt_epochs,
             )
         if not self.settings.commodity_position_manager_simnow_shakedown_enabled:
             raise CommoditySimNowDisabledError(
@@ -3355,7 +3360,25 @@ class CommoditySimNowService:
     ) -> dict[str, Any]:
         plan = self.current_plan
         if not plan or not plan.get("position_manager_shakedown_session_id"):
-            raise CommoditySimNowStateError("不存在运行中的候选测试会话")
+            self._revoke_auto_dispatch("shakedown")
+            result = {
+                **self.position_manager_shakedown_status(),
+                "action": "already_stopped",
+                "halt": {
+                    "required": False,
+                    "reason": reason,
+                    "status": "IDLE",
+                },
+            }
+            self.audit.record(
+                action="commodity_position_manager_shakedown_stop",
+                user_id=operator,
+                role=role,
+                request={"reason": reason},
+                result=result,
+                source_ip=source_ip,
+            )
+            return result
         halt = self._finalize_pre_submit_shakedown_stop(
             plan, reason=reason, operator=operator
         )

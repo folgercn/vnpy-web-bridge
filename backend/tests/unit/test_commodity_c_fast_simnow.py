@@ -1153,7 +1153,7 @@ def test_c_fast_start_entered_during_pending_halt_cannot_authorize(
 
     def observed_snapshot():
         state = original_snapshot()
-        if state[0] > state[1]:
+        if state[1]:
             pending_snapshot_taken.set()
         return state
 
@@ -1207,7 +1207,9 @@ def test_c_fast_start_entered_during_pending_halt_cannot_authorize(
         start_errors[0], CommoditySimNowSafetyError
     )
     assert not trade.requests
-    assert service._dispatch_epoch_state_snapshot() == (1, 1)
+    assert service._dispatch_epoch_state_snapshot() == (
+        1, frozenset()
+    )
 
     service.start_c_fast_shakedown(
         preview["plan_hash"],
@@ -1257,12 +1259,12 @@ def test_pending_halt_blocks_every_authorization_entry(
 
     assert service._dispatch_epoch_state_snapshot() == (
         abort_epoch,
-        0,
+        frozenset({abort_epoch}),
     )
     service._complete_dispatch_halt(abort_epoch)
-    requested, completed = service._dispatch_epoch_state_snapshot()
+    requested, pending = service._dispatch_epoch_state_snapshot()
     assert service._begin_dispatch_epoch(
-        requested, completed
+        requested, pending
     ) == abort_epoch
 
 
@@ -1302,7 +1304,174 @@ def test_service_shutdown_pending_halt_blocks_authorization(
 
     asyncio.run(scenario())
 
-    assert service._dispatch_epoch_state_snapshot() == (1, 1)
+    assert service._dispatch_epoch_state_snapshot() == (
+        1, frozenset()
+    )
+
+
+def test_later_halt_completion_cannot_skip_earlier_pending_halt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, _, _, _ = prepare_c_fast_shakedown(tmp_path)
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    monkeypatch.setattr(
+        service,
+        "auto_candidate_shakedown_advance",
+        lambda **_kwargs: {"action": "held_for_test"},
+    )
+    service.start_c_fast_shakedown(
+        preview["plan_hash"],
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+    first_abort_requested = Event()
+    release_first_abort = Event()
+    original_request_abort = service._request_dispatch_abort
+
+    def request_abort_with_first_paused():
+        epoch = original_request_abort()
+        if epoch == 1:
+            first_abort_requested.set()
+            assert release_first_abort.wait(5)
+        return epoch
+
+    monkeypatch.setattr(
+        service,
+        "_request_dispatch_abort",
+        request_abort_with_first_paused,
+    )
+    disable_errors: list[Exception] = []
+    stop_errors: list[Exception] = []
+    disable_thread = Thread(
+        target=lambda: _capture_thread_error(
+            disable_errors,
+            lambda: service.disable(
+                CommoditySimNowDisableRequestDTO(
+                    reason="earlier global disable"
+                ),
+                operator="admin",
+                role="admin",
+                source_ip=None,
+            ),
+        )
+    )
+    disable_thread.start()
+    assert first_abort_requested.wait(5)
+    stop_thread = Thread(
+        target=lambda: _capture_thread_error(
+            stop_errors,
+            lambda: service.stop_c_fast_shakedown(
+                "later scoped stop",
+                operator="admin",
+                role="admin",
+                source_ip=None,
+            ),
+        )
+    )
+    stop_thread.start()
+    stop_thread.join(5)
+
+    assert not stop_thread.is_alive()
+    assert not stop_errors
+    assert service._dispatch_epoch_state_snapshot() == (
+        2, frozenset({1})
+    )
+    with pytest.raises(CommoditySimNowSafetyError):
+        service.enable(
+            enable_payload(),
+            operator="admin",
+            role="admin",
+            source_ip=None,
+        )
+
+    release_first_abort.set()
+    disable_thread.join(5)
+    assert not disable_thread.is_alive()
+    assert not disable_errors
+    assert service._dispatch_epoch_state_snapshot() == (
+        2, frozenset()
+    )
+    service.enable(
+        enable_payload(),
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+
+
+@pytest.mark.parametrize(
+    "stop_name",
+    [
+        "stop_c_fast_shakedown",
+        "stop_position_manager_shakedown",
+    ],
+)
+def test_idle_repeated_stop_is_idempotent_and_does_not_lock_authority(
+    tmp_path: Path,
+    stop_name: str,
+) -> None:
+    service, _, _, _ = prepare_c_fast_shakedown(tmp_path)
+    stop_method = getattr(service, stop_name)
+
+    for _ in range(2):
+        result = stop_method(
+            "idempotent idle stop",
+            operator="admin",
+            role="admin",
+            source_ip=None,
+        )
+        assert result["action"] == "already_stopped"
+
+    assert service._dispatch_epoch_state_snapshot() == (
+        2, frozenset()
+    )
+    service.enable(
+        enable_payload(),
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+
+
+def test_failed_safe_halt_token_remains_pending(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, _, _, _ = prepare_c_fast_shakedown(tmp_path)
+
+    def fail_safe_halt(*args, **kwargs):
+        raise RuntimeError("safe halt failed")
+
+    monkeypatch.setattr(
+        service,
+        "_begin_safe_halt",
+        fail_safe_halt,
+    )
+
+    with pytest.raises(RuntimeError, match="safe halt failed"):
+        service.disable(
+            CommoditySimNowDisableRequestDTO(
+                reason="failed safe halt"
+            ),
+            operator="admin",
+            role="admin",
+            source_ip=None,
+        )
+
+    assert service._dispatch_epoch_state_snapshot() == (
+        1, frozenset({1})
+    )
+    with pytest.raises(CommoditySimNowSafetyError):
+        service.enable(
+            enable_payload(),
+            operator="admin",
+            role="admin",
+            source_ip=None,
+        )
 
 
 def test_c_fast_continuous_nested_start_inherits_epoch(
