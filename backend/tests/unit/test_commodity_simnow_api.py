@@ -63,6 +63,9 @@ class FakeCommoditySimNowService:
     def c_fast_shakedown_events(self, limit: int) -> list[dict]:
         return []
 
+    def c_fast_shakedown_history(self, limit: int) -> list[dict]:
+        return []
+
     def c_fast_shakedown_pnl(self) -> dict:
         return {
             "status": "UNAVAILABLE",
@@ -250,6 +253,10 @@ def test_c_fast_shakedown_reads_and_mutations_use_expected_rbac(
             "/api/commodity-simnow/c-fast-shakedown/pnl",
             headers=auth_headers("trader"),
         )
+        sessions = client.get(
+            "/api/commodity-simnow/c-fast-shakedown/sessions",
+            headers=auth_headers("viewer"),
+        )
         forbidden = client.post(
             "/api/commodity-simnow/c-fast-shakedown/preview",
             headers=auth_headers("trader"),
@@ -274,6 +281,7 @@ def test_c_fast_shakedown_reads_and_mutations_use_expected_rbac(
     assert status.status_code == 200
     assert status.json()["data"]["production_allowed"] is False
     assert pnl.status_code == 200
+    assert sessions.status_code == 200
     assert forbidden.status_code == 403
     assert preview.json()["data"]["preview"]["selected_products"] == ["ag"]
     assert started.json()["data"]["action"] == "open_submitted"

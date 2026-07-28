@@ -126,7 +126,7 @@ class Settings(BaseSettings):
     )
     commodity_c_fast_simnow_auto_dispatch_enabled: bool = False
     commodity_c_fast_simnow_max_selected_products: int = Field(
-        default=2, ge=1, le=10
+        default=2, ge=1, le=2
     )
     commodity_simnow_delivery_month_cutoff_day: int = Field(default=1, ge=1, le=15)
     commodity_simnow_sc_pre_delivery_cutoff_day: int = Field(default=15, ge=1, le=25)
@@ -191,6 +191,13 @@ class Settings(BaseSettings):
             c_fast_session_path = Path(
                 self.commodity_c_fast_simnow_state_path
             ).expanduser().resolve()
+            commodity_state_path = Path(
+                self.commodity_simnow_state_path
+            ).expanduser().resolve()
+            commodity_active_path = commodity_state_path.with_name(
+                f"{commodity_state_path.stem}.active"
+                f"{commodity_state_path.suffix}"
+            )
             protected_paths = {
                 Path(value).expanduser().resolve()
                 for value in (
@@ -205,9 +212,29 @@ class Settings(BaseSettings):
                 )
                 if value.strip()
             }
-            if c_fast_session_path in protected_paths:
+            protected_paths.add(commodity_active_path)
+            protected_paths.update(
+                path.with_suffix(f"{path.suffix}.tmp")
+                for path in list(protected_paths)
+            )
+            c_fast_derived_paths = {
+                c_fast_session_path,
+                c_fast_session_path.with_suffix(
+                    f"{c_fast_session_path.suffix}.tmp"
+                ),
+                c_fast_session_path.with_name(
+                    f"{c_fast_session_path.stem}.sessions"
+                ),
+            }
+            c_fast_archive_dir = c_fast_session_path.with_name(
+                f"{c_fast_session_path.stem}.sessions"
+            )
+            if c_fast_derived_paths & protected_paths or any(
+                path.is_relative_to(c_fast_archive_dir)
+                for path in protected_paths
+            ):
                 raise ValueError(
-                    "COMMODITY_C_FAST_SIMNOW_STATE_PATH must not overlap existing commodity paths"
+                    "COMMODITY_C_FAST_SIMNOW_STATE_PATH and derived paths must not overlap existing commodity paths"
                 )
         if self.app_env.lower() != "production":
             return self

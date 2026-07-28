@@ -157,7 +157,7 @@ class CommodityPositionManagerShakedownStopRequestDTO(StrictModel):
 
 
 class CommodityCFastShakedownPreviewRequestDTO(StrictModel):
-    selected_products: list[Product] = Field(min_length=1, max_length=10)
+    selected_products: list[Product] = Field(min_length=1, max_length=2)
 
 
 class CommodityCFastShakedownStartRequestDTO(StrictModel):

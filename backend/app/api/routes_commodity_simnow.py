@@ -62,6 +62,14 @@ def c_fast_shakedown_events(
     return ok(commodity_simnow_service.c_fast_shakedown_events(limit))
 
 
+@router.get("/c-fast-shakedown/sessions")
+def c_fast_shakedown_sessions(
+    limit: int = Query(default=100, ge=1, le=1000),
+    _: CurrentUser = Depends(require_roles("viewer", "trader", "admin")),
+) -> dict:
+    return ok(commodity_simnow_service.c_fast_shakedown_history(limit))
+
+
 @router.get("/c-fast-shakedown/pnl")
 def c_fast_shakedown_pnl(
     _: CurrentUser = Depends(require_roles("viewer", "trader", "admin")),

@@ -32,8 +32,8 @@ COMMODITY_C_FAST_SIMNOW_MAX_SELECTED_PRODUCTS=2
 
 部署默认必须保持两个 shakedown 开关为 `false`。启用前还必须配置并验证现有
 `COMMODITY_SIMNOW_*` 安全项、Web 交易风控和 C_FAST Shadow 公钥/路径。
-shakedown state 路径不能与任何 baseline、position-manager 或 C_FAST Shadow
-路径重合。
+shakedown state 及其 `.tmp`、不可变终态归档目录不能与任何 baseline、
+共享 active plan、position-manager 或 C_FAST Shadow 路径重合。
 
 ## 数据流
 
@@ -63,6 +63,7 @@ signed C_FAST snapshot
 ```text
 GET /api/commodity-simnow/c-fast-shakedown/status
 GET /api/commodity-simnow/c-fast-shakedown/events
+GET /api/commodity-simnow/c-fast-shakedown/sessions
 GET /api/commodity-simnow/c-fast-shakedown/pnl
 ```
 
@@ -81,7 +82,15 @@ target delta 时自动生成新 session，无需逐会话确认。正常 shutdow
 emergency stop、信任校验失败或任何 fail-closed 停机会撤销持续授权，重启后
 只有仍在收口的原 session 可以恢复，不会静默获得新的下单权。stop 只按本
 session nonce/reference 和已确认 order id 定向撤单；会话空闲时 stop 只撤销
-持续授权。
+持续授权。授权先在内存中不可逆撤销，再尝试写入 session；即使磁盘写入失败，
+safe-halt、定向撤单和只读 reconcile 仍继续。固定十品种内出现无法用
+reference/order id 唯一归属的活动委托时，状态保持
+`SUBMISSION_OUTCOME_UNKNOWN`，禁止声明无证据、禁止归档或重发。
+
+每个终态 session 在覆盖当前 session pointer 前，先写入
+`<state-stem>.sessions/<session_id>.json` 不可变归档；下一 session 通过
+`previous_terminal_checksum` 与上一终态形成证据链。`sessions` 接口用于
+重启后枚举和校验历史终态。
 
 ## PnL 证据
 
@@ -95,6 +104,8 @@ net_pnl_state=UNAVAILABLE_UNTIL_FEES_BOUND
 ```
 
 不得把未绑定费用当作零，也不得把 shakedown PnL 并入正式 forward PnL。
+如果 orders/trades execution snapshot 不可用，成交现金流、库存估值和
+execution PnL 全部返回 `None`，不得把未知成交事实推导为零。
 
 ## 本地验证
 
