@@ -91,32 +91,48 @@ def _serialized(method):
         context = self._dispatch_operation_context
         depth = int(getattr(context, "depth", 0))
         if depth == 0:
-            context.entry_abort_epoch = (
-                self._dispatch_epoch_snapshot()
+            (
+                context.entry_abort_epoch,
+                context.entry_completed_halt_epoch,
+            ) = (
+                self._dispatch_epoch_state_snapshot()
             )
         entry_abort_epoch = int(
             context.entry_abort_epoch
         )
+        entry_completed_halt_epoch = int(
+            context.entry_completed_halt_epoch
+        )
+        requested_abort_epoch: int | None = None
         if method.__name__ in {
             "disable",
             "stop_c_fast_shakedown",
             "stop_position_manager_shakedown",
         }:
-            self._request_dispatch_abort()
+            requested_abort_epoch = self._request_dispatch_abort()
         if method.__name__ in {
             "enable",
             "start_c_fast_shakedown",
             "start_position_manager_shakedown",
         }:
             kwargs["_dispatch_entry_abort_epoch"] = entry_abort_epoch
+            kwargs["_dispatch_entry_completed_halt_epoch"] = (
+                entry_completed_halt_epoch
+            )
         context.depth = depth + 1
         try:
             with self._cycle_lock:
-                return method(self, *args, **kwargs)
+                result = method(self, *args, **kwargs)
+                if requested_abort_epoch is not None:
+                    self._complete_dispatch_halt(
+                        requested_abort_epoch
+                    )
+                return result
         finally:
             context.depth = depth
             if depth == 0:
                 del context.entry_abort_epoch
+                del context.entry_completed_halt_epoch
 
     return wrapped
 
@@ -263,6 +279,7 @@ class CommoditySimNowService:
         self._c_fast_authority_persist_error: str | None = None
         self._dispatch_abort_requested = False
         self._dispatch_abort_epoch = 0
+        self._dispatch_completed_halt_epoch = 0
         self._dispatch_abort_lock = Lock()
         self._dispatch_operation_context = local()
         self._completed_state = self._load_completed_state()
@@ -280,15 +297,44 @@ class CommoditySimNowService:
         with self._dispatch_abort_lock:
             return self._dispatch_abort_epoch
 
+    def _dispatch_epoch_state_snapshot(
+        self,
+    ) -> tuple[int, int]:
+        with self._dispatch_abort_lock:
+            return (
+                self._dispatch_abort_epoch,
+                self._dispatch_completed_halt_epoch,
+            )
+
     def _request_dispatch_abort(self) -> int:
         with self._dispatch_abort_lock:
             self._dispatch_abort_epoch += 1
             self._dispatch_abort_requested = True
             return self._dispatch_abort_epoch
 
-    def _begin_dispatch_epoch(self, expected_epoch: int) -> int:
+    def _complete_dispatch_halt(self, abort_epoch: int) -> None:
         with self._dispatch_abort_lock:
-            if self._dispatch_abort_epoch != expected_epoch:
+            if abort_epoch > self._dispatch_abort_epoch:
+                raise RuntimeError(
+                    "completed halt epoch exceeds requested abort epoch"
+                )
+            self._dispatch_completed_halt_epoch = max(
+                self._dispatch_completed_halt_epoch,
+                abort_epoch,
+            )
+
+    def _begin_dispatch_epoch(
+        self,
+        expected_epoch: int,
+        expected_completed_halt_epoch: int,
+    ) -> int:
+        with self._dispatch_abort_lock:
+            if (
+                expected_epoch != expected_completed_halt_epoch
+                or self._dispatch_abort_epoch != expected_epoch
+                or self._dispatch_completed_halt_epoch
+                != expected_completed_halt_epoch
+            ):
                 raise CommoditySimNowSafetyError(
                     "授权等待期间收到 stop/disable/shutdown，拒绝派单"
                 )
@@ -399,7 +445,7 @@ class CommoditySimNowService:
         self._task = asyncio.create_task(self._run_auto_dispatch_loop())
 
     async def stop(self) -> None:
-        self._request_dispatch_abort()
+        abort_epoch = self._request_dispatch_abort()
         halt_error: Exception | None = None
         try:
             await asyncio.to_thread(
@@ -421,6 +467,7 @@ class CommoditySimNowService:
                 self._task = None
         if halt_error is not None:
             raise halt_error
+        self._complete_dispatch_halt(abort_epoch)
 
     @_serialized
     def _revoke_auto_dispatch(self, scope: str = "all") -> None:
@@ -460,10 +507,15 @@ class CommoditySimNowService:
         role: str | None,
         source_ip: str | None,
         _dispatch_entry_abort_epoch: int | None = None,
+        _dispatch_entry_completed_halt_epoch: int | None = None,
     ) -> dict[str, Any]:
-        if _dispatch_entry_abort_epoch is not None:
+        if (
+            _dispatch_entry_abort_epoch is not None
+            and _dispatch_entry_completed_halt_epoch is not None
+        ):
             self._begin_dispatch_epoch(
-                _dispatch_entry_abort_epoch
+                _dispatch_entry_abort_epoch,
+                _dispatch_entry_completed_halt_epoch,
             )
         if not self.settings.commodity_simnow_enabled:
             raise CommoditySimNowDisabledError(
@@ -1042,6 +1094,11 @@ class CommoditySimNowService:
                     if plan.get(
                         "c_fast_shakedown_session_id"
                     ):
+                        intent["pre_send_binding_guard"] = (
+                            self._verify_c_fast_final_dispatch_binding(
+                                plan
+                            )
+                        )
                         intent["pre_send_fact_guard"] = (
                             self._verify_c_fast_pre_send_fact_guard(
                                 plan,
@@ -2270,10 +2327,15 @@ class CommoditySimNowService:
         role: str | None,
         source_ip: str | None,
         _dispatch_entry_abort_epoch: int | None = None,
+        _dispatch_entry_completed_halt_epoch: int | None = None,
     ) -> dict[str, Any]:
-        if _dispatch_entry_abort_epoch is not None:
+        if (
+            _dispatch_entry_abort_epoch is not None
+            and _dispatch_entry_completed_halt_epoch is not None
+        ):
             self._begin_dispatch_epoch(
-                _dispatch_entry_abort_epoch
+                _dispatch_entry_abort_epoch,
+                _dispatch_entry_completed_halt_epoch,
             )
         if not self.settings.commodity_c_fast_simnow_shakedown_enabled:
             raise CommoditySimNowDisabledError(
@@ -3105,11 +3167,16 @@ class CommoditySimNowService:
         role: str | None,
         source_ip: str | None,
         _dispatch_entry_abort_epoch: int | None = None,
+        _dispatch_entry_completed_halt_epoch: int | None = None,
     ) -> dict[str, Any]:
         """Start one pre-previewed SimNow shakedown without per-order approval."""
-        if _dispatch_entry_abort_epoch is not None:
+        if (
+            _dispatch_entry_abort_epoch is not None
+            and _dispatch_entry_completed_halt_epoch is not None
+        ):
             self._begin_dispatch_epoch(
-                _dispatch_entry_abort_epoch
+                _dispatch_entry_abort_epoch,
+                _dispatch_entry_completed_halt_epoch,
             )
         if not self.settings.commodity_position_manager_simnow_shakedown_enabled:
             raise CommoditySimNowDisabledError(
@@ -4882,6 +4949,101 @@ class CommoditySimNowService:
             if expected[vt_symbol] == 0:
                 expected.pop(vt_symbol)
         return dict(sorted(expected.items()))
+
+    def _verify_c_fast_final_dispatch_binding(
+        self,
+        plan: dict[str, Any],
+    ) -> dict[str, Any]:
+        session = self._load_c_fast_shakedown_state()
+        snapshot, snapshot_hash = self._c_fast_snapshot()
+        current_trading_day = self._current_trading_day(
+            self._plan_symbols(plan)
+        ).isoformat()
+        expected = {
+            "session_id":
+            plan.get("c_fast_shakedown_session_id"),
+            "plan_hash": plan.get("plan_hash"),
+            "source_snapshot_hash":
+            plan.get("source_snapshot_hash"),
+            "source_snapshot_id":
+            (
+                session.get("source_snapshot_id")
+                if isinstance(session, dict)
+                else None
+            ),
+            "formula_target_binding_sha256":
+            plan.get("formula_target_binding_sha256"),
+            "execution_day": plan.get("execution_day"),
+        }
+        observed = {
+            "session_id":
+            (
+                session.get("session_id")
+                if isinstance(session, dict)
+                else None
+            ),
+            "plan_hash":
+            (
+                session.get("plan_hash")
+                if isinstance(session, dict)
+                else None
+            ),
+            "source_snapshot_hash": snapshot_hash,
+            "source_snapshot_id": snapshot.snapshot_id,
+            "formula_target_binding_sha256":
+            snapshot.formula_target_binding_sha256,
+            "execution_day": snapshot.execution_day.isoformat(),
+            "session_signed_execution_day":
+            (
+                session.get("signed_execution_day")
+                if isinstance(session, dict)
+                else None
+            ),
+            "current_trading_day": current_trading_day,
+            "active_plan_hash":
+            (
+                self.current_plan.get("plan_hash")
+                if isinstance(self.current_plan, dict)
+                else None
+            ),
+        }
+        if (
+            not isinstance(session, dict)
+            or session.get("status") == "RESULT_UNKNOWN"
+            or any(
+                observed[field] != expected[field]
+                for field in (
+                    "session_id",
+                    "plan_hash",
+                    "source_snapshot_hash",
+                    "source_snapshot_id",
+                    "formula_target_binding_sha256",
+                    "execution_day",
+                )
+            )
+            or observed["session_signed_execution_day"]
+            != expected["execution_day"]
+            or observed["current_trading_day"]
+            != expected["execution_day"]
+            or observed["active_plan_hash"]
+            != expected["plan_hash"]
+        ):
+            raise CommoditySimNowSafetyError(
+                "C_FAST child 最终发送绑定已失效",
+                detail={
+                    "expected": expected,
+                    "observed": observed,
+                },
+            )
+        return {
+            "captured_at_utc":
+            self.clock().astimezone(timezone.utc).isoformat(),
+            "plan_hash": expected["plan_hash"],
+            "source_snapshot_hash":
+            expected["source_snapshot_hash"],
+            "execution_day": expected["execution_day"],
+            "current_trading_day": current_trading_day,
+        }
 
     def _verify_c_fast_pre_send_fact_guard(
         self,

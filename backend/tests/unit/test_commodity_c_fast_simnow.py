@@ -17,6 +17,7 @@ from app.core.errors import (
 from app.schemas.commodity_c_fast_shadow import CommodityCFastShadowDTO
 from app.schemas.commodity_simnow import (
     CommodityCFastShakedownPreviewRequestDTO,
+    CommoditySimNowDisableRequestDTO,
 )
 from app.services.commodity_simnow import CommoditySimNowService
 from app.services.vnpy_rpc_service import RpcTimeoutError
@@ -29,6 +30,7 @@ from test_commodity_simnow import (
     LocalRiskRejectTrade,
     RpcTimeoutTrade,
     fills_for_requests,
+    enable_payload,
     make_key,
     make_service,
     make_settings,
@@ -173,6 +175,21 @@ class ProductionWindowGenerationChangeTrade(FakeTrade):
         self.rpc.last_connected_at = "fake-generation-B"
         kwargs["pre_rpc_guard"]()
         pytest.fail("non-idempotent RPC must not be reached")
+
+
+class ClockChangeAfterFirstChildTrade(FakeTrade):
+    def __init__(self, next_now: datetime) -> None:
+        super().__init__()
+        self.service: CommoditySimNowService | None = None
+        self.next_now = next_now
+
+    def send_order(self, request, **kwargs):
+        kwargs["pre_rpc_guard"]()
+        result = super().send_order(request, **kwargs)
+        if len(self.requests) == 1:
+            assert self.service is not None
+            self.service.clock = lambda: self.next_now
+        return result
 
 
 def fills_for_submitted(plan: dict) -> list[dict]:
@@ -1113,6 +1130,181 @@ def test_c_fast_queued_stop_epoch_cannot_be_cleared_by_start(
     assert not trade.requests
 
 
+def test_c_fast_start_entered_during_pending_halt_cannot_authorize(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trade = FakeTrade()
+    service, _, _, _ = prepare_c_fast_shakedown(
+        tmp_path, trade=trade
+    )
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    halt_entered = Event()
+    release_halt = Event()
+    pending_snapshot_taken = Event()
+    original_snapshot = service._dispatch_epoch_state_snapshot
+
+    def blocking_safe_halt(*args, **kwargs):
+        halt_entered.set()
+        assert release_halt.wait(5)
+        return {"required": False, "status": "IDLE"}
+
+    def observed_snapshot():
+        state = original_snapshot()
+        if state[0] > state[1]:
+            pending_snapshot_taken.set()
+        return state
+
+    monkeypatch.setattr(
+        service, "_begin_safe_halt", blocking_safe_halt
+    )
+    monkeypatch.setattr(
+        service,
+        "_dispatch_epoch_state_snapshot",
+        observed_snapshot,
+    )
+    disable_errors: list[Exception] = []
+    start_errors: list[Exception] = []
+    disable_thread = Thread(
+        target=lambda: _capture_thread_error(
+            disable_errors,
+            lambda: service.disable(
+                CommoditySimNowDisableRequestDTO(
+                    reason="pending halt race"
+                ),
+                operator="admin",
+                role="admin",
+                source_ip=None,
+            ),
+        )
+    )
+    disable_thread.start()
+    assert halt_entered.wait(5)
+    start_thread = Thread(
+        target=lambda: _capture_thread_error(
+            start_errors,
+            lambda: service.start_c_fast_shakedown(
+                preview["plan_hash"],
+                operator="admin",
+                role="admin",
+                source_ip=None,
+            ),
+        )
+    )
+    start_thread.start()
+    assert pending_snapshot_taken.wait(5)
+    release_halt.set()
+    disable_thread.join(5)
+    start_thread.join(5)
+
+    assert not disable_thread.is_alive()
+    assert not start_thread.is_alive()
+    assert not disable_errors
+    assert start_errors
+    assert isinstance(
+        start_errors[0], CommoditySimNowSafetyError
+    )
+    assert not trade.requests
+    assert service._dispatch_epoch_state_snapshot() == (1, 1)
+
+    service.start_c_fast_shakedown(
+        preview["plan_hash"],
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+    assert trade.requests
+
+
+@pytest.mark.parametrize(
+    "authorization_entry",
+    ["enable", "c_fast", "position_manager"],
+)
+def test_pending_halt_blocks_every_authorization_entry(
+    tmp_path: Path,
+    authorization_entry: str,
+) -> None:
+    service, _, _, _ = prepare_c_fast_shakedown(tmp_path)
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    abort_epoch = service._request_dispatch_abort()
+
+    with pytest.raises(CommoditySimNowSafetyError):
+        if authorization_entry == "enable":
+            service.enable(
+                enable_payload(),
+                operator="admin",
+                role="admin",
+                source_ip=None,
+            )
+        elif authorization_entry == "c_fast":
+            service.start_c_fast_shakedown(
+                preview["plan_hash"],
+                operator="admin",
+                role="admin",
+                source_ip=None,
+            )
+        else:
+            service.start_position_manager_shakedown(
+                "pending-halt-must-win",
+                operator="admin",
+                role="admin",
+                source_ip=None,
+            )
+
+    assert service._dispatch_epoch_state_snapshot() == (
+        abort_epoch,
+        0,
+    )
+    service._complete_dispatch_halt(abort_epoch)
+    requested, completed = service._dispatch_epoch_state_snapshot()
+    assert service._begin_dispatch_epoch(
+        requested, completed
+    ) == abort_epoch
+
+
+def test_service_shutdown_pending_halt_blocks_authorization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, _, _, _ = prepare_c_fast_shakedown(tmp_path)
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    halt_entered = Event()
+    release_halt = Event()
+
+    def blocking_safe_halt(*args, **kwargs):
+        halt_entered.set()
+        assert release_halt.wait(5)
+        return {"required": False, "status": "IDLE"}
+
+    monkeypatch.setattr(
+        service, "_begin_safe_halt", blocking_safe_halt
+    )
+
+    async def scenario() -> None:
+        stop_task = asyncio.create_task(service.stop())
+        assert await asyncio.to_thread(halt_entered.wait, 5)
+        with pytest.raises(CommoditySimNowSafetyError):
+            await asyncio.to_thread(
+                service.start_c_fast_shakedown,
+                preview["plan_hash"],
+                operator="admin",
+                role="admin",
+                source_ip=None,
+            )
+        release_halt.set()
+        await stop_task
+
+    asyncio.run(scenario())
+
+    assert service._dispatch_epoch_state_snapshot() == (1, 1)
+
+
 def test_c_fast_continuous_nested_start_inherits_epoch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1268,6 +1460,83 @@ def test_c_fast_trade_service_window_rechecks_generation(
         )
 
     assert not trade.requests
+
+
+def test_c_fast_final_guard_rejects_next_trading_day_child(
+    tmp_path: Path,
+) -> None:
+    trade = ClockChangeAfterFirstChildTrade(
+        datetime(2026, 9, 2, 1, tzinfo=timezone.utc)
+    )
+    service, _, _, _ = prepare_c_fast_shakedown(
+        tmp_path, trade=trade
+    )
+    trade.service = service
+    service.settings = service.settings.model_copy(
+        update={"commodity_simnow_max_child_order_lots": 1}
+    )
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+
+    with pytest.raises(
+        CommoditySimNowStateError,
+        match="委托部分提交",
+    ) as exc_info:
+        service.start_c_fast_shakedown(
+            preview["plan_hash"],
+            operator="admin",
+            role="admin",
+            source_ip=None,
+        )
+
+    assert len(trade.requests) == 1
+    assert isinstance(
+        exc_info.value.__cause__,
+        CommoditySimNowSafetyError,
+    )
+    assert "child 最终发送绑定已失效" in str(
+        exc_info.value.__cause__
+    )
+
+
+def test_c_fast_final_guard_allows_night_natural_day_rollover(
+    tmp_path: Path,
+) -> None:
+    after_midnight = datetime(
+        2026, 8, 31, 16, 30, tzinfo=timezone.utc
+    )
+    trade = ClockChangeAfterFirstChildTrade(after_midnight)
+    service, _, _, _ = prepare_c_fast_shakedown(
+        tmp_path, trade=trade
+    )
+    trade.service = service
+    before_midnight = datetime(
+        2026, 8, 31, 13, 30, tzinfo=timezone.utc
+    )
+    service.clock = lambda: before_midnight
+    for tick in service.tick_store.ticks.values():
+        tick["received_at"] = before_midnight.isoformat()
+    service.settings = service.settings.model_copy(
+        update={"commodity_simnow_max_child_order_lots": 1}
+    )
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+
+    service.start_c_fast_shakedown(
+        preview["plan_hash"],
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+
+    assert len(trade.requests) >= 2
+    assert all(
+        intent["pre_send_binding_guard"]["execution_day"]
+        == "2026-09-01"
+        for intent in service.current_plan["send_intents"]["open"]
+    )
 
 
 @pytest.mark.parametrize("with_late_order", [False, True])
