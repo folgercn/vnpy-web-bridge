@@ -121,6 +121,19 @@ Testing
 PR Review
 ```
 
+## 4.1 Issue Template Compliance
+
+AI Agent 创建 Issue 时必须使用 `.github/ISSUE_TEMPLATE/` 中适用的模板。
+
+不得创建缺少以下声明的新 Issue：
+
+- Architecture Plane
+- Authority Impact
+- Security Boundary
+- Non-goals
+
+创建 Issue 后，AI Agent 必须先确认 Plane 归属和 Authority 影响，再进入设计与实现。
+
 ---
 
 # 5. 开发输出规范

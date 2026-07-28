@@ -6,27 +6,37 @@
 
 ---
 
+## Issue Creation Rule
+
+所有新 Issue 必须使用 `.github/ISSUE_TEMPLATE/` 中适用的模板，并明确声明：
+
+- Architecture Plane
+- Authority Impact
+- Security Boundary
+- Non-goals
+
+缺少任一项时，不得进入设计或实现阶段。
+
+---
+
 ## Workflow
 
 ```text
-Issue
- |
- v
-Architecture Review
- |
- v
-Design Proposal
- |
- v
+Create Issue
+      |
+      v
+Architecture Classification
+      |
+      v
+Design Review
+      |
+      v
 Implementation
- |
- v
-Security Review
- |
- v
+      |
+      v
 PR Review
- |
- v
+      |
+      v
 Merge
 ```
 
@@ -101,8 +111,8 @@ PR 必须包含：
 
 使用 LLM/Codex 开发时，必须先阅读：
 
-- architecture-v1
-- authority-model-v1
-- llm-development-guide-v1
+- `docs/architecture/vnpy-web-bridge-architecture-v1.md`
+- `docs/architecture/authority-model-v1.md`
+- `docs/development/llm-development-guide-v1.md`
 
 AI 不得自行改变架构边界。
