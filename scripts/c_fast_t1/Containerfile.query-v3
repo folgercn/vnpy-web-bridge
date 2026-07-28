@@ -1,0 +1,91 @@
+FROM python:3.12-slim@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de
+
+ARG SOURCE_REVISION=UNSET
+
+LABEL org.opencontainers.image.title="vnpy-web-bridge C_FAST T1 query-v3 runner" \
+      org.opencontainers.image.revision="${SOURCE_REVISION}" \
+      io.vnpy-web-bridge.c-fast-t1.query-v3-runtime="true" \
+      io.vnpy-web-bridge.c-fast-t1.authority-granted="false"
+
+ENV PATH=/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin \
+    LANG=C.UTF-8 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /opt/c-fast-t1
+
+RUN /usr/local/bin/python3.12 -m pip install --no-cache-dir --disable-pip-version-check \
+      "psycopg[binary]==3.2.3" \
+      "cryptography==48.0.0" \
+      "jsonschema==4.26.0" \
+      "referencing==0.37.0"
+
+COPY scripts/commodity_c_fast_t1_query_v3.py ./scripts/commodity_c_fast_t1_query_v3.py
+COPY scripts/commodity_c_fast_t1_query_child_v3.py ./scripts/commodity_c_fast_t1_query_child_v3.py
+COPY scripts/commodity_c_fast_t1_one_shot.py ./scripts/commodity_c_fast_t1_one_shot.py
+COPY scripts/commodity_c_fast_t1_readiness_v2.py ./scripts/commodity_c_fast_t1_readiness_v2.py
+COPY scripts/commodity_c_fast_t1_release_v2_foundation.py ./scripts/commodity_c_fast_t1_release_v2_foundation.py
+COPY scripts/commodity_c_fast_readonly_deployment_outcome.py ./scripts/commodity_c_fast_readonly_deployment_outcome.py
+COPY scripts/commodity_c_fast_readonly_deployment_release.py ./scripts/commodity_c_fast_readonly_deployment_release.py
+COPY scripts/commodity_c_fast_t1_build_registry_provenance.py ./scripts/commodity_c_fast_t1_build_registry_provenance.py
+COPY scripts/commodity_c_fast_l1_l5_audit.py ./scripts/commodity_c_fast_l1_l5_audit.py
+COPY scripts/c_fast_t1/verify_image_attestation.py ./scripts/c_fast_t1/verify_image_attestation.py
+
+COPY docs/schemas/commodity-c-fast-l1-l5-audit-manifest-v2.schema.json ./docs/schemas/commodity-c-fast-l1-l5-audit-manifest-v2.schema.json
+COPY docs/schemas/commodity-c-fast-l1-l5-audit-v1.schema.json ./docs/schemas/commodity-c-fast-l1-l5-audit-v1.schema.json
+COPY docs/schemas/commodity-c-fast-l1-l5-audit-v2.schema.json ./docs/schemas/commodity-c-fast-l1-l5-audit-v2.schema.json
+COPY docs/schemas/commodity-c-fast-questdb-readonly-proof-v1.schema.json ./docs/schemas/commodity-c-fast-questdb-readonly-proof-v1.schema.json
+COPY docs/schemas/commodity-c-fast-t1-one-shot-query-release-v3.schema.json ./docs/schemas/commodity-c-fast-t1-one-shot-query-release-v3.schema.json
+COPY docs/schemas/commodity-c-fast-t1-query-consume-v3.schema.json ./docs/schemas/commodity-c-fast-t1-query-consume-v3.schema.json
+COPY docs/schemas/commodity-c-fast-t1-query-child-started-v3.schema.json ./docs/schemas/commodity-c-fast-t1-query-child-started-v3.schema.json
+COPY docs/schemas/commodity-c-fast-t1-query-terminal-v3.schema.json ./docs/schemas/commodity-c-fast-t1-query-terminal-v3.schema.json
+COPY docs/schemas/commodity-c-fast-t1-query-v3-trusted-keys-v1.schema.json ./docs/schemas/commodity-c-fast-t1-query-v3-trusted-keys-v1.schema.json
+COPY docs/schemas/commodity-c-fast-t1-readiness-v2.schema.json ./docs/schemas/commodity-c-fast-t1-readiness-v2.schema.json
+COPY docs/schemas/commodity-c-fast-t1-external-image-evidence-v1.schema.json ./docs/schemas/commodity-c-fast-t1-external-image-evidence-v1.schema.json
+COPY docs/schemas/commodity-c-fast-t1-image-attestation-v1.schema.json ./docs/schemas/commodity-c-fast-t1-image-attestation-v1.schema.json
+COPY docs/schemas/commodity-c-fast-t1-build-registry-provenance-v1.schema.json ./docs/schemas/commodity-c-fast-t1-build-registry-provenance-v1.schema.json
+COPY docs/schemas/commodity-c-fast-t1-build-registry-provenance-receipt-v1.schema.json ./docs/schemas/commodity-c-fast-t1-build-registry-provenance-receipt-v1.schema.json
+COPY docs/schemas/commodity-c-fast-readonly-deployment-release-v1.schema.json ./docs/schemas/commodity-c-fast-readonly-deployment-release-v1.schema.json
+COPY docs/schemas/commodity-c-fast-readonly-deployment-consume-v1.schema.json ./docs/schemas/commodity-c-fast-readonly-deployment-consume-v1.schema.json
+COPY docs/schemas/commodity-c-fast-readonly-deployment-receipt-v1.schema.json ./docs/schemas/commodity-c-fast-readonly-deployment-receipt-v1.schema.json
+COPY docs/schemas/commodity-c-fast-readonly-deployment-outcome-v1.schema.json ./docs/schemas/commodity-c-fast-readonly-deployment-outcome-v1.schema.json
+COPY docs/schemas/commodity-c-fast-readonly-deployment-execution-v1.schema.json ./docs/schemas/commodity-c-fast-readonly-deployment-execution-v1.schema.json
+COPY docs/schemas/commodity-c-fast-readonly-deployment-writer-post-v1.schema.json ./docs/schemas/commodity-c-fast-readonly-deployment-writer-post-v1.schema.json
+COPY docs/schemas/commodity-c-fast-readonly-deployment-health-post-v1.schema.json ./docs/schemas/commodity-c-fast-readonly-deployment-health-post-v1.schema.json
+COPY docs/schemas/commodity-c-fast-readonly-deployment-backlog-post-v1.schema.json ./docs/schemas/commodity-c-fast-readonly-deployment-backlog-post-v1.schema.json
+COPY docs/schemas/commodity-c-fast-readonly-deployment-principal-secret-post-v1.schema.json ./docs/schemas/commodity-c-fast-readonly-deployment-principal-secret-post-v1.schema.json
+COPY docs/schemas/commodity-c-fast-readonly-deployment-network-post-v1.schema.json ./docs/schemas/commodity-c-fast-readonly-deployment-network-post-v1.schema.json
+
+RUN /usr/local/bin/python3.12 -m py_compile \
+      scripts/commodity_c_fast_t1_query_v3.py \
+      scripts/commodity_c_fast_t1_query_child_v3.py \
+      scripts/commodity_c_fast_t1_one_shot.py \
+      scripts/commodity_c_fast_t1_readiness_v2.py \
+      scripts/commodity_c_fast_t1_release_v2_foundation.py \
+      scripts/commodity_c_fast_readonly_deployment_outcome.py \
+      scripts/commodity_c_fast_readonly_deployment_release.py \
+      scripts/commodity_c_fast_t1_build_registry_provenance.py \
+      scripts/commodity_c_fast_l1_l5_audit.py \
+      scripts/c_fast_t1/verify_image_attestation.py \
+    && find /opt/c-fast-t1 -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete \
+    && find /opt/c-fast-t1 -type d -name '__pycache__' -empty -delete \
+    && test -z "$(find /opt/c-fast-t1 -type f \( -name '*.pyc' -o -name '*.pyo' \) -print -quit)" \
+    && chmod -R a-w /opt/c-fast-t1
+
+RUN printf '%s\n' '/opt/c-fast-t1/scripts' \
+      > /usr/local/lib/python3.12/site-packages/c-fast-t1-query-v3-runtime.pth \
+    && chmod 0444 /usr/local/lib/python3.12/site-packages/c-fast-t1-query-v3-runtime.pth
+
+RUN install -d -o root -g root -m 0555 \
+      /run/c-fast-t1-query-v3-input \
+      /run/c-fast-t1-readiness-v2-pins \
+      /run/secrets \
+    && install -d -o 65532 -g 65532 -m 0700 \
+      /var/lib/c-fast-readonly-deployment-custody \
+      /var/lib/c-fast-t1-readiness
+
+USER 65532:65532
+
+# -I ignores PYTHONPATH and user site packages. The root-owned, immutable system
+# site .pth above exposes only the fixed runtime module directory.
+ENTRYPOINT ["/usr/local/bin/python3.12", "-I", "/opt/c-fast-t1/scripts/commodity_c_fast_t1_query_v3.py"]
