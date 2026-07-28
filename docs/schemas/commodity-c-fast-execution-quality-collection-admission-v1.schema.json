@@ -1,0 +1,254 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bktrader.local/schemas/commodity-c-fast-execution-quality-collection-admission-v1.schema.json",
+  "title": "C_FAST execution-quality collection admission v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "purpose", "candidate_id", "parent_issue_number",
+    "issue_number", "release_id", "attempt_id", "issued_at", "not_before",
+    "expires_at", "minimum_final_revalidation_margin_seconds",
+    "reviewer_role", "human_signature", "source_binding",
+    "admission_keyring_sha256", "custody_path_sha256",
+    "custody_identity_sha256", "verifier_sha256",
+    "release_schema_sha256", "trusted_keyring_schema_sha256",
+    "consume_schema_sha256", "terminal_schema_sha256",
+    "admission_fact_frozen", "p0_accepted", "policy_rules_complete",
+    "raw_signed_sources_required",
+    "startup_recovery_exact_revalidation_required", "admission_scope",
+    "admission_is_runtime_authority", "collection_authorized",
+    "execution_quality_collection_authorized",
+    "runtime_activation_authorized", "database_mutation_authorized",
+    "deployment_mutation_authorized", "network_authorized",
+    "query_authorized", "web_bridge_rpc_authorized", "order_authorized",
+    "order_submission_authorized", "position_mutation_authorized",
+    "dispatch_authorized", "trading_authorized",
+    "strategy_activation_authorized", "replacement_authorized",
+    "production_authorized", "automatic_promotion_authorized",
+    "dynamic_selection_allowed", "replay_allowed", "signer_key_id",
+    "signature"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "commodity_c_fast_execution_quality_collection_admission_v1"
+    },
+    "purpose": {
+      "const": "c_fast_execution_quality_collection_admission_offline_review"
+    },
+    "candidate_id": {"const": "C_FAST_CROSS_SECTION_NEUTRAL"},
+    "parent_issue_number": {"const": 114},
+    "issue_number": {"const": 140},
+    "release_id": {"$ref": "#/$defs/id"},
+    "attempt_id": {
+      "type": "string",
+      "pattern": "^collection-admission-attempt-[0-9a-f]{64}$"
+    },
+    "issued_at": {"$ref": "#/$defs/dateTime"},
+    "not_before": {"$ref": "#/$defs/dateTime"},
+    "expires_at": {"$ref": "#/$defs/dateTime"},
+    "minimum_final_revalidation_margin_seconds": {"const": 30},
+    "reviewer_role": {"$ref": "#/$defs/nonPendingText"},
+    "human_signature": {"$ref": "#/$defs/nonPendingText"},
+    "source_binding": {"$ref": "#/$defs/sourceBinding"},
+    "admission_keyring_sha256": {"$ref": "#/$defs/sha256"},
+    "custody_path_sha256": {"$ref": "#/$defs/sha256"},
+    "custody_identity_sha256": {"$ref": "#/$defs/sha256"},
+    "verifier_sha256": {"$ref": "#/$defs/sha256"},
+    "release_schema_sha256": {"$ref": "#/$defs/sha256"},
+    "trusted_keyring_schema_sha256": {"$ref": "#/$defs/sha256"},
+    "consume_schema_sha256": {"$ref": "#/$defs/sha256"},
+    "terminal_schema_sha256": {"$ref": "#/$defs/sha256"},
+    "admission_fact_frozen": {"const": true},
+    "p0_accepted": {"const": true},
+    "policy_rules_complete": {"const": true},
+    "raw_signed_sources_required": {"const": true},
+    "startup_recovery_exact_revalidation_required": {"const": true},
+    "admission_scope": {
+      "const": "OFFLINE_FACT_FOR_SEPARATE_RUNTIME_RELEASE_ONLY"
+    },
+    "admission_is_runtime_authority": {"const": false},
+    "collection_authorized": {"const": false},
+    "execution_quality_collection_authorized": {"const": false},
+    "runtime_activation_authorized": {"const": false},
+    "database_mutation_authorized": {"const": false},
+    "deployment_mutation_authorized": {"const": false},
+    "network_authorized": {"const": false},
+    "query_authorized": {"const": false},
+    "web_bridge_rpc_authorized": {"const": false},
+    "order_authorized": {"const": false},
+    "order_submission_authorized": {"const": false},
+    "position_mutation_authorized": {"const": false},
+    "dispatch_authorized": {"const": false},
+    "trading_authorized": {"const": false},
+    "strategy_activation_authorized": {"const": false},
+    "replacement_authorized": {"const": false},
+    "production_authorized": {"const": false},
+    "automatic_promotion_authorized": {"const": false},
+    "dynamic_selection_allowed": {"const": false},
+    "replay_allowed": {"const": false},
+    "signer_key_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{8,128}$"
+    },
+    "signature": {"type": "string", "minLength": 40, "maxLength": 256}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{8,128}$"
+    },
+    "dateTime": {"type": "string", "format": "date-time"},
+    "nonPendingText": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "not": {"pattern": "^PENDING_"}
+    },
+    "policyBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "v1_freeze_id", "v1_freeze_sha256", "v1_raw_sha256",
+        "v1_canonical_sha256", "v2_freeze_id", "v2_freeze_sha256",
+        "v2_raw_sha256", "v2_canonical_sha256",
+        "trusted_keyring_sha256", "policy_id", "policy_hash",
+        "policy_rule_completeness"
+      ],
+      "properties": {
+        "v1_freeze_id": {"$ref": "#/$defs/id"},
+        "v1_freeze_sha256": {"$ref": "#/$defs/sha256"},
+        "v1_raw_sha256": {"$ref": "#/$defs/sha256"},
+        "v1_canonical_sha256": {"$ref": "#/$defs/sha256"},
+        "v2_freeze_id": {"$ref": "#/$defs/id"},
+        "v2_freeze_sha256": {"$ref": "#/$defs/sha256"},
+        "v2_raw_sha256": {"$ref": "#/$defs/sha256"},
+        "v2_canonical_sha256": {"$ref": "#/$defs/sha256"},
+        "trusted_keyring_sha256": {"$ref": "#/$defs/sha256"},
+        "policy_id": {"$ref": "#/$defs/id"},
+        "policy_hash": {"$ref": "#/$defs/sha256"},
+        "policy_rule_completeness": {
+          "const": "COLLECTION_RULES_COMPLETE_AUTHORITY_ABSENT"
+        }
+      }
+    },
+    "p0Binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "acceptance_id", "acceptance_raw_sha256",
+        "acceptance_canonical_sha256", "acceptance_keyring_sha256",
+        "release_id", "attempt_id", "terminal_state",
+        "bundle_raw_sha256", "bundle_canonical_sha256",
+        "artifact_sha256", "bundle_index_sha256"
+      ],
+      "properties": {
+        "acceptance_id": {"$ref": "#/$defs/id"},
+        "acceptance_raw_sha256": {"$ref": "#/$defs/sha256"},
+        "acceptance_canonical_sha256": {"$ref": "#/$defs/sha256"},
+        "acceptance_keyring_sha256": {"$ref": "#/$defs/sha256"},
+        "release_id": {"$ref": "#/$defs/id"},
+        "attempt_id": {"$ref": "#/$defs/id"},
+        "terminal_state": {"const": "COMPLETED_EVIDENCE_P0_PASS"},
+        "bundle_raw_sha256": {"$ref": "#/$defs/bundleRaw"},
+        "bundle_canonical_sha256": {"$ref": "#/$defs/bundleCanonical"},
+        "artifact_sha256": {"$ref": "#/$defs/artifactHashes"},
+        "bundle_index_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "sourceBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["policy", "p0"],
+      "properties": {
+        "policy": {"$ref": "#/$defs/policyBinding"},
+        "p0": {"$ref": "#/$defs/p0Binding"}
+      }
+    },
+    "bundleRaw": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "query_release", "query_trusted_keyring", "readiness_packet",
+        "content_attestation", "provenance", "provenance_trusted_keyring",
+        "t1_trusted_keyring", "l3_trusted_keyring", "l3_release",
+        "outcome", "outcome_trusted_keyring", "manifest",
+        "consume_marker", "child_launch_marker", "audit_child_invocation",
+        "pre_connect_gate", "query_child_invocation", "terminal_seal",
+        "audit_json", "audit_csv", "audit_markdown", "readonly_proof"
+      ],
+      "properties": {
+        "query_release": {"$ref": "#/$defs/sha256"},
+        "query_trusted_keyring": {"$ref": "#/$defs/sha256"},
+        "readiness_packet": {"$ref": "#/$defs/sha256"},
+        "content_attestation": {"$ref": "#/$defs/sha256"},
+        "provenance": {"$ref": "#/$defs/sha256"},
+        "provenance_trusted_keyring": {"$ref": "#/$defs/sha256"},
+        "t1_trusted_keyring": {"$ref": "#/$defs/sha256"},
+        "l3_trusted_keyring": {"$ref": "#/$defs/sha256"},
+        "l3_release": {"$ref": "#/$defs/sha256"},
+        "outcome": {"$ref": "#/$defs/sha256"},
+        "outcome_trusted_keyring": {"$ref": "#/$defs/sha256"},
+        "manifest": {"$ref": "#/$defs/sha256"},
+        "consume_marker": {"$ref": "#/$defs/sha256"},
+        "child_launch_marker": {"$ref": "#/$defs/sha256"},
+        "audit_child_invocation": {"$ref": "#/$defs/sha256"},
+        "pre_connect_gate": {"$ref": "#/$defs/sha256"},
+        "query_child_invocation": {"$ref": "#/$defs/sha256"},
+        "terminal_seal": {"$ref": "#/$defs/sha256"},
+        "audit_json": {"$ref": "#/$defs/sha256"},
+        "audit_csv": {"$ref": "#/$defs/sha256"},
+        "audit_markdown": {"$ref": "#/$defs/sha256"},
+        "readonly_proof": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "bundleCanonical": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "query_release", "query_trusted_keyring", "readiness_packet",
+        "content_attestation", "provenance", "provenance_trusted_keyring",
+        "t1_trusted_keyring", "l3_trusted_keyring", "l3_release",
+        "outcome", "outcome_trusted_keyring", "manifest",
+        "consume_marker", "child_launch_marker", "audit_child_invocation",
+        "pre_connect_gate", "query_child_invocation", "terminal_seal",
+        "audit_json", "readonly_proof"
+      ],
+      "properties": {
+        "query_release": {"$ref": "#/$defs/sha256"},
+        "query_trusted_keyring": {"$ref": "#/$defs/sha256"},
+        "readiness_packet": {"$ref": "#/$defs/sha256"},
+        "content_attestation": {"$ref": "#/$defs/sha256"},
+        "provenance": {"$ref": "#/$defs/sha256"},
+        "provenance_trusted_keyring": {"$ref": "#/$defs/sha256"},
+        "t1_trusted_keyring": {"$ref": "#/$defs/sha256"},
+        "l3_trusted_keyring": {"$ref": "#/$defs/sha256"},
+        "l3_release": {"$ref": "#/$defs/sha256"},
+        "outcome": {"$ref": "#/$defs/sha256"},
+        "outcome_trusted_keyring": {"$ref": "#/$defs/sha256"},
+        "manifest": {"$ref": "#/$defs/sha256"},
+        "consume_marker": {"$ref": "#/$defs/sha256"},
+        "child_launch_marker": {"$ref": "#/$defs/sha256"},
+        "audit_child_invocation": {"$ref": "#/$defs/sha256"},
+        "pre_connect_gate": {"$ref": "#/$defs/sha256"},
+        "query_child_invocation": {"$ref": "#/$defs/sha256"},
+        "terminal_seal": {"$ref": "#/$defs/sha256"},
+        "audit_json": {"$ref": "#/$defs/sha256"},
+        "readonly_proof": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "artifactHashes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "audit_json", "audit_csv", "audit_markdown", "readonly_proof"
+      ],
+      "properties": {
+        "audit_json": {"$ref": "#/$defs/sha256"},
+        "audit_csv": {"$ref": "#/$defs/sha256"},
+        "audit_markdown": {"$ref": "#/$defs/sha256"},
+        "readonly_proof": {"$ref": "#/$defs/sha256"}
+      }
+    }
+  }
+}
