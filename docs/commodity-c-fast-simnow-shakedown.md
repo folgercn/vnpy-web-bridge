@@ -88,6 +88,12 @@ reference/order id 唯一归属的活动委托时，状态保持
 `SUBMISSION_OUTCOME_UNKNOWN`，禁止声明无证据、禁止归档或重发。
 归属按每个 send intent 独立判定；同阶段其他子单已 ACK 或已有 evidence，
 不能掩盖另一个 unresolved timeout 子单。
+如果 unresolved intent 期间持仓已经偏离派单前快照，即使 orders/trades
+仍没有回报，也必须保持 `UNRESOLVED_SEND_INTENTS`，禁止按目标持仓误判完成。
+submitted、halted reconcile 和 terminal finalize 都会重新读取原始账户持仓；
+发现固定十品种范围外持仓时撤权并保留 active plan，禁止生成终态归档。
+目标手数均为零、仅 exact contract 变化的合法 snapshot 会直接生成可重启恢复的
+no-op 终态证据，不发送委托，也不占用共享执行槽。
 共享 active-plan 落盘失败同样不得阻断 live RPC 查询和撤单，结果会显式记录
 `active_state_persistence_error`；服务 shutdown 使用 finally 保证 worker
 一定停止。
@@ -119,6 +125,8 @@ execution PnL 全部返回 `None`，不得把未知成交事实推导为零。
 RPC 可用但 `expected_volume > filled_volume` 时同样返回
 `trade_evidence_state=INCOMPLETE`，所有金额字段为 `None`；权威持仓可用于
 安全收口，但不能把迟到的 trade callback 当作零成交或零 PnL。
+终态 `execution_snapshot` 与 PnL 的成交量、成交现金流和滑点来自同一次
+orders/trades 采集，并记录相同的 `execution_captured_at_utc`。
 
 ## 本地验证
 

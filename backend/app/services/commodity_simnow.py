@@ -1000,6 +1000,33 @@ class CommoditySimNowService:
             raise CommoditySimNowStateError(
                 "当前状态不允许对账", detail={"status": plan["status"]}
             )
+        if plan.get("c_fast_shakedown_session_id"):
+            outside_scope = self._c_fast_outside_scope_positions()
+            if outside_scope:
+                self._revoke_auto_dispatch("c_fast_shakedown")
+                halt_result = self._begin_safe_halt(
+                    "c_fast_outside_scope_position",
+                    operator=operator,
+                    source_ip=source_ip,
+                    phase=self._infer_plan_phase(plan),
+                    revoke_scope="c_fast_shakedown",
+                )
+                halt = plan.setdefault("halt", {})
+                halt.update(
+                    {
+                        "recovery_blocker":
+                        "OUTSIDE_C_FAST_POSITION_SCOPE",
+                        "outside_scope_positions": outside_scope,
+                    }
+                )
+                self._persist_active_plan_during_halt(halt)
+                raise CommoditySimNowSafetyError(
+                    "账户存在 C_FAST 固定十品种范围外持仓",
+                    detail={
+                        "symbols": outside_scope,
+                        "halt": halt_result,
+                    },
+                )
         if self._is_shakedown_plan(plan):
             conflicts = self._candidate_shakedown_external_active_orders(
                 plan
@@ -1094,8 +1121,13 @@ class CommoditySimNowService:
                 self._persist_active_plan()
         except Exception as exc:
             if self._is_shakedown_plan(plan):
-                plan["status"] = status_before_reconcile
                 halt = plan.setdefault("halt", {})
+                plan["status"] = (
+                    "HALTED_RECONCILE_REQUIRED"
+                    if halt.get("recovery_blocker")
+                    == "OUTSIDE_C_FAST_POSITION_SCOPE"
+                    else status_before_reconcile
+                )
                 halt["terminal_finalize_error_type"] = exc.__class__.__name__
                 halt["terminal_finalize_failed_at_utc"] = (
                     self.clock().astimezone(timezone.utc).isoformat()
@@ -1241,6 +1273,16 @@ class CommoditySimNowService:
         status = str(plan.get("status"))
         if status in {"CANCEL_PENDING", "SUBMISSION_OUTCOME_UNKNOWN"}:
             return self._advance_cancel_pending(operator=operator, source_ip=source_ip)
+        if (
+            status == "NOOP_FINALIZING"
+            and plan.get("c_fast_shakedown_session_id")
+        ):
+            reconciliation = self._complete_c_fast_noop_plan(plan)
+            return {
+                "action": "noop_reconciled",
+                "reconciliation": reconciliation,
+                **self.c_fast_shakedown_status(),
+            }
         if status in {"COMPLETE", "HALTED_RECONCILED", "HALTED_PRE_SUBMIT_SAFE"}:
             return {
                 "action": "idle",
@@ -2079,7 +2121,11 @@ class CommoditySimNowService:
             "submitted": {"close": [], "open": []},
             "send_intents": {"close": [], "open": []},
             "submitted_at_utc": {"close": None, "open": None},
-            "status": stored_plan["phase_status"],
+            "status": (
+                "NOOP_FINALIZING"
+                if stored_plan["phase_status"] == "COMPLETE"
+                else stored_plan["phase_status"]
+            ),
             "started_at_utc":
             self.clock().astimezone(timezone.utc).isoformat(),
         }
@@ -2100,9 +2146,16 @@ class CommoditySimNowService:
         self.simnow_mode = True
         self.c_fast_shakedown_auto_dispatch_authorized = True
         try:
-            execution = self.auto_candidate_shakedown_advance(
-                operator=operator, role=role, source_ip=source_ip
-            )
+            if plan["status"] == "NOOP_FINALIZING":
+                reconciliation = self._complete_c_fast_noop_plan(plan)
+                execution = {
+                    "action": "noop_reconciled",
+                    "reconciliation": reconciliation,
+                }
+            else:
+                execution = self.auto_candidate_shakedown_advance(
+                    operator=operator, role=role, source_ip=source_ip
+                )
         except Exception:
             self._revoke_auto_dispatch("c_fast_shakedown")
             if (
@@ -2507,6 +2560,14 @@ class CommoditySimNowService:
             )
 
     def _verify_c_fast_account_position_scope(self) -> None:
+        outside_scope = self._c_fast_outside_scope_positions()
+        if outside_scope:
+            raise CommoditySimNowSafetyError(
+                "账户存在 C_FAST 固定十品种范围外持仓",
+                detail={"symbols": outside_scope},
+            )
+
+    def _c_fast_outside_scope_positions(self) -> list[str]:
         outside_scope: list[str] = []
         for position in self.rpc.get_positions():
             volume = float(position.get("volume") or 0)
@@ -2518,11 +2579,7 @@ class CommoditySimNowService:
                 symbol = vt_symbol.split(".", 1)[0]
             if _product_from_symbol(symbol) not in PRODUCT_SPECS:
                 outside_scope.append(symbol or "unknown")
-        if outside_scope:
-            raise CommoditySimNowSafetyError(
-                "账户存在 C_FAST 固定十品种范围外持仓",
-                detail={"symbols": sorted(set(outside_scope))},
-            )
+        return sorted(set(outside_scope))
 
     @_serialized
     def position_manager_shadow(self) -> dict[str, Any]:
@@ -3558,6 +3615,50 @@ class CommoditySimNowService:
                 plan, result=result
             )
 
+    def _complete_c_fast_noop_plan(
+        self, plan: dict[str, Any]
+    ) -> dict[str, Any]:
+        if (
+            plan.get("status") != "NOOP_FINALIZING"
+            or not plan.get("c_fast_shakedown_session_id")
+            or any(plan.get(f"{phase}_orders") for phase in ("close", "open"))
+            or any(plan.get("submitted", {}).get(phase) for phase in ("close", "open"))
+            or any(plan.get("send_intents", {}).get(phase) for phase in ("close", "open"))
+        ):
+            raise CommoditySimNowStateError(
+                "C_FAST no-op 计划状态或委托证据无效"
+            )
+        self._verify_c_fast_active_plan_chain(plan)
+        self._verify_c_fast_account_position_scope()
+        conflicts = self._candidate_shakedown_external_active_orders(plan)
+        if conflicts:
+            raise CommoditySimNowStateError(
+                "C_FAST no-op 终态存在外部活动委托",
+                detail={"active_orders": conflicts},
+            )
+        observed = self._signed_positions(self._position_snapshot())
+        expected = plan["expected_final_positions"]
+        if observed != expected:
+            raise CommoditySimNowSafetyError(
+                "C_FAST no-op 终态持仓不匹配",
+                detail={"expected": expected, "observed": observed},
+            )
+        reconciliation = {
+            "phase": "noop",
+            "matched": True,
+            "active_order_ids": [],
+            "expected_positions": expected,
+            "observed_positions": observed,
+            "mismatch_halted": False,
+            "halted_reconcile": False,
+            "no_order_session": True,
+        }
+        plan["execution"] = self._execution_snapshot(plan)
+        self._complete_candidate_shakedown(
+            plan, result=reconciliation
+        )
+        return reconciliation
+
     def _archive_candidate_shakedown_terminal(
         self,
         plan: dict[str, Any],
@@ -3630,6 +3731,24 @@ class CommoditySimNowService:
         status: str,
         reconciliation: dict[str, Any] | None,
     ) -> None:
+        outside_scope = self._c_fast_outside_scope_positions()
+        if outside_scope:
+            halt = plan.setdefault("halt", {})
+            halt.update(
+                {
+                    "reason": "c_fast_outside_scope_position",
+                    "recovery_blocker":
+                    "OUTSIDE_C_FAST_POSITION_SCOPE",
+                    "outside_scope_positions": outside_scope,
+                }
+            )
+            plan["status"] = "HALTED_RECONCILE_REQUIRED"
+            self._revoke_auto_dispatch("c_fast_shakedown")
+            self._persist_active_plan_during_halt(halt)
+            raise CommoditySimNowSafetyError(
+                "账户存在 C_FAST 固定十品种范围外持仓",
+                detail={"symbols": outside_scope},
+            )
         session_id = str(
             plan.get("c_fast_shakedown_session_id") or ""
         )
@@ -3665,6 +3784,10 @@ class CommoditySimNowService:
                 raise CommoditySimNowStateError(
                     "C_FAST 测试终态会话证据缺失"
                 )
+            execution_snapshot = (
+                plan.get("execution")
+                or self._execution_snapshot(plan)
+            )
             execution = {
                 "schema_version":
                 "commodity_c_fast_simnow_shakedown_evidence_v1",
@@ -3678,8 +3801,10 @@ class CommoditySimNowService:
                 "final_positions":
                 self._signed_positions(self._position_snapshot()),
                 "execution_snapshot":
-                plan.get("execution") or self._execution_snapshot(plan),
-                "pnl": self._c_fast_pnl(plan),
+                execution_snapshot,
+                "pnl": self._c_fast_pnl(
+                    plan, execution=execution_snapshot
+                ),
             }
             execution["state_checksum"] = _sha256_json(execution)
             session["status"] = status
@@ -4067,8 +4192,13 @@ class CommoditySimNowService:
             == self._c_fast_shakedown_terminal_checksum(session)
         )
 
-    def _c_fast_pnl(self, plan: dict[str, Any]) -> dict[str, Any]:
-        execution = self._execution_snapshot(plan)
+    def _c_fast_pnl(
+        self,
+        plan: dict[str, Any],
+        *,
+        execution: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        execution = execution or self._execution_snapshot(plan)
         if not execution.get("available"):
             return {
                 "schema_version": "commodity_c_fast_simnow_pnl_v1",
@@ -4090,6 +4220,10 @@ class CommoditySimNowService:
                 "execution_snapshot_available": False,
                 "execution_error_type": execution.get("error_type"),
                 "trade_evidence_state": "UNAVAILABLE",
+                "execution_captured_at_utc":
+                execution.get("captured_at_utc"),
+                "expected_volume": None,
+                "filled_volume": None,
             }
         expected_volume = float(execution.get("expected_volume") or 0)
         filled_volume = float(execution.get("filled_volume") or 0)
@@ -4123,6 +4257,8 @@ class CommoditySimNowService:
                 "net_pnl_state": "UNAVAILABLE",
                 "execution_snapshot_available": True,
                 "trade_evidence_state": "INCOMPLETE",
+                "execution_captured_at_utc":
+                execution.get("captured_at_utc"),
                 "expected_volume": expected_volume,
                 "filled_volume": filled_volume,
                 "recovery_blocker": recovery_blocker or None,
@@ -4195,6 +4331,10 @@ class CommoditySimNowService:
             "execution_snapshot_available":
             execution.get("available", False),
             "trade_evidence_state": "COMPLETE",
+            "execution_captured_at_utc":
+            execution.get("captured_at_utc"),
+            "expected_volume": expected_volume,
+            "filled_volume": filled_volume,
         }
 
     def _cleanup_terminal_shakedown_active_plan(self) -> None:
@@ -5160,6 +5300,21 @@ class CommoditySimNowService:
                     if self._is_shakedown_plan(plan)
                     else []
                 )
+                recovery_observed: dict[str, int] | None = None
+                recovery_positions_changed = False
+                if (
+                    unresolved_intents
+                    and self._is_shakedown_plan(plan)
+                ):
+                    recovery_observed = self._signed_positions(
+                        self._position_snapshot()
+                    )
+                    recovery_positions_changed = (
+                        recovery_observed
+                        != self._phase_pre_positions(
+                            plan, submission_recovery_phase
+                        )
+                    )
                 if not unresolved_intents:
                     halt.pop("recovery_blocker", None)
                     halt.pop("unattributed_active_orders", None)
@@ -5169,6 +5324,7 @@ class CommoditySimNowService:
                     and (
                         has_persisted_submission
                         or external_active
+                        or recovery_positions_changed
                         or halt.get("recovery_blocker")
                         in {
                             "UNATTRIBUTED_FIXED_SCOPE_ACTIVE_ORDERS",
@@ -5197,6 +5353,8 @@ class CommoditySimNowService:
                                 str(intent.get("reference") or "")
                                 for intent in unresolved_intents
                             ],
+                            "observed_positions":
+                            recovery_observed,
                         }
                     )
                     active_state_persisted = (
