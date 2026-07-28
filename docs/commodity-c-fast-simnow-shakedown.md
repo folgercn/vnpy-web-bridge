@@ -161,9 +161,13 @@ session order/trade fact（包括已完成且净持仓往返为零）都会阻�
 `previous_positions`，派单前再次精确比对；不会用后续未绑定读取替换计划基线。
 preview、start 和每次 READY 派单前均拒绝未知 order status。列表型 RPC
 快照按行内容无序哈希，返回顺序变化不会制造虚假的不稳定 blocker。
+每个 child 的 send intent 落盘后、调用 RPC 前都重新执行 account/gateway/
+connection generation 与 watermark-bound 全事实屏障；新增外部 order/trade
+会中止剩余 child。C_FAST 必须使用 `get_all_orders` 完整订单缓存，禁止回退
+active-only。stop、disable、shutdown 和 emergency 可在 child 间抢占批量派单。
 session trade 归属除 order id 外还必须绑定 CTP gateway、exact contract、
 direction、offset，并在回报提供 reference 时要求 reference 一致；裸 ID
-碰撞、语义缺失或多 child 歧义均标记 `INCONSISTENT`。
+碰撞、语义缺失或多 child 歧义均标记 `INCONSISTENT`，并阻止 COMPLETE 归档。
 遗留 `NOOP_FINALIZING` 在启动时遇到 RPC 暂时不可用只记录恢复错误并保持
 fail-closed，后端和 worker 仍会启动，RPC 恢复后自动重试 no-op 终态提交。
 

@@ -258,6 +258,10 @@ class VnpyRpcService:
     def get_orders(self) -> list[dict[str, Any]]:
         return to_plain_list(self.call_first(["get_all_orders", "get_all_active_orders"]))
 
+    def get_all_orders(self) -> list[dict[str, Any]]:
+        """Return complete order history without active-only fallback."""
+        return to_plain_list(self.call("get_all_orders"))
+
     def get_trades(self) -> list[dict[str, Any]]:
         return to_plain_list(self.call_first(["get_all_trades"]))
 

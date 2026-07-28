@@ -109,6 +109,48 @@ class FilledWithoutEvidenceTimeoutTrade(FakeTrade):
         raise RpcTimeoutError()
 
 
+class AbortAfterFirstChildTrade(FakeTrade):
+    def __init__(self) -> None:
+        super().__init__()
+        self.service: CommoditySimNowService | None = None
+
+    def send_order(self, request, **kwargs):
+        result = super().send_order(request, **kwargs)
+        assert self.service is not None
+        self.service._dispatch_abort_requested = True
+        return result
+
+
+class ExternalFactAfterFirstChildTrade(FakeTrade):
+    def send_order(self, request, **kwargs):
+        result = super().send_order(request, **kwargs)
+        assert self.rpc is not None
+        self.rpc.orders.append(
+            {
+                "vt_orderid": "CTP.external-complete",
+                "orderid": "external-complete",
+                "reference": "",
+                "symbol": "IF2609",
+                "vt_symbol": "IF2609.CFFEX",
+                "direction": "long",
+                "offset": "open",
+                "volume": 1,
+                "traded": 1,
+                "status": "all_traded",
+                "gateway_name": "CTP",
+            }
+        )
+        return result
+
+
+class GenerationChangeAfterFirstChildTrade(FakeTrade):
+    def send_order(self, request, **kwargs):
+        result = super().send_order(request, **kwargs)
+        assert self.rpc is not None
+        self.rpc.last_connected_at = "fake-generation-B"
+        return result
+
+
 def fills_for_submitted(plan: dict) -> list[dict]:
     rows: list[dict] = []
     for phase in ("close", "open"):
@@ -704,6 +746,235 @@ def test_c_fast_rpc_timeout_never_replays_send_intent(
         != "open_submitted"
     )
     assert len(service.trade.requests) == 0
+
+
+@pytest.mark.parametrize(
+    "trade_type",
+    [
+        AbortAfterFirstChildTrade,
+        ExternalFactAfterFirstChildTrade,
+        GenerationChangeAfterFirstChildTrade,
+    ],
+)
+def test_c_fast_each_child_has_final_dispatch_barrier(
+    tmp_path: Path,
+    trade_type,
+) -> None:
+    trade = trade_type()
+    service, _, _, _ = prepare_c_fast_shakedown(
+        tmp_path, trade=trade
+    )
+    if isinstance(trade, AbortAfterFirstChildTrade):
+        trade.service = service
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    assert len(preview["plan"]["open_orders"]) >= 2
+
+    with pytest.raises(CommoditySimNowStateError):
+        service.start_c_fast_shakedown(
+            preview["plan_hash"],
+            operator="admin",
+            role="admin",
+            source_ip=None,
+        )
+
+    assert len(trade.requests) == 1
+    assert service.current_plan is not None
+    assert service.current_plan["status"] in {
+        "CANCEL_PENDING",
+        "HALTED_RECONCILE_REQUIRED",
+        "SUBMISSION_OUTCOME_UNKNOWN",
+    }
+
+
+def test_c_fast_reprice_position_drift_sends_no_child(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, rpc, snapshot, _ = prepare_c_fast_shakedown(tmp_path)
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    reprice = service._reprice_order
+    mutated = {"done": False}
+
+    def reprice_then_fill(order, *, passive=False):
+        result = reprice(order, passive=passive)
+        if not mutated["done"]:
+            mutated["done"] = True
+            ag = next(
+                row for row in snapshot.targets
+                if row.product == "ag"
+            )
+            rpc.positions = [
+                position(
+                    "ag",
+                    ag.target_quantity,
+                    contract_month="2612",
+                )
+            ]
+        return result
+
+    monkeypatch.setattr(
+        service, "_reprice_order", reprice_then_fill
+    )
+
+    with pytest.raises(CommoditySimNowSafetyError):
+        service.start_c_fast_shakedown(
+            preview["plan_hash"],
+            operator="admin",
+            role="admin",
+            source_ip=None,
+        )
+
+    assert not service.trade.requests
+
+
+def test_c_fast_start_rejects_order_status_transition(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, rpc, _, _ = prepare_c_fast_shakedown(tmp_path)
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    order = {
+        "vt_orderid": "CTP.external-transition",
+        "orderid": "external-transition",
+        "reference": "",
+        "symbol": "ag2612",
+        "vt_symbol": "ag2612.SHFE",
+        "direction": "long",
+        "offset": "open",
+        "volume": 1,
+        "traded": 0,
+        "status": "not_traded",
+        "gateway_name": "CTP",
+    }
+    calls = {"count": 0}
+
+    def transitioning_orders():
+        calls["count"] += 1
+        return [
+            {
+                **order,
+                "status":
+                "not_traded"
+                if calls["count"] == 1
+                else "all_traded",
+                "traded": 0 if calls["count"] == 1 else 1,
+            }
+        ]
+
+    monkeypatch.setattr(
+        rpc, "get_all_orders", transitioning_orders
+    )
+
+    with pytest.raises(
+        CommoditySimNowSafetyError,
+        match="事实不稳定",
+    ):
+        service.start_c_fast_shakedown(
+            preview["plan_hash"],
+            operator="admin",
+            role="admin",
+            source_ip=None,
+        )
+
+    assert not service.trade.requests
+
+
+def test_c_fast_requires_full_order_capability(
+    tmp_path: Path,
+) -> None:
+    service, rpc, _, _ = prepare_c_fast_shakedown(tmp_path)
+    rpc.get_all_orders = None
+
+    with pytest.raises(
+        CommoditySimNowSafetyError,
+        match="完整订单快照",
+    ):
+        service.preview_c_fast_shakedown(
+            ["ag"],
+            operator="admin",
+            role="admin",
+            source_ip=None,
+        )
+
+    assert not service.trade.requests
+
+
+def test_c_fast_start_rejects_rpc_generation_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, _, _, _ = prepare_c_fast_shakedown(tmp_path)
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    safety = service._safety_snapshot
+    calls = {"count": 0}
+
+    def changing_generation(**kwargs):
+        result = safety(**kwargs)
+        calls["count"] += 1
+        return {
+            **result,
+            "rpc_last_connected_at":
+            "generation-A"
+            if calls["count"] <= 3
+            else "generation-B",
+        }
+
+    monkeypatch.setattr(
+        service, "_safety_snapshot", changing_generation
+    )
+
+    with pytest.raises(
+        CommoditySimNowSafetyError,
+        match="事实不稳定",
+    ):
+        service.start_c_fast_shakedown(
+            preview["plan_hash"],
+            operator="admin",
+            role="admin",
+            source_ip=None,
+        )
+
+    assert not service.trade.requests
+
+
+def test_c_fast_ready_dispatch_rejects_rpc_generation_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, rpc, _, _ = prepare_c_fast_shakedown(tmp_path)
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    advance = service.auto_candidate_shakedown_advance
+    monkeypatch.setattr(
+        service,
+        "auto_candidate_shakedown_advance",
+        lambda **_kwargs: {"action": "held_for_test"},
+    )
+    service.start_c_fast_shakedown(
+        preview["plan_hash"],
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+    monkeypatch.setattr(
+        service, "auto_candidate_shakedown_advance", advance
+    )
+    rpc.last_connected_at = "fake-generation-B"
+
+    result = service.auto_candidate_shakedown_advance()
+
+    assert result["action"] == "halted"
+    assert result["reason"] == "shakedown_execution_trust_failed"
+    assert not service.trade.requests
 
 
 def test_c_fast_filled_timeout_without_order_or_trade_stays_unknown(

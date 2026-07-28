@@ -49,9 +49,14 @@ class FakeRpc:
         self.contract_months = contract_months
         self.get_orders_error: Exception | None = None
         self.get_positions_error: Exception | None = None
+        self.last_connected_at = "fake-generation-A"
 
     def status(self, *, probe: bool = False) -> dict[str, Any]:
-        return {"connected": True, "gateway_name": "CTP"}
+        return {
+            "connected": True,
+            "gateway_name": "CTP",
+            "last_connected_at": self.last_connected_at,
+        }
 
     def get_accounts(self) -> list[dict[str, Any]]:
         return [{"accountid": ACCOUNT_ID, "gateway_name": "CTP"}]
@@ -83,6 +88,9 @@ class FakeRpc:
         if self.get_orders_error is not None:
             raise self.get_orders_error
         return list(self.orders)
+
+    def get_all_orders(self) -> list[dict[str, Any]]:
+        return self.get_orders()
 
     def get_trades(self) -> list[dict[str, Any]]:
         return list(self.trades)
