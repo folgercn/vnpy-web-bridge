@@ -200,7 +200,8 @@ class CommodityCFastShakedownSnapshotDTO(CommodityCFastShadowDTO):
     expires_at_utc: datetime
     account_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     max_selected_products: int = Field(ge=1, le=2)
-    max_child_order_lots: Literal[1]
+    # Zero means that Control does not impose a per-order lot ceiling.
+    max_child_order_lots: Literal[0]
     countable_forward: Literal[False]
     control_signer_key_id: str = Field(
         pattern=r"^[A-Za-z0-9._-]{1,128}$"

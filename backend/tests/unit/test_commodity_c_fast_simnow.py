@@ -14,15 +14,26 @@ from app.core.errors import (
     CommoditySimNowSafetyError,
     CommoditySimNowStateError,
 )
-from app.schemas.commodity_c_fast_shadow import CommodityCFastShadowDTO
+from app.schemas.commodity_c_fast_shadow import (
+    CommodityCFastRuntimeSnapshotDTO,
+    CommodityCFastShakedownSnapshotDTO,
+)
 from app.schemas.commodity_simnow import (
     CommodityCFastShakedownPreviewRequestDTO,
     CommoditySimNowDisableRequestDTO,
 )
 from app.services.commodity_simnow import CommoditySimNowService
+from app.services.commodity_c_fast_shadow_common import (
+    formula_target_binding_sha256,
+    sha256_json,
+    unsigned_snapshot_payload,
+)
 from app.services.vnpy_rpc_service import RpcTimeoutError
 from pydantic import ValidationError
-from test_commodity_c_fast_shadow import sign_payload, unsigned_payload
+from test_commodity_c_fast_shadow import (
+    sign_payload as official_sign_payload,
+    unsigned_payload,
+)
 from test_commodity_simnow import (
     ACCOUNT_HASH,
     NOW,
@@ -36,6 +47,63 @@ from test_commodity_simnow import (
     make_settings,
     position,
 )
+
+
+def sign_payload(payload: dict, private_key) -> tuple[dict, str]:
+    signed, _ = official_sign_payload(payload, private_key)
+    bindings = signed["research_bindings"]
+    bindings["snapshot_producer_status"] = (
+        "IMPLEMENTED_HUMAN_CONFIRMED_BUNDLE_V1"
+    )
+    bindings["producer_sha256"] = "1" * 64
+    bindings["input_bundle_sha256"] = "2" * 64
+    signed.update(
+        {
+            "schema_version": "commodity_c_fast_simnow_shakedown_snapshot_v1",
+            "mode": "simnow_shakedown",
+            "execution_lane": "simnow_shakedown",
+            "frequency": "ONE_SHOT",
+            "source_is_month_last_official_day": False,
+            "execution_is_next_cross_month_official_day": False,
+            "input_cutoff_after_source_close": False,
+            "calendar_alignment": "HUMAN_CONFIRMED_RESEARCH_BUNDLE",
+            "allocator_output_validation": (
+                "PRODUCER_RECOMPUTED_AND_SIGNER_CONFIRMED"
+            ),
+            "daily_roll_alignment": (
+                "HUMAN_CONFIRMED_PIT_EXACT_CONTRACT"
+            ),
+            "research_observed_at_utc": signed[
+                "snapshot_created_at_utc"
+            ],
+            "research_signature": signed["signature"],
+            "control_acceptance_id": "cfast-accept-testfixture1",
+            "execution_permit_id": "cfast-permit-testfixture1",
+            "accepted_at_utc": signed["snapshot_created_at_utc"],
+            "expires_at_utc": (
+                datetime.fromisoformat(
+                    signed["snapshot_created_at_utc"].replace(
+                        "Z", "+00:00"
+                    )
+                )
+                + timedelta(hours=6)
+            ).isoformat(),
+            "account_sha256": ACCOUNT_HASH,
+            "max_selected_products": 2,
+            "max_child_order_lots": 0,
+            "countable_forward": False,
+            "control_signer_key_id": "c-fast-control-test",
+        }
+    )
+    draft = CommodityCFastShakedownSnapshotDTO.model_validate(signed)
+    signed["formula_target_binding_sha256"] = (
+        formula_target_binding_sha256(draft)
+    )
+    snapshot = CommodityCFastShakedownSnapshotDTO.model_validate(signed)
+    return (
+        snapshot.model_dump(mode="json"),
+        sha256_json(unsigned_snapshot_payload(snapshot)),
+    )
 
 
 class AcceptedWithoutIdentityTimeoutTrade(FakeTrade):
@@ -224,7 +292,7 @@ def prepare_c_fast_shakedown(
 ) -> tuple[
     CommoditySimNowService,
     object,
-    CommodityCFastShadowDTO,
+    CommodityCFastRuntimeSnapshotDTO,
     str,
 ]:
     service, _, rpc = make_service(
@@ -235,7 +303,7 @@ def prepare_c_fast_shakedown(
     )
     private_key = make_key()
     signed, snapshot_hash = sign_payload(unsigned_payload(), private_key)
-    snapshot = CommodityCFastShadowDTO.model_validate(signed)
+    snapshot = CommodityCFastShakedownSnapshotDTO.model_validate(signed)
     service.settings = service.settings.model_copy(
         update={
             "commodity_c_fast_shadow_enabled": True,
@@ -257,7 +325,7 @@ def prepare_c_fast_shakedown(
 def complete_c_fast_ag_session(
     service: CommoditySimNowService,
     rpc,
-    snapshot: CommodityCFastShadowDTO,
+    snapshot: CommodityCFastRuntimeSnapshotDTO,
 ) -> dict:
     preview = service.preview_c_fast_shakedown(
         ["ag"], operator="admin", role="admin", source_ip=None
@@ -280,9 +348,9 @@ def complete_c_fast_ag_session(
 def install_next_c_fast_snapshot(
     service: CommoditySimNowService,
     rpc,
-    first_snapshot: CommodityCFastShadowDTO,
+    first_snapshot: CommodityCFastRuntimeSnapshotDTO,
     first_hash: str,
-) -> tuple[CommodityCFastShadowDTO, str]:
+) -> tuple[CommodityCFastRuntimeSnapshotDTO, str]:
     previous_targets = {
         row.product: {
             "exact_contract": row.exact_contract,
@@ -301,7 +369,7 @@ def install_next_c_fast_snapshot(
     )
     payload["targets"][0]["target_quantity"] += 1
     signed, snapshot_hash = sign_payload(payload, make_key())
-    snapshot = CommodityCFastShadowDTO.model_validate(signed)
+    snapshot = CommodityCFastShakedownSnapshotDTO.model_validate(signed)
     service.bind_c_fast_snapshot_provider(
         lambda: (snapshot.model_copy(deep=True), snapshot_hash)
     )
@@ -338,6 +406,8 @@ def test_c_fast_preview_builds_masked_signed_target_plan(
     assert sum(
         order["volume"] for order in plan["open_orders"]
     ) == abs(ag.target_quantity)
+    assert len(plan["open_orders"]) == 1
+    assert plan["open_orders"][0]["volume"] == abs(ag.target_quantity)
     assert all(
         order["reference"].startswith("commodity_cf:sh:")
         for order in plan["open_orders"]
@@ -710,7 +780,7 @@ def test_c_fast_ready_open_rejects_unknown_status_after_close_reconcile(
     ag["previous_target_quantity"] = 2
     ag["target_quantity"] = -1
     signed, snapshot_hash = sign_payload(payload, make_key())
-    snapshot = CommodityCFastShadowDTO.model_validate(signed)
+    snapshot = CommodityCFastShakedownSnapshotDTO.model_validate(signed)
     service.bind_c_fast_snapshot_provider(
         lambda: (snapshot.model_copy(deep=True), snapshot_hash)
     )
@@ -994,7 +1064,7 @@ def test_c_fast_each_child_has_final_dispatch_barrier(
     if isinstance(trade, AbortAfterFirstChildTrade):
         trade.service = service
     preview = service.preview_c_fast_shakedown(
-        ["ag"], operator="admin", role="admin", source_ip=None
+        ["ag", "al"], operator="admin", role="admin", source_ip=None
     )["preview"]
     assert len(preview["plan"]["open_orders"]) >= 2
 
@@ -1023,7 +1093,7 @@ def test_c_fast_stop_preempts_blocked_child_loop(
         tmp_path, trade=trade
     )
     preview = service.preview_c_fast_shakedown(
-        ["ag"], operator="admin", role="admin", source_ip=None
+        ["ag", "al"], operator="admin", role="admin", source_ip=None
     )["preview"]
     start_error: list[Exception] = []
     stop_result: list[dict] = []
@@ -1641,11 +1711,8 @@ def test_c_fast_final_guard_rejects_next_trading_day_child(
         tmp_path, trade=trade
     )
     trade.service = service
-    service.settings = service.settings.model_copy(
-        update={"commodity_simnow_max_child_order_lots": 1}
-    )
     preview = service.preview_c_fast_shakedown(
-        ["ag"], operator="admin", role="admin", source_ip=None
+        ["ag", "al"], operator="admin", role="admin", source_ip=None
     )["preview"]
 
     with pytest.raises(
@@ -1686,11 +1753,8 @@ def test_c_fast_final_guard_allows_night_natural_day_rollover(
     service.clock = lambda: before_midnight
     for tick in service.tick_store.ticks.values():
         tick["received_at"] = before_midnight.isoformat()
-    service.settings = service.settings.model_copy(
-        update={"commodity_simnow_max_child_order_lots": 1}
-    )
     preview = service.preview_c_fast_shakedown(
-        ["ag"], operator="admin", role="admin", source_ip=None
+        ["ag", "al"], operator="admin", role="admin", source_ip=None
     )["preview"]
 
     service.start_c_fast_shakedown(
@@ -2109,7 +2173,7 @@ def test_c_fast_one_start_continues_with_next_accepted_snapshot(
     )
     next_payload["targets"][0]["target_quantity"] += 1
     next_signed, next_hash = sign_payload(next_payload, make_key())
-    current["snapshot"] = CommodityCFastShadowDTO.model_validate(
+    current["snapshot"] = CommodityCFastShakedownSnapshotDTO.model_validate(
         next_signed
     )
     current["hash"] = next_hash
@@ -2220,7 +2284,9 @@ def test_c_fast_stop_revokes_memory_before_session_persist_failure(
         previous_targets=previous_targets,
     )
     close_signed, close_hash = sign_payload(close_payload, make_key())
-    close_snapshot = CommodityCFastShadowDTO.model_validate(close_signed)
+    close_snapshot = CommodityCFastShakedownSnapshotDTO.model_validate(
+        close_signed
+    )
     service.bind_c_fast_snapshot_provider(
         lambda: (close_snapshot.model_copy(deep=True), close_hash)
     )
@@ -2336,7 +2402,7 @@ def test_c_fast_stop_cancels_when_first_active_state_persist_fails(
         previous_targets=previous_targets,
     )
     signed, snapshot_hash = sign_payload(payload, make_key())
-    snapshot = CommodityCFastShadowDTO.model_validate(signed)
+    snapshot = CommodityCFastShakedownSnapshotDTO.model_validate(signed)
     service.bind_c_fast_snapshot_provider(
         lambda: (snapshot.model_copy(deep=True), snapshot_hash)
     )
@@ -2598,7 +2664,7 @@ def test_c_fast_partial_ack_does_not_hide_unattributed_timeout_child(
         tmp_path, trade=trade
     )
     preview = service.preview_c_fast_shakedown(
-        ["ag"], operator="admin", role="admin", source_ip=None
+        ["ag", "al"], operator="admin", role="admin", source_ip=None
     )["preview"]
     assert len(preview["plan"]["open_orders"]) >= 2
 
@@ -2684,7 +2750,7 @@ def test_c_fast_terminal_archive_survives_next_preview_start_failure(
     )
     next_payload["targets"][0]["target_quantity"] += 1
     next_signed, next_hash = sign_payload(next_payload, make_key())
-    current["snapshot"] = CommodityCFastShadowDTO.model_validate(
+    current["snapshot"] = CommodityCFastShakedownSnapshotDTO.model_validate(
         next_signed
     )
     current["hash"] = next_hash
@@ -3084,7 +3150,7 @@ def test_c_fast_zero_quantity_contract_change_archives_noop(
     ag["previous_exact_contract"] = None
     ag["target_quantity"] = 0
     signed, snapshot_hash = sign_payload(payload, make_key())
-    snapshot = CommodityCFastShadowDTO.model_validate(signed)
+    snapshot = CommodityCFastShakedownSnapshotDTO.model_validate(signed)
     service.bind_c_fast_snapshot_provider(
         lambda: (snapshot.model_copy(deep=True), snapshot_hash)
     )
@@ -3130,7 +3196,7 @@ def test_c_fast_zero_quantity_noop_recovers_after_restart(
     ag["previous_exact_contract"] = None
     ag["target_quantity"] = 0
     signed, snapshot_hash = sign_payload(payload, make_key())
-    snapshot = CommodityCFastShadowDTO.model_validate(signed)
+    snapshot = CommodityCFastShakedownSnapshotDTO.model_validate(signed)
     provider = lambda: (
         snapshot.model_copy(deep=True),
         snapshot_hash,
@@ -3198,7 +3264,7 @@ def test_c_fast_noop_rpc_failure_does_not_abort_service_start(
     ag["previous_exact_contract"] = None
     ag["target_quantity"] = 0
     signed, snapshot_hash = sign_payload(payload, make_key())
-    snapshot = CommodityCFastShadowDTO.model_validate(signed)
+    snapshot = CommodityCFastShakedownSnapshotDTO.model_validate(signed)
     provider = lambda: (
         snapshot.model_copy(deep=True),
         snapshot_hash,
@@ -3273,7 +3339,7 @@ def test_c_fast_noop_restart_adopts_archive_after_pointer_failure(
     ag["previous_exact_contract"] = None
     ag["target_quantity"] = 0
     signed, snapshot_hash = sign_payload(payload, make_key())
-    snapshot = CommodityCFastShadowDTO.model_validate(signed)
+    snapshot = CommodityCFastShakedownSnapshotDTO.model_validate(signed)
     service.bind_c_fast_snapshot_provider(
         lambda: (snapshot.model_copy(deep=True), snapshot_hash)
     )
@@ -3383,7 +3449,7 @@ def test_c_fast_pnl_requires_complete_evidence_per_child(
 ) -> None:
     service, rpc, _, _ = prepare_c_fast_shakedown(tmp_path)
     preview = service.preview_c_fast_shakedown(
-        ["ag"], operator="admin", role="admin", source_ip=None
+        ["ag", "al"], operator="admin", role="admin", source_ip=None
     )["preview"]
     service.start_c_fast_shakedown(
         preview["plan_hash"],

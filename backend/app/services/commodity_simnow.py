@@ -2078,7 +2078,7 @@ class CommoditySimNowService:
                 "C_FAST Control Plane 快照源未绑定"
             )
         try:
-            return provider()
+            snapshot, snapshot_hash = provider()
         except Exception as exc:
             raise CommoditySimNowSafetyError(
                 "C_FAST 签名快照未通过当前 Control Plane 验证",
@@ -2087,6 +2087,19 @@ class CommoditySimNowService:
                     "error_code": getattr(exc, "code", None),
                 },
             ) from exc
+        if not isinstance(snapshot, CommodityCFastShakedownSnapshotDTO):
+            raise CommoditySimNowSafetyError(
+                "C_FAST shakedown 只接受独立 Research/Control Execution Permit"
+            )
+        if (
+            snapshot.countable_forward is not False
+            or snapshot.production_allowed is not False
+            or snapshot.max_child_order_lots != 0
+        ):
+            raise CommoditySimNowSafetyError(
+                "C_FAST shakedown Execution Permit 边界无效"
+            )
+        return snapshot, snapshot_hash
 
     def _verify_c_fast_account(self, account_hash: str) -> None:
         allowed = _csv_set(
@@ -2245,9 +2258,9 @@ class CommoditySimNowService:
                 raise CommoditySimNowSafetyError(
                     "C_FAST Execution Permit 品种范围超限"
                 )
-            if snapshot.max_child_order_lots != 1:
+            if snapshot.max_child_order_lots != 0:
                 raise CommoditySimNowSafetyError(
-                    "C_FAST Execution Permit child 上限无效"
+                    "C_FAST Execution Permit 不得设置单笔手数上限"
                 )
         rows = {row.product: row for row in snapshot.targets}
         if set(rows) != set(PRODUCT_SPECS):
@@ -8326,8 +8339,14 @@ class CommoditySimNowService:
         quote = self._quote(vt_symbol, PRODUCT_SPECS[product]["price_tick"])
         quote_rows.append({"vt_symbol": vt_symbol, **quote})
         price = self._protected_price(direction, quote, PRODUCT_SPECS[product]["price_tick"])
-        maximum = self.settings.commodity_simnow_max_child_order_lots
+        maximum = (
+            0
+            if batch_id == "c-fast-shakedown"
+            else self.settings.commodity_simnow_max_child_order_lots
+        )
         remaining = abs(signed_delta)
+        if maximum == 0:
+            maximum = remaining
         orders: list[dict[str, Any]] = []
         while remaining:
             volume = min(remaining, maximum)

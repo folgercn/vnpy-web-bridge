@@ -98,6 +98,16 @@ def test_max_order_volume(monkeypatch) -> None:
         service.check_order(make_order(volume=2))
 
 
+def test_zero_max_order_volume_disables_only_order_volume_ceiling(
+    monkeypatch,
+) -> None:
+    service = make_service(max_order_volume=0)
+    allow_rpc(monkeypatch)
+    service.rules["max_symbol_position"] = 0
+
+    service.check_order(make_order(volume=20))
+
+
 def test_fractional_volume_is_rejected_by_schema() -> None:
     with pytest.raises(ValueError):
         make_order(volume=1.5)

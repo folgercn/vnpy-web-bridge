@@ -16,6 +16,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from pydantic import ValidationError
 
@@ -504,6 +505,20 @@ class CommodityCFastShadowService:
                 raise CFastShadowInvalidError(
                     "CONTROL_SIGNER_KEY_NOT_TRUSTED"
                 )
+            if (
+                snapshot.signer_key_id == snapshot.control_signer_key_id
+                or key[0].public_bytes(
+                    serialization.Encoding.Raw,
+                    serialization.PublicFormat.Raw,
+                )
+                == control_key[0].public_bytes(
+                    serialization.Encoding.Raw,
+                    serialization.PublicFormat.Raw,
+                )
+            ):
+                raise CFastShadowInvalidError(
+                    "RESEARCH_CONTROL_SIGNERS_NOT_DISTINCT"
+                )
             try:
                 research_signature = base64.b64decode(
                     snapshot.research_signature, validate=True
@@ -911,6 +926,24 @@ class CommodityCFastShadowService:
                 str(previous["execution_day"])
             ).date():
                 raise CFastShadowInvalidError("SNAPSHOT_STALE_OR_REPLAYED")
+            previous_targets = {
+                str(row["product"]): (
+                    str(row["exact_contract"]),
+                    int(row["target_quantity"]),
+                )
+                for row in previous["targets"]
+            }
+            if any(
+                previous_targets.get(row.product)
+                != (
+                    row.previous_exact_contract,
+                    row.previous_target_quantity,
+                )
+                for row in snapshot.targets
+            ):
+                raise CFastShadowInvalidError(
+                    "PREVIOUS_TARGET_CONTINUITY_MISMATCH"
+                )
             return "verified"
         if previous is None:
             if (

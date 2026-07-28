@@ -164,6 +164,7 @@ def test_produce_sign_permit_reload_and_runtime_read(
     assert result["execution_lane"] == "simnow_shakedown"
     assert snapshot.account_sha256 == ACCOUNT_HASH
     assert snapshot.max_selected_products == 1
+    assert snapshot.max_child_order_lots == 0
     assert snapshot_hash == result["snapshot_hash"]
 
 
@@ -247,6 +248,89 @@ def test_same_day_successor_is_replay_rejected(tmp_path: Path) -> None:
     rejected = instance.reload(operator="admin", role="admin", source_ip=None)
 
     assert rejected["error_code"] == "SNAPSHOT_STALE_OR_REPLAYED"
+
+
+def test_research_and_control_must_use_distinct_keys(
+    tmp_path: Path,
+) -> None:
+    shared_key = Ed25519PrivateKey.generate()
+    payload = signed_artifact(shared_key, shared_key)
+
+    rejected = service(
+        tmp_path, payload, shared_key, shared_key
+    ).reload(operator="admin", role="admin", source_ip=None)
+
+    assert (
+        rejected["error_code"]
+        == "RESEARCH_CONTROL_SIGNERS_NOT_DISTINCT"
+    )
+
+
+def test_successor_previous_targets_must_match_accepted_state(
+    tmp_path: Path,
+) -> None:
+    research_key = Ed25519PrivateKey.generate()
+    control_key = Ed25519PrivateKey.generate()
+    first = signed_artifact(research_key, control_key)
+    instance = service(tmp_path, first, research_key, control_key)
+    accepted = instance.reload(
+        operator="admin", role="admin", source_ip=None
+    )
+    assert accepted["valid"] is True
+
+    bundle = research_bundle()
+    bundle["snapshot"]["snapshot_id"] = "c-fast-shakedown-20260902-next"
+    bundle["snapshot"]["execution_day"] = "2026-09-02"
+    bundle["snapshot"]["source_official_day"] = "2026-09-02"
+    bundle["snapshot"]["snapshot_created_at_utc"] = (
+        "2026-09-02T01:02:00Z"
+    )
+    bundle["snapshot"]["research_observed_at_utc"] = (
+        "2026-09-02T01:01:30Z"
+    )
+    bundle["snapshot"]["input_cutoff_at_utc"] = "2026-09-02T01:00:00Z"
+    bundle["snapshot"]["previous_snapshot_hash"] = accepted[
+        "snapshot_hash"
+    ]
+    for row in bundle["snapshot"]["targets"]:
+        row["previous_exact_contract"] = row["exact_contract"]
+        row["previous_target_quantity"] = row["target_quantity"]
+        row["reference_price_observed_at_utc"] = (
+            "2026-09-02T01:01:00Z"
+        )
+        row["pit_main_dte"] -= 1
+        row["pit_main_following_official_day"] = "2026-09-03"
+        row["pit_main_following_dte"] -= 1
+    bundle["snapshot"]["targets"][0]["previous_target_quantity"] += 1
+    core = ARTIFACT.produce(bundle)
+    research = ARTIFACT.sign_research(core, research_key)
+    successor = ARTIFACT.issue_permit(
+        research,
+        research_public_key=research_key.public_key(),
+        control_private_key=control_key,
+        acceptance_id="cfast-accept-20260902a",
+        permit_id="cfast-permit-20260902a",
+        account_sha256=ACCOUNT_HASH,
+        accepted_at="2026-09-02T01:03:00Z",
+        expires_at="2026-09-02T03:00:00Z",
+        max_selected_products=1,
+        control_signer_key_id="c-fast-control-1",
+    )
+    Path(
+        instance.settings.commodity_c_fast_shadow_snapshot_path
+    ).write_text(json.dumps(successor), encoding="utf-8")
+    instance._clock = lambda: datetime(
+        2026, 9, 2, 2, tzinfo=timezone.utc
+    )
+
+    rejected = instance.reload(
+        operator="admin", role="admin", source_ip=None
+    )
+
+    assert (
+        rejected["error_code"]
+        == "PREVIOUS_TARGET_CONTINUITY_MISMATCH"
+    )
 
 
 def test_producer_rejects_missing_evidence_and_owned_fields() -> None:
