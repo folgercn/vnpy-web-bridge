@@ -5,6 +5,8 @@ import hashlib
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from threading import Event, Thread
+from time import monotonic, sleep
 
 import pytest
 from app.core.config import Settings
@@ -148,6 +150,20 @@ class GenerationChangeAfterFirstChildTrade(FakeTrade):
         result = super().send_order(request, **kwargs)
         assert self.rpc is not None
         self.rpc.last_connected_at = "fake-generation-B"
+        return result
+
+
+class BlockingAfterFirstChildTrade(FakeTrade):
+    def __init__(self) -> None:
+        super().__init__()
+        self.first_child_sent = Event()
+        self.release_first_child = Event()
+
+    def send_order(self, request, **kwargs):
+        result = super().send_order(request, **kwargs)
+        if len(self.requests) == 1:
+            self.first_child_sent.set()
+            assert self.release_first_child.wait(5)
         return result
 
 
@@ -786,6 +802,67 @@ def test_c_fast_each_child_has_final_dispatch_barrier(
         "HALTED_RECONCILE_REQUIRED",
         "SUBMISSION_OUTCOME_UNKNOWN",
     }
+
+
+def test_c_fast_stop_preempts_blocked_child_loop(
+    tmp_path: Path,
+) -> None:
+    trade = BlockingAfterFirstChildTrade()
+    service, _, _, _ = prepare_c_fast_shakedown(
+        tmp_path, trade=trade
+    )
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    start_error: list[Exception] = []
+    stop_result: list[dict] = []
+
+    def start_session():
+        try:
+            service.start_c_fast_shakedown(
+                preview["plan_hash"],
+                operator="admin",
+                role="admin",
+                source_ip=None,
+            )
+        except Exception as exc:
+            start_error.append(exc)
+
+    def stop_session():
+        stop_result.append(
+            service.stop_c_fast_shakedown(
+                "concurrent operator stop",
+                operator="admin",
+                role="admin",
+                source_ip=None,
+            )
+        )
+
+    start_thread = Thread(target=start_session)
+    start_thread.start()
+    assert trade.first_child_sent.wait(5)
+    stop_thread = Thread(target=stop_session)
+    stop_thread.start()
+    deadline = monotonic() + 5
+    while (
+        not service._dispatch_abort_requested
+        and monotonic() < deadline
+    ):
+        sleep(0.01)
+    assert service._dispatch_abort_requested is True
+    trade.release_first_child.set()
+    start_thread.join(5)
+    stop_thread.join(5)
+
+    assert not start_thread.is_alive()
+    assert not stop_thread.is_alive()
+    assert len(trade.requests) == 1
+    assert start_error
+    assert stop_result
+    assert (
+        service.c_fast_shakedown_auto_dispatch_authorized
+        is False
+    )
 
 
 def test_c_fast_reprice_position_drift_sends_no_child(
