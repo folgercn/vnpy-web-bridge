@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bktrader.local/schemas/commodity-c-fast-simnow-research-bundle-install-receipt-v1.schema.json",
+  "title": "C_FAST SimNow research-bundle install receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "purpose",
+    "candidate_id",
+    "bundle_id",
+    "installed_at",
+    "installed_path_sha256",
+    "install_claim_id",
+    "install_claim_raw_sha256",
+    "custody_root_path_sha256",
+    "custody_identity_sha256",
+    "installed_bundle_bytes",
+    "bundle_raw_sha256",
+    "bundle_canonical_sha256",
+    "trusted_keyring_raw_sha256",
+    "artifact_index_sha256",
+    "formula_target_binding_sha256",
+    "signer_key_id",
+    "installer_verifier_sha256",
+    "bundle_schema_sha256",
+    "trusted_keyring_schema_sha256",
+    "install_receipt_schema_sha256",
+    "installation_state",
+    "receipt_is_execution_authority",
+    "countable_forward",
+    "simnow_execution_authorized",
+    "runtime_activation_authorized",
+    "network_authorized",
+    "web_bridge_rpc_authorized",
+    "order_submission_authorized",
+    "position_mutation_authorized",
+    "dispatch_authorized",
+    "trading_authorized",
+    "production_authorized",
+    "replay_allowed"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "commodity_c_fast_simnow_research_bundle_install_receipt_v1"
+    },
+    "purpose": {
+      "const": "c_fast_simnow_research_bundle_create_only_install_receipt"
+    },
+    "candidate_id": {"const": "C_FAST_CROSS_SECTION_NEUTRAL"},
+    "bundle_id": {
+      "type": "string",
+      "pattern": "^cfast-simnow-research-v1-[0-9a-f]{64}$"
+    },
+    "installed_at": {"type": "string", "format": "date-time"},
+    "installed_path_sha256": {"$ref": "#/$defs/sha256"},
+    "install_claim_id": {
+      "type": "string",
+      "pattern": "^cfast-simnow-install-claim-v1-[0-9a-f]{64}$"
+    },
+    "install_claim_raw_sha256": {"$ref": "#/$defs/sha256"},
+    "custody_root_path_sha256": {"$ref": "#/$defs/sha256"},
+    "custody_identity_sha256": {"$ref": "#/$defs/sha256"},
+    "installed_bundle_bytes": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2097152
+    },
+    "bundle_raw_sha256": {"$ref": "#/$defs/sha256"},
+    "bundle_canonical_sha256": {"$ref": "#/$defs/sha256"},
+    "trusted_keyring_raw_sha256": {"$ref": "#/$defs/sha256"},
+    "artifact_index_sha256": {"$ref": "#/$defs/sha256"},
+    "formula_target_binding_sha256": {"$ref": "#/$defs/sha256"},
+    "signer_key_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{8,128}$"
+    },
+    "installer_verifier_sha256": {"$ref": "#/$defs/sha256"},
+    "bundle_schema_sha256": {"$ref": "#/$defs/sha256"},
+    "trusted_keyring_schema_sha256": {"$ref": "#/$defs/sha256"},
+    "install_receipt_schema_sha256": {"$ref": "#/$defs/sha256"},
+    "installation_state": {
+      "const": "RESEARCH_BUNDLE_INSTALLED_NO_RUNTIME_AUTHORITY"
+    },
+    "receipt_is_execution_authority": {"const": false},
+    "countable_forward": {"const": false},
+    "simnow_execution_authorized": {"const": false},
+    "runtime_activation_authorized": {"const": false},
+    "network_authorized": {"const": false},
+    "web_bridge_rpc_authorized": {"const": false},
+    "order_submission_authorized": {"const": false},
+    "position_mutation_authorized": {"const": false},
+    "dispatch_authorized": {"const": false},
+    "trading_authorized": {"const": false},
+    "production_authorized": {"const": false},
+    "replay_allowed": {"const": false}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}
