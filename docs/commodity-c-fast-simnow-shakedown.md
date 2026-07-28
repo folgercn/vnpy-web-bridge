@@ -157,6 +157,10 @@ start 会在实时计划重建前后保存稳定的 order/trade watermark。term
 连续采集两组完整的 account/gateway/connection generation、positions、orders
 和 trades 快照；两组完整事实 hash 必须相同。watermark 后出现的任何非本
 session order/trade fact（包括已完成且净持仓往返为零）都会阻止归档。
+实时重建得到的同一份 positions 同时绑定为 active plan 的
+`previous_positions`，派单前再次精确比对；不会用后续未绑定读取替换计划基线。
+preview、start 和每次 READY 派单前均拒绝未知 order status。列表型 RPC
+快照按行内容无序哈希，返回顺序变化不会制造虚假的不稳定 blocker。
 session trade 归属除 order id 外还必须绑定 CTP gateway、exact contract、
 direction、offset，并在回报提供 reference 时要求 reference 一致；裸 ID
 碰撞、语义缺失或多 child 歧义均标记 `INCONSISTENT`。

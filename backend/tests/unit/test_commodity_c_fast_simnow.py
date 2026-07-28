@@ -406,6 +406,101 @@ def test_c_fast_start_rejects_snapshot_change_after_preview(
     assert not service.trade.requests
 
 
+@pytest.mark.parametrize("stage", ["preview", "start"])
+def test_c_fast_rejects_unknown_order_status_before_dispatch(
+    tmp_path: Path,
+    stage: str,
+) -> None:
+    service, rpc, _, _ = prepare_c_fast_shakedown(tmp_path)
+    preview = None
+    if stage == "start":
+        preview = service.preview_c_fast_shakedown(
+            ["ag"], operator="admin", role="admin", source_ip=None
+        )["preview"]
+    rpc.orders = [
+        {
+            "vt_orderid": "CTP.unknown-status",
+            "orderid": "unknown-status",
+            "reference": "",
+            "symbol": "IF2609",
+            "vt_symbol": "IF2609.CFFEX",
+            "status": "future_gateway_state",
+        }
+    ]
+
+    with pytest.raises(
+        CommoditySimNowSafetyError,
+        match="状态未知",
+    ):
+        if stage == "preview":
+            service.preview_c_fast_shakedown(
+                ["ag"],
+                operator="admin",
+                role="admin",
+                source_ip=None,
+            )
+        else:
+            service.start_c_fast_shakedown(
+                preview["plan_hash"],
+                operator="admin",
+                role="admin",
+                source_ip=None,
+            )
+
+    assert not service.trade.requests
+
+
+def test_c_fast_start_binds_previous_positions_to_rebuilt_plan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, rpc, snapshot, _ = prepare_c_fast_shakedown(tmp_path)
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    watermark = service._c_fast_terminal_fact_watermark
+    calls = {"count": 0}
+
+    def mutate_after_rebuild():
+        result = watermark()
+        calls["count"] += 1
+        if calls["count"] == 2:
+            ag = next(
+                row
+                for row in snapshot.targets
+                if row.product == "ag"
+            )
+            rpc.positions = [
+                position(
+                    "ag",
+                    ag.target_quantity,
+                    contract_month="2612",
+                )
+            ]
+        return result
+
+    monkeypatch.setattr(
+        service,
+        "_c_fast_terminal_fact_watermark",
+        mutate_after_rebuild,
+    )
+
+    with pytest.raises(
+        CommoditySimNowStateError,
+        match="执行前持仓与计划不一致",
+    ):
+        service.start_c_fast_shakedown(
+            preview["plan_hash"],
+            operator="admin",
+            role="admin",
+            source_ip=None,
+        )
+
+    assert service.current_plan is not None
+    assert service.current_plan["previous_positions"] == {}
+    assert not service.trade.requests
+
+
 def test_c_fast_rpc_timeout_never_replays_send_intent(
     tmp_path: Path,
 ) -> None:

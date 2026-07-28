@@ -2014,6 +2014,7 @@ class CommoditySimNowService:
                 )
         safety = self._safety_snapshot(require_trade_enabled=True)
         self._verify_c_fast_account(str(safety["account_hash"]))
+        self._verify_c_fast_known_order_statuses()
         conflicts = self._position_manager_shakedown_active_orders(
             set(PRODUCT_SPECS)
         )
@@ -2177,6 +2178,7 @@ class CommoditySimNowService:
             ),
         )
         comparable = (
+            "previous_positions",
             "expected_after_close",
             "expected_final_positions",
             "previous_risk_targets",
@@ -2236,7 +2238,7 @@ class CommoditySimNowService:
             "production_allowed": False,
             "execution_day": execution_day.isoformat(),
             "previous_positions":
-            self._signed_positions(self._position_snapshot()),
+            rechecked["previous_positions"],
             "expected_after_close": stored_plan["expected_after_close"],
             "expected_final_positions":
             stored_plan["expected_final_positions"],
@@ -2646,6 +2648,7 @@ class CommoditySimNowService:
             ),
             "expected_after_close": after_close,
             "expected_final_positions": final_positions,
+            "previous_positions": observed,
             "quote_snapshot_hash": _sha256_json(quote_rows),
             "preview_exposure_snapshot": exposure,
             "targets": details,
@@ -2672,6 +2675,7 @@ class CommoditySimNowService:
     ) -> None:
         self._verify_c_fast_active_plan_chain(plan)
         self._verify_c_fast_account_position_scope()
+        self._verify_c_fast_known_order_statuses()
         snapshot, snapshot_hash = self._c_fast_snapshot()
         if (
             snapshot_hash != plan.get("source_snapshot_hash")
@@ -4104,6 +4108,7 @@ class CommoditySimNowService:
         self,
     ) -> dict[str, Any]:
         orders = self.rpc.get_orders()
+        self._verify_c_fast_known_order_statuses(orders)
         trades = self.rpc.get_trades()
         return {
             "captured_at_utc":
@@ -4117,6 +4122,46 @@ class CommoditySimNowService:
                 for trade in trades
             ),
         }
+
+    @staticmethod
+    def _unordered_rows_hash(
+        rows: list[dict[str, Any]],
+    ) -> str:
+        return _sha256_json(
+            sorted(_sha256_json(row) for row in rows)
+        )
+
+    def _verify_c_fast_known_order_statuses(
+        self,
+        orders: list[dict[str, Any]] | None = None,
+    ) -> None:
+        unknown = [
+            {
+                "vt_orderid": str(
+                    order.get("vt_orderid")
+                    or order.get("orderid")
+                    or "unknown"
+                ),
+                "reference": str(order.get("reference") or ""),
+                "symbol": str(
+                    order.get("symbol")
+                    or str(order.get("vt_symbol") or "").split(".", 1)[0]
+                ),
+                "status": _normalize_status(order.get("status")),
+            }
+            for order in (
+                orders
+                if orders is not None
+                else self.rpc.get_orders()
+            )
+            if _normalize_status(order.get("status"))
+            not in KNOWN_ORDER_STATUSES
+        ]
+        if unknown:
+            raise CommoditySimNowSafetyError(
+                "账户存在状态未知的委托，禁止 C_FAST 派单",
+                detail={"unknown_status_orders": unknown},
+            )
 
     def _c_fast_terminal_fact_snapshot(
         self, plan: dict[str, Any]
@@ -4150,9 +4195,9 @@ class CommoditySimNowService:
                 or ""
             ),
         ]
-        positions_hash = _sha256_json(raw_positions)
-        orders_hash = _sha256_json(orders)
-        trades_hash = _sha256_json(trades)
+        positions_hash = self._unordered_rows_hash(raw_positions)
+        orders_hash = self._unordered_rows_hash(orders)
+        trades_hash = self._unordered_rows_hash(trades)
         outside_scope = self._c_fast_outside_scope_positions(
             raw_positions
         )
