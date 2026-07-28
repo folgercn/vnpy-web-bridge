@@ -303,21 +303,27 @@ class CommoditySimNowService:
         self._task = asyncio.create_task(self._run_auto_dispatch_loop())
 
     async def stop(self) -> None:
-        await asyncio.to_thread(
-            self._begin_safe_halt,
-            "service_stop",
-            operator="commodity-simnow-shutdown",
-            source_ip=None,
-            revoke_scope="all",
-        )
-        if not self._task:
-            return
-        self._task.cancel()
+        halt_error: Exception | None = None
         try:
-            await self._task
-        except asyncio.CancelledError:
-            pass
-        self._task = None
+            await asyncio.to_thread(
+                self._begin_safe_halt,
+                "service_stop",
+                operator="commodity-simnow-shutdown",
+                source_ip=None,
+                revoke_scope="all",
+            )
+        except Exception as exc:
+            halt_error = exc
+        finally:
+            if self._task:
+                self._task.cancel()
+                try:
+                    await self._task
+                except asyncio.CancelledError:
+                    pass
+                self._task = None
+        if halt_error is not None:
+            raise halt_error
 
     @_serialized
     def _revoke_auto_dispatch(self, scope: str = "all") -> None:
@@ -1258,11 +1264,19 @@ class CommoditySimNowService:
                 revoke_scope="all",
             )
             return {"action": "halted", "reason": "emergency_stop", "halt": halt}
-        if not self._candidate_shakedown_auto_dispatch_allowed(plan):
-            halt = self._begin_safe_halt("shakedown_auto_dispatch_not_active", operator=operator, source_ip=source_ip)
-            return {"action": "halted", "reason": "shakedown_auto_dispatch_not_active", "halt": halt}
         if status in {"READY_CLOSE", "READY_OPEN"}:
             phase = "close" if status == "READY_CLOSE" else "open"
+            if not self._candidate_shakedown_auto_dispatch_allowed(plan):
+                halt = self._begin_safe_halt(
+                    "shakedown_auto_dispatch_not_active",
+                    operator=operator,
+                    source_ip=source_ip,
+                )
+                return {
+                    "action": "halted",
+                    "reason": "shakedown_auto_dispatch_not_active",
+                    "halt": halt,
+                }
             try:
                 self._verify_candidate_shakedown_execution_trust(plan)
             except CommoditySimNowSafetyError as exc:
@@ -3568,41 +3582,54 @@ class CommoditySimNowService:
         status: str,
         reconciliation: dict[str, Any] | None,
     ) -> None:
-        session = self._load_c_fast_shakedown_state()
-        if (
-            not session
-            or session.get("session_id")
-            != plan.get("c_fast_shakedown_session_id")
-        ):
-            raise CommoditySimNowStateError(
-                "C_FAST 测试终态会话证据缺失"
+        session_id = str(
+            plan.get("c_fast_shakedown_session_id") or ""
+        )
+        archived = self._load_c_fast_terminal_archive(session_id)
+        if archived is not None:
+            if (
+                archived.get("plan_hash") != plan.get("plan_hash")
+                or archived.get("status") != status
+            ):
+                raise CommoditySimNowStateError(
+                    "C_FAST 终态归档与活动计划冲突"
+                )
+            session = archived
+        else:
+            session = self._load_c_fast_shakedown_state()
+            if (
+                not session
+                or session.get("session_id") != session_id
+            ):
+                raise CommoditySimNowStateError(
+                    "C_FAST 测试终态会话证据缺失"
+                )
+            execution = {
+                "schema_version":
+                "commodity_c_fast_simnow_shakedown_evidence_v1",
+                "started_at_utc": plan.get("started_at_utc"),
+                "submitted": plan.get("submitted", {}),
+                "send_intents": plan.get("send_intents", {}),
+                "halt": plan.get("halt"),
+                "reconciliation":
+                reconciliation
+                or (plan.get("execution") or {}).get("reconciliation"),
+                "final_positions":
+                self._signed_positions(self._position_snapshot()),
+                "execution_snapshot":
+                plan.get("execution") or self._execution_snapshot(plan),
+                "pnl": self._c_fast_pnl(plan),
+            }
+            execution["state_checksum"] = _sha256_json(execution)
+            session["status"] = status
+            session["completed_at_utc"] = (
+                self.clock().astimezone(timezone.utc).isoformat()
             )
-        execution = {
-            "schema_version":
-            "commodity_c_fast_simnow_shakedown_evidence_v1",
-            "started_at_utc": plan.get("started_at_utc"),
-            "submitted": plan.get("submitted", {}),
-            "send_intents": plan.get("send_intents", {}),
-            "halt": plan.get("halt"),
-            "reconciliation":
-            reconciliation
-            or (plan.get("execution") or {}).get("reconciliation"),
-            "final_positions":
-            self._signed_positions(self._position_snapshot()),
-            "execution_snapshot":
-            plan.get("execution") or self._execution_snapshot(plan),
-            "pnl": self._c_fast_pnl(plan),
-        }
-        execution["state_checksum"] = _sha256_json(execution)
-        session["status"] = status
-        session["completed_at_utc"] = (
-            self.clock().astimezone(timezone.utc).isoformat()
-        )
-        session["execution"] = execution
-        session["terminal_checksum"] = (
-            self._c_fast_shakedown_terminal_checksum(session)
-        )
-        self._archive_c_fast_terminal_session(session)
+            session["execution"] = execution
+            session["terminal_checksum"] = (
+                self._c_fast_shakedown_terminal_checksum(session)
+            )
+            self._archive_c_fast_terminal_session(session)
         self._save_c_fast_shakedown_state(session)
         self._active_state_path().unlink(missing_ok=True)
         self.c_fast_shakedown_auto_dispatch_authorized = False
@@ -3650,6 +3677,7 @@ class CommoditySimNowService:
                 != session.get("session_id")
                 or existing.get("terminal_checksum")
                 != session.get("terminal_checksum")
+                or not self._c_fast_plan_checksum_valid(existing)
                 or not self._c_fast_execution_checksum_valid(existing)
                 or not self._c_fast_shakedown_terminal_checksum_valid(
                     existing
@@ -3667,44 +3695,94 @@ class CommoditySimNowService:
         )
         temporary.replace(path)
 
+    def _load_c_fast_terminal_archive(
+        self, session_id: str
+    ) -> dict[str, Any] | None:
+        path = self._c_fast_terminal_archive_path(session_id)
+        if not path.exists():
+            return None
+        try:
+            session = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise CommoditySimNowStateError(
+                "C_FAST 终态归档不可读取"
+            ) from exc
+        if (
+            not isinstance(session, dict)
+            or session.get("session_id") != session_id
+            or not self._c_fast_plan_checksum_valid(session)
+            or not self._c_fast_execution_checksum_valid(session)
+            or not self._c_fast_shakedown_terminal_checksum_valid(
+                session
+            )
+        ):
+            raise CommoditySimNowStateError(
+                "C_FAST 终态归档校验失败"
+            )
+        return session
+
+    def _c_fast_terminal_chain(
+        self,
+    ) -> tuple[list[dict[str, Any]], str]:
+        archive_dir = self._c_fast_terminal_archive_dir()
+        if not archive_dir.exists():
+            return [], "VALID"
+        sessions = [
+            self._load_c_fast_terminal_archive(path.stem)
+            for path in archive_dir.glob("cfast-shakedown-*.json")
+        ]
+        rows = [session for session in sessions if session is not None]
+        if not rows:
+            return [], "VALID"
+        by_previous: dict[str | None, list[dict[str, Any]]] = {}
+        for session in rows:
+            previous = session.get("previous_terminal_checksum")
+            if previous is not None and not re.fullmatch(
+                r"[0-9a-f]{64}", str(previous)
+            ):
+                return rows, "CHAIN_BROKEN"
+            by_previous.setdefault(previous, []).append(session)
+        roots = by_previous.get(None, [])
+        if len(roots) != 1:
+            return rows, "CHAIN_BROKEN"
+        ordered = [roots[0]]
+        visited = {str(roots[0].get("terminal_checksum"))}
+        while True:
+            checksum = str(ordered[-1].get("terminal_checksum"))
+            children = by_previous.get(checksum, [])
+            if not children:
+                break
+            if len(children) != 1:
+                return rows, "CHAIN_BROKEN"
+            child = children[0]
+            child_checksum = str(child.get("terminal_checksum"))
+            if child_checksum in visited:
+                return rows, "CHAIN_BROKEN"
+            visited.add(child_checksum)
+            ordered.append(child)
+        if len(ordered) != len(rows):
+            return rows, "CHAIN_BROKEN"
+        return ordered, "VALID"
+
     @_serialized
     def c_fast_shakedown_history(
         self, limit: int = 100
     ) -> list[dict[str, Any]]:
-        archive_dir = self._c_fast_terminal_archive_dir()
-        if not archive_dir.exists():
-            return []
-        rows: list[dict[str, Any]] = []
-        for path in sorted(
-            archive_dir.glob("cfast-shakedown-*.json"),
-            reverse=True,
-        ):
-            try:
-                session = json.loads(path.read_text(encoding="utf-8"))
-                if (
-                    not isinstance(session, dict)
-                    or not self._c_fast_execution_checksum_valid(session)
-                    or not self._c_fast_shakedown_terminal_checksum_valid(
-                        session
-                    )
-                    or path
-                    != self._c_fast_terminal_archive_path(
-                        str(session.get("session_id") or "")
-                    )
-                ):
-                    raise ValueError("invalid terminal archive")
-                rows.append(session)
-            except Exception as exc:
-                rows.append(
-                    {
-                        "status": "RESULT_UNKNOWN",
-                        "archive_file": path.name,
-                        "error_type": exc.__class__.__name__,
-                    }
-                )
-            if len(rows) >= max(1, min(limit, 1000)):
-                break
-        return rows
+        try:
+            rows, chain_state = self._c_fast_terminal_chain()
+        except Exception as exc:
+            return [
+                {
+                    "status": "RESULT_UNKNOWN",
+                    "chain_state": "CHAIN_BROKEN",
+                    "error_type": exc.__class__.__name__,
+                }
+            ]
+        bounded = max(1, min(limit, 1000))
+        return [
+            {**session, "chain_state": chain_state}
+            for session in reversed(rows)
+        ][:bounded]
 
     def _load_c_fast_shakedown_state(self) -> dict[str, Any] | None:
         path = self._c_fast_shakedown_state_path()
@@ -3718,23 +3796,7 @@ class CommoditySimNowService:
                 != "commodity_c_fast_simnow_shakedown_session_v1"
             ):
                 raise ValueError("invalid C_FAST shakedown session")
-            core = {
-                key: value
-                for key, value in payload.items()
-                if key
-                not in {
-                    "schema_version",
-                    "plan_hash",
-                    "status",
-                    "started_by",
-                    "previewed_at_utc",
-                    "completed_at_utc",
-                    "execution",
-                    "terminal_checksum",
-                    "continuous_authorized",
-                }
-            }
-            if _sha256_json(core) != payload.get("plan_hash"):
+            if not self._c_fast_plan_checksum_valid(payload):
                 raise ValueError(
                     "C_FAST shakedown plan checksum mismatch"
                 )
@@ -3756,6 +3818,42 @@ class CommoditySimNowService:
                 raise ValueError(
                     "C_FAST terminal envelope checksum mismatch"
                 )
+            if payload.get("status") in {
+                "COMPLETE",
+                "HALTED_RECONCILED",
+            }:
+                if (
+                    not self._c_fast_execution_checksum_valid(payload)
+                    or not self._c_fast_shakedown_terminal_checksum_valid(
+                        payload
+                    )
+                ):
+                    raise ValueError(
+                        "C_FAST terminal evidence is incomplete"
+                    )
+                archived = self._load_c_fast_terminal_archive(
+                    str(payload.get("session_id") or "")
+                )
+                if (
+                    archived is None
+                    or archived.get("plan_hash")
+                    != payload.get("plan_hash")
+                    or archived.get("terminal_checksum")
+                    != payload.get("terminal_checksum")
+                ):
+                    raise ValueError(
+                        "C_FAST terminal pointer/archive mismatch"
+                    )
+                chain, chain_state = self._c_fast_terminal_chain()
+                if (
+                    chain_state != "VALID"
+                    or not chain
+                    or chain[-1].get("terminal_checksum")
+                    != payload.get("terminal_checksum")
+                ):
+                    raise ValueError(
+                        "C_FAST terminal archive chain invalid"
+                    )
             return payload
         except Exception as exc:
             return {
@@ -3788,6 +3886,31 @@ class CommoditySimNowService:
         session["continuous_authorized"] = value
         self._save_c_fast_shakedown_state(session)
         self._c_fast_authority_persist_error = None
+
+    @staticmethod
+    def _c_fast_plan_checksum_valid(
+        session: dict[str, Any]
+    ) -> bool:
+        core = {
+            key: value
+            for key, value in session.items()
+            if key
+            not in {
+                "schema_version",
+                "plan_hash",
+                "status",
+                "started_by",
+                "previewed_at_utc",
+                "completed_at_utc",
+                "execution",
+                "terminal_checksum",
+                "continuous_authorized",
+            }
+        }
+        return bool(
+            isinstance(session.get("plan_hash"), str)
+            and _sha256_json(core) == session.get("plan_hash")
+        )
 
     @staticmethod
     def _c_fast_execution_checksum_valid(
@@ -4837,7 +4960,9 @@ class CommoditySimNowService:
             halt["pre_phase_expected_positions"] = pre_phase_expected
             halt["active_order_ids"] = []
             plan["status"] = "HALTED_PRE_SUBMIT_SAFE"
-            self._persist_active_plan()
+            active_state_persisted = (
+                self._persist_active_plan_during_halt(halt)
+            )
             result = {
                 "required": False,
                 "reason": reason,
@@ -4848,6 +4973,9 @@ class CommoditySimNowService:
                 "cancel_requested_order_ids": [],
                 "active_order_ids": [],
                 "orders_snapshot_available": True,
+                "active_state_persisted": active_state_persisted,
+                "active_state_persistence_error":
+                halt.get("active_state_persistence_error"),
             }
             self._event("safe_halt_pre_submit", plan_hash=plan.get("plan_hash"), result=result)
             return result
@@ -4856,7 +4984,7 @@ class CommoditySimNowService:
         plan["status"] = "CANCEL_PENDING"
         halt["active_order_ids"] = halt.get("active_order_ids", [])
         halt["orders_snapshot_available"] = False
-        self._persist_active_plan()
+        self._persist_active_plan_during_halt(halt)
 
         orders_snapshot: list[dict[str, Any]] | None = None
         try:
@@ -4870,8 +4998,59 @@ class CommoditySimNowService:
                     phases=(submission_recovery_phase,),
                 )
                 halt["submission_evidence_references"] = evidence_references
-                self._persist_active_plan()
+                self._persist_active_plan_during_halt(halt)
                 active_before = self._active_plan_orders_from_snapshot(plan, orders_snapshot)
+                if evidence_references:
+                    halt.pop("recovery_blocker", None)
+                    halt.pop("unattributed_active_orders", None)
+                elif (
+                    halt.get("recovery_blocker")
+                    == "UNATTRIBUTED_FIXED_SCOPE_ACTIVE_ORDERS"
+                ):
+                    external_active = (
+                        self._candidate_shakedown_external_active_orders_from_snapshot(
+                            plan, orders_snapshot
+                        )
+                    )
+                    plan["status"] = "SUBMISSION_OUTCOME_UNKNOWN"
+                    halt.update(
+                        {
+                            "phase": submission_recovery_phase,
+                            "active_order_ids": [],
+                            "orders_snapshot_available": True,
+                            "trades_snapshot_available": True,
+                            "unattributed_active_orders":
+                            external_active,
+                        }
+                    )
+                    active_state_persisted = (
+                        self._persist_active_plan_during_halt(halt)
+                    )
+                    result = {
+                        "required": True,
+                        "reason": reason,
+                        "status": plan["status"],
+                        "phase": submission_recovery_phase,
+                        "cancel_requested_order_ids": sorted(requested),
+                        "active_order_ids": [],
+                        "orders_snapshot_available": True,
+                        "trades_snapshot_available": True,
+                        "submission_evidence_references": [],
+                        "recovery_blocker":
+                        halt["recovery_blocker"],
+                        "unattributed_active_orders":
+                        external_active,
+                        "active_state_persisted":
+                        active_state_persisted,
+                        "active_state_persistence_error":
+                        halt.get("active_state_persistence_error"),
+                    }
+                    self._event(
+                        "submission_outcome_unknown",
+                        plan_hash=plan.get("plan_hash"),
+                        result=result,
+                    )
+                    return result
                 has_persisted_submission = bool(plan.get("submitted", {}).get(submission_recovery_phase))
                 if not evidence_references and not has_persisted_submission and not active_before:
                     external_active = (
@@ -4895,7 +5074,9 @@ class CommoditySimNowService:
                                 external_active,
                             }
                         )
-                        self._persist_active_plan()
+                        active_state_persisted = (
+                            self._persist_active_plan_during_halt(halt)
+                        )
                         result = {
                             "required": True,
                             "reason": reason,
@@ -4910,6 +5091,10 @@ class CommoditySimNowService:
                             halt["recovery_blocker"],
                             "unattributed_active_orders":
                             external_active,
+                            "active_state_persisted":
+                            active_state_persisted,
+                            "active_state_persistence_error":
+                            halt.get("active_state_persistence_error"),
                         }
                         self._event(
                             "submission_outcome_unknown",
@@ -4958,7 +5143,11 @@ class CommoditySimNowService:
                                 }
                             )
                             plan["status"] = "HALTED_PRE_SUBMIT_SAFE"
-                            self._persist_active_plan()
+                            active_state_persisted = (
+                                self._persist_active_plan_during_halt(
+                                    halt
+                                )
+                            )
                             result = {
                                 "required": False,
                                 "reason": reason,
@@ -4973,6 +5162,12 @@ class CommoditySimNowService:
                                 "submission_evidence_references": [],
                                 "empty_snapshot_count": len(checks),
                                 "outcome_grace_elapsed_seconds": elapsed,
+                                "active_state_persisted":
+                                active_state_persisted,
+                                "active_state_persistence_error":
+                                halt.get(
+                                    "active_state_persistence_error"
+                                ),
                             }
                             self._event(
                                 "safe_halt_submitting_without_evidence",
@@ -4989,7 +5184,9 @@ class CommoditySimNowService:
                                 "trades_snapshot_available": True,
                             }
                         )
-                        self._persist_active_plan()
+                        active_state_persisted = (
+                            self._persist_active_plan_during_halt(halt)
+                        )
                         result = {
                             "required": True,
                             "reason": reason,
@@ -5002,6 +5199,10 @@ class CommoditySimNowService:
                             "submission_evidence_references": [],
                             "empty_snapshot_count": len(checks),
                             "outcome_grace_elapsed_seconds": elapsed,
+                            "active_state_persisted":
+                            active_state_persisted,
+                            "active_state_persistence_error":
+                            halt.get("active_state_persistence_error"),
                         }
                         self._event(
                             "submission_outcome_unknown",
@@ -5014,7 +5215,9 @@ class CommoditySimNowService:
         except Exception as exc:
             halt["last_rpc_error_type"] = exc.__class__.__name__
             halt["last_rpc_error_at_utc"] = self.clock().astimezone(timezone.utc).isoformat()
-            self._persist_active_plan()
+            active_state_persisted = (
+                self._persist_active_plan_during_halt(halt)
+            )
             result = {
                 "required": True,
                 "reason": reason,
@@ -5025,6 +5228,9 @@ class CommoditySimNowService:
                 "attempts": [],
                 "orders_snapshot_available": False,
                 "rpc_error_type": exc.__class__.__name__,
+                "active_state_persisted": active_state_persisted,
+                "active_state_persistence_error":
+                halt.get("active_state_persistence_error"),
             }
             self._event("safe_halt_rpc_unavailable", plan_hash=plan.get("plan_hash"), result=result)
             return result
@@ -5080,9 +5286,49 @@ class CommoditySimNowService:
             "attempts": attempts,
             "orders_snapshot_available": halt["orders_snapshot_available"],
         }
-        self._persist_active_plan()
+        active_state_persisted = (
+            self._persist_active_plan_during_halt(halt)
+        )
+        result["active_state_persisted"] = active_state_persisted
+        result["active_state_persistence_error"] = halt.get(
+            "active_state_persistence_error"
+        )
         self._event("safe_halt", plan_hash=plan.get("plan_hash"), result=result)
         return result
+
+    def _persist_active_plan_during_halt(
+        self, halt: dict[str, Any]
+    ) -> bool:
+        try:
+            self._persist_active_plan()
+        except Exception as exc:
+            halt["active_state_persistence_error"] = (
+                exc.__class__.__name__
+            )
+            halt["active_state_persistence_failed_at_utc"] = (
+                self.clock().astimezone(timezone.utc).isoformat()
+            )
+            self._event(
+                "safe_halt_active_state_persist_failed",
+                plan_hash=(
+                    self.current_plan.get("plan_hash")
+                    if self.current_plan
+                    else None
+                ),
+                result={
+                    "error_type": exc.__class__.__name__,
+                    "live_cancellation_continued": True,
+                },
+            )
+            logger.exception(
+                "failed to persist active plan during safe halt"
+            )
+            return False
+        if halt.get("active_state_persistence_error"):
+            halt["active_state_persistence_recovered_at_utc"] = (
+                self.clock().astimezone(timezone.utc).isoformat()
+            )
+        return True
 
     def _advance_cancel_pending(
         self,

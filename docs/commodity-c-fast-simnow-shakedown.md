@@ -86,11 +86,16 @@ session nonce/reference 和已确认 order id 定向撤单；会话空闲时 sto
 safe-halt、定向撤单和只读 reconcile 仍继续。固定十品种内出现无法用
 reference/order id 唯一归属的活动委托时，状态保持
 `SUBMISSION_OUTCOME_UNKNOWN`，禁止声明无证据、禁止归档或重发。
+共享 active-plan 落盘失败同样不得阻断 live RPC 查询和撤单，结果会显式记录
+`active_state_persistence_error`；服务 shutdown 使用 finally 保证 worker
+一定停止。
 
 每个终态 session 在覆盖当前 session pointer 前，先写入
 `<state-stem>.sessions/<session_id>.json` 不可变归档；下一 session 通过
 `previous_terminal_checksum` 与上一终态形成证据链。`sessions` 接口用于
-重启后枚举和校验历史终态。
+重启后按链顺序枚举和校验历史终态；缺失 predecessor、分叉、循环或单文件
+checksum 错误会返回 `CHAIN_BROKEN`。archive 成功但 current pointer 写失败时，
+终态重试复用原 archive，不重新生成完成时间、PnL 或 checksum。
 
 ## PnL 证据
 
