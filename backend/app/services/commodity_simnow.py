@@ -297,13 +297,28 @@ class CommoditySimNowService:
             and self.current_plan.get("status") == "NOOP_FINALIZING"
             and self.current_plan.get("c_fast_shakedown_session_id")
         ):
-            self._complete_c_fast_noop_plan(self.current_plan)
+            try:
+                self._complete_c_fast_noop_plan(self.current_plan)
+            except Exception as exc:
+                self._revoke_auto_dispatch("c_fast_shakedown")
+                halt = self.current_plan.setdefault("halt", {})
+                halt.update(
+                    {
+                        "reason": "noop_restart_recovery_failed",
+                        "noop_recovery_error_type":
+                        exc.__class__.__name__,
+                        "noop_recovery_failed_at_utc":
+                        self.clock().astimezone(timezone.utc).isoformat(),
+                    }
+                )
+                self._persist_active_plan_during_halt(halt)
         if self.current_plan and self.current_plan.get("status") != "COMPLETE":
-            self._begin_safe_halt(
-                "process_restart_recovery",
-                operator="commodity-simnow-recovery",
-                source_ip=None,
-            )
+            if self.current_plan.get("status") != "NOOP_FINALIZING":
+                self._begin_safe_halt(
+                    "process_restart_recovery",
+                    operator="commodity-simnow-recovery",
+                    source_ip=None,
+                )
         if self._task or not self.settings.commodity_simnow_enabled:
             return
         self._task = asyncio.create_task(self._run_auto_dispatch_loop())
@@ -3649,7 +3664,10 @@ class CommoditySimNowService:
                 order.get("symbol")
                 or str(order.get("vt_symbol") or "").split(".", 1)[0]
             )
-            if _product_from_symbol(symbol) not in PRODUCT_SPECS:
+            if (
+                not plan.get("c_fast_shakedown_session_id")
+                and _product_from_symbol(symbol) not in PRODUCT_SPECS
+            ):
                 continue
             reference = str(order.get("reference") or "")
             observed_ids = (
@@ -3909,6 +3927,18 @@ class CommoditySimNowService:
         *,
         reconciliation: dict[str, Any] | None,
     ) -> dict[str, Any]:
+        safety = self._safety_snapshot(
+            require_trade_enabled=False,
+            allow_emergency_stopped=True,
+        )
+        observed_account_hash = str(safety["account_hash"])
+        account_valid = (
+            observed_account_hash == plan.get("account_hash")
+        )
+        try:
+            self._verify_c_fast_account(observed_account_hash)
+        except CommoditySimNowSafetyError:
+            account_valid = False
         raw_positions = self.rpc.get_positions()
         outside_scope = self._c_fast_outside_scope_positions(
             raw_positions
@@ -3934,6 +3964,8 @@ class CommoditySimNowService:
             )
         )
         blockers: list[str] = []
+        if not account_valid:
+            blockers.append("ACCOUNT_HASH_MISMATCH")
         if outside_scope:
             blockers.append("OUTSIDE_C_FAST_POSITION_SCOPE")
         if expected is None or final_positions != expected:
@@ -3945,6 +3977,9 @@ class CommoditySimNowService:
         captured_at = self.clock().astimezone(timezone.utc).isoformat()
         guard = {
             "captured_at_utc": captured_at,
+            "expected_account_hash": plan.get("account_hash"),
+            "observed_account_hash": observed_account_hash,
+            "account_hash_valid": account_valid,
             "final_positions": final_positions,
             "expected_positions": expected,
             "outside_scope_positions": outside_scope,

@@ -145,9 +145,12 @@ orders/trades 采集，并记录相同的 `execution_captured_at_utc`。
 欠成交时为 `INCOMPLETE`，超额或矛盾证据为 `INCONSISTENT`，两者金额字段均为
 `None`。
 terminal commit 还会最终复验原始持仓、精确 expected positions、session
-活动委托和外部活动委托，并把快照 hash 写入 `terminal_guard`。成交回报按
+活动委托、所有范围（包括未知 symbol）的外部活动委托，以及实时账户哈希，
+并把账户绑定和快照 hash 写入 `terminal_guard`。成交回报按
 gateway/trade id 去重且逐 child 要求完整；任一 child 缺失或超额时，PnL
 分别标记 `INCOMPLETE` 或 `INCONSISTENT`，金额字段保持 `None`。
+遗留 `NOOP_FINALIZING` 在启动时遇到 RPC 暂时不可用只记录恢复错误并保持
+fail-closed，后端和 worker 仍会启动，RPC 恢复后自动重试 no-op 终态提交。
 
 ## 本地验证
 
