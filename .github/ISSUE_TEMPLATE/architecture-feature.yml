@@ -1,0 +1,72 @@
+name: Architecture Aligned Issue
+description: Create an issue following vnpy-web-bridge architecture and authority rules
+title: "[Architecture] "
+labels:
+  - architecture
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## vnpy-web-bridge Architecture Requirement
+
+        New issues must follow Architecture v1, Authority Model v1 and LLM Development Guide v1.
+
+  - type: dropdown
+    id: plane
+    attributes:
+      label: Architecture Plane
+      description: Which system plane does this issue belong to?
+      options:
+        - Research Plane
+        - Control Plane
+        - Execution Plane
+        - Cross Plane Architecture
+    validations:
+      required: true
+
+  - type: dropdown
+    id: authority
+    attributes:
+      label: Authority Impact
+      description: Does this change system authority?
+      options:
+        - None
+        - Evidence Authority
+        - Acceptance Authority
+        - Deployment Authority
+        - Execution Authority
+    validations:
+      required: true
+
+  - type: textarea
+    id: background
+    attributes:
+      label: Background
+      description: Explain the problem and current situation.
+    validations:
+      required: true
+
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: Define the expected outcome.
+    validations:
+      required: true
+
+  - type: textarea
+    id: boundary
+    attributes:
+      label: Security Boundary and Non-goals
+      description: Explicitly describe forbidden behaviors and out of scope items.
+      value: |
+        -
+        -
+
+  - type: textarea
+    id: validation
+    attributes:
+      label: Acceptance Criteria
+      description: Define verification requirements.
+    validations:
+      required: true
