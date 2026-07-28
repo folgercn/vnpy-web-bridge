@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bktrader.local/schemas/commodity-c-fast-execution-quality-collection-admission-terminal-v1.schema.json",
+  "title": "C_FAST collection-admission terminal v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "purpose", "candidate_id", "release_id",
+    "attempt_id", "terminal_state", "error_code", "started_at",
+    "final_revalidation_at", "ended_at", "release_raw_sha256",
+    "release_canonical_sha256", "consume_raw_sha256",
+    "consume_canonical_sha256", "source_binding_sha256",
+    "p0_acceptance_raw_sha256", "policy_v1_raw_sha256",
+    "policy_v2_raw_sha256", "admission_fact_frozen",
+    "terminal_is_runtime_authority", "collection_authorized",
+    "execution_quality_collection_authorized",
+    "runtime_activation_authorized", "database_mutation_authorized",
+    "deployment_mutation_authorized", "network_authorized",
+    "query_authorized", "web_bridge_rpc_authorized", "order_authorized",
+    "position_mutation_authorized", "dispatch_authorized",
+    "trading_authorized", "production_authorized",
+    "database_mutations_observed", "web_bridge_rpc_calls", "orders_sent",
+    "positions_modified", "dispatch_changed"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "commodity_c_fast_execution_quality_collection_admission_terminal_v1"
+    },
+    "purpose": {"const": "c_fast_collection_admission_offline_terminal"},
+    "candidate_id": {"const": "C_FAST_CROSS_SECTION_NEUTRAL"},
+    "release_id": {"$ref": "#/$defs/id"},
+    "attempt_id": {
+      "type": "string",
+      "pattern": "^collection-admission-attempt-[0-9a-f]{64}$"
+    },
+    "terminal_state": {
+      "enum": [
+        "ADMISSION_VERIFIED_FOR_SEPARATE_RUNTIME_RELEASE_ONLY",
+        "FAILED_FINAL_REVALIDATION_NO_COLLECTION"
+      ]
+    },
+    "error_code": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "started_at": {"type": "string", "format": "date-time"},
+    "final_revalidation_at": {
+      "type": ["string", "null"],
+      "format": "date-time"
+    },
+    "ended_at": {"type": "string", "format": "date-time"},
+    "release_raw_sha256": {"$ref": "#/$defs/sha256"},
+    "release_canonical_sha256": {"$ref": "#/$defs/sha256"},
+    "consume_raw_sha256": {"$ref": "#/$defs/sha256"},
+    "consume_canonical_sha256": {"$ref": "#/$defs/sha256"},
+    "source_binding_sha256": {"$ref": "#/$defs/sha256"},
+    "p0_acceptance_raw_sha256": {"$ref": "#/$defs/sha256"},
+    "policy_v1_raw_sha256": {"$ref": "#/$defs/sha256"},
+    "policy_v2_raw_sha256": {"$ref": "#/$defs/sha256"},
+    "admission_fact_frozen": {"type": "boolean"},
+    "terminal_is_runtime_authority": {"const": false},
+    "collection_authorized": {"const": false},
+    "execution_quality_collection_authorized": {"const": false},
+    "runtime_activation_authorized": {"const": false},
+    "database_mutation_authorized": {"const": false},
+    "deployment_mutation_authorized": {"const": false},
+    "network_authorized": {"const": false},
+    "query_authorized": {"const": false},
+    "web_bridge_rpc_authorized": {"const": false},
+    "order_authorized": {"const": false},
+    "position_mutation_authorized": {"const": false},
+    "dispatch_authorized": {"const": false},
+    "trading_authorized": {"const": false},
+    "production_authorized": {"const": false},
+    "database_mutations_observed": {"const": 0},
+    "web_bridge_rpc_calls": {"const": 0},
+    "orders_sent": {"const": 0},
+    "positions_modified": {"const": 0},
+    "dispatch_changed": {"const": false}
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "terminal_state": {
+            "const": "ADMISSION_VERIFIED_FOR_SEPARATE_RUNTIME_RELEASE_ONLY"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "error_code": {"const": null},
+          "final_revalidation_at": {"type": "string"},
+          "admission_fact_frozen": {"const": true}
+        }
+      },
+      "else": {
+        "properties": {
+          "error_code": {"type": "string"},
+          "final_revalidation_at": {"const": null},
+          "admission_fact_frozen": {"const": false}
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{8,128}$"
+    },
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

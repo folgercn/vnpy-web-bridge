@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bktrader.local/schemas/commodity-c-fast-execution-quality-collection-admission-consume-v1.schema.json",
+  "title": "C_FAST collection-admission consume v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "purpose", "candidate_id", "release_id",
+    "attempt_id", "consumed_at", "release_raw_sha256",
+    "release_canonical_sha256", "admission_keyring_sha256",
+    "source_binding_sha256", "consume_is_authority",
+    "collection_authorized", "runtime_activation_authorized",
+    "database_mutation_authorized", "dispatch_authorized",
+    "trading_authorized", "replay_allowed"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "commodity_c_fast_execution_quality_collection_admission_consume_v1"
+    },
+    "purpose": {
+      "const": "c_fast_collection_admission_consume_before_final_revalidation"
+    },
+    "candidate_id": {"const": "C_FAST_CROSS_SECTION_NEUTRAL"},
+    "release_id": {"$ref": "#/$defs/id"},
+    "attempt_id": {
+      "type": "string",
+      "pattern": "^collection-admission-attempt-[0-9a-f]{64}$"
+    },
+    "consumed_at": {"type": "string", "format": "date-time"},
+    "release_raw_sha256": {"$ref": "#/$defs/sha256"},
+    "release_canonical_sha256": {"$ref": "#/$defs/sha256"},
+    "admission_keyring_sha256": {"$ref": "#/$defs/sha256"},
+    "source_binding_sha256": {"$ref": "#/$defs/sha256"},
+    "consume_is_authority": {"const": false},
+    "collection_authorized": {"const": false},
+    "runtime_activation_authorized": {"const": false},
+    "database_mutation_authorized": {"const": false},
+    "dispatch_authorized": {"const": false},
+    "trading_authorized": {"const": false},
+    "replay_allowed": {"const": false}
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{8,128}$"
+    },
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}
