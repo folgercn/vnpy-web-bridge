@@ -8,7 +8,8 @@
     "schema_version", "purpose", "candidate_id", "release_id",
     "attempt_id", "consumed_at", "release_raw_sha256",
     "release_canonical_sha256", "admission_keyring_sha256",
-    "source_binding_sha256", "consume_is_authority",
+    "source_binding_sha256", "custody_path_sha256",
+    "custody_identity_sha256", "consume_is_authority",
     "collection_authorized", "runtime_activation_authorized",
     "database_mutation_authorized", "dispatch_authorized",
     "trading_authorized", "replay_allowed"
@@ -31,6 +32,8 @@
     "release_canonical_sha256": {"$ref": "#/$defs/sha256"},
     "admission_keyring_sha256": {"$ref": "#/$defs/sha256"},
     "source_binding_sha256": {"$ref": "#/$defs/sha256"},
+    "custody_path_sha256": {"$ref": "#/$defs/sha256"},
+    "custody_identity_sha256": {"$ref": "#/$defs/sha256"},
     "consume_is_authority": {"const": false},
     "collection_authorized": {"const": false},
     "runtime_activation_authorized": {"const": false},

@@ -127,6 +127,7 @@ class Fixture:
     admission_keyring_path: Path
     admission_pin: str
     custody: Path
+    custody_identity_sha256: str
 
     def source_kwargs(self) -> dict:
         return {
@@ -146,6 +147,21 @@ class Fixture:
             **self.source_kwargs(),
             "expected_admission_keyring_sha256": self.admission_pin,
             "custody_dir": self.custody,
+            "pinned_custody_path": self.custody,
+            "pinned_custody_identity_sha256": (
+                self.custody_identity_sha256
+            ),
+            "require_root_owned_parent": False,
+        }
+
+    def binding_kwargs(self) -> dict:
+        return {
+            "custody_dir": self.custody,
+            "pinned_custody_path": self.custody,
+            "pinned_custody_identity_sha256": (
+                self.custody_identity_sha256
+            ),
+            "require_root_owned_parent": False,
         }
 
 
@@ -208,6 +224,15 @@ def build_fixture(
     admission_pin = sha256(canonical_json(keyring))
     custody = tmp_path / "admission-custody"
     custody.mkdir(mode=0o700)
+    custody_identity = {
+        "schema_version": "commodity_c_fast_t1_custody_identity_v1",
+        "custody_id": "collection-admission-custody-20260901",
+    }
+    write_json(
+        custody / "custody-identity.json",
+        custody_identity,
+    )
+    custody_identity_sha256 = sha256(canonical_json(custody_identity))
     return Fixture(
         p0=p0,
         acceptance_path=acceptance_path,
@@ -219,6 +244,7 @@ def build_fixture(
         admission_keyring_path=admission_keyring_path,
         admission_pin=admission_pin,
         custody=custody,
+        custody_identity_sha256=custody_identity_sha256,
     )
 
 
@@ -247,6 +273,9 @@ def draft_for(fixture: Fixture, sources=None) -> dict:
         "admission_keyring_sha256": fixture.admission_pin,
         "custody_path_sha256": admission.custody_path_sha256(
             fixture.custody
+        ),
+        "custody_identity_sha256": (
+            fixture.custody_identity_sha256
         ),
         "verifier_sha256": sha256(admission.VERIFIER_PATH.read_bytes()),
         "release_schema_sha256": sha256(
@@ -284,6 +313,11 @@ def sign_release(fixture: Fixture, draft: dict | None = None) -> Path:
         fixture.admission_keyring_path,
         expected_admission_keyring_sha256=fixture.admission_pin,
         custody_dir=fixture.custody,
+        pinned_custody_path=fixture.custody,
+        pinned_custody_identity_sha256=(
+            fixture.custody_identity_sha256
+        ),
+        require_root_owned_parent=False,
         now=NOW,
         source_kwargs=fixture.source_kwargs(),
     )
@@ -328,6 +362,11 @@ def test_signed_admission_replays_policy_and_p0_then_consumes_once(
             **fixture.verify_kwargs(),
         ),
         custody_dir=fixture.custody,
+        pinned_custody_path=fixture.custody,
+        pinned_custody_identity_sha256=(
+            fixture.custody_identity_sha256
+        ),
+        require_root_owned_parent=False,
         clock=lambda: next(times),
     )
 
@@ -346,6 +385,17 @@ def test_signed_admission_replays_policy_and_p0_then_consumes_once(
     )
     assert consume_path.stat().st_mode & 0o777 == 0o600
     assert terminal_path.stat().st_mode & 0o777 == 0o600
+    consume_payload = json.loads(consume_path.read_text(encoding="utf-8"))
+    terminal_payload = json.loads(terminal_path.read_text(encoding="utf-8"))
+    for payload in (consume_payload, terminal_payload):
+        assert (
+            payload["custody_path_sha256"]
+            == verified.payload["custody_path_sha256"]
+        )
+        assert (
+            payload["custody_identity_sha256"]
+            == fixture.custody_identity_sha256
+        )
     terminal_path.unlink()
     with pytest.raises(
         admission.CollectionAdmissionError,
@@ -355,7 +405,37 @@ def test_signed_admission_replays_policy_and_p0_then_consumes_once(
             verified,
             lambda _now: verified,
             custody_dir=fixture.custody,
+            pinned_custody_path=fixture.custody,
+            pinned_custody_identity_sha256=(
+                fixture.custody_identity_sha256
+            ),
+            require_root_owned_parent=False,
             clock=lambda: NOW + timedelta(seconds=4),
+        )
+
+    archived_custody = fixture.custody.with_name(
+        "admission-custody-archived"
+    )
+    fixture.custody.rename(archived_custody)
+    fixture.custody.mkdir(mode=0o700)
+    write_json(
+        fixture.custody / "custody-identity.json",
+        {
+            "schema_version": (
+                "commodity_c_fast_t1_custody_identity_v1"
+            ),
+            "custody_id": "replacement-custody-20260901",
+        },
+    )
+    with pytest.raises(
+        OneShotError,
+        match="custody identity SHA256 does not match",
+    ):
+        admission.verify_signed_admission(
+            release_path,
+            fixture.admission_keyring_path,
+            now=NOW + timedelta(seconds=5),
+            **fixture.verify_kwargs(),
         )
 
 
@@ -376,6 +456,64 @@ def test_raw_policy_ancestry_and_p0_bundle_splice_fail_closed(
     source_kwargs["expected_upstream_keyring_sha256"] = other.p0.pins
     with pytest.raises(Exception):
         admission.verify_admission_sources(**source_kwargs)
+
+
+def test_production_custody_requires_root_owned_immutable_parent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = build_fixture(tmp_path, monkeypatch)
+    with pytest.raises(
+        OneShotError,
+        match="custody parent must be root-owned",
+    ):
+        admission._validate_custody_binding(
+            {
+                "custody_path_sha256": admission.custody_path_sha256(
+                    fixture.custody
+                ),
+                "custody_identity_sha256": (
+                    fixture.custody_identity_sha256
+                ),
+            },
+            custody_dir=fixture.custody,
+            pinned_custody_path=fixture.custody,
+            pinned_custody_identity_sha256=(
+                fixture.custody_identity_sha256
+            ),
+            require_root_owned_parent=True,
+        )
+
+
+@pytest.mark.parametrize("policy_version", ["v1", "v2"])
+def test_policy_raw_replacement_during_signature_verification_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    policy_version: str,
+) -> None:
+    fixture = build_fixture(tmp_path, monkeypatch)
+    target = (
+        fixture.policy_v1_path
+        if policy_version == "v1"
+        else fixture.policy_v2_path
+    )
+    original = admission.verify_execution_policy_freeze_v2_raw_chain
+
+    def replace_after_verification(*args, **kwargs):
+        receipt = original(*args, **kwargs)
+        write_bytes(target, target.read_bytes() + b"\n")
+        return receipt
+
+    monkeypatch.setattr(
+        admission,
+        "verify_execution_policy_freeze_v2_raw_chain",
+        replace_after_verification,
+    )
+    with pytest.raises(
+        admission.CollectionAdmissionError,
+        match="policy raw chain changed during source verification",
+    ):
+        admission.verify_admission_sources(**fixture.source_kwargs())
 
 
 @pytest.mark.parametrize("field", admission.FALSE_AUTHORITY_FIELDS)
@@ -410,7 +548,7 @@ def test_admission_ttl_attempt_and_source_binding_are_exact(
         admission.validate_admission_bindings(
             {**draft, "signature": admission.PLACEHOLDER_SIGNATURE},
             sources,
-            custody_dir=fixture.custody,
+            **fixture.binding_kwargs(),
             now=NOW,
         )
 
@@ -422,7 +560,7 @@ def test_admission_ttl_attempt_and_source_binding_are_exact(
         admission.validate_admission_bindings(
             {**draft, "signature": admission.PLACEHOLDER_SIGNATURE},
             sources,
-            custody_dir=fixture.custody,
+            **fixture.binding_kwargs(),
             now=NOW + timedelta(minutes=6),
         )
 
@@ -437,7 +575,7 @@ def test_admission_ttl_attempt_and_source_binding_are_exact(
         admission.validate_admission_bindings(
             {**draft, "signature": admission.PLACEHOLDER_SIGNATURE},
             sources,
-            custody_dir=fixture.custody,
+            **fixture.binding_kwargs(),
             now=NOW,
         )
 
@@ -450,7 +588,7 @@ def test_admission_ttl_attempt_and_source_binding_are_exact(
         admission.validate_admission_bindings(
             {**draft, "signature": admission.PLACEHOLDER_SIGNATURE},
             sources,
-            custody_dir=fixture.custody,
+            **fixture.binding_kwargs(),
             now=NOW,
         )
 
@@ -481,6 +619,11 @@ def test_admission_keyring_rejects_upstream_reuse_and_private_mismatch(
             fixture.admission_keyring_path,
             expected_admission_keyring_sha256=fixture.admission_pin,
             custody_dir=fixture.custody,
+            pinned_custody_path=fixture.custody,
+            pinned_custody_identity_sha256=(
+                fixture.custody_identity_sha256
+            ),
+            require_root_owned_parent=False,
             now=NOW,
             source_kwargs=fixture.source_kwargs(),
         )
@@ -491,6 +634,11 @@ def test_admission_keyring_rejects_upstream_reuse_and_private_mismatch(
         clean.admission_keyring_path,
         expected_admission_keyring_sha256=clean.admission_pin,
         custody_dir=clean.custody,
+        pinned_custody_path=clean.custody,
+        pinned_custody_identity_sha256=(
+            clean.custody_identity_sha256
+        ),
+        require_root_owned_parent=False,
         now=NOW,
         source_kwargs=clean.source_kwargs(),
     )
@@ -505,9 +653,11 @@ def test_admission_keyring_rejects_upstream_reuse_and_private_mismatch(
         )
 
 
+@pytest.mark.parametrize("rotated_pin", ["policy", "custody_identity"])
 def test_pin_rotation_after_consume_writes_failure_terminal(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    rotated_pin: str,
 ) -> None:
     fixture = build_fixture(tmp_path, monkeypatch)
     release_path = sign_release(fixture)
@@ -530,7 +680,7 @@ def test_pin_rotation_after_consume_writes_failure_terminal(
     def rotated_revalidation(now: datetime):
         nonlocal calls
         calls += 1
-        if calls == 2:
+        if calls == 2 and rotated_pin == "policy":
             keyring = json.loads(
                 fixture.policy_keyring_path.read_text(encoding="utf-8")
             )
@@ -541,17 +691,25 @@ def test_pin_rotation_after_consume_writes_failure_terminal(
                 "purpose": admission.POLICY_KEY_PURPOSE,
             }
             write_json(fixture.policy_keyring_path, keyring)
+        verify_kwargs = fixture.verify_kwargs()
+        if calls == 2 and rotated_pin == "custody_identity":
+            verify_kwargs["pinned_custody_identity_sha256"] = "f" * 64
         return admission.verify_signed_admission(
             release_path,
             fixture.admission_keyring_path,
             now=now,
-            **fixture.verify_kwargs(),
+            **verify_kwargs,
         )
 
     exit_code, terminal = admission.execute_offline_admission(
         verified,
         rotated_revalidation,
         custody_dir=fixture.custody,
+        pinned_custody_path=fixture.custody,
+        pinned_custody_identity_sha256=(
+            fixture.custody_identity_sha256
+        ),
+        require_root_owned_parent=False,
         clock=lambda: next(times),
     )
     assert exit_code == 2

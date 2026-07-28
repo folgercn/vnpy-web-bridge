@@ -93,6 +93,7 @@
   },
   "admission_keyring_sha256": "PENDING_SHA256",
   "custody_path_sha256": "PENDING_SHA256",
+  "custody_identity_sha256": "PENDING_SHA256",
   "verifier_sha256": "PENDING_SHA256",
   "release_schema_sha256": "PENDING_SHA256",
   "trusted_keyring_schema_sha256": "PENDING_SHA256",

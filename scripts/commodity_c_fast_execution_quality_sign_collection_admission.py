@@ -20,6 +20,7 @@ from commodity_c_fast_execution_quality_collection_admission import (
     _load_admission_keyring,
     add_source_arguments,
     canonical_json,
+    custody_pins_from_args,
     source_kwargs_from_args,
     unsigned_admission_payload,
     validate_admission_bindings,
@@ -44,6 +45,9 @@ def prepare_admission(
     *,
     expected_admission_keyring_sha256: str,
     custody_dir: Path,
+    pinned_custody_path: Path,
+    pinned_custody_identity_sha256: str,
+    require_root_owned_parent: bool,
     now: datetime,
     source_kwargs: dict,
 ) -> tuple[dict, object]:
@@ -58,6 +62,11 @@ def prepare_admission(
         candidate,
         sources,
         custody_dir=custody_dir,
+        pinned_custody_path=pinned_custody_path,
+        pinned_custody_identity_sha256=(
+            pinned_custody_identity_sha256
+        ),
+        require_root_owned_parent=require_root_owned_parent,
         now=now,
     )
     public_key, admission_materials, keyring_pin = (
@@ -135,6 +144,12 @@ def parse_args() -> argparse.Namespace:
         required=True,
     )
     parser.add_argument("--custody-dir", type=Path, required=True)
+    parser.add_argument("--custody-path-pin", type=Path, required=True)
+    parser.add_argument(
+        "--custody-identity-pin",
+        type=Path,
+        required=True,
+    )
     add_source_arguments(parser)
     return parser.parse_args()
 
@@ -142,6 +157,9 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     try:
+        pinned_custody_path, pinned_custody_identity = (
+            custody_pins_from_args(args)
+        )
         draft = parse_json_bytes(
             read_regular_file_strict(
                 args.input,
@@ -158,6 +176,11 @@ def main() -> int:
                 args.expected_admission_keyring_sha256
             ),
             custody_dir=args.custody_dir,
+            pinned_custody_path=pinned_custody_path,
+            pinned_custody_identity_sha256=(
+                pinned_custody_identity
+            ),
+            require_root_owned_parent=True,
             now=datetime.now(timezone.utc),
             source_kwargs=source_kwargs_from_args(args),
         )

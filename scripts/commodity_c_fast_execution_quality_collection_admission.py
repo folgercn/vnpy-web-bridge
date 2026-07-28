@@ -27,7 +27,7 @@ if str(BACKEND) not in sys.path:
 from app.services.commodity_c_fast_execution_policy import (  # noqa: E402
     CFastExecutionPolicyFreezeError,
     SIGNER_KEY_PURPOSE as POLICY_KEY_PURPOSE,
-    verify_execution_policy_freeze_v2_raw_chain_files,
+    verify_execution_policy_freeze_v2_raw_chain,
 )
 from commodity_c_fast_p0_acceptance_v2 import (  # noqa: E402
     P0AcceptanceV2Error,
@@ -54,6 +54,8 @@ from commodity_c_fast_t1_one_shot import (  # noqa: E402
     parse_json_bytes,
     read_regular_file_at,
     read_regular_file_strict,
+    read_root_owned_deployment_pin,
+    validate_custody_identity,
     validate_json_schema,
     write_json_create_only_at,
 )
@@ -213,7 +215,7 @@ def _read_policy_keyring(
     path: Path,
     *,
     expected_sha256: str,
-) -> tuple[dict[str, Any], frozenset[bytes], str]:
+) -> tuple[dict[str, Any], frozenset[bytes], str, bytes]:
     expected = _validate_sha256(
         expected_sha256,
         "independently pinned policy keyring",
@@ -259,7 +261,7 @@ def _read_policy_keyring(
                 "policy keyring reuses public-key material"
             )
         materials.add(material)
-    return payload, frozenset(materials), digest
+    return payload, frozenset(materials), digest, raw
 
 
 def _load_admission_keyring(
@@ -312,15 +314,14 @@ def verify_admission_sources(
     bundle_paths: P0BundleV2Paths,
     expected_upstream_keyring_sha256: dict[str, str],
 ) -> AdmissionSources:
-    policy_keyring, policy_materials, policy_pin = _read_policy_keyring(
+    (
+        policy_keyring,
+        policy_materials,
+        policy_pin,
+        policy_keyring_raw,
+    ) = _read_policy_keyring(
         policy_keyring_path,
         expected_sha256=expected_policy_keyring_sha256,
-    )
-    policy_receipt = verify_execution_policy_freeze_v2_raw_chain_files(
-        policy_v2_path,
-        superseded_freeze_path=policy_v1_path,
-        trusted_public_keys_path=policy_keyring_path,
-        expected_trusted_public_keys_sha256=policy_pin,
     )
     policy_v1_raw = read_regular_file_strict(
         policy_v1_path,
@@ -331,6 +332,22 @@ def verify_admission_sources(
         policy_v2_path,
         "signed execution-quality policy freeze v2",
         limit=MAX_POLICY_BYTES,
+    )
+    policy_receipt = verify_execution_policy_freeze_v2_raw_chain(
+        policy_v2_raw,
+        superseded_freeze_raw=policy_v1_raw,
+        trusted_public_keys=policy_keyring,
+        expected_trusted_public_keys_sha256=policy_pin,
+    )
+    _compare(
+        _hash(policy_v1_raw),
+        policy_receipt.supersedes_freeze_raw_sha256,
+        "verified policy v1 raw bytes",
+    )
+    _compare(
+        _hash(policy_v2_raw),
+        policy_receipt.freeze_raw_sha256,
+        "verified policy v2 raw bytes",
     )
     policy_v1 = parse_json_bytes(policy_v1_raw, "policy freeze v1")
     policy_v2 = parse_json_bytes(policy_v2_raw, "policy freeze v2")
@@ -389,17 +406,29 @@ def verify_admission_sources(
                 raise CollectionAdmissionError(
                     "policy/P0 key domains reuse public-key material"
                 )
-    if policy_keyring != parse_json_bytes(
+    if (
         read_regular_file_strict(
+            policy_v1_path,
+            "signed execution-quality policy freeze v1",
+            limit=MAX_POLICY_BYTES,
+        )
+        != policy_v1_raw
+        or read_regular_file_strict(
+            policy_v2_path,
+            "signed execution-quality policy freeze v2",
+            limit=MAX_POLICY_BYTES,
+        )
+        != policy_v2_raw
+        or read_regular_file_strict(
             policy_keyring_path,
             "execution-quality policy trusted keyring",
             limit=MAX_POLICY_BYTES,
             private=True,
-        ),
-        "execution-quality policy trusted keyring",
+        )
+        != policy_keyring_raw
     ):
         raise CollectionAdmissionError(
-            "policy keyring changed during source verification"
+            "policy raw chain changed during source verification"
         )
     return AdmissionSources(
         policy_receipt=policy_receipt,
@@ -488,11 +517,61 @@ def _validate_runtime_bindings(payload: dict[str, Any]) -> None:
         )
 
 
+def _validate_custody_binding(
+    payload: dict[str, Any],
+    *,
+    custody_dir: Path,
+    pinned_custody_path: Path,
+    pinned_custody_identity_sha256: str,
+    require_root_owned_parent: bool,
+) -> None:
+    expected_identity = _validate_sha256(
+        pinned_custody_identity_sha256,
+        "independently pinned custody identity",
+    )
+    if pinned_custody_path.is_symlink():
+        raise CollectionAdmissionError(
+            "immutable custody path pin must not name a symlink"
+        )
+    try:
+        requested = custody_dir.resolve(strict=True)
+        pinned = pinned_custody_path.resolve(strict=True)
+    except OSError as exc:
+        raise CollectionAdmissionError(
+            "cannot resolve collection-admission custody"
+        ) from exc
+    if requested != pinned:
+        raise CollectionAdmissionError(
+            "custody directory does not match the immutable path pin"
+        )
+    _compare(
+        str(payload["custody_path_sha256"]),
+        custody_path_sha256(pinned),
+        "collection-admission custody path",
+    )
+    _compare(
+        str(payload["custody_identity_sha256"]),
+        expected_identity,
+        "collection-admission custody identity pin",
+    )
+    guard = open_custody_guard(
+        custody_dir,
+        require_root_owned_parent=require_root_owned_parent,
+    )
+    try:
+        validate_custody_identity(guard, expected_identity)
+    finally:
+        guard.close()
+
+
 def validate_admission_bindings(
     payload: dict[str, Any],
     sources: AdmissionSources,
     *,
     custody_dir: Path,
+    pinned_custody_path: Path,
+    pinned_custody_identity_sha256: str,
+    require_root_owned_parent: bool,
     now: datetime,
 ) -> None:
     validate_json_schema(
@@ -564,10 +643,15 @@ def validate_admission_bindings(
         raise CollectionAdmissionError(
             "collection-admission exact source binding mismatch"
         )
-    if payload["custody_path_sha256"] != custody_path_sha256(custody_dir):
-        raise CollectionAdmissionError(
-            "collection-admission custody path binding mismatch"
-        )
+    _validate_custody_binding(
+        payload,
+        custody_dir=custody_dir,
+        pinned_custody_path=pinned_custody_path,
+        pinned_custody_identity_sha256=(
+            pinned_custody_identity_sha256
+        ),
+        require_root_owned_parent=require_root_owned_parent,
+    )
     if (
         payload["admission_fact_frozen"] is not True
         or payload["p0_accepted"] is not True
@@ -621,6 +705,9 @@ def verify_signed_admission(
     bundle_paths: P0BundleV2Paths,
     expected_upstream_keyring_sha256: dict[str, str],
     custody_dir: Path,
+    pinned_custody_path: Path,
+    pinned_custody_identity_sha256: str,
+    require_root_owned_parent: bool,
     now: datetime,
 ) -> VerifiedAdmission:
     release_raw = read_regular_file_strict(
@@ -654,6 +741,11 @@ def verify_signed_admission(
         release,
         sources,
         custody_dir=custody_dir,
+        pinned_custody_path=pinned_custody_path,
+        pinned_custody_identity_sha256=(
+            pinned_custody_identity_sha256
+        ),
+        require_root_owned_parent=require_root_owned_parent,
         now=now,
     )
     public_key, admission_materials, keyring_pin = (
@@ -722,6 +814,10 @@ def _consume_payload(
         "source_binding_sha256": _hash(
             canonical_json(verified.payload["source_binding"])
         ),
+        "custody_path_sha256": verified.payload["custody_path_sha256"],
+        "custody_identity_sha256": (
+            verified.payload["custody_identity_sha256"]
+        ),
         "consume_is_authority": False,
         "collection_authorized": False,
         "runtime_activation_authorized": False,
@@ -768,6 +864,10 @@ def _terminal_payload(
         "source_binding_sha256": _hash(
             canonical_json(verified.payload["source_binding"])
         ),
+        "custody_path_sha256": verified.payload["custody_path_sha256"],
+        "custody_identity_sha256": (
+            verified.payload["custody_identity_sha256"]
+        ),
         "p0_acceptance_raw_sha256": (
             verified.sources.acceptance_raw_sha256
         ),
@@ -805,16 +905,27 @@ def execute_offline_admission(
     revalidator: Callable[[datetime], VerifiedAdmission],
     *,
     custody_dir: Path,
+    pinned_custody_path: Path,
+    pinned_custody_identity_sha256: str,
+    require_root_owned_parent: bool,
     clock: Callable[[], datetime],
 ) -> tuple[int, dict[str, Any]]:
     custody = custody_dir.resolve(strict=True)
+    if custody != pinned_custody_path.resolve(strict=True):
+        raise CollectionAdmissionError(
+            "custody directory does not match the immutable path pin"
+        )
     guard = open_custody_guard(
-        custody,
-        require_root_owned_parent=False,
+        custody_dir,
+        require_root_owned_parent=require_root_owned_parent,
     )
     consume_name = f"{initial.payload['attempt_id']}.admission-consumed.json"
     terminal_name = f"{initial.payload['attempt_id']}.admission-terminal.json"
     try:
+        validate_custody_identity(
+            guard,
+            pinned_custody_identity_sha256,
+        )
         if custody_entry_exists(guard, consume_name):
             raise CollectionAdmissionError(
                 "collection-admission attempt is already consumed"
@@ -836,6 +947,11 @@ def execute_offline_admission(
             consumption_verified.payload,
             consumption_verified.sources,
             custody_dir=custody,
+            pinned_custody_path=pinned_custody_path,
+            pinned_custody_identity_sha256=(
+                pinned_custody_identity_sha256
+            ),
+            require_root_owned_parent=require_root_owned_parent,
             now=preconsume_time,
         )
         started_at = _utc(clock(), "admission consume time")
@@ -847,6 +963,11 @@ def execute_offline_admission(
             consumption_verified.payload,
             consumption_verified.sources,
             custody_dir=custody,
+            pinned_custody_path=pinned_custody_path,
+            pinned_custody_identity_sha256=(
+                pinned_custody_identity_sha256
+            ),
+            require_root_owned_parent=require_root_owned_parent,
             now=started_at,
         )
         consume = _consume_payload(consumption_verified, started_at)
@@ -890,6 +1011,13 @@ def execute_offline_admission(
                     final.payload,
                     final.sources,
                     custody_dir=custody,
+                    pinned_custody_path=pinned_custody_path,
+                    pinned_custody_identity_sha256=(
+                        pinned_custody_identity_sha256
+                    ),
+                    require_root_owned_parent=(
+                        require_root_owned_parent
+                    ),
                     now=final_time,
                 )
                 success = True
@@ -910,6 +1038,11 @@ def execute_offline_admission(
             success = False
             error_code = "NON_MONOTONIC_CLOCK"
         ended_at = max(started_at, final_time, observed_end)
+        guard.assert_path_identity()
+        validate_custody_identity(
+            guard,
+            pinned_custody_identity_sha256,
+        )
         terminal = _terminal_payload(
             consumption_verified,
             consume_raw_sha256=consume_raw_sha256,
@@ -975,6 +1108,25 @@ def source_kwargs_from_args(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def custody_pins_from_args(
+    args: argparse.Namespace,
+) -> tuple[Path, str]:
+    path = Path(
+        read_root_owned_deployment_pin(
+            args.custody_path_pin,
+            "collection-admission custody path pin",
+        )
+    )
+    identity = _validate_sha256(
+        read_root_owned_deployment_pin(
+            args.custody_identity_pin,
+            "collection-admission custody identity pin",
+        ),
+        "collection-admission custody identity pin",
+    )
+    return path, identity
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--release", type=Path, required=True)
@@ -988,6 +1140,12 @@ def parse_args() -> argparse.Namespace:
         required=True,
     )
     parser.add_argument("--custody-dir", type=Path, required=True)
+    parser.add_argument("--custody-path-pin", type=Path, required=True)
+    parser.add_argument(
+        "--custody-identity-pin",
+        type=Path,
+        required=True,
+    )
     add_source_arguments(parser)
     return parser.parse_args()
 
@@ -997,6 +1155,7 @@ def main() -> int:
     source_kwargs = source_kwargs_from_args(args)
 
     def revalidate(now: datetime) -> VerifiedAdmission:
+        pinned_path, pinned_identity = custody_pins_from_args(args)
         return verify_signed_admission(
             args.release,
             args.admission_trusted_keyring,
@@ -1004,16 +1163,35 @@ def main() -> int:
                 args.expected_admission_keyring_sha256
             ),
             custody_dir=args.custody_dir,
+            pinned_custody_path=pinned_path,
+            pinned_custody_identity_sha256=pinned_identity,
+            require_root_owned_parent=True,
             now=now,
             **source_kwargs,
         )
 
     try:
-        initial = revalidate(datetime.now(timezone.utc))
+        initial_path, initial_identity = custody_pins_from_args(args)
+        initial = verify_signed_admission(
+            args.release,
+            args.admission_trusted_keyring,
+            expected_admission_keyring_sha256=(
+                args.expected_admission_keyring_sha256
+            ),
+            custody_dir=args.custody_dir,
+            pinned_custody_path=initial_path,
+            pinned_custody_identity_sha256=initial_identity,
+            require_root_owned_parent=True,
+            now=datetime.now(timezone.utc),
+            **source_kwargs,
+        )
         exit_code, terminal = execute_offline_admission(
             initial,
             revalidate,
             custody_dir=args.custody_dir,
+            pinned_custody_path=initial_path,
+            pinned_custody_identity_sha256=initial_identity,
+            require_root_owned_parent=True,
             clock=lambda: datetime.now(timezone.utc),
         )
     except (

@@ -23,6 +23,10 @@ admission 不接受 P0 receipt、单个 `p0_accepted=true` 或手填 hash 作为
 4. policy、acceptance、五个上游域和 admission keyring 的全部 active/unused
    Ed25519 public-key material 隔离。
 
+policy v1/v2 bytes 只读取一次后直接交给 raw-chain verifier；source binding 使用
+的就是该次验签 bytes。函数返回前还会逐字节重读 v1、v2 和 policy keyring，
+任何验签期间的文件替换都会拒绝，不允许把首次 receipt 与二次未验签 bytes 拼接。
+
 因此，raw v1 重排、v2 ancestry 改写、不同 P0 attempt/source 拼接、artifact
 改写、keyring pin rotation 或 unused key 复用都会 fail closed。
 
@@ -52,9 +56,12 @@ verification_time + 30 seconds < expires_at
 P0 acceptance accepted_at <= admission issued_at
 ```
 
-release 还绑定 verifier、四份 schema、私有 custody 的 resolved path SHA256、
-policy v1/v2 raw/canonical hash、signed acceptance raw/canonical hash 和完整
-P0 bundle raw/canonical/artifact/index hash。
+release 还绑定 verifier、四份 schema、私有 custody 的 resolved path SHA256
+和 `custody-identity.json` canonical SHA256、policy v1/v2 raw/canonical hash、
+signed acceptance raw/canonical hash 和完整 P0
+bundle raw/canonical/artifact/index hash。custody path 与 identity 必须分别由
+root-owned、不可组/世界写的单行 pin 文件固定；custody 的父目录也必须
+root-owned 且不可组/世界写，防止成功后在同一路径替换整个目录进行重放。
 
 ## 权限边界
 
@@ -108,6 +115,8 @@ PYTHONPATH=backend:scripts .venv/bin/python \
   --admission-trusted-keyring /private/keys/admission-v1-keyring.json \
   --expected-admission-keyring-sha256 <sha256> \
   --custody-dir /private/custody/c-fast-admission \
+  --custody-path-pin /run/c-fast-collection-admission/custody.path \
+  --custody-identity-pin /run/c-fast-collection-admission/custody-identity.sha256 \
   --policy-v1 /archive/policy-v1.signed.json \
   --policy-v2 /archive/policy-v2.signed.json \
   --policy-trusted-keyring /private/keys/policy-keyring.json \
@@ -144,7 +153,8 @@ ADMISSION_VERIFIED_FOR_SEPARATE_RUNTIME_RELEASE_ONLY
 ```
 
 两种 terminal 都记录零 database mutation、零 RPC、零订单、零仓位修改和
-`dispatch_changed=false`。
+`dispatch_changed=false`。consume 与 terminal 都重复绑定 custody path/identity；
+consume 前、final revalidation 和 terminal 写入前都会重新检查同一目录 identity。
 
 ## 验证
 
