@@ -19,6 +19,7 @@ from research_warehouse.m2_isolation_audit import verify_isolation_evidence
 from research_warehouse.m2_isolation_contracts import (
     PF_ANCHOR_SHA256,
     PLIST_SHA256,
+    WRAPPER_SHA256,
     load_isolation_evidence,
     load_isolation_policy,
 )
@@ -28,6 +29,16 @@ M2_DIR = ROOT / "deployments/research-warehouse/m2"
 POLICY_PATH = M2_DIR / "isolation-policy-v1.json"
 UTC = timezone.utc
 NOW = datetime(2026, 7, 29, 12, 0, tzinfo=UTC)
+RELEASE_TREE_SHA256 = "2" * 64
+PROBE_SHA256 = "3" * 64
+
+
+def probed(values: dict) -> dict:
+    return {
+        "observed_at": "2026-07-29T10:30:00.000000Z",
+        "probe_result_sha256": PROBE_SHA256,
+        **values,
+    }
 
 
 def policy():
@@ -65,7 +76,16 @@ def evidence() -> dict:
         "host_identity": "1" * 64,
         "policy_raw_sha256": value.raw_sha256,
         "registry_raw_sha256": value.payload["registry_raw_sha256"],
-        "identity": {
+        "release_tree_raw_sha256": RELEASE_TREE_SHA256,
+        "activation": {
+            "policy_activated_at": "2026-07-29T09:00:00.000000Z",
+            "pf_loaded_at": "2026-07-29T09:01:00.000000Z",
+            "launchd_loaded_at": "2026-07-29T09:02:00.000000Z",
+            "policy_raw_sha256": value.raw_sha256,
+            "pf_anchor_raw_sha256": PF_ANCHOR_SHA256,
+            "plist_raw_sha256s": PLIST_SHA256,
+        },
+        "identity": probed({
             "user": "vnpyresearch",
             "group": "vnpyresearch",
             "uid": 510,
@@ -75,26 +95,63 @@ def evidence() -> dict:
             "inherited_fujun_home_acl": False,
             "web_bridge_uid": 501,
             "web_bridge_gid": 20,
-        },
-        "launchd": {
+        }),
+        "launchd": probed({
             "loaded_labels": value.payload["launchd_labels"],
             "plist_raw_sha256s": PLIST_SHA256,
             "jobs_run_as_user": {
                 label: value.user
                 for label in value.payload["launchd_labels"]
             },
-        },
-        "environment": value.payload["allowed_environment"],
-        "filesystem": {
+            "program_arguments": {
+                label: [value.payload["program_paths"][label]]
+                for label in value.payload["launchd_labels"]
+            },
+        }),
+        "environment": probed({
+            "values": value.payload["allowed_environment"],
+        }),
+        "filesystem": probed({
             "root_facts": roots,
+            "code_root_facts": {
+                path: {
+                    "owner_uid": 0,
+                    "owner_gid": 0,
+                    "mode": "0755",
+                    "service_user_writable": False,
+                    "symlink_free": True,
+                }
+                for path in (
+                    value.payload["libexec_root"],
+                    value.payload["release_root"],
+                )
+            },
+            "executable_facts": {
+                path: {
+                    "raw_sha256": digest,
+                    "owner_uid": 0,
+                    "owner_gid": 0,
+                    "mode": "0555",
+                    "regular": True,
+                    "symlink": False,
+                    "nlink": 1,
+                    "device": 1,
+                    "inode": index,
+                    "parent_chain_service_writable": False,
+                }
+                for index, (path, digest) in enumerate(
+                    WRAPPER_SHA256.items(),
+                    start=1,
+                )
+            },
             "forbidden_path_reads": {
                 path: False for path in value.payload["forbidden_paths"]
             },
             "fujun_home_traversable": False,
             "writable_paths": sorted(roots),
             "shared_writable_mount": False,
-        },
-        "network": {
+        }),
+        "network": probed({
             "pf_enabled": True,
             "pf_anchor_loaded": True,
             "pf_anchor_raw_sha256": PF_ANCHOR_SHA256,
@@ -119,15 +176,31 @@ def evidence() -> dict:
             "docker_socket_connectivity": False,
             "docker_network_membership": False,
             "unexpected_egress": [],
-        },
-        "process": {
+        }),
+        "process": probed({
             "service_process_uid": 510,
             "service_process_gid": 510,
             "shared_process_identity": False,
             "shared_credential_scope": False,
             "shared_network_namespace": False,
-        },
+        }),
         "monitor_input": monitor_input(),
+        "success_receipt": {
+            "schema_version": "vnpy_research_m2_success_receipt_v1",
+            "host_identity": "1" * 64,
+            "service_uid": 510,
+            "service_gid": 510,
+            "policy_raw_sha256": value.raw_sha256,
+            "plist_raw_sha256s": PLIST_SHA256,
+            "pf_anchor_raw_sha256": PF_ANCHOR_SHA256,
+            "release_tree_raw_sha256": RELEASE_TREE_SHA256,
+            "started_at": "2026-07-29T10:45:00.000000Z",
+            "completed_at": "2026-07-29T11:00:00.000000Z",
+            "output_raw_sha256": "4" * 64,
+            "create_only": True,
+            "regular": True,
+            "nlink": 1,
+        },
         "authority": {
             "account_data_read": False,
             "control_authorized": False,
@@ -154,13 +227,22 @@ def private_evidence(tmp_path: Path, payload: dict) -> Path:
 def test_policy_assets_and_healthy_evidence(tmp_path: Path) -> None:
     value = policy()
     assets = verify_deployment_assets(M2_DIR, policy=value)
-    assert assets == {**PLIST_SHA256, "pf_anchor": PF_ANCHOR_SHA256}
+    assert assets == {
+        **PLIST_SHA256,
+        **WRAPPER_SHA256,
+        "pf_anchor": PF_ANCHOR_SHA256,
+    }
     evidence_path = private_evidence(tmp_path, evidence())
     loaded = load_isolation_evidence(
         evidence_path,
         expected_raw_sha256=sha256(evidence_path.read_bytes()),
     )
-    result = verify_isolation_evidence(loaded, policy=value, now=NOW)
+    result = verify_isolation_evidence(
+        loaded,
+        policy=value,
+        now=NOW,
+        expected_release_tree_sha256=RELEASE_TREE_SHA256,
+    )
     assert result["status"] == "M2_RESEARCH_ISOLATION_VERIFIED"
     assert result["monitor"]["status"] == "HEALTHY"
     assert set(result["authority"].values()) == {False}
@@ -182,7 +264,65 @@ def test_policy_and_pf_tables_are_exactly_pinned(tmp_path: Path) -> None:
         "127.0.0.1"
     )
     with pytest.raises(RegistryError, match="forbidden IP"):
-        verify_isolation_evidence(item, policy=policy(), now=NOW)
+        verify_isolation_evidence(
+            item,
+            policy=policy(),
+            now=NOW,
+            expected_release_tree_sha256=RELEASE_TREE_SHA256,
+        )
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (
+            lambda item: item["filesystem"]["executable_facts"][
+                "/usr/local/libexec/vnpyresearch/run-warehouse"
+            ].__setitem__("parent_chain_service_writable", True),
+            "executable custody",
+        ),
+        (
+            lambda item: item["filesystem"]["executable_facts"][
+                "/usr/local/libexec/vnpyresearch/run-warehouse"
+            ].__setitem__("raw_sha256", "f" * 64),
+            "executable custody",
+        ),
+        (
+            lambda item: item["identity"].__setitem__(
+                "observed_at",
+                "2026-07-29T08:59:59.000000Z",
+            ),
+            "predates active policy",
+        ),
+        (
+            lambda item: item["success_receipt"].__setitem__(
+                "started_at",
+                "2026-07-29T08:59:59.000000Z",
+            ),
+            "receipt activation binding",
+        ),
+        (
+            lambda item: item["monitor_input"].__setitem__(
+                "last_success_at",
+                "2026-07-29T10:59:59.000000Z",
+            ),
+            "receipt activation binding",
+        ),
+    ],
+)
+def test_activation_and_root_owned_entrypoint_failures_close(
+    mutate,
+    message: str,
+) -> None:
+    item = evidence()
+    mutate(item)
+    with pytest.raises(RegistryError, match=message):
+        verify_isolation_evidence(
+            item,
+            policy=policy(),
+            now=NOW,
+            expected_release_tree_sha256=RELEASE_TREE_SHA256,
+        )
 
 
 @pytest.mark.parametrize(
@@ -224,7 +364,7 @@ def test_policy_and_pf_tables_are_exactly_pinned(tmp_path: Path) -> None:
             "process",
         ),
         (
-            lambda item: item["environment"].__setitem__(
+            lambda item: item["environment"]["values"].__setitem__(
                 "HTTP_PROXY",
                 "http://proxy.invalid",
             ),
@@ -236,7 +376,12 @@ def test_isolation_threat_model_failures_close(mutate, message: str) -> None:
     item = evidence()
     mutate(item)
     with pytest.raises(RegistryError, match=message):
-        verify_isolation_evidence(item, policy=policy(), now=NOW)
+        verify_isolation_evidence(
+            item,
+            policy=policy(),
+            now=NOW,
+            expected_release_tree_sha256=RELEASE_TREE_SHA256,
+        )
 
 
 @pytest.mark.parametrize(
@@ -281,6 +426,8 @@ def test_cli_and_research_only_import_boundary(tmp_path: Path) -> None:
             str(evidence_path),
             "--expected-evidence-sha256",
             sha256(evidence_path.read_bytes()),
+            "--expected-release-tree-sha256",
+            RELEASE_TREE_SHA256,
             "--now",
             "2026-07-29T12:00:00.000000Z",
         ],

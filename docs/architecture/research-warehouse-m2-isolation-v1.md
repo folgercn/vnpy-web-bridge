@@ -50,8 +50,8 @@ PF supplies the host-native per-uid network policy boundary.
 
 ## Egress
 
-`pf.vnpyresearch.conf` blocks all outbound traffic for `vnpyresearch` first,
-then permits only:
+`pf.vnpyresearch.conf` permits three exact table/port classes first and then
+applies a final quick block to all other outbound traffic for `vnpyresearch`:
 
 - TCP/UDP 53 to an administrator-populated literal DNS table;
 - UDP 123 to an administrator-populated literal NTP table;
@@ -70,15 +70,18 @@ The service must not possess `sudo`, PF, launchctl, Docker or admin authority.
 
 ## LaunchDaemons
 
-The two raw-SHA-pinned plist files run as `vnpyresearch`, use only the isolated
-runtime tree, and contain no shell-expanded environment:
+The two raw-SHA-pinned plist files run as `vnpyresearch`, use only the exact
+minimal environment, and invoke raw-pinned wrappers beneath the root-owned
+`/usr/local/libexec/vnpyresearch` tree:
 
 - `com.vnpy.research-warehouse`: scheduled warehouse acquisition/sealing;
 - `com.vnpy.research-warehouse-monitor`: 15-minute health evaluation.
 
-Runtime wrapper files are installed root-owned and non-writable by the service.
-The service writes only its private custody/runtime/backup roots. Activating
-the plists before PF default-block and negative preflight pass is forbidden.
+The wrapper files, their complete parent chain and the release tree are
+root-owned and non-writable by the service; neither entrypoint is beneath a
+service-owned runtime directory. The service writes only its private
+custody/runtime/backup roots. Activating the plists before PF default-block
+and negative preflight pass is forbidden.
 
 ## Monitoring
 
@@ -103,12 +106,22 @@ ownership/modes/devices, every negative read/connectivity result, PF state,
 process separation and monitor inputs. A copied or edited evidence file is
 rejected before semantic verification.
 
+Policy, PF and LaunchDaemon activation times are bound to their exact hashes.
+Every identity, launchd, environment, filesystem, network and process probe
+has an observation time and result hash and must occur after all activation
+steps. The create-only success receipt binds host, uid/gid, policy, plist, PF,
+externally pinned release-tree hash, output hash and completion time. Its
+completion must equal the monitor's last-success time; backup verification
+must also be newer than activation. This prevents replaying pre-activation
+probe or success artifacts.
+
 ```bash
 PYTHONPATH=scripts python scripts/research_warehouse_m2_isolation_cli.py \
   --policy deployments/research-warehouse/m2/isolation-policy-v1.json \
   --deployment-dir deployments/research-warehouse/m2 \
   --evidence /secure/external/m2-isolation-evidence.json \
   --expected-evidence-sha256 <independently-retained-sha256> \
+  --expected-release-tree-sha256 <independently-retained-release-sha256> \
   --now <trusted-canonical-UTC-Z>
 ```
 

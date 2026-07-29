@@ -14,14 +14,22 @@ from .manifest_contracts import SHA256_PATTERN
 POLICY_SCHEMA = "vnpy_research_m2_isolation_policy_v1"
 EVIDENCE_SCHEMA = "vnpy_research_m2_isolation_evidence_v1"
 POLICY_RAW_SHA256 = (
-    "e62e4244ca3835e3991d0c7076a4304f6f254856ad777c0986c1d79a5614f785"
+    "34dd9ccafb045fbb954cad732e3cc4d6aa314880fadaa149c5031bc3e4ce0e55"
 )
 PLIST_SHA256 = {
     "com.vnpy.research-warehouse": (
-        "be189608d7a590b2cbf524970ef4fa134993924ffdb57049f2a43bce39de557d"
+        "c6fee8672ea38d898177a89c34b0f9491198d4d83df7acecc6c01a2469c50aa0"
     ),
     "com.vnpy.research-warehouse-monitor": (
-        "51bf29a2bdd36951be8cb275ff1108219317df52baebc69ce67f88a91aa5c88c"
+        "2f66b52051bfe23d81e1781d44f1095533729987677bd614d2851149e01b43cf"
+    ),
+}
+WRAPPER_SHA256 = {
+    "/usr/local/libexec/vnpyresearch/run-warehouse": (
+        "1e8fc0574dba095be49d9a606c2718a5e058cfda9a223b53280210ae7db05e32"
+    ),
+    "/usr/local/libexec/vnpyresearch/run-monitor": (
+        "98c4108c65e9284d9e085a8d64bc4b246bca20aaac18eb85329d3b791b9611d2"
     ),
 }
 PF_ANCHOR_SHA256 = (
@@ -49,8 +57,11 @@ POLICY_KEYS = {
     "custody_root",
     "runtime_root",
     "backup_root",
+    "libexec_root",
+    "release_root",
     "umask",
     "launchd_labels",
+    "program_paths",
     "allowed_environment",
     "forbidden_environment_names",
     "registry_raw_sha256",
@@ -67,6 +78,8 @@ EVIDENCE_KEYS = {
     "host_identity",
     "policy_raw_sha256",
     "registry_raw_sha256",
+    "release_tree_raw_sha256",
+    "activation",
     "identity",
     "launchd",
     "environment",
@@ -74,6 +87,7 @@ EVIDENCE_KEYS = {
     "network",
     "process",
     "monitor_input",
+    "success_receipt",
     "authority",
 }
 
@@ -142,6 +156,24 @@ def load_isolation_policy(path: Path) -> IsolationPolicy:
         "TMPDIR": f"{payload['runtime_root']}/tmp",
     }:
         raise RegistryError("M2 isolation environment is not minimal")
+    expected_programs = {
+        label: path
+        for label, path in zip(
+            payload["launchd_labels"],
+            (
+                f"{payload['libexec_root']}/run-warehouse",
+                f"{payload['libexec_root']}/run-monitor",
+            ),
+            strict=True,
+        )
+    }
+    if (
+        payload["libexec_root"] != "/usr/local/libexec/vnpyresearch"
+        or payload["release_root"] != f"{payload['libexec_root']}/release"
+        or payload["program_paths"] != expected_programs
+        or set(payload["program_paths"].values()) != set(WRAPPER_SHA256)
+    ):
+        raise RegistryError("M2 root-owned program path contract mismatch")
     for field in (
         "launchd_labels",
         "forbidden_environment_names",

@@ -10,6 +10,7 @@ from .errors import RegistryError
 from .m2_isolation_contracts import (
     PF_ANCHOR_SHA256,
     PLIST_SHA256,
+    WRAPPER_SHA256,
     IsolationPolicy,
     false_authority,
     require_sha,
@@ -18,6 +19,8 @@ from .m2_monitor import evaluate_monitor
 from .timeutil import parse_utc
 
 IDENTITY_KEYS = {
+    "observed_at",
+    "probe_result_sha256",
     "user",
     "group",
     "uid",
@@ -28,15 +31,29 @@ IDENTITY_KEYS = {
     "web_bridge_uid",
     "web_bridge_gid",
 }
-LAUNCHD_KEYS = {"loaded_labels", "plist_raw_sha256s", "jobs_run_as_user"}
+LAUNCHD_KEYS = {
+    "observed_at",
+    "probe_result_sha256",
+    "loaded_labels",
+    "plist_raw_sha256s",
+    "jobs_run_as_user",
+    "program_arguments",
+}
+ENVIRONMENT_KEYS = {"observed_at", "probe_result_sha256", "values"}
 FILESYSTEM_KEYS = {
+    "observed_at",
+    "probe_result_sha256",
     "root_facts",
+    "code_root_facts",
+    "executable_facts",
     "forbidden_path_reads",
     "fujun_home_traversable",
     "writable_paths",
     "shared_writable_mount",
 }
 NETWORK_KEYS = {
+    "observed_at",
+    "probe_result_sha256",
     "pf_enabled",
     "pf_anchor_loaded",
     "pf_anchor_raw_sha256",
@@ -51,6 +68,8 @@ NETWORK_KEYS = {
     "unexpected_egress",
 }
 PROCESS_KEYS = {
+    "observed_at",
+    "probe_result_sha256",
     "service_process_uid",
     "service_process_gid",
     "shared_process_identity",
@@ -58,6 +77,49 @@ PROCESS_KEYS = {
     "shared_network_namespace",
 }
 ROOT_FACT_KEYS = {"owner_uid", "owner_gid", "mode", "device"}
+CODE_ROOT_FACT_KEYS = {
+    "owner_uid",
+    "owner_gid",
+    "mode",
+    "service_user_writable",
+    "symlink_free",
+}
+EXECUTABLE_FACT_KEYS = {
+    "raw_sha256",
+    "owner_uid",
+    "owner_gid",
+    "mode",
+    "regular",
+    "symlink",
+    "nlink",
+    "device",
+    "inode",
+    "parent_chain_service_writable",
+}
+ACTIVATION_KEYS = {
+    "policy_activated_at",
+    "pf_loaded_at",
+    "launchd_loaded_at",
+    "policy_raw_sha256",
+    "pf_anchor_raw_sha256",
+    "plist_raw_sha256s",
+}
+SUCCESS_RECEIPT_KEYS = {
+    "schema_version",
+    "host_identity",
+    "service_uid",
+    "service_gid",
+    "policy_raw_sha256",
+    "plist_raw_sha256s",
+    "pf_anchor_raw_sha256",
+    "release_tree_raw_sha256",
+    "started_at",
+    "completed_at",
+    "output_raw_sha256",
+    "create_only",
+    "regular",
+    "nlink",
+}
 
 
 def _exact(value: object, keys: set[str], label: str) -> dict[str, Any]:
@@ -96,6 +158,7 @@ def verify_isolation_evidence(
     *,
     policy: IsolationPolicy,
     now: datetime,
+    expected_release_tree_sha256: str,
 ) -> dict[str, Any]:
     _exact(
         evidence,
@@ -105,6 +168,8 @@ def verify_isolation_evidence(
             "host_identity",
             "policy_raw_sha256",
             "registry_raw_sha256",
+            "release_tree_raw_sha256",
+            "activation",
             "identity",
             "launchd",
             "environment",
@@ -112,6 +177,7 @@ def verify_isolation_evidence(
             "network",
             "process",
             "monitor_input",
+            "success_receipt",
             "authority",
         },
         "M2 isolation evidence",
@@ -132,10 +198,51 @@ def verify_isolation_evidence(
         or evidence["policy_raw_sha256"] != policy.raw_sha256
         or evidence["registry_raw_sha256"]
         != policy.payload["registry_raw_sha256"]
+        or require_sha(
+            expected_release_tree_sha256,
+            "expected M2 release tree SHA256",
+        )
+        != evidence["release_tree_raw_sha256"]
         or evidence["authority"] != false_authority()
     ):
         raise RegistryError("M2 evidence top-level binding mismatch")
+    activation = _exact(
+        evidence["activation"],
+        ACTIVATION_KEYS,
+        "M2 activation",
+    )
+    activation_times = [
+        parse_utc(activation[field], f"M2 activation {field}")
+        for field in (
+            "policy_activated_at",
+            "pf_loaded_at",
+            "launchd_loaded_at",
+        )
+    ]
+    activated = max(activation_times)
+    if (
+        activated > captured
+        or activation["policy_raw_sha256"] != policy.raw_sha256
+        or activation["pf_anchor_raw_sha256"] != PF_ANCHOR_SHA256
+        or activation["plist_raw_sha256s"] != PLIST_SHA256
+    ):
+        raise RegistryError("M2 activation binding mismatch")
+
+    def verify_probe(value: dict[str, Any], label: str) -> None:
+        observed = parse_utc(value["observed_at"], f"{label} observed_at")
+        if (
+            observed < activated
+            or observed > captured
+            or require_sha(
+                value["probe_result_sha256"],
+                f"{label} probe result",
+            )
+            == "0" * 64
+        ):
+            raise RegistryError(f"{label} predates active policy")
+
     identity = _exact(evidence["identity"], IDENTITY_KEYS, "M2 identity")
+    verify_probe(identity, "M2 identity")
     if (
         identity["user"] != policy.user
         or identity["group"] != policy.group
@@ -153,21 +260,33 @@ def verify_isolation_evidence(
     ):
         raise RegistryError("M2 service identity is not isolated")
     launchd = _exact(evidence["launchd"], LAUNCHD_KEYS, "M2 launchd")
+    verify_probe(launchd, "M2 launchd")
     if (
         launchd["loaded_labels"] != policy.payload["launchd_labels"]
         or launchd["plist_raw_sha256s"] != PLIST_SHA256
         or launchd["jobs_run_as_user"] != {
             label: policy.user for label in policy.payload["launchd_labels"]
         }
+        or launchd["program_arguments"] != {
+            label: [policy.payload["program_paths"][label]]
+            for label in policy.payload["launchd_labels"]
+        }
     ):
         raise RegistryError("M2 launchd evidence mismatch")
-    if evidence["environment"] != policy.payload["allowed_environment"]:
+    environment = _exact(
+        evidence["environment"],
+        ENVIRONMENT_KEYS,
+        "M2 environment",
+    )
+    verify_probe(environment, "M2 environment")
+    if environment["values"] != policy.payload["allowed_environment"]:
         raise RegistryError("M2 process environment is not exact minimal environment")
     filesystem = _exact(
         evidence["filesystem"],
         FILESYSTEM_KEYS,
         "M2 filesystem",
     )
+    verify_probe(filesystem, "M2 filesystem")
     expected_roots = {
         policy.payload[field]
         for field in ("home", "custody_root", "runtime_root", "backup_root")
@@ -185,6 +304,45 @@ def verify_isolation_evidence(
             or not isinstance(facts["device"], int)
         ):
             raise RegistryError("M2 filesystem root ownership mismatch")
+    code_roots = filesystem["code_root_facts"]
+    expected_code_roots = {
+        policy.payload["libexec_root"],
+        policy.payload["release_root"],
+    }
+    if not isinstance(code_roots, dict) or set(code_roots) != expected_code_roots:
+        raise RegistryError("M2 root-owned code root set mismatch")
+    for facts in code_roots.values():
+        _exact(facts, CODE_ROOT_FACT_KEYS, "M2 code root fact")
+        if (
+            facts["owner_uid"] != 0
+            or facts["owner_gid"] != 0
+            or facts["mode"] != "0755"
+            or facts["service_user_writable"] is not False
+            or facts["symlink_free"] is not True
+        ):
+            raise RegistryError("M2 code root is service-user writable")
+    executables = filesystem["executable_facts"]
+    if not isinstance(executables, dict) or set(executables) != set(WRAPPER_SHA256):
+        raise RegistryError("M2 executable evidence set mismatch")
+    for path, facts in executables.items():
+        _exact(facts, EXECUTABLE_FACT_KEYS, "M2 executable fact")
+        if (
+            facts["raw_sha256"] != WRAPPER_SHA256[path]
+            or facts["owner_uid"] != 0
+            or facts["owner_gid"] != 0
+            or facts["mode"] != "0555"
+            or facts["regular"] is not True
+            or facts["symlink"] is not False
+            or facts["nlink"] != 1
+            or any(
+                isinstance(facts[field], bool)
+                or not isinstance(facts[field], int)
+                or facts[field] <= 0
+                for field in ("device", "inode")
+            )
+            or facts["parent_chain_service_writable"] is not False
+        ):
+            raise RegistryError("M2 executable custody mismatch")
     if (
         filesystem["forbidden_path_reads"]
         != {path: False for path in policy.payload["forbidden_paths"]}
@@ -195,6 +353,7 @@ def verify_isolation_evidence(
     ):
         raise RegistryError("M2 forbidden filesystem boundary failed")
     network = _exact(evidence["network"], NETWORK_KEYS, "M2 network")
+    verify_probe(network, "M2 network")
     tables = network["pf_table_entries"]
     if not isinstance(tables, dict) or set(tables) != {
         "DNS",
@@ -245,6 +404,7 @@ def verify_isolation_evidence(
     ):
         raise RegistryError("M2 egress isolation evidence failed")
     process = _exact(evidence["process"], PROCESS_KEYS, "M2 process")
+    verify_probe(process, "M2 process")
     if (
         process["service_process_uid"] != identity["uid"]
         or process["service_process_gid"] != identity["gid"]
@@ -253,6 +413,41 @@ def verify_isolation_evidence(
         or process["shared_network_namespace"] is not False
     ):
         raise RegistryError("M2 process isolation evidence failed")
+    receipt = _exact(
+        evidence["success_receipt"],
+        SUCCESS_RECEIPT_KEYS,
+        "M2 success receipt",
+    )
+    started = parse_utc(receipt["started_at"], "M2 receipt started_at")
+    completed = parse_utc(receipt["completed_at"], "M2 receipt completed_at")
+    if (
+        receipt["schema_version"]
+        != "vnpy_research_m2_success_receipt_v1"
+        or receipt["host_identity"] != evidence["host_identity"]
+        or receipt["service_uid"] != identity["uid"]
+        or receipt["service_gid"] != identity["gid"]
+        or receipt["policy_raw_sha256"] != policy.raw_sha256
+        or receipt["plist_raw_sha256s"] != PLIST_SHA256
+        or receipt["pf_anchor_raw_sha256"] != PF_ANCHOR_SHA256
+        or receipt["release_tree_raw_sha256"]
+        != evidence["release_tree_raw_sha256"]
+        or started < activated
+        or completed < started
+        or completed > captured
+        or require_sha(receipt["output_raw_sha256"], "M2 receipt output")
+        == "0" * 64
+        or receipt["create_only"] is not True
+        or receipt["regular"] is not True
+        or receipt["nlink"] != 1
+        or evidence["monitor_input"]["last_success_at"]
+        != receipt["completed_at"]
+        or parse_utc(
+            evidence["monitor_input"]["last_backup_at"],
+            "M2 last backup",
+        )
+        < activated
+    ):
+        raise RegistryError("M2 success receipt activation binding mismatch")
     evaluate_monitor(
         evidence["monitor_input"],
         policy=policy,

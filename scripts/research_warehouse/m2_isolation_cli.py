@@ -23,6 +23,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--deployment-dir", type=Path, required=True)
     result.add_argument("--evidence", type=Path, required=True)
     result.add_argument("--expected-evidence-sha256", required=True)
+    result.add_argument("--expected-release-tree-sha256", required=True)
     result.add_argument("--now", required=True)
     return result
 
@@ -43,6 +44,7 @@ def main(argv: list[str] | None = None) -> int:
             evidence,
             policy=policy,
             now=parse_utc(args.now, "M2 isolation verification now"),
+            expected_release_tree_sha256=args.expected_release_tree_sha256,
         )
     except RegistryError as exc:
         print(f"M2 isolation verification failed closed: {exc}", file=sys.stderr)

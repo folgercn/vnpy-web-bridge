@@ -11,6 +11,7 @@ from .file_integrity import read_regular_strict
 from .m2_isolation_contracts import (
     PF_ANCHOR_SHA256,
     PLIST_SHA256,
+    WRAPPER_SHA256,
     IsolationPolicy,
 )
 
@@ -47,10 +48,8 @@ def verify_deployment_assets(
             or payload.get("EnvironmentVariables")
             != policy.payload["allowed_environment"]
             or payload.get("WorkingDirectory") != policy.payload["runtime_root"]
-            or len(payload.get("ProgramArguments", [])) != 1
-            or not payload["ProgramArguments"][0].startswith(
-                f"{policy.payload['runtime_root']}/"
-            )
+            or payload.get("ProgramArguments")
+            != [policy.payload["program_paths"][label]]
             or not payload.get("StandardOutPath", "").startswith(
                 f"{policy.payload['runtime_root']}/"
             )
@@ -60,6 +59,19 @@ def verify_deployment_assets(
         ):
             raise RegistryError(f"{label} plist isolation contract mismatch")
         actual[label] = expected
+    for installed_path, expected in WRAPPER_SHA256.items():
+        name = Path(installed_path).name
+        raw = _asset_raw(directory / name, f"{name} wrapper")
+        if sha256(raw) != expected:
+            raise RegistryError(f"{name} wrapper raw SHA256 mismatch")
+        text = raw.decode("utf-8")
+        if (
+            not text.startswith("#!/bin/sh\nset -eu\numask 077\nexec ")
+            or policy.payload["release_root"] not in text
+            or policy.payload["runtime_root"] in text
+        ):
+            raise RegistryError(f"{name} wrapper isolation contract mismatch")
+        actual[installed_path] = expected
     pf_raw = _asset_raw(directory / "pf.vnpyresearch.conf", "PF anchor")
     if sha256(pf_raw) != PF_ANCHOR_SHA256:
         raise RegistryError("PF anchor raw SHA256 mismatch")

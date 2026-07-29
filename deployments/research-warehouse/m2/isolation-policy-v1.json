@@ -7,11 +7,17 @@
   "custody_root": "/Users/Shared/vnpy-research/custody",
   "runtime_root": "/Users/Shared/vnpy-research/runtime",
   "backup_root": "/Users/Shared/vnpy-research/backups",
+  "libexec_root": "/usr/local/libexec/vnpyresearch",
+  "release_root": "/usr/local/libexec/vnpyresearch/release",
   "umask": "077",
   "launchd_labels": [
     "com.vnpy.research-warehouse",
     "com.vnpy.research-warehouse-monitor"
   ],
+  "program_paths": {
+    "com.vnpy.research-warehouse": "/usr/local/libexec/vnpyresearch/run-warehouse",
+    "com.vnpy.research-warehouse-monitor": "/usr/local/libexec/vnpyresearch/run-monitor"
+  },
   "allowed_environment": {
     "HOME": "/Users/Shared/vnpy-research/home",
     "LANG": "C.UTF-8",

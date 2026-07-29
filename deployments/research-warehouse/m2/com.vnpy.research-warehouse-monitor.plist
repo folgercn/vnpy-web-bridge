@@ -6,7 +6,7 @@
   <key>UserName</key><string>vnpyresearch</string>
   <key>GroupName</key><string>vnpyresearch</string>
   <key>ProgramArguments</key>
-  <array><string>/Users/Shared/vnpy-research/runtime/run-monitor</string></array>
+  <array><string>/usr/local/libexec/vnpyresearch/run-monitor</string></array>
   <key>WorkingDirectory</key><string>/Users/Shared/vnpy-research/runtime</string>
   <key>EnvironmentVariables</key>
   <dict>

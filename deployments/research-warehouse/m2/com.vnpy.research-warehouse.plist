@@ -10,7 +10,7 @@
   <string>vnpyresearch</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/Shared/vnpy-research/runtime/run-warehouse</string>
+    <string>/usr/local/libexec/vnpyresearch/run-warehouse</string>
   </array>
   <key>WorkingDirectory</key>
   <string>/Users/Shared/vnpy-research/runtime</string>
