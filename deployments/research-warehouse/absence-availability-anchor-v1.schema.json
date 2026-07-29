@@ -9,6 +9,7 @@
     "absence_id",
     "receipt_sha256",
     "calendar_raw_sha256",
+    "registry_raw_sha256",
     "available_at"
   ],
   "properties": {
@@ -24,6 +25,10 @@
       "pattern": "^[0-9a-f]{64}$"
     },
     "calendar_raw_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "registry_raw_sha256": {
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
     },

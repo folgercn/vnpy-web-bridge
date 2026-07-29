@@ -134,6 +134,7 @@ def parser() -> argparse.ArgumentParser:
     absence_anchor.add_argument("--anchor", type=Path, required=True)
     absence_anchor.add_argument("--expected-anchor-sha256", required=True)
     absence_anchor.add_argument("--cutoff-at", required=True)
+    absence_anchor.add_argument("--registry", type=Path, required=True)
     _add_calendar_arguments(absence_anchor)
     absence_anchor.add_argument("--calendar-anchor", type=Path, required=True)
     absence_anchor.add_argument(
@@ -475,6 +476,7 @@ def main(argv: list[str] | None = None) -> int:
                         args.expected_calendar_anchor_sha256
                     ),
                 ),
+                registry=load_registry(args.registry),
             )
             anchor.require_available(
                 cutoff_at=parse_utc(args.cutoff_at, "cutoff_at")

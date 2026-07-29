@@ -10,6 +10,7 @@
     "source_id",
     "exchange",
     "trade_day",
+    "request_url",
     "source_url",
     "http_status",
     "request_started_at",
@@ -18,6 +19,7 @@
     "ntp_offset_milliseconds",
     "http_metadata",
     "calendar_raw_sha256",
+    "registry_raw_sha256",
     "collector_version",
     "authority"
   ],
@@ -30,6 +32,7 @@
     "source_id": {"type": "string", "minLength": 8},
     "exchange": {"enum": ["INE", "SHFE"]},
     "trade_day": {"type": "string", "format": "date"},
+    "request_url": {"type": "string", "format": "uri", "pattern": "^https://"},
     "source_url": {"type": "string", "format": "uri", "pattern": "^https://"},
     "http_status": {"const": 404},
     "request_started_at": {
@@ -69,6 +72,10 @@
       }
     },
     "calendar_raw_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "registry_raw_sha256": {
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
     },

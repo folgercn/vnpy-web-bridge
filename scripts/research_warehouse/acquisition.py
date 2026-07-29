@@ -143,6 +143,7 @@ def acquire_daily(
                         source_id=source.source_id,
                         exchange=source.exchange,
                         trade_day=trade_day,
+                        request_url=endpoint,
                         source_url=response.final_url,
                         request_started_at=observed,
                         response_received_at=response_received,
@@ -155,6 +156,7 @@ def acquire_daily(
                             for name in CAPTURED_HTTP_HEADERS
                         },
                         calendar_raw_sha256=calendar.raw_sha256,
+                        registry_raw_sha256=registry.raw_sha256,
                         collector_version=collector_version,
                     )
                     return AuthoritativeAbsence(

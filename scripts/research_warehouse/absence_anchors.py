@@ -14,7 +14,9 @@ from .canonical import canonical_json, canonical_json_line, parse_json_strict, s
 from .errors import RegistryError
 from .file_integrity import read_regular_strict
 from .manifest_contracts import ID_PATTERN, SHA256_PATTERN
+from .models import SourceRegistry
 from .official_calendar import revalidate_official_calendar_evidence
+from .policy import render_endpoint, validate_redirect
 from .source_availability import classify_http_status
 from .timeutil import parse_utc, require_utc
 
@@ -24,6 +26,7 @@ ANCHOR_KEYS = {
     "absence_id",
     "receipt_sha256",
     "calendar_raw_sha256",
+    "registry_raw_sha256",
     "available_at",
 }
 RECEIPT_KEYS = {
@@ -32,6 +35,7 @@ RECEIPT_KEYS = {
     "source_id",
     "exchange",
     "trade_day",
+    "request_url",
     "source_url",
     "http_status",
     "request_started_at",
@@ -40,6 +44,7 @@ RECEIPT_KEYS = {
     "ntp_offset_milliseconds",
     "http_metadata",
     "calendar_raw_sha256",
+    "registry_raw_sha256",
     "collector_version",
     "authority",
 }
@@ -61,6 +66,7 @@ class AbsenceAvailabilityAnchor:
     absence_id: str
     receipt_sha256: str
     calendar_raw_sha256: str
+    registry_raw_sha256: str
     response_received_at: datetime
     available_at: datetime
 
@@ -147,6 +153,12 @@ def _load_receipt(path: Path) -> tuple[dict, str]:
         or SHA256_PATTERN.fullmatch(calendar_digest) is None
     ):
         raise RegistryError("authoritative absence calendar SHA256 is invalid")
+    registry_digest = payload["registry_raw_sha256"]
+    if (
+        not isinstance(registry_digest, str)
+        or SHA256_PATTERN.fullmatch(registry_digest) is None
+    ):
+        raise RegistryError("authoritative absence registry SHA256 is invalid")
     if (
         not isinstance(payload["source_id"], str)
         or ID_PATTERN.fullmatch(payload["source_id"]) is None
@@ -162,6 +174,7 @@ def load_absence_availability_anchor(
     receipt_path: Path,
     calendar: OfficialCalendar,
     calendar_anchor: CalendarAvailabilityAnchor,
+    registry: SourceRegistry,
 ) -> AbsenceAvailabilityAnchor:
     if (
         not isinstance(expected_raw_sha256, str)
@@ -172,6 +185,21 @@ def load_absence_availability_anchor(
     revalidate_official_calendar_evidence(calendar)
     if receipt["calendar_raw_sha256"] != calendar.raw_sha256:
         raise RegistryError("absence receipt calendar binding mismatch")
+    if receipt["registry_raw_sha256"] != registry.raw_sha256:
+        raise RegistryError("absence receipt registry binding mismatch")
+    try:
+        source = registry.source(receipt["source_id"])
+    except KeyError as exc:
+        raise RegistryError("absence receipt source is not in registry") from exc
+    if source.exchange != receipt["exchange"]:
+        raise RegistryError("absence receipt source/exchange binding mismatch")
+    expected_request_url = render_endpoint(
+        source.endpoint_template,
+        receipt["trade_day"].replace("-", ""),
+    )
+    if receipt["request_url"] != expected_request_url:
+        raise RegistryError("absence receipt request endpoint binding mismatch")
+    validate_redirect(receipt["source_url"], source.allowed_hosts)
     request_started = parse_utc(
         receipt["request_started_at"],
         "absence request_started_at",
@@ -203,6 +231,7 @@ def load_absence_availability_anchor(
         payload["absence_id"] != receipt["absence_id"]
         or payload["receipt_sha256"] != receipt_sha
         or payload["calendar_raw_sha256"] != receipt["calendar_raw_sha256"]
+        or payload["registry_raw_sha256"] != registry.raw_sha256
     ):
         raise RegistryError("absence availability anchor binding mismatch")
     available_at = parse_utc(
@@ -226,6 +255,7 @@ def load_absence_availability_anchor(
         absence_id=receipt["absence_id"],
         receipt_sha256=receipt_sha,
         calendar_raw_sha256=receipt["calendar_raw_sha256"],
+        registry_raw_sha256=registry.raw_sha256,
         response_received_at=response_received,
         available_at=available_at,
     )

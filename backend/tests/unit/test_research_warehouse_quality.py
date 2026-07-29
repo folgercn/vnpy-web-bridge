@@ -261,6 +261,7 @@ def absence_anchor(
     available_at: datetime,
     calendar: OfficialCalendar,
     calendar_availability,
+    registry,
 ):
     tmp_path.mkdir(parents=True, exist_ok=True)
     receipt_raw = absence.receipt_path.read_bytes()
@@ -269,6 +270,7 @@ def absence_anchor(
         "absence_id": absence.absence_id,
         "receipt_sha256": sha256(receipt_raw),
         "calendar_raw_sha256": absence.calendar_raw_sha256,
+        "registry_raw_sha256": registry.raw_sha256,
         "available_at": available_at.isoformat(timespec="microseconds").replace(
             "+00:00",
             "Z",
@@ -284,6 +286,7 @@ def absence_anchor(
         receipt_path=absence.receipt_path,
         calendar=calendar,
         calendar_anchor=calendar_availability,
+        registry=registry,
     )
 
 
@@ -524,11 +527,15 @@ def test_404_requires_explicit_calendar_closed_day(tmp_path: Path) -> None:
     closed_day = date(2026, 7, 20)
     calendar, _path, _payload = signed_calendar(tmp_path, closed={closed_day})
     paths = WarehousePaths.initialize(tmp_path / "warehouse")
+    registry = load_registry(REGISTRY_PATH)
+    shfe_template = registry.source(
+        "shfe-daily-market-data-v1"
+    ).endpoint_template
     observed = datetime(2026, 7, 20, 8, tzinfo=UTC)
     sample = TrustedClockSample(observed, observed, 0)
     result = acquire_daily(
         paths=paths,
-        registry=load_registry(REGISTRY_PATH),
+        registry=registry,
         source_id="shfe-daily-market-data-v1",
         trade_day=closed_day.isoformat(),
         collector_version="calendar-test-v1",
@@ -557,6 +564,7 @@ def test_404_requires_explicit_calendar_closed_day(tmp_path: Path) -> None:
         available_at=observed + timedelta(seconds=3),
         calendar=calendar,
         calendar_availability=calendar_availability,
+        registry=registry,
     )
     Draft202012Validator(
         json.loads(ABSENCE_ANCHOR_SCHEMA_PATH.read_bytes()),
@@ -579,6 +587,7 @@ def test_404_requires_explicit_calendar_closed_day(tmp_path: Path) -> None:
             available_at=observed + timedelta(seconds=3),
             calendar=calendar,
             calendar_availability=late_calendar_anchor,
+            registry=registry,
         )
 
     official_absence_id, official_receipt = create_absence_receipt(
@@ -586,7 +595,8 @@ def test_404_requires_explicit_calendar_closed_day(tmp_path: Path) -> None:
         source_id="shfe-daily-market-data-v1",
         exchange="SHFE",
         trade_day="2026-07-21",
-        source_url="https://www.shfe.com.cn/data/dailydata/kx/kx20260721.dat",
+        request_url=shfe_template.format(yyyymmdd="20260721"),
+        source_url=shfe_template.format(yyyymmdd="20260721"),
         request_started_at=observed,
         response_received_at=observed + timedelta(seconds=1),
         ntp_sampled_at=observed,
@@ -598,6 +608,7 @@ def test_404_requires_explicit_calendar_closed_day(tmp_path: Path) -> None:
             "last-modified": None,
         },
         calendar_raw_sha256=calendar.raw_sha256,
+        registry_raw_sha256=registry.raw_sha256,
         collector_version="calendar-test-v1",
     )
     forged_official_absence = AuthoritativeAbsence(
@@ -618,13 +629,56 @@ def test_404_requires_explicit_calendar_closed_day(tmp_path: Path) -> None:
             available_at=observed + timedelta(seconds=3),
             calendar=calendar,
             calendar_availability=calendar_availability,
+            registry=registry,
+        )
+    relabeled_id, relabeled_receipt = create_absence_receipt(
+        paths=paths,
+        source_id="ine-daily-market-data-v1",
+        exchange="SHFE",
+        trade_day=closed_day.isoformat(),
+        request_url=shfe_template.format(yyyymmdd="20260720"),
+        source_url=shfe_template.format(yyyymmdd="20260720"),
+        request_started_at=observed,
+        response_received_at=observed + timedelta(seconds=1),
+        ntp_sampled_at=observed,
+        ntp_offset_milliseconds=0,
+        http_metadata={
+            "content-length": None,
+            "content-type": None,
+            "etag": None,
+            "last-modified": None,
+        },
+        calendar_raw_sha256=calendar.raw_sha256,
+        registry_raw_sha256=registry.raw_sha256,
+        collector_version="calendar-test-v1",
+    )
+    relabeled_absence = AuthoritativeAbsence(
+        absence_id=relabeled_id,
+        receipt_path=relabeled_receipt,
+        source_id="ine-daily-market-data-v1",
+        exchange="SHFE",
+        trade_day=closed_day.isoformat(),
+        observed_at=observed + timedelta(seconds=1),
+        http_status=404,
+        calendar_raw_sha256=calendar.raw_sha256,
+        status="CALENDAR_AUTHORIZED_ABSENCE_AWAITING_EXTERNAL_ANCHOR",
+    )
+    with pytest.raises(RegistryError, match="source/exchange binding"):
+        absence_anchor(
+            tmp_path / "relabeled-source",
+            relabeled_absence,
+            available_at=observed + timedelta(seconds=3),
+            calendar=calendar,
+            calendar_availability=calendar_availability,
+            registry=registry,
         )
     stale_absence_id, stale_receipt = create_absence_receipt(
         paths=paths,
         source_id="shfe-daily-market-data-v1",
         exchange="SHFE",
         trade_day=closed_day.isoformat(),
-        source_url="https://www.shfe.com.cn/data/dailydata/kx/kx20260720.dat",
+        request_url=shfe_template.format(yyyymmdd="20260720"),
+        source_url=shfe_template.format(yyyymmdd="20260720"),
         request_started_at=observed,
         response_received_at=observed + timedelta(seconds=1),
         ntp_sampled_at=observed - timedelta(seconds=301),
@@ -636,6 +690,7 @@ def test_404_requires_explicit_calendar_closed_day(tmp_path: Path) -> None:
             "last-modified": None,
         },
         calendar_raw_sha256=calendar.raw_sha256,
+        registry_raw_sha256=registry.raw_sha256,
         collector_version="calendar-test-v1",
     )
     stale_absence = AuthoritativeAbsence(
@@ -656,6 +711,7 @@ def test_404_requires_explicit_calendar_closed_day(tmp_path: Path) -> None:
             available_at=observed + timedelta(seconds=3),
             calendar=calendar,
             calendar_availability=calendar_availability,
+            registry=registry,
         )
 
     with pytest.raises(RegistryError, match="official-day source is missing"):

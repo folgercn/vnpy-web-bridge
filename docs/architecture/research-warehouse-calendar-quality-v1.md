@@ -64,8 +64,9 @@ day and produces an append-only absence receipt. Caller-supplied historical
 observation times are forbidden: the request start is aligned to live wall
 time plus the bounded NTP offset, and response time advances from that trusted
 sample with a monotonic clock. The receipt binds both times, the NTP sample and
-offset, final URL, status, and response metadata. Calendar source bytes are
-strictly revalidated after the response before a 404 is accepted.
+offset, exact registry hash, reconstructed request endpoint, final URL, status,
+and response metadata. Calendar source bytes are strictly revalidated after
+the response before a 404 is accepted.
 
 The local receipt reports
 `CALENDAR_AUTHORIZED_ABSENCE_AWAITING_EXTERNAL_ANCHOR`; it is never PIT
@@ -76,7 +77,9 @@ replays HTTP 404 classification against the exact calendar, requires its
 external calendar anchor to have been available by `request_started_at`,
 revalidates the 0–300 second NTP sample age, and prevents the absence anchor
 from predating the response, calendar issuance, calendar evidence, or calendar
-anchor. An official-day 404, a
+anchor. It also reloads the frozen hash-pinned source registry and requires the
+receipt's `source_id`, exchange, reconstructed request endpoint, and final URL
+allowlist to agree; the absence anchor binds that registry hash. An official-day 404, a
 closed-day 200, a missing classification, another status, a backfilled clock,
 or an anchor after the cutoff fails closed.
 

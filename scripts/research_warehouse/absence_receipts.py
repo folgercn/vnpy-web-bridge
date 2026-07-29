@@ -18,6 +18,7 @@ def create_absence_receipt(
     source_id: str,
     exchange: str,
     trade_day: str,
+    request_url: str,
     source_url: str,
     request_started_at,
     response_received_at,
@@ -25,6 +26,7 @@ def create_absence_receipt(
     ntp_offset_milliseconds: int,
     http_metadata: dict[str, str | None],
     calendar_raw_sha256: str,
+    registry_raw_sha256: str,
     collector_version: str,
 ) -> tuple[str, Path]:
     payload = {
@@ -33,6 +35,7 @@ def create_absence_receipt(
         "source_id": source_id,
         "exchange": exchange,
         "trade_day": trade_day,
+        "request_url": request_url,
         "source_url": source_url,
         "http_status": 404,
         "request_started_at": format_utc(
@@ -50,6 +53,7 @@ def create_absence_receipt(
         "ntp_offset_milliseconds": ntp_offset_milliseconds,
         "http_metadata": http_metadata,
         "calendar_raw_sha256": calendar_raw_sha256,
+        "registry_raw_sha256": registry_raw_sha256,
         "collector_version": collector_version,
         "authority": ABSENCE_AUTHORITY,
     }
