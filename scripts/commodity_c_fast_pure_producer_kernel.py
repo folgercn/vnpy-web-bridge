@@ -37,6 +37,7 @@ FROZEN_RULE_SHA256 = (
     "d9a6ef4ffb6d74fe0feee8ac8935acbeb79abd4686581611f14135eb5c41040a"
 )
 PRODUCTS = ("ag", "al", "au", "bu", "cu", "rb", "ru", "sc", "sp", "zn")
+SECTOR_MAP_ID = "COMMODITY_FROZEN_SECTOR_MAP_V1"
 SECTOR_MAP = {
     "ag": "precious",
     "al": "nonferrous",

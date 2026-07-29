@@ -91,6 +91,7 @@ ARTIFACT_ROLES = (
 )
 
 PRODUCTS = ("ag", "al", "au", "bu", "cu", "rb", "ru", "sc", "sp", "zn")
+SECTOR_MAP_ID = "COMMODITY_FROZEN_SECTOR_MAP_V1"
 SECTOR_MAP = {
     "ag": "precious",
     "al": "nonferrous",

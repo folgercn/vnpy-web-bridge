@@ -116,7 +116,9 @@ COMMODITY_SIMNOW_SC_PRE_DELIVERY_CUTOFF_DAY=15
 
 研究流水线必须先写临时文件并用同文件系统的原子 rename 替换 `COMMODITY_SIMNOW_TEMPLATE_BATCH_PATH`，不要原地覆盖。控制器只读取单个不超过 2 MiB 的 v2 JSON；文件缺失、半写、schema 错误、签名错误、批次链错误或合约到期保护失败都会撤销本次模板和自动派单授权。
 
-`COMMODITY_POSITION_MANAGER_SHADOW_PATH` 是独立的只读候选快照。它不会直接参与 baseline 目标批次加载或获得派单权；即使快照无效，冻结 baseline 仍按原安全边界运行。独立的 position-manager shakedown 会话只在四个 `COMMODITY_POSITION_MANAGER_SIMNOW_*` 开关、SimNow 白名单、有效 Shadow 和有效 baseline 关联同时满足时，读取其签名 targets 生成固定执行掩码；不会回写或改变 Shadow 的安全 Literal。服务按 `baseline_batch_hash` 查找已验证的 active/completed baseline，并逐项核对日期、合约、权重、整数手数、参考价与合约规格；无法取得完整 baseline 时标记为 `unlinked`。shadow 使用独立的 `POSITION_MANAGER_SECTOR_MAP_V1`，不会修改 baseline 的 `PRODUCT_SPECS` 或执行校验口径。策略页和 `GET /api/commodity-simnow/position-manager-shadow` 只展示通过 Ed25519、公式、guardband 与整数目标硬上限校验后的审计信息。
+`COMMODITY_POSITION_MANAGER_SHADOW_PATH` 是独立的只读候选快照。它不会直接参与 baseline 目标批次加载或获得派单权；即使快照无效，冻结 baseline 仍按原安全边界运行。独立的 position-manager shakedown 会话只在四个 `COMMODITY_POSITION_MANAGER_SIMNOW_*` 开关、SimNow 白名单、有效 Shadow 和有效 baseline 关联同时满足时，读取其签名 targets 生成固定执行掩码；不会回写或改变 Shadow 的安全 Literal。服务按 `baseline_batch_hash` 查找已验证的 active/completed baseline，并逐项核对日期、合约、权重、整数手数、参考价与合约规格；无法取得完整 baseline 时标记为 `unlinked`。策略页和 `GET /api/commodity-simnow/position-manager-shadow` 只展示通过 Ed25519、公式、guardband 与整数目标硬上限校验后的审计信息。
+
+主策略、position-manager 与 C_FAST runtime 使用同一个内部冻结映射 identity `COMMODITY_FROZEN_SECTOR_MAP_V1`。外部签名 schema 为兼容历史对象，仍保留 `POSITION_MANAGER_SECTOR_MAP_V1` 等 lane-specific ID。冻结十品种映射中 `bu`、`ru` 同属 `energy_chemical`，`sp` 属于 `light_industry`；因此 source 层 `abs(bu)+abs(ru)>35%` 会 fail closed。迁移只收紧新目标批次的验收和后续实时敞口校验，不重写 active/completed 持久化计划，也不改变签名、SimNow 白名单、两阶段派单、auto-dispatch 默认值或 `production=false` 边界。已有 completed state 继续按原 schema 只读加载；重新提交旧签名批次时必须通过新的共享板块约束。
 
 通用风控仍然生效。`RISK_MAX_ORDER_VOLUME` 必须不小于计划中的单笔拆单手数；控制器会在阶段零提交之前，按当前持仓、已有活动开仓委托和本阶段全部子单累计校验 `RISK_MAX_SYMBOL_POSITION`，拆单不能绕过单合约上限。不要为了通过执行而关闭交易所、价格、持仓或日亏损校验。
 

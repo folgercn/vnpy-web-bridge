@@ -19,6 +19,10 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from jsonschema import Draft202012Validator
 import pytest
 
+from app.core.commodity_strategy_identity import (
+    COMMODITY_FROZEN_SECTOR_MAP_V1,
+    COMMODITY_FROZEN_SECTOR_MAP_V1_ID,
+)
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -57,6 +61,11 @@ DIRECTION = {
     "sp": 1,
     "zn": -1,
 }
+
+
+def test_bundle_verifier_uses_frozen_cross_plane_sector_map_identity() -> None:
+    assert bundle.SECTOR_MAP_ID == COMMODITY_FROZEN_SECTOR_MAP_V1_ID
+    assert bundle.SECTOR_MAP == dict(COMMODITY_FROZEN_SECTOR_MAP_V1)
 
 
 def write_bytes(path: Path, raw: bytes, *, mode: int = 0o600) -> Path:
