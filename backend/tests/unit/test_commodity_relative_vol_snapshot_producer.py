@@ -669,6 +669,21 @@ def test_semantic_tamper_fails_even_when_claimed_batch_hash_is_rewritten(
         producer.produce_snapshot(source)
 
 
+@pytest.mark.parametrize("invalid_key_id", [True, 7])
+def test_signer_key_id_rejects_non_string_json_types(
+    invalid_key_id: object,
+) -> None:
+    source = source_view()
+    source["baseline_batch"]["signer_key_id"] = invalid_key_id
+    _rehash_baseline(source)
+
+    with pytest.raises(
+        producer.SnapshotProducerError,
+        match="signer_key_id must be one key id",
+    ):
+        producer.produce_snapshot(source)
+
+
 def test_chain_hash_month_and_missing_proof_fail_closed() -> None:
     hash_tampered = linked_source_view()
     hash_tampered["continuity"]["previous_snapshot_hash"] = "f" * 64

@@ -314,10 +314,9 @@ def _sha256_text(value: Any, label: str) -> str:
 
 
 def _key_id(value: Any, label: str) -> str:
-    text = str(value)
-    if KEY_ID_PATTERN.fullmatch(text) is None:
+    if not isinstance(value, str) or KEY_ID_PATTERN.fullmatch(value) is None:
         raise SnapshotProducerError(f"{label} must be one key id")
-    return text
+    return value
 
 
 def _iso_date(value: Any, label: str) -> date:
@@ -667,7 +666,10 @@ def _validate_baseline_batch(
     previous_batch_hash = batch["previous_batch_hash"]
     if previous_batch_hash is not None:
         _sha256_text(previous_batch_hash, "baseline_batch.previous_batch_hash")
-    _key_id(batch["signer_key_id"], "baseline_batch.signer_key_id")
+    batch["signer_key_id"] = _key_id(
+        batch["signer_key_id"],
+        "baseline_batch.signer_key_id",
+    )
     _signature_shape(batch["signature"], "baseline_batch.signature")
 
     canonical_payload = canonical_json(
