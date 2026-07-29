@@ -1,8 +1,9 @@
-# C_FAST 四层 PnL Evidence Ledger v2（纯离线切片）
+# C_FAST 四层 PnL Evidence Ledger v3（不可变离线仓储切片）
 
-本文档对应 Issue #145 的首个可独立合并切片。当前只提供 strict typed source
-facts、确定性 builder、fresh replay verifier 和 immutable hash-chain audit；
-不接 repository、QuestDB、API、worker、runtime、Settings、RPC、
+本文档对应 Issue #145 的可独立合并切片。v2 提供 strict typed source facts、
+确定性 builder、fresh replay verifier 和 immutable hash-chain audit；v3 在
+其上增加本地 create-only repository、crash recovery、确定性 JSON export
+和中文审计报告。不接 QuestDB、API、worker、runtime、Settings、RPC、
 TradeService、订单、派单或部署。
 
 ## Architecture Impact
@@ -280,6 +281,72 @@ external_tip_anchor_state=NOT_PROVIDED_STRUCTURE_ONLY
 genesis/tip anchor 时，攻击者若整体替换整条 chain 并重算内部 hashes，本切片
 无法发现。这是明确保留的结构性限制，不声称已解决。
 
+## v3 create-only repository
+
+`CommodityCFastPnlLedgerRepository` 每个实例只管理一个 `ledger_id`，目录固定为：
+
+```text
+<root>/<ledger_id>/
+  .append.lock
+  entries/
+    0000000001-<entry_hash>.json
+    0000000002-<entry_hash>.json
+```
+
+entry 文件必须是 UTF-8、末尾单换行、key 排序、无额外空白的 canonical JSON。
+文件名同时绑定十位 sequence 与 `entry_hash`。仓储没有可覆盖的 mutable index；
+每次读、追加、审计和导出都会从 create-only entry 重建整条链并运行 v2 fresh
+replay。完全相同的 entry 再次追加返回 `ALREADY_PRESENT`，不重写文件或更新时间。
+
+追加协议固定为：
+
+1. 锁内重新验证现有完整链；
+2. 验证 candidate sequence、predecessor、ledger identity 和 source replay；
+3. 以 `O_EXCL` 写 `.pending-*`，flush + fsync；
+4. 用 create-only hard link 安装最终文件并 fsync 目录；
+5. 删除 pending 并再次 fsync；
+6. 从磁盘重新加载并验证 chain tip。
+
+进程若在第 3 至第 5 步之间退出，重新 open 时只接受唯一 pending。pending 必须
+是 canonical、fresh-replay 可验证且恰好接续当前 chain tip；否则 fail closed。
+final 与 pending 同时存在时，二者必须完全相同才会清理 pending。多个 pending、
+不连续 sequence、错误 predecessor、未知文件、symlink、非 canonical 内容和
+读取期间 path/inode 替换均拒绝。
+
+仓储目录必须由当前 OS 用户持有，且 group/world 不可写；entry 与 lock 文件
+必须由当前用户持有，且 group/world 无任何权限。读取使用 `O_NOFOLLOW`，并在
+读后同时比较 fd 与当前路径的 device、inode、type、owner、mode、link count、
+size、mtime 和 ctime。
+
+这是离线 Research Plane 的结构级 custody，不是对恶意 root 或同一 owner
+进程的安全沙箱。同一 owner 若能替换整个 root 和所有内部 checksum，本地链
+仍无法单独证明事实历史；需要仓储外签名 genesis/tip anchor 才能覆盖该威胁。
+
+## 固定 source adapters
+
+export 和中文报告按固定顺序声明五个 adapter，调用方不能替换或删减：
+
+| adapter | 输入 | 金额边界 |
+|---|---|---|
+| `cfast-theoretical-target-marks-v1` | theoretical source facts v1 | 只从 realized、unrealized、roll fresh replay 派生研究值 |
+| `cfast-fee-and-stress-v2` | fee source facts v2 | 完整 BOUND 才计算；否则显式 UNBOUND 且净值为 null |
+| `cfast-book-walk-fill-bounds-v1` | execution-quality source facts v1 | 只发布未校准 fill interval，禁止点成交概率 |
+| `cfast-simnow-not-provided-v1` | actual NOT_PROVIDED source facts v1 | Actual 全部 null |
+| `cfast-simnow-archive-reference-v3` | actual SimNow archive reference v3 | 只有 archive 引用，没有 raw core，Actual 仍为 null/UNVERIFIED |
+
+JSON export 内嵌全部 entry、v2 audit、固定 adapter contract、structure-only
+external anchor 状态和固定 false 权限字段。`export_sha256` 绑定除自身以外的
+完整 export。export 与中文报告不使用 wall clock；同一条链在 reopen 后应
+逐字节相同。
+
+消费 export 时不得只调用 DTO。公开
+`reload_and_verify_repository_export` 对 raw bytes 先要求 canonical JSON，
+再 fresh replay 全部 entry 和跨记录 predecessor/sequence/count-once 规则，
+要求 fresh audit 与嵌入 audit 完全相等、五个 frozen adapter 全字段全等，
+最后重建完整 export 并要求对象全等。协调改写 entry、audit 和 export hash，
+伪造 Actual count，或置换/remap adapter 都会 fail closed。repository 自己
+生成 export 后也必须经过这个公开 verifier 重新加载才返回。
+
 ## Python 使用
 
 ```python
@@ -301,6 +368,15 @@ entry = build_four_layer_pnl_entry(
 audit = verify_four_layer_pnl_chain(
     [entry.model_dump(mode="json")]
 )
+
+repository = CommodityCFastPnlLedgerRepository.open_or_create(
+    "/private/cfast-pnl-ledgers",
+    entry.ledger_id,
+)
+repository.append(entry.model_dump(mode="json"))
+json_export = repository.export_json_bytes()
+chinese_report = repository.render_audit_report_zh()
+verified_export = reload_and_verify_repository_export(json_export)
 ```
 
 严格 JSON Schema 可由
