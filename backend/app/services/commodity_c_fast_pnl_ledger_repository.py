@@ -280,63 +280,166 @@ class CommodityCFastPnlLedgerRepository:
         )
 
     def _ensure_directories(self) -> None:
-        self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
-        self.ledger_path.mkdir(mode=0o700, exist_ok=True)
-        self.entries_path.mkdir(mode=0o700, exist_ok=True)
-        self._validate_directories()
-        _fsync_directory(self.root)
-        _fsync_directory(self.ledger_path)
+        if not self.root.name:
+            raise CFastPnlLedgerRepositoryError("REPOSITORY_ROOT_INVALID")
+        with _pinned_owned_directory(
+            self.root.parent,
+            not_found_code="REPOSITORY_ROOT_PARENT_NOT_FOUND",
+            invalid_code="REPOSITORY_ROOT_PARENT_CUSTODY_INVALID",
+            open_code="REPOSITORY_ROOT_PARENT_OPEN_FAILED",
+            changed_code="REPOSITORY_ROOT_PARENT_PATH_CHANGED",
+        ) as parent_descriptor:
+            _mkdir_create_only_or_existing(
+                self.root.name,
+                parent_descriptor,
+                create_code="REPOSITORY_ROOT_CREATE_FAILED",
+            )
+            _fsync_descriptor(
+                parent_descriptor,
+                "REPOSITORY_ROOT_PARENT_FSYNC_FAILED",
+            )
+            with _pinned_owned_directory(
+                self.root,
+                relative_name=self.root.name,
+                parent_descriptor=parent_descriptor,
+                not_found_code="REPOSITORY_NOT_FOUND",
+                invalid_code="REPOSITORY_DIRECTORY_CUSTODY_INVALID",
+                open_code="REPOSITORY_PATH_NOT_DIRECTORY",
+                changed_code="REPOSITORY_DIRECTORY_PATH_CHANGED",
+            ) as root_descriptor:
+                _mkdir_create_only_or_existing(
+                    self.ledger_id,
+                    root_descriptor,
+                    create_code="REPOSITORY_LEDGER_DIRECTORY_CREATE_FAILED",
+                )
+                _fsync_descriptor(
+                    root_descriptor,
+                    "REPOSITORY_DIRECTORY_FSYNC_FAILED",
+                )
+                with _pinned_owned_directory(
+                    self.ledger_path,
+                    relative_name=self.ledger_id,
+                    parent_descriptor=root_descriptor,
+                    not_found_code="REPOSITORY_NOT_FOUND",
+                    invalid_code="REPOSITORY_DIRECTORY_CUSTODY_INVALID",
+                    open_code="REPOSITORY_PATH_NOT_DIRECTORY",
+                    changed_code="REPOSITORY_DIRECTORY_PATH_CHANGED",
+                ) as ledger_descriptor:
+                    _mkdir_create_only_or_existing(
+                        "entries",
+                        ledger_descriptor,
+                        create_code="REPOSITORY_ENTRIES_DIRECTORY_CREATE_FAILED",
+                    )
+                    _fsync_descriptor(
+                        ledger_descriptor,
+                        "REPOSITORY_DIRECTORY_FSYNC_FAILED",
+                    )
+                    with _pinned_owned_directory(
+                        self.entries_path,
+                        relative_name="entries",
+                        parent_descriptor=ledger_descriptor,
+                        not_found_code="REPOSITORY_NOT_FOUND",
+                        invalid_code="REPOSITORY_DIRECTORY_CUSTODY_INVALID",
+                        open_code="REPOSITORY_PATH_NOT_DIRECTORY",
+                        changed_code="REPOSITORY_DIRECTORY_PATH_CHANGED",
+                    ):
+                        self._validate_ledger_artifacts(ledger_descriptor)
 
     def _validate_directories(self) -> None:
-        for path in (self.root, self.ledger_path, self.entries_path):
-            try:
-                path_stat = path.lstat()
-            except FileNotFoundError as exc:
-                raise CFastPnlLedgerRepositoryError("REPOSITORY_NOT_FOUND") from exc
-            if not stat.S_ISDIR(path_stat.st_mode):
-                raise CFastPnlLedgerRepositoryError("REPOSITORY_PATH_NOT_DIRECTORY")
-            if (
-                path_stat.st_uid != os.geteuid()
-                or stat.S_IMODE(path_stat.st_mode) & 0o022
-            ):
-                raise CFastPnlLedgerRepositoryError(
-                    "REPOSITORY_DIRECTORY_CUSTODY_INVALID"
-                )
+        with self._pinned_directories():
+            return
+
+    @contextmanager
+    def _pinned_directories(self) -> Iterator[tuple[int, int]]:
+        if not self.root.name:
+            raise CFastPnlLedgerRepositoryError("REPOSITORY_ROOT_INVALID")
+        with _pinned_owned_directory(
+            self.root.parent,
+            not_found_code="REPOSITORY_ROOT_PARENT_NOT_FOUND",
+            invalid_code="REPOSITORY_ROOT_PARENT_CUSTODY_INVALID",
+            open_code="REPOSITORY_ROOT_PARENT_OPEN_FAILED",
+            changed_code="REPOSITORY_ROOT_PARENT_PATH_CHANGED",
+        ) as parent_descriptor:
+            with _pinned_owned_directory(
+                self.root,
+                relative_name=self.root.name,
+                parent_descriptor=parent_descriptor,
+                not_found_code="REPOSITORY_NOT_FOUND",
+                invalid_code="REPOSITORY_DIRECTORY_CUSTODY_INVALID",
+                open_code="REPOSITORY_PATH_NOT_DIRECTORY",
+                changed_code="REPOSITORY_DIRECTORY_PATH_CHANGED",
+            ) as root_descriptor:
+                with _pinned_owned_directory(
+                    self.ledger_path,
+                    relative_name=self.ledger_id,
+                    parent_descriptor=root_descriptor,
+                    not_found_code="REPOSITORY_NOT_FOUND",
+                    invalid_code="REPOSITORY_DIRECTORY_CUSTODY_INVALID",
+                    open_code="REPOSITORY_PATH_NOT_DIRECTORY",
+                    changed_code="REPOSITORY_DIRECTORY_PATH_CHANGED",
+                ) as ledger_descriptor:
+                    with _pinned_owned_directory(
+                        self.entries_path,
+                        relative_name="entries",
+                        parent_descriptor=ledger_descriptor,
+                        not_found_code="REPOSITORY_NOT_FOUND",
+                        invalid_code="REPOSITORY_DIRECTORY_CUSTODY_INVALID",
+                        open_code="REPOSITORY_PATH_NOT_DIRECTORY",
+                        changed_code="REPOSITORY_DIRECTORY_PATH_CHANGED",
+                    ):
+                        self._validate_ledger_artifacts(ledger_descriptor)
+                        yield ledger_descriptor, parent_descriptor
+
+    def _validate_ledger_artifacts(self, ledger_descriptor: int) -> None:
         allowed = {".append.lock", "entries"}
-        if any(path.name not in allowed for path in self.ledger_path.iterdir()):
+        if any(name not in allowed for name in os.listdir(ledger_descriptor)):
             raise CFastPnlLedgerRepositoryError("REPOSITORY_UNKNOWN_LEDGER_ARTIFACT")
 
     @contextmanager
     def _locked(self) -> Iterator[None]:
-        self._validate_directories()
-        flags = os.O_RDWR | os.O_CREAT
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
-        try:
-            descriptor = os.open(self.lock_path, flags, 0o600)
-        except OSError as exc:
-            raise CFastPnlLedgerRepositoryError("REPOSITORY_LOCK_OPEN_FAILED") from exc
-        try:
-            lock_stat = os.fstat(descriptor)
-            if (
-                not stat.S_ISREG(lock_stat.st_mode)
-                or lock_stat.st_uid != os.geteuid()
-                or stat.S_IMODE(lock_stat.st_mode) & 0o077
-            ):
-                raise CFastPnlLedgerRepositoryError("REPOSITORY_LOCK_NOT_REGULAR")
+        with self._pinned_directories() as (
+            ledger_descriptor,
+            _parent_descriptor,
+        ):
+            flags = os.O_RDWR | os.O_CREAT
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
             try:
-                lock_path_stat = self.lock_path.lstat()
+                descriptor = os.open(
+                    ".append.lock",
+                    flags,
+                    0o600,
+                    dir_fd=ledger_descriptor,
+                )
             except OSError as exc:
                 raise CFastPnlLedgerRepositoryError(
-                    "REPOSITORY_LOCK_PATH_CHANGED"
+                    "REPOSITORY_LOCK_OPEN_FAILED"
                 ) from exc
-            if _stat_identity(lock_stat) != _stat_identity(lock_path_stat):
-                raise CFastPnlLedgerRepositoryError("REPOSITORY_LOCK_PATH_CHANGED")
-            fcntl.flock(descriptor, fcntl.LOCK_EX)
-            yield
-        finally:
-            fcntl.flock(descriptor, fcntl.LOCK_UN)
-            os.close(descriptor)
+            try:
+                lock_stat = os.fstat(descriptor)
+                if (
+                    not stat.S_ISREG(lock_stat.st_mode)
+                    or lock_stat.st_uid != os.geteuid()
+                    or stat.S_IMODE(lock_stat.st_mode) & 0o077
+                ):
+                    raise CFastPnlLedgerRepositoryError("REPOSITORY_LOCK_NOT_REGULAR")
+                try:
+                    lock_path_stat = os.stat(
+                        ".append.lock",
+                        dir_fd=ledger_descriptor,
+                        follow_symlinks=False,
+                    )
+                except OSError as exc:
+                    raise CFastPnlLedgerRepositoryError(
+                        "REPOSITORY_LOCK_PATH_CHANGED"
+                    ) from exc
+                if _stat_identity(lock_stat) != _stat_identity(lock_path_stat):
+                    raise CFastPnlLedgerRepositoryError("REPOSITORY_LOCK_PATH_CHANGED")
+                fcntl.flock(descriptor, fcntl.LOCK_EX)
+                yield
+            finally:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+                os.close(descriptor)
 
     def _load_entries_locked(
         self,
@@ -663,6 +766,105 @@ def _pending_name(entry: CommodityCFastFourLayerPnlLedgerEntryDTO) -> str:
 
 def _entry_bytes(entry: CommodityCFastFourLayerPnlLedgerEntryDTO) -> bytes:
     return canonical_json_line(entry.model_dump(mode="json"))
+
+
+def _mkdir_create_only_or_existing(
+    name: str,
+    parent_descriptor: int,
+    *,
+    create_code: str,
+) -> bool:
+    try:
+        os.mkdir(
+            name,
+            mode=0o700,
+            dir_fd=parent_descriptor,
+        )
+    except FileExistsError:
+        return False
+    except OSError as exc:
+        raise CFastPnlLedgerRepositoryError(create_code) from exc
+    return True
+
+
+@contextmanager
+def _pinned_owned_directory(
+    path: Path,
+    *,
+    relative_name: str | None = None,
+    parent_descriptor: int | None = None,
+    not_found_code: str,
+    invalid_code: str,
+    open_code: str,
+    changed_code: str,
+) -> Iterator[int]:
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    target: str | Path = relative_name if relative_name is not None else path
+    try:
+        if parent_descriptor is None:
+            descriptor = os.open(target, flags)
+        else:
+            descriptor = os.open(
+                target,
+                flags,
+                dir_fd=parent_descriptor,
+            )
+    except FileNotFoundError as exc:
+        raise CFastPnlLedgerRepositoryError(not_found_code) from exc
+    except OSError as exc:
+        raise CFastPnlLedgerRepositoryError(open_code) from exc
+    try:
+        before = os.fstat(descriptor)
+        _validate_owned_directory_stat(before, invalid_code)
+        try:
+            current_path = path.lstat()
+        except OSError as exc:
+            raise CFastPnlLedgerRepositoryError(changed_code) from exc
+        if _directory_identity(before) != _directory_identity(current_path):
+            raise CFastPnlLedgerRepositoryError(changed_code)
+        yield descriptor
+        after = os.fstat(descriptor)
+        _validate_owned_directory_stat(after, invalid_code)
+        try:
+            current_path = path.lstat()
+        except OSError as exc:
+            raise CFastPnlLedgerRepositoryError(changed_code) from exc
+        if _directory_identity(before) != _directory_identity(
+            after
+        ) or _directory_identity(after) != _directory_identity(current_path):
+            raise CFastPnlLedgerRepositoryError(changed_code)
+    finally:
+        os.close(descriptor)
+
+
+def _validate_owned_directory_stat(
+    value: os.stat_result,
+    invalid_code: str,
+) -> None:
+    if (
+        not stat.S_ISDIR(value.st_mode)
+        or value.st_uid != os.geteuid()
+        or stat.S_IMODE(value.st_mode) & 0o022
+    ):
+        raise CFastPnlLedgerRepositoryError(invalid_code)
+
+
+def _directory_identity(value: os.stat_result) -> tuple[int, ...]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        stat.S_IFMT(value.st_mode),
+        stat.S_IMODE(value.st_mode),
+        value.st_uid,
+        value.st_gid,
+    )
+
+
+def _fsync_descriptor(descriptor: int, code: str) -> None:
+    try:
+        os.fsync(descriptor)
+    except OSError as exc:
+        raise CFastPnlLedgerRepositoryError(code) from exc
 
 
 def _read_raw_regular(

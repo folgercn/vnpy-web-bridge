@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import ast
+import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -364,15 +366,16 @@ def test_path_replacement_during_fd_read_is_detected(
     replacement_path.write_bytes(entry_path.read_bytes())
     replacement_path.chmod(0o600)
     original_fstat = repository_module.os.fstat
-    calls = 0
+    original_entry_inode = entry_path.stat().st_ino
+    replaced = False
 
     def replacing_fstat(descriptor: int):
-        nonlocal calls
-        calls += 1
+        nonlocal replaced
         observed = original_fstat(descriptor)
-        if calls == 2:
+        if not replaced and observed.st_ino == original_entry_inode:
             entry_path.rename(displaced_path)
             replacement_path.rename(entry_path)
+            replaced = True
         return observed
 
     monkeypatch.setattr(repository_module.os, "fstat", replacing_fstat)
@@ -399,6 +402,201 @@ def test_group_or_world_writable_custody_is_rejected(
         )
     finally:
         entries_path.chmod(0o700)
+
+
+def test_root_parent_must_preexist_and_have_secure_custody(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    missing_root = tmp_path / "missing-parent" / "repository-root"
+    assert_repository_error(
+        "REPOSITORY_ROOT_PARENT_NOT_FOUND",
+        CommodityCFastPnlLedgerRepository.open_or_create,
+        missing_root,
+        LEDGER_ID,
+    )
+
+    insecure_parent = tmp_path / "insecure-parent"
+    insecure_parent.mkdir(mode=0o700)
+    insecure_parent.chmod(0o777)
+    try:
+        assert_repository_error(
+            "REPOSITORY_ROOT_PARENT_CUSTODY_INVALID",
+            CommodityCFastPnlLedgerRepository.open_or_create,
+            insecure_parent / "repository-root",
+            LEDGER_ID,
+        )
+    finally:
+        insecure_parent.chmod(0o700)
+
+    wrong_owner_parent = tmp_path / "wrong-owner-parent"
+    wrong_owner_parent.mkdir(mode=0o700)
+    current_euid = os.geteuid()
+    monkeypatch.setattr(repository_module.os, "geteuid", lambda: current_euid + 1)
+    assert_repository_error(
+        "REPOSITORY_ROOT_PARENT_CUSTODY_INVALID",
+        CommodityCFastPnlLedgerRepository.open_or_create,
+        wrong_owner_parent / "repository-root",
+        LEDGER_ID,
+    )
+
+
+def test_symlink_root_parent_is_rejected(tmp_path: Path) -> None:
+    real_parent = tmp_path / "real-parent"
+    real_parent.mkdir(mode=0o700)
+    symlink_parent = tmp_path / "symlink-parent"
+    symlink_parent.symlink_to(real_parent, target_is_directory=True)
+
+    assert_repository_error(
+        "REPOSITORY_ROOT_PARENT_OPEN_FAILED",
+        CommodityCFastPnlLedgerRepository.open_or_create,
+        symlink_parent / "repository-root",
+        LEDGER_ID,
+    )
+
+
+def test_open_revalidates_root_parent_custody(tmp_path: Path) -> None:
+    secure_parent = tmp_path / "secure-parent"
+    secure_parent.mkdir(mode=0o700)
+    root = secure_parent / "repository-root"
+    CommodityCFastPnlLedgerRepository.open_or_create(root, LEDGER_ID)
+    secure_parent.chmod(0o777)
+    try:
+        assert_repository_error(
+            "REPOSITORY_ROOT_PARENT_CUSTODY_INVALID",
+            CommodityCFastPnlLedgerRepository.open,
+            root,
+            LEDGER_ID,
+        )
+    finally:
+        secure_parent.chmod(0o700)
+
+
+def test_umask_zero_cannot_create_permissive_repository_ancestors(
+    tmp_path: Path,
+) -> None:
+    secure_parent = tmp_path / "secure-parent"
+    secure_parent.mkdir(mode=0o700)
+    root = secure_parent / "repository-root"
+
+    original_umask = os.umask(0)
+    try:
+        CommodityCFastPnlLedgerRepository.open_or_create(root, LEDGER_ID)
+    finally:
+        os.umask(original_umask)
+
+    assert stat.S_IMODE(root.stat().st_mode) == 0o700
+    assert stat.S_IMODE((root / LEDGER_ID).stat().st_mode) == 0o700
+    assert stat.S_IMODE((root / LEDGER_ID / "entries").stat().st_mode) == 0o700
+
+
+def test_creation_fsyncs_pinned_parent_before_child_directories(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secure_parent = tmp_path / "secure-parent"
+    secure_parent.mkdir(mode=0o700)
+    root = secure_parent / "repository-root"
+    parent_identity = (
+        secure_parent.stat().st_dev,
+        secure_parent.stat().st_ino,
+    )
+    fsync_identities: list[tuple[int, int]] = []
+    original_fsync = repository_module.os.fsync
+
+    def recording_fsync(descriptor: int) -> None:
+        observed = repository_module.os.fstat(descriptor)
+        fsync_identities.append((observed.st_dev, observed.st_ino))
+        original_fsync(descriptor)
+
+    monkeypatch.setattr(repository_module.os, "fsync", recording_fsync)
+
+    CommodityCFastPnlLedgerRepository.open_or_create(root, LEDGER_ID)
+
+    assert fsync_identities[0] == parent_identity
+    assert fsync_identities[:3] == [
+        parent_identity,
+        (root.stat().st_dev, root.stat().st_ino),
+        (
+            (root / LEDGER_ID).stat().st_dev,
+            (root / LEDGER_ID).stat().st_ino,
+        ),
+    ]
+
+
+def test_parent_fsync_failure_never_reports_success_and_retry_fsyncs_again(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secure_parent = tmp_path / "secure-parent"
+    secure_parent.mkdir(mode=0o700)
+    root = secure_parent / "repository-root"
+    parent_identity = (
+        secure_parent.stat().st_dev,
+        secure_parent.stat().st_ino,
+    )
+    original_fsync = repository_module.os.fsync
+    parent_fsync_attempts = 0
+
+    def fail_parent_once(descriptor: int) -> None:
+        nonlocal parent_fsync_attempts
+        observed = repository_module.os.fstat(descriptor)
+        if (observed.st_dev, observed.st_ino) == parent_identity:
+            parent_fsync_attempts += 1
+            if parent_fsync_attempts == 1:
+                raise OSError("injected parent fsync loss")
+        original_fsync(descriptor)
+
+    monkeypatch.setattr(repository_module.os, "fsync", fail_parent_once)
+
+    assert_repository_error(
+        "REPOSITORY_ROOT_PARENT_FSYNC_FAILED",
+        CommodityCFastPnlLedgerRepository.open_or_create,
+        root,
+        LEDGER_ID,
+    )
+    assert root.is_dir()
+
+    CommodityCFastPnlLedgerRepository.open_or_create(root, LEDGER_ID)
+    assert parent_fsync_attempts == 2
+
+
+def test_root_parent_path_replacement_is_detected_at_operation_end(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secure_parent = tmp_path / "secure-parent"
+    secure_parent.mkdir(mode=0o700)
+    displaced_parent = tmp_path / "displaced-parent"
+    root = secure_parent / "repository-root"
+    parent_identity = (
+        secure_parent.stat().st_dev,
+        secure_parent.stat().st_ino,
+    )
+    original_fsync = repository_module.os.fsync
+    replaced = False
+
+    def replace_parent_after_root_create(descriptor: int) -> None:
+        nonlocal replaced
+        observed = repository_module.os.fstat(descriptor)
+        if not replaced and (observed.st_dev, observed.st_ino) == parent_identity:
+            secure_parent.rename(displaced_parent)
+            secure_parent.symlink_to(displaced_parent, target_is_directory=True)
+            replaced = True
+        original_fsync(descriptor)
+
+    monkeypatch.setattr(
+        repository_module.os,
+        "fsync",
+        replace_parent_after_root_create,
+    )
+
+    assert_repository_error(
+        "REPOSITORY_ROOT_PARENT_PATH_CHANGED",
+        CommodityCFastPnlLedgerRepository.open_or_create,
+        root,
+        LEDGER_ID,
+    )
 
 
 def test_repository_module_has_no_runtime_or_execution_capability() -> None:

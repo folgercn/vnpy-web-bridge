@@ -298,6 +298,13 @@ entry 文件必须是 UTF-8、末尾单换行、key 排序、无额外空白的 
 每次读、追加、审计和导出都会从 create-only entry 重建整条链并运行 v2 fresh
 replay。完全相同的 entry 再次追加返回 `ALREADY_PRESENT`，不重写文件或更新时间。
 
+repository root 的直接父目录必须预先存在，且必须是当前 OS 用户持有、
+group/world 不可写的真实目录；`open_or_create` 不会用 `parents=True` 隐式
+创建未知祖先。父目录、root、ledger 和 entries 均以
+`O_DIRECTORY|O_NOFOLLOW` 打开并持有 dirfd，操作结束前复核 path 与 fd
+identity。root 创建或确认存在后立即 fsync pinned parent，再按
+root → ledger → entries 顺序逐级 fsync；任何 fsync 失败都不会报告成功。
+
 追加协议固定为：
 
 1. 锁内重新验证现有完整链；
@@ -313,10 +320,10 @@ final 与 pending 同时存在时，二者必须完全相同才会清理 pending
 不连续 sequence、错误 predecessor、未知文件、symlink、非 canonical 内容和
 读取期间 path/inode 替换均拒绝。
 
-仓储目录必须由当前 OS 用户持有，且 group/world 不可写；entry 与 lock 文件
-必须由当前用户持有，且 group/world 无任何权限。读取使用 `O_NOFOLLOW`，并在
-读后同时比较 fd 与当前路径的 device、inode、type、owner、mode、link count、
-size、mtime 和 ctime。
+root 的直接父目录和仓储目录必须由当前 OS 用户持有，且 group/world 不可写；
+entry 与 lock 文件必须由当前用户持有，且 group/world 无任何权限。读取使用
+`O_NOFOLLOW`，并在读后同时比较 fd 与当前路径的 device、inode、type、owner、
+mode、link count、size、mtime 和 ctime。
 
 这是离线 Research Plane 的结构级 custody，不是对恶意 root 或同一 owner
 进程的安全沙箱。同一 owner 若能替换整个 root 和所有内部 checksum，本地链
@@ -386,12 +393,15 @@ verified_export = reload_and_verify_repository_export(json_export)
 
 ```bash
 PYTHONPATH=backend python -m pytest -q \
-  backend/tests/unit/test_commodity_c_fast_pnl_ledger.py
+  backend/tests/unit/test_commodity_c_fast_pnl_ledger.py \
+  backend/tests/unit/test_commodity_c_fast_pnl_ledger_repository.py
 
 PYTHONPATH=backend python -m pytest -q \
   backend/tests/unit/test_commodity_c_fast_execution_quality.py \
+  backend/tests/unit/test_commodity_c_fast_execution_quality_scorer.py \
   backend/tests/unit/test_commodity_c_fast_simnow.py \
-  backend/tests/unit/test_commodity_c_fast_pnl_ledger.py
+  backend/tests/unit/test_commodity_c_fast_pnl_ledger.py \
+  backend/tests/unit/test_commodity_c_fast_pnl_ledger_repository.py
 
 PYTHONPATH=backend python -m pytest -q backend/tests/unit
 ```
