@@ -76,6 +76,14 @@ source view 继承 C_FAST pure kernel 的资源与因果边界：
 任何字段缺失、额外字段、未来日、contract splice、非法 OHLC、零波动、
 unsafe DTE 或代码身份漂移都会 fail closed。
 
+`ProducerResult.source_view_canonical` 会保留通过严格 schema 归一化后的
+canonical source bytes。public verifier 先核对该 bytes 的资源上限和
+SHA256，再用同一 source 与已固定的 C/D 代码完整重放九件 artifact 和
+projection，并逐字节比较。因此仅协调修改多个 output artifact、重算其
+digest，不能伪造另一条自洽证据链。source 本身的签名、receipt、custody
+和 sealed-export authority 仍不由此 producer 验证，继续由 #181 边界
+提供。
+
 ## 5. D_DONCHIAN20_EXIT10_NEUTRAL
 
 D 的 exact contract 固定为：

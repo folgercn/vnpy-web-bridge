@@ -490,6 +490,54 @@ def test_every_artifact_role_is_bound_to_fresh_source_replay(
         producer.verify_research_artifacts(tampered)
 
 
+def test_canonical_source_bytes_and_hash_cannot_be_rebound_without_replay() -> None:
+    result = producer.produce_research_artifacts(source_view())
+    changed_source = json.loads(result.source_view_canonical)
+    contract = changed_source["products"][0]["daily"][0]["contracts"][0]
+    contract["open"] = (
+        float(contract["open"]) + float(contract["settlement"])
+    ) / 2
+    changed_source_raw = producer.canonical_json(changed_source)
+    changed_source_hash = hashlib.sha256(changed_source_raw).hexdigest()
+
+    hash_only = producer.ProducerResult(
+        status=result.status,
+        source_view_canonical_sha256=result.source_view_canonical_sha256,
+        source_view_canonical=changed_source_raw,
+        artifacts=result.artifacts,
+        producer_projection=result.producer_projection,
+    )
+    with pytest.raises(
+        producer.StaticCoreEqualProducerError,
+        match="canonical source view identity mismatch",
+    ):
+        producer.verify_research_artifacts(hash_only)
+
+    rebound_artifacts: dict[str, bytes] = {}
+    for role, raw in result.artifacts.items():
+        payload = json.loads(raw)
+        payload["source_view_canonical_sha256"] = changed_source_hash
+        rebound_artifacts[role] = producer.canonical_json(payload)
+    rebound_projection = dict(result.producer_projection)
+    rebound_projection["source_view_canonical_sha256"] = changed_source_hash
+    rebound_projection["artifact_digests"] = [
+        {"role": role, "sha256": hashlib.sha256(raw).hexdigest()}
+        for role, raw in rebound_artifacts.items()
+    ]
+    rebound = producer.ProducerResult(
+        status=result.status,
+        source_view_canonical_sha256=changed_source_hash,
+        source_view_canonical=changed_source_raw,
+        artifacts=rebound_artifacts,
+        producer_projection=rebound_projection,
+    )
+    with pytest.raises(
+        producer.StaticCoreEqualProducerError,
+        match="producer artifacts do not match fresh source replay",
+    ):
+        producer.verify_research_artifacts(rebound)
+
+
 def test_code_identity_tamper_fails_before_source_calculation(monkeypatch) -> None:
     monkeypatch.setattr(producer, "D_FORMULA_CODE_SHA256", "0" * 64)
     with pytest.raises(
