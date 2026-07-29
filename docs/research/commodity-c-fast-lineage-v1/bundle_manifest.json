@@ -1,0 +1,129 @@
+{
+  "schema_version": "commodity_c_fast_lineage_bundle_v1",
+  "status": "SOURCE_AND_FREEZE_LINEAGE_ARCHIVE_ONLY",
+  "candidate_id": "C_FAST_CROSS_SECTION_NEUTRAL",
+  "frozen_rule_id": "commodity_fast_tsmom_forward_freeze_v1",
+  "frozen_rule_sha256": "d9a6ef4ffb6d74fe0feee8ac8935acbeb79abd4686581611f14135eb5c41040a",
+  "consumer": {
+    "audited_main_commit": "4e16dfe69e58b1110c5e8b379f5e7fb26eaaf487",
+    "path": "scripts/commodity_c_fast_pure_producer_kernel.py",
+    "lineage": {
+      "market_only_curve_panel_source_sha256": "bd3d8f673bed08ea589aceafab2a9fceae2e658c4ae59266677000ae78d9ad2a",
+      "fast_tsmom_signal_source_sha256": "7ebe1529173b46cbae17680d872680c7bb7bae39863d09b2d9a37183828a43a9",
+      "self_financing_target_source_sha256": "40fd1a27bb1e6dedf483a4c7dcec6d181d325d9c9958d6620f79f04fbdb696db",
+      "integer_allocator_source_sha256": "66497283d1c35383d620ef3c92f2c23316046a9b4b0cbe6f1dcf3f361041f307",
+      "guardband_v2_source_sha256": "e9871b26af4f0ebebed6e697e8fa1c3064bc3d6557df739bcef9b80697eab353"
+    }
+  },
+  "archive_bindings": [
+    {
+      "path": "sources/commodity_market_only_curve_panel_v1.py",
+      "source_path": "research/entry_redesign/scripts/futures_lead/commodity_market_only_curve_panel_v1.py",
+      "bytes": 22516,
+      "sha256": "bd3d8f673bed08ea589aceafab2a9fceae2e658c4ae59266677000ae78d9ad2a"
+    },
+    {
+      "path": "sources/commodity_fast_tsmom_family_dev_v1.py",
+      "source_path": "research/entry_redesign/scripts/futures_lead/commodity_fast_tsmom_family_dev_v1.py",
+      "bytes": 17217,
+      "sha256": "7ebe1529173b46cbae17680d872680c7bb7bae39863d09b2d9a37183828a43a9"
+    },
+    {
+      "path": "sources/commodity_fast_tsmom_self_financing_sidecar_v1.py",
+      "source_path": "research/entry_redesign/scripts/futures_lead/commodity_fast_tsmom_self_financing_sidecar_v1.py",
+      "bytes": 43849,
+      "sha256": "40fd1a27bb1e6dedf483a4c7dcec6d181d325d9c9958d6620f79f04fbdb696db"
+    },
+    {
+      "path": "sources/commodity_candidate_lot_aware_safe_allocator_v1.py",
+      "source_path": "research/entry_redesign/scripts/futures_lead/commodity_candidate_lot_aware_safe_allocator_v1.py",
+      "bytes": 46037,
+      "sha256": "66497283d1c35383d620ef3c92f2c23316046a9b4b0cbe6f1dcf3f361041f307"
+    },
+    {
+      "path": "sources/commodity_candidate_lot_aware_safe_allocator_guardband_v2.py",
+      "source_path": "research/entry_redesign/scripts/futures_lead/commodity_candidate_lot_aware_safe_allocator_guardband_v2.py",
+      "bytes": 18598,
+      "sha256": "e9871b26af4f0ebebed6e697e8fa1c3064bc3d6557df739bcef9b80697eab353"
+    },
+    {
+      "path": "tests/test_commodity_market_only_curve_panel_v1.py",
+      "source_path": "research/entry_redesign/scripts/futures_lead/tests/test_commodity_market_only_curve_panel_v1.py",
+      "bytes": 3070,
+      "sha256": "83a9cf89634aad455341b41d8132a833bff86c54ae8e3104a39b89a59504a023"
+    },
+    {
+      "path": "tests/test_commodity_fast_tsmom_family_dev_v1.py",
+      "source_path": "research/entry_redesign/scripts/futures_lead/tests/test_commodity_fast_tsmom_family_dev_v1.py",
+      "bytes": 2988,
+      "sha256": "7a3a90d9a646b53067e28db4e282a4202f5c493a69b520176c51d16be98932e4"
+    },
+    {
+      "path": "tests/test_commodity_fast_tsmom_self_financing_sidecar_v1.py",
+      "source_path": "research/entry_redesign/scripts/futures_lead/tests/test_commodity_fast_tsmom_self_financing_sidecar_v1.py",
+      "bytes": 6751,
+      "sha256": "443da25046028e7017bba22f5584a82ccb9bcba1fad3d1d3959ab972f700a4c2"
+    },
+    {
+      "path": "tests/test_commodity_candidate_lot_aware_safe_allocator_v1.py",
+      "source_path": "research/entry_redesign/scripts/futures_lead/tests/test_commodity_candidate_lot_aware_safe_allocator_v1.py",
+      "bytes": 4575,
+      "sha256": "0e9b17bfdcbbee8646f04c607c8bf9a2c49497f01c7f07a4b4dc68f36d7dd2fb"
+    },
+    {
+      "path": "tests/test_commodity_candidate_lot_aware_safe_allocator_guardband_v2.py",
+      "source_path": "research/entry_redesign/scripts/futures_lead/tests/test_commodity_candidate_lot_aware_safe_allocator_guardband_v2.py",
+      "bytes": 4219,
+      "sha256": "01e1b30834c813465d2555c5b2f5b1304f728a57b37a27e3bf6ef8c7f6c3069b"
+    },
+    {
+      "path": "freeze/freeze_contract.json",
+      "source_path": "research/entry_redesign/scripts/output/commodity_fast_tsmom_forward_freeze_v1_20260717/freeze_contract.json",
+      "bytes": 6923,
+      "sha256": "c1639d5f7714fd3989da799ece2743ca392ac8a8edad64a7f1238dd2e51c9d31"
+    },
+    {
+      "path": "freeze/manifest.json",
+      "source_path": "research/entry_redesign/scripts/output/commodity_fast_tsmom_forward_freeze_v1_20260717/manifest.json",
+      "bytes": 4790,
+      "sha256": "a76763f10d63e07c518de4604608c42e79ef912e8a8c159259b3100ef7947a66"
+    },
+    {
+      "path": "freeze/ABC_isolation_receipt.json",
+      "source_path": "research/entry_redesign/scripts/output/commodity_fast_tsmom_forward_freeze_v1_20260717/ABC_isolation_receipt.json",
+      "bytes": 549,
+      "sha256": "d506725509cad873f2438c9521da92d45aeb4092bf3271e498d381dcc110f699"
+    },
+    {
+      "path": "freeze/forward_collection_TEMPLATE.json",
+      "source_path": "research/entry_redesign/scripts/output/commodity_fast_tsmom_forward_freeze_v1_20260717/forward_collection_TEMPLATE.json",
+      "bytes": 1091,
+      "sha256": "25a4d88c439803d0cdd4a6fd444c95babff41b00fcbf4d326c678a9dd040a938"
+    },
+    {
+      "path": "freeze/report.md",
+      "source_path": "research/entry_redesign/scripts/output/commodity_fast_tsmom_forward_freeze_v1_20260717/report.md",
+      "bytes": 1579,
+      "sha256": "d35827d29d8f482ed56faab85eb59512bb879914baa23bf55af676a0df84781e"
+    }
+  ],
+  "excluded": [
+    "raw_market_data",
+    "historical_event_trade_position_or_pnl_ledgers",
+    "credentials_or_private_keys",
+    "signed_execution_targets",
+    "freeze_manifest_dependencies_outside_the_consumer_five_source_lineage"
+  ],
+  "authority": {
+    "acquisition_authorized": false,
+    "network_authorized": false,
+    "control_authorized": false,
+    "deployment_authorized": false,
+    "execution_authorized": false,
+    "shadow_authorized": false,
+    "simnow_authorized": false,
+    "dispatch_authorized": false,
+    "live_authorized": false,
+    "production_authorized": false
+  }
+}

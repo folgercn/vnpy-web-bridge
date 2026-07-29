@@ -40,6 +40,10 @@ receipt SHA256 claim 当成已验证事实，也绝不产生 #160 signing input�
   `scripts/commodity_c_fast_pure_producer_kernel.py`
 - typed source schema：
   `docs/schemas/commodity-c-fast-pit-frozen-source-view-v1.schema.json`
+- 原始研究源码与 freeze lineage 封存：
+  `docs/research/commodity-c-fast-lineage-v1/`
+- lineage 离线校验器：
+  `scripts/commodity_c_fast_lineage_verify.py`
 - golden、资源上限、raw-lot cap 与 #160 contract-separation 测试：
   `backend/tests/unit/test_commodity_c_fast_pure_producer_kernel.py`
 
