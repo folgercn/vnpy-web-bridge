@@ -306,6 +306,11 @@ group/world 不可写的真实目录；`open_or_create` 不会用 `parents=True`
 `O_DIRECTORY|O_NOFOLLOW` 打开并持有 dirfd，操作结束前复核 path 与 fd
 identity。root 创建或确认存在后立即 fsync pinned parent，再按
 root → ledger → entries 顺序逐级 fsync；任何 fsync 失败都不会报告成功。
+锁内所有 entries 枚举、读取、`O_EXCL` 创建、hard-link、unlink 和 fsync
+只接受 retained entries dirfd 与 basename，不重新解析 `entries` 绝对路径；
+每个关键阶段同时复核 retained fd 与 ledger dirfd 下当前 `entries` dirent。
+因此即使 `entries` 路径被瞬时替换后又恢复，I/O 仍只能落到原 retained
+directory，不能从 replacement 返回 `CREATED` 或有效 export。
 
 追加协议固定为：
 

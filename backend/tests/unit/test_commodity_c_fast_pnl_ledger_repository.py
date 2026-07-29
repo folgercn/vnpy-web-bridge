@@ -60,6 +60,26 @@ def _rehash_export(payload: dict) -> None:
     )
 
 
+def _call_during_transient_entries_swap(
+    entries_path: Path,
+    operation,
+):
+    detached = entries_path.with_name("entries-retained")
+    entries_path.rename(detached)
+    entries_path.mkdir(mode=0o700)
+    replacement_names: tuple[str, ...] = ()
+    try:
+        result = operation()
+        replacement_names = tuple(sorted(path.name for path in entries_path.iterdir()))
+        return result
+    finally:
+        for path in entries_path.iterdir():
+            path.unlink()
+        entries_path.rmdir()
+        detached.rename(entries_path)
+        assert replacement_names == ()
+
+
 def test_append_reopen_audit_and_exports_are_deterministic(
     tmp_path: Path,
 ) -> None:
@@ -121,8 +141,12 @@ def test_fixed_sequence_reservation_recovers_before_pending_write(
     entry = build()
     original_write = repository._write_reservation_create_only
 
-    def fail_after_reservation(path: Path, raw: bytes) -> None:
-        original_write(path, raw)
+    def fail_after_reservation(
+        entries_descriptor: int,
+        name: str,
+        raw: bytes,
+    ) -> None:
+        original_write(entries_descriptor, name, raw)
         raise RuntimeError("injected crash after reservation")
 
     monkeypatch.setattr(
@@ -157,13 +181,14 @@ def test_lock_rotation_cannot_commit_two_entries_for_same_sequence(
 
     def block_first_reservation(
         self: CommodityCFastPnlLedgerRepository,
-        path: Path,
+        entries_descriptor: int,
+        name: str,
         raw: bytes,
     ) -> None:
         if self is first:
             reached_reservation.set()
             assert allow_first_writer.wait(timeout=10)
-        original_write(self, path, raw)
+        original_write(self, entries_descriptor, name, raw)
 
     monkeypatch.setattr(
         CommodityCFastPnlLedgerRepository,
@@ -221,10 +246,11 @@ def test_lock_rotation_after_reservation_fails_closed_then_recovers(
 
     def rotate_after_reservation(
         self: CommodityCFastPnlLedgerRepository,
-        path: Path,
+        entries_descriptor: int,
+        name: str,
         raw: bytes,
     ) -> None:
-        original_write(self, path, raw)
+        original_write(self, entries_descriptor, name, raw)
         lock_path = tmp_path / LEDGER_ID / ".append.lock"
         lock_path.unlink()
         lock_path.touch(mode=0o600)
@@ -251,6 +277,95 @@ def test_lock_rotation_after_reservation_fails_closed_then_recovers(
         LEDGER_ID,
     )
     assert reopened.entries() == (entry,)
+
+
+@pytest.mark.parametrize(
+    ("method_name", "target_call"),
+    (
+        ("_write_reservation_create_only", 1),
+        ("_write_create_only", 1),
+        ("_promote_pending_create_only", 1),
+        ("_load_entries_locked", 2),
+    ),
+)
+def test_transient_entries_swap_cannot_redirect_append_io(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    method_name: str,
+    target_call: int,
+) -> None:
+    repository = CommodityCFastPnlLedgerRepository.open_or_create(
+        tmp_path,
+        LEDGER_ID,
+    )
+    entry = build()
+    entries_path = tmp_path / LEDGER_ID / "entries"
+    original = getattr(
+        CommodityCFastPnlLedgerRepository,
+        method_name,
+    )
+    calls = 0
+
+    def swap_around_target(self, *args, **kwargs):
+        nonlocal calls
+        if self is repository:
+            calls += 1
+            if calls == target_call:
+                return _call_during_transient_entries_swap(
+                    entries_path,
+                    lambda: original(self, *args, **kwargs),
+                )
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(
+        CommodityCFastPnlLedgerRepository,
+        method_name,
+        swap_around_target,
+    )
+
+    result = repository.append(entry.model_dump(mode="json"))
+
+    assert result.status == "CREATED"
+    assert calls >= target_call
+    assert repository.entries() == (entry,)
+    assert len(tuple(entries_path.glob("[0-9]*-*.json"))) == 1
+    assert len(tuple(entries_path.glob(".reservation-*.json"))) == 1
+
+
+def test_transient_entries_swap_cannot_redirect_export_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = CommodityCFastPnlLedgerRepository.open_or_create(
+        tmp_path,
+        LEDGER_ID,
+    )
+    entry = build()
+    repository.append(entry.model_dump(mode="json"))
+    entries_path = tmp_path / LEDGER_ID / "entries"
+    original = CommodityCFastPnlLedgerRepository._read_entry_file
+    swapped = False
+
+    def swap_around_first_read(self, *args, **kwargs):
+        nonlocal swapped
+        if self is repository and not swapped:
+            swapped = True
+            return _call_during_transient_entries_swap(
+                entries_path,
+                lambda: original(self, *args, **kwargs),
+            )
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(
+        CommodityCFastPnlLedgerRepository,
+        "_read_entry_file",
+        swap_around_first_read,
+    )
+
+    exported = repository.export()
+
+    assert swapped is True
+    assert tuple(exported.entries) == (entry,)
 
 
 def test_reopen_recovers_pending_before_and_after_final_link(
