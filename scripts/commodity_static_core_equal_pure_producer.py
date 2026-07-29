@@ -865,6 +865,86 @@ def verify_research_artifacts(result: ProducerResult) -> None:
     ):
         raise StaticCoreEqualProducerError("C/D signal identity mismatch")
 
+    c_signal_rows = {row["product"]: row for row in c_signals}
+    d_signal_rows = {row["product"]: row for row in d_signals}
+    try:
+        for product in cfast.PRODUCTS:
+            c_row = c_signal_rows[product]
+            c_vol = float(c_row["vol60_annualized"])
+            c_source_score = float(c_row["source_score"])
+            c_raw_risk_score = float(c_row["raw_risk_score"])
+            c_trend_sign_values = (
+                c_row["trend_21_sign"],
+                c_row["trend_63_sign"],
+                c_row["trend_126_sign"],
+            )
+            if any(
+                isinstance(value, bool) or not isinstance(value, int)
+                for value in c_trend_sign_values
+            ):
+                raise StaticCoreEqualProducerError(
+                    f"{product} C signal formula mismatch"
+                )
+            c_trend_signs = tuple(int(value) for value in c_trend_sign_values)
+            if (
+                not all(
+                    math.isfinite(value)
+                    for value in (c_vol, c_source_score, c_raw_risk_score)
+                )
+                or c_vol <= 0
+                or any(value not in {-1, 0, 1} for value in c_trend_signs)
+                or not math.isclose(
+                    c_source_score,
+                    math.fsum(c_trend_signs) / len(cfast.TREND_HORIZONS),
+                    rel_tol=0,
+                    abs_tol=1e-12,
+                )
+                or not math.isclose(
+                    c_raw_risk_score,
+                    c_source_score / max(c_vol, cfast.VOLATILITY_FLOOR),
+                    rel_tol=0,
+                    abs_tol=1e-12,
+                )
+            ):
+                raise StaticCoreEqualProducerError(
+                    f"{product} C signal formula mismatch"
+                )
+
+            d_row = d_signal_rows[product]
+            d_vol = float(d_row["vol60_annualized"])
+            d_state_value = d_row["state"]
+            if isinstance(d_state_value, bool) or not isinstance(
+                d_state_value, int
+            ):
+                raise StaticCoreEqualProducerError(
+                    f"{product} D signal formula mismatch"
+                )
+            d_state = int(d_state_value)
+            d_raw_risk_score = float(d_row["raw_risk_score"])
+            if (
+                not all(
+                    math.isfinite(value)
+                    for value in (d_vol, d_raw_risk_score)
+                )
+                or d_vol <= 0
+                or d_state not in {-1, 0, 1}
+                or not math.isclose(
+                    d_raw_risk_score,
+                    d_state / max(d_vol, cfast.VOLATILITY_FLOOR),
+                    rel_tol=0,
+                    abs_tol=1e-12,
+                )
+            ):
+                raise StaticCoreEqualProducerError(
+                    f"{product} D signal formula mismatch"
+                )
+    except StaticCoreEqualProducerError:
+        raise
+    except (KeyError, TypeError, ValueError, OverflowError) as exc:
+        raise StaticCoreEqualProducerError(
+            "C/D signal formula fields are invalid"
+        ) from exc
+
     rows = target.get("targets")
     if not isinstance(rows, list) or [
         row.get("product") for row in rows if isinstance(row, dict)
@@ -879,6 +959,48 @@ def verify_research_artifacts(result: ProducerResult) -> None:
     d_weights = {
         row["product"]: float(row["D_source_target_weight"]) for row in rows
     }
+    expected_c_weights = cfast._cap_source_weights(
+        {
+            product: float(c_signal_rows[product]["raw_risk_score"])
+            for product in cfast.PRODUCTS
+        }
+    )
+    expected_d_weights = cfast._cap_source_weights(
+        {
+            product: float(d_signal_rows[product]["raw_risk_score"])
+            for product in cfast.PRODUCTS
+        }
+    )
+    if any(
+        not math.isclose(
+            c_weights[product],
+            expected_c_weights[product],
+            rel_tol=0,
+            abs_tol=1e-12,
+        )
+        or not math.isclose(
+            d_weights[product],
+            expected_d_weights[product],
+            rel_tol=0,
+            abs_tol=1e-12,
+        )
+        or c_signal_rows[product].get("pit_main_exact_contract")
+        != next(
+            row["exact_contract"]
+            for row in rows
+            if row["product"] == product
+        )
+        or d_signal_rows[product].get("pit_main_exact_contract")
+        != next(
+            row["exact_contract"]
+            for row in rows
+            if row["product"] == product
+        )
+        for product in cfast.PRODUCTS
+    ):
+        raise StaticCoreEqualProducerError(
+            "C/D signal-to-target binding mismatch"
+        )
     expected_contributions, expected_source = (
         formula.build_composite_source_target(c_weights, d_weights)
     )

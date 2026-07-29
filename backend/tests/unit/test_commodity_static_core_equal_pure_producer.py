@@ -213,6 +213,35 @@ def test_missing_or_tampered_output_fails_independent_verification() -> None:
         producer.verify_research_artifacts(tampered)
 
 
+@pytest.mark.parametrize("sleeve", ["C", "D"])
+def test_signal_risk_score_is_bound_to_formula_and_target_sleeve(
+    sleeve: str,
+) -> None:
+    result = producer.produce_research_artifacts(source_view())
+    signal = json.loads(result.artifacts["signal_evidence"])
+    signal[f"{sleeve}_signals"][0]["raw_risk_score"] += 0.125
+
+    tampered_artifacts = dict(result.artifacts)
+    tampered_artifacts["signal_evidence"] = producer.canonical_json(signal)
+    tampered_projection = dict(result.producer_projection)
+    tampered_projection["artifact_digests"] = [
+        {"role": role, "sha256": hashlib.sha256(raw).hexdigest()}
+        for role, raw in tampered_artifacts.items()
+    ]
+    tampered = producer.ProducerResult(
+        status=result.status,
+        source_view_canonical_sha256=result.source_view_canonical_sha256,
+        artifacts=tampered_artifacts,
+        producer_projection=tampered_projection,
+    )
+
+    with pytest.raises(
+        producer.StaticCoreEqualProducerError,
+        match=rf"{sleeve} signal formula mismatch",
+    ):
+        producer.verify_research_artifacts(tampered)
+
+
 def test_code_identity_tamper_fails_before_source_calculation(monkeypatch) -> None:
     monkeypatch.setattr(producer, "D_FORMULA_CODE_SHA256", "0" * 64)
     with pytest.raises(
