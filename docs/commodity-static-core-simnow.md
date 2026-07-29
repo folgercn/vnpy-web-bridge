@@ -177,8 +177,10 @@ authority 验证的有界 PIT view，独立重算 21/126 日 sample vol、scale�
 guardband 及 20m beam allocator，并输出未签名 draft 与 Authority=false
 evidence；详见
 [MONTHLY_RELATIVE_VOL_THERMOSTAT_V1 纯 Research producer](operations/commodity-relative-vol-snapshot-producer-v1.md)。
-producer 自身不验证 source sealing 或 Ed25519 签名，也不会自动签名、安装或
-派单。
+producer 要求完整 official-calendar 自然日 binding 并证明收益严格等于 as-of
+最近 126 个 official days，同时绑定 linked baseline batch/逐产品 previous
+目标和实际 frozen allocator kernel bytes；但它自身不验证 #181 calendar/source
+sealing 或 Ed25519 签名，也不会自动签名、安装或派单。
 
 ## 主力切换与到期保护
 

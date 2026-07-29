@@ -21,19 +21,32 @@ snapshot，也不连接 Trade、RPC、Gateway 或订单接口。真实 sealed da
 - baseline 必须是完整的 `commodity_static_core_equal_target_batch_v2`；
 - producer 只重算与现有 verifier 相同的 unsigned canonical payload SHA256，
   并核对 `baseline_batch_hash`，不验证 Ed25519 签名；
-- official day 和 baseline daily return 必须逐日一一对应、严格递增且恰好
-  126 行；所有日期必须不晚于 source month 截止日并严格早于执行日；
+- `official_calendar` 必须携带 source identity、完整自然日开闭市 rows、
+  `research_as_of_official_day`、rows SHA256、lineage 和 claimed receipt；
+  rows 从 `query_start` 到 source month 截止日必须逐自然日连续，不能靠任意
+  固定天数 heuristic 猜测是否缺日；
+- producer 从完整 calendar rows 派生截至 as-of 的最近 126 个 official
+  days；official day 和 baseline daily return 必须与这 126 天逐日一一对应。
+  整段滞后、末尾漏日、calendar hash tamper 或自然日 gap 均拒绝；
 - `cutoff_at` 必须落在 source month 最后一个自然日，
   `generated_at` 必须落在 baseline execution day；
 - baseline source target、guardband 和冻结 20m beam allocator 必须可独立
   重放，任一 buffered weight 或整数手数不一致即拒绝；
-- 正式 genesis 只允许 `source_month=2026-08`、无 previous snapshot；
+- 正式 genesis 只允许 `source_month=2026-08`、无 previous snapshot，同时
+  baseline `previous_batch_hash=null`，十品种 previous contract 均为 null、
+  previous quantity 均为 0；
 - linked 必须携带完整上一期签名 snapshot 和声明 hash。producer 重算
-  previous unsigned canonical hash，并核对相邻月份及 previous smoothed scale；
-- SimNow shakedown 使用隔离 genesis，不读取或推进正式连续性链。
+  previous unsigned canonical hash，并核对相邻月份、previous smoothed scale、
+  当前 baseline `previous_batch_hash` 与上一 snapshot `baseline_batch_hash`；
+  当前十品种 previous contract/quantity 必须逐项等于上一 snapshot 的
+  exact contract/baseline quantity；
+- SimNow shakedown 使用隔离 genesis，不读取或推进正式 position-manager
+  连续性链，也不把其 baseline 自身 chain 重新解释成正式 shadow chain。
 
 baseline/previous snapshot 的签名字节只做 base64 及 64-byte 形状检查。输入边界
 必须在调用 producer 前完成真实签名、receipt、keyring 和 custody 验证。
+calendar authority 同样不由 producer 自证，仍必须由 sealed #181 边界验证；
+evidence 固定声明 `calendar_authority_verified_by_producer=false`。
 
 ## 冻结计算
 
@@ -62,6 +75,11 @@ baseline 与 shadow 都重新执行冻结 guardband：
 分别生成 baseline/shadow 整数目标。baseline 重算结果必须与输入签名批次的手数
 逐品种一致。
 
+producer 在任何 source 计算前读取实际
+`commodity_c_fast_pure_producer_kernel.py` bytes，并核对冻结 SHA256
+`23539d801d6ee9ddccd0371c3793282eeedf63b13dd442f9447adc795bc1d995`。
+仅有自报 lineage 不足以通过；本地 kernel bytes 漂移即 fail closed。
+
 ## 运行
 
 ```bash
@@ -89,10 +107,15 @@ PYTHONPATH=backend python scripts/commodity_position_manager_shadow_sign.py \
 
 下列任一情况都不会生成输出：
 
-- 未来日、少于或多于 126 行、官方日与收益不对齐；
+- 未来日、少于或多于 126 行、收益不等于 calendar 最近 126 official days；
+- calendar query window/as-of/source identity 不一致、自然日缺口、末尾漏日、
+  rows hash tamper；
 - 零波动、NaN、Infinity、非法日期或重复 JSON key；
 - baseline canonical hash、guardband、合约规格或整数 allocator 不一致；
-- linked previous hash、月份或 previous scale 断裂；
+- linked previous hash、月份、previous scale、baseline batch hash、逐产品
+  previous contract/quantity 断裂；
+- 正式 genesis 携带非冷启动 baseline chain；
+- 实际 C_FAST kernel source bytes SHA256 与冻结 pin 不一致；
 - 冻结产品、sector map、NAV、lookback、scale 或 smoothing identity 变化；
 - 输入超过 4 MiB、输出路径已存在。
 

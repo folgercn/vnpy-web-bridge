@@ -19,7 +19,7 @@ import base64
 import binascii
 import calendar
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 import hashlib
 import json
 import math
@@ -48,6 +48,9 @@ POSITION_MANAGER_ID = "MONTHLY_RELATIVE_VOL_THERMOSTAT_V1"
 BASELINE_SCHEDULER_ID = "STATIC_CORE_EQUAL"
 SECTOR_MAP_ID = "POSITION_MANAGER_SECTOR_MAP_V1"
 GENESIS_SOURCE_MONTH = "2026-08"
+C_FAST_KERNEL_CODE_SHA256 = (
+    "23539d801d6ee9ddccd0371c3793282eeedf63b13dd442f9447adc795bc1d995"
+)
 
 FAST_LOOKBACK_DAYS = 21
 SLOW_LOOKBACK_DAYS = 126
@@ -58,6 +61,7 @@ SCALE_MAX = 1.2
 SMOOTHING_ALPHA = 0.5
 
 MAX_SOURCE_VIEW_RAW_BYTES = 4 * 1024 * 1024
+MAX_CALENDAR_ROWS = 512
 CHINA_TZ = ZoneInfo("Asia/Shanghai")
 ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{8,128}$")
 KEY_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
@@ -159,6 +163,23 @@ PREVIOUS_TARGET_FIELDS = {
     "multiplier",
     "price_tick",
 }
+OFFICIAL_CALENDAR_FIELDS = {
+    "binding_id",
+    "source_class",
+    "source_identity",
+    "exchange_scope",
+    "query_start",
+    "query_end",
+    "research_as_of_official_day",
+    "calendar_rows",
+    "calendar_rows_sha256",
+    "lineage_sha256",
+    "claimed_receipt_sha256",
+}
+OFFICIAL_CALENDAR_ROW_FIELDS = {
+    "calendar_day",
+    "is_official_day",
+}
 
 
 class SnapshotProducerError(ValueError):
@@ -190,6 +211,26 @@ def canonical_json(payload: Any) -> bytes:
 
 def _sha256(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
+
+
+def _frozen_kernel_path() -> Path:
+    return Path(__file__).resolve().with_name(
+        "commodity_c_fast_pure_producer_kernel.py"
+    )
+
+
+def _verify_frozen_kernel_identity() -> str:
+    try:
+        observed = _sha256(_frozen_kernel_path().read_bytes())
+    except OSError as exc:
+        raise SnapshotProducerError(
+            "frozen C_FAST kernel source cannot be read"
+        ) from exc
+    if observed != C_FAST_KERNEL_CODE_SHA256:
+        raise SnapshotProducerError(
+            "frozen C_FAST kernel source code identity mismatch"
+        )
+    return observed
 
 
 def _reject_json_constant(value: str) -> None:
@@ -231,6 +272,16 @@ def _bounded_source_input(
         raise SnapshotProducerError(
             "source view must be one mapping or bounded JSON bytes"
         )
+    raw_calendar = source.get("official_calendar")
+    if isinstance(raw_calendar, dict):
+        raw_calendar_rows = raw_calendar.get("calendar_rows")
+        if (
+            isinstance(raw_calendar_rows, list)
+            and len(raw_calendar_rows) > MAX_CALENDAR_ROWS
+        ):
+            raise SnapshotProducerError(
+                "official calendar rows exceed resource limit"
+            )
     if len(canonical_json(source)) > MAX_SOURCE_VIEW_RAW_BYTES:
         raise SnapshotProducerError("source-view canonical bytes exceeds resource limit")
     return source
@@ -377,11 +428,135 @@ def _sample_annual_vol(values: list[float], label: str) -> float:
     return annual_vol
 
 
+def _validate_official_calendar(
+    raw_calendar: Any,
+    *,
+    source_month: str,
+    input_cutoff_day: date,
+    execution_day: date,
+) -> tuple[dict[str, Any], list[date]]:
+    calendar_binding = _exact_object(
+        raw_calendar,
+        OFFICIAL_CALENDAR_FIELDS,
+        "official_calendar",
+    )
+    binding_id = _stable_id(
+        calendar_binding["binding_id"], "official_calendar.binding_id"
+    )
+    if calendar_binding["source_class"] != "OFFICIAL_TRADING_CALENDAR":
+        raise SnapshotProducerError("official calendar source class mismatch")
+    source_identity = _stable_id(
+        calendar_binding["source_identity"],
+        "official_calendar.source_identity",
+    )
+    if calendar_binding["exchange_scope"] != "SHFE_INE":
+        raise SnapshotProducerError("official calendar exchange scope mismatch")
+    query_start = _iso_date(
+        calendar_binding["query_start"], "official_calendar.query_start"
+    )
+    query_end = _iso_date(
+        calendar_binding["query_end"], "official_calendar.query_end"
+    )
+    if query_end != input_cutoff_day or query_start > query_end:
+        raise SnapshotProducerError(
+            "official calendar query window does not end at the PIT cutoff"
+        )
+    research_as_of = _iso_date(
+        calendar_binding["research_as_of_official_day"],
+        "official_calendar.research_as_of_official_day",
+    )
+    if (
+        research_as_of >= execution_day
+        or research_as_of > input_cutoff_day
+        or research_as_of.strftime("%Y-%m") != source_month
+    ):
+        raise SnapshotProducerError(
+            "official calendar research as-of is stale or outside source month"
+        )
+    raw_rows = calendar_binding["calendar_rows"]
+    if not isinstance(raw_rows, list) or not (
+        SLOW_LOOKBACK_DAYS <= len(raw_rows) <= MAX_CALENDAR_ROWS
+    ):
+        raise SnapshotProducerError(
+            "official calendar row count is outside the bounded contract"
+        )
+    normalized_rows: list[dict[str, Any]] = []
+    official_dates: list[date] = []
+    for index, raw_row in enumerate(raw_rows):
+        row = _exact_object(
+            raw_row,
+            OFFICIAL_CALENDAR_ROW_FIELDS,
+            f"official_calendar.calendar_rows[{index}]",
+        )
+        calendar_day = _iso_date(
+            row["calendar_day"],
+            f"official_calendar.calendar_rows[{index}].calendar_day",
+        )
+        expected_day = query_start + timedelta(days=index)
+        if calendar_day != expected_day:
+            raise SnapshotProducerError(
+                "official calendar rows have a natural-day gap"
+            )
+        if not isinstance(row["is_official_day"], bool):
+            raise SnapshotProducerError(
+                "official calendar open-state must be boolean"
+            )
+        normalized_rows.append(
+            {
+                "calendar_day": calendar_day.isoformat(),
+                "is_official_day": row["is_official_day"],
+            }
+        )
+        if row["is_official_day"]:
+            official_dates.append(calendar_day)
+    if normalized_rows[-1]["calendar_day"] != query_end.isoformat():
+        raise SnapshotProducerError(
+            "official calendar rows do not cover the complete query window"
+        )
+    claimed_rows_hash = _sha256_text(
+        calendar_binding["calendar_rows_sha256"],
+        "official_calendar.calendar_rows_sha256",
+    )
+    if _sha256(canonical_json(normalized_rows)) != claimed_rows_hash:
+        raise SnapshotProducerError("official calendar rows hash tamper detected")
+    if len(official_dates) < SLOW_LOOKBACK_DAYS:
+        raise SnapshotProducerError(
+            "official calendar does not contain 126 completed official days"
+        )
+    if official_dates[-1] != research_as_of:
+        raise SnapshotProducerError(
+            "official calendar research as-of is not the latest official day"
+        )
+    lineage_sha256 = _sha256_text(
+        calendar_binding["lineage_sha256"],
+        "official_calendar.lineage_sha256",
+    )
+    claimed_receipt_sha256 = _sha256_text(
+        calendar_binding["claimed_receipt_sha256"],
+        "official_calendar.claimed_receipt_sha256",
+    )
+    normalized = {
+        "binding_id": binding_id,
+        "source_class": "OFFICIAL_TRADING_CALENDAR",
+        "source_identity": source_identity,
+        "exchange_scope": "SHFE_INE",
+        "query_start": query_start.isoformat(),
+        "query_end": query_end.isoformat(),
+        "research_as_of_official_day": research_as_of.isoformat(),
+        "calendar_rows": normalized_rows,
+        "calendar_rows_sha256": claimed_rows_hash,
+        "lineage_sha256": lineage_sha256,
+        "claimed_receipt_sha256": claimed_receipt_sha256,
+    }
+    return normalized, official_dates[-SLOW_LOOKBACK_DAYS:]
+
+
 def _validate_daily_returns(
     source: dict[str, Any],
     *,
     input_cutoff_day: date,
     execution_day: date,
+    expected_official_days: list[date],
 ) -> tuple[list[dict[str, Any]], list[float]]:
     raw_official_days = source["official_days"]
     raw_returns = source["baseline_daily_returns"]
@@ -409,6 +584,10 @@ def _validate_daily_returns(
     ):
         raise SnapshotProducerError(
             "daily returns contain lookahead beyond the strict PIT cutoff"
+        )
+    if official_days != expected_official_days:
+        raise SnapshotProducerError(
+            "daily returns are not the calendar's most recent 126 official days"
         )
 
     normalized: list[dict[str, Any]] = []
@@ -613,7 +792,7 @@ def _validate_previous_snapshot(
     *,
     claimed_hash: str,
     current_source_month: str,
-) -> tuple[str, float]:
+) -> dict[str, Any]:
     snapshot = _exact_object(
         raw_snapshot, PREVIOUS_SNAPSHOT_FIELDS, "continuity.previous_snapshot"
     )
@@ -721,6 +900,7 @@ def _validate_previous_snapshot(
     if not isinstance(raw_targets, list) or len(raw_targets) != len(frozen.PRODUCTS):
         raise SnapshotProducerError("previous snapshot targets are incomplete")
     target_products: set[str] = set()
+    targets_by_product: dict[str, dict[str, Any]] = {}
     for index, raw_target in enumerate(raw_targets):
         target = _exact_object(
             raw_target,
@@ -733,6 +913,7 @@ def _validate_previous_snapshot(
                 "previous snapshot target product set is invalid"
             )
         target_products.add(product)
+        targets_by_product[product] = dict(target)
         spec = frozen.PRODUCT_SPECS[product]
         _exact_contract(
             target["exact_contract"],
@@ -778,7 +959,57 @@ def _validate_previous_snapshot(
     )
     if _sha256(canonical_payload) != claimed_hash:
         raise SnapshotProducerError("previous snapshot hash tamper detected")
-    return previous_month, smoothed_scale
+    return {
+        "source_month": previous_month,
+        "smoothed_scale": smoothed_scale,
+        "baseline_batch_hash": str(snapshot["baseline_batch_hash"]),
+        "targets": targets_by_product,
+    }
+
+
+def _verify_formal_genesis_baseline_chain(
+    batch: dict[str, Any],
+    baseline_rows: dict[str, dict[str, Any]],
+) -> None:
+    if batch["previous_batch_hash"] is not None:
+        raise SnapshotProducerError(
+            "formal genesis baseline previous batch hash must be null"
+        )
+    for product in frozen.PRODUCTS:
+        row = baseline_rows[product]
+        if (
+            row["previous_exact_contract"] is not None
+            or row["previous_target_quantity"] != 0
+        ):
+            raise SnapshotProducerError(
+                f"formal genesis baseline previous target must be cold for {product}"
+            )
+
+
+def _verify_linked_baseline_chain(
+    batch: dict[str, Any],
+    baseline_rows: dict[str, dict[str, Any]],
+    previous_snapshot: dict[str, Any],
+) -> None:
+    if batch["previous_batch_hash"] != previous_snapshot["baseline_batch_hash"]:
+        raise SnapshotProducerError(
+            "linked baseline previous batch hash does not match previous snapshot"
+        )
+    previous_targets = previous_snapshot["targets"]
+    for product in frozen.PRODUCTS:
+        current = baseline_rows[product]
+        previous = previous_targets[product]
+        if current["previous_exact_contract"] != previous["exact_contract"]:
+            raise SnapshotProducerError(
+                f"linked baseline previous exact contract mismatch for {product}"
+            )
+        if (
+            current["previous_target_quantity"]
+            != previous["baseline_target_quantity"]
+        ):
+            raise SnapshotProducerError(
+                f"linked baseline previous target quantity mismatch for {product}"
+            )
 
 
 def _allocation_projection(allocation: frozen.Allocation) -> dict[str, Any]:
@@ -800,6 +1031,7 @@ def produce_snapshot(
 ) -> ProducerResult:
     """Produce deterministic unsigned snapshot and non-authoritative evidence."""
 
+    frozen_kernel_code_sha256 = _verify_frozen_kernel_identity()
     source = _bounded_source_input(source_view)
     source = _exact_object(
         source,
@@ -811,6 +1043,7 @@ def produce_snapshot(
             "snapshot_id",
             "generated_at",
             "cutoff_at",
+            "official_calendar",
             "official_days",
             "baseline_daily_returns",
             "baseline_batch_hash",
@@ -853,10 +1086,17 @@ def produce_snapshot(
         raise SnapshotProducerError(
             "source view must be generated on the baseline execution day"
         )
+    normalized_calendar, expected_official_days = _validate_official_calendar(
+        source["official_calendar"],
+        source_month=source_month,
+        input_cutoff_day=input_cutoff_day,
+        execution_day=execution_day,
+    )
     normalized_returns, daily_return_values = _validate_daily_returns(
         source,
         input_cutoff_day=input_cutoff_day,
         execution_day=execution_day,
+        expected_official_days=expected_official_days,
     )
 
     continuity = _exact_object(
@@ -867,6 +1107,7 @@ def produce_snapshot(
     mode = str(continuity["mode"])
     previous_snapshot_hash: str | None
     previous_smoothed_scale: float
+    baseline_chain_rule: str
     if batch["execution_lane"] == "simnow_shakedown":
         if (
             mode != "genesis"
@@ -878,6 +1119,9 @@ def produce_snapshot(
             )
         previous_snapshot_hash = None
         previous_smoothed_scale = 1.0
+        baseline_chain_rule = (
+            "SIMNOW_ISOLATED_POSITION_MANAGER_CHAIN_BASELINE_CHAIN_NOT_REINTERPRETED"
+        )
     elif mode == "genesis":
         if (
             source_month != GENESIS_SOURCE_MONTH
@@ -887,6 +1131,8 @@ def produce_snapshot(
             raise SnapshotProducerError("formal genesis continuity declaration is invalid")
         previous_snapshot_hash = None
         previous_smoothed_scale = 1.0
+        _verify_formal_genesis_baseline_chain(batch, baseline_rows)
+        baseline_chain_rule = "FORMAL_GENESIS_COLD_BASELINE_REQUIRED"
     elif mode == "linked":
         previous_snapshot_hash = _sha256_text(
             continuity["previous_snapshot_hash"],
@@ -894,10 +1140,19 @@ def produce_snapshot(
         )
         if continuity["previous_snapshot"] is None:
             raise SnapshotProducerError("linked continuity proof is missing")
-        _, previous_smoothed_scale = _validate_previous_snapshot(
+        previous_snapshot = _validate_previous_snapshot(
             continuity["previous_snapshot"],
             claimed_hash=previous_snapshot_hash,
             current_source_month=source_month,
+        )
+        previous_smoothed_scale = float(previous_snapshot["smoothed_scale"])
+        _verify_linked_baseline_chain(
+            batch,
+            baseline_rows,
+            previous_snapshot,
+        )
+        baseline_chain_rule = (
+            "FORMAL_LINKED_EXACT_PREVIOUS_BASELINE_REQUIRED"
         )
     else:
         raise SnapshotProducerError("continuity mode must be genesis or linked")
@@ -1013,6 +1268,11 @@ def produce_snapshot(
         "source_view_status_claim": SOURCE_STATUS,
         "sealed_source_view_verified_by_producer": False,
         "daily_return_source_authority_verified_by_producer": False,
+        "frozen_kernel_code_identity": {
+            "source_file": "commodity_c_fast_pure_producer_kernel.py",
+            "actual_source_bytes_sha256": frozen_kernel_code_sha256,
+            "pinned_source_bytes_sha256": C_FAST_KERNEL_CODE_SHA256,
+        },
         "baseline_batch_hash": baseline_batch_hash,
         "baseline_batch_hash_validation": (
             "CANONICAL_UNSIGNED_PAYLOAD_HASH_MATCH_ONLY"
@@ -1030,6 +1290,26 @@ def produce_snapshot(
         "daily_return_evidence_sha256": _sha256(
             canonical_json(normalized_returns)
         ),
+        "official_calendar": {
+            "binding_id": normalized_calendar["binding_id"],
+            "source_identity": normalized_calendar["source_identity"],
+            "exchange_scope": normalized_calendar["exchange_scope"],
+            "query_start": normalized_calendar["query_start"],
+            "query_end": normalized_calendar["query_end"],
+            "research_as_of_official_day": normalized_calendar[
+                "research_as_of_official_day"
+            ],
+            "calendar_rows_sha256": normalized_calendar[
+                "calendar_rows_sha256"
+            ],
+            "lineage_sha256": normalized_calendar["lineage_sha256"],
+            "claimed_receipt_sha256": normalized_calendar[
+                "claimed_receipt_sha256"
+            ],
+            "latest_126_alignment_verified": True,
+            "calendar_authority_verified_by_producer": False,
+            "sealed_issue_181_verification_required": True,
+        },
         "daily_return_count": len(normalized_returns),
         "fast_lookback_days": FAST_LOOKBACK_DAYS,
         "slow_lookback_days": SLOW_LOOKBACK_DAYS,
@@ -1044,6 +1324,7 @@ def produce_snapshot(
         "previous_snapshot_hash": previous_snapshot_hash,
         "continuity_proof_present": mode == "genesis"
         or continuity["previous_snapshot"] is not None,
+        "baseline_chain_rule": baseline_chain_rule,
         "guardband": {
             "lineage_sha256": frozen.LINEAGE["guardband_v2_source_sha256"],
             "product": frozen.BUFFER_LIMITS["product"],

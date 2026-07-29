@@ -12,6 +12,7 @@
     "snapshot_id",
     "generated_at",
     "cutoff_at",
+    "official_calendar",
     "official_days",
     "baseline_daily_returns",
     "baseline_batch_hash",
@@ -41,6 +42,9 @@
     "cutoff_at": {
       "type": "string",
       "format": "date-time"
+    },
+    "official_calendar": {
+      "$ref": "#/$defs/official_calendar"
     },
     "official_days": {
       "type": "array",
@@ -112,6 +116,83 @@
         },
         "daily_return": {
           "type": "number"
+        }
+      }
+    },
+    "official_calendar_row": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "calendar_day",
+        "is_official_day"
+      ],
+      "properties": {
+        "calendar_day": {
+          "type": "string",
+          "format": "date"
+        },
+        "is_official_day": {
+          "type": "boolean"
+        }
+      }
+    },
+    "official_calendar": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "binding_id",
+        "source_class",
+        "source_identity",
+        "exchange_scope",
+        "query_start",
+        "query_end",
+        "research_as_of_official_day",
+        "calendar_rows",
+        "calendar_rows_sha256",
+        "lineage_sha256",
+        "claimed_receipt_sha256"
+      ],
+      "properties": {
+        "binding_id": {
+          "$ref": "#/$defs/stable_id"
+        },
+        "source_class": {
+          "const": "OFFICIAL_TRADING_CALENDAR"
+        },
+        "source_identity": {
+          "$ref": "#/$defs/stable_id"
+        },
+        "exchange_scope": {
+          "const": "SHFE_INE"
+        },
+        "query_start": {
+          "type": "string",
+          "format": "date"
+        },
+        "query_end": {
+          "type": "string",
+          "format": "date"
+        },
+        "research_as_of_official_day": {
+          "type": "string",
+          "format": "date"
+        },
+        "calendar_rows": {
+          "type": "array",
+          "minItems": 126,
+          "maxItems": 512,
+          "items": {
+            "$ref": "#/$defs/official_calendar_row"
+          }
+        },
+        "calendar_rows_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "lineage_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "claimed_receipt_sha256": {
+          "$ref": "#/$defs/sha256"
         }
       }
     },
@@ -604,6 +685,7 @@
   },
   "x-vnpy-resource-limits": {
     "max_raw_bytes": 4194304,
+    "max_calendar_rows": 512,
     "official_daily_returns": 126,
     "baseline_targets": 10
   }

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import base64
+import calendar
 from copy import deepcopy
 from datetime import date, timedelta
 import hashlib
@@ -77,11 +78,54 @@ def _returns(*, fast_amplitude: float = 0.015) -> list[float]:
     return values
 
 
+def _official_calendar(cutoff_day: date) -> tuple[dict, list[date]]:
+    history = _weekdays_ending(cutoff_day, 140)
+    query_start = history[0]
+    rows: list[dict] = []
+    current = query_start
+    while current <= cutoff_day:
+        rows.append(
+            {
+                "calendar_day": current.isoformat(),
+                "is_official_day": current.weekday() < 5,
+            }
+        )
+        current += timedelta(days=1)
+    official_days = [
+        date.fromisoformat(row["calendar_day"])
+        for row in rows
+        if row["is_official_day"]
+    ]
+    return (
+        {
+            "binding_id": f"official-calendar-{cutoff_day.isoformat()}-a01",
+            "source_class": "OFFICIAL_TRADING_CALENDAR",
+            "source_identity": "official-shfe-ine-calendar-v1",
+            "exchange_scope": "SHFE_INE",
+            "query_start": query_start.isoformat(),
+            "query_end": cutoff_day.isoformat(),
+            "research_as_of_official_day": official_days[-1].isoformat(),
+            "calendar_rows": rows,
+            "calendar_rows_sha256": hashlib.sha256(
+                producer.canonical_json(rows)
+            ).hexdigest(),
+            "lineage_sha256": hashlib.sha256(
+                b"official-calendar-lineage"
+            ).hexdigest(),
+            "claimed_receipt_sha256": hashlib.sha256(
+                b"official-calendar-receipt"
+            ).hexdigest(),
+        },
+        official_days,
+    )
+
+
 def _baseline_batch(
     *,
     source_month: str,
     execution_day: date,
     previous_batch_hash: str | None = None,
+    execution_lane: str = "official_forward",
 ) -> tuple[dict, str]:
     buffered = producer.frozen._buffer_weights(SOURCE_WEIGHTS)
     unit_weights = {
@@ -123,7 +167,7 @@ def _baseline_batch(
         "batch_id": f"batch-{execution_day.isoformat()}-static-core",
         "scheduler_id": "STATIC_CORE_EQUAL",
         "source_combination_arm": "CORE_EQUAL_TARGET",
-        "execution_lane": "official_forward",
+        "execution_lane": execution_lane,
         "source_month": source_month,
         "execution_day": execution_day.isoformat(),
         "virtual_nav_cny": 20_000_000,
@@ -162,19 +206,22 @@ def source_view(
     previous_snapshot: dict | None = None,
     previous_snapshot_hash: str | None = None,
     previous_batch_hash: str | None = None,
+    execution_lane: str = "official_forward",
 ) -> dict:
     year, month = (int(item) for item in source_month.split("-"))
     cutoff_day = date(
         year,
         month,
-        __import__("calendar").monthrange(year, month)[1],
+        calendar.monthrange(year, month)[1],
     )
-    official_days = _weekdays_ending(cutoff_day, producer.SLOW_LOOKBACK_DAYS)
+    official_calendar, calendar_official_days = _official_calendar(cutoff_day)
+    official_days = calendar_official_days[-producer.SLOW_LOOKBACK_DAYS :]
     values = _returns(fast_amplitude=fast_amplitude)
     baseline, baseline_hash = _baseline_batch(
         source_month=source_month,
         execution_day=execution_day,
         previous_batch_hash=previous_batch_hash,
+        execution_lane=execution_lane,
     )
     return {
         "schema_version": producer.SOURCE_SCHEMA_VERSION,
@@ -184,6 +231,7 @@ def source_view(
         "snapshot_id": f"relative-vol-shadow-{execution_day.isoformat()}-a01",
         "generated_at": f"{execution_day.isoformat()}T09:00:00+08:00",
         "cutoff_at": f"{cutoff_day.isoformat()}T15:00:00+08:00",
+        "official_calendar": official_calendar,
         "official_days": [item.isoformat() for item in official_days],
         "baseline_daily_returns": [
             {
@@ -230,6 +278,13 @@ def _rehash_baseline(source: dict) -> None:
         producer.canonical_json(
             {key: value for key, value in batch.items() if key != "signature"}
         )
+    ).hexdigest()
+
+
+def _rehash_calendar(source: dict) -> None:
+    official_calendar = source["official_calendar"]
+    official_calendar["calendar_rows_sha256"] = hashlib.sha256(
+        producer.canonical_json(official_calendar["calendar_rows"])
     ).hexdigest()
 
 
@@ -285,6 +340,23 @@ def test_golden_snapshot_is_deterministic_lagged_and_non_authoritative() -> None
         "CANONICAL_UNSIGNED_PAYLOAD_HASH_MATCH_ONLY"
     )
     assert evidence["baseline_batch_signature_verified_by_producer"] is False
+    assert evidence["frozen_kernel_code_identity"] == {
+        "source_file": "commodity_c_fast_pure_producer_kernel.py",
+        "actual_source_bytes_sha256": producer.C_FAST_KERNEL_CODE_SHA256,
+        "pinned_source_bytes_sha256": producer.C_FAST_KERNEL_CODE_SHA256,
+    }
+    assert evidence["official_calendar"]["latest_126_alignment_verified"] is True
+    assert (
+        evidence["official_calendar"]["calendar_authority_verified_by_producer"]
+        is False
+    )
+    assert (
+        evidence["official_calendar"]["sealed_issue_181_verification_required"]
+        is True
+    )
+    assert evidence["baseline_chain_rule"] == (
+        "FORMAL_GENESIS_COLD_BASELINE_REQUIRED"
+    )
     assert evidence["guardband"]["lineage_sha256"] == (
         producer.frozen.LINEAGE["guardband_v2_source_sha256"]
     )
@@ -342,6 +414,25 @@ def test_linked_continuity_matches_existing_snapshot_contract() -> None:
     )
     assert snapshot["source_month"] == "2026-09"
     assert snapshot["execution_day"] == "2026-10-01"
+    current_ag = next(
+        row
+        for row in source["baseline_batch"]["targets"]
+        if row["product"] == "ag"
+    )
+    previous_ag = next(
+        row
+        for row in source["continuity"]["previous_snapshot"]["targets"]
+        if row["product"] == "ag"
+    )
+    assert current_ag["previous_target_quantity"] == previous_ag[
+        "baseline_target_quantity"
+    ]
+    assert current_ag["previous_target_quantity"] != previous_ag[
+        "shadow_target_quantity"
+    ]
+    assert json.loads(result.evidence)["baseline_chain_rule"] == (
+        "FORMAL_LINKED_EXACT_PREVIOUS_BASELINE_REQUIRED"
+    )
 
 
 def test_generated_genesis_and_linked_drafts_pass_existing_consumer_verifier() -> None:
@@ -431,6 +522,100 @@ def test_missing_lookahead_and_baseline_tamper_fail_closed(
         producer.produce_snapshot(source)
 
 
+def test_stale_return_window_cannot_pose_as_latest_126_official_days() -> None:
+    source = source_view()
+    stale_days = [
+        (date.fromisoformat(value) - timedelta(days=365)).isoformat()
+        for value in source["official_days"]
+    ]
+    source["official_days"] = stale_days
+    for row, stale_day in zip(source["baseline_daily_returns"], stale_days):
+        row["official_day"] = stale_day
+
+    with pytest.raises(
+        producer.SnapshotProducerError,
+        match="calendar's most recent 126",
+    ):
+        producer.produce_snapshot(source)
+
+
+def test_stale_calendar_binding_cannot_move_the_complete_window_back_one_year() -> None:
+    source = source_view()
+    official_calendar = source["official_calendar"]
+    for field in (
+        "query_start",
+        "query_end",
+        "research_as_of_official_day",
+    ):
+        official_calendar[field] = (
+            date.fromisoformat(official_calendar[field]) - timedelta(days=365)
+        ).isoformat()
+    for row in official_calendar["calendar_rows"]:
+        row["calendar_day"] = (
+            date.fromisoformat(row["calendar_day"]) - timedelta(days=365)
+        ).isoformat()
+    stale_days = [
+        (date.fromisoformat(value) - timedelta(days=365)).isoformat()
+        for value in source["official_days"]
+    ]
+    source["official_days"] = stale_days
+    for row, stale_day in zip(source["baseline_daily_returns"], stale_days):
+        row["official_day"] = stale_day
+    _rehash_calendar(source)
+
+    with pytest.raises(
+        producer.SnapshotProducerError,
+        match="does not end at the PIT cutoff",
+    ):
+        producer.produce_snapshot(source)
+
+
+def test_calendar_terminal_missing_tamper_and_natural_day_gap_fail_closed() -> None:
+    terminal_missing = source_view()
+    terminal_calendar = terminal_missing["official_calendar"]
+    last_open_index = max(
+        index
+        for index, row in enumerate(terminal_calendar["calendar_rows"])
+        if row["is_official_day"]
+    )
+    terminal_calendar["calendar_rows"][last_open_index][
+        "is_official_day"
+    ] = False
+    remaining_open = [
+        row["calendar_day"]
+        for row in terminal_calendar["calendar_rows"]
+        if row["is_official_day"]
+    ]
+    terminal_calendar["research_as_of_official_day"] = remaining_open[-1]
+    _rehash_calendar(terminal_missing)
+    with pytest.raises(
+        producer.SnapshotProducerError,
+        match="calendar's most recent 126",
+    ):
+        producer.produce_snapshot(terminal_missing)
+
+    hash_tamper = source_view()
+    hash_tamper["official_calendar"]["calendar_rows"][10][
+        "is_official_day"
+    ] = not hash_tamper["official_calendar"]["calendar_rows"][10][
+        "is_official_day"
+    ]
+    with pytest.raises(
+        producer.SnapshotProducerError,
+        match="calendar rows hash tamper",
+    ):
+        producer.produce_snapshot(hash_tamper)
+
+    gap = source_view()
+    gap["official_calendar"]["calendar_rows"].pop(10)
+    _rehash_calendar(gap)
+    with pytest.raises(
+        producer.SnapshotProducerError,
+        match="natural-day gap",
+    ):
+        producer.produce_snapshot(gap)
+
+
 def test_zero_and_nonfinite_volatility_fail_closed() -> None:
     zero = source_view()
     for row in zero["baseline_daily_returns"]:
@@ -515,6 +700,73 @@ def test_chain_hash_month_and_missing_proof_fail_closed() -> None:
 
 
 @pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (
+            lambda source: source["baseline_batch"].__setitem__(
+                "previous_batch_hash", "f" * 64
+            ),
+            "previous batch hash does not match",
+        ),
+        (
+            lambda source: source["baseline_batch"]["targets"][0].__setitem__(
+                "previous_exact_contract", "SHFE.ag2701"
+            ),
+            "previous exact contract mismatch",
+        ),
+        (
+            lambda source: source["baseline_batch"]["targets"][0].__setitem__(
+                "previous_target_quantity",
+                source["baseline_batch"]["targets"][0][
+                    "previous_target_quantity"
+                ]
+                + 1,
+            ),
+            "previous target quantity mismatch",
+        ),
+    ],
+)
+def test_linked_baseline_chain_is_bound_to_previous_snapshot(
+    mutate,
+    message: str,
+) -> None:
+    source = linked_source_view()
+    mutate(source)
+    _rehash_baseline(source)
+
+    with pytest.raises(producer.SnapshotProducerError, match=message):
+        producer.produce_snapshot(source)
+
+
+def test_formal_genesis_requires_cold_baseline_but_simnow_is_isolated() -> None:
+    formal = source_view(previous_batch_hash="a" * 64)
+    with pytest.raises(
+        producer.SnapshotProducerError,
+        match="formal genesis baseline previous batch hash must be null",
+    ):
+        producer.produce_snapshot(formal)
+
+    simnow = source_view(
+        source_month="2026-07",
+        execution_day=date(2026, 8, 3),
+        previous_batch_hash="a" * 64,
+        execution_lane="simnow_shakedown",
+    )
+    result = producer.produce_snapshot(simnow)
+    snapshot = json.loads(result.snapshot_draft)
+    evidence = json.loads(result.evidence)
+
+    assert snapshot["execution_lane"] == "simnow_shakedown"
+    assert snapshot["countable_forward"] is False
+    assert snapshot["continuity_mode"] == "genesis"
+    assert snapshot["previous_snapshot_hash"] is None
+    assert snapshot["previous_smoothed_scale"] == 1.0
+    assert evidence["baseline_chain_rule"] == (
+        "SIMNOW_ISOLATED_POSITION_MANAGER_CHAIN_BASELINE_CHAIN_NOT_REINTERPRETED"
+    )
+
+
+@pytest.mark.parametrize(
     ("fast_amplitude", "expected"),
     [
         (0.05, 0.8),
@@ -541,6 +793,7 @@ def test_source_schema_is_strict_bounded_and_fixture_valid() -> None:
     Draft202012Validator(schema).validate(linked_source_view())
     assert schema["x-vnpy-resource-limits"] == {
         "max_raw_bytes": producer.MAX_SOURCE_VIEW_RAW_BYTES,
+        "max_calendar_rows": producer.MAX_CALENDAR_ROWS,
         "official_daily_returns": producer.SLOW_LOOKBACK_DAYS,
         "baseline_targets": len(producer.frozen.PRODUCTS),
     }
@@ -556,6 +809,37 @@ def test_source_schema_is_strict_bounded_and_fixture_valid() -> None:
                 assert_strict(item)
 
     assert_strict(schema)
+
+
+def test_frozen_kernel_actual_source_bytes_are_pinned_and_drift_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kernel_path = ROOT / "scripts/commodity_c_fast_pure_producer_kernel.py"
+    assert hashlib.sha256(kernel_path.read_bytes()).hexdigest() == (
+        producer.C_FAST_KERNEL_CODE_SHA256
+    )
+
+    monkeypatch.setattr(producer, "C_FAST_KERNEL_CODE_SHA256", "0" * 64)
+    with pytest.raises(
+        producer.SnapshotProducerError,
+        match="source code identity mismatch",
+    ):
+        producer.produce_snapshot(source_view())
+
+    monkeypatch.setattr(
+        producer,
+        "C_FAST_KERNEL_CODE_SHA256",
+        hashlib.sha256(kernel_path.read_bytes()).hexdigest(),
+    )
+    drifted = tmp_path / "commodity_c_fast_pure_producer_kernel.py"
+    drifted.write_bytes(kernel_path.read_bytes() + b"\n# drift\n")
+    monkeypatch.setattr(producer, "_frozen_kernel_path", lambda: drifted)
+    with pytest.raises(
+        producer.SnapshotProducerError,
+        match="source code identity mismatch",
+    ):
+        producer.produce_snapshot(source_view())
 
 
 def test_import_boundary_excludes_execution_network_signing_and_installation() -> None:
