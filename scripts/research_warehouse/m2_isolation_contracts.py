@@ -79,6 +79,7 @@ EVIDENCE_KEYS = {
     "policy_raw_sha256",
     "registry_raw_sha256",
     "release_tree_raw_sha256",
+    "release_tree_manifest_raw_sha256",
     "activation",
     "identity",
     "launchd",

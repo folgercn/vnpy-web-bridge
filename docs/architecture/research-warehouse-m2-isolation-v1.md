@@ -13,6 +13,12 @@ operator action followed by freshly captured, externally SHA-pinned evidence.
   and PF anchor.
 - `m2_isolation_audit.py` verifies dedicated identity, exact environment,
   filesystem denials, process separation, egress results, and monitor result.
+- `m2_probe_binding.py` recomputes domain-separated canonical hashes for each
+  normalized post-activation probe class.
+- `m2_release_artifacts.py` rescans the root-owned release tree and successful
+  output against independently retained raw-pinned artifacts.
+- `m2_success_binding.py` binds those verified artifacts to one exact
+  post-activation success receipt and monitor completion.
 - `m2_monitor.py` is a pure evaluator for last success, missing official day,
   unreviewed revision, hash mismatch, disk capacity, and backup freshness.
 - `m2_isolation_cli.py` is argument and output plumbing.
@@ -108,12 +114,22 @@ rejected before semantic verification.
 
 Policy, PF and LaunchDaemon activation times are bound to their exact hashes.
 Every identity, launchd, environment, filesystem, network and process probe
-has an observation time and result hash and must occur after all activation
-steps. The create-only success receipt binds host, uid/gid, policy, plist, PF,
-externally pinned release-tree hash, output hash and completion time. Its
-completion must equal the monitor's last-success time; backup verification
-must also be newer than activation. This prevents replaying pre-activation
-probe or success artifacts.
+has an observation time and a domain-separated canonical result hash. The
+verifier recomputes that hash from probe class, host identity, observation
+time and the exact normalized result, so a digest cannot be copied across
+classes or paired with edited safe claims. Every probe must occur after all
+activation steps.
+
+A separately retained canonical release-tree manifest binds every relative
+path, type, byte count, raw SHA-256, owner/mode/link fact, device/inode and
+the release-root identity. Verification rescans the installed root-owned tree
+and requires exact manifest equality. The successful output is also read
+through stable non-symlink custody and checked against an independent raw
+SHA-256 plus device/inode/owner/mode/link facts. The create-only success
+receipt binds those verified artifacts together with host, uid/gid, policy,
+plist, PF and completion time. Its completion must equal the monitor's
+last-success time; backup verification must also be newer than activation.
+This prevents pre-activation replay and hash-only artifact claims.
 
 ```bash
 PYTHONPATH=scripts python scripts/research_warehouse_m2_isolation_cli.py \
@@ -121,7 +137,11 @@ PYTHONPATH=scripts python scripts/research_warehouse_m2_isolation_cli.py \
   --deployment-dir deployments/research-warehouse/m2 \
   --evidence /secure/external/m2-isolation-evidence.json \
   --expected-evidence-sha256 <independently-retained-sha256> \
-  --expected-release-tree-sha256 <independently-retained-release-sha256> \
+  --release-root /usr/local/libexec/vnpyresearch/release \
+  --release-tree-manifest /secure/external/release-tree-manifest.json \
+  --expected-release-tree-manifest-sha256 <retained-manifest-sha256> \
+  --success-output /Users/Shared/vnpy-research/runtime/success-output.json \
+  --expected-success-output-sha256 <retained-output-sha256> \
   --now <trusted-canonical-UTC-Z>
 ```
 

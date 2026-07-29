@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import ast
 import json
-import subprocess
+import os
 import sys
+from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -12,6 +13,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "scripts"))
 
+from research_warehouse import m2_isolation_cli
 from research_warehouse.canonical import canonical_json_line, sha256
 from research_warehouse.errors import RegistryError
 from research_warehouse.m2_deployment_assets import verify_deployment_assets
@@ -24,21 +26,64 @@ from research_warehouse.m2_isolation_contracts import (
     load_isolation_policy,
 )
 from research_warehouse.m2_monitor import evaluate_monitor
+from research_warehouse.m2_probe_binding import probe_result_sha256
+from research_warehouse.m2_release_artifacts import (
+    VerifiedReleaseArtifacts,
+    build_release_tree_manifest,
+    verify_release_artifacts,
+)
 
 M2_DIR = ROOT / "deployments/research-warehouse/m2"
 POLICY_PATH = M2_DIR / "isolation-policy-v1.json"
 UTC = timezone.utc
 NOW = datetime(2026, 7, 29, 12, 0, tzinfo=UTC)
 RELEASE_TREE_SHA256 = "2" * 64
-PROBE_SHA256 = "3" * 64
+RELEASE_MANIFEST_SHA256 = "3" * 64
+OUTPUT_SHA256 = "4" * 64
+OUTPUT_PATH = "/Users/Shared/vnpy-research/runtime/success-output.json"
 
 
-def probed(values: dict) -> dict:
-    return {
+def probed(values: dict, probe_class: str) -> dict:
+    result = {
         "observed_at": "2026-07-29T10:30:00.000000Z",
-        "probe_result_sha256": PROBE_SHA256,
+        "probe_result_sha256": "0" * 64,
         **values,
     }
+    result["probe_result_sha256"] = probe_result_sha256(
+        result,
+        probe_class=probe_class,
+        host_identity="1" * 64,
+    )
+    return result
+
+
+def rebind_probe(item: dict, probe_class: str) -> None:
+    item[probe_class]["probe_result_sha256"] = probe_result_sha256(
+        item[probe_class],
+        probe_class=probe_class,
+        host_identity=item["host_identity"],
+    )
+
+
+def verified_release_artifacts() -> VerifiedReleaseArtifacts:
+    return VerifiedReleaseArtifacts(
+        release_tree_manifest_raw_sha256=RELEASE_MANIFEST_SHA256,
+        release_tree_content_sha256=RELEASE_TREE_SHA256,
+        release_root_identity={
+            "device": 9,
+            "inode": 10,
+            "owner_uid": 0,
+            "owner_gid": 0,
+            "mode": "0755",
+        },
+        output_path=OUTPUT_PATH,
+        output_raw_sha256=OUTPUT_SHA256,
+        output_device=11,
+        output_inode=12,
+        output_owner_uid=510,
+        output_mode="0600",
+        output_nlink=1,
+    )
 
 
 def policy():
@@ -77,6 +122,7 @@ def evidence() -> dict:
         "policy_raw_sha256": value.raw_sha256,
         "registry_raw_sha256": value.payload["registry_raw_sha256"],
         "release_tree_raw_sha256": RELEASE_TREE_SHA256,
+        "release_tree_manifest_raw_sha256": RELEASE_MANIFEST_SHA256,
         "activation": {
             "policy_activated_at": "2026-07-29T09:00:00.000000Z",
             "pf_loaded_at": "2026-07-29T09:01:00.000000Z",
@@ -95,7 +141,7 @@ def evidence() -> dict:
             "inherited_fujun_home_acl": False,
             "web_bridge_uid": 501,
             "web_bridge_gid": 20,
-        }),
+        }, "identity"),
         "launchd": probed({
             "loaded_labels": value.payload["launchd_labels"],
             "plist_raw_sha256s": PLIST_SHA256,
@@ -107,10 +153,10 @@ def evidence() -> dict:
                 label: [value.payload["program_paths"][label]]
                 for label in value.payload["launchd_labels"]
             },
-        }),
+        }, "launchd"),
         "environment": probed({
             "values": value.payload["allowed_environment"],
-        }),
+        }, "environment"),
         "filesystem": probed({
             "root_facts": roots,
             "code_root_facts": {
@@ -150,7 +196,7 @@ def evidence() -> dict:
             "fujun_home_traversable": False,
             "writable_paths": sorted(roots),
             "shared_writable_mount": False,
-        }),
+        }, "filesystem"),
         "network": probed({
             "pf_enabled": True,
             "pf_anchor_loaded": True,
@@ -176,14 +222,14 @@ def evidence() -> dict:
             "docker_socket_connectivity": False,
             "docker_network_membership": False,
             "unexpected_egress": [],
-        }),
+        }, "network"),
         "process": probed({
             "service_process_uid": 510,
             "service_process_gid": 510,
             "shared_process_identity": False,
             "shared_credential_scope": False,
             "shared_network_namespace": False,
-        }),
+        }, "process"),
         "monitor_input": monitor_input(),
         "success_receipt": {
             "schema_version": "vnpy_research_m2_success_receipt_v1",
@@ -194,9 +240,15 @@ def evidence() -> dict:
             "plist_raw_sha256s": PLIST_SHA256,
             "pf_anchor_raw_sha256": PF_ANCHOR_SHA256,
             "release_tree_raw_sha256": RELEASE_TREE_SHA256,
+            "release_tree_manifest_raw_sha256": RELEASE_MANIFEST_SHA256,
             "started_at": "2026-07-29T10:45:00.000000Z",
             "completed_at": "2026-07-29T11:00:00.000000Z",
-            "output_raw_sha256": "4" * 64,
+            "output_path": OUTPUT_PATH,
+            "output_raw_sha256": OUTPUT_SHA256,
+            "output_device": 11,
+            "output_inode": 12,
+            "output_owner_uid": 510,
+            "output_mode": "0600",
             "create_only": True,
             "regular": True,
             "nlink": 1,
@@ -224,6 +276,24 @@ def private_evidence(tmp_path: Path, payload: dict) -> Path:
     return path
 
 
+def build_private_manifest(
+    tmp_path: Path,
+    release: Path,
+    owner_uid: int,
+    owner_gid: int,
+) -> Path:
+    value = build_release_tree_manifest(
+        release,
+        logical_release_root=policy().payload["release_root"],
+        expected_owner_uid=owner_uid,
+        expected_owner_gid=owner_gid,
+    )
+    path = tmp_path / "current-release-manifest.json"
+    path.write_bytes(canonical_json_line(value))
+    path.chmod(0o600)
+    return path
+
+
 def test_policy_assets_and_healthy_evidence(tmp_path: Path) -> None:
     value = policy()
     assets = verify_deployment_assets(M2_DIR, policy=value)
@@ -241,11 +311,18 @@ def test_policy_assets_and_healthy_evidence(tmp_path: Path) -> None:
         loaded,
         policy=value,
         now=NOW,
-        expected_release_tree_sha256=RELEASE_TREE_SHA256,
+        release_artifacts=verified_release_artifacts(),
     )
     assert result["status"] == "M2_RESEARCH_ISOLATION_VERIFIED"
     assert result["monitor"]["status"] == "HEALTHY"
     assert set(result["authority"].values()) == {False}
+    with pytest.raises(RegistryError, match="not independently verified"):
+        verify_isolation_evidence(
+            loaded,
+            policy=value,
+            now=NOW,
+            release_artifacts=asdict(verified_release_artifacts()),  # type: ignore[arg-type]
+        )
     with pytest.raises(RegistryError, match="raw SHA256 mismatch"):
         load_isolation_evidence(
             evidence_path,
@@ -263,12 +340,13 @@ def test_policy_and_pf_tables_are_exactly_pinned(tmp_path: Path) -> None:
     item["network"]["pf_table_entries"]["REGISTRY_HTTPS"].append(
         "127.0.0.1"
     )
+    rebind_probe(item, "network")
     with pytest.raises(RegistryError, match="forbidden IP"):
         verify_isolation_evidence(
             item,
             policy=policy(),
             now=NOW,
-            expected_release_tree_sha256=RELEASE_TREE_SHA256,
+            release_artifacts=verified_release_artifacts(),
         )
 
 
@@ -316,12 +394,14 @@ def test_activation_and_root_owned_entrypoint_failures_close(
 ) -> None:
     item = evidence()
     mutate(item)
+    if "executable custody" in message:
+        rebind_probe(item, "filesystem")
     with pytest.raises(RegistryError, match=message):
         verify_isolation_evidence(
             item,
             policy=policy(),
             now=NOW,
-            expected_release_tree_sha256=RELEASE_TREE_SHA256,
+            release_artifacts=verified_release_artifacts(),
         )
 
 
@@ -375,12 +455,158 @@ def test_activation_and_root_owned_entrypoint_failures_close(
 def test_isolation_threat_model_failures_close(mutate, message: str) -> None:
     item = evidence()
     mutate(item)
+    section = {
+        "identity": "identity",
+        "filesystem": "filesystem",
+        "egress": "network",
+        "process": "process",
+        "environment": "environment",
+    }[message]
+    rebind_probe(item, section)
     with pytest.raises(RegistryError, match=message):
         verify_isolation_evidence(
             item,
             policy=policy(),
             now=NOW,
-            expected_release_tree_sha256=RELEASE_TREE_SHA256,
+            release_artifacts=verified_release_artifacts(),
+        )
+
+
+def test_probe_hash_binds_class_host_time_and_normalized_result() -> None:
+    item = evidence()
+    item["network"]["docker_socket_connectivity"] = True
+    with pytest.raises(RegistryError, match="network probe result SHA256 mismatch"):
+        verify_isolation_evidence(
+            item,
+            policy=policy(),
+            now=NOW,
+            release_artifacts=verified_release_artifacts(),
+        )
+    item = evidence()
+    item["identity"]["probe_result_sha256"] = item["launchd"][
+        "probe_result_sha256"
+    ]
+    with pytest.raises(RegistryError, match="identity probe result SHA256 mismatch"):
+        verify_isolation_evidence(
+            item,
+            policy=policy(),
+            now=NOW,
+            release_artifacts=verified_release_artifacts(),
+        )
+    item = evidence()
+    item["identity"]["observed_at"] = "2026-07-29T10:31:00.000000Z"
+    with pytest.raises(RegistryError, match="identity probe result SHA256 mismatch"):
+        verify_isolation_evidence(
+            item,
+            policy=policy(),
+            now=NOW,
+            release_artifacts=verified_release_artifacts(),
+        )
+    item = evidence()
+    item["host_identity"] = "9" * 64
+    with pytest.raises(RegistryError, match="identity probe result SHA256 mismatch"):
+        verify_isolation_evidence(
+            item,
+            policy=policy(),
+            now=NOW,
+            release_artifacts=verified_release_artifacts(),
+        )
+
+
+def test_release_manifest_and_output_are_recomputed_from_files(
+    tmp_path: Path,
+) -> None:
+    release = tmp_path / "release"
+    binary_dir = release / "bin"
+    binary_dir.mkdir(parents=True)
+    release.chmod(0o755)
+    binary_dir.chmod(0o755)
+    executable = binary_dir / "research-warehouse-job"
+    executable.write_bytes(b"#!/bin/sh\nexit 0\n")
+    executable.chmod(0o555)
+    monitor_executable = binary_dir / "research-warehouse-monitor"
+    monitor_executable.write_bytes(b"#!/bin/sh\nexit 0\n")
+    monitor_executable.chmod(0o555)
+    owner_uid = os.geteuid()
+    owner_gid = os.getegid()
+    manifest = build_release_tree_manifest(
+        release,
+        logical_release_root=policy().payload["release_root"],
+        expected_owner_uid=owner_uid,
+        expected_owner_gid=owner_gid,
+    )
+    manifest_path = tmp_path / "release-manifest.json"
+    manifest_path.write_bytes(canonical_json_line(manifest))
+    manifest_path.chmod(0o600)
+    output_path = tmp_path / "success-output.json"
+    output_path.write_bytes(b'{"status":"ok"}\n')
+    output_path.chmod(0o600)
+    result = verify_release_artifacts(
+        policy=policy(),
+        release_root=release,
+        manifest_path=manifest_path,
+        expected_manifest_raw_sha256=sha256(manifest_path.read_bytes()),
+        output_path=output_path,
+        expected_output_raw_sha256=sha256(output_path.read_bytes()),
+        output_owner_uid=owner_uid,
+        expected_release_owner_uid=owner_uid,
+        expected_release_owner_gid=owner_gid,
+    )
+    assert result.release_tree_content_sha256 == (
+        manifest["tree_content_sha256"]
+    )
+    assert result.output_raw_sha256 == sha256(output_path.read_bytes())
+    manifest_raw = manifest_path.read_bytes()
+    manifest_path.write_bytes(manifest_raw + b" ")
+    manifest_path.chmod(0o600)
+    with pytest.raises(RegistryError, match="manifest raw SHA256 mismatch"):
+        verify_release_artifacts(
+            policy=policy(),
+            release_root=release,
+            manifest_path=manifest_path,
+            expected_manifest_raw_sha256=sha256(manifest_raw),
+            output_path=output_path,
+            expected_output_raw_sha256=sha256(output_path.read_bytes()),
+            output_owner_uid=owner_uid,
+            expected_release_owner_uid=owner_uid,
+            expected_release_owner_gid=owner_gid,
+        )
+    manifest_path.write_bytes(manifest_raw)
+    manifest_path.chmod(0o600)
+    executable.chmod(0o755)
+    executable.write_bytes(b"#!/bin/sh\nexit 1\n")
+    executable.chmod(0o555)
+    with pytest.raises(RegistryError, match="tree/manifest mismatch"):
+        verify_release_artifacts(
+            policy=policy(),
+            release_root=release,
+            manifest_path=manifest_path,
+            expected_manifest_raw_sha256=sha256(manifest_path.read_bytes()),
+            output_path=output_path,
+            expected_output_raw_sha256=sha256(output_path.read_bytes()),
+            output_owner_uid=owner_uid,
+            expected_release_owner_uid=owner_uid,
+            expected_release_owner_gid=owner_gid,
+        )
+    output_path.write_bytes(b'{"status":"forged"}\n')
+    output_path.chmod(0o600)
+    current_manifest = build_private_manifest(
+        tmp_path,
+        release,
+        owner_uid,
+        owner_gid,
+    )
+    with pytest.raises(RegistryError, match="output custody/hash mismatch"):
+        verify_release_artifacts(
+            policy=policy(),
+            release_root=release,
+            manifest_path=current_manifest,
+            expected_manifest_raw_sha256=sha256(current_manifest.read_bytes()),
+            output_path=output_path,
+            expected_output_raw_sha256=OUTPUT_SHA256,
+            output_owner_uid=owner_uid,
+            expected_release_owner_uid=owner_uid,
+            expected_release_owner_gid=owner_gid,
         )
 
 
@@ -412,12 +638,27 @@ def test_monitor_covers_required_failure_classes(
     assert set(result["authority"].values()) == {False}
 
 
-def test_cli_and_research_only_import_boundary(tmp_path: Path) -> None:
+def test_cli_and_research_only_import_boundary(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
     evidence_path = private_evidence(tmp_path, evidence())
-    completed = subprocess.run(
+    monkeypatch.setattr(
+        m2_isolation_cli,
+        "verify_release_artifacts",
+        lambda **_kwargs: verified_release_artifacts(),
+    )
+    monkeypatch.setattr(
+        m2_isolation_cli,
+        "_verified_artifact_paths",
+        lambda _policy, release_root, success_output: (
+            release_root,
+            success_output,
+        ),
+    )
+    assert m2_isolation_cli.main(
         [
-            sys.executable,
-            str(ROOT / "scripts/research_warehouse_m2_isolation_cli.py"),
             "--policy",
             str(POLICY_PATH),
             "--deployment-dir",
@@ -426,18 +667,21 @@ def test_cli_and_research_only_import_boundary(tmp_path: Path) -> None:
             str(evidence_path),
             "--expected-evidence-sha256",
             sha256(evidence_path.read_bytes()),
-            "--expected-release-tree-sha256",
-            RELEASE_TREE_SHA256,
+            "--release-root",
+            policy().payload["release_root"],
+            "--release-tree-manifest",
+            str(tmp_path / "release-manifest.json"),
+            "--expected-release-tree-manifest-sha256",
+            RELEASE_MANIFEST_SHA256,
+            "--success-output",
+            OUTPUT_PATH,
+            "--expected-success-output-sha256",
+            OUTPUT_SHA256,
             "--now",
             "2026-07-29T12:00:00.000000Z",
-        ],
-        cwd=ROOT,
-        env={"PYTHONPATH": str(ROOT / "scripts"), "PATH": "/usr/bin:/bin"},
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    assert json.loads(completed.stdout)["status"] == (
+        ]
+    ) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == (
         "M2_RESEARCH_ISOLATION_VERIFIED"
     )
     forbidden = {"app", "vnpy", "rpc", "questdb", "docker", "sqlalchemy"}
@@ -445,6 +689,9 @@ def test_cli_and_research_only_import_boundary(tmp_path: Path) -> None:
         "m2_isolation_contracts.py",
         "m2_deployment_assets.py",
         "m2_isolation_audit.py",
+        "m2_probe_binding.py",
+        "m2_release_artifacts.py",
+        "m2_success_binding.py",
         "m2_monitor.py",
         "m2_isolation_cli.py",
     ):

@@ -16,6 +16,9 @@ from .m2_isolation_contracts import (
     require_sha,
 )
 from .m2_monitor import evaluate_monitor
+from .m2_probe_binding import verify_probe_result_sha256
+from .m2_release_artifacts import VerifiedReleaseArtifacts
+from .m2_success_binding import verify_release_success_binding
 from .timeutil import parse_utc
 
 IDENTITY_KEYS = {
@@ -104,22 +107,6 @@ ACTIVATION_KEYS = {
     "pf_anchor_raw_sha256",
     "plist_raw_sha256s",
 }
-SUCCESS_RECEIPT_KEYS = {
-    "schema_version",
-    "host_identity",
-    "service_uid",
-    "service_gid",
-    "policy_raw_sha256",
-    "plist_raw_sha256s",
-    "pf_anchor_raw_sha256",
-    "release_tree_raw_sha256",
-    "started_at",
-    "completed_at",
-    "output_raw_sha256",
-    "create_only",
-    "regular",
-    "nlink",
-}
 
 
 def _exact(value: object, keys: set[str], label: str) -> dict[str, Any]:
@@ -158,7 +145,7 @@ def verify_isolation_evidence(
     *,
     policy: IsolationPolicy,
     now: datetime,
-    expected_release_tree_sha256: str,
+    release_artifacts: VerifiedReleaseArtifacts,
 ) -> dict[str, Any]:
     _exact(
         evidence,
@@ -169,6 +156,7 @@ def verify_isolation_evidence(
             "policy_raw_sha256",
             "registry_raw_sha256",
             "release_tree_raw_sha256",
+            "release_tree_manifest_raw_sha256",
             "activation",
             "identity",
             "launchd",
@@ -198,11 +186,6 @@ def verify_isolation_evidence(
         or evidence["policy_raw_sha256"] != policy.raw_sha256
         or evidence["registry_raw_sha256"]
         != policy.payload["registry_raw_sha256"]
-        or require_sha(
-            expected_release_tree_sha256,
-            "expected M2 release tree SHA256",
-        )
-        != evidence["release_tree_raw_sha256"]
         or evidence["authority"] != false_authority()
     ):
         raise RegistryError("M2 evidence top-level binding mismatch")
@@ -228,21 +211,25 @@ def verify_isolation_evidence(
     ):
         raise RegistryError("M2 activation binding mismatch")
 
-    def verify_probe(value: dict[str, Any], label: str) -> None:
+    def verify_probe(
+        value: dict[str, Any],
+        label: str,
+        probe_class: str,
+    ) -> None:
         observed = parse_utc(value["observed_at"], f"{label} observed_at")
         if (
             observed < activated
             or observed > captured
-            or require_sha(
-                value["probe_result_sha256"],
-                f"{label} probe result",
-            )
-            == "0" * 64
         ):
             raise RegistryError(f"{label} predates active policy")
+        verify_probe_result_sha256(
+            value,
+            probe_class=probe_class,
+            host_identity=evidence["host_identity"],
+        )
 
     identity = _exact(evidence["identity"], IDENTITY_KEYS, "M2 identity")
-    verify_probe(identity, "M2 identity")
+    verify_probe(identity, "M2 identity", "identity")
     if (
         identity["user"] != policy.user
         or identity["group"] != policy.group
@@ -260,7 +247,7 @@ def verify_isolation_evidence(
     ):
         raise RegistryError("M2 service identity is not isolated")
     launchd = _exact(evidence["launchd"], LAUNCHD_KEYS, "M2 launchd")
-    verify_probe(launchd, "M2 launchd")
+    verify_probe(launchd, "M2 launchd", "launchd")
     if (
         launchd["loaded_labels"] != policy.payload["launchd_labels"]
         or launchd["plist_raw_sha256s"] != PLIST_SHA256
@@ -278,7 +265,7 @@ def verify_isolation_evidence(
         ENVIRONMENT_KEYS,
         "M2 environment",
     )
-    verify_probe(environment, "M2 environment")
+    verify_probe(environment, "M2 environment", "environment")
     if environment["values"] != policy.payload["allowed_environment"]:
         raise RegistryError("M2 process environment is not exact minimal environment")
     filesystem = _exact(
@@ -286,7 +273,7 @@ def verify_isolation_evidence(
         FILESYSTEM_KEYS,
         "M2 filesystem",
     )
-    verify_probe(filesystem, "M2 filesystem")
+    verify_probe(filesystem, "M2 filesystem", "filesystem")
     expected_roots = {
         policy.payload[field]
         for field in ("home", "custody_root", "runtime_root", "backup_root")
@@ -353,7 +340,7 @@ def verify_isolation_evidence(
     ):
         raise RegistryError("M2 forbidden filesystem boundary failed")
     network = _exact(evidence["network"], NETWORK_KEYS, "M2 network")
-    verify_probe(network, "M2 network")
+    verify_probe(network, "M2 network", "network")
     tables = network["pf_table_entries"]
     if not isinstance(tables, dict) or set(tables) != {
         "DNS",
@@ -404,7 +391,7 @@ def verify_isolation_evidence(
     ):
         raise RegistryError("M2 egress isolation evidence failed")
     process = _exact(evidence["process"], PROCESS_KEYS, "M2 process")
-    verify_probe(process, "M2 process")
+    verify_probe(process, "M2 process", "process")
     if (
         process["service_process_uid"] != identity["uid"]
         or process["service_process_gid"] != identity["gid"]
@@ -413,45 +400,18 @@ def verify_isolation_evidence(
         or process["shared_network_namespace"] is not False
     ):
         raise RegistryError("M2 process isolation evidence failed")
-    receipt = _exact(
-        evidence["success_receipt"],
-        SUCCESS_RECEIPT_KEYS,
-        "M2 success receipt",
-    )
-    started = parse_utc(receipt["started_at"], "M2 receipt started_at")
-    completed = parse_utc(receipt["completed_at"], "M2 receipt completed_at")
-    if (
-        receipt["schema_version"]
-        != "vnpy_research_m2_success_receipt_v1"
-        or receipt["host_identity"] != evidence["host_identity"]
-        or receipt["service_uid"] != identity["uid"]
-        or receipt["service_gid"] != identity["gid"]
-        or receipt["policy_raw_sha256"] != policy.raw_sha256
-        or receipt["plist_raw_sha256s"] != PLIST_SHA256
-        or receipt["pf_anchor_raw_sha256"] != PF_ANCHOR_SHA256
-        or receipt["release_tree_raw_sha256"]
-        != evidence["release_tree_raw_sha256"]
-        or started < activated
-        or completed < started
-        or completed > captured
-        or require_sha(receipt["output_raw_sha256"], "M2 receipt output")
-        == "0" * 64
-        or receipt["create_only"] is not True
-        or receipt["regular"] is not True
-        or receipt["nlink"] != 1
-        or evidence["monitor_input"]["last_success_at"]
-        != receipt["completed_at"]
-        or parse_utc(
-            evidence["monitor_input"]["last_backup_at"],
-            "M2 last backup",
-        )
-        < activated
-    ):
-        raise RegistryError("M2 success receipt activation binding mismatch")
     evaluate_monitor(
         evidence["monitor_input"],
         policy=policy,
         now=captured,
+    )
+    verify_release_success_binding(
+        evidence,
+        policy=policy,
+        release_artifacts=release_artifacts,
+        identity=identity,
+        activated=activated,
+        captured=captured,
     )
     monitor = evaluate_monitor(
         evidence["monitor_input"],
@@ -466,6 +426,10 @@ def verify_isolation_evidence(
         "schema_version": "vnpy_research_m2_isolation_result_v1",
         "status": "M2_RESEARCH_ISOLATION_VERIFIED",
         "policy_raw_sha256": policy.raw_sha256,
+        "release_tree_raw_sha256": evidence["release_tree_raw_sha256"],
+        "release_tree_manifest_raw_sha256": evidence[
+            "release_tree_manifest_raw_sha256"
+        ],
         "host_identity": evidence["host_identity"],
         "monitor": monitor,
         "authority": false_authority(),
