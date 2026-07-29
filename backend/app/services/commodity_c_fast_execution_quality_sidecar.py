@@ -36,6 +36,7 @@ from app.services.commodity_c_fast_shadow_common import sha256_json
 
 MAX_JOURNAL_RECORD_BYTES = 16 * 1024 * 1024
 _RECORD_NAME = re.compile(r"^([0-9]{20})-([0-9a-f]{64})\.json$")
+_RESERVATION_NAME = re.compile(r"^([0-9]{20})\.reservation$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _HORIZONS = (250, 1_000, 5_000, 30_000, 60_000)
 _GENESIS_HASH = "0" * 64
@@ -163,21 +164,118 @@ class CreateOnlyExecutionQualityJournal:
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_SH)
             self._assert_lock(lock_fd)
-            return self._recover_locked()
+            records = self._recover_locked()
+            self._assert_lock(lock_fd)
+            return records
         finally:
             os.close(lock_fd)
 
     def _recover_locked(self) -> tuple[JournalRecord, ...]:
         root_fd = self._open_root()
         try:
-            names = sorted(
-                name for name in os.listdir(root_fd) if name != _LOCK_NAME
-            )
+            reservation_names: dict[int, str] = {}
+            record_names: dict[int, list[str]] = {}
+            for name in os.listdir(root_fd):
+                if name == _LOCK_NAME:
+                    continue
+                reservation_match = _RESERVATION_NAME.fullmatch(name)
+                if reservation_match is not None:
+                    sequence = int(reservation_match.group(1))
+                    reservation_names[sequence] = name
+                    continue
+                record_match = _RECORD_NAME.fullmatch(name)
+                if record_match is not None:
+                    sequence = int(record_match.group(1))
+                    record_names.setdefault(sequence, []).append(name)
+                    continue
+                raise CFastExecutionQualitySidecarError(
+                    "JOURNAL_SEQUENCE_INVALID"
+                )
+            sequences = set(reservation_names) | set(record_names)
+            if sequences:
+                expected_sequences = set(range(1, max(sequences) + 1))
+                if sequences != expected_sequences:
+                    raise CFastExecutionQualitySidecarError(
+                        "JOURNAL_SEQUENCE_INVALID"
+                    )
+            for sequence in sorted(sequences):
+                if sequence not in reservation_names:
+                    raise CFastExecutionQualitySidecarError(
+                        "JOURNAL_RESERVATION_MISSING"
+                    )
+                if sequence not in record_names:
+                    raise CFastExecutionQualitySidecarError(
+                        "JOURNAL_INCOMPLETE_RESERVATION"
+                    )
+                if len(record_names[sequence]) != 1:
+                    raise CFastExecutionQualitySidecarError(
+                        "JOURNAL_SEQUENCE_INVALID"
+                    )
+
             records: list[JournalRecord] = []
             previous = _GENESIS_HASH
-            for expected_sequence, name in enumerate(names, start=1):
+            for expected_sequence in sorted(sequences):
+                reservation_raw = self._read_record(
+                    root_fd,
+                    reservation_names[expected_sequence],
+                )
+                try:
+                    reservation = json.loads(reservation_raw)
+                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise CFastExecutionQualitySidecarError(
+                        "JOURNAL_RESERVATION_JSON_INVALID"
+                    ) from exc
+                if not isinstance(reservation, dict):
+                    raise CFastExecutionQualitySidecarError(
+                        "JOURNAL_RESERVATION_INVALID"
+                    )
+                reservation_core = {
+                    key: value
+                    for key, value in reservation.items()
+                    if key != "reservation_hash"
+                }
+                expected_reservation_hash = _record_hash(reservation_core)
+                if (
+                    reservation_raw != _canonical_json(reservation) + b"\n"
+                    or set(reservation)
+                    != {
+                        "schema_version",
+                        "sequence",
+                        "operation_id",
+                        "previous_record_hash",
+                        "record_hash",
+                        "record_filename",
+                        "record_bytes_sha256",
+                        "reservation_hash",
+                    }
+                    or reservation.get("schema_version")
+                    != (
+                        "commodity_c_fast_execution_quality_journal_reservation_v1"
+                    )
+                    or type(reservation.get("sequence")) is not int
+                    or reservation["sequence"] != expected_sequence
+                    or not isinstance(reservation.get("operation_id"), str)
+                    or reservation.get("previous_record_hash") != previous
+                    or _SHA256.fullmatch(str(reservation.get("record_hash")))
+                    is None
+                    or _SHA256.fullmatch(
+                        str(reservation.get("record_bytes_sha256"))
+                    )
+                    is None
+                    or reservation.get("record_filename")
+                    != record_names[expected_sequence][0]
+                    or not hmac.compare_digest(
+                        str(reservation.get("reservation_hash")),
+                        expected_reservation_hash,
+                    )
+                ):
+                    raise CFastExecutionQualitySidecarError(
+                        "JOURNAL_RESERVATION_INVALID"
+                    )
+
+                name = record_names[expected_sequence][0]
                 match = _RECORD_NAME.fullmatch(name)
-                if match is None or int(match.group(1)) != expected_sequence:
+                if match is None:
                     raise CFastExecutionQualitySidecarError(
                         "JOURNAL_SEQUENCE_INVALID"
                     )
@@ -207,6 +305,8 @@ class CreateOnlyExecutionQualityJournal:
                     or not isinstance(payload.get("operation_id"), str)
                     or not isinstance(payload.get("payload"), dict)
                     or payload.get("previous_record_hash") != previous
+                    or payload.get("operation_id")
+                    != reservation.get("operation_id")
                 ):
                     raise CFastExecutionQualitySidecarError(
                         "JOURNAL_RECORD_SCHEMA_INVALID"
@@ -219,6 +319,9 @@ class CreateOnlyExecutionQualityJournal:
                 expected_hash = _record_hash(core)
                 if (
                     match.group(2) != expected_hash
+                    or reservation.get("record_hash") != expected_hash
+                    or reservation.get("record_bytes_sha256")
+                    != hashlib.sha256(raw).hexdigest()
                     or not hmac.compare_digest(
                         str(payload.get("record_hash")),
                         expected_hash,
@@ -265,6 +368,7 @@ class CreateOnlyExecutionQualityJournal:
             fcntl.flock(lock_fd, fcntl.LOCK_EX)
             self._assert_lock(lock_fd)
             records = self._recover_locked()
+            self._assert_lock(lock_fd)
             for record in records:
                 if record.operation_id != operation_id:
                     continue
@@ -294,7 +398,30 @@ class CreateOnlyExecutionQualityJournal:
                     "JOURNAL_RECORD_SIZE_INVALID"
                 )
             filename = f"{sequence:020d}-{digest}.json"
+            reservation_core = {
+                "schema_version": (
+                    "commodity_c_fast_execution_quality_journal_reservation_v1"
+                ),
+                "sequence": sequence,
+                "operation_id": operation_id,
+                "previous_record_hash": previous,
+                "record_hash": digest,
+                "record_filename": filename,
+                "record_bytes_sha256": hashlib.sha256(raw).hexdigest(),
+            }
+            reservation = {
+                **reservation_core,
+                "reservation_hash": _record_hash(reservation_core),
+            }
+            reservation_raw = _canonical_json(reservation) + b"\n"
+            self._assert_lock(lock_fd)
+            self._create_reservation(
+                f"{sequence:020d}.reservation",
+                reservation_raw,
+            )
+            self._assert_lock(lock_fd)
             self._create_record(filename, raw)
+            self._assert_lock(lock_fd)
             return JournalRecord(
                 sequence=sequence,
                 operation_id=operation_id,
@@ -305,7 +432,30 @@ class CreateOnlyExecutionQualityJournal:
         finally:
             os.close(lock_fd)
 
+    def _create_reservation(self, filename: str, raw: bytes) -> None:
+        self._create_journal_file(
+            filename,
+            raw,
+            collision_code="JOURNAL_SEQUENCE_COLLISION",
+            write_failure_code="JOURNAL_RESERVATION_WRITE_FAILED",
+        )
+
     def _create_record(self, filename: str, raw: bytes) -> None:
+        self._create_journal_file(
+            filename,
+            raw,
+            collision_code="JOURNAL_SEQUENCE_COLLISION",
+            write_failure_code="JOURNAL_CREATE_ONLY_WRITE_FAILED",
+        )
+
+    def _create_journal_file(
+        self,
+        filename: str,
+        raw: bytes,
+        *,
+        collision_code: str,
+        write_failure_code: str,
+    ) -> None:
         root_fd = self._open_root()
         file_fd: int | None = None
         try:
@@ -337,14 +487,12 @@ class CreateOnlyExecutionQualityJournal:
             os.fsync(root_fd)
             self._assert_root(root_fd)
         except FileExistsError as exc:
-            raise CFastExecutionQualitySidecarError(
-                "JOURNAL_SEQUENCE_COLLISION"
-            ) from exc
+            raise CFastExecutionQualitySidecarError(collision_code) from exc
         except CFastExecutionQualitySidecarError:
             raise
         except OSError as exc:
             raise CFastExecutionQualitySidecarError(
-                "JOURNAL_CREATE_ONLY_WRITE_FAILED"
+                write_failure_code
             ) from exc
         finally:
             if file_fd is not None:
@@ -451,10 +599,15 @@ class CreateOnlyExecutionQualityJournal:
             os.close(root_fd)
 
     def _assert_lock(self, lock_fd: int) -> None:
-        identity = self._file_identity(
-            os.fstat(lock_fd),
-            require_empty=True,
-        )
+        try:
+            identity = self._file_identity(
+                os.fstat(lock_fd),
+                require_empty=True,
+            )
+        except (CFastExecutionQualitySidecarError, OSError) as exc:
+            raise CFastExecutionQualitySidecarError(
+                "JOURNAL_LOCK_CHANGED"
+            ) from exc
         if identity != self._lock_identity:
             raise CFastExecutionQualitySidecarError(
                 "JOURNAL_LOCK_CHANGED"
@@ -720,7 +873,7 @@ class OfflineExecutionQualitySidecar:
         event_key = sha256_json(
             {
                 "schema_version": (
-                    "commodity_c_fast_execution_quality_event_key_v1"
+                "commodity_c_fast_execution_quality_event_key_v1"
                 ),
                 "exact_contract": snapshot.exact_contract,
                 "exchange_timestamp": _utc_text(

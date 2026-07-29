@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+import hashlib
 import importlib.util
 import json
 import os
 from pathlib import Path
 import sys
+from threading import Event
 
 import pytest
 
@@ -316,12 +318,15 @@ def test_directory_fsync_failure_is_recoverable_without_duplicate(
     repository = journal(tmp_path)
     real_fsync = sidecar_module.os.fsync
     calls = 0
+    directory_fsyncs = 0
 
     def fail_directory(fd: int) -> None:
-        nonlocal calls
+        nonlocal calls, directory_fsyncs
         calls += 1
         if stat_is_directory(fd):
-            raise OSError("forced directory fsync failure")
+            directory_fsyncs += 1
+            if directory_fsyncs == 2:
+                raise OSError("forced post-record directory fsync failure")
         real_fsync(fd)
 
     def stat_is_directory(fd: int) -> bool:
@@ -340,6 +345,7 @@ def test_directory_fsync_failure_is_recoverable_without_duplicate(
             },
         )
     assert calls >= 2
+    assert directory_fsyncs == 2
 
     monkeypatch.setattr(sidecar_module.os, "fsync", real_fsync)
     recovered = repository.append(
@@ -351,6 +357,49 @@ def test_directory_fsync_failure_is_recoverable_without_duplicate(
     )
     assert recovered.sequence == 1
     assert len(repository.recover()) == 1
+
+
+def test_incomplete_reservation_fails_closed_after_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = journal(tmp_path)
+    real_fsync = sidecar_module.os.fsync
+
+    def fail_first_directory_fsync(fd: int) -> None:
+        if stat_is_directory(fd):
+            raise OSError("forced reservation directory fsync failure")
+        real_fsync(fd)
+
+    def stat_is_directory(fd: int) -> bool:
+        return bool(os.fstat(fd).st_mode & 0o040000)
+
+    monkeypatch.setattr(
+        sidecar_module.os,
+        "fsync",
+        fail_first_directory_fsync,
+    )
+    with pytest.raises(
+        CFastExecutionQualitySidecarError,
+        match="JOURNAL_RESERVATION_WRITE_FAILED",
+    ):
+        repository.append(
+            operation_id="test:incomplete-reservation",
+            payload={
+                "record_type": "test",
+                **sidecar_module._FALSE_AUTHORITY,
+            },
+        )
+
+    monkeypatch.setattr(sidecar_module.os, "fsync", real_fsync)
+    restarted = CreateOnlyExecutionQualityJournal(repository.root)
+    with pytest.raises(
+        CFastExecutionQualitySidecarError,
+        match="JOURNAL_INCOMPLETE_RESERVATION",
+    ):
+        restarted.recover()
+    assert len(list(repository.root.glob("*.reservation"))) == 1
+    assert not list(repository.root.glob("*.json"))
 
 
 def test_two_writer_instances_serialize_distinct_create_only_appends(
@@ -379,6 +428,117 @@ def test_two_writer_instances_serialize_distinct_create_only_appends(
     assert {row.sequence for row in receipts} == set(range(1, 17))
     assert [row.sequence for row in recovered] == list(range(1, 17))
     assert len({row.record_hash for row in recovered}) == 16
+
+
+def test_lock_rotation_cannot_commit_same_sequence_twice(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = journal(tmp_path)
+    reached_reservation = Event()
+    allow_first_writer = Event()
+    original_create_reservation = (
+        CreateOnlyExecutionQualityJournal._create_reservation
+    )
+
+    def block_first_reservation(
+        self: CreateOnlyExecutionQualityJournal,
+        filename: str,
+        raw: bytes,
+    ) -> None:
+        if self is first:
+            reached_reservation.set()
+            assert allow_first_writer.wait(timeout=10)
+        original_create_reservation(self, filename, raw)
+
+    monkeypatch.setattr(
+        CreateOnlyExecutionQualityJournal,
+        "_create_reservation",
+        block_first_reservation,
+    )
+
+    def append(
+        writer: CreateOnlyExecutionQualityJournal,
+        index: int,
+    ):
+        try:
+            return writer.append(
+                operation_id=f"lock-rotation:{index}",
+                payload={
+                    "record_type": "lock-rotation-test",
+                    "writer": index,
+                    **sidecar_module._FALSE_AUTHORITY,
+                },
+            )
+        except CFastExecutionQualitySidecarError as exc:
+            return exc.code
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first_future = pool.submit(append, first, 1)
+        assert reached_reservation.wait(timeout=10)
+        lock = first.root / sidecar_module._LOCK_NAME
+        lock.unlink()
+        lock.touch(mode=0o600)
+        lock.chmod(0o600)
+        second = CreateOnlyExecutionQualityJournal(first.root)
+        second_future = pool.submit(append, second, 2)
+        second_result = second_future.result(timeout=10)
+        allow_first_writer.set()
+        first_result = first_future.result(timeout=10)
+
+    outcomes = [first_result, second_result]
+    assert sum(not isinstance(row, str) for row in outcomes) == 1
+    assert "JOURNAL_SEQUENCE_COLLISION" in outcomes
+    recovered = CreateOnlyExecutionQualityJournal(first.root).recover()
+    assert len(recovered) == 1
+    assert recovered[0].sequence == 1
+    assert len(list(first.root.glob("00000000000000000001-*.json"))) == 1
+    assert len(list(first.root.glob("00000000000000000001.reservation"))) == 1
+
+
+def test_lock_rotation_after_reservation_leaves_fail_closed_marker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = journal(tmp_path)
+    original_create_reservation = (
+        CreateOnlyExecutionQualityJournal._create_reservation
+    )
+
+    def rotate_after_reservation(
+        self: CreateOnlyExecutionQualityJournal,
+        filename: str,
+        raw: bytes,
+    ) -> None:
+        original_create_reservation(self, filename, raw)
+        lock = self.root / sidecar_module._LOCK_NAME
+        lock.unlink()
+        lock.touch(mode=0o600)
+        lock.chmod(0o600)
+
+    monkeypatch.setattr(
+        CreateOnlyExecutionQualityJournal,
+        "_create_reservation",
+        rotate_after_reservation,
+    )
+    with pytest.raises(
+        CFastExecutionQualitySidecarError,
+        match="JOURNAL_LOCK_CHANGED",
+    ):
+        repository.append(
+            operation_id="lock-rotation:after-reservation",
+            payload={
+                "record_type": "lock-rotation-test",
+                **sidecar_module._FALSE_AUTHORITY,
+            },
+        )
+
+    restarted = CreateOnlyExecutionQualityJournal(repository.root)
+    with pytest.raises(
+        CFastExecutionQualitySidecarError,
+        match="JOURNAL_INCOMPLETE_RESERVATION",
+    ):
+        restarted.recover()
 
 
 def test_two_sidecars_cannot_commit_conflicting_ingest_identity(
@@ -446,7 +606,7 @@ def test_root_path_swap_during_append_fails_closed(
         nonlocal directory_fsyncs
         if bool(os.fstat(fd).st_mode & 0o040000):
             directory_fsyncs += 1
-            if directory_fsyncs == 1:
+            if directory_fsyncs == 2:
                 original_root.rename(detached_root)
                 original_root.mkdir(mode=0o700)
                 original_root.chmod(0o700)
@@ -470,6 +630,7 @@ def test_root_path_swap_during_append_fails_closed(
         )
     assert not list(original_root.glob("*.json"))
     assert len(list(detached_root.glob("*.json"))) == 1
+    assert len(list(detached_root.glob("*.reservation"))) == 1
 
 
 def test_root_path_swap_before_recover_fails_closed(tmp_path: Path) -> None:
@@ -569,6 +730,32 @@ def test_coordinated_evidence_and_outer_hash_rewrite_fails_fresh_replay(
     )
     replacement.chmod(0o600)
     evidence_path.unlink()
+    reservation_path = service.journal.root / (
+        f"{envelope['sequence']:020d}.reservation"
+    )
+    reservation = json.loads(reservation_path.read_text())
+    reservation["record_hash"] = envelope["record_hash"]
+    reservation["record_filename"] = replacement.name
+    reservation["record_bytes_sha256"] = hashlib.sha256(
+        replacement.read_bytes()
+    ).hexdigest()
+    reservation["reservation_hash"] = sha256_json(
+        {
+            key: value
+            for key, value in reservation.items()
+            if key != "reservation_hash"
+        }
+    )
+    reservation_path.write_text(
+        json.dumps(
+            reservation,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    )
+    reservation_path.chmod(0o600)
 
     with pytest.raises(
         CFastExecutionQualitySidecarError,

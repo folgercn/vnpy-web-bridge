@@ -50,22 +50,34 @@ journal root 必须是调用者预先创建、当前用户拥有且权限严格�
 目录。每条 record：
 
 - 使用连续 20 位 sequence、previous-record hash 和 canonical JSON SHA256；
-- 文件名同时绑定 sequence 与 record hash；
-- 通过 `O_CREAT | O_EXCL | O_NOFOLLOW` 以 `0600` 创建；
+- 先以固定、每个 sequence 唯一的
+  `<20-digit-sequence>.reservation` 执行 create-only reservation，再创建同时
+  绑定 sequence 与 record hash 的 record 文件；reservation 永久绑定
+  operation、previous hash、record hash、record filename 和 exact record bytes
+  hash；
+- reservation 和 record 都通过 `O_CREAT | O_EXCL | O_NOFOLLOW` 以 `0600`
+  创建；因此即使 `.journal.lock` 在两个 writer 之间被轮换，两个锁域也只能有
+  一个成功占用同一 sequence；
 - 完整写入后依次 fsync 文件和 journal 目录；
 - 使用固定、`0600`、regular-file、owner-pinned、inode-pinned 的
   `.journal.lock` 和跨进程 `flock(LOCK_EX)`，在同一锁内执行
   recover + semantic replay + dedupe + append，两个 writer 不会各自创建同
   sequence 的不同文件，也不能以竞态写入冲突的 ingest/event identity；
+- reservation 提交前、reservation 提交后和 record 提交后都会重新比较已打开
+  lock fd 与当前 `.journal.lock` 的 identity；lock 轮换必须 fail closed；
 - 每次操作同时比较已经打开的 root fd 与当前 root path 的
   device/inode/type/owner/mode；目录被 rename 后替换时，即使旧 fd 仍可写，也会
   fail closed，不能向已经脱链的旧目录写完后返回成功；
 - operation ID 重试只允许 byte-equivalent payload，冲突 replay fail closed；
 - recovery 拒绝 sequence gap、未知文件、symlink、非普通文件、非 canonical
-  JSON、hash-chain 断裂、截断写、内容篡改和 authority literal 改写。
+  JSON、缺 reservation、reservation 与 record 不一致、hash-chain 断裂、截断
+  写、内容篡改和 authority literal 改写。
 
 目录 fsync 已发生但调用方未收到成功响应时，重启/retry 会恢复同一 operation，
-不会追加第二份 evidence。当前 root identity pin 只覆盖 journal 实例生命周期；
+不会追加第二份 evidence。若进程只留下 reservation、尚未完成 record，recovery
+明确返回 `JOURNAL_INCOMPLETE_RESERVATION`，不会猜测 payload、删除 marker 或
+重用该 sequence；这类 journal 需要独立审计/恢复工具后续处理。当前 root
+identity pin 只覆盖 journal 实例生命周期；
 跨主机或跨进程重建的强抗回滚仍需外部 WORM/签名 checkpoint，不由 SHA256
 自证。
 
