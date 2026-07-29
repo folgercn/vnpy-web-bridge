@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from research_warehouse import filesystem, publication
+from research_warehouse import manifests as manifests_module
 from research_warehouse.acquisition import acquire_daily
 from research_warehouse.acquisition_models import HttpResponse
 from research_warehouse.canonical import canonical_json_line, sha256
@@ -503,6 +504,95 @@ def test_confirmed_head_commit_deletion_cannot_rewrite_pit_history(
             expected_head_seal_sha256=seal_hash,
             expected_head_commit_seal_sha256=original_commit_seal,
         )
+
+
+def test_commit_clock_rollback_fails_before_receipt_publish_and_retries(
+    tmp_path: Path,
+) -> None:
+    paths = warehouse(tmp_path)
+    private_key, public_key = signing_keys(tmp_path)
+    acquire(paths, official_raw(), T1)
+    moments = iter((T2, T1))
+
+    with pytest.raises(RegistryError, match="predates manifest signature"):
+        seal_daily_batch(
+            paths=paths,
+            registry=registry(),
+            trade_day=TRADE_DAY,
+            private_key_path=private_key,
+            signer_key_id="research-key-v1",
+            expected_parent_batch_seal_sha256=None,
+            expected_parent_commit_seal_sha256=None,
+            trusted_clock=lambda: next(moments),
+        )
+
+    prepared = next(paths.manifests.rglob("batch-*.json"))
+    assert list(paths.manifests.rglob("commit-*.json")) == []
+    recovered, manifest = seal(paths, private_key, T3, None)
+    assert recovered == prepared
+    seal_hash = manifest["batch_seal_sha256"]
+    chain = verify_manifest_chain(
+        paths=paths,
+        public_key_path=public_key,
+        registry=registry(),
+        expected_genesis_seal_sha256=seal_hash,
+        expected_head_seal_sha256=seal_hash,
+        expected_head_commit_seal_sha256=commit_seal(paths, seal_hash),
+    )
+    assert len(chain) == 1
+
+
+def test_uncommitted_head_recovers_after_new_observation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = warehouse(tmp_path)
+    private_key, public_key = signing_keys(tmp_path)
+    acquire(paths, official_raw("first"), T1)
+    real_create_commit = manifests_module.create_commit_receipt
+
+    def fail_before_receipt_publish(**_kwargs):
+        raise OSError(errno.ENOSPC, "forced pre-receipt interruption")
+
+    monkeypatch.setattr(
+        manifests_module,
+        "create_commit_receipt",
+        fail_before_receipt_publish,
+    )
+    with pytest.raises(OSError, match="pre-receipt"):
+        seal(paths, private_key, T2, None)
+    prepared = next(paths.manifests.rglob("batch-*.json"))
+    first_seal = manifest_payload(prepared)["batch_seal_sha256"]
+    assert list(paths.manifests.rglob("commit-*.json")) == []
+
+    acquire(paths, official_raw("second"), T3)
+    monkeypatch.setattr(
+        manifests_module,
+        "create_commit_receipt",
+        real_create_commit,
+    )
+    recovered, recovered_manifest = seal(paths, private_key, T4, None)
+    assert recovered == prepared
+    assert recovered_manifest["observation_count"] == 1
+
+    second_path, second_manifest = seal(
+        paths,
+        private_key,
+        T5,
+        first_seal,
+    )
+    assert second_path != prepared
+    assert second_manifest["observation_count"] == 2
+    second_seal = second_manifest["batch_seal_sha256"]
+    chain = verify_manifest_chain(
+        paths=paths,
+        public_key_path=public_key,
+        registry=registry(),
+        expected_genesis_seal_sha256=first_seal,
+        expected_head_seal_sha256=second_seal,
+        expected_head_commit_seal_sha256=commit_seal(paths, second_seal),
+    )
+    assert len(chain) == 2
 
 
 @pytest.mark.parametrize(

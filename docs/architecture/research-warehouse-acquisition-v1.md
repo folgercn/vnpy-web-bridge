@@ -60,6 +60,9 @@ carries `ready: false`. After its final parent directory is successfully
 fsynced, the signer atomically publishes a second signed commit receipt. The
 receipt's exact raw SHA-256 is its commit seal. A later manifest binds its
 parent's commit seal, so replacing an earlier receipt breaks the signed chain.
+All receipt fields, time ordering, signature, and canonical bytes are
+validated in memory before create-only publication. A clock rollback therefore
+leaves no invalid final receipt and remains retryable.
 
 The local chain cannot detect head rollback. Every verify/PIT call therefore
 requires trusted external genesis, current batch-head, and current commit-head
@@ -87,7 +90,10 @@ retrying the identical request with the old expected parent recognizes the
 unique matching child, completes any missing commit receipt, and returns the
 same batch seal. This recovery is allowed only while external state still
 names the old parent batch and commit. If external state already names the
-current child, a missing or changed receipt fails closed.
+current child, a missing or changed receipt fails closed. A signed prepared
+head binds a validated observation prefix, so later observations do not
+invalidate recovery: the old head is committed first and the new observations
+enter a later child.
 
 Before signing, the signer treats receipts as untrusted: it reloads the pinned
 registry, validates exact source/exchange/schema/URL/HTTP bindings, revalidates

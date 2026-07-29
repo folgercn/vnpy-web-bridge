@@ -75,7 +75,6 @@ def _matches_lost_response(
     expected_parent_commit: str | None,
     trade_day: str,
     registry: SourceRegistry,
-    fingerprint: str,
     signer_key_id: str,
     signer_public_key_sha256: str,
 ) -> bool:
@@ -84,7 +83,6 @@ def _matches_lost_response(
         and manifest["parent_commit_seal_sha256"] == expected_parent_commit
         and manifest["trade_day"] == trade_day
         and manifest["registry_raw_sha256"] == registry.raw_sha256
-        and manifest["input_fingerprint_sha256"] == fingerprint
         and manifest["signer_key_id"] == signer_key_id
         and manifest["signer_public_key_sha256"] == signer_public_key_sha256
     )
@@ -177,7 +175,6 @@ def seal_daily_batch(
                 expected_parent_commit=expected_parent_commit_seal_sha256,
                 trade_day=trade_day,
                 registry=registry,
-                fingerprint=fingerprint,
                 signer_key_id=signer_key_id,
                 signer_public_key_sha256=signer_public_hash,
             ):

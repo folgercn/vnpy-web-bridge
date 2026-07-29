@@ -16,7 +16,7 @@ from .errors import RegistryError
 from .filesystem import WarehousePaths, create_only_bytes, read_regular_strict
 from .manifest_contracts import ID_PATTERN, SHA256_PATTERN
 from .signing import public_key_sha256, sign_payload, verify_payload
-from .timeutil import format_utc, parse_utc
+from .timeutil import format_utc, parse_utc, require_utc
 
 COMMIT_SCHEMA = "vnpy_research_manifest_commit_receipt_v1"
 COMMIT_AUTHORITY = "RESEARCH_EVIDENCE_COMMIT_ONLY"
@@ -109,22 +109,33 @@ def create_commit_receipt(
     private_key: Ed25519PrivateKey,
     committed_at: datetime,
 ) -> tuple[dict[str, Any], str]:
+    committed = require_utc(committed_at, "committed_at")
+    if committed < parse_utc(manifest["sealed_at"], "sealed_at"):
+        raise RegistryError("manifest commit receipt predates manifest signature")
     payload = {
         "schema_version": COMMIT_SCHEMA,
         "batch_id": manifest["batch_id"],
         "batch_seal_sha256": manifest["batch_seal_sha256"],
         "registry_raw_sha256": manifest["registry_raw_sha256"],
-        "committed_at": format_utc(committed_at, "committed_at"),
+        "committed_at": format_utc(committed, "committed_at"),
         "signer_key_id": manifest["signer_key_id"],
         "signer_public_key_sha256": manifest["signer_public_key_sha256"],
         "authority": COMMIT_AUTHORITY,
         "ready": True,
     }
     signed = sign_payload(payload, private_key)
+    raw = canonical_json_line(signed)
+    validated = validate_commit_receipt(
+        parse_json_strict(raw, "manifest commit receipt"),
+        manifest,
+        private_key.public_key(),
+    )
+    if raw != canonical_json_line(validated):
+        raise RegistryError("manifest commit receipt is not canonical JSON")
     output = commit_receipt_path(manifest_path, manifest["batch_id"])
     create_only_bytes(
         output,
-        canonical_json_line(signed),
+        raw,
         "manifest commit receipt",
         temporary_dir=paths.temporary,
     )
