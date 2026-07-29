@@ -5,14 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from .canonical import sha256
 from .catalog_builder import build_catalog
 from .catalog_lock import single_writer_lock
 from .catalog_validation import validate_catalog
 from .commit_anchors import CommitAnchorLedger
 from .derived_paths import DerivedPaths
 from .errors import RegistryError
-from .file_integrity import read_regular_strict
 from .filesystem import WarehousePaths
 from .manifests import verify_manifest_chain
 from .models import SourceRegistry
@@ -101,6 +99,8 @@ def rebuild_empty_catalog(
             binding=binding,
             expected_artifacts=artifacts,
         )
+        if validated["catalog_sha256"] != catalog_hash:
+            raise RegistryError("built catalog digest changed before validation")
     return {
         **validated,
         "catalog_sha256": catalog_hash,
@@ -151,13 +151,7 @@ def verify_rebuilt_catalog(
         binding=binding,
         expected_artifacts=expected_artifacts,
     )
-    catalog_raw = read_regular_strict(
-        Path(validated["catalog"]),
-        "verified DuckDB catalog",
-        limit=512 * 1024 * 1024,
-    )
     return {
         **validated,
-        "catalog_sha256": sha256(catalog_raw),
         "status": "REBUILT_CATALOG_VALID",
     }

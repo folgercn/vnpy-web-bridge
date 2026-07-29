@@ -490,6 +490,55 @@ def test_partition_path_swap_during_validation_fails_closed(
     assert swapped is True
 
 
+def test_catalog_path_swap_during_validation_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    values = sealed_evidence(tmp_path)
+    rebuild(*values, tmp_path / "derived")
+    derived = DerivedPaths.open(tmp_path / "derived")
+    published = derived.catalog / CATALOG_FILENAME
+    replacement = derived.temporary / "replacement.duckdb"
+    replacement.write_bytes(b"corrupt replacement")
+    replacement.chmod(0o600)
+    real_connect = duckdb.connect
+    swapped = False
+
+    def swap_after_private_catalog_open(database=":memory:", *args, **kwargs):
+        nonlocal swapped
+        connection = real_connect(database, *args, **kwargs)
+        candidate = Path(str(database))
+        if (
+            not swapped
+            and candidate.parent == derived.temporary
+            and candidate.name.startswith(".verify-")
+            and candidate.suffix == ".duckdb"
+            and kwargs.get("read_only") is True
+        ):
+            swapped = True
+            os.replace(replacement, published)
+        return connection
+
+    monkeypatch.setattr(
+        catalog_validation.duckdb,
+        "connect",
+        swap_after_private_catalog_open,
+    )
+    with pytest.raises(RegistryError, match="catalog changed during validation"):
+        verify_rebuilt_catalog(
+            evidence=values[0],
+            derived=derived,
+            public_key_path=values[1],
+            registry=load_registry(REGISTRY_PATH),
+            expected_genesis_seal_sha256=values[2],
+            expected_head_seal_sha256=values[3],
+            expected_head_commit_seal_sha256=values[4],
+            ledger=values[5],
+            binding=values[6],
+        )
+    assert swapped is True
+
+
 def test_same_revision_snapshot_extension_rebuilds(tmp_path: Path) -> None:
     values = sealed_evidence(tmp_path, repeat_same_raw=True)
     for path in values[0].observations.rglob("obs-*.json"):
