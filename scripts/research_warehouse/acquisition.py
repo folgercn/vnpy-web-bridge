@@ -2,11 +2,22 @@
 
 from __future__ import annotations
 
+import math
 import os
+import time
+from collections.abc import Callable
 from datetime import date, datetime, timezone
 
-from .acquisition_models import AcquiredObject
+from .absence_receipts import create_absence_receipt
+from .acquisition_models import AcquiredObject, AuthoritativeAbsence
+from .calendar_models import OfficialCalendar
+from .clock_quality import (
+    TrustedClockSample,
+    trusted_time_after,
+    validate_live_clock_sample,
+)
 from .errors import RegistryError
+from .file_integrity import fsync_dir
 from .filesystem import (
     WarehousePaths,
     create_download_temp,
@@ -17,8 +28,10 @@ from .filesystem import (
     stream_to_fd,
 )
 from .observations import create_observation
+from .official_calendar import revalidate_official_calendar_evidence
 from .policy import render_endpoint, validate_redirect
 from .registry import SourceRegistry
+from .source_availability import classify_http_status
 from .timeutil import parse_utc, require_utc
 from .transport import Transport, UrllibTransport
 from .validation import validate_source_bytes
@@ -41,7 +54,18 @@ def acquire_daily(
     observed_at: datetime | None = None,
     transport: Transport | None = None,
     timeout_seconds: float = 30.0,
-) -> AcquiredObject:
+    calendar: OfficialCalendar | None = None,
+    clock_sample: TrustedClockSample | None = None,
+    utc_clock: Callable[[], datetime] | None = None,
+    monotonic_clock: Callable[[], float] | None = None,
+) -> AcquiredObject | AuthoritativeAbsence:
+    if (
+        isinstance(timeout_seconds, bool)
+        or not isinstance(timeout_seconds, (int, float))
+        or not math.isfinite(timeout_seconds)
+        or timeout_seconds <= 0
+    ):
+        raise RegistryError("acquisition timeout must be a positive finite number")
     try:
         source = registry.source(source_id)
     except KeyError as exc:
@@ -54,9 +78,33 @@ def acquire_daily(
         raise RegistryError("trade_day must be canonical YYYY-MM-DD")
     compact_day = trade_day.replace("-", "")
     endpoint = render_endpoint(source.endpoint_template, compact_day)
-    observed = require_utc(
-        observed_at or datetime.now(timezone.utc), "observed_at"
-    )
+    wall_clock = utc_clock or (lambda: datetime.now(timezone.utc))
+    monotonic = monotonic_clock or time.monotonic
+    if calendar is not None:
+        if observed_at is not None:
+            raise RegistryError(
+                "calendar-aware acquisition forbids caller-supplied observed_at"
+            )
+        if clock_sample is None:
+            raise RegistryError(
+                "calendar-aware acquisition requires trusted NTP clock evidence"
+            )
+        validate_live_clock_sample(clock_sample, local_now=wall_clock())
+        observed = require_utc(clock_sample.trusted_now, "request_started_at")
+        if calendar.issued_at > observed or any(
+            evidence.observed_at > observed
+            for evidence in calendar.source_evidence
+        ):
+            raise RegistryError(
+                "calendar authority was unavailable at request start"
+            )
+        request_started_monotonic = monotonic()
+    else:
+        observed = require_utc(
+            observed_at or wall_clock(),
+            "observed_at",
+        )
+        request_started_monotonic = 0.0
     client = transport or UrllibTransport()
     descriptor, temp_path = create_download_temp(paths)
     try:
@@ -68,10 +116,61 @@ def acquire_daily(
             timeout_seconds=timeout_seconds,
         ) as response:
             validate_redirect(response.final_url, source.allowed_hosts)
-            if response.status != 200:
+            if calendar is None and response.status != 200:
                 raise RegistryError(
                     f"official source returned unexpected HTTP {response.status}"
                 )
+            if calendar is not None:
+                response_received = trusted_time_after(
+                    clock_sample,
+                    elapsed_seconds=monotonic() - request_started_monotonic,
+                    max_elapsed_seconds=timeout_seconds + 5,
+                )
+                revalidate_official_calendar_evidence(calendar)
+                availability = classify_http_status(
+                    calendar=calendar,
+                    exchange=source.exchange,
+                    requested_day=parsed_day,
+                    status=response.status,
+                )
+                if response.status == 404:
+                    os.close(descriptor)
+                    descriptor = -1
+                    temp_path.unlink()
+                    fsync_dir(paths.temporary)
+                    absence_id, receipt_path = create_absence_receipt(
+                        paths=paths,
+                        source_id=source.source_id,
+                        exchange=source.exchange,
+                        trade_day=trade_day,
+                        request_url=endpoint,
+                        source_url=response.final_url,
+                        request_started_at=observed,
+                        response_received_at=response_received,
+                        ntp_sampled_at=clock_sample.sampled_at,
+                        ntp_offset_milliseconds=(
+                            clock_sample.ntp_offset_milliseconds
+                        ),
+                        http_metadata={
+                            name: response.headers.get(name)
+                            for name in CAPTURED_HTTP_HEADERS
+                        },
+                        calendar_raw_sha256=calendar.raw_sha256,
+                        registry_raw_sha256=registry.raw_sha256,
+                        collector_version=collector_version,
+                    )
+                    return AuthoritativeAbsence(
+                        absence_id=absence_id,
+                        receipt_path=receipt_path,
+                        source_id=source.source_id,
+                        exchange=source.exchange,
+                        trade_day=trade_day,
+                        observed_at=response_received,
+                        http_status=404,
+                        calendar_raw_sha256=calendar.raw_sha256,
+                        status=availability,
+                    )
+                observed = response_received
             expected_length = response.headers.get("content-length")
             if expected_length is not None:
                 try:

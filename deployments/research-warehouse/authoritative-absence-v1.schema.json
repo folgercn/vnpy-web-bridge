@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/folgercn/vnpy-web-bridge/authoritative-absence-v1.schema.json",
+  "title": "Research Warehouse calendar-authorized HTTP absence receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "absence_id",
+    "source_id",
+    "exchange",
+    "trade_day",
+    "request_url",
+    "source_url",
+    "http_status",
+    "request_started_at",
+    "response_received_at",
+    "ntp_sampled_at",
+    "ntp_offset_milliseconds",
+    "http_metadata",
+    "calendar_raw_sha256",
+    "registry_raw_sha256",
+    "collector_version",
+    "authority"
+  ],
+  "properties": {
+    "schema_version": {"const": "vnpy_research_authoritative_absence_v1"},
+    "absence_id": {
+      "type": "string",
+      "pattern": "^absence-[0-9a-f]{64}$"
+    },
+    "source_id": {"type": "string", "minLength": 8},
+    "exchange": {"enum": ["INE", "SHFE"]},
+    "trade_day": {"type": "string", "format": "date"},
+    "request_url": {"type": "string", "format": "uri", "pattern": "^https://"},
+    "source_url": {"type": "string", "format": "uri", "pattern": "^https://"},
+    "http_status": {"const": 404},
+    "request_started_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$"
+    },
+    "response_received_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$"
+    },
+    "ntp_sampled_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$"
+    },
+    "ntp_offset_milliseconds": {
+      "type": "integer",
+      "minimum": -1000,
+      "maximum": 1000
+    },
+    "http_metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "content-length",
+        "content-type",
+        "etag",
+        "last-modified"
+      ],
+      "properties": {
+        "content-length": {"type": ["string", "null"]},
+        "content-type": {"type": ["string", "null"]},
+        "etag": {"type": ["string", "null"]},
+        "last-modified": {"type": ["string", "null"]}
+      }
+    },
+    "calendar_raw_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "registry_raw_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "collector_version": {"type": "string", "minLength": 1},
+    "authority": {"const": "CALENDAR_CLASSIFIED_SOURCE_ABSENCE_ONLY"}
+  }
+}

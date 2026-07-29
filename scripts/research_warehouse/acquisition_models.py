@@ -32,6 +32,19 @@ class AcquiredObject:
 
 
 @dataclass(frozen=True)
+class AuthoritativeAbsence:
+    absence_id: str
+    receipt_path: Path
+    source_id: str
+    exchange: str
+    trade_day: str
+    observed_at: datetime
+    http_status: int
+    calendar_raw_sha256: str
+    status: str
+
+
+@dataclass(frozen=True)
 class PitSelection:
     object_id: str
     revision_id: str
