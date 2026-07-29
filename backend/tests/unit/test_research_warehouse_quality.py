@@ -21,6 +21,7 @@ from research_warehouse.absence_anchors import (
 from research_warehouse.absence_anchors import (
     load_absence_availability_anchor,
 )
+from research_warehouse.absence_receipts import create_absence_receipt
 from research_warehouse.acquisition import acquire_daily
 from research_warehouse.acquisition_models import (
     AuthoritativeAbsence,
@@ -259,7 +260,9 @@ def absence_anchor(
     *,
     available_at: datetime,
     calendar: OfficialCalendar,
+    calendar_availability,
 ):
+    tmp_path.mkdir(parents=True, exist_ok=True)
     receipt_raw = absence.receipt_path.read_bytes()
     payload = {
         "schema_version": ABSENCE_ANCHOR_SCHEMA,
@@ -280,6 +283,7 @@ def absence_anchor(
         expected_raw_sha256=sha256(raw),
         receipt_path=absence.receipt_path,
         calendar=calendar,
+        calendar_anchor=calendar_availability,
     )
 
 
@@ -542,11 +546,17 @@ def test_404_requires_explicit_calendar_closed_day(tmp_path: Path) -> None:
         format_checker=FormatChecker(),
     ).validate(json.loads(result.receipt_path.read_bytes()))
     assert not list(paths.raw.rglob("*.raw"))
+    calendar_availability = calendar_anchor(
+        tmp_path,
+        calendar,
+        datetime(2025, 6, 30, 3, tzinfo=UTC),
+    )
     anchor = absence_anchor(
         tmp_path,
         result,
         available_at=observed + timedelta(seconds=3),
         calendar=calendar,
+        calendar_availability=calendar_availability,
     )
     Draft202012Validator(
         json.loads(ABSENCE_ANCHOR_SCHEMA_PATH.read_bytes()),
@@ -557,6 +567,96 @@ def test_404_requires_explicit_calendar_closed_day(tmp_path: Path) -> None:
     with pytest.raises(RegistryError, match="unavailable at PIT cutoff"):
         anchor.require_available(cutoff_at=observed + timedelta(seconds=1))
     anchor.require_available(cutoff_at=observed + timedelta(seconds=3))
+    late_calendar_anchor = calendar_anchor(
+        tmp_path,
+        calendar,
+        observed + timedelta(seconds=1),
+    )
+    with pytest.raises(RegistryError, match="unavailable at PIT cutoff"):
+        absence_anchor(
+            tmp_path / "late-calendar",
+            result,
+            available_at=observed + timedelta(seconds=3),
+            calendar=calendar,
+            calendar_availability=late_calendar_anchor,
+        )
+
+    official_absence_id, official_receipt = create_absence_receipt(
+        paths=paths,
+        source_id="shfe-daily-market-data-v1",
+        exchange="SHFE",
+        trade_day="2026-07-21",
+        source_url="https://www.shfe.com.cn/data/dailydata/kx/kx20260721.dat",
+        request_started_at=observed,
+        response_received_at=observed + timedelta(seconds=1),
+        ntp_sampled_at=observed,
+        ntp_offset_milliseconds=0,
+        http_metadata={
+            "content-length": None,
+            "content-type": None,
+            "etag": None,
+            "last-modified": None,
+        },
+        calendar_raw_sha256=calendar.raw_sha256,
+        collector_version="calendar-test-v1",
+    )
+    forged_official_absence = AuthoritativeAbsence(
+        absence_id=official_absence_id,
+        receipt_path=official_receipt,
+        source_id="shfe-daily-market-data-v1",
+        exchange="SHFE",
+        trade_day="2026-07-21",
+        observed_at=observed + timedelta(seconds=1),
+        http_status=404,
+        calendar_raw_sha256=calendar.raw_sha256,
+        status="CALENDAR_AUTHORIZED_ABSENCE_AWAITING_EXTERNAL_ANCHOR",
+    )
+    with pytest.raises(RegistryError, match="official-day source is missing"):
+        absence_anchor(
+            tmp_path / "official-day",
+            forged_official_absence,
+            available_at=observed + timedelta(seconds=3),
+            calendar=calendar,
+            calendar_availability=calendar_availability,
+        )
+    stale_absence_id, stale_receipt = create_absence_receipt(
+        paths=paths,
+        source_id="shfe-daily-market-data-v1",
+        exchange="SHFE",
+        trade_day=closed_day.isoformat(),
+        source_url="https://www.shfe.com.cn/data/dailydata/kx/kx20260720.dat",
+        request_started_at=observed,
+        response_received_at=observed + timedelta(seconds=1),
+        ntp_sampled_at=observed - timedelta(seconds=301),
+        ntp_offset_milliseconds=0,
+        http_metadata={
+            "content-length": None,
+            "content-type": None,
+            "etag": None,
+            "last-modified": None,
+        },
+        calendar_raw_sha256=calendar.raw_sha256,
+        collector_version="calendar-test-v1",
+    )
+    stale_absence = AuthoritativeAbsence(
+        absence_id=stale_absence_id,
+        receipt_path=stale_receipt,
+        source_id="shfe-daily-market-data-v1",
+        exchange="SHFE",
+        trade_day=closed_day.isoformat(),
+        observed_at=observed + timedelta(seconds=1),
+        http_status=404,
+        calendar_raw_sha256=calendar.raw_sha256,
+        status="CALENDAR_AUTHORIZED_ABSENCE_AWAITING_EXTERNAL_ANCHOR",
+    )
+    with pytest.raises(RegistryError, match="time ordering"):
+        absence_anchor(
+            tmp_path / "stale-ntp",
+            stale_absence,
+            available_at=observed + timedelta(seconds=3),
+            calendar=calendar,
+            calendar_availability=calendar_availability,
+        )
 
     with pytest.raises(RegistryError, match="official-day source is missing"):
         acquire_daily(

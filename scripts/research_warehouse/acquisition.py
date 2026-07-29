@@ -91,6 +91,13 @@ def acquire_daily(
             )
         validate_live_clock_sample(clock_sample, local_now=wall_clock())
         observed = require_utc(clock_sample.trusted_now, "request_started_at")
+        if calendar.issued_at > observed or any(
+            evidence.observed_at > observed
+            for evidence in calendar.source_evidence
+        ):
+            raise RegistryError(
+                "calendar authority was unavailable at request start"
+            )
         request_started_monotonic = monotonic()
     else:
         observed = require_utc(

@@ -71,7 +71,12 @@ The local receipt reports
 `CALENDAR_AUTHORIZED_ABSENCE_AWAITING_EXTERNAL_ANCHOR`; it is never PIT
 authority by itself. Only a separately hash-pinned absence anchor, created
 after durable receipt publication and bound to the receipt hash, makes the
-absence eligible at its external `available_at`. An official-day 404, a
+absence eligible at its external `available_at`. Verification independently
+replays HTTP 404 classification against the exact calendar, requires its
+external calendar anchor to have been available by `request_started_at`,
+revalidates the 0–300 second NTP sample age, and prevents the absence anchor
+from predating the response, calendar issuance, calendar evidence, or calendar
+anchor. An official-day 404, a
 closed-day 200, a missing classification, another status, a backfilled clock,
 or an anchor after the cutoff fails closed.
 

@@ -3,17 +3,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from .absence_receipts import ABSENCE_AUTHORITY, ABSENCE_SCHEMA
+from .calendar_anchors import CalendarAvailabilityAnchor
 from .calendar_models import OfficialCalendar
 from .canonical import canonical_json, canonical_json_line, parse_json_strict, sha256
 from .errors import RegistryError
 from .file_integrity import read_regular_strict
 from .manifest_contracts import ID_PATTERN, SHA256_PATTERN
 from .official_calendar import revalidate_official_calendar_evidence
+from .source_availability import classify_http_status
 from .timeutil import parse_utc, require_utc
 
 ANCHOR_SCHEMA = "vnpy_research_absence_availability_anchor_v1"
@@ -98,7 +100,12 @@ def _load_receipt(path: Path) -> tuple[dict, str]:
         "absence response_received_at",
     )
     sampled_at = parse_utc(payload["ntp_sampled_at"], "absence NTP sampled_at")
-    if sampled_at > request_started or response_received < request_started:
+    sample_age = request_started - sampled_at
+    if (
+        sample_age < timedelta(0)
+        or sample_age > timedelta(seconds=300)
+        or response_received < request_started
+    ):
         raise RegistryError("authoritative absence time ordering is invalid")
     try:
         trade_day = date.fromisoformat(payload["trade_day"])
@@ -154,6 +161,7 @@ def load_absence_availability_anchor(
     expected_raw_sha256: str,
     receipt_path: Path,
     calendar: OfficialCalendar,
+    calendar_anchor: CalendarAvailabilityAnchor,
 ) -> AbsenceAvailabilityAnchor:
     if (
         not isinstance(expected_raw_sha256, str)
@@ -164,6 +172,22 @@ def load_absence_availability_anchor(
     revalidate_official_calendar_evidence(calendar)
     if receipt["calendar_raw_sha256"] != calendar.raw_sha256:
         raise RegistryError("absence receipt calendar binding mismatch")
+    request_started = parse_utc(
+        receipt["request_started_at"],
+        "absence request_started_at",
+    )
+    calendar_anchor.require_available(
+        calendar,
+        cutoff_at=request_started,
+    )
+    availability = classify_http_status(
+        calendar=calendar,
+        exchange=receipt["exchange"],
+        requested_day=date.fromisoformat(receipt["trade_day"]),
+        status=receipt["http_status"],
+    )
+    if availability != "CALENDAR_AUTHORIZED_ABSENCE_AWAITING_EXTERNAL_ANCHOR":
+        raise RegistryError("absence receipt is not calendar-authorized")
     raw = read_regular_strict(path, "absence availability anchor")
     if sha256(raw) != expected_raw_sha256:
         raise RegistryError("absence availability anchor hash mismatch")
@@ -189,8 +213,14 @@ def load_absence_availability_anchor(
         receipt["response_received_at"],
         "absence response_received_at",
     )
-    if available_at < response_received:
-        raise RegistryError("absence anchor predates the HTTP response")
+    earliest_valid = max(
+        response_received,
+        calendar.issued_at,
+        calendar_anchor.available_at,
+        *(item.observed_at for item in calendar.source_evidence),
+    )
+    if available_at < earliest_valid:
+        raise RegistryError("absence anchor predates its authority or response")
     return AbsenceAvailabilityAnchor(
         raw_sha256=expected_raw_sha256,
         absence_id=receipt["absence_id"],

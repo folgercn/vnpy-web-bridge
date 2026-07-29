@@ -135,6 +135,11 @@ def parser() -> argparse.ArgumentParser:
     absence_anchor.add_argument("--expected-anchor-sha256", required=True)
     absence_anchor.add_argument("--cutoff-at", required=True)
     _add_calendar_arguments(absence_anchor)
+    absence_anchor.add_argument("--calendar-anchor", type=Path, required=True)
+    absence_anchor.add_argument(
+        "--expected-calendar-anchor-sha256",
+        required=True,
+    )
     return result
 
 
@@ -464,6 +469,12 @@ def main(argv: list[str] | None = None) -> int:
                 expected_raw_sha256=args.expected_anchor_sha256,
                 receipt_path=args.receipt,
                 calendar=_calendar(args),
+                calendar_anchor=load_calendar_availability_anchor(
+                    args.calendar_anchor,
+                    expected_raw_sha256=(
+                        args.expected_calendar_anchor_sha256
+                    ),
+                ),
             )
             anchor.require_available(
                 cutoff_at=parse_utc(args.cutoff_at, "cutoff_at")
