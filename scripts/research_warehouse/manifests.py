@@ -247,6 +247,7 @@ def verify_manifest_chain(
     expected_genesis_seal_sha256: str | None,
     expected_head_seal_sha256: str | None,
     expected_head_commit_seal_sha256: str | None,
+    offline: bool = False,
 ) -> list[dict[str, Any]]:
     with custody_lock(paths, "manifest-chain"):
         _recover_manifest_publications(paths)
@@ -254,6 +255,7 @@ def verify_manifest_chain(
             paths,
             load_public_key(public_key_path),
             registry,
+            offline=offline,
         )
         require_chain_anchors(
             chain,

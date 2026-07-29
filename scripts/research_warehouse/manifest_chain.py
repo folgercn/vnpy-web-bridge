@@ -11,6 +11,7 @@ from .errors import RegistryError
 from .filesystem import WarehousePaths, read_regular_strict
 from .manifest_commits import commit_receipt_path, load_commit_receipt
 from .manifest_contracts import SHA256_PATTERN
+from .manifest_envelope import validate_manifest_envelope
 from .manifest_validation import validate_manifest
 from .models import SourceRegistry
 from .timeutil import parse_utc
@@ -22,11 +23,13 @@ def load_manifest_chain(
     registry: SourceRegistry,
     *,
     allow_uncommitted_head: bool = False,
+    offline: bool = False,
 ) -> list[dict[str, Any]]:
     manifests: list[dict[str, Any]] = []
     for path in sorted(paths.manifests.rglob("batch-*.json")):
         raw = read_regular_strict(path, "daily batch manifest", limit=16 * 1024 * 1024)
-        payload = validate_manifest(
+        validator = validate_manifest_envelope if offline else validate_manifest
+        payload = validator(
             paths,
             parse_json_strict(raw, "daily batch manifest"),
             public_key,

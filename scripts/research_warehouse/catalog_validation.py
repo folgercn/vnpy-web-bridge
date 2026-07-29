@@ -1,0 +1,318 @@
+"""Fail-closed validation for DuckDB catalog and Parquet derivatives."""
+
+from __future__ import annotations
+
+from pathlib import Path, PurePosixPath
+from typing import Any
+
+import duckdb
+
+from .canonical import sha256
+from .catalog_schema import CATALOG_FILENAME, CATALOG_SCHEMA_VERSION, TABLE_COLUMNS
+from .commit_anchors import CommitAnchorLedger
+from .custody_paths import require_private_dir
+from .derived_paths import DerivedPaths
+from .errors import RegistryError
+from .file_integrity import read_regular_strict
+from .normalization_contracts import (
+    DUCKDB_VERSION,
+    NORMALIZED_COLUMNS,
+    NORMALIZED_SCHEMA_VERSION,
+    NORMALIZER_VERSION,
+    PARQUET_COMPRESSION,
+    SORT_KEYS,
+    TIMEZONE,
+    schema_sha256,
+    sort_sha256,
+)
+from .normalization_models import NormalizationBinding
+from .timeutil import format_utc
+
+
+def _expected_revisions(
+    chain: list[dict[str, Any]],
+) -> dict[str, tuple[int, dict[str, Any]]]:
+    values: dict[str, tuple[int, dict[str, Any]]] = {}
+    for sequence, manifest in enumerate(chain, start=1):
+        for revision in manifest["revisions"]:
+            existing = values.get(revision["revision_id"])
+            if existing is None:
+                values[revision["revision_id"]] = (sequence, revision)
+            elif existing[1] != revision:
+                raise RegistryError("signed revision changed across manifest chain")
+    return values
+
+
+def _require_schema(connection: duckdb.DuckDBPyConnection) -> None:
+    tables = {
+        row[0]
+        for row in connection.execute(
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_schema = 'main'"
+        ).fetchall()
+    }
+    if tables != set(TABLE_COLUMNS):
+        raise RegistryError("DuckDB catalog table set drifted")
+    for table, expected in TABLE_COLUMNS.items():
+        actual = tuple(
+            (row[1], row[2])
+            for row in connection.execute(
+                f"PRAGMA table_info('{table}')"
+            ).fetchall()
+        )
+        if actual != expected:
+            raise RegistryError(f"DuckDB catalog schema drifted: {table}")
+
+
+def _safe_partition(paths: DerivedPaths, relative: str) -> Path:
+    pure = PurePosixPath(relative)
+    if (
+        pure.is_absolute()
+        or ".." in pure.parts
+        or not pure.parts
+        or pure.parts[0] != "parquet"
+    ):
+        raise RegistryError("catalog Parquet path escapes derived root")
+    candidate = paths.root.joinpath(*pure.parts)
+    current = paths.root
+    for component in pure.parts[:-1]:
+        current /= component
+        require_private_dir(current, "catalog Parquet parent")
+    return candidate
+
+
+def _sql_path(path: Path) -> str:
+    return "'" + str(path).replace("'", "''") + "'"
+
+
+def _validate_partition(
+    connection: duckdb.DuckDBPyConnection,
+    paths: DerivedPaths,
+    row: tuple[Any, ...],
+    binding: NormalizationBinding,
+) -> None:
+    (
+        normalization_id,
+        revision_id,
+        source_id,
+        exchange,
+        trade_day,
+        raw_sha256,
+        row_count,
+        parquet_sha256,
+        parquet_bytes,
+        relative,
+        claimed_schema,
+        claimed_sort,
+        tool_commit,
+        dependency_lock,
+        duckdb_version,
+        timezone,
+    ) = row
+    path = _safe_partition(paths, relative)
+    raw = read_regular_strict(
+        path,
+        "catalog normalized Parquet",
+        limit=512 * 1024 * 1024,
+    )
+    if len(raw) != parquet_bytes or sha256(raw) != parquet_sha256:
+        raise RegistryError("catalog Parquet hash/size mismatch")
+    if (
+        claimed_schema != schema_sha256()
+        or claimed_sort != sort_sha256()
+        or tool_commit != binding.tool_commit_sha
+        or dependency_lock != binding.dependency_lock_sha256
+        or duckdb_version != DUCKDB_VERSION
+        or timezone != TIMEZONE
+    ):
+        raise RegistryError("catalog normalization binding mismatch")
+    literal = _sql_path(path)
+    try:
+        actual_count = connection.execute(
+            f"SELECT count(*) FROM read_parquet({literal})"
+        ).fetchone()[0]
+        described = tuple(
+            (item[0], item[1])
+            for item in connection.execute(
+                f"DESCRIBE SELECT * FROM read_parquet({literal})"
+            ).fetchall()
+        )
+        metadata = connection.execute(
+            f"SELECT num_rows, format_version, created_by "
+            f"FROM parquet_file_metadata({literal})"
+        ).fetchone()
+        compressions = {
+            value[0]
+            for value in connection.execute(
+                f"SELECT DISTINCT compression FROM parquet_metadata({literal})"
+            ).fetchall()
+        }
+        mismatch_count = connection.execute(
+            f"SELECT count(*) FROM read_parquet({literal}) WHERE "
+            "normalization_id <> ? OR revision_id <> ? OR source_id <> ? "
+            "OR exchange <> ? OR trade_day <> ? OR raw_sha256 <> ? "
+            "OR schema_version <> ? OR tool_commit_sha <> ? "
+            "OR dependency_lock_sha256 <> ? OR duckdb_version <> ? "
+            "OR timezone <> ?",
+            (
+                normalization_id,
+                revision_id,
+                source_id,
+                exchange,
+                trade_day,
+                raw_sha256,
+                NORMALIZED_SCHEMA_VERSION,
+                binding.tool_commit_sha,
+                binding.dependency_lock_sha256,
+                DUCKDB_VERSION,
+                TIMEZONE,
+            ),
+        ).fetchone()[0]
+        sort_rows = connection.execute(
+            "SELECT "
+            + ", ".join(f'"{key}"' for key in SORT_KEYS)
+            + f" FROM read_parquet({literal})"
+        ).fetchall()
+    except duckdb.Error as exc:
+        raise RegistryError(f"catalog Parquet validation failed: {exc}") from exc
+    if actual_count != row_count or metadata[0] != row_count:
+        raise RegistryError("catalog Parquet row count mismatch")
+    if described != NORMALIZED_COLUMNS:
+        raise RegistryError("catalog Parquet schema mismatch")
+    if metadata[1] != 2 or DUCKDB_VERSION not in metadata[2]:
+        raise RegistryError("catalog Parquet writer/version mismatch")
+    if compressions != {PARQUET_COMPRESSION.upper()}:
+        raise RegistryError("catalog Parquet compression mismatch")
+    if mismatch_count:
+        raise RegistryError("catalog Parquet lineage columns mismatch")
+    if sort_rows != sorted(sort_rows):
+        raise RegistryError("catalog Parquet row order mismatch")
+
+
+def validate_catalog(
+    *,
+    paths: DerivedPaths,
+    chain: list[dict[str, Any]],
+    ledger: CommitAnchorLedger,
+    binding: NormalizationBinding,
+) -> dict[str, Any]:
+    ledger.require_chain(chain)
+    catalog_path = paths.catalog / CATALOG_FILENAME
+    read_regular_strict(
+        catalog_path,
+        "DuckDB catalog",
+        limit=512 * 1024 * 1024,
+    )
+    try:
+        connection = duckdb.connect(
+            str(catalog_path),
+            read_only=True,
+            config={"threads": "1"},
+        )
+    except duckdb.Error as exc:
+        raise RegistryError(f"DuckDB catalog is corrupt: {exc}") from exc
+    try:
+        _require_schema(connection)
+        meta = dict(connection.execute("SELECT key, value FROM catalog_meta").fetchall())
+        revisions = _expected_revisions(chain)
+        expected_meta = {
+            "catalog_schema_version": CATALOG_SCHEMA_VERSION,
+            "commit_anchor_ledger_sha256": ledger.raw_sha256,
+            "dependency_lock_sha256": binding.dependency_lock_sha256,
+            "duckdb_version": DUCKDB_VERSION,
+            "genesis_batch_seal_sha256": chain[0]["batch_seal_sha256"],
+            "head_batch_seal_sha256": chain[-1]["batch_seal_sha256"],
+            "head_commit_seal_sha256": chain[-1]["commit_seal_sha256"],
+            "manifest_count": str(len(chain)),
+            "normalization_count": str(len(revisions)),
+            "normalized_schema_version": NORMALIZED_SCHEMA_VERSION,
+            "normalizer_version": NORMALIZER_VERSION,
+            "registry_raw_sha256": binding.registry_raw_sha256,
+            "revision_count": str(len(revisions)),
+            "timezone": TIMEZONE,
+            "tool_commit_sha": binding.tool_commit_sha,
+        }
+        if meta != expected_meta:
+            raise RegistryError("DuckDB catalog metadata mismatch")
+        batch_rows = connection.execute(
+            "SELECT batch_sequence, batch_id, batch_seal_sha256, "
+            "commit_seal_sha256, parent_batch_seal_sha256, "
+            "parent_commit_seal_sha256, trade_day::VARCHAR, "
+            "sealed_at, available_at, registry_raw_sha256 "
+            "FROM batches ORDER BY batch_sequence"
+        ).fetchall()
+        expected_batches = [
+            (
+                sequence,
+                manifest["batch_id"],
+                manifest["batch_seal_sha256"],
+                manifest["commit_seal_sha256"],
+                manifest["parent_batch_seal_sha256"],
+                manifest["parent_commit_seal_sha256"],
+                manifest["trade_day"],
+                manifest["sealed_at"],
+                format_utc(ledger.entries[sequence - 1].available_at),
+                manifest["registry_raw_sha256"],
+            )
+            for sequence, manifest in enumerate(chain, start=1)
+        ]
+        if batch_rows != expected_batches:
+            raise RegistryError("DuckDB catalog batch lineage mismatch")
+        revision_rows = connection.execute(
+            "SELECT revision_id, revision_sequence, source_id, exchange, "
+            "trade_day::VARCHAR, object_id, raw_sha256, raw_bytes, "
+            "raw_relative_path, first_seen_at, last_seen_at, "
+            "supersedes_revision_id, supersedes_object_id, first_batch_sequence "
+            "FROM revisions ORDER BY revision_id"
+        ).fetchall()
+        expected_revision_rows = sorted(
+            (
+                revision["revision_id"],
+                revision["revision_sequence"],
+                revision["source_id"],
+                revision["exchange"],
+                revision["trade_day"],
+                revision["object_id"],
+                revision["raw_sha256"],
+                revision["raw_bytes"],
+                revision["raw_relative_path"],
+                revision["first_seen_at"],
+                revision["last_seen_at"],
+                revision["supersedes_revision_id"],
+                revision["supersedes_object_id"],
+                sequence,
+            )
+            for sequence, revision in revisions.values()
+        )
+        if revision_rows != expected_revision_rows:
+            raise RegistryError("DuckDB catalog revision lineage mismatch")
+        partition_rows = connection.execute(
+            "SELECT normalization_id, revision_id, source_id, exchange, "
+            "trade_day::VARCHAR, raw_sha256, row_count, parquet_sha256, "
+            "parquet_bytes, parquet_relative_path, schema_sha256, sort_sha256, "
+            "tool_commit_sha, dependency_lock_sha256, duckdb_version, timezone "
+            "FROM normalized_partitions ORDER BY revision_id"
+        ).fetchall()
+        if len(partition_rows) != len(revisions):
+            raise RegistryError("DuckDB catalog partition count mismatch")
+        for row in partition_rows:
+            revision = revisions[row[1]][1]
+            if (
+                row[2] != revision["source_id"]
+                or row[3] != revision["exchange"]
+                or row[4] != revision["trade_day"]
+                or row[5] != revision["raw_sha256"]
+            ):
+                raise RegistryError("catalog partition/revision lineage mismatch")
+            _validate_partition(connection, paths, row, binding)
+    except (duckdb.Error, KeyError, TypeError) as exc:
+        raise RegistryError(f"DuckDB catalog validation failed: {exc}") from exc
+    finally:
+        connection.close()
+    return {
+        "catalog": str(catalog_path),
+        "manifest_count": len(chain),
+        "partition_count": len(revisions),
+        "revision_count": len(revisions),
+        "status": "CATALOG_VALID",
+    }
