@@ -119,6 +119,7 @@ class FakeRisk:
 class FakeTrade:
     def __init__(self, fail_after: int | None = None, *, complete_cancel: bool = True) -> None:
         self.requests = []
+        self.send_kwargs: list[dict[str, Any]] = []
         self.cancel_requests: list[str] = []
         self.fail_after = fail_after
         self.complete_cancel = complete_cancel
@@ -128,6 +129,7 @@ class FakeTrade:
         if self.fail_after is not None and len(self.requests) >= self.fail_after:
             raise RuntimeError("simulated send failure")
         self.requests.append(request)
+        self.send_kwargs.append(dict(kwargs))
         return {"vt_orderid": f"CTP.{len(self.requests)}", "accepted": True}
 
     def cancel_order(self, vt_orderid: str, **kwargs) -> dict[str, Any]:
@@ -283,6 +285,7 @@ def make_batch(
     execution_day: str = "2026-09-01",
     target_contract_month: str = "2610",
     previous_contract_month: str | None = None,
+    batch_id: str | None = None,
 ) -> CommodityTargetBatchDTO:
     targets = targets or {"ag": 2, "al": -1}
     previous = previous or {}
@@ -313,7 +316,7 @@ def make_batch(
         )
     data = {
         "schema_version": "commodity_static_core_equal_target_batch_v2",
-        "batch_id": f"batch-{execution_day}-static-core",
+        "batch_id": batch_id or f"batch-{execution_day}-static-core",
         "scheduler_id": "STATIC_CORE_EQUAL",
         "source_combination_arm": "CORE_EQUAL_TARGET",
         "execution_lane": execution_lane,
@@ -577,6 +580,27 @@ def test_cold_start_preview_creates_open_only_plan(tmp_path: Path) -> None:
     assert plan["countable_forward"] is True
 
 
+def test_official_batch_cannot_spoof_c_fast_unsplit_context(
+    tmp_path: Path,
+) -> None:
+    service, private_key, _ = make_service(tmp_path)
+    service.settings = service.settings.model_copy(
+        update={"commodity_simnow_max_child_order_lots": 1}
+    )
+    batch = make_batch(
+        private_key,
+        targets={"ag": 3, "al": -3},
+        batch_id="c-fast-shakedown",
+    )
+
+    plan = service.preview(
+        batch, operator="admin", role="admin", source_ip=None
+    )
+
+    assert len(plan["open_orders"]) == 6
+    assert all(row["volume"] == 1 for row in plan["open_orders"])
+
+
 def test_acceptance_passive_limit_is_explicit_and_uses_touch_price(tmp_path: Path) -> None:
     service, private_key, _ = make_service(tmp_path, now=SHAKEDOWN_NOW)
     service.settings = service.settings.model_copy(
@@ -608,6 +632,10 @@ def test_acceptance_passive_limit_is_explicit_and_uses_touch_price(tmp_path: Pat
     )
 
     requests = service.trade.requests
+    assert all(
+        row.get("max_order_volume_override") is None
+        for row in service.trade.send_kwargs
+    )
     assert requests[0].price == service.tick_store.ticks["ag2610.SHFE"]["bid_price_1"]
     assert requests[1].price == service.tick_store.ticks["al2610.SHFE"]["ask_price_1"]
     assert service.plan()["submitted"]["open"][0]["price_mode"] == "acceptance_passive"

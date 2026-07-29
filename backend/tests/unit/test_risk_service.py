@@ -98,16 +98,19 @@ def test_max_order_volume(monkeypatch) -> None:
         service.check_order(make_order(volume=2))
 
 
-def test_internal_override_skips_only_order_volume_ceiling(
+def test_internal_volume_override_does_not_change_default_ceiling(
     monkeypatch,
 ) -> None:
     service = make_service(max_order_volume=1)
     allow_rpc(monkeypatch)
     service.rules["max_symbol_position"] = 0
 
+    with pytest.raises(RiskMaxOrderVolumeError):
+        service.check_order(make_order(volume=20))
+
     service.check_order(
         make_order(volume=20),
-        enforce_max_order_volume=False,
+        max_order_volume_override=0,
     )
 
 

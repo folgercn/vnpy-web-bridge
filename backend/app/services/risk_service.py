@@ -83,7 +83,7 @@ class RiskService:
         self,
         payload: OrderRequestDTO,
         *,
-        enforce_max_order_volume: bool = True,
+        max_order_volume_override: float | None = None,
     ) -> None:
         self.check_trade_allowed(confirm=payload.confirm)
         if not rpc_service.status()["connected"]:
@@ -107,11 +107,12 @@ class RiskService:
         if contract is None:
             raise RiskSymbolBlockedError("合约不存在", detail={"vt_symbol": vt_symbol})
 
-        max_order_volume = self.rules["max_order_volume"]
-        if (
-            enforce_max_order_volume
-            and payload.volume > max_order_volume
-        ):
+        max_order_volume = (
+            self.rules["max_order_volume"]
+            if max_order_volume_override is None
+            else max_order_volume_override
+        )
+        if max_order_volume > 0 and payload.volume > max_order_volume:
             raise RiskMaxOrderVolumeError(
                 detail={
                     "volume": payload.volume,
