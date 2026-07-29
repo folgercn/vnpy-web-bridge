@@ -1,0 +1,398 @@
+{
+  "x-c-fast-t1-query-v4-runtime": {
+    "template_state": "INVALID_BLOCKED_NOT_RUNNABLE_NOT_AUTHORITY",
+    "schema_version": "commodity_c_fast_t1_query_v4_runtime_template_v1",
+    "code_only_template": true,
+    "packaging_validated_only": true,
+    "image_built": false,
+    "image_pushed": false,
+    "deployed": false,
+    "production_queried": false,
+    "runtime_execution_ready": false,
+    "blocking_reasons": [
+      "QUERY_V4_SOURCE_BUNDLE_CONTENT_IDENTITY_NOT_FROZEN",
+      "FINAL_MERGED_SHA_OCI_NOT_BUILT_ATTESTED_DEPLOYED_OR_SIGNED"
+    ],
+    "requires_separate_query_v4_image_attestation": true,
+    "requires_signed_query_v4_release": true,
+    "requires_active_readiness_v3_pins": true,
+    "authority_granted": false,
+    "production_query_authorized": false,
+    "collection_authorized": false,
+    "dispatch_authorized": false,
+    "trading_authorized": false
+  },
+  "services": {
+    "c-fast-t1-query-v4": {
+      "profiles": [
+        "manual-c-fast-t1-query-v4"
+      ],
+      "image": "${C_FAST_T1_QUERY_V4_IMAGE_REPOSITORY:?required_repository}@${C_FAST_T1_QUERY_V4_IMAGE_DIGEST:?required_sha256_digest}",
+      "entrypoint": [
+        "/usr/local/bin/python3.12",
+        "-I",
+        "/opt/c-fast-t1/scripts/commodity_c_fast_t1_query_v4.py"
+      ],
+      "command": [
+        "--query-release",
+        "/var/lib/c-fast-t1-readiness/${C_FAST_T1_QUERY_V4_RELEASE_BASENAME:?required_query_release_basename}",
+        "--trusted-keyring",
+        "/run/c-fast-t1-query-v4-input/query-keyring.json",
+        "--manifest",
+        "/run/c-fast-t1-query-v4-input/manifest.json",
+        "--dsn-file",
+        "/run/secrets/c-fast-t1-query-v4-readonly.dsn",
+        "--readiness-packet",
+        "/var/lib/c-fast-t1-readiness/${C_FAST_T1_READINESS_PACKET_BASENAME:?required_readiness_packet_basename}",
+        "--external-image-evidence",
+        "/run/c-fast-t1-query-v4-input/external-image-evidence.json",
+        "--oci-layout-archive",
+        "/run/c-fast-t1-query-v4-input/runtime.oci.tar",
+        "--source-bundle-archive",
+        "/run/c-fast-t1-query-v4-input/source-bundle.tar",
+        "--content-attestation",
+        "/run/c-fast-t1-query-v4-input/content-attestation.json",
+        "--provenance",
+        "/run/c-fast-t1-query-v4-input/provenance.signed.json",
+        "--provenance-keyring",
+        "/run/c-fast-t1-query-v4-input/provenance-keyring.json",
+        "--t1-keyring",
+        "/run/c-fast-t1-query-v4-input/t1-keyring.json",
+        "--outcome",
+        "/var/lib/c-fast-readonly-deployment-custody/${C_FAST_T1_L3_OUTCOME_BASENAME:?required_l3_outcome_basename}",
+        "--outcome-keyring",
+        "/run/c-fast-t1-query-v4-input/outcome-keyring.json",
+        "--expected-t1-runtime-source-commit-sha",
+        "${C_FAST_T1_QUERY_V4_SOURCE_COMMIT_SHA:?required_exact_40_char_sha}",
+        "--expected-t1-runtime-image-digest",
+        "${C_FAST_T1_QUERY_V4_IMAGE_DIGEST:?required_sha256_digest}",
+        "--expected-l3-contract-source-commit-sha",
+        "${C_FAST_T1_L3_CONTRACT_SOURCE_COMMIT_SHA:?required_exact_40_char_sha}",
+        "--expected-outcome-contract-source-commit-assertion",
+        "${C_FAST_T1_L3_OUTCOME_SOURCE_COMMIT_SHA:?required_exact_40_char_sha}",
+        "--expected-questdb-image-digest",
+        "${C_FAST_T1_QUESTDB_IMAGE_DIGEST:?required_sha256_digest}",
+        "--release",
+        "/run/c-fast-t1-query-v4-input/l3-release.signed.json",
+        "--release-keyring",
+        "/run/c-fast-t1-query-v4-input/l3-release-keyring.json",
+        "--consume-marker",
+        "/var/lib/c-fast-readonly-deployment-custody/${C_FAST_T1_L3_CONSUME_BASENAME:?required_l3_consume_basename}",
+        "--receipt",
+        "/var/lib/c-fast-readonly-deployment-custody/${C_FAST_T1_L3_RECEIPT_BASENAME:?required_l3_receipt_basename}",
+        "--questdb-image-attestation",
+        "/run/c-fast-t1-query-v4-input/questdb-image-attestation.json",
+        "--readonly-principal-identity-attestation",
+        "/run/c-fast-t1-query-v4-input/readonly-principal-identity.json",
+        "--secret-file-identity-attestation",
+        "/run/c-fast-t1-query-v4-input/secret-file-identity.json",
+        "--writer-continuity-pre-evidence",
+        "/run/c-fast-t1-query-v4-input/writer-continuity-pre.json",
+        "--writer-continuity-post-evidence",
+        "/run/c-fast-t1-query-v4-input/writer-continuity-post-contract.json",
+        "--health-evidence",
+        "/run/c-fast-t1-query-v4-input/health-pre.json",
+        "--backlog-evidence",
+        "/run/c-fast-t1-query-v4-input/backlog-pre.json",
+        "--rollback-plan",
+        "/run/c-fast-t1-query-v4-input/rollback-plan.json",
+        "--root-pin-identity-attestation",
+        "/run/c-fast-t1-query-v4-input/root-pin-identity.json",
+        "--custody-path-identity-attestation",
+        "/run/c-fast-t1-query-v4-input/custody-path-identity.json",
+        "--isolated-network-attestation",
+        "/run/c-fast-t1-query-v4-input/isolated-network-attestation.json",
+        "--deployment-plan",
+        "/run/c-fast-t1-query-v4-input/deployment-plan.json",
+        "--execution",
+        "/run/c-fast-t1-query-v4-input/deployment-execution.json",
+        "--writer-post",
+        "/run/c-fast-t1-query-v4-input/writer-post.json",
+        "--health-post",
+        "/run/c-fast-t1-query-v4-input/health-post.json",
+        "--backlog-post",
+        "/run/c-fast-t1-query-v4-input/backlog-post.json",
+        "--principal-secret-post",
+        "/run/c-fast-t1-query-v4-input/principal-secret-post.json",
+        "--network-post",
+        "/run/c-fast-t1-query-v4-input/network-post.json"
+      ],
+      "networks": [
+        "c-fast-t1-query-v4-questdb-only"
+      ],
+      "read_only": true,
+      "user": "65532:65532",
+      "cap_drop": [
+        "ALL"
+      ],
+      "security_opt": [
+        "no-new-privileges:true"
+      ],
+      "restart": "no",
+      "healthcheck": {
+        "disable": true
+      },
+      "pids_limit": 64,
+      "mem_limit": "1g",
+      "cpus": 1.0,
+      "tmpfs": [
+        "/tmp:rw,noexec,nosuid,nodev,size=64m"
+      ],
+      "environment": {
+        "PATH": "/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "PYTHONPATH": "/INVALID_POISON_MUST_BE_IGNORED_BY_PYTHON_ISOLATED_MODE",
+        "C_FAST_T1_DEPLOYMENT_MUTATION_AUTHORIZED": "false",
+        "C_FAST_T1_DATABASE_MUTATION_AUTHORIZED": "false",
+        "C_FAST_T1_WRITE_PROBE_AUTHORIZED": "false",
+        "C_FAST_T1_WEB_BRIDGE_RPC_AUTHORIZED": "false",
+        "C_FAST_T1_COLLECTION_AUTHORIZED": "false",
+        "C_FAST_T1_ORDER_AUTHORIZED": "false",
+        "C_FAST_T1_POSITION_MUTATION_AUTHORIZED": "false",
+        "C_FAST_T1_DISPATCH_AUTHORIZED": "false",
+        "C_FAST_T1_TRADING_AUTHORIZED": "false"
+      },
+      "volumes": [
+        {
+          "type": "bind",
+          "source": "${C_FAST_T1_READINESS_V3_PIN_ROOT:?required_root_owned_readiness_v3_pin_root}",
+          "target": "/run/c-fast-t1-readiness-v3-pins",
+          "read_only": true
+        },
+        {
+          "type": "bind",
+          "source": "${C_FAST_T1_QUERY_V4_KEYRING_FILE:?required_query_v4_keyring_file}",
+          "target": "/run/c-fast-t1-query-v4-input/query-keyring.json",
+          "read_only": true
+        },
+        {
+          "type": "bind",
+          "source": "${C_FAST_T1_MANIFEST_FILE:?required_frozen_manifest_file}",
+          "target": "/run/c-fast-t1-query-v4-input/manifest.json",
+          "read_only": true
+        },
+        {
+          "type": "bind",
+          "source": "${C_FAST_T1_EXTERNAL_IMAGE_EVIDENCE_FILE:?required_external_image_evidence_file}",
+          "target": "/run/c-fast-t1-query-v4-input/external-image-evidence.json",
+          "read_only": true
+        },
+        {
+          "type": "bind",
+          "source": "${C_FAST_T1_SOURCE_BUNDLE_ARCHIVE_FILE:?required_source_bundle_archive_file}",
+          "target": "/run/c-fast-t1-query-v4-input/source-bundle.tar",
+          "read_only": true
+        },
+        {
+          "type": "bind",
+          "source": "${C_FAST_T1_OCI_LAYOUT_ARCHIVE_FILE:?required_oci_layout_archive_file}",
+          "target": "/run/c-fast-t1-query-v4-input/runtime.oci.tar",
+          "read_only": true
+        },
+        {
+          "type": "bind",
+          "source": "${C_FAST_T1_CONTENT_ATTESTATION_FILE:?required_content_attestation_file}",
+          "target": "/run/c-fast-t1-query-v4-input/content-attestation.json",
+          "read_only": true
+        },
+        {
+          "type": "bind",
+          "source": "${C_FAST_T1_PROVENANCE_FILE:?required_signed_provenance_file}",
+          "target": "/run/c-fast-t1-query-v4-input/provenance.signed.json",
+          "read_only": true
+        },
+        {
+          "type": "bind",
+          "source": "${C_FAST_T1_PROVENANCE_KEYRING_FILE:?required_provenance_keyring_file}",
+          "target": "/run/c-fast-t1-query-v4-input/provenance-keyring.json",
+          "read_only": true
+        },
+        {
+          "type": "bind",
+          "source": "${C_FAST_T1_AUTHORITY_KEYRING_FILE:?required_t1_keyring_file}",
+          "target": "/run/c-fast-t1-query-v4-input/t1-keyring.json",
+          "read_only": true
+        },
+        {
+          "type": "bind",
+          "source": "${C_FAST_T1_OUTCOME_KEYRING_FILE:?required_outcome_keyring_file}",
+          "target": "/run/c-fast-t1-query-v4-input/outcome-keyring.json",
+          "read_only": true
+        },
+        {
+          "type": "bind",
+          "source": "${C_FAST_T1_L3_RELEASE_FILE:?required_l3_release_file}",
+          "target": "/run/c-fast-t1-query-v4-input/l3-release.signed.json",
+          "read_only": true
+        },
+        {
+          "type": "bind",
+          "source": "${C_FAST_T1_L3_RELEASE_KEYRING_FILE:?required_l3_release_keyring_file}",
+          "target": "/run/c-fast-t1-query-v4-input/l3-release-keyring.json",
+          "read_only": true
+        },
+        {
+          "type": "bind",
+          "source": "${C_FAST_T1_QUESTDB_IMAGE_ATTESTATION_FILE:?required_questdb_image_attestation_file}",
+          "target": "/run/c-fast-t1-query-v4-input/questdb-image-attestation.json",
+          "read_only": true
+        },
+        {
+          "type": "bind",
+          "source": "${C_FAST_T1_READONLY_PRINCIPAL_IDENTITY_FILE:?required_readonly_principal_identity_file}",
+          "target": "/run/c-fast-t1-query-v4-input/readonly-principal-identity.json",
+          "read_only": true
+        },
+        {
+          "type": "bind",
+          "source": "${C_FAST_T1_SECRET_FILE_IDENTITY_FILE:?required_secret_file_identity_file}",
+          "target": "/run/c-fast-t1-query-v4-input/secret-file-identity.json",
+          "read_only": true
+        },
+        {
+          "type": "bind",
+          "source": "${C_FAST_T1_WRITER_CONTINUITY_PRE_FILE:?required_writer_continuity_pre_file}",
+          "target": "/run/c-fast-t1-query-v4-input/writer-continuity-pre.json",
+          "read_only": true
+        },
+        {
+          "type": "bind",
+          "source": "${C_FAST_T1_WRITER_CONTINUITY_POST_CONTRACT_FILE:?required_writer_continuity_post_contract_file}",
+          "target": "/run/c-fast-t1-query-v4-input/writer-continuity-post-contract.json",
+          "read_only": true
+        },
+        {
+          "type": "bind",
+          "source": "${C_FAST_T1_HEALTH_PRE_FILE:?required_health_pre_file}",
+          "target": "/run/c-fast-t1-query-v4-input/health-pre.json",
+          "read_only": true
+        },
+        {
+          "type": "bind",
+          "source": "${C_FAST_T1_BACKLOG_PRE_FILE:?required_backlog_pre_file}",
+          "target": "/run/c-fast-t1-query-v4-input/backlog-pre.json",
+          "read_only": true
+        },
+        {
+          "type": "bind",
+          "source": "${C_FAST_T1_ROLLBACK_PLAN_FILE:?required_rollback_plan_file}",
+          "target": "/run/c-fast-t1-query-v4-input/rollback-plan.json",
+          "read_only": true
+        },
+        {
+          "type": "bind",
+          "source": "${C_FAST_T1_ROOT_PIN_IDENTITY_FILE:?required_root_pin_identity_file}",
+          "target": "/run/c-fast-t1-query-v4-input/root-pin-identity.json",
+          "read_only": true
+        },
+        {
+          "type": "bind",
+          "source": "${C_FAST_T1_CUSTODY_PATH_IDENTITY_FILE:?required_custody_path_identity_file}",
+          "target": "/run/c-fast-t1-query-v4-input/custody-path-identity.json",
+          "read_only": true
+        },
+        {
+          "type": "bind",
+          "source": "${C_FAST_T1_ISOLATED_NETWORK_ATTESTATION_FILE:?required_isolated_network_attestation_file}",
+          "target": "/run/c-fast-t1-query-v4-input/isolated-network-attestation.json",
+          "read_only": true
+        },
+        {
+          "type": "bind",
+          "source": "${C_FAST_T1_DEPLOYMENT_PLAN_FILE:?required_deployment_plan_file}",
+          "target": "/run/c-fast-t1-query-v4-input/deployment-plan.json",
+          "read_only": true
+        },
+        {
+          "type": "bind",
+          "source": "${C_FAST_T1_DEPLOYMENT_EXECUTION_FILE:?required_deployment_execution_file}",
+          "target": "/run/c-fast-t1-query-v4-input/deployment-execution.json",
+          "read_only": true
+        },
+        {
+          "type": "bind",
+          "source": "${C_FAST_T1_WRITER_POST_FILE:?required_writer_post_file}",
+          "target": "/run/c-fast-t1-query-v4-input/writer-post.json",
+          "read_only": true
+        },
+        {
+          "type": "bind",
+          "source": "${C_FAST_T1_HEALTH_POST_FILE:?required_health_post_file}",
+          "target": "/run/c-fast-t1-query-v4-input/health-post.json",
+          "read_only": true
+        },
+        {
+          "type": "bind",
+          "source": "${C_FAST_T1_BACKLOG_POST_FILE:?required_backlog_post_file}",
+          "target": "/run/c-fast-t1-query-v4-input/backlog-post.json",
+          "read_only": true
+        },
+        {
+          "type": "bind",
+          "source": "${C_FAST_T1_PRINCIPAL_SECRET_POST_FILE:?required_principal_secret_post_file}",
+          "target": "/run/c-fast-t1-query-v4-input/principal-secret-post.json",
+          "read_only": true
+        },
+        {
+          "type": "bind",
+          "source": "${C_FAST_T1_NETWORK_POST_FILE:?required_network_post_file}",
+          "target": "/run/c-fast-t1-query-v4-input/network-post.json",
+          "read_only": true
+        },
+        {
+          "type": "bind",
+          "source": "${C_FAST_T1_READONLY_DSN_FILE:?required_uid_65532_mode_0600_file}",
+          "target": "/run/secrets/c-fast-t1-query-v4-readonly.dsn",
+          "read_only": true
+        },
+        {
+          "type": "bind",
+          "source": "${C_FAST_T1_L3_CUSTODY_IDENTITY_FILE:?required_l3_custody_identity_file}",
+          "target": "/var/lib/c-fast-readonly-deployment-custody/custody-identity.json",
+          "read_only": true
+        },
+        {
+          "type": "bind",
+          "source": "${C_FAST_T1_L3_CONSUME_FILE:?required_l3_consume_file}",
+          "target": "/var/lib/c-fast-readonly-deployment-custody/${C_FAST_T1_L3_CONSUME_BASENAME:?required_l3_consume_basename}",
+          "read_only": true
+        },
+        {
+          "type": "bind",
+          "source": "${C_FAST_T1_L3_RECEIPT_FILE:?required_l3_receipt_file}",
+          "target": "/var/lib/c-fast-readonly-deployment-custody/${C_FAST_T1_L3_RECEIPT_BASENAME:?required_l3_receipt_basename}",
+          "read_only": true
+        },
+        {
+          "type": "bind",
+          "source": "${C_FAST_T1_L3_OUTCOME_FILE:?required_l3_outcome_file}",
+          "target": "/var/lib/c-fast-readonly-deployment-custody/${C_FAST_T1_L3_OUTCOME_BASENAME:?required_l3_outcome_basename}",
+          "read_only": true
+        },
+        {
+          "type": "bind",
+          "source": "${C_FAST_T1_PACKET_CUSTODY_DIR:?required_exact_packet_custody_directory}",
+          "target": "/var/lib/c-fast-t1-readiness",
+          "read_only": false
+        },
+        {
+          "type": "bind",
+          "source": "${C_FAST_T1_READINESS_PACKET_FILE:?required_readiness_packet_file}",
+          "target": "/var/lib/c-fast-t1-readiness/${C_FAST_T1_READINESS_PACKET_BASENAME:?required_readiness_packet_basename}",
+          "read_only": true
+        },
+        {
+          "type": "bind",
+          "source": "${C_FAST_T1_QUERY_V4_RELEASE_FILE:?required_query_release_file}",
+          "target": "/var/lib/c-fast-t1-readiness/${C_FAST_T1_QUERY_V4_RELEASE_BASENAME:?required_query_release_basename}",
+          "read_only": true
+        }
+      ]
+    }
+  },
+  "networks": {
+    "c-fast-t1-query-v4-questdb-only": {
+      "external": true,
+      "name": "${C_FAST_T1_QUERY_V4_QUESTDB_NETWORK:?required_preapproved_isolated_network}"
+    }
+  }
+}
