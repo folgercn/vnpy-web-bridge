@@ -1,0 +1,318 @@
+# C_FAST query-v3 readiness-v3 离线门禁
+
+## 结论与权限边界
+
+readiness-v3 对应 Issue #161，属于 Control Plane 的 Evidence 汇合合同。它把
+query-v3 source bundle、OCI content attestation、provenance-v2 和既有 L3
+deployment outcome 汇合为一份 15 分钟有效的、非权威 packet。
+
+成功状态固定为：
+
+```text
+READY_FOR_QUERY_RELEASE_V4_HUMAN_SIGNATURE_ONLY
+```
+
+该状态只表示 exact Evidence 可以交给人类审核，并由后续独立
+query-release-v4 合同处理。它不是 Acceptance、Deployment Authority 或
+Execution Permit，不允许启动 query-v3，也不允许访问 QuestDB、DSN、registry、
+Web Bridge RPC、Gateway、订单或持仓。
+
+成功 packet 固定：
+
+```text
+ready_for_query_release_v4_human_signature_only=true
+query_release_v3_accepted=false
+readiness_v2_accepted=false
+packet_is_authority=false
+authority_granted=false
+readiness_authorized=false
+network_authorized=false
+production_query_authorized=false
+collection_authorized=false
+runtime_activation_authorized=false
+t1_one_shot_child_launch_authorized=false
+local_query_evidence_write_authorized=false
+web_bridge_rpc_authorized=false
+p0_acceptance_authorized=false
+dispatch_authorized=false
+trading_authorized=false
+```
+
+本合同不会修改或兼容升级 readiness-v2、provenance-v1、query release-v3、
+query parent/child、`Containerfile.query-v3` 或 runtime template。
+
+## 验证链
+
+readiness-v3 按以下顺序重新验证 raw artifacts：
+
+```text
+query-v3 unsigned external evidence
+  + exact bounded source-bundle archive
+  + exact OCI layout archive
+    -> 重新运行 #155 query-v3 content verifier
+    -> 要求 supplied content attestation object 完全相等
+    -> 重新验证 #156 signed provenance-v2
+    -> 重新验证 L3 release/consume/receipt + pre/post evidence + signed outcome
+    -> 派生 readiness-v3 packet
+```
+
+### query-v3 content
+
+工具调用
+`c_fast_t1.verify_query_v3_image_attestation.verify_query_v3_image_evidence()`。
+输入只有 exact external evidence、source bundle、OCI archive 和预期 source
+commit。没有 `--source-root`，不 import `subprocess`，不运行 Git，也不需要完整
+repository mount。
+
+重新生成的 content object 必须与 supplied attestation object 完全相等；随后
+再次绑定以下 raw/canonical identity：
+
+- external image evidence raw SHA256；
+- source bundle archive raw SHA256；
+- source manifest raw/canonical SHA256；
+- OCI layout archive raw SHA256；
+- content attestation raw/canonical SHA256；
+- runtime source commit、immutable image reference/digest/image ID；
+- runtime bundle index、content verifier/schema 和 source-manifest schema。
+
+packet 明确保留：
+
+```text
+source_commit_assertion_bound=true
+git_binary_required=false
+source_root_required=false
+git_commit_independently_resolved=false
+```
+
+commit lineage 由 provenance-v2 的签名 assertion 和独立 root-owned signer-source
+pins 约束；readiness-v3 不声称自己连接 Git object database。
+
+### provenance-v2 与 key domain
+
+readiness-v3 只调用
+`commodity_c_fast_t1_build_registry_provenance_v2.verify_provenance()`，不接受
+provenance-v1 fallback。验证输入包括：
+
+- pinned provenance keyring SHA256；
+- pinned provenance signing-tool source SHA256；
+- pinned provenance signing-tool source commit；
+- pinned T1/L3 authority keyrings；
+- exact content attestation、runtime source commit 和 image digest。
+
+provenance-v2 仍明确：
+
+```text
+signing_tool_source_pin_verified=true
+external_facts_independently_reverified=false
+```
+
+readiness-v3 还重新解析 provenance 和 outcome 的完整 keyring，要求每个 entry
+都是唯一的 32-byte Ed25519 public key，并要求 provenance、T1、L3、outcome
+四个完整 key domain 两两不交叉。不能只比较当前 signer 而忽略预埋的 rotation
+key。readiness-v3 会直接重新读取四份真实 keyring，而不是只信任
+provenance receipt 合并后的 authority hash 列表；因此四个 domain 的六种两两
+collision 都会 fail closed。
+
+### content/provenance 与 outcome join
+
+独立验签并不足以证明任意一份 query-v3 build 可以与任意一份 deployment
+outcome 拼接。root-owned pin-set manifest 还必须固定
+`evidence_join_identity_sha256`。它是以下 canonical object 的 SHA256：
+
+- candidate ID；
+- T1 runtime source commit、image digest；
+- content attestation canonical SHA256；
+- signed provenance canonical SHA256；
+- L3/outcome contract source commits、QuestDB image digest；
+- signed outcome canonical SHA256；
+- release ID、attempt ID、QuestDB target identity SHA256。
+
+任何 target/release/attempt 或 build/outcome 换片都会改变 join identity，并在
+packet 派生前 fail closed。
+
+### L3 outcome freshness
+
+既有 signed deployment outcome verifier 会重新验证 raw release、consume、
+receipt、全部 pre/post evidence、签名、keyring pin 和 QuestDB namespace。
+
+readiness-v3 保留 readiness-v2 的时间关系：
+
+```text
+deployment_ended_at <= outcome.issued_at <= readiness.generated_at
+```
+
+packet 固定 15 分钟 TTL；`expires_at` 距 outcome 签发和 deployment completion
+都不得超过一小时。因此生成时，二者最多已有 45 分钟。
+
+## active pins 与 custody
+
+生产 CLI 不接受调用方传入 trust-root hash。它只从以下固定目录读取单行 pin：
+
+```text
+/run/c-fast-t1-readiness-v3-pins/
+  pin-set.manifest.json
+  provenance-keyring.sha256
+  provenance-signing-tool-source.sha256
+  provenance-signing-tool-source.commit
+  t1-authority-keyring.sha256
+  l3-authority-keyring.sha256
+  outcome-keyring.sha256
+  packet-custody.path
+```
+
+pin root 必须 root-owned、non-symlink、不可 group/world 写；每个 pin 文件也必须
+root-owned、non-symlink、不可 group/world 写。`pin-set.manifest.json` 是完整
+generation 的 root-owned 原子快照，字段固定为：
+
+```json
+{
+  "schema_version": "commodity_c_fast_t1_readiness_v3_pin_set_v1",
+  "generation_id": "readiness-v3-pins-UNIQUE_ID",
+  "provenance_keyring_sha256": "<64 hex>",
+  "provenance_signing_tool_source_sha256": "<64 hex>",
+  "provenance_signing_tool_source_commit_sha": "<40 hex>",
+  "t1_authority_keyring_sha256": "<64 hex>",
+  "l3_authority_keyring_sha256": "<64 hex>",
+  "outcome_keyring_sha256": "<64 hex>",
+  "packet_custody_path": "/absolute/custody/path",
+  "packet_custody_id": "readiness-v3-custody-UNIQUE_ID",
+  "packet_custody_identity_sha256": "<64 hex>",
+  "evidence_join_identity_sha256": "<64 hex>"
+}
+```
+
+verifier 在逐项读取前后重读 manifest 和 pin-root directory identity，并要求所有
+单行 pin 与同一 manifest 完全一致。轮换时应先在临时路径完整准备新一代单行
+pin，再逐项原子 rename，最后原子替换 manifest；任何中间态只会拒绝，不会产生
+混代 snapshot。
+
+packet custody 必须是 pinned absolute path、当前 verifier UID 所有的 `0700`
+non-symlink 目录，其父目录在正式运行时必须 root-owned 且不可 group/world 写。
+custody 内必须预先存在：
+
+```json
+{
+  "schema_version": "commodity_c_fast_t1_readiness_v3_custody_identity_v1",
+  "custody_id": "readiness-v3-custody-UNIQUE_ID"
+}
+```
+
+该 object 的 canonical SHA256 和 custody ID 都由 root-owned manifest 固定。
+packet 还绑定当前 custody directory 的 device/inode/owner/mode identity。即使
+路径和 `custody-identity.json` 被复制到重建目录，旧 packet 或由旧 snapshot
+派生的二次写也会因 directory identity 不同而失败。
+
+packet ID 绑定 verifier/schema、pin-root directory identity、pin generation/
+manifest、custody path/object/directory identity、root-pinned evidence join、
+source/image namespaces、content、provenance-v2 和 deployment outcome 全部
+exact facts：
+
+```text
+readiness-v3-<canonical identity SHA256>
+```
+
+输出只能位于：
+
+```text
+<pinned custody>/<packet_id>.json
+```
+
+写入使用 guarded directory FD、`O_EXCL`、file fsync 和 directory fsync。写入前
+重新读取全部 active pins，写入后再次重核 generation；若期间轮换，新建 packet
+会被移除。`verify_existing_readiness_packet()` 在返回前再次重读 packet 和完整
+active pin snapshot。任何 keyring、signer-source、join 或 custody pin 轮换都会
+fail closed。
+
+existing packet 必须保持 verifier 的 deterministic canonical storage bytes
+（sorted keys、2-space indent、单个尾随 newline）。只改 whitespace 的重写也会
+失败，不能只依赖解析后的 object 相等。
+
+## PENDING 模板
+
+[`c-fast-t1-readiness-v3.template.json`](c-fast-t1-readiness-v3.template.json)
+只是人工准备清单，不是 verifier 输入，也不是 readiness packet。它故意包含
+`PENDING_` 和额外模板字段，不能通过 readiness-v3 schema。
+
+不得删除模板的 `template_only_not_accepted_as_packet_input` 后把它冒充 packet。
+正式 packet 只能由 verifier 从 raw artifacts 派生。
+
+## 离线命令
+
+以下命令只读取本地 exact artifacts并写入 pinned custody。示例中的 L3 pre/post
+参数与既有 deployment outcome runbook 相同：
+
+```bash
+PYTHONPATH=scripts .venv/bin/python \
+  scripts/commodity_c_fast_t1_readiness_v3.py \
+  --external-image-evidence /archive/query-v3-external-evidence.json \
+  --source-bundle-archive /archive/query-v3-source-bundle.tar \
+  --oci-layout-archive /archive/query-v3-runtime.oci.tar \
+  --content-attestation /archive/query-v3-content-attestation.json \
+  --provenance /archive/query-v3-provenance-v2.signed.json \
+  --provenance-keyring /secure/provenance-keyring.json \
+  --t1-keyring /secure/t1-keyring.json \
+  --outcome /var/lib/c-fast-readonly-deployment-custody/<attempt_id>.deployment-outcome.json \
+  --outcome-keyring /secure/outcome-keyring.json \
+  --expected-t1-runtime-source-commit-sha "$QUERY_V3_RUNTIME_SOURCE_SHA" \
+  --expected-t1-runtime-image-digest "$QUERY_V3_IMAGE_DIGEST" \
+  --expected-l3-contract-source-commit-sha "$L3_CONTRACT_SOURCE_SHA" \
+  --expected-outcome-contract-source-commit-assertion "$OUTCOME_SOURCE_ASSERTION" \
+  --expected-questdb-image-digest "$QUESTDB_IMAGE_DIGEST" \
+  --release /archive/l3-release.signed.json \
+  --release-keyring /secure/l3-release-keyring.json \
+  --consume-marker /var/lib/c-fast-readonly-deployment-custody/<attempt_id>.deployment-consumed.json \
+  --receipt /var/lib/c-fast-readonly-deployment-custody/<attempt_id>.deployment-receipt.json \
+  --questdb-image-attestation /archive/questdb-image.json \
+  --readonly-principal-identity-attestation /archive/readonly-principal.json \
+  --secret-file-identity-attestation /archive/secret-file.json \
+  --writer-continuity-pre-evidence /archive/writer-pre.json \
+  --writer-continuity-post-evidence /archive/writer-release-post.json \
+  --health-evidence /archive/health-pre.json \
+  --backlog-evidence /archive/backlog-pre.json \
+  --rollback-plan /archive/rollback-plan.json \
+  --root-pin-identity-attestation /archive/root-pin.json \
+  --custody-path-identity-attestation /archive/custody-path.json \
+  --isolated-network-attestation /archive/isolated-network.json \
+  --deployment-plan /archive/deployment-plan.json \
+  --execution /archive/execution.json \
+  --writer-post /archive/writer-post.json \
+  --health-post /archive/health-post.json \
+  --backlog-post /archive/backlog-post.json \
+  --principal-secret-post /archive/principal-secret-post.json \
+  --network-post /archive/network-post.json \
+  --output /var/lib/c-fast-t1-readiness/<derived_readiness_v3_packet_id>.json
+```
+
+该命令不读取 DSN、不联网、不连接 registry/QuestDB、不执行部署或 query。
+
+## 后续严格顺序
+
+1. readiness-v3 代码和 schema 人工 review、合并；
+2. 独立 query-release-v4/runtime integration issue 消费 exact readiness-v3；
+3. 更新并冻结最终 query-v3 Containerfile/source bundle/content identity；
+4. 基于最终 merge commit 在受控环境构建 OCI、推送并归档 immutable RepoDigest；
+5. 重新生成 content attestation、签署 provenance-v2 和 L3 outcome；
+6. 派生短时 readiness-v3；
+7. 人工签署 query-release-v4 后，才允许未来 one-shot readonly query。
+
+本 Issue 不执行上述 build、push、deployment、release 签署或 query。
+
+## 测试
+
+```bash
+PYTHONPATH=scripts .venv/bin/python -m pytest -q \
+  backend/tests/unit/test_commodity_c_fast_t1_readiness_v3_script.py
+
+.venv/bin/ruff check \
+  scripts/commodity_c_fast_t1_readiness_v3.py \
+  backend/tests/unit/test_commodity_c_fast_t1_readiness_v3_script.py
+
+PYTHONPATH=scripts .venv/bin/python -m py_compile \
+  scripts/commodity_c_fast_t1_readiness_v3.py
+```
+
+failure-path 覆盖 exact content 重算、raw artifact splice、provenance-v2/signing
+tool pin、四 keyring 六对 collision、build/outcome join splice、stale outcome、
+symlink、authority escalation、真实 readiness-v2 file downgrade、mixed-generation
+pin snapshot、write/return 前 pin rotation、同路径 custody 重建、whitespace
+rewrite、create-only replay 和 expired packet。
