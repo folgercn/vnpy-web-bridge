@@ -1,0 +1,135 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vnpy.example/schemas/research-warehouse-migration-receipt-v1.json",
+  "title": "Research Warehouse signed migration receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "migration_id",
+    "purpose",
+    "migrated_at",
+    "source_custody_identity",
+    "destination_custody_identity",
+    "snapshot_root_sha256",
+    "object_count",
+    "total_bytes",
+    "raw_object_count",
+    "manifest_object_count",
+    "lineage",
+    "genesis_batch_seal_sha256",
+    "head_batch_seal_sha256",
+    "head_commit_seal_sha256",
+    "original_batches_resigned",
+    "authority",
+    "signer_key_id",
+    "signer_public_key_sha256",
+    "signature"
+  ],
+  "properties": {
+    "schema_version": {"const": "vnpy_research_migration_receipt_v1"},
+    "migration_id": {"type": "string", "pattern": "^migration-[0-9a-f]{64}$"},
+    "purpose": {"const": "RESEARCH_EVIDENCE_CUSTODY_MIGRATION"},
+    "migrated_at": {"type": "string", "format": "date-time"},
+    "source_custody_identity": {"$ref": "#/$defs/sha256"},
+    "destination_custody_identity": {"$ref": "#/$defs/sha256"},
+    "snapshot_root_sha256": {"$ref": "#/$defs/sha256"},
+    "object_count": {"type": "integer", "minimum": 2},
+    "total_bytes": {"type": "integer", "minimum": 2},
+    "raw_object_count": {"type": "integer", "minimum": 1},
+    "manifest_object_count": {"type": "integer", "minimum": 1},
+    "lineage": {"$ref": "#/$defs/lineage"},
+    "genesis_batch_seal_sha256": {"$ref": "#/$defs/sha256"},
+    "head_batch_seal_sha256": {"$ref": "#/$defs/sha256"},
+    "head_commit_seal_sha256": {"$ref": "#/$defs/sha256"},
+    "original_batches_resigned": {"const": false},
+    "authority": {"$ref": "#/$defs/authority"},
+    "signer_key_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._:-]{1,160}$"
+    },
+    "signer_public_key_sha256": {"$ref": "#/$defs/sha256"},
+    "signature": {"type": "string", "minLength": 88, "maxLength": 88}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "control_authorized",
+        "deployment_authorized",
+        "execution_authorized",
+        "network_authorized",
+        "rpc_authorized",
+        "order_authorized",
+        "position_mutation_authorized",
+        "dispatch_authorized",
+        "trading_authorized",
+        "production_authorized"
+      ],
+      "properties": {
+        "control_authorized": {"const": false},
+        "deployment_authorized": {"const": false},
+        "execution_authorized": {"const": false},
+        "network_authorized": {"const": false},
+        "rpc_authorized": {"const": false},
+        "order_authorized": {"const": false},
+        "position_mutation_authorized": {"const": false},
+        "dispatch_authorized": {"const": false},
+        "trading_authorized": {"const": false},
+        "production_authorized": {"const": false}
+      }
+    },
+    "record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "raw_object_id",
+        "raw_relative_path",
+        "raw_sha256",
+        "original_batch_seal_sha256"
+      ],
+      "properties": {
+        "raw_object_id": {"type": "string", "minLength": 1},
+        "raw_relative_path": {
+          "type": "string",
+          "pattern": "^raw/[A-Za-z0-9._/-]{1,900}$"
+        },
+        "raw_sha256": {"$ref": "#/$defs/sha256"},
+        "original_batch_seal_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "lineage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "record_count",
+        "root_sha256",
+        "preserved_fields",
+        "non_preserved_identities",
+        "records"
+      ],
+      "properties": {
+        "record_count": {"type": "integer", "minimum": 1},
+        "root_sha256": {"$ref": "#/$defs/sha256"},
+        "preserved_fields": {
+          "const": [
+            "raw_object_id",
+            "raw_relative_path",
+            "raw_sha256",
+            "original_batch_seal_sha256"
+          ]
+        },
+        "non_preserved_identities": {
+          "const": ["absolute_path", "device", "host", "inode"]
+        },
+        "records": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/record"}
+        }
+      }
+    }
+  }
+}
