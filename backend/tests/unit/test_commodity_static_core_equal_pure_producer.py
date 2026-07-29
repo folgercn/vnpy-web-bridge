@@ -265,6 +265,18 @@ def test_signal_risk_score_is_bound_to_formula_and_target_sleeve(
                 "C_source_target_weight", "not-a-number"
             ),
         ),
+        (
+            "signal_evidence",
+            lambda payload: payload["C_signals"][0].__setitem__(
+                "source_score", True
+            ),
+        ),
+        (
+            "target_evidence",
+            lambda payload: payload["targets"][0].__setitem__(
+                "target_quantity", False
+            ),
+        ),
     ],
 )
 def test_malformed_artifact_fields_use_controlled_fail_closed_error(
@@ -291,7 +303,60 @@ def test_malformed_artifact_fields_use_controlled_fail_closed_error(
 
     with pytest.raises(
         producer.StaticCoreEqualProducerError,
-        match="producer artifact field validation failed",
+        match=(
+            "producer artifact field validation failed"
+            "|must be one finite JSON number"
+            "|must be one JSON integer"
+        ),
+    ):
+        producer.verify_research_artifacts(tampered)
+
+
+def test_coordinated_exact_contract_cross_splice_fails_closed() -> None:
+    result = producer.produce_research_artifacts(source_view())
+    tampered_artifacts = dict(result.artifacts)
+    signal = json.loads(tampered_artifacts["signal_evidence"])
+    target = json.loads(tampered_artifacts["target_evidence"])
+    reference = json.loads(tampered_artifacts["reference_price_evidence"])
+    spec = json.loads(tampered_artifacts["contract_spec_evidence"])
+    daily_roll = json.loads(tampered_artifacts["daily_roll_evidence"])
+
+    malicious_contract = "EVIL.CONTRACT"
+    signal["C_signals"][0]["pit_main_exact_contract"] = malicious_contract
+    signal["D_signals"][0]["pit_main_exact_contract"] = malicious_contract
+    target["targets"][0]["exact_contract"] = malicious_contract
+    reference["rows"][0]["exact_contract"] = malicious_contract
+    spec["rows"][0]["exact_contract"] = malicious_contract
+    daily_roll["D_rows"][0]["source_day_state"][
+        "pit_main_exact_contract"
+    ] = malicious_contract
+    for role, payload in (
+        ("signal_evidence", signal),
+        ("target_evidence", target),
+        ("reference_price_evidence", reference),
+        ("contract_spec_evidence", spec),
+        ("daily_roll_evidence", daily_roll),
+    ):
+        tampered_artifacts[role] = producer.canonical_json(payload)
+
+    tampered_projection = dict(result.producer_projection)
+    tampered_projection["artifact_digests"] = [
+        {"role": role, "sha256": hashlib.sha256(raw).hexdigest()}
+        for role, raw in tampered_artifacts.items()
+    ]
+    tampered = producer.ProducerResult(
+        status=result.status,
+        source_view_canonical_sha256=result.source_view_canonical_sha256,
+        artifacts=tampered_artifacts,
+        producer_projection=tampered_projection,
+    )
+
+    with pytest.raises(
+        producer.StaticCoreEqualProducerError,
+        match=(
+            "producer artifact field validation failed"
+            "|outside the frozen exact contract"
+        ),
     ):
         producer.verify_research_artifacts(tampered)
 

@@ -66,6 +66,27 @@ def _sha256(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+def _strict_finite_number(value: Any, label: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise StaticCoreEqualProducerError(
+            f"{label} must be one finite JSON number"
+        )
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise StaticCoreEqualProducerError(
+            f"{label} must be one finite JSON number"
+        )
+    return parsed
+
+
+def _strict_integer(value: Any, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise StaticCoreEqualProducerError(
+            f"{label} must be one JSON integer"
+        )
+    return value
+
+
 def _source_path(name: str) -> Path:
     return Path(__file__).resolve().with_name(name)
 
@@ -887,9 +908,18 @@ def _verify_research_artifacts(result: ProducerResult) -> None:
     try:
         for product in cfast.PRODUCTS:
             c_row = c_signal_rows[product]
-            c_vol = float(c_row["vol60_annualized"])
-            c_source_score = float(c_row["source_score"])
-            c_raw_risk_score = float(c_row["raw_risk_score"])
+            c_vol = _strict_finite_number(
+                c_row["vol60_annualized"],
+                f"{product} C vol60",
+            )
+            c_source_score = _strict_finite_number(
+                c_row["source_score"],
+                f"{product} C source score",
+            )
+            c_raw_risk_score = _strict_finite_number(
+                c_row["raw_risk_score"],
+                f"{product} C raw risk score",
+            )
             c_trend_sign_values = (
                 c_row["trend_21_sign"],
                 c_row["trend_63_sign"],
@@ -928,7 +958,10 @@ def _verify_research_artifacts(result: ProducerResult) -> None:
                 )
 
             d_row = d_signal_rows[product]
-            d_vol = float(d_row["vol60_annualized"])
+            d_vol = _strict_finite_number(
+                d_row["vol60_annualized"],
+                f"{product} D vol60",
+            )
             d_state_value = d_row["state"]
             if isinstance(d_state_value, bool) or not isinstance(
                 d_state_value, int
@@ -937,7 +970,10 @@ def _verify_research_artifacts(result: ProducerResult) -> None:
                     f"{product} D signal formula mismatch"
                 )
             d_state = int(d_state_value)
-            d_raw_risk_score = float(d_row["raw_risk_score"])
+            d_raw_risk_score = _strict_finite_number(
+                d_row["raw_risk_score"],
+                f"{product} D raw risk score",
+            )
             if (
                 not all(
                     math.isfinite(value)
@@ -967,24 +1003,131 @@ def _verify_research_artifacts(result: ProducerResult) -> None:
         row.get("product") for row in rows if isinstance(row, dict)
     ] != list(cfast.PRODUCTS):
         raise StaticCoreEqualProducerError("target rows are incomplete or reordered")
+    target_rows_by_product = {row["product"]: row for row in rows}
+    reference_rows = payloads["reference_price_evidence"].get("rows")
+    spec_rows = payloads["contract_spec_evidence"].get("rows")
+    d_roll_rows = payloads["daily_roll_evidence"].get("D_rows")
+    if (
+        not isinstance(reference_rows, list)
+        or not isinstance(spec_rows, list)
+        or not isinstance(d_roll_rows, list)
+        or any(
+            not isinstance(row, dict)
+            for row in reference_rows + spec_rows + d_roll_rows
+        )
+        or [row.get("product") for row in reference_rows]
+        != list(cfast.PRODUCTS)
+        or [row.get("product") for row in spec_rows]
+        != list(cfast.PRODUCTS)
+        or [row.get("product") for row in d_roll_rows]
+        != list(cfast.PRODUCTS)
+    ):
+        raise StaticCoreEqualProducerError(
+            "target reference/spec/roll rows are incomplete or reordered"
+        )
+    reference_rows_by_product = {
+        row["product"]: row for row in reference_rows
+    }
+    spec_rows_by_product = {row["product"]: row for row in spec_rows}
+    d_roll_rows_by_product = {row["product"]: row for row in d_roll_rows}
+    for product in cfast.PRODUCTS:
+        target_row = target_rows_by_product[product]
+        reference_row = reference_rows_by_product[product]
+        spec_row = spec_rows_by_product[product]
+        d_roll_row = d_roll_rows_by_product[product]
+        product_spec = cfast.PRODUCT_SPECS[product]
+        exact_contract = cfast._exact_contract(
+            target_row["exact_contract"],
+            product,
+            product_spec["exchange"],
+            f"{product} composite target exact contract",
+        )
+        source_day_state = d_roll_row.get("source_day_state")
+        if (
+            reference_row.get("exact_contract") != exact_contract
+            or spec_row.get("exact_contract") != exact_contract
+            or spec_row.get("exchange") != product_spec["exchange"]
+            or not isinstance(source_day_state, dict)
+            or source_day_state.get("pit_main_exact_contract")
+            != exact_contract
+            or c_signal_rows[product].get("pit_main_exact_contract")
+            != exact_contract
+            or d_signal_rows[product].get("pit_main_exact_contract")
+            != exact_contract
+            or _strict_finite_number(
+                reference_row.get("reference_open_price"),
+                f"{product} reference evidence open price",
+            )
+            != _strict_finite_number(
+                target_row["reference_open_price"],
+                f"{product} target reference open price",
+            )
+            or _strict_integer(
+                spec_row.get("multiplier"),
+                f"{product} spec evidence multiplier",
+            )
+            != _strict_integer(
+                target_row["multiplier"],
+                f"{product} target multiplier",
+            )
+            or _strict_integer(
+                target_row["multiplier"],
+                f"{product} target multiplier",
+            )
+            != product_spec["multiplier"]
+            or _strict_finite_number(
+                spec_row.get("price_tick"),
+                f"{product} spec evidence price tick",
+            )
+            != _strict_finite_number(
+                target_row["price_tick"],
+                f"{product} target price tick",
+            )
+            or not math.isclose(
+                _strict_finite_number(
+                    target_row["price_tick"],
+                    f"{product} target price tick",
+                ),
+                float(product_spec["price_tick"]),
+                rel_tol=0,
+                abs_tol=1e-12,
+            )
+        ):
+            raise StaticCoreEqualProducerError(
+                f"{product} exact-contract/reference/spec/roll binding mismatch"
+            )
     buffered = {
         row["product"]: row["buffered_target_weight"] for row in rows
     }
     c_weights = {
-        row["product"]: float(row["C_source_target_weight"]) for row in rows
+        row["product"]: _strict_finite_number(
+            row["C_source_target_weight"],
+            f"{row['product']} C source target weight",
+        )
+        for row in rows
     }
     d_weights = {
-        row["product"]: float(row["D_source_target_weight"]) for row in rows
+        row["product"]: _strict_finite_number(
+            row["D_source_target_weight"],
+            f"{row['product']} D source target weight",
+        )
+        for row in rows
     }
     expected_c_weights = cfast._cap_source_weights(
         {
-            product: float(c_signal_rows[product]["raw_risk_score"])
+            product: _strict_finite_number(
+                c_signal_rows[product]["raw_risk_score"],
+                f"{product} C raw risk score",
+            )
             for product in cfast.PRODUCTS
         }
     )
     expected_d_weights = cfast._cap_source_weights(
         {
-            product: float(d_signal_rows[product]["raw_risk_score"])
+            product: _strict_finite_number(
+                d_signal_rows[product]["raw_risk_score"],
+                f"{product} D raw risk score",
+            )
             for product in cfast.PRODUCTS
         }
     )
@@ -1002,17 +1145,9 @@ def _verify_research_artifacts(result: ProducerResult) -> None:
             abs_tol=1e-12,
         )
         or c_signal_rows[product].get("pit_main_exact_contract")
-        != next(
-            row["exact_contract"]
-            for row in rows
-            if row["product"] == product
-        )
+        != target_rows_by_product[product]["exact_contract"]
         or d_signal_rows[product].get("pit_main_exact_contract")
-        != next(
-            row["exact_contract"]
-            for row in rows
-            if row["product"] == product
-        )
+        != target_rows_by_product[product]["exact_contract"]
         for product in cfast.PRODUCTS
     ):
         raise StaticCoreEqualProducerError(
@@ -1022,25 +1157,38 @@ def _verify_research_artifacts(result: ProducerResult) -> None:
         formula.build_composite_source_target(c_weights, d_weights)
     )
     observed_source = {
-        row["product"]: float(row["source_target_weight"]) for row in rows
+        row["product"]: _strict_finite_number(
+            row["source_target_weight"],
+            f"{row['product']} source target weight",
+        )
+        for row in rows
     }
     for row in rows:
         product = row["product"]
         if (
             not math.isclose(
-                float(row["C_raw_contribution"]),
+                _strict_finite_number(
+                    row["C_raw_contribution"],
+                    f"{product} C raw contribution",
+                ),
                 expected_contributions[product]["C"],
                 rel_tol=0,
                 abs_tol=1e-12,
             )
             or not math.isclose(
-                float(row["D_raw_contribution"]),
+                _strict_finite_number(
+                    row["D_raw_contribution"],
+                    f"{product} D raw contribution",
+                ),
                 expected_contributions[product]["D"],
                 rel_tol=0,
                 abs_tol=1e-12,
             )
             or not math.isclose(
-                float(row["raw_combined_weight"]),
+                _strict_finite_number(
+                    row["raw_combined_weight"],
+                    f"{product} raw combined weight",
+                ),
                 math.fsum(expected_contributions[product].values()),
                 rel_tol=0,
                 abs_tol=1e-12,
@@ -1058,7 +1206,10 @@ def _verify_research_artifacts(result: ProducerResult) -> None:
     expected_buffered = cfast._buffer_weights(expected_source)
     if any(
         not math.isclose(
-            float(buffered[product]),
+            _strict_finite_number(
+                buffered[product],
+                f"{product} buffered target weight",
+            ),
             expected_buffered[product],
             rel_tol=0,
             abs_tol=1e-12,
@@ -1077,7 +1228,14 @@ def _verify_research_artifacts(result: ProducerResult) -> None:
         )
     quantities = allocation.get("quantities")
     if not isinstance(quantities, dict) or any(
-        row["target_quantity"] != quantities.get(row["product"])
+        _strict_integer(
+            row["target_quantity"],
+            f"{row['product']} target quantity",
+        )
+        != _strict_integer(
+            quantities.get(row["product"]),
+            f"{row['product']} allocation quantity",
+        )
         for row in rows
     ):
         raise StaticCoreEqualProducerError(
@@ -1085,8 +1243,14 @@ def _verify_research_artifacts(result: ProducerResult) -> None:
         )
     unit_weights = {
         row["product"]: (
-            float(row["reference_open_price"])
-            * int(row["multiplier"])
+            _strict_finite_number(
+                row["reference_open_price"],
+                f"{row['product']} reference open price",
+            )
+            * _strict_integer(
+                row["multiplier"],
+                f"{row['product']} multiplier",
+            )
             / cfast.VIRTUAL_NAV_CNY
         )
         for row in rows
@@ -1122,7 +1286,7 @@ def _verify_research_artifacts(result: ProducerResult) -> None:
         "states_retained": expected_allocation.states_retained,
     }
     if any(
-        allocation.get(field) != value
+        canonical_json(allocation.get(field)) != canonical_json(value)
         for field, value in expected_allocation_fields.items()
     ):
         raise StaticCoreEqualProducerError(
