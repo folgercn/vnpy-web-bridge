@@ -1120,6 +1120,11 @@ class CommoditySimNowService:
                     source_ip=source_ip,
                     operator=operator,
                     pre_rpc_guard=pre_rpc_guard,
+                    max_order_volume_override_guard=(
+                        pre_rpc_guard
+                        if plan.get("c_fast_shakedown_session_id")
+                        else None
+                    ),
                 )
                 submitted_row = {
                     **repriced,
@@ -2850,6 +2855,7 @@ class CommoditySimNowService:
                             -quantity,
                             "closeyesterday",
                             quote_rows,
+                            unsplit=True,
                         )
                     )
             delta = target_quantity - same_contract
@@ -2866,6 +2872,7 @@ class CommoditySimNowService:
                         -same_contract,
                         "closeyesterday",
                         quote_rows,
+                        unsplit=True,
                     )
                 )
                 open_orders.extend(
@@ -2876,6 +2883,7 @@ class CommoditySimNowService:
                         target_quantity,
                         "open",
                         quote_rows,
+                        unsplit=True,
                     )
                 )
             elif (
@@ -2891,6 +2899,7 @@ class CommoditySimNowService:
                         delta,
                         "closeyesterday",
                         quote_rows,
+                        unsplit=True,
                     )
                 )
             elif delta:
@@ -2902,6 +2911,7 @@ class CommoditySimNowService:
                         delta,
                         "open",
                         quote_rows,
+                        unsplit=True,
                     )
                 )
             details.append(
@@ -8492,6 +8502,8 @@ class CommoditySimNowService:
         signed_delta: int,
         offset: str,
         quote_rows: list[dict[str, Any]],
+        *,
+        unsplit: bool = False,
     ) -> list[dict[str, Any]]:
         if signed_delta == 0:
             return []
@@ -8500,14 +8512,12 @@ class CommoditySimNowService:
         quote = self._quote(vt_symbol, PRODUCT_SPECS[product]["price_tick"])
         quote_rows.append({"vt_symbol": vt_symbol, **quote})
         price = self._protected_price(direction, quote, PRODUCT_SPECS[product]["price_tick"])
+        remaining = abs(signed_delta)
         maximum = (
-            0
-            if batch_id == "c-fast-shakedown"
+            remaining
+            if unsplit
             else self.settings.commodity_simnow_max_child_order_lots
         )
-        remaining = abs(signed_delta)
-        if maximum == 0:
-            maximum = remaining
         orders: list[dict[str, Any]] = []
         while remaining:
             volume = min(remaining, maximum)

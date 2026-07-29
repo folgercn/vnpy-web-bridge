@@ -98,14 +98,17 @@ def test_max_order_volume(monkeypatch) -> None:
         service.check_order(make_order(volume=2))
 
 
-def test_zero_max_order_volume_disables_only_order_volume_ceiling(
+def test_internal_override_skips_only_order_volume_ceiling(
     monkeypatch,
 ) -> None:
-    service = make_service(max_order_volume=0)
+    service = make_service(max_order_volume=1)
     allow_rpc(monkeypatch)
     service.rules["max_symbol_position"] = 0
 
-    service.check_order(make_order(volume=20))
+    service.check_order(
+        make_order(volume=20),
+        enforce_max_order_volume=False,
+    )
 
 
 def test_fractional_volume_is_rejected_by_schema() -> None:

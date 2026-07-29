@@ -68,11 +68,20 @@ class TradeService:
         source_ip: str | None = None,
         operator: str = "anonymous",
         pre_rpc_guard: Callable[[], Any] | None = None,
+        max_order_volume_override_guard:
+        Callable[[], Any] | None = None,
     ) -> dict[str, Any]:
         request_data = payload.model_dump()
         self.audit.record(action="order_request", request=request_data, operator=operator, source_ip=source_ip)
         try:
-            self.risk.check_order(payload)
+            if max_order_volume_override_guard is not None:
+                max_order_volume_override_guard()
+                self.risk.check_order(
+                    payload,
+                    enforce_max_order_volume=False,
+                )
+            else:
+                self.risk.check_order(payload)
             order_request = self.to_vnpy_order_request(payload)
             gateway_name = payload.gateway_name or self.settings.default_gateway_name
             if pre_rpc_guard is None:

@@ -2931,6 +2931,26 @@ def test_split_orders_exceeding_symbol_limit_reject_entire_phase(tmp_path: Path)
     assert service.plan()["status"] == "READY_OPEN"
 
 
+def test_batch_id_cannot_claim_c_fast_unsplit_authority(
+    tmp_path: Path,
+) -> None:
+    service, _, _ = make_service(tmp_path)
+    service.settings = service.settings.model_copy(
+        update={"commodity_simnow_max_child_order_lots": 1}
+    )
+
+    orders = service._orders_for_leg(
+        "c-fast-shakedown",
+        "ag",
+        "ag2610.SHFE",
+        3,
+        "open",
+        [],
+    )
+
+    assert [row["volume"] for row in orders] == [1, 1, 1]
+
+
 def test_partial_submission_fail_closed(tmp_path: Path) -> None:
     trade = FakeTrade(fail_after=1)
     service, private_key, _ = make_service(tmp_path, trade=trade)

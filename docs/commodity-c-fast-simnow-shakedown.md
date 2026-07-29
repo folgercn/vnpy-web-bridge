@@ -21,9 +21,10 @@ CTP RPC 执行与事实回传。
 - `commodity_c_fast_simnow_shakedown_snapshot_v1` 使用两个不同用途的签名：
   Research signer 只签人工确认的真实 Research bundle，Control signer 再签
   绑定账户、交易日、到期时间和 1–2 品种上限的 permit。
-- 不设置单笔手数上限；permit 固定 `max_child_order_lots=0`，部署同时使用
-  `RISK_MAX_ORDER_VOLUME=0`、`COMMODITY_SIMNOW_MAX_CHILD_ORDER_LOTS=0`。
-  最终手数仍只能来自完整签名目标，组合、账户、持仓和价格风险门继续生效。
+- C_FAST 不设置单笔手数上限；permit 固定 `max_child_order_lots=0`，
+  仅通过已验证的 C_FAST plan/final guard 执行完整签名目标。全局
+  `RISK_MAX_ORDER_VOLUME` 和其他 CommoditySimNow lane 的 child 拆单上限
+  保持正数；账户、合约、持仓、价格、交易日和 Web trade 风险门继续生效。
 - 该一次性 schema 不改变 `official_forward` 月度 schema 的时间边界或含义。
 
 ## 配置
@@ -35,8 +36,6 @@ COMMODITY_C_FAST_SIMNOW_ACCOUNT_HASHES=<dedicated-simnow-account-sha256>
 COMMODITY_C_FAST_SIMNOW_STATE_PATH=logs/commodity-c-fast-shadow/shakedown-session.json
 COMMODITY_C_FAST_SIMNOW_AUTO_DISPATCH_ENABLED=false
 COMMODITY_C_FAST_SIMNOW_MAX_SELECTED_PRODUCTS=2
-RISK_MAX_ORDER_VOLUME=0
-COMMODITY_SIMNOW_MAX_CHILD_ORDER_LOTS=0
 ```
 
 部署默认必须保持两个 shakedown 开关为 `false`。启用前还必须配置并验证现有

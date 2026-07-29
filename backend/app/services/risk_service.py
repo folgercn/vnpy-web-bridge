@@ -79,7 +79,12 @@ class RiskService:
         if self.settings.order_confirm_required and not confirm:
             raise OrderConfirmRequiredError()
 
-    def check_order(self, payload: OrderRequestDTO) -> None:
+    def check_order(
+        self,
+        payload: OrderRequestDTO,
+        *,
+        enforce_max_order_volume: bool = True,
+    ) -> None:
         self.check_trade_allowed(confirm=payload.confirm)
         if not rpc_service.status()["connected"]:
             raise RpcUnavailableError()
@@ -103,7 +108,10 @@ class RiskService:
             raise RiskSymbolBlockedError("合约不存在", detail={"vt_symbol": vt_symbol})
 
         max_order_volume = self.rules["max_order_volume"]
-        if max_order_volume > 0 and payload.volume > max_order_volume:
+        if (
+            enforce_max_order_volume
+            and payload.volume > max_order_volume
+        ):
             raise RiskMaxOrderVolumeError(
                 detail={
                     "volume": payload.volume,
