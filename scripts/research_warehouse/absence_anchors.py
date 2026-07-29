@@ -106,10 +106,11 @@ def _load_receipt(path: Path) -> tuple[dict, str]:
         "absence response_received_at",
     )
     sampled_at = parse_utc(payload["ntp_sampled_at"], "absence NTP sampled_at")
-    sample_age = request_started - sampled_at
+    sample_age_at_start = request_started - sampled_at
+    sample_age_at_response = response_received - sampled_at
     if (
-        sample_age < timedelta(0)
-        or sample_age > timedelta(seconds=300)
+        sample_age_at_start < timedelta(0)
+        or sample_age_at_response > timedelta(seconds=300)
         or response_received < request_started
     ):
         raise RegistryError("authoritative absence time ordering is invalid")

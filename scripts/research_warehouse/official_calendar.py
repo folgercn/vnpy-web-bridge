@@ -5,7 +5,6 @@ from __future__ import annotations
 from datetime import date, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Any
-from urllib.parse import urlsplit
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
@@ -19,6 +18,7 @@ from .custody_paths import normalized_absolute, require_private_dir
 from .errors import RegistryError
 from .file_integrity import read_regular_strict
 from .manifest_contracts import ID_PATTERN, SHA256_PATTERN
+from .policy import validate_https_url
 from .signing import public_key_sha256, verify_payload
 from .timeutil import parse_utc
 
@@ -115,14 +115,13 @@ def _load_evidence(
     if value["owner"] != owner or value["source_type"] != SOURCE_TYPE:
         raise RegistryError("calendar evidence owner/type mismatch")
     source_url = value["source_url"]
-    if (
-        not isinstance(source_url, str)
-        or urlsplit(source_url).scheme != "https"
-        or urlsplit(source_url).hostname != host
-        or urlsplit(source_url).username is not None
-        or urlsplit(source_url).password is not None
-    ):
-        raise RegistryError("calendar evidence URL is not an approved official URL")
+    if not isinstance(source_url, str):
+        raise RegistryError("calendar evidence URL must be a string")
+    validate_https_url(
+        source_url,
+        allowed_hosts=(host,),
+        label="calendar evidence URL",
+    )
     observed_at = parse_utc(value["observed_at"], "calendar evidence observed_at")
     if observed_at > issued_at:
         raise RegistryError("calendar evidence was observed after calendar issuance")
@@ -212,6 +211,15 @@ def _load_days(
     ]
     if len(session_days) != len(set(session_days)):
         raise RegistryError("calendar repeats an evening-session natural date")
+    previous_official = None
+    for day, item in result.items():
+        evening_day = item.evening_session_natural_date
+        if evening_day is not None and evening_day != previous_official:
+            raise RegistryError(
+                "evening session date must be the previous official workday"
+            )
+        if item.is_official:
+            previous_official = day
     return result
 
 

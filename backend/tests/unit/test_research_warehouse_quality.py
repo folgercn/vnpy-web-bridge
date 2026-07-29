@@ -121,8 +121,13 @@ def signed_calendar(
     tmp_path: Path,
     *,
     closed: set[date] | None = None,
+    evening_overrides: dict[date, date | None] | None = None,
+    evidence_urls: dict[str, str] | None = None,
 ) -> tuple[OfficialCalendar, Path, dict]:
     closed = closed or set()
+    evening_overrides = evening_overrides or {}
+    evidence_urls = evidence_urls or {}
+    tmp_path.mkdir(parents=True, exist_ok=True)
     start = date(2025, 7, 1)
     end = date(2026, 7, 31)
     evidence_root = tmp_path / "calendar-evidence"
@@ -146,7 +151,10 @@ def signed_calendar(
             {
                 "exchange": exchange,
                 "owner": owner,
-                "source_url": f"https://{host}/services/trading-calendar",
+                "source_url": evidence_urls.get(
+                    exchange,
+                    f"https://{host}/services/trading-calendar",
+                ),
                 "source_type": SOURCE_TYPE,
                 "observed_at": "2025-06-30T01:00:00.000000Z",
                 "raw_sha256": digest,
@@ -169,6 +177,8 @@ def signed_calendar(
             if official and candidate in official_dates
             else None
         )
+        if current in evening_overrides:
+            evening_session = evening_overrides[current]
         days.append(
             {
                 "date": current.isoformat(),
@@ -427,6 +437,24 @@ def test_signed_calendar_schema_and_raw_evidence_binding(tmp_path: Path) -> None
         json.loads(CALENDAR_ANCHOR_SCHEMA_PATH.read_bytes())
     )
     assert len(calendar.official_days_through(date(2026, 7, 30), count=186)) == 186
+
+
+def test_calendar_rejects_contradictory_night_date_and_nonstandard_port(
+    tmp_path: Path,
+) -> None:
+    monday = date(2026, 7, 20)
+    with pytest.raises(RegistryError, match="previous official workday"):
+        signed_calendar(
+            tmp_path / "night-date",
+            evening_overrides={monday: monday - timedelta(days=1)},
+        )
+    with pytest.raises(RegistryError, match="default HTTPS port"):
+        signed_calendar(
+            tmp_path / "source-port",
+            evidence_urls={
+                "SHFE": "https://www.shfe.com.cn:444/services/trading-calendar"
+            },
+        )
 
 
 def test_calendar_missing_day_and_tampered_source_fail_closed(
@@ -712,6 +740,23 @@ def test_404_requires_explicit_calendar_closed_day(tmp_path: Path) -> None:
             calendar=calendar,
             calendar_availability=calendar_availability,
             registry=registry,
+        )
+
+    with pytest.raises(RegistryError, match="stale at response time"):
+        acquire_daily(
+            paths=paths,
+            registry=registry,
+            source_id="shfe-daily-market-data-v1",
+            trade_day=closed_day.isoformat(),
+            collector_version="calendar-test-v1",
+            transport=StatusTransport(404),
+            calendar=calendar,
+            clock_sample=TrustedClockSample(
+                observed,
+                observed - timedelta(seconds=299),
+                0,
+            ),
+            **calendar_clock_args(observed, elapsed_seconds=2),
         )
 
     with pytest.raises(RegistryError, match="official-day source is missing"):

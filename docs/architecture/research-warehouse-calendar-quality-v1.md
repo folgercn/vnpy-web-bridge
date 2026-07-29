@@ -36,7 +36,8 @@ The calendar must:
 - explicitly classify every natural date in its validity range as
   `OFFICIAL_DAY` or `CLOSED`;
 - retain at least 186 official days and explicitly name the natural date of
-  each authorized preceding evening session;
+  each authorized preceding evening session, which must be the immediately
+  previous official workday in the same calendar;
 - store timestamps in UTC while declaring `Asia/Shanghai` as the exchange
   timezone;
 - match an externally pinned calendar hash and trusted Ed25519 public key.
@@ -55,18 +56,19 @@ The frozen local windows are day `08:30–16:00`, evening `20:00–23:59:59`, an
 after-midnight `00:00–03:00`. Night mapping searches the signed calendar's
 exact `evening_session_natural_date`; it never guesses the next natural or next
 official date. Thus Friday evening and Saturday after midnight can map to a
-Monday trade day, while Sunday evening remains rejected unless explicitly
-authorized. Timestamps outside the declared session window fail closed.
+Monday trade day, while Sunday evening remains rejected. Timestamps outside
+the declared session window fail closed.
 
 Calendar-aware acquisition requires a trusted NTP sample. HTTP 200 is accepted
 only for an official day. HTTP 404 is accepted only for an explicitly closed
 day and produces an append-only absence receipt. Caller-supplied historical
 observation times are forbidden: the request start is aligned to live wall
 time plus the bounded NTP offset, and response time advances from that trusted
-sample with a monotonic clock. The receipt binds both times, the NTP sample and
-offset, exact registry hash, reconstructed request endpoint, final URL, status,
-and response metadata. Calendar source bytes are strictly revalidated after
-the response before a 404 is accepted.
+sample with a monotonic clock. The NTP sample must remain no more than 300
+seconds old at response time, not merely at request start. The receipt binds
+both times, the NTP sample and offset, exact registry hash, reconstructed
+request endpoint, final URL, status, and response metadata. Calendar source
+bytes are strictly revalidated after the response before a 404 is accepted.
 
 The local receipt reports
 `CALENDAR_AUTHORIZED_ABSENCE_AWAITING_EXTERNAL_ANCHOR`; it is never PIT
@@ -75,13 +77,14 @@ after durable receipt publication and bound to the receipt hash, makes the
 absence eligible at its external `available_at`. Verification independently
 replays HTTP 404 classification against the exact calendar, requires its
 external calendar anchor to have been available by `request_started_at`,
-revalidates the 0–300 second NTP sample age, and prevents the absence anchor
-from predating the response, calendar issuance, calendar evidence, or calendar
-anchor. It also reloads the frozen hash-pinned source registry and requires the
-receipt's `source_id`, exchange, reconstructed request endpoint, and final URL
-allowlist to agree; the absence anchor binds that registry hash. An official-day 404, a
-closed-day 200, a missing classification, another status, a backfilled clock,
-or an anchor after the cutoff fails closed.
+revalidates the 0–300 second NTP sample age through response time, and prevents
+the absence anchor from predating the response, calendar issuance, calendar
+evidence, or calendar anchor. It also reloads the frozen hash-pinned source
+registry and requires the receipt's `source_id`, exchange, reconstructed
+request endpoint, and final URL allowlist to agree; the absence anchor binds
+that registry hash. An official-day 404, a closed-day 200, a missing
+classification, another status, a backfilled clock, or an anchor after the
+cutoff fails closed.
 
 ## 186-day PIT quality gate
 
@@ -106,12 +109,13 @@ observed-open evidence.
 ## Commands
 
 The CLI exposes `verify-calendar`, `map-trade-day`,
-`acquire-calendar-aware`, `verify-absence-anchor`, and `quality-gate`. Each command requires explicit
-calendar path, trusted calendar SHA-256, trusted public key, and raw source
-evidence root. Acquisition and quality evaluation additionally require an NTP
-sample; the quality gate also requires the signed manifest-chain heads,
-externally pinned commit-anchor ledger, and externally pinned calendar
-availability anchor. Run:
+`acquire-calendar-aware`, `verify-absence-anchor`, and `quality-gate`. Each
+command requires explicit calendar path, trusted calendar SHA-256, trusted
+public key, and raw source evidence root. Absence verification also requires
+the frozen source registry. Acquisition and quality evaluation additionally
+require an NTP sample; the quality gate also requires the signed
+manifest-chain heads, externally pinned commit-anchor ledger, and externally
+pinned calendar availability anchor. Run:
 
 ```bash
 python scripts/research_warehouse_cli.py <command> --help

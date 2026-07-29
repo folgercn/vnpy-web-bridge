@@ -57,10 +57,15 @@ def trusted_time_after(
         or elapsed_seconds > max_elapsed_seconds
     ):
         raise RegistryError("trusted monotonic request duration is invalid")
-    return require_utc(
+    response_received_at = require_utc(
         sample.trusted_now,
         "trusted clock now",
     ) + timedelta(seconds=elapsed_seconds)
+    sampled_at = require_utc(sample.sampled_at, "NTP sampled_at")
+    sample_age = response_received_at - sampled_at
+    if sample_age < timedelta(0) or sample_age > timedelta(seconds=300):
+        raise RegistryError("NTP sample is stale at response time")
+    return response_received_at
 
 
 def validate_observation_clock(
