@@ -89,11 +89,21 @@ export COMMODITY_C_FAST_SHADOW_SNAPSHOT_PATH=\
 ```
 
 `install --destination` 是安装单元目录，不再是 snapshot 文件路径。installer
-先在同一父目录的私有 staging directory 中 create-only 写入 `snapshot.json`
-与 `snapshot.json.sha256`，分别 fsync 两个文件，再 fsync staging directory，
-最后通过一次 directory rename 发布并 fsync 父目录。Bridge 的
+不会隐式创建 destination 的父目录：运维必须预先创建由当前 installer 用户
+持有、非 symlink 且 group/other 无权限的私有父目录（例如 `0700` 的
+`/private/runtime`）。installer 打开并绑定该父目录的 device/inode 后，所有
+staging、child file、cleanup、fsync 和 no-replace rename 都只通过同一个
+parent directory fd 加 basename 执行，并在发布前后复核当前 parent path
+仍指向同一 inode。
+
+installer 在该 pinned parent 内的私有 staging directory 中 create-only 写入
+`snapshot.json` 与 `snapshot.json.sha256`，分别 fsync 两个文件，再 fsync
+staging directory，最后通过一次 directory rename 发布并 fsync 已绑定的父
+目录。Bridge 的
 `COMMODITY_C_FAST_SHADOW_SNAPSHOT_PATH` 必须指向安装单元内固定的
-`snapshot.json` child。
+`snapshot.json` child。staging directory fd 会在 rename 前关闭；即使 rename
+已提交但调用方只收到异常，失败清理也只会重新打开仍在 staging basename
+下且 inode 匹配的目录，不会沿旧 fd 删除已经发布的 child。
 
 这是未投产 C_FAST shakedown installer 的合同迁移。旧的单文件 destination
 会被显式拒绝，不会静默改写成 runtime 无法读取的目录。完整安装单元、半安装

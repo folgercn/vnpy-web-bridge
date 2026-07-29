@@ -451,11 +451,33 @@ def test_snapshot_bundle_install_is_atomic_private_and_durable(
 
     real_rename = ARTIFACT.atomic_rename_no_replace
 
-    def recording_rename(source: Path, target: Path) -> None:
-        rename_observations.append(
-            (Path(target).exists(), {row.name for row in Path(source).iterdir()})
+    def recording_rename(
+        parent_fd: int,
+        source_name: str,
+        target_name: str,
+    ) -> None:
+        try:
+            os.stat(
+                target_name,
+                dir_fd=parent_fd,
+                follow_symlinks=False,
+            )
+            target_exists = True
+        except FileNotFoundError:
+            target_exists = False
+        source_fd = os.open(
+            source_name,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            dir_fd=parent_fd,
         )
-        real_rename(source, target)
+        try:
+            source_names = set(os.listdir(source_fd))
+        finally:
+            os.close(source_fd)
+        rename_observations.append(
+            (target_exists, source_names)
+        )
+        real_rename(parent_fd, source_name, target_name)
 
     monkeypatch.setattr(ARTIFACT.os, "fsync", recording_fsync)
     monkeypatch.setattr(
@@ -517,8 +539,12 @@ def test_interrupted_publish_never_exposes_half_install(
 ) -> None:
     destination = tmp_path / "c-fast-snapshot"
 
-    def fail_before_publish(source: Path, target: Path) -> None:
-        del source, target
+    def fail_before_publish(
+        parent_fd: int,
+        source_name: str,
+        target_name: str,
+    ) -> None:
+        del parent_fd, source_name, target_name
         raise OSError("simulated crash before atomic rename")
 
     monkeypatch.setattr(
@@ -529,6 +555,41 @@ def test_interrupted_publish_never_exposes_half_install(
         ARTIFACT.install_snapshot_bundle(destination, b'{"value":1}')
 
     assert not destination.exists()
+    assert not list(tmp_path.glob(".c-fast-snapshot.staging-*"))
+
+
+def test_committed_rename_lost_response_never_deletes_published_bundle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destination = tmp_path / "c-fast-snapshot"
+    canonical = b'{"value":1}'
+    real_rename = ARTIFACT.atomic_rename_no_replace
+
+    def publish_then_lose_response(
+        parent_fd: int,
+        source_name: str,
+        target_name: str,
+    ) -> None:
+        real_rename(parent_fd, source_name, target_name)
+        raise OSError("simulated lost response after committed rename")
+
+    monkeypatch.setattr(
+        ARTIFACT,
+        "atomic_rename_no_replace",
+        publish_then_lose_response,
+    )
+
+    with pytest.raises(OSError, match="simulated lost response"):
+        ARTIFACT.install_snapshot_bundle(destination, canonical)
+
+    assert ARTIFACT.validate_snapshot_installation(
+        destination
+    ) == hashlib.sha256(canonical).hexdigest()
+    assert set(row.name for row in destination.iterdir()) == {
+        ARTIFACT.INSTALL_SNAPSHOT_NAME,
+        ARTIFACT.INSTALL_CHECKSUM_NAME,
+    }
     assert not list(tmp_path.glob(".c-fast-snapshot.staging-*"))
 
 
@@ -568,9 +629,13 @@ def test_atomic_publish_race_never_replaces_new_destination(
     destination = tmp_path / "c-fast-snapshot"
     real_rename = ARTIFACT.atomic_rename_no_replace
 
-    def create_racing_destination(source: Path, target: Path) -> None:
-        Path(target).mkdir(mode=0o700)
-        real_rename(source, target)
+    def create_racing_destination(
+        parent_fd: int,
+        source_name: str,
+        target_name: str,
+    ) -> None:
+        os.mkdir(target_name, mode=0o700, dir_fd=parent_fd)
+        real_rename(parent_fd, source_name, target_name)
 
     monkeypatch.setattr(
         ARTIFACT,
@@ -593,26 +658,122 @@ def test_validator_rejects_destination_replaced_after_open(
     destination = tmp_path / "c-fast-snapshot"
     retired = tmp_path / "retired-snapshot"
     ARTIFACT.install_snapshot_bundle(destination, b'{"value":1}')
-    real_lstat = os.lstat
+    real_entry_lstat = ARTIFACT._entry_lstat
     swapped = False
 
-    def swap_before_path_identity_check(path: Path) -> os.stat_result:
+    def swap_before_path_identity_check(
+        parent_fd: int,
+        name: str,
+    ) -> os.stat_result:
         nonlocal swapped
-        if Path(path) == destination and not swapped:
+        if name == destination.name and not swapped:
             swapped = True
-            os.rename(destination, retired)
-            destination.mkdir(mode=0o700)
-        return real_lstat(path)
+            os.rename(
+                destination.name,
+                retired.name,
+                src_dir_fd=parent_fd,
+                dst_dir_fd=parent_fd,
+            )
+            os.mkdir(destination.name, mode=0o700, dir_fd=parent_fd)
+        return real_entry_lstat(parent_fd, name)
 
     monkeypatch.setattr(
-        ARTIFACT.os, "lstat", swap_before_path_identity_check
+        ARTIFACT, "_entry_lstat", swap_before_path_identity_check
     )
 
     with pytest.raises(
         ARTIFACT.SnapshotInstallInvalidError,
-        match="path changed",
+        match="changed during validation",
     ):
         ARTIFACT.validate_snapshot_installation(destination)
+
+
+def test_missing_parent_fails_closed_without_implicit_creation(
+    tmp_path: Path,
+) -> None:
+    missing_parent = tmp_path / "missing" / "nested"
+    destination = missing_parent / "c-fast-snapshot"
+
+    with pytest.raises(
+        ARTIFACT.SnapshotInstallInvalidError,
+        match="parent must pre-exist",
+    ):
+        ARTIFACT.install_snapshot_bundle(destination, b'{"value":1}')
+
+    assert not missing_parent.exists()
+
+
+@pytest.mark.parametrize("parent_kind", ["insecure", "symlink", "wrong_owner"])
+def test_untrusted_parent_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    parent_kind: str,
+) -> None:
+    real_parent = tmp_path / "real-parent"
+    real_parent.mkdir(mode=0o700)
+    parent = real_parent
+    if parent_kind == "insecure":
+        real_parent.chmod(0o755)
+    elif parent_kind == "symlink":
+        parent = tmp_path / "linked-parent"
+        parent.symlink_to(real_parent, target_is_directory=True)
+    else:
+        real_uid = os.geteuid()
+        monkeypatch.setattr(
+            ARTIFACT.os,
+            "geteuid",
+            lambda: real_uid + 1,
+        )
+    destination = parent / "c-fast-snapshot"
+
+    with pytest.raises(
+        ARTIFACT.SnapshotInstallInvalidError,
+        match="private|owner-controlled",
+    ):
+        ARTIFACT.install_snapshot_bundle(destination, b'{"value":1}')
+
+    assert not destination.exists()
+    assert not list(real_parent.glob(".c-fast-snapshot.staging-*"))
+
+
+def test_parent_swap_during_publish_fails_closed_on_pinned_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = tmp_path / "private-parent"
+    retired_parent = tmp_path / "retired-parent"
+    parent.mkdir(mode=0o700)
+    destination = parent / "c-fast-snapshot"
+    real_rename = ARTIFACT.atomic_rename_no_replace
+
+    def swap_parent_then_publish(
+        parent_fd: int,
+        source_name: str,
+        target_name: str,
+    ) -> None:
+        parent.rename(retired_parent)
+        parent.mkdir(mode=0o700)
+        real_rename(parent_fd, source_name, target_name)
+
+    monkeypatch.setattr(
+        ARTIFACT,
+        "atomic_rename_no_replace",
+        swap_parent_then_publish,
+    )
+
+    with pytest.raises(
+        ARTIFACT.SnapshotInstallInvalidError,
+        match="parent path changed",
+    ):
+        ARTIFACT.install_snapshot_bundle(destination, b'{"value":1}')
+
+    assert not destination.exists()
+    retired_destination = retired_parent / destination.name
+    assert retired_destination.is_dir()
+    assert ARTIFACT.validate_snapshot_installation(
+        retired_destination
+    ) == hashlib.sha256(b'{"value":1}').hexdigest()
+    assert not list(parent.glob(".c-fast-snapshot.staging-*"))
 
 
 def test_half_installed_destination_fails_closed_and_is_not_repaired(

@@ -124,27 +124,103 @@ def write_private_create(path: Path, payload: bytes) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def fsync_directory(path: Path) -> None:
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-    fd = os.open(path, flags)
+def _directory_open_flags() -> int:
+    if not hasattr(os, "O_DIRECTORY") or not hasattr(os, "O_NOFOLLOW"):
+        raise OSError(
+            errno.ENOTSUP,
+            "directory descriptor custody is unsupported",
+        )
+    return os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
+
+def _stat_identity(value: os.stat_result) -> tuple[int, int]:
+    return value.st_dev, value.st_ino
+
+
+def _require_private_owned_directory(
+    value: os.stat_result,
+    *,
+    label: str,
+) -> None:
+    if (
+        not stat.S_ISDIR(value.st_mode)
+        or value.st_uid != os.geteuid()
+        or value.st_mode & 0o077
+    ):
+        raise SnapshotInstallInvalidError(
+            f"{label} must be an owner-controlled private directory"
+        )
+
+
+def _entry_lstat(directory_fd: int, name: str) -> os.stat_result:
+    return os.stat(
+        name,
+        dir_fd=directory_fd,
+        follow_symlinks=False,
+    )
+
+
+def _assert_path_identity(
+    path: Path,
+    expected: tuple[int, int],
+    *,
+    label: str,
+) -> None:
     try:
-        os.fsync(fd)
-    finally:
+        current = os.lstat(path)
+    except OSError as exc:
+        raise SnapshotInstallInvalidError(
+            f"{label} path changed during installation"
+        ) from exc
+    _require_private_owned_directory(current, label=label)
+    if _stat_identity(current) != expected:
+        raise SnapshotInstallInvalidError(
+            f"{label} path changed during installation"
+        )
+
+
+def _open_private_parent(path: Path) -> tuple[int, tuple[int, int]]:
+    try:
+        fd = os.open(path, _directory_open_flags())
+    except OSError as exc:
+        raise SnapshotInstallInvalidError(
+            "snapshot installation parent must pre-exist as a private "
+            "non-symlink directory"
+        ) from exc
+    try:
+        opened = os.fstat(fd)
+        _require_private_owned_directory(
+            opened,
+            label="snapshot installation parent",
+        )
+        identity = _stat_identity(opened)
+        _assert_path_identity(
+            path,
+            identity,
+            label="snapshot installation parent",
+        )
+        return fd, identity
+    except Exception:
         os.close(fd)
+        raise
 
 
-def atomic_rename_no_replace(source: Path, destination: Path) -> None:
-    """Publish one directory without replacing any existing destination."""
+def atomic_rename_no_replace(
+    parent_fd: int,
+    source_name: str,
+    destination_name: str,
+) -> None:
+    """Publish one directory within a pinned parent without replacement."""
     libc = ctypes.CDLL(None, use_errno=True)
-    source_raw = os.fsencode(source)
-    destination_raw = os.fsencode(destination)
+    source_raw = os.fsencode(source_name)
+    destination_raw = os.fsencode(destination_name)
     if sys.platform.startswith("linux"):
         rename = getattr(libc, "renameat2", None)
         if rename is None:
             raise OSError(
                 errno.ENOTSUP,
                 "renameat2(RENAME_NOREPLACE) is unavailable",
-                destination,
+                destination_name,
             )
         rename.argtypes = [
             ctypes.c_int,
@@ -155,28 +231,32 @@ def atomic_rename_no_replace(source: Path, destination: Path) -> None:
         ]
         rename.restype = ctypes.c_int
         result = rename(
-            -100,  # AT_FDCWD
+            parent_fd,
             source_raw,
-            -100,
+            parent_fd,
             destination_raw,
             1,  # RENAME_NOREPLACE
         )
     elif sys.platform == "darwin":
-        rename = getattr(libc, "renamex_np", None)
+        rename = getattr(libc, "renameatx_np", None)
         if rename is None:
             raise OSError(
                 errno.ENOTSUP,
-                "renamex_np(RENAME_EXCL) is unavailable",
-                destination,
+                "renameatx_np(RENAME_EXCL) is unavailable",
+                destination_name,
             )
         rename.argtypes = [
+            ctypes.c_int,
             ctypes.c_char_p,
+            ctypes.c_int,
             ctypes.c_char_p,
             ctypes.c_uint,
         ]
         rename.restype = ctypes.c_int
         result = rename(
+            parent_fd,
             source_raw,
+            parent_fd,
             destination_raw,
             0x00000004,  # RENAME_EXCL
         )
@@ -184,7 +264,7 @@ def atomic_rename_no_replace(source: Path, destination: Path) -> None:
         raise OSError(
             errno.ENOTSUP,
             "atomic no-replace directory rename is unsupported",
-            destination,
+            destination_name,
         )
     if result:
         error = ctypes.get_errno()
@@ -192,27 +272,81 @@ def atomic_rename_no_replace(source: Path, destination: Path) -> None:
             raise FileExistsError(
                 error,
                 "snapshot installation destination already exists",
-                destination,
+                destination_name,
             )
         raise OSError(
             error,
             os.strerror(error),
-            destination,
+            destination_name,
         )
 
 
-def _write_private_file(path: Path, payload: bytes) -> None:
+def _write_private_file(
+    directory_fd: int,
+    name: str,
+    payload: bytes,
+) -> None:
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-    flags |= getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(path, flags, 0o600)
+    flags |= os.O_NOFOLLOW
+    fd = os.open(name, flags, 0o600, dir_fd=directory_fd)
     try:
         with os.fdopen(fd, "wb") as handle:
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
     except Exception:
-        path.unlink(missing_ok=True)
+        try:
+            os.unlink(name, dir_fd=directory_fd)
+        except FileNotFoundError:
+            pass
         raise
+
+
+def _cleanup_staging_if_unpublished(
+    parent_fd: int,
+    staging_name: str,
+    staging_identity: tuple[int, int] | None,
+) -> None:
+    """Remove only the still-named staging directory that we created."""
+    if staging_identity is None:
+        return
+    try:
+        staging_fd = os.open(
+            staging_name,
+            _directory_open_flags(),
+            dir_fd=parent_fd,
+        )
+    except OSError:
+        # The no-replace rename may have committed before its caller observed
+        # an exception.  Never follow the old directory fd into destination.
+        os.fsync(parent_fd)
+        return
+    remove_named_staging = False
+    try:
+        opened = os.fstat(staging_fd)
+        try:
+            named = _entry_lstat(parent_fd, staging_name)
+        except OSError:
+            return
+        if (
+            _stat_identity(opened) != staging_identity
+            or _stat_identity(named) != staging_identity
+        ):
+            return
+        remove_named_staging = True
+        for child in INSTALL_FILE_NAMES:
+            try:
+                os.unlink(child, dir_fd=staging_fd)
+            except FileNotFoundError:
+                pass
+    finally:
+        os.close(staging_fd)
+    if remove_named_staging:
+        try:
+            os.rmdir(staging_name, dir_fd=parent_fd)
+        except FileNotFoundError:
+            pass
+        os.fsync(parent_fd)
 
 
 def _read_private_regular_file(
@@ -267,24 +401,28 @@ def _read_private_regular_file(
         os.close(fd)
 
 
-def validate_snapshot_installation(destination: Path) -> str:
-    """Validate one atomically published snapshot/checksum directory."""
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-    flags |= getattr(os, "O_NOFOLLOW", 0)
+def _validate_snapshot_installation_at(
+    parent_fd: int,
+    destination_name: str,
+) -> str:
     try:
-        directory_fd = os.open(destination, flags)
+        directory_fd = os.open(
+            destination_name,
+            _directory_open_flags(),
+            dir_fd=parent_fd,
+        )
     except OSError as exc:
         raise SnapshotInstallInvalidError(
             "snapshot installation must be a directory"
         ) from exc
     try:
         before = os.fstat(directory_fd)
-        if not stat.S_ISDIR(before.st_mode) or before.st_mode & 0o077:
-            raise SnapshotInstallInvalidError(
-                "snapshot installation directory is not private"
-            )
+        _require_private_owned_directory(
+            before,
+            label="snapshot installation directory",
+        )
         try:
-            path_before = os.lstat(destination)
+            path_before = _entry_lstat(parent_fd, destination_name)
         except OSError as exc:
             raise SnapshotInstallInvalidError(
                 "snapshot installation path changed during validation"
@@ -313,7 +451,7 @@ def validate_snapshot_installation(destination: Path) -> str:
         )
         after = os.fstat(directory_fd)
         try:
-            path_after = os.lstat(destination)
+            path_after = _entry_lstat(parent_fd, destination_name)
         except OSError as exc:
             raise SnapshotInstallInvalidError(
                 "snapshot installation path changed during validation"
@@ -362,6 +500,28 @@ def validate_snapshot_installation(destination: Path) -> str:
     return digest
 
 
+def validate_snapshot_installation(destination: Path) -> str:
+    """Validate one snapshot/checksum directory under pinned custody."""
+    if destination.name in {"", ".", ".."}:
+        raise SnapshotInstallInvalidError(
+            "snapshot installation destination is invalid"
+        )
+    parent_fd, parent_identity = _open_private_parent(destination.parent)
+    try:
+        digest = _validate_snapshot_installation_at(
+            parent_fd,
+            destination.name,
+        )
+        _assert_path_identity(
+            destination.parent,
+            parent_identity,
+            label="snapshot installation parent",
+        )
+        return digest
+    finally:
+        os.close(parent_fd)
+
+
 def install_snapshot_bundle(destination: Path, canonical: bytes) -> str:
     """Create-only publish snapshot and checksum as one directory rename."""
     if destination.name in {"", ".", ".."}:
@@ -375,47 +535,105 @@ def install_snapshot_bundle(destination: Path, canonical: bytes) -> str:
     if len(canonical) + 1 > MAX_INSTALLED_SNAPSHOT_BYTES:
         raise ValueError("snapshot installation input exceeds 2 MiB")
 
-    destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     expected_digest = hashlib.sha256(canonical).hexdigest()
-    staging = destination.with_name(
+    staging_name = (
         f".{destination.name}.staging-{uuid.uuid4().hex}"
     )
-    if destination.exists() or destination.is_symlink():
-        try:
-            validate_snapshot_installation(destination)
-        except SnapshotInstallInvalidError:
-            raise
-        raise FileExistsError(
-            f"snapshot installation already exists: {destination}"
-        )
-    os.mkdir(staging, mode=0o700)
+    parent_fd, parent_identity = _open_private_parent(destination.parent)
+    staging_fd: int | None = None
+    staging_created = False
+    staging_identity: tuple[int, int] | None = None
     published = False
     try:
+        try:
+            _entry_lstat(parent_fd, destination.name)
+        except FileNotFoundError:
+            pass
+        else:
+            _validate_snapshot_installation_at(
+                parent_fd,
+                destination.name,
+            )
+            raise FileExistsError(
+                f"snapshot installation already exists: {destination}"
+            )
+
+        os.mkdir(staging_name, mode=0o700, dir_fd=parent_fd)
+        staging_created = True
+        staging_fd = os.open(
+            staging_name,
+            _directory_open_flags(),
+            dir_fd=parent_fd,
+        )
+        staging_stat = os.fstat(staging_fd)
+        staging_identity = _stat_identity(staging_stat)
+        _require_private_owned_directory(
+            staging_stat,
+            label="snapshot installation staging directory",
+        )
+        if _stat_identity(
+            _entry_lstat(parent_fd, staging_name)
+        ) != staging_identity:
+            raise SnapshotInstallInvalidError(
+                "snapshot installation staging path changed"
+            )
+
         _write_private_file(
-            staging / INSTALL_SNAPSHOT_NAME, canonical + b"\n"
+            staging_fd,
+            INSTALL_SNAPSHOT_NAME,
+            canonical + b"\n",
         )
         _write_private_file(
-            staging / INSTALL_CHECKSUM_NAME,
+            staging_fd,
+            INSTALL_CHECKSUM_NAME,
             expected_digest.encode("ascii") + b"\n",
         )
-        fsync_directory(staging)
-        atomic_rename_no_replace(staging, destination)
-        published = True
-        fsync_directory(destination.parent)
-    finally:
-        if not published:
-            for child in INSTALL_FILE_NAMES:
-                (staging / child).unlink(missing_ok=True)
-            try:
-                staging.rmdir()
-            except FileNotFoundError:
-                pass
-    installed_digest = validate_snapshot_installation(destination)
-    if installed_digest != expected_digest:
-        raise SnapshotInstallInvalidError(
-            "published snapshot installation changed unexpectedly"
+        os.fsync(staging_fd)
+        if _stat_identity(
+            _entry_lstat(parent_fd, staging_name)
+        ) != staging_identity:
+            raise SnapshotInstallInvalidError(
+                "snapshot installation staging path changed"
+            )
+        closing_staging_fd = staging_fd
+        staging_fd = None
+        os.close(closing_staging_fd)
+        _assert_path_identity(
+            destination.parent,
+            parent_identity,
+            label="snapshot installation parent",
         )
-    return installed_digest
+        atomic_rename_no_replace(
+            parent_fd,
+            staging_name,
+            destination.name,
+        )
+        published = True
+        os.fsync(parent_fd)
+        _assert_path_identity(
+            destination.parent,
+            parent_identity,
+            label="snapshot installation parent",
+        )
+        installed_digest = _validate_snapshot_installation_at(
+            parent_fd,
+            destination.name,
+        )
+        if installed_digest != expected_digest:
+            raise SnapshotInstallInvalidError(
+                "published snapshot installation changed unexpectedly"
+            )
+        return installed_digest
+    finally:
+        if staging_fd is not None:
+            os.close(staging_fd)
+        if not published and staging_created:
+            _cleanup_staging_if_unpublished(
+                parent_fd,
+                staging_name,
+                staging_identity,
+            )
+        os.close(parent_fd)
 
 
 def dummy_control(core: dict[str, Any]) -> dict[str, Any]:
