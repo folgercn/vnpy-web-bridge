@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import base64
 import copy
+import hashlib
 import importlib.util
 import json
+import os
+import stat
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 from app.core.config import Settings
 from app.services.commodity_c_fast_shadow import (
-    CFastShadowInvalidError,
     CommodityCFastShadowService,
 )
 from cryptography.hazmat.primitives import serialization
@@ -430,3 +432,215 @@ def test_installer_is_create_only(tmp_path: Path) -> None:
         ARTIFACT.write_private_create(target, b"replacement")
     assert target.read_bytes() == b"first"
     assert target.stat().st_mode & 0o077 == 0
+
+
+def test_snapshot_bundle_install_is_atomic_private_and_durable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destination = tmp_path / "c-fast-snapshot"
+    canonical = b'{"schema_version":"test_snapshot_v1","value":1}'
+    real_fsync = os.fsync
+    fsync_kinds: list[str] = []
+    rename_observations: list[tuple[bool, set[str]]] = []
+
+    def recording_fsync(fd: int) -> None:
+        mode = os.fstat(fd).st_mode
+        fsync_kinds.append("directory" if stat.S_ISDIR(mode) else "file")
+        real_fsync(fd)
+
+    real_rename = ARTIFACT.atomic_rename_no_replace
+
+    def recording_rename(source: Path, target: Path) -> None:
+        rename_observations.append(
+            (Path(target).exists(), {row.name for row in Path(source).iterdir()})
+        )
+        real_rename(source, target)
+
+    monkeypatch.setattr(ARTIFACT.os, "fsync", recording_fsync)
+    monkeypatch.setattr(
+        ARTIFACT, "atomic_rename_no_replace", recording_rename
+    )
+
+    digest = ARTIFACT.install_snapshot_bundle(destination, canonical)
+
+    assert digest == hashlib.sha256(canonical).hexdigest()
+    assert ARTIFACT.validate_snapshot_installation(destination) == digest
+    assert rename_observations == [
+        (
+            False,
+            {
+                ARTIFACT.INSTALL_SNAPSHOT_NAME,
+                ARTIFACT.INSTALL_CHECKSUM_NAME,
+            },
+        )
+    ]
+    assert fsync_kinds.count("file") == 2
+    assert fsync_kinds.count("directory") == 2
+    assert destination.stat().st_mode & 0o077 == 0
+    for child in destination.iterdir():
+        assert child.stat().st_mode & 0o077 == 0
+
+
+def test_snapshot_bundle_replay_is_create_only(tmp_path: Path) -> None:
+    destination = tmp_path / "c-fast-snapshot"
+    canonical = b'{"schema_version":"test_snapshot_v1","value":1}'
+    ARTIFACT.install_snapshot_bundle(destination, canonical)
+
+    with pytest.raises(FileExistsError, match="already exists"):
+        ARTIFACT.install_snapshot_bundle(destination, canonical)
+
+    assert (
+        ARTIFACT.validate_snapshot_installation(destination)
+        == hashlib.sha256(canonical).hexdigest()
+    )
+
+
+def test_legacy_single_file_destination_is_rejected_without_mutation(
+    tmp_path: Path,
+) -> None:
+    destination = tmp_path / "snapshot.json"
+    destination.write_bytes(b"legacy-single-file")
+
+    with pytest.raises(
+        ARTIFACT.SnapshotInstallInvalidError,
+        match="must be a directory",
+    ):
+        ARTIFACT.install_snapshot_bundle(destination, b'{"value":1}')
+
+    assert destination.read_bytes() == b"legacy-single-file"
+
+
+def test_interrupted_publish_never_exposes_half_install(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destination = tmp_path / "c-fast-snapshot"
+
+    def fail_before_publish(source: Path, target: Path) -> None:
+        del source, target
+        raise OSError("simulated crash before atomic rename")
+
+    monkeypatch.setattr(
+        ARTIFACT, "atomic_rename_no_replace", fail_before_publish
+    )
+
+    with pytest.raises(OSError, match="simulated crash"):
+        ARTIFACT.install_snapshot_bundle(destination, b'{"value":1}')
+
+    assert not destination.exists()
+    assert not list(tmp_path.glob(".c-fast-snapshot.staging-*"))
+
+
+def test_orphaned_crash_staging_is_never_treated_as_installed(
+    tmp_path: Path,
+) -> None:
+    destination = tmp_path / "c-fast-snapshot"
+    orphan = tmp_path / ".c-fast-snapshot.staging-crashed"
+    orphan.mkdir(mode=0o700)
+    (orphan / ARTIFACT.INSTALL_SNAPSHOT_NAME).write_bytes(b'{"partial":true}\n')
+
+    digest = ARTIFACT.install_snapshot_bundle(destination, b'{"value":1}')
+
+    assert orphan.exists()
+    assert ARTIFACT.validate_snapshot_installation(destination) == digest
+
+
+def test_atomic_publish_race_never_replaces_new_destination(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destination = tmp_path / "c-fast-snapshot"
+    real_rename = ARTIFACT.atomic_rename_no_replace
+
+    def create_racing_destination(source: Path, target: Path) -> None:
+        Path(target).mkdir(mode=0o700)
+        real_rename(source, target)
+
+    monkeypatch.setattr(
+        ARTIFACT,
+        "atomic_rename_no_replace",
+        create_racing_destination,
+    )
+
+    with pytest.raises(FileExistsError):
+        ARTIFACT.install_snapshot_bundle(destination, b'{"value":1}')
+
+    assert destination.is_dir()
+    assert not list(destination.iterdir())
+    assert not list(tmp_path.glob(".c-fast-snapshot.staging-*"))
+
+
+def test_validator_rejects_destination_replaced_after_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destination = tmp_path / "c-fast-snapshot"
+    retired = tmp_path / "retired-snapshot"
+    ARTIFACT.install_snapshot_bundle(destination, b'{"value":1}')
+    real_lstat = os.lstat
+    swapped = False
+
+    def swap_before_path_identity_check(path: Path) -> os.stat_result:
+        nonlocal swapped
+        if Path(path) == destination and not swapped:
+            swapped = True
+            os.rename(destination, retired)
+            destination.mkdir(mode=0o700)
+        return real_lstat(path)
+
+    monkeypatch.setattr(
+        ARTIFACT.os, "lstat", swap_before_path_identity_check
+    )
+
+    with pytest.raises(
+        ARTIFACT.SnapshotInstallInvalidError,
+        match="path changed",
+    ):
+        ARTIFACT.validate_snapshot_installation(destination)
+
+
+def test_half_installed_destination_fails_closed_and_is_not_repaired(
+    tmp_path: Path,
+) -> None:
+    destination = tmp_path / "c-fast-snapshot"
+    destination.mkdir(mode=0o700)
+    snapshot = destination / ARTIFACT.INSTALL_SNAPSHOT_NAME
+    snapshot.write_bytes(b'{"value":1}\n')
+    snapshot.chmod(0o600)
+
+    with pytest.raises(
+        ARTIFACT.SnapshotInstallInvalidError,
+        match="files are not exact",
+    ):
+        ARTIFACT.install_snapshot_bundle(destination, b'{"value":1}')
+
+    assert snapshot.read_bytes() == b'{"value":1}\n'
+    assert not (destination / ARTIFACT.INSTALL_CHECKSUM_NAME).exists()
+
+
+@pytest.mark.parametrize("tampered_name", ["snapshot.json", "snapshot.json.sha256"])
+def test_tampered_installation_fails_closed_without_overwrite(
+    tmp_path: Path,
+    tampered_name: str,
+) -> None:
+    destination = tmp_path / "c-fast-snapshot"
+    canonical = b'{"value":1}'
+    ARTIFACT.install_snapshot_bundle(destination, canonical)
+    tampered = destination / tampered_name
+    tampered.write_bytes(
+        b'{"value":2}\n'
+        if tampered_name == "snapshot.json"
+        else b"0" * 64 + b"\n"
+    )
+
+    with pytest.raises(ARTIFACT.SnapshotInstallInvalidError):
+        ARTIFACT.validate_snapshot_installation(destination)
+    with pytest.raises(ARTIFACT.SnapshotInstallInvalidError):
+        ARTIFACT.install_snapshot_bundle(destination, canonical)
+
+    assert tampered.read_bytes() != (
+        canonical + b"\n"
+        if tampered_name == "snapshot.json"
+        else hashlib.sha256(canonical).hexdigest().encode() + b"\n"
+    )

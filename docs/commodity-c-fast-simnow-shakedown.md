@@ -79,12 +79,28 @@ PYTHONPATH=backend python scripts/commodity_c_fast_shakedown_artifact.py \
   --max-selected-products 1 --control-signer-key-id c-fast-control-1
 
 PYTHONPATH=backend python scripts/commodity_c_fast_shakedown_artifact.py \
-  install --input permit.json --destination /private/runtime/snapshot.json \
+  install --input permit.json \
+  --destination /private/runtime/c-fast-snapshot-install \
   --research-public-key-file /secure/research-ed25519.pub \
   --control-public-key-file /secure/control-ed25519.pub
+
+export COMMODITY_C_FAST_SHADOW_SNAPSHOT_PATH=\
+/private/runtime/c-fast-snapshot-install/snapshot.json
 ```
 
-所有输出以 `0600` create-only 写入；destination 和 checksum 已存在时拒绝覆盖。
+`install --destination` 是安装单元目录，不再是 snapshot 文件路径。installer
+先在同一父目录的私有 staging directory 中 create-only 写入 `snapshot.json`
+与 `snapshot.json.sha256`，分别 fsync 两个文件，再 fsync staging directory，
+最后通过一次 directory rename 发布并 fsync 父目录。Bridge 的
+`COMMODITY_C_FAST_SHADOW_SNAPSHOT_PATH` 必须指向安装单元内固定的
+`snapshot.json` child。
+
+这是未投产 C_FAST shakedown installer 的合同迁移。旧的单文件 destination
+会被显式拒绝，不会静默改写成 runtime 无法读取的目录。完整安装单元、半安装
+单元和 checksum/snapshot 篡改都拒绝覆盖；遗留 `.staging-*` 不构成已安装
+authority，也不会被恢复路径当作 snapshot 读取。安装单元目录为 `0700`，
+其中两个文件为 `0600`。
+
 私钥只用于离线签署，M2 运行时仅保存公钥。安装后仍需由 Bridge 使用 RPC
 合约目录独立复核 exact contract、multiplier 和 price tick。
 

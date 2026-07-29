@@ -10,14 +10,19 @@ from __future__ import annotations
 
 import argparse
 import base64
+import ctypes
+import errno
+import fcntl
 import hashlib
 import json
 import os
+import stat
 import sys
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 from zoneinfo import ZoneInfo
 
 from cryptography.hazmat.primitives import serialization
@@ -86,6 +91,14 @@ PROTECTED_SNAPSHOT_KEYS = {
     "control_signer_key_id",
     "signature",
 }
+INSTALL_SNAPSHOT_NAME = "snapshot.json"
+INSTALL_CHECKSUM_NAME = "snapshot.json.sha256"
+INSTALL_FILE_NAMES = {INSTALL_SNAPSHOT_NAME, INSTALL_CHECKSUM_NAME}
+MAX_INSTALLED_SNAPSHOT_BYTES = 2 * 1024 * 1024
+
+
+class SnapshotInstallInvalidError(ValueError):
+    """The published install unit is incomplete or fails integrity checks."""
 
 
 def read_object(path: Path) -> dict[str, Any]:
@@ -111,6 +124,322 @@ def write_private_create(path: Path, payload: bytes) -> None:
         raise
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def fsync_directory(path: Path) -> None:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    fd = os.open(path, flags)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def atomic_rename_no_replace(source: Path, destination: Path) -> None:
+    """Publish one directory without replacing any existing destination."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    source_raw = os.fsencode(source)
+    destination_raw = os.fsencode(destination)
+    if sys.platform.startswith("linux"):
+        rename = getattr(libc, "renameat2", None)
+        if rename is None:
+            raise OSError(
+                errno.ENOTSUP,
+                "renameat2(RENAME_NOREPLACE) is unavailable",
+                destination,
+            )
+        rename.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        rename.restype = ctypes.c_int
+        result = rename(
+            -100,  # AT_FDCWD
+            source_raw,
+            -100,
+            destination_raw,
+            1,  # RENAME_NOREPLACE
+        )
+    elif sys.platform == "darwin":
+        rename = getattr(libc, "renamex_np", None)
+        if rename is None:
+            raise OSError(
+                errno.ENOTSUP,
+                "renamex_np(RENAME_EXCL) is unavailable",
+                destination,
+            )
+        rename.argtypes = [
+            ctypes.c_char_p,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        rename.restype = ctypes.c_int
+        result = rename(
+            source_raw,
+            destination_raw,
+            0x00000004,  # RENAME_EXCL
+        )
+    else:
+        raise OSError(
+            errno.ENOTSUP,
+            "atomic no-replace directory rename is unsupported",
+            destination,
+        )
+    if result:
+        error = ctypes.get_errno()
+        if error == errno.EEXIST:
+            raise FileExistsError(
+                error,
+                "snapshot installation destination already exists",
+                destination,
+            )
+        raise OSError(
+            error,
+            os.strerror(error),
+            destination,
+        )
+
+
+def _write_private_file(path: Path, payload: bytes) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise
+
+
+def _read_private_regular_file(
+    directory_fd: int,
+    name: str,
+    *,
+    max_bytes: int,
+) -> bytes:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(name, flags, dir_fd=directory_fd)
+    except OSError as exc:
+        raise SnapshotInstallInvalidError(
+            f"installed {name} is missing or unsafe"
+        ) from exc
+    try:
+        before = os.fstat(fd)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_mode & 0o077
+            or before.st_size > max_bytes
+        ):
+            raise SnapshotInstallInvalidError(
+                f"installed {name} is not a private regular file"
+            )
+        chunks: list[bytes] = []
+        remaining = max_bytes + 1
+        while remaining:
+            chunk = os.read(fd, min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+        after = os.fstat(fd)
+
+        def identity(value: os.stat_result) -> tuple[int, int, int, int, int]:
+            return (
+                value.st_dev,
+                value.st_ino,
+                value.st_size,
+                value.st_mtime_ns,
+                value.st_ctime_ns,
+            )
+
+        if len(raw) > max_bytes or identity(before) != identity(after):
+            raise SnapshotInstallInvalidError(
+                f"installed {name} changed during validation"
+            )
+        return raw
+    finally:
+        os.close(fd)
+
+
+def validate_snapshot_installation(destination: Path) -> str:
+    """Validate one atomically published snapshot/checksum directory."""
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        directory_fd = os.open(destination, flags)
+    except OSError as exc:
+        raise SnapshotInstallInvalidError(
+            "snapshot installation must be a directory"
+        ) from exc
+    try:
+        before = os.fstat(directory_fd)
+        if not stat.S_ISDIR(before.st_mode) or before.st_mode & 0o077:
+            raise SnapshotInstallInvalidError(
+                "snapshot installation directory is not private"
+            )
+        try:
+            path_before = os.lstat(destination)
+        except OSError as exc:
+            raise SnapshotInstallInvalidError(
+                "snapshot installation path changed during validation"
+            ) from exc
+        if (
+            not stat.S_ISDIR(path_before.st_mode)
+            or (path_before.st_dev, path_before.st_ino)
+            != (before.st_dev, before.st_ino)
+        ):
+            raise SnapshotInstallInvalidError(
+                "snapshot installation path changed during validation"
+            )
+        if set(os.listdir(directory_fd)) != INSTALL_FILE_NAMES:
+            raise SnapshotInstallInvalidError(
+                "snapshot installation files are not exact"
+            )
+        snapshot_raw = _read_private_regular_file(
+            directory_fd,
+            INSTALL_SNAPSHOT_NAME,
+            max_bytes=MAX_INSTALLED_SNAPSHOT_BYTES,
+        )
+        checksum_raw = _read_private_regular_file(
+            directory_fd,
+            INSTALL_CHECKSUM_NAME,
+            max_bytes=65,
+        )
+        after = os.fstat(directory_fd)
+        try:
+            path_after = os.lstat(destination)
+        except OSError as exc:
+            raise SnapshotInstallInvalidError(
+                "snapshot installation path changed during validation"
+            ) from exc
+        if (
+            before.st_dev,
+            before.st_ino,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        ) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        ) or (
+            not stat.S_ISDIR(path_after.st_mode)
+            or (path_after.st_dev, path_after.st_ino)
+            != (after.st_dev, after.st_ino)
+        ):
+            raise SnapshotInstallInvalidError(
+                "snapshot installation changed during validation"
+            )
+    finally:
+        os.close(directory_fd)
+
+    if not snapshot_raw.endswith(b"\n") or snapshot_raw.endswith(b"\n\n"):
+        raise SnapshotInstallInvalidError(
+            "installed snapshot is not canonical JSON"
+        )
+    canonical = snapshot_raw[:-1]
+    try:
+        parsed = json.loads(canonical)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SnapshotInstallInvalidError(
+            "installed snapshot is not valid JSON"
+        ) from exc
+    if not isinstance(parsed, dict) or canonical_json(parsed) != canonical:
+        raise SnapshotInstallInvalidError(
+            "installed snapshot is not canonical JSON"
+        )
+    digest = hashlib.sha256(canonical).hexdigest()
+    if checksum_raw != digest.encode("ascii") + b"\n":
+        raise SnapshotInstallInvalidError(
+            "installed snapshot checksum mismatch"
+        )
+    return digest
+
+
+@contextmanager
+def _installation_lock(destination: Path) -> Iterator[None]:
+    lock_path = destination.with_name(f".{destination.name}.install.lock")
+    flags = os.O_RDWR | os.O_CREAT
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(lock_path, flags, 0o600)
+    try:
+        lock_stat = os.fstat(fd)
+        if not stat.S_ISREG(lock_stat.st_mode) or lock_stat.st_mode & 0o077:
+            raise SnapshotInstallInvalidError(
+                "snapshot installation lock is unsafe"
+            )
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
+def install_snapshot_bundle(destination: Path, canonical: bytes) -> str:
+    """Create-only publish snapshot and checksum as one directory rename."""
+    if destination.name in {"", ".", ".."}:
+        raise ValueError("snapshot installation destination is invalid")
+    try:
+        parsed = json.loads(canonical)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("snapshot installation input is not JSON") from exc
+    if not isinstance(parsed, dict) or canonical_json(parsed) != canonical:
+        raise ValueError("snapshot installation input is not canonical JSON")
+    if len(canonical) + 1 > MAX_INSTALLED_SNAPSHOT_BYTES:
+        raise ValueError("snapshot installation input exceeds 2 MiB")
+
+    destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    expected_digest = hashlib.sha256(canonical).hexdigest()
+    staging = destination.with_name(
+        f".{destination.name}.staging-{uuid.uuid4().hex}"
+    )
+    with _installation_lock(destination):
+        if destination.exists() or destination.is_symlink():
+            try:
+                validate_snapshot_installation(destination)
+            except SnapshotInstallInvalidError:
+                raise
+            raise FileExistsError(
+                f"snapshot installation already exists: {destination}"
+            )
+        os.mkdir(staging, mode=0o700)
+        published = False
+        try:
+            _write_private_file(
+                staging / INSTALL_SNAPSHOT_NAME, canonical + b"\n"
+            )
+            _write_private_file(
+                staging / INSTALL_CHECKSUM_NAME,
+                expected_digest.encode("ascii") + b"\n",
+            )
+            fsync_directory(staging)
+            atomic_rename_no_replace(staging, destination)
+            published = True
+            fsync_directory(destination.parent)
+        finally:
+            if not published:
+                for child in INSTALL_FILE_NAMES:
+                    (staging / child).unlink(missing_ok=True)
+                try:
+                    staging.rmdir()
+                except FileNotFoundError:
+                    pass
+        installed_digest = validate_snapshot_installation(destination)
+        if installed_digest != expected_digest:
+            raise SnapshotInstallInvalidError(
+                "published snapshot installation changed unexpectedly"
+            )
+        return installed_digest
 
 
 def dummy_control(core: dict[str, Any]) -> dict[str, Any]:
@@ -417,12 +746,7 @@ def main() -> int:
             )
             canonical = canonical_json(snapshot.model_dump(mode="json"))
             if args.command == "install":
-                write_private_create(args.destination, canonical + b"\n")
-                checksum = hashlib.sha256(canonical).hexdigest().encode() + b"\n"
-                write_private_create(
-                    args.destination.with_suffix(args.destination.suffix + ".sha256"),
-                    checksum,
-                )
+                install_snapshot_bundle(args.destination, canonical)
             print(hashlib.sha256(canonical).hexdigest())
             return 0
         write_private_create(
