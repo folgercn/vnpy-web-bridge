@@ -753,6 +753,23 @@ def produce_research_artifacts(
 def verify_research_artifacts(result: ProducerResult) -> None:
     """Fail closed on missing, non-canonical, tampered or cross-spliced bytes."""
 
+    try:
+        _verify_research_artifacts(result)
+    except StaticCoreEqualProducerError:
+        raise
+    except (
+        ArithmeticError,
+        AttributeError,
+        LookupError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        raise StaticCoreEqualProducerError(
+            "producer artifact field validation failed"
+        ) from exc
+
+
+def _verify_research_artifacts(result: ProducerResult) -> None:
     code_identity = _verify_code_identity()
     if result.status != STATUS or cfast.SHA256_PATTERN.fullmatch(
         result.source_view_canonical_sha256

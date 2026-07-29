@@ -242,6 +242,60 @@ def test_signal_risk_score_is_bound_to_formula_and_target_sleeve(
         producer.verify_research_artifacts(tampered)
 
 
+@pytest.mark.parametrize(
+    ("role", "mutate"),
+    [
+        (
+            "signal_evidence",
+            lambda payload: payload["D_signals"].append(None),
+        ),
+        (
+            "target_evidence",
+            lambda payload: payload["targets"][0].pop(
+                "C_source_target_weight"
+            ),
+        ),
+        (
+            "target_evidence",
+            lambda payload: payload["targets"][0].pop("exact_contract"),
+        ),
+        (
+            "target_evidence",
+            lambda payload: payload["targets"][0].__setitem__(
+                "C_source_target_weight", "not-a-number"
+            ),
+        ),
+    ],
+)
+def test_malformed_artifact_fields_use_controlled_fail_closed_error(
+    role: str,
+    mutate: object,
+) -> None:
+    result = producer.produce_research_artifacts(source_view())
+    payload = json.loads(result.artifacts[role])
+    mutate(payload)  # type: ignore[operator]
+
+    tampered_artifacts = dict(result.artifacts)
+    tampered_artifacts[role] = producer.canonical_json(payload)
+    tampered_projection = dict(result.producer_projection)
+    tampered_projection["artifact_digests"] = [
+        {"role": item, "sha256": hashlib.sha256(raw).hexdigest()}
+        for item, raw in tampered_artifacts.items()
+    ]
+    tampered = producer.ProducerResult(
+        status=result.status,
+        source_view_canonical_sha256=result.source_view_canonical_sha256,
+        artifacts=tampered_artifacts,
+        producer_projection=tampered_projection,
+    )
+
+    with pytest.raises(
+        producer.StaticCoreEqualProducerError,
+        match="producer artifact field validation failed",
+    ):
+        producer.verify_research_artifacts(tampered)
+
+
 def test_code_identity_tamper_fails_before_source_calculation(monkeypatch) -> None:
     monkeypatch.setattr(producer, "D_FORMULA_CODE_SHA256", "0" * 64)
     with pytest.raises(
