@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/folgercn/vnpy-web-bridge/official-calendar-v1.schema.json",
+  "title": "Research Warehouse signed official calendar v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "calendar_id",
+    "timezone",
+    "timestamp_storage",
+    "valid_from",
+    "valid_to",
+    "issued_at",
+    "exchanges",
+    "source_evidence",
+    "days",
+    "authority",
+    "signer_key_id",
+    "signer_public_key_sha256",
+    "signature"
+  ],
+  "properties": {
+    "schema_version": {"const": "vnpy_research_official_calendar_v1"},
+    "calendar_id": {"type": "string", "pattern": "^calendar-[0-9a-f]{64}$"},
+    "timezone": {"const": "Asia/Shanghai"},
+    "timestamp_storage": {"const": "UTC"},
+    "valid_from": {"type": "string", "format": "date"},
+    "valid_to": {"type": "string", "format": "date"},
+    "issued_at": {"type": "string", "format": "date-time", "pattern": "Z$"},
+    "exchanges": {"const": ["INE", "SHFE"]},
+    "source_evidence": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "exchange",
+          "owner",
+          "source_url",
+          "source_type",
+          "observed_at",
+          "raw_sha256",
+          "raw_bytes",
+          "raw_relative_path"
+        ],
+        "properties": {
+          "exchange": {"enum": ["INE", "SHFE"]},
+          "owner": {"type": "string", "minLength": 1},
+          "source_url": {"type": "string", "format": "uri", "pattern": "^https://"},
+          "source_type": {
+            "const": "OFFICIAL_TRADING_CALENDAR_EXPORT_OR_CLOSURE_NOTICE"
+          },
+          "observed_at": {
+            "type": "string",
+            "format": "date-time",
+            "pattern": "Z$"
+          },
+          "raw_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "raw_bytes": {"type": "integer", "minimum": 1},
+          "raw_relative_path": {
+            "type": "string",
+            "pattern": "^calendar-sources/(ine|shfe)/[0-9a-f]{64}\\.raw$"
+          }
+        }
+      }
+    },
+    "days": {
+      "type": "array",
+      "minItems": 186,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["date", "status", "previous_evening_session"],
+        "properties": {
+          "date": {"type": "string", "format": "date"},
+          "status": {"enum": ["OFFICIAL_DAY", "CLOSED"]},
+          "previous_evening_session": {"type": "boolean"}
+        },
+        "allOf": [
+          {
+            "if": {"properties": {"status": {"const": "CLOSED"}}},
+            "then": {
+              "properties": {"previous_evening_session": {"const": false}}
+            }
+          }
+        ]
+      }
+    },
+    "authority": {"const": "SIGNED_SHFE_INE_OFFICIAL_DAY_EVIDENCE_ONLY"},
+    "signer_key_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{8,128}$"
+    },
+    "signer_public_key_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "signature": {"type": "string", "minLength": 1}
+  }
+}

@@ -5,8 +5,12 @@ from __future__ import annotations
 import os
 from datetime import date, datetime, timezone
 
-from .acquisition_models import AcquiredObject
+from .absence_receipts import create_absence_receipt
+from .acquisition_models import AcquiredObject, AuthoritativeAbsence
+from .calendar_models import OfficialCalendar
+from .clock_quality import TrustedClockSample, validate_observation_clock
 from .errors import RegistryError
+from .file_integrity import fsync_dir
 from .filesystem import (
     WarehousePaths,
     create_download_temp,
@@ -19,6 +23,7 @@ from .filesystem import (
 from .observations import create_observation
 from .policy import render_endpoint, validate_redirect
 from .registry import SourceRegistry
+from .source_availability import classify_http_status
 from .timeutil import parse_utc, require_utc
 from .transport import Transport, UrllibTransport
 from .validation import validate_source_bytes
@@ -41,7 +46,9 @@ def acquire_daily(
     observed_at: datetime | None = None,
     transport: Transport | None = None,
     timeout_seconds: float = 30.0,
-) -> AcquiredObject:
+    calendar: OfficialCalendar | None = None,
+    clock_sample: TrustedClockSample | None = None,
+) -> AcquiredObject | AuthoritativeAbsence:
     try:
         source = registry.source(source_id)
     except KeyError as exc:
@@ -57,6 +64,12 @@ def acquire_daily(
     observed = require_utc(
         observed_at or datetime.now(timezone.utc), "observed_at"
     )
+    if calendar is not None:
+        if clock_sample is None:
+            raise RegistryError(
+                "calendar-aware acquisition requires trusted NTP clock evidence"
+            )
+        validate_observation_clock(observed, sample=clock_sample)
     client = transport or UrllibTransport()
     descriptor, temp_path = create_download_temp(paths)
     try:
@@ -68,10 +81,43 @@ def acquire_daily(
             timeout_seconds=timeout_seconds,
         ) as response:
             validate_redirect(response.final_url, source.allowed_hosts)
-            if response.status != 200:
+            if calendar is None and response.status != 200:
                 raise RegistryError(
                     f"official source returned unexpected HTTP {response.status}"
                 )
+            if calendar is not None:
+                availability = classify_http_status(
+                    calendar=calendar,
+                    exchange=source.exchange,
+                    requested_day=parsed_day,
+                    status=response.status,
+                )
+                if response.status == 404:
+                    os.close(descriptor)
+                    descriptor = -1
+                    temp_path.unlink()
+                    fsync_dir(paths.temporary)
+                    absence_id, receipt_path = create_absence_receipt(
+                        paths=paths,
+                        source_id=source.source_id,
+                        exchange=source.exchange,
+                        trade_day=trade_day,
+                        source_url=response.final_url,
+                        observed_at=observed,
+                        calendar_raw_sha256=calendar.raw_sha256,
+                        collector_version=collector_version,
+                    )
+                    return AuthoritativeAbsence(
+                        absence_id=absence_id,
+                        receipt_path=receipt_path,
+                        source_id=source.source_id,
+                        exchange=source.exchange,
+                        trade_day=trade_day,
+                        observed_at=observed,
+                        http_status=404,
+                        calendar_raw_sha256=calendar.raw_sha256,
+                        status=availability,
+                    )
             expected_length = response.headers.get("content-length")
             if expected_length is not None:
                 try:
