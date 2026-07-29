@@ -54,8 +54,8 @@ def validate_manifest(
         raise RegistryError("daily manifest fields do not match v1 schema")
     if payload["schema_version"] != MANIFEST_SCHEMA:
         raise RegistryError("daily manifest schema mismatch")
-    if payload["authority"] != MANIFEST_AUTHORITY or payload["ready"] is not True:
-        raise RegistryError("daily manifest authority/READY state mismatch")
+    if payload["authority"] != MANIFEST_AUTHORITY or payload["ready"] is not False:
+        raise RegistryError("daily manifest authority/prepared state mismatch")
     if payload["registry_raw_sha256"] != registry.raw_sha256:
         raise RegistryError("daily manifest trusted registry pin mismatch")
     if not isinstance(payload["signer_key_id"], str) or ID_PATTERN.fullmatch(

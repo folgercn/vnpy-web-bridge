@@ -18,7 +18,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from research_warehouse import filesystem
+from research_warehouse import filesystem, publication
 from research_warehouse.acquisition import acquire_daily
 from research_warehouse.acquisition_models import HttpResponse
 from research_warehouse.canonical import canonical_json_line, sha256
@@ -26,6 +26,7 @@ from research_warehouse.errors import RegistryError
 from research_warehouse.filesystem import (
     WarehousePaths,
     create_only_bytes,
+    publish_temp_create_only,
     read_regular_strict,
     recover_atomic_publishes,
 )
@@ -68,7 +69,7 @@ def _crash_during_metadata_write(
         os.write(descriptor, raw[:4])
         os._exit(91)
 
-    filesystem._write_all = partial_then_exit
+    publication._write_all = partial_then_exit
     create_only_bytes(
         Path(target),
         b'{"complete":true}\n',
@@ -82,18 +83,37 @@ def _crash_after_metadata_link(
     target: str,
 ) -> None:
     paths = WarehousePaths.open(Path(warehouse_root))
-    original_link = filesystem.os.link
+    original_link = publication.os.link
 
     def link_then_exit(source, destination, **kwargs) -> None:
         original_link(source, destination, **kwargs)
         os._exit(92)
 
-    filesystem.os.link = link_then_exit
+    publication.os.link = link_then_exit
     create_only_bytes(
         Path(target),
         b'{"complete":true}\n',
         "crash-test metadata",
         temporary_dir=paths.temporary,
+    )
+
+
+def _crash_after_raw_link(
+    temporary: str,
+    destination: str,
+    digest: str,
+) -> None:
+    original_link = publication.os.link
+
+    def link_then_exit(source, target, **kwargs) -> None:
+        original_link(source, target, **kwargs)
+        os._exit(93)
+
+    publication.os.link = link_then_exit
+    publish_temp_create_only(
+        Path(temporary),
+        Path(destination),
+        expected_sha256=digest,
     )
 
 
@@ -190,7 +210,7 @@ def seal(
         private_key_path=private_key,
         signer_key_id="research-key-v1",
         expected_parent_batch_seal_sha256=parent_seal,
-        sealed_at=sealed_at,
+        trusted_clock=lambda: sealed_at,
     )
     return output, manifest_payload(output)
 
@@ -293,7 +313,7 @@ def test_revision_is_append_only_and_pit_cutoff_never_uses_future_revision(
         private_key_path=private_key,
         signer_key_id="research-key-v1",
         expected_parent_batch_seal_sha256=None,
-        sealed_at=T2,
+        trusted_clock=lambda: T2,
     )
     first_seal = manifest_payload(first_manifest)["batch_seal_sha256"]
     second = acquire(paths, official_raw("revision"), T3)
@@ -304,7 +324,7 @@ def test_revision_is_append_only_and_pit_cutoff_never_uses_future_revision(
         private_key_path=private_key,
         signer_key_id="research-key-v1",
         expected_parent_batch_seal_sha256=first_seal,
-        sealed_at=T4,
+        trusted_clock=lambda: T4,
     )
     second_seal = manifest_payload(second_manifest)["batch_seal_sha256"]
 
@@ -359,7 +379,7 @@ def test_seal_is_idempotent_when_observations_are_unchanged(
         private_key_path=private_key,
         signer_key_id="research-key-v1",
         expected_parent_batch_seal_sha256=None,
-        sealed_at=T2,
+        trusted_clock=lambda: T2,
     )
     first_seal = manifest_payload(first)["batch_seal_sha256"]
     repeated = seal_daily_batch(
@@ -369,7 +389,7 @@ def test_seal_is_idempotent_when_observations_are_unchanged(
         private_key_path=private_key,
         signer_key_id="research-key-v1",
         expected_parent_batch_seal_sha256=first_seal,
-        sealed_at=T3,
+        trusted_clock=lambda: T3,
     )
 
     assert repeated == first
@@ -462,7 +482,7 @@ def test_disk_full_cleans_partial_and_never_publishes(
     def disk_full(_descriptor: int, _raw: bytes) -> None:
         raise OSError(errno.ENOSPC, "No space left on device")
 
-    monkeypatch.setattr(filesystem, "_write_all", disk_full)
+    monkeypatch.setattr(publication, "_write_all", disk_full)
 
     with pytest.raises(RegistryError, match="filesystem failure"):
         acquire(paths, official_raw(), T1)
@@ -523,7 +543,7 @@ def test_manifest_tamper_wrong_key_and_missing_parent_fail_closed(
         private_key_path=private_key,
         signer_key_id="research-key-v1",
         expected_parent_batch_seal_sha256=None,
-        sealed_at=T2,
+        trusted_clock=lambda: T2,
     )
     first_seal = manifest_payload(first)["batch_seal_sha256"]
     acquire(paths, official_raw("second"), T3)
@@ -534,7 +554,7 @@ def test_manifest_tamper_wrong_key_and_missing_parent_fail_closed(
         private_key_path=private_key,
         signer_key_id="research-key-v1",
         expected_parent_batch_seal_sha256=first_seal,
-        sealed_at=T4,
+        trusted_clock=lambda: T4,
     )
     second_seal = manifest_payload(second_manifest)["batch_seal_sha256"]
 
@@ -570,20 +590,54 @@ def test_manifest_signature_tamper_fails_closed(tmp_path: Path) -> None:
         private_key_path=private_key,
         signer_key_id="research-key-v1",
         expected_parent_batch_seal_sha256=None,
-        sealed_at=T2,
+        trusted_clock=lambda: T2,
     )
     seal = manifest_payload(manifest)["batch_seal_sha256"]
     payload = json.loads(manifest.read_bytes())
-    payload["ready"] = False
+    payload["ready"] = True
     manifest.write_text(json.dumps(payload), encoding="utf-8")
 
-    with pytest.raises(RegistryError, match="authority/READY|signature"):
+    with pytest.raises(RegistryError, match="authority/prepared|signature"):
         verify_manifest_chain(
             paths=paths,
             public_key_path=public_key,
             registry=registry(),
             expected_genesis_seal_sha256=seal,
             expected_head_seal_sha256=seal,
+        )
+
+
+def test_manifest_commit_receipt_is_required_and_signed(tmp_path: Path) -> None:
+    paths = warehouse(tmp_path)
+    private_key, public_key = signing_keys(tmp_path)
+    acquire(paths, official_raw(), T1)
+    manifest_path, manifest = seal(paths, private_key, T2, None)
+    seal_hash = manifest["batch_seal_sha256"]
+    receipt = manifest_path.parent / f"commit-{manifest['batch_id']}.json"
+    original = receipt.read_bytes()
+    receipt.unlink()
+
+    with pytest.raises(RegistryError, match="uncommitted"):
+        verify_manifest_chain(
+            paths=paths,
+            public_key_path=public_key,
+            registry=registry(),
+            expected_genesis_seal_sha256=seal_hash,
+            expected_head_seal_sha256=seal_hash,
+        )
+
+    receipt.write_bytes(original)
+    receipt.chmod(0o600)
+    payload = json.loads(original)
+    payload["committed_at"] = T1.isoformat().replace("+00:00", "Z")
+    receipt.write_bytes(canonical_json_line(payload))
+    with pytest.raises(RegistryError, match="signature|predates"):
+        verify_manifest_chain(
+            paths=paths,
+            public_key_path=public_key,
+            registry=registry(),
+            expected_genesis_seal_sha256=seal_hash,
+            expected_head_seal_sha256=seal_hash,
         )
 
 
@@ -734,7 +788,8 @@ def test_metadata_publish_survives_forced_process_death(
     recover_atomic_publishes(
         temporary_dir=paths.temporary,
         final_root=paths.observations,
-        filename_prefix="obs-",
+        temporary_name_prefix=".publish-obs-",
+        final_name_glob="obs-*.json",
     )
     assert read_regular_strict(target, "crash-test metadata") == (
         b'{"complete":true}\n'
@@ -784,6 +839,251 @@ def test_observation_and_manifest_scanners_recover_link_phase(
     assert len(chain) == 1
     assert manifest_path.lstat().st_nlink == 1
     assert not manifest_temp.exists()
+
+
+def test_raw_acquisition_recovers_forced_link_phase_death(
+    tmp_path: Path,
+) -> None:
+    paths = warehouse(tmp_path)
+    raw = official_raw()
+    digest = sha256(raw)
+    raw_parent = paths.private_subdir(
+        paths.raw,
+        "shfe",
+        TRADE_DAY,
+        SOURCE_ID,
+    )
+    destination = raw_parent / f"{digest}.raw"
+    temporary = paths.temporary / ".download-forced.partial"
+    temporary.write_bytes(raw)
+    temporary.chmod(0o600)
+    context = multiprocessing.get_context("fork")
+    process = context.Process(
+        target=_crash_after_raw_link,
+        args=(str(temporary), str(destination), digest),
+    )
+    process.start()
+    process.join(timeout=10)
+
+    assert process.exitcode == 93
+    assert destination.lstat().st_nlink == 2
+    recovered = acquire(paths, raw, T1)
+    assert recovered.idempotent_raw is True
+    assert destination.lstat().st_nlink == 1
+    assert not temporary.exists()
+
+
+def test_final_parent_fsync_failure_retains_recoverable_raw_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = warehouse(tmp_path)
+    raw = official_raw()
+    digest = sha256(raw)
+    raw_parent = paths.private_subdir(
+        paths.raw,
+        "shfe",
+        TRADE_DAY,
+        SOURCE_ID,
+    )
+    real_fsync_dir = publication._fsync_dir
+    failed = False
+
+    def fail_once_after_link(path: Path) -> None:
+        nonlocal failed
+        if (
+            not failed
+            and path == raw_parent
+            and (raw_parent / f"{digest}.raw").exists()
+        ):
+            failed = True
+            raise OSError(errno.ENOSPC, "forced final-parent fsync failure")
+        real_fsync_dir(path)
+
+    monkeypatch.setattr(publication, "_fsync_dir", fail_once_after_link)
+    with pytest.raises(RegistryError, match="filesystem failure"):
+        acquire(paths, raw, T1)
+
+    destination = raw_parent / f"{digest}.raw"
+    assert destination.lstat().st_nlink == 2
+    assert observations(paths) == []
+    monkeypatch.setattr(publication, "_fsync_dir", real_fsync_dir)
+    recovered = acquire(paths, raw, T1)
+    assert recovered.idempotent_raw is True
+    assert destination.lstat().st_nlink == 1
+
+
+def test_manifest_fsync_failure_and_lost_response_retry_are_idempotent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = warehouse(tmp_path)
+    private_key, public_key = signing_keys(tmp_path)
+    acquire(paths, official_raw(), T1)
+    manifest_parent = paths.private_subdir(paths.manifests, TRADE_DAY)
+    real_fsync_dir = publication._fsync_dir
+    failed = False
+
+    def fail_once_after_link(path: Path) -> None:
+        nonlocal failed
+        if (
+            not failed
+            and path == manifest_parent
+            and list(manifest_parent.glob("batch-*.json"))
+        ):
+            failed = True
+            raise OSError(errno.ENOSPC, "forced final-parent fsync failure")
+        real_fsync_dir(path)
+
+    monkeypatch.setattr(publication, "_fsync_dir", fail_once_after_link)
+    with pytest.raises(OSError, match="final-parent"):
+        seal(paths, private_key, T2, None)
+    prepared = next(manifest_parent.glob("batch-*.json"))
+    assert prepared.lstat().st_nlink == 2
+    assert list(manifest_parent.glob("commit-*.json")) == []
+
+    monkeypatch.setattr(publication, "_fsync_dir", real_fsync_dir)
+    recovered_path, recovered_manifest = seal(paths, private_key, T2, None)
+    assert recovered_path == prepared
+    seal_hash = recovered_manifest["batch_seal_sha256"]
+    assert prepared.lstat().st_nlink == 1
+    assert len(list(manifest_parent.glob("commit-*.json"))) == 1
+    chain = verify_manifest_chain(
+        paths=paths,
+        public_key_path=public_key,
+        registry=registry(),
+        expected_genesis_seal_sha256=seal_hash,
+        expected_head_seal_sha256=seal_hash,
+    )
+    assert len(chain) == 1
+
+    repeated_path, repeated_manifest = seal(paths, private_key, T3, None)
+    assert repeated_path == recovered_path
+    assert repeated_manifest["batch_seal_sha256"] == seal_hash
+
+
+def test_observation_parent_fsync_failure_is_not_visible_until_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = warehouse(tmp_path)
+    observation_parent = paths.private_subdir(
+        paths.observations,
+        "shfe",
+        TRADE_DAY,
+        SOURCE_ID,
+    )
+    real_fsync_dir = publication._fsync_dir
+    failed = False
+
+    def fail_once_after_link(path: Path) -> None:
+        nonlocal failed
+        if (
+            not failed
+            and path == observation_parent
+            and list(observation_parent.glob("obs-*.json"))
+        ):
+            failed = True
+            raise OSError(errno.ENOSPC, "forced observation parent fsync failure")
+        real_fsync_dir(path)
+
+    monkeypatch.setattr(publication, "_fsync_dir", fail_once_after_link)
+    with pytest.raises(RegistryError, match="filesystem failure"):
+        acquire(paths, official_raw(), T1)
+    receipt = next(observation_parent.glob("obs-*.json"))
+    assert receipt.lstat().st_nlink == 2
+
+    monkeypatch.setattr(publication, "_fsync_dir", real_fsync_dir)
+    recovered = observations(paths)
+    assert len(recovered) == 1
+    assert receipt.lstat().st_nlink == 1
+
+
+def test_commit_receipt_parent_fsync_failure_recovers_old_parent_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = warehouse(tmp_path)
+    private_key, public_key = signing_keys(tmp_path)
+    acquire(paths, official_raw(), T1)
+    manifest_parent = paths.private_subdir(paths.manifests, TRADE_DAY)
+    real_fsync_dir = publication._fsync_dir
+    failed = False
+
+    def fail_once_after_commit_link(path: Path) -> None:
+        nonlocal failed
+        if (
+            not failed
+            and path == manifest_parent
+            and list(manifest_parent.glob("commit-*.json"))
+        ):
+            failed = True
+            raise OSError(errno.ENOSPC, "forced commit parent fsync failure")
+        real_fsync_dir(path)
+
+    monkeypatch.setattr(publication, "_fsync_dir", fail_once_after_commit_link)
+    with pytest.raises(OSError, match="commit parent"):
+        seal(paths, private_key, T2, None)
+    manifest_path = next(manifest_parent.glob("batch-*.json"))
+    commit_path = next(manifest_parent.glob("commit-*.json"))
+    assert manifest_path.lstat().st_nlink == 1
+    assert commit_path.lstat().st_nlink == 2
+
+    monkeypatch.setattr(publication, "_fsync_dir", real_fsync_dir)
+    recovered_path, manifest = seal(paths, private_key, T3, None)
+    assert recovered_path == manifest_path
+    assert commit_path.lstat().st_nlink == 1
+    seal_hash = manifest["batch_seal_sha256"]
+    assert len(
+        verify_manifest_chain(
+            paths=paths,
+            public_key_path=public_key,
+            registry=registry(),
+            expected_genesis_seal_sha256=seal_hash,
+            expected_head_seal_sha256=seal_hash,
+        )
+    ) == 1
+
+
+def test_pit_uses_post_fsync_commit_receipt_time(tmp_path: Path) -> None:
+    paths = warehouse(tmp_path)
+    private_key, public_key = signing_keys(tmp_path)
+    acquired = acquire(paths, official_raw(), T1)
+    moments = iter((T2, T4))
+    manifest_path = seal_daily_batch(
+        paths=paths,
+        registry=registry(),
+        trade_day=TRADE_DAY,
+        private_key_path=private_key,
+        signer_key_id="research-key-v1",
+        expected_parent_batch_seal_sha256=None,
+        trusted_clock=lambda: next(moments),
+    )
+    manifest = manifest_payload(manifest_path)
+    seal_hash = manifest["batch_seal_sha256"]
+
+    with pytest.raises(RegistryError, match="no verified daily batch"):
+        select_pit_revision(
+            paths=paths,
+            public_key_path=public_key,
+            registry=registry(),
+            expected_genesis_seal_sha256=seal_hash,
+            expected_head_seal_sha256=seal_hash,
+            source_id=SOURCE_ID,
+            trade_day=TRADE_DAY,
+            cutoff_at=T3,
+        )
+    selected = select_pit_revision(
+        paths=paths,
+        public_key_path=public_key,
+        registry=registry(),
+        expected_genesis_seal_sha256=seal_hash,
+        expected_head_seal_sha256=seal_hash,
+        source_id=SOURCE_ID,
+        trade_day=TRADE_DAY,
+        cutoff_at=T5,
+    )
+    assert selected.object_id == acquired.object_id
 
 
 def test_external_anchors_detect_leaf_and_full_chain_rollback(

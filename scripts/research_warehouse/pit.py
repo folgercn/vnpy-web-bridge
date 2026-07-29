@@ -37,7 +37,11 @@ def select_pit_revision(
         item
         for item in chain
         if item["trade_day"] == trade_day
-        and parse_utc(item["sealed_at"], "sealed_at") <= cutoff
+        and parse_utc(
+            item["commit_receipt"]["committed_at"],
+            "committed_at",
+        )
+        <= cutoff
     ]
     if not eligible_manifests:
         raise RegistryError("no verified daily batch existed at PIT cutoff")

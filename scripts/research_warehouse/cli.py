@@ -13,6 +13,7 @@ from .authority import assert_research_source_boundary
 from .canonical import parse_json_strict
 from .errors import RegistryError
 from .filesystem import WarehousePaths, read_regular_strict
+from .manifest_commits import commit_receipt_path
 from .manifests import seal_daily_batch, verify_manifest_chain
 from .pit import select_pit_revision
 from .registry import load_registry
@@ -129,8 +130,22 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 "sealed daily manifest",
             )
+            receipt_path = commit_receipt_path(
+                output_path,
+                manifest["batch_id"],
+            )
+            receipt = parse_json_strict(
+                read_regular_strict(
+                    receipt_path,
+                    "manifest commit receipt",
+                    limit=2 * 1024 * 1024,
+                ),
+                "manifest commit receipt",
+            )
             output = {
                 "batch_seal_sha256": manifest["batch_seal_sha256"],
+                "commit_receipt": str(receipt_path),
+                "committed_at": receipt["committed_at"],
                 "manifest": str(output_path),
                 "status": "DAILY_BATCH_READY",
             }

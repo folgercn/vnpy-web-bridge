@@ -10,10 +10,10 @@ service, or grant execution authority.
 ```text
 CLI
  ├─ transport -> validation
-├─ acquisition -> filesystem custody -> append-only observations
-│                                   └-> trusted validation -> revision replay
-├─ manifests -> manifest validation -> parent seal chain -> external anchors
-│            └-> Ed25519 signing
+ ├─ acquisition -> custody paths / file integrity / publication / locks
+ │              └-> observations -> trusted validation -> revision replay
+ ├─ manifests -> validation / chain / post-fsync commit receipts
+ │            └-> Ed25519 signing -> external anchors
  └─ PIT selector -> verified manifest chain
 ```
 
@@ -54,9 +54,11 @@ object; it is not `READY` and is never selected by PIT.
 `seal-day` takes all append-only observations for the requested day, derives
 the revision state, writes canonical JSON, binds it to the pinned registry
 hash and signer public key, and signs it with a separate raw Ed25519 private
-key. Every seal names `parent_batch_seal_sha256`, producing one linear,
-append-only chain. Only a successfully verified signed manifest has
-`ready: true`.
+key. Every prepared manifest names `parent_batch_seal_sha256`, producing one
+linear, append-only chain, and carries `ready: false`. After its final parent
+directory is successfully fsynced, the signer samples a trusted clock and
+atomically publishes a second signed commit receipt with `ready: true`.
+Verification and PIT require both artifacts.
 
 The parent chain alone cannot detect suffix deletion. Every verify/PIT call
 therefore requires trusted external genesis and current-head hashes, and every
@@ -65,13 +67,18 @@ explicit expected parent for the first seal. The full seal hash printed by
 `seal-day` must be stored outside the writable manifests directory before the
 next operation.
 
+If a process exits after committing a manifest but before returning its seal,
+retrying the identical request with the old expected parent recognizes the
+unique matching child, completes any missing commit receipt, and returns the
+same seal. Other parent mismatches remain fail closed.
+
 Before signing, the signer treats receipts as untrusted: it reloads the pinned
 registry, validates exact source/exchange/schema/URL/HTTP bindings, revalidates
 the exact raw schema and response day, and deterministically replays the
 revision chain. PIT uses source/day/revision fields already covered by the
 verified signature, then strictly rereads and hashes the selected raw bytes.
-It uses the latest manifest whose `sealed_at` is at or before the cutoff and
-rejects revisions first seen later than that cutoff.
+It uses the latest manifest whose signed post-fsync commit receipt time is at
+or before the cutoff and rejects revisions first seen later than that cutoff.
 
 ## Commands
 

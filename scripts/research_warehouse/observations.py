@@ -94,7 +94,8 @@ def load_observations(
         recover_atomic_publishes(
             temporary_dir=paths.temporary,
             final_root=paths.observations,
-            filename_prefix="obs-",
+            temporary_name_prefix=".publish-obs-",
+            final_name_glob="obs-*.json",
         )
         return _load_observations_unlocked(
             paths,
@@ -212,7 +213,8 @@ def create_observation(
         recover_atomic_publishes(
             temporary_dir=paths.temporary,
             final_root=paths.observations,
-            filename_prefix="obs-",
+            temporary_name_prefix=".publish-obs-",
+            final_name_glob="obs-*.json",
         )
         return _create_observation_unlocked(
             paths,

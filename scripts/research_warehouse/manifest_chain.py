@@ -9,6 +9,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from .canonical import canonical_json_line, parse_json_strict
 from .errors import RegistryError
 from .filesystem import WarehousePaths, read_regular_strict
+from .manifest_commits import commit_receipt_path, load_commit_receipt
 from .manifest_contracts import SHA256_PATTERN
 from .manifest_validation import validate_manifest
 from .models import SourceRegistry
@@ -19,6 +20,8 @@ def load_manifest_chain(
     paths: WarehousePaths,
     public_key: Ed25519PublicKey,
     registry: SourceRegistry,
+    *,
+    allow_uncommitted_head: bool = False,
 ) -> list[dict[str, Any]]:
     manifests: list[dict[str, Any]] = []
     for path in sorted(paths.manifests.rglob("batch-*.json")):
@@ -40,7 +43,14 @@ def load_manifest_chain(
         )
         if path != expected:
             raise RegistryError("daily batch manifest custody path binding mismatch")
-        manifests.append(payload)
+        receipt_path = commit_receipt_path(path, payload["batch_id"])
+        enriched = dict(payload)
+        enriched["commit_receipt"] = (
+            load_commit_receipt(receipt_path, payload, public_key)
+            if receipt_path.exists()
+            else None
+        )
+        manifests.append(enriched)
     if not manifests:
         return []
     by_seal = {item["batch_seal_sha256"]: item for item in manifests}
@@ -73,6 +83,14 @@ def load_manifest_chain(
         ordered.append(child)
     if len(ordered) != len(manifests):
         raise RegistryError("manifest chain contains a cycle or disconnected node")
+    uncommitted = [
+        index
+        for index, item in enumerate(ordered)
+        if item["commit_receipt"] is None
+    ]
+    allowed = [len(ordered) - 1] if allow_uncommitted_head else []
+    if uncommitted and uncommitted != allowed:
+        raise RegistryError("manifest chain contains an uncommitted batch")
     return ordered
 
 

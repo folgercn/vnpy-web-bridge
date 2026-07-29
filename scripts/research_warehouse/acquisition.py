@@ -13,6 +13,7 @@ from .filesystem import (
     custody_lock,
     publish_temp_create_only,
     read_regular_strict,
+    recover_atomic_publishes,
     stream_to_fd,
 )
 from .observations import create_observation
@@ -97,11 +98,20 @@ def acquire_daily(
             raw_path = raw_parent / f"{raw_sha256}.raw"
             lock_key = f"{source.exchange.lower()}-{trade_day}-{source.source_id}"
             with custody_lock(paths, lock_key):
-                raw_path, idempotent_raw = publish_temp_create_only(
-                    temp_path,
-                    raw_path,
-                    expected_sha256=raw_sha256,
-                )
+                with custody_lock(paths, "raw-publish"):
+                    recover_atomic_publishes(
+                        temporary_dir=paths.temporary,
+                        final_root=paths.raw,
+                        temporary_name_prefix=".download-",
+                        final_name_glob="*.raw",
+                        remove_unlinked=False,
+                        verify_sha256_filename=True,
+                    )
+                    raw_path, idempotent_raw = publish_temp_create_only(
+                        temp_path,
+                        raw_path,
+                        expected_sha256=raw_sha256,
+                    )
                 metadata = {
                     name: response.headers.get(name)
                     for name in CAPTURED_HTTP_HEADERS
@@ -137,7 +147,9 @@ def acquire_daily(
         if descriptor >= 0:
             os.close(descriptor)
         try:
-            temp_path.unlink()
+            temp_info = temp_path.lstat()
+            if temp_info.st_nlink == 1:
+                temp_path.unlink()
         except FileNotFoundError:
             pass
         if isinstance(exc, OSError):

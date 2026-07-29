@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,7 @@ from .filesystem import (
     recover_atomic_publishes,
 )
 from .manifest_chain import load_manifest_chain, require_chain_anchors
+from .manifest_commits import create_commit_receipt
 from .manifest_contracts import (
     ID_PATTERN,
     MANIFEST_AUTHORITY,
@@ -40,6 +42,54 @@ __all__ = [
     "validate_manifest",
     "verify_manifest_chain",
 ]
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _recover_manifest_publications(paths: WarehousePaths) -> None:
+    for temporary_prefix, final_glob in (
+        (".publish-batch-", "batch-*.json"),
+        (".publish-commit-batch-", "commit-batch-*.json"),
+    ):
+        recover_atomic_publishes(
+            temporary_dir=paths.temporary,
+            final_root=paths.manifests,
+            temporary_name_prefix=temporary_prefix,
+            final_name_glob=final_glob,
+        )
+
+
+def _path_for_manifest(
+    paths: WarehousePaths,
+    manifest: dict[str, Any],
+) -> Path:
+    return (
+        paths.manifests
+        / manifest["trade_day"]
+        / f"{manifest['batch_id']}.json"
+    )
+
+
+def _matches_lost_response(
+    manifest: dict[str, Any],
+    *,
+    expected_parent: str | None,
+    trade_day: str,
+    registry: SourceRegistry,
+    fingerprint: str,
+    signer_key_id: str,
+    signer_public_key_sha256: str,
+) -> bool:
+    return (
+        manifest["parent_batch_seal_sha256"] == expected_parent
+        and manifest["trade_day"] == trade_day
+        and manifest["registry_raw_sha256"] == registry.raw_sha256
+        and manifest["input_fingerprint_sha256"] == fingerprint
+        and manifest["signer_key_id"] == signer_key_id
+        and manifest["signer_public_key_sha256"] == signer_public_key_sha256
+    )
 
 
 def _manifest_payload(
@@ -78,7 +128,7 @@ def _manifest_payload(
         "signer_key_id": signer_key_id,
         "signer_public_key_sha256": signer_public_key_sha256,
         "authority": MANIFEST_AUTHORITY,
-        "ready": True,
+        "ready": False,
     }
 
 
@@ -90,25 +140,21 @@ def seal_daily_batch(
     private_key_path: Path,
     signer_key_id: str,
     expected_parent_batch_seal_sha256: str | None,
-    sealed_at: datetime | None = None,
+    trusted_clock: Callable[[], datetime] = _utc_now,
 ) -> Path:
     if ID_PATTERN.fullmatch(signer_key_id) is None:
         raise RegistryError("manifest signer key ID is invalid")
     private_key = load_private_key(private_key_path)
     public_key = private_key.public_key()
-    sealed = require_utc(
-        sealed_at or datetime.now(timezone.utc), "sealed_at"
-    )
+    signer_public_hash = public_key_sha256(public_key)
     with custody_lock(paths, "manifest-chain"):
-        recover_atomic_publishes(
-            temporary_dir=paths.temporary,
-            final_root=paths.manifests,
-            filename_prefix="batch-",
+        _recover_manifest_publications(paths)
+        chain = load_manifest_chain(
+            paths,
+            public_key,
+            registry,
+            allow_uncommitted_head=True,
         )
-        chain = load_manifest_chain(paths, public_key, registry)
-        actual_parent = chain[-1]["batch_seal_sha256"] if chain else None
-        if actual_parent != expected_parent_batch_seal_sha256:
-            raise RegistryError("manifest head does not match expected parent anchor")
         observations = load_observations(paths, registry, trade_day=trade_day)
         if not observations:
             raise RegistryError("cannot seal a day with no raw observations")
@@ -116,23 +162,65 @@ def seal_daily_batch(
             parse_utc(item["observed_at"], "observed_at")
             for item in observations
         )
-        if sealed < latest_observation:
-            raise RegistryError("sealed_at cannot predate a claimed observation")
         fingerprint = input_fingerprint(
             registry.raw_sha256,
             sorted(item["observation_id"] for item in observations),
         )
-        if (
-            chain
-            and chain[-1]["trade_day"] == trade_day
-            and chain[-1]["input_fingerprint_sha256"] == fingerprint
-        ):
-            return (
-                paths.manifests
-                / chain[-1]["trade_day"]
-                / f"{chain[-1]['batch_id']}.json"
+        head = chain[-1] if chain else None
+        actual_parent = head["batch_seal_sha256"] if head else None
+        if actual_parent != expected_parent_batch_seal_sha256:
+            if head is None or not _matches_lost_response(
+                head,
+                expected_parent=expected_parent_batch_seal_sha256,
+                trade_day=trade_day,
+                registry=registry,
+                fingerprint=fingerprint,
+                signer_key_id=signer_key_id,
+                signer_public_key_sha256=signer_public_hash,
+            ):
+                raise RegistryError(
+                    "manifest head does not match expected parent anchor"
+                )
+            if head["commit_receipt"] is None:
+                committed = require_utc(trusted_clock(), "committed_at")
+                create_commit_receipt(
+                    paths=paths,
+                    manifest_path=_path_for_manifest(paths, head),
+                    manifest=head,
+                    private_key=private_key,
+                    committed_at=committed,
+                )
+            return _path_for_manifest(paths, head)
+        if head is not None and head["commit_receipt"] is None:
+            if not _matches_lost_response(
+                head,
+                expected_parent=head["parent_batch_seal_sha256"],
+                trade_day=trade_day,
+                registry=registry,
+                fingerprint=fingerprint,
+                signer_key_id=signer_key_id,
+                signer_public_key_sha256=signer_public_hash,
+            ):
+                raise RegistryError("uncommitted manifest does not match seal request")
+            committed = require_utc(trusted_clock(), "committed_at")
+            create_commit_receipt(
+                paths=paths,
+                manifest_path=_path_for_manifest(paths, head),
+                manifest=head,
+                private_key=private_key,
+                committed_at=committed,
             )
-        if chain and sealed <= parse_utc(chain[-1]["sealed_at"], "sealed_at"):
+            return _path_for_manifest(paths, head)
+        if (
+            head
+            and head["trade_day"] == trade_day
+            and head["input_fingerprint_sha256"] == fingerprint
+        ):
+            return _path_for_manifest(paths, head)
+        sealed = require_utc(trusted_clock(), "sealed_at")
+        if sealed < latest_observation:
+            raise RegistryError("sealed_at cannot predate a claimed observation")
+        if head and sealed <= parse_utc(head["sealed_at"], "sealed_at"):
             raise RegistryError("sealed_at must be later than parent batch")
         payload = _manifest_payload(
             trade_day=trade_day,
@@ -141,7 +229,7 @@ def seal_daily_batch(
             parent_seal=actual_parent,
             observations=observations,
             signer_key_id=signer_key_id,
-            signer_public_key_sha256=public_key_sha256(public_key),
+            signer_public_key_sha256=signer_public_hash,
         )
         payload["batch_seal_sha256"] = sha256(
             canonical_json(seal_base(payload))
@@ -159,6 +247,14 @@ def seal_daily_batch(
             temporary_dir=paths.temporary,
         )
         validate_manifest(paths, signed, public_key, registry)
+        committed = require_utc(trusted_clock(), "committed_at")
+        create_commit_receipt(
+            paths=paths,
+            manifest_path=output,
+            manifest=signed,
+            private_key=private_key,
+            committed_at=committed,
+        )
         return output
 
 
@@ -171,11 +267,7 @@ def verify_manifest_chain(
     expected_head_seal_sha256: str | None,
 ) -> list[dict[str, Any]]:
     with custody_lock(paths, "manifest-chain"):
-        recover_atomic_publishes(
-            temporary_dir=paths.temporary,
-            final_root=paths.manifests,
-            filename_prefix="batch-",
-        )
+        _recover_manifest_publications(paths)
         chain = load_manifest_chain(
             paths,
             load_public_key(public_key_path),
