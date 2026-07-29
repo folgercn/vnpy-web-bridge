@@ -21,6 +21,10 @@ from zoneinfo import ZoneInfo
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
+from app.core.commodity_strategy_identity import (
+    COMMODITY_FROZEN_SECTOR_MAP_V1_ID,
+    commodity_frozen_sector_map_v1,
+)
 from app.core.config import Settings, get_settings
 from app.core.errors import (
     AppError,
@@ -67,31 +71,22 @@ KNOWN_ORDER_STATUSES = (
     ACTIVE_ORDER_STATUSES | TERMINAL_ORDER_STATUSES
 )
 
+STATIC_CORE_SECTOR_MAP_ID = COMMODITY_FROZEN_SECTOR_MAP_V1_ID
+STATIC_CORE_SECTOR_MAP_V1 = commodity_frozen_sector_map_v1()
 PRODUCT_SPECS: dict[str, dict[str, Any]] = {
-    "ag": {"exchange": "SHFE", "sector": "precious", "multiplier": 15, "price_tick": 1.0},
-    "al": {"exchange": "SHFE", "sector": "nonferrous", "multiplier": 5, "price_tick": 5.0},
-    "au": {"exchange": "SHFE", "sector": "precious", "multiplier": 1000, "price_tick": 0.02},
-    "bu": {"exchange": "SHFE", "sector": "energy", "multiplier": 10, "price_tick": 1.0},
-    "cu": {"exchange": "SHFE", "sector": "nonferrous", "multiplier": 5, "price_tick": 10.0},
-    "rb": {"exchange": "SHFE", "sector": "ferrous", "multiplier": 10, "price_tick": 1.0},
-    "ru": {"exchange": "SHFE", "sector": "chemicals", "multiplier": 10, "price_tick": 5.0},
-    "sc": {"exchange": "INE", "sector": "energy", "multiplier": 1000, "price_tick": 0.1},
-    "sp": {"exchange": "SHFE", "sector": "agriculture", "multiplier": 10, "price_tick": 2.0},
-    "zn": {"exchange": "SHFE", "sector": "nonferrous", "multiplier": 5, "price_tick": 5.0},
+    "ag": {"exchange": "SHFE", "sector": STATIC_CORE_SECTOR_MAP_V1["ag"], "multiplier": 15, "price_tick": 1.0},
+    "al": {"exchange": "SHFE", "sector": STATIC_CORE_SECTOR_MAP_V1["al"], "multiplier": 5, "price_tick": 5.0},
+    "au": {"exchange": "SHFE", "sector": STATIC_CORE_SECTOR_MAP_V1["au"], "multiplier": 1000, "price_tick": 0.02},
+    "bu": {"exchange": "SHFE", "sector": STATIC_CORE_SECTOR_MAP_V1["bu"], "multiplier": 10, "price_tick": 1.0},
+    "cu": {"exchange": "SHFE", "sector": STATIC_CORE_SECTOR_MAP_V1["cu"], "multiplier": 5, "price_tick": 10.0},
+    "rb": {"exchange": "SHFE", "sector": STATIC_CORE_SECTOR_MAP_V1["rb"], "multiplier": 10, "price_tick": 1.0},
+    "ru": {"exchange": "SHFE", "sector": STATIC_CORE_SECTOR_MAP_V1["ru"], "multiplier": 10, "price_tick": 5.0},
+    "sc": {"exchange": "INE", "sector": STATIC_CORE_SECTOR_MAP_V1["sc"], "multiplier": 1000, "price_tick": 0.1},
+    "sp": {"exchange": "SHFE", "sector": STATIC_CORE_SECTOR_MAP_V1["sp"], "multiplier": 10, "price_tick": 2.0},
+    "zn": {"exchange": "SHFE", "sector": STATIC_CORE_SECTOR_MAP_V1["zn"], "multiplier": 5, "price_tick": 5.0},
 }
 
-POSITION_MANAGER_SECTOR_MAP_V1: dict[str, str] = {
-    "ag": "precious",
-    "al": "nonferrous",
-    "au": "precious",
-    "bu": "energy_chemical",
-    "cu": "nonferrous",
-    "rb": "ferrous",
-    "ru": "energy_chemical",
-    "sc": "energy",
-    "sp": "light_industry",
-    "zn": "nonferrous",
-}
+POSITION_MANAGER_SECTOR_MAP_V1 = commodity_frozen_sector_map_v1()
 POSITION_MANAGER_GENESIS_SOURCE_MONTH = "2026-08"
 
 

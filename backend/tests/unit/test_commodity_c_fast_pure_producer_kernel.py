@@ -10,6 +10,10 @@ import sys
 from jsonschema import Draft202012Validator
 import pytest
 
+from app.core.commodity_strategy_identity import (
+    COMMODITY_FROZEN_SECTOR_MAP_V1,
+    COMMODITY_FROZEN_SECTOR_MAP_V1_ID,
+)
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -33,6 +37,11 @@ PRICES = {
     "sp": 6200.0,
     "zn": 24000.0,
 }
+
+
+def test_pure_producer_uses_frozen_cross_plane_sector_map_identity() -> None:
+    assert producer.SECTOR_MAP_ID == COMMODITY_FROZEN_SECTOR_MAP_V1_ID
+    assert producer.SECTOR_MAP == dict(COMMODITY_FROZEN_SECTOR_MAP_V1)
 
 
 def _sha(character: str) -> str:

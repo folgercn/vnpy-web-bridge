@@ -9,6 +9,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from app.core.commodity_strategy_identity import (
+    COMMODITY_FROZEN_SECTOR_MAP_V1,
+    COMMODITY_FROZEN_SECTOR_MAP_V1_ID,
+)
 from app.core.config import Settings
 from app.core.errors import (
     CommoditySimNowBatchError,
@@ -25,9 +29,15 @@ from app.schemas.commodity_simnow import (
     CommodityTemplateStartRequestDTO,
     CommodityTargetBatchDTO,
 )
+from app.services.commodity_c_fast_shadow import (
+    C_FAST_SECTOR_MAP_ID,
+    C_FAST_SECTOR_MAP_V1,
+)
 from app.services.commodity_simnow import (
     POSITION_MANAGER_SECTOR_MAP_V1,
     PRODUCT_SPECS,
+    STATIC_CORE_SECTOR_MAP_ID,
+    STATIC_CORE_SECTOR_MAP_V1,
     CommoditySimNowService,
     _canonical_json,
 )
@@ -2073,22 +2083,34 @@ def test_simnow_shakedown_shadow_does_not_pollute_formal_continuity(tmp_path: Pa
     assert not Path(service.settings.commodity_position_manager_shadow_state_path).exists()
 
 
-def test_baseline_sector_mapping_remains_identical_to_main() -> None:
-    assert {product: spec["sector"] for product, spec in PRODUCT_SPECS.items()} == {
+def test_all_runtime_lanes_share_frozen_sector_map_identity() -> None:
+    expected = {
         "ag": "precious",
         "al": "nonferrous",
         "au": "precious",
-        "bu": "energy",
+        "bu": "energy_chemical",
         "cu": "nonferrous",
         "rb": "ferrous",
-        "ru": "chemicals",
+        "ru": "energy_chemical",
         "sc": "energy",
-        "sp": "agriculture",
+        "sp": "light_industry",
         "zn": "nonferrous",
     }
+    product_spec_map = {
+        product: spec["sector"] for product, spec in PRODUCT_SPECS.items()
+    }
+
+    assert COMMODITY_FROZEN_SECTOR_MAP_V1_ID == "COMMODITY_FROZEN_SECTOR_MAP_V1"
+    assert STATIC_CORE_SECTOR_MAP_ID == COMMODITY_FROZEN_SECTOR_MAP_V1_ID
+    assert C_FAST_SECTOR_MAP_ID == COMMODITY_FROZEN_SECTOR_MAP_V1_ID
+    assert dict(COMMODITY_FROZEN_SECTOR_MAP_V1) == expected
+    assert STATIC_CORE_SECTOR_MAP_V1 == expected
+    assert POSITION_MANAGER_SECTOR_MAP_V1 == expected
+    assert C_FAST_SECTOR_MAP_V1 == expected
+    assert product_spec_map == expected
 
 
-def test_shadow_sector_map_does_not_change_baseline_weight_acceptance(tmp_path: Path) -> None:
+def test_source_energy_chemical_sector_breach_fails_closed(tmp_path: Path) -> None:
     service, private_key, _ = make_service(tmp_path)
     batch = make_batch(
         private_key,
@@ -2110,23 +2132,137 @@ def test_shadow_sector_map_does_not_change_baseline_weight_acceptance(tmp_path: 
         }
     )
 
+    with pytest.raises(
+        CommoditySimNowBatchError,
+        match="source_target_weight 超过板块上限",
+    ) as captured:
+        service._verify_weight_caps(batch)
+
+    assert captured.value.detail == {"sector": "energy_chemical"}
+
+
+def test_source_energy_chemical_sector_exact_boundary_is_accepted(
+    tmp_path: Path,
+) -> None:
+    service, private_key, _ = make_service(tmp_path)
+    source_weights = {
+        "bu": 0.175,
+        "ru": 0.175,
+        "ag": -0.175,
+        "al": -0.175,
+    }
+    batch = make_batch(
+        private_key,
+        targets={"bu": 1, "ru": 1, "ag": -1, "al": -1},
+    )
+    batch = batch.model_copy(
+        update={
+            "targets": [
+                row.model_copy(
+                    update={
+                        "source_target_weight": source_weights.get(
+                            row.product, 0.0
+                        ),
+                        "buffered_target_weight": 0.0,
+                    }
+                )
+                for row in batch.targets
+            ]
+        }
+    )
+
     service._verify_weight_caps(batch)
 
-    baseline_sector_gross = {
-        sector: sum(
-            abs(source_weights.get(product, 0.0))
-            for product, spec in PRODUCT_SPECS.items()
-            if spec["sector"] == sector
-        )
-        for sector in {spec["sector"] for spec in PRODUCT_SPECS.values()}
+
+def test_ten_product_source_buffer_and_integer_sector_golden_parity() -> None:
+    vectors = {
+        "source": {
+            "ag": 0.10,
+            "al": -0.08,
+            "au": -0.05,
+            "bu": 0.09,
+            "cu": 0.07,
+            "rb": -0.06,
+            "ru": -0.04,
+            "sc": 0.03,
+            "sp": -0.02,
+            "zn": -0.04,
+        },
+        "buffer": {
+            "ag": 0.08,
+            "al": -0.06,
+            "au": -0.04,
+            "bu": 0.07,
+            "cu": 0.05,
+            "rb": -0.04,
+            "ru": -0.03,
+            "sc": 0.02,
+            "sp": -0.01,
+            "zn": -0.04,
+        },
+        "integer": {
+            "ag": 0.06,
+            "al": -0.05,
+            "au": -0.03,
+            "bu": 0.055,
+            "cu": 0.04,
+            "rb": -0.035,
+            "ru": -0.025,
+            "sc": 0.015,
+            "sp": -0.01,
+            "zn": -0.02,
+        },
     }
-    shadow_energy_chemical_gross = sum(
-        abs(source_weights.get(product, 0.0))
-        for product, sector in POSITION_MANAGER_SECTOR_MAP_V1.items()
-        if sector == "energy_chemical"
+    maps = (
+        STATIC_CORE_SECTOR_MAP_V1,
+        POSITION_MANAGER_SECTOR_MAP_V1,
+        C_FAST_SECTOR_MAP_V1,
     )
-    assert max(baseline_sector_gross.values()) == pytest.approx(0.2)
-    assert shadow_energy_chemical_gross == pytest.approx(0.4)
+
+    for weights in vectors.values():
+        observed = [
+            {
+                sector: sum(
+                    abs(weights[product])
+                    for product in PRODUCT_SPECS
+                    if sector_map[product] == sector
+                )
+                for sector in set(sector_map.values())
+            }
+            for sector_map in maps
+        ]
+        assert observed[1:] == observed[:1] * (len(observed) - 1)
+
+
+def test_completed_signed_target_state_load_is_read_only_across_sector_map_fix(
+    tmp_path: Path,
+) -> None:
+    service, private_key, rpc = make_service(tmp_path)
+    plan = service.preview(
+        make_batch(private_key),
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+    service.current_plan["status"] = "COMPLETE"
+    service._save_completed_state(service.current_plan)
+    state_path = Path(service.settings.commodity_simnow_state_path)
+    persisted_before_restart = state_path.read_bytes()
+
+    restarted = CommoditySimNowService(
+        settings=service.settings,
+        rpc=rpc,  # type: ignore[arg-type]
+        trade=service.trade,
+        risk=service.risk,
+        audit=service.audit,
+        tick_store=service.tick_store,
+        clock=service.clock,
+    )
+
+    assert restarted._state_load_error is None
+    assert restarted._completed_state["last_completed_batch_hash"] == plan["batch_hash"]
+    assert restarted._completed_state["targets"] == plan["targets"]
+    assert state_path.read_bytes() == persisted_before_restart
 
 
 def test_position_manager_shadow_verifies_monthly_continuity(tmp_path: Path) -> None:

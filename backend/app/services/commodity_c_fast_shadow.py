@@ -20,6 +20,10 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from pydantic import ValidationError
 
+from app.core.commodity_strategy_identity import (
+    COMMODITY_FROZEN_SECTOR_MAP_V1_ID,
+    commodity_frozen_sector_map_v1,
+)
 from app.core.config import Settings, get_settings
 from app.schemas.commodity_c_fast_shadow import (
     CommodityCFastRuntimeSnapshotDTO,
@@ -43,20 +47,10 @@ CFastContractLoader = Callable[
 ]
 MAX_CLOCK_SKEW = timedelta(minutes=5)
 
-# This candidate owns its frozen maps.  It deliberately does not import
-# CommoditySimNowService or the position-manager shadow's mutable constants.
-C_FAST_SECTOR_MAP_V1: dict[str, str] = {
-    "ag": "precious",
-    "al": "nonferrous",
-    "au": "precious",
-    "bu": "energy_chemical",
-    "cu": "nonferrous",
-    "rb": "ferrous",
-    "ru": "energy_chemical",
-    "sc": "energy",
-    "sp": "light_industry",
-    "zn": "nonferrous",
-}
+# Plane-local copy of the shared immutable identity.  This candidate still
+# does not import CommoditySimNowService or mutable execution-service state.
+C_FAST_SECTOR_MAP_ID = COMMODITY_FROZEN_SECTOR_MAP_V1_ID
+C_FAST_SECTOR_MAP_V1 = commodity_frozen_sector_map_v1()
 C_FAST_PRODUCT_SPECS_V1: dict[str, dict[str, Any]] = {
     "ag": {"exchange": "SHFE", "multiplier": 15, "price_tick": 1.0},
     "al": {"exchange": "SHFE", "multiplier": 5, "price_tick": 5.0},
