@@ -65,17 +65,14 @@ def _path_for_manifest(
     paths: WarehousePaths,
     manifest: dict[str, Any],
 ) -> Path:
-    return (
-        paths.manifests
-        / manifest["trade_day"]
-        / f"{manifest['batch_id']}.json"
-    )
+    return paths.manifests / manifest["trade_day"] / f"{manifest['batch_id']}.json"
 
 
 def _matches_lost_response(
     manifest: dict[str, Any],
     *,
     expected_parent: str | None,
+    expected_parent_commit: str | None,
     trade_day: str,
     registry: SourceRegistry,
     fingerprint: str,
@@ -84,6 +81,7 @@ def _matches_lost_response(
 ) -> bool:
     return (
         manifest["parent_batch_seal_sha256"] == expected_parent
+        and manifest["parent_commit_seal_sha256"] == expected_parent_commit
         and manifest["trade_day"] == trade_day
         and manifest["registry_raw_sha256"] == registry.raw_sha256
         and manifest["input_fingerprint_sha256"] == fingerprint
@@ -98,15 +96,14 @@ def _manifest_payload(
     sealed: datetime,
     registry: SourceRegistry,
     parent_seal: str | None,
+    parent_commit_seal: str | None,
     observations: list[dict[str, Any]],
     signer_key_id: str,
     signer_public_key_sha256: str,
 ) -> dict[str, Any]:
     observation_ids = sorted(item["observation_id"] for item in observations)
     revisions = revision_state(observations)
-    unique_objects = {
-        item["object_id"]: item["raw_bytes"] for item in revisions
-    }
+    unique_objects = {item["object_id"]: item["raw_bytes"] for item in revisions}
     return {
         "schema_version": MANIFEST_SCHEMA,
         "batch_id": "",
@@ -118,6 +115,7 @@ def _manifest_payload(
             observation_ids,
         ),
         "parent_batch_seal_sha256": parent_seal,
+        "parent_commit_seal_sha256": parent_commit_seal,
         "batch_seal_sha256": "",
         "revisions": revisions,
         "observation_ids": observation_ids,
@@ -140,6 +138,7 @@ def seal_daily_batch(
     private_key_path: Path,
     signer_key_id: str,
     expected_parent_batch_seal_sha256: str | None,
+    expected_parent_commit_seal_sha256: str | None,
     trusted_clock: Callable[[], datetime] = _utc_now,
 ) -> Path:
     if ID_PATTERN.fullmatch(signer_key_id) is None:
@@ -159,8 +158,7 @@ def seal_daily_batch(
         if not observations:
             raise RegistryError("cannot seal a day with no raw observations")
         latest_observation = max(
-            parse_utc(item["observed_at"], "observed_at")
-            for item in observations
+            parse_utc(item["observed_at"], "observed_at") for item in observations
         )
         fingerprint = input_fingerprint(
             registry.raw_sha256,
@@ -168,10 +166,15 @@ def seal_daily_batch(
         )
         head = chain[-1] if chain else None
         actual_parent = head["batch_seal_sha256"] if head else None
-        if actual_parent != expected_parent_batch_seal_sha256:
+        actual_parent_commit = head["commit_seal_sha256"] if head else None
+        if (
+            actual_parent != expected_parent_batch_seal_sha256
+            or actual_parent_commit != expected_parent_commit_seal_sha256
+        ):
             if head is None or not _matches_lost_response(
                 head,
                 expected_parent=expected_parent_batch_seal_sha256,
+                expected_parent_commit=expected_parent_commit_seal_sha256,
                 trade_day=trade_day,
                 registry=registry,
                 fingerprint=fingerprint,
@@ -192,25 +195,9 @@ def seal_daily_batch(
                 )
             return _path_for_manifest(paths, head)
         if head is not None and head["commit_receipt"] is None:
-            if not _matches_lost_response(
-                head,
-                expected_parent=head["parent_batch_seal_sha256"],
-                trade_day=trade_day,
-                registry=registry,
-                fingerprint=fingerprint,
-                signer_key_id=signer_key_id,
-                signer_public_key_sha256=signer_public_hash,
-            ):
-                raise RegistryError("uncommitted manifest does not match seal request")
-            committed = require_utc(trusted_clock(), "committed_at")
-            create_commit_receipt(
-                paths=paths,
-                manifest_path=_path_for_manifest(paths, head),
-                manifest=head,
-                private_key=private_key,
-                committed_at=committed,
+            raise RegistryError(
+                "trusted current head is missing its externally anchored commit"
             )
-            return _path_for_manifest(paths, head)
         if (
             head
             and head["trade_day"] == trade_day
@@ -227,16 +214,13 @@ def seal_daily_batch(
             sealed=sealed,
             registry=registry,
             parent_seal=actual_parent,
+            parent_commit_seal=actual_parent_commit,
             observations=observations,
             signer_key_id=signer_key_id,
             signer_public_key_sha256=signer_public_hash,
         )
-        payload["batch_seal_sha256"] = sha256(
-            canonical_json(seal_base(payload))
-        )
-        payload["batch_id"] = (
-            f"batch-{trade_day}-{payload['batch_seal_sha256'][:24]}"
-        )
+        payload["batch_seal_sha256"] = sha256(canonical_json(seal_base(payload)))
+        payload["batch_id"] = f"batch-{trade_day}-{payload['batch_seal_sha256'][:24]}"
         signed = sign_payload(payload, private_key)
         parent = paths.private_subdir(paths.manifests, trade_day)
         output = parent / f"{signed['batch_id']}.json"
@@ -265,6 +249,7 @@ def verify_manifest_chain(
     registry: SourceRegistry,
     expected_genesis_seal_sha256: str | None,
     expected_head_seal_sha256: str | None,
+    expected_head_commit_seal_sha256: str | None,
 ) -> list[dict[str, Any]]:
     with custody_lock(paths, "manifest-chain"):
         _recover_manifest_publications(paths)
@@ -277,5 +262,6 @@ def verify_manifest_chain(
             chain,
             expected_genesis_seal_sha256=expected_genesis_seal_sha256,
             expected_head_seal_sha256=expected_head_seal_sha256,
+            expected_head_commit_seal_sha256=(expected_head_commit_seal_sha256),
         )
         return chain

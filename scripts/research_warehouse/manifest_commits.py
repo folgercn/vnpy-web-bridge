@@ -11,7 +11,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PublicKey,
 )
 
-from .canonical import canonical_json_line, parse_json_strict
+from .canonical import canonical_json_line, parse_json_strict, sha256
 from .errors import RegistryError
 from .filesystem import WarehousePaths, create_only_bytes, read_regular_strict
 from .manifest_contracts import ID_PATTERN, SHA256_PATTERN
@@ -55,18 +55,19 @@ def validate_commit_receipt(
         or payload["registry_raw_sha256"] != manifest["registry_raw_sha256"]
     ):
         raise RegistryError("manifest commit receipt batch binding mismatch")
-    if not isinstance(payload["batch_seal_sha256"], str) or SHA256_PATTERN.fullmatch(
-        payload["batch_seal_sha256"]
-    ) is None:
+    if (
+        not isinstance(payload["batch_seal_sha256"], str)
+        or SHA256_PATTERN.fullmatch(payload["batch_seal_sha256"]) is None
+    ):
         raise RegistryError("manifest commit receipt seal is invalid")
-    if not isinstance(payload["signer_key_id"], str) or ID_PATTERN.fullmatch(
-        payload["signer_key_id"]
-    ) is None:
+    if (
+        not isinstance(payload["signer_key_id"], str)
+        or ID_PATTERN.fullmatch(payload["signer_key_id"]) is None
+    ):
         raise RegistryError("manifest commit receipt signer ID is invalid")
     if (
         payload["signer_key_id"] != manifest["signer_key_id"]
-        or payload["signer_public_key_sha256"]
-        != manifest["signer_public_key_sha256"]
+        or payload["signer_public_key_sha256"] != manifest["signer_public_key_sha256"]
         or payload["signer_public_key_sha256"] != public_key_sha256(public_key)
     ):
         raise RegistryError("manifest commit receipt signer binding mismatch")
@@ -81,7 +82,7 @@ def load_commit_receipt(
     path: Path,
     manifest: dict[str, Any],
     public_key: Ed25519PublicKey,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], str]:
     raw = read_regular_strict(
         path,
         "manifest commit receipt",
@@ -97,7 +98,7 @@ def load_commit_receipt(
     expected = path.parent / f"commit-{manifest['batch_id']}.json"
     if path != expected:
         raise RegistryError("manifest commit receipt custody path mismatch")
-    return payload
+    return payload, sha256(raw)
 
 
 def create_commit_receipt(
@@ -107,7 +108,7 @@ def create_commit_receipt(
     manifest: dict[str, Any],
     private_key: Ed25519PrivateKey,
     committed_at: datetime,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], str]:
     payload = {
         "schema_version": COMMIT_SCHEMA,
         "batch_id": manifest["batch_id"],

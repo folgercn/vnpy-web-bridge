@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .acquisition_models import PitSelection
 from .canonical import sha256
+from .commit_anchors import CommitAnchorLedger
 from .errors import RegistryError
 from .filesystem import WarehousePaths, read_regular_strict
 from .manifests import verify_manifest_chain
@@ -21,6 +22,8 @@ def select_pit_revision(
     registry: SourceRegistry,
     expected_genesis_seal_sha256: str,
     expected_head_seal_sha256: str,
+    expected_head_commit_seal_sha256: str,
+    commit_anchor_ledger: CommitAnchorLedger,
     source_id: str,
     trade_day: str,
     cutoff_at: datetime,
@@ -32,16 +35,15 @@ def select_pit_revision(
         registry=registry,
         expected_genesis_seal_sha256=expected_genesis_seal_sha256,
         expected_head_seal_sha256=expected_head_seal_sha256,
+        expected_head_commit_seal_sha256=expected_head_commit_seal_sha256,
     )
+    commit_anchor_ledger.require_chain(chain)
+    eligibility = commit_anchor_ledger.available_at_by_batch()
     eligible_manifests = [
         item
         for item in chain
         if item["trade_day"] == trade_day
-        and parse_utc(
-            item["commit_receipt"]["committed_at"],
-            "committed_at",
-        )
-        <= cutoff
+        and eligibility[item["batch_seal_sha256"]] <= cutoff
     ]
     if not eligible_manifests:
         raise RegistryError("no verified daily batch existed at PIT cutoff")
@@ -50,10 +52,7 @@ def select_pit_revision(
     for item in manifest["revisions"]:
         if parse_utc(item["first_seen_at"], "first_seen_at") > cutoff:
             continue
-        if (
-            item["source_id"] != source_id
-            or item["trade_day"] != trade_day
-        ):
+        if item["source_id"] != source_id or item["trade_day"] != trade_day:
             continue
         candidates.append(item)
     if not candidates:
@@ -64,10 +63,7 @@ def select_pit_revision(
     )
     raw_path = paths.root / selected["raw_relative_path"]
     raw = read_regular_strict(raw_path, "PIT selected raw object")
-    if (
-        len(raw) != selected["raw_bytes"]
-        or sha256(raw) != selected["raw_sha256"]
-    ):
+    if len(raw) != selected["raw_bytes"] or sha256(raw) != selected["raw_sha256"]:
         raise RegistryError("PIT selected raw object changed after verification")
     return PitSelection(
         object_id=selected["object_id"],

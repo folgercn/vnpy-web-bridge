@@ -10,7 +10,8 @@ from pathlib import Path
 
 from .acquisition import acquire_daily
 from .authority import assert_research_source_boundary
-from .canonical import parse_json_strict
+from .canonical import parse_json_strict, sha256
+from .commit_anchors import load_commit_anchor_ledger
 from .errors import RegistryError
 from .filesystem import WarehousePaths, read_regular_strict
 from .manifest_commits import commit_receipt_path
@@ -54,18 +55,23 @@ def parser() -> argparse.ArgumentParser:
     seal.add_argument("--private-key", type=Path, required=True)
     seal.add_argument("--signer-key-id", required=True)
     seal.add_argument("--expected-parent-seal", required=True)
+    seal.add_argument("--expected-parent-commit-seal", required=True)
     verify = commands.add_parser("verify-chain")
     verify.add_argument("--root", type=Path, required=True)
     verify.add_argument("--registry", type=Path, required=True)
     verify.add_argument("--public-key", type=Path, required=True)
     verify.add_argument("--expected-genesis-seal", required=True)
     verify.add_argument("--expected-head-seal", required=True)
+    verify.add_argument("--expected-head-commit-seal", required=True)
     select = commands.add_parser("select-pit")
     select.add_argument("--root", type=Path, required=True)
     select.add_argument("--registry", type=Path, required=True)
     select.add_argument("--public-key", type=Path, required=True)
     select.add_argument("--expected-genesis-seal", required=True)
     select.add_argument("--expected-head-seal", required=True)
+    select.add_argument("--expected-head-commit-seal", required=True)
+    select.add_argument("--commit-anchor-ledger", type=Path, required=True)
+    select.add_argument("--expected-commit-anchor-ledger-sha256", required=True)
     select.add_argument("--source-id", required=True)
     select.add_argument("--trade-day", required=True)
     select.add_argument("--cutoff-at", required=True)
@@ -121,6 +127,9 @@ def main(argv: list[str] | None = None) -> int:
                 expected_parent_batch_seal_sha256=_parent_anchor(
                     args.expected_parent_seal
                 ),
+                expected_parent_commit_seal_sha256=_parent_anchor(
+                    args.expected_parent_commit_seal
+                ),
             )
             manifest = parse_json_strict(
                 read_regular_strict(
@@ -134,20 +143,22 @@ def main(argv: list[str] | None = None) -> int:
                 output_path,
                 manifest["batch_id"],
             )
+            receipt_raw = read_regular_strict(
+                receipt_path,
+                "manifest commit receipt",
+                limit=2 * 1024 * 1024,
+            )
             receipt = parse_json_strict(
-                read_regular_strict(
-                    receipt_path,
-                    "manifest commit receipt",
-                    limit=2 * 1024 * 1024,
-                ),
+                receipt_raw,
                 "manifest commit receipt",
             )
             output = {
                 "batch_seal_sha256": manifest["batch_seal_sha256"],
+                "commit_seal_sha256": sha256(receipt_raw),
                 "commit_receipt": str(receipt_path),
                 "committed_at": receipt["committed_at"],
                 "manifest": str(output_path),
-                "status": "DAILY_BATCH_READY",
+                "status": "DAILY_BATCH_COMMITTED_AWAITING_EXTERNAL_ANCHOR",
             }
         elif args.command == "verify-chain":
             chain = verify_manifest_chain(
@@ -156,6 +167,7 @@ def main(argv: list[str] | None = None) -> int:
                 registry=load_registry(args.registry),
                 expected_genesis_seal_sha256=args.expected_genesis_seal,
                 expected_head_seal_sha256=args.expected_head_seal,
+                expected_head_commit_seal_sha256=(args.expected_head_commit_seal),
             )
             output = {
                 "batch_count": len(chain),
@@ -169,6 +181,11 @@ def main(argv: list[str] | None = None) -> int:
                 registry=load_registry(args.registry),
                 expected_genesis_seal_sha256=args.expected_genesis_seal,
                 expected_head_seal_sha256=args.expected_head_seal,
+                expected_head_commit_seal_sha256=(args.expected_head_commit_seal),
+                commit_anchor_ledger=load_commit_anchor_ledger(
+                    args.commit_anchor_ledger,
+                    expected_raw_sha256=(args.expected_commit_anchor_ledger_sha256),
+                ),
                 source_id=args.source_id,
                 trade_day=args.trade_day,
                 cutoff_at=parse_utc(args.cutoff_at, "cutoff_at"),

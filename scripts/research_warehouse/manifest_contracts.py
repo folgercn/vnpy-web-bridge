@@ -21,6 +21,7 @@ MANIFEST_KEYS = {
     "registry_raw_sha256",
     "input_fingerprint_sha256",
     "parent_batch_seal_sha256",
+    "parent_commit_seal_sha256",
     "batch_seal_sha256",
     "revisions",
     "observation_ids",

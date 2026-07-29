@@ -35,9 +35,7 @@ def _validate_claimed_prefix(
     for item in selected:
         if parse_utc(item["observed_at"], "observed_at") > sealed_at:
             raise RegistryError("manifest cannot predate a claimed observation")
-        groups.setdefault(item["source_id"], []).append(
-            item["observation_sequence"]
-        )
+        groups.setdefault(item["source_id"], []).append(item["observation_sequence"])
     for sequences in groups.values():
         ordered = sorted(sequences)
         if ordered != list(range(1, ordered[-1] + 1)):
@@ -58,9 +56,10 @@ def validate_manifest(
         raise RegistryError("daily manifest authority/prepared state mismatch")
     if payload["registry_raw_sha256"] != registry.raw_sha256:
         raise RegistryError("daily manifest trusted registry pin mismatch")
-    if not isinstance(payload["signer_key_id"], str) or ID_PATTERN.fullmatch(
-        payload["signer_key_id"]
-    ) is None:
+    if (
+        not isinstance(payload["signer_key_id"], str)
+        or ID_PATTERN.fullmatch(payload["signer_key_id"]) is None
+    ):
         raise RegistryError("manifest signer key ID is invalid")
     if payload["signer_public_key_sha256"] != public_key_sha256(public_key):
         raise RegistryError("manifest signer public-key binding mismatch")
@@ -68,15 +67,24 @@ def validate_manifest(
     trade_day = validate_manifest_trade_day(payload["trade_day"])
     sealed_at = parse_utc(payload["sealed_at"], "sealed_at")
     claimed_seal = payload["batch_seal_sha256"]
-    if not isinstance(claimed_seal, str) or SHA256_PATTERN.fullmatch(
-        claimed_seal
-    ) is None:
+    if (
+        not isinstance(claimed_seal, str)
+        or SHA256_PATTERN.fullmatch(claimed_seal) is None
+    ):
         raise RegistryError("batch seal SHA256 is invalid")
     parent = payload["parent_batch_seal_sha256"]
     if parent is not None and (
         not isinstance(parent, str) or SHA256_PATTERN.fullmatch(parent) is None
     ):
         raise RegistryError("manifest parent seal SHA256 is invalid")
+    parent_commit = payload["parent_commit_seal_sha256"]
+    if parent_commit is not None and (
+        not isinstance(parent_commit, str)
+        or SHA256_PATTERN.fullmatch(parent_commit) is None
+    ):
+        raise RegistryError("manifest parent commit seal SHA256 is invalid")
+    if (parent is None) != (parent_commit is None):
+        raise RegistryError("manifest parent seals must be paired")
     if sha256(canonical_json(seal_base(unsigned))) != claimed_seal:
         raise RegistryError("batch seal payload binding mismatch")
     expected_id = f"batch-{trade_day}-{claimed_seal[:24]}"

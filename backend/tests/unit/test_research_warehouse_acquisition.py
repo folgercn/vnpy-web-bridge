@@ -22,6 +22,12 @@ from research_warehouse import filesystem, publication
 from research_warehouse.acquisition import acquire_daily
 from research_warehouse.acquisition_models import HttpResponse
 from research_warehouse.canonical import canonical_json_line, sha256
+from research_warehouse.commit_anchors import (
+    ANCHOR_SCHEMA,
+    CommitAnchor,
+    CommitAnchorLedger,
+    load_commit_anchor_ledger,
+)
 from research_warehouse.errors import RegistryError
 from research_warehouse.filesystem import (
     WarehousePaths,
@@ -44,9 +50,7 @@ from research_warehouse.observations import (
 from research_warehouse.pit import select_pit_revision
 from research_warehouse.registry import load_registry
 
-REGISTRY_PATH = (
-    ROOT / "deployments/research-warehouse/source-registry-v1.json"
-)
+REGISTRY_PATH = ROOT / "deployments/research-warehouse/source-registry-v1.json"
 SOURCE_ID = "shfe-daily-market-data-v1"
 TRADE_DAY = "2026-07-28"
 T1 = datetime(2026, 7, 28, 8, 0, tzinfo=timezone.utc)
@@ -146,15 +150,12 @@ class FakeTransport:
         content_length: int | None = None,
         chunks: list[bytes] | None = None,
         final_url: str = (
-            "https://www.shfe.com.cn/data/tradedata/future/"
-            "dailydata/kx20260728.dat"
+            "https://www.shfe.com.cn/data/tradedata/future/dailydata/kx20260728.dat"
         ),
     ) -> None:
         self.raw = raw
         self.status = status
-        self.content_length = (
-            len(raw) if content_length is None else content_length
-        )
+        self.content_length = len(raw) if content_length is None else content_length
         self._chunks = chunks
         self.final_url = final_url
 
@@ -197,11 +198,56 @@ def manifest_payload(path: Path) -> dict:
     return json.loads(path.read_bytes())
 
 
+def commit_seal(paths: WarehousePaths, batch_seal: str | None) -> str | None:
+    if batch_seal is None:
+        return None
+    manifests = [
+        path
+        for path in paths.manifests.rglob("batch-*.json")
+        if manifest_payload(path)["batch_seal_sha256"] == batch_seal
+    ]
+    assert len(manifests) == 1
+    manifest = manifest_payload(manifests[0])
+    receipt = manifests[0].parent / f"commit-{manifest['batch_id']}.json"
+    return sha256(receipt.read_bytes())
+
+
+def trusted_commit_ledger(
+    paths: WarehousePaths,
+    available_at: dict[str, datetime] | None = None,
+) -> CommitAnchorLedger:
+    manifests = sorted(
+        (manifest_payload(path) for path in paths.manifests.rglob("batch-*.json")),
+        key=lambda payload: payload["sealed_at"],
+    )
+    entries = []
+    for sequence, manifest in enumerate(manifests, start=1):
+        path = paths.manifests / manifest["trade_day"] / f"{manifest['batch_id']}.json"
+        receipt_path = path.parent / f"commit-{manifest['batch_id']}.json"
+        receipt = json.loads(receipt_path.read_bytes())
+        batch_seal = manifest["batch_seal_sha256"]
+        anchored_at = (
+            available_at[batch_seal]
+            if available_at is not None and batch_seal in available_at
+            else datetime.fromisoformat(receipt["committed_at"].replace("Z", "+00:00"))
+        )
+        entries.append(
+            CommitAnchor(
+                sequence=sequence,
+                batch_seal_sha256=batch_seal,
+                commit_seal_sha256=sha256(receipt_path.read_bytes()),
+                available_at=anchored_at,
+            )
+        )
+    return CommitAnchorLedger(raw_sha256="0" * 64, entries=tuple(entries))
+
+
 def seal(
     paths: WarehousePaths,
     private_key: Path,
     sealed_at: datetime,
     parent_seal: str | None,
+    parent_commit_seal: str | None = None,
 ) -> tuple[Path, dict]:
     output = seal_daily_batch(
         paths=paths,
@@ -210,6 +256,11 @@ def seal(
         private_key_path=private_key,
         signer_key_id="research-key-v1",
         expected_parent_batch_seal_sha256=parent_seal,
+        expected_parent_commit_seal_sha256=(
+            parent_commit_seal
+            if parent_commit_seal is not None
+            else commit_seal(paths, parent_seal)
+        ),
         trusted_clock=lambda: sealed_at,
     )
     return output, manifest_payload(output)
@@ -313,6 +364,7 @@ def test_revision_is_append_only_and_pit_cutoff_never_uses_future_revision(
         private_key_path=private_key,
         signer_key_id="research-key-v1",
         expected_parent_batch_seal_sha256=None,
+        expected_parent_commit_seal_sha256=None,
         trusted_clock=lambda: T2,
     )
     first_seal = manifest_payload(first_manifest)["batch_seal_sha256"]
@@ -324,6 +376,7 @@ def test_revision_is_append_only_and_pit_cutoff_never_uses_future_revision(
         private_key_path=private_key,
         signer_key_id="research-key-v1",
         expected_parent_batch_seal_sha256=first_seal,
+        expected_parent_commit_seal_sha256=commit_seal(paths, first_seal),
         trusted_clock=lambda: T4,
     )
     second_seal = manifest_payload(second_manifest)["batch_seal_sha256"]
@@ -336,15 +389,21 @@ def test_revision_is_append_only_and_pit_cutoff_never_uses_future_revision(
         registry=registry(),
         expected_genesis_seal_sha256=first_seal,
         expected_head_seal_sha256=second_seal,
+        expected_head_commit_seal_sha256=commit_seal(paths, second_seal),
     )
     assert len(chain) == 2
     assert chain[1]["parent_batch_seal_sha256"] == chain[0]["batch_seal_sha256"]
+    assert chain[1]["parent_commit_seal_sha256"] == chain[0][
+        "commit_seal_sha256"
+    ]
     before_revision = select_pit_revision(
         paths=paths,
         public_key_path=public_key,
         registry=registry(),
         expected_genesis_seal_sha256=first_seal,
         expected_head_seal_sha256=second_seal,
+        expected_head_commit_seal_sha256=commit_seal(paths, second_seal),
+        commit_anchor_ledger=trusted_commit_ledger(paths),
         source_id=SOURCE_ID,
         trade_day=TRADE_DAY,
         cutoff_at=datetime(2026, 7, 28, 8, 7, tzinfo=timezone.utc),
@@ -355,6 +414,8 @@ def test_revision_is_append_only_and_pit_cutoff_never_uses_future_revision(
         registry=registry(),
         expected_genesis_seal_sha256=first_seal,
         expected_head_seal_sha256=second_seal,
+        expected_head_commit_seal_sha256=commit_seal(paths, second_seal),
+        commit_anchor_ledger=trusted_commit_ledger(paths),
         source_id=SOURCE_ID,
         trade_day=TRADE_DAY,
         cutoff_at=datetime(2026, 7, 28, 8, 20, tzinfo=timezone.utc),
@@ -379,6 +440,7 @@ def test_seal_is_idempotent_when_observations_are_unchanged(
         private_key_path=private_key,
         signer_key_id="research-key-v1",
         expected_parent_batch_seal_sha256=None,
+        expected_parent_commit_seal_sha256=None,
         trusted_clock=lambda: T2,
     )
     first_seal = manifest_payload(first)["batch_seal_sha256"]
@@ -389,19 +451,58 @@ def test_seal_is_idempotent_when_observations_are_unchanged(
         private_key_path=private_key,
         signer_key_id="research-key-v1",
         expected_parent_batch_seal_sha256=first_seal,
+        expected_parent_commit_seal_sha256=commit_seal(paths, first_seal),
         trusted_clock=lambda: T3,
     )
 
     assert repeated == first
-    assert len(
+    assert (
+        len(
+            verify_manifest_chain(
+                paths=paths,
+                public_key_path=public_key,
+                registry=registry(),
+                expected_genesis_seal_sha256=first_seal,
+                expected_head_seal_sha256=first_seal,
+                expected_head_commit_seal_sha256=commit_seal(paths, first_seal),
+            )
+        )
+        == 1
+    )
+def test_confirmed_head_commit_deletion_cannot_rewrite_pit_history(
+    tmp_path: Path,
+) -> None:
+    paths = warehouse(tmp_path)
+    private_key, public_key = signing_keys(tmp_path)
+    acquire(paths, official_raw(), T1)
+    manifest_path, manifest = seal(paths, private_key, T2, None)
+    seal_hash = manifest["batch_seal_sha256"]
+    receipt = manifest_path.parent / f"commit-{manifest['batch_id']}.json"
+    original_commit_seal = sha256(receipt.read_bytes())
+    receipt.unlink()
+
+    with pytest.raises(RegistryError, match="expected parent anchor"):
+        seal(
+            paths,
+            private_key,
+            T3,
+            seal_hash,
+            original_commit_seal,
+        )
+
+    recovered_path, recovered_manifest = seal(paths, private_key, T4, None)
+    assert recovered_path == manifest_path
+    assert recovered_manifest["batch_seal_sha256"] == seal_hash
+    assert commit_seal(paths, seal_hash) != original_commit_seal
+    with pytest.raises(RegistryError, match="head commit"):
         verify_manifest_chain(
             paths=paths,
             public_key_path=public_key,
             registry=registry(),
-            expected_genesis_seal_sha256=first_seal,
-            expected_head_seal_sha256=first_seal,
+            expected_genesis_seal_sha256=seal_hash,
+            expected_head_seal_sha256=seal_hash,
+            expected_head_commit_seal_sha256=original_commit_seal,
         )
-    ) == 1
 
 
 @pytest.mark.parametrize(
@@ -543,6 +644,7 @@ def test_manifest_tamper_wrong_key_and_missing_parent_fail_closed(
         private_key_path=private_key,
         signer_key_id="research-key-v1",
         expected_parent_batch_seal_sha256=None,
+        expected_parent_commit_seal_sha256=None,
         trusted_clock=lambda: T2,
     )
     first_seal = manifest_payload(first)["batch_seal_sha256"]
@@ -554,6 +656,7 @@ def test_manifest_tamper_wrong_key_and_missing_parent_fail_closed(
         private_key_path=private_key,
         signer_key_id="research-key-v1",
         expected_parent_batch_seal_sha256=first_seal,
+        expected_parent_commit_seal_sha256=commit_seal(paths, first_seal),
         trusted_clock=lambda: T4,
     )
     second_seal = manifest_payload(second_manifest)["batch_seal_sha256"]
@@ -566,6 +669,7 @@ def test_manifest_tamper_wrong_key_and_missing_parent_fail_closed(
             registry=registry(),
             expected_genesis_seal_sha256=first_seal,
             expected_head_seal_sha256=second_seal,
+            expected_head_commit_seal_sha256=commit_seal(paths, second_seal),
         )
 
     first.unlink()
@@ -576,6 +680,7 @@ def test_manifest_tamper_wrong_key_and_missing_parent_fail_closed(
             registry=registry(),
             expected_genesis_seal_sha256=first_seal,
             expected_head_seal_sha256=second_seal,
+            expected_head_commit_seal_sha256=commit_seal(paths, second_seal),
         )
 
 
@@ -590,6 +695,7 @@ def test_manifest_signature_tamper_fails_closed(tmp_path: Path) -> None:
         private_key_path=private_key,
         signer_key_id="research-key-v1",
         expected_parent_batch_seal_sha256=None,
+        expected_parent_commit_seal_sha256=None,
         trusted_clock=lambda: T2,
     )
     seal = manifest_payload(manifest)["batch_seal_sha256"]
@@ -604,6 +710,7 @@ def test_manifest_signature_tamper_fails_closed(tmp_path: Path) -> None:
             registry=registry(),
             expected_genesis_seal_sha256=seal,
             expected_head_seal_sha256=seal,
+            expected_head_commit_seal_sha256=commit_seal(paths, seal),
         )
 
 
@@ -615,6 +722,7 @@ def test_manifest_commit_receipt_is_required_and_signed(tmp_path: Path) -> None:
     seal_hash = manifest["batch_seal_sha256"]
     receipt = manifest_path.parent / f"commit-{manifest['batch_id']}.json"
     original = receipt.read_bytes()
+    original_commit_seal = sha256(original)
     receipt.unlink()
 
     with pytest.raises(RegistryError, match="uncommitted"):
@@ -624,6 +732,7 @@ def test_manifest_commit_receipt_is_required_and_signed(tmp_path: Path) -> None:
             registry=registry(),
             expected_genesis_seal_sha256=seal_hash,
             expected_head_seal_sha256=seal_hash,
+            expected_head_commit_seal_sha256=original_commit_seal,
         )
 
     receipt.write_bytes(original)
@@ -638,6 +747,7 @@ def test_manifest_commit_receipt_is_required_and_signed(tmp_path: Path) -> None:
             registry=registry(),
             expected_genesis_seal_sha256=seal_hash,
             expected_head_seal_sha256=seal_hash,
+            expected_head_commit_seal_sha256=original_commit_seal,
         )
 
 
@@ -702,13 +812,7 @@ def test_signer_revalidates_trusted_registry_and_raw_schema(
         sort_keys=True,
     ).encode()
     digest = sha256(invalid_raw)
-    invalid_path = (
-        paths.raw
-        / "shfe"
-        / TRADE_DAY
-        / SOURCE_ID
-        / f"{digest}.raw"
-    )
+    invalid_path = paths.raw / "shfe" / TRADE_DAY / SOURCE_ID / f"{digest}.raw"
     acquired.raw_path.unlink()
     invalid_path.write_bytes(invalid_raw)
     invalid_path.chmod(0o600)
@@ -813,9 +917,7 @@ def test_observation_and_manifest_scanners_recover_link_phase(
     private_key, public_key = signing_keys(tmp_path)
     acquired = acquire(paths, official_raw(), T1)
     receipt = next(paths.observations.rglob("obs-*.json"))
-    receipt_temp = (
-        paths.temporary / f".publish-{receipt.name}-stale.partial"
-    )
+    receipt_temp = paths.temporary / f".publish-{receipt.name}-stale.partial"
     receipt_temp.hardlink_to(receipt)
 
     recovered = observations(paths)
@@ -824,9 +926,7 @@ def test_observation_and_manifest_scanners_recover_link_phase(
     assert not receipt_temp.exists()
 
     manifest_path, manifest = seal(paths, private_key, T2, None)
-    manifest_temp = (
-        paths.temporary / f".publish-{manifest_path.name}-stale.partial"
-    )
+    manifest_temp = paths.temporary / f".publish-{manifest_path.name}-stale.partial"
     manifest_temp.hardlink_to(manifest_path)
     seal_hash = manifest["batch_seal_sha256"]
     chain = verify_manifest_chain(
@@ -835,6 +935,7 @@ def test_observation_and_manifest_scanners_recover_link_phase(
         registry=registry(),
         expected_genesis_seal_sha256=seal_hash,
         expected_head_seal_sha256=seal_hash,
+        expected_head_commit_seal_sha256=commit_seal(paths, seal_hash),
     )
     assert len(chain) == 1
     assert manifest_path.lstat().st_nlink == 1
@@ -954,6 +1055,7 @@ def test_manifest_fsync_failure_and_lost_response_retry_are_idempotent(
         registry=registry(),
         expected_genesis_seal_sha256=seal_hash,
         expected_head_seal_sha256=seal_hash,
+        expected_head_commit_seal_sha256=commit_seal(paths, seal_hash),
     )
     assert len(chain) == 1
 
@@ -1005,7 +1107,7 @@ def test_commit_receipt_parent_fsync_failure_recovers_old_parent_retry(
 ) -> None:
     paths = warehouse(tmp_path)
     private_key, public_key = signing_keys(tmp_path)
-    acquire(paths, official_raw(), T1)
+    acquired = acquire(paths, official_raw(), T1)
     manifest_parent = paths.private_subdir(paths.manifests, TRADE_DAY)
     real_fsync_dir = publication._fsync_dir
     failed = False
@@ -1034,18 +1136,51 @@ def test_commit_receipt_parent_fsync_failure_recovers_old_parent_retry(
     assert recovered_path == manifest_path
     assert commit_path.lstat().st_nlink == 1
     seal_hash = manifest["batch_seal_sha256"]
-    assert len(
-        verify_manifest_chain(
+    assert (
+        len(
+            verify_manifest_chain(
+                paths=paths,
+                public_key_path=public_key,
+                registry=registry(),
+                expected_genesis_seal_sha256=seal_hash,
+                expected_head_seal_sha256=seal_hash,
+                expected_head_commit_seal_sha256=commit_seal(paths, seal_hash),
+            )
+        )
+        == 1
+    )
+    anchored = trusted_commit_ledger(paths, {seal_hash: T5})
+    with pytest.raises(RegistryError, match="no verified daily batch"):
+        select_pit_revision(
             paths=paths,
             public_key_path=public_key,
             registry=registry(),
             expected_genesis_seal_sha256=seal_hash,
             expected_head_seal_sha256=seal_hash,
+            expected_head_commit_seal_sha256=commit_seal(paths, seal_hash),
+            commit_anchor_ledger=anchored,
+            source_id=SOURCE_ID,
+            trade_day=TRADE_DAY,
+            cutoff_at=T3,
         )
-    ) == 1
+    selected = select_pit_revision(
+        paths=paths,
+        public_key_path=public_key,
+        registry=registry(),
+        expected_genesis_seal_sha256=seal_hash,
+        expected_head_seal_sha256=seal_hash,
+        expected_head_commit_seal_sha256=commit_seal(paths, seal_hash),
+        commit_anchor_ledger=anchored,
+        source_id=SOURCE_ID,
+        trade_day=TRADE_DAY,
+        cutoff_at=T6,
+    )
+    assert selected.object_id == acquired.object_id
 
 
-def test_pit_uses_post_fsync_commit_receipt_time(tmp_path: Path) -> None:
+def test_pit_uses_external_post_fsync_availability_anchor(
+    tmp_path: Path,
+) -> None:
     paths = warehouse(tmp_path)
     private_key, public_key = signing_keys(tmp_path)
     acquired = acquire(paths, official_raw(), T1)
@@ -1057,10 +1192,12 @@ def test_pit_uses_post_fsync_commit_receipt_time(tmp_path: Path) -> None:
         private_key_path=private_key,
         signer_key_id="research-key-v1",
         expected_parent_batch_seal_sha256=None,
+        expected_parent_commit_seal_sha256=None,
         trusted_clock=lambda: next(moments),
     )
     manifest = manifest_payload(manifest_path)
     seal_hash = manifest["batch_seal_sha256"]
+    ledger = trusted_commit_ledger(paths, {seal_hash: T4})
 
     with pytest.raises(RegistryError, match="no verified daily batch"):
         select_pit_revision(
@@ -1069,6 +1206,8 @@ def test_pit_uses_post_fsync_commit_receipt_time(tmp_path: Path) -> None:
             registry=registry(),
             expected_genesis_seal_sha256=seal_hash,
             expected_head_seal_sha256=seal_hash,
+            expected_head_commit_seal_sha256=commit_seal(paths, seal_hash),
+            commit_anchor_ledger=ledger,
             source_id=SOURCE_ID,
             trade_day=TRADE_DAY,
             cutoff_at=T3,
@@ -1079,11 +1218,82 @@ def test_pit_uses_post_fsync_commit_receipt_time(tmp_path: Path) -> None:
         registry=registry(),
         expected_genesis_seal_sha256=seal_hash,
         expected_head_seal_sha256=seal_hash,
+        expected_head_commit_seal_sha256=commit_seal(paths, seal_hash),
+        commit_anchor_ledger=ledger,
         source_id=SOURCE_ID,
         trade_day=TRADE_DAY,
         cutoff_at=T5,
     )
     assert selected.object_id == acquired.object_id
+
+
+def test_external_commit_anchor_ledger_is_hash_pinned_and_canonical(
+    tmp_path: Path,
+) -> None:
+    paths = warehouse(tmp_path)
+    private_key, public_key = signing_keys(tmp_path)
+    acquired = acquire(paths, official_raw(), T1)
+    _manifest_path, manifest = seal(paths, private_key, T2, None)
+    seal_hash = manifest["batch_seal_sha256"]
+    commit_hash = commit_seal(paths, seal_hash)
+    assert commit_hash is not None
+    payload = {
+        "schema_version": ANCHOR_SCHEMA,
+        "entries": [
+            {
+                "sequence": 1,
+                "batch_seal_sha256": seal_hash,
+                "commit_seal_sha256": commit_hash,
+                "available_at": T4.isoformat(
+                    timespec="microseconds"
+                ).replace("+00:00", "Z"),
+            }
+        ],
+    }
+    raw = canonical_json_line(payload)
+    ledger_path = tmp_path / "trusted-commit-anchors.json"
+    ledger_path.write_bytes(raw)
+    ledger_path.chmod(0o600)
+    ledger = load_commit_anchor_ledger(
+        ledger_path,
+        expected_raw_sha256=sha256(raw),
+    )
+    selected = select_pit_revision(
+        paths=paths,
+        public_key_path=public_key,
+        registry=registry(),
+        expected_genesis_seal_sha256=seal_hash,
+        expected_head_seal_sha256=seal_hash,
+        expected_head_commit_seal_sha256=commit_hash,
+        commit_anchor_ledger=ledger,
+        source_id=SOURCE_ID,
+        trade_day=TRADE_DAY,
+        cutoff_at=T5,
+    )
+    assert selected.object_id == acquired.object_id
+
+    with pytest.raises(RegistryError, match="predates receipt creation"):
+        select_pit_revision(
+            paths=paths,
+            public_key_path=public_key,
+            registry=registry(),
+            expected_genesis_seal_sha256=seal_hash,
+            expected_head_seal_sha256=seal_hash,
+            expected_head_commit_seal_sha256=commit_hash,
+            commit_anchor_ledger=trusted_commit_ledger(
+                paths,
+                {seal_hash: T1},
+            ),
+            source_id=SOURCE_ID,
+            trade_day=TRADE_DAY,
+            cutoff_at=T5,
+        )
+
+    with pytest.raises(RegistryError, match="hash mismatch"):
+        load_commit_anchor_ledger(
+            ledger_path,
+            expected_raw_sha256="f" * 64,
+        )
 
 
 def test_external_anchors_detect_leaf_and_full_chain_rollback(
@@ -1097,6 +1307,7 @@ def test_external_anchors_detect_leaf_and_full_chain_rollback(
     acquire(paths, official_raw("second"), T3)
     second_path, second_manifest = seal(paths, private_key, T4, first_seal)
     second_seal = second_manifest["batch_seal_sha256"]
+    second_commit_seal = commit_seal(paths, second_seal)
 
     second_path.unlink()
     with pytest.raises(RegistryError, match="trusted anchor"):
@@ -1106,9 +1317,10 @@ def test_external_anchors_detect_leaf_and_full_chain_rollback(
             registry=registry(),
             expected_genesis_seal_sha256=first_seal,
             expected_head_seal_sha256=second_seal,
+            expected_head_commit_seal_sha256=second_commit_seal,
         )
     with pytest.raises(RegistryError, match="expected parent anchor"):
-        seal(paths, private_key, T5, second_seal)
+        seal(paths, private_key, T5, second_seal, second_commit_seal)
 
     first_path.unlink()
     with pytest.raises(RegistryError, match="empty"):
@@ -1118,9 +1330,10 @@ def test_external_anchors_detect_leaf_and_full_chain_rollback(
             registry=registry(),
             expected_genesis_seal_sha256=first_seal,
             expected_head_seal_sha256=second_seal,
+            expected_head_commit_seal_sha256=second_commit_seal,
         )
     with pytest.raises(RegistryError, match="expected parent anchor"):
-        seal(paths, private_key, T5, second_seal)
+        seal(paths, private_key, T5, second_seal, second_commit_seal)
 
 
 def test_revision_occurrences_preserve_a_b_a_and_following_c(
@@ -1147,6 +1360,8 @@ def test_revision_occurrences_preserve_a_b_a_and_following_c(
         registry=registry(),
         expected_genesis_seal_sha256=first_seal,
         expected_head_seal_sha256=third_seal,
+        expected_head_commit_seal_sha256=commit_seal(paths, third_seal),
+        commit_anchor_ledger=trusted_commit_ledger(paths),
         source_id=SOURCE_ID,
         trade_day=TRADE_DAY,
         cutoff_at=T7,
@@ -1164,6 +1379,8 @@ def test_revision_occurrences_preserve_a_b_a_and_following_c(
         registry=registry(),
         expected_genesis_seal_sha256=first_seal,
         expected_head_seal_sha256=fourth_seal,
+        expected_head_commit_seal_sha256=commit_seal(paths, fourth_seal),
+        commit_anchor_ledger=trusted_commit_ledger(paths),
         source_id=SOURCE_ID,
         trade_day=TRADE_DAY,
         cutoff_at=datetime(2026, 7, 28, 8, 40, tzinfo=timezone.utc),
@@ -1207,6 +1424,8 @@ def test_pit_rechecks_raw_after_chain_verification(
             registry=registry(),
             expected_genesis_seal_sha256=seal_hash,
             expected_head_seal_sha256=seal_hash,
+            expected_head_commit_seal_sha256=commit_seal(paths, seal_hash),
+            commit_anchor_ledger=trusted_commit_ledger(paths),
             source_id=SOURCE_ID,
             trade_day=TRADE_DAY,
             cutoff_at=T3,
@@ -1240,6 +1459,8 @@ def test_pit_uses_signed_revision_fields_after_receipt_verification(
         registry=registry(),
         expected_genesis_seal_sha256=seal_hash,
         expected_head_seal_sha256=seal_hash,
+        expected_head_commit_seal_sha256=commit_seal(paths, seal_hash),
+        commit_anchor_ledger=trusted_commit_ledger(paths),
         source_id=SOURCE_ID,
         trade_day=TRADE_DAY,
         cutoff_at=T3,
