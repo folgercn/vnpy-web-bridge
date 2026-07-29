@@ -12,17 +12,15 @@ import argparse
 import base64
 import ctypes
 import errno
-import fcntl
 import hashlib
 import json
 import os
 import stat
 import sys
 import uuid
-from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from cryptography.hazmat.primitives import serialization
@@ -364,27 +362,6 @@ def validate_snapshot_installation(destination: Path) -> str:
     return digest
 
 
-@contextmanager
-def _installation_lock(destination: Path) -> Iterator[None]:
-    lock_path = destination.with_name(f".{destination.name}.install.lock")
-    flags = os.O_RDWR | os.O_CREAT
-    flags |= getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(lock_path, flags, 0o600)
-    try:
-        lock_stat = os.fstat(fd)
-        if not stat.S_ISREG(lock_stat.st_mode) or lock_stat.st_mode & 0o077:
-            raise SnapshotInstallInvalidError(
-                "snapshot installation lock is unsafe"
-            )
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-        finally:
-            os.close(fd)
-
-
 def install_snapshot_bundle(destination: Path, canonical: bytes) -> str:
     """Create-only publish snapshot and checksum as one directory rename."""
     if destination.name in {"", ".", ".."}:
@@ -403,43 +380,42 @@ def install_snapshot_bundle(destination: Path, canonical: bytes) -> str:
     staging = destination.with_name(
         f".{destination.name}.staging-{uuid.uuid4().hex}"
     )
-    with _installation_lock(destination):
-        if destination.exists() or destination.is_symlink():
-            try:
-                validate_snapshot_installation(destination)
-            except SnapshotInstallInvalidError:
-                raise
-            raise FileExistsError(
-                f"snapshot installation already exists: {destination}"
-            )
-        os.mkdir(staging, mode=0o700)
-        published = False
+    if destination.exists() or destination.is_symlink():
         try:
-            _write_private_file(
-                staging / INSTALL_SNAPSHOT_NAME, canonical + b"\n"
-            )
-            _write_private_file(
-                staging / INSTALL_CHECKSUM_NAME,
-                expected_digest.encode("ascii") + b"\n",
-            )
-            fsync_directory(staging)
-            atomic_rename_no_replace(staging, destination)
-            published = True
-            fsync_directory(destination.parent)
-        finally:
-            if not published:
-                for child in INSTALL_FILE_NAMES:
-                    (staging / child).unlink(missing_ok=True)
-                try:
-                    staging.rmdir()
-                except FileNotFoundError:
-                    pass
-        installed_digest = validate_snapshot_installation(destination)
-        if installed_digest != expected_digest:
-            raise SnapshotInstallInvalidError(
-                "published snapshot installation changed unexpectedly"
-            )
-        return installed_digest
+            validate_snapshot_installation(destination)
+        except SnapshotInstallInvalidError:
+            raise
+        raise FileExistsError(
+            f"snapshot installation already exists: {destination}"
+        )
+    os.mkdir(staging, mode=0o700)
+    published = False
+    try:
+        _write_private_file(
+            staging / INSTALL_SNAPSHOT_NAME, canonical + b"\n"
+        )
+        _write_private_file(
+            staging / INSTALL_CHECKSUM_NAME,
+            expected_digest.encode("ascii") + b"\n",
+        )
+        fsync_directory(staging)
+        atomic_rename_no_replace(staging, destination)
+        published = True
+        fsync_directory(destination.parent)
+    finally:
+        if not published:
+            for child in INSTALL_FILE_NAMES:
+                (staging / child).unlink(missing_ok=True)
+            try:
+                staging.rmdir()
+            except FileNotFoundError:
+                pass
+    installed_digest = validate_snapshot_installation(destination)
+    if installed_digest != expected_digest:
+        raise SnapshotInstallInvalidError(
+            "published snapshot installation changed unexpectedly"
+        )
+    return installed_digest
 
 
 def dummy_control(core: dict[str, Any]) -> dict[str, Any]:

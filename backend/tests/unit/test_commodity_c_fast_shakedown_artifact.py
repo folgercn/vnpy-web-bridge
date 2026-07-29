@@ -532,6 +532,21 @@ def test_interrupted_publish_never_exposes_half_install(
     assert not list(tmp_path.glob(".c-fast-snapshot.staging-*"))
 
 
+def test_unsupported_no_replace_platform_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destination = tmp_path / "c-fast-snapshot"
+    monkeypatch.setattr(ARTIFACT.sys, "platform", "unsupported")
+
+    with pytest.raises(OSError) as exc_info:
+        ARTIFACT.install_snapshot_bundle(destination, b'{"value":1}')
+
+    assert exc_info.value.errno == ARTIFACT.errno.ENOTSUP
+    assert not destination.exists()
+    assert not list(tmp_path.glob(".c-fast-snapshot.staging-*"))
+
+
 def test_orphaned_crash_staging_is_never_treated_as_installed(
     tmp_path: Path,
 ) -> None:
