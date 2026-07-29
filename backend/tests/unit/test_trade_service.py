@@ -112,7 +112,7 @@ def test_pre_rpc_guard_runs_after_risk_and_immediately_before_send(
     monkeypatch.setattr(
         service.risk,
         "check_order",
-        lambda _payload: events.append("risk"),
+            lambda _payload, **_kwargs: events.append("risk"),
     )
     monkeypatch.setattr(
         rpc_service,
@@ -128,6 +128,40 @@ def test_pre_rpc_guard_runs_after_risk_and_immediately_before_send(
     )
 
     assert events == ["risk", "guard", "send"]
+
+
+def test_internal_volume_override_keeps_other_risk_checks(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    service = make_service(tmp_path)
+    events: list[str] = []
+    monkeypatch.setattr(
+        rpc_service,
+        "send_order",
+        lambda *_args: (
+            events.append("send") or "CTP.123"
+        ),
+    )
+    monkeypatch.setattr(
+        rpc_service, "status", lambda: {"connected": True}
+    )
+    monkeypatch.setattr(rpc_service, "get_positions", lambda: [])
+    monkeypatch.setattr(
+        rpc_service,
+        "get_contracts",
+        lambda: [
+            {"vt_symbol": "rb2610.SHFE", "pricetick": 1}
+        ],
+    )
+
+    service.send_order(
+        make_order(volume=2),
+        max_order_volume_override=0,
+        pre_rpc_guard=lambda: events.append("final"),
+    )
+
+    assert events == ["final", "send"]
 
 
 def test_status_mapping_and_cancelable_status() -> None:
