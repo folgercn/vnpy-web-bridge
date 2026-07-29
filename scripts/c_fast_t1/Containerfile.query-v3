@@ -18,7 +18,13 @@ RUN /usr/local/bin/python3.12 -m pip install --no-cache-dir --disable-pip-versio
       "psycopg[binary]==3.2.3" \
       "cryptography==48.0.0" \
       "jsonschema==4.26.0" \
-      "referencing==0.37.0"
+      "referencing==0.37.0" \
+      "attrs==26.1.0" \
+      "cffi==2.1.0" \
+      "jsonschema-specifications==2025.9.1" \
+      "pycparser==3.0" \
+      "rpds-py==2026.6.3" \
+      "typing-extensions==4.16.0"
 
 COPY scripts/commodity_c_fast_t1_query_v3.py ./scripts/commodity_c_fast_t1_query_v3.py
 COPY scripts/commodity_c_fast_t1_query_child_v3.py ./scripts/commodity_c_fast_t1_query_child_v3.py
