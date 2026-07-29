@@ -316,7 +316,9 @@ def verify_four_layer_pnl_chain(
         is not None
     ]
     if len(set(actual_fact_identities)) != len(actual_fact_identities):
-        raise CFastPnlLedgerError("LEDGER_ACTUAL_FACT_REPLAY")
+        raise CFastPnlLedgerError(
+            "LEDGER_ACTUAL_TERMINAL_REPLAY_OR_DIGEST_CONFLICT"
+        )
     for predecessor, current in zip(entries, entries[1:]):
         if current.previous_entry_hash != predecessor.entry_hash:
             raise CFastPnlLedgerError("LEDGER_PREDECESSOR_MISMATCH")
@@ -572,12 +574,6 @@ def _stable_actual_fact_identity(facts: ActualSimNowFactsDTO) -> str:
             "snapshot_hash": facts.snapshot_hash,
             "plan_hash": facts.plan_hash,
             "session_id": facts.session_id,
-            "account_sha256": facts.account_sha256,
-            "orders_sha256": facts.orders_sha256,
-            "trades_sha256": facts.trades_sha256,
-            "positions_sha256": facts.positions_sha256,
-            "reconciliation_sha256": facts.reconciliation_sha256,
-            "execution_state_checksum": facts.execution_state_checksum,
             "terminal_checksum": facts.terminal_checksum,
         }
     )

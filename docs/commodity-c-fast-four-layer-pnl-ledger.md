@@ -191,6 +191,10 @@ SHA256({
 })
 ```
 
+`completed_at_utc` 以 archive 中的原始字符串参与 checksum；真实 runtime
+`datetime.isoformat()` 产生的 `+00:00` 不会先归一化成 `Z`。同一 raw 字符串
+另行 parse 为 UTC datetime，仅用于时间因果校验。
+
 当前纯 ledger 没有嵌入 SimNow execution core 的 raw orders/trades/fill price、
 合约 multiplier、mark 与 fee rows，因此只能验证 terminal envelope 对
 `execution_state_checksum` 的绑定，不能独立重算 execution state，也不能把
@@ -251,9 +255,11 @@ precision/rounding 影响。
 - entry ID/hash 不重复；
 - 完全相同的四层 source-fact set 不得换 sequence 重放；
 - `FACTS_BOUND` entry 额外派生 stable actual fact identity；该 key 只覆盖
-  session、snapshot、plan、terminal/execution checksum 与
-  account/order/trade/position/reconciliation digests，刻意排除 valuation day、
-  as-of 与 created-at，同一终态事实不能改时间后再次计入；
+  snapshot、plan、session 与 terminal checksum，刻意排除 valuation day、
+  as-of、created-at 和 subsidiary digests。同一终态事实不能通过改时间再次
+  计入，也不能通过改 order/trade/position/reconciliation digest 绕过去重；
+  后一种情况明确报
+  `LEDGER_ACTUAL_TERMINAL_REPLAY_OR_DIGEST_CONFLICT`；
 - predecessor 精确指向上一 entry hash；
 - 单次 audit 最多 10,000 条。
 

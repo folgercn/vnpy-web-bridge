@@ -30,6 +30,10 @@ def _iso(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _runtime_iso(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat()
+
+
 def common_source(
     *,
     ledger_id: str,
@@ -214,7 +218,9 @@ def source_inputs(
             "terminal_status": "COMPLETE" if complete else "INCOMPLETE",
             "terminal_reconciliation_complete": complete,
             "terminal_completed_at_utc": (
-                _iso(as_of - timedelta(seconds=30)) if complete else None
+                _runtime_iso(as_of - timedelta(seconds=30))
+                if complete
+                else None
             ),
             "valuation_at_utc": _iso(as_of - timedelta(minutes=2)),
             "execution_captured_at_utc": _iso(as_of - timedelta(minutes=1)),
@@ -389,6 +395,7 @@ def test_actual_complete_binds_terminal_but_amounts_remain_unverified() -> (
     assert facts.snapshot_hash == SNAPSHOT_HASH
     assert facts.plan_hash == PLAN_HASH
     assert facts.session_id == "cfast-simnow-session-20260902"
+    assert facts.terminal_completed_at_utc == "2026-09-02T08:01:30+00:00"
     assert facts.terminal_checksum == terminal_checksum(
         facts.model_dump(mode="json")
     )
@@ -776,11 +783,39 @@ def test_same_actual_terminal_fact_cannot_replay_with_later_as_of() -> None:
         == second.actual_simnow_calibration_pnl.stable_actual_fact_identity_sha256
     )
     assert_error(
-        "LEDGER_ACTUAL_FACT_REPLAY",
+        "LEDGER_ACTUAL_TERMINAL_REPLAY_OR_DIGEST_CONFLICT",
         verify_four_layer_pnl_chain,
         [
             first.model_dump(mode="json"),
             second.model_dump(mode="json"),
+        ],
+    )
+
+    digest_conflict_inputs = source_inputs(actual_state="complete")
+    for source in digest_conflict_inputs.values():
+        source["as_of_at_utc"] = "2026-09-02T08:02:45Z"
+    digest_conflict_inputs["theoretical"]["realized_pnl_cny"] = 1_002.0
+    digest_conflict_inputs["actual"] = {
+        **first_inputs["actual"],
+        "as_of_at_utc": "2026-09-02T08:02:45Z",
+        "trades_sha256": "7" * 64,
+    }
+    digest_conflict = build(
+        sequence=2,
+        previous=first.entry_hash,
+        created_at="2026-09-02T08:03:45Z",
+        payloads=digest_conflict_inputs,
+    )
+    assert (
+        first.actual_simnow_calibration_pnl.stable_actual_fact_identity_sha256
+        == digest_conflict.actual_simnow_calibration_pnl.stable_actual_fact_identity_sha256
+    )
+    assert_error(
+        "LEDGER_ACTUAL_TERMINAL_REPLAY_OR_DIGEST_CONFLICT",
+        verify_four_layer_pnl_chain,
+        [
+            first.model_dump(mode="json"),
+            digest_conflict.model_dump(mode="json"),
         ],
     )
 

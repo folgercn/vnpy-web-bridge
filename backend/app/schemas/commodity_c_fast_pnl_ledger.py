@@ -112,6 +112,16 @@ def canonical_utc_json(value: datetime) -> str:
     return value.isoformat().replace("+00:00", "Z")
 
 
+def parse_utc_string(value: str, field: str) -> datetime:
+    try:
+        normalized = f"{value[:-1]}+00:00" if value.endswith("Z") else value
+        parsed = datetime.fromisoformat(normalized)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field} must be an ISO-8601 timestamp") from exc
+    _require_utc(parsed, field)
+    return parsed
+
+
 class StrictLedgerModel(StrictFiniteModel):
     model_config = ConfigDict(
         extra="forbid",
@@ -352,7 +362,11 @@ class ActualSimNowFactsDTO(PnlSourceFactsBaseDTO):
         "INCONSISTENT",
     ]
     terminal_reconciliation_complete: StrictBool
-    terminal_completed_at_utc: datetime | None = None
+    terminal_completed_at_utc: str | None = Field(
+        default=None,
+        min_length=20,
+        max_length=40,
+    )
     valuation_at_utc: datetime
     execution_captured_at_utc: datetime
     expected_lots: int = Field(ge=0, le=MAX_LEDGER_LOTS)
@@ -382,22 +396,21 @@ class ActualSimNowFactsDTO(PnlSourceFactsBaseDTO):
             self.execution_captured_at_utc,
             "execution_captured_at_utc",
         )
-        if self.terminal_completed_at_utc is not None:
-            _require_utc(
+        terminal_completed_at = (
+            parse_utc_string(
                 self.terminal_completed_at_utc,
                 "terminal_completed_at_utc",
             )
+            if self.terminal_completed_at_utc is not None
+            else None
+        )
         if self.filled_lots > self.expected_lots:
             raise ValueError("filled_lots exceeds expected_lots")
         terminal_payload = {
             "session_id": self.session_id,
             "plan_hash": self.plan_hash,
             "status": self.terminal_status,
-            "completed_at_utc": (
-                canonical_utc_json(self.terminal_completed_at_utc)
-                if self.terminal_completed_at_utc is not None
-                else None
-            ),
+            "completed_at_utc": self.terminal_completed_at_utc,
             "execution_state_checksum": self.execution_state_checksum,
         }
         if self.terminal_checksum != sha256_json(terminal_payload):
@@ -406,7 +419,7 @@ class ActualSimNowFactsDTO(PnlSourceFactsBaseDTO):
             self.trade_evidence_state == "COMPLETE"
             and self.terminal_status == "COMPLETE"
             and self.terminal_reconciliation_complete
-            and self.terminal_completed_at_utc is not None
+            and terminal_completed_at is not None
             and self.expected_lots > 0
             and self.filled_lots == self.expected_lots
             and self.order_outcome == "FULL_FILL"
@@ -427,15 +440,15 @@ class ActualSimNowFactsDTO(PnlSourceFactsBaseDTO):
         if self.execution_captured_at_utc < self.valuation_at_utc:
             raise ValueError("execution capture precedes valuation")
         if (
-            self.terminal_completed_at_utc is not None
-            and self.terminal_completed_at_utc < self.execution_captured_at_utc
+            terminal_completed_at is not None
+            and terminal_completed_at < self.execution_captured_at_utc
         ):
             raise ValueError("terminal completion precedes execution capture")
         if self.as_of_at_utc < self.execution_captured_at_utc:
             raise ValueError("actual as-of precedes execution capture")
         if (
-            self.terminal_completed_at_utc is not None
-            and self.as_of_at_utc < self.terminal_completed_at_utc
+            terminal_completed_at is not None
+            and self.as_of_at_utc < terminal_completed_at
         ):
             raise ValueError("actual as-of precedes terminal completion")
         return self
@@ -748,14 +761,6 @@ class ActualSimNowCalibrationPnlLayerDTO(StrictLedgerModel):
                     "snapshot_hash": facts.snapshot_hash,
                     "plan_hash": facts.plan_hash,
                     "session_id": facts.session_id,
-                    "account_sha256": facts.account_sha256,
-                    "orders_sha256": facts.orders_sha256,
-                    "trades_sha256": facts.trades_sha256,
-                    "positions_sha256": facts.positions_sha256,
-                    "reconciliation_sha256": (facts.reconciliation_sha256),
-                    "execution_state_checksum": (
-                        facts.execution_state_checksum
-                    ),
                     "terminal_checksum": facts.terminal_checksum,
                 }
             )
