@@ -54,6 +54,7 @@ class StaticCoreEqualProducerError(cfast.ProducerKernelError):
 class ProducerResult:
     status: str
     source_view_canonical_sha256: str
+    source_view_canonical: bytes
     artifacts: Mapping[str, bytes]
     producer_projection: Mapping[str, Any]
 
@@ -366,10 +367,10 @@ def _artifact_base(
     return payload
 
 
-def produce_research_artifacts(
+def _produce_research_artifacts_unverified(
     source_view: Mapping[str, Any] | bytes | bytearray,
 ) -> ProducerResult:
-    """Produce deterministic, non-authoritative STATIC_CORE_EQUAL evidence."""
+    """Build deterministic evidence before the public fresh-replay check."""
 
     code_identity = _verify_code_identity()
     source, c_source, ohlc_lookup = _normalize_source(source_view)
@@ -764,9 +765,19 @@ def produce_research_artifacts(
     result = ProducerResult(
         status=STATUS,
         source_view_canonical_sha256=source_sha256,
+        source_view_canonical=source_raw,
         artifacts=artifacts,
         producer_projection=projection,
     )
+    return result
+
+
+def produce_research_artifacts(
+    source_view: Mapping[str, Any] | bytes | bytearray,
+) -> ProducerResult:
+    """Produce and freshly replay deterministic non-authoritative evidence."""
+
+    result = _produce_research_artifacts_unverified(source_view)
     verify_research_artifacts(result)
     return result
 
@@ -800,7 +811,42 @@ def _verify_research_artifacts(result: ProducerResult) -> None:
         raise StaticCoreEqualProducerError("producer artifacts are missing or reordered")
     if len(set(result.artifacts.values())) != len(ARTIFACT_ROLES):
         raise StaticCoreEqualProducerError("producer artifact bytes are duplicated")
-
+    if (
+        not isinstance(result.source_view_canonical, bytes)
+        or len(result.source_view_canonical) > cfast.MAX_SOURCE_VIEW_RAW_BYTES
+    ):
+        raise StaticCoreEqualProducerError(
+            "canonical source view is missing or outside the resource bound"
+        )
+    source_payload = _decode_artifact(
+        result.source_view_canonical,
+        "source view",
+    )
+    normalized_source, normalized_c_source, _ohlc_lookup = _normalize_source(
+        source_payload
+    )
+    if (
+        canonical_json(normalized_source) != result.source_view_canonical
+        or _sha256(result.source_view_canonical)
+        != result.source_view_canonical_sha256
+    ):
+        raise StaticCoreEqualProducerError(
+            "canonical source view identity mismatch"
+        )
+    source_product_views = {
+        row["product"]: row for row in normalized_c_source["products"]
+    }
+    source_day_pit_mains = {
+        product: cfast._pit_main(
+            product,
+            cfast._parse_date(
+                source_product_views[product]["daily"][-1]["official_day"],
+                f"{product} source official day",
+            ),
+            source_product_views[product]["daily"][-1]["contracts"],
+        )[0]["exact_contract"]
+        for product in cfast.PRODUCTS
+    }
     payloads: dict[str, dict[str, Any]] = {}
     for role in ARTIFACT_ROLES:
         payload = _decode_artifact(result.artifacts[role], role)
@@ -852,23 +898,30 @@ def _verify_research_artifacts(result: ProducerResult) -> None:
     allocation = payloads["allocation_evidence"]
     freeze = payloads["freeze_contract"]
     if (
-        freeze.get("candidate_weights") != formula.CANDIDATE_WEIGHTS
+        canonical_json(freeze.get("candidate_weights"))
+        != canonical_json(formula.CANDIDATE_WEIGHTS)
         or freeze.get("C_candidate_id") != cfast.CANDIDATE_ID
         or freeze.get("D_candidate_id") != formula.D_CANDIDATE_ID
         or freeze.get("D_algorithm_id") != formula.D_ALGORITHM_ID
-        or freeze.get("source_limits") != cfast.SOURCE_LIMITS
+        or canonical_json(freeze.get("source_limits"))
+        != canonical_json(cfast.SOURCE_LIMITS)
         or freeze.get("sector_map_id") != cfast.SECTOR_MAP_ID
-        or freeze.get("sector_map") != cfast.SECTOR_MAP
-        or freeze.get("guardband_v2")
-        != {
-            **cfast.BUFFER_LIMITS,
-            "target_net": 0.0,
-            "policy": "SHRINK_ONLY_PRODUCT_SECTOR_GROSS_THEN_NET_ZERO",
-        }
+        or canonical_json(freeze.get("sector_map"))
+        != canonical_json(cfast.SECTOR_MAP)
+        or canonical_json(freeze.get("guardband_v2"))
+        != canonical_json(
+            {
+                **cfast.BUFFER_LIMITS,
+                "target_net": 0.0,
+                "policy": (
+                    "SHRINK_ONLY_PRODUCT_SECTOR_GROSS_THEN_NET_ZERO"
+                ),
+            }
+        )
     ):
         raise StaticCoreEqualProducerError("freeze contract literal mismatch")
     frozen_allocator = freeze.get("allocator")
-    if not isinstance(frozen_allocator, dict) or frozen_allocator != {
+    expected_frozen_allocator = {
         "virtual_nav_cny": cfast.VIRTUAL_NAV_CNY,
         "algorithm": "FINITE_NEIGHBOURHOOD_BEAM_V1",
         "neighbourhood_radius_lots": cfast.NEIGHBOURHOOD_RADIUS_LOTS,
@@ -877,7 +930,12 @@ def _verify_research_artifacts(result: ProducerResult) -> None:
         "integer_limits_strict": cfast.INTEGER_LIMITS,
         "absolute_lot_cap": cfast.MAX_ABS_TARGET_QUANTITY,
         "no_product_nonzero_policy": "SAFE_ZERO",
-    }:
+    }
+    if (
+        not isinstance(frozen_allocator, dict)
+        or canonical_json(frozen_allocator)
+        != canonical_json(expected_frozen_allocator)
+    ):
         raise StaticCoreEqualProducerError("freeze allocator literal mismatch")
 
     signal = payloads["signal_evidence"]
@@ -1044,7 +1102,8 @@ def _verify_research_artifacts(result: ProducerResult) -> None:
         )
         source_day_state = d_roll_row.get("source_day_state")
         if (
-            reference_row.get("exact_contract") != exact_contract
+            exact_contract != source_day_pit_mains[product]
+            or reference_row.get("exact_contract") != exact_contract
             or spec_row.get("exact_contract") != exact_contract
             or spec_row.get("exchange") != product_spec["exchange"]
             or not isinstance(source_day_state, dict)
@@ -1291,4 +1350,18 @@ def _verify_research_artifacts(result: ProducerResult) -> None:
     ):
         raise StaticCoreEqualProducerError(
             "integer allocation deterministic replay mismatch"
+        )
+
+    expected_result = _produce_research_artifacts_unverified(source_payload)
+    if (
+        expected_result.status != result.status
+        or expected_result.source_view_canonical_sha256
+        != result.source_view_canonical_sha256
+        or expected_result.source_view_canonical
+        != result.source_view_canonical
+        or expected_result.artifacts != result.artifacts
+        or expected_result.producer_projection != result.producer_projection
+    ):
+        raise StaticCoreEqualProducerError(
+            "producer artifacts do not match fresh source replay"
         )

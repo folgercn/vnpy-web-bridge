@@ -182,6 +182,7 @@ def test_missing_or_tampered_output_fails_independent_verification() -> None:
     missing = producer.ProducerResult(
         status=result.status,
         source_view_canonical_sha256=result.source_view_canonical_sha256,
+        source_view_canonical=result.source_view_canonical,
         artifacts=missing_artifacts,
         producer_projection=result.producer_projection,
     )
@@ -203,6 +204,7 @@ def test_missing_or_tampered_output_fails_independent_verification() -> None:
     tampered = producer.ProducerResult(
         status=result.status,
         source_view_canonical_sha256=result.source_view_canonical_sha256,
+        source_view_canonical=result.source_view_canonical,
         artifacts=tampered_artifacts,
         producer_projection=tampered_projection,
     )
@@ -231,6 +233,7 @@ def test_signal_risk_score_is_bound_to_formula_and_target_sleeve(
     tampered = producer.ProducerResult(
         status=result.status,
         source_view_canonical_sha256=result.source_view_canonical_sha256,
+        source_view_canonical=result.source_view_canonical,
         artifacts=tampered_artifacts,
         producer_projection=tampered_projection,
     )
@@ -297,6 +300,7 @@ def test_malformed_artifact_fields_use_controlled_fail_closed_error(
     tampered = producer.ProducerResult(
         status=result.status,
         source_view_canonical_sha256=result.source_view_canonical_sha256,
+        source_view_canonical=result.source_view_canonical,
         artifacts=tampered_artifacts,
         producer_projection=tampered_projection,
     )
@@ -312,7 +316,13 @@ def test_malformed_artifact_fields_use_controlled_fail_closed_error(
         producer.verify_research_artifacts(tampered)
 
 
-def test_coordinated_exact_contract_cross_splice_fails_closed() -> None:
+@pytest.mark.parametrize(
+    "malicious_contract",
+    ["EVIL.CONTRACT", "SHFE.ag2712"],
+)
+def test_coordinated_exact_contract_cross_splice_fails_closed(
+    malicious_contract: str,
+) -> None:
     result = producer.produce_research_artifacts(source_view())
     tampered_artifacts = dict(result.artifacts)
     signal = json.loads(tampered_artifacts["signal_evidence"])
@@ -321,7 +331,6 @@ def test_coordinated_exact_contract_cross_splice_fails_closed() -> None:
     spec = json.loads(tampered_artifacts["contract_spec_evidence"])
     daily_roll = json.loads(tampered_artifacts["daily_roll_evidence"])
 
-    malicious_contract = "EVIL.CONTRACT"
     signal["C_signals"][0]["pit_main_exact_contract"] = malicious_contract
     signal["D_signals"][0]["pit_main_exact_contract"] = malicious_contract
     target["targets"][0]["exact_contract"] = malicious_contract
@@ -347,6 +356,7 @@ def test_coordinated_exact_contract_cross_splice_fails_closed() -> None:
     tampered = producer.ProducerResult(
         status=result.status,
         source_view_canonical_sha256=result.source_view_canonical_sha256,
+        source_view_canonical=result.source_view_canonical,
         artifacts=tampered_artifacts,
         producer_projection=tampered_projection,
     )
@@ -356,7 +366,126 @@ def test_coordinated_exact_contract_cross_splice_fails_closed() -> None:
         match=(
             "producer artifact field validation failed"
             "|outside the frozen exact contract"
+            "|exact-contract/reference/spec/roll binding mismatch"
         ),
+    ):
+        producer.verify_research_artifacts(tampered)
+
+
+@pytest.mark.parametrize(
+    ("path", "value"),
+    [
+        (("guardband_v2", "target_net"), False),
+        (("allocator", "net_error_penalty"), True),
+        (("allocator", "integer_limits_strict", "gross"), True),
+    ],
+)
+def test_freeze_numeric_literals_reject_boolean_equivalents(
+    path: tuple[str, ...],
+    value: bool,
+) -> None:
+    result = producer.produce_research_artifacts(source_view())
+    freeze = json.loads(result.artifacts["freeze_contract"])
+    target = freeze
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = value
+
+    tampered_artifacts = dict(result.artifacts)
+    tampered_artifacts["freeze_contract"] = producer.canonical_json(freeze)
+    tampered_projection = dict(result.producer_projection)
+    tampered_projection["artifact_digests"] = [
+        {"role": role, "sha256": hashlib.sha256(raw).hexdigest()}
+        for role, raw in tampered_artifacts.items()
+    ]
+    tampered = producer.ProducerResult(
+        status=result.status,
+        source_view_canonical_sha256=result.source_view_canonical_sha256,
+        source_view_canonical=result.source_view_canonical,
+        artifacts=tampered_artifacts,
+        producer_projection=tampered_projection,
+    )
+
+    with pytest.raises(
+        producer.StaticCoreEqualProducerError,
+        match="freeze contract literal mismatch|freeze allocator literal mismatch",
+    ):
+        producer.verify_research_artifacts(tampered)
+
+
+@pytest.mark.parametrize(
+    ("role", "mutate"),
+    [
+        (
+            "research_manifest",
+            lambda payload: payload.__setitem__(
+                "real_artifact_claimed", True
+            ),
+        ),
+        (
+            "research_manifest",
+            lambda payload: payload.__setitem__(
+                "acceptance_authority_claimed", True
+            ),
+        ),
+        (
+            "research_manifest",
+            lambda payload: payload.__setitem__(
+                "execution_permit_claimed", True
+            ),
+        ),
+        (
+            "target_evidence",
+            lambda payload: payload["candidate_weights"].__setitem__(
+                "C", True
+            ),
+        ),
+        (
+            "freeze_contract",
+            lambda payload: payload["D_exact_contract"].__setitem__(
+                "entry", "tampered"
+            ),
+        ),
+        (
+            "calendar_authority",
+            lambda payload: payload.__setitem__(
+                "execution_is_immediate_next_official_day", False
+            ),
+        ),
+        (
+            "signal_evidence",
+            lambda payload: payload.__setitem__(
+                "C_signal_evidence_sha256", "0" * 64
+            ),
+        ),
+    ],
+)
+def test_every_artifact_role_is_bound_to_fresh_source_replay(
+    role: str,
+    mutate: object,
+) -> None:
+    result = producer.produce_research_artifacts(source_view())
+    payload = json.loads(result.artifacts[role])
+    mutate(payload)  # type: ignore[operator]
+
+    tampered_artifacts = dict(result.artifacts)
+    tampered_artifacts[role] = producer.canonical_json(payload)
+    tampered_projection = dict(result.producer_projection)
+    tampered_projection["artifact_digests"] = [
+        {"role": item, "sha256": hashlib.sha256(raw).hexdigest()}
+        for item, raw in tampered_artifacts.items()
+    ]
+    tampered = producer.ProducerResult(
+        status=result.status,
+        source_view_canonical_sha256=result.source_view_canonical_sha256,
+        source_view_canonical=result.source_view_canonical,
+        artifacts=tampered_artifacts,
+        producer_projection=tampered_projection,
+    )
+
+    with pytest.raises(
+        producer.StaticCoreEqualProducerError,
+        match="producer artifacts do not match fresh source replay",
     ):
         producer.verify_research_artifacts(tampered)
 
@@ -521,9 +650,13 @@ def test_result_shape_cannot_be_mutated_into_execution_contract() -> None:
     assert set(result.__dataclass_fields__) == {
         "status",
         "source_view_canonical_sha256",
+        "source_view_canonical",
         "artifacts",
         "producer_projection",
     }
+    assert hashlib.sha256(result.source_view_canonical).hexdigest() == (
+        result.source_view_canonical_sha256
+    )
     assert not hasattr(result, "unsigned_bundle_draft")
     forbidden_projection_fields = {
         "schema_version",
