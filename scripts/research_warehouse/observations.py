@@ -12,7 +12,9 @@ from .filesystem import (
     WarehousePaths,
     create_only_bytes,
     custody_identity,
+    custody_lock,
     read_regular_strict,
+    recover_atomic_publishes,
 )
 from .models import SourceEndpoint, SourceRegistry
 from .observation_contracts import (
@@ -35,7 +37,7 @@ __all__ = [
 ]
 
 
-def load_observations(
+def _load_observations_unlocked(
     paths: WarehousePaths,
     registry: SourceRegistry,
     *,
@@ -81,7 +83,28 @@ def load_observations(
     return filtered
 
 
-def create_observation(
+def load_observations(
+    paths: WarehousePaths,
+    registry: SourceRegistry,
+    *,
+    source_id: str | None = None,
+    trade_day: str | None = None,
+) -> list[dict[str, Any]]:
+    with custody_lock(paths, "observation-metadata"):
+        recover_atomic_publishes(
+            temporary_dir=paths.temporary,
+            final_root=paths.observations,
+            filename_prefix="obs-",
+        )
+        return _load_observations_unlocked(
+            paths,
+            registry,
+            source_id=source_id,
+            trade_day=trade_day,
+        )
+
+
+def _create_observation_unlocked(
     paths: WarehousePaths,
     *,
     source: SourceEndpoint,
@@ -97,7 +120,7 @@ def create_observation(
     registry: SourceRegistry,
 ) -> dict[str, Any]:
     validate_trade_day(trade_day)
-    existing = load_observations(
+    existing = _load_observations_unlocked(
         paths,
         registry,
         source_id=source.source_id,
@@ -168,3 +191,40 @@ def create_observation(
         temporary_dir=paths.temporary,
     )
     return validate_observation(paths, payload, registry)
+
+
+def create_observation(
+    paths: WarehousePaths,
+    *,
+    source: SourceEndpoint,
+    trade_day: str,
+    source_url: str,
+    http_status: int,
+    http_metadata: dict[str, str | None],
+    observed_at: datetime,
+    raw_sha256: str,
+    raw_bytes: int,
+    raw_path: Path,
+    collector_version: str,
+    registry: SourceRegistry,
+) -> dict[str, Any]:
+    with custody_lock(paths, "observation-metadata"):
+        recover_atomic_publishes(
+            temporary_dir=paths.temporary,
+            final_root=paths.observations,
+            filename_prefix="obs-",
+        )
+        return _create_observation_unlocked(
+            paths,
+            source=source,
+            trade_day=trade_day,
+            source_url=source_url,
+            http_status=http_status,
+            http_metadata=http_metadata,
+            observed_at=observed_at,
+            raw_sha256=raw_sha256,
+            raw_bytes=raw_bytes,
+            raw_path=raw_path,
+            collector_version=collector_version,
+            registry=registry,
+        )

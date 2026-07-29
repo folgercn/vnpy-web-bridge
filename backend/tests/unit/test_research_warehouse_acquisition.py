@@ -27,6 +27,7 @@ from research_warehouse.filesystem import (
     WarehousePaths,
     create_only_bytes,
     read_regular_strict,
+    recover_atomic_publishes,
 )
 from research_warehouse.manifests import (
     seal_daily_batch,
@@ -730,6 +731,14 @@ def test_metadata_publish_survives_forced_process_death(
     with pytest.raises(RegistryError, match="exactly one hard link"):
         read_regular_strict(target, "crash-test metadata")
 
+    recover_atomic_publishes(
+        temporary_dir=paths.temporary,
+        final_root=paths.observations,
+        filename_prefix="obs-",
+    )
+    assert read_regular_strict(target, "crash-test metadata") == (
+        b'{"complete":true}\n'
+    )
     create_only_bytes(
         target,
         b'{"complete":true}\n',
@@ -740,6 +749,41 @@ def test_metadata_publish_survives_forced_process_death(
         b'{"complete":true}\n'
     )
     assert list(paths.temporary.iterdir()) == []
+
+
+def test_observation_and_manifest_scanners_recover_link_phase(
+    tmp_path: Path,
+) -> None:
+    paths = warehouse(tmp_path)
+    private_key, public_key = signing_keys(tmp_path)
+    acquired = acquire(paths, official_raw(), T1)
+    receipt = next(paths.observations.rglob("obs-*.json"))
+    receipt_temp = (
+        paths.temporary / f".publish-{receipt.name}-stale.partial"
+    )
+    receipt_temp.hardlink_to(receipt)
+
+    recovered = observations(paths)
+    assert recovered[0]["object_id"] == acquired.object_id
+    assert receipt.lstat().st_nlink == 1
+    assert not receipt_temp.exists()
+
+    manifest_path, manifest = seal(paths, private_key, T2, None)
+    manifest_temp = (
+        paths.temporary / f".publish-{manifest_path.name}-stale.partial"
+    )
+    manifest_temp.hardlink_to(manifest_path)
+    seal_hash = manifest["batch_seal_sha256"]
+    chain = verify_manifest_chain(
+        paths=paths,
+        public_key_path=public_key,
+        registry=registry(),
+        expected_genesis_seal_sha256=seal_hash,
+        expected_head_seal_sha256=seal_hash,
+    )
+    assert len(chain) == 1
+    assert manifest_path.lstat().st_nlink == 1
+    assert not manifest_temp.exists()
 
 
 def test_external_anchors_detect_leaf_and_full_chain_rollback(

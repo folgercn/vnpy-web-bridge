@@ -8,7 +8,12 @@ from typing import Any
 
 from .canonical import canonical_json, canonical_json_line, sha256
 from .errors import RegistryError
-from .filesystem import WarehousePaths, create_only_bytes, custody_lock
+from .filesystem import (
+    WarehousePaths,
+    create_only_bytes,
+    custody_lock,
+    recover_atomic_publishes,
+)
 from .manifest_chain import load_manifest_chain, require_chain_anchors
 from .manifest_contracts import (
     ID_PATTERN,
@@ -95,6 +100,11 @@ def seal_daily_batch(
         sealed_at or datetime.now(timezone.utc), "sealed_at"
     )
     with custody_lock(paths, "manifest-chain"):
+        recover_atomic_publishes(
+            temporary_dir=paths.temporary,
+            final_root=paths.manifests,
+            filename_prefix="batch-",
+        )
         chain = load_manifest_chain(paths, public_key, registry)
         actual_parent = chain[-1]["batch_seal_sha256"] if chain else None
         if actual_parent != expected_parent_batch_seal_sha256:
@@ -160,14 +170,20 @@ def verify_manifest_chain(
     expected_genesis_seal_sha256: str | None,
     expected_head_seal_sha256: str | None,
 ) -> list[dict[str, Any]]:
-    chain = load_manifest_chain(
-        paths,
-        load_public_key(public_key_path),
-        registry,
-    )
-    require_chain_anchors(
-        chain,
-        expected_genesis_seal_sha256=expected_genesis_seal_sha256,
-        expected_head_seal_sha256=expected_head_seal_sha256,
-    )
-    return chain
+    with custody_lock(paths, "manifest-chain"):
+        recover_atomic_publishes(
+            temporary_dir=paths.temporary,
+            final_root=paths.manifests,
+            filename_prefix="batch-",
+        )
+        chain = load_manifest_chain(
+            paths,
+            load_public_key(public_key_path),
+            registry,
+        )
+        require_chain_anchors(
+            chain,
+            expected_genesis_seal_sha256=expected_genesis_seal_sha256,
+            expected_head_seal_sha256=expected_head_seal_sha256,
+        )
+        return chain

@@ -214,6 +214,70 @@ def _cleanup_publish_temps(
         info = candidate.lstat()
         if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
             raise RegistryError("metadata publish temporary object is unsafe")
+        if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o077:
+            raise RegistryError("metadata publish temporary object is not private")
+        if info.st_nlink == 2:
+            try:
+                target_info = path.lstat()
+            except OSError as exc:
+                raise RegistryError(
+                    "metadata publish target is missing during recovery"
+                ) from exc
+            if (
+                target_info.st_dev != info.st_dev
+                or target_info.st_ino != info.st_ino
+            ):
+                raise RegistryError("metadata publish recovery identity mismatch")
+            _fsync_dir(path.parent)
+        elif info.st_nlink != 1:
+            raise RegistryError("metadata publish temporary link count is unsafe")
+        candidate.unlink()
+        changed = True
+    if changed:
+        _fsync_dir(temporary_dir)
+
+
+def recover_atomic_publishes(
+    *,
+    temporary_dir: Path,
+    final_root: Path,
+    filename_prefix: str,
+) -> None:
+    """Recover interrupted temp/link publication before scanning final files."""
+    _require_private_dir(temporary_dir, "metadata recovery temporary directory")
+    _require_private_dir(final_root, "metadata recovery final root")
+    candidates = [
+        path
+        for path in temporary_dir.iterdir()
+        if path.name.startswith(f".publish-{filename_prefix}")
+        and path.name.endswith(".partial")
+    ]
+    changed = False
+    for candidate in candidates:
+        info = candidate.lstat()
+        if (
+            stat.S_ISLNK(info.st_mode)
+            or not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.geteuid()
+            or stat.S_IMODE(info.st_mode) & 0o077
+            or info.st_nlink not in (1, 2)
+        ):
+            raise RegistryError("abandoned metadata temporary object is unsafe")
+        if info.st_nlink == 2:
+            matches = []
+            for target in final_root.rglob(f"{filename_prefix}*"):
+                target_info = target.lstat()
+                if (
+                    stat.S_ISREG(target_info.st_mode)
+                    and target_info.st_dev == info.st_dev
+                    and target_info.st_ino == info.st_ino
+                ):
+                    matches.append(target)
+            if len(matches) != 1:
+                raise RegistryError(
+                    "abandoned metadata publication has no unique final link"
+                )
+            _fsync_dir(matches[0].parent)
         candidate.unlink()
         changed = True
     if changed:
