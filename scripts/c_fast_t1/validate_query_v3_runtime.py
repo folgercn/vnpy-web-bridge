@@ -120,7 +120,7 @@ EXPECTED_CONTAINERFILE_INSTRUCTION_KEYWORDS = (
 # formatting whitespace are ignored, but every instruction, argument, order,
 # and shell command is frozen.
 EXPECTED_CONTAINERFILE_INSTRUCTION_SHA256 = (
-    "bcb8a47d18a79441c3e04cf665fd64ec5a15c8d5d4a8b74bd9576f473780fa8f"
+    "6322dbef5346afbc74deadc1bf74cd521517ad3d34da4d241eb80c3f89d21db4"
 )
 
 COMMAND_FLAGS = (
