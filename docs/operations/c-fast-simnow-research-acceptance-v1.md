@@ -109,6 +109,7 @@ chmod 0600 /private/c-fast-acceptance/unsigned-acceptance.json
 1. 删除 `template_state`；
 2. 填写 `accepted_at`、`not_before`、`expires_at`；窗口必须为正且不超过
    15 分钟，并完全落在 Research bundle 有效期和 execution day 内；
+   `accepted_at` 必须是已经发生的人工接受事实，不能使用未来时刻；
 3. 填写 `execution_day`；
 4. 填写真实 `reviewer_role` 和非 `PENDING_` 的 `human_signature`；
 5. 填写 Control `signer_key_id`；
@@ -247,17 +248,23 @@ consume marker 以 `research_bundle_id` 唯一命名，而不是以 acceptance I
 1. create-only 写 bundle-scoped consume marker；
 2. 重新验证 signed acceptance、完整 install chain、九份 artifacts、两个
    keyring 和 custody；
-3. 构造 provisional receipt 后，再重新读取 acceptance、bundle、claim、
-   install receipt、两个 keyring、九份 raw artifacts、custody root 和三个
-   custody 文件 identity，完成 final composite snapshot；
-4. 使用新取得的当前时间做最终 freshness 检查；`current == expires_at`
-   失败；
+3. 重新读取 acceptance、bundle、claim、install receipt、两个 keyring、
+   九份 raw artifacts、custody root 和三个 custody 文件 identity，完成
+   final composite snapshot；
+4. 记录 `final_revalidated_at`，并使用新取得的当前时间做 freshness 检查；
+   `current == expires_at` 失败；
 5. 重新打开并核对 exact consume marker；
-6. create-only 写 acceptance receipt。
+6. 记录 receipt commit 时刻，要求
+   `accepted_at <= consumed_at <= final_revalidated_at <= ready_at <
+   expires_at`；
+7. create-only 写 acceptance receipt；
+8. 写入后再次取得当前时间。若时钟回退或已经到达 `expires_at`，立即删除本次
+   尚未提交的 receipt，保留不可逆 consume marker 并 fail closed。
 
 并发消费只有一个进程能写入 marker。marker 一旦存在，任何后续 consume
-都失败。入口验证、marker 前、marker 后和 receipt commit 前分别使用新取得
-或注入的当前时刻；不会用入口 `now` 穿过整个流程。
+都失败。入口验证、marker 前、marker 后、final revalidation、receipt commit
+前后分别使用新取得或注入的当前时刻；每次观测都不得早于前一次，不会用入口
+`now` 穿过整个流程，也不会接受倒退时钟产生的成功 chronology。
 
 ## 9. 崩溃与失败处理
 

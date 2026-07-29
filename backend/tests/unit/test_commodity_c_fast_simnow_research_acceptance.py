@@ -464,6 +464,25 @@ def test_sign_verify_consume_is_one_shot_and_acceptance_only(
         "synthetic acceptance receipt",
     )
     assert receipt["acceptance_state"] == acceptance.ACCEPTANCE_STATE
+    assert (
+        acceptance.parse_datetime(
+            verified.payload["accepted_at"],
+            "accepted_at",
+        )
+        <= acceptance.parse_datetime(
+            receipt["consumed_at"],
+            "consumed_at",
+        )
+        <= acceptance.parse_datetime(
+            receipt["final_revalidated_at"],
+            "final_revalidated_at",
+        )
+        <= acceptance.parse_datetime(receipt["ready_at"], "ready_at")
+        < acceptance.parse_datetime(
+            verified.payload["expires_at"],
+            "expires_at",
+        )
+    )
     for field in acceptance.FALSE_AUTHORITY_FIELDS:
         assert consume[field] is False
         assert receipt[field] is False
@@ -958,6 +977,146 @@ def test_ttl_crossed_after_marker_leaves_no_receipt(
             datetime(2026, 7, 29, 2, 9, tzinfo=timezone.utc),
             datetime(2026, 7, 29, 2, 9, 30, tzinfo=timezone.utc),
             datetime(2026, 7, 29, 2, 9, 40, tzinfo=timezone.utc),
+            datetime(2026, 7, 29, 2, 9, 50, tzinfo=timezone.utc),
+            datetime(2026, 7, 29, 2, 10, tzinfo=timezone.utc),
+        ]
+    )
+    with pytest.raises(
+        acceptance.ResearchAcceptanceError,
+        match="not currently valid",
+    ):
+        acceptance.consume_signed_acceptance(
+            signed_path,
+            **consume_kwargs(acceptance_inputs, clock=lambda: next(times)),
+        )
+    consume_name, receipt_name = acceptance._consume_filenames(
+        verified.payload["research_bundle_id"]
+    )
+    assert (acceptance_inputs["custody_dir"] / consume_name).is_file()
+    assert not (acceptance_inputs["custody_dir"] / receipt_name).exists()
+
+
+def test_future_human_acceptance_fails_before_consume_marker(
+    acceptance_inputs: dict,
+) -> None:
+    draft = acceptance_draft(acceptance_inputs["bundle_id"])
+    draft["accepted_at"] = "2026-07-29T02:08:00+00:00"
+    candidate, public_key, _installed = prepare_acceptance(
+        acceptance_inputs,
+        draft,
+        now=datetime(2026, 7, 29, 2, 8, tzinfo=timezone.utc),
+    )
+    signed = acceptance.complete_signature(
+        candidate,
+        public_key,
+        acceptance_inputs["acceptance_private_key"],
+    )
+    signed_path = bundle.write_json_create_only_verified(
+        acceptance_inputs["private_dir"] / "future-acceptance.json",
+        signed,
+        label="future synthetic Research Acceptance",
+    )
+    with pytest.raises(
+        acceptance.ResearchAcceptanceError,
+        match="accepted in the future",
+    ):
+        acceptance.consume_signed_acceptance(
+            signed_path,
+            **consume_kwargs(
+                acceptance_inputs,
+                clock=lambda: datetime(
+                    2026,
+                    7,
+                    29,
+                    2,
+                    5,
+                    tzinfo=timezone.utc,
+                ),
+            ),
+        )
+    consume_name, receipt_name = acceptance._consume_filenames(
+        candidate["research_bundle_id"]
+    )
+    assert not (acceptance_inputs["custody_dir"] / consume_name).exists()
+    assert not (acceptance_inputs["custody_dir"] / receipt_name).exists()
+
+
+def test_clock_regression_after_marker_is_irreversible_fail_closed(
+    acceptance_inputs: dict,
+) -> None:
+    signed_path, verified = signed_acceptance(acceptance_inputs)
+    times = iter(
+        [
+            datetime(2026, 7, 29, 2, 5, tzinfo=timezone.utc),
+            datetime(2026, 7, 29, 2, 6, tzinfo=timezone.utc),
+            datetime(2026, 7, 29, 2, 5, 30, tzinfo=timezone.utc),
+        ]
+    )
+    with pytest.raises(
+        acceptance.ResearchAcceptanceError,
+        match="clock regressed during post-marker revalidation",
+    ):
+        acceptance.consume_signed_acceptance(
+            signed_path,
+            **consume_kwargs(acceptance_inputs, clock=lambda: next(times)),
+        )
+    consume_name, receipt_name = acceptance._consume_filenames(
+        verified.payload["research_bundle_id"]
+    )
+    assert (acceptance_inputs["custody_dir"] / consume_name).is_file()
+    assert not (acceptance_inputs["custody_dir"] / receipt_name).exists()
+
+
+def test_receipt_ready_at_cannot_predate_consume_or_revalidation(
+    acceptance_inputs: dict,
+) -> None:
+    _signed_path, verified = signed_acceptance(acceptance_inputs)
+    consume_name, receipt_name = acceptance._consume_filenames(
+        verified.payload["research_bundle_id"]
+    )
+    consumed_at = datetime(2026, 7, 29, 2, 6, tzinfo=timezone.utc)
+    marker = acceptance._consume_marker(
+        verified,
+        consumed_at=consumed_at,
+        receipt_filename=receipt_name,
+    )
+    marker_raw = acceptance.canonical_json(marker) + b"\n"
+    receipt = acceptance._acceptance_receipt(
+        verified,
+        marker,
+        marker_raw,
+        final_revalidated_at=datetime(
+            2026,
+            7,
+            29,
+            2,
+            7,
+            tzinfo=timezone.utc,
+        ),
+        ready_at=datetime(2026, 7, 29, 2, 5, tzinfo=timezone.utc),
+        consume_filename=consume_name,
+    )
+    with pytest.raises(
+        acceptance.ResearchAcceptanceError,
+        match="receipt chronology is invalid",
+    ):
+        acceptance._validate_receipt_chronology(
+            receipt,
+            verified.payload,
+            marker,
+        )
+
+
+def test_receipt_write_crossing_expiry_removes_receipt(
+    acceptance_inputs: dict,
+) -> None:
+    signed_path, verified = signed_acceptance(acceptance_inputs)
+    times = iter(
+        [
+            datetime(2026, 7, 29, 2, 9, tzinfo=timezone.utc),
+            datetime(2026, 7, 29, 2, 9, 10, tzinfo=timezone.utc),
+            datetime(2026, 7, 29, 2, 9, 20, tzinfo=timezone.utc),
+            datetime(2026, 7, 29, 2, 9, 30, tzinfo=timezone.utc),
             datetime(2026, 7, 29, 2, 9, 50, tzinfo=timezone.utc),
             datetime(2026, 7, 29, 2, 10, tzinfo=timezone.utc),
         ]

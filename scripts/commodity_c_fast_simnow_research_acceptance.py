@@ -72,7 +72,6 @@ RECEIPT_VERSION = (
 ACCEPTANCE_STATE = "READY_FOR_HUMAN_SIMNOW_EXECUTION_PERMIT_ONLY"
 CANDIDATE_ID = research.CANDIDATE_ID
 MAX_ACCEPTANCE_TTL = timedelta(minutes=15)
-MAX_CLOCK_SKEW = timedelta(minutes=5)
 MAX_ACCEPTANCE_BYTES = 2 * 1024 * 1024
 PLACEHOLDER_SIGNATURE = base64.b64encode(bytes(64)).decode("ascii")
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
@@ -155,6 +154,20 @@ def _clock_now(clock: Callable[[], datetime]) -> datetime:
             "injected acceptance clock must include a UTC offset"
         )
     return current.astimezone(timezone.utc)
+
+
+def _clock_now_not_before(
+    clock: Callable[[], datetime],
+    previous: datetime,
+    *,
+    stage: str,
+) -> datetime:
+    current = _clock_now(clock)
+    if current < previous:
+        raise ResearchAcceptanceError(
+            f"acceptance clock regressed during {stage}"
+        )
+    return current
 
 
 def _compare(actual: str, expected: str, label: str) -> None:
@@ -684,7 +697,7 @@ def _verify_time_semantics(
         raise ResearchAcceptanceError(
             "Research Acceptance is not currently valid"
         )
-    if accepted > current + MAX_CLOCK_SKEW:
+    if accepted > current:
         raise ResearchAcceptanceError(
             "Research Acceptance was accepted in the future"
         )
@@ -1293,6 +1306,7 @@ def _acceptance_receipt(
     marker: dict[str, Any],
     marker_raw: bytes,
     *,
+    final_revalidated_at: datetime,
     ready_at: datetime,
     consume_filename: str,
 ) -> dict[str, Any]:
@@ -1306,6 +1320,10 @@ def _acceptance_receipt(
         "candidate_id": CANDIDATE_ID,
         "acceptance_id": payload["acceptance_id"],
         "consume_id": marker["consume_id"],
+        "consumed_at": marker["consumed_at"],
+        "final_revalidated_at": (
+            final_revalidated_at.astimezone(timezone.utc).isoformat()
+        ),
         "ready_at": ready_at.astimezone(timezone.utc).isoformat(),
         "execution_day": payload["execution_day"],
         "research_bundle_id": payload["research_bundle_id"],
@@ -1367,6 +1385,37 @@ def _acceptance_receipt(
         "positions_modified": 0,
         "web_bridge_rpc_calls": 0,
     }
+
+
+def _validate_receipt_chronology(
+    receipt: dict[str, Any],
+    acceptance_payload: dict[str, Any],
+    marker: dict[str, Any],
+) -> None:
+    accepted_at = parse_datetime(
+        acceptance_payload["accepted_at"],
+        "accepted_at",
+    )
+    consumed_at = parse_datetime(receipt["consumed_at"], "consumed_at")
+    final_revalidated_at = parse_datetime(
+        receipt["final_revalidated_at"],
+        "final_revalidated_at",
+    )
+    ready_at = parse_datetime(receipt["ready_at"], "ready_at")
+    expires_at = parse_datetime(
+        acceptance_payload["expires_at"],
+        "expires_at",
+    )
+    if receipt["consumed_at"] != marker["consumed_at"] or not (
+        accepted_at
+        <= consumed_at
+        <= final_revalidated_at
+        <= ready_at
+        < expires_at
+    ):
+        raise ResearchAcceptanceError(
+            "Research Acceptance receipt chronology is invalid"
+        )
 
 
 def _path_exists(path: Path) -> bool:
@@ -1513,12 +1562,25 @@ def consume_signed_acceptance(
             expected_simnow_account_sha256
         ),
     }
+    initial_now = _clock_now(clock)
     verified = verify_signed_acceptance(
         acceptance_path,
         **base_verify_kwargs,
-        now=_clock_now(clock),
+        now=initial_now,
     )
-    marker_now = _clock_now(clock)
+    marker_now = _clock_now_not_before(
+        clock,
+        initial_now,
+        stage="consume marker preparation",
+    )
+    accepted_at = parse_datetime(
+        verified.payload["accepted_at"],
+        "accepted_at",
+    )
+    if marker_now < accepted_at:
+        raise ResearchAcceptanceError(
+            "consume marker cannot predate human acceptance"
+        )
     marker_verified = verify_signed_acceptance(
         acceptance_path,
         **base_verify_kwargs,
@@ -1588,10 +1650,15 @@ def consume_signed_acceptance(
             raise ResearchAcceptanceError(str(exc)) from exc
         # The consume marker is deliberately irreversible. Every public input
         # is re-verified before a receipt can be created.
+        post_marker_now = _clock_now_not_before(
+            clock,
+            marker_now,
+            stage="post-marker revalidation",
+        )
         reverified = verify_signed_acceptance(
             acceptance_path,
             **base_verify_kwargs,
-            now=_clock_now(clock),
+            now=post_marker_now,
         )
         if reverified != verified:
             raise ResearchAcceptanceError(
@@ -1606,18 +1673,6 @@ def consume_signed_acceptance(
             raise ResearchAcceptanceError(
                 "Research Acceptance consume marker changed before receipt"
             )
-        provisional_receipt = _acceptance_receipt(
-            reverified,
-            marker,
-            marker_raw,
-            ready_at=_clock_now(clock),
-            consume_filename=consume_name,
-        )
-        validate_json_schema(
-            provisional_receipt,
-            RECEIPT_SCHEMA_PATH,
-            "C_FAST Research Acceptance receipt",
-        )
         _assert_exact_snapshot_current(
             reverified,
             acceptance_path=acceptance_path,
@@ -1625,11 +1680,15 @@ def consume_signed_acceptance(
             acceptance_keyring_path=acceptance_keyring_path,
             artifact_paths=artifact_paths,
         )
-        final_now = _clock_now(clock)
+        final_revalidated_at = _clock_now_not_before(
+            clock,
+            post_marker_now,
+            stage="final receipt revalidation",
+        )
         _verify_time_semantics(
             reverified.payload,
             reverified.installed,
-            now=final_now,
+            now=final_revalidated_at,
         )
         observed_marker = read_regular_file_strict(
             consume_path,
@@ -1640,25 +1699,35 @@ def consume_signed_acceptance(
             raise ResearchAcceptanceError(
                 "Research Acceptance consume marker changed at receipt commit"
             )
+        receipt_commit_started_at = _clock_now_not_before(
+            clock,
+            final_revalidated_at,
+            stage="receipt commit",
+        )
+        _verify_time_semantics(
+            reverified.payload,
+            reverified.installed,
+            now=receipt_commit_started_at,
+        )
         receipt = _acceptance_receipt(
             reverified,
             marker,
             marker_raw,
-            ready_at=final_now,
+            final_revalidated_at=final_revalidated_at,
+            ready_at=receipt_commit_started_at,
             consume_filename=consume_name,
         )
-        if {
-            key: value
-            for key, value in receipt.items()
-            if key != "ready_at"
-        } != {
-            key: value
-            for key, value in provisional_receipt.items()
-            if key != "ready_at"
-        }:
-            raise ResearchAcceptanceError(
-                "acceptance receipt binding changed before commit"
-            )
+        _validate_receipt_chronology(
+            receipt,
+            reverified.payload,
+            marker,
+        )
+        validate_json_schema(
+            receipt,
+            RECEIPT_SCHEMA_PATH,
+            "C_FAST Research Acceptance receipt",
+        )
+        receipt_created = False
         try:
             research._custody_write_create_only(
                 custody_fd,
@@ -1667,15 +1736,34 @@ def consume_signed_acceptance(
                 canonical_json(receipt) + b"\n",
                 label="C_FAST Research Acceptance receipt",
             )
-        except research.ResearchBundleError as exc:
-            raise ResearchAcceptanceError(str(exc)) from exc
-        try:
+            receipt_created = True
+            receipt_commit_completed_at = _clock_now_not_before(
+                clock,
+                receipt_commit_started_at,
+                stage="receipt commit completion",
+            )
+            _verify_time_semantics(
+                reverified.payload,
+                reverified.installed,
+                now=receipt_commit_completed_at,
+            )
             if research.custody_facts(custody.root) != custody:
                 raise ResearchAcceptanceError(
                     "Research custody changed during acceptance consumption"
                 )
-        except research.ResearchBundleError as exc:
-            raise ResearchAcceptanceError(str(exc)) from exc
+        except Exception as exc:
+            if receipt_created:
+                try:
+                    os.unlink(receipt_name, dir_fd=custody_fd)
+                    os.fsync(custody_fd)
+                except OSError as cleanup_exc:
+                    raise ResearchAcceptanceError(
+                        "receipt commit validation failed and the "
+                        "uncommitted receipt could not be removed"
+                    ) from cleanup_exc
+            if isinstance(exc, research.ResearchBundleError):
+                raise ResearchAcceptanceError(str(exc)) from exc
+            raise
     finally:
         os.close(custody_fd)
     return consume_path, receipt_path

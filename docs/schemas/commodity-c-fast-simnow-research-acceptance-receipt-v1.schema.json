@@ -10,6 +10,8 @@
     "candidate_id",
     "acceptance_id",
     "consume_id",
+    "consumed_at",
+    "final_revalidated_at",
     "ready_at",
     "execution_day",
     "research_bundle_id",
@@ -70,6 +72,8 @@
       "type": "string",
       "pattern": "^cfast-simnow-research-accept-consume-v1-[0-9a-f]{64}$"
     },
+    "consumed_at": {"$ref": "#/$defs/dateTime"},
+    "final_revalidated_at": {"$ref": "#/$defs/dateTime"},
     "ready_at": {"$ref": "#/$defs/dateTime"},
     "execution_day": {"$ref": "#/$defs/date"},
     "research_bundle_id": {"$ref": "#/$defs/bundleId"},
