@@ -1,0 +1,265 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bktrader.local/schemas/commodity-static-core-equal-pit-ohlc-source-view-v1.schema.json",
+  "title": "STATIC_CORE_EQUAL unverified PIT OHLC source view v1",
+  "type": "object",
+  "additionalProperties": false,
+  "x-vnpy-resource-limits": {
+    "max_raw_bytes": 16777216,
+    "max_official_days": 512,
+    "max_source_bindings": 7,
+    "max_daily_rows_per_product": 512,
+    "max_contracts_per_product_day": 64,
+    "max_total_contract_rows": 40000
+  },
+  "required": [
+    "schema_version",
+    "purpose",
+    "status",
+    "source_view_id",
+    "claimed_receipt_sha256",
+    "generated_at",
+    "cutoff_at",
+    "research_as_of_official_day",
+    "execution_day",
+    "official_days",
+    "source_bindings",
+    "products"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "commodity_static_core_equal_pit_ohlc_source_view_v1"
+    },
+    "purpose": {
+      "const": "UNVERIFIED_PIT_OHLC_TYPED_VIEW_INPUT_ONLY"
+    },
+    "status": {
+      "const": "UNVERIFIED_PIT_OHLC_TYPED_VIEW"
+    },
+    "source_view_id": {"$ref": "#/$defs/id"},
+    "claimed_receipt_sha256": {"$ref": "#/$defs/sha256"},
+    "generated_at": {"$ref": "#/$defs/dateTime"},
+    "cutoff_at": {"$ref": "#/$defs/dateTime"},
+    "research_as_of_official_day": {"$ref": "#/$defs/date"},
+    "execution_day": {"$ref": "#/$defs/date"},
+    "official_days": {
+      "type": "array",
+      "minItems": 129,
+      "maxItems": 512,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/date"}
+    },
+    "source_bindings": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 7,
+      "items": {"$ref": "#/$defs/sourceBinding"}
+    },
+    "products": {
+      "type": "array",
+      "minItems": 10,
+      "maxItems": 10,
+      "items": {"$ref": "#/$defs/product"}
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{8,128}$"
+    },
+    "date": {
+      "type": "string",
+      "format": "date"
+    },
+    "dateTime": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "sourceBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "binding_id",
+        "source_class",
+        "scope",
+        "source_identity",
+        "query_start",
+        "query_end",
+        "cutoff_at",
+        "generated_at",
+        "raw_sha256",
+        "lineage_sha256",
+        "claimed_receipt_sha256"
+      ],
+      "properties": {
+        "binding_id": {"$ref": "#/$defs/id"},
+        "source_class": {
+          "enum": [
+            "MARKET_DAILY",
+            "CALENDAR",
+            "REFERENCE_OPEN",
+            "CONTRACT_SPEC"
+          ]
+        },
+        "scope": {
+          "enum": ["SHFE", "INE", "SHFE_INE"]
+        },
+        "source_identity": {"$ref": "#/$defs/id"},
+        "query_start": {"$ref": "#/$defs/date"},
+        "query_end": {"$ref": "#/$defs/date"},
+        "cutoff_at": {"$ref": "#/$defs/dateTime"},
+        "generated_at": {"$ref": "#/$defs/dateTime"},
+        "raw_sha256": {"$ref": "#/$defs/sha256"},
+        "lineage_sha256": {"$ref": "#/$defs/sha256"},
+        "claimed_receipt_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "contractObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "exact_contract",
+        "delivery_yyyymm",
+        "open",
+        "high",
+        "low",
+        "settlement",
+        "open_interest"
+      ],
+      "properties": {
+        "exact_contract": {
+          "type": "string",
+          "pattern": "^(SHFE|INE)\\.[a-z]{2}[0-9]{4}$"
+        },
+        "delivery_yyyymm": {
+          "type": "integer",
+          "minimum": 200001,
+          "maximum": 219912
+        },
+        "open": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "high": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "low": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "settlement": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "open_interest": {
+          "type": "number",
+          "minimum": 0
+        }
+      }
+    },
+    "daily": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "official_day",
+        "source_binding_id",
+        "contracts"
+      ],
+      "properties": {
+        "official_day": {"$ref": "#/$defs/date"},
+        "source_binding_id": {"$ref": "#/$defs/id"},
+        "contracts": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 64,
+          "items": {"$ref": "#/$defs/contractObservation"}
+        }
+      }
+    },
+    "executionReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_binding_id",
+        "exact_contract",
+        "official_open",
+        "observed_at",
+        "raw_sha256"
+      ],
+      "properties": {
+        "source_binding_id": {"$ref": "#/$defs/id"},
+        "exact_contract": {
+          "type": "string",
+          "pattern": "^(SHFE|INE)\\.[a-z]{2}[0-9]{4}$"
+        },
+        "official_open": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "observed_at": {"$ref": "#/$defs/dateTime"},
+        "raw_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "contractSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_binding_id",
+        "exact_contract",
+        "official_last_trading_day",
+        "multiplier",
+        "price_tick",
+        "raw_sha256"
+      ],
+      "properties": {
+        "source_binding_id": {"$ref": "#/$defs/id"},
+        "exact_contract": {
+          "type": "string",
+          "pattern": "^(SHFE|INE)\\.[a-z]{2}[0-9]{4}$"
+        },
+        "official_last_trading_day": {"$ref": "#/$defs/date"},
+        "multiplier": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "price_tick": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "raw_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "product": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "product",
+        "exchange",
+        "daily",
+        "execution_reference",
+        "contract_spec"
+      ],
+      "properties": {
+        "product": {
+          "enum": ["ag", "al", "au", "bu", "cu", "rb", "ru", "sc", "sp", "zn"]
+        },
+        "exchange": {
+          "enum": ["SHFE", "INE"]
+        },
+        "daily": {
+          "type": "array",
+          "minItems": 127,
+          "maxItems": 512,
+          "items": {"$ref": "#/$defs/daily"}
+        },
+        "execution_reference": {"$ref": "#/$defs/executionReference"},
+        "contract_spec": {"$ref": "#/$defs/contractSpec"}
+      }
+    }
+  }
+}
