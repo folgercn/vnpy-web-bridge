@@ -8,7 +8,7 @@ import stat
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator, Literal, Mapping
+from typing import Any, Callable, Iterator, Literal, Mapping
 
 from pydantic import ValidationError
 
@@ -38,6 +38,7 @@ PENDING_NAME_PATTERN = re.compile(
     r"^\.pending-(?P<sequence>[0-9]{10})-"
     r"(?P<entry_hash>[0-9a-f]{64})\.json$"
 )
+RESERVATION_NAME_PATTERN = re.compile(r"^\.reservation-(?P<sequence>[0-9]{10})\.json$")
 
 
 class CFastPnlLedgerRepositoryError(ValueError):
@@ -171,7 +172,7 @@ class CommodityCFastPnlLedgerRepository:
         if candidate.ledger_id != self.ledger_id:
             raise CFastPnlLedgerRepositoryError("REPOSITORY_LEDGER_ID_MISMATCH")
         candidate_raw = _entry_bytes(candidate)
-        with self._locked():
+        with self._locked() as assert_lock:
             self._recover_pending_locked()
             entries = self._load_entries_locked(allow_empty=True)
             for existing in entries:
@@ -199,12 +200,21 @@ class CommodityCFastPnlLedgerRepository:
                 ) from exc
             pending_path = self.entries_path / _pending_name(candidate)
             final_path = self.entries_path / _entry_name(candidate)
+            reservation_path = self.entries_path / _reservation_name(candidate)
+            assert_lock()
+            self._write_reservation_create_only(
+                reservation_path,
+                candidate_raw,
+            )
+            assert_lock()
             self._write_create_only(pending_path, candidate_raw)
+            assert_lock()
             self._promote_pending_create_only(
                 pending_path,
                 final_path,
                 candidate_raw,
             )
+            assert_lock()
             committed = self._load_entries_locked(allow_empty=False)
             if committed[-1].entry_hash != candidate.entry_hash:
                 raise CFastPnlLedgerRepositoryError("REPOSITORY_COMMIT_TIP_MISMATCH")
@@ -396,7 +406,7 @@ class CommodityCFastPnlLedgerRepository:
             raise CFastPnlLedgerRepositoryError("REPOSITORY_UNKNOWN_LEDGER_ARTIFACT")
 
     @contextmanager
-    def _locked(self) -> Iterator[None]:
+    def _locked(self) -> Iterator[Callable[[], None]]:
         with self._pinned_directories() as (
             ledger_descriptor,
             _parent_descriptor,
@@ -417,29 +427,50 @@ class CommodityCFastPnlLedgerRepository:
                 ) from exc
             try:
                 lock_stat = os.fstat(descriptor)
-                if (
-                    not stat.S_ISREG(lock_stat.st_mode)
-                    or lock_stat.st_uid != os.geteuid()
-                    or stat.S_IMODE(lock_stat.st_mode) & 0o077
-                ):
-                    raise CFastPnlLedgerRepositoryError("REPOSITORY_LOCK_NOT_REGULAR")
-                try:
-                    lock_path_stat = os.stat(
-                        ".append.lock",
-                        dir_fd=ledger_descriptor,
-                        follow_symlinks=False,
-                    )
-                except OSError as exc:
-                    raise CFastPnlLedgerRepositoryError(
-                        "REPOSITORY_LOCK_PATH_CHANGED"
-                    ) from exc
-                if _stat_identity(lock_stat) != _stat_identity(lock_path_stat):
-                    raise CFastPnlLedgerRepositoryError("REPOSITORY_LOCK_PATH_CHANGED")
+                self._validate_lock_stat(lock_stat)
+                lock_identity = _stat_identity(lock_stat)
+
+                def assert_lock() -> None:
+                    try:
+                        descriptor_stat = os.fstat(descriptor)
+                        self._validate_lock_stat(descriptor_stat)
+                        path_stat = os.stat(
+                            ".append.lock",
+                            dir_fd=ledger_descriptor,
+                            follow_symlinks=False,
+                        )
+                        self._validate_lock_stat(path_stat)
+                    except (CFastPnlLedgerRepositoryError, OSError) as exc:
+                        raise CFastPnlLedgerRepositoryError(
+                            "REPOSITORY_LOCK_PATH_CHANGED"
+                        ) from exc
+                    if (
+                        _stat_identity(descriptor_stat) != lock_identity
+                        or _stat_identity(path_stat) != lock_identity
+                    ):
+                        raise CFastPnlLedgerRepositoryError(
+                            "REPOSITORY_LOCK_PATH_CHANGED"
+                        )
+
+                assert_lock()
                 fcntl.flock(descriptor, fcntl.LOCK_EX)
-                yield
+                assert_lock()
+                yield assert_lock
+                assert_lock()
             finally:
                 fcntl.flock(descriptor, fcntl.LOCK_UN)
                 os.close(descriptor)
+
+    @staticmethod
+    def _validate_lock_stat(value: os.stat_result) -> None:
+        if (
+            not stat.S_ISREG(value.st_mode)
+            or value.st_uid != os.geteuid()
+            or stat.S_IMODE(value.st_mode) != 0o600
+            or value.st_nlink != 1
+            or value.st_size != 0
+        ):
+            raise CFastPnlLedgerRepositoryError("REPOSITORY_LOCK_NOT_REGULAR")
 
     def _load_entries_locked(
         self,
@@ -450,6 +481,8 @@ class CommodityCFastPnlLedgerRepository:
         for path in self.entries_path.iterdir():
             if PENDING_NAME_PATTERN.fullmatch(path.name):
                 raise CFastPnlLedgerRepositoryError("REPOSITORY_PENDING_NOT_RECOVERED")
+            if RESERVATION_NAME_PATTERN.fullmatch(path.name):
+                continue
             match = ENTRY_NAME_PATTERN.fullmatch(path.name)
             if match is None:
                 raise CFastPnlLedgerRepositoryError("REPOSITORY_UNKNOWN_ENTRY_ARTIFACT")
@@ -474,30 +507,99 @@ class CommodityCFastPnlLedgerRepository:
 
     def _recover_pending_locked(self) -> None:
         pending_paths: list[Path] = []
+        reservation_paths: dict[int, Path] = {}
+        final_paths: dict[int, list[Path]] = {}
         for path in self.entries_path.iterdir():
-            if PENDING_NAME_PATTERN.fullmatch(path.name):
+            pending_match = PENDING_NAME_PATTERN.fullmatch(path.name)
+            reservation_match = RESERVATION_NAME_PATTERN.fullmatch(path.name)
+            final_match = ENTRY_NAME_PATTERN.fullmatch(path.name)
+            if pending_match is not None:
                 pending_paths.append(path)
-            elif ENTRY_NAME_PATTERN.fullmatch(path.name) is None:
+            elif reservation_match is not None:
+                reservation_paths[int(reservation_match["sequence"])] = path
+            elif final_match is not None:
+                final_paths.setdefault(
+                    int(final_match["sequence"]),
+                    [],
+                ).append(path)
+            else:
                 raise CFastPnlLedgerRepositoryError("REPOSITORY_UNKNOWN_ENTRY_ARTIFACT")
         pending_paths.sort()
         if len(pending_paths) > 1:
             raise CFastPnlLedgerRepositoryError("REPOSITORY_MULTIPLE_PENDING_FILES")
-        if not pending_paths:
+
+        reservations = {
+            sequence: self._read_entry_file(path, RESERVATION_NAME_PATTERN)
+            for sequence, path in reservation_paths.items()
+        }
+        if any(
+            entry.entry_sequence != sequence for sequence, entry in reservations.items()
+        ):
+            raise CFastPnlLedgerRepositoryError(
+                "REPOSITORY_RESERVATION_SEQUENCE_MISMATCH"
+            )
+
+        for sequence, paths in final_paths.items():
+            if len(paths) != 1:
+                raise CFastPnlLedgerRepositoryError(
+                    "REPOSITORY_SEQUENCE_RESERVATION_CONFLICT"
+                )
+            reservation = reservations.get(sequence)
+            if reservation is None:
+                raise CFastPnlLedgerRepositoryError(
+                    "REPOSITORY_SEQUENCE_RESERVATION_MISSING"
+                )
+            final = self._read_entry_file(paths[0], ENTRY_NAME_PATTERN)
+            if final != reservation:
+                raise CFastPnlLedgerRepositoryError(
+                    "REPOSITORY_SEQUENCE_RESERVATION_CONFLICT"
+                )
+
+        pending_path = pending_paths[0] if pending_paths else None
+        pending: CommodityCFastFourLayerPnlLedgerEntryDTO | None = None
+        if pending_path is not None:
+            pending = self._read_entry_file(
+                pending_path,
+                PENDING_NAME_PATTERN,
+            )
+            reservation = reservations.get(pending.entry_sequence)
+            if reservation is None:
+                raise CFastPnlLedgerRepositoryError(
+                    "REPOSITORY_SEQUENCE_RESERVATION_MISSING"
+                )
+            if pending != reservation:
+                raise CFastPnlLedgerRepositoryError(
+                    "REPOSITORY_SEQUENCE_RESERVATION_CONFLICT"
+                )
+            final_for_pending = final_paths.get(pending.entry_sequence, [])
+            if final_for_pending:
+                final = self._read_entry_file(
+                    final_for_pending[0],
+                    ENTRY_NAME_PATTERN,
+                )
+                if final != pending:
+                    raise CFastPnlLedgerRepositoryError(
+                        "REPOSITORY_PENDING_FINAL_CONFLICT"
+                    )
+                pending_path.unlink()
+                _fsync_directory(self.entries_path)
+                pending_path = None
+                pending = None
+
+        incomplete_sequences = sorted(set(reservations) - set(final_paths))
+        if len(incomplete_sequences) > 1:
+            raise CFastPnlLedgerRepositoryError(
+                "REPOSITORY_MULTIPLE_INCOMPLETE_RESERVATIONS"
+            )
+        if not incomplete_sequences:
+            if pending_path is not None:
+                raise CFastPnlLedgerRepositoryError("REPOSITORY_PENDING_FINAL_CONFLICT")
             return
-        pending_path = pending_paths[0]
-        candidate = self._read_entry_file(
-            pending_path,
-            PENDING_NAME_PATTERN,
-        )
+
+        incomplete_sequence = incomplete_sequences[0]
+        candidate = reservations[incomplete_sequence]
         candidate_raw = _entry_bytes(candidate)
         final_path = self.entries_path / _entry_name(candidate)
-        if final_path.exists():
-            final = self._read_entry_file(final_path, ENTRY_NAME_PATTERN)
-            if final != candidate:
-                raise CFastPnlLedgerRepositoryError("REPOSITORY_PENDING_FINAL_CONFLICT")
-            pending_path.unlink()
-            _fsync_directory(self.entries_path)
-            return
         entries = self._load_entries_without_pending_locked()
         self._validate_next_entry(entries, candidate)
         try:
@@ -508,6 +610,14 @@ class CommodityCFastPnlLedgerRepository:
             raise CFastPnlLedgerRepositoryError(
                 f"REPOSITORY_PENDING_CHAIN_INVALID:{exc.code}"
             ) from exc
+        expected_pending_path = self.entries_path / _pending_name(candidate)
+        if pending_path is None:
+            self._write_create_only(expected_pending_path, candidate_raw)
+            pending_path = expected_pending_path
+        elif pending != candidate or pending_path != expected_pending_path:
+            raise CFastPnlLedgerRepositoryError(
+                "REPOSITORY_SEQUENCE_RESERVATION_CONFLICT"
+            )
         self._promote_pending_create_only(
             pending_path,
             final_path,
@@ -519,7 +629,9 @@ class CommodityCFastPnlLedgerRepository:
     ) -> tuple[CommodityCFastFourLayerPnlLedgerEntryDTO, ...]:
         paths: list[tuple[int, Path]] = []
         for path in self.entries_path.iterdir():
-            if PENDING_NAME_PATTERN.fullmatch(path.name):
+            if PENDING_NAME_PATTERN.fullmatch(
+                path.name
+            ) or RESERVATION_NAME_PATTERN.fullmatch(path.name):
                 continue
             match = ENTRY_NAME_PATTERN.fullmatch(path.name)
             if match is None:
@@ -570,9 +682,9 @@ class CommodityCFastPnlLedgerRepository:
             ) from exc
         if raw != _entry_bytes(entry):
             raise CFastPnlLedgerRepositoryError("REPOSITORY_ENTRY_NOT_CANONICAL")
-        if (
-            int(match["sequence"]) != entry.entry_sequence
-            or match["entry_hash"] != entry.entry_hash
+        filename_hash = match.groupdict().get("entry_hash")
+        if int(match["sequence"]) != entry.entry_sequence or (
+            filename_hash is not None and filename_hash != entry.entry_hash
         ):
             raise CFastPnlLedgerRepositoryError(
                 "REPOSITORY_ENTRY_FILENAME_BINDING_MISMATCH"
@@ -592,6 +704,36 @@ class CommodityCFastPnlLedgerRepository:
             raise CFastPnlLedgerRepositoryError("REPOSITORY_APPEND_PREDECESSOR_INVALID")
 
     def _write_create_only(self, path: Path, raw: bytes) -> None:
+        self._write_create_only_artifact(
+            path,
+            raw,
+            conflict_code="REPOSITORY_PENDING_CONFLICT",
+            create_code="REPOSITORY_PENDING_CREATE_FAILED",
+            changed_code="REPOSITORY_PENDING_CHANGED_AFTER_WRITE",
+        )
+
+    def _write_reservation_create_only(
+        self,
+        path: Path,
+        raw: bytes,
+    ) -> None:
+        self._write_create_only_artifact(
+            path,
+            raw,
+            conflict_code="REPOSITORY_SEQUENCE_RESERVATION_CONFLICT",
+            create_code="REPOSITORY_SEQUENCE_RESERVATION_CREATE_FAILED",
+            changed_code="REPOSITORY_SEQUENCE_RESERVATION_CHANGED_AFTER_WRITE",
+        )
+
+    def _write_create_only_artifact(
+        self,
+        path: Path,
+        raw: bytes,
+        *,
+        conflict_code: str,
+        create_code: str,
+        changed_code: str,
+    ) -> None:
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
@@ -600,12 +742,10 @@ class CommodityCFastPnlLedgerRepository:
         except FileExistsError:
             existing = _read_raw_regular(path)
             if existing != raw:
-                raise CFastPnlLedgerRepositoryError("REPOSITORY_PENDING_CONFLICT")
+                raise CFastPnlLedgerRepositoryError(conflict_code)
             return
         except OSError as exc:
-            raise CFastPnlLedgerRepositoryError(
-                "REPOSITORY_PENDING_CREATE_FAILED"
-            ) from exc
+            raise CFastPnlLedgerRepositoryError(create_code) from exc
         try:
             with os.fdopen(descriptor, "wb", closefd=False) as handle:
                 handle.write(raw)
@@ -615,9 +755,7 @@ class CommodityCFastPnlLedgerRepository:
             os.close(descriptor)
         _fsync_directory(self.entries_path)
         if _read_raw_regular(path) != raw:
-            raise CFastPnlLedgerRepositoryError(
-                "REPOSITORY_PENDING_CHANGED_AFTER_WRITE"
-            )
+            raise CFastPnlLedgerRepositoryError(changed_code)
 
     def _promote_pending_create_only(
         self,
@@ -737,7 +875,9 @@ def _build_repository_export(
             adapter.model_dump(mode="json") for adapter in SOURCE_ADAPTER_BINDINGS
         ],
         "repository_semantics": ("APPEND_ONLY_CREATE_ONLY_CANONICAL_JSON_HASH_CHAIN"),
-        "recovery_semantics": ("FSYNC_PENDING_THEN_CREATE_ONLY_LINK_AND_FRESH_REPLAY"),
+        "recovery_semantics": (
+            "FSYNC_SEQUENCE_RESERVATION_THEN_PENDING_CREATE_ONLY_LINK_FRESH_REPLAY"
+        ),
         "audit_report_language": "zh-CN",
         "audit_scope": "DETERMINISTIC_OFFLINE_RESEARCH_STRUCTURE_ONLY",
         "external_genesis_anchor_state": "NOT_PROVIDED_STRUCTURE_ONLY",
@@ -762,6 +902,10 @@ def _entry_name(entry: CommodityCFastFourLayerPnlLedgerEntryDTO) -> str:
 
 def _pending_name(entry: CommodityCFastFourLayerPnlLedgerEntryDTO) -> str:
     return f".pending-{entry.entry_sequence:010d}-{entry.entry_hash}.json"
+
+
+def _reservation_name(entry: CommodityCFastFourLayerPnlLedgerEntryDTO) -> str:
+    return f".reservation-{entry.entry_sequence:010d}.json"
 
 
 def _entry_bytes(entry: CommodityCFastFourLayerPnlLedgerEntryDTO) -> bytes:

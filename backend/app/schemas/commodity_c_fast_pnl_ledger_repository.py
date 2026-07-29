@@ -78,7 +78,9 @@ class CommodityCFastPnlLedgerRepositoryExportDTO(StrictLedgerModel):
         ...,
     ] = Field(min_length=5, max_length=5)
     repository_semantics: Literal["APPEND_ONLY_CREATE_ONLY_CANONICAL_JSON_HASH_CHAIN"]
-    recovery_semantics: Literal["FSYNC_PENDING_THEN_CREATE_ONLY_LINK_AND_FRESH_REPLAY"]
+    recovery_semantics: Literal[
+        "FSYNC_SEQUENCE_RESERVATION_THEN_PENDING_CREATE_ONLY_LINK_FRESH_REPLAY"
+    ]
     audit_report_language: Literal["zh-CN"]
     audit_scope: Literal["DETERMINISTIC_OFFLINE_RESEARCH_STRUCTURE_ONLY"]
     external_genesis_anchor_state: Literal["NOT_PROVIDED_STRUCTURE_ONLY"]

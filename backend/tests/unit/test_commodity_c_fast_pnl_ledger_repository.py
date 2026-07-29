@@ -3,7 +3,9 @@ from __future__ import annotations
 import ast
 import os
 import stat
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Event
 
 import pytest
 from pydantic import ValidationError
@@ -97,14 +99,158 @@ def test_append_is_create_only_and_idempotent(tmp_path: Path) -> None:
     )
     entry = build()
     repository.append(entry.model_dump(mode="json"))
-    path = next((tmp_path / LEDGER_ID / "entries").glob("*.json"))
+    path = next((tmp_path / LEDGER_ID / "entries").glob("[0-9]*-*.json"))
     before = (path.read_bytes(), path.stat().st_mtime_ns)
 
     result = repository.append(entry.model_dump(mode="json"))
 
     assert result.status == "ALREADY_PRESENT"
     assert (path.read_bytes(), path.stat().st_mtime_ns) == before
-    assert len(tuple(path.parent.glob("*.json"))) == 1
+    assert len(tuple(path.parent.glob("[0-9]*-*.json"))) == 1
+    assert len(tuple(path.parent.glob(".reservation-*.json"))) == 1
+
+
+def test_fixed_sequence_reservation_recovers_before_pending_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = CommodityCFastPnlLedgerRepository.open_or_create(
+        tmp_path,
+        LEDGER_ID,
+    )
+    entry = build()
+    original_write = repository._write_reservation_create_only
+
+    def fail_after_reservation(path: Path, raw: bytes) -> None:
+        original_write(path, raw)
+        raise RuntimeError("injected crash after reservation")
+
+    monkeypatch.setattr(
+        repository,
+        "_write_reservation_create_only",
+        fail_after_reservation,
+    )
+    with pytest.raises(RuntimeError, match="injected crash"):
+        repository.append(entry.model_dump(mode="json"))
+
+    assert not tuple((tmp_path / LEDGER_ID / "entries").glob("[0-9]*-*.json"))
+    recovered = CommodityCFastPnlLedgerRepository.open(
+        tmp_path,
+        LEDGER_ID,
+    )
+    assert recovered.entries() == (entry,)
+
+
+def test_lock_rotation_cannot_commit_two_entries_for_same_sequence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = CommodityCFastPnlLedgerRepository.open_or_create(
+        tmp_path,
+        LEDGER_ID,
+    )
+    first_entry = build()
+    competing_entry = build(created_at="2026-09-02T08:04:00Z")
+    reached_reservation = Event()
+    allow_first_writer = Event()
+    original_write = CommodityCFastPnlLedgerRepository._write_reservation_create_only
+
+    def block_first_reservation(
+        self: CommodityCFastPnlLedgerRepository,
+        path: Path,
+        raw: bytes,
+    ) -> None:
+        if self is first:
+            reached_reservation.set()
+            assert allow_first_writer.wait(timeout=10)
+        original_write(self, path, raw)
+
+    monkeypatch.setattr(
+        CommodityCFastPnlLedgerRepository,
+        "_write_reservation_create_only",
+        block_first_reservation,
+    )
+
+    def append(repository, entry):
+        try:
+            return repository.append(entry.model_dump(mode="json"))
+        except CFastPnlLedgerRepositoryError as exc:
+            return exc.code
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first_future = pool.submit(append, first, first_entry)
+        assert reached_reservation.wait(timeout=10)
+        lock_path = tmp_path / LEDGER_ID / ".append.lock"
+        lock_path.unlink()
+        lock_path.touch(mode=0o600)
+        lock_path.chmod(0o600)
+        second = CommodityCFastPnlLedgerRepository.open(
+            tmp_path,
+            LEDGER_ID,
+        )
+        second_result = pool.submit(
+            append,
+            second,
+            competing_entry,
+        ).result(timeout=10)
+        allow_first_writer.set()
+        first_result = first_future.result(timeout=10)
+
+    assert second_result.status == "CREATED"
+    assert first_result == "REPOSITORY_SEQUENCE_RESERVATION_CONFLICT"
+    reopened = CommodityCFastPnlLedgerRepository.open(
+        tmp_path,
+        LEDGER_ID,
+    )
+    assert reopened.entries() == (competing_entry,)
+    entries_path = tmp_path / LEDGER_ID / "entries"
+    assert len(tuple(entries_path.glob("[0-9]*-*.json"))) == 1
+    assert len(tuple(entries_path.glob(".reservation-*.json"))) == 1
+
+
+def test_lock_rotation_after_reservation_fails_closed_then_recovers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = CommodityCFastPnlLedgerRepository.open_or_create(
+        tmp_path,
+        LEDGER_ID,
+    )
+    entry = build()
+    original_write = CommodityCFastPnlLedgerRepository._write_reservation_create_only
+
+    def rotate_after_reservation(
+        self: CommodityCFastPnlLedgerRepository,
+        path: Path,
+        raw: bytes,
+    ) -> None:
+        original_write(self, path, raw)
+        lock_path = tmp_path / LEDGER_ID / ".append.lock"
+        lock_path.unlink()
+        lock_path.touch(mode=0o600)
+        lock_path.chmod(0o600)
+
+    monkeypatch.setattr(
+        CommodityCFastPnlLedgerRepository,
+        "_write_reservation_create_only",
+        rotate_after_reservation,
+    )
+    assert_repository_error(
+        "REPOSITORY_LOCK_PATH_CHANGED",
+        repository.append,
+        entry.model_dump(mode="json"),
+    )
+
+    monkeypatch.setattr(
+        CommodityCFastPnlLedgerRepository,
+        "_write_reservation_create_only",
+        original_write,
+    )
+    reopened = CommodityCFastPnlLedgerRepository.open(
+        tmp_path,
+        LEDGER_ID,
+    )
+    assert reopened.entries() == (entry,)
 
 
 def test_reopen_recovers_pending_before_and_after_final_link(
@@ -121,7 +267,13 @@ def test_reopen_recovers_pending_before_and_after_final_link(
     second_pending = entries_path / (
         f".pending-{second.entry_sequence:010d}-{second.entry_hash}.json"
     )
-    second_pending.write_bytes(canonical_json_line(second.model_dump(mode="json")))
+    second_raw = canonical_json_line(second.model_dump(mode="json"))
+    second_reservation = entries_path / (
+        f".reservation-{second.entry_sequence:010d}.json"
+    )
+    second_reservation.write_bytes(second_raw)
+    second_reservation.chmod(0o600)
+    second_pending.write_bytes(second_raw)
     second_pending.chmod(0o600)
 
     recovered = CommodityCFastPnlLedgerRepository.open(
@@ -172,7 +324,7 @@ def test_tampered_entry_and_wrong_predecessor_fail_closed(
     )
     assert repository.entries() == (first,)
 
-    path = next((tmp_path / LEDGER_ID / "entries").glob("*.json"))
+    path = next((tmp_path / LEDGER_ID / "entries").glob("[0-9]*-*.json"))
     path.write_bytes(path.read_bytes() + b"\n")
     assert_repository_error(
         "REPOSITORY_ENTRY_NOT_CANONICAL",
@@ -213,9 +365,15 @@ def test_multiple_pending_unknown_artifact_and_symlink_fail_closed(
     )
     unknown.unlink()
 
+    entry = build()
+    raw = canonical_json_line(entry.model_dump(mode="json"))
+    reservation = entries_path / ".reservation-0000000001.json"
+    reservation.write_bytes(raw)
+    reservation.chmod(0o600)
     target = tmp_path / "target.json"
-    target.write_text("{}\n", encoding="utf-8")
-    link = entries_path / ("0000000001-" + "f" * 64 + ".json")
+    target.write_bytes(raw)
+    target.chmod(0o600)
+    link = entries_path / f"0000000001-{entry.entry_hash}.json"
     link.symlink_to(target)
     assert_repository_error(
         "REPOSITORY_ENTRY_READ_FAILED",
@@ -360,7 +518,7 @@ def test_path_replacement_during_fd_read_is_detected(
     )
     repository.append(build().model_dump(mode="json"))
     entries_path = tmp_path / LEDGER_ID / "entries"
-    entry_path = next(entries_path.glob("*.json"))
+    entry_path = next(entries_path.glob("[0-9]*-*.json"))
     displaced_path = tmp_path / "displaced-entry.json"
     replacement_path = tmp_path / "replacement-entry.json"
     replacement_path.write_bytes(entry_path.read_bytes())

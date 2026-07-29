@@ -289,7 +289,9 @@ genesis/tip anchor 时，攻击者若整体替换整条 chain 并重算内部 ha
 <root>/<ledger_id>/
   .append.lock
   entries/
+    .reservation-0000000001.json
     0000000001-<entry_hash>.json
+    .reservation-0000000002.json
     0000000002-<entry_hash>.json
 ```
 
@@ -307,18 +309,23 @@ root → ledger → entries 顺序逐级 fsync；任何 fsync 失败都不会报
 
 追加协议固定为：
 
-1. 锁内重新验证现有完整链；
+1. 获得锁后再次复核 lock fd/path identity，并在锁内重新验证现有完整链；
 2. 验证 candidate sequence、predecessor、ledger identity 和 source replay；
-3. 以 `O_EXCL` 写 `.pending-*`，flush + fsync；
-4. 用 create-only hard link 安装最终文件并 fsync 目录；
-5. 删除 pending 并再次 fsync；
-6. 从磁盘重新加载并验证 chain tip。
+3. 以 sequence 唯一的 `O_EXCL` `.reservation-<sequence>.json` 持久保留
+   candidate canonical bytes，flush + fsync，并再次复核 lock identity；
+4. 以 `O_EXCL` 写 `.pending-*`，flush + fsync；
+5. 用 create-only hard link 安装最终文件并 fsync 目录；
+6. 删除 pending 并再次 fsync；
+7. 从磁盘重新加载并验证 chain tip，返回前再次复核 lock identity。
 
-进程若在第 3 至第 5 步之间退出，重新 open 时只接受唯一 pending。pending 必须
-是 canonical、fresh-replay 可验证且恰好接续当前 chain tip；否则 fail closed。
-final 与 pending 同时存在时，二者必须完全相同才会清理 pending。多个 pending、
-不连续 sequence、错误 predecessor、未知文件、symlink、非 canonical 内容和
-读取期间 path/inode 替换均拒绝。
+进程若在第 3 至第 6 步之间退出，重新 open 时从不可变 reservation 恢复唯一
+candidate；reservation、pending 与 final 必须是完全相同的 canonical bytes，
+且 candidate 必须 fresh-replay 可验证并恰好接续当前 chain tip，否则 fail
+closed。每个 sequence 的 reservation 永久保留，因而即使同一 owner 在持锁
+期间轮换 `.append.lock` 形成两个 inode lock domain，竞争 writer 也不能为同一
+sequence 安装不同 hash。多个未完成 reservation、多个 pending、不连续
+sequence、错误 predecessor、未知文件、symlink、非 canonical 内容和读取期间
+path/inode 替换均拒绝。
 
 root 的直接父目录和仓储目录必须由当前 OS 用户持有，且 group/world 不可写；
 entry 与 lock 文件必须由当前用户持有，且 group/world 无任何权限。读取使用
