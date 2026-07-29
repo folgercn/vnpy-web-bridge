@@ -6,10 +6,11 @@ from datetime import datetime
 from pathlib import Path
 
 from .acquisition_models import PitSelection
-from .canonical import parse_json_strict
+from .canonical import sha256
 from .errors import RegistryError
 from .filesystem import WarehousePaths, read_regular_strict
 from .manifests import verify_manifest_chain
+from .models import SourceRegistry
 from .timeutil import parse_utc, require_utc
 
 
@@ -17,6 +18,9 @@ def select_pit_revision(
     *,
     paths: WarehousePaths,
     public_key_path: Path,
+    registry: SourceRegistry,
+    expected_genesis_seal_sha256: str,
+    expected_head_seal_sha256: str,
     source_id: str,
     trade_day: str,
     cutoff_at: datetime,
@@ -25,6 +29,9 @@ def select_pit_revision(
     chain = verify_manifest_chain(
         paths=paths,
         public_key_path=public_key_path,
+        registry=registry,
+        expected_genesis_seal_sha256=expected_genesis_seal_sha256,
+        expected_head_seal_sha256=expected_head_seal_sha256,
     )
     eligible_manifests = [
         item
@@ -35,25 +42,13 @@ def select_pit_revision(
     if not eligible_manifests:
         raise RegistryError("no verified daily batch existed at PIT cutoff")
     manifest = eligible_manifests[-1]
-    observations_by_id = set(manifest["observation_ids"])
     candidates = []
-    for item in manifest["objects"]:
+    for item in manifest["revisions"]:
         if parse_utc(item["first_seen_at"], "first_seen_at") > cutoff:
             continue
-        # Object IDs are source/day bound; the source is proven by observation.
-        observation_paths = list(paths.observations.rglob(f"{item['observation_ids'][0]}.json"))
-        if len(observation_paths) != 1:
-            raise RegistryError("PIT object observation receipt is unavailable")
-        observation = parse_json_strict(
-            read_regular_strict(
-                observation_paths[0], "PIT observation receipt", limit=2 * 1024 * 1024
-            ),
-            "PIT observation receipt",
-        )
         if (
-            observation["observation_id"] not in observations_by_id
-            or observation["source_id"] != source_id
-            or observation["trade_day"] != trade_day
+            item["source_id"] != source_id
+            or item["trade_day"] != trade_day
         ):
             continue
         candidates.append(item)
@@ -61,14 +56,22 @@ def select_pit_revision(
         raise RegistryError("no source revision existed at PIT cutoff")
     selected = max(
         candidates,
-        key=lambda item: (item["first_seen_at"], item["object_id"]),
+        key=lambda item: (item["revision_sequence"], item["revision_id"]),
     )
     raw_path = paths.root / selected["raw_relative_path"]
+    raw = read_regular_strict(raw_path, "PIT selected raw object")
+    if (
+        len(raw) != selected["raw_bytes"]
+        or sha256(raw) != selected["raw_sha256"]
+    ):
+        raise RegistryError("PIT selected raw object changed after verification")
     return PitSelection(
         object_id=selected["object_id"],
+        revision_id=selected["revision_id"],
         raw_sha256=selected["raw_sha256"],
         raw_bytes=selected["raw_bytes"],
         raw_path=raw_path,
+        raw_content=raw,
         first_seen_at=parse_utc(selected["first_seen_at"], "first_seen_at"),
         batch_id=manifest["batch_id"],
         batch_seal_sha256=manifest["batch_seal_sha256"],

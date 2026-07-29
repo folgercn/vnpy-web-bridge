@@ -36,8 +36,11 @@ class WarehousePaths:
         if absolute.exists():
             raise RegistryError(f"warehouse root already exists: {absolute}")
         absolute.mkdir(mode=0o700)
+        _fsync_dir(absolute.parent)
         for name in LAYOUT_DIRS:
             (absolute / name).mkdir(mode=0o700)
+            _fsync_dir(absolute / name)
+            _fsync_dir(absolute)
         _fsync_dir(absolute)
         return cls.open(absolute)
 
@@ -74,12 +77,18 @@ class WarehousePaths:
         for component in components:
             if SAFE_COMPONENT.fullmatch(component) is None:
                 raise RegistryError(f"unsafe custody path component: {component}")
+            parent = current
             current /= component
+            created = False
             try:
                 current.mkdir(mode=0o700)
+                created = True
             except FileExistsError:
                 pass
             _require_private_dir(current, "custody subdirectory")
+            if created:
+                _fsync_dir(current)
+                _fsync_dir(parent)
         return current
 
 
@@ -191,34 +200,78 @@ def _fsync_dir(path: Path) -> None:
         os.close(descriptor)
 
 
-def create_only_bytes(path: Path, raw: bytes, label: str) -> Path:
+def _cleanup_publish_temps(
+    temporary_dir: Path,
+    path: Path,
+) -> None:
+    prefix = f".publish-{path.name}-"
+    changed = False
+    for candidate in temporary_dir.iterdir():
+        if not candidate.name.startswith(prefix) or not candidate.name.endswith(
+            ".partial"
+        ):
+            continue
+        info = candidate.lstat()
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            raise RegistryError("metadata publish temporary object is unsafe")
+        candidate.unlink()
+        changed = True
+    if changed:
+        _fsync_dir(temporary_dir)
+
+
+def create_only_bytes(
+    path: Path,
+    raw: bytes,
+    label: str,
+    *,
+    temporary_dir: Path,
+) -> Path:
     _require_private_dir(path.parent, f"{label} parent")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-    flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        descriptor = os.open(path, flags, 0o600)
-    except FileExistsError:
-        existing = read_regular_strict(
-            path, label, limit=max(MAX_RAW_BYTES, len(raw))
-        )
-        if existing != raw:
-            raise RegistryError(f"create-only {label} conflicts with existing bytes")
-        return path
+    _require_private_dir(temporary_dir, "metadata publish temporary directory")
+    if path.parent.lstat().st_dev != temporary_dir.lstat().st_dev:
+        raise RegistryError(f"{label} temporary and final paths differ by filesystem")
+    _cleanup_publish_temps(temporary_dir, path)
+    descriptor, name = tempfile.mkstemp(
+        prefix=f".publish-{path.name}-",
+        suffix=".partial",
+        dir=temporary_dir,
+    )
+    temp_path = Path(name)
+    os.fchmod(descriptor, 0o600)
     try:
         _write_all(descriptor, raw)
         os.fsync(descriptor)
-    except BaseException:
         os.close(descriptor)
+        descriptor = -1
+        completed = read_regular_strict(
+            temp_path,
+            f"completed {label} temporary object",
+            limit=max(MAX_RAW_BYTES, len(raw)),
+        )
+        if completed != raw:
+            raise RegistryError(f"{label} temporary bytes changed before publish")
         try:
-            path.unlink()
+            os.link(temp_path, path, follow_symlinks=False)
             _fsync_dir(path.parent)
-        except OSError:
+        except FileExistsError:
+            existing = read_regular_strict(
+                path, label, limit=max(MAX_RAW_BYTES, len(raw))
+            )
+            if existing != raw:
+                raise RegistryError(
+                    f"create-only {label} conflicts with existing bytes"
+                )
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            temp_path.unlink()
+            _fsync_dir(temporary_dir)
+        except FileNotFoundError:
             pass
-        raise
-    os.close(descriptor)
-    _fsync_dir(path.parent)
     if read_regular_strict(path, label, limit=max(MAX_RAW_BYTES, len(raw))) != raw:
-        raise RegistryError(f"{label} changed after create-only write")
+        raise RegistryError(f"{label} changed after atomic publish")
     return path
 
 

@@ -87,7 +87,7 @@ def acquire_daily(
             os.close(descriptor)
             descriptor = -1
             raw = read_regular_strict(temp_path, "completed temporary raw object")
-            validate_source_bytes(raw, source)
+            validate_source_bytes(raw, source, trade_day)
             raw_parent = paths.private_subdir(
                 paths.raw,
                 source.exchange.lower(),
@@ -118,17 +118,19 @@ def acquire_daily(
                     raw_bytes=raw_bytes,
                     raw_path=raw_path,
                     collector_version=collector_version,
-                    registry_raw_sha256=registry.raw_sha256,
+                    registry=registry,
                 )
         return AcquiredObject(
             object_id=observation["object_id"],
             observation_id=observation["observation_id"],
+            revision_id=observation["revision_id"],
             raw_sha256=raw_sha256,
             raw_bytes=raw_bytes,
             raw_path=raw_path,
             first_seen_at=parse_utc(observation["first_seen_at"], "first_seen_at"),
             last_seen_at=parse_utc(observation["last_seen_at"], "last_seen_at"),
             supersedes_object_id=observation["supersedes_object_id"],
+            supersedes_revision_id=observation["supersedes_revision_id"],
             idempotent_raw=idempotent_raw,
         )
     except BaseException as exc:

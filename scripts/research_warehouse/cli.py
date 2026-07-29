@@ -4,17 +4,31 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
 from .acquisition import acquire_daily
 from .authority import assert_research_source_boundary
+from .canonical import parse_json_strict
 from .errors import RegistryError
-from .filesystem import WarehousePaths
+from .filesystem import WarehousePaths, read_regular_strict
 from .manifests import seal_daily_batch, verify_manifest_chain
 from .pit import select_pit_revision
 from .registry import load_registry
 from .timeutil import parse_utc
+
+SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _parent_anchor(value: str) -> str | None:
+    if value == "GENESIS":
+        return None
+    if SHA256_PATTERN.fullmatch(value) is None:
+        raise RegistryError(
+            "expected parent seal must be GENESIS or a lowercase SHA256"
+        )
+    return value
 
 
 def parser() -> argparse.ArgumentParser:
@@ -38,12 +52,19 @@ def parser() -> argparse.ArgumentParser:
     seal.add_argument("--trade-day", required=True)
     seal.add_argument("--private-key", type=Path, required=True)
     seal.add_argument("--signer-key-id", required=True)
+    seal.add_argument("--expected-parent-seal", required=True)
     verify = commands.add_parser("verify-chain")
     verify.add_argument("--root", type=Path, required=True)
+    verify.add_argument("--registry", type=Path, required=True)
     verify.add_argument("--public-key", type=Path, required=True)
+    verify.add_argument("--expected-genesis-seal", required=True)
+    verify.add_argument("--expected-head-seal", required=True)
     select = commands.add_parser("select-pit")
     select.add_argument("--root", type=Path, required=True)
+    select.add_argument("--registry", type=Path, required=True)
     select.add_argument("--public-key", type=Path, required=True)
+    select.add_argument("--expected-genesis-seal", required=True)
+    select.add_argument("--expected-head-seal", required=True)
     select.add_argument("--source-id", required=True)
     select.add_argument("--trade-day", required=True)
     select.add_argument("--cutoff-at", required=True)
@@ -96,8 +117,20 @@ def main(argv: list[str] | None = None) -> int:
                 trade_day=args.trade_day,
                 private_key_path=args.private_key,
                 signer_key_id=args.signer_key_id,
+                expected_parent_batch_seal_sha256=_parent_anchor(
+                    args.expected_parent_seal
+                ),
+            )
+            manifest = parse_json_strict(
+                read_regular_strict(
+                    output_path,
+                    "sealed daily manifest",
+                    limit=16 * 1024 * 1024,
+                ),
+                "sealed daily manifest",
             )
             output = {
+                "batch_seal_sha256": manifest["batch_seal_sha256"],
                 "manifest": str(output_path),
                 "status": "DAILY_BATCH_READY",
             }
@@ -105,6 +138,9 @@ def main(argv: list[str] | None = None) -> int:
             chain = verify_manifest_chain(
                 paths=WarehousePaths.open(args.root),
                 public_key_path=args.public_key,
+                registry=load_registry(args.registry),
+                expected_genesis_seal_sha256=args.expected_genesis_seal,
+                expected_head_seal_sha256=args.expected_head_seal,
             )
             output = {
                 "batch_count": len(chain),
@@ -115,6 +151,9 @@ def main(argv: list[str] | None = None) -> int:
             selection = select_pit_revision(
                 paths=WarehousePaths.open(args.root),
                 public_key_path=args.public_key,
+                registry=load_registry(args.registry),
+                expected_genesis_seal_sha256=args.expected_genesis_seal,
+                expected_head_seal_sha256=args.expected_head_seal,
                 source_id=args.source_id,
                 trade_day=args.trade_day,
                 cutoff_at=parse_utc(args.cutoff_at, "cutoff_at"),
@@ -122,6 +161,7 @@ def main(argv: list[str] | None = None) -> int:
             output = {
                 "batch_id": selection.batch_id,
                 "object_id": selection.object_id,
+                "revision_id": selection.revision_id,
                 "raw_sha256": selection.raw_sha256,
                 "status": "PIT_REVISION_SELECTED",
             }

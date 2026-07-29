@@ -20,21 +20,25 @@ class HttpResponse:
 class AcquiredObject:
     object_id: str
     observation_id: str
+    revision_id: str
     raw_sha256: str
     raw_bytes: int
     raw_path: Path
     first_seen_at: datetime
     last_seen_at: datetime
     supersedes_object_id: str | None
+    supersedes_revision_id: str | None
     idempotent_raw: bool
 
 
 @dataclass(frozen=True)
 class PitSelection:
     object_id: str
+    revision_id: str
     raw_sha256: str
     raw_bytes: int
     raw_path: Path
+    raw_content: bytes
     first_seen_at: datetime
     batch_id: str
     batch_seal_sha256: str

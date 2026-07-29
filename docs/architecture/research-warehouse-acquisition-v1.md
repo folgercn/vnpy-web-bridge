@@ -10,8 +10,10 @@ service, or grant execution authority.
 ```text
 CLI
  ├─ transport -> validation
- ├─ acquisition -> filesystem custody -> append-only observations
- ├─ manifests -> Ed25519 signing -> parent seal chain
+├─ acquisition -> filesystem custody -> append-only observations
+│                                   └-> trusted validation -> revision replay
+├─ manifests -> manifest validation -> parent seal chain -> external anchors
+│            └-> Ed25519 signing
  └─ PIT selector -> verified manifest chain
 ```
 
@@ -25,16 +27,21 @@ regular, non-symlinked, and single-link.
    allowlist on the request and every redirect.
 2. Stream the response into `tmp/`, enforce the size limit and content length,
    `fsync` the file, close it, read it twice through a stable file descriptor,
-   and validate the frozen source schema.
+   validate the frozen source schema, and bind the response's authoritative
+   `report_date` to the requested trade day.
 3. Publish the SHA-256-named raw object with a create-only hard link on the
    same filesystem, `fsync` its parent, remove the temporary link, and verify
    the final bytes and single-link identity.
-4. Append a canonical observation receipt containing HTTP metadata, registry
-   binding, custody binding, first/last seen timestamps, and revision lineage.
+4. Atomically publish a canonical observation receipt containing HTTP
+   metadata, registry binding, custody binding, first/last seen timestamps,
+   and revision lineage. Receipt and manifest publication use the same
+   temp-file, file-fsync, create-only-link, parent-fsync protocol as raw.
 
 Identical response bytes reuse the raw object but append a new observation.
-Different bytes create a new raw object whose first observation records the
-previous object as `supersedes_object_id`. Raw acquisition never creates
+Consecutive identical responses remain one revision occurrence. If the current
+head changed, old bytes appearing again create a new revision occurrence that
+references the reused raw object and supersedes the actual current revision.
+This preserves sequences such as `A -> B -> A`. Raw acquisition never creates
 `READY`.
 
 A partial response, timeout, disk-full error, schema mismatch, or interruption
@@ -51,10 +58,20 @@ key. Every seal names `parent_batch_seal_sha256`, producing one linear,
 append-only chain. Only a successfully verified signed manifest has
 `ready: true`.
 
-PIT selection first verifies the complete signature and parent chain. It then
-uses the latest manifest whose `sealed_at` is at or before the requested
-cutoff, and rejects revisions whose `first_seen_at` is later than that cutoff.
-A late correction can therefore never enter an earlier PIT view.
+The parent chain alone cannot detect suffix deletion. Every verify/PIT call
+therefore requires trusted external genesis and current-head hashes, and every
+seal requires the externally retained expected parent hash. `GENESIS` is the
+explicit expected parent for the first seal. The full seal hash printed by
+`seal-day` must be stored outside the writable manifests directory before the
+next operation.
+
+Before signing, the signer treats receipts as untrusted: it reloads the pinned
+registry, validates exact source/exchange/schema/URL/HTTP bindings, revalidates
+the exact raw schema and response day, and deterministically replays the
+revision chain. PIT uses source/day/revision fields already covered by the
+verified signature, then strictly rereads and hashes the selected raw bytes.
+It uses the latest manifest whose `sealed_at` is at or before the cutoff and
+rejects revisions first seen later than that cutoff.
 
 ## Commands
 
@@ -73,15 +90,22 @@ python scripts/research_warehouse_cli.py seal-day \
   --registry deployments/research-warehouse/source-registry-v1.json \
   --trade-day 2026-07-28 \
   --private-key /private/key/path \
-  --signer-key-id research-manifest-v1
+  --signer-key-id research-manifest-v1 \
+  --expected-parent-seal GENESIS
 
 python scripts/research_warehouse_cli.py verify-chain \
   --root /private/path \
-  --public-key /trusted/public-key
+  --registry deployments/research-warehouse/source-registry-v1.json \
+  --public-key /trusted/public-key \
+  --expected-genesis-seal $TRUSTED_GENESIS_SHA256 \
+  --expected-head-seal $TRUSTED_HEAD_SHA256
 
 python scripts/research_warehouse_cli.py select-pit \
   --root /private/path \
+  --registry deployments/research-warehouse/source-registry-v1.json \
   --public-key /trusted/public-key \
+  --expected-genesis-seal $TRUSTED_GENESIS_SHA256 \
+  --expected-head-seal $TRUSTED_HEAD_SHA256 \
   --source-id shfe-daily-market-data-v1 \
   --trade-day 2026-07-28 \
   --cutoff-at 2026-07-28T09:00:00Z
