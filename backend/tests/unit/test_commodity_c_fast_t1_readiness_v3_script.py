@@ -239,6 +239,7 @@ def build_fixture(
             content,
             provenance_receipt,
             outcome_payload,
+            verified_outcome.raw_sha256,
             verified_outcome.canonical_sha256,
         )
     )
@@ -431,6 +432,9 @@ def pin_manifest(pins: readiness_module.ReadinessPins) -> dict:
         "packet_custody_identity_sha256": (
             pins.packet_custody_identity_sha256
         ),
+        "packet_custody_directory_identity_sha256": (
+            pins.packet_custody_directory_identity_sha256
+        ),
         "evidence_join_identity_sha256": (
             pins.evidence_join_identity_sha256
         ),
@@ -570,6 +574,31 @@ def test_content_provenance_and_outcome_join_cannot_be_spliced(
 ) -> None:
     values = build_fixture(tmp_path, monkeypatch)
     values["outcome"].payload[field] = replacement
+    with pytest.raises(
+        readiness_module.ReadinessV3Error,
+        match="root-pinned evidence join identity",
+    ):
+        derive(values)
+
+
+@pytest.mark.parametrize("artifact", ["provenance", "outcome"])
+def test_join_pins_signed_raw_encoding_not_only_canonical_object(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    artifact: str,
+) -> None:
+    values = build_fixture(tmp_path, monkeypatch)
+    if artifact == "provenance":
+        reencoded_receipt = dict(values["provenance_receipt"])
+        reencoded_receipt["signed_provenance_raw_sha256"] = "f" * 64
+        monkeypatch.setattr(
+            readiness_module,
+            "verify_provenance",
+            lambda *_args, **_kwargs: reencoded_receipt,
+        )
+    else:
+        values["outcome"].raw_sha256 = "f" * 64
+
     with pytest.raises(
         readiness_module.ReadinessV3Error,
         match="root-pinned evidence join identity",
@@ -1004,6 +1033,48 @@ def test_atomic_pin_manifest_rotation_during_snapshot_fails_closed(
     with pytest.raises(
         readiness_module.ReadinessV3Error,
         match="snapshot changed",
+    ):
+        READ_PRODUCTION_PINS()
+
+
+def test_atomic_pin_manifest_rejects_same_path_custody_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    values = build_fixture(tmp_path, monkeypatch)
+    manifest = pin_manifest(values["pins"])
+    raw = canonical(manifest)
+    individual = {
+        field: str(manifest[field])
+        for field in readiness_module.PIN_MANIFEST_VALUE_FIELDS
+    }
+    monkeypatch.setattr(
+        readiness_module,
+        "_pin_root_identity_sha256",
+        lambda: "1" * 64,
+    )
+    monkeypatch.setattr(
+        readiness_module,
+        "_read_root_owned_pin_manifest",
+        lambda: (raw, dict(manifest)),
+    )
+    monkeypatch.setattr(
+        readiness_module,
+        "read_root_owned_deployment_pin",
+        lambda _path, label: individual[label],
+    )
+    monkeypatch.setattr(
+        readiness_module,
+        "_read_packet_custody_facts",
+        lambda _path: (
+            values["pins"].packet_custody_id,
+            values["pins"].packet_custody_identity_sha256,
+            "f" * 64,
+        ),
+    )
+    with pytest.raises(
+        readiness_module.ReadinessV3Error,
+        match="directory identity does not match root-owned pins",
     ):
         READ_PRODUCTION_PINS()
 

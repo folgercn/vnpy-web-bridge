@@ -135,6 +135,7 @@ PIN_MANIFEST_FIELDS = (
     *PIN_MANIFEST_VALUE_FIELDS,
     "packet_custody_id",
     "packet_custody_identity_sha256",
+    "packet_custody_directory_identity_sha256",
     "evidence_join_identity_sha256",
 )
 
@@ -538,9 +539,18 @@ def _read_production_pins() -> ReadinessPins:
             str(manifest_before["packet_custody_identity_sha256"]),
             custody_identity_sha256,
         )
+        or not hmac.compare_digest(
+            str(
+                manifest_before[
+                    "packet_custody_directory_identity_sha256"
+                ]
+            ),
+            custody_directory_identity_sha256,
+        )
     ):
         raise ReadinessV3Error(
-            "readiness-v3 custody identity does not match root-owned pins"
+            "readiness-v3 custody identity or directory identity does not "
+            "match root-owned pins"
         )
     pins = ReadinessPins(
         pin_set_generation_id=str(manifest_before["generation_id"]),
@@ -720,6 +730,7 @@ def _evidence_join_identity_sha256(
     content: dict[str, Any],
     provenance_receipt: dict[str, Any],
     outcome_payload: dict[str, Any],
+    outcome_raw_sha256: str,
     outcome_canonical_sha256: str,
 ) -> str:
     return _hash_bytes(
@@ -741,6 +752,9 @@ def _evidence_join_identity_sha256(
                 "signed_provenance_canonical_sha256": provenance_receipt[
                     "signed_provenance_canonical_sha256"
                 ],
+                "signed_provenance_raw_sha256": provenance_receipt[
+                    "signed_provenance_raw_sha256"
+                ],
                 "l3_contract_source_commit_sha": (
                     inputs.l3_contract_source_commit_sha
                 ),
@@ -749,6 +763,7 @@ def _evidence_join_identity_sha256(
                 ),
                 "questdb_image_digest": inputs.questdb_image_digest,
                 "signed_outcome_canonical_sha256": outcome_canonical_sha256,
+                "signed_outcome_raw_sha256": outcome_raw_sha256,
                 "release_id": outcome_payload["release_id"],
                 "attempt_id": outcome_payload["attempt_id"],
                 "questdb_target_identity_sha256": outcome_payload[
@@ -1096,6 +1111,7 @@ def derive_readiness_packet(
         content,
         provenance_receipt,
         outcome_payload,
+        outcome.raw_sha256,
         outcome.canonical_sha256,
     )
     if not hmac.compare_digest(

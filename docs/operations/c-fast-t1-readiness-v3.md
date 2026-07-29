@@ -122,12 +122,13 @@ outcome 拼接。root-owned pin-set manifest 还必须固定
 - candidate ID；
 - T1 runtime source commit、image digest；
 - content attestation canonical SHA256；
-- signed provenance canonical SHA256；
+- signed provenance raw SHA256、canonical SHA256；
 - L3/outcome contract source commits、QuestDB image digest；
-- signed outcome canonical SHA256；
+- signed outcome raw SHA256、canonical SHA256；
 - release ID、attempt ID、QuestDB target identity SHA256。
 
-任何 target/release/attempt 或 build/outcome 换片都会改变 join identity，并在
+任何 target/release/attempt、build/outcome 换片，或仅通过 whitespace/key
+order 改写 signed provenance/outcome raw bytes，都会改变 join identity，并在
 packet 派生前 fail closed。
 
 ### L3 outcome freshness
@@ -177,6 +178,7 @@ generation 的 root-owned 原子快照，字段固定为：
   "packet_custody_path": "/absolute/custody/path",
   "packet_custody_id": "readiness-v3-custody-UNIQUE_ID",
   "packet_custody_identity_sha256": "<64 hex>",
+  "packet_custody_directory_identity_sha256": "<64 hex>",
   "evidence_join_identity_sha256": "<64 hex>"
 }
 ```
@@ -188,6 +190,8 @@ pin，再逐项原子 rename，最后原子替换 manifest；任何中间态只�
 
 packet custody 必须是 pinned absolute path、当前 verifier UID 所有的 `0700`
 non-symlink 目录，其父目录在正式运行时必须 root-owned 且不可 group/world 写。
+manifest 还必须独立冻结 custody directory 的 resolved path、device、inode、
+owner、mode 与 file type identity SHA256；不能从当前路径动态接受一个新的 inode。
 custody 内必须预先存在：
 
 ```json

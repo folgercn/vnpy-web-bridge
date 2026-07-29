@@ -27,6 +27,7 @@
     "packet_custody_path": "PENDING_root_owned_file",
     "packet_custody_id": "PENDING_root_owned_manifest_value",
     "packet_custody_identity_sha256": "PENDING_root_owned_manifest_value",
+    "packet_custody_directory_identity_sha256": "PENDING_root_owned_manifest_value",
     "evidence_join_identity_sha256": "PENDING_root_owned_manifest_value"
   },
   "packet_custody_identity": {
