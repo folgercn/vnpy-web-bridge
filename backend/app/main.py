@@ -36,6 +36,9 @@ from app.services.commodity_c_fast_shadow import (
     commodity_c_fast_shadow_service,
     normalize_rpc_contracts,
 )
+from app.services.commodity_c_fast_execution_permit import (
+    commodity_c_fast_execution_permit_service,
+)
 from app.services.commodity_simnow import commodity_simnow_service
 from app.services.market_data_service import market_data_service
 from app.services.monitoring_service import monitoring_service
@@ -125,8 +128,28 @@ async def startup() -> None:
         )
     )
     commodity_c_fast_shadow_service.start()
+    if settings.commodity_c_fast_simnow_execution_permit_enabled:
+        # The runtime image must package the exact #165 verifier module before
+        # this default-off bridge can be enabled.  Missing verifier code is a
+        # startup failure, never a downgrade to embedded hash assertions.
+        from commodity_c_fast_simnow_research_acceptance import (
+            CONSUME_SCHEMA_PATH,
+            RECEIPT_SCHEMA_PATH,
+            validate_json_schema,
+            verify_signed_acceptance,
+        )
+
+        commodity_c_fast_execution_permit_service.acceptance_evidence.bind_full_acceptance_verifier(
+            verify_signed_acceptance,
+            contract_schema_validator=validate_json_schema,
+            consume_schema_path=CONSUME_SCHEMA_PATH,
+            receipt_schema_path=RECEIPT_SCHEMA_PATH,
+        )
     commodity_simnow_service.bind_c_fast_snapshot_provider(
         commodity_c_fast_shadow_service.accepted_snapshot_for_control
+    )
+    commodity_simnow_service.bind_c_fast_execution_permit_provider(
+        commodity_c_fast_execution_permit_service.verified_permit_for_snapshot
     )
     try:
         monitoring_service.start()
