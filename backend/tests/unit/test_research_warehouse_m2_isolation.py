@@ -294,6 +294,41 @@ def build_private_manifest(
     return path
 
 
+def release_artifact_fixture(
+    tmp_path: Path,
+) -> tuple[Path, Path, Path, Path, int, int]:
+    release = tmp_path / "release"
+    binary_dir = release / "bin"
+    binary_dir.mkdir(parents=True)
+    release.chmod(0o755)
+    binary_dir.chmod(0o755)
+    executable = binary_dir / "research-warehouse-job"
+    executable.write_bytes(b"#!/bin/sh\nexit 0\n")
+    executable.chmod(0o555)
+    monitor_executable = binary_dir / "research-warehouse-monitor"
+    monitor_executable.write_bytes(b"#!/bin/sh\nexit 0\n")
+    monitor_executable.chmod(0o555)
+    owner_uid = os.geteuid()
+    owner_gid = os.getegid()
+    manifest_path = build_private_manifest(
+        tmp_path,
+        release,
+        owner_uid,
+        owner_gid,
+    )
+    output_path = tmp_path / "success-output.json"
+    output_path.write_bytes(b'{"status":"ok"}\n')
+    output_path.chmod(0o600)
+    return (
+        release,
+        executable,
+        manifest_path,
+        output_path,
+        owner_uid,
+        owner_gid,
+    )
+
+
 def test_policy_assets_and_healthy_evidence(tmp_path: Path) -> None:
     value = policy()
     assets = verify_deployment_assets(M2_DIR, policy=value)
@@ -516,31 +551,15 @@ def test_probe_hash_binds_class_host_time_and_normalized_result() -> None:
 def test_release_manifest_and_output_are_recomputed_from_files(
     tmp_path: Path,
 ) -> None:
-    release = tmp_path / "release"
-    binary_dir = release / "bin"
-    binary_dir.mkdir(parents=True)
-    release.chmod(0o755)
-    binary_dir.chmod(0o755)
-    executable = binary_dir / "research-warehouse-job"
-    executable.write_bytes(b"#!/bin/sh\nexit 0\n")
-    executable.chmod(0o555)
-    monitor_executable = binary_dir / "research-warehouse-monitor"
-    monitor_executable.write_bytes(b"#!/bin/sh\nexit 0\n")
-    monitor_executable.chmod(0o555)
-    owner_uid = os.geteuid()
-    owner_gid = os.getegid()
-    manifest = build_release_tree_manifest(
+    (
         release,
-        logical_release_root=policy().payload["release_root"],
-        expected_owner_uid=owner_uid,
-        expected_owner_gid=owner_gid,
-    )
-    manifest_path = tmp_path / "release-manifest.json"
-    manifest_path.write_bytes(canonical_json_line(manifest))
-    manifest_path.chmod(0o600)
-    output_path = tmp_path / "success-output.json"
-    output_path.write_bytes(b'{"status":"ok"}\n')
-    output_path.chmod(0o600)
+        executable,
+        manifest_path,
+        output_path,
+        owner_uid,
+        owner_gid,
+    ) = release_artifact_fixture(tmp_path)
+    manifest = json.loads(manifest_path.read_bytes())
     result = verify_release_artifacts(
         policy=policy(),
         release_root=release,
@@ -608,6 +627,61 @@ def test_release_manifest_and_output_are_recomputed_from_files(
             expected_release_owner_uid=owner_uid,
             expected_release_owner_gid=owner_gid,
         )
+
+
+@pytest.mark.parametrize("race", ["add-after-enumerate", "replace-after-entry"])
+def test_release_tree_concurrent_membership_and_entry_races_fail_closed(
+    tmp_path: Path,
+    race: str,
+) -> None:
+    (
+        release,
+        executable,
+        manifest_path,
+        output_path,
+        owner_uid,
+        owner_gid,
+    ) = release_artifact_fixture(tmp_path)
+    fired = False
+
+    def race_hook(event: str, relative_path: str) -> None:
+        nonlocal fired
+        if fired:
+            return
+        if (
+            race == "add-after-enumerate"
+            and event == "after_enumerate"
+            and relative_path == "bin"
+        ):
+            added = release / "bin/unpinned-tool"
+            added.write_bytes(b"unpinned\n")
+            added.chmod(0o555)
+            fired = True
+        elif (
+            race == "replace-after-entry"
+            and event == "after_entry"
+            and relative_path == "bin/research-warehouse-job"
+        ):
+            replacement = tmp_path / "replacement-job"
+            replacement.write_bytes(b"#!/bin/sh\nexit 9\n")
+            replacement.chmod(0o555)
+            os.replace(replacement, executable)
+            fired = True
+
+    with pytest.raises(RegistryError, match="release .*changed"):
+        verify_release_artifacts(
+            policy=policy(),
+            release_root=release,
+            manifest_path=manifest_path,
+            expected_manifest_raw_sha256=sha256(manifest_path.read_bytes()),
+            output_path=output_path,
+            expected_output_raw_sha256=sha256(output_path.read_bytes()),
+            output_owner_uid=owner_uid,
+            expected_release_owner_uid=owner_uid,
+            expected_release_owner_gid=owner_gid,
+            _scan_hook=race_hook,
+        )
+    assert fired is True
 
 
 @pytest.mark.parametrize(
@@ -691,6 +765,7 @@ def test_cli_and_research_only_import_boundary(
         "m2_isolation_audit.py",
         "m2_probe_binding.py",
         "m2_release_artifacts.py",
+        "m2_release_tree_custody.py",
         "m2_success_binding.py",
         "m2_monitor.py",
         "m2_isolation_cli.py",

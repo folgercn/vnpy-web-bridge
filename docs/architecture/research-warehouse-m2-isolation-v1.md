@@ -17,6 +17,9 @@ operator action followed by freshly captured, externally SHA-pinned evidence.
   normalized post-activation probe class.
 - `m2_release_artifacts.py` rescans the root-owned release tree and successful
   output against independently retained raw-pinned artifacts.
+- `m2_release_tree_custody.py` performs the fd-relative recursive scan, keeps
+  every directory/file descriptor held, then rechecks directory membership
+  and pathname-to-fd identity before release verification completes.
 - `m2_success_binding.py` binds those verified artifacts to one exact
   post-activation success receipt and monitor completion.
 - `m2_monitor.py` is a pure evaluator for last success, missing official day,
