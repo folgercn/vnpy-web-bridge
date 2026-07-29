@@ -94,7 +94,9 @@ export COMMODITY_C_FAST_SHADOW_SNAPSHOT_PATH=\
 `/private/runtime`）。installer 打开并绑定该父目录的 device/inode 后，所有
 staging、child file、cleanup、fsync 和 no-replace rename 都只通过同一个
 parent directory fd 加 basename 执行，并在发布前后复核当前 parent path
-仍指向同一 inode。
+仍指向同一 inode。post-publish 内容校验完成后、installer 返回成功前还会再次
+复核 configured parent path identity；即使 parent 在 pinned-fd 校验期间被替换，
+也必须 fail closed，不能把已经失效的 configured path 报告为安装成功。
 
 installer 在该 pinned parent 内的私有 staging directory 中 create-only 写入
 `snapshot.json` 与 `snapshot.json.sha256`，分别 fsync 两个文件，再 fsync

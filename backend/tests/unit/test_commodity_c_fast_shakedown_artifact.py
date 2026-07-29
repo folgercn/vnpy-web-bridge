@@ -776,6 +776,49 @@ def test_parent_swap_during_publish_fails_closed_on_pinned_directory(
     assert not list(parent.glob(".c-fast-snapshot.staging-*"))
 
 
+def test_parent_swap_during_post_publish_validation_never_returns_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = tmp_path / "private-parent"
+    retired_parent = tmp_path / "retired-parent"
+    parent.mkdir(mode=0o700)
+    destination = parent / "c-fast-snapshot"
+    real_validate = ARTIFACT._validate_snapshot_installation_at
+    swapped = False
+
+    def validate_then_swap_parent(
+        parent_fd: int,
+        destination_name: str,
+    ) -> str:
+        nonlocal swapped
+        digest = real_validate(parent_fd, destination_name)
+        if not swapped:
+            swapped = True
+            parent.rename(retired_parent)
+            parent.mkdir(mode=0o700)
+        return digest
+
+    monkeypatch.setattr(
+        ARTIFACT,
+        "_validate_snapshot_installation_at",
+        validate_then_swap_parent,
+    )
+
+    with pytest.raises(
+        ARTIFACT.SnapshotInstallInvalidError,
+        match="parent path changed",
+    ):
+        ARTIFACT.install_snapshot_bundle(destination, b'{"value":1}')
+
+    assert swapped is True
+    assert not destination.exists()
+    retired_destination = retired_parent / destination.name
+    assert ARTIFACT.validate_snapshot_installation(
+        retired_destination
+    ) == hashlib.sha256(b'{"value":1}').hexdigest()
+
+
 def test_half_installed_destination_fails_closed_and_is_not_repaired(
     tmp_path: Path,
 ) -> None:

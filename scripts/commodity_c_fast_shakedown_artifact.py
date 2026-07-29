@@ -623,6 +623,11 @@ def install_snapshot_bundle(destination: Path, canonical: bytes) -> str:
             raise SnapshotInstallInvalidError(
                 "published snapshot installation changed unexpectedly"
             )
+        _assert_path_identity(
+            destination.parent,
+            parent_identity,
+            label="snapshot installation parent",
+        )
         return installed_digest
     finally:
         if staging_fd is not None:
