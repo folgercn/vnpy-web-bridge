@@ -28,7 +28,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "verify-registry":
             registry = load_registry(args.registry)
             output = {
-                "authority": registry.authority["class"],
+                "authority": registry.authority.authority_class,
                 "registry_id": registry.registry_id,
                 "registry_raw_sha256": registry.raw_sha256,
                 "sources": [source.source_id for source in registry.sources],

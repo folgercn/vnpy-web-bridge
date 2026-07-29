@@ -3,7 +3,22 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+
+
+@dataclass(frozen=True)
+class AuthorityPolicy:
+    authority_class: str
+    account_data_authorized: bool
+    control_authorized: bool
+    deployment_authorized: bool
+    dispatch_authorized: bool
+    execution_authorized: bool
+    order_authorized: bool
+    permit_authorized: bool
+    position_authorized: bool
+    production_authorized: bool
+    rpc_authorized: bool
+    trading_authorized: bool
 
 
 @dataclass(frozen=True)
@@ -33,7 +48,7 @@ class SourceRegistry:
     raw_sha256: str
     timezone: str
     timestamp_storage: str
-    authority: dict[str, Any]
+    authority: AuthorityPolicy
     sources: tuple[SourceEndpoint, ...]
 
     def source(self, source_id: str) -> SourceEndpoint:

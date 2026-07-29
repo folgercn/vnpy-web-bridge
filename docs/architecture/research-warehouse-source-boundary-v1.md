@@ -10,8 +10,9 @@ and #173.
 
 The registry is
 `deployments/research-warehouse/source-registry-v1.json`. Its exact raw SHA256
-is an input to future acquisition manifests; changing any byte creates a new
-registry version.
+is pinned in the trusted validator and is an input to future acquisition
+manifests. The validator rejects any byte change before semantic parsing;
+changing the registry requires a newly reviewed version and pin.
 
 ## Frozen official sources
 

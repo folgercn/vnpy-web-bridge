@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from string import Formatter
 from urllib.parse import urlparse
 
 from .errors import RegistryError
+from .models import AuthorityPolicy
 
 RESEARCH_AUTHORITY = "RESEARCH_DATA_CUSTODY_EVIDENCE_ONLY"
 FALSE_AUTHORITY_FIELDS = (
@@ -26,14 +28,17 @@ APPROVED_MEDIA_TYPES = frozenset(
 )
 
 
-def validate_authority(authority: object) -> dict[str, object]:
+def validate_authority(authority: object) -> AuthorityPolicy:
     if not isinstance(authority, dict):
         raise RegistryError("authority policy must be an object")
     expected = {"class": RESEARCH_AUTHORITY}
     expected.update({field: False for field in FALSE_AUTHORITY_FIELDS})
     if authority != expected:
         raise RegistryError("registry authority policy is not the frozen Research-only policy")
-    return authority
+    return AuthorityPolicy(
+        authority_class=RESEARCH_AUTHORITY,
+        **{field: False for field in FALSE_AUTHORITY_FIELDS},
+    )
 
 
 def validate_https_url(
@@ -45,12 +50,19 @@ def validate_https_url(
 ) -> str:
     rendered = value
     if allow_template:
+        fields = [
+            (field_name, format_spec, conversion)
+            for _, field_name, format_spec, conversion in Formatter().parse(value)
+            if field_name is not None
+        ]
+        if fields != [("yyyymmdd", "", None)]:
+            raise RegistryError(
+                f"{label} must contain exactly one plain {{yyyymmdd}} field"
+            )
         try:
             rendered = value.format(yyyymmdd="20260728")
         except (IndexError, KeyError, ValueError) as exc:
             raise RegistryError(f"{label} contains an unsupported template") from exc
-        if value.count("{yyyymmdd}") != 1:
-            raise RegistryError(f"{label} must contain exactly one {{yyyymmdd}}")
     parsed = urlparse(rendered)
     if parsed.scheme != "https":
         raise RegistryError(f"{label} must use HTTPS")

@@ -11,6 +11,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .contracts import (
+    FROZEN_PUBLISHED_AT,
+    FROZEN_REGISTRY_ID,
+    FROZEN_REGISTRY_RAW_SHA256,
+    FROZEN_SOURCES,
+)
 from .errors import RegistryError
 from .models import SourceEndpoint, SourceRegistry
 from .policy import (
@@ -196,6 +202,9 @@ def _source(value: Any) -> SourceEndpoint:
 
 def load_registry(path: Path) -> SourceRegistry:
     raw = _read_exact_regular(path)
+    raw_sha256 = hashlib.sha256(raw).hexdigest()
+    if raw_sha256 != FROZEN_REGISTRY_RAW_SHA256:
+        raise RegistryError("source registry raw SHA256 does not match the audited v1 pin")
     try:
         payload = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -207,6 +216,8 @@ def load_registry(path: Path) -> SourceRegistry:
     registry_id = _string(payload["registry_id"], "registry_id")
     if ID_PATTERN.fullmatch(registry_id) is None:
         raise RegistryError("invalid registry_id")
+    if registry_id != FROZEN_REGISTRY_ID:
+        raise RegistryError("source registry registry_id is not the audited v1 ID")
     if payload["timezone"] != "Asia/Shanghai":
         raise RegistryError("source registry must freeze Asia/Shanghai")
     if payload["timestamp_storage"] != "UTC":
@@ -219,13 +230,18 @@ def load_registry(path: Path) -> SourceRegistry:
         raise RegistryError("v1 registry must cover exactly SHFE and INE")
     if len({item.source_id for item in sources}) != len(sources):
         raise RegistryError("source_id values must be unique")
+    if sources != FROZEN_SOURCES:
+        raise RegistryError("source entries do not match the audited exact v1 contracts")
+    published_at = _utc_timestamp(payload["published_at"], "published_at")
+    if published_at != FROZEN_PUBLISHED_AT:
+        raise RegistryError("source registry published_at is not the audited v1 value")
     authority = validate_authority(payload["authority"])
     return SourceRegistry(
         registry_id=registry_id,
         schema_version=payload["schema_version"],
-        published_at=_utc_timestamp(payload["published_at"], "published_at"),
+        published_at=published_at,
         raw=raw,
-        raw_sha256=hashlib.sha256(raw).hexdigest(),
+        raw_sha256=raw_sha256,
         timezone=payload["timezone"],
         timestamp_storage=payload["timestamp_storage"],
         authority=authority,
