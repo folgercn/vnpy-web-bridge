@@ -9,6 +9,7 @@ from .canonical import sha256
 from .errors import RegistryError
 from .file_integrity import read_regular_strict
 from .m2_isolation_contracts import (
+    LOCK_RUNNER_SHA256,
     PF_ANCHOR_SHA256,
     PLIST_SHA256,
     WRAPPER_SHA256,
@@ -65,13 +66,26 @@ def verify_deployment_assets(
         if sha256(raw) != expected:
             raise RegistryError(f"{name} wrapper raw SHA256 mismatch")
         text = raw.decode("utf-8")
-        if (
-            not text.startswith("#!/bin/sh\nset -eu\numask 077\nexec ")
-            or policy.payload["release_root"] not in text
-            or policy.payload["runtime_root"] in text
-        ):
+        role = "warehouse" if name == "run-warehouse" else "monitor"
+        expected_text = (
+            "#!/bin/sh\n"
+            "set -eu\n"
+            "umask 077\n"
+            f"exec {policy.payload['libexec_root']}/release-lock-runner {role}\n"
+        )
+        if text != expected_text:
             raise RegistryError(f"{name} wrapper isolation contract mismatch")
         actual[installed_path] = expected
+    runner_path = directory / "release-lock-runner"
+    runner_raw = _asset_raw(runner_path, "release lock runner")
+    if (
+        sha256(runner_raw) != LOCK_RUNNER_SHA256
+        or policy.payload["release_lock_path"].encode() not in runner_raw
+        or policy.payload["release_root"].encode() not in runner_raw
+        or policy.payload["runtime_root"].encode() in runner_raw
+    ):
+        raise RegistryError("release lock runner isolation contract mismatch")
+    actual[f"{policy.payload['libexec_root']}/release-lock-runner"] = LOCK_RUNNER_SHA256
     pf_raw = _asset_raw(directory / "pf.vnpyresearch.conf", "PF anchor")
     if sha256(pf_raw) != PF_ANCHOR_SHA256:
         raise RegistryError("PF anchor raw SHA256 mismatch")

@@ -8,6 +8,7 @@ from typing import Any
 
 from .errors import RegistryError
 from .m2_isolation_contracts import (
+    LOCK_RUNNER_SHA256,
     PF_ANCHOR_SHA256,
     PLIST_SHA256,
     WRAPPER_SHA256,
@@ -116,11 +117,7 @@ def _exact(value: object, keys: set[str], label: str) -> dict[str, Any]:
 
 
 def _ip_list(value: object, label: str, *, public: bool) -> list[str]:
-    if (
-        not isinstance(value, list)
-        or not value
-        or len(value) != len(set(value))
-    ):
+    if not isinstance(value, list) or not value or len(value) != len(set(value)):
         raise RegistryError(f"{label} must be a unique non-empty IP list")
     result = []
     for item in value:
@@ -130,8 +127,10 @@ def _ip_list(value: object, label: str, *, public: bool) -> list[str]:
             address = ipaddress.ip_address(item)
         except ValueError as exc:
             raise RegistryError(f"{label} contains an invalid IP") from exc
-        if address.is_unspecified or address.is_multicast or (
-            public and not address.is_global
+        if (
+            address.is_unspecified
+            or address.is_multicast
+            or (public and not address.is_global)
         ):
             raise RegistryError(f"{label} contains a forbidden IP")
         result.append(address.compressed)
@@ -140,7 +139,7 @@ def _ip_list(value: object, label: str, *, public: bool) -> list[str]:
     return result
 
 
-def verify_isolation_evidence(
+def verify_isolation_evidence_semantics(
     evidence: dict[str, Any],
     *,
     policy: IsolationPolicy,
@@ -157,6 +156,7 @@ def verify_isolation_evidence(
             "registry_raw_sha256",
             "release_tree_raw_sha256",
             "release_tree_manifest_raw_sha256",
+            "release_lock_identity",
             "activation",
             "identity",
             "launchd",
@@ -181,11 +181,9 @@ def verify_isolation_evidence(
     ):
         raise RegistryError("M2 evidence time is invalid")
     if (
-        require_sha(evidence["host_identity"], "M2 host identity")
-        == "0" * 64
+        require_sha(evidence["host_identity"], "M2 host identity") == "0" * 64
         or evidence["policy_raw_sha256"] != policy.raw_sha256
-        or evidence["registry_raw_sha256"]
-        != policy.payload["registry_raw_sha256"]
+        or evidence["registry_raw_sha256"] != policy.payload["registry_raw_sha256"]
         or evidence["authority"] != false_authority()
     ):
         raise RegistryError("M2 evidence top-level binding mismatch")
@@ -217,10 +215,7 @@ def verify_isolation_evidence(
         probe_class: str,
     ) -> None:
         observed = parse_utc(value["observed_at"], f"{label} observed_at")
-        if (
-            observed < activated
-            or observed > captured
-        ):
+        if observed < activated or observed > captured:
             raise RegistryError(f"{label} predates active policy")
         verify_probe_result_sha256(
             value,
@@ -251,10 +246,10 @@ def verify_isolation_evidence(
     if (
         launchd["loaded_labels"] != policy.payload["launchd_labels"]
         or launchd["plist_raw_sha256s"] != PLIST_SHA256
-        or launchd["jobs_run_as_user"] != {
-            label: policy.user for label in policy.payload["launchd_labels"]
-        }
-        or launchd["program_arguments"] != {
+        or launchd["jobs_run_as_user"]
+        != {label: policy.user for label in policy.payload["launchd_labels"]}
+        or launchd["program_arguments"]
+        != {
             label: [policy.payload["program_paths"][label]]
             for label in policy.payload["launchd_labels"]
         }
@@ -309,12 +304,18 @@ def verify_isolation_evidence(
         ):
             raise RegistryError("M2 code root is service-user writable")
     executables = filesystem["executable_facts"]
-    if not isinstance(executables, dict) or set(executables) != set(WRAPPER_SHA256):
+    expected_executables = {
+        **WRAPPER_SHA256,
+        f"{policy.payload['libexec_root']}/release-lock-runner": (LOCK_RUNNER_SHA256),
+    }
+    if not isinstance(executables, dict) or set(executables) != set(
+        expected_executables
+    ):
         raise RegistryError("M2 executable evidence set mismatch")
     for path, facts in executables.items():
         _exact(facts, EXECUTABLE_FACT_KEYS, "M2 executable fact")
         if (
-            facts["raw_sha256"] != WRAPPER_SHA256[path]
+            facts["raw_sha256"] != expected_executables[path]
             or facts["owner_uid"] != 0
             or facts["owner_gid"] != 0
             or facts["mode"] != "0555"
@@ -356,9 +357,8 @@ def verify_isolation_evidence(
         public=True,
     )
     resolutions = network["resolved_registry_hosts"]
-    if (
-        not isinstance(resolutions, dict)
-        or set(resolutions) != set(policy.payload["allowed_https_hosts"])
+    if not isinstance(resolutions, dict) or set(resolutions) != set(
+        policy.payload["allowed_https_hosts"]
     ):
         raise RegistryError("M2 registry resolution evidence mismatch")
     resolved = set()
@@ -381,10 +381,7 @@ def verify_isolation_evidence(
         or network["allowed_egress_classes_observed"]
         != policy.payload["allowed_egress_classes"]
         or network["forbidden_target_connectivity"]
-        != {
-            target: False
-            for target in policy.payload["forbidden_network_targets"]
-        }
+        != {target: False for target in policy.payload["forbidden_network_targets"]}
         or network["docker_socket_connectivity"] is not False
         or network["docker_network_membership"] is not False
         or network["unexpected_egress"] != []
@@ -419,12 +416,10 @@ def verify_isolation_evidence(
         now=now,
     )
     if monitor["status"] != "HEALTHY":
-        raise RegistryError(
-            "M2 monitor is degraded: " + ",".join(monitor["incidents"])
-        )
+        raise RegistryError("M2 monitor is degraded: " + ",".join(monitor["incidents"]))
     return {
-        "schema_version": "vnpy_research_m2_isolation_result_v1",
-        "status": "M2_RESEARCH_ISOLATION_VERIFIED",
+        "schema_version": "vnpy_research_m2_isolation_semantics_result_v1",
+        "status": "M2_RESEARCH_ISOLATION_SEMANTICS_VERIFIED",
         "policy_raw_sha256": policy.raw_sha256,
         "release_tree_raw_sha256": evidence["release_tree_raw_sha256"],
         "release_tree_manifest_raw_sha256": evidence[

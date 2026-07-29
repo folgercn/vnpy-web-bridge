@@ -26,6 +26,7 @@ SUCCESS_RECEIPT_KEYS = {
     "pf_anchor_raw_sha256",
     "release_tree_raw_sha256",
     "release_tree_manifest_raw_sha256",
+    "release_lock_identity",
     "started_at",
     "completed_at",
     "output_path",
@@ -39,6 +40,7 @@ SUCCESS_RECEIPT_KEYS = {
     "nlink",
 }
 RELEASE_ARTIFACT_KEYS = {
+    "release_lock_identity",
     "release_tree_manifest_raw_sha256",
     "release_tree_content_sha256",
     "release_root_identity",
@@ -71,6 +73,19 @@ def _verified_artifact_values(
         RELEASE_ARTIFACT_KEYS,
         "M2 verified release artifacts",
     )
+    lock = _exact(
+        artifacts["release_lock_identity"],
+        {
+            "path",
+            "device",
+            "inode",
+            "owner_uid",
+            "owner_gid",
+            "mode",
+            "nlink",
+        },
+        "M2 release deployment lock identity",
+    )
     if (
         require_sha(
             artifacts["release_tree_content_sha256"],
@@ -82,8 +97,23 @@ def _verified_artifact_values(
             "verified M2 release tree manifest",
         )
         != evidence["release_tree_manifest_raw_sha256"]
+        or lock != evidence["release_lock_identity"]
     ):
         raise RegistryError("M2 verified release artifact binding mismatch")
+    if (
+        lock["path"] != policy.payload["release_lock_path"]
+        or lock["owner_uid"] != 0
+        or lock["owner_gid"] != 0
+        or lock["mode"] != "0444"
+        or lock["nlink"] != 1
+        or any(
+            isinstance(lock[field], bool)
+            or not isinstance(lock[field], int)
+            or lock[field] <= 0
+            for field in ("device", "inode")
+        )
+    ):
+        raise RegistryError("M2 release deployment lock custody mismatch")
     root = _exact(
         artifacts["release_root_identity"],
         {"device", "inode", "owner_uid", "owner_gid", "mode"},
@@ -146,18 +176,17 @@ def verify_release_success_binding(
     started = parse_utc(receipt["started_at"], "M2 receipt started_at")
     completed = parse_utc(receipt["completed_at"], "M2 receipt completed_at")
     if (
-        receipt["schema_version"]
-        != "vnpy_research_m2_success_receipt_v1"
+        receipt["schema_version"] != "vnpy_research_m2_success_receipt_v1"
         or receipt["host_identity"] != evidence["host_identity"]
         or receipt["service_uid"] != identity["uid"]
         or receipt["service_gid"] != identity["gid"]
         or receipt["policy_raw_sha256"] != policy.raw_sha256
         or receipt["plist_raw_sha256s"] != PLIST_SHA256
         or receipt["pf_anchor_raw_sha256"] != PF_ANCHOR_SHA256
-        or receipt["release_tree_raw_sha256"]
-        != evidence["release_tree_raw_sha256"]
+        or receipt["release_tree_raw_sha256"] != evidence["release_tree_raw_sha256"]
         or receipt["release_tree_manifest_raw_sha256"]
         != evidence["release_tree_manifest_raw_sha256"]
+        or receipt["release_lock_identity"] != artifacts["release_lock_identity"]
         or started < activated
         or completed < started
         or completed > captured
@@ -173,8 +202,7 @@ def verify_release_success_binding(
         or receipt["regular"] is not True
         or receipt["nlink"] != artifacts["output_nlink"]
         or receipt["nlink"] != 1
-        or evidence["monitor_input"]["last_success_at"]
-        != receipt["completed_at"]
+        or evidence["monitor_input"]["last_success_at"] != receipt["completed_at"]
         or parse_utc(
             evidence["monitor_input"]["last_backup_at"],
             "M2 last backup",

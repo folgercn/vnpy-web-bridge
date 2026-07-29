@@ -20,8 +20,14 @@ operator action followed by freshly captured, externally SHA-pinned evidence.
 - `m2_release_tree_custody.py` performs the fd-relative recursive scan, keeps
   every directory/file descriptor held, then rechecks directory membership
   and pathname-to-fd identity before release verification completes.
+- `m2_release_lock.py` supplies the root-owned deployment lock: verification
+  and job execution take a shared lock; every supported release update must
+  take the exclusive lock.
 - `m2_success_binding.py` binds those verified artifacts to one exact
   post-activation success receipt and monitor completion.
+- `m2_verifier.py` is the only public layer that can issue final
+  `M2_RESEARCH_ISOLATION_VERIFIED`; it always loads raw-pinned files, takes
+  the deployment lock and performs artifact I/O before semantic checks.
 - `m2_monitor.py` is a pure evaluator for last success, missing official day,
   unreviewed revision, hash mismatch, disk capacity, and backup freshness.
 - `m2_isolation_cli.py` is argument and output plumbing.
@@ -92,6 +98,17 @@ service-owned runtime directory. The service writes only its private
 custody/runtime/backup roots. Activating the plists before PF default-block
 and negative preflight pass is forbidden.
 
+Both raw-pinned wrappers enter the root-owned `release-lock-runner`. The
+runner validates `/usr/local/libexec/vnpyresearch/release.lock` as a
+root-owned, single-link `0444` regular file, takes a shared lock and keeps its
+descriptor inherited for the entire warehouse/monitor process lifetime.
+The verifier holds the same shared lock from tree scan through final result.
+All supported root release installation or switching must use
+`hold_release_update_lock()` for the entire mutation; the exclusive lock
+serializes it against verification and running jobs. Direct in-place changes
+that ignore this contract are unsupported root compromise, not a deployment
+path.
+
 ## Monitoring
 
 The monitor fails degraded on any of:
@@ -126,11 +143,13 @@ activation steps.
 A separately retained canonical release-tree manifest binds every relative
 path, type, byte count, raw SHA-256, owner/mode/link fact, device/inode and
 the release-root identity. Verification rescans the installed root-owned tree
-and requires exact manifest equality. The successful output is also read
+and requires exact manifest equality while the shared deployment lock is
+held. The successful output is also read
 through stable non-symlink custody and checked against an independent raw
 SHA-256 plus device/inode/owner/mode/link facts. The create-only success
 receipt binds those verified artifacts together with host, uid/gid, policy,
-plist, PF and completion time. Its completion must equal the monitor's
+plist, PF, exact deployment-lock identity and completion time. Its completion
+must equal the monitor's
 last-success time; backup verification must also be newer than activation.
 This prevents pre-activation replay and hash-only artifact claims.
 

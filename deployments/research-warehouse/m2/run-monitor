@@ -1,4 +1,4 @@
 #!/bin/sh
 set -eu
 umask 077
-exec /usr/local/libexec/vnpyresearch/release/bin/research-warehouse-monitor
+exec /usr/local/libexec/vnpyresearch/release-lock-runner monitor

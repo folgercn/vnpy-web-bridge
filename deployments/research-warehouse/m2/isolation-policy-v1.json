@@ -9,6 +9,7 @@
   "backup_root": "/Users/Shared/vnpy-research/backups",
   "libexec_root": "/usr/local/libexec/vnpyresearch",
   "release_root": "/usr/local/libexec/vnpyresearch/release",
+  "release_lock_path": "/usr/local/libexec/vnpyresearch/release.lock",
   "umask": "077",
   "launchd_labels": [
     "com.vnpy.research-warehouse",

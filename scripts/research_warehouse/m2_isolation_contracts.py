@@ -13,9 +13,7 @@ from .manifest_contracts import SHA256_PATTERN
 
 POLICY_SCHEMA = "vnpy_research_m2_isolation_policy_v1"
 EVIDENCE_SCHEMA = "vnpy_research_m2_isolation_evidence_v1"
-POLICY_RAW_SHA256 = (
-    "34dd9ccafb045fbb954cad732e3cc4d6aa314880fadaa149c5031bc3e4ce0e55"
-)
+POLICY_RAW_SHA256 = "9eb01b945ca7c991f4df30da6219b27d902f5cc601176c20166811841a0d08a2"
 PLIST_SHA256 = {
     "com.vnpy.research-warehouse": (
         "c6fee8672ea38d898177a89c34b0f9491198d4d83df7acecc6c01a2469c50aa0"
@@ -26,15 +24,14 @@ PLIST_SHA256 = {
 }
 WRAPPER_SHA256 = {
     "/usr/local/libexec/vnpyresearch/run-warehouse": (
-        "1e8fc0574dba095be49d9a606c2718a5e058cfda9a223b53280210ae7db05e32"
+        "2ea400ef59f58faff6ba72535e7b4e5e1522e572ad099ff8bb341b4f370f1eed"
     ),
     "/usr/local/libexec/vnpyresearch/run-monitor": (
-        "98c4108c65e9284d9e085a8d64bc4b246bca20aaac18eb85329d3b791b9611d2"
+        "dce180546349a1870f504fff54cc9bec27cafafa26a05b070cc53fddceb25f97"
     ),
 }
-PF_ANCHOR_SHA256 = (
-    "9692ed110a0db70be5cf096ae2e0ace15544b0c2c20e89ce4cc8dc79363d936a"
-)
+LOCK_RUNNER_SHA256 = "db820909dc868ec6cb9b2bf71584030cf1c2c1a1025ff5684b6a48ec55557d21"
+PF_ANCHOR_SHA256 = "9692ed110a0db70be5cf096ae2e0ace15544b0c2c20e89ce4cc8dc79363d936a"
 AUTHORITY_FIELDS = (
     "account_data_read",
     "control_authorized",
@@ -59,6 +56,7 @@ POLICY_KEYS = {
     "backup_root",
     "libexec_root",
     "release_root",
+    "release_lock_path",
     "umask",
     "launchd_labels",
     "program_paths",
@@ -80,6 +78,7 @@ EVIDENCE_KEYS = {
     "registry_raw_sha256",
     "release_tree_raw_sha256",
     "release_tree_manifest_raw_sha256",
+    "release_lock_identity",
     "activation",
     "identity",
     "launchd",
@@ -171,6 +170,7 @@ def load_isolation_policy(path: Path) -> IsolationPolicy:
     if (
         payload["libexec_root"] != "/usr/local/libexec/vnpyresearch"
         or payload["release_root"] != f"{payload['libexec_root']}/release"
+        or payload["release_lock_path"] != f"{payload['libexec_root']}/release.lock"
         or payload["program_paths"] != expected_programs
         or set(payload["program_paths"].values()) != set(WRAPPER_SHA256)
     ):

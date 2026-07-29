@@ -12,6 +12,7 @@ from .canonical import canonical_json_line, parse_json_strict, sha256
 from .errors import RegistryError
 from .file_integrity import file_identity, read_regular_strict
 from .m2_isolation_contracts import IsolationPolicy, require_sha
+from .m2_release_lock import ReleaseLockIdentity
 from .m2_release_tree_custody import (
     HeldReleaseTree,
     mode_string,
@@ -40,8 +41,11 @@ ENTRY_KEYS = {
     "mode",
     "nlink",
 }
+
+
 @dataclass(frozen=True)
 class VerifiedReleaseArtifacts:
+    release_lock_identity: dict[str, int | str]
     release_tree_manifest_raw_sha256: str
     release_tree_content_sha256: str
     release_root_identity: dict[str, Any]
@@ -55,6 +59,7 @@ class VerifiedReleaseArtifacts:
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
+
 
 def release_tree_content_sha256(entries: list[dict[str, Any]]) -> str:
     return sha256(
@@ -137,6 +142,7 @@ def verify_release_artifacts(
     output_path: Path,
     expected_output_raw_sha256: str,
     output_owner_uid: int,
+    release_lock_identity: ReleaseLockIdentity,
     expected_release_owner_uid: int = 0,
     expected_release_owner_gid: int = 0,
     _scan_hook: Callable[[str, str], None] | None = None,
@@ -147,6 +153,8 @@ def verify_release_artifacts(
         or output_owner_uid <= 0
     ):
         raise RegistryError("M2 successful output owner UID is invalid")
+    if not isinstance(release_lock_identity, ReleaseLockIdentity):
+        raise RegistryError("M2 release lock was not independently verified")
     manifest, manifest_raw_sha256 = _load_manifest(
         manifest_path,
         expected_raw_sha256=expected_manifest_raw_sha256,
@@ -184,6 +192,7 @@ def verify_release_artifacts(
                 raise RegistryError("M2 successful output custody/hash mismatch")
             held.revalidate()
             return VerifiedReleaseArtifacts(
+                release_lock_identity=release_lock_identity.as_dict(),
                 release_tree_manifest_raw_sha256=manifest_raw_sha256,
                 release_tree_content_sha256=manifest["tree_content_sha256"],
                 release_root_identity=manifest["root_identity"],
