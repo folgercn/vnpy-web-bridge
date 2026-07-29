@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "export_id", "purpose", "created_at",
+    "lineage_raw_sha256", "lineage_sha256", "lineage",
+    "artifact_index_sha256", "artifacts", "authority",
+    "signer_key_id", "signer_public_key_sha256",
+    "keyring_raw_sha256", "signature"
+  ],
+  "properties": {
+    "schema_version": {"const": "vnpy_research_sealed_source_export_v1"},
+    "export_id": {"type": "string", "pattern": "^sealed-export-[0-9a-f]{64}$"},
+    "purpose": {"const": "C_FAST_RESEARCH_EVIDENCE_EXPORT_ONLY"},
+    "created_at": {"type": "string", "format": "date-time", "pattern": "Z$"},
+    "lineage_raw_sha256": {"$ref": "#/$defs/sha"},
+    "lineage_sha256": {"$ref": "#/$defs/sha"},
+    "lineage": {"$ref": "#/$defs/lineage"},
+    "artifact_index_sha256": {"$ref": "#/$defs/sha"},
+    "artifacts": {"$ref": "#/$defs/artifacts"},
+    "authority": {"$ref": "#/$defs/authority"},
+    "signer_key_id": {"type": "string", "pattern": "^[A-Za-z0-9._-]{8,128}$"},
+    "signer_public_key_sha256": {"$ref": "#/$defs/sha"},
+    "keyring_raw_sha256": {"$ref": "#/$defs/sha"},
+    "signature": {"type": "string", "minLength": 80}
+  },
+  "$defs": {
+    "sha": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "lineage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "registry_raw_sha256", "calendar_raw_sha256",
+        "calendar_anchor_sha256", "commit_anchor_ledger_sha256",
+        "manifest_genesis_seal_sha256", "manifest_head_seal_sha256",
+        "manifest_head_commit_seal_sha256", "pit_cutoff_at",
+        "research_as_of_official_day", "execution_day",
+        "source_view_canonical_sha256"
+      ],
+      "properties": {
+        "registry_raw_sha256": {"$ref": "#/$defs/sha"},
+        "calendar_raw_sha256": {"$ref": "#/$defs/sha"},
+        "calendar_anchor_sha256": {"$ref": "#/$defs/sha"},
+        "commit_anchor_ledger_sha256": {"$ref": "#/$defs/sha"},
+        "manifest_genesis_seal_sha256": {"$ref": "#/$defs/sha"},
+        "manifest_head_seal_sha256": {"$ref": "#/$defs/sha"},
+        "manifest_head_commit_seal_sha256": {"$ref": "#/$defs/sha"},
+        "pit_cutoff_at": {"type": "string", "format": "date-time", "pattern": "Z$"},
+        "research_as_of_official_day": {"type": "string", "format": "date"},
+        "execution_day": {"type": "string", "format": "date"},
+        "source_view_canonical_sha256": {"$ref": "#/$defs/sha"}
+      }
+    },
+    "binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "filename", "bytes", "raw_sha256",
+        "lineage_sha256", "pit_cutoff_at"
+      ],
+      "properties": {
+        "filename": {"type": "string", "pattern": "^[a-z_]+\\.json$"},
+        "bytes": {"type": "integer", "minimum": 1, "maximum": 67108864},
+        "raw_sha256": {"$ref": "#/$defs/sha"},
+        "lineage_sha256": {"$ref": "#/$defs/sha"},
+        "pit_cutoff_at": {"type": "string", "format": "date-time", "pattern": "Z$"}
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "freeze_contract", "research_manifest", "signal_evidence",
+        "target_evidence", "allocation_evidence", "daily_roll_evidence",
+        "reference_price_evidence", "calendar_authority",
+        "contract_spec_evidence"
+      ],
+      "properties": {
+        "freeze_contract": {"$ref": "#/$defs/binding"},
+        "research_manifest": {"$ref": "#/$defs/binding"},
+        "signal_evidence": {"$ref": "#/$defs/binding"},
+        "target_evidence": {"$ref": "#/$defs/binding"},
+        "allocation_evidence": {"$ref": "#/$defs/binding"},
+        "daily_roll_evidence": {"$ref": "#/$defs/binding"},
+        "reference_price_evidence": {"$ref": "#/$defs/binding"},
+        "calendar_authority": {"$ref": "#/$defs/binding"},
+        "contract_spec_evidence": {"$ref": "#/$defs/binding"}
+      }
+    },
+    "authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "control_authorized", "deployment_authorized", "execution_authorized",
+        "execution_permit_authorized", "network_authorized",
+        "web_bridge_rpc_authorized", "account_data_read", "order_authorized",
+        "position_mutation_authorized", "dispatch_authorized",
+        "trading_authorized", "production_authorized",
+        "replacement_authorized"
+      ],
+      "properties": {
+        "control_authorized": {"const": false},
+        "deployment_authorized": {"const": false},
+        "execution_authorized": {"const": false},
+        "execution_permit_authorized": {"const": false},
+        "network_authorized": {"const": false},
+        "web_bridge_rpc_authorized": {"const": false},
+        "account_data_read": {"const": false},
+        "order_authorized": {"const": false},
+        "position_mutation_authorized": {"const": false},
+        "dispatch_authorized": {"const": false},
+        "trading_authorized": {"const": false},
+        "production_authorized": {"const": false},
+        "replacement_authorized": {"const": false}
+      }
+    }
+  }
+}
