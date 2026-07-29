@@ -4,7 +4,10 @@ import hashlib
 import json
 from typing import Any
 
-from app.schemas.commodity_c_fast_shadow import CommodityCFastShadowDTO
+from app.schemas.commodity_c_fast_shadow import (
+    CommodityCFastRuntimeSnapshotDTO,
+    CommodityCFastShakedownSnapshotDTO,
+)
 
 
 def canonical_json(value: Any) -> bytes:
@@ -21,7 +24,7 @@ def sha256_json(value: Any) -> str:
 
 
 def formula_target_binding_payload(
-    snapshot: CommodityCFastShadowDTO,
+    snapshot: CommodityCFastRuntimeSnapshotDTO,
 ) -> dict[str, Any]:
     return {
         "schema_version": snapshot.schema_version,
@@ -66,9 +69,35 @@ def formula_target_binding_payload(
     }
 
 
-def formula_target_binding_sha256(snapshot: CommodityCFastShadowDTO) -> str:
+def formula_target_binding_sha256(
+    snapshot: CommodityCFastRuntimeSnapshotDTO,
+) -> str:
     return sha256_json(formula_target_binding_payload(snapshot))
 
 
-def unsigned_snapshot_payload(snapshot: CommodityCFastShadowDTO) -> dict[str, Any]:
+def unsigned_snapshot_payload(
+    snapshot: CommodityCFastRuntimeSnapshotDTO,
+) -> dict[str, Any]:
     return snapshot.model_dump(mode="json", exclude={"signature"})
+
+
+def shakedown_research_payload(
+    snapshot: CommodityCFastShakedownSnapshotDTO,
+) -> dict[str, Any]:
+    """Research-signed core, excluding all Control authority fields."""
+    return snapshot.model_dump(
+        mode="json",
+        exclude={
+            "research_signature",
+            "control_acceptance_id",
+            "execution_permit_id",
+            "accepted_at_utc",
+            "expires_at_utc",
+            "account_sha256",
+            "max_selected_products",
+            "max_child_order_lots",
+            "countable_forward",
+            "control_signer_key_id",
+            "signature",
+        },
+    )
