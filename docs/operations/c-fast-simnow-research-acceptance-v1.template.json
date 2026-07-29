@@ -1,0 +1,120 @@
+{
+  "template_state": "INVALID_TEMPLATE_DO_NOT_SIGN_REMOVE_THIS_FIELD",
+  "schema_version": "commodity_c_fast_simnow_research_acceptance_v1",
+  "purpose": "c_fast_simnow_research_control_acceptance",
+  "candidate_id": "C_FAST_CROSS_SECTION_NEUTRAL",
+  "parent_issue_number": 114,
+  "issue_number": 162,
+  "acceptance_id": "PENDING_DERIVED_BY_SIGNER",
+  "accepted_at": "PENDING_HUMAN_ACCEPTANCE_TIME",
+  "not_before": "PENDING_SHORT_VALIDITY_START",
+  "expires_at": "PENDING_MAX_15_MINUTE_EXPIRY",
+  "execution_day": "PENDING_YYYY-MM-DD",
+  "acceptance_state": "READY_FOR_HUMAN_SIMNOW_EXECUTION_PERMIT_ONLY",
+  "acceptance_scope": "CONTROL_PLANE_RESEARCH_EVIDENCE_ONLY",
+  "execution_permit_required": true,
+  "source_artifacts_exact_raw_reverified": true,
+  "signer_type": "human",
+  "reviewer_role": "PENDING_REAL_REVIEWER_ROLE",
+  "human_signature": "PENDING_REAL_HUMAN_SIGNATURE_TEXT",
+  "signer_key_id": "PENDING_CONTROL_ACCEPTANCE_KEY_ID",
+  "research_bundle_id": "PENDING_INSTALLED_RESEARCH_BUNDLE_ID",
+  "research_bundle_raw_sha256": "PENDING_DERIVED_BY_SIGNER",
+  "research_bundle_canonical_sha256": "PENDING_DERIVED_BY_SIGNER",
+  "research_keyring_raw_sha256": "PENDING_DERIVED_BY_SIGNER",
+  "research_install_claim_id": "PENDING_DERIVED_BY_SIGNER",
+  "research_install_claim_raw_sha256": "PENDING_DERIVED_BY_SIGNER",
+  "research_install_claim_canonical_sha256": "PENDING_DERIVED_BY_SIGNER",
+  "research_install_receipt_raw_sha256": "PENDING_DERIVED_BY_SIGNER",
+  "research_install_receipt_canonical_sha256": "PENDING_DERIVED_BY_SIGNER",
+  "research_artifact_bindings": {
+    "freeze_contract": {
+      "bytes": 0,
+      "raw_sha256": "PENDING_DERIVED_BY_SIGNER"
+    },
+    "research_manifest": {
+      "bytes": 0,
+      "raw_sha256": "PENDING_DERIVED_BY_SIGNER"
+    },
+    "signal_evidence": {
+      "bytes": 0,
+      "raw_sha256": "PENDING_DERIVED_BY_SIGNER"
+    },
+    "target_evidence": {
+      "bytes": 0,
+      "raw_sha256": "PENDING_DERIVED_BY_SIGNER"
+    },
+    "allocation_evidence": {
+      "bytes": 0,
+      "raw_sha256": "PENDING_DERIVED_BY_SIGNER"
+    },
+    "daily_roll_evidence": {
+      "bytes": 0,
+      "raw_sha256": "PENDING_DERIVED_BY_SIGNER"
+    },
+    "reference_price_evidence": {
+      "bytes": 0,
+      "raw_sha256": "PENDING_DERIVED_BY_SIGNER"
+    },
+    "calendar_authority": {
+      "bytes": 0,
+      "raw_sha256": "PENDING_DERIVED_BY_SIGNER"
+    },
+    "contract_spec_evidence": {
+      "bytes": 0,
+      "raw_sha256": "PENDING_DERIVED_BY_SIGNER"
+    }
+  },
+  "research_artifact_index_sha256": "PENDING_DERIVED_BY_SIGNER",
+  "formula_target_binding_sha256": "PENDING_DERIVED_BY_SIGNER",
+  "custody_root_path_sha256": "PENDING_DERIVED_BY_SIGNER",
+  "custody_identity_sha256": "PENDING_DERIVED_BY_SIGNER",
+  "research_install_files_identity_sha256": "PENDING_DERIVED_BY_SIGNER",
+  "acceptance_keyring_raw_sha256": "PENDING_DERIVED_BY_SIGNER",
+  "acceptance_verifier_sha256": "PENDING_DERIVED_BY_SIGNER",
+  "acceptance_signer_sha256": "PENDING_DERIVED_BY_SIGNER",
+  "acceptance_schema_sha256": "PENDING_DERIVED_BY_SIGNER",
+  "acceptance_keyring_schema_sha256": "PENDING_DERIVED_BY_SIGNER",
+  "consume_schema_sha256": "PENDING_DERIVED_BY_SIGNER",
+  "receipt_schema_sha256": "PENDING_DERIVED_BY_SIGNER",
+  "expected_simnow_account_sha256": "PENDING_INDEPENDENT_ACCOUNT_SHA256",
+  "selected_products": ["PENDING_PRODUCT"],
+  "selected_targets": [
+    {
+      "product": "PENDING_PRODUCT",
+      "exact_contract": "PENDING_EXACT_CONTRACT",
+      "previous_target_quantity": 0,
+      "signed_target_quantity": 0,
+      "signed_target_delta": 0,
+      "signed_target_row_sha256": "PENDING_DERIVED_BY_SIGNER"
+    }
+  ],
+  "selected_target_index_sha256": "PENDING_DERIVED_BY_SIGNER",
+  "acceptance_is_deployment_authority": false,
+  "acceptance_is_execution_authority": false,
+  "countable_forward": false,
+  "official_forward_claimed": false,
+  "production_allowed": false,
+  "deployment_authorized": false,
+  "execution_permit_issued": false,
+  "simnow_execution_authorized": false,
+  "runtime_activation_authorized": false,
+  "network_authorized": false,
+  "web_bridge_rpc_authorized": false,
+  "order_authorized": false,
+  "order_submission_authorized": false,
+  "position_read_authorized": false,
+  "position_mutation_authorized": false,
+  "dispatch_authorized": false,
+  "trading_authorized": false,
+  "replacement_authorized": false,
+  "production_authorized": false,
+  "automatic_promotion_authorized": false,
+  "dynamic_selection_allowed": false,
+  "replay_allowed": false,
+  "account_data_read": false,
+  "execution_data_read": false,
+  "orders_sent": 0,
+  "positions_modified": 0,
+  "web_bridge_rpc_calls": 0
+}
