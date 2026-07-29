@@ -6,21 +6,26 @@ from datetime import timedelta
 from pathlib import Path
 
 import pytest
-
 from app.core.config import Settings
+from app.services.commodity_c_fast_one_shot_custody import (
+    one_shot_custody_pins,
+)
 from app.services.commodity_c_fast_research_acceptance_evidence import (
     CommodityCFastResearchAcceptanceEvidenceError,
     CommodityCFastResearchAcceptanceEvidenceService,
 )
+from pydantic import ValidationError
 from test_commodity_c_fast_simnow_research_acceptance import (
     ACCEPTANCE_NOW,
     ACCOUNT_SHA256,
     acceptance,
-    acceptance_inputs as _source_acceptance_inputs_fixture,
     bundle,
     consume_kwargs,
     signed_acceptance,
     write_json,
+)
+from test_commodity_c_fast_simnow_research_acceptance import (
+    acceptance_inputs as _source_acceptance_inputs_fixture,
 )
 
 
@@ -46,6 +51,15 @@ def build_runtime_evidence(
         **consume_kwargs(inputs),
     )
     custody = bundle.custody_facts(inputs["custody_dir"])
+    inputs["private_dir"].chmod(0o700)
+    one_shot_custody = inputs["private_dir"] / "execution-one-shot"
+    one_shot_custody.mkdir(mode=0o700)
+    one_shot_custody.chmod(0o700)
+    one_shot_owner_uid = one_shot_custody.stat().st_uid
+    one_shot_pins = one_shot_custody_pins(
+        one_shot_custody,
+        expected_owner_uid=one_shot_owner_uid,
+    )
     settings = Settings(
         commodity_c_fast_simnow_execution_permit_enabled=True,
         commodity_c_fast_simnow_execution_permit_path=str(
@@ -55,6 +69,18 @@ def build_runtime_evidence(
             inputs["private_dir"] / "execution-keyring.json"
         ),
         commodity_c_fast_simnow_execution_permit_expected_keyring_raw_sha256=("9" * 64),
+        commodity_c_fast_simnow_execution_one_shot_custody_root=str(
+            one_shot_custody
+        ),
+        commodity_c_fast_simnow_execution_one_shot_expected_root_path_sha256=(
+            one_shot_pins.root_path_sha256
+        ),
+        commodity_c_fast_simnow_execution_one_shot_expected_identity_sha256=(
+            one_shot_pins.identity_sha256
+        ),
+        commodity_c_fast_simnow_execution_one_shot_expected_owner_uid=(
+            one_shot_owner_uid
+        ),
         commodity_c_fast_simnow_research_acceptance_path=str(signed_path),
         commodity_c_fast_simnow_research_acceptance_consume_path=str(consume_path),
         commodity_c_fast_simnow_research_acceptance_receipt_path=str(receipt_path),
@@ -121,6 +147,44 @@ def test_runtime_reuses_full_pr165_verifier_and_exact_receipt(
         verified.receipt_raw_sha256
         == hashlib.sha256(receipt_path.read_bytes()).hexdigest()
     )
+
+
+def test_execution_permit_settings_require_independent_one_shot_custody(
+    acceptance_inputs: dict,
+) -> None:
+    service, *_ = build_runtime_evidence(acceptance_inputs)
+    values = service.settings.model_dump()
+    values.update(
+        {
+            "commodity_c_fast_simnow_execution_one_shot_custody_root": str(
+                acceptance_inputs["private_dir"]
+            ),
+            "commodity_c_fast_simnow_execution_one_shot_expected_root_path_sha256": "a"
+            * 64,
+            "commodity_c_fast_simnow_execution_one_shot_expected_identity_sha256": "b"
+            * 64,
+        }
+    )
+
+    with pytest.raises(ValidationError, match="one-shot custody"):
+        Settings(**values)
+
+
+def test_execution_permit_production_custody_requires_root_owner_pin(
+    acceptance_inputs: dict,
+) -> None:
+    service, *_ = build_runtime_evidence(acceptance_inputs)
+    values = service.settings.model_dump()
+    values.update(
+        {
+            "app_env": "production",
+            "jwt_secret_key": "x" * 32,
+            "commodity_c_fast_simnow_execution_one_shot_expected_owner_uid": 1,
+        }
+    )
+
+    with pytest.raises(ValidationError, match="one-shot custody"):
+        Settings(**values)
 
 
 def test_runtime_rejects_post_receipt_research_artifact_tamper(

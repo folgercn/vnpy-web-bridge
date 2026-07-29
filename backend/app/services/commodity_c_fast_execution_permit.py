@@ -16,6 +16,7 @@ from pydantic import ValidationError
 
 from app.core.config import Settings, get_settings
 from app.schemas.commodity_c_fast_execution_permit import (
+    CommodityCFastExecutionPermitTrustedKeyDTO,
     CommodityCFastExecutionPermitTrustedKeysDTO,
     CommodityCFastSimNowExecutionPermitDTO,
 )
@@ -117,6 +118,52 @@ def _read_exact_canonical_json(path: Path, label: str) -> tuple[Any, bytes]:
         raise CommodityCFastExecutionPermitError(f"{label}_READ_INVALID") from exc
 
 
+def verified_execution_key_materials(
+    keyring: CommodityCFastExecutionPermitTrustedKeysDTO,
+    evidence: VerifiedCommodityCFastResearchAcceptanceEvidence,
+) -> dict[str, tuple[CommodityCFastExecutionPermitTrustedKeyDTO, bytes]]:
+    """Validate the complete Execution key domain before selecting a signer."""
+    verified: dict[
+        str,
+        tuple[CommodityCFastExecutionPermitTrustedKeyDTO, bytes],
+    ] = {}
+    seen_materials: set[bytes] = set()
+    for trusted in keyring.trusted_keys:
+        try:
+            material = base64.b64decode(
+                trusted.public_key_base64,
+                validate=True,
+            )
+            if len(material) != 32:
+                raise ValueError
+            Ed25519PublicKey.from_public_bytes(material)
+        except (ValueError, binascii.Error) as exc:
+            raise CommodityCFastExecutionPermitError(
+                "EXECUTION_PERMIT_KEYRING_MATERIAL_INVALID"
+            ) from exc
+        if material in seen_materials:
+            raise CommodityCFastExecutionPermitError(
+                "EXECUTION_PERMIT_KEYRING_MATERIAL_DUPLICATE"
+            )
+        if (
+            material in evidence.research_key_materials
+            or material in evidence.acceptance_key_materials
+        ):
+            raise CommodityCFastExecutionPermitError(
+                "EXECUTION_PERMIT_KEYRING_DOMAIN_COLLISION"
+            )
+        if (
+            base64.b64encode(material).decode("ascii")
+            != trusted.public_key_base64
+        ):
+            raise CommodityCFastExecutionPermitError(
+                "EXECUTION_PERMIT_KEYRING_MATERIAL_INVALID"
+            )
+        seen_materials.add(material)
+        verified[trusted.key_id] = (trusted, material)
+    return verified
+
+
 class CommodityCFastExecutionPermitService:
     """Read-only verifier with no deployment, RPC, position or order dependency."""
 
@@ -177,21 +224,25 @@ class CommodityCFastExecutionPermitService:
             ) from exc
         if permit.permit_id != derived_permit_id(payload):
             raise CommodityCFastExecutionPermitError("EXECUTION_PERMIT_ID_MISMATCH")
-        trusted = {row.key_id: row for row in keyring.trusted_keys}.get(
-            permit.signer_key_id
+        verified_keys = verified_execution_key_materials(
+            keyring,
+            evidence,
         )
-        if trusted is None or trusted.reviewer_role != permit.reviewer_role:
+        selected = verified_keys.get(permit.signer_key_id)
+        if (
+            selected is None
+            or selected[0].reviewer_role != permit.reviewer_role
+        ):
             raise CommodityCFastExecutionPermitError(
                 "EXECUTION_PERMIT_SIGNER_NOT_TRUSTED"
             )
+        material = selected[1]
         try:
-            material = base64.b64decode(trusted.public_key_base64, validate=True)
             signature = base64.b64decode(permit.signature, validate=True)
             if (
-                len(material) != 32
-                or len(signature) != 64
-                or material in evidence.research_key_materials
-                or material in evidence.acceptance_key_materials
+                len(signature) != 64
+                or base64.b64encode(signature).decode("ascii")
+                != permit.signature
             ):
                 raise ValueError
             Ed25519PublicKey.from_public_bytes(material).verify(

@@ -8,7 +8,6 @@ import hashlib
 import json
 import logging
 import math
-import os
 import re
 import uuid
 from collections.abc import Callable
@@ -30,12 +29,12 @@ from app.core.errors import (
     CommoditySimNowSafetyError,
     CommoditySimNowStateError,
 )
+from app.schemas.commodity_c_fast_execution_permit import (
+    CommodityCFastSimNowExecutionPermitDTO,
+)
 from app.schemas.commodity_c_fast_shadow import (
     CommodityCFastRuntimeSnapshotDTO,
     CommodityCFastShakedownSnapshotDTO,
-)
-from app.schemas.commodity_c_fast_execution_permit import (
-    CommodityCFastSimNowExecutionPermitDTO,
 )
 from app.schemas.commodity_simnow import (
     CommodityPlanExecuteRequestDTO,
@@ -49,6 +48,10 @@ from app.schemas.common import STATUS_VALUE_MAP
 from app.schemas.trade import OrderRequestDTO
 from app.services.audit_service import AuditService, audit_service
 from app.services.calendar_service import calendar_service
+from app.services.commodity_c_fast_one_shot_custody import (
+    CommodityCFastOneShotCustody,
+    CommodityCFastOneShotCustodyError,
+)
 from app.services.commodity_c_fast_shadow import C_FAST_SECTOR_MAP_V1
 from app.services.risk_service import RiskService, risk_service
 from app.services.trade_service import TradeService, trade_service
@@ -5425,7 +5428,26 @@ class CommoditySimNowService:
             self.settings.commodity_c_fast_simnow_state_path
         ).expanduser()
 
-    def _c_fast_permit_receipt_path(self, permit_id: str) -> Path:
+    def _c_fast_one_shot_custody(
+        self,
+    ) -> CommodityCFastOneShotCustody:
+        return CommodityCFastOneShotCustody(
+            root=Path(
+                self.settings.commodity_c_fast_simnow_execution_one_shot_custody_root
+            ),
+            expected_root_path_sha256=(
+                self.settings.commodity_c_fast_simnow_execution_one_shot_expected_root_path_sha256
+            ),
+            expected_identity_sha256=(
+                self.settings.commodity_c_fast_simnow_execution_one_shot_expected_identity_sha256
+            ),
+            expected_owner_uid=(
+                self.settings.commodity_c_fast_simnow_execution_one_shot_expected_owner_uid
+            ),
+        )
+
+    @staticmethod
+    def _c_fast_permit_receipt_filename(permit_id: str) -> str:
         if not re.fullmatch(
             r"cfast-simnow-execution-permit-v1-[0-9a-f]{64}",
             permit_id,
@@ -5434,23 +5456,26 @@ class CommoditySimNowService:
                 "C_FAST Execution Permit id 无效"
             )
         digest = hashlib.sha256(permit_id.encode("utf-8")).hexdigest()
-        state_path = self._c_fast_shakedown_state_path()
-        return state_path.with_name(
-            f"{state_path.stem}.permits"
-        ) / f"{digest}.json"
+        return f"permit-{digest}.json"
+
+    def _c_fast_permit_receipt_path(self, permit_id: str) -> Path:
+        return self._c_fast_one_shot_custody().path(
+            self._c_fast_permit_receipt_filename(permit_id)
+        )
 
     def _load_c_fast_permit_receipt(
         self, permit_id: str
     ) -> dict[str, Any] | None:
-        path = self._c_fast_permit_receipt_path(permit_id)
-        if not path.exists():
-            return None
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except Exception as exc:
+            payload = self._c_fast_one_shot_custody().read_payload(
+                self._c_fast_permit_receipt_filename(permit_id)
+            )
+        except CommodityCFastOneShotCustodyError as exc:
             raise CommoditySimNowSafetyError(
                 "C_FAST Execution Permit 消费凭证不可读取"
             ) from exc
+        if payload is None:
+            return None
         if not isinstance(payload, dict) or set(payload) != {
             "schema_version",
             "execution_permit_id",
@@ -5484,31 +5509,39 @@ class CommoditySimNowService:
     def _c_fast_acceptance_use_path(
         self, acceptance_receipt_raw_sha256: str
     ) -> Path:
+        return self._c_fast_one_shot_custody().path(
+            self._c_fast_acceptance_use_filename(
+                acceptance_receipt_raw_sha256
+            )
+        )
+
+    @staticmethod
+    def _c_fast_acceptance_use_filename(
+        acceptance_receipt_raw_sha256: str,
+    ) -> str:
         if not re.fullmatch(
             r"[0-9a-f]{64}", acceptance_receipt_raw_sha256
         ):
             raise CommoditySimNowSafetyError(
                 "C_FAST Research Acceptance receipt hash 无效"
             )
-        state_path = self._c_fast_shakedown_state_path()
-        return state_path.with_name(
-            f"{state_path.stem}.acceptances"
-        ) / f"{acceptance_receipt_raw_sha256}.json"
+        return f"acceptance-{acceptance_receipt_raw_sha256}.json"
 
     def _load_c_fast_acceptance_use(
         self, acceptance_receipt_raw_sha256: str
     ) -> dict[str, Any] | None:
-        path = self._c_fast_acceptance_use_path(
-            acceptance_receipt_raw_sha256
-        )
-        if not path.exists():
-            return None
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except Exception as exc:
+            payload = self._c_fast_one_shot_custody().read_payload(
+                self._c_fast_acceptance_use_filename(
+                    acceptance_receipt_raw_sha256
+                )
+            )
+        except CommodityCFastOneShotCustodyError as exc:
             raise CommoditySimNowSafetyError(
                 "C_FAST Research Acceptance 使用凭证不可读取"
             ) from exc
+        if payload is None:
+            return None
         if not isinstance(payload, dict) or set(payload) != {
             "schema_version",
             "acceptance_receipt_raw_sha256",
@@ -5625,8 +5658,11 @@ class CommoditySimNowService:
         source_snapshot_hash: str,
     ) -> dict[str, Any]:
         permit_id = permit.permit_id
-        path = self._c_fast_permit_receipt_path(permit_id)
-        acceptance_use_path = self._c_fast_acceptance_use_path(
+        custody = self._c_fast_one_shot_custody()
+        permit_filename = self._c_fast_permit_receipt_filename(
+            permit_id
+        )
+        acceptance_use_filename = self._c_fast_acceptance_use_filename(
             permit.acceptance_receipt_raw_sha256
         )
         if (
@@ -5657,28 +5693,18 @@ class CommoditySimNowService:
             **acceptance_core,
             "receipt_checksum": _sha256_json(acceptance_core),
         }
-        acceptance_use_path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            acceptance_fd = os.open(
-                acceptance_use_path,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-                0o600,
+            custody.create_payload(
+                acceptance_use_filename,
+                acceptance_payload,
             )
-            with os.fdopen(
-                acceptance_fd, "w", encoding="utf-8"
-            ) as handle:
-                json.dump(
-                    acceptance_payload,
-                    handle,
-                    ensure_ascii=False,
-                    indent=2,
-                )
-                handle.write("\n")
-                handle.flush()
-                os.fsync(handle.fileno())
         except FileExistsError as exc:
             raise CommoditySimNowSafetyError(
                 "C_FAST Research Acceptance 已并发绑定，禁止重放"
+            ) from exc
+        except CommodityCFastOneShotCustodyError as exc:
+            raise CommoditySimNowSafetyError(
+                "C_FAST Research Acceptance one-shot custody 无效"
             ) from exc
         core = {
             "schema_version":
@@ -5698,25 +5724,19 @@ class CommoditySimNowService:
             **core,
             "receipt_checksum": _sha256_json(core),
         }
-        path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            fd = os.open(
-                path,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-                0o600,
+            custody.create_payload(
+                permit_filename,
+                payload,
             )
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(payload, handle, ensure_ascii=False, indent=2)
-                handle.write("\n")
-                handle.flush()
-                os.fsync(handle.fileno())
         except FileExistsError as exc:
             raise CommoditySimNowSafetyError(
                 "C_FAST Execution Permit 已消费，禁止并发重放"
             ) from exc
-        except Exception:
-            path.unlink(missing_ok=True)
-            raise
+        except CommodityCFastOneShotCustodyError as exc:
+            raise CommoditySimNowSafetyError(
+                "C_FAST Execution Permit one-shot custody 无效"
+            ) from exc
         return payload
 
     def _c_fast_terminal_archive_dir(self) -> Path:

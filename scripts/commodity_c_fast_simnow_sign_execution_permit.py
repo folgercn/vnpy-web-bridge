@@ -9,18 +9,20 @@ key is read.  The signer performs no RPC, account query, order or deployment.
 from __future__ import annotations
 
 import argparse
-import base64
-from datetime import datetime
 import hashlib
 import json
-from pathlib import Path
 import sys
+from datetime import datetime
+from pathlib import Path
 
 from app.core.config import Settings
 from app.schemas.commodity_c_fast_execution_permit import (
     CommodityCFastExecutionPermitTrustedKeysDTO,
 )
-from app.services.commodity_c_fast_execution_permit import canonical_json
+from app.services.commodity_c_fast_execution_permit import (
+    canonical_json,
+    verified_execution_key_materials,
+)
 from app.services.commodity_c_fast_research_acceptance_evidence import (
     CommodityCFastResearchAcceptanceEvidenceService,
 )
@@ -32,6 +34,8 @@ from commodity_c_fast_shadow_sign import load_private_key
 from commodity_c_fast_shakedown_artifact import (
     load_public_key,
     read_object,
+)
+from commodity_c_fast_shakedown_artifact import (
     verify as verify_legacy_snapshot,
 )
 from commodity_c_fast_simnow_execution_permit import (
@@ -124,18 +128,22 @@ def main() -> int:
         ):
             raise ValueError("Execution permit keyring pin mismatch")
         trusted = CommodityCFastExecutionPermitTrustedKeysDTO.model_validate(keyring)
-        selected = {row.key_id: row for row in trusted.trusted_keys}.get(
+        verified_keys = verified_execution_key_materials(
+            trusted,
+            evidence,
+        )
+        selected = verified_keys.get(
             str(unsigned["signer_key_id"])
         )
-        if selected is None or selected.reviewer_role != unsigned["reviewer_role"]:
+        if (
+            selected is None
+            or selected[0].reviewer_role != unsigned["reviewer_role"]
+        ):
             raise ValueError("Execution signer is not trusted")
 
         # Private material is intentionally read only after every public check.
         private_key = load_private_key(args.execution_private_key)
-        public_base64 = base64.b64encode(
-            private_key.public_key().public_bytes_raw()
-        ).decode("ascii")
-        if public_base64 != selected.public_key_base64:
+        if private_key.public_key().public_bytes_raw() != selected[1]:
             raise ValueError("private key does not match trusted Execution signer")
         if evidence_service.verify_existing_receipt() != evidence:
             raise ValueError("#165 evidence changed after private key access")

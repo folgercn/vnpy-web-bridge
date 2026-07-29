@@ -3,43 +3,50 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
+import stat
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Event, Thread
 from time import monotonic, sleep
 
+import app.services.commodity_c_fast_one_shot_custody as one_shot_custody_module
 import pytest
-import app.services.commodity_simnow as commodity_simnow_module
 from app.core.config import Settings
 from app.core.errors import (
     CommoditySimNowSafetyError,
     CommoditySimNowStateError,
 )
+from app.schemas.commodity_c_fast_execution_permit import (
+    CommodityCFastSimNowExecutionPermitDTO,
+)
 from app.schemas.commodity_c_fast_shadow import (
     CommodityCFastRuntimeSnapshotDTO,
     CommodityCFastShakedownSnapshotDTO,
-)
-from app.schemas.commodity_c_fast_execution_permit import (
-    CommodityCFastSimNowExecutionPermitDTO,
 )
 from app.schemas.commodity_simnow import (
     CommodityCFastShakedownPreviewRequestDTO,
     CommoditySimNowDisableRequestDTO,
 )
-from app.services.commodity_simnow import CommoditySimNowService
 from app.services.commodity_c_fast_execution_permit import (
     adapter_target_projection_sha256,
     derived_permit_id,
+)
+from app.services.commodity_c_fast_one_shot_custody import (
+    one_shot_custody_pins,
 )
 from app.services.commodity_c_fast_shadow_common import (
     formula_target_binding_sha256,
     sha256_json,
     unsigned_snapshot_payload,
 )
+from app.services.commodity_simnow import CommoditySimNowService
 from app.services.vnpy_rpc_service import RpcTimeoutError
 from pydantic import ValidationError
 from test_commodity_c_fast_shadow import (
     sign_payload as official_sign_payload,
+)
+from test_commodity_c_fast_shadow import (
     unsigned_payload,
 )
 from test_commodity_simnow import (
@@ -48,8 +55,8 @@ from test_commodity_simnow import (
     FakeTrade,
     LocalRiskRejectTrade,
     RpcTimeoutTrade,
-    fills_for_requests,
     enable_payload,
+    fills_for_requests,
     make_key,
     make_service,
     make_settings,
@@ -315,6 +322,15 @@ def prepare_c_fast_shakedown(
     private_key = make_key()
     signed, snapshot_hash = sign_payload(unsigned_payload(), private_key)
     snapshot = CommodityCFastShakedownSnapshotDTO.model_validate(signed)
+    tmp_path.chmod(0o700)
+    one_shot_custody = tmp_path / "c-fast-one-shot-custody"
+    one_shot_custody.mkdir(exist_ok=True, mode=0o700)
+    one_shot_custody.chmod(0o700)
+    custody_owner_uid = one_shot_custody.stat().st_uid
+    custody_pins = one_shot_custody_pins(
+        one_shot_custody,
+        expected_owner_uid=custody_owner_uid,
+    )
     service.settings = service.settings.model_copy(
         update={
             "commodity_c_fast_shadow_enabled": True,
@@ -325,6 +341,12 @@ def prepare_c_fast_shakedown(
             ),
             "commodity_c_fast_simnow_auto_dispatch_enabled": True,
             "commodity_c_fast_simnow_max_selected_products": 2,
+            "commodity_c_fast_simnow_execution_one_shot_custody_root": str(
+                one_shot_custody
+            ),
+            "commodity_c_fast_simnow_execution_one_shot_expected_root_path_sha256": custody_pins.root_path_sha256,
+            "commodity_c_fast_simnow_execution_one_shot_expected_identity_sha256": custody_pins.identity_sha256,
+            "commodity_c_fast_simnow_execution_one_shot_expected_owner_uid": custody_owner_uid,
         }
     )
     service.bind_c_fast_snapshot_provider(
@@ -757,17 +779,218 @@ def test_c_fast_crash_between_acceptance_and_permit_receipts_burns_safe(
     permit_path = service._c_fast_permit_receipt_path(
         preview["execution_permit_id"]
     )
-    original_open = commodity_simnow_module.os.open
+    original_open = one_shot_custody_module.os.open
 
     def fail_permit_receipt(path, *args, **kwargs):
-        if Path(path) == permit_path:
+        flags = int(args[0]) if args else 0
+        if (
+            str(path) == permit_path.name
+            and flags & os.O_CREAT
+        ):
             raise OSError("simulated permit receipt crash")
         return original_open(path, *args, **kwargs)
 
     monkeypatch.setattr(
-        commodity_simnow_module.os, "open", fail_permit_receipt
+        one_shot_custody_module.os, "open", fail_permit_receipt
     )
     with pytest.raises(OSError, match="permit receipt crash"):
+        service.start_c_fast_shakedown(
+            preview["plan_hash"],
+            operator="admin",
+            role="admin",
+            source_ip=None,
+        )
+
+    assert service.trade.requests == []
+    assert service._load_c_fast_acceptance_use(
+        preview["acceptance_receipt_raw_sha256"]
+    ) is not None
+    assert service._load_c_fast_permit_receipt(
+        preview["execution_permit_id"]
+    ) is None
+
+
+def test_c_fast_rebuilt_one_shot_custody_cannot_reset_consumption(
+    tmp_path: Path,
+) -> None:
+    service, _, snapshot, snapshot_hash = prepare_c_fast_shakedown(
+        tmp_path
+    )
+    assert service._c_fast_execution_permit_provider is not None
+    permit = service._c_fast_execution_permit_provider(
+        snapshot,
+        snapshot_hash,
+    )
+    service._consume_c_fast_execution_permit(
+        permit,
+        session_id="cfast-shakedown-" + "1" * 32,
+        source_snapshot_hash=snapshot_hash,
+    )
+    root = Path(
+        service.settings.commodity_c_fast_simnow_execution_one_shot_custody_root
+    )
+    original = root.with_name(f"{root.name}-original")
+    root.rename(original)
+    root.mkdir(mode=0o700)
+    root.chmod(0o700)
+
+    with pytest.raises(
+        CommoditySimNowSafetyError,
+        match="消费凭证不可读取",
+    ):
+        service._load_c_fast_permit_receipt(
+            permit.permit_id
+        )
+
+
+@pytest.mark.parametrize("mutation", ["symlink", "unsafe_mode", "wrong_owner_pin"])
+def test_c_fast_one_shot_custody_rejects_unsafe_root(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    service, _, _, _ = prepare_c_fast_shakedown(tmp_path)
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    root = Path(
+        service.settings.commodity_c_fast_simnow_execution_one_shot_custody_root
+    )
+    if mutation == "symlink":
+        original = root.with_name(f"{root.name}-original")
+        root.rename(original)
+        root.symlink_to(original, target_is_directory=True)
+    elif mutation == "unsafe_mode":
+        root.chmod(0o777)
+    else:
+        service.settings = service.settings.model_copy(
+            update={
+                "commodity_c_fast_simnow_execution_one_shot_expected_owner_uid": (
+                    root.stat().st_uid + 1
+                )
+            }
+        )
+
+    with pytest.raises(
+        CommoditySimNowSafetyError,
+        match="使用凭证不可读取",
+    ):
+        service._load_c_fast_acceptance_use(
+            preview["acceptance_receipt_raw_sha256"]
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["symlink", "unsafe_mode", "noncanonical_bytes"],
+)
+def test_c_fast_one_shot_custody_rejects_unsafe_marker(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    service, _, _, _ = prepare_c_fast_shakedown(tmp_path)
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    marker = service._c_fast_acceptance_use_path(
+        preview["acceptance_receipt_raw_sha256"]
+    )
+    if mutation == "symlink":
+        external = tmp_path / "external-marker.json"
+        external.write_text("{}\n", encoding="utf-8")
+        external.chmod(0o600)
+        marker.symlink_to(external)
+    elif mutation == "unsafe_mode":
+        marker.write_bytes(b"{}\n")
+        marker.chmod(0o644)
+    else:
+        marker.write_bytes(b'{ "unexpected": true }\n')
+        marker.chmod(0o600)
+
+    with pytest.raises(
+        CommoditySimNowSafetyError,
+        match="使用凭证不可读取",
+    ):
+        service._load_c_fast_acceptance_use(
+            preview["acceptance_receipt_raw_sha256"]
+        )
+
+
+def test_c_fast_two_service_instances_only_one_claims_acceptance(
+    tmp_path: Path,
+) -> None:
+    first, _, snapshot, snapshot_hash = prepare_c_fast_shakedown(tmp_path)
+    second, _, _, _ = prepare_c_fast_shakedown(tmp_path)
+    assert first._c_fast_execution_permit_provider is not None
+    permit = first._c_fast_execution_permit_provider(
+        snapshot,
+        snapshot_hash,
+    )
+    gate = Event()
+    results: list[str] = []
+
+    def claim(
+        service: CommoditySimNowService,
+        session_id: str,
+    ) -> None:
+        gate.wait()
+        try:
+            service._consume_c_fast_execution_permit(
+                permit,
+                session_id=session_id,
+                source_snapshot_hash=snapshot_hash,
+            )
+            results.append("claimed")
+        except CommoditySimNowSafetyError:
+            results.append("rejected")
+
+    workers = [
+        Thread(
+            target=claim,
+            args=(first, "cfast-shakedown-" + "1" * 32),
+        ),
+        Thread(
+            target=claim,
+            args=(second, "cfast-shakedown-" + "2" * 32),
+        ),
+    ]
+    for worker in workers:
+        worker.start()
+    gate.set()
+    for worker in workers:
+        worker.join(timeout=5)
+
+    assert results.count("claimed") == 1
+    assert results.count("rejected") == 1
+    assert first._load_c_fast_acceptance_use(
+        permit.acceptance_receipt_raw_sha256
+    ) is not None
+    assert first._load_c_fast_permit_receipt(permit.permit_id) is not None
+
+
+def test_c_fast_directory_fsync_failure_burns_acceptance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, _, _, _ = prepare_c_fast_shakedown(tmp_path)
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    original_fsync = one_shot_custody_module.os.fsync
+    failed = False
+
+    def fail_first_directory_fsync(fd: int) -> None:
+        nonlocal failed
+        if not failed and stat.S_ISDIR(os.fstat(fd).st_mode):
+            failed = True
+            raise OSError("simulated directory fsync failure")
+        original_fsync(fd)
+
+    monkeypatch.setattr(
+        one_shot_custody_module.os,
+        "fsync",
+        fail_first_directory_fsync,
+    )
+    with pytest.raises(OSError, match="directory fsync failure"):
         service.start_c_fast_shakedown(
             preview["plan_hash"],
             operator="admin",

@@ -6,10 +6,6 @@ from datetime import timedelta
 from pathlib import Path
 
 import pytest
-from cryptography.hazmat.primitives.asymmetric.ed25519 import (
-    Ed25519PrivateKey,
-)
-
 from app.core.config import Settings
 from app.schemas.commodity_c_fast_shadow import (
     CommodityCFastShakedownSnapshotDTO,
@@ -27,8 +23,11 @@ from commodity_c_fast_simnow_execution_permit import (
     prepare_unsigned_execution_permit,
     sign_execution_permit,
 )
-from test_commodity_c_fast_simnow import sign_payload
+from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+    Ed25519PrivateKey,
+)
 from test_commodity_c_fast_shadow import unsigned_payload
+from test_commodity_c_fast_simnow import sign_payload
 from test_commodity_simnow import NOW, make_key
 
 
@@ -155,9 +154,26 @@ def permit_fixture(tmp_path: Path) -> dict:
         "snapshot_sha256": snapshot_sha256,
         "permit": permit,
         "permit_path": permit_path,
+        "keyring_path": keyring_path,
+        "keyring": keyring,
         "evidence": evidence,
         "execution_key": execution_key,
     }
+
+
+def replace_keyring(fixture: dict, trusted_keys: list[dict]) -> None:
+    keyring = {
+        **fixture["keyring"],
+        "trusted_keys": trusted_keys,
+    }
+    write_exact(fixture["keyring_path"], keyring)
+    fixture["service"].settings = fixture["service"].settings.model_copy(
+        update={
+            "commodity_c_fast_simnow_execution_permit_expected_keyring_raw_sha256": hashlib.sha256(
+                fixture["keyring_path"].read_bytes()
+            ).hexdigest()
+        }
+    )
 
 
 def test_execution_permit_verifies_exact_acceptance_and_snapshot(
@@ -173,6 +189,124 @@ def test_execution_permit_verifies_exact_acceptance_and_snapshot(
     assert permit.production_allowed is False
     assert permit.live_trading_authorized is False
     assert permit.automatic_promotion_authorized is False
+
+
+@pytest.mark.parametrize("source_domain", ["research", "acceptance"])
+def test_execution_permit_rejects_unused_cross_domain_execution_key(
+    tmp_path: Path,
+    source_domain: str,
+) -> None:
+    fixture = permit_fixture(tmp_path)
+    source_materials = getattr(
+        fixture["evidence"],
+        f"{source_domain}_key_materials",
+    )
+    replace_keyring(
+        fixture,
+        [
+            *fixture["keyring"]["trusted_keys"],
+            {
+                "key_id": f"unused-{source_domain}-collision",
+                "public_key_base64": base64.b64encode(
+                    next(iter(source_materials))
+                ).decode("ascii"),
+                "signer_type": "human",
+                "reviewer_role": "Unused rotation reviewer",
+            },
+        ],
+    )
+
+    with pytest.raises(
+        CommodityCFastExecutionPermitError,
+        match="KEYRING_DOMAIN_COLLISION",
+    ):
+        fixture["service"].verified_permit_for_snapshot(
+            fixture["snapshot"],
+            fixture["snapshot_sha256"],
+        )
+
+
+@pytest.mark.parametrize(
+    ("public_key_base64", "expected_error"),
+    [
+        ("!" * 44, "KEYRING_MATERIAL_INVALID"),
+        (
+            base64.b64encode(b"x" * 31).decode("ascii"),
+            "KEYRING_MATERIAL_INVALID",
+        ),
+    ],
+)
+def test_execution_permit_rejects_invalid_unused_execution_key(
+    tmp_path: Path,
+    public_key_base64: str,
+    expected_error: str,
+) -> None:
+    fixture = permit_fixture(tmp_path)
+    replace_keyring(
+        fixture,
+        [
+            *fixture["keyring"]["trusted_keys"],
+            {
+                "key_id": "unused-invalid-execution-key",
+                "public_key_base64": public_key_base64,
+                "signer_type": "human",
+                "reviewer_role": "Unused rotation reviewer",
+            },
+        ],
+    )
+
+    with pytest.raises(
+        CommodityCFastExecutionPermitError,
+        match=expected_error,
+    ):
+        fixture["service"].verified_permit_for_snapshot(
+            fixture["snapshot"],
+            fixture["snapshot_sha256"],
+        )
+
+
+def test_execution_permit_rejects_duplicate_decoded_execution_key(
+    tmp_path: Path,
+) -> None:
+    fixture = permit_fixture(tmp_path)
+    canonical = fixture["keyring"]["trusted_keys"][0]["public_key_base64"]
+    alphabet = (
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        "abcdefghijklmnopqrstuvwxyz"
+        "0123456789+/"
+    )
+    penultimate = alphabet.index(canonical[-2])
+    noncanonical = (
+        canonical[:-2]
+        + alphabet[(penultimate & 0b110000) | ((penultimate + 1) & 0b001111)]
+        + "="
+    )
+    assert noncanonical != canonical
+    assert base64.b64decode(noncanonical, validate=True) == base64.b64decode(
+        canonical,
+        validate=True,
+    )
+    replace_keyring(
+        fixture,
+        [
+            *fixture["keyring"]["trusted_keys"],
+            {
+                "key_id": "unused-duplicate-execution-key",
+                "public_key_base64": noncanonical,
+                "signer_type": "human",
+                "reviewer_role": "Unused rotation reviewer",
+            },
+        ],
+    )
+
+    with pytest.raises(
+        CommodityCFastExecutionPermitError,
+        match="KEYRING_MATERIAL_DUPLICATE",
+    ):
+        fixture["service"].verified_permit_for_snapshot(
+            fixture["snapshot"],
+            fixture["snapshot_sha256"],
+        )
 
 
 def test_execution_permit_rejects_forged_acceptance_receipt_claim(

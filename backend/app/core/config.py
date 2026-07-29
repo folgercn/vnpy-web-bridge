@@ -134,6 +134,13 @@ class Settings(BaseSettings):
     commodity_c_fast_simnow_execution_permit_path: str = ""
     commodity_c_fast_simnow_execution_permit_trusted_keyring_path: str = ""
     commodity_c_fast_simnow_execution_permit_expected_keyring_raw_sha256: str = ""
+    commodity_c_fast_simnow_execution_one_shot_custody_root: str = ""
+    commodity_c_fast_simnow_execution_one_shot_expected_root_path_sha256: str = ""
+    commodity_c_fast_simnow_execution_one_shot_expected_identity_sha256: str = ""
+    commodity_c_fast_simnow_execution_one_shot_expected_owner_uid: int = Field(
+        default=0,
+        ge=0,
+    )
     commodity_c_fast_simnow_research_acceptance_path: str = ""
     commodity_c_fast_simnow_research_acceptance_consume_path: str = ""
     commodity_c_fast_simnow_research_acceptance_receipt_path: str = ""
@@ -259,18 +266,19 @@ class Settings(BaseSettings):
             authority_path_values = (
                 self.commodity_c_fast_simnow_execution_permit_path,
                 self.commodity_c_fast_simnow_execution_permit_trusted_keyring_path,
+                self.commodity_c_fast_simnow_execution_one_shot_custody_root,
                 self.commodity_c_fast_simnow_research_acceptance_path,
                 self.commodity_c_fast_simnow_research_acceptance_consume_path,
                 self.commodity_c_fast_simnow_research_acceptance_receipt_path,
                 self.commodity_c_fast_simnow_research_acceptance_trusted_keyring_path,
+                self.commodity_c_fast_simnow_research_acceptance_custody_root,
                 self.commodity_c_fast_simnow_research_keyring_path,
             )
-            required_text = (
-                *authority_path_values,
-                self.commodity_c_fast_simnow_research_acceptance_custody_root,
-            )
+            required_text = authority_path_values
             required_pins = (
                 self.commodity_c_fast_simnow_execution_permit_expected_keyring_raw_sha256,
+                self.commodity_c_fast_simnow_execution_one_shot_expected_root_path_sha256,
+                self.commodity_c_fast_simnow_execution_one_shot_expected_identity_sha256,
                 self.commodity_c_fast_simnow_research_acceptance_expected_keyring_raw_sha256,
                 self.commodity_c_fast_simnow_research_acceptance_expected_custody_root_path_sha256,
                 self.commodity_c_fast_simnow_research_acceptance_expected_custody_identity_sha256,
@@ -283,6 +291,23 @@ class Settings(BaseSettings):
                 for value in authority_path_values
                 if value.strip()
             }
+            one_shot_root = Path(
+                self.commodity_c_fast_simnow_execution_one_shot_custody_root
+            ).expanduser().resolve()
+            non_one_shot_authority_paths = {
+                Path(value).expanduser().resolve()
+                for value in authority_path_values
+                if (
+                    value.strip()
+                    and value
+                    != self.commodity_c_fast_simnow_execution_one_shot_custody_root
+                )
+            }
+            one_shot_overlaps_authority = any(
+                path.is_relative_to(one_shot_root)
+                or one_shot_root.is_relative_to(path)
+                for path in non_one_shot_authority_paths
+            )
             if (
                 any(not value.strip() for value in required_text)
                 or any(
@@ -290,9 +315,15 @@ class Settings(BaseSettings):
                     for value in required_pins
                 )
                 or len(authority_paths) != len(authority_path_values)
+                or one_shot_overlaps_authority
+                or (
+                    self.app_env.lower() == "production"
+                    and self.commodity_c_fast_simnow_execution_one_shot_expected_owner_uid
+                    != 0
+                )
             ):
                 raise ValueError(
-                    "C_FAST SimNow execution permit and #165 acceptance paths/keyrings/custody pins must be complete and distinct"
+                    "C_FAST SimNow execution permit, one-shot custody and #165 acceptance paths/keyrings/custody pins must be complete and distinct"
                 )
             try:
                 artifact_paths = json.loads(

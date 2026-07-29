@@ -35,6 +35,11 @@ dispatch。真正执行前必须同时通过：
 - 独立 Execution keyring。Execution 公钥材料不得复用 Research 或
   Acceptance 公钥材料。
 
+runtime 和 signer 会先解码并验证 Execution keyring 的**全部** entry，再选择
+当前 signer。任一备用 key 非 canonical base64、不是 32-byte Ed25519 公钥、
+decoded material 重复，或与 Research/Acceptance keyset 有交集，整个 keyring
+都会 fail closed；不能预埋跨域 rotation key。
+
 custody root 必须是绝对、规范、无 symlink 的目录，且不能 group/world
 writable。consume/receipt 必须是 custody 同设备、同 owner、`0600` 的普通
 文件。运行时会 pin root path hash 和包含 device/inode/owner/mode 的 identity
@@ -102,6 +107,28 @@ allocation_evidence, daily_roll_evidence, reference_price_evidence,
 calendar_authority, contract_spec_evidence
 ```
 
+另外必须预创建独立 Execution one-shot custody。生产环境要求 root owner
+UID `0`、目录 mode `0700`，其 parent 也必须 root-owned 且不能
+group/world writable。运行时不创建该目录；Acceptance-use 与 Permit-consume
+均通过已 pin 的 guarded dirfd、`O_EXCL|O_NOFOLLOW` 写入，并在 file fsync 后
+执行 directory fsync。可在受控主机上生成首次 pin：
+
+```bash
+PYTHONPATH=backend python - <<'PY'
+from pathlib import Path
+from app.services.commodity_c_fast_one_shot_custody import one_shot_custody_pins
+
+pins = one_shot_custody_pins(
+    Path("/absolute/root-owned/cfast-execution-one-shot"),
+    expected_owner_uid=0,
+)
+print("COMMODITY_C_FAST_SIMNOW_EXECUTION_ONE_SHOT_EXPECTED_ROOT_PATH_SHA256="
+      + pins.root_path_sha256)
+print("COMMODITY_C_FAST_SIMNOW_EXECUTION_ONE_SHOT_EXPECTED_IDENTITY_SHA256="
+      + pins.identity_sha256)
+PY
+```
+
 当前 PR 不修改部署镜像。若运行环境没有把原 PR #165 verifier 模块作为
 `PYTHONPATH` 中的受审代码提供，显式启用 bridge 会在 startup 失败；这是预期的
 fail-closed 行为，不能用 embedded hash 或关闭 full verifier 来绕过。部署打包应
@@ -120,6 +147,14 @@ fail-closed 行为，不能用 embedded hash 或关闭 full verifier 来绕过�
 Acceptance use marker 拒绝。若 use marker 已创建但后续持久化失败，该
 Acceptance 永久烧毁，属于安全失败，不得删除 marker 后重试。
 
+两个 marker 位于同一个独立、path/device/inode/owner/mode identity-pinned
+custody 中，而不是从普通 session state path 派生的可替换目录。每次读写都会
+在 guarded dirfd 前后复核 root identity；marker 必须是 owner 一致、`0600`、
+single-link 的普通文件和 exact canonical JSON。目录被重建、替换或变成
+symlink 时，即使路径字符串相同也会 fail closed。此本地机制不替代外部
+WORM/append-only 备份；生产 custody 的删除、迁移和 pin rotation 必须单独
+人工审批。
+
 ## 7. 必须拒绝的情况
 
 - 缺少 full PR #165 verifier；
@@ -130,6 +165,9 @@ Acceptance 永久烧毁，属于安全失败，不得删除 marker 后重试。
 - account、execution day、selected products、selected target、formula 或
   snapshot hash 不匹配；
 - Execution key material 与 Research/Acceptance key material 相同；
+- 任一 unused Execution key 非法、重复或跨 Research/Acceptance key domain；
+- one-shot custody root/parent owner、mode、path 或 inode identity 变化；
+- marker symlink、非 `0600`、非 exact canonical bytes 或 directory fsync 失败；
 - legacy embedded permit 单独出现；
 - permit 或 Acceptance receipt 已使用；
 - 任何 production/live/deployment/automatic-promotion 字段为 true。
