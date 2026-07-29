@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from decimal import Decimal
+from decimal import Context, Decimal, ROUND_HALF_EVEN, localcontext
 from typing import Any, Mapping, Sequence
 
 from app.schemas.commodity_c_fast_execution_policy import (
@@ -93,6 +93,26 @@ def score_execution_quality(
 ) -> CFastExecutionQualityScoreDTO:
     """Score one virtual intent without any runtime or execution capability."""
 
+    with localcontext(_scoring_decimal_context()):
+        return _score_execution_quality_in_fixed_decimal_context(
+            intent=intent,
+            durably_created_at_utc=durably_created_at_utc,
+            policy=policy,
+            policy_hash=policy_hash,
+            contract_spec=contract_spec,
+            snapshots=snapshots,
+        )
+
+
+def _score_execution_quality_in_fixed_decimal_context(
+    *,
+    intent: CFastVirtualIntentDTO,
+    durably_created_at_utc: datetime,
+    policy: CFastExecutionQualityCollectionPolicyV2DTO,
+    policy_hash: str,
+    contract_spec: CFastExecutionQualityContractSpecDTO,
+    snapshots: Sequence[CFastL1L5BookSnapshotDTO],
+) -> CFastExecutionQualityScoreDTO:
     _verify_inputs(
         intent=intent,
         durably_created_at_utc=durably_created_at_utc,
@@ -200,6 +220,17 @@ def score_execution_quality(
     }
     return CFastExecutionQualityScoreDTO.model_validate(
         {**core, "score_hash": sha256_json(core)}
+    )
+
+
+def _scoring_decimal_context() -> Context:
+    return Context(
+        prec=256,
+        rounding=ROUND_HALF_EVEN,
+        Emin=-999_999,
+        Emax=999_999,
+        capitals=1,
+        clamp=0,
     )
 
 

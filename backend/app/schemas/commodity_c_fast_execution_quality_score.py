@@ -91,10 +91,15 @@ def _reject_coercive_booleans(value: Any) -> None:
             _reject_coercive_booleans(item)
 
 
-def _decimal(value: str, *, positive: bool = False) -> Decimal:
+def _decimal(
+    value: str,
+    *,
+    positive: bool = False,
+    maximum_characters: int = 64,
+) -> Decimal:
     if (
         not isinstance(value, str)
-        or len(value) > 64
+        or len(value) > maximum_characters
         or _DECIMAL_PATTERN.fullmatch(value) is None
     ):
         raise ValueError("decimal values must use plain decimal strings")
@@ -330,7 +335,7 @@ class CFastBookWalkMetricsDTO(StrictScoreModel):
         value: str | None,
     ) -> str | None:
         if value is not None:
-            _decimal(value)
+            _decimal(value, maximum_characters=512)
         return value
 
     @model_validator(mode="after")
@@ -412,7 +417,7 @@ class CFastPassiveFillBoundsDTO(StrictScoreModel):
     @classmethod
     def validate_bound(cls, value: str | None) -> str | None:
         if value is not None:
-            parsed = _decimal(value)
+            parsed = _decimal(value, maximum_characters=512)
             if parsed < 0 or parsed > 1:
                 raise ValueError("fill bound must be between zero and one")
         return value
@@ -456,7 +461,7 @@ class CFastExecutionQualityHorizonDTO(StrictScoreModel):
     @classmethod
     def validate_markout(cls, value: str | None) -> str | None:
         if value is not None:
-            _decimal(value)
+            _decimal(value, maximum_characters=512)
         return value
 
     @model_validator(mode="after")

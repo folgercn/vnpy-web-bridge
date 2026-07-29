@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 from datetime import datetime, timedelta, timezone
+from decimal import Context, ROUND_DOWN, ROUND_HALF_UP, ROUND_UP, localcontext
 import importlib.util
 from pathlib import Path
 import sys
@@ -224,6 +225,38 @@ def test_happy_path_scores_market_book_walk_markout_and_bounds() -> None:
     assert result.score_hash == execution_quality_score_hash(result)
 
 
+def test_score_is_byte_identical_across_ambient_decimal_contexts() -> None:
+    frozen_policy = policy()
+    virtual_intent = intent(lots=12)
+    spec = contract_spec(volume_lots_per_raw_unit="0.333333333333333333")
+    rows = full_horizon_books()
+    serialized: list[bytes] = []
+    score_hashes: list[str] = []
+
+    for precision, rounding in (
+        (10, ROUND_DOWN),
+        (28, ROUND_HALF_UP),
+        (512, ROUND_UP),
+    ):
+        ambient = Context(prec=precision, rounding=rounding)
+        with localcontext(ambient):
+            result = score_execution_quality(
+                intent=virtual_intent,
+                durably_created_at_utc=ANCHOR,
+                policy=frozen_policy,
+                policy_hash=sha256_json(
+                    frozen_policy.model_dump(mode="json")
+                ),
+                contract_spec=spec,
+                snapshots=rows,
+            )
+        serialized.append(result.model_dump_json().encode("utf-8"))
+        score_hashes.append(result.score_hash)
+
+    assert serialized[0] == serialized[1] == serialized[2]
+    assert score_hashes[0] == score_hashes[1] == score_hashes[2]
+
+
 def test_l1_only_never_synthesizes_l5_metrics_or_fill_bounds() -> None:
     rows = full_horizon_books()
     rows[0] = book(
@@ -341,7 +374,7 @@ def test_insufficient_l5_depth_reports_partial_observed_walk() -> None:
     )
     assert result.decision_metrics.l5_covered_lots == 10
     assert result.decision_metrics.l5_coverage_ratio == (
-        "0.8333333333333333333333333333"
+        "0.8" + ("3" * 255)
     )
 
 

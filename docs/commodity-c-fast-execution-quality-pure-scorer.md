@@ -39,6 +39,11 @@ production_allowed=false
   字符串；禁止 binary float、`NaN`、`Infinity` 和科学计数法。
 - tick-grid 使用 Decimal tuple 转换后的缩放整数精确整除，不依赖 Decimal
   默认 precision 下的除法或四舍五入。
+- 完整 score derivation 在独立
+  `Context(prec=256, rounding=ROUND_HALF_EVEN)` 的 `localcontext` 内运行；
+  调用进程的 ambient Decimal precision/rounding 不会改变指标或 score hash。
+  原始输入 decimal 仍限制为 64 字符；只有 scorer 派生指标允许最多 512
+  字符，以容纳固定高精度最坏有界中间结果。
 - 每条 book snapshot、contract spec 和最终 score 都有 canonical JSON
   SHA256。严格 DTO reload 会重算 hash。
 - `reload_and_verify_execution_quality_score` 还会使用当前 intent、policy、
