@@ -18,7 +18,7 @@ from jsonschema import Draft202012Validator
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from research_warehouse import publication
+from research_warehouse import catalog_validation, publication
 from research_warehouse.acquisition import acquire_daily
 from research_warehouse.acquisition_models import HttpResponse
 from research_warehouse.canonical import canonical_json_line, sha256
@@ -119,6 +119,28 @@ def official_raw(*, invalid_price: bool = False) -> bytes:
         separators=(",", ":"),
         sort_keys=True,
     ).encode()
+
+
+def changed_market_parquet(source: Path, destination: Path) -> None:
+    source_literal = "'" + str(source).replace("'", "''") + "'"
+    destination_literal = "'" + str(destination).replace("'", "''") + "'"
+    order = ", ".join(f'"{key}" ASC NULLS FIRST' for key in SORT_KEYS)
+    connection = duckdb.connect(":memory:")
+    try:
+        connection.execute(
+            "COPY (SELECT * REPLACE (open_price + 1 AS open_price) "
+            f"FROM read_parquet({source_literal}) ORDER BY {order}) "
+            f"TO {destination_literal} (FORMAT parquet, "
+            f"COMPRESSION {PARQUET_COMPRESSION}, "
+            f"COMPRESSION_LEVEL {PARQUET_COMPRESSION_LEVEL}, "
+            f"ROW_GROUP_SIZE {PARQUET_ROW_GROUP_SIZE}, "
+            f"PARQUET_VERSION '{PARQUET_VERSION}', "
+            "STRING_DICTIONARY_PAGE_SIZE_LIMIT "
+            f"{PARQUET_DICTIONARY_PAGE_SIZE})"
+        )
+    finally:
+        connection.close()
+    destination.chmod(0o600)
 
 
 def signing_keys(tmp_path: Path) -> tuple[Path, Path]:
@@ -395,25 +417,7 @@ def test_market_value_and_catalog_hash_tamper_fails_replay(
     derived = DerivedPaths.open(tmp_path / "derived")
     parquet = next(derived.parquet.rglob("*.parquet"))
     changed = derived.temporary / "changed.parquet"
-    literal = "'" + str(parquet).replace("'", "''") + "'"
-    changed_literal = "'" + str(changed).replace("'", "''") + "'"
-    order = ", ".join(f'"{key}" ASC NULLS FIRST' for key in SORT_KEYS)
-    connection = duckdb.connect(":memory:")
-    try:
-        connection.execute(
-            "COPY (SELECT * REPLACE (open_price + 1 AS open_price) "
-            f"FROM read_parquet({literal}) ORDER BY {order}) "
-            f"TO {changed_literal} (FORMAT parquet, "
-            f"COMPRESSION {PARQUET_COMPRESSION}, "
-            f"COMPRESSION_LEVEL {PARQUET_COMPRESSION_LEVEL}, "
-            f"ROW_GROUP_SIZE {PARQUET_ROW_GROUP_SIZE}, "
-            f"PARQUET_VERSION '{PARQUET_VERSION}', "
-            "STRING_DICTIONARY_PAGE_SIZE_LIMIT "
-            f"{PARQUET_DICTIONARY_PAGE_SIZE})"
-        )
-    finally:
-        connection.close()
-    changed.chmod(0o600)
+    changed_market_parquet(parquet, changed)
     os.replace(changed, parquet)
     changed_raw = parquet.read_bytes()
     catalog = duckdb.connect(str(derived.catalog / CATALOG_FILENAME))
@@ -439,6 +443,51 @@ def test_market_value_and_catalog_hash_tamper_fails_replay(
             ledger=values[5],
             binding=values[6],
         )
+
+
+def test_partition_path_swap_during_validation_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    values = sealed_evidence(tmp_path)
+    rebuild(*values, tmp_path / "derived")
+    derived = DerivedPaths.open(tmp_path / "derived")
+    parquet = next(derived.parquet.rglob("*.parquet"))
+    changed = derived.temporary / "changed.parquet"
+    changed_market_parquet(parquet, changed)
+    real_read = catalog_validation.read_regular_strict
+    swapped = False
+
+    def swap_after_verified_read(
+        path: Path,
+        label: str,
+        **kwargs,
+    ) -> bytes:
+        nonlocal swapped
+        raw = real_read(path, label, **kwargs)
+        if label == "catalog normalized Parquet" and not swapped:
+            swapped = True
+            os.replace(changed, path)
+        return raw
+
+    monkeypatch.setattr(
+        catalog_validation,
+        "read_regular_strict",
+        swap_after_verified_read,
+    )
+    with pytest.raises(RegistryError, match="changed during validation"):
+        verify_rebuilt_catalog(
+            evidence=values[0],
+            derived=derived,
+            public_key_path=values[1],
+            registry=load_registry(REGISTRY_PATH),
+            expected_genesis_seal_sha256=values[2],
+            expected_head_seal_sha256=values[3],
+            expected_head_commit_seal_sha256=values[4],
+            ledger=values[5],
+            binding=values[6],
+        )
+    assert swapped is True
 
 
 def test_same_revision_snapshot_extension_rebuilds(tmp_path: Path) -> None:

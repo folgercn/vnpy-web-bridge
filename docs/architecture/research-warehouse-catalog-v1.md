@@ -52,9 +52,11 @@ result before reporting success.
 signed raw into a disposable replay root. Catalog partition identities, paths,
 row counts, and hashes must exactly match that replay, so coordinated edits to
 both a Parquet file and the untrusted catalog cannot validate. Both commands
-require explicit genesis, head, head-commit, ledger, tool-commit, and
-dependency-lock anchors. Run `python -m research_warehouse.cli <command>
---help` for the complete arguments.
+make DuckDB inspect an anonymous, verifier-owned file descriptor containing the
+already hashed bytes, then strictly reread the published path after inspection
+to detect concurrent replacement. They require explicit genesis, head,
+head-commit, ledger, tool-commit, and dependency-lock anchors. Run `python -m
+research_warehouse.cli <command> --help` for the complete arguments.
 
 ## Failure semantics
 

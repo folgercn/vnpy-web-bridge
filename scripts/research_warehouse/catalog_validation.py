@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import os
+import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -13,7 +17,7 @@ from .commit_anchors import CommitAnchorLedger
 from .custody_paths import require_private_dir
 from .derived_paths import DerivedPaths
 from .errors import RegistryError
-from .file_integrity import read_regular_strict
+from .file_integrity import fsync_dir, read_regular_strict, write_all
 from .normalization_contracts import (
     DUCKDB_VERSION,
     NORMALIZED_COLUMNS,
@@ -72,6 +76,52 @@ def _sql_path(path: Path) -> str:
     return "'" + str(path).replace("'", "''") + "'"
 
 
+def _read_descriptor(descriptor: int, size: int) -> bytes:
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    chunks = []
+    remaining = size + 1
+    while remaining:
+        chunk = os.read(descriptor, min(65_536, remaining))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    return b"".join(chunks)
+
+
+@contextmanager
+def _private_verified_copy(
+    paths: DerivedPaths,
+    raw: bytes,
+) -> Iterator[Path]:
+    descriptor, name = tempfile.mkstemp(
+        prefix=".verify-parquet-",
+        suffix=".parquet",
+        dir=paths.temporary,
+    )
+    temporary = Path(name)
+    try:
+        os.fchmod(descriptor, 0o600)
+        write_all(descriptor, raw)
+        os.fsync(descriptor)
+        if _read_descriptor(descriptor, len(raw)) != raw:
+            raise RegistryError("private verified Parquet copy changed")
+        temporary.unlink()
+        fsync_dir(paths.temporary)
+        yield Path("/dev/fd") / str(descriptor)
+        if _read_descriptor(descriptor, len(raw)) != raw:
+            raise RegistryError("private verified Parquet copy changed")
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            temporary.unlink()
+            fsync_dir(paths.temporary)
+        except FileNotFoundError:
+            pass
+
+
 def _validate_partition(
     connection: duckdb.DuckDBPyConnection,
     paths: DerivedPaths,
@@ -114,67 +164,77 @@ def _validate_partition(
         or timezone != TIMEZONE
     ):
         raise RegistryError("catalog normalization binding mismatch")
-    literal = _sql_path(path)
-    try:
-        actual_count = connection.execute(
-            f"SELECT count(*) FROM read_parquet({literal})"
-        ).fetchone()[0]
-        described = tuple(
-            (item[0], item[1])
-            for item in connection.execute(
-                f"DESCRIBE SELECT * FROM read_parquet({literal})"
+    with _private_verified_copy(paths, raw) as verified:
+        literal = _sql_path(verified)
+        try:
+            actual_count = connection.execute(
+                f"SELECT count(*) FROM read_parquet({literal})"
+            ).fetchone()[0]
+            described = tuple(
+                (item[0], item[1])
+                for item in connection.execute(
+                    f"DESCRIBE SELECT * FROM read_parquet({literal})"
+                ).fetchall()
+            )
+            metadata = connection.execute(
+                f"SELECT num_rows, format_version, created_by "
+                f"FROM parquet_file_metadata({literal})"
+            ).fetchone()
+            compressions = {
+                value[0]
+                for value in connection.execute(
+                    f"SELECT DISTINCT compression "
+                    f"FROM parquet_metadata({literal})"
+                ).fetchall()
+            }
+            mismatch_count = connection.execute(
+                f"SELECT count(*) FROM read_parquet({literal}) WHERE "
+                "normalization_id IS DISTINCT FROM ? "
+                "OR normalizer_version IS DISTINCT FROM ? "
+                "OR registry_raw_sha256 IS DISTINCT FROM ? "
+                "OR revision_id IS DISTINCT FROM ? "
+                "OR object_id IS DISTINCT FROM ? "
+                "OR source_id IS DISTINCT FROM ? "
+                "OR exchange IS DISTINCT FROM ? "
+                "OR trade_day IS DISTINCT FROM ? "
+                "OR raw_sha256 IS DISTINCT FROM ? "
+                "OR schema_version IS DISTINCT FROM ? "
+                "OR tool_commit_sha IS DISTINCT FROM ? "
+                "OR dependency_lock_sha256 IS DISTINCT FROM ? "
+                "OR duckdb_version IS DISTINCT FROM ? "
+                "OR timezone IS DISTINCT FROM ?",
+                (
+                    normalization_id,
+                    NORMALIZER_VERSION,
+                    binding.registry_raw_sha256,
+                    revision_id,
+                    revision["object_id"],
+                    source_id,
+                    exchange,
+                    trade_day,
+                    raw_sha256,
+                    NORMALIZED_SCHEMA_VERSION,
+                    binding.tool_commit_sha,
+                    binding.dependency_lock_sha256,
+                    DUCKDB_VERSION,
+                    TIMEZONE,
+                ),
+            ).fetchone()[0]
+            sort_rows = connection.execute(
+                "SELECT "
+                + ", ".join(f'"{key}"' for key in SORT_KEYS)
+                + f" FROM read_parquet({literal})"
             ).fetchall()
-        )
-        metadata = connection.execute(
-            f"SELECT num_rows, format_version, created_by "
-            f"FROM parquet_file_metadata({literal})"
-        ).fetchone()
-        compressions = {
-            value[0]
-            for value in connection.execute(
-                f"SELECT DISTINCT compression FROM parquet_metadata({literal})"
-            ).fetchall()
-        }
-        mismatch_count = connection.execute(
-            f"SELECT count(*) FROM read_parquet({literal}) WHERE "
-            "normalization_id IS DISTINCT FROM ? "
-            "OR normalizer_version IS DISTINCT FROM ? "
-            "OR registry_raw_sha256 IS DISTINCT FROM ? "
-            "OR revision_id IS DISTINCT FROM ? "
-            "OR object_id IS DISTINCT FROM ? "
-            "OR source_id IS DISTINCT FROM ? "
-            "OR exchange IS DISTINCT FROM ? "
-            "OR trade_day IS DISTINCT FROM ? "
-            "OR raw_sha256 IS DISTINCT FROM ? "
-            "OR schema_version IS DISTINCT FROM ? "
-            "OR tool_commit_sha IS DISTINCT FROM ? "
-            "OR dependency_lock_sha256 IS DISTINCT FROM ? "
-            "OR duckdb_version IS DISTINCT FROM ? "
-            "OR timezone IS DISTINCT FROM ?",
-            (
-                normalization_id,
-                NORMALIZER_VERSION,
-                binding.registry_raw_sha256,
-                revision_id,
-                revision["object_id"],
-                source_id,
-                exchange,
-                trade_day,
-                raw_sha256,
-                NORMALIZED_SCHEMA_VERSION,
-                binding.tool_commit_sha,
-                binding.dependency_lock_sha256,
-                DUCKDB_VERSION,
-                TIMEZONE,
-            ),
-        ).fetchone()[0]
-        sort_rows = connection.execute(
-            "SELECT "
-            + ", ".join(f'"{key}"' for key in SORT_KEYS)
-            + f" FROM read_parquet({literal})"
-        ).fetchall()
-    except duckdb.Error as exc:
-        raise RegistryError(f"catalog Parquet validation failed: {exc}") from exc
+        except duckdb.Error as exc:
+            raise RegistryError(
+                f"catalog Parquet validation failed: {exc}"
+            ) from exc
+    if read_regular_strict(
+        path,
+        "catalog normalized Parquet post-validation",
+        limit=512 * 1024 * 1024,
+    ) != raw:
+        raise RegistryError("catalog Parquet changed during validation")
     if actual_count != row_count or metadata[0] != row_count:
         raise RegistryError("catalog Parquet row count mismatch")
     if described != NORMALIZED_COLUMNS:
