@@ -7,9 +7,14 @@ import json
 import sys
 from pathlib import Path
 
+from .acquisition import acquire_daily
 from .authority import assert_research_source_boundary
 from .errors import RegistryError
+from .filesystem import WarehousePaths
+from .manifests import seal_daily_batch, verify_manifest_chain
+from .pit import select_pit_revision
 from .registry import load_registry
+from .timeutil import parse_utc
 
 
 def parser() -> argparse.ArgumentParser:
@@ -19,6 +24,29 @@ def parser() -> argparse.ArgumentParser:
     registry.add_argument("--registry", type=Path, required=True)
     boundary = commands.add_parser("verify-boundary")
     boundary.add_argument("--source-root", type=Path, required=True)
+    init = commands.add_parser("init-custody")
+    init.add_argument("--root", type=Path, required=True)
+    acquire = commands.add_parser("acquire")
+    acquire.add_argument("--root", type=Path, required=True)
+    acquire.add_argument("--registry", type=Path, required=True)
+    acquire.add_argument("--source-id", required=True)
+    acquire.add_argument("--trade-day", required=True)
+    acquire.add_argument("--collector-version", required=True)
+    seal = commands.add_parser("seal-day")
+    seal.add_argument("--root", type=Path, required=True)
+    seal.add_argument("--registry", type=Path, required=True)
+    seal.add_argument("--trade-day", required=True)
+    seal.add_argument("--private-key", type=Path, required=True)
+    seal.add_argument("--signer-key-id", required=True)
+    verify = commands.add_parser("verify-chain")
+    verify.add_argument("--root", type=Path, required=True)
+    verify.add_argument("--public-key", type=Path, required=True)
+    select = commands.add_parser("select-pit")
+    select.add_argument("--root", type=Path, required=True)
+    select.add_argument("--public-key", type=Path, required=True)
+    select.add_argument("--source-id", required=True)
+    select.add_argument("--trade-day", required=True)
+    select.add_argument("--cutoff-at", required=True)
     return result
 
 
@@ -34,7 +62,7 @@ def main(argv: list[str] | None = None) -> int:
                 "sources": [source.source_id for source in registry.sources],
                 "status": "VALID",
             }
-        else:
+        elif args.command == "verify-boundary":
             paths = list(args.source_root.rglob("*.py"))
             if not paths:
                 raise RegistryError("Research source root contains no Python modules")
@@ -43,6 +71,62 @@ def main(argv: list[str] | None = None) -> int:
                 "checked_file_count": len(paths),
                 "status": "RESEARCH_BOUNDARY_VALID",
             }
+        elif args.command == "init-custody":
+            paths = WarehousePaths.initialize(args.root)
+            output = {"root": str(paths.root), "status": "CUSTODY_INITIALIZED"}
+        elif args.command == "acquire":
+            acquired = acquire_daily(
+                paths=WarehousePaths.open(args.root),
+                registry=load_registry(args.registry),
+                source_id=args.source_id,
+                trade_day=args.trade_day,
+                collector_version=args.collector_version,
+            )
+            output = {
+                "idempotent_raw": acquired.idempotent_raw,
+                "object_id": acquired.object_id,
+                "observation_id": acquired.observation_id,
+                "raw_sha256": acquired.raw_sha256,
+                "status": "RAW_OBSERVED_NOT_READY",
+            }
+        elif args.command == "seal-day":
+            output_path = seal_daily_batch(
+                paths=WarehousePaths.open(args.root),
+                registry=load_registry(args.registry),
+                trade_day=args.trade_day,
+                private_key_path=args.private_key,
+                signer_key_id=args.signer_key_id,
+            )
+            output = {
+                "manifest": str(output_path),
+                "status": "DAILY_BATCH_READY",
+            }
+        elif args.command == "verify-chain":
+            chain = verify_manifest_chain(
+                paths=WarehousePaths.open(args.root),
+                public_key_path=args.public_key,
+            )
+            output = {
+                "batch_count": len(chain),
+                "latest_batch_id": chain[-1]["batch_id"] if chain else None,
+                "status": "MANIFEST_CHAIN_VALID",
+            }
+        elif args.command == "select-pit":
+            selection = select_pit_revision(
+                paths=WarehousePaths.open(args.root),
+                public_key_path=args.public_key,
+                source_id=args.source_id,
+                trade_day=args.trade_day,
+                cutoff_at=parse_utc(args.cutoff_at, "cutoff_at"),
+            )
+            output = {
+                "batch_id": selection.batch_id,
+                "object_id": selection.object_id,
+                "raw_sha256": selection.raw_sha256,
+                "status": "PIT_REVISION_SELECTED",
+            }
+        else:  # pragma: no cover
+            raise RegistryError(f"unsupported command: {args.command}")
     except RegistryError as exc:
         print(f"Research source policy failed closed: {exc}", file=sys.stderr)
         return 1
