@@ -9,6 +9,7 @@ from threading import Event, Thread
 from time import monotonic, sleep
 
 import pytest
+import app.services.commodity_simnow as commodity_simnow_module
 from app.core.config import Settings
 from app.core.errors import (
     CommoditySimNowSafetyError,
@@ -18,11 +19,18 @@ from app.schemas.commodity_c_fast_shadow import (
     CommodityCFastRuntimeSnapshotDTO,
     CommodityCFastShakedownSnapshotDTO,
 )
+from app.schemas.commodity_c_fast_execution_permit import (
+    CommodityCFastSimNowExecutionPermitDTO,
+)
 from app.schemas.commodity_simnow import (
     CommodityCFastShakedownPreviewRequestDTO,
     CommoditySimNowDisableRequestDTO,
 )
 from app.services.commodity_simnow import CommoditySimNowService
+from app.services.commodity_c_fast_execution_permit import (
+    adapter_target_projection_sha256,
+    derived_permit_id,
+)
 from app.services.commodity_c_fast_shadow_common import (
     formula_target_binding_sha256,
     sha256_json,
@@ -322,7 +330,150 @@ def prepare_c_fast_shakedown(
     service.bind_c_fast_snapshot_provider(
         lambda: (snapshot.model_copy(deep=True), snapshot_hash)
     )
+    bind_test_execution_permit(service, selected_products=("ag",))
     return service, rpc, snapshot, snapshot_hash
+
+
+def bind_test_execution_permit(
+    service: CommoditySimNowService,
+    *,
+    selected_products: tuple[str, ...],
+) -> None:
+    def provider(
+        snapshot: CommodityCFastShakedownSnapshotDTO,
+        snapshot_hash: str,
+    ) -> CommodityCFastSimNowExecutionPermitDTO:
+        rows = {row.product: row for row in snapshot.targets}
+        acceptance_identity = hashlib.sha256(
+            snapshot.snapshot_id.encode()
+        ).hexdigest()
+        acceptance_receipt_identity = hashlib.sha256(
+            f"receipt:{snapshot.snapshot_id}".encode()
+        ).hexdigest()
+        selected_targets = []
+        for product in selected_products:
+            row = rows[product]
+            selected_targets.append(
+                {
+                    "product": product,
+                    "exact_contract": row.exact_contract,
+                    "previous_target_quantity":
+                    row.previous_target_quantity,
+                    "signed_target_quantity": row.target_quantity,
+                    "signed_target_delta":
+                    row.target_quantity - row.previous_target_quantity,
+                    "signed_target_row_sha256":
+                    hashlib.sha256(
+                        f"research:{product}".encode()
+                    ).hexdigest(),
+                    "adapter_target_projection_sha256":
+                    adapter_target_projection_sha256(
+                        product=product,
+                        exact_contract=row.exact_contract,
+                        previous_target_quantity=(
+                            row.previous_target_quantity
+                        ),
+                        target_quantity=row.target_quantity,
+                    ),
+                }
+            )
+        core = {
+            "schema_version":
+            "commodity_c_fast_simnow_execution_permit_v1",
+            "purpose":
+            "c_fast_simnow_one_shot_control_execution_permit",
+            "candidate_id": "C_FAST_CROSS_SECTION_NEUTRAL",
+            "parent_issue_number": 114,
+            "issue_number": 146,
+            "issued_at": snapshot.accepted_at_utc.isoformat(),
+            "not_before": snapshot.accepted_at_utc.isoformat(),
+            "expires_at": snapshot.expires_at_utc.isoformat(),
+            "execution_day": snapshot.execution_day.isoformat(),
+            "permit_state":
+            "READY_FOR_EXPLICIT_HUMAN_SIMNOW_SESSION_START_ONLY",
+            "execution_environment": "SIMNOW",
+            "signer_type": "human",
+            "reviewer_role": "unit-test-control-execution-reviewer",
+            "human_signature": "unit-test-human-signature",
+            "signer_key_id": "execution-unit-test-key",
+            "acceptance_id":
+            "cfast-simnow-research-accept-v1-"
+            + acceptance_identity,
+            "acceptance_state":
+            "READY_FOR_HUMAN_SIMNOW_EXECUTION_PERMIT_ONLY",
+            "acceptance_signer_key_id": "acceptance-unit-test-key",
+            "research_signer_key_id": "research-unit-test-key",
+            "acceptance_raw_sha256": "b" * 64,
+            "acceptance_canonical_sha256": "c" * 64,
+            "acceptance_receipt_raw_sha256":
+            acceptance_receipt_identity,
+            "acceptance_receipt_canonical_sha256": "e" * 64,
+            "acceptance_consume_raw_sha256": "3" * 64,
+            "acceptance_consume_canonical_sha256": "4" * 64,
+            "acceptance_consume_id":
+            "cfast-simnow-research-accept-consume-v1-" + "f" * 64,
+            "research_bundle_id":
+            "cfast-simnow-research-v1-" + "1" * 64,
+            "research_artifact_index_sha256": "2" * 64,
+            "selected_target_index_sha256": "5" * 64,
+            "custody_root_path_sha256": "6" * 64,
+            "custody_identity_sha256": "7" * 64,
+            "source_snapshot_id": snapshot.snapshot_id,
+            "source_snapshot_sha256": snapshot_hash,
+            "legacy_control_acceptance_id":
+            snapshot.control_acceptance_id,
+            "legacy_execution_permit_id":
+            snapshot.execution_permit_id,
+            "formula_target_binding_sha256":
+            snapshot.formula_target_binding_sha256,
+            "expected_simnow_account_sha256": snapshot.account_sha256,
+            "selected_products": list(selected_products),
+            "selected_targets": selected_targets,
+            "human_session_start_required": True,
+            "automatic_session_start_authorized": False,
+            "simnow_execution_authorized": True,
+            "simnow_auto_dispatch_authorized": True,
+            "simnow_account_read_authorized": True,
+            "simnow_rpc_authorized": True,
+            "simnow_order_submission_authorized": True,
+            "simnow_position_read_authorized": True,
+            "simnow_position_mutation_authorized": True,
+            "simnow_reconcile_authorized": True,
+            "countable_forward": False,
+            "official_forward_claimed": False,
+            "production_allowed": False,
+            "deployment_authorized": False,
+            "live_trading_authorized": False,
+            "replacement_authorized": False,
+            "automatic_promotion_authorized": False,
+            "dynamic_selection_allowed": False,
+            "replay_allowed": False,
+            "account_data_read_at_issuance": False,
+            "execution_data_read_at_issuance": False,
+            "orders_sent_at_issuance": 0,
+            "positions_modified_at_issuance": 0,
+            "web_bridge_rpc_calls_at_issuance": 0,
+        }
+        payload = {
+            **core,
+            "permit_id": derived_permit_id(core),
+            "signature": "A" * 88,
+        }
+        if any(
+            row["signed_target_delta"] == 0
+            for row in selected_targets
+        ):
+            # Legacy no-op adapter recovery tests predate #165, whose real
+            # Acceptance schema forbids zero selected deltas.  Keep those
+            # state-machine tests isolated from authority-schema validation.
+            return CommodityCFastSimNowExecutionPermitDTO.model_construct(
+                **payload
+            )
+        return CommodityCFastSimNowExecutionPermitDTO.model_validate(
+            payload
+        )
+
+    service.bind_c_fast_execution_permit_provider(provider)
 
 
 def complete_c_fast_ag_session(
@@ -382,6 +533,43 @@ def install_next_c_fast_snapshot(
         tick["received_at"] = next_now.isoformat()
     rpc.trades = []
     return snapshot, snapshot_hash
+
+
+def test_c_fast_legacy_snapshot_cannot_bypass_missing_independent_permit(
+    tmp_path: Path,
+) -> None:
+    service, _, _, _ = prepare_c_fast_shakedown(tmp_path)
+    service._c_fast_execution_permit_provider = None
+
+    with pytest.raises(
+        CommoditySimNowSafetyError,
+        match="旧 shakedown 内嵌 permit 不具备执行权限",
+    ):
+        service.preview_c_fast_shakedown(
+            ["ag"], operator="admin", role="admin", source_ip=None
+        )
+
+    assert service.trade.requests == []
+    assert service.order_endpoint_touched is False
+
+
+def test_c_fast_selected_products_must_equal_acceptance_scope(
+    tmp_path: Path,
+) -> None:
+    service, _, _, _ = prepare_c_fast_shakedown(tmp_path)
+    bind_test_execution_permit(
+        service, selected_products=("ag", "al")
+    )
+
+    with pytest.raises(
+        CommoditySimNowSafetyError,
+        match="Research Acceptance 完全一致",
+    ):
+        service.preview_c_fast_shakedown(
+            ["ag"], operator="admin", role="admin", source_ip=None
+        )
+
+    assert service.trade.requests == []
 
 
 def test_c_fast_preview_builds_masked_signed_target_plan(
@@ -447,11 +635,11 @@ def test_c_fast_start_auto_dispatches_and_archives_reconciled_pnl(
         for row in service.trade.send_kwargs
     )
     receipt = service._load_c_fast_permit_receipt(
-        snapshot.execution_permit_id
+        preview["execution_permit_id"]
     )
     assert receipt is not None
     assert service.current_plan["execution_permit_id"] == (
-        snapshot.execution_permit_id
+        preview["execution_permit_id"]
     )
     assert service.current_plan[
         "permit_consumption_receipt_checksum"
@@ -501,13 +689,13 @@ def test_c_fast_one_shot_permit_is_consumed_before_plan_persist(
 
     assert service.trade.requests == []
     assert service._load_c_fast_permit_receipt(
-        snapshot.execution_permit_id
+        preview["execution_permit_id"]
     ) is not None
 
     restarted, _, _, _ = prepare_c_fast_shakedown(tmp_path)
     with pytest.raises(
         CommoditySimNowSafetyError,
-        match="Permit 已消费",
+        match="Acceptance 已绑定|Permit 已消费",
     ):
         restarted.preview_c_fast_shakedown(
             ["ag"],
@@ -515,6 +703,85 @@ def test_c_fast_one_shot_permit_is_consumed_before_plan_persist(
             role="admin",
             source_ip=None,
         )
+
+
+def test_c_fast_invalid_final_permit_does_not_burn_acceptance(
+    tmp_path: Path,
+) -> None:
+    service, _, _, _ = prepare_c_fast_shakedown(tmp_path)
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    valid_provider = service._c_fast_execution_permit_provider
+    assert valid_provider is not None
+    calls = 0
+
+    def expires_before_consume(snapshot, snapshot_hash):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise ValueError("simulated permit expiry")
+        return valid_provider(snapshot, snapshot_hash)
+
+    service.bind_c_fast_execution_permit_provider(
+        expires_before_consume
+    )
+    with pytest.raises(
+        CommoditySimNowSafetyError,
+        match="Execution Permit 未通过",
+    ):
+        service.start_c_fast_shakedown(
+            preview["plan_hash"],
+            operator="admin",
+            role="admin",
+            source_ip=None,
+        )
+
+    assert service.trade.requests == []
+    assert service._load_c_fast_acceptance_use(
+        preview["acceptance_receipt_raw_sha256"]
+    ) is None
+    assert service._load_c_fast_permit_receipt(
+        preview["execution_permit_id"]
+    ) is None
+
+
+def test_c_fast_crash_between_acceptance_and_permit_receipts_burns_safe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, _, _, _ = prepare_c_fast_shakedown(tmp_path)
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    permit_path = service._c_fast_permit_receipt_path(
+        preview["execution_permit_id"]
+    )
+    original_open = commodity_simnow_module.os.open
+
+    def fail_permit_receipt(path, *args, **kwargs):
+        if Path(path) == permit_path:
+            raise OSError("simulated permit receipt crash")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(
+        commodity_simnow_module.os, "open", fail_permit_receipt
+    )
+    with pytest.raises(OSError, match="permit receipt crash"):
+        service.start_c_fast_shakedown(
+            preview["plan_hash"],
+            operator="admin",
+            role="admin",
+            source_ip=None,
+        )
+
+    assert service.trade.requests == []
+    assert service._load_c_fast_acceptance_use(
+        preview["acceptance_receipt_raw_sha256"]
+    ) is not None
+    assert service._load_c_fast_permit_receipt(
+        preview["execution_permit_id"]
+    ) is None
 
 
 def test_c_fast_terminal_reconciliation_survives_unavailable_pnl_mark(
@@ -1122,6 +1389,9 @@ def test_c_fast_each_child_has_final_dispatch_barrier(
     )
     if isinstance(trade, AbortAfterFirstChildTrade):
         trade.service = service
+    bind_test_execution_permit(
+        service, selected_products=("ag", "al")
+    )
     preview = service.preview_c_fast_shakedown(
         ["ag", "al"], operator="admin", role="admin", source_ip=None
     )["preview"]
@@ -1150,6 +1420,9 @@ def test_c_fast_stop_preempts_blocked_child_loop(
     trade = BlockingAfterFirstChildTrade()
     service, _, _, _ = prepare_c_fast_shakedown(
         tmp_path, trade=trade
+    )
+    bind_test_execution_permit(
+        service, selected_products=("ag", "al")
     )
     preview = service.preview_c_fast_shakedown(
         ["ag", "al"], operator="admin", role="admin", source_ip=None
@@ -1770,6 +2043,9 @@ def test_c_fast_final_guard_rejects_next_trading_day_child(
         tmp_path, trade=trade
     )
     trade.service = service
+    bind_test_execution_permit(
+        service, selected_products=("ag", "al")
+    )
     preview = service.preview_c_fast_shakedown(
         ["ag", "al"], operator="admin", role="admin", source_ip=None
     )["preview"]
@@ -1812,6 +2088,9 @@ def test_c_fast_final_guard_allows_night_natural_day_rollover(
     service.clock = lambda: before_midnight
     for tick in service.tick_store.ticks.values():
         tick["received_at"] = before_midnight.isoformat()
+    bind_test_execution_permit(
+        service, selected_products=("ag", "al")
+    )
     preview = service.preview_c_fast_shakedown(
         ["ag", "al"], operator="admin", role="admin", source_ip=None
     )["preview"]
@@ -2722,6 +3001,9 @@ def test_c_fast_partial_ack_does_not_hide_unattributed_timeout_child(
     service, rpc, snapshot, _ = prepare_c_fast_shakedown(
         tmp_path, trade=trade
     )
+    bind_test_execution_permit(
+        service, selected_products=("ag", "al")
+    )
     preview = service.preview_c_fast_shakedown(
         ["ag", "al"], operator="admin", role="admin", source_ip=None
     )["preview"]
@@ -3507,6 +3789,9 @@ def test_c_fast_pnl_requires_complete_evidence_per_child(
     tmp_path: Path,
 ) -> None:
     service, rpc, _, _ = prepare_c_fast_shakedown(tmp_path)
+    bind_test_execution_permit(
+        service, selected_products=("ag", "al")
+    )
     preview = service.preview_c_fast_shakedown(
         ["ag", "al"], operator="admin", role="admin", source_ip=None
     )["preview"]

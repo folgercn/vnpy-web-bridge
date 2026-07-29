@@ -130,6 +130,23 @@ class Settings(BaseSettings):
     commodity_c_fast_simnow_max_selected_products: int = Field(
         default=2, ge=1, le=2
     )
+    commodity_c_fast_simnow_execution_permit_enabled: bool = False
+    commodity_c_fast_simnow_execution_permit_path: str = ""
+    commodity_c_fast_simnow_execution_permit_trusted_keyring_path: str = ""
+    commodity_c_fast_simnow_execution_permit_expected_keyring_raw_sha256: str = ""
+    commodity_c_fast_simnow_research_acceptance_path: str = ""
+    commodity_c_fast_simnow_research_acceptance_consume_path: str = ""
+    commodity_c_fast_simnow_research_acceptance_receipt_path: str = ""
+    commodity_c_fast_simnow_research_acceptance_trusted_keyring_path: str = ""
+    commodity_c_fast_simnow_research_acceptance_expected_keyring_raw_sha256: str = ""
+    commodity_c_fast_simnow_research_acceptance_custody_root: str = ""
+    commodity_c_fast_simnow_research_acceptance_expected_custody_root_path_sha256: str = ""
+    commodity_c_fast_simnow_research_acceptance_expected_custody_identity_sha256: str = ""
+    commodity_c_fast_simnow_research_keyring_path: str = ""
+    commodity_c_fast_simnow_research_expected_keyring_raw_sha256: str = ""
+    commodity_c_fast_simnow_research_expected_signer_sha256: str = ""
+    commodity_c_fast_simnow_research_acceptance_expected_signer_sha256: str = ""
+    commodity_c_fast_simnow_research_artifact_paths_json: str = "{}"
     commodity_simnow_delivery_month_cutoff_day: int = Field(default=1, ge=1, le=15)
     commodity_simnow_sc_pre_delivery_cutoff_day: int = Field(default=15, ge=1, le=25)
 
@@ -237,6 +254,75 @@ class Settings(BaseSettings):
             ):
                 raise ValueError(
                     "COMMODITY_C_FAST_SIMNOW_STATE_PATH and derived paths must not overlap existing commodity paths"
+                )
+        if self.commodity_c_fast_simnow_execution_permit_enabled:
+            authority_path_values = (
+                self.commodity_c_fast_simnow_execution_permit_path,
+                self.commodity_c_fast_simnow_execution_permit_trusted_keyring_path,
+                self.commodity_c_fast_simnow_research_acceptance_path,
+                self.commodity_c_fast_simnow_research_acceptance_consume_path,
+                self.commodity_c_fast_simnow_research_acceptance_receipt_path,
+                self.commodity_c_fast_simnow_research_acceptance_trusted_keyring_path,
+                self.commodity_c_fast_simnow_research_keyring_path,
+            )
+            required_text = (
+                *authority_path_values,
+                self.commodity_c_fast_simnow_research_acceptance_custody_root,
+            )
+            required_pins = (
+                self.commodity_c_fast_simnow_execution_permit_expected_keyring_raw_sha256,
+                self.commodity_c_fast_simnow_research_acceptance_expected_keyring_raw_sha256,
+                self.commodity_c_fast_simnow_research_acceptance_expected_custody_root_path_sha256,
+                self.commodity_c_fast_simnow_research_acceptance_expected_custody_identity_sha256,
+                self.commodity_c_fast_simnow_research_expected_keyring_raw_sha256,
+                self.commodity_c_fast_simnow_research_expected_signer_sha256,
+                self.commodity_c_fast_simnow_research_acceptance_expected_signer_sha256,
+            )
+            authority_paths = {
+                Path(value).expanduser().resolve()
+                for value in authority_path_values
+                if value.strip()
+            }
+            if (
+                any(not value.strip() for value in required_text)
+                or any(
+                    not re.fullmatch(r"[0-9a-f]{64}", value)
+                    for value in required_pins
+                )
+                or len(authority_paths) != len(authority_path_values)
+            ):
+                raise ValueError(
+                    "C_FAST SimNow execution permit and #165 acceptance paths/keyrings/custody pins must be complete and distinct"
+                )
+            try:
+                artifact_paths = json.loads(
+                    self.commodity_c_fast_simnow_research_artifact_paths_json
+                )
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    "COMMODITY_C_FAST_SIMNOW_RESEARCH_ARTIFACT_PATHS_JSON must be valid JSON"
+                ) from exc
+            if (
+                not isinstance(artifact_paths, dict)
+                or set(artifact_paths)
+                != {
+                    "freeze_contract",
+                    "research_manifest",
+                    "signal_evidence",
+                    "target_evidence",
+                    "allocation_evidence",
+                    "daily_roll_evidence",
+                    "reference_price_evidence",
+                    "calendar_authority",
+                    "contract_spec_evidence",
+                }
+                or any(
+                    not isinstance(value, str) or not value.strip()
+                    for value in artifact_paths.values()
+                )
+            ):
+                raise ValueError(
+                    "COMMODITY_C_FAST_SIMNOW_RESEARCH_ARTIFACT_PATHS_JSON must bind all nine #165 Research artifacts"
                 )
         if self.app_env.lower() != "production":
             return self
