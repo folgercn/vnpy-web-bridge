@@ -774,11 +774,25 @@ class OfflineExecutionQualitySidecar:
             raise CFastExecutionQualitySidecarError(
                 "INTENT_SOURCE_BINDING_INVALID"
             )
-        provisional_anchor = self.clock()
-        _utc_text(provisional_anchor)
+        state = self.recover()
+        existing_intent_record = state.intents.get(intent_id)
+        if existing_intent_record is None:
+            pre_durable_clock_observed_at_utc = self.clock()
+            pre_durable_clock_text = _utc_text(
+                pre_durable_clock_observed_at_utc
+            )
+        else:
+            pre_durable_clock_observed_at_utc = _parse_utc(
+                existing_intent_record.payload.get(
+                    "pre_durable_clock_observed_at_utc"
+                )
+            )
+            pre_durable_clock_text = _utc_text(
+                pre_durable_clock_observed_at_utc
+            )
         score_execution_quality(
             intent=intent,
-            durably_created_at_utc=provisional_anchor,
+            durably_created_at_utc=pre_durable_clock_observed_at_utc,
             policy=score_policy,
             policy_hash=score_policy_hash,
             contract_spec=contract_spec,
@@ -794,43 +808,99 @@ class OfflineExecutionQualitySidecar:
             "score_policy": score_policy.model_dump(mode="json"),
             "score_policy_hash": score_policy_hash,
             "contract_spec": contract_spec.model_dump(mode="json"),
+            "pre_durable_clock_observed_at_utc": (
+                pre_durable_clock_text
+            ),
             "source_validation_scope": (
                 "CALLER_REVALIDATION_REQUIRED_SIGNED_SNAPSHOT_PLAN_AND_POLICY"
             ),
             **_FALSE_AUTHORITY,
         }
-        self.journal.append(
-            operation_id=_operation_id("intent", intent_id),
-            payload=payload,
-            pre_append_validate=self._semantic_append_validator(
-                _operation_id("intent", intent_id),
-                payload,
-            ),
-        )
+        intent_operation_id = _operation_id("intent", intent_id)
+        try:
+            intent_record = self.journal.append(
+                operation_id=intent_operation_id,
+                payload=payload,
+                pre_append_validate=self._semantic_append_validator(
+                    intent_operation_id,
+                    payload,
+                ),
+            )
+        except CFastExecutionQualitySidecarError as exc:
+            if exc.code != "JOURNAL_OPERATION_REPLAY_CONFLICT":
+                raise
+            raced_state = self.recover()
+            intent_record = raced_state.intents.get(intent_id)
+            if intent_record is None:
+                raise
+            persisted_pre_observation = _parse_utc(
+                intent_record.payload.get(
+                    "pre_durable_clock_observed_at_utc"
+                )
+            )
+            raced_payload = {
+                **payload,
+                "pre_durable_clock_observed_at_utc": _utc_text(
+                    persisted_pre_observation
+                ),
+            }
+            if intent_record.payload != raced_payload:
+                raise
+            pre_durable_clock_observed_at_utc = (
+                persisted_pre_observation
+            )
         state = self.recover()
         existing = state.anchors.get(intent_id)
         if existing is not None:
             return _parse_utc(existing.payload["durably_created_at_utc"])
         anchor = self.clock()
+        anchor_text = _utc_text(anchor)
+        if anchor < pre_durable_clock_observed_at_utc:
+            raise CFastExecutionQualitySidecarError(
+                "DURABLE_INTENT_CLOCK_REGRESSION"
+            )
         anchor_payload = {
             "record_type": "DURABLE_INTENT_ANCHOR",
             "intent_id": intent_id,
-            "durably_created_at_utc": _utc_text(anchor),
+            "pre_durable_clock_observed_at_utc": (
+                _utc_text(pre_durable_clock_observed_at_utc)
+            ),
+            "durably_created_at_utc": anchor_text,
+            "prerequisite_intent_record_hash": intent_record.record_hash,
             "anchor_basis": (
                 "AFTER_PREVERIFIED_INTENT_INPUT_FILE_AND_DIRECTORY_FSYNC"
             ),
             **_FALSE_AUTHORITY,
         }
-        self.journal.append(
-            operation_id=_operation_id("anchor", intent_id),
-            payload=anchor_payload,
-            pre_append_validate=self._semantic_append_validator(
-                _operation_id("anchor", intent_id),
-                anchor_payload,
-            ),
+        anchor_operation_id = _operation_id("anchor", intent_id)
+        try:
+            self.journal.append(
+                operation_id=anchor_operation_id,
+                payload=anchor_payload,
+                pre_append_validate=self._semantic_append_validator(
+                    anchor_operation_id,
+                    anchor_payload,
+                ),
+            )
+        except CFastExecutionQualitySidecarError as exc:
+            if exc.code != "JOURNAL_OPERATION_REPLAY_CONFLICT":
+                raise
+            raced_state = self.recover()
+            raced_anchor = raced_state.anchors.get(intent_id)
+            if raced_anchor is None:
+                raise
+            return _parse_utc(
+                raced_anchor.payload["durably_created_at_utc"]
+            )
+        recovered = self.recover()
+        persisted_anchor = recovered.anchors.get(intent_id)
+        if persisted_anchor is None:
+            raise CFastExecutionQualitySidecarError(
+                "INTENT_ANCHOR_NOT_DURABLE"
+            )
+        return _parse_utc(
+            persisted_anchor.payload["durably_created_at_utc"]
         )
-        self.recover()
-        return anchor
 
     def append_preverified_snapshot(
         self,
@@ -1132,6 +1202,11 @@ class OfflineExecutionQualitySidecar:
                     spec = CFastExecutionQualityContractSpecDTO.model_validate(
                         record.payload["contract_spec"]
                     )
+                    pre_durable_clock_observed_at_utc = _parse_utc(
+                        record.payload.get(
+                            "pre_durable_clock_observed_at_utc"
+                        )
+                    )
                     if (
                         intent.intent_id in intents
                         or record.operation_id
@@ -1155,12 +1230,31 @@ class OfflineExecutionQualitySidecar:
                         raise CFastExecutionQualitySidecarError(
                             "INTENT_RECORD_INVALID"
                         )
+                    score_execution_quality(
+                        intent=intent,
+                        durably_created_at_utc=(
+                            pre_durable_clock_observed_at_utc
+                        ),
+                        policy=policy,
+                        policy_hash=record.payload["score_policy_hash"],
+                        contract_spec=spec,
+                        snapshots=(),
+                    )
                     intents[intent.intent_id] = record
                 elif record_type == "DURABLE_INTENT_ANCHOR":
                     intent_id = record.payload.get("intent_id")
+                    prerequisite_intent = intents.get(str(intent_id))
+                    pre_durable_clock_observed_at_utc = _parse_utc(
+                        record.payload.get(
+                            "pre_durable_clock_observed_at_utc"
+                        )
+                    )
+                    durably_created_at_utc = _parse_utc(
+                        record.payload.get("durably_created_at_utc")
+                    )
                     if (
                         not isinstance(intent_id, str)
-                        or intent_id not in intents
+                        or prerequisite_intent is None
                         or intent_id in anchors
                         or record.operation_id
                         != _operation_id("anchor", intent_id)
@@ -1169,11 +1263,22 @@ class OfflineExecutionQualitySidecar:
                             "AFTER_PREVERIFIED_INTENT_INPUT_FILE_AND_"
                             "DIRECTORY_FSYNC"
                         )
+                        or record.payload.get(
+                            "prerequisite_intent_record_hash"
+                        )
+                        != prerequisite_intent.record_hash
+                        or record.payload.get(
+                            "pre_durable_clock_observed_at_utc"
+                        )
+                        != prerequisite_intent.payload.get(
+                            "pre_durable_clock_observed_at_utc"
+                        )
+                        or durably_created_at_utc
+                        < pre_durable_clock_observed_at_utc
                     ):
                         raise CFastExecutionQualitySidecarError(
                             "INTENT_ANCHOR_INVALID"
                         )
-                    _parse_utc(record.payload.get("durably_created_at_utc"))
                     anchors[intent_id] = record
                 elif record_type == "PREVERIFIED_L1_L5_SNAPSHOT_INPUT":
                     snapshot = CFastL1L5BookSnapshotDTO.model_validate(

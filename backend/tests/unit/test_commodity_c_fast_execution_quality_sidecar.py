@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import importlib.util
 import json
@@ -139,6 +139,113 @@ def test_registration_is_create_only_durable_and_restart_idempotent(
     assert status["collection_authorized"] is False
     assert status["dispatch_allowed"] is False
     assert status["order_authorized"] is False
+
+
+def test_registration_clock_regression_leaves_retriable_intent_without_anchor(
+    tmp_path: Path,
+) -> None:
+    observations = iter((ANCHOR, ANCHOR - timedelta(seconds=1)))
+    service = OfflineExecutionQualitySidecar(
+        journal(tmp_path),
+        clock=lambda: next(observations),
+    )
+    intent_id = plan().intents[0].intent_id
+
+    with pytest.raises(
+        CFastExecutionQualitySidecarError,
+        match="DURABLE_INTENT_CLOCK_REGRESSION",
+    ):
+        register(service)
+
+    failed_state = service.recover()
+    assert tuple(failed_state.intents) == (intent_id,)
+    assert failed_state.anchors == {}
+    intent_record = failed_state.intents[intent_id]
+    assert intent_record.payload["pre_durable_clock_observed_at_utc"] == (
+        ANCHOR.isoformat().replace("+00:00", "Z")
+    )
+
+    service.clock = lambda: ANCHOR + timedelta(seconds=1)
+    assert register(service) == intent_id
+    recovered = service.recover()
+    anchor_record = recovered.anchors[intent_id]
+    assert anchor_record.payload["prerequisite_intent_record_hash"] == (
+        intent_record.record_hash
+    )
+    assert (
+        anchor_record.payload["pre_durable_clock_observed_at_utc"]
+        == intent_record.payload["pre_durable_clock_observed_at_utc"]
+    )
+    assert len(recovered.records) == 2
+
+
+def test_recovery_rejects_coordinated_backward_anchor_rewrite(
+    tmp_path: Path,
+) -> None:
+    service = sidecar(tmp_path)
+    intent_id = register(service)
+    state = service.recover()
+    anchor_record = state.anchors[intent_id]
+    record_path = service.journal.root / (
+        f"{anchor_record.sequence:020d}-{anchor_record.record_hash}.json"
+    )
+    envelope = json.loads(record_path.read_text())
+    envelope["payload"]["durably_created_at_utc"] = (
+        ANCHOR - timedelta(seconds=1)
+    ).isoformat().replace("+00:00", "Z")
+    envelope["record_hash"] = sha256_json(
+        {
+            key: value
+            for key, value in envelope.items()
+            if key != "record_hash"
+        }
+    )
+    replacement = record_path.with_name(
+        f"{anchor_record.sequence:020d}-{envelope['record_hash']}.json"
+    )
+    replacement.write_text(
+        json.dumps(
+            envelope,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    )
+    replacement.chmod(0o600)
+    record_path.unlink()
+    reservation_path = service.journal.root / (
+        f"{anchor_record.sequence:020d}.reservation"
+    )
+    reservation = json.loads(reservation_path.read_text())
+    reservation["record_hash"] = envelope["record_hash"]
+    reservation["record_filename"] = replacement.name
+    reservation["record_bytes_sha256"] = hashlib.sha256(
+        replacement.read_bytes()
+    ).hexdigest()
+    reservation["reservation_hash"] = sha256_json(
+        {
+            key: value
+            for key, value in reservation.items()
+            if key != "reservation_hash"
+        }
+    )
+    reservation_path.write_text(
+        json.dumps(
+            reservation,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    )
+    reservation_path.chmod(0o600)
+
+    with pytest.raises(
+        CFastExecutionQualitySidecarError,
+        match="INTENT_ANCHOR_INVALID",
+    ):
+        service.recover()
 
 
 def test_snapshot_ingest_and_event_identities_dedupe_across_restart(
