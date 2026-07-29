@@ -1,0 +1,296 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bktrader.local/schemas/commodity-c-fast-simnow-research-bundle-v1.schema.json",
+  "title": "C_FAST non-countable SimNow research bundle v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "purpose",
+    "candidate_id",
+    "parent_issue_number",
+    "issue_number",
+    "bundle_id",
+    "generated_at",
+    "not_before",
+    "expires_at",
+    "execution_day",
+    "research_as_of_official_day",
+    "research_source_class",
+    "target_derivation",
+    "initialization_policy",
+    "frozen_rule_id",
+    "frozen_rule_sha256",
+    "frequency",
+    "pit_main_definition",
+    "trend_horizons_official_days",
+    "volatility_lookback_official_days",
+    "volatility_floor",
+    "virtual_nav_cny",
+    "artifact_bindings",
+    "artifact_index_sha256",
+    "formula_target_binding_sha256",
+    "verifier_sha256",
+    "signer_sha256",
+    "bundle_schema_sha256",
+    "trusted_keyring_schema_sha256",
+    "install_receipt_schema_sha256",
+    "trusted_keyring_raw_sha256",
+    "custody_root_path_sha256",
+    "custody_identity_sha256",
+    "source_artifacts_exact_raw_required",
+    "research_bundle_fact_frozen",
+    "bundle_is_execution_authority",
+    "countable_forward",
+    "official_forward_claimed",
+    "simnow_execution_authorized",
+    "runtime_activation_authorized",
+    "network_authorized",
+    "web_bridge_rpc_authorized",
+    "order_authorized",
+    "order_submission_authorized",
+    "position_mutation_authorized",
+    "dispatch_authorized",
+    "trading_authorized",
+    "replacement_authorized",
+    "production_authorized",
+    "automatic_promotion_authorized",
+    "dynamic_selection_allowed",
+    "replay_allowed",
+    "account_data_read",
+    "execution_data_read",
+    "orders_sent",
+    "positions_modified",
+    "targets",
+    "signer_key_id",
+    "signature"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "commodity_c_fast_simnow_research_bundle_v1"
+    },
+    "purpose": {
+      "const": "NON_COUNTABLE_SIMNOW_EXERCISE_ONLY"
+    },
+    "candidate_id": {"const": "C_FAST_CROSS_SECTION_NEUTRAL"},
+    "parent_issue_number": {"const": 114},
+    "issue_number": {"const": 157},
+    "bundle_id": {
+      "type": "string",
+      "pattern": "^cfast-simnow-research-v1-[0-9a-f]{64}$"
+    },
+    "generated_at": {"$ref": "#/$defs/dateTime"},
+    "not_before": {"$ref": "#/$defs/dateTime"},
+    "expires_at": {"$ref": "#/$defs/dateTime"},
+    "execution_day": {"$ref": "#/$defs/date"},
+    "research_as_of_official_day": {"$ref": "#/$defs/date"},
+    "research_source_class": {
+      "const": "SEALED_EXTERNAL_C_FAST_EVIDENCE"
+    },
+    "target_derivation": {
+      "const": "FROZEN_RULE_EXTERNAL_RESEARCH_PRODUCER"
+    },
+    "initialization_policy": {"const": "COLD_START_ZERO_ACCOUNT"},
+    "frozen_rule_id": {"const": "commodity_fast_tsmom_forward_freeze_v1"},
+    "frozen_rule_sha256": {
+      "const": "d9a6ef4ffb6d74fe0feee8ac8935acbeb79abd4686581611f14135eb5c41040a"
+    },
+    "frequency": {"const": "ONE_SHOT_SIMNOW_EXERCISE"},
+    "pit_main_definition": {"const": "DAILY_PIT_OI_MAIN"},
+    "trend_horizons_official_days": {
+      "type": "array",
+      "prefixItems": [
+        {"const": 21},
+        {"const": 63},
+        {"const": 126}
+      ],
+      "items": false,
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "volatility_lookback_official_days": {"const": 60},
+    "volatility_floor": {"const": 0.05},
+    "virtual_nav_cny": {"const": 20000000},
+    "artifact_bindings": {"$ref": "#/$defs/artifactBindings"},
+    "artifact_index_sha256": {"$ref": "#/$defs/sha256"},
+    "formula_target_binding_sha256": {"$ref": "#/$defs/sha256"},
+    "verifier_sha256": {"$ref": "#/$defs/sha256"},
+    "signer_sha256": {"$ref": "#/$defs/sha256"},
+    "bundle_schema_sha256": {"$ref": "#/$defs/sha256"},
+    "trusted_keyring_schema_sha256": {"$ref": "#/$defs/sha256"},
+    "install_receipt_schema_sha256": {"$ref": "#/$defs/sha256"},
+    "trusted_keyring_raw_sha256": {"$ref": "#/$defs/sha256"},
+    "custody_root_path_sha256": {"$ref": "#/$defs/sha256"},
+    "custody_identity_sha256": {"$ref": "#/$defs/sha256"},
+    "source_artifacts_exact_raw_required": {"const": true},
+    "research_bundle_fact_frozen": {"const": true},
+    "bundle_is_execution_authority": {"const": false},
+    "countable_forward": {"const": false},
+    "official_forward_claimed": {"const": false},
+    "simnow_execution_authorized": {"const": false},
+    "runtime_activation_authorized": {"const": false},
+    "network_authorized": {"const": false},
+    "web_bridge_rpc_authorized": {"const": false},
+    "order_authorized": {"const": false},
+    "order_submission_authorized": {"const": false},
+    "position_mutation_authorized": {"const": false},
+    "dispatch_authorized": {"const": false},
+    "trading_authorized": {"const": false},
+    "replacement_authorized": {"const": false},
+    "production_authorized": {"const": false},
+    "automatic_promotion_authorized": {"const": false},
+    "dynamic_selection_allowed": {"const": false},
+    "replay_allowed": {"const": false},
+    "account_data_read": {"const": false},
+    "execution_data_read": {"const": false},
+    "orders_sent": {"const": 0},
+    "positions_modified": {"const": 0},
+    "targets": {
+      "type": "array",
+      "minItems": 10,
+      "maxItems": 10,
+      "items": {"$ref": "#/$defs/target"}
+    },
+    "signer_key_id": {"$ref": "#/$defs/id"},
+    "signature": {
+      "type": "string",
+      "minLength": 88,
+      "maxLength": 88
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{8,128}$"
+    },
+    "date": {"type": "string", "format": "date"},
+    "dateTime": {"type": "string", "format": "date-time"},
+    "artifactBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bytes", "raw_sha256"],
+      "properties": {
+        "bytes": {"type": "integer", "minimum": 1, "maximum": 67108864},
+        "raw_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "artifactBindings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "freeze_contract",
+        "research_manifest",
+        "signal_evidence",
+        "target_evidence",
+        "allocation_evidence",
+        "daily_roll_evidence",
+        "reference_price_evidence",
+        "calendar_authority",
+        "contract_spec_evidence"
+      ],
+      "properties": {
+        "freeze_contract": {"$ref": "#/$defs/artifactBinding"},
+        "research_manifest": {"$ref": "#/$defs/artifactBinding"},
+        "signal_evidence": {"$ref": "#/$defs/artifactBinding"},
+        "target_evidence": {"$ref": "#/$defs/artifactBinding"},
+        "allocation_evidence": {"$ref": "#/$defs/artifactBinding"},
+        "daily_roll_evidence": {"$ref": "#/$defs/artifactBinding"},
+        "reference_price_evidence": {"$ref": "#/$defs/artifactBinding"},
+        "calendar_authority": {"$ref": "#/$defs/artifactBinding"},
+        "contract_spec_evidence": {"$ref": "#/$defs/artifactBinding"}
+      }
+    },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "product",
+        "sector",
+        "trend_21_sign",
+        "trend_63_sign",
+        "trend_126_sign",
+        "source_score",
+        "vol60_annualized",
+        "raw_risk_score",
+        "source_target_weight",
+        "buffered_target_weight",
+        "previous_exact_contract",
+        "exact_contract",
+        "previous_target_quantity",
+        "target_quantity",
+        "reference_open_price",
+        "reference_price_field",
+        "reference_price_observed_at",
+        "reference_price_source_sha256",
+        "multiplier",
+        "price_tick",
+        "pit_main_exact_contract",
+        "pit_main_dte",
+        "pit_main_official_last_trading_day",
+        "pit_main_following_official_day",
+        "pit_main_following_dte",
+        "pit_main_target_position_allowed",
+        "pit_main_roll"
+      ],
+      "properties": {
+        "product": {
+          "enum": ["ag", "al", "au", "bu", "cu", "rb", "ru", "sc", "sp", "zn"]
+        },
+        "sector": {
+          "enum": [
+            "precious",
+            "nonferrous",
+            "energy_chemical",
+            "ferrous",
+            "energy",
+            "light_industry"
+          ]
+        },
+        "trend_21_sign": {"enum": [-1, 0, 1]},
+        "trend_63_sign": {"enum": [-1, 0, 1]},
+        "trend_126_sign": {"enum": [-1, 0, 1]},
+        "source_score": {"type": "number", "minimum": -1, "maximum": 1},
+        "vol60_annualized": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "raw_risk_score": {"type": "number"},
+        "source_target_weight": {"type": "number"},
+        "buffered_target_weight": {"type": "number"},
+        "previous_exact_contract": {
+          "type": "null"
+        },
+        "exact_contract": {
+          "type": "string",
+          "pattern": "^(SHFE|INE)\\.[a-z]{2}[0-9]{4}$"
+        },
+        "previous_target_quantity": {"const": 0},
+        "target_quantity": {
+          "type": "integer",
+          "minimum": -500,
+          "maximum": 500
+        },
+        "reference_open_price": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "reference_price_field": {"const": "official_open"},
+        "reference_price_observed_at": {"$ref": "#/$defs/dateTime"},
+        "reference_price_source_sha256": {"$ref": "#/$defs/sha256"},
+        "multiplier": {"type": "integer", "minimum": 1},
+        "price_tick": {"type": "number", "exclusiveMinimum": 0},
+        "pit_main_exact_contract": {
+          "type": "string",
+          "pattern": "^(SHFE|INE)\\.[a-z]{2}[0-9]{4}$"
+        },
+        "pit_main_dte": {"type": "integer", "minimum": 11},
+        "pit_main_official_last_trading_day": {"$ref": "#/$defs/date"},
+        "pit_main_following_official_day": {"$ref": "#/$defs/date"},
+        "pit_main_following_dte": {"type": "integer", "minimum": 11},
+        "pit_main_target_position_allowed": {"const": true},
+        "pit_main_roll": {"const": false}
+      }
+    }
+  }
+}
