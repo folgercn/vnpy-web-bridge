@@ -16,17 +16,21 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from pydantic import ValidationError
 
 from app.core.config import Settings, get_settings
 from app.schemas.commodity_c_fast_shadow import (
+    CommodityCFastRuntimeSnapshotDTO,
+    CommodityCFastShakedownSnapshotDTO,
     CommodityCFastShadowDTO,
     CommodityCFastShadowStateDTO,
 )
 from app.services.commodity_c_fast_shadow_common import (
     canonical_json,
     formula_target_binding_sha256,
+    shakedown_research_payload,
     sha256_json,
     unsigned_snapshot_payload,
 )
@@ -134,7 +138,7 @@ class CommodityCFastShadowService:
 
     def accepted_snapshot_for_control(
         self,
-    ) -> tuple[CommodityCFastShadowDTO, str]:
+    ) -> tuple[CommodityCFastRuntimeSnapshotDTO, str]:
         """Return a freshly verified accepted snapshot without execution rights."""
         with self._lock:
             if not self.settings.commodity_c_fast_shadow_enabled:
@@ -445,7 +449,7 @@ class CommodityCFastShadowService:
         }
 
     @staticmethod
-    def _load_snapshot(path: Path) -> CommodityCFastShadowDTO:
+    def _load_snapshot(path: Path) -> CommodityCFastRuntimeSnapshotDTO:
         if not path.is_file():
             raise CFastShadowInvalidError("SNAPSHOT_FILE_NOT_FOUND")
         try:
@@ -460,11 +464,19 @@ class CommodityCFastShadowService:
         if not isinstance(raw, dict):
             raise CFastShadowInvalidError("SNAPSHOT_ROOT_INVALID")
         try:
-            return CommodityCFastShadowDTO.model_validate(raw)
+            model = (
+                CommodityCFastShakedownSnapshotDTO
+                if raw.get("schema_version")
+                == "commodity_c_fast_simnow_shakedown_snapshot_v1"
+                else CommodityCFastShadowDTO
+            )
+            return model.model_validate(raw)
         except ValidationError as exc:
             raise CFastShadowInvalidError("SNAPSHOT_SCHEMA_INVALID") from exc
 
-    def _verify_snapshot(self, snapshot: CommodityCFastShadowDTO) -> str:
+    def _verify_snapshot(
+        self, snapshot: CommodityCFastRuntimeSnapshotDTO
+    ) -> str:
         self._verify_signature(snapshot)
         if (
             formula_target_binding_sha256(snapshot)
@@ -476,20 +488,69 @@ class CommodityCFastShadowService:
         self._verify_contract_alignment(snapshot)
         return sha256_json(unsigned_snapshot_payload(snapshot))
 
-    def _verify_signature(self, snapshot: CommodityCFastShadowDTO) -> None:
+    def _verify_signature(
+        self, snapshot: CommodityCFastRuntimeSnapshotDTO
+    ) -> None:
         key = self._trusted_keys().get(snapshot.signer_key_id)
-        if key is None:
+        if key is None or key[1] != "research_snapshot_signer":
             raise CFastShadowInvalidError("SIGNER_KEY_NOT_TRUSTED")
+        if isinstance(snapshot, CommodityCFastShakedownSnapshotDTO):
+            control_key = self._trusted_keys().get(
+                snapshot.control_signer_key_id
+            )
+            if (
+                control_key is None
+                or control_key[1] != "simnow_shakedown_control_signer"
+            ):
+                raise CFastShadowInvalidError(
+                    "CONTROL_SIGNER_KEY_NOT_TRUSTED"
+                )
+            if (
+                snapshot.signer_key_id == snapshot.control_signer_key_id
+                or key[0].public_bytes(
+                    serialization.Encoding.Raw,
+                    serialization.PublicFormat.Raw,
+                )
+                == control_key[0].public_bytes(
+                    serialization.Encoding.Raw,
+                    serialization.PublicFormat.Raw,
+                )
+            ):
+                raise CFastShadowInvalidError(
+                    "RESEARCH_CONTROL_SIGNERS_NOT_DISTINCT"
+                )
+            try:
+                research_signature = base64.b64decode(
+                    snapshot.research_signature, validate=True
+                )
+                key[0].verify(
+                    research_signature,
+                    canonical_json(shakedown_research_payload(snapshot)),
+                )
+                control_signature = base64.b64decode(
+                    snapshot.signature, validate=True
+                )
+                control_key[0].verify(
+                    control_signature,
+                    canonical_json(unsigned_snapshot_payload(snapshot)),
+                )
+            except (InvalidSignature, ValueError, binascii.Error) as exc:
+                raise CFastShadowInvalidError(
+                    "SHAKEDOWN_SIGNATURE_INVALID"
+                ) from exc
+            return
         try:
             signature = base64.b64decode(snapshot.signature, validate=True)
-            key.verify(
+            key[0].verify(
                 signature,
                 canonical_json(unsigned_snapshot_payload(snapshot)),
             )
         except (InvalidSignature, ValueError, binascii.Error) as exc:
             raise CFastShadowInvalidError("SIGNATURE_INVALID") from exc
 
-    def _trusted_keys(self) -> dict[str, Ed25519PublicKey]:
+    def _trusted_keys(
+        self,
+    ) -> dict[str, tuple[Ed25519PublicKey, str]]:
         try:
             raw = json.loads(
                 self.settings.commodity_c_fast_shadow_trusted_public_keys_json
@@ -498,14 +559,21 @@ class CommodityCFastShadowService:
             raise CFastShadowInvalidError("TRUSTED_KEYS_JSON_INVALID") from exc
         if not isinstance(raw, dict) or not raw:
             raise CFastShadowInvalidError("TRUSTED_KEYS_EMPTY")
-        result: dict[str, Ed25519PublicKey] = {}
+        result: dict[str, tuple[Ed25519PublicKey, str]] = {}
+        keys_by_purpose: dict[str, set[bytes]] = {
+            "research_snapshot_signer": set(),
+            "simnow_shakedown_control_signer": set(),
+        }
         for key_id, entry in raw.items():
             if not isinstance(entry, dict) or set(entry) != {
                 "public_key_base64",
                 "purpose",
             }:
                 raise CFastShadowInvalidError("TRUSTED_KEY_ENTRY_INVALID")
-            if entry["purpose"] != "research_snapshot_signer":
+            if entry["purpose"] not in {
+                "research_snapshot_signer",
+                "simnow_shakedown_control_signer",
+            }:
                 raise CFastShadowInvalidError("TRUSTED_KEY_PURPOSE_INVALID")
             try:
                 key_bytes = base64.b64decode(
@@ -513,15 +581,29 @@ class CommodityCFastShadowService:
                 )
                 if len(key_bytes) != 32:
                     raise ValueError
-                result[str(key_id)] = Ed25519PublicKey.from_public_bytes(
-                    key_bytes
+                result[str(key_id)] = (
+                    Ed25519PublicKey.from_public_bytes(key_bytes),
+                    str(entry["purpose"]),
                 )
+                keys_by_purpose[str(entry["purpose"])].add(key_bytes)
             except (ValueError, binascii.Error) as exc:
                 raise CFastShadowInvalidError("TRUSTED_KEY_INVALID") from exc
+        if (
+            keys_by_purpose["research_snapshot_signer"]
+            & keys_by_purpose["simnow_shakedown_control_signer"]
+        ):
+            raise CFastShadowInvalidError(
+                "RESEARCH_CONTROL_SIGNERS_NOT_DISTINCT"
+            )
         return result
 
-    def _verify_timing(self, snapshot: CommodityCFastShadowDTO) -> None:
+    def _verify_timing(
+        self, snapshot: CommodityCFastRuntimeSnapshotDTO
+    ) -> None:
         _month(snapshot.source_month)
+        if isinstance(snapshot, CommodityCFastShakedownSnapshotDTO):
+            self._verify_shakedown_timing(snapshot)
+            return
         if snapshot.source_month < GENESIS_SOURCE_MONTH:
             raise CFastShadowInvalidError("SOURCE_MONTH_BEFORE_FORWARD_BOUNDARY")
         if snapshot.source_official_day.strftime("%Y-%m") != snapshot.source_month:
@@ -558,7 +640,7 @@ class CommodityCFastShadowService:
             raise CFastShadowInvalidError("REFERENCE_PRICE_OBSERVED_IN_FUTURE")
 
     def _verify_acceptance_freshness(
-        self, snapshot: CommodityCFastShadowDTO
+        self, snapshot: CommodityCFastRuntimeSnapshotDTO
     ) -> None:
         now = self._clock()
         if now.tzinfo is None or now.utcoffset() is None:
@@ -567,8 +649,63 @@ class CommodityCFastShadowService:
             raise CFastShadowInvalidError(
                 "SNAPSHOT_ACCEPTANCE_WINDOW_CLOSED"
             )
+        if isinstance(snapshot, CommodityCFastShakedownSnapshotDTO) and not (
+            snapshot.accepted_at_utc <= now <= snapshot.expires_at_utc
+        ):
+            raise CFastShadowInvalidError("EXECUTION_PERMIT_EXPIRED")
 
-    def _verify_targets(self, snapshot: CommodityCFastShadowDTO) -> None:
+    def _verify_shakedown_timing(
+        self, snapshot: CommodityCFastShakedownSnapshotDTO
+    ) -> None:
+        values = (
+            snapshot.input_cutoff_at_utc,
+            snapshot.research_observed_at_utc,
+            snapshot.snapshot_created_at_utc,
+            snapshot.accepted_at_utc,
+            snapshot.expires_at_utc,
+        )
+        if any(value.tzinfo is None or value.utcoffset() is None for value in values):
+            raise CFastShadowInvalidError("SHAKEDOWN_TIMEZONE_MISSING")
+        if snapshot.source_official_day != snapshot.execution_day:
+            raise CFastShadowInvalidError("SHAKEDOWN_DAY_MISMATCH")
+        if snapshot.source_month != snapshot.execution_day.strftime("%Y-%m"):
+            raise CFastShadowInvalidError("SOURCE_DAY_MONTH_MISMATCH")
+        if not (
+            snapshot.input_cutoff_at_utc
+            <= snapshot.research_observed_at_utc
+            <= snapshot.snapshot_created_at_utc
+            <= snapshot.accepted_at_utc
+            < snapshot.expires_at_utc
+        ):
+            raise CFastShadowInvalidError("SHAKEDOWN_TIME_ORDER_INVALID")
+        if snapshot.expires_at_utc - snapshot.accepted_at_utc > timedelta(
+            hours=8
+        ):
+            raise CFastShadowInvalidError("EXECUTION_PERMIT_WINDOW_TOO_LARGE")
+        if any(
+            value.astimezone(CHINA_TZ).date() != snapshot.execution_day
+            for value in values
+        ):
+            raise CFastShadowInvalidError("SHAKEDOWN_DAY_MISMATCH")
+        now = self._clock()
+        if snapshot.snapshot_created_at_utc > now + MAX_CLOCK_SKEW:
+            raise CFastShadowInvalidError("SNAPSHOT_CREATED_IN_FUTURE")
+        if not (
+            snapshot.accepted_at_utc - MAX_CLOCK_SKEW
+            <= now
+            <= snapshot.expires_at_utc
+        ):
+            raise CFastShadowInvalidError("EXECUTION_PERMIT_EXPIRED")
+        if snapshot.account_sha256 not in {
+            item.strip().lower()
+            for item in self.settings.commodity_c_fast_simnow_account_hashes.split(",")
+            if item.strip()
+        }:
+            raise CFastShadowInvalidError("PERMIT_ACCOUNT_NOT_ALLOWLISTED")
+
+    def _verify_targets(
+        self, snapshot: CommodityCFastRuntimeSnapshotDTO
+    ) -> None:
         rows = sorted(snapshot.targets, key=lambda row: row.product)
         products = [row.product for row in rows]
         if tuple(products) != PRODUCTS or len(products) != len(set(products)):
@@ -693,7 +830,9 @@ class CommodityCFastShadowService:
             raise CFastShadowInvalidError("TARGET_QUANTITY_DIRECTION_MISMATCH")
 
     @staticmethod
-    def _verify_integer_targets(snapshot: CommodityCFastShadowDTO) -> None:
+    def _verify_integer_targets(
+        snapshot: CommodityCFastRuntimeSnapshotDTO,
+    ) -> None:
         exposures: dict[str, float] = {}
         for row in snapshot.targets:
             unit_weight = (
@@ -718,7 +857,7 @@ class CommodityCFastShadowService:
                 raise CFastShadowInvalidError("INTEGER_SECTOR_HARD_CAP_BREACH")
 
     def _verify_contract_alignment(
-        self, snapshot: CommodityCFastShadowDTO
+        self, snapshot: CommodityCFastRuntimeSnapshotDTO
     ) -> None:
         if self._contract_loader is None:
             raise CFastShadowInvalidError("CONTRACT_LOADER_UNAVAILABLE")
@@ -762,13 +901,62 @@ class CommodityCFastShadowService:
                     )
 
     def _verify_continuity(
-        self, snapshot: CommodityCFastShadowDTO, snapshot_hash: str
+        self,
+        snapshot: CommodityCFastRuntimeSnapshotDTO,
+        snapshot_hash: str,
     ) -> str:
         if self._state_load_error:
             raise CFastShadowInvalidError("CONTINUITY_STATE_CORRUPT")
         previous = self._accepted_state
         if previous and previous.get("snapshot_hash") == snapshot_hash:
             return str(previous["continuity_state"])
+        if isinstance(snapshot, CommodityCFastShakedownSnapshotDTO):
+            if previous is None:
+                if (
+                    snapshot.previous_snapshot_hash is not None
+                    or any(
+                        row.previous_exact_contract is not None
+                        or row.previous_target_quantity != 0
+                        for row in snapshot.targets
+                    )
+                ):
+                    raise CFastShadowInvalidError(
+                        "GENESIS_CONTINUITY_INVALID"
+                    )
+                return "genesis"
+            if (
+                previous.get("snapshot_schema_version")
+                != snapshot.schema_version
+                or previous.get("execution_lane") != snapshot.execution_lane
+            ):
+                raise CFastShadowInvalidError("CONTINUITY_LANE_MISMATCH")
+            if snapshot.previous_snapshot_hash != previous["snapshot_hash"]:
+                raise CFastShadowInvalidError(
+                    "PREVIOUS_SNAPSHOT_HASH_MISMATCH"
+                )
+            if snapshot.execution_day <= datetime.fromisoformat(
+                str(previous["execution_day"])
+            ).date():
+                raise CFastShadowInvalidError("SNAPSHOT_STALE_OR_REPLAYED")
+            previous_targets = {
+                str(row["product"]): (
+                    str(row["exact_contract"]),
+                    int(row["target_quantity"]),
+                )
+                for row in previous["targets"]
+            }
+            if any(
+                previous_targets.get(row.product)
+                != (
+                    row.previous_exact_contract,
+                    row.previous_target_quantity,
+                )
+                for row in snapshot.targets
+            ):
+                raise CFastShadowInvalidError(
+                    "PREVIOUS_TARGET_CONTINUITY_MISMATCH"
+                )
+            return "verified"
         if previous is None:
             if (
                 snapshot.source_month != GENESIS_SOURCE_MONTH
@@ -791,7 +979,7 @@ class CommodityCFastShadowService:
 
     def _state_payload(
         self,
-        snapshot: CommodityCFastShadowDTO,
+        snapshot: CommodityCFastRuntimeSnapshotDTO,
         snapshot_hash: str,
         continuity_state: str,
     ) -> dict[str, Any]:
@@ -802,6 +990,8 @@ class CommodityCFastShadowService:
             "source_month": snapshot.source_month,
             "source_official_day": snapshot.source_official_day.isoformat(),
             "execution_day": snapshot.execution_day.isoformat(),
+            "snapshot_schema_version": snapshot.schema_version,
+            "execution_lane": snapshot.execution_lane,
             "continuity_state": continuity_state,
             "accepted_at_utc": self._clock()
             .astimezone(timezone.utc)
@@ -846,7 +1036,8 @@ class CommodityCFastShadowService:
         if products != PRODUCTS:
             self._state_load_error = "STATE_TARGET_UNIVERSE_INVALID"
             return None
-        core = state.model_dump(mode="json", exclude={"state_checksum"})
+        core = dict(raw)
+        core.pop("state_checksum", None)
         if state.state_checksum != sha256_json(core):
             self._state_load_error = "STATE_CHECKSUM_MISMATCH"
             return None
@@ -856,7 +1047,7 @@ class CommodityCFastShadowService:
         ):
             self._state_load_error = "STATE_ACCEPTED_TIMEZONE_MISSING"
             return None
-        return state.model_dump(mode="json")
+        return state.model_dump(mode="json", exclude_none=True)
 
     def _verify_path_isolation(self) -> None:
         c_paths = {

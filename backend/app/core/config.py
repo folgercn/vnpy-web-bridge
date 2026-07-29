@@ -84,7 +84,9 @@ class Settings(BaseSettings):
     commodity_simnow_trusted_public_keys_json: str = "{}"
     commodity_simnow_state_path: str = "logs/commodity-simnow/state.json"
     commodity_simnow_min_source_month: str = "2026-08"
-    commodity_simnow_max_child_order_lots: int = Field(default=10, ge=1, le=100)
+    commodity_simnow_max_child_order_lots: int = Field(
+        default=10, ge=1, le=100
+    )
     commodity_simnow_max_orders_per_phase: int = Field(default=128, ge=1, le=500)
     commodity_simnow_max_quote_age_seconds: int = Field(default=5, ge=1, le=60)
     commodity_simnow_max_spread_ticks: float = Field(default=4, gt=0, le=20)
@@ -279,6 +281,10 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "COMMODITY_C_FAST_SHADOW_TRUSTED_PUBLIC_KEYS_JSON must contain at least one Ed25519 public key"
                 )
+            keys_by_purpose: dict[str, set[bytes]] = {
+                "research_snapshot_signer": set(),
+                "simnow_shakedown_control_signer": set(),
+            }
             for entry in trusted_keys.values():
                 if not isinstance(entry, dict) or set(entry) != {
                     "public_key_base64",
@@ -287,9 +293,12 @@ class Settings(BaseSettings):
                     raise ValueError(
                         "COMMODITY_C_FAST_SHADOW_TRUSTED_PUBLIC_KEYS_JSON entries must contain only public_key_base64 and purpose"
                     )
-                if entry["purpose"] != "research_snapshot_signer":
+                if entry["purpose"] not in {
+                    "research_snapshot_signer",
+                    "simnow_shakedown_control_signer",
+                }:
                     raise ValueError(
-                        "COMMODITY_C_FAST_SHADOW_TRUSTED_PUBLIC_KEYS_JSON purpose must be research_snapshot_signer"
+                        "COMMODITY_C_FAST_SHADOW_TRUSTED_PUBLIC_KEYS_JSON purpose must be research_snapshot_signer or simnow_shakedown_control_signer"
                     )
                 try:
                     public_key = base64.b64decode(
@@ -303,6 +312,14 @@ class Settings(BaseSettings):
                     raise ValueError(
                         "COMMODITY_C_FAST_SHADOW_TRUSTED_PUBLIC_KEYS_JSON must contain 32-byte Ed25519 keys"
                     )
+                keys_by_purpose[str(entry["purpose"])].add(public_key)
+            if (
+                keys_by_purpose["research_snapshot_signer"]
+                & keys_by_purpose["simnow_shakedown_control_signer"]
+            ):
+                raise ValueError(
+                    "C_FAST Research and Control public keys must be distinct"
+                )
         allowed_levels = {"info", "warning", "critical"}
         levels = {item.strip().lower() for item in self.telegram_send_levels.split(",") if item.strip()}
         if not levels or levels - allowed_levels:

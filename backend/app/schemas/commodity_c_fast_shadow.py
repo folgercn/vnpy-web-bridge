@@ -55,6 +55,14 @@ class CFastResearchBindingsDTO(StrictFiniteModel):
     daily_roll_evidence_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
+class CFastShakedownResearchBindingsDTO(CFastResearchBindingsDTO):
+    snapshot_producer_status: Literal[
+        "IMPLEMENTED_HUMAN_CONFIRMED_BUNDLE_V1"
+    ]
+    producer_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    input_bundle_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class CFastGuardrailsDTO(StrictFiniteModel):
     source_product_abs_cap: Literal[0.2]
     source_sector_gross_cap: Literal[0.35]
@@ -158,6 +166,53 @@ class CommodityCFastShadowDTO(StrictFiniteModel):
     signature: str = Field(min_length=40, max_length=256)
 
 
+class CommodityCFastShakedownSnapshotDTO(CommodityCFastShadowDTO):
+    """One-day, non-countable Research→Control permit for SimNow only.
+
+    This is deliberately a separate schema.  It does not relax or reinterpret
+    the official-forward contract above.
+    """
+
+    schema_version: Literal[
+        "commodity_c_fast_simnow_shakedown_snapshot_v1"
+    ]
+    mode: Literal["simnow_shakedown"]
+    execution_lane: Literal["simnow_shakedown"]
+    frequency: Literal["ONE_SHOT"]
+    source_is_month_last_official_day: Literal[False]
+    execution_is_next_cross_month_official_day: Literal[False]
+    input_cutoff_after_source_close: Literal[False]
+    calendar_alignment: Literal["HUMAN_CONFIRMED_RESEARCH_BUNDLE"]
+    allocator_output_validation: Literal[
+        "PRODUCER_RECOMPUTED_AND_SIGNER_CONFIRMED"
+    ]
+    daily_roll_alignment: Literal["HUMAN_CONFIRMED_PIT_EXACT_CONTRACT"]
+    research_bindings: CFastShakedownResearchBindingsDTO
+    research_observed_at_utc: datetime
+    research_signature: str = Field(min_length=40, max_length=256)
+    control_acceptance_id: str = Field(
+        pattern=r"^cfast-accept-[A-Za-z0-9._-]{8,96}$"
+    )
+    execution_permit_id: str = Field(
+        pattern=r"^cfast-permit-[A-Za-z0-9._-]{8,96}$"
+    )
+    accepted_at_utc: datetime
+    expires_at_utc: datetime
+    account_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    max_selected_products: int = Field(ge=1, le=2)
+    # Zero means that Control does not impose a per-order lot ceiling.
+    max_child_order_lots: Literal[0]
+    countable_forward: Literal[False]
+    control_signer_key_id: str = Field(
+        pattern=r"^[A-Za-z0-9._-]{1,128}$"
+    )
+
+
+CommodityCFastRuntimeSnapshotDTO = (
+    CommodityCFastShadowDTO | CommodityCFastShakedownSnapshotDTO
+)
+
+
 class CFastShadowStateTargetDTO(StrictFiniteModel):
     product: Product
     exact_contract: str = Field(min_length=8, max_length=32)
@@ -171,6 +226,8 @@ class CommodityCFastShadowStateDTO(StrictFiniteModel):
     source_month: str = Field(pattern=r"^\d{4}-\d{2}$")
     source_official_day: date
     execution_day: date
+    snapshot_schema_version: str | None = None
+    execution_lane: str | None = None
     continuity_state: Literal["genesis", "verified"]
     accepted_at_utc: datetime
     targets: list[CFastShadowStateTargetDTO] = Field(
