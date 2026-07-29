@@ -8,12 +8,16 @@ compute signals, or grant execution authority.
 
 - `official_calendar.py` verifies a canonical Ed25519-signed calendar and the
   exact raw SHFE/INE source evidence named by that calendar.
+- `calendar_anchors.py` requires an externally hash-pinned publication time
+  for the exact calendar and both source-evidence hashes.
 - `trade_day_mapping.py` maps stored UTC timestamps through the frozen
   `Asia/Shanghai` session rules.
 - `clock_quality.py` enforces NTP offset, sample age, and future-skew limits.
 - `source_availability.py` classifies HTTP 200/404 responses only after an
   authoritative calendar classification exists.
 - `absence_receipts.py` publishes create-only evidence for an authorized 404.
+- `absence_anchors.py` verifies the separately retained availability time for
+  a durable 404 receipt.
 - `daily_evidence.py` independently reads the signed revision's exact raw bytes
   and extracts product coverage.
 - `quality_gate.py` coordinates PIT anchors, official days, daily evidence, and
@@ -31,8 +35,8 @@ The calendar must:
   paths, byte counts, and SHA-256 hashes;
 - explicitly classify every natural date in its validity range as
   `OFFICIAL_DAY` or `CLOSED`;
-- retain at least 186 official days and explicitly authorize each preceding
-  evening session;
+- retain at least 186 official days and explicitly name the natural date of
+  each authorized preceding evening session;
 - store timestamps in UTC while declaring `Asia/Shanghai` as the exchange
   timezone;
 - match an externally pinned calendar hash and trusted Ed25519 public key.
@@ -40,19 +44,36 @@ The calendar must:
 Source evidence is read from private, non-symlink custody directories both
 when the calendar is loaded and immediately before history evaluation. A
 missing, changed, linked, or permission-weakened source artifact fails closed.
+For historical use, an external canonical anchor binds the calendar hash, both
+source-evidence hashes, and `available_at`. Its own SHA-256 is retained outside
+the calendar and warehouse. Signer-declared `issued_at` and `observed_at` are
+consistency fields, not PIT availability authority.
 
 ## Session and availability rules
 
 The frozen local windows are day `08:30–16:00`, evening `20:00–23:59:59`, and
-after-midnight `00:00–03:00`. An evening timestamp maps to the next natural
-date; an after-midnight timestamp maps to that natural date. The target date
-must be an official day whose `previous_evening_session` flag is true.
-Timestamps outside the declared session window fail closed.
+after-midnight `00:00–03:00`. Night mapping searches the signed calendar's
+exact `evening_session_natural_date`; it never guesses the next natural or next
+official date. Thus Friday evening and Saturday after midnight can map to a
+Monday trade day, while Sunday evening remains rejected unless explicitly
+authorized. Timestamps outside the declared session window fail closed.
 
 Calendar-aware acquisition requires a trusted NTP sample. HTTP 200 is accepted
 only for an official day. HTTP 404 is accepted only for an explicitly closed
-day and produces an append-only absence receipt. An official-day 404, a
-closed-day 200, a missing classification, or another status fails closed.
+day and produces an append-only absence receipt. Caller-supplied historical
+observation times are forbidden: the request start is aligned to live wall
+time plus the bounded NTP offset, and response time advances from that trusted
+sample with a monotonic clock. The receipt binds both times, the NTP sample and
+offset, final URL, status, and response metadata. Calendar source bytes are
+strictly revalidated after the response before a 404 is accepted.
+
+The local receipt reports
+`CALENDAR_AUTHORIZED_ABSENCE_AWAITING_EXTERNAL_ANCHOR`; it is never PIT
+authority by itself. Only a separately hash-pinned absence anchor, created
+after durable receipt publication and bound to the receipt hash, makes the
+absence eligible at its external `available_at`. An official-day 404, a
+closed-day 200, a missing classification, another status, a backfilled clock,
+or an anchor after the cutoff fails closed.
 
 ## 186-day PIT quality gate
 
@@ -62,7 +83,8 @@ days. The as-of date must be official and the execution date must be the next
 official date.
 
 Only manifests whose external commit-anchor `available_at` is at or before the
-UTC cutoff are eligible. For every required day, the gate verifies the exact
+UTC cutoff are eligible. The exact calendar's external availability anchor
+must also be at or before that cutoff. For every required day, the gate verifies the exact
 raw revision bytes, authoritative report date, source schema, exchange/product
 binding, and all ten products. Missing days, missing products, future-dated
 revisions, broken anchors, or changed raw bytes fail closed. A legitimate
@@ -76,11 +98,12 @@ observed-open evidence.
 ## Commands
 
 The CLI exposes `verify-calendar`, `map-trade-day`,
-`acquire-calendar-aware`, and `quality-gate`. Each command requires explicit
+`acquire-calendar-aware`, `verify-absence-anchor`, and `quality-gate`. Each command requires explicit
 calendar path, trusted calendar SHA-256, trusted public key, and raw source
 evidence root. Acquisition and quality evaluation additionally require an NTP
-sample; the quality gate also requires the signed manifest-chain heads and
-externally pinned commit-anchor ledger. Run:
+sample; the quality gate also requires the signed manifest-chain heads,
+externally pinned commit-anchor ledger, and externally pinned calendar
+availability anchor. Run:
 
 ```bash
 python scripts/research_warehouse_cli.py <command> --help

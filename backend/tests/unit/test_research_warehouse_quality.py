@@ -15,10 +15,20 @@ from jsonschema import Draft202012Validator, FormatChecker
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "scripts"))
 
+from research_warehouse.absence_anchors import (
+    ANCHOR_SCHEMA as ABSENCE_ANCHOR_SCHEMA,
+)
+from research_warehouse.absence_anchors import (
+    load_absence_availability_anchor,
+)
 from research_warehouse.acquisition import acquire_daily
 from research_warehouse.acquisition_models import (
     AuthoritativeAbsence,
     HttpResponse,
+)
+from research_warehouse.calendar_anchors import (
+    ANCHOR_SCHEMA,
+    load_calendar_availability_anchor,
 )
 from research_warehouse.calendar_models import OfficialCalendar
 from research_warehouse.canonical import canonical_json, canonical_json_line, sha256
@@ -52,6 +62,17 @@ from research_warehouse.trade_day_mapping import map_exchange_timestamp
 REGISTRY_PATH = ROOT / "deployments/research-warehouse/source-registry-v1.json"
 CALENDAR_SCHEMA_PATH = (
     ROOT / "deployments/research-warehouse/official-calendar-v1.schema.json"
+)
+CALENDAR_ANCHOR_SCHEMA_PATH = (
+    ROOT
+    / "deployments/research-warehouse/calendar-availability-anchor-v1.schema.json"
+)
+ABSENCE_SCHEMA_PATH = (
+    ROOT / "deployments/research-warehouse/authoritative-absence-v1.schema.json"
+)
+ABSENCE_ANCHOR_SCHEMA_PATH = (
+    ROOT
+    / "deployments/research-warehouse/absence-availability-anchor-v1.schema.json"
 )
 UTC = timezone.utc
 
@@ -136,15 +157,30 @@ def signed_calendar(
         )
     days = []
     current = start
+    official_dates = set()
     while current <= end:
         official = current.weekday() < 5 and current not in closed
+        candidate = current - timedelta(
+            days=3 if current.weekday() == 0 else 1
+        )
+        evening_session = (
+            candidate
+            if official and candidate in official_dates
+            else None
+        )
         days.append(
             {
                 "date": current.isoformat(),
                 "status": "OFFICIAL_DAY" if official else "CLOSED",
-                "previous_evening_session": official,
+                "evening_session_natural_date": (
+                    evening_session.isoformat()
+                    if evening_session is not None
+                    else None
+                ),
             }
         )
+        if official:
+            official_dates.add(current)
         current += timedelta(days=1)
     private, _private_path, _public_path = private_key_paths(tmp_path)
     payload = {
@@ -184,6 +220,67 @@ def shanghai_utc(day: date, value: time) -> datetime:
         tzinfo=__import__("zoneinfo").ZoneInfo("Asia/Shanghai")
     )
     return local.astimezone(UTC)
+
+
+def calendar_anchor(tmp_path: Path, calendar: OfficialCalendar, available_at):
+    payload = {
+        "schema_version": ANCHOR_SCHEMA,
+        "calendar_raw_sha256": calendar.raw_sha256,
+        "source_evidence_sha256": {
+            item.exchange: item.raw_sha256
+            for item in calendar.source_evidence
+        },
+        "available_at": available_at.isoformat(timespec="microseconds").replace(
+            "+00:00",
+            "Z",
+        ),
+    }
+    raw = canonical_json_line(payload)
+    path = tmp_path / "calendar-availability-anchor.json"
+    path.write_bytes(raw)
+    path.chmod(0o600)
+    return load_calendar_availability_anchor(
+        path,
+        expected_raw_sha256=sha256(raw),
+    )
+
+
+def calendar_clock_args(now: datetime, *, elapsed_seconds: float = 0):
+    monotonic_values = iter((0.0, elapsed_seconds))
+    return {
+        "utc_clock": lambda: now,
+        "monotonic_clock": lambda: next(monotonic_values),
+    }
+
+
+def absence_anchor(
+    tmp_path: Path,
+    absence: AuthoritativeAbsence,
+    *,
+    available_at: datetime,
+    calendar: OfficialCalendar,
+):
+    receipt_raw = absence.receipt_path.read_bytes()
+    payload = {
+        "schema_version": ABSENCE_ANCHOR_SCHEMA,
+        "absence_id": absence.absence_id,
+        "receipt_sha256": sha256(receipt_raw),
+        "calendar_raw_sha256": absence.calendar_raw_sha256,
+        "available_at": available_at.isoformat(timespec="microseconds").replace(
+            "+00:00",
+            "Z",
+        ),
+    }
+    raw = canonical_json_line(payload)
+    path = tmp_path / "absence-availability-anchor.json"
+    path.write_bytes(raw)
+    path.chmod(0o600)
+    return load_absence_availability_anchor(
+        path,
+        expected_raw_sha256=sha256(raw),
+        receipt_path=absence.receipt_path,
+        calendar=calendar,
+    )
 
 
 def official_raw(exchange: str, day: date) -> bytes:
@@ -293,6 +390,11 @@ def history_chain(
         sampled_at=cutoff,
         ntp_offset_milliseconds=0,
     )
+    anchor = calendar_anchor(
+        tmp_path,
+        calendar,
+        datetime(2025, 6, 30, 3, tzinfo=UTC),
+    )
     return (
         paths,
         registry,
@@ -302,6 +404,7 @@ def history_chain(
         execution_day,
         cutoff,
         clock,
+        anchor,
     )
 
 
@@ -313,6 +416,9 @@ def test_signed_calendar_schema_and_raw_evidence_binding(tmp_path: Path) -> None
         schema,
         format_checker=FormatChecker(),
     ).validate(payload)
+    Draft202012Validator.check_schema(
+        json.loads(CALENDAR_ANCHOR_SCHEMA_PATH.read_bytes())
+    )
     assert len(calendar.official_days_through(date(2026, 7, 30), count=186)) == 186
 
 
@@ -338,26 +444,34 @@ def test_calendar_missing_day_and_tampered_source_fail_closed(
         )
 
 
-def test_night_and_after_midnight_map_to_same_official_day(
+def test_friday_night_and_saturday_after_midnight_map_to_monday(
     tmp_path: Path,
 ) -> None:
     calendar, _path, _payload = signed_calendar(tmp_path)
     monday = date(2026, 7, 20)
-    sunday = monday - timedelta(days=1)
+    friday = monday - timedelta(days=3)
+    saturday = monday - timedelta(days=2)
     before_midnight = map_exchange_timestamp(
-        shanghai_utc(sunday, time(21, 30)),
+        shanghai_utc(friday, time(21, 30)),
         exchange="SHFE",
         session="NIGHT",
         calendar=calendar,
     )
     after_midnight = map_exchange_timestamp(
-        shanghai_utc(monday, time(0, 30)),
+        shanghai_utc(saturday, time(0, 30)),
         exchange="SHFE",
         session="NIGHT",
         calendar=calendar,
     )
     assert before_midnight.trade_day == monday
     assert after_midnight.trade_day == monday
+    with pytest.raises(RegistryError, match="session"):
+        map_exchange_timestamp(
+            shanghai_utc(monday - timedelta(days=1), time(21, 30)),
+            exchange="SHFE",
+            session="NIGHT",
+            calendar=calendar,
+        )
 
 
 def test_holiday_night_mapping_and_clock_skew_fail_closed(
@@ -365,7 +479,7 @@ def test_holiday_night_mapping_and_clock_skew_fail_closed(
 ) -> None:
     closed = {date(2026, 7, 20)}
     calendar, _path, _payload = signed_calendar(tmp_path, closed=closed)
-    with pytest.raises(RegistryError, match="night session"):
+    with pytest.raises(RegistryError, match="session"):
         map_exchange_timestamp(
             shanghai_utc(date(2026, 7, 19), time(21)),
             exchange="SHFE",
@@ -414,15 +528,35 @@ def test_404_requires_explicit_calendar_closed_day(tmp_path: Path) -> None:
         source_id="shfe-daily-market-data-v1",
         trade_day=closed_day.isoformat(),
         collector_version="calendar-test-v1",
-        observed_at=observed,
         transport=StatusTransport(404),
         calendar=calendar,
         clock_sample=sample,
+        **calendar_clock_args(observed, elapsed_seconds=2),
     )
     assert isinstance(result, AuthoritativeAbsence)
-    assert result.status == "AUTHORITATIVE_NON_OFFICIAL_DAY_ABSENCE"
+    assert result.status == "CALENDAR_AUTHORIZED_ABSENCE_AWAITING_EXTERNAL_ANCHOR"
+    assert result.observed_at == observed + timedelta(seconds=2)
     assert result.receipt_path.exists()
+    Draft202012Validator(
+        json.loads(ABSENCE_SCHEMA_PATH.read_bytes()),
+        format_checker=FormatChecker(),
+    ).validate(json.loads(result.receipt_path.read_bytes()))
     assert not list(paths.raw.rglob("*.raw"))
+    anchor = absence_anchor(
+        tmp_path,
+        result,
+        available_at=observed + timedelta(seconds=3),
+        calendar=calendar,
+    )
+    Draft202012Validator(
+        json.loads(ABSENCE_ANCHOR_SCHEMA_PATH.read_bytes()),
+        format_checker=FormatChecker(),
+    ).validate(
+        json.loads((tmp_path / "absence-availability-anchor.json").read_bytes())
+    )
+    with pytest.raises(RegistryError, match="unavailable at PIT cutoff"):
+        anchor.require_available(cutoff_at=observed + timedelta(seconds=1))
+    anchor.require_available(cutoff_at=observed + timedelta(seconds=3))
 
     with pytest.raises(RegistryError, match="official-day source is missing"):
         acquire_daily(
@@ -431,10 +565,10 @@ def test_404_requires_explicit_calendar_closed_day(tmp_path: Path) -> None:
             source_id="shfe-daily-market-data-v1",
             trade_day="2026-07-21",
             collector_version="calendar-test-v1",
-            observed_at=observed,
             transport=StatusTransport(404),
             calendar=calendar,
             clock_sample=sample,
+            **calendar_clock_args(observed),
         )
     with pytest.raises(RegistryError, match="calendar-closed day"):
         acquire_daily(
@@ -443,10 +577,10 @@ def test_404_requires_explicit_calendar_closed_day(tmp_path: Path) -> None:
             source_id="shfe-daily-market-data-v1",
             trade_day=closed_day.isoformat(),
             collector_version="calendar-test-v1",
-            observed_at=observed,
             transport=StatusTransport(200),
             calendar=calendar,
             clock_sample=sample,
+            **calendar_clock_args(observed),
         )
     with pytest.raises(RegistryError, match="no authoritative classification"):
         acquire_daily(
@@ -455,10 +589,50 @@ def test_404_requires_explicit_calendar_closed_day(tmp_path: Path) -> None:
             source_id="shfe-daily-market-data-v1",
             trade_day="2027-01-01",
             collector_version="calendar-test-v1",
-            observed_at=observed,
             transport=StatusTransport(404),
             calendar=calendar,
             clock_sample=sample,
+            **calendar_clock_args(observed),
+        )
+    with pytest.raises(RegistryError, match="forbids caller-supplied"):
+        acquire_daily(
+            paths=paths,
+            registry=load_registry(REGISTRY_PATH),
+            source_id="shfe-daily-market-data-v1",
+            trade_day=closed_day.isoformat(),
+            collector_version="calendar-test-v1",
+            observed_at=observed - timedelta(days=1),
+            transport=StatusTransport(404),
+            calendar=calendar,
+            clock_sample=sample,
+            **calendar_clock_args(observed),
+        )
+    with pytest.raises(RegistryError, match="not aligned with live wall time"):
+        acquire_daily(
+            paths=paths,
+            registry=load_registry(REGISTRY_PATH),
+            source_id="shfe-daily-market-data-v1",
+            trade_day=closed_day.isoformat(),
+            collector_version="calendar-test-v1",
+            transport=StatusTransport(404),
+            calendar=calendar,
+            clock_sample=sample,
+            **calendar_clock_args(observed + timedelta(days=1)),
+        )
+    evidence = calendar.source_evidence[0]
+    evidence_path = calendar.source_evidence_root / evidence.raw_relative_path
+    evidence_path.write_bytes(b"changed-after-calendar-load")
+    with pytest.raises(RegistryError, match="source evidence changed"):
+        acquire_daily(
+            paths=paths,
+            registry=load_registry(REGISTRY_PATH),
+            source_id="shfe-daily-market-data-v1",
+            trade_day=closed_day.isoformat(),
+            collector_version="calendar-test-v1",
+            transport=StatusTransport(404),
+            calendar=calendar,
+            clock_sample=sample,
+            **calendar_clock_args(observed),
         )
 
 
@@ -476,6 +650,7 @@ def test_ten_product_186_day_quality_gate(tmp_path: Path) -> None:
         chain=values[2],
         ledger=values[3],
         calendar=calendar,
+        calendar_anchor=values[8],
         as_of_official_day=values[4],
         execution_trade_day=values[5],
         cutoff_at=values[6],
@@ -485,6 +660,24 @@ def test_ten_product_186_day_quality_gate(tmp_path: Path) -> None:
     assert result["required_official_days"] == 186
     assert set(result["product_day_counts"].values()) == {186}
     assert result["intraday_observed_open_eligible"] is False
+    late_anchor = calendar_anchor(
+        tmp_path,
+        calendar,
+        values[6] + timedelta(seconds=1),
+    )
+    with pytest.raises(RegistryError, match="unavailable at PIT cutoff"):
+        evaluate_history_quality(
+            paths=values[0],
+            registry=values[1],
+            chain=values[2],
+            ledger=values[3],
+            calendar=calendar,
+            calendar_anchor=late_anchor,
+            as_of_official_day=values[4],
+            execution_trade_day=values[5],
+            cutoff_at=values[6],
+            clock_sample=values[7],
+        )
 
     latest = values[2][-1]["revisions"][0]
     revised = dict(latest)
@@ -500,6 +693,7 @@ def test_ten_product_186_day_quality_gate(tmp_path: Path) -> None:
         chain=values[2],
         ledger=values[3],
         calendar=calendar,
+        calendar_anchor=values[8],
         as_of_official_day=values[4],
         execution_trade_day=values[5],
         cutoff_at=values[6],
@@ -530,6 +724,7 @@ def test_missing_official_day_and_future_revision_fail_closed(
             chain=values[2],
             ledger=values[3],
             calendar=calendar,
+            calendar_anchor=values[8],
             as_of_official_day=values[4],
             execution_trade_day=values[5],
             cutoff_at=values[6],
@@ -547,6 +742,7 @@ def test_missing_official_day_and_future_revision_fail_closed(
             chain=values[2],
             ledger=values[3],
             calendar=calendar,
+            calendar_anchor=values[8],
             as_of_official_day=values[4],
             execution_trade_day=values[5],
             cutoff_at=values[6],
@@ -585,6 +781,7 @@ def test_missing_target_product_fails_closed(tmp_path: Path) -> None:
             chain=values[2],
             ledger=values[3],
             calendar=calendar,
+            calendar_anchor=values[8],
             as_of_official_day=values[4],
             execution_trade_day=values[5],
             cutoff_at=values[6],

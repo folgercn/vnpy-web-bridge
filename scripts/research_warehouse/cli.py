@@ -9,9 +9,11 @@ import sys
 from datetime import date
 from pathlib import Path
 
+from .absence_anchors import load_absence_availability_anchor
 from .acquisition import acquire_daily
 from .acquisition_models import AuthoritativeAbsence
 from .authority import assert_research_source_boundary
+from .calendar_anchors import load_calendar_availability_anchor
 from .calendar_models import OfficialCalendar
 from .canonical import parse_json_strict, sha256
 from .clock_quality import TrustedClockSample
@@ -65,7 +67,6 @@ def parser() -> argparse.ArgumentParser:
     calendar_acquire.add_argument("--source-id", required=True)
     calendar_acquire.add_argument("--trade-day", required=True)
     calendar_acquire.add_argument("--collector-version", required=True)
-    calendar_acquire.add_argument("--observed-at", required=True)
     _add_calendar_arguments(calendar_acquire)
     _add_clock_arguments(calendar_acquire)
     seal = commands.add_parser("seal-day")
@@ -122,7 +123,18 @@ def parser() -> argparse.ArgumentParser:
     quality.add_argument("--execution-trade-day", required=True)
     quality.add_argument("--cutoff-at", required=True)
     _add_calendar_arguments(quality)
+    quality.add_argument("--calendar-anchor", type=Path, required=True)
+    quality.add_argument(
+        "--expected-calendar-anchor-sha256",
+        required=True,
+    )
     _add_clock_arguments(quality)
+    absence_anchor = commands.add_parser("verify-absence-anchor")
+    absence_anchor.add_argument("--receipt", type=Path, required=True)
+    absence_anchor.add_argument("--anchor", type=Path, required=True)
+    absence_anchor.add_argument("--expected-anchor-sha256", required=True)
+    absence_anchor.add_argument("--cutoff-at", required=True)
+    _add_calendar_arguments(absence_anchor)
     return result
 
 
@@ -233,7 +245,6 @@ def main(argv: list[str] | None = None) -> int:
                 source_id=args.source_id,
                 trade_day=args.trade_day,
                 collector_version=args.collector_version,
-                observed_at=parse_utc(args.observed_at, "observed_at"),
                 calendar=_calendar(args),
                 clock_sample=_clock_sample(args),
             )
@@ -242,6 +253,15 @@ def main(argv: list[str] | None = None) -> int:
                     "absence_id": acquired.absence_id,
                     "calendar_raw_sha256": acquired.calendar_raw_sha256,
                     "receipt": str(acquired.receipt_path),
+                    "receipt_sha256": sha256(
+                        read_regular_strict(
+                            acquired.receipt_path,
+                            "authoritative absence receipt",
+                        )
+                    ),
+                    "response_received_at": acquired.observed_at.isoformat(
+                        timespec="microseconds"
+                    ).replace("+00:00", "Z"),
                     "status": acquired.status,
                 }
             else:
@@ -421,6 +441,12 @@ def main(argv: list[str] | None = None) -> int:
                     ),
                 ),
                 calendar=_calendar(args),
+                calendar_anchor=load_calendar_availability_anchor(
+                    args.calendar_anchor,
+                    expected_raw_sha256=(
+                        args.expected_calendar_anchor_sha256
+                    ),
+                ),
                 as_of_official_day=_canonical_date(
                     args.as_of_official_day,
                     "as_of_official_day",
@@ -432,6 +458,24 @@ def main(argv: list[str] | None = None) -> int:
                 cutoff_at=parse_utc(args.cutoff_at, "cutoff_at"),
                 clock_sample=_clock_sample(args),
             )
+        elif args.command == "verify-absence-anchor":
+            anchor = load_absence_availability_anchor(
+                args.anchor,
+                expected_raw_sha256=args.expected_anchor_sha256,
+                receipt_path=args.receipt,
+                calendar=_calendar(args),
+            )
+            anchor.require_available(
+                cutoff_at=parse_utc(args.cutoff_at, "cutoff_at")
+            )
+            output = {
+                "absence_id": anchor.absence_id,
+                "anchor_sha256": anchor.raw_sha256,
+                "available_at": anchor.available_at.isoformat(
+                    timespec="microseconds"
+                ).replace("+00:00", "Z"),
+                "status": "AUTHORITATIVE_ABSENCE_AVAILABLE_AT_PIT",
+            }
         else:  # pragma: no cover
             raise RegistryError(f"unsupported command: {args.command}")
     except RegistryError as exc:

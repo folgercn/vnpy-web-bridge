@@ -25,5 +25,5 @@ def classify_http_status(
     if status == 404:
         if classification.is_official:
             raise RegistryError("official-day source is missing")
-        return "AUTHORITATIVE_NON_OFFICIAL_DAY_ABSENCE"
+        return "CALENDAR_AUTHORIZED_ABSENCE_AWAITING_EXTERNAL_ANCHOR"
     raise RegistryError(f"official source returned unexpected HTTP {status}")

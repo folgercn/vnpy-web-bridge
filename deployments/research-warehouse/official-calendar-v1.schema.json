@@ -73,17 +73,20 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["date", "status", "previous_evening_session"],
+        "required": ["date", "status", "evening_session_natural_date"],
         "properties": {
           "date": {"type": "string", "format": "date"},
           "status": {"enum": ["OFFICIAL_DAY", "CLOSED"]},
-          "previous_evening_session": {"type": "boolean"}
+          "evening_session_natural_date": {
+            "type": ["string", "null"],
+            "format": "date"
+          }
         },
         "allOf": [
           {
             "if": {"properties": {"status": {"const": "CLOSED"}}},
             "then": {
-              "properties": {"previous_evening_session": {"const": false}}
+              "properties": {"evening_session_natural_date": {"const": null}}
             }
           }
         ]

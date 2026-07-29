@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any
 
+from .calendar_anchors import CalendarAvailabilityAnchor
 from .calendar_models import OfficialCalendar
 from .clock_quality import TrustedClockSample, validate_observation_clock
 from .commit_anchors import CommitAnchorLedger
@@ -73,6 +74,7 @@ def evaluate_history_quality(
     chain: list[dict[str, Any]],
     ledger: CommitAnchorLedger,
     calendar: OfficialCalendar,
+    calendar_anchor: CalendarAvailabilityAnchor,
     as_of_official_day: date,
     execution_trade_day: date,
     cutoff_at: datetime,
@@ -81,6 +83,7 @@ def evaluate_history_quality(
     cutoff = require_utc(cutoff_at, "history quality PIT cutoff")
     validate_observation_clock(cutoff, sample=clock_sample)
     revalidate_official_calendar_evidence(calendar)
+    calendar_anchor.require_available(calendar, cutoff_at=cutoff)
     ledger.require_chain(chain)
     if calendar.issued_at > cutoff or any(
         evidence.observed_at > cutoff for evidence in calendar.source_evidence
@@ -130,6 +133,10 @@ def evaluate_history_quality(
         "status": "RESEARCH_HISTORY_QUALITY_VALID",
         "calendar_id": calendar.calendar_id,
         "calendar_raw_sha256": calendar.raw_sha256,
+        "calendar_anchor_sha256": calendar_anchor.raw_sha256,
+        "calendar_available_at": calendar_anchor.available_at.isoformat(
+            timespec="microseconds"
+        ).replace("+00:00", "Z"),
         "commit_anchor_ledger_sha256": ledger.raw_sha256,
         "as_of_official_day": as_of_official_day.isoformat(),
         "execution_trade_day": execution_trade_day.isoformat(),

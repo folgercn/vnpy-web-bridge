@@ -39,15 +39,29 @@ def map_exchange_timestamp(
         if not calendar.require_day(trade_day).is_official:
             raise RegistryError("day-session timestamp maps to a closed day")
     elif local_time >= NIGHT_START:
-        trade_day = natural_day + timedelta(days=1)
-        mapped = calendar.require_day(trade_day)
-        if not mapped.is_official or not mapped.previous_evening_session:
-            raise RegistryError("night session is not authorized for next trade day")
+        matches = [
+            item.day
+            for item in calendar.days.values()
+            if item.is_official
+            and item.evening_session_natural_date == natural_day
+        ]
+        if len(matches) != 1:
+            raise RegistryError("evening session has no unique official trade day")
+        trade_day = matches[0]
     elif local_time <= NIGHT_END:
-        trade_day = natural_day
-        mapped = calendar.require_day(trade_day)
-        if not mapped.is_official or not mapped.previous_evening_session:
-            raise RegistryError("after-midnight session has no official trade day")
+        matches = [
+            item.day
+            for item in calendar.days.values()
+            if item.is_official
+            and item.evening_session_natural_date is not None
+            and item.evening_session_natural_date + timedelta(days=1)
+            == natural_day
+        ]
+        if len(matches) != 1:
+            raise RegistryError(
+                "after-midnight session has no unique official trade day"
+            )
+        trade_day = matches[0]
     else:
         raise RegistryError("timestamp is outside frozen night-session window")
     return ExchangeTimestampMapping(

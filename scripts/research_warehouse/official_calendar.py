@@ -50,7 +50,7 @@ EVIDENCE_KEYS = {
     "raw_bytes",
     "raw_relative_path",
 }
-DAY_KEYS = {"date", "status", "previous_evening_session"}
+DAY_KEYS = {"date", "status", "evening_session_natural_date"}
 EXCHANGES = ("INE", "SHFE")
 SOURCE_CONTRACTS = {
     "INE": ("Shanghai International Energy Exchange", "www.ine.cn"),
@@ -177,17 +177,24 @@ def _load_days(
             raise RegistryError("calendar day fields do not match v1")
         day = _canonical_date(value["date"], "calendar day")
         status = value["status"]
-        previous = value["previous_evening_session"]
-        if status not in STATUSES or not isinstance(previous, bool):
-            raise RegistryError("calendar day status/night flag is invalid")
-        if status == "CLOSED" and previous:
+        evening_value = value["evening_session_natural_date"]
+        evening_day = (
+            None
+            if evening_value is None
+            else _canonical_date(evening_value, "evening session natural date")
+        )
+        if status not in STATUSES:
+            raise RegistryError("calendar day status is invalid")
+        if status == "CLOSED" and evening_day is not None:
             raise RegistryError("closed calendar day cannot have a night session")
+        if evening_day is not None and evening_day >= day:
+            raise RegistryError("evening session date must precede its trade day")
         if day in result:
             raise RegistryError("calendar repeats a natural day")
         result[day] = CalendarDay(
             day=day,
             status=status,
-            previous_evening_session=previous,
+            evening_session_natural_date=evening_day,
         )
     expected = []
     current = valid_from
@@ -198,6 +205,13 @@ def _load_days(
         raise RegistryError("calendar must classify every natural day in order")
     if sum(item.is_official for item in result.values()) < 186:
         raise RegistryError("calendar must cover at least 186 official days")
+    session_days = [
+        item.evening_session_natural_date
+        for item in result.values()
+        if item.evening_session_natural_date is not None
+    ]
+    if len(session_days) != len(set(session_days)):
+        raise RegistryError("calendar repeats an evening-session natural date")
     return result
 
 

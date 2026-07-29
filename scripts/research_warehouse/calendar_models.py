@@ -15,7 +15,7 @@ from .errors import RegistryError
 class CalendarDay:
     day: date
     status: str
-    previous_evening_session: bool
+    evening_session_natural_date: date | None
 
     @property
     def is_official(self) -> bool:
