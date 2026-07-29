@@ -12,11 +12,14 @@ from .acquisition import acquire_daily
 from .authority import assert_research_source_boundary
 from .canonical import parse_json_strict, sha256
 from .commit_anchors import load_commit_anchor_ledger
+from .derived_paths import DerivedPaths
 from .errors import RegistryError
 from .filesystem import WarehousePaths, read_regular_strict
 from .manifest_commits import commit_receipt_path
 from .manifests import seal_daily_batch, verify_manifest_chain
 from .pit import select_pit_revision
+from .rebuild import rebuild_empty_catalog, verify_rebuilt_catalog
+from .rebuild_binding import load_normalization_binding
 from .registry import load_registry
 from .timeutil import parse_utc
 
@@ -75,7 +78,32 @@ def parser() -> argparse.ArgumentParser:
     select.add_argument("--source-id", required=True)
     select.add_argument("--trade-day", required=True)
     select.add_argument("--cutoff-at", required=True)
+    rebuild = commands.add_parser("rebuild-catalog")
+    _add_rebuild_arguments(rebuild)
+    verify_catalog = commands.add_parser("verify-catalog")
+    _add_rebuild_arguments(verify_catalog)
     return result
+
+
+def _add_rebuild_arguments(command: argparse.ArgumentParser) -> None:
+    command.add_argument("--root", type=Path, required=True)
+    command.add_argument("--derived-root", type=Path, required=True)
+    command.add_argument("--registry", type=Path, required=True)
+    command.add_argument("--public-key", type=Path, required=True)
+    command.add_argument("--expected-genesis-seal", required=True)
+    command.add_argument("--expected-head-seal", required=True)
+    command.add_argument("--expected-head-commit-seal", required=True)
+    command.add_argument("--commit-anchor-ledger", type=Path, required=True)
+    command.add_argument(
+        "--expected-commit-anchor-ledger-sha256",
+        required=True,
+    )
+    command.add_argument("--tool-commit-sha", required=True)
+    command.add_argument("--dependency-lock", type=Path, required=True)
+    command.add_argument(
+        "--expected-dependency-lock-sha256",
+        required=True,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -197,6 +225,45 @@ def main(argv: list[str] | None = None) -> int:
                 "raw_sha256": selection.raw_sha256,
                 "status": "PIT_REVISION_SELECTED",
             }
+        elif args.command in {"rebuild-catalog", "verify-catalog"}:
+            evidence = WarehousePaths.open(args.root)
+            trusted_registry = load_registry(args.registry)
+            ledger = load_commit_anchor_ledger(
+                args.commit_anchor_ledger,
+                expected_raw_sha256=(
+                    args.expected_commit_anchor_ledger_sha256
+                ),
+            )
+            binding = load_normalization_binding(
+                tool_commit_sha=args.tool_commit_sha,
+                dependency_lock_path=args.dependency_lock,
+                expected_dependency_lock_sha256=(
+                    args.expected_dependency_lock_sha256
+                ),
+                registry_raw_sha256=trusted_registry.raw_sha256,
+            )
+            common = {
+                "evidence": evidence,
+                "public_key_path": args.public_key,
+                "registry": trusted_registry,
+                "expected_genesis_seal_sha256": args.expected_genesis_seal,
+                "expected_head_seal_sha256": args.expected_head_seal,
+                "expected_head_commit_seal_sha256": (
+                    args.expected_head_commit_seal
+                ),
+                "ledger": ledger,
+                "binding": binding,
+            }
+            if args.command == "rebuild-catalog":
+                output = rebuild_empty_catalog(
+                    derived_root=args.derived_root,
+                    **common,
+                )
+            else:
+                output = verify_rebuilt_catalog(
+                    derived=DerivedPaths.open(args.derived_root),
+                    **common,
+                )
         else:  # pragma: no cover
             raise RegistryError(f"unsupported command: {args.command}")
     except RegistryError as exc:
