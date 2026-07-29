@@ -13,6 +13,7 @@ from .canonical import sha256
 from .catalog_schema import CATALOG_FILENAME, CATALOG_SCHEMA_VERSION, DDL
 from .commit_anchors import CommitAnchorLedger
 from .derived_paths import DerivedPaths, private_file_mode
+from .derived_publication import cleanup_failed_temporary
 from .errors import RegistryError
 from .file_integrity import fsync_dir, read_regular_strict
 from .normalization_contracts import (
@@ -23,29 +24,8 @@ from .normalization_contracts import (
 )
 from .normalization_models import NormalizationBinding, NormalizedArtifact
 from .publication import publish_temp_create_only
+from .revision_snapshots import latest_revision_snapshots
 from .timeutil import format_utc
-
-
-def _deduplicate_revisions(
-    chain: list[dict[str, Any]],
-) -> list[tuple[int, dict[str, Any]]]:
-    values: dict[str, tuple[int, dict[str, Any]]] = {}
-    for batch_sequence, manifest in enumerate(chain, start=1):
-        for revision in manifest["revisions"]:
-            existing = values.get(revision["revision_id"])
-            if existing is None:
-                values[revision["revision_id"]] = (batch_sequence, revision)
-            elif existing[1] != revision:
-                raise RegistryError("signed revision changed across manifest chain")
-    return sorted(
-        values.values(),
-        key=lambda item: (
-            item[1]["source_id"],
-            item[1]["trade_day"],
-            item[1]["revision_sequence"],
-            item[1]["revision_id"],
-        ),
-    )
 
 
 def _catalog_meta(
@@ -83,7 +63,7 @@ def _write_catalog(
 ) -> None:
     if duckdb.__version__ != DUCKDB_VERSION:
         raise RegistryError("DuckDB dependency version drift")
-    revisions = _deduplicate_revisions(chain)
+    revisions = latest_revision_snapshots(chain)
     if len(revisions) != len(artifacts):
         raise RegistryError("normalization artifact/revision count mismatch")
     by_revision = {item.revision_id: item for item in artifacts}
@@ -135,7 +115,10 @@ def _write_catalog(
                     revision["supersedes_object_id"],
                     first_batch,
                 )
-                for first_batch, revision in revisions
+                for snapshot in revisions
+                for first_batch, revision in [
+                    (snapshot.first_batch_sequence, snapshot.revision)
+                ]
             ],
         )
         connection.executemany(
@@ -211,9 +194,11 @@ def build_catalog(
             paths.catalog / CATALOG_FILENAME,
             expected_sha256=digest,
         )
-    finally:
-        try:
-            temporary.unlink()
-        except FileNotFoundError:
-            pass
+    except BaseException as exc:
+        cleanup_failed_temporary(temporary)
+        if isinstance(exc, OSError):
+            raise RegistryError(
+                f"catalog publication filesystem failure: {exc}"
+            ) from exc
+        raise
     return output, digest

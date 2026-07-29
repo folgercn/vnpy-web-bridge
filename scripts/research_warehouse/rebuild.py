@@ -16,28 +16,11 @@ from .file_integrity import read_regular_strict
 from .filesystem import WarehousePaths
 from .manifests import verify_manifest_chain
 from .models import SourceRegistry
-from .normalization_models import NormalizationBinding, NormalizedArtifact
-from .normalizer import normalize_revision
-
-
-def _unique_revisions(
-    chain: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    values: dict[str, dict[str, Any]] = {}
-    for manifest in chain:
-        for revision in manifest["revisions"]:
-            existing = values.setdefault(revision["revision_id"], revision)
-            if existing != revision:
-                raise RegistryError("signed revision changed across manifest chain")
-    return sorted(
-        values.values(),
-        key=lambda item: (
-            item["source_id"],
-            item["trade_day"],
-            item["revision_sequence"],
-            item["revision_id"],
-        ),
-    )
+from .normalization_models import NormalizationBinding
+from .normalization_replay import (
+    normalize_chain,
+    replay_expected_artifacts,
+)
 
 
 def _verified_chain(
@@ -65,30 +48,12 @@ def _verified_chain(
     return chain
 
 
-def _normalize_all(
-    *,
-    evidence: WarehousePaths,
-    derived: DerivedPaths,
-    chain: list[dict[str, Any]],
+def _require_registry_binding(
     registry: SourceRegistry,
     binding: NormalizationBinding,
-) -> list[NormalizedArtifact]:
-    artifacts = []
-    for revision in _unique_revisions(chain):
-        try:
-            source = registry.source(revision["source_id"])
-        except KeyError as exc:
-            raise RegistryError("signed revision source is not trusted") from exc
-        artifacts.append(
-            normalize_revision(
-                evidence_root=evidence.root,
-                derived=derived,
-                revision=revision,
-                source=source,
-                binding=binding,
-            )
-        )
-    return artifacts
+) -> None:
+    if binding.registry_raw_sha256 != registry.raw_sha256:
+        raise RegistryError("normalization registry provenance mismatch")
 
 
 def rebuild_empty_catalog(
@@ -103,6 +68,7 @@ def rebuild_empty_catalog(
     ledger: CommitAnchorLedger,
     binding: NormalizationBinding,
 ) -> dict[str, Any]:
+    _require_registry_binding(registry, binding)
     derived = DerivedPaths.initialize(derived_root)
     with single_writer_lock(derived):
         chain = _verified_chain(
@@ -114,7 +80,7 @@ def rebuild_empty_catalog(
             expected_head_commit_seal_sha256=expected_head_commit_seal_sha256,
             ledger=ledger,
         )
-        artifacts = _normalize_all(
+        artifacts = normalize_chain(
             evidence=evidence,
             derived=derived,
             chain=chain,
@@ -133,6 +99,7 @@ def rebuild_empty_catalog(
             chain=chain,
             ledger=ledger,
             binding=binding,
+            expected_artifacts=artifacts,
         )
     return {
         **validated,
@@ -161,6 +128,7 @@ def verify_rebuilt_catalog(
     ledger: CommitAnchorLedger,
     binding: NormalizationBinding,
 ) -> dict[str, Any]:
+    _require_registry_binding(registry, binding)
     chain = _verified_chain(
         evidence=evidence,
         public_key_path=public_key_path,
@@ -170,11 +138,18 @@ def verify_rebuilt_catalog(
         expected_head_commit_seal_sha256=expected_head_commit_seal_sha256,
         ledger=ledger,
     )
+    expected_artifacts = replay_expected_artifacts(
+        evidence=evidence,
+        chain=chain,
+        registry=registry,
+        binding=binding,
+    )
     validated = validate_catalog(
         paths=derived,
         chain=chain,
         ledger=ledger,
         binding=binding,
+        expected_artifacts=expected_artifacts,
     )
     catalog_raw = read_regular_strict(
         Path(validated["catalog"]),

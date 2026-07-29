@@ -13,6 +13,7 @@ import duckdb
 
 from .canonical import canonical_json, parse_json_strict, sha256
 from .derived_paths import DerivedPaths, private_file_mode
+from .derived_publication import cleanup_failed_temporary
 from .errors import RegistryError
 from .file_integrity import fsync_dir, read_regular_strict
 from .models import SourceEndpoint
@@ -256,11 +257,13 @@ def normalize_revision(
             destination,
             expected_sha256=parquet_hash,
         )
-    finally:
-        try:
-            temporary.unlink()
-        except FileNotFoundError:
-            pass
+    except BaseException as exc:
+        cleanup_failed_temporary(temporary)
+        if isinstance(exc, OSError):
+            raise RegistryError(
+                f"Parquet publication filesystem failure: {exc}"
+            ) from exc
+        raise
     relative = destination.relative_to(derived.root).as_posix()
     return NormalizedArtifact(
         normalization_id=normalization_id,

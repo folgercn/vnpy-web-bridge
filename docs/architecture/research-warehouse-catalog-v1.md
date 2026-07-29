@@ -13,6 +13,10 @@ lineage only; normalized market rows live in versioned Parquet partitions.
   Parquet writer settings.
 - `normalizer.py` validates one signed raw revision and emits one deterministic
   Parquet partition.
+- `revision_snapshots.py` validates monotonic snapshot evolution and selects the
+  latest signed view while retaining first-batch lineage.
+- `normalization_replay.py` independently reconstructs expected partitions from
+  signed raw for verification.
 - `catalog_builder.py` publishes a metadata-only DuckDB catalog.
 - `catalog_validation.py` independently verifies schema, lineage, bindings,
   partition hashes, row counts, physical schema, compression, and row order.
@@ -44,10 +48,13 @@ signed manifest chain and external commit-anchor ledger, reconstructs every
 unique revision from raw evidence, creates the catalog, and validates the full
 result before reporting success.
 
-`verify-catalog` repeats the evidence-chain and catalog checks without writing.
-Both commands require explicit genesis, head, head-commit, ledger, tool-commit,
-and dependency-lock anchors. Run `python -m research_warehouse.cli
-<command> --help` for the complete arguments.
+`verify-catalog` repeats the evidence-chain checks and independently normalizes
+signed raw into a disposable replay root. Catalog partition identities, paths,
+row counts, and hashes must exactly match that replay, so coordinated edits to
+both a Parquet file and the untrusted catalog cannot validate. Both commands
+require explicit genesis, head, head-commit, ledger, tool-commit, and
+dependency-lock anchors. Run `python -m research_warehouse.cli <command>
+--help` for the complete arguments.
 
 ## Failure semantics
 
@@ -56,4 +63,6 @@ unsafe path or permissions, signature or anchor mismatch, schema drift, raw or
 Parquet hash mismatch, catalog corruption, lineage disagreement, dependency
 drift, and DuckDB version drift. A failed empty-root rebuild may leave a partial
 derived root; it is not valid and must be discarded before retrying with a new
-empty path.
+empty path. If final-parent durability fails after a hard link is created, the
+temporary link is deliberately retained and strict readers reject the resulting
+two-link artifact.

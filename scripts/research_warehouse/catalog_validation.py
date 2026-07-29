@@ -25,22 +25,9 @@ from .normalization_contracts import (
     schema_sha256,
     sort_sha256,
 )
-from .normalization_models import NormalizationBinding
+from .normalization_models import NormalizationBinding, NormalizedArtifact
+from .revision_snapshots import latest_revision_snapshots
 from .timeutil import format_utc
-
-
-def _expected_revisions(
-    chain: list[dict[str, Any]],
-) -> dict[str, tuple[int, dict[str, Any]]]:
-    values: dict[str, tuple[int, dict[str, Any]]] = {}
-    for sequence, manifest in enumerate(chain, start=1):
-        for revision in manifest["revisions"]:
-            existing = values.get(revision["revision_id"])
-            if existing is None:
-                values[revision["revision_id"]] = (sequence, revision)
-            elif existing[1] != revision:
-                raise RegistryError("signed revision changed across manifest chain")
-    return values
 
 
 def _require_schema(connection: duckdb.DuckDBPyConnection) -> None:
@@ -90,6 +77,7 @@ def _validate_partition(
     paths: DerivedPaths,
     row: tuple[Any, ...],
     binding: NormalizationBinding,
+    revision: dict[str, Any],
 ) -> None:
     (
         normalization_id,
@@ -149,14 +137,26 @@ def _validate_partition(
         }
         mismatch_count = connection.execute(
             f"SELECT count(*) FROM read_parquet({literal}) WHERE "
-            "normalization_id <> ? OR revision_id <> ? OR source_id <> ? "
-            "OR exchange <> ? OR trade_day <> ? OR raw_sha256 <> ? "
-            "OR schema_version <> ? OR tool_commit_sha <> ? "
-            "OR dependency_lock_sha256 <> ? OR duckdb_version <> ? "
-            "OR timezone <> ?",
+            "normalization_id IS DISTINCT FROM ? "
+            "OR normalizer_version IS DISTINCT FROM ? "
+            "OR registry_raw_sha256 IS DISTINCT FROM ? "
+            "OR revision_id IS DISTINCT FROM ? "
+            "OR object_id IS DISTINCT FROM ? "
+            "OR source_id IS DISTINCT FROM ? "
+            "OR exchange IS DISTINCT FROM ? "
+            "OR trade_day IS DISTINCT FROM ? "
+            "OR raw_sha256 IS DISTINCT FROM ? "
+            "OR schema_version IS DISTINCT FROM ? "
+            "OR tool_commit_sha IS DISTINCT FROM ? "
+            "OR dependency_lock_sha256 IS DISTINCT FROM ? "
+            "OR duckdb_version IS DISTINCT FROM ? "
+            "OR timezone IS DISTINCT FROM ?",
             (
                 normalization_id,
+                NORMALIZER_VERSION,
+                binding.registry_raw_sha256,
                 revision_id,
+                revision["object_id"],
                 source_id,
                 exchange,
                 trade_day,
@@ -195,8 +195,14 @@ def validate_catalog(
     chain: list[dict[str, Any]],
     ledger: CommitAnchorLedger,
     binding: NormalizationBinding,
+    expected_artifacts: list[NormalizedArtifact],
 ) -> dict[str, Any]:
     ledger.require_chain(chain)
+    if any(
+        manifest["registry_raw_sha256"] != binding.registry_raw_sha256
+        for manifest in chain
+    ):
+        raise RegistryError("catalog registry provenance mismatch")
     catalog_path = paths.catalog / CATALOG_FILENAME
     read_regular_strict(
         catalog_path,
@@ -214,7 +220,18 @@ def validate_catalog(
     try:
         _require_schema(connection)
         meta = dict(connection.execute("SELECT key, value FROM catalog_meta").fetchall())
-        revisions = _expected_revisions(chain)
+        snapshots = latest_revision_snapshots(chain)
+        revisions = {
+            item.revision["revision_id"]: item for item in snapshots
+        }
+        expected_by_revision = {
+            item.revision_id: item for item in expected_artifacts
+        }
+        if (
+            len(expected_by_revision) != len(expected_artifacts)
+            or set(expected_by_revision) != set(revisions)
+        ):
+            raise RegistryError("catalog replay revision set mismatch")
         expected_meta = {
             "catalog_schema_version": CATALOG_SCHEMA_VERSION,
             "commit_anchor_ledger_sha256": ledger.raw_sha256,
@@ -282,7 +299,10 @@ def validate_catalog(
                 revision["supersedes_object_id"],
                 sequence,
             )
-            for sequence, revision in revisions.values()
+            for snapshot in snapshots
+            for sequence, revision in [
+                (snapshot.first_batch_sequence, snapshot.revision)
+            ]
         )
         if revision_rows != expected_revision_rows:
             raise RegistryError("DuckDB catalog revision lineage mismatch")
@@ -296,7 +316,33 @@ def validate_catalog(
         if len(partition_rows) != len(revisions):
             raise RegistryError("DuckDB catalog partition count mismatch")
         for row in partition_rows:
-            revision = revisions[row[1]][1]
+            try:
+                revision = revisions[row[1]].revision
+                artifact = expected_by_revision[row[1]]
+            except KeyError as exc:
+                raise RegistryError(
+                    "catalog partition references an unknown revision"
+                ) from exc
+            expected_row = (
+                artifact.normalization_id,
+                artifact.revision_id,
+                artifact.source_id,
+                artifact.exchange,
+                artifact.trade_day,
+                artifact.raw_sha256,
+                artifact.row_count,
+                artifact.parquet_sha256,
+                artifact.parquet_bytes,
+                artifact.parquet_relative_path,
+                artifact.schema_sha256,
+                artifact.sort_sha256,
+                binding.tool_commit_sha,
+                binding.dependency_lock_sha256,
+                DUCKDB_VERSION,
+                TIMEZONE,
+            )
+            if row != expected_row:
+                raise RegistryError("catalog partition replay mismatch")
             if (
                 row[2] != revision["source_id"]
                 or row[3] != revision["exchange"]
@@ -304,7 +350,7 @@ def validate_catalog(
                 or row[5] != revision["raw_sha256"]
             ):
                 raise RegistryError("catalog partition/revision lineage mismatch")
-            _validate_partition(connection, paths, row, binding)
+            _validate_partition(connection, paths, row, binding, revision)
     except (duckdb.Error, KeyError, TypeError) as exc:
         raise RegistryError(f"DuckDB catalog validation failed: {exc}") from exc
     finally:

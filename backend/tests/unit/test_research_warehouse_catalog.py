@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import base64
+import errno
 import json
+import os
 import sys
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -16,6 +18,7 @@ from jsonschema import Draft202012Validator
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "scripts"))
 
+from research_warehouse import publication
 from research_warehouse.acquisition import acquire_daily
 from research_warehouse.acquisition_models import HttpResponse
 from research_warehouse.canonical import canonical_json_line, sha256
@@ -32,6 +35,11 @@ from research_warehouse.filesystem import WarehousePaths
 from research_warehouse.manifests import seal_daily_batch
 from research_warehouse.normalization_contracts import (
     NORMALIZED_COLUMNS,
+    PARQUET_COMPRESSION,
+    PARQUET_COMPRESSION_LEVEL,
+    PARQUET_DICTIONARY_PAGE_SIZE,
+    PARQUET_ROW_GROUP_SIZE,
+    PARQUET_VERSION,
     SORT_KEYS,
     contract_document,
 )
@@ -54,6 +62,8 @@ TRADE_DAY = "2026-07-28"
 T1 = datetime(2026, 7, 28, 8, 0, tzinfo=timezone.utc)
 T2 = datetime(2026, 7, 28, 8, 5, tzinfo=timezone.utc)
 T3 = datetime(2026, 7, 28, 8, 10, tzinfo=timezone.utc)
+T4 = datetime(2026, 7, 28, 8, 15, tzinfo=timezone.utc)
+T5 = datetime(2026, 7, 28, 8, 20, tzinfo=timezone.utc)
 TOOL_COMMIT = "a" * 40
 
 
@@ -140,9 +150,11 @@ def sealed_evidence(
     tmp_path: Path,
     *,
     invalid_price: bool = False,
+    repeat_same_raw: bool = False,
 ) -> tuple[
     WarehousePaths,
     Path,
+    str,
     str,
     str,
     CommitAnchorLedger,
@@ -171,21 +183,60 @@ def sealed_evidence(
         expected_parent_commit_seal_sha256=None,
         trusted_clock=lambda: T2,
     )
-    manifest = json.loads(manifest_path.read_bytes())
-    batch_seal = manifest["batch_seal_sha256"]
-    receipt_path = manifest_path.parent / f"commit-{manifest['batch_id']}.json"
-    commit_seal = sha256(receipt_path.read_bytes())
+    manifests = [json.loads(manifest_path.read_bytes())]
+    if repeat_same_raw:
+        acquire_daily(
+            paths=evidence,
+            registry=trusted_registry,
+            source_id=SOURCE_ID,
+            trade_day=TRADE_DAY,
+            collector_version="issue-168-test-v1",
+            observed_at=T3,
+            transport=FakeTransport(raw),
+        )
+        parent = manifests[-1]
+        parent_receipt = (
+            manifest_path.parent / f"commit-{parent['batch_id']}.json"
+        )
+        manifest_path = seal_daily_batch(
+            paths=evidence,
+            registry=trusted_registry,
+            trade_day=TRADE_DAY,
+            private_key_path=private_key,
+            signer_key_id="research-key-v1",
+            expected_parent_batch_seal_sha256=parent["batch_seal_sha256"],
+            expected_parent_commit_seal_sha256=sha256(
+                parent_receipt.read_bytes()
+            ),
+            trusted_clock=lambda: T4,
+        )
+        manifests.append(json.loads(manifest_path.read_bytes()))
+    seals = []
+    for manifest in manifests:
+        receipt_path = (
+            manifest_path.parent / f"commit-{manifest['batch_id']}.json"
+        )
+        seals.append(
+            (
+                manifest["batch_seal_sha256"],
+                sha256(receipt_path.read_bytes()),
+            )
+        )
     ledger_payload = {
         "schema_version": ANCHOR_SCHEMA,
         "entries": [
             {
-                "sequence": 1,
+                "sequence": sequence,
                 "batch_seal_sha256": batch_seal,
                 "commit_seal_sha256": commit_seal,
-                "available_at": T3.isoformat(
+                "available_at": available_at.isoformat(
                     timespec="microseconds"
                 ).replace("+00:00", "Z"),
             }
+            for sequence, ((batch_seal, commit_seal), available_at) in enumerate(
+                zip(seals, (T3, T5), strict=False),
+                start=1,
+            )
         ],
     }
     ledger_raw = canonical_json_line(ledger_payload)
@@ -206,8 +257,9 @@ def sealed_evidence(
     return (
         evidence,
         public_key,
-        batch_seal,
-        commit_seal,
+        seals[0][0],
+        seals[-1][0],
+        seals[-1][1],
         ledger,
         binding,
     )
@@ -216,7 +268,8 @@ def sealed_evidence(
 def rebuild(
     evidence: WarehousePaths,
     public_key: Path,
-    batch_seal: str,
+    genesis_seal: str,
+    head_seal: str,
     commit_seal: str,
     ledger: CommitAnchorLedger,
     binding: NormalizationBinding,
@@ -227,8 +280,8 @@ def rebuild(
         derived_root=root,
         public_key_path=public_key,
         registry=load_registry(REGISTRY_PATH),
-        expected_genesis_seal_sha256=batch_seal,
-        expected_head_seal_sha256=batch_seal,
+        expected_genesis_seal_sha256=genesis_seal,
+        expected_head_seal_sha256=head_seal,
         expected_head_commit_seal_sha256=commit_seal,
         ledger=ledger,
         binding=binding,
@@ -257,10 +310,10 @@ def test_empty_rebuild_is_deterministic_from_raw_and_signed_manifests(
         public_key_path=values[1],
         registry=load_registry(REGISTRY_PATH),
         expected_genesis_seal_sha256=values[2],
-        expected_head_seal_sha256=values[2],
-        expected_head_commit_seal_sha256=values[3],
-        ledger=values[4],
-        binding=values[5],
+        expected_head_seal_sha256=values[3],
+        expected_head_commit_seal_sha256=values[4],
+        ledger=values[5],
+        binding=values[6],
     )
     assert verified["status"] == "REBUILT_CATALOG_VALID"
 
@@ -306,10 +359,10 @@ def test_corrupt_catalog_fails_closed(tmp_path: Path) -> None:
             public_key_path=values[1],
             registry=load_registry(REGISTRY_PATH),
             expected_genesis_seal_sha256=values[2],
-            expected_head_seal_sha256=values[2],
-            expected_head_commit_seal_sha256=values[3],
-            ledger=values[4],
-            binding=values[5],
+            expected_head_seal_sha256=values[3],
+            expected_head_commit_seal_sha256=values[4],
+            ledger=values[5],
+            binding=values[6],
         )
 
 
@@ -327,10 +380,177 @@ def test_corrupt_parquet_fails_closed(tmp_path: Path) -> None:
             public_key_path=values[1],
             registry=load_registry(REGISTRY_PATH),
             expected_genesis_seal_sha256=values[2],
-            expected_head_seal_sha256=values[2],
-            expected_head_commit_seal_sha256=values[3],
-            ledger=values[4],
-            binding=values[5],
+            expected_head_seal_sha256=values[3],
+            expected_head_commit_seal_sha256=values[4],
+            ledger=values[5],
+            binding=values[6],
+        )
+
+
+def test_market_value_and_catalog_hash_tamper_fails_replay(
+    tmp_path: Path,
+) -> None:
+    values = sealed_evidence(tmp_path)
+    rebuild(*values, tmp_path / "derived")
+    derived = DerivedPaths.open(tmp_path / "derived")
+    parquet = next(derived.parquet.rglob("*.parquet"))
+    changed = derived.temporary / "changed.parquet"
+    literal = "'" + str(parquet).replace("'", "''") + "'"
+    changed_literal = "'" + str(changed).replace("'", "''") + "'"
+    order = ", ".join(f'"{key}" ASC NULLS FIRST' for key in SORT_KEYS)
+    connection = duckdb.connect(":memory:")
+    try:
+        connection.execute(
+            "COPY (SELECT * REPLACE (open_price + 1 AS open_price) "
+            f"FROM read_parquet({literal}) ORDER BY {order}) "
+            f"TO {changed_literal} (FORMAT parquet, "
+            f"COMPRESSION {PARQUET_COMPRESSION}, "
+            f"COMPRESSION_LEVEL {PARQUET_COMPRESSION_LEVEL}, "
+            f"ROW_GROUP_SIZE {PARQUET_ROW_GROUP_SIZE}, "
+            f"PARQUET_VERSION '{PARQUET_VERSION}', "
+            "STRING_DICTIONARY_PAGE_SIZE_LIMIT "
+            f"{PARQUET_DICTIONARY_PAGE_SIZE})"
+        )
+    finally:
+        connection.close()
+    changed.chmod(0o600)
+    os.replace(changed, parquet)
+    changed_raw = parquet.read_bytes()
+    catalog = duckdb.connect(str(derived.catalog / CATALOG_FILENAME))
+    try:
+        catalog.execute(
+            "UPDATE normalized_partitions "
+            "SET parquet_sha256 = ?, parquet_bytes = ?",
+            [sha256(changed_raw), len(changed_raw)],
+        )
+        catalog.execute("CHECKPOINT")
+    finally:
+        catalog.close()
+
+    with pytest.raises(RegistryError, match="partition replay mismatch"):
+        verify_rebuilt_catalog(
+            evidence=values[0],
+            derived=derived,
+            public_key_path=values[1],
+            registry=load_registry(REGISTRY_PATH),
+            expected_genesis_seal_sha256=values[2],
+            expected_head_seal_sha256=values[3],
+            expected_head_commit_seal_sha256=values[4],
+            ledger=values[5],
+            binding=values[6],
+        )
+
+
+def test_same_revision_snapshot_extension_rebuilds(tmp_path: Path) -> None:
+    values = sealed_evidence(tmp_path, repeat_same_raw=True)
+    for path in values[0].observations.rglob("obs-*.json"):
+        path.unlink()
+    rebuilt = rebuild(*values, tmp_path / "derived")
+
+    assert rebuilt["manifest_count"] == 2
+    assert rebuilt["revision_count"] == 1
+    derived = DerivedPaths.open(tmp_path / "derived")
+    catalog = duckdb.connect(
+        str(derived.catalog / CATALOG_FILENAME),
+        read_only=True,
+    )
+    try:
+        assert catalog.execute(
+            "SELECT first_batch_sequence, last_seen_at FROM revisions"
+        ).fetchone() == (
+            1,
+            T3.isoformat(timespec="microseconds").replace("+00:00", "Z"),
+        )
+    finally:
+        catalog.close()
+
+
+def test_registry_binding_must_match_signed_chain(tmp_path: Path) -> None:
+    values = sealed_evidence(tmp_path)
+    mismatched = NormalizationBinding(
+        tool_commit_sha=values[6].tool_commit_sha,
+        dependency_lock_sha256=values[6].dependency_lock_sha256,
+        registry_raw_sha256="f" * 64,
+    )
+    with pytest.raises(RegistryError, match="registry provenance mismatch"):
+        rebuild(
+            *values[:6],
+            mismatched,
+            tmp_path / "derived",
+        )
+
+
+def test_parquet_fsync_failure_preserves_incomplete_link(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    values = sealed_evidence(tmp_path)
+    derived_root = tmp_path / "derived"
+    real_fsync_dir = publication._fsync_dir
+    failed = False
+
+    def fail_parquet_parent(path: Path) -> None:
+        nonlocal failed
+        if (
+            not failed
+            and derived_root / "parquet" in path.parents
+            and list(path.glob("*.parquet"))
+        ):
+            failed = True
+            raise OSError(errno.ENOSPC, "forced Parquet parent fsync failure")
+        real_fsync_dir(path)
+
+    monkeypatch.setattr(publication, "_fsync_dir", fail_parquet_parent)
+    with pytest.raises(RegistryError, match="Parquet publication"):
+        rebuild(*values, derived_root)
+
+    final = next((derived_root / "parquet").rglob("*.parquet"))
+    temporary = next((derived_root / "tmp").glob(".normalize-*.partial"))
+    assert final.lstat().st_nlink == 2
+    assert temporary.lstat().st_ino == final.lstat().st_ino
+    assert not list((derived_root / "catalog").glob("*.duckdb"))
+
+
+def test_catalog_fsync_failure_preserves_incomplete_link(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    values = sealed_evidence(tmp_path)
+    derived_root = tmp_path / "derived"
+    catalog_parent = derived_root / "catalog"
+    real_fsync_dir = publication._fsync_dir
+    failed = False
+
+    def fail_catalog_parent(path: Path) -> None:
+        nonlocal failed
+        if (
+            not failed
+            and path == catalog_parent
+            and (path / CATALOG_FILENAME).exists()
+        ):
+            failed = True
+            raise OSError(errno.ENOSPC, "forced catalog parent fsync failure")
+        real_fsync_dir(path)
+
+    monkeypatch.setattr(publication, "_fsync_dir", fail_catalog_parent)
+    with pytest.raises(RegistryError, match="catalog publication"):
+        rebuild(*values, derived_root)
+
+    final = catalog_parent / CATALOG_FILENAME
+    temporary = next((derived_root / "tmp").glob(".catalog-*.partial"))
+    assert final.lstat().st_nlink == 2
+    assert temporary.lstat().st_ino == final.lstat().st_ino
+    with pytest.raises(RegistryError, match="exactly one hard link"):
+        verify_rebuilt_catalog(
+            evidence=values[0],
+            derived=DerivedPaths.open(derived_root),
+            public_key_path=values[1],
+            registry=load_registry(REGISTRY_PATH),
+            expected_genesis_seal_sha256=values[2],
+            expected_head_seal_sha256=values[3],
+            expected_head_commit_seal_sha256=values[4],
+            ledger=values[5],
+            binding=values[6],
         )
 
 
@@ -339,11 +559,11 @@ def test_tool_commit_changes_partition_identity(tmp_path: Path) -> None:
     first = rebuild(*values, tmp_path / "derived-a")
     alternate = NormalizationBinding(
         tool_commit_sha="b" * 40,
-        dependency_lock_sha256=values[5].dependency_lock_sha256,
-        registry_raw_sha256=values[5].registry_raw_sha256,
+        dependency_lock_sha256=values[6].dependency_lock_sha256,
+        registry_raw_sha256=values[6].registry_raw_sha256,
     )
     second = rebuild(
-        *values[:5],
+        *values[:6],
         alternate,
         tmp_path / "derived-b",
     )
