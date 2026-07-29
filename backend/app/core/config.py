@@ -69,8 +69,7 @@ class Settings(BaseSettings):
     telegram_http_timeout_seconds: int = Field(default=8, ge=1)
     telegram_trade_events_enabled: bool = False
 
-    # Zero disables only the per-order volume ceiling. All other gates remain.
-    risk_max_order_volume: float = Field(default=1, ge=0)
+    risk_max_order_volume: float = Field(default=1, gt=0)
     risk_max_symbol_position: float = Field(default=5, ge=0)
     risk_max_daily_loss: float = Field(default=1000, ge=0)
     risk_price_protection_percent: float = Field(default=3, ge=0)
@@ -85,9 +84,8 @@ class Settings(BaseSettings):
     commodity_simnow_trusted_public_keys_json: str = "{}"
     commodity_simnow_state_path: str = "logs/commodity-simnow/state.json"
     commodity_simnow_min_source_month: str = "2026-08"
-    # Zero sends each signed leg intact instead of splitting it by lots.
     commodity_simnow_max_child_order_lots: int = Field(
-        default=10, ge=0, le=500
+        default=10, ge=1, le=100
     )
     commodity_simnow_max_orders_per_phase: int = Field(default=128, ge=1, le=500)
     commodity_simnow_max_quote_age_seconds: int = Field(default=5, ge=1, le=60)

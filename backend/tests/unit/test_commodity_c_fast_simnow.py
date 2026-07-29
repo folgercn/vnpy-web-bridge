@@ -442,6 +442,10 @@ def test_c_fast_start_auto_dispatches_and_archives_reconciled_pnl(
     assert started["action"] == "open_submitted"
     requests = list(service.trade.requests)
     assert requests
+    assert all(
+        row.get("max_order_volume_override") == 0.0
+        for row in service.trade.send_kwargs
+    )
     receipt = service._load_c_fast_permit_receipt(
         snapshot.execution_permit_id
     )

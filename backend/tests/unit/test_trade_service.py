@@ -112,7 +112,7 @@ def test_pre_rpc_guard_runs_after_risk_and_immediately_before_send(
     monkeypatch.setattr(
         service.risk,
         "check_order",
-        lambda _payload: events.append("risk"),
+            lambda _payload, **_kwargs: events.append("risk"),
     )
     monkeypatch.setattr(
         rpc_service,

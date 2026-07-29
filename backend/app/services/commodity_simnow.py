@@ -1120,6 +1120,9 @@ class CommoditySimNowService:
                     source_ip=source_ip,
                     operator=operator,
                     pre_rpc_guard=pre_rpc_guard,
+                    max_order_volume_override=(
+                        self._c_fast_max_order_volume_override(plan)
+                    ),
                 )
                 submitted_row = {
                     **repriced,
@@ -2850,6 +2853,7 @@ class CommoditySimNowService:
                             -quantity,
                             "closeyesterday",
                             quote_rows,
+                            maximum_lots=0,
                         )
                     )
             delta = target_quantity - same_contract
@@ -2866,6 +2870,7 @@ class CommoditySimNowService:
                         -same_contract,
                         "closeyesterday",
                         quote_rows,
+                        maximum_lots=0,
                     )
                 )
                 open_orders.extend(
@@ -2876,6 +2881,7 @@ class CommoditySimNowService:
                         target_quantity,
                         "open",
                         quote_rows,
+                        maximum_lots=0,
                     )
                 )
             elif (
@@ -2891,6 +2897,7 @@ class CommoditySimNowService:
                         delta,
                         "closeyesterday",
                         quote_rows,
+                        maximum_lots=0,
                     )
                 )
             elif delta:
@@ -2902,6 +2909,7 @@ class CommoditySimNowService:
                         delta,
                         "open",
                         quote_rows,
+                        maximum_lots=0,
                     )
                 )
             details.append(
@@ -5390,6 +5398,43 @@ class CommoditySimNowService:
                 "C_FAST Execution Permit 消费凭证校验失败"
             )
         return payload
+
+    def _c_fast_max_order_volume_override(
+        self, plan: dict[str, Any]
+    ) -> float | None:
+        """Return an unsplit-only volume override for a bound C_FAST plan."""
+        if not plan.get("c_fast_shakedown_session_id"):
+            return None
+        if (
+            plan.get("execution_lane") != "simnow_shakedown"
+            or plan.get("production_allowed") is not False
+            or plan.get("countable_forward") is not False
+        ):
+            raise CommoditySimNowSafetyError(
+                "C_FAST 单笔手数放宽执行上下文无效"
+            )
+        session = self._load_c_fast_shakedown_state()
+        permit_id = str(plan.get("execution_permit_id") or "")
+        receipt = self._load_c_fast_permit_receipt(permit_id)
+        if (
+            not isinstance(session, dict)
+            or receipt is None
+            or session.get("session_id")
+            != plan.get("c_fast_shakedown_session_id")
+            or session.get("execution_permit_id") != permit_id
+            or session.get("source_snapshot_hash")
+            != plan.get("source_snapshot_hash")
+            or receipt.get("session_id")
+            != plan.get("c_fast_shakedown_session_id")
+            or receipt.get("source_snapshot_hash")
+            != plan.get("source_snapshot_hash")
+            or receipt.get("receipt_checksum")
+            != plan.get("permit_consumption_receipt_checksum")
+        ):
+            raise CommoditySimNowSafetyError(
+                "C_FAST 单笔手数放宽 permit/session/receipt 绑定无效"
+            )
+        return 0.0
 
     def _verify_c_fast_execution_permit_available(
         self,
@@ -8492,6 +8537,8 @@ class CommoditySimNowService:
         signed_delta: int,
         offset: str,
         quote_rows: list[dict[str, Any]],
+        *,
+        maximum_lots: int | None = None,
     ) -> list[dict[str, Any]]:
         if signed_delta == 0:
             return []
@@ -8501,9 +8548,9 @@ class CommoditySimNowService:
         quote_rows.append({"vt_symbol": vt_symbol, **quote})
         price = self._protected_price(direction, quote, PRODUCT_SPECS[product]["price_tick"])
         maximum = (
-            0
-            if batch_id == "c-fast-shakedown"
-            else self.settings.commodity_simnow_max_child_order_lots
+            self.settings.commodity_simnow_max_child_order_lots
+            if maximum_lots is None
+            else maximum_lots
         )
         remaining = abs(signed_delta)
         if maximum == 0:
