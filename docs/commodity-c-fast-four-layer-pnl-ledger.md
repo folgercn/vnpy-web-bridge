@@ -91,24 +91,39 @@ OBSERVED_VIRTUAL_FILL_STATE_NEVER_ASSUME_UNFILLED_TARGET
 费用层自动绑定理论层的 layer hash 与 total PnL。caller 不能提交或覆盖这两个
 派生字段。
 
-若任一必要费率/金额未绑定，必须使用：
+费用输入固定为四组件全集：
+
+```text
+official_exchange_fee
+broker_customer_fee
+preregistered_tick_stress
+roll_round_trip_cost
+```
+
+official 与 broker/customer fee 不接受 caller 自报 CNY，builder 分别从 typed
+`rate * turnover_cny` 重算；tick stress 与 roll round-trip cost 是显式 typed
+金额组件。若任一必要输入未绑定，必须使用：
 
 ```text
 fee_binding_state=UNBOUND_NOT_ASSUMED_ZERO
 ```
 
-并列入 `unbound_components`。组件与必须为 null 的字段对应如下：
+并列入 `unbound_components`。`fee_component_universe` 必须按固定顺序完整提交，
+不能通过删掉 tick stress 等组件缩小费用宇宙。组件与必须为 null 的 source
+字段对应如下：
 
 | unbound component | 必须为 null |
 |---|---|
-| `official_exchange_fee_rate` | official rate 与 official fee CNY |
-| `broker_customer_fee_rate` | broker/customer rate 与 fee CNY |
+| `official_exchange_fee` | official rate 与 official turnover CNY |
+| `broker_customer_fee` | broker/customer rate 与 turnover CNY |
 | `preregistered_tick_stress` | tick-stress CNY |
 | `roll_round_trip_cost` | roll cost CNY |
 
-即使 caller 传 `0` 或 `0.0` 也拒绝。UNBOUND 时 complete fee schedule、
-all-in cost 与 fee-adjusted net PnL 均为 null。只有所有 fee facts 完整
-`BOUND` 时，builder 才派生 all-in cost 和 net PnL。
+每个没有列入 `unbound_components` 的组件都必须具有完整 source inputs；每个
+列入的组件，其派生 CNY 固定为 null。即使 caller 以 `rate=1` 配合自报
+`fee_cny=0`，也会因 source facts `extra=forbid` 被拒绝。UNBOUND 时 complete
+fee schedule、all-in cost 与 fee-adjusted net PnL 均为 null。只有所有 fee
+facts 完整 `BOUND` 时，builder 才从四项派生费用加总 all-in cost 和 net PnL。
 
 ## 3. 盘口可成交区间 PnL
 
@@ -160,11 +175,28 @@ actual facts 必须显式绑定：
 - snapshot / formula / plan；
 - session / account；
 - orders / trades / positions / reconciliation hashes；
+- archive `execution_state_checksum`；
 - terminal status、terminal reconciliation 和可重算 terminal checksum；
 - expected / filled lots 与 order outcome。
 
-只有以下条件全部成立，才允许 `trade_evidence_state=COMPLETE` 并发布 gross
-PnL：
+terminal checksum 严格复用 `commodity_simnow.py` 的 archive 语义：
+
+```text
+SHA256({
+  session_id,
+  plan_hash,
+  status,
+  completed_at_utc,
+  execution_state_checksum
+})
+```
+
+当前纯 ledger 没有嵌入 SimNow execution core 的 raw orders/trades/fill price、
+合约 multiplier、mark 与 fee rows，因此只能验证 terminal envelope 对
+`execution_state_checksum` 的绑定，不能独立重算 execution state，也不能把
+checksum 当作金额真实性证明。source facts 明示
+`execution_state_checksum_verification_state=ARCHIVE_REFERENCE_ONLY_CORE_NOT_EMBEDDED`。
+即使以下终态完整条件全部成立：
 
 ```text
 terminal_status=COMPLETE
@@ -175,13 +207,27 @@ filled_lots=expected_lots
 order_outcome=FULL_FILL
 ```
 
-partial、unfilled、cancel、reject、timeout、结果未知、terminal 未完全对账或
-`filled_lots != expected_lots` 都必须保持 `INCOMPLETE/INCONSISTENT`，所有
-actual PnL/slippage/fee 金额为 null。权威持仓可用于安全收口，但不能把迟到的
-trade callback 当作零成交或零 PnL。
+`gross_execution_pnl_cny`、`adverse_slippage_cny`、`actual_fees_cny` 和
+`actual_net_pnl_cny` 仍全部固定为 null，状态固定为
+`UNVERIFIED_REQUIRES_RAW_FILL_PRICE_MULTIPLIER_FEE_FACTS`。caller 在 source
+facts 中添加 gross/fee，或协调改写 layer 金额并重算所有内部 checksum，都会
+fail closed。后续只有新增包含原始成交、价格、乘数和 fee component 的独立
+typed replay contract，才可发布 actual 金额。
 
-完整成交但 actual fee 未绑定时可保留 gross/slippage，net 仍为 null；fee
-`BOUND` 后才派生 actual net。
+partial、unfilled、cancel、reject、timeout、结果未知、terminal 未完全对账或
+`filled_lots != expected_lots` 仍必须保持 `INCOMPLETE/INCONSISTENT`。权威持仓
+可用于安全收口，但不能把迟到的 trade callback 当作零成交或零 PnL。
+
+时间因果固定为：
+
+```text
+valuation_at_utc <= execution_captured_at_utc
+                  <= terminal_completed_at_utc
+                  <= as_of_at_utc
+```
+
+未完成 terminal 没有 `terminal_completed_at_utc`，但仍要求 valuation 不晚于
+execution capture，且 capture 不晚于 as-of。
 
 ## Strict boolean 与确定性金额
 
@@ -204,6 +250,10 @@ precision/rounding 影响。
 - ledger ID 不混用；
 - entry ID/hash 不重复；
 - 完全相同的四层 source-fact set 不得换 sequence 重放；
+- `FACTS_BOUND` entry 额外派生 stable actual fact identity；该 key 只覆盖
+  session、snapshot、plan、terminal/execution checksum 与
+  account/order/trade/position/reconciliation digests，刻意排除 valuation day、
+  as-of 与 created-at，同一终态事实不能改时间后再次计入；
 - predecessor 精确指向上一 entry hash；
 - 单次 audit 最多 10,000 条。
 
@@ -213,7 +263,16 @@ verifier 成功只返回：
 PASS_FRESH_REPLAY_STRUCTURE_AND_HASH_CHAIN_ONLY
 ```
 
-它不是签名验收、forward 计数、晋级、替换或交易许可。
+它不是签名验收、forward 计数、晋级、替换或交易许可。audit 明示：
+
+```text
+external_genesis_anchor_state=NOT_PROVIDED_STRUCTURE_ONLY
+external_tip_anchor_state=NOT_PROVIDED_STRUCTURE_ONLY
+```
+
+因此本地 hash chain 只能发现给定 chain 内部的结构和链接破坏；没有外部签名
+genesis/tip anchor 时，攻击者若整体替换整条 chain 并重算内部 hashes，本切片
+无法发现。这是明确保留的结构性限制，不声称已解决。
 
 ## Python 使用
 

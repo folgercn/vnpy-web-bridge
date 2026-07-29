@@ -24,6 +24,7 @@ from app.schemas.commodity_c_fast_pnl_ledger import (
     TheoreticalTargetPnlSourceFactsDTO,
     canonical_utc_json,
     money_bounds,
+    money_multiply,
     money_sum,
     sha256_json,
 )
@@ -45,11 +46,15 @@ DERIVATION_RULES: dict[str, tuple[str, str]] = {
         ),
     ),
     "FEE_AND_STRESS_ASSUMPTIONS": (
-        "cfast-fee-adjusted-pnl-v2",
+        "cfast-fee-adjusted-pnl-v3",
         sha256_json(
             {
-                "formula": "theoretical-total-all-bound-costs",
-                "unbound": "all-in-and-net-null",
+                "formula": (
+                    "rate-times-turnover-plus-tick-and-roll-components"
+                ),
+                "unbound": (
+                    "complete-frozen-component-universe-unknowns-null"
+                ),
             }
         ),
     ),
@@ -69,11 +74,13 @@ DERIVATION_RULES: dict[str, tuple[str, str]] = {
         sha256_json({"formula": "no-facts-no-actual-pnl"}),
     ),
     "SIMNOW_AUTHORITATIVE_ORDER_TRADE_POSITION_RECONCILIATION": (
-        "cfast-actual-simnow-terminal-reconciled-pnl-v2",
+        "cfast-actual-simnow-terminal-binding-unverified-amounts-v3",
         sha256_json(
             {
-                "formula": "gross-actual-fees-only-when-fully-reconciled",
-                "partial": "incomplete-and-all-amounts-null",
+                "terminal_checksum": (
+                    "session-plan-status-completed-execution-state"
+                ),
+                "amounts": ("null-until-raw-fill-price-multiplier-fee-replay"),
             }
         ),
     ),
@@ -163,9 +170,7 @@ def build_four_layer_pnl_entry(
         sources,
         ledger_id=ledger_id,
         snapshot_hash=snapshot_hash,
-        formula_target_binding_sha256=(
-            formula_target_binding_sha256
-        ),
+        formula_target_binding_sha256=(formula_target_binding_sha256),
         plan_hash=plan_hash,
         valuation_day=valuation_day,
     )
@@ -180,18 +185,14 @@ def build_four_layer_pnl_entry(
     layer_hashes = PnlLayerHashIndexDTO(
         theoretical_target_pnl_sha256=theoretical.layer_hash,
         fee_adjusted_pnl_sha256=fee_adjusted.layer_hash,
-        execution_quality_interval_pnl_sha256=(
-            execution_interval.layer_hash
-        ),
+        execution_quality_interval_pnl_sha256=(execution_interval.layer_hash),
         actual_simnow_calibration_pnl_sha256=actual.layer_hash,
     )
     entry_identity = {
         "ledger_id": ledger_id,
         "entry_sequence": entry_sequence,
         "snapshot_hash": snapshot_hash,
-        "formula_target_binding_sha256": (
-            formula_target_binding_sha256
-        ),
+        "formula_target_binding_sha256": (formula_target_binding_sha256),
         "plan_hash": plan_hash,
         "valuation_day": valuation_day,
         "layer_hashes": layer_hashes.model_dump(mode="json"),
@@ -199,16 +200,12 @@ def build_four_layer_pnl_entry(
     core: dict[str, Any] = {
         "schema_version": "commodity_c_fast_four_layer_pnl_ledger_v2",
         "ledger_id": ledger_id,
-        "entry_id": (
-            f"cfast-pnl-entry-v2-{sha256_json(entry_identity)}"
-        ),
+        "entry_id": (f"cfast-pnl-entry-v2-{sha256_json(entry_identity)}"),
         "entry_sequence": entry_sequence,
         "previous_entry_hash": previous_entry_hash,
         "candidate_id": "C_FAST_CROSS_SECTION_NEUTRAL",
         "snapshot_hash": snapshot_hash,
-        "formula_target_binding_sha256": (
-            formula_target_binding_sha256
-        ),
+        "formula_target_binding_sha256": (formula_target_binding_sha256),
         "plan_hash": plan_hash,
         "valuation_day": valuation_day,
         "created_at_utc": created_at_utc,
@@ -223,9 +220,7 @@ def build_four_layer_pnl_entry(
         "layer_isolation": (
             "FOUR_LAYERS_APPEND_ONLY_NEVER_OVERWRITE_OR_COALESCE"
         ),
-        "audit_scope": (
-            "DETERMINISTIC_OFFLINE_RESEARCH_STRUCTURE_ONLY"
-        ),
+        "audit_scope": ("DETERMINISTIC_OFFLINE_RESEARCH_STRUCTURE_ONLY"),
         "countable_forward": False,
         "authority_granted": False,
         "dispatch_allowed": False,
@@ -257,9 +252,7 @@ def reload_and_verify_four_layer_pnl_entry(
         entry_sequence=reloaded.entry_sequence,
         previous_entry_hash=reloaded.previous_entry_hash,
         snapshot_hash=reloaded.snapshot_hash,
-        formula_target_binding_sha256=(
-            reloaded.formula_target_binding_sha256
-        ),
+        formula_target_binding_sha256=(reloaded.formula_target_binding_sha256),
         plan_hash=reloaded.plan_hash,
         valuation_day=reloaded.valuation_day.isoformat(),
         created_at_utc=reloaded.created_at_utc.isoformat(),
@@ -295,8 +288,7 @@ def verify_four_layer_pnl_chain(
     if len(payloads) > MAX_CHAIN_ENTRIES:
         raise CFastPnlLedgerError("LEDGER_CHAIN_RESOURCE_LIMIT")
     entries = tuple(
-        reload_and_verify_four_layer_pnl_entry(payload)
-        for payload in payloads
+        reload_and_verify_four_layer_pnl_entry(payload) for payload in payloads
     )
     ledger_id = entries[0].ledger_id
     entry_hashes = [entry.entry_hash for entry in entries]
@@ -314,6 +306,17 @@ def verify_four_layer_pnl_chain(
     source_sets = [_source_fact_set_hash(entry) for entry in entries]
     if len(set(source_sets)) != len(source_sets):
         raise CFastPnlLedgerError("LEDGER_SOURCE_FACT_REPLAY")
+    actual_fact_identities = [
+        identity
+        for entry in entries
+        if (
+            identity
+            := entry.actual_simnow_calibration_pnl.stable_actual_fact_identity_sha256
+        )
+        is not None
+    ]
+    if len(set(actual_fact_identities)) != len(actual_fact_identities):
+        raise CFastPnlLedgerError("LEDGER_ACTUAL_FACT_REPLAY")
     for predecessor, current in zip(entries, entries[1:]):
         if current.previous_entry_hash != predecessor.entry_hash:
             raise CFastPnlLedgerError("LEDGER_PREDECESSOR_MISMATCH")
@@ -335,14 +338,13 @@ def verify_four_layer_pnl_chain(
         genesis_entry_hash=entries[0].entry_hash,
         chain_tip_entry_hash=entries[-1].entry_hash,
         ordered_entry_hashes_sha256=sha256_json(entry_hashes),
-        audit_state=(
-            "PASS_FRESH_REPLAY_STRUCTURE_AND_HASH_CHAIN_ONLY"
-        ),
+        audit_state=("PASS_FRESH_REPLAY_STRUCTURE_AND_HASH_CHAIN_ONLY"),
         actual_fact_entry_count=sum(
-            entry.actual_simnow_calibration_pnl.actual_state
-            == "FACTS_BOUND"
+            entry.actual_simnow_calibration_pnl.actual_state == "FACTS_BOUND"
             for entry in entries
         ),
+        external_genesis_anchor_state="NOT_PROVIDED_STRUCTURE_ONLY",
+        external_tip_anchor_state="NOT_PROVIDED_STRUCTURE_ONLY",
         countable_forward=False,
         authority_granted=False,
         dispatch_allowed=False,
@@ -356,9 +358,7 @@ def _build_lineage(
     source_kind: str,
 ) -> PnlSourceLineageDTO:
     source_hash = sha256_json(facts.model_dump(mode="json"))
-    derivation_rule_id, derivation_code_sha256 = DERIVATION_RULES[
-        source_kind
-    ]
+    derivation_rule_id, derivation_code_sha256 = DERIVATION_RULES[source_kind]
     core = {
         "schema_version": "commodity_c_fast_pnl_source_lineage_v2",
         "source_kind": source_kind,
@@ -378,9 +378,7 @@ def _build_theoretical_layer(
     facts: TheoreticalTargetPnlSourceFactsDTO,
 ) -> TheoreticalTargetPnlLayerDTO:
     core = {
-        "schema_version": (
-            "commodity_c_fast_theoretical_target_pnl_layer_v2"
-        ),
+        "schema_version": ("commodity_c_fast_theoretical_target_pnl_layer_v2"),
         "layer_kind": "THEORETICAL_TARGET_PNL",
         "snapshot_hash": facts.snapshot_hash,
         "source_facts": facts.model_dump(mode="json"),
@@ -413,17 +411,33 @@ def _build_fee_layer(
     *,
     theoretical: TheoreticalTargetPnlLayerDTO,
 ) -> FeeAdjustedPnlLayerDTO:
+    official_fee = (
+        None
+        if facts.official_exchange_fee_rate is None
+        else money_multiply(
+            facts.official_exchange_fee_rate,
+            float(facts.official_exchange_turnover_cny),
+        )
+    )
+    broker_fee = (
+        None
+        if facts.broker_customer_fee_rate is None
+        else money_multiply(
+            facts.broker_customer_fee_rate,
+            float(facts.broker_customer_turnover_cny),
+        )
+    )
+    component_costs = (
+        official_fee,
+        broker_fee,
+        facts.preregistered_tick_stress_cny,
+        facts.roll_round_trip_cost_cny,
+    )
     all_in: float | None = None
     adjusted: float | None = None
     if facts.fee_binding_state == "BOUND":
-        costs = (
-            facts.official_exchange_fee_cny,
-            facts.preregistered_tick_stress_cny,
-            facts.roll_round_trip_cost_cny,
-            facts.broker_customer_fee_cny,
-        )
         all_in = money_sum(
-            *(float(value) for value in costs if value is not None)
+            *(float(value) for value in component_costs if value is not None)
         )
         adjusted = money_sum(theoretical.total_pnl_cny, -all_in)
     core = {
@@ -438,6 +452,10 @@ def _build_fee_layer(
         "source_theoretical_layer_hash": theoretical.layer_hash,
         "source_theoretical_total_pnl_cny": theoretical.total_pnl_cny,
         "fee_binding_state": facts.fee_binding_state,
+        "official_exchange_fee_cny": official_fee,
+        "broker_customer_fee_cny": broker_fee,
+        "preregistered_tick_stress_cny": (facts.preregistered_tick_stress_cny),
+        "roll_round_trip_cost_cny": facts.roll_round_trip_cost_cny,
         "all_in_cost_cny": all_in,
         "fee_adjusted_total_pnl_cny": adjusted,
     }
@@ -473,17 +491,13 @@ def _build_execution_layer(
             "EXECUTION_QUALITY_BOOK_WALK_FILL_BOUNDS",
         ).model_dump(mode="json"),
         "fill_evidence_state": facts.fill_evidence_state,
-        "point_fill_probability_state": (
-            "FORBIDDEN_UNCALIBRATED_BOUNDS_ONLY"
-        ),
+        "point_fill_probability_state": ("FORBIDDEN_UNCALIBRATED_BOUNDS_ONLY"),
         "planned_lots": facts.planned_lots,
         "filled_lots_lower": facts.filled_lots_lower,
         "filled_lots_upper": facts.filled_lots_upper,
         "unfilled_lots_lower": unfilled_lower,
         "unfilled_lots_upper": unfilled_upper,
-        "marketable_book_walk_pnl_cny": (
-            facts.marketable_book_walk_pnl_cny
-        ),
+        "marketable_book_walk_pnl_cny": (facts.marketable_book_walk_pnl_cny),
         "conservative_fill_lower_bound_pnl_cny": pnl_lower,
         "optimistic_fill_upper_bound_pnl_cny": pnl_upper,
         "opportunity_cost_lower_bound_cny": opportunity_lower,
@@ -500,6 +514,8 @@ def _build_actual_layer(
     if isinstance(facts, ActualSimNowNotProvidedSourceFactsDTO):
         source_kind = "ACTUAL_SIMNOW_FACTS_NOT_PROVIDED"
         actual_state = "NOT_PROVIDED"
+        stable_actual_fact_identity = None
+        amount_verification_state = "NOT_PROVIDED"
         gross = None
         slippage = None
         fees_state = "NOT_AVAILABLE"
@@ -511,27 +527,14 @@ def _build_actual_layer(
             "SIMNOW_AUTHORITATIVE_ORDER_TRADE_POSITION_RECONCILIATION"
         )
         actual_state = "FACTS_BOUND"
-        if facts.trade_evidence_state != "COMPLETE":
-            gross = None
-            slippage = None
-            fees_state = "NOT_AVAILABLE"
-            fees = None
-            net_state = "NOT_AVAILABLE"
-            net = None
-        elif facts.fees_state == "UNBOUND_NOT_ASSUMED_ZERO":
-            gross = facts.gross_execution_pnl_cny
-            slippage = facts.adverse_slippage_cny
-            fees_state = facts.fees_state
-            fees = None
-            net_state = "UNAVAILABLE_UNTIL_FEES_BOUND"
-            net = None
-        else:
-            gross = facts.gross_execution_pnl_cny
-            slippage = facts.adverse_slippage_cny
-            fees_state = facts.fees_state
-            fees = facts.actual_fees_cny
-            net_state = "AVAILABLE"
-            net = money_sum(float(gross), -float(fees))
+        stable_actual_fact_identity = _stable_actual_fact_identity(facts)
+        amount_verification_state = facts.actual_amount_verification_state
+        gross = None
+        slippage = None
+        fees_state = "UNVERIFIED"
+        fees = None
+        net_state = "UNVERIFIED_REQUIRES_RAW_FILL_PRICE_MULTIPLIER_FEE_FACTS"
+        net = None
     else:
         raise CFastPnlLedgerError("INVALID_ACTUAL_SOURCE_FACTS")
     core = {
@@ -546,6 +549,8 @@ def _build_actual_layer(
             source_kind,
         ).model_dump(mode="json"),
         "actual_state": actual_state,
+        "stable_actual_fact_identity_sha256": (stable_actual_fact_identity),
+        "actual_amount_verification_state": amount_verification_state,
         "gross_execution_pnl_cny": gross,
         "adverse_slippage_cny": slippage,
         "fees_state": fees_state,
@@ -556,6 +561,25 @@ def _build_actual_layer(
     }
     return ActualSimNowCalibrationPnlLayerDTO.model_validate(
         {**core, "layer_hash": sha256_json(core)}
+    )
+
+
+def _stable_actual_fact_identity(facts: ActualSimNowFactsDTO) -> str:
+    """Identity excludes collection time so one terminal fact is count-once."""
+
+    return sha256_json(
+        {
+            "snapshot_hash": facts.snapshot_hash,
+            "plan_hash": facts.plan_hash,
+            "session_id": facts.session_id,
+            "account_sha256": facts.account_sha256,
+            "orders_sha256": facts.orders_sha256,
+            "trades_sha256": facts.trades_sha256,
+            "positions_sha256": facts.positions_sha256,
+            "reconciliation_sha256": facts.reconciliation_sha256,
+            "execution_state_checksum": facts.execution_state_checksum,
+            "terminal_checksum": facts.terminal_checksum,
+        }
     )
 
 
@@ -623,12 +647,10 @@ def _source_fact_set_hash(
             entry.theoretical_target_pnl.lineage.source_payload_sha256,
             entry.fee_adjusted_pnl.lineage.source_payload_sha256,
             (
-                entry.execution_quality_interval_pnl.lineage
-                .source_payload_sha256
+                entry.execution_quality_interval_pnl.lineage.source_payload_sha256
             ),
             (
-                entry.actual_simnow_calibration_pnl.lineage
-                .source_payload_sha256
+                entry.actual_simnow_calibration_pnl.lineage.source_payload_sha256
             ),
         ]
     )

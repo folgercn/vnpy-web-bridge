@@ -31,12 +31,18 @@ SourceKind = Literal[
     "ACTUAL_SIMNOW_FACTS_NOT_PROVIDED",
     "SIMNOW_AUTHORITATIVE_ORDER_TRADE_POSITION_RECONCILIATION",
 ]
-UnboundFeeComponent = Literal[
-    "official_exchange_fee_rate",
-    "broker_customer_fee_rate",
+FeeComponent = Literal[
+    "official_exchange_fee",
+    "broker_customer_fee",
     "preregistered_tick_stress",
     "roll_round_trip_cost",
 ]
+FEE_COMPONENT_UNIVERSE = (
+    "official_exchange_fee",
+    "broker_customer_fee",
+    "preregistered_tick_stress",
+    "roll_round_trip_cost",
+)
 
 
 def _strict_false(value: Any) -> Literal[False]:
@@ -72,6 +78,11 @@ def money_sum(*values: float) -> float:
 def money_product(value: float, quantity: int) -> float:
     with localcontext(MONEY_CONTEXT):
         return float(_decimal(value) * Decimal(quantity))
+
+
+def money_multiply(left: float, right: float) -> float:
+    with localcontext(MONEY_CONTEXT):
+        return float(_decimal(left) * _decimal(right))
 
 
 def money_bounds(
@@ -117,9 +128,7 @@ class PnlSourceFactsBaseDTO(StrictLedgerModel):
         pattern=r"^[A-Za-z0-9._-]+$",
     )
     snapshot_hash: Sha256 = Field(pattern=r"^[0-9a-f]{64}$")
-    formula_target_binding_sha256: Sha256 = Field(
-        pattern=r"^[0-9a-f]{64}$"
-    )
+    formula_target_binding_sha256: Sha256 = Field(pattern=r"^[0-9a-f]{64}$")
     plan_hash: Sha256 = Field(pattern=r"^[0-9a-f]{64}$")
     valuation_day: date
     as_of_at_utc: datetime
@@ -152,15 +161,19 @@ class TheoreticalTargetPnlSourceFactsDTO(PnlSourceFactsBaseDTO):
 
 class FeeAdjustedPnlSourceFactsDTO(PnlSourceFactsBaseDTO):
     schema_version: Literal[
-        "commodity_c_fast_fee_adjusted_pnl_source_facts_v1"
+        "commodity_c_fast_fee_adjusted_pnl_source_facts_v2"
     ]
     fee_binding_state: Literal["BOUND", "UNBOUND_NOT_ASSUMED_ZERO"]
+    fee_component_universe: tuple[FeeComponent, ...] = Field(
+        min_length=4,
+        max_length=4,
+    )
     official_exchange_fee_rate: float | None = Field(
         default=None,
         ge=0,
         le=1,
     )
-    official_exchange_fee_cny: Money | None = Field(
+    official_exchange_turnover_cny: Money | None = Field(
         default=None,
         ge=0,
         le=MAX_ABS_MONEY_CNY,
@@ -180,7 +193,7 @@ class FeeAdjustedPnlSourceFactsDTO(PnlSourceFactsBaseDTO):
         ge=0,
         le=1,
     )
-    broker_customer_fee_cny: Money | None = Field(
+    broker_customer_turnover_cny: Money | None = Field(
         default=None,
         ge=0,
         le=MAX_ABS_MONEY_CNY,
@@ -189,56 +202,61 @@ class FeeAdjustedPnlSourceFactsDTO(PnlSourceFactsBaseDTO):
         default=None,
         pattern=r"^[0-9a-f]{64}$",
     )
-    unbound_components: tuple[UnboundFeeComponent, ...] = Field(
+    unbound_components: tuple[FeeComponent, ...] = Field(
         default=(),
         max_length=4,
     )
 
     @model_validator(mode="after")
     def validate_fee_source(self) -> "FeeAdjustedPnlSourceFactsDTO":
-        if len(set(self.unbound_components)) != len(
-            self.unbound_components
-        ):
+        if self.fee_component_universe != FEE_COMPONENT_UNIVERSE:
+            raise ValueError(
+                "fee component universe must be complete and frozen"
+            )
+        if len(set(self.unbound_components)) != len(self.unbound_components):
             raise ValueError("unbound_components must be unique")
         component_fields = {
-            "official_exchange_fee_rate": (
+            "official_exchange_fee": (
                 self.official_exchange_fee_rate,
-                self.official_exchange_fee_cny,
+                self.official_exchange_turnover_cny,
             ),
-            "broker_customer_fee_rate": (
+            "broker_customer_fee": (
                 self.broker_customer_fee_rate,
-                self.broker_customer_fee_cny,
+                self.broker_customer_turnover_cny,
             ),
-            "preregistered_tick_stress": (
-                self.preregistered_tick_stress_cny,
-            ),
-            "roll_round_trip_cost": (
-                self.roll_round_trip_cost_cny,
-            ),
+            "preregistered_tick_stress": (self.preregistered_tick_stress_cny,),
+            "roll_round_trip_cost": (self.roll_round_trip_cost_cny,),
         }
         if self.fee_binding_state == "UNBOUND_NOT_ASSUMED_ZERO":
             if not self.unbound_components:
                 raise ValueError("UNBOUND requires named components")
             if self.fee_schedule_sha256 is not None:
                 raise ValueError("UNBOUND must not claim a complete schedule")
-            for component in self.unbound_components:
-                if any(
-                    value is not None
-                    for value in component_fields[component]
+            unbound = set(self.unbound_components)
+            for component in self.fee_component_universe:
+                values = component_fields[component]
+                if component in unbound and any(
+                    value is not None for value in values
                 ):
                     raise ValueError(
                         f"{component} is UNBOUND and must remain null"
+                    )
+                if component not in unbound and any(
+                    value is None for value in values
+                ):
+                    raise ValueError(
+                        f"{component} is omitted from UNBOUND but incomplete"
                     )
         else:
             if self.unbound_components:
                 raise ValueError("BOUND must not list unbound components")
             required = (
                 self.official_exchange_fee_rate,
-                self.official_exchange_fee_cny,
+                self.official_exchange_turnover_cny,
                 self.preregistered_tick_stress_cny,
                 self.roll_round_trip_cost_cny,
                 self.broker_customer_fee_rate,
-                self.broker_customer_fee_cny,
+                self.broker_customer_turnover_cny,
                 self.fee_schedule_sha256,
             )
             if any(value is None for value in required):
@@ -294,9 +312,7 @@ class ExecutionQualityIntervalPnlSourceFactsDTO(PnlSourceFactsBaseDTO):
                     "PARTIAL requires 0 <= lower <= upper < planned"
                 )
         elif lower >= upper:
-            raise ValueError(
-                "UNIDENTIFIED requires a non-point fill interval"
-            )
+            raise ValueError("UNIDENTIFIED requires a non-point fill interval")
         return self
 
 
@@ -308,7 +324,7 @@ class ActualSimNowNotProvidedSourceFactsDTO(PnlSourceFactsBaseDTO):
 
 
 class ActualSimNowFactsDTO(PnlSourceFactsBaseDTO):
-    schema_version: Literal["commodity_c_fast_actual_simnow_facts_v2"]
+    schema_version: Literal["commodity_c_fast_actual_simnow_facts_v3"]
     actual_state: Literal["FACTS_BOUND"]
     fact_source: Literal[
         "SIMNOW_AUTHORITATIVE_ORDER_TRADE_POSITION_RECONCILIATION"
@@ -324,6 +340,10 @@ class ActualSimNowFactsDTO(PnlSourceFactsBaseDTO):
     trades_sha256: Sha256 = Field(pattern=r"^[0-9a-f]{64}$")
     positions_sha256: Sha256 = Field(pattern=r"^[0-9a-f]{64}$")
     reconciliation_sha256: Sha256 = Field(pattern=r"^[0-9a-f]{64}$")
+    execution_state_checksum: Sha256 = Field(pattern=r"^[0-9a-f]{64}$")
+    execution_state_checksum_verification_state: Literal[
+        "ARCHIVE_REFERENCE_ONLY_CORE_NOT_EMBEDDED"
+    ]
     terminal_checksum: Sha256 = Field(pattern=r"^[0-9a-f]{64}$")
     terminal_status: Literal[
         "COMPLETE",
@@ -333,6 +353,7 @@ class ActualSimNowFactsDTO(PnlSourceFactsBaseDTO):
     ]
     terminal_reconciliation_complete: StrictBool
     terminal_completed_at_utc: datetime | None = None
+    valuation_at_utc: datetime
     execution_captured_at_utc: datetime
     expected_lots: int = Field(ge=0, le=MAX_LEDGER_LOTS)
     filled_lots: int = Field(ge=0, le=MAX_LEDGER_LOTS)
@@ -348,31 +369,15 @@ class ActualSimNowFactsDTO(PnlSourceFactsBaseDTO):
         "INCOMPLETE",
         "INCONSISTENT",
     ]
-    gross_execution_pnl_cny: Money | None = Field(
-        default=None,
-        ge=-MAX_ABS_MONEY_CNY,
-        le=MAX_ABS_MONEY_CNY,
-    )
-    adverse_slippage_cny: Money | None = Field(
-        default=None,
-        ge=-MAX_ABS_MONEY_CNY,
-        le=MAX_ABS_MONEY_CNY,
-    )
-    fees_state: Literal[
-        "NOT_AVAILABLE",
-        "UNBOUND_NOT_ASSUMED_ZERO",
-        "BOUND",
+    actual_amount_verification_state: Literal[
+        "UNVERIFIED_REQUIRES_RAW_FILL_PRICE_MULTIPLIER_FEE_FACTS"
     ]
-    actual_fees_cny: Money | None = Field(
-        default=None,
-        ge=0,
-        le=MAX_ABS_MONEY_CNY,
-    )
     countable_forward: StrictFalse
     production_allowed: StrictFalse
 
     @model_validator(mode="after")
     def validate_actual_facts(self) -> "ActualSimNowFactsDTO":
+        _require_utc(self.valuation_at_utc, "valuation_at_utc")
         _require_utc(
             self.execution_captured_at_utc,
             "execution_captured_at_utc",
@@ -385,31 +390,15 @@ class ActualSimNowFactsDTO(PnlSourceFactsBaseDTO):
         if self.filled_lots > self.expected_lots:
             raise ValueError("filled_lots exceeds expected_lots")
         terminal_payload = {
-            "schema_version": (
-                "commodity_c_fast_actual_simnow_terminal_binding_v1"
-            ),
-            "candidate_id": self.candidate_id,
-            "ledger_id": self.ledger_id,
-            "snapshot_hash": self.snapshot_hash,
-            "formula_target_binding_sha256": (
-                self.formula_target_binding_sha256
-            ),
-            "plan_hash": self.plan_hash,
             "session_id": self.session_id,
-            "account_sha256": self.account_sha256,
-            "orders_sha256": self.orders_sha256,
-            "trades_sha256": self.trades_sha256,
-            "positions_sha256": self.positions_sha256,
-            "reconciliation_sha256": self.reconciliation_sha256,
-            "terminal_status": self.terminal_status,
-            "terminal_reconciliation_complete": (
-                self.terminal_reconciliation_complete
-            ),
-            "terminal_completed_at_utc": (
+            "plan_hash": self.plan_hash,
+            "status": self.terminal_status,
+            "completed_at_utc": (
                 canonical_utc_json(self.terminal_completed_at_utc)
                 if self.terminal_completed_at_utc is not None
                 else None
             ),
+            "execution_state_checksum": self.execution_state_checksum,
         }
         if self.terminal_checksum != sha256_json(terminal_payload):
             raise ValueError("terminal_checksum mismatch")
@@ -433,34 +422,15 @@ class ActualSimNowFactsDTO(PnlSourceFactsBaseDTO):
             raise ValueError(
                 "COMPLETE requires full fill and terminal reconciliation"
             )
-        if not fully_reconciled:
-            if any(
-                value is not None
-                for value in (
-                    self.gross_execution_pnl_cny,
-                    self.adverse_slippage_cny,
-                    self.actual_fees_cny,
-                )
-            ):
-                raise ValueError(
-                    "incomplete actual facts must not publish amounts"
-                )
-            if self.fees_state != "NOT_AVAILABLE":
-                raise ValueError(
-                    "incomplete actual facts require unavailable fees"
-                )
-        elif self.gross_execution_pnl_cny is None:
-            raise ValueError("complete actual facts require gross PnL")
-        elif self.fees_state == "BOUND":
-            if self.actual_fees_cny is None:
-                raise ValueError("BOUND actual fees require an amount")
-        elif self.fees_state == "UNBOUND_NOT_ASSUMED_ZERO":
-            if self.actual_fees_cny is not None:
-                raise ValueError("UNBOUND actual fees must remain null")
-        else:
-            raise ValueError(
-                "complete actual facts require BOUND or UNBOUND fees"
-            )
+        if self.valuation_at_utc.date() != self.valuation_day:
+            raise ValueError("valuation_at_utc does not match valuation_day")
+        if self.execution_captured_at_utc < self.valuation_at_utc:
+            raise ValueError("execution capture precedes valuation")
+        if (
+            self.terminal_completed_at_utc is not None
+            and self.terminal_completed_at_utc < self.execution_captured_at_utc
+        ):
+            raise ValueError("terminal completion precedes execution capture")
         if self.as_of_at_utc < self.execution_captured_at_utc:
             raise ValueError("actual as-of precedes execution capture")
         if (
@@ -505,9 +475,7 @@ class PnlSourceLineageDTO(StrictLedgerModel):
 
 
 class TheoreticalTargetPnlLayerDTO(StrictLedgerModel):
-    schema_version: Literal[
-        "commodity_c_fast_theoretical_target_pnl_layer_v2"
-    ]
+    schema_version: Literal["commodity_c_fast_theoretical_target_pnl_layer_v2"]
     layer_kind: Literal["THEORETICAL_TARGET_PNL"]
     snapshot_hash: Sha256 = Field(pattern=r"^[0-9a-f]{64}$")
     source_facts: TheoreticalTargetPnlSourceFactsDTO
@@ -562,11 +530,13 @@ class FeeAdjustedPnlLayerDTO(StrictLedgerModel):
     snapshot_hash: Sha256 = Field(pattern=r"^[0-9a-f]{64}$")
     source_facts: FeeAdjustedPnlSourceFactsDTO
     lineage: PnlSourceLineageDTO
-    source_theoretical_layer_hash: Sha256 = Field(
-        pattern=r"^[0-9a-f]{64}$"
-    )
+    source_theoretical_layer_hash: Sha256 = Field(pattern=r"^[0-9a-f]{64}$")
     source_theoretical_total_pnl_cny: Money
     fee_binding_state: Literal["BOUND", "UNBOUND_NOT_ASSUMED_ZERO"]
+    official_exchange_fee_cny: Money | None = None
+    broker_customer_fee_cny: Money | None = None
+    preregistered_tick_stress_cny: Money | None = None
+    roll_round_trip_cost_cny: Money | None = None
     all_in_cost_cny: Money | None = None
     fee_adjusted_total_pnl_cny: Money | None = None
     layer_hash: Sha256 = Field(pattern=r"^[0-9a-f]{64}$")
@@ -577,6 +547,39 @@ class FeeAdjustedPnlLayerDTO(StrictLedgerModel):
             raise ValueError("fee lineage source kind mismatch")
         if self.fee_binding_state != self.source_facts.fee_binding_state:
             raise ValueError("fee state is not derived from facts")
+        facts = self.source_facts
+        expected_components = (
+            None
+            if facts.official_exchange_fee_rate is None
+            else money_multiply(
+                facts.official_exchange_fee_rate,
+                float(facts.official_exchange_turnover_cny),
+            ),
+            None
+            if facts.broker_customer_fee_rate is None
+            else money_multiply(
+                facts.broker_customer_fee_rate,
+                float(facts.broker_customer_turnover_cny),
+            ),
+            facts.preregistered_tick_stress_cny,
+            facts.roll_round_trip_cost_cny,
+        )
+        actual_components = (
+            self.official_exchange_fee_cny,
+            self.broker_customer_fee_cny,
+            self.preregistered_tick_stress_cny,
+            self.roll_round_trip_cost_cny,
+        )
+        if any(
+            (expected is None) != (actual is None)
+            or (
+                expected is not None
+                and actual is not None
+                and not _money_equal(actual, expected)
+            )
+            for actual, expected in zip(actual_components, expected_components)
+        ):
+            raise ValueError("fee components are not derived from facts")
         if self.fee_binding_state == "UNBOUND_NOT_ASSUMED_ZERO":
             if (
                 self.all_in_cost_cny is not None
@@ -584,12 +587,7 @@ class FeeAdjustedPnlLayerDTO(StrictLedgerModel):
             ):
                 raise ValueError("UNBOUND must not publish all-in/net")
         else:
-            costs = (
-                self.source_facts.official_exchange_fee_cny,
-                self.source_facts.preregistered_tick_stress_cny,
-                self.source_facts.roll_round_trip_cost_cny,
-                self.source_facts.broker_customer_fee_cny,
-            )
+            costs = actual_components
             if any(value is None for value in costs):
                 raise ValueError("BOUND facts lost a fee amount")
             expected_cost = money_sum(
@@ -628,9 +626,7 @@ class ExecutionQualityIntervalPnlLayerDTO(StrictLedgerModel):
         "UNFILLED",
         "UNIDENTIFIED_BOUNDS_ONLY",
     ]
-    point_fill_probability_state: Literal[
-        "FORBIDDEN_UNCALIBRATED_BOUNDS_ONLY"
-    ]
+    point_fill_probability_state: Literal["FORBIDDEN_UNCALIBRATED_BOUNDS_ONLY"]
     planned_lots: int
     filled_lots_lower: int
     filled_lots_upper: int
@@ -705,20 +701,26 @@ class ActualSimNowCalibrationPnlLayerDTO(StrictLedgerModel):
     source_facts: ActualSourceFactsDTO
     lineage: PnlSourceLineageDTO
     actual_state: Literal["NOT_PROVIDED", "FACTS_BOUND"]
-    gross_execution_pnl_cny: Money | None = None
-    adverse_slippage_cny: Money | None = None
+    stable_actual_fact_identity_sha256: Sha256 | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    actual_amount_verification_state: Literal[
+        "NOT_PROVIDED",
+        "UNVERIFIED_REQUIRES_RAW_FILL_PRICE_MULTIPLIER_FEE_FACTS",
+    ]
+    gross_execution_pnl_cny: Literal[None] = None
+    adverse_slippage_cny: Literal[None] = None
     fees_state: Literal[
         "NOT_AVAILABLE",
-        "UNBOUND_NOT_ASSUMED_ZERO",
-        "BOUND",
+        "UNVERIFIED",
     ]
-    actual_fees_cny: Money | None = None
+    actual_fees_cny: Literal[None] = None
     net_pnl_state: Literal[
         "NOT_AVAILABLE",
-        "UNAVAILABLE_UNTIL_FEES_BOUND",
-        "AVAILABLE",
+        "UNVERIFIED_REQUIRES_RAW_FILL_PRICE_MULTIPLIER_FEE_FACTS",
     ]
-    actual_net_pnl_cny: Money | None = None
+    actual_net_pnl_cny: Literal[None] = None
     countable_forward: StrictFalse
     layer_hash: Sha256 = Field(pattern=r"^[0-9a-f]{64}$")
 
@@ -730,6 +732,8 @@ class ActualSimNowCalibrationPnlLayerDTO(StrictLedgerModel):
                 raise ValueError("actual state is not derived from facts")
             expected = (
                 None,
+                "NOT_PROVIDED",
+                None,
                 None,
                 "NOT_AVAILABLE",
                 None,
@@ -739,39 +743,35 @@ class ActualSimNowCalibrationPnlLayerDTO(StrictLedgerModel):
         else:
             if self.actual_state != "FACTS_BOUND":
                 raise ValueError("actual state is not derived from facts")
-            complete = facts.trade_evidence_state == "COMPLETE"
-            if not complete:
-                expected = (
-                    None,
-                    None,
-                    "NOT_AVAILABLE",
-                    None,
-                    "NOT_AVAILABLE",
-                    None,
-                )
-            elif facts.fees_state == "UNBOUND_NOT_ASSUMED_ZERO":
-                expected = (
-                    facts.gross_execution_pnl_cny,
-                    facts.adverse_slippage_cny,
-                    facts.fees_state,
-                    None,
-                    "UNAVAILABLE_UNTIL_FEES_BOUND",
-                    None,
-                )
-            else:
-                net = money_sum(
-                    float(facts.gross_execution_pnl_cny),
-                    -float(facts.actual_fees_cny),
-                )
-                expected = (
-                    facts.gross_execution_pnl_cny,
-                    facts.adverse_slippage_cny,
-                    facts.fees_state,
-                    facts.actual_fees_cny,
-                    "AVAILABLE",
-                    net,
-                )
+            stable_identity = sha256_json(
+                {
+                    "snapshot_hash": facts.snapshot_hash,
+                    "plan_hash": facts.plan_hash,
+                    "session_id": facts.session_id,
+                    "account_sha256": facts.account_sha256,
+                    "orders_sha256": facts.orders_sha256,
+                    "trades_sha256": facts.trades_sha256,
+                    "positions_sha256": facts.positions_sha256,
+                    "reconciliation_sha256": (facts.reconciliation_sha256),
+                    "execution_state_checksum": (
+                        facts.execution_state_checksum
+                    ),
+                    "terminal_checksum": facts.terminal_checksum,
+                }
+            )
+            expected = (
+                stable_identity,
+                facts.actual_amount_verification_state,
+                None,
+                None,
+                "UNVERIFIED",
+                None,
+                ("UNVERIFIED_REQUIRES_RAW_FILL_PRICE_MULTIPLIER_FEE_FACTS"),
+                None,
+            )
         actual = (
+            self.stable_actual_fact_identity_sha256,
+            self.actual_amount_verification_state,
             self.gross_execution_pnl_cny,
             self.adverse_slippage_cny,
             self.fees_state,
@@ -787,9 +787,7 @@ class ActualSimNowCalibrationPnlLayerDTO(StrictLedgerModel):
 
 
 class PnlLayerHashIndexDTO(StrictLedgerModel):
-    theoretical_target_pnl_sha256: Sha256 = Field(
-        pattern=r"^[0-9a-f]{64}$"
-    )
+    theoretical_target_pnl_sha256: Sha256 = Field(pattern=r"^[0-9a-f]{64}$")
     fee_adjusted_pnl_sha256: Sha256 = Field(pattern=r"^[0-9a-f]{64}$")
     execution_quality_interval_pnl_sha256: Sha256 = Field(
         pattern=r"^[0-9a-f]{64}$"
@@ -806,9 +804,7 @@ class CommodityCFastFourLayerPnlLedgerEntryDTO(StrictLedgerModel):
         max_length=128,
         pattern=r"^[A-Za-z0-9._-]+$",
     )
-    entry_id: str = Field(
-        pattern=r"^cfast-pnl-entry-v2-[0-9a-f]{64}$"
-    )
+    entry_id: str = Field(pattern=r"^cfast-pnl-entry-v2-[0-9a-f]{64}$")
     entry_sequence: int = Field(ge=1, le=1_000_000)
     previous_entry_hash: Sha256 | None = Field(
         default=None,
@@ -817,9 +813,7 @@ class CommodityCFastFourLayerPnlLedgerEntryDTO(StrictLedgerModel):
     entry_hash: Sha256 = Field(pattern=r"^[0-9a-f]{64}$")
     candidate_id: Literal["C_FAST_CROSS_SECTION_NEUTRAL"]
     snapshot_hash: Sha256 = Field(pattern=r"^[0-9a-f]{64}$")
-    formula_target_binding_sha256: Sha256 = Field(
-        pattern=r"^[0-9a-f]{64}$"
-    )
+    formula_target_binding_sha256: Sha256 = Field(pattern=r"^[0-9a-f]{64}$")
     plan_hash: Sha256 = Field(pattern=r"^[0-9a-f]{64}$")
     valuation_day: date
     created_at_utc: datetime
@@ -832,9 +826,7 @@ class CommodityCFastFourLayerPnlLedgerEntryDTO(StrictLedgerModel):
     layer_isolation: Literal[
         "FOUR_LAYERS_APPEND_ONLY_NEVER_OVERWRITE_OR_COALESCE"
     ]
-    audit_scope: Literal[
-        "DETERMINISTIC_OFFLINE_RESEARCH_STRUCTURE_ONLY"
-    ]
+    audit_scope: Literal["DETERMINISTIC_OFFLINE_RESEARCH_STRUCTURE_ONLY"]
     countable_forward: StrictFalse
     authority_granted: StrictFalse
     dispatch_allowed: StrictFalse
@@ -906,9 +898,7 @@ class CommodityCFastFourLayerPnlLedgerEntryDTO(StrictLedgerModel):
             "valuation_day": self.valuation_day.isoformat(),
             "layer_hashes": self.layer_hashes.model_dump(mode="json"),
         }
-        expected_entry_id = (
-            f"cfast-pnl-entry-v2-{sha256_json(entry_identity)}"
-        )
+        expected_entry_id = f"cfast-pnl-entry-v2-{sha256_json(entry_identity)}"
         if self.entry_id != expected_entry_id:
             raise ValueError("entry_id hash mismatch")
         entry_payload = self.model_dump(mode="json", exclude={"entry_hash"})
@@ -927,13 +917,11 @@ class CommodityCFastPnlLedgerAuditDTO(StrictLedgerModel):
     entry_count: int = Field(ge=1, le=10_000)
     genesis_entry_hash: Sha256 = Field(pattern=r"^[0-9a-f]{64}$")
     chain_tip_entry_hash: Sha256 = Field(pattern=r"^[0-9a-f]{64}$")
-    ordered_entry_hashes_sha256: Sha256 = Field(
-        pattern=r"^[0-9a-f]{64}$"
-    )
-    audit_state: Literal[
-        "PASS_FRESH_REPLAY_STRUCTURE_AND_HASH_CHAIN_ONLY"
-    ]
+    ordered_entry_hashes_sha256: Sha256 = Field(pattern=r"^[0-9a-f]{64}$")
+    audit_state: Literal["PASS_FRESH_REPLAY_STRUCTURE_AND_HASH_CHAIN_ONLY"]
     actual_fact_entry_count: int = Field(ge=0, le=10_000)
+    external_genesis_anchor_state: Literal["NOT_PROVIDED_STRUCTURE_ONLY"]
+    external_tip_anchor_state: Literal["NOT_PROVIDED_STRUCTURE_ONLY"]
     countable_forward: StrictFalse
     authority_granted: StrictFalse
     dispatch_allowed: StrictFalse

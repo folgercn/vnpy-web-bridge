@@ -52,27 +52,11 @@ def common_source(
 
 def terminal_checksum(facts: dict[str, Any]) -> str:
     payload = {
-        "schema_version": (
-            "commodity_c_fast_actual_simnow_terminal_binding_v1"
-        ),
-        "candidate_id": facts["candidate_id"],
-        "ledger_id": facts["ledger_id"],
-        "snapshot_hash": facts["snapshot_hash"],
-        "formula_target_binding_sha256": (
-            facts["formula_target_binding_sha256"]
-        ),
-        "plan_hash": facts["plan_hash"],
         "session_id": facts["session_id"],
-        "account_sha256": facts["account_sha256"],
-        "orders_sha256": facts["orders_sha256"],
-        "trades_sha256": facts["trades_sha256"],
-        "positions_sha256": facts["positions_sha256"],
-        "reconciliation_sha256": facts["reconciliation_sha256"],
-        "terminal_status": facts["terminal_status"],
-        "terminal_reconciliation_complete": (
-            facts["terminal_reconciliation_complete"]
-        ),
-        "terminal_completed_at_utc": facts["terminal_completed_at_utc"],
+        "plan_hash": facts["plan_hash"],
+        "status": facts["terminal_status"],
+        "completed_at_utc": facts["terminal_completed_at_utc"],
+        "execution_state_checksum": facts["execution_state_checksum"],
     }
     return sha256_json(payload)
 
@@ -112,15 +96,21 @@ def source_inputs(
         fee = {
             **common,
             "schema_version": (
-                "commodity_c_fast_fee_adjusted_pnl_source_facts_v1"
+                "commodity_c_fast_fee_adjusted_pnl_source_facts_v2"
             ),
             "fee_binding_state": "BOUND",
+            "fee_component_universe": (
+                "official_exchange_fee",
+                "broker_customer_fee",
+                "preregistered_tick_stress",
+                "roll_round_trip_cost",
+            ),
             "official_exchange_fee_rate": 0.0001,
-            "official_exchange_fee_cny": 10.0,
+            "official_exchange_turnover_cny": 100_000.0,
             "preregistered_tick_stress_cny": 20.0,
             "roll_round_trip_cost_cny": 30.0,
             "broker_customer_fee_rate": 0.00005,
-            "broker_customer_fee_cny": 5.0,
+            "broker_customer_turnover_cny": 100_000.0,
             "fee_schedule_sha256": "d" * 64,
             "unbound_components": (),
         }
@@ -128,23 +118,28 @@ def source_inputs(
         fee = {
             **common,
             "schema_version": (
-                "commodity_c_fast_fee_adjusted_pnl_source_facts_v1"
+                "commodity_c_fast_fee_adjusted_pnl_source_facts_v2"
             ),
             "fee_binding_state": "UNBOUND_NOT_ASSUMED_ZERO",
+            "fee_component_universe": (
+                "official_exchange_fee",
+                "broker_customer_fee",
+                "preregistered_tick_stress",
+                "roll_round_trip_cost",
+            ),
             "official_exchange_fee_rate": 0.0001,
-            "official_exchange_fee_cny": 10.0,
+            "official_exchange_turnover_cny": 100_000.0,
             "preregistered_tick_stress_cny": 20.0,
             "roll_round_trip_cost_cny": 30.0,
             "broker_customer_fee_rate": None,
-            "broker_customer_fee_cny": None,
+            "broker_customer_turnover_cny": None,
             "fee_schedule_sha256": None,
-            "unbound_components": ("broker_customer_fee_rate",),
+            "unbound_components": ("broker_customer_fee",),
         }
     execution = {
         **common,
         "schema_version": (
-            "commodity_c_fast_execution_quality_interval_pnl_"
-            "source_facts_v1"
+            "commodity_c_fast_execution_quality_interval_pnl_source_facts_v1"
         ),
         "fill_evidence_state": fill_state,
         "planned_lots": 10,
@@ -181,15 +176,12 @@ def source_inputs(
         actual = {
             **common,
             "schema_version": (
-                "commodity_c_fast_actual_simnow_not_provided_"
-                "source_facts_v1"
+                "commodity_c_fast_actual_simnow_not_provided_source_facts_v1"
             ),
             "actual_state": "NOT_PROVIDED",
         }
     else:
-        as_of = datetime.fromisoformat(
-            as_of_at_utc.replace("Z", "+00:00")
-        )
+        as_of = datetime.fromisoformat(as_of_at_utc.replace("Z", "+00:00"))
         complete = actual_state == "complete"
         rejected = actual_state == "rejected"
         filled_lots = 10 if complete else 0 if rejected else 3
@@ -202,11 +194,10 @@ def source_inputs(
         )
         actual = {
             **common,
-            "schema_version": "commodity_c_fast_actual_simnow_facts_v2",
+            "schema_version": "commodity_c_fast_actual_simnow_facts_v3",
             "actual_state": "FACTS_BOUND",
             "fact_source": (
-                "SIMNOW_AUTHORITATIVE_ORDER_TRADE_POSITION_"
-                "RECONCILIATION"
+                "SIMNOW_AUTHORITATIVE_ORDER_TRADE_POSITION_RECONCILIATION"
             ),
             "execution_lane": "simnow_shakedown",
             "session_id": "cfast-simnow-session-20260902",
@@ -215,27 +206,25 @@ def source_inputs(
             "trades_sha256": "3" * 64,
             "positions_sha256": "4" * 64,
             "reconciliation_sha256": "5" * 64,
+            "execution_state_checksum": "6" * 64,
+            "execution_state_checksum_verification_state": (
+                "ARCHIVE_REFERENCE_ONLY_CORE_NOT_EMBEDDED"
+            ),
             "terminal_checksum": "0" * 64,
             "terminal_status": "COMPLETE" if complete else "INCOMPLETE",
             "terminal_reconciliation_complete": complete,
             "terminal_completed_at_utc": (
-                _iso(as_of - timedelta(seconds=30))
-                if complete
-                else None
+                _iso(as_of - timedelta(seconds=30)) if complete else None
             ),
-            "execution_captured_at_utc": _iso(
-                as_of - timedelta(minutes=1)
-            ),
+            "valuation_at_utc": _iso(as_of - timedelta(minutes=2)),
+            "execution_captured_at_utc": _iso(as_of - timedelta(minutes=1)),
             "expected_lots": 10,
             "filled_lots": filled_lots,
             "order_outcome": outcome,
-            "trade_evidence_state": (
-                "COMPLETE" if complete else "INCOMPLETE"
+            "trade_evidence_state": ("COMPLETE" if complete else "INCOMPLETE"),
+            "actual_amount_verification_state": (
+                "UNVERIFIED_REQUIRES_RAW_FILL_PRICE_MULTIPLIER_FEE_FACTS"
             ),
-            "gross_execution_pnl_cny": 90.0 if complete else None,
-            "adverse_slippage_cny": 12.0 if complete else None,
-            "fees_state": "BOUND" if complete else "NOT_AVAILABLE",
-            "actual_fees_cny": 5.0 if complete else None,
             "countable_forward": False,
             "production_allowed": False,
         }
@@ -316,9 +305,7 @@ def _rehash_entry(payload: dict[str, Any], layer_name: str) -> None:
         "valuation_day": payload["valuation_day"],
         "layer_hashes": payload["layer_hashes"],
     }
-    payload["entry_id"] = (
-        f"cfast-pnl-entry-v2-{sha256_json(identity)}"
-    )
+    payload["entry_id"] = f"cfast-pnl-entry-v2-{sha256_json(identity)}"
     payload["entry_hash"] = sha256_json(
         {key: value for key, value in payload.items() if key != "entry_hash"}
     )
@@ -346,22 +333,20 @@ def test_happy_path_is_deterministic_and_fresh_source_bound() -> None:
         assert layer.lineage.source_artifact_sha256 == facts_hash
 
 
-def test_reload_fresh_replay_rejects_self_hashed_derivation_substitution() -> None:
+def test_reload_fresh_replay_rejects_self_hashed_derivation_substitution() -> (
+    None
+):
     payload = build().model_dump(mode="json")
     lineage = payload["theoretical_target_pnl"]["lineage"]
     lineage["derivation_rule_id"] = "attacker-selected-rule-v1"
     lineage["derivation_code_sha256"] = "9" * 64
     lineage["lineage_hash"] = sha256_json(
-        {
-            key: value
-            for key, value in lineage.items()
-            if key != "lineage_hash"
-        }
+        {key: value for key, value in lineage.items() if key != "lineage_hash"}
     )
     _rehash_entry(payload, "theoretical_target_pnl")
-    payload["fee_adjusted_pnl"]["source_theoretical_layer_hash"] = (
-        payload["theoretical_target_pnl"]["layer_hash"]
-    )
+    payload["fee_adjusted_pnl"]["source_theoretical_layer_hash"] = payload[
+        "theoretical_target_pnl"
+    ]["layer_hash"]
     _rehash_entry(payload, "fee_adjusted_pnl")
 
     CommodityCFastFourLayerPnlLedgerEntryDTO.model_validate(payload)
@@ -393,7 +378,9 @@ def test_same_source_facts_cannot_attach_to_other_identity(
     )
 
 
-def test_actual_complete_requires_terminal_bound_full_fill() -> None:
+def test_actual_complete_binds_terminal_but_amounts_remain_unverified() -> (
+    None
+):
     entry = build(payloads=source_inputs(actual_state="complete"))
     actual = entry.actual_simnow_calibration_pnl
     facts = actual.source_facts
@@ -406,7 +393,16 @@ def test_actual_complete_requires_terminal_bound_full_fill() -> None:
         facts.model_dump(mode="json")
     )
     assert facts.filled_lots == facts.expected_lots == 10
-    assert actual.actual_net_pnl_cny == 85.0
+    assert actual.stable_actual_fact_identity_sha256 is not None
+    assert actual.gross_execution_pnl_cny is None
+    assert actual.adverse_slippage_cny is None
+    assert actual.actual_fees_cny is None
+    assert actual.actual_net_pnl_cny is None
+    assert (
+        actual.actual_amount_verification_state
+        == "UNVERIFIED_REQUIRES_RAW_FILL_PRICE_MULTIPLIER_FEE_FACTS"
+    )
+    assert actual.fees_state == "UNVERIFIED"
     assert actual.countable_forward is False
 
 
@@ -421,10 +417,15 @@ def test_partial_and_rejected_are_incomplete_and_publish_no_amounts(
     assert actual.gross_execution_pnl_cny is None
     assert actual.actual_fees_cny is None
     assert actual.actual_net_pnl_cny is None
-    assert actual.net_pnl_state == "NOT_AVAILABLE"
+    assert (
+        actual.net_pnl_state
+        == "UNVERIFIED_REQUIRES_RAW_FILL_PRICE_MULTIPLIER_FEE_FACTS"
+    )
 
 
-def test_zero_fill_rejected_or_terminal_incomplete_cannot_claim_complete() -> None:
+def test_zero_fill_rejected_or_terminal_incomplete_cannot_claim_complete() -> (
+    None
+):
     zero_fill = source_inputs(actual_state="rejected")
     zero_fill["actual"].update(
         {
@@ -432,10 +433,6 @@ def test_zero_fill_rejected_or_terminal_incomplete_cannot_claim_complete() -> No
             "terminal_status": "COMPLETE",
             "terminal_reconciliation_complete": True,
             "terminal_completed_at_utc": "2026-09-02T08:01:30Z",
-            "gross_execution_pnl_cny": 0.0,
-            "adverse_slippage_cny": 0.0,
-            "fees_state": "BOUND",
-            "actual_fees_cny": 0.0,
         }
     )
     zero_fill["actual"]["terminal_checksum"] = terminal_checksum(
@@ -461,7 +458,7 @@ def test_zero_fill_rejected_or_terminal_incomplete_cannot_claim_complete() -> No
 
 def test_actual_terminal_checksum_and_fact_identity_fail_closed() -> None:
     tampered = source_inputs(actual_state="complete")
-    tampered["actual"]["trades_sha256"] = "6" * 64
+    tampered["actual"]["execution_state_checksum"] = "7" * 64
     assert_error(
         "INVALID_ACTUAL_SOURCE_FACTS",
         build,
@@ -478,10 +475,49 @@ def test_actual_terminal_checksum_and_fact_identity_fail_closed() -> None:
     )
 
 
-def test_fee_bound_derives_net_and_unbound_cannot_use_zero_placeholders() -> None:
+def test_actual_amount_substitution_with_coordinated_rehash_is_rejected() -> (
+    None
+):
+    for gross, fee in ((90.0, 5.0), (777_777.0, 0.0)):
+        source_claim = source_inputs(actual_state="complete")
+        source_claim["actual"]["gross_execution_pnl_cny"] = gross
+        source_claim["actual"]["actual_fees_cny"] = fee
+        source_claim["actual"]["execution_state_checksum"] = sha256_json(
+            {"gross_execution_pnl_cny": gross, "actual_fees_cny": fee}
+        )
+        source_claim["actual"]["terminal_checksum"] = terminal_checksum(
+            source_claim["actual"]
+        )
+        assert_error(
+            "INVALID_ACTUAL_SOURCE_FACTS",
+            build,
+            payloads=source_claim,
+        )
+
+    payload = build(
+        payloads=source_inputs(actual_state="complete")
+    ).model_dump(mode="json")
+    actual = payload["actual_simnow_calibration_pnl"]
+    actual["gross_execution_pnl_cny"] = 777_777.0
+    actual["actual_fees_cny"] = 0.0
+    actual["actual_net_pnl_cny"] = 777_777.0
+    _rehash_entry(payload, "actual_simnow_calibration_pnl")
+
+    assert_error(
+        "LEDGER_ENTRY_VERIFICATION_FAILED",
+        reload_and_verify_four_layer_pnl_entry,
+        payload,
+    )
+
+
+def test_fee_bound_derives_net_and_unbound_cannot_use_zero_placeholders() -> (
+    None
+):
     bound = build(payloads=source_inputs(fee_bound=True))
     assert bound.fee_adjusted_pnl.all_in_cost_cny == 65.0
     assert bound.fee_adjusted_pnl.fee_adjusted_total_pnl_cny == 785.0
+    assert bound.fee_adjusted_pnl.official_exchange_fee_cny == 10.0
+    assert bound.fee_adjusted_pnl.broker_customer_fee_cny == 5.0
 
     broker_zero = source_inputs()
     broker_zero["fee"]["broker_customer_fee_rate"] = 0.0
@@ -492,20 +528,50 @@ def test_fee_bound_derives_net_and_unbound_cannot_use_zero_placeholders() -> Non
         payloads=broker_zero,
     )
 
-    official_zero = source_inputs()
+    official_zero = source_inputs(fee_bound=True)
     official_zero["fee"].update(
         {
-            "official_exchange_fee_rate": 0.0,
+            "official_exchange_fee_rate": 1.0,
             "official_exchange_fee_cny": 0.0,
-            "broker_customer_fee_rate": 0.00005,
-            "broker_customer_fee_cny": 5.0,
-            "unbound_components": ("official_exchange_fee_rate",),
         }
     )
     assert_error(
         "INVALID_FEE_SOURCE_FACTS",
         build,
         payloads=official_zero,
+    )
+
+    omitted_tick = source_inputs()
+    omitted_tick["fee"]["preregistered_tick_stress_cny"] = None
+    assert_error(
+        "INVALID_FEE_SOURCE_FACTS",
+        build,
+        payloads=omitted_tick,
+    )
+
+    named_tick = source_inputs()
+    named_tick["fee"]["preregistered_tick_stress_cny"] = None
+    named_tick["fee"]["unbound_components"] = (
+        "broker_customer_fee",
+        "preregistered_tick_stress",
+    )
+    named_tick_layer = build(payloads=named_tick).fee_adjusted_pnl
+    assert named_tick_layer.official_exchange_fee_cny == 10.0
+    assert named_tick_layer.broker_customer_fee_cny is None
+    assert named_tick_layer.preregistered_tick_stress_cny is None
+    assert named_tick_layer.roll_round_trip_cost_cny == 30.0
+    assert named_tick_layer.all_in_cost_cny is None
+
+    shortened_universe = source_inputs()
+    shortened_universe["fee"]["fee_component_universe"] = (
+        "official_exchange_fee",
+        "broker_customer_fee",
+        "roll_round_trip_cost",
+    )
+    assert_error(
+        "INVALID_FEE_SOURCE_FACTS",
+        build,
+        payloads=shortened_universe,
     )
 
 
@@ -580,9 +646,7 @@ def test_execution_rejects_state_mismatch_and_caller_derived_fields() -> None:
     )
 
     caller_derived = source_inputs()
-    caller_derived["execution"][
-        "opportunity_cost_upper_bound_cny"
-    ] = 456.0
+    caller_derived["execution"]["opportunity_cost_upper_bound_cny"] = 456.0
     assert_error(
         "INVALID_EXECUTION_SOURCE_FACTS",
         build,
@@ -610,9 +674,10 @@ def test_chain_requires_hash_time_and_source_as_of_monotonicity() -> None:
     assert audit.entry_count == 2
     assert audit.actual_fact_entry_count == 1
     assert (
-        audit.audit_state
-        == "PASS_FRESH_REPLAY_STRUCTURE_AND_HASH_CHAIN_ONLY"
+        audit.audit_state == "PASS_FRESH_REPLAY_STRUCTURE_AND_HASH_CHAIN_ONLY"
     )
+    assert audit.external_genesis_anchor_state == "NOT_PROVIDED_STRUCTURE_ONLY"
+    assert audit.external_tip_anchor_state == "NOT_PROVIDED_STRUCTURE_ONLY"
 
     same_created_inputs = source_inputs()
     same_created_inputs["theoretical"]["realized_pnl_cny"] = 1001.0
@@ -688,15 +753,70 @@ def test_duplicate_and_wrong_predecessor_fail_closed() -> None:
     )
 
 
+def test_same_actual_terminal_fact_cannot_replay_with_later_as_of() -> None:
+    first_inputs = source_inputs(actual_state="complete")
+    first = build(payloads=first_inputs)
+    second_inputs = source_inputs(actual_state="complete")
+    for source in second_inputs.values():
+        source["as_of_at_utc"] = "2026-09-02T08:02:30Z"
+    second_inputs["theoretical"]["realized_pnl_cny"] = 1_001.0
+    second_inputs["actual"] = {
+        **first_inputs["actual"],
+        "as_of_at_utc": "2026-09-02T08:02:30Z",
+    }
+    second = build(
+        sequence=2,
+        previous=first.entry_hash,
+        created_at="2026-09-02T08:03:30Z",
+        payloads=second_inputs,
+    )
+
+    assert (
+        first.actual_simnow_calibration_pnl.stable_actual_fact_identity_sha256
+        == second.actual_simnow_calibration_pnl.stable_actual_fact_identity_sha256
+    )
+    assert_error(
+        "LEDGER_ACTUAL_FACT_REPLAY",
+        verify_four_layer_pnl_chain,
+        [
+            first.model_dump(mode="json"),
+            second.model_dump(mode="json"),
+        ],
+    )
+
+
+def test_actual_time_causality_is_valuation_execution_terminal_as_of() -> None:
+    terminal_before_execution = source_inputs(actual_state="complete")
+    terminal_before_execution["actual"]["terminal_completed_at_utc"] = (
+        "2026-09-02T08:00:30Z"
+    )
+    terminal_before_execution["actual"]["terminal_checksum"] = (
+        terminal_checksum(terminal_before_execution["actual"])
+    )
+    assert_error(
+        "INVALID_ACTUAL_SOURCE_FACTS",
+        build,
+        payloads=terminal_before_execution,
+    )
+
+    execution_before_valuation = source_inputs(actual_state="complete")
+    execution_before_valuation["actual"]["execution_captured_at_utc"] = (
+        "2026-09-02T07:59:30Z"
+    )
+    assert_error(
+        "INVALID_ACTUAL_SOURCE_FACTS",
+        build,
+        payloads=execution_before_valuation,
+    )
+
+
 @pytest.mark.parametrize("raw_false", [0, 0.0])
 def test_literal_false_rejects_numeric_zero_before_coercion(
     raw_false: int | float,
 ) -> None:
     actual = source_inputs(actual_state="complete")
     actual["actual"]["countable_forward"] = raw_false
-    actual["actual"]["terminal_checksum"] = terminal_checksum(
-        actual["actual"]
-    )
+    actual["actual"]["terminal_checksum"] = terminal_checksum(actual["actual"])
     assert_error(
         "INVALID_ACTUAL_SOURCE_FACTS",
         build,
@@ -772,7 +892,9 @@ def test_dto_json_schema_is_strict_and_has_four_separate_layers() -> None:
     } <= required
 
 
-def test_pure_module_import_boundary_has_no_runtime_or_execution_capability() -> None:
+def test_pure_module_import_boundary_has_no_runtime_or_execution_capability() -> (
+    None
+):
     root = Path(__file__).resolve().parents[2]
     paths = (
         root / "app/schemas/commodity_c_fast_pnl_ledger.py",
@@ -808,8 +930,7 @@ def test_pure_module_import_boundary_has_no_runtime_or_execution_capability() ->
                 imported.add(node.module or "")
                 names.update(alias.name for alias in node.names)
         assert not any(
-            module == forbidden
-            or module.startswith(f"{forbidden}.")
+            module == forbidden or module.startswith(f"{forbidden}.")
             for module in imported
             for forbidden in forbidden_modules
         )
