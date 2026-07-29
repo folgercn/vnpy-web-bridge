@@ -37,6 +37,8 @@ production_allowed=false
 
 - 价格、累计成交量、price tick 和 volume-unit binding 只接受有限普通十进制
   字符串；禁止 binary float、`NaN`、`Infinity` 和科学计数法。
+- tick-grid 使用 Decimal tuple 转换后的缩放整数精确整除，不依赖 Decimal
+  默认 precision 下的除法或四舍五入。
 - 每条 book snapshot、contract spec 和最终 score 都有 canonical JSON
   SHA256。严格 DTO reload 会重算 hash。
 - `reload_and_verify_execution_quality_score` 还会使用当前 intent、policy、
@@ -46,7 +48,9 @@ production_allowed=false
   `foundation_policy_hash`。
 - 相同 `ingest_id` 若绑定不同 snapshot 内容直接失败；同合约上相同
   `exchange_timestamp + ingest_seq` 只保留 policy tie-break 后的第一条
-  canonical row。
+  canonical row，但 event-key 相同而非身份字段内容不同时也直接失败。即使
+  某条 row 因另一身份重复而被跳过，它的两套身份仍会先登记，后续复用冲突
+  不能绕过检查。
 
 SHA256 仍然只是 checksum，不是签名或 authority。调用方必须在未来独立接线
 中重新验证 accepted signed snapshot、raw signed policy chain 和 contract
@@ -87,6 +91,9 @@ decision 还记录 spread、microprice 和 L1 depth imbalance。markout 使用
 Passive fill 永远只输出 conservative bounds：
 
 - lower bound 固定为 0；
+- volume interval 使用 canonical total order 中 decision 与 selected horizon
+  对象位置的 inclusive slice；同 timestamp 但 tie-break 位于 selected
+  horizon 之后的 row 不属于该 horizon；
 - 只有 decision/horizon 都为 L5 usable、volume unit 已绑定且区间累计
   volume 单调时，upper bound 才是
   `min(1, positive raw volume delta × lots-per-unit / order lots)`；

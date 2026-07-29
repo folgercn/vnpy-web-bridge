@@ -393,6 +393,54 @@ def test_conflicting_duplicate_ingest_identity_fails_closed() -> None:
         score([*rows, conflicting])
 
 
+def test_event_duplicate_registers_skipped_ingest_identity_before_skip() -> None:
+    first = book(250)
+    duplicate_core = first.model_dump(
+        mode="json",
+        exclude={"book_snapshot_hash"},
+    )
+    duplicate_core["ingest_id"] = "zz-skipped-ingest-id"
+    skipped_duplicate = CFastL1L5BookSnapshotDTO.model_validate(
+        {
+            **duplicate_core,
+            "book_snapshot_hash": sha256_json(duplicate_core),
+        }
+    )
+    conflicting_reuse = book(
+        500,
+        ingest_id="zz-skipped-ingest-id",
+        cumulative_volume="999",
+    )
+
+    with pytest.raises(
+        CFastExecutionQualityScorerError,
+        match="BOOK_DUPLICATE_IDENTITY_CONFLICT",
+    ):
+        score([first, skipped_duplicate, conflicting_reuse])
+
+
+def test_same_event_key_with_different_content_fails_closed() -> None:
+    first = book(250)
+    conflicting_core = first.model_dump(
+        mode="json",
+        exclude={"book_snapshot_hash"},
+    )
+    conflicting_core["ingest_id"] = "zz-conflicting-event"
+    conflicting_core["cumulative_volume"] = "999"
+    conflicting = CFastL1L5BookSnapshotDTO.model_validate(
+        {
+            **conflicting_core,
+            "book_snapshot_hash": sha256_json(conflicting_core),
+        }
+    )
+
+    with pytest.raises(
+        CFastExecutionQualityScorerError,
+        match="BOOK_DUPLICATE_EVENT_CONFLICT",
+    ):
+        score([first, conflicting])
+
+
 def test_same_contract_timestamp_and_sequence_is_duplicate_event() -> None:
     rows = full_horizon_books()
     first = rows[1]
@@ -437,6 +485,29 @@ def test_passive_bounds_never_emit_point_probability_and_degrade_safely() -> Non
     )
     assert reset.horizons[0].passive_fill_bounds.lower_bound is None
     assert reset.horizons[0].passive_fill_bounds.upper_bound is None
+
+
+def test_passive_interval_stops_at_selected_horizon_total_order_position() -> None:
+    rows = full_horizon_books()
+    after_selected_same_time = book(
+        250,
+        exchange_offset_ms=-50,
+        ingest_seq=999,
+        ingest_id="zz-after-selected-horizon",
+        cumulative_volume="105",
+        shift_ticks=1,
+    )
+
+    result = score([*rows, after_selected_same_time])
+
+    assert result.horizons[0].selected_tick is not None
+    assert result.horizons[0].selected_tick.book_snapshot_hash == (
+        rows[1].book_snapshot_hash
+    )
+    assert result.horizons[0].passive_fill_bounds.state == (
+        "IDENTIFIED_CONSERVATIVE_BOUNDS"
+    )
+    assert result.horizons[0].passive_fill_bounds.upper_bound == "0.2"
 
 
 def test_score_hash_and_fresh_derivation_reject_tamper() -> None:
@@ -552,6 +623,39 @@ def test_off_grid_l1_is_unusable_and_not_selected() -> None:
         row.selection_state == "DECISION_TICK_MISSING"
         for row in result.horizons
     )
+
+
+def test_64_character_off_grid_locked_book_cannot_round_to_integer_ticks() -> None:
+    off_grid_price = "1." + ("0" * 61) + "1"
+    price_tick = "0." + ("0" * 61) + "3"
+    assert len(off_grid_price) == 64
+    assert len(price_tick) == 64
+
+    spec_core = contract_spec().model_dump(
+        mode="json",
+        exclude={"contract_spec_hash"},
+    )
+    spec_core["price_tick"] = price_tick
+    spec = CFastExecutionQualityContractSpecDTO.model_validate(
+        {**spec_core, "contract_spec_hash": sha256_json(spec_core)}
+    )
+    locked_off_grid = book(
+        0,
+        bid_prices=[off_grid_price, None, None, None, None],
+        ask_prices=[off_grid_price, None, None, None, None],
+        bid_sizes=[2, None, None, None, None],
+        ask_sizes=[2, None, None, None, None],
+    )
+
+    result = score([locked_off_grid], spec=spec)
+
+    assert result.rejection_quality_counts[
+        "DEGRADED_MARKOUT_ONLY_NO_BOOK_WALK_OR_FILL_BOUNDS"
+    ] == 1
+    assert result.decision_selection_state == (
+        "MISSING_DECISION_TICK_NOT_IMPUTED"
+    )
+    assert result.decision_tick is None
 
 
 def test_zero_l1_and_zero_l2_depth_follow_quality_degradation() -> None:

@@ -289,7 +289,7 @@ def _canonicalize_snapshots(
         ),
     )
     seen_ingest_ids: dict[str, str] = {}
-    seen_exchange_events: set[tuple[str, datetime, int]] = set()
+    seen_exchange_events: dict[tuple[str, datetime, int], str] = {}
     canonical: list[CFastL1L5BookSnapshotDTO] = []
     for row in ordered:
         event_key = (
@@ -297,18 +297,36 @@ def _canonicalize_snapshots(
             row.exchange_timestamp,
             row.ingest_seq,
         )
+        ingest_hash = row.book_snapshot_hash
+        event_hash = sha256_json(
+            row.model_dump(
+                mode="json",
+                exclude={"book_snapshot_hash", "ingest_id"},
+            )
+        )
         previous_hash = seen_ingest_ids.get(row.ingest_id)
         if (
             previous_hash is not None
-            and previous_hash != row.book_snapshot_hash
+            and previous_hash != ingest_hash
         ):
             raise CFastExecutionQualityScorerError(
                 "BOOK_DUPLICATE_IDENTITY_CONFLICT"
             )
-        if previous_hash is not None or event_key in seen_exchange_events:
+        previous_event_hash = seen_exchange_events.get(event_key)
+        if (
+            previous_event_hash is not None
+            and previous_event_hash != event_hash
+        ):
+            raise CFastExecutionQualityScorerError(
+                "BOOK_DUPLICATE_EVENT_CONFLICT"
+            )
+        is_duplicate = (
+            previous_hash is not None or previous_event_hash is not None
+        )
+        seen_ingest_ids.setdefault(row.ingest_id, ingest_hash)
+        seen_exchange_events.setdefault(event_key, event_hash)
+        if is_duplicate:
             continue
-        seen_ingest_ids[row.ingest_id] = row.book_snapshot_hash
-        seen_exchange_events.add(event_key)
         canonical.append(row)
     return tuple(canonical), len(snapshots) - len(canonical)
 
@@ -371,11 +389,31 @@ def _classify_snapshot(
 def _integer_ticks(value: str | None, tick_size: Decimal) -> int | None:
     if value is None:
         return None
-    quotient = Decimal(value) / tick_size
-    integral = quotient.to_integral_value()
-    if quotient != integral:
+    price_coefficient, price_exponent = _decimal_components(
+        Decimal(value)
+    )
+    tick_coefficient, tick_exponent = _decimal_components(tick_size)
+    common_exponent = min(price_exponent, tick_exponent)
+    scaled_price = price_coefficient * (
+        10 ** (price_exponent - common_exponent)
+    )
+    scaled_tick = tick_coefficient * (
+        10 ** (tick_exponent - common_exponent)
+    )
+    quotient, remainder = divmod(scaled_price, scaled_tick)
+    if remainder:
         return None
-    return int(integral)
+    return quotient
+
+
+def _decimal_components(value: Decimal) -> tuple[int, int]:
+    parts = value.as_tuple()
+    coefficient = 0
+    for digit in parts.digits:
+        coefficient = coefficient * 10 + digit
+    if parts.sign:
+        coefficient = -coefficient
+    return coefficient, parts.exponent
 
 
 def _l5_is_usable(
@@ -670,12 +708,15 @@ def _passive_fill_bounds(
         )
     if contract_spec.volume_lots_per_raw_unit is None:
         return _unidentified_fill("UNIDENTIFIED_VOLUME_UNIT_BINDING")
+    decision_index = _canonical_position(canonical, decision)
+    horizon_index = _canonical_position(canonical, horizon)
+    if horizon_index < decision_index:
+        return _unidentified_fill(
+            "UNIDENTIFIED_BOUNDS_NOT_ZERO_OR_FULL"
+        )
     interval = [
         row.snapshot
-        for row in canonical
-        if decision.snapshot.received_at_utc
-        <= row.snapshot.received_at_utc
-        <= horizon.snapshot.received_at_utc
+        for row in canonical[decision_index : horizon_index + 1]
     ]
     if not interval or any(
         row.cumulative_volume is None for row in interval
@@ -722,6 +763,18 @@ def _unidentified_fill(state: str) -> CFastPassiveFillBoundsDTO:
         ),
         point_probability_output="FORBIDDEN",
         calibrated_point_probability_allowed=False,
+    )
+
+
+def _canonical_position(
+    canonical: Sequence[_ClassifiedTick],
+    selected: _ClassifiedTick,
+) -> int:
+    for index, row in enumerate(canonical):
+        if row is selected:
+            return index
+    raise CFastExecutionQualityScorerError(
+        "SELECTED_TICK_NOT_IN_CANONICAL_ORDER"
     )
 
 
