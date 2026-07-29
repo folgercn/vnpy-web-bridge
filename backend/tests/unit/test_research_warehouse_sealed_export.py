@@ -515,6 +515,41 @@ def test_root_and_output_directory_replacement_races_fail_closed(
     assert not list(values["export_root"].glob("*/sealed-export-receipt.json"))
 
 
+def test_source_inode_reuse_after_precheck_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    values = export_inputs(tmp_path)
+    original_os_open = custody.os.open
+    freeze = values["artifact_paths"]["freeze_contract"]
+    signal = values["artifact_paths"]["signal_evidence"]
+    raced = False
+
+    def reuse_first_inode(path, flags, *args, **kwargs):
+        nonlocal raced
+        if not raced and Path(path) == signal:
+            raced = True
+            signal.rename(signal.with_suffix(".displaced"))
+            freeze.rename(signal)
+        return original_os_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(custody.os, "open", reuse_first_inode)
+    with pytest.raises(RegistryError, match="changed while being opened"):
+        create_sealed_export(
+            artifact_paths=values["artifact_paths"],
+            source_view_path=values["source_view_path"],
+            lineage_path=values["lineage_path"],
+            expected_lineage_raw_sha256=sha256(values["lineage_raw"]),
+            keyring_path=values["keyring_path"],
+            expected_keyring_raw_sha256=sha256(values["keyring_raw"]),
+            signer_key_id="sealed-export-key-v1",
+            private_key_path=values["private_path"],
+            export_root=values["export_root"],
+            now=datetime(2026, 8, 3, 2, 5, tzinfo=UTC),
+        )
+    assert not list(values["export_root"].glob("*/sealed-export-receipt.json"))
+
+
 def test_consumer_layer_has_no_warehouse_db_or_execution_imports() -> None:
     paths = [
         ROOT / "scripts/research_warehouse/sealed_export.py",

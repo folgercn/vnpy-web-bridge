@@ -56,6 +56,10 @@ distinct paths/inodes/bytes, retain the producer's unverified flags, and agree
 on source-view identity. The verifier independently checks exact ten-product
 sets and target quantity/exact-contract agreement across signal, target,
 allocation, daily-roll, reference-price, and contract-spec evidence.
+The exporter opens all nine source files with `O_NOFOLLOW`, proves uniqueness
+from the descriptors' actual `fstat` identities, keeps every descriptor open
+through the complete set read, then re-reads and revalidates every held
+descriptor and pathname before signing.
 
 ## Publication and replay
 

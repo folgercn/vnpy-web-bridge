@@ -10,7 +10,7 @@ from commodity_c_fast_pure_producer_kernel import ARTIFACT_ROLES
 
 from .custody_paths import normalized_absolute
 from .errors import RegistryError
-from .file_integrity import file_identity, read_regular_strict, write_all
+from .file_integrity import file_identity, write_all
 
 MANIFEST_FILENAME = "sealed-export-manifest.json"
 RECEIPT_FILENAME = "sealed-export-receipt.json"
@@ -36,26 +36,89 @@ def require_symlink_free_path(path: Path, label: str) -> Path:
 def read_source_artifacts(paths: dict[str, Path]) -> dict[str, bytes]:
     if tuple(paths) != ARTIFACT_ROLES:
         raise RegistryError("source artifact role order/set mismatch")
-    identities = set()
-    result = {}
-    for role, path in paths.items():
-        path = require_symlink_free_path(path, f"source artifact {role}")
-        try:
-            info = path.lstat()
-        except OSError as exc:
-            raise RegistryError(f"source artifact {role} is unavailable") from exc
-        identity = (info.st_dev, info.st_ino)
-        if identity in identities:
-            raise RegistryError("source artifacts must use distinct inodes")
-        identities.add(identity)
-        result[role] = read_regular_strict(
-            path,
-            f"source artifact {role}",
-            limit=64 * 1024 * 1024,
-        )
-    if sum(map(len, result.values())) > 256 * 1024 * 1024:
-        raise RegistryError("source artifact set exceeds aggregate limit")
-    return result
+    held: dict[str, tuple[Path, int, tuple[int, ...]]] = {}
+    actual_inodes = set()
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    try:
+        for role, source_path in paths.items():
+            path = require_symlink_free_path(
+                source_path,
+                f"source artifact {role}",
+            )
+            try:
+                before = path.lstat()
+                descriptor = os.open(path, flags)
+                opened = os.fstat(descriptor)
+                after = path.lstat()
+            except OSError as exc:
+                raise RegistryError(
+                    f"source artifact {role} is unavailable"
+                ) from exc
+            try:
+                _require_private_file_info(opened, f"source artifact {role}")
+                identities = {
+                    file_identity(before),
+                    file_identity(opened),
+                    file_identity(after),
+                }
+                if len(identities) != 1:
+                    raise RegistryError(
+                        f"source artifact {role} changed while being opened"
+                    )
+                actual_inode = (opened.st_dev, opened.st_ino)
+                if actual_inode in actual_inodes:
+                    raise RegistryError(
+                        "source artifacts must use distinct inodes actually opened"
+                    )
+                actual_inodes.add(actual_inode)
+                held[role] = (path, descriptor, identities.pop())
+            except Exception:
+                os.close(descriptor)
+                raise
+        result = {}
+        for role, (_path, descriptor, _identity) in held.items():
+            result[role] = _read_fd(
+                descriptor,
+                64 * 1024 * 1024,
+                f"source artifact {role}",
+            )
+        if sum(map(len, result.values())) > 256 * 1024 * 1024:
+            raise RegistryError("source artifact set exceeds aggregate limit")
+        for role, (path, descriptor, identity) in held.items():
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            repeated = _read_fd(
+                descriptor,
+                64 * 1024 * 1024,
+                f"source artifact {role}",
+            )
+            if (
+                repeated != result[role]
+                or file_identity(os.fstat(descriptor)) != identity
+                or file_identity(path.lstat()) != identity
+            ):
+                raise RegistryError(
+                    f"source artifact {role} changed while artifact set read"
+                )
+        return result
+    except OSError as exc:
+        raise RegistryError("source artifact set read failed closed") from exc
+    finally:
+        for _path, descriptor, _identity in held.values():
+            os.close(descriptor)
+
+
+def _require_private_file_info(info: os.stat_result, label: str) -> None:
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_uid != os.geteuid()
+        or stat.S_IMODE(info.st_mode) & 0o077
+        or info.st_nlink != 1
+    ):
+        raise RegistryError(f"{label} must be private one-link regular file")
 
 
 def _directory_identity(info: os.stat_result) -> tuple[int, ...]:
