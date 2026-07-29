@@ -54,11 +54,13 @@ row counts, and hashes must exactly match that replay, so coordinated edits to
 both a Parquet file and the untrusted catalog cannot validate. DuckDB inspects
 Parquet through an anonymous verifier-owned descriptor. It opens a private
 verified catalog copy before that copy's pathname is unlinked, leaving the
-connection bound to a stable inode. Both published paths are strictly reread
-after inspection to detect concurrent replacement. The commands require
-explicit genesis, head, head-commit, ledger, tool-commit, and dependency-lock
-anchors. Run `python -m research_warehouse.cli <command> --help` for the
-complete arguments.
+connection bound to a stable inode; the verifier confirms that DuckDB opened a
+new process descriptor with the same device and inode as the already verified
+descriptor before unlinking. Both published paths are strictly reread after
+inspection to detect concurrent replacement. The commands require explicit
+genesis, head, head-commit, ledger, tool-commit, and dependency-lock anchors.
+Run `python -m research_warehouse.cli <command> --help` for the complete
+arguments.
 
 ## Failure semantics
 

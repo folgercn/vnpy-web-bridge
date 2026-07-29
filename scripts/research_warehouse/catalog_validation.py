@@ -88,6 +88,39 @@ def _read_descriptor(descriptor: int, size: int) -> bytes:
     return b"".join(chunks)
 
 
+def _descriptor_identity(descriptor: int) -> tuple[int, int]:
+    info = os.fstat(descriptor)
+    return info.st_dev, info.st_ino
+
+
+def _descriptor_matches(
+    descriptor: int,
+    expected: tuple[int, int],
+) -> bool:
+    try:
+        return _descriptor_identity(descriptor) == expected
+    except OSError:
+        return False
+
+
+def _open_descriptor_identities() -> dict[int, tuple[int, int]]:
+    directory = (
+        Path("/proc/self/fd")
+        if Path("/proc/self/fd").is_dir()
+        else Path("/dev/fd")
+    )
+    values = {}
+    for name in os.listdir(directory):
+        if not name.isdigit():
+            continue
+        descriptor = int(name)
+        try:
+            values[descriptor] = _descriptor_identity(descriptor)
+        except OSError:
+            pass
+    return values
+
+
 def _write_verified_temporary(
     paths: DerivedPaths,
     raw: bytes,
@@ -151,15 +184,31 @@ def _private_catalog_connection(
         suffix=".duckdb",
     )
     connection = None
+    duckdb_descriptors: set[int] = set()
     try:
+        verified_identity = _descriptor_identity(descriptor)
+        before = _open_descriptor_identities()
         connection = duckdb.connect(
             str(temporary),
             read_only=True,
             config={"threads": "1"},
         )
+        after = _open_descriptor_identities()
+        duckdb_descriptors = {
+            candidate
+            for candidate, identity in after.items()
+            if identity == verified_identity and before.get(candidate) != identity
+        }
+        if not duckdb_descriptors:
+            raise RegistryError("DuckDB catalog connection inode mismatch")
         temporary.unlink()
         fsync_dir(paths.temporary)
         yield connection
+        if not any(
+            _descriptor_matches(candidate, verified_identity)
+            for candidate in duckdb_descriptors
+        ):
+            raise RegistryError("DuckDB catalog connection inode changed")
         if _read_descriptor(descriptor, len(raw)) != raw:
             raise RegistryError("private verified catalog copy changed")
     finally:
