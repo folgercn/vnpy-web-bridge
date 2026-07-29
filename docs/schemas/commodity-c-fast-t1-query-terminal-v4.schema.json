@@ -1,0 +1,260 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vnpy-web-bridge:schema:commodity-c-fast-t1-query-terminal-v4",
+  "title": "C_FAST T1 readonly query terminal v4",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "purpose", "candidate_id", "release_id", "attempt_id",
+    "terminal_state", "error_code", "release_raw_sha256",
+    "release_canonical_sha256", "consume_marker_raw_sha256",
+    "consume_marker_canonical_sha256",
+    "query_child_launch_marker_raw_sha256",
+    "query_child_launch_marker_canonical_sha256",
+    "parent_launch_capability_sha256",
+    "launch_marker_identity_sha256",
+    "launch_capability_binding_sha256",
+    "readiness_packet_raw_sha256",
+    "readiness_packet_canonical_sha256",
+    "content_attestation_raw_sha256",
+    "content_attestation_canonical_sha256",
+    "provenance_raw_sha256", "provenance_canonical_sha256",
+    "outcome_raw_sha256", "outcome_canonical_sha256", "manifest_raw_sha256",
+    "manifest_canonical_sha256", "query_v4_keyring_raw_sha256",
+    "query_v4_keyring_canonical_sha256",
+    "audit_child_invocation_raw_sha256",
+    "audit_child_invocation_canonical_sha256",
+    "pre_connect_gate_raw_sha256",
+    "pre_connect_gate_canonical_sha256",
+    "query_child_invocation_raw_sha256",
+    "query_child_invocation_canonical_sha256", "child_exit_code", "started_at",
+    "final_revalidation_at", "ended_at", "query_execution_state",
+    "production_query_attempted",
+    "production_query_completed", "artifact_sha256", "p0_pass",
+    "proof_verified", "write_probe_attempted",
+    "database_mutations_observed", "web_bridge_rpc_calls", "orders_sent",
+    "positions_modified", "dispatch_changed", "terminal_is_authority",
+    "p0_acceptance_authorized", "terminal_integrity_scope",
+    "replay_allowed"
+  ],
+  "properties": {
+    "schema_version": {"const": "commodity_c_fast_t1_query_terminal_v4"},
+    "purpose": {"const": "c_fast_t1_readonly_query_v4_terminal"},
+    "candidate_id": {"const": "C_FAST_CROSS_SECTION_NEUTRAL"},
+    "release_id": {"$ref": "#/$defs/id"},
+    "attempt_id": {"$ref": "#/$defs/attemptId"},
+    "terminal_state": {
+      "enum": [
+        "BLOCKED_FINAL_REVALIDATION_PRE_CHILD",
+        "FAILED_CHILD_LAUNCH_PRE_QUERY",
+        "COMPLETED_EVIDENCE_P0_PASS",
+        "COMPLETED_EVIDENCE_P0_BLOCKED",
+        "FAILED_CHILD",
+        "FAILED_OUTPUT_VALIDATION",
+        "TIMED_OUT_OUTCOME_UNKNOWN",
+        "INTERRUPTED_OUTCOME_UNKNOWN",
+        "CORRUPT_CHILD_LAUNCH_MARKER_OUTCOME_UNKNOWN"
+      ]
+    },
+    "error_code": {"type": ["string", "null"], "pattern": "^[A-Z0-9_]{3,96}$"},
+    "release_raw_sha256": {"$ref": "#/$defs/sha256"},
+    "release_canonical_sha256": {"$ref": "#/$defs/sha256"},
+    "consume_marker_raw_sha256": {"$ref": "#/$defs/sha256"},
+    "consume_marker_canonical_sha256": {"$ref": "#/$defs/sha256"},
+    "query_child_launch_marker_raw_sha256": {"$ref": "#/$defs/nullableSha256"},
+    "query_child_launch_marker_canonical_sha256": {"$ref": "#/$defs/nullableSha256"},
+    "parent_launch_capability_sha256": {"$ref": "#/$defs/sha256"},
+    "launch_marker_identity_sha256": {"$ref": "#/$defs/nullableSha256"},
+    "launch_capability_binding_sha256": {"$ref": "#/$defs/nullableSha256"},
+    "readiness_packet_raw_sha256": {"$ref": "#/$defs/sha256"},
+    "readiness_packet_canonical_sha256": {"$ref": "#/$defs/sha256"},
+    "content_attestation_raw_sha256": {"$ref": "#/$defs/sha256"},
+    "content_attestation_canonical_sha256": {"$ref": "#/$defs/sha256"},
+    "provenance_raw_sha256": {"$ref": "#/$defs/sha256"},
+    "provenance_canonical_sha256": {"$ref": "#/$defs/sha256"},
+    "outcome_raw_sha256": {"$ref": "#/$defs/sha256"},
+    "outcome_canonical_sha256": {"$ref": "#/$defs/sha256"},
+    "manifest_raw_sha256": {"$ref": "#/$defs/sha256"},
+    "manifest_canonical_sha256": {"$ref": "#/$defs/sha256"},
+    "query_v4_keyring_raw_sha256": {"$ref": "#/$defs/sha256"},
+    "query_v4_keyring_canonical_sha256": {"$ref": "#/$defs/sha256"},
+    "audit_child_invocation_raw_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    "audit_child_invocation_canonical_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    "pre_connect_gate_raw_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    "pre_connect_gate_canonical_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    "query_child_invocation_raw_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    "query_child_invocation_canonical_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    "child_exit_code": {"type": ["integer", "null"], "minimum": -255, "maximum": 255},
+    "started_at": {"$ref": "#/$defs/dateTime"},
+    "final_revalidation_at": {"type": ["string", "null"], "format": "date-time"},
+    "ended_at": {"$ref": "#/$defs/dateTime"},
+    "query_execution_state": {"enum": ["NOT_STARTED", "COMPLETED", "OUTCOME_UNKNOWN"]},
+    "production_query_attempted": {"type": "boolean"},
+    "production_query_completed": {"type": ["boolean", "null"]},
+    "artifact_sha256": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["audit_json", "audit_csv", "audit_markdown", "readonly_proof"],
+      "properties": {
+        "audit_json": {"$ref": "#/$defs/nullableSha256"},
+        "audit_csv": {"$ref": "#/$defs/nullableSha256"},
+        "audit_markdown": {"$ref": "#/$defs/nullableSha256"},
+        "readonly_proof": {"$ref": "#/$defs/nullableSha256"}
+      }
+    },
+    "p0_pass": {"type": ["boolean", "null"]},
+    "proof_verified": {"type": "boolean"},
+    "write_probe_attempted": {"const": false},
+    "database_mutations_observed": {"type": ["integer", "null"], "minimum": 0, "maximum": 0},
+    "web_bridge_rpc_calls": {"const": 0},
+    "orders_sent": {"const": 0},
+    "positions_modified": {"const": 0},
+    "dispatch_changed": {"const": false},
+    "terminal_is_authority": {"const": false},
+    "p0_acceptance_authorized": {"const": false},
+    "terminal_integrity_scope": {"const": "CREATE_ONLY_LOCAL_RECORD_REQUIRES_EXTERNAL_CUSTODY"},
+    "replay_allowed": {"const": false}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"terminal_state": {"enum": ["BLOCKED_FINAL_REVALIDATION_PRE_CHILD", "FAILED_CHILD_LAUNCH_PRE_QUERY"]}}},
+      "then": {
+        "properties": {
+          "error_code": {"type": "string"},
+          "child_exit_code": {"type": "null"},
+          "query_execution_state": {"const": "NOT_STARTED"},
+          "production_query_attempted": {"const": false},
+          "production_query_completed": {"const": false},
+          "query_child_launch_marker_raw_sha256": {"$ref": "#/$defs/nullableSha256"},
+          "query_child_launch_marker_canonical_sha256": {"$ref": "#/$defs/nullableSha256"},
+          "p0_pass": {"type": "null"},
+          "proof_verified": {"const": false},
+          "database_mutations_observed": {"type": "null"}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"terminal_state": {"const": "COMPLETED_EVIDENCE_P0_PASS"}}},
+      "then": {
+        "properties": {
+          "error_code": {"type": "null"},
+          "child_exit_code": {"const": 0},
+          "query_execution_state": {"const": "COMPLETED"},
+          "production_query_attempted": {"const": true},
+          "production_query_completed": {"const": true},
+          "p0_pass": {"const": true},
+          "proof_verified": {"const": true},
+          "database_mutations_observed": {"const": 0},
+          "query_child_launch_marker_raw_sha256": {"$ref": "#/$defs/sha256"},
+          "query_child_launch_marker_canonical_sha256": {"$ref": "#/$defs/sha256"},
+          "launch_marker_identity_sha256": {"$ref": "#/$defs/sha256"},
+          "launch_capability_binding_sha256": {"$ref": "#/$defs/sha256"},
+          "audit_child_invocation_raw_sha256": {"$ref": "#/$defs/sha256"},
+          "audit_child_invocation_canonical_sha256": {"$ref": "#/$defs/sha256"},
+          "pre_connect_gate_raw_sha256": {"$ref": "#/$defs/sha256"},
+          "pre_connect_gate_canonical_sha256": {"$ref": "#/$defs/sha256"},
+          "query_child_invocation_raw_sha256": {"$ref": "#/$defs/sha256"},
+          "query_child_invocation_canonical_sha256": {"$ref": "#/$defs/sha256"},
+          "final_revalidation_at": {"type": "string", "format": "date-time"},
+          "artifact_sha256": {"$ref": "#/$defs/completeArtifactHashes"}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"terminal_state": {"const": "COMPLETED_EVIDENCE_P0_BLOCKED"}}},
+      "then": {
+        "properties": {
+          "error_code": {"type": "null"},
+          "child_exit_code": {"const": 1},
+          "query_execution_state": {"const": "COMPLETED"},
+          "production_query_attempted": {"const": true},
+          "production_query_completed": {"const": true},
+          "p0_pass": {"const": false},
+          "proof_verified": {"const": true},
+          "database_mutations_observed": {"const": 0},
+          "query_child_launch_marker_raw_sha256": {"$ref": "#/$defs/sha256"},
+          "query_child_launch_marker_canonical_sha256": {"$ref": "#/$defs/sha256"},
+          "launch_marker_identity_sha256": {"$ref": "#/$defs/sha256"},
+          "launch_capability_binding_sha256": {"$ref": "#/$defs/sha256"},
+          "audit_child_invocation_raw_sha256": {"$ref": "#/$defs/sha256"},
+          "audit_child_invocation_canonical_sha256": {"$ref": "#/$defs/sha256"},
+          "pre_connect_gate_raw_sha256": {"$ref": "#/$defs/sha256"},
+          "pre_connect_gate_canonical_sha256": {"$ref": "#/$defs/sha256"},
+          "query_child_invocation_raw_sha256": {"$ref": "#/$defs/sha256"},
+          "query_child_invocation_canonical_sha256": {"$ref": "#/$defs/sha256"},
+          "final_revalidation_at": {"type": "string", "format": "date-time"},
+          "artifact_sha256": {"$ref": "#/$defs/completeArtifactHashes"}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"terminal_state": {"enum": ["FAILED_CHILD", "FAILED_OUTPUT_VALIDATION"]}}},
+      "then": {
+        "properties": {
+          "error_code": {"type": "string"},
+          "query_execution_state": {"const": "OUTCOME_UNKNOWN"},
+          "production_query_attempted": {"const": true},
+          "production_query_completed": {"type": "null"},
+          "p0_pass": {"type": "null"},
+          "proof_verified": {"const": false},
+          "database_mutations_observed": {"type": "null"},
+          "query_child_launch_marker_raw_sha256": {"$ref": "#/$defs/sha256"},
+          "query_child_launch_marker_canonical_sha256": {"$ref": "#/$defs/sha256"},
+          "launch_marker_identity_sha256": {"$ref": "#/$defs/sha256"},
+          "launch_capability_binding_sha256": {"$ref": "#/$defs/sha256"},
+          "audit_child_invocation_raw_sha256": {"$ref": "#/$defs/sha256"},
+          "audit_child_invocation_canonical_sha256": {"$ref": "#/$defs/sha256"},
+          "pre_connect_gate_raw_sha256": {"$ref": "#/$defs/sha256"},
+          "pre_connect_gate_canonical_sha256": {"$ref": "#/$defs/sha256"},
+          "query_child_invocation_raw_sha256": {"$ref": "#/$defs/sha256"},
+          "query_child_invocation_canonical_sha256": {"$ref": "#/$defs/sha256"},
+          "final_revalidation_at": {"type": "string", "format": "date-time"}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"terminal_state": {"enum": ["TIMED_OUT_OUTCOME_UNKNOWN", "INTERRUPTED_OUTCOME_UNKNOWN"]}}},
+      "then": {
+        "properties": {
+          "error_code": {"type": "string"},
+          "child_exit_code": {"type": "null"},
+          "query_execution_state": {"const": "OUTCOME_UNKNOWN"},
+          "production_query_attempted": {"const": true},
+          "production_query_completed": {"type": "null"},
+          "p0_pass": {"type": "null"},
+          "proof_verified": {"const": false},
+          "database_mutations_observed": {"type": "null"},
+          "query_child_launch_marker_raw_sha256": {"$ref": "#/$defs/sha256"},
+          "query_child_launch_marker_canonical_sha256": {"$ref": "#/$defs/sha256"},
+          "launch_marker_identity_sha256": {"$ref": "#/$defs/sha256"},
+          "launch_capability_binding_sha256": {"$ref": "#/$defs/sha256"},
+          "audit_child_invocation_raw_sha256": {"$ref": "#/$defs/sha256"},
+          "audit_child_invocation_canonical_sha256": {"$ref": "#/$defs/sha256"},
+          "pre_connect_gate_raw_sha256": {"$ref": "#/$defs/sha256"},
+          "pre_connect_gate_canonical_sha256": {"$ref": "#/$defs/sha256"},
+          "query_child_invocation_raw_sha256": {"$ref": "#/$defs/sha256"},
+          "query_child_invocation_canonical_sha256": {"$ref": "#/$defs/sha256"},
+          "final_revalidation_at": {"type": "string", "format": "date-time"}
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[A-Za-z0-9._-]{8,128}$"},
+    "attemptId": {"type": "string", "pattern": "^attempt-[0-9a-f]{64}$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "nullableSha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    "completeArtifactHashes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["audit_json", "audit_csv", "audit_markdown", "readonly_proof"],
+      "properties": {
+        "audit_json": {"$ref": "#/$defs/sha256"},
+        "audit_csv": {"$ref": "#/$defs/sha256"},
+        "audit_markdown": {"$ref": "#/$defs/sha256"},
+        "readonly_proof": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "dateTime": {"type": "string", "format": "date-time"}
+  }
+}
