@@ -5,8 +5,11 @@
   "frozen_rule_id": "commodity_fast_tsmom_forward_freeze_v1",
   "frozen_rule_sha256": "d9a6ef4ffb6d74fe0feee8ac8935acbeb79abd4686581611f14135eb5c41040a",
   "consumer": {
-    "audited_main_commit": "4e16dfe69e58b1110c5e8b379f5e7fb26eaaf487",
+    "audited_main_commit": "d2ea96b514b0a43f02a211a463487ca4ce41f609",
     "path": "scripts/commodity_c_fast_pure_producer_kernel.py",
+    "source_sha256": "23539d801d6ee9ddccd0371c3793282eeedf63b13dd442f9447adc795bc1d995",
+    "sector_map_id": "COMMODITY_FROZEN_SECTOR_MAP_V1",
+    "sector_map_sha256": "974a8eadcf947d18cc203e3c3c71f57a9b579fc556597df5bf9b3ea5b79945f7",
     "lineage": {
       "market_only_curve_panel_source_sha256": "bd3d8f673bed08ea589aceafab2a9fceae2e658c4ae59266677000ae78d9ad2a",
       "fast_tsmom_signal_source_sha256": "7ebe1529173b46cbae17680d872680c7bb7bae39863d09b2d9a37183828a43a9",

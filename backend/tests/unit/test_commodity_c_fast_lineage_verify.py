@@ -40,7 +40,9 @@ def test_committed_lineage_bundle_verifies() -> None:
     assert verifier.verify_bundle(BUNDLE) == {
         "status": "PASS",
         "archive_files": 15,
+        "consumer_source_hashes": 1,
         "source_lineage_hashes": 5,
+        "sector_map_products": 10,
         "authority_fields_false": 10,
     }
 
@@ -121,5 +123,92 @@ def test_consumer_identity_drift_fails_closed(tmp_path: Path) -> None:
     with pytest.raises(
         verifier.LineageVerificationError,
         match="consumer path mismatch",
+    ):
+        verifier.verify_bundle(bundle)
+
+
+def test_consumer_audited_commit_drift_fails_closed(tmp_path: Path) -> None:
+    bundle = _copy_bundle(tmp_path)
+    manifest = _manifest(bundle)
+    manifest["consumer"]["audited_main_commit"] = "0" * 40
+    _write_manifest(bundle, manifest)
+
+    with pytest.raises(
+        verifier.LineageVerificationError,
+        match="consumer audited commit mismatch",
+    ):
+        verifier.verify_bundle(bundle)
+
+
+def test_manifest_consumer_source_hash_drift_fails_closed(tmp_path: Path) -> None:
+    bundle = _copy_bundle(tmp_path)
+    manifest = _manifest(bundle)
+    manifest["consumer"]["source_sha256"] = "0" * 64
+    _write_manifest(bundle, manifest)
+
+    with pytest.raises(
+        verifier.LineageVerificationError,
+        match="manifest consumer source sha256 mismatch",
+    ):
+        verifier.verify_bundle(bundle)
+
+
+def test_live_consumer_source_drift_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_root = tmp_path / "root"
+    consumer = fake_root / verifier.CONSUMER_PATH
+    consumer.parent.mkdir(parents=True)
+    shutil.copy2(ROOT / verifier.CONSUMER_PATH, consumer)
+    consumer.write_bytes(consumer.read_bytes() + b"\n# drift\n")
+    monkeypatch.setattr(verifier, "ROOT", fake_root)
+
+    with pytest.raises(
+        verifier.LineageVerificationError,
+        match="live consumer source sha256 mismatch",
+    ):
+        verifier.verify_bundle(BUNDLE)
+
+
+def test_missing_live_consumer_source_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(verifier, "ROOT", tmp_path / "missing-root")
+
+    with pytest.raises(
+        verifier.LineageVerificationError,
+        match="live consumer source is missing or unsafe",
+    ):
+        verifier.verify_bundle(BUNDLE)
+
+
+def test_symlinked_live_consumer_source_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_root = tmp_path / "root"
+    consumer = fake_root / verifier.CONSUMER_PATH
+    consumer.parent.mkdir(parents=True)
+    consumer.symlink_to(ROOT / verifier.CONSUMER_PATH)
+    monkeypatch.setattr(verifier, "ROOT", fake_root)
+
+    with pytest.raises(
+        verifier.LineageVerificationError,
+        match="live consumer source is missing or unsafe",
+    ):
+        verifier.verify_bundle(BUNDLE)
+
+
+def test_consumer_sector_map_identity_drift_fails_closed(tmp_path: Path) -> None:
+    bundle = _copy_bundle(tmp_path)
+    manifest = _manifest(bundle)
+    manifest["consumer"]["sector_map_id"] = "UNRELATED_MAP"
+    _write_manifest(bundle, manifest)
+
+    with pytest.raises(
+        verifier.LineageVerificationError,
+        match="manifest consumer sector map id mismatch",
     ):
         verifier.verify_bundle(bundle)

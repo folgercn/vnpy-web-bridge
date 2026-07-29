@@ -2,14 +2,14 @@
 
 ## 结论
 
-审计基准：`main@4e16dfe69e58b1110c5e8b379f5e7fb26eaaf487`。
+审计基准：`main@d2ea96b514b0a43f02a211a463487ca4ce41f609`。
 
 结论为：
 
 ```text
 EXECUTION_CONSUMER_COMPLETE_ENOUGH
 RESEARCH_REPRODUCTION_INCOMPLETE
-FROZEN_SECTOR_MAP_PARITY_FAILED
+FROZEN_SECTOR_MAP_PARITY_RESTORED
 ```
 
 当前 `main` 已能安全消费研究侧签名的 `STATIC_CORE_EQUAL` 整数目标，并完成
@@ -24,7 +24,7 @@ SimNow 两阶段派单、换月、对账和执行质量记录；但不能只依�
 |---|---|---|
 | scheduler 身份、十品种、月频、20m NAV | schema/service 中固定 | 完整 |
 | `50%C + 50%D` 权重元数据 | 批次验签后固定校验 | 完整 |
-| guardband `12%/27%/80%/0` | 批次和仓位管理均校验 | 参数完整，但主策略 sector map 有偏差 |
+| guardband `12%/27%/80%/0` | 批次和仓位管理均校验 | 参数与冻结 sector map 完整 |
 | beam allocator `radius=2/width=2048/net penalty=1` | schema Literal 固定 | 参数完整 |
 | beam 整数最优化重算 | 不重算；消费签名手数并校验硬上限 | 缺失 |
 | C_FAST 信号 producer | 独立 pure producer kernel 已存在 | C 腿完整，但未生成主组合 |
@@ -91,7 +91,7 @@ producer。`candidate_weights={C:0.5,D:0.5}` 只是已签名批次的身份元�
 scale，并重算 guardband；但不会从官方日收益生成 21/126 日波动，也不会对
 shadow 手数运行冻结整数 optimizer。
 
-## P0：sector map 与本地冻结规则不一致
+## 已修复：sector map 与本地冻结规则一致
 
 原冻结研究使用：
 
@@ -101,36 +101,23 @@ ru -> energy_chemical
 sp -> light_industry
 ```
 
-仓位管理 shadow 已通过 `POSITION_MANAGER_SECTOR_MAP_V1` 使用上述映射。
+Issue [#183](https://github.com/folgercn/vnpy-web-bridge/issues/183) 已由
+PR [#187](https://github.com/folgercn/vnpy-web-bridge/pull/187) 修复并合入
+`main`。主策略、position manager 与 C_FAST runtime 现在都从
+`COMMODITY_FROZEN_SECTOR_MAP_V1` 取得同一不可变身份；standalone producer
+显式声明相同 `SECTOR_MAP_ID`。
 
-主策略批次和实时敞口校验使用的 `PRODUCT_SPECS` 却是：
+回归覆盖：
 
-```text
-bu -> energy
-ru -> chemicals
-sp -> agriculture
-```
+1. 三条 runtime lane 和 standalone producer 的十品种 frozen-map parity。
+2. `bu + ru` source gross 超过 35% 时 fail closed，恰好 35% 时通过。
+3. source、buffer、integer exposure 的十品种 golden parity。
+4. 已完成签名目标的 persisted state 在迁移后只读兼容，不被重写。
 
-这会把本应合并计算的 `bu + ru` 板块风险拆开，使三层 sector-cap 身份与
-冻结研究不一致。可实际构造的接受差异发生在 source 35% cap：例如
-`bu=+20%`、`ru=+20%`，再用两个其他板块各 `-20%` 恢复净额零；当前远端
-映射会让每个板块都不超过 20%，原冻结映射则应把 `bu+ru=40%` 判为超限。
-
-buffer 与 integer 层虽然分类身份也不同，但在当前十品种中，`bu/ru` 各自的
-12% buffer product cap 和 `<15%` integer product cap 会把两者合计分别限制
-在 24% 和 `<30%`，数值上已经低于对应 27%/35% sector cap；因此本次没有把
-它误报为可直接放大的成交风险。问题仍会破坏 source target 的冻结算法 parity。
-
-在修复前，不应声称主候选已经实现冻结参数的全链路 parity。修复必须单独开
-Issue/PR，并补：
-
-1. 主策略、position manager、C_FAST producer 共用同一个冻结 sector-map 身份。
-2. `bu + ru` source weights 联合越过 35% 时 fail closed 的 failure-path 测试。
-3. 十品种 source、buffer、integer exposure 的本地冻结 golden parity。
-4. 已有签名目标在新映射下的兼容性审计。
-
-该修复会影响 Execution Plane 的批次接受语义，不能在本 Research-only PR
-中顺手修改。
+因此此前可构造的 `bu=+20%`、`ru=+20%` source acceptance gap 已关闭。
+外部签名 schema 仍保留 lane-specific 历史 ID，以避免无关 schema 迁移；
+内部实际校验统一使用冻结 identity。该修复不改变 auto-dispatch 默认值、
+SimNow 白名单、两阶段派单或 `production=false` 边界。
 
 ## 远端协作者仍需要什么
 
@@ -148,8 +135,9 @@ Issue/PR，并补：
 
 ## 建议关键路径
 
-1. P0：[#183](https://github.com/folgercn/vnpy-web-bridge/issues/183)
-   单独修复 sector-map parity。
+1. 已完成：[#183](https://github.com/folgercn/vnpy-web-bridge/issues/183)
+   / [PR #187](https://github.com/folgercn/vnpy-web-bridge/pull/187)
+   恢复 sector-map parity。
 2. P1：[#184](https://github.com/folgercn/vnpy-web-bridge/issues/184)
    补 D 与 STATIC_CORE_EQUAL composite pure producer。
 3. P1：[#185](https://github.com/folgercn/vnpy-web-bridge/issues/185)

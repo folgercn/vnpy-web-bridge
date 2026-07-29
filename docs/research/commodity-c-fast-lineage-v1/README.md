@@ -19,8 +19,12 @@ producer kernel 直接绑定的五份原始研究源码、对应测试快照，�
 - 为后续独立重放、差异审计和 sealed-export 验收提供稳定 provenance。
 
 同仓库消费者是 `scripts/commodity_c_fast_pure_producer_kernel.py`。本次以
-`main@4e16dfe69e58b1110c5e8b379f5e7fb26eaaf487` 为审计基准；其中
-`LINEAGE` 五个 SHA256 与本目录 `sources/` 五份源码逐项一致。
+`main@d2ea96b514b0a43f02a211a463487ca4ce41f609` 为审计基准；其中
+`LINEAGE` 五个 SHA256 与本目录 `sources/` 五份源码逐项一致。manifest
+还固定 consumer 完整源码 SHA256，以及 PR
+[#187](https://github.com/folgercn/vnpy-web-bridge/pull/187) 合并后的
+`COMMODITY_FROZEN_SECTOR_MAP_V1` 身份和十品种映射哈希；任一漂移都会
+fail closed。
 
 SHA256 一致只证明 producer kernel 明确绑定了这些原始研究源码的身份，不
 表示两者逐字节相同。producer kernel 是面向严格 typed source view 的独立、

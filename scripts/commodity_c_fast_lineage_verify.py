@@ -8,7 +8,6 @@ import ast
 import hashlib
 import json
 from pathlib import Path, PurePosixPath
-import re
 from typing import Any
 
 
@@ -25,6 +24,26 @@ FROZEN_RULE_SHA256 = (
     "d9a6ef4ffb6d74fe0feee8ac8935acbeb79abd4686581611f14135eb5c41040a"
 )
 CONSUMER_PATH = "scripts/commodity_c_fast_pure_producer_kernel.py"
+AUDITED_MAIN_COMMIT = "d2ea96b514b0a43f02a211a463487ca4ce41f609"
+CONSUMER_SOURCE_SHA256 = (
+    "23539d801d6ee9ddccd0371c3793282eeedf63b13dd442f9447adc795bc1d995"
+)
+SECTOR_MAP_ID = "COMMODITY_FROZEN_SECTOR_MAP_V1"
+SECTOR_MAP = {
+    "ag": "precious",
+    "al": "nonferrous",
+    "au": "precious",
+    "bu": "energy_chemical",
+    "cu": "nonferrous",
+    "rb": "ferrous",
+    "ru": "energy_chemical",
+    "sc": "energy",
+    "sp": "light_industry",
+    "zn": "nonferrous",
+}
+SECTOR_MAP_SHA256 = (
+    "974a8eadcf947d18cc203e3c3c71f57a9b579fc556597df5bf9b3ea5b79945f7"
+)
 SOURCE_LINEAGE = {
     "market_only_curve_panel_source_sha256": (
         "sources/commodity_market_only_curve_panel_v1.py"
@@ -69,6 +88,16 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def sha256_canonical_json(value: Any) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _load_json(path: Path, label: str) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -105,6 +134,8 @@ def _consumer_constants(path: Path) -> dict[str, Any]:
         "FROZEN_RULE_ID",
         "FROZEN_RULE_SHA256",
         "LINEAGE",
+        "SECTOR_MAP_ID",
+        "SECTOR_MAP",
     }
     values: dict[str, Any] = {}
     for node in tree.body:
@@ -187,11 +218,14 @@ def verify_bundle(bundle_dir: Path = DEFAULT_BUNDLE_DIR) -> dict[str, Any]:
         raise LineageVerificationError("consumer lineage is missing")
     if consumer.get("path") != CONSUMER_PATH:
         raise LineageVerificationError("consumer path mismatch")
-    if not re.fullmatch(
-        r"[0-9a-f]{40}",
-        str(consumer.get("audited_main_commit", "")),
-    ):
-        raise LineageVerificationError("consumer audited commit is invalid")
+    if consumer.get("audited_main_commit") != AUDITED_MAIN_COMMIT:
+        raise LineageVerificationError("consumer audited commit mismatch")
+    if consumer.get("source_sha256") != CONSUMER_SOURCE_SHA256:
+        raise LineageVerificationError("manifest consumer source sha256 mismatch")
+    if consumer.get("sector_map_id") != SECTOR_MAP_ID:
+        raise LineageVerificationError("manifest consumer sector map id mismatch")
+    if consumer.get("sector_map_sha256") != SECTOR_MAP_SHA256:
+        raise LineageVerificationError("manifest consumer sector map sha256 mismatch")
     remote_lineage = consumer["lineage"]
     if set(remote_lineage) != set(SOURCE_LINEAGE):
         raise LineageVerificationError("consumer lineage fields mismatch")
@@ -200,7 +234,16 @@ def verify_bundle(bundle_dir: Path = DEFAULT_BUNDLE_DIR) -> dict[str, Any]:
             raise LineageVerificationError(
                 f"consumer lineage mismatch: {consumer_key}"
             )
-    live_consumer = _consumer_constants(ROOT / CONSUMER_PATH)
+    consumer_path = ROOT / CONSUMER_PATH
+    if consumer_path.is_symlink() or not consumer_path.is_file():
+        raise LineageVerificationError("live consumer source is missing or unsafe")
+    try:
+        consumer_digest = sha256_file(consumer_path)
+    except OSError as exc:
+        raise LineageVerificationError("live consumer source is unreadable") from exc
+    if consumer_digest != CONSUMER_SOURCE_SHA256:
+        raise LineageVerificationError("live consumer source sha256 mismatch")
+    live_consumer = _consumer_constants(consumer_path)
     if live_consumer["CANDIDATE_ID"] != CANDIDATE_ID:
         raise LineageVerificationError("live consumer candidate id mismatch")
     if live_consumer["FROZEN_RULE_ID"] != FROZEN_RULE_ID:
@@ -209,6 +252,12 @@ def verify_bundle(bundle_dir: Path = DEFAULT_BUNDLE_DIR) -> dict[str, Any]:
         raise LineageVerificationError("live consumer frozen rule sha256 mismatch")
     if live_consumer["LINEAGE"] != remote_lineage:
         raise LineageVerificationError("live consumer lineage mismatch")
+    if live_consumer["SECTOR_MAP_ID"] != SECTOR_MAP_ID:
+        raise LineageVerificationError("live consumer sector map id mismatch")
+    if live_consumer["SECTOR_MAP"] != SECTOR_MAP:
+        raise LineageVerificationError("live consumer sector map mismatch")
+    if sha256_canonical_json(live_consumer["SECTOR_MAP"]) != SECTOR_MAP_SHA256:
+        raise LineageVerificationError("live consumer sector map sha256 mismatch")
 
     freeze = _load_json(
         bundle_dir / "freeze/freeze_contract.json",
@@ -249,7 +298,9 @@ def verify_bundle(bundle_dir: Path = DEFAULT_BUNDLE_DIR) -> dict[str, Any]:
     return {
         "status": "PASS",
         "archive_files": len(observed),
+        "consumer_source_hashes": 1,
         "source_lineage_hashes": len(SOURCE_LINEAGE),
+        "sector_map_products": len(SECTOR_MAP),
         "authority_fields_false": len(AUTHORITY_FIELDS),
     }
 
@@ -274,7 +325,9 @@ def main() -> int:
     print(
         "PASS: "
         f"{result['archive_files']} archived files; "
+        f"{result['consumer_source_hashes']} consumer source hash; "
         f"{result['source_lineage_hashes']} consumer lineage hashes; "
+        f"{result['sector_map_products']} sector-map products; "
         f"{result['authority_fields_false']} authority fields false"
     )
     return 0
