@@ -18,6 +18,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import commodity_c_fast_pure_producer_kernel as producer
 import commodity_c_fast_simnow_research_bundle as bundle
+import research_warehouse.sealed_export_custody as custody
 from research_warehouse.canonical import (
     canonical_json_line,
     sha256,
@@ -61,6 +62,10 @@ def export_inputs(tmp_path: Path):
     fixture = _producer_fixture_module()
     source = fixture.source_view()
     produced = producer.produce_research_artifacts(source)
+    source_view_path = _private_file(
+        tmp_path / "source-view.json",
+        producer.canonical_json(source),
+    )
     source_root = tmp_path / "producer-artifacts"
     source_root.mkdir(mode=0o700)
     artifact_paths = {
@@ -122,6 +127,7 @@ def export_inputs(tmp_path: Path):
     export_root.mkdir(mode=0o700)
     return {
         "artifact_paths": artifact_paths,
+        "source_view_path": source_view_path,
         "lineage": lineage,
         "lineage_path": lineage_path,
         "lineage_raw": lineage_raw,
@@ -137,6 +143,7 @@ def create_export(tmp_path: Path):
     values = export_inputs(tmp_path)
     verified = create_sealed_export(
         artifact_paths=values["artifact_paths"],
+        source_view_path=values["source_view_path"],
         lineage_path=values["lineage_path"],
         expected_lineage_raw_sha256=sha256(values["lineage_raw"]),
         keyring_path=values["keyring_path"],
@@ -219,6 +226,7 @@ def test_create_only_and_late_source_revision_do_not_rewrite_export(
                 **values["artifact_paths"],
                 "signal_evidence": verified.output / "signal_evidence.json",
             },
+            source_view_path=values["source_view_path"],
             lineage_path=values["lineage_path"],
             expected_lineage_raw_sha256=sha256(values["lineage_raw"]),
             keyring_path=values["keyring_path"],
@@ -282,6 +290,7 @@ def test_source_splice_and_future_lineage_fail_before_signing(tmp_path: Path) ->
     with pytest.raises(RegistryError, match="common lineage mismatch"):
         create_sealed_export(
             artifact_paths=values["artifact_paths"],
+            source_view_path=values["source_view_path"],
             lineage_path=values["lineage_path"],
             expected_lineage_raw_sha256=sha256(values["lineage_raw"]),
             keyring_path=values["keyring_path"],
@@ -299,6 +308,7 @@ def test_source_splice_and_future_lineage_fail_before_signing(tmp_path: Path) ->
     with pytest.raises(RegistryError, match="PIT/date lineage mismatch"):
         create_sealed_export(
             artifact_paths=values["artifact_paths"],
+            source_view_path=values["source_view_path"],
             lineage_path=values["lineage_path"],
             expected_lineage_raw_sha256=sha256(raw),
             keyring_path=values["keyring_path"],
@@ -319,6 +329,7 @@ def test_missing_duplicate_inode_symlink_and_wrong_signer_fail_closed(
     with pytest.raises(RegistryError, match="role order/set"):
         create_sealed_export(
             artifact_paths=missing,
+            source_view_path=values["source_view_path"],
             lineage_path=values["lineage_path"],
             expected_lineage_raw_sha256=sha256(values["lineage_raw"]),
             keyring_path=values["keyring_path"],
@@ -333,6 +344,7 @@ def test_missing_duplicate_inode_symlink_and_wrong_signer_fail_closed(
     with pytest.raises(RegistryError, match="distinct inodes"):
         create_sealed_export(
             artifact_paths=duplicate,
+            source_view_path=values["source_view_path"],
             lineage_path=values["lineage_path"],
             expected_lineage_raw_sha256=sha256(values["lineage_raw"]),
             keyring_path=values["keyring_path"],
@@ -347,6 +359,7 @@ def test_missing_duplicate_inode_symlink_and_wrong_signer_fail_closed(
     with pytest.raises(RegistryError, match="symlink-free"):
         create_sealed_export(
             artifact_paths=values["artifact_paths"],
+            source_view_path=values["source_view_path"],
             lineage_path=symlink,
             expected_lineage_raw_sha256=sha256(values["lineage_raw"]),
             keyring_path=values["keyring_path"],
@@ -368,6 +381,7 @@ def test_missing_duplicate_inode_symlink_and_wrong_signer_fail_closed(
     with pytest.raises(RegistryError, match="private key is not trusted"):
         create_sealed_export(
             artifact_paths=values["artifact_paths"],
+            source_view_path=values["source_view_path"],
             lineage_path=values["lineage_path"],
             expected_lineage_raw_sha256=sha256(values["lineage_raw"]),
             keyring_path=values["keyring_path"],
@@ -377,6 +391,128 @@ def test_missing_duplicate_inode_symlink_and_wrong_signer_fail_closed(
             export_root=values["export_root"],
             now=datetime(2026, 8, 3, 2, 5, tzinfo=UTC),
         )
+
+
+def test_consistent_artifact_forgery_fails_exact_producer_replay(
+    tmp_path: Path,
+) -> None:
+    values = export_inputs(tmp_path)
+    forged_contract = "SHFE.ag9999"
+    row_fields = {
+        "target_evidence": ("targets", "exact_contract"),
+        "signal_evidence": ("signals", "pit_main_exact_contract"),
+        "daily_roll_evidence": ("rows", "pit_main_exact_contract"),
+        "reference_price_evidence": ("rows", "exact_contract"),
+        "contract_spec_evidence": ("rows", "exact_contract"),
+    }
+    for role, (rows_field, contract_field) in row_fields.items():
+        path = values["artifact_paths"][role]
+        payload = json.loads(path.read_bytes())
+        row = next(item for item in payload[rows_field] if item["product"] == "ag")
+        row[contract_field] = forged_contract
+        if role == "target_evidence":
+            row["target_quantity"] = "not-an-integer"
+        _private_file(
+            path,
+            json.dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode(),
+        )
+    allocation = values["artifact_paths"]["allocation_evidence"]
+    payload = json.loads(allocation.read_bytes())
+    payload["quantities"]["ag"] = "not-an-integer"
+    _private_file(
+        allocation,
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(),
+    )
+    with pytest.raises(RegistryError, match="exact #163 replay"):
+        create_sealed_export(
+            artifact_paths=values["artifact_paths"],
+            source_view_path=values["source_view_path"],
+            lineage_path=values["lineage_path"],
+            expected_lineage_raw_sha256=sha256(values["lineage_raw"]),
+            keyring_path=values["keyring_path"],
+            expected_keyring_raw_sha256=sha256(values["keyring_raw"]),
+            signer_key_id="sealed-export-key-v1",
+            private_key_path=values["private_path"],
+            export_root=values["export_root"],
+            now=datetime(2026, 8, 3, 2, 5, tzinfo=UTC),
+        )
+
+
+def test_root_and_output_directory_replacement_races_fail_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    values = export_inputs(tmp_path / "root-race")
+    original_open_bound = custody._open_bound_directory
+    raced = False
+
+    def replace_root(path, label, *, expected_identity=None):
+        nonlocal raced
+        if label == "sealed export root" and not raced:
+            raced = True
+            displaced = path.with_name(path.name + "-displaced")
+            path.rename(displaced)
+            path.mkdir(mode=0o700)
+        return original_open_bound(
+            path,
+            label,
+            expected_identity=expected_identity,
+        )
+
+    monkeypatch.setattr(custody, "_open_bound_directory", replace_root)
+    with pytest.raises(RegistryError, match="changed while being opened"):
+        create_sealed_export(
+            artifact_paths=values["artifact_paths"],
+            source_view_path=values["source_view_path"],
+            lineage_path=values["lineage_path"],
+            expected_lineage_raw_sha256=sha256(values["lineage_raw"]),
+            keyring_path=values["keyring_path"],
+            expected_keyring_raw_sha256=sha256(values["keyring_raw"]),
+            signer_key_id="sealed-export-key-v1",
+            private_key_path=values["private_path"],
+            export_root=values["export_root"],
+            now=datetime(2026, 8, 3, 2, 5, tzinfo=UTC),
+        )
+    assert not list(values["export_root"].glob("*/sealed-export-receipt.json"))
+
+    monkeypatch.setattr(custody, "_open_bound_directory", original_open_bound)
+    values = export_inputs(tmp_path / "output-race")
+    original_os_open = custody.os.open
+    output_raced = False
+
+    def replace_output(path, flags, *args, **kwargs):
+        nonlocal output_raced
+        if (
+            not output_raced
+            and isinstance(path, str)
+            and path.startswith("sealed-export-")
+            and flags & getattr(custody.os, "O_DIRECTORY", 0)
+        ):
+            output_raced = True
+            output = values["export_root"] / path
+            output.rename(values["export_root"] / "displaced-output")
+            output.mkdir(mode=0o700)
+        return original_os_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(custody.os, "open", replace_output)
+    with pytest.raises(RegistryError, match="changed while being opened"):
+        create_sealed_export(
+            artifact_paths=values["artifact_paths"],
+            source_view_path=values["source_view_path"],
+            lineage_path=values["lineage_path"],
+            expected_lineage_raw_sha256=sha256(values["lineage_raw"]),
+            keyring_path=values["keyring_path"],
+            expected_keyring_raw_sha256=sha256(values["keyring_raw"]),
+            signer_key_id="sealed-export-key-v1",
+            private_key_path=values["private_path"],
+            export_root=values["export_root"],
+            now=datetime(2026, 8, 3, 2, 5, tzinfo=UTC),
+        )
+    assert not list(values["export_root"].glob("*/sealed-export-receipt.json"))
 
 
 def test_consumer_layer_has_no_warehouse_db_or_execution_imports() -> None:

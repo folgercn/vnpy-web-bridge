@@ -28,6 +28,7 @@ def parser() -> argparse.ArgumentParser:
     commands = result.add_subparsers(dest="command", required=True)
     create = commands.add_parser("create")
     _artifact_arguments(create)
+    create.add_argument("--source-view", type=Path, required=True)
     create.add_argument("--lineage", type=Path, required=True)
     create.add_argument("--expected-lineage-sha256", required=True)
     create.add_argument("--keyring", type=Path, required=True)
@@ -50,6 +51,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "create":
             verified = create_sealed_export(
                 artifact_paths=_artifact_paths(args),
+                source_view_path=args.source_view,
                 lineage_path=args.lineage,
                 expected_lineage_raw_sha256=args.expected_lineage_sha256,
                 keyring_path=args.keyring,

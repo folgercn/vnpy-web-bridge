@@ -4,7 +4,7 @@
   "additionalProperties": false,
   "required": [
     "schema_version", "export_id", "purpose", "created_at",
-    "lineage_raw_sha256", "lineage_sha256", "lineage",
+    "lineage_raw_sha256", "lineage_sha256", "lineage", "producer_replay",
     "artifact_index_sha256", "artifacts", "authority",
     "signer_key_id", "signer_public_key_sha256",
     "keyring_raw_sha256", "signature"
@@ -17,6 +17,7 @@
     "lineage_raw_sha256": {"$ref": "#/$defs/sha"},
     "lineage_sha256": {"$ref": "#/$defs/sha"},
     "lineage": {"$ref": "#/$defs/lineage"},
+    "producer_replay": {"$ref": "#/$defs/producer_replay"},
     "artifact_index_sha256": {"$ref": "#/$defs/sha"},
     "artifacts": {"$ref": "#/$defs/artifacts"},
     "authority": {"$ref": "#/$defs/authority"},
@@ -27,6 +28,20 @@
   },
   "$defs": {
     "sha": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "producer_replay": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status", "producer_kernel_id", "source_view_raw_sha256",
+        "source_view_canonical_sha256"
+      ],
+      "properties": {
+        "status": {"const": "EXACT_NINE_ARTIFACT_REPLAY_VERIFIED"},
+        "producer_kernel_id": {"const": "commodity_c_fast_pure_producer_kernel_v1"},
+        "source_view_raw_sha256": {"$ref": "#/$defs/sha"},
+        "source_view_canonical_sha256": {"$ref": "#/$defs/sha"}
+      }
+    },
     "lineage": {
       "type": "object",
       "additionalProperties": false,

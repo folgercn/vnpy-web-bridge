@@ -22,6 +22,7 @@ from .sealed_export_contracts import (
     artifact_bindings,
     derive_export_id,
     false_authority,
+    replay_exact_artifact_set,
     validate_artifact_set,
     validate_lineage,
 )
@@ -30,8 +31,7 @@ from .sealed_export_crypto import (
     verify_export_signature,
 )
 from .sealed_export_custody import (
-    create_export_directory,
-    publish_export,
+    create_and_publish_export,
     read_export_directory,
     read_source_artifacts,
     require_symlink_free_path,
@@ -47,6 +47,7 @@ MANIFEST_KEYS = {
     "lineage_raw_sha256",
     "lineage_sha256",
     "lineage",
+    "producer_replay",
     "artifact_index_sha256",
     "artifacts",
     "authority",
@@ -141,6 +142,7 @@ def _validate_receipt_shape(payload: object) -> dict[str, Any]:
 def create_sealed_export(
     *,
     artifact_paths: dict[str, Path],
+    source_view_path: Path,
     lineage_path: Path,
     expected_lineage_raw_sha256: str,
     keyring_path: Path,
@@ -152,14 +154,25 @@ def create_sealed_export(
 ) -> VerifiedSealedExport:
     created_at = require_utc(now, "sealed export created_at")
     require_symlink_free_path(lineage_path, "sealed export lineage")
+    require_symlink_free_path(source_view_path, "sealed export source view")
     require_symlink_free_path(keyring_path, "sealed export keyring")
     require_symlink_free_path(private_key_path, "sealed export private key")
     artifact_raw = read_source_artifacts(artifact_paths)
+    source_view_raw = read_regular_strict(
+        source_view_path,
+        "sealed export source view",
+        limit=16 * 1024 * 1024,
+    )
     lineage, lineage_sha = _load_lineage(
         lineage_path,
         expected_raw_sha256=expected_lineage_raw_sha256,
     )
     payloads = validate_artifact_set(artifact_raw, lineage=lineage)
+    producer_replay = replay_exact_artifact_set(
+        source_view_raw,
+        artifact_raw,
+        lineage=lineage,
+    )
     generated_at = max(
         datetime.fromisoformat(
             str(payload["generated_at"]).replace("Z", "+00:00")
@@ -190,6 +203,7 @@ def create_sealed_export(
         "lineage_raw_sha256": expected_lineage_raw_sha256,
         "lineage_sha256": lineage_sha,
         "lineage": lineage,
+        "producer_replay": producer_replay,
         "artifact_index_sha256": artifact_index,
         "artifacts": bindings,
         "authority": false_authority(),
@@ -235,9 +249,9 @@ def create_sealed_export(
     _validate_receipt_shape(receipt)
     verify_export_signature(receipt, trusted_key=trusted_key)
     receipt_raw = canonical_json_line(receipt)
-    output = create_export_directory(export_root, manifest["export_id"])
-    publish_export(
-        output,
+    output = create_and_publish_export(
+        export_root,
+        manifest["export_id"],
         artifact_raw=artifact_raw,
         manifest_raw=manifest_raw,
         receipt_raw=receipt_raw,
@@ -297,6 +311,25 @@ def verify_sealed_export(
     lineage = validate_lineage(manifest["lineage"])
     if sha256(canonical_json(lineage)) != manifest["lineage_sha256"]:
         raise RegistryError("sealed export lineage hash mismatch")
+    replay = manifest["producer_replay"]
+    if (
+        not isinstance(replay, dict)
+        or set(replay)
+        != {
+            "status",
+            "producer_kernel_id",
+            "source_view_raw_sha256",
+            "source_view_canonical_sha256",
+        }
+        or replay["status"] != "EXACT_NINE_ARTIFACT_REPLAY_VERIFIED"
+        or replay["producer_kernel_id"]
+        != "commodity_c_fast_pure_producer_kernel_v1"
+        or SHA256_PATTERN.fullmatch(str(replay["source_view_raw_sha256"]))
+        is None
+        or replay["source_view_canonical_sha256"]
+        != lineage["source_view_canonical_sha256"]
+    ):
+        raise RegistryError("sealed export producer replay claim mismatch")
     payloads = validate_artifact_set(artifact_raw, lineage=lineage)
     created_at = parse_utc(manifest["created_at"], "sealed export created_at")
     if created_at < parse_utc(lineage["pit_cutoff_at"], "sealed export PIT cutoff"):

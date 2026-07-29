@@ -10,6 +10,8 @@ a runtime snapshot, or grant Control/Execution authority.
 - `sealed_export_contracts.py` independently validates the nine canonical
   producer artifacts, their common source identity, ten-product
   cross-artifact contract/target agreement, PIT dates, and all-false authority.
+  Before signing it also re-runs the #163 pure producer from the exact stable
+  source-view bytes and requires all nine output byte strings to match.
 - `sealed_export_crypto.py` loads an externally SHA-pinned independent
   Ed25519 keyring and verifies signer/keyring identity.
 - `sealed_export_custody.py` performs stable, symlink-free reads and publishes
@@ -45,7 +47,8 @@ Each artifact binding carries filename, byte count, raw SHA-256, common
 lineage SHA-256, and PIT cutoff. The manifest binds the frozen source registry,
 calendar and calendar anchor, commit-anchor ledger, manifest
 genesis/head/head-commit seals, research as-of date, execution date, source
-view hash, and all nine exact byte identities. The signed receipt binds the
+view hash, exact source-view replay claim, and all nine exact byte identities.
+The signed receipt binds the
 exact manifest hash, artifact index, lineage hash, signer, and keyring.
 
 All source artifacts must be non-empty canonical #163 producer JSON, use
@@ -57,10 +60,12 @@ allocation, daily-roll, reference-price, and contract-spec evidence.
 ## Publication and replay
 
 The export root and directory are private, current-user-owned, normalized and
-symlink-free. The deterministic export directory is created with `mkdir`
-create-only semantics. Artifact files and the signed manifest use `O_EXCL`,
-file `fsync`, parent `fsync`, and strict readback. The signed receipt is
-published last and is the completion marker.
+symlink-free. Publication pins root and output directory device/inode identity
+and retains their directory descriptors for the whole operation. The
+deterministic directory is created with `mkdirat`; all files use the same
+output descriptor with `O_EXCL|O_NOFOLLOW`, file `fsync`, directory `fsync`,
+and descriptor-relative strict readback. Root/output path identities are
+rechecked before completion. The signed receipt is published last.
 
 An existing export ID is never overwritten. A failed partial publication has
 no valid receipt and cannot be consumed. A later warehouse revision or changed

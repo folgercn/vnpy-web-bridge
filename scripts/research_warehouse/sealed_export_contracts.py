@@ -12,6 +12,8 @@ from commodity_c_fast_pure_producer_kernel import (
     CANDIDATE_ID,
     KERNEL_ID,
     PRODUCTS,
+    ProducerKernelError,
+    produce_research_artifacts,
 )
 from commodity_c_fast_pure_producer_kernel import (
     FALSE_AUTHORITY_FIELDS as PRODUCER_FALSE_AUTHORITY_FIELDS,
@@ -301,6 +303,32 @@ def artifact_bindings(
             "pit_cutoff_at": pit_cutoff_at,
         }
         for role, raw in artifact_raw.items()
+    }
+
+
+def replay_exact_artifact_set(
+    source_view_raw: bytes,
+    artifact_raw: dict[str, bytes],
+    *,
+    lineage: dict[str, str],
+) -> dict[str, str]:
+    """Re-run #163 and require byte-for-byte equality for all nine outputs."""
+    try:
+        replay = produce_research_artifacts(source_view_raw)
+    except ProducerKernelError as exc:
+        raise RegistryError("sealed export source-view replay failed") from exc
+    if (
+        replay.source_view_canonical_sha256
+        != lineage["source_view_canonical_sha256"]
+    ):
+        raise RegistryError("sealed export replay source-view hash mismatch")
+    if dict(replay.artifacts) != artifact_raw:
+        raise RegistryError("sealed export artifacts differ from exact #163 replay")
+    return {
+        "status": "EXACT_NINE_ARTIFACT_REPLAY_VERIFIED",
+        "producer_kernel_id": KERNEL_ID,
+        "source_view_raw_sha256": sha256(source_view_raw),
+        "source_view_canonical_sha256": replay.source_view_canonical_sha256,
     }
 
 
