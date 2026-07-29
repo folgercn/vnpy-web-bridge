@@ -1,0 +1,610 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/folgercn/vnpy-web-bridge/docs/schemas/commodity-relative-vol-position-manager-source-view-v1.schema.json",
+  "title": "MONTHLY_RELATIVE_VOL_THERMOSTAT_V1 bounded PIT source view",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "purpose",
+    "status",
+    "source_view_id",
+    "snapshot_id",
+    "generated_at",
+    "cutoff_at",
+    "official_days",
+    "baseline_daily_returns",
+    "baseline_batch_hash",
+    "baseline_batch",
+    "continuity"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "commodity_relative_vol_position_manager_source_view_v1"
+    },
+    "purpose": {
+      "const": "VERIFIED_BOUNDED_PIT_BASELINE_INPUT_ONLY"
+    },
+    "status": {
+      "const": "VERIFIED_BOUNDED_PIT_BASELINE_VIEW"
+    },
+    "source_view_id": {
+      "$ref": "#/$defs/stable_id"
+    },
+    "snapshot_id": {
+      "$ref": "#/$defs/stable_id"
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "cutoff_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "official_days": {
+      "type": "array",
+      "minItems": 126,
+      "maxItems": 126,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "format": "date"
+      }
+    },
+    "baseline_daily_returns": {
+      "type": "array",
+      "minItems": 126,
+      "maxItems": 126,
+      "items": {
+        "$ref": "#/$defs/daily_return"
+      }
+    },
+    "baseline_batch_hash": {
+      "$ref": "#/$defs/sha256"
+    },
+    "baseline_batch": {
+      "$ref": "#/$defs/baseline_batch"
+    },
+    "continuity": {
+      "$ref": "#/$defs/continuity"
+    }
+  },
+  "$defs": {
+    "stable_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{8,128}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "signature": {
+      "type": "string",
+      "minLength": 88,
+      "maxLength": 88
+    },
+    "product": {
+      "enum": [
+        "ag",
+        "al",
+        "au",
+        "bu",
+        "cu",
+        "rb",
+        "ru",
+        "sc",
+        "sp",
+        "zn"
+      ]
+    },
+    "daily_return": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "official_day",
+        "daily_return"
+      ],
+      "properties": {
+        "official_day": {
+          "type": "string",
+          "format": "date"
+        },
+        "daily_return": {
+          "type": "number"
+        }
+      }
+    },
+    "candidate_weights": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "C",
+        "D"
+      ],
+      "properties": {
+        "C": {
+          "const": 0.5
+        },
+        "D": {
+          "const": 0.5
+        }
+      }
+    },
+    "guardband": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "product",
+        "sector",
+        "gross",
+        "target_net"
+      ],
+      "properties": {
+        "product": {
+          "const": 0.12
+        },
+        "sector": {
+          "const": 0.27
+        },
+        "gross": {
+          "const": 0.8
+        },
+        "target_net": {
+          "const": 0.0
+        }
+      }
+    },
+    "allocator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "algorithm_id",
+        "neighbourhood_radius_lots",
+        "beam_width",
+        "net_error_penalty",
+        "monthly_target_dates_only",
+        "daily_auto_reweight",
+        "roll_preserves_integer_lots"
+      ],
+      "properties": {
+        "algorithm_id": {
+          "const": "FINITE_NEIGHBOURHOOD_BEAM_V1"
+        },
+        "neighbourhood_radius_lots": {
+          "const": 2
+        },
+        "beam_width": {
+          "const": 2048
+        },
+        "net_error_penalty": {
+          "const": 1.0
+        },
+        "monthly_target_dates_only": {
+          "const": true
+        },
+        "daily_auto_reweight": {
+          "const": false
+        },
+        "roll_preserves_integer_lots": {
+          "const": true
+        }
+      }
+    },
+    "baseline_target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "product",
+        "previous_exact_contract",
+        "previous_target_quantity",
+        "exact_contract",
+        "target_quantity",
+        "source_target_weight",
+        "buffered_target_weight",
+        "reference_open_price",
+        "multiplier",
+        "price_tick"
+      ],
+      "properties": {
+        "product": {
+          "$ref": "#/$defs/product"
+        },
+        "previous_exact_contract": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "string",
+              "pattern": "^(SHFE|INE)\\.[a-z]{2}[0-9]{4}$"
+            }
+          ]
+        },
+        "previous_target_quantity": {
+          "type": "integer",
+          "minimum": -500,
+          "maximum": 500
+        },
+        "exact_contract": {
+          "type": "string",
+          "pattern": "^(SHFE|INE)\\.[a-z]{2}[0-9]{4}$"
+        },
+        "target_quantity": {
+          "type": "integer",
+          "minimum": -500,
+          "maximum": 500
+        },
+        "source_target_weight": {
+          "type": "number"
+        },
+        "buffered_target_weight": {
+          "type": "number"
+        },
+        "reference_open_price": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "multiplier": {
+          "type": "integer",
+          "exclusiveMinimum": 0
+        },
+        "price_tick": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      }
+    },
+    "baseline_batch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "batch_id",
+        "scheduler_id",
+        "source_combination_arm",
+        "execution_lane",
+        "source_month",
+        "execution_day",
+        "virtual_nav_cny",
+        "candidate_weights",
+        "guardband",
+        "allocator",
+        "previous_batch_hash",
+        "targets",
+        "signer_key_id",
+        "signature"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "commodity_static_core_equal_target_batch_v2"
+        },
+        "batch_id": {
+          "$ref": "#/$defs/stable_id"
+        },
+        "scheduler_id": {
+          "const": "STATIC_CORE_EQUAL"
+        },
+        "source_combination_arm": {
+          "const": "CORE_EQUAL_TARGET"
+        },
+        "execution_lane": {
+          "enum": [
+            "simnow_shakedown",
+            "official_forward"
+          ]
+        },
+        "source_month": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])$"
+        },
+        "execution_day": {
+          "type": "string",
+          "format": "date"
+        },
+        "virtual_nav_cny": {
+          "const": 20000000
+        },
+        "candidate_weights": {
+          "$ref": "#/$defs/candidate_weights"
+        },
+        "guardband": {
+          "$ref": "#/$defs/guardband"
+        },
+        "allocator": {
+          "$ref": "#/$defs/allocator"
+        },
+        "previous_batch_hash": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/sha256"
+            }
+          ]
+        },
+        "targets": {
+          "type": "array",
+          "minItems": 10,
+          "maxItems": 10,
+          "items": {
+            "$ref": "#/$defs/baseline_target"
+          }
+        },
+        "signer_key_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]{1,128}$"
+        },
+        "signature": {
+          "$ref": "#/$defs/signature"
+        }
+      }
+    },
+    "previous_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "snapshot_id",
+        "position_manager_id",
+        "sector_map_id",
+        "mode",
+        "execution_lane",
+        "countable_forward",
+        "baseline_scheduler_id",
+        "baseline_batch_hash",
+        "source_month",
+        "execution_day",
+        "input_cutoff_day",
+        "fast_lookback_days",
+        "slow_lookback_days",
+        "annualization_days",
+        "fast_annual_vol",
+        "slow_annual_vol",
+        "scale_min",
+        "scale_max",
+        "raw_scale",
+        "continuity_mode",
+        "previous_snapshot_hash",
+        "previous_smoothed_scale",
+        "smoothing_alpha",
+        "smoothed_scale",
+        "daily_auto_reweight",
+        "guardband_reapplied",
+        "authority_granted",
+        "dispatch_allowed",
+        "targets",
+        "signer_key_id",
+        "signature"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "commodity_relative_vol_position_manager_shadow_v2"
+        },
+        "snapshot_id": {
+          "$ref": "#/$defs/stable_id"
+        },
+        "position_manager_id": {
+          "const": "MONTHLY_RELATIVE_VOL_THERMOSTAT_V1"
+        },
+        "sector_map_id": {
+          "const": "POSITION_MANAGER_SECTOR_MAP_V1"
+        },
+        "mode": {
+          "const": "shadow_only"
+        },
+        "execution_lane": {
+          "const": "official_forward"
+        },
+        "countable_forward": {
+          "const": true
+        },
+        "baseline_scheduler_id": {
+          "const": "STATIC_CORE_EQUAL"
+        },
+        "baseline_batch_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "source_month": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])$"
+        },
+        "execution_day": {
+          "type": "string",
+          "format": "date"
+        },
+        "input_cutoff_day": {
+          "type": "string",
+          "format": "date"
+        },
+        "fast_lookback_days": {
+          "const": 21
+        },
+        "slow_lookback_days": {
+          "const": 126
+        },
+        "annualization_days": {
+          "const": 252
+        },
+        "fast_annual_vol": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "slow_annual_vol": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "scale_min": {
+          "const": 0.8
+        },
+        "scale_max": {
+          "const": 1.2
+        },
+        "raw_scale": {
+          "type": "number",
+          "minimum": 0.8,
+          "maximum": 1.2
+        },
+        "continuity_mode": {
+          "enum": [
+            "genesis",
+            "linked"
+          ]
+        },
+        "previous_snapshot_hash": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/sha256"
+            }
+          ]
+        },
+        "previous_smoothed_scale": {
+          "type": "number",
+          "minimum": 0.8,
+          "maximum": 1.2
+        },
+        "smoothing_alpha": {
+          "const": 0.5
+        },
+        "smoothed_scale": {
+          "type": "number",
+          "minimum": 0.8,
+          "maximum": 1.2
+        },
+        "daily_auto_reweight": {
+          "const": false
+        },
+        "guardband_reapplied": {
+          "const": true
+        },
+        "authority_granted": {
+          "const": false
+        },
+        "dispatch_allowed": {
+          "const": false
+        },
+        "targets": {
+          "type": "array",
+          "minItems": 10,
+          "maxItems": 10,
+          "items": {
+            "$ref": "#/$defs/position_manager_target"
+          }
+        },
+        "signer_key_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]{1,128}$"
+        },
+        "signature": {
+          "$ref": "#/$defs/signature"
+        }
+      }
+    },
+    "position_manager_target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "product",
+        "exact_contract",
+        "baseline_target_quantity",
+        "shadow_target_quantity",
+        "baseline_source_target_weight",
+        "shadow_source_target_weight",
+        "baseline_buffered_target_weight",
+        "shadow_buffered_target_weight",
+        "reference_open_price",
+        "multiplier",
+        "price_tick"
+      ],
+      "properties": {
+        "product": {
+          "$ref": "#/$defs/product"
+        },
+        "exact_contract": {
+          "type": "string",
+          "pattern": "^(SHFE|INE)\\.[a-z]{2}[0-9]{4}$"
+        },
+        "baseline_target_quantity": {
+          "type": "integer",
+          "minimum": -500,
+          "maximum": 500
+        },
+        "shadow_target_quantity": {
+          "type": "integer",
+          "minimum": -500,
+          "maximum": 500
+        },
+        "baseline_source_target_weight": {
+          "type": "number"
+        },
+        "shadow_source_target_weight": {
+          "type": "number"
+        },
+        "baseline_buffered_target_weight": {
+          "type": "number"
+        },
+        "shadow_buffered_target_weight": {
+          "type": "number"
+        },
+        "reference_open_price": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "multiplier": {
+          "type": "integer",
+          "exclusiveMinimum": 0
+        },
+        "price_tick": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      }
+    },
+    "continuity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "previous_snapshot_hash",
+        "previous_snapshot"
+      ],
+      "properties": {
+        "mode": {
+          "enum": [
+            "genesis",
+            "linked"
+          ]
+        },
+        "previous_snapshot_hash": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/sha256"
+            }
+          ]
+        },
+        "previous_snapshot": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/previous_snapshot"
+            }
+          ]
+        }
+      }
+    }
+  },
+  "x-vnpy-resource-limits": {
+    "max_raw_bytes": 4194304,
+    "official_daily_returns": 126,
+    "baseline_targets": 10
+  }
+}

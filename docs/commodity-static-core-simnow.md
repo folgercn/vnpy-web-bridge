@@ -172,6 +172,14 @@ PYTHONPATH=backend .venv/bin/python scripts/commodity_position_manager_shadow_si
 
 私钥权限必须为 `0600` 或更严格。签名快照可以原子更新，但 Web Bridge 永远不会把其中的 `shadow_target_quantity` 送到交易接口。
 
+仓库内的纯 Research producer 可以从外部已完成 receipt/custody/source
+authority 验证的有界 PIT view，独立重算 21/126 日 sample vol、scale、
+guardband 及 20m beam allocator，并输出未签名 draft 与 Authority=false
+evidence；详见
+[MONTHLY_RELATIVE_VOL_THERMOSTAT_V1 纯 Research producer](operations/commodity-relative-vol-snapshot-producer-v1.md)。
+producer 自身不验证 source sealing 或 Ed25519 签名，也不会自动签名、安装或
+派单。
+
 ## 主力切换与到期保护
 
 主力合约不由 Web 页面猜测，也不采用简单的 1/5/9 月启发式。冻结研究流水线负责按 PIT OI 主力链给出每个品种的 `previous_exact_contract` 和新 `exact_contract`。两者不同时，即使方向和目标手数完全不变，控制器也会把该品种列入 `roll_products` 并固定执行：
