@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
 from .canonical import canonical_json, canonical_json_line, sha256
 from .errors import RegistryError
 from .filesystem import (
@@ -39,6 +41,7 @@ from .timeutil import format_utc, parse_utc, require_utc
 __all__ = [
     "load_manifest_chain",
     "seal_daily_batch",
+    "seal_daily_batch_with_private_key",
     "validate_manifest",
     "verify_manifest_chain",
 ]
@@ -139,9 +142,34 @@ def seal_daily_batch(
     expected_parent_commit_seal_sha256: str | None,
     trusted_clock: Callable[[], datetime] = _utc_now,
 ) -> Path:
+    return seal_daily_batch_with_private_key(
+        paths=paths,
+        registry=registry,
+        trade_day=trade_day,
+        private_key=load_private_key(private_key_path),
+        signer_key_id=signer_key_id,
+        expected_parent_batch_seal_sha256=expected_parent_batch_seal_sha256,
+        expected_parent_commit_seal_sha256=expected_parent_commit_seal_sha256,
+        trusted_clock=trusted_clock,
+    )
+
+
+def seal_daily_batch_with_private_key(
+    *,
+    paths: WarehousePaths,
+    registry: SourceRegistry,
+    trade_day: str,
+    private_key: Ed25519PrivateKey,
+    signer_key_id: str,
+    expected_parent_batch_seal_sha256: str | None,
+    expected_parent_commit_seal_sha256: str | None,
+    trusted_clock: Callable[[], datetime] = _utc_now,
+) -> Path:
+    """Seal one day using key material preloaded by a privileged signer parent."""
     if ID_PATTERN.fullmatch(signer_key_id) is None:
         raise RegistryError("manifest signer key ID is invalid")
-    private_key = load_private_key(private_key_path)
+    if not isinstance(private_key, Ed25519PrivateKey):
+        raise RegistryError("manifest signer private key object is invalid")
     public_key = private_key.public_key()
     signer_public_hash = public_key_sha256(public_key)
     with custody_lock(paths, "manifest-chain"):

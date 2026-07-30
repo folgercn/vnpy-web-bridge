@@ -8,6 +8,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
 from .backup_contracts import (
     AUTHORITY_FIELDS,
     BACKUP_ANCHOR_SCHEMA,
@@ -217,8 +219,42 @@ def _create_backup_anchor(
     now: datetime,
 ) -> VerifiedBackupAnchor:
     # Creation-only imports stay outside the monitor verification import graph.
-    from .signing import load_private_key, sign_payload
+    from .signing import load_private_key
 
+    return _create_backup_anchor_with_private_key(
+        paths=paths,
+        source_held=source_held,
+        backup_held=backup_held,
+        snapshot=snapshot,
+        rebuild=rebuild,
+        expected_parent_anchor_raw_sha256=expected_parent_anchor_raw_sha256,
+        signer_key_id=signer_key_id,
+        private_key=load_private_key(private_key_path),
+        public_key_path=public_key_path,
+        expected_public_key_sha256=expected_public_key_sha256,
+        now=now,
+    )
+
+
+def _create_backup_anchor_with_private_key(
+    *,
+    paths: BackupPaths,
+    source_held: HeldCustodyRoot,
+    backup_held: HeldCustodyRoot,
+    snapshot: WarehouseSnapshot,
+    rebuild: RebuildFingerprint,
+    expected_parent_anchor_raw_sha256: str | None,
+    signer_key_id: str,
+    private_key: Ed25519PrivateKey,
+    public_key_path: Path,
+    expected_public_key_sha256: str,
+    now: datetime,
+) -> VerifiedBackupAnchor:
+    # Creation-only imports stay outside the monitor verification import graph.
+    from .signing import sign_payload
+
+    if not isinstance(private_key, Ed25519PrivateKey):
+        raise RegistryError("backup signer private key object is invalid")
     created = require_utc(now, "backup anchor created_at")
     source_custody_identity = source_held.identity_sha256(
         domain="vnpy-research-source-custody-v1",
@@ -258,7 +294,6 @@ def _create_backup_anchor(
             raise RegistryError("backup anchor expected parent is stale")
         if head is not None and created <= head.created_at:
             raise RegistryError("backup anchor time does not follow current head")
-        private_key = load_private_key(private_key_path)
         if public_key_sha256(private_key.public_key()) != require_sha256(
             expected_public_key_sha256,
             "trusted backup signer public key",

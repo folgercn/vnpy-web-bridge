@@ -39,6 +39,7 @@ from research_warehouse.filesystem import (
 )
 from research_warehouse.manifests import (
     seal_daily_batch,
+    seal_daily_batch_with_private_key,
     verify_manifest_chain,
 )
 from research_warehouse.observations import (
@@ -50,6 +51,7 @@ from research_warehouse.observations import (
 )
 from research_warehouse.pit import select_pit_revision
 from research_warehouse.registry import load_registry
+from research_warehouse.signing import load_private_key
 
 REGISTRY_PATH = ROOT / "deployments/research-warehouse/source-registry-v1.json"
 SOURCE_ID = "shfe-daily-market-data-v1"
@@ -540,6 +542,45 @@ def test_commit_clock_rollback_fails_before_receipt_publish_and_retries(
         expected_head_commit_seal_sha256=commit_seal(paths, seal_hash),
     )
     assert len(chain) == 1
+
+
+def test_preloaded_manifest_key_seals_without_reopening_private_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = warehouse(tmp_path)
+    private_key_path, public_key = signing_keys(tmp_path)
+    private_key = load_private_key(private_key_path)
+    acquire(paths, official_raw(), T1)
+
+    monkeypatch.setattr(
+        manifests_module,
+        "load_private_key",
+        lambda _path: pytest.fail("preloaded signer reopened private key path"),
+    )
+    manifest_path = seal_daily_batch_with_private_key(
+        paths=paths,
+        registry=registry(),
+        trade_day=TRADE_DAY,
+        private_key=private_key,
+        signer_key_id="research-key-v1",
+        expected_parent_batch_seal_sha256=None,
+        expected_parent_commit_seal_sha256=None,
+        trusted_clock=lambda: T2,
+    )
+    manifest = manifest_payload(manifest_path)
+    seal_hash = manifest["batch_seal_sha256"]
+
+    assert len(
+        verify_manifest_chain(
+            paths=paths,
+            public_key_path=public_key,
+            registry=registry(),
+            expected_genesis_seal_sha256=seal_hash,
+            expected_head_seal_sha256=seal_hash,
+            expected_head_commit_seal_sha256=commit_seal(paths, seal_hash),
+        )
+    ) == 1
 
 
 def test_uncommitted_head_recovers_after_new_observation(

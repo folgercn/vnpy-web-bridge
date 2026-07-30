@@ -21,7 +21,10 @@ from research_warehouse import (
 )
 from research_warehouse.backup_anchor import verify_backup_anchor
 from research_warehouse.backup_custody import BackupPaths
-from research_warehouse.backup_service import create_append_only_backup
+from research_warehouse.backup_service import (
+    create_append_only_backup,
+    create_append_only_backup_with_private_key,
+)
 from research_warehouse.canonical import canonical_json_line, sha256
 from research_warehouse.commit_anchors import (
     ANCHOR_SCHEMA,
@@ -38,7 +41,11 @@ from research_warehouse.migration_service import (
 )
 from research_warehouse.registry import load_registry
 from research_warehouse.restore_service import restore_and_verify
-from research_warehouse.signing import load_public_key, public_key_sha256
+from research_warehouse.signing import (
+    load_private_key,
+    load_public_key,
+    public_key_sha256,
+)
 
 BACKUP_SCHEMA = (
     ROOT / "deployments/research-warehouse/backup-anchor-v1.schema.json"
@@ -253,6 +260,49 @@ def test_append_only_backup_restore_migration_and_schema(
             schema,
             format_checker=FormatChecker(),
         ).validate(payload)
+
+
+def test_preloaded_backup_key_never_reopens_private_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture, values, source_derived = _revised_fixture(tmp_path / "source")
+    backup_keys = _private_key_pair(tmp_path / "backup-keys")
+    private_key = load_private_key(backup_keys[0])
+    backup = BackupPaths.initialize(tmp_path / "off-host-backup")
+    monkeypatch.setattr(
+        backup_service,
+        "_create_backup_anchor",
+        lambda **_kwargs: pytest.fail("backup reopened private key path"),
+    )
+
+    anchor = create_append_only_backup_with_private_key(
+        source=values[0],
+        source_derived=source_derived,
+        backup=backup,
+        public_key_path=values[1],
+        registry=load_registry(fixture.REGISTRY_PATH),
+        expected_genesis_seal_sha256=values[2],
+        expected_head_seal_sha256=values[3],
+        expected_head_commit_seal_sha256=values[4],
+        ledger=values[5],
+        binding=values[6],
+        expected_parent_anchor_raw_sha256=None,
+        backup_signer_key_id="research-backup-key-v1",
+        backup_private_key=private_key,
+        backup_public_key_path=backup_keys[1],
+        expected_backup_public_key_sha256=backup_keys[2],
+        minimum_free_bytes_after=0,
+        now=NOW,
+    )
+
+    assert anchor.sequence == 1
+    assert verify_backup_anchor(
+        paths=backup,
+        public_key_path=backup_keys[1],
+        expected_public_key_sha256=backup_keys[2],
+        expected_head_anchor_raw_sha256=anchor.raw_sha256,
+    ).raw_sha256 == anchor.raw_sha256
 
 
 def test_tamper_and_replay_fail_closed(tmp_path: Path) -> None:

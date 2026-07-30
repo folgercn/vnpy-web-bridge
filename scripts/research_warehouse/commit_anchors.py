@@ -114,6 +114,7 @@ def load_commit_anchor_ledger(
     path: Path,
     *,
     expected_raw_sha256: str,
+    private: bool = True,
 ) -> CommitAnchorLedger:
     if (
         not isinstance(expected_raw_sha256, str)
@@ -124,6 +125,7 @@ def load_commit_anchor_ledger(
         path,
         "trusted external commit anchor ledger",
         limit=2 * 1024 * 1024,
+        private=private,
     )
     if sha256(raw) != expected_raw_sha256:
         raise RegistryError("trusted commit anchor ledger hash mismatch")
