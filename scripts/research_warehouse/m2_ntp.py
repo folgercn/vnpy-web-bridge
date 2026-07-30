@@ -35,11 +35,6 @@ def query_trusted_clock(
     wall_clock: Callable[[], float] = time.time,
     monotonic_clock: Callable[[], float] = time.monotonic,
 ) -> TrustedClockSample:
-    request = bytearray(PACKET_BYTES)
-    request[0] = 0x23
-    sent_unix = wall_clock()
-    request[40:48] = _encode_timestamp(sent_unix)
-    started = monotonic_clock()
     try:
         addresses = socket.getaddrinfo(
             NTP_SERVER,
@@ -50,19 +45,36 @@ def query_trusted_clock(
         raise RegistryError("trusted NTP endpoint cannot be resolved") from exc
     response = None
     last_error = None
+    sent_unix = None
+    received_unix = None
+    elapsed = None
+    request = None
     for family, socktype, protocol, _canonname, address in addresses:
+        attempt = bytearray(PACKET_BYTES)
+        attempt[0] = 0x23
+        attempt_sent_unix = wall_clock()
+        attempt[40:48] = _encode_timestamp(attempt_sent_unix)
+        attempt_started = monotonic_clock()
         try:
             with socket.socket(family, socktype, protocol) as client:
                 client.settimeout(timeout_seconds)
                 client.connect(address)
-                client.send(request)
+                client.send(attempt)
                 response = client.recv(512)
+                received_unix = wall_clock()
+                elapsed = monotonic_clock() - attempt_started
+                sent_unix = attempt_sent_unix
+                request = attempt
                 break
         except OSError as exc:
             last_error = exc
-    received_unix = wall_clock()
-    elapsed = monotonic_clock() - started
-    if response is None:
+    if (
+        response is None
+        or sent_unix is None
+        or received_unix is None
+        or elapsed is None
+        or request is None
+    ):
         raise RegistryError("trusted NTP query failed") from last_error
     if len(response) != PACKET_BYTES or elapsed < 0 or elapsed > timeout_seconds:
         raise RegistryError("trusted NTP response timing/size is invalid")

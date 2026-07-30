@@ -13,7 +13,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from research_warehouse import m2_operator_state
+from research_warehouse import m2_operator_state, m2_rebuild_cli
 from research_warehouse.canonical import canonical_json_line, sha256
 from research_warehouse.m2_isolation_contracts import false_authority
 from research_warehouse.m2_runtime_input import RuntimeInput
@@ -146,6 +146,28 @@ def test_public_ledger_directory_ignores_restrictive_signer_umask(
         os.umask(previous)
 
     assert stat.S_IMODE(directory.stat().st_mode) == 0o755
+
+
+def test_incomplete_derived_generation_is_quarantined_for_retry(
+    tmp_path: Path,
+) -> None:
+    runtime = tmp_path / "runtime"
+    runtime.mkdir(mode=0o700)
+    derived_parent = runtime / "derived"
+    derived_parent.mkdir(mode=0o700)
+    generation = derived_parent / ("a" * 64)
+    generation.mkdir(mode=0o700)
+    (generation / "tmp").mkdir(mode=0o700)
+
+    assert m2_rebuild_cli._quarantine_incomplete_generation(
+        runtime,
+        generation,
+    )
+    assert not generation.exists()
+    quarantined = list((runtime / "failed-derived").iterdir())
+    assert len(quarantined) == 1
+    assert quarantined[0].name.startswith("a" * 64)
+    assert (quarantined[0] / "tmp").is_dir()
 
 
 def test_state_rejects_manifest_that_does_not_extend_root_pin(
