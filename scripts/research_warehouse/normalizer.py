@@ -43,6 +43,14 @@ GIT_SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
+def _is_exchange_total_row(value: object) -> bool:
+    return (
+        isinstance(value, dict)
+        and value.get("PRODUCTID") == "总计"
+        and value.get("DELIVERYMONTH") == ""
+    )
+
+
 def _decimal(value: object, label: str) -> Decimal | None:
     if value in ("", None):
         return None
@@ -122,6 +130,8 @@ def _rows(
     values = payload[source.required_top_level_fields[0]]
     rows: list[tuple[object, ...]] = []
     for index, item in enumerate(values, start=1):
+        if _is_exchange_total_row(item):
+            continue
         prices = [
             _decimal(item[source_name], f"row {index} {source_name}")
             for source_name, _target_name in PRICE_FIELDS
