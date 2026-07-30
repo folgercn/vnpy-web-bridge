@@ -28,10 +28,11 @@ class _HeldNode:
     relative_path: str
     name: str | None
     parent_fd: int | None
-    fd: int
+    fd: int | None
     identity: tuple[int, ...]
     stat_result: os.stat_result
     child_names: tuple[str, ...] | None
+    raw_sha256: str | None
 
 
 class HeldReleaseTree:
@@ -78,6 +79,7 @@ class HeldReleaseTree:
                     identity=file_identity(root_stat),
                     stat_result=root_stat,
                     child_names=None,
+                    raw_sha256=None,
                 )
             )
             self._walk_directory(self.nodes[0])
@@ -92,6 +94,8 @@ class HeldReleaseTree:
 
     def close(self) -> None:
         for node in reversed(self.nodes):
+            if node.fd is None:
+                continue
             try:
                 os.close(node.fd)
             except OSError:
@@ -192,6 +196,7 @@ class HeldReleaseTree:
             identity=file_identity(opened),
             stat_result=opened,
             child_names=None,
+            raw_sha256=None,
         )
         self.nodes.append(node)
         if directory:
@@ -201,6 +206,9 @@ class HeldReleaseTree:
         else:
             raw = self._read_file(node)
             size_bytes = len(raw)
+            node.raw_sha256 = sha256(raw)
+            os.close(child_fd)
+            node.fd = None
         self.entries.append(
             {
                 "relative_path": relative,
@@ -218,28 +226,43 @@ class HeldReleaseTree:
         self._hook("after_entry", relative)
 
     def _read_file(self, node: _HeldNode) -> bytes:
+        if node.fd is None:
+            raise RegistryError("M2 release file descriptor is missing")
+        return self._read_descriptor(
+            node.fd,
+            relative_path=node.relative_path,
+            identity=node.identity,
+        )
+
+    def _read_descriptor(
+        self,
+        descriptor: int,
+        *,
+        relative_path: str,
+        identity: tuple[int, ...],
+    ) -> bytes:
         def read_once() -> bytes:
-            os.lseek(node.fd, 0, os.SEEK_SET)
+            os.lseek(descriptor, 0, os.SEEK_SET)
             chunks: list[bytes] = []
             total = 0
             while True:
-                chunk = os.read(node.fd, 65536)
+                chunk = os.read(descriptor, 65536)
                 if not chunk:
                     break
                 total += len(chunk)
                 if total > MAX_RAW_BYTES:
                     raise RegistryError(
-                        f"M2 release file exceeds limit: {node.relative_path}"
+                        f"M2 release file exceeds limit: {relative_path}"
                     )
                 chunks.append(chunk)
             return b"".join(chunks)
 
         first = read_once()
         second = read_once()
-        after = os.fstat(node.fd)
-        if first != second or file_identity(after) != node.identity:
+        after = os.fstat(descriptor)
+        if first != second or file_identity(after) != identity:
             raise RegistryError(
-                f"M2 release file changed while reading: {node.relative_path}"
+                f"M2 release file changed while reading: {relative_path}"
             )
         return first
 
@@ -256,8 +279,8 @@ class HeldReleaseTree:
 
     def revalidate(self) -> None:
         for node in self.nodes:
+            reopened = None
             try:
-                held = os.fstat(node.fd)
                 if node.parent_fd is None:
                     path_stat = self.root.lstat()
                 else:
@@ -266,30 +289,59 @@ class HeldReleaseTree:
                         dir_fd=node.parent_fd,
                         follow_symlinks=False,
                     )
+                if node.fd is None:
+                    reopened = os.open(
+                        node.name,
+                        os.O_RDONLY
+                        | getattr(os, "O_CLOEXEC", 0)
+                        | getattr(os, "O_NOFOLLOW", 0),
+                        dir_fd=node.parent_fd,
+                    )
+                    held = os.fstat(reopened)
+                else:
+                    held = os.fstat(node.fd)
             except OSError as exc:
+                if reopened is not None:
+                    os.close(reopened)
                 raise RegistryError(
                     f"M2 release entry unavailable: {node.relative_path}"
                 ) from exc
-            if file_identity(held) != node.identity:
-                raise RegistryError(
-                    f"M2 held release entry changed: {node.relative_path}"
-                )
-            if file_identity(path_stat) != node.identity:
-                raise RegistryError(
-                    f"M2 release pathname changed: {node.relative_path}"
-                )
-            if node.child_names is not None:
-                try:
-                    final_names = tuple(sorted(os.listdir(node.fd)))
-                except OSError as exc:
+            try:
+                if file_identity(held) != node.identity:
                     raise RegistryError(
-                        f"M2 release directory unavailable: {node.relative_path}"
-                    ) from exc
-                if final_names != node.child_names:
-                    raise RegistryError(
-                        f"M2 release directory membership changed: "
-                        f"{node.relative_path}"
+                        f"M2 held release entry changed: {node.relative_path}"
                     )
+                if file_identity(path_stat) != node.identity:
+                    raise RegistryError(
+                        f"M2 release pathname changed: {node.relative_path}"
+                    )
+                if reopened is not None:
+                    raw = self._read_descriptor(
+                        reopened,
+                        relative_path=node.relative_path,
+                        identity=node.identity,
+                    )
+                    if sha256(raw) != node.raw_sha256:
+                        raise RegistryError(
+                            f"M2 release file content changed: "
+                            f"{node.relative_path}"
+                        )
+                if node.child_names is not None:
+                    try:
+                        final_names = tuple(sorted(os.listdir(node.fd)))
+                    except OSError as exc:
+                        raise RegistryError(
+                            f"M2 release directory unavailable: "
+                            f"{node.relative_path}"
+                        ) from exc
+                    if final_names != node.child_names:
+                        raise RegistryError(
+                            f"M2 release directory membership changed: "
+                            f"{node.relative_path}"
+                        )
+            finally:
+                if reopened is not None:
+                    os.close(reopened)
 
     def snapshot(self) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         root_stat = self.nodes[0].stat_result

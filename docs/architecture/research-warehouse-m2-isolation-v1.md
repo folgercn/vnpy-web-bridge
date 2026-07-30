@@ -23,6 +23,10 @@ operator action followed by freshly captured, externally SHA-pinned evidence.
 - `m2_release_lock.py` supplies the root-owned deployment lock: verification
   and job execution take a shared lock; every supported release update must
   take the exclusive lock.
+- `m2_wheelhouse.py`, `m2_release_contracts.py`,
+  `m2_release_builder.py` and `m2_release_install.py` build an offline,
+  exact-byte runtime tree from committed Git blobs and switch it only under
+  that exclusive lock. The complete release remains independently manifested.
 - `m2_success_binding.py` binds those verified artifacts to one exact
   post-activation success receipt and monitor completion.
 - `m2_verifier.py` is the only public layer that can issue final
