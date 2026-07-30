@@ -28,18 +28,11 @@ def _safe_raw_path(paths: WarehousePaths, relative: object):
 def _product_id(value: object) -> str | None:
     if not isinstance(value, str):
         raise RegistryError("official daily row PRODUCTID is not canonical")
-    if value == "总计":
-        return None
-    if value.endswith("_tas"):
-        product = value[:-4].lower()
-        if product.isascii() and product.isalpha():
-            return None
-        raise RegistryError("official daily TAS row PRODUCTID is invalid")
     if not value.endswith("_f"):
-        raise RegistryError("official daily row PRODUCTID is not canonical")
+        return None
     product = value[:-2].lower()
     if not product.isascii() or not product.isalpha():
-        raise RegistryError("official daily row PRODUCTID is invalid")
+        return None
     return product
 
 

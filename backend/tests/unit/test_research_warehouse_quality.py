@@ -445,7 +445,7 @@ def official_raw(exchange: str, day: date) -> bytes:
             "VOLUME": "0",
             "OPENINTEREST": "0",
         }
-        for product_id in ("sc_tas", "总计")
+        for product_id in ("auefp", "sc_tas", "总计")
     )
     return json.dumps(
         {
