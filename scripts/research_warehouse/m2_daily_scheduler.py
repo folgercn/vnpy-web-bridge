@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import datetime, time
+from datetime import date, datetime, time
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -47,8 +47,9 @@ def _existing_receipt(
     trade_day: str,
     *,
     verify: Callable[[dict], None],
+    receipt_directory: Path | None = None,
 ) -> Path | None:
-    path = runtime.run_receipts / f"{trade_day}.json"
+    path = (receipt_directory or runtime.run_receipts) / f"{trade_day}.json"
     if not path.exists():
         return None
     receipt = load_run_receipt(path)
@@ -111,6 +112,7 @@ def run_trade_day(
     acquire: Callable[..., object] = acquire_daily,
     utc_clock: Callable[[], datetime] | None = None,
     clock_provider: Callable[[], TrustedClockSample] | None = None,
+    receipt_directory: Path | None = None,
 ) -> dict:
     """Acquire one explicit official day using only live observation clocks."""
     live_now = (utc_clock or (lambda: clock_sample.trusted_now))()
@@ -118,17 +120,19 @@ def run_trade_day(
     revalidate_official_calendar_evidence(calendar)
     availability.require_available(calendar, cutoff_at=clock_sample.trusted_now)
     try:
-        parsed_day = datetime.strptime(trade_day, "%Y-%m-%d").date()
+        parsed_day = date.fromisoformat(trade_day)
     except ValueError as exc:
         raise RegistryError("trade_day must be canonical YYYY-MM-DD") from exc
     if parsed_day.isoformat() != trade_day:
         raise RegistryError("trade_day must be canonical YYYY-MM-DD")
     if not calendar.require_day(parsed_day).is_official:
         raise RegistryError("historical acquisition day is not official")
+    receipts = receipt_directory or runtime.run_receipts
     existing = _existing_receipt(
         runtime,
         trade_day,
         verify=verify_receipt,
+        receipt_directory=receipts,
     )
     if existing is not None:
         return {
@@ -181,7 +185,7 @@ def run_trade_day(
     }
     payload["receipt_id"] = run_receipt_id(payload)
     verify_receipt(payload)
-    receipt = publish_run_receipt(runtime, payload)
+    receipt = publish_run_receipt(runtime, payload, directory=receipts)
     return {
         "status": "OFFICIAL_DAY_COMPLETE",
         "trade_day": trade_day,

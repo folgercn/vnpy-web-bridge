@@ -267,8 +267,12 @@ def load_official_calendar(
     if payload["calendar_id"] != expected_id:
         raise RegistryError("official calendar ID binding mismatch")
     evidence_values = payload["source_evidence"]
-    if not isinstance(evidence_values, list) or len(evidence_values) != 2:
-        raise RegistryError("calendar must bind exact SHFE/INE source evidence")
+    if (
+        not isinstance(evidence_values, list)
+        or len(evidence_values) < 2
+        or len(evidence_values) > 8
+    ):
+        raise RegistryError("calendar source evidence count is invalid")
     evidence = tuple(
         _load_evidence(
             source_evidence_root,
@@ -277,7 +281,14 @@ def load_official_calendar(
         )
         for value in evidence_values
     )
-    if tuple(item.exchange for item in evidence) != EXCHANGES:
+    evidence_exchanges = tuple(item.exchange for item in evidence)
+    if (
+        evidence_exchanges != tuple(sorted(evidence_exchanges))
+        or set(evidence_exchanges) != set(EXCHANGES)
+        or evidence_exchanges.count("INE") != evidence_exchanges.count("SHFE")
+        or len({item.source_url for item in evidence}) != len(evidence)
+        or len({item.raw_sha256 for item in evidence}) != len(evidence)
+    ):
         raise RegistryError("calendar source evidence order/set mismatch")
     days = _load_days(
         payload["days"],

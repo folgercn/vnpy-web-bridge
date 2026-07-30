@@ -13,6 +13,7 @@ from .errors import RegistryError
 class RuntimePaths:
     root: Path
     run_receipts: Path
+    history_run_receipts: Path
     backfill_receipts: Path
     monitor_receipts: Path
     temporary: Path
@@ -27,6 +28,7 @@ class RuntimePaths:
             name: absolute / name
             for name in (
                 "run-receipts",
+                "history-run-receipts",
                 "backfill-receipts",
                 "monitor-receipts",
                 "tmp",
@@ -41,6 +43,7 @@ class RuntimePaths:
         return cls(
             root=absolute,
             run_receipts=values["run-receipts"],
+            history_run_receipts=values["history-run-receipts"],
             backfill_receipts=values["backfill-receipts"],
             monitor_receipts=values["monitor-receipts"],
             temporary=values["tmp"],

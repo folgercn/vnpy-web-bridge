@@ -36,10 +36,7 @@ class CalendarAvailabilityAnchor:
         cutoff_at: datetime,
     ) -> None:
         cutoff = require_utc(cutoff_at, "calendar PIT cutoff")
-        expected_evidence = tuple(
-            (item.exchange, item.raw_sha256)
-            for item in calendar.source_evidence
-        )
+        expected_evidence = calendar_evidence_anchor_bindings(calendar)
         if (
             self.calendar_raw_sha256 != calendar.raw_sha256
             or self.source_evidence_sha256 != expected_evidence
@@ -53,6 +50,38 @@ class CalendarAvailabilityAnchor:
             raise RegistryError("calendar anchor predates its signed evidence")
         if self.available_at > cutoff:
             raise RegistryError("official calendar was unavailable at PIT cutoff")
+
+
+def calendar_evidence_anchor_bindings(
+    calendar: OfficialCalendar,
+) -> tuple[tuple[str, str], ...]:
+    """Bind one or more annual official notices per frozen exchange."""
+    result = []
+    for exchange in calendar.exchanges:
+        hashes = [
+            item.raw_sha256
+            for item in calendar.source_evidence
+            if item.exchange == exchange
+        ]
+        if not hashes:
+            raise RegistryError("calendar anchor evidence exchange is missing")
+        digest = (
+            hashes[0]
+            if len(hashes) == 1
+            else sha256(
+                canonical_json_line(
+                    {
+                        "schema_version": (
+                            "vnpy_research_calendar_evidence_bundle_v1"
+                        ),
+                        "exchange": exchange,
+                        "raw_sha256": hashes,
+                    }
+                )
+            )
+        )
+        result.append((exchange, digest))
+    return tuple(result)
 
 
 def load_calendar_availability_anchor(

@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import stat
+from pathlib import Path
 from typing import Any
 
 from .canonical import canonical_json, canonical_json_line, parse_json_strict, sha256
@@ -135,7 +135,7 @@ def validate_backfill_receipt(value: object) -> dict[str, Any]:
             )
         ):
             raise RegistryError("M2 history backfill source binding is invalid")
-        expected_path = f"run-receipts/{item['trade_day']}.json"
+        expected_path = f"history-run-receipts/{item['trade_day']}.json"
         if item["run_receipt_relative_path"] != expected_path:
             raise RegistryError("M2 history backfill run receipt path mismatch")
     if value["receipt_id"] != backfill_receipt_id(value):

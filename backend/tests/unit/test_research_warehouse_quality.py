@@ -6,6 +6,7 @@ import sys
 from contextlib import contextmanager
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -29,9 +30,15 @@ from research_warehouse.acquisition_models import (
 )
 from research_warehouse.calendar_anchors import (
     ANCHOR_SCHEMA,
+    calendar_evidence_anchor_bindings,
     load_calendar_availability_anchor,
 )
+from research_warehouse.calendar_extension import (
+    NewCalendarEvidence,
+    issue_extended_calendar,
+)
 from research_warehouse.calendar_models import OfficialCalendar
+from research_warehouse.calendar_schedule import official_calendar_days
 from research_warehouse.canonical import canonical_json, canonical_json_line, sha256
 from research_warehouse.clock_quality import (
     TrustedClockSample,
@@ -54,6 +61,7 @@ from research_warehouse.quality_gate import (
 )
 from research_warehouse.registry import load_registry
 from research_warehouse.signing import (
+    load_private_key,
     load_public_key,
     public_key_sha256,
     sign_payload,
@@ -123,6 +131,7 @@ def signed_calendar(
     closed: set[date] | None = None,
     evening_overrides: dict[date, date | None] | None = None,
     evidence_urls: dict[str, str] | None = None,
+    evidence_years: int = 1,
 ) -> tuple[OfficialCalendar, Path, dict]:
     closed = closed or set()
     evening_overrides = evening_overrides or {}
@@ -137,33 +146,39 @@ def signed_calendar(
         ("INE", "Shanghai International Energy Exchange", "www.ine.cn"),
         ("SHFE", "Shanghai Futures Exchange", "www.shfe.com.cn"),
     ):
-        raw = f"official-{exchange}-calendar-evidence".encode()
-        digest = sha256(raw)
-        sources = evidence_root / "calendar-sources"
-        sources.mkdir(mode=0o700, exist_ok=True)
-        sources.chmod(0o700)
-        parent = sources / exchange.lower()
-        parent.mkdir(mode=0o700)
-        path = parent / f"{digest}.raw"
-        path.write_bytes(raw)
-        path.chmod(0o600)
-        evidence_values.append(
-            {
-                "exchange": exchange,
-                "owner": owner,
-                "source_url": evidence_urls.get(
-                    exchange,
-                    f"https://{host}/services/trading-calendar",
-                ),
-                "source_type": SOURCE_TYPE,
-                "observed_at": "2025-06-30T01:00:00.000000Z",
-                "raw_sha256": digest,
-                "raw_bytes": len(raw),
-                "raw_relative_path": (
-                    f"calendar-sources/{exchange.lower()}/{digest}.raw"
-                ),
-            }
-        )
+        for year_index in range(evidence_years):
+            raw = (
+                f"official-{exchange}-calendar-evidence-{year_index}"
+            ).encode()
+            digest = sha256(raw)
+            sources = evidence_root / "calendar-sources"
+            sources.mkdir(mode=0o700, exist_ok=True)
+            sources.chmod(0o700)
+            parent = sources / exchange.lower()
+            parent.mkdir(mode=0o700, exist_ok=True)
+            path = parent / f"{digest}.raw"
+            path.write_bytes(raw)
+            path.chmod(0o600)
+            evidence_values.append(
+                {
+                    "exchange": exchange,
+                    "owner": owner,
+                    "source_url": evidence_urls.get(
+                        exchange,
+                        (
+                            f"https://{host}/services/trading-calendar"
+                            f"?year={2025 + year_index}"
+                        ),
+                    ),
+                    "source_type": SOURCE_TYPE,
+                    "observed_at": "2025-06-30T01:00:00.000000Z",
+                    "raw_sha256": digest,
+                    "raw_bytes": len(raw),
+                    "raw_relative_path": (
+                        f"calendar-sources/{exchange.lower()}/{digest}.raw"
+                    ),
+                }
+            )
     days = []
     current = start
     official_dates = set()
@@ -237,10 +252,9 @@ def calendar_anchor(tmp_path: Path, calendar: OfficialCalendar, available_at):
     payload = {
         "schema_version": ANCHOR_SCHEMA,
         "calendar_raw_sha256": calendar.raw_sha256,
-        "source_evidence_sha256": {
-            item.exchange: item.raw_sha256
-            for item in calendar.source_evidence
-        },
+        "source_evidence_sha256": dict(
+            calendar_evidence_anchor_bindings(calendar)
+        ),
         "available_at": available_at.isoformat(timespec="microseconds").replace(
             "+00:00",
             "Z",
@@ -254,6 +268,105 @@ def calendar_anchor(tmp_path: Path, calendar: OfficialCalendar, available_at):
         path,
         expected_raw_sha256=sha256(raw),
     )
+
+
+def test_calendar_binds_multiple_annual_notices_per_exchange(
+    tmp_path: Path,
+) -> None:
+    calendar, _path, _signed = signed_calendar(
+        tmp_path,
+        evidence_years=2,
+    )
+    assert [item.exchange for item in calendar.source_evidence] == [
+        "INE",
+        "INE",
+        "SHFE",
+        "SHFE",
+    ]
+    bindings = dict(calendar_evidence_anchor_bindings(calendar))
+    assert bindings["INE"] not in {
+        item.raw_sha256
+        for item in calendar.source_evidence
+        if item.exchange == "INE"
+    }
+    anchor = calendar_anchor(
+        tmp_path,
+        calendar,
+        datetime(2025, 7, 1, tzinfo=timezone.utc),
+    )
+    anchor.require_available(
+        calendar,
+        cutoff_at=datetime(2025, 7, 2, tzinfo=timezone.utc),
+    )
+
+
+def test_extended_calendar_schedule_matches_notice_boundaries() -> None:
+    rows = {row["date"]: row for row in official_calendar_days()}
+    assert len(rows) == 730
+    assert rows["2025-01-01"]["status"] == "CLOSED"
+    assert rows["2025-01-27"]["status"] == "OFFICIAL_DAY"
+    assert rows["2025-02-05"]["evening_session_natural_date"] is None
+    assert rows["2025-09-30"]["status"] == "OFFICIAL_DAY"
+    assert rows["2025-10-09"]["evening_session_natural_date"] is None
+    assert rows["2025-12-31"]["status"] == "OFFICIAL_DAY"
+    assert rows["2026-01-05"]["evening_session_natural_date"] is None
+
+
+def test_extended_calendar_issues_immutable_signed_inputs(tmp_path: Path) -> None:
+    calendar, calendar_path, _signed = signed_calendar(tmp_path)
+    private = load_private_key(tmp_path / "calendar-private.key")
+    captures = []
+    for exchange, host, title in (
+        (
+            "INE",
+            "www.ine.cn",
+            "上海国际能源交易中心关于2025年休市安排的公告",
+        ),
+        (
+            "SHFE",
+            "www.shfe.com.cn",
+            "上海期货交易所关于2025年休市安排的公告",
+        ),
+    ):
+        path = tmp_path / f"{exchange.lower()}-2025.raw"
+        path.write_bytes(f"<html>{title}</html>".encode())
+        path.chmod(0o600)
+        captures.append(
+            NewCalendarEvidence(
+                exchange=exchange,
+                source_url=(
+                    f"https://{host}/publicnotice/notice/202412/test.html"
+                ),
+                capture_path=path,
+            )
+        )
+    context = SimpleNamespace(
+        calendar=calendar,
+        runtime_input=SimpleNamespace(
+            payload={
+                "expected_calendar_public_key_sha256": public_key_sha256(
+                    private.public_key()
+                ),
+                "calendar_source_evidence_root": str(
+                    tmp_path / "calendar-evidence"
+                ),
+                "calendar_path": str(calendar_path),
+            }
+        ),
+    )
+    result = issue_extended_calendar(
+        context=context,
+        private_key=private,
+        new_evidence=tuple(captures),
+        observed_at=datetime(2025, 7, 1, tzinfo=timezone.utc),
+        issued_at=datetime(2025, 7, 1, 0, 0, 1, tzinfo=timezone.utc),
+    )
+    assert Path(result["calendar_path"]).is_file()
+    assert Path(result["calendar_availability_anchor_path"]).is_file()
+    assert result["new_evidence_sha256"] == {
+        item.exchange: sha256(item.capture_path.read_bytes())
+        for item in captures
+    }
 
 
 def calendar_clock_args(now: datetime, *, elapsed_seconds: float = 0):

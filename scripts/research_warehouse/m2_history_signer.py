@@ -12,11 +12,11 @@ from .m2_monitor_facts import verify_daily_run_receipt
 from .m2_ntp import query_trusted_clock
 from .m2_receipts import load_run_receipt
 from .manifest_commits import commit_receipt_path, load_commit_receipt
+from .manifest_validation import validate_manifest
 from .manifests import (
     find_committed_manifest_for_day,
     seal_daily_batch_with_private_key,
 )
-from .manifest_validation import validate_manifest
 from .timeutil import format_utc, parse_utc
 
 
@@ -29,8 +29,13 @@ def sign_manifest_day(
     parent_seal: str | None,
     parent_commit: str | None,
     clock,
+    run_receipt_path: Path | None = None,
 ) -> dict:
-    receipt = load_run_receipt(context.runtime.run_receipts / f"{trade_day}.json")
+    receipt_path = (
+        run_receipt_path
+        or context.runtime.run_receipts / f"{trade_day}.json"
+    )
+    receipt = load_run_receipt(receipt_path)
     verify_daily_run_receipt(
         receipt,
         paths=context.paths,
@@ -151,7 +156,7 @@ def sign_manifest_day(
         context.registry,
     )
     receipt_path = commit_receipt_path(manifest_path, manifest["batch_id"])
-    receipt_raw = read_regular_strict(
+    read_regular_strict(
         receipt_path,
         "M2 signed manifest commit receipt",
         limit=2 * 1024 * 1024,

@@ -8,6 +8,8 @@ from collections.abc import Callable
 from datetime import date, datetime
 from typing import Any
 
+from .calendar_anchors import CalendarAvailabilityAnchor
+from .calendar_models import OfficialCalendar
 from .canonical import sha256
 from .clock_quality import TrustedClockSample
 from .daily_evidence import require_target_product_receipt_coverage
@@ -27,8 +29,6 @@ from .m2_operator_state import OperatorState
 from .m2_receipts import load_run_receipt
 from .m2_runtime_paths import RuntimePaths
 from .models import SourceRegistry
-from .calendar_anchors import CalendarAvailabilityAnchor
-from .calendar_models import OfficialCalendar
 from .timeutil import format_utc
 
 DEFAULT_HISTORY_DAYS = 186
@@ -190,8 +190,9 @@ def run_history_backfill(
             acquire=acquire,
             utc_clock=utc_clock,
             clock_provider=clock_provider,
+            receipt_directory=runtime.history_run_receipts,
         )
-        receipt_path = runtime.run_receipts / f"{day.isoformat()}.json"
+        receipt_path = runtime.history_run_receipts / f"{day.isoformat()}.json"
         receipt = load_run_receipt(receipt_path)
         verify_history_receipt(receipt)
         receipt_raw = read_regular_strict(
@@ -202,7 +203,7 @@ def run_history_backfill(
             {
                 "trade_day": day.isoformat(),
                 "run_receipt_relative_path": (
-                    f"run-receipts/{day.isoformat()}.json"
+                    f"history-run-receipts/{day.isoformat()}.json"
                 ),
                 "run_receipt_raw_sha256": sha256(receipt_raw),
                 "source_raw_sha256": [

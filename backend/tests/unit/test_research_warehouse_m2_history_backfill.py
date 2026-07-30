@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
-from pathlib import Path
 import sys
 import threading
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -214,7 +214,9 @@ def test_backfill_receipt_binds_exact_days_receipts_and_sources() -> None:
         "daily_receipts": [
             {
                 "trade_day": day,
-                "run_receipt_relative_path": f"run-receipts/{day}.json",
+                "run_receipt_relative_path": (
+                    f"history-run-receipts/{day}.json"
+                ),
                 "run_receipt_raw_sha256": str(index) * 64,
                 "source_raw_sha256": ["a" * 64, "b" * 64],
                 "source_raw_bytes": [10, 20],

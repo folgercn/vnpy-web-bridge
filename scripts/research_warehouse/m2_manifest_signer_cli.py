@@ -24,7 +24,6 @@ from .m2_operator_state import (
     operator_state_lock,
     record_manifest_result,
 )
-from .m2_receipts import load_run_receipt
 from .m2_runtime_input import DEFAULT_RUNTIME_INPUT
 from .m2_runtime_loader import load_runtime_context
 from .m2_signer_handoff import run_with_preloaded_private_key
@@ -137,6 +136,17 @@ def main(argv: list[str] | None = None) -> int:
                         raise RegistryError(
                             "M2 manifest signer has no official day due"
                         )
+                    history_receipt_path = None
+                    if history is not None:
+                        daily_entry = next(
+                            item
+                            for item in history["daily_receipts"]
+                            if item["trade_day"] == trade_day
+                        )
+                        history_receipt_path = (
+                            context.runtime.root
+                            / daily_entry["run_receipt_relative_path"]
+                        )
                     return sign_manifest_day(
                         context=context,
                         private_key=private_key,
@@ -145,6 +155,7 @@ def main(argv: list[str] | None = None) -> int:
                         parent_seal=parent_seal,
                         parent_commit=parent_commit,
                         clock=clock,
+                        run_receipt_path=history_receipt_path,
                     )
                 return run_with_preloaded_private_key(
                     private_key_path=args.private_key,
