@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import plistlib
+import stat
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,6 +25,11 @@ def _fake_root_io(monkeypatch: pytest.MonkeyPatch) -> None:
         m2_operator_state,
         "require_root_managed",
         lambda _path: None,
+    )
+    monkeypatch.setattr(
+        m2_operator_state,
+        "_prepare_public_root_directory",
+        lambda path: (path.mkdir(parents=True, exist_ok=True), path.chmod(0o755)),
     )
 
     def write(path: Path, raw: bytes, *, create_only: bool) -> None:
@@ -120,6 +127,25 @@ def test_root_state_records_content_addressed_ledger_and_backup_pin(
     assert json.loads(runtime_path.read_bytes())[
         "expected_backup_head_anchor_raw_sha256"
     ] == "d" * 64
+
+
+def test_public_ledger_directory_ignores_restrictive_signer_umask(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    directory = tmp_path / "commit-anchor-ledgers"
+    monkeypatch.setattr(
+        m2_operator_state,
+        "_require_root_parent",
+        lambda _path: None,
+    )
+    previous = os.umask(0o077)
+    try:
+        m2_operator_state._prepare_public_root_directory(directory)
+    finally:
+        os.umask(previous)
+
+    assert stat.S_IMODE(directory.stat().st_mode) == 0o755
 
 
 def test_state_rejects_manifest_that_does_not_extend_root_pin(

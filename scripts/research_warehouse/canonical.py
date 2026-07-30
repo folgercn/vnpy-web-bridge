@@ -43,12 +43,18 @@ def _reject_constant(value: str) -> None:
     raise ValueError(f"non-finite JSON number: {value}")
 
 
-def parse_json_strict(raw: bytes, label: str) -> Any:
+def parse_json_strict(
+    raw: bytes,
+    label: str,
+    *,
+    decimal_numbers_as_strings: bool = False,
+) -> Any:
     try:
         return json.loads(
             raw,
             object_pairs_hook=_reject_duplicate_keys,
             parse_constant=_reject_constant,
+            parse_float=str if decimal_numbers_as_strings else float,
         )
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
         raise RegistryError(f"{label} is not strict JSON: {exc}") from exc
