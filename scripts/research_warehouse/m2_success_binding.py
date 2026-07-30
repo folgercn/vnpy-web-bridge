@@ -116,7 +116,7 @@ def _verified_artifact_values(
         raise RegistryError("M2 release deployment lock custody mismatch")
     root = _exact(
         artifacts["release_root_identity"],
-        {"device", "inode", "owner_uid", "owner_gid", "mode"},
+        {"device", "inode", "owner_uid", "owner_gid", "mode", "acl_free"},
         "M2 verified release root identity",
     )
     output_path = Path(artifacts["output_path"])
@@ -124,6 +124,7 @@ def _verified_artifact_values(
         root["owner_uid"] != 0
         or root["owner_gid"] != 0
         or root["mode"] != "0755"
+        or root["acl_free"] is not True
         or any(
             isinstance(root[field], bool)
             or not isinstance(root[field], int)

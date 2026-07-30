@@ -113,6 +113,12 @@ service-owned runtime directory. The service writes only its private
 custody/runtime/backup roots. Activating the plists before PF default-block
 and negative preflight pass is forbidden.
 
+The release parent and every release descendant must be free of Darwin
+extended ACL entries. Installation rejects an inheritable ACL before creating
+the candidate, recursively rechecks the candidate/current tree, and the final
+fd-relative verifier records and revalidates `acl_free: true` for every object.
+BSD uid/gid/mode bits alone are not treated as sufficient custody evidence.
+
 Both raw-pinned wrappers enter the root-owned `release-lock-runner`. The
 runner validates `/usr/local/libexec/vnpyresearch/release.lock` as a
 root-owned, single-link `0444` regular file, takes a shared lock and keeps its

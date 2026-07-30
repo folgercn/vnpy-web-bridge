@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import pwd
 import subprocess
 import sys
 from pathlib import Path
@@ -489,6 +490,54 @@ def test_installer_rejects_changed_runtime_without_executing_it(
         )
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="Darwin extended ACL")
+def test_installer_rejects_inheritable_parent_acl(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_subprocess(monkeypatch)
+    wheelhouse, manifest_path, digest = fake_wheelhouse(tmp_path)
+    runtime, runtime_manifest, runtime_digest = fake_python_runtime(
+        tmp_path,
+        monkeypatch,
+    )
+    staged = tmp_path / "staged"
+    manifest = build_release_bundle(
+        source_root=REPO_ROOT,
+        source_commit_sha="1" * 40,
+        requirements_path=REQUIREMENTS,
+        wheelhouse=wheelhouse,
+        wheelhouse_manifest_path=manifest_path,
+        expected_wheelhouse_manifest_raw_sha256=digest,
+        python_runtime=runtime,
+        python_runtime_manifest_path=runtime_manifest,
+        expected_python_runtime_manifest_raw_sha256=runtime_digest,
+        output_root=staged,
+    )
+    parent = tmp_path / "libexec"
+    parent.mkdir(mode=0o755)
+    lock = parent / "release.lock"
+    lock.write_bytes(b"")
+    lock.chmod(0o444)
+    account = pwd.getpwuid(os.getuid()).pw_name
+    acl = (
+        f"user:{account} allow "
+        "write,file_inherit,directory_inherit,only_inherit"
+    )
+    subprocess.check_call(["chmod", "+a", acl, str(parent)])
+
+    with pytest.raises(RegistryError, match="extended ACL"):
+        install_release_bundle(
+            staged_root=staged,
+            manifest=manifest,
+            release_root=parent / "release",
+            lock_path=lock,
+            expected_owner_uid=os.geteuid(),
+            expected_owner_gid=os.getegid(),
+            enforce_logical_paths=False,
+        )
+
+
 @pytest.mark.parametrize("interrupt", [False, True])
 def test_atomic_switch_failure_restores_current_release(
     tmp_path: Path,
@@ -593,6 +642,8 @@ def test_interrupted_legacy_transition_recovers_unique_current(
         release_root=release,
         candidate=candidate,
         previous=previous,
+        owner_uid=os.geteuid(),
+        owner_gid=os.getegid(),
     )
 
     assert (release / "old-release").read_bytes() == b"old"

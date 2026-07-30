@@ -13,6 +13,7 @@ authority.
   Python archive into a normalized, symlink-free private runtime.
 - `m2_python_runtime.py` owns its exact version, manifest, content and
   self-contained execution contracts.
+- `m2_acl_custody.py` owns the Darwin fd-level extended-ACL-free contract.
 - `m2_release_contracts.py` owns bundle content, private-runtime launcher and
   manifest contracts.
 - `m2_release_builder.py` reads exact blobs from a clean Git HEAD and builds
@@ -142,7 +143,8 @@ The installer never executes staged or installed bundle code. It:
 2. takes the exclusive deployment lock;
 3. creates `release.candidate` using exact-byte writes without carrying source
    ACLs, xattrs or symlinks;
-4. verifies root ownership and the complete candidate manifest;
+4. rejects any inherited Darwin extended ACL, then verifies root ownership
+   and the complete candidate manifest;
 5. atomically exchanges an existing tree with `release.candidate`, so current
    is never absent even if the process is killed or the host loses power;
 6. retains the exchanged old tree as `release.previous` and fsyncs the parent;
@@ -162,7 +164,9 @@ The installed-tree verifier holds the release-root descriptor while it walks.
 Traversal descriptors are bounded by path depth; every reopened component uses
 `O_NOFOLLOW` and must retain its recorded identity. Each regular file is read
 twice through one fd-relative descriptor and reopened for final identity/hash
-verification. This preserves root-relative pathname and exact-byte binding
+verification. Every root/directory/file descriptor must also report no Darwin
+extended ACL, and installed-tree manifest v2 records `acl_free: true` for the
+root and every entry. This preserves root-relative pathname and exact-byte binding
 without holding every runtime directory or dependency file open
 simultaneously; the full runtime tree remains verifiable under the M2
 LaunchDaemon soft limit of 256 file descriptors.

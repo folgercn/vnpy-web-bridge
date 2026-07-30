@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .errors import RegistryError
+from .m2_acl_custody import require_acl_free_path
 from .m2_release_artifacts import build_release_tree_manifest
 from .m2_release_contracts import (
     LOGICAL_RELEASE_ROOT,
@@ -83,6 +84,10 @@ def _verify_owner(root: Path, *, owner_uid: int, owner_gid: int) -> None:
             or value.st_gid != owner_gid
         ):
             raise RegistryError("installed M2 release ownership mismatch")
+        require_acl_free_path(
+            path,
+            f"installed M2 release {path.relative_to(root) if path != root else '.'}",
+        )
 
 
 def _remove_candidate(path: Path) -> None:
@@ -96,9 +101,12 @@ def _recover_interrupted_install(
     release_root: Path,
     candidate: Path,
     previous: Path,
+    owner_uid: int,
+    owner_gid: int,
 ) -> None:
     """Restore a unique current release before accepting another update."""
     if not release_root.exists() and previous.exists():
+        _verify_owner(previous, owner_uid=owner_uid, owner_gid=owner_gid)
         previous.rename(release_root)
         _fsync_directory(parent)
     if candidate.exists():
@@ -195,17 +203,27 @@ def install_release_bundle(
         or stat.S_IMODE(parent_stat.st_mode) != 0o755
     ):
         raise RegistryError("M2 release parent custody mismatch")
+    require_acl_free_path(parent, "M2 release parent")
     with hold_release_update_lock(
         lock_path,
         expected_owner_uid=expected_owner_uid,
         expected_owner_gid=expected_owner_gid,
     ):
+        require_acl_free_path(parent, "M2 release parent")
         _recover_interrupted_install(
             parent=parent,
             release_root=release_root,
             candidate=candidate,
             previous=previous,
+            owner_uid=expected_owner_uid,
+            owner_gid=expected_owner_gid,
         )
+        if release_root.exists():
+            _verify_owner(
+                release_root,
+                owner_uid=expected_owner_uid,
+                owner_gid=expected_owner_gid,
+            )
         if previous.exists():
             raise RegistryError("M2 release.previous must be archived first")
         had_previous = False

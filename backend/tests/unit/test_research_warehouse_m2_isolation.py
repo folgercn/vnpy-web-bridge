@@ -5,6 +5,8 @@ import fcntl
 import inspect
 import json
 import os
+import pwd
+import subprocess
 import sys
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -96,6 +98,7 @@ def verified_release_artifacts() -> VerifiedReleaseArtifacts:
             "owner_uid": 0,
             "owner_gid": 0,
             "mode": "0755",
+            "acl_free": True,
         },
         output_path=OUTPUT_PATH,
         output_raw_sha256=OUTPUT_SHA256,
@@ -714,6 +717,36 @@ def test_release_manifest_and_output_are_recomputed_from_files(
             expected_manifest_raw_sha256=sha256(current_manifest.read_bytes()),
             output_path=output_path,
             expected_output_raw_sha256=OUTPUT_SHA256,
+            output_owner_uid=owner_uid,
+            release_lock_identity=verified_lock_identity(),
+            expected_release_owner_uid=owner_uid,
+            expected_release_owner_gid=owner_gid,
+        )
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Darwin extended ACL")
+def test_final_release_verifier_rejects_descendant_acl(tmp_path: Path) -> None:
+    (
+        release,
+        executable,
+        manifest_path,
+        output_path,
+        owner_uid,
+        owner_gid,
+    ) = release_artifact_fixture(tmp_path)
+    account = pwd.getpwuid(os.getuid()).pw_name
+    subprocess.check_call(
+        ["chmod", "+a", f"user:{account} allow write", str(executable)]
+    )
+
+    with pytest.raises(RegistryError, match="extended ACL"):
+        verify_release_artifacts(
+            policy=policy(),
+            release_root=release,
+            manifest_path=manifest_path,
+            expected_manifest_raw_sha256=sha256(manifest_path.read_bytes()),
+            output_path=output_path,
+            expected_output_raw_sha256=sha256(output_path.read_bytes()),
             output_owner_uid=owner_uid,
             release_lock_identity=verified_lock_identity(),
             expected_release_owner_uid=owner_uid,

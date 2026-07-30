@@ -12,6 +12,7 @@ from typing import Any
 from .canonical import sha256
 from .errors import RegistryError
 from .file_integrity import MAX_RAW_BYTES, file_identity
+from .m2_acl_custody import require_acl_free_fd
 
 REQUIRED_RELEASE_PROGRAMS = {
     "bin/research-warehouse-job",
@@ -66,6 +67,7 @@ class HeldReleaseTree:
                 raise RegistryError("M2 release root pathname identity mismatch")
             try:
                 self._validate_custody(root_stat, ".", directory=True)
+                require_acl_free_fd(root_fd, "M2 release root")
             except RegistryError:
                 os.close(root_fd)
                 raise
@@ -185,6 +187,7 @@ class HeldReleaseTree:
             raise RegistryError(f"M2 release entry changed while opening: {relative}")
         try:
             self._validate_custody(opened, relative, directory=directory)
+            require_acl_free_fd(child_fd, f"M2 release entry {relative}")
         except RegistryError:
             os.close(child_fd)
             raise
@@ -223,6 +226,7 @@ class HeldReleaseTree:
                 "owner_gid": opened.st_gid,
                 "mode": mode_string(opened.st_mode),
                 "nlink": opened.st_nlink,
+                "acl_free": True,
             }
         )
         self._hook("after_entry", relative)
@@ -301,6 +305,13 @@ class HeldReleaseTree:
                     raise RegistryError(
                         f"M2 release pathname changed: {node.relative_path}"
                     )
+                acl_descriptor = (
+                    self.root_fd if node.relative_path == "." else reopened
+                )
+                require_acl_free_fd(
+                    acl_descriptor,
+                    f"M2 release entry {node.relative_path}",
+                )
                 if node.child_names is None and reopened is not None:
                     raw = self._read_descriptor(
                         reopened,
@@ -378,6 +389,7 @@ class HeldReleaseTree:
             "owner_uid": root_stat.st_uid,
             "owner_gid": root_stat.st_gid,
             "mode": mode_string(root_stat.st_mode),
+            "acl_free": True,
         }
         return root_identity, sorted(
             self.entries,
