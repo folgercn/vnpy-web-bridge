@@ -125,7 +125,10 @@ All supported root release installation or switching must use
 `hold_release_update_lock()` for the entire mutation; the exclusive lock
 serializes it against verification and running jobs. Direct in-place changes
 that ignore this contract are unsupported root compromise, not a deployment
-path.
+path. Existing releases are replaced with the Darwin atomic exchange
+primitive, so the fixed current pathname is never absent across interruption
+or power loss; the next exclusive updater also repairs legacy
+`release.previous`-only state before accepting a candidate.
 
 ## Monitoring
 

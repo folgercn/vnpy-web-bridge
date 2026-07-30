@@ -8,9 +8,6 @@ from pathlib import Path
 
 from .canonical import canonical_json_line
 from .errors import RegistryError
-from .m2_python_runtime import (
-    create_python_runtime_manifest,
-)
 from .m2_python_runtime_archive import prepare_python_runtime
 from .m2_release_builder import build_release_bundle
 from .m2_release_contracts import (
@@ -28,12 +25,10 @@ def parser() -> argparse.ArgumentParser:
     wheelhouse = commands.add_parser("manifest-wheelhouse")
     wheelhouse.add_argument("--wheelhouse", type=Path, required=True)
     wheelhouse.add_argument("--output", type=Path, required=True)
-    runtime = commands.add_parser("manifest-python-runtime")
-    runtime.add_argument("--runtime-root", type=Path, required=True)
-    runtime.add_argument("--output", type=Path, required=True)
     prepare_runtime = commands.add_parser("prepare-python-runtime")
     prepare_runtime.add_argument("--source-archive", type=Path, required=True)
     prepare_runtime.add_argument("--output-root", type=Path, required=True)
+    prepare_runtime.add_argument("--manifest-output", type=Path, required=True)
     build = commands.add_parser("build")
     build.add_argument("--source-root", type=Path, required=True)
     build.add_argument("--source-commit-sha", required=True)
@@ -74,23 +69,14 @@ def main(argv: list[str] | None = None) -> int:
                 "wheel_count": len(manifest["wheels"]),
             }
         elif args.command == "prepare-python-runtime":
-            prepare_python_runtime(args.source_archive, args.output_root)
+            manifest = prepare_python_runtime(args.source_archive, args.output_root)
+            digest = write_create_only(args.manifest_output, manifest)
             output = {
                 "schema_version": (
                     "vnpy_research_m2_python_runtime_prepare_result_v1"
                 ),
                 "status": "M2_PYTHON_RUNTIME_PREPARED",
                 "runtime_root": str(args.output_root),
-            }
-        elif args.command == "manifest-python-runtime":
-            manifest = create_python_runtime_manifest(
-                args.runtime_root,
-            )
-            digest = write_create_only(args.output, manifest)
-            output = {
-                "schema_version": (
-                    "vnpy_research_m2_python_runtime_manifest_result_v1"
-                ),
                 "manifest_raw_sha256": digest,
                 "entry_count": len(manifest["entries"]),
                 "tree_content_sha256": manifest["tree_content_sha256"],

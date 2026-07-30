@@ -20,6 +20,12 @@ PYTHON_RUNTIME_VERSION = "3.12.13"
 PYTHON_RUNTIME_SOURCE_ARCHIVE_SHA256 = (
     "e654c21d0ba53e2c671868d4112fac5874deca4c35226d36c5cfe53bc5c9cd71"
 )
+PYTHON_RUNTIME_TREE_CONTENT_SHA256 = (
+    "30b11e575da124b5cd1b529dc6434ee962a589073563b8b027fb33553607bfdc"
+)
+PYTHON_RUNTIME_MANIFEST_RAW_SHA256 = (
+    "086376bad228cf428b31cc740e8e4b42a19d4f3de1de9b7efb7c743a697e45b1"
+)
 RUNTIME_KEYS = {
     "schema_version",
     "python_version",
@@ -110,13 +116,21 @@ def create_python_runtime_manifest(
     root: Path,
 ) -> dict[str, Any]:
     entries = snapshot_python_runtime(root)
-    return {
+    tree_digest = runtime_content_sha256(entries)
+    if tree_digest != PYTHON_RUNTIME_TREE_CONTENT_SHA256:
+        raise RegistryError(
+            "M2 Python runtime is not the approved archive extraction"
+        )
+    manifest = {
         "schema_version": RUNTIME_SCHEMA,
         "python_version": PYTHON_RUNTIME_VERSION,
         "source_archive_raw_sha256": PYTHON_RUNTIME_SOURCE_ARCHIVE_SHA256,
         "entries": entries,
-        "tree_content_sha256": runtime_content_sha256(entries),
+        "tree_content_sha256": tree_digest,
     }
+    if sha256(canonical_json_line(manifest)) != PYTHON_RUNTIME_MANIFEST_RAW_SHA256:
+        raise RegistryError("M2 Python runtime approved manifest mismatch")
+    return manifest
 
 
 def load_python_runtime_manifest(
@@ -127,6 +141,8 @@ def load_python_runtime_manifest(
 ) -> tuple[dict[str, Any], str]:
     if SHA256_PATTERN.fullmatch(expected_raw_sha256) is None:
         raise RegistryError("expected M2 Python runtime manifest SHA256 is invalid")
+    if expected_raw_sha256 != PYTHON_RUNTIME_MANIFEST_RAW_SHA256:
+        raise RegistryError("M2 Python runtime manifest is not approved")
     raw = read_regular_strict(
         path,
         "M2 Python runtime manifest",
@@ -148,6 +164,8 @@ def _validate_manifest(value: object) -> dict[str, Any]:
         or manifest["python_version"] != PYTHON_RUNTIME_VERSION
         or manifest["source_archive_raw_sha256"]
         != PYTHON_RUNTIME_SOURCE_ARCHIVE_SHA256
+        or manifest["tree_content_sha256"]
+        != PYTHON_RUNTIME_TREE_CONTENT_SHA256
         or not isinstance(manifest["entries"], list)
         or SHA256_PATTERN.fullmatch(manifest["tree_content_sha256"]) is None
     ):

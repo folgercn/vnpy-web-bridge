@@ -14,6 +14,7 @@ from .file_integrity import MAX_RAW_BYTES, read_regular_strict
 from .m2_python_runtime import (
     PYTHON_RUNTIME_SOURCE_ARCHIVE_SHA256,
     RUNTIME_EXECUTABLE,
+    create_python_runtime_manifest,
     verify_runtime_execution,
 )
 
@@ -21,7 +22,10 @@ MAX_RUNTIME_ENTRIES = 10_000
 MAX_RUNTIME_BYTES = 256 * 1024 * 1024
 
 
-def prepare_python_runtime(source_archive: Path, output_root: Path) -> None:
+def prepare_python_runtime(
+    source_archive: Path,
+    output_root: Path,
+) -> dict[str, object]:
     """Extract the pinned archive into a normalized symlink-free tree."""
     archive_raw = read_regular_strict(
         source_archive,
@@ -49,6 +53,7 @@ def prepare_python_runtime(source_archive: Path, output_root: Path) -> None:
             directory.chmod(0o755)
         output_root.chmod(0o755)
         verify_runtime_execution(output_root)
+        return create_python_runtime_manifest(output_root)
     except Exception:
         shutil.rmtree(output_root, ignore_errors=True)
         raise

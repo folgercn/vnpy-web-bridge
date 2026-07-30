@@ -18,8 +18,9 @@ authority.
 - `m2_release_builder.py` reads exact blobs from a clean Git HEAD and builds
   the frozen source/dependency tree.
 - `m2_release_install.py` copies without symlinks or inherited xattrs, verifies
-  the candidate, and switches it only while holding the exclusive root-owned
-  deployment lock. A failed post-switch verification restores the old tree.
+  the candidate, and atomically exchanges it with current only while holding
+  the exclusive root-owned deployment lock. A failed post-switch verification
+  or catchable process interruption restores the old tree.
 - `m2_release_cli.py` is argument and canonical output plumbing.
 - `m2_monitor_cli.py` exposes the existing pure monitor evaluator as a real
   command-line entrypoint.
@@ -62,24 +63,23 @@ raw SHA-256 is
 `e654c21d0ba53e2c671868d4112fac5874deca4c35226d36c5cfe53bc5c9cd71`.
 Retain the archive privately as mode `0600`; any other bytes fail closed.
 
-Prepare and manifest it before building:
+Prepare and manifest it in the same pinned-archive operation before building:
 
 ```bash
 PYTHONPATH=scripts python3.12 scripts/research_warehouse_m2_release_cli.py \
   prepare-python-runtime \
   --source-archive /private/build/python-runtime.tar.gz \
-  --output-root /private/build/python-runtime
-
-PYTHONPATH=scripts python3.12 scripts/research_warehouse_m2_release_cli.py \
-  manifest-python-runtime \
-  --runtime-root /private/build/python-runtime \
-  --output /private/evidence/python-runtime-manifest.json
+  --output-root /private/build/python-runtime \
+  --manifest-output /private/evidence/python-runtime-manifest.json
 ```
 
 Preparation reads the verified archive directly, rejects unsafe paths and
 special entries, omits archive links, writes fresh single-link files, applies
 fixed modes, and proves that Python 3.12.13 resolves both `sys.prefix` and its
-standard library inside the prepared tree with user site disabled.
+standard library inside the prepared tree with user site disabled. The
+resulting exact tree-content SHA and canonical runtime-manifest SHA are frozen
+in the contract; no command can issue provenance for an arbitrary runtime
+directory.
 
 ## Build
 
@@ -143,17 +143,20 @@ The installer never executes staged or installed bundle code. It:
 3. creates `release.candidate` using exact-byte writes without carrying source
    ACLs, xattrs or symlinks;
 4. verifies root ownership and the complete candidate manifest;
-5. retains an existing tree as `release.previous`;
-6. switches the candidate and fsyncs the parent;
+5. atomically exchanges an existing tree with `release.candidate`, so current
+   is never absent even if the process is killed or the host loses power;
+6. retains the exchanged old tree as `release.previous` and fsyncs the parent;
 7. verifies the installed tree again;
 8. publishes the create-only physical installed-tree manifest needed by the
    #172 verifier and prints its independently retainable raw SHA-256;
-9. restores the previous tree on every exception after the old release moves,
-   including failure of the first parent-directory fsync.
+9. atomically restores the previous tree on every `BaseException` after the
+   exchange, including `KeyboardInterrupt` and parent-directory fsync failure.
 
-An existing `release.candidate` or `release.previous` makes the next install
-fail closed. Removing or archiving those root-owned paths is an explicit
-operator action, not an automatic cleanup side effect.
+At the start of the next root update, a legacy/interrupted state with
+`release` missing and `release.previous` present is restored before staging;
+an orphan `release.candidate` is removed under the exclusive lock. A retained
+`release.previous` from a completed update still requires explicit archival
+before another update.
 
 The installed-tree verifier holds the release-root descriptor while it walks.
 Traversal descriptors are bounded by path depth; every reopened component uses

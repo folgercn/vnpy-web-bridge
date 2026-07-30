@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import ctypes
 import os
 import shutil
 import stat
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +21,37 @@ from .m2_release_contracts import (
 from .m2_release_lock import hold_release_update_lock
 
 LOGICAL_LOCK_PATH = "/usr/local/libexec/vnpyresearch/release.lock"
+
+
+def _atomic_exchange(first: Path, second: Path) -> None:
+    """Atomically exchange two directory names on the supported M2/CI kernels."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    first_raw = os.fsencode(first)
+    second_raw = os.fsencode(second)
+    if sys.platform == "darwin":
+        result = libc.renameatx_np(
+            -2,
+            ctypes.c_char_p(first_raw),
+            -2,
+            ctypes.c_char_p(second_raw),
+            0x00000002,  # RENAME_SWAP
+        )
+    elif sys.platform.startswith("linux"):
+        result = libc.renameat2(
+            -100,
+            ctypes.c_char_p(first_raw),
+            -100,
+            ctypes.c_char_p(second_raw),
+            0x00000002,  # RENAME_EXCHANGE
+        )
+    else:
+        raise RegistryError("atomic M2 release exchange is unsupported")
+    if result != 0:
+        error = ctypes.get_errno()
+        raise RegistryError("cannot atomically exchange M2 releases") from OSError(
+            error,
+            os.strerror(error),
+        )
 
 
 def _fsync_directory(path: Path) -> None:
@@ -55,6 +88,22 @@ def _verify_owner(root: Path, *, owner_uid: int, owner_gid: int) -> None:
 def _remove_candidate(path: Path) -> None:
     if path.exists():
         shutil.rmtree(path)
+
+
+def _recover_interrupted_install(
+    *,
+    parent: Path,
+    release_root: Path,
+    candidate: Path,
+    previous: Path,
+) -> None:
+    """Restore a unique current release before accepting another update."""
+    if not release_root.exists() and previous.exists():
+        previous.rename(release_root)
+        _fsync_directory(parent)
+    if candidate.exists():
+        _remove_candidate(candidate)
+        _fsync_directory(parent)
 
 
 def _copy_regular(source: Path, target: Path) -> None:
@@ -146,15 +195,20 @@ def install_release_bundle(
         or stat.S_IMODE(parent_stat.st_mode) != 0o755
     ):
         raise RegistryError("M2 release parent custody mismatch")
-    if candidate.exists() or previous.exists():
-        raise RegistryError("M2 release install staging path is not empty")
     with hold_release_update_lock(
         lock_path,
         expected_owner_uid=expected_owner_uid,
         expected_owner_gid=expected_owner_gid,
     ):
+        _recover_interrupted_install(
+            parent=parent,
+            release_root=release_root,
+            candidate=candidate,
+            previous=previous,
+        )
+        if previous.exists():
+            raise RegistryError("M2 release.previous must be archived first")
         had_previous = False
-        old_moved = False
         new_installed = False
         try:
             _copy_tree(staged_root, candidate)
@@ -166,11 +220,14 @@ def install_release_bundle(
             verify_release_bundle(candidate, manifest)
             had_previous = release_root.exists()
             if had_previous:
-                release_root.rename(previous)
-                old_moved = True
+                _atomic_exchange(release_root, candidate)
+                new_installed = True
                 _fsync_directory(parent)
-            candidate.rename(release_root)
-            new_installed = True
+                candidate.rename(previous)
+                _fsync_directory(parent)
+            else:
+                candidate.rename(release_root)
+                new_installed = True
             _fsync_directory(parent)
             _verify_owner(
                 release_root,
@@ -190,16 +247,23 @@ def install_release_bundle(
                     installed_manifest_output,
                     installed_manifest,
                 )
-        except Exception as exc:
+        except BaseException as exc:
             rollback_error: Exception | None = None
             try:
-                if new_installed and release_root.exists():
+                if had_previous and new_installed and release_root.exists():
+                    rollback_source = (
+                        previous if previous.exists() else candidate
+                    )
+                    if rollback_source.exists():
+                        _atomic_exchange(release_root, rollback_source)
+                        _remove_candidate(rollback_source)
+                    new_installed = False
+                elif new_installed and release_root.exists():
                     release_root.rename(candidate)
                     new_installed = False
-                if old_moved and previous.exists():
-                    previous.rename(release_root)
-                    old_moved = False
             except OSError as rollback_exc:
+                rollback_error = rollback_exc
+            except RegistryError as rollback_exc:
                 rollback_error = rollback_exc
             try:
                 _fsync_directory(parent)

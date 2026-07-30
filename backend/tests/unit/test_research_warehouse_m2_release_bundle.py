@@ -7,7 +7,11 @@ import sys
 from pathlib import Path
 
 import pytest
-from research_warehouse import m2_monitor_cli, m2_release_install
+from research_warehouse import (
+    m2_monitor_cli,
+    m2_python_runtime,
+    m2_release_install,
+)
 from research_warehouse.canonical import canonical_json_line, sha256
 from research_warehouse.errors import RegistryError
 from research_warehouse.m2_python_runtime import (
@@ -53,7 +57,10 @@ def fake_wheelhouse(tmp_path: Path) -> tuple[Path, Path, str]:
     return wheelhouse, manifest_path, digest
 
 
-def fake_python_runtime(tmp_path: Path) -> tuple[Path, Path, str]:
+def fake_python_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[Path, Path, str]:
     runtime = tmp_path / "python-runtime"
     bin_dir = runtime / "bin"
     stdlib = runtime / "lib/python3.12"
@@ -66,7 +73,28 @@ def fake_python_runtime(tmp_path: Path) -> tuple[Path, Path, str]:
     executable = bin_dir / "python3.12"
     executable.write_bytes(b"fake private Python 3.12\n")
     executable.chmod(0o555)
-    manifest = create_python_runtime_manifest(runtime)
+    entries = m2_python_runtime.snapshot_python_runtime(runtime)
+    tree_digest = m2_python_runtime.runtime_content_sha256(entries)
+    manifest = {
+        "schema_version": m2_python_runtime.RUNTIME_SCHEMA,
+        "python_version": m2_python_runtime.PYTHON_RUNTIME_VERSION,
+        "source_archive_raw_sha256": (
+            m2_python_runtime.PYTHON_RUNTIME_SOURCE_ARCHIVE_SHA256
+        ),
+        "entries": entries,
+        "tree_content_sha256": tree_digest,
+    }
+    approved_manifest_digest = sha256(canonical_json_line(manifest))
+    monkeypatch.setattr(
+        m2_python_runtime,
+        "PYTHON_RUNTIME_TREE_CONTENT_SHA256",
+        tree_digest,
+    )
+    monkeypatch.setattr(
+        m2_python_runtime,
+        "PYTHON_RUNTIME_MANIFEST_RAW_SHA256",
+        approved_manifest_digest,
+    )
     manifest_path = tmp_path / "python-runtime-manifest.json"
     digest = write_manifest(manifest_path, manifest)
     return runtime, manifest_path, digest
@@ -159,8 +187,9 @@ def test_wheelhouse_rejects_symlink(tmp_path: Path) -> None:
 
 def test_python_runtime_rejects_links_and_unpinned_archive(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    runtime, _manifest_path, _digest = fake_python_runtime(tmp_path)
+    runtime, _manifest_path, _digest = fake_python_runtime(tmp_path, monkeypatch)
     linked = runtime / "linked-python"
     linked.symlink_to(runtime / "bin/python3.12")
     with pytest.raises(RegistryError, match="contains a symlink"):
@@ -172,6 +201,13 @@ def test_python_runtime_rejects_links_and_unpinned_archive(
     with pytest.raises(RegistryError, match="exactly one hard link"):
         create_python_runtime_manifest(runtime)
     hardlink.unlink()
+
+    executable = runtime / "bin/python3.12"
+    executable.chmod(0o755)
+    executable.write_bytes(b"another self-reporting private Python 3.12\n")
+    executable.chmod(0o555)
+    with pytest.raises(RegistryError, match="approved archive extraction"):
+        create_python_runtime_manifest(runtime)
 
     archive = tmp_path / "runtime.tar.gz"
     archive.write_bytes(b"not the pinned runtime")
@@ -186,7 +222,7 @@ def test_build_and_verify_bundle_is_exact(
 ) -> None:
     fake_subprocess(monkeypatch)
     wheelhouse, manifest_path, digest = fake_wheelhouse(tmp_path)
-    runtime, runtime_manifest, runtime_digest = fake_python_runtime(tmp_path)
+    runtime, runtime_manifest, runtime_digest = fake_python_runtime(tmp_path, monkeypatch)
     output = tmp_path / "release"
     manifest = build_release_bundle(
         source_root=REPO_ROOT,
@@ -227,7 +263,7 @@ def test_failed_dependency_install_publishes_no_bundle(
 ) -> None:
     fake_subprocess(monkeypatch, pip_status=1)
     wheelhouse, manifest_path, digest = fake_wheelhouse(tmp_path)
-    runtime, runtime_manifest, runtime_digest = fake_python_runtime(tmp_path)
+    runtime, runtime_manifest, runtime_digest = fake_python_runtime(tmp_path, monkeypatch)
     output = tmp_path / "release"
     with pytest.raises(RegistryError, match="dependency installation"):
         build_release_bundle(
@@ -251,7 +287,7 @@ def test_install_switches_under_lock_and_retains_previous(
 ) -> None:
     fake_subprocess(monkeypatch)
     wheelhouse, manifest_path, digest = fake_wheelhouse(tmp_path)
-    runtime, runtime_manifest, runtime_digest = fake_python_runtime(tmp_path)
+    runtime, runtime_manifest, runtime_digest = fake_python_runtime(tmp_path, monkeypatch)
     staged = tmp_path / "staged"
     manifest = build_release_bundle(
         source_root=REPO_ROOT,
@@ -331,7 +367,7 @@ def test_install_rolls_back_failed_post_switch_verification(
 ) -> None:
     fake_subprocess(monkeypatch)
     wheelhouse, manifest_path, digest = fake_wheelhouse(tmp_path)
-    runtime, runtime_manifest, runtime_digest = fake_python_runtime(tmp_path)
+    runtime, runtime_manifest, runtime_digest = fake_python_runtime(tmp_path, monkeypatch)
     staged = tmp_path / "staged"
     manifest = build_release_bundle(
         source_root=REPO_ROOT,
@@ -410,7 +446,7 @@ def test_installer_rejects_changed_runtime_without_executing_it(
 ) -> None:
     fake_subprocess(monkeypatch)
     wheelhouse, manifest_path, digest = fake_wheelhouse(tmp_path)
-    runtime, runtime_manifest, runtime_digest = fake_python_runtime(tmp_path)
+    runtime, runtime_manifest, runtime_digest = fake_python_runtime(tmp_path, monkeypatch)
     staged = tmp_path / "staged"
     manifest = build_release_bundle(
         source_root=REPO_ROOT,
@@ -453,13 +489,15 @@ def test_installer_rejects_changed_runtime_without_executing_it(
         )
 
 
-def test_first_parent_fsync_failure_restores_current_release(
+@pytest.mark.parametrize("interrupt", [False, True])
+def test_atomic_switch_failure_restores_current_release(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    interrupt: bool,
 ) -> None:
     fake_subprocess(monkeypatch)
     wheelhouse, manifest_path, digest = fake_wheelhouse(tmp_path)
-    runtime, runtime_manifest, runtime_digest = fake_python_runtime(tmp_path)
+    runtime, runtime_manifest, runtime_digest = fake_python_runtime(tmp_path, monkeypatch)
 
     def build(path: Path) -> dict:
         return build_release_bundle(
@@ -503,10 +541,12 @@ def test_first_parent_fsync_failure_restores_current_release(
         if (
             not injected
             and path == parent
-            and (parent / "release.previous").exists()
-            and not release.exists()
+            and (parent / "release.candidate").exists()
+            and release.exists()
         ):
             injected = True
+            if interrupt:
+                raise KeyboardInterrupt
             raise RegistryError("forced first parent fsync failure")
         original_fsync(path)
 
@@ -514,7 +554,9 @@ def test_first_parent_fsync_failure_restores_current_release(
         "research_warehouse.m2_release_install._fsync_directory",
         fail_after_old_release_moves,
     )
-    with pytest.raises(RegistryError, match="first parent fsync"):
+    expected = KeyboardInterrupt if interrupt else RegistryError
+    match = None if interrupt else "first parent fsync"
+    with pytest.raises(expected, match=match):
         install_release_bundle(
             staged_root=staged_again,
             manifest=manifest_again,
@@ -531,6 +573,33 @@ def test_first_parent_fsync_failure_restores_current_release(
     verify_release_bundle(release, manifest)
 
 
+def test_interrupted_legacy_transition_recovers_unique_current(
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "libexec"
+    parent.mkdir(mode=0o755)
+    previous = parent / "release.previous"
+    previous.mkdir(mode=0o755)
+    marker = previous / "old-release"
+    marker.write_bytes(b"old")
+    marker.chmod(0o444)
+    candidate = parent / "release.candidate"
+    candidate.mkdir(mode=0o755)
+    (candidate / "partial").write_bytes(b"partial")
+    release = parent / "release"
+
+    m2_release_install._recover_interrupted_install(
+        parent=parent,
+        release_root=release,
+        candidate=candidate,
+        previous=previous,
+    )
+
+    assert (release / "old-release").read_bytes() == b"old"
+    assert not previous.exists()
+    assert not candidate.exists()
+
+
 def test_runtime_requirements_are_raw_pinned(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -539,7 +608,7 @@ def test_runtime_requirements_are_raw_pinned(
     changed = tmp_path / "requirements.txt"
     changed.write_bytes(REQUIREMENTS.read_bytes() + b"extra==1\n")
     wheelhouse, manifest_path, digest = fake_wheelhouse(tmp_path)
-    runtime, runtime_manifest, runtime_digest = fake_python_runtime(tmp_path)
+    runtime, runtime_manifest, runtime_digest = fake_python_runtime(tmp_path, monkeypatch)
     with pytest.raises(RegistryError, match="requirements raw SHA256"):
         build_release_bundle(
             source_root=REPO_ROOT,
