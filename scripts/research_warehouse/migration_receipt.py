@@ -103,6 +103,30 @@ class VerifiedMigrationReceipt:
     payload: dict[str, Any]
 
 
+def _migration_receipt_location(path: Path) -> tuple[Path, Path]:
+    normalized = normalized_absolute(path)
+    root = normalized.parent.parent
+    canonical = root / "receipts" / normalized.name
+    if normalized != canonical:
+        raise RegistryError(
+            "migration receipt path is outside the canonical receipts directory"
+        )
+    return root, canonical
+
+
+def _bind_migration_receipt_path(
+    path: Path,
+    held: HeldCustodyRoot,
+) -> Path:
+    normalized = normalized_absolute(path)
+    canonical = held.path / "receipts" / normalized.name
+    if normalized != canonical:
+        raise RegistryError(
+            "migration receipt path does not match held custody"
+        )
+    return canonical
+
+
 def _migration_id(payload: dict[str, Any]) -> str:
     value = dict(payload)
     value["migration_id"] = ""
@@ -267,12 +291,12 @@ def verify_migration_receipt(
     expected_public_key_sha256: str,
     snapshot: WarehouseSnapshot,
 ) -> VerifiedMigrationReceipt:
-    receipt_root = path.parent.parent
+    receipt_root, canonical_path = _migration_receipt_location(path)
     from .held_custody import hold_custody_root
 
     with hold_custody_root(receipt_root) as held:
         return _verify_migration_receipt_held(
-            path=path,
+            path=canonical_path,
             held=held,
             expected_raw_sha256=expected_raw_sha256,
             public_key_path=public_key_path,
@@ -290,12 +314,13 @@ def _verify_migration_receipt_held(
     expected_public_key_sha256: str,
     snapshot: WarehouseSnapshot,
 ) -> VerifiedMigrationReceipt:
+    canonical_path = _bind_migration_receipt_path(path, held)
     expected = require_sha256(
         expected_raw_sha256,
         "trusted migration receipt",
     )
     raw = held.read_file(
-        f"receipts/{path.name}",
+        f"receipts/{canonical_path.name}",
         label="migration receipt",
         limit=64 * 1024 * 1024,
     )
@@ -317,11 +342,11 @@ def _verify_migration_receipt_held(
         or validated["manifest_object_count"] != snapshot.manifest_object_count
     ):
         raise RegistryError("migration receipt snapshot metrics mismatch")
-    if path.name != f"{validated['migration_id']}.json":
+    if canonical_path.name != f"{validated['migration_id']}.json":
         raise RegistryError("migration receipt custody filename mismatch")
     held.revalidate()
     return VerifiedMigrationReceipt(
-        path=path,
+        path=canonical_path,
         raw_sha256=expected,
         migration_id=validated["migration_id"],
         source_custody_identity=validated["source_custody_identity"],

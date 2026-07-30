@@ -227,6 +227,22 @@ def test_append_only_backup_restore_migration_and_schema(
         for item in verified.lineage.records
     } == {values[2], values[3]}
     assert verified.payload["original_batches_resigned"] is False
+    alternate_parent = receipt_paths.root / "other"
+    alternate_parent.mkdir(mode=0o700)
+    alternate_path = alternate_parent / migrated.receipt.path.name
+    alternate_path.write_bytes(b'{"tampered":true}\n')
+    alternate_path.chmod(0o600)
+    with pytest.raises(RegistryError, match="canonical receipts directory"):
+        verify_completed_migration(
+            source=restore.evidence,
+            destination=migrated.destination,
+            receipt_path=alternate_path,
+            expected_receipt_raw_sha256=migrated.receipt.raw_sha256,
+            manifest_public_key_path=values[1],
+            registry=load_registry(fixture.REGISTRY_PATH),
+            migration_public_key_path=migration_keys[1],
+            expected_migration_public_key_sha256=migration_keys[2],
+        )
     for schema_path, payload in (
         (BACKUP_SCHEMA, anchor.payload),
         (MIGRATION_SCHEMA, verified.payload),

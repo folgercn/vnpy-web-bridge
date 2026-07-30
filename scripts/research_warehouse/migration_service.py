@@ -20,6 +20,7 @@ from .migration_receipt import (
     MigrationReceiptPaths,
     VerifiedMigrationReceipt,
     _create_migration_receipt,
+    _migration_receipt_location,
     _verify_migration_receipt_held,
 )
 from .models import SourceRegistry
@@ -144,7 +145,9 @@ def verify_completed_migration(
     migration_public_key_path: Path,
     expected_migration_public_key_sha256: str,
 ) -> VerifiedMigrationReceipt:
-    receipt_root = receipt_path.parent.parent
+    receipt_root, canonical_receipt_path = _migration_receipt_location(
+        receipt_path
+    )
     with (
         hold_custody_root(source.root) as source_held,
         hold_custody_root(destination.root) as destination_held,
@@ -165,7 +168,7 @@ def verify_completed_migration(
         ):
             raise RegistryError("migration source/destination snapshot mismatch")
         receipt = _verify_migration_receipt_held(
-            path=receipt_path,
+            path=canonical_receipt_path,
             held=receipt_held,
             expected_raw_sha256=expected_receipt_raw_sha256,
             public_key_path=migration_public_key_path,
