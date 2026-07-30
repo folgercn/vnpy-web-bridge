@@ -5,17 +5,20 @@ from __future__ import annotations
 import os
 import re
 import stat
-import subprocess
 from pathlib import Path
 from typing import Any
 
 from .canonical import canonical_json_line, parse_json_strict, sha256
 from .errors import RegistryError
 from .file_integrity import file_identity, read_regular_strict
-from .m2_wheelhouse import PYTHON_VERSION
+from .m2_python_runtime import (
+    RUNTIME_EXECUTABLE,
+    load_python_runtime_manifest,
+    verify_python_runtime,
+)
 from .manifest_contracts import SHA256_PATTERN
 
-BUNDLE_SCHEMA = "vnpy_research_m2_release_bundle_manifest_v1"
+BUNDLE_SCHEMA = "vnpy_research_m2_release_bundle_manifest_v2"
 REQUIREMENTS_RAW_SHA256 = (
     "4a372ecbd149efbb19bb1fd251a13c1ca395cc8356a7a66e325ed65a8b4094bf"
 )
@@ -29,8 +32,8 @@ BUNDLE_KEYS = {
     "source_commit_sha",
     "requirements_raw_sha256",
     "wheelhouse_manifest_raw_sha256",
-    "python_executable",
-    "python_executable_raw_sha256",
+    "python_runtime_manifest_raw_sha256",
+    "python_runtime_tree_content_sha256",
     "entries",
     "tree_content_sha256",
 }
@@ -111,26 +114,20 @@ def tree_content_sha256(entries: list[dict[str, Any]]) -> str:
     )
 
 
-def python_facts(python_executable: Path) -> tuple[str, str]:
-    try:
-        resolved = python_executable.resolve(strict=True)
-    except OSError as exc:
-        raise RegistryError("M2 Python executable is unavailable") from exc
-    raw = regular_bytes(resolved, "M2 Python executable")
-    completed = subprocess.run(
-        [
-            str(resolved),
-            "-I",
-            "-c",
-            "import sys; print('.'.join(map(str, sys.version_info[:2])))",
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
+def release_launcher(role: str) -> bytes:
+    if role not in {"warehouse", "monitor"}:
+        raise RegistryError("M2 release launcher role is invalid")
+    bootstrap = (
+        "research_warehouse_job.py"
+        if role == "warehouse"
+        else "research_warehouse_monitor.py"
     )
-    if completed.returncode != 0 or completed.stdout.strip() != PYTHON_VERSION:
-        raise RegistryError("M2 Python version mismatch")
-    return str(resolved), sha256(raw)
+    return (
+        "#!/bin/sh\n"
+        "set -eu\n"
+        f"exec {LOGICAL_RELEASE_ROOT}/runtime/{RUNTIME_EXECUTABLE} -B -I "
+        f"{LOGICAL_RELEASE_ROOT}/app/{bootstrap} \"$@\"\n"
+    ).encode()
 
 
 def verify_release_bundle(root: Path, manifest: object) -> None:
@@ -140,9 +137,14 @@ def verify_release_bundle(root: Path, manifest: object) -> None:
         or COMMIT_PATTERN.fullmatch(value["source_commit_sha"]) is None
         or value["requirements_raw_sha256"] != REQUIREMENTS_RAW_SHA256
         or SHA256_PATTERN.fullmatch(value["wheelhouse_manifest_raw_sha256"]) is None
-        or not isinstance(value["python_executable"], str)
-        or not value["python_executable"].startswith("/")
-        or SHA256_PATTERN.fullmatch(value["python_executable_raw_sha256"]) is None
+        or SHA256_PATTERN.fullmatch(
+            value["python_runtime_manifest_raw_sha256"]
+        )
+        is None
+        or SHA256_PATTERN.fullmatch(
+            value["python_runtime_tree_content_sha256"]
+        )
+        is None
         or not isinstance(value["entries"], list)
     ):
         raise RegistryError("M2 release bundle manifest contract mismatch")
@@ -154,12 +156,25 @@ def verify_release_bundle(root: Path, manifest: object) -> None:
         or tree_content_sha256(actual_entries) != value["tree_content_sha256"]
     ):
         raise RegistryError("M2 release bundle content mismatch")
-    resolved, digest = python_facts(Path(value["python_executable"]))
+    runtime_manifest, _digest = load_python_runtime_manifest(
+        root / "python-runtime-manifest.json",
+        expected_raw_sha256=value["python_runtime_manifest_raw_sha256"],
+        private=False,
+    )
     if (
-        resolved != value["python_executable"]
-        or digest != value["python_executable_raw_sha256"]
+        runtime_manifest["tree_content_sha256"]
+        != value["python_runtime_tree_content_sha256"]
     ):
-        raise RegistryError("M2 release Python executable changed")
+        raise RegistryError("M2 Python runtime tree binding mismatch")
+    verify_python_runtime(root / "runtime", runtime_manifest)
+    for role, relative in (
+        ("warehouse", "bin/research-warehouse-job"),
+        ("monitor", "bin/research-warehouse-monitor"),
+    ):
+        if regular_bytes(root / relative, f"M2 {role} launcher") != release_launcher(
+            role
+        ):
+            raise RegistryError("M2 release launcher runtime binding mismatch")
 
 
 def load_release_bundle_manifest(

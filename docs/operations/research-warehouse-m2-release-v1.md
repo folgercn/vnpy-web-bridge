@@ -9,7 +9,12 @@ authority.
 ## Layers
 
 - `m2_wheelhouse.py` verifies the raw-SHA-pinned offline dependency set.
-- `m2_release_contracts.py` owns Python, content and manifest contracts.
+- `m2_python_runtime_archive.py` extracts the one raw-SHA-pinned standalone
+  Python archive into a normalized, symlink-free private runtime.
+- `m2_python_runtime.py` owns its exact version, manifest, content and
+  self-contained execution contracts.
+- `m2_release_contracts.py` owns bundle content, private-runtime launcher and
+  manifest contracts.
 - `m2_release_builder.py` reads exact blobs from a clean Git HEAD and builds
   the frozen source/dependency tree.
 - `m2_release_install.py` copies without symlinks or inherited xattrs, verifies
@@ -48,12 +53,40 @@ The manifest requires an exact, unique, sorted wheel filename set and binds
 every wheel's exact bytes. Adding, removing, replacing, hard-linking or
 symlinking a wheel fails closed.
 
+## Private Python runtime
+
+The approved runtime input is
+`cpython-3.12.13+20260728-x86_64-apple-darwin-install_only_stripped.tar.gz`
+from the Astral `python-build-standalone` `20260728` release. Its required
+raw SHA-256 is
+`e654c21d0ba53e2c671868d4112fac5874deca4c35226d36c5cfe53bc5c9cd71`.
+Retain the archive privately as mode `0600`; any other bytes fail closed.
+
+Prepare and manifest it before building:
+
+```bash
+PYTHONPATH=scripts python3.12 scripts/research_warehouse_m2_release_cli.py \
+  prepare-python-runtime \
+  --source-archive /private/build/python-runtime.tar.gz \
+  --output-root /private/build/python-runtime
+
+PYTHONPATH=scripts python3.12 scripts/research_warehouse_m2_release_cli.py \
+  manifest-python-runtime \
+  --runtime-root /private/build/python-runtime \
+  --output /private/evidence/python-runtime-manifest.json
+```
+
+Preparation reads the verified archive directly, rejects unsafe paths and
+special entries, omits archive links, writes fresh single-link files, applies
+fixed modes, and proves that Python 3.12.13 resolves both `sys.prefix` and its
+standard library inside the prepared tree with user site disabled.
+
 ## Build
 
 Build only from an exact clean Git HEAD. The source commit, frozen requirements
-raw hash, externally retained wheelhouse-manifest hash, resolved Python 3.12
-executable path/hash, every source/dependency byte, mode and relative path are
-bound into a canonical bundle manifest.
+raw hash, externally retained wheelhouse/runtime-manifest hashes, every private
+Python runtime, source and dependency byte, mode and relative path are bound
+into a canonical bundle manifest.
 
 ```bash
 PYTHONPATH=scripts python scripts/research_warehouse_m2_release_cli.py build \
@@ -63,16 +96,19 @@ PYTHONPATH=scripts python scripts/research_warehouse_m2_release_cli.py build \
   --wheelhouse /private/build/wheels \
   --wheelhouse-manifest /private/evidence/wheelhouse-manifest.json \
   --expected-wheelhouse-manifest-sha256 <retained-sha256> \
-  --python /usr/local/bin/python3.12 \
+  --python-runtime /private/build/python-runtime \
+  --python-runtime-manifest \
+    /private/evidence/python-runtime-manifest.json \
+  --expected-python-runtime-manifest-sha256 <retained-runtime-sha256> \
   --output-root /private/build/release \
   --bundle-manifest-output /private/evidence/release-bundle-manifest.json
 ```
 
 `pip` runs with `--no-index --no-deps --no-compile`; the wheelhouse is the only
-dependency source. Both frozen entrypoints must import successfully under
-Python isolated mode before the manifest is issued. The generated bundle is
-symlink-free, directory mode `0755`, executable mode `0555`, and other file
-mode `0444`.
+dependency source. It and both import checks execute only the copied private
+runtime under `-B -I`. Both launchers bind the fixed
+`release/runtime/bin/python3.12` path. The generated bundle is symlink-free,
+directory mode `0755`, executable mode `0555`, and other file mode `0444`.
 
 Verify it again with the independently retained bundle-manifest SHA:
 
@@ -99,9 +135,10 @@ sudo env PYTHONPATH=scripts python \
     /private/evidence/installed-release-tree-manifest.json
 ```
 
-The installer:
+The installer never executes staged or installed bundle code. It:
 
-1. verifies staged content and target Python bytes;
+1. verifies staged content, the embedded runtime manifest and all private
+   Python/runtime bytes;
 2. takes the exclusive deployment lock;
 3. creates `release.candidate` using exact-byte writes without carrying source
    ACLs, xattrs or symlinks;
@@ -111,8 +148,8 @@ The installer:
 7. verifies the installed tree again;
 8. publishes the create-only physical installed-tree manifest needed by the
    #172 verifier and prints its independently retainable raw SHA-256;
-9. restores the previous tree if final verification or manifest publication
-   fails.
+9. restores the previous tree on every exception after the old release moves,
+   including failure of the first parent-directory fsync.
 
 An existing `release.candidate` or `release.previous` makes the next install
 fail closed. Removing or archiving those root-owned paths is an explicit

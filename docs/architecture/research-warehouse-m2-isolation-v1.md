@@ -18,15 +18,19 @@ operator action followed by freshly captured, externally SHA-pinned evidence.
 - `m2_release_artifacts.py` rescans the root-owned release tree and successful
   output against independently retained raw-pinned artifacts.
 - `m2_release_tree_custody.py` performs the fd-relative recursive scan, keeps
-  every directory/file descriptor held, then rechecks directory membership
-  and pathname-to-fd identity before release verification completes.
+  every directory descriptor held, then reopens each bounded-lifetime file
+  descriptor from its held parent and rechecks identity, content and directory
+  membership before release verification completes.
 - `m2_release_lock.py` supplies the root-owned deployment lock: verification
   and job execution take a shared lock; every supported release update must
   take the exclusive lock.
-- `m2_wheelhouse.py`, `m2_release_contracts.py`,
-  `m2_release_builder.py` and `m2_release_install.py` build an offline,
-  exact-byte runtime tree from committed Git blobs and switch it only under
-  that exclusive lock. The complete release remains independently manifested.
+- `m2_wheelhouse.py`, `m2_python_runtime_archive.py`,
+  `m2_python_runtime.py`, `m2_release_contracts.py`, `m2_release_builder.py`
+  and `m2_release_install.py` build an offline,
+  exact-byte tree from a raw-pinned self-contained Python 3.12.13 archive,
+  wheelhouse and committed Git blobs, then switch it only under that exclusive
+  lock. The complete private interpreter, standard library, dependencies and
+  release remain independently manifested.
 - `m2_success_binding.py` binds those verified artifacts to one exact
   post-activation success receipt and monitor completion.
 - `m2_verifier.py` is the only public layer that can issue final
@@ -113,6 +117,9 @@ Both raw-pinned wrappers enter the root-owned `release-lock-runner`. The
 runner validates `/usr/local/libexec/vnpyresearch/release.lock` as a
 root-owned, single-link `0444` regular file, takes a shared lock and keeps its
 descriptor inherited for the entire warehouse/monitor process lifetime.
+The selected release launcher then executes only
+`release/runtime/bin/python3.12 -B -I`; no Homebrew, user-site or workspace
+Python pathname participates in the warehouse/monitor runtime.
 The verifier holds the same shared lock from tree scan through final result.
 All supported root release installation or switching must use
 `hold_release_update_lock()` for the entire mutation; the exclusive lock

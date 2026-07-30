@@ -10,14 +10,18 @@ from typing import Any
 
 from .canonical import sha256
 from .errors import RegistryError
+from .m2_python_runtime import (
+    load_python_runtime_manifest,
+    verify_python_runtime,
+    verify_runtime_execution,
+)
 from .m2_release_contracts import (
     BUNDLE_SCHEMA,
     COMMIT_PATTERN,
-    LOGICAL_RELEASE_ROOT,
     REQUIRED_ENTRYPOINTS,
     REQUIREMENTS_RAW_SHA256,
-    python_facts,
     regular_bytes,
+    release_launcher,
     snapshot_bundle_content,
     tree_content_sha256,
 )
@@ -104,20 +108,6 @@ def _bootstrap(role: str) -> bytes:
     ).encode()
 
 
-def _launcher(python_executable: str, role: str) -> bytes:
-    bootstrap = (
-        "research_warehouse_job.py"
-        if role == "warehouse"
-        else "research_warehouse_monitor.py"
-    )
-    return (
-        "#!/bin/sh\n"
-        "set -eu\n"
-        f"exec {python_executable} -I "
-        f"{LOGICAL_RELEASE_ROOT}/app/{bootstrap} \"$@\"\n"
-    ).encode()
-
-
 def _normalize_tree(root: Path) -> None:
     for path in sorted(root.rglob("*"), reverse=True):
         value = path.lstat()
@@ -168,7 +158,9 @@ def build_release_bundle(
     wheelhouse: Path,
     wheelhouse_manifest_path: Path,
     expected_wheelhouse_manifest_raw_sha256: str,
-    python_executable: Path,
+    python_runtime: Path,
+    python_runtime_manifest_path: Path,
+    expected_python_runtime_manifest_raw_sha256: str,
     output_root: Path,
 ) -> dict[str, Any]:
     if COMMIT_PATTERN.fullmatch(source_commit_sha) is None:
@@ -182,7 +174,11 @@ def build_release_bundle(
         expected_raw_sha256=expected_wheelhouse_manifest_raw_sha256,
     )
     verify_wheelhouse(wheelhouse, manifest)
-    python_path, python_sha = python_facts(python_executable)
+    runtime_manifest, runtime_manifest_sha = load_python_runtime_manifest(
+        python_runtime_manifest_path,
+        expected_raw_sha256=expected_python_runtime_manifest_raw_sha256,
+    )
+    verify_python_runtime(python_runtime, runtime_manifest)
     if output_root.exists():
         raise RegistryError("M2 release output already exists")
     output_root.mkdir(parents=False, mode=0o700)
@@ -190,12 +186,27 @@ def build_release_bundle(
         vendor = output_root / "vendor"
         app = output_root / "app"
         bin_dir = output_root / "bin"
+        runtime = output_root / "runtime"
         vendor.mkdir()
         app.mkdir()
         bin_dir.mkdir()
+        shutil.copytree(
+            python_runtime,
+            runtime,
+            symlinks=True,
+            copy_function=shutil.copy,
+        )
+        shutil.copyfile(
+            python_runtime_manifest_path,
+            output_root / "python-runtime-manifest.json",
+        )
+        _normalize_tree(runtime)
+        verify_python_runtime(runtime, runtime_manifest)
+        python_path = verify_runtime_execution(runtime)
         completed = subprocess.run(
             [
-                python_path,
+                str(python_path),
+                "-B",
                 "-I",
                 "-m",
                 "pip",
@@ -221,10 +232,10 @@ def build_release_bundle(
         (app / "research_warehouse_job.py").write_bytes(_bootstrap("warehouse"))
         (app / "research_warehouse_monitor.py").write_bytes(_bootstrap("monitor"))
         (bin_dir / "research-warehouse-job").write_bytes(
-            _launcher(python_path, "warehouse")
+            release_launcher("warehouse")
         )
         (bin_dir / "research-warehouse-monitor").write_bytes(
-            _launcher(python_path, "monitor")
+            release_launcher("monitor")
         )
         for entrypoint in REQUIRED_ENTRYPOINTS:
             (output_root / entrypoint).chmod(0o755)
@@ -234,7 +245,7 @@ def build_release_bundle(
             app / "research_warehouse_monitor.py",
         ):
             check = subprocess.run(
-                [python_path, "-I", str(bootstrap), "--help"],
+                [str(python_path), "-B", "-I", str(bootstrap), "--help"],
                 check=False,
                 capture_output=True,
                 text=True,
@@ -247,8 +258,10 @@ def build_release_bundle(
             "source_commit_sha": source_commit_sha,
             "requirements_raw_sha256": REQUIREMENTS_RAW_SHA256,
             "wheelhouse_manifest_raw_sha256": manifest_sha,
-            "python_executable": python_path,
-            "python_executable_raw_sha256": python_sha,
+            "python_runtime_manifest_raw_sha256": runtime_manifest_sha,
+            "python_runtime_tree_content_sha256": runtime_manifest[
+                "tree_content_sha256"
+            ],
             "entries": entries,
             "tree_content_sha256": tree_content_sha256(entries),
         }

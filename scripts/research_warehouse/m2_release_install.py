@@ -12,6 +12,7 @@ from .errors import RegistryError
 from .m2_release_artifacts import build_release_tree_manifest
 from .m2_release_contracts import (
     LOGICAL_RELEASE_ROOT,
+    regular_bytes,
     verify_release_bundle,
     write_create_only,
 )
@@ -63,7 +64,7 @@ def _copy_regular(source: Path, target: Path) -> None:
         raise RegistryError("staged M2 release entry is unavailable") from exc
     if stat.S_ISLNK(source_stat.st_mode) or not stat.S_ISREG(source_stat.st_mode):
         raise RegistryError("staged M2 release file type mismatch")
-    raw = source.read_bytes()
+    raw = regular_bytes(source, "staged M2 release file")
     descriptor = None
     try:
         descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -152,6 +153,9 @@ def install_release_bundle(
         expected_owner_uid=expected_owner_uid,
         expected_owner_gid=expected_owner_gid,
     ):
+        had_previous = False
+        old_moved = False
+        new_installed = False
         try:
             _copy_tree(staged_root, candidate)
             _verify_owner(
@@ -163,41 +167,54 @@ def install_release_bundle(
             had_previous = release_root.exists()
             if had_previous:
                 release_root.rename(previous)
+                old_moved = True
                 _fsync_directory(parent)
-            try:
-                candidate.rename(release_root)
-                _fsync_directory(parent)
-                _verify_owner(
+            candidate.rename(release_root)
+            new_installed = True
+            _fsync_directory(parent)
+            _verify_owner(
+                release_root,
+                owner_uid=expected_owner_uid,
+                owner_gid=expected_owner_gid,
+            )
+            verify_release_bundle(release_root, manifest)
+            installed_manifest_sha = None
+            if installed_manifest_output is not None:
+                installed_manifest = build_release_tree_manifest(
                     release_root,
-                    owner_uid=expected_owner_uid,
-                    owner_gid=expected_owner_gid,
+                    logical_release_root=LOGICAL_RELEASE_ROOT,
+                    expected_owner_uid=expected_owner_uid,
+                    expected_owner_gid=expected_owner_gid,
                 )
-                verify_release_bundle(release_root, manifest)
-                installed_manifest_sha = None
-                if installed_manifest_output is not None:
-                    installed_manifest = build_release_tree_manifest(
-                        release_root,
-                        logical_release_root=LOGICAL_RELEASE_ROOT,
-                        expected_owner_uid=expected_owner_uid,
-                        expected_owner_gid=expected_owner_gid,
-                    )
-                    installed_manifest_sha = write_create_only(
-                        installed_manifest_output,
-                        installed_manifest,
-                    )
-            except Exception:
-                if release_root.exists():
+                installed_manifest_sha = write_create_only(
+                    installed_manifest_output,
+                    installed_manifest,
+                )
+        except Exception as exc:
+            rollback_error: Exception | None = None
+            try:
+                if new_installed and release_root.exists():
                     release_root.rename(candidate)
-                if had_previous and previous.exists():
+                    new_installed = False
+                if old_moved and previous.exists():
                     previous.rename(release_root)
-                    _fsync_directory(parent)
+                    old_moved = False
+            except OSError as rollback_exc:
+                rollback_error = rollback_exc
+            try:
+                _fsync_directory(parent)
+            except RegistryError as rollback_fsync_exc:
+                if rollback_error is None:
+                    rollback_error = rollback_fsync_exc
+            finally:
+                _remove_candidate(candidate)
+            if rollback_error is not None:
+                raise RegistryError("M2 release rollback failed") from rollback_error
+            if isinstance(exc, RegistryError):
                 raise
-        except RegistryError:
-            _remove_candidate(candidate)
+            if isinstance(exc, OSError):
+                raise RegistryError("M2 release installation failed") from exc
             raise
-        except OSError as exc:
-            _remove_candidate(candidate)
-            raise RegistryError("M2 release installation failed") from exc
     return {
         "schema_version": "vnpy_research_m2_release_install_result_v1",
         "status": "M2_RELEASE_INSTALLED",
