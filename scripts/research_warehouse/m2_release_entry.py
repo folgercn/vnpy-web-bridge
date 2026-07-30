@@ -7,6 +7,7 @@ import importlib.metadata
 import os
 import platform
 import sys
+import sysconfig
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +26,7 @@ from .m2_release_bundle_contracts import (
 )
 
 ROLES = {"warehouse", "monitor"}
-COMMANDS = {"self-check"}
+COMMANDS = {"preinstall-self-check", "self-check"}
 FORBIDDEN_ENVIRONMENT = {
     "COMMODITY_C_FAST_SIMNOW_RPC_REQUEST_ADDRESS",
     "COMMODITY_C_FAST_SIMNOW_RPC_SUBSCRIBE_ADDRESS",
@@ -55,9 +56,12 @@ def _verify_interpreter() -> None:
     if (
         platform.python_implementation() != PYTHON_IMPLEMENTATION
         or platform.python_version() != PYTHON_VERSION
+        or platform.machine() != "arm64"
         or sys.version_info[:2] != (3, 12)
         or sys.flags.isolated != 1
+        or sys.flags.no_site != 1
         or sys.flags.no_user_site != 1
+        or sys.flags.dont_write_bytecode != 1
     ):
         raise RegistryError("M2 release interpreter identity/isolation mismatch")
     try:
@@ -65,6 +69,43 @@ def _verify_interpreter() -> None:
             raise RegistryError("M2 release interpreter path mismatch")
     except OSError as exc:
         raise RegistryError("M2 release interpreter path is unavailable") from exc
+
+
+def _path_in_allowed_import_closure(path: Path, release_root: Path) -> bool:
+    resolved = path.resolve(strict=False)
+    release_roots = (
+        (release_root / "lib").resolve(strict=False),
+        (release_root / "libexec").resolve(strict=False),
+    )
+    if any(resolved.is_relative_to(root) for root in release_roots):
+        return True
+    if any(part in {"site-packages", "dist-packages"} for part in resolved.parts):
+        return False
+    stdlib = Path(sysconfig.get_path("stdlib")).resolve(strict=False)
+    python_zip = stdlib.parent / (
+        f"python{sys.version_info.major}{sys.version_info.minor}.zip"
+    )
+    return resolved == python_zip or resolved.is_relative_to(stdlib)
+
+
+def _verify_import_closure(release_root: Path) -> None:
+    if any(
+        entry
+        and not _path_in_allowed_import_closure(Path(entry), release_root)
+        for entry in sys.path
+    ):
+        raise RegistryError("M2 release sys.path escaped frozen import closure")
+
+
+def _verify_loaded_module_origins(release_root: Path) -> None:
+    for module_name, module in tuple(sys.modules.items()):
+        origin = getattr(module, "__file__", None)
+        if not isinstance(origin, str) or not origin:
+            continue
+        if not _path_in_allowed_import_closure(Path(origin), release_root):
+            raise RegistryError(
+                f"M2 release loaded module escaped import closure: {module_name}"
+            )
 
 
 def _distribution_versions(
@@ -112,14 +153,20 @@ def self_check_release(
     expected_owner_uid: int = 0,
     expected_owner_gid: int = 0,
     enforce_interpreter: bool = True,
+    enforce_logical_root: bool = True,
     import_modules: bool = True,
 ) -> dict[str, Any]:
     if role not in ROLES:
         raise RegistryError("M2 release role is invalid")
-    if release_root.as_posix() != LOGICAL_RELEASE_ROOT and enforce_interpreter:
+    if (
+        release_root.as_posix() != LOGICAL_RELEASE_ROOT
+        and enforce_interpreter
+        and enforce_logical_root
+    ):
         raise RegistryError("M2 release logical root mismatch")
     if enforce_interpreter:
         _verify_interpreter()
+        _verify_import_closure(release_root)
     if FORBIDDEN_ENVIRONMENT & set(os.environ):
         raise RegistryError("M2 release inherited a forbidden environment")
     metadata, _raw = load_runtime_metadata(
@@ -159,6 +206,8 @@ def self_check_release(
                 module,
                 release_root / "lib/research_warehouse",
             )
+        if enforce_interpreter:
+            _verify_loaded_module_origins(release_root)
     return {
         "schema_version": "vnpy_research_m2_release_entry_result_v1",
         "status": "RELEASE_SELF_CHECK_PASSED_NO_SCHEDULE_AUTHORITY",
@@ -184,9 +233,11 @@ def main(
     if len(values) != 2 or values[0] not in ROLES or values[1] not in COMMANDS:
         return 64
     try:
+        preinstall = values[1] == "preinstall-self-check"
         result = self_check_release(
             release_root=release_root,
             role=values[0],
+            enforce_logical_root=not preinstall,
         )
     except RegistryError as exc:
         print(f"FAIL: {exc}", file=sys.stderr)

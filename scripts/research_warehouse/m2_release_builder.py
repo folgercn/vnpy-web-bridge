@@ -8,6 +8,7 @@ import shutil
 import stat
 import subprocess
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -49,6 +50,13 @@ FORBIDDEN_WHEEL_ROOTS = {
 }
 
 
+@dataclass(frozen=True)
+class CommitSource:
+    repo_path: str
+    raw: bytes
+    workspace_path: Path
+
+
 def require_clean_source_commit(source_root: Path) -> str:
     try:
         resolved = source_root.resolve(strict=True)
@@ -85,6 +93,94 @@ def require_clean_source_commit(source_root: Path) -> str:
     if status:
         raise RegistryError("M2 release source checkout must be clean")
     return require_source_commit(commit)
+
+
+def load_commit_source_snapshot(
+    source_root: Path,
+    source_commit_sha: str,
+) -> tuple[CommitSource, ...]:
+    """Bind release sources to Git object bytes, then prove worktree equality."""
+    source_commit_sha = require_source_commit(source_commit_sha)
+    prefix = PurePosixPath("scripts/research_warehouse")
+    try:
+        listed = subprocess.run(
+            [
+                "git",
+                "ls-tree",
+                "-rz",
+                "--name-only",
+                source_commit_sha,
+                "--",
+                prefix.as_posix(),
+            ],
+            cwd=source_root,
+            check=True,
+            capture_output=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise RegistryError("cannot enumerate M2 release commit sources") from exc
+    repo_paths: list[str] = []
+    for raw_path in listed.split(b"\0"):
+        if not raw_path:
+            continue
+        try:
+            repo_path = raw_path.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise RegistryError("M2 release commit source path is invalid") from exc
+        logical = PurePosixPath(repo_path)
+        if logical.parent == prefix and logical.suffix == ".py":
+            repo_paths.append(repo_path)
+    repo_paths.sort()
+    if (
+        not repo_paths
+        or f"{prefix.as_posix()}/__init__.py" not in repo_paths
+    ):
+        raise RegistryError("Research source package is incomplete in commit")
+
+    package_root = source_root / prefix
+    workspace_paths = sorted(
+        path.relative_to(source_root).as_posix()
+        for path in package_root.glob("*.py")
+    )
+    if workspace_paths != repo_paths:
+        raise RegistryError(
+            "M2 release workspace Python source set differs from commit"
+        )
+
+    snapshot: list[CommitSource] = []
+    for repo_path in repo_paths:
+        try:
+            raw = subprocess.run(
+                ["git", "cat-file", "blob", f"{source_commit_sha}:{repo_path}"],
+                cwd=source_root,
+                check=True,
+                capture_output=True,
+            ).stdout
+        except (OSError, subprocess.CalledProcessError) as exc:
+            raise RegistryError(
+                f"cannot read M2 release commit blob: {repo_path}"
+            ) from exc
+        workspace_path = source_root / PurePosixPath(repo_path)
+        workspace_raw = read_regular_strict(
+            workspace_path,
+            f"M2 release workspace source {repo_path}",
+            private=False,
+        )
+        if workspace_raw != raw:
+            raise RegistryError(
+                f"M2 release workspace source differs from commit: {repo_path}"
+            )
+        snapshot.append(
+            CommitSource(
+                repo_path=repo_path,
+                raw=raw,
+                workspace_path=workspace_path,
+            )
+        )
+    assert_research_source_boundary(
+        [source.workspace_path for source in snapshot]
+    )
+    return tuple(snapshot)
 
 
 def _mkdir(path: Path, mode: int) -> None:
@@ -258,7 +354,6 @@ def _extract_wheel(
 
 def _entry_module() -> bytes:
     return (
-        "#!/usr/local/bin/python3.12\n"
         "from pathlib import Path\n"
         "import sys\n"
         "\n"
@@ -279,35 +374,26 @@ def _role_entrypoint(role: str) -> bytes:
         "set -eu\n"
         "umask 077\n"
         "unset PYTHONPATH PYTHONHOME PYTHONUSERBASE\n"
-        f"exec {python_identity()['executable']} -I -s -E "
+        f"exec {python_identity()['executable']} -I -S -s -E -B "
         f"{LOGICAL_RELEASE_ROOT}/{ENTRY_MODULE_PATH} {role} self-check\n"
     ).encode("utf-8")
 
 
 def _copy_research_sources(
-    source_root: Path,
+    sources: tuple[CommitSource, ...],
     release_root: Path,
 ) -> list[dict[str, str]]:
-    package_root = source_root / "scripts/research_warehouse"
-    sources = sorted(package_root.glob("*.py"))
-    if not sources or not (package_root / "__init__.py").is_file():
-        raise RegistryError("Research source package is incomplete")
-    assert_research_source_boundary(sources)
     destination = release_root / "lib/research_warehouse"
     bindings: list[dict[str, str]] = []
     for source in sources:
-        raw = read_regular_strict(
-            source,
-            f"M2 release source {source.name}",
-            private=False,
-        )
-        release_path = f"lib/research_warehouse/{source.name}"
-        _write_file(destination / source.name, raw, 0o444)
+        name = PurePosixPath(source.repo_path).name
+        release_path = f"lib/research_warehouse/{name}"
+        _write_file(destination / name, source.raw, 0o444)
         bindings.append(
             {
-                "repo_path": source.relative_to(source_root).as_posix(),
+                "repo_path": source.repo_path,
                 "release_path": release_path,
-                "raw_sha256": sha256(raw),
+                "raw_sha256": sha256(source.raw),
             }
         )
     return bindings
@@ -329,6 +415,10 @@ def build_release_package(
     observed_source_commit_sha = require_clean_source_commit(source_root)
     if observed_source_commit_sha != source_commit_sha:
         raise RegistryError("M2 release source commit does not match checkout")
+    source_snapshot = load_commit_source_snapshot(
+        source_root,
+        source_commit_sha,
+    )
     if package_root.exists():
         raise RegistryError("M2 release package root already exists")
     try:
@@ -359,11 +449,11 @@ def build_release_package(
                 claimed_paths=claimed_paths,
             )
 
-        source_bindings = _copy_research_sources(source_root, release_root)
+        source_bindings = _copy_research_sources(source_snapshot, release_root)
         _write_file(
             release_root / ENTRY_MODULE_PATH,
             _entry_module(),
-            0o555,
+            0o444,
         )
         _write_file(
             release_root / "bin/research-warehouse-job",

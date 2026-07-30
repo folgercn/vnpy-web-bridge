@@ -28,6 +28,11 @@ EXECUTABLE_PATHS = frozenset(
     {
         "bin/research-warehouse-job",
         "bin/research-warehouse-monitor",
+    }
+)
+REQUIRED_FILE_PATHS = frozenset(
+    {
+        *EXECUTABLE_PATHS,
         "libexec/m2_release_entry.py",
     }
 )
@@ -462,7 +467,7 @@ def _validate_required_tree_paths(
     paths = {entry["relative_path"]: entry["kind"] for entry in entries}
     if (
         any(paths.get(path) != "directory" for path in REQUIRED_DIRECTORY_PATHS)
-        or any(paths.get(path) != "file" for path in EXECUTABLE_PATHS)
+        or any(paths.get(path) != "file" for path in REQUIRED_FILE_PATHS)
         or (
             paths.get(RUNTIME_METADATA_PATH)
             != ("file" if not runtime else None)

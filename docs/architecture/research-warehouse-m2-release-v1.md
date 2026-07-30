@@ -100,18 +100,27 @@ PYTHONPATH=scripts /usr/local/bin/python3.12 \
   --package-root "/secure/private/releases/$release_id"
 ```
 
-Identical frozen inputs and release ID produce an identical canonical
-manifest and tree content hash.
+The builder enumerates `scripts/research_warehouse/*.py` from the declared
+commit tree and reads each blob directly from Git. It independently requires
+the workspace Python file set and every workspace byte to match those blobs,
+so ignored files and index `assume-unchanged`/`skip-worktree` flags cannot
+alter the release inputs. Identical frozen inputs and release ID produce an
+identical canonical manifest and tree content hash.
 
 ## Install and rollback
 
 The root-only installer requires the literal confirmation
 `INSTALL_M2_RESEARCH_RELEASE_NOT_ACTIVATE`. It verifies the private package,
 takes the existing root-owned `release.lock` exclusively, copies into a
-same-parent private stage, reapplies root ownership and frozen modes, rescans
-the complete stage and runs the non-importing runtime self-check. Only then
-does it atomically exchange the stage and current directory. The previous
-release moves into the private rollback root.
+same-parent private stage, reapplies root ownership and frozen modes, and
+rescans the complete stage. Before switching, it launches the fixed
+`/usr/local/bin/python3.12` with `-I -S -s -E -B` in a sanitized environment
+for both warehouse and monitor roles. This validates Python version,
+architecture, native dependencies, role imports, and the complete allowed
+stdlib/release import closure. The ordinary read-only `libexec` Python module
+is not directly executable. Only then does the installer atomically exchange
+the stage and current directory. The previous release moves into the private
+rollback root.
 
 ```bash
 sudo env PYTHONPATH=scripts /usr/local/bin/python3.12 \
@@ -122,10 +131,16 @@ sudo env PYTHONPATH=scripts /usr/local/bin/python3.12 \
   --confirm INSTALL_M2_RESEARCH_RELEASE_NOT_ACTIVATE
 ```
 
-The installed tree manifest is create-only and is generated from the verified
-stage before switching. A failure before the switch removes the partial stage
-and manifest. A failure during or after the atomic exchange restores the prior
-current release before returning failure.
+The installed tree manifest is generated from the verified stage but remains
+at a private pending path until after the active switch, both custody-parent
+`fsync` calls, and active-tree identity revalidation. A fixed root-owned
+transaction record progresses through `PREPARED`, `SWITCHED`, and `COMMITTED`.
+Every install or rollback first recovers an incomplete record: a `PREPARED`
+operation restores the prior active identity and removes its pending state,
+while a durably `SWITCHED` operation completes publication. Only a committed
+switch publishes the create-only external manifest. Handled failures restore
+and revalidate the prior identity and durably sync both the active and rollback
+parents before returning failure.
 
 Explicit rollback exchanges the current release with one verified rollback
 candidate while holding the same exclusive lock:

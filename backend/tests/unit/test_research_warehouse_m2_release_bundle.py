@@ -20,12 +20,15 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from research_warehouse import (
     m2_release_builder as builder_module,
     m2_release_bundle_contracts as contracts,
+    m2_release_installer as installer_module,
 )
 from research_warehouse.canonical import canonical_json_line, sha256
 from research_warehouse.errors import RegistryError
 from research_warehouse.m2_release_builder import (
+    CommitSource,
     _extract_wheel,
     build_release_package,
+    load_commit_source_snapshot,
 )
 from research_warehouse.m2_release_bundle_contracts import (
     DependencyBinding,
@@ -154,6 +157,20 @@ def synthetic_lock(
         "require_clean_source_commit",
         lambda _source_root: SOURCE_COMMIT,
     )
+    monkeypatch.setattr(
+        builder_module,
+        "load_commit_source_snapshot",
+        lambda source_root, _commit: tuple(
+            CommitSource(
+                repo_path=path.relative_to(source_root).as_posix(),
+                raw=path.read_bytes(),
+                workspace_path=path,
+            )
+            for path in sorted(
+                (source_root / "scripts/research_warehouse").glob("*.py")
+            )
+        ),
+    )
     return wheelhouse, lock
 
 
@@ -203,7 +220,10 @@ def _install(
     paths: dict[str, Path | int],
     installed_manifest_path: Path,
     hook: Callable[[str], None] | None = None,
+    preflight_runner: Callable[[Path], None] | None = None,
 ) -> dict:
+    if preflight_runner is None:
+        preflight_runner = lambda _stage_root: None
     return install_release_package(
         package_root=package_root,
         active_root=paths["active_root"],
@@ -213,6 +233,7 @@ def _install(
         expected_owner_uid=paths["expected_owner_uid"],
         expected_owner_gid=paths["expected_owner_gid"],
         hook=hook,
+        preflight_runner=preflight_runner,
     )
 
 
@@ -258,6 +279,87 @@ def test_source_commit_binding_requires_exact_clean_checkout(
         builder_module.require_clean_source_commit(source)
 
 
+def _git_source_repo(tmp_path: Path) -> tuple[Path, str, Path]:
+    source = tmp_path / "git-source"
+    package = source / "scripts/research_warehouse"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("")
+    module = package / "registry.py"
+    module.write_text("FROZEN = True\n")
+    subprocess.run(["git", "init", "-q"], cwd=source, check=True)
+    subprocess.run(
+        ["git", "config", "user.name", "M2 Test"],
+        cwd=source,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "m2-test@example.invalid"],
+        cwd=source,
+        check=True,
+    )
+    subprocess.run(["git", "add", "."], cwd=source, check=True)
+    subprocess.run(["git", "commit", "-qm", "frozen"], cwd=source, check=True)
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=source,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    return source, commit, module
+
+
+def test_source_snapshot_rejects_ignored_python_extra(
+    tmp_path: Path,
+) -> None:
+    source, commit, _module = _git_source_repo(tmp_path)
+    exclude = source / ".git/info/exclude"
+    exclude.write_text(
+        exclude.read_text() + "\nscripts/research_warehouse/ignored.py\n"
+    )
+    (source / "scripts/research_warehouse/ignored.py").write_text(
+        "ESCAPE = True\n"
+    )
+    assert builder_module.require_clean_source_commit(source) == commit
+    with pytest.raises(RegistryError, match="source set differs"):
+        load_commit_source_snapshot(source, commit)
+
+
+@pytest.mark.parametrize("index_flag", ["--assume-unchanged", "--skip-worktree"])
+def test_source_snapshot_rejects_index_hidden_drift(
+    tmp_path: Path,
+    index_flag: str,
+) -> None:
+    source, commit, module = _git_source_repo(tmp_path)
+    relative = module.relative_to(source).as_posix()
+    subprocess.run(
+        ["git", "update-index", index_flag, relative],
+        cwd=source,
+        check=True,
+    )
+    module.write_text("FROZEN = False\n")
+    assert builder_module.require_clean_source_commit(source) == commit
+    with pytest.raises(RegistryError, match="differs from commit"):
+        load_commit_source_snapshot(source, commit)
+
+
+def test_source_bindings_are_reconstructible_from_declared_commit(
+    tmp_path: Path,
+) -> None:
+    source, commit, _module = _git_source_repo(tmp_path)
+    snapshot = load_commit_source_snapshot(source, commit)
+    assert snapshot
+    for item in snapshot:
+        committed_raw = subprocess.run(
+            ["git", "cat-file", "blob", f"{commit}:{item.repo_path}"],
+            cwd=source,
+            check=True,
+            capture_output=True,
+        ).stdout
+        assert item.raw == committed_raw
+        assert sha256(item.raw) == sha256(committed_raw)
+
+
 def test_build_is_deterministic_and_entrypoints_are_real(
     bundle_factory: Callable[[str], Path],
 ) -> None:
@@ -271,7 +373,7 @@ def test_build_is_deterministic_and_entrypoints_are_real(
     assert first_manifest["authority"] == contracts.false_authority()
     for name in ("research-warehouse-job", "research-warehouse-monitor"):
         raw = (second / "release/bin" / name).read_text()
-        assert "-I -s -E" in raw
+        assert "-I -S -s -E" in raw
         assert "self-check" in raw
         assert "exit 0" not in raw
     entry_source = (
@@ -279,6 +381,53 @@ def test_build_is_deterministic_and_entrypoints_are_real(
         / "release/lib/research_warehouse/m2_release_entry.py"
     ).read_text()
     assert "ROLE_IMPORTS" in entry_source
+    libexec_entry = second / "release/libexec/m2_release_entry.py"
+    assert stat.S_IMODE(libexec_entry.stat().st_mode) == 0o444
+    assert not libexec_entry.read_bytes().startswith(b"#!")
+
+
+def test_no_site_startup_and_non_executable_libexec_block_early_code(
+    tmp_path: Path,
+    bundle_factory: Callable[[str], Path],
+) -> None:
+    user_base = tmp_path / "userbase"
+    startup = user_base / (
+        f"lib/python{sys.version_info.major}.{sys.version_info.minor}"
+        "/site-packages"
+    )
+    startup.mkdir(parents=True)
+    sentinel = tmp_path / "startup-ran"
+    (startup / "sitecustomize.py").write_text(
+        f"from pathlib import Path; Path({str(sentinel)!r}).write_text('ran')\n"
+    )
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-S",
+            "-s",
+            "-E",
+            "-B",
+            "-c",
+            "import sys; assert sys.flags.no_site == 1",
+        ],
+        env={**os.environ, "PYTHONUSERBASE": str(user_base)},
+        check=False,
+    )
+    assert completed.returncode == 0
+    assert not sentinel.exists()
+
+    entry = (
+        bundle_factory("release-no-direct")
+        / "release/libexec/m2_release_entry.py"
+    )
+    with pytest.raises(PermissionError):
+        subprocess.run(
+            [str(entry)],
+            env={**os.environ, "PYTHONUSERBASE": str(user_base)},
+            check=False,
+        )
+    assert not sentinel.exists()
 
 
 def test_build_rejects_source_commit_mismatch_without_partial_output(
@@ -494,6 +643,96 @@ def test_runtime_self_check_rejects_tree_drift_and_forbidden_environment(
         )
 
 
+def test_installer_preflight_uses_fixed_isolated_interpreter_for_both_roles(
+    bundle_factory: Callable[[str], Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    release_root = bundle_factory("release-preflight") / "release"
+    calls: list[tuple[list[str], dict]] = []
+
+    def completed(command: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+        role = command[-2]
+        calls.append((command, dict(kwargs)))
+        output = canonical_json_line(
+            {
+                "status": "RELEASE_SELF_CHECK_PASSED_NO_SCHEDULE_AUTHORITY",
+                "role": role,
+                "release_id": "release-preflight",
+                "authority": contracts.false_authority(),
+            }
+        )
+        return subprocess.CompletedProcess(command, 0, stdout=output, stderr=b"")
+
+    monkeypatch.setattr(installer_module.subprocess, "run", completed)
+    installer_module._run_stage_preflight(release_root)
+    assert [command[-2] for command, _kwargs in calls] == [
+        "warehouse",
+        "monitor",
+    ]
+    for command, kwargs in calls:
+        assert command[:5] == [
+            contracts.PYTHON_EXECUTABLE,
+            "-I",
+            "-S",
+            "-s",
+            "-E",
+        ]
+        assert command[5] == "-B"
+        assert kwargs["cwd"] == "/"
+        assert not {
+            "PYTHONPATH",
+            "PYTHONHOME",
+            "PYTHONUSERBASE",
+        } & set(kwargs["env"])
+
+
+@pytest.mark.parametrize(
+    "preflight_failure",
+    ["wrong interpreter", "native import", "role import escape"],
+)
+def test_preflight_failure_keeps_previous_current_unchanged(
+    tmp_path: Path,
+    bundle_factory: Callable[[str], Path],
+    preflight_failure: str,
+) -> None:
+    first = bundle_factory(f"release-old-{preflight_failure.split()[0]}")
+    second = bundle_factory(f"release-new-{preflight_failure.split()[0]}")
+    paths = _install_paths(tmp_path)
+    _install(
+        package_root=first,
+        paths=paths,
+        installed_manifest_path=tmp_path / "installed-old.json",
+    )
+
+    def fail_preflight(_stage_root: Path) -> None:
+        raise RegistryError(preflight_failure)
+
+    failed_manifest = tmp_path / "installed-new.json"
+    with pytest.raises(RegistryError, match=preflight_failure):
+        _install(
+            package_root=second,
+            paths=paths,
+            installed_manifest_path=failed_manifest,
+            preflight_runner=fail_preflight,
+        )
+    assert _active_release_id_for_test(paths) == first.name.removeprefix(
+        "package-"
+    )
+    assert not failed_manifest.exists()
+    assert not list((tmp_path / "install").glob(".release.stage.*"))
+
+
+def _active_release_id_for_test(paths: dict[str, Path | int]) -> str:
+    return self_check_release(
+        release_root=paths["active_root"],
+        role="warehouse",
+        expected_owner_uid=os.geteuid(),
+        expected_owner_gid=os.getegid(),
+        enforce_interpreter=False,
+        import_modules=False,
+    )["release_id"]
+
+
 def test_initial_install_failure_leaves_no_current_or_partial_state(
     tmp_path: Path,
     bundle_factory: Callable[[str], Path],
@@ -516,6 +755,125 @@ def test_initial_install_failure_leaves_no_current_or_partial_state(
     assert not paths["active_root"].exists()
     assert not installed_manifest.exists()
     assert not list((tmp_path / "install").glob(".release.stage.*"))
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
+@pytest.mark.parametrize(
+    "crash_event",
+    [
+        "after_transaction_prepared",
+        "after_pending_manifest",
+        "after_switch",
+        "after_old_release_move",
+        "before_parent_fsync",
+        "after_parent_fsync",
+    ],
+)
+def test_interrupted_upgrade_is_recovered_by_next_install(
+    tmp_path: Path,
+    bundle_factory: Callable[[str], Path],
+    crash_event: str,
+) -> None:
+    first = bundle_factory(f"release-crash-old-{crash_event}")
+    second = bundle_factory(f"release-crash-new-{crash_event}")
+    paths = _install_paths(tmp_path)
+    _install(
+        package_root=first,
+        paths=paths,
+        installed_manifest_path=tmp_path / "installed-crash-old.json",
+    )
+    installed_manifest = tmp_path / "installed-crash-new.json"
+
+    child = os.fork()
+    if child == 0:
+        def crash(event: str) -> None:
+            if event == crash_event:
+                os._exit(73)
+
+        try:
+            _install(
+                package_root=second,
+                paths=paths,
+                installed_manifest_path=installed_manifest,
+                hook=crash,
+            )
+        except BaseException:
+            os._exit(74)
+        os._exit(0)
+    waited, status = os.waitpid(child, 0)
+    assert waited == child
+    assert os.WIFEXITED(status)
+    assert os.WEXITSTATUS(status) == 73
+    assert not installed_manifest.exists()
+
+    result = _install(
+        package_root=second,
+        paths=paths,
+        installed_manifest_path=installed_manifest,
+    )
+    expected_id = second.name.removeprefix("package-")
+    assert result["release_id"] == expected_id
+    assert _active_release_id_for_test(paths) == expected_id
+    assert installed_manifest.exists()
+    assert not (tmp_path / "install/.release-install-transaction.json").exists()
+    assert not list((tmp_path / "install").glob(".release.stage.*"))
+    assert not list(tmp_path.glob(".*.pending.*"))
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
+@pytest.mark.parametrize(
+    "crash_event",
+    [
+        "after_transaction_switched",
+        "after_manifest_publish_before_fsync",
+    ],
+)
+def test_switched_transaction_is_committed_before_next_install(
+    tmp_path: Path,
+    bundle_factory: Callable[[str], Path],
+    crash_event: str,
+) -> None:
+    first = bundle_factory("release-journal-old")
+    second = bundle_factory("release-journal-middle")
+    third = bundle_factory("release-journal-new")
+    paths = _install_paths(tmp_path)
+    _install(
+        package_root=first,
+        paths=paths,
+        installed_manifest_path=tmp_path / "installed-journal-old.json",
+    )
+    middle_manifest = tmp_path / "installed-journal-middle.json"
+
+    child = os.fork()
+    if child == 0:
+        def crash(event: str) -> None:
+            if event == crash_event:
+                os._exit(75)
+
+        try:
+            _install(
+                package_root=second,
+                paths=paths,
+                installed_manifest_path=middle_manifest,
+                hook=crash,
+            )
+        except BaseException:
+            os._exit(76)
+        os._exit(0)
+    _waited, status = os.waitpid(child, 0)
+    assert os.WIFEXITED(status)
+    assert os.WEXITSTATUS(status) == 75
+
+    newest_manifest = tmp_path / "installed-journal-new.json"
+    result = _install(
+        package_root=third,
+        paths=paths,
+        installed_manifest_path=newest_manifest,
+    )
+    assert middle_manifest.exists()
+    assert newest_manifest.exists()
+    assert result["release_id"] == "release-journal-new"
+    assert _active_release_id_for_test(paths) == "release-journal-new"
 
 
 def test_install_manifest_destination_cannot_overlap_release_custody(
