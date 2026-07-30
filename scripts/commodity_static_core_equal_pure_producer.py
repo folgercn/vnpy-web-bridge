@@ -88,6 +88,208 @@ def _strict_integer(value: Any, label: str) -> int:
     return value
 
 
+def _strict_json_string(value: Any, label: str) -> str:
+    if not isinstance(value, str):
+        raise StaticCoreEqualProducerError(
+            f"{label} must be one JSON string"
+        )
+    return value
+
+
+def _validate_strict_source_json_types(source: dict[str, Any]) -> None:
+    """Reject schema-invalid primitive coercion before frozen normalization."""
+
+    for field in (
+        "source_view_id",
+        "claimed_receipt_sha256",
+        "generated_at",
+        "cutoff_at",
+        "research_as_of_official_day",
+        "execution_day",
+    ):
+        _strict_json_string(source[field], field)
+
+    raw_official_days = source["official_days"]
+    if not isinstance(raw_official_days, list):
+        raise StaticCoreEqualProducerError(
+            "official_days must be one JSON array"
+        )
+    for index, value in enumerate(raw_official_days):
+        _strict_json_string(value, f"official_days[{index}]")
+
+    raw_bindings = source["source_bindings"]
+    if not isinstance(raw_bindings, list):
+        raise StaticCoreEqualProducerError(
+            "source_bindings must be one JSON array"
+        )
+    binding_fields = {
+        "binding_id",
+        "source_class",
+        "scope",
+        "source_identity",
+        "query_start",
+        "query_end",
+        "cutoff_at",
+        "generated_at",
+        "raw_sha256",
+        "lineage_sha256",
+        "claimed_receipt_sha256",
+    }
+    for index, item in enumerate(raw_bindings):
+        binding = cfast._require_exact_keys(
+            item,
+            binding_fields,
+            f"source_bindings[{index}]",
+        )
+        for field in binding_fields:
+            _strict_json_string(
+                binding[field],
+                f"source_bindings[{index}].{field}",
+            )
+
+    raw_products = source["products"]
+    if not isinstance(raw_products, list):
+        raise StaticCoreEqualProducerError(
+            "products must be one JSON array"
+        )
+    for product_index, item in enumerate(raw_products):
+        product = cfast._require_exact_keys(
+            item,
+            {
+                "product",
+                "exchange",
+                "daily",
+                "execution_reference",
+                "contract_spec",
+            },
+            f"products[{product_index}]",
+        )
+        _strict_json_string(
+            product["product"],
+            f"products[{product_index}].product",
+        )
+        _strict_json_string(
+            product["exchange"],
+            f"products[{product_index}].exchange",
+        )
+        raw_daily = product["daily"]
+        if not isinstance(raw_daily, list):
+            raise StaticCoreEqualProducerError(
+                f"products[{product_index}].daily must be one JSON array"
+            )
+        for day_index, day_item in enumerate(raw_daily):
+            daily = cfast._require_exact_keys(
+                day_item,
+                {"official_day", "source_binding_id", "contracts"},
+                f"products[{product_index}].daily[{day_index}]",
+            )
+            for field in ("official_day", "source_binding_id"):
+                _strict_json_string(
+                    daily[field],
+                    f"products[{product_index}].daily[{day_index}].{field}",
+                )
+            raw_contracts = daily["contracts"]
+            if not isinstance(raw_contracts, list):
+                raise StaticCoreEqualProducerError(
+                    f"products[{product_index}].daily[{day_index}]"
+                    ".contracts must be one JSON array"
+                )
+            for contract_index, contract_item in enumerate(raw_contracts):
+                label = (
+                    f"products[{product_index}].daily[{day_index}]"
+                    f".contracts[{contract_index}]"
+                )
+                contract = cfast._require_exact_keys(
+                    contract_item,
+                    {
+                        "exact_contract",
+                        "delivery_yyyymm",
+                        "open",
+                        "high",
+                        "low",
+                        "settlement",
+                        "open_interest",
+                    },
+                    label,
+                )
+                _strict_json_string(
+                    contract["exact_contract"],
+                    f"{label}.exact_contract",
+                )
+                _strict_integer(
+                    contract["delivery_yyyymm"],
+                    f"{label}.delivery_yyyymm",
+                )
+                for field in (
+                    "open",
+                    "high",
+                    "low",
+                    "settlement",
+                    "open_interest",
+                ):
+                    _strict_finite_number(
+                        contract[field],
+                        f"{label}.{field}",
+                    )
+
+        reference = cfast._require_exact_keys(
+            product["execution_reference"],
+            {
+                "source_binding_id",
+                "exact_contract",
+                "official_open",
+                "observed_at",
+                "raw_sha256",
+            },
+            f"products[{product_index}].execution_reference",
+        )
+        for field in (
+            "source_binding_id",
+            "exact_contract",
+            "observed_at",
+            "raw_sha256",
+        ):
+            _strict_json_string(
+                reference[field],
+                f"products[{product_index}].execution_reference.{field}",
+            )
+        _strict_finite_number(
+            reference["official_open"],
+            f"products[{product_index}].execution_reference.official_open",
+        )
+
+        contract_spec = cfast._require_exact_keys(
+            product["contract_spec"],
+            {
+                "source_binding_id",
+                "exact_contract",
+                "official_last_trading_day",
+                "multiplier",
+                "price_tick",
+                "raw_sha256",
+            },
+            f"products[{product_index}].contract_spec",
+        )
+        for field in (
+            "source_binding_id",
+            "exact_contract",
+            "official_last_trading_day",
+            "raw_sha256",
+        ):
+            _strict_json_string(
+                contract_spec[field],
+                f"products[{product_index}].contract_spec.{field}",
+            )
+        _strict_integer(
+            contract_spec["multiplier"],
+            f"products[{product_index}].contract_spec.multiplier",
+        )
+        _strict_finite_number(
+            contract_spec["price_tick"],
+            f"products[{product_index}].contract_spec.price_tick",
+        )
+
+
 def _source_path(name: str) -> Path:
     return Path(__file__).resolve().with_name(name)
 
@@ -188,6 +390,7 @@ def _normalize_source(
         raise StaticCoreEqualProducerError(
             "source view is not the frozen PIT OHLC typed input"
         )
+    _validate_strict_source_json_types(source)
 
     raw_products = source["products"]
     if not isinstance(raw_products, list):

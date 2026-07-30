@@ -28,8 +28,8 @@ PURE_RESEARCH_PRODUCER_ONLY_NOT_REAL_ARTIFACT
 ```
 
 合成测试 golden 只证明代码确定性，不是真实 execution-day forward evidence。
-真实 sealed source、signed receipt、独立 keyring 和 custody 仍由 Issue #181
-阻塞；本 producer 不下载数据，也不能把 typed view 中自报的 receipt SHA256
+真实 sealed source、signed receipt、独立 keyring 和 custody 必须先通过
+Issue #181 已提供的边界验证；本 producer 不下载数据，也不能把 typed view 中自报的 receipt SHA256
 升级成可信事实。
 
 ## 2. Architecture Impact
@@ -83,6 +83,11 @@ projection，并逐字节比较。因此仅协调修改多个 output artifact、
 digest，不能伪造另一条自洽证据链。source 本身的签名、receipt、custody
 和 sealed-export authority 仍不由此 producer 验证，继续由 #181 边界
 提供。
+
+receipt/custody 只证明 bytes 身份，不能替代领域 schema。producer 会在调用
+冻结 C kernel normalization 前，拒绝 ID、日期、哈希、OHLC、OI、reference
+和 contract-spec 中所有与本页 source schema primitive type 不一致的值；
+禁止把字符串或 bool 静默转换为数值。
 
 ## 5. D_DONCHIAN20_EXIT10_NEUTRAL
 

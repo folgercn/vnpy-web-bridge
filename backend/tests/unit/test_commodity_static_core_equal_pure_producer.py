@@ -174,6 +174,43 @@ def test_missing_and_tampered_source_fail_closed() -> None:
         producer.produce_research_artifacts(future)
 
 
+def test_source_schema_primitive_types_fail_closed_before_normalization() -> None:
+    numeric_source_id = source_view()
+    numeric_source_id["source_view_id"] = 12345678
+    with pytest.raises(
+        producer.StaticCoreEqualProducerError,
+        match="source_view_id must be one JSON string",
+    ):
+        producer.produce_research_artifacts(numeric_source_id)
+
+    string_open = source_view()
+    contract = string_open["products"][0]["daily"][0]["contracts"][0]
+    contract["open"] = str(contract["open"])
+    with pytest.raises(
+        producer.StaticCoreEqualProducerError,
+        match=r"contracts\[0\]\.open must be one finite JSON number",
+    ):
+        producer.produce_research_artifacts(string_open)
+
+    string_open_interest = source_view()
+    contract = string_open_interest["products"][0]["daily"][0]["contracts"][0]
+    contract["open_interest"] = str(contract["open_interest"])
+    with pytest.raises(
+        producer.StaticCoreEqualProducerError,
+        match=r"contracts\[0\]\.open_interest must be one finite JSON number",
+    ):
+        producer.produce_research_artifacts(string_open_interest)
+
+    boolean_settlement = source_view()
+    contract = boolean_settlement["products"][0]["daily"][0]["contracts"][0]
+    contract["settlement"] = True
+    with pytest.raises(
+        producer.StaticCoreEqualProducerError,
+        match=r"contracts\[0\]\.settlement must be one finite JSON number",
+    ):
+        producer.produce_research_artifacts(boolean_settlement)
+
+
 def test_missing_or_tampered_output_fails_independent_verification() -> None:
     result = producer.produce_research_artifacts(source_view())
 
