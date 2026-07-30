@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import os
+import pwd
 import sys
 from pathlib import Path
 
@@ -14,16 +15,33 @@ from research_warehouse import m2_signer_handoff
 from research_warehouse.errors import RegistryError
 
 
-def test_privilege_drop_is_exact_clears_groups_and_cannot_reopen_key(
+def test_privilege_drop_is_exact_binds_groups_and_cannot_reopen_key(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     identity = {"uid": 0, "gid": 0, "groups": [0, 80]}
+    account = pwd.struct_passwd(
+        ("vnpyresearch", "*", 503, 503, "", "/var/empty", "/usr/bin/false")
+    )
 
     monkeypatch.setattr(
+        m2_signer_handoff.pwd,
+        "getpwuid",
+        lambda uid: account if uid == 503 else pytest.fail("unexpected UID"),
+    )
+    monkeypatch.setattr(
         m2_signer_handoff.os,
-        "setgroups",
-        lambda groups: identity.update(groups=list(groups)),
+        "getgrouplist",
+        lambda username, gid: (
+            [gid, 12, 61, 100]
+            if username == "vnpyresearch"
+            else pytest.fail("unexpected user")
+        ),
+    )
+    monkeypatch.setattr(
+        m2_signer_handoff.os,
+        "initgroups",
+        lambda username, gid: identity.update(groups=[gid, 12, 61, 100]),
     )
     monkeypatch.setattr(
         m2_signer_handoff.os,
@@ -88,7 +106,7 @@ def test_privilege_drop_is_exact_clears_groups_and_cannot_reopen_key(
         key_path=tmp_path / "root-private.raw",
     )
 
-    assert identity == {"uid": 503, "gid": 503, "groups": []}
+    assert identity == {"uid": 503, "gid": 503, "groups": [503, 12, 61, 100]}
     assert "HTTPS_PROXY" not in os.environ
     assert "DOCKER_HOST" not in os.environ
     assert os.environ["HOME"] == "/Users/Shared/vnpy-research/home"

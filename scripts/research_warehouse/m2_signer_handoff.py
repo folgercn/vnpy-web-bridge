@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import pwd
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -29,7 +30,11 @@ def _require_service_identity(uid: int, gid: int) -> None:
 
 
 def _drop_privileges(uid: int, gid: int, *, key_path: Path) -> None:
-    os.setgroups([])
+    account = pwd.getpwuid(uid)
+    if account.pw_uid != uid or account.pw_gid != gid:
+        raise RegistryError("M2 signer service account identity mismatch")
+    expected_groups = set(os.getgrouplist(account.pw_name, gid))
+    os.initgroups(account.pw_name, gid)
     os.setgid(gid)
     os.setuid(uid)
     if (
@@ -37,7 +42,7 @@ def _drop_privileges(uid: int, gid: int, *, key_path: Path) -> None:
         or os.geteuid() != uid
         or os.getgid() != gid
         or os.getegid() != gid
-        or os.getgroups()
+        or set(os.getgroups()) != expected_groups
     ):
         raise RegistryError("M2 signer privilege drop did not bind exact identity")
     if hasattr(os, "getresuid") and set(os.getresuid()) != {uid}:
