@@ -107,6 +107,7 @@ def verified_release_artifacts() -> VerifiedReleaseArtifacts:
         output_owner_uid=503,
         output_mode="0600",
         output_nlink=1,
+        output_acl_free=True,
     )
 
 
@@ -737,6 +738,38 @@ def test_final_release_verifier_rejects_descendant_acl(tmp_path: Path) -> None:
     account = pwd.getpwuid(os.getuid()).pw_name
     subprocess.check_call(
         ["chmod", "+a", f"user:{account} allow write", str(executable)]
+    )
+
+    with pytest.raises(RegistryError, match="extended ACL"):
+        verify_release_artifacts(
+            policy=policy(),
+            release_root=release,
+            manifest_path=manifest_path,
+            expected_manifest_raw_sha256=sha256(manifest_path.read_bytes()),
+            output_path=output_path,
+            expected_output_raw_sha256=sha256(output_path.read_bytes()),
+            output_owner_uid=owner_uid,
+            release_lock_identity=verified_lock_identity(),
+            expected_release_owner_uid=owner_uid,
+            expected_release_owner_gid=owner_gid,
+        )
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Darwin extended ACL")
+def test_final_release_verifier_rejects_success_output_acl(
+    tmp_path: Path,
+) -> None:
+    (
+        release,
+        _executable,
+        manifest_path,
+        output_path,
+        owner_uid,
+        owner_gid,
+    ) = release_artifact_fixture(tmp_path)
+    account = pwd.getpwuid(os.getuid()).pw_name
+    subprocess.check_call(
+        ["chmod", "+a", f"user:{account} allow write", str(output_path)]
     )
 
     with pytest.raises(RegistryError, match="extended ACL"):

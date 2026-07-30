@@ -11,6 +11,7 @@ from typing import Any
 from .canonical import canonical_json_line, parse_json_strict, sha256
 from .errors import RegistryError
 from .file_integrity import file_identity, read_regular_strict
+from .m2_acl_custody import require_acl_free_fd
 from .m2_isolation_contracts import IsolationPolicy, require_sha
 from .m2_release_lock import ReleaseLockIdentity
 from .m2_release_tree_custody import (
@@ -57,6 +58,7 @@ class VerifiedReleaseArtifacts:
     output_owner_uid: int
     output_mode: str
     output_nlink: int
+    output_acl_free: bool
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -181,6 +183,10 @@ def verify_release_artifacts(
                 output_path,
                 "M2 successful output",
                 private=False,
+                descriptor_validator=lambda descriptor: require_acl_free_fd(
+                    descriptor,
+                    "M2 successful output",
+                ),
             )
             output_after = output_path.lstat()
             if (
@@ -204,6 +210,7 @@ def verify_release_artifacts(
                 output_owner_uid=output_before.st_uid,
                 output_mode=mode_string(output_before.st_mode),
                 output_nlink=output_before.st_nlink,
+                output_acl_free=True,
             )
     except RegistryError:
         raise

@@ -92,7 +92,7 @@ def _copy_source_tree(
 
 def _bootstrap(role: str) -> bytes:
     module = (
-        "research_warehouse.cli"
+        "research_warehouse.m2_scheduler_cli"
         if role == "warehouse"
         else "research_warehouse.m2_monitor_cli"
     )

@@ -10,6 +10,7 @@ from pathlib import Path
 
 from .errors import RegistryError
 from .file_integrity import fsync_dir
+from .m2_acl_custody import require_acl_free_path
 
 SAFE_COMPONENT = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 LAYOUT_DIRS = ("raw", "observations", "manifests", "tmp", "locks")
@@ -104,4 +105,5 @@ def require_private_dir(path: Path, label: str) -> os.stat_result:
         raise RegistryError(f"{label} must be a non-symlink directory")
     if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o077:
         raise RegistryError(f"{label} must be private and owned by current user")
+    require_acl_free_path(path, label)
     return info

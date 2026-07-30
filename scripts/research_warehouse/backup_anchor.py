@@ -31,10 +31,8 @@ from .held_custody import (
     scan_held_snapshot,
 )
 from .signing import (
-    load_private_key,
     load_public_key,
     public_key_sha256,
-    sign_payload,
     verify_payload,
 )
 from .timeutil import format_utc, parse_utc, require_utc
@@ -218,6 +216,9 @@ def _create_backup_anchor(
     expected_public_key_sha256: str,
     now: datetime,
 ) -> VerifiedBackupAnchor:
+    # Creation-only imports stay outside the monitor verification import graph.
+    from .signing import load_private_key, sign_payload
+
     created = require_utc(now, "backup anchor created_at")
     source_custody_identity = source_held.identity_sha256(
         domain="vnpy-research-source-custody-v1",
