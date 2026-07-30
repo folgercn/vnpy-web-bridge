@@ -51,6 +51,7 @@ RELEASE_ARTIFACT_KEYS = {
     "output_owner_uid",
     "output_mode",
     "output_nlink",
+    "output_acl_free",
 }
 
 
@@ -140,6 +141,7 @@ def _verified_artifact_values(
         == "0" * 64
         or artifacts["output_mode"] != "0600"
         or artifacts["output_nlink"] != 1
+        or artifacts["output_acl_free"] is not True
         or any(
             isinstance(artifacts[field], bool)
             or not isinstance(artifacts[field], int)

@@ -10,10 +10,23 @@ import sys
 from pathlib import Path
 
 from .errors import RegistryError
-from .file_integrity import file_identity
 
 ACL_TYPE_EXTENDED = 0x00000100
 ACL_FIRST_ENTRY = 0
+
+
+def _file_identity(value: os.stat_result) -> tuple[int, ...]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+        value.st_uid,
+        stat.S_IFMT(value.st_mode),
+        stat.S_IMODE(value.st_mode),
+        value.st_nlink,
+    )
 
 
 def require_acl_free_fd(descriptor: int, label: str) -> None:
@@ -79,7 +92,7 @@ def require_acl_free_path(path: Path, label: str) -> None:
         raise RegistryError(f"cannot open M2 release ACL path: {label}") from exc
     try:
         opened = os.fstat(descriptor)
-        if file_identity(path_stat) != file_identity(opened):
+        if _file_identity(path_stat) != _file_identity(opened):
             raise RegistryError(f"M2 release ACL path changed: {label}")
         require_acl_free_fd(descriptor, label)
     finally:

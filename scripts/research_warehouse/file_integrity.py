@@ -8,6 +8,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from .errors import RegistryError
+from .m2_acl_custody import require_acl_free_fd
 
 MAX_RAW_BYTES = 128 * 1024 * 1024
 
@@ -58,6 +59,8 @@ def read_regular_strict(
     descriptor: int | None = None
     try:
         descriptor = os.open(path, flags)
+        if private:
+            require_acl_free_fd(descriptor, label)
         if descriptor_validator is not None:
             descriptor_validator(descriptor)
         before = os.fstat(descriptor)

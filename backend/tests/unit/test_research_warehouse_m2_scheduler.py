@@ -373,7 +373,7 @@ def test_runtime_input_requires_exact_external_pins(
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="Darwin extended ACL")
-@pytest.mark.parametrize("target", ["file", "inheritable-parent"])
+@pytest.mark.parametrize("target", ["file", "inheritable-parent", "fd-only"])
 def test_runtime_input_rejects_darwin_acl(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -389,14 +389,66 @@ def test_runtime_input_rejects_darwin_acl(
     account = pwd.getpwuid(os.getuid()).pw_name
     acl = (
         f"user:{account} allow write"
-        if target == "file"
+        if target in {"file", "fd-only"}
         else (f"user:{account} allow write,file_inherit,directory_inherit,only_inherit")
     )
     subprocess.check_call(
         ["chmod", "+a", acl, str(path if target == "file" else tmp_path)]
     )
+    if target == "fd-only":
+        subprocess.check_call(["chmod", "-a", acl, str(tmp_path)])
+        subprocess.check_call(["chmod", "+a", acl, str(path)])
+        monkeypatch.setattr(
+            "research_warehouse.m2_runtime_input.require_acl_free_path",
+            lambda *_args: None,
+        )
     with pytest.raises(RegistryError, match="extended ACL"):
         load_runtime_input(path, policy=policy)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Darwin extended ACL")
+def test_private_custody_roots_and_receipt_reject_acl(tmp_path: Path) -> None:
+    account = pwd.getpwuid(os.getuid()).pw_name
+    explicit_acl = f"user:{account} allow write"
+    paths = WarehousePaths.initialize(tmp_path / "warehouse")
+    backup = BackupPaths.initialize(tmp_path / "backup")
+    runtime = RuntimePaths.ensure(tmp_path / "runtime")
+    for root, reopen in (
+        (paths.root, lambda: WarehousePaths.open(paths.root)),
+        (backup.root, lambda: BackupPaths.open(backup.root)),
+        (runtime.root, lambda: RuntimePaths.ensure(runtime.root)),
+    ):
+        subprocess.check_call(["chmod", "+a", explicit_acl, str(root)])
+        with pytest.raises(RegistryError, match="extended ACL"):
+            reopen()
+
+    clean_runtime = RuntimePaths.ensure(tmp_path / "clean-runtime")
+    receipt_path, _payload = publish_monitor_receipt(
+        clean_runtime,
+        checked_at="2026-07-30T10:30:00.000000Z",
+        runtime_input_raw_sha256="a" * 64,
+        facts={"derived": True},
+        result={"status": "HEALTHY"},
+    )
+    subprocess.check_call(["chmod", "+a", explicit_acl, str(receipt_path)])
+    with pytest.raises(RegistryError, match="extended ACL"):
+        load_monitor_receipt(
+            receipt_path,
+            expected_raw_sha256=sha256(receipt_path.read_bytes()),
+        )
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Darwin extended ACL")
+def test_runtime_creation_rejects_inherited_parent_acl(tmp_path: Path) -> None:
+    shared = tmp_path / "shared"
+    shared.mkdir(mode=0o700)
+    account = pwd.getpwuid(os.getuid()).pw_name
+    inheritable_acl = (
+        f"user:{account} allow read,write,file_inherit,directory_inherit,only_inherit"
+    )
+    subprocess.check_call(["chmod", "+a", inheritable_acl, str(shared)])
+    with pytest.raises(RegistryError, match="extended ACL"):
+        RuntimePaths.ensure(shared / "runtime")
 
 
 def test_monitor_facts_derive_missing_revision_hash_disk_and_backup(
