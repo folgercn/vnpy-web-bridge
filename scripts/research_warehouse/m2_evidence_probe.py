@@ -114,6 +114,65 @@ def _service_readable(policy: IsolationPolicy, path: str) -> bool:
     return result.returncode == 0
 
 
+def service_trusted_now(policy: IsolationPolicy) -> str:
+    code = """
+import sys
+sys.path.insert(0, '/usr/local/libexec/vnpyresearch/release/app')
+from research_warehouse.m2_ntp import query_trusted_clock
+print(query_trusted_clock().trusted_now.isoformat(timespec='microseconds').replace('+00:00','Z'))
+"""
+    result = _run(_service_command(policy, code), timeout=20)
+    if result.returncode != 0:
+        raise RegistryError("M2 service trusted clock probe failed")
+    return result.stdout.strip()
+
+
+def service_monitor_snapshot(
+    policy: IsolationPolicy,
+    runtime_input: Path,
+) -> dict[str, Any]:
+    code = f"""
+import json,sys
+from datetime import date
+from pathlib import Path
+sys.path.insert(0, '/usr/local/libexec/vnpyresearch/release/app')
+sys.path.insert(0, '/usr/local/libexec/vnpyresearch/release/vendor')
+from research_warehouse.m2_monitor_facts import derive_monitor_facts
+from research_warehouse.m2_ntp import query_trusted_clock
+from research_warehouse.m2_runtime_loader import load_runtime_context
+context=load_runtime_context(Path({str(runtime_input)!r}))
+clock=query_trusted_clock()
+value=context.runtime_input.payload
+facts=derive_monitor_facts(
+    paths=context.paths,
+    runtime=context.runtime,
+    registry=context.registry,
+    calendar=context.calendar,
+    calendar_availability_raw_sha256=context.availability.raw_sha256,
+    monitor_from_day=date.fromisoformat(value['monitor_from_day']),
+    backup_root=Path(context.policy.payload['backup_root']),
+    backup_public_key_path=Path(value['backup_public_key_path']),
+    expected_backup_public_key_sha256=value['expected_backup_public_key_sha256'],
+    expected_backup_head_anchor_raw_sha256=value['expected_backup_head_anchor_raw_sha256'],
+    now=clock.trusted_now,
+)
+print(json.dumps({{
+    'captured_at':clock.trusted_now.isoformat(timespec='microseconds').replace('+00:00','Z'),
+    'facts':facts,
+}},sort_keys=True,separators=(',',':')))
+"""
+    result = _run(_service_command(policy, code), timeout=30)
+    if result.returncode != 0:
+        raise RegistryError("M2 service monitor facts probe failed")
+    try:
+        value = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RegistryError("M2 service monitor facts probe is invalid") from exc
+    if not isinstance(value, dict) or set(value) != {"captured_at", "facts"}:
+        raise RegistryError("M2 service monitor facts probe is invalid")
+    return value
+
+
 def _mode(value: os.stat_result) -> str:
     return f"{stat.S_IMODE(value.st_mode):04o}"
 

@@ -4,19 +4,20 @@ from __future__ import annotations
 
 import argparse
 import sys
-from datetime import date
 from pathlib import Path
 
 from .canonical import canonical_json_line
 from .errors import RegistryError
 from .m2_evidence_capture import publish_evidence
-from .m2_evidence_probe import capture_host_probes
+from .m2_evidence_probe import (
+    capture_host_probes,
+    service_monitor_snapshot,
+    service_trusted_now,
+)
+from .m2_isolation_contracts import load_isolation_policy
 from .m2_monitor import evaluate_monitor
-from .m2_monitor_facts import derive_monitor_facts
-from .m2_ntp import query_trusted_clock
 from .m2_release_lock import hold_release_verification_lock
 from .m2_runtime_input import DEFAULT_RUNTIME_INPUT
-from .m2_runtime_loader import load_runtime_context
 from .timeutil import parse_utc
 
 
@@ -51,54 +52,35 @@ def main(argv: list[str] | None = None) -> int:
         }
         for label, value in activation.items():
             parse_utc(value, f"M2 {label}")
-        context = load_runtime_context(args.runtime_input)
-        clock = query_trusted_clock()
-        facts = derive_monitor_facts(
-            paths=context.paths,
-            runtime=context.runtime,
-            registry=context.registry,
-            calendar=context.calendar,
-            calendar_availability_raw_sha256=context.availability.raw_sha256,
-            monitor_from_day=date.fromisoformat(
-                context.runtime_input.payload["monitor_from_day"]
-            ),
-            backup_root=Path(context.policy.payload["backup_root"]),
-            backup_public_key_path=Path(
-                context.runtime_input.payload["backup_public_key_path"]
-            ),
-            expected_backup_public_key_sha256=context.runtime_input.payload[
-                "expected_backup_public_key_sha256"
-            ],
-            expected_backup_head_anchor_raw_sha256=context.runtime_input.payload[
-                "expected_backup_head_anchor_raw_sha256"
-            ],
-            now=clock.trusted_now,
+        policy = load_isolation_policy(
+            args.runtime_input.parent / "isolation-policy-v1.json"
         )
+        observed_at = service_trusted_now(policy)
         probes = capture_host_probes(
-            policy=context.policy,
+            policy=policy,
             deployment_directory=args.deployment_dir,
-            observed_at=clock.trusted_now.isoformat(timespec="microseconds").replace(
-                "+00:00", "Z"
-            ),
+            observed_at=observed_at,
         )
-        captured_clock = query_trusted_clock()
+        snapshot = service_monitor_snapshot(policy, args.runtime_input)
+        facts = snapshot["facts"]
+        captured_at = parse_utc(snapshot["captured_at"], "M2 captured_at")
         monitor = evaluate_monitor(
             facts,
-            policy=context.policy,
-            now=captured_clock.trusted_now,
+            policy=policy,
+            now=captured_at,
         )
         if monitor["status"] != "HEALTHY":
             raise RegistryError(
                 "M2 evidence monitor is degraded: " + ",".join(monitor["incidents"])
             )
         with hold_release_verification_lock(
-            Path(context.policy.payload["release_lock_path"])
+            Path(policy.payload["release_lock_path"])
         ) as held:
             if held.identity is None:
                 raise RegistryError("M2 release lock identity is missing")
             result = publish_evidence(
                 args.evidence_output,
-                policy=context.policy,
+                policy=policy,
                 probes=probes,
                 activation=activation,
                 monitor_input=facts,
@@ -108,7 +90,7 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 release_lock_identity=held.identity.as_dict(),
                 success_output_path=args.success_output,
-                captured_at=captured_clock.trusted_now,
+                captured_at=captured_at,
             )
             held.revalidate()
     except (OSError, RegistryError, ValueError) as exc:
