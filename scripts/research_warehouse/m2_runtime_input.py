@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import stat
 from dataclasses import dataclass
 from datetime import date
@@ -12,6 +13,7 @@ from .canonical import canonical_json_line, parse_json_strict, sha256
 from .custody_paths import normalized_absolute
 from .errors import RegistryError
 from .file_integrity import read_regular_strict
+from .m2_acl_custody import require_acl_free_fd, require_acl_free_path
 from .m2_isolation_contracts import IsolationPolicy, false_authority
 from .manifest_contracts import SHA256_PATTERN
 
@@ -68,26 +70,39 @@ class RuntimeInput:
     payload: dict[str, Any]
 
 
+def _require_root_owner_mode(info: os.stat_result, label: str) -> None:
+    if info.st_uid != 0 or stat.S_IMODE(info.st_mode) & 0o022:
+        raise RegistryError(f"{label} must be root-managed and non-writable")
+
+
 def require_root_managed(path: Path) -> None:
     try:
         parent_info = path.parent.lstat()
-        file_info = path.lstat()
     except OSError as exc:
         raise RegistryError("M2 root-managed runtime input is unavailable") from exc
-    if (
-        stat.S_ISLNK(parent_info.st_mode)
-        or not stat.S_ISDIR(parent_info.st_mode)
-        or parent_info.st_uid != 0
-        or stat.S_IMODE(parent_info.st_mode) & 0o022
-        or file_info.st_uid != 0
-        or stat.S_IMODE(file_info.st_mode) & 0o022
-    ):
-        raise RegistryError("M2 runtime input must be root-managed and non-writable")
+    if stat.S_ISLNK(parent_info.st_mode) or not stat.S_ISDIR(parent_info.st_mode):
+        raise RegistryError("M2 runtime input parent is unsafe")
+    _require_root_owner_mode(parent_info, "M2 runtime input parent")
+    require_acl_free_path(path.parent, "M2 runtime input parent")
+    require_acl_free_path(path, "M2 runtime input")
+
+
+def _validate_runtime_input_fd(descriptor: int) -> None:
+    _require_root_owner_mode(
+        os.fstat(descriptor),
+        "M2 runtime input",
+    )
+    require_acl_free_fd(descriptor, "M2 runtime input")
 
 
 def load_runtime_input(path: Path, *, policy: IsolationPolicy) -> RuntimeInput:
     require_root_managed(path)
-    raw = read_regular_strict(path, "M2 runtime input", private=False)
+    raw = read_regular_strict(
+        path,
+        "M2 runtime input",
+        private=False,
+        descriptor_validator=_validate_runtime_input_fd,
+    )
     payload = parse_json_strict(raw, "M2 runtime input")
     if (
         not isinstance(payload, dict)

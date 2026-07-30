@@ -21,7 +21,7 @@ from .m2_runtime_paths import RuntimePaths
 from .models import SourceRegistry
 from .observations import load_observations
 from .revisions import revision_state
-from .timeutil import format_utc
+from .timeutil import format_utc, parse_utc
 from .validation import validate_source_bytes
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -57,7 +57,7 @@ def verify_daily_run_receipt(
     registry: SourceRegistry,
     calendar: OfficialCalendar,
     calendar_availability_raw_sha256: str,
-) -> None:
+) -> datetime:
     if (
         receipt["registry_raw_sha256"] != registry.raw_sha256
         or receipt["calendar_raw_sha256"] != calendar.raw_sha256
@@ -68,6 +68,7 @@ def verify_daily_run_receipt(
         ).is_official
     ):
         raise RegistryError("M2 run receipt authority binding mismatch")
+    observed_completion = []
     for item in receipt["sources"]:
         source = registry.source(item["source_id"])
         if item["exchange"] != source.exchange:
@@ -86,6 +87,9 @@ def verify_daily_run_receipt(
         if len(matches) != 1:
             raise RegistryError("M2 run receipt observation binding mismatch")
         observation = matches[0]
+        observed_completion.append(
+            parse_utc(observation["last_seen_at"], "observation last_seen_at")
+        )
         for field in (
             "object_id",
             "revision_id",
@@ -100,6 +104,10 @@ def verify_daily_run_receipt(
         if len(raw) != item["raw_bytes"] or sha256(raw) != item["raw_sha256"]:
             raise RegistryError("M2 run receipt raw hash binding mismatch")
         validate_source_bytes(raw, source, receipt["trade_day"])
+    completed_at = max(observed_completion)
+    if parse_utc(receipt["completed_at"], "run receipt completed_at") != completed_at:
+        raise RegistryError("M2 run receipt completion time binding mismatch")
+    return completed_at
 
 
 def _unreviewed_revisions(
@@ -148,6 +156,7 @@ def derive_monitor_facts(
         if item.is_official and monitor_from_day <= day <= expected
     ]
     valid: dict[date, dict[str, Any]] = {}
+    verified_completion: dict[date, datetime] = {}
     hash_mismatches = 0
     unreviewed = 0
     for receipt_path in sorted(runtime.run_receipts.glob("*.json")):
@@ -156,7 +165,7 @@ def derive_monitor_facts(
             trade_day = date.fromisoformat(receipt["trade_day"])
             if trade_day < monitor_from_day or trade_day > expected:
                 continue
-            verify_daily_run_receipt(
+            completed_at = verify_daily_run_receipt(
                 receipt,
                 paths=paths,
                 registry=registry,
@@ -164,6 +173,7 @@ def derive_monitor_facts(
                 calendar_availability_raw_sha256=(calendar_availability_raw_sha256),
             )
             valid[trade_day] = receipt
+            verified_completion[trade_day] = completed_at
             unreviewed += _unreviewed_revisions(
                 receipt,
                 paths=paths,
@@ -175,10 +185,7 @@ def derive_monitor_facts(
     missing = [day.isoformat() for day in official_days if day not in valid]
     latest = max(completed) if completed else None
     last_success = max(
-        (
-            datetime.fromisoformat(valid[day]["completed_at"].replace("Z", "+00:00"))
-            for day in completed
-        ),
+        (verified_completion[day] for day in completed),
         default=None,
     )
     backup_verified = False

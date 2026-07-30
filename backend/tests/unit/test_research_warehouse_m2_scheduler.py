@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import ast
 import json
+import os
+import pwd
+import subprocess
 import sys
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
@@ -119,6 +122,27 @@ def official_raw(marker: str) -> bytes:
         separators=(",", ":"),
         sort_keys=True,
     ).encode()
+
+
+def runtime_input_payload(root: Path) -> dict:
+    return {
+        "schema_version": RUNTIME_INPUT_SCHEMA,
+        "policy_path": str(root / "isolation-policy-v1.json"),
+        "registry_path": str(root / "source-registry-v1.json"),
+        "calendar_path": str(root / "calendar.json"),
+        "calendar_public_key_path": str(root / "calendar.pub"),
+        "calendar_source_evidence_root": str(root / "calendar-evidence"),
+        "calendar_availability_anchor_path": str(root / "availability.json"),
+        "backup_public_key_path": str(root / "backup.pub"),
+        "expected_calendar_raw_sha256": "a" * 64,
+        "expected_calendar_public_key_sha256": "b" * 64,
+        "expected_calendar_availability_anchor_raw_sha256": "c" * 64,
+        "expected_backup_public_key_sha256": "d" * 64,
+        "expected_backup_head_anchor_raw_sha256": "e" * 64,
+        "monitor_from_day": DAY.isoformat(),
+        "collector_version": "m2-daily-scheduler-v1",
+        "authority": false_authority(),
+    }
 
 
 class RawTransport:
@@ -328,34 +352,50 @@ def test_runtime_input_requires_exact_external_pins(
 ) -> None:
     path = tmp_path / "runtime-input-v1.json"
     policy = SimpleNamespace(payload={"authority": false_authority()})
-    payload = {
-        "schema_version": RUNTIME_INPUT_SCHEMA,
-        "policy_path": str(tmp_path / "isolation-policy-v1.json"),
-        "registry_path": str(tmp_path / "source-registry-v1.json"),
-        "calendar_path": str(tmp_path / "calendar.json"),
-        "calendar_public_key_path": str(tmp_path / "calendar.pub"),
-        "calendar_source_evidence_root": str(tmp_path / "calendar-evidence"),
-        "calendar_availability_anchor_path": str(tmp_path / "availability.json"),
-        "backup_public_key_path": str(tmp_path / "backup.pub"),
-        "expected_calendar_raw_sha256": "a" * 64,
-        "expected_calendar_public_key_sha256": "b" * 64,
-        "expected_calendar_availability_anchor_raw_sha256": "c" * 64,
-        "expected_backup_public_key_sha256": "d" * 64,
-        "expected_backup_head_anchor_raw_sha256": "e" * 64,
-        "monitor_from_day": DAY.isoformat(),
-        "collector_version": "m2-daily-scheduler-v1",
-        "authority": false_authority(),
-    }
+    payload = runtime_input_payload(tmp_path)
     path.write_bytes(canonical_json_line(payload))
     monkeypatch.setattr(
-        "research_warehouse.m2_runtime_input.require_root_managed",
-        lambda _path: None,
+        "research_warehouse.m2_runtime_input._require_root_owner_mode",
+        lambda *_args: None,
+    )
+    checked = []
+    monkeypatch.setattr(
+        "research_warehouse.m2_runtime_input.require_acl_free_path",
+        lambda value, _label: checked.append(value),
     )
     loaded = load_runtime_input(path, policy=policy)
     assert loaded.payload == payload
+    assert checked == [tmp_path, path]
     payload["unexpected"] = True
     path.write_bytes(canonical_json_line(payload))
     with pytest.raises(RegistryError, match="contract mismatch"):
+        load_runtime_input(path, policy=policy)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Darwin extended ACL")
+@pytest.mark.parametrize("target", ["file", "inheritable-parent"])
+def test_runtime_input_rejects_darwin_acl(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    target: str,
+) -> None:
+    path = tmp_path / "runtime-input-v1.json"
+    path.write_bytes(canonical_json_line(runtime_input_payload(tmp_path)))
+    policy = SimpleNamespace(payload={"authority": false_authority()})
+    monkeypatch.setattr(
+        "research_warehouse.m2_runtime_input._require_root_owner_mode",
+        lambda *_args: None,
+    )
+    account = pwd.getpwuid(os.getuid()).pw_name
+    acl = (
+        f"user:{account} allow write"
+        if target == "file"
+        else (f"user:{account} allow write,file_inherit,directory_inherit,only_inherit")
+    )
+    subprocess.check_call(
+        ["chmod", "+a", acl, str(path if target == "file" else tmp_path)]
+    )
+    with pytest.raises(RegistryError, match="extended ACL"):
         load_runtime_input(path, policy=policy)
 
 
@@ -378,7 +418,7 @@ def test_monitor_facts_derive_missing_revision_hash_disk_and_backup(
     )
     monkeypatch.setattr(
         "research_warehouse.m2_monitor_facts.verify_daily_run_receipt",
-        lambda *_args, **_kwargs: None,
+        lambda *_args, **_kwargs: NOW,
     )
     monkeypatch.setattr(
         "research_warehouse.m2_monitor_facts._unreviewed_revisions",
@@ -490,6 +530,17 @@ def test_run_receipt_rechecks_real_custody_hash_and_revision(
         calendar=calendar(),
         calendar_availability_raw_sha256="b" * 64,
     )
+    forged = dict(receipt)
+    forged["completed_at"] = "2026-07-30T10:31:00.000000Z"
+    forged["receipt_id"] = run_receipt_id(forged)
+    with pytest.raises(RegistryError, match="completion time binding"):
+        verify_daily_run_receipt(
+            forged,
+            paths=paths,
+            registry=registry,
+            calendar=calendar(),
+            calendar_availability_raw_sha256="b" * 64,
+        )
     raw_path = acquired_values[0][1].raw_path
     original = raw_path.read_bytes()
     raw_path.write_bytes(b"tampered")

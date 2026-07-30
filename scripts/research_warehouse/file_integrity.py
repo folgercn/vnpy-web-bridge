@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import stat
+from collections.abc import Callable
 from pathlib import Path
 
 from .errors import RegistryError
@@ -32,6 +33,7 @@ def read_regular_strict(
     limit: int = MAX_RAW_BYTES,
     private: bool = True,
     expected_nlink: int = 1,
+    descriptor_validator: Callable[[int], None] | None = None,
 ) -> bytes:
     try:
         path_before = path.lstat()
@@ -56,6 +58,8 @@ def read_regular_strict(
     descriptor: int | None = None
     try:
         descriptor = os.open(path, flags)
+        if descriptor_validator is not None:
+            descriptor_validator(descriptor)
         before = os.fstat(descriptor)
         raw = _read_fd(descriptor, limit, label)
         os.lseek(descriptor, 0, os.SEEK_SET)
