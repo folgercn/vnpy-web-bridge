@@ -89,13 +89,19 @@ class FakeTransport:
         )
 
 
-def official_raw(*, invalid_price: bool = False) -> bytes:
+def official_raw(
+    *,
+    invalid_price: bool = False,
+    numeric_fractional_price: bool = False,
+) -> bytes:
     rows = [
         {
             "DELIVERYMONTH": "2609",
             "PRODUCTID": "zn_f",
             "OPENPRICE": [] if invalid_price else "22000.5",
-            "HIGHESTPRICE": "22100",
+            "HIGHESTPRICE": (
+                22100.125 if numeric_fractional_price else "22100"
+            ),
             "LOWESTPRICE": "21900",
             "CLOSEPRICE": "22050",
             "SETTLEMENTPRICE": "22020",
@@ -172,6 +178,7 @@ def sealed_evidence(
     tmp_path: Path,
     *,
     invalid_price: bool = False,
+    numeric_fractional_price: bool = False,
     repeat_same_raw: bool = False,
 ) -> tuple[
     WarehousePaths,
@@ -184,7 +191,10 @@ def sealed_evidence(
 ]:
     evidence = WarehousePaths.initialize(tmp_path / "evidence")
     trusted_registry = load_registry(REGISTRY_PATH)
-    raw = official_raw(invalid_price=invalid_price)
+    raw = official_raw(
+        invalid_price=invalid_price,
+        numeric_fractional_price=numeric_fractional_price,
+    )
     acquire_daily(
         paths=evidence,
         registry=trusted_registry,
@@ -366,6 +376,26 @@ def test_normalizer_schema_drift_fails_closed(tmp_path: Path) -> None:
     with pytest.raises(RegistryError, match="OPENPRICE"):
         rebuild(*values, tmp_path / "derived")
     assert not list((tmp_path / "derived" / "catalog").glob("*.duckdb"))
+
+
+def test_normalizer_preserves_fractional_json_number_exactly(
+    tmp_path: Path,
+) -> None:
+    values = sealed_evidence(tmp_path, numeric_fractional_price=True)
+    rebuild(*values, tmp_path / "derived")
+    parquet = next(
+        DerivedPaths.open(tmp_path / "derived").parquet.rglob("*.parquet")
+    )
+    connection = duckdb.connect(":memory:")
+    try:
+        value = connection.execute(
+            "SELECT highest_price FROM read_parquet(?) "
+            "WHERE product_id = 'zn_f'",
+            [str(parquet)],
+        ).fetchone()[0]
+    finally:
+        connection.close()
+    assert str(value) == "22100.1250000000"
 
 
 def test_corrupt_catalog_fails_closed(tmp_path: Path) -> None:

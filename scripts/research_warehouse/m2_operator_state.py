@@ -132,6 +132,16 @@ def _require_root_parent(path: Path) -> None:
         raise RegistryError("M2 operator state parent is unsafe")
 
 
+def _prepare_public_root_directory(path: Path) -> None:
+    path.mkdir(mode=0o755, exist_ok=True)
+    _require_root_parent(path)
+    os.chmod(path, 0o755, follow_symlinks=False)
+    info = path.lstat()
+    if stat.S_IMODE(info.st_mode) != 0o755:
+        raise RegistryError("M2 public root directory mode is unsafe")
+    fsync_dir(path.parent)
+
+
 def _atomic_root_write(path: Path, raw: bytes, *, create_only: bool) -> None:
     _require_root()
     path = normalized_absolute(path)
@@ -359,7 +369,7 @@ def record_manifest_result(
     ledger_path = state.path.parent / "commit-anchor-ledgers" / (
         f"commit-anchor-ledger-{ledger_sha}.json"
     )
-    ledger_path.parent.mkdir(mode=0o755, exist_ok=True)
+    _prepare_public_root_directory(ledger_path.parent)
     _atomic_root_write(ledger_path, ledger_raw, create_only=True)
     load_commit_anchor_ledger(
         ledger_path,

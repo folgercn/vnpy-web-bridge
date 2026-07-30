@@ -114,7 +114,11 @@ def _rows(
     normalization_id: str,
 ) -> list[tuple[object, ...]]:
     validate_source_bytes(raw, source, revision["trade_day"])
-    payload = parse_json_strict(raw, "normalizer raw source")
+    payload = parse_json_strict(
+        raw,
+        "normalizer raw source",
+        decimal_numbers_as_strings=True,
+    )
     values = payload[source.required_top_level_fields[0]]
     rows: list[tuple[object, ...]] = []
     for index, item in enumerate(values, start=1):
