@@ -163,7 +163,7 @@ def evidence() -> dict:
                 "group": "vnpyresearch",
                 "uid": 510,
                 "gid": 510,
-                "supplementary_gids": [510],
+                "supplementary_gids": [12, 61, 100, 510],
                 "home": value.payload["home"],
                 "inherited_fujun_home_acl": False,
                 "web_bridge_uid": 501,
@@ -498,6 +498,27 @@ def test_activation_and_root_owned_entrypoint_failures_close(
             lambda item: item["identity"].__setitem__(
                 "inherited_fujun_home_acl",
                 True,
+            ),
+            "identity",
+        ),
+        (
+            lambda item: item["identity"].__setitem__(
+                "supplementary_gids",
+                [12, 61, 80, 100, 510],
+            ),
+            "identity",
+        ),
+        (
+            lambda item: item["identity"].__setitem__(
+                "supplementary_gids",
+                [12, 61, 510],
+            ),
+            "identity",
+        ),
+        (
+            lambda item: item["identity"].__setitem__(
+                "supplementary_gids",
+                [12, 61, 100, "510"],
             ),
             "identity",
         ),

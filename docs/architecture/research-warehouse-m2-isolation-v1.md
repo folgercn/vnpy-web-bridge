@@ -40,6 +40,11 @@ SQLAlchemy, account, order, position, trade, or execution service.
 The service identity is exactly `vnpyresearch:vnpyresearch`. Its HOME,
 custody, runtime, backup and temporary directories are under
 `/Users/Shared/vnpy-research`, owned by that identity and mode `0700`.
+macOS automatically adds every local account to the non-admin system groups
+`everyone` (12), `localaccounts` (61), and `_lpoperator` (100). The policy
+freezes exactly those unavoidable groups; evidence normalizes the effective
+GID set in ascending order and rejects any additional group such as `admin`,
+`wheel`, or a Docker/operator group.
 Launchd applies umask `077` and an exact five-variable environment:
 
 ```text

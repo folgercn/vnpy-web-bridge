@@ -13,7 +13,7 @@ from .manifest_contracts import SHA256_PATTERN
 
 POLICY_SCHEMA = "vnpy_research_m2_isolation_policy_v1"
 EVIDENCE_SCHEMA = "vnpy_research_m2_isolation_evidence_v1"
-POLICY_RAW_SHA256 = "9eb01b945ca7c991f4df30da6219b27d902f5cc601176c20166811841a0d08a2"
+POLICY_RAW_SHA256 = "fdbbba37710521181f6f2b631597ed8673228e5745fc7104897616254095a328"
 PLIST_SHA256 = {
     "com.vnpy.research-warehouse": (
         "c6fee8672ea38d898177a89c34b0f9491198d4d83df7acecc6c01a2469c50aa0"
@@ -50,6 +50,7 @@ POLICY_KEYS = {
     "policy_id",
     "service_user",
     "service_group",
+    "allowed_system_supplementary_groups",
     "home",
     "custody_root",
     "runtime_root",
@@ -156,6 +157,14 @@ def load_isolation_policy(path: Path) -> IsolationPolicy:
         "TMPDIR": f"{payload['runtime_root']}/tmp",
     }:
         raise RegistryError("M2 isolation environment is not minimal")
+    if payload["allowed_system_supplementary_groups"] != {
+        "_lpoperator": 100,
+        "everyone": 12,
+        "localaccounts": 61,
+    }:
+        raise RegistryError(
+            "M2 system supplementary group allowlist mismatch"
+        )
     expected_programs = {
         label: path
         for label, path in zip(
