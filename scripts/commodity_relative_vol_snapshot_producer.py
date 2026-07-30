@@ -300,17 +300,15 @@ def _exact_object(value: Any, fields: set[str], label: str) -> dict[str, Any]:
 
 
 def _stable_id(value: Any, label: str) -> str:
-    text = str(value)
-    if ID_PATTERN.fullmatch(text) is None:
+    if not isinstance(value, str) or ID_PATTERN.fullmatch(value) is None:
         raise SnapshotProducerError(f"{label} must be one stable id")
-    return text
+    return value
 
 
 def _sha256_text(value: Any, label: str) -> str:
-    text = str(value)
-    if SHA256_PATTERN.fullmatch(text) is None:
+    if not isinstance(value, str) or SHA256_PATTERN.fullmatch(value) is None:
         raise SnapshotProducerError(f"{label} must be one lowercase SHA256")
-    return text
+    return value
 
 
 def _key_id(value: Any, label: str) -> str:
@@ -320,7 +318,9 @@ def _key_id(value: Any, label: str) -> str:
 
 
 def _iso_date(value: Any, label: str) -> date:
-    text = str(value)
+    if not isinstance(value, str):
+        raise SnapshotProducerError(f"{label} must be an ISO date string")
+    text = value
     try:
         parsed = date.fromisoformat(text)
     except ValueError as exc:
@@ -331,7 +331,9 @@ def _iso_date(value: Any, label: str) -> date:
 
 
 def _iso_datetime(value: Any, label: str) -> datetime:
-    text = str(value)
+    if not isinstance(value, str):
+        raise SnapshotProducerError(f"{label} must be an ISO datetime string")
+    text = value
     try:
         parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError as exc:
@@ -342,7 +344,9 @@ def _iso_datetime(value: Any, label: str) -> datetime:
 
 
 def _source_month(value: Any, label: str) -> str:
-    text = str(value)
+    if not isinstance(value, str):
+        raise SnapshotProducerError(f"{label} must be a YYYY-MM string")
+    text = value
     if MONTH_PATTERN.fullmatch(text) is None:
         raise SnapshotProducerError(f"{label} must be YYYY-MM")
     try:
@@ -361,12 +365,9 @@ def _next_month(value: str) -> str:
 
 
 def _finite(value: Any, label: str) -> float:
-    if isinstance(value, bool):
-        raise SnapshotProducerError(f"{label} must be numeric")
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError) as exc:
-        raise SnapshotProducerError(f"{label} must be numeric") from exc
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise SnapshotProducerError(f"{label} must be one JSON number")
+    parsed = float(value)
     if not math.isfinite(parsed):
         raise SnapshotProducerError(f"{label} must be finite")
     return parsed
@@ -386,7 +387,9 @@ def _strict_integer(value: Any, label: str) -> int:
 
 
 def _signature_shape(value: Any, label: str) -> str:
-    text = str(value)
+    if not isinstance(value, str):
+        raise SnapshotProducerError(f"{label} must be canonical base64 text")
+    text = value
     try:
         raw = base64.b64decode(text, validate=True)
     except (ValueError, binascii.Error) as exc:
@@ -403,7 +406,11 @@ def _exact_contract(
     exchange: str,
     label: str,
 ) -> str:
-    text = str(value)
+    if not isinstance(value, str):
+        raise SnapshotProducerError(
+            f"{label} must be one exact-contract string"
+        )
+    text = value
     match = CONTRACT_PATTERN.fullmatch(text)
     if match is None or match.group(1) != exchange or match.group(2) != product:
         raise SnapshotProducerError(f"{label} is outside the frozen product identity")

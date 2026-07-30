@@ -684,6 +684,35 @@ def test_signer_key_id_rejects_non_string_json_types(
         producer.produce_snapshot(source)
 
 
+def test_source_schema_primitive_types_fail_closed_before_normalization() -> None:
+    numeric_source_id = source_view()
+    numeric_source_id["source_view_id"] = 12345678
+    with pytest.raises(
+        producer.SnapshotProducerError,
+        match="source_view_id must be one stable id",
+    ):
+        producer.produce_snapshot(numeric_source_id)
+
+    string_daily_return = source_view()
+    string_daily_return["baseline_daily_returns"][0]["daily_return"] = "0.01"
+    with pytest.raises(
+        producer.SnapshotProducerError,
+        match="daily_return must be one JSON number",
+    ):
+        producer.produce_snapshot(string_daily_return)
+
+    string_reference_price = source_view()
+    string_reference_price["baseline_batch"]["targets"][0][
+        "reference_open_price"
+    ] = "8000.0"
+    _rehash_baseline(string_reference_price)
+    with pytest.raises(
+        producer.SnapshotProducerError,
+        match="reference open price must be one JSON number",
+    ):
+        producer.produce_snapshot(string_reference_price)
+
+
 def test_chain_hash_month_and_missing_proof_fail_closed() -> None:
     hash_tampered = linked_source_view()
     hash_tampered["continuity"]["previous_snapshot_hash"] = "f" * 64

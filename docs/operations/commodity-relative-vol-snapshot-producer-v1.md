@@ -8,7 +8,7 @@
 
 它不获取数据、不验证 source receipt/custody、不持有私钥、不签名、不安装
 snapshot，也不连接 Trade、RPC、Gateway 或订单接口。真实 sealed daily-return
-输入及其 source authority 仍由 #171/#181 边界提供；producer evidence 会明确写
+输入及其 source authority 必须先通过 #171/#181 边界验证；producer evidence 会明确写
 `sealed_source_view_verified_by_producer=false` 和
 `daily_return_source_authority_verified_by_producer=false`。
 
@@ -47,6 +47,9 @@ baseline/previous snapshot 的签名字节只做 base64 及 64-byte 形状检查
 必须在调用 producer 前完成真实签名、receipt、keyring 和 custody 验证。
 calendar authority 同样不由 producer 自证，仍必须由 sealed #181 边界验证；
 evidence 固定声明 `calendar_authority_verified_by_producer=false`。
+即使 receipt/custody 已通过，producer 仍会在 normalization 前拒绝与本页
+source schema 类型不一致的 ID、日期、哈希和数值；sealed bytes 不能替代
+领域 schema 校验。
 
 ## 冻结计算
 
