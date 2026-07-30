@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import argparse
 import sys
+from datetime import date
 from pathlib import Path
 
-from .canonical import canonical_json_line, parse_json_strict, sha256
+from .canonical import canonical_json_line
 from .errors import RegistryError
-from .file_integrity import read_regular_strict
+from .history_backfill_receipts import load_backfill_receipt
 from .m2_daily_scheduler import due_trade_day
+from .m2_history_signer import sign_manifest_day, verify_history_base
 from .m2_isolation_contracts import load_isolation_policy
-from .m2_monitor_facts import verify_daily_run_receipt
 from .m2_ntp import query_trusted_clock
 from .m2_operator_defaults import (
     DEFAULT_MANIFEST_PRIVATE_KEY,
@@ -27,8 +28,7 @@ from .m2_receipts import load_run_receipt
 from .m2_runtime_input import DEFAULT_RUNTIME_INPUT
 from .m2_runtime_loader import load_runtime_context
 from .m2_signer_handoff import run_with_preloaded_private_key
-from .manifest_commits import commit_receipt_path
-from .manifests import seal_daily_batch_with_private_key
+from .quality_contracts import REQUIRED_HISTORY_OFFICIAL_DAYS
 
 
 def parser() -> argparse.ArgumentParser:
@@ -45,101 +45,162 @@ def parser() -> argparse.ArgumentParser:
         default=DEFAULT_OPERATOR_STATE,
     )
     result.add_argument("--signer-key-id", default=MANIFEST_SIGNER_KEY_ID)
-    result.add_argument("--trade-day")
+    mode = result.add_mutually_exclusive_group()
+    mode.add_argument("--trade-day")
+    mode.add_argument("--history-receipt", type=Path)
+    result.add_argument("--expected-history-receipt-sha256")
     return result
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
+        if (args.history_receipt is None) != (
+            args.expected_history_receipt_sha256 is None
+        ):
+            raise RegistryError(
+                "history receipt and expected SHA256 must be provided together"
+            )
         policy = load_isolation_policy(
             args.runtime_input.parent / "isolation-policy-v1.json"
         )
         with operator_state_lock(args.operator_state, exclusive=True):
             state = load_operator_state(args.operator_state)
-            parent_seal = state.payload["manifest_head_seal_sha256"]
-            parent_commit = state.payload["manifest_head_commit_seal_sha256"]
-
-            def sign(private_key):
-                context = load_runtime_context(args.runtime_input)
-                clock = query_trusted_clock()
-                trade_day = args.trade_day or due_trade_day(
-                    context.calendar,
-                    now=clock.trusted_now,
+            if args.history_receipt is not None:
+                expected_parent = (
+                    Path(policy.payload["runtime_root"])
+                    / "backfill-receipts"
                 )
-                if trade_day is None:
-                    raise RegistryError("M2 manifest signer has no official day due")
-                receipt = load_run_receipt(
-                    context.runtime.run_receipts / f"{trade_day}.json"
-                )
-                verify_daily_run_receipt(
-                    receipt,
-                    paths=context.paths,
-                    registry=context.registry,
-                    calendar=context.calendar,
-                    calendar_availability_raw_sha256=(
-                        context.availability.raw_sha256
+                if args.history_receipt.parent != expected_parent:
+                    raise RegistryError(
+                        "M2 history receipt is outside frozen runtime custody"
+                    )
+            history = (
+                load_backfill_receipt(
+                    args.history_receipt,
+                    expected_raw_sha256=(
+                        args.expected_history_receipt_sha256
                     ),
+                    private=False,
+                    expected_owner_uid=policy.payload["service_uid"],
                 )
-                manifest_path = seal_daily_batch_with_private_key(
-                    paths=context.paths,
-                    registry=context.registry,
-                    trade_day=trade_day,
-                    private_key=private_key,
-                    signer_key_id=args.signer_key_id,
-                    expected_parent_batch_seal_sha256=parent_seal,
-                    expected_parent_commit_seal_sha256=parent_commit,
-                    trusted_clock=lambda: clock.trusted_now,
-                )
-                manifest_raw = read_regular_strict(
-                    manifest_path,
-                    "M2 signed manifest",
-                    limit=16 * 1024 * 1024,
-                )
-                manifest = parse_json_strict(manifest_raw, "M2 signed manifest")
-                receipt_path = commit_receipt_path(
-                    manifest_path,
-                    manifest["batch_id"],
-                )
-                receipt_raw = read_regular_strict(
-                    receipt_path,
-                    "M2 signed manifest commit receipt",
-                    limit=2 * 1024 * 1024,
-                )
-                receipt = parse_json_strict(
-                    receipt_raw,
-                    "M2 signed manifest commit receipt",
-                )
-                return {
-                    "batch_id": manifest["batch_id"],
-                    "batch_seal_sha256": manifest["batch_seal_sha256"],
-                    "commit_seal_sha256": sha256(receipt_raw),
-                    "committed_at": receipt["committed_at"],
-                    "manifest_relative_path": str(
-                        manifest_path.relative_to(context.paths.root)
-                    ),
-                    "manifest_raw_sha256": sha256(manifest_raw),
-                    "parent_batch_seal_sha256": manifest[
-                        "parent_batch_seal_sha256"
-                    ],
-                    "parent_commit_seal_sha256": manifest[
-                        "parent_commit_seal_sha256"
-                    ],
-                    "status": (
-                        "DAILY_BATCH_COMMITTED_AWAITING_EXTERNAL_ANCHOR"
-                    ),
-                    "trade_day": trade_day,
-                }
-
-            output = run_with_preloaded_private_key(
-                private_key_path=args.private_key,
-                service_uid=policy.payload["service_uid"],
-                service_gid=policy.payload["service_gid"],
-                operation=sign,
+                if args.history_receipt is not None
+                else None
             )
-            record_manifest_result(
-                state,
-                result=output,
+            if history is not None:
+                verify_history_base(state, history)
+                trade_days = history["official_days"]
+            else:
+                trade_days = [args.trade_day] if args.trade_day else [None]
+
+            def execute_day(requested_day, parent_seal, parent_commit):
+                def sign(private_key):
+                    context = load_runtime_context(args.runtime_input)
+                    if history is not None and (
+                        history["registry_raw_sha256"]
+                        != context.registry.raw_sha256
+                        or history["calendar_raw_sha256"]
+                        != context.calendar.raw_sha256
+                        or history[
+                            "calendar_availability_anchor_raw_sha256"
+                        ]
+                        != context.availability.raw_sha256
+                    ):
+                        raise RegistryError(
+                            "M2 history receipt runtime pins diverged"
+                        )
+                    if history is not None:
+                        through = date.fromisoformat(
+                            history["through_trade_day"]
+                        )
+                        expected_days = [
+                            day.isoformat()
+                            for day in context.calendar.official_days_through(
+                                through,
+                                count=REQUIRED_HISTORY_OFFICIAL_DAYS,
+                            )
+                        ]
+                        if (
+                            history["required_official_days"]
+                            != REQUIRED_HISTORY_OFFICIAL_DAYS
+                            or history["official_days"] != expected_days
+                        ):
+                            raise RegistryError(
+                                "M2 history signer plan is not exact 186 days"
+                            )
+                    clock = query_trusted_clock()
+                    trade_day = requested_day or due_trade_day(
+                        context.calendar,
+                        now=clock.trusted_now,
+                    )
+                    if trade_day is None:
+                        raise RegistryError(
+                            "M2 manifest signer has no official day due"
+                        )
+                    return sign_manifest_day(
+                        context=context,
+                        private_key=private_key,
+                        trade_day=trade_day,
+                        signer_key_id=args.signer_key_id,
+                        parent_seal=parent_seal,
+                        parent_commit=parent_commit,
+                        clock=clock,
+                    )
+                return run_with_preloaded_private_key(
+                    private_key_path=args.private_key,
+                    service_uid=policy.payload["service_uid"],
+                    service_gid=policy.payload["service_gid"],
+                    operation=sign,
+                )
+
+            results = []
+            for requested_day in trade_days:
+                attempts = 0
+                while True:
+                    attempts += 1
+                    if attempts > 3:
+                        raise RegistryError(
+                            "M2 history signer did not converge on current fingerprint"
+                        )
+                    item = execute_day(
+                        requested_day,
+                        state.payload["manifest_head_seal_sha256"],
+                        state.payload["manifest_head_commit_seal_sha256"],
+                    )
+                    results.append(item)
+                    if item["status"] == "DAILY_BATCH_ALREADY_COMMITTED":
+                        break
+                    state = record_manifest_result(state, result=item)
+                    if history is None:
+                        break
+            output = (
+                {
+                    "status": "M2_HISTORY_MANIFEST_CHAIN_COMPLETE",
+                    "history_receipt_id": history["receipt_id"],
+                    "required_official_days": len(trade_days),
+                    "signed_days": sum(
+                        item["status"]
+                        == "DAILY_BATCH_COMMITTED_AWAITING_EXTERNAL_ANCHOR"
+                        for item in results
+                    ),
+                    "already_signed_days": sum(
+                        item["status"] == "DAILY_BATCH_ALREADY_COMMITTED"
+                        for item in results
+                    ),
+                    "manifest_sequence": state.payload["manifest_sequence"],
+                    "manifest_head_seal_sha256": state.payload[
+                        "manifest_head_seal_sha256"
+                    ],
+                    "manifest_head_commit_seal_sha256": state.payload[
+                        "manifest_head_commit_seal_sha256"
+                    ],
+                    "commit_anchor_ledger_raw_sha256": state.payload[
+                        "commit_anchor_ledger_raw_sha256"
+                    ],
+                    "days": results,
+                }
+                if history is not None
+                else results[0]
             )
     except (OSError, RegistryError, ValueError) as exc:
         print(str(exc), file=sys.stderr)

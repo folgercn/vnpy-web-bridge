@@ -38,6 +38,7 @@ from research_warehouse.filesystem import (
     recover_atomic_publishes,
 )
 from research_warehouse.manifests import (
+    find_committed_manifest_for_day,
     seal_daily_batch,
     seal_daily_batch_with_private_key,
     verify_manifest_chain,
@@ -51,7 +52,7 @@ from research_warehouse.observations import (
 )
 from research_warehouse.pit import select_pit_revision
 from research_warehouse.registry import load_registry
-from research_warehouse.signing import load_private_key
+from research_warehouse.signing import load_private_key, load_public_key
 
 REGISTRY_PATH = ROOT / "deployments/research-warehouse/source-registry-v1.json"
 SOURCE_ID = "shfe-daily-market-data-v1"
@@ -605,6 +606,15 @@ def test_uncommitted_head_recovers_after_new_observation(
     prepared = next(paths.manifests.rglob("batch-*.json"))
     first_seal = manifest_payload(prepared)["batch_seal_sha256"]
     assert list(paths.manifests.rglob("commit-*.json")) == []
+    assert (
+        find_committed_manifest_for_day(
+            paths=paths,
+            registry=registry(),
+            public_key=load_public_key(public_key),
+            trade_day=TRADE_DAY,
+        )
+        is None
+    )
 
     acquire(paths, official_raw("second"), T3)
     monkeypatch.setattr(

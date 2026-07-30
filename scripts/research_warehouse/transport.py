@@ -9,7 +9,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from .acquisition_models import HttpResponse
-from .errors import RegistryError
+from .errors import RegistryError, RetryableTransportError
 from .policy import validate_redirect
 
 
@@ -61,9 +61,25 @@ class UrllibTransport:
         try:
             response = opener.open(request, timeout=timeout_seconds)
         except HTTPError as exc:
+            retry_after = exc.headers.get("Retry-After")
+            parsed_retry_after = None
+            if retry_after is not None:
+                try:
+                    parsed_retry_after = float(retry_after)
+                except ValueError:
+                    parsed_retry_after = None
+                if parsed_retry_after is not None and parsed_retry_after < 0:
+                    parsed_retry_after = None
+            if exc.code == 429 or 500 <= exc.code <= 599:
+                raise RetryableTransportError(
+                    f"official source returned HTTP {exc.code}",
+                    retry_after_seconds=parsed_retry_after,
+                ) from exc
             raise RegistryError(f"official source returned HTTP {exc.code}") from exc
         except (TimeoutError, URLError, OSError) as exc:
-            raise RegistryError("official source request failed") from exc
+            raise RetryableTransportError(
+                "official source request failed"
+            ) from exc
         try:
             headers = {key.lower(): value for key, value in response.headers.items()}
 
@@ -81,6 +97,8 @@ class UrllibTransport:
                 chunks=chunks(),
             )
         except (TimeoutError, OSError) as exc:
-            raise RegistryError("official source body download failed") from exc
+            raise RetryableTransportError(
+                "official source body download failed"
+            ) from exc
         finally:
             response.close()

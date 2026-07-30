@@ -98,3 +98,34 @@ def product_coverage_for_manifest(
             + ", ".join(sorted(missing))
         )
     return coverage
+
+
+def require_target_product_receipt_coverage(
+    *,
+    paths: WarehousePaths,
+    registry: SourceRegistry,
+    receipt: dict[str, Any],
+) -> None:
+    """Fail before receipt publication when a historical day lacks a target."""
+    coverage = set()
+    for item in receipt["sources"]:
+        source = registry.source(item["source_id"])
+        raw_path = _safe_raw_path(paths, item["raw_relative_path"])
+        raw = read_regular_strict(raw_path, "historical daily raw evidence")
+        if len(raw) != item["raw_bytes"] or sha256(raw) != item["raw_sha256"]:
+            raise RegistryError("historical daily raw evidence binding mismatch")
+        validate_source_bytes(raw, source, receipt["trade_day"])
+        payload = parse_json_strict(raw, "historical official daily raw")
+        for row in payload[source.required_top_level_fields[0]]:
+            product = _product_id(row["PRODUCTID"])
+            if product not in TARGET_PRODUCTS:
+                continue
+            if PRODUCT_EXCHANGES[product] != source.exchange:
+                raise RegistryError("target product appeared under wrong exchange")
+            coverage.add(product)
+    missing = set(TARGET_PRODUCTS) - coverage
+    if missing:
+        raise RegistryError(
+            "official daily evidence is missing target products: "
+            + ", ".join(sorted(missing))
+        )

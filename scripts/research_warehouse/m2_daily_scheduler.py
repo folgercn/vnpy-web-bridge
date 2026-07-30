@@ -81,6 +81,50 @@ def run_daily(
             "calendar_raw_sha256": calendar.raw_sha256,
             "authority": false_authority(),
         }
+    return run_trade_day(
+        paths=paths,
+        runtime=runtime,
+        registry=registry,
+        calendar=calendar,
+        availability=availability,
+        trade_day=trade_day,
+        clock_sample=clock_sample,
+        collector_version=collector_version,
+        verify_receipt=verify_receipt,
+        acquire=acquire,
+        utc_clock=utc_clock,
+        clock_provider=clock_provider,
+    )
+
+
+def run_trade_day(
+    *,
+    paths: WarehousePaths,
+    runtime: RuntimePaths,
+    registry: SourceRegistry,
+    calendar: OfficialCalendar,
+    availability: CalendarAvailabilityAnchor,
+    trade_day: str,
+    clock_sample: TrustedClockSample,
+    collector_version: str,
+    verify_receipt: Callable[[dict], None],
+    acquire: Callable[..., object] = acquire_daily,
+    utc_clock: Callable[[], datetime] | None = None,
+    clock_provider: Callable[[], TrustedClockSample] | None = None,
+) -> dict:
+    """Acquire one explicit official day using only live observation clocks."""
+    live_now = (utc_clock or (lambda: clock_sample.trusted_now))()
+    validate_live_clock_sample(clock_sample, local_now=live_now)
+    revalidate_official_calendar_evidence(calendar)
+    availability.require_available(calendar, cutoff_at=clock_sample.trusted_now)
+    try:
+        parsed_day = datetime.strptime(trade_day, "%Y-%m-%d").date()
+    except ValueError as exc:
+        raise RegistryError("trade_day must be canonical YYYY-MM-DD") from exc
+    if parsed_day.isoformat() != trade_day:
+        raise RegistryError("trade_day must be canonical YYYY-MM-DD")
+    if not calendar.require_day(parsed_day).is_official:
+        raise RegistryError("historical acquisition day is not official")
     existing = _existing_receipt(
         runtime,
         trade_day,

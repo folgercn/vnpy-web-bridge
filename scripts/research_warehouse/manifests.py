@@ -7,7 +7,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+    Ed25519PrivateKey,
+    Ed25519PublicKey,
+)
 
 from .canonical import canonical_json, canonical_json_line, sha256
 from .errors import RegistryError
@@ -39,6 +42,7 @@ from .signing import (
 from .timeutil import format_utc, parse_utc, require_utc
 
 __all__ = [
+    "find_committed_manifest_for_day",
     "load_manifest_chain",
     "seal_daily_batch",
     "seal_daily_batch_with_private_key",
@@ -152,6 +156,39 @@ def seal_daily_batch(
         expected_parent_commit_seal_sha256=expected_parent_commit_seal_sha256,
         trusted_clock=trusted_clock,
     )
+
+
+def find_committed_manifest_for_day(
+    *,
+    paths: WarehousePaths,
+    registry: SourceRegistry,
+    public_key: Ed25519PublicKey,
+    trade_day: str,
+) -> dict[str, Any] | None:
+    """Return the unique committed batch for today's exact observation set."""
+    observations = load_observations(paths, registry, trade_day=trade_day)
+    if not observations:
+        raise RegistryError("cannot inspect a day with no raw observations")
+    fingerprint = input_fingerprint(
+        registry.raw_sha256,
+        sorted(item["observation_id"] for item in observations),
+    )
+    chain = load_manifest_chain(
+        paths,
+        public_key,
+        registry,
+        allow_uncommitted_head=True,
+    )
+    matches = [
+        item
+        for item in chain
+        if item["trade_day"] == trade_day
+        and item["input_fingerprint_sha256"] == fingerprint
+        and item["commit_receipt"] is not None
+    ]
+    if len(matches) > 1:
+        raise RegistryError("manifest chain repeats an identical daily fingerprint")
+    return matches[0] if matches else None
 
 
 def seal_daily_batch_with_private_key(

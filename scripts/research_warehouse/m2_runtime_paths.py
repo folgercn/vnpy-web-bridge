@@ -13,6 +13,7 @@ from .errors import RegistryError
 class RuntimePaths:
     root: Path
     run_receipts: Path
+    backfill_receipts: Path
     monitor_receipts: Path
     temporary: Path
 
@@ -24,7 +25,12 @@ class RuntimePaths:
         require_private_dir(absolute, "M2 runtime root")
         values = {
             name: absolute / name
-            for name in ("run-receipts", "monitor-receipts", "tmp")
+            for name in (
+                "run-receipts",
+                "backfill-receipts",
+                "monitor-receipts",
+                "tmp",
+            )
         }
         for path in values.values():
             if not path.exists():
@@ -35,6 +41,7 @@ class RuntimePaths:
         return cls(
             root=absolute,
             run_receipts=values["run-receipts"],
+            backfill_receipts=values["backfill-receipts"],
             monitor_receipts=values["monitor-receipts"],
             temporary=values["tmp"],
         )
