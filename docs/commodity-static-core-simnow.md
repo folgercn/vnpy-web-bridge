@@ -1,5 +1,10 @@
 # STATIC_CORE_EQUAL 商品组合 SimNow 接入
 
+远端 `main` 已固化执行消费者和大部分参数，但不等于已具备从官方行情独立
+再生完整主候选的 Research producer。算法、参数、sector-map parity 与缺失
+输入的逐项边界见
+[`STATIC_CORE_EQUAL` 远端完备性审计](research/static-core-equal-remote-completeness-audit-20260729.md)。
+
 ## 接入边界
 
 Web Bridge 接入的是已冻结的商品组合执行控制面，不在运行时重新搜索参数或计算研究信号。研究侧每月输出一个 Ed25519 签名的 exact-contract 整数目标批次，Web Bridge 只在已核验的 SimNow 账户上完成：

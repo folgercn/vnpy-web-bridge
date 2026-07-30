@@ -25,7 +25,7 @@ except ImportError:  # pragma: no cover - covered in deployments with QuestDB IL
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 CHINA_TZ = ZoneInfo("Asia/Shanghai")
 NIGHT_TRADING_EXCHANGES = {"SHFE", "DCE", "CZCE", "INE", "GFEX"}
 
@@ -196,12 +196,12 @@ class QuestDbMarketDataService:
         if not prepared_rows:
             return True
 
-        columns = [*TICK_SELECT_FIELDS, "raw_json"]
+        columns = TICK_SELECT_FIELDS
         sql = f"""
             INSERT INTO market_ticks ({", ".join(columns)})
             VALUES ({", ".join(["%s"] * len(columns))})
         """
-        params = [tuple(row[key] for key in TICK_SELECT_FIELDS) + (row["raw_json"],) for row in prepared_rows]
+        params = [tuple(row[key] for key in TICK_SELECT_FIELDS) for row in prepared_rows]
         try:
             with self._lock:
                 conn = self._connect()
@@ -231,7 +231,7 @@ class QuestDbMarketDataService:
         prepared_rows = [_prepare_tick_row(row) for row in rows]
         if not prepared_rows:
             return
-        columns = [*TICK_SELECT_FIELDS, "raw_json"]
+        columns = TICK_SELECT_FIELDS
         placeholders = ", ".join(["%s"] * len(columns))
         try:
             with self._lock:
@@ -246,7 +246,7 @@ class QuestDbMarketDataService:
                         INSERT INTO market_ticks ({", ".join(columns)})
                         VALUES ({placeholders})
                         """,
-                        [tuple(row[key] for key in TICK_SELECT_FIELDS) + (row["raw_json"],) for row in prepared_rows],
+                        [tuple(row[key] for key in TICK_SELECT_FIELDS) for row in prepared_rows],
                     )
         except Exception:
             self._drop_connection()
@@ -453,8 +453,10 @@ class QuestDbMarketDataService:
         if self._initialized:
             return
         conn = self._connect()
+        retention_days = self.settings.questdb_tick_retention_days
+        ttl_clause = f" TTL {retention_days} DAYS" if retention_days else ""
         conn.execute(
-            """
+            f"""
             CREATE TABLE IF NOT EXISTS market_ticks (
                 ts TIMESTAMP,
                 received_at TIMESTAMP,
@@ -498,14 +500,14 @@ class QuestDbMarketDataService:
                 ask_volume_2 DOUBLE,
                 ask_volume_3 DOUBLE,
                 ask_volume_4 DOUBLE,
-                ask_volume_5 DOUBLE,
-                raw_json STRING
-            ) TIMESTAMP(ts) PARTITION BY DAY WAL
+                ask_volume_5 DOUBLE
+            ) TIMESTAMP(ts) PARTITION BY DAY{ttl_clause} WAL
             DEDUP UPSERT KEYS(ts, ingest_id)
             """
         )
         self._ensure_schema_columns(conn)
         self._enable_dedup(conn)
+        self._apply_retention(conn)
         self._initialized = True
 
     def _ensure_schema_columns(self, conn: Any) -> None:
@@ -519,6 +521,11 @@ class QuestDbMarketDataService:
 
     def _enable_dedup(self, conn: Any) -> None:
         conn.execute("ALTER TABLE market_ticks DEDUP ENABLE UPSERT KEYS(ts, ingest_id)")
+
+    def _apply_retention(self, conn: Any) -> None:
+        retention_days = self.settings.questdb_tick_retention_days
+        ttl = f"{retention_days} DAYS" if retention_days else "0h"
+        conn.execute(f"ALTER TABLE market_ticks SET TTL {ttl}")
 
     def _drop_connection(self) -> None:
         with self._lock:
@@ -571,7 +578,6 @@ def _normalize_tick(tick: dict[str, Any]) -> dict[str, Any] | None:
     if not vt_symbol or not symbol or not exchange or last_price is None:
         return None
 
-    raw_json = json.dumps(tick, ensure_ascii=False, default=str, sort_keys=True)
     schema_version = _int_or_default(tick.get("schema_version"), SCHEMA_VERSION)
     received_at = _parse_datetime(tick.get("received_at") or tick.get("localtime") or timestamp)
     action_day = _string_or_none(tick.get("action_day")) or _infer_action_day(timestamp)
@@ -588,7 +594,6 @@ def _normalize_tick(tick: dict[str, Any]) -> dict[str, Any] | None:
         "name": _string_or_none(tick.get("name")),
         "trading_day": trading_day,
         "action_day": action_day,
-        "raw_json": raw_json,
     }
     for field in TICK_NUMERIC_FIELDS:
         row[field] = _number(tick.get(field))
@@ -614,8 +619,6 @@ def _prepare_tick_row(row: dict[str, Any]) -> dict[str, Any]:
     prepared["received_at"] = _parse_datetime(prepared.get("received_at") or prepared["ts"])
     prepared["ingest_seq"] = _int_or_default(prepared.get("ingest_seq"), 0)
     prepared["schema_version"] = _int_or_default(prepared.get("schema_version"), SCHEMA_VERSION)
-    if not prepared.get("raw_json"):
-        prepared["raw_json"] = json.dumps(prepared, ensure_ascii=False, default=str, sort_keys=True)
     for field in TICK_NUMERIC_FIELDS:
         prepared[field] = _number(prepared.get(field))
     return prepared
@@ -653,7 +656,6 @@ def _ilp_columns(row: dict[str, Any]) -> dict[str, Any]:
         "ingest_id": row["ingest_id"],
         "ingest_seq": row["ingest_seq"],
         "schema_version": row["schema_version"],
-        "raw_json": row["raw_json"],
     }
     for key in ("name", "trading_day", "action_day"):
         if row.get(key) not in (None, ""):

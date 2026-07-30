@@ -1,0 +1,159 @@
+{
+  "schema_version": "commodity_fast_tsmom_forward_freeze_v1",
+  "contract_id": "commodity_fast_tsmom_forward_freeze_v1",
+  "candidate_id": "C_FAST_CROSS_SECTION_NEUTRAL",
+  "status": "FROZEN_RESULT_BLIND_COLLECTION_PREFLIGHT_ONLY",
+  "created_at_utc": "2026-07-17T13:26:42.382137Z",
+  "freeze_effective_at_utc": "2026-07-17T13:26:42.382137Z",
+  "result_blind_at_freeze": true,
+  "future_rows_read": 0,
+  "forward_pnl_read": false,
+  "research_only": true,
+  "legacy_event_trade_position_pnl_ledger_read": false,
+  "network_used": false,
+  "scoring_authorized": false,
+  "confirmatory_authorized": false,
+  "tradable_authorized": false,
+  "production_authorized": false,
+  "shadow_testnet_live_authorized": false,
+  "initialization_policy": "COLD_START",
+  "historical_position_carry_in": false,
+  "fixed_rule": {
+    "universe": [
+      "ag",
+      "al",
+      "au",
+      "bu",
+      "cu",
+      "rb",
+      "ru",
+      "sc",
+      "sp",
+      "zn"
+    ],
+    "frequency": "MONTHLY",
+    "pit_continuous_index": {
+      "main_definition": "daily PIT OI main from sealed official full-contract panel",
+      "non_roll_return": "same exact main contract adjacent source-day settlement return",
+      "roll_return": "old exact contract closes interval; same-day new contract only anchors index",
+      "future_main_chain_lookup_forbidden": true
+    },
+    "time_series_vote": {
+      "horizons_official_days": [
+        21,
+        63,
+        126
+      ],
+      "per_horizon": "sign(log(I_t/I_t-h))",
+      "equal_vote": "(sign21 + sign63 + sign126) / 3"
+    },
+    "raw_weight": "equal-vote score / max(vol60 annualized, 0.05)",
+    "cross_section_neutralization": "subtract same-day fixed-10 raw arithmetic mean",
+    "leg_normalization": "positive and negative legs each normalized to 50% gross",
+    "caps": {
+      "single_product_abs": 0.2,
+      "sector_gross": 0.35,
+      "portfolio_gross": 1.0,
+      "post_cap_neutrality": "only shrink larger gross leg; never expand smaller leg"
+    },
+    "signal_timing": "completed source-month last official day only",
+    "execution": "next cross-month available official day exact-contract open",
+    "roll": "daily PIT main; old and new exact legs at same open; two fills; initial open is not roll",
+    "cost_stresses": [
+      "3T",
+      "5T"
+    ]
+  },
+  "fixed_rule_sha256": "d9a6ef4ffb6d74fe0feee8ac8935acbeb79abd4686581611f14135eb5c41040a",
+  "lineage_bindings": {
+    "builder_and_preflight": {
+      "path": "research/entry_redesign/scripts/futures_lead/commodity_fast_tsmom_forward_freeze_v1.py",
+      "bytes": 22680,
+      "sha256": "d374d1e2aa37c30dae3c69b6b2ec756d2364c1b61ca775732414f1b9248a833a"
+    },
+    "tests": {
+      "path": "research/entry_redesign/scripts/futures_lead/tests/test_commodity_fast_tsmom_forward_freeze_v1.py",
+      "bytes": 7348,
+      "sha256": "b09f0f46df6f6bbf5d28bed00fcd0eb086e7b7c411e096babb7d8f9b573f602b"
+    },
+    "candidate_mechanism_runner": {
+      "path": "research/entry_redesign/scripts/futures_lead/commodity_fast_tsmom_mechanism_diagnostic_v1.py",
+      "bytes": 11649,
+      "sha256": "9101bfc0f5cc69eef79bb40d1b8360093b8aa18a0847aa4320cc475f07c5772f"
+    },
+    "candidate_mechanism_manifest": {
+      "path": "research/entry_redesign/scripts/output/commodity_fast_tsmom_mechanism_diagnostic_v1_20260717/manifest.json",
+      "bytes": 4409,
+      "sha256": "cfeccebf14499ff82fa4de48bec4517c6e826accfdf87138c1bb649d502204e2"
+    },
+    "candidate_mechanism_receipt": {
+      "path": "research/entry_redesign/scripts/output/commodity_fast_tsmom_mechanism_diagnostic_v1_20260717/receipt.json",
+      "bytes": 509,
+      "sha256": "6af22cbee52f19decd2c2155ad42e0730234c7790159cdb9e6b04b603a004302"
+    },
+    "fast_signal_runner": {
+      "path": "research/entry_redesign/scripts/futures_lead/commodity_fast_tsmom_family_dev_v1.py",
+      "bytes": 17217,
+      "sha256": "7ebe1529173b46cbae17680d872680c7bb7bae39863d09b2d9a37183828a43a9"
+    },
+    "fast_signal_manifest": {
+      "path": "research/entry_redesign/scripts/output/commodity_fast_tsmom_family_dev_v1_20260717/manifest.json",
+      "bytes": 4348,
+      "sha256": "34e85e00529928ddc2e30b23b42e1b8fbe44215a0a69bcb6fb2ac0b5e8b9b6b2"
+    },
+    "exact_execution_runner": {
+      "path": "research/entry_redesign/scripts/futures_lead/commodity_carry_multihorizon_trend_dev_v1.py",
+      "bytes": 28954,
+      "sha256": "2cba018cb8a6c10b84a6cadfbb0fa13087bd961ce4a2054c8c3a8e850eef01ef"
+    },
+    "curve_panel_manifest": {
+      "path": "research/entry_redesign/scripts/output/commodity_market_only_curve_panel_v1_20260717/manifest.json",
+      "bytes": 2416,
+      "sha256": "d49b8b84631879ef7ae46ddfd438932f932cdd088f7e719d4fa26f77b35b3bac"
+    },
+    "research_spec_manifest": {
+      "path": "research/entry_redesign/scripts/output/commodity_market_only_spec_empirical_verifier_v1_20260717/manifest.json",
+      "bytes": 735,
+      "sha256": "ee43f7df560c23e40a7401fb1cce11414bb130d765d8efbede8e0ee6f7074bc6"
+    },
+    "existing_AB_registry_manifest": {
+      "path": "research/entry_redesign/scripts/output/commodity_carry_forward_family_registry_v2_20260717/manifest.json",
+      "bytes": 1125,
+      "sha256": "f1cdf9a3fff21ba7dd0f60c13436cdc9ee689cbcbea67e4d5c10c4d487e79baf"
+    },
+    "existing_A_freeze_manifest": {
+      "path": "research/entry_redesign/scripts/output/commodity_carry_extreme_forward_freeze_v1_20260717/manifest.json",
+      "bytes": 3259,
+      "sha256": "70d25d72790887bb1326461009dadd76e7f786d1625738d6467fb7f478f8ed19"
+    },
+    "existing_B_freeze_manifest": {
+      "path": "research/entry_redesign/scripts/output/commodity_carry_rank8_forward_freeze_v1r2_20260717/manifest.json",
+      "bytes": 3134,
+      "sha256": "7375e519937058905d4abed5225c0bc4bd856efd2a9aee0f525f4d8b70525c92"
+    }
+  },
+  "forward_boundary": {
+    "known_raw_max": "2026-07-10",
+    "sealed_source_and_pnl_max": "2026-07-09",
+    "sealed_available_max": "2026-07-10",
+    "first_countable_complete_source_month": "2026-08",
+    "first_holding_month": "2026-09",
+    "partial_2026_07_counts": false,
+    "pre_freeze_unread_gap_is_forward_outcome": false,
+    "pre_freeze_unread_gap_use": "hashed feature warmup only; outcome and PnL forbidden"
+  },
+  "evaluation": {
+    "three_months": "checkpoint_due notification only; scoring forbidden",
+    "six_months": "checkpoint_due notification only; confirmatory scoring forbidden",
+    "full_scorer_status": "NOT_IMPLEMENTED_EARLY_SCORING_FORBIDDEN"
+  },
+  "implementation_gaps": {
+    "formal_pit_fee_authority_bound": false,
+    "cash_self_financing_contract_bound": false,
+    "integer_lot_sizing_and_margin_bound": false,
+    "effect": "tradable_authorized must remain false"
+  },
+  "AB_registry_treatment": "existing sealed A/B registry is read-only and is not reopened or modified by C",
+  "family_closed": false,
+  "A_B_C_winner_select_blend_switch_fallback_or_pooled_pass_forbidden": true
+}

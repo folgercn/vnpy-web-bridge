@@ -131,12 +131,14 @@ def test_save_tick_writes_to_questdb_connection() -> None:
     assert "schema_version" in sql
     assert "bid_price_5" in sql
     assert "ask_volume_5" in sql
+    assert "raw_json" not in sql
     assert params
+    assert len(params) == len(TICK_SELECT_FIELDS)
     assert params[TICK_SELECT_FIELDS.index("vt_symbol")] == "rb2610.SHFE"
     assert params[TICK_SELECT_FIELDS.index("ts")] == datetime(2026, 6, 18, 2, 0, tzinfo=timezone.utc)
     assert params[TICK_SELECT_FIELDS.index("received_at")] == datetime(2026, 6, 18, 2, 0, 1, tzinfo=timezone.utc)
     assert params[TICK_SELECT_FIELDS.index("ingest_seq")] == 0
-    assert params[TICK_SELECT_FIELDS.index("schema_version")] == 2
+    assert params[TICK_SELECT_FIELDS.index("schema_version")] == 3
     assert params[TICK_SELECT_FIELDS.index("name")] == "螺纹钢"
     assert len(params[TICK_SELECT_FIELDS.index("ingest_id")]) == 32
     assert params[TICK_SELECT_FIELDS.index("last_price")] == 3126.0
@@ -190,6 +192,7 @@ def test_save_tick_uses_ilp_batch_when_configured(monkeypatch) -> None:
     }
     assert row["columns"]["ingest_id"] == "event-1"
     assert row["columns"]["ingest_seq"] == 42
+    assert "raw_json" not in row["columns"]
     assert row["columns"]["last_price"] == 3126.0
     assert row["columns"]["volume"] == 100.0
     assert row["at"] == datetime(2026, 6, 18, 2, 0, tzinfo=timezone.utc)
@@ -227,6 +230,8 @@ def test_normalize_tick_builds_stable_ingest_id() -> None:
     assert first["ts"] == datetime(2026, 6, 18, 2, 0, tzinfo=timezone.utc)
     assert first["received_at"] == first["ts"]
     assert first["ingest_seq"] == 0
+    assert first["schema_version"] == 3
+    assert "raw_json" not in first
     assert first["ingest_id"] == second["ingest_id"]
 
 
@@ -372,6 +377,28 @@ def test_init_schema_is_idempotent_for_existing_v1_table() -> None:
     assert any("ALTER TABLE market_ticks ADD COLUMN received_at TIMESTAMP" in call[0] for call in connection.calls)
     assert any("ALTER TABLE market_ticks ADD COLUMN ingest_seq LONG" in call[0] for call in connection.calls)
     assert any("ALTER TABLE market_ticks DEDUP ENABLE UPSERT KEYS(ts, ingest_id)" in call[0] for call in connection.calls)
+    assert any("ALTER TABLE market_ticks SET TTL 365 DAYS" in call[0] for call in connection.calls)
+
+
+def test_init_schema_can_disable_tick_retention() -> None:
+    service = QuestDbMarketDataService(
+        Settings(
+            questdb_pg_dsn="postgresql://admin:quest@questdb:8812/qdb",
+            questdb_tick_retention_days=0,
+        )
+    )
+    connection = DuplicateColumnConnection()
+    service._conn = connection
+
+    service._init_schema()
+
+    create_sql = next(
+        sql
+        for sql, _ in connection.calls
+        if "CREATE TABLE IF NOT EXISTS market_ticks" in sql
+    )
+    assert " TTL " not in create_sql
+    assert any("ALTER TABLE market_ticks SET TTL 0h" in call[0] for call in connection.calls)
 
 
 def test_init_schema_fails_when_upgrade_column_fails() -> None:

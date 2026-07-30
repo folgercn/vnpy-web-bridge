@@ -10,12 +10,31 @@ CD 会始终把 `APP_ENV`、`JWT_SECRET_KEY`、`MONITOR_ENABLED` 写入最终 `.
 
 QuestDB 使用命名 volume `questdb-data`，挂载到 `/var/lib/questdb`。Tick spool 使用独立命名 volume `tick-spool`，在 Web Bridge 容器内挂载到 `/app/tick-spool`。Web Bridge 会等待 QuestDB PostgreSQL Wire 端口 `8812` 通过 healthcheck 后再启动。
 
-历史 tick 采用长期保留策略：
+历史行情采用分层保留策略：
 
-- 不配置 QuestDB TTL
-- 不自动 drop partition
-- 不因磁盘压力自动清理历史数据
-- 容量压力只通过 status/monitoring 告警，后续人工处理
+- `market_ticks` 只保存结构化 Tick，不再重复保存 `raw_json`
+- `QUESTDB_TICK_RETENTION_DAYS` 默认是 `365`，由 QuestDB TTL 按日分区自动清理
+- 设置为 `0` 可以禁用 TTL；允许范围为 0～3650 天
+- 不因磁盘压力临时缩短 TTL，变更保留期限前先确认研究窗口和备份
+- 1 分钟/5 分钟长期聚合表应在首批 Tick 到期前独立上线；当前 K 线仍由结构化 Tick 即时聚合
+
+### schema v2 `raw_json` 迁移
+
+删除 `raw_json` 属于不可逆业务数据删除，应用不会在启动时自动执行。生产迁移必须按以下顺序：
+
+1. 先备份 QuestDB volume，并保留恢复演练记录。
+2. 部署 schema v3 应用，保持现有 `raw_json` 列不动。
+3. 验证最新 Tick 的 `schema_version=3`、五档字段完整、spool 无积压，且 K 线、查询、CSV 导出和 C_FAST 只读审计正常。
+4. 确认不再需要原始报文后，人工执行：
+
+```sql
+ALTER TABLE market_ticks DROP COLUMN raw_json;
+ALTER TABLE market_ticks SET TTL 365 DAYS;
+```
+
+5. 使用 `SHOW COLUMNS FROM market_ticks`、`SHOW PARTITIONS FROM market_ticks` 和磁盘监控确认列已移除、TTL 生效及空间回收完成。
+
+不要先删列再部署旧版应用：schema v2 writer 会继续向 `raw_json` 写入并导致 Tick 持久化失败。当前约 42 天数据不会被 365 天 TTL 删除。
 
 ## 备份
 

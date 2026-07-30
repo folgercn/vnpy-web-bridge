@@ -1,0 +1,16 @@
+{
+  "status": "C_FROZEN_INDEPENDENTLY_AB_UNCHANGED",
+  "candidate_C": "C_FAST_CROSS_SECTION_NEUTRAL",
+  "candidate_C_origin": "POST_DISCOVERY_PERMANENT",
+  "existing_AB_registry_modified": false,
+  "A_B_C_must_be_collected_reported_and_judged_separately": true,
+  "winner_select_forbidden": true,
+  "blend_forbidden": true,
+  "switch_forbidden": true,
+  "fallback_forbidden": true,
+  "pooled_pass_forbidden": true,
+  "scoring_authorized": false,
+  "confirmatory_authorized": false,
+  "tradable_authorized": false,
+  "production_authorized": false
+}
