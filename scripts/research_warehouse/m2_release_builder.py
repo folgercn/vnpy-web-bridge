@@ -93,6 +93,7 @@ def _copy_source_tree(
 def _bootstrap(role: str) -> bytes:
     modules = {
         "backup-signer": "research_warehouse.m2_backup_signer_cli",
+        "evidence-capture": "research_warehouse.m2_evidence_capture_cli",
         "manifest-signer": "research_warehouse.m2_manifest_signer_cli",
         "monitor": "research_warehouse.m2_monitor_cli",
         "operator-state": "research_warehouse.m2_operator_state_cli",
@@ -247,6 +248,7 @@ def build_release_bundle(
         _copy_source_tree(exact_source_root, app, source_commit_sha)
         roles = {
             "backup-signer": "research-warehouse-backup-signer",
+            "evidence-capture": "research-warehouse-evidence-capture",
             "manifest-signer": "research-warehouse-manifest-signer",
             "monitor": "research-warehouse-monitor",
             "operator-state": "research-warehouse-operator-state",
