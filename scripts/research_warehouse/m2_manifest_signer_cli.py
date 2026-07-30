@@ -11,7 +11,11 @@ from .canonical import canonical_json_line
 from .errors import RegistryError
 from .history_backfill_receipts import load_backfill_receipt
 from .m2_daily_scheduler import due_trade_day
-from .m2_history_signer import sign_manifest_day, verify_history_base
+from .m2_history_signer import (
+    remaining_history_days,
+    sign_manifest_day,
+    verify_history_base,
+)
 from .m2_isolation_contracts import load_isolation_policy
 from .m2_ntp import query_trusted_clock
 from .m2_operator_defaults import (
@@ -51,6 +55,17 @@ def parser() -> argparse.ArgumentParser:
     return result
 
 
+def _bounded_history_clock():
+    failure = None
+    for _attempt in range(3):
+        try:
+            return query_trusted_clock()
+        except RegistryError as exc:
+            failure = exc
+    assert failure is not None
+    raise failure
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
@@ -88,7 +103,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             if history is not None:
                 verify_history_base(state, history)
-                trade_days = history["official_days"]
+                trade_days = remaining_history_days(state, history)
             else:
                 trade_days = [args.trade_day] if args.trade_day else [None]
 
@@ -127,7 +142,12 @@ def main(argv: list[str] | None = None) -> int:
                             raise RegistryError(
                                 "M2 history signer plan is not exact 186 days"
                             )
-                    clock = query_trusted_clock()
+                    clock_provider = (
+                        _bounded_history_clock
+                        if history is not None
+                        else query_trusted_clock
+                    )
+                    clock = clock_provider()
                     trade_day = requested_day or due_trade_day(
                         context.calendar,
                         now=clock.trusted_now,
@@ -156,6 +176,7 @@ def main(argv: list[str] | None = None) -> int:
                         parent_commit=parent_commit,
                         clock=clock,
                         run_receipt_path=history_receipt_path,
+                        clock_provider=clock_provider,
                     )
                 return run_with_preloaded_private_key(
                     private_key_path=args.private_key,
@@ -188,7 +209,10 @@ def main(argv: list[str] | None = None) -> int:
                 {
                     "status": "M2_HISTORY_MANIFEST_CHAIN_COMPLETE",
                     "history_receipt_id": history["receipt_id"],
-                    "required_official_days": len(trade_days),
+                    "required_official_days": history[
+                        "required_official_days"
+                    ],
+                    "processed_days_this_run": len(trade_days),
                     "signed_days": sum(
                         item["status"]
                         == "DAILY_BATCH_COMMITTED_AWAITING_EXTERNAL_ANCHOR"

@@ -4,6 +4,7 @@ import sys
 import threading
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -23,6 +24,7 @@ from research_warehouse.m2_history_backfill import (
     history_days,
     retrying_acquirer,
 )
+from research_warehouse.m2_history_signer import remaining_history_days
 from research_warehouse.m2_isolation_contracts import false_authority
 from research_warehouse.m2_request_gate import PersistentRequestGate
 
@@ -230,3 +232,23 @@ def test_backfill_receipt_binds_exact_days_receipts_and_sources() -> None:
     payload["daily_receipts"].reverse()
     with pytest.raises(RegistryError, match="incomplete"):
         validate_backfill_receipt(payload)
+
+
+def test_history_signer_resumes_only_a_root_pinned_day_prefix() -> None:
+    history = {
+        "base_manifest_sequence": 1,
+        "official_days": ["2025-10-27", "2025-10-28", "2025-10-29"],
+    }
+    state = SimpleNamespace(
+        payload={
+            "manifest_sequence": 2,
+            "last_trade_day": "2025-10-27",
+        }
+    )
+    assert remaining_history_days(state, history) == [
+        "2025-10-28",
+        "2025-10-29",
+    ]
+    state.payload["last_trade_day"] = "2025-10-29"
+    with pytest.raises(RegistryError, match="progress day diverged"):
+        remaining_history_days(state, history)

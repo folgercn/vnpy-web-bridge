@@ -30,6 +30,7 @@ def sign_manifest_day(
     parent_commit: str | None,
     clock,
     run_receipt_path: Path | None = None,
+    clock_provider=query_trusted_clock,
 ) -> dict:
     receipt_path = (
         run_receipt_path
@@ -94,7 +95,7 @@ def sign_manifest_day(
         )
         recovered_available_at = None
         if lost_response:
-            recovered_clock = query_trusted_clock().trusted_now
+            recovered_clock = clock_provider().trusted_now
             committed_at = parse_utc(
                 existing["commit_receipt"]["committed_at"],
                 "M2 recovered manifest committed_at",
@@ -169,7 +170,7 @@ def sign_manifest_day(
     if loaded_commit is None:
         raise RegistryError("M2 signed manifest commit receipt is unavailable")
     commit_receipt, commit_seal = loaded_commit
-    available_at = query_trusted_clock().trusted_now
+    available_at = clock_provider().trusted_now
     if available_at <= parse_utc(
         commit_receipt["committed_at"],
         "M2 manifest committed_at",
@@ -217,3 +218,17 @@ def verify_history_base(state, history: dict) -> None:
         != history["base_manifest_head_commit_seal_sha256"]
     ):
         raise RegistryError("M2 history signer base chain diverged")
+
+
+def remaining_history_days(state, history: dict) -> list[str]:
+    """Resume only after proving the root-pinned signed prefix is contiguous."""
+    trade_days = history["official_days"]
+    completed = (
+        state.payload["manifest_sequence"]
+        - history["base_manifest_sequence"]
+    )
+    if completed < 0 or completed >= len(trade_days):
+        raise RegistryError("M2 history signer progress is outside exact plan")
+    if completed and state.payload["last_trade_day"] != trade_days[completed - 1]:
+        raise RegistryError("M2 history signer progress day diverged")
+    return trade_days[completed:]
