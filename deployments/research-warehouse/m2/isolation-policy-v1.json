@@ -3,6 +3,13 @@
   "policy_id": "m2-vnpyresearch-native-launchd-v1",
   "service_user": "vnpyresearch",
   "service_group": "vnpyresearch",
+  "service_uid": 503,
+  "service_gid": 503,
+  "allowed_system_supplementary_groups": {
+    "_lpoperator": 100,
+    "everyone": 12,
+    "localaccounts": 61
+  },
   "home": "/Users/Shared/vnpy-research/home",
   "custody_root": "/Users/Shared/vnpy-research/custody",
   "runtime_root": "/Users/Shared/vnpy-research/runtime",

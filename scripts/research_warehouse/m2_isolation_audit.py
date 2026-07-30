@@ -228,6 +228,8 @@ def verify_isolation_evidence_semantics(
     if (
         identity["user"] != policy.user
         or identity["group"] != policy.group
+        or identity["uid"] != policy.uid
+        or identity["gid"] != policy.gid
         or identity["home"] != policy.payload["home"]
         or any(
             isinstance(identity[field], bool)
@@ -238,7 +240,25 @@ def verify_isolation_evidence_semantics(
         or identity["uid"] == identity["web_bridge_uid"]
         or identity["gid"] == identity["web_bridge_gid"]
         or identity["inherited_fujun_home_acl"] is not False
-        or identity["supplementary_gids"] != [identity["gid"]]
+    ):
+        raise RegistryError("M2 service identity is not isolated")
+    expected_gids = sorted(
+        {
+            policy.gid,
+            *policy.payload[
+                "allowed_system_supplementary_groups"
+            ].values(),
+        }
+    )
+    supplementary_gids = identity["supplementary_gids"]
+    if (
+        not isinstance(supplementary_gids, list)
+        or any(
+            isinstance(gid, bool) or not isinstance(gid, int) or gid <= 0
+            for gid in supplementary_gids
+        )
+        or len(supplementary_gids) != len(set(supplementary_gids))
+        or supplementary_gids != expected_gids
     ):
         raise RegistryError("M2 service identity is not isolated")
     launchd = _exact(evidence["launchd"], LAUNCHD_KEYS, "M2 launchd")

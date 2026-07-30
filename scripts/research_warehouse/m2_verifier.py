@@ -55,14 +55,6 @@ def verify_m2_isolation_files(
         evidence_path,
         expected_raw_sha256=expected_evidence_raw_sha256,
     )
-    identity = evidence.get("identity")
-    if (
-        not isinstance(identity, dict)
-        or isinstance(identity.get("uid"), bool)
-        or not isinstance(identity.get("uid"), int)
-        or identity["uid"] <= 0
-    ):
-        raise RegistryError("M2 evidence identity is invalid")
     actual_release, actual_output = _verified_artifact_paths(
         policy,
         release_root,
@@ -83,7 +75,7 @@ def verify_m2_isolation_files(
             expected_manifest_raw_sha256=(expected_release_tree_manifest_raw_sha256),
             output_path=actual_output,
             expected_output_raw_sha256=expected_success_output_raw_sha256,
-            output_owner_uid=identity["uid"],
+            output_owner_uid=policy.uid,
             release_lock_identity=held_lock.identity,
         )
         semantics = verify_isolation_evidence_semantics(
