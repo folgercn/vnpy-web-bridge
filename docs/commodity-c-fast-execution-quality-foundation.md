@@ -4,6 +4,11 @@
 DTO、纯编译规则和确定性哈希；它不是 execution-quality observer，也
 不会开始收集 forward evidence。
 
+冻结 policy v2 规则的纯 Research Plane 计算实现见
+[`commodity-c-fast-execution-quality-pure-scorer.md`](commodity-c-fast-execution-quality-pure-scorer.md)。
+该 scorer 同样不采集 forward evidence、不接运行链路，也不改变本文固定的
+authority 边界。
+
 ## 当前边界
 
 固定状态：

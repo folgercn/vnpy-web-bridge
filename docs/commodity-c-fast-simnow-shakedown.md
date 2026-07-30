@@ -79,12 +79,40 @@ PYTHONPATH=backend python scripts/commodity_c_fast_shakedown_artifact.py \
   --max-selected-products 1 --control-signer-key-id c-fast-control-1
 
 PYTHONPATH=backend python scripts/commodity_c_fast_shakedown_artifact.py \
-  install --input permit.json --destination /private/runtime/snapshot.json \
+  install --input permit.json \
+  --destination /private/runtime/c-fast-snapshot-install \
   --research-public-key-file /secure/research-ed25519.pub \
   --control-public-key-file /secure/control-ed25519.pub
+
+export COMMODITY_C_FAST_SHADOW_SNAPSHOT_PATH=\
+/private/runtime/c-fast-snapshot-install/snapshot.json
 ```
 
-所有输出以 `0600` create-only 写入；destination 和 checksum 已存在时拒绝覆盖。
+`install --destination` 是安装单元目录，不再是 snapshot 文件路径。installer
+不会隐式创建 destination 的父目录：运维必须预先创建由当前 installer 用户
+持有、非 symlink 且 group/other 无权限的私有父目录（例如 `0700` 的
+`/private/runtime`）。installer 打开并绑定该父目录的 device/inode 后，所有
+staging、child file、cleanup、fsync 和 no-replace rename 都只通过同一个
+parent directory fd 加 basename 执行，并在发布前后复核当前 parent path
+仍指向同一 inode。post-publish 内容校验完成后、installer 返回成功前还会再次
+复核 configured parent path identity；即使 parent 在 pinned-fd 校验期间被替换，
+也必须 fail closed，不能把已经失效的 configured path 报告为安装成功。
+
+installer 在该 pinned parent 内的私有 staging directory 中 create-only 写入
+`snapshot.json` 与 `snapshot.json.sha256`，分别 fsync 两个文件，再 fsync
+staging directory，最后通过一次 directory rename 发布并 fsync 已绑定的父
+目录。Bridge 的
+`COMMODITY_C_FAST_SHADOW_SNAPSHOT_PATH` 必须指向安装单元内固定的
+`snapshot.json` child。staging directory fd 会在 rename 前关闭；即使 rename
+已提交但调用方只收到异常，失败清理也只会重新打开仍在 staging basename
+下且 inode 匹配的目录，不会沿旧 fd 删除已经发布的 child。
+
+这是未投产 C_FAST shakedown installer 的合同迁移。旧的单文件 destination
+会被显式拒绝，不会静默改写成 runtime 无法读取的目录。完整安装单元、半安装
+单元和 checksum/snapshot 篡改都拒绝覆盖；遗留 `.staging-*` 不构成已安装
+authority，也不会被恢复路径当作 snapshot 读取。安装单元目录为 `0700`，
+其中两个文件为 `0600`。
+
 私钥只用于离线签署，M2 运行时仅保存公钥。安装后仍需由 Bridge 使用 RPC
 合约目录独立复核 exact contract、multiplier 和 price tick。
 

@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "export_id", "purpose", "receipt_created_at",
+    "manifest_filename", "manifest_raw_sha256",
+    "artifact_index_sha256", "lineage_sha256", "authority",
+    "signer_key_id", "signer_public_key_sha256",
+    "keyring_raw_sha256", "signature"
+  ],
+  "properties": {
+    "schema_version": {"const": "vnpy_research_sealed_source_export_receipt_v1"},
+    "export_id": {"type": "string", "pattern": "^sealed-export-[0-9a-f]{64}$"},
+    "purpose": {"const": "C_FAST_RESEARCH_EVIDENCE_EXPORT_ONLY"},
+    "receipt_created_at": {"type": "string", "format": "date-time", "pattern": "Z$"},
+    "manifest_filename": {"const": "sealed-export-manifest.json"},
+    "manifest_raw_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "artifact_index_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "lineage_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "control_authorized", "deployment_authorized", "execution_authorized",
+        "execution_permit_authorized", "network_authorized",
+        "web_bridge_rpc_authorized", "account_data_read", "order_authorized",
+        "position_mutation_authorized", "dispatch_authorized",
+        "trading_authorized", "production_authorized",
+        "replacement_authorized"
+      ],
+      "properties": {
+        "control_authorized": {"const": false},
+        "deployment_authorized": {"const": false},
+        "execution_authorized": {"const": false},
+        "execution_permit_authorized": {"const": false},
+        "network_authorized": {"const": false},
+        "web_bridge_rpc_authorized": {"const": false},
+        "account_data_read": {"const": false},
+        "order_authorized": {"const": false},
+        "position_mutation_authorized": {"const": false},
+        "dispatch_authorized": {"const": false},
+        "trading_authorized": {"const": false},
+        "production_authorized": {"const": false},
+        "replacement_authorized": {"const": false}
+      }
+    },
+    "signer_key_id": {"type": "string", "pattern": "^[A-Za-z0-9._-]{8,128}$"},
+    "signer_public_key_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "keyring_raw_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "signature": {"type": "string", "minLength": 80}
+  }
+}

@@ -1,0 +1,79 @@
+{
+  "schema_version": "vnpy_research_m2_isolation_policy_v1",
+  "policy_id": "m2-vnpyresearch-native-launchd-v1",
+  "service_user": "vnpyresearch",
+  "service_group": "vnpyresearch",
+  "home": "/Users/Shared/vnpy-research/home",
+  "custody_root": "/Users/Shared/vnpy-research/custody",
+  "runtime_root": "/Users/Shared/vnpy-research/runtime",
+  "backup_root": "/Users/Shared/vnpy-research/backups",
+  "libexec_root": "/usr/local/libexec/vnpyresearch",
+  "release_root": "/usr/local/libexec/vnpyresearch/release",
+  "release_lock_path": "/usr/local/libexec/vnpyresearch/release.lock",
+  "umask": "077",
+  "launchd_labels": [
+    "com.vnpy.research-warehouse",
+    "com.vnpy.research-warehouse-monitor"
+  ],
+  "program_paths": {
+    "com.vnpy.research-warehouse": "/usr/local/libexec/vnpyresearch/run-warehouse",
+    "com.vnpy.research-warehouse-monitor": "/usr/local/libexec/vnpyresearch/run-monitor"
+  },
+  "allowed_environment": {
+    "HOME": "/Users/Shared/vnpy-research/home",
+    "LANG": "C.UTF-8",
+    "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+    "PYTHONNOUSERSITE": "1",
+    "TMPDIR": "/Users/Shared/vnpy-research/runtime/tmp"
+  },
+  "forbidden_environment_names": [
+    "ALL_PROXY",
+    "COMMODITY_C_FAST_SIMNOW_RPC_REQUEST_ADDRESS",
+    "COMMODITY_C_FAST_SIMNOW_RPC_SUBSCRIBE_ADDRESS",
+    "DOCKER_HOST",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "WEB_TRADE_ENABLED"
+  ],
+  "registry_raw_sha256": "638cb64fa8799b29b2f5ae915218d25f4cc15b6482555355661920c482e54dae",
+  "allowed_https_hosts": ["www.ine.cn", "www.shfe.com.cn"],
+  "allowed_egress_classes": ["DNS", "NTP", "REGISTRY_HTTPS"],
+  "forbidden_network_targets": [
+    "127.0.0.1:8080",
+    "192.168.100.89:8080",
+    "192.168.100.187:2014",
+    "192.168.100.187:4102"
+  ],
+  "forbidden_paths": [
+    "/Users/fujun/.netrc",
+    "/Users/fujun/.ssh",
+    "/Users/fujun/Library/Application Support/Google/Chrome",
+    "/Users/fujun/Library/Containers/com.docker.docker/Data/vms",
+    "/Users/fujun/Library/Keychains",
+    "/Users/fujun/services/vnpy-web-bridge/.env",
+    "/Users/fujun/services/vnpy-web-bridge/logs",
+    "/Users/fujun/services/vnpy-web-bridge/tick-spool",
+    "/Users/fujun/services/vnpy-web-bridge/state",
+    "/Users/fujun/services/vnpy-web-bridge/keys",
+    "/var/run/docker.sock"
+  ],
+  "monitor_thresholds": {
+    "backup_max_age_seconds": 93600,
+    "disk_free_min_bytes": 53687091200,
+    "last_success_max_age_seconds": 129600
+  },
+  "authority": {
+    "account_data_read": false,
+    "control_authorized": false,
+    "deployment_authorized": false,
+    "execution_authorized": false,
+    "network_beyond_allowlist_authorized": false,
+    "order_authorized": false,
+    "permit_authorized": false,
+    "position_mutation_authorized": false,
+    "production_authorized": false,
+    "rpc_authorized": false,
+    "trading_authorized": false
+  }
+}
