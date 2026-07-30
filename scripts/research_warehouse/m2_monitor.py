@@ -45,13 +45,27 @@ def evaluate_monitor(
     current = now
     if current.tzinfo is None or current.utcoffset() is None:
         raise RegistryError("M2 monitor now must be timezone-aware")
-    last_success = parse_utc(value["last_success_at"], "last success")
-    last_backup = parse_utc(value["last_backup_at"], "last backup")
-    if last_success > current or last_backup > current:
+    last_success = (
+        None
+        if value["last_success_at"] is None
+        else parse_utc(value["last_success_at"], "last success")
+    )
+    last_backup = (
+        None
+        if value["last_backup_at"] is None
+        else parse_utc(value["last_backup_at"], "last backup")
+    )
+    if (last_success is not None and last_success > current) or (
+        last_backup is not None and last_backup > current
+    ):
         raise RegistryError("M2 monitor facts cannot be in the future")
     expected = _day(value["expected_official_day"], "expected official day")
-    latest = _day(value["latest_official_day"], "latest official day")
-    if latest > expected:
+    latest = (
+        None
+        if value["latest_official_day"] is None
+        else _day(value["latest_official_day"], "latest official day")
+    )
+    if latest is not None and latest > expected:
         raise RegistryError("M2 latest official day cannot exceed expected day")
     missing = value["missing_official_days"]
     if (
@@ -75,11 +89,11 @@ def evaluate_monitor(
         raise RegistryError("M2 backup_verified must be boolean")
     thresholds = policy.payload["monitor_thresholds"]
     incidents = []
-    if current - last_success > timedelta(
+    if last_success is None or current - last_success > timedelta(
         seconds=thresholds["last_success_max_age_seconds"]
     ):
         incidents.append("LAST_SUCCESS_STALE")
-    if missing or latest < expected:
+    if missing or latest is None or latest < expected:
         incidents.append("OFFICIAL_DAY_MISSING")
     if value["unreviewed_revision_count"]:
         incidents.append("UNREVIEWED_REVISION")
@@ -89,6 +103,7 @@ def evaluate_monitor(
         incidents.append("DISK_FREE_LOW")
     if (
         not value["backup_verified"]
+        or last_backup is None
         or current - last_backup
         > timedelta(seconds=thresholds["backup_max_age_seconds"])
     ):
