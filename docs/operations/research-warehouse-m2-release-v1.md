@@ -155,10 +155,11 @@ An existing `release.candidate` or `release.previous` makes the next install
 fail closed. Removing or archiving those root-owned paths is an explicit
 operator action, not an automatic cleanup side effect.
 
-The installed-tree verifier holds the root and directory descriptors while it
-walks. Each regular file is read twice through one fd-relative descriptor,
-closed, then reopened from its still-held parent directory for final
-identity/hash verification. This preserves pathname and exact-byte binding
-without holding every dependency file open simultaneously; the full runtime
-tree therefore remains verifiable under the M2 LaunchDaemon soft limit of 256
-file descriptors.
+The installed-tree verifier holds the release-root descriptor while it walks.
+Traversal descriptors are bounded by path depth; every reopened component uses
+`O_NOFOLLOW` and must retain its recorded identity. Each regular file is read
+twice through one fd-relative descriptor and reopened for final identity/hash
+verification. This preserves root-relative pathname and exact-byte binding
+without holding every runtime directory or dependency file open
+simultaneously; the full runtime tree remains verifiable under the M2
+LaunchDaemon soft limit of 256 file descriptors.

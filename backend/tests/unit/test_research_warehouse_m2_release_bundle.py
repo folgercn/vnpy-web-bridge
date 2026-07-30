@@ -621,7 +621,10 @@ def test_release_tree_scan_stays_below_launchd_fd_limit(tmp_path: Path) -> None:
         entrypoint.write_bytes(b"#!/bin/sh\nexit 2\n")
         entrypoint.chmod(0o555)
     for index in range(300):
-        dependency = vendor / f"dependency-{index:03d}.py"
+        package = vendor / f"package-{index:03d}"
+        package.mkdir()
+        package.chmod(0o755)
+        dependency = package / "dependency.py"
         dependency.write_bytes(f"VALUE = {index}\n".encode())
         dependency.chmod(0o444)
     script = """

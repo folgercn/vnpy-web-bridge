@@ -18,9 +18,9 @@ operator action followed by freshly captured, externally SHA-pinned evidence.
 - `m2_release_artifacts.py` rescans the root-owned release tree and successful
   output against independently retained raw-pinned artifacts.
 - `m2_release_tree_custody.py` performs the fd-relative recursive scan, keeps
-  every directory descriptor held, then reopens each bounded-lifetime file
-  descriptor from its held parent and rechecks identity, content and directory
-  membership before release verification completes.
+  the release-root descriptor held, bounds traversal descriptors by path depth,
+  then reopens every component with `O_NOFOLLOW` and rechecks identity, content
+  and directory membership before release verification completes.
 - `m2_release_lock.py` supplies the root-owned deployment lock: verification
   and job execution take a shared lock; every supported release update must
   take the exclusive lock.

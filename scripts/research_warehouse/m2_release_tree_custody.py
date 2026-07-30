@@ -26,9 +26,6 @@ def mode_string(value: int) -> str:
 @dataclass
 class _HeldNode:
     relative_path: str
-    name: str | None
-    parent_fd: int | None
-    fd: int | None
     identity: tuple[int, ...]
     stat_result: os.stat_result
     child_names: tuple[str, ...] | None
@@ -49,7 +46,9 @@ class HeldReleaseTree:
         self.expected_owner_gid = expected_owner_gid
         self.scan_hook = scan_hook
         self.nodes: list[_HeldNode] = []
+        self.nodes_by_path: dict[str, _HeldNode] = {}
         self.entries: list[dict[str, Any]] = []
+        self.root_fd: int | None = None
 
     def __enter__(self) -> HeldReleaseTree:  # noqa: PYI034
         flags = (
@@ -70,19 +69,16 @@ class HeldReleaseTree:
             except RegistryError:
                 os.close(root_fd)
                 raise
-            self.nodes.append(
-                _HeldNode(
-                    relative_path=".",
-                    name=None,
-                    parent_fd=None,
-                    fd=root_fd,
-                    identity=file_identity(root_stat),
-                    stat_result=root_stat,
-                    child_names=None,
-                    raw_sha256=None,
-                )
+            self.root_fd = root_fd
+            root_node = _HeldNode(
+                relative_path=".",
+                identity=file_identity(root_stat),
+                stat_result=root_stat,
+                child_names=None,
+                raw_sha256=None,
             )
-            self._walk_directory(self.nodes[0])
+            self._remember(root_node)
+            self._walk_directory(root_node, root_fd)
             self._validate_required_programs()
             return self
         except Exception:
@@ -93,14 +89,18 @@ class HeldReleaseTree:
         self.close()
 
     def close(self) -> None:
-        for node in reversed(self.nodes):
-            if node.fd is None:
-                continue
+        if self.root_fd is not None:
             try:
-                os.close(node.fd)
+                os.close(self.root_fd)
             except OSError:
                 pass
+            self.root_fd = None
         self.nodes.clear()
+        self.nodes_by_path.clear()
+
+    def _remember(self, node: _HeldNode) -> None:
+        self.nodes.append(node)
+        self.nodes_by_path[node.relative_path] = node
 
     def _hook(self, event: str, relative_path: str) -> None:
         if self.scan_hook is not None:
@@ -129,9 +129,9 @@ class HeldReleaseTree:
                 f"M2 release entry custody mismatch: {relative_path}"
             )
 
-    def _walk_directory(self, directory: _HeldNode) -> None:
+    def _walk_directory(self, directory: _HeldNode, directory_fd: int) -> None:
         try:
-            names = tuple(sorted(os.listdir(directory.fd)))
+            names = tuple(sorted(os.listdir(directory_fd)))
         except OSError as exc:
             raise RegistryError("cannot enumerate M2 release directory") from exc
         if any(
@@ -150,16 +150,16 @@ class HeldReleaseTree:
                 if directory.relative_path == "."
                 else f"{directory.relative_path}/"
             )
-            self._open_child(directory, name, f"{prefix}{name}")
+            self._open_child(directory_fd, name, f"{prefix}{name}")
 
     def _open_child(
         self,
-        parent: _HeldNode,
+        parent_fd: int,
         name: str,
         relative: str,
     ) -> None:
         try:
-            path_stat = os.stat(name, dir_fd=parent.fd, follow_symlinks=False)
+            path_stat = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
         except OSError as exc:
             raise RegistryError(f"M2 release entry disappeared: {relative}") from exc
         if stat.S_ISLNK(path_stat.st_mode):
@@ -172,7 +172,7 @@ class HeldReleaseTree:
         if directory:
             flags |= getattr(os, "O_DIRECTORY", 0)
         try:
-            child_fd = os.open(name, flags, dir_fd=parent.fd)
+            child_fd = os.open(name, flags, dir_fd=parent_fd)
         except OSError as exc:
             raise RegistryError(f"cannot open M2 release entry: {relative}") from exc
         try:
@@ -190,25 +190,27 @@ class HeldReleaseTree:
             raise
         node = _HeldNode(
             relative_path=relative,
-            name=name,
-            parent_fd=parent.fd,
-            fd=child_fd,
             identity=file_identity(opened),
             stat_result=opened,
             child_names=None,
             raw_sha256=None,
         )
-        self.nodes.append(node)
-        if directory:
-            raw = None
-            size_bytes = 0
-            self._walk_directory(node)
-        else:
-            raw = self._read_file(node)
-            size_bytes = len(raw)
-            node.raw_sha256 = sha256(raw)
+        self._remember(node)
+        try:
+            if directory:
+                raw = None
+                size_bytes = 0
+                self._walk_directory(node, child_fd)
+            else:
+                raw = self._read_descriptor(
+                    child_fd,
+                    relative_path=relative,
+                    identity=node.identity,
+                )
+                size_bytes = len(raw)
+                node.raw_sha256 = sha256(raw)
+        finally:
             os.close(child_fd)
-            node.fd = None
         self.entries.append(
             {
                 "relative_path": relative,
@@ -224,15 +226,6 @@ class HeldReleaseTree:
             }
         )
         self._hook("after_entry", relative)
-
-    def _read_file(self, node: _HeldNode) -> bytes:
-        if node.fd is None:
-            raise RegistryError("M2 release file descriptor is missing")
-        return self._read_descriptor(
-            node.fd,
-            relative_path=node.relative_path,
-            identity=node.identity,
-        )
 
     def _read_descriptor(
         self,
@@ -278,28 +271,21 @@ class HeldReleaseTree:
             )
 
     def revalidate(self) -> None:
+        if self.root_fd is None:
+            raise RegistryError("M2 release root descriptor is missing")
         for node in self.nodes:
-            reopened = None
+            reopened: int | None = None
             try:
-                if node.parent_fd is None:
+                if node.relative_path == ".":
                     path_stat = self.root.lstat()
+                    held = os.fstat(self.root_fd)
                 else:
-                    path_stat = os.stat(
-                        node.name,
-                        dir_fd=node.parent_fd,
-                        follow_symlinks=False,
-                    )
-                if node.fd is None:
-                    reopened = os.open(
-                        node.name,
-                        os.O_RDONLY
-                        | getattr(os, "O_CLOEXEC", 0)
-                        | getattr(os, "O_NOFOLLOW", 0),
-                        dir_fd=node.parent_fd,
+                    reopened = self._reopen_relative(
+                        node.relative_path,
+                        directory=node.child_names is not None,
                     )
                     held = os.fstat(reopened)
-                else:
-                    held = os.fstat(node.fd)
+                    path_stat = held
             except OSError as exc:
                 if reopened is not None:
                     os.close(reopened)
@@ -315,7 +301,7 @@ class HeldReleaseTree:
                     raise RegistryError(
                         f"M2 release pathname changed: {node.relative_path}"
                     )
-                if reopened is not None:
+                if node.child_names is None and reopened is not None:
                     raw = self._read_descriptor(
                         reopened,
                         relative_path=node.relative_path,
@@ -328,7 +314,12 @@ class HeldReleaseTree:
                         )
                 if node.child_names is not None:
                     try:
-                        final_names = tuple(sorted(os.listdir(node.fd)))
+                        directory_fd = (
+                            self.root_fd
+                            if node.relative_path == "."
+                            else reopened
+                        )
+                        final_names = tuple(sorted(os.listdir(directory_fd)))
                     except OSError as exc:
                         raise RegistryError(
                             f"M2 release directory unavailable: "
@@ -342,6 +333,42 @@ class HeldReleaseTree:
             finally:
                 if reopened is not None:
                     os.close(reopened)
+
+    def _reopen_relative(self, relative_path: str, *, directory: bool) -> int:
+        if self.root_fd is None:
+            raise RegistryError("M2 release root descriptor is missing")
+        current = os.dup(self.root_fd)
+        parts = relative_path.split("/")
+        prefix: list[str] = []
+        try:
+            for index, part in enumerate(parts):
+                prefix.append(part)
+                final = index == len(parts) - 1
+                flags = (
+                    os.O_RDONLY
+                    | getattr(os, "O_CLOEXEC", 0)
+                    | getattr(os, "O_NOFOLLOW", 0)
+                )
+                if not final or directory:
+                    flags |= getattr(os, "O_DIRECTORY", 0)
+                path_stat = os.stat(part, dir_fd=current, follow_symlinks=False)
+                opened = os.open(part, flags, dir_fd=current)
+                opened_stat = os.fstat(opened)
+                node = self.nodes_by_path["/".join(prefix)]
+                if (
+                    file_identity(path_stat) != node.identity
+                    or file_identity(opened_stat) != node.identity
+                ):
+                    os.close(opened)
+                    raise RegistryError(
+                        f"M2 release pathname changed: {'/'.join(prefix)}"
+                    )
+                os.close(current)
+                current = opened
+            return current
+        except Exception:
+            os.close(current)
+            raise
 
     def snapshot(self) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         root_stat = self.nodes[0].stat_result
