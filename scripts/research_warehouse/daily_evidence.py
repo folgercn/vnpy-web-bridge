@@ -84,7 +84,7 @@ def product_coverage_for_manifest(
                 product_counts[product] = product_counts.get(product, 0) + 1
         for product, count in product_counts.items():
             if PRODUCT_EXCHANGES[product] != source.exchange:
-                raise RegistryError("target product appeared under wrong exchange")
+                continue
             coverage[product] = {
                 "exchange": source.exchange,
                 "revision_id": revision["revision_id"],
@@ -121,7 +121,7 @@ def require_target_product_receipt_coverage(
             if product not in TARGET_PRODUCTS:
                 continue
             if PRODUCT_EXCHANGES[product] != source.exchange:
-                raise RegistryError("target product appeared under wrong exchange")
+                continue
             coverage.add(product)
     missing = set(TARGET_PRODUCTS) - coverage
     if missing:

@@ -414,7 +414,9 @@ def absence_anchor(
 
 
 def official_raw(exchange: str, day: date) -> bytes:
-    products = [product for product in TARGET_PRODUCTS if product != "sc"]
+    # The SHFE official daily file also carries INE rows. Coverage remains
+    # authoritative only when counted from the product's owning exchange.
+    products = list(TARGET_PRODUCTS)
     if exchange == "INE":
         products = ["sc"]
     rows = [
