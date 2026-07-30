@@ -35,7 +35,9 @@ DATABASE_URL=postgresql://vnpy:vnpy@127.0.0.1:5432/vnpy
 datetime,received_at,ingest_id,ingest_seq,schema_version,vt_symbol,symbol,exchange,gateway_name,name,trading_day,action_day,last_price,last_volume,volume,turnover,open_interest,open_price,high_price,low_price,pre_close,limit_up,limit_down,bid_price_1,bid_price_2,bid_price_3,bid_price_4,bid_price_5,ask_price_1,ask_price_2,ask_price_3,ask_price_4,ask_price_5,bid_volume_1,bid_volume_2,bid_volume_3,bid_volume_4,bid_volume_5,ask_volume_1,ask_volume_2,ask_volume_3,ask_volume_4,ask_volume_5
 ```
 
-`market_ticks` schema v2 使用 UTC `ts` 作为 QuestDB 时间戳，额外保存 `received_at`、`schema_version`、事件级 `ingest_id` 和接收进程内单调递增的 `ingest_seq`，并启用 `DEDUP UPSERT KEYS(ts, ingest_id)`，重试同一 tick 时保持幂等。同一 `ts` 下查询按 `ingest_seq` 稳定排序；`ingest_seq` 用于单进程接收顺序，不承诺跨进程重启全局连续。`raw_json` 保留原始 TickData 字段，结构化列覆盖 vn.py `TickData` 的合约名、价格、成交量、成交额、持仓、涨跌停、开高低昨收和买卖 1-5 档；`extra` 保留在 `raw_json` 中。若 CTP payload 没有 `action_day`/`trading_day`，Web Bridge 会按北京时间推导 `action_day`，并对 SHFE/DCE/CZCE/INE/GFEX 的 20:00 后夜盘 tick 将 `trading_day` 推到下一交易日；原始字段存在时始终优先保留原值。
+`market_ticks` schema v3 使用 UTC `ts` 作为 QuestDB 时间戳，额外保存 `received_at`、`schema_version`、事件级 `ingest_id` 和接收进程内单调递增的 `ingest_seq`，并启用 `DEDUP UPSERT KEYS(ts, ingest_id)`，重试同一 tick 时保持幂等。同一 `ts` 下查询按 `ingest_seq` 稳定排序；`ingest_seq` 用于单进程接收顺序，不承诺跨进程重启全局连续。结构化列覆盖 vn.py `TickData` 的合约名、价格、成交量、成交额、持仓、涨跌停、开高低昨收和买卖 1-5 档；schema v3 不再重复保存原始 `raw_json`。若 CTP payload 没有 `action_day`/`trading_day`，Web Bridge 会按北京时间推导 `action_day`，并对 SHFE/DCE/CZCE/INE/GFEX 的 20:00 后夜盘 tick 将 `trading_day` 推到下一交易日；原始字段存在时始终优先保留值。
+
+结构化 Tick 默认保留 365 天，配置 `QUESTDB_TICK_RETENTION_DAYS=0` 可以禁用 TTL；允许范围为 0～3650 天。TTL 按 QuestDB 日分区边界生效，不逐行删除。历史 schema v2 表中的 `raw_json` 不会由应用自动删除，生产迁移顺序见 `docs/deployment.md`。
 
 实时 tick 持久化由后台 writer 完成，RPC callback 只做标准化和有界入队，不直接访问 QuestDB。相关配置：
 
@@ -50,6 +52,7 @@ QUESTDB_TICK_SPOOL_MAX_BYTES=10737418240
 QUESTDB_TICK_SPOOL_SEGMENT_BYTES=67108864
 QUESTDB_TICK_SPOOL_FSYNC=false
 QUESTDB_TICK_ERROR_LOG_INTERVAL_SECONDS=60
+QUESTDB_TICK_RETENTION_DAYS=365
 ```
 
 每条 tick 入队时由 Web Bridge 生成事件级 `ingest_id` 和 `received_at`，重试、spool 和补写过程中保持不变。当 QuestDB 短暂不可用或内存队列满时，合法 tick 会写入本地 JSONL spool；spool 使用 `ticks.active.jsonl` 追加和 `ticks.replaying.*.jsonl` 原子轮转，后台 writer 恢复后只删除已成功回放的 replaying 文件，避免新追加 tick 被误删。spool 数据文件每次追加后都会 flush；`QUESTDB_TICK_SPOOL_FSYNC=true` 时额外 fsync 数据文件、meta 文件和目录，增强主机崩溃一致性，但会增加故障期间写入延迟，默认关闭以保护 RPC callback P95。spool 超过上限时会显式计入 dropped 并写 error 日志，不静默丢弃。`GET /api/market/data/status` 可查看 received、valid、invalid、persisted、retry、failed、dropped、worker_alive、队列深度、spool 积压、最旧 pending 时间、持久化延迟、最近错误和 spool 所在磁盘容量。

@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     questdb_tick_spool_segment_bytes: int = Field(default=64 * 1024 * 1024, ge=1024)
     questdb_tick_spool_fsync: bool = False
     questdb_tick_error_log_interval_seconds: int = Field(default=60, ge=1)
+    questdb_tick_retention_days: int = Field(default=365, ge=0, le=3650)
     database_url: str = ""
 
     monitor_enabled: bool = False
