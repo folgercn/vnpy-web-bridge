@@ -5,9 +5,14 @@
   "frozen_rule_id": "commodity_fast_tsmom_forward_freeze_v1",
   "frozen_rule_sha256": "d9a6ef4ffb6d74fe0feee8ac8935acbeb79abd4686581611f14135eb5c41040a",
   "consumer": {
-    "audited_main_commit": "d2ea96b514b0a43f02a211a463487ca4ce41f609",
+    "audited_main_commit": "50b3674baf5ba4206be4de73b4c5ee6818aab269",
     "path": "scripts/commodity_c_fast_pure_producer_kernel.py",
     "source_sha256": "23539d801d6ee9ddccd0371c3793282eeedf63b13dd442f9447adc795bc1d995",
+    "related_source_sha256": {
+      "scripts/commodity_static_core_equal_formula_v1.py": "653aa9d43f0e9f3aeb78e2a53f27781b48d6a20fcf8e59996af204d1433a5b4e",
+      "scripts/commodity_static_core_equal_pure_producer.py": "a31167a034763f443b020c21c4d10d8a9f39729b69dec4e51d644c9701e8ea65",
+      "scripts/commodity_relative_vol_snapshot_producer.py": "faf63fd38e26192db33809051f9beeda6e7bb02b65a56e1caf2dde8dabad0f66"
+    },
     "sector_map_id": "COMMODITY_FROZEN_SECTOR_MAP_V1",
     "sector_map_sha256": "974a8eadcf947d18cc203e3c3c71f57a9b579fc556597df5bf9b3ea5b79945f7",
     "lineage": {

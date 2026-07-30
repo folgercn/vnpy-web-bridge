@@ -24,10 +24,21 @@ FROZEN_RULE_SHA256 = (
     "d9a6ef4ffb6d74fe0feee8ac8935acbeb79abd4686581611f14135eb5c41040a"
 )
 CONSUMER_PATH = "scripts/commodity_c_fast_pure_producer_kernel.py"
-AUDITED_MAIN_COMMIT = "d2ea96b514b0a43f02a211a463487ca4ce41f609"
+AUDITED_MAIN_COMMIT = "50b3674baf5ba4206be4de73b4c5ee6818aab269"
 CONSUMER_SOURCE_SHA256 = (
     "23539d801d6ee9ddccd0371c3793282eeedf63b13dd442f9447adc795bc1d995"
 )
+RELATED_CONSUMER_SOURCE_SHA256 = {
+    "scripts/commodity_static_core_equal_formula_v1.py": (
+        "653aa9d43f0e9f3aeb78e2a53f27781b48d6a20fcf8e59996af204d1433a5b4e"
+    ),
+    "scripts/commodity_static_core_equal_pure_producer.py": (
+        "a31167a034763f443b020c21c4d10d8a9f39729b69dec4e51d644c9701e8ea65"
+    ),
+    "scripts/commodity_relative_vol_snapshot_producer.py": (
+        "faf63fd38e26192db33809051f9beeda6e7bb02b65a56e1caf2dde8dabad0f66"
+    ),
+}
 SECTOR_MAP_ID = "COMMODITY_FROZEN_SECTOR_MAP_V1"
 SECTOR_MAP = {
     "ag": "precious",
@@ -222,6 +233,13 @@ def verify_bundle(bundle_dir: Path = DEFAULT_BUNDLE_DIR) -> dict[str, Any]:
         raise LineageVerificationError("consumer audited commit mismatch")
     if consumer.get("source_sha256") != CONSUMER_SOURCE_SHA256:
         raise LineageVerificationError("manifest consumer source sha256 mismatch")
+    if (
+        consumer.get("related_source_sha256")
+        != RELATED_CONSUMER_SOURCE_SHA256
+    ):
+        raise LineageVerificationError(
+            "manifest related consumer source hashes mismatch"
+        )
     if consumer.get("sector_map_id") != SECTOR_MAP_ID:
         raise LineageVerificationError("manifest consumer sector map id mismatch")
     if consumer.get("sector_map_sha256") != SECTOR_MAP_SHA256:
@@ -243,6 +261,22 @@ def verify_bundle(bundle_dir: Path = DEFAULT_BUNDLE_DIR) -> dict[str, Any]:
         raise LineageVerificationError("live consumer source is unreadable") from exc
     if consumer_digest != CONSUMER_SOURCE_SHA256:
         raise LineageVerificationError("live consumer source sha256 mismatch")
+    for related_path, expected_digest in RELATED_CONSUMER_SOURCE_SHA256.items():
+        live_related_path = ROOT / related_path
+        if live_related_path.is_symlink() or not live_related_path.is_file():
+            raise LineageVerificationError(
+                f"related consumer source is missing or unsafe: {related_path}"
+            )
+        try:
+            related_digest = sha256_file(live_related_path)
+        except OSError as exc:
+            raise LineageVerificationError(
+                f"related consumer source is unreadable: {related_path}"
+            ) from exc
+        if related_digest != expected_digest:
+            raise LineageVerificationError(
+                f"related consumer source sha256 mismatch: {related_path}"
+            )
     live_consumer = _consumer_constants(consumer_path)
     if live_consumer["CANDIDATE_ID"] != CANDIDATE_ID:
         raise LineageVerificationError("live consumer candidate id mismatch")
@@ -298,7 +332,7 @@ def verify_bundle(bundle_dir: Path = DEFAULT_BUNDLE_DIR) -> dict[str, Any]:
     return {
         "status": "PASS",
         "archive_files": len(observed),
-        "consumer_source_hashes": 1,
+        "consumer_source_hashes": 1 + len(RELATED_CONSUMER_SOURCE_SHA256),
         "source_lineage_hashes": len(SOURCE_LINEAGE),
         "sector_map_products": len(SECTOR_MAP),
         "authority_fields_false": len(AUTHORITY_FIELDS),
@@ -325,7 +359,7 @@ def main() -> int:
     print(
         "PASS: "
         f"{result['archive_files']} archived files; "
-        f"{result['consumer_source_hashes']} consumer source hash; "
+        f"{result['consumer_source_hashes']} consumer source hashes; "
         f"{result['source_lineage_hashes']} consumer lineage hashes; "
         f"{result['sector_map_products']} sector-map products; "
         f"{result['authority_fields_false']} authority fields false"

@@ -18,10 +18,11 @@ producer kernel 直接绑定的五份原始研究源码、对应测试快照，�
 - 保存冻结规则、forward 边界和 result-blind 权限边界的原始证据。
 - 为后续独立重放、差异审计和 sealed-export 验收提供稳定 provenance。
 
-同仓库消费者是 `scripts/commodity_c_fast_pure_producer_kernel.py`。本次以
-`main@d2ea96b514b0a43f02a211a463487ca4ce41f609` 为审计基准；其中
-`LINEAGE` 五个 SHA256 与本目录 `sources/` 五份源码逐项一致。manifest
-还固定 consumer 完整源码 SHA256，以及 PR
+同仓库消费者根节点是 `scripts/commodity_c_fast_pure_producer_kernel.py`。
+本次以 `main@50b3674baf5ba4206be4de73b4c5ee6818aab269` 为审计基准；
+其中 `LINEAGE` 五个 SHA256 与本目录 `sources/` 五份源码逐项一致。
+manifest 还固定 C_FAST kernel、D/STATIC_CORE_EQUAL composite producer 和
+relative-vol thermostat producer 共四份完整源码 SHA256，以及 PR
 [#187](https://github.com/folgercn/vnpy-web-bridge/pull/187) 合并后的
 `COMMODITY_FROZEN_SECTOR_MAP_V1` 身份和十品种映射哈希；任一漂移都会
 fail closed。

@@ -40,7 +40,7 @@ def test_committed_lineage_bundle_verifies() -> None:
     assert verifier.verify_bundle(BUNDLE) == {
         "status": "PASS",
         "archive_files": 15,
-        "consumer_source_hashes": 1,
+        "consumer_source_hashes": 4,
         "source_lineage_hashes": 5,
         "sector_map_products": 10,
         "authority_fields_false": 10,
@@ -153,6 +153,23 @@ def test_manifest_consumer_source_hash_drift_fails_closed(tmp_path: Path) -> Non
         verifier.verify_bundle(bundle)
 
 
+def test_manifest_related_consumer_source_hash_drift_fails_closed(
+    tmp_path: Path,
+) -> None:
+    bundle = _copy_bundle(tmp_path)
+    manifest = _manifest(bundle)
+    manifest["consumer"]["related_source_sha256"][
+        "scripts/commodity_static_core_equal_pure_producer.py"
+    ] = "0" * 64
+    _write_manifest(bundle, manifest)
+
+    with pytest.raises(
+        verifier.LineageVerificationError,
+        match="manifest related consumer source hashes mismatch",
+    ):
+        verifier.verify_bundle(bundle)
+
+
 def test_live_consumer_source_drift_fails_closed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -167,6 +184,82 @@ def test_live_consumer_source_drift_fails_closed(
     with pytest.raises(
         verifier.LineageVerificationError,
         match="live consumer source sha256 mismatch",
+    ):
+        verifier.verify_bundle(BUNDLE)
+
+
+def test_related_consumer_source_drift_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_root = tmp_path / "root"
+    primary = fake_root / verifier.CONSUMER_PATH
+    primary.parent.mkdir(parents=True)
+    shutil.copy2(ROOT / verifier.CONSUMER_PATH, primary)
+    for related_path in verifier.RELATED_CONSUMER_SOURCE_SHA256:
+        target = fake_root / related_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / related_path, target)
+    drifted = (
+        fake_root
+        / "scripts/commodity_static_core_equal_pure_producer.py"
+    )
+    drifted.write_bytes(drifted.read_bytes() + b"\n# drift\n")
+    monkeypatch.setattr(verifier, "ROOT", fake_root)
+
+    with pytest.raises(
+        verifier.LineageVerificationError,
+        match=(
+            "related consumer source sha256 mismatch: "
+            "scripts/commodity_static_core_equal_pure_producer.py"
+        ),
+    ):
+        verifier.verify_bundle(BUNDLE)
+
+
+def test_missing_related_consumer_source_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_root = tmp_path / "root"
+    primary = fake_root / verifier.CONSUMER_PATH
+    primary.parent.mkdir(parents=True)
+    shutil.copy2(ROOT / verifier.CONSUMER_PATH, primary)
+    monkeypatch.setattr(verifier, "ROOT", fake_root)
+
+    with pytest.raises(
+        verifier.LineageVerificationError,
+        match=(
+            "related consumer source is missing or unsafe: "
+            "scripts/commodity_static_core_equal_formula_v1.py"
+        ),
+    ):
+        verifier.verify_bundle(BUNDLE)
+
+
+def test_symlinked_related_consumer_source_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_root = tmp_path / "root"
+    primary = fake_root / verifier.CONSUMER_PATH
+    primary.parent.mkdir(parents=True)
+    shutil.copy2(ROOT / verifier.CONSUMER_PATH, primary)
+    for related_path in verifier.RELATED_CONSUMER_SOURCE_SHA256:
+        target = fake_root / related_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if related_path.endswith("formula_v1.py"):
+            target.symlink_to(ROOT / related_path)
+        else:
+            shutil.copy2(ROOT / related_path, target)
+    monkeypatch.setattr(verifier, "ROOT", fake_root)
+
+    with pytest.raises(
+        verifier.LineageVerificationError,
+        match=(
+            "related consumer source is missing or unsafe: "
+            "scripts/commodity_static_core_equal_formula_v1.py"
+        ),
     ):
         verifier.verify_bundle(BUNDLE)
 
