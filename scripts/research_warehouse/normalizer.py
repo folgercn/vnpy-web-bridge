@@ -74,7 +74,9 @@ def _decimal(value: object, label: str) -> Decimal | None:
     return parsed
 
 
-def _integer(value: object, label: str) -> int:
+def _integer(value: object, label: str) -> int | None:
+    if value in ("", None):
+        return None
     if isinstance(value, bool) or not isinstance(value, (str, int)):
         raise RegistryError(f"{label} must be an integer")
     text = str(value)

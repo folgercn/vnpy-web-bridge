@@ -94,6 +94,7 @@ def official_raw(
     invalid_price: bool = False,
     numeric_fractional_price: bool = False,
     include_total_row: bool = False,
+    empty_integer_fields: bool = False,
 ) -> bytes:
     rows = [
         {
@@ -106,8 +107,8 @@ def official_raw(
             "LOWESTPRICE": "21900",
             "CLOSEPRICE": "22050",
             "SETTLEMENTPRICE": "22020",
-            "VOLUME": "8",
-            "OPENINTEREST": 11,
+            "VOLUME": "" if empty_integer_fields else "8",
+            "OPENINTEREST": "" if empty_integer_fields else 11,
         },
         {
             "DELIVERYMONTH": "2608",
@@ -195,6 +196,7 @@ def sealed_evidence(
     invalid_price: bool = False,
     numeric_fractional_price: bool = False,
     include_total_row: bool = False,
+    empty_integer_fields: bool = False,
     repeat_same_raw: bool = False,
 ) -> tuple[
     WarehousePaths,
@@ -211,6 +213,7 @@ def sealed_evidence(
         invalid_price=invalid_price,
         numeric_fractional_price=numeric_fractional_price,
         include_total_row=include_total_row,
+        empty_integer_fields=empty_integer_fields,
     )
     acquire_daily(
         paths=evidence,
@@ -430,6 +433,26 @@ def test_normalizer_skips_exact_exchange_total_row(tmp_path: Path) -> None:
     finally:
         connection.close()
     assert rows == [("cu_f",), ("zn_f",)]
+
+
+def test_normalizer_maps_empty_volume_and_open_interest_to_null(
+    tmp_path: Path,
+) -> None:
+    values = sealed_evidence(tmp_path, empty_integer_fields=True)
+    rebuild(*values, tmp_path / "derived")
+    parquet = next(
+        DerivedPaths.open(tmp_path / "derived").parquet.rglob("*.parquet")
+    )
+    connection = duckdb.connect(":memory:")
+    try:
+        row = connection.execute(
+            "SELECT volume, open_interest FROM read_parquet(?) "
+            "WHERE product_id = 'zn_f'",
+            [str(parquet)],
+        ).fetchone()
+    finally:
+        connection.close()
+    assert row == (None, None)
 
 
 def test_corrupt_catalog_fails_closed(tmp_path: Path) -> None:
