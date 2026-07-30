@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -18,16 +19,17 @@ from .backup_contracts import (
     require_sha256,
 )
 from .backup_custody import (
+    ANCHOR_FILENAME_PATTERN,
     BackupPaths,
-    custody_identity,
-    require_no_unsafe_anchor_files,
 )
-from .backup_inventory import scan_object_store_snapshot
-from .backup_lock import backup_lock
 from .canonical import canonical_json, canonical_json_line, parse_json_strict, sha256
 from .errors import RegistryError
-from .file_integrity import read_regular_strict
-from .publication import create_only_bytes
+from .held_custody import (
+    HeldCustodyRoot,
+    held_custody_lock,
+    hold_custody_root,
+    scan_held_snapshot,
+)
 from .signing import (
     load_private_key,
     load_public_key,
@@ -130,13 +132,22 @@ def _validate_payload(
 def _load_chain(
     *,
     paths: BackupPaths,
+    held: HeldCustodyRoot,
     public_key_path: Path,
     expected_public_key_sha256: str,
 ) -> list[VerifiedBackupAnchor]:
-    require_no_unsafe_anchor_files(paths)
     anchors: list[VerifiedBackupAnchor] = []
-    for path in sorted(paths.anchors.glob("backup-*.json"), key=str):
-        raw = read_regular_strict(path, "backup anchor", limit=32 * 1024 * 1024)
+    with held.open_directory("anchors") as anchors_fd:
+        names = sorted(os.listdir(anchors_fd))
+    if any(ANCHOR_FILENAME_PATTERN.fullmatch(name) is None for name in names):
+        raise RegistryError("backup anchor custody has an unexpected member")
+    for name in names:
+        path = paths.anchors / name
+        raw = held.read_file(
+            f"anchors/{name}",
+            label="backup anchor",
+            limit=32 * 1024 * 1024,
+        )
         payload = parse_json_strict(raw, "backup anchor")
         validated, snapshot, rebuild = _validate_payload(
             payload,
@@ -196,10 +207,10 @@ def _load_chain(
 def _create_backup_anchor(
     *,
     paths: BackupPaths,
+    source_held: HeldCustodyRoot,
+    backup_held: HeldCustodyRoot,
     snapshot: WarehouseSnapshot,
     rebuild: RebuildFingerprint,
-    source_custody_identity: str,
-    backup_custody_identity: str,
     expected_parent_anchor_raw_sha256: str | None,
     signer_key_id: str,
     private_key_path: Path,
@@ -208,19 +219,25 @@ def _create_backup_anchor(
     now: datetime,
 ) -> VerifiedBackupAnchor:
     created = require_utc(now, "backup anchor created_at")
-    actual_backup_identity = custody_identity(
-        paths.root,
+    source_custody_identity = source_held.identity_sha256(
+        domain="vnpy-research-source-custody-v1",
+    )
+    backup_custody_identity = backup_held.identity_sha256(
         domain="vnpy-research-backup-custody-v1",
     )
-    if backup_custody_identity != actual_backup_identity:
-        raise RegistryError("backup custody identity is not the actual backup root")
-    with backup_lock(paths, "anchor-chain"):
+    with held_custody_lock(backup_held, key="anchor-chain"):
         chain = _load_chain(
             paths=paths,
+            held=backup_held,
             public_key_path=public_key_path,
             expected_public_key_sha256=expected_public_key_sha256,
         )
-        actual_snapshot = scan_object_store_snapshot(paths.objects)
+        actual_snapshot = scan_held_snapshot(
+            backup_held,
+            raw_prefix="objects/raw",
+            manifests_prefix="objects/manifests",
+            strip_prefix="objects",
+        )
         if actual_snapshot != snapshot:
             raise RegistryError("backup object store does not match source snapshot")
         head = chain[-1] if chain else None
@@ -284,14 +301,16 @@ def _create_backup_anchor(
         path = paths.anchors / (
             f"backup-{unsigned['sequence']:08d}-{unsigned['anchor_id']}.json"
         )
-        create_only_bytes(
-            path,
+        source_held.revalidate()
+        backup_held.revalidate()
+        backup_held.publish_bytes(
+            f"anchors/{path.name}",
             raw,
-            "signed backup anchor",
-            temporary_dir=paths.temporary,
+            label="signed backup anchor",
         )
         loaded = _load_chain(
             paths=paths,
+            held=backup_held,
             public_key_path=public_key_path,
             expected_public_key_sha256=expected_public_key_sha256,
         )
@@ -307,24 +326,50 @@ def verify_backup_anchor(
     expected_public_key_sha256: str,
     expected_head_anchor_raw_sha256: str,
 ) -> VerifiedBackupAnchor:
+    with hold_custody_root(paths.root) as held:
+        return _verify_backup_anchor_held(
+            paths=paths,
+            held=held,
+            public_key_path=public_key_path,
+            expected_public_key_sha256=expected_public_key_sha256,
+            expected_head_anchor_raw_sha256=(
+                expected_head_anchor_raw_sha256
+            ),
+        )
+
+
+def _verify_backup_anchor_held(
+    *,
+    paths: BackupPaths,
+    held: HeldCustodyRoot,
+    public_key_path: Path,
+    expected_public_key_sha256: str,
+    expected_head_anchor_raw_sha256: str,
+) -> VerifiedBackupAnchor:
     expected = require_sha256(
         expected_head_anchor_raw_sha256,
         "trusted backup head anchor",
     )
-    with backup_lock(paths, "anchor-chain"):
+    with held_custody_lock(held, key="anchor-chain"):
         chain = _load_chain(
             paths=paths,
+            held=held,
             public_key_path=public_key_path,
             expected_public_key_sha256=expected_public_key_sha256,
         )
         if not chain or chain[-1].raw_sha256 != expected:
             raise RegistryError("backup anchor head does not match trusted pin")
-        if chain[-1].backup_custody_identity != custody_identity(
-            paths.root,
+        if chain[-1].backup_custody_identity != held.identity_sha256(
             domain="vnpy-research-backup-custody-v1",
         ):
             raise RegistryError("backup anchor was replayed to different custody")
-        actual = scan_object_store_snapshot(paths.objects)
+        actual = scan_held_snapshot(
+            held,
+            raw_prefix="objects/raw",
+            manifests_prefix="objects/manifests",
+            strip_prefix="objects",
+        )
         if actual != chain[-1].snapshot:
             raise RegistryError("backup object store does not match trusted head")
+        held.revalidate()
         return chain[-1]

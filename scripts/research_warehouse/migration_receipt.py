@@ -19,9 +19,9 @@ from .backup_contracts import (
 from .canonical import canonical_json, canonical_json_line, parse_json_strict, sha256
 from .custody_paths import normalized_absolute, require_private_dir
 from .errors import RegistryError
-from .file_integrity import fsync_dir, read_regular_strict
+from .file_integrity import fsync_dir
+from .held_custody import HeldCustodyRoot
 from .migration_contracts import MigrationLineage, parse_migration_lineage
-from .publication import create_only_bytes
 from .signing import (
     load_private_key,
     load_public_key,
@@ -180,10 +180,11 @@ def _validate(
 def _create_migration_receipt(
     *,
     paths: MigrationReceiptPaths,
+    source_held: HeldCustodyRoot,
+    destination_held: HeldCustodyRoot,
+    receipt_held: HeldCustodyRoot,
     snapshot: WarehouseSnapshot,
     lineage: MigrationLineage,
-    source_custody_identity: str,
-    destination_custody_identity: str,
     genesis_batch_seal_sha256: str,
     head_batch_seal_sha256: str,
     head_commit_seal_sha256: str,
@@ -194,6 +195,12 @@ def _create_migration_receipt(
     now: datetime,
 ) -> VerifiedMigrationReceipt:
     migrated = require_utc(now, "migration migrated_at")
+    source_custody_identity = source_held.identity_sha256(
+        domain="vnpy-research-warehouse-custody-v1"
+    )
+    destination_custody_identity = destination_held.identity_sha256(
+        domain="vnpy-research-warehouse-custody-v1"
+    )
     private_key = load_private_key(private_key_path)
     trusted = require_sha256(
         expected_public_key_sha256,
@@ -234,14 +241,17 @@ def _create_migration_receipt(
     )
     raw = canonical_json_line(signed)
     path = paths.receipts / f"{unsigned['migration_id']}.json"
-    create_only_bytes(
-        path,
+    source_held.revalidate()
+    destination_held.revalidate()
+    receipt_held.revalidate()
+    receipt_held.publish_bytes(
+        f"receipts/{path.name}",
         raw,
-        "signed migration receipt",
-        temporary_dir=paths.temporary,
+        label="signed migration receipt",
     )
-    return verify_migration_receipt(
+    return _verify_migration_receipt_held(
         path=path,
+        held=receipt_held,
         expected_raw_sha256=sha256(raw),
         public_key_path=public_key_path,
         expected_public_key_sha256=trusted,
@@ -257,13 +267,36 @@ def verify_migration_receipt(
     expected_public_key_sha256: str,
     snapshot: WarehouseSnapshot,
 ) -> VerifiedMigrationReceipt:
+    receipt_root = path.parent.parent
+    from .held_custody import hold_custody_root
+
+    with hold_custody_root(receipt_root) as held:
+        return _verify_migration_receipt_held(
+            path=path,
+            held=held,
+            expected_raw_sha256=expected_raw_sha256,
+            public_key_path=public_key_path,
+            expected_public_key_sha256=expected_public_key_sha256,
+            snapshot=snapshot,
+        )
+
+
+def _verify_migration_receipt_held(
+    *,
+    path: Path,
+    held: HeldCustodyRoot,
+    expected_raw_sha256: str,
+    public_key_path: Path,
+    expected_public_key_sha256: str,
+    snapshot: WarehouseSnapshot,
+) -> VerifiedMigrationReceipt:
     expected = require_sha256(
         expected_raw_sha256,
         "trusted migration receipt",
     )
-    raw = read_regular_strict(
-        path,
-        "migration receipt",
+    raw = held.read_file(
+        f"receipts/{path.name}",
+        label="migration receipt",
         limit=64 * 1024 * 1024,
     )
     if sha256(raw) != expected:
@@ -286,6 +319,7 @@ def verify_migration_receipt(
         raise RegistryError("migration receipt snapshot metrics mismatch")
     if path.name != f"{validated['migration_id']}.json":
         raise RegistryError("migration receipt custody filename mismatch")
+    held.revalidate()
     return VerifiedMigrationReceipt(
         path=path,
         raw_sha256=expected,

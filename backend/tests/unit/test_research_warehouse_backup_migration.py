@@ -13,7 +13,12 @@ from jsonschema import Draft202012Validator, FormatChecker
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from research_warehouse import backup_custody, migration_service
+from research_warehouse import (
+    backup_service,
+    held_custody,
+    migration_service,
+    restore_service,
+)
 from research_warehouse.backup_anchor import verify_backup_anchor
 from research_warehouse.backup_custody import BackupPaths
 from research_warehouse.backup_service import create_append_only_backup
@@ -24,6 +29,7 @@ from research_warehouse.commit_anchors import (
 )
 from research_warehouse.derived_paths import DerivedPaths
 from research_warehouse.errors import RegistryError
+from research_warehouse.filesystem import WarehousePaths
 from research_warehouse.manifests import seal_daily_batch
 from research_warehouse.migration_receipt import MigrationReceiptPaths
 from research_warehouse.migration_service import (
@@ -262,9 +268,9 @@ def test_disk_low_and_migration_failure_publish_no_receipt(
     backup_keys = _private_key_pair(tmp_path / "backup-keys")
     backup = BackupPaths.initialize(tmp_path / "off-host-backup")
     monkeypatch.setattr(
-        backup_custody.shutil,
-        "disk_usage",
-        lambda _path: SimpleNamespace(free=0),
+        held_custody.os,
+        "fstatvfs",
+        lambda _descriptor: SimpleNamespace(f_bavail=0, f_frsize=1),
     )
     with pytest.raises(RegistryError, match="insufficient destination capacity"):
         create_append_only_backup(
@@ -294,11 +300,153 @@ def test_disk_low_and_migration_failure_publish_no_receipt(
     def fail_copy(**_kwargs):
         raise RegistryError("injected migration copy failure")
 
-    monkeypatch.setattr(migration_service, "materialize_snapshot", fail_copy)
+    monkeypatch.setattr(
+        migration_service,
+        "materialize_held_snapshot",
+        fail_copy,
+    )
     with pytest.raises(RegistryError, match="injected migration copy failure"):
         migrate_warehouse(
             source=values[0],
             destination_root=tmp_path / "failed-destination",
+            receipt_paths=receipt_paths,
+            manifest_public_key_path=values[1],
+            registry=load_registry(fixture.REGISTRY_PATH),
+            expected_genesis_seal_sha256=values[2],
+            expected_head_seal_sha256=values[3],
+            expected_head_commit_seal_sha256=values[4],
+            migration_signer_key_id="research-migration-key-v1",
+            migration_private_key_path=migration_keys[0],
+            migration_public_key_path=migration_keys[1],
+            expected_migration_public_key_sha256=migration_keys[2],
+            minimum_free_bytes_after=0,
+            now=NOW,
+        )
+    assert not list(receipt_paths.receipts.iterdir())
+
+
+def test_restore_rereads_actual_parquet_after_rebuild(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture, values, backup, backup_keys, anchor = _backup_fixture(tmp_path)
+    real_rebuild = restore_service.rebuild_empty_catalog
+
+    def corrupt_after_rebuild(**kwargs):
+        result = real_rebuild(**kwargs)
+        target = next(Path(kwargs["derived_root"]).rglob("*.parquet"))
+        target.write_bytes(target.read_bytes() + b"post-rebuild-tamper")
+        target.chmod(0o600)
+        return result
+
+    monkeypatch.setattr(
+        restore_service,
+        "rebuild_empty_catalog",
+        corrupt_after_rebuild,
+    )
+    with pytest.raises(
+        RegistryError,
+        match="actual Parquet lineage hashes changed",
+    ):
+        restore_and_verify(
+            backup=backup,
+            expected_backup_anchor_raw_sha256=anchor.raw_sha256,
+            backup_public_key_path=backup_keys[1],
+            expected_backup_public_key_sha256=backup_keys[2],
+            restore_root=tmp_path / "restored-evidence",
+            restore_derived_root=tmp_path / "restored-derived",
+            manifest_public_key_path=values[1],
+            registry=load_registry(fixture.REGISTRY_PATH),
+            ledger=values[5],
+            binding=values[6],
+            minimum_free_bytes_after=0,
+        )
+
+
+def _swap_root(original: Path, replacement: Path) -> Path:
+    moved = original.with_name(original.name + "-held-original")
+    original.rename(moved)
+    replacement.rename(original)
+    return moved
+
+
+@pytest.mark.parametrize("target", ["source", "backup"])
+def test_backup_root_replacement_publishes_no_anchor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    target: str,
+) -> None:
+    fixture, values, source_derived = _revised_fixture(tmp_path / "source")
+    backup_keys = _private_key_pair(tmp_path / "backup-keys")
+    backup = BackupPaths.initialize(tmp_path / "off-host-backup")
+    if target == "source":
+        replacement = WarehousePaths.initialize(tmp_path / "replacement-source")
+        root = values[0].root
+    else:
+        replacement = BackupPaths.initialize(tmp_path / "replacement-backup")
+        root = backup.root
+    real_create = backup_service._create_backup_anchor
+    moved = None
+
+    def replace_before_signing(**kwargs):
+        nonlocal moved
+        moved = _swap_root(root, replacement.root)
+        return real_create(**kwargs)
+
+    monkeypatch.setattr(
+        backup_service,
+        "_create_backup_anchor",
+        replace_before_signing,
+    )
+    with pytest.raises(RegistryError, match="pathname identity changed"):
+        create_append_only_backup(
+            source=values[0],
+            source_derived=source_derived,
+            backup=backup,
+            public_key_path=values[1],
+            registry=load_registry(fixture.REGISTRY_PATH),
+            expected_genesis_seal_sha256=values[2],
+            expected_head_seal_sha256=values[3],
+            expected_head_commit_seal_sha256=values[4],
+            ledger=values[5],
+            binding=values[6],
+            expected_parent_anchor_raw_sha256=None,
+            backup_signer_key_id="research-backup-key-v1",
+            backup_private_key_path=backup_keys[0],
+            backup_public_key_path=backup_keys[1],
+            expected_backup_public_key_sha256=backup_keys[2],
+            minimum_free_bytes_after=0,
+            now=NOW,
+        )
+    assert moved is not None
+    anchor_root = moved if target == "backup" else backup.root
+    assert not list((anchor_root / "anchors").iterdir())
+
+
+def test_migration_destination_replacement_publishes_no_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture, values, _source_derived = _revised_fixture(tmp_path / "source")
+    migration_keys = _private_key_pair(tmp_path / "migration-keys")
+    receipt_paths = MigrationReceiptPaths.initialize(tmp_path / "receipts")
+    replacement = WarehousePaths.initialize(tmp_path / "replacement-destination")
+    real_create = migration_service._create_migration_receipt
+
+    def replace_before_signing(**kwargs):
+        destination_held = kwargs["destination_held"]
+        _swap_root(destination_held.path, replacement.root)
+        return real_create(**kwargs)
+
+    monkeypatch.setattr(
+        migration_service,
+        "_create_migration_receipt",
+        replace_before_signing,
+    )
+    with pytest.raises(RegistryError, match="pathname identity changed"):
+        migrate_warehouse(
+            source=values[0],
+            destination_root=tmp_path / "migration-destination",
             receipt_paths=receipt_paths,
             manifest_public_key_path=values[1],
             registry=load_registry(fixture.REGISTRY_PATH),

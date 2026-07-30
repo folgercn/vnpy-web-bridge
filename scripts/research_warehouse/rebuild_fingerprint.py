@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import tempfile
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -14,25 +16,21 @@ from .catalog_schema import CATALOG_FILENAME
 from .commit_anchors import CommitAnchorLedger
 from .derived_paths import DerivedPaths
 from .errors import RegistryError
-from .file_integrity import read_regular_strict
+from .file_integrity import write_all
 from .filesystem import WarehousePaths
+from .held_custody import HeldCustodyRoot, hash_held_tree, hold_custody_root
 from .models import SourceRegistry
 from .normalization_models import NormalizationBinding
 from .rebuild import verify_rebuilt_catalog
 
 
-def _partition_hashes(derived: DerivedPaths) -> tuple[tuple[str, str], ...]:
-    values = []
-    for path in sorted(derived.parquet.rglob("*.parquet"), key=str):
-        raw = read_regular_strict(
-            path,
-            "rebuild fingerprint Parquet",
-            limit=512 * 1024 * 1024,
-        )
-        values.append((path.relative_to(derived.root).as_posix(), sha256(raw)))
-    if not values:
-        raise RegistryError("rebuild fingerprint found no Parquet partitions")
-    return tuple(values)
+def _partition_hashes(held: HeldCustodyRoot) -> tuple[tuple[str, str], ...]:
+    return hash_held_tree(
+        held,
+        prefix="parquet",
+        suffix=".parquet",
+        limit=512 * 1024 * 1024,
+    )
 
 
 def _canonical_cell(value):
@@ -45,55 +43,58 @@ def _canonical_cell(value):
     raise RegistryError("DuckDB catalog contains a non-canonical value type")
 
 
-def _catalog_logical_sha256(derived: DerivedPaths) -> str:
-    path = derived.catalog / CATALOG_FILENAME
-    before = read_regular_strict(
-        path,
-        "logical-fingerprint DuckDB catalog",
+def _catalog_logical_sha256(held: HeldCustodyRoot) -> str:
+    raw = held.read_file(
+        f"catalog/{CATALOG_FILENAME}",
+        label="logical-fingerprint DuckDB catalog",
         limit=512 * 1024 * 1024,
     )
+    descriptor, name = tempfile.mkstemp(suffix=".duckdb")
+    os.fchmod(descriptor, 0o600)
+    try:
+        write_all(descriptor, raw)
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
     orders = {
         "catalog_meta": "key",
         "batches": "batch_sequence",
         "revisions": "revision_id",
         "normalized_partitions": "revision_id",
     }
-    connection = duckdb.connect(str(path), read_only=True)
     try:
-        tables = {}
-        for table, order in orders.items():
-            columns = [
-                item[1]
-                for item in connection.execute(
-                    f"PRAGMA table_info('{table}')"
+        connection = duckdb.connect(name, read_only=True)
+        try:
+            tables = {}
+            for table, order in orders.items():
+                columns = [
+                    item[1]
+                    for item in connection.execute(
+                        f"PRAGMA table_info('{table}')"
+                    ).fetchall()
+                ]
+                rows = connection.execute(
+                    f'SELECT * FROM "{table}" ORDER BY "{order}"'
                 ).fetchall()
-            ]
-            rows = connection.execute(
-                f'SELECT * FROM "{table}" ORDER BY "{order}"'
-            ).fetchall()
-            tables[table] = {
-                "columns": columns,
-                "rows": [
-                    [_canonical_cell(value) for value in row] for row in rows
-                ],
-            }
-    except duckdb.Error as exc:
-        raise RegistryError("cannot fingerprint DuckDB catalog logically") from exc
+                tables[table] = {
+                    "columns": columns,
+                    "rows": [
+                        [_canonical_cell(value) for value in row]
+                        for row in rows
+                    ],
+                }
+        except duckdb.Error as exc:
+            raise RegistryError(
+                "cannot fingerprint DuckDB catalog logically"
+            ) from exc
+        finally:
+            connection.close()
     finally:
-        connection.close()
-    after = read_regular_strict(
-        path,
-        "post-fingerprint DuckDB catalog",
-        limit=512 * 1024 * 1024,
-    )
-    if after != before:
-        raise RegistryError("DuckDB catalog changed during logical fingerprint")
+        Path(name).unlink(missing_ok=True)
+    held.revalidate()
     return sha256(
         canonical_json(
-            {
-                "domain": "vnpy-research-catalog-logical-v1",
-                "tables": tables,
-            }
+            {"domain": "vnpy-research-catalog-logical-v1", "tables": tables}
         )
     )
 
@@ -121,36 +122,27 @@ def capture_rebuild_fingerprint(
         ledger=ledger,
         binding=binding,
     )
-    return RebuildFingerprint(
-        registry_raw_sha256=registry.raw_sha256,
-        commit_anchor_ledger_sha256=ledger.raw_sha256,
-        genesis_batch_seal_sha256=expected_genesis_seal_sha256,
-        head_batch_seal_sha256=expected_head_seal_sha256,
-        head_commit_seal_sha256=expected_head_commit_seal_sha256,
-        tool_commit_sha=binding.tool_commit_sha,
-        dependency_lock_sha256=binding.dependency_lock_sha256,
-        catalog_logical_sha256=_catalog_logical_sha256(derived),
-        partition_hashes=_partition_hashes(derived),
-    )
+    with hold_custody_root(derived.root) as held:
+        return RebuildFingerprint(
+            registry_raw_sha256=registry.raw_sha256,
+            commit_anchor_ledger_sha256=ledger.raw_sha256,
+            genesis_batch_seal_sha256=expected_genesis_seal_sha256,
+            head_batch_seal_sha256=expected_head_seal_sha256,
+            head_commit_seal_sha256=expected_head_commit_seal_sha256,
+            tool_commit_sha=binding.tool_commit_sha,
+            dependency_lock_sha256=binding.dependency_lock_sha256,
+            catalog_logical_sha256=_catalog_logical_sha256(held),
+            partition_hashes=_partition_hashes(held),
+        )
 
 
 def require_rebuild_result(
     *,
     expected: RebuildFingerprint,
-    result: dict,
+    derived: DerivedPaths,
 ) -> None:
-    restored_root = result.get("catalog")
-    if not isinstance(restored_root, str):
-        raise RegistryError("restored DuckDB catalog path is unavailable")
-    catalog_path = Path(restored_root)
-    actual_logical = _catalog_logical_sha256(
-        DerivedPaths.open(catalog_path.parent.parent)
-    )
-    if actual_logical != expected.catalog_logical_sha256:
-        raise RegistryError("restored DuckDB catalog logical content changed")
-    partition_hashes = result.get("partition_hashes")
-    if (
-        not isinstance(partition_hashes, dict)
-        or tuple(sorted(partition_hashes.items())) != expected.partition_hashes
-    ):
-        raise RegistryError("restored Parquet lineage hashes changed")
+    with hold_custody_root(derived.root) as held:
+        if _catalog_logical_sha256(held) != expected.catalog_logical_sha256:
+            raise RegistryError("restored DuckDB catalog logical content changed")
+        if _partition_hashes(held) != expected.partition_hashes:
+            raise RegistryError("restored actual Parquet lineage hashes changed")

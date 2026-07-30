@@ -7,12 +7,16 @@ from pathlib import Path
 
 from .backup_anchor import VerifiedBackupAnchor, _create_backup_anchor
 from .backup_chain_binding import require_complete_chain_snapshot
-from .backup_custody import BackupPaths, custody_identity, materialize_snapshot
-from .backup_inventory import scan_warehouse_snapshot
+from .backup_custody import BackupPaths
 from .commit_anchors import CommitAnchorLedger
 from .derived_paths import DerivedPaths
 from .errors import RegistryError
 from .filesystem import WarehousePaths
+from .held_custody import (
+    hold_custody_root,
+    materialize_held_snapshot,
+    scan_held_snapshot,
+)
 from .manifests import verify_manifest_chain
 from .models import SourceRegistry
 from .normalization_models import NormalizationBinding
@@ -39,65 +43,81 @@ def create_append_only_backup(
     minimum_free_bytes_after: int,
     now: datetime,
 ) -> VerifiedBackupAnchor:
-    first_rebuild = capture_rebuild_fingerprint(
-        evidence=source,
-        derived=source_derived,
-        public_key_path=public_key_path,
-        registry=registry,
-        expected_genesis_seal_sha256=expected_genesis_seal_sha256,
-        expected_head_seal_sha256=expected_head_seal_sha256,
-        expected_head_commit_seal_sha256=expected_head_commit_seal_sha256,
-        ledger=ledger,
-        binding=binding,
-    )
-    snapshot = scan_warehouse_snapshot(source)
-    chain = verify_manifest_chain(
-        paths=source,
-        public_key_path=public_key_path,
-        registry=registry,
-        expected_genesis_seal_sha256=expected_genesis_seal_sha256,
-        expected_head_seal_sha256=expected_head_seal_sha256,
-        expected_head_commit_seal_sha256=expected_head_commit_seal_sha256,
-        offline=True,
-    )
-    require_complete_chain_snapshot(snapshot, chain)
-    second_rebuild = capture_rebuild_fingerprint(
-        evidence=source,
-        derived=source_derived,
-        public_key_path=public_key_path,
-        registry=registry,
-        expected_genesis_seal_sha256=expected_genesis_seal_sha256,
-        expected_head_seal_sha256=expected_head_seal_sha256,
-        expected_head_commit_seal_sha256=expected_head_commit_seal_sha256,
-        ledger=ledger,
-        binding=binding,
-    )
-    if first_rebuild != second_rebuild:
-        raise RegistryError("warehouse rebuild evidence changed during backup")
-    materialize_snapshot(
-        source_root=source.root,
-        destination_root=backup.objects,
-        temporary_dir=backup.temporary,
-        snapshot=snapshot,
-        minimum_free_bytes_after=minimum_free_bytes_after,
-        destination_parent=backup.private_object_parent,
-    )
-    return _create_backup_anchor(
-        paths=backup,
-        snapshot=snapshot,
-        rebuild=first_rebuild,
-        source_custody_identity=custody_identity(
-            source.root,
-            domain="vnpy-research-source-custody-v1",
-        ),
-        backup_custody_identity=custody_identity(
-            backup.root,
-            domain="vnpy-research-backup-custody-v1",
-        ),
-        expected_parent_anchor_raw_sha256=expected_parent_anchor_raw_sha256,
-        signer_key_id=backup_signer_key_id,
-        private_key_path=backup_private_key_path,
-        public_key_path=backup_public_key_path,
-        expected_public_key_sha256=expected_backup_public_key_sha256,
-        now=now,
-    )
+    with (
+        hold_custody_root(source.root) as source_held,
+        hold_custody_root(backup.root) as backup_held,
+    ):
+        first_rebuild = capture_rebuild_fingerprint(
+            evidence=source,
+            derived=source_derived,
+            public_key_path=public_key_path,
+            registry=registry,
+            expected_genesis_seal_sha256=expected_genesis_seal_sha256,
+            expected_head_seal_sha256=expected_head_seal_sha256,
+            expected_head_commit_seal_sha256=expected_head_commit_seal_sha256,
+            ledger=ledger,
+            binding=binding,
+        )
+        snapshot = scan_held_snapshot(
+            source_held,
+            raw_prefix="raw",
+            manifests_prefix="manifests",
+        )
+        chain = verify_manifest_chain(
+            paths=source,
+            public_key_path=public_key_path,
+            registry=registry,
+            expected_genesis_seal_sha256=expected_genesis_seal_sha256,
+            expected_head_seal_sha256=expected_head_seal_sha256,
+            expected_head_commit_seal_sha256=(
+                expected_head_commit_seal_sha256
+            ),
+            offline=True,
+        )
+        require_complete_chain_snapshot(snapshot, chain)
+        second_rebuild = capture_rebuild_fingerprint(
+            evidence=source,
+            derived=source_derived,
+            public_key_path=public_key_path,
+            registry=registry,
+            expected_genesis_seal_sha256=expected_genesis_seal_sha256,
+            expected_head_seal_sha256=expected_head_seal_sha256,
+            expected_head_commit_seal_sha256=(
+                expected_head_commit_seal_sha256
+            ),
+            ledger=ledger,
+            binding=binding,
+        )
+        if first_rebuild != second_rebuild:
+            raise RegistryError("warehouse rebuild evidence changed during backup")
+        source_held.revalidate()
+        materialize_held_snapshot(
+            source=source_held,
+            destination=backup_held,
+            source_prefix="",
+            destination_prefix="objects",
+            snapshot=snapshot,
+            minimum_free_bytes_after=minimum_free_bytes_after,
+        )
+        if scan_held_snapshot(
+            backup_held,
+            raw_prefix="objects/raw",
+            manifests_prefix="objects/manifests",
+            strip_prefix="objects",
+        ) != snapshot:
+            raise RegistryError("backup destination differs from source snapshot")
+        return _create_backup_anchor(
+            paths=backup,
+            source_held=source_held,
+            backup_held=backup_held,
+            snapshot=snapshot,
+            rebuild=first_rebuild,
+            expected_parent_anchor_raw_sha256=(
+                expected_parent_anchor_raw_sha256
+            ),
+            signer_key_id=backup_signer_key_id,
+            private_key_path=backup_private_key_path,
+            public_key_path=backup_public_key_path,
+            expected_public_key_sha256=expected_backup_public_key_sha256,
+            now=now,
+        )

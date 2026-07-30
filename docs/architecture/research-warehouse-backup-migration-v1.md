@@ -12,8 +12,9 @@ Deployment、RPC、order、position、dispatch、trading 或 production authorit
 ## 2. 分层
 
 - `backup_contracts.py`：inventory、snapshot、rebuild fingerprint 值合同。
-- `backup_inventory.py`：稳定双扫描和 exact-byte SHA256 inventory。
-- `backup_custody.py`：独立 backup layout、容量门和 create-only copy。
+- `backup_custody.py`：独立 backup layout。
+- `held_custody.py`：descriptor-held root、fd-relative 双扫描、容量门、
+  create-only copy/publication 与 custody lock。
 - `backup_anchor.py`：Ed25519 signed append-only anchor chain。
 - `rebuild_fingerprint.py`：DuckDB 逻辑表内容哈希及 Parquet exact SHA256。
 - `restore_service.py`：空目录恢复、离线 seal chain 校验、catalog/Parquet 重放。
@@ -43,6 +44,11 @@ anchor 只能向前追加。新 snapshot 必须包含旧 snapshot 的全部相�
 不能删除或改写。调用方必须从独立记录传入当前 parent anchor SHA256；丢失响应
 的完全相同重试幂等返回原 anchor，过期 parent/replay fail closed。
 
+source 与 backup root 在完整 inventory、copy、最终扫描和 anchor publication
+期间保持 `O_DIRECTORY | O_NOFOLLOW` descriptor。custody identity 从 held fd
+生成；发布前再次校验 pathname → held-fd identity。所有对象读取、写入和 anchor
+lock/publication 均相对 held root fd 执行，root replacement fail closed。
+
 ## 4. Restore
 
 restore 只能落到不存在的空 root：
@@ -52,7 +58,9 @@ restore 只能落到不存在的空 root：
 3. 再次计算 snapshot，要求 relative path、byte count、SHA256 全等。
 4. 用外部 registry、manifest public key、commit-anchor ledger 验证原 seal chain。
 5. 从空 derived root 重建 DuckDB/Parquet。
-6. 比较 DuckDB 逻辑内容哈希和每个 Parquet exact SHA256。
+6. 重新从 actual derived root 的 held fd 读取 DuckDB，并重新枚举、读取每个
+   actual Parquet；比较逻辑内容哈希和 exact SHA256。不得信任 rebuild 返回值
+   自报的 partition hashes。
 
 DuckDB 数据库物理文件 SHA 不作为跨重建不变量；其内部页布局不是逻辑合同。
 
@@ -97,7 +105,10 @@ DuckDB 数据库物理文件 SHA 不作为跨重建不变量；其内部页布�
 - backup raw tamper；
 - 错误/stale external anchor replay；
 - destination disk-low preflight；
-- migration copy failure 不发布 receipt。
+- migration copy failure 不发布 receipt；
+- rebuild 返回后 Parquet 被篡改；
+- backup source、backup root、migration destination root replacement，均不得
+  发布 anchor/receipt。
 
 合并前汇总执行：
 
