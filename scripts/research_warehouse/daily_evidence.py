@@ -25,8 +25,17 @@ def _safe_raw_path(paths: WarehousePaths, relative: object):
     return paths.root.joinpath(*pure.parts)
 
 
-def _product_id(value: object) -> str:
-    if not isinstance(value, str) or not value.endswith("_f"):
+def _product_id(value: object) -> str | None:
+    if not isinstance(value, str):
+        raise RegistryError("official daily row PRODUCTID is not canonical")
+    if value == "总计":
+        return None
+    if value.endswith("_tas"):
+        product = value[:-4].lower()
+        if product.isascii() and product.isalpha():
+            return None
+        raise RegistryError("official daily TAS row PRODUCTID is invalid")
+    if not value.endswith("_f"):
         raise RegistryError("official daily row PRODUCTID is not canonical")
     product = value[:-2].lower()
     if not product.isascii() or not product.isalpha():
@@ -80,6 +89,8 @@ def product_coverage_for_manifest(
         product_counts: dict[str, int] = {}
         for row in payload[source.required_top_level_fields[0]]:
             product = _product_id(row["PRODUCTID"])
+            if product is None:
+                continue
             if product in TARGET_PRODUCTS:
                 product_counts[product] = product_counts.get(product, 0) + 1
         for product, count in product_counts.items():
@@ -118,6 +129,8 @@ def require_target_product_receipt_coverage(
         payload = parse_json_strict(raw, "historical official daily raw")
         for row in payload[source.required_top_level_fields[0]]:
             product = _product_id(row["PRODUCTID"])
+            if product is None:
+                continue
             if product not in TARGET_PRODUCTS:
                 continue
             if PRODUCT_EXCHANGES[product] != source.exchange:
