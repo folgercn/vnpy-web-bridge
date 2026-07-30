@@ -19,8 +19,8 @@ from .m2_release_tree_custody import (
     snapshot_release_tree,
 )
 
-MANIFEST_SCHEMA = "vnpy_research_m2_release_tree_manifest_v1"
-CONTENT_SCHEMA = "vnpy_research_m2_release_tree_content_v1"
+MANIFEST_SCHEMA = "vnpy_research_m2_release_tree_manifest_v2"
+CONTENT_SCHEMA = "vnpy_research_m2_release_tree_content_v2"
 MANIFEST_KEYS = {
     "schema_version",
     "logical_release_root",
@@ -28,7 +28,7 @@ MANIFEST_KEYS = {
     "entries",
     "tree_content_sha256",
 }
-ROOT_KEYS = {"device", "inode", "owner_uid", "owner_gid", "mode"}
+ROOT_KEYS = {"device", "inode", "owner_uid", "owner_gid", "mode", "acl_free"}
 ENTRY_KEYS = {
     "relative_path",
     "kind",
@@ -40,6 +40,7 @@ ENTRY_KEYS = {
     "owner_gid",
     "mode",
     "nlink",
+    "acl_free",
 }
 
 
