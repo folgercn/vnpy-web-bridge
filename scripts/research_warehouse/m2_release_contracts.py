@@ -24,8 +24,12 @@ REQUIREMENTS_RAW_SHA256 = (
 )
 LOGICAL_RELEASE_ROOT = "/usr/local/libexec/vnpyresearch/release"
 REQUIRED_ENTRYPOINTS = {
+    "bin/research-warehouse-backup-signer",
     "bin/research-warehouse-job",
+    "bin/research-warehouse-manifest-signer",
     "bin/research-warehouse-monitor",
+    "bin/research-warehouse-operator-state",
+    "bin/research-warehouse-rebuild",
 }
 BUNDLE_KEYS = {
     "schema_version",
@@ -115,13 +119,17 @@ def tree_content_sha256(entries: list[dict[str, Any]]) -> str:
 
 
 def release_launcher(role: str) -> bytes:
-    if role not in {"warehouse", "monitor"}:
+    bootstraps = {
+        "backup-signer": "research_warehouse_backup_signer.py",
+        "manifest-signer": "research_warehouse_manifest_signer.py",
+        "monitor": "research_warehouse_monitor.py",
+        "operator-state": "research_warehouse_operator_state.py",
+        "rebuild": "research_warehouse_rebuild.py",
+        "warehouse": "research_warehouse_job.py",
+    }
+    if role not in bootstraps:
         raise RegistryError("M2 release launcher role is invalid")
-    bootstrap = (
-        "research_warehouse_job.py"
-        if role == "warehouse"
-        else "research_warehouse_monitor.py"
-    )
+    bootstrap = bootstraps[role]
     return (
         "#!/bin/sh\n"
         "set -eu\n"
@@ -168,8 +176,12 @@ def verify_release_bundle(root: Path, manifest: object) -> None:
         raise RegistryError("M2 Python runtime tree binding mismatch")
     verify_python_runtime(root / "runtime", runtime_manifest)
     for role, relative in (
+        ("backup-signer", "bin/research-warehouse-backup-signer"),
         ("warehouse", "bin/research-warehouse-job"),
+        ("manifest-signer", "bin/research-warehouse-manifest-signer"),
         ("monitor", "bin/research-warehouse-monitor"),
+        ("operator-state", "bin/research-warehouse-operator-state"),
+        ("rebuild", "bin/research-warehouse-rebuild"),
     ):
         if regular_bytes(root / relative, f"M2 {role} launcher") != release_launcher(
             role

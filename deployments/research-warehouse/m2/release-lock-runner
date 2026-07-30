@@ -6,6 +6,10 @@ import sys
 
 LOCK = "/usr/local/libexec/vnpyresearch/release.lock"
 PROGRAMS = {
+    "backup-signer": "/usr/local/libexec/vnpyresearch/release/bin/research-warehouse-backup-signer",
+    "manifest-signer": "/usr/local/libexec/vnpyresearch/release/bin/research-warehouse-manifest-signer",
+    "operator-state": "/usr/local/libexec/vnpyresearch/release/bin/research-warehouse-operator-state",
+    "rebuild": "/usr/local/libexec/vnpyresearch/release/bin/research-warehouse-rebuild",
     "warehouse": "/usr/local/libexec/vnpyresearch/release/bin/research-warehouse-job",
     "monitor": "/usr/local/libexec/vnpyresearch/release/bin/research-warehouse-monitor",
 }

@@ -91,11 +91,18 @@ def _copy_source_tree(
 
 
 def _bootstrap(role: str) -> bytes:
-    module = (
-        "research_warehouse.m2_scheduler_cli"
-        if role == "warehouse"
-        else "research_warehouse.m2_monitor_cli"
-    )
+    modules = {
+        "backup-signer": "research_warehouse.m2_backup_signer_cli",
+        "manifest-signer": "research_warehouse.m2_manifest_signer_cli",
+        "monitor": "research_warehouse.m2_monitor_cli",
+        "operator-state": "research_warehouse.m2_operator_state_cli",
+        "rebuild": "research_warehouse.m2_rebuild_cli",
+        "warehouse": "research_warehouse.m2_scheduler_cli",
+    }
+    try:
+        module = modules[role]
+    except KeyError as exc:
+        raise RegistryError("M2 release bootstrap role is invalid") from exc
     return (
         "#!/usr/bin/env python3\n"
         "from pathlib import Path\n"
@@ -186,10 +193,19 @@ def build_release_bundle(
         vendor = output_root / "vendor"
         app = output_root / "app"
         bin_dir = output_root / "bin"
+        metadata = output_root / "metadata"
         runtime = output_root / "runtime"
         vendor.mkdir()
         app.mkdir()
         bin_dir.mkdir()
+        metadata.mkdir()
+        (metadata / "source-commit-sha").write_text(
+            f"{source_commit_sha}\n",
+            encoding="ascii",
+        )
+        (metadata / "runtime-requirements-v1.txt").write_bytes(
+            requirements_raw
+        )
         shutil.copytree(
             python_runtime,
             runtime,
@@ -229,21 +245,24 @@ def build_release_bundle(
         if completed.returncode != 0:
             raise RegistryError("offline M2 dependency installation failed")
         _copy_source_tree(exact_source_root, app, source_commit_sha)
-        (app / "research_warehouse_job.py").write_bytes(_bootstrap("warehouse"))
-        (app / "research_warehouse_monitor.py").write_bytes(_bootstrap("monitor"))
-        (bin_dir / "research-warehouse-job").write_bytes(
-            release_launcher("warehouse")
-        )
-        (bin_dir / "research-warehouse-monitor").write_bytes(
-            release_launcher("monitor")
-        )
+        roles = {
+            "backup-signer": "research-warehouse-backup-signer",
+            "manifest-signer": "research-warehouse-manifest-signer",
+            "monitor": "research-warehouse-monitor",
+            "operator-state": "research-warehouse-operator-state",
+            "rebuild": "research-warehouse-rebuild",
+            "warehouse": "research-warehouse-job",
+        }
+        bootstraps = []
+        for role, executable in roles.items():
+            bootstrap = app / f"{executable.replace('-', '_')}.py"
+            bootstrap.write_bytes(_bootstrap(role))
+            (bin_dir / executable).write_bytes(release_launcher(role))
+            bootstraps.append(bootstrap)
         for entrypoint in REQUIRED_ENTRYPOINTS:
             (output_root / entrypoint).chmod(0o755)
         _normalize_tree(output_root)
-        for bootstrap in (
-            app / "research_warehouse_job.py",
-            app / "research_warehouse_monitor.py",
-        ):
+        for bootstrap in bootstraps:
             check = subprocess.run(
                 [str(python_path), "-B", "-I", str(bootstrap), "--help"],
                 check=False,
