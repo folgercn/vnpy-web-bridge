@@ -84,7 +84,24 @@ def _load_observations_unlocked(
     trade_day: str | None = None,
 ) -> list[dict[str, Any]]:
     payloads: list[dict[str, Any]] = []
-    for path in sorted(paths.observations.rglob("obs-*.json")):
+    if source_id is not None and trade_day is not None:
+        validate_trade_day(trade_day)
+        try:
+            source = registry.source(source_id)
+        except KeyError as exc:
+            raise RegistryError(
+                "observation source is not in audited registry"
+            ) from exc
+        target = (
+            paths.observations
+            / source.exchange.lower()
+            / trade_day
+            / source_id
+        )
+        candidates = sorted(target.glob("obs-*.json")) if target.exists() else []
+    else:
+        candidates = sorted(paths.observations.rglob("obs-*.json"))
+    for path in candidates:
         raw = read_regular_strict(
             path, "observation receipt", limit=2 * 1024 * 1024
         )
