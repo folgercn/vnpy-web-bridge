@@ -155,7 +155,10 @@ def self_check_release(
                 release_root / "lib/python3.12/site-packages",
             )
         for module in ROLE_IMPORTS[role]:
-            _import_from_release(module, release_root / "lib")
+            _import_from_release(
+                module,
+                release_root / "lib/research_warehouse",
+            )
     return {
         "schema_version": "vnpy_research_m2_release_entry_result_v1",
         "status": "RELEASE_SELF_CHECK_PASSED_NO_SCHEDULE_AUTHORITY",

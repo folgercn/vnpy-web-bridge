@@ -43,6 +43,7 @@ FORBIDDEN_WHEEL_ROOTS = {
     "backend",
     "psycopg",
     "questdb",
+    "research_warehouse",
     "vnpy",
     "zmq",
 }
@@ -262,8 +263,8 @@ def _entry_module() -> bytes:
         "import sys\n"
         "\n"
         "release_root = Path(__file__).resolve(strict=True).parents[1]\n"
-        "sys.path.insert(0, str(release_root / 'lib'))\n"
         "sys.path.insert(0, str(release_root / 'lib/python3.12/site-packages'))\n"
+        "sys.path.insert(0, str(release_root / 'lib'))\n"
         "from research_warehouse.m2_release_entry import main\n"
         "\n"
         "raise SystemExit(main(sys.argv[1:], release_root=release_root))\n"

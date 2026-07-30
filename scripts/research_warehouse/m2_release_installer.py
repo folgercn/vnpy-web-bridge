@@ -185,7 +185,9 @@ def _copy_verified_tree(
         key=lambda value: len(PurePosixPath(value["relative_path"]).parts),
         reverse=True,
     ):
-        (stage_root / entry["relative_path"]).chmod(int(entry["mode"], 8))
+        directory = stage_root / entry["relative_path"]
+        directory.chmod(int(entry["mode"], 8))
+        fsync_dir(directory)
     stage_root.chmod(0o755)
     fsync_dir(stage_root)
     fsync_dir(stage_root.parent)

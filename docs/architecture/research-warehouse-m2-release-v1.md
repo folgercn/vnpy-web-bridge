@@ -76,13 +76,16 @@ No path may be a symlink or group/world writable. Consequently
 
 ## Build and verify
 
-Run from a clean checkout whose `HEAD` equals the supplied commit:
+The installable bundle must be built as root from a root-owned clean build
+checkout and private wheelhouse; a user-owned package is intentionally
+rejected by the root installer. The checkout `HEAD` must equal the supplied
+commit:
 
 ```bash
 commit="$(git rev-parse HEAD)"
 release_id="m2-release-$(date -u +%Y%m%dT%H%M%SZ)"
 
-PYTHONPATH=scripts /usr/local/bin/python3.12 \
+sudo env PYTHONPATH=scripts /usr/local/bin/python3.12 \
   scripts/research_warehouse_m2_release_cli.py build \
   --source-root "$PWD" \
   --wheelhouse /secure/private/m2-wheelhouse \

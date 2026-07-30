@@ -359,6 +359,11 @@ def test_build_rejects_missing_or_tampered_wheel_and_cleans_partial_output(
         ({"startup.pth": b"import os\n"}, None, "startup injection"),
         ({}, "package/link.py", "symlink"),
         ({"vnpy/__init__.py": b""}, None, "forbidden import root"),
+        (
+            {"research_warehouse/__init__.py": b""},
+            None,
+            "forbidden import root",
+        ),
     ],
 )
 def test_wheel_extraction_rejects_injection_and_symlinks(
