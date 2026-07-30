@@ -25,6 +25,7 @@ from .m2_receipts import (
 )
 from .m2_runtime_paths import RuntimePaths
 from .models import SourceRegistry
+from .observations import latest_acquired_observation
 from .official_calendar import revalidate_official_calendar_evidence
 from .timeutil import format_utc
 
@@ -113,6 +114,7 @@ def run_trade_day(
     utc_clock: Callable[[], datetime] | None = None,
     clock_provider: Callable[[], TrustedClockSample] | None = None,
     receipt_directory: Path | None = None,
+    resume_source_observations: bool = False,
 ) -> dict:
     """Acquire one explicit official day using only live observation clocks."""
     live_now = (utc_clock or (lambda: clock_sample.trusted_now))()
@@ -145,6 +147,24 @@ def run_trade_day(
     results: list[tuple[object, AcquiredObject]] = []
     for source_id in SOURCE_IDS:
         source = registry.source(source_id)
+        acquired = (
+            latest_acquired_observation(
+                paths,
+                registry,
+                source_id=source_id,
+                trade_day=trade_day,
+                not_before=max(
+                    calendar.issued_at,
+                    availability.available_at,
+                    *(item.observed_at for item in calendar.source_evidence),
+                ),
+            )
+            if resume_source_observations
+            else None
+        )
+        if acquired is not None:
+            results.append((source, acquired))
+            continue
         source_clock = clock_provider() if clock_provider else clock_sample
         acquired = acquire(
             paths=paths,

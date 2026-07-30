@@ -25,7 +25,7 @@ from research_warehouse.canonical import canonical_json_line, sha256
 from research_warehouse.clock_quality import TrustedClockSample
 from research_warehouse.errors import RegistryError
 from research_warehouse.filesystem import WarehousePaths
-from research_warehouse.m2_daily_scheduler import run_daily
+from research_warehouse.m2_daily_scheduler import run_daily, run_trade_day
 from research_warehouse.m2_isolation_contracts import false_authority
 from research_warehouse.m2_monitor import evaluate_monitor
 from research_warehouse.m2_monitor_facts import (
@@ -250,6 +250,55 @@ def test_scheduler_publishes_only_after_both_sources(
     )
     assert second["status"] == "ALREADY_COMPLETE"
     assert len(calls) == 2
+
+
+def test_history_resume_reuses_each_completed_source_observation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, runtime = scheduler_paths(tmp_path)
+    registry = load_registry(REGISTRY_PATH)
+    recovered = acquired(paths, "shfe-daily-market-data-v1", 1)
+    calls = []
+    monkeypatch.setattr(
+        "research_warehouse.m2_daily_scheduler.revalidate_official_calendar_evidence",
+        lambda _calendar: None,
+    )
+    monkeypatch.setattr(
+        "research_warehouse.m2_daily_scheduler.latest_acquired_observation",
+        lambda _paths, _registry, *, source_id, **_kwargs: (
+            recovered if source_id == "shfe-daily-market-data-v1" else None
+        ),
+    )
+    availability = SimpleNamespace(
+        raw_sha256="b" * 64,
+        available_at=NOW - timedelta(days=1),
+        require_available=lambda *_args, **_kwargs: None,
+    )
+
+    def acquire(**kwargs):
+        calls.append(kwargs["source_id"])
+        return acquired(paths, kwargs["source_id"], 2)
+
+    result = run_trade_day(
+        paths=paths,
+        runtime=runtime,
+        registry=registry,
+        calendar=calendar(),
+        availability=availability,
+        trade_day=DAY.isoformat(),
+        clock_sample=TrustedClockSample(NOW, NOW, 0),
+        collector_version="m2-daily-scheduler-v1",
+        verify_receipt=lambda _receipt: None,
+        acquire=acquire,
+        utc_clock=lambda: NOW,
+        receipt_directory=runtime.history_run_receipts,
+        resume_source_observations=True,
+    )
+    assert result["status"] == "OFFICIAL_DAY_COMPLETE"
+    assert calls == ["ine-daily-market-data-v1"]
+    receipt = runtime.history_run_receipts / f"{DAY}.json"
+    assert receipt.is_file()
 
 
 def test_scheduler_closed_partial_and_clock_skew_fail_closed(

@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .acquisition_models import AcquiredObject
 from .canonical import canonical_json_line, parse_json_strict
 from .errors import RegistryError
 from .filesystem import (
@@ -29,12 +30,50 @@ from .revisions import revision_state, validate_lineage
 from .timeutil import format_utc, parse_utc
 
 __all__ = [
+    "latest_acquired_observation",
     "load_observations",
     "observation_id",
     "raw_object_id",
     "revision_occurrence_id",
     "revision_state",
 ]
+
+
+def latest_acquired_observation(
+    paths: WarehousePaths,
+    registry: SourceRegistry,
+    *,
+    source_id: str,
+    trade_day: str,
+    not_before: datetime,
+) -> AcquiredObject | None:
+    """Recover the latest fully validated acquisition after a trusted cutoff."""
+    values = load_observations(
+        paths,
+        registry,
+        source_id=source_id,
+        trade_day=trade_day,
+    )
+    if not values:
+        return None
+    latest = values[-1]
+    first_seen = parse_utc(latest["first_seen_at"], "first_seen_at")
+    last_seen = parse_utc(latest["last_seen_at"], "last_seen_at")
+    if first_seen < not_before or last_seen < not_before:
+        return None
+    return AcquiredObject(
+        object_id=latest["object_id"],
+        observation_id=latest["observation_id"],
+        revision_id=latest["revision_id"],
+        raw_sha256=latest["raw_sha256"],
+        raw_bytes=latest["raw_bytes"],
+        raw_path=paths.root / latest["raw_relative_path"],
+        first_seen_at=first_seen,
+        last_seen_at=last_seen,
+        supersedes_object_id=latest["supersedes_object_id"],
+        supersedes_revision_id=latest["supersedes_revision_id"],
+        idempotent_raw=True,
+    )
 
 
 def _load_observations_unlocked(

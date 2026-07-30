@@ -191,6 +191,7 @@ def run_history_backfill(
             utc_clock=utc_clock,
             clock_provider=clock_provider,
             receipt_directory=runtime.history_run_receipts,
+            resume_source_observations=True,
         )
         receipt_path = runtime.history_run_receipts / f"{day.isoformat()}.json"
         receipt = load_run_receipt(receipt_path)
