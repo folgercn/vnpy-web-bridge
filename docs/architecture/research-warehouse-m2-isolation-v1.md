@@ -23,6 +23,10 @@ operator action followed by freshly captured, externally SHA-pinned evidence.
 - `m2_release_lock.py` supplies the root-owned deployment lock: verification
   and job execution take a shared lock; every supported release update must
   take the exclusive lock.
+- `m2_release_bundle_contracts.py`, `m2_release_builder.py`,
+  `m2_release_entry.py` and `m2_release_installer.py` implement the
+  deterministic Python 3.12 bundle contract described in
+  [research-warehouse-m2-release-v1.md](research-warehouse-m2-release-v1.md).
 - `m2_success_binding.py` binds those verified artifacts to one exact
   post-activation success receipt and monitor completion.
 - `m2_verifier.py` is the only public layer that can issue final
@@ -176,3 +180,8 @@ PYTHONPATH=scripts python scripts/research_warehouse_m2_isolation_cli.py \
 
 Success is only `M2_RESEARCH_ISOLATION_VERIFIED`. Root/admin or host-kernel
 compromise remains outside the same-host threat model.
+
+The isolation assets must not be activated merely because a deterministic
+release bundle has been installed. Issue #198 must first provide the
+calendar-aware official-day work command and real monitor facts; only then can
+Issue #172 perform a fresh preflight and explicit host activation.

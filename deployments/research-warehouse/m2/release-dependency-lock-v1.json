@@ -1,0 +1,51 @@
+{
+  "schema_version": "vnpy_research_m2_release_dependency_lock_v1",
+  "python_implementation": "CPython",
+  "python_version": "3.12.13",
+  "python_executable": "/usr/local/bin/python3.12",
+  "platform_tag": "macosx_11_0_arm64",
+  "dependencies": [
+    {
+      "name": "cffi",
+      "version": "2.0.0",
+      "wheel_filename": "cffi-2.0.0-cp312-cp312-macosx_11_0_arm64.whl",
+      "wheel_sha256": "8eca2a813c1cb7ad4fb74d368c2ffbbb4789d377ee5bb8df98373c2cc0dee76c",
+      "size_bytes": 181048
+    },
+    {
+      "name": "cryptography",
+      "version": "48.0.0",
+      "wheel_filename": "cryptography-48.0.0-cp311-abi3-macosx_10_9_universal2.whl",
+      "wheel_sha256": "0c558d2cdffd8f4bbb30fc7134c74d2ca9a476f830bb053074498fbc86f41ed6",
+      "size_bytes": 8001587
+    },
+    {
+      "name": "duckdb",
+      "version": "1.5.5",
+      "wheel_filename": "duckdb-1.5.5-cp312-cp312-macosx_11_0_arm64.whl",
+      "wheel_sha256": "f0b88535a5d86fdd63dba6ea02ab68c003dfb9e4892b11256ef24c4da208baae",
+      "size_bytes": 15509131
+    },
+    {
+      "name": "pycparser",
+      "version": "2.23",
+      "wheel_filename": "pycparser-2.23-py3-none-any.whl",
+      "wheel_sha256": "e5c6e8d3fbad53479cab09ac03729e0a9faf2bee3db8208a550daf5af81a5934",
+      "size_bytes": 118140
+    }
+  ],
+  "authority": {
+    "account_data_read": false,
+    "control_authorized": false,
+    "deployment_authorized": false,
+    "execution_authorized": false,
+    "network_authorized": false,
+    "order_authorized": false,
+    "permit_authorized": false,
+    "position_mutation_authorized": false,
+    "production_authorized": false,
+    "rpc_authorized": false,
+    "signing_authorized": false,
+    "trading_authorized": false
+  }
+}
