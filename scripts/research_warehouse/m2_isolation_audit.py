@@ -228,6 +228,8 @@ def verify_isolation_evidence_semantics(
     if (
         identity["user"] != policy.user
         or identity["group"] != policy.group
+        or identity["uid"] != policy.uid
+        or identity["gid"] != policy.gid
         or identity["home"] != policy.payload["home"]
         or any(
             isinstance(identity[field], bool)
@@ -242,7 +244,7 @@ def verify_isolation_evidence_semantics(
         raise RegistryError("M2 service identity is not isolated")
     expected_gids = sorted(
         {
-            identity["gid"],
+            policy.gid,
             *policy.payload[
                 "allowed_system_supplementary_groups"
             ].values(),

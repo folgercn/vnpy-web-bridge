@@ -101,7 +101,7 @@ def verified_release_artifacts() -> VerifiedReleaseArtifacts:
         output_raw_sha256=OUTPUT_SHA256,
         output_device=11,
         output_inode=12,
-        output_owner_uid=510,
+        output_owner_uid=503,
         output_mode="0600",
         output_nlink=1,
     )
@@ -133,8 +133,8 @@ def evidence() -> dict:
     value = policy()
     roots = {
         value.payload[field]: {
-            "owner_uid": 510,
-            "owner_gid": 510,
+            "owner_uid": 503,
+            "owner_gid": 503,
             "mode": "0700",
             "device": 1,
         }
@@ -161,9 +161,9 @@ def evidence() -> dict:
             {
                 "user": "vnpyresearch",
                 "group": "vnpyresearch",
-                "uid": 510,
-                "gid": 510,
-                "supplementary_gids": [12, 61, 100, 510],
+                "uid": 503,
+                "gid": 503,
+                "supplementary_gids": [12, 61, 100, 503],
                 "home": value.payload["home"],
                 "inherited_fujun_home_acl": False,
                 "web_bridge_uid": 501,
@@ -270,8 +270,8 @@ def evidence() -> dict:
         ),
         "process": probed(
             {
-                "service_process_uid": 510,
-                "service_process_gid": 510,
+                "service_process_uid": 503,
+                "service_process_gid": 503,
                 "shared_process_identity": False,
                 "shared_credential_scope": False,
                 "shared_network_namespace": False,
@@ -282,8 +282,8 @@ def evidence() -> dict:
         "success_receipt": {
             "schema_version": "vnpy_research_m2_success_receipt_v1",
             "host_identity": "1" * 64,
-            "service_uid": 510,
-            "service_gid": 510,
+            "service_uid": 503,
+            "service_gid": 503,
             "policy_raw_sha256": value.raw_sha256,
             "plist_raw_sha256s": PLIST_SHA256,
             "pf_anchor_raw_sha256": PF_ANCHOR_SHA256,
@@ -296,7 +296,7 @@ def evidence() -> dict:
             "output_raw_sha256": OUTPUT_SHA256,
             "output_device": 11,
             "output_inode": 12,
-            "output_owner_uid": 510,
+            "output_owner_uid": 503,
             "output_mode": "0600",
             "create_only": True,
             "regular": True,
@@ -504,21 +504,21 @@ def test_activation_and_root_owned_entrypoint_failures_close(
         (
             lambda item: item["identity"].__setitem__(
                 "supplementary_gids",
-                [12, 61, 80, 100, 510],
+                [12, 61, 80, 100, 503],
             ),
             "identity",
         ),
         (
             lambda item: item["identity"].__setitem__(
                 "supplementary_gids",
-                [12, 61, 510],
+                [12, 61, 503],
             ),
             "identity",
         ),
         (
             lambda item: item["identity"].__setitem__(
                 "supplementary_gids",
-                [12, 61, 100, "510"],
+                [12, 61, 100, "503"],
             ),
             "identity",
         ),
@@ -571,6 +571,26 @@ def test_isolation_threat_model_failures_close(mutate, message: str) -> None:
     }[message]
     rebind_probe(item, section)
     with pytest.raises(RegistryError, match=message):
+        verify_isolation_evidence_semantics(
+            item,
+            policy=policy(),
+            now=NOW,
+            release_artifacts=verified_release_artifacts(),
+        )
+
+
+def test_admin_primary_gid_cannot_be_rebound_as_service_group() -> None:
+    item = evidence()
+    item["identity"]["gid"] = 80
+    item["identity"]["supplementary_gids"] = [12, 61, 80, 100]
+    for facts in item["filesystem"]["root_facts"].values():
+        facts["owner_gid"] = 80
+    item["process"]["service_process_gid"] = 80
+    item["success_receipt"]["service_gid"] = 80
+    for probe_class in ("identity", "filesystem", "process"):
+        rebind_probe(item, probe_class)
+
+    with pytest.raises(RegistryError, match="identity"):
         verify_isolation_evidence_semantics(
             item,
             policy=policy(),
