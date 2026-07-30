@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
 from .canonical import canonical_json_line
+from .catalog_schema import CATALOG_FILENAME
 from .commit_anchors import load_commit_anchor_ledger
 from .custody_paths import require_private_dir
 from .derived_paths import DerivedPaths
@@ -55,6 +57,38 @@ def _derived_root(runtime_root: Path, head_seal: str) -> Path:
     return parent / head_seal
 
 
+def _quarantine_incomplete_generation(
+    runtime_root: Path,
+    derived_root: Path,
+) -> bool:
+    catalog = derived_root / "catalog" / CATALOG_FILENAME
+    if not derived_root.exists() or catalog.exists():
+        return False
+    facts = require_private_dir(
+        derived_root,
+        "incomplete M2 derived generation",
+    )
+    quarantine = runtime_root / "failed-derived"
+    created = False
+    try:
+        quarantine.mkdir(mode=0o700)
+        created = True
+    except FileExistsError:
+        pass
+    require_private_dir(quarantine, "M2 failed generations root")
+    destination = quarantine / (
+        f"{derived_root.name}-{facts.st_dev}-{facts.st_ino}"
+    )
+    if destination.exists():
+        raise RegistryError("M2 failed generation quarantine conflicts")
+    os.rename(derived_root, destination)
+    fsync_dir(quarantine)
+    fsync_dir(derived_root.parent)
+    if created:
+        fsync_dir(runtime_root)
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
@@ -80,6 +114,10 @@ def main(argv: list[str] | None = None) -> int:
             derived_root = _derived_root(
                 context.runtime.root,
                 state.payload["manifest_head_seal_sha256"],
+            )
+            _quarantine_incomplete_generation(
+                context.runtime.root,
+                derived_root,
             )
             if derived_root.exists():
                 result = verify_rebuilt_catalog(

@@ -193,6 +193,11 @@ class FakeNtpSocket:
         return bytes(response)
 
 
+class FailingNtpSocket(FakeNtpSocket):
+    def recv(self, _limit):
+        raise TimeoutError("first NTP address timed out")
+
+
 def test_scheduler_publishes_only_after_both_sources(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -344,6 +349,37 @@ def test_live_ntp_clock_accepts_bound_reply_and_rejects_skew(
             wall_clock=lambda: next(wall_values),
             monotonic_clock=lambda: next(monotonic_values),
         )
+
+
+def test_live_ntp_clock_times_only_the_successful_address(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        m2_ntp.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (2, 2, 17, "", ("203.0.113.1", 123)),
+            (2, 2, 17, "", ("203.0.113.2", 123)),
+        ],
+    )
+    sockets = iter(
+        (
+            FailingNtpSocket(server_time=1_000.0),
+            FakeNtpSocket(server_time=1_001.05),
+        )
+    )
+    monkeypatch.setattr(
+        m2_ntp.socket,
+        "socket",
+        lambda *_args: next(sockets),
+    )
+    wall_values = iter((1_000.0, 1_001.0, 1_001.1))
+    monotonic_values = iter((0.0, 5.1, 5.2))
+    sample = m2_ntp.query_trusted_clock(
+        wall_clock=lambda: next(wall_values),
+        monotonic_clock=lambda: next(monotonic_values),
+    )
+    assert sample.ntp_offset_milliseconds == 0
 
 
 def test_runtime_input_requires_exact_external_pins(
