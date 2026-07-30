@@ -14,7 +14,7 @@ PROGRAMS = {
     "monitor": "/usr/local/libexec/vnpyresearch/release/bin/research-warehouse-monitor",
 }
 
-if len(sys.argv) != 2 or sys.argv[1] not in PROGRAMS:
+if len(sys.argv) < 2 or sys.argv[1] not in PROGRAMS:
     raise SystemExit(64)
 flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
 path_facts = os.stat(LOCK, follow_symlinks=False)
@@ -33,4 +33,4 @@ if (
 fcntl.flock(descriptor, fcntl.LOCK_SH)
 os.set_inheritable(descriptor, True)
 program = PROGRAMS[sys.argv[1]]
-os.execv(program, [program])
+os.execv(program, [program, *sys.argv[2:]])

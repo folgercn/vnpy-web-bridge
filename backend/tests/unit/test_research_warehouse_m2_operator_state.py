@@ -164,3 +164,12 @@ def test_layered_launchd_jobs_keep_signers_root_and_rebuild_service_only() -> No
             "Minute": minute,
         }
         assert payload["Umask"] == 0o77
+
+
+def test_release_lock_runner_forwards_role_arguments() -> None:
+    source = (
+        ROOT / "deployments/research-warehouse/m2/release-lock-runner"
+    ).read_text()
+    assert "if len(sys.argv) < 2" in source
+    assert "os.execv(program, [program, *sys.argv[2:]])" in source
+    compile(source, "release-lock-runner", "exec")
