@@ -93,6 +93,7 @@ def official_raw(
     *,
     invalid_price: bool = False,
     numeric_fractional_price: bool = False,
+    include_total_row: bool = False,
 ) -> bytes:
     rows = [
         {
@@ -120,6 +121,20 @@ def official_raw(
             "OPENINTEREST": "200",
         },
     ]
+    if include_total_row:
+        rows.append(
+            {
+                "DELIVERYMONTH": "",
+                "PRODUCTID": "总计",
+                "OPENPRICE": "",
+                "HIGHESTPRICE": "",
+                "LOWESTPRICE": "",
+                "CLOSEPRICE": "",
+                "SETTLEMENTPRICE": "",
+                "VOLUME": 108,
+                "OPENINTEREST": 211,
+            }
+        )
     return json.dumps(
         {"o_curinstrument": rows, "report_date": "20260728"},
         separators=(",", ":"),
@@ -179,6 +194,7 @@ def sealed_evidence(
     *,
     invalid_price: bool = False,
     numeric_fractional_price: bool = False,
+    include_total_row: bool = False,
     repeat_same_raw: bool = False,
 ) -> tuple[
     WarehousePaths,
@@ -194,6 +210,7 @@ def sealed_evidence(
     raw = official_raw(
         invalid_price=invalid_price,
         numeric_fractional_price=numeric_fractional_price,
+        include_total_row=include_total_row,
     )
     acquire_daily(
         paths=evidence,
@@ -396,6 +413,23 @@ def test_normalizer_preserves_fractional_json_number_exactly(
     finally:
         connection.close()
     assert str(value) == "22100.1250000000"
+
+
+def test_normalizer_skips_exact_exchange_total_row(tmp_path: Path) -> None:
+    values = sealed_evidence(tmp_path, include_total_row=True)
+    rebuild(*values, tmp_path / "derived")
+    parquet = next(
+        DerivedPaths.open(tmp_path / "derived").parquet.rglob("*.parquet")
+    )
+    connection = duckdb.connect(":memory:")
+    try:
+        rows = connection.execute(
+            "SELECT product_id FROM read_parquet(?) ORDER BY product_id",
+            [str(parquet)],
+        ).fetchall()
+    finally:
+        connection.close()
+    assert rows == [("cu_f",), ("zn_f",)]
 
 
 def test_corrupt_catalog_fails_closed(tmp_path: Path) -> None:
