@@ -191,7 +191,7 @@ def contract_rows_from_daily_raw(
     exchange: str,
     official_day: str,
 ) -> dict[str, list[dict[str, Any]]]:
-    """Extract exact target-contract OHLC/OI without accepting summary rows."""
+    """Extract exact target-contract settlement/OI without summary rows."""
 
     payload = parse_json_strict(raw, f"{exchange} official daily raw")
     if not isinstance(payload, dict) or payload.get("report_date") != official_day.replace(
@@ -213,10 +213,19 @@ def contract_rows_from_daily_raw(
         raw_product = row.get("PRODUCTID")
         if not isinstance(raw_product, str):
             raise PitSourceViewError("official raw PRODUCTID is not a string")
-        product = raw_product.lower()
-        if raw_product.strip().lower() in expected_products and raw_product != product:
+        normalized_product = raw_product.strip().lower()
+        candidate_product = normalized_product.removesuffix("_f")
+        if (
+            candidate_product in expected_products
+            and raw_product != f"{candidate_product}_f"
+        ):
             raise PitSourceViewError("official target PRODUCTID is not canonical")
+        if not raw_product.endswith("_f"):
+            continue
+        product = raw_product[:-2]
         if product not in expected_products:
+            continue
+        if row.get("DELIVERYMONTH") in {"", "小计", "总计"}:
             continue
         delivery = _delivery_yyyymm(
             row.get("DELIVERYMONTH"),
@@ -227,9 +236,6 @@ def contract_rows_from_daily_raw(
         observation = {
             "exact_contract": exact_contract,
             "delivery_yyyymm": delivery,
-            "open": _strict_number(row.get("OPENPRICE"), f"{exact_contract} open"),
-            "high": _strict_number(row.get("HIGHESTPRICE"), f"{exact_contract} high"),
-            "low": _strict_number(row.get("LOWESTPRICE"), f"{exact_contract} low"),
             "settlement": _strict_number(
                 row.get("SETTLEMENTPRICE"),
                 f"{exact_contract} settlement",
@@ -240,13 +246,6 @@ def contract_rows_from_daily_raw(
                 nonnegative=True,
             ),
         }
-        if not (
-            observation["low"]
-            <= min(observation["open"], observation["settlement"])
-            <= max(observation["open"], observation["settlement"])
-            <= observation["high"]
-        ):
-            raise PitSourceViewError(f"{exact_contract} OHLC range is invalid")
         result[product].append(observation)
     for product in expected_products:
         rows_for_product = result[product]

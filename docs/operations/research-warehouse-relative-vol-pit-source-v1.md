@@ -57,8 +57,10 @@ official observations on or before the selected cutoff, while the complete
 186-day receipt remains pinned as custody provenance. Every used source day
 records exact SHFE/INE raw SHA-256 and byte count.
 
-For each target product/day it admits exact contract rows only. Product summary
-rows, TAS rows, totals and other products cannot become contracts. PIT main is
+For each target product/day it admits the official canonical `<product>_f`
+contract rows only. Delivery subtotal rows, TAS rows, totals and other products
+cannot become contracts; inactive far contracts may lack OHLC, because this
+relative-vol derivation consumes only positive settlement and OI. PIT main is
 the frozen `OI descending, delivery ascending, exact contract ascending` rule,
 with at least three positive-settlement/OI contracts beyond the source month.
 Each daily return closes the interval with the previous day's exact PIT main;

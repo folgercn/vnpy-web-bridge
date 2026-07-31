@@ -126,7 +126,7 @@ def _row(product: str, delivery: str, index: int, contract_index: int) -> dict:
     settlement = round(level / tick) * tick
     return {
         "DELIVERYMONTH": delivery,
-        "PRODUCTID": product,
+        "PRODUCTID": f"{product}_f",
         "OPENPRICE": str(settlement),
         "HIGHESTPRICE": str(settlement + tick),
         "LOWESTPRICE": str(settlement - tick),
@@ -146,7 +146,7 @@ def _raw_for_day(raw_day: str, exchange: str, index: int) -> bytes:
             rows.append(_row(product, delivery, index, contract_index))
         rows.append(
             {
-                "DELIVERYMONTH": "",
+                "DELIVERYMONTH": "小计",
                 "PRODUCTID": f"{product}_f",
                 "OPENPRICE": "",
                 "HIGHESTPRICE": "",
@@ -291,6 +291,15 @@ def test_contract_extraction_rejects_missing_wrong_day_and_hash_shape() -> None:
     )
     assert rows["ag"][0]["exact_contract"] == "SHFE.ag2612"
 
+    wrong_product_id = json.loads(raw)
+    wrong_product_id["o_curinstrument"][0]["PRODUCTID"] = "ag"
+    with pytest.raises(PitSourceViewError, match="PRODUCTID is not canonical"):
+        contract_rows_from_daily_raw(
+            raw=canonical_json(wrong_product_id),
+            exchange="SHFE",
+            official_day="2026-07-31",
+        )
+
     wrong_day = json.loads(raw)
     wrong_day["report_date"] = "20260730"
     with pytest.raises(PitSourceViewError, match="report date"):
@@ -302,7 +311,7 @@ def test_contract_extraction_rejects_missing_wrong_day_and_hash_shape() -> None:
 
     missing = json.loads(raw)
     missing["o_curinstrument"] = [
-        row for row in missing["o_curinstrument"] if row["PRODUCTID"] != "ag"
+        row for row in missing["o_curinstrument"] if row["PRODUCTID"] != "ag_f"
     ]
     with pytest.raises(RegistryError, match="fewer than three"):
         contract_rows_from_daily_raw(
