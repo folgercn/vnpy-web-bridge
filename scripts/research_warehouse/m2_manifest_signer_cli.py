@@ -107,7 +107,12 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 trade_days = [args.trade_day] if args.trade_day else [None]
 
-            def execute_day(requested_day, parent_seal, parent_commit):
+            def execute_day(
+                requested_day,
+                parent_trade_day,
+                parent_seal,
+                parent_commit,
+            ):
                 def sign(private_key):
                     context = load_runtime_context(args.runtime_input)
                     if history is not None and (
@@ -172,6 +177,7 @@ def main(argv: list[str] | None = None) -> int:
                         private_key=private_key,
                         trade_day=trade_day,
                         signer_key_id=args.signer_key_id,
+                        parent_trade_day=parent_trade_day,
                         parent_seal=parent_seal,
                         parent_commit=parent_commit,
                         clock=clock,
@@ -196,6 +202,7 @@ def main(argv: list[str] | None = None) -> int:
                         )
                     item = execute_day(
                         requested_day,
+                        state.payload["last_trade_day"],
                         state.payload["manifest_head_seal_sha256"],
                         state.payload["manifest_head_commit_seal_sha256"],
                     )

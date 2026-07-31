@@ -12,16 +12,21 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PublicKey,
 )
 
-from .canonical import canonical_json, canonical_json_line, sha256
+from .canonical import canonical_json, canonical_json_line, parse_json_strict, sha256
 from .errors import RegistryError
 from .filesystem import (
     WarehousePaths,
     create_only_bytes,
     custody_lock,
+    read_regular_strict,
     recover_atomic_publishes,
 )
 from .manifest_chain import load_manifest_chain, require_chain_anchors
-from .manifest_commits import create_commit_receipt
+from .manifest_commits import (
+    commit_receipt_path,
+    create_commit_receipt,
+    load_commit_receipt,
+)
 from .manifest_contracts import (
     ID_PATTERN,
     MANIFEST_AUTHORITY,
@@ -29,6 +34,7 @@ from .manifest_contracts import (
     input_fingerprint,
     seal_base,
 )
+from .manifest_envelope import validate_manifest_envelope
 from .manifest_validation import validate_manifest
 from .models import SourceRegistry
 from .observations import load_observations
@@ -43,8 +49,10 @@ from .timeutil import format_utc, parse_utc, require_utc
 
 __all__ = [
     "find_committed_manifest_for_day",
+    "find_committed_manifest_for_day_incremental",
     "load_manifest_chain",
     "seal_daily_batch",
+    "seal_daily_batch_incremental_with_private_key",
     "seal_daily_batch_with_private_key",
     "validate_manifest",
     "verify_manifest_chain",
@@ -73,6 +81,83 @@ def _path_for_manifest(
     manifest: dict[str, Any],
 ) -> Path:
     return paths.manifests / manifest["trade_day"] / f"{manifest['batch_id']}.json"
+
+
+def _load_day_manifests(
+    *,
+    paths: WarehousePaths,
+    registry: SourceRegistry,
+    public_key: Ed25519PublicKey,
+    trade_day: str,
+    verify_evidence: bool,
+) -> list[dict[str, Any]]:
+    """Load one day's manifests without walking the historical chain."""
+    validator = validate_manifest if verify_evidence else validate_manifest_envelope
+    manifests = []
+    day_root = paths.manifests / trade_day
+    for path in sorted(day_root.glob("batch-*.json")):
+        raw = read_regular_strict(
+            path,
+            "daily batch manifest",
+            limit=16 * 1024 * 1024,
+        )
+        payload = validator(
+            paths,
+            parse_json_strict(raw, "daily batch manifest"),
+            public_key,
+            registry,
+        )
+        if raw != canonical_json_line(payload):
+            raise RegistryError("daily batch manifest is not canonical JSON")
+        if path != _path_for_manifest(paths, payload):
+            raise RegistryError("daily batch manifest custody path binding mismatch")
+        receipt_path = commit_receipt_path(path, payload["batch_id"])
+        loaded = (
+            load_commit_receipt(receipt_path, payload, public_key)
+            if receipt_path.exists()
+            else None
+        )
+        manifests.append(
+            {
+                **payload,
+                "commit_receipt": loaded[0] if loaded is not None else None,
+                "commit_seal_sha256": loaded[1] if loaded is not None else None,
+            }
+        )
+    return manifests
+
+
+def _require_incremental_head(
+    *,
+    paths: WarehousePaths,
+    registry: SourceRegistry,
+    public_key: Ed25519PublicKey,
+    trade_day: str | None,
+    expected_batch_seal_sha256: str | None,
+    expected_commit_seal_sha256: str | None,
+) -> dict[str, Any] | None:
+    if expected_batch_seal_sha256 is None:
+        if trade_day is not None or expected_commit_seal_sha256 is not None:
+            raise RegistryError("incremental manifest genesis pin is inconsistent")
+        return None
+    if trade_day is None or expected_commit_seal_sha256 is None:
+        raise RegistryError("incremental manifest head pin is incomplete")
+    matches = [
+        item
+        for item in _load_day_manifests(
+            paths=paths,
+            registry=registry,
+            public_key=public_key,
+            trade_day=trade_day,
+            verify_evidence=False,
+        )
+        if item["batch_seal_sha256"] == expected_batch_seal_sha256
+        and item["commit_seal_sha256"] == expected_commit_seal_sha256
+        and item["commit_receipt"] is not None
+    ]
+    if len(matches) != 1:
+        raise RegistryError("incremental manifest head does not match root pin")
+    return matches[0]
 
 
 def _matches_lost_response(
@@ -191,6 +276,38 @@ def find_committed_manifest_for_day(
     return matches[0] if matches else None
 
 
+def find_committed_manifest_for_day_incremental(
+    *,
+    paths: WarehousePaths,
+    registry: SourceRegistry,
+    public_key: Ed25519PublicKey,
+    trade_day: str,
+) -> dict[str, Any] | None:
+    """Find an exact committed day without rereading every prior manifest."""
+    observations = load_observations(paths, registry, trade_day=trade_day)
+    if not observations:
+        raise RegistryError("cannot inspect a day with no raw observations")
+    fingerprint = input_fingerprint(
+        registry.raw_sha256,
+        sorted(item["observation_id"] for item in observations),
+    )
+    matches = [
+        item
+        for item in _load_day_manifests(
+            paths=paths,
+            registry=registry,
+            public_key=public_key,
+            trade_day=trade_day,
+            verify_evidence=True,
+        )
+        if item["input_fingerprint_sha256"] == fingerprint
+        and item["commit_receipt"] is not None
+    ]
+    if len(matches) > 1:
+        raise RegistryError("manifest day repeats an identical committed fingerprint")
+    return matches[0] if matches else None
+
+
 def seal_daily_batch_with_private_key(
     *,
     paths: WarehousePaths,
@@ -300,6 +417,117 @@ def seal_daily_batch_with_private_key(
             manifest=signed,
             private_key=private_key,
             committed_at=committed,
+        )
+        return output
+
+
+def seal_daily_batch_incremental_with_private_key(
+    *,
+    paths: WarehousePaths,
+    registry: SourceRegistry,
+    trade_day: str,
+    private_key: Ed25519PrivateKey,
+    signer_key_id: str,
+    trusted_head_trade_day: str | None,
+    expected_parent_batch_seal_sha256: str | None,
+    expected_parent_commit_seal_sha256: str | None,
+    trusted_clock: Callable[[], datetime] = _utc_now,
+) -> Path:
+    """Seal one day against the root-pinned head, without a full chain walk."""
+    if ID_PATTERN.fullmatch(signer_key_id) is None:
+        raise RegistryError("manifest signer key ID is invalid")
+    if not isinstance(private_key, Ed25519PrivateKey):
+        raise RegistryError("manifest signer private key object is invalid")
+    public_key = private_key.public_key()
+    signer_public_hash = public_key_sha256(public_key)
+    with custody_lock(paths, "manifest-chain"):
+        _recover_manifest_publications(paths)
+        head = _require_incremental_head(
+            paths=paths,
+            registry=registry,
+            public_key=public_key,
+            trade_day=trusted_head_trade_day,
+            expected_batch_seal_sha256=expected_parent_batch_seal_sha256,
+            expected_commit_seal_sha256=expected_parent_commit_seal_sha256,
+        )
+        observations = load_observations(paths, registry, trade_day=trade_day)
+        if not observations:
+            raise RegistryError("cannot seal a day with no raw observations")
+        latest_observation = max(
+            parse_utc(item["observed_at"], "observed_at") for item in observations
+        )
+        fingerprint = input_fingerprint(
+            registry.raw_sha256,
+            sorted(item["observation_id"] for item in observations),
+        )
+        same_fingerprint = [
+            item
+            for item in _load_day_manifests(
+                paths=paths,
+                registry=registry,
+                public_key=public_key,
+                trade_day=trade_day,
+                verify_evidence=False,
+            )
+            if item["input_fingerprint_sha256"] == fingerprint
+        ]
+        if len(same_fingerprint) > 1:
+            raise RegistryError("manifest day repeats an identical fingerprint")
+        if same_fingerprint:
+            candidate = same_fingerprint[0]
+            if (
+                candidate["parent_batch_seal_sha256"]
+                != expected_parent_batch_seal_sha256
+                or candidate["parent_commit_seal_sha256"]
+                != expected_parent_commit_seal_sha256
+                or candidate["signer_key_id"] != signer_key_id
+                or candidate["signer_public_key_sha256"] != signer_public_hash
+            ):
+                raise RegistryError("incremental manifest candidate forks root pin")
+            if candidate["commit_receipt"] is None:
+                create_commit_receipt(
+                    paths=paths,
+                    manifest_path=_path_for_manifest(paths, candidate),
+                    manifest=candidate,
+                    private_key=private_key,
+                    committed_at=require_utc(trusted_clock(), "committed_at"),
+                )
+            return _path_for_manifest(paths, candidate)
+        sealed = require_utc(trusted_clock(), "sealed_at")
+        if sealed < latest_observation:
+            raise RegistryError("sealed_at cannot predate a claimed observation")
+        if head and sealed <= parse_utc(head["sealed_at"], "sealed_at"):
+            raise RegistryError("sealed_at must be later than parent batch")
+        payload = _manifest_payload(
+            trade_day=trade_day,
+            sealed=sealed,
+            registry=registry,
+            parent_seal=expected_parent_batch_seal_sha256,
+            parent_commit_seal=expected_parent_commit_seal_sha256,
+            observations=observations,
+            signer_key_id=signer_key_id,
+            signer_public_key_sha256=signer_public_hash,
+        )
+        payload["batch_seal_sha256"] = sha256(canonical_json(seal_base(payload)))
+        payload["batch_id"] = f"batch-{trade_day}-{payload['batch_seal_sha256'][:24]}"
+        signed = sign_payload(payload, private_key)
+        output = (
+            paths.private_subdir(paths.manifests, trade_day)
+            / f"{signed['batch_id']}.json"
+        )
+        create_only_bytes(
+            output,
+            canonical_json_line(signed),
+            "daily batch manifest",
+            temporary_dir=paths.temporary,
+        )
+        validate_manifest_envelope(paths, signed, public_key, registry)
+        create_commit_receipt(
+            paths=paths,
+            manifest_path=output,
+            manifest=signed,
+            private_key=private_key,
+            committed_at=require_utc(trusted_clock(), "committed_at"),
         )
         return output
 

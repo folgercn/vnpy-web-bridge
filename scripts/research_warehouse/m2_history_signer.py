@@ -14,8 +14,8 @@ from .m2_receipts import load_run_receipt
 from .manifest_commits import commit_receipt_path, load_commit_receipt
 from .manifest_validation import validate_manifest
 from .manifests import (
-    find_committed_manifest_for_day,
-    seal_daily_batch_with_private_key,
+    find_committed_manifest_for_day_incremental,
+    seal_daily_batch_incremental_with_private_key,
 )
 from .timeutil import format_utc, parse_utc
 
@@ -26,6 +26,7 @@ def sign_manifest_day(
     private_key,
     trade_day: str,
     signer_key_id: str,
+    parent_trade_day: str | None,
     parent_seal: str | None,
     parent_commit: str | None,
     clock,
@@ -44,7 +45,7 @@ def sign_manifest_day(
         calendar=context.calendar,
         calendar_availability_raw_sha256=context.availability.raw_sha256,
     )
-    existing = find_committed_manifest_for_day(
+    existing = find_committed_manifest_for_day_incremental(
         paths=context.paths,
         registry=context.registry,
         public_key=private_key.public_key(),
@@ -135,12 +136,13 @@ def sign_manifest_day(
             ),
             "trade_day": trade_day,
         }
-    manifest_path = seal_daily_batch_with_private_key(
+    manifest_path = seal_daily_batch_incremental_with_private_key(
         paths=context.paths,
         registry=context.registry,
         trade_day=trade_day,
         private_key=private_key,
         signer_key_id=signer_key_id,
+        trusted_head_trade_day=parent_trade_day,
         expected_parent_batch_seal_sha256=parent_seal,
         expected_parent_commit_seal_sha256=parent_commit,
         trusted_clock=lambda: clock.trusted_now,

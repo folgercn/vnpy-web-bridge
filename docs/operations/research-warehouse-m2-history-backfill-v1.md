@@ -64,13 +64,19 @@ sudo /usr/local/libexec/vnpyresearch/release-lock-runner manifest-signer \
 
 The signer verifies every daily receipt after irreversible UID/GID handoff.
 Before advancing the root state, each manifest and commit receipt is durably
-re-read and a new live NTP sample records external availability. Re-running
-verifies identical fingerprints anywhere in the full chain and only signs
-missing days.
+re-read and a new live NTP sample records external availability. Each append
+verifies only the root-pinned current head plus that day's receipt, exact raw
+bytes, manifest and commit. Re-running resumes from the root-pinned contiguous
+prefix and signs only missing days. It does not walk prior raw evidence or the
+full manifest chain for every append.
 
-## Rebuild, backup and final verifier
+## Manual full-chain maintenance
 
-After the history signer succeeds:
+Rebuild, backup and the full-chain history verifier remain available as
+explicit operator tools, but are not invoked by the history signer or scheduled
+automatically. They intentionally perform high-I/O whole-chain work and should
+only be run when an operator explicitly requests a rebuild, recovery exercise
+or full audit:
 
 ```sh
 sudo -u vnpyresearch \
@@ -85,7 +91,8 @@ sudo -u vnpyresearch \
   --expected-history-receipt-sha256 SHA256
 ```
 
-The final status must be `M2_RESEARCH_HISTORY_BACKFILL_VERIFIED`. It binds:
+When explicitly run, the final status is
+`M2_RESEARCH_HISTORY_BACKFILL_VERIFIED`. It binds:
 
 - exactly 186 official days and ten products with 186 observations each;
 - every daily receipt, exact raw hash and byte count;

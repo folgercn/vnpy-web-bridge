@@ -39,7 +39,9 @@ from research_warehouse.filesystem import (
 )
 from research_warehouse.manifests import (
     find_committed_manifest_for_day,
+    find_committed_manifest_for_day_incremental,
     seal_daily_batch,
+    seal_daily_batch_incremental_with_private_key,
     seal_daily_batch_with_private_key,
     verify_manifest_chain,
 )
@@ -582,6 +584,70 @@ def test_preloaded_manifest_key_seals_without_reopening_private_path(
             expected_head_commit_seal_sha256=commit_seal(paths, seal_hash),
         )
     ) == 1
+
+
+def test_incremental_seal_uses_only_root_pinned_head_and_current_day(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    paths = warehouse(tmp_path)
+    private_key_path, public_key_path = signing_keys(tmp_path)
+    private_key = load_private_key(private_key_path)
+    acquire(paths, official_raw("first"), T1)
+    first_path = seal_daily_batch_incremental_with_private_key(
+        paths=paths,
+        registry=registry(),
+        trade_day=TRADE_DAY,
+        private_key=private_key,
+        signer_key_id="research-key-v1",
+        trusted_head_trade_day=None,
+        expected_parent_batch_seal_sha256=None,
+        expected_parent_commit_seal_sha256=None,
+        trusted_clock=lambda: T2,
+    )
+    first = manifest_payload(first_path)
+    first_commit = commit_seal(paths, first["batch_seal_sha256"])
+    acquire(paths, official_raw("second"), T3)
+    monkeypatch.setattr(
+        manifests_module,
+        "load_manifest_chain",
+        lambda *_args, **_kwargs: pytest.fail("incremental seal walked full chain"),
+    )
+    second_path = seal_daily_batch_incremental_with_private_key(
+        paths=paths,
+        registry=registry(),
+        trade_day=TRADE_DAY,
+        private_key=private_key,
+        signer_key_id="research-key-v1",
+        trusted_head_trade_day=TRADE_DAY,
+        expected_parent_batch_seal_sha256=first["batch_seal_sha256"],
+        expected_parent_commit_seal_sha256=first_commit,
+        trusted_clock=lambda: T4,
+    )
+    second = manifest_payload(second_path)
+    assert second["parent_batch_seal_sha256"] == first["batch_seal_sha256"]
+    assert (
+        find_committed_manifest_for_day_incremental(
+            paths=paths,
+            registry=registry(),
+            public_key=load_public_key(public_key_path),
+            trade_day=TRADE_DAY,
+        )["batch_seal_sha256"]
+        == second["batch_seal_sha256"]
+    )
+
+    with pytest.raises(RegistryError, match="root pin"):
+        seal_daily_batch_incremental_with_private_key(
+            paths=paths,
+            registry=registry(),
+            trade_day=TRADE_DAY,
+            private_key=private_key,
+            signer_key_id="research-key-v1",
+            trusted_head_trade_day=TRADE_DAY,
+            expected_parent_batch_seal_sha256="0" * 64,
+            expected_parent_commit_seal_sha256=first_commit,
+            trusted_clock=lambda: T5,
+        )
 
 
 def test_uncommitted_head_recovers_after_new_observation(
