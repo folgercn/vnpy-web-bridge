@@ -82,10 +82,11 @@ repository mount。它 fail closed 检查：
   runtime hooks；
 - 除固定 runtime `.pth` 外拒绝所有额外 `.pth`、`sitecustomize`、
   `usercustomize` 和 `.egg-link`，并把 interpreter、stdlib、site-packages
-  的完整路径、内容 hash、权限和 link metadata 收敛成
+  的完整路径、内容 hash 和权限收敛成
   `python_execution_closure_sha256`；
-- hardlink 按目标 regular-file 内容建模；原路径在后层被 whiteout 后，
-  alias 内容仍参加 signer/private-key 扫描；
+- Python execution closure 内一律拒绝 symlink；hardlink 的名称或 target
+  触碰 closure 都在 layer 应用时拒绝，禁止 target escape、缺失 target、
+  runtime-writable target 和跨 closure inode 身份折叠；
 - 最终 layer filesystem 的 exact runtime bundle 与 source bundle
   byte-for-byte SHA 对应；
 - extra runtime path、bytecode、signer/private-key path 或内容。

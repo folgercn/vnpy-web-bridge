@@ -78,6 +78,9 @@ def _tar(
                 member.size = len(raw)
                 member.type = tarfile.REGTYPE
                 archive.addfile(member, io.BytesIO(raw))
+            elif kind == "directory":
+                member.type = tarfile.DIRTYPE
+                archive.addfile(member)
             elif kind == "symlink":
                 member.type = tarfile.SYMTYPE
                 member.linkname = raw.decode()
@@ -165,12 +168,19 @@ def _layer(
     files: dict[str, bytes],
     *,
     modes: dict[str, int] | None = None,
+    directories: dict[str, int] | None = None,
     compressed: bool = False,
 ) -> tuple[bytes, str, str]:
     raw = _tar(
         [
-            (path, content, (modes or {}).get(path, 0o644), "regular")
-            for path, content in sorted(files.items())
+            *[
+                (path, b"", mode, "directory")
+                for path, mode in sorted((directories or {}).items())
+            ],
+            *[
+                (path, content, (modes or {}).get(path, 0o644), "regular")
+                for path, content in sorted(files.items())
+            ],
         ]
     )
     if compressed:
@@ -265,6 +275,19 @@ def _build_oci(
         modes={
             path: (runtime_modes or {}).get(path, 0o444)
             for path in runtime_files
+        },
+        directories={
+            directory: 0o555
+            for path in runtime_files
+            if path.startswith("opt/c-fast-t1/")
+            for directory in {
+                "/".join(path.split("/")[:depth])
+                for depth in range(2, len(path.split("/")))
+            }
+            if (
+                directory == "opt/c-fast-t1"
+                or directory.startswith("opt/c-fast-t1/")
+            )
         },
     )
     base_diff = "sha256:" + hashlib.sha256(gzip.decompress(base_blob)).hexdigest()
@@ -809,7 +832,7 @@ def test_unallowlisted_importable_site_package_fails_closed(
         )
 
 
-def test_hardlink_private_key_survives_source_whiteout_and_is_detected(
+def test_python_closure_hardlink_private_key_is_rejected_before_whiteout(
     tmp_path: Path,
     source_bundle: tuple[bytes, bytes, dict[str, Any]],
     source_commit: str,
@@ -838,7 +861,7 @@ def test_hardlink_private_key_survives_source_whiteout_and_is_detected(
 
     with pytest.raises(
         subject.QueryV3ImageAttestationError,
-        match="private-key material",
+        match="Python execution closure cannot contain hardlinks",
     ):
         subject.derive_oci_facts(
             oci_path,

@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vnpy-web-bridge:schema:commodity-c-fast-t1-query-v4-source-manifest-v1",
+  "title": "C_FAST T1 query-v4 deterministic source bundle manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "manifest_id",
+    "candidate_id",
+    "runtime_kind",
+    "source_commit_sha",
+    "containerfile_path",
+    "containerfile_instruction_sha256",
+    "entries",
+    "git_resolution_performed_by_producer",
+    "runtime_git_resolution_required",
+    "source_commit_lineage_independently_verified_by_runtime",
+    "sensitive_material_present",
+    "authority_granted"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "commodity_c_fast_t1_query_v4_source_manifest_v1"
+    },
+    "manifest_id": {
+      "type": "string",
+      "pattern": "^query-v4-source-manifest-v1-[0-9a-f]{64}$"
+    },
+    "candidate_id": {
+      "const": "C_FAST_CROSS_SECTION_NEUTRAL"
+    },
+    "runtime_kind": {
+      "const": "c_fast_t1_query_v4"
+    },
+    "source_commit_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "containerfile_path": {
+      "const": "scripts/c_fast_t1/Containerfile.query-v4"
+    },
+    "containerfile_instruction_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "entries": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 128,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "sha256",
+          "size",
+          "mode"
+        ],
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "pattern": "^[A-Za-z0-9._/-]+$"
+          },
+          "sha256": {
+            "$ref": "#/$defs/sha256"
+          },
+          "size": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2097152
+          },
+          "mode": {
+            "enum": [
+              420,
+              493
+            ]
+          }
+        }
+      }
+    },
+    "git_resolution_performed_by_producer": {
+      "const": true
+    },
+    "runtime_git_resolution_required": {
+      "const": false
+    },
+    "source_commit_lineage_independently_verified_by_runtime": {
+      "const": false
+    },
+    "sensitive_material_present": {
+      "const": false
+    },
+    "authority_granted": {
+      "const": false
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

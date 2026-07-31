@@ -43,6 +43,7 @@ MANIFEST_ARCHIVE_PATH = "query-v3-source-manifest.json"
 CONTAINERFILE_PATH = "scripts/c_fast_t1/Containerfile.query-v3"
 SCHEMA_VERSION = "commodity_c_fast_t1_query_v3_image_attestation_v1"
 MANIFEST_SCHEMA_VERSION = "commodity_c_fast_t1_query_v3_source_manifest_v1"
+MANIFEST_ID_PREFIX = "query-v3-source-manifest-v1-"
 EVIDENCE_SCHEMA_VERSION = (
     "commodity_c_fast_t1_query_v3_external_image_evidence_v1"
 )
@@ -50,6 +51,7 @@ STATUS = (
     "QUERY_V3_SOURCE_BUNDLE_AND_OCI_CONTENT_VERIFIED_"
     "NO_BUILD_OR_REGISTRY_PROVENANCE"
 )
+ADDITIONAL_REPORT_FIELDS: dict[str, Any] = {}
 CANDIDATE_ID = "C_FAST_CROSS_SECTION_NEUTRAL"
 BASE_IMAGE = (
     "python:3.12-slim@"
@@ -93,6 +95,7 @@ EXPECTED_LABELS = {
         "vnpy-web-bridge C_FAST T1 query-v3 runner"
     ),
 }
+RUNTIME_LABEL = "io.vnpy-web-bridge.c-fast-t1.query-v3-runtime"
 ENTRYPOINT = [
     "/usr/local/bin/python3.12",
     "-I",
@@ -107,6 +110,7 @@ RUNTIME_PTH_CONTENT = b"/opt/c-fast-t1/scripts\n"
 ALLOWED_POST_BASE_PATHS = frozenset(
     {
         "opt",
+        "opt/c-fast-t1",
         "run",
         "run/c-fast-t1-query-v3-input",
         "run/c-fast-t1-readiness-v2-pins",
@@ -550,15 +554,15 @@ def inspect_containerfile(raw: bytes) -> tuple[str, dict[str, str]]:
         for keyword, instruction in zip(keywords, instructions)
     ):
         raise QueryV3ImageAttestationError("Containerfile RUN --mount is forbidden")
-    expected_entrypoint = (
-        'ENTRYPOINT ["/usr/local/bin/python3.12", "-I", '
-        '"/opt/c-fast-t1/scripts/commodity_c_fast_t1_query_v3.py"]'
+    expected_entrypoint = "ENTRYPOINT " + json.dumps(
+        ENTRYPOINT,
+        ensure_ascii=False,
     )
     if instructions.count(expected_entrypoint) != 1:
         raise QueryV3ImageAttestationError("query-v3 isolated ENTRYPOINT drifted")
     normalized = "\n".join(instructions)
     required_fragments = (
-        'io.vnpy-web-bridge.c-fast-t1.query-v3-runtime="true"',
+        f'{RUNTIME_LABEL}="{EXPECTED_LABELS[RUNTIME_LABEL]}"',
         'io.vnpy-web-bridge.c-fast-t1.authority-granted="false"',
         "USER 65532:65532",
         "chmod -R a-w /opt/c-fast-t1",
@@ -681,7 +685,7 @@ def derive_source_facts(
             "source manifest bytes are not canonical JSON"
         )
     expected_manifest_id = (
-        "query-v3-source-manifest-v1-"
+        MANIFEST_ID_PREFIX
         + _sha256(canonical_json(_manifest_identity(manifest)))
     )
     if manifest["manifest_id"] != expected_manifest_id:
@@ -923,6 +927,13 @@ def _resolve_link(path: str, target: str, *, symlink: bool) -> str:
     return "/".join(resolved)
 
 
+def _is_python_execution_path(path: str) -> bool:
+    return (
+        path == INTERPRETER_PATH
+        or path.startswith("usr/local/lib/python3.12/")
+    )
+
+
 def _apply_layer(
     filesystem: dict[str, FileEntry],
     directories: dict[str, FileEntry],
@@ -1022,6 +1033,14 @@ def _apply_layer(
                         member.linkname,
                         symlink=False,
                     )
+                    if (
+                        _is_python_execution_path(name)
+                        or _is_python_execution_path(target)
+                    ):
+                        raise QueryV3ImageAttestationError(
+                            "OCI Python execution closure cannot contain "
+                            f"hardlinks: /{name} -> /{target}"
+                        )
                     target_entry = filesystem.get(target)
                     if target_entry is None or target_entry.kind != "regular":
                         raise QueryV3ImageAttestationError(
@@ -1087,10 +1106,7 @@ def _python_execution_closure(
 ) -> tuple[str, int]:
     entries: dict[str, dict[str, Any]] = {}
     for path, entry in sorted(filesystem.items()):
-        if not (
-            path == INTERPRETER_PATH
-            or path.startswith("usr/local/lib/python3.12/")
-        ):
+        if not _is_python_execution_path(path):
             continue
         entries["/" + path] = {
             "kind": entry.kind,
@@ -1146,6 +1162,77 @@ def _mode_allows(
         owner_bit if entry.uid == uid else group_bit if entry.gid == gid else other_bit
     )
     return entry.mode & required != 0
+
+
+def _runtime_identity_can_write(entry: FileEntry) -> bool:
+    return _mode_allows(
+        entry,
+        uid=65532,
+        gid=65532,
+        owner_bit=0o200,
+        group_bit=0o020,
+        other_bit=0o002,
+    )
+
+
+def _validate_python_execution_permissions(
+    filesystem: dict[str, FileEntry],
+    directories: dict[str, FileEntry],
+) -> None:
+    file_paths = {
+        path
+        for path in filesystem
+        if _is_python_execution_path(path)
+    }
+    directory_paths = {
+        path
+        for path in directories
+        if (
+            path
+            in {
+                "usr",
+                "usr/local",
+                "usr/local/bin",
+                "usr/local/lib",
+                "usr/local/lib/python3.12",
+            }
+            or path.startswith("usr/local/lib/python3.12/")
+        )
+    }
+    for path in sorted(file_paths):
+        entry = filesystem[path]
+        if entry.kind != "regular":
+            raise QueryV3ImageAttestationError(
+                "OCI Python execution closure cannot contain "
+                f"links: /{path}"
+            )
+        if (
+            entry.mode & 0o022 != 0
+            or _runtime_identity_can_write(entry)
+        ):
+            raise QueryV3ImageAttestationError(
+                "OCI Python execution closure is writable by the runtime "
+                f"identity or group/world: /{path}"
+            )
+    for path in sorted(directory_paths):
+        entry = directories[path]
+        if (
+            entry.kind != "directory"
+            or entry.mode & 0o022 != 0
+            or _runtime_identity_can_write(entry)
+            or not _mode_allows(
+                entry,
+                uid=65532,
+                gid=65532,
+                owner_bit=0o100,
+                group_bit=0o010,
+                other_bit=0o001,
+            )
+        ):
+            raise QueryV3ImageAttestationError(
+                "OCI Python execution closure directory is writable or not "
+                f"traversable by the runtime identity: /{path}"
+            )
 
 
 def _installed_versions(filesystem: dict[str, FileEntry]) -> dict[str, str]:
@@ -1307,6 +1394,7 @@ def derive_oci_facts(
             "OCI rootfs does not inherit the pinned linux/amd64 base image prefix"
         )
     _validate_python_startup_closure(filesystem)
+    _validate_python_execution_permissions(filesystem, directories)
     disallowed_delta = sorted(
         path for path in post_base_touched if not _post_base_path_allowed(path)
     )
@@ -1380,6 +1468,9 @@ def derive_oci_facts(
             entry is None
             or entry.kind != "regular"
             or entry.sha256 != expected_hash
+            or entry.uid != 0
+            or entry.gid != 0
+            or entry.mode not in {0o444, 0o555}
             or not _mode_allows(
                 entry,
                 uid=65532,
@@ -1393,6 +1484,22 @@ def derive_oci_facts(
                 f"OCI runtime file does not match source bundle: {expected_path}"
             )
         runtime_bundle[expected_path] = entry.sha256
+    for path, entry in sorted(directories.items()):
+        if not (
+            path == "opt/c-fast-t1"
+            or path.startswith("opt/c-fast-t1/")
+        ):
+            continue
+        if (
+            entry.kind != "directory"
+            or entry.uid != 0
+            or entry.gid != 0
+            or entry.mode != 0o555
+        ):
+            raise QueryV3ImageAttestationError(
+                "OCI runtime directory is not root-owned and immutable: "
+                f"/{path}"
+            )
     required_directories = {"opt", "opt/c-fast-t1"}
     for relative in expected_relative:
         parent = PurePosixPath(relative).parent
@@ -1404,6 +1511,15 @@ def derive_oci_facts(
         if (
             entry is None
             or entry.kind != "directory"
+            or entry.uid != 0
+            or entry.gid != 0
+            or (
+                path == "opt"
+                and (
+                    entry.mode & 0o022 != 0
+                    or _runtime_identity_can_write(entry)
+                )
+            )
             or not _mode_allows(
                 entry,
                 uid=65532,
@@ -1658,6 +1774,11 @@ def verify_query_v3_image_evidence(
         "positions_modified": 0,
         "dispatch_changed": False,
     }
+    if set(report) & set(ADDITIONAL_REPORT_FIELDS):
+        raise QueryV3ImageAttestationError(
+            "additional attestation fields collide with the base report"
+        )
+    report.update(ADDITIONAL_REPORT_FIELDS)
     _validate_schema(
         report,
         ATTESTATION_SCHEMA_PATH,

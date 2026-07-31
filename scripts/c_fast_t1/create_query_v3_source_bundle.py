@@ -30,6 +30,7 @@ MANIFEST_ARCHIVE_PATH = "query-v3-source-manifest.json"
 SCHEMA_VERSION = "commodity_c_fast_t1_query_v3_source_manifest_v1"
 CANDIDATE_ID = "C_FAST_CROSS_SECTION_NEUTRAL"
 RUNTIME_KIND = "c_fast_t1_query_v3"
+MANIFEST_ID_PREFIX = "query-v3-source-manifest-v1-"
 BASE_IMAGE = (
     "python:3.12-slim@"
     "sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de"
@@ -37,6 +38,12 @@ BASE_IMAGE = (
 EXPECTED_CONTAINERFILE_INSTRUCTION_SHA256 = (
     "6322dbef5346afbc74deadc1bf74cd521517ad3d34da4d241eb80c3f89d21db4"
 )
+ENTRYPOINT = [
+    "/usr/local/bin/python3.12",
+    "-I",
+    "/opt/c-fast-t1/scripts/commodity_c_fast_t1_query_v3.py",
+]
+RUNTIME_LABEL = "io.vnpy-web-bridge.c-fast-t1.query-v3-runtime"
 MAX_FILE_BYTES = 2 * 1024 * 1024
 MAX_BUNDLE_BYTES = 64 * 1024 * 1024
 MAX_ENTRIES = 128
@@ -220,14 +227,14 @@ def inspect_containerfile(raw: bytes) -> tuple[str, tuple[str, ...]]:
         for keyword, instruction in zip(keywords, instructions)
     ):
         raise SourceBundleError("Containerfile RUN --mount is forbidden")
-    expected_entrypoint = (
-        'ENTRYPOINT ["/usr/local/bin/python3.12", "-I", '
-        '"/opt/c-fast-t1/scripts/commodity_c_fast_t1_query_v3.py"]'
+    expected_entrypoint = "ENTRYPOINT " + json.dumps(
+        ENTRYPOINT,
+        ensure_ascii=False,
     )
     if instructions.count(expected_entrypoint) != 1:
         raise SourceBundleError("query-v3 isolated ENTRYPOINT drifted")
     required_fragments = (
-        'io.vnpy-web-bridge.c-fast-t1.query-v3-runtime="true"',
+        f'{RUNTIME_LABEL}="true"',
         'io.vnpy-web-bridge.c-fast-t1.authority-granted="false"',
         "USER 65532:65532",
         "chmod -R a-w /opt/c-fast-t1",
@@ -372,7 +379,7 @@ def build_source_bundle(
         "authority_granted": False,
     }
     manifest["manifest_id"] = (
-        "query-v3-source-manifest-v1-"
+        MANIFEST_ID_PREFIX
         + _sha256(canonical_json(_manifest_identity(manifest)))
     )
     _validate_schema(manifest)
