@@ -33,6 +33,14 @@ QUESTDB_IMAGE = "sha256:" + "6" * 64
 SIGNER_SOURCE_SHA256 = "7" * 64
 SIGNER_DEPENDENCY_MANIFEST_SHA256 = "f" * 64
 SIGNER_RUNTIME_IMAGE_DIGEST = "sha256:" + "0" * 64
+READINESS_RUNTIME_IMAGE_DIGEST = "sha256:" + "1" * 64
+READINESS_LAUNCHER_SHA256 = "2" * 64
+READINESS_VERIFIER_SHA256 = "3" * 64
+READINESS_PYTHON_SHA256 = "4" * 64
+READINESS_SOURCE_IDENTITY_SHA256 = "5" * 64
+READINESS_SOURCE_MANIFEST_SHA256 = "6" * 64
+READINESS_SITE_IDENTITY_SHA256 = "7" * 64
+READINESS_DEPENDENCY_MANIFEST_SHA256 = "8" * 64
 T1_PUBLIC = b"T" * 32
 L3_PUBLIC = b"L" * 32
 PROVENANCE_PUBLIC = b"P" * 32
@@ -269,6 +277,25 @@ def build_fixture(
         pin_set_generation_id="readiness-v4-pin-generation-a01",
         pin_set_manifest_sha256="d" * 64,
         pin_root_identity_sha256="e" * 64,
+        readiness_runtime_image_digest=READINESS_RUNTIME_IMAGE_DIGEST,
+        readiness_runtime_launcher_sha256=READINESS_LAUNCHER_SHA256,
+        readiness_runtime_verifier_sha256=READINESS_VERIFIER_SHA256,
+        readiness_runtime_python_executable_path=tmp_path / "python",
+        readiness_runtime_python_executable_sha256=READINESS_PYTHON_SHA256,
+        readiness_runtime_source_root_path=tmp_path / "runtime-source",
+        readiness_runtime_source_root_identity_sha256=(
+            READINESS_SOURCE_IDENTITY_SHA256
+        ),
+        readiness_runtime_source_closure_manifest_sha256=(
+            READINESS_SOURCE_MANIFEST_SHA256
+        ),
+        readiness_runtime_site_packages_path=tmp_path / "site-packages",
+        readiness_runtime_site_packages_identity_sha256=(
+            READINESS_SITE_IDENTITY_SHA256
+        ),
+        readiness_runtime_dependency_manifest_sha256=(
+            READINESS_DEPENDENCY_MANIFEST_SHA256
+        ),
         provenance_keyring_sha256=sha256(canonical(provenance_keyring)),
         provenance_signing_tool_source_sha256=SIGNER_SOURCE_SHA256,
         provenance_signing_tool_source_commit_sha=SIGNER_SOURCE_COMMIT,
@@ -296,6 +323,28 @@ def build_fixture(
         readiness_module,
         "_read_production_pins",
         lambda: pins,
+    )
+    runtime_identity = readiness_module.ReadinessRuntimeIdentity(
+        runtime_image_digest=READINESS_RUNTIME_IMAGE_DIGEST,
+        launcher_sha256=READINESS_LAUNCHER_SHA256,
+        verifier_sha256=READINESS_VERIFIER_SHA256,
+        python_executable_path_sha256=sha256(
+            str(pins.readiness_runtime_python_executable_path).encode()
+        ),
+        python_executable_sha256=READINESS_PYTHON_SHA256,
+        source_root_path_sha256=sha256(
+            str(pins.readiness_runtime_source_root_path).encode()
+        ),
+        source_root_identity_sha256=READINESS_SOURCE_IDENTITY_SHA256,
+        source_closure_manifest_sha256=READINESS_SOURCE_MANIFEST_SHA256,
+        site_packages_path_sha256=sha256(
+            str(pins.readiness_runtime_site_packages_path).encode()
+        ),
+        site_packages_identity_sha256=READINESS_SITE_IDENTITY_SHA256,
+        dependency_manifest_sha256=READINESS_DEPENDENCY_MANIFEST_SHA256,
+        isolated_flags_verified=True,
+        source_closure_retained=True,
+        immutable_runtime_verified=True,
     )
 
     def verify_image(
@@ -428,6 +477,7 @@ def build_fixture(
     return {
         "inputs": inputs,
         "pins": pins,
+        "runtime_identity": runtime_identity,
         "content": content,
         "provenance_receipt": provenance_receipt,
         "outcome": verified_outcome,
@@ -445,6 +495,7 @@ def derive(values: dict) -> dict:
     return readiness_module.derive_readiness_packet(
         values["inputs"],
         values["pins"],
+        values["runtime_identity"],
         now=NOW,
     )
 
@@ -453,6 +504,39 @@ def pin_manifest(pins: readiness_module.ReadinessPins) -> dict:
     return {
         "schema_version": readiness_module.PIN_MANIFEST_VERSION,
         "generation_id": pins.pin_set_generation_id,
+        "readiness_runtime_image_digest": (
+            pins.readiness_runtime_image_digest
+        ),
+        "readiness_runtime_launcher_sha256": (
+            pins.readiness_runtime_launcher_sha256
+        ),
+        "readiness_runtime_verifier_sha256": (
+            pins.readiness_runtime_verifier_sha256
+        ),
+        "readiness_runtime_python_executable_path": str(
+            pins.readiness_runtime_python_executable_path
+        ),
+        "readiness_runtime_python_executable_sha256": (
+            pins.readiness_runtime_python_executable_sha256
+        ),
+        "readiness_runtime_source_root_path": str(
+            pins.readiness_runtime_source_root_path
+        ),
+        "readiness_runtime_source_root_identity_sha256": (
+            pins.readiness_runtime_source_root_identity_sha256
+        ),
+        "readiness_runtime_source_closure_manifest_sha256": (
+            pins.readiness_runtime_source_closure_manifest_sha256
+        ),
+        "readiness_runtime_site_packages_path": str(
+            pins.readiness_runtime_site_packages_path
+        ),
+        "readiness_runtime_site_packages_identity_sha256": (
+            pins.readiness_runtime_site_packages_identity_sha256
+        ),
+        "readiness_runtime_dependency_manifest_sha256": (
+            pins.readiness_runtime_dependency_manifest_sha256
+        ),
         "provenance_keyring_sha256": pins.provenance_keyring_sha256,
         "provenance_signing_tool_source_sha256": (
             pins.provenance_signing_tool_source_sha256
@@ -536,6 +620,12 @@ def test_success_packet_is_evidence_only_and_binds_v4_inputs(
         == values["pins"].evidence_join_identity_sha256
     )
     assert packet["ready_for_query_release_v5_human_signature_only"] is True
+    assert packet["readiness_runtime"]["runtime_image_digest"] == (
+        READINESS_RUNTIME_IMAGE_DIGEST
+    )
+    assert packet["readiness_runtime"]["isolated_flags_verified"] is True
+    assert packet["readiness_runtime"]["source_closure_retained"] is True
+    assert packet["readiness_runtime"]["immutable_runtime_verified"] is True
     assert packet["requirements"] == {
         "requires_query_release_v5": True,
         "query_release_v4_accepted": False,
@@ -575,6 +665,43 @@ def test_success_packet_is_evidence_only_and_binds_v4_inputs(
         assert packet[field] is False
     for field in readiness_module.ZERO_FACT_FIELDS:
         assert packet[field] == 0
+
+
+def test_runtime_identity_must_match_independent_pins(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    values = build_fixture(tmp_path, monkeypatch)
+    drifted = replace(
+        values["runtime_identity"],
+        dependency_manifest_sha256="f" * 64,
+    )
+
+    with pytest.raises(
+        readiness_module.ReadinessV4Error,
+        match="runtime identity does not match active root pins",
+    ):
+        readiness_module.derive_readiness_packet(
+            values["inputs"],
+            values["pins"],
+            drifted,
+            now=NOW,
+        )
+
+
+def test_packet_runtime_identity_is_checked_against_active_pins(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    values = build_fixture(tmp_path, monkeypatch)
+    packet = derive(values)
+    packet["readiness_runtime"]["launcher_sha256"] = "f" * 64
+
+    assert not readiness_module._packet_binds_active_pins(
+        packet,
+        values["pins"],
+        values["pins"].packet_custody_path,
+    )
 
 
 def test_v4_has_no_git_subprocess_or_source_root_interface() -> None:
@@ -1040,6 +1167,7 @@ def test_invalid_pin_naive_time_and_authority_tamper_fail_closed(
         readiness_module.derive_readiness_packet(
             values["inputs"],
             bad_pins,
+            values["runtime_identity"],
             now=NOW,
         )
     with pytest.raises(
@@ -1049,6 +1177,7 @@ def test_invalid_pin_naive_time_and_authority_tamper_fail_closed(
         readiness_module.derive_readiness_packet(
             values["inputs"],
             values["pins"],
+            values["runtime_identity"],
             now=datetime(2026, 9, 1, 0, 30),
         )
     packet = derive(values)
@@ -1270,6 +1399,7 @@ def test_real_readiness_v3_packet_file_is_rejected_as_downgrade(
         readiness_module.verify_existing_readiness_packet(
             values["inputs"],
             values["pins"],
+            values["runtime_identity"],
             legacy_path,
             require_root_owned_parent=False,
             now=NOW,
@@ -1427,6 +1557,7 @@ def test_same_path_custody_rebuild_rejects_old_write_and_copied_packet(
         readiness_module.verify_existing_readiness_packet(
             values["inputs"],
             active_pins,
+            values["runtime_identity"],
             output,
             require_root_owned_parent=False,
             now=NOW,
@@ -1452,6 +1583,7 @@ def test_existing_packet_is_exactly_rederived_and_expires(
     verified = readiness_module.verify_existing_readiness_packet(
         values["inputs"],
         values["pins"],
+        values["runtime_identity"],
         output,
         require_root_owned_parent=False,
         now=NOW,
@@ -1465,6 +1597,7 @@ def test_existing_packet_is_exactly_rederived_and_expires(
         readiness_module.verify_existing_readiness_packet(
             values["inputs"],
             values["pins"],
+            values["runtime_identity"],
             output,
             require_root_owned_parent=False,
             now=NOW + readiness_module.PACKET_TTL,
@@ -1504,6 +1637,7 @@ def test_verify_existing_rechecks_pin_generation_before_return(
         readiness_module.verify_existing_readiness_packet(
             values["inputs"],
             values["pins"],
+            values["runtime_identity"],
             output,
             require_root_owned_parent=False,
             now=NOW,
@@ -1545,6 +1679,7 @@ def test_existing_packet_whitespace_rewrite_is_rejected(
         readiness_module.verify_existing_readiness_packet(
             values["inputs"],
             values["pins"],
+            values["runtime_identity"],
             output,
             require_root_owned_parent=False,
             now=NOW,

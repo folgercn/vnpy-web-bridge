@@ -1,7 +1,16 @@
-#!/usr/bin/env python3
 """Derive a non-authoritative C_FAST query-v4 readiness packet."""
 
 from __future__ import annotations
+
+import sys
+
+
+if __name__ == "__main__":
+    raise SystemExit(
+        "readiness-v4 is not a direct entry point; use the independently "
+        "pinned commodity_c_fast_t1_readiness_v4_launcher.py with a fixed "
+        "interpreter and -I -S -s -E -B"
+    )
 
 import argparse
 import base64
@@ -16,7 +25,6 @@ import os
 from pathlib import Path
 import re
 import stat
-import sys
 from typing import Any
 
 from c_fast_t1.verify_query_v4_image_attestation import (
@@ -88,6 +96,39 @@ QUERY_V5_KEYRING_SCHEMA_PATH = (
 PIN_ROOT = Path("/run/c-fast-t1-readiness-v4-pins")
 PIN_MANIFEST_PATH = PIN_ROOT / "pin-set.manifest.json"
 PIN_PATHS = {
+    "readiness_runtime_image_digest": (
+        PIN_ROOT / "readiness-runtime-image.digest"
+    ),
+    "readiness_runtime_launcher_sha256": (
+        PIN_ROOT / "readiness-runtime-launcher.sha256"
+    ),
+    "readiness_runtime_verifier_sha256": (
+        PIN_ROOT / "readiness-runtime-verifier.sha256"
+    ),
+    "readiness_runtime_python_executable_path": (
+        PIN_ROOT / "readiness-runtime-python-executable.path"
+    ),
+    "readiness_runtime_python_executable_sha256": (
+        PIN_ROOT / "readiness-runtime-python-executable.sha256"
+    ),
+    "readiness_runtime_source_root_path": (
+        PIN_ROOT / "readiness-runtime-source-root.path"
+    ),
+    "readiness_runtime_source_root_identity_sha256": (
+        PIN_ROOT / "readiness-runtime-source-root-identity.sha256"
+    ),
+    "readiness_runtime_source_closure_manifest_sha256": (
+        PIN_ROOT / "readiness-runtime-source-closure-manifest.sha256"
+    ),
+    "readiness_runtime_site_packages_path": (
+        PIN_ROOT / "readiness-runtime-site-packages.path"
+    ),
+    "readiness_runtime_site_packages_identity_sha256": (
+        PIN_ROOT / "readiness-runtime-site-packages-identity.sha256"
+    ),
+    "readiness_runtime_dependency_manifest_sha256": (
+        PIN_ROOT / "readiness-runtime-dependency-manifest.sha256"
+    ),
     "provenance_keyring_sha256": PIN_ROOT / "provenance-keyring.sha256",
     "provenance_signing_tool_source_sha256": (
         PIN_ROOT / "provenance-signing-tool-source.sha256"
@@ -115,7 +156,7 @@ PIN_PATHS = {
 }
 
 SCHEMA_VERSION = "commodity_c_fast_t1_readiness_v4"
-PIN_MANIFEST_VERSION = "commodity_c_fast_t1_readiness_v4_pin_set_v1"
+PIN_MANIFEST_VERSION = "commodity_c_fast_t1_readiness_v4_pin_set_v2"
 CUSTODY_IDENTITY_VERSION = (
     "commodity_c_fast_t1_readiness_v4_custody_identity_v1"
 )
@@ -139,6 +180,17 @@ OCI_DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{8,128}$")
 
 PIN_MANIFEST_VALUE_FIELDS = (
+    "readiness_runtime_image_digest",
+    "readiness_runtime_launcher_sha256",
+    "readiness_runtime_verifier_sha256",
+    "readiness_runtime_python_executable_path",
+    "readiness_runtime_python_executable_sha256",
+    "readiness_runtime_source_root_path",
+    "readiness_runtime_source_root_identity_sha256",
+    "readiness_runtime_source_closure_manifest_sha256",
+    "readiness_runtime_site_packages_path",
+    "readiness_runtime_site_packages_identity_sha256",
+    "readiness_runtime_dependency_manifest_sha256",
     "provenance_keyring_sha256",
     "provenance_signing_tool_source_sha256",
     "provenance_signing_tool_source_commit_sha",
@@ -252,6 +304,17 @@ class ReadinessPins:
     pin_set_generation_id: str
     pin_set_manifest_sha256: str
     pin_root_identity_sha256: str
+    readiness_runtime_image_digest: str
+    readiness_runtime_launcher_sha256: str
+    readiness_runtime_verifier_sha256: str
+    readiness_runtime_python_executable_path: Path
+    readiness_runtime_python_executable_sha256: str
+    readiness_runtime_source_root_path: Path
+    readiness_runtime_source_root_identity_sha256: str
+    readiness_runtime_source_closure_manifest_sha256: str
+    readiness_runtime_site_packages_path: Path
+    readiness_runtime_site_packages_identity_sha256: str
+    readiness_runtime_dependency_manifest_sha256: str
     provenance_keyring_sha256: str
     provenance_signing_tool_source_sha256: str
     provenance_signing_tool_source_commit_sha: str
@@ -296,8 +359,136 @@ class VerifiedReadinessPacket:
     canonical_sha256: str
 
 
+@dataclass(frozen=True)
+class ReadinessRuntimeIdentity:
+    runtime_image_digest: str
+    launcher_sha256: str
+    verifier_sha256: str
+    python_executable_path_sha256: str
+    python_executable_sha256: str
+    source_root_path_sha256: str
+    source_root_identity_sha256: str
+    source_closure_manifest_sha256: str
+    site_packages_path_sha256: str
+    site_packages_identity_sha256: str
+    dependency_manifest_sha256: str
+    isolated_flags_verified: bool
+    source_closure_retained: bool
+    immutable_runtime_verified: bool
+
+
+_ACTIVE_RUNTIME_IDENTITY: ReadinessRuntimeIdentity | None = None
+_ACTIVE_RUNTIME_REVALIDATOR: Any = None
+
+
+def install_verified_runtime_identity(
+    identity: ReadinessRuntimeIdentity,
+    revalidator: Any,
+) -> None:
+    """Install the launcher's retained identity before production main()."""
+
+    global _ACTIVE_RUNTIME_IDENTITY, _ACTIVE_RUNTIME_REVALIDATOR
+    if _ACTIVE_RUNTIME_IDENTITY is not None:
+        raise ReadinessV4Error("readiness-v4 runtime identity already installed")
+    _validate_runtime_identity(identity)
+    if not callable(revalidator):
+        raise ReadinessV4Error("readiness-v4 runtime revalidator is required")
+    _ACTIVE_RUNTIME_IDENTITY = identity
+    _ACTIVE_RUNTIME_REVALIDATOR = revalidator
+
+
 def _hash_bytes(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
+
+
+def _path_sha256(path: Path) -> str:
+    return _hash_bytes(str(path).encode("utf-8"))
+
+
+def _validate_runtime_identity(identity: ReadinessRuntimeIdentity) -> None:
+    for field in (
+        "launcher_sha256",
+        "verifier_sha256",
+        "python_executable_path_sha256",
+        "python_executable_sha256",
+        "source_root_path_sha256",
+        "source_root_identity_sha256",
+        "source_closure_manifest_sha256",
+        "site_packages_path_sha256",
+        "site_packages_identity_sha256",
+        "dependency_manifest_sha256",
+    ):
+        if SHA256_PATTERN.fullmatch(str(getattr(identity, field))) is None:
+            raise ReadinessV4Error(
+                f"readiness runtime {field} must be a lowercase SHA256"
+            )
+    if OCI_DIGEST_PATTERN.fullmatch(identity.runtime_image_digest) is None:
+        raise ReadinessV4Error(
+            "readiness runtime image digest must be an OCI RepoDigest"
+        )
+    if not (
+        identity.isolated_flags_verified
+        and identity.source_closure_retained
+        and identity.immutable_runtime_verified
+    ):
+        raise ReadinessV4Error(
+            "readiness runtime identity is not independently enforced"
+        )
+
+
+def _runtime_identity_payload(
+    identity: ReadinessRuntimeIdentity,
+) -> dict[str, Any]:
+    _validate_runtime_identity(identity)
+    payload = {
+        field: getattr(identity, field)
+        for field in identity.__dataclass_fields__
+    }
+    payload["runtime_identity_sha256"] = _hash_bytes(
+        canonical_json(payload)
+    )
+    return payload
+
+
+def _runtime_matches_pins(
+    identity: ReadinessRuntimeIdentity,
+    pins: ReadinessPins,
+) -> bool:
+    return (
+        identity.runtime_image_digest
+        == pins.readiness_runtime_image_digest
+        and identity.launcher_sha256
+        == pins.readiness_runtime_launcher_sha256
+        and identity.verifier_sha256
+        == pins.readiness_runtime_verifier_sha256
+        and identity.python_executable_path_sha256
+        == _path_sha256(pins.readiness_runtime_python_executable_path)
+        and identity.python_executable_sha256
+        == pins.readiness_runtime_python_executable_sha256
+        and identity.source_root_path_sha256
+        == _path_sha256(pins.readiness_runtime_source_root_path)
+        and identity.source_root_identity_sha256
+        == pins.readiness_runtime_source_root_identity_sha256
+        and identity.source_closure_manifest_sha256
+        == pins.readiness_runtime_source_closure_manifest_sha256
+        and identity.site_packages_path_sha256
+        == _path_sha256(pins.readiness_runtime_site_packages_path)
+        and identity.site_packages_identity_sha256
+        == pins.readiness_runtime_site_packages_identity_sha256
+        and identity.dependency_manifest_sha256
+        == pins.readiness_runtime_dependency_manifest_sha256
+    )
+
+
+def _require_runtime_identity(
+    identity: ReadinessRuntimeIdentity,
+    pins: ReadinessPins,
+) -> None:
+    _validate_runtime_identity(identity)
+    if not _runtime_matches_pins(identity, pins):
+        raise ReadinessV4Error(
+            "readiness runtime identity does not match active root pins"
+        )
 
 
 def pin_root_path_sha256() -> str:
@@ -496,6 +687,13 @@ def _validate_pins(pins: ReadinessPins) -> None:
     for field in (
         "pin_set_manifest_sha256",
         "pin_root_identity_sha256",
+        "readiness_runtime_launcher_sha256",
+        "readiness_runtime_verifier_sha256",
+        "readiness_runtime_python_executable_sha256",
+        "readiness_runtime_source_root_identity_sha256",
+        "readiness_runtime_source_closure_manifest_sha256",
+        "readiness_runtime_site_packages_identity_sha256",
+        "readiness_runtime_dependency_manifest_sha256",
         "provenance_keyring_sha256",
         "provenance_signing_tool_source_sha256",
         "provenance_signer_dependency_manifest_sha256",
@@ -525,6 +723,17 @@ def _validate_pins(pins: ReadinessPins) -> None:
         raise ReadinessV4Error(
             "provenance_signer_runtime_image_digest is invalid"
         )
+    if OCI_DIGEST_PATTERN.fullmatch(
+        str(pins.readiness_runtime_image_digest)
+    ) is None:
+        raise ReadinessV4Error("readiness_runtime_image_digest is invalid")
+    for field in (
+        "readiness_runtime_python_executable_path",
+        "readiness_runtime_source_root_path",
+        "readiness_runtime_site_packages_path",
+    ):
+        if not getattr(pins, field).is_absolute():
+            raise ReadinessV4Error(f"{field} must be absolute")
     if not pins.packet_custody_path.is_absolute():
         raise ReadinessV4Error("packet custody path must be absolute")
 
@@ -624,6 +833,39 @@ def _read_production_pins() -> ReadinessPins:
             canonical_json(manifest_before)
         ),
         pin_root_identity_sha256=pin_root_identity_before,
+        readiness_runtime_image_digest=values[
+            "readiness_runtime_image_digest"
+        ],
+        readiness_runtime_launcher_sha256=values[
+            "readiness_runtime_launcher_sha256"
+        ],
+        readiness_runtime_verifier_sha256=values[
+            "readiness_runtime_verifier_sha256"
+        ],
+        readiness_runtime_python_executable_path=Path(
+            values["readiness_runtime_python_executable_path"]
+        ),
+        readiness_runtime_python_executable_sha256=values[
+            "readiness_runtime_python_executable_sha256"
+        ],
+        readiness_runtime_source_root_path=Path(
+            values["readiness_runtime_source_root_path"]
+        ),
+        readiness_runtime_source_root_identity_sha256=values[
+            "readiness_runtime_source_root_identity_sha256"
+        ],
+        readiness_runtime_source_closure_manifest_sha256=values[
+            "readiness_runtime_source_closure_manifest_sha256"
+        ],
+        readiness_runtime_site_packages_path=Path(
+            values["readiness_runtime_site_packages_path"]
+        ),
+        readiness_runtime_site_packages_identity_sha256=values[
+            "readiness_runtime_site_packages_identity_sha256"
+        ],
+        readiness_runtime_dependency_manifest_sha256=values[
+            "readiness_runtime_dependency_manifest_sha256"
+        ],
         provenance_keyring_sha256=values["provenance_keyring_sha256"],
         provenance_signing_tool_source_sha256=values[
             "provenance_signing_tool_source_sha256"
@@ -880,6 +1122,7 @@ def _packet_identity(packet: dict[str, Any]) -> dict[str, Any]:
             "expires_at",
             "verifier_sha256",
             "schema_sha256",
+            "readiness_runtime",
             "pin_root_path_sha256",
             "pin_root_identity_sha256",
             "pin_set_generation_id",
@@ -971,9 +1214,16 @@ def _validate_packet(packet: dict[str, Any]) -> None:
         raise ReadinessV4Error(
             "readiness-v4 packet ID does not bind exact facts"
         )
+    runtime = packet["readiness_runtime"]
+    runtime_identity = {
+        field: value
+        for field, value in runtime.items()
+        if field != "runtime_identity_sha256"
+    }
     if (
-        packet["verifier_sha256"]
-        != _hash_bytes(_read(VERIFIER_PATH, "readiness-v4 verifier"))
+        packet["verifier_sha256"] != runtime["verifier_sha256"]
+        or runtime["runtime_identity_sha256"]
+        != _hash_bytes(canonical_json(runtime_identity))
         or packet["schema_sha256"]
         != _hash_bytes(_read(SCHEMA_PATH, "readiness-v4 schema"))
         or packet["pin_root_path_sha256"] != pin_root_path_sha256()
@@ -1041,10 +1291,12 @@ def _verify_query_v4_content(
 def derive_readiness_packet(
     inputs: ReadinessInputs,
     pins: ReadinessPins,
+    runtime_identity: ReadinessRuntimeIdentity,
     *,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     _validate_pins(pins)
+    _require_runtime_identity(runtime_identity, pins)
     verify_active_readiness_pins(pins)
     _validate_expected_namespaces(inputs)
     generated_at = _require_aware(
@@ -1364,12 +1616,11 @@ def derive_readiness_packet(
     identity = {
         "generated_at": generated_at.isoformat(),
         "expires_at": expires_at.isoformat(),
-        "verifier_sha256": _hash_bytes(
-            _read(VERIFIER_PATH, "readiness-v4 verifier")
-        ),
+        "verifier_sha256": runtime_identity.verifier_sha256,
         "schema_sha256": _hash_bytes(
             _read(SCHEMA_PATH, "readiness-v4 schema")
         ),
+        "readiness_runtime": _runtime_identity_payload(runtime_identity),
         "pin_root_path_sha256": pin_root_path_sha256(),
         "pin_root_identity_sha256": pins.pin_root_identity_sha256,
         "pin_set_generation_id": pins.pin_set_generation_id,
@@ -1416,6 +1667,7 @@ def derive_readiness_packet(
         **{field: 0 for field in ZERO_FACT_FIELDS},
     }
     _validate_packet(packet)
+    _require_runtime_identity(runtime_identity, pins)
     verify_active_readiness_pins(pins)
     return packet
 
@@ -1427,6 +1679,7 @@ def _packet_binds_active_pins(
 ) -> bool:
     build = packet["build_registry_provenance"]
     deployment = packet["readonly_deployment_outcome"]
+    runtime = packet["readiness_runtime"]
     try:
         (
             custody_id,
@@ -1438,6 +1691,28 @@ def _packet_binds_active_pins(
     return (
         packet["pin_root_identity_sha256"]
         == pins.pin_root_identity_sha256
+        and runtime["runtime_image_digest"]
+        == pins.readiness_runtime_image_digest
+        and runtime["launcher_sha256"]
+        == pins.readiness_runtime_launcher_sha256
+        and runtime["verifier_sha256"]
+        == pins.readiness_runtime_verifier_sha256
+        and runtime["python_executable_path_sha256"]
+        == _path_sha256(pins.readiness_runtime_python_executable_path)
+        and runtime["python_executable_sha256"]
+        == pins.readiness_runtime_python_executable_sha256
+        and runtime["source_root_path_sha256"]
+        == _path_sha256(pins.readiness_runtime_source_root_path)
+        and runtime["source_root_identity_sha256"]
+        == pins.readiness_runtime_source_root_identity_sha256
+        and runtime["source_closure_manifest_sha256"]
+        == pins.readiness_runtime_source_closure_manifest_sha256
+        and runtime["site_packages_path_sha256"]
+        == _path_sha256(pins.readiness_runtime_site_packages_path)
+        and runtime["site_packages_identity_sha256"]
+        == pins.readiness_runtime_site_packages_identity_sha256
+        and runtime["dependency_manifest_sha256"]
+        == pins.readiness_runtime_dependency_manifest_sha256
         and packet["pin_set_generation_id"]
         == pins.pin_set_generation_id
         and packet["pin_set_manifest_sha256"]
@@ -1564,12 +1839,14 @@ def write_packet_create_only(
 def verify_existing_readiness_packet(
     inputs: ReadinessInputs,
     pins: ReadinessPins,
+    runtime_identity: ReadinessRuntimeIdentity,
     packet_path: Path,
     *,
     now: datetime | None = None,
     require_root_owned_parent: bool = True,
 ) -> VerifiedReadinessPacket:
     _validate_pins(pins)
+    _require_runtime_identity(runtime_identity, pins)
     active_pins, active_custody = _reload_and_match_active_pins(pins)
     current_time = _require_aware(
         datetime.now(timezone.utc) if now is None else now,
@@ -1643,6 +1920,7 @@ def verify_existing_readiness_packet(
     regenerated = derive_readiness_packet(
         inputs,
         active_pins,
+        runtime_identity,
         now=generated_at,
     )
     if regenerated != packet:
@@ -1678,6 +1956,7 @@ def verify_existing_readiness_packet(
             "existing readiness-v4 packet changed during verification"
         )
     _reload_and_match_active_pins(final_pins)
+    _require_runtime_identity(runtime_identity, final_pins)
     return VerifiedReadinessPacket(
         payload=packet,
         raw_sha256=_hash_bytes(raw),
@@ -1748,10 +2027,24 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     try:
+        if (
+            _ACTIVE_RUNTIME_IDENTITY is None
+            or not callable(_ACTIVE_RUNTIME_REVALIDATOR)
+        ):
+            raise ReadinessV4Error(
+                "readiness-v4 production main requires the verified launcher"
+            )
+        _ACTIVE_RUNTIME_REVALIDATOR()
         pins = _read_production_pins()
         verify_active_readiness_pins(pins)
-        packet = derive_readiness_packet(inputs_from_args(args), pins)
+        packet = derive_readiness_packet(
+            inputs_from_args(args),
+            pins,
+            _ACTIVE_RUNTIME_IDENTITY,
+        )
+        _ACTIVE_RUNTIME_REVALIDATOR()
         raw_sha256 = write_packet_create_only(packet, pins, args.output)
+        _ACTIVE_RUNTIME_REVALIDATOR()
     except (ReadinessV4Error, OSError, ValueError) as exc:
         print(f"query-v4 readiness-v4 derivation failed: {exc}", file=sys.stderr)
         return 2
@@ -1761,7 +2054,3 @@ def main() -> int:
     print("authority_granted=false")
     print("production_query_authorized=false")
     return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

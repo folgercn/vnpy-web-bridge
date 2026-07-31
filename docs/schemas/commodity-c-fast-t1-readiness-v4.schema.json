@@ -15,6 +15,7 @@
     "expires_at",
     "verifier_sha256",
     "schema_sha256",
+    "readiness_runtime",
     "pin_root_path_sha256",
     "pin_root_identity_sha256",
     "pin_set_generation_id",
@@ -119,6 +120,74 @@
     },
     "schema_sha256": {
       "$ref": "#/$defs/sha256"
+    },
+    "readiness_runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "runtime_image_digest",
+        "launcher_sha256",
+        "verifier_sha256",
+        "python_executable_path_sha256",
+        "python_executable_sha256",
+        "source_root_path_sha256",
+        "source_root_identity_sha256",
+        "source_closure_manifest_sha256",
+        "site_packages_path_sha256",
+        "site_packages_identity_sha256",
+        "dependency_manifest_sha256",
+        "isolated_flags_verified",
+        "source_closure_retained",
+        "immutable_runtime_verified",
+        "runtime_identity_sha256"
+      ],
+      "properties": {
+        "runtime_image_digest": {
+          "$ref": "#/$defs/ociDigest"
+        },
+        "launcher_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "verifier_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "python_executable_path_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "python_executable_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "source_root_path_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "source_root_identity_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "source_closure_manifest_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "site_packages_path_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "site_packages_identity_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "dependency_manifest_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "isolated_flags_verified": {
+          "const": true
+        },
+        "source_closure_retained": {
+          "const": true
+        },
+        "immutable_runtime_verified": {
+          "const": true
+        },
+        "runtime_identity_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
     },
     "pin_root_path_sha256": {
       "$ref": "#/$defs/sha256"

@@ -19,7 +19,8 @@ Web Bridge RPC、Gateway、订单或持仓。
 
 这里的 `READY_FOR_QUERY_RELEASE_V5_HUMAN_SIGNATURE_ONLY` 只表示 Evidence
 与未来 query-v5 authority key domain 已冻结，可以交给下一切片实现 release-v5；
-本切片没有 release-v5 schema、signer 或 runtime，因此不能据此签名或启动 query。
+本切片新增的只是 readiness verifier 的隔离 runtime，并没有 query release-v5
+schema、signer 或 query runtime，因此不能据此签名或启动 query。
 
 成功 packet 固定：
 
@@ -48,6 +49,47 @@ query-v4 parent/child、`Containerfile.query-v4` 或 runtime template。后续�
 release/runtime-v5，不能把 readiness-v4 回灌到历史 v4 合同。
 
 ## 验证链
+
+### 独立 readiness runtime trust root
+
+正式入口不再直接运行 verifier，也不接受 shebang 或 `PYTHONPATH`。唯一受支持
+入口是 exact readiness-v4 release 中的 launcher：
+
+```text
+<PINNED_PYTHON> -I -S -s -E -B \
+  /opt/c-fast-readiness-v4/release/scripts/commodity_c_fast_t1_readiness_v4_launcher.py
+```
+
+launcher 在任何 readiness、本地 delegate、jsonschema、referencing 或 crypto
+module import 前验证 Python flags，并从 root-owned v2 pin generation 取得固定的
+interpreter、source root、site-packages 和 immutable image RepoDigest。随后它：
+
+- stable-FD double-read 并固定 launcher、verifier 和 interpreter bytes；
+- 验证 source/site-packages 从 filesystem root 开始的完整父链均 root-owned、
+  non-symlink、不可 group/world 写，并且 non-root runtime 没有写权限；
+- 连续两次递归扫描完整 source release 和 dependency tree，固定每个目录/文件的
+  relative path、owner、mode、size 和 SHA256；
+- 拒绝 symlink、hardlink、device/socket、`.pth`、`.egg-link`、
+  `sitecustomize` 和 `usercustomize`；
+- 只从初次扫描保留的 exact Python source bytes 加载全部本地 module；普通路径
+  漂移不会改变已执行 bytes，后续全 closure rescan 又会检测并拒绝漂移；
+- 只有 dependency closure 与独立 pin 匹配后，才把唯一 site-packages root 加入
+  `sys.path`；`-I -S -s -E -B` 同时排除 cwd、environment、user-site、site hooks
+  和 bytecode 写入；
+- 在派生前、create-only 写入前和写入后重新核对 pin generation 与完整 execution
+  closure。
+
+`scripts/c_fast_t1/Containerfile.readiness-v4` 把全部 `scripts/`、全部 schemas 和
+固定版本第三方依赖封装为 root-owned、non-writable release。trusted release
+launcher 必须按 immutable RepoDigest 选择该 image，并使用 read-only rootfs、
+non-root UID、`--network=none`、只读 pin/evidence mounts；只有 exact pinned
+custody mount 可写。不能在目标 container 内现场从当前 bytes 反推 expected pins。
+
+packet 的 `readiness_runtime` 固定 image RepoDigest、launcher/verifier/interpreter、
+source/dependency manifests、path/directory identities 和 enforcement booleans；
+`runtime_identity_sha256` 进入 packet ID。existing-packet verifier 也必须由同一
+launcher 调用，并用当前 retained runtime identity 重派生，不能只检查 packet
+自报的 `verifier_sha256`。
 
 readiness-v4 按以下顺序重新验证 raw artifacts：
 
@@ -166,6 +208,17 @@ packet 固定 15 分钟 TTL；`expires_at` 距 outcome 签发和 deployment comp
 ```text
 /run/c-fast-t1-readiness-v4-pins/
   pin-set.manifest.json
+  readiness-runtime-image.digest
+  readiness-runtime-launcher.sha256
+  readiness-runtime-verifier.sha256
+  readiness-runtime-python-executable.path
+  readiness-runtime-python-executable.sha256
+  readiness-runtime-source-root.path
+  readiness-runtime-source-root-identity.sha256
+  readiness-runtime-source-closure-manifest.sha256
+  readiness-runtime-site-packages.path
+  readiness-runtime-site-packages-identity.sha256
+  readiness-runtime-dependency-manifest.sha256
   provenance-keyring.sha256
   provenance-signing-tool-source.sha256
   provenance-signing-tool-source.commit
@@ -188,8 +241,19 @@ rename/swap 的上层目录。
 
 ```json
 {
-  "schema_version": "commodity_c_fast_t1_readiness_v4_pin_set_v1",
+  "schema_version": "commodity_c_fast_t1_readiness_v4_pin_set_v2",
   "generation_id": "readiness-v4-pins-UNIQUE_ID",
+  "readiness_runtime_image_digest": "sha256:<64 hex>",
+  "readiness_runtime_launcher_sha256": "<64 hex>",
+  "readiness_runtime_verifier_sha256": "<64 hex>",
+  "readiness_runtime_python_executable_path": "/usr/local/bin/python3.12",
+  "readiness_runtime_python_executable_sha256": "<64 hex>",
+  "readiness_runtime_source_root_path": "/opt/c-fast-readiness-v4/release",
+  "readiness_runtime_source_root_identity_sha256": "<64 hex>",
+  "readiness_runtime_source_closure_manifest_sha256": "<64 hex>",
+  "readiness_runtime_site_packages_path": "/opt/c-fast-readiness-v4/site-packages",
+  "readiness_runtime_site_packages_identity_sha256": "<64 hex>",
+  "readiness_runtime_dependency_manifest_sha256": "<64 hex>",
   "provenance_keyring_sha256": "<64 hex>",
   "provenance_signing_tool_source_sha256": "<64 hex>",
   "provenance_signing_tool_source_commit_sha": "<40 hex>",
@@ -231,7 +295,8 @@ packet 还绑定当前 custody directory 的 device/inode/owner/mode identity。
 路径和 `custody-identity.json` 被复制到重建目录，旧 packet 或由旧 snapshot
 派生的二次写也会因 directory identity 不同而失败。
 
-packet ID 绑定 verifier/schema、pin-root directory identity、pin generation/
+packet ID 绑定 independently retained readiness execution closure、verifier/schema、
+pin-root directory identity、pin generation/
 manifest、custody path/object/directory identity、root-pinned evidence join、
 source/image namespaces、content、provenance-v3 和 deployment outcome 全部
 exact facts：
@@ -271,8 +336,8 @@ existing packet 必须保持 verifier 的 deterministic canonical storage bytes
 参数与既有 deployment outcome runbook 相同：
 
 ```bash
-PYTHONPATH=scripts .venv/bin/python \
-  scripts/commodity_c_fast_t1_readiness_v4.py \
+/usr/local/bin/python3.12 -I -S -s -E -B \
+  /opt/c-fast-readiness-v4/release/scripts/commodity_c_fast_t1_readiness_v4_launcher.py \
   --external-image-evidence /archive/query-v4-external-evidence.json \
   --source-bundle-archive /archive/query-v4-source-bundle.tar \
   --oci-layout-archive /archive/query-v4-runtime.oci.tar \
@@ -330,14 +395,18 @@ PYTHONPATH=scripts .venv/bin/python \
 
 ```bash
 PYTHONPATH=scripts .venv/bin/python -m pytest -q \
-  backend/tests/unit/test_commodity_c_fast_t1_readiness_v4_script.py
+  backend/tests/unit/test_commodity_c_fast_t1_readiness_v4_script.py \
+  backend/tests/unit/test_commodity_c_fast_t1_readiness_v4_launcher.py
 
 .venv/bin/ruff check \
   scripts/commodity_c_fast_t1_readiness_v4.py \
-  backend/tests/unit/test_commodity_c_fast_t1_readiness_v4_script.py
+  scripts/commodity_c_fast_t1_readiness_v4_launcher.py \
+  backend/tests/unit/test_commodity_c_fast_t1_readiness_v4_script.py \
+  backend/tests/unit/test_commodity_c_fast_t1_readiness_v4_launcher.py
 
 PYTHONPATH=scripts .venv/bin/python -m py_compile \
-  scripts/commodity_c_fast_t1_readiness_v4.py
+  scripts/commodity_c_fast_t1_readiness_v4.py \
+  scripts/commodity_c_fast_t1_readiness_v4_launcher.py
 ```
 
 failure-path 覆盖 exact content 重算、raw artifact splice、provenance-v3 signing
@@ -345,4 +414,6 @@ tool/dependency/runtime pins、五 keyring 十对 collision、build/outcome join
 non-canonical key encoding、unsafe ancestor、stale outcome、symlink、authority
 escalation、真实 readiness-v3 file downgrade、
 mixed-generation pin snapshot、write/return 前 pin rotation、同路径 custody 重建、
-whitespace rewrite、create-only replay 和 expired packet。
+whitespace rewrite、create-only replay、expired packet、non-isolated direct entry、
+startup hooks、`PYTHONPATH` module shadow、symlink escape、post-import path drift、
+retained source bytes 和 independently pinned runtime identity。
