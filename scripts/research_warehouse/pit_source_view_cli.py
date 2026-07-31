@@ -35,6 +35,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--manifest-public-key-sha256", required=True)
     parser.add_argument("--business-public-key", type=Path, required=True)
     parser.add_argument("--business-public-key-sha256", required=True)
+    parser.add_argument("--business-signer-key-id", required=True)
     parser.add_argument("--baseline-batch", type=Path, required=True)
     parser.add_argument("--previous-snapshot", type=Path)
     parser.add_argument("--source-month", required=True)
@@ -99,13 +100,14 @@ def main(argv: list[str] | None = None) -> int:
         )
         built = build_source_view(
             calendar=context.calendar,
-            calendar_anchor_sha256=context.availability.raw_sha256,
+            calendar_anchor=context.availability,
             history_receipt=history,
             history_receipt_sha256=pins.history_receipt_raw_sha256,
             operator_state=state,
             daily_source_raw=daily_raw,
             baseline_batch=baseline,
             business_public_key=business_key,
+            expected_business_signer_key_id=args.business_signer_key_id,
             source_month=args.source_month,
             previous_snapshot=previous,
         )

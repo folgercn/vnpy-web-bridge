@@ -63,9 +63,28 @@ def _open_bound_directory(path: Path, label: str) -> tuple[int, tuple[int, ...]]
         raise
 
 
+def _read_fd(descriptor: int, *, limit: int) -> bytes:
+    chunks = []
+    remaining = limit + 1
+    while remaining:
+        chunk = os.read(descriptor, min(65536, remaining))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    raw = b"".join(chunks)
+    if len(raw) > limit:
+        raise RegistryError("published PIT source object exceeds limit")
+    return raw
+
+
 def _read_at(parent_fd: int, name: str, *, limit: int) -> bytes:
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
-    descriptor = os.open(name, flags, dir_fd=parent_fd)
+    try:
+        before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        descriptor = os.open(name, flags, dir_fd=parent_fd)
+    except OSError as exc:
+        raise RegistryError("published PIT source object is unavailable") from exc
     try:
         opened = os.fstat(descriptor)
         if (
@@ -75,26 +94,33 @@ def _read_at(parent_fd: int, name: str, *, limit: int) -> bytes:
             or opened.st_nlink != 1
         ):
             raise RegistryError("published PIT source object custody is unsafe")
-        chunks = []
-        remaining = limit + 1
-        while remaining:
-            chunk = os.read(descriptor, min(65536, remaining))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        raw = b"".join(chunks)
-        if len(raw) > limit:
-            raise RegistryError("published PIT source object exceeds limit")
-        if file_identity(opened) != file_identity(os.fstat(descriptor)):
+        raw = _read_fd(descriptor, limit=limit)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        repeated = _read_fd(descriptor, limit=limit)
+        after = os.fstat(descriptor)
+        path_after = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if (
+            len(
+                {
+                    file_identity(before),
+                    file_identity(opened),
+                    file_identity(after),
+                    file_identity(path_after),
+                }
+            )
+            != 1
+            or raw != repeated
+        ):
             raise RegistryError("published PIT source object changed while read")
         return raw
+    except OSError as exc:
+        raise RegistryError("published PIT source object read failed closed") from exc
     finally:
         os.close(descriptor)
 
 def _create_at(parent_fd: int, name: str, raw: bytes) -> None:
     flags = (
-        os.O_WRONLY
+        os.O_RDWR
         | os.O_CREAT
         | os.O_EXCL
         | getattr(os, "O_NOFOLLOW", 0)
@@ -104,6 +130,16 @@ def _create_at(parent_fd: int, name: str, raw: bytes) -> None:
     try:
         write_all(descriptor, raw)
         os.fsync(descriptor)
+        created = os.fstat(descriptor)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        repeated = _read_fd(descriptor, limit=max(1, len(raw)))
+        path_after = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if (
+            raw != repeated
+            or file_identity(created) != file_identity(os.fstat(descriptor))
+            or file_identity(created) != file_identity(path_after)
+        ):
+            raise RegistryError("created PIT source object identity changed")
     finally:
         os.close(descriptor)
     os.fsync(parent_fd)
@@ -128,11 +164,31 @@ def publish_source_view(
             os.fsync(root_fd)
         except FileExistsError as exc:
             raise RegistryError("PIT source view already exists; overwrite forbidden") from exc
+        expected_output = _directory_identity(
+            os.stat(directory_id, dir_fd=root_fd, follow_symlinks=False)
+        )
         output_fd = os.open(directory_id, DIRECTORY_FLAGS, dir_fd=root_fd)
         output_identity = _directory_identity(os.fstat(output_fd))
         _require_private_directory(os.fstat(output_fd), "PIT source-view directory")
+        if output_identity != expected_output:
+            raise RegistryError("PIT source-view directory changed while opening")
         _create_at(output_fd, SOURCE_VIEW_FILENAME, source_view_raw)
         _create_at(output_fd, RECEIPT_FILENAME, receipt_raw)
+        if (
+            _read_at(
+                output_fd,
+                SOURCE_VIEW_FILENAME,
+                limit=max(1, len(source_view_raw)),
+            )
+            != source_view_raw
+            or _read_at(
+                output_fd,
+                RECEIPT_FILENAME,
+                limit=max(1, len(receipt_raw)),
+            )
+            != receipt_raw
+        ):
+            raise RegistryError("PIT source-view final readback mismatch")
         if (
             _directory_identity(output_root.lstat()) != root_identity
             or _directory_identity(

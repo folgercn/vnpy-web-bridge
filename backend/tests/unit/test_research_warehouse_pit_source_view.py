@@ -4,8 +4,10 @@ import ast
 import base64
 import json
 import math
+import os
 import sys
 from copy import deepcopy
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -20,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import commodity_c_fast_pure_producer_kernel as frozen
 import commodity_relative_vol_snapshot_producer as producer
+import research_warehouse.pit_source_view_custody as pit_custody
 from research_warehouse.calendar_models import (
     CalendarDay,
     OfficialCalendar,
@@ -56,6 +59,23 @@ PRODUCT_BASE = {
     "sp": 6200.0,
     "zn": 24000.0,
 }
+SIGNER_KEY_ID = "research-key"
+
+
+@dataclass(frozen=True)
+class _TestAnchor:
+    raw_sha256: str = "2" * 64
+    available_at: datetime = datetime(2025, 9, 1, tzinfo=UTC)
+
+    def require_available(
+        self,
+        calendar: OfficialCalendar,
+        *,
+        cutoff_at: datetime,
+    ) -> None:
+        del calendar
+        if self.available_at > cutoff_at:
+            raise RegistryError("official calendar was unavailable at PIT cutoff")
 
 
 def _calendar() -> OfficialCalendar:
@@ -222,13 +242,14 @@ def test_real_shape_source_view_is_deterministic_and_producer_replays() -> None:
     baseline = _signed_baseline(key)
     kwargs = {
         "calendar": calendar,
-        "calendar_anchor_sha256": "2" * 64,
+        "calendar_anchor": _TestAnchor(),
         "history_receipt": history,
         "history_receipt_sha256": "3" * 64,
         "operator_state": _operator_state(),
         "daily_source_raw": daily_raw,
         "baseline_batch": baseline,
         "business_public_key": key.public_key(),
+        "expected_business_signer_key_id": SIGNER_KEY_ID,
         "source_month": "2026-07",
         "previous_snapshot": None,
     }
@@ -325,13 +346,14 @@ def test_missing_wrong_day_tamper_and_baseline_splice_fail_closed(
     with pytest.raises(PitSourceViewError, match=message):
         build_source_view(
             calendar=calendar,
-            calendar_anchor_sha256="2" * 64,
+            calendar_anchor=_TestAnchor(),
             history_receipt=history,
             history_receipt_sha256="3" * 64,
             operator_state=_operator_state(),
             daily_source_raw=daily_raw,
             baseline_batch=baseline,
             business_public_key=key.public_key(),
+            expected_business_signer_key_id=SIGNER_KEY_ID,
             source_month="2026-07",
             previous_snapshot=None,
         )
@@ -341,13 +363,14 @@ def test_create_only_custody_replay_and_file_set_fail_closed(tmp_path: Path) -> 
     calendar, history, daily_raw, key = _inputs()
     built = build_source_view(
         calendar=calendar,
-        calendar_anchor_sha256="2" * 64,
+        calendar_anchor=_TestAnchor(),
         history_receipt=history,
         history_receipt_sha256="3" * 64,
         operator_state=_operator_state(),
         daily_source_raw=daily_raw,
         baseline_batch=_signed_baseline(key),
         business_public_key=key.public_key(),
+        expected_business_signer_key_id=SIGNER_KEY_ID,
         source_month="2026-07",
         previous_snapshot=None,
     )
@@ -406,30 +429,64 @@ def test_future_availability_spec_and_output_permission_fail_closed(
     with pytest.raises(PitSourceViewError, match="unavailable at PIT cutoff"):
         build_source_view(
             calendar=calendar,
-            calendar_anchor_sha256="2" * 64,
+            calendar_anchor=_TestAnchor(),
             history_receipt=history,
             history_receipt_sha256="3" * 64,
             operator_state=_operator_state(),
             daily_source_raw=daily_raw,
             baseline_batch=baseline,
             business_public_key=key.public_key(),
+            expected_business_signer_key_id=SIGNER_KEY_ID,
             source_month="2026-07",
             previous_snapshot=None,
         )
 
     history["completed_at"] = "2026-07-31T14:00:00.000000Z"
-    baseline["targets"][0]["multiplier"] += 1
-    _resign(baseline, key)
-    with pytest.raises(PitSourceViewError, match="contract spec"):
+    with pytest.raises(RegistryError, match="calendar was unavailable"):
         build_source_view(
             calendar=calendar,
-            calendar_anchor_sha256="2" * 64,
+            calendar_anchor=_TestAnchor(
+                available_at=datetime(2026, 8, 1, tzinfo=UTC)
+            ),
             history_receipt=history,
             history_receipt_sha256="3" * 64,
             operator_state=_operator_state(),
             daily_source_raw=daily_raw,
             baseline_batch=baseline,
             business_public_key=key.public_key(),
+            expected_business_signer_key_id=SIGNER_KEY_ID,
+            source_month="2026-07",
+            previous_snapshot=None,
+        )
+
+    with pytest.raises(PitSourceViewError, match="signer key ID mismatch"):
+        build_source_view(
+            calendar=calendar,
+            calendar_anchor=_TestAnchor(),
+            history_receipt=history,
+            history_receipt_sha256="3" * 64,
+            operator_state=_operator_state(),
+            daily_source_raw=daily_raw,
+            baseline_batch=baseline,
+            business_public_key=key.public_key(),
+            expected_business_signer_key_id="wrong-key",
+            source_month="2026-07",
+            previous_snapshot=None,
+        )
+
+    baseline["targets"][0]["multiplier"] += 1
+    _resign(baseline, key)
+    with pytest.raises(PitSourceViewError, match="contract spec"):
+        build_source_view(
+            calendar=calendar,
+            calendar_anchor=_TestAnchor(),
+            history_receipt=history,
+            history_receipt_sha256="3" * 64,
+            operator_state=_operator_state(),
+            daily_source_raw=daily_raw,
+            baseline_batch=baseline,
+            business_public_key=key.public_key(),
+            expected_business_signer_key_id=SIGNER_KEY_ID,
             source_month="2026-07",
             previous_snapshot=None,
         )
@@ -443,6 +500,47 @@ def test_future_availability_spec_and_output_permission_fail_closed(
             source_view_raw=b"{}",
             receipt_raw=b"{}\n",
         )
+
+
+def test_custody_open_path_replacement_race_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "race"
+    root.mkdir(mode=0o700)
+    target = root / "source-view.json"
+    target.write_bytes(b"trusted")
+    target.chmod(0o600)
+    descriptor = os.open(root, pit_custody.DIRECTORY_FLAGS)
+    real_open = os.open
+    raced = False
+
+    def racing_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal raced
+        if path == "source-view.json" and dir_fd == descriptor and not raced:
+            raced = True
+            os.rename(
+                "source-view.json",
+                "old-source-view.json",
+                src_dir_fd=descriptor,
+                dst_dir_fd=descriptor,
+            )
+            replacement = real_open(
+                "source-view.json",
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=descriptor,
+            )
+            os.write(replacement, b"replacement")
+            os.close(replacement)
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(pit_custody.os, "open", racing_open)
+    try:
+        with pytest.raises(RegistryError, match="changed while read"):
+            pit_custody._read_at(descriptor, "source-view.json", limit=1024)
+    finally:
+        os.close(descriptor)
 
 
 def test_receipt_schema_and_static_authority_boundary() -> None:

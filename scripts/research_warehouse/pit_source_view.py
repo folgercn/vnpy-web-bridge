@@ -18,6 +18,7 @@ import commodity_relative_vol_snapshot_producer as snapshot_producer
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
+from .calendar_anchors import CalendarAvailabilityAnchor
 from .calendar_models import OfficialCalendar
 from .canonical import canonical_json, canonical_json_line, parse_json_strict, sha256
 from .commit_anchors import load_commit_anchor_ledger
@@ -212,7 +213,9 @@ def contract_rows_from_daily_raw(
         raw_product = row.get("PRODUCTID")
         if not isinstance(raw_product, str):
             raise PitSourceViewError("official raw PRODUCTID is not a string")
-        product = raw_product.strip().lower()
+        product = raw_product.lower()
+        if raw_product.strip().lower() in expected_products and raw_product != product:
+            raise PitSourceViewError("official target PRODUCTID is not canonical")
         if product not in expected_products:
             continue
         delivery = _delivery_yyyymm(
@@ -296,11 +299,14 @@ def _verify_business_signature(
     payload: dict[str, Any],
     *,
     public_key: Ed25519PublicKey,
+    expected_signer_key_id: str,
     label: str,
 ) -> None:
     signature = payload.get("signature")
     if not isinstance(signature, str):
         raise PitSourceViewError(f"{label} signature is missing")
+    if payload.get("signer_key_id") != expected_signer_key_id:
+        raise PitSourceViewError(f"{label} signer key ID mismatch")
     try:
         decoded = base64.b64decode(signature, validate=True)
         public_key.verify(
@@ -396,13 +402,14 @@ def _calendar_binding(
 def build_source_view(
     *,
     calendar: OfficialCalendar,
-    calendar_anchor_sha256: str,
+    calendar_anchor: CalendarAvailabilityAnchor,
     history_receipt: dict[str, Any],
     history_receipt_sha256: str,
     operator_state: OperatorState,
     daily_source_raw: dict[str, dict[str, bytes]],
     baseline_batch: dict[str, Any],
     business_public_key: Ed25519PublicKey,
+    expected_business_signer_key_id: str,
     source_month: str,
     previous_snapshot: dict[str, Any] | None,
 ) -> BuiltSourceView:
@@ -411,6 +418,7 @@ def build_source_view(
     _verify_business_signature(
         baseline_batch,
         public_key=business_public_key,
+        expected_signer_key_id=expected_business_signer_key_id,
         label="baseline batch",
     )
     research_as_of, execution_day, cutoff_day = _official_month_boundary(
@@ -427,6 +435,7 @@ def build_source_view(
         "history receipt completed_at",
     ) > cutoff_instant:
         raise PitSourceViewError("history receipt was unavailable at PIT cutoff")
+    calendar_anchor.require_available(calendar, cutoff_at=cutoff_instant)
     if (
         baseline_batch.get("source_month") != source_month
         or baseline_batch.get("execution_day") != execution_day.isoformat()
@@ -469,7 +478,7 @@ def build_source_view(
     calendar_binding, selected_days = _calendar_binding(
         calendar,
         history_receipt_sha256=history_receipt_sha256,
-        calendar_anchor_sha256=calendar_anchor_sha256,
+        calendar_anchor_sha256=calendar_anchor.raw_sha256,
         source_month=source_month,
         research_as_of=research_as_of,
         cutoff_day=cutoff_day,
@@ -539,6 +548,7 @@ def build_source_view(
         _verify_business_signature(
             previous_snapshot,
             public_key=business_public_key,
+            expected_signer_key_id=expected_business_signer_key_id,
             label="previous snapshot",
         )
         previous_hash = _unsigned_hash(previous_snapshot)
@@ -551,7 +561,7 @@ def build_source_view(
     identity = {
         "history_receipt_raw_sha256": history_receipt_sha256,
         "calendar_raw_sha256": calendar.raw_sha256,
-        "calendar_anchor_raw_sha256": calendar_anchor_sha256,
+        "calendar_anchor_raw_sha256": calendar_anchor.raw_sha256,
         "registry_raw_sha256": history_receipt["registry_raw_sha256"],
         "operator_state_raw_sha256": operator_state.raw_sha256,
         "manifest_genesis_seal_sha256": state["manifest_genesis_seal_sha256"],
@@ -563,6 +573,8 @@ def build_source_view(
             "commit_anchor_ledger_raw_sha256"
         ],
         "baseline_batch_hash": baseline_hash,
+        "business_public_key_sha256": public_key_sha256(business_public_key),
+        "business_signer_key_id": expected_business_signer_key_id,
         "source_month": source_month,
         "derivation_id": DERIVATION_ID,
     }
@@ -734,6 +746,7 @@ def verified_supplemental_daily_raw(
         return {}
     manifests = {item["trade_day"]: item for item in chain}
     result: dict[str, dict[str, bytes]] = {}
+    aggregate = 0
     for day in supplemental_days:
         raw_day = day.isoformat()
         receipt_path = context.runtime.run_receipts / f"{raw_day}.json"
@@ -782,6 +795,11 @@ def verified_supplemental_daily_raw(
             )
             if len(raw) != source["raw_bytes"] or sha256(raw) != source["raw_sha256"]:
                 raise PitSourceViewError("supplemental PIT raw bytes drifted")
+            aggregate += len(raw)
+            if aggregate > MAX_AGGREGATE_RAW_BYTES:
+                raise PitSourceViewError(
+                    "supplemental PIT aggregate raw resource limit exceeded"
+                )
             sources[source["exchange"]] = raw
         if set(sources) != {"SHFE", "INE"}:
             raise PitSourceViewError("supplemental daily exact source set mismatch")

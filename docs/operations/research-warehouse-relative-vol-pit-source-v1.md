@@ -94,6 +94,7 @@ PYTHONPATH=scripts python scripts/research_warehouse_pit_source_view.py \
   --manifest-public-key-sha256 <exact-key-sha256> \
   --business-public-key <business-public-key-path> \
   --business-public-key-sha256 <exact-key-sha256> \
+  --business-signer-key-id <expected-signer-key-id> \
   --baseline-batch <signed-baseline-path> \
   --source-month 2026-08 \
   --output-root <private-transfer-staging-root>

@@ -124,6 +124,8 @@
         "manifest_head_commit_seal_sha256",
         "commit_anchor_ledger_raw_sha256",
         "baseline_batch_hash",
+        "business_public_key_sha256",
+        "business_signer_key_id",
         "source_month",
         "derivation_id"
       ],
@@ -157,6 +159,13 @@
         },
         "baseline_batch_hash": {
           "$ref": "#/$defs/sha256"
+        },
+        "business_public_key_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "business_signer_key_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]{1,128}$"
         },
         "source_month": {
           "type": "string",
