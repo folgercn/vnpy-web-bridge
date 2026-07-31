@@ -1,0 +1,454 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vnpy-web-bridge:schema:commodity-c-fast-t1-build-registry-provenance-v3",
+  "title": "C_FAST query-v4 signed external build and registry provenance v3",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "provenance_id",
+    "candidate_id",
+    "purpose",
+    "issued_at",
+    "signer_key_id",
+    "trusted_keyring_sha256",
+    "excluded_authority_keyring_sha256s",
+    "excluded_authority_public_key_sha256s",
+    "runtime_source_commit_sha",
+    "signing_tool_source_identity",
+    "content_attestation_raw_sha256",
+    "content_attestation_canonical_sha256",
+    "content_attestation_schema_sha256",
+    "content_verifier_sha256",
+    "source_bundle_archive_sha256",
+    "source_manifest_raw_sha256",
+    "source_manifest_canonical_sha256",
+    "source_manifest_schema_sha256",
+    "oci_layout_archive_sha256",
+    "containerfile_sha256",
+    "image_reference",
+    "image_digest",
+    "image_id",
+    "runtime_bundle_index_sha256",
+    "build",
+    "registry",
+    "external_fact_scope",
+    "provenance_verifier_sha256",
+    "provenance_delegate_verifier_sha256",
+    "provenance_delegate_signer_sha256",
+    "provenance_support_sha256",
+    "provenance_schema_sha256",
+    "receipt_schema_sha256",
+    "signature",
+    "sensitive_material_present",
+    "authority_granted",
+    "readiness_authorized",
+    "ready_for_human_t1_release_signature_only",
+    "network_authorized",
+    "network_query_authorized",
+    "readonly_production_query_authorized",
+    "production_query_authorized",
+    "write_probe_authorized",
+    "database_mutation_authorized",
+    "deployment_mutation_authorized",
+    "collection_authorized",
+    "execution_quality_collection_authorized",
+    "runtime_activation_authorized",
+    "order_authorized",
+    "order_submission_authorized",
+    "position_mutation_authorized",
+    "dispatch_authorized",
+    "replacement_authorized",
+    "production_authorized",
+    "dynamic_selection_allowed",
+    "automatic_promotion_authorized",
+    "t1_executed",
+    "production_queried",
+    "database_mutations",
+    "orders_sent",
+    "positions_modified",
+    "dispatch_changed"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "commodity_c_fast_t1_build_registry_provenance_v3"
+    },
+    "provenance_id": {
+      "$ref": "#/$defs/id"
+    },
+    "candidate_id": {
+      "const": "C_FAST_CROSS_SECTION_NEUTRAL"
+    },
+    "purpose": {
+      "const": "c_fast_t1_query_v4_external_build_registry_provenance"
+    },
+    "issued_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "signer_key_id": {
+      "$ref": "#/$defs/id"
+    },
+    "trusted_keyring_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "excluded_authority_keyring_sha256s": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "t1_release_keyring_sha256",
+        "l3_release_keyring_sha256"
+      ],
+      "properties": {
+        "t1_release_keyring_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "l3_release_keyring_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "excluded_authority_public_key_sha256s": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 128,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/sha256"
+      }
+    },
+    "runtime_source_commit_sha": {
+      "$ref": "#/$defs/commit"
+    },
+    "signing_tool_source_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "source_commit_sha",
+        "sha256",
+        "verification_scope",
+        "bootstrap_dependency_manifest_sha256",
+        "signer_runtime_image_digest",
+        "runtime_verification_scope"
+      ],
+      "properties": {
+        "path": {
+          "const": "scripts/commodity_c_fast_t1_build_registry_provenance_sign_v3.py"
+        },
+        "source_commit_sha": {
+          "$ref": "#/$defs/commit"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "verification_scope": {
+          "const": "SIGNED_AND_INDEPENDENTLY_PINNED_SOURCE_IDENTITY_NOT_RUNTIME_BYTES_OR_EXECUTION_ATTESTATION"
+        },
+        "bootstrap_dependency_manifest_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "signer_runtime_image_digest": {
+          "$ref": "#/$defs/ociDigest"
+        },
+        "runtime_verification_scope": {
+          "const": "INDEPENDENTLY_PINNED_DEPENDENCY_CLOSURE_IN_TRUSTED_READONLY_SIGNER_IMAGE"
+        }
+      }
+    },
+    "content_attestation_raw_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "content_attestation_canonical_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "content_attestation_schema_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "content_verifier_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "source_bundle_archive_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "source_manifest_raw_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "source_manifest_canonical_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "source_manifest_schema_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "oci_layout_archive_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "containerfile_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "image_reference": {
+      "type": "string",
+      "pattern": "^[^@\\s]+@sha256:[0-9a-f]{64}$"
+    },
+    "image_digest": {
+      "$ref": "#/$defs/ociDigest"
+    },
+    "image_id": {
+      "$ref": "#/$defs/ociDigest"
+    },
+    "runtime_bundle_index_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "build": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "builder_identity_sha256",
+        "build_invocation_sha256",
+        "build_log_archive_sha256",
+        "platform",
+        "started_at",
+        "completed_at",
+        "exact_source_archive_used",
+        "exact_containerfile_used",
+        "build_exit_code",
+        "output_oci_layout_archive_sha256",
+        "output_image_digest",
+        "output_image_id",
+        "reproducible_build_verified",
+        "sensitive_material_present"
+      ],
+      "properties": {
+        "builder_identity_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "build_invocation_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "build_log_archive_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "platform": {
+          "const": "linux/amd64"
+        },
+        "started_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "completed_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "exact_source_archive_used": {
+          "const": true
+        },
+        "exact_containerfile_used": {
+          "const": true
+        },
+        "build_exit_code": {
+          "const": 0
+        },
+        "output_oci_layout_archive_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "output_image_digest": {
+          "$ref": "#/$defs/ociDigest"
+        },
+        "output_image_id": {
+          "$ref": "#/$defs/ociDigest"
+        },
+        "reproducible_build_verified": {
+          "const": false
+        },
+        "sensitive_material_present": {
+          "const": false
+        }
+      }
+    },
+    "registry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "registry_identity_sha256",
+        "repository",
+        "immutable_reference",
+        "manifest_digest",
+        "push_receipt_sha256",
+        "pushed_at",
+        "observed_at",
+        "digest_reference_resolved",
+        "manifest_digest_matched",
+        "mutable_tag_trusted",
+        "sensitive_material_present"
+      ],
+      "properties": {
+        "registry_identity_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "repository": {
+          "type": "string",
+          "pattern": "^[^@:\\s]+(?::[0-9]+)?(?:/[^@:\\s]+)+$"
+        },
+        "immutable_reference": {
+          "type": "string",
+          "pattern": "^[^@\\s]+@sha256:[0-9a-f]{64}$"
+        },
+        "manifest_digest": {
+          "$ref": "#/$defs/ociDigest"
+        },
+        "push_receipt_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "pushed_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "observed_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "digest_reference_resolved": {
+          "const": true
+        },
+        "manifest_digest_matched": {
+          "const": true
+        },
+        "mutable_tag_trusted": {
+          "const": false
+        },
+        "sensitive_material_present": {
+          "const": false
+        }
+      }
+    },
+    "external_fact_scope": {
+      "const": "SIGNED_EXTERNAL_ASSERTION_NOT_INDEPENDENTLY_REVERIFIED_BY_OFFLINE_VERIFIER"
+    },
+    "provenance_verifier_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "provenance_delegate_verifier_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "provenance_delegate_signer_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "provenance_support_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "provenance_schema_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "receipt_schema_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "signature": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9+/]{86}==$"
+    },
+    "sensitive_material_present": {
+      "const": false
+    },
+    "authority_granted": {
+      "const": false
+    },
+    "readiness_authorized": {
+      "const": false
+    },
+    "ready_for_human_t1_release_signature_only": {
+      "const": false
+    },
+    "network_authorized": {
+      "const": false
+    },
+    "network_query_authorized": {
+      "const": false
+    },
+    "readonly_production_query_authorized": {
+      "const": false
+    },
+    "production_query_authorized": {
+      "const": false
+    },
+    "write_probe_authorized": {
+      "const": false
+    },
+    "database_mutation_authorized": {
+      "const": false
+    },
+    "deployment_mutation_authorized": {
+      "const": false
+    },
+    "collection_authorized": {
+      "const": false
+    },
+    "execution_quality_collection_authorized": {
+      "const": false
+    },
+    "runtime_activation_authorized": {
+      "const": false
+    },
+    "order_authorized": {
+      "const": false
+    },
+    "order_submission_authorized": {
+      "const": false
+    },
+    "position_mutation_authorized": {
+      "const": false
+    },
+    "dispatch_authorized": {
+      "const": false
+    },
+    "replacement_authorized": {
+      "const": false
+    },
+    "production_authorized": {
+      "const": false
+    },
+    "dynamic_selection_allowed": {
+      "const": false
+    },
+    "automatic_promotion_authorized": {
+      "const": false
+    },
+    "t1_executed": {
+      "const": false
+    },
+    "production_queried": {
+      "const": false
+    },
+    "database_mutations": {
+      "const": 0
+    },
+    "orders_sent": {
+      "const": 0
+    },
+    "positions_modified": {
+      "const": 0
+    },
+    "dispatch_changed": {
+      "const": false
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 8,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._-]+$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "ociDigest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    }
+  }
+}
