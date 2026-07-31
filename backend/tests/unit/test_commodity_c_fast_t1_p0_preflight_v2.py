@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
@@ -115,6 +114,11 @@ def _provenance_receipt(attestation: dict, raw: bytes) -> dict:
         "signing_tool_source_pin_verified": True,
         "signing_tool_source_bytes_revalidated_at_runtime": False,
         "signing_tool_execution_independently_verified": False,
+        "signer_dependency_manifest_sha256": "6" * 64,
+        "signer_dependency_manifest_pin_verified": True,
+        "signer_runtime_image_digest": "sha256:" + "7" * 64,
+        "signer_runtime_image_digest_pin_verified": True,
+        "signer_runtime_execution_independently_verified": False,
         "runtime_source_commit_sha": COMMIT,
         "source_bundle_archive_sha256": attestation[
             "source_bundle_archive_sha256"

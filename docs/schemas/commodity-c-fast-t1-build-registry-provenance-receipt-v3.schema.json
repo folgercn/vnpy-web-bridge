@@ -24,6 +24,11 @@
     "signing_tool_source_pin_verified",
     "signing_tool_source_bytes_revalidated_at_runtime",
     "signing_tool_execution_independently_verified",
+    "signer_dependency_manifest_sha256",
+    "signer_dependency_manifest_pin_verified",
+    "signer_runtime_image_digest",
+    "signer_runtime_image_digest_pin_verified",
+    "signer_runtime_execution_independently_verified",
     "runtime_source_commit_sha",
     "source_bundle_archive_sha256",
     "source_manifest_canonical_sha256",
@@ -138,6 +143,21 @@
       "const": false
     },
     "signing_tool_execution_independently_verified": {
+      "const": false
+    },
+    "signer_dependency_manifest_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "signer_dependency_manifest_pin_verified": {
+      "const": true
+    },
+    "signer_runtime_image_digest": {
+      "$ref": "#/$defs/ociDigest"
+    },
+    "signer_runtime_image_digest_pin_verified": {
+      "const": true
+    },
+    "signer_runtime_execution_independently_verified": {
       "const": false
     },
     "runtime_source_commit_sha": {

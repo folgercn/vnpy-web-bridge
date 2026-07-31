@@ -40,6 +40,8 @@ artifact 之外独立提供：
 --query-v4-build-registry-provenance
 --expected-query-v4-provenance-signing-tool-source-sha256
 --expected-query-v4-provenance-signing-tool-source-commit-sha
+--expected-query-v4-provenance-signer-dependency-manifest-sha256
+--expected-query-v4-provenance-signer-runtime-image-digest
 ```
 
 其余 query-v4 content、readiness-v3/L3 和 DSN 参数与
@@ -55,6 +57,10 @@ PYTHONPATH=scripts python3 \
     "$SIGNER_V3_SOURCE_SHA256" \
   --expected-query-v4-provenance-signing-tool-source-commit-sha \
     "$SIGNER_SOURCE_COMMIT_SHA" \
+  --expected-query-v4-provenance-signer-dependency-manifest-sha256 \
+    "$SIGNER_DEPENDENCY_MANIFEST_SHA256" \
+  --expected-query-v4-provenance-signer-runtime-image-digest \
+    "$SIGNER_RUNTIME_IMAGE_DIGEST" \
   <all-v1-query-v4-readiness-l3-dsn-arguments> \
   --output /new/archive/t1-p0-preflight-v2.json
 ```
@@ -71,7 +77,8 @@ PYTHONPATH=scripts python3 \
 - signed provenance 与 source commit、source bundle、attestation、image
   reference/digest 任一不一致；
 - provenance signer key 与 T1/L3 authority key 复用；
-- signer/keyring independent pin 不匹配；
+- signer source、dependency closure、runtime image 或 keyring independent
+  pin 不匹配；
 - readiness-v3/L3 过期或无法精确重放；
 - DSN metadata 不是当前用户持有的普通 `0600` 文件；
 - 输出路径已存在。

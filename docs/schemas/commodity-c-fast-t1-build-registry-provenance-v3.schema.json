@@ -127,7 +127,10 @@
         "path",
         "source_commit_sha",
         "sha256",
-        "verification_scope"
+        "verification_scope",
+        "bootstrap_dependency_manifest_sha256",
+        "signer_runtime_image_digest",
+        "runtime_verification_scope"
       ],
       "properties": {
         "path": {
@@ -141,6 +144,15 @@
         },
         "verification_scope": {
           "const": "SIGNED_AND_INDEPENDENTLY_PINNED_SOURCE_IDENTITY_NOT_RUNTIME_BYTES_OR_EXECUTION_ATTESTATION"
+        },
+        "bootstrap_dependency_manifest_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "signer_runtime_image_digest": {
+          "$ref": "#/$defs/ociDigest"
+        },
+        "runtime_verification_scope": {
+          "const": "INDEPENDENTLY_PINNED_DEPENDENCY_CLOSURE_IN_TRUSTED_READONLY_SIGNER_IMAGE"
         }
       }
     },

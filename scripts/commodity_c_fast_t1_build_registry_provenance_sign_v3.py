@@ -27,14 +27,14 @@ if RUNNING_AS_SCRIPT:
     _require_isolated_no_site_startup()
 
 
-import hashlib
-import hmac
-import importlib.machinery
-import os
-from pathlib import Path
-import stat
-from types import ModuleType
-from typing import Any
+import hashlib  # noqa: E402
+import hmac  # noqa: E402
+import importlib.machinery  # noqa: E402
+import os  # noqa: E402
+from pathlib import Path  # noqa: E402
+import stat  # noqa: E402
+from types import ModuleType  # noqa: E402
+from typing import Any  # noqa: E402
 
 SIGNER_SOURCE_PATH = Path(__file__).resolve()
 PROVENANCE_WRAPPER_PATH = SIGNER_SOURCE_PATH.with_name(
@@ -44,7 +44,7 @@ DELEGATE_SIGNER_PATH = SIGNER_SOURCE_PATH.with_name(
     "commodity_c_fast_t1_build_registry_provenance_sign_v2.py"
 )
 EXPECTED_PROVENANCE_WRAPPER_SHA256 = (
-    "be022471bec66d6c5c1cfe55dca55fa87442fe68d32b3b185b7ba5828d4619e0"
+    "7152b68c2bf26759a28c2d15c76ee5de854ec35b6b25ca2e4da00b4e24bd8dbd"
 )
 MAX_BOOTSTRAP_SOURCE_BYTES = 8 * 1024 * 1024
 V2_VERIFIER_PUBLIC_MODULE = (
@@ -54,6 +54,12 @@ BOOTSTRAP_SITE_PACKAGES_ARGUMENT = "--bootstrap-site-packages"
 BOOTSTRAP_SITE_PACKAGES_PIN_ARGUMENT = (
     "--expected-bootstrap-site-packages-identity-sha256"
 )
+BOOTSTRAP_DEPENDENCY_MANIFEST_PIN_ARGUMENT = (
+    "--expected-bootstrap-dependency-manifest-sha256"
+)
+SIGNER_RUNTIME_IMAGE_DIGEST_ARGUMENT = (
+    "--signer-runtime-image-digest"
+)
 FORBIDDEN_BOOTSTRAP_SITE_ENTRIES = frozenset(
     {
         "sitecustomize.py",
@@ -62,6 +68,15 @@ FORBIDDEN_BOOTSTRAP_SITE_ENTRIES = frozenset(
         "usercustomize.pyc",
     }
 )
+MAX_BOOTSTRAP_DEPENDENCY_ENTRIES = 100_000
+MAX_BOOTSTRAP_DEPENDENCY_FILE_BYTES = 512 * 1024 * 1024
+BOOTSTRAP_DEPENDENCY_MANIFEST_VERSION = (
+    "c-fast-provenance-bootstrap-dependency-closure-v1"
+)
+RETAINED_BOOTSTRAP_SITE_PACKAGES_IDENTITY_SHA256: str | None = None
+RETAINED_BOOTSTRAP_DEPENDENCY_MANIFEST_SHA256: str | None = None
+RETAINED_SIGNER_RUNTIME_IMAGE_DIGEST: str | None = None
+BOOTSTRAP_SITE_PACKAGES_PATH: Path | None = None
 
 
 class SignerBootstrapError(RuntimeError):
@@ -118,35 +133,289 @@ def bootstrap_site_packages_identity(path: Path) -> str:
     return hashlib.sha256(identity).hexdigest()
 
 
+def _validate_sha256(value: str, label: str) -> None:
+    if (
+        len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise SignerBootstrapError(f"{label} is invalid")
+
+
+def _validate_image_digest(value: str, label: str) -> None:
+    prefix = "sha256:"
+    if not value.startswith(prefix):
+        raise SignerBootstrapError(f"{label} is invalid")
+    _validate_sha256(value[len(prefix) :], label)
+
+
+def _dependency_entry_is_safe(
+    info: os.stat_result,
+    *,
+    regular: bool,
+    label: str,
+) -> None:
+    if info.st_uid not in {0, os.geteuid()}:
+        raise SignerBootstrapError(f"{label} owner is unsafe")
+    if stat.S_IMODE(info.st_mode) & 0o022:
+        raise SignerBootstrapError(f"{label} is group/world writable")
+    if regular and info.st_nlink != 1:
+        raise SignerBootstrapError(
+            f"{label} must be a single-link regular file"
+        )
+
+
+def _read_dependency_file(path: Path, label: str) -> tuple[bytes, os.stat_result]:
+    descriptor = -1
+    try:
+        before_path = path.lstat()
+        if (
+            stat.S_ISLNK(before_path.st_mode)
+            or not stat.S_ISREG(before_path.st_mode)
+        ):
+            raise SignerBootstrapError(
+                f"{label} must be a regular non-symlink file"
+            )
+        _dependency_entry_is_safe(
+            before_path,
+            regular=True,
+            label=label,
+        )
+        if before_path.st_size > MAX_BOOTSTRAP_DEPENDENCY_FILE_BYTES:
+            raise SignerBootstrapError(f"{label} is too large")
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        opened = os.fstat(descriptor)
+        if _file_identity(before_path) != _file_identity(opened):
+            raise SignerBootstrapError(
+                f"{label} changed before stable read"
+            )
+        first = _read_fd_bytes(
+            descriptor,
+            label,
+            limit=MAX_BOOTSTRAP_DEPENDENCY_FILE_BYTES,
+        )
+        after_first = os.fstat(descriptor)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        second = _read_fd_bytes(
+            descriptor,
+            label,
+            limit=MAX_BOOTSTRAP_DEPENDENCY_FILE_BYTES,
+        )
+        after_second = os.fstat(descriptor)
+        after_path = path.lstat()
+        identity = _file_identity(opened)
+        if (
+            _file_identity(after_first) != identity
+            or _file_identity(after_second) != identity
+            or _file_identity(after_path) != identity
+            or first != second
+        ):
+            raise SignerBootstrapError(f"{label} changed during stable read")
+        return first, opened
+    except SignerBootstrapError:
+        raise
+    except OSError as exc:
+        raise SignerBootstrapError(f"{label} cannot be read safely") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _dependency_manifest_records(path: Path) -> list[bytes]:
+    records: list[bytes] = []
+    entries = 0
+
+    def visit(directory: Path, relative: Path) -> None:
+        nonlocal entries
+        try:
+            before = directory.lstat()
+        except OSError as exc:
+            raise SignerBootstrapError(
+                "bootstrap dependency directory is unavailable"
+            ) from exc
+        if stat.S_ISLNK(before.st_mode) or not stat.S_ISDIR(before.st_mode):
+            raise SignerBootstrapError(
+                "bootstrap dependency directory must not be a symlink"
+            )
+        _dependency_entry_is_safe(
+            before,
+            regular=False,
+            label=f"bootstrap dependency directory {relative.as_posix()}",
+        )
+        try:
+            with os.scandir(directory) as iterator:
+                children = sorted(
+                    iterator,
+                    key=lambda entry: os.fsencode(entry.name),
+                )
+        except OSError as exc:
+            raise SignerBootstrapError(
+                "bootstrap dependency directory cannot be enumerated"
+            ) from exc
+        for child in children:
+            entries += 1
+            if entries > MAX_BOOTSTRAP_DEPENDENCY_ENTRIES:
+                raise SignerBootstrapError(
+                    "bootstrap dependency closure has too many entries"
+                )
+            child_relative = relative / child.name
+            child_label = (
+                f"bootstrap dependency {child_relative.as_posix()}"
+            )
+            try:
+                info = child.stat(follow_symlinks=False)
+            except OSError as exc:
+                raise SignerBootstrapError(
+                    f"{child_label} cannot be inspected"
+                ) from exc
+            if stat.S_ISLNK(info.st_mode):
+                raise SignerBootstrapError(
+                    f"{child_label} symlink escape is forbidden"
+                )
+            encoded_path = child_relative.as_posix().encode("utf-8")
+            if stat.S_ISDIR(info.st_mode):
+                _dependency_entry_is_safe(
+                    info,
+                    regular=False,
+                    label=child_label,
+                )
+                if (
+                    relative == Path(".")
+                    and not child.name.endswith(
+                        (".dist-info", ".data", ".libs")
+                    )
+                ):
+                    package_init = Path(child.path) / "__init__.py"
+                    try:
+                        init_info = package_init.lstat()
+                    except OSError as exc:
+                        raise SignerBootstrapError(
+                            f"{child_label} namespace escape is forbidden"
+                        ) from exc
+                    if (
+                        stat.S_ISLNK(init_info.st_mode)
+                        or not stat.S_ISREG(init_info.st_mode)
+                    ):
+                        raise SignerBootstrapError(
+                            f"{child_label} namespace escape is forbidden"
+                        )
+                records.append(
+                    b"D\0"
+                    + encoded_path
+                    + b"\0"
+                    + f"{info.st_uid}:{stat.S_IMODE(info.st_mode):o}".encode(
+                        "ascii"
+                    )
+                )
+                visit(Path(child.path), child_relative)
+            elif stat.S_ISREG(info.st_mode):
+                if (
+                    child.name in FORBIDDEN_BOOTSTRAP_SITE_ENTRIES
+                    or child.name.endswith((".pth", ".egg-link"))
+                ):
+                    raise SignerBootstrapError(
+                        f"{child_label} startup hook is forbidden"
+                    )
+                raw, opened = _read_dependency_file(
+                    Path(child.path),
+                    child_label,
+                )
+                records.append(
+                    b"F\0"
+                    + encoded_path
+                    + b"\0"
+                    + (
+                        f"{opened.st_uid}:"
+                        f"{stat.S_IMODE(opened.st_mode):o}:"
+                        f"{opened.st_size}:"
+                    ).encode("ascii")
+                    + hashlib.sha256(raw).hexdigest().encode("ascii")
+                )
+            else:
+                raise SignerBootstrapError(
+                    f"{child_label} has a forbidden file type"
+                )
+        try:
+            after = directory.lstat()
+        except OSError as exc:
+            raise SignerBootstrapError(
+                "bootstrap dependency directory changed during scan"
+            ) from exc
+        if _file_identity(before) != _file_identity(after):
+            raise SignerBootstrapError(
+                "bootstrap dependency directory changed during scan"
+            )
+
+    visit(path, Path("."))
+    return records
+
+
+def bootstrap_dependency_manifest_sha256(path: Path) -> str:
+    """Hash the exact safe dependency tree twice without importing it."""
+
+    first = _dependency_manifest_records(path)
+    second = _dependency_manifest_records(path)
+    if first != second:
+        raise SignerBootstrapError(
+            "bootstrap dependency closure changed during stable scan"
+        )
+    digest = hashlib.sha256()
+    digest.update(BOOTSTRAP_DEPENDENCY_MANIFEST_VERSION.encode("ascii"))
+    digest.update(b"\0")
+    digest.update(str(path).encode("utf-8"))
+    digest.update(b"\0")
+    for record in first:
+        digest.update(len(record).to_bytes(8, "big"))
+        digest.update(record)
+    return digest.hexdigest()
+
+
 def _install_bootstrap_site_packages_from_argv() -> None:
+    global BOOTSTRAP_SITE_PACKAGES_PATH
+    global RETAINED_BOOTSTRAP_DEPENDENCY_MANIFEST_SHA256
+    global RETAINED_BOOTSTRAP_SITE_PACKAGES_IDENTITY_SHA256
+    global RETAINED_SIGNER_RUNTIME_IMAGE_DIGEST
+
     raw_path = _take_bootstrap_argument(
         BOOTSTRAP_SITE_PACKAGES_ARGUMENT
     )
-    expected = _take_bootstrap_argument(
+    expected_identity = _take_bootstrap_argument(
         BOOTSTRAP_SITE_PACKAGES_PIN_ARGUMENT
     )
-    if (
-        len(expected) != 64
-        or any(character not in "0123456789abcdef" for character in expected)
-    ):
-        raise SignerBootstrapError(
-            "bootstrap site-packages identity pin is invalid"
-        )
+    expected_manifest = _take_bootstrap_argument(
+        BOOTSTRAP_DEPENDENCY_MANIFEST_PIN_ARGUMENT
+    )
+    runtime_image_digest = _take_bootstrap_argument(
+        SIGNER_RUNTIME_IMAGE_DIGEST_ARGUMENT
+    )
+    _validate_sha256(
+        expected_identity,
+        "bootstrap site-packages identity pin",
+    )
+    _validate_sha256(
+        expected_manifest,
+        "bootstrap dependency manifest pin",
+    )
+    _validate_image_digest(
+        runtime_image_digest,
+        "signer runtime image digest",
+    )
     path = Path(raw_path)
-    actual = bootstrap_site_packages_identity(path)
-    if not hmac.compare_digest(actual, expected):
+    actual_identity = bootstrap_site_packages_identity(path)
+    if not hmac.compare_digest(actual_identity, expected_identity):
         raise SignerBootstrapError(
             "bootstrap site-packages identity pin mismatch"
         )
-    for entry in path.iterdir():
-        name = entry.name
-        if (
-            name in FORBIDDEN_BOOTSTRAP_SITE_ENTRIES
-            or name.endswith((".pth", ".egg-link"))
-        ):
-            raise SignerBootstrapError(
-                "bootstrap site-packages contains a startup hook"
-            )
+    actual_manifest = bootstrap_dependency_manifest_sha256(path)
+    if not hmac.compare_digest(actual_manifest, expected_manifest):
+        raise SignerBootstrapError(
+            "bootstrap dependency manifest pin mismatch"
+        )
+    BOOTSTRAP_SITE_PACKAGES_PATH = path
+    RETAINED_BOOTSTRAP_SITE_PACKAGES_IDENTITY_SHA256 = actual_identity
+    RETAINED_BOOTSTRAP_DEPENDENCY_MANIFEST_SHA256 = actual_manifest
+    RETAINED_SIGNER_RUNTIME_IMAGE_DIGEST = runtime_image_digest
     sys.path.append(str(path))
 
 
@@ -164,7 +433,12 @@ def _file_identity(info: os.stat_result) -> tuple[int, ...]:
     )
 
 
-def _read_fd_bytes(descriptor: int, label: str) -> bytes:
+def _read_fd_bytes(
+    descriptor: int,
+    label: str,
+    *,
+    limit: int = MAX_BOOTSTRAP_SOURCE_BYTES,
+) -> bytes:
     chunks: list[bytes] = []
     size = 0
     while True:
@@ -172,7 +446,7 @@ def _read_fd_bytes(descriptor: int, label: str) -> bytes:
         if not chunk:
             return b"".join(chunks)
         size += len(chunk)
-        if size > MAX_BOOTSTRAP_SOURCE_BYTES:
+        if size > limit:
             raise SignerBootstrapError(f"{label} is too large")
         chunks.append(chunk)
 
@@ -331,7 +605,91 @@ def _load_delegate() -> ModuleType:
 
 _delegate = _load_delegate()
 
-load_private_key = _delegate.load_private_key
+_delegate_signing_tool_source_identity = (
+    _delegate._signing_tool_source_identity
+)
+_delegate_load_private_key = _delegate.load_private_key
+
+
+def _require_retained_signer_runtime_identity() -> tuple[str, str]:
+    manifest = RETAINED_BOOTSTRAP_DEPENDENCY_MANIFEST_SHA256
+    image_digest = RETAINED_SIGNER_RUNTIME_IMAGE_DIGEST
+    if manifest is None or image_digest is None:
+        raise SignerBootstrapError(
+            "signer runtime identity was not established by the "
+            "isolated production entry"
+        )
+    return manifest, image_digest
+
+
+def _signing_tool_source_identity(
+    *,
+    expected_source_sha256: str,
+    expected_source_commit_sha: str,
+) -> dict[str, str]:
+    manifest, image_digest = _require_retained_signer_runtime_identity()
+    identity = _delegate_signing_tool_source_identity(
+        expected_source_sha256=expected_source_sha256,
+        expected_source_commit_sha=expected_source_commit_sha,
+    )
+    identity.update(
+        {
+            "bootstrap_dependency_manifest_sha256": manifest,
+            "signer_runtime_image_digest": image_digest,
+            "runtime_verification_scope": (
+                "INDEPENDENTLY_PINNED_DEPENDENCY_CLOSURE_IN_"
+                "TRUSTED_READONLY_SIGNER_IMAGE"
+            ),
+        }
+    )
+    provenance_v3.EXPECTED_SIGNER_DEPENDENCY_MANIFEST_SHA256 = (
+        manifest
+    )
+    provenance_v3.EXPECTED_SIGNER_RUNTIME_IMAGE_DIGEST = image_digest
+    return identity
+
+
+def _revalidate_bootstrap_dependency_closure() -> None:
+    if BOOTSTRAP_SITE_PACKAGES_PATH is None:
+        if RUNNING_AS_SCRIPT:
+            raise SignerBootstrapError(
+                "bootstrap dependency closure path is unavailable"
+            )
+        return
+    expected_manifest, _image_digest = (
+        _require_retained_signer_runtime_identity()
+    )
+    if RETAINED_BOOTSTRAP_SITE_PACKAGES_IDENTITY_SHA256 is None:
+        raise SignerBootstrapError(
+            "bootstrap site-packages identity was not retained"
+        )
+    actual_root = bootstrap_site_packages_identity(
+        BOOTSTRAP_SITE_PACKAGES_PATH
+    )
+    if not hmac.compare_digest(
+        actual_root,
+        RETAINED_BOOTSTRAP_SITE_PACKAGES_IDENTITY_SHA256,
+    ):
+        raise SignerBootstrapError(
+            "bootstrap site-packages identity drifted before private-key read"
+        )
+    actual_manifest = bootstrap_dependency_manifest_sha256(
+        BOOTSTRAP_SITE_PACKAGES_PATH
+    )
+    if not hmac.compare_digest(actual_manifest, expected_manifest):
+        raise SignerBootstrapError(
+            "bootstrap dependency closure drifted before private-key read"
+        )
+
+
+def load_private_key(path: Path) -> Any:
+    _revalidate_bootstrap_dependency_closure()
+    return _delegate_load_private_key(path)
+
+
+_delegate._signing_tool_source_identity = _signing_tool_source_identity
+_delegate.load_private_key = load_private_key
+
 prepare_provenance = _delegate.prepare_provenance
 complete_signature = _delegate.complete_signature
 sign_provenance = _delegate.sign_provenance

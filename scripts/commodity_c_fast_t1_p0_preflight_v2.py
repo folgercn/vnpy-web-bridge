@@ -253,6 +253,14 @@ def parse_args() -> argparse.Namespace:
         "--expected-query-v4-provenance-signing-tool-source-commit-sha",
         required=True,
     )
+    parser.add_argument(
+        "--expected-query-v4-provenance-signer-dependency-manifest-sha256",
+        required=True,
+    )
+    parser.add_argument(
+        "--expected-query-v4-provenance-signer-runtime-image-digest",
+        required=True,
+    )
     parser.add_argument("--dsn-file", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     add_readiness_verification_arguments(parser)
@@ -326,6 +334,20 @@ def main() -> int:
             expected_image_digest=args.expected_query_v4_image_digest,
             expected_signing_tool_source_sha256=provenance_signer_sha256,
             expected_signing_tool_source_commit_sha=provenance_signer_commit,
+            expected_signer_dependency_manifest_sha256=(
+                getattr(
+                    args,
+                    "expected_query_v4_provenance_"
+                    "signer_dependency_manifest_sha256",
+                )
+            ),
+            expected_signer_runtime_image_digest=(
+                getattr(
+                    args,
+                    "expected_query_v4_provenance_"
+                    "signer_runtime_image_digest",
+                )
+            ),
             excluded_authority_key_hashes=excluded_hashes,
             excluded_authority_keyring_sha256s=excluded_keyring_hashes,
             now=now,

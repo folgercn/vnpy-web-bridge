@@ -28,6 +28,10 @@ import commodity_c_fast_t1_build_registry_provenance_v3 as subject  # noqa: E402
 import commodity_c_fast_t1_build_registry_provenance_sign_v3 as signer  # noqa: E402
 
 
+SIGNER_DEPENDENCY_MANIFEST_SHA256 = "6" * 64
+SIGNER_RUNTIME_IMAGE_DIGEST = "sha256:" + "7" * 64
+
+
 def _helper() -> Any:
     name = "_query_v4_provenance_v3_test_helper"
     if name in sys.modules:
@@ -60,8 +64,77 @@ def _signed_fixture(
 ) -> tuple[Any, dict[str, Any]]:
     helper = _helper()
     monkeypatch.setattr(signer._delegate, "provenance_v2", subject)
+    monkeypatch.setattr(
+        signer,
+        "RETAINED_BOOTSTRAP_DEPENDENCY_MANIFEST_SHA256",
+        SIGNER_DEPENDENCY_MANIFEST_SHA256,
+    )
+    monkeypatch.setattr(
+        signer,
+        "RETAINED_SIGNER_RUNTIME_IMAGE_DIGEST",
+        SIGNER_RUNTIME_IMAGE_DIGEST,
+    )
+    monkeypatch.setattr(
+        subject,
+        "EXPECTED_SIGNER_DEPENDENCY_MANIFEST_SHA256",
+        SIGNER_DEPENDENCY_MANIFEST_SHA256,
+    )
+    monkeypatch.setattr(
+        subject,
+        "EXPECTED_SIGNER_RUNTIME_IMAGE_DIGEST",
+        SIGNER_RUNTIME_IMAGE_DIGEST,
+    )
     fixture = helper.signed_fixture(monkeypatch, tmp_path)
+    fixture["signer_dependency_manifest_sha256"] = (
+        SIGNER_DEPENDENCY_MANIFEST_SHA256
+    )
+    fixture["signer_runtime_image_digest"] = SIGNER_RUNTIME_IMAGE_DIGEST
     return helper, fixture
+
+
+def _verify_fixture(
+    helper: Any,
+    tmp_path: Path,
+    fixture: dict[str, Any],
+    *,
+    dependency_manifest_sha256: str | None = None,
+    runtime_image_digest: str | None = None,
+) -> dict[str, Any]:
+    provenance_path = helper.write_json(
+        tmp_path / "provenance.signed.json",
+        fixture["signed"],
+    )
+    keyring_path = helper.write_json(
+        tmp_path / "provenance-keyring.json",
+        fixture["keyring"],
+    )
+    content_path = helper.write_bytes(
+        tmp_path / "content.json",
+        fixture["content_raw"],
+    )
+    return subject.verify_provenance(
+        provenance_path,
+        keyring_path,
+        content_path,
+        expected_trusted_keyring_sha256=fixture["keyring_sha256"],
+        expected_runtime_source_commit_sha=helper.RUNTIME_COMMIT,
+        expected_image_digest=helper.IMAGE_DIGEST,
+        expected_signing_tool_source_sha256=fixture["signer_sha256"],
+        expected_signing_tool_source_commit_sha=helper.SIGNER_COMMIT,
+        expected_signer_dependency_manifest_sha256=(
+            fixture["signer_dependency_manifest_sha256"]
+            if dependency_manifest_sha256 is None
+            else dependency_manifest_sha256
+        ),
+        expected_signer_runtime_image_digest=(
+            fixture["signer_runtime_image_digest"]
+            if runtime_image_digest is None
+            else runtime_image_digest
+        ),
+        excluded_authority_key_hashes=fixture["excluded_hashes"],
+        excluded_authority_keyring_sha256s=fixture["excluded_keyrings"],
+        now=helper.NOW,
+    )
 
 
 def _load_module_from_path(path: Path, name: str) -> Any:
@@ -104,6 +177,7 @@ def _run_fresh_signer(
     site_packages = signer_path.parent / "controlled-site-packages"
     site_packages.mkdir(mode=0o700)
     identity = signer.bootstrap_site_packages_identity(site_packages)
+    manifest = signer.bootstrap_dependency_manifest_sha256(site_packages)
     return subprocess.run(
         [
             sys.executable,
@@ -117,6 +191,10 @@ def _run_fresh_signer(
             str(site_packages),
             signer.BOOTSTRAP_SITE_PACKAGES_PIN_ARGUMENT,
             identity,
+            signer.BOOTSTRAP_DEPENDENCY_MANIFEST_PIN_ARGUMENT,
+            manifest,
+            signer.SIGNER_RUNTIME_IMAGE_DIGEST_ARGUMENT,
+            SIGNER_RUNTIME_IMAGE_DIGEST,
             "--private-key-file",
             str(private_key),
         ],
@@ -134,7 +212,7 @@ def test_query_v4_provenance_v3_round_trip_binds_delegate_bytes(
 ) -> None:
     helper, fixture = _signed_fixture(monkeypatch, tmp_path)
 
-    receipt = helper.verify_fixture(tmp_path, fixture)
+    receipt = _verify_fixture(helper, tmp_path, fixture)
 
     assert (
         fixture["signed"]["schema_version"]
@@ -159,6 +237,40 @@ def test_query_v4_provenance_v3_round_trip_binds_delegate_bytes(
     assert receipt["authority_granted"] is False
     assert receipt["network_authorized"] is False
     assert receipt["production_queried"] is False
+    assert receipt["signer_dependency_manifest_sha256"] == (
+        SIGNER_DEPENDENCY_MANIFEST_SHA256
+    )
+    assert receipt["signer_runtime_image_digest"] == (
+        SIGNER_RUNTIME_IMAGE_DIGEST
+    )
+    assert receipt["signer_dependency_manifest_pin_verified"] is True
+    assert receipt["signer_runtime_image_digest_pin_verified"] is True
+
+
+@pytest.mark.parametrize(
+    ("dependency_manifest_sha256", "runtime_image_digest", "error"),
+    [
+        ("8" * 64, None, "dependency manifest binding mismatch"),
+        (None, "sha256:" + "9" * 64, "runtime image binding mismatch"),
+    ],
+)
+def test_signer_runtime_identity_requires_independent_exact_pins(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    dependency_manifest_sha256: str | None,
+    runtime_image_digest: str | None,
+    error: str,
+) -> None:
+    helper, fixture = _signed_fixture(monkeypatch, tmp_path)
+
+    with pytest.raises(subject.BuildRegistryProvenanceV3Error, match=error):
+        _verify_fixture(
+            helper,
+            tmp_path,
+            fixture,
+            dependency_manifest_sha256=dependency_manifest_sha256,
+            runtime_image_digest=runtime_image_digest,
+        )
 
 
 def test_delegate_pins_match_the_reviewed_v2_sources() -> None:
@@ -210,7 +322,9 @@ def test_path_drift_after_verified_import_keeps_retained_identity(
     monkeypatch.setattr(subject, "DELEGATE_SIGNER_PATH", signer_path)
 
     assert subject._runtime_file_hashes() == original_hashes
-    assert helper.verify_fixture(tmp_path, fixture)["authority_granted"] is False
+    assert _verify_fixture(helper, tmp_path, fixture)[
+        "authority_granted"
+    ] is False
 
 
 def test_malicious_verifier_delegate_never_executes_before_pin_check(
@@ -571,14 +685,118 @@ def test_bootstrap_site_packages_rejects_startup_hooks(
             str(site_packages),
             signer.BOOTSTRAP_SITE_PACKAGES_PIN_ARGUMENT,
             identity,
+            signer.BOOTSTRAP_DEPENDENCY_MANIFEST_PIN_ARGUMENT,
+            "0" * 64,
+            signer.SIGNER_RUNTIME_IMAGE_DIGEST_ARGUMENT,
+            SIGNER_RUNTIME_IMAGE_DIGEST,
         ],
     )
 
     with pytest.raises(
         signer.SignerBootstrapError,
-        match="contains a startup hook",
+        match="startup hook is forbidden",
     ):
         signer._install_bootstrap_site_packages_from_argv()
+
+
+def test_dependency_manifest_binds_nested_content_not_root_metadata(
+    tmp_path: Path,
+) -> None:
+    site_packages = tmp_path / "site-packages"
+    package = site_packages / "trusted_package"
+    package.mkdir(parents=True)
+    module = package / "__init__.py"
+    module.write_text("VALUE = 1\n")
+    root_identity = signer.bootstrap_site_packages_identity(site_packages)
+    before = signer.bootstrap_dependency_manifest_sha256(site_packages)
+
+    module.write_text("VALUE = 2\n")
+
+    assert signer.bootstrap_site_packages_identity(site_packages) == (
+        root_identity
+    )
+    assert signer.bootstrap_dependency_manifest_sha256(site_packages) != before
+
+
+@pytest.mark.parametrize("unsafe_kind", ["writable", "symlink", "hardlink"])
+def test_dependency_manifest_rejects_unsafe_nested_entry(
+    tmp_path: Path,
+    unsafe_kind: str,
+) -> None:
+    site_packages = tmp_path / "site-packages"
+    package = site_packages / "trusted_package"
+    package.mkdir(parents=True)
+    candidate = package / "__init__.py"
+    source = tmp_path / "source.py"
+    source.write_text("VALUE = 1\n")
+    if unsafe_kind == "writable":
+        candidate.write_text("VALUE = 1\n")
+        candidate.chmod(0o666)
+        error = "group/world writable"
+    elif unsafe_kind == "symlink":
+        candidate.symlink_to(source)
+        error = "(namespace|symlink) escape"
+    else:
+        os.link(source, candidate)
+        error = "single-link regular file"
+
+    with pytest.raises(signer.SignerBootstrapError, match=error):
+        signer.bootstrap_dependency_manifest_sha256(site_packages)
+
+
+def test_dependency_manifest_rejects_namespace_escape(
+    tmp_path: Path,
+) -> None:
+    site_packages = tmp_path / "site-packages"
+    namespace = site_packages / "namespace_portion"
+    namespace.mkdir(parents=True)
+    (namespace / "payload.py").write_text("VALUE = 1\n")
+
+    with pytest.raises(
+        signer.SignerBootstrapError,
+        match="namespace escape",
+    ):
+        signer.bootstrap_dependency_manifest_sha256(site_packages)
+
+
+def test_private_key_gate_rejects_post_validation_dependency_drift(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    site_packages = tmp_path / "site-packages"
+    package = site_packages / "trusted_package"
+    package.mkdir(parents=True)
+    module = package / "__init__.py"
+    module.write_text("VALUE = 1\n")
+    identity = signer.bootstrap_site_packages_identity(site_packages)
+    manifest = signer.bootstrap_dependency_manifest_sha256(site_packages)
+    monkeypatch.setattr(
+        signer,
+        "BOOTSTRAP_SITE_PACKAGES_PATH",
+        site_packages,
+    )
+    monkeypatch.setattr(
+        signer,
+        "RETAINED_BOOTSTRAP_SITE_PACKAGES_IDENTITY_SHA256",
+        identity,
+    )
+    monkeypatch.setattr(
+        signer,
+        "RETAINED_BOOTSTRAP_DEPENDENCY_MANIFEST_SHA256",
+        manifest,
+    )
+    monkeypatch.setattr(
+        signer,
+        "RETAINED_SIGNER_RUNTIME_IMAGE_DIGEST",
+        SIGNER_RUNTIME_IMAGE_DIGEST,
+    )
+    module.write_text("VALUE = 2\n")
+
+    with pytest.raises(
+        signer.SignerBootstrapError,
+        match="dependency closure drifted before private-key read",
+    ):
+        signer._revalidate_bootstrap_dependency_closure()
 
 
 def test_signer_retains_verified_wrapper_identity_after_path_drift(

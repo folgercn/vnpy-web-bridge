@@ -87,10 +87,26 @@ signer 在任何本地 wrapper/support/delegate bootstrap 前验证
 `isolated/no_site/no_user_site/ignore_environment/dont_write_bytecode` flags；
 不满足立即退出。`-S` 后 signer 只追加一个显式、canonical、非 symlink、
 非 group/world-writable 的 site-packages root，并要求 independently supplied
-path/inode/owner/mode identity pin。该 root 顶层存在任何 `.pth`、`.egg-link`、
-`sitecustomize` 或 `usercustomize` 时直接拒绝。site-packages 的 package bytes
-必须来自同一个已独立 pin 的只读 signer image/release；目录 identity pin
-不能替代 image/release content pin。
+path/inode/owner/mode identity pin。
+
+在任何第三方 import 前，signer 还会递归扫描整个 dependency closure：
+
+- 对每个目录和文件固定相对路径、owner、mode、size 和 file SHA256；
+- 对文件做 stable FD double-read，拒绝 symlink、hardlink、device/socket 及
+  group/world-writable nested entry；
+- 拒绝任意层级的 `.pth`、`.egg-link`、`sitecustomize`、`usercustomize`；
+- 顶层 package directory 必须包含普通非 symlink `__init__.py`，只有
+  `.dist-info`、`.data`、`.libs` release metadata/native-library 目录例外，
+  因而 namespace portion 不能从其他 `sys.path` 拼接逃逸；
+- 连续两次 closure scan 必须完全一致，并与 release side 独立提供的
+  dependency-manifest SHA256 pin 匹配。
+
+trusted launcher 必须以 immutable RepoDigest 启动只读、non-root signer image。
+该 image digest 与 dependency-manifest digest 都签入 provenance；offline
+verifier 再与独立 pins 比较并写入 receipt。第三方模块加载后、打开 private
+key 前，signer 会重新验证 root identity 和完整 closure；普通
+post-validation drift 会在私钥读取前阻断。并发同 UID 自恢复攻击依赖
+trusted launcher 的只读 rootfs/mount 边界，不能只依赖目录 mode 或二次扫描。
 
 ## 签署
 
@@ -107,6 +123,9 @@ BOOTSTRAP_SITE_PACKAGES=/opt/c-fast-provenance/lib/python3.12/site-packages
   --bootstrap-site-packages "$BOOTSTRAP_SITE_PACKAGES" \
   --expected-bootstrap-site-packages-identity-sha256 \
     "$BOOTSTRAP_SITE_PACKAGES_IDENTITY_SHA256" \
+  --expected-bootstrap-dependency-manifest-sha256 \
+    "$SIGNER_DEPENDENCY_MANIFEST_SHA256" \
+  --signer-runtime-image-digest "$SIGNER_RUNTIME_IMAGE_DIGEST" \
   --input /secure/query-v4-provenance-v3.unsigned.json \
   --output /secure/query-v4-provenance-v3.signed.json \
   --private-key-file /secure/provenance-ed25519-private.pem \
@@ -126,8 +145,10 @@ BOOTSTRAP_SITE_PACKAGES=/opt/c-fast-provenance/lib/python3.12/site-packages
 private key 必须属于 dedicated provenance key domain，且不得与 T1/L3
 authority key 复用。signer source pin 必须来自待签 artifact 之外的独立审查
 渠道。`PINNED_PYTHON`、site-packages identity pin 和 signer environment
-image/release pin 也必须来自待签 artifact 与当前 shell environment 之外的
-release-side 配置；签署命令不得现场从目标目录反推这些 expected pins。
+dependency-manifest/image RepoDigest pins 也必须来自待签 artifact 与当前
+shell environment 之外的 release-side 配置；签署命令不得现场从目标目录反推
+这些 expected pins。trusted launcher 必须按 exact RepoDigest 选择 image，并
+使用 read-only rootfs/mount、non-root UID 和 `--network=none`。
 
 ## 离线验证
 
@@ -142,6 +163,9 @@ PYTHONPATH=scripts python3 \
   --expected-image-digest "$QUERY_V4_IMAGE_DIGEST" \
   --expected-signing-tool-source-sha256 "$SIGNER_V3_SOURCE_SHA256" \
   --expected-signing-tool-source-commit-sha "$SIGNER_SOURCE_COMMIT_SHA" \
+  --expected-signer-dependency-manifest-sha256 \
+    "$SIGNER_DEPENDENCY_MANIFEST_SHA256" \
+  --expected-signer-runtime-image-digest "$SIGNER_RUNTIME_IMAGE_DIGEST" \
   --t1-authority-keyring /secure/t1-release-keyring.json \
   --expected-t1-authority-keyring-sha256 "$T1_KEYRING_SHA256" \
   --l3-authority-keyring /secure/l3-release-keyring.json \
