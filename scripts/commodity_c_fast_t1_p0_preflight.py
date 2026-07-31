@@ -19,6 +19,7 @@ from c_fast_t1.validate_query_v4_runtime import (
     validate_package,
 )
 from c_fast_t1.verify_query_v4_image_attestation import (
+    ATTESTATION_SCHEMA_PATH as QUERY_V4_ATTESTATION_SCHEMA_PATH,
     QueryV4ImageAttestationError,
     verify_query_v4_image_evidence,
 )
@@ -92,9 +93,50 @@ def _read_content_attestation(
             limit=MAX_ATTESTATION_BYTES,
         )
         payload = parse_json_bytes(raw, "query-v4 content attestation")
+        validate_json_schema(
+            payload,
+            QUERY_V4_ATTESTATION_SCHEMA_PATH,
+            "query-v4 content attestation",
+        )
     except OneShotError as exc:
         raise T1P0PreflightError(str(exc)) from exc
     return raw, payload
+
+
+def _canonical_storage_json(payload: dict[str, Any]) -> bytes:
+    return (
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            indent=2,
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+def _require_exact_content_attestation_rerun(
+    supplied_raw: bytes,
+    supplied: dict[str, Any],
+    regenerated: dict[str, Any],
+) -> None:
+    supplied_canonical = canonical_json(supplied)
+    regenerated_canonical = canonical_json(regenerated)
+    if not hmac.compare_digest(
+        supplied_canonical,
+        regenerated_canonical,
+    ):
+        raise T1P0PreflightError(
+            "query-v4 content attestation is not the exact typed rerun"
+        )
+    if not hmac.compare_digest(
+        supplied_raw,
+        _canonical_storage_json(supplied),
+    ):
+        raise T1P0PreflightError(
+            "query-v4 content attestation is not canonical storage bytes"
+        )
 
 
 def readonly_dsn_metadata(path: Path) -> dict[str, Any]:
@@ -442,10 +484,11 @@ def main() -> int:
         supplied_raw, supplied = _read_content_attestation(
             args.query_v4_content_attestation
         )
-        if supplied != regenerated:
-            raise T1P0PreflightError(
-                "query-v4 content attestation is not the exact rerun"
-            )
+        _require_exact_content_attestation_rerun(
+            supplied_raw,
+            supplied,
+            regenerated,
+        )
         if not hmac.compare_digest(
             str(regenerated["image_digest"]),
             args.expected_query_v4_image_digest,

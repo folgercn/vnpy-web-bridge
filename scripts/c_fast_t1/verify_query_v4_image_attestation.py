@@ -71,6 +71,7 @@ RUNTIME_PTH_PATH = (
 ALLOWED_POST_BASE_PATHS = frozenset(
     {
         "opt",
+        "opt/c-fast-t1",
         "run",
         "run/c-fast-t1-query-v4-input",
         "run/c-fast-t1-readiness-v3-pins",

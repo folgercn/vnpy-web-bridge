@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
@@ -155,6 +156,111 @@ def test_containerfile_splice_fails_closed(tmp_path: Path) -> None:
             validate_package(),
             dsn,
             now=NOW,
+        )
+
+
+def test_content_attestation_reader_requires_exact_v4_schema(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "partial-attestation.json"
+    path.write_bytes(subject._canonical_storage_json(_attestation()))
+
+    with pytest.raises(
+        subject.T1P0PreflightError,
+        match="schema",
+    ):
+        subject._read_content_attestation(path)
+
+
+def test_content_attestation_exact_rerun_accepts_unique_storage_bytes() -> None:
+    regenerated = _attestation()
+    supplied = copy.deepcopy(regenerated)
+
+    subject._require_exact_content_attestation_rerun(
+        subject._canonical_storage_json(supplied),
+        supplied,
+        regenerated,
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("authority_granted", 0),
+        ("production_query_authorized", 0),
+        ("database_mutations", False),
+        ("database_mutations", 0.0),
+        ("database_mutations", -0.0),
+    ],
+)
+def test_content_attestation_type_splice_fails_exact_rerun(
+    field: str,
+    replacement: object,
+) -> None:
+    regenerated = _attestation()
+    supplied = copy.deepcopy(regenerated)
+    supplied[field] = replacement
+
+    with pytest.raises(
+        subject.T1P0PreflightError,
+        match="exact typed rerun",
+    ):
+        subject._require_exact_content_attestation_rerun(
+            subject._canonical_storage_json(supplied),
+            supplied,
+            regenerated,
+        )
+
+
+def test_content_attestation_true_integer_splice_fails_exact_rerun() -> None:
+    regenerated = {**_attestation(), "synthetic_check": True}
+    supplied = {**regenerated, "synthetic_check": 1}
+
+    with pytest.raises(
+        subject.T1P0PreflightError,
+        match="exact typed rerun",
+    ):
+        subject._require_exact_content_attestation_rerun(
+            subject._canonical_storage_json(supplied),
+            supplied,
+            regenerated,
+        )
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        json.dumps(
+            _attestation(),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8"),
+        (
+            json.dumps(
+                _attestation(),
+                ensure_ascii=False,
+                sort_keys=False,
+                indent=2,
+            )
+            + "\n"
+        ).encode("utf-8"),
+    ],
+)
+def test_content_attestation_reencoding_fails_exact_storage(
+    raw: bytes,
+) -> None:
+    regenerated = _attestation()
+    supplied = copy.deepcopy(regenerated)
+
+    with pytest.raises(
+        subject.T1P0PreflightError,
+        match="canonical storage bytes",
+    ):
+        subject._require_exact_content_attestation_rerun(
+            raw,
+            supplied,
+            regenerated,
         )
 
 

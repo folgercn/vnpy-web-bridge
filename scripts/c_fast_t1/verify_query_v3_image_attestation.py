@@ -110,6 +110,7 @@ RUNTIME_PTH_CONTENT = b"/opt/c-fast-t1/scripts\n"
 ALLOWED_POST_BASE_PATHS = frozenset(
     {
         "opt",
+        "opt/c-fast-t1",
         "run",
         "run/c-fast-t1-query-v3-input",
         "run/c-fast-t1-readiness-v2-pins",
@@ -1151,6 +1152,75 @@ def _mode_allows(
     return entry.mode & required != 0
 
 
+def _runtime_identity_can_write(entry: FileEntry) -> bool:
+    return _mode_allows(
+        entry,
+        uid=65532,
+        gid=65532,
+        owner_bit=0o200,
+        group_bit=0o020,
+        other_bit=0o002,
+    )
+
+
+def _validate_python_execution_permissions(
+    filesystem: dict[str, FileEntry],
+    directories: dict[str, FileEntry],
+) -> None:
+    file_paths = {
+        path
+        for path in filesystem
+        if (
+            path == INTERPRETER_PATH
+            or path.startswith("usr/local/lib/python3.12/")
+        )
+    }
+    directory_paths = {
+        path
+        for path in directories
+        if (
+            path
+            in {
+                "usr",
+                "usr/local",
+                "usr/local/bin",
+                "usr/local/lib",
+                "usr/local/lib/python3.12",
+            }
+            or path.startswith("usr/local/lib/python3.12/")
+        )
+    }
+    for path in sorted(file_paths):
+        entry = filesystem[path]
+        if entry.kind == "regular" and (
+            entry.mode & 0o022 != 0
+            or _runtime_identity_can_write(entry)
+        ):
+            raise QueryV3ImageAttestationError(
+                "OCI Python execution closure is writable by the runtime "
+                f"identity or group/world: /{path}"
+            )
+    for path in sorted(directory_paths):
+        entry = directories[path]
+        if (
+            entry.kind != "directory"
+            or entry.mode & 0o022 != 0
+            or _runtime_identity_can_write(entry)
+            or not _mode_allows(
+                entry,
+                uid=65532,
+                gid=65532,
+                owner_bit=0o100,
+                group_bit=0o010,
+                other_bit=0o001,
+            )
+        ):
+            raise QueryV3ImageAttestationError(
+                "OCI Python execution closure directory is writable or not "
+                f"traversable by the runtime identity: /{path}"
+            )
+
+
 def _installed_versions(filesystem: dict[str, FileEntry]) -> dict[str, str]:
     installed: dict[str, str] = {}
     for path, entry in filesystem.items():
@@ -1310,6 +1380,7 @@ def derive_oci_facts(
             "OCI rootfs does not inherit the pinned linux/amd64 base image prefix"
         )
     _validate_python_startup_closure(filesystem)
+    _validate_python_execution_permissions(filesystem, directories)
     disallowed_delta = sorted(
         path for path in post_base_touched if not _post_base_path_allowed(path)
     )
@@ -1383,6 +1454,9 @@ def derive_oci_facts(
             entry is None
             or entry.kind != "regular"
             or entry.sha256 != expected_hash
+            or entry.uid != 0
+            or entry.gid != 0
+            or entry.mode not in {0o444, 0o555}
             or not _mode_allows(
                 entry,
                 uid=65532,
@@ -1396,6 +1470,22 @@ def derive_oci_facts(
                 f"OCI runtime file does not match source bundle: {expected_path}"
             )
         runtime_bundle[expected_path] = entry.sha256
+    for path, entry in sorted(directories.items()):
+        if not (
+            path == "opt/c-fast-t1"
+            or path.startswith("opt/c-fast-t1/")
+        ):
+            continue
+        if (
+            entry.kind != "directory"
+            or entry.uid != 0
+            or entry.gid != 0
+            or entry.mode != 0o555
+        ):
+            raise QueryV3ImageAttestationError(
+                "OCI runtime directory is not root-owned and immutable: "
+                f"/{path}"
+            )
     required_directories = {"opt", "opt/c-fast-t1"}
     for relative in expected_relative:
         parent = PurePosixPath(relative).parent
@@ -1407,6 +1497,15 @@ def derive_oci_facts(
         if (
             entry is None
             or entry.kind != "directory"
+            or entry.uid != 0
+            or entry.gid != 0
+            or (
+                path == "opt"
+                and (
+                    entry.mode & 0o022 != 0
+                    or _runtime_identity_can_write(entry)
+                )
+            )
             or not _mode_allows(
                 entry,
                 uid=65532,

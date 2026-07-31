@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import io
 import json
 from pathlib import Path
 import subprocess
@@ -38,6 +39,52 @@ def _git(*arguments: str) -> str:
         capture_output=True,
         text=True,
     ).stdout.strip()
+
+
+def _oci_helper() -> Any:
+    name = "_query_v4_oci_test_helper"
+    if name in sys.modules:
+        helper = sys.modules[name]
+    else:
+        spec = importlib.util.spec_from_file_location(name, V3_TEST_HELPER)
+        assert spec is not None and spec.loader is not None
+        helper = importlib.util.module_from_spec(spec)
+        sys.modules[name] = helper
+        spec.loader.exec_module(helper)
+    helper.subject = subject._delegate
+    return helper
+
+
+def _permission_override_layer(
+    path: str,
+    content: bytes,
+    *,
+    mode: int,
+    uid: int,
+    gid: int,
+    directory: bool = False,
+) -> bytes:
+    output = io.BytesIO()
+    with tarfile.open(
+        fileobj=output,
+        mode="w:",
+        format=tarfile.USTAR_FORMAT,
+    ) as archive:
+        member = tarfile.TarInfo(path)
+        member.mode = mode
+        member.uid = uid
+        member.gid = gid
+        member.uname = ""
+        member.gname = ""
+        member.mtime = 0
+        if directory:
+            member.type = tarfile.DIRTYPE
+            archive.addfile(member)
+        else:
+            member.type = tarfile.REGTYPE
+            member.size = len(content)
+            archive.addfile(member, io.BytesIO(content))
+    return output.getvalue()
 
 
 @pytest.fixture(scope="module")
@@ -121,15 +168,7 @@ def test_query_v4_exact_bundle_and_synthetic_oci_pass_full_verifier(
     source_commit: str,
     source_bundle: tuple[bytes, bytes, dict[str, Any]],
 ) -> None:
-    spec = importlib.util.spec_from_file_location(
-        "_query_v4_oci_test_helper",
-        V3_TEST_HELPER,
-    )
-    assert spec is not None and spec.loader is not None
-    helper = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = helper
-    spec.loader.exec_module(helper)
-    helper.subject = subject._delegate
+    helper = _oci_helper()
 
     bundle_path = tmp_path / "query-v4-source.tar"
     bundle_path.write_bytes(source_bundle[0])
@@ -197,6 +236,123 @@ def test_query_v4_exact_bundle_and_synthetic_oci_pass_full_verifier(
     assert report["checks"]["runtime_bundle_matches_source_bundle"] is True
     assert report["authority_granted"] is False
     assert report["production_query_authorized"] is False
+
+
+def test_query_v4_rejects_runtime_and_python_closure_writable_by_runtime(
+    tmp_path: Path,
+    source_commit: str,
+    source_bundle: tuple[bytes, bytes, dict[str, Any]],
+) -> None:
+    helper = _oci_helper()
+    bundle_path = tmp_path / "query-v4-source.tar"
+    bundle_path.write_bytes(source_bundle[0])
+    source_facts = subject.derive_source_facts(bundle_path, source_commit)
+    bundle_entries = {
+        name: raw
+        for name, raw, _mode, _kind in helper._source_entries(
+            source_facts["bundle_raw"]
+        )[1:]
+    }
+    runtime_script = (
+        "opt/c-fast-t1/scripts/commodity_c_fast_t1_query_v4.py"
+    )
+    runtime_schema = next(
+        path
+        for path in sorted(
+            item.removeprefix("/")
+            for item in source_facts["runtime_bundle"]
+        )
+        if path.endswith(".schema.json")
+    )
+    dependency_module = (
+        "usr/local/lib/python3.12/site-packages/"
+        "attrs/__init__.py"
+    )
+    attacks = (
+        (
+            runtime_script,
+            bundle_entries[
+                runtime_script.removeprefix("opt/c-fast-t1/")
+            ],
+            0o777,
+            65532,
+            65532,
+            False,
+            "runtime file",
+        ),
+        (
+            runtime_schema,
+            bundle_entries[
+                runtime_schema.removeprefix("opt/c-fast-t1/")
+            ],
+            0o666,
+            0,
+            0,
+            False,
+            "runtime file",
+        ),
+        (
+            "opt/c-fast-t1/scripts",
+            b"",
+            0o755,
+            65532,
+            65532,
+            True,
+            "runtime directory",
+        ),
+        (
+            dependency_module,
+            b"# synthetic dependency module\n",
+            0o666,
+            0,
+            0,
+            False,
+            "Python execution closure",
+        ),
+        (
+            "opt/c-fast-t1/writable-injection",
+            b"",
+            0o777,
+            65532,
+            65532,
+            True,
+            "runtime directory",
+        ),
+    )
+    for index, (
+        path,
+        content,
+        mode,
+        uid,
+        gid,
+        directory,
+        error,
+    ) in enumerate(attacks):
+        attack_layer = _permission_override_layer(
+            path,
+            content,
+            mode=mode,
+            uid=uid,
+            gid=gid,
+            directory=directory,
+        )
+        oci_raw, _image = helper._build_oci(
+            source_facts,
+            source_commit,
+            extra_raw_layers=[attack_layer],
+        )
+        oci_path = tmp_path / f"writable-{index}.oci.tar"
+        oci_path.write_bytes(oci_raw)
+
+        with pytest.raises(
+            subject.QueryV4ImageAttestationError,
+            match=error,
+        ):
+            subject.derive_oci_facts(
+                oci_path,
+                source_commit,
+                source_facts["runtime_bundle"],
+            )
 
 
 def test_v4_delegate_configuration_does_not_mutate_v3_contract() -> None:
