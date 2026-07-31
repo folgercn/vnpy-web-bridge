@@ -27,6 +27,10 @@ relative-vol thermostat producer 共四份完整源码 SHA256，以及 PR
 `COMMODITY_FROZEN_SECTOR_MAP_V1` 身份和十品种映射哈希；任一漂移都会
 fail closed。
 
+Issue #215 更新了 relative-vol thermostat 的 source-weight 缩放顺序：
+先按冻结 scale 缩放，再由既有 guardband 收紧；manifest 同步固定更新后的
+完整源码 SHA256，不改变 C_FAST 原始研究 lineage 或任何 Authority。
+
 SHA256 一致只证明 producer kernel 明确绑定了这些原始研究源码的身份，不
 表示两者逐字节相同。producer kernel 是面向严格 typed source view 的独立、
 自包含移植，仍须通过自身 golden、sealed-export 和真实数据验收。

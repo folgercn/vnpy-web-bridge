@@ -18,23 +18,22 @@ import argparse
 import base64
 import binascii
 import calendar
-from dataclasses import dataclass
-from datetime import date, datetime, timedelta
 import hashlib
 import json
 import math
-from pathlib import Path
 import re
 import sys
-from typing import Any, Mapping
+from collections.abc import Mapping
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
+from pathlib import Path
+from typing import Any
 from zoneinfo import ZoneInfo
-
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-import commodity_c_fast_pure_producer_kernel as frozen  # noqa: E402
-
+import commodity_c_fast_pure_producer_kernel as frozen
 
 SOURCE_SCHEMA_VERSION = "commodity_relative_vol_position_manager_source_view_v1"
 SOURCE_PURPOSE = "VERIFIED_BOUNDED_PIT_BASELINE_INPUT_ONLY"
@@ -211,6 +210,24 @@ def canonical_json(payload: Any) -> bytes:
 
 def _sha256(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
+
+
+def _scale_shadow_source(
+    baseline_source: dict[str, float],
+    scale: float,
+) -> dict[str, float]:
+    if set(baseline_source) != set(frozen.PRODUCTS) or not math.isfinite(scale):
+        raise SnapshotProducerError("scaled shadow source is invalid")
+    shadow = {
+        product: baseline_source[product] * scale
+        for product in frozen.PRODUCTS
+    }
+    if (
+        any(not math.isfinite(value) for value in shadow.values())
+        or abs(math.fsum(shadow.values())) > 1e-10
+    ):
+        raise SnapshotProducerError("scaled shadow source is invalid")
+    return shadow
 
 
 def _frozen_kernel_path() -> Path:
@@ -1187,14 +1204,8 @@ def produce_snapshot(
         product: baseline_rows[product]["source_target_weight"]
         for product in frozen.PRODUCTS
     }
-    shadow_source = {
-        product: baseline_source[product] * smoothed_scale
-        for product in frozen.PRODUCTS
-    }
+    shadow_source = _scale_shadow_source(baseline_source, smoothed_scale)
     try:
-        frozen._verify_weight_limits(
-            shadow_source, frozen.SOURCE_LIMITS, "shadow source"
-        )
         baseline_buffered = frozen._buffer_weights(baseline_source)
         shadow_buffered = frozen._buffer_weights(shadow_source)
         unit_weights = {

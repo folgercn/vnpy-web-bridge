@@ -190,8 +190,9 @@ def contract_rows_from_daily_raw(
     raw: bytes,
     exchange: str,
     official_day: str,
+    include_ohlc: bool = False,
 ) -> dict[str, list[dict[str, Any]]]:
-    """Extract exact target-contract settlement/OI without summary rows."""
+    """Extract canonical target-contract rows without product summaries."""
 
     payload = parse_json_strict(raw, f"{exchange} official daily raw")
     if not isinstance(payload, dict) or payload.get("report_date") != official_day.replace(
@@ -202,6 +203,7 @@ def contract_rows_from_daily_raw(
     if not isinstance(rows, list) or not rows:
         raise PitSourceViewError("official raw contract rows are missing")
     result = {product: [] for product in TARGET_PRODUCTS}
+    ranking_result = {product: [] for product in TARGET_PRODUCTS}
     expected_products = {
         product
         for product, spec in frozen.PRODUCT_SPECS.items()
@@ -246,6 +248,38 @@ def contract_rows_from_daily_raw(
                 nonnegative=True,
             ),
         }
+        ranking_result[product].append(dict(observation))
+        if include_ohlc:
+            if any(
+                row.get(field) in {"", None}
+                for field in ("OPENPRICE", "HIGHESTPRICE", "LOWESTPRICE")
+            ):
+                continue
+            observation.update(
+                {
+                    "open": _strict_number(
+                        row.get("OPENPRICE"),
+                        f"{exact_contract} open",
+                    ),
+                    "high": _strict_number(
+                        row.get("HIGHESTPRICE"),
+                        f"{exact_contract} high",
+                    ),
+                    "low": _strict_number(
+                        row.get("LOWESTPRICE"),
+                        f"{exact_contract} low",
+                    ),
+                }
+            )
+            if not (
+                observation["low"]
+                <= min(observation["open"], observation["settlement"])
+                <= max(observation["open"], observation["settlement"])
+                <= observation["high"]
+            ):
+                raise PitSourceViewError(
+                    f"{exact_contract} OHLC envelope is inconsistent"
+                )
         result[product].append(observation)
     for product in expected_products:
         rows_for_product = result[product]
@@ -253,7 +287,20 @@ def contract_rows_from_daily_raw(
             rows_for_product
         ):
             raise PitSourceViewError(f"{product} repeats an exact contract")
-        _pit_main(product, date.fromisoformat(official_day), rows_for_product)
+        ranked_main, _ = _pit_main(
+            product,
+            date.fromisoformat(official_day),
+            ranking_result[product],
+        )
+        admitted_main, _ = _pit_main(
+            product,
+            date.fromisoformat(official_day),
+            rows_for_product,
+        )
+        if ranked_main["exact_contract"] != admitted_main["exact_contract"]:
+            raise PitSourceViewError(
+                f"{product} PIT main lacks complete official OHLC"
+            )
     return result
 
 

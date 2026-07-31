@@ -10,7 +10,6 @@ import json
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_BUNDLE_DIR = (
     ROOT / "docs/research/commodity-c-fast-lineage-v1"
@@ -36,7 +35,7 @@ RELATED_CONSUMER_SOURCE_SHA256 = {
         "a31167a034763f443b020c21c4d10d8a9f39729b69dec4e51d644c9701e8ea65"
     ),
     "scripts/commodity_relative_vol_snapshot_producer.py": (
-        "faf63fd38e26192db33809051f9beeda6e7bb02b65a56e1caf2dde8dabad0f66"
+        "a230d4196b2c095b32f2490031fc4c75eb84c96be5955a0427e9ef108740e588"
     ),
 }
 SECTOR_MAP_ID = "COMMODITY_FROZEN_SECTOR_MAP_V1"

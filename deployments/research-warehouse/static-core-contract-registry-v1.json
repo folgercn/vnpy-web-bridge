@@ -1,0 +1,112 @@
+{
+  "schema_version": "vnpy_research_static_core_contract_registry_v1",
+  "registry_id": "static-core-contract-registry-20260731-v1",
+  "generated_at": "2026-07-31T12:30:37+08:00",
+  "sources": [
+    {
+      "source_id": "shfe-standard-futures-contracts",
+      "url": "https://www.shfe.com.cn/products/futures/",
+      "scope": "SHFE standard futures contracts and product rules"
+    },
+    {
+      "source_id": "ine-sc-standard-contract",
+      "url": "https://www.ine.cn/products/futures/energyandchemical/sc_f/standard_sc_f/202312/t20231205_802540.html",
+      "scope": "INE crude-oil standard futures contract"
+    }
+  ],
+  "products": [
+    {
+      "product": "ag",
+      "exchange": "SHFE",
+      "multiplier": 15,
+      "price_tick": 1.0,
+      "last_trading_day_rule": "SHFE_DELIVERY_MONTH_15TH_NEXT_OFFICIAL_V1",
+      "source_id": "shfe-standard-futures-contracts"
+    },
+    {
+      "product": "al",
+      "exchange": "SHFE",
+      "multiplier": 5,
+      "price_tick": 5.0,
+      "last_trading_day_rule": "SHFE_DELIVERY_MONTH_15TH_NEXT_OFFICIAL_V1",
+      "source_id": "shfe-standard-futures-contracts"
+    },
+    {
+      "product": "au",
+      "exchange": "SHFE",
+      "multiplier": 1000,
+      "price_tick": 0.02,
+      "last_trading_day_rule": "SHFE_DELIVERY_MONTH_15TH_NEXT_OFFICIAL_V1",
+      "source_id": "shfe-standard-futures-contracts"
+    },
+    {
+      "product": "bu",
+      "exchange": "SHFE",
+      "multiplier": 10,
+      "price_tick": 1.0,
+      "last_trading_day_rule": "SHFE_DELIVERY_MONTH_15TH_NEXT_OFFICIAL_V1",
+      "source_id": "shfe-standard-futures-contracts"
+    },
+    {
+      "product": "cu",
+      "exchange": "SHFE",
+      "multiplier": 5,
+      "price_tick": 10.0,
+      "last_trading_day_rule": "SHFE_DELIVERY_MONTH_15TH_NEXT_OFFICIAL_V1",
+      "source_id": "shfe-standard-futures-contracts"
+    },
+    {
+      "product": "rb",
+      "exchange": "SHFE",
+      "multiplier": 10,
+      "price_tick": 1.0,
+      "last_trading_day_rule": "SHFE_DELIVERY_MONTH_15TH_NEXT_OFFICIAL_V1",
+      "source_id": "shfe-standard-futures-contracts"
+    },
+    {
+      "product": "ru",
+      "exchange": "SHFE",
+      "multiplier": 10,
+      "price_tick": 5.0,
+      "last_trading_day_rule": "SHFE_DELIVERY_MONTH_15TH_NEXT_OFFICIAL_V1",
+      "source_id": "shfe-standard-futures-contracts"
+    },
+    {
+      "product": "sc",
+      "exchange": "INE",
+      "multiplier": 1000,
+      "price_tick": 0.1,
+      "last_trading_day_rule": "INE_SC_PREVIOUS_MONTH_LAST_OFFICIAL_V1",
+      "source_id": "ine-sc-standard-contract"
+    },
+    {
+      "product": "sp",
+      "exchange": "SHFE",
+      "multiplier": 10,
+      "price_tick": 2.0,
+      "last_trading_day_rule": "SHFE_DELIVERY_MONTH_15TH_NEXT_OFFICIAL_V1",
+      "source_id": "shfe-standard-futures-contracts"
+    },
+    {
+      "product": "zn",
+      "exchange": "SHFE",
+      "multiplier": 5,
+      "price_tick": 5.0,
+      "last_trading_day_rule": "SHFE_DELIVERY_MONTH_15TH_NEXT_OFFICIAL_V1",
+      "source_id": "shfe-standard-futures-contracts"
+    }
+  ],
+  "authority": {
+    "account_data_read": false,
+    "control_authorized": false,
+    "deployment_authorized": false,
+    "execution_authorized": false,
+    "network_beyond_allowlist_authorized": false,
+    "order_authorized": false,
+    "permit_authorized": false,
+    "position_mutation_authorized": false,
+    "production_authorized": false,
+    "rpc_authorized": false,
+    "trading_authorized": false
+  }
+}

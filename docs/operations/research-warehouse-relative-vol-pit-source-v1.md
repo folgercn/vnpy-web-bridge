@@ -46,6 +46,25 @@ The main process must never mount or read the Warehouse custody root, raw
 objects, run/backfill receipts, manifests, commit ledger, DuckDB/catalog,
 operator state or signing key.
 
+## Historical baseline backfill
+
+An existing signed baseline from another source month or SimNow exercise must
+not be relabeled. Run `scripts/research_warehouse_static_core_baseline.py`
+inside the isolated `vnpyresearch` boundary first. It verifies the 186-day
+receipt, exact daily bytes and manifest/commit/root pins; selects the source
+month-end PIT main from full official OHLC/OI curves; reads only that contract's
+next-official-day open; and validates multiplier, tick and calendar-derived
+last trading day against
+`deployments/research-warehouse/static-core-contract-registry-v1.json`.
+
+The create-only bundle contains the canonical source, all nine pure Research
+artifacts, an unsigned baseline and a receipt. Fresh replay must be byte
+identical. The receipt records both the logical execution-day replay time and
+the actual backfill completion time, so a late acquisition is never represented
+as contemporaneous custody. This adapter has no signing, installation, RPC,
+account or trading capability; only the independently replayed unsigned batch
+may be passed to the existing controlled signer.
+
 ## Frozen derivation
 
 The adapter binds the exact 186-day receipt even when the selected source month

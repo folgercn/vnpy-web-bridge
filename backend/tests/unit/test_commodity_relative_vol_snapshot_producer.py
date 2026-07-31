@@ -3,31 +3,28 @@ from __future__ import annotations
 import ast
 import base64
 import calendar
-from copy import deepcopy
-from datetime import date, timedelta
 import hashlib
 import json
 import math
-from pathlib import Path
 import statistics
 import sys
+from copy import deepcopy
+from datetime import date, timedelta
+from pathlib import Path
 
-from jsonschema import Draft202012Validator
 import pytest
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-
 from app.schemas.commodity_simnow import (
     CommodityPositionManagerShadowDTO,
     CommodityTargetBatchDTO,
 )
 from app.services.commodity_simnow import CommoditySimNowService
-
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from jsonschema import Draft202012Validator
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-import commodity_relative_vol_snapshot_producer as producer  # noqa: E402
-
+import commodity_relative_vol_snapshot_producer as producer
 
 PRICES = {
     "ag": 8000.0,
@@ -823,6 +820,20 @@ def test_scale_clip_boundaries(fast_amplitude: float, expected: float) -> None:
     result = producer.produce_snapshot(source)
 
     assert json.loads(result.snapshot_draft)["raw_scale"] == expected
+
+
+def test_scale_above_one_reapplies_guardband_after_raw_source_scaling() -> None:
+    baseline = {product: 0.0 for product in producer.frozen.PRODUCTS}
+    baseline["ag"] = 0.2
+    baseline["al"] = -0.2
+
+    scaled = producer._scale_shadow_source(baseline, 1.2)
+    buffered = producer.frozen._buffer_weights(scaled)
+
+    assert scaled["ag"] == pytest.approx(0.24)
+    assert scaled["al"] == pytest.approx(-0.24)
+    assert buffered["ag"] == pytest.approx(0.12)
+    assert buffered["al"] == pytest.approx(-0.12)
 
 
 def test_source_schema_is_strict_bounded_and_fixture_valid() -> None:
