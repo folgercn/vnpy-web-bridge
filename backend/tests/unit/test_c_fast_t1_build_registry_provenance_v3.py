@@ -101,13 +101,8 @@ def _run_fresh_signer(
     *,
     env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    site_packages = next(
-        Path(item).resolve()
-        for item in sys.path
-        if item.endswith("site-packages")
-        and (Path(item) / "cryptography").is_dir()
-        and (Path(item) / "jsonschema").is_dir()
-    )
+    site_packages = signer_path.parent / "controlled-site-packages"
+    site_packages.mkdir(mode=0o700)
     identity = signer.bootstrap_site_packages_identity(site_packages)
     return subprocess.run(
         [
@@ -514,6 +509,9 @@ def test_isolated_signer_ignores_pre_startup_hooks(
     assert control.returncode == 0
     assert sentinel.read_text() == "must-not-be-read"
     sentinel.unlink()
+    (tmp_path / signer.PROVENANCE_WRAPPER_PATH.name).write_text(
+        "raise RuntimeError('must never execute')\n"
+    )
 
     result = _run_fresh_signer(
         signer_path,
@@ -524,6 +522,7 @@ def test_isolated_signer_ignores_pre_startup_hooks(
     assert result.returncode != 0
     assert not sentinel.exists()
     assert "sitecustomize" not in result.stderr
+    assert "failed the pre-execution SHA256 pin" in result.stderr
 
 
 def test_non_isolated_direct_signer_is_rejected(tmp_path: Path) -> None:
