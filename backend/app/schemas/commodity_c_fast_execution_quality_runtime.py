@@ -17,6 +17,15 @@ from app.schemas.commodity_c_fast_shadow import StrictFiniteModel
 
 
 RevalidationTrigger = Literal["startup", "reload", "recovery"]
+ArtifactRole = Literal[
+    "signed_p0_acceptance",
+    "collection_admission",
+    "execution_policy",
+    "signed_snapshot",
+    "virtual_intent_plan",
+    "contract_spec_set",
+    "custody_binding",
+]
 
 
 def _strict_false(value: Any) -> Literal[False]:
@@ -134,3 +143,64 @@ class CFastExecutionQualityRuntimeRevalidationDTO(StrictFiniteModel):
         if self.receipt_sha256 != _sha256_json(core):
             raise ValueError("receipt_sha256 mismatch")
         return self
+
+
+class CFastExecutionQualityArtifactVerificationDTO(StrictFiniteModel):
+    """One verifier's result for exact bytes read by the runtime adapter."""
+
+    model_config = ConfigDict(
+        frozen=True,
+        revalidate_instances="always",
+    )
+
+    schema_version: Literal[
+        "commodity_c_fast_execution_quality_artifact_verification_v1"
+    ]
+    artifact_role: ArtifactRole
+    candidate_id: Literal["C_FAST_CROSS_SECTION_NEUTRAL"]
+    raw_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    canonical_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    valid_until_utc: datetime | None = None
+    exact_contracts: tuple[str, ...] = Field(default=(), max_length=100)
+    bound_artifact_raw_sha256: dict[ArtifactRole, str] = Field(default_factory=dict)
+    signature_verified: Literal[True]
+    semantic_contract_verified: Literal[True]
+
+    collection_authorized: StrictFalse
+    runtime_activation_authorized: StrictFalse
+    authority_granted: StrictFalse
+    dispatch_allowed: StrictFalse
+    order_authorized: StrictFalse
+    position_mutation_authorized: StrictFalse
+    database_mutation_authorized: StrictFalse
+    deployment_mutation_authorized: StrictFalse
+    replacement_allowed: StrictFalse
+    production_allowed: StrictFalse
+
+    @field_validator("valid_until_utc")
+    @classmethod
+    def require_optional_utc(cls, value: datetime | None) -> datetime | None:
+        if value is not None:
+            _require_utc(value, "valid_until_utc")
+        return value
+
+    @field_validator("exact_contracts")
+    @classmethod
+    def require_canonical_optional_contract_set(
+        cls,
+        value: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        if tuple(sorted(set(value))) != value:
+            raise ValueError("exact_contracts must be sorted and unique")
+        for exact_contract in value:
+            exchange, separator, symbol = exact_contract.partition(".")
+            if (
+                separator != "."
+                or not exchange.isupper()
+                or not exchange.isalpha()
+                or not symbol[:-4].isalpha()
+                or not symbol[-4:].isdigit()
+                or not (8 <= len(exact_contract) <= 32)
+            ):
+                raise ValueError("exact_contract is invalid")
+        return value
