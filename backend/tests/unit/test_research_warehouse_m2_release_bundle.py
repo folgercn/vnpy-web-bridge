@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import pwd
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -309,17 +310,22 @@ def test_install_switches_under_lock_and_retains_previous(
     lock.chmod(0o444)
     release = parent / "release"
     installed_manifest = tmp_path / "installed-tree-manifest.json"
-    first = install_release_bundle(
-        staged_root=staged,
-        manifest=manifest,
-        release_root=release,
-        lock_path=lock,
-        expected_owner_uid=os.geteuid(),
-        expected_owner_gid=os.getegid(),
-        enforce_logical_paths=False,
-        installed_manifest_output=installed_manifest,
-    )
+    previous_umask = os.umask(0o077)
+    try:
+        first = install_release_bundle(
+            staged_root=staged,
+            manifest=manifest,
+            release_root=release,
+            lock_path=lock,
+            expected_owner_uid=os.geteuid(),
+            expected_owner_gid=os.getegid(),
+            enforce_logical_paths=False,
+            installed_manifest_output=installed_manifest,
+        )
+    finally:
+        os.umask(previous_umask)
     assert first["previous_retained"] is False
+    assert stat.S_IMODE(release.stat().st_mode) == 0o755
     assert first["installed_tree_manifest_raw_sha256"] == sha256(
         installed_manifest.read_bytes()
     )

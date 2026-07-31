@@ -42,6 +42,7 @@ STATE_KEYS = {
     "authority",
 }
 MANIFEST_RESULT_KEYS = {
+    "available_at",
     "batch_id",
     "batch_seal_sha256",
     "commit_seal_sha256",
@@ -322,6 +323,10 @@ def record_manifest_result(
         require_sha(result[field], field)
     require_day(result["trade_day"], "manifest trade_day")
     parse_utc(result["committed_at"], "manifest committed_at")
+    available_at = parse_utc(result["available_at"], "manifest available_at")
+    committed_at = parse_utc(result["committed_at"], "manifest committed_at")
+    if available_at <= committed_at:
+        raise RegistryError("M2 manifest availability must follow durable commit")
     if result["status"] != "DAILY_BATCH_COMMITTED_AWAITING_EXTERNAL_ANCHOR":
         raise RegistryError("M2 manifest signer status is invalid")
     for field in (
@@ -359,7 +364,7 @@ def record_manifest_result(
             "sequence": current["manifest_sequence"] + 1,
             "batch_seal_sha256": result["batch_seal_sha256"],
             "commit_seal_sha256": result["commit_seal_sha256"],
-            "available_at": result["committed_at"],
+            "available_at": result["available_at"],
         },
     ]
     ledger_raw = canonical_json_line(

@@ -15,6 +15,9 @@ DEFAULT_MANIFEST_PRIVATE_KEY = Path(
 DEFAULT_BACKUP_PRIVATE_KEY = Path(
     "/private/var/root/vnpyresearch-keys/backup-private.raw"
 )
+DEFAULT_CALENDAR_PRIVATE_KEY = Path(
+    "/private/var/root/vnpyresearch-keys/calendar-private.raw"
+)
 DEFAULT_MANIFEST_PUBLIC_KEY = LIBEXEC / "manifest-public-key.b64"
 SOURCE_COMMIT_PATH = RELEASE / "metadata/source-commit-sha"
 DEPENDENCY_LOCK_PATH = RELEASE / "metadata/runtime-requirements-v1.txt"

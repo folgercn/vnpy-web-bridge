@@ -51,6 +51,7 @@ def _manifest_result() -> dict:
         "batch_seal_sha256": "a" * 64,
         "commit_seal_sha256": "b" * 64,
         "committed_at": "2026-07-30T10:40:00.000000Z",
+        "available_at": "2026-07-30T10:40:01.000000Z",
         "manifest_relative_path": (
             "manifests/2026-07-30/batch-2026-07-30-" + "a" * 24 + ".json"
         ),

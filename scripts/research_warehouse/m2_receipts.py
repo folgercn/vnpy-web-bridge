@@ -121,10 +121,18 @@ def load_run_receipt(path: Path) -> dict[str, Any]:
     return payload
 
 
-def publish_run_receipt(paths: RuntimePaths, payload: dict[str, Any]) -> Path:
+def publish_run_receipt(
+    paths: RuntimePaths,
+    payload: dict[str, Any],
+    *,
+    directory: Path | None = None,
+) -> Path:
     validated = validate_run_receipt(payload)
+    destination = directory or paths.run_receipts
+    if destination not in (paths.run_receipts, paths.history_run_receipts):
+        raise RegistryError("M2 run receipt directory is outside frozen runtime")
     return create_only_bytes(
-        paths.run_receipts / f"{validated['trade_day']}.json",
+        destination / f"{validated['trade_day']}.json",
         canonical_json_line(validated),
         "M2 daily run receipt",
         temporary_dir=paths.temporary,

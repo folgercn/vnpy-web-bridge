@@ -25,12 +25,14 @@ def _safe_raw_path(paths: WarehousePaths, relative: object):
     return paths.root.joinpath(*pure.parts)
 
 
-def _product_id(value: object) -> str:
-    if not isinstance(value, str) or not value.endswith("_f"):
+def _product_id(value: object) -> str | None:
+    if not isinstance(value, str):
         raise RegistryError("official daily row PRODUCTID is not canonical")
+    if not value.endswith("_f"):
+        return None
     product = value[:-2].lower()
     if not product.isascii() or not product.isalpha():
-        raise RegistryError("official daily row PRODUCTID is invalid")
+        return None
     return product
 
 
@@ -80,11 +82,13 @@ def product_coverage_for_manifest(
         product_counts: dict[str, int] = {}
         for row in payload[source.required_top_level_fields[0]]:
             product = _product_id(row["PRODUCTID"])
+            if product is None:
+                continue
             if product in TARGET_PRODUCTS:
                 product_counts[product] = product_counts.get(product, 0) + 1
         for product, count in product_counts.items():
             if PRODUCT_EXCHANGES[product] != source.exchange:
-                raise RegistryError("target product appeared under wrong exchange")
+                continue
             coverage[product] = {
                 "exchange": source.exchange,
                 "revision_id": revision["revision_id"],
@@ -98,3 +102,36 @@ def product_coverage_for_manifest(
             + ", ".join(sorted(missing))
         )
     return coverage
+
+
+def require_target_product_receipt_coverage(
+    *,
+    paths: WarehousePaths,
+    registry: SourceRegistry,
+    receipt: dict[str, Any],
+) -> None:
+    """Fail before receipt publication when a historical day lacks a target."""
+    coverage = set()
+    for item in receipt["sources"]:
+        source = registry.source(item["source_id"])
+        raw_path = _safe_raw_path(paths, item["raw_relative_path"])
+        raw = read_regular_strict(raw_path, "historical daily raw evidence")
+        if len(raw) != item["raw_bytes"] or sha256(raw) != item["raw_sha256"]:
+            raise RegistryError("historical daily raw evidence binding mismatch")
+        validate_source_bytes(raw, source, receipt["trade_day"])
+        payload = parse_json_strict(raw, "historical official daily raw")
+        for row in payload[source.required_top_level_fields[0]]:
+            product = _product_id(row["PRODUCTID"])
+            if product is None:
+                continue
+            if product not in TARGET_PRODUCTS:
+                continue
+            if PRODUCT_EXCHANGES[product] != source.exchange:
+                continue
+            coverage.add(product)
+    missing = set(TARGET_PRODUCTS) - coverage
+    if missing:
+        raise RegistryError(
+            "official daily evidence is missing target products: "
+            + ", ".join(sorted(missing))
+        )

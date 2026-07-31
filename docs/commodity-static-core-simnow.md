@@ -182,6 +182,13 @@ authority 验证的有界 PIT view，独立重算 21/126 日 sample vol、scale�
 guardband 及 20m beam allocator，并输出未签名 draft 与 Authority=false
 evidence；详见
 [MONTHLY_RELATIVE_VOL_THERMOSTAT_V1 纯 Research producer](operations/commodity-relative-vol-snapshot-producer-v1.md)。
+
+Research Warehouse 历史数据不得由本服务直接读取。它必须先经过 sealed PIT
+source view、Research producer、独立审核与 Shadow 签名，再通过
+`COMMODITY_POSITION_MANAGER_SHADOW_PATH` 进入现有只读消费校验。当前能力状态和
+后续接入验收见
+[Research Warehouse 主业务消费边界](architecture/research-warehouse-business-consumption-v1.md)。
+
 producer 要求完整 official-calendar 自然日 binding 并证明收益严格等于 as-of
 最近 126 个 official days，同时绑定 linked baseline batch/逐产品 previous
 目标和实际 frozen allocator kernel bytes；但它自身不验证 #181 calendar/source

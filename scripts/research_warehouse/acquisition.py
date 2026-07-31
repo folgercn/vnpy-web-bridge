@@ -6,6 +6,7 @@ import math
 import os
 import time
 from collections.abc import Callable
+from contextlib import AbstractContextManager, nullcontext
 from datetime import date, datetime, timezone
 
 from .absence_receipts import create_absence_receipt
@@ -58,6 +59,9 @@ def acquire_daily(
     clock_sample: TrustedClockSample | None = None,
     utc_clock: Callable[[], datetime] | None = None,
     monotonic_clock: Callable[[], float] | None = None,
+    request_gate: (
+        Callable[[], AbstractContextManager[TrustedClockSample]] | None
+    ) = None,
 ) -> AcquiredObject | AuthoritativeAbsence:
     if (
         isinstance(timeout_seconds, bool)
@@ -90,24 +94,39 @@ def acquire_daily(
                 "calendar-aware acquisition requires trusted NTP clock evidence"
             )
         validate_live_clock_sample(clock_sample, local_now=wall_clock())
-        observed = require_utc(clock_sample.trusted_now, "request_started_at")
-        if calendar.issued_at > observed or any(
-            evidence.observed_at > observed
-            for evidence in calendar.source_evidence
-        ):
-            raise RegistryError(
-                "calendar authority was unavailable at request start"
-            )
-        request_started_monotonic = monotonic()
+        request_context = (
+            request_gate() if request_gate is not None else nullcontext(clock_sample)
+        )
     else:
         observed = require_utc(
             observed_at or wall_clock(),
             "observed_at",
         )
         request_started_monotonic = 0.0
+        request_context = nullcontext(None)
     client = transport or UrllibTransport()
     descriptor, temp_path = create_download_temp(paths)
+    gate_entered = False
     try:
+        gated_clock = request_context.__enter__()
+        gate_entered = True
+        if calendar is not None:
+            if not isinstance(gated_clock, TrustedClockSample):
+                raise RegistryError("official-source request gate clock is invalid")
+            clock_sample = gated_clock
+            validate_live_clock_sample(clock_sample, local_now=wall_clock())
+            observed = require_utc(
+                clock_sample.trusted_now,
+                "request_started_at",
+            )
+            if calendar.issued_at > observed or any(
+                evidence.observed_at > observed
+                for evidence in calendar.source_evidence
+            ):
+                raise RegistryError(
+                    "calendar authority was unavailable at request start"
+                )
+            request_started_monotonic = monotonic()
         with client.open(
             endpoint,
             allowed_hosts=source.allowed_hosts,
@@ -229,6 +248,8 @@ def acquire_daily(
                     collector_version=collector_version,
                     registry=registry,
                 )
+        request_context.__exit__(None, None, None)
+        gate_entered = False
         return AcquiredObject(
             object_id=observation["object_id"],
             observation_id=observation["observation_id"],
@@ -243,6 +264,8 @@ def acquire_daily(
             idempotent_raw=idempotent_raw,
         )
     except BaseException as exc:
+        if gate_entered:
+            request_context.__exit__(type(exc), exc, exc.__traceback__)
         if descriptor >= 0:
             os.close(descriptor)
         try:

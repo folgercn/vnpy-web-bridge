@@ -139,6 +139,7 @@ def _copy_regular(source: Path, target: Path) -> None:
 
 def _copy_tree(source: Path, target: Path) -> None:
     target.mkdir(mode=0o755)
+    target.chmod(0o755)
     for path in sorted(source.rglob("*")):
         relative = path.relative_to(source)
         destination = target / relative
@@ -146,7 +147,9 @@ def _copy_tree(source: Path, target: Path) -> None:
         if stat.S_ISLNK(value.st_mode):
             raise RegistryError("staged M2 release symlink is forbidden")
         if stat.S_ISDIR(value.st_mode):
-            destination.mkdir(mode=stat.S_IMODE(value.st_mode))
+            mode = stat.S_IMODE(value.st_mode)
+            destination.mkdir(mode=mode)
+            destination.chmod(mode)
         elif stat.S_ISREG(value.st_mode):
             _copy_regular(path, destination)
         else:
