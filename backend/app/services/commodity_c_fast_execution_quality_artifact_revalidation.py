@@ -130,6 +130,7 @@ def _canonical_json(payload: object) -> bytes:
     ).encode("utf-8")
 
 
+@dataclass(frozen=True, slots=True, init=False)
 class CommodityCFastExecutionQualityArtifactRevalidator:
     """Stable-file join for seven independently verified signed artifacts.
 
@@ -138,6 +139,13 @@ class CommodityCFastExecutionQualityArtifactRevalidator:
     coverage, cross-artifact hash joins, validity joins and final rereads. It
     has no Tick, QuestDB, RPC, account, position or order dependency.
     """
+
+    _artifact_paths: Mapping[ArtifactRole, Path]
+    _artifact_verifiers: Mapping[ArtifactRole, SignedArtifactVerifier]
+    custody_root: Path
+    expected_custody_root_path_sha256: str
+    expected_custody_identity_sha256: str
+    expected_owner_uid: int
 
     def __init__(
         self,
@@ -158,12 +166,28 @@ class CommodityCFastExecutionQualityArtifactRevalidator:
             raise CFastExecutionQualityArtifactRevalidationError(
                 "ARTIFACT_REVALIDATION_CONFIG_PIN_INVALID"
             )
-        self._artifact_paths = MappingProxyType(dict(artifact_paths))
-        self._artifact_verifiers = MappingProxyType(dict(artifact_verifiers))
-        self.custody_root = custody_root
-        self.expected_custody_root_path_sha256 = expected_custody_root_path_sha256
-        self.expected_custody_identity_sha256 = expected_custody_identity_sha256
-        self.expected_owner_uid = expected_owner_uid
+        object.__setattr__(
+            self,
+            "_artifact_paths",
+            MappingProxyType(dict(artifact_paths)),
+        )
+        object.__setattr__(
+            self,
+            "_artifact_verifiers",
+            MappingProxyType(dict(artifact_verifiers)),
+        )
+        object.__setattr__(self, "custody_root", custody_root)
+        object.__setattr__(
+            self,
+            "expected_custody_root_path_sha256",
+            expected_custody_root_path_sha256,
+        )
+        object.__setattr__(
+            self,
+            "expected_custody_identity_sha256",
+            expected_custody_identity_sha256,
+        )
+        object.__setattr__(self, "expected_owner_uid", expected_owner_uid)
 
     def __call__(
         self,

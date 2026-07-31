@@ -4,6 +4,7 @@ import ast
 import hashlib
 import json
 import os
+from dataclasses import FrozenInstanceError
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -257,6 +258,16 @@ def test_constructor_takes_immutable_path_and_verifier_snapshots(
         adapter._artifact_paths["signed_snapshot"] = Path("/tmp/replaced")
     with pytest.raises(TypeError):
         adapter._artifact_verifiers["signed_snapshot"] = lambda _: None
+    for field, replacement in (
+        ("_artifact_paths", {}),
+        ("_artifact_verifiers", {}),
+        ("custody_root", Path("/tmp/replaced")),
+        ("expected_custody_root_path_sha256", "f" * 64),
+        ("expected_custody_identity_sha256", "e" * 64),
+        ("expected_owner_uid", 0),
+    ):
+        with pytest.raises(FrozenInstanceError):
+            setattr(adapter, field, replacement)
 
 
 def test_exact_file_reader_handles_short_os_reads(
@@ -281,11 +292,18 @@ def test_initial_custody_revalidation_failure_closes_retained_fd(
     adapter = build_adapter(tmp_path)
     retained_fds: list[int] = []
 
-    def fail_initial_guard(guard: object) -> None:
+    def fail_initial_guard(
+        _adapter: CommodityCFastExecutionQualityArtifactRevalidator,
+        guard: object,
+    ) -> None:
         retained_fds.append(guard.fd)
         raise CFastExecutionQualityArtifactRevalidationError("CUSTODY_ROOT_CHANGED")
 
-    monkeypatch.setattr(adapter, "_verify_open_custody_root", fail_initial_guard)
+    monkeypatch.setattr(
+        CommodityCFastExecutionQualityArtifactRevalidator,
+        "_verify_open_custody_root",
+        fail_initial_guard,
+    )
 
     with pytest.raises(
         CFastExecutionQualityArtifactRevalidationError,
