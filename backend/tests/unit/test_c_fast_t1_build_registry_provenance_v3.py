@@ -792,7 +792,11 @@ def test_fresh_signer_rejects_runtime_owned_dependency_before_import(
     )
 
     assert result.returncode != 0
-    assert "must be root-owned" in result.stderr
+    assert "bootstrap dependency parent" in result.stderr
+    assert (
+        "must be root-owned" in result.stderr
+        or "group/world writable" in result.stderr
+    )
     assert not sentinel.exists()
 
 
