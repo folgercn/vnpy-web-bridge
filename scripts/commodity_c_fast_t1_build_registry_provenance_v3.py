@@ -3,8 +3,12 @@
 
 from __future__ import annotations
 
-import importlib.util
+import hashlib
+import hmac
+import importlib.machinery
+import os
 from pathlib import Path
+import stat
 import sys
 from types import ModuleType
 from typing import Any
@@ -12,12 +16,19 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 VERIFIER_PATH = Path(__file__).resolve()
-DELEGATE_VERIFIER_PATH = Path(__file__).with_name(
+DELEGATE_VERIFIER_PATH = VERIFIER_PATH.with_name(
     "commodity_c_fast_t1_build_registry_provenance_v2.py"
 )
-DELEGATE_SIGNER_PATH = Path(__file__).with_name(
+DELEGATE_SIGNER_PATH = VERIFIER_PATH.with_name(
     "commodity_c_fast_t1_build_registry_provenance_sign_v2.py"
 )
+EXPECTED_DELEGATE_VERIFIER_SHA256 = (
+    "a78fc7c61412db40b59d3b24753675c313abf53c02d0ea156806ac3ca1209986"
+)
+EXPECTED_DELEGATE_SIGNER_SHA256 = (
+    "945a0aa8dd1fd6e3828d3cb30ff405d1f01546feda56be43644ac4c1b5f5fee9"
+)
+MAX_DELEGATE_SOURCE_BYTES = 8 * 1024 * 1024
 PROVENANCE_SCHEMA_PATH = (
     ROOT
     / "docs/schemas/"
@@ -58,18 +69,147 @@ RECEIPT_STATUS = (
 )
 
 
+class DelegateBootstrapError(RuntimeError):
+    """Delegate source failed before any untrusted code was executed."""
+
+
+def _file_identity(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_uid,
+        stat.S_IFMT(info.st_mode),
+        stat.S_IMODE(info.st_mode),
+        info.st_nlink,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+def _read_fd_bytes(descriptor: int, label: str) -> bytes:
+    chunks: list[bytes] = []
+    size = 0
+    while True:
+        chunk = os.read(descriptor, 64 * 1024)
+        if not chunk:
+            return b"".join(chunks)
+        size += len(chunk)
+        if size > MAX_DELEGATE_SOURCE_BYTES:
+            raise DelegateBootstrapError(f"{label} is too large")
+        chunks.append(chunk)
+
+
+def _read_verified_source(
+    path: Path,
+    expected_sha256: str,
+    label: str,
+) -> tuple[bytes, str]:
+    """Read one stable, unlinked source twice before it can be compiled."""
+
+    descriptor = -1
+    try:
+        before_path = path.lstat()
+        if (
+            not stat.S_ISREG(before_path.st_mode)
+            or stat.S_ISLNK(before_path.st_mode)
+            or before_path.st_nlink != 1
+        ):
+            raise DelegateBootstrapError(
+                f"{label} must be a single-link regular file"
+            )
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        opened = os.fstat(descriptor)
+        if _file_identity(before_path) != _file_identity(opened):
+            raise DelegateBootstrapError(
+                f"{label} changed before stable read"
+            )
+        first = _read_fd_bytes(descriptor, label)
+        after_first = os.fstat(descriptor)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        second = _read_fd_bytes(descriptor, label)
+        after_second = os.fstat(descriptor)
+        after_path = path.lstat()
+        identity = _file_identity(opened)
+        if (
+            _file_identity(after_first) != identity
+            or _file_identity(after_second) != identity
+            or _file_identity(after_path) != identity
+            or first != second
+        ):
+            raise DelegateBootstrapError(
+                f"{label} changed during stable read"
+            )
+    except DelegateBootstrapError:
+        raise
+    except OSError as exc:
+        raise DelegateBootstrapError(
+            f"{label} cannot be read safely"
+        ) from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    digest = hashlib.sha256(first).hexdigest()
+    if not hmac.compare_digest(digest, expected_sha256):
+        raise DelegateBootstrapError(
+            f"{label} failed the pre-execution SHA256 pin"
+        )
+    return first, digest
+
+
+def _module_from_verified_source(
+    name: str,
+    path: Path,
+    source: bytes,
+) -> ModuleType:
+    """Compile and execute only the exact in-memory bytes already verified."""
+
+    module = ModuleType(name)
+    module.__file__ = str(path)
+    module.__loader__ = None
+    module.__package__ = ""
+    module.__spec__ = importlib.machinery.ModuleSpec(
+        name,
+        loader=None,
+        origin=str(path),
+    )
+    code = compile(source, str(path), "exec", dont_inherit=True)
+    sys.modules[name] = module
+    try:
+        exec(code, module.__dict__)
+    except BaseException:
+        sys.modules.pop(name, None)
+        raise
+    return module
+
+
+(
+    DELEGATE_VERIFIER_SOURCE,
+    RETAINED_DELEGATE_VERIFIER_SHA256,
+) = _read_verified_source(
+    DELEGATE_VERIFIER_PATH,
+    EXPECTED_DELEGATE_VERIFIER_SHA256,
+    "query-v4 provenance verifier delegate",
+)
+(
+    DELEGATE_SIGNER_SOURCE,
+    RETAINED_DELEGATE_SIGNER_SHA256,
+) = _read_verified_source(
+    DELEGATE_SIGNER_PATH,
+    EXPECTED_DELEGATE_SIGNER_SHA256,
+    "query-v4 provenance signer delegate",
+)
+
+
 def _load_delegate() -> ModuleType:
     name = "_c_fast_t1_query_v4_build_registry_provenance_delegate"
-    spec = importlib.util.spec_from_file_location(
+    return _module_from_verified_source(
         name,
         DELEGATE_VERIFIER_PATH,
+        DELEGATE_VERIFIER_SOURCE,
     )
-    if spec is None or spec.loader is None:
-        raise RuntimeError("query-v4 provenance delegate is unavailable")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
 
 
 _delegate = _load_delegate()
@@ -94,22 +234,16 @@ _delegate_runtime_file_hashes = _delegate._runtime_file_hashes
 
 
 def _runtime_file_hashes() -> dict[str, str]:
-    """Bind this v3 wrapper and both executable delegate sources."""
+    """Bind the exact delegate identities retained before execution."""
 
     hashes = _delegate_runtime_file_hashes()
     hashes.update(
         {
-            "provenance_delegate_verifier_sha256": _delegate._hash_bytes(
-                _delegate._read_file(
-                    DELEGATE_VERIFIER_PATH,
-                    "provenance v3 verifier delegate",
-                )
+            "provenance_delegate_verifier_sha256": (
+                RETAINED_DELEGATE_VERIFIER_SHA256
             ),
-            "provenance_delegate_signer_sha256": _delegate._hash_bytes(
-                _delegate._read_file(
-                    DELEGATE_SIGNER_PATH,
-                    "provenance v3 signer delegate",
-                )
+            "provenance_delegate_signer_sha256": (
+                RETAINED_DELEGATE_SIGNER_SHA256
             ),
         }
     )

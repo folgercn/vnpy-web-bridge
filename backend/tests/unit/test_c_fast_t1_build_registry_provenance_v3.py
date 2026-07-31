@@ -4,6 +4,7 @@ import copy
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import sys
 from typing import Any
@@ -61,6 +62,19 @@ def _signed_fixture(
     return helper, fixture
 
 
+def _load_module_from_path(path: Path, name: str) -> Any:
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(name, None)
+        raise
+    return module
+
+
 def test_query_v4_provenance_v3_round_trip_binds_delegate_bytes(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -94,38 +108,175 @@ def test_query_v4_provenance_v3_round_trip_binds_delegate_bytes(
     assert receipt["production_queried"] is False
 
 
-@pytest.mark.parametrize(
-    ("path_attribute", "error_field"),
-    [
-        (
-            "DELEGATE_VERIFIER_PATH",
-            "provenance_delegate_verifier_sha256",
-        ),
-        (
-            "DELEGATE_SIGNER_PATH",
-            "provenance_delegate_signer_sha256",
-        ),
-    ],
-)
-def test_query_v4_provenance_delegate_drift_fails_closed(
+def test_delegate_pins_match_the_reviewed_v2_sources() -> None:
+    assert subject.RETAINED_DELEGATE_VERIFIER_SHA256 == (
+        hashlib.sha256(subject.DELEGATE_VERIFIER_PATH.read_bytes()).hexdigest()
+    )
+    assert subject.RETAINED_DELEGATE_SIGNER_SHA256 == (
+        hashlib.sha256(subject.DELEGATE_SIGNER_PATH.read_bytes()).hexdigest()
+    )
+    assert subject.RETAINED_DELEGATE_VERIFIER_SHA256 == (
+        subject.EXPECTED_DELEGATE_VERIFIER_SHA256
+    )
+    assert subject.RETAINED_DELEGATE_SIGNER_SHA256 == (
+        subject.EXPECTED_DELEGATE_SIGNER_SHA256
+    )
+
+
+def test_path_drift_after_verified_import_keeps_retained_identity(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    path_attribute: str,
-    error_field: str,
 ) -> None:
     helper, fixture = _signed_fixture(monkeypatch, tmp_path)
-    original = getattr(subject, path_attribute)
-    drifted = helper.write_bytes(
-        tmp_path / f"drifted-{original.name}",
-        original.read_bytes() + b"\n# drift\n",
+    original_hashes = subject._runtime_file_hashes()
+    verifier = helper.write_bytes(
+        tmp_path / "drifted-verifier.py",
+        subject.DELEGATE_VERIFIER_PATH.read_bytes() + b"\n# drift\n",
     )
-    monkeypatch.setattr(subject, path_attribute, drifted)
+    signer_path = helper.write_bytes(
+        tmp_path / "drifted-signer.py",
+        subject.DELEGATE_SIGNER_PATH.read_bytes() + b"\n# drift\n",
+    )
+    monkeypatch.setattr(subject, "DELEGATE_VERIFIER_PATH", verifier)
+    monkeypatch.setattr(subject, "DELEGATE_SIGNER_PATH", signer_path)
+
+    assert subject._runtime_file_hashes() == original_hashes
+    assert helper.verify_fixture(tmp_path, fixture)["authority_granted"] is False
+
+
+def test_malicious_verifier_delegate_never_executes_before_pin_check(
+    tmp_path: Path,
+) -> None:
+    wrapper = tmp_path / subject.VERIFIER_PATH.name
+    wrapper.write_bytes(subject.VERIFIER_PATH.read_bytes())
+    sentinel = tmp_path / "verifier-executed"
+    clean_backup = tmp_path / "clean-verifier.py"
+    clean_backup.write_bytes(subject.DELEGATE_VERIFIER_PATH.read_bytes())
+    malicious = (
+        "from pathlib import Path\n"
+        f"Path({str(sentinel)!r}).write_text('executed')\n"
+        f"Path(__file__).write_bytes(Path({str(clean_backup)!r}).read_bytes())\n"
+    ).encode("utf-8")
+    (tmp_path / subject.DELEGATE_VERIFIER_PATH.name).write_bytes(malicious)
+    (tmp_path / subject.DELEGATE_SIGNER_PATH.name).write_bytes(
+        subject.DELEGATE_SIGNER_PATH.read_bytes()
+    )
 
     with pytest.raises(
-        subject.BuildRegistryProvenanceV3Error,
-        match=rf"{error_field} binding mismatch",
+        RuntimeError,
+        match="pre-execution SHA256 pin",
     ):
-        helper.verify_fixture(tmp_path, fixture)
+        _load_module_from_path(
+            wrapper,
+            "_malicious_query_v4_provenance_wrapper",
+        )
+
+    assert not sentinel.exists()
+    assert (
+        tmp_path / subject.DELEGATE_VERIFIER_PATH.name
+    ).read_bytes() == malicious
+
+
+@pytest.mark.parametrize("link_kind", ["symlink", "hardlink"])
+def test_delegate_link_is_rejected_before_execution(
+    tmp_path: Path,
+    link_kind: str,
+) -> None:
+    source = tmp_path / "delegate-source.py"
+    source.write_bytes(subject.DELEGATE_VERIFIER_SOURCE)
+    candidate = tmp_path / "delegate-candidate.py"
+    if link_kind == "symlink":
+        candidate.symlink_to(source)
+    else:
+        os.link(source, candidate)
+
+    with pytest.raises(
+        subject.DelegateBootstrapError,
+        match="single-link regular file",
+    ):
+        subject._read_verified_source(
+            candidate,
+            subject.EXPECTED_DELEGATE_VERIFIER_SHA256,
+            "test delegate",
+        )
+
+
+def test_delegate_path_replacement_during_read_fails_before_execution(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    candidate = tmp_path / "delegate.py"
+    candidate.write_bytes(subject.DELEGATE_VERIFIER_SOURCE)
+    displaced = tmp_path / "delegate.displaced.py"
+    original_read = subject._read_fd_bytes
+    calls = 0
+
+    def replacing_read(descriptor: int, label: str) -> bytes:
+        nonlocal calls
+        raw = original_read(descriptor, label)
+        calls += 1
+        if calls == 1:
+            candidate.rename(displaced)
+            candidate.write_bytes(subject.DELEGATE_VERIFIER_SOURCE)
+        return raw
+
+    monkeypatch.setattr(subject, "_read_fd_bytes", replacing_read)
+    with pytest.raises(
+        subject.DelegateBootstrapError,
+        match="changed during stable read",
+    ):
+        subject._read_verified_source(
+            candidate,
+            subject.EXPECTED_DELEGATE_VERIFIER_SHA256,
+            "test delegate",
+        )
+
+
+def test_signer_delegate_cannot_read_private_key_before_pin_check(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    wrapper = tmp_path / signer.SIGNER_SOURCE_PATH.name
+    wrapper.write_bytes(signer.SIGNER_SOURCE_PATH.read_bytes())
+    private_key = tmp_path / "private-key.pem"
+    private_key.write_text("must-not-be-read")
+    sentinel = tmp_path / "stolen-private-key"
+    malicious = (
+        "from pathlib import Path\n"
+        "import sys\n"
+        "key_path = Path(sys.argv[sys.argv.index('--private-key-file') + 1])\n"
+        f"Path({str(sentinel)!r}).write_bytes(key_path.read_bytes())\n"
+    ).encode("utf-8")
+    (tmp_path / signer.DELEGATE_SIGNER_PATH.name).write_bytes(malicious)
+    private_reads: list[Path] = []
+    original_read_bytes = Path.read_bytes
+
+    def observed_read(path: Path) -> bytes:
+        if path == private_key:
+            private_reads.append(path)
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", observed_read)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(wrapper),
+            "--private-key-file",
+            str(private_key),
+        ],
+    )
+    with pytest.raises(
+        subject.DelegateBootstrapError,
+        match="pre-execution SHA256 pin",
+    ):
+        _load_module_from_path(
+            wrapper,
+            "_malicious_query_v4_provenance_signer_wrapper",
+        )
+
+    assert private_reads == []
+    assert not sentinel.exists()
 
 
 def test_query_v4_provenance_namespace_cannot_downgrade_to_v2(

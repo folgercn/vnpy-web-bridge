@@ -3,9 +3,7 @@
 
 from __future__ import annotations
 
-import importlib.util
 from pathlib import Path
-import sys
 from types import ModuleType
 from typing import Any
 
@@ -13,19 +11,27 @@ import commodity_c_fast_t1_build_registry_provenance_v3 as provenance_v3
 
 
 SIGNER_SOURCE_PATH = Path(__file__).resolve()
-DELEGATE_SIGNER_PATH = Path(__file__).with_name(
+DELEGATE_SIGNER_PATH = SIGNER_SOURCE_PATH.with_name(
     "commodity_c_fast_t1_build_registry_provenance_sign_v2.py"
 )
 
 
 def _load_delegate() -> ModuleType:
     name = "_c_fast_t1_query_v4_build_registry_provenance_signer_delegate"
-    spec = importlib.util.spec_from_file_location(name, DELEGATE_SIGNER_PATH)
-    if spec is None or spec.loader is None:
-        raise RuntimeError("query-v4 provenance signer delegate is unavailable")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
+    source, digest = provenance_v3._read_verified_source(
+        DELEGATE_SIGNER_PATH,
+        provenance_v3.EXPECTED_DELEGATE_SIGNER_SHA256,
+        "query-v4 provenance signer delegate",
+    )
+    if digest != provenance_v3.RETAINED_DELEGATE_SIGNER_SHA256:
+        raise provenance_v3.DelegateBootstrapError(
+            "query-v4 provenance signer delegate identity diverged"
+        )
+    module = provenance_v3._module_from_verified_source(
+        name,
+        DELEGATE_SIGNER_PATH,
+        source,
+    )
     module.provenance_v2 = provenance_v3
     module.SIGNER_SOURCE_PATH = SIGNER_SOURCE_PATH
     return module

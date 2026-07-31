@@ -40,6 +40,22 @@ wrapper 显式绑定以下 exact bytes：
 任一 wrapper、delegate、schema 或 verifier 漂移都会 fail closed。query-v3
 v2 module 的全局 contract 不会被 v3 import 修改。
 
+v2 verifier/signer delegate 不能通过普通 `importlib.exec_module` 直接从路径
+执行。v3 wrapper 在任何 delegate `compile/exec` 前完成以下 bootstrap：
+
+- wrapper 内硬编码已审查的 v2 verifier/signer exact SHA256；
+- 对 resolved delegate path 使用 `O_NOFOLLOW` 打开；
+- 要求 single-link regular file，拒绝 symlink 和 hardlink；
+- 对同一 FD 稳定读取两次，并比较 path/FD 的
+  device/inode/uid/mode/link-count/size/mtime/ctime；
+- 先比较 hard-coded SHA256 pin，再对同一批 retained memory bytes
+  `compile/exec`；
+- provenance payload 使用 retained digest，不再从执行后的路径重读身份。
+
+因此，恶意 delegate 无法先执行顶层代码再自恢复磁盘文件；signer delegate
+在 pin 验证完成前也不能解析参数、读取 private-key path 或接触私钥内容。验证
+完成后的路径替换不会改变已执行 module 或 retained digest。
+
 ## 签署
 
 复制
