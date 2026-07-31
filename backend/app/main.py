@@ -39,6 +39,9 @@ from app.services.commodity_c_fast_shadow import (
 from app.services.commodity_c_fast_execution_permit import (
     commodity_c_fast_execution_permit_service,
 )
+from app.services.commodity_c_fast_execution_quality_runtime import (
+    commodity_c_fast_execution_quality_runtime,
+)
 from app.services.commodity_simnow import commodity_simnow_service
 from app.services.market_data_service import market_data_service
 from app.services.monitoring_service import monitoring_service
@@ -128,6 +131,14 @@ async def startup() -> None:
         )
     )
     commodity_c_fast_shadow_service.start()
+    execution_quality_status = (
+        commodity_c_fast_execution_quality_runtime.start()
+    )
+    if str(execution_quality_status["runtime_state"]).startswith("BLOCKED_"):
+        logger.warning(
+            "C_FAST execution-quality runtime remains isolated: %s",
+            execution_quality_status["runtime_state"],
+        )
     if settings.commodity_c_fast_simnow_execution_permit_enabled:
         # The runtime image must package the exact #165 verifier module before
         # this default-off bridge can be enabled.  Missing verifier code is a
@@ -160,6 +171,7 @@ async def startup() -> None:
 
 @app.on_event("shutdown")
 async def shutdown() -> None:
+    commodity_c_fast_execution_quality_runtime.stop()
     await commodity_simnow_service.stop()
     await monitoring_service.stop()
     rpc_service.stop()
