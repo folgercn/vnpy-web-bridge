@@ -36,6 +36,7 @@
     "provenance_verifier_sha256",
     "provenance_delegate_verifier_sha256",
     "provenance_delegate_signer_sha256",
+    "provenance_support_sha256",
     "provenance_schema_sha256",
     "receipt_schema_sha256",
     "signature",
@@ -318,6 +319,9 @@
       "$ref": "#/$defs/sha256"
     },
     "provenance_delegate_signer_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "provenance_support_sha256": {
       "$ref": "#/$defs/sha256"
     },
     "provenance_schema_sha256": {

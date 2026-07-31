@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 from typing import Any
 
@@ -58,6 +59,7 @@ def _signed_fixture(
     tmp_path: Path,
 ) -> tuple[Any, dict[str, Any]]:
     helper = _helper()
+    monkeypatch.setattr(signer._delegate, "provenance_v2", subject)
     fixture = helper.signed_fixture(monkeypatch, tmp_path)
     return helper, fixture
 
@@ -73,6 +75,45 @@ def _load_module_from_path(path: Path, name: str) -> Any:
         sys.modules.pop(name, None)
         raise
     return module
+
+
+def _copy_signer_bootstrap_closure(tmp_path: Path) -> Path:
+    signer_path = tmp_path / signer.SIGNER_SOURCE_PATH.name
+    signer_path.write_bytes(signer.SIGNER_SOURCE_PATH.read_bytes())
+    (tmp_path / signer.PROVENANCE_WRAPPER_PATH.name).write_bytes(
+        subject.VERIFIER_PATH.read_bytes()
+    )
+    (tmp_path / subject.DELEGATE_VERIFIER_PATH.name).write_bytes(
+        subject.DELEGATE_VERIFIER_PATH.read_bytes()
+    )
+    (tmp_path / subject.DELEGATE_SIGNER_PATH.name).write_bytes(
+        subject.DELEGATE_SIGNER_PATH.read_bytes()
+    )
+    (tmp_path / subject.SUPPORT_PATH.name).write_bytes(
+        subject.SUPPORT_PATH.read_bytes()
+    )
+    return signer_path
+
+
+def _run_fresh_signer(
+    signer_path: Path,
+    private_key: Path,
+    *,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            sys.executable,
+            str(signer_path),
+            "--private-key-file",
+            str(private_key),
+        ],
+        cwd=signer_path.parent,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
 
 
 def test_query_v4_provenance_v3_round_trip_binds_delegate_bytes(
@@ -120,6 +161,22 @@ def test_delegate_pins_match_the_reviewed_v2_sources() -> None:
     )
     assert subject.RETAINED_DELEGATE_SIGNER_SHA256 == (
         subject.EXPECTED_DELEGATE_SIGNER_SHA256
+    )
+    assert subject.RETAINED_SUPPORT_SHA256 == hashlib.sha256(
+        subject.SUPPORT_PATH.read_bytes()
+    ).hexdigest()
+    assert (
+        subject.RETAINED_SUPPORT_SHA256
+        == subject.EXPECTED_SUPPORT_SHA256
+    )
+    assert signer.RETAINED_PROVENANCE_WRAPPER_SHA256 == (
+        hashlib.sha256(subject.VERIFIER_PATH.read_bytes()).hexdigest()
+    )
+    assert signer.RETAINED_PROVENANCE_WRAPPER_SHA256 == (
+        signer.EXPECTED_PROVENANCE_WRAPPER_SHA256
+    )
+    assert signer.provenance_v3.RETAINED_VERIFIER_SHA256 == (
+        signer.RETAINED_PROVENANCE_WRAPPER_SHA256
     )
 
 
@@ -236,8 +293,7 @@ def test_signer_delegate_cannot_read_private_key_before_pin_check(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    wrapper = tmp_path / signer.SIGNER_SOURCE_PATH.name
-    wrapper.write_bytes(signer.SIGNER_SOURCE_PATH.read_bytes())
+    wrapper = _copy_signer_bootstrap_closure(tmp_path)
     private_key = tmp_path / "private-key.pem"
     private_key.write_text("must-not-be-read")
     sentinel = tmp_path / "stolen-private-key"
@@ -267,7 +323,7 @@ def test_signer_delegate_cannot_read_private_key_before_pin_check(
         ],
     )
     with pytest.raises(
-        subject.DelegateBootstrapError,
+        RuntimeError,
         match="pre-execution SHA256 pin",
     ):
         _load_module_from_path(
@@ -277,6 +333,153 @@ def test_signer_delegate_cannot_read_private_key_before_pin_check(
 
     assert private_reads == []
     assert not sentinel.exists()
+
+
+def test_fresh_signer_rejects_malicious_wrapper_before_private_key_read(
+    tmp_path: Path,
+) -> None:
+    signer_path = tmp_path / signer.SIGNER_SOURCE_PATH.name
+    signer_path.write_bytes(signer.SIGNER_SOURCE_PATH.read_bytes())
+    private_key = tmp_path / "private-key.pem"
+    private_key.write_text("must-not-be-read")
+    sentinel = tmp_path / "stolen-private-key"
+    clean_backup = tmp_path / "clean-wrapper.py"
+    clean_backup.write_bytes(subject.VERIFIER_PATH.read_bytes())
+    malicious = (
+        "from pathlib import Path\n"
+        "import sys\n"
+        "key_path = Path(sys.argv[sys.argv.index('--private-key-file') + 1])\n"
+        f"Path({str(sentinel)!r}).write_bytes(key_path.read_bytes())\n"
+        f"Path(__file__).write_bytes(Path({str(clean_backup)!r}).read_bytes())\n"
+    ).encode("utf-8")
+    wrapper = tmp_path / signer.PROVENANCE_WRAPPER_PATH.name
+    wrapper.write_bytes(malicious)
+
+    result = _run_fresh_signer(signer_path, private_key)
+
+    assert result.returncode != 0
+    assert "failed the pre-execution SHA256 pin" in result.stderr
+    assert not sentinel.exists()
+    assert wrapper.read_bytes() == malicious
+
+
+def test_fresh_signer_rejects_malicious_support_before_private_key_read(
+    tmp_path: Path,
+) -> None:
+    signer_path = _copy_signer_bootstrap_closure(tmp_path)
+    private_key = tmp_path / "private-key.pem"
+    private_key.write_text("must-not-be-read")
+    sentinel = tmp_path / "support-stole-private-key"
+    malicious = (
+        "from pathlib import Path\n"
+        "import sys\n"
+        "key_path = Path(sys.argv[sys.argv.index('--private-key-file') + 1])\n"
+        f"Path({str(sentinel)!r}).write_bytes(key_path.read_bytes())\n"
+    ).encode("utf-8")
+    (tmp_path / subject.SUPPORT_PATH.name).write_bytes(malicious)
+
+    result = _run_fresh_signer(signer_path, private_key)
+
+    assert result.returncode != 0
+    assert "support module failed the pre-execution SHA256 pin" in result.stderr
+    assert not sentinel.exists()
+
+
+@pytest.mark.parametrize("link_kind", ["symlink", "hardlink"])
+def test_fresh_signer_rejects_wrapper_link_before_execution(
+    tmp_path: Path,
+    link_kind: str,
+) -> None:
+    signer_path = tmp_path / signer.SIGNER_SOURCE_PATH.name
+    signer_path.write_bytes(signer.SIGNER_SOURCE_PATH.read_bytes())
+    private_key = tmp_path / "private-key.pem"
+    private_key.write_text("must-not-be-read")
+    source = tmp_path / "wrapper-source.py"
+    source.write_bytes(subject.VERIFIER_PATH.read_bytes())
+    wrapper = tmp_path / signer.PROVENANCE_WRAPPER_PATH.name
+    if link_kind == "symlink":
+        wrapper.symlink_to(source)
+    else:
+        os.link(source, wrapper)
+
+    result = _run_fresh_signer(signer_path, private_key)
+
+    assert result.returncode != 0
+    assert "must be a single-link regular file" in result.stderr
+
+
+def test_fresh_signer_rejects_wrapper_path_replacement_before_execution(
+    tmp_path: Path,
+) -> None:
+    signer_path = tmp_path / signer.SIGNER_SOURCE_PATH.name
+    signer_path.write_bytes(signer.SIGNER_SOURCE_PATH.read_bytes())
+    private_key = tmp_path / "private-key.pem"
+    private_key.write_text("must-not-be-read")
+    wrapper = tmp_path / signer.PROVENANCE_WRAPPER_PATH.name
+    wrapper.write_bytes(subject.VERIFIER_PATH.read_bytes())
+    displaced = tmp_path / "wrapper-displaced.py"
+    hook_root = tmp_path / "hook"
+    hook_root.mkdir()
+    (hook_root / "sitecustomize.py").write_text(
+        "import os\n"
+        "from pathlib import Path\n"
+        "_target = Path(os.environ['C_FAST_TEST_WRAPPER_PATH'])\n"
+        "_displaced = Path(os.environ['C_FAST_TEST_DISPLACED_PATH'])\n"
+        "_original_read = os.read\n"
+        "_triggered = False\n"
+        "def _replacing_read(descriptor, size):\n"
+        "    global _triggered\n"
+        "    raw = _original_read(descriptor, size)\n"
+        "    if not _triggered:\n"
+        "        _triggered = True\n"
+        "        _target.rename(_displaced)\n"
+        "        _target.write_bytes(_displaced.read_bytes())\n"
+        "    return raw\n"
+        "os.read = _replacing_read\n"
+    )
+    environment = dict(os.environ)
+    environment.update(
+        {
+            "PYTHONPATH": str(hook_root),
+            "C_FAST_TEST_WRAPPER_PATH": str(wrapper),
+            "C_FAST_TEST_DISPLACED_PATH": str(displaced),
+        }
+    )
+
+    result = _run_fresh_signer(
+        signer_path,
+        private_key,
+        env=environment,
+    )
+
+    assert result.returncode != 0
+    assert "changed during stable read" in result.stderr
+    assert displaced.exists()
+    assert wrapper.exists()
+
+
+def test_signer_retains_verified_wrapper_identity_after_path_drift(
+    tmp_path: Path,
+) -> None:
+    signer_path = _copy_signer_bootstrap_closure(tmp_path)
+    loaded = _load_module_from_path(
+        signer_path,
+        "_retained_query_v4_provenance_signer_wrapper",
+    )
+    retained = loaded.RETAINED_PROVENANCE_WRAPPER_SHA256
+    wrapper = tmp_path / signer.PROVENANCE_WRAPPER_PATH.name
+    wrapper.write_bytes(wrapper.read_bytes() + b"\n# post-bootstrap drift\n")
+    loaded.provenance_v3._delegate_runtime_file_hashes = lambda: {
+        "provenance_verifier_sha256": hashlib.sha256(
+            wrapper.read_bytes()
+        ).hexdigest(),
+    }
+
+    hashes = loaded.provenance_v3._runtime_file_hashes()
+
+    assert loaded.RETAINED_PROVENANCE_WRAPPER_SHA256 == retained
+    assert loaded.provenance_v3.RETAINED_VERIFIER_SHA256 == retained
+    assert hashes["provenance_verifier_sha256"] == retained
 
 
 def test_query_v4_provenance_namespace_cannot_downgrade_to_v2(

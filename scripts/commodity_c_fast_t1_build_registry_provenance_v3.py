@@ -22,13 +22,20 @@ DELEGATE_VERIFIER_PATH = VERIFIER_PATH.with_name(
 DELEGATE_SIGNER_PATH = VERIFIER_PATH.with_name(
     "commodity_c_fast_t1_build_registry_provenance_sign_v2.py"
 )
+SUPPORT_PATH = VERIFIER_PATH.with_name(
+    "commodity_c_fast_t1_one_shot.py"
+)
 EXPECTED_DELEGATE_VERIFIER_SHA256 = (
     "a78fc7c61412db40b59d3b24753675c313abf53c02d0ea156806ac3ca1209986"
 )
 EXPECTED_DELEGATE_SIGNER_SHA256 = (
     "945a0aa8dd1fd6e3828d3cb30ff405d1f01546feda56be43644ac4c1b5f5fee9"
 )
+EXPECTED_SUPPORT_SHA256 = (
+    "6a4ea2da568d91825e8387897484e5da26bb0e0f96a19465480ed52eca8e2b20"
+)
 MAX_DELEGATE_SOURCE_BYTES = 8 * 1024 * 1024
+SUPPORT_PUBLIC_MODULE = "commodity_c_fast_t1_one_shot"
 PROVENANCE_SCHEMA_PATH = (
     ROOT
     / "docs/schemas/"
@@ -201,15 +208,36 @@ def _module_from_verified_source(
     EXPECTED_DELEGATE_SIGNER_SHA256,
     "query-v4 provenance signer delegate",
 )
+(
+    SUPPORT_SOURCE,
+    RETAINED_SUPPORT_SHA256,
+) = _read_verified_source(
+    SUPPORT_PATH,
+    EXPECTED_SUPPORT_SHA256,
+    "query-v4 provenance support module",
+)
+_support = _module_from_verified_source(
+    "_c_fast_t1_verified_provenance_support",
+    SUPPORT_PATH,
+    SUPPORT_SOURCE,
+)
 
 
 def _load_delegate() -> ModuleType:
     name = "_c_fast_t1_query_v4_build_registry_provenance_delegate"
-    return _module_from_verified_source(
-        name,
-        DELEGATE_VERIFIER_PATH,
-        DELEGATE_VERIFIER_SOURCE,
-    )
+    previous = sys.modules.get(SUPPORT_PUBLIC_MODULE)
+    sys.modules[SUPPORT_PUBLIC_MODULE] = _support
+    try:
+        return _module_from_verified_source(
+            name,
+            DELEGATE_VERIFIER_PATH,
+            DELEGATE_VERIFIER_SOURCE,
+        )
+    finally:
+        if previous is None:
+            sys.modules.pop(SUPPORT_PUBLIC_MODULE, None)
+        else:
+            sys.modules[SUPPORT_PUBLIC_MODULE] = previous
 
 
 _delegate = _load_delegate()
@@ -231,6 +259,9 @@ _delegate.SIGNING_TOOL_SOURCE_PATH = SIGNING_TOOL_SOURCE_PATH
 _delegate.RECEIPT_STATUS = RECEIPT_STATUS
 
 _delegate_runtime_file_hashes = _delegate._runtime_file_hashes
+RETAINED_VERIFIER_SHA256 = hashlib.sha256(
+    VERIFIER_PATH.read_bytes()
+).hexdigest()
 
 
 def _runtime_file_hashes() -> dict[str, str]:
@@ -239,12 +270,14 @@ def _runtime_file_hashes() -> dict[str, str]:
     hashes = _delegate_runtime_file_hashes()
     hashes.update(
         {
+            "provenance_verifier_sha256": RETAINED_VERIFIER_SHA256,
             "provenance_delegate_verifier_sha256": (
                 RETAINED_DELEGATE_VERIFIER_SHA256
             ),
             "provenance_delegate_signer_sha256": (
                 RETAINED_DELEGATE_SIGNER_SHA256
             ),
+            "provenance_support_sha256": RETAINED_SUPPORT_SHA256,
         }
     )
     return hashes

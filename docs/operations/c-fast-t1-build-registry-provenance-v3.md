@@ -33,6 +33,8 @@ wrapper 显式绑定以下 exact bytes：
 - v3 verifier；
 - v2 verifier delegate；
 - v2 signer delegate；
+- delegates 唯一的本地 support module
+  `commodity_c_fast_t1_one_shot.py`；
 - v3 provenance/receipt schema；
 - query-v4 content/source-manifest schema；
 - query-v4 content verifier。
@@ -55,6 +57,20 @@ v2 verifier/signer delegate 不能通过普通 `importlib.exec_module` 直接从
 因此，恶意 delegate 无法先执行顶层代码再自恢复磁盘文件；signer delegate
 在 pin 验证完成前也不能解析参数、读取 private-key path 或接触私钥内容。验证
 完成后的路径替换不会改变已执行 module 或 retained digest。
+
+`sign_v3.py` 自身是由 release side 独立 pin 的 signer trust root。它不能普通
+import sibling v3 verifier wrapper，而是内嵌同样的 minimal stable-FD reader，
+硬编码已审查的 v3 wrapper SHA256，在任何 wrapper `compile/exec` 前完成
+single-link/no-symlink、双读、FD/path identity 和 digest 检查，并只执行
+retained bytes。随后它把 retained wrapper digest 注入 provenance runtime
+identity；验证后的 wrapper 路径漂移不会改变签入的 verifier identity。
+
+v2 signer delegate 顶层需要 import v2 verifier。执行该 delegate 时，
+`sign_v3.py` 临时提供 v3 wrapper 已经验证并 retained 的 v2 verifier module，
+同时提供预先验证的 `commodity_c_fast_t1_one_shot.py` support module，不允许
+Python 再从 sibling path 普通加载另一份未验证代码。support exact SHA256 也
+签入 provenance。整个 bootstrap closure 完成前不会解析或打开
+`--private-key-file`。
 
 ## 签署
 
