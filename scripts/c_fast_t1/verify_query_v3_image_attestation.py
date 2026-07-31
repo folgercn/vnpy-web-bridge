@@ -927,6 +927,13 @@ def _resolve_link(path: str, target: str, *, symlink: bool) -> str:
     return "/".join(resolved)
 
 
+def _is_python_execution_path(path: str) -> bool:
+    return (
+        path == INTERPRETER_PATH
+        or path.startswith("usr/local/lib/python3.12/")
+    )
+
+
 def _apply_layer(
     filesystem: dict[str, FileEntry],
     directories: dict[str, FileEntry],
@@ -1026,6 +1033,14 @@ def _apply_layer(
                         member.linkname,
                         symlink=False,
                     )
+                    if (
+                        _is_python_execution_path(name)
+                        or _is_python_execution_path(target)
+                    ):
+                        raise QueryV3ImageAttestationError(
+                            "OCI Python execution closure cannot contain "
+                            f"hardlinks: /{name} -> /{target}"
+                        )
                     target_entry = filesystem.get(target)
                     if target_entry is None or target_entry.kind != "regular":
                         raise QueryV3ImageAttestationError(
@@ -1091,10 +1106,7 @@ def _python_execution_closure(
 ) -> tuple[str, int]:
     entries: dict[str, dict[str, Any]] = {}
     for path, entry in sorted(filesystem.items()):
-        if not (
-            path == INTERPRETER_PATH
-            or path.startswith("usr/local/lib/python3.12/")
-        ):
+        if not _is_python_execution_path(path):
             continue
         entries["/" + path] = {
             "kind": entry.kind,
@@ -1170,10 +1182,7 @@ def _validate_python_execution_permissions(
     file_paths = {
         path
         for path in filesystem
-        if (
-            path == INTERPRETER_PATH
-            or path.startswith("usr/local/lib/python3.12/")
-        )
+        if _is_python_execution_path(path)
     }
     directory_paths = {
         path
@@ -1192,7 +1201,12 @@ def _validate_python_execution_permissions(
     }
     for path in sorted(file_paths):
         entry = filesystem[path]
-        if entry.kind == "regular" and (
+        if entry.kind != "regular":
+            raise QueryV3ImageAttestationError(
+                "OCI Python execution closure cannot contain "
+                f"links: /{path}"
+            )
+        if (
             entry.mode & 0o022 != 0
             or _runtime_identity_can_write(entry)
         ):

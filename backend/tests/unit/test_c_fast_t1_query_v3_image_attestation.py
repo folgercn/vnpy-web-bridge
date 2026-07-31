@@ -832,7 +832,7 @@ def test_unallowlisted_importable_site_package_fails_closed(
         )
 
 
-def test_hardlink_private_key_survives_source_whiteout_and_is_detected(
+def test_python_closure_hardlink_private_key_is_rejected_before_whiteout(
     tmp_path: Path,
     source_bundle: tuple[bytes, bytes, dict[str, Any]],
     source_commit: str,
@@ -861,7 +861,7 @@ def test_hardlink_private_key_survives_source_whiteout_and_is_detected(
 
     with pytest.raises(
         subject.QueryV3ImageAttestationError,
-        match="private-key material",
+        match="Python execution closure cannot contain hardlinks",
     ):
         subject.derive_oci_facts(
             oci_path,

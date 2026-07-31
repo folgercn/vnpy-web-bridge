@@ -87,6 +87,45 @@ def _permission_override_layer(
     return output.getvalue()
 
 
+def _link_override_layer(
+    path: str,
+    target: str,
+    *,
+    hardlink: bool = False,
+    target_files: dict[str, tuple[bytes, int]] | None = None,
+) -> bytes:
+    output = io.BytesIO()
+    with tarfile.open(
+        fileobj=output,
+        mode="w:",
+        format=tarfile.USTAR_FORMAT,
+    ) as archive:
+        for target_path, (content, mode) in sorted(
+            (target_files or {}).items()
+        ):
+            member = tarfile.TarInfo(target_path)
+            member.mode = mode
+            member.uid = 0
+            member.gid = 0
+            member.uname = ""
+            member.gname = ""
+            member.mtime = 0
+            member.type = tarfile.REGTYPE
+            member.size = len(content)
+            archive.addfile(member, io.BytesIO(content))
+        member = tarfile.TarInfo(path)
+        member.mode = 0o444
+        member.uid = 0
+        member.gid = 0
+        member.uname = ""
+        member.gname = ""
+        member.mtime = 0
+        member.type = tarfile.LNKTYPE if hardlink else tarfile.SYMTYPE
+        member.linkname = target
+        archive.addfile(member)
+    return output.getvalue()
+
+
 @pytest.fixture(scope="module")
 def source_commit() -> str:
     return _git("rev-parse", "HEAD")
@@ -347,6 +386,86 @@ def test_query_v4_rejects_runtime_and_python_closure_writable_by_runtime(
         with pytest.raises(
             subject.QueryV4ImageAttestationError,
             match=error,
+        ):
+            subject.derive_oci_facts(
+                oci_path,
+                source_commit,
+                source_facts["runtime_bundle"],
+            )
+
+
+def test_query_v4_rejects_python_execution_closure_links(
+    tmp_path: Path,
+    source_commit: str,
+    source_bundle: tuple[bytes, bytes, dict[str, Any]],
+) -> None:
+    helper = _oci_helper()
+    bundle_path = tmp_path / "query-v4-source.tar"
+    bundle_path.write_bytes(source_bundle[0])
+    source_facts = subject.derive_source_facts(bundle_path, source_commit)
+    site_packages = "usr/local/lib/python3.12/site-packages"
+    dependency_file = f"{site_packages}/psycopg/__init__.py"
+    runtime_script = next(
+        path.removeprefix("/")
+        for path in source_facts["runtime_bundle"]
+        if path.endswith("commodity_c_fast_t1_query_v4.py")
+    )
+    writable_target = f"{site_packages}/psycopg/writable_target.py"
+    attacks = (
+        (
+            "dependency-absolute-escape",
+            dependency_file,
+            "/tmp/psycopg.py",
+            False,
+            {},
+        ),
+        (
+            "package-directory-escape",
+            f"{site_packages}/psycopg",
+            "../../../../../tmp/psycopg",
+            False,
+            {},
+        ),
+        (
+            "dependency-missing-target",
+            dependency_file,
+            "missing.py",
+            False,
+            {},
+        ),
+        (
+            "dependency-writable-target",
+            dependency_file,
+            "writable_target.py",
+            False,
+            {writable_target: (b"raise RuntimeError('mutable')\n", 0o666)},
+        ),
+        (
+            "dependency-cross-closure-hardlink",
+            dependency_file,
+            runtime_script,
+            True,
+            {},
+        ),
+    )
+    for label, path, target, hardlink, target_files in attacks:
+        attack_layer = _link_override_layer(
+            path,
+            target,
+            hardlink=hardlink,
+            target_files=target_files,
+        )
+        oci_raw, _image = helper._build_oci(
+            source_facts,
+            source_commit,
+            extra_raw_layers=[attack_layer],
+        )
+        oci_path = tmp_path / f"{label}.oci.tar"
+        oci_path.write_bytes(oci_raw)
+
+        with pytest.raises(
+            subject.QueryV4ImageAttestationError,
+            match="Python execution closure cannot contain",
         ):
             subject.derive_oci_facts(
                 oci_path,
