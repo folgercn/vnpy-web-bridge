@@ -4,6 +4,8 @@ import ast
 import hashlib
 import json
 import os
+import tempfile
+from collections.abc import Iterator
 from dataclasses import FrozenInstanceError
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -52,6 +54,19 @@ REQUIRED_BINDINGS = {
     "contract_spec_set": (),
     "custody_binding": ARTIFACT_ROLES[:-1],
 }
+
+
+@pytest.fixture
+def secure_tmp_path() -> Iterator[Path]:
+    """Exercise the real full-chain guard outside root-owned sticky /tmp."""
+
+    with tempfile.TemporaryDirectory(
+        prefix="cfast-artifact-revalidation-",
+        dir=Path.home(),
+    ) as directory:
+        path = Path(directory)
+        path.chmod(0o700)
+        yield path
 
 
 def canonical(value: object) -> bytes:
@@ -177,9 +192,9 @@ def build_adapter(
 
 
 def test_exact_artifact_set_revalidates_without_runtime_authority(
-    tmp_path: Path,
+    secure_tmp_path: Path,
 ) -> None:
-    adapter = build_adapter(tmp_path)
+    adapter = build_adapter(secure_tmp_path)
     runtime = CommodityCFastExecutionQualityRuntime(
         settings=Settings(commodity_c_fast_execution_quality_runtime_enabled=True),
         clock=lambda: NOW,
@@ -222,11 +237,11 @@ def test_exact_artifact_set_revalidates_without_runtime_authority(
     ],
 )
 def test_incomplete_spliced_expired_or_mutated_set_fails_closed(
-    tmp_path: Path,
+    secure_tmp_path: Path,
     kwargs: dict[str, object],
     code: str,
 ) -> None:
-    adapter = build_adapter(tmp_path, **kwargs)
+    adapter = build_adapter(secure_tmp_path, **kwargs)
 
     with pytest.raises(
         CFastExecutionQualityArtifactRevalidationError,
@@ -236,9 +251,9 @@ def test_incomplete_spliced_expired_or_mutated_set_fails_closed(
 
 
 def test_artifacts_must_be_distinct_canonical_files_inside_pinned_custody(
-    tmp_path: Path,
+    secure_tmp_path: Path,
 ) -> None:
-    adapter = build_adapter(tmp_path, path_collision=True)
+    adapter = build_adapter(secure_tmp_path, path_collision=True)
     with pytest.raises(
         CFastExecutionQualityArtifactRevalidationError,
         match="ARTIFACT_PATH_COLLISION",
@@ -247,9 +262,12 @@ def test_artifacts_must_be_distinct_canonical_files_inside_pinned_custody(
 
 
 def test_constructor_takes_immutable_path_and_verifier_snapshots(
-    tmp_path: Path,
+    secure_tmp_path: Path,
 ) -> None:
-    adapter = build_adapter(tmp_path, mutate_constructor_inputs=True)
+    adapter = build_adapter(
+        secure_tmp_path,
+        mutate_constructor_inputs=True,
+    )
 
     receipt = adapter("startup", NOW)
 
@@ -271,10 +289,10 @@ def test_constructor_takes_immutable_path_and_verifier_snapshots(
 
 
 def test_exact_file_reader_handles_short_os_reads(
-    tmp_path: Path,
+    secure_tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    adapter = build_adapter(tmp_path)
+    adapter = build_adapter(secure_tmp_path)
     original_read = os.read
 
     def short_read(fd: int, size: int) -> bytes:
@@ -286,10 +304,10 @@ def test_exact_file_reader_handles_short_os_reads(
 
 
 def test_initial_custody_revalidation_failure_closes_retained_fd(
-    tmp_path: Path,
+    secure_tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    adapter = build_adapter(tmp_path)
+    adapter = build_adapter(secure_tmp_path)
     retained_fds: list[int] = []
 
     def fail_initial_guard(
@@ -314,6 +332,24 @@ def test_initial_custody_revalidation_failure_closes_retained_fd(
     assert len(retained_fds) == 1
     with pytest.raises(OSError):
         os.fstat(retained_fds[0])
+
+
+def test_world_writable_ancestor_is_rejected_without_relaxing_full_chain(
+    secure_tmp_path: Path,
+) -> None:
+    unsafe_parent = secure_tmp_path / "unsafe-parent"
+    unsafe_parent.mkdir(mode=0o700)
+    unsafe_parent.chmod(0o777)
+    try:
+        adapter = build_adapter(unsafe_parent)
+
+        with pytest.raises(
+            CFastExecutionQualityArtifactRevalidationError,
+            match="CUSTODY_ROOT_INVALID",
+        ):
+            adapter("startup", NOW)
+    finally:
+        unsafe_parent.chmod(0o700)
 
 
 def test_adapter_has_no_tick_questdb_rpc_or_trading_dependency() -> None:
