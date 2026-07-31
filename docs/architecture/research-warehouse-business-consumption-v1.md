@@ -11,16 +11,16 @@ manifest、DuckDB 或私钥路径。
 | --- | --- |
 | M2 186 个官方交易日、10 个产品、exact bytes 与每日 receipt | 已完成 |
 | 增量 manifest/commit/root anchor | 已完成 |
-| Warehouse → sealed PIT source view 适配器 | 尚未实现，跟踪于 #215 |
+| Warehouse → sealed PIT source view 适配器 | 已实现离线 create-only 适配与独立 verifier；真实月末输入/受控签名仍须按 #215 验收 |
 | Position-manager Research producer 与签名工具 | 已存在 |
 | Web Bridge 签名 Shadow 消费入口 | 已存在 |
 | 主业务实际启用本批历史数据 | 尚未启用 |
 
 因此，#213 完成的是可信历史输入，不应被描述为“主业务已经在使用”。在
-sealed source view 适配器、独立验证和受控签名完成前，主业务继续使用当前
-已验收输入并 fail closed。
+真实月末输入、独立验证和受控签名完成前，主业务继续使用当前已验收输入并
+fail closed。
 
-后续实现与主业务只读启用由
+后续真实生成、签名与主业务只读启用由
 [#215](https://github.com/folgercn/vnpy-web-bridge/issues/215) 跟踪。
 
 ## 固定消费链
@@ -79,5 +79,6 @@ Trading 或自动派单权限。SimNow shakedown、auto-dispatch 和 production 
 
 相关运行说明见
 [`commodity-relative-vol-snapshot-producer-v1.md`](../operations/commodity-relative-vol-snapshot-producer-v1.md)
+、[`research-warehouse-relative-vol-pit-source-v1.md`](../operations/research-warehouse-relative-vol-pit-source-v1.md)
 和
 [`commodity-static-core-simnow.md`](../commodity-static-core-simnow.md)。
