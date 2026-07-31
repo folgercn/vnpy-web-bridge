@@ -229,7 +229,7 @@ def remaining_history_days(state, history: dict) -> list[str]:
         state.payload["manifest_sequence"]
         - history["base_manifest_sequence"]
     )
-    if completed < 0 or completed >= len(trade_days):
+    if completed < 0 or completed > len(trade_days):
         raise RegistryError("M2 history signer progress is outside exact plan")
     if completed and state.payload["last_trade_day"] != trade_days[completed - 1]:
         raise RegistryError("M2 history signer progress day diverged")

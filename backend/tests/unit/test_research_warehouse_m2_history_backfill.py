@@ -249,6 +249,10 @@ def test_history_signer_resumes_only_a_root_pinned_day_prefix() -> None:
         "2025-10-28",
         "2025-10-29",
     ]
+    state.payload["manifest_sequence"] = 4
+    state.payload["last_trade_day"] = "2025-10-29"
+    assert remaining_history_days(state, history) == []
+    state.payload["manifest_sequence"] = 2
     state.payload["last_trade_day"] = "2025-10-29"
     with pytest.raises(RegistryError, match="progress day diverged"):
         remaining_history_days(state, history)
