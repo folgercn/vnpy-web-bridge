@@ -72,6 +72,26 @@ Python 再从 sibling path 普通加载另一份未验证代码。support exact 
 签入 provenance。整个 bootstrap closure 完成前不会解析或打开
 `--private-key-file`。
 
+生产 signer 文件没有 shebang，也不是可执行文件。普通 `python3 sign_v3.py`
+和 `PYTHONPATH=scripts` 均不受支持：CPython 会在 signer trust root 之前处理
+`.pth`、`sitecustomize` 和 `usercustomize`，这些 hook 能从 `sys.argv` 读取
+private-key path。
+
+唯一受支持入口必须使用 release side 已固定的 exact interpreter：
+
+```text
+<PINNED_PYTHON> -I -S -s -E -B sign_v3.py ...
+```
+
+signer 在任何本地 wrapper/support/delegate bootstrap 前验证
+`isolated/no_site/no_user_site/ignore_environment/dont_write_bytecode` flags；
+不满足立即退出。`-S` 后 signer 只追加一个显式、canonical、非 symlink、
+非 group/world-writable 的 site-packages root，并要求 independently supplied
+path/inode/owner/mode identity pin。该 root 顶层存在任何 `.pth`、`.egg-link`、
+`sitecustomize` 或 `usercustomize` 时直接拒绝。site-packages 的 package bytes
+必须来自同一个已独立 pin 的只读 signer image/release；目录 identity pin
+不能替代 image/release content pin。
+
 ## 签署
 
 复制
@@ -80,8 +100,13 @@ Python 再从 sibling path 普通加载另一份未验证代码。support exact 
 signer 生成，不能手填。
 
 ```bash
-PYTHONPATH=scripts python3 \
+BOOTSTRAP_SITE_PACKAGES=/opt/c-fast-provenance/lib/python3.12/site-packages
+
+/opt/c-fast-provenance/bin/python3 -I -S -s -E -B \
   scripts/commodity_c_fast_t1_build_registry_provenance_sign_v3.py \
+  --bootstrap-site-packages "$BOOTSTRAP_SITE_PACKAGES" \
+  --expected-bootstrap-site-packages-identity-sha256 \
+    "$BOOTSTRAP_SITE_PACKAGES_IDENTITY_SHA256" \
   --input /secure/query-v4-provenance-v3.unsigned.json \
   --output /secure/query-v4-provenance-v3.signed.json \
   --private-key-file /secure/provenance-ed25519-private.pem \
@@ -100,7 +125,9 @@ PYTHONPATH=scripts python3 \
 
 private key 必须属于 dedicated provenance key domain，且不得与 T1/L3
 authority key 复用。signer source pin 必须来自待签 artifact 之外的独立审查
-渠道。
+渠道。`PINNED_PYTHON`、site-packages identity pin 和 signer environment
+image/release pin 也必须来自待签 artifact 与当前 shell environment 之外的
+release-side 配置；签署命令不得现场从目标目录反推这些 expected pins。
 
 ## 离线验证
 

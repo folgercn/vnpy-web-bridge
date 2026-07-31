@@ -101,10 +101,27 @@ def _run_fresh_signer(
     *,
     env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    site_packages = next(
+        Path(item).resolve()
+        for item in sys.path
+        if item.endswith("site-packages")
+        and (Path(item) / "cryptography").is_dir()
+        and (Path(item) / "jsonschema").is_dir()
+    )
+    identity = signer.bootstrap_site_packages_identity(site_packages)
     return subprocess.run(
         [
             sys.executable,
+            "-I",
+            "-S",
+            "-s",
+            "-E",
+            "-B",
             str(signer_path),
+            signer.BOOTSTRAP_SITE_PACKAGES_ARGUMENT,
+            str(site_packages),
+            signer.BOOTSTRAP_SITE_PACKAGES_PIN_ARGUMENT,
+            identity,
             "--private-key-file",
             str(private_key),
         ],
@@ -408,43 +425,95 @@ def test_fresh_signer_rejects_wrapper_link_before_execution(
     assert "must be a single-link regular file" in result.stderr
 
 
-def test_fresh_signer_rejects_wrapper_path_replacement_before_execution(
+def test_signer_bootstrap_reader_rejects_path_replacement_before_execution(
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    signer_path = tmp_path / signer.SIGNER_SOURCE_PATH.name
-    signer_path.write_bytes(signer.SIGNER_SOURCE_PATH.read_bytes())
-    private_key = tmp_path / "private-key.pem"
-    private_key.write_text("must-not-be-read")
-    wrapper = tmp_path / signer.PROVENANCE_WRAPPER_PATH.name
+    wrapper = tmp_path / "wrapper.py"
     wrapper.write_bytes(subject.VERIFIER_PATH.read_bytes())
     displaced = tmp_path / "wrapper-displaced.py"
+    original_read = signer._read_fd_bytes
+    calls = 0
+
+    def replacing_read(descriptor: int, label: str) -> bytes:
+        nonlocal calls
+        raw = original_read(descriptor, label)
+        calls += 1
+        if calls == 1:
+            wrapper.rename(displaced)
+            wrapper.write_bytes(displaced.read_bytes())
+        return raw
+
+    monkeypatch.setattr(signer, "_read_fd_bytes", replacing_read)
+    with pytest.raises(
+        signer.SignerBootstrapError,
+        match="changed during stable read",
+    ):
+        signer._read_verified_source(
+            wrapper,
+            signer.EXPECTED_PROVENANCE_WRAPPER_SHA256,
+            "test wrapper",
+        )
+
+
+def test_isolated_signer_ignores_pre_startup_hooks(
+    tmp_path: Path,
+) -> None:
+    signer_path = _copy_signer_bootstrap_closure(tmp_path)
+    private_key = tmp_path / "private-key.pem"
+    private_key.write_text("must-not-be-read")
+    sentinel = tmp_path / "startup-stole-private-key"
     hook_root = tmp_path / "hook"
     hook_root.mkdir()
     (hook_root / "sitecustomize.py").write_text(
-        "import os\n"
         "from pathlib import Path\n"
-        "_target = Path(os.environ['C_FAST_TEST_WRAPPER_PATH'])\n"
-        "_displaced = Path(os.environ['C_FAST_TEST_DISPLACED_PATH'])\n"
-        "_original_read = os.read\n"
-        "_triggered = False\n"
-        "def _replacing_read(descriptor, size):\n"
-        "    global _triggered\n"
-        "    raw = _original_read(descriptor, size)\n"
-        "    if not _triggered:\n"
-        "        _triggered = True\n"
-        "        _target.rename(_displaced)\n"
-        "        _target.write_bytes(_displaced.read_bytes())\n"
-        "    return raw\n"
-        "os.read = _replacing_read\n"
+        "import sys\n"
+        "key = Path(sys.argv[sys.argv.index('--private-key-file') + 1])\n"
+        f"Path({str(sentinel)!r}).write_bytes(key.read_bytes())\n"
+    )
+    (hook_root / "steal-key.pth").write_text(
+        "import sitecustomize\n"
+    )
+    user_base = tmp_path / "user-base"
+    user_site = (
+        user_base
+        / "lib"
+        / f"python{sys.version_info.major}.{sys.version_info.minor}"
+        / "site-packages"
+    )
+    user_site.mkdir(parents=True)
+    (user_site / "usercustomize.py").write_text(
+        "from pathlib import Path\n"
+        "import sys\n"
+        "key = Path(sys.argv[sys.argv.index('--private-key-file') + 1])\n"
+        f"Path({str(sentinel)!r}).write_bytes(key.read_bytes())\n"
+    )
+    (user_site / "steal-key.pth").write_text(
+        "import usercustomize\n"
     )
     environment = dict(os.environ)
     environment.update(
         {
             "PYTHONPATH": str(hook_root),
-            "C_FAST_TEST_WRAPPER_PATH": str(wrapper),
-            "C_FAST_TEST_DISPLACED_PATH": str(displaced),
+            "PYTHONUSERBASE": str(user_base),
         }
     )
+    control = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "pass",
+            "--private-key-file",
+            str(private_key),
+        ],
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert control.returncode == 0
+    assert sentinel.read_text() == "must-not-be-read"
+    sentinel.unlink()
 
     result = _run_fresh_signer(
         signer_path,
@@ -453,9 +522,64 @@ def test_fresh_signer_rejects_wrapper_path_replacement_before_execution(
     )
 
     assert result.returncode != 0
-    assert "changed during stable read" in result.stderr
-    assert displaced.exists()
-    assert wrapper.exists()
+    assert not sentinel.exists()
+    assert "sitecustomize" not in result.stderr
+
+
+def test_non_isolated_direct_signer_is_rejected(tmp_path: Path) -> None:
+    signer_path = tmp_path / signer.SIGNER_SOURCE_PATH.name
+    signer_path.write_bytes(signer.SIGNER_SOURCE_PATH.read_bytes())
+    private_key = tmp_path / "private-key.pem"
+    private_key.write_text("must-not-be-read")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(signer_path),
+            "--private-key-file",
+            str(private_key),
+        ],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "requires a fixed interpreter with -I -S -s -E -B" in (
+        result.stderr
+    )
+    assert signer_path.read_bytes().startswith(b'"""')
+    assert signer_path.stat().st_mode & 0o111 == 0
+
+
+def test_bootstrap_site_packages_rejects_startup_hooks(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    site_packages = tmp_path / "site-packages"
+    site_packages.mkdir()
+    (site_packages / "sitecustomize.py").write_text(
+        "raise RuntimeError('must never execute')\n"
+    )
+    identity = signer.bootstrap_site_packages_identity(site_packages)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(signer.SIGNER_SOURCE_PATH),
+            signer.BOOTSTRAP_SITE_PACKAGES_ARGUMENT,
+            str(site_packages),
+            signer.BOOTSTRAP_SITE_PACKAGES_PIN_ARGUMENT,
+            identity,
+        ],
+    )
+
+    with pytest.raises(
+        signer.SignerBootstrapError,
+        match="contains a startup hook",
+    ):
+        signer._install_bootstrap_site_packages_from_argv()
 
 
 def test_signer_retains_verified_wrapper_identity_after_path_drift(

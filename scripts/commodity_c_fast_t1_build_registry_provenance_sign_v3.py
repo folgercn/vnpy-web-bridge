@@ -1,7 +1,31 @@
-#!/usr/bin/env python3
 """Sign a reviewed query-v4 build/registry provenance-v3 record."""
 
 from __future__ import annotations
+
+import sys
+
+
+RUNNING_AS_SCRIPT = __name__ == "__main__"
+
+
+def _require_isolated_no_site_startup() -> None:
+    flags = sys.flags
+    if not (
+        flags.isolated == 1
+        and flags.no_site == 1
+        and flags.no_user_site == 1
+        and flags.ignore_environment == 1
+        and flags.dont_write_bytecode == 1
+    ):
+        raise SystemExit(
+            "query-v4 provenance signer requires a fixed interpreter "
+            "with -I -S -s -E -B"
+        )
+
+
+if RUNNING_AS_SCRIPT:
+    _require_isolated_no_site_startup()
+
 
 import hashlib
 import hmac
@@ -9,7 +33,6 @@ import importlib.machinery
 import os
 from pathlib import Path
 import stat
-import sys
 from types import ModuleType
 from typing import Any
 
@@ -27,10 +50,104 @@ MAX_BOOTSTRAP_SOURCE_BYTES = 8 * 1024 * 1024
 V2_VERIFIER_PUBLIC_MODULE = (
     "commodity_c_fast_t1_build_registry_provenance_v2"
 )
+BOOTSTRAP_SITE_PACKAGES_ARGUMENT = "--bootstrap-site-packages"
+BOOTSTRAP_SITE_PACKAGES_PIN_ARGUMENT = (
+    "--expected-bootstrap-site-packages-identity-sha256"
+)
+FORBIDDEN_BOOTSTRAP_SITE_ENTRIES = frozenset(
+    {
+        "sitecustomize.py",
+        "sitecustomize.pyc",
+        "usercustomize.py",
+        "usercustomize.pyc",
+    }
+)
 
 
 class SignerBootstrapError(RuntimeError):
     """Signer dependency failed before any untrusted code was executed."""
+
+
+def _take_bootstrap_argument(name: str) -> str:
+    positions = [
+        index
+        for index, value in enumerate(sys.argv)
+        if value == name
+    ]
+    if len(positions) != 1:
+        raise SignerBootstrapError(
+            f"{name} must appear exactly once"
+        )
+    index = positions[0]
+    if index + 1 >= len(sys.argv):
+        raise SignerBootstrapError(f"{name} requires one value")
+    value = sys.argv[index + 1]
+    del sys.argv[index : index + 2]
+    return value
+
+
+def bootstrap_site_packages_identity(path: Path) -> str:
+    try:
+        before = path.lstat()
+        resolved = path.resolve(strict=True)
+        after = path.lstat()
+    except OSError as exc:
+        raise SignerBootstrapError(
+            "bootstrap site-packages is unavailable"
+        ) from exc
+    if (
+        not path.is_absolute()
+        or path != resolved
+        or stat.S_ISLNK(before.st_mode)
+        or not stat.S_ISDIR(before.st_mode)
+        or _file_identity(before) != _file_identity(after)
+        or before.st_uid not in {0, os.geteuid()}
+        or stat.S_IMODE(before.st_mode) & 0o022
+    ):
+        raise SignerBootstrapError(
+            "bootstrap site-packages identity is unsafe"
+        )
+    identity = (
+        "c-fast-provenance-bootstrap-site-packages-v1"
+        f"\0{resolved}"
+        f"\0{before.st_dev}"
+        f"\0{before.st_ino}"
+        f"\0{before.st_uid}"
+        f"\0{stat.S_IMODE(before.st_mode):o}"
+    ).encode("utf-8")
+    return hashlib.sha256(identity).hexdigest()
+
+
+def _install_bootstrap_site_packages_from_argv() -> None:
+    raw_path = _take_bootstrap_argument(
+        BOOTSTRAP_SITE_PACKAGES_ARGUMENT
+    )
+    expected = _take_bootstrap_argument(
+        BOOTSTRAP_SITE_PACKAGES_PIN_ARGUMENT
+    )
+    if (
+        len(expected) != 64
+        or any(character not in "0123456789abcdef" for character in expected)
+    ):
+        raise SignerBootstrapError(
+            "bootstrap site-packages identity pin is invalid"
+        )
+    path = Path(raw_path)
+    actual = bootstrap_site_packages_identity(path)
+    if not hmac.compare_digest(actual, expected):
+        raise SignerBootstrapError(
+            "bootstrap site-packages identity pin mismatch"
+        )
+    for entry in path.iterdir():
+        name = entry.name
+        if (
+            name in FORBIDDEN_BOOTSTRAP_SITE_ENTRIES
+            or name.endswith((".pth", ".egg-link"))
+        ):
+            raise SignerBootstrapError(
+                "bootstrap site-packages contains a startup hook"
+            )
+    sys.path.append(str(path))
 
 
 def _file_identity(info: os.stat_result) -> tuple[int, ...]:
@@ -143,6 +260,10 @@ def _module_from_verified_source(
         sys.modules.pop(name, None)
         raise
     return module
+
+
+if RUNNING_AS_SCRIPT:
+    _install_bootstrap_site_packages_from_argv()
 
 
 (
