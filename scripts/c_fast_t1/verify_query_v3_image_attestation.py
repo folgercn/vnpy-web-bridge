@@ -43,6 +43,7 @@ MANIFEST_ARCHIVE_PATH = "query-v3-source-manifest.json"
 CONTAINERFILE_PATH = "scripts/c_fast_t1/Containerfile.query-v3"
 SCHEMA_VERSION = "commodity_c_fast_t1_query_v3_image_attestation_v1"
 MANIFEST_SCHEMA_VERSION = "commodity_c_fast_t1_query_v3_source_manifest_v1"
+MANIFEST_ID_PREFIX = "query-v3-source-manifest-v1-"
 EVIDENCE_SCHEMA_VERSION = (
     "commodity_c_fast_t1_query_v3_external_image_evidence_v1"
 )
@@ -50,6 +51,7 @@ STATUS = (
     "QUERY_V3_SOURCE_BUNDLE_AND_OCI_CONTENT_VERIFIED_"
     "NO_BUILD_OR_REGISTRY_PROVENANCE"
 )
+ADDITIONAL_REPORT_FIELDS: dict[str, Any] = {}
 CANDIDATE_ID = "C_FAST_CROSS_SECTION_NEUTRAL"
 BASE_IMAGE = (
     "python:3.12-slim@"
@@ -93,6 +95,7 @@ EXPECTED_LABELS = {
         "vnpy-web-bridge C_FAST T1 query-v3 runner"
     ),
 }
+RUNTIME_LABEL = "io.vnpy-web-bridge.c-fast-t1.query-v3-runtime"
 ENTRYPOINT = [
     "/usr/local/bin/python3.12",
     "-I",
@@ -550,15 +553,15 @@ def inspect_containerfile(raw: bytes) -> tuple[str, dict[str, str]]:
         for keyword, instruction in zip(keywords, instructions)
     ):
         raise QueryV3ImageAttestationError("Containerfile RUN --mount is forbidden")
-    expected_entrypoint = (
-        'ENTRYPOINT ["/usr/local/bin/python3.12", "-I", '
-        '"/opt/c-fast-t1/scripts/commodity_c_fast_t1_query_v3.py"]'
+    expected_entrypoint = "ENTRYPOINT " + json.dumps(
+        ENTRYPOINT,
+        ensure_ascii=False,
     )
     if instructions.count(expected_entrypoint) != 1:
         raise QueryV3ImageAttestationError("query-v3 isolated ENTRYPOINT drifted")
     normalized = "\n".join(instructions)
     required_fragments = (
-        'io.vnpy-web-bridge.c-fast-t1.query-v3-runtime="true"',
+        f'{RUNTIME_LABEL}="{EXPECTED_LABELS[RUNTIME_LABEL]}"',
         'io.vnpy-web-bridge.c-fast-t1.authority-granted="false"',
         "USER 65532:65532",
         "chmod -R a-w /opt/c-fast-t1",
@@ -681,7 +684,7 @@ def derive_source_facts(
             "source manifest bytes are not canonical JSON"
         )
     expected_manifest_id = (
-        "query-v3-source-manifest-v1-"
+        MANIFEST_ID_PREFIX
         + _sha256(canonical_json(_manifest_identity(manifest)))
     )
     if manifest["manifest_id"] != expected_manifest_id:
@@ -1658,6 +1661,11 @@ def verify_query_v3_image_evidence(
         "positions_modified": 0,
         "dispatch_changed": False,
     }
+    if set(report) & set(ADDITIONAL_REPORT_FIELDS):
+        raise QueryV3ImageAttestationError(
+            "additional attestation fields collide with the base report"
+        )
+    report.update(ADDITIONAL_REPORT_FIELDS)
     _validate_schema(
         report,
         ATTESTATION_SCHEMA_PATH,

@@ -1,0 +1,365 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vnpy-web-bridge:schema:commodity-c-fast-t1-p0-preflight-v1",
+  "title": "C_FAST T1/P0 exact input preflight v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "status",
+    "candidate_id",
+    "parent_issue_number",
+    "issue_number",
+    "preflight_id",
+    "generated_at",
+    "expires_at",
+    "preflight_verifier_sha256",
+    "preflight_schema_sha256",
+    "query_v4",
+    "upstream_readiness",
+    "readonly_dsn",
+    "checks",
+    "blocking_reasons",
+    "ready_for_human_query_release_only",
+    "sensitive_material_present",
+    "artifact_is_authority",
+    "authority_granted",
+    "network_authorized",
+    "readonly_production_query_authorized",
+    "production_query_authorized",
+    "p0_acceptance_authorized",
+    "collection_authorized",
+    "runtime_activation_authorized",
+    "web_bridge_rpc_authorized",
+    "order_authorized",
+    "position_mutation_authorized",
+    "dispatch_authorized",
+    "trading_authorized",
+    "production_query_attempted",
+    "production_query_completed",
+    "p0_verdict",
+    "production_queries_executed",
+    "readonly_queries_executed",
+    "database_mutations",
+    "web_bridge_rpc_calls",
+    "orders_sent",
+    "positions_modified"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "commodity_c_fast_t1_p0_preflight_v1"
+    },
+    "status": {
+      "const": "QUERY_V4_SOURCE_OCI_AND_UPSTREAM_PREFLIGHT_VERIFIED_PROVENANCE_BLOCKED"
+    },
+    "candidate_id": {
+      "const": "C_FAST_CROSS_SECTION_NEUTRAL"
+    },
+    "parent_issue_number": {
+      "const": 114
+    },
+    "issue_number": {
+      "const": 216
+    },
+    "preflight_id": {
+      "type": "string",
+      "pattern": "^t1-p0-preflight-v1-[0-9a-f]{64}$"
+    },
+    "generated_at": {
+      "$ref": "#/$defs/dateTime"
+    },
+    "expires_at": {
+      "$ref": "#/$defs/dateTime"
+    },
+    "preflight_verifier_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "preflight_schema_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "query_v4": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_commit_sha",
+        "source_bundle_archive_sha256",
+        "content_attestation_raw_sha256",
+        "content_attestation_canonical_sha256",
+        "content_verifier_sha256",
+        "content_verifier_delegate_sha256",
+        "image_reference",
+        "image_digest",
+        "image_id",
+        "runtime_bundle_index_sha256",
+        "containerfile_sha256",
+        "runtime_packaging_report_canonical_sha256",
+        "runtime_template_sha256",
+        "build_provenance_verified",
+        "registry_provenance_verified"
+      ],
+      "properties": {
+        "source_commit_sha": {
+          "$ref": "#/$defs/commit"
+        },
+        "source_bundle_archive_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "content_attestation_raw_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "content_attestation_canonical_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "content_verifier_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "content_verifier_delegate_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "image_reference": {
+          "type": "string",
+          "pattern": "^[^@\\s]+@sha256:[0-9a-f]{64}$"
+        },
+        "image_digest": {
+          "$ref": "#/$defs/ociDigest"
+        },
+        "image_id": {
+          "$ref": "#/$defs/ociDigest"
+        },
+        "runtime_bundle_index_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "containerfile_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "runtime_packaging_report_canonical_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "runtime_template_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "build_provenance_verified": {
+          "const": false
+        },
+        "registry_provenance_verified": {
+          "const": false
+        }
+      }
+    },
+    "upstream_readiness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "packet_id",
+        "packet_raw_sha256",
+        "packet_canonical_sha256",
+        "packet_expires_at",
+        "shared_source_commit_sha",
+        "signed_l3_outcome_raw_sha256",
+        "signed_l3_outcome_canonical_sha256",
+        "questdb_target_identity_sha256",
+        "questdb_image_digest"
+      ],
+      "properties": {
+        "packet_id": {
+          "type": "string",
+          "pattern": "^readiness-v3-[0-9a-f]{64}$"
+        },
+        "packet_raw_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "packet_canonical_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "packet_expires_at": {
+          "$ref": "#/$defs/dateTime"
+        },
+        "shared_source_commit_sha": {
+          "$ref": "#/$defs/commit"
+        },
+        "signed_l3_outcome_raw_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "signed_l3_outcome_canonical_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "questdb_target_identity_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "questdb_image_digest": {
+          "$ref": "#/$defs/ociDigest"
+        }
+      }
+    },
+    "readonly_dsn": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path_sha256",
+        "device",
+        "inode",
+        "owner_uid",
+        "mode",
+        "size_bytes",
+        "regular_non_symlink",
+        "owned_by_current_user",
+        "permissions_0600_or_stricter",
+        "metadata_only",
+        "content_read"
+      ],
+      "properties": {
+        "path_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "device": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "inode": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "owner_uid": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "mode": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 511
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        },
+        "regular_non_symlink": {
+          "const": true
+        },
+        "owned_by_current_user": {
+          "const": true
+        },
+        "permissions_0600_or_stricter": {
+          "const": true
+        },
+        "metadata_only": {
+          "const": true
+        },
+        "content_read": {
+          "const": false
+        }
+      }
+    },
+    "checks": {
+      "const": {
+        "query_v4_source_bundle_exact_commit_verified": true,
+        "query_v4_oci_content_recomputed": true,
+        "query_v4_attestation_exact_rerun_matched": true,
+        "query_v4_runtime_packaging_closure_verified": true,
+        "readiness_v3_active_and_exactly_rederived": true,
+        "l3_signed_outcome_chain_verified_by_readiness_v3": true,
+        "query_v4_and_readiness_share_exact_source_commit": true,
+        "readonly_dsn_private_metadata_verified": true,
+        "readonly_dsn_content_not_read": true,
+        "production_query_not_attempted": true,
+        "p0_not_evaluated": true
+      }
+    },
+    "blocking_reasons": {
+      "const": [
+        "QUERY_V4_SIGNED_BUILD_REGISTRY_PROVENANCE_NOT_YET_VERIFIED",
+        "QUERY_V4_READINESS_AND_HUMAN_RELEASE_NOT_YET_DERIVED"
+      ]
+    },
+    "ready_for_human_query_release_only": {
+      "const": false
+    },
+    "sensitive_material_present": {
+      "const": false
+    },
+    "artifact_is_authority": {
+      "const": false
+    },
+    "authority_granted": {
+      "const": false
+    },
+    "network_authorized": {
+      "const": false
+    },
+    "readonly_production_query_authorized": {
+      "const": false
+    },
+    "production_query_authorized": {
+      "const": false
+    },
+    "p0_acceptance_authorized": {
+      "const": false
+    },
+    "collection_authorized": {
+      "const": false
+    },
+    "runtime_activation_authorized": {
+      "const": false
+    },
+    "web_bridge_rpc_authorized": {
+      "const": false
+    },
+    "order_authorized": {
+      "const": false
+    },
+    "position_mutation_authorized": {
+      "const": false
+    },
+    "dispatch_authorized": {
+      "const": false
+    },
+    "trading_authorized": {
+      "const": false
+    },
+    "production_query_attempted": {
+      "const": false
+    },
+    "production_query_completed": {
+      "const": false
+    },
+    "p0_verdict": {
+      "const": "NOT_RUN"
+    },
+    "production_queries_executed": {
+      "const": 0
+    },
+    "readonly_queries_executed": {
+      "const": 0
+    },
+    "database_mutations": {
+      "const": 0
+    },
+    "web_bridge_rpc_calls": {
+      "const": 0
+    },
+    "orders_sent": {
+      "const": 0
+    },
+    "positions_modified": {
+      "const": 0
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "ociDigest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "dateTime": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}
