@@ -100,7 +100,17 @@ When explicitly run, the final status is
 - deterministic derived catalog and release source/dependency pins;
 - append-only backup head and rebuild fingerprint.
 
-Retain exact canonical stdout bytes with create-only mode (`umask 077` and shell
-`noclobber`), hash those bytes independently, then run the existing isolation
-evidence capture/final verifier. No step contacts Web Bridge, Docker, Windows
-RPC, CTP, SimNow, accounts, positions or orders.
+When an operator explicitly requests a full audit, retain exact canonical
+stdout bytes with create-only mode (`umask 077` and shell `noclobber`), hash
+those bytes independently, then run the existing isolation evidence capture
+and final verifier. These high-I/O operations are not automatic. No step
+contacts Web Bridge, Docker, Windows RPC, CTP, SimNow, accounts, positions or
+orders.
+
+## 主业务消费
+
+历史回填完成只表示可信 Research 输入已经具备，不表示 Web Bridge 已直接使用
+这些 raw bytes。主业务不得读取或挂载 M2 custody；固定接入点是受控生成和签名的
+position-manager Shadow。完整边界、当前未实现的 Warehouse → sealed PIT
+source view 适配器以及后续验收条件见
+[`research-warehouse-business-consumption-v1.md`](../architecture/research-warehouse-business-consumption-v1.md)。
