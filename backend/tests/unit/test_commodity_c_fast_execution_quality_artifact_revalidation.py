@@ -274,6 +274,30 @@ def test_exact_file_reader_handles_short_os_reads(
     assert adapter("startup", NOW).exact_contracts == CONTRACTS
 
 
+def test_initial_custody_revalidation_failure_closes_retained_fd(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = build_adapter(tmp_path)
+    retained_fds: list[int] = []
+
+    def fail_initial_guard(guard: object) -> None:
+        retained_fds.append(guard.fd)
+        raise CFastExecutionQualityArtifactRevalidationError("CUSTODY_ROOT_CHANGED")
+
+    monkeypatch.setattr(adapter, "_verify_open_custody_root", fail_initial_guard)
+
+    with pytest.raises(
+        CFastExecutionQualityArtifactRevalidationError,
+        match="CUSTODY_ROOT_CHANGED",
+    ):
+        adapter("startup", NOW)
+
+    assert len(retained_fds) == 1
+    with pytest.raises(OSError):
+        os.fstat(retained_fds[0])
+
+
 def test_adapter_has_no_tick_questdb_rpc_or_trading_dependency() -> None:
     service_path = (
         Path(__file__).resolve().parents[2]

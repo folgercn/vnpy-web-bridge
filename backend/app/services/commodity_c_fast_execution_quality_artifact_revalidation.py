@@ -370,7 +370,11 @@ class CommodityCFastExecutionQualityArtifactRevalidator:
                 info.st_mode,
             ),
         )
-        self._verify_open_custody_root(guard)
+        try:
+            self._verify_open_custody_root(guard)
+        except Exception:
+            os.close(fd)
+            raise
         return guard
 
     def _verify_open_custody_root(self, guard: _CustodyRootGuard) -> None:
