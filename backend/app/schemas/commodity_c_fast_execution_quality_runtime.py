@@ -5,7 +5,13 @@ import json
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
-from pydantic import BeforeValidator, Field, field_validator, model_validator
+from pydantic import (
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 from app.schemas.commodity_c_fast_shadow import StrictFiniteModel
 
@@ -49,6 +55,11 @@ class CFastExecutionQualityRuntimeRevalidationDTO(StrictFiniteModel):
     accepts it only from a separately bound verifier and keeps all collection,
     persistence and trading authorities false.
     """
+
+    model_config = ConfigDict(
+        frozen=True,
+        revalidate_instances="always",
+    )
 
     schema_version: Literal[
         "commodity_c_fast_execution_quality_runtime_revalidation_v1"

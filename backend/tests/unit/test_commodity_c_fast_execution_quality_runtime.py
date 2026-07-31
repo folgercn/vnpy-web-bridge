@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -241,6 +243,26 @@ def test_receipt_rejects_coercive_authority_and_hash_rewrite() -> None:
         CFastExecutionQualityRuntimeRevalidationDTO.model_validate(rewritten)
 
 
+def test_runtime_revalidates_an_already_constructed_receipt_instance() -> None:
+    candidate = revalidation("startup", NOW)
+    object.__setattr__(candidate, "signed_snapshot_sha256", "9" * 64)
+    service = CommodityCFastExecutionQualityRuntime(
+        settings=enabled_settings(),
+        clock=lambda: NOW,
+    )
+    service.bind_full_revalidation_verifier(
+        lambda _trigger, _observed: candidate
+    )
+
+    status = service.start()
+
+    assert status["runtime_state"] == "BLOCKED_FULL_REVALIDATION_FAILED"
+    assert status["last_error"] == "ValidationError"
+    assert status["full_revalidation_complete"] is False
+    assert status["revalidation_receipt_sha256"] is None
+    assert all(status[key] is False for key in FALSE_AUTHORITY)
+
+
 def test_invalid_runtime_clock_is_contained() -> None:
     service = CommodityCFastExecutionQualityRuntime(
         settings=enabled_settings(),
@@ -299,3 +321,53 @@ def test_stop_drops_receipt_and_preserves_zero_authority() -> None:
     assert stopped["full_revalidation_complete"] is False
     assert stopped["revalidation_receipt_sha256"] is None
     assert all(stopped[key] is False for key in FALSE_AUTHORITY)
+
+
+def test_runtime_foundation_has_no_market_or_trading_dependencies() -> None:
+    service_path = (
+        Path(__file__).resolve().parents[2]
+        / "app"
+        / "services"
+        / "commodity_c_fast_execution_quality_runtime.py"
+    )
+    tree = ast.parse(service_path.read_text(encoding="utf-8"))
+    imports: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imports.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            imports.add(module)
+            imports.update(f"{module}.{alias.name}" for alias in node.names)
+
+    forbidden_imports = {
+        "app.services.commodity_simnow",
+        "app.services.market_data_service",
+        "app.services.tick_persistence",
+        "app.services.trade_service",
+        "app.services.vnpy_rpc_service",
+        "psycopg",
+        "questdb",
+    }
+    forbidden_runtime_names = {
+        "TradeService",
+        "account",
+        "cancel_order",
+        "gateway",
+        "position",
+        "rpc_service",
+        "send_order",
+    }
+
+    assert imports.isdisjoint(forbidden_imports)
+    assert not any(
+        (
+            isinstance(node, ast.Name)
+            and node.id in forbidden_runtime_names
+        )
+        or (
+            isinstance(node, ast.Attribute)
+            and node.attr in forbidden_runtime_names
+        )
+        for node in ast.walk(tree)
+    )
