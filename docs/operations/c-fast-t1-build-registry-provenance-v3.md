@@ -85,15 +85,19 @@ private-key path。
 
 signer 在任何本地 wrapper/support/delegate bootstrap 前验证
 `isolated/no_site/no_user_site/ignore_environment/dont_write_bytecode` flags；
-不满足立即退出。`-S` 后 signer 只追加一个显式、canonical、非 symlink、
-非 group/world-writable 的 site-packages root，并要求 independently supplied
-path/inode/owner/mode identity pin。
+不满足立即退出。signer 还拒绝以 root UID 运行。`-S` 后 signer 只追加一个
+显式、canonical、非 symlink 的 site-packages root；从 filesystem root 到该
+目录的完整父链必须全部 root-owned、非 group/world-writable，且对 signer 的
+effective UID 不可写。父链每一级的 path/device/inode/owner/group/mode 都进入
+independently supplied identity pin。
 
 在任何第三方 import 前，signer 还会递归扫描整个 dependency closure：
 
 - 对每个目录和文件固定相对路径、owner、mode、size 和 file SHA256；
 - 对文件做 stable FD double-read，拒绝 symlink、hardlink、device/socket 及
   group/world-writable nested entry；
+- 生产入口额外要求每个 nested directory/file 都 root-owned，且对 signer
+  effective UID 不可写；
 - 拒绝任意层级的 `.pth`、`.egg-link`、`sitecustomize`、`usercustomize`；
 - 顶层 package directory 必须包含普通非 symlink `__init__.py`，只有
   `.dist-info`、`.data`、`.libs` release metadata/native-library 目录例外，
@@ -104,9 +108,10 @@ path/inode/owner/mode identity pin。
 trusted launcher 必须以 immutable RepoDigest 启动只读、non-root signer image。
 该 image digest 与 dependency-manifest digest 都签入 provenance；offline
 verifier 再与独立 pins 比较并写入 receipt。第三方模块加载后、打开 private
-key 前，signer 会重新验证 root identity 和完整 closure；普通
-post-validation drift 会在私钥读取前阻断。并发同 UID 自恢复攻击依赖
-trusted launcher 的只读 rootfs/mount 边界，不能只依赖目录 mode 或二次扫描。
+key 前，signer 会重新验证父链 identity 和完整 closure。由于生产入口在任何
+第三方 import 前要求父链和 closure 全部 root-owned，并拒绝 signer UID 的写
+权限，同 UID 无法在初次校验后替换 dependency bytes；只读 rootfs/mount 则
+继续提供独立的 launcher 边界。任一约束不满足都会在第三方代码执行前退出。
 
 ## 签署
 

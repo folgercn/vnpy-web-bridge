@@ -168,14 +168,42 @@ def _copy_signer_bootstrap_closure(tmp_path: Path) -> Path:
     return signer_path
 
 
+def _immutable_empty_bootstrap_site_packages() -> Path:
+    for candidate in (
+        Path("/private/var/empty"),
+        Path("/var/empty"),
+        Path("/usr/share/empty"),
+        Path("/etc/skel"),
+    ):
+        if not candidate.is_dir():
+            continue
+        try:
+            signer.bootstrap_site_packages_identity(
+                candidate,
+                require_immutable=True,
+            )
+            signer.bootstrap_dependency_manifest_sha256(
+                candidate,
+                require_immutable=True,
+            )
+        except signer.SignerBootstrapError:
+            continue
+        return candidate
+    pytest.skip(
+        "no canonical root-owned empty directory is available "
+        "for the production bootstrap test"
+    )
+
+
 def _run_fresh_signer(
     signer_path: Path,
     private_key: Path,
     *,
     env: dict[str, str] | None = None,
+    site_packages: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    site_packages = signer_path.parent / "controlled-site-packages"
-    site_packages.mkdir(mode=0o700)
+    if site_packages is None:
+        site_packages = _immutable_empty_bootstrap_site_packages()
     identity = signer.bootstrap_site_packages_identity(site_packages)
     manifest = signer.bootstrap_dependency_manifest_sha256(site_packages)
     return subprocess.run(
@@ -667,7 +695,6 @@ def test_non_isolated_direct_signer_is_rejected(tmp_path: Path) -> None:
 
 
 def test_bootstrap_site_packages_rejects_startup_hooks(
-    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     site_packages = tmp_path / "site-packages"
@@ -675,28 +702,12 @@ def test_bootstrap_site_packages_rejects_startup_hooks(
     (site_packages / "sitecustomize.py").write_text(
         "raise RuntimeError('must never execute')\n"
     )
-    identity = signer.bootstrap_site_packages_identity(site_packages)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            str(signer.SIGNER_SOURCE_PATH),
-            signer.BOOTSTRAP_SITE_PACKAGES_ARGUMENT,
-            str(site_packages),
-            signer.BOOTSTRAP_SITE_PACKAGES_PIN_ARGUMENT,
-            identity,
-            signer.BOOTSTRAP_DEPENDENCY_MANIFEST_PIN_ARGUMENT,
-            "0" * 64,
-            signer.SIGNER_RUNTIME_IMAGE_DIGEST_ARGUMENT,
-            SIGNER_RUNTIME_IMAGE_DIGEST,
-        ],
-    )
 
     with pytest.raises(
         signer.SignerBootstrapError,
         match="startup hook is forbidden",
     ):
-        signer._install_bootstrap_site_packages_from_argv()
+        signer.bootstrap_dependency_manifest_sha256(site_packages)
 
 
 def test_dependency_manifest_binds_nested_content_not_root_metadata(
@@ -759,6 +770,50 @@ def test_dependency_manifest_rejects_namespace_escape(
         signer.bootstrap_dependency_manifest_sha256(site_packages)
 
 
+def test_fresh_signer_rejects_runtime_owned_dependency_before_import(
+    tmp_path: Path,
+) -> None:
+    signer_path = _copy_signer_bootstrap_closure(tmp_path)
+    private_key = tmp_path / "private-key.pem"
+    private_key.write_text("must-not-be-read")
+    sentinel = tmp_path / "dependency-executed"
+    site_packages = tmp_path / "controlled-site-packages"
+    package = site_packages / "cryptography"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text(
+        "from pathlib import Path\n"
+        f"Path({str(sentinel)!r}).write_text('executed')\n"
+    )
+
+    result = _run_fresh_signer(
+        signer_path,
+        private_key,
+        site_packages=site_packages,
+    )
+
+    assert result.returncode != 0
+    assert "must be root-owned" in result.stderr
+    assert not sentinel.exists()
+
+
+def test_immutable_dependency_manifest_rejects_runtime_owned_nested_entry(
+    tmp_path: Path,
+) -> None:
+    site_packages = tmp_path / "site-packages"
+    package = site_packages / "trusted_package"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("VALUE = 1\n")
+
+    with pytest.raises(
+        signer.SignerBootstrapError,
+        match="must be root-owned",
+    ):
+        signer.bootstrap_dependency_manifest_sha256(
+            site_packages,
+            require_immutable=True,
+        )
+
+
 def test_private_key_gate_rejects_post_validation_dependency_drift(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -789,6 +844,17 @@ def test_private_key_gate_rejects_post_validation_dependency_drift(
         signer,
         "RETAINED_SIGNER_RUNTIME_IMAGE_DIGEST",
         SIGNER_RUNTIME_IMAGE_DIGEST,
+    )
+    original_manifest = signer.bootstrap_dependency_manifest_sha256
+    monkeypatch.setattr(
+        signer,
+        "bootstrap_site_packages_identity",
+        lambda _path, *, require_immutable=False: identity,
+    )
+    monkeypatch.setattr(
+        signer,
+        "bootstrap_dependency_manifest_sha256",
+        lambda path, *, require_immutable=False: original_manifest(path),
     )
     module.write_text("VALUE = 2\n")
 

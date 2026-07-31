@@ -73,6 +73,9 @@ MAX_BOOTSTRAP_DEPENDENCY_FILE_BYTES = 512 * 1024 * 1024
 BOOTSTRAP_DEPENDENCY_MANIFEST_VERSION = (
     "c-fast-provenance-bootstrap-dependency-closure-v1"
 )
+BOOTSTRAP_SITE_PACKAGES_IDENTITY_VERSION = (
+    "c-fast-provenance-bootstrap-site-packages-v2"
+)
 RETAINED_BOOTSTRAP_SITE_PACKAGES_IDENTITY_SHA256: str | None = None
 RETAINED_BOOTSTRAP_DEPENDENCY_MANIFEST_SHA256: str | None = None
 RETAINED_SIGNER_RUNTIME_IMAGE_DIGEST: str | None = None
@@ -101,7 +104,61 @@ def _take_bootstrap_argument(name: str) -> str:
     return value
 
 
-def bootstrap_site_packages_identity(path: Path) -> str:
+def _effective_access(path: Path, mode: int) -> bool:
+    if os.access in os.supports_effective_ids:
+        return os.access(path, mode, effective_ids=True)
+    return os.access(path, mode)
+
+
+def _site_packages_path_chain_records(
+    path: Path,
+    *,
+    require_immutable: bool,
+) -> list[bytes]:
+    if os.geteuid() == 0 and require_immutable:
+        raise SignerBootstrapError(
+            "provenance signer must run as a non-root user"
+        )
+    chain = [path, *path.parents]
+    records: list[bytes] = []
+    for component in reversed(chain):
+        label = f"bootstrap dependency parent {component}"
+        try:
+            info = component.lstat()
+        except OSError as exc:
+            raise SignerBootstrapError(f"{label} is unavailable") from exc
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise SignerBootstrapError(
+                f"{label} must be a regular directory"
+            )
+        if require_immutable:
+            if info.st_uid != 0:
+                raise SignerBootstrapError(
+                    f"{label} must be root-owned"
+                )
+            if stat.S_IMODE(info.st_mode) & 0o022:
+                raise SignerBootstrapError(
+                    f"{label} is group/world writable"
+                )
+            if _effective_access(component, os.W_OK):
+                raise SignerBootstrapError(
+                    f"{label} is writable by the signer runtime"
+                )
+        records.append(
+            (
+                f"{component}\0{info.st_dev}\0{info.st_ino}\0"
+                f"{info.st_uid}\0{info.st_gid}\0"
+                f"{stat.S_IMODE(info.st_mode):o}"
+            ).encode("utf-8")
+        )
+    return records
+
+
+def bootstrap_site_packages_identity(
+    path: Path,
+    *,
+    require_immutable: bool = False,
+) -> str:
     try:
         before = path.lstat()
         resolved = path.resolve(strict=True)
@@ -122,15 +179,27 @@ def bootstrap_site_packages_identity(path: Path) -> str:
         raise SignerBootstrapError(
             "bootstrap site-packages identity is unsafe"
         )
-    identity = (
-        "c-fast-provenance-bootstrap-site-packages-v1"
-        f"\0{resolved}"
-        f"\0{before.st_dev}"
-        f"\0{before.st_ino}"
-        f"\0{before.st_uid}"
-        f"\0{stat.S_IMODE(before.st_mode):o}"
-    ).encode("utf-8")
-    return hashlib.sha256(identity).hexdigest()
+    first = _site_packages_path_chain_records(
+        path,
+        require_immutable=require_immutable,
+    )
+    second = _site_packages_path_chain_records(
+        path,
+        require_immutable=require_immutable,
+    )
+    if first != second:
+        raise SignerBootstrapError(
+            "bootstrap dependency parent chain changed during identity scan"
+        )
+    digest = hashlib.sha256()
+    digest.update(
+        BOOTSTRAP_SITE_PACKAGES_IDENTITY_VERSION.encode("ascii")
+    )
+    digest.update(b"\0")
+    for record in first:
+        digest.update(len(record).to_bytes(8, "big"))
+        digest.update(record)
+    return digest.hexdigest()
 
 
 def _validate_sha256(value: str, label: str) -> None:
@@ -151,20 +220,33 @@ def _validate_image_digest(value: str, label: str) -> None:
 def _dependency_entry_is_safe(
     info: os.stat_result,
     *,
+    path: Path,
     regular: bool,
     label: str,
+    require_immutable: bool,
 ) -> None:
     if info.st_uid not in {0, os.geteuid()}:
         raise SignerBootstrapError(f"{label} owner is unsafe")
+    if require_immutable and info.st_uid != 0:
+        raise SignerBootstrapError(f"{label} must be root-owned")
     if stat.S_IMODE(info.st_mode) & 0o022:
         raise SignerBootstrapError(f"{label} is group/world writable")
+    if require_immutable and _effective_access(path, os.W_OK):
+        raise SignerBootstrapError(
+            f"{label} is writable by the signer runtime"
+        )
     if regular and info.st_nlink != 1:
         raise SignerBootstrapError(
             f"{label} must be a single-link regular file"
         )
 
 
-def _read_dependency_file(path: Path, label: str) -> tuple[bytes, os.stat_result]:
+def _read_dependency_file(
+    path: Path,
+    label: str,
+    *,
+    require_immutable: bool,
+) -> tuple[bytes, os.stat_result]:
     descriptor = -1
     try:
         before_path = path.lstat()
@@ -177,8 +259,10 @@ def _read_dependency_file(path: Path, label: str) -> tuple[bytes, os.stat_result
             )
         _dependency_entry_is_safe(
             before_path,
+            path=path,
             regular=True,
             label=label,
+            require_immutable=require_immutable,
         )
         if before_path.st_size > MAX_BOOTSTRAP_DEPENDENCY_FILE_BYTES:
             raise SignerBootstrapError(f"{label} is too large")
@@ -222,7 +306,11 @@ def _read_dependency_file(path: Path, label: str) -> tuple[bytes, os.stat_result
             os.close(descriptor)
 
 
-def _dependency_manifest_records(path: Path) -> list[bytes]:
+def _dependency_manifest_records(
+    path: Path,
+    *,
+    require_immutable: bool,
+) -> list[bytes]:
     records: list[bytes] = []
     entries = 0
 
@@ -240,8 +328,10 @@ def _dependency_manifest_records(path: Path) -> list[bytes]:
             )
         _dependency_entry_is_safe(
             before,
+            path=directory,
             regular=False,
             label=f"bootstrap dependency directory {relative.as_posix()}",
+            require_immutable=require_immutable,
         )
         try:
             with os.scandir(directory) as iterator:
@@ -277,8 +367,10 @@ def _dependency_manifest_records(path: Path) -> list[bytes]:
             if stat.S_ISDIR(info.st_mode):
                 _dependency_entry_is_safe(
                     info,
+                    path=Path(child.path),
                     regular=False,
                     label=child_label,
+                    require_immutable=require_immutable,
                 )
                 if (
                     relative == Path(".")
@@ -320,6 +412,7 @@ def _dependency_manifest_records(path: Path) -> list[bytes]:
                 raw, opened = _read_dependency_file(
                     Path(child.path),
                     child_label,
+                    require_immutable=require_immutable,
                 )
                 records.append(
                     b"F\0"
@@ -351,11 +444,21 @@ def _dependency_manifest_records(path: Path) -> list[bytes]:
     return records
 
 
-def bootstrap_dependency_manifest_sha256(path: Path) -> str:
+def bootstrap_dependency_manifest_sha256(
+    path: Path,
+    *,
+    require_immutable: bool = False,
+) -> str:
     """Hash the exact safe dependency tree twice without importing it."""
 
-    first = _dependency_manifest_records(path)
-    second = _dependency_manifest_records(path)
+    first = _dependency_manifest_records(
+        path,
+        require_immutable=require_immutable,
+    )
+    second = _dependency_manifest_records(
+        path,
+        require_immutable=require_immutable,
+    )
     if first != second:
         raise SignerBootstrapError(
             "bootstrap dependency closure changed during stable scan"
@@ -402,17 +505,23 @@ def _install_bootstrap_site_packages_from_argv() -> None:
         "signer runtime image digest",
     )
     path = Path(raw_path)
-    actual_identity = bootstrap_site_packages_identity(path)
+    actual_identity = bootstrap_site_packages_identity(
+        path,
+        require_immutable=True,
+    )
     if not hmac.compare_digest(actual_identity, expected_identity):
         raise SignerBootstrapError(
             "bootstrap site-packages identity pin mismatch"
         )
-    actual_manifest = bootstrap_dependency_manifest_sha256(path)
+    actual_manifest = bootstrap_dependency_manifest_sha256(
+        path,
+        require_immutable=True,
+    )
     if not hmac.compare_digest(actual_manifest, expected_manifest):
         raise SignerBootstrapError(
             "bootstrap dependency manifest pin mismatch"
         )
-    BOOTSTRAP_SITE_PACKAGES_PATH = path
+    BOOTSTRAP_SITE_PACKAGES_PATH = path.resolve(strict=True)
     RETAINED_BOOTSTRAP_SITE_PACKAGES_IDENTITY_SHA256 = actual_identity
     RETAINED_BOOTSTRAP_DEPENDENCY_MANIFEST_SHA256 = actual_manifest
     RETAINED_SIGNER_RUNTIME_IMAGE_DIGEST = runtime_image_digest
@@ -664,7 +773,8 @@ def _revalidate_bootstrap_dependency_closure() -> None:
             "bootstrap site-packages identity was not retained"
         )
     actual_root = bootstrap_site_packages_identity(
-        BOOTSTRAP_SITE_PACKAGES_PATH
+        BOOTSTRAP_SITE_PACKAGES_PATH,
+        require_immutable=True,
     )
     if not hmac.compare_digest(
         actual_root,
@@ -674,7 +784,8 @@ def _revalidate_bootstrap_dependency_closure() -> None:
             "bootstrap site-packages identity drifted before private-key read"
         )
     actual_manifest = bootstrap_dependency_manifest_sha256(
-        BOOTSTRAP_SITE_PACKAGES_PATH
+        BOOTSTRAP_SITE_PACKAGES_PATH,
+        require_immutable=True,
     )
     if not hmac.compare_digest(actual_manifest, expected_manifest):
         raise SignerBootstrapError(
