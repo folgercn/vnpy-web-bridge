@@ -1,0 +1,57 @@
+FROM python:3.12-slim@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de
+
+ARG SOURCE_REVISION=UNSET
+
+LABEL org.opencontainers.image.title="vnpy-web-bridge C_FAST readiness-v4 verifier" \
+      org.opencontainers.image.revision="${SOURCE_REVISION}" \
+      io.vnpy-web-bridge.c-fast-t1.readiness-v4-runtime="true" \
+      io.vnpy-web-bridge.c-fast-t1.authority-granted="false"
+
+ENV PATH=/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin \
+    LANG=C.UTF-8 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /opt/c-fast-readiness-v4
+
+# A private dependency root avoids ambient system/user site packages and .pth
+# processing. The launcher scans every byte before appending this path.
+RUN /usr/local/bin/python3.12 -m pip install \
+      --no-cache-dir \
+      --disable-pip-version-check \
+      --target /opt/c-fast-readiness-v4/site-packages \
+      "cryptography==48.0.0" \
+      "jsonschema==4.26.0" \
+      "referencing==0.37.0" \
+      "attrs==26.1.0" \
+      "cffi==2.1.0" \
+      "jsonschema-specifications==2025.9.1" \
+      "pycparser==3.0" \
+      "rpds-py==2026.6.3" \
+      "typing-extensions==4.16.0"
+
+# The exact source release is deliberately closed: every copied file is part
+# of the launcher's source-closure manifest, including delegated verifiers and
+# all schemas reachable through jsonschema/referencing.
+COPY scripts /opt/c-fast-readiness-v4/release/scripts
+COPY docs/schemas /opt/c-fast-readiness-v4/release/docs/schemas
+
+RUN find /opt/c-fast-readiness-v4 -type f \
+      \( -name '*.pth' -o -name '*.egg-link' \
+         -o -name 'sitecustomize.py' -o -name 'usercustomize.py' \) \
+      -print -quit | grep -q . && exit 1 || true \
+    && find /opt/c-fast-readiness-v4 -type f \
+      \( -name '*.pyc' -o -name '*.pyo' \) -delete \
+    && find /opt/c-fast-readiness-v4 -type d -name '__pycache__' \
+      -empty -delete \
+    && chown -R root:root /opt/c-fast-readiness-v4 \
+    && chmod -R a-w /opt/c-fast-readiness-v4 \
+    && install -d -o root -g root -m 0555 \
+      /run/c-fast-t1-readiness-v4-pins
+
+USER 65532:65532
+
+# The release operator must additionally select this image by immutable
+# RepoDigest, mount the v2 pin generation read-only, use --read-only and
+# --network=none, and provide writable custody only at its exact pinned path.
+ENTRYPOINT ["/usr/local/bin/python3.12", "-I", "-S", "-s", "-E", "-B", "/opt/c-fast-readiness-v4/release/scripts/commodity_c_fast_t1_readiness_v4_launcher.py"]

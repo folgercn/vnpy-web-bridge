@@ -1,0 +1,743 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vnpy-web-bridge:schema:commodity-c-fast-t1-readiness-v4",
+  "title": "C_FAST query-v4 human-release readiness packet",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "status",
+    "candidate_id",
+    "parent_issue_number",
+    "issue_number",
+    "packet_id",
+    "generated_at",
+    "expires_at",
+    "verifier_sha256",
+    "schema_sha256",
+    "readiness_runtime",
+    "pin_root_path_sha256",
+    "pin_root_identity_sha256",
+    "pin_set_generation_id",
+    "pin_set_manifest_sha256",
+    "packet_custody_path_sha256",
+    "packet_custody_id",
+    "packet_custody_identity_sha256",
+    "packet_custody_directory_identity_sha256",
+    "evidence_join_identity_sha256",
+    "source_namespaces",
+    "digest_namespaces",
+    "t1_runtime",
+    "build_registry_provenance",
+    "query_release_authority",
+    "readonly_deployment_outcome",
+    "requirements",
+    "blocking_reasons",
+    "ready_for_query_release_v5_human_signature_only",
+    "sensitive_material_present",
+    "packet_is_authority",
+    "receipt_is_authority",
+    "outcome_is_authority",
+    "authority_granted",
+    "readiness_authorized",
+    "ready_for_human_t1_release_signature_only",
+    "ready_for_human_query_release_signature_only",
+    "replay_allowed",
+    "network_authorized",
+    "network_query_authorized",
+    "readonly_production_query_authorized",
+    "production_query_authorized",
+    "write_probe_authorized",
+    "database_mutation_authorized",
+    "deployment_mutation_authorized",
+    "readonly_principal_deployment_authorized",
+    "readonly_secret_file_installation_authorized",
+    "questdb_restart_authorized",
+    "questdb_recreate_authorized",
+    "questdb_image_change_authorized",
+    "writer_identity_mutation_authorized",
+    "writer_secret_mutation_authorized",
+    "network_mutation_authorized",
+    "unscoped_deployment_mutation_authorized",
+    "collection_authorized",
+    "execution_quality_collection_authorized",
+    "runtime_activation_authorized",
+    "order_authorized",
+    "order_submission_authorized",
+    "position_mutation_authorized",
+    "dispatch_authorized",
+    "trading_authorized",
+    "strategy_activation_authorized",
+    "replacement_authorized",
+    "production_authorized",
+    "dynamic_selection_allowed",
+    "automatic_promotion_authorized",
+    "t1_executed",
+    "production_queried",
+    "readonly_query_authorized",
+    "web_bridge_deployment_authorized",
+    "t1_one_shot_child_launch_authorized",
+    "local_query_evidence_write_authorized",
+    "web_bridge_rpc_authorized",
+    "p0_acceptance_authorized",
+    "production_queries_executed",
+    "readonly_queries_executed",
+    "write_probes_attempted",
+    "database_mutations",
+    "web_bridge_rpc_calls",
+    "orders_sent",
+    "positions_modified",
+    "dispatch_changed"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "commodity_c_fast_t1_readiness_v4"
+    },
+    "status": {
+      "const": "READY_FOR_QUERY_RELEASE_V5_HUMAN_SIGNATURE_ONLY"
+    },
+    "candidate_id": {
+      "const": "C_FAST_CROSS_SECTION_NEUTRAL"
+    },
+    "parent_issue_number": {
+      "const": 114
+    },
+    "issue_number": {
+      "const": 216
+    },
+    "packet_id": {
+      "type": "string",
+      "pattern": "^readiness-v4-[0-9a-f]{64}$"
+    },
+    "generated_at": {
+      "$ref": "#/$defs/dateTime"
+    },
+    "expires_at": {
+      "$ref": "#/$defs/dateTime"
+    },
+    "verifier_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "schema_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "readiness_runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "runtime_image_digest",
+        "launcher_sha256",
+        "verifier_sha256",
+        "python_executable_path_sha256",
+        "python_executable_sha256",
+        "source_root_path_sha256",
+        "source_root_identity_sha256",
+        "source_closure_manifest_sha256",
+        "site_packages_path_sha256",
+        "site_packages_identity_sha256",
+        "dependency_manifest_sha256",
+        "isolated_flags_verified",
+        "source_closure_retained",
+        "immutable_runtime_verified",
+        "runtime_identity_sha256"
+      ],
+      "properties": {
+        "runtime_image_digest": {
+          "$ref": "#/$defs/ociDigest"
+        },
+        "launcher_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "verifier_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "python_executable_path_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "python_executable_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "source_root_path_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "source_root_identity_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "source_closure_manifest_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "site_packages_path_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "site_packages_identity_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "dependency_manifest_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "isolated_flags_verified": {
+          "const": true
+        },
+        "source_closure_retained": {
+          "const": true
+        },
+        "immutable_runtime_verified": {
+          "const": true
+        },
+        "runtime_identity_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "pin_root_path_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "pin_root_identity_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "pin_set_generation_id": {
+      "$ref": "#/$defs/id"
+    },
+    "pin_set_manifest_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "packet_custody_path_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "packet_custody_id": {
+      "$ref": "#/$defs/id"
+    },
+    "packet_custody_identity_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "packet_custody_directory_identity_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "evidence_join_identity_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "source_namespaces": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "t1_runtime_source_commit_sha",
+        "provenance_signing_tool_source_commit_sha",
+        "l3_contract_source_commit_sha",
+        "outcome_contract_source_commit_assertion"
+      ],
+      "properties": {
+        "t1_runtime_source_commit_sha": {
+          "$ref": "#/$defs/commit"
+        },
+        "provenance_signing_tool_source_commit_sha": {
+          "$ref": "#/$defs/commit"
+        },
+        "l3_contract_source_commit_sha": {
+          "$ref": "#/$defs/commit"
+        },
+        "outcome_contract_source_commit_assertion": {
+          "$ref": "#/$defs/commit"
+        }
+      }
+    },
+    "digest_namespaces": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "t1_runtime_image_digest",
+        "questdb_image_digest"
+      ],
+      "properties": {
+        "t1_runtime_image_digest": {
+          "$ref": "#/$defs/ociDigest"
+        },
+        "questdb_image_digest": {
+          "$ref": "#/$defs/ociDigest"
+        }
+      }
+    },
+    "t1_runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "content_attestation_raw_sha256",
+        "content_attestation_canonical_sha256",
+        "external_image_evidence_raw_sha256",
+        "source_bundle_archive_raw_sha256",
+        "source_manifest_raw_sha256",
+        "source_manifest_canonical_sha256",
+        "oci_layout_archive_raw_sha256",
+        "image_reference",
+        "image_id",
+        "runtime_bundle_index_sha256",
+        "content_verifier_sha256",
+        "content_attestation_schema_sha256",
+        "source_manifest_schema_sha256",
+        "source_commit_assertion_bound",
+        "git_binary_required",
+        "source_root_required",
+        "git_commit_independently_resolved"
+      ],
+      "properties": {
+        "content_attestation_raw_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "content_attestation_canonical_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "external_image_evidence_raw_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "source_bundle_archive_raw_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "source_manifest_raw_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "source_manifest_canonical_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "oci_layout_archive_raw_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "image_reference": {
+          "type": "string",
+          "pattern": "^[^@\\s]+@sha256:[0-9a-f]{64}$"
+        },
+        "image_id": {
+          "$ref": "#/$defs/ociDigest"
+        },
+        "runtime_bundle_index_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "content_verifier_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "content_attestation_schema_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "source_manifest_schema_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "source_commit_assertion_bound": {
+          "const": true
+        },
+        "git_binary_required": {
+          "const": false
+        },
+        "source_root_required": {
+          "const": false
+        },
+        "git_commit_independently_resolved": {
+          "const": false
+        }
+      }
+    },
+    "build_registry_provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "signed_provenance_raw_sha256",
+        "signed_provenance_canonical_sha256",
+        "provenance_keyring_sha256",
+        "provenance_signing_tool_source_sha256",
+        "provenance_signing_tool_source_commit_sha",
+        "signer_dependency_manifest_sha256",
+        "signer_runtime_image_digest",
+        "t1_authority_keyring_sha256",
+        "l3_authority_keyring_sha256",
+        "signer_key_id",
+        "signer_public_key_sha256",
+        "signing_tool_source_pin_verified",
+        "signing_tool_source_bytes_revalidated_at_runtime",
+        "signing_tool_execution_independently_verified",
+        "signer_dependency_manifest_pin_verified",
+        "signer_runtime_image_digest_pin_verified",
+        "signer_runtime_execution_independently_verified",
+        "signed_build_assertion_verified",
+        "signed_registry_assertion_verified",
+        "external_facts_independently_reverified"
+      ],
+      "properties": {
+        "signed_provenance_raw_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "signed_provenance_canonical_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "provenance_keyring_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "provenance_signing_tool_source_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "provenance_signing_tool_source_commit_sha": {
+          "$ref": "#/$defs/commit"
+        },
+        "signer_dependency_manifest_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "signer_runtime_image_digest": {
+          "$ref": "#/$defs/ociDigest"
+        },
+        "t1_authority_keyring_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "l3_authority_keyring_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "signer_key_id": {
+          "$ref": "#/$defs/id"
+        },
+        "signer_public_key_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "signing_tool_source_pin_verified": {
+          "const": true
+        },
+        "signing_tool_source_bytes_revalidated_at_runtime": {
+          "const": false
+        },
+        "signing_tool_execution_independently_verified": {
+          "const": false
+        },
+        "signer_dependency_manifest_pin_verified": {
+          "const": true
+        },
+        "signer_runtime_image_digest_pin_verified": {
+          "const": true
+        },
+        "signer_runtime_execution_independently_verified": {
+          "const": false
+        },
+        "signed_build_assertion_verified": {
+          "const": true
+        },
+        "signed_registry_assertion_verified": {
+          "const": true
+        },
+        "external_facts_independently_reverified": {
+          "const": false
+        }
+      }
+    },
+    "query_release_authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "trusted_keyring_sha256",
+        "trusted_keyring_schema_version",
+        "key_purpose",
+        "complete_key_domain_disjoint",
+        "release_signed",
+        "release_authority_granted"
+      ],
+      "properties": {
+        "trusted_keyring_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "trusted_keyring_schema_version": {
+          "const": "commodity_c_fast_t1_query_v5_trusted_keys_v1"
+        },
+        "key_purpose": {
+          "const": "t1_exact_readonly_query_v5_release_signer"
+        },
+        "complete_key_domain_disjoint": {
+          "const": true
+        },
+        "release_signed": {
+          "const": false
+        },
+        "release_authority_granted": {
+          "const": false
+        }
+      }
+    },
+    "readonly_deployment_outcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "signed_outcome_raw_sha256",
+        "signed_outcome_canonical_sha256",
+        "outcome_keyring_sha256",
+        "signer_key_id",
+        "signer_public_key_sha256",
+        "release_raw_sha256",
+        "release_canonical_sha256",
+        "consume_marker_raw_sha256",
+        "receipt_raw_sha256",
+        "pre_evidence_bundle_index_sha256",
+        "post_evidence_bundle_index_sha256",
+        "release_id",
+        "attempt_id",
+        "questdb_target_identity_sha256",
+        "outcome_issued_at",
+        "deployment_ended_at",
+        "deployment_executed",
+        "restart_count"
+      ],
+      "properties": {
+        "signed_outcome_raw_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "signed_outcome_canonical_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "outcome_keyring_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "signer_key_id": {
+          "$ref": "#/$defs/id"
+        },
+        "signer_public_key_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "release_raw_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "release_canonical_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "consume_marker_raw_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "receipt_raw_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "pre_evidence_bundle_index_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "post_evidence_bundle_index_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "release_id": {
+          "$ref": "#/$defs/id"
+        },
+        "attempt_id": {
+          "$ref": "#/$defs/attemptId"
+        },
+        "questdb_target_identity_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "outcome_issued_at": {
+          "$ref": "#/$defs/dateTime"
+        },
+        "deployment_ended_at": {
+          "$ref": "#/$defs/dateTime"
+        },
+        "deployment_executed": {
+          "const": true
+        },
+        "restart_count": {
+          "const": 1
+        }
+      }
+    },
+    "requirements": {
+      "const": {
+        "requires_query_release_v5": true,
+        "query_release_v4_accepted": false,
+        "readiness_v3_accepted": false,
+        "p0_preflight_v2_accepted_as_readiness": false,
+        "raw_readiness_packet_binding_required": true,
+        "human_signature_required": true,
+        "one_shot_runtime_required": true
+      }
+    },
+    "blocking_reasons": {
+      "type": "array",
+      "maxItems": 0
+    },
+    "ready_for_query_release_v5_human_signature_only": {
+      "const": true
+    },
+    "sensitive_material_present": {
+      "const": false
+    },
+    "packet_is_authority": {
+      "const": false
+    },
+    "receipt_is_authority": {
+      "const": false
+    },
+    "outcome_is_authority": {
+      "const": false
+    },
+    "authority_granted": {
+      "const": false
+    },
+    "readiness_authorized": {
+      "const": false
+    },
+    "ready_for_human_t1_release_signature_only": {
+      "const": false
+    },
+    "ready_for_human_query_release_signature_only": {
+      "const": false
+    },
+    "replay_allowed": {
+      "const": false
+    },
+    "network_authorized": {
+      "const": false
+    },
+    "network_query_authorized": {
+      "const": false
+    },
+    "readonly_production_query_authorized": {
+      "const": false
+    },
+    "production_query_authorized": {
+      "const": false
+    },
+    "write_probe_authorized": {
+      "const": false
+    },
+    "database_mutation_authorized": {
+      "const": false
+    },
+    "deployment_mutation_authorized": {
+      "const": false
+    },
+    "readonly_principal_deployment_authorized": {
+      "const": false
+    },
+    "readonly_secret_file_installation_authorized": {
+      "const": false
+    },
+    "questdb_restart_authorized": {
+      "const": false
+    },
+    "questdb_recreate_authorized": {
+      "const": false
+    },
+    "questdb_image_change_authorized": {
+      "const": false
+    },
+    "writer_identity_mutation_authorized": {
+      "const": false
+    },
+    "writer_secret_mutation_authorized": {
+      "const": false
+    },
+    "network_mutation_authorized": {
+      "const": false
+    },
+    "unscoped_deployment_mutation_authorized": {
+      "const": false
+    },
+    "collection_authorized": {
+      "const": false
+    },
+    "execution_quality_collection_authorized": {
+      "const": false
+    },
+    "runtime_activation_authorized": {
+      "const": false
+    },
+    "order_authorized": {
+      "const": false
+    },
+    "order_submission_authorized": {
+      "const": false
+    },
+    "position_mutation_authorized": {
+      "const": false
+    },
+    "dispatch_authorized": {
+      "const": false
+    },
+    "trading_authorized": {
+      "const": false
+    },
+    "strategy_activation_authorized": {
+      "const": false
+    },
+    "replacement_authorized": {
+      "const": false
+    },
+    "production_authorized": {
+      "const": false
+    },
+    "dynamic_selection_allowed": {
+      "const": false
+    },
+    "automatic_promotion_authorized": {
+      "const": false
+    },
+    "t1_executed": {
+      "const": false
+    },
+    "production_queried": {
+      "const": false
+    },
+    "readonly_query_authorized": {
+      "const": false
+    },
+    "web_bridge_deployment_authorized": {
+      "const": false
+    },
+    "t1_one_shot_child_launch_authorized": {
+      "const": false
+    },
+    "local_query_evidence_write_authorized": {
+      "const": false
+    },
+    "web_bridge_rpc_authorized": {
+      "const": false
+    },
+    "p0_acceptance_authorized": {
+      "const": false
+    },
+    "production_queries_executed": {
+      "const": 0
+    },
+    "readonly_queries_executed": {
+      "const": 0
+    },
+    "write_probes_attempted": {
+      "const": 0
+    },
+    "database_mutations": {
+      "const": 0
+    },
+    "web_bridge_rpc_calls": {
+      "const": 0
+    },
+    "orders_sent": {
+      "const": 0
+    },
+    "positions_modified": {
+      "const": 0
+    },
+    "dispatch_changed": {
+      "const": false
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]{8,128}$"
+    },
+    "attemptId": {
+      "type": "string",
+      "pattern": "^attempt-[0-9a-f]{64}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "ociDigest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "dateTime": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}
