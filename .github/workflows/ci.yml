@@ -139,3 +139,10 @@ jobs:
 
       - name: Build production image
         run: docker build --progress=plain -t vnpy-web-bridge:ci-${{ github.sha }} .
+
+      - name: Build readiness-v4 verifier image
+        run: |
+          docker build --progress=plain \
+            -f scripts/c_fast_t1/Containerfile.readiness-v4 \
+            --build-arg SOURCE_REVISION=${{ github.sha }} \
+            -t vnpy-web-bridge-c-fast-readiness-v4:ci-${{ github.sha }} .
