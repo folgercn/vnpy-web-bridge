@@ -48,9 +48,14 @@ operator state or signing key.
 
 ## Frozen derivation
 
-The adapter binds the exact 186-day receipt even when a later source month also
-needs root-pinned normal daily receipts. Every used source day records exact
-SHFE/INE raw SHA-256 and byte count.
+The adapter binds the exact 186-day receipt even when the selected source month
+is an earlier complete historical month or a later source month also needs
+root-pinned normal daily receipts. A late historical backfill remains explicit
+in the bound receipt lineage; it is not misrepresented as having been acquired
+at the historical cutoff. Calculation and `used_daily_sources` admit only
+official observations on or before the selected cutoff, while the complete
+186-day receipt remains pinned as custody provenance. Every used source day
+records exact SHFE/INE raw SHA-256 and byte count.
 
 For each target product/day it admits exact contract rows only. Product summary
 rows, TAS rows, totals and other products cannot become contracts. PIT main is
@@ -162,7 +167,8 @@ position, order or trading.
 
 Creation or verification rejects:
 
-- missing/wrong official day, late acquisition, calendar gap or future data;
+- missing/wrong official day, calendar gap or post-cutoff data used by the
+  calculation;
 - daily receipt/raw SHA or byte drift, registry/calendar/anchor mismatch;
 - manifest/commit/root/anchor-ledger fork, replay pin change or uncommitted day;
 - malformed/duplicate contract, fewer than three PIT-eligible contracts,
@@ -175,8 +181,10 @@ Creation or verification rejects:
 - any attempt to add network, RPC, account, position, order, dispatch,
   production or trading capability.
 
-The fixed #214 receipt ends on 2026-07-30. It cannot truthfully produce a July
-month-end view before the 2026-07-31 official close is acquired and root
-pinned, and a signed baseline for the following execution day exists. Missing
-those facts is an expected fail-closed state, not a reason to synthesize or
-backdate input.
+The fixed #214 receipt ends on 2026-07-30. Before the 2026-07-31 official close
+is acquired and root pinned it cannot produce a July month-end view, but it can
+produce a bounded view for an earlier complete historical month when a valid
+signed baseline for that month exists. A historical view records the actual
+late-backfill lineage and never consumes post-cutoff observations. Missing a
+valid baseline or signing authority remains an expected fail-closed state, not
+a reason to synthesize or backdate input.

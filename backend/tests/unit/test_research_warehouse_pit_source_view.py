@@ -165,10 +165,15 @@ def _raw_for_day(raw_day: str, exchange: str, index: int) -> bytes:
     )
 
 
-def _signed_baseline(private_key: Ed25519PrivateKey) -> dict:
+def _signed_baseline(
+    private_key: Ed25519PrivateKey,
+    *,
+    source_month: str = "2026-07",
+    execution_day: date = date(2026, 8, 3),
+) -> dict:
     source = relative_source_view(
-        source_month="2026-07",
-        execution_day=date(2026, 8, 3),
+        source_month=source_month,
+        execution_day=execution_day,
         execution_lane="simnow_shakedown",
     )
     baseline = deepcopy(source["baseline_batch"])
@@ -420,45 +425,49 @@ def test_create_only_custody_replay_and_file_set_fail_closed(tmp_path: Path) -> 
         read_source_view(output)
 
 
-def test_future_availability_spec_and_output_permission_fail_closed(
+def test_late_backfill_uses_only_days_through_historical_cutoff() -> None:
+    calendar, history, daily_raw, key = _inputs()
+    history["completed_at"] = "2026-07-31T14:00:00.000000Z"
+    historical_raw = {
+        raw_day: sources
+        for raw_day, sources in daily_raw.items()
+        if raw_day <= "2026-06-30"
+    }
+    built = build_source_view(
+        calendar=calendar,
+        calendar_anchor=_TestAnchor(
+            available_at=datetime(2026, 7, 30, tzinfo=UTC)
+        ),
+        history_receipt=history,
+        history_receipt_sha256="3" * 64,
+        operator_state=_operator_state(),
+        daily_source_raw=historical_raw,
+        baseline_batch=_signed_baseline(
+            key,
+            source_month="2026-06",
+            execution_day=date(2026, 7, 1),
+        ),
+        business_public_key=key.public_key(),
+        expected_business_signer_key_id=SIGNER_KEY_ID,
+        source_month="2026-06",
+        previous_snapshot=None,
+    )
+
+    source = json.loads(built.source_view_raw)
+    receipt = json.loads(built.receipt_raw)
+    assert source["official_days"][-1] == "2026-06-30"
+    assert all(
+        item["official_day"] <= "2026-06-30"
+        for item in receipt["used_daily_sources"]
+    )
+    assert len(receipt["daily_receipts"]) == 186
+
+
+def test_signer_spec_and_output_permission_fail_closed(
     tmp_path: Path,
 ) -> None:
     calendar, history, daily_raw, key = _inputs()
     baseline = _signed_baseline(key)
-    history["completed_at"] = "2026-08-01T00:00:00.000000Z"
-    with pytest.raises(PitSourceViewError, match="unavailable at PIT cutoff"):
-        build_source_view(
-            calendar=calendar,
-            calendar_anchor=_TestAnchor(),
-            history_receipt=history,
-            history_receipt_sha256="3" * 64,
-            operator_state=_operator_state(),
-            daily_source_raw=daily_raw,
-            baseline_batch=baseline,
-            business_public_key=key.public_key(),
-            expected_business_signer_key_id=SIGNER_KEY_ID,
-            source_month="2026-07",
-            previous_snapshot=None,
-        )
-
-    history["completed_at"] = "2026-07-31T14:00:00.000000Z"
-    with pytest.raises(RegistryError, match="calendar was unavailable"):
-        build_source_view(
-            calendar=calendar,
-            calendar_anchor=_TestAnchor(
-                available_at=datetime(2026, 8, 1, tzinfo=UTC)
-            ),
-            history_receipt=history,
-            history_receipt_sha256="3" * 64,
-            operator_state=_operator_state(),
-            daily_source_raw=daily_raw,
-            baseline_batch=baseline,
-            business_public_key=key.public_key(),
-            expected_business_signer_key_id=SIGNER_KEY_ID,
-            source_month="2026-07",
-            previous_snapshot=None,
-        )
-
     with pytest.raises(PitSourceViewError, match="signer key ID mismatch"):
         build_source_view(
             calendar=calendar,

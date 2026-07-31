@@ -430,12 +430,13 @@ def build_source_view(
         time(23, 59, 59, 999999),
         tzinfo=CHINA_TZ,
     ).astimezone(UTC)
-    if parse_utc(
-        history_receipt.get("completed_at"),
-        "history receipt completed_at",
-    ) > cutoff_instant:
-        raise PitSourceViewError("history receipt was unavailable at PIT cutoff")
-    calendar_anchor.require_available(calendar, cutoff_at=cutoff_instant)
+    # Historical backfills may be acquired after their observation cutoff.
+    # Validate the signed calendar/evidence binding at its real availability
+    # instant without rewriting that availability as historical PIT time.
+    calendar_anchor.require_available(
+        calendar,
+        cutoff_at=calendar_anchor.available_at,
+    )
     if (
         baseline_batch.get("source_month") != source_month
         or baseline_batch.get("execution_day") != execution_day.isoformat()
@@ -450,10 +451,9 @@ def build_source_view(
     ):
         raise PitSourceViewError("history receipt is not the exact 186-day plan")
     required_days = sorted(
-        {
-            *history_days,
-            research_as_of.isoformat(),
-        }
+        day
+        for day in {*history_days, research_as_of.isoformat()}
+        if day <= research_as_of.isoformat()
     )
     missing = set(required_days) - set(daily_source_raw)
     if missing:
@@ -668,6 +668,7 @@ def verified_daily_raw(
     context: RuntimeContext,
     history: dict[str, Any],
     chain: list[dict[str, Any]],
+    through_day: date,
 ) -> dict[str, dict[str, bytes]]:
     """Verify receipt/raw/manifest bindings and return stable exact source bytes."""
 
@@ -676,6 +677,8 @@ def verified_daily_raw(
     aggregate = 0
     for expected in history["daily_receipts"]:
         raw_day = expected["trade_day"]
+        if raw_day > through_day.isoformat():
+            continue
         receipt_path = context.runtime.root / expected["run_receipt_relative_path"]
         receipt_raw = read_regular_strict(receipt_path, "PIT daily run receipt")
         if sha256(receipt_raw) != expected["run_receipt_raw_sha256"]:

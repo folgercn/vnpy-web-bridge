@@ -11,6 +11,7 @@ from .m2_operator_state import load_operator_state, operator_state_lock
 from .m2_runtime_loader import load_runtime_context
 from .pit_source_view import (
     SourcePins,
+    _official_month_boundary,
     _read_signed_payload,
     build_source_view,
     require_separate_paths,
@@ -75,10 +76,15 @@ def main(argv: list[str] | None = None) -> int:
             pins=pins,
             manifest_public_key_path=args.manifest_public_key,
         )
+        research_as_of, _execution_day, _cutoff_day = _official_month_boundary(
+            context.calendar,
+            source_month=args.source_month,
+        )
         daily_raw = verified_daily_raw(
             context=context,
             history=history,
             chain=chain,
+            through_day=research_as_of,
         )
         daily_raw.update(
             verified_supplemental_daily_raw(
