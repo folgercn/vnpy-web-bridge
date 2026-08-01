@@ -1062,6 +1062,31 @@ def test_query_v5_schemas_are_strict_and_namespace_clean(
     assert "query_v3" not in rendered
 
 
+@pytest.mark.parametrize(
+    "schema_path",
+    [subject.EVIDENCE_SCHEMA_PATH, subject.ATTESTATION_SCHEMA_PATH],
+)
+def test_overlay_path_schema_admits_only_exact_builder_ancestor_markers(
+    schema_path: Path,
+) -> None:
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    validator = Draft202012Validator(schema["$defs"]["pathList"])
+
+    assert not list(
+        validator.iter_errors(
+            [
+                "/opt",
+                "/run",
+                "/opt/c-fast-query-v5/release",
+                "/run/c-fast-t1-query-v5-pins",
+            ]
+        )
+    )
+    assert list(validator.iter_errors(["/usr"]))
+    assert list(validator.iter_errors(["/opt/unrelated"]))
+    assert list(validator.iter_errors(["/run/unrelated"]))
+
+
 def test_external_evidence_template_is_schema_valid_and_non_authoritative() -> None:
     template_path = (
         ROOT / "docs/operations/"

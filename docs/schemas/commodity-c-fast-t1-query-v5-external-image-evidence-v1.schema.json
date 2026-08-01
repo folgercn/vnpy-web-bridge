@@ -109,7 +109,7 @@
     },
     "pathList": {
       "type": "array", "minItems": 1, "maxItems": 128, "uniqueItems": true,
-      "items": {"type": "string", "pattern": "^/(?:opt/c-fast-query-v5|run/c-fast-t1-query-v5-pins)(?:/[A-Za-z0-9._/-]+)?$"}
+      "items": {"type": "string", "pattern": "^/(?:opt(?:/c-fast-query-v5(?:/[A-Za-z0-9._/-]+)?)?|run(?:/c-fast-t1-query-v5-pins(?:/[A-Za-z0-9._/-]+)?)?)$"}
     },
     "emptyList": {"type": "array", "maxItems": 0},
     "runtimeBundle": {
