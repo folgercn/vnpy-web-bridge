@@ -1,0 +1,31 @@
+services:
+  web-bridge:
+    environment:
+      COMMODITY_C_FAST_SIMNOW_SHAKEDOWN_ENABLED: "false"
+      COMMODITY_C_FAST_SIMNOW_AUTO_DISPATCH_ENABLED: "false"
+      COMMODITY_C_FAST_SIMNOW_EXECUTION_PERMIT_ENABLED: "false"
+    volumes:
+      - type: bind
+        source: ${COMMODITY_C_FAST_SIMNOW_ARTIFACTS_HOST_DIR:?required_for_explicit_c_fast_simnow_mount}
+        target: /run/c-fast-simnow/artifacts
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${COMMODITY_C_FAST_SIMNOW_KEYRINGS_HOST_DIR:?required_for_explicit_c_fast_simnow_mount}
+        target: /run/c-fast-simnow/keyrings
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${COMMODITY_C_FAST_SIMNOW_SNAPSHOT_HOST_DIR:?required_for_explicit_c_fast_simnow_mount}
+        target: /run/c-fast-simnow/snapshot
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${COMMODITY_C_FAST_SIMNOW_ONE_SHOT_HOST_DIR:?required_for_explicit_c_fast_simnow_mount}
+        target: /run/c-fast-simnow/one-shot
+        read_only: false
+        bind:
+          create_host_path: false
