@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from dataclasses import replace
 import hashlib
 import importlib.util
 import inspect
@@ -73,10 +74,11 @@ def _verified_test_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
         dependency_root_identity_sha256="9" * 64,
         dependency_closure_manifest_sha256="0" * 64,
         bootstrap_dependency_closure_sha256="1" * 64,
-        isolated_flags_verified=True,
-        pre_import_runtime_verified=True,
+        isolated_flags_verified=False,
+        pre_import_runtime_verified=False,
         source_closure_retained=True,
-        immutable_runtime_verified=True,
+        immutable_runtime_verified=False,
+        external_runtime_identity_required=True,
     )
     monkeypatch.setattr(subject, "_ACTIVE_RUNTIME_IDENTITY", identity)
     monkeypatch.setattr(subject, "_ACTIVE_RUNTIME_REVALIDATOR", lambda: None)
@@ -710,9 +712,13 @@ def test_exact_query_v4_prefix_and_query_v5_overlay_pass(
     assert report["attestation_runtime"]["runtime_image_digest"] == (
         "sha256:" + "a" * 64
     )
-    assert report["attestation_runtime"]["isolated_flags_verified"] is True
-    assert report["attestation_runtime"]["pre_import_runtime_verified"] is True
+    assert report["attestation_runtime"]["isolated_flags_verified"] is False
+    assert report["attestation_runtime"]["pre_import_runtime_verified"] is False
+    assert report["attestation_runtime"]["immutable_runtime_verified"] is False
+    assert report["attestation_runtime"]["external_runtime_identity_required"] is True
     assert report["attestation_runtime"]["source_closure_retained"] is True
+    assert report["checks"]["attestation_runtime_externally_verified"] is False
+    assert report["checks"]["external_exact_runtime_image_required"] is True
     assert report["image_built_here"] is False
     assert report["authority_granted"] is False
     assert report["network_authorized"] is False
@@ -1124,7 +1130,7 @@ def test_runtime_pin_template_is_strict_and_non_authoritative() -> None:
     assert "authority_granted" not in template
 
 
-def test_preimport_bootstrap_hash_and_pin_template_are_self_contained() -> None:
+def test_python_startup_bootstrap_hash_and_pin_template_are_self_contained() -> None:
     for raw in (b"", b"abc", bytes(range(256)), b"x" * 1000):
         assert (
             runtime_launcher._bootstrap_sha256(raw) == hashlib.sha256(raw).hexdigest()
@@ -1135,7 +1141,27 @@ def test_preimport_bootstrap_hash_and_pin_template_are_self_contained() -> None:
     assert pins["schema_version"] == runtime_launcher.BOOTSTRAP_SCHEMA_VERSION
 
 
-def test_fresh_process_preimport_bootstrap_rejects_stdlib_and_native_replacements(
+def test_stock_cpython_codec_bootstrap_is_path_backed_before_launcher() -> None:
+    probe = """
+import sys
+
+module = sys.modules.get("encodings")
+origin = getattr(getattr(module, "__spec__", None), "origin", None)
+if module is None or origin in (None, "built-in", "frozen"):
+    raise SystemExit("encodings bootstrap was not path-backed")
+print(origin)
+"""
+    completed = subprocess.run(
+        [sys.executable, "-I", "-S", "-s", "-E", "-B", "-c", probe],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "encodings" in completed.stdout
+
+
+def test_python_startup_bootstrap_rejects_later_stdlib_and_native_replacements(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1165,8 +1191,8 @@ launcher_path, runtime_root, trusted, sentinel = sys.argv[1:]
 sys.path.insert(0, runtime_root)
 with open(launcher_path, encoding="utf-8") as stream:
     source = stream.read()
-prefix = source.split("_PREIMPORT_BOOTSTRAP_IDENTITY =", 1)[0]
-namespace = {"__name__": "query_v5_preimport_probe"}
+prefix = source.split("_PYTHON_STARTUP_BOOTSTRAP_IDENTITY =", 1)[0]
+namespace = {"__name__": "query_v5_python_startup_probe"}
 exec(compile(prefix, launcher_path, "exec"), namespace)
 namespace["_bootstrap_os"] = os
 namespace["_bootstrap_safe"] = lambda *_args, **_kwargs: None
@@ -1175,7 +1201,7 @@ if actual == trusted:
     raise SystemExit("replacement was not detected")
 if os.path.exists(sentinel):
     raise SystemExit("replacement executed before bootstrap failure")
-print("MISMATCH_REJECTED_BEFORE_PATH_IMPORT")
+print("MISMATCH_REJECTED_BEFORE_ADDITIONAL_PATH_IMPORT")
 """
     for relative, replacement in replacements.items():
         target = runtime / relative
@@ -1201,9 +1227,31 @@ print("MISMATCH_REJECTED_BEFORE_PATH_IMPORT")
             text=True,
         )
         assert completed.returncode == 0, completed.stderr
-        assert "MISMATCH_REJECTED_BEFORE_PATH_IMPORT" in completed.stdout
+        assert "MISMATCH_REJECTED_BEFORE_ADDITIONAL_PATH_IMPORT" in completed.stdout
         assert not sentinel.exists()
         target.write_bytes(originals[relative])
+
+
+def test_runtime_identity_rejects_in_process_phase_zero_claims() -> None:
+    identity = subject._ACTIVE_RUNTIME_IDENTITY
+    assert identity is not None
+    for field in (
+        "isolated_flags_verified",
+        "pre_import_runtime_verified",
+        "immutable_runtime_verified",
+    ):
+        with pytest.raises(
+            subject.QueryV5ImageAttestationError,
+            match="external exact-RepoDigest verification",
+        ):
+            subject._runtime_identity_payload(replace(identity, **{field: True}))
+    with pytest.raises(
+        subject.QueryV5ImageAttestationError,
+        match="external exact-RepoDigest verification",
+    ):
+        subject._runtime_identity_payload(
+            replace(identity, external_runtime_identity_required=False)
+        )
 
 
 def test_production_entrypoints_are_launcher_only() -> None:
@@ -1225,9 +1273,8 @@ def test_production_entrypoints_are_launcher_only() -> None:
         text=True,
     )
     assert direct_verifier.returncode != 0
-    assert "requires the independently pinned isolated launcher" in (
-        direct_verifier.stderr
-    )
+    assert "requires the pinned isolated launcher" in direct_verifier.stderr
+    assert "external exact-RepoDigest verification" in direct_verifier.stderr
     assert direct_launcher.returncode != 0
     assert "-I -S -s -E -B" in direct_launcher.stderr
 

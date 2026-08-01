@@ -77,7 +77,7 @@ launcher、v5/v4 verifier、v4 delegate、v5/v4 validators、全部 schemas 与�
 pin-set schema/template 分别是
 `commodity-c-fast-t1-query-v5-image-attestation-pin-set-v1.schema.json` 与
 `c-fast-t1-query-v5-image-attestation-pin-set.template.json`。不能在目标 runtime 内
-从当前文件反推 expected pins。pin-set 固定 immutable runtime image RepoDigest、
+从当前文件反推 expected pins。pin-set 记录预期 attestation runtime image RepoDigest、
 launcher/verifier/delegate/validator、解释器、source root 与 dependency root。
 bootstrap pin 使用固定有序的 ASCII line contract，模板是
 `c-fast-t1-query-v5-image-attestation-bootstrap-pin.template`；同一 independent
@@ -85,7 +85,8 @@ release generation 额外固定完整 `/usr/local` Python runtime（stdlib、
 `lib-dynload`）、`/usr/lib/x86_64-linux-gnu` native runtime、source 与 dependency
 closure。
 
-唯一支持的入口使用固定解释器与隔离 flags：
+运行入口使用固定解释器与隔离 flags；调用方必须先由容器运行时把实际启动 image
+独立解析并强制为 pin-set 中的 exact RepoDigest：
 
 ```bash
 <PINNED_PYTHON> -I -S -s -E -B \
@@ -102,18 +103,21 @@ closure。
   --output /private/c-fast-query-v5-attestation/composition-attestation.json
 ```
 
-launcher 的 phase zero 只使用 built-in `sys` 与 CPython 3.12 frozen `os`，并使用
-内嵌 pure-Python SHA256、`os.open/scandir` 和 `/proc/self/exe`/`/proc/self/maps`。
-在任何 path-backed stdlib、`lib-dynload`、native extension、本地 verifier 或第三方
-import 前，它先验证 bootstrap generation、launcher、解释器、完整 `/usr/local`、
-`/usr/lib/x86_64-linux-gnu`、source 与 dependency trees 均 root-owned 且 runtime
-不可写；任何 mapped
-native path 或 `sys.path` 逃出这些 roots 都 fail closed。phase two 再验证 canonical
-JSON pin、拒绝 symlink/hardlink/special file、`.pth`、`.egg-link`、
-`sitecustomize`/`usercustomize`，并从首次扫描保留的 exact source bytes 加载本地
-modules。两阶段 generation/hash 必须互相一致；导入前后和 receipt create-only 写入
-前后都会重验 closure。stdlib/native/bootstrap/source/dependency identities 全部进入
-`attestation_runtime` 与 `runtime_identity_sha256`。
+stock CPython 3.12 在执行 launcher 源码前已从 path-backed stdlib 加载
+`encodings` codec bootstrap。因此 Python 内的 bootstrap 只能作为 defense in depth：
+它在继续导入其他 path-backed stdlib、native extension、本地 verifier 或第三方模块前，
+验证 bootstrap generation、launcher、解释器、完整 `/usr/local`、
+`/usr/lib/x86_64-linux-gnu`、source 与 dependency trees，并在后续阶段继续拒绝
+symlink/hardlink/special file、`.pth`、`.egg-link`、
+`sitecustomize`/`usercustomize`，从首次扫描保留的 exact source bytes 加载本地 modules。
+导入前后和 receipt create-only 写入前后仍会重验 closure。
+
+该进程不能独立证明启动前的 codec/runtime 没有被替换，所以 receipt 固定
+`isolated_flags_verified=false`、`pre_import_runtime_verified=false`、
+`immutable_runtime_verified=false`、`external_runtime_identity_required=true`。
+这些字段和 stdlib/native/bootstrap/source/dependency identities 一并进入
+`attestation_runtime` 与 `runtime_identity_sha256`；下游只有在外部 exact RepoDigest
+验证成功后才能信任本 receipt，不能把 pin-set 内的 digest 声明当作自证事实。
 
 输出是 create-only、mode `0600`。已有路径、相对路径、symlink output 或变化中的
 input 都会 fail closed。
@@ -123,6 +127,10 @@ input 都会 fail closed。
 receipt 中以下结论固定为 false：
 
 ```text
+checks.attestation_runtime_externally_verified=false
+attestation_runtime.isolated_flags_verified=false
+attestation_runtime.pre_import_runtime_verified=false
+attestation_runtime.immutable_runtime_verified=false
 image_built_here=false
 build_provenance_verified=false
 registry_provenance_verified=false
@@ -135,9 +143,10 @@ trading_authorized=false
 production_authorized=false
 ```
 
-因此通过本 verifier 只代表给定 source/OCI bytes 的离线 composition 一致性，不代表
-这些 bytes 来自受信 builder、已 push 到 registry、RepoDigest 已确认、可以连接 DSN
-或可以执行 query。下一阶段仍须基于最终 merge commit 完成实际 build/push、registry
+因此通过本 verifier 只代表给定 source/OCI bytes 的离线 composition 一致性。本进程
+不确认 attestation runtime RepoDigest，也不代表这些 bytes 来自受信 builder、已 push
+到 registry、可以连接 DSN 或可以执行 query。下一阶段仍须基于最终 merge commit
+完成实际 build/push、registry
 capture 与独立签名 provenance，之后才能进入 release-v5 lifecycle；本切片不加入
 release signer、parent/child、DSN 或 query path。
 

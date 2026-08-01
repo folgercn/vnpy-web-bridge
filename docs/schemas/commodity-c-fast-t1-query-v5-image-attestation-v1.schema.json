@@ -84,7 +84,9 @@
         "all_overlay_layer_contents_sensitive_free",
         "merged_python_execution_closure_frozen",
         "runtime_bundle_matches_source_bundle",
-        "immutable_image_reference_matched", "build_provenance_verified",
+        "immutable_image_reference_matched",
+        "attestation_runtime_externally_verified",
+        "external_exact_runtime_image_required", "build_provenance_verified",
         "registry_provenance_verified"
       ],
       "properties": {
@@ -105,6 +107,8 @@
         "merged_python_execution_closure_frozen": {"const": true},
         "runtime_bundle_matches_source_bundle": {"const": true},
         "immutable_image_reference_matched": {"const": true},
+        "attestation_runtime_externally_verified": {"const": false},
+        "external_exact_runtime_image_required": {"const": true},
         "build_provenance_verified": {"const": false},
         "registry_provenance_verified": {"const": false}
       }
@@ -168,10 +172,11 @@
         "dependency_root_identity_sha256", "dependency_closure_manifest_sha256",
         "bootstrap_dependency_closure_sha256", "isolated_flags_verified",
         "pre_import_runtime_verified", "source_closure_retained",
-        "immutable_runtime_verified", "runtime_identity_sha256"
+        "immutable_runtime_verified", "external_runtime_identity_required",
+        "runtime_identity_sha256"
       ],
       "properties": {
-        "schema_version": {"const": "commodity_c_fast_t1_query_v5_image_attestation_runtime_identity_v1"},
+        "schema_version": {"const": "commodity_c_fast_t1_query_v5_image_attestation_runtime_identity_v2"},
         "runtime_image_digest": {"$ref": "#/$defs/ociDigest"},
         "pin_manifest_sha256": {"$ref": "#/$defs/sha256"},
         "launcher_sha256": {"$ref": "#/$defs/sha256"},
@@ -196,10 +201,11 @@
         "dependency_root_identity_sha256": {"$ref": "#/$defs/sha256"},
         "dependency_closure_manifest_sha256": {"$ref": "#/$defs/sha256"},
         "bootstrap_dependency_closure_sha256": {"$ref": "#/$defs/sha256"},
-        "isolated_flags_verified": {"const": true},
-        "pre_import_runtime_verified": {"const": true},
+        "isolated_flags_verified": {"const": false},
+        "pre_import_runtime_verified": {"const": false},
         "source_closure_retained": {"const": true},
-        "immutable_runtime_verified": {"const": true},
+        "immutable_runtime_verified": {"const": false},
+        "external_runtime_identity_required": {"const": true},
         "runtime_identity_sha256": {"$ref": "#/$defs/sha256"}
       }
     }

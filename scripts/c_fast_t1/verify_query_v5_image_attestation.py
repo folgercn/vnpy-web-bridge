@@ -7,7 +7,8 @@ import sys
 
 if __name__ == "__main__":
     raise SystemExit(
-        "query-v5 image attestation requires the independently pinned isolated launcher"
+        "query-v5 image attestation requires the pinned isolated launcher and "
+        "external exact-RepoDigest verification"
     )
 
 
@@ -56,7 +57,7 @@ STATUS = (
     "QUERY_V5_BASE_AND_OVERLAY_OCI_COMPOSITION_VERIFIED_NO_BUILD_OR_REGISTRY_PROVENANCE"
 )
 RUNTIME_IDENTITY_VERSION = (
-    "commodity_c_fast_t1_query_v5_image_attestation_runtime_identity_v1"
+    "commodity_c_fast_t1_query_v5_image_attestation_runtime_identity_v2"
 )
 RUNTIME_PREFIX = "opt/c-fast-query-v5/"
 PIN_DIRECTORY = "run/c-fast-t1-query-v5-pins"
@@ -119,6 +120,7 @@ class QueryV5AttestationRuntimeIdentity:
     pre_import_runtime_verified: bool
     source_closure_retained: bool
     immutable_runtime_verified: bool
+    external_runtime_identity_required: bool
 
 
 _ACTIVE_RUNTIME_IDENTITY: QueryV5AttestationRuntimeIdentity | None = None
@@ -157,13 +159,17 @@ def _validate_runtime_identity(
         for value in hashes.values()
     ):
         _fail("query-v5 attestation runtime identity hash is invalid")
-    if not (
+    if (
         identity.isolated_flags_verified
-        and identity.pre_import_runtime_verified
-        and identity.source_closure_retained
-        and identity.immutable_runtime_verified
+        or identity.pre_import_runtime_verified
+        or identity.immutable_runtime_verified
+        or not identity.source_closure_retained
+        or not identity.external_runtime_identity_required
     ):
-        _fail("query-v5 attestation runtime identity is not independently enforced")
+        _fail(
+            "query-v5 attestation runtime must require external exact-RepoDigest "
+            "verification"
+        )
 
 
 def _runtime_identity_payload(
@@ -1067,6 +1073,8 @@ def verify_query_v5_image_evidence(
             "merged_python_execution_closure_frozen": True,
             "runtime_bundle_matches_source_bundle": True,
             "immutable_image_reference_matched": True,
+            "attestation_runtime_externally_verified": False,
+            "external_exact_runtime_image_required": True,
             "build_provenance_verified": False,
             "registry_provenance_verified": False,
         },
@@ -1142,5 +1150,6 @@ def main() -> int:
     print(f"image_digest={report['image_digest']}")
     print("build_provenance_verified=false")
     print("registry_provenance_verified=false")
+    print("external_runtime_identity_required=true")
     print("authority_granted=false")
     return 0

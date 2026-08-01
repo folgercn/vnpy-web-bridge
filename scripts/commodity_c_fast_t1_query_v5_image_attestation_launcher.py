@@ -27,12 +27,11 @@ if RUNNING_AS_SCRIPT:
     _require_isolated_startup()
 
 
-# Production executes this phase before importing any path-backed stdlib,
-# extension, project, or third-party module.  ``sys`` is built in and CPython
-# 3.12 freezes ``os`` into the interpreter executable.  The small SHA256 and
-# tree scanner below are intentionally self-contained so the complete Python
-# and native runtime can be checked against an independently mounted pin before
-# path-backed code executes.
+# CPython loads path-backed codec modules before executing this file.  This
+# bootstrap is therefore defense in depth only: it checks the remaining runtime
+# closure before importing additional path-backed modules, but it must never be
+# represented as an independently trusted phase-zero verification.  Consumers
+# must establish the exact attestation image RepoDigest outside this process.
 if RUNNING_AS_SCRIPT:
     import os as _bootstrap_os
 
@@ -497,11 +496,11 @@ def _bootstrap_verify():
         "native_runtime_root_path": paths["native_runtime_root_path"],
         "source_root_path": paths["source_root_path"],
         "dependency_root_path": paths["dependency_root_path"],
-        "pre_import_runtime_verified": True,
+        "pre_import_runtime_verified": False,
     }
 
 
-_PREIMPORT_BOOTSTRAP_IDENTITY = _bootstrap_verify() if RUNNING_AS_SCRIPT else None
+_PYTHON_STARTUP_BOOTSTRAP_IDENTITY = _bootstrap_verify() if RUNNING_AS_SCRIPT else None
 
 
 import hashlib  # noqa: E402
@@ -1214,11 +1213,11 @@ def _inspect_runtime(
         dependency_root,
         require_immutable=require_immutable,
     )
-    bootstrap = _PREIMPORT_BOOTSTRAP_IDENTITY
+    bootstrap = _PYTHON_STARTUP_BOOTSTRAP_IDENTITY
     if require_immutable:
         if bootstrap is None:
             raise QueryV5AttestationLauncherError(
-                "query-v5 pre-import bootstrap identity is unavailable"
+                "query-v5 Python-startup bootstrap identity is unavailable"
             )
         bootstrap_expected = {
             "generation_id": pins["generation_id"],
@@ -1236,7 +1235,7 @@ def _inspect_runtime(
             "bootstrap_dependency_closure_sha256": pins[
                 "bootstrap_dependency_closure_sha256"
             ],
-            "pre_import_runtime_verified": True,
+            "pre_import_runtime_verified": False,
         }
         if bootstrap != bootstrap_expected:
             raise QueryV5AttestationLauncherError(
@@ -1291,10 +1290,14 @@ def _inspect_runtime(
         "bootstrap_dependency_closure_sha256": pins[
             "bootstrap_dependency_closure_sha256"
         ],
-        "isolated_flags_verified": bool(require_immutable),
-        "pre_import_runtime_verified": bool(require_immutable),
+        # CPython has already executed path-backed encodings modules before this
+        # launcher can observe any flags or files.  These claims stay false until
+        # a non-Python phase-zero trust root is introduced.
+        "isolated_flags_verified": False,
+        "pre_import_runtime_verified": False,
         "source_closure_retained": True,
-        "immutable_runtime_verified": bool(require_immutable),
+        "immutable_runtime_verified": False,
+        "external_runtime_identity_required": True,
     }
     snapshot_pins = dict(pins)
 

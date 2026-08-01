@@ -195,10 +195,11 @@ def _ci_runtime_identity() -> query_v5.QueryV5AttestationRuntimeIdentity:
     return query_v5.QueryV5AttestationRuntimeIdentity(
         runtime_image_digest="sha256:" + "a" * 64,
         **values,
-        isolated_flags_verified=True,
-        pre_import_runtime_verified=True,
+        isolated_flags_verified=False,
+        pre_import_runtime_verified=False,
         source_closure_retained=True,
-        immutable_runtime_verified=True,
+        immutable_runtime_verified=False,
+        external_runtime_identity_required=True,
     )
 
 
