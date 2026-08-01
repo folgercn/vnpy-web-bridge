@@ -283,6 +283,50 @@ def test_handle_tick_event_enqueues_unsubscribed_symbol_for_persistence(monkeypa
     assert saved[0]["vt_symbol"] == "UNIT999.SHFE"
 
 
+def test_handle_tick_event_fans_out_copy_without_market_subscription() -> None:
+    observed: list[dict] = []
+    service = VnpyRpcService()
+    service.bind_readonly_tick_listener(observed.append)
+
+    service.handle_event("", TickEvent())
+
+    assert observed == [
+        {
+            "symbol": "UNIT999",
+            "exchange": "SHFE",
+            "last_price": 3126,
+            "vt_symbol": "UNIT999.SHFE",
+        }
+    ]
+
+
+def test_readonly_tick_listener_failure_isolated_from_existing_tick_path() -> None:
+    service = VnpyRpcService()
+    service._market_subscriptions.add("UNIT999.SHFE")
+    service.bind_readonly_tick_listener(
+        lambda _payload: (_ for _ in ()).throw(RuntimeError("listener failed"))
+    )
+
+    service.handle_event("", TickEvent())
+
+    assert memory_store.get_tick("UNIT999.SHFE") is not None
+
+
+def test_readonly_tick_listener_binding_is_prestart_and_idempotent() -> None:
+    service = VnpyRpcService()
+
+    def listener(_payload) -> None:
+        return None
+
+    service.bind_readonly_tick_listener(listener)
+    service.bind_readonly_tick_listener(listener)
+    assert service._readonly_tick_listeners == [listener]
+
+    service.started = True
+    with pytest.raises(ValueError, match="before start"):
+        service.bind_readonly_tick_listener(lambda _payload: None)
+
+
 def test_unsubscribe_market_removes_subscription_and_tick() -> None:
     service = VnpyRpcService()
     service._market_subscriptions.add("UNIT999.SHFE")

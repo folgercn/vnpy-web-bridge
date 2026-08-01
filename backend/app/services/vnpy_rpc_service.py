@@ -5,7 +5,7 @@ import logging
 from datetime import datetime, timedelta
 from threading import RLock
 from time import monotonic
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 from zoneinfo import ZoneInfo
 
 from app.core.config import Settings, get_settings
@@ -76,12 +76,31 @@ class VnpyRpcService:
         self._call_lock = RLock()
         self._subscription_lock = RLock()
         self._market_subscriptions: set[str] = set()
+        self._readonly_tick_listeners: list[Callable[[Mapping[str, Any]], object]] = []
         self._last_probe_at = 0.0
         self._last_probe_connected: bool | None = None
         self._probe_ttl_seconds = 5.0
 
     def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
         self.loop = loop
+
+    def bind_readonly_tick_listener(
+        self,
+        listener: Callable[[Mapping[str, Any]], object],
+    ) -> None:
+        """Bind a local publish-only Tick copy listener before RPC startup.
+
+        The listener receives no service/client handle and this method never
+        performs an upstream market subscription.
+        """
+
+        if not callable(listener):
+            raise ValueError("readonly Tick listener must be callable")
+        with self._subscription_lock:
+            if self.started:
+                raise ValueError("readonly Tick listeners must bind before start")
+            if listener not in self._readonly_tick_listeners:
+                self._readonly_tick_listeners.append(listener)
 
     def start(self) -> None:
         if self.started:
@@ -374,6 +393,7 @@ class VnpyRpcService:
             vt_symbol = payload.get("vt_symbol")
             if vt_symbol:
                 tick_persistence_service.enqueue_tick(payload)
+            self._publish_readonly_tick(payload)
             if not vt_symbol or not self._is_market_subscribed(str(vt_symbol)):
                 return
             memory_store.save_tick(str(vt_symbol), payload)
@@ -399,6 +419,15 @@ class VnpyRpcService:
     def _is_market_subscribed(self, vt_symbol: str) -> bool:
         with self._subscription_lock:
             return vt_symbol in self._market_subscriptions
+
+    def _publish_readonly_tick(self, payload: Mapping[str, Any]) -> None:
+        with self._subscription_lock:
+            listeners = tuple(self._readonly_tick_listeners)
+        for listener in listeners:
+            try:
+                listener(dict(payload))
+            except Exception:
+                logger.exception("readonly Tick listener failed in isolation")
 
 
 rpc_service = VnpyRpcService()

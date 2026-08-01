@@ -62,6 +62,7 @@ class PreverifiedTickHorizonWorker:
         self._worker_state = "CREATED_CODE_ONLY_NOT_ACTIVATED"
         self._last_error: str | None = None
         self._blocked = False
+        self._frozen_exact_contracts: tuple[str, ...] | None = None
 
     def register_preverified_plan(
         self,
@@ -75,6 +76,10 @@ class PreverifiedTickHorizonWorker:
         """Durably register every virtual intent after a complete type join."""
 
         with self._lock:
+            if self._frozen_exact_contracts is not None:
+                raise CFastExecutionQualityHorizonWorkerError(
+                    "PREVERIFIED_EXACT_CONTRACTS_FROZEN"
+                )
             try:
                 plan = self._revalidate_model(
                     preverified_plan,
@@ -193,6 +198,14 @@ class PreverifiedTickHorizonWorker:
                 )
                 before = self._sidecar.recover()
                 self._require_complete_plan_state(before)
+                if (
+                    self._frozen_exact_contracts is not None
+                    and self._accepted_exact_contracts(before)
+                    != self._frozen_exact_contracts
+                ):
+                    raise CFastExecutionQualityHorizonWorkerError(
+                        "DURABLE_EXACT_CONTRACT_SET_DRIFT"
+                    )
                 affected_intents = self._intent_ids_for_contract(
                     before,
                     tick.exact_contract,
@@ -262,6 +275,58 @@ class PreverifiedTickHorizonWorker:
                 **_FALSE_AUTHORITY,
             }
 
+    def freeze_preverified_exact_contracts(
+        self,
+        exact_contracts: tuple[str, ...],
+    ) -> dict[str, Any]:
+        """Freeze one caller-preverified local subscription contract set."""
+
+        if (
+            type(exact_contracts) is not tuple
+            or not exact_contracts
+            or any(
+                not isinstance(exact_contract, str) or not exact_contract
+                for exact_contract in exact_contracts
+            )
+            or len(set(exact_contracts)) != len(exact_contracts)
+            or tuple(sorted(exact_contracts)) != exact_contracts
+        ):
+            raise CFastExecutionQualityHorizonWorkerError(
+                "PREVERIFIED_EXACT_CONTRACT_FREEZE_INPUT_INVALID"
+            )
+        with self._lock:
+            self._require_unblocked()
+            state = self._sidecar.recover()
+            self._require_complete_plan_state(state)
+            accepted = self._accepted_exact_contracts(state)
+            if accepted != exact_contracts:
+                raise CFastExecutionQualityHorizonWorkerError(
+                    "PREVERIFIED_EXACT_CONTRACT_FREEZE_MISMATCH"
+                )
+            if self._frozen_exact_contracts is not None:
+                if self._frozen_exact_contracts != exact_contracts:
+                    raise CFastExecutionQualityHorizonWorkerError(
+                        "PREVERIFIED_EXACT_CONTRACT_FREEZE_ALREADY_BOUND"
+                    )
+            else:
+                self._frozen_exact_contracts = exact_contracts
+            self._worker_state = (
+                "PREVERIFIED_EXACT_CONTRACTS_FROZEN_CODE_ONLY_NOT_ACTIVATED"
+            )
+            return {
+                "schema_version": (
+                    "commodity_c_fast_execution_quality_horizon_worker_"
+                    "exact_contract_freeze_v1"
+                ),
+                "frozen_exact_contracts": list(exact_contracts),
+                "tick_subscription_frozen": True,
+                "runtime_active": False,
+                "execution_quality_implemented": False,
+                "orders_sent": 0,
+                "positions_modified": 0,
+                **_FALSE_AUTHORITY,
+            }
+
     def recover(self) -> dict[str, Any]:
         """Replay the journal and seal work made ready before a restart."""
 
@@ -321,13 +386,7 @@ class PreverifiedTickHorizonWorker:
     def _status_locked(self) -> dict[str, Any]:
         state = self._sidecar.recover()
         self._require_complete_plan_state(state)
-        accepted_contracts = sorted(
-            {
-                str(record.payload["intent"]["exact_contract"])
-                for intent_id, record in state.intents.items()
-                if intent_id in state.anchors
-            }
-        )
+        accepted_contracts = list(self._accepted_exact_contracts(state))
         completion_counts = {
             "SEALED_SELECTED_EVIDENCE": 0,
             "SEALED_MISSING_NOT_IMPUTED": 0,
@@ -351,6 +410,12 @@ class PreverifiedTickHorizonWorker:
             "last_error": self._last_error,
             "registered_intent_count": len(state.anchors),
             "accepted_exact_contracts": accepted_contracts,
+            "exact_contract_subscription_frozen": (
+                self._frozen_exact_contracts is not None
+            ),
+            "frozen_exact_contracts": list(
+                self._frozen_exact_contracts or ()
+            ),
             "snapshot_record_count": len(state.snapshots),
             "evidence_record_count": len(state.evidence),
             "completion_counts": completion_counts,
@@ -448,6 +513,12 @@ class PreverifiedTickHorizonWorker:
             "last_error": self._last_error,
             "registered_intent_count": None,
             "accepted_exact_contracts": [],
+            "exact_contract_subscription_frozen": (
+                self._frozen_exact_contracts is not None
+            ),
+            "frozen_exact_contracts": list(
+                self._frozen_exact_contracts or ()
+            ),
             "snapshot_record_count": None,
             "evidence_record_count": None,
             "completion_counts": None,
@@ -464,6 +535,20 @@ class PreverifiedTickHorizonWorker:
             "positions_modified": 0,
             **_FALSE_AUTHORITY,
         }
+
+    @staticmethod
+    def _accepted_exact_contracts(
+        state: SidecarState,
+    ) -> tuple[str, ...]:
+        return tuple(
+            sorted(
+                {
+                    str(record.payload["intent"]["exact_contract"])
+                    for intent_id, record in state.intents.items()
+                    if intent_id in state.anchors
+                }
+            )
+        )
 
     @staticmethod
     def _intent_ids_for_contract(
