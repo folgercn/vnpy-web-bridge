@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import importlib.util
 from pathlib import Path
 import sys
@@ -255,6 +255,62 @@ def test_partial_multi_intent_registration_retries_after_restart(
     assert len(recovered.intents) == 2
     assert len(recovered.anchors) == 2
     assert len(recovered.records) == 4
+
+
+def test_orphan_intent_anchor_is_repaired_by_same_full_plan(
+    tmp_path: Path,
+) -> None:
+    observations = iter((ANCHOR, ANCHOR - timedelta(seconds=1)))
+    repository = sidecar(tmp_path)
+    repository.clock = lambda: next(observations)
+    subject = PreverifiedTickHorizonWorker(repository)
+    inputs = registration_inputs()
+
+    with pytest.raises(
+        CFastExecutionQualityHorizonWorkerError,
+        match="DURABLE_INTENT_CLOCK_REGRESSION",
+    ):
+        subject.register_preverified_plan(**inputs)
+    orphaned = repository.recover()
+    assert len(orphaned.intents) == 1
+    assert orphaned.anchors == {}
+    assert subject.status()["blocked_fail_closed"] is True
+    with pytest.raises(
+        CFastExecutionQualityHorizonWorkerError,
+        match="WORKER_BLOCKED_REQUIRES_EXPLICIT_RECOVERY",
+    ):
+        subject.accept_preverified_tick(SCORER.book(0))
+
+    repository.clock = lambda: ANCHOR + timedelta(seconds=1)
+    receipt = subject.register_preverified_plan(**inputs)
+
+    assert len(receipt["registered_intent_ids"]) == 1
+    assert subject.status()["blocked_fail_closed"] is False
+    repaired = repository.recover()
+    assert len(repaired.intents) == 1
+    assert len(repaired.anchors) == 1
+    assert len(repaired.records) == 2
+
+
+def test_status_reports_journal_failure_as_fail_closed(
+    tmp_path: Path,
+) -> None:
+    subject = worker(tmp_path)
+    register(subject)
+    unexpected = subject._sidecar.journal.root / "unexpected"
+    unexpected.write_text("tampered")
+    unexpected.chmod(0o600)
+
+    status = subject.status()
+
+    assert status["worker_state"] == "BLOCKED_FAIL_CLOSED"
+    assert status["blocked_fail_closed"] is True
+    assert status["last_error"] == "JOURNAL_SEQUENCE_INVALID"
+    assert status["registered_intent_count"] is None
+    assert status["snapshot_record_count"] is None
+    assert status["runtime_active"] is False
+    assert status["execution_quality_implemented"] is False
+    assert status["dispatch_allowed"] is False
 
 
 def test_missing_horizons_are_sealed_missing_not_imputed(

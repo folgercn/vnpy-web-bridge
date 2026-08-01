@@ -75,7 +75,6 @@ class PreverifiedTickHorizonWorker:
         """Durably register every virtual intent after a complete type join."""
 
         with self._lock:
-            self._require_unblocked()
             try:
                 plan = self._revalidate_model(
                     preverified_plan,
@@ -154,6 +153,7 @@ class PreverifiedTickHorizonWorker:
             self._worker_state = (
                 "PREVERIFIED_INPUTS_DURABLE_CODE_ONLY_NOT_ACTIVATED"
             )
+            self._blocked = False
             self._last_error = None
             return {
                 "schema_version": (
@@ -283,7 +283,11 @@ class PreverifiedTickHorizonWorker:
 
     def status(self) -> dict[str, Any]:
         with self._lock:
-            return self._status_locked()
+            try:
+                return self._status_locked()
+            except Exception as exc:
+                self._block(exc)
+                return self._blocked_status_locked()
 
     def _seal_all_ready_locked(self) -> int:
         state = self._sidecar.recover()
@@ -337,6 +341,33 @@ class PreverifiedTickHorizonWorker:
             "snapshot_record_count": len(state.snapshots),
             "evidence_record_count": len(state.evidence),
             "completion_counts": completion_counts,
+            "horizon_schedule_ms": [250, 1_000, 5_000, 30_000, 60_000],
+            "input_contract": (
+                "CALLER_PREVERIFIED_STRONG_TYPES_ONLY_NO_SIGNATURE_AUTHORITY"
+            ),
+            "tick_subscription_built": False,
+            "settings_or_startup_bound": False,
+            "external_repository_bound": False,
+            "runtime_active": False,
+            "execution_quality_implemented": False,
+            "orders_sent": 0,
+            "positions_modified": 0,
+            **_FALSE_AUTHORITY,
+        }
+
+    def _blocked_status_locked(self) -> dict[str, Any]:
+        return {
+            "schema_version": (
+                "commodity_c_fast_execution_quality_horizon_worker_status_v1"
+            ),
+            "worker_state": "BLOCKED_FAIL_CLOSED",
+            "blocked_fail_closed": True,
+            "last_error": self._last_error,
+            "registered_intent_count": None,
+            "accepted_exact_contracts": [],
+            "snapshot_record_count": None,
+            "evidence_record_count": None,
+            "completion_counts": None,
             "horizon_schedule_ms": [250, 1_000, 5_000, 30_000, 60_000],
             "input_contract": (
                 "CALLER_PREVERIFIED_STRONG_TYPES_ONLY_NO_SIGNATURE_AUTHORITY"

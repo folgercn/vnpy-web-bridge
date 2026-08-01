@@ -67,7 +67,8 @@ decision, 250ms, 1s, 5s, 30s, 60s
 `recover()` 会先完整恢复 create-only journal，拒绝缺 durable anchor 的半注册
 intent，再用已经持久化的 watermark 补封 crash 前已 ready 的 horizon。已经存在的
 evidence 不会重复追加。输入或 sidecar 错误会把 worker 置为
-`BLOCKED_FAIL_CLOSED`；继续接收输入前必须显式 `recover()`。
+`BLOCKED_FAIL_CLOSED`；继续接收 Tick 前必须显式 `recover()`，或用同一完整
+preverified plan/policy/spec 再次调用 `register_preverified_plan`。
 
 多 intent plan 逐 intent 做 create-only durable append，不伪装成跨文件事务。若
 第二个及后续 intent 在 I/O/进程故障中断，已经完成的 intent 保持不可变；调用方
@@ -75,6 +76,12 @@ evidence 不会重复追加。输入或 sidecar 错误会把 worker 置为
 `register_preverified_plan`。既有 intent/anchor 会幂等复用，缺失 intent 才继续创建。
 若故障留下“已有 intent 但无 anchor”，单独 `recover()` 会明确失败关闭；必须由同一
 preverified plan 重放补齐，禁止 worker 从不完整 journal 猜测上游签名事实。
+`register_preverified_plan` 是 blocked 状态下唯一允许的非 Tick 输入入口，因为它会
+从头重验完整强类型集合；成功补齐全部 intent/anchor 后才解除 blocked。普通
+`accept_preverified_tick` 在此期间始终拒绝。
+
+`status()` 如果无法恢复 journal，不会沿用旧计数或把状态报成健康；它返回
+`BLOCKED_FAIL_CLOSED`，计数字段为 `null`，全部 authority 仍为 false。
 
 ## 尚未实现、不得宣称
 
