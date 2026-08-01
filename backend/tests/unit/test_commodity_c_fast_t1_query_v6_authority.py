@@ -644,6 +644,24 @@ def test_verifier_has_no_dsn_network_consume_or_launch_capability() -> None:
     assert "def launch" not in source
 
 
+def test_signer_does_not_require_verifier_only_signed_release(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(sys, "argv", ["query-v6-sign", "--help"])
+    with pytest.raises(SystemExit) as exc_info:
+        signer.parse_args()
+    assert exc_info.value.code == 0
+    help_text = capsys.readouterr().out
+    assert "--signed-release" not in help_text
+
+    monkeypatch.setattr(sys, "argv", ["query-v6-verify", "--help"])
+    with pytest.raises(SystemExit) as exc_info:
+        subject.parse_args()
+    assert exc_info.value.code == 0
+    assert "--signed-release" in capsys.readouterr().out
+
+
 def test_pending_templates_are_not_signed_contracts() -> None:
     release_template = json.loads(
         (

@@ -987,7 +987,6 @@ def verify_offline_foundation(
 
 
 def _common_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--signed-release", type=Path, required=True)
     parser.add_argument("--release-keyring", type=Path, required=True)
     parser.add_argument("--expected-release-keyring-sha256", required=True)
     parser.add_argument("--signed-provenance", type=Path, required=True)
@@ -1150,6 +1149,7 @@ def _paths(args: argparse.Namespace) -> OfflineVerificationPaths:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--signed-release", type=Path, required=True)
     _common_arguments(parser)
     return parser.parse_args()
 

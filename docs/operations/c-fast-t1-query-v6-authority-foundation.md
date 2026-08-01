@@ -75,7 +75,9 @@ python scripts/commodity_c_fast_t1_query_v6_authority.py --help
 
 signer 只 create-only 写入一个 `0600` signed JSON。verifier 只读输入并打印
 `FOUNDATION_ONLY_NO_QUERY_AUTHORITY`；它没有 `--dsn-file`、consume、network
-或 launch 参数。任何 PENDING、schema downgrade、raw/canonical splice、
+或 launch 参数。`--signed-release` 只属于 verifier；signer 只接收 unsigned
+`--input` 和 create-only `--output`，不要求尚未生成的 signed release。任何
+PENDING、schema downgrade、raw/canonical splice、
 十品种缺失、roll window 缺失、四组 session window 反转/重叠/越过 audit
 window/偏离签署 trading day、custody 不一致、endpoint 不一致、runtime pin
 rotation、source/schema hash rotation、签名错误、跨域 key reuse、TTL/attempt
