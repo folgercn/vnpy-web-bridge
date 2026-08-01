@@ -40,7 +40,10 @@ from app.services.commodity_c_fast_shadow_common import (
     sha256_json,
     unsigned_snapshot_payload,
 )
-from app.services.commodity_simnow import CommoditySimNowService
+from app.services.commodity_simnow import (
+    PRODUCT_SPECS,
+    CommoditySimNowService,
+)
 from app.services.vnpy_rpc_service import RpcTimeoutError
 from pydantic import ValidationError
 from test_commodity_c_fast_shadow import (
@@ -275,6 +278,38 @@ class ClockChangeAfterFirstChildTrade(FakeTrade):
         if len(self.requests) == 1:
             assert self.service is not None
             self.service.clock = lambda: self.next_now
+            for tick in self.service.tick_store.ticks.values():
+                tick["received_at"] = self.next_now.isoformat()
+        return result
+
+
+class QuoteChangeAfterFirstChildTrade(FakeTrade):
+    def __init__(self, *, invalidate: bool = False) -> None:
+        super().__init__()
+        self.service: CommoditySimNowService | None = None
+        self.next_vt_symbol: str | None = None
+        self.invalidate = invalidate
+        self.next_max_symbol_position: float | None = None
+
+    def send_order(self, request, **kwargs):
+        result = super().send_order(request, **kwargs)
+        if len(self.requests) == 1:
+            assert self.service is not None
+            assert self.next_vt_symbol is not None
+            if self.next_max_symbol_position is not None:
+                self.service.risk.rules[
+                    "max_symbol_position"
+                ] = self.next_max_symbol_position
+            quote = self.service.tick_store.ticks[
+                self.next_vt_symbol
+            ]
+            if self.invalidate:
+                quote["ask_volume_1"] = 0
+                return result
+            product = self.next_vt_symbol.split(".", 1)[0][:-4]
+            tick = float(PRODUCT_SPECS[product]["price_tick"])
+            quote["bid_price_1"] += 3 * tick
+            quote["ask_price_1"] += 3 * tick
         return result
 
 
@@ -1635,6 +1670,375 @@ def test_c_fast_each_child_has_final_dispatch_barrier(
         "HALTED_RECONCILE_REQUIRED",
         "SUBMISSION_OUTCOME_UNKNOWN",
     }
+
+
+def test_c_fast_each_child_refreshes_quote_and_risk_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trade = QuoteChangeAfterFirstChildTrade()
+    service, _, _, _ = prepare_c_fast_shakedown(
+        tmp_path, trade=trade
+    )
+    trade.service = service
+    bind_test_execution_permit(
+        service, selected_products=("ag", "al")
+    )
+    preview = service.preview_c_fast_shakedown(
+        ["ag", "al"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    first_order, second_order = preview["plan"]["open_orders"]
+    trade.next_vt_symbol = second_order["vt_symbol"]
+    initial_first_price = service._reprice_order(first_order)[
+        "price"
+    ]
+    initial_price = service._reprice_order(second_order)["price"]
+    reprice = service._reprice_order
+    repriced_references: list[str] = []
+    position_guard = service._verify_phase_symbol_position_limit
+    position_guard_references: list[list[str]] = []
+    exposure_guard = service._verify_realtime_exposures
+    exposure_guard_overrides: list[dict[str, float]] = []
+    persist_active_plan = service._persist_active_plan
+    first_quote_shifted = False
+
+    def tracked_reprice(order, *, passive=False):
+        repriced_references.append(str(order["reference"]))
+        return reprice(order, passive=passive)
+
+    def tracked_position_guard(
+        orders, positions, *, acknowledged_orders=None
+    ) -> None:
+        position_guard_references.append(
+            [str(order["reference"]) for order in orders]
+        )
+        position_guard(
+            orders,
+            positions,
+            acknowledged_orders=acknowledged_orders,
+        )
+
+    def tracked_exposure_guard(*args, **kwargs):
+        exposure_guard_overrides.append(
+            dict(kwargs.get("price_overrides") or {})
+        )
+        return exposure_guard(*args, **kwargs)
+
+    def persist_then_shift_first_quote() -> None:
+        nonlocal first_quote_shifted
+        persist_active_plan()
+        if (
+            not first_quote_shifted
+            and service.current_plan is not None
+            and service.current_plan.get("status")
+            == "SUBMITTING_OPEN"
+        ):
+            quote = service.tick_store.ticks[
+                first_order["vt_symbol"]
+            ]
+            tick = float(
+                PRODUCT_SPECS[first_order["product"]][
+                    "price_tick"
+                ]
+            )
+            quote["bid_price_1"] += 2 * tick
+            quote["ask_price_1"] += 2 * tick
+            first_quote_shifted = True
+
+    monkeypatch.setattr(service, "_reprice_order", tracked_reprice)
+    monkeypatch.setattr(
+        service,
+        "_verify_phase_symbol_position_limit",
+        tracked_position_guard,
+    )
+    monkeypatch.setattr(
+        service,
+        "_verify_realtime_exposures",
+        tracked_exposure_guard,
+    )
+    monkeypatch.setattr(
+        service,
+        "_persist_active_plan",
+        persist_then_shift_first_quote,
+    )
+
+    service.start_c_fast_shakedown(
+        preview["plan_hash"],
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+
+    assert [request.reference for request in trade.requests] == [
+        order["reference"]
+        for order in preview["plan"]["open_orders"]
+    ]
+    expected_references = [
+        str(order["reference"])
+        for order in preview["plan"]["open_orders"]
+    ]
+    assert repriced_references == (
+        expected_references + expected_references
+    )
+    assert position_guard_references == [
+        expected_references,
+        expected_references,
+        expected_references[1:],
+    ]
+    assert exposure_guard_overrides[-2:] == [
+        {order["vt_symbol"]: trade.requests[index].price}
+        for index, order in enumerate(
+            preview["plan"]["open_orders"]
+        )
+    ]
+    refreshed_first = reprice(first_order)
+    assert trade.requests[0].price == refreshed_first["price"]
+    assert trade.requests[0].price != initial_first_price
+    second_request = trade.requests[1]
+    refreshed = reprice(second_order)
+    assert second_request.price == refreshed["price"]
+    assert second_request.price != initial_price
+    assert service.current_plan is not None
+    intent = service.current_plan["send_intents"]["open"][1]
+    assert intent["dispatch_quote"] == refreshed["dispatch_quote"]
+    assert intent["child_dispatch_guard"] == {
+        "child_index": 2,
+        "remaining_phase_order_count": len(
+            preview["plan"]["open_orders"]
+        )
+        - 1,
+        "position_snapshot_sha256": hashlib.sha256(
+            b"{}"
+        ).hexdigest(),
+        "exposure_snapshot_hash": intent[
+            "child_dispatch_guard"
+        ]["exposure_snapshot_hash"],
+        "verified_at_utc": NOW.isoformat(),
+    }
+    assert intent["child_dispatch_guard"][
+        "exposure_snapshot_hash"
+    ]
+
+
+def test_c_fast_child_quote_failure_does_not_relabel_prior_ack(
+    tmp_path: Path,
+) -> None:
+    trade = QuoteChangeAfterFirstChildTrade(invalidate=True)
+    service, _, _, _ = prepare_c_fast_shakedown(
+        tmp_path, trade=trade
+    )
+    trade.service = service
+    bind_test_execution_permit(
+        service, selected_products=("ag", "al")
+    )
+    preview = service.preview_c_fast_shakedown(
+        ["ag", "al"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    trade.next_vt_symbol = preview["plan"]["open_orders"][1][
+        "vt_symbol"
+    ]
+
+    with pytest.raises(CommoditySimNowStateError):
+        service.start_c_fast_shakedown(
+            preview["plan_hash"],
+            operator="admin",
+            role="admin",
+            source_ip=None,
+        )
+
+    assert len(trade.requests) == 1
+    assert service.current_plan is not None
+    intents = service.current_plan["send_intents"]["open"]
+    assert len(intents) == 1
+    assert intents[0]["intent_status"] == "ACKNOWLEDGED"
+    assert "error_type" not in intents[0]
+
+
+def test_c_fast_child_risk_counts_ack_when_callback_is_delayed(
+    tmp_path: Path,
+) -> None:
+    service, rpc, _, _ = prepare_c_fast_shakedown(tmp_path)
+    bind_test_execution_permit(
+        service, selected_products=("ag",)
+    )
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    template = preview["plan"]["open_orders"][0]
+    current = {
+        **template,
+        "reference": "current-child",
+        "volume": 3,
+    }
+    acknowledged = {
+        **template,
+        "reference": "ack-child",
+        "vt_orderid": "CTP.ack-child",
+        "orderid": "ack-child",
+        "volume": 4,
+        "intent_status": "ACKNOWLEDGED",
+    }
+    service.risk.rules["max_symbol_position"] = 6
+    rpc.orders = []
+
+    with pytest.raises(CommoditySimNowSafetyError) as exc_info:
+        service._verify_phase_symbol_position_limit(
+            [current],
+            {},
+            acknowledged_orders=[acknowledged],
+        )
+
+    violation = exc_info.value.detail["violations"][0]
+    assert violation["active_open_volume"] == 0
+    assert violation["session_ack_pending_open_volume"] == 4
+    assert violation["phase_open_volume"] == 3
+    assert violation["projected_position"] == 7
+
+
+def test_c_fast_next_child_stops_when_rule_drops_below_unseen_ack(
+    tmp_path: Path,
+) -> None:
+    trade = QuoteChangeAfterFirstChildTrade()
+    service, _, _, _ = prepare_c_fast_shakedown(
+        tmp_path, trade=trade
+    )
+    trade.service = service
+    bind_test_execution_permit(
+        service, selected_products=("bu", "cu")
+    )
+    preview = service.preview_c_fast_shakedown(
+        ["bu", "cu"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    first, second = preview["plan"]["open_orders"]
+    assert first["volume"] > second["volume"]
+    trade.next_vt_symbol = second["vt_symbol"]
+    trade.next_max_symbol_position = first["volume"] - 1
+
+    with pytest.raises(CommoditySimNowStateError):
+        service.start_c_fast_shakedown(
+            preview["plan_hash"],
+            operator="admin",
+            role="admin",
+            source_ip=None,
+        )
+
+    assert len(trade.requests) == 1
+    assert service.rpc.orders == []
+    assert service.current_plan is not None
+    intents = service.current_plan["send_intents"]["open"]
+    assert len(intents) == 1
+    assert intents[0]["intent_status"] == "ACKNOWLEDGED"
+
+
+@pytest.mark.parametrize("identity", ["reference", "order_id"])
+def test_c_fast_child_risk_deduplicates_ack_from_rpc_active(
+    tmp_path: Path,
+    identity: str,
+) -> None:
+    service, rpc, _, _ = prepare_c_fast_shakedown(tmp_path)
+    bind_test_execution_permit(
+        service, selected_products=("ag",)
+    )
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    template = preview["plan"]["open_orders"][0]
+    current = {
+        **template,
+        "reference": "current-child",
+        "volume": 3,
+    }
+    acknowledged = {
+        **template,
+        "reference": "ack-child",
+        "vt_orderid": "CTP.ack-child",
+        "orderid": "ack-child",
+        "volume": 4,
+        "intent_status": "ACKNOWLEDGED",
+    }
+    active = {
+        **acknowledged,
+        "reference": (
+            "ack-child" if identity == "reference" else ""
+        ),
+        "vt_orderid": (
+            "CTP.other" if identity == "reference"
+            else "CTP.ack-child"
+        ),
+        "orderid": (
+            "other" if identity == "reference" else "ack-child"
+        ),
+        "status": "not_traded",
+        "traded": 0,
+    }
+    service.risk.rules["max_symbol_position"] = 6
+    rpc.orders = [active]
+
+    with pytest.raises(CommoditySimNowSafetyError) as exc_info:
+        service._verify_phase_symbol_position_limit(
+            [current],
+            {},
+            acknowledged_orders=[acknowledged],
+        )
+
+    violation = exc_info.value.detail["violations"][0]
+    assert violation["active_open_volume"] == 0
+    assert violation["session_ack_pending_open_volume"] == 4
+    assert violation["projected_position"] == 7
+
+
+@pytest.mark.parametrize(
+    ("status", "traded"),
+    [("part_traded", 2), ("all_traded", 4)],
+)
+def test_c_fast_child_risk_is_conservative_before_position_callback(
+    tmp_path: Path,
+    status: str,
+    traded: int,
+) -> None:
+    service, rpc, _, _ = prepare_c_fast_shakedown(tmp_path)
+    bind_test_execution_permit(
+        service, selected_products=("ag",)
+    )
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    template = preview["plan"]["open_orders"][0]
+    current = {
+        **template,
+        "reference": "current-child",
+        "volume": 3,
+    }
+    acknowledged = {
+        **template,
+        "reference": "ack-child",
+        "vt_orderid": "CTP.ack-child",
+        "orderid": "ack-child",
+        "volume": 4,
+        "intent_status": "ACKNOWLEDGED",
+    }
+    rpc.orders = [
+        {
+            **acknowledged,
+            "status": status,
+            "traded": traded,
+        }
+    ]
+    service.risk.rules["max_symbol_position"] = 6
+
+    with pytest.raises(CommoditySimNowSafetyError) as exc_info:
+        service._verify_phase_symbol_position_limit(
+            [current],
+            {},
+            acknowledged_orders=[acknowledged],
+        )
+
+    violation = exc_info.value.detail["violations"][0]
+    assert violation["current_position"] == 0
+    assert violation["active_open_volume"] == 0
+    assert violation["session_ack_pending_open_volume"] == 4
+    assert violation["phase_open_volume"] == 3
+    assert violation["projected_position"] == 7
 
 
 def test_c_fast_stop_preempts_blocked_child_loop(

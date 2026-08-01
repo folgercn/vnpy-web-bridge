@@ -235,9 +235,29 @@ connection generation 与 watermark-bound 全事实屏障；新增外部 order/t
 active-only。stop、disable、shutdown 和 emergency 可在 child 间抢占批量派单。
 抢占使用单调 epoch：已排队的 stop/disable/shutdown 不能被随后取得锁的
 start/enable 清除；只有停机完成后的新显式授权才能开始新的派单代次。
+阶段级 preflight 报价只用于整批 fail-fast，不作为派单价。每个 child（包括
+child 1）在建立 intent 前独立重新读取 L1、计算保护价，并按最新持仓、活动委托和
+全组合实时价格重新执行单合约持仓与产品/板块/gross/net 敞口硬上限；intent 的
+`dispatch_quote` 和 `child_dispatch_guard` 保存该次报价、持仓 hash 与敞口 hash。
+单合约累计上限还会计入本 session 已 ACK、尚未被持仓证明的 open exposure；
+callback 按 reference/order id 与 RPC active 去重，不重复加入 active raw volume。
+缺失或 active/part-traded callback 保守计入完整 ACK volume；终态 callback 至少
+计入其 reported traded volume，`all_traded` 至少计入完整 ACK。持仓若已先更新，
+允许宁可双算并 fail closed，避免 order/trade callback 先到时漏掉已成交 exposure。
+全局 risk disable 在等待 session 串行锁前就推进 dispatch epoch，因此已经通过
+普通风控但正在等待 RPC call lock 的 child 也会被最终 guard 拦截，不能越过撤权。
+RPC lock 内的最终 guard 与非幂等 send 会继续持有同一个 dispatch 线性化锁；abort
+若先取得锁则该 child fail closed，send 若先取得锁则完成当前调用后 abort 才生效，
+不会出现 guard 已通过、abort 已生效、RPC send 随后才开始的交错。
 每个 `PENDING_SEND` intent 必须先落盘，再执行紧邻 `send_order` 的最终事实
 guard；生产 `TradeService` 会先完成审计、风控和请求构造，再在同一个 RPC
 call lock 内执行最终 guard 与非幂等 send，中间不得再有持久化或 RPC I/O。
+同一线性化锁内还会只读复验 intent 绑定的 dispatch quote：时间戳、best、L1
+volume、spread、价格推导必须仍一致且未超过 quote age。intent 落盘后盘口更新或
+锁等待导致报价过期时直接 fail closed，不改写原 PENDING intent 的报价证据。
+受控集成测试直接组合生产 `TradeService`、`RiskService` 与 `VnpyRpcService`，
+验证 lock/disable 竞态下 RPC client 收不到委托；RPC client state error 会重建
+连接，但非幂等 `send_order` 固定禁止重试，首单 intent 保持 outcome unknown。
 历史 intent 不可覆盖或重放；恢复和
 重新授权也必须使用完整订单历史。相同 gateway/trade-id 只有 canonical payload
 完全一致时才能幂等去重；terminal commit 会用同一份 raw orders/trades
@@ -254,6 +274,7 @@ fail-closed，后端和 worker 仍会启动，RPC 恢复后自动重试 no-op �
 ```bash
 PYTHONPATH=backend python -m pytest -q \
   backend/tests/unit/test_commodity_c_fast_simnow.py \
+  backend/tests/unit/test_commodity_c_fast_trade_rpc_integration.py \
   backend/tests/unit/test_commodity_c_fast_shadow.py \
   backend/tests/unit/test_commodity_simnow.py \
   backend/tests/unit/test_commodity_simnow_api.py

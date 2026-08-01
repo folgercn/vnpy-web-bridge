@@ -69,6 +69,7 @@ class TradeService:
         operator: str = "anonymous",
         pre_rpc_guard: Callable[[], Any] | None = None,
         max_order_volume_override: float | None = None,
+        send_linearization_lock: Any | None = None,
     ) -> dict[str, Any]:
         request_data = payload.model_dump()
         self.audit.record(action="order_request", request=request_data, operator=operator, source_ip=source_ip)
@@ -95,6 +96,7 @@ class TradeService:
                     order_request,
                     gateway_name,
                     pre_rpc_guard,
+                    linearization_lock=send_linearization_lock,
                 )
             result = {"vt_orderid": vt_orderid, "accepted": True}
             self.audit.record(
