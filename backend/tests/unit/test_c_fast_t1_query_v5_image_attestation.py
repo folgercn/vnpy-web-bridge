@@ -112,6 +112,9 @@ def isolated_runtime_fixture(
         installed_site_packages / "typing_extensions.py",
         dependency_root / "typing_extensions.py",
     )
+    for copied in dependency_root.rglob("*"):
+        copied.chmod(0o755 if copied.is_dir() else 0o644)
+    dependency_root.chmod(0o755)
     source_identity = runtime_launcher.directory_identity_sha256(source_root)
     source_manifest, _retained = runtime_launcher.scan_source_closure(source_root)
     dependency_identity = runtime_launcher.directory_identity_sha256(dependency_root)
