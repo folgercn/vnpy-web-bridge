@@ -85,14 +85,16 @@ def test_source_bundle_is_deterministic_and_code_only(
     assert manifest["authority_granted"] is False
 
 
-def _runtime_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
+def _runtime_fixture(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
     source_root = tmp_path / "release"
     scripts = source_root / "scripts"
     scripts.mkdir(parents=True)
     copied_launcher = scripts / "commodity_c_fast_t1_query_v5_launcher.py"
     copied_launcher.write_bytes(Path(launcher.__file__).read_bytes())
     copied_launcher.chmod(0o444)
-    interpreter = Path(sys.executable).resolve()
+    interpreter = tmp_path / "private-python"
+    interpreter.write_bytes(Path(sys.executable).resolve().read_bytes())
+    interpreter.chmod(0o555)
     root_identity, closure_sha256, _closure = launcher.source_closure(
         source_root,
         require_root_owned=False,
@@ -113,12 +115,11 @@ def _runtime_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
     pin_path = tmp_path / "pin-set.manifest.json"
     pin_path.write_bytes(launcher.canonical_json(pins))
     pin_path.chmod(0o444)
-    return source_root, copied_launcher, pin_path
+    return source_root, copied_launcher, pin_path, interpreter
 
 
-def test_launcher_binds_current_interpreter_and_stable_closure(tmp_path: Path) -> None:
-    source_root, copied_launcher, pin_path = _runtime_fixture(tmp_path)
-    interpreter = Path(sys.executable).resolve()
+def test_launcher_binds_pinned_interpreter_and_stable_closure(tmp_path: Path) -> None:
+    source_root, copied_launcher, pin_path, interpreter = _runtime_fixture(tmp_path)
     digest = "sha256:" + "b" * 64
     result = launcher._inspect_runtime_identity(
         digest,
@@ -140,8 +141,7 @@ def test_launcher_binds_current_interpreter_and_stable_closure(tmp_path: Path) -
 
 
 def test_launcher_rejects_alternate_reported_interpreter(tmp_path: Path) -> None:
-    source_root, copied_launcher, pin_path = _runtime_fixture(tmp_path)
-    interpreter = Path(sys.executable).resolve()
+    source_root, copied_launcher, pin_path, interpreter = _runtime_fixture(tmp_path)
     alternate = tmp_path / "alternate-python"
     alternate.write_bytes(interpreter.read_bytes())
     alternate.chmod(0o555)
@@ -159,8 +159,7 @@ def test_launcher_rejects_alternate_reported_interpreter(tmp_path: Path) -> None
 
 
 def test_launcher_rejects_loaded_executable_path_replacement(tmp_path: Path) -> None:
-    source_root, copied_launcher, pin_path = _runtime_fixture(tmp_path)
-    loaded = Path(sys.executable).resolve()
+    source_root, copied_launcher, pin_path, loaded = _runtime_fixture(tmp_path)
     pinned = tmp_path / "replacement-python"
     pinned.write_bytes(loaded.read_bytes())
     pinned.chmod(0o555)
@@ -190,8 +189,7 @@ def test_launcher_rejects_loaded_executable_bytes_mismatch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    source_root, copied_launcher, pin_path = _runtime_fixture(tmp_path)
-    interpreter = Path(sys.executable).resolve()
+    source_root, copied_launcher, pin_path, interpreter = _runtime_fixture(tmp_path)
     interpreter_info = interpreter.lstat()
     monkeypatch.setattr(
         launcher,
@@ -218,7 +216,7 @@ def test_source_closure_fails_closed_on_walk_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    source_root, _copied_launcher, _pin_path = _runtime_fixture(tmp_path)
+    source_root, _copied_launcher, _pin_path, _interpreter = _runtime_fixture(tmp_path)
 
     def failed_walk(
         *_args: object, onerror: object = None, **_kwargs: object
@@ -239,7 +237,7 @@ def test_source_closure_rejects_non_enumerable_directory(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    source_root, _copied_launcher, _pin_path = _runtime_fixture(tmp_path)
+    source_root, _copied_launcher, _pin_path, _interpreter = _runtime_fixture(tmp_path)
     hidden = source_root / "hidden"
     hidden.mkdir()
     (hidden / "hidden.py").write_text("raise RuntimeError\n", encoding="utf-8")
@@ -271,6 +269,36 @@ def test_public_verifier_has_no_injectable_trust_root() -> None:
             "sha256:" + "b" * 64,
             loaded_executable_path=Path(sys.executable),  # type: ignore[call-arg]
         )
+
+
+def test_public_verifier_uses_fixed_production_trust_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    digest = "sha256:" + "b" * 64
+    captured: dict[str, object] = {}
+
+    def inspect(runtime_image_digest: str, **kwargs: object) -> dict[str, object]:
+        captured["runtime_image_digest"] = runtime_image_digest
+        captured.update(kwargs)
+        return {"status": launcher.INSPECTION_STATUS}
+
+    monkeypatch.setattr(launcher, "_require_isolated_startup", lambda: None)
+    monkeypatch.setattr(launcher, "_inspect_runtime_identity", inspect)
+
+    result = launcher.verify_runtime_identity(digest)
+
+    assert result["status"] == launcher.STATUS
+    assert result["isolated_flags_verified"] is True
+    assert captured == {
+        "runtime_image_digest": digest,
+        "pin_manifest_path": launcher.PIN_MANIFEST_PATH,
+        "launcher_path": launcher.LAUNCHER_PATH,
+        "interpreter_path": launcher.INTERPRETER_PATH,
+        "source_root": launcher.SOURCE_ROOT,
+        "reported_executable_path": None,
+        "loaded_executable_path": None,
+        "require_root_owned": True,
+    }
 
 
 def test_private_inspection_allows_root_owned_sticky_shared_ancestor() -> None:
