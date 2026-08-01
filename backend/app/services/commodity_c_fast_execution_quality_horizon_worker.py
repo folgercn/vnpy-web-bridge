@@ -119,6 +119,8 @@ class PreverifiedTickHorizonWorker:
                     raise CFastExecutionQualityHorizonWorkerError(
                         "PREVERIFIED_CONTRACT_SPEC_SET_MISMATCH"
                     )
+                existing = self._sidecar.recover()
+                self._require_orphan_recovery_matches_plan(existing, plan)
 
                 anchors: dict[str, str] = {}
                 for intent in plan.intents:
@@ -312,6 +314,7 @@ class PreverifiedTickHorizonWorker:
 
     def _status_locked(self) -> dict[str, Any]:
         state = self._sidecar.recover()
+        self._require_complete_anchors(state)
         accepted_contracts = sorted(
             {
                 str(record.payload["intent"]["exact_contract"])
@@ -358,6 +361,24 @@ class PreverifiedTickHorizonWorker:
             "positions_modified": 0,
             **_FALSE_AUTHORITY,
         }
+
+    @staticmethod
+    def _require_orphan_recovery_matches_plan(
+        state: SidecarState,
+        plan: CFastVirtualIntentPlanDTO,
+    ) -> None:
+        orphan_ids = set(state.intents) - set(state.anchors)
+        if not orphan_ids:
+            return
+        incoming_intent_ids = {intent.intent_id for intent in plan.intents}
+        if not orphan_ids.issubset(incoming_intent_ids) or any(
+            state.intents[intent_id].payload.get("preverified_plan_hash")
+            != plan.plan_hash
+            for intent_id in orphan_ids
+        ):
+            raise CFastExecutionQualityHorizonWorkerError(
+                "ORPHAN_INTENT_PLAN_RECOVERY_MISMATCH"
+            )
 
     def _blocked_status_locked(self) -> dict[str, Any]:
         return {

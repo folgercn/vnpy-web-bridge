@@ -292,6 +292,69 @@ def test_orphan_intent_anchor_is_repaired_by_same_full_plan(
     assert len(repaired.records) == 2
 
 
+def test_orphan_recovery_with_different_plan_is_zero_write(
+    tmp_path: Path,
+) -> None:
+    observations = iter((ANCHOR, ANCHOR - timedelta(seconds=1)))
+    repository = sidecar(tmp_path)
+    repository.clock = lambda: next(observations)
+    subject = PreverifiedTickHorizonWorker(repository)
+    with pytest.raises(
+        CFastExecutionQualityHorizonWorkerError,
+        match="DURABLE_INTENT_CLOCK_REGRESSION",
+    ):
+        subject.register_preverified_plan(**registration_inputs())
+    before = {
+        path.name: path.read_bytes()
+        for path in repository.journal.root.iterdir()
+    }
+    assert len(repository.recover().records) == 1
+
+    repository.clock = lambda: ANCHOR + timedelta(seconds=1)
+    with pytest.raises(
+        CFastExecutionQualityHorizonWorkerError,
+        match="ORPHAN_INTENT_PLAN_RECOVERY_MISMATCH",
+    ):
+        subject.register_preverified_plan(**two_intent_registration_inputs())
+
+    after = {
+        path.name: path.read_bytes()
+        for path in repository.journal.root.iterdir()
+    }
+    assert after == before
+    recovered = repository.recover()
+    assert len(recovered.records) == 1
+    assert len(recovered.intents) == 1
+    assert recovered.anchors == {}
+
+
+def test_restarted_worker_status_first_blocks_orphan_journal(
+    tmp_path: Path,
+) -> None:
+    observations = iter((ANCHOR, ANCHOR - timedelta(seconds=1)))
+    repository = sidecar(tmp_path)
+    repository.clock = lambda: next(observations)
+    first = PreverifiedTickHorizonWorker(repository)
+    with pytest.raises(CFastExecutionQualityHorizonWorkerError):
+        first.register_preverified_plan(**registration_inputs())
+    assert len(repository.recover().intents) == 1
+    assert repository.recover().anchors == {}
+
+    restarted = PreverifiedTickHorizonWorker(
+        OfflineExecutionQualitySidecar(
+            CreateOnlyExecutionQualityJournal(repository.journal.root),
+            clock=lambda: ANCHOR + timedelta(seconds=1),
+        )
+    )
+    status = restarted.status()
+
+    assert status["worker_state"] == "BLOCKED_FAIL_CLOSED"
+    assert status["blocked_fail_closed"] is True
+    assert status["last_error"] == "DURABLE_INTENT_ANCHOR_MISSING"
+    assert status["registered_intent_count"] is None
+    assert status["accepted_exact_contracts"] == []
+
+
 def test_restarted_worker_rejects_tick_when_any_intent_is_orphaned(
     tmp_path: Path,
 ) -> None:
@@ -332,7 +395,7 @@ def test_restarted_worker_rejects_tick_when_any_intent_is_orphaned(
     assert recovered.evidence == {}
     status = restarted.status()
     assert status["blocked_fail_closed"] is True
-    assert status["registered_intent_count"] == 1
+    assert status["registered_intent_count"] is None
 
 
 def test_status_reports_journal_failure_as_fail_closed(

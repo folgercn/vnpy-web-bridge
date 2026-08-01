@@ -81,9 +81,16 @@ preverified plan 重放补齐，禁止 worker 从不完整 journal 猜测上游�
 `accept_preverified_tick` 在此期间始终拒绝。新建 worker 也不会只筛选已有 anchor
 的 intent 后继续：每次 Tick 写入前都要求 journal 的 intent ID 集合与 anchor ID
 集合完全相等；任一 orphan intent 会全局 fail closed，且该 Tick 不得落盘。
+完整 plan recovery 在任何 append 前先恢复 journal。若存在 orphan，每条 orphan
+record 的 `preverified_plan_hash` 必须等于 incoming plan 的 exact `plan_hash`，且
+incoming plan 必须覆盖全部 orphan intent ID；否则
+`ORPHAN_INTENT_PLAN_RECOVERY_MISMATCH` 零写入失败，禁止用另一个 plan 扩大 journal
+中的 accepted exact-contract/intents 集合。
 
 `status()` 如果无法恢复 journal，不会沿用旧计数或把状态报成健康；它返回
-`BLOCKED_FAIL_CLOSED`，计数字段为 `null`，全部 authority 仍为 false。
+`BLOCKED_FAIL_CLOSED`，计数字段为 `null`，全部 authority 仍为 false。status 在
+计算计数前也执行完整 anchor 集合检查，因此新建 worker 首次 status 不会把 orphan
+journal 报成 `blocked=false`。
 
 ## 尚未实现、不得宣称
 
