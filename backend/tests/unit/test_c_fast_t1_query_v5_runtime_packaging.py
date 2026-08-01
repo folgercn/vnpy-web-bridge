@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import inspect
 import os
 from pathlib import Path
 import subprocess
@@ -258,6 +259,16 @@ def test_source_closure_rejects_non_enumerable_directory(
 def test_imported_verify_rejects_nonisolated_process() -> None:
     with pytest.raises(SystemExit, match="-I -S -s -E -B"):
         launcher.verify_runtime_identity("sha256:" + "b" * 64)
+
+
+def test_public_verifier_has_no_injectable_trust_root() -> None:
+    signature = inspect.signature(launcher.verify_runtime_identity)
+    assert tuple(signature.parameters) == ("runtime_image_digest",)
+    with pytest.raises(TypeError, match="unexpected keyword argument"):
+        launcher.verify_runtime_identity(
+            "sha256:" + "b" * 64,
+            loaded_executable_path=Path(sys.executable),  # type: ignore[call-arg]
+        )
 
 
 def test_launcher_rejects_nonisolated_direct_execution() -> None:

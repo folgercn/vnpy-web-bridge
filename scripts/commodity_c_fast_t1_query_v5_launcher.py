@@ -685,25 +685,17 @@ def _inspect_runtime_identity(
 
 def verify_runtime_identity(
     runtime_image_digest: str,
-    *,
-    pin_manifest_path: Path = PIN_MANIFEST_PATH,
-    launcher_path: Path = LAUNCHER_PATH,
-    interpreter_path: Path = INTERPRETER_PATH,
-    source_root: Path = SOURCE_ROOT,
-    reported_executable_path: Path | None = None,
-    loaded_executable_path: Path | None = None,
-    require_root_owned: bool = True,
 ) -> dict[str, Any]:
     _require_isolated_startup()
     inspected = _inspect_runtime_identity(
         runtime_image_digest,
-        pin_manifest_path=pin_manifest_path,
-        launcher_path=launcher_path,
-        interpreter_path=interpreter_path,
-        source_root=source_root,
-        reported_executable_path=reported_executable_path,
-        loaded_executable_path=loaded_executable_path,
-        require_root_owned=require_root_owned,
+        pin_manifest_path=PIN_MANIFEST_PATH,
+        launcher_path=LAUNCHER_PATH,
+        interpreter_path=INTERPRETER_PATH,
+        source_root=SOURCE_ROOT,
+        reported_executable_path=None,
+        loaded_executable_path=None,
+        require_root_owned=True,
     )
     return {
         **inspected,
