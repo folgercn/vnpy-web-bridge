@@ -15,7 +15,7 @@ from collections.abc import Callable
 from datetime import date, datetime, timezone
 from functools import wraps
 from pathlib import Path
-from threading import Lock, RLock, local
+from threading import RLock, local
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -112,6 +112,7 @@ def _serialized(method):
         requested_abort_epoch: int | None = None
         if method.__name__ in {
             "disable",
+            "revoke_all_execution_authority",
             "stop_c_fast_shakedown",
             "stop_position_manager_shakedown",
         }:
@@ -293,7 +294,10 @@ class CommoditySimNowService:
         self._dispatch_abort_requested = False
         self._dispatch_abort_epoch = 0
         self._dispatch_pending_halt_epochs: set[int] = set()
-        self._dispatch_abort_lock = Lock()
+        # The same re-entrant lock linearizes abort-token changes with the
+        # guarded non-idempotent RPC send.  Re-entrancy is required because
+        # the final guard rechecks the epoch while the send path holds it.
+        self._dispatch_abort_lock = RLock()
         self._dispatch_operation_context = local()
         self._completed_state = self._load_completed_state()
         self.current_plan = self._load_active_plan()
@@ -370,6 +374,17 @@ class CommoditySimNowService:
             return bool(
                 self._dispatch_abort_requested
                 or self._dispatch_abort_epoch != epoch
+            )
+
+    def _require_dispatch_epoch_active(self, epoch: int) -> None:
+        risk_status = self.risk.status()
+        if (
+            self._dispatch_aborted(epoch)
+            or not risk_status.get("web_trade_enabled")
+            or risk_status.get("emergency_stopped")
+        ):
+            raise CommoditySimNowSafetyError(
+                "派单已被 stop/disable/emergency 抢占"
             )
 
     @_serialized
@@ -1027,14 +1042,67 @@ class CommoditySimNowService:
         submitted: list[dict[str, Any]] = []
         current_intent: dict[str, Any] | None = None
         try:
-            for order, repriced in zip(orders, repriced_orders, strict=True):
-                if (
-                    self._dispatch_aborted(dispatch_abort_epoch)
-                    or self.risk.status().get("emergency_stopped")
-                ):
-                    raise CommoditySimNowSafetyError(
-                        "派单已被 stop/disable/emergency 抢占"
+            for child_index, order in enumerate(orders):
+                current_intent = None
+                self._require_dispatch_epoch_active(
+                    dispatch_abort_epoch
+                )
+                if plan.get("c_fast_shakedown_session_id"):
+                    self._verify_c_fast_final_dispatch_binding(
+                        plan
                     )
+                # Phase preflight remains fail-before-first-send evidence;
+                # every child, including child 1, gets a separate dispatch
+                # quote after the preceding child (if any) has returned.
+                repriced = self._reprice_order(
+                    order,
+                    passive=use_acceptance_passive_limit,
+                )
+                if use_acceptance_passive_limit:
+                    self._verify_acceptance_passive_limits(
+                        [repriced]
+                    )
+                position_snapshot = self._position_snapshot()
+                acknowledged_orders = [
+                    intent
+                    for intent in plan.get("send_intents", {}).get(
+                        payload.phase, []
+                    )
+                    if intent.get("intent_status") == "ACKNOWLEDGED"
+                ]
+                self._verify_phase_symbol_position_limit(
+                    orders[child_index:],
+                    position_snapshot,
+                    acknowledged_orders=acknowledged_orders,
+                )
+                child_exposure_snapshot = None
+                if payload.phase == "open":
+                    child_exposure_snapshot = (
+                        self._verify_realtime_exposures(
+                            plan["targets"],
+                            plan["expected_final_positions"],
+                            price_overrides={
+                                str(repriced["vt_symbol"]): float(
+                                    repriced["price"]
+                                )
+                            },
+                            sector_map=(
+                                POSITION_MANAGER_SECTOR_MAP_V1
+                                if plan.get("risk_sector_map_id")
+                                == "POSITION_MANAGER_SECTOR_MAP_V1"
+                                else C_FAST_SECTOR_MAP_V1
+                                if plan.get("risk_sector_map_id")
+                                == "C_FAST_SECTOR_MAP_V1"
+                                else None
+                            ),
+                        )
+                    )
+                    plan["latest_exposure_snapshot"] = (
+                        child_exposure_snapshot
+                    )
+                self._require_dispatch_epoch_active(
+                    dispatch_abort_epoch
+                )
                 pre_intent_guard = None
                 if plan.get("c_fast_shakedown_session_id"):
                     pre_intent_guard = (
@@ -1054,6 +1122,25 @@ class CommoditySimNowService:
                     "intent_status": "PENDING_SEND",
                     "intent_at_utc": self.clock().astimezone(timezone.utc).isoformat(),
                     "pre_intent_fact_guard": pre_intent_guard,
+                    "child_dispatch_guard": {
+                        "child_index": child_index + 1,
+                        "remaining_phase_order_count": (
+                            len(orders) - child_index
+                        ),
+                        "position_snapshot_sha256": _sha256_json(
+                            self._signed_positions(position_snapshot)
+                        ),
+                        "exposure_snapshot_hash": (
+                            child_exposure_snapshot.get(
+                                "snapshot_hash"
+                            )
+                            if child_exposure_snapshot is not None
+                            else None
+                        ),
+                        "verified_at_utc": self.clock()
+                        .astimezone(timezone.utc)
+                        .isoformat(),
+                    },
                 }
                 intents = plan.setdefault("send_intents", {}).setdefault(payload.phase, [])
                 existing_intent = next(
@@ -1073,15 +1160,9 @@ class CommoditySimNowService:
                     )
                 current_intent = intent
                 self._persist_active_plan()
-                if (
-                    self._dispatch_aborted(dispatch_abort_epoch)
-                    or self.risk.status().get(
-                        "emergency_stopped"
-                    )
-                ):
-                    raise CommoditySimNowSafetyError(
-                        "派单已被 stop/disable/emergency 抢占"
-                    )
+                self._require_dispatch_epoch_active(
+                    dispatch_abort_epoch
+                )
                 if plan.get("c_fast_shakedown_session_id"):
                     intent["pre_send_fact_guard"] = (
                         self._verify_c_fast_pre_send_fact_guard(
@@ -1105,17 +1186,9 @@ class CommoditySimNowService:
                     confirm=True,
                 )
                 def pre_rpc_guard() -> None:
-                    if (
-                        self._dispatch_aborted(
-                            dispatch_abort_epoch
-                        )
-                        or self.risk.status().get(
-                            "emergency_stopped"
-                        )
-                    ):
-                        raise CommoditySimNowSafetyError(
-                            "派单已被 stop/disable/emergency 抢占"
-                        )
+                    self._require_dispatch_epoch_active(
+                        dispatch_abort_epoch
+                    )
                     if plan.get(
                         "c_fast_shakedown_session_id"
                     ):
@@ -1133,6 +1206,12 @@ class CommoditySimNowService:
                                 ),
                             )
                         )
+                    self._verify_bound_dispatch_quote_current(
+                        intent
+                    )
+                    self._require_dispatch_epoch_active(
+                        dispatch_abort_epoch
+                    )
 
                 result = self.trade.send_order(
                     request,
@@ -1141,6 +1220,9 @@ class CommoditySimNowService:
                     pre_rpc_guard=pre_rpc_guard,
                     max_order_volume_override=(
                         self._c_fast_max_order_volume_override(plan)
+                    ),
+                    send_linearization_lock=(
+                        self._dispatch_abort_lock
                     ),
                 )
                 submitted_row = {
@@ -8763,6 +8845,8 @@ class CommoditySimNowService:
         self,
         orders: list[dict[str, Any]],
         positions: dict[str, dict[str, Any]],
+        *,
+        acknowledged_orders: list[dict[str, Any]] | None = None,
     ) -> None:
         get_rules = getattr(self.risk, "get_rules", None)
         rules = get_rules() if callable(get_rules) else getattr(self.risk, "rules", {})
@@ -8775,15 +8859,44 @@ class CommoditySimNowService:
             if order.get("offset") == "open":
                 vt_symbol = str(order["vt_symbol"])
                 pending[vt_symbol] = pending.get(vt_symbol, 0.0) + float(order["volume"])
-        if not pending:
+        acknowledged_open_orders = [
+            acknowledged
+            for acknowledged in acknowledged_orders or []
+            if acknowledged.get("intent_status")
+            == "ACKNOWLEDGED"
+            and _value(acknowledged.get("offset") or "")
+            .strip()
+            .lower()
+            in {"open", "开"}
+        ]
+        if not pending and not acknowledged_open_orders:
             return
 
         active_open: dict[str, float] = {}
-        for order in self.rpc.get_orders():
+        rpc_orders = self.rpc.get_orders()
+        unique_active_orders: list[dict[str, Any]] = []
+        for order in rpc_orders:
             if _normalize_status(order.get("status")) not in ACTIVE_ORDER_STATUSES:
                 continue
             if _value(order.get("offset") or "").strip().lower() not in {"open", "开"}:
                 continue
+            if any(
+                self._same_dispatch_order_identity(
+                    order, acknowledged
+                )
+                for acknowledged in acknowledged_open_orders
+            ):
+                # Session ACK exposure is accounted conservatively below.
+                # Do not add the same RPC order's raw/remaining volume again.
+                continue
+            if any(
+                self._same_dispatch_order_identity(
+                    order, existing
+                )
+                for existing in unique_active_orders
+            ):
+                continue
+            unique_active_orders.append(order)
             vt_symbol = str(
                 order.get("vt_symbol")
                 or f"{order.get('symbol')}.{_value(order.get('exchange') or '')}"
@@ -8794,17 +8907,79 @@ class CommoditySimNowService:
             )
             active_open[vt_symbol] = active_open.get(vt_symbol, 0.0) + remaining
 
+        session_ack_pending: dict[str, float] = {}
+        for acknowledged in acknowledged_open_orders:
+            matching = [
+                row
+                for row in rpc_orders
+                if self._same_dispatch_order_identity(
+                    acknowledged, row
+                )
+            ]
+            acknowledged_volume = float(acknowledged["volume"])
+            if matching and all(
+                _normalize_status(row.get("status"))
+                in TERMINAL_ORDER_STATUSES
+                for row in matching
+            ):
+                reported_traded = max(
+                    (
+                        float(
+                            row.get("traded")
+                            or row.get("traded_volume")
+                            or 0
+                        )
+                        for row in matching
+                    ),
+                    default=0.0,
+                )
+                if any(
+                    _normalize_status(row.get("status"))
+                    == "all_traded"
+                    for row in matching
+                ):
+                    reported_traded = max(
+                        reported_traded,
+                        acknowledged_volume,
+                    )
+                conservative_exposure = reported_traded
+            else:
+                # Missing/active/unknown callbacks cannot prove that the
+                # position snapshot includes any filled quantity.  Count the
+                # full ACK volume; double-counting a reflected partial fill is
+                # deliberately fail-closed.
+                conservative_exposure = acknowledged_volume
+            vt_symbol = str(acknowledged["vt_symbol"])
+            session_ack_pending[vt_symbol] = (
+                session_ack_pending.get(vt_symbol, 0.0)
+                + conservative_exposure
+            )
+
         violations = []
-        for vt_symbol, pending_volume in sorted(pending.items()):
+        for vt_symbol in sorted(
+            set(pending) | set(session_ack_pending)
+        ):
+            pending_volume = pending.get(vt_symbol, 0.0)
+            session_ack_volume = session_ack_pending.get(
+                vt_symbol, 0.0
+            )
             current = abs(float(positions.get(vt_symbol, {}).get("signed_quantity") or 0))
             active = active_open.get(vt_symbol, 0.0)
-            projected = current + active + pending_volume
+            projected = (
+                current
+                + active
+                + session_ack_volume
+                + pending_volume
+            )
             if projected > maximum:
                 violations.append(
                     {
                         "vt_symbol": vt_symbol,
                         "current_position": current,
                         "active_open_volume": active,
+                        "session_ack_pending_open_volume": (
+                            session_ack_volume
+                        ),
                         "phase_open_volume": pending_volume,
                         "projected_position": projected,
                         "max_symbol_position": maximum,
@@ -8815,6 +8990,25 @@ class CommoditySimNowService:
                 "本阶段拆单累计量超过单合约持仓上限",
                 detail={"violations": violations},
             )
+
+    def _same_dispatch_order_identity(
+        self,
+        left: dict[str, Any],
+        right: dict[str, Any],
+    ) -> bool:
+        left_reference = str(left.get("reference") or "")
+        right_reference = str(right.get("reference") or "")
+        if (
+            left_reference
+            and right_reference
+            and left_reference == right_reference
+        ):
+            return True
+        return bool(
+            self._order_ids(left).intersection(
+                self._order_ids(right)
+            )
+        )
 
     def _plan_symbols(self, plan: dict[str, Any] | None) -> list[str]:
         if not plan:
@@ -9119,7 +9313,142 @@ class CommoditySimNowService:
             price = quote["bid_price_1"] if order["direction"] == "long" else quote["ask_price_1"]
         else:
             price = self._protected_price(order["direction"], quote, tick)
-        return {**order, "price": _round_price(price, tick)}
+        return {
+            **order,
+            "price": _round_price(price, tick),
+            "dispatch_quote": {
+                "bid_price_1": quote["bid_price_1"],
+                "ask_price_1": quote["ask_price_1"],
+                "bid_volume_1": quote["bid_volume_1"],
+                "ask_volume_1": quote["ask_volume_1"],
+                "spread_ticks": quote["spread_ticks"],
+                "quote_received_at_utc": quote["received_at"],
+                "refreshed_at_utc": self.clock()
+                .astimezone(timezone.utc)
+                .isoformat(),
+            },
+        }
+
+    def _verify_bound_dispatch_quote_current(
+        self,
+        intent: dict[str, Any],
+    ) -> None:
+        vt_symbol = str(intent.get("vt_symbol") or "")
+        product = str(intent.get("product") or "")
+        bound = intent.get("dispatch_quote")
+        raw = self.tick_store.get_tick(vt_symbol)
+        if (
+            product not in PRODUCT_SPECS
+            or not isinstance(bound, dict)
+            or not isinstance(raw, dict)
+        ):
+            raise CommoditySimNowSafetyError(
+                "child 派单盘口绑定缺失",
+                detail={"vt_symbol": vt_symbol},
+            )
+
+        bid = float(
+            raw.get("bid_price_1")
+            or raw.get("bid_price1")
+            or 0
+        )
+        ask = float(
+            raw.get("ask_price_1")
+            or raw.get("ask_price1")
+            or 0
+        )
+        bid_volume = float(
+            raw.get("bid_volume_1")
+            or raw.get("bid_volume1")
+            or 0
+        )
+        ask_volume = float(
+            raw.get("ask_volume_1")
+            or raw.get("ask_volume1")
+            or 0
+        )
+        timestamp = _parse_datetime(
+            raw.get("received_at") or raw.get("datetime")
+        )
+        if (
+            bid <= 0
+            or ask <= 0
+            or ask < bid
+            or bid_volume <= 0
+            or ask_volume <= 0
+            or timestamp is None
+        ):
+            raise CommoditySimNowSafetyError(
+                "child 派单盘口字段已失效",
+                detail={"vt_symbol": vt_symbol},
+            )
+        age = (
+            self.clock().astimezone(timezone.utc) - timestamp
+        ).total_seconds()
+        if (
+            age < -2
+            or age
+            > self.settings.commodity_simnow_max_quote_age_seconds
+        ):
+            raise CommoditySimNowSafetyError(
+                "child 派单盘口已过期",
+                detail={
+                    "vt_symbol": vt_symbol,
+                    "quote_age_seconds": round(age, 3),
+                },
+            )
+
+        tick = float(PRODUCT_SPECS[product]["price_tick"])
+        current_identity = {
+            "bid_price_1": bid,
+            "ask_price_1": ask,
+            "bid_volume_1": bid_volume,
+            "ask_volume_1": ask_volume,
+            "spread_ticks": (ask - bid) / tick,
+            "quote_received_at_utc": timestamp.isoformat(),
+        }
+        bound_identity = {
+            key: bound.get(key)
+            for key in current_identity
+        }
+        if current_identity != bound_identity:
+            raise CommoditySimNowSafetyError(
+                "child 派单盘口已更新，必须重新 preview",
+                detail={
+                    "vt_symbol": vt_symbol,
+                    "bound_quote_sha256": _sha256_json(
+                        bound_identity
+                    ),
+                    "current_quote_sha256": _sha256_json(
+                        current_identity
+                    ),
+                },
+            )
+
+        price_mode = str(intent.get("price_mode") or "")
+        direction = str(intent.get("direction") or "")
+        if price_mode == "acceptance_passive":
+            expected_price = (
+                bid if direction == "long" else ask
+            )
+        elif price_mode == "protected":
+            expected_price = self._protected_price(
+                direction,
+                current_identity,
+                tick,
+            )
+        else:
+            raise CommoditySimNowSafetyError(
+                "child 派单价格模式绑定无效",
+                detail={"vt_symbol": vt_symbol},
+            )
+        if float(intent.get("price") or 0) != _round_price(
+            expected_price, tick
+        ):
+            raise CommoditySimNowSafetyError(
+                "child 派单价格与绑定盘口不一致",
+                detail={"vt_symbol": vt_symbol},
+            )
 
     def _signed_positions(self, positions: dict[str, dict[str, Any]]) -> dict[str, int]:
         return {vt: int(row["signed_quantity"]) for vt, row in sorted(positions.items()) if row["signed_quantity"]}

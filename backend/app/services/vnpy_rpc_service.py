@@ -317,11 +317,17 @@ class VnpyRpcService:
         order_request: "OrderRequest",
         gateway_name: str,
         guard: Callable[[], Any],
+        *,
+        linearization_lock: Any | None = None,
     ) -> Any:
-        """Run the final fact guard and non-idempotent send under one RPC lock."""
+        """Linearize the final guard and non-idempotent send with abort."""
         with self._call_lock:
-            guard()
-            return self.send_order(order_request, gateway_name)
+            if linearization_lock is None:
+                guard()
+                return self.send_order(order_request, gateway_name)
+            with linearization_lock:
+                guard()
+                return self.send_order(order_request, gateway_name)
 
     def cancel_order(self, cancel_request: "CancelRequest", gateway_name: str) -> Any:
         return self.call("cancel_order", cancel_request, gateway_name)
