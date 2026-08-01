@@ -76,21 +76,26 @@ preverified plan/policy/spec 再次调用 `register_preverified_plan`。
 `register_preverified_plan`。既有 intent/anchor 会幂等复用，缺失 intent 才继续创建。
 若故障留下“已有 intent 但无 anchor”，单独 `recover()` 会明确失败关闭；必须由同一
 preverified plan 重放补齐，禁止 worker 从不完整 journal 猜测上游签名事实。
+每条 `PREVERIFIED_VIRTUAL_INTENT_INPUT` 都持久化该 plan 的 exact ordered
+`expected_plan_intent_ids`。sidecar recovery 要求字段为非空、唯一、合法 intent ID
+列表，包含当前 intent，并要求同一 `preverified_plan_hash` 的每条 record 保存完全
+相同的 ordered expected IDs。
 `register_preverified_plan` 是 blocked 状态下唯一允许的非 Tick 输入入口，因为它会
 从头重验完整强类型集合；成功补齐全部 intent/anchor 后才解除 blocked。普通
 `accept_preverified_tick` 在此期间始终拒绝。新建 worker 也不会只筛选已有 anchor
 的 intent 后继续：每次 Tick 写入前都要求 journal 的 intent ID 集合与 anchor ID
 集合完全相等；任一 orphan intent 会全局 fail closed，且该 Tick 不得落盘。
-完整 plan recovery 在任何 append 前先恢复 journal。若存在 orphan，每条 orphan
-record 的 `preverified_plan_hash` 必须等于 incoming plan 的 exact `plan_hash`，且
-incoming plan 必须覆盖全部 orphan intent ID；否则
-`ORPHAN_INTENT_PLAN_RECOVERY_MISMATCH` 零写入失败，禁止用另一个 plan 扩大 journal
-中的 accepted exact-contract/intents 集合。
+完整 plan recovery 在任何 append 前先恢复 journal。对每个 durable plan，worker
+要求 actual ordered intent IDs 等于 durable expected IDs，且每个 actual intent 都有
+anchor。若存在 missing-tail 或 orphan incomplete plan，只允许 incoming plan 的 exact
+`plan_hash` 和 ordered intent IDs 与 durable expectation 全等；否则
+`INCOMPLETE_PLAN_RECOVERY_MISMATCH` 零写入失败，禁止用另一个 plan 扩大 journal 中
+的 accepted exact-contract/intents 集合。并发注册暴露的中间态同样 fail closed。
 
 `status()` 如果无法恢复 journal，不会沿用旧计数或把状态报成健康；它返回
 `BLOCKED_FAIL_CLOSED`，计数字段为 `null`，全部 authority 仍为 false。status 在
-计算计数前也执行完整 anchor 集合检查，因此新建 worker 首次 status 不会把 orphan
-journal 报成 `blocked=false`。
+计算计数前也执行完整 plan/anchor 检查，因此新建 worker 首次 status 不会把
+missing-tail 或 orphan journal 报成 `blocked=false`。
 
 ## 尚未实现、不得宣称
 

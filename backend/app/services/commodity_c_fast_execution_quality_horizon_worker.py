@@ -120,7 +120,10 @@ class PreverifiedTickHorizonWorker:
                         "PREVERIFIED_CONTRACT_SPEC_SET_MISMATCH"
                     )
                 existing = self._sidecar.recover()
-                self._require_orphan_recovery_matches_plan(existing, plan)
+                self._require_incomplete_plan_recovery_matches(
+                    existing,
+                    plan,
+                )
 
                 anchors: dict[str, str] = {}
                 for intent in plan.intents:
@@ -189,7 +192,7 @@ class PreverifiedTickHorizonWorker:
                     "PREVERIFIED_TICK_TYPE_INVALID",
                 )
                 before = self._sidecar.recover()
-                self._require_complete_anchors(before)
+                self._require_complete_plan_state(before)
                 affected_intents = self._intent_ids_for_contract(
                     before,
                     tick.exact_contract,
@@ -294,7 +297,7 @@ class PreverifiedTickHorizonWorker:
 
     def _seal_all_ready_locked(self) -> int:
         state = self._sidecar.recover()
-        self._require_complete_anchors(state)
+        self._require_complete_plan_state(state)
         created = 0
         intent_records = sorted(
             state.intents.values(),
@@ -306,15 +309,18 @@ class PreverifiedTickHorizonWorker:
         return created
 
     @staticmethod
-    def _require_complete_anchors(state: SidecarState) -> None:
-        if set(state.intents) != set(state.anchors):
+    def _require_complete_plan_state(state: SidecarState) -> None:
+        incomplete = PreverifiedTickHorizonWorker._incomplete_plan_hashes(
+            state
+        )
+        if incomplete:
             raise CFastExecutionQualityHorizonWorkerError(
-                "DURABLE_INTENT_ANCHOR_MISSING"
+                "DURABLE_PLAN_INTENT_SET_INCOMPLETE"
             )
 
     def _status_locked(self) -> dict[str, Any]:
         state = self._sidecar.recover()
-        self._require_complete_anchors(state)
+        self._require_complete_plan_state(state)
         accepted_contracts = sorted(
             {
                 str(record.payload["intent"]["exact_contract"])
@@ -363,22 +369,74 @@ class PreverifiedTickHorizonWorker:
         }
 
     @staticmethod
-    def _require_orphan_recovery_matches_plan(
+    def _require_incomplete_plan_recovery_matches(
         state: SidecarState,
         plan: CFastVirtualIntentPlanDTO,
     ) -> None:
-        orphan_ids = set(state.intents) - set(state.anchors)
-        if not orphan_ids:
+        incomplete = PreverifiedTickHorizonWorker._incomplete_plan_hashes(
+            state
+        )
+        if not incomplete:
             return
-        incoming_intent_ids = {intent.intent_id for intent in plan.intents}
-        if not orphan_ids.issubset(incoming_intent_ids) or any(
-            state.intents[intent_id].payload.get("preverified_plan_hash")
-            != plan.plan_hash
-            for intent_id in orphan_ids
+        expected_by_plan, _ = (
+            PreverifiedTickHorizonWorker._durable_plan_intent_sets(state)
+        )
+        incoming_expected = tuple(
+            intent.intent_id for intent in plan.intents
+        )
+        if (
+            incomplete != {plan.plan_hash}
+            or expected_by_plan.get(plan.plan_hash) != incoming_expected
         ):
             raise CFastExecutionQualityHorizonWorkerError(
-                "ORPHAN_INTENT_PLAN_RECOVERY_MISMATCH"
+                "INCOMPLETE_PLAN_RECOVERY_MISMATCH"
             )
+
+    @staticmethod
+    def _incomplete_plan_hashes(state: SidecarState) -> set[str]:
+        expected_by_plan, actual_by_plan = (
+            PreverifiedTickHorizonWorker._durable_plan_intent_sets(state)
+        )
+        incomplete = {
+            plan_hash
+            for plan_hash, expected_ids in expected_by_plan.items()
+            if actual_by_plan.get(plan_hash, ()) != expected_ids
+        }
+        for intent_id, record in state.intents.items():
+            if intent_id not in state.anchors:
+                incomplete.add(
+                    str(record.payload["preverified_plan_hash"])
+                )
+        return incomplete
+
+    @staticmethod
+    def _durable_plan_intent_sets(
+        state: SidecarState,
+    ) -> tuple[dict[str, tuple[str, ...]], dict[str, tuple[str, ...]]]:
+        expected_by_plan: dict[str, tuple[str, ...]] = {}
+        actual_lists: dict[str, list[str]] = {}
+        for record in sorted(
+            state.intents.values(),
+            key=lambda item: item.sequence,
+        ):
+            plan_hash = str(record.payload["preverified_plan_hash"])
+            expected_ids = tuple(
+                str(intent_id)
+                for intent_id in record.payload["expected_plan_intent_ids"]
+            )
+            prior_expected = expected_by_plan.get(plan_hash)
+            if prior_expected is not None and prior_expected != expected_ids:
+                raise CFastExecutionQualityHorizonWorkerError(
+                    "DURABLE_PLAN_EXPECTED_SET_MISMATCH"
+                )
+            expected_by_plan[plan_hash] = expected_ids
+            actual_lists.setdefault(plan_hash, []).append(
+                str(record.payload["intent"]["intent_id"])
+            )
+        return expected_by_plan, {
+            plan_hash: tuple(intent_ids)
+            for plan_hash, intent_ids in actual_lists.items()
+        }
 
     def _blocked_status_locked(self) -> dict[str, Any]:
         return {

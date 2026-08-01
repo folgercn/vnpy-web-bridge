@@ -247,7 +247,21 @@ def test_partial_multi_intent_registration_retries_after_restart(
         CreateOnlyExecutionQualityJournal(subject._sidecar.journal.root),
         clock=lambda: ANCHOR,
     )
+    tick_probe = PreverifiedTickHorizonWorker(restarted_sidecar)
+    with pytest.raises(
+        CFastExecutionQualityHorizonWorkerError,
+        match="DURABLE_PLAN_INTENT_SET_INCOMPLETE",
+    ):
+        tick_probe.accept_preverified_tick(SCORER.book(0))
+    assert restarted_sidecar.recover().snapshots == ()
+
     restarted = PreverifiedTickHorizonWorker(restarted_sidecar)
+    blocked_status = restarted.status()
+    assert blocked_status["blocked_fail_closed"] is True
+    assert blocked_status["registered_intent_count"] is None
+    assert blocked_status["last_error"] == (
+        "DURABLE_PLAN_INTENT_SET_INCOMPLETE"
+    )
     receipt = restarted.register_preverified_plan(**inputs)
 
     assert len(receipt["registered_intent_ids"]) == 2
@@ -313,7 +327,7 @@ def test_orphan_recovery_with_different_plan_is_zero_write(
     repository.clock = lambda: ANCHOR + timedelta(seconds=1)
     with pytest.raises(
         CFastExecutionQualityHorizonWorkerError,
-        match="ORPHAN_INTENT_PLAN_RECOVERY_MISMATCH",
+        match="INCOMPLETE_PLAN_RECOVERY_MISMATCH",
     ):
         subject.register_preverified_plan(**two_intent_registration_inputs())
 
@@ -350,7 +364,7 @@ def test_restarted_worker_status_first_blocks_orphan_journal(
 
     assert status["worker_state"] == "BLOCKED_FAIL_CLOSED"
     assert status["blocked_fail_closed"] is True
-    assert status["last_error"] == "DURABLE_INTENT_ANCHOR_MISSING"
+    assert status["last_error"] == "DURABLE_PLAN_INTENT_SET_INCOMPLETE"
     assert status["registered_intent_count"] is None
     assert status["accepted_exact_contracts"] == []
 
@@ -386,7 +400,7 @@ def test_restarted_worker_rejects_tick_when_any_intent_is_orphaned(
     restarted = PreverifiedTickHorizonWorker(restarted_sidecar)
     with pytest.raises(
         CFastExecutionQualityHorizonWorkerError,
-        match="DURABLE_INTENT_ANCHOR_MISSING",
+        match="DURABLE_PLAN_INTENT_SET_INCOMPLETE",
     ):
         restarted.accept_preverified_tick(SCORER.book(0))
 

@@ -123,6 +123,9 @@ def test_registration_is_create_only_durable_and_restart_idempotent(
         "PREVERIFIED_VIRTUAL_INTENT_INPUT",
         "DURABLE_INTENT_ANCHOR",
     ]
+    assert state.intents[intent_id].payload[
+        "expected_plan_intent_ids"
+    ] == [intent_id]
     assert all(
         (service.journal.root / path.name).stat().st_mode & 0o777 == 0o600
         for path in service.journal.root.iterdir()

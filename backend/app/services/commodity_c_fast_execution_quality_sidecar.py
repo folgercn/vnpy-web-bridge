@@ -38,6 +38,7 @@ MAX_JOURNAL_RECORD_BYTES = 16 * 1024 * 1024
 _RECORD_NAME = re.compile(r"^([0-9]{20})-([0-9a-f]{64})\.json$")
 _RESERVATION_NAME = re.compile(r"^([0-9]{20})\.reservation$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_INTENT_ID = re.compile(r"^cfast-virtual-intent-v1-[0-9a-f]{64}$")
 _HORIZONS = (250, 1_000, 5_000, 30_000, 60_000)
 _GENESIS_HASH = "0" * 64
 _LOCK_NAME = ".journal.lock"
@@ -801,6 +802,9 @@ class OfflineExecutionQualitySidecar:
         payload = {
             "record_type": "PREVERIFIED_VIRTUAL_INTENT_INPUT",
             "preverified_plan_hash": preverified_plan.plan_hash,
+            "expected_plan_intent_ids": [
+                row.intent_id for row in preverified_plan.intents
+            ],
             "source_snapshot_receipt_sha256": (
                 source_snapshot_receipt_sha256
             ),
@@ -1180,6 +1184,7 @@ class OfflineExecutionQualitySidecar:
         ingest_ids: dict[str, str] = {}
         event_keys: dict[str, str] = {}
         snapshot_records_by_hash: dict[str, JournalRecord] = {}
+        expected_intents_by_plan: dict[str, tuple[str, ...]] = {}
 
         for record in records:
             if record.operation_id in operations:
@@ -1207,14 +1212,28 @@ class OfflineExecutionQualitySidecar:
                             "pre_durable_clock_observed_at_utc"
                         )
                     )
+                    plan_hash = record.payload.get("preverified_plan_hash")
+                    expected_intent_ids = record.payload.get(
+                        "expected_plan_intent_ids"
+                    )
                     if (
                         intent.intent_id in intents
                         or record.operation_id
                         != _operation_id("intent", intent.intent_id)
                         or _SHA256.fullmatch(
-                            str(record.payload.get("preverified_plan_hash"))
+                            str(plan_hash)
                         )
                         is None
+                        or type(expected_intent_ids) is not list
+                        or not (1 <= len(expected_intent_ids) <= 10_000)
+                        or any(
+                            type(expected_id) is not str
+                            or _INTENT_ID.fullmatch(expected_id) is None
+                            for expected_id in expected_intent_ids
+                        )
+                        or len(set(expected_intent_ids))
+                        != len(expected_intent_ids)
+                        or intent.intent_id not in expected_intent_ids
                         or record.payload.get("source_snapshot_receipt_sha256")
                         != intent.snapshot_hash
                         or record.payload.get("source_validation_scope")
@@ -1230,6 +1249,18 @@ class OfflineExecutionQualitySidecar:
                         raise CFastExecutionQualitySidecarError(
                             "INTENT_RECORD_INVALID"
                         )
+                    expected_tuple = tuple(expected_intent_ids)
+                    prior_expected = expected_intents_by_plan.get(
+                        str(plan_hash)
+                    )
+                    if (
+                        prior_expected is not None
+                        and prior_expected != expected_tuple
+                    ):
+                        raise CFastExecutionQualitySidecarError(
+                            "INTENT_PLAN_EXPECTED_SET_MISMATCH"
+                        )
+                    expected_intents_by_plan[str(plan_hash)] = expected_tuple
                     score_execution_quality(
                         intent=intent,
                         durably_created_at_utc=(
