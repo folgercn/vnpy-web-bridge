@@ -465,6 +465,10 @@ def _load_oci_state(path: Path, label: str) -> dict[str, Any]:
             directories,
             raw,
             f"{label} OCI layer {number}",
+            allow_pinned_base_root_marker=(
+                number < len(_delegate.BASE_ROOTFS_LAYER_DIGESTS)
+                and digest == _delegate.BASE_ROOTFS_LAYER_DIGESTS[number]
+            ),
         )
         layer_descriptors.append(dict(descriptor))
         layer_digests.append(digest)

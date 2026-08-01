@@ -939,6 +939,8 @@ def _apply_layer(
     directories: dict[str, FileEntry],
     raw: bytes,
     label: str,
+    *,
+    allow_pinned_base_root_marker: bool = False,
 ) -> set[str]:
     seen: set[str] = set()
     touched: set[str] = set()
@@ -952,6 +954,21 @@ def _apply_layer(
                     raise QueryV3ImageAttestationError(
                         f"{label} exceeds entry limit"
                     )
+                if member.name == ".":
+                    if not allow_pinned_base_root_marker:
+                        raise QueryV3ImageAttestationError(
+                            f"{label} path is not normalized"
+                        )
+                    if (
+                        not member.isdir()
+                        or member.size != 0
+                        or member.linkname
+                        or member.pax_headers
+                    ):
+                        raise QueryV3ImageAttestationError(
+                            f"{label} pinned base root marker is invalid"
+                        )
+                    continue
                 name = _normalized_path(member.name, label)
                 if not name or name in seen:
                     raise QueryV3ImageAttestationError(
@@ -1374,6 +1391,10 @@ def derive_oci_facts(
             directories,
             uncompressed,
             f"OCI layer {index_number}",
+            allow_pinned_base_root_marker=(
+                index_number < len(BASE_ROOTFS_LAYER_DIGESTS)
+                and digest == BASE_ROOTFS_LAYER_DIGESTS[index_number]
+            ),
         )
         if index_number >= len(BASE_ROOTFS_LAYER_DIGESTS):
             post_base_touched.update(touched)
