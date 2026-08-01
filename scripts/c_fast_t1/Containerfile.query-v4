@@ -14,7 +14,7 @@ ENV PATH=/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin \
 
 WORKDIR /opt/c-fast-t1
 
-RUN /usr/local/bin/python3.12 -m pip install --no-cache-dir --disable-pip-version-check \
+RUN /usr/local/bin/python3.12 -m pip install --no-cache-dir --disable-pip-version-check --no-compile \
       "psycopg[binary]==3.2.3" \
       "cryptography==48.0.0" \
       "jsonschema==4.26.0" \
@@ -24,7 +24,8 @@ RUN /usr/local/bin/python3.12 -m pip install --no-cache-dir --disable-pip-versio
       "jsonschema-specifications==2025.9.1" \
       "pycparser==3.0" \
       "rpds-py==2026.6.3" \
-      "typing-extensions==4.16.0"
+      "typing-extensions==4.16.0" \
+    && rm -f /usr/local/bin/cffi-gen-src
 
 COPY scripts/commodity_c_fast_t1_query_v4.py ./scripts/commodity_c_fast_t1_query_v4.py
 COPY scripts/commodity_c_fast_t1_query_child_v4.py ./scripts/commodity_c_fast_t1_query_child_v4.py
@@ -82,15 +83,15 @@ RUN printf '%s\n' '/opt/c-fast-t1/scripts' \
     && chmod 0444 /usr/local/lib/python3.12/site-packages/c-fast-t1-query-v4-runtime.pth
 
 RUN PYTHONPATH=/INVALID_POISON_MUST_BE_IGNORED_BY_PYTHON_ISOLATED_MODE \
-      /usr/local/bin/python3.12 -I \
+      /usr/local/bin/python3.12 -I -B \
       /opt/c-fast-t1/scripts/commodity_c_fast_t1_query_v4.py \
       --help > /dev/null \
     && PYTHONPATH=/INVALID_POISON_MUST_BE_IGNORED_BY_PYTHON_ISOLATED_MODE \
-      /usr/local/bin/python3.12 -I \
+      /usr/local/bin/python3.12 -I -B \
       /opt/c-fast-t1/scripts/commodity_c_fast_t1_query_child_v4.py \
       --help > /dev/null \
     && PYTHONPATH=/INVALID_POISON_MUST_BE_IGNORED_BY_PYTHON_ISOLATED_MODE \
-      /usr/local/bin/python3.12 -I \
+      /usr/local/bin/python3.12 -I -B \
       /opt/c-fast-t1/scripts/commodity_c_fast_l1_l5_audit_v4.py \
       --help > /dev/null
 

@@ -135,7 +135,7 @@ EXPECTED_CONTAINERFILE_INSTRUCTION_KEYWORDS = (
 # formatting whitespace are ignored, but every instruction, argument, order,
 # and shell command is frozen.
 EXPECTED_CONTAINERFILE_INSTRUCTION_SHA256 = (
-    "204ca8d3f9cb556563670721478254cfb62aa425fdb209f0f85689292ae4eb6f"
+    "3a4f1e7f2eb73e32d381a5744df34d23e3d243bd6075d085b07b8640b6b07e7c"
 )
 
 COMMAND_FLAGS = (
@@ -458,6 +458,8 @@ def validate_containerfile(path: Path = DEFAULT_CONTAINERFILE) -> dict[str, Any]
         ),
         "USER 65532:65532",
         "chmod -R a-w /opt/c-fast-t1",
+        "--disable-pip-version-check --no-compile",
+        "rm -f /usr/local/bin/cffi-gen-src",
         (
             "/opt/c-fast-t1/scripts/"
             "commodity_c_fast_t1_query_child_v4.py"
@@ -479,7 +481,7 @@ def validate_containerfile(path: Path = DEFAULT_CONTAINERFILE) -> dict[str, Any]
             "query-v4 poisoned-PYTHONPATH import closure drifted"
         )
     exact_parent_smoke = (
-        "/usr/local/bin/python3.12 -I /opt/c-fast-t1/scripts/"
+        "/usr/local/bin/python3.12 -I -B /opt/c-fast-t1/scripts/"
         "commodity_c_fast_t1_query_v4.py --help > /dev/null"
     )
     if sum(

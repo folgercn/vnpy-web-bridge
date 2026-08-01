@@ -44,6 +44,14 @@ def test_query_v4_packaging_closure_is_valid_but_not_authority() -> None:
     assert runtime["trading_authorized"] is False
 
 
+def test_containerfile_suppresses_build_time_python_side_effects() -> None:
+    text = CONTAINERFILE.read_text()
+
+    assert "--disable-pip-version-check --no-compile" in text
+    assert text.count("/usr/local/bin/python3.12 -I -B") == 3
+    assert text.count("rm -f /usr/local/bin/cffi-gen-src") == 1
+
+
 def test_parent_child_and_audit_reach_help_in_real_subprocesses() -> None:
     scripts = ROOT / "scripts"
     parent = scripts / "commodity_c_fast_t1_query_v4.py"
