@@ -64,7 +64,7 @@ jobs:
                 ;;
             esac
             case "$file" in
-              scripts/c_fast_t1/*query_v4*|scripts/c_fast_t1/*query_v5*|scripts/commodity_c_fast_t1_query_v5_launcher.py|docs/operations/c-fast-t1-query-v5-*|docs/schemas/commodity-c-fast-t1-query-v5-*|backend/tests/unit/test_c_fast_t1_query_v5*)
+              .dockerignore|backend/requirements.txt|scripts/c_fast_t1/*query_v3*|scripts/c_fast_t1/*query_v4*|scripts/c_fast_t1/*query_v5*|scripts/commodity_c_fast_*|docs/operations/c-fast-t1-query-v5-*|docs/schemas/commodity-c-fast-*|backend/tests/unit/test_c_fast_t1_query_v3*|backend/tests/unit/test_c_fast_t1_query_v4*|backend/tests/unit/test_c_fast_t1_query_v5*)
                 query_v5_changed=true
                 ;;
             esac
@@ -175,6 +175,14 @@ jobs:
 
       - name: Install verifier dependencies
         run: pip install -r backend/requirements.txt
+
+      - name: Run query-v5 attestation closure tests
+        run: |
+          PYTHONPATH=backend:scripts pytest -q \
+            backend/tests/unit/test_c_fast_t1_query_v3_image_attestation.py \
+            backend/tests/unit/test_c_fast_t1_query_v4_image_attestation.py \
+            backend/tests/unit/test_c_fast_t1_query_v4_runtime_packaging.py \
+            backend/tests/unit/test_c_fast_t1_query_v5_image_attestation.py
 
       - name: Set up Buildx for local OCI registry
         uses: docker/setup-buildx-action@v3
