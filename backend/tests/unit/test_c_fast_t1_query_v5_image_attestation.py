@@ -327,6 +327,48 @@ def _scan_overlay(raw: bytes, source_facts: dict[str, Any]) -> set[str]:
     return touched
 
 
+def test_overlay_allows_only_exact_existing_base_ancestor_directory_marker(
+    tmp_path: Path,
+    source_commit: str,
+) -> None:
+    bundle_raw = producer.build_source_bundle(ROOT, source_commit)[0]
+    source_facts = subject._source_facts(
+        _write(tmp_path / "query-v5-source.tar", bundle_raw),
+        source_commit,
+    )
+    base_directory = subject._delegate.FileEntry(
+        kind="directory",
+        mode=0o755,
+        uid=0,
+        gid=0,
+    )
+    exact = _tar_with_metadata([("opt", b"", 0o755, "directory")])
+
+    touched, _contract = subject._scan_overlay_layer(
+        exact,
+        "test overlay",
+        {"opt"},
+        source_facts["runtime_bundle"],
+        source_facts["runtime_modes"],
+        {"opt": base_directory},
+    )
+    assert touched == {"opt"}
+
+    drifted = _tar_with_metadata([("opt", b"", 0o777, "directory")])
+    with pytest.raises(
+        subject.QueryV5ImageAttestationError,
+        match="overwrites query-v4 base path",
+    ):
+        subject._scan_overlay_layer(
+            drifted,
+            "test overlay",
+            {"opt"},
+            source_facts["runtime_bundle"],
+            source_facts["runtime_modes"],
+            {"opt": base_directory},
+        )
+
+
 def _compose_oci(
     v4_oci_raw: bytes,
     v4_image_reference: str,

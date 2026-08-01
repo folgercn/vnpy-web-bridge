@@ -68,6 +68,7 @@ ALLOWED_OVERLAY_DIRECTORIES = frozenset(
         PIN_DIRECTORY,
     }
 )
+ALLOWED_BASE_ANCESTOR_DIRECTORY_MARKERS = frozenset({"opt", "run"})
 EXPECTED_LABEL_TITLE = "vnpy-web-bridge C_FAST T1 query-v5 code-only overlay"
 PRIVATE_KEY_MARKERS = query_v4._delegate.PRIVATE_KEY_MARKERS
 SENSITIVE_PATH_MARKERS = (
@@ -606,6 +607,7 @@ def _scan_overlay_layer(
     base_paths: set[str],
     expected_runtime_bundle: dict[str, str],
     expected_runtime_modes: dict[str, int],
+    base_directories: dict[str, Any] | None = None,
 ) -> tuple[set[str], str]:
     if any(marker in raw for marker in PRIVATE_KEY_MARKERS):
         _fail(f"{label} raw tar contains private-key material")
@@ -628,7 +630,19 @@ def _scan_overlay_layer(
                 if PurePosixPath(path).name.startswith(".wh."):
                     _fail(f"{label} contains a forbidden whiteout")
                 if path in base_paths:
-                    _fail(f"{label} overwrites query-v4 base path: /{path}")
+                    base_directory = (base_directories or {}).get(path)
+                    mode = member.mode & 0o7777
+                    if (
+                        path not in ALLOWED_BASE_ANCESTOR_DIRECTORY_MARKERS
+                        or base_directory is None
+                        or not member.isdir()
+                        or member.size != 0
+                        or member.uid != base_directory.uid
+                        or member.gid != base_directory.gid
+                        or mode != base_directory.mode
+                    ):
+                        _fail(f"{label} overwrites query-v4 base path: /{path}")
+                    continue
                 if not (
                     path in ALLOWED_OVERLAY_DIRECTORIES
                     or path.startswith(RUNTIME_PREFIX)
@@ -724,6 +738,7 @@ def _validate_final_oci(
             base_paths,
             source["runtime_bundle"],
             source["runtime_modes"],
+            base["directories"],
         )
         overlay_touched.update(touched)
         overlay_header_contracts.append(header_contract)
