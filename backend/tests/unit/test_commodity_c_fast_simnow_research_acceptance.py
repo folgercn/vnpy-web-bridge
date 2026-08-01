@@ -21,10 +21,14 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT / "backend/tests/unit"))
 
 import commodity_c_fast_simnow_research_acceptance as acceptance  # noqa: E402
 import commodity_c_fast_simnow_research_bundle as bundle  # noqa: E402
 import commodity_c_fast_simnow_sign_research_acceptance as signer  # noqa: E402
+from c_fast_producer_artifacts import (  # noqa: E402
+    canonical_c_fast_artifacts,
+)
 
 
 RESEARCH_NOW = datetime(2026, 7, 29, 2, 1, tzinfo=timezone.utc)
@@ -254,10 +258,17 @@ def acceptance_inputs(
     research_keyring_sha256 = hashlib.sha256(
         research_keyring_path.read_bytes()
     ).hexdigest()
+    artifact_raw = canonical_c_fast_artifacts(
+        targets=target_rows(),
+        research_as_of_official_day="2026-07-09",
+        execution_day=EXECUTION_DAY.isoformat(),
+        generated_at="2026-07-29T01:59:00+00:00",
+        canonical_json=bundle.canonical_json,
+    )
     artifacts = {
         role: write_bytes(
-            artifacts_dir / f"{role}.raw",
-            f"synthetic-{role}\n".encode(),
+            artifacts_dir / f"{role}.json",
+            artifact_raw[role],
             mode=0o644,
         )
         for role in bundle.ARTIFACT_ROLES

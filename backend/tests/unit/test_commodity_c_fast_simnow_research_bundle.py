@@ -26,9 +26,13 @@ from app.core.commodity_strategy_identity import (
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT / "backend/tests/unit"))
 
 import commodity_c_fast_simnow_research_bundle as bundle  # noqa: E402
 import commodity_c_fast_simnow_sign_research_bundle as signer  # noqa: E402
+from c_fast_producer_artifacts import (  # noqa: E402
+    canonical_c_fast_artifacts,
+)
 
 
 NOW = datetime(2026, 7, 29, 2, 1, tzinfo=timezone.utc)
@@ -231,10 +235,17 @@ def research_inputs(
     }
     keyring_path = write_json(private_dir / "keyring.json", keyring)
     keyring_raw_sha256 = hashlib.sha256(keyring_path.read_bytes()).hexdigest()
+    artifact_raw = canonical_c_fast_artifacts(
+        targets=target_rows(),
+        research_as_of_official_day="2026-07-09",
+        execution_day=EXECUTION_DAY.isoformat(),
+        generated_at="2026-07-29T01:59:00+00:00",
+        canonical_json=bundle.canonical_json,
+    )
     artifacts = {
         role: write_bytes(
-            artifacts_dir / f"{role}.raw",
-            f"synthetic-{role}\n".encode(),
+            artifacts_dir / f"{role}.json",
+            artifact_raw[role],
             mode=0o644,
         )
         for role in bundle.ARTIFACT_ROLES
@@ -383,6 +394,49 @@ def test_artifact_roles_reject_same_path_and_hardlink_alias(
         match="distinct paths and inodes",
     ):
         bundle._read_artifacts(hardlink)
+
+
+def test_non_json_artifact_cannot_be_signed_as_research_evidence(
+    research_inputs: dict,
+) -> None:
+    artifact = research_inputs["artifacts"]["signal_evidence"]
+    artifact.write_bytes(b"synthetic-signal_evidence\n")
+
+    with pytest.raises(
+        bundle.ResearchBundleError,
+        match="producer artifact signal_evidence is not JSON",
+    ):
+        prepare(research_inputs)
+
+
+def test_producer_target_projection_drift_is_rejected(
+    research_inputs: dict,
+) -> None:
+    artifact = research_inputs["artifacts"]["target_evidence"]
+    payload = json.loads(artifact.read_bytes())
+    payload["targets"][0]["target_quantity"] += 1
+    artifact.write_bytes(bundle.canonical_json(payload))
+
+    with pytest.raises(
+        bundle.ResearchBundleError,
+        match="contract/target projection mismatch",
+    ):
+        prepare(research_inputs)
+
+
+def test_producer_artifact_cannot_self_claim_sealed_verification(
+    research_inputs: dict,
+) -> None:
+    artifact = research_inputs["artifacts"]["freeze_contract"]
+    payload = json.loads(artifact.read_bytes())
+    payload["sealed_export_verified"] = True
+    artifact.write_bytes(bundle.canonical_json(payload))
+
+    with pytest.raises(
+        bundle.ResearchBundleError,
+        match="producer artifact freeze_contract identity mismatch",
+    ):
+        prepare(research_inputs)
 
 
 def test_artifact_set_identity_is_stable_across_complete_read(
@@ -711,6 +765,7 @@ def test_raw_artifact_and_signature_tampering_fail_closed(
         )
 
     artifact = research_inputs["artifacts"]["signal_evidence"]
+    artifact_original = artifact.read_bytes()
     artifact.write_bytes(artifact.read_bytes() + b"tampered\n")
     with pytest.raises(
         bundle.ResearchBundleError,
@@ -727,7 +782,7 @@ def test_raw_artifact_and_signature_tampering_fail_closed(
             now=NOW,
         )
 
-    artifact.write_bytes(b"synthetic-signal_evidence\n")
+    artifact.write_bytes(artifact_original)
     tampered = json.loads(source_path.read_text(encoding="utf-8"))
     tampered["signature"] = bundle.PLACEHOLDER_SIGNATURE
     tampered_path = write_json(
@@ -886,6 +941,147 @@ def test_signer_never_reads_private_key_after_public_failure(
 
     assert signer.main() == 2
     assert private_key_read is False
+
+
+@pytest.mark.parametrize("tamper_receipt", [False, True])
+def test_signer_requires_exact_verified_sealed_export_before_private_key(
+    research_inputs: dict,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tamper_receipt: bool,
+) -> None:
+    from research_warehouse.canonical import sha256
+    from test_research_warehouse_sealed_export import create_export
+
+    values, sealed = create_export(tmp_path / "real-sealed-export")
+    if tamper_receipt:
+        receipt = sealed.output / "sealed-export-receipt.json"
+        receipt.write_bytes(receipt.read_bytes() + b"tampered\n")
+    prepared_raw = dict(sealed.artifact_raw)
+    if not tamper_receipt:
+        prepared_raw["signal_evidence"] = b"different-from-sealed-export"
+    args = argparse.Namespace(
+        input=research_inputs["private_dir"] / "unused-draft.json",
+        output=research_inputs["private_dir"] / "must-not-exist.json",
+        private_key_file=research_inputs["private_key_path"],
+        trusted_keyring=research_inputs["keyring_path"],
+        expected_trusted_keyring_raw_sha256=(
+            research_inputs["keyring_raw_sha256"]
+        ),
+        expected_signer_sha256=research_inputs["signer_sha256"],
+        expected_custody_root_path_sha256=research_inputs[
+            "custody_root_path_sha256"
+        ],
+        expected_custody_identity_sha256=research_inputs[
+            "custody_identity_sha256"
+        ],
+        sealed_export=sealed.output,
+        sealed_export_trusted_keyring=values["keyring_path"],
+        expected_sealed_export_keyring_raw_sha256=sha256(
+            values["keyring_raw"]
+        ),
+        expected_sealed_export_receipt_raw_sha256=(
+            sealed.receipt_raw_sha256
+        ),
+        **values["artifact_paths"],
+    )
+    private_key_read = False
+
+    def forbidden_private_key_read(_path: Path):
+        nonlocal private_key_read
+        private_key_read = True
+        raise AssertionError("private key read before sealed-export rejection")
+
+    monkeypatch.setattr(signer, "parse_args", lambda: args)
+    monkeypatch.setattr(
+        signer,
+        "verified_signer_source_sha256",
+        lambda _expected: research_inputs["signer_sha256"],
+    )
+    monkeypatch.setattr(signer, "load_json_strict", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        signer,
+        "prepare_unsigned_bundle",
+        lambda *_args, **_kwargs: (
+            {},
+            research_inputs["private_key"].public_key(),
+            prepared_raw,
+        ),
+    )
+    monkeypatch.setattr(signer, "load_private_key", forbidden_private_key_read)
+
+    assert signer.main() == 2
+    assert private_key_read is False
+
+
+def test_signer_enters_private_signing_only_after_exact_sealed_export(
+    research_inputs: dict,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from research_warehouse.canonical import sha256
+    from test_research_warehouse_sealed_export import create_export
+
+    values, sealed = create_export(tmp_path / "real-sealed-export")
+    args = argparse.Namespace(
+        input=research_inputs["private_dir"] / "unused-draft.json",
+        output=research_inputs["private_dir"] / "must-not-exist.json",
+        private_key_file=research_inputs["private_key_path"],
+        trusted_keyring=research_inputs["keyring_path"],
+        expected_trusted_keyring_raw_sha256=(
+            research_inputs["keyring_raw_sha256"]
+        ),
+        expected_signer_sha256=research_inputs["signer_sha256"],
+        expected_custody_root_path_sha256=research_inputs[
+            "custody_root_path_sha256"
+        ],
+        expected_custody_identity_sha256=research_inputs[
+            "custody_identity_sha256"
+        ],
+        sealed_export=sealed.output,
+        sealed_export_trusted_keyring=values["keyring_path"],
+        expected_sealed_export_keyring_raw_sha256=sha256(
+            values["keyring_raw"]
+        ),
+        expected_sealed_export_receipt_raw_sha256=(
+            sealed.receipt_raw_sha256
+        ),
+        **values["artifact_paths"],
+    )
+    private_key_read = False
+
+    def allowed_private_key_read(_path: Path):
+        nonlocal private_key_read
+        private_key_read = True
+        return research_inputs["private_key"]
+
+    monkeypatch.setattr(signer, "parse_args", lambda: args)
+    monkeypatch.setattr(
+        signer,
+        "verified_signer_source_sha256",
+        lambda _expected: research_inputs["signer_sha256"],
+    )
+    monkeypatch.setattr(signer, "load_json_strict", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        signer,
+        "prepare_unsigned_bundle",
+        lambda *_args, **_kwargs: (
+            {},
+            research_inputs["private_key"].public_key(),
+            dict(sealed.artifact_raw),
+        ),
+    )
+    monkeypatch.setattr(signer, "load_private_key", allowed_private_key_read)
+    monkeypatch.setattr(
+        signer,
+        "complete_signature",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            ValueError("stop after private signing boundary")
+        ),
+    )
+
+    assert signer.main() == 2
+    assert private_key_read is True
     assert not args.output.exists()
 
 
