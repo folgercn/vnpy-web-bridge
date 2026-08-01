@@ -59,7 +59,11 @@ from app.services.commodity_c_fast_one_shot_custody import (
 )
 from app.services.commodity_c_fast_shadow import C_FAST_SECTOR_MAP_V1
 from app.services.risk_service import RiskService, risk_service
-from app.services.trade_service import TradeService, trade_service
+from app.services.trade_service import (
+    TradeService,
+    c_fast_order_request_fingerprint,
+    trade_service,
+)
 from app.services.vnpy_rpc_service import VnpyRpcService, rpc_service
 from app.stores.memory_store import memory_store
 
@@ -339,23 +343,36 @@ class CommoditySimNowService:
         self._c_fast_trade_capabilities[trade] = capability
         return capability
 
-    def _c_fast_pre_rpc_guard(self) -> None:
+    def _c_fast_pre_rpc_guard(
+        self,
+        actual_order_request_sha256: str,
+    ) -> None:
         context = getattr(
             self._dispatch_operation_context,
             "c_fast_pre_rpc_guard_context",
             None,
         )
-        if not isinstance(context, tuple) or len(context) != 5:
+        if not isinstance(context, tuple) or len(context) != 6:
             raise CommoditySimNowSafetyError(
                 "C_FAST final guard context 无效"
             )
-        plan, phase, reference, intent, dispatch_abort_epoch = context
+        (
+            plan,
+            phase,
+            reference,
+            intent,
+            expected_order_request_sha256,
+            dispatch_abort_epoch,
+        ) = context
         if (
             plan is not self.current_plan
             or not isinstance(plan, dict)
             or not plan.get("c_fast_shakedown_session_id")
             or not isinstance(intent, dict)
             or intent.get("reference") != reference
+            or not isinstance(actual_order_request_sha256, str)
+            or actual_order_request_sha256
+            != expected_order_request_sha256
         ):
             raise CommoditySimNowSafetyError(
                 "C_FAST final guard ownership 已失效"
@@ -1272,6 +1289,7 @@ class CommoditySimNowService:
                         payload.phase,
                         str(repriced["reference"]),
                         intent,
+                        c_fast_order_request_fingerprint(request),
                         dispatch_abort_epoch,
                     )
                     try:

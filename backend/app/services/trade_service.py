@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import asdict, is_dataclass
 from datetime import datetime
+import hashlib
+import json
 from threading import RLock
 from typing import Any, Callable
 
@@ -41,6 +43,24 @@ ORDER_TYPE_MAP = {
 CANCELABLE_STATUSES = {"submitting", "not_traded", "part_traded"}
 
 _C_FAST_CAPABILITY_CONSTRUCTION_KEY = object()
+
+
+def c_fast_order_request_fingerprint(
+    payload: OrderRequestDTO,
+) -> str:
+    """Canonical identity for every field that can affect one order send."""
+
+    candidate = OrderRequestDTO.model_validate(
+        payload.model_dump(mode="python")
+    )
+    canonical = json.dumps(
+        candidate.model_dump(mode="json"),
+        allow_nan=False,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
 
 
 class _CFastOrderVolumeCapability:
@@ -126,7 +146,7 @@ class TradeService:
         *,
         owner: object,
         capability: object,
-        pre_rpc_guard: Callable[[], Any],
+        pre_rpc_guard: Callable[[str], Any],
         send_linearization_lock: Any,
     ) -> None:
         from app.services.commodity_simnow import (
@@ -199,7 +219,7 @@ class TradeService:
         c_fast_order_volume_capability: object,
         source_ip: str | None = None,
         operator: str = "anonymous",
-        pre_rpc_guard: Callable[[], Any],
+        pre_rpc_guard: Callable[[str], Any],
         send_linearization_lock: Any,
     ) -> dict[str, Any]:
         """Send one C_FAST SimNow child through the capability-only lane."""
@@ -227,7 +247,7 @@ class TradeService:
         *,
         source_ip: str | None,
         operator: str,
-        pre_rpc_guard: Callable[[], Any] | None,
+        pre_rpc_guard: Callable[..., Any] | None,
         send_linearization_lock: Any | None,
         c_fast_order_owner: object | None,
         c_fast_order_volume_capability: object | None,
@@ -253,8 +273,14 @@ class TradeService:
                 raise RuntimeError(
                     "C_FAST order-volume capability is invalid"
                 )
-            order_request = self.to_vnpy_order_request(payload)
-            gateway_name = payload.gateway_name or self.settings.default_gateway_name
+            final_payload = OrderRequestDTO.model_validate(
+                payload.model_dump(mode="python")
+            )
+            order_request = self.to_vnpy_order_request(final_payload)
+            gateway_name = (
+                final_payload.gateway_name
+                or self.settings.default_gateway_name
+            )
             if pre_rpc_guard is None:
                 vt_orderid = self.rpc.send_order(
                     order_request, gateway_name
@@ -267,10 +293,34 @@ class TradeService:
                     raise RuntimeError(
                         "guarded non-idempotent RPC unavailable"
                     )
+                final_guard: Callable[[], Any] = pre_rpc_guard
+                if c_fast_order_volume_capability is not None:
+                    if c_fast_order_owner is None:
+                        raise RuntimeError(
+                            "C_FAST order-volume capability is invalid"
+                        )
+                    actual_order_request_sha256 = (
+                        c_fast_order_request_fingerprint(final_payload)
+                    )
+
+                    def final_guard() -> Any:
+                        self._validate_c_fast_send_contract(
+                            final_payload,
+                            owner=c_fast_order_owner,
+                            capability=c_fast_order_volume_capability,
+                            pre_rpc_guard=pre_rpc_guard,
+                            send_linearization_lock=(
+                                send_linearization_lock
+                            ),
+                        )
+                        return pre_rpc_guard(
+                            actual_order_request_sha256
+                        )
+
                 vt_orderid = guarded_send(
                     order_request,
                     gateway_name,
-                    pre_rpc_guard,
+                    final_guard,
                     linearization_lock=send_linearization_lock,
                 )
             result = {"vt_orderid": vt_orderid, "accepted": True}
