@@ -129,10 +129,42 @@ print("COMMODITY_C_FAST_SIMNOW_EXECUTION_ONE_SHOT_EXPECTED_IDENTITY_SHA256="
 PY
 ```
 
-当前 PR 不修改部署镜像。若运行环境没有把原 PR #165 verifier 模块作为
-`PYTHONPATH` 中的受审代码提供，显式启用 bridge 会在 startup 失败；这是预期的
-fail-closed 行为，不能用 embedded hash 或关闭 full verifier 来绕过。部署打包应
-由独立 issue / 人工审批处理。
+production image 只打包 #165/#178 runtime 所需的三个 verifier 模块和七份
+schema；Research/Acceptance/Execution signer、private key loader、producer 和
+其余 `scripts/` 不进入镜像。镜像构建会执行
+`app.services.commodity_c_fast_permit_runtime_smoke`，确认 full #165 verifier 可
+绑定、schema 路径闭合且三个运行开关默认均为 `false`。任何模块/schema 缺失、
+路径漂移或 signer 意外进入镜像都会使构建/测试失败。
+
+base `deployments/docker-compose.prod.yml` 不包含 C_FAST permit custody mount。
+如需先做默认关闭的只读部署预检，必须显式叠加：
+
+```bash
+docker compose \
+  -f deployments/docker-compose.prod.yml \
+  -f deployments/docker-compose.c-fast-simnow-permit.yml \
+  config
+```
+
+overlay 要求人工提供四个已经存在的绝对 host directory；`create_host_path=false`
+禁止 Compose 隐式创建或替换 custody：
+
+- `COMMODITY_C_FAST_SIMNOW_ARTIFACTS_HOST_DIR`：#160 install chain、#165
+  Acceptance/consume/receipt、九件 artifacts 和 signed Execution Permit，只读；
+- `COMMODITY_C_FAST_SIMNOW_KEYRINGS_HOST_DIR`：Research/Acceptance/Execution
+  public keyrings，只读；
+- `COMMODITY_C_FAST_SIMNOW_SNAPSHOT_HOST_DIR`：已安装 shakedown snapshot，只读；
+- `COMMODITY_C_FAST_SIMNOW_ONE_SHOT_HOST_DIR`：独立 root-owned `0700` one-shot
+  custody，唯一可写 mount。
+
+container target 固定为 `/run/c-fast-simnow/{artifacts,keyrings,snapshot,one-shot}`。
+路径、identity 和 raw SHA pins 必须针对 container 内 target 重新生成，不能复制
+host pathname hash。该 overlay 仍强制
+`COMMODITY_C_FAST_SIMNOW_SHAKEDOWN_ENABLED=false`、
+`COMMODITY_C_FAST_SIMNOW_AUTO_DISPATCH_ENABLED=false` 和
+`COMMODITY_C_FAST_SIMNOW_EXECUTION_PERMIT_ENABLED=false`；它只允许挂载后执行
+只读检查，不提供启用或下单入口。后续短时启用必须使用另行人工批准的私有
+override/release，并重新完成全链 preflight。
 
 ## 6. 一次性消费与重放
 
