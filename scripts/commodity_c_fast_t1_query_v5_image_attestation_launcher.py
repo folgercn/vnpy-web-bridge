@@ -1,4 +1,4 @@
-"""Isolated trust-root launcher for query-v5 OCI composition attestation."""
+"""Isolated query-v5 launcher whose runtime trust is established externally."""
 
 from __future__ import annotations
 
@@ -598,7 +598,7 @@ LOCAL_MODULE_PATHS = {
 
 
 class QueryV5AttestationLauncherError(RuntimeError):
-    """The independently pinned execution closure failed closed."""
+    """The pinned execution-closure self-check failed closed."""
 
 
 def _canonical(value: Any) -> bytes:
@@ -1561,7 +1561,7 @@ def main() -> int:
             source_root,
             dependency_root,
         )
-        module.install_verified_runtime_identity(
+        module.install_runtime_identity_observation(
             module.QueryV5AttestationRuntimeIdentity(**identity),
             revalidate,
         )
@@ -1569,7 +1569,7 @@ def main() -> int:
         return int(module.main())
     except (QueryV5AttestationLauncherError, OSError, ValueError) as exc:
         print(
-            f"query-v5 image attestation trusted launcher failed: {exc}",
+            f"query-v5 image attestation launcher self-check failed: {exc}",
             file=sys.stderr,
         )
         return 2

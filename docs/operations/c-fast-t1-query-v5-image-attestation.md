@@ -63,7 +63,7 @@ cp docs/operations/c-fast-t1-query-v5-external-image-evidence.template.json \
   /private/c-fast-query-v5-input/external-image-evidence.json
 ```
 
-### 独立 attestation runtime trust root
+### Attestation runtime closure 与外部 trust boundary
 
 正式入口禁止直接运行 verifier、shebang 或依赖 `PYTHONPATH`。独立 release 必须把
 launcher、v5/v4 verifier、v4 delegate、v5/v4 validators、全部 schemas 与固定第三方

@@ -184,7 +184,7 @@ def _runtime_identity_payload(
     return payload
 
 
-def install_verified_runtime_identity(
+def install_runtime_identity_observation(
     identity: QueryV5AttestationRuntimeIdentity,
     revalidator: Callable[[], None],
 ) -> None:
@@ -204,7 +204,10 @@ def _require_runtime_identity() -> QueryV5AttestationRuntimeIdentity:
     identity = _ACTIVE_RUNTIME_IDENTITY
     revalidator = _ACTIVE_RUNTIME_REVALIDATOR
     if identity is None or not callable(revalidator):
-        _fail("query-v5 attestation requires the independently pinned launcher")
+        _fail(
+            "query-v5 attestation requires the pinned launcher and external "
+            "exact-RepoDigest verification"
+        )
     _validate_runtime_identity(identity)
     revalidator()
     return identity
