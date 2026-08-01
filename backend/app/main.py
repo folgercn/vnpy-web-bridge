@@ -13,6 +13,7 @@ from app.api import (
     routes_account,
     routes_auth,
     routes_calendar,
+    routes_commodity_c_fast_execution_quality,
     routes_commodity_c_fast_shadow,
     routes_commodity_simnow,
     routes_mak_v2_observer,
@@ -83,6 +84,10 @@ app.include_router(routes_status.router, prefix="/api")
 app.include_router(routes_auth.router, prefix="/api")
 app.include_router(routes_market.router, prefix="/api")
 app.include_router(routes_commodity_simnow.router, prefix="/api")
+app.include_router(
+    routes_commodity_c_fast_execution_quality.router,
+    prefix="/api",
+)
 app.include_router(routes_commodity_c_fast_shadow.router, prefix="/api")
 app.include_router(routes_mak_v2_observer.router, prefix="/api")
 app.include_router(routes_monitoring.router, prefix="/api")

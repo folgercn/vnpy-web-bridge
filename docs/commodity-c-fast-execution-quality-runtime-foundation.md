@@ -18,6 +18,9 @@ durable sidecar 之外缺失的 **Settings、startup 生命周期、完整重验
 - verifier 失败只把本 runtime 置为 `BLOCKED_FULL_REVALIDATION_FAILED`；不阻断
   baseline、其他 Shadow、行情持久化或 CommoditySimNow。
 - shutdown 清除内存中的 revalidation receipt。
+- 认证后的 viewer/trader/admin 可读取独立 status；只有 admin 可触发 reload
+  或 recovery。API 不提供 start、execute、dispatch、order 或 position mutation
+  路由，且两个 lifecycle mutation 仍只返回 fail-closed revalidation 状态。
 
 ## 能力隔离
 
@@ -79,7 +82,7 @@ receipt trigger/time 不匹配、过期、hash 不一致、authority literal 不
 2. exact snapshot/plan/policy/spec/custody 的文件级完整 verifier；
 3. 与现有 Tick fan-out 的只读 listener 接口及 exact-contract subscription；
 4. decision + `250ms/1s/5s/30s/60s` worker 与 durable sidecar restart replay；
-5. 只读 repository/QuestDB evidence adapter、API/RBAC/监控；
+5. intents/execution-quality/evidence-export 的只读 repository/QuestDB API 与监控；
 6. M2 一个完整 execution window 的真实零订单证据。
 
 在上述能力全部构建并经过真实验收前，
