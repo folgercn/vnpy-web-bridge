@@ -8,6 +8,7 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import socket
 import subprocess
 import sys
 import tarfile
@@ -23,7 +24,9 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 import commodity_c_fast_t1_query_v5_release as subject  # noqa: E402
+import commodity_c_fast_t1_query_v5_runtime as runtime_contract  # noqa: E402
 import commodity_c_fast_t1_query_v5_sign as signer  # noqa: E402
+import commodity_c_fast_t1_one_shot as one_shot  # noqa: E402
 
 
 NOW = datetime(2026, 8, 1, 12, 0, tzinfo=timezone.utc)
@@ -579,6 +582,154 @@ def _run_gate(tmp_path: Path, fixture: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def _runtime_paths(fixture: dict[str, Any]) -> runtime_contract.GateReplayPaths:
+    return runtime_contract.GateReplayPaths(
+        provenance_path=fixture["provenance_path"],
+        provenance_keyring_path=fixture["provenance_keyring_path"],
+        composition_path=fixture["composition_path"],
+        final_oci_layout_path=fixture["final_oci_path"],
+        composition_replay=fixture["composition_replay"],
+        release_path=fixture["release_path"],
+        release_keyring_path=fixture["release_keyring_path"],
+        expected_provenance_keyring_sha256=fixture["provenance_keyring_hash"],
+        expected_release_keyring_sha256=fixture["release_keyring_hash"],
+        expected_source_commit_sha=SOURCE_COMMIT,
+        expected_image_digest=fixture["expected_image_digest"],
+    )
+
+
+def _terminal_record(state: str) -> dict[str, Any]:
+    schema = json.loads(
+        runtime_contract.TERMINAL_SCHEMA_PATH.read_text(encoding="utf-8")
+    )
+    definitions = schema["$defs"]
+
+    def example(specification: dict[str, Any]) -> Any:
+        if "const" in specification:
+            return copy.deepcopy(specification["const"])
+        if "$ref" in specification:
+            return example(definitions[specification["$ref"].rsplit("/", 1)[-1]])
+        if "enum" in specification:
+            return copy.deepcopy(specification["enum"][0])
+        kind = specification.get("type")
+        if isinstance(kind, list):
+            if "null" in kind:
+                return None
+            kind = kind[0]
+        if kind == "string":
+            if specification.get("format") == "date-time":
+                return "2026-08-01T12:00:00+00:00"
+            pattern = specification.get("pattern", "")
+            if pattern == "^[0-9a-f]{64}$":
+                return "a" * 64
+            if pattern == "^[0-9a-f]{40}$":
+                return "a" * 40
+            if pattern == "^sha256:[0-9a-f]{64}$":
+                return "sha256:" + "a" * 64
+            if pattern == "^[^@\\s]+@sha256:[0-9a-f]{64}$":
+                return "registry.invalid/query-v5@sha256:" + "a" * 64
+            if pattern == "^attempt-[0-9a-f]{64}$":
+                return "attempt-" + "a" * 64
+            return "test-value"
+        if kind == "integer":
+            return 0
+        if kind == "boolean":
+            return False
+        if kind == "object":
+            return {
+                name: example(specification["properties"][name])
+                for name in specification.get("required", [])
+            }
+        raise AssertionError(f"no test value for schema property: {specification}")
+
+    payload = {name: example(schema["properties"][name]) for name in schema["required"]}
+    payload.update(
+        {
+            "release_id": "release-valid-01",
+            "attempt_id": "attempt-" + "a" * 64,
+            "runtime_pin_generation_id": "runtime-pins-01",
+            "started_at": "2026-08-01T12:00:00+00:00",
+            "ended_at": "2026-08-01T12:01:00+00:00",
+            "terminal_state": state,
+        }
+    )
+    if state in {"COMPLETED_PASS", "COMPLETED_BLOCKED"}:
+        payload.update(
+            {
+                "error_code": None,
+                "query_execution_state": "COMPLETE",
+                "final_revalidation_at": "2026-08-01T12:00:10+00:00",
+                "child_exit_code": 0 if state == "COMPLETED_PASS" else 1,
+                "child_signal": None,
+                "launch_marker_integrity": "VERIFIED",
+                "production_query_attempted": True,
+                "production_query_completed": True,
+                "readonly_proof_verified": True,
+                "readonly_principal_verified": True,
+                "endpoint_verified": True,
+                "p0_pass": state == "COMPLETED_PASS",
+                "database_mutations_observed": 0,
+            }
+        )
+        for name in (
+            "query_child_started_raw_sha256",
+            "query_child_started_canonical_sha256",
+            "query_child_invocation_raw_sha256",
+            "query_child_invocation_canonical_sha256",
+            "audit_invocation_raw_sha256",
+            "audit_invocation_canonical_sha256",
+            "pre_connect_gate_raw_sha256",
+            "pre_connect_gate_canonical_sha256",
+            "parent_launch_capability_sha256",
+            "launch_marker_identity_sha256",
+            "launch_capability_binding_sha256",
+            "readonly_preflight_canonical_sha256",
+            "readonly_postflight_canonical_sha256",
+        ):
+            payload[name] = "b" * 64
+        payload["artifact_sha256"] = {
+            name: "c" * 64
+            for name in ("audit_json", "audit_csv", "audit_markdown", "readonly_proof")
+        }
+    elif state == "FAILED_BEFORE_CHILD":
+        payload.update(
+            {
+                "error_code": "PRE_CHILD_VALIDATION_FAILED",
+                "query_execution_state": "NOT_STARTED",
+                "final_revalidation_at": None,
+                "child_exit_code": None,
+                "child_signal": None,
+                "launch_marker_integrity": "NOT_CREATED",
+                "production_query_attempted": False,
+                "production_query_completed": False,
+                "readonly_proof_verified": False,
+                "readonly_principal_verified": False,
+                "endpoint_verified": False,
+                "p0_pass": None,
+                "database_mutations_observed": None,
+            }
+        )
+    else:
+        payload.update(
+            {
+                "error_code": "CHILD_OUTCOME_UNKNOWN",
+                "query_execution_state": "OUTCOME_UNKNOWN",
+                "final_revalidation_at": None,
+                "child_exit_code": None,
+                "child_signal": None,
+                "launch_marker_integrity": "MISSING",
+                "production_query_attempted": True,
+                "production_query_completed": None,
+                "readonly_proof_verified": False,
+                "readonly_principal_verified": False,
+                "endpoint_verified": False,
+                "p0_pass": None,
+                "database_mutations_observed": None,
+            }
+        )
+    return payload
+
+
 def test_round_trip_stops_before_dsn_and_has_no_authority(
     tmp_path: Path,
 ) -> None:
@@ -885,3 +1036,206 @@ def test_operator_templates_are_unsigned_pending_and_fail_closed() -> None:
             subject.RELEASE_SCHEMA_PATH,
             "query-v5 release template",
         )
+
+
+def test_runtime_contract_replays_receipt_and_remains_non_executable(
+    tmp_path: Path,
+) -> None:
+    fixture = _fixture(tmp_path)
+    _run_gate(tmp_path, fixture)
+    replay = runtime_contract.replay_pre_dsn_gate(
+        _runtime_paths(fixture),
+        (tmp_path / "pre-dsn-receipt.json").resolve(),
+        now=NOW,
+    )
+    report = runtime_contract.build_blocked_report(replay)
+
+    assert report["status"] == runtime_contract.STATUS
+    assert report["fact_scope"] == "THIS_VERIFY_ONLY_RUNNER_PROCESS_ONLY"
+    assert report["attempt_state"] == "NOT_INSPECTED"
+    assert report["this_runner_release_consumed"] is False
+    assert report["this_runner_custody_opened"] is False
+    assert report["this_runner_dsn_metadata_read"] is False
+    assert report["this_runner_dsn_secret_read"] is False
+    assert report["this_runner_query_child_started"] is False
+    assert report["this_runner_network_attempted"] is False
+    assert report["this_runner_production_query_attempted"] is False
+    assert report["authority_granted"] is False
+    assert set(report["missing_release_bindings"]) == (
+        runtime_contract.REQUIRED_FUTURE_RELEASE_BINDINGS
+    )
+
+
+def test_runtime_contract_rejects_receipt_splice(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path)
+    receipt = _run_gate(tmp_path, fixture)
+    receipt["runtime_image_id"] = "sha256:" + "9" * 64
+    _write(
+        tmp_path / "spliced-receipt.json",
+        _json_bytes(receipt),
+        private=True,
+    )
+
+    with pytest.raises(
+        runtime_contract.QueryV5RuntimeError,
+        match="exact gate replay",
+    ):
+        runtime_contract.replay_pre_dsn_gate(
+            _runtime_paths(fixture),
+            tmp_path / "spliced-receipt.json",
+            now=NOW,
+        )
+
+
+def test_runtime_lifecycle_schemas_are_strict_and_secret_free() -> None:
+    hashes = runtime_contract.validate_lifecycle_contract_schemas()
+    assert set(hashes) == {
+        "consume_schema_sha256",
+        "child_started_schema_sha256",
+        "terminal_schema_sha256",
+    }
+    for path in (
+        runtime_contract.CONSUME_SCHEMA_PATH,
+        runtime_contract.CHILD_STARTED_SCHEMA_PATH,
+        runtime_contract.TERMINAL_SCHEMA_PATH,
+    ):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        assert payload["additionalProperties"] is False
+        assert "v5" in payload["properties"]["schema_version"]["const"]
+        serialized = json.dumps(payload, sort_keys=True)
+        assert "dsn_raw" not in serialized
+        assert "dsn_sha256" not in serialized
+        assert "credential" not in serialized
+        assert "dsn_file_identity_attestation_raw_sha256" in serialized
+
+
+def test_runtime_cli_exposes_no_consume_custody_dsn_or_child_path() -> None:
+    source = Path(runtime_contract.__file__).read_text(encoding="utf-8")
+    assert "execute_one_shot" not in source
+    assert "ChildExecutor" not in source
+    assert "--custody" not in source
+    assert "--dsn-file" not in source
+    assert "--query-child" not in source
+    assert "write_json_create_only" not in source
+
+
+def test_terminal_semantics_accept_complete_blocked_and_conservative_failures() -> None:
+    for state in (
+        "COMPLETED_PASS",
+        "COMPLETED_BLOCKED",
+        "FAILED_BEFORE_CHILD",
+        "OUTCOME_UNKNOWN",
+    ):
+        runtime_contract.validate_terminal_semantics(_terminal_record(state))
+
+
+@pytest.mark.parametrize(
+    ("state", "mutations"),
+    (
+        (
+            "COMPLETED_PASS",
+            {
+                "p0_pass": None,
+                "final_revalidation_at": None,
+                "child_signal": 9,
+                "artifact_sha256": {
+                    "audit_json": None,
+                    "audit_csv": None,
+                    "audit_markdown": None,
+                    "readonly_proof": None,
+                },
+            },
+        ),
+        (
+            "FAILED_BEFORE_CHILD",
+            {
+                "error_code": None,
+                "artifact_sha256": {
+                    "audit_json": "d" * 64,
+                    "audit_csv": "d" * 64,
+                    "audit_markdown": "d" * 64,
+                    "readonly_proof": "d" * 64,
+                },
+            },
+        ),
+        (
+            "OUTCOME_UNKNOWN",
+            {
+                "error_code": None,
+                "readonly_proof_verified": True,
+                "readonly_principal_verified": True,
+                "endpoint_verified": True,
+            },
+        ),
+    ),
+)
+def test_terminal_semantics_reject_reviewer_contradictions(
+    state: str,
+    mutations: dict[str, Any],
+) -> None:
+    payload = _terminal_record(state)
+    payload.update(mutations)
+    with pytest.raises(runtime_contract.QueryV5RuntimeError):
+        runtime_contract.validate_terminal_semantics(payload)
+
+
+def test_terminal_semantics_rejects_clock_rollback_and_dual_child_outcome() -> None:
+    completed = _terminal_record("COMPLETED_PASS")
+    completed["final_revalidation_at"] = "2026-08-01T11:59:59+00:00"
+    with pytest.raises(runtime_contract.QueryV5RuntimeError):
+        runtime_contract.validate_terminal_semantics(completed)
+
+    unknown = _terminal_record("OUTCOME_UNKNOWN")
+    unknown["query_child_started_raw_sha256"] = None
+    unknown["query_child_started_canonical_sha256"] = None
+    runtime_contract.validate_terminal_semantics(unknown)
+    unknown["query_child_started_raw_sha256"] = "e" * 64
+    with pytest.raises(runtime_contract.QueryV5RuntimeError):
+        runtime_contract.validate_terminal_semantics(unknown)
+    unknown["query_child_started_canonical_sha256"] = "e" * 64
+    unknown["child_exit_code"] = 2
+    unknown["child_signal"] = 9
+    with pytest.raises(runtime_contract.QueryV5RuntimeError):
+        runtime_contract.validate_terminal_semantics(unknown)
+
+
+@pytest.mark.parametrize(
+    ("state", "wrong_exit"),
+    (("COMPLETED_PASS", 1), ("COMPLETED_BLOCKED", 0)),
+)
+def test_terminal_semantics_rejects_swapped_exit_and_p0_mapping(
+    state: str,
+    wrong_exit: int,
+) -> None:
+    payload = _terminal_record(state)
+    payload["child_exit_code"] = wrong_exit
+    with pytest.raises(runtime_contract.QueryV5RuntimeError):
+        runtime_contract.validate_terminal_semantics(payload)
+
+
+def test_runtime_replay_call_graph_cannot_open_custody_write_or_connect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _fixture(tmp_path)
+    _run_gate(tmp_path, fixture)
+
+    def forbidden(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("forbidden runtime capability was called")
+
+    monkeypatch.setattr(one_shot, "open_custody_guard", forbidden)
+    monkeypatch.setattr(one_shot, "write_json_create_only_at", forbidden)
+    monkeypatch.setattr(subject, "write_json_create_only", forbidden)
+    monkeypatch.setattr(socket, "create_connection", forbidden)
+    monkeypatch.setattr(subprocess, "Popen", forbidden)
+    monkeypatch.setattr(Path, "write_bytes", forbidden)
+    monkeypatch.setattr(Path, "write_text", forbidden)
+
+    replay = runtime_contract.replay_pre_dsn_gate(
+        _runtime_paths(fixture),
+        tmp_path / "pre-dsn-receipt.json",
+        now=NOW,
+    )
+    report = runtime_contract.build_blocked_report(replay)
+    assert report["runtime_execution_ready"] is False
+    assert report["this_runner_release_consumed"] is False
