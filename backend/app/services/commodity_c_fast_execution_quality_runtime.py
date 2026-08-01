@@ -130,6 +130,18 @@ class CommodityCFastExecutionQualityRuntime:
         with self._lock:
             return self._status_locked()
 
+    def current_revalidation_receipt(
+        self,
+    ) -> CFastExecutionQualityRuntimeRevalidationDTO:
+        """Return an immutable copy only after the current lifecycle passed."""
+
+        with self._lock:
+            if not self._started or self._receipt is None:
+                raise CFastExecutionQualityRuntimeError(
+                    "CURRENT_REVALIDATION_RECEIPT_UNAVAILABLE"
+                )
+            return self._receipt.model_copy(deep=True)
+
     def _run_lifecycle_revalidation(
         self,
         trigger: RevalidationTrigger,
