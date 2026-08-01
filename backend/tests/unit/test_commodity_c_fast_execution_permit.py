@@ -6,6 +6,7 @@ from datetime import timedelta
 from pathlib import Path
 
 import pytest
+import app.services.commodity_c_fast_execution_permit as execution_permit_module
 from app.core.config import Settings
 from app.schemas.commodity_c_fast_shadow import (
     CommodityCFastShakedownSnapshotDTO,
@@ -46,6 +47,39 @@ class StaticEvidence:
 def write_exact(path: Path, payload: dict) -> None:
     path.write_bytes(canonical_json(payload) + b"\n")
     path.chmod(0o600)
+
+
+class _StatOverride:
+    def __init__(self, source: object, **overrides: int) -> None:
+        self._source = source
+        self._overrides = overrides
+
+    def __getattr__(self, name: str) -> object:
+        if name in self._overrides:
+            return self._overrides[name]
+        return getattr(self._source, name)
+
+
+def _mutate_second_fstat(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    field: str,
+) -> None:
+    original = execution_permit_module.os.fstat
+    calls = 0
+
+    def mutated(descriptor: int) -> object:
+        nonlocal calls
+        metadata = original(descriptor)
+        calls += 1
+        if calls == 2:
+            return _StatOverride(
+                metadata,
+                **{field: getattr(metadata, field) + 1},
+            )
+        return metadata
+
+    monkeypatch.setattr(execution_permit_module.os, "fstat", mutated)
 
 
 def permit_fixture(tmp_path: Path) -> dict:
@@ -189,6 +223,47 @@ def test_execution_permit_verifies_exact_acceptance_and_snapshot(
     assert permit.production_allowed is False
     assert permit.live_trading_authorized is False
     assert permit.automatic_promotion_authorized is False
+
+
+def test_exact_canonical_reader_ignores_atime_only_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "canonical.json"
+    payload = {"value": "stable"}
+    write_exact(path, payload)
+    _mutate_second_fstat(monkeypatch, field="st_atime_ns")
+
+    parsed, raw = execution_permit_module._read_exact_canonical_json(
+        path,
+        "TEST_ARTIFACT",
+    )
+
+    assert parsed == payload
+    assert raw == canonical_json(payload) + b"\n"
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["st_ino", "st_size", "st_mtime_ns", "st_ctime_ns"],
+)
+def test_exact_canonical_reader_rejects_security_metadata_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+) -> None:
+    path = tmp_path / "canonical.json"
+    write_exact(path, {"value": "changed"})
+    _mutate_second_fstat(monkeypatch, field=field)
+
+    with pytest.raises(
+        CommodityCFastExecutionPermitError,
+        match="TEST_ARTIFACT_CHANGED_DURING_READ",
+    ):
+        execution_permit_module._read_exact_canonical_json(
+            path,
+            "TEST_ARTIFACT",
+        )
 
 
 @pytest.mark.parametrize("source_domain", ["research", "acceptance"])
