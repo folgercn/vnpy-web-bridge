@@ -300,7 +300,9 @@ def attest_real_builds(
         }
         v5_evidence = root / "query-v5-evidence.json"
         v5_evidence.write_bytes(_canonical(evidence))
-        query_v5.install_verified_runtime_identity(_ci_runtime_identity(), lambda: None)
+        query_v5.install_runtime_identity_observation(
+            _ci_runtime_identity(), lambda: None
+        )
         return query_v5.verify_query_v5_image_evidence(
             v4_evidence,
             v4_bundle,
