@@ -37,19 +37,24 @@ sidecar，输出只有 canonical evidence artifact，不需要 API、QuestDB、R
 
 `OfflineExecutionQualitySidecar.recover_at_tip` 会在完整 journal fresh recovery 后，只对
 指定 record count 与 exact tip 的历史前缀再次运行语义 replay。因此 collection 继续
-追加后，旧 create-only export 仍可对原 tip 验证；不存在的 tip、错误 count、tamper 或
-cross-journal splice 会 fail closed。
+追加后，旧 create-only export 仍可对原 tip 验证；不存在的 tip、错误 count、非协调的
+bytes/hash drift 或 cross-journal splice 会 fail closed。这里的 hash chain 没有密钥和
+external custody anchor，不能检测同一 UID 对 source journal 与 hashes 的协调重写。
 
 ## create-only export custody
 
 `CreateOnlyExecutionQualityEvidenceExportStore` 要求调用方预建独立绝对路径：
 
-- 目录必须为当前用户持有的真实目录，权限精确为 `0700`；
+- 目录只建立当前进程 UID 的 owner/mode boundary：必须由当前 UID 持有，权限精确为
+  `0700`；它不等同于 root UID、外部 custody 或不可变存储；
 - export root 与 source journal root 不得相同、互为父子目录；
 - `.export.lock` 必须为当前用户持有的 `0600` 单链接普通空文件；
 - artifact 名称只由 generation hash 与 source journal tip 构成；
-- JSON 使用 canonical encoding、`O_EXCL + O_NOFOLLOW`、`0600`、file fsync 与 directory
-  fsync，不覆盖已有 bytes；
+- JSON 先写入同目录唯一 `0600 O_EXCL + O_NOFOLLOW` temporary file 并 file fsync，再用
+  hard-link no-replace 语义原子创建 final path，最后 directory fsync 并清理 temporary；
+- constructor、publisher 与 loader 使用同一 `.export.lock` flock 协议；restart 会在独占
+  lock 内清理结构合法的 pre-link partial temporary，或移除已完成 hard-link 后残留的
+  temporary，不会把 partial bytes 暴露到 final artifact path；
 - 同 generation/tip 重复发布 exact bytes 返回 `ALREADY_PRESENT`；不同 bytes 冲突；
 - source 在写入期间可以继续前进；artifact 只绑定 build 时 fresh-recover 得到的 exact
   tip，之后仍按该历史 prefix 验证，不宣称是 API 返回瞬间的 latest tip。
@@ -76,6 +81,8 @@ positions_modified=0
 所有 collection、activation、dispatch、order、position、database、deployment、
 replacement 与 production authority 均为 `false`。本模块不导入 Settings、main、
 QuestDB、VnpyRpcService、TradeService、Gateway、account 或 position capability。
+本地 create-only 是应用协议与 owner/mode boundary，不宣称可以抵抗同一 UID 的协调
+rewrite；真实 tamper-evident custody 仍需后续 external signed anchor。
 
 `ALL_TARGETS_SEALED_LOCAL_JOURNAL_ONLY` 只说明该本地 journal 的 decision 与
 250ms/1s/5s/30s/60s target 均已 sealed。它不能替代真实 signed M2 window、部署 SHA、

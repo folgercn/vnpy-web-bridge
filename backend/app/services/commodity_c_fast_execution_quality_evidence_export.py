@@ -4,6 +4,7 @@ import fcntl
 import json
 import os
 import re
+import secrets
 import stat
 from pathlib import Path
 from typing import Any, Mapping
@@ -32,6 +33,10 @@ _LOCK_NAME = ".export.lock"
 _EXPORT_NAME = re.compile(
     r"^cfast-execution-quality-evidence-export-v1-"
     r"([0-9a-f]{64})-([0-9a-f]{64})\.json$"
+)
+_TEMP_NAME = re.compile(
+    r"^\.((?:cfast-execution-quality-evidence-export-v1-)"
+    r"[0-9a-f]{64}-[0-9a-f]{64}\.json)\.tmp-([0-9a-f]{32})$"
 )
 _TARGETS = (
     ("decision", 0),
@@ -193,8 +198,8 @@ class CreateOnlyExecutionQualityEvidenceExportStore:
         self.root = expanded
         self._root_identity = _directory_identity(metadata)
         root_fd = self._open_root()
+        lock_fd: int | None = None
         try:
-            self._validate_artifacts(root_fd)
             lock_fd = self._open_or_create_lock(root_fd)
             try:
                 try:
@@ -204,17 +209,30 @@ class CreateOnlyExecutionQualityEvidenceExportStore:
                         "EVIDENCE_EXPORT_LOCK_INVALID"
                     ) from exc
                 self._assert_lock(root_fd, lock_fd)
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_EX)
+                except OSError as exc:
+                    raise CFastExecutionQualityEvidenceExportError(
+                        "EVIDENCE_EXPORT_LOCK_ACQUIRE_FAILED"
+                    ) from exc
+                self._assert_lock(root_fd, lock_fd)
+                self._assert_root(root_fd)
+                self._recover_temporary_artifacts(root_fd)
+                self._validate_artifacts(root_fd)
+                self._assert_lock(root_fd, lock_fd)
+                self._assert_root(root_fd)
+                try:
+                    os.fsync(root_fd)
+                except OSError as exc:
+                    raise CFastExecutionQualityEvidenceExportError(
+                        "EVIDENCE_EXPORT_ROOT_FSYNC_FAILED"
+                    ) from exc
             finally:
                 os.close(lock_fd)
-            self._validate_artifacts(root_fd)
-            self._assert_root(root_fd)
-            try:
-                os.fsync(root_fd)
-            except OSError as exc:
-                raise CFastExecutionQualityEvidenceExportError(
-                    "EVIDENCE_EXPORT_ROOT_FSYNC_FAILED"
-                ) from exc
+                lock_fd = None
         finally:
+            if lock_fd is not None:
+                os.close(lock_fd)
             os.close(root_fd)
 
     def publish(
@@ -248,8 +266,15 @@ class CreateOnlyExecutionQualityEvidenceExportStore:
             self._validate_artifacts(root_fd)
             existing = self._read_optional(root_fd, filename)
             if existing is None:
-                self._write_create_only(root_fd, filename, raw)
-                artifact_state = "CREATED"
+                if self._artifact_count(root_fd) >= MAX_EXPORT_FILES:
+                    raise CFastExecutionQualityEvidenceExportError(
+                        "EVIDENCE_EXPORT_FILE_LIMIT"
+                    )
+                artifact_state = self._write_create_only(
+                    root_fd,
+                    filename,
+                    raw,
+                )
             elif existing == raw:
                 artifact_state = "ALREADY_PRESENT"
             else:
@@ -448,6 +473,75 @@ class CreateOnlyExecutionQualityEvidenceExportStore:
                     "EVIDENCE_EXPORT_ARTIFACT_INVALID"
                 )
 
+    @staticmethod
+    def _artifact_count(root_fd: int) -> int:
+        try:
+            return sum(name != _LOCK_NAME for name in os.listdir(root_fd))
+        except OSError as exc:
+            raise CFastExecutionQualityEvidenceExportError(
+                "EVIDENCE_EXPORT_ROOT_LIST_FAILED"
+            ) from exc
+
+    def _recover_temporary_artifacts(self, root_fd: int) -> None:
+        """Remove only structurally valid remnants of interrupted publishes."""
+
+        try:
+            names = os.listdir(root_fd)
+        except OSError as exc:
+            raise CFastExecutionQualityEvidenceExportError(
+                "EVIDENCE_EXPORT_ROOT_LIST_FAILED"
+            ) from exc
+        if sum(name != _LOCK_NAME for name in names) > MAX_EXPORT_FILES + 1:
+            raise CFastExecutionQualityEvidenceExportError("EVIDENCE_EXPORT_FILE_LIMIT")
+        changed = False
+        for name in names:
+            match = _TEMP_NAME.fullmatch(name)
+            if match is None:
+                continue
+            final_name = match.group(1)
+            try:
+                temporary = os.stat(
+                    name,
+                    dir_fd=root_fd,
+                    follow_symlinks=False,
+                )
+                _validate_temporary_file(temporary)
+                try:
+                    final = os.stat(
+                        final_name,
+                        dir_fd=root_fd,
+                        follow_symlinks=False,
+                    )
+                except FileNotFoundError:
+                    final = None
+                if final is None:
+                    if temporary.st_nlink != 1:
+                        raise ValueError("unpaired temporary hard link")
+                else:
+                    _validate_published_file(final)
+                    same_file = (
+                        temporary.st_dev == final.st_dev
+                        and temporary.st_ino == final.st_ino
+                    )
+                    if same_file:
+                        if temporary.st_nlink != 2 or final.st_nlink != 2:
+                            raise ValueError("published hard link count invalid")
+                    elif temporary.st_nlink != 1 or final.st_nlink != 1:
+                        raise ValueError("temporary hard link conflict")
+                os.unlink(name, dir_fd=root_fd)
+                changed = True
+            except (OSError, ValueError) as exc:
+                raise CFastExecutionQualityEvidenceExportError(
+                    "EVIDENCE_EXPORT_TEMP_RECOVERY_FAILED"
+                ) from exc
+        if changed:
+            try:
+                os.fsync(root_fd)
+            except OSError as exc:
+                raise CFastExecutionQualityEvidenceExportError(
+                    "EVIDENCE_EXPORT_ROOT_FSYNC_FAILED"
+                ) from exc
+
     def _read_optional(self, root_fd: int, filename: str) -> bytes | None:
         try:
             return self._read_required(root_fd, filename)
@@ -514,15 +608,22 @@ class CreateOnlyExecutionQualityEvidenceExportStore:
                 os.close(descriptor)
 
     @staticmethod
-    def _write_create_only(root_fd: int, filename: str, raw: bytes) -> None:
+    def _write_create_only(
+        root_fd: int,
+        filename: str,
+        raw: bytes,
+    ) -> str:
+        temporary_name = f".{filename}.tmp-{secrets.token_hex(16)}"
         descriptor: int | None = None
+        temporary_created = False
         try:
             descriptor = os.open(
-                filename,
+                temporary_name,
                 (os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC),
                 0o600,
                 dir_fd=root_fd,
             )
+            temporary_created = True
             os.fchmod(descriptor, 0o600)
             remaining = memoryview(raw)
             while remaining:
@@ -532,15 +633,44 @@ class CreateOnlyExecutionQualityEvidenceExportStore:
                 remaining = remaining[written:]
             os.fsync(descriptor)
             metadata = os.fstat(descriptor)
-            if metadata.st_size != len(raw):
+            if metadata.st_size != len(raw) or metadata.st_nlink != 1:
                 raise OSError("export size mismatch")
             os.close(descriptor)
             descriptor = None
+            path_metadata = os.stat(
+                temporary_name,
+                dir_fd=root_fd,
+                follow_symlinks=False,
+            )
+            _validate_temporary_file(path_metadata)
+            if (
+                path_metadata.st_dev != metadata.st_dev
+                or path_metadata.st_ino != metadata.st_ino
+                or path_metadata.st_size != metadata.st_size
+            ):
+                raise OSError("temporary export changed")
+            try:
+                os.link(
+                    temporary_name,
+                    filename,
+                    src_dir_fd=root_fd,
+                    dst_dir_fd=root_fd,
+                    follow_symlinks=False,
+                )
+            except FileExistsError:
+                existing = CreateOnlyExecutionQualityEvidenceExportStore._read_required(
+                    root_fd,
+                    filename,
+                )
+                if existing != raw:
+                    raise CFastExecutionQualityEvidenceExportError(
+                        "EVIDENCE_EXPORT_ARTIFACT_CONFLICT"
+                    )
+                return "ALREADY_PRESENT"
             os.fsync(root_fd)
-        except FileExistsError as exc:
-            raise CFastExecutionQualityEvidenceExportError(
-                "EVIDENCE_EXPORT_ARTIFACT_CONFLICT"
-            ) from exc
+            return "CREATED"
+        except CFastExecutionQualityEvidenceExportError:
+            raise
         except OSError as exc:
             raise CFastExecutionQualityEvidenceExportError(
                 "EVIDENCE_EXPORT_CREATE_ONLY_WRITE_FAILED"
@@ -548,6 +678,16 @@ class CreateOnlyExecutionQualityEvidenceExportStore:
         finally:
             if descriptor is not None:
                 os.close(descriptor)
+            if temporary_created:
+                try:
+                    os.unlink(temporary_name, dir_fd=root_fd)
+                    os.fsync(root_fd)
+                except FileNotFoundError:
+                    pass
+                except OSError as exc:
+                    raise CFastExecutionQualityEvidenceExportError(
+                        "EVIDENCE_EXPORT_TEMP_CLEANUP_FAILED"
+                    ) from exc
 
 
 def _build_from_state(
@@ -795,3 +935,27 @@ def _regular_file_identity(
         metadata.st_mtime_ns,
         metadata.st_ctime_ns,
     )
+
+
+def _validate_temporary_file(metadata: os.stat_result) -> None:
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+        or metadata.st_nlink not in {1, 2}
+        or not 0 <= metadata.st_size <= MAX_EXPORT_BYTES
+    ):
+        raise ValueError("temporary export identity invalid")
+
+
+def _validate_published_file(metadata: os.stat_result) -> None:
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or stat.S_ISLNK(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+        or metadata.st_nlink not in {1, 2}
+        or not 0 < metadata.st_size <= MAX_EXPORT_BYTES
+    ):
+        raise ValueError("published export identity invalid")

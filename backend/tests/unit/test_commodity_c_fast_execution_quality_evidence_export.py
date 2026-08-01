@@ -3,8 +3,10 @@ from __future__ import annotations
 import ast
 from datetime import timedelta
 import importlib.util
+import os
 from pathlib import Path
 import sys
+import threading
 
 import pytest
 
@@ -234,6 +236,166 @@ def test_create_only_publish_is_restart_idempotent_and_source_verified(
     assert created["positions_modified"] == 0
 
 
+def test_short_temp_write_never_exposes_partial_final_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    subject = _registered(tmp_path / "source")
+    root = _export_root(tmp_path)
+    store = CreateOnlyExecutionQualityEvidenceExportStore(root)
+    real_write = export_module.os.write
+    calls = 0
+
+    def write_one_byte_then_fail(descriptor: int, value: object) -> int:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return real_write(descriptor, memoryview(value)[:1])
+        raise OSError("injected short write")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(export_module.os, "write", write_one_byte_then_fail)
+        with pytest.raises(
+            CFastExecutionQualityEvidenceExportError,
+            match="EVIDENCE_EXPORT_CREATE_ONLY_WRITE_FAILED",
+        ):
+            store.publish(subject)
+
+    assert not list(root.glob("*.json"))
+    assert not list(root.glob(".*.tmp-*"))
+    assert store.publish(subject)["artifact_state"] == "CREATED"
+
+
+def test_restart_recovers_interrupted_temp_before_and_after_atomic_link(
+    tmp_path: Path,
+) -> None:
+    subject = _registered(tmp_path / "source")
+    root = _export_root(tmp_path)
+    CreateOnlyExecutionQualityEvidenceExportStore(root)
+    exported = build_execution_quality_evidence_export(subject)
+    raw = canonical_evidence_export_json_line(exported.model_dump(mode="json"))
+    filename = (
+        "cfast-execution-quality-evidence-export-v1-"
+        f"{exported.generation_basis_sha256}-"
+        f"{exported.source_journal_tip_record_hash}.json"
+    )
+    temporary = root / f".{filename}.tmp-{'a' * 32}"
+
+    temporary.write_bytes(raw[:17])
+    temporary.chmod(0o600)
+    reopened = CreateOnlyExecutionQualityEvidenceExportStore(root)
+    assert not temporary.exists()
+    assert not (root / filename).exists()
+
+    temporary.write_bytes(raw)
+    temporary.chmod(0o600)
+    os.link(temporary, root / filename)
+    assert temporary.stat().st_nlink == 2
+    restarted_after_link = CreateOnlyExecutionQualityEvidenceExportStore(root)
+
+    assert not temporary.exists()
+    assert (root / filename).stat().st_nlink == 1
+    assert restarted_after_link.load(filename, source=subject) == exported
+    assert reopened.root == restarted_after_link.root
+
+
+def test_constructor_waits_for_publish_flock_before_validating_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    subject = _registered(tmp_path / "source")
+    root = _export_root(tmp_path)
+    store = CreateOnlyExecutionQualityEvidenceExportStore(root)
+    original_write = store._write_create_only
+    original_flock = export_module.fcntl.flock
+    write_complete = threading.Event()
+    release_publisher = threading.Event()
+    constructor_lock_attempted = threading.Event()
+    constructor_complete = threading.Event()
+    errors: list[BaseException] = []
+
+    def write_then_hold(root_fd: int, filename: str, raw: bytes) -> str:
+        state = original_write(root_fd, filename, raw)
+        write_complete.set()
+        if not release_publisher.wait(timeout=5):
+            raise RuntimeError("test publisher release timed out")
+        return state
+
+    def observed_flock(descriptor: int, operation: int) -> None:
+        if threading.current_thread().name == "evidence-store-reopen":
+            constructor_lock_attempted.set()
+        original_flock(descriptor, operation)
+
+    def publish() -> None:
+        try:
+            store.publish(subject)
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    def reopen() -> None:
+        try:
+            CreateOnlyExecutionQualityEvidenceExportStore(root)
+            constructor_complete.set()
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    monkeypatch.setattr(store, "_write_create_only", write_then_hold)
+    monkeypatch.setattr(export_module.fcntl, "flock", observed_flock)
+    publisher = threading.Thread(target=publish, name="evidence-publisher")
+    publisher.start()
+    assert write_complete.wait(timeout=5)
+
+    constructor = threading.Thread(target=reopen, name="evidence-store-reopen")
+    constructor.start()
+    assert constructor_lock_attempted.wait(timeout=5)
+    assert not constructor_complete.wait(timeout=0.1)
+
+    release_publisher.set()
+    publisher.join(timeout=5)
+    constructor.join(timeout=5)
+    assert not publisher.is_alive()
+    assert not constructor.is_alive()
+    assert constructor_complete.is_set()
+    assert errors == []
+
+
+def test_concurrent_publishers_have_one_create_only_winner(
+    tmp_path: Path,
+) -> None:
+    subject = _registered(tmp_path / "source")
+    root = _export_root(tmp_path)
+    stores = (
+        CreateOnlyExecutionQualityEvidenceExportStore(root),
+        CreateOnlyExecutionQualityEvidenceExportStore(root),
+    )
+    start = threading.Barrier(2)
+    receipts: list[dict[str, object]] = []
+    errors: list[BaseException] = []
+
+    def publish(store: CreateOnlyExecutionQualityEvidenceExportStore) -> None:
+        try:
+            start.wait(timeout=5)
+            receipts.append(store.publish(subject))
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    workers = [threading.Thread(target=publish, args=(store,)) for store in stores]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=5)
+
+    assert not any(worker.is_alive() for worker in workers)
+    assert errors == []
+    assert sorted(str(row["artifact_state"]) for row in receipts) == [
+        "ALREADY_PRESENT",
+        "CREATED",
+    ]
+    assert len({str(row["artifact_filename"]) for row in receipts}) == 1
+    assert len(list(root.glob("*.json"))) == 1
+    assert not list(root.glob(".*.tmp-*"))
+
+
 def test_canonical_reload_rejects_coordinated_export_splice_against_source(
     tmp_path: Path,
 ) -> None:
@@ -302,9 +464,10 @@ def test_publish_remains_exact_prefix_if_source_advances_during_write(
     expected = build_execution_quality_evidence_export(subject)
     original_write = store._write_create_only
 
-    def write_then_advance(root_fd: int, filename: str, raw: bytes) -> None:
-        original_write(root_fd, filename, raw)
+    def write_then_advance(root_fd: int, filename: str, raw: bytes) -> str:
+        state = original_write(root_fd, filename, raw)
         subject.append_preverified_snapshot(SIDECAR.SCORER.book(0))
+        return state
 
     monkeypatch.setattr(store, "_write_create_only", write_then_advance)
 
@@ -401,7 +564,10 @@ def test_store_rejects_insecure_or_unknown_custody(tmp_path: Path) -> None:
         match="EVIDENCE_EXPORT_UNKNOWN_ARTIFACT",
     ):
         CreateOnlyExecutionQualityEvidenceExportStore(unknown)
-    assert not (unknown / ".export.lock").exists()
+    lock = unknown / ".export.lock"
+    assert lock.is_file()
+    assert lock.stat().st_mode & 0o777 == 0o600
+    assert lock.stat().st_size == 0
 
 
 def test_store_rejects_lock_downgrade_and_source_root_overlap(
