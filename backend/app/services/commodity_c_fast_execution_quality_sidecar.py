@@ -171,6 +171,28 @@ class CreateOnlyExecutionQualityJournal:
         finally:
             os.close(lock_fd)
 
+    def custody_hashes(self) -> tuple[str, str]:
+        """Return hashes for the currently pinned journal root identity."""
+
+        root_fd = self._open_root()
+        try:
+            self._assert_root(root_fd)
+            metadata = os.fstat(root_fd)
+            path_hash = hashlib.sha256(str(self.root).encode("utf-8")).hexdigest()
+            identity_hash = sha256_json(
+                {
+                    "root_path_sha256": path_hash,
+                    "device": metadata.st_dev,
+                    "inode": metadata.st_ino,
+                    "owner_uid": metadata.st_uid,
+                    "mode": stat.S_IMODE(metadata.st_mode),
+                }
+            )
+            self._assert_root(root_fd)
+            return path_hash, identity_hash
+        finally:
+            os.close(root_fd)
+
     def _recover_locked(self) -> tuple[JournalRecord, ...]:
         root_fd = self._open_root()
         try:
@@ -1148,6 +1170,35 @@ class OfflineExecutionQualitySidecar:
 
     def recover(self) -> SidecarState:
         return self._state_from_records(self.journal.recover())
+
+    def recover_at_tip(
+        self,
+        *,
+        record_count: int,
+        tip_record_hash: str,
+    ) -> SidecarState:
+        """Fresh-replay one durable prefix selected by its exact chain tip."""
+
+        if (
+            type(record_count) is not int
+            or record_count < 1
+            or not isinstance(tip_record_hash, str)
+            or _SHA256.fullmatch(tip_record_hash) is None
+        ):
+            raise CFastExecutionQualitySidecarError(
+                "JOURNAL_PREFIX_IDENTITY_INVALID"
+            )
+        records = self.journal.recover()
+        if len(records) < record_count:
+            raise CFastExecutionQualitySidecarError(
+                "JOURNAL_PREFIX_NOT_FOUND"
+            )
+        prefix = records[:record_count]
+        if prefix[-1].record_hash != tip_record_hash:
+            raise CFastExecutionQualitySidecarError(
+                "JOURNAL_PREFIX_TIP_MISMATCH"
+            )
+        return self._state_from_records(prefix)
 
     def _semantic_append_validator(
         self,
