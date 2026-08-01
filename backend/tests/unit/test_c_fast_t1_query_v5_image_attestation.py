@@ -41,6 +41,9 @@ PIN_SCHEMA = (
 PIN_TEMPLATE = (
     ROOT / "docs/operations/c-fast-t1-query-v5-image-attestation-pin-set.template.json"
 )
+BOOTSTRAP_TEMPLATE = (
+    ROOT / "docs/operations/c-fast-t1-query-v5-image-attestation-bootstrap-pin.template"
+)
 
 
 @pytest.fixture(autouse=True)
@@ -54,16 +57,24 @@ def _verified_test_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
         query_v4_delegate_sha256="f" * 64,
         query_v5_validator_sha256="1" * 64,
         query_v4_validator_sha256="2" * 64,
+        bootstrap_pin_sha256="a" * 64,
         python_executable_path_sha256="3" * 64,
         python_executable_sha256="4" * 64,
         loaded_executable_sha256="4" * 64,
+        python_runtime_root_path_sha256="b" * 64,
+        python_runtime_closure_sha256="c" * 64,
+        native_runtime_root_path_sha256="d" * 64,
+        native_runtime_closure_sha256="e" * 64,
         source_root_path_sha256="5" * 64,
         source_root_identity_sha256="6" * 64,
         source_closure_manifest_sha256="7" * 64,
+        bootstrap_source_closure_sha256="f" * 64,
         dependency_root_path_sha256="8" * 64,
         dependency_root_identity_sha256="9" * 64,
         dependency_closure_manifest_sha256="0" * 64,
+        bootstrap_dependency_closure_sha256="1" * 64,
         isolated_flags_verified=True,
+        pre_import_runtime_verified=True,
         source_closure_retained=True,
         immutable_runtime_verified=True,
     )
@@ -136,12 +147,19 @@ def isolated_runtime_fixture(
         "python_executable_sha256": hashlib.sha256(
             python_path.read_bytes()
         ).hexdigest(),
+        "bootstrap_pin_sha256": "a" * 64,
+        "python_runtime_root_path": str(root),
+        "python_runtime_closure_sha256": "b" * 64,
+        "native_runtime_root_path": str(root),
+        "native_runtime_closure_sha256": "c" * 64,
         "source_root_path": str(source_root),
         "source_root_identity_sha256": source_identity,
         "source_closure_manifest_sha256": source_manifest,
+        "bootstrap_source_closure_sha256": "d" * 64,
         "dependency_root_path": str(dependency_root),
         "dependency_root_identity_sha256": dependency_identity,
         "dependency_closure_manifest_sha256": dependency_manifest,
+        "bootstrap_dependency_closure_sha256": "e" * 64,
     }
     pin_path.write_bytes(runtime_launcher._canonical(pins))
     pin_path.chmod(0o444)
@@ -268,6 +286,7 @@ def _tar_with_metadata(
     global_pax: dict[str, str] | None = None,
     local_pax: dict[str, str] | None = None,
     uname: str = "",
+    mtime: int = 0,
 ) -> bytes:
     output = io.BytesIO()
     with tarfile.open(
@@ -283,7 +302,7 @@ def _tar_with_metadata(
             member.gid = 0
             member.uname = uname
             member.gname = ""
-            member.mtime = 0
+            member.mtime = mtime
             member.pax_headers = dict(local_pax or {})
             if kind == "regular":
                 member.size = len(raw)
@@ -298,13 +317,14 @@ def _tar_with_metadata(
 
 
 def _scan_overlay(raw: bytes, source_facts: dict[str, Any]) -> set[str]:
-    return subject._scan_overlay_layer(
+    touched, _header_contract = subject._scan_overlay_layer(
         raw,
         "test overlay",
         set(),
         source_facts["runtime_bundle"],
         source_facts["runtime_modes"],
     )
+    return touched
 
 
 def _compose_oci(
@@ -641,12 +661,15 @@ def test_exact_query_v4_prefix_and_query_v5_overlay_pass(
     assert report["checks"]["query_v4_layer_descriptor_prefix_verified"] is True
     assert report["checks"]["query_v4_diff_id_prefix_verified"] is True
     assert report["checks"]["all_overlay_layer_contents_sensitive_free"] is True
+    assert report["checks"]["overlay_layers_strict_ustar_verified"] is True
+    assert len(report["overlay_layer_header_contract_sha256"]) == 1
     assert report["checks"]["merged_python_execution_closure_frozen"] is True
     assert report["verifier_sha256"] == "d" * 64
     assert report["attestation_runtime"]["runtime_image_digest"] == (
         "sha256:" + "a" * 64
     )
     assert report["attestation_runtime"]["isolated_flags_verified"] is True
+    assert report["attestation_runtime"]["pre_import_runtime_verified"] is True
     assert report["attestation_runtime"]["source_closure_retained"] is True
     assert report["image_built_here"] is False
     assert report["authority_granted"] is False
@@ -850,6 +873,31 @@ def test_overlay_tar_hidden_metadata_and_trailing_bytes_fail_closed(
         assert str(captured.value), name
 
 
+def test_strict_ustar_accepts_bound_builder_mtime_and_zero_record_padding(
+    tmp_path: Path,
+    source_commit: str,
+) -> None:
+    bundle_raw = producer.build_source_bundle(ROOT, source_commit)[0]
+    bundle_path = _write(tmp_path / "builder-source.tar", bundle_raw)
+    source_facts = subject._source_facts(bundle_path, source_commit)
+    raw = (
+        _tar_with_metadata(
+            _overlay_entries(source_facts),
+            mtime=1_777_777_777,
+        )
+        + b"\0" * 1024
+    )
+    touched, header_contract = subject._scan_overlay_layer(
+        raw,
+        "builder-style overlay",
+        set(),
+        source_facts["runtime_bundle"],
+        source_facts["runtime_modes"],
+    )
+    assert touched
+    assert len(header_contract) == 64
+
+
 @pytest.mark.parametrize(
     ("hidden_value", "error"),
     [
@@ -1007,6 +1055,45 @@ def test_runtime_pin_template_is_strict_and_non_authoritative() -> None:
     )
     assert template["runtime_image_digest"].startswith("sha256:")
     assert "authority_granted" not in template
+
+
+def test_preimport_bootstrap_hash_and_pin_template_are_self_contained() -> None:
+    for raw in (b"", b"abc", bytes(range(256)), b"x" * 1000):
+        assert (
+            runtime_launcher._bootstrap_sha256(raw) == hashlib.sha256(raw).hexdigest()
+        )
+    raw = BOOTSTRAP_TEMPLATE.read_bytes()
+    pins = runtime_launcher._bootstrap_parse_pin(raw)
+    assert tuple(pins) == runtime_launcher.BOOTSTRAP_FIELDS
+    assert pins["schema_version"] == runtime_launcher.BOOTSTRAP_SCHEMA_VERSION
+
+
+def test_preimport_bootstrap_detects_stdlib_and_native_replacements_without_execution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    sentinel = tmp_path / "malicious-module-executed"
+    payloads = {
+        "json.py": f"open({str(sentinel)!r}, 'w').write('json')\n".encode(),
+        "pathlib.py": f"open({str(sentinel)!r}, 'w').write('pathlib')\n".encode(),
+        "tarfile.py": f"open({str(sentinel)!r}, 'w').write('tarfile')\n".encode(),
+        "lib-dynload/_attack.so": b"native-extension-payload",
+    }
+    for relative, raw in payloads.items():
+        path = runtime / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(raw)
+    monkeypatch.setattr(runtime_launcher, "_bootstrap_safe", lambda *_a, **_k: None)
+    trusted = runtime_launcher._bootstrap_tree_digest(str(runtime))
+    for relative in payloads:
+        path = runtime / relative
+        original = path.read_bytes()
+        path.write_bytes(original + b"tampered")
+        assert runtime_launcher._bootstrap_tree_digest(str(runtime)) != trusted
+        assert not sentinel.exists()
+        path.write_bytes(original)
 
 
 def test_production_entrypoints_are_launcher_only() -> None:

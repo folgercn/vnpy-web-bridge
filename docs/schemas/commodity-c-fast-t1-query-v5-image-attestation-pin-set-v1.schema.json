@@ -9,10 +9,15 @@
     "launcher_sha256", "verifier_sha256", "query_v4_verifier_sha256",
     "query_v4_delegate_sha256", "query_v5_validator_sha256",
     "query_v4_validator_sha256", "python_executable_path",
-    "python_executable_sha256", "source_root_path",
+    "python_executable_sha256", "bootstrap_pin_sha256",
+    "python_runtime_root_path", "python_runtime_closure_sha256",
+    "native_runtime_root_path", "native_runtime_closure_sha256",
+    "source_root_path",
     "source_root_identity_sha256", "source_closure_manifest_sha256",
+    "bootstrap_source_closure_sha256",
     "dependency_root_path", "dependency_root_identity_sha256",
-    "dependency_closure_manifest_sha256"
+    "dependency_closure_manifest_sha256",
+    "bootstrap_dependency_closure_sha256"
   ],
   "properties": {
     "schema_version": {"const": "commodity_c_fast_t1_query_v5_image_attestation_pin_set_v1"},
@@ -26,12 +31,19 @@
     "query_v4_validator_sha256": {"$ref": "#/$defs/sha256"},
     "python_executable_path": {"$ref": "#/$defs/absolutePath"},
     "python_executable_sha256": {"$ref": "#/$defs/sha256"},
+    "bootstrap_pin_sha256": {"$ref": "#/$defs/sha256"},
+    "python_runtime_root_path": {"$ref": "#/$defs/absolutePath"},
+    "python_runtime_closure_sha256": {"$ref": "#/$defs/sha256"},
+    "native_runtime_root_path": {"$ref": "#/$defs/absolutePath"},
+    "native_runtime_closure_sha256": {"$ref": "#/$defs/sha256"},
     "source_root_path": {"$ref": "#/$defs/absolutePath"},
     "source_root_identity_sha256": {"$ref": "#/$defs/sha256"},
     "source_closure_manifest_sha256": {"$ref": "#/$defs/sha256"},
+    "bootstrap_source_closure_sha256": {"$ref": "#/$defs/sha256"},
     "dependency_root_path": {"$ref": "#/$defs/absolutePath"},
     "dependency_root_identity_sha256": {"$ref": "#/$defs/sha256"},
-    "dependency_closure_manifest_sha256": {"$ref": "#/$defs/sha256"}
+    "dependency_closure_manifest_sha256": {"$ref": "#/$defs/sha256"},
+    "bootstrap_dependency_closure_sha256": {"$ref": "#/$defs/sha256"}
   },
   "$defs": {
     "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},

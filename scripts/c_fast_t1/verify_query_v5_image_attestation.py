@@ -98,16 +98,24 @@ class QueryV5AttestationRuntimeIdentity:
     query_v4_delegate_sha256: str
     query_v5_validator_sha256: str
     query_v4_validator_sha256: str
+    bootstrap_pin_sha256: str
     python_executable_path_sha256: str
     python_executable_sha256: str
     loaded_executable_sha256: str
+    python_runtime_root_path_sha256: str
+    python_runtime_closure_sha256: str
+    native_runtime_root_path_sha256: str
+    native_runtime_closure_sha256: str
     source_root_path_sha256: str
     source_root_identity_sha256: str
     source_closure_manifest_sha256: str
+    bootstrap_source_closure_sha256: str
     dependency_root_path_sha256: str
     dependency_root_identity_sha256: str
     dependency_closure_manifest_sha256: str
+    bootstrap_dependency_closure_sha256: str
     isolated_flags_verified: bool
+    pre_import_runtime_verified: bool
     source_closure_retained: bool
     immutable_runtime_verified: bool
 
@@ -150,6 +158,7 @@ def _validate_runtime_identity(
         _fail("query-v5 attestation runtime identity hash is invalid")
     if not (
         identity.isolated_flags_verified
+        and identity.pre_import_runtime_verified
         and identity.source_closure_retained
         and identity.immutable_runtime_verified
     ):
@@ -480,20 +489,127 @@ def _load_oci_state(path: Path, label: str) -> dict[str, Any]:
     }
 
 
+def _tar_text(field: bytes, label: str, *, allow_empty: bool) -> str:
+    end = field.find(b"\0")
+    raw = field if end < 0 else field[:end]
+    padding = b"" if end < 0 else field[end:]
+    if padding and any(byte != 0 for byte in padding):
+        _fail(f"{label} text padding is not zero")
+    try:
+        value = raw.decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise QueryV5ImageAttestationError(f"{label} is not ASCII") from exc
+    if (not value and not allow_empty) or any(
+        ord(character) < 0x20 or ord(character) > 0x7E for character in value
+    ):
+        _fail(f"{label} text field is invalid")
+    return value
+
+
+def _tar_octal(field: bytes, label: str, *, allow_empty: bool = False) -> int:
+    if field and field[0] & 0x80:
+        _fail(f"{label} base-256 number is forbidden")
+    if any(byte not in b" 01234567\0" for byte in field):
+        _fail(f"{label} octal field contains hidden bytes")
+    stripped = field.strip(b" \0")
+    if not stripped and allow_empty:
+        return 0
+    if not stripped or any(byte not in b"01234567" for byte in stripped):
+        _fail(f"{label} octal field is invalid")
+    return int(stripped, 8)
+
+
+def _strict_overlay_tar_contract(raw: bytes, label: str) -> str:
+    if len(raw) < 1024 or len(raw) % 512:
+        _fail(f"{label} is not a complete block-aligned USTAR stream")
+    cursor = 0
+    records: list[dict[str, Any]] = []
+    zero = b"\0" * 512
+    while cursor < len(raw):
+        header = raw[cursor : cursor + 512]
+        if header == zero:
+            if cursor + 1024 > len(raw) or raw[cursor + 512 : cursor + 1024] != zero:
+                _fail(f"{label} has no exact two-block EOF marker")
+            if any(raw[cursor:]):
+                _fail(f"{label} contains nonzero bytes after tar EOF")
+            break
+        expected_checksum = _tar_octal(header[148:156], f"{label} checksum")
+        checksum_header = header[:148] + b" " * 8 + header[156:]
+        if sum(checksum_header) != expected_checksum:
+            _fail(f"{label} tar header checksum drifted")
+        name = _tar_text(header[0:100], f"{label} name", allow_empty=False)
+        mode = _tar_octal(header[100:108], f"{label} mode") & 0o7777
+        uid = _tar_octal(header[108:116], f"{label} uid")
+        gid = _tar_octal(header[116:124], f"{label} gid")
+        size = _tar_octal(header[124:136], f"{label} size")
+        mtime = _tar_octal(header[136:148], f"{label} mtime")
+        kind = header[156:157]
+        linkname = _tar_text(header[157:257], f"{label} linkname", allow_empty=True)
+        magic = header[257:263]
+        version = header[263:265]
+        uname = _tar_text(header[265:297], f"{label} uname", allow_empty=True)
+        gname = _tar_text(header[297:329], f"{label} gname", allow_empty=True)
+        devmajor = _tar_octal(header[329:337], f"{label} devmajor", allow_empty=True)
+        devminor = _tar_octal(header[337:345], f"{label} devminor", allow_empty=True)
+        prefix = _tar_text(header[345:500], f"{label} prefix", allow_empty=True)
+        if kind not in {b"\0", tarfile.REGTYPE, tarfile.DIRTYPE}:
+            _fail(f"{label} contains a link or special file")
+        if (
+            magic != b"ustar\0"
+            or version != b"00"
+            or linkname
+            or uname
+            or gname
+            or devmajor != 0
+            or devminor != 0
+            or prefix
+            or any(header[500:512])
+        ):
+            _fail(f"{label} contains extended or unfrozen tar header metadata")
+        content_start = cursor + 512
+        content_end = content_start + size
+        padded_end = content_start + ((size + 511) // 512) * 512
+        if padded_end > len(raw) or any(raw[content_end:padded_end]):
+            _fail(f"{label} contains nonzero or truncated member padding")
+        if kind == tarfile.DIRTYPE and size != 0:
+            _fail(f"{label} directory carries a payload")
+        records.append(
+            {
+                "header_sha256": _sha256(header),
+                "name": name,
+                "type": kind.hex(),
+                "mode": mode,
+                "uid": uid,
+                "gid": gid,
+                "size": size,
+                "mtime": mtime,
+                "uname": uname,
+                "gname": gname,
+                "content_sha256": _sha256(raw[content_start:content_end]),
+            }
+        )
+        cursor = padded_end
+    else:
+        _fail(f"{label} is missing the tar EOF marker")
+    if not records:
+        _fail(f"{label} contains no USTAR members")
+    return _sha256(canonical_json(records))
+
+
 def _scan_overlay_layer(
     raw: bytes,
     label: str,
     base_paths: set[str],
     expected_runtime_bundle: dict[str, str],
     expected_runtime_modes: dict[str, int],
-) -> set[str]:
+) -> tuple[set[str], str]:
     if any(marker in raw for marker in PRIVATE_KEY_MARKERS):
         _fail(f"{label} raw tar contains private-key material")
+    header_contract_sha256 = _strict_overlay_tar_contract(raw, label)
     expected_runtime_paths = {
         path.removeprefix("/") for path in expected_runtime_bundle
     }
     touched: set[str] = set()
-    canonical_members: list[tuple[str, bytes, int, bytes]] = []
     try:
         with tarfile.open(fileobj=io.BytesIO(raw), mode="r:") as archive:
             if archive.pax_headers:
@@ -527,7 +643,6 @@ def _scan_overlay_layer(
                         _fail(
                             f"{label} allowlisted directory entry is not exact: /{path}"
                         )
-                    canonical_members.append((path, b"", mode, tarfile.DIRTYPE))
                 elif path in expected_runtime_paths:
                     if not member.isreg():
                         _fail(f"{label} runtime entry is not a regular file: /{path}")
@@ -549,43 +664,13 @@ def _scan_overlay_layer(
                         _fail(
                             f"{label} runtime entry does not match exact source: /{path}"
                         )
-                    canonical_members.append((path, content, mode, tarfile.REGTYPE))
                 else:
                     _fail(f"{label} contains an unexpected overlay path: /{path}")
     except QueryV5ImageAttestationError:
         raise
     except (OSError, tarfile.TarError) as exc:
         raise QueryV5ImageAttestationError(f"{label} is not a valid tar") from exc
-    canonical = io.BytesIO()
-    try:
-        with tarfile.open(
-            fileobj=canonical,
-            mode="w:",
-            format=tarfile.USTAR_FORMAT,
-        ) as archive:
-            for path, content, mode, kind in canonical_members:
-                member = tarfile.TarInfo(path)
-                member.type = kind
-                member.mode = mode
-                member.uid = 0
-                member.gid = 0
-                member.uname = ""
-                member.gname = ""
-                member.mtime = 0
-                if kind == tarfile.REGTYPE:
-                    member.size = len(content)
-                    archive.addfile(member, io.BytesIO(content))
-                else:
-                    archive.addfile(member)
-    except (OSError, tarfile.TarError, ValueError) as exc:
-        raise QueryV5ImageAttestationError(
-            f"{label} cannot be represented as canonical USTAR"
-        ) from exc
-    if raw != canonical.getvalue():
-        _fail(
-            f"{label} is not the unique canonical USTAR encoding of its exact members"
-        )
-    return touched
+    return touched, header_contract_sha256
 
 
 def _environment(config: dict[str, Any], label: str) -> dict[str, str]:
@@ -627,16 +712,17 @@ def _validate_final_oci(
     )
     base_paths = set(base["filesystem"]) | set(base["directories"])
     overlay_touched: set[str] = set()
+    overlay_header_contracts: list[str] = []
     for number, raw in enumerate(final["layer_raw"][base_count:], base_count):
-        overlay_touched.update(
-            _scan_overlay_layer(
-                raw,
-                f"query-v5 OCI layer {number}",
-                base_paths,
-                source["runtime_bundle"],
-                source["runtime_modes"],
-            )
+        touched, header_contract = _scan_overlay_layer(
+            raw,
+            f"query-v5 OCI layer {number}",
+            base_paths,
+            source["runtime_bundle"],
+            source["runtime_modes"],
         )
+        overlay_touched.update(touched)
+        overlay_header_contracts.append(header_contract)
     config = final["config"]
     expected_labels = {
         "io.vnpy-web-bridge.c-fast-t1.authority-granted": "false",
@@ -756,6 +842,7 @@ def _validate_final_oci(
         _fail("query-v5 overlay contains signer or private-key material")
     return {
         "overlay_touched_paths": ["/" + path for path in sorted(overlay_touched)],
+        "overlay_layer_header_contract_sha256": overlay_header_contracts,
         "runtime_bundle": runtime_bundle,
         "python_execution_closure_sha256": closure_sha256,
         "python_execution_closure_entries": closure_entries,
@@ -929,6 +1016,9 @@ def verify_query_v5_image_evidence(
         "query_v4_rootfs_diff_ids": base["diff_ids"],
         "overlay_layer_digests": final["layer_digests"][base_count:],
         "overlay_diff_ids": final["diff_ids"][base_count:],
+        "overlay_layer_header_contract_sha256": composition[
+            "overlay_layer_header_contract_sha256"
+        ],
         "rootfs_layer_digests": final["layer_digests"],
         "rootfs_diff_ids": final["diff_ids"],
         "overlay_touched_paths": composition["overlay_touched_paths"],
@@ -953,7 +1043,7 @@ def verify_query_v5_image_evidence(
             "overlay_base_overwrites_absent": True,
             "overlay_path_allowlist_verified": True,
             "overlay_links_and_special_files_absent": True,
-            "overlay_layers_canonical_ustar_verified": True,
+            "overlay_layers_strict_ustar_verified": True,
             "all_overlay_layer_contents_sensitive_free": True,
             "merged_python_execution_closure_frozen": True,
             "runtime_bundle_matches_source_bundle": True,

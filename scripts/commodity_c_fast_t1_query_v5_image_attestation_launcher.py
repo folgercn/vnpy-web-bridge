@@ -27,6 +27,483 @@ if RUNNING_AS_SCRIPT:
     _require_isolated_startup()
 
 
+# Production executes this phase before importing any path-backed stdlib,
+# extension, project, or third-party module.  ``sys`` is built in and CPython
+# 3.12 freezes ``os`` into the interpreter executable.  The small SHA256 and
+# tree scanner below are intentionally self-contained so the complete Python
+# and native runtime can be checked against an independently mounted pin before
+# path-backed code executes.
+if RUNNING_AS_SCRIPT:
+    import os as _bootstrap_os
+
+    if getattr(getattr(_bootstrap_os, "__spec__", None), "origin", None) != "frozen":
+        raise SystemExit("query-v5 attestation requires CPython 3.12 frozen os")
+else:
+    _bootstrap_os = None
+
+
+BOOTSTRAP_PIN_PATH_TEXT = "/run/c-fast-t1-query-v5-image-attestation-pins/bootstrap.pin"
+BOOTSTRAP_SCHEMA_VERSION = (
+    "commodity_c_fast_t1_query_v5_image_attestation_bootstrap_pin_v1"
+)
+BOOTSTRAP_FIELDS = (
+    "schema_version",
+    "generation_id",
+    "runtime_image_digest",
+    "launcher_path",
+    "launcher_sha256",
+    "python_executable_path",
+    "python_executable_sha256",
+    "python_runtime_root_path",
+    "python_runtime_closure_sha256",
+    "native_runtime_root_path",
+    "native_runtime_closure_sha256",
+    "source_root_path",
+    "bootstrap_source_closure_sha256",
+    "dependency_root_path",
+    "bootstrap_dependency_closure_sha256",
+)
+_BOOTSTRAP_K = (
+    0x428A2F98,
+    0x71374491,
+    0xB5C0FBCF,
+    0xE9B5DBA5,
+    0x3956C25B,
+    0x59F111F1,
+    0x923F82A4,
+    0xAB1C5ED5,
+    0xD807AA98,
+    0x12835B01,
+    0x243185BE,
+    0x550C7DC3,
+    0x72BE5D74,
+    0x80DEB1FE,
+    0x9BDC06A7,
+    0xC19BF174,
+    0xE49B69C1,
+    0xEFBE4786,
+    0x0FC19DC6,
+    0x240CA1CC,
+    0x2DE92C6F,
+    0x4A7484AA,
+    0x5CB0A9DC,
+    0x76F988DA,
+    0x983E5152,
+    0xA831C66D,
+    0xB00327C8,
+    0xBF597FC7,
+    0xC6E00BF3,
+    0xD5A79147,
+    0x06CA6351,
+    0x14292967,
+    0x27B70A85,
+    0x2E1B2138,
+    0x4D2C6DFC,
+    0x53380D13,
+    0x650A7354,
+    0x766A0ABB,
+    0x81C2C92E,
+    0x92722C85,
+    0xA2BFE8A1,
+    0xA81A664B,
+    0xC24B8B70,
+    0xC76C51A3,
+    0xD192E819,
+    0xD6990624,
+    0xF40E3585,
+    0x106AA070,
+    0x19A4C116,
+    0x1E376C08,
+    0x2748774C,
+    0x34B0BCB5,
+    0x391C0CB3,
+    0x4ED8AA4A,
+    0x5B9CCA4F,
+    0x682E6FF3,
+    0x748F82EE,
+    0x78A5636F,
+    0x84C87814,
+    0x8CC70208,
+    0x90BEFFFA,
+    0xA4506CEB,
+    0xBEF9A3F7,
+    0xC67178F2,
+)
+
+
+def _bootstrap_sha256(raw):
+    mask = 0xFFFFFFFF
+    values = [
+        0x6A09E667,
+        0xBB67AE85,
+        0x3C6EF372,
+        0xA54FF53A,
+        0x510E527F,
+        0x9B05688C,
+        0x1F83D9AB,
+        0x5BE0CD19,
+    ]
+    padded = raw + b"\x80"
+    padded += b"\x00" * ((55 - len(raw)) % 64)
+    padded += (len(raw) * 8).to_bytes(8, "big")
+    for offset in range(0, len(padded), 64):
+        block = padded[offset : offset + 64]
+        words = [
+            int.from_bytes(block[index : index + 4], "big") for index in range(0, 64, 4)
+        ]
+        for index in range(16, 64):
+            old = words[index - 15]
+            s0 = (
+                ((old >> 7) | (old << 25)) ^ ((old >> 18) | (old << 14)) ^ (old >> 3)
+            ) & mask
+            old = words[index - 2]
+            s1 = (
+                ((old >> 17) | (old << 15)) ^ ((old >> 19) | (old << 13)) ^ (old >> 10)
+            ) & mask
+            words.append((words[index - 16] + s0 + words[index - 7] + s1) & mask)
+        a, b, c, d, e, f, g, h = values
+        for index in range(64):
+            s1 = (
+                ((e >> 6) | (e << 26))
+                ^ ((e >> 11) | (e << 21))
+                ^ ((e >> 25) | (e << 7))
+            ) & mask
+            choice = (e & f) ^ ((~e) & g)
+            first = (h + s1 + choice + _BOOTSTRAP_K[index] + words[index]) & mask
+            s0 = (
+                ((a >> 2) | (a << 30))
+                ^ ((a >> 13) | (a << 19))
+                ^ ((a >> 22) | (a << 10))
+            ) & mask
+            majority = (a & b) ^ (a & c) ^ (b & c)
+            second = (s0 + majority) & mask
+            h, g, f, e, d, c, b, a = (
+                g,
+                f,
+                e,
+                (d + first) & mask,
+                c,
+                b,
+                a,
+                (first + second) & mask,
+            )
+        values = [
+            (left + right) & mask
+            for left, right in zip(values, (a, b, c, d, e, f, g, h))
+        ]
+    return b"".join(value.to_bytes(4, "big") for value in values).hex()
+
+
+def _bootstrap_identity(info):
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_uid,
+        info.st_gid,
+        info.st_mode,
+        info.st_nlink,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+def _bootstrap_safe(path, info, *, directory):
+    mode = info.st_mode
+    kind = mode & 0o170000
+    if info.st_uid != 0 or mode & 0o022:
+        raise SystemExit("query-v5 bootstrap closure is not root-owned immutable")
+    if directory:
+        if kind != 0o040000:
+            raise SystemExit("query-v5 bootstrap closure directory is invalid")
+        access = _bootstrap_os.R_OK | _bootstrap_os.X_OK
+    else:
+        if kind != 0o100000 or info.st_nlink != 1:
+            raise SystemExit("query-v5 bootstrap closure file is invalid")
+        access = _bootstrap_os.R_OK
+    kwargs = (
+        {"effective_ids": True}
+        if _bootstrap_os.access in _bootstrap_os.supports_effective_ids
+        else {}
+    )
+    if not _bootstrap_os.access(path, access, **kwargs):
+        raise SystemExit("query-v5 bootstrap closure is inaccessible")
+    if _bootstrap_os.access(path, _bootstrap_os.W_OK, **kwargs):
+        raise SystemExit("query-v5 bootstrap closure is runtime writable")
+
+
+def _bootstrap_read(path, label):
+    before = _bootstrap_os.lstat(path)
+    _bootstrap_safe(path, before, directory=False)
+    flags = _bootstrap_os.O_RDONLY | getattr(_bootstrap_os, "O_CLOEXEC", 0)
+    flags |= getattr(_bootstrap_os, "O_NOFOLLOW", 0)
+    descriptor = _bootstrap_os.open(path, flags)
+    try:
+        opened = _bootstrap_os.fstat(descriptor)
+        if _bootstrap_identity(before) != _bootstrap_identity(opened):
+            raise SystemExit(label + " changed before bootstrap read")
+        chunks = []
+        size = 0
+        while True:
+            chunk = _bootstrap_os.read(descriptor, 65536)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > 536870912:
+                raise SystemExit(label + " exceeds bootstrap size limit")
+            chunks.append(chunk)
+        raw = b"".join(chunks)
+        after = _bootstrap_os.fstat(descriptor)
+        path_after = _bootstrap_os.lstat(path)
+        if (
+            len(raw) != opened.st_size
+            or _bootstrap_identity(opened) != _bootstrap_identity(after)
+            or _bootstrap_identity(opened) != _bootstrap_identity(path_after)
+        ):
+            raise SystemExit(label + " changed during bootstrap read")
+        return raw
+    finally:
+        _bootstrap_os.close(descriptor)
+
+
+def _bootstrap_proc_read(path, label):
+    descriptor = _bootstrap_os.open(
+        path,
+        _bootstrap_os.O_RDONLY | getattr(_bootstrap_os, "O_CLOEXEC", 0),
+    )
+    try:
+        chunks = []
+        size = 0
+        while True:
+            chunk = _bootstrap_os.read(descriptor, 65536)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > 16777216:
+                raise SystemExit(label + " exceeds bootstrap size limit")
+            chunks.append(chunk)
+        return b"".join(chunks)
+    finally:
+        _bootstrap_os.close(descriptor)
+
+
+def _bootstrap_tree_digest(root, *, allow_symlinks=False):
+    root = _bootstrap_os.path.realpath(root)
+    records = []
+    count = 0
+
+    def visit(directory, relative):
+        nonlocal count
+        before = _bootstrap_os.lstat(directory)
+        _bootstrap_safe(directory, before, directory=True)
+        with _bootstrap_os.scandir(directory) as iterator:
+            children = sorted(
+                iterator, key=lambda entry: _bootstrap_os.fsencode(entry.name)
+            )
+        for child in children:
+            count += 1
+            if count > 200000:
+                raise SystemExit("query-v5 bootstrap closure has too many entries")
+            child_path = child.path
+            child_relative = child.name if not relative else relative + "/" + child.name
+            encoded_path = _bootstrap_os.fsencode(child_relative).hex()
+            info = child.stat(follow_symlinks=False)
+            kind = info.st_mode & 0o170000
+            if kind == 0o040000:
+                _bootstrap_safe(child_path, info, directory=True)
+                records.append(
+                    "d|%s|%d|%d|%o\n"
+                    % (encoded_path, info.st_uid, info.st_gid, info.st_mode & 0o7777)
+                )
+                visit(child_path, child_relative)
+            elif kind == 0o100000:
+                raw = _bootstrap_read(child_path, "bootstrap closure file")
+                records.append(
+                    "f|%s|%d|%d|%o|%d|%s\n"
+                    % (
+                        encoded_path,
+                        info.st_uid,
+                        info.st_gid,
+                        info.st_mode & 0o7777,
+                        len(raw),
+                        _bootstrap_sha256(raw),
+                    )
+                )
+            elif kind == 0o120000 and allow_symlinks:
+                if info.st_uid != 0:
+                    raise SystemExit(
+                        "query-v5 bootstrap closure symlink owner is unsafe"
+                    )
+                target = _bootstrap_os.readlink(child_path)
+                resolved = _bootstrap_os.path.realpath(child_path)
+                if not _bootstrap_under(resolved, root):
+                    raise SystemExit(
+                        "query-v5 bootstrap closure symlink escapes its root"
+                    )
+                records.append(
+                    "l|%s|%d|%d|%s\n"
+                    % (
+                        encoded_path,
+                        info.st_uid,
+                        info.st_gid,
+                        _bootstrap_os.fsencode(target).hex(),
+                    )
+                )
+            else:
+                raise SystemExit(
+                    "query-v5 bootstrap closure contains link or special file"
+                )
+        after = _bootstrap_os.lstat(directory)
+        if _bootstrap_identity(before) != _bootstrap_identity(after):
+            raise SystemExit("query-v5 bootstrap closure changed during scan")
+
+    visit(root, "")
+    return _bootstrap_sha256("".join(records).encode("ascii"))
+
+
+def _bootstrap_directory_chain(path):
+    current = _bootstrap_os.path.realpath(path)
+    while True:
+        info = _bootstrap_os.lstat(current)
+        _bootstrap_safe(current, info, directory=True)
+        parent = _bootstrap_os.path.dirname(current)
+        if parent == current:
+            return
+        current = parent
+
+
+def _bootstrap_parse_pin(raw):
+    expected_prefixes = [field.encode("ascii") + b"=" for field in BOOTSTRAP_FIELDS]
+    lines = raw.splitlines(keepends=True)
+    if len(lines) != len(BOOTSTRAP_FIELDS) or any(
+        not line.endswith(b"\n") or not line.startswith(prefix)
+        for line, prefix in zip(lines, expected_prefixes)
+    ):
+        raise SystemExit("query-v5 bootstrap pin is not canonical")
+    values = {}
+    for field, line, prefix in zip(BOOTSTRAP_FIELDS, lines, expected_prefixes):
+        try:
+            values[field] = line[len(prefix) : -1].decode("ascii")
+        except UnicodeDecodeError as exc:
+            raise SystemExit("query-v5 bootstrap pin is not ASCII") from exc
+    if values["schema_version"] != BOOTSTRAP_SCHEMA_VERSION:
+        raise SystemExit("query-v5 bootstrap pin version mismatch")
+    if not 8 <= len(values["generation_id"]) <= 128 or any(
+        character
+        not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-"
+        for character in values["generation_id"]
+    ):
+        raise SystemExit("query-v5 bootstrap generation is invalid")
+    digest_fields = [field for field in BOOTSTRAP_FIELDS if field.endswith("_sha256")]
+    for field in digest_fields:
+        value = values[field]
+        if len(value) != 64 or any(
+            character not in "0123456789abcdef" for character in value
+        ):
+            raise SystemExit("query-v5 bootstrap digest is invalid")
+    image_digest = values["runtime_image_digest"]
+    if (
+        len(image_digest) != 71
+        or not image_digest.startswith("sha256:")
+        or any(character not in "0123456789abcdef" for character in image_digest[7:])
+    ):
+        raise SystemExit("query-v5 bootstrap image digest is invalid")
+    return values
+
+
+def _bootstrap_under(path, root):
+    path = _bootstrap_os.path.realpath(path)
+    root = _bootstrap_os.path.realpath(root)
+    return path == root or path.startswith(root.rstrip("/") + "/")
+
+
+def _bootstrap_verify():
+    if _bootstrap_os.geteuid() == 0 or sys.version_info[:2] != (3, 12):
+        raise SystemExit("query-v5 bootstrap requires non-root CPython 3.12")
+    _bootstrap_directory_chain(_bootstrap_os.path.dirname(BOOTSTRAP_PIN_PATH_TEXT))
+    pin_raw = _bootstrap_read(BOOTSTRAP_PIN_PATH_TEXT, "query-v5 bootstrap pin")
+    pins = _bootstrap_parse_pin(pin_raw)
+    paths = {
+        field: pins[field] for field in BOOTSTRAP_FIELDS if field.endswith("_path")
+    }
+    for field, value in paths.items():
+        if not value.startswith("/") or _bootstrap_os.path.realpath(value) != value:
+            raise SystemExit("query-v5 bootstrap path is not canonical: " + field)
+        _bootstrap_directory_chain(
+            value if field.endswith("root_path") else _bootstrap_os.path.dirname(value)
+        )
+    if _bootstrap_os.path.realpath(__file__) != paths["launcher_path"]:
+        raise SystemExit("query-v5 bootstrap launcher path escaped pin")
+    if _bootstrap_os.path.realpath(sys.executable) != paths["python_executable_path"]:
+        raise SystemExit("query-v5 bootstrap interpreter path escaped pin")
+    if not _bootstrap_os.path.samefile(
+        "/proc/self/exe", paths["python_executable_path"]
+    ):
+        raise SystemExit("query-v5 bootstrap did not load pinned interpreter")
+    actual = {
+        "launcher_sha256": _bootstrap_sha256(
+            _bootstrap_read(paths["launcher_path"], "query-v5 bootstrap launcher")
+        ),
+        "python_executable_sha256": _bootstrap_sha256(
+            _bootstrap_read(
+                paths["python_executable_path"], "query-v5 bootstrap interpreter"
+            )
+        ),
+        "python_runtime_closure_sha256": _bootstrap_tree_digest(
+            paths["python_runtime_root_path"], allow_symlinks=True
+        ),
+        "native_runtime_closure_sha256": _bootstrap_tree_digest(
+            paths["native_runtime_root_path"], allow_symlinks=True
+        ),
+        "bootstrap_source_closure_sha256": _bootstrap_tree_digest(
+            paths["source_root_path"]
+        ),
+        "bootstrap_dependency_closure_sha256": _bootstrap_tree_digest(
+            paths["dependency_root_path"]
+        ),
+    }
+    if any(actual[field] != pins[field] for field in actual):
+        raise SystemExit("query-v5 pre-import runtime closure pin mismatch")
+    allowed_roots = (
+        paths["python_runtime_root_path"],
+        paths["native_runtime_root_path"],
+        paths["source_root_path"],
+        paths["dependency_root_path"],
+    )
+    for entry in sys.path:
+        if entry and not any(_bootstrap_under(entry, root) for root in allowed_roots):
+            raise SystemExit("query-v5 bootstrap sys.path escaped pinned roots")
+    maps_raw = _bootstrap_proc_read(
+        "/proc/self/maps", "query-v5 bootstrap process maps"
+    )
+    for line in maps_raw.splitlines():
+        fields = line.split(None, 5)
+        if len(fields) != 6 or not fields[5].startswith(b"/"):
+            continue
+        if fields[5].endswith(b" (deleted)"):
+            raise SystemExit("query-v5 bootstrap mapped deleted native code")
+        try:
+            mapped = _bootstrap_os.fsdecode(fields[5])
+        except UnicodeDecodeError as exc:
+            raise SystemExit("query-v5 bootstrap mapped path is invalid") from exc
+        if not any(_bootstrap_under(mapped, root) for root in allowed_roots):
+            raise SystemExit("query-v5 bootstrap mapped code escaped pinned roots")
+    return {
+        **actual,
+        "bootstrap_pin_sha256": _bootstrap_sha256(pin_raw),
+        "generation_id": pins["generation_id"],
+        "runtime_image_digest": pins["runtime_image_digest"],
+        "python_runtime_root_path": paths["python_runtime_root_path"],
+        "native_runtime_root_path": paths["native_runtime_root_path"],
+        "source_root_path": paths["source_root_path"],
+        "dependency_root_path": paths["dependency_root_path"],
+        "pre_import_runtime_verified": True,
+    }
+
+
+_PREIMPORT_BOOTSTRAP_IDENTITY = _bootstrap_verify() if RUNNING_AS_SCRIPT else None
+
+
 import hashlib  # noqa: E402
 import hmac  # noqa: E402
 import importlib.abc  # noqa: E402
@@ -37,6 +514,9 @@ from pathlib import Path  # noqa: E402
 import stat  # noqa: E402
 from types import ModuleType  # noqa: E402
 from typing import Any, Callable  # noqa: E402
+
+if _bootstrap_os is None:
+    _bootstrap_os = os
 
 
 PIN_ROOT = Path("/run/c-fast-t1-query-v5-image-attestation-pins")
@@ -90,12 +570,19 @@ PIN_FIELDS = frozenset(
         "query_v4_validator_sha256",
         "python_executable_path",
         "python_executable_sha256",
+        "bootstrap_pin_sha256",
+        "python_runtime_root_path",
+        "python_runtime_closure_sha256",
+        "native_runtime_root_path",
+        "native_runtime_closure_sha256",
         "source_root_path",
         "source_root_identity_sha256",
         "source_closure_manifest_sha256",
+        "bootstrap_source_closure_sha256",
         "dependency_root_path",
         "dependency_root_identity_sha256",
         "dependency_closure_manifest_sha256",
+        "bootstrap_dependency_closure_sha256",
     }
 )
 LOCAL_MODULE_PATHS = {
@@ -353,8 +840,6 @@ def _directory_records(
         records.append(
             {
                 "path": str(current),
-                "device": info.st_dev,
-                "inode": info.st_ino,
                 "uid": info.st_uid,
                 "gid": info.st_gid,
                 "mode": stat.S_IMODE(info.st_mode),
@@ -611,6 +1096,22 @@ def _read_pin_manifest(
     for field in PIN_FIELDS:
         if field.endswith("_sha256"):
             _validate_sha256(manifest[field], field)
+    for field in (
+        "python_executable_path",
+        "python_runtime_root_path",
+        "native_runtime_root_path",
+        "source_root_path",
+        "dependency_root_path",
+    ):
+        value = manifest[field]
+        if (
+            not isinstance(value, str)
+            or not value.startswith("/")
+            or Path(value).resolve(strict=True) != Path(value)
+        ):
+            raise QueryV5AttestationLauncherError(
+                f"{field} is not one canonical absolute path"
+            )
     second, _ = _stable_read(
         path,
         "query-v5 attestation pin manifest",
@@ -713,6 +1214,34 @@ def _inspect_runtime(
         dependency_root,
         require_immutable=require_immutable,
     )
+    bootstrap = _PREIMPORT_BOOTSTRAP_IDENTITY
+    if require_immutable:
+        if bootstrap is None:
+            raise QueryV5AttestationLauncherError(
+                "query-v5 pre-import bootstrap identity is unavailable"
+            )
+        bootstrap_expected = {
+            "generation_id": pins["generation_id"],
+            "runtime_image_digest": pins["runtime_image_digest"],
+            "bootstrap_pin_sha256": pins["bootstrap_pin_sha256"],
+            "launcher_sha256": pins["launcher_sha256"],
+            "python_executable_sha256": pins["python_executable_sha256"],
+            "python_runtime_root_path": pins["python_runtime_root_path"],
+            "python_runtime_closure_sha256": pins["python_runtime_closure_sha256"],
+            "native_runtime_root_path": pins["native_runtime_root_path"],
+            "native_runtime_closure_sha256": pins["native_runtime_closure_sha256"],
+            "source_root_path": pins["source_root_path"],
+            "bootstrap_source_closure_sha256": pins["bootstrap_source_closure_sha256"],
+            "dependency_root_path": pins["dependency_root_path"],
+            "bootstrap_dependency_closure_sha256": pins[
+                "bootstrap_dependency_closure_sha256"
+            ],
+            "pre_import_runtime_verified": True,
+        }
+        if bootstrap != bootstrap_expected:
+            raise QueryV5AttestationLauncherError(
+                "query-v5 bootstrap and phase-two pin generations differ"
+            )
     local_hashes: dict[str, str] = {}
     for field, relative in LOCAL_MODULE_PATHS.items():
         module_path = (source_root / relative).resolve(strict=True)
@@ -749,7 +1278,21 @@ def _inspect_runtime(
         "python_executable_path_sha256": _path_sha256(python_path),
         "source_root_path_sha256": _path_sha256(source_root),
         "dependency_root_path_sha256": _path_sha256(dependency_root),
+        "bootstrap_pin_sha256": pins["bootstrap_pin_sha256"],
+        "python_runtime_root_path_sha256": _path_sha256(
+            Path(pins["python_runtime_root_path"])
+        ),
+        "python_runtime_closure_sha256": pins["python_runtime_closure_sha256"],
+        "native_runtime_root_path_sha256": _path_sha256(
+            Path(pins["native_runtime_root_path"])
+        ),
+        "native_runtime_closure_sha256": pins["native_runtime_closure_sha256"],
+        "bootstrap_source_closure_sha256": pins["bootstrap_source_closure_sha256"],
+        "bootstrap_dependency_closure_sha256": pins[
+            "bootstrap_dependency_closure_sha256"
+        ],
         "isolated_flags_verified": bool(require_immutable),
+        "pre_import_runtime_verified": bool(require_immutable),
         "source_closure_retained": True,
         "immutable_runtime_verified": bool(require_immutable),
     }
@@ -778,6 +1321,26 @@ def _inspect_runtime(
             "query-v5 attestation Python interpreter",
             require_immutable=require_immutable,
         )
+        bootstrap_drifted = False
+        if require_immutable:
+            bootstrap_drifted = any(
+                (
+                    _bootstrap_tree_digest(
+                        pins["python_runtime_root_path"],
+                        allow_symlinks=True,
+                    )
+                    != pins["python_runtime_closure_sha256"],
+                    _bootstrap_tree_digest(
+                        pins["native_runtime_root_path"],
+                        allow_symlinks=True,
+                    )
+                    != pins["native_runtime_closure_sha256"],
+                    _bootstrap_tree_digest(pins["source_root_path"])
+                    != pins["bootstrap_source_closure_sha256"],
+                    _bootstrap_tree_digest(pins["dependency_root_path"])
+                    != pins["bootstrap_dependency_closure_sha256"],
+                )
+            )
         if (
             current_pins != snapshot_pins
             or current_pin_sha256 != pin_manifest_sha256
@@ -785,6 +1348,7 @@ def _inspect_runtime(
             or current_dependency != dependency_manifest
             or _sha256(current_launcher) != actual["launcher_sha256"]
             or _sha256(current_python) != actual["python_executable_sha256"]
+            or bootstrap_drifted
             or directory_identity_sha256(
                 source_root,
                 require_immutable=require_immutable,
