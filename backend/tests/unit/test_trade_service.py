@@ -9,7 +9,12 @@ from app.core.errors import OrderConfirmRequiredError, OrderNotCancelableError, 
 from app.schemas.trade import CancelAllRequestDTO, CancelRequestDTO, OrderRequestDTO
 from app.services.audit_service import AuditService
 from app.services.risk_service import RiskService
-from app.services.trade_service import TradeService, is_cancelable_status, normalize_status
+from app.services.trade_service import (
+    TradeService,
+    _CFastOrderVolumeCapability,
+    is_cancelable_status,
+    normalize_status,
+)
 from app.services.vnpy_rpc_service import rpc_service
 from vnpy.trader.constant import Direction, Exchange, Offset, OrderType, Status
 
@@ -130,7 +135,7 @@ def test_pre_rpc_guard_runs_after_risk_and_immediately_before_send(
     assert events == ["risk", "guard", "send"]
 
 
-def test_internal_volume_override_keeps_other_risk_checks(
+def test_public_send_cannot_select_a_volume_override(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -155,13 +160,47 @@ def test_internal_volume_override_keeps_other_risk_checks(
         ],
     )
 
-    service.send_order(
-        make_order(volume=2),
-        max_order_volume_override=0,
-        pre_rpc_guard=lambda: events.append("final"),
-    )
+    with pytest.raises(TypeError):
+        service.send_order(
+            make_order(volume=2),
+            max_order_volume_override=0,  # type: ignore[call-arg]
+            pre_rpc_guard=lambda: events.append("final"),
+        )
 
-    assert events == ["final", "send"]
+    assert events == []
+
+
+def test_c_fast_volume_capability_cannot_be_forged_or_misused(
+    tmp_path,
+) -> None:
+    service = make_service(tmp_path)
+
+    with pytest.raises(TypeError, match="cannot be constructed"):
+        _CFastOrderVolumeCapability(
+            object(), construction_key=object()
+        )
+
+    with pytest.raises(RuntimeError, match="capability is invalid"):
+        service._send_c_fast_order(
+            make_order(
+                reference=(
+                    "commodity_cf:sh:0123456789abcdef:open:ag2610:1"
+                )
+            ),
+            c_fast_order_volume_capability=object(),
+            pre_rpc_guard=lambda: None,
+            send_linearization_lock=object(),
+        )
+
+    with pytest.raises(RuntimeError, match="capability is invalid"):
+        service._send_order(
+            make_order(),
+            source_ip=None,
+            operator="test",
+            pre_rpc_guard=None,
+            send_linearization_lock=None,
+            c_fast_order_volume_capability=object(),
+        )
 
 
 def test_status_mapping_and_cancelable_status() -> None:

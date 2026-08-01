@@ -691,8 +691,9 @@ def test_c_fast_start_auto_dispatches_and_archives_reconciled_pnl(
     assert started["action"] == "open_submitted"
     requests = list(service.trade.requests)
     assert requests
+    assert service.trade.c_fast_send_count == len(requests)
     assert all(
-        row.get("max_order_volume_override") == 0.0
+        row.get("c_fast_order_volume_capability") is not None
         for row in service.trade.send_kwargs
     )
     receipt = service._load_c_fast_permit_receipt(

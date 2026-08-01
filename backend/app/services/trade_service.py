@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, is_dataclass
 from datetime import datetime
+from threading import RLock
 from typing import Any, Callable
 
 from app.core.config import Settings, get_settings
@@ -39,6 +40,19 @@ ORDER_TYPE_MAP = {
 
 CANCELABLE_STATUSES = {"submitting", "not_traded", "part_traded"}
 
+_C_FAST_CAPABILITY_CONSTRUCTION_KEY = object()
+
+
+class _CFastOrderVolumeCapability:
+    """Opaque process-local authority for the C_FAST child-order lane."""
+
+    __slots__ = ("owner_identity",)
+
+    def __init__(self, owner: object, *, construction_key: object) -> None:
+        if construction_key is not _C_FAST_CAPABILITY_CONSTRUCTION_KEY:
+            raise TypeError("C_FAST order-volume capability cannot be constructed")
+        self.owner_identity = id(owner)
+
 
 class TradeService:
     def __init__(
@@ -52,6 +66,41 @@ class TradeService:
         self.audit = audit or audit_service
         self.risk = risk or risk_service
         self.rpc = rpc or rpc_service
+        self._c_fast_capability_lock = RLock()
+        self._c_fast_order_volume_capabilities: set[
+            _CFastOrderVolumeCapability
+        ] = set()
+
+    def _bind_c_fast_order_volume_capability(
+        self,
+        owner: object,
+    ) -> _CFastOrderVolumeCapability:
+        """Bind an opaque capability to an exact CommoditySimNow owner."""
+
+        # Import lazily to avoid the module cycle at import time.  An exact
+        # type check prevents callers from spoofing the owner with a subclass
+        # or a same-named object.
+        from app.services.commodity_simnow import CommoditySimNowService
+
+        if type(owner) is not CommoditySimNowService:
+            raise TypeError("C_FAST capability owner is invalid")
+        capability = _CFastOrderVolumeCapability(
+            owner,
+            construction_key=_C_FAST_CAPABILITY_CONSTRUCTION_KEY,
+        )
+        with self._c_fast_capability_lock:
+            self._c_fast_order_volume_capabilities.add(capability)
+        return capability
+
+    def _is_c_fast_order_volume_capability(
+        self, capability: object
+    ) -> bool:
+        with self._c_fast_capability_lock:
+            return bool(
+                type(capability) is _CFastOrderVolumeCapability
+                and capability
+                in self._c_fast_order_volume_capabilities
+            )
 
     def config_status(self) -> dict[str, Any]:
         return {
@@ -68,16 +117,71 @@ class TradeService:
         source_ip: str | None = None,
         operator: str = "anonymous",
         pre_rpc_guard: Callable[[], Any] | None = None,
-        max_order_volume_override: float | None = None,
         send_linearization_lock: Any | None = None,
+    ) -> dict[str, Any]:
+        return self._send_order(
+            payload,
+            source_ip=source_ip,
+            operator=operator,
+            pre_rpc_guard=pre_rpc_guard,
+            send_linearization_lock=send_linearization_lock,
+            c_fast_order_volume_capability=None,
+        )
+
+    def _send_c_fast_order(
+        self,
+        payload: OrderRequestDTO,
+        *,
+        c_fast_order_volume_capability: object,
+        source_ip: str | None = None,
+        operator: str = "anonymous",
+        pre_rpc_guard: Callable[[], Any],
+        send_linearization_lock: Any,
+    ) -> dict[str, Any]:
+        """Send one C_FAST SimNow child through the capability-only lane."""
+
+        if not self._is_c_fast_order_volume_capability(
+            c_fast_order_volume_capability
+        ):
+            raise RuntimeError("C_FAST order-volume capability is invalid")
+        if (
+            not callable(pre_rpc_guard)
+            or send_linearization_lock is None
+            or not str(payload.reference or "").startswith("commodity_cf:sh:")
+        ):
+            raise RuntimeError("C_FAST guarded-send contract is invalid")
+        return self._send_order(
+            payload,
+            source_ip=source_ip,
+            operator=operator,
+            pre_rpc_guard=pre_rpc_guard,
+            send_linearization_lock=send_linearization_lock,
+            c_fast_order_volume_capability=c_fast_order_volume_capability,
+        )
+
+    def _send_order(
+        self,
+        payload: OrderRequestDTO,
+        *,
+        source_ip: str | None,
+        operator: str,
+        pre_rpc_guard: Callable[[], Any] | None,
+        send_linearization_lock: Any | None,
+        c_fast_order_volume_capability: object | None,
     ) -> dict[str, Any]:
         request_data = payload.model_dump()
         self.audit.record(action="order_request", request=request_data, operator=operator, source_ip=source_ip)
         try:
-            self.risk.check_order(
-                payload,
-                max_order_volume_override=max_order_volume_override,
-            )
+            if c_fast_order_volume_capability is None:
+                self.risk.check_order(payload)
+            elif self._is_c_fast_order_volume_capability(
+                c_fast_order_volume_capability
+            ):
+                self.risk._check_c_fast_order(payload)
+            else:
+                raise RuntimeError(
+                    "C_FAST order-volume capability is invalid"
+                )
             order_request = self.to_vnpy_order_request(payload)
             gateway_name = payload.gateway_name or self.settings.default_gateway_name
             if pre_rpc_guard is None:

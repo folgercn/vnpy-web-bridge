@@ -288,6 +288,10 @@ class CommoditySimNowService:
             ]
             | None
         ) = None
+        self._c_fast_trade_capabilities: dict[
+            int, tuple[object, object]
+        ] = {}
+        self._c_fast_test_double_capability = object()
         self._task: asyncio.Task[Any] | None = None
         self._state_load_error: str | None = None
         self._c_fast_authority_persist_error: str | None = None
@@ -321,6 +325,20 @@ class CommoditySimNowService:
     ) -> None:
         with self._cycle_lock:
             self._c_fast_execution_permit_provider = provider
+
+    def _c_fast_order_volume_capability(self) -> object:
+        trade = self.trade
+        if not isinstance(trade, TradeService):
+            # Test doubles must expose the dedicated C_FAST entry point but
+            # never reach the production RiskService bypass.
+            return self._c_fast_test_double_capability
+        key = id(trade)
+        bound = self._c_fast_trade_capabilities.get(key)
+        if bound is not None and bound[0] is trade:
+            return bound[1]
+        capability = trade._bind_c_fast_order_volume_capability(self)
+        self._c_fast_trade_capabilities[key] = (trade, capability)
+        return capability
 
     def _dispatch_epoch_snapshot(self) -> int:
         with self._dispatch_abort_lock:
@@ -1213,18 +1231,39 @@ class CommoditySimNowService:
                         dispatch_abort_epoch
                     )
 
-                result = self.trade.send_order(
-                    request,
-                    source_ip=source_ip,
-                    operator=operator,
-                    pre_rpc_guard=pre_rpc_guard,
-                    max_order_volume_override=(
-                        self._c_fast_max_order_volume_override(plan)
-                    ),
-                    send_linearization_lock=(
-                        self._dispatch_abort_lock
-                    ),
-                )
+                if plan.get("c_fast_shakedown_session_id"):
+                    self._verify_c_fast_order_volume_capability_context(
+                        plan
+                    )
+                    c_fast_send = getattr(
+                        self.trade, "_send_c_fast_order", None
+                    )
+                    if not callable(c_fast_send):
+                        raise CommoditySimNowSafetyError(
+                            "C_FAST 私有下单入口不可用"
+                        )
+                    result = c_fast_send(
+                        request,
+                        c_fast_order_volume_capability=(
+                            self._c_fast_order_volume_capability()
+                        ),
+                        source_ip=source_ip,
+                        operator=operator,
+                        pre_rpc_guard=pre_rpc_guard,
+                        send_linearization_lock=(
+                            self._dispatch_abort_lock
+                        ),
+                    )
+                else:
+                    result = self.trade.send_order(
+                        request,
+                        source_ip=source_ip,
+                        operator=operator,
+                        pre_rpc_guard=pre_rpc_guard,
+                        send_linearization_lock=(
+                            self._dispatch_abort_lock
+                        ),
+                    )
                 submitted_row = {
                     **repriced,
                     "decision_price": order["price"],
@@ -5390,6 +5429,17 @@ class CommoditySimNowService:
         plan: dict[str, Any],
     ) -> dict[str, Any]:
         session = self._load_c_fast_shakedown_state()
+        permit_id = str(plan.get("execution_permit_id") or "")
+        acceptance_receipt_hash = str(
+            plan.get("acceptance_receipt_raw_sha256") or ""
+        )
+        permit_receipt = self._load_c_fast_permit_receipt(
+            permit_id
+        )
+        acceptance_use = self._load_c_fast_acceptance_use(
+            acceptance_receipt_hash
+        )
+        durable_plan = self._load_active_plan()
         snapshot, snapshot_hash, permit = self._c_fast_snapshot()
         current_trading_day = self._current_trading_day(
             self._plan_symbols(plan)
@@ -5451,10 +5501,46 @@ class CommoditySimNowService:
                 if isinstance(self.current_plan, dict)
                 else None
             ),
+            "durable_plan_hash":
+            (
+                durable_plan.get("plan_hash")
+                if isinstance(durable_plan, dict)
+                else None
+            ),
+            "permit_receipt_checksum":
+            (
+                permit_receipt.get("receipt_checksum")
+                if isinstance(permit_receipt, dict)
+                else None
+            ),
+            "acceptance_use_receipt_checksum":
+            (
+                acceptance_use.get("receipt_checksum")
+                if isinstance(acceptance_use, dict)
+                else None
+            ),
         }
+        durable_binding_fields = (
+            "c_fast_shakedown_session_id",
+            "plan_hash",
+            "source_snapshot_hash",
+            "control_acceptance_id",
+            "execution_permit_id",
+            "acceptance_receipt_raw_sha256",
+            "permit_consumption_receipt_checksum",
+            "account_hash",
+            "execution_day",
+            "execution_lane",
+            "countable_forward",
+            "production_allowed",
+        )
         if (
             not isinstance(session, dict)
             or session.get("status") == "RESULT_UNKNOWN"
+            or not self._c_fast_plan_checksum_valid(session)
+            or permit_receipt is None
+            or acceptance_use is None
+            or durable_plan is None
             or any(
                 observed[field] != expected[field]
                 for field in (
@@ -5475,6 +5561,34 @@ class CommoditySimNowService:
             != expected["execution_day"]
             or observed["active_plan_hash"]
             != expected["plan_hash"]
+            or observed["durable_plan_hash"]
+            != expected["plan_hash"]
+            or any(
+                durable_plan.get(field) != plan.get(field)
+                for field in durable_binding_fields
+            )
+            or permit_receipt.get("execution_permit_id")
+            != expected["execution_permit_id"]
+            or permit_receipt.get("control_acceptance_id")
+            != expected["control_acceptance_id"]
+            or permit_receipt.get("acceptance_receipt_raw_sha256")
+            != expected["acceptance_receipt_raw_sha256"]
+            or permit_receipt.get("source_snapshot_hash")
+            != expected["source_snapshot_hash"]
+            or permit_receipt.get("expected_simnow_account_sha256")
+            != plan.get("account_hash")
+            or permit_receipt.get("session_id")
+            != expected["session_id"]
+            or permit_receipt.get("receipt_checksum")
+            != plan.get("permit_consumption_receipt_checksum")
+            or acceptance_use.get("acceptance_receipt_raw_sha256")
+            != expected["acceptance_receipt_raw_sha256"]
+            or acceptance_use.get("control_acceptance_id")
+            != expected["control_acceptance_id"]
+            or acceptance_use.get("execution_permit_id")
+            != expected["execution_permit_id"]
+            or acceptance_use.get("session_id")
+            != expected["session_id"]
         ):
             raise CommoditySimNowSafetyError(
                 "C_FAST child 最终发送绑定已失效",
@@ -5491,6 +5605,12 @@ class CommoditySimNowService:
             expected["source_snapshot_hash"],
             "execution_day": expected["execution_day"],
             "current_trading_day": current_trading_day,
+            "permit_consumption_receipt_checksum":
+            observed["permit_receipt_checksum"],
+            "acceptance_use_receipt_checksum":
+            observed["acceptance_use_receipt_checksum"],
+            "session_plan_checksum_revalidated": True,
+            "active_plan_checksum_revalidated": True,
         }
 
     def _verify_c_fast_pre_send_fact_guard(
@@ -5836,12 +5956,14 @@ class CommoditySimNowService:
             )
         return payload
 
-    def _c_fast_max_order_volume_override(
+    def _verify_c_fast_order_volume_capability_context(
         self, plan: dict[str, Any]
-    ) -> float | None:
-        """Return an unsplit-only volume override for a bound C_FAST plan."""
+    ) -> None:
+        """Verify the exact C_FAST plan allowed to use the private lane."""
         if not plan.get("c_fast_shakedown_session_id"):
-            return None
+            raise CommoditySimNowSafetyError(
+                "C_FAST 私有下单入口缺少 shakedown session"
+            )
         if (
             plan.get("execution_lane") != "simnow_shakedown"
             or plan.get("production_allowed") is not False
@@ -5877,7 +5999,6 @@ class CommoditySimNowService:
             raise CommoditySimNowSafetyError(
                 "C_FAST 单笔手数放宽 permit/session/receipt 绑定无效"
             )
-        return 0.0
 
     def _verify_c_fast_execution_permit_available(
         self,
@@ -8146,6 +8267,7 @@ class CommoditySimNowService:
             "TRADE_DISABLED",
             "ORDER_CONFIRM_REQUIRED",
             "INVALID_ORDER_REQUEST",
+            "COMMODITY_SIMNOW_SAFETY_FAILED",
         }
 
     def _submission_recovery_phase(self, status: str) -> str | None:
