@@ -892,6 +892,72 @@ def test_unpinned_base_rootfs_prefix_fails_closed(
         )
 
 
+def test_root_directory_marker_is_only_admitted_for_pinned_base_layer() -> None:
+    root_marker = _tar([(".", b"", 0o755, "directory")])
+
+    with pytest.raises(
+        subject.QueryV3ImageAttestationError,
+        match="path is not normalized",
+    ):
+        subject._apply_layer({}, {}, root_marker, "untrusted layer")
+
+    filesystem: dict[str, Any] = {}
+    directories: dict[str, Any] = {}
+    assert subject._apply_layer(
+        filesystem,
+        directories,
+        root_marker,
+        "pinned base layer",
+        allow_pinned_base_root_marker=True,
+    ) == set()
+    assert filesystem == {}
+    assert directories == {}
+
+
+def test_pinned_base_root_marker_rejects_non_directory_payload() -> None:
+    invalid_marker = _tar([(".", b"payload", 0o755, "regular")])
+
+    with pytest.raises(
+        subject.QueryV3ImageAttestationError,
+        match="pinned base root marker is invalid",
+    ):
+        subject._apply_layer(
+            {},
+            {},
+            invalid_marker,
+            "pinned base layer",
+            allow_pinned_base_root_marker=True,
+        )
+
+
+def test_dependency_private_key_literal_exemption_is_byte_exact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = (
+        "usr/local/lib/python3.12/site-packages/cryptography/"
+        "hazmat/primitives/serialization/ssh.py"
+    )
+    trusted = b'_SK_START = b"-----BEGIN OPENSSH PRIVATE KEY-----"\n'
+    monkeypatch.setattr(
+        subject,
+        "PRIVATE_KEY_MARKER_LITERAL_DEPENDENCY_SHA256",
+        {path: hashlib.sha256(trusted).hexdigest()},
+    )
+
+    assert subject._contains_unapproved_private_key_marker(path, trusted) is False
+    assert (
+        subject._contains_unapproved_private_key_marker(path, trusted + b"# drift\n")
+        is True
+    )
+    assert (
+        subject._contains_unapproved_private_key_marker(
+            "tmp/private-key.pem",
+            b"-----BEGIN PRIVATE KEY-----\nnot-a-real-key\n",
+        )
+        is True
+    )
+
+
 def test_runtime_file_unreadable_by_frozen_uid_fails_closed(
     tmp_path: Path,
     source_bundle: tuple[bytes, bytes, dict[str, Any]],

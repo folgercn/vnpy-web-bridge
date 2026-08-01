@@ -15,6 +15,7 @@ jobs:
       backend_changed: ${{ steps.filter.outputs.backend_changed }}
       frontend_changed: ${{ steps.filter.outputs.frontend_changed }}
       image_changed: ${{ steps.filter.outputs.image_changed }}
+      query_v5_changed: ${{ steps.filter.outputs.query_v5_changed }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -33,6 +34,7 @@ jobs:
             echo "backend_changed=true" >> "$GITHUB_OUTPUT"
             echo "frontend_changed=true" >> "$GITHUB_OUTPUT"
             echo "image_changed=true" >> "$GITHUB_OUTPUT"
+            echo "query_v5_changed=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -48,6 +50,7 @@ jobs:
           backend_changed=false
           frontend_changed=false
           image_changed=false
+          query_v5_changed=false
 
           while IFS= read -r file; do
             [ -z "$file" ] && continue
@@ -56,7 +59,13 @@ jobs:
                 backend_changed=true
                 frontend_changed=true
                 image_changed=true
+                query_v5_changed=true
                 continue
+                ;;
+            esac
+            case "$file" in
+              .dockerignore|backend/requirements.txt|scripts/c_fast_t1/*query_v3*|scripts/c_fast_t1/*query_v4*|scripts/c_fast_t1/*query_v5*|scripts/commodity_c_fast_*|docs/operations/c-fast-t1-query-v5-*|docs/schemas/commodity-c-fast-*|backend/tests/unit/test_c_fast_t1_query_v3*|backend/tests/unit/test_c_fast_t1_query_v4*|backend/tests/unit/test_c_fast_t1_query_v5*)
+                query_v5_changed=true
                 ;;
             esac
             case "$file" in
@@ -79,6 +88,7 @@ jobs:
           echo "backend_changed=$backend_changed" >> "$GITHUB_OUTPUT"
           echo "frontend_changed=$frontend_changed" >> "$GITHUB_OUTPUT"
           echo "image_changed=$image_changed" >> "$GITHUB_OUTPUT"
+          echo "query_v5_changed=$query_v5_changed" >> "$GITHUB_OUTPUT"
 
   backend:
     name: Backend tests
@@ -146,3 +156,88 @@ jobs:
             -f scripts/c_fast_t1/Containerfile.readiness-v4 \
             --build-arg SOURCE_REVISION=${{ github.sha }} \
             -t vnpy-web-bridge-c-fast-readiness-v4:ci-${{ github.sha }} .
+
+  query-v5-real-oci:
+    name: Query-v5 real OCI composition
+    needs: changes
+    if: needs.changes.outputs.query_v5_changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install verifier dependencies
+        run: pip install -r backend/requirements.txt
+
+      - name: Run query-v5 attestation closure tests
+        run: |
+          PYTHONPATH=backend:scripts pytest -q \
+            backend/tests/unit/test_c_fast_t1_query_v3_image_attestation.py \
+            backend/tests/unit/test_c_fast_t1_query_v4_image_attestation.py \
+            backend/tests/unit/test_c_fast_t1_query_v4_runtime_packaging.py \
+            backend/tests/unit/test_c_fast_t1_query_v5_image_attestation.py
+
+      - name: Set up Buildx for local OCI registry
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: network=host
+          buildkitd-config-inline: |
+            [registry."localhost:5000"]
+              http = true
+              insecure = true
+
+      - name: Build, export, and fully attest exact query-v5 composition
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run -d --rm --network host --name query-v5-ci-registry registry:2
+
+          v4_repository="c-fast/query-v4"
+          v4_tag="localhost:5000/${v4_repository}:${GITHUB_SHA}"
+          docker buildx build --progress=plain --platform linux/amd64 \
+            --provenance=false --sbom=false \
+            --output "type=registry,name=${v4_tag},oci-mediatypes=true" \
+            -f scripts/c_fast_t1/Containerfile.query-v4 \
+            --build-arg "SOURCE_REVISION=${GITHUB_SHA}" .
+          v4_digest="$(PYTHONPATH=scripts python \
+            scripts/c_fast_t1/ci_query_v5_real_oci_attestation.py \
+            export-registry-oci \
+            --registry http://localhost:5000 \
+            --repository "${v4_repository}" \
+            --reference "${GITHUB_SHA}" \
+            --output /tmp/query-v4.oci.tar | sed -n 's/^image_digest=//p')"
+          test -n "${v4_digest}"
+          v4_reference="localhost:5000/${v4_repository}@${v4_digest}"
+
+          v5_repository="c-fast/query-v5"
+          v5_tag="localhost:5000/${v5_repository}:${GITHUB_SHA}"
+          docker buildx build --progress=plain --platform linux/amd64 \
+            --provenance=false --sbom=false \
+            --output "type=registry,name=${v5_tag},oci-mediatypes=true" \
+            -f scripts/c_fast_t1/Containerfile.query-v5 \
+            --build-arg "QUERY_V4_BASE_IMAGE=${v4_reference}" \
+            --build-arg "SOURCE_REVISION=${GITHUB_SHA}" .
+          v5_digest="$(PYTHONPATH=scripts python \
+            scripts/c_fast_t1/ci_query_v5_real_oci_attestation.py \
+            export-registry-oci \
+            --registry http://localhost:5000 \
+            --repository "${v5_repository}" \
+            --reference "${GITHUB_SHA}" \
+            --output /tmp/query-v5.oci.tar | sed -n 's/^image_digest=//p')"
+          test -n "${v5_digest}"
+          v5_reference="localhost:5000/${v5_repository}@${v5_digest}"
+
+          PYTHONPATH=scripts python \
+            scripts/c_fast_t1/ci_query_v5_real_oci_attestation.py attest \
+            --source-commit-sha "${GITHUB_SHA}" \
+            --query-v4-oci /tmp/query-v4.oci.tar \
+            --query-v4-image-reference "${v4_reference}" \
+            --query-v5-oci /tmp/query-v5.oci.tar \
+            --query-v5-image-reference "${v5_reference}"
