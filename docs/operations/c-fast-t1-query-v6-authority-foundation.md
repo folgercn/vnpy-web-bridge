@@ -9,6 +9,14 @@ L3 outcome、十品种 exact-contract manifest、runtime pin generation、custod
 secret-free DSN identity、超时参数，以及 runner/child/audit/lifecycle/readonly
 proof 的 exact bytes。
 
+readiness-v4 与 L3 不是按 schema/hash 直接接收。signer 和 verifier 都必须从
+固定 `/run/c-fast-t1-readiness-v4-pins` 重读 active root-owned pin generation，
+调用官方 `verify_existing_readiness_packet` 做 packet/custody/runtime identity
+exact re-derive，并调用官方 `verify_signed_outcome` 重放 L3 release、consume、
+receipt、pre/post evidence 和 Ed25519 signature。完成后还会重验 active pins，
+因此同路径伪 packet、伪 outcome、keyring/pin rotation 或中途 tamper 都会
+fail closed。
+
 签名 payload 使用独立 Ed25519 key domain。query-v6 key material 与
 query-v5 provenance keyring 任意重合都会 fail closed。`release_id` 必须全新，
 `attempt_id` 只能是 `attempt-<sha256(UTF-8 release_id)>`；TTL 最长 600 秒，
@@ -30,6 +38,11 @@ create-only consume、final revalidation、readonly proof 和 terminal custody�
 - signed query-v5 provenance、独立 provenance keyring、composition attestation、
   final OCI layout 及其完整 replay inputs；
 - 当前有效的 readiness-v4 与其中绑定的 exact signed L3 outcome；
+- readiness-v4 全量 replay inputs：query-v4 image/source/OCI/content、
+  provenance-v3 及 keyring、query-v5/T1 keyrings；L3 release keyring、release、
+  consume marker、receipt、12 个 pre evidence、6 个 post evidence、outcome
+  keyring；以及独立提供的 T1/L3 source commit、T1/QuestDB image digest 和
+  outcome contract source assertion；
 - `commodity_c_fast_l1_l5_audit_manifest_v2` manifest。`targets` 必须恰好为
   `ag/al/au/bu/cu/rb/ru/sc/sp/zn`，current/roll 每个 exact contract 都必须有
   execution window；
@@ -43,6 +56,8 @@ create-only consume、final revalidation、readonly proof 和 terminal custody�
 runtime pin manifest、DSN identity attestation、keyring、unsigned/signed release
 均应为当前用户所有的普通 `0600` 文件。keyring canonical SHA256 必须通过
 独立 root-owned pin 传入，不可只相信 release 内的值。
+query-v6 的跨域隔离使用上述 active pins 验证过的完整 keyring materials；不会
+相信 readiness packet 自报的 `signer_public_key_sha256`。
 
 ## Sign and verify
 
@@ -61,7 +76,8 @@ python scripts/commodity_c_fast_t1_query_v6_authority.py --help
 signer 只 create-only 写入一个 `0600` signed JSON。verifier 只读输入并打印
 `FOUNDATION_ONLY_NO_QUERY_AUTHORITY`；它没有 `--dsn-file`、consume、network
 或 launch 参数。任何 PENDING、schema downgrade、raw/canonical splice、
-十品种缺失、roll window 缺失、custody 不一致、endpoint 不一致、runtime pin
+十品种缺失、roll window 缺失、四组 session window 反转/重叠/越过 audit
+window/偏离签署 trading day、custody 不一致、endpoint 不一致、runtime pin
 rotation、source/schema hash rotation、签名错误、跨域 key reuse、TTL/attempt
 错误都会 fail closed。
 

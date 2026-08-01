@@ -150,27 +150,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--private-key-file", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--release-keyring", type=Path, required=True)
-    parser.add_argument("--expected-release-keyring-sha256", required=True)
-    parser.add_argument("--signed-provenance", type=Path, required=True)
-    parser.add_argument("--provenance-keyring", type=Path, required=True)
-    parser.add_argument("--expected-provenance-keyring-sha256", required=True)
-    parser.add_argument("--composition-attestation", type=Path, required=True)
-    parser.add_argument("--final-oci-layout", type=Path, required=True)
-    parser.add_argument("--query-v4-external-image-evidence", type=Path, required=True)
-    parser.add_argument("--query-v4-source-bundle-archive", type=Path, required=True)
-    parser.add_argument("--query-v4-oci-layout-archive", type=Path, required=True)
-    parser.add_argument("--query-v4-content-attestation", type=Path, required=True)
-    parser.add_argument("--expected-query-v4-source-commit-sha", required=True)
-    parser.add_argument("--external-image-evidence", type=Path, required=True)
-    parser.add_argument("--source-bundle-archive", type=Path, required=True)
-    parser.add_argument("--expected-source-commit-sha", required=True)
-    parser.add_argument("--expected-image-digest", required=True)
-    parser.add_argument("--readiness-v4", type=Path, required=True)
-    parser.add_argument("--l3-outcome", type=Path, required=True)
-    parser.add_argument("--query-manifest", type=Path, required=True)
-    parser.add_argument("--runtime-pin-manifest", type=Path, required=True)
-    parser.add_argument("--dsn-file-identity-attestation", type=Path, required=True)
+    authority._common_arguments(parser)
     return parser.parse_args()
 
 
@@ -207,6 +187,8 @@ def main() -> int:
             args.query_manifest,
             args.runtime_pin_manifest,
             args.dsn_file_identity_attestation,
+            readiness_inputs=authority._readiness_inputs_from_args(args),
+            now=now,
         )
         _keyring_raw = authority._read_bytes(
             args.release_keyring, "query-v6 keyring", private=True

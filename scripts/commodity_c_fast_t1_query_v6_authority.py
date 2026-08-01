@@ -20,11 +20,22 @@ from pathlib import Path, PurePosixPath
 import re
 import sys
 from typing import Any, Mapping
+from zoneinfo import ZoneInfo
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 import commodity_c_fast_t1_query_v5_release as query_v5
+import commodity_c_fast_t1_readiness_v4 as readiness_v4
+from commodity_c_fast_readonly_deployment_outcome import (
+    DeploymentOutcomeError,
+    OutcomeSourcePaths,
+    PostEvidencePaths,
+    verify_signed_outcome,
+)
+from commodity_c_fast_readonly_deployment_release import (
+    DeploymentEvidencePaths,
+)
 from commodity_c_fast_t1_one_shot import (
     OneShotError,
     canonical_json,
@@ -87,6 +98,19 @@ AUTHORITY_STATE = "FOUNDATION_ONLY_NO_QUERY_AUTHORITY"
 MAX_JSON_BYTES = 8 * 1024 * 1024
 MAX_RELEASE_TTL = timedelta(minutes=10)
 EXPECTED_PRODUCTS = frozenset({"ag", "al", "au", "bu", "cu", "rb", "ru", "sc", "sp", "zn"})
+REQUIRED_SESSION_WINDOWS = (
+    "night_open",
+    "night_session",
+    "day_open",
+    "day_session",
+)
+CHINA_TZ = ZoneInfo("Asia/Shanghai")
+CANONICAL_SESSION_CLOCKS = {
+    "night_open": ("21:00:00", "21:02:05", "night"),
+    "night_session": ("21:10:00", "21:20:00", "night"),
+    "day_open": ("09:00:00", "09:02:05", "day"),
+    "day_session": ("09:10:00", "09:20:00", "day"),
+}
 ID_RE = re.compile(r"^[A-Za-z0-9._-]{8,128}$")
 SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -166,6 +190,7 @@ class AuthorityEvidence:
     query_manifest: JsonArtifact
     runtime_pin_manifest: JsonArtifact
     dsn_identity_attestation: JsonArtifact
+    verified_domain_public_key_hashes: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -196,6 +221,7 @@ class OfflineVerificationPaths:
     expected_provenance_keyring_sha256: str
     expected_source_commit_sha: str
     expected_image_digest: str
+    readiness_inputs: readiness_v4.ReadinessInputs
 
 
 def sha256_bytes(raw: bytes) -> str:
@@ -321,14 +347,64 @@ def _validate_query_manifest(manifest: dict[str, Any]) -> None:
         end = parse_datetime(
             manifest["audit_window"]["end_exclusive"], "audit end"
         )
+        trading_day = datetime.strptime(
+            str(manifest["audit_window"]["trading_day"]), "%Y%m%d"
+        ).date()
         times = [
             parse_datetime(window["execution_time"], "execution time")
             for window in manifest["execution_windows"]
         ]
-    except OneShotError as exc:
+        sessions = []
+        for name in REQUIRED_SESSION_WINDOWS:
+            raw = manifest["session_windows"][name]
+            session_start = parse_datetime(
+                raw["start"], f"session_windows.{name}.start"
+            )
+            session_end = parse_datetime(
+                raw["end_exclusive"],
+                f"session_windows.{name}.end_exclusive",
+            )
+            if not session_start < session_end:
+                raise QueryV6AuthorityError(
+                    f"session window {name} end must be later than start"
+                )
+            if session_start < start or session_end > end:
+                raise QueryV6AuthorityError(
+                    f"session window {name} is outside signed audit window"
+                )
+            sessions.append((name, session_start, session_end))
+    except (OneShotError, ValueError) as exc:
         raise QueryV6AuthorityError(str(exc)) from exc
     if not start < end or any(not start <= value < end for value in times):
         raise QueryV6AuthorityError("query manifest time window is invalid")
+    ordered_sessions = sorted(sessions, key=lambda item: item[1])
+    for previous, current in zip(ordered_sessions, ordered_sessions[1:]):
+        if current[1] < previous[2]:
+            raise QueryV6AuthorityError(
+                f"session windows overlap: {previous[0]}/{current[0]}"
+            )
+    for name, session_start, session_end in sessions:
+        start_clock, end_clock, day_role = CANONICAL_SESSION_CLOCKS[name]
+        local_start = session_start.astimezone(CHINA_TZ)
+        local_end = session_end.astimezone(CHINA_TZ)
+        if (
+            local_start.strftime("%H:%M:%S") != start_clock
+            or local_end.strftime("%H:%M:%S") != end_clock
+            or local_start.date() != local_end.date()
+        ):
+            raise QueryV6AuthorityError(
+                f"session window {name} is not the canonical China-time window"
+            )
+        if day_role == "day" and local_start.date() != trading_day:
+            raise QueryV6AuthorityError(
+                f"session window {name} must fall on signed trading_day"
+            )
+        if day_role == "night":
+            days_before = (trading_day - local_start.date()).days
+            if days_before < 1 or days_before > 3:
+                raise QueryV6AuthorityError(
+                    f"session window {name} must precede signed trading_day"
+                )
 
 
 def dsn_identity_sha256(payload: Mapping[str, Any]) -> str:
@@ -369,19 +445,159 @@ def _validate_dsn_identity(payload: dict[str, Any]) -> None:
             raise QueryV6AuthorityError(f"forbidden DSN attestation fact: {field}")
 
 
+def _readiness_runtime_identity_candidate(
+    readiness_path: Path,
+) -> readiness_v4.ReadinessRuntimeIdentity:
+    candidate = _load_json_artifact(
+        readiness_path,
+        READINESS_SCHEMA_PATH,
+        "readiness-v4 runtime identity candidate",
+    ).payload["readiness_runtime"]
+    values = {
+        field: candidate[field]
+        for field in readiness_v4.ReadinessRuntimeIdentity.__dataclass_fields__
+    }
+    try:
+        return readiness_v4.ReadinessRuntimeIdentity(**values)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise QueryV6AuthorityError(
+            "readiness-v4 runtime identity candidate is invalid"
+        ) from exc
+
+
+def _verified_readiness_key_materials(
+    inputs: readiness_v4.ReadinessInputs,
+    pins: readiness_v4.ReadinessPins,
+) -> frozenset[str]:
+    specs = (
+        (
+            inputs.provenance_keyring,
+            pins.provenance_keyring_sha256,
+            readiness_v4.PROVENANCE_KEYRING_VERSION,
+            readiness_v4.PROVENANCE_KEY_PURPOSE,
+            "readiness-v4 provenance keyring",
+            None,
+        ),
+        (
+            inputs.query_v5_keyring,
+            pins.query_v5_authority_keyring_sha256,
+            readiness_v4.QUERY_V5_KEYRING_SCHEMA_VERSION,
+            readiness_v4.QUERY_V5_KEY_PURPOSE,
+            "readiness-v4 query-v5 keyring",
+            readiness_v4.QUERY_V5_KEYRING_SCHEMA_PATH,
+        ),
+        (
+            inputs.t1_keyring,
+            pins.t1_authority_keyring_sha256,
+            readiness_v4.T1_KEYRING_VERSION,
+            readiness_v4.T1_KEY_PURPOSE,
+            "readiness-v4 T1 keyring",
+            None,
+        ),
+        (
+            inputs.outcome_source.release_keyring,
+            pins.l3_authority_keyring_sha256,
+            readiness_v4.L3_KEYRING_VERSION,
+            readiness_v4.L3_KEY_PURPOSE,
+            "readiness-v4 L3 keyring",
+            None,
+        ),
+        (
+            inputs.outcome_keyring,
+            pins.outcome_keyring_sha256,
+            readiness_v4.OUTCOME_KEYRING_VERSION,
+            readiness_v4.OUTCOME_KEY_PURPOSE,
+            "readiness-v4 outcome keyring",
+            None,
+        ),
+    )
+    materials: set[str] = set()
+    for path, expected, version, purpose, label, schema_path in specs:
+        materials.update(
+            readiness_v4._load_keyring_public_hashes(
+                path,
+                expected,
+                expected_schema_version=version,
+                expected_purpose=purpose,
+                label=label,
+                schema_path=schema_path,
+            )
+        )
+    return frozenset(materials)
+
+
 def load_authority_evidence(
     readiness_path: Path,
     l3_outcome_path: Path,
     query_manifest_path: Path,
     runtime_pin_manifest_path: Path,
     dsn_identity_attestation_path: Path,
+    *,
+    readiness_inputs: readiness_v4.ReadinessInputs,
+    now: datetime,
+    require_root_owned_parent: bool = True,
 ) -> AuthorityEvidence:
+    try:
+        if (
+            readiness_inputs.outcome.resolve(strict=True)
+            != l3_outcome_path.resolve(strict=True)
+        ):
+            raise QueryV6AuthorityError(
+                "readiness-v4 and query-v6 L3 outcome paths differ"
+            )
+        pins = readiness_v4._read_production_pins()
+        verified_readiness = readiness_v4.verify_existing_readiness_packet(
+            readiness_inputs,
+            pins,
+            _readiness_runtime_identity_candidate(readiness_path),
+            readiness_path,
+            now=now,
+            require_root_owned_parent=require_root_owned_parent,
+        )
+        verified_l3 = verify_signed_outcome(
+            l3_outcome_path,
+            readiness_inputs.outcome_keyring,
+            readiness_inputs.t1_keyring,
+            readiness_inputs.outcome_source,
+            readiness_inputs.post_evidence,
+            expected_outcome_keyring_sha256=pins.outcome_keyring_sha256,
+            expected_release_keyring_sha256=pins.l3_authority_keyring_sha256,
+            expected_t1_keyring_sha256=pins.t1_authority_keyring_sha256,
+            expected_outcome_source_commit_sha=(
+                readiness_inputs.outcome_contract_source_commit_assertion
+            ),
+            expected_release_source_commit_sha=(
+                readiness_inputs.l3_contract_source_commit_sha
+            ),
+            expected_questdb_image_digest=(
+                readiness_inputs.questdb_image_digest
+            ),
+            now=now,
+        )
+        verified_key_materials = _verified_readiness_key_materials(
+            readiness_inputs,
+            pins,
+        )
+        readiness_v4.verify_active_readiness_pins(pins)
+    except (
+        OSError,
+        DeploymentOutcomeError,
+        readiness_v4.ReadinessV4Error,
+        ValueError,
+    ) as exc:
+        raise QueryV6AuthorityError(
+            f"readiness-v4/L3 full replay failed: {exc}"
+        ) from exc
     evidence = AuthorityEvidence(
-        readiness=_load_json_artifact(
-            readiness_path, READINESS_SCHEMA_PATH, "readiness-v4"
+        readiness=JsonArtifact(
+            payload=verified_readiness.payload,
+            raw_sha256=verified_readiness.raw_sha256,
+            canonical_sha256=verified_readiness.canonical_sha256,
         ),
-        l3_outcome=_load_json_artifact(
-            l3_outcome_path, L3_OUTCOME_SCHEMA_PATH, "signed L3 outcome"
+        l3_outcome=JsonArtifact(
+            payload=verified_l3.payload,
+            raw_sha256=verified_l3.raw_sha256,
+            canonical_sha256=verified_l3.canonical_sha256,
         ),
         query_manifest=_load_json_artifact(
             query_manifest_path, QUERY_MANIFEST_SCHEMA_PATH, "query manifest"
@@ -398,6 +614,7 @@ def load_authority_evidence(
             "secret-free DSN identity attestation",
             private=True,
         ),
+        verified_domain_public_key_hashes=verified_key_materials,
     )
     readiness = evidence.readiness.payload
     for field, value in readiness.items():
@@ -592,17 +809,12 @@ def known_domain_public_key_hashes(
     provenance: query_v5.VerifiedProvenance,
     evidence: AuthorityEvidence,
 ) -> frozenset[str]:
-    """Return signer materials exposed by already-bound independent domains."""
+    """Return only independently verified signer-domain key materials."""
 
-    hashes = {provenance.signer_public_key_sha256}
-    readiness = evidence.readiness.payload
-    for group in ("build_registry_provenance", "readonly_deployment_outcome"):
-        value = readiness.get(group)
-        if isinstance(value, dict):
-            candidate = value.get("signer_public_key_sha256")
-            if isinstance(candidate, str) and SHA_RE.fullmatch(candidate):
-                hashes.add(candidate)
-    return frozenset(hashes)
+    return frozenset(
+        {provenance.signer_public_key_sha256}
+        | set(evidence.verified_domain_public_key_hashes)
+    )
 
 
 def validate_release_semantics(
@@ -760,6 +972,8 @@ def verify_offline_foundation(
         paths.query_manifest_path,
         paths.runtime_pin_manifest_path,
         paths.dsn_identity_attestation_path,
+        readiness_inputs=paths.readiness_inputs,
+        now=now,
     )
     return verify_release(
         paths.release_path,
@@ -795,6 +1009,111 @@ def _common_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--query-manifest", type=Path, required=True)
     parser.add_argument("--runtime-pin-manifest", type=Path, required=True)
     parser.add_argument("--dsn-file-identity-attestation", type=Path, required=True)
+    _add_readiness_replay_arguments(parser)
+
+
+def _add_readiness_replay_arguments(parser: argparse.ArgumentParser) -> None:
+    path_fields = (
+        "external_image_evidence",
+        "source_bundle_archive",
+        "oci_layout_archive",
+        "content_attestation",
+        "provenance",
+        "provenance_keyring",
+        "query_v5_keyring",
+        "t1_keyring",
+        "outcome_keyring",
+    )
+    for field in path_fields:
+        parser.add_argument(
+            "--readiness-" + field.replace("_", "-"),
+            dest=f"readiness_{field}",
+            type=Path,
+            required=True,
+        )
+    for field in ("release", "release_keyring", "consume_marker", "receipt"):
+        parser.add_argument(
+            "--readiness-l3-" + field.replace("_", "-"),
+            dest=f"readiness_l3_{field}",
+            type=Path,
+            required=True,
+        )
+    for field in DeploymentEvidencePaths.__dataclass_fields__:
+        parser.add_argument(
+            "--readiness-l3-pre-" + field.replace("_", "-"),
+            dest=f"readiness_l3_pre_{field}",
+            type=Path,
+            required=True,
+        )
+    for field in PostEvidencePaths.__dataclass_fields__:
+        parser.add_argument(
+            "--readiness-l3-post-" + field.replace("_", "-"),
+            dest=f"readiness_l3_post_{field}",
+            type=Path,
+            required=True,
+        )
+    for field in (
+        "expected_t1_runtime_source_commit_sha",
+        "expected_t1_runtime_image_digest",
+        "expected_l3_contract_source_commit_sha",
+        "expected_outcome_contract_source_commit_assertion",
+        "expected_questdb_image_digest",
+    ):
+        parser.add_argument(
+            "--readiness-" + field.replace("_", "-"),
+            dest=f"readiness_{field}",
+            required=True,
+        )
+
+
+def _readiness_inputs_from_args(
+    args: argparse.Namespace,
+) -> readiness_v4.ReadinessInputs:
+    pre = DeploymentEvidencePaths(
+        **{
+            field: getattr(args, f"readiness_l3_pre_{field}")
+            for field in DeploymentEvidencePaths.__dataclass_fields__
+        }
+    )
+    post = PostEvidencePaths(
+        **{
+            field: getattr(args, f"readiness_l3_post_{field}")
+            for field in PostEvidencePaths.__dataclass_fields__
+        }
+    )
+    return readiness_v4.ReadinessInputs(
+        external_image_evidence=args.readiness_external_image_evidence,
+        source_bundle_archive=args.readiness_source_bundle_archive,
+        oci_layout_archive=args.readiness_oci_layout_archive,
+        content_attestation=args.readiness_content_attestation,
+        provenance=args.readiness_provenance,
+        provenance_keyring=args.readiness_provenance_keyring,
+        query_v5_keyring=args.readiness_query_v5_keyring,
+        t1_keyring=args.readiness_t1_keyring,
+        outcome=args.l3_outcome,
+        outcome_keyring=args.readiness_outcome_keyring,
+        outcome_source=OutcomeSourcePaths(
+            release=args.readiness_l3_release,
+            release_keyring=args.readiness_l3_release_keyring,
+            consume_marker=args.readiness_l3_consume_marker,
+            receipt=args.readiness_l3_receipt,
+            pre_evidence=pre,
+        ),
+        post_evidence=post,
+        t1_runtime_source_commit_sha=(
+            args.readiness_expected_t1_runtime_source_commit_sha
+        ),
+        t1_runtime_image_digest=(
+            args.readiness_expected_t1_runtime_image_digest
+        ),
+        l3_contract_source_commit_sha=(
+            args.readiness_expected_l3_contract_source_commit_sha
+        ),
+        outcome_contract_source_commit_assertion=(
+            args.readiness_expected_outcome_contract_source_commit_assertion
+        ),
+        questdb_image_digest=args.readiness_expected_questdb_image_digest,
+    )
 
 
 def _paths(args: argparse.Namespace) -> OfflineVerificationPaths:
@@ -825,6 +1144,7 @@ def _paths(args: argparse.Namespace) -> OfflineVerificationPaths:
         expected_provenance_keyring_sha256=args.expected_provenance_keyring_sha256,
         expected_source_commit_sha=args.expected_source_commit_sha,
         expected_image_digest=args.expected_image_digest,
+        readiness_inputs=_readiness_inputs_from_args(args),
     )
 
 

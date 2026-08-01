@@ -7,6 +7,7 @@ import hashlib
 import json
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 from typing import Any
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -86,7 +87,11 @@ def _dsn_identity() -> dict[str, Any]:
     return payload
 
 
-def _evidence(custody_path: str = "/var/lib/c-fast-t1-query-v6-custody") -> subject.AuthorityEvidence:
+def _evidence(
+    custody_path: str = "/var/lib/c-fast-t1-query-v6-custody",
+    *,
+    verified_domain_public_key_hashes: frozenset[str] = frozenset(),
+) -> subject.AuthorityEvidence:
     dsn = _dsn_identity()
     l3 = _artifact(
         {"questdb_target_identity_sha256": dsn["expected_endpoint_identity_sha256"]},
@@ -121,6 +126,7 @@ def _evidence(custody_path: str = "/var/lib/c-fast-t1-query-v6-custody") -> subj
             "runtime-pins",
         ),
         dsn_identity_attestation=_artifact(dsn, "dsn"),
+        verified_domain_public_key_hashes=verified_domain_public_key_hashes,
     )
 
 
@@ -214,7 +220,7 @@ def _manifest() -> dict[str, Any]:
                         "window_id": f"window-{product}-{suffix}-0001",
                         "product": product,
                         "exact_contract": contract,
-                        "execution_time": "2026-08-02T01:00:00+00:00",
+                        "execution_time": "2026-08-02T13:01:00+00:00",
                         "window_seconds": 60,
                     }
                 )
@@ -223,16 +229,27 @@ def _manifest() -> dict[str, Any]:
         "candidate_id": subject.CANDIDATE_ID,
         "snapshot_id": "snapshot-query-v6-test-0001",
         "audit_window": {
-            "start": "2026-08-02T00:00:00+00:00",
-            "end_exclusive": "2026-08-03T00:00:00+00:00",
-            "trading_day": "20260802",
+            "start": "2026-08-02T13:00:00+00:00",
+            "end_exclusive": "2026-08-03T01:21:00+00:00",
+            "trading_day": "20260803",
         },
         "session_windows": {
-            name: {
-                "start": "2026-08-02T00:00:00+00:00",
-                "end_exclusive": "2026-08-03T00:00:00+00:00",
-            }
-            for name in ("night_open", "night_session", "day_open", "day_session")
+            "night_open": {
+                "start": "2026-08-02T13:00:00+00:00",
+                "end_exclusive": "2026-08-02T13:02:05+00:00",
+            },
+            "night_session": {
+                "start": "2026-08-02T13:10:00+00:00",
+                "end_exclusive": "2026-08-02T13:20:00+00:00",
+            },
+            "day_open": {
+                "start": "2026-08-03T01:00:00+00:00",
+                "end_exclusive": "2026-08-03T01:02:05+00:00",
+            },
+            "day_session": {
+                "start": "2026-08-03T01:10:00+00:00",
+                "end_exclusive": "2026-08-03T01:20:00+00:00",
+            },
         },
         "targets": targets,
         "execution_windows": windows,
@@ -325,10 +342,9 @@ def test_readiness_signer_key_reuse_also_fails_closed() -> None:
     private_key = Ed25519PrivateKey.generate()
     keyring = _keyring(private_key)
     material_hash = _sha(private_key.public_key().public_bytes_raw())
-    evidence = _evidence()
-    evidence.readiness.payload["build_registry_provenance"] = {
-        "signer_public_key_sha256": material_hash
-    }
+    evidence = _evidence(
+        verified_domain_public_key_hashes=frozenset({material_hash})
+    )
     with pytest.raises(subject.QueryV6AuthorityError, match="domains overlap"):
         signer.prepare_release(
             _draft(),
@@ -410,6 +426,205 @@ def test_exact_ten_product_manifest_and_roll_windows_fail_closed() -> None:
     )
     with pytest.raises(subject.QueryV6AuthorityError, match="duplicated"):
         subject._validate_query_manifest(duplicated_previous)
+
+
+@pytest.mark.parametrize(
+    ("case", "message"),
+    [
+        ("inverted", "later than start"),
+        ("outside_audit", "outside signed audit window"),
+        ("overlap", "session windows overlap"),
+        ("wrong_trading_day", "signed trading_day"),
+    ],
+)
+def test_session_windows_fail_closed_on_invalid_causality(
+    case: str,
+    message: str,
+) -> None:
+    manifest = _manifest()
+    if case == "inverted":
+        window = manifest["session_windows"]["night_open"]
+        window["start"], window["end_exclusive"] = (
+            window["end_exclusive"],
+            window["start"],
+        )
+    elif case == "outside_audit":
+        manifest["session_windows"]["night_open"]["start"] = (
+            "2026-08-02T12:59:59+00:00"
+        )
+    elif case == "overlap":
+        manifest["session_windows"]["night_session"]["start"] = (
+            "2026-08-02T13:01:00+00:00"
+        )
+    else:
+        manifest["session_windows"]["day_open"] = {
+            "start": "2026-08-02T01:00:00+00:00",
+            "end_exclusive": "2026-08-02T01:02:05+00:00",
+        }
+        manifest["audit_window"]["start"] = "2026-08-02T01:00:00+00:00"
+
+    with pytest.raises(subject.QueryV6AuthorityError, match=message):
+        subject._validate_query_manifest(manifest)
+
+
+def _readiness_replay_stub(l3_path: Path) -> SimpleNamespace:
+    return SimpleNamespace(
+        outcome=l3_path,
+        outcome_keyring=Path("outcome-keyring.json"),
+        t1_keyring=Path("t1-keyring.json"),
+        outcome_source=SimpleNamespace(
+            release_keyring=Path("l3-release-keyring.json")
+        ),
+        post_evidence=object(),
+        outcome_contract_source_commit_assertion="a" * 40,
+        l3_contract_source_commit_sha="b" * 40,
+        questdb_image_digest=IMAGE_DIGEST,
+    )
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "existing readiness-v4 packet is not the exact re-derived object",
+        "existing readiness-v4 packet changed during verification",
+    ],
+)
+def test_schema_valid_forged_or_tampered_readiness_cannot_skip_official_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    l3_path = tmp_path / "l3.json"
+    l3_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(subject.readiness_v4, "_read_production_pins", lambda: object())
+    monkeypatch.setattr(
+        subject,
+        "_readiness_runtime_identity_candidate",
+        lambda _path: object(),
+    )
+    monkeypatch.setattr(
+        subject.readiness_v4,
+        "verify_existing_readiness_packet",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            subject.readiness_v4.ReadinessV4Error(failure)
+        ),
+    )
+
+    with pytest.raises(subject.QueryV6AuthorityError, match="full replay failed"):
+        subject.load_authority_evidence(
+            tmp_path / "readiness.json",
+            l3_path,
+            tmp_path / "manifest.json",
+            tmp_path / "runtime-pins.json",
+            tmp_path / "dsn.json",
+            readiness_inputs=_readiness_replay_stub(l3_path),
+            now=NOW,
+            require_root_owned_parent=False,
+        )
+
+
+def test_forged_l3_signature_cannot_skip_official_outcome_verifier(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    l3_path = tmp_path / "l3.json"
+    l3_path.write_text("{}", encoding="utf-8")
+    pins = SimpleNamespace(
+        outcome_keyring_sha256=H,
+        l3_authority_keyring_sha256=H2,
+        t1_authority_keyring_sha256=H3,
+    )
+    monkeypatch.setattr(subject.readiness_v4, "_read_production_pins", lambda: pins)
+    monkeypatch.setattr(
+        subject,
+        "_readiness_runtime_identity_candidate",
+        lambda _path: object(),
+    )
+    monkeypatch.setattr(
+        subject.readiness_v4,
+        "verify_existing_readiness_packet",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            payload={}, raw_sha256=H, canonical_sha256=H2
+        ),
+    )
+    monkeypatch.setattr(
+        subject,
+        "verify_signed_outcome",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            subject.DeploymentOutcomeError("deployment outcome signature is invalid")
+        ),
+    )
+
+    with pytest.raises(subject.QueryV6AuthorityError, match="signature is invalid"):
+        subject.load_authority_evidence(
+            tmp_path / "readiness.json",
+            l3_path,
+            tmp_path / "manifest.json",
+            tmp_path / "runtime-pins.json",
+            tmp_path / "dsn.json",
+            readiness_inputs=_readiness_replay_stub(l3_path),
+            now=NOW,
+            require_root_owned_parent=False,
+        )
+
+
+def test_active_readiness_pin_rotation_after_replay_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    l3_path = tmp_path / "l3.json"
+    l3_path.write_text("{}", encoding="utf-8")
+    pins = SimpleNamespace(
+        outcome_keyring_sha256=H,
+        l3_authority_keyring_sha256=H2,
+        t1_authority_keyring_sha256=H3,
+    )
+    monkeypatch.setattr(subject.readiness_v4, "_read_production_pins", lambda: pins)
+    monkeypatch.setattr(
+        subject,
+        "_readiness_runtime_identity_candidate",
+        lambda _path: object(),
+    )
+    monkeypatch.setattr(
+        subject.readiness_v4,
+        "verify_existing_readiness_packet",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            payload={}, raw_sha256=H, canonical_sha256=H2
+        ),
+    )
+    monkeypatch.setattr(
+        subject,
+        "verify_signed_outcome",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            payload={}, raw_sha256=H2, canonical_sha256=H3
+        ),
+    )
+    monkeypatch.setattr(
+        subject,
+        "_verified_readiness_key_materials",
+        lambda *_args: frozenset({H}),
+    )
+    monkeypatch.setattr(
+        subject.readiness_v4,
+        "verify_active_readiness_pins",
+        lambda _pins: (_ for _ in ()).throw(
+            subject.readiness_v4.ReadinessV4Error(
+                "active readiness-v4 pins changed"
+            )
+        ),
+    )
+
+    with pytest.raises(subject.QueryV6AuthorityError, match="pins changed"):
+        subject.load_authority_evidence(
+            tmp_path / "readiness.json",
+            l3_path,
+            tmp_path / "manifest.json",
+            tmp_path / "runtime-pins.json",
+            tmp_path / "dsn.json",
+            readiness_inputs=_readiness_replay_stub(l3_path),
+            now=NOW,
+            require_root_owned_parent=False,
+        )
 
 
 def test_verifier_has_no_dsn_network_consume_or_launch_capability() -> None:
