@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vnpy-web-bridge:schema:commodity-c-fast-t1-query-v5-image-attestation-pin-set-v1",
+  "title": "C_FAST T1 query-v5 image attestation runtime pin set v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "generation_id", "runtime_image_digest",
+    "launcher_sha256", "verifier_sha256", "query_v4_verifier_sha256",
+    "query_v4_delegate_sha256", "query_v5_validator_sha256",
+    "query_v4_validator_sha256", "python_executable_path",
+    "python_executable_sha256", "source_root_path",
+    "source_root_identity_sha256", "source_closure_manifest_sha256",
+    "dependency_root_path", "dependency_root_identity_sha256",
+    "dependency_closure_manifest_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "commodity_c_fast_t1_query_v5_image_attestation_pin_set_v1"},
+    "generation_id": {"type": "string", "pattern": "^[A-Za-z0-9._-]{8,128}$"},
+    "runtime_image_digest": {"$ref": "#/$defs/ociDigest"},
+    "launcher_sha256": {"$ref": "#/$defs/sha256"},
+    "verifier_sha256": {"$ref": "#/$defs/sha256"},
+    "query_v4_verifier_sha256": {"$ref": "#/$defs/sha256"},
+    "query_v4_delegate_sha256": {"$ref": "#/$defs/sha256"},
+    "query_v5_validator_sha256": {"$ref": "#/$defs/sha256"},
+    "query_v4_validator_sha256": {"$ref": "#/$defs/sha256"},
+    "python_executable_path": {"$ref": "#/$defs/absolutePath"},
+    "python_executable_sha256": {"$ref": "#/$defs/sha256"},
+    "source_root_path": {"$ref": "#/$defs/absolutePath"},
+    "source_root_identity_sha256": {"$ref": "#/$defs/sha256"},
+    "source_closure_manifest_sha256": {"$ref": "#/$defs/sha256"},
+    "dependency_root_path": {"$ref": "#/$defs/absolutePath"},
+    "dependency_root_identity_sha256": {"$ref": "#/$defs/sha256"},
+    "dependency_closure_manifest_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "ociDigest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "absolutePath": {"type": "string", "pattern": "^/[^\\u0000\\r\\n]+$"}
+  }
+}

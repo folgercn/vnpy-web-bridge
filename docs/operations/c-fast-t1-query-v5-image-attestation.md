@@ -35,6 +35,10 @@ query-v4 attestation payload 与重放结果完全相等；只给一个历史 JS
   每层只能出现 fixed directory 或 exact source runtime file，且当层 path、type、
   content hash、root uid/gid 与允许的 build/final mode 必须立即匹配；后续 layer
   恢复 exact final file 不能掩盖旧 layer blob 中的 payload 或 type 漂移；
+- 每个 overlay layer 必须是其 exact members 的唯一 canonical USTAR 编码；拒绝
+  local/global PAX、GNU longname/sparse/extended records、未冻结 header 字段、
+  非零 padding、非规范 EOF 和 trailing bytes。layer digest 之外不存在未被
+  member contract 解释的隐藏 raw payload；
 - base/final OCI config raw bytes 与解析后的所有嵌套 string 都检查敏感内容，不能把
   私钥藏在 `history`、`author` 或其他非-runtime config 字段；
 - merged rootfs 的 Python startup/execution closure 重新扫描，其 closure hash 与
@@ -57,12 +61,28 @@ cp docs/operations/c-fast-t1-query-v5-external-image-evidence.template.json \
   /private/c-fast-query-v5-input/external-image-evidence.json
 ```
 
-然后只读验证，并写入一个此前不存在的绝对输出路径：
+### 独立 attestation runtime trust root
+
+正式入口禁止直接运行 verifier、shebang 或依赖 `PYTHONPATH`。独立 release 必须把
+launcher、v5/v4 verifier、v4 delegate、v5/v4 validators、全部 schemas 与固定第三方
+依赖封装进 root-owned、runtime 不可写的 attestation image，并由独立流程填写：
+
+```text
+/run/c-fast-t1-query-v5-image-attestation-pins/pin-set.manifest.json
+```
+
+pin-set schema/template 分别是
+`commodity-c-fast-t1-query-v5-image-attestation-pin-set-v1.schema.json` 与
+`c-fast-t1-query-v5-image-attestation-pin-set.template.json`。不能在目标 runtime 内
+从当前文件反推 expected pins。pin-set 固定 immutable runtime image RepoDigest、
+launcher/verifier/delegate/validator、解释器、source root、dependency root 与两份完整
+closure manifest。
+
+唯一支持的入口使用固定解释器与隔离 flags：
 
 ```bash
-mkdir -m 700 /private/c-fast-query-v5-attestation
-
-python scripts/c_fast_t1/verify_query_v5_image_attestation.py \
+<PINNED_PYTHON> -I -S -s -E -B \
+  /opt/c-fast-query-v5-attestation/release/scripts/commodity_c_fast_t1_query_v5_image_attestation_launcher.py \
   --query-v4-external-image-evidence /private/query-v4/external-image-evidence.json \
   --query-v4-source-bundle-archive /private/query-v4/source-bundle.tar \
   --query-v4-oci-layout-archive /private/query-v4/runtime.oci.tar \
@@ -74,6 +94,15 @@ python scripts/c_fast_t1/verify_query_v5_image_attestation.py \
   --expected-source-commit-sha <40-hex-query-v5-commit> \
   --output /private/c-fast-query-v5-attestation/composition-attestation.json
 ```
+
+launcher 在任何本地 verifier/delegate/validator 或第三方 import 前 stable-FD 读取并
+验证 pin generation、launcher、解释器、Linux `/proc/self/exe`、完整 source tree 与
+dependency tree。它拒绝 symlink/hardlink/special file、group/world write、`.pth`、
+`.egg-link`、`sitecustomize`、`usercustomize`；本地 modules 只从首次扫描保留的 exact
+bytes 加载。导入前后、receipt create-only 写入前后都会重验 closure。runtime
+RepoDigest、launcher/verifier/interpreter、明确的 v4 delegate/validators 与
+source/dependency manifests 全部进入 `attestation_runtime` 和
+`runtime_identity_sha256`。
 
 输出是 create-only、mode `0600`。已有路径、相对路径、symlink output 或变化中的
 input 都会 fail closed。
@@ -112,6 +141,7 @@ PYTHONPATH=backend:scripts python -m pytest -q \
   backend/tests/unit/test_c_fast_t1_query_v5_image_attestation.py
 
 ruff check \
+  scripts/commodity_c_fast_t1_query_v5_image_attestation_launcher.py \
   scripts/c_fast_t1/verify_query_v5_image_attestation.py \
   backend/tests/unit/test_c_fast_t1_query_v5_image_attestation.py
 ```

@@ -3,14 +3,17 @@ from __future__ import annotations
 import copy
 import hashlib
 import importlib.util
+import inspect
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
 import tarfile
 from typing import Any
 
+import jsonschema
 from jsonschema import Draft202012Validator, FormatChecker
 import pytest
 
@@ -27,6 +30,105 @@ from c_fast_t1 import create_query_v4_source_bundle as v4_producer  # noqa: E402
 from c_fast_t1 import create_query_v5_source_bundle as producer  # noqa: E402
 from c_fast_t1 import verify_query_v4_image_attestation as query_v4  # noqa: E402
 from c_fast_t1 import verify_query_v5_image_attestation as subject  # noqa: E402
+import commodity_c_fast_t1_query_v5_image_attestation_launcher as runtime_launcher  # noqa: E402
+
+
+PIN_SCHEMA = (
+    ROOT / "docs/schemas/"
+    "commodity-c-fast-t1-query-v5-image-attestation-pin-set-v1.schema.json"
+)
+PIN_TEMPLATE = (
+    ROOT / "docs/operations/c-fast-t1-query-v5-image-attestation-pin-set.template.json"
+)
+
+
+@pytest.fixture(autouse=True)
+def _verified_test_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    identity = subject.QueryV5AttestationRuntimeIdentity(
+        runtime_image_digest="sha256:" + "a" * 64,
+        pin_manifest_sha256="b" * 64,
+        launcher_sha256="c" * 64,
+        verifier_sha256="d" * 64,
+        query_v4_verifier_sha256="e" * 64,
+        query_v4_delegate_sha256="f" * 64,
+        query_v5_validator_sha256="1" * 64,
+        query_v4_validator_sha256="2" * 64,
+        python_executable_path_sha256="3" * 64,
+        python_executable_sha256="4" * 64,
+        loaded_executable_sha256="4" * 64,
+        source_root_path_sha256="5" * 64,
+        source_root_identity_sha256="6" * 64,
+        source_closure_manifest_sha256="7" * 64,
+        dependency_root_path_sha256="8" * 64,
+        dependency_root_identity_sha256="9" * 64,
+        dependency_closure_manifest_sha256="0" * 64,
+        isolated_flags_verified=True,
+        source_closure_retained=True,
+        immutable_runtime_verified=True,
+    )
+    monkeypatch.setattr(subject, "_ACTIVE_RUNTIME_IDENTITY", identity)
+    monkeypatch.setattr(subject, "_ACTIVE_RUNTIME_REVALIDATOR", lambda: None)
+
+
+@pytest.fixture(scope="module")
+def isolated_runtime_fixture(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> dict[str, Path]:
+    root = tmp_path_factory.mktemp("query-v5-attestation-runtime")
+    source_root = root / "release"
+    for relative in {
+        runtime_launcher.LAUNCHER_RELATIVE_PATH,
+        *runtime_launcher.LOCAL_MODULE_PATHS.values(),
+    }:
+        source = ROOT / relative
+        target = source_root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(source.read_bytes())
+        target.chmod(0o644)
+    launcher_path = source_root / runtime_launcher.LAUNCHER_RELATIVE_PATH
+    python_path = root / "private-python"
+    python_path.write_bytes(Path(sys.executable).resolve().read_bytes())
+    python_path.chmod(0o555)
+    dependency_root = Path(jsonschema.__file__).resolve().parents[1]
+    source_identity = runtime_launcher.directory_identity_sha256(source_root)
+    source_manifest, _retained = runtime_launcher.scan_source_closure(source_root)
+    dependency_identity = runtime_launcher.directory_identity_sha256(dependency_root)
+    dependency_manifest = runtime_launcher.scan_dependency_closure(dependency_root)
+    local_hashes = {
+        field: hashlib.sha256((source_root / relative).read_bytes()).hexdigest()
+        for field, relative in runtime_launcher.LOCAL_MODULE_PATHS.items()
+    }
+    pin_root = root / "pins"
+    pin_root.mkdir()
+    pin_path = pin_root / "pin-set.manifest.json"
+    pins = {
+        "schema_version": runtime_launcher.PIN_MANIFEST_VERSION,
+        "generation_id": "query-v5-attestation-test-generation",
+        "runtime_image_digest": "sha256:" + "a" * 64,
+        "launcher_sha256": hashlib.sha256(launcher_path.read_bytes()).hexdigest(),
+        **local_hashes,
+        "python_executable_path": str(python_path),
+        "python_executable_sha256": hashlib.sha256(
+            python_path.read_bytes()
+        ).hexdigest(),
+        "source_root_path": str(source_root),
+        "source_root_identity_sha256": source_identity,
+        "source_closure_manifest_sha256": source_manifest,
+        "dependency_root_path": str(dependency_root),
+        "dependency_root_identity_sha256": dependency_identity,
+        "dependency_closure_manifest_sha256": dependency_manifest,
+    }
+    pin_path.write_bytes(runtime_launcher._canonical(pins))
+    pin_path.chmod(0o444)
+    return {
+        "root": root,
+        "source_root": source_root,
+        "launcher": launcher_path,
+        "python": python_path,
+        "dependency_root": dependency_root,
+        "pins": pin_path,
+        "target": source_root / runtime_launcher.TARGET_RELATIVE_PATH,
+    }
 
 
 def _git(*arguments: str) -> str:
@@ -132,6 +234,52 @@ def _overlay_entries(
         ),
         ("run/c-fast-t1-query-v5-pins", b"", 0o555, "directory"),
     ]
+
+
+def _tar_with_metadata(
+    entries: list[tuple[str, bytes, int, str]],
+    *,
+    tar_format: int = tarfile.USTAR_FORMAT,
+    global_pax: dict[str, str] | None = None,
+    local_pax: dict[str, str] | None = None,
+    uname: str = "",
+) -> bytes:
+    output = io.BytesIO()
+    with tarfile.open(
+        fileobj=output,
+        mode="w:",
+        format=tar_format,
+        pax_headers=global_pax,
+    ) as archive:
+        for name, raw, mode, kind in entries:
+            member = tarfile.TarInfo(name)
+            member.mode = mode
+            member.uid = 0
+            member.gid = 0
+            member.uname = uname
+            member.gname = ""
+            member.mtime = 0
+            member.pax_headers = dict(local_pax or {})
+            if kind == "regular":
+                member.size = len(raw)
+                member.type = tarfile.REGTYPE
+                archive.addfile(member, io.BytesIO(raw))
+            elif kind == "directory":
+                member.type = tarfile.DIRTYPE
+                archive.addfile(member)
+            else:
+                raise AssertionError(kind)
+    return output.getvalue()
+
+
+def _scan_overlay(raw: bytes, source_facts: dict[str, Any]) -> set[str]:
+    return subject._scan_overlay_layer(
+        raw,
+        "test overlay",
+        set(),
+        source_facts["runtime_bundle"],
+        source_facts["runtime_modes"],
+    )
 
 
 def _compose_oci(
@@ -469,6 +617,12 @@ def test_exact_query_v4_prefix_and_query_v5_overlay_pass(
     assert report["checks"]["query_v4_diff_id_prefix_verified"] is True
     assert report["checks"]["all_overlay_layer_contents_sensitive_free"] is True
     assert report["checks"]["merged_python_execution_closure_frozen"] is True
+    assert report["verifier_sha256"] == "d" * 64
+    assert report["attestation_runtime"]["runtime_image_digest"] == (
+        "sha256:" + "a" * 64
+    )
+    assert report["attestation_runtime"]["isolated_flags_verified"] is True
+    assert report["attestation_runtime"]["source_closure_retained"] is True
     assert report["image_built_here"] is False
     assert report["authority_granted"] is False
     assert report["network_authorized"] is False
@@ -620,6 +774,57 @@ def test_superseded_overlay_payload_or_type_fails_closed(
         _verify(artifacts, source_commit)
 
 
+def test_overlay_tar_hidden_metadata_and_trailing_bytes_fail_closed(
+    tmp_path: Path,
+    source_commit: str,
+) -> None:
+    bundle_raw = producer.build_source_bundle(ROOT, source_commit)[0]
+    bundle_path = _write(tmp_path / "canonical-source.tar", bundle_raw)
+    source_facts = subject._source_facts(bundle_path, source_commit)
+    entries = _overlay_entries(source_facts)
+    canonical = _tar_with_metadata(entries)
+    with tarfile.open(fileobj=io.BytesIO(canonical), mode="r:") as archive:
+        runtime = next(member for member in archive if member.isreg())
+        padding_offset = runtime.offset_data + runtime.size
+        runtime_header_offset = runtime.offset
+    assert padding_offset % 512 != 0
+    padding_payload = bytearray(canonical)
+    padding_payload[padding_offset] = 1
+    sparse_payload = bytearray(canonical)
+    sparse_payload[runtime_header_offset + 156] = ord("S")
+    sparse_payload[runtime_header_offset + 148 : runtime_header_offset + 156] = b" " * 8
+    checksum = sum(sparse_payload[runtime_header_offset : runtime_header_offset + 512])
+    sparse_payload[runtime_header_offset + 148 : runtime_header_offset + 156] = (
+        f"{checksum:06o}\0 ".encode("ascii")
+    )
+    long_name = "opt/c-fast-query-v5/" + "x" * 180
+
+    attacks = {
+        "local PAX": _tar_with_metadata(
+            entries,
+            tar_format=tarfile.PAX_FORMAT,
+            local_pax={"comment": "hidden-payload"},
+        ),
+        "global PAX": _tar_with_metadata(
+            entries,
+            tar_format=tarfile.PAX_FORMAT,
+            global_pax={"comment": "hidden-payload"},
+        ),
+        "GNU longname": _tar_with_metadata(
+            [(long_name, b"hidden", 0o444, "regular")],
+            tar_format=tarfile.GNU_FORMAT,
+        ),
+        "GNU sparse metadata": bytes(sparse_payload),
+        "unfrozen header": _tar_with_metadata(entries, uname="root"),
+        "nonzero padding": bytes(padding_payload),
+        "trailing payload": canonical + b"hidden-after-tar-eof",
+    }
+    for name, raw in attacks.items():
+        with pytest.raises(subject.QueryV5ImageAttestationError) as captured:
+            _scan_overlay(raw, source_facts)
+        assert str(captured.value), name
+
+
 @pytest.mark.parametrize(
     ("hidden_value", "error"),
     [
@@ -760,3 +965,143 @@ def test_external_evidence_template_is_schema_valid_and_non_authoritative() -> N
     assert template["registry_provenance_verified"] is False
     assert template["image_built_here"] is False
     assert template["authority_granted"] is False
+
+
+def test_runtime_pin_template_is_strict_and_non_authoritative() -> None:
+    schema = json.loads(PIN_SCHEMA.read_text(encoding="utf-8"))
+    template = json.loads(PIN_TEMPLATE.read_text(encoding="utf-8"))
+    Draft202012Validator.check_schema(schema)
+    assert (
+        list(
+            Draft202012Validator(
+                schema,
+                format_checker=FormatChecker(),
+            ).iter_errors(template)
+        )
+        == []
+    )
+    assert template["runtime_image_digest"].startswith("sha256:")
+    assert "authority_granted" not in template
+
+
+def test_production_entrypoints_are_launcher_only() -> None:
+    assert tuple(inspect.signature(runtime_launcher.main).parameters) == ()
+    direct_verifier = subprocess.run(
+        [sys.executable, str(subject.VERIFIER_PATH), "--help"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    direct_launcher = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / runtime_launcher.LAUNCHER_RELATIVE_PATH),
+            "--help",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert direct_verifier.returncode != 0
+    assert "requires the independently pinned isolated launcher" in (
+        direct_verifier.stderr
+    )
+    assert direct_launcher.returncode != 0
+    assert "-I -S -s -E -B" in direct_launcher.stderr
+
+
+def test_isolated_launcher_uses_retained_sources_and_rejects_path_drift(
+    isolated_runtime_fixture: dict[str, Path],
+    tmp_path: Path,
+) -> None:
+    shadow_root = tmp_path / "shadow"
+    shadow_package = shadow_root / "c_fast_t1"
+    shadow_package.mkdir(parents=True)
+    sentinel = tmp_path / "startup-hook-ran"
+    (shadow_root / "sitecustomize.py").write_text(
+        f"from pathlib import Path\nPath({str(sentinel)!r}).write_text('bad')\n",
+        encoding="utf-8",
+    )
+    (shadow_package / "verify_query_v5_image_attestation.py").write_text(
+        "raise RuntimeError('module shadow executed')\n",
+        encoding="utf-8",
+    )
+    script = """
+import importlib.util
+from pathlib import Path
+import sys
+
+launcher_path = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("query_v5_attestation_test_launcher", launcher_path)
+assert spec is not None and spec.loader is not None
+launcher = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(launcher)
+identity, revalidate, retained, source_root, dependency_root = launcher._inspect_runtime(
+    pin_manifest_path=Path(sys.argv[2]),
+    launcher_path=launcher_path,
+    reported_executable_path=Path(sys.argv[3]),
+    loaded_executable_path=Path(sys.argv[3]),
+    require_immutable=False,
+)
+target = Path(sys.argv[4])
+original = target.read_bytes()
+target.chmod(0o644)
+target.write_bytes(b"raise RuntimeError('pre-import disk drift executed')\\n")
+try:
+    module = launcher._load_retained_target(retained, source_root, dependency_root)
+    assert module.STATUS.startswith("QUERY_V5_BASE_AND_OVERLAY")
+    assert identity["source_closure_retained"] is True
+    target.write_bytes(original)
+    revalidate()
+    print("SELF_RESTORE_EXECUTED_RETAINED_BYTES")
+    target.write_bytes(b"raise RuntimeError('post-import path drift')\\n")
+    try:
+        revalidate()
+    except launcher.QueryV5AttestationLauncherError:
+        print("POST_IMPORT_PATH_DRIFT_REJECTED")
+    else:
+        raise AssertionError("post-import path drift was accepted")
+finally:
+    target.write_bytes(original)
+"""
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = str(shadow_root)
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-S",
+            "-s",
+            "-E",
+            "-B",
+            "-c",
+            script,
+            str(isolated_runtime_fixture["launcher"]),
+            str(isolated_runtime_fixture["pins"]),
+            str(isolated_runtime_fixture["python"]),
+            str(isolated_runtime_fixture["target"]),
+        ],
+        cwd=shadow_root,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "SELF_RESTORE_EXECUTED_RETAINED_BYTES" in completed.stdout
+    assert "POST_IMPORT_PATH_DRIFT_REJECTED" in completed.stdout
+    assert not sentinel.exists()
+
+
+def test_dependency_closure_rejects_startup_hooks(tmp_path: Path) -> None:
+    dependency_root = tmp_path / "site-packages"
+    dependency_root.mkdir()
+    (dependency_root / "sitecustomize.py").write_text(
+        "raise RuntimeError('startup hook')\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(
+        runtime_launcher.QueryV5AttestationLauncherError,
+        match="startup hook is forbidden",
+    ):
+        runtime_launcher.scan_dependency_closure(dependency_root)

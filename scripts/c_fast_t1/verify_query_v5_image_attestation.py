@@ -1,15 +1,23 @@
-#!/usr/bin/env python3
 """Verify query-v5 source and final OCI composition against exact query-v4."""
 
 from __future__ import annotations
 
+import sys
+
+
+if __name__ == "__main__":
+    raise SystemExit(
+        "query-v5 image attestation requires the independently pinned isolated launcher"
+    )
+
+
 import argparse
+from dataclasses import dataclass
 import hashlib
 import io
 from pathlib import Path, PurePosixPath
-import sys
 import tarfile
-from typing import Any
+from typing import Any, Callable
 
 SCRIPTS_ROOT = Path(__file__).resolve().parents[1]
 if str(SCRIPTS_ROOT) not in sys.path:
@@ -47,6 +55,9 @@ MANIFEST_ID_PREFIX = "query-v5-source-manifest-v1-"
 STATUS = (
     "QUERY_V5_BASE_AND_OVERLAY_OCI_COMPOSITION_VERIFIED_NO_BUILD_OR_REGISTRY_PROVENANCE"
 )
+RUNTIME_IDENTITY_VERSION = (
+    "commodity_c_fast_t1_query_v5_image_attestation_runtime_identity_v1"
+)
 RUNTIME_PREFIX = "opt/c-fast-query-v5/"
 PIN_DIRECTORY = "run/c-fast-t1-query-v5-pins"
 ALLOWED_OVERLAY_DIRECTORIES = frozenset(
@@ -77,12 +88,110 @@ QueryV5ImageAttestationError = query_v4.QueryV4ImageAttestationError
 canonical_json = query_v4.canonical_json
 
 
+@dataclass(frozen=True)
+class QueryV5AttestationRuntimeIdentity:
+    runtime_image_digest: str
+    pin_manifest_sha256: str
+    launcher_sha256: str
+    verifier_sha256: str
+    query_v4_verifier_sha256: str
+    query_v4_delegate_sha256: str
+    query_v5_validator_sha256: str
+    query_v4_validator_sha256: str
+    python_executable_path_sha256: str
+    python_executable_sha256: str
+    loaded_executable_sha256: str
+    source_root_path_sha256: str
+    source_root_identity_sha256: str
+    source_closure_manifest_sha256: str
+    dependency_root_path_sha256: str
+    dependency_root_identity_sha256: str
+    dependency_closure_manifest_sha256: str
+    isolated_flags_verified: bool
+    source_closure_retained: bool
+    immutable_runtime_verified: bool
+
+
+_ACTIVE_RUNTIME_IDENTITY: QueryV5AttestationRuntimeIdentity | None = None
+_ACTIVE_RUNTIME_REVALIDATOR: Callable[[], None] | None = None
+
+
 def _sha256(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
 def _fail(message: str) -> None:
     raise QueryV5ImageAttestationError(message)
+
+
+def _validate_runtime_identity(
+    identity: QueryV5AttestationRuntimeIdentity,
+) -> None:
+    if (
+        not identity.runtime_image_digest.startswith("sha256:")
+        or len(identity.runtime_image_digest) != 71
+        or any(
+            character not in "0123456789abcdef"
+            for character in identity.runtime_image_digest[7:]
+        )
+    ):
+        _fail("query-v5 attestation runtime image digest is invalid")
+    hashes = {
+        field: getattr(identity, field)
+        for field in identity.__dataclass_fields__
+        if field.endswith("_sha256")
+    }
+    if any(
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+        for value in hashes.values()
+    ):
+        _fail("query-v5 attestation runtime identity hash is invalid")
+    if not (
+        identity.isolated_flags_verified
+        and identity.source_closure_retained
+        and identity.immutable_runtime_verified
+    ):
+        _fail("query-v5 attestation runtime identity is not independently enforced")
+
+
+def _runtime_identity_payload(
+    identity: QueryV5AttestationRuntimeIdentity,
+) -> dict[str, Any]:
+    _validate_runtime_identity(identity)
+    payload = {
+        "schema_version": RUNTIME_IDENTITY_VERSION,
+        **{field: getattr(identity, field) for field in identity.__dataclass_fields__},
+    }
+    payload["runtime_identity_sha256"] = _sha256(canonical_json(payload))
+    return payload
+
+
+def install_verified_runtime_identity(
+    identity: QueryV5AttestationRuntimeIdentity,
+    revalidator: Callable[[], None],
+) -> None:
+    """Install the launcher's retained execution identity exactly once."""
+
+    global _ACTIVE_RUNTIME_IDENTITY, _ACTIVE_RUNTIME_REVALIDATOR
+    if _ACTIVE_RUNTIME_IDENTITY is not None:
+        _fail("query-v5 attestation runtime identity is already installed")
+    _validate_runtime_identity(identity)
+    if not callable(revalidator):
+        _fail("query-v5 attestation runtime revalidator is required")
+    _ACTIVE_RUNTIME_IDENTITY = identity
+    _ACTIVE_RUNTIME_REVALIDATOR = revalidator
+
+
+def _require_runtime_identity() -> QueryV5AttestationRuntimeIdentity:
+    identity = _ACTIVE_RUNTIME_IDENTITY
+    revalidator = _ACTIVE_RUNTIME_REVALIDATOR
+    if identity is None or not callable(revalidator):
+        _fail("query-v5 attestation requires the independently pinned launcher")
+    _validate_runtime_identity(identity)
+    revalidator()
+    return identity
 
 
 def _exact(actual: Any, expected: Any, label: str) -> None:
@@ -384,13 +493,18 @@ def _scan_overlay_layer(
         path.removeprefix("/") for path in expected_runtime_bundle
     }
     touched: set[str] = set()
+    canonical_members: list[tuple[str, bytes, int, bytes]] = []
     try:
         with tarfile.open(fileobj=io.BytesIO(raw), mode="r:") as archive:
+            if archive.pax_headers:
+                _fail(f"{label} contains forbidden global PAX headers")
             for member in archive:
                 path = _delegate._normalized_path(member.name, label)
                 if not path or path in touched:
                     _fail(f"{label} contains an empty or duplicate path")
                 touched.add(path)
+                if member.pax_headers:
+                    _fail(f"{label} contains forbidden local PAX headers")
                 if PurePosixPath(path).name.startswith(".wh."):
                     _fail(f"{label} contains a forbidden whiteout")
                 if path in base_paths:
@@ -413,6 +527,7 @@ def _scan_overlay_layer(
                         _fail(
                             f"{label} allowlisted directory entry is not exact: /{path}"
                         )
+                    canonical_members.append((path, b"", mode, tarfile.DIRTYPE))
                 elif path in expected_runtime_paths:
                     if not member.isreg():
                         _fail(f"{label} runtime entry is not a regular file: /{path}")
@@ -434,12 +549,42 @@ def _scan_overlay_layer(
                         _fail(
                             f"{label} runtime entry does not match exact source: /{path}"
                         )
+                    canonical_members.append((path, content, mode, tarfile.REGTYPE))
                 else:
                     _fail(f"{label} contains an unexpected overlay path: /{path}")
     except QueryV5ImageAttestationError:
         raise
     except (OSError, tarfile.TarError) as exc:
         raise QueryV5ImageAttestationError(f"{label} is not a valid tar") from exc
+    canonical = io.BytesIO()
+    try:
+        with tarfile.open(
+            fileobj=canonical,
+            mode="w:",
+            format=tarfile.USTAR_FORMAT,
+        ) as archive:
+            for path, content, mode, kind in canonical_members:
+                member = tarfile.TarInfo(path)
+                member.type = kind
+                member.mode = mode
+                member.uid = 0
+                member.gid = 0
+                member.uname = ""
+                member.gname = ""
+                member.mtime = 0
+                if kind == tarfile.REGTYPE:
+                    member.size = len(content)
+                    archive.addfile(member, io.BytesIO(content))
+                else:
+                    archive.addfile(member)
+    except (OSError, tarfile.TarError, ValueError) as exc:
+        raise QueryV5ImageAttestationError(
+            f"{label} cannot be represented as canonical USTAR"
+        ) from exc
+    if raw != canonical.getvalue():
+        _fail(
+            f"{label} is not the unique canonical USTAR encoding of its exact members"
+        )
     return touched
 
 
@@ -630,6 +775,7 @@ def verify_query_v5_image_evidence(
     oci_layout_archive_path: Path,
     expected_source_commit_sha: str,
 ) -> dict[str, Any]:
+    runtime_identity = _require_runtime_identity()
     query_v4_report = query_v4.verify_query_v4_image_evidence(
         query_v4_external_image_evidence_path,
         query_v4_source_bundle_path,
@@ -750,13 +896,8 @@ def verify_query_v5_image_evidence(
         "external_evidence_sha256": _sha256(evidence_raw),
         "evidence_captured_at": evidence["captured_at"],
         "containerfile_sha256": source["containerfile_sha256"],
-        "verifier_sha256": _sha256(
-            _delegate._read_regular(
-                VERIFIER_PATH,
-                "query-v5 verifier",
-                limit=_delegate.MAX_JSON_BYTES,
-            )
-        ),
+        "verifier_sha256": runtime_identity.verifier_sha256,
+        "attestation_runtime": _runtime_identity_payload(runtime_identity),
         "source_manifest_schema_sha256": _sha256(
             _delegate._read_regular(
                 MANIFEST_SCHEMA_PATH,
@@ -812,6 +953,7 @@ def verify_query_v5_image_evidence(
             "overlay_base_overwrites_absent": True,
             "overlay_path_allowlist_verified": True,
             "overlay_links_and_special_files_absent": True,
+            "overlay_layers_canonical_ustar_verified": True,
             "all_overlay_layer_contents_sensitive_free": True,
             "merged_python_execution_closure_frozen": True,
             "runtime_bundle_matches_source_bundle": True,
@@ -843,6 +985,7 @@ def verify_query_v5_image_evidence(
         ATTESTATION_SCHEMA_PATH,
         "query-v5 image attestation",
     )
+    _require_runtime_identity()
     return report
 
 
@@ -868,6 +1011,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     try:
+        _require_runtime_identity()
         report = verify_query_v5_image_evidence(
             args.query_v4_external_image_evidence,
             args.query_v4_source_bundle_archive,
@@ -879,7 +1023,9 @@ def main() -> int:
             args.oci_layout_archive,
             args.expected_source_commit_sha,
         )
+        _require_runtime_identity()
         write_create_only(args.output, report)
+        _require_runtime_identity()
     except (QueryV5ImageAttestationError, OSError, ValueError) as exc:
         print(f"query-v5 image attestation failed: {exc}", file=sys.stderr)
         return 2
@@ -889,7 +1035,3 @@ def main() -> int:
     print("registry_provenance_verified=false")
     print("authority_granted=false")
     return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
