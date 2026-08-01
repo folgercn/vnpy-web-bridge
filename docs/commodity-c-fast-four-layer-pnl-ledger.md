@@ -1,10 +1,12 @@
-# C_FAST 四层 PnL Evidence Ledger v3（不可变离线仓储切片）
+# C_FAST 四层 PnL Evidence Ledger v4（终态归档重放切片）
 
 本文档对应 Issue #145 的可独立合并切片。v2 提供 strict typed source facts、
-确定性 builder、fresh replay verifier 和 immutable hash-chain audit；v3 在
-其上增加本地 create-only repository、crash recovery、确定性 JSON export
-和中文审计报告。不接 QuestDB、API、worker、runtime、Settings、RPC、
-TradeService、订单、派单或部署。
+确定性 builder、fresh replay verifier 和 immutable hash-chain audit；v3 增加
+create-only repository、crash recovery、确定性 JSON export 和中文审计报告；
+v4 让既有 C_FAST SimNow terminal archive 在 0700/0600 本地 custody 中额外封存 session-scoped canonical、严格 allowlist
+order/trade、final-position、contract-spec 与带 timestamp/source hash 的 mark
+evidence，并允许纯 ledger 从本地 archive file fresh replay Actual gross/slippage。
+不增加 API、worker、Settings、RPC、TradeService、订单、派单或部署权限。
 
 ## Architecture Impact
 
@@ -22,9 +24,14 @@ replacement_allowed=false
 production_allowed=false
 ```
 
-这里的 SHA256 是完整性 checksum，不是签名或事实 authority。接入真实
-forward/SimNow 证据前，调用方仍须独立验证签名、custody 和事实来源。本切片
-没有产生真实 forward、盘口或 SimNow evidence。
+这里的 SHA256 是完整性 checksum，不是签名或事实 authority。v4 构造入口要求
+调用方提供预期 archive raw-byte SHA、terminal SHA 与当前 archive chain-tip SHA，
+并将它们与本地目录、文件名和 session ID 逐项绑定；这些 caller/local pins 只能
+证明所选本地字节自洽，不能冒充独立 release/receipt、外部签名或事实 anchor。
+因此 v4 固定为 `LOCAL_ARCHIVE_REPLAYED_UNATTESTED` 和
+`external_fact_authority_state=NOT_PROVIDED_STRUCTURE_ONLY`，账本 export 也仍是
+`STRUCTURE_ONLY`。本切片只增加终态归档与 replay 能力，不把它计作权威 actual
+fact、真实 forward 或晋级证据。
 
 ## v2 fresh replay 边界
 
@@ -162,7 +169,7 @@ point_fill_probability_state=FORBIDDEN_UNCALIBRATED_BOUNDS_ONLY
 无事实时提交 typed `NOT_PROVIDED` source facts，仍绑定当前
 ledger/snapshot/formula/plan/as-of，但不生成 actual 金额。
 
-`FACTS_BOUND` 只接受：
+v3 `FACTS_BOUND` 只接受：
 
 ```text
 fact_source=SIMNOW_AUTHORITATIVE_ORDER_TRADE_POSITION_RECONCILIATION
@@ -196,8 +203,7 @@ SHA256({
 `datetime.isoformat()` 产生的 `+00:00` 不会先归一化成 `Z`。同一 raw 字符串
 另行 parse 为 UTC datetime，仅用于时间因果校验。
 
-当前纯 ledger 没有嵌入 SimNow execution core 的 raw orders/trades/fill price、
-合约 multiplier、mark 与 fee rows，因此只能验证 terminal envelope 对
+v3 archive-reference contract 仍只验证 terminal envelope 对
 `execution_state_checksum` 的绑定，不能独立重算 execution state，也不能把
 checksum 当作金额真实性证明。source facts 明示
 `execution_state_checksum_verification_state=ARCHIVE_REFERENCE_ONLY_CORE_NOT_EMBEDDED`。
@@ -212,16 +218,57 @@ filled_lots=expected_lots
 order_outcome=FULL_FILL
 ```
 
-`gross_execution_pnl_cny`、`adverse_slippage_cny`、`actual_fees_cny` 和
-`actual_net_pnl_cny` 仍全部固定为 null，状态固定为
-`UNVERIFIED_REQUIRES_RAW_FILL_PRICE_MULTIPLIER_FEE_FACTS`。caller 在 source
-facts 中添加 gross/fee，或协调改写 layer 金额并重算所有内部 checksum，都会
-fail closed。后续只有新增包含原始成交、价格、乘数和 fee component 的独立
-typed replay contract，才可发布 actual 金额。
+因此 v3 的 `gross_execution_pnl_cny`、`adverse_slippage_cny`、
+`actual_fees_cny` 和 `actual_net_pnl_cny` 仍全部固定为 null，状态固定为
+`UNVERIFIED_REQUIRES_RAW_FILL_PRICE_MULTIPLIER_FEE_FACTS`。
+
+v4 builder 只读取 owner 持有、目录 0700、regular file 0600、文件名与 session
+ID 一致的 terminal archive；构造时还要求 caller-provided local
+raw-byte/terminal/linear-chain-tip pins 完全匹配，目标 session 必须是当前 chain
+tip。这里明确没有独立事实签名或外部 receipt，所以 v4 只能发布
+`LOCAL_ARCHIVE_REPLAYED_UNATTESTED`，不能发布 `FACTS_BOUND`。随后重新验证 plan
+hash、execution state checksum、terminal
+checksum、account/snapshot/formula/plan join、终态 reconciliation、session-scoped
+order/trade identity 与字段、final positions、contract multiplier，以及 mark raw
+quote/timestamp/source SHA256。runtime archive、submitted child 与 raw terminal
+facts 都采用 exact allowlist projection；任意层级出现 account_original/password/token/
+secret/credential 类字段均 fail closed，避免 RPC payload 被带入 ledger/export。
+每个 execution snapshot child 都按 phase、contract、
+direction、offset、expected/filled volume、trade count、average fill 和 slippage
+重放，任何单 child overfill 或 leg substitution 都 fail closed。每笔 trade
+必须满足 `trade_at <= mark_at <= pnl_captured_at <= terminal_completed_at <=
+as_of_at`。gross 与 arrival slippage 分别从原始 trade price、decision price、
+mark、direction、volume 和 multiplier 重算；caller 不提交金额。
+
+v4 当前仅接受 `FULL_FILL + COMPLETE + every child COMPLETE`。partial、unfilled、
+cancel、reject 与 timeout 继续使用 v3 reference-only contract，所有 Actual 金额
+保持 null；这避免把真实 runtime 的 `INCOMPLETE` 或缺 mark 事实伪装成可重放金额。
+
+当前 SimNow terminal archive 没有权威 broker/customer fee statement。因此 v4
+固定：
+
+```text
+fee_binding_state=UNBOUND_NOT_ASSUMED_ZERO
+fee_source_state=NOT_AVAILABLE_IN_SESSION_ARCHIVE
+fees_state=UNBOUND_NOT_ASSUMED_ZERO
+actual_fees_cny=null
+net_pnl_state=UNAVAILABLE_UNTIL_AUTHORITATIVE_FEES_BOUND
+actual_net_pnl_cny=null
+```
+
+空 fee rows 不会被解释为零费用，也不会发布“verified all-in/net”。需要后续独立
+fee-statement adapter 提供完整覆盖、去重、custody/signature 与 archive join，
+才可能升级 fee/net；本切片不伪造该事实。
 
 partial、unfilled、cancel、reject、timeout、结果未知、terminal 未完全对账或
-`filled_lots != expected_lots` 仍必须保持 `INCOMPLETE/INCONSISTENT`。权威持仓
-可用于安全收口，但不能把迟到的 trade callback 当作零成交或零 PnL。
+`filled_lots != expected_lots` 仍必须保持 v3 `INCOMPLETE/INCONSISTENT` 且金额
+全空。权威持仓可用于安全收口，但不能把迟到的 trade callback 当作零成交或零
+PnL。
+
+完整 raw order/trade/position 只保留在上述本地 custody 文件。公共
+`/c-fast-shakedown/status` 与 `/c-fast-shakedown/sessions` 返回安全投影：移除
+`terminal_raw_facts` 及 password/token/secret/credential/account_original 等字段，
+仅保留 raw fact hashes、时间和 row counts 摘要。
 
 时间因果固定为：
 
@@ -255,7 +302,9 @@ precision/rounding 影响。
 - ledger ID 不混用；
 - entry ID/hash 不重复；
 - 完全相同的四层 source-fact set 不得换 sequence 重放；
-- `FACTS_BOUND` entry 额外派生 stable actual fact identity；该 key 只覆盖
+- v3 `FACTS_BOUND` 与 v4 `LOCAL_ARCHIVE_REPLAYED_UNATTESTED` entry 均额外派生
+  stable actual fact identity；但 audit 的 `actual_fact_entry_count` 只统计 v3
+  `FACTS_BOUND`，v4 只进入 `actual_gross_replayed_entry_count`。该 key 只覆盖
   snapshot、plan、session 与 terminal checksum，刻意排除 valuation day、
   as-of、created-at 和 subsidiary digests。同一终态事实不能通过改时间再次
   计入，也不能通过改 order/trade/position/reconciliation digest 绕过去重；
@@ -352,6 +401,7 @@ export 和中文报告按固定顺序声明五个 adapter，调用方不能替�
 | `cfast-book-walk-fill-bounds-v1` | execution-quality source facts v1 | 只发布未校准 fill interval，禁止点成交概率 |
 | `cfast-simnow-not-provided-v1` | actual NOT_PROVIDED source facts v1 | Actual 全部 null |
 | `cfast-simnow-archive-reference-v3` | actual SimNow archive reference v3 | 只有 archive 引用，没有 raw core，Actual 仍为 null/UNVERIFIED |
+| `cfast-simnow-session-archive-replay-v4` | embedded local terminal session archive v4 | unattested fresh replay gross/slippage；不计为 authoritative actual fact；fee 明确 UNBOUND，net 为 null |
 
 JSON export 内嵌全部 entry、v2 audit、固定 adapter contract、structure-only
 external anchor 状态和固定 false 权限字段。`export_sha256` 绑定除自身以外的
