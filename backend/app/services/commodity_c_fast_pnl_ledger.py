@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import os
+import re
+import stat
 from collections.abc import Mapping, Sequence
 from datetime import datetime
 from decimal import Decimal
+from pathlib import Path
 from typing import Any, TypeVar
 
 from pydantic import ValidationError
@@ -11,6 +17,7 @@ from app.schemas.commodity_c_fast_pnl_ledger import (
     ActualSimNowCalibrationPnlLayerDTO,
     ActualSimNowFactsDTO,
     ActualSimNowNotProvidedSourceFactsDTO,
+    ActualSimNowPinnedArchiveReplayFactsDTO,
     CommodityCFastFourLayerPnlLedgerEntryDTO,
     CommodityCFastPnlLedgerAuditDTO,
     ExecutionQualityIntervalPnlLayerDTO,
@@ -26,6 +33,7 @@ from app.schemas.commodity_c_fast_pnl_ledger import (
     money_bounds,
     money_multiply,
     money_sum,
+    replay_actual_simnow_session_archive,
     sha256_json,
 )
 
@@ -84,6 +92,22 @@ DERIVATION_RULES: dict[str, tuple[str, str]] = {
             }
         ),
     ),
+    "SIMNOW_SESSION_ARCHIVE_RAW_TRADE_MARK_REPLAY_FEES_UNBOUND": (
+        "cfast-actual-simnow-session-archive-replay-v4",
+        sha256_json(
+            {
+                "gross": (
+                    "sum(direction*(mark-fill)*multiplier*filled-volume)"
+                ),
+                "adverse_slippage": (
+                    "sum(direction*(fill-decision)*multiplier*filled-volume)"
+                ),
+                "fees": "unbound-not-assumed-zero",
+                "net": "null-until-authoritative-fees-bound",
+                "settlement": ("full-fill-complete-terminal-only"),
+            }
+        ),
+    ),
 }
 
 
@@ -91,6 +115,299 @@ class CFastPnlLedgerError(ValueError):
     def __init__(self, code: str) -> None:
         self.code = code
         super().__init__(code)
+
+
+MAX_SIMNOW_ARCHIVE_BYTES = 32 * 1024 * 1024
+_C_FAST_SESSION_ID = re.compile(r"cfast-shakedown-[0-9a-f]{32}")
+
+
+def _read_pinned_simnow_archive(path: Path) -> tuple[bytes, dict[str, Any]]:
+    """Read one regular archive file without following a leaf symlink."""
+
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise CFastPnlLedgerError(
+            "ACTUAL_ARCHIVE_CUSTODY_READ_FAILED"
+        ) from exc
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise CFastPnlLedgerError("ACTUAL_ARCHIVE_CUSTODY_NOT_REGULAR")
+        if (
+            metadata.st_uid != os.getuid()
+            or stat.S_IMODE(metadata.st_mode) & 0o077
+        ):
+            raise CFastPnlLedgerError("ACTUAL_ARCHIVE_CUSTODY_MODE_INVALID")
+        if (
+            metadata.st_size <= 0
+            or metadata.st_size > MAX_SIMNOW_ARCHIVE_BYTES
+        ):
+            raise CFastPnlLedgerError("ACTUAL_ARCHIVE_CUSTODY_RESOURCE_LIMIT")
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            raw = handle.read(MAX_SIMNOW_ARCHIVE_BYTES + 1)
+    finally:
+        os.close(descriptor)
+    if len(raw) > MAX_SIMNOW_ARCHIVE_BYTES:
+        raise CFastPnlLedgerError("ACTUAL_ARCHIVE_CUSTODY_RESOURCE_LIMIT")
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise CFastPnlLedgerError(
+            "ACTUAL_ARCHIVE_CUSTODY_JSON_INVALID"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise CFastPnlLedgerError("ACTUAL_ARCHIVE_CUSTODY_JSON_INVALID")
+    return raw, payload
+
+
+def _load_pinned_simnow_archive_chain(
+    *,
+    archive_dir: Path,
+    session_id: str,
+    expected_archive_raw_sha256: str,
+    expected_terminal_checksum: str,
+    expected_chain_tip_terminal_checksum: str,
+) -> tuple[dict[str, Any], str, str | None]:
+    """Bind a session file to independently supplied raw and chain-tip pins."""
+
+    if not _C_FAST_SESSION_ID.fullmatch(session_id):
+        raise CFastPnlLedgerError("ACTUAL_ARCHIVE_SESSION_ID_INVALID")
+    if archive_dir.is_symlink() or not archive_dir.is_dir():
+        raise CFastPnlLedgerError("ACTUAL_ARCHIVE_CUSTODY_DIR_INVALID")
+    directory_metadata = archive_dir.stat()
+    if (
+        directory_metadata.st_uid != os.getuid()
+        or stat.S_IMODE(directory_metadata.st_mode) & 0o077
+    ):
+        raise CFastPnlLedgerError("ACTUAL_ARCHIVE_CUSTODY_MODE_INVALID")
+    path = archive_dir / f"{session_id}.json"
+    if path.parent != archive_dir or path.is_symlink():
+        raise CFastPnlLedgerError("ACTUAL_ARCHIVE_PATH_SESSION_MISMATCH")
+
+    rows: list[tuple[dict[str, Any], str]] = []
+    target: dict[str, Any] | None = None
+    target_raw_sha256: str | None = None
+    for candidate in sorted(archive_dir.glob("cfast-shakedown-*.json")):
+        if candidate.is_symlink() or not _C_FAST_SESSION_ID.fullmatch(
+            candidate.stem
+        ):
+            raise CFastPnlLedgerError("ACTUAL_ARCHIVE_CUSTODY_ENTRY_INVALID")
+        raw, payload = _read_pinned_simnow_archive(candidate)
+        raw_sha256 = hashlib.sha256(raw).hexdigest()
+        if payload.get("session_id") != candidate.stem:
+            raise CFastPnlLedgerError("ACTUAL_ARCHIVE_PATH_SESSION_MISMATCH")
+        execution = payload.get("execution")
+        if not isinstance(execution, dict):
+            raise CFastPnlLedgerError("ACTUAL_ARCHIVE_CHAIN_INVALID")
+        execution_core = {
+            key: value
+            for key, value in execution.items()
+            if key != "state_checksum"
+        }
+        execution_checksum = execution.get("state_checksum")
+        terminal_checksum = payload.get("terminal_checksum")
+        terminal_payload = {
+            "session_id": payload.get("session_id"),
+            "plan_hash": payload.get("plan_hash"),
+            "status": payload.get("status"),
+            "completed_at_utc": payload.get("completed_at_utc"),
+            "execution_state_checksum": execution_checksum,
+        }
+        if execution_checksum != sha256_json(
+            execution_core
+        ) or terminal_checksum != sha256_json(terminal_payload):
+            raise CFastPnlLedgerError("ACTUAL_ARCHIVE_CHAIN_INVALID")
+        rows.append((payload, str(terminal_checksum)))
+        if candidate == path:
+            target = payload
+            target_raw_sha256 = raw_sha256
+    if target is None or target_raw_sha256 is None:
+        raise CFastPnlLedgerError("ACTUAL_ARCHIVE_SESSION_NOT_FOUND")
+    if target_raw_sha256 != expected_archive_raw_sha256:
+        raise CFastPnlLedgerError("ACTUAL_ARCHIVE_RAW_PIN_MISMATCH")
+    if target.get("terminal_checksum") != expected_terminal_checksum:
+        raise CFastPnlLedgerError("ACTUAL_ARCHIVE_TERMINAL_PIN_MISMATCH")
+
+    by_previous: dict[str | None, list[tuple[dict[str, Any], str]]] = {}
+    for payload, checksum in rows:
+        previous = payload.get("previous_terminal_checksum")
+        if previous is not None and not re.fullmatch(
+            r"[0-9a-f]{64}", str(previous)
+        ):
+            raise CFastPnlLedgerError("ACTUAL_ARCHIVE_CHAIN_INVALID")
+        by_previous.setdefault(previous, []).append((payload, checksum))
+    roots = by_previous.get(None, [])
+    if len(roots) != 1:
+        raise CFastPnlLedgerError("ACTUAL_ARCHIVE_CHAIN_INVALID")
+    ordered = [roots[0]]
+    visited = {roots[0][1]}
+    while True:
+        children = by_previous.get(ordered[-1][1], [])
+        if not children:
+            break
+        if len(children) != 1 or children[0][1] in visited:
+            raise CFastPnlLedgerError("ACTUAL_ARCHIVE_CHAIN_INVALID")
+        ordered.append(children[0])
+        visited.add(children[0][1])
+    if len(ordered) != len(rows):
+        raise CFastPnlLedgerError("ACTUAL_ARCHIVE_CHAIN_INVALID")
+    chain_tip = ordered[-1][1]
+    if chain_tip != expected_chain_tip_terminal_checksum:
+        raise CFastPnlLedgerError("ACTUAL_ARCHIVE_CHAIN_TIP_PIN_MISMATCH")
+    if target.get("terminal_checksum") != chain_tip:
+        raise CFastPnlLedgerError("ACTUAL_ARCHIVE_SESSION_NOT_CHAIN_TIP")
+    if not any(payload is target for payload, _ in ordered):
+        raise CFastPnlLedgerError("ACTUAL_ARCHIVE_SESSION_OUTSIDE_CHAIN")
+    return target, target_raw_sha256, target.get("previous_terminal_checksum")
+
+
+def build_actual_simnow_archive_replay_source_facts(
+    *,
+    ledger_id: str,
+    snapshot_hash: str,
+    formula_target_binding_sha256: str,
+    valuation_day: str,
+    as_of_at_utc: str,
+    archive_dir: str | Path,
+    session_id: str,
+    expected_archive_raw_sha256: str,
+    expected_terminal_checksum: str,
+    expected_chain_tip_terminal_checksum: str,
+) -> ActualSimNowPinnedArchiveReplayFactsDTO:
+    """Build unattested v4 facts from a locally pinned service archive chain.
+
+    The expected digests bind this read to caller-selected local bytes and
+    chain state.  They are integrity inputs, not an external fact authority.
+    """
+
+    try:
+        archive, raw_sha256, previous_terminal_checksum = (
+            _load_pinned_simnow_archive_chain(
+                archive_dir=Path(archive_dir),
+                session_id=session_id,
+                expected_archive_raw_sha256=expected_archive_raw_sha256,
+                expected_terminal_checksum=expected_terminal_checksum,
+                expected_chain_tip_terminal_checksum=(
+                    expected_chain_tip_terminal_checksum
+                ),
+            )
+        )
+        execution = archive["execution"]
+        raw = execution["terminal_raw_facts"]
+        pnl = execution["pnl"]
+        reconciliation = execution["reconciliation"]
+        submitted = execution["submitted"]
+        marks = pnl["mark_evidence"]
+        orders = raw["orders"]
+        trades = raw["trades"]
+        positions = raw["positions"]
+        child_rows = [
+            row for phase in ("close", "open") for row in submitted[phase]
+        ]
+        expected_lots = sum(int(row["volume"]) for row in child_rows)
+        filled_lots = sum(int(row["volume"]) for row in trades)
+        if filled_lots == expected_lots:
+            order_outcome = "FULL_FILL"
+        elif filled_lots > 0:
+            order_outcome = "PARTIAL_FILL"
+        else:
+            order_outcome = (
+                "REJECTED"
+                if any(
+                    "reject" in str(row.get("status") or "").lower()
+                    for row in orders
+                )
+                else "UNFILLED_CANCELLED"
+            )
+        mark_times = [
+            str(row["received_at_utc"])
+            for row in marks.values()
+            if isinstance(row, Mapping)
+        ]
+        valuation_at_utc = max(
+            mark_times,
+            key=lambda value: datetime.fromisoformat(
+                value.replace("Z", "+00:00")
+            ),
+        )
+
+        def row_hash(rows: list[dict[str, Any]]) -> str:
+            return sha256_json(sorted(sha256_json(row) for row in rows))
+
+        source = {
+            "schema_version": "commodity_c_fast_actual_simnow_facts_v4",
+            "candidate_id": "C_FAST_CROSS_SECTION_NEUTRAL",
+            "ledger_id": ledger_id,
+            "snapshot_hash": snapshot_hash,
+            "formula_target_binding_sha256": formula_target_binding_sha256,
+            "plan_hash": archive["plan_hash"],
+            "valuation_day": valuation_day,
+            "as_of_at_utc": as_of_at_utc,
+            "actual_state": "LOCAL_ARCHIVE_REPLAYED_UNATTESTED",
+            "fact_source": (
+                "SIMNOW_SESSION_ARCHIVE_RAW_TRADE_MARK_REPLAY_FEES_UNBOUND"
+            ),
+            "execution_lane": "simnow_shakedown",
+            "session_id": archive["session_id"],
+            "account_sha256": raw["account_sha256"],
+            "orders_sha256": row_hash(orders),
+            "trades_sha256": row_hash(trades),
+            "positions_sha256": row_hash(positions),
+            "reconciliation_sha256": sha256_json(reconciliation),
+            "execution_state_checksum": execution["state_checksum"],
+            "execution_state_checksum_verification_state": (
+                "FULL_EMBEDDED_SESSION_ARCHIVE_FRESH_REPLAY"
+            ),
+            "terminal_checksum": archive["terminal_checksum"],
+            "terminal_status": archive["status"],
+            "terminal_reconciliation_complete": (
+                reconciliation.get("expected_positions")
+                == reconciliation.get("observed_positions")
+                and execution["terminal_guard"].get("state") == "VALID"
+            ),
+            "terminal_completed_at_utc": archive["completed_at_utc"],
+            "valuation_at_utc": valuation_at_utc,
+            "execution_captured_at_utc": pnl["captured_at_utc"],
+            "expected_lots": expected_lots,
+            "filled_lots": filled_lots,
+            "order_outcome": order_outcome,
+            "trade_evidence_state": "COMPLETE",
+            "mark_source": "CURRENT_L1_MID",
+            "fee_binding_state": "UNBOUND_NOT_ASSUMED_ZERO",
+            "fee_source_state": "NOT_AVAILABLE_IN_SESSION_ARCHIVE",
+            "session_archive_sha256": sha256_json(archive),
+            "session_archive_raw_sha256": raw_sha256,
+            "archive_chain_tip_terminal_checksum": (
+                expected_chain_tip_terminal_checksum
+            ),
+            "archive_predecessor_terminal_checksum": (
+                previous_terminal_checksum
+            ),
+            "archive_custody_verification_state": (
+                "LOCAL_FILE_AND_LINEAR_CHAIN_CHECKED_NO_EXTERNAL_AUTHORITY"
+            ),
+            "external_fact_authority_state": (
+                "NOT_PROVIDED_STRUCTURE_ONLY"
+            ),
+            "session_archive": archive,
+            "actual_amount_verification_state": (
+                "GROSS_AND_SLIPPAGE_REPLAYED_FROM_SESSION_ARCHIVE_FEES_UNBOUND"
+            ),
+            "countable_forward": False,
+            "production_allowed": False,
+        }
+    except CFastPnlLedgerError:
+        raise
+    except (KeyError, TypeError, ValueError) as exc:
+        raise CFastPnlLedgerError("INVALID_ACTUAL_SESSION_ARCHIVE") from exc
+    try:
+        return ActualSimNowPinnedArchiveReplayFactsDTO.model_validate(source)
+    except (TypeError, ValueError, ValidationError) as exc:
+        raise CFastPnlLedgerError("INVALID_ACTUAL_SESSION_ARCHIVE") from exc
 
 
 def build_four_layer_pnl_entry(
@@ -151,6 +468,14 @@ def build_four_layer_pnl_entry(
     if actual_state == "NOT_PROVIDED":
         actual_facts = _load_source_facts(
             ActualSimNowNotProvidedSourceFactsDTO,
+            actual_simnow_calibration_pnl,
+            "INVALID_ACTUAL_SOURCE_FACTS",
+        )
+    elif actual_simnow_calibration_pnl.get("schema_version") == (
+        "commodity_c_fast_actual_simnow_facts_v4"
+    ):
+        actual_facts = _load_source_facts(
+            ActualSimNowPinnedArchiveReplayFactsDTO,
             actual_simnow_calibration_pnl,
             "INVALID_ACTUAL_SOURCE_FACTS",
         )
@@ -334,7 +659,7 @@ def verify_four_layer_pnl_chain(
         ):
             raise CFastPnlLedgerError("LEDGER_SOURCE_AS_OF_REGRESSION")
     return CommodityCFastPnlLedgerAuditDTO(
-        schema_version="commodity_c_fast_pnl_ledger_audit_v2",
+        schema_version="commodity_c_fast_pnl_ledger_audit_v3",
         ledger_id=ledger_id,
         entry_count=len(entries),
         genesis_entry_hash=entries[0].entry_hash,
@@ -343,6 +668,11 @@ def verify_four_layer_pnl_chain(
         audit_state=("PASS_FRESH_REPLAY_STRUCTURE_AND_HASH_CHAIN_ONLY"),
         actual_fact_entry_count=sum(
             entry.actual_simnow_calibration_pnl.actual_state == "FACTS_BOUND"
+            for entry in entries
+        ),
+        actual_gross_replayed_entry_count=sum(
+            entry.actual_simnow_calibration_pnl.actual_amount_verification_state
+            == "GROSS_AND_SLIPPAGE_REPLAYED_FROM_SESSION_ARCHIVE_FEES_UNBOUND"
             for entry in entries
         ),
         external_genesis_anchor_state="NOT_PROVIDED_STRUCTURE_ONLY",
@@ -537,11 +867,26 @@ def _build_actual_layer(
         fees = None
         net_state = "UNVERIFIED_REQUIRES_RAW_FILL_PRICE_MULTIPLIER_FEE_FACTS"
         net = None
+    elif isinstance(facts, ActualSimNowPinnedArchiveReplayFactsDTO):
+        source_kind = (
+            "SIMNOW_SESSION_ARCHIVE_RAW_TRADE_MARK_REPLAY_FEES_UNBOUND"
+        )
+        actual_state = "LOCAL_ARCHIVE_REPLAYED_UNATTESTED"
+        stable_actual_fact_identity = _stable_actual_fact_identity(facts)
+        amount_verification_state = facts.actual_amount_verification_state
+        replay = replay_actual_simnow_session_archive(facts)
+        gross, slippage = replay[15:17]
+        fees_state = "UNBOUND_NOT_ASSUMED_ZERO"
+        fees = None
+        net_state = "UNAVAILABLE_UNTIL_AUTHORITATIVE_FEES_BOUND"
+        net = None
     else:
         raise CFastPnlLedgerError("INVALID_ACTUAL_SOURCE_FACTS")
     core = {
         "schema_version": (
-            "commodity_c_fast_actual_simnow_calibration_pnl_layer_v2"
+            "commodity_c_fast_actual_simnow_calibration_pnl_layer_v3"
+            if isinstance(facts, ActualSimNowPinnedArchiveReplayFactsDTO)
+            else "commodity_c_fast_actual_simnow_calibration_pnl_layer_v2"
         ),
         "layer_kind": "ACTUAL_SIMNOW_CALIBRATION_PNL",
         "snapshot_hash": facts.snapshot_hash,
@@ -566,7 +911,9 @@ def _build_actual_layer(
     )
 
 
-def _stable_actual_fact_identity(facts: ActualSimNowFactsDTO) -> str:
+def _stable_actual_fact_identity(
+    facts: ActualSimNowFactsDTO | ActualSimNowPinnedArchiveReplayFactsDTO,
+) -> str:
     """Identity excludes collection time so one terminal fact is count-once."""
 
     return sha256_json(

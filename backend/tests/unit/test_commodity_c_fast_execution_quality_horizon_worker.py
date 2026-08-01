@@ -472,6 +472,27 @@ def test_tick_outside_durable_exact_contracts_is_not_persisted(
     assert subject._sidecar.recover().snapshots == ()
 
 
+def test_exact_contract_freeze_prevents_plan_mutation_without_blocking_worker(
+    tmp_path: Path,
+) -> None:
+    subject = worker(tmp_path)
+    register(subject)
+
+    receipt = subject.freeze_preverified_exact_contracts(("SHFE.cu2612",))
+
+    assert receipt["tick_subscription_frozen"] is True
+    assert receipt["frozen_exact_contracts"] == ["SHFE.cu2612"]
+    with pytest.raises(
+        CFastExecutionQualityHorizonWorkerError,
+        match="PREVERIFIED_EXACT_CONTRACTS_FROZEN",
+    ):
+        subject.register_preverified_plan(**registration_inputs())
+    status = subject.status()
+    assert status["blocked_fail_closed"] is False
+    assert status["exact_contract_subscription_frozen"] is True
+    assert status["frozen_exact_contracts"] == ["SHFE.cu2612"]
+
+
 @pytest.mark.parametrize(
     ("change", "message"),
     [

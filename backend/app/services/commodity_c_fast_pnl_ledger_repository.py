@@ -102,6 +102,16 @@ SOURCE_ADAPTER_BINDINGS = (
         verification_rule=("ARCHIVE_REFERENCE_ONLY_NO_ACTUAL_AMOUNT_AUTHORITY"),
         amount_authority="UNVERIFIED_ACTUAL_AMOUNTS_MUST_REMAIN_NULL",
     ),
+    CommodityCFastPnlSourceAdapterBindingDTO(
+        adapter_id="cfast-simnow-session-archive-replay-v4",
+        layer_kind="ACTUAL_SIMNOW_CALIBRATION_PNL",
+        source_schema_version="commodity_c_fast_actual_simnow_facts_v4",
+        source_kind=("SIMNOW_SESSION_ARCHIVE_RAW_TRADE_MARK_REPLAY_FEES_UNBOUND"),
+        verification_rule=(
+            "FRESH_REPLAY_SESSION_RAW_TRADES_MARKS_MULTIPLIERS_FEES_UNBOUND"
+        ),
+        amount_authority="GROSS_AND_SLIPPAGE_REPLAYED_FEES_AND_NET_UNBOUND",
+    ),
 )
 
 
@@ -301,6 +311,8 @@ class CommodityCFastPnlLedgerRepository:
             f"- Chain tip：`{exported.chain_tip_entry_hash}`\n"
             f"- 有 Actual 引用事实的记录数："
             f"`{audit.actual_fact_entry_count}`\n"
+            f"- 有 archive fresh-replay Actual gross/slippage 的记录数："
+            f"`{audit.actual_gross_replayed_entry_count}`\n"
             f"- 审计状态：`{audit.audit_state}`\n"
             f"- Export SHA256：`{exported.export_sha256}`\n\n"
             "## Source adapters\n\n"
@@ -311,8 +323,9 @@ class CommodityCFastPnlLedgerRepository:
             "- `external_genesis_anchor_state="
             "NOT_PROVIDED_STRUCTURE_ONLY`。\n"
             "- `external_tip_anchor_state=NOT_PROVIDED_STRUCTURE_ONLY`。\n"
-            "- 无权威 SimNow raw orders/trades/fill price/multiplier/fee "
-            "archive 时，Actual 金额固定为 `null/UNVERIFIED`。\n"
+            "- v4 只从外部 raw/terminal/chain-tip pins 绑定的 FULL_FILL COMPLETE "
+            "terminal archive 重放 gross/slippage；"
+            "当前 archive 没有权威 fee statement，fees 固定 UNBOUND，net 固定 null。\n"
             "- `countable_forward=false`，`authority_granted=false`，"
             "`dispatch_allowed=false`，`replacement_allowed=false`，"
             "`production_allowed=false`。\n"
@@ -988,7 +1001,7 @@ def _build_repository_export(
                 f"REPOSITORY_EXPORT_CHAIN_INVALID:{exc.code}"
             ) from exc
     core: dict[str, Any] = {
-        "schema_version": ("commodity_c_fast_pnl_ledger_repository_export_v1"),
+        "schema_version": ("commodity_c_fast_pnl_ledger_repository_export_v2"),
         "ledger_id": ledger_id,
         "entry_count": len(entries),
         "genesis_entry_hash": entries[0].entry_hash,

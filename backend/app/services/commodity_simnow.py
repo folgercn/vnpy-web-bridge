@@ -8,6 +8,7 @@ import hashlib
 import json
 import logging
 import math
+import os
 import re
 import uuid
 from collections.abc import Callable
@@ -2183,6 +2184,8 @@ class CommoditySimNowService:
                     "pnl": self._c_fast_pnl(active),
                 },
             }
+        if isinstance(session, dict):
+            session = self._c_fast_public_session_projection(session)
         return {
             "configured":
             self.settings.commodity_c_fast_simnow_shakedown_enabled,
@@ -4360,6 +4363,9 @@ class CommoditySimNowService:
                     "_terminal_execution_snapshot"
                 )
             )
+            terminal_raw_facts = terminal_guard.pop(
+                "_terminal_raw_fact_snapshot"
+            )
             self._verify_c_fast_archive_predecessor(
                 plan.get("previous_terminal_checksum")
             )
@@ -4372,11 +4378,18 @@ class CommoditySimNowService:
                     "C_FAST 测试终态会话证据缺失"
                 )
             execution_snapshot = terminal_execution_snapshot
+            archived_submitted = {
+                phase: [
+                    self._c_fast_archive_submitted_projection(row)
+                    for row in plan.get("submitted", {}).get(phase, [])
+                ]
+                for phase in ("close", "open")
+            }
             execution = {
                 "schema_version":
                 "commodity_c_fast_simnow_shakedown_evidence_v1",
                 "started_at_utc": plan.get("started_at_utc"),
-                "submitted": plan.get("submitted", {}),
+                "submitted": archived_submitted,
                 "send_intents": plan.get("send_intents", {}),
                 "halt": plan.get("halt"),
                 "reconciliation":
@@ -4385,6 +4398,7 @@ class CommoditySimNowService:
                 "final_positions":
                 terminal_guard["final_positions"],
                 "terminal_guard": terminal_guard,
+                "terminal_raw_facts": terminal_raw_facts,
                 "execution_snapshot":
                 execution_snapshot,
                 "pnl": self._c_fast_pnl(
@@ -4406,6 +4420,130 @@ class CommoditySimNowService:
         self.c_fast_shakedown_auto_dispatch_authorized = False
         if self.current_plan is plan:
             self.current_plan = None
+
+    @staticmethod
+    def _c_fast_archive_integral_volume(
+        value: Any,
+        *,
+        field: str,
+        allow_zero: bool = False,
+    ) -> int:
+        if isinstance(value, bool):
+            raise CommoditySimNowStateError(
+                f"C_FAST 终态 {field} 不是整数"
+            )
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError) as exc:
+            raise CommoditySimNowStateError(
+                f"C_FAST 终态 {field} 不是整数"
+            ) from exc
+        if (
+            not math.isfinite(numeric)
+            or not numeric.is_integer()
+            or numeric < 0
+            or (numeric == 0 and not allow_zero)
+        ):
+            raise CommoditySimNowStateError(
+                f"C_FAST 终态 {field} 不是有效整数"
+            )
+        return int(numeric)
+
+    @staticmethod
+    def _c_fast_archive_positive_price(value: Any) -> float:
+        if isinstance(value, bool):
+            raise CommoditySimNowStateError(
+                "C_FAST 终态成交价不是有效正数"
+            )
+        try:
+            price = float(value)
+        except (TypeError, ValueError) as exc:
+            raise CommoditySimNowStateError(
+                "C_FAST 终态成交价不是有效正数"
+            ) from exc
+        if not math.isfinite(price) or price <= 0:
+            raise CommoditySimNowStateError(
+                "C_FAST 终态成交价不是有效正数"
+            )
+        return price
+
+    def _c_fast_archive_order_projection(
+        self, row: dict[str, Any]
+    ) -> dict[str, Any]:
+        return {
+            "vt_orderid": str(
+                row.get("vt_orderid") or row.get("orderid") or ""
+            ),
+            "reference": str(row.get("reference") or ""),
+            "vt_symbol": self._row_vt_symbol(row),
+            "direction": _normalize_direction(row.get("direction")),
+            "offset": _value(row.get("offset") or "").lower(),
+            "volume": self._c_fast_archive_integral_volume(
+                row.get("volume"), field="order volume"
+            ),
+            "status": _normalize_status(row.get("status")),
+        }
+
+    def _c_fast_archive_submitted_projection(
+        self, row: dict[str, Any]
+    ) -> dict[str, Any]:
+        return {
+            "product": str(row.get("product") or ""),
+            "vt_symbol": self._row_vt_symbol(row),
+            "direction": _normalize_direction(row.get("direction")),
+            "offset": _value(row.get("offset") or "").lower(),
+            "volume": self._c_fast_archive_integral_volume(
+                row.get("volume"), field="submitted volume"
+            ),
+            "price": self._c_fast_archive_positive_price(row.get("price")),
+            "decision_price": self._c_fast_archive_positive_price(
+                row.get("decision_price", row.get("price"))
+            ),
+            "reference": str(row.get("reference") or ""),
+            "vt_orderid": str(
+                row.get("vt_orderid") or row.get("orderid") or ""
+            ),
+        }
+
+    def _c_fast_archive_trade_projection(
+        self, row: dict[str, Any]
+    ) -> dict[str, Any]:
+        trade_time = row.get("trade_at_utc") or row.get("datetime")
+        parsed_trade_time = _parse_datetime(trade_time)
+        if parsed_trade_time is None:
+            raise CommoditySimNowStateError(
+                "C_FAST 终态成交时间不是有效 UTC 时间"
+            )
+        return {
+            "vt_tradeid": str(
+                row.get("vt_tradeid") or row.get("tradeid") or ""
+            ),
+            "vt_orderid": str(
+                row.get("vt_orderid") or row.get("orderid") or ""
+            ),
+            "reference": str(row.get("reference") or ""),
+            "vt_symbol": self._row_vt_symbol(row),
+            "direction": _normalize_direction(row.get("direction")),
+            "offset": _value(row.get("offset") or "").lower(),
+            "volume": self._c_fast_archive_integral_volume(
+                row.get("volume"), field="trade volume"
+            ),
+            "price": self._c_fast_archive_positive_price(row.get("price")),
+            "trade_at_utc": parsed_trade_time.isoformat(),
+        }
+
+    def _c_fast_archive_position_projection(
+        self, row: dict[str, Any]
+    ) -> dict[str, Any]:
+        return {
+            "vt_symbol": self._row_vt_symbol(row),
+            "direction": _normalize_direction(row.get("direction")),
+            "volume": self._c_fast_archive_integral_volume(
+                row.get("volume"),
+                field="position volume",
+                allow_zero=True,
+            ),
+        }
 
     def _c_fast_terminal_guard(
         self,
@@ -4675,6 +4813,55 @@ class CommoditySimNowService:
         guard["_terminal_execution_snapshot"] = (
             terminal_execution
         )
+        session_orders = [
+            self._c_fast_archive_order_projection(row)
+            for row in second["_raw_orders"]
+            if self._c_fast_order_belongs_to_plan(plan, row)
+        ]
+        session_trades = [
+            self._c_fast_archive_trade_projection(row)
+            for row in second["_raw_trades"]
+            if self._c_fast_trade_belongs_to_plan(plan, row)
+        ]
+        session_positions = [
+            self._c_fast_archive_position_projection(row)
+            for row in second["_raw_positions"]
+        ]
+        submitted_rows = [
+            row
+            for phase in ("close", "open")
+            for row in plan.get("submitted", {}).get(phase, [])
+        ]
+        contract_specs = {
+            str(row["vt_symbol"]): {
+                "product": str(row["product"]),
+                "multiplier": int(
+                    PRODUCT_SPECS[str(row["product"])]["multiplier"]
+                ),
+                "price_tick": float(
+                    PRODUCT_SPECS[str(row["product"])]["price_tick"]
+                ),
+            }
+            for row in submitted_rows
+        }
+        guard["_terminal_raw_fact_snapshot"] = {
+            "schema_version": "commodity_c_fast_terminal_raw_facts_v2",
+            "scope": "C_FAST_SESSION_PLUS_FINAL_POSITIONS",
+            "account_sha256": account_hash_after,
+            "orders": session_orders,
+            "trades": session_trades,
+            "positions": session_positions,
+            "contract_specs": contract_specs,
+            "orders_sha256": self._unordered_rows_hash(session_orders),
+            "trades_sha256": self._unordered_rows_hash(session_trades),
+            "positions_sha256": self._unordered_rows_hash(
+                session_positions
+            ),
+            "all_orders_sha256": second["evidence"]["orders_hash"],
+            "all_trades_sha256": second["evidence"]["trades_hash"],
+            "all_positions_sha256": second["evidence"]["positions_hash"],
+            "captured_at_utc": second["evidence"]["captured_at_utc"],
+        }
         return guard
 
     def _c_fast_terminal_fact_watermark(
@@ -4953,6 +5140,7 @@ class CommoditySimNowService:
             new_external_trade_facts,
             "_raw_orders": orders,
             "_raw_trades": trades,
+            "_raw_positions": raw_positions,
             "snapshot_fingerprint":
             _sha256_json(fingerprint_payload),
             "evidence": {
@@ -5780,13 +5968,31 @@ class CommoditySimNowService:
                     "C_FAST 终态归档冲突，禁止覆盖"
                 )
             return
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_suffix(f"{path.suffix}.tmp")
-        temporary.write_text(
-            json.dumps(session, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
-        temporary.replace(path)
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path.parent.chmod(0o700)
+        raw = (
+            json.dumps(session, ensure_ascii=False, indent=2) + "\n"
+        ).encode("utf-8")
+        try:
+            descriptor = os.open(
+                path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+            )
+        except FileExistsError:
+            return self._archive_c_fast_terminal_session(session)
+        try:
+            with os.fdopen(descriptor, "wb", closefd=False) as handle:
+                handle.write(raw)
+                handle.flush()
+                os.fsync(handle.fileno())
+        finally:
+            os.close(descriptor)
+        directory_descriptor = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
 
     def _load_c_fast_terminal_archive(
         self, session_id: str
@@ -5919,9 +6125,60 @@ class CommoditySimNowService:
             ]
         bounded = max(1, min(limit, 1000))
         return [
-            {**session, "chain_state": chain_state}
+            {
+                **self._c_fast_public_session_projection(session),
+                "chain_state": chain_state,
+            }
             for session in reversed(rows)
         ][:bounded]
+
+    @staticmethod
+    def _c_fast_public_session_projection(
+        session: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Return API-safe terminal evidence without raw broker rows."""
+
+        def scrub(value: Any) -> Any:
+            if isinstance(value, dict):
+                return {
+                    key: scrub(child)
+                    for key, child in value.items()
+                    if not any(
+                        marker in str(key).lower()
+                        for marker in (
+                            "account_original",
+                            "password",
+                            "secret",
+                            "token",
+                            "credential",
+                        )
+                    )
+                }
+            if isinstance(value, list):
+                return [scrub(child) for child in value]
+            return value
+
+        projected = scrub(session)
+        execution = projected.get("execution")
+        if not isinstance(execution, dict):
+            return projected
+        raw = execution.pop("terminal_raw_facts", None)
+        if isinstance(raw, dict):
+            execution["terminal_raw_fact_summary"] = {
+                "schema_version": raw.get("schema_version"),
+                "scope": raw.get("scope"),
+                "orders_sha256": raw.get("orders_sha256"),
+                "trades_sha256": raw.get("trades_sha256"),
+                "positions_sha256": raw.get("positions_sha256"),
+                "all_orders_sha256": raw.get("all_orders_sha256"),
+                "all_trades_sha256": raw.get("all_trades_sha256"),
+                "captured_at_utc": raw.get("captured_at_utc"),
+                "order_count": len(raw.get("orders", [])),
+                "trade_count": len(raw.get("trades", [])),
+                "position_count": len(raw.get("positions", [])),
+                "contract_spec_count": len(raw.get("contract_specs", {})),
+            }
+        return projected
 
     def _load_c_fast_shakedown_state(self) -> dict[str, Any] | None:
         path = self._c_fast_shakedown_state_path()
@@ -6004,12 +6261,13 @@ class CommoditySimNowService:
         self, session: dict[str, Any]
     ) -> None:
         path = self._c_fast_shakedown_state_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         temporary = path.with_suffix(f"{path.suffix}.tmp")
         temporary.write_text(
             json.dumps(session, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
+        temporary.chmod(0o600)
         temporary.replace(path)
 
     def _set_c_fast_continuous_authorized(self, value: bool) -> None:
@@ -6116,6 +6374,7 @@ class CommoditySimNowService:
                 "mark_source": "CURRENT_L1_MID",
                 "mark_state": "UNAVAILABLE",
                 "mark_prices": {},
+                "mark_evidence": {},
                 "mark_errors": {},
                 "trade_cashflow_cny": None,
                 "inventory_change_mark_cny": None,
@@ -6164,6 +6423,7 @@ class CommoditySimNowService:
                 "mark_source": "CURRENT_L1_MID",
                 "mark_state": "UNAVAILABLE",
                 "mark_prices": {},
+                "mark_evidence": {},
                 "mark_errors": {},
                 "trade_cashflow_cny": None,
                 "inventory_change_mark_cny": None,
@@ -6187,6 +6447,7 @@ class CommoditySimNowService:
             }
         rows = execution.get("orders", [])
         mark_by_symbol: dict[str, float] = {}
+        mark_evidence: dict[str, dict[str, Any]] = {}
         mark_errors: dict[str, str] = {}
         cashflow = 0.0
         marked_inventory = 0.0
@@ -6217,6 +6478,12 @@ class CommoditySimNowService:
                         float(quote["bid_price_1"])
                         + float(quote["ask_price_1"])
                     ) / 2.0
+                    mark_evidence[vt_symbol] = {
+                        "raw_quote": quote,
+                        "raw_quote_sha256": _sha256_json(quote),
+                        "received_at_utc": quote["received_at"],
+                        "mark_price": mark_by_symbol[vt_symbol],
+                    }
                 except Exception as exc:
                     mark_errors[vt_symbol] = exc.__class__.__name__
             if vt_symbol not in mark_by_symbol:
@@ -6239,6 +6506,7 @@ class CommoditySimNowService:
             if unmarked_fill
             else "AVAILABLE",
             "mark_prices": mark_by_symbol,
+            "mark_evidence": mark_evidence,
             "mark_errors": mark_errors,
             "trade_cashflow_cny": cashflow,
             "inventory_change_mark_cny": marked_inventory,

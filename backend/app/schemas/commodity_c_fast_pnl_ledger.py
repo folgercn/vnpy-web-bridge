@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from datetime import date, datetime
 from decimal import Context, Decimal, ROUND_HALF_EVEN, localcontext
 from typing import Annotated, Any, Literal
@@ -30,6 +31,7 @@ SourceKind = Literal[
     "EXECUTION_QUALITY_BOOK_WALK_FILL_BOUNDS",
     "ACTUAL_SIMNOW_FACTS_NOT_PROVIDED",
     "SIMNOW_AUTHORITATIVE_ORDER_TRADE_POSITION_RECONCILIATION",
+    "SIMNOW_SESSION_ARCHIVE_RAW_TRADE_MARK_REPLAY_FEES_UNBOUND",
 ]
 FeeComponent = Literal[
     "official_exchange_fee",
@@ -454,8 +456,129 @@ class ActualSimNowFactsDTO(PnlSourceFactsBaseDTO):
         return self
 
 
+class ActualSimNowPinnedArchiveReplayFactsDTO(PnlSourceFactsBaseDTO):
+    """Unattested local full-fill archive replay; fees stay unbound."""
+
+    schema_version: Literal["commodity_c_fast_actual_simnow_facts_v4"]
+    actual_state: Literal["LOCAL_ARCHIVE_REPLAYED_UNATTESTED"]
+    fact_source: Literal[
+        "SIMNOW_SESSION_ARCHIVE_RAW_TRADE_MARK_REPLAY_FEES_UNBOUND"
+    ]
+    execution_lane: Literal["simnow_shakedown"]
+    session_id: str = Field(
+        min_length=8,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9._-]+$",
+    )
+    account_sha256: Sha256 = Field(pattern=r"^[0-9a-f]{64}$")
+    orders_sha256: Sha256 = Field(pattern=r"^[0-9a-f]{64}$")
+    trades_sha256: Sha256 = Field(pattern=r"^[0-9a-f]{64}$")
+    positions_sha256: Sha256 = Field(pattern=r"^[0-9a-f]{64}$")
+    reconciliation_sha256: Sha256 = Field(pattern=r"^[0-9a-f]{64}$")
+    execution_state_checksum: Sha256 = Field(pattern=r"^[0-9a-f]{64}$")
+    execution_state_checksum_verification_state: Literal[
+        "FULL_EMBEDDED_SESSION_ARCHIVE_FRESH_REPLAY"
+    ]
+    terminal_checksum: Sha256 = Field(pattern=r"^[0-9a-f]{64}$")
+    terminal_status: Literal["COMPLETE"]
+    terminal_reconciliation_complete: StrictBool
+    terminal_completed_at_utc: str = Field(min_length=20, max_length=40)
+    valuation_at_utc: datetime
+    execution_captured_at_utc: datetime
+    expected_lots: int = Field(ge=1, le=MAX_LEDGER_LOTS)
+    filled_lots: int = Field(ge=0, le=MAX_LEDGER_LOTS)
+    order_outcome: Literal["FULL_FILL"]
+    trade_evidence_state: Literal["COMPLETE"]
+    mark_source: Literal["CURRENT_L1_MID"]
+    fee_binding_state: Literal["UNBOUND_NOT_ASSUMED_ZERO"]
+    fee_source_state: Literal["NOT_AVAILABLE_IN_SESSION_ARCHIVE"]
+    session_archive_sha256: Sha256 = Field(pattern=r"^[0-9a-f]{64}$")
+    session_archive_raw_sha256: Sha256 = Field(pattern=r"^[0-9a-f]{64}$")
+    archive_chain_tip_terminal_checksum: Sha256 = Field(
+        pattern=r"^[0-9a-f]{64}$"
+    )
+    archive_predecessor_terminal_checksum: Sha256 | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    archive_custody_verification_state: Literal[
+        "LOCAL_FILE_AND_LINEAR_CHAIN_CHECKED_NO_EXTERNAL_AUTHORITY"
+    ]
+    external_fact_authority_state: Literal[
+        "NOT_PROVIDED_STRUCTURE_ONLY"
+    ]
+    session_archive: dict[str, Any]
+    actual_amount_verification_state: Literal[
+        "GROSS_AND_SLIPPAGE_REPLAYED_FROM_SESSION_ARCHIVE_FEES_UNBOUND"
+    ]
+    countable_forward: StrictFalse
+    production_allowed: StrictFalse
+
+    @model_validator(mode="after")
+    def validate_pinned_archive_facts(
+        self,
+    ) -> "ActualSimNowPinnedArchiveReplayFactsDTO":
+        if self.terminal_reconciliation_complete is not True:
+            raise ValueError("archive replay requires terminal reconciliation")
+        if self.filled_lots != self.expected_lots:
+            raise ValueError("v4 archive replay is limited to full fills")
+        if self.archive_chain_tip_terminal_checksum != self.terminal_checksum:
+            raise ValueError("v4 archive session is not the pinned chain tip")
+        _require_utc(self.valuation_at_utc, "valuation_at_utc")
+        _require_utc(
+            self.execution_captured_at_utc,
+            "execution_captured_at_utc",
+        )
+        terminal_completed_at = parse_utc_string(
+            self.terminal_completed_at_utc,
+            "terminal_completed_at_utc",
+        )
+        terminal_payload = {
+            "session_id": self.session_id,
+            "plan_hash": self.plan_hash,
+            "status": self.terminal_status,
+            "completed_at_utc": self.terminal_completed_at_utc,
+            "execution_state_checksum": self.execution_state_checksum,
+        }
+        if self.terminal_checksum != sha256_json(terminal_payload):
+            raise ValueError("terminal_checksum mismatch")
+        if self.valuation_at_utc.date() != self.valuation_day:
+            raise ValueError("valuation_at_utc does not match valuation_day")
+        if not (
+            self.valuation_at_utc
+            <= self.execution_captured_at_utc
+            <= terminal_completed_at
+            <= self.as_of_at_utc
+        ):
+            raise ValueError("archive replay time causality is invalid")
+
+        replay = replay_actual_simnow_session_archive(self)
+        expected = (
+            self.session_id,
+            self.account_sha256,
+            self.orders_sha256,
+            self.trades_sha256,
+            self.positions_sha256,
+            self.reconciliation_sha256,
+            self.execution_state_checksum,
+            self.terminal_checksum,
+            self.terminal_status,
+            self.terminal_completed_at_utc,
+            self.valuation_at_utc,
+            self.execution_captured_at_utc,
+            self.expected_lots,
+            self.filled_lots,
+            self.order_outcome,
+        )
+        if replay[:15] != expected:
+            raise ValueError("session archive replay summary mismatch")
+        return self
+
+
 ActualSourceFactsDTO = (
-    ActualSimNowNotProvidedSourceFactsDTO | ActualSimNowFactsDTO
+    ActualSimNowNotProvidedSourceFactsDTO
+    | ActualSimNowFactsDTO
+    | ActualSimNowPinnedArchiveReplayFactsDTO
 )
 
 
@@ -707,13 +830,18 @@ class ExecutionQualityIntervalPnlLayerDTO(StrictLedgerModel):
 
 class ActualSimNowCalibrationPnlLayerDTO(StrictLedgerModel):
     schema_version: Literal[
-        "commodity_c_fast_actual_simnow_calibration_pnl_layer_v2"
+        "commodity_c_fast_actual_simnow_calibration_pnl_layer_v2",
+        "commodity_c_fast_actual_simnow_calibration_pnl_layer_v3",
     ]
     layer_kind: Literal["ACTUAL_SIMNOW_CALIBRATION_PNL"]
     snapshot_hash: Sha256 = Field(pattern=r"^[0-9a-f]{64}$")
     source_facts: ActualSourceFactsDTO
     lineage: PnlSourceLineageDTO
-    actual_state: Literal["NOT_PROVIDED", "FACTS_BOUND"]
+    actual_state: Literal[
+        "NOT_PROVIDED",
+        "FACTS_BOUND",
+        "LOCAL_ARCHIVE_REPLAYED_UNATTESTED",
+    ]
     stable_actual_fact_identity_sha256: Sha256 | None = Field(
         default=None,
         pattern=r"^[0-9a-f]{64}$",
@@ -721,19 +849,38 @@ class ActualSimNowCalibrationPnlLayerDTO(StrictLedgerModel):
     actual_amount_verification_state: Literal[
         "NOT_PROVIDED",
         "UNVERIFIED_REQUIRES_RAW_FILL_PRICE_MULTIPLIER_FEE_FACTS",
+        "GROSS_AND_SLIPPAGE_REPLAYED_FROM_SESSION_ARCHIVE_FEES_UNBOUND",
     ]
-    gross_execution_pnl_cny: Literal[None] = None
-    adverse_slippage_cny: Literal[None] = None
+    gross_execution_pnl_cny: Money | None = Field(
+        default=None,
+        ge=-MAX_ABS_MONEY_CNY,
+        le=MAX_ABS_MONEY_CNY,
+    )
+    adverse_slippage_cny: Money | None = Field(
+        default=None,
+        ge=-MAX_ABS_MONEY_CNY,
+        le=MAX_ABS_MONEY_CNY,
+    )
     fees_state: Literal[
         "NOT_AVAILABLE",
         "UNVERIFIED",
+        "UNBOUND_NOT_ASSUMED_ZERO",
     ]
-    actual_fees_cny: Literal[None] = None
+    actual_fees_cny: Money | None = Field(
+        default=None,
+        ge=0,
+        le=MAX_ABS_MONEY_CNY,
+    )
     net_pnl_state: Literal[
         "NOT_AVAILABLE",
         "UNVERIFIED_REQUIRES_RAW_FILL_PRICE_MULTIPLIER_FEE_FACTS",
+        "UNAVAILABLE_UNTIL_AUTHORITATIVE_FEES_BOUND",
     ]
-    actual_net_pnl_cny: Literal[None] = None
+    actual_net_pnl_cny: Money | None = Field(
+        default=None,
+        ge=-MAX_ABS_MONEY_CNY,
+        le=MAX_ABS_MONEY_CNY,
+    )
     countable_forward: StrictFalse
     layer_hash: Sha256 = Field(pattern=r"^[0-9a-f]{64}$")
 
@@ -753,7 +900,7 @@ class ActualSimNowCalibrationPnlLayerDTO(StrictLedgerModel):
                 "NOT_AVAILABLE",
                 None,
             )
-        else:
+        elif isinstance(facts, ActualSimNowFactsDTO):
             if self.actual_state != "FACTS_BOUND":
                 raise ValueError("actual state is not derived from facts")
             stable_identity = sha256_json(
@@ -774,6 +921,29 @@ class ActualSimNowCalibrationPnlLayerDTO(StrictLedgerModel):
                 ("UNVERIFIED_REQUIRES_RAW_FILL_PRICE_MULTIPLIER_FEE_FACTS"),
                 None,
             )
+        else:
+            if self.actual_state != "LOCAL_ARCHIVE_REPLAYED_UNATTESTED":
+                raise ValueError("actual state is not derived from facts")
+            stable_identity = sha256_json(
+                {
+                    "snapshot_hash": facts.snapshot_hash,
+                    "plan_hash": facts.plan_hash,
+                    "session_id": facts.session_id,
+                    "terminal_checksum": facts.terminal_checksum,
+                }
+            )
+            replay = replay_actual_simnow_session_archive(facts)
+            gross, slippage = replay[15:17]
+            expected = (
+                stable_identity,
+                facts.actual_amount_verification_state,
+                gross,
+                slippage,
+                "UNBOUND_NOT_ASSUMED_ZERO",
+                None,
+                "UNAVAILABLE_UNTIL_AUTHORITATIVE_FEES_BOUND",
+                None,
+            )
         actual = (
             self.stable_actual_fact_identity_sha256,
             self.actual_amount_verification_state,
@@ -786,6 +956,13 @@ class ActualSimNowCalibrationPnlLayerDTO(StrictLedgerModel):
         )
         if actual != expected:
             raise ValueError("actual layer is not derived from facts")
+        expected_schema = (
+            "commodity_c_fast_actual_simnow_calibration_pnl_layer_v3"
+            if isinstance(facts, ActualSimNowPinnedArchiveReplayFactsDTO)
+            else "commodity_c_fast_actual_simnow_calibration_pnl_layer_v2"
+        )
+        if self.schema_version != expected_schema:
+            raise ValueError("actual layer schema version mismatch")
         _validate_source_lineage(self.source_facts, self.lineage)
         _validate_layer_hash(self)
         return self
@@ -913,7 +1090,7 @@ class CommodityCFastFourLayerPnlLedgerEntryDTO(StrictLedgerModel):
 
 
 class CommodityCFastPnlLedgerAuditDTO(StrictLedgerModel):
-    schema_version: Literal["commodity_c_fast_pnl_ledger_audit_v2"]
+    schema_version: Literal["commodity_c_fast_pnl_ledger_audit_v3"]
     ledger_id: str = Field(
         min_length=8,
         max_length=128,
@@ -925,6 +1102,7 @@ class CommodityCFastPnlLedgerAuditDTO(StrictLedgerModel):
     ordered_entry_hashes_sha256: Sha256 = Field(pattern=r"^[0-9a-f]{64}$")
     audit_state: Literal["PASS_FRESH_REPLAY_STRUCTURE_AND_HASH_CHAIN_ONLY"]
     actual_fact_entry_count: int = Field(ge=0, le=10_000)
+    actual_gross_replayed_entry_count: int = Field(ge=0, le=10_000)
     external_genesis_anchor_state: Literal["NOT_PROVIDED_STRUCTURE_ONLY"]
     external_tip_anchor_state: Literal["NOT_PROVIDED_STRUCTURE_ONLY"]
     countable_forward: StrictFalse
@@ -932,6 +1110,695 @@ class CommodityCFastPnlLedgerAuditDTO(StrictLedgerModel):
     dispatch_allowed: StrictFalse
     replacement_allowed: StrictFalse
     production_allowed: StrictFalse
+
+    @model_validator(mode="after")
+    def validate_actual_counts(self) -> "CommodityCFastPnlLedgerAuditDTO":
+        if self.actual_gross_replayed_entry_count > self.entry_count:
+            raise ValueError("replayed actual count exceeds ledger entries")
+        return self
+
+
+def replay_actual_simnow_session_archive(
+    facts: ActualSimNowPinnedArchiveReplayFactsDTO,
+) -> tuple[Any, ...]:
+    """Replay gross/slippage from one embedded terminal session archive.
+
+    The replay intentionally does not derive fees or net PnL: the current
+    session archive has no authoritative fee statement source.
+    """
+
+    archive = facts.session_archive
+    if facts.session_archive_sha256 != sha256_json(archive):
+        raise ValueError("session_archive_sha256 mismatch")
+
+    def contains_sensitive_key(value: Any) -> bool:
+        if isinstance(value, dict):
+            return any(
+                any(
+                    marker in str(key).lower()
+                    for marker in (
+                        "account_original",
+                        "password",
+                        "secret",
+                        "token",
+                        "credential",
+                    )
+                )
+                or contains_sensitive_key(child)
+                for key, child in value.items()
+            )
+        if isinstance(value, list):
+            return any(contains_sensitive_key(child) for child in value)
+        return False
+
+    if contains_sensitive_key(archive):
+        raise ValueError("session archive contains a sensitive field")
+    if (
+        archive.get("schema_version")
+        != "commodity_c_fast_simnow_shakedown_session_v1"
+        or archive.get("candidate_id") != "C_FAST_CROSS_SECTION_NEUTRAL"
+        or archive.get("execution_lane") != "simnow_shakedown"
+        or archive.get("countable_forward") is not False
+        or archive.get("production_allowed") is not False
+        or archive.get("source_snapshot_hash") != facts.snapshot_hash
+        or archive.get("formula_target_binding_sha256")
+        != facts.formula_target_binding_sha256
+        or archive.get("plan_hash") != facts.plan_hash
+        or archive.get("previous_terminal_checksum")
+        != facts.archive_predecessor_terminal_checksum
+    ):
+        raise ValueError("session archive identity mismatch")
+
+    plan_core = {
+        key: value
+        for key, value in archive.items()
+        if key
+        not in {
+            "schema_version",
+            "plan_hash",
+            "status",
+            "started_by",
+            "previewed_at_utc",
+            "completed_at_utc",
+            "execution",
+            "terminal_checksum",
+            "continuous_authorized",
+        }
+    }
+    if sha256_json(plan_core) != facts.plan_hash:
+        raise ValueError("session archive plan hash mismatch")
+
+    execution = archive.get("execution")
+    if not isinstance(execution, dict):
+        raise ValueError("session archive execution is missing")
+    execution_core = {
+        key: value
+        for key, value in execution.items()
+        if key != "state_checksum"
+    }
+    execution_checksum = execution.get("state_checksum")
+    if execution_checksum != sha256_json(execution_core):
+        raise ValueError("session archive execution checksum mismatch")
+    terminal_payload = {
+        "session_id": archive.get("session_id"),
+        "plan_hash": archive.get("plan_hash"),
+        "status": archive.get("status"),
+        "completed_at_utc": archive.get("completed_at_utc"),
+        "execution_state_checksum": execution_checksum,
+    }
+    terminal_checksum = sha256_json(terminal_payload)
+    if archive.get("terminal_checksum") != terminal_checksum:
+        raise ValueError("session archive terminal checksum mismatch")
+
+    raw = execution.get("terminal_raw_facts")
+    guard = execution.get("terminal_guard")
+    snapshot = execution.get("execution_snapshot")
+    pnl = execution.get("pnl")
+    reconciliation = execution.get("reconciliation")
+    submitted = execution.get("submitted")
+    if not all(
+        isinstance(value, dict)
+        for value in (raw, guard, snapshot, pnl, reconciliation, submitted)
+    ):
+        raise ValueError("session archive replay inputs are incomplete")
+    if (
+        raw.get("schema_version") != "commodity_c_fast_terminal_raw_facts_v2"
+        or raw.get("scope") != "C_FAST_SESSION_PLUS_FINAL_POSITIONS"
+        or raw.get("account_sha256") != archive.get("account_hash")
+        or guard.get("state") != "VALID"
+        or guard.get("observed_account_hash") != raw.get("account_sha256")
+        or guard.get("final_positions")
+        != reconciliation.get("observed_positions")
+        or reconciliation.get("expected_positions")
+        != reconciliation.get("observed_positions")
+    ):
+        raise ValueError("session archive reconciliation join mismatch")
+
+    orders = raw.get("orders")
+    trades = raw.get("trades")
+    positions = raw.get("positions")
+    contract_specs = raw.get("contract_specs")
+    if (
+        not isinstance(orders, list)
+        or not isinstance(trades, list)
+        or not isinstance(positions, list)
+        or not isinstance(contract_specs, dict)
+        or not all(
+            isinstance(row, dict) for row in (*orders, *trades, *positions)
+        )
+    ):
+        raise ValueError("terminal raw fact rows are invalid")
+
+    def row_hash(rows: list[dict[str, Any]]) -> str:
+        return sha256_json(sorted(sha256_json(row) for row in rows))
+
+    orders_hash = row_hash(orders)
+    trades_hash = row_hash(trades)
+    positions_hash = row_hash(positions)
+    if (
+        raw.get("orders_sha256") != orders_hash
+        or raw.get("trades_sha256") != trades_hash
+        or raw.get("positions_sha256") != positions_hash
+        or raw.get("all_orders_sha256")
+        != guard.get("second_snapshot", {}).get("orders_hash")
+        or raw.get("all_trades_sha256")
+        != guard.get("second_snapshot", {}).get("trades_hash")
+        or raw.get("all_positions_sha256")
+        != guard.get("second_snapshot", {}).get("positions_hash")
+    ):
+        raise ValueError("terminal raw fact hash mismatch")
+
+    order_fields = {
+        "vt_orderid",
+        "reference",
+        "vt_symbol",
+        "direction",
+        "offset",
+        "volume",
+        "status",
+    }
+    trade_fields = {
+        "vt_tradeid",
+        "vt_orderid",
+        "reference",
+        "vt_symbol",
+        "direction",
+        "offset",
+        "volume",
+        "price",
+        "trade_at_utc",
+    }
+    position_fields = {"vt_symbol", "direction", "volume"}
+    if (
+        any(set(row) != order_fields for row in orders)
+        or any(set(row) != trade_fields for row in trades)
+        or any(set(row) != position_fields for row in positions)
+    ):
+        raise ValueError("terminal facts are not canonical safe projections")
+
+    replayed_positions: dict[str, int] = {}
+    position_directions: dict[str, str] = {}
+    for position in positions:
+        vt_symbol = str(position.get("vt_symbol") or "")
+        direction = _normalize_ledger_direction(position.get("direction"))
+        volume = _strict_nonnegative_int(
+            position.get("volume"), "position volume"
+        )
+        if not vt_symbol:
+            raise ValueError("position contract is missing")
+        if (
+            vt_symbol in position_directions
+            and position_directions[vt_symbol] != direction
+        ):
+            raise ValueError("same contract has opposing position rows")
+        position_directions[vt_symbol] = direction
+        signed = volume if direction == "long" else -volume
+        replayed_positions[vt_symbol] = (
+            replayed_positions.get(vt_symbol, 0) + signed
+        )
+    replayed_positions = dict(
+        sorted(
+            (symbol, volume)
+            for symbol, volume in replayed_positions.items()
+            if volume
+        )
+    )
+    if (
+        replayed_positions != reconciliation.get("observed_positions")
+        or replayed_positions != reconciliation.get("expected_positions")
+        or replayed_positions != guard.get("final_positions")
+        or replayed_positions != execution.get("final_positions")
+    ):
+        raise ValueError("canonical positions do not replay reconciliation")
+
+    child_rows_with_phase = [
+        (phase, row)
+        for phase in ("close", "open")
+        for row in submitted.get(phase, [])
+        if isinstance(row, dict)
+    ]
+    child_rows = [row for _, row in child_rows_with_phase]
+    if not child_rows or len(child_rows) != sum(
+        len(submitted.get(phase, []))
+        for phase in ("close", "open")
+        if isinstance(submitted.get(phase), list)
+    ):
+        raise ValueError("submitted child rows are invalid")
+    submitted_fields = {
+        "product",
+        "vt_symbol",
+        "direction",
+        "offset",
+        "volume",
+        "price",
+        "decision_price",
+        "reference",
+        "vt_orderid",
+    }
+    if any(set(row) != submitted_fields for row in child_rows):
+        raise ValueError("submitted rows are not canonical safe projections")
+    snapshot_orders = snapshot.get("orders")
+    if (
+        snapshot.get("available") is not True
+        or not isinstance(snapshot_orders, list)
+        or len(snapshot_orders) != len(child_rows)
+        or not all(isinstance(row, dict) for row in snapshot_orders)
+    ):
+        raise ValueError("execution snapshot is unavailable or incomplete")
+
+    def identity(row: dict[str, Any], prefix: str) -> str:
+        return str(row.get(f"vt_{prefix}id") or row.get(f"{prefix}id") or "")
+
+    order_ids = [identity(row, "order") for row in orders]
+    trade_ids = [identity(row, "trade") for row in trades]
+    if (
+        any(not value for value in (*order_ids, *trade_ids))
+        or len(set(order_ids)) != len(order_ids)
+        or len(set(trade_ids)) != len(trade_ids)
+    ):
+        raise ValueError(
+            "terminal raw fact identities are missing or duplicated"
+        )
+
+    marks = pnl.get("mark_evidence")
+    if pnl.get("mark_source") != "CURRENT_L1_MID" or not isinstance(
+        marks, dict
+    ):
+        raise ValueError("session archive mark evidence is missing")
+    child_symbols = {str(row.get("vt_symbol") or "") for row in child_rows}
+    if set(contract_specs) != child_symbols or set(marks) != child_symbols:
+        raise ValueError("contract specs or marks do not match submitted symbols")
+    if (
+        pnl.get("execution_snapshot_available") is not True
+        or pnl.get("trade_evidence_state") != "COMPLETE"
+        or pnl.get("fees_state") != "UNBOUND_NOT_ASSUMED_ZERO"
+        or pnl.get("fees_cny") is not None
+        or pnl.get("net_pnl_state") != "UNAVAILABLE_UNTIL_FEES_BOUND"
+        or pnl.get("net_pnl_cny") is not None
+    ):
+        raise ValueError("archive PnL availability or fee state is invalid")
+    pnl_captured = parse_utc_string(
+        str(pnl.get("captured_at_utc") or ""),
+        "pnl.captured_at_utc",
+    )
+
+    expected_lots = 0
+    filled_lots = 0
+    gross_components: list[float] = []
+    slippage_components: list[float] = []
+    mark_times: list[datetime] = []
+    used_trade_ids: set[str] = set()
+    for child_index, (child_phase, child) in enumerate(child_rows_with_phase):
+        child_order_id = str(child.get("vt_orderid") or "")
+        child_reference = str(child.get("reference") or "")
+        child_symbol = str(child.get("vt_symbol") or "")
+        if not child_order_id or not child_reference or not child_symbol:
+            raise ValueError("submitted child identity is incomplete")
+        child_direction = _normalize_ledger_direction(child.get("direction"))
+        child_volume = _strict_positive_int(
+            child.get("volume"), "child volume"
+        )
+        decision_price = _strict_positive_number(
+            child.get("decision_price", child.get("price")),
+            "decision price",
+        )
+        expected_lots += child_volume
+        matching_orders = [
+            row
+            for row in orders
+            if identity(row, "order") == child_order_id
+            and str(row.get("reference") or "") == child_reference
+        ]
+        if len(matching_orders) != 1:
+            raise ValueError(
+                "submitted child does not join one archived order"
+            )
+        order = matching_orders[0]
+        if (
+            str(order.get("vt_symbol") or "") != child_symbol
+            or _normalize_ledger_direction(order.get("direction"))
+            != child_direction
+            or _normalize_ledger_offset(order.get("offset"))
+            != _normalize_ledger_offset(child.get("offset"))
+            or _strict_positive_int(order.get("volume"), "order volume")
+            != child_volume
+            or _normalize_ledger_order_status(order.get("status"))
+            != "all_traded"
+        ):
+            raise ValueError(
+                "archived order fields do not match submitted child"
+            )
+        order_status = _normalize_ledger_order_status(order.get("status"))
+
+        matching_trades = [
+            row
+            for row in trades
+            if str(row.get("vt_orderid") or row.get("orderid") or "")
+            == child_order_id
+            and (
+                not str(row.get("reference") or "")
+                or str(row.get("reference") or "") == child_reference
+            )
+        ]
+        child_filled_lots = sum(
+            _strict_positive_int(trade.get("volume"), "trade volume")
+            for trade in matching_trades
+        )
+        if child_filled_lots > child_volume:
+            raise ValueError("archived child fills exceed child volume")
+        if child_filled_lots != child_volume:
+            raise ValueError(
+                "v4 archive replay requires every child full fill"
+            )
+
+        spec = contract_specs.get(child_symbol)
+        mark = marks.get(child_symbol)
+        if not isinstance(spec, dict) or not isinstance(mark, dict):
+            raise ValueError("filled child contract spec or mark is missing")
+        if set(spec) != {"product", "multiplier", "price_tick"}:
+            raise ValueError("contract spec is not a canonical safe projection")
+        if set(mark) != {
+            "raw_quote",
+            "raw_quote_sha256",
+            "received_at_utc",
+            "mark_price",
+        }:
+            raise ValueError("mark is not a canonical safe projection")
+        multiplier = _strict_positive_int(spec.get("multiplier"), "multiplier")
+        if spec.get("product") != child.get("product"):
+            raise ValueError("contract spec product mismatch")
+        raw_quote = mark.get("raw_quote")
+        if not isinstance(raw_quote, dict):
+            raise ValueError("mark raw quote is missing")
+        if set(raw_quote) != {
+            "bid_price_1",
+            "ask_price_1",
+            "bid_volume_1",
+            "ask_volume_1",
+            "received_at",
+            "spread_ticks",
+        }:
+            raise ValueError("mark quote is not a canonical safe projection")
+        if mark.get("raw_quote_sha256") != sha256_json(raw_quote):
+            raise ValueError("mark raw quote hash mismatch")
+        bid = _strict_positive_number(raw_quote.get("bid_price_1"), "mark bid")
+        ask = _strict_positive_number(raw_quote.get("ask_price_1"), "mark ask")
+        mark_price = money_multiply(money_sum(bid, ask), 0.5)
+        archived_mark = _strict_positive_number(
+            mark.get("mark_price"), "mark price"
+        )
+        if not _money_equal(mark_price, archived_mark):
+            raise ValueError("mark price is not derived from raw quote")
+        mark_at = parse_utc_string(
+            str(mark.get("received_at_utc") or ""),
+            "mark.received_at_utc",
+        )
+        if raw_quote.get("received_at") != mark.get("received_at_utc"):
+            raise ValueError("mark timestamp is not bound to raw quote")
+        if mark_at > pnl_captured:
+            raise ValueError("mark occurs after PnL capture")
+        mark_times.append(mark_at)
+
+        fill_notional = money_sum(
+            *[
+                money_multiply(
+                    _strict_positive_number(trade.get("price"), "fill price"),
+                    _strict_positive_int(trade.get("volume"), "trade volume"),
+                )
+                for trade in matching_trades
+            ]
+        )
+        average_fill_price = money_multiply(
+            fill_notional,
+            1.0 / child_filled_lots,
+        )
+        direction_factor = 1 if child_direction == "long" else -1
+        child_slippage = money_product(
+            money_multiply(
+                money_sum(average_fill_price, -decision_price),
+                float(multiplier),
+            ),
+            direction_factor * child_filled_lots,
+        )
+        snapshot_child = snapshot_orders[child_index]
+        exact_snapshot_fields = (
+            ("phase", snapshot_child.get("phase"), child_phase),
+            ("vt_orderid", snapshot_child.get("vt_orderid"), child_order_id),
+            ("product", snapshot_child.get("product"), child.get("product")),
+            ("vt_symbol", snapshot_child.get("vt_symbol"), child_symbol),
+            ("direction", snapshot_child.get("direction"), child_direction),
+            ("offset", snapshot_child.get("offset"), child.get("offset")),
+            (
+                "expected_volume",
+                snapshot_child.get("expected_volume"),
+                child_volume,
+            ),
+            (
+                "trade_evidence_state",
+                snapshot_child.get("trade_evidence_state"),
+                "COMPLETE",
+            ),
+            (
+                "trade_count",
+                snapshot_child.get("trade_count"),
+                len(matching_trades),
+            ),
+            (
+                "order_status",
+                snapshot_child.get("order_status"),
+                order_status,
+            ),
+        )
+        if any(
+            observed != expected
+            for _, observed, expected in exact_snapshot_fields
+        ):
+            raise ValueError(
+                "execution snapshot child identity/state mismatch"
+            )
+        if (
+            not _money_equal(
+                _strict_finite_number(
+                    snapshot_child.get("filled_volume"),
+                    "snapshot filled volume",
+                ),
+                float(child_filled_lots),
+            )
+            or not _money_equal(
+                _strict_positive_number(
+                    snapshot_child.get("average_fill_price"),
+                    "snapshot average fill price",
+                ),
+                average_fill_price,
+            )
+            or not _money_equal(
+                _strict_finite_number(
+                    snapshot_child.get("decision_price"),
+                    "snapshot decision price",
+                ),
+                decision_price,
+            )
+            or not _money_equal(
+                _strict_finite_number(
+                    snapshot_child.get("slippage_cny"),
+                    "snapshot child slippage",
+                ),
+                child_slippage,
+            )
+        ):
+            raise ValueError("execution snapshot child amount mismatch")
+        for trade in matching_trades:
+            trade_id = identity(trade, "trade")
+            if trade_id in used_trade_ids:
+                raise ValueError("one archived trade joins multiple children")
+            used_trade_ids.add(trade_id)
+            if (
+                str(trade.get("vt_symbol") or "") != child_symbol
+                or _normalize_ledger_direction(trade.get("direction"))
+                != child_direction
+                or _normalize_ledger_offset(trade.get("offset"))
+                != _normalize_ledger_offset(child.get("offset"))
+            ):
+                raise ValueError("archived trade fields do not match child")
+            volume = _strict_positive_int(trade.get("volume"), "trade volume")
+            fill_price = _strict_positive_number(
+                trade.get("price"), "fill price"
+            )
+            trade_at = parse_utc_string(
+                str(trade.get("trade_at_utc") or trade.get("datetime") or ""),
+                "trade_at_utc",
+            )
+            if trade_at > mark_at:
+                raise ValueError("trade occurs after valuation mark")
+            filled_lots += volume
+            signed_volume = volume if child_direction == "long" else -volume
+            gross_components.append(
+                money_product(
+                    money_multiply(
+                        money_sum(mark_price, -fill_price),
+                        float(multiplier),
+                    ),
+                    signed_volume,
+                )
+            )
+            slippage_components.append(
+                money_product(
+                    money_multiply(
+                        money_sum(fill_price, -decision_price),
+                        float(multiplier),
+                    ),
+                    signed_volume,
+                )
+            )
+    if used_trade_ids != set(trade_ids):
+        raise ValueError("archived trade does not join the submitted plan")
+    if filled_lots != expected_lots or archive.get("status") != "COMPLETE":
+        raise ValueError(
+            "v4 archive replay requires full-fill COMPLETE terminal"
+        )
+    outcome = "FULL_FILL"
+
+    replayed_gross = money_sum(*gross_components)
+    replayed_slippage = money_sum(*slippage_components)
+    if (
+        int(snapshot.get("expected_volume", -1)) != expected_lots
+        or not _money_equal(
+            _strict_finite_number(
+                snapshot.get("filled_volume"), "snapshot filled volume"
+            ),
+            filled_lots,
+        )
+        or not _money_equal(
+            _strict_finite_number(
+                snapshot.get("slippage_cny"), "snapshot slippage"
+            ),
+            replayed_slippage,
+        )
+        or int(pnl.get("expected_volume", -1)) != expected_lots
+        or not _money_equal(
+            _strict_finite_number(
+                pnl.get("filled_volume"), "PnL filled volume"
+            ),
+            filled_lots,
+        )
+        or not _money_equal(
+            _strict_finite_number(
+                pnl.get("execution_mark_to_market_pnl_cny"),
+                "PnL gross amount",
+            ),
+            replayed_gross,
+        )
+        or not _money_equal(
+            _strict_finite_number(
+                pnl.get("adverse_slippage_cny"), "PnL slippage"
+            ),
+            replayed_slippage,
+        )
+    ):
+        raise ValueError("execution snapshot or archive PnL replay mismatch")
+
+    valuation_at = max(mark_times)
+    if not (
+        valuation_at
+        <= pnl_captured
+        <= parse_utc_string(
+            str(archive.get("completed_at_utc") or ""),
+            "completed_at_utc",
+        )
+        <= facts.as_of_at_utc
+    ):
+        raise ValueError(
+            "archive valuation/capture/terminal time causality is invalid"
+        )
+    reconciliation_hash = sha256_json(reconciliation)
+    return (
+        archive.get("session_id"),
+        raw.get("account_sha256"),
+        orders_hash,
+        trades_hash,
+        positions_hash,
+        reconciliation_hash,
+        execution_checksum,
+        terminal_checksum,
+        archive.get("status"),
+        archive.get("completed_at_utc"),
+        valuation_at,
+        pnl_captured,
+        expected_lots,
+        filled_lots,
+        outcome,
+        replayed_gross,
+        replayed_slippage,
+    )
+
+
+def _normalize_ledger_direction(value: Any) -> str:
+    raw = str(value).strip().lower()
+    normalized = {"多": "long", "空": "short"}.get(raw, raw)
+    if normalized not in {"long", "short"}:
+        raise ValueError("direction is invalid")
+    return normalized
+
+
+def _normalize_ledger_offset(value: Any) -> str:
+    raw = str(value).strip().lower().replace(" ", "_").replace("-", "_")
+    normalized = {
+        "开": "open",
+        "平": "close",
+        "平今": "closetoday",
+        "平昨": "closeyesterday",
+    }.get(raw, raw)
+    if normalized not in {"open", "close", "closetoday", "closeyesterday"}:
+        raise ValueError("offset is invalid")
+    return normalized
+
+
+def _normalize_ledger_order_status(value: Any) -> str:
+    raw = str(value).strip().lower().replace(" ", "_").replace("-", "_")
+    normalized = {
+        "全部成交": "all_traded",
+        "filled": "all_traded",
+        "alltraded": "all_traded",
+    }.get(raw, raw)
+    if normalized not in {
+        "all_traded",
+        "cancelled",
+        "rejected",
+        "part_traded",
+        "not_traded",
+        "submitting",
+        "submitting_order",
+    }:
+        raise ValueError("order status is invalid")
+    return normalized
+
+
+def _strict_positive_int(value: Any, field: str) -> int:
+    if type(value) is not int or value <= 0:
+        raise ValueError(f"{field} must be a positive integer literal")
+    return value
+
+
+def _strict_nonnegative_int(value: Any, field: str) -> int:
+    if type(value) is not int or value < 0:
+        raise ValueError(f"{field} must be a nonnegative integer literal")
+    return value
+
+
+def _strict_finite_number(value: Any, field: str) -> float:
+    if type(value) not in {int, float} or not math.isfinite(float(value)):
+        raise ValueError(f"{field} must be a finite number literal")
+    return float(value)
+
+
+def _strict_positive_number(value: Any, field: str) -> float:
+    if (
+        type(value) not in {int, float}
+        or not math.isfinite(float(value))
+        or value <= 0
+    ):
+        raise ValueError(f"{field} must be a positive number literal")
+    return float(value)
 
 
 def _validate_source_lineage(
