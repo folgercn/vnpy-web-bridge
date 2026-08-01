@@ -187,6 +187,7 @@ class PreverifiedTickHorizonWorker:
                     "PREVERIFIED_TICK_TYPE_INVALID",
                 )
                 before = self._sidecar.recover()
+                self._require_complete_anchors(before)
                 affected_intents = self._intent_ids_for_contract(
                     before,
                     tick.exact_contract,
@@ -291,11 +292,7 @@ class PreverifiedTickHorizonWorker:
 
     def _seal_all_ready_locked(self) -> int:
         state = self._sidecar.recover()
-        missing_anchors = set(state.intents) - set(state.anchors)
-        if missing_anchors:
-            raise CFastExecutionQualityHorizonWorkerError(
-                "DURABLE_INTENT_ANCHOR_MISSING"
-            )
+        self._require_complete_anchors(state)
         created = 0
         intent_records = sorted(
             state.intents.values(),
@@ -305,6 +302,13 @@ class PreverifiedTickHorizonWorker:
             intent_id = str(record.payload["intent"]["intent_id"])
             created += len(self._sidecar.seal_ready_evidence(intent_id))
         return created
+
+    @staticmethod
+    def _require_complete_anchors(state: SidecarState) -> None:
+        if set(state.intents) != set(state.anchors):
+            raise CFastExecutionQualityHorizonWorkerError(
+                "DURABLE_INTENT_ANCHOR_MISSING"
+            )
 
     def _status_locked(self) -> dict[str, Any]:
         state = self._sidecar.recover()

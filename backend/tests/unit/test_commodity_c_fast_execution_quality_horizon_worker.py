@@ -292,6 +292,49 @@ def test_orphan_intent_anchor_is_repaired_by_same_full_plan(
     assert len(repaired.records) == 2
 
 
+def test_restarted_worker_rejects_tick_when_any_intent_is_orphaned(
+    tmp_path: Path,
+) -> None:
+    observations = iter(
+        (
+            ANCHOR,
+            ANCHOR,
+            ANCHOR,
+            ANCHOR - timedelta(seconds=1),
+        )
+    )
+    repository = sidecar(tmp_path)
+    repository.clock = lambda: next(observations)
+    first = PreverifiedTickHorizonWorker(repository)
+    inputs = two_intent_registration_inputs()
+    with pytest.raises(
+        CFastExecutionQualityHorizonWorkerError,
+        match="DURABLE_INTENT_CLOCK_REGRESSION",
+    ):
+        first.register_preverified_plan(**inputs)
+    partial = repository.recover()
+    assert len(partial.intents) == 2
+    assert len(partial.anchors) == 1
+
+    restarted_sidecar = OfflineExecutionQualitySidecar(
+        CreateOnlyExecutionQualityJournal(repository.journal.root),
+        clock=lambda: ANCHOR + timedelta(seconds=1),
+    )
+    restarted = PreverifiedTickHorizonWorker(restarted_sidecar)
+    with pytest.raises(
+        CFastExecutionQualityHorizonWorkerError,
+        match="DURABLE_INTENT_ANCHOR_MISSING",
+    ):
+        restarted.accept_preverified_tick(SCORER.book(0))
+
+    recovered = restarted_sidecar.recover()
+    assert recovered.snapshots == ()
+    assert recovered.evidence == {}
+    status = restarted.status()
+    assert status["blocked_fail_closed"] is True
+    assert status["registered_intent_count"] == 1
+
+
 def test_status_reports_journal_failure_as_fail_closed(
     tmp_path: Path,
 ) -> None:

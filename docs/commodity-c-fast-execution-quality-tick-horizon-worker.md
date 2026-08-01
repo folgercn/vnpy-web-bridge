@@ -78,7 +78,9 @@ preverified plan/policy/spec 再次调用 `register_preverified_plan`。
 preverified plan 重放补齐，禁止 worker 从不完整 journal 猜测上游签名事实。
 `register_preverified_plan` 是 blocked 状态下唯一允许的非 Tick 输入入口，因为它会
 从头重验完整强类型集合；成功补齐全部 intent/anchor 后才解除 blocked。普通
-`accept_preverified_tick` 在此期间始终拒绝。
+`accept_preverified_tick` 在此期间始终拒绝。新建 worker 也不会只筛选已有 anchor
+的 intent 后继续：每次 Tick 写入前都要求 journal 的 intent ID 集合与 anchor ID
+集合完全相等；任一 orphan intent 会全局 fail closed，且该 Tick 不得落盘。
 
 `status()` 如果无法恢复 journal，不会沿用旧计数或把状态报成健康；它返回
 `BLOCKED_FAIL_CLOSED`，计数字段为 `null`，全部 authority 仍为 false。
