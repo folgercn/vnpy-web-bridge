@@ -25,6 +25,8 @@ from commodity_c_fast_t1_one_shot import (
     read_regular_file_strict,
 )
 from commodity_c_fast_t1_sign_release import load_private_key
+from research_warehouse.errors import RegistryError
+from research_warehouse.sealed_export import verify_sealed_export
 
 
 SIGNER_PATH = Path(__file__).resolve()
@@ -74,6 +76,27 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="out-of-band pin for custody dev/inode/uid/mode identity",
     )
+    parser.add_argument(
+        "--sealed-export",
+        type=Path,
+        required=True,
+        help="verified #171 sealed-export directory containing the nine artifacts",
+    )
+    parser.add_argument(
+        "--sealed-export-trusted-keyring",
+        type=Path,
+        required=True,
+    )
+    parser.add_argument(
+        "--expected-sealed-export-keyring-raw-sha256",
+        required=True,
+        help="out-of-band raw SHA256 pin for the sealed-export keyring",
+    )
+    parser.add_argument(
+        "--expected-sealed-export-receipt-raw-sha256",
+        required=True,
+        help="out-of-band raw SHA256 pin for the signed sealed-export receipt",
+    )
     add_artifact_arguments(parser)
     return parser.parse_args()
 
@@ -91,7 +114,6 @@ def main() -> int:
             "unsigned C_FAST SimNow research bundle",
             private=True,
         )
-
         # Public evidence, schemas, raw pins, formulae and validity are checked
         # before this process is allowed to read private-key material.
         candidate, public_key, _artifact_raw = prepare_unsigned_bundle(
@@ -110,6 +132,20 @@ def main() -> int:
             ),
             now=now,
         )
+        sealed_export = verify_sealed_export(
+            output=args.sealed_export,
+            keyring_path=args.sealed_export_trusted_keyring,
+            expected_keyring_raw_sha256=(
+                args.expected_sealed_export_keyring_raw_sha256
+            ),
+            expected_receipt_raw_sha256=(
+                args.expected_sealed_export_receipt_raw_sha256
+            ),
+        )
+        if _artifact_raw != sealed_export.artifact_raw:
+            raise ResearchBundleError(
+                "research artifacts are not the exact signed sealed-export bytes"
+            )
         private_key = load_private_key(args.private_key_file)
         signed = complete_signature(candidate, public_key, private_key)
         output = write_json_create_only_verified(
@@ -134,6 +170,7 @@ def main() -> int:
         KeyError,
         TypeError,
         ValueError,
+        RegistryError,
     ) as exc:
         print(
             f"C_FAST research-bundle signing failed: {exc}",

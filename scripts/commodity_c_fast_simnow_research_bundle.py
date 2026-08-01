@@ -33,8 +33,6 @@ from commodity_c_fast_t1_one_shot import (
     read_regular_file_strict,
     validate_json_schema,
 )
-
-
 ROOT = Path(__file__).resolve().parents[1]
 VERIFIER_PATH = Path(__file__).resolve()
 BUNDLE_SCHEMA_PATH = (
@@ -77,6 +75,25 @@ MAX_BUNDLE_TTL = timedelta(hours=24)
 MAX_CLOCK_SKEW = timedelta(minutes=5)
 CHINA_TZ = ZoneInfo("Asia/Shanghai")
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+PRODUCER_ARTIFACT_SCHEMA_PREFIX = "commodity_c_fast_pure_producer"
+PRODUCER_KERNEL_ID = "commodity_c_fast_pure_producer_kernel_v1"
+PRODUCER_STATUS = "PURE_PRODUCER_KERNEL_ONLY_NOT_REAL_ARTIFACT"
+PRODUCER_FALSE_AUTHORITY_FIELDS = (
+    "control_authorized",
+    "deployment_authorized",
+    "execution_authorized",
+    "simnow_execution_authorized",
+    "runtime_activation_authorized",
+    "network_authorized",
+    "web_bridge_rpc_authorized",
+    "order_authorized",
+    "order_submission_authorized",
+    "position_mutation_authorized",
+    "dispatch_authorized",
+    "trading_authorized",
+    "production_authorized",
+    "automatic_promotion_authorized",
+)
 
 ARTIFACT_ROLES = (
     "freeze_contract",
@@ -241,6 +258,238 @@ def artifact_index_sha256(bindings: dict[str, Any]) -> str:
 def _validate_artifact_roles(values: dict[str, Any]) -> None:
     if set(values) != set(ARTIFACT_ROLES):
         raise ResearchBundleError("research artifact role set is incomplete")
+
+
+def _artifact_rows_by_product(
+    payload: dict[str, Any],
+    field: str,
+    *,
+    label: str,
+) -> dict[str, dict[str, Any]]:
+    rows = payload.get(field)
+    if not isinstance(rows, list) or len(rows) != len(PRODUCTS):
+        raise ResearchBundleError(f"{label} must cover exact ten products")
+    result: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if not isinstance(row, dict) or row.get("product") not in PRODUCTS:
+            raise ResearchBundleError(f"{label} product row is invalid")
+        product = str(row["product"])
+        if product in result:
+            raise ResearchBundleError(f"{label} repeats product {product}")
+        result[product] = row
+    if set(result) != set(PRODUCTS):
+        raise ResearchBundleError(f"{label} product set is incomplete")
+    return result
+
+
+def _validate_producer_artifact_projection(
+    payload: dict[str, Any],
+    artifact_raw: dict[str, bytes],
+) -> None:
+    """Bind every signed target fact to canonical #163 producer artifacts."""
+    _validate_artifact_roles(artifact_raw)
+    artifacts: dict[str, dict[str, Any]] = {}
+    for role in ARTIFACT_ROLES:
+        raw = artifact_raw[role]
+        try:
+            artifact = parse_json_bytes(raw, f"C_FAST producer artifact {role}")
+        except OneShotError as exc:
+            raise ResearchBundleError(
+                f"C_FAST producer artifact {role} is not JSON"
+            ) from exc
+        if not isinstance(artifact, dict) or canonical_json(artifact) != raw:
+            raise ResearchBundleError(
+                f"C_FAST producer artifact {role} is not canonical JSON"
+            )
+        identity = {
+            "schema_version": (
+                f"{PRODUCER_ARTIFACT_SCHEMA_PREFIX}_{role}_v1"
+            ),
+            "purpose": PRODUCER_STATUS,
+            "status": PRODUCER_STATUS,
+            "artifact_role": role,
+            "candidate_id": CANDIDATE_ID,
+            "producer_kernel_id": PRODUCER_KERNEL_ID,
+            "source_receipt_signature_verified": False,
+            "source_receipt_keyring_verified": False,
+            "source_custody_verified": False,
+            "sealed_export_verified": False,
+            "research_evidence_only": True,
+        }
+        if any(artifact.get(field) != expected for field, expected in identity.items()):
+            raise ResearchBundleError(
+                f"C_FAST producer artifact {role} identity mismatch"
+            )
+        if any(
+            artifact.get(field) is not False
+            for field in PRODUCER_FALSE_AUTHORITY_FIELDS
+        ):
+            raise ResearchBundleError(
+                f"C_FAST producer artifact {role} grants authority"
+            )
+        artifacts[role] = artifact
+
+    common_fields = (
+        "source_view_id",
+        "source_view_canonical_sha256",
+        "claimed_receipt_sha256",
+        "generated_at",
+    )
+    reference = artifacts[ARTIFACT_ROLES[0]]
+    for field in common_fields:
+        if field not in reference:
+            raise ResearchBundleError(
+                f"C_FAST producer artifacts lack common {field}"
+            )
+    _require_sha256(
+        reference["source_view_canonical_sha256"],
+        "producer source-view canonical",
+    )
+    _require_sha256(
+        reference["claimed_receipt_sha256"],
+        "producer claimed sealed receipt",
+    )
+    artifact_generated = parse_datetime(
+        reference["generated_at"],
+        "producer generated_at",
+    )
+    for role, artifact in artifacts.items():
+        if any(artifact.get(field) != reference[field] for field in common_fields):
+            raise ResearchBundleError(
+                f"C_FAST producer artifact {role} common lineage mismatch"
+            )
+
+    freeze = artifacts["freeze_contract"]
+    manifest = artifacts["research_manifest"]
+    signal = artifacts["signal_evidence"]
+    target = artifacts["target_evidence"]
+    allocation = artifacts["allocation_evidence"]
+    roll = artifacts["daily_roll_evidence"]
+    prices = artifacts["reference_price_evidence"]
+    calendar = artifacts["calendar_authority"]
+    specs = artifacts["contract_spec_evidence"]
+    as_of = payload["research_as_of_official_day"]
+    execution = payload["execution_day"]
+    official_days = calendar.get("official_days")
+    if (
+        manifest.get("research_as_of_official_day") != as_of
+        or signal.get("research_as_of_official_day") != as_of
+        or calendar.get("research_as_of_official_day") != as_of
+        or manifest.get("execution_day") != execution
+        or target.get("execution_day") != execution
+        or prices.get("execution_day") != execution
+        or calendar.get("execution_day") != execution
+        or calendar.get("execution_is_immediate_next_official_day") is not True
+        or not isinstance(official_days, list)
+        or as_of not in official_days
+        or execution not in official_days
+        or official_days.index(execution) != official_days.index(as_of) + 1
+    ):
+        raise ResearchBundleError("producer cross-artifact date mismatch")
+    if artifact_generated > parse_datetime(payload["generated_at"], "generated_at"):
+        raise ResearchBundleError(
+            "research bundle predates its producer artifacts"
+        )
+    projection = freeze.get("frozen_rule_projection")
+    if (
+        freeze.get("frozen_rule_id") != payload["frozen_rule_id"]
+        or freeze.get("frozen_rule_sha256") != payload["frozen_rule_sha256"]
+        or not isinstance(projection, dict)
+        or projection.get("universe") != list(PRODUCTS)
+        or projection.get("pit_main_definition") != payload["pit_main_definition"]
+        or projection.get("trend_horizons_official_days")
+        != payload["trend_horizons_official_days"]
+        or projection.get("volatility_lookback_official_days")
+        != payload["volatility_lookback_official_days"]
+        or not _close(
+            projection.get("volatility_floor"),
+            payload["volatility_floor"],
+        )
+        or projection.get("virtual_nav_cny") != payload["virtual_nav_cny"]
+        or allocation.get("virtual_nav_cny") != payload["virtual_nav_cny"]
+        or roll.get("pit_main_definition") != payload["pit_main_definition"]
+    ):
+        raise ResearchBundleError("producer frozen-rule projection mismatch")
+
+    target_rows = _artifact_rows_by_product(
+        target, "targets", label="producer target evidence"
+    )
+    signal_rows = _artifact_rows_by_product(
+        signal, "signals", label="producer signal evidence"
+    )
+    roll_rows = _artifact_rows_by_product(
+        roll, "rows", label="producer daily-roll evidence"
+    )
+    price_rows = _artifact_rows_by_product(
+        prices, "rows", label="producer reference-price evidence"
+    )
+    spec_rows = _artifact_rows_by_product(
+        specs, "rows", label="producer contract-spec evidence"
+    )
+    quantities = allocation.get("quantities")
+    if not isinstance(quantities, dict) or set(quantities) != set(PRODUCTS):
+        raise ResearchBundleError(
+            "producer allocation quantity set is incomplete"
+        )
+    expected_targets: list[dict[str, Any]] = []
+    for product in PRODUCTS:
+        target_row = target_rows[product]
+        signal_row = signal_rows[product]
+        roll_row = roll_rows[product]
+        price_row = price_rows[product]
+        spec_row = spec_rows[product]
+        exact_contract = target_row.get("exact_contract")
+        if (
+            target_row.get("target_quantity") != quantities[product]
+            or signal_row.get("pit_main_exact_contract") != exact_contract
+            or roll_row.get("pit_main_exact_contract") != exact_contract
+            or price_row.get("exact_contract") != exact_contract
+            or spec_row.get("exact_contract") != exact_contract
+        ):
+            raise ResearchBundleError(
+                f"producer {product} contract/target projection mismatch"
+            )
+        expected_targets.append(
+            {
+                "product": product,
+                "sector": SECTOR_MAP[product],
+                "trend_21_sign": signal_row.get("trend_21_sign"),
+                "trend_63_sign": signal_row.get("trend_63_sign"),
+                "trend_126_sign": signal_row.get("trend_126_sign"),
+                "source_score": signal_row.get("source_score"),
+                "vol60_annualized": signal_row.get("vol60_annualized"),
+                "raw_risk_score": signal_row.get("raw_risk_score"),
+                "source_target_weight": target_row.get("source_target_weight"),
+                "buffered_target_weight": target_row.get("buffered_target_weight"),
+                "previous_exact_contract": None,
+                "exact_contract": exact_contract,
+                "previous_target_quantity": 0,
+                "target_quantity": target_row.get("target_quantity"),
+                "reference_open_price": price_row.get("reference_open_price"),
+                "reference_price_field": prices.get("reference_price_field"),
+                "reference_price_observed_at": price_row.get("observed_at"),
+                "reference_price_source_sha256": price_row.get("source_raw_sha256"),
+                "multiplier": spec_row.get("multiplier"),
+                "price_tick": spec_row.get("price_tick"),
+                "pit_main_exact_contract": roll_row.get("pit_main_exact_contract"),
+                "pit_main_dte": roll_row.get("pit_main_dte"),
+                "pit_main_official_last_trading_day": roll_row.get(
+                    "pit_main_official_last_trading_day"
+                ),
+                "pit_main_following_official_day": roll_row.get(
+                    "pit_main_following_official_day"
+                ),
+                "pit_main_following_dte": roll_row.get("pit_main_following_dte"),
+                "pit_main_target_position_allowed": roll_row.get(
+                    "pit_main_target_position_allowed"
+                ),
+                "pit_main_roll": roll_row.get("pit_main_roll"),
+            }
+        )
+    if sorted(payload["targets"], key=lambda row: row["product"]) != expected_targets:
+        raise ResearchBundleError(
+            "signed targets do not exactly project producer artifacts"
+        )
 
 
 def _read_artifacts(paths: dict[str, Path]) -> dict[str, bytes]:
@@ -705,6 +954,7 @@ def validate_bundle_semantics(
         _compare(str(payload[field]), expected, field)
     _verify_time_semantics(payload, now=now)
     _verify_targets(payload)
+    _validate_producer_artifact_projection(payload, artifact_raw)
     binding = formula_target_binding_sha256(payload)
     _compare(
         str(payload["formula_target_binding_sha256"]),

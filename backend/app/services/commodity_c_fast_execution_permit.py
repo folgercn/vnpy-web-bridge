@@ -5,6 +5,8 @@ import binascii
 import hashlib
 import hmac
 import json
+import os
+import stat
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -96,21 +98,80 @@ def _parse_utc(value: datetime, label: str) -> datetime:
     return value.astimezone(timezone.utc)
 
 
+def _stable_file_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    """Return security-relevant metadata, excluding read-mutated access time."""
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        stat.S_IFMT(metadata.st_mode),
+        stat.S_IMODE(metadata.st_mode),
+        metadata.st_uid,
+        metadata.st_gid,
+        metadata.st_nlink,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def _read_fd_bounded(descriptor: int) -> bytes:
+    chunks: list[bytes] = []
+    remaining = MAX_JSON_BYTES + 1
+    while remaining > 0:
+        chunk = os.read(descriptor, min(64 * 1024, remaining))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
 def _read_exact_canonical_json(path: Path, label: str) -> tuple[Any, bytes]:
     try:
-        stat = path.lstat()
-        if not path.is_file() or path.is_symlink():
+        path_before = path.lstat()
+        if not stat.S_ISREG(path_before.st_mode):
             raise CommodityCFastExecutionPermitError(f"{label}_FILE_INVALID")
-        if stat.st_size <= 0 or stat.st_size > MAX_JSON_BYTES:
+        if path_before.st_size <= 0 or path_before.st_size > MAX_JSON_BYTES:
             raise CommodityCFastExecutionPermitError(f"{label}_SIZE_INVALID")
-        raw = path.read_bytes()
+
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        if hasattr(os, "O_CLOEXEC"):
+            flags |= os.O_CLOEXEC
+        if hasattr(os, "O_NONBLOCK"):
+            flags |= os.O_NONBLOCK
+        descriptor = os.open(path, flags)
+        try:
+            before = os.fstat(descriptor)
+            if not stat.S_ISREG(before.st_mode):
+                raise CommodityCFastExecutionPermitError(f"{label}_FILE_INVALID")
+            if before.st_size <= 0 or before.st_size > MAX_JSON_BYTES:
+                raise CommodityCFastExecutionPermitError(f"{label}_SIZE_INVALID")
+            raw = _read_fd_bounded(descriptor)
+            after = os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+
+        path_after = path.lstat()
+        if (
+            len(
+                {
+                    _stable_file_identity(path_before),
+                    _stable_file_identity(before),
+                    _stable_file_identity(after),
+                    _stable_file_identity(path_after),
+                }
+            )
+            != 1
+            or len(raw) != before.st_size
+        ):
+            raise CommodityCFastExecutionPermitError(f"{label}_CHANGED_DURING_READ")
         payload = json.loads(raw.decode("utf-8"))
         if not isinstance(payload, dict):
             raise CommodityCFastExecutionPermitError(f"{label}_ROOT_INVALID")
         if raw != canonical_json(payload) + b"\n":
             raise CommodityCFastExecutionPermitError(f"{label}_NOT_EXACT_CANONICAL")
-        if path.lstat() != stat:
-            raise CommodityCFastExecutionPermitError(f"{label}_CHANGED_DURING_READ")
         return payload, raw
     except CommodityCFastExecutionPermitError:
         raise

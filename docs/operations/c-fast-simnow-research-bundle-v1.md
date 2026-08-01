@@ -38,10 +38,13 @@ bundle 必须覆盖 `ag/al/au/bu/cu/rb/ru/sc/sp/zn` 十个品种，使用
 `research_as_of_official_day < execution_day`。有效期必须为 execution day
 当日、正数且不超过 24 小时。
 
-verifier 会绑定九份文件的 exact raw bytes 并核对 bundle 内的冻结公式、
-约束、DTE 和 contract spec 字段，但不会解析这些外部文件来重放 PIT、
-calendar 或 allocator。上述来源事实仍是 signer 的 Research assertion，
-不能表述为 runtime 独立重推导。
+verifier 会要求九份文件都是 canonical #163 producer JSON，核对 producer
+identity、无 authority 声明、共同 source-view/receipt lineage、日期、calendar、
+allocation、exact contract，并从 signal/target/daily-roll/reference-price/spec
+重新拼出全部十品种 target row，要求与 signed bundle 完全一致。它不会在
+runtime 重新读取 Warehouse 或 source view；source view 的 exact replay 与签名
+authority 由离线 signer 在读取 Research 私钥前通过 #171 sealed export 验证，
+再由 Research bundle 签名转移信任。
 
 v1 不允许从 Web Bridge 账户、订单、成交或持仓反推 target，也不允许
 dynamic selection、replay 或自动 promotion。它故意固定
@@ -129,6 +132,10 @@ KEYRING_RAW_SHA256="<out-of-band lowercase sha256>"
 SIGNER_SHA256="<out-of-band lowercase signer source sha256>"
 CUSTODY_ROOT_PATH_SHA256="<out-of-band custody path pin>"
 CUSTODY_IDENTITY_SHA256="<out-of-band custody identity pin>"
+SEALED_EXPORT_DIR="/sealed/sealed-export-<id>"
+SEALED_EXPORT_KEYRING="/private/c-fast/sealed-export-keyring.json"
+SEALED_EXPORT_KEYRING_RAW_SHA256="<out-of-band sealed-export keyring sha256>"
+SEALED_EXPORT_RECEIPT_RAW_SHA256="<out-of-band signed receipt sha256>"
 ```
 
 然后签名：
@@ -143,12 +150,21 @@ python scripts/commodity_c_fast_simnow_sign_research_bundle.py \
   --expected-signer-sha256 "${SIGNER_SHA256}" \
   --expected-custody-root-path-sha256 "${CUSTODY_ROOT_PATH_SHA256}" \
   --expected-custody-identity-sha256 "${CUSTODY_IDENTITY_SHA256}" \
+  --sealed-export "${SEALED_EXPORT_DIR}" \
+  --sealed-export-trusted-keyring "${SEALED_EXPORT_KEYRING}" \
+  --expected-sealed-export-keyring-raw-sha256 \
+    "${SEALED_EXPORT_KEYRING_RAW_SHA256}" \
+  --expected-sealed-export-receipt-raw-sha256 \
+    "${SEALED_EXPORT_RECEIPT_RAW_SHA256}" \
   "${ARTIFACT_ARGS[@]}"
 ```
 
 signer 会在读取私钥前完成 schema、PENDING、raw artifact、keyring raw pin、
 自身 source raw SHA256、时间窗、十品种集合、公式、权重上限、整数
-exposure、PIT-main/DTE、contract spec 及工具 hash 检查。输出使用
+exposure、PIT-main/DTE、contract spec 及工具 hash 检查；然后以独立 pin
+验证 #171 sealed-export manifest/receipt 签名，并要求其九件 artifact 与命令行
+输入 exact raw 相等。缺失、篡改或只使用 fixture/plain-text artifact 都会在
+读取 Research 私钥前失败。输出使用
 `O_EXCL` create-only；目标已存在、父目录不私有或 symlink 都会拒绝。
 
 ## 6. 独立验证与 create-only 安装
