@@ -8,6 +8,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -89,7 +90,28 @@ def isolated_runtime_fixture(
     python_path = root / "private-python"
     python_path.write_bytes(Path(sys.executable).resolve().read_bytes())
     python_path.chmod(0o555)
-    dependency_root = Path(jsonschema.__file__).resolve().parents[1]
+    installed_site_packages = Path(jsonschema.__file__).resolve().parents[1]
+    dependency_root = root / "site-packages"
+    dependency_root.mkdir()
+    for package in (
+        "attr",
+        "attrs",
+        "idna",
+        "jsonschema",
+        "jsonschema_specifications",
+        "referencing",
+        "rpds",
+        "yaml",
+    ):
+        shutil.copytree(
+            installed_site_packages / package,
+            dependency_root / package,
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo"),
+        )
+    shutil.copy2(
+        installed_site_packages / "typing_extensions.py",
+        dependency_root / "typing_extensions.py",
+    )
     source_identity = runtime_launcher.directory_identity_sha256(source_root)
     source_manifest, _retained = runtime_launcher.scan_source_closure(source_root)
     dependency_identity = runtime_launcher.directory_identity_sha256(dependency_root)
