@@ -1,0 +1,45 @@
+ARG QUERY_V4_BASE_IMAGE
+FROM ${QUERY_V4_BASE_IMAGE}
+
+ARG QUERY_V4_BASE_IMAGE
+ARG SOURCE_REVISION=UNSET
+
+# query-v4 intentionally ends as uid 65532; the build overlay must explicitly
+# return to root before installing immutable files, then drop privileges again.
+USER 0:0
+
+LABEL org.opencontainers.image.title="vnpy-web-bridge C_FAST T1 query-v5 code-only overlay" \
+      org.opencontainers.image.revision="${SOURCE_REVISION}" \
+      io.vnpy-web-bridge.c-fast-t1.query-v4-runtime="true" \
+      io.vnpy-web-bridge.c-fast-t1.query-v5-runtime="true" \
+      io.vnpy-web-bridge.c-fast-t1.query-v5-base-image="${QUERY_V4_BASE_IMAGE}" \
+      io.vnpy-web-bridge.c-fast-t1.authority-granted="false"
+
+ENV PATH=/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin \
+    LANG=C.UTF-8 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /opt/c-fast-query-v5
+
+COPY scripts/commodity_c_fast_t1_query_v5_launcher.py ./release/scripts/commodity_c_fast_t1_query_v5_launcher.py
+
+RUN /usr/local/bin/python3.12 -I -S -s -E -B \
+      -m py_compile \
+      /opt/c-fast-query-v5/release/scripts/commodity_c_fast_t1_query_v5_launcher.py \
+    && find /opt/c-fast-query-v5 -type f \
+      \( -name '*.pyc' -o -name '*.pyo' \) -delete \
+    && find /opt/c-fast-query-v5 -type d -name '__pycache__' \
+      -empty -delete \
+    && test -z "$(find /opt/c-fast-query-v5 -type f \
+      \( -name '*.pyc' -o -name '*.pyo' \) -print -quit)" \
+    && chown -R root:root /opt/c-fast-query-v5 \
+    && chmod -R a-w /opt/c-fast-query-v5 \
+    && install -d -o root -g root -m 0555 \
+      /run/c-fast-t1-query-v5-pins
+
+USER 65532:65532
+
+# This entrypoint can only verify the independently pinned code-only overlay.
+# It has no DSN flag, query child, release verifier, or network authority.
+ENTRYPOINT ["/usr/local/bin/python3.12", "-I", "-S", "-s", "-E", "-B", "/opt/c-fast-query-v5/release/scripts/commodity_c_fast_t1_query_v5_launcher.py"]

@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vnpy-web-bridge:schema:commodity-c-fast-t1-query-v5-runtime-pin-set-v1",
+  "title": "C_FAST T1 query-v5 code-only runtime pin set v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "generation_id", "runtime_image_digest",
+    "launcher_sha256", "python_executable_path", "python_executable_sha256",
+    "source_root_path", "source_root_identity_sha256",
+    "source_closure_manifest_sha256", "code_only_blocked",
+    "authority_granted"
+  ],
+  "properties": {
+    "schema_version": {"const": "commodity_c_fast_t1_query_v5_runtime_pin_set_v1"},
+    "generation_id": {"type": "string", "pattern": "^[A-Za-z0-9._-]{8,128}$"},
+    "runtime_image_digest": {"$ref": "#/$defs/ociDigest"},
+    "launcher_sha256": {"$ref": "#/$defs/sha256"},
+    "python_executable_path": {"const": "/usr/local/bin/python3.12"},
+    "python_executable_sha256": {"$ref": "#/$defs/sha256"},
+    "source_root_path": {"const": "/opt/c-fast-query-v5/release"},
+    "source_root_identity_sha256": {"$ref": "#/$defs/sha256"},
+    "source_closure_manifest_sha256": {"$ref": "#/$defs/sha256"},
+    "code_only_blocked": {"const": true},
+    "authority_granted": {"const": false}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "ociDigest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  }
+}
