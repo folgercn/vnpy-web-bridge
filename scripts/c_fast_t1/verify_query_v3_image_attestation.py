@@ -221,6 +221,12 @@ PRIVATE_KEY_MARKER_LITERAL_SOURCE_PATHS = frozenset(
         "opt/c-fast-t1/scripts/c_fast_t1/verify_query_v3_image_attestation.py",
     }
 )
+PRIVATE_KEY_MARKER_LITERAL_DEPENDENCY_SHA256 = {
+    (
+        "usr/local/lib/python3.12/site-packages/cryptography/"
+        "hazmat/primitives/serialization/ssh.py"
+    ): "1d5e99a888ea34d68d50be8ce2043234926d67be44b22499b3acb175da81ad62",
+}
 SENSITIVE_ENV_MARKERS = (
     "PASSWORD",
     "PASSWD",
@@ -934,6 +940,18 @@ def _is_python_execution_path(path: str) -> bool:
     )
 
 
+def _contains_unapproved_private_key_marker(
+    path: str,
+    content: bytes | None,
+) -> bool:
+    if content is None or not any(marker in content for marker in PRIVATE_KEY_MARKERS):
+        return False
+    if path in PRIVATE_KEY_MARKER_LITERAL_SOURCE_PATHS:
+        return False
+    expected_sha256 = PRIVATE_KEY_MARKER_LITERAL_DEPENDENCY_SHA256.get(path)
+    return expected_sha256 is None or _sha256(content) != expected_sha256
+
+
 def _apply_layer(
     filesystem: dict[str, FileEntry],
     directories: dict[str, FileEntry],
@@ -1566,9 +1584,7 @@ def derive_oci_facts(
         if (
             any(marker in lowered for marker in RUNTIME_SENSITIVE_PATH_MARKERS)
             or basename in {"id_rsa", "id_ed25519"}
-            or path not in PRIVATE_KEY_MARKER_LITERAL_SOURCE_PATHS
-            and entry.content is not None
-            and any(marker in entry.content for marker in PRIVATE_KEY_MARKERS)
+            or _contains_unapproved_private_key_marker(path, entry.content)
         ):
             sensitive.append("/" + path)
     if forbidden or sensitive:
