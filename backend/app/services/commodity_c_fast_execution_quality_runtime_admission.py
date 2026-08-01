@@ -106,11 +106,17 @@ def _safe_parent_chain(path: Path, expected_owner_uid: int) -> bool:
             metadata = current.lstat()
         except OSError:
             return False
+        mode = stat.S_IMODE(metadata.st_mode)
+        writable_by_others = bool(mode & 0o022)
+        trusted_sticky_root = (
+            metadata.st_uid == 0
+            and bool(mode & stat.S_ISVTX)
+        )
         if (
             stat.S_ISLNK(metadata.st_mode)
             or not stat.S_ISDIR(metadata.st_mode)
             or metadata.st_uid not in {0, expected_owner_uid}
-            or stat.S_IMODE(metadata.st_mode) & 0o022
+            or (writable_by_others and not trusted_sticky_root)
         ):
             return False
         if current.parent == current:
@@ -184,11 +190,13 @@ def _read_exact_private_canonical_json(
 
 
 class CommodityCFastExecutionQualityRuntimeAdmissionConsumer:
-    """Consume one short-lived signed read-only sidecar admission.
+    """Verify one short-lived signed read-only sidecar admission.
 
     This service verifies exact private files, the pinned key domain, Ed25519
     signature, lifetime and every hash in the current full-revalidation
-    receipt. It owns no Tick, repository, network, account or trading handle.
+    receipt. Verification is reusable within the admission window; this
+    default-off slice does not claim irreversible one-shot consumption. It
+    owns no Tick, repository, network, account or trading handle.
     """
 
     def __init__(

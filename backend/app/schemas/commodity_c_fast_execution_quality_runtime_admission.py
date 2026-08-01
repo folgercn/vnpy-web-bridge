@@ -50,8 +50,10 @@ class CFastExecutionQualityRuntimeAdmissionDTO(StrictFiniteModel):
     """Short-lived human-signed permission to assemble a read-only sidecar.
 
     The admission is deliberately not collection, execution, deployment or
-    trading authority. It only allows the process to consume one exact full
+    trading authority. It only allows the process to verify one exact full
     revalidation receipt while constructing the separately guarded sidecar.
+    This v1 admission is short-lived but reusable within its validity window;
+    it is not an irreversible one-shot consume capability.
     """
 
     model_config = ConfigDict(frozen=True, revalidate_instances="always")

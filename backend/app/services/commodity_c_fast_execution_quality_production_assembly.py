@@ -53,10 +53,11 @@ class RuntimeAdmissionConsumer(Protocol):
 class CommodityCFastExecutionQualityProductionAssembly:
     """Default-off production assembly gate for the read-only sidecar.
 
-    This first assembly slice consumes a fresh full-revalidation receipt and
+    This first assembly slice verifies a fresh full-revalidation receipt and
     its independently signed runtime admission on every lifecycle transition.
     Tick, repository, export and monitoring components are intentionally not
-    represented as built until later slices bind the complete capability.
+    represented as built until later slices bind the complete capability. The
+    admission is not an irreversible one-shot consume token in this slice.
     """
 
     def __init__(

@@ -126,7 +126,7 @@ def runtime(*, enabled: bool) -> CommodityCFastExecutionQualityRuntime:
     return subject
 
 
-def test_default_off_never_consumes_admission_or_repository() -> None:
+def test_default_off_never_verifies_admission_or_repository() -> None:
     consumer = FakeAdmissionConsumer()
     repository_calls = 0
 

@@ -192,7 +192,7 @@ def build_fixture(
     )
 
 
-def test_signed_runtime_admission_consumes_one_exact_receipt(
+def test_signed_runtime_admission_verifies_one_exact_receipt(
     tmp_path: Path,
 ) -> None:
     consumer, receipt, _, _ = build_fixture(tmp_path)
@@ -222,7 +222,7 @@ def test_signature_tamper_fails_closed(tmp_path: Path) -> None:
         consumer.verify_for_receipt(receipt)
 
 
-def test_receipt_splice_and_replay_fail_closed(tmp_path: Path) -> None:
+def test_receipt_splice_and_expired_reuse_fail_closed(tmp_path: Path) -> None:
     consumer, receipt, _, _ = build_fixture(tmp_path)
     changed = revalidation(trigger="reload")
 
