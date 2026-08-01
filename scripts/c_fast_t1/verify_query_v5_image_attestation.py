@@ -66,6 +66,11 @@ SENSITIVE_PATH_MARKERS = (
     "query_child",
     "dsn",
 )
+CONFIG_SENSITIVE_TEXT_MARKERS = (
+    "private_key",
+    "signer",
+    "sign_release",
+)
 
 _delegate = query_v4._delegate
 QueryV5ImageAttestationError = query_v4.QueryV4ImageAttestationError
@@ -83,6 +88,29 @@ def _fail(message: str) -> None:
 def _exact(actual: Any, expected: Any, label: str) -> None:
     if actual != expected:
         _fail(f"{label} does not match recomputed content")
+
+
+def _reject_sensitive_config(
+    raw: bytes,
+    document: dict[str, Any],
+    label: str,
+) -> None:
+    if any(marker in raw for marker in PRIVATE_KEY_MARKERS):
+        _fail(f"{label} OCI config contains private-key material")
+    pending: list[Any] = [document]
+    while pending:
+        value = pending.pop()
+        if isinstance(value, dict):
+            pending.extend(value.keys())
+            pending.extend(value.values())
+        elif isinstance(value, list):
+            pending.extend(value)
+        elif isinstance(value, str):
+            encoded = value.encode("utf-8")
+            if any(marker in encoded for marker in PRIVATE_KEY_MARKERS) or any(
+                marker in value.lower() for marker in CONFIG_SENSITIVE_TEXT_MARKERS
+            ):
+                _fail(f"{label} OCI config contains sensitive material")
 
 
 def _source_facts(
@@ -201,12 +229,17 @@ def _source_facts(
         f"/opt/c-fast-query-v5/{copies[source]}": _sha256(by_name[source][0])
         for source in copy_sources
     }
+    runtime_modes = {
+        f"/opt/c-fast-query-v5/{copies[source]}": by_name[source][1]
+        for source in copy_sources
+    }
     return {
         "bundle_raw": bundle_raw,
         "manifest": manifest,
         "manifest_raw": manifest_raw,
         "containerfile_sha256": _sha256(containerfile_raw),
         "runtime_bundle": runtime_bundle,
+        "runtime_modes": runtime_modes,
     }
 
 
@@ -271,6 +304,7 @@ def _load_oci_state(path: Path, label: str) -> dict[str, Any]:
         f"{label} OCI config",
     )
     config_document = _delegate._parse_json(config_raw, f"{label} OCI config")
+    _reject_sensitive_config(config_raw, config_document, label)
     if (
         config_document.get("architecture") != "amd64"
         or config_document.get("os") != "linux"
@@ -341,7 +375,14 @@ def _scan_overlay_layer(
     raw: bytes,
     label: str,
     base_paths: set[str],
+    expected_runtime_bundle: dict[str, str],
+    expected_runtime_modes: dict[str, int],
 ) -> set[str]:
+    if any(marker in raw for marker in PRIVATE_KEY_MARKERS):
+        _fail(f"{label} raw tar contains private-key material")
+    expected_runtime_paths = {
+        path.removeprefix("/") for path in expected_runtime_bundle
+    }
     touched: set[str] = set()
     try:
         with tarfile.open(fileobj=io.BytesIO(raw), mode="r:") as archive:
@@ -359,13 +400,42 @@ def _scan_overlay_layer(
                     or path.startswith(RUNTIME_PREFIX)
                 ):
                     _fail(f"{label} touches path outside overlay allowlist: /{path}")
+                mode = member.mode & 0o7777
                 if member.uid != 0 or member.gid != 0:
                     _fail(f"{label} contains a non-root-owned entry: /{path}")
-                if member.isdir():
-                    if path not in ALLOWED_OVERLAY_DIRECTORIES:
-                        _fail(f"{label} contains an unexpected directory: /{path}")
-                elif not member.isreg():
+                if any(marker in path.lower() for marker in SENSITIVE_PATH_MARKERS):
+                    _fail(f"{label} contains signer or private-key material: /{path}")
+                if not member.isdir() and not member.isreg():
                     _fail(f"{label} contains a link or special file: /{path}")
+                if path in ALLOWED_OVERLAY_DIRECTORIES:
+                    allowed_modes = {0o555} if path == PIN_DIRECTORY else {0o555, 0o755}
+                    if not member.isdir() or mode not in allowed_modes:
+                        _fail(
+                            f"{label} allowlisted directory entry is not exact: /{path}"
+                        )
+                elif path in expected_runtime_paths:
+                    if not member.isreg():
+                        _fail(f"{label} runtime entry is not a regular file: /{path}")
+                    content = _delegate._tar_member_raw(
+                        archive,
+                        member,
+                        f"{label}:{path}",
+                        limit=_delegate.MAX_LAYER_FILE_BYTES,
+                    )
+                    if any(marker in content for marker in PRIVATE_KEY_MARKERS):
+                        _fail(
+                            f"{label} contains signer or private-key material: /{path}"
+                        )
+                    image_path = "/" + path
+                    source_mode = expected_runtime_modes[image_path]
+                    if _sha256(content) != expected_runtime_bundle[
+                        image_path
+                    ] or mode not in {source_mode, source_mode & ~0o222}:
+                        _fail(
+                            f"{label} runtime entry does not match exact source: /{path}"
+                        )
+                else:
+                    _fail(f"{label} contains an unexpected overlay path: /{path}")
     except QueryV5ImageAttestationError:
         raise
     except (OSError, tarfile.TarError) as exc:
@@ -414,7 +484,13 @@ def _validate_final_oci(
     overlay_touched: set[str] = set()
     for number, raw in enumerate(final["layer_raw"][base_count:], base_count):
         overlay_touched.update(
-            _scan_overlay_layer(raw, f"query-v5 OCI layer {number}", base_paths)
+            _scan_overlay_layer(
+                raw,
+                f"query-v5 OCI layer {number}",
+                base_paths,
+                source["runtime_bundle"],
+                source["runtime_modes"],
+            )
         )
     config = final["config"]
     expected_labels = {
@@ -736,6 +812,7 @@ def verify_query_v5_image_evidence(
             "overlay_base_overwrites_absent": True,
             "overlay_path_allowlist_verified": True,
             "overlay_links_and_special_files_absent": True,
+            "all_overlay_layer_contents_sensitive_free": True,
             "merged_python_execution_closure_frozen": True,
             "runtime_bundle_matches_source_bundle": True,
             "immutable_image_reference_matched": True,

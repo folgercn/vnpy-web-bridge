@@ -31,6 +31,12 @@ query-v4 attestation payload 与重放结果完全相等；只给一个历史 JS
 - overlay 只能触碰 `/opt/c-fast-query-v5/**` 与
   `/run/c-fast-t1-query-v5-pins` 固定闭包；最终 runtime path 必须与 source bundle
   byte-for-byte 一致，root-owned 且不可写；
+- 每个 overlay layer raw tar 与每个 bounded regular member 都检查私钥 marker；
+  每层只能出现 fixed directory 或 exact source runtime file，且当层 path、type、
+  content hash、root uid/gid 与允许的 build/final mode 必须立即匹配；后续 layer
+  恢复 exact final file 不能掩盖旧 layer blob 中的 payload 或 type 漂移；
+- base/final OCI config raw bytes 与解析后的所有嵌套 string 都检查敏感内容，不能把
+  私钥藏在 `history`、`author` 或其他非-runtime config 字段；
 - merged rootfs 的 Python startup/execution closure 重新扫描，其 closure hash 与
   entry count 必须与重放后的 query-v4 attestation 完全相同；
 - non-root user、isolated ENTRYPOINT、working directory、环境、完整 labels、base

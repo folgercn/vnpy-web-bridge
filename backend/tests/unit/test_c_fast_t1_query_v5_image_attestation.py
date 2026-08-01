@@ -141,7 +141,9 @@ def _compose_oci(
     source_commit: str,
     *,
     overlay_entries: list[tuple[str, bytes, int, str]] | None = None,
+    overlay_layers: list[list[tuple[str, bytes, int, str]]] | None = None,
     config_override: dict[str, Any] | None = None,
+    config_document_override: dict[str, Any] | None = None,
     reverse_base_prefix: bool = False,
 ) -> tuple[bytes, dict[str, Any]]:
     helper = _helper()
@@ -163,15 +165,23 @@ def _compose_oci(
         "synthetic query-v4 config",
     )
     v4_config_document = json.loads(v4_config_raw)
-    entries = overlay_entries or _overlay_entries(source_facts)
-    overlay_raw = helper._tar(entries)
-    overlay_digest = "sha256:" + hashlib.sha256(overlay_raw).hexdigest()
-    overlay_diff_id = overlay_digest
-    overlay_descriptor = {
-        "mediaType": "application/vnd.oci.image.layer.v1.tar",
-        "digest": overlay_digest,
-        "size": len(overlay_raw),
-    }
+    assert not (overlay_entries is not None and overlay_layers is not None)
+    entry_layers = overlay_layers or [overlay_entries or _overlay_entries(source_facts)]
+    overlays: list[tuple[bytes, str, dict[str, Any]]] = []
+    for entries in entry_layers:
+        raw = helper._tar(entries)
+        digest = "sha256:" + hashlib.sha256(raw).hexdigest()
+        overlays.append(
+            (
+                raw,
+                digest,
+                {
+                    "mediaType": "application/vnd.oci.image.layer.v1.tar",
+                    "digest": digest,
+                    "size": len(raw),
+                },
+            )
+        )
     base_layers = list(v4_manifest["layers"])
     base_diff_ids = list(v4_config_document["rootfs"]["diff_ids"])
     if reverse_base_prefix:
@@ -203,9 +213,10 @@ def _compose_oci(
         "config": config,
         "rootfs": {
             "type": "layers",
-            "diff_ids": [*base_diff_ids, overlay_diff_id],
+            "diff_ids": [*base_diff_ids, *[item[1] for item in overlays]],
         },
     }
+    config_document.update(config_document_override or {})
     config_raw = _json_bytes(config_document)
     config_digest = "sha256:" + hashlib.sha256(config_raw).hexdigest()
     manifest = {
@@ -216,7 +227,7 @@ def _compose_oci(
             "digest": config_digest,
             "size": len(config_raw),
         },
-        "layers": [*base_layers, overlay_descriptor],
+        "layers": [*base_layers, *[item[2] for item in overlays]],
     }
     manifest_raw = _json_bytes(manifest)
     manifest_digest = "sha256:" + hashlib.sha256(manifest_raw).hexdigest()
@@ -245,7 +256,10 @@ def _compose_oci(
     }
     blobs = {
         **referenced_base_blobs,
-        "blobs/sha256/" + overlay_digest.removeprefix("sha256:"): overlay_raw,
+        **{
+            "blobs/sha256/" + digest.removeprefix("sha256:"): raw
+            for raw, digest, _descriptor in overlays
+        },
         "blobs/sha256/" + config_digest.removeprefix("sha256:"): config_raw,
         "blobs/sha256/" + manifest_digest.removeprefix("sha256:"): manifest_raw,
     }
@@ -264,7 +278,7 @@ def _compose_oci(
     relevant_environment = {
         item.split("=", 1)[0]: item.split("=", 1)[1] for item in config["Env"]
     }
-    touched = sorted("/" + entry[0] for entry in entries)
+    touched = sorted({"/" + entry[0] for entries in entry_layers for entry in entries})
     image = {
         "reference": f"registry.invalid/c-fast/query-v5@{manifest_digest}",
         "digest": manifest_digest,
@@ -272,9 +286,9 @@ def _compose_oci(
         "export_sha256": hashlib.sha256(archive_raw).hexdigest(),
         "rootfs_layer_digests": [
             *[item["digest"] for item in base_layers],
-            overlay_digest,
+            *[item[1] for item in overlays],
         ],
-        "rootfs_diff_ids": [*base_diff_ids, overlay_diff_id],
+        "rootfs_diff_ids": [*base_diff_ids, *[item[1] for item in overlays]],
         "config": {
             "user": config["User"],
             "working_dir": config["WorkingDir"],
@@ -345,7 +359,9 @@ def _artifacts(
     source_commit: str,
     *,
     overlay_entries: list[tuple[str, bytes, int, str]] | None = None,
+    overlay_layers: list[list[tuple[str, bytes, int, str]]] | None = None,
     config_override: dict[str, Any] | None = None,
+    config_document_override: dict[str, Any] | None = None,
     reverse_base_prefix: bool = False,
 ) -> dict[str, Any]:
     helper = _helper()
@@ -391,7 +407,9 @@ def _artifacts(
         source_facts,
         source_commit,
         overlay_entries=overlay_entries,
+        overlay_layers=overlay_layers,
         config_override=config_override,
+        config_document_override=config_document_override,
         reverse_base_prefix=reverse_base_prefix,
     )
     final_oci_path = _write(tmp_path / "query-v5.oci.tar", final_oci_raw)
@@ -449,6 +467,7 @@ def test_exact_query_v4_prefix_and_query_v5_overlay_pass(
     assert report["checks"]["query_v4_content_attestation_replayed"] is True
     assert report["checks"]["query_v4_layer_descriptor_prefix_verified"] is True
     assert report["checks"]["query_v4_diff_id_prefix_verified"] is True
+    assert report["checks"]["all_overlay_layer_contents_sensitive_free"] is True
     assert report["checks"]["merged_python_execution_closure_frozen"] is True
     assert report["image_built_here"] is False
     assert report["authority_granted"] is False
@@ -541,6 +560,94 @@ def test_overlay_structural_attacks_fail_closed(
         overlay_entries=entries,
     )
     with pytest.raises(subject.QueryV5ImageAttestationError, match=error):
+        _verify(artifacts, source_commit)
+
+
+@pytest.mark.parametrize(
+    ("attack_entry", "error"),
+    [
+        (
+            (
+                "opt/c-fast-query-v5/release/scripts/"
+                "commodity_c_fast_t1_query_v5_launcher.py",
+                b"-----BEGIN PRIVATE KEY-----\nnot-a-real-key\n",
+                0o444,
+                "regular",
+            ),
+            "raw tar contains private-key material",
+        ),
+        (
+            (
+                "opt/c-fast-query-v5/release/scripts/"
+                "commodity_c_fast_t1_query_v5_launcher.py",
+                b"wrong launcher bytes\n",
+                0o444,
+                "regular",
+            ),
+            "does not match exact source",
+        ),
+        (
+            ("opt/c-fast-query-v5/release", b"", 0o555, "regular"),
+            "allowlisted directory entry is not exact",
+        ),
+    ],
+)
+def test_superseded_overlay_payload_or_type_fails_closed(
+    tmp_path: Path,
+    source_commit: str,
+    attack_entry: tuple[str, bytes, int, str],
+    error: str,
+) -> None:
+    bundle_raw = producer.build_source_bundle(ROOT, source_commit)[0]
+    bundle_path = _write(tmp_path / "seed-source.tar", bundle_raw)
+    source_facts = subject._source_facts(bundle_path, source_commit)
+    artifacts = _artifacts(
+        tmp_path,
+        source_commit,
+        overlay_layers=[[attack_entry], _overlay_entries(source_facts)],
+    )
+
+    final_state = subject._load_oci_state(artifacts["oci"], "test-final")
+    launcher_path = next(
+        path.removeprefix("/") for path in source_facts["runtime_bundle"]
+    )
+    assert (
+        final_state["filesystem"][launcher_path].sha256
+        == source_facts["runtime_bundle"]["/" + launcher_path]
+    )
+
+    with pytest.raises(subject.QueryV5ImageAttestationError, match=error):
+        _verify(artifacts, source_commit)
+
+
+@pytest.mark.parametrize(
+    ("hidden_value", "error"),
+    [
+        (
+            "-----BEGIN PRIVATE KEY-----\nnot-a-real-config-key\n",
+            "OCI config contains private-key material",
+        ),
+        (
+            "private_key=not-a-real-config-key",
+            "OCI config contains sensitive material",
+        ),
+    ],
+)
+def test_sensitive_outer_config_history_fails_closed(
+    tmp_path: Path,
+    source_commit: str,
+    hidden_value: str,
+    error: str,
+) -> None:
+    artifacts = _artifacts(
+        tmp_path,
+        source_commit,
+        config_document_override={"history": [{"author": hidden_value}]},
+    )
+    with pytest.raises(
+        subject.QueryV5ImageAttestationError,
+        match=error,
+    ):
         _verify(artifacts, source_commit)
 
 
