@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vnpy-web-bridge:schema:commodity-c-fast-t1-query-v5-source-manifest-v1",
+  "title": "C_FAST T1 query-v5 deterministic overlay source manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "manifest_id", "candidate_id", "runtime_kind",
+    "source_commit_sha", "containerfile_path",
+    "containerfile_instruction_sha256", "entries", "base_runtime_kind",
+    "requires_exact_query_v4_base_content_attestation",
+    "git_resolution_performed_by_producer", "runtime_git_resolution_required",
+    "source_commit_lineage_independently_verified_by_runtime",
+    "code_only_blocked", "sensitive_material_present", "authority_granted"
+  ],
+  "properties": {
+    "schema_version": {"const": "commodity_c_fast_t1_query_v5_source_manifest_v1"},
+    "manifest_id": {"type": "string", "pattern": "^query-v5-source-manifest-v1-[0-9a-f]{64}$"},
+    "candidate_id": {"const": "C_FAST_CROSS_SECTION_NEUTRAL"},
+    "runtime_kind": {"const": "c_fast_t1_query_v5_code_only_overlay"},
+    "source_commit_sha": {"$ref": "#/$defs/commit"},
+    "containerfile_path": {"const": "scripts/c_fast_t1/Containerfile.query-v5"},
+    "containerfile_instruction_sha256": {"$ref": "#/$defs/sha256"},
+    "entries": {
+      "type": "array", "minItems": 2, "maxItems": 16,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["path", "sha256", "size", "mode"],
+        "properties": {
+          "path": {"type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[A-Za-z0-9._/-]+$"},
+          "sha256": {"$ref": "#/$defs/sha256"},
+          "size": {"type": "integer", "minimum": 0, "maximum": 8388608},
+          "mode": {"enum": [420, 493]}
+        }
+      }
+    },
+    "base_runtime_kind": {"const": "c_fast_t1_query_v4"},
+    "requires_exact_query_v4_base_content_attestation": {"const": true},
+    "git_resolution_performed_by_producer": {"const": true},
+    "runtime_git_resolution_required": {"const": false},
+    "source_commit_lineage_independently_verified_by_runtime": {"const": false},
+    "code_only_blocked": {"const": true},
+    "sensitive_material_present": {"const": false},
+    "authority_granted": {"const": false}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
+  }
+}

@@ -1,0 +1,38 @@
+x-c-fast-t1-query-v5-runtime:
+  schema_version: commodity_c_fast_t1_query_v5_runtime_template_v1
+  status: QUERY_V5_CODE_ONLY_OVERLAY_PACKAGING_VALID_RUNTIME_BLOCKED
+  candidate_id: C_FAST_CROSS_SECTION_NEUTRAL
+  parent_issue_number: 114
+  issue_number: 216
+  runtime_execution_ready: false
+  requires_exact_query_v4_base_content_attestation: true
+  requires_query_v5_overlay_content_attestation: true
+  requires_query_v5_build_registry_provenance: true
+  requires_future_query_release_v5_lifecycle: true
+  code_only_blocked: true
+  network_authorized: false
+  production_query_authorized: false
+  authority_granted: false
+
+services:
+  c-fast-t1-query-v5-code-only:
+    image: ${C_FAST_T1_QUERY_V5_IMAGE_REPOSITORY:?required_repository}@${C_FAST_T1_QUERY_V5_IMAGE_DIGEST:?required_sha256_digest}
+    read_only: true
+    network_mode: none
+    user: 65532:65532
+    environment: {}
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    command:
+      - --runtime-image-digest
+      - ${C_FAST_T1_QUERY_V5_IMAGE_DIGEST:?required_sha256_digest}
+      - --verify-code-only
+    volumes:
+      - type: bind
+        source: ${C_FAST_T1_QUERY_V5_PIN_ROOT:?required_pin_root}
+        target: /run/c-fast-t1-query-v5-pins
+        read_only: true
+        bind:
+          create_host_path: false
