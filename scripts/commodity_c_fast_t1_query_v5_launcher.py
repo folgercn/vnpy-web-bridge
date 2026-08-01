@@ -152,6 +152,22 @@ def _require_safe_ancestor_chain(
             raise QueryV5LauncherError(f"cannot inspect {label} ancestor") from exc
         if stat.S_ISLNK(info.st_mode):
             raise QueryV5LauncherError(f"{label} ancestor contains a symlink")
+        mode = stat.S_IMODE(info.st_mode)
+        private_inspection_sticky_ancestor = (
+            not require_root_owned
+            and stat.S_ISDIR(info.st_mode)
+            and info.st_uid == 0
+            and bool(mode & stat.S_ISVTX)
+            and bool(mode & 0o002)
+            and _effective_access(current, os.R_OK | os.X_OK)
+        )
+        if private_inspection_sticky_ancestor:
+            # Test-only NONAUTHORITY inspection may be rooted below a standard
+            # shared sticky directory such as /tmp. This exception applies to
+            # ancestors only; source, pin and interpreter targets still pass
+            # the full _require_safe checks. Production always requests
+            # require_root_owned=True and therefore cannot enter this branch.
+            continue
         _require_safe(
             current,
             info,

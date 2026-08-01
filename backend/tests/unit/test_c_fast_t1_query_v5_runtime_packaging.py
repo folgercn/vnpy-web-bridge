@@ -4,8 +4,10 @@ import json
 import inspect
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
+import tempfile
 
 import pytest
 from jsonschema import Draft202012Validator
@@ -269,6 +271,44 @@ def test_public_verifier_has_no_injectable_trust_root() -> None:
             "sha256:" + "b" * 64,
             loaded_executable_path=Path(sys.executable),  # type: ignore[call-arg]
         )
+
+
+def test_private_inspection_allows_root_owned_sticky_shared_ancestor() -> None:
+    shared_parent = Path("/tmp").resolve(strict=True)
+    source_parent = Path(tempfile.mkdtemp(dir=shared_parent))
+    try:
+        source_root = source_parent / "release"
+        scripts = source_root / "scripts"
+        scripts.mkdir(parents=True)
+        copied_launcher = scripts / "commodity_c_fast_t1_query_v5_launcher.py"
+        copied_launcher.write_bytes(Path(launcher.__file__).read_bytes())
+        copied_launcher.chmod(0o444)
+        identity, closure, manifest = launcher.source_closure(
+            source_root,
+            require_root_owned=False,
+        )
+        assert len(identity) == 64
+        assert len(closure) == 64
+        assert manifest["entries"]
+    finally:
+        shutil.rmtree(source_parent)
+
+
+def test_production_mode_rejects_root_owned_sticky_shared_ancestor() -> None:
+    shared_parent = Path("/tmp").resolve(strict=True)
+    source_parent = Path(tempfile.mkdtemp(dir=shared_parent))
+    try:
+        with pytest.raises(
+            launcher.QueryV5LauncherError,
+            match="ancestor is group/world writable",
+        ):
+            launcher._require_safe_ancestor_chain(
+                source_parent,
+                "production source root",
+                require_root_owned=True,
+            )
+    finally:
+        shutil.rmtree(source_parent)
 
 
 def test_launcher_rejects_nonisolated_direct_execution() -> None:
