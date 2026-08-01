@@ -44,6 +44,14 @@ sidecar 不保存签名私钥，也不独立读取 accepted signed snapshot。�
 接受的事实。因此运行接线仍须独立消费和重放签名 authority；journal checksum
 不能替代签名。
 
+每条 intent input record 还会持久化同一 plan 的 exact ordered
+`expected_plan_intent_ids`。recovery 要求该列表非空、唯一、类型和 ID 格式严格，
+包含当前 record 的 intent，并要求同一 `preverified_plan_hash` 的全部 intent record
+保存完全相同的 expected 列表。sidecar 本身允许逐 intent create-only 写入产生短暂
+missing-tail 中间态；任何 runtime worker 在接收 Tick、封口或报告健康前必须证明
+每个 plan 的 actual ordered intent IDs 等于这份 durable expectation，且 anchor 全部
+存在。不能只用 `actual intents == anchors` 误判 plan 已完整落盘。
+
 ## create-only journal
 
 journal root 必须是调用者预先创建、当前用户拥有且权限严格为 `0700` 的真实绝对
