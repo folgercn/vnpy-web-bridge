@@ -117,15 +117,18 @@ def test_launcher_binds_current_interpreter_and_stable_closure(tmp_path: Path) -
     source_root, copied_launcher, pin_path = _runtime_fixture(tmp_path)
     interpreter = Path(sys.executable).resolve()
     digest = "sha256:" + "b" * 64
-    result = launcher.verify_runtime_identity(
+    result = launcher._inspect_runtime_identity(
         digest,
         pin_manifest_path=pin_path,
         launcher_path=copied_launcher,
         interpreter_path=interpreter,
         source_root=source_root,
+        reported_executable_path=interpreter,
+        loaded_executable_path=interpreter,
         require_root_owned=False,
     )
-    assert result["status"] == launcher.STATUS
+    assert result["status"] == launcher.INSPECTION_STATUS
+    assert result["isolated_flags_verified"] is False
     assert result["code_only_blocked"] is True
     before = launcher.source_closure(source_root, require_root_owned=False)[:2]
     os.utime(source_root, ns=(1_000_000_000, 2_000_000_000))
@@ -133,22 +136,128 @@ def test_launcher_binds_current_interpreter_and_stable_closure(tmp_path: Path) -
     assert before == after
 
 
-def test_launcher_rejects_alternate_running_interpreter(tmp_path: Path) -> None:
+def test_launcher_rejects_alternate_reported_interpreter(tmp_path: Path) -> None:
     source_root, copied_launcher, pin_path = _runtime_fixture(tmp_path)
     interpreter = Path(sys.executable).resolve()
     alternate = tmp_path / "alternate-python"
     alternate.write_bytes(interpreter.read_bytes())
     alternate.chmod(0o555)
     with pytest.raises(launcher.QueryV5LauncherError, match="pinned interpreter"):
-        launcher.verify_runtime_identity(
+        launcher._inspect_runtime_identity(
             "sha256:" + "b" * 64,
             pin_manifest_path=pin_path,
             launcher_path=copied_launcher,
             interpreter_path=interpreter,
             source_root=source_root,
-            running_executable_path=alternate,
+            reported_executable_path=alternate,
+            loaded_executable_path=interpreter,
             require_root_owned=False,
         )
+
+
+def test_launcher_rejects_loaded_executable_path_replacement(tmp_path: Path) -> None:
+    source_root, copied_launcher, pin_path = _runtime_fixture(tmp_path)
+    loaded = Path(sys.executable).resolve()
+    pinned = tmp_path / "replacement-python"
+    pinned.write_bytes(loaded.read_bytes())
+    pinned.chmod(0o555)
+    pins = json.loads(pin_path.read_text(encoding="utf-8"))
+    pins["python_executable_path"] = str(pinned)
+    pins["python_executable_sha256"] = launcher._sha256(pinned.read_bytes())
+    pin_path.chmod(0o644)
+    pin_path.write_bytes(launcher.canonical_json(pins))
+    pin_path.chmod(0o444)
+    with pytest.raises(
+        launcher.QueryV5LauncherError,
+        match="loaded executable is not the pinned interpreter",
+    ):
+        launcher._inspect_runtime_identity(
+            "sha256:" + "b" * 64,
+            pin_manifest_path=pin_path,
+            launcher_path=copied_launcher,
+            interpreter_path=pinned,
+            source_root=source_root,
+            reported_executable_path=pinned,
+            loaded_executable_path=loaded,
+            require_root_owned=False,
+        )
+
+
+def test_launcher_rejects_loaded_executable_bytes_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_root, copied_launcher, pin_path = _runtime_fixture(tmp_path)
+    interpreter = Path(sys.executable).resolve()
+    interpreter_info = interpreter.lstat()
+    monkeypatch.setattr(
+        launcher,
+        "_stable_loaded_executable",
+        lambda *_args, **_kwargs: (b"loaded-executable-drift", interpreter_info),
+    )
+    with pytest.raises(
+        launcher.QueryV5LauncherError,
+        match="loaded executable bytes or identity changed",
+    ):
+        launcher._inspect_runtime_identity(
+            "sha256:" + "b" * 64,
+            pin_manifest_path=pin_path,
+            launcher_path=copied_launcher,
+            interpreter_path=interpreter,
+            source_root=source_root,
+            reported_executable_path=interpreter,
+            loaded_executable_path=interpreter,
+            require_root_owned=False,
+        )
+
+
+def test_source_closure_fails_closed_on_walk_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_root, _copied_launcher, _pin_path = _runtime_fixture(tmp_path)
+
+    def failed_walk(
+        *_args: object, onerror: object = None, **_kwargs: object
+    ) -> object:
+        assert callable(onerror)
+        onerror(PermissionError("simulated scandir denial"))
+        return iter(())
+
+    monkeypatch.setattr(launcher.os, "walk", failed_walk)
+    with pytest.raises(
+        launcher.QueryV5LauncherError,
+        match="cannot enumerate query-v5 source directory",
+    ):
+        launcher.source_closure(source_root, require_root_owned=False)
+
+
+def test_source_closure_rejects_non_enumerable_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_root, _copied_launcher, _pin_path = _runtime_fixture(tmp_path)
+    hidden = source_root / "hidden"
+    hidden.mkdir()
+    (hidden / "hidden.py").write_text("raise RuntimeError\n", encoding="utf-8")
+    original = launcher._effective_access
+
+    def denied(path: Path, mode: int) -> bool:
+        if path == hidden and mode == (os.R_OK | os.X_OK):
+            return False
+        return original(path, mode)
+
+    monkeypatch.setattr(launcher, "_effective_access", denied)
+    with pytest.raises(
+        launcher.QueryV5LauncherError,
+        match="source directory hidden is not enumerable by the runtime",
+    ):
+        launcher.source_closure(source_root, require_root_owned=False)
+
+
+def test_imported_verify_rejects_nonisolated_process() -> None:
+    with pytest.raises(SystemExit, match="-I -S -s -E -B"):
+        launcher.verify_runtime_identity("sha256:" + "b" * 64)
 
 
 def test_launcher_rejects_nonisolated_direct_execution() -> None:

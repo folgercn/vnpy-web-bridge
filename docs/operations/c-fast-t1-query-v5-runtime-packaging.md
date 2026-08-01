@@ -45,10 +45,13 @@ authority。
   /opt/c-fast-query-v5/release/scripts/commodity_c_fast_t1_query_v5_launcher.py
 ```
 
-launcher 在任何后续导入前验证：当前进程确由 pinned interpreter 启动、
-interpreter 和 launcher exact bytes、source closure、root ownership、不可写性以及
-root-owned canonical pin generation。source-root identity 仅使用可跨 OCI 部署复现的
-绝对路径、uid/gid/mode 和 closure hash；不 pin device/inode/timestamps。
+launcher 在任何后续导入前验证：Linux `/proc/self/exe` 已加载二进制、
+`sys.executable`、pinned interpreter path 的 exact bytes/stat/samefile 三者一致，
+以及 launcher exact bytes、source closure、root ownership、不可写性和 root-owned
+canonical pin generation。source closure 对目录枚举错误 fail closed，要求每个目录
+可读可执行，并以两次完整扫描及扫描前后 identity/entry 集合一致证明没有漏文件。
+source-root 的外部 pin identity 仅使用可跨 OCI 部署复现的绝对路径、uid/gid/mode
+和 closure hash；device/inode/timestamps 只用于同次运行的抗漂移比较，不写入 pin。
 
 ## 离线验证
 
