@@ -1135,32 +1135,75 @@ def test_preimport_bootstrap_hash_and_pin_template_are_self_contained() -> None:
     assert pins["schema_version"] == runtime_launcher.BOOTSTRAP_SCHEMA_VERSION
 
 
-def test_preimport_bootstrap_detects_stdlib_and_native_replacements_without_execution(
+def test_fresh_process_preimport_bootstrap_rejects_stdlib_and_native_replacements(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runtime = tmp_path / "runtime"
     runtime.mkdir()
     sentinel = tmp_path / "malicious-module-executed"
-    payloads = {
+    replacements = {
         "json.py": f"open({str(sentinel)!r}, 'w').write('json')\n".encode(),
         "pathlib.py": f"open({str(sentinel)!r}, 'w').write('pathlib')\n".encode(),
         "tarfile.py": f"open({str(sentinel)!r}, 'w').write('tarfile')\n".encode(),
-        "lib-dynload/_attack.so": b"native-extension-payload",
+        "lib-dynload/_attack.so": b"replaced-native-extension-payload",
     }
-    for relative, raw in payloads.items():
+    originals: dict[str, bytes] = {}
+    for relative in replacements:
         path = runtime / relative
         path.parent.mkdir(parents=True, exist_ok=True)
+        raw = f"trusted-runtime-entry:{relative}\n".encode()
+        originals[relative] = raw
         path.write_bytes(raw)
     monkeypatch.setattr(runtime_launcher, "_bootstrap_safe", lambda *_a, **_k: None)
     trusted = runtime_launcher._bootstrap_tree_digest(str(runtime))
-    for relative in payloads:
-        path = runtime / relative
-        original = path.read_bytes()
-        path.write_bytes(original + b"tampered")
-        assert runtime_launcher._bootstrap_tree_digest(str(runtime)) != trusted
+    bootstrap_probe = """
+import os
+import sys
+
+launcher_path, runtime_root, trusted, sentinel = sys.argv[1:]
+sys.path.insert(0, runtime_root)
+with open(launcher_path, encoding="utf-8") as stream:
+    source = stream.read()
+prefix = source.split("_PREIMPORT_BOOTSTRAP_IDENTITY =", 1)[0]
+namespace = {"__name__": "query_v5_preimport_probe"}
+exec(compile(prefix, launcher_path, "exec"), namespace)
+namespace["_bootstrap_os"] = os
+namespace["_bootstrap_safe"] = lambda *_args, **_kwargs: None
+actual = namespace["_bootstrap_tree_digest"](runtime_root)
+if actual == trusted:
+    raise SystemExit("replacement was not detected")
+if os.path.exists(sentinel):
+    raise SystemExit("replacement executed before bootstrap failure")
+print("MISMATCH_REJECTED_BEFORE_PATH_IMPORT")
+"""
+    for relative, replacement in replacements.items():
+        target = runtime / relative
+        target.write_bytes(replacement)
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-S",
+                "-s",
+                "-E",
+                "-B",
+                "-c",
+                bootstrap_probe,
+                str(ROOT / runtime_launcher.LAUNCHER_RELATIVE_PATH),
+                str(runtime),
+                trusted,
+                str(sentinel),
+            ],
+            env={**os.environ, "PYTHONPATH": str(runtime)},
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert completed.returncode == 0, completed.stderr
+        assert "MISMATCH_REJECTED_BEFORE_PATH_IMPORT" in completed.stdout
         assert not sentinel.exists()
-        path.write_bytes(original)
+        target.write_bytes(originals[relative])
 
 
 def test_production_entrypoints_are_launcher_only() -> None:
