@@ -1,0 +1,90 @@
+{
+  "schema_version": "commodity_c_fast_t1_query_v5_external_image_evidence_v1",
+  "capture_kind": "unsigned_external_query_v5_final_oci_composition_capture_v1",
+  "captured_at": "2026-08-01T00:00:00Z",
+  "producer": {
+    "tool": "replace-me",
+    "tool_version": "1"
+  },
+  "query_v4": {
+    "content_attestation_raw_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "content_attestation_canonical_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "oci_layout_archive_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "image_reference": "registry.invalid/c-fast/query-v4@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "image_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "image_id": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+  },
+  "source_commit_sha": "0000000000000000000000000000000000000000",
+  "source_bundle_archive_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "source_manifest_raw_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "source_manifest_canonical_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "build": {
+    "platform": "linux/amd64",
+    "context_kind": "exact_query_v5_source_bundle_v1",
+    "containerfile_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "query_v4_base_image_reference": "registry.invalid/c-fast/query-v4@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "query_v4_base_image_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+  },
+  "image": {
+    "reference": "registry.invalid/c-fast/query-v5@sha256:3333333333333333333333333333333333333333333333333333333333333333",
+    "digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+    "id": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+    "export_sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+    "rootfs_layer_digests": [
+      "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+      "sha256:7777777777777777777777777777777777777777777777777777777777777777"
+    ],
+    "rootfs_diff_ids": [
+      "sha256:8888888888888888888888888888888888888888888888888888888888888888",
+      "sha256:9999999999999999999999999999999999999999999999999999999999999999"
+    ],
+    "config": {
+      "user": "65532:65532",
+      "working_dir": "/opt/c-fast-query-v5",
+      "entrypoint": [
+        "/usr/local/bin/python3.12",
+        "-I",
+        "-S",
+        "-s",
+        "-E",
+        "-B",
+        "/opt/c-fast-query-v5/release/scripts/commodity_c_fast_t1_query_v5_launcher.py"
+      ],
+      "relevant_environment": {
+        "GPG_KEY": "7169605F62C751356D054A26A821E680E5FA6305",
+        "LANG": "C.UTF-8",
+        "PATH": "/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONUNBUFFERED": "1",
+        "PYTHON_SHA256": "c08bc65a81971c1dd5783182826503369466c7e67374d1646519adf05207b684",
+        "PYTHON_VERSION": "3.12.13"
+      },
+      "labels": {
+        "io.vnpy-web-bridge.c-fast-t1.authority-granted": "false",
+        "io.vnpy-web-bridge.c-fast-t1.query-v4-runtime": "true",
+        "io.vnpy-web-bridge.c-fast-t1.query-v5-base-image": "registry.invalid/c-fast/query-v4@sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "io.vnpy-web-bridge.c-fast-t1.query-v5-runtime": "true",
+        "org.opencontainers.image.revision": "0000000000000000000000000000000000000000",
+        "org.opencontainers.image.title": "vnpy-web-bridge C_FAST T1 query-v5 code-only overlay"
+      }
+    },
+    "bundle_files": {
+      "/opt/c-fast-query-v5/release/scripts/commodity_c_fast_t1_query_v5_launcher.py": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "overlay_touched_paths": [
+      "/opt/c-fast-query-v5",
+      "/opt/c-fast-query-v5/release",
+      "/opt/c-fast-query-v5/release/scripts",
+      "/opt/c-fast-query-v5/release/scripts/commodity_c_fast_t1_query_v5_launcher.py",
+      "/run/c-fast-t1-query-v5-pins"
+    ],
+    "forbidden_path_matches": [],
+    "unexpected_bundle_paths": [],
+    "signer_or_private_key_paths": []
+  },
+  "build_provenance_verified": false,
+  "registry_provenance_verified": false,
+  "image_built_here": false,
+  "sensitive_material_present": false,
+  "authority_granted": false
+}

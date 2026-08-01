@@ -1,0 +1,158 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vnpy-web-bridge:schema:commodity-c-fast-t1-query-v5-external-image-evidence-v1",
+  "title": "C_FAST T1 query-v5 unsigned final OCI composition claims v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "capture_kind", "captured_at", "producer",
+    "query_v4", "source_commit_sha", "source_bundle_archive_sha256",
+    "source_manifest_raw_sha256", "source_manifest_canonical_sha256",
+    "build", "image", "build_provenance_verified",
+    "registry_provenance_verified", "image_built_here",
+    "sensitive_material_present", "authority_granted"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "commodity_c_fast_t1_query_v5_external_image_evidence_v1"
+    },
+    "capture_kind": {
+      "const": "unsigned_external_query_v5_final_oci_composition_capture_v1"
+    },
+    "captured_at": {"type": "string", "format": "date-time"},
+    "producer": {"$ref": "#/$defs/producer"},
+    "query_v4": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "content_attestation_raw_sha256",
+        "content_attestation_canonical_sha256",
+        "oci_layout_archive_sha256", "image_reference", "image_digest",
+        "image_id"
+      ],
+      "properties": {
+        "content_attestation_raw_sha256": {"$ref": "#/$defs/sha256"},
+        "content_attestation_canonical_sha256": {"$ref": "#/$defs/sha256"},
+        "oci_layout_archive_sha256": {"$ref": "#/$defs/sha256"},
+        "image_reference": {"$ref": "#/$defs/imageReference"},
+        "image_digest": {"$ref": "#/$defs/ociDigest"},
+        "image_id": {"$ref": "#/$defs/ociDigest"}
+      }
+    },
+    "source_commit_sha": {"$ref": "#/$defs/commit"},
+    "source_bundle_archive_sha256": {"$ref": "#/$defs/sha256"},
+    "source_manifest_raw_sha256": {"$ref": "#/$defs/sha256"},
+    "source_manifest_canonical_sha256": {"$ref": "#/$defs/sha256"},
+    "build": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "platform", "context_kind", "containerfile_sha256",
+        "query_v4_base_image_reference", "query_v4_base_image_digest"
+      ],
+      "properties": {
+        "platform": {"const": "linux/amd64"},
+        "context_kind": {"const": "exact_query_v5_source_bundle_v1"},
+        "containerfile_sha256": {"$ref": "#/$defs/sha256"},
+        "query_v4_base_image_reference": {"$ref": "#/$defs/imageReference"},
+        "query_v4_base_image_digest": {"$ref": "#/$defs/ociDigest"}
+      }
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reference", "digest", "id", "export_sha256",
+        "rootfs_layer_digests", "rootfs_diff_ids", "config",
+        "bundle_files", "overlay_touched_paths", "forbidden_path_matches",
+        "unexpected_bundle_paths", "signer_or_private_key_paths"
+      ],
+      "properties": {
+        "reference": {"$ref": "#/$defs/imageReference"},
+        "digest": {"$ref": "#/$defs/ociDigest"},
+        "id": {"$ref": "#/$defs/ociDigest"},
+        "export_sha256": {"$ref": "#/$defs/sha256"},
+        "rootfs_layer_digests": {"$ref": "#/$defs/digestList"},
+        "rootfs_diff_ids": {"$ref": "#/$defs/digestList"},
+        "config": {"$ref": "#/$defs/config"},
+        "bundle_files": {"$ref": "#/$defs/runtimeBundle"},
+        "overlay_touched_paths": {"$ref": "#/$defs/pathList"},
+        "forbidden_path_matches": {"$ref": "#/$defs/emptyList"},
+        "unexpected_bundle_paths": {"$ref": "#/$defs/emptyList"},
+        "signer_or_private_key_paths": {"$ref": "#/$defs/emptyList"}
+      }
+    },
+    "build_provenance_verified": {"const": false},
+    "registry_provenance_verified": {"const": false},
+    "image_built_here": {"const": false},
+    "sensitive_material_present": {"const": false},
+    "authority_granted": {"const": false}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "ociDigest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "imageReference": {
+      "type": "string", "pattern": "^[^@\\s]+@sha256:[0-9a-f]{64}$"
+    },
+    "producer": {
+      "type": "object", "additionalProperties": false,
+      "required": ["tool", "tool_version"],
+      "properties": {
+        "tool": {"type": "string", "pattern": "^[A-Za-z0-9._+-]+$", "minLength": 1, "maxLength": 128},
+        "tool_version": {"type": "string", "pattern": "^[A-Za-z0-9._+-]+$", "minLength": 1, "maxLength": 128}
+      }
+    },
+    "digestList": {
+      "type": "array", "minItems": 1, "maxItems": 256,
+      "items": {"$ref": "#/$defs/ociDigest"}
+    },
+    "pathList": {
+      "type": "array", "minItems": 1, "maxItems": 128, "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^/(?:opt/c-fast-query-v5|run/c-fast-t1-query-v5-pins)(?:/[A-Za-z0-9._/-]+)?$"}
+    },
+    "emptyList": {"type": "array", "maxItems": 0},
+    "runtimeBundle": {
+      "type": "object", "minProperties": 1, "maxProperties": 16,
+      "propertyNames": {"pattern": "^/opt/c-fast-query-v5/[A-Za-z0-9._/-]+$"},
+      "additionalProperties": {"$ref": "#/$defs/sha256"}
+    },
+    "config": {
+      "type": "object", "additionalProperties": false,
+      "required": ["user", "working_dir", "entrypoint", "relevant_environment", "labels"],
+      "properties": {
+        "user": {"const": "65532:65532"},
+        "working_dir": {"const": "/opt/c-fast-query-v5"},
+        "entrypoint": {
+          "const": [
+            "/usr/local/bin/python3.12", "-I", "-S", "-s", "-E", "-B",
+            "/opt/c-fast-query-v5/release/scripts/commodity_c_fast_t1_query_v5_launcher.py"
+          ]
+        },
+        "relevant_environment": {
+          "type": "object", "minProperties": 1,
+          "additionalProperties": {"type": "string"}
+        },
+        "labels": {
+          "type": "object", "additionalProperties": false,
+          "required": [
+            "io.vnpy-web-bridge.c-fast-t1.authority-granted",
+            "io.vnpy-web-bridge.c-fast-t1.query-v4-runtime",
+            "io.vnpy-web-bridge.c-fast-t1.query-v5-base-image",
+            "io.vnpy-web-bridge.c-fast-t1.query-v5-runtime",
+            "org.opencontainers.image.revision",
+            "org.opencontainers.image.title"
+          ],
+          "properties": {
+            "io.vnpy-web-bridge.c-fast-t1.authority-granted": {"const": "false"},
+            "io.vnpy-web-bridge.c-fast-t1.query-v4-runtime": {"const": "true"},
+            "io.vnpy-web-bridge.c-fast-t1.query-v5-base-image": {"$ref": "#/$defs/imageReference"},
+            "io.vnpy-web-bridge.c-fast-t1.query-v5-runtime": {"const": "true"},
+            "org.opencontainers.image.revision": {"$ref": "#/$defs/commit"},
+            "org.opencontainers.image.title": {"const": "vnpy-web-bridge C_FAST T1 query-v5 code-only overlay"}
+          }
+        }
+      }
+    }
+  }
+}
