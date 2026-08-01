@@ -114,6 +114,7 @@ def make_real_trade_service(
         audit=audit,
         risk=risk,
         rpc=rpc,
+        _c_fast_capability_issuers=(service,),
     )
     service.rpc = rpc
     service.risk = risk

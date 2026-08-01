@@ -289,7 +289,7 @@ class CommoditySimNowService:
             | None
         ) = None
         self._c_fast_trade_capabilities: dict[
-            int, tuple[object, object]
+            TradeService, object
         ] = {}
         self._c_fast_test_double_capability = object()
         self._task: asyncio.Task[Any] | None = None
@@ -332,13 +332,47 @@ class CommoditySimNowService:
             # Test doubles must expose the dedicated C_FAST entry point but
             # never reach the production RiskService bypass.
             return self._c_fast_test_double_capability
-        key = id(trade)
-        bound = self._c_fast_trade_capabilities.get(key)
-        if bound is not None and bound[0] is trade:
-            return bound[1]
+        bound = self._c_fast_trade_capabilities.get(trade)
+        if bound is not None:
+            return bound
         capability = trade._bind_c_fast_order_volume_capability(self)
-        self._c_fast_trade_capabilities[key] = (trade, capability)
+        self._c_fast_trade_capabilities[trade] = capability
         return capability
+
+    def _c_fast_pre_rpc_guard(self) -> None:
+        context = getattr(
+            self._dispatch_operation_context,
+            "c_fast_pre_rpc_guard_context",
+            None,
+        )
+        if not isinstance(context, tuple) or len(context) != 5:
+            raise CommoditySimNowSafetyError(
+                "C_FAST final guard context 无效"
+            )
+        plan, phase, reference, intent, dispatch_abort_epoch = context
+        if (
+            plan is not self.current_plan
+            or not isinstance(plan, dict)
+            or not plan.get("c_fast_shakedown_session_id")
+            or not isinstance(intent, dict)
+            or intent.get("reference") != reference
+        ):
+            raise CommoditySimNowSafetyError(
+                "C_FAST final guard ownership 已失效"
+            )
+        self._require_dispatch_epoch_active(dispatch_abort_epoch)
+        intent["pre_send_binding_guard"] = (
+            self._verify_c_fast_final_dispatch_binding(plan)
+        )
+        intent["pre_send_fact_guard"] = (
+            self._verify_c_fast_pre_send_fact_guard(
+                plan,
+                phase,
+                current_reference=reference,
+            )
+        )
+        self._verify_bound_dispatch_quote_current(intent)
+        self._require_dispatch_epoch_active(dispatch_abort_epoch)
 
     def _dispatch_epoch_snapshot(self) -> int:
         with self._dispatch_abort_lock:
@@ -1207,23 +1241,6 @@ class CommoditySimNowService:
                     self._require_dispatch_epoch_active(
                         dispatch_abort_epoch
                     )
-                    if plan.get(
-                        "c_fast_shakedown_session_id"
-                    ):
-                        intent["pre_send_binding_guard"] = (
-                            self._verify_c_fast_final_dispatch_binding(
-                                plan
-                            )
-                        )
-                        intent["pre_send_fact_guard"] = (
-                            self._verify_c_fast_pre_send_fact_guard(
-                                plan,
-                                payload.phase,
-                                current_reference=str(
-                                    repriced["reference"]
-                                ),
-                            )
-                        )
                     self._verify_bound_dispatch_quote_current(
                         intent
                     )
@@ -1242,18 +1259,37 @@ class CommoditySimNowService:
                         raise CommoditySimNowSafetyError(
                             "C_FAST 私有下单入口不可用"
                         )
-                    result = c_fast_send(
-                        request,
-                        c_fast_order_volume_capability=(
-                            self._c_fast_order_volume_capability()
-                        ),
-                        source_ip=source_ip,
-                        operator=operator,
-                        pre_rpc_guard=pre_rpc_guard,
-                        send_linearization_lock=(
-                            self._dispatch_abort_lock
-                        ),
+                    guard_context = self._dispatch_operation_context
+                    if hasattr(
+                        guard_context,
+                        "c_fast_pre_rpc_guard_context",
+                    ):
+                        raise CommoditySimNowSafetyError(
+                            "C_FAST final guard context 已被占用"
+                        )
+                    guard_context.c_fast_pre_rpc_guard_context = (
+                        plan,
+                        payload.phase,
+                        str(repriced["reference"]),
+                        intent,
+                        dispatch_abort_epoch,
                     )
+                    try:
+                        result = c_fast_send(
+                            request,
+                            c_fast_order_owner=self,
+                            c_fast_order_volume_capability=(
+                                self._c_fast_order_volume_capability()
+                            ),
+                            source_ip=source_ip,
+                            operator=operator,
+                            pre_rpc_guard=self._c_fast_pre_rpc_guard,
+                            send_linearization_lock=(
+                                self._dispatch_abort_lock
+                            ),
+                        )
+                    finally:
+                        del guard_context.c_fast_pre_rpc_guard_context
                 else:
                     result = self.trade.send_order(
                         request,
