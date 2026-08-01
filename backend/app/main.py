@@ -43,6 +43,9 @@ from app.services.commodity_c_fast_execution_permit import (
 from app.services.commodity_c_fast_execution_quality_runtime import (
     commodity_c_fast_execution_quality_runtime,
 )
+from app.services.commodity_c_fast_execution_quality_tick_fanout import (
+    commodity_c_fast_execution_quality_tick_fanout,
+)
 from app.services.commodity_simnow import commodity_simnow_service
 from app.services.market_data_service import market_data_service
 from app.services.monitoring_service import monitoring_service
@@ -126,6 +129,9 @@ async def startup() -> None:
     tick_persistence_service.start()
 
     rpc_service.bind_loop(asyncio.get_running_loop())
+    rpc_service.bind_readonly_tick_listener(
+        commodity_c_fast_execution_quality_tick_fanout.offer_tick
+    )
     try:
         rpc_service.start()
     except AppError as exc:
@@ -143,6 +149,16 @@ async def startup() -> None:
         logger.warning(
             "C_FAST execution-quality runtime remains isolated: %s",
             execution_quality_status["runtime_state"],
+        )
+    execution_quality_tick_status = (
+        commodity_c_fast_execution_quality_tick_fanout.start()
+    )
+    if str(execution_quality_tick_status["fanout_state"]).startswith(
+        "BLOCKED_"
+    ):
+        logger.warning(
+            "C_FAST execution-quality Tick fan-out remains isolated: %s",
+            execution_quality_tick_status["fanout_state"],
         )
     if settings.commodity_c_fast_simnow_execution_permit_enabled:
         # The runtime image must package the exact #165 verifier module before
@@ -176,6 +192,7 @@ async def startup() -> None:
 
 @app.on_event("shutdown")
 async def shutdown() -> None:
+    commodity_c_fast_execution_quality_tick_fanout.stop()
     commodity_c_fast_execution_quality_runtime.stop()
     await commodity_simnow_service.stop()
     await monitoring_service.stop()

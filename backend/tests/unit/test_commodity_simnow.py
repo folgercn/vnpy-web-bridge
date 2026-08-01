@@ -525,6 +525,7 @@ def fills_for_requests(requests: list[Any]) -> list[dict[str, Any]]:
             "reference": str(request.reference),
             "price": request.price,
             "volume": request.volume,
+            "trade_at_utc": NOW.isoformat(),
         }
         for index, request in enumerate(requests, start=1)
     ]

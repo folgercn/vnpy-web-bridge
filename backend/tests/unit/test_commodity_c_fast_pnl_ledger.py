@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import ast
+import hashlib
+import json
+import tempfile
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, localcontext
 from pathlib import Path
@@ -14,6 +17,7 @@ from app.schemas.commodity_c_fast_pnl_ledger import (
 )
 from app.services.commodity_c_fast_pnl_ledger import (
     CFastPnlLedgerError,
+    build_actual_simnow_archive_replay_source_facts,
     build_four_layer_pnl_entry,
     reload_and_verify_four_layer_pnl_entry,
     verify_four_layer_pnl_chain,
@@ -63,6 +67,370 @@ def terminal_checksum(facts: dict[str, Any]) -> str:
         "execution_state_checksum": facts["execution_state_checksum"],
     }
     return sha256_json(payload)
+
+
+def verified_actual_source(
+    *,
+    outcome: str = "FULL_FILL",
+) -> dict[str, Any]:
+    children = [
+        {
+            "product": "ag",
+            "vt_symbol": "ag2609.SHFE",
+            "direction": "long",
+            "offset": "open",
+            "volume": 4,
+            "price": 100.0,
+            "decision_price": 99.0,
+            "reference": "CFAST:test:o:1",
+            "vt_orderid": "CTP.1",
+        },
+        {
+            "product": "cu",
+            "vt_symbol": "cu2609.SHFE",
+            "direction": "short",
+            "offset": "open",
+            "volume": 6,
+            "price": 200.0,
+            "decision_price": 202.0,
+            "reference": "CFAST:test:o:2",
+            "vt_orderid": "CTP.2",
+        },
+    ]
+    orders = [
+        {
+            "vt_orderid": row["vt_orderid"],
+            "vt_symbol": row["vt_symbol"],
+            "direction": row["direction"],
+            "offset": row["offset"],
+            "volume": row["volume"],
+            "reference": row["reference"],
+            "status": "all_traded" if outcome == "FULL_FILL" else "cancelled",
+        }
+        for row in children
+    ]
+    trades = [
+        {
+            "vt_tradeid": "CTP.T1",
+            "vt_orderid": "CTP.1",
+            "vt_symbol": "ag2609.SHFE",
+            "direction": "long",
+            "offset": "open",
+            "volume": 4,
+            "price": 100.0,
+            "reference": "CFAST:test:o:1",
+            "trade_at_utc": "2026-09-02T08:00:10Z",
+        },
+        {
+            "vt_tradeid": "CTP.T2",
+            "vt_orderid": "CTP.2",
+            "vt_symbol": "cu2609.SHFE",
+            "direction": "short",
+            "offset": "open",
+            "volume": 6,
+            "price": 200.0,
+            "reference": "CFAST:test:o:2",
+            "trade_at_utc": "2026-09-02T08:00:20Z",
+        },
+    ]
+    if outcome != "FULL_FILL":
+        trades = trades[:1]
+    positions = [
+        {"vt_symbol": "ag2609.SHFE", "direction": "long", "volume": 4}
+    ]
+    if outcome == "FULL_FILL":
+        positions.append(
+            {"vt_symbol": "cu2609.SHFE", "direction": "short", "volume": 6}
+        )
+
+    def row_hash(rows: list[dict[str, Any]]) -> str:
+        return sha256_json(sorted(sha256_json(row) for row in rows))
+
+    raw_quotes = {
+        "ag2609.SHFE": {
+            "bid_price_1": 104.0,
+            "ask_price_1": 106.0,
+            "bid_volume_1": 10.0,
+            "ask_volume_1": 10.0,
+            "received_at": "2026-09-02T08:00:30Z",
+            "spread_ticks": 2.0,
+        },
+        "cu2609.SHFE": {
+            "bid_price_1": 189.0,
+            "ask_price_1": 191.0,
+            "bid_volume_1": 10.0,
+            "ask_volume_1": 10.0,
+            "received_at": "2026-09-02T08:00:40Z",
+            "spread_ticks": 2.0,
+        },
+    }
+    mark_evidence = {
+        symbol: {
+            "raw_quote": quote,
+            "raw_quote_sha256": sha256_json(quote),
+            "received_at_utc": quote["received_at"],
+            "mark_price": (quote["bid_price_1"] + quote["ask_price_1"]) / 2,
+        }
+        for symbol, quote in raw_quotes.items()
+    }
+    observed_positions = {
+        row["vt_symbol"]: (
+            row["volume"] if row["direction"] == "long" else -row["volume"]
+        )
+        for row in positions
+        if row["volume"]
+    }
+    reconciliation = {
+        "expected_positions": observed_positions,
+        "observed_positions": observed_positions,
+    }
+    orders_hash = row_hash(orders)
+    trades_hash = row_hash(trades)
+    positions_hash = row_hash(positions)
+    terminal_raw_facts = {
+        "schema_version": "commodity_c_fast_terminal_raw_facts_v2",
+        "scope": "C_FAST_SESSION_PLUS_FINAL_POSITIONS",
+        "account_sha256": "1" * 64,
+        "orders": orders,
+        "trades": trades,
+        "positions": positions,
+        "contract_specs": {
+            "ag2609.SHFE": {
+                "product": "ag",
+                "multiplier": 10,
+                "price_tick": 1.0,
+            },
+            "cu2609.SHFE": {
+                "product": "cu",
+                "multiplier": 5,
+                "price_tick": 1.0,
+            },
+        },
+        "orders_sha256": orders_hash,
+        "trades_sha256": trades_hash,
+        "positions_sha256": positions_hash,
+        "all_orders_sha256": orders_hash,
+        "all_trades_sha256": trades_hash,
+        "all_positions_sha256": positions_hash,
+        "captured_at_utc": "2026-09-02T08:00:50Z",
+    }
+    terminal_status = (
+        "COMPLETE" if outcome == "FULL_FILL" else "HALTED_RECONCILED"
+    )
+    terminal_guard = {
+        "state": "VALID",
+        "observed_account_hash": "1" * 64,
+        "final_positions": observed_positions,
+        "second_snapshot": {
+            "orders_hash": orders_hash,
+            "trades_hash": trades_hash,
+            "positions_hash": positions_hash,
+        },
+    }
+    execution_snapshot = {
+        "captured_at_utc": "2026-09-02T08:01:00Z",
+        "available": True,
+        "expected_volume": 10,
+        "filled_volume": sum(row["volume"] for row in trades),
+        "slippage_cny": 100.0 if outcome == "FULL_FILL" else 40.0,
+        "orders": [
+            {
+                "phase": "open",
+                "vt_orderid": "CTP.1",
+                "product": "ag",
+                "vt_symbol": "ag2609.SHFE",
+                "direction": "long",
+                "offset": "open",
+                "expected_volume": 4,
+                "filled_volume": 4.0,
+                "trade_evidence_state": "COMPLETE",
+                "decision_price": 99.0,
+                "average_fill_price": 100.0,
+                "slippage_cny": 40.0,
+                "trade_count": 1,
+                "order_status": "all_traded",
+            },
+            {
+                "phase": "open",
+                "vt_orderid": "CTP.2",
+                "product": "cu",
+                "vt_symbol": "cu2609.SHFE",
+                "direction": "short",
+                "offset": "open",
+                "expected_volume": 6,
+                "filled_volume": 6.0 if outcome == "FULL_FILL" else 0.0,
+                "trade_evidence_state": (
+                    "COMPLETE" if outcome == "FULL_FILL" else "INCOMPLETE"
+                ),
+                "decision_price": 202.0,
+                "average_fill_price": (
+                    200.0 if outcome == "FULL_FILL" else None
+                ),
+                "slippage_cny": 60.0 if outcome == "FULL_FILL" else None,
+                "trade_count": 1 if outcome == "FULL_FILL" else 0,
+                "order_status": (
+                    "all_traded" if outcome == "FULL_FILL" else "cancelled"
+                ),
+            },
+        ],
+    }
+    pnl = {
+        "schema_version": "commodity_c_fast_simnow_pnl_v1",
+        "captured_at_utc": "2026-09-02T08:01:00Z",
+        "mark_source": "CURRENT_L1_MID",
+        "mark_evidence": mark_evidence,
+        "fees_state": "UNBOUND_NOT_ASSUMED_ZERO",
+        "fees_cny": None,
+        "net_pnl_state": "UNAVAILABLE_UNTIL_FEES_BOUND",
+        "net_pnl_cny": None,
+        "execution_snapshot_available": True,
+        "trade_evidence_state": (
+            "COMPLETE" if outcome == "FULL_FILL" else "INCOMPLETE"
+        ),
+        "expected_volume": 10,
+        "filled_volume": sum(row["volume"] for row in trades),
+        "execution_mark_to_market_pnl_cny": (
+            500.0 if outcome == "FULL_FILL" else 200.0
+        ),
+        "adverse_slippage_cny": (100.0 if outcome == "FULL_FILL" else 40.0),
+    }
+    execution = {
+        "schema_version": "commodity_c_fast_simnow_shakedown_evidence_v1",
+        "started_at_utc": "2026-09-02T07:59:00Z",
+        "submitted": {"close": [], "open": children},
+        "send_intents": {"close": [], "open": []},
+        "halt": None,
+        "reconciliation": reconciliation,
+        "final_positions": observed_positions,
+        "terminal_guard": terminal_guard,
+        "terminal_raw_facts": terminal_raw_facts,
+        "execution_snapshot": execution_snapshot,
+        "pnl": pnl,
+    }
+    execution["state_checksum"] = sha256_json(execution)
+    session_core = {
+        "session_id": "cfast-shakedown-" + "a" * 32,
+        "session_nonce": "a" * 32,
+        "candidate_id": "C_FAST_CROSS_SECTION_NEUTRAL",
+        "execution_lane": "simnow_shakedown",
+        "countable_forward": False,
+        "production_allowed": False,
+        "automatic_promotion_allowed": False,
+        "source_snapshot_id": "cfast-snapshot-202609",
+        "source_snapshot_hash": SNAPSHOT_HASH,
+        "control_acceptance_id": "cfast-acceptance-202609",
+        "execution_permit_id": "cfast-permit-202609",
+        "acceptance_receipt_raw_sha256": "a" * 64,
+        "formula_target_binding_sha256": FORMULA_HASH,
+        "source_month": "2026-08",
+        "signed_execution_day": "2026-09-02",
+        "account_hash": "1" * 64,
+        "selected_products": ["ag", "cu"],
+        "plan": {"selected_products": ["ag", "cu"]},
+        "previous_terminal_checksum": None,
+    }
+    plan_hash = sha256_json(session_core)
+    archive = {
+        "schema_version": "commodity_c_fast_simnow_shakedown_session_v1",
+        **session_core,
+        "plan_hash": plan_hash,
+        "status": terminal_status,
+        "continuous_authorized": False,
+        "started_by": "admin",
+        "previewed_at_utc": "2026-09-02T07:58:00Z",
+        "completed_at_utc": "2026-09-02T08:01:30+00:00",
+        "execution": execution,
+    }
+    archive["terminal_checksum"] = sha256_json(
+        {
+            "session_id": archive["session_id"],
+            "plan_hash": archive["plan_hash"],
+            "status": archive["status"],
+            "completed_at_utc": archive["completed_at_utc"],
+            "execution_state_checksum": execution["state_checksum"],
+        }
+    )
+    raw_archive = (
+        json.dumps(archive, ensure_ascii=False, indent=2) + "\n"
+    ).encode("utf-8")
+    with tempfile.TemporaryDirectory() as directory:
+        archive_dir = Path(directory)
+        archive_path = archive_dir / f"{archive['session_id']}.json"
+        archive_path.write_bytes(raw_archive)
+        archive_path.chmod(0o600)
+        actual = build_actual_simnow_archive_replay_source_facts(
+            ledger_id=LEDGER_ID,
+            snapshot_hash=SNAPSHOT_HASH,
+            formula_target_binding_sha256=FORMULA_HASH,
+            valuation_day="2026-09-02",
+            as_of_at_utc="2026-09-02T08:02:00Z",
+            archive_dir=archive_dir,
+            session_id=archive["session_id"],
+            expected_archive_raw_sha256=hashlib.sha256(
+                raw_archive
+            ).hexdigest(),
+            expected_terminal_checksum=archive["terminal_checksum"],
+            expected_chain_tip_terminal_checksum=archive["terminal_checksum"],
+        )
+    assert actual.order_outcome == outcome
+    return actual.model_dump(mode="json")
+
+
+def source_inputs_with_verified_actual(
+    *, outcome: str = "FULL_FILL"
+) -> tuple[dict[str, dict[str, Any]], str]:
+    actual = verified_actual_source(outcome=outcome)
+    plan_hash = str(actual["plan_hash"])
+    source = source_inputs(plan_hash=plan_hash)
+    source["actual"] = actual
+    return source, plan_hash
+
+
+def rehash_verified_session_archive(actual: dict[str, Any]) -> None:
+    archive = actual["session_archive"]
+    execution = archive["execution"]
+    raw = execution["terminal_raw_facts"]
+
+    def row_hash(rows: list[dict[str, Any]]) -> str:
+        return sha256_json(sorted(sha256_json(row) for row in rows))
+
+    raw["orders_sha256"] = row_hash(raw["orders"])
+    raw["trades_sha256"] = row_hash(raw["trades"])
+    raw["positions_sha256"] = row_hash(raw["positions"])
+    raw["all_orders_sha256"] = raw["orders_sha256"]
+    raw["all_trades_sha256"] = raw["trades_sha256"]
+    raw["all_positions_sha256"] = raw["positions_sha256"]
+    guard = execution["terminal_guard"]
+    guard["second_snapshot"]["orders_hash"] = raw["all_orders_sha256"]
+    guard["second_snapshot"]["trades_hash"] = raw["all_trades_sha256"]
+    guard["second_snapshot"]["positions_hash"] = raw[
+        "all_positions_sha256"
+    ]
+    execution["state_checksum"] = sha256_json(
+        {
+            key: value
+            for key, value in execution.items()
+            if key != "state_checksum"
+        }
+    )
+    archive["terminal_checksum"] = sha256_json(
+        {
+            "session_id": archive["session_id"],
+            "plan_hash": archive["plan_hash"],
+            "status": archive["status"],
+            "completed_at_utc": archive["completed_at_utc"],
+            "execution_state_checksum": execution["state_checksum"],
+        }
+    )
+    actual["orders_sha256"] = raw["orders_sha256"]
+    actual["trades_sha256"] = raw["trades_sha256"]
+    actual["positions_sha256"] = raw["positions_sha256"]
+    actual["execution_state_checksum"] = execution["state_checksum"]
+    actual["terminal_checksum"] = archive["terminal_checksum"]
+    actual["archive_chain_tip_terminal_checksum"] = archive[
+        "terminal_checksum"
+    ]
+    actual["session_archive_sha256"] = sha256_json(archive)
 
 
 def source_inputs(
@@ -411,6 +779,297 @@ def test_actual_complete_binds_terminal_but_amounts_remain_unverified() -> (
     )
     assert actual.fees_state == "UNVERIFIED"
     assert actual.countable_forward is False
+
+
+def test_actual_v4_replays_archived_trades_marks_and_keeps_fees_unbound() -> (
+    None
+):
+    source, plan_hash = source_inputs_with_verified_actual()
+    entry = build(payloads=source, plan_hash=plan_hash)
+    actual = entry.actual_simnow_calibration_pnl
+
+    assert actual.schema_version == (
+        "commodity_c_fast_actual_simnow_calibration_pnl_layer_v3"
+    )
+    assert actual.lineage.source_kind == (
+        "SIMNOW_SESSION_ARCHIVE_RAW_TRADE_MARK_REPLAY_FEES_UNBOUND"
+    )
+    assert actual.source_facts.fact_source == actual.lineage.source_kind
+    assert actual.actual_state == "LOCAL_ARCHIVE_REPLAYED_UNATTESTED"
+    assert (
+        actual.source_facts.external_fact_authority_state
+        == "NOT_PROVIDED_STRUCTURE_ONLY"
+    )
+    assert actual.gross_execution_pnl_cny == 500.0
+    assert actual.adverse_slippage_cny == 100.0
+    assert actual.actual_fees_cny is None
+    assert actual.actual_net_pnl_cny is None
+    assert actual.fees_state == "UNBOUND_NOT_ASSUMED_ZERO"
+    assert actual.net_pnl_state == "UNAVAILABLE_UNTIL_AUTHORITATIVE_FEES_BOUND"
+    assert (
+        reload_and_verify_four_layer_pnl_entry(entry.model_dump(mode="json"))
+        == entry
+    )
+
+    audit = verify_four_layer_pnl_chain([entry.model_dump(mode="json")])
+    assert audit.actual_fact_entry_count == 0
+    assert audit.actual_gross_replayed_entry_count == 1
+
+
+def test_actual_v4_caller_mapping_cannot_claim_authoritative_facts() -> None:
+    source, plan_hash = source_inputs_with_verified_actual()
+    source["actual"]["session_archive_raw_sha256"] = "f" * 64
+
+    entry = build(payloads=source, plan_hash=plan_hash)
+    actual = entry.actual_simnow_calibration_pnl
+    audit = verify_four_layer_pnl_chain([entry.model_dump(mode="json")])
+
+    assert actual.actual_state == "LOCAL_ARCHIVE_REPLAYED_UNATTESTED"
+    assert actual.actual_state != "FACTS_BOUND"
+    assert audit.actual_fact_entry_count == 0
+    assert audit.actual_gross_replayed_entry_count == 1
+
+
+def test_actual_v4_rejects_partial_fill_until_runtime_marks_are_available() -> (
+    None
+):
+    with pytest.raises(CFastPnlLedgerError) as exc_info:
+        verified_actual_source(outcome="PARTIAL_FILL")
+    assert exc_info.value.code == "INVALID_ACTUAL_SESSION_ARCHIVE"
+
+
+def test_actual_v4_rejects_archive_tamper_and_duplicate_trade_identity() -> (
+    None
+):
+    mismatched, plan_hash = source_inputs_with_verified_actual()
+    actual = mismatched["actual"]
+    actual["session_archive"]["execution"]["terminal_raw_facts"]["trades"][0][
+        "price"
+    ] = 101.0
+    actual["session_archive_sha256"] = sha256_json(actual["session_archive"])
+    assert_error(
+        "INVALID_ACTUAL_SOURCE_FACTS",
+        build,
+        payloads=mismatched,
+        plan_hash=plan_hash,
+    )
+
+
+@pytest.mark.parametrize(
+    ("row_kind", "field", "value"),
+    [
+        ("orders", "vt_orderid", "CTP.external"),
+        ("trades", "vt_orderid", "CTP.external"),
+        ("trades", "reference", "CFAST:wrong:reference"),
+        ("orders", "offset", "close"),
+        ("trades", "offset", "close"),
+        ("orders", "vt_symbol", "zn2609.SHFE"),
+    ],
+)
+def test_actual_v4_rejects_rehashed_external_or_substituted_leg(
+    row_kind: str,
+    field: str,
+    value: str,
+) -> None:
+    source, plan_hash = source_inputs_with_verified_actual()
+    actual = source["actual"]
+    raw = actual["session_archive"]["execution"]["terminal_raw_facts"]
+    raw[row_kind][0][field] = value
+    rehash_verified_session_archive(actual)
+
+    assert_error(
+        "INVALID_ACTUAL_SOURCE_FACTS",
+        build,
+        payloads=source,
+        plan_hash=plan_hash,
+    )
+
+
+def test_actual_v4_allows_blank_trade_reference_but_rejects_order_rejection() -> (
+    None
+):
+    blank_reference, plan_hash = source_inputs_with_verified_actual()
+    blank_actual = blank_reference["actual"]
+    blank_actual["session_archive"]["execution"]["terminal_raw_facts"][
+        "trades"
+    ][0]["reference"] = ""
+    rehash_verified_session_archive(blank_actual)
+    assert build(payloads=blank_reference, plan_hash=plan_hash)
+
+    rejected, plan_hash = source_inputs_with_verified_actual()
+    rejected_actual = rejected["actual"]
+    execution = rejected_actual["session_archive"]["execution"]
+    execution["terminal_raw_facts"]["orders"][0]["status"] = "rejected"
+    execution["execution_snapshot"]["orders"][0]["order_status"] = (
+        "rejected"
+    )
+    rehash_verified_session_archive(rejected_actual)
+    assert_error(
+        "INVALID_ACTUAL_SOURCE_FACTS",
+        build,
+        payloads=rejected,
+        plan_hash=plan_hash,
+    )
+
+
+def test_actual_v4_rejects_rehashed_position_and_legacy_extra_fields() -> None:
+    position_tamper, plan_hash = source_inputs_with_verified_actual()
+    position_actual = position_tamper["actual"]
+    position_actual["session_archive"]["execution"]["terminal_raw_facts"][
+        "positions"
+    ][0]["volume"] = 5
+    rehash_verified_session_archive(position_actual)
+    assert_error(
+        "INVALID_ACTUAL_SOURCE_FACTS",
+        build,
+        payloads=position_tamper,
+        plan_hash=plan_hash,
+    )
+
+    extra_field, plan_hash = source_inputs_with_verified_actual()
+    extra_actual = extra_field["actual"]
+    extra_actual["session_archive"]["execution"]["terminal_raw_facts"][
+        "orders"
+    ][0]["legacy_note"] = "must not be exported"
+    rehash_verified_session_archive(extra_actual)
+    assert_error(
+        "INVALID_ACTUAL_SOURCE_FACTS",
+        build,
+        payloads=extra_field,
+        plan_hash=plan_hash,
+    )
+
+    sensitive, plan_hash = source_inputs_with_verified_actual()
+    sensitive_actual = sensitive["actual"]
+    sensitive_actual["session_archive"]["execution"]["send_intents"][
+        "open"
+    ].append({"legacy_credential": "must-not-leak"})
+    rehash_verified_session_archive(sensitive_actual)
+    assert_error(
+        "INVALID_ACTUAL_SOURCE_FACTS",
+        build,
+        payloads=sensitive,
+        plan_hash=plan_hash,
+    )
+
+    duplicate, plan_hash = source_inputs_with_verified_actual()
+    duplicate_actual = duplicate["actual"]
+    trades = duplicate_actual["session_archive"]["execution"][
+        "terminal_raw_facts"
+    ]["trades"]
+    trades[1]["vt_tradeid"] = trades[0]["vt_tradeid"]
+    rehash_verified_session_archive(duplicate_actual)
+    assert_error(
+        "INVALID_ACTUAL_SOURCE_FACTS",
+        build,
+        payloads=duplicate,
+        plan_hash=plan_hash,
+    )
+
+
+def test_actual_v4_builder_requires_independent_raw_archive_pin(
+    tmp_path: Path,
+) -> None:
+    actual = verified_actual_source()
+    archive = actual["session_archive"]
+    raw = (json.dumps(archive, ensure_ascii=False, indent=2) + "\n").encode()
+    (tmp_path / f"{archive['session_id']}.json").write_bytes(raw)
+    (tmp_path / f"{archive['session_id']}.json").chmod(0o600)
+
+    with pytest.raises(CFastPnlLedgerError) as exc_info:
+        build_actual_simnow_archive_replay_source_facts(
+            ledger_id=LEDGER_ID,
+            snapshot_hash=SNAPSHOT_HASH,
+            formula_target_binding_sha256=FORMULA_HASH,
+            valuation_day="2026-09-02",
+            as_of_at_utc="2026-09-02T08:02:00Z",
+            archive_dir=tmp_path,
+            session_id=archive["session_id"],
+            expected_archive_raw_sha256="f" * 64,
+            expected_terminal_checksum=archive["terminal_checksum"],
+            expected_chain_tip_terminal_checksum=archive["terminal_checksum"],
+        )
+    assert exc_info.value.code == "ACTUAL_ARCHIVE_RAW_PIN_MISMATCH"
+
+
+def test_actual_v4_replays_exact_execution_snapshot_even_after_rehash() -> (
+    None
+):
+    source, plan_hash = source_inputs_with_verified_actual()
+    actual = source["actual"]
+    snapshot = actual["session_archive"]["execution"]["execution_snapshot"]
+    snapshot["available"] = False
+    snapshot["orders"] = []
+    rehash_verified_session_archive(actual)
+
+    assert_error(
+        "INVALID_ACTUAL_SOURCE_FACTS",
+        build,
+        payloads=source,
+        plan_hash=plan_hash,
+    )
+
+
+def test_actual_v4_rejects_per_child_overfill_with_same_total_fill() -> None:
+    source, plan_hash = source_inputs_with_verified_actual()
+    actual = source["actual"]
+    execution = actual["session_archive"]["execution"]
+    trades = execution["terminal_raw_facts"]["trades"]
+    trades[0]["volume"] = 5
+    trades[1]["volume"] = 5
+    rows = execution["execution_snapshot"]["orders"]
+    rows[0].update({"filled_volume": 5.0, "slippage_cny": 50.0})
+    rows[1].update({"filled_volume": 5.0, "slippage_cny": 50.0})
+    rehash_verified_session_archive(actual)
+
+    assert_error(
+        "INVALID_ACTUAL_SOURCE_FACTS",
+        build,
+        payloads=source,
+        plan_hash=plan_hash,
+    )
+
+
+def test_actual_v4_rejects_archive_fee_or_net_overclaim() -> None:
+    source, plan_hash = source_inputs_with_verified_actual()
+    actual = source["actual"]
+    pnl = actual["session_archive"]["execution"]["pnl"]
+    pnl.update(
+        {
+            "fees_state": "BOUND",
+            "fees_cny": 0.0,
+            "net_pnl_state": "AVAILABLE",
+            "net_pnl_cny": pnl["execution_mark_to_market_pnl_cny"],
+        }
+    )
+    rehash_verified_session_archive(actual)
+
+    assert_error(
+        "INVALID_ACTUAL_SOURCE_FACTS",
+        build,
+        payloads=source,
+        plan_hash=plan_hash,
+    )
+
+
+def test_actual_v4_coordinated_amount_substitution_fails_fresh_replay() -> (
+    None
+):
+    source, plan_hash = source_inputs_with_verified_actual()
+    payload = build(
+        payloads=source,
+        plan_hash=plan_hash,
+    ).model_dump(mode="json")
+    actual = payload["actual_simnow_calibration_pnl"]
+    actual["gross_execution_pnl_cny"] = 999_999.0
+    actual["actual_net_pnl_cny"] = 999_994.0
+    _rehash_entry(payload, "actual_simnow_calibration_pnl")
+
+    assert_error(
+        "LEDGER_ENTRY_VERIFICATION_FAILED",
+        reload_and_verify_four_layer_pnl_entry,
+        payload,
+    )
 
 
 @pytest.mark.parametrize("actual_state", ["partial", "rejected"])

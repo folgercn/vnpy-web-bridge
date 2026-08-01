@@ -35,6 +35,9 @@ from app.services.commodity_c_fast_execution_permit import (
 from app.services.commodity_c_fast_one_shot_custody import (
     one_shot_custody_pins,
 )
+from app.services.commodity_c_fast_pnl_ledger import (
+    build_actual_simnow_archive_replay_source_facts,
+)
 from app.services.commodity_c_fast_shadow_common import (
     formula_target_binding_sha256,
     sha256_json,
@@ -333,6 +336,7 @@ def fills_for_submitted(plan: dict) -> list[dict]:
                     "reference": submitted["reference"],
                     "price": submitted["price"],
                     "volume": submitted["volume"],
+                    "trade_at_utc": NOW.isoformat(),
                 }
             )
     return rows
@@ -3274,6 +3278,9 @@ def test_c_fast_stop_revokes_memory_before_session_persist_failure(
             "symbol": request.symbol,
             "vt_symbol": f"{request.symbol}.{request.exchange}",
             "status": "not_traded",
+            "direction": request.direction,
+            "offset": request.offset,
+            "volume": request.volume,
         }
     ]
     save_state = service._save_c_fast_shakedown_state
@@ -3390,6 +3397,9 @@ def test_c_fast_stop_cancels_when_first_active_state_persist_fails(
             "symbol": request.symbol,
             "vt_symbol": f"{request.symbol}.{request.exchange}",
             "status": "not_traded",
+            "direction": request.direction,
+            "offset": request.offset,
+            "volume": request.volume,
         }
     ]
     persist = service._persist_active_plan
@@ -4165,10 +4175,8 @@ def test_c_fast_zero_quantity_noop_recovers_after_restart(
     ag["target_quantity"] = 0
     signed, snapshot_hash = sign_payload(payload, make_key())
     snapshot = CommodityCFastShakedownSnapshotDTO.model_validate(signed)
-    provider = lambda: (
-        snapshot.model_copy(deep=True),
-        snapshot_hash,
-    )
+    def provider():
+        return snapshot.model_copy(deep=True), snapshot_hash
     service.bind_c_fast_snapshot_provider(provider)
     preview = service.preview_c_fast_shakedown(
         ["ag"], operator="admin", role="admin", source_ip=None
@@ -4233,10 +4241,8 @@ def test_c_fast_noop_rpc_failure_does_not_abort_service_start(
     ag["target_quantity"] = 0
     signed, snapshot_hash = sign_payload(payload, make_key())
     snapshot = CommodityCFastShakedownSnapshotDTO.model_validate(signed)
-    provider = lambda: (
-        snapshot.model_copy(deep=True),
-        snapshot_hash,
-    )
+    def provider():
+        return snapshot.model_copy(deep=True), snapshot_hash
     service.bind_c_fast_snapshot_provider(provider)
     preview = service.preview_c_fast_shakedown(
         ["ag"], operator="admin", role="admin", source_ip=None
@@ -4410,6 +4416,182 @@ def test_c_fast_terminal_pnl_uses_reconciliation_execution_snapshot(
         execution["pnl"]["filled_volume"]
         == execution["execution_snapshot"]["filled_volume"]
     )
+
+
+def test_c_fast_terminal_archive_contains_fresh_replay_actual_inputs(
+    tmp_path: Path,
+) -> None:
+    service, rpc, snapshot, snapshot_hash = prepare_c_fast_shakedown(tmp_path)
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    service.start_c_fast_shakedown(
+        preview["plan_hash"],
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+    ag = next(row for row in snapshot.targets if row.product == "ag")
+    rpc.positions = [
+        position("ag", ag.target_quantity, contract_month="2612")
+    ]
+    rpc.positions[0]["account_original"] = "sensitive-account"
+    rpc.positions[0]["password"] = "sensitive-password"
+    rpc.trades = fills_for_submitted(service.current_plan)
+    for trade in rpc.trades:
+        trade["trade_at_utc"] = NOW.isoformat()
+        trade["token"] = "sensitive-token"
+    rpc.orders = [
+        {
+            **submitted,
+            "status": "all_traded",
+        }
+        for phase in ("close", "open")
+        for submitted in service.current_plan["submitted"][phase]
+    ]
+    for order in rpc.orders:
+        order["account_original"] = "sensitive-account"
+
+    service.auto_candidate_shakedown_advance()
+
+    archive = service._load_c_fast_terminal_archive(preview["session_id"])
+    assert archive is not None
+    execution = archive["execution"]
+    raw = execution["terminal_raw_facts"]
+    assert raw["schema_version"] == "commodity_c_fast_terminal_raw_facts_v2"
+    assert raw["scope"] == "C_FAST_SESSION_PLUS_FINAL_POSITIONS"
+    assert raw["orders"]
+    assert all(
+        set(row)
+        == {
+            "vt_orderid",
+            "reference",
+            "vt_symbol",
+            "direction",
+            "offset",
+            "volume",
+            "status",
+        }
+        for row in raw["orders"]
+    )
+    assert all(
+        set(row)
+        == {
+            "vt_tradeid",
+            "vt_orderid",
+            "reference",
+            "vt_symbol",
+            "direction",
+            "offset",
+            "volume",
+            "price",
+            "trade_at_utc",
+        }
+        for row in raw["trades"]
+    )
+    assert all(
+        set(row) == {"vt_symbol", "direction", "volume"}
+        for row in raw["positions"]
+    )
+    archive_json = json.dumps(archive, ensure_ascii=False)
+    for secret in (
+        "account_original",
+        "sensitive-account",
+        "password",
+        "sensitive-password",
+        "token",
+        "sensitive-token",
+    ):
+        assert secret not in archive_json
+    public_status = json.dumps(
+        service.c_fast_shakedown_status(), ensure_ascii=False
+    )
+    public_history = json.dumps(
+        service.c_fast_shakedown_history(), ensure_ascii=False
+    )
+    for public_payload in (public_status, public_history):
+        assert '"terminal_raw_facts":' not in public_payload
+        assert "account_original" not in public_payload
+        assert "sensitive-account" not in public_payload
+        assert "password" not in public_payload
+        assert "sensitive-password" not in public_payload
+        assert "token" not in public_payload
+        assert "sensitive-token" not in public_payload
+        assert "terminal_raw_fact_summary" in public_payload
+    assert execution["pnl"]["mark_evidence"]["ag2612.SHFE"][
+        "raw_quote_sha256"
+    ] == sha256_json(
+        execution["pnl"]["mark_evidence"]["ag2612.SHFE"]["raw_quote"]
+    )
+
+    source = build_actual_simnow_archive_replay_source_facts(
+        ledger_id="cfast-four-layer-ledger-2026-09",
+        snapshot_hash=snapshot_hash,
+        formula_target_binding_sha256=(
+            snapshot.formula_target_binding_sha256
+        ),
+        valuation_day=NOW.date().isoformat(),
+        as_of_at_utc=archive["completed_at_utc"],
+        archive_dir=service._c_fast_terminal_archive_dir(),
+        session_id=preview["session_id"],
+        expected_archive_raw_sha256=hashlib.sha256(
+            service._c_fast_terminal_archive_path(
+                preview["session_id"]
+            ).read_bytes()
+        ).hexdigest(),
+        expected_terminal_checksum=archive["terminal_checksum"],
+        expected_chain_tip_terminal_checksum=archive["terminal_checksum"],
+    )
+    assert source.fee_binding_state == "UNBOUND_NOT_ASSUMED_ZERO"
+    assert source.fee_source_state == "NOT_AVAILABLE_IN_SESSION_ARCHIVE"
+    assert source.filled_lots == source.expected_lots
+    assert source.actual_state == "LOCAL_ARCHIVE_REPLAYED_UNATTESTED"
+    assert "sensitive-" not in source.model_dump_json()
+
+
+@pytest.mark.parametrize(
+    "value",
+    [float("nan"), float("inf"), float("-inf"), 1.5, -1, 0, True],
+)
+def test_c_fast_archive_rejects_non_positive_integral_volume(value) -> None:
+    with pytest.raises(CommoditySimNowStateError):
+        CommoditySimNowService._c_fast_archive_integral_volume(
+            value,
+            field="test volume",
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("price", float("nan")),
+        ("price", float("inf")),
+        ("price", 0),
+        ("volume", 1.5),
+        ("trade_at_utc", "not-a-time"),
+    ],
+)
+def test_c_fast_archive_trade_projection_rejects_invalid_numeric_or_time(
+    tmp_path: Path,
+    field: str,
+    value,
+) -> None:
+    service, _, _ = make_service(tmp_path)
+    row = {
+        "vt_tradeid": "CTP.T1",
+        "vt_orderid": "CTP.1",
+        "reference": "CFAST:test:o:1",
+        "vt_symbol": "ag2610.SHFE",
+        "direction": "long",
+        "offset": "open",
+        "volume": 1,
+        "price": 100.0,
+        "trade_at_utc": NOW.isoformat(),
+    }
+    row[field] = value
+
+    with pytest.raises(CommoditySimNowStateError):
+        service._c_fast_archive_trade_projection(row)
 
 
 def test_c_fast_pnl_requires_complete_evidence_per_child(

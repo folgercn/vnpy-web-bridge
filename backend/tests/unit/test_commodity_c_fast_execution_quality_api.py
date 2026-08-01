@@ -97,6 +97,10 @@ def test_status_is_readonly_authenticated_and_zero_authority(
     assert status["orders_sent"] == 0
     assert status["positions_modified"] == 0
     assert all(status[key] is False for key in FALSE_AUTHORITY)
+    assert status["tick_fanout"]["fanout_state"] == "DISABLED_DEFAULT_OFF"
+    assert status["tick_fanout"]["external_market_subscription_requested"] is False
+    assert status["tick_fanout"]["runtime_active"] is False
+    assert status["tick_fanout"]["execution_quality_implemented"] is False
 
 
 def test_lifecycle_revalidation_is_admin_only_and_has_no_start_route(

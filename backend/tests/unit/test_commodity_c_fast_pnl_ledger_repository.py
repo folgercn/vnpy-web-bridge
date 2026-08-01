@@ -25,6 +25,7 @@ from test_commodity_c_fast_pnl_ledger import (
     LEDGER_ID,
     build,
     source_inputs,
+    source_inputs_with_verified_actual,
 )
 
 
@@ -109,7 +110,7 @@ def test_append_reopen_audit_and_exports_are_deterministic(
     assert expected_json.endswith(b"\n")
     assert "不可变账本审计报告" in expected_report
     assert "NOT_PROVIDED_STRUCTURE_ONLY" in expected_report
-    assert "Actual 金额固定为 `null/UNVERIFIED`" in expected_report
+    assert "当前 archive 没有权威 fee statement" in expected_report
 
 
 def test_append_is_create_only_and_idempotent(tmp_path: Path) -> None:
@@ -517,6 +518,7 @@ def test_export_declares_strict_adapters_and_actual_null_boundary(
         "cfast-book-walk-fill-bounds-v1",
         "cfast-simnow-not-provided-v1",
         "cfast-simnow-archive-reference-v3",
+        "cfast-simnow-session-archive-replay-v4",
     ]
     actual = exported.entries[0].actual_simnow_calibration_pnl
     assert actual.actual_state == "FACTS_BOUND"
@@ -538,6 +540,38 @@ def test_export_declares_strict_adapters_and_actual_null_boundary(
         "REPOSITORY_EXPORT_DTO_INVALID",
         reload_and_verify_repository_export,
         duplicated,
+    )
+
+
+def test_export_and_report_count_verified_actual_amount_entries(
+    tmp_path: Path,
+) -> None:
+    repository = CommodityCFastPnlLedgerRepository.open_or_create(
+        tmp_path,
+        LEDGER_ID,
+    )
+    source, plan_hash = source_inputs_with_verified_actual()
+    repository.append(
+        build(payloads=source, plan_hash=plan_hash).model_dump(mode="json")
+    )
+
+    exported = repository.export()
+    assert exported.schema_version == (
+        "commodity_c_fast_pnl_ledger_repository_export_v2"
+    )
+    assert exported.audit.actual_fact_entry_count == 0
+    assert exported.audit.actual_gross_replayed_entry_count == 1
+    export_bytes = repository.export_json_bytes()
+    for marker in (
+        b"account_original",
+        b"password",
+        b"token",
+        b"secret",
+        b"credential",
+    ):
+        assert marker not in export_bytes.lower()
+    assert "archive fresh-replay Actual gross/slippage 的记录数：`1`" in (
+        repository.render_audit_report_zh()
     )
 
 

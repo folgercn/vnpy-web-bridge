@@ -1,0 +1,252 @@
+from __future__ import annotations
+
+import json
+import sys
+from copy import deepcopy
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT / "backend"))
+sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import commodity_c_fast_pure_producer_kernel as producer
+import research_warehouse.c_fast_source_view as c_fast_source
+from research_warehouse.c_fast_source_view import (
+    BuiltCFastSourceView,
+    VerifiedExecutionDayRaw,
+    build_c_fast_source_view,
+    publish_built_c_fast_source_view,
+    verify_built_c_fast_source_view,
+)
+from research_warehouse.c_fast_source_view_verify_cli import main as verify_cli
+from research_warehouse.calendar_models import (
+    CalendarDay,
+    OfficialCalendar,
+)
+from research_warehouse.canonical import sha256
+from research_warehouse.m2_isolation_contracts import false_authority
+from research_warehouse.pit_source_view import PitSourceViewError
+from test_research_warehouse_pit_source_view import _inputs
+from test_research_warehouse_static_core_baseline import (
+    _contract_registry,
+)
+
+UTC = timezone.utc
+
+
+def _build(
+    *,
+    observed_at_utc: datetime = datetime(2026, 8, 3, 9, 0, tzinfo=UTC),
+    contract_registry_sha256: str | None = None,
+    history_completed_at: str | None = None,
+) -> BuiltCFastSourceView:
+    calendar, history, daily_raw, _key = _inputs()
+    if history_completed_at is not None:
+        history = {**history, "completed_at": history_completed_at}
+    rows = dict(calendar.days)
+    current = max(rows) + timedelta(days=1)
+    while current <= date(2026, 10, 20):
+        rows[current] = CalendarDay(
+            day=current,
+            status="OFFICIAL_DAY" if current.weekday() < 5 else "CLOSED",
+            evening_session_natural_date=None,
+        )
+        current += timedelta(days=1)
+    calendar = OfficialCalendar.create(
+        calendar_id=calendar.calendar_id,
+        raw_sha256=calendar.raw_sha256,
+        valid_from=calendar.valid_from,
+        valid_to=date(2026, 10, 20),
+        issued_at=calendar.issued_at,
+        exchanges=calendar.exchanges,
+        days=rows,
+        source_evidence=calendar.source_evidence,
+        source_evidence_root=calendar.source_evidence_root,
+    )
+    daily_raw = {
+        day: {
+            exchange: raw.replace(b"2612", b"2609")
+            .replace(b"2701", b"2610")
+            .replace(b"2702", b"2611")
+            for exchange, raw in sources.items()
+        }
+        for day, sources in daily_raw.items()
+    }
+    execution_raw = {
+        exchange: raw.replace(b'"report_date":"20260731"', b'"report_date":"20260803"')
+        for exchange, raw in daily_raw["2026-07-31"].items()
+    }
+    contract_registry_raw = _contract_registry()
+    return build_c_fast_source_view(
+        calendar=calendar,
+        calendar_anchor_raw_sha256="2" * 64,
+        warehouse_registry_raw_sha256=history["registry_raw_sha256"],
+        history_receipt=history,
+        history_receipt_raw_sha256="3" * 64,
+        operator_pins={
+            "operator_state_raw_sha256": "4" * 64,
+            "manifest_genesis_seal_sha256": "5" * 64,
+            "manifest_head_seal_sha256": "6" * 64,
+            "manifest_head_commit_seal_sha256": "7" * 64,
+            "commit_anchor_ledger_raw_sha256": "8" * 64,
+        },
+        daily_source_raw=daily_raw,
+        execution_day_source=VerifiedExecutionDayRaw(
+            official_day="2026-08-03",
+            completed_at=datetime(2026, 8, 3, 8, 30, tzinfo=UTC),
+            receipt_raw_sha256="9" * 64,
+            sources=execution_raw,
+        ),
+        contract_registry_raw=contract_registry_raw,
+        expected_contract_registry_raw_sha256=(
+            contract_registry_sha256 or sha256(contract_registry_raw)
+        ),
+        source_month="2026-07",
+        observed_at_utc=observed_at_utc,
+    )
+
+
+def test_warehouse_c_fast_source_is_deterministic_and_sealed_export_ready() -> None:
+    first = _build()
+    second = _build()
+
+    assert first == second
+    verify_built_c_fast_source_view(first)
+    source = json.loads(first.source_view_raw)
+    evidence = json.loads(first.evidence_raw)
+    lineage = json.loads(first.lineage_raw)
+    assert source["schema_version"] == producer.SOURCE_SCHEMA_VERSION
+    assert source["research_as_of_official_day"] == "2026-07-31"
+    assert source["execution_day"] == "2026-08-03"
+    assert len(source["products"]) == 10
+    assert tuple(first.artifacts) == producer.ARTIFACT_ROLES
+    assert evidence["producer_replay"] == "EXACT_NINE_ARTIFACT_BYTES_VERIFIED"
+    assert evidence["authority"] == false_authority()
+    assert lineage["source_view_canonical_sha256"] == (
+        producer.produce_research_artifacts(first.source_view_raw)
+        .source_view_canonical_sha256
+    )
+    assert lineage["source_view_canonical_sha256"] == sha256(first.source_view_raw)
+
+
+def test_warehouse_c_fast_source_tamper_and_missing_month_end_fail_closed() -> None:
+    built = _build()
+    tampered_artifacts = dict(built.artifacts)
+    tampered_artifacts["target_evidence"] = tampered_artifacts[
+        "target_evidence"
+    ].replace(b'"target_quantity":', b'"target_quantity":1,"x":')
+    tampered = BuiltCFastSourceView(
+        source_view_raw=built.source_view_raw,
+        artifacts=tampered_artifacts,
+        lineage_raw=built.lineage_raw,
+        evidence_raw=built.evidence_raw,
+    )
+    with pytest.raises(PitSourceViewError, match="replay diverged"):
+        verify_built_c_fast_source_view(tampered)
+
+    calendar, history, daily_raw, _key = _inputs()
+    missing = deepcopy(daily_raw)
+    missing.pop("2026-07-31")
+    with pytest.raises(PitSourceViewError, match="exact days"):
+        build_c_fast_source_view(
+            calendar=calendar,
+            calendar_anchor_raw_sha256="2" * 64,
+            warehouse_registry_raw_sha256=history["registry_raw_sha256"],
+            history_receipt=history,
+            history_receipt_raw_sha256="3" * 64,
+            operator_pins={
+                "operator_state_raw_sha256": "4" * 64,
+                "manifest_genesis_seal_sha256": "5" * 64,
+                "manifest_head_seal_sha256": "6" * 64,
+                "manifest_head_commit_seal_sha256": "7" * 64,
+                "commit_anchor_ledger_raw_sha256": "8" * 64,
+            },
+            daily_source_raw=missing,
+            execution_day_source=VerifiedExecutionDayRaw(
+                official_day="2026-08-03",
+                completed_at=datetime(2026, 8, 3, 8, 30, tzinfo=UTC),
+                receipt_raw_sha256="9" * 64,
+                sources=daily_raw["2026-07-31"],
+            ),
+            contract_registry_raw=_contract_registry(),
+            expected_contract_registry_raw_sha256=sha256(_contract_registry()),
+            source_month="2026-07",
+            observed_at_utc=datetime(2026, 8, 3, 9, 0, tzinfo=UTC),
+        )
+
+
+def test_warehouse_c_fast_source_rejects_stale_observation_and_root_pin() -> None:
+    with pytest.raises(PitSourceViewError, match="after all receipt completion"):
+        _build(observed_at_utc=datetime(2026, 8, 4, 9, 0, tzinfo=UTC))
+    with pytest.raises(PitSourceViewError, match="after all receipt completion"):
+        _build(history_completed_at="2026-08-03T10:00:00.000000Z")
+    with pytest.raises(PitSourceViewError, match="root pin mismatch"):
+        _build(contract_registry_sha256="a" * 64)
+
+
+def test_warehouse_c_fast_source_evidence_tamper_fails_closed() -> None:
+    built = _build()
+    evidence = json.loads(built.evidence_raw)
+    evidence["artifact_digests"][0]["raw_bytes"] += 1
+    tampered = BuiltCFastSourceView(
+        source_view_raw=built.source_view_raw,
+        artifacts=built.artifacts,
+        lineage_raw=built.lineage_raw,
+        evidence_raw=c_fast_source.canonical_json_line(evidence),
+    )
+    with pytest.raises(PitSourceViewError, match="evidence binding mismatch"):
+        verify_built_c_fast_source_view(tampered)
+
+
+def test_warehouse_c_fast_publish_is_create_only_and_cli_replays(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    built = _build()
+    output = tmp_path / "published"
+    publish_built_c_fast_source_view(output, built)
+
+    assert verify_cli(["--input", str(output)]) == 0
+    assert "C_FAST_WAREHOUSE_SOURCE_VIEW_VERIFIED" in capsys.readouterr().out
+    with pytest.raises(PitSourceViewError, match="overwrite forbidden"):
+        publish_built_c_fast_source_view(output, built)
+
+
+def test_warehouse_c_fast_publish_requires_private_custody_root(
+    tmp_path: Path,
+) -> None:
+    public_root = tmp_path / "public"
+    public_root.mkdir(mode=0o755)
+    public_root.chmod(0o755)
+    with pytest.raises(RuntimeError, match="must be private"):
+        publish_built_c_fast_source_view(public_root / "published", _build())
+
+
+def test_warehouse_c_fast_publish_failure_preserves_existing_parent_data(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sentinel = tmp_path / "unrelated.txt"
+    sentinel.write_text("keep", encoding="utf-8")
+    original_create = c_fast_source._create_at
+    calls = 0
+
+    def fail_after_first(parent_fd: int, name: str, raw: bytes) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("injected publication failure")
+        original_create(parent_fd, name, raw)
+
+    monkeypatch.setattr(c_fast_source, "_create_at", fail_after_first)
+    output = tmp_path / "partial"
+    with pytest.raises(PitSourceViewError, match="publication failed closed"):
+        publish_built_c_fast_source_view(output, _build())
+
+    assert sentinel.read_text(encoding="utf-8") == "keep"
+    assert output.is_dir()
+    assert {path.name for path in output.iterdir()} == {"source-view.json"}
