@@ -182,6 +182,9 @@ checksum 错误会返回 `CHAIN_BROKEN`。archive 成功但 current pointer 写�
 归档不再对 final path 原位 `O_EXCL` 写入：在 owner-only archive
 directory fd 和跨进程 lock 下先 create-only 写 reservation 与 hidden temp，
 file fsync 后用 hard-link 原子创建 final，directory fsync 后再清理中间件。
+在同一跨进程 lock 内、reservation/link 之前会重建 final chain，并要求
+candidate `previous_terminal_checksum` 精确等于当前 tail；因此两个进程
+不能同时从同一 predecessor 生成分叉。
 重启只会清理结构和 checksum 可验证的未提交 temp，或收养已 atomic-link
 的 final；partial/conflicting/unknown custody 保留 active plan 并 fail closed。
 如果进程在 archive 写成功、current pointer 写入前崩溃，启动恢复会校验该

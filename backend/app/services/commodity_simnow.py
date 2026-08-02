@@ -7074,6 +7074,13 @@ class CommoditySimNowService:
                 archive_fd,
                 session_id,
             )
+            chain, chain_state = self._c_fast_terminal_chain_locked(
+                archive_fd
+            )
+            if chain_state != "VALID":
+                raise CommoditySimNowStateError(
+                    "C_FAST 终态归档锁内 chain 无效"
+                )
             final_name = f"{session_id}.json"
             existing = self._read_c_fast_archive_artifact_at(
                 archive_fd,
@@ -7086,6 +7093,13 @@ class CommoditySimNowService:
                         "C_FAST 终态归档冲突，禁止覆盖"
                     )
                 return
+            current_tail = (
+                chain[-1].get("terminal_checksum") if chain else None
+            )
+            if session.get("previous_terminal_checksum") != current_tail:
+                raise CommoditySimNowStateError(
+                    "C_FAST 终态归档 predecessor 不是锁内 chain 尾部"
+                )
             reservation_name = f".{session_id}.reservation.json"
             reservation = self._c_fast_terminal_reservation(
                 session,
@@ -7196,30 +7210,45 @@ class CommoditySimNowService:
 
     @staticmethod
     def _open_c_fast_terminal_archive_lock(archive_fd: int) -> int:
-        flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0)
+        flags = os.O_RDWR | getattr(os, "O_CLOEXEC", 0)
         flags |= getattr(os, "O_NOFOLLOW", 0)
-        descriptor = os.open(
-            C_FAST_TERMINAL_ARCHIVE_LOCK,
-            flags,
-            0o600,
-            dir_fd=archive_fd,
-        )
-        opened = os.fstat(descriptor)
-        observed = os.stat(
-            C_FAST_TERMINAL_ARCHIVE_LOCK,
-            dir_fd=archive_fd,
-            follow_symlinks=False,
-        )
-        if (
-            not stat.S_ISREG(opened.st_mode)
-            or opened.st_uid != os.geteuid()
-            or stat.S_IMODE(opened.st_mode) != 0o600
-            or opened.st_nlink != 1
-            or (opened.st_dev, opened.st_ino)
-            != (observed.st_dev, observed.st_ino)
-        ):
+        created = False
+        try:
+            descriptor = os.open(
+                C_FAST_TERMINAL_ARCHIVE_LOCK,
+                flags | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=archive_fd,
+            )
+            created = True
+        except FileExistsError:
+            descriptor = os.open(
+                C_FAST_TERMINAL_ARCHIVE_LOCK,
+                flags,
+                dir_fd=archive_fd,
+            )
+        try:
+            if created:
+                os.fsync(descriptor)
+                os.fsync(archive_fd)
+            opened = os.fstat(descriptor)
+            observed = os.stat(
+                C_FAST_TERMINAL_ARCHIVE_LOCK,
+                dir_fd=archive_fd,
+                follow_symlinks=False,
+            )
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or opened.st_uid != os.geteuid()
+                or stat.S_IMODE(opened.st_mode) != 0o600
+                or opened.st_nlink != 1
+                or (opened.st_dev, opened.st_ino)
+                != (observed.st_dev, observed.st_ino)
+            ):
+                raise OSError("archive lock custody invalid")
+        except Exception:
             os.close(descriptor)
-            raise OSError("archive lock custody invalid")
+            raise
         return descriptor
 
     @staticmethod
@@ -7546,6 +7575,69 @@ class CommoditySimNowService:
             )
         if changed:
             os.fsync(archive_fd)
+
+    def _c_fast_terminal_chain_locked(
+        self,
+        archive_fd: int,
+    ) -> tuple[list[dict[str, Any]], str]:
+        final_pattern = re.compile(
+            r"^cfast-shakedown-[0-9a-f]{32}\.json$"
+        )
+        rows: list[dict[str, Any]] = []
+        for name in os.listdir(archive_fd):
+            if name == C_FAST_TERMINAL_ARCHIVE_LOCK:
+                continue
+            if final_pattern.fullmatch(name) is None:
+                return rows, "CHAIN_BROKEN"
+            session_id = name.removesuffix(".json")
+            artifact = self._read_c_fast_archive_artifact_at(
+                archive_fd,
+                name,
+                required=True,
+            )
+            if artifact is None:  # pragma: no cover - required invariant
+                return rows, "CHAIN_BROKEN"
+            try:
+                session = self._validate_c_fast_terminal_archive_raw(
+                    artifact[0],
+                    session_id=session_id,
+                )
+            except CommoditySimNowStateError:
+                return rows, "CHAIN_BROKEN"
+            if artifact[1].st_nlink != 1:
+                return rows, "CHAIN_BROKEN"
+            rows.append(session)
+        if not rows:
+            return [], "VALID"
+        by_previous: dict[str | None, list[dict[str, Any]]] = {}
+        for session in rows:
+            previous = session.get("previous_terminal_checksum")
+            if previous is not None and not re.fullmatch(
+                r"[0-9a-f]{64}", str(previous)
+            ):
+                return rows, "CHAIN_BROKEN"
+            by_previous.setdefault(previous, []).append(session)
+        roots = by_previous.get(None, [])
+        if len(roots) != 1:
+            return rows, "CHAIN_BROKEN"
+        ordered = [roots[0]]
+        visited = {str(roots[0].get("terminal_checksum"))}
+        while True:
+            checksum = str(ordered[-1].get("terminal_checksum"))
+            children = by_previous.get(checksum, [])
+            if not children:
+                break
+            if len(children) != 1:
+                return rows, "CHAIN_BROKEN"
+            child = children[0]
+            child_checksum = str(child.get("terminal_checksum"))
+            if child_checksum in visited:
+                return rows, "CHAIN_BROKEN"
+            visited.add(child_checksum)
+            ordered.append(child)
+        if len(ordered) != len(rows):
+            return rows, "CHAIN_BROKEN"
+        return ordered, "VALID"
 
     def _recover_c_fast_terminal_archive_artifacts(
         self,

@@ -6,9 +6,11 @@ import json
 import os
 import stat
 from datetime import datetime, timedelta, timezone
+from multiprocessing import get_context
 from pathlib import Path
 from threading import Event, Thread
 from time import monotonic, sleep
+from typing import Any
 
 import app.services.commodity_c_fast_one_shot_custody as one_shot_custody_module
 import pytest
@@ -69,6 +71,22 @@ from test_commodity_simnow import (
     make_settings,
     position,
 )
+
+
+def _publish_terminal_archive_process(
+    settings_payload: dict[str, Any],
+    session: dict[str, Any],
+    start,
+    outcomes,
+) -> None:
+    service = object.__new__(CommoditySimNowService)
+    service.settings = Settings.model_construct(**settings_payload)
+    assert start.wait(5)
+    try:
+        service._archive_c_fast_terminal_session(session)
+        outcomes.put("COMMITTED")
+    except Exception as exc:
+        outcomes.put(f"{exc.__class__.__name__}:{exc}")
 
 
 def sign_payload(payload: dict, private_key) -> tuple[dict, str]:
@@ -4131,6 +4149,94 @@ def test_c_fast_terminal_restart_recovers_linked_pending_commit(
             f".{preview['session_id']}.*.tmp"
         )
     )
+
+
+def test_c_fast_terminal_cross_instance_flock_revalidates_predecessor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shared_archive = tmp_path / "shared-terminal.sessions"
+
+    def candidate(
+        root: Path,
+    ) -> tuple[CommoditySimNowService, dict[str, object]]:
+        root.mkdir()
+        service, rpc, snapshot, _ = prepare_c_fast_shakedown(root)
+        preview = service.preview_c_fast_shakedown(
+            ["ag"], operator="admin", role="admin", source_ip=None
+        )["preview"]
+        service.start_c_fast_shakedown(
+            preview["plan_hash"],
+            operator="admin",
+            role="admin",
+            source_ip=None,
+        )
+        assert service.current_plan is not None
+        ag = next(
+            row for row in snapshot.targets if row.product == "ag"
+        )
+        rpc.positions = [
+            position("ag", ag.target_quantity, contract_month="2612")
+        ]
+        rpc.orders = []
+        rpc.trades = fills_for_submitted(service.current_plan)
+        monkeypatch.setattr(
+            service,
+            "_c_fast_terminal_archive_dir",
+            lambda: shared_archive,
+        )
+        expected = dict(service.current_plan["expected_final_positions"])
+        session, _, _ = service._build_c_fast_terminal_session_candidate(
+            service.current_plan,
+            status="COMPLETE",
+            reconciliation={
+                "expected_positions": expected,
+                "observed_positions": expected,
+            },
+            event_generation=0,
+        )
+        assert session["previous_terminal_checksum"] is None
+        return service, session
+
+    first_service, first_session = candidate(tmp_path / "first")
+    second_service, second_session = candidate(tmp_path / "second")
+    context = get_context("spawn")
+    start = context.Event()
+    outcomes = context.Queue()
+    settings_payload = first_service.settings.model_copy(
+        update={
+            "commodity_c_fast_simnow_state_path": str(
+                tmp_path / "shared-terminal.json"
+            )
+        }
+    ).model_dump(mode="json")
+
+    processes = [
+        context.Process(
+            target=_publish_terminal_archive_process,
+            args=(settings_payload, first_session, start, outcomes),
+        ),
+        context.Process(
+            target=_publish_terminal_archive_process,
+            args=(settings_payload, second_session, start, outcomes),
+        ),
+    ]
+    for process in processes:
+        process.start()
+    start.set()
+    for process in processes:
+        process.join(10)
+        assert not process.is_alive()
+        assert process.exitcode == 0
+
+    rows = [outcomes.get(timeout=2) for _ in processes]
+    assert rows.count("COMMITTED") == 1
+    failures = [row for row in rows if row != "COMMITTED"]
+    assert len(failures) == 1
+    assert "predecessor" in failures[0]
+    chain, state = first_service._c_fast_terminal_chain()
+    assert state == "VALID"
+    assert len(chain) == 1
 
 
 @pytest.mark.parametrize("archive_state", ["missing", "corrupt"])
