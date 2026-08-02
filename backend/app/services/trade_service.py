@@ -10,6 +10,9 @@ from typing import Any, Callable
 from app.core.config import Settings, get_settings
 from app.core.errors import AppError, InvalidOrderRequestError, OrderNotCancelableError, OrderNotFoundError
 from app.schemas.common import STATUS_VALUE_MAP, to_plain_dict
+from app.schemas.manual_execution_permit import (
+    manual_order_request_fingerprint,
+)
 from app.schemas.trade import CancelAllRequestDTO, CancelRequestDTO, OrderRequestDTO
 from app.services.audit_service import AuditService, audit_service
 from app.services.monitoring_service import monitoring_service
@@ -43,6 +46,7 @@ ORDER_TYPE_MAP = {
 CANCELABLE_STATUSES = {"submitting", "not_traded", "part_traded"}
 
 _C_FAST_CAPABILITY_CONSTRUCTION_KEY = object()
+_MANUAL_EXECUTION_CAPABILITY_CONSTRUCTION_KEY = object()
 
 
 def c_fast_order_request_fingerprint(
@@ -80,6 +84,17 @@ class _CFastOrderVolumeCapability:
         self.owner = owner
 
 
+class _ManualExecutionCapability:
+    """Opaque process-local authority for the manual-permit lane."""
+
+    __slots__ = ("owner",)
+
+    def __init__(self, owner: object, *, construction_key: object) -> None:
+        if construction_key is not _MANUAL_EXECUTION_CAPABILITY_CONSTRUCTION_KEY:
+            raise TypeError("manual execution capability cannot be constructed")
+        self.owner = owner
+
+
 class TradeService:
     def __init__(
         self,
@@ -88,6 +103,7 @@ class TradeService:
         risk: RiskService | None = None,
         rpc: VnpyRpcService | None = None,
         _c_fast_capability_issuers: tuple[object, ...] = (),
+        _manual_execution_capability_issuers: tuple[object, ...] = (),
     ) -> None:
         self.settings = settings or get_settings()
         self.audit = audit or audit_service
@@ -99,6 +115,13 @@ class TradeService:
         )
         self._c_fast_order_volume_capabilities: set[
             _CFastOrderVolumeCapability
+        ] = set()
+        self._manual_execution_capability_issuers = tuple(
+            _manual_execution_capability_issuers
+        )
+        self._manual_execution_capability_lock = RLock()
+        self._manual_execution_capabilities: set[
+            _ManualExecutionCapability
         ] = set()
 
     def _bind_c_fast_order_volume_capability(
@@ -190,6 +213,77 @@ class TradeService:
         ):
             raise RuntimeError("C_FAST guarded-send contract is invalid")
 
+    def _bind_manual_execution_capability(
+        self,
+        owner: object,
+    ) -> _ManualExecutionCapability:
+        """Bind an opaque capability to the exact manual permit service."""
+
+        from app.services.manual_execution_permit import (
+            ManualExecutionPermitService,
+            manual_execution_permit_service,
+        )
+
+        if (
+            type(owner) is not ManualExecutionPermitService
+            or getattr(owner, "trade", None) is not self
+            or (
+                owner is not manual_execution_permit_service
+                and not any(
+                    owner is issuer
+                    for issuer in self._manual_execution_capability_issuers
+                )
+            )
+        ):
+            raise TypeError("manual execution capability owner is invalid")
+        capability = _ManualExecutionCapability(
+            owner,
+            construction_key=_MANUAL_EXECUTION_CAPABILITY_CONSTRUCTION_KEY,
+        )
+        with self._manual_execution_capability_lock:
+            self._manual_execution_capabilities.add(capability)
+        return capability
+
+    def _validate_manual_send_contract(
+        self,
+        *,
+        owner: object,
+        capability: object,
+        pre_rpc_guard: Callable[[str], Any],
+        send_linearization_lock: Any | None,
+    ) -> None:
+        from app.services.manual_execution_permit import (
+            ManualExecutionPermitService,
+            manual_execution_permit_service,
+        )
+
+        owner_allowed = bool(
+            type(owner) is ManualExecutionPermitService
+            and getattr(owner, "trade", None) is self
+            and (
+                owner is manual_execution_permit_service
+                or any(
+                    owner is issuer
+                    for issuer in self._manual_execution_capability_issuers
+                )
+            )
+        )
+        with self._manual_execution_capability_lock:
+            capability_allowed = bool(
+                type(capability) is _ManualExecutionCapability
+                and capability in self._manual_execution_capabilities
+                and capability.owner is owner
+            )
+        if not owner_allowed or not capability_allowed:
+            raise RuntimeError("manual execution capability is invalid")
+        if (
+            getattr(pre_rpc_guard, "__self__", None) is not owner
+            or getattr(pre_rpc_guard, "__func__", None)
+            is not ManualExecutionPermitService._manual_pre_rpc_guard
+            or send_linearization_lock is not None
+        ):
+            raise RuntimeError("manual guarded-send contract is invalid")
+
     def config_status(self) -> dict[str, Any]:
         return {
             "web_trade_enabled": self.settings.web_trade_enabled,
@@ -215,6 +309,8 @@ class TradeService:
             send_linearization_lock=send_linearization_lock,
             c_fast_order_owner=None,
             c_fast_order_volume_capability=None,
+            manual_execution_owner=None,
+            manual_execution_capability=None,
         )
 
     def _send_c_fast_order(
@@ -245,6 +341,38 @@ class TradeService:
             send_linearization_lock=send_linearization_lock,
             c_fast_order_owner=c_fast_order_owner,
             c_fast_order_volume_capability=c_fast_order_volume_capability,
+            manual_execution_owner=None,
+            manual_execution_capability=None,
+        )
+
+    def _send_manual_permitted_order(
+        self,
+        payload: OrderRequestDTO,
+        *,
+        manual_execution_owner: object,
+        manual_execution_capability: object,
+        source_ip: str | None = None,
+        operator: str = "anonymous",
+        pre_rpc_guard: Callable[[str], Any],
+    ) -> dict[str, Any]:
+        """Send one human manual order through its independent permit lane."""
+
+        self._validate_manual_send_contract(
+            owner=manual_execution_owner,
+            capability=manual_execution_capability,
+            pre_rpc_guard=pre_rpc_guard,
+            send_linearization_lock=None,
+        )
+        return self._send_order(
+            payload,
+            source_ip=source_ip,
+            operator=operator,
+            pre_rpc_guard=pre_rpc_guard,
+            send_linearization_lock=None,
+            c_fast_order_owner=None,
+            c_fast_order_volume_capability=None,
+            manual_execution_owner=manual_execution_owner,
+            manual_execution_capability=manual_execution_capability,
         )
 
     def _send_order(
@@ -257,11 +385,33 @@ class TradeService:
         send_linearization_lock: Any | None,
         c_fast_order_owner: object | None,
         c_fast_order_volume_capability: object | None,
+        manual_execution_owner: object | None = None,
+        manual_execution_capability: object | None = None,
     ) -> dict[str, Any]:
         request_data = payload.model_dump()
         self.audit.record(action="order_request", request=request_data, operator=operator, source_ip=source_ip)
         try:
-            if c_fast_order_volume_capability is None:
+            if (
+                c_fast_order_volume_capability is not None
+                and manual_execution_capability is not None
+            ):
+                raise RuntimeError("order capabilities are mutually exclusive")
+            if manual_execution_capability is not None:
+                if (
+                    manual_execution_owner is None
+                    or pre_rpc_guard is None
+                ):
+                    raise RuntimeError(
+                        "manual execution capability is invalid"
+                    )
+                self._validate_manual_send_contract(
+                    owner=manual_execution_owner,
+                    capability=manual_execution_capability,
+                    pre_rpc_guard=pre_rpc_guard,
+                    send_linearization_lock=send_linearization_lock,
+                )
+                self.risk.check_order(payload)
+            elif c_fast_order_volume_capability is None:
                 self.risk.check_order(payload)
             elif (
                 c_fast_order_owner is not None
@@ -300,7 +450,32 @@ class TradeService:
                         "guarded non-idempotent RPC unavailable"
                     )
                 final_guard: Callable[[], Any] = pre_rpc_guard
-                if c_fast_order_volume_capability is not None:
+                if manual_execution_capability is not None:
+                    if manual_execution_owner is None:
+                        raise RuntimeError(
+                            "manual execution capability is invalid"
+                        )
+                    actual_order_request_sha256 = (
+                        manual_order_request_fingerprint(
+                            final_payload,
+                            resolved_gateway_name=gateway_name,
+                        )
+                    )
+
+                    def final_guard() -> Any:
+                        self._validate_manual_send_contract(
+                            owner=manual_execution_owner,
+                            capability=manual_execution_capability,
+                            pre_rpc_guard=pre_rpc_guard,
+                            send_linearization_lock=(
+                                send_linearization_lock
+                            ),
+                        )
+                        return pre_rpc_guard(
+                            actual_order_request_sha256
+                        )
+
+                elif c_fast_order_volume_capability is not None:
                     if c_fast_order_owner is None:
                         raise RuntimeError(
                             "C_FAST order-volume capability is invalid"

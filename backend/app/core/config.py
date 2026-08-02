@@ -25,6 +25,17 @@ class Settings(BaseSettings):
     default_gateway_name: str = "CTP"
     order_confirm_required: bool = True
     trade_reference_prefix: str = "web_bridge"
+    manual_execution_permit_enabled: bool = False
+    manual_execution_permit_trusted_public_keys_json: str = "{}"
+    manual_execution_permit_account_hashes: str = ""
+    manual_execution_permit_consume_root: str = (
+        "logs/manual-execution-permit/consumed"
+    )
+    manual_execution_permit_max_ttl_seconds: int = Field(
+        default=300,
+        ge=1,
+        le=300,
+    )
 
     jwt_secret_key: str = "change-me-in-production"
     access_token_expire_minutes: int = Field(default=480, ge=1)
@@ -170,6 +181,59 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_production_secrets(self) -> Settings:
+        if self.manual_execution_permit_enabled:
+            account_hashes = {
+                item.strip().lower()
+                for item in self.manual_execution_permit_account_hashes.split(",")
+                if item.strip()
+            }
+            if not account_hashes or any(
+                not re.fullmatch(r"[0-9a-f]{64}", item)
+                for item in account_hashes
+            ):
+                raise ValueError(
+                    "MANUAL_EXECUTION_PERMIT_ACCOUNT_HASHES must contain SHA256 account hashes"
+                )
+            try:
+                trusted_keys = json.loads(
+                    self.manual_execution_permit_trusted_public_keys_json
+                )
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    "MANUAL_EXECUTION_PERMIT_TRUSTED_PUBLIC_KEYS_JSON must be valid JSON"
+                ) from exc
+            if not isinstance(trusted_keys, dict) or not trusted_keys:
+                raise ValueError(
+                    "MANUAL_EXECUTION_PERMIT_TRUSTED_PUBLIC_KEYS_JSON must contain at least one key"
+                )
+            for entry in trusted_keys.values():
+                if not isinstance(entry, dict) or set(entry) != {
+                    "public_key_base64",
+                    "purpose",
+                }:
+                    raise ValueError(
+                        "MANUAL_EXECUTION_PERMIT_TRUSTED_PUBLIC_KEYS_JSON entries are invalid"
+                    )
+                if entry["purpose"] != "manual_execution_permit_signer":
+                    raise ValueError(
+                        "MANUAL_EXECUTION_PERMIT trusted key purpose is invalid"
+                    )
+                try:
+                    key_bytes = base64.b64decode(
+                        str(entry["public_key_base64"]), validate=True
+                    )
+                except (ValueError, binascii.Error) as exc:
+                    raise ValueError(
+                        "MANUAL_EXECUTION_PERMIT trusted key is invalid base64"
+                    ) from exc
+                if len(key_bytes) != 32:
+                    raise ValueError(
+                        "MANUAL_EXECUTION_PERMIT trusted key must be 32-byte Ed25519"
+                    )
+            if not self.manual_execution_permit_consume_root.strip():
+                raise ValueError(
+                    "MANUAL_EXECUTION_PERMIT_CONSUME_ROOT must be set"
+                )
         if self.commodity_c_fast_shadow_enabled:
             if not self.commodity_c_fast_shadow_snapshot_path.strip():
                 raise ValueError(
