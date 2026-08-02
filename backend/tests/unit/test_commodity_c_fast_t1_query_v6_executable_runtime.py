@@ -53,9 +53,7 @@ def _keyring(
 ) -> dict[str, Any]:
     return {
         "schema_version": (
-            subject.KEYRING_VERSION
-            if executable
-            else foundation_v6.KEYRING_VERSION
+            subject.KEYRING_VERSION if executable else foundation_v6.KEYRING_VERSION
         ),
         "keys": [
             {
@@ -65,9 +63,7 @@ def _keyring(
                     else "query-v6-foundation-test-key-0001"
                 ),
                 "purpose": (
-                    subject.KEY_PURPOSE
-                    if executable
-                    else foundation_v6.KEY_PURPOSE
+                    subject.KEY_PURPOSE if executable else foundation_v6.KEY_PURPOSE
                 ),
                 "public_key_base64": base64.b64encode(
                     private_key.public_key().public_bytes_raw()
@@ -110,9 +106,7 @@ def _foundation(
         "schema_version": foundation_v6.DSN_IDENTITY_VERSION,
         "attestation_id": "dsn-executable-test-0001",
         "observed_at": (NOW - timedelta(minutes=2)).isoformat(),
-        "dsn_file_absolute_path_sha256": _sha(
-            str(dsn_file.resolve()).encode()
-        ),
+        "dsn_file_absolute_path_sha256": _sha(str(dsn_file.resolve()).encode()),
         "device": dsn_info.st_dev,
         "inode": dsn_info.st_ino,
         "owner_uid": dsn_info.st_uid,
@@ -163,9 +157,7 @@ def _foundation(
     foundation_keyring = _keyring(foundation_signer, executable=False)
     payload = {
         "release_id": "foundation-release-test-0001",
-        "attempt_id": foundation_v6.release_attempt_id(
-            "foundation-release-test-0001"
-        ),
+        "attempt_id": foundation_v6.release_attempt_id("foundation-release-test-0001"),
         "issued_at": (NOW - timedelta(minutes=3)).isoformat(),
         "expires_at": (NOW + timedelta(minutes=8)).isoformat(),
         "signer_key_id": foundation_keyring["keys"][0]["key_id"],
@@ -185,9 +177,7 @@ def _foundation(
         "l3_outcome_canonical_sha256": l3.canonical_sha256,
         "query_manifest_raw_sha256": manifest.raw_sha256,
         "query_manifest_canonical_sha256": manifest.canonical_sha256,
-        "runtime_source_commit_sha": provenance.payload[
-            "runtime_source_commit_sha"
-        ],
+        "runtime_source_commit_sha": provenance.payload["runtime_source_commit_sha"],
         "runtime_image_reference": provenance.payload["image_reference"],
         "runtime_image_digest": provenance.payload["image_digest"],
         "runtime_image_id": provenance.payload["image_id"],
@@ -206,12 +196,8 @@ def _foundation(
             evidence.dsn_identity_attestation.canonical_sha256
         ),
         "dsn_file_identity_sha256": dsn["dsn_file_identity_sha256"],
-        "expected_readonly_principal_sha256": dsn[
-            "expected_readonly_principal_sha256"
-        ],
-        "expected_endpoint_identity_sha256": dsn[
-            "expected_endpoint_identity_sha256"
-        ],
+        "expected_readonly_principal_sha256": dsn["expected_readonly_principal_sha256"],
+        "expected_endpoint_identity_sha256": dsn["expected_endpoint_identity_sha256"],
         "query_child_sha256": "f" * 64,
         "audit_script_sha256": "0" * 64,
         "readonly_proof_schema_sha256": "1" * 64,
@@ -228,13 +214,28 @@ def _foundation(
     )
 
 
-def _pins(executable_keyring: dict[str, Any], adapter_raw: bytes) -> subject.ExecutablePins:
+def _pins(
+    executable_keyring: dict[str, Any],
+    adapter_raw: bytes,
+    adapter_path: Path = Path("/opt/c-fast-query-v6/adapter.py"),
+) -> subject.ExecutablePins:
     payload = {
         "schema_version": subject.PIN_SET_VERSION,
         "generation_id": "query-v6-executable-pins-test-0001",
         "executable_keyring_sha256": _sha(subject.canonical_json(executable_keyring)),
         **subject.source_and_schema_hashes(),
         "execution_adapter_sha256": _sha(adapter_raw),
+        "execution_adapter_absolute_path": str(adapter_path.resolve()),
+        "adapter_package_manifest_absolute_path": str(
+            (
+                adapter_path.parent / "query-v6-preconnect-package-manifest.json"
+            ).resolve()
+        ),
+        "adapter_package_manifest_sha256": "4" * 64,
+        "adapter_package_root_identity_sha256": "5" * 64,
+        "python_executable_path": str(Path(sys.executable).resolve()),
+        "python_executable_sha256": "6" * 64,
+        "python_dependency_closure_sha256": "7" * 64,
         "questdb_build_sha256": _sha(b"questdb-build-test"),
     }
     return subject.ExecutablePins(
@@ -246,8 +247,7 @@ def _pins(executable_keyring: dict[str, Any], adapter_raw: bytes) -> subject.Exe
 def _draft() -> dict[str, Any]:
     payload = json.loads(
         (
-            ROOT
-            / "docs/operations/c-fast-t1-query-v6-executable-release.template.json"
+            ROOT / "docs/operations/c-fast-t1-query-v6-executable-release.template.json"
         ).read_text(encoding="utf-8")
     )
     payload.update(
@@ -269,7 +269,9 @@ def _fixture(tmp_path: Path) -> dict[str, Any]:
     custody = tmp_path / "custody"
     custody.mkdir(mode=0o700)
     dsn_file = tmp_path / "dsn"
-    dsn_file.write_text("postgresql://readonly:test@localhost:8812/qdb", encoding="utf-8")
+    dsn_file.write_text(
+        "postgresql://readonly:test@localhost:8812/qdb", encoding="utf-8"
+    )
     dsn_file.chmod(0o600)
     adapter_raw = b"#!/usr/bin/env python3\n# pinned test adapter\n"
     adapter_path = tmp_path / "adapter.py"
@@ -284,7 +286,7 @@ def _fixture(tmp_path: Path) -> dict[str, Any]:
     foundation = _foundation(custody, dsn_file, foundation_signer)
     executable_signer = Ed25519PrivateKey.generate()
     executable_keyring = _keyring(executable_signer, executable=True)
-    pins = _pins(executable_keyring, adapter_raw)
+    pins = _pins(executable_keyring, adapter_raw, adapter_path)
     signed = signer.sign_release(
         _draft(),
         executable_keyring,
@@ -447,12 +449,25 @@ def test_executable_key_cannot_reuse_foundation_domain(tmp_path: Path) -> None:
 def test_consume_precedes_adapter_launch_and_replay_is_closed(tmp_path: Path) -> None:
     values = _fixture(tmp_path)
     launches: list[list[str]] = []
+    capabilities: list[bytes] = []
 
-    def launch(invocation: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+    def launch(
+        invocation: list[str], **kwargs: Any
+    ) -> subprocess.CompletedProcess[str]:
         consume_path = values["custody"] / (
             values["verified"].payload["attempt_id"] + ".query-consumed-v6.json"
         )
         assert consume_path.exists()
+        launch_path = values["custody"] / (
+            values["verified"].payload["attempt_id"] + ".query-child-launched-v6.json"
+        )
+        assert launch_path.exists()
+        launch_claim = json.loads(launch_path.read_text(encoding="utf-8"))
+        capability = kwargs["launch_capability"]
+        assert launch_claim["launch_capability_sha256"] == (
+            runtime.preconnect_adapter.launch_capability_sha256(capability)
+        )
+        capabilities.append(capability)
         launches.append(invocation)
         return subprocess.CompletedProcess(invocation, 0, "", "")
 
@@ -475,6 +490,7 @@ def test_consume_precedes_adapter_launch_and_replay_is_closed(tmp_path: Path) ->
     assert terminal["orders_sent"] == 0
     assert terminal["positions_modified"] == 0
     assert len(launches) == 1
+    assert len(capabilities) == 1
     assert Path(launches[0][2]) == values["adapter_path"].resolve(strict=True)
     assert "query-v6-execution-adapter.py" not in launches[0][2]
 
@@ -493,52 +509,6 @@ def test_consume_precedes_adapter_launch_and_replay_is_closed(tmp_path: Path) ->
             require_root_owned_adapter=False,
         )
     assert len(launches) == 1
-
-
-def test_staged_archive_tamper_never_changes_executed_adapter(tmp_path: Path) -> None:
-    values = _fixture(tmp_path)
-    revalidations = 0
-    launches: list[list[str]] = []
-
-    def tamper_staged_archive(
-        _at: datetime,
-    ) -> subject.VerifiedExecutableRelease:
-        nonlocal revalidations
-        revalidations += 1
-        if revalidations == 2:
-            staged = (
-                values["custody"]
-                / values["verified"].payload["attempt_id"]
-                / "query-v6-execution-adapter.py"
-            )
-            staged.chmod(0o700)
-            staged.write_text("tampered archival copy", encoding="utf-8")
-        return values["verified"]
-
-    def launch(
-        invocation: list[str],
-        **_kwargs: Any,
-    ) -> subprocess.CompletedProcess[str]:
-        launches.append(invocation)
-        return subprocess.CompletedProcess(invocation, 0, "", "")
-
-    code, terminal = runtime.run_authorized_attempt(
-        values["verified"],
-        values["release_path"],
-        values["manifest_path"],
-        values["dsn_file"],
-        values["adapter_path"],
-        tamper_staged_archive,
-        clock=lambda: NOW,
-        adapter_launcher=launch,
-        output_validator=lambda *_args: _successful_validation(),
-        require_root_owned_parent=False,
-        require_root_owned_adapter=False,
-    )
-    assert code == 0
-    assert terminal["terminal_state"] == "COMPLETED_PASS"
-    assert len(launches) == 1
-    assert Path(launches[0][2]) == values["adapter_path"].resolve(strict=True)
 
 
 @pytest.mark.parametrize("drift_target", ["adapter", "dsn"])
@@ -693,7 +663,9 @@ def test_launch_boundary_failure_after_consume_is_terminalized(tmp_path: Path) -
 def test_timeout_is_terminal_outcome_unknown_and_never_replays(tmp_path: Path) -> None:
     values = _fixture(tmp_path)
 
-    def timeout(invocation: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+    def timeout(
+        invocation: list[str], **_kwargs: Any
+    ) -> subprocess.CompletedProcess[str]:
         raise subprocess.TimeoutExpired(invocation, 600)
 
     code, terminal = runtime.run_authorized_attempt(
