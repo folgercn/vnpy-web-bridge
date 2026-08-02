@@ -327,8 +327,25 @@ def foundation_key_materials(
 def expected_foundation_binding(
     verified: foundation_v6.VerifiedAuthorityFoundation,
 ) -> dict[str, Any]:
-    payload = verified.payload
-    manifest = verified.evidence.query_manifest.payload
+    return expected_foundation_binding_from_payload(
+        verified.payload,
+        verified.evidence.query_manifest.payload,
+        raw_sha256=verified.raw_sha256,
+        canonical_sha256=verified.canonical_sha256,
+        signer_public_key_sha256=verified.signer_public_key_sha256,
+    )
+
+
+def expected_foundation_binding_from_payload(
+    payload: dict[str, Any],
+    manifest: dict[str, Any],
+    *,
+    raw_sha256: str,
+    canonical_sha256: str,
+    signer_public_key_sha256: str,
+) -> dict[str, Any]:
+    """Pure official projection used by offline and bundle verifiers."""
+
     fields = (
         "provenance_raw_sha256",
         "provenance_canonical_sha256",
@@ -364,9 +381,9 @@ def expected_foundation_binding(
     return {
         "release_id": payload["release_id"],
         "attempt_id": payload["attempt_id"],
-        "raw_sha256": verified.raw_sha256,
-        "canonical_sha256": verified.canonical_sha256,
-        "signer_public_key_sha256": verified.signer_public_key_sha256,
+        "raw_sha256": raw_sha256,
+        "canonical_sha256": canonical_sha256,
+        "signer_public_key_sha256": signer_public_key_sha256,
         "trusted_keyring_sha256": payload["trusted_keyring_sha256"],
         "authority_state": payload["authority_state"],
         **{field: payload[field] for field in fields},

@@ -174,8 +174,14 @@ the code must not be described as completed production acceptance.
 ```bash
 PYTHONPATH=backend pytest -q \
   backend/tests/unit/test_commodity_c_fast_execution_quality_production_verifier.py \
+  backend/tests/unit/test_commodity_c_fast_execution_quality_p0_bundle_v6.py \
   backend/tests/unit/test_commodity_c_fast_execution_quality_artifact_revalidation.py \
   backend/tests/unit/test_commodity_c_fast_execution_quality_production_assembly.py
 
-ruff check backend/app backend/tests/unit/test_commodity_c_fast_execution_quality_production_verifier.py
+ruff check backend/app \
+  scripts/commodity_c_fast_execution_quality_p0_bundle_v6.py \
+  scripts/commodity_c_fast_execution_quality_sign_runtime_artifact.py \
+  scripts/commodity_c_fast_t1_query_v6_executable.py \
+  backend/tests/unit/test_commodity_c_fast_execution_quality_production_verifier.py \
+  backend/tests/unit/test_commodity_c_fast_execution_quality_p0_bundle_v6.py
 ```

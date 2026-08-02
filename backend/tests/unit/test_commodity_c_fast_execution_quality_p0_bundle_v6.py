@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import base64
+from copy import deepcopy
 from dataclasses import replace
-from datetime import timedelta
+from datetime import datetime, timedelta
 import hashlib
 import importlib.util
 import json
@@ -239,10 +240,18 @@ def _bundle_fixture(tmp_path: Path) -> tuple[subject.P0BundleV6Paths, dict]:
         "foundation_raw_sha256": verified_foundation.raw_sha256,
         "pin_set_manifest_sha256": pins.canonical_sha256,
         "execution_adapter_sha256": pins.execution_adapter_sha256,
-        "adapter_package_manifest_sha256": "1" * 64,
-        "adapter_package_root_identity_sha256": "2" * 64,
-        "python_executable_sha256": "3" * 64,
-        "python_dependency_closure_sha256": "4" * 64,
+        "adapter_package_manifest_sha256": executable_payload["execution"][
+            "adapter_package_manifest_sha256"
+        ],
+        "adapter_package_root_identity_sha256": executable_payload["execution"][
+            "adapter_package_root_identity_sha256"
+        ],
+        "python_executable_sha256": executable_payload["execution"][
+            "python_executable_sha256"
+        ],
+        "python_dependency_closure_sha256": executable_payload["execution"][
+            "python_dependency_closure_sha256"
+        ],
         "invocation_binding_sha256": "5" * 64,
         "launch_capability_sha256": "6" * 64,
         "consume_verified_before_claim": True,
@@ -355,7 +364,11 @@ def _bundle_fixture(tmp_path: Path) -> tuple[subject.P0BundleV6Paths, dict]:
         readonly_proof=proof_path,
         external_custody_identity=external_path,
     )
-    return paths, {"now": now, "terminal": terminal}
+    return paths, {
+        "now": now,
+        "terminal": terminal,
+        "executable_private": executable_key,
+    }
 
 
 def test_builder_replays_full_bundle_and_writes_unsigned_pretty_draft(
@@ -413,6 +426,180 @@ def test_bundle_splice_is_rejected_before_draft(tmp_path: Path) -> None:
             reviewer_role="independent reviewer",
             human_signature="reviewed exact evidence",
         )
+
+
+@pytest.mark.parametrize(
+    "field",
+    (
+        "adapter_package_manifest_sha256",
+        "adapter_package_root_identity_sha256",
+        "python_executable_sha256",
+        "python_dependency_closure_sha256",
+    ),
+)
+def test_launch_runtime_identity_must_match_signed_executable_execution(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    paths, fixture = _bundle_fixture(tmp_path)
+    launch = json.loads(paths.launch_marker.read_text())
+    launch[field] = "f" * 64
+    paths.launch_marker.write_text(
+        json.dumps(launch, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(subject.P0BundleV6Error, match=rf"launch {field} binding"):
+        subject.build_unsigned_p0_draft(
+            paths,
+            generation_id="query-v6-p0-launch-binding-test",
+            issued_at=fixture["now"] - timedelta(minutes=1),
+            valid_until=fixture["now"] + timedelta(minutes=5),
+            archived_at=fixture["now"] - timedelta(minutes=1, seconds=30),
+            signer_key_id="signed-p0-acceptance-key-v1",
+            reviewer_role="independent reviewer",
+            human_signature="reviewed exact execution identity",
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "tampered"),
+    (
+        ("readiness_v4_raw_sha256", "f" * 64),
+        ("l3_outcome_raw_sha256", "f" * 64),
+        ("runtime_pin_manifest_sha256", "f" * 64),
+        ("dsn_file_identity_attestation_raw_sha256", "f" * 64),
+        ("custody_identity_sha256", "f" * 64),
+        ("pin_set_generation_id", "attacker-pin-generation-v1"),
+    ),
+)
+def test_consume_lineage_must_match_signed_executable(
+    tmp_path: Path,
+    field: str,
+    tampered: str,
+) -> None:
+    paths, fixture = _bundle_fixture(tmp_path)
+    consume = json.loads(paths.consume_marker.read_text())
+    consume[field] = tampered
+    paths.consume_marker.unlink()
+    _write_production_json(
+        paths.consume_marker,
+        consume,
+        executable.CONSUME_SCHEMA_PATH,
+        "tampered query-v6 consume lineage",
+    )
+
+    with pytest.raises(subject.P0BundleV6Error, match=rf"consume {field} binding"):
+        subject.build_unsigned_p0_draft(
+            paths,
+            generation_id="query-v6-p0-consume-binding-test",
+            issued_at=fixture["now"] - timedelta(minutes=1),
+            valid_until=fixture["now"] + timedelta(minutes=5),
+            archived_at=fixture["now"] - timedelta(minutes=1, seconds=30),
+            signer_key_id="signed-p0-acceptance-key-v1",
+            reviewer_role="independent reviewer",
+            human_signature="reviewed exact consume lineage",
+        )
+
+
+@pytest.mark.parametrize(
+    ("section", "field", "tampered"),
+    (
+        (
+            "foundation",
+            "runtime_image_reference",
+            "attacker/image@sha256:" + "f" * 64,
+        ),
+        ("execution", "python_executable_path", "/attacker/python"),
+    ),
+)
+def test_validly_signed_executable_must_replay_official_full_projection(
+    tmp_path: Path,
+    section: str,
+    field: str,
+    tampered: str,
+) -> None:
+    paths, fixture = _bundle_fixture(tmp_path)
+    release = json.loads(paths.executable_release.read_text())
+    release[section][field] = tampered
+    release["signature"] = base64.b64encode(
+        fixture["executable_private"].sign(
+            executable.canonical_json(executable.unsigned_payload(release))
+        )
+    ).decode()
+    paths.executable_release.unlink()
+    _write_production_json(
+        paths.executable_release,
+        release,
+        executable.RELEASE_SCHEMA_PATH,
+        "validly signed executable projection splice",
+    )
+
+    with pytest.raises(
+        subject.P0BundleV6Error,
+        match=rf"official {section} projection binding",
+    ):
+        subject.build_unsigned_p0_draft(
+            paths,
+            generation_id="query-v6-p0-executable-projection-test",
+            issued_at=fixture["now"] - timedelta(minutes=1),
+            valid_until=fixture["now"] + timedelta(minutes=5),
+            archived_at=fixture["now"] - timedelta(minutes=1, seconds=30),
+            signer_key_id="signed-p0-acceptance-key-v1",
+            reviewer_role="independent reviewer",
+            human_signature="reviewed official executable projections",
+        )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    (
+        ("foundation_ttl", "foundation release TTL exceeds ten minutes"),
+        ("executable_ttl", "executable release TTL exceeds five minutes"),
+        ("foundation_margin", "consume foundation verification margin"),
+        ("executable_margin", "consume executable launch margin"),
+    ),
+)
+def test_release_ttl_and_margins_replay_from_exact_bundle_timestamps(
+    tmp_path: Path,
+    mutation: str,
+    message: str,
+) -> None:
+    paths, _fixture = _bundle_fixture(tmp_path)
+    payloads = deepcopy(subject.load_exact_bundle(paths).payloads)
+    foundation = payloads["foundation_release"]
+    executable_release = payloads["executable_release"]
+    if mutation == "foundation_ttl":
+        issued = datetime.fromisoformat(foundation["issued_at"])
+        foundation["expires_at"] = (issued + timedelta(minutes=10, seconds=1)).isoformat()
+    elif mutation == "executable_ttl":
+        issued = datetime.fromisoformat(executable_release["issued_at"])
+        executable_release["expires_at"] = (
+            issued + timedelta(minutes=5, seconds=1)
+        ).isoformat()
+    elif mutation == "foundation_margin":
+        foundation["minimum_verification_margin_seconds"] = 600
+    else:
+        executable_release["execution"]["minimum_launch_margin_seconds"] = 300
+
+    with pytest.raises(subject.P0BundleV6Error, match=message):
+        subject._validate_release_timeline(payloads)
+
+
+@pytest.mark.parametrize("role", ("foundation_release", "executable_release"))
+def test_release_attempt_id_must_derive_from_release_id(
+    tmp_path: Path,
+    role: str,
+) -> None:
+    paths, _fixture = _bundle_fixture(tmp_path)
+    payloads = deepcopy(subject.load_exact_bundle(paths).payloads)
+    payloads[role]["attempt_id"] = "attempt-" + "f" * 64
+
+    with pytest.raises(
+        subject.P0BundleV6Error,
+        match=rf"{role.removesuffix('_release')} attempt_id does not derive",
+    ):
+        subject._validate_release_identities(payloads)
 
 
 def test_whole_bundle_second_read_detects_cross_file_drift(

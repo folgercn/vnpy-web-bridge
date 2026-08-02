@@ -13,7 +13,7 @@ import argparse
 import base64
 import binascii
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
 import os
@@ -49,6 +49,15 @@ from commodity_c_fast_t1_one_shot import (  # noqa: E402
     read_regular_file_strict,
     validate_json_schema,
     write_json_create_only,
+)
+from commodity_c_fast_t1_query_v6_authority import (  # noqa: E402
+    QueryV6AuthorityError,
+    release_attempt_id,
+)
+from commodity_c_fast_t1_query_v6_executable import (  # noqa: E402
+    ExecutablePins,
+    expected_execution_binding,
+    expected_foundation_binding_from_payload,
 )
 from app.services.commodity_c_fast_l1_l5_audit_semantic_replay import (  # noqa: E402
     AuditSemanticReplayError,
@@ -303,8 +312,9 @@ def _verify_release_signature(
     *,
     required_purpose: str,
     label: str,
-) -> frozenset[str]:
+) -> tuple[frozenset[str], str]:
     selected: Ed25519PublicKey | None = None
+    selected_hash = ""
     key_ids: set[str] = set()
     materials: set[str] = set()
     for entry in keyring["keys"]:
@@ -327,6 +337,7 @@ def _verify_release_signature(
             if entry["purpose"] != required_purpose:
                 raise P0BundleV6Error(f"{label} signer purpose is invalid")
             selected = public_key
+            selected_hash = material_hash
     if selected is None:
         raise P0BundleV6Error(f"{label} signer is not trusted")
     try:
@@ -341,7 +352,7 @@ def _verify_release_signature(
         )
     except (InvalidSignature, KeyError, TypeError, ValueError, binascii.Error) as exc:
         raise P0BundleV6Error(f"{label} signature is invalid") from exc
-    return frozenset(materials)
+    return frozenset(materials), selected_hash
 
 
 def load_exact_bundle(paths: P0BundleV6Paths) -> ExactBundle:
@@ -395,6 +406,79 @@ def load_exact_bundle(paths: P0BundleV6Paths) -> ExactBundle:
     )
 
 
+def _validate_release_timeline(payloads: dict[str, dict[str, Any]]) -> None:
+    foundation = payloads["foundation_release"]
+    executable = payloads["executable_release"]
+    foundation_issued = _utc(foundation["issued_at"], "foundation.issued_at")
+    foundation_not_before = _utc(
+        foundation["not_before"], "foundation.not_before"
+    )
+    foundation_expires = _utc(foundation["expires_at"], "foundation.expires_at")
+    executable_issued = _utc(executable["issued_at"], "executable.issued_at")
+    executable_not_before = _utc(
+        executable["not_before"], "executable.not_before"
+    )
+    executable_expires = _utc(executable["expires_at"], "executable.expires_at")
+    consumed_at = _utc(payloads["consume_marker"]["consumed_at"], "consumed_at")
+    launch_claimed_at = _utc(
+        payloads["launch_marker"]["claimed_at"], "launch.claimed_at"
+    )
+    if foundation_expires - foundation_issued > timedelta(minutes=10):
+        raise P0BundleV6Error("foundation release TTL exceeds ten minutes")
+    if executable_expires - executable_issued > timedelta(minutes=5):
+        raise P0BundleV6Error("executable release TTL exceeds five minutes")
+    if not (
+        foundation_issued
+        <= foundation_not_before
+        <= executable_issued
+        <= executable_not_before
+        <= consumed_at
+        <= launch_claimed_at
+        < executable_expires
+        <= foundation_expires
+    ):
+        raise P0BundleV6Error("query-v6 release and execution timeline is invalid")
+    foundation_margin = timedelta(
+        seconds=int(foundation["minimum_verification_margin_seconds"])
+    )
+    launch_margin = timedelta(
+        seconds=int(executable["execution"]["minimum_launch_margin_seconds"])
+    )
+    for label, event in (
+        ("consume", consumed_at),
+        ("launch", launch_claimed_at),
+    ):
+        if (
+            event < foundation_not_before
+            or event + foundation_margin >= foundation_expires
+        ):
+            raise P0BundleV6Error(
+                f"{label} foundation verification margin is exhausted"
+            )
+        if (
+            event < executable_not_before
+            or event + launch_margin >= executable_expires
+        ):
+            raise P0BundleV6Error(
+                f"{label} executable launch margin is exhausted"
+            )
+
+
+def _validate_release_identities(payloads: dict[str, dict[str, Any]]) -> None:
+    for label, release in (
+        ("foundation", payloads["foundation_release"]),
+        ("executable", payloads["executable_release"]),
+    ):
+        try:
+            expected_attempt = release_attempt_id(str(release["release_id"]))
+        except QueryV6AuthorityError as exc:
+            raise P0BundleV6Error(f"{label} release identity is invalid") from exc
+        if release["attempt_id"] != expected_attempt:
+            raise P0BundleV6Error(
+                f"{label} attempt_id does not derive from release_id"
+            )
+
+
 def _validate_exact_bundle_joins(bundle: ExactBundle) -> None:
     payloads = bundle.payloads
     foundation = payloads["foundation_release"]
@@ -412,13 +496,13 @@ def _validate_exact_bundle_joins(bundle: ExactBundle) -> None:
     except AuditSemanticReplayError as exc:
         raise P0BundleV6Error("query-v6 audit semantic replay failed") from exc
 
-    foundation_materials = _verify_release_signature(
+    foundation_materials, foundation_signer_hash = _verify_release_signature(
         foundation,
         payloads["foundation_keyring"],
         required_purpose="t1_query_v6_authority_foundation_signer",
         label="foundation release",
     )
-    executable_materials = _verify_release_signature(
+    executable_materials, _executable_signer_hash = _verify_release_signature(
         executable,
         payloads["executable_keyring"],
         required_purpose="t1_query_v6_executable_release_signer",
@@ -426,6 +510,29 @@ def _validate_exact_bundle_joins(bundle: ExactBundle) -> None:
     )
     if foundation_materials & executable_materials:
         raise P0BundleV6Error("foundation and executable key domains overlap")
+    _validate_release_identities(payloads)
+
+    expected_foundation = expected_foundation_binding_from_payload(
+        foundation,
+        manifest,
+        raw_sha256=bundle.raw_sha256["foundation_release"],
+        canonical_sha256=str(bundle.canonical_sha256["foundation_release"]),
+        signer_public_key_sha256=foundation_signer_hash,
+    )
+    if executable["foundation"] != expected_foundation:
+        raise P0BundleV6Error(
+            "executable official foundation projection binding mismatch"
+        )
+    expected_execution = expected_execution_binding(
+        ExecutablePins(
+            payload=pins,
+            canonical_sha256=str(bundle.canonical_sha256["active_pin_set"]),
+        )
+    )
+    if executable["execution"] != expected_execution:
+        raise P0BundleV6Error(
+            "executable official execution projection binding mismatch"
+        )
 
     _same(
         foundation["trusted_keyring_sha256"],
@@ -499,6 +606,33 @@ def _validate_exact_bundle_joins(bundle: ExactBundle) -> None:
         bundle.raw_sha256["manifest"],
         "consume manifest raw",
     )
+    for field, expected in (
+        (
+            "readiness_v4_raw_sha256",
+            exact_foundation["readiness_v4_raw_sha256"],
+        ),
+        (
+            "l3_outcome_raw_sha256",
+            exact_foundation["l3_outcome_raw_sha256"],
+        ),
+        (
+            "runtime_pin_manifest_sha256",
+            exact_foundation["runtime_pin_manifest_sha256"],
+        ),
+        (
+            "dsn_file_identity_attestation_raw_sha256",
+            exact_foundation["dsn_file_identity_attestation_raw_sha256"],
+        ),
+        (
+            "custody_identity_sha256",
+            exact_foundation["custody_identity_sha256"],
+        ),
+        (
+            "pin_set_generation_id",
+            executable["execution"]["pin_set_generation_id"],
+        ),
+    ):
+        _same(consume[field], expected, f"consume {field}")
 
     for field, expected in (
         ("release_id", executable["release_id"]),
@@ -514,6 +648,22 @@ def _validate_exact_bundle_joins(bundle: ExactBundle) -> None:
         (
             "execution_adapter_sha256",
             executable["execution"]["execution_adapter_sha256"],
+        ),
+        (
+            "adapter_package_manifest_sha256",
+            executable["execution"]["adapter_package_manifest_sha256"],
+        ),
+        (
+            "adapter_package_root_identity_sha256",
+            executable["execution"]["adapter_package_root_identity_sha256"],
+        ),
+        (
+            "python_executable_sha256",
+            executable["execution"]["python_executable_sha256"],
+        ),
+        (
+            "python_dependency_closure_sha256",
+            executable["execution"]["python_dependency_closure_sha256"],
         ),
     ):
         _same(launch[field], expected, f"launch {field}")
@@ -550,29 +700,7 @@ def _validate_exact_bundle_joins(bundle: ExactBundle) -> None:
         bundle.raw_sha256["audit_json"],
         "proof audit evidence",
     )
-    foundation_issued = _utc(foundation["issued_at"], "foundation.issued_at")
-    foundation_not_before = _utc(
-        foundation["not_before"], "foundation.not_before"
-    )
-    foundation_expires = _utc(foundation["expires_at"], "foundation.expires_at")
-    executable_issued = _utc(executable["issued_at"], "executable.issued_at")
-    executable_not_before = _utc(
-        executable["not_before"], "executable.not_before"
-    )
-    executable_expires = _utc(executable["expires_at"], "executable.expires_at")
-    consumed_at = _utc(consume["consumed_at"], "consume.consumed_at")
-    launch_claimed_at = _utc(launch["claimed_at"], "launch.claimed_at")
-    if not (
-        foundation_issued
-        <= foundation_not_before
-        <= executable_issued
-        <= executable_not_before
-        <= consumed_at
-        <= launch_claimed_at
-        < executable_expires
-        <= foundation_expires
-    ):
-        raise P0BundleV6Error("query-v6 release and execution timeline is invalid")
+    _validate_release_timeline(payloads)
 
 
 def build_unsigned_p0_draft(
