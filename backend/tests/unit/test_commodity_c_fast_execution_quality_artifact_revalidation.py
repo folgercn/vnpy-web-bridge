@@ -54,6 +54,9 @@ REQUIRED_BINDINGS = {
     "contract_spec_set": (),
     "custody_binding": ARTIFACT_ROLES[:-1],
 }
+SIGNER_DOMAINS = {
+    role: (format(index + 8, "x") * 64,) for index, role in enumerate(ARTIFACT_ROLES)
+}
 
 
 @pytest.fixture
@@ -166,6 +169,7 @@ def build_adapter(
             ),
             exact_contracts=CONTRACTS,
             bound_artifact_raw_sha256=bindings,
+            verified_signer_domain_public_key_sha256=(SIGNER_DOMAINS[request.role]),
             signature_verified=True,
             semantic_contract_verified=True,
             **FALSE_AUTHORITY,
@@ -272,6 +276,7 @@ def test_constructor_takes_immutable_path_and_verifier_snapshots(
     receipt = adapter("startup", NOW)
 
     assert receipt.exact_contracts == CONTRACTS
+    assert receipt.verified_signer_domains.model_dump(mode="python") == (SIGNER_DOMAINS)
     with pytest.raises(TypeError):
         adapter._artifact_paths["signed_snapshot"] = Path("/tmp/replaced")
     with pytest.raises(TypeError):

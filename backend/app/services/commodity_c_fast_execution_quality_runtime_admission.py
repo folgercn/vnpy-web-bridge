@@ -108,10 +108,7 @@ def _safe_parent_chain(path: Path, expected_owner_uid: int) -> bool:
             return False
         mode = stat.S_IMODE(metadata.st_mode)
         writable_by_others = bool(mode & 0o022)
-        trusted_sticky_root = (
-            metadata.st_uid == 0
-            and bool(mode & stat.S_ISVTX)
-        )
+        trusted_sticky_root = metadata.st_uid == 0 and bool(mode & stat.S_ISVTX)
         if (
             stat.S_ISLNK(metadata.st_mode)
             or not stat.S_ISDIR(metadata.st_mode)
@@ -189,14 +186,14 @@ def _read_exact_private_canonical_json(
         ) from exc
 
 
-class CommodityCFastExecutionQualityRuntimeAdmissionConsumer:
+class CommodityCFastExecutionQualityRuntimeAdmissionVerifier:
     """Verify one short-lived signed read-only sidecar admission.
 
-    This service verifies exact private files, the pinned key domain, Ed25519
-    signature, lifetime and every hash in the current full-revalidation
-    receipt. Verification is reusable within the admission window; this
-    default-off slice does not claim irreversible one-shot consumption. It
-    owns no Tick, repository, network, account or trading handle.
+    This service verifies exact private files, the pinned admission key domain,
+    Ed25519 signature, active lifetime and the stable scope returned by the
+    current fresh full revalidation. Verification is reusable within the
+    admission window; it does not create or claim a one-shot consume record.
+    It owns no Tick, repository, network, account or trading handle.
     """
 
     def __init__(
@@ -208,13 +205,13 @@ class CommodityCFastExecutionQualityRuntimeAdmissionConsumer:
         self.settings = settings or get_settings()
         self.clock = clock or (lambda: datetime.now(timezone.utc))
 
-    def verify_for_receipt(
+    def verify_for_revalidation(
         self,
         revalidation_receipt: CFastExecutionQualityRuntimeRevalidationDTO,
     ) -> VerifiedCFastExecutionQualityRuntimeAdmission:
         if not self.settings.commodity_c_fast_execution_quality_runtime_enabled:
             raise CFastExecutionQualityRuntimeAdmissionError(
-                "RUNTIME_ADMISSION_CONSUMER_DISABLED"
+                "RUNTIME_ADMISSION_VERIFIER_DISABLED"
             )
         try:
             receipt = CFastExecutionQualityRuntimeRevalidationDTO.model_validate(
@@ -268,9 +265,17 @@ class CommodityCFastExecutionQualityRuntimeAdmissionConsumer:
                 "RUNTIME_ADMISSION_SCHEMA_INVALID"
             ) from exc
 
-        self._verify_signature(admission_payload, admission, keyring)
+        admission_key_hashes = self._verify_signature(
+            admission_payload,
+            admission,
+            keyring,
+        )
         self._verify_timing(admission, receipt)
-        self._verify_receipt_binding(admission, receipt)
+        self._verify_stable_scope(admission, receipt)
+        self._verify_upstream_key_domain_isolation(
+            admission_key_hashes,
+            receipt,
+        )
 
         if (
             _read_exact_private_canonical_json(
@@ -301,7 +306,7 @@ class CommodityCFastExecutionQualityRuntimeAdmissionConsumer:
         payload: dict[str, Any],
         admission: CFastExecutionQualityRuntimeAdmissionDTO,
         keyring: CFastExecutionQualityRuntimeAdmissionTrustedKeysDTO,
-    ) -> None:
+    ) -> frozenset[str]:
         if admission.admission_id != derived_runtime_admission_id(payload):
             raise CFastExecutionQualityRuntimeAdmissionError(
                 "RUNTIME_ADMISSION_ID_MISMATCH"
@@ -336,7 +341,7 @@ class CommodityCFastExecutionQualityRuntimeAdmissionConsumer:
         ):
             raise CFastExecutionQualityRuntimeAdmissionError(
                 "RUNTIME_ADMISSION_SIGNER_NOT_TRUSTED"
-        )
+            )
         try:
             material = selected[1]
             signature = base64.b64decode(admission.signature, validate=True)
@@ -353,6 +358,9 @@ class CommodityCFastExecutionQualityRuntimeAdmissionConsumer:
             raise CFastExecutionQualityRuntimeAdmissionError(
                 "RUNTIME_ADMISSION_SIGNATURE_INVALID"
             ) from exc
+        return frozenset(
+            sha256_bytes(material) for _, material in verified_keys.values()
+        )
 
     def _verify_timing(
         self,
@@ -374,24 +382,24 @@ class CommodityCFastExecutionQualityRuntimeAdmissionConsumer:
             or now >= admission.expires_at_utc
             or admission.expires_at_utc - admission.not_before_utc
             > MAX_ADMISSION_LIFETIME
-            or admission.not_before_utc < receipt.revalidated_at_utc
+            or receipt.revalidated_at_utc < admission.not_before_utc
+            or receipt.revalidated_at_utc > now
+            or receipt.revalidated_at_utc >= admission.expires_at_utc
             or admission.expires_at_utc > receipt.valid_until_utc
+            or now >= receipt.valid_until_utc
         ):
             raise CFastExecutionQualityRuntimeAdmissionError(
                 "RUNTIME_ADMISSION_TIMING_INVALID"
             )
 
     @staticmethod
-    def _verify_receipt_binding(
+    def _verify_stable_scope(
         admission: CFastExecutionQualityRuntimeAdmissionDTO,
         receipt: CFastExecutionQualityRuntimeRevalidationDTO,
     ) -> None:
-        if (
-            admission.revalidation_receipt_sha256 != receipt.receipt_sha256
-            or admission.exact_contracts != receipt.exact_contracts
-        ):
+        if admission.exact_contracts != receipt.exact_contracts:
             raise CFastExecutionQualityRuntimeAdmissionError(
-                "RUNTIME_ADMISSION_RECEIPT_BINDING_MISMATCH"
+                "RUNTIME_ADMISSION_CONTRACT_SCOPE_MISMATCH"
             )
         digests = admission.artifact_raw_sha256.model_dump(mode="python")
         if any(
@@ -401,19 +409,40 @@ class CommodityCFastExecutionQualityRuntimeAdmissionConsumer:
             raise CFastExecutionQualityRuntimeAdmissionError(
                 "RUNTIME_ADMISSION_ARTIFACT_BINDING_MISMATCH"
             )
+        if admission.verified_signer_domains != receipt.verified_signer_domains:
+            raise CFastExecutionQualityRuntimeAdmissionError(
+                "RUNTIME_ADMISSION_SIGNER_DOMAIN_BINDING_MISMATCH"
+            )
+
+    @staticmethod
+    def _verify_upstream_key_domain_isolation(
+        admission_key_hashes: frozenset[str],
+        receipt: CFastExecutionQualityRuntimeRevalidationDTO,
+    ) -> None:
+        upstream_key_hashes = {
+            digest
+            for domain in receipt.verified_signer_domains.model_dump(
+                mode="python"
+            ).values()
+            for digest in domain
+        }
+        if admission_key_hashes & upstream_key_hashes:
+            raise CFastExecutionQualityRuntimeAdmissionError(
+                "RUNTIME_ADMISSION_UPSTREAM_KEY_DOMAIN_REUSE"
+            )
 
 
-commodity_c_fast_execution_quality_runtime_admission_consumer = (
-    CommodityCFastExecutionQualityRuntimeAdmissionConsumer()
+commodity_c_fast_execution_quality_runtime_admission_verifier = (
+    CommodityCFastExecutionQualityRuntimeAdmissionVerifier()
 )
 
 
 __all__ = [
     "CFastExecutionQualityRuntimeAdmissionError",
-    "CommodityCFastExecutionQualityRuntimeAdmissionConsumer",
+    "CommodityCFastExecutionQualityRuntimeAdmissionVerifier",
     "VerifiedCFastExecutionQualityRuntimeAdmission",
     "canonical_json",
-    "commodity_c_fast_execution_quality_runtime_admission_consumer",
+    "commodity_c_fast_execution_quality_runtime_admission_verifier",
     "sha256_bytes",
     "unsigned_admission_payload",
 ]

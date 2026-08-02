@@ -16,11 +16,12 @@ from app.schemas.commodity_c_fast_execution_quality_runtime import (
     CFastExecutionQualityRuntimeRevalidationDTO,
 )
 from app.schemas.commodity_c_fast_execution_quality_runtime_admission import (
+    CFastExecutionQualityRuntimeAdmissionDTO,
     derived_runtime_admission_id,
 )
 from app.services.commodity_c_fast_execution_quality_runtime_admission import (
     CFastExecutionQualityRuntimeAdmissionError,
-    CommodityCFastExecutionQualityRuntimeAdmissionConsumer,
+    CommodityCFastExecutionQualityRuntimeAdmissionVerifier,
     canonical_json,
     sha256_bytes,
 )
@@ -40,6 +41,15 @@ FALSE_AUTHORITY = {
     "replacement_allowed": False,
     "production_allowed": False,
 }
+SIGNER_DOMAINS = {
+    "signed_p0_acceptance": ["8" * 64],
+    "collection_admission": ["9" * 64],
+    "execution_policy": ["a" * 64],
+    "signed_snapshot": ["b" * 64],
+    "virtual_intent_plan": ["c" * 64],
+    "contract_spec_set": ["d" * 64],
+    "custody_binding": ["e" * 64],
+}
 
 
 def _sha256_json(value: object) -> str:
@@ -50,6 +60,8 @@ def revalidation(
     *,
     trigger: str = "startup",
     observed_at: datetime = NOW,
+    signed_p0_acceptance_sha256: str = "1" * 64,
+    signer_domains: dict[str, list[str]] | None = None,
 ) -> CFastExecutionQualityRuntimeRevalidationDTO:
     core = {
         "schema_version": (
@@ -61,13 +73,14 @@ def revalidation(
         .isoformat()
         .replace("+00:00", "Z"),
         "exact_contracts": list(CONTRACTS),
-        "signed_p0_acceptance_sha256": "1" * 64,
+        "signed_p0_acceptance_sha256": signed_p0_acceptance_sha256,
         "collection_admission_sha256": "2" * 64,
         "execution_policy_sha256": "3" * 64,
         "signed_snapshot_sha256": "4" * 64,
         "virtual_intent_plan_sha256": "5" * 64,
         "contract_spec_set_sha256": "6" * 64,
         "custody_binding_sha256": "7" * 64,
+        "verified_signer_domains": signer_domains or SIGNER_DOMAINS,
         "p0_acceptance_state": "VERIFIED",
         "collection_admission_state": "VERIFIED",
         "execution_policy_state": "VERIFIED",
@@ -88,8 +101,9 @@ def build_fixture(
     receipt: CFastExecutionQualityRuntimeRevalidationDTO | None = None,
     now: datetime = NOW,
     expires_at: datetime | None = None,
+    private_key: Ed25519PrivateKey | None = None,
 ) -> tuple[
-    CommodityCFastExecutionQualityRuntimeAdmissionConsumer,
+    CommodityCFastExecutionQualityRuntimeAdmissionVerifier,
     CFastExecutionQualityRuntimeRevalidationDTO,
     Path,
     Path,
@@ -99,7 +113,7 @@ def build_fixture(
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
     admission_path = root / "runtime-admission.json"
     keyring_path = root / "runtime-admission-keyring.json"
-    private_key = Ed25519PrivateKey.generate()
+    private_key = private_key or Ed25519PrivateKey.generate()
     public_key = private_key.public_key().public_bytes(
         encoding=serialization.Encoding.Raw,
         format=serialization.PublicFormat.Raw,
@@ -139,7 +153,6 @@ def build_fixture(
         "reviewer_role": "human_runtime_admission_reviewer",
         "human_signature": "reviewed-and-signed-for-readonly-sidecar-only",
         "signer_key_id": "runtime-admission-reviewer-v1",
-        "revalidation_receipt_sha256": receipt.receipt_sha256,
         "exact_contracts": list(receipt.exact_contracts),
         "artifact_raw_sha256": {
             "signed_p0_acceptance": receipt.signed_p0_acceptance_sha256,
@@ -150,10 +163,9 @@ def build_fixture(
             "contract_spec_set": receipt.contract_spec_set_sha256,
             "custody_binding": receipt.custody_binding_sha256,
         },
-        "journal_root_path_sha256": "8" * 64,
-        "journal_root_identity_sha256": "9" * 64,
-        "evidence_export_root_path_sha256": "a" * 64,
-        "evidence_export_root_identity_sha256": "b" * 64,
+        "verified_signer_domains": receipt.verified_signer_domains.model_dump(
+            mode="json"
+        ),
         "tick_input_mode": "LOCAL_COPY_CALLBACK_NO_RPC_CAPABILITY",
         "repository_mode": "CREATE_ONLY_SIDECAR_READ_ONLY_API",
         "questdb_mode": "READ_ONLY_ADAPTER_NOT_CONNECTION_AUTHORITY",
@@ -182,7 +194,7 @@ def build_fixture(
         commodity_c_fast_execution_quality_runtime_admission_expected_owner_uid=os.getuid(),
     )
     return (
-        CommodityCFastExecutionQualityRuntimeAdmissionConsumer(
+        CommodityCFastExecutionQualityRuntimeAdmissionVerifier(
             settings=settings,
             clock=lambda: now,
         ),
@@ -192,22 +204,24 @@ def build_fixture(
     )
 
 
-def test_signed_runtime_admission_verifies_one_exact_receipt(
+def test_signed_runtime_admission_verifies_stable_fresh_scope(
     tmp_path: Path,
 ) -> None:
-    consumer, receipt, _, _ = build_fixture(tmp_path)
+    verifier, receipt, _, _ = build_fixture(tmp_path)
 
-    verified = consumer.verify_for_receipt(receipt)
+    verified = verifier.verify_for_revalidation(receipt)
 
-    assert verified.admission.revalidation_receipt_sha256 == receipt.receipt_sha256
     assert verified.admission.exact_contracts == CONTRACTS
+    assert verified.admission.verified_signer_domains == (
+        receipt.verified_signer_domains
+    )
     assert len(verified.admission_raw_sha256) == 64
     assert len(verified.trusted_keyring_raw_sha256) == 64
     assert all(getattr(verified.admission, field) is False for field in FALSE_AUTHORITY)
 
 
 def test_signature_tamper_fails_closed(tmp_path: Path) -> None:
-    consumer, receipt, admission_path, _ = build_fixture(tmp_path)
+    verifier, receipt, admission_path, _ = build_fixture(tmp_path)
     payload = json.loads(admission_path.read_text(encoding="utf-8"))
     signature = bytearray(base64.b64decode(payload["signature"]))
     signature[0] ^= 1
@@ -219,58 +233,153 @@ def test_signature_tamper_fails_closed(tmp_path: Path) -> None:
         CFastExecutionQualityRuntimeAdmissionError,
         match="RUNTIME_ADMISSION_SIGNATURE_INVALID",
     ):
-        consumer.verify_for_receipt(receipt)
+        verifier.verify_for_revalidation(receipt)
 
 
-def test_receipt_splice_and_expired_reuse_fail_closed(tmp_path: Path) -> None:
-    consumer, receipt, _, _ = build_fixture(tmp_path)
-    changed = revalidation(trigger="reload")
+def test_reusable_admission_accepts_two_fresh_lifecycles_with_same_scope(
+    tmp_path: Path,
+) -> None:
+    verifier, startup_receipt, _, _ = build_fixture(tmp_path)
+    reload_observed_at = NOW + timedelta(minutes=1)
+    reload_receipt = revalidation(
+        trigger="reload",
+        observed_at=reload_observed_at,
+    )
+
+    startup = verifier.verify_for_revalidation(startup_receipt)
+    verifier.clock = lambda: reload_observed_at
+    reloaded = verifier.verify_for_revalidation(reload_receipt)
+
+    assert startup.admission.admission_id == reloaded.admission.admission_id
+    assert startup_receipt.receipt_sha256 != reload_receipt.receipt_sha256
+
+
+def test_scope_splice_and_expired_reuse_fail_closed(tmp_path: Path) -> None:
+    verifier, receipt, _, _ = build_fixture(tmp_path)
+    changed = revalidation(signed_p0_acceptance_sha256="f" * 64)
 
     with pytest.raises(
         CFastExecutionQualityRuntimeAdmissionError,
-        match="RUNTIME_ADMISSION_RECEIPT_BINDING_MISMATCH",
+        match="RUNTIME_ADMISSION_ARTIFACT_BINDING_MISMATCH",
     ):
-        consumer.verify_for_receipt(changed)
+        verifier.verify_for_revalidation(changed)
 
-    expired_consumer, expired_receipt, _, _ = build_fixture(
+    expired_verifier, expired_receipt, _, _ = build_fixture(
         tmp_path / "expired",
         expires_at=NOW + timedelta(minutes=5),
     )
-    expired_consumer.clock = lambda: NOW + timedelta(minutes=6)
+    expired_verifier.clock = lambda: NOW + timedelta(minutes=6)
     with pytest.raises(
         CFastExecutionQualityRuntimeAdmissionError,
         match="RUNTIME_ADMISSION_SCHEMA_INVALID|RUNTIME_ADMISSION_TIMING_INVALID",
     ):
-        expired_consumer.verify_for_receipt(expired_receipt)
+        expired_verifier.verify_for_revalidation(expired_receipt)
+
+
+def test_signer_domain_scope_splice_fails_closed(tmp_path: Path) -> None:
+    verifier, receipt, _, _ = build_fixture(tmp_path)
+    changed_domains = {key: list(value) for key, value in SIGNER_DOMAINS.items()}
+    changed_domains["execution_policy"] = ["f" * 64]
+    changed = revalidation(signer_domains=changed_domains)
+
+    with pytest.raises(
+        CFastExecutionQualityRuntimeAdmissionError,
+        match="RUNTIME_ADMISSION_SIGNER_DOMAIN_BINDING_MISMATCH",
+    ):
+        verifier.verify_for_revalidation(changed)
+
+
+def test_complete_admission_key_domain_reuse_with_upstream_is_rejected(
+    tmp_path: Path,
+) -> None:
+    upstream_key = Ed25519PrivateKey.generate()
+    upstream_material = upstream_key.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    reused_hash = sha256_bytes(upstream_material)
+    signer_domains = {key: list(value) for key, value in SIGNER_DOMAINS.items()}
+    signer_domains["execution_policy"] = [reused_hash]
+    receipt = revalidation(signer_domains=signer_domains)
+    verifier, _, _, keyring_path = build_fixture(tmp_path, receipt=receipt)
+
+    keyring = json.loads(keyring_path.read_text(encoding="utf-8"))
+    keyring["trusted_keys"].append(
+        {
+            "key_id": "runtime-admission-unused-reused-v1",
+            "public_key_base64": base64.b64encode(upstream_material).decode("ascii"),
+            "signer_type": "human",
+            "reviewer_role": "human_runtime_admission_reviewer",
+        }
+    )
+    keyring_raw = canonical_json(keyring) + b"\n"
+    keyring_path.write_bytes(keyring_raw)
+    keyring_path.chmod(0o600)
+    verifier.settings.commodity_c_fast_execution_quality_runtime_admission_expected_keyring_raw_sha256 = sha256_bytes(
+        keyring_raw
+    )
+
+    with pytest.raises(
+        CFastExecutionQualityRuntimeAdmissionError,
+        match="RUNTIME_ADMISSION_UPSTREAM_KEY_DOMAIN_REUSE",
+    ):
+        verifier.verify_for_revalidation(receipt)
+
+
+@pytest.mark.parametrize(
+    "root_field",
+    (
+        "journal_root_path_sha256",
+        "journal_root_identity_sha256",
+        "evidence_export_root_path_sha256",
+        "evidence_export_root_identity_sha256",
+    ),
+)
+def test_unverified_future_root_fields_are_not_admission_scope(
+    tmp_path: Path,
+    root_field: str,
+) -> None:
+    verifier, receipt, admission_path, _ = build_fixture(tmp_path)
+    payload = json.loads(admission_path.read_text(encoding="utf-8"))
+    payload[root_field] = "f" * 64
+    admission_path.write_bytes(canonical_json(payload) + b"\n")
+    admission_path.chmod(0o600)
+
+    assert root_field not in CFastExecutionQualityRuntimeAdmissionDTO.model_fields
+    with pytest.raises(
+        CFastExecutionQualityRuntimeAdmissionError,
+        match="RUNTIME_ADMISSION_SCHEMA_INVALID",
+    ):
+        verifier.verify_for_revalidation(receipt)
 
 
 def test_keyring_pin_and_private_file_custody_are_mandatory(
     tmp_path: Path,
 ) -> None:
-    consumer, receipt, admission_path, _ = build_fixture(tmp_path)
+    verifier, receipt, admission_path, _ = build_fixture(tmp_path)
     admission_path.chmod(0o644)
 
     with pytest.raises(
         CFastExecutionQualityRuntimeAdmissionError,
         match="RUNTIME_ADMISSION_FILE_CUSTODY_INVALID",
     ):
-        consumer.verify_for_receipt(receipt)
+        verifier.verify_for_revalidation(receipt)
 
-    consumer, receipt, _, _ = build_fixture(tmp_path / "bad-pin")
-    consumer.settings.commodity_c_fast_execution_quality_runtime_admission_expected_keyring_raw_sha256 = (
+    verifier, receipt, _, _ = build_fixture(tmp_path / "bad-pin")
+    verifier.settings.commodity_c_fast_execution_quality_runtime_admission_expected_keyring_raw_sha256 = (
         "f" * 64
     )
     with pytest.raises(
         CFastExecutionQualityRuntimeAdmissionError,
         match="RUNTIME_ADMISSION_KEYRING_PIN_MISMATCH",
     ):
-        consumer.verify_for_receipt(receipt)
+        verifier.verify_for_revalidation(receipt)
 
 
 def test_complete_keyring_domain_is_validated_before_signer_selection(
     tmp_path: Path,
 ) -> None:
-    consumer, receipt, _, keyring_path = build_fixture(tmp_path)
+    verifier, receipt, _, keyring_path = build_fixture(tmp_path)
     payload = json.loads(keyring_path.read_text(encoding="utf-8"))
     payload["trusted_keys"].append(
         {
@@ -283,7 +392,7 @@ def test_complete_keyring_domain_is_validated_before_signer_selection(
     raw = canonical_json(payload) + b"\n"
     keyring_path.write_bytes(raw)
     keyring_path.chmod(0o600)
-    consumer.settings.commodity_c_fast_execution_quality_runtime_admission_expected_keyring_raw_sha256 = sha256_bytes(
+    verifier.settings.commodity_c_fast_execution_quality_runtime_admission_expected_keyring_raw_sha256 = sha256_bytes(
         raw
     )
 
@@ -291,10 +400,10 @@ def test_complete_keyring_domain_is_validated_before_signer_selection(
         CFastExecutionQualityRuntimeAdmissionError,
         match="RUNTIME_ADMISSION_KEYRING_MATERIAL_INVALID",
     ):
-        consumer.verify_for_receipt(receipt)
+        verifier.verify_for_revalidation(receipt)
 
 
-def test_runtime_admission_consumer_has_no_external_or_trading_dependency() -> None:
+def test_runtime_admission_verifier_has_no_external_or_trading_dependency() -> None:
     service_path = (
         Path(__file__).resolve().parents[2]
         / "app/services/commodity_c_fast_execution_quality_runtime_admission.py"

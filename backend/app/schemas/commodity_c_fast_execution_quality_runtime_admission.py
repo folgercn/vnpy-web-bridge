@@ -7,7 +7,10 @@ from typing import Any, Literal
 
 from pydantic import ConfigDict, Field, field_validator, model_validator
 
-from app.schemas.commodity_c_fast_execution_quality_runtime import StrictFalse
+from app.schemas.commodity_c_fast_execution_quality_runtime import (
+    CFastExecutionQualityArtifactSignerDomainsDTO,
+    StrictFalse,
+)
 from app.schemas.commodity_c_fast_shadow import StrictFiniteModel
 
 
@@ -50,10 +53,10 @@ class CFastExecutionQualityRuntimeAdmissionDTO(StrictFiniteModel):
     """Short-lived human-signed permission to assemble a read-only sidecar.
 
     The admission is deliberately not collection, execution, deployment or
-    trading authority. It only allows the process to verify one exact full
-    revalidation receipt while constructing the separately guarded sidecar.
-    This v1 admission is short-lived but reusable within its validity window;
-    it is not an irreversible one-shot consume capability.
+    trading authority. It signs a stable scope: exact contracts, all seven raw
+    artifact hashes and all seven complete verified signer domains. Every
+    lifecycle must freshly revalidate that same scope. This v1 admission is
+    reusable within its short validity window; it is not a consume token.
     """
 
     model_config = ConfigDict(frozen=True, revalidate_instances="always")
@@ -75,13 +78,9 @@ class CFastExecutionQualityRuntimeAdmissionDTO(StrictFiniteModel):
     signer_key_id: str = Field(pattern=r"^[A-Za-z0-9._-]{8,128}$")
     signature: str = Field(min_length=88, max_length=88)
 
-    revalidation_receipt_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     exact_contracts: tuple[str, ...] = Field(min_length=1, max_length=100)
     artifact_raw_sha256: CFastExecutionQualityRuntimeArtifactDigestsDTO
-    journal_root_path_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    journal_root_identity_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    evidence_export_root_path_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    evidence_export_root_identity_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    verified_signer_domains: CFastExecutionQualityArtifactSignerDomainsDTO
     tick_input_mode: Literal["LOCAL_COPY_CALLBACK_NO_RPC_CAPABILITY"]
     repository_mode: Literal["CREATE_ONLY_SIDECAR_READ_ONLY_API"]
     questdb_mode: Literal["READ_ONLY_ADAPTER_NOT_CONNECTION_AUTHORITY"]

@@ -13,7 +13,7 @@ from app.services.commodity_c_fast_execution_quality_runtime import (
 )
 from app.services.commodity_c_fast_execution_quality_runtime_admission import (
     VerifiedCFastExecutionQualityRuntimeAdmission,
-    commodity_c_fast_execution_quality_runtime_admission_consumer,
+    commodity_c_fast_execution_quality_runtime_admission_verifier,
 )
 from app.services.commodity_c_fast_execution_quality_readonly_repository import (
     CommodityCFastExecutionQualityReadonlyRepository,
@@ -43,8 +43,8 @@ _DENIED_CAPABILITIES = (
 )
 
 
-class RuntimeAdmissionConsumer(Protocol):
-    def verify_for_receipt(
+class RuntimeAdmissionVerifier(Protocol):
+    def verify_for_revalidation(
         self,
         revalidation_receipt: CFastExecutionQualityRuntimeRevalidationDTO,
     ) -> VerifiedCFastExecutionQualityRuntimeAdmission: ...
@@ -54,24 +54,25 @@ class CommodityCFastExecutionQualityProductionAssembly:
     """Default-off production assembly gate for the read-only sidecar.
 
     This first assembly slice verifies a fresh full-revalidation receipt and
-    its independently signed runtime admission on every lifecycle transition.
+    the stable scope of an independently signed runtime admission on every
+    lifecycle transition. The admission is reusable within its short validity
+    window; every use still requires a fresh full revalidation of exact bytes.
     Tick, repository, export and monitoring components are intentionally not
-    represented as built until later slices bind the complete capability. The
-    admission is not an irreversible one-shot consume token in this slice.
+    represented as built until later slices bind the complete capability.
     """
 
     def __init__(
         self,
         *,
         runtime: CommodityCFastExecutionQualityRuntime,
-        admission_consumer: RuntimeAdmissionConsumer,
+        admission_verifier: RuntimeAdmissionVerifier,
     ) -> None:
         if type(runtime) is not CommodityCFastExecutionQualityRuntime:
             raise TypeError("PRODUCTION_ASSEMBLY_RUNTIME_TYPE_INVALID")
-        if not callable(getattr(admission_consumer, "verify_for_receipt", None)):
-            raise TypeError("PRODUCTION_ASSEMBLY_ADMISSION_CONSUMER_INVALID")
+        if not callable(getattr(admission_verifier, "verify_for_revalidation", None)):
+            raise TypeError("PRODUCTION_ASSEMBLY_ADMISSION_VERIFIER_INVALID")
         self._runtime = runtime
-        self._admission_consumer = admission_consumer
+        self._admission_verifier = admission_verifier
         self._lock = RLock()
         self._state = "CREATED_DEFAULT_OFF"
         self._started = False
@@ -117,7 +118,11 @@ class CommodityCFastExecutionQualityProductionAssembly:
             self._admission = None
             self._state = "STOPPED_NO_CAPABILITY"
             self._last_error = None
-            self._runtime.stop()
+            try:
+                self._runtime.stop()
+            except Exception as exc:
+                self._state = "BLOCKED_LIFECYCLE_OPERATION_FAILED"
+                self._last_error = str(getattr(exc, "code", type(exc).__name__))
             return self._status_locked()
 
     def status(self) -> dict[str, object]:
@@ -137,20 +142,28 @@ class CommodityCFastExecutionQualityProductionAssembly:
                 "reload": self._runtime.reload,
                 "recovery": self._runtime.recover,
             }[trigger]
-            runtime_status = operation()
-            if runtime_status["configured_enabled"] is False:
+            try:
+                runtime_status = operation()
+                configured_enabled = runtime_status["configured_enabled"]
+                revalidation_complete = runtime_status["full_revalidation_complete"]
+                runtime_error = runtime_status["last_error"]
+            except Exception as exc:
+                self._state = "BLOCKED_LIFECYCLE_OPERATION_FAILED"
+                self._last_error = str(getattr(exc, "code", type(exc).__name__))
+                return self._status_locked()
+            if configured_enabled is False:
                 self._state = "DISABLED_DEFAULT_OFF"
                 self._last_error = None
                 return self._status_locked()
-            if runtime_status["full_revalidation_complete"] is not True:
+            if revalidation_complete is not True:
                 self._state = "BLOCKED_FULL_REVALIDATION_INCOMPLETE"
-                self._last_error = str(
-                    runtime_status["last_error"] or "FULL_REVALIDATION_INCOMPLETE"
-                )
+                self._last_error = str(runtime_error or "FULL_REVALIDATION_INCOMPLETE")
                 return self._status_locked()
             try:
                 receipt = self._runtime.current_revalidation_receipt()
-                self._admission = self._admission_consumer.verify_for_receipt(receipt)
+                self._admission = self._admission_verifier.verify_for_revalidation(
+                    receipt
+                )
             except Exception as exc:
                 self._state = "BLOCKED_SIGNED_RUNTIME_ADMISSION_INVALID"
                 self._last_error = str(getattr(exc, "code", type(exc).__name__))
@@ -194,7 +207,7 @@ class CommodityCFastExecutionQualityProductionAssembly:
             "execution_quality_implemented": False,
             "capabilities": {
                 **dict(runtime_status["capabilities"]),
-                "signed_runtime_admission_consumer_bound": True,
+                "signed_runtime_admission_verifier_bound": True,
                 "signed_runtime_admission_verified": admission is not None,
                 "tick_input_bound": False,
                 "tick_subscription_built": False,
@@ -216,8 +229,8 @@ class CommodityCFastExecutionQualityProductionAssembly:
 commodity_c_fast_execution_quality_production_assembly = (
     CommodityCFastExecutionQualityProductionAssembly(
         runtime=commodity_c_fast_execution_quality_runtime,
-        admission_consumer=(
-            commodity_c_fast_execution_quality_runtime_admission_consumer
+        admission_verifier=(
+            commodity_c_fast_execution_quality_runtime_admission_verifier
         ),
     )
 )
@@ -225,6 +238,6 @@ commodity_c_fast_execution_quality_production_assembly = (
 
 __all__ = [
     "CommodityCFastExecutionQualityProductionAssembly",
-    "RuntimeAdmissionConsumer",
+    "RuntimeAdmissionVerifier",
     "commodity_c_fast_execution_quality_production_assembly",
 ]

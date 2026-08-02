@@ -77,6 +77,15 @@ def revalidation(
         "virtual_intent_plan_sha256": "5" * 64,
         "contract_spec_set_sha256": "6" * 64,
         "custody_binding_sha256": "7" * 64,
+        "verified_signer_domains": {
+            "signed_p0_acceptance": ["8" * 64],
+            "collection_admission": ["9" * 64],
+            "execution_policy": ["a" * 64],
+            "signed_snapshot": ["b" * 64],
+            "virtual_intent_plan": ["c" * 64],
+            "contract_spec_set": ["d" * 64],
+            "custody_binding": ["e" * 64],
+        },
         "p0_acceptance_state": "VERIFIED",
         "collection_admission_state": "VERIFIED",
         "execution_policy_state": "VERIFIED",
@@ -91,11 +100,11 @@ def revalidation(
     )
 
 
-class FakeAdmissionConsumer:
+class FakeAdmissionVerifier:
     def __init__(self) -> None:
         self.receipts: list[str] = []
 
-    def verify_for_receipt(self, receipt):
+    def verify_for_revalidation(self, receipt):
         self.receipts.append(receipt.receipt_sha256)
         return SimpleNamespace(
             admission=SimpleNamespace(
@@ -127,7 +136,7 @@ def runtime(*, enabled: bool) -> CommodityCFastExecutionQualityRuntime:
 
 
 def test_default_off_never_verifies_admission_or_repository() -> None:
-    consumer = FakeAdmissionConsumer()
+    verifier = FakeAdmissionVerifier()
     repository_calls = 0
 
     def load() -> SidecarState:
@@ -137,7 +146,7 @@ def test_default_off_never_verifies_admission_or_repository() -> None:
 
     assembly = CommodityCFastExecutionQualityProductionAssembly(
         runtime=runtime(enabled=False),
-        admission_consumer=consumer,
+        admission_verifier=verifier,
     )
     assembly.bind_readonly_repository(
         CommodityCFastExecutionQualityReadonlyRepository(load)
@@ -146,7 +155,7 @@ def test_default_off_never_verifies_admission_or_repository() -> None:
     status = assembly.start()
 
     assert status["assembly_state"] == "DISABLED_DEFAULT_OFF"
-    assert consumer.receipts == []
+    assert verifier.receipts == []
     assert repository_calls == 0
     assert status["runtime_active"] is False
     assert status["execution_quality_implemented"] is False
@@ -154,11 +163,11 @@ def test_default_off_never_verifies_admission_or_repository() -> None:
 
 
 def test_every_lifecycle_revalidates_admission_and_readonly_repository() -> None:
-    consumer = FakeAdmissionConsumer()
+    verifier = FakeAdmissionVerifier()
     repository = CommodityCFastExecutionQualityReadonlyRepository(empty_state)
     assembly = CommodityCFastExecutionQualityProductionAssembly(
         runtime=runtime(enabled=True),
-        admission_consumer=consumer,
+        admission_verifier=verifier,
     )
     assembly.bind_readonly_repository(repository)
 
@@ -178,7 +187,8 @@ def test_every_lifecycle_revalidates_admission_and_readonly_repository() -> None
         assert status["orders_sent"] == 0
         assert status["positions_modified"] == 0
 
-    assert len(consumer.receipts) == 3
+    assert len(verifier.receipts) == 3
+    assert len(set(verifier.receipts)) == 3
 
 
 def test_repository_failure_blocks_only_assembly_and_is_retryable() -> None:
@@ -193,7 +203,7 @@ def test_repository_failure_blocks_only_assembly_and_is_retryable() -> None:
     repository = CommodityCFastExecutionQualityReadonlyRepository(load)
     assembly = CommodityCFastExecutionQualityProductionAssembly(
         runtime=runtime(enabled=True),
-        admission_consumer=FakeAdmissionConsumer(),
+        admission_verifier=FakeAdmissionVerifier(),
     )
     assembly.bind_readonly_repository(repository)
 
@@ -211,6 +221,53 @@ def test_repository_failure_blocks_only_assembly_and_is_retryable() -> None:
     )
     assert recovered["readonly_repository"]["blocked_fail_closed"] is False
     assert unrelated_shadow_state == {"running": True}
+
+
+def test_unexpected_runtime_lifecycle_exception_is_blocked_at_assembly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    underlying_runtime = runtime(enabled=True)
+
+    def fail_start() -> dict[str, object]:
+        raise OSError("unexpected runtime dependency failure")
+
+    monkeypatch.setattr(underlying_runtime, "start", fail_start)
+    assembly = CommodityCFastExecutionQualityProductionAssembly(
+        runtime=underlying_runtime,
+        admission_verifier=FakeAdmissionVerifier(),
+    )
+
+    status = assembly.start()
+
+    assert status["assembly_state"] == "BLOCKED_LIFECYCLE_OPERATION_FAILED"
+    assert status["assembly_last_error"] == "OSError"
+    assert status["assembly_lifecycle_started"] is True
+    assert status["signed_runtime_admission_verified"] is False
+    assert status["runtime_active"] is False
+    assert all(status[field] is False for field in FALSE_AUTHORITY)
+
+
+def test_unexpected_runtime_stop_exception_is_blocked_at_assembly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    underlying_runtime = runtime(enabled=True)
+
+    def fail_stop() -> dict[str, object]:
+        raise OSError("unexpected runtime shutdown failure")
+
+    monkeypatch.setattr(underlying_runtime, "stop", fail_stop)
+    assembly = CommodityCFastExecutionQualityProductionAssembly(
+        runtime=underlying_runtime,
+        admission_verifier=FakeAdmissionVerifier(),
+    )
+
+    status = assembly.stop()
+
+    assert status["assembly_state"] == "BLOCKED_LIFECYCLE_OPERATION_FAILED"
+    assert status["assembly_last_error"] == "OSError"
+    assert status["assembly_lifecycle_started"] is False
+    assert status["runtime_active"] is False
+    assert all(status[field] is False for field in FALSE_AUTHORITY)
 
 
 def test_readonly_repository_returns_detached_deterministic_projections() -> None:

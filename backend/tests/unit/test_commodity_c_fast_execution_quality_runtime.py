@@ -56,12 +56,10 @@ def revalidation(
             "commodity_c_fast_execution_quality_runtime_revalidation_v1"
         ),
         "trigger": trigger,
-        "revalidated_at_utc": observed_at_utc.isoformat().replace(
-            "+00:00", "Z"
-        ),
-        "valid_until_utc": (
-            expires_at or observed_at_utc + timedelta(minutes=5)
-        ).isoformat().replace("+00:00", "Z"),
+        "revalidated_at_utc": observed_at_utc.isoformat().replace("+00:00", "Z"),
+        "valid_until_utc": (expires_at or observed_at_utc + timedelta(minutes=5))
+        .isoformat()
+        .replace("+00:00", "Z"),
         "exact_contracts": ["SHFE.ag2612", "SHFE.cu2612"],
         "signed_p0_acceptance_sha256": "1" * 64,
         "collection_admission_sha256": "2" * 64,
@@ -70,6 +68,15 @@ def revalidation(
         "virtual_intent_plan_sha256": "5" * 64,
         "contract_spec_set_sha256": "6" * 64,
         "custody_binding_sha256": "7" * 64,
+        "verified_signer_domains": {
+            "signed_p0_acceptance": ["8" * 64],
+            "collection_admission": ["9" * 64],
+            "execution_policy": ["a" * 64],
+            "signed_snapshot": ["b" * 64],
+            "virtual_intent_plan": ["c" * 64],
+            "contract_spec_set": ["d" * 64],
+            "custody_binding": ["e" * 64],
+        },
         "p0_acceptance_state": "VERIFIED",
         "collection_admission_state": "VERIFIED",
         "execution_policy_state": "VERIFIED",
@@ -85,9 +92,7 @@ def revalidation(
 
 
 def enabled_settings() -> Settings:
-    return Settings(
-        commodity_c_fast_execution_quality_runtime_enabled=True
-    )
+    return Settings(commodity_c_fast_execution_quality_runtime_enabled=True)
 
 
 def test_default_off_does_not_call_verifier_or_acquire_capability() -> None:
@@ -130,9 +135,7 @@ def test_enabled_without_full_verifier_isolated_and_fail_closed() -> None:
 
     status = service.start()
 
-    assert status["runtime_state"] == (
-        "BLOCKED_FULL_REVALIDATION_VERIFIER_NOT_BOUND"
-    )
+    assert status["runtime_state"] == ("BLOCKED_FULL_REVALIDATION_VERIFIER_NOT_BOUND")
     assert status["last_error"] == "FULL_REVALIDATION_VERIFIER_NOT_BOUND"
     assert status["full_revalidation_complete"] is False
     assert status["execution_quality_implemented"] is False
@@ -223,12 +226,8 @@ def test_spliced_or_expired_receipt_blocks_only_this_runtime() -> None:
         )
     )
     expired_status = expired.start()
-    assert expired_status["runtime_state"] == (
-        "BLOCKED_FULL_REVALIDATION_FAILED"
-    )
-    assert expired_status["last_error"] == (
-        "REVALIDATION_CLOCK_BINDING_MISMATCH"
-    )
+    assert expired_status["runtime_state"] == ("BLOCKED_FULL_REVALIDATION_FAILED")
+    assert expired_status["last_error"] == ("REVALIDATION_CLOCK_BINDING_MISMATCH")
 
 
 def test_receipt_rejects_coercive_authority_and_hash_rewrite() -> None:
@@ -242,6 +241,24 @@ def test_receipt_rejects_coercive_authority_and_hash_rewrite() -> None:
     with pytest.raises(ValidationError, match="receipt_sha256 mismatch"):
         CFastExecutionQualityRuntimeRevalidationDTO.model_validate(rewritten)
 
+    rewritten_domain = revalidation("startup", NOW).model_dump(mode="json")
+    rewritten_domain["verified_signer_domains"]["execution_policy"] = ["f" * 64]
+    with pytest.raises(ValidationError, match="receipt_sha256 mismatch"):
+        CFastExecutionQualityRuntimeRevalidationDTO.model_validate(rewritten_domain)
+
+
+def test_receipt_requires_complete_canonical_signer_domains() -> None:
+    invalid = revalidation("startup", NOW).model_dump(mode="json")
+    invalid["verified_signer_domains"]["execution_policy"] = [
+        "a" * 64,
+        "a" * 64,
+    ]
+    core = {key: value for key, value in invalid.items() if key != "receipt_sha256"}
+    invalid["receipt_sha256"] = _sha256_json(core)
+
+    with pytest.raises(ValidationError, match="signer domain"):
+        CFastExecutionQualityRuntimeRevalidationDTO.model_validate(invalid)
+
 
 def test_runtime_revalidates_an_already_constructed_receipt_instance() -> None:
     candidate = revalidation("startup", NOW)
@@ -250,9 +267,7 @@ def test_runtime_revalidates_an_already_constructed_receipt_instance() -> None:
         settings=enabled_settings(),
         clock=lambda: NOW,
     )
-    service.bind_full_revalidation_verifier(
-        lambda _trigger, _observed: candidate
-    )
+    service.bind_full_revalidation_verifier(lambda _trigger, _observed: candidate)
 
     status = service.start()
 
@@ -361,13 +376,7 @@ def test_runtime_foundation_has_no_market_or_trading_dependencies() -> None:
 
     assert imports.isdisjoint(forbidden_imports)
     assert not any(
-        (
-            isinstance(node, ast.Name)
-            and node.id in forbidden_runtime_names
-        )
-        or (
-            isinstance(node, ast.Attribute)
-            and node.attr in forbidden_runtime_names
-        )
+        (isinstance(node, ast.Name) and node.id in forbidden_runtime_names)
+        or (isinstance(node, ast.Attribute) and node.attr in forbidden_runtime_names)
         for node in ast.walk(tree)
     )
