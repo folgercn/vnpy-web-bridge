@@ -141,7 +141,13 @@ PYTHONPATH=backend .venv/bin/python scripts/tick_persistence_load_smoke.py --cou
 - `POST /api/market/data/import`
 - `GET /ws/events`
 
-交易 API 默认关闭。必须设置 `WEB_TRADE_ENABLED=true`，且在默认 `ORDER_CONFIRM_REQUIRED=true` 时请求体传入 `confirm: true`，才会调用真实交易 RPC。
+交易 API 默认关闭。`POST /api/orders` 不再接受裸 `OrderRequest`；必须同时设置
+`WEB_TRADE_ENABLED=true` 与 `MANUAL_EXECUTION_PERMIT_ENABLED=true`，并提交包含
+`order` 和独立、短时效、Ed25519 签名的 `execution_permit` envelope。permit 精确绑定
+登录 operator、白名单账户哈希、完整订单、实际 resolved gateway 与 nonce，并在发送前
+create-only 消费；RPC 超时或结果未知后同一个 permit 也不能重放。该手工 permit 不复用
+C_FAST authority，默认不授予 production、live 或 automatic-dispatch 权限。撤单、全撤与只读
+订单查询不使用该 permit，原有安全边界不变。
 
 返回格式统一为：
 
