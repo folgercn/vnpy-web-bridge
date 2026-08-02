@@ -8,7 +8,9 @@ import importlib.util
 import json
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 import pytest
 
@@ -19,6 +21,7 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 import commodity_c_fast_execution_quality_p0_bundle_v6 as subject  # noqa: E402
+import commodity_c_fast_execution_quality_sign_runtime_artifact as signer  # noqa: E402
 import commodity_c_fast_t1_query_v6_authority as authority  # noqa: E402
 import commodity_c_fast_t1_query_v6_executable as executable  # noqa: E402
 import commodity_c_fast_t1_query_v6_executable_sign as executable_signer  # noqa: E402
@@ -457,3 +460,189 @@ def test_release_signature_tamper_is_rejected(tmp_path: Path) -> None:
             reviewer_role="independent reviewer",
             human_signature="reviewed exact evidence",
         )
+
+
+def _write_private_canonical_json(path: Path, payload: dict) -> bytes:
+    raw = subject.canonical_json(payload) + b"\n"
+    path.write_bytes(raw)
+    path.chmod(0o600)
+    return raw
+
+
+def _p0_signer_fixture(root: Path):
+    paths, fixture = _bundle_fixture(root)
+    now = fixture["now"]
+    private = Ed25519PrivateKey.generate()
+    key_id = "signed-p0-acceptance-key-v1"
+    draft = subject.build_unsigned_p0_draft(
+        paths,
+        generation_id=None,
+        issued_at=now - timedelta(minutes=1),
+        valid_until=now + timedelta(minutes=5),
+        archived_at=now - timedelta(minutes=1, seconds=30),
+        signer_key_id=key_id,
+        reviewer_role="independent query-v6 P0 reviewer",
+        human_signature="reviewed exact query-v6 bundle and external custody",
+    )
+    draft_path = root / "unsigned-p0.json"
+    _write_private_canonical_json(draft_path, draft)
+    keyring = {
+        "schema_version": (
+            "commodity_c_fast_execution_quality_role_trusted_keys_v1"
+        ),
+        "artifact_role": "signed_p0_acceptance",
+        "trusted_keys": [
+            {
+                "key_id": key_id,
+                "purpose": (
+                    "c_fast_execution_quality_query_v6_p0_acceptance_signer"
+                ),
+                "public_key_base64": base64.b64encode(
+                    private.public_key().public_bytes(
+                        serialization.Encoding.Raw,
+                        serialization.PublicFormat.Raw,
+                    )
+                ).decode(),
+            }
+        ],
+    }
+    keyring_path = root / "p0-keyring.json"
+    keyring_raw = _write_private_canonical_json(keyring_path, keyring)
+    private_path = root / "p0-private.key"
+    private_path.write_bytes(
+        base64.b64encode(
+            private.private_bytes(
+                serialization.Encoding.Raw,
+                serialization.PrivateFormat.Raw,
+                serialization.NoEncryption(),
+            )
+        )
+        + b"\n"
+    )
+    private_path.chmod(0o600)
+    args = SimpleNamespace(
+        input=draft_path,
+        output=root / "signed-p0.json",
+        private_key_file=private_path,
+        role_keyring=keyring_path,
+        expected_role_keyring_raw_sha256=hashlib.sha256(keyring_raw).hexdigest(),
+        **{
+            role: getattr(paths, role)
+            for role in signer.P0_QUERY_V6_BUNDLE_FILE_ORDER
+        },
+    )
+    return paths, draft, args
+
+
+def _replace_draft(root: Path, args: SimpleNamespace, draft: dict) -> None:
+    args.input.unlink()
+    _write_private_canonical_json(root / "unsigned-p0.json", draft)
+
+
+def _bundle_index_sha256(draft: dict) -> str:
+    index = {
+        "schema_version": (
+            "commodity_c_fast_execution_quality_p0_bundle_index_v6_v1"
+        ),
+        "files": [
+            {
+                "name": role,
+                "size_bytes": draft["bundle_size_bytes"][role],
+                "raw_sha256": draft["bundle_raw_sha256"][role],
+                "canonical_sha256": draft["bundle_canonical_sha256"][role],
+            }
+            for role in signer.P0_QUERY_V6_BUNDLE_FILE_ORDER
+        ],
+    }
+    return hashlib.sha256(subject.canonical_json(index)).hexdigest()
+
+
+def test_p0_signer_reconstructs_all_exact_bundle_roles_before_key_access(
+    secure_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _paths, _draft, args = _p0_signer_fixture(secure_tmp_path)
+    monkeypatch.setattr(signer, "parse_args", lambda: args)
+
+    assert signer.main() == 0
+    assert json.loads(args.output.read_text())["artifact_role"] == (
+        "signed_p0_acceptance"
+    )
+
+
+def test_p0_signer_rejects_self_consistent_unembedded_bundle_replacement(
+    secure_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _paths, draft, args = _p0_signer_fixture(secure_tmp_path)
+    attacker_raw = subject.canonical_json({"attacker": "foundation-keyring"}) + b"\n"
+    role = "foundation_keyring"
+    draft["bundle_raw_sha256"][role] = hashlib.sha256(attacker_raw).hexdigest()
+    draft["bundle_canonical_sha256"][role] = hashlib.sha256(
+        subject.canonical_json({"attacker": "foundation-keyring"})
+    ).hexdigest()
+    draft["bundle_size_bytes"][role] = len(attacker_raw)
+    draft["bundle_index_sha256"] = _bundle_index_sha256(draft)
+    draft["external_archive"]["archived_bundle_index_sha256"] = draft[
+        "bundle_index_sha256"
+    ]
+    _replace_draft(secure_tmp_path, args, draft)
+    key_opened = False
+
+    def reject_key_access(_path: Path):
+        nonlocal key_opened
+        key_opened = True
+        raise AssertionError("private key must remain unopened")
+
+    monkeypatch.setattr(signer, "load_private_key", reject_key_access)
+    monkeypatch.setattr(signer, "parse_args", lambda: args)
+
+    assert signer.main() == 2
+    assert key_opened is False
+    assert "does not exactly match reconstructed" in capsys.readouterr().err
+    assert not args.output.exists()
+
+
+def test_p0_signer_rejects_exact_original_tamper_before_key_access(
+    secure_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, _draft, args = _p0_signer_fixture(secure_tmp_path)
+    paths.audit_csv.write_bytes(paths.audit_csv.read_bytes() + b"tamper\n")
+    key_opened = False
+
+    def reject_key_access(_path: Path):
+        nonlocal key_opened
+        key_opened = True
+        raise AssertionError("private key must remain unopened")
+
+    monkeypatch.setattr(signer, "load_private_key", reject_key_access)
+    monkeypatch.setattr(signer, "parse_args", lambda: args)
+
+    assert signer.main() == 2
+    assert key_opened is False
+    assert not args.output.exists()
+
+
+def test_p0_signer_cli_rejects_missing_bundle_paths_before_key_access(
+    secure_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _paths, _draft, args = _p0_signer_fixture(secure_tmp_path)
+    args.audit_markdown = None
+    key_opened = False
+
+    def reject_key_access(_path: Path):
+        nonlocal key_opened
+        key_opened = True
+        raise AssertionError("private key must remain unopened")
+
+    monkeypatch.setattr(signer, "load_private_key", reject_key_access)
+    monkeypatch.setattr(signer, "parse_args", lambda: args)
+
+    assert signer.main() == 2
+    assert key_opened is False
+    assert "requires all exact query-v6 bundle paths" in capsys.readouterr().err
+    assert not args.output.exists()

@@ -112,8 +112,22 @@ PYTHONPATH=backend python \
 ```
 
 The signer is deliberately excluded from the production image.
-For `signed_p0_acceptance`, the signer replays the embedded terminal, proof,
-audit and exact-bundle index semantics before it opens private-key material.
+For `signed_p0_acceptance`, the signer additionally requires all fourteen
+query-v6 originals and reconstructs the unsigned draft from those stable-read
+files before it opens private-key material. The supplied draft must be
+canonically identical to that reconstruction; self-reported bundle hashes are
+never signed on their own. Add these arguments to the signing command:
+
+```text
+--foundation-release <path> --foundation-keyring <path>
+--executable-release <path> --executable-keyring <path>
+--active-pin-set <path> --manifest <path>
+--consume-marker <path> --launch-marker <path>
+--terminal <path> --audit-json <path> --audit-csv <path>
+--audit-markdown <path> --readonly-proof <path>
+--external-custody-identity <path>
+```
+
 The other envelopes need
 external upstream artifacts for their full joins, so the signer validates their
 envelope contract and the runtime performs the complete generation join.

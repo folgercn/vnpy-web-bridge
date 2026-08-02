@@ -30,6 +30,7 @@ from app.schemas.commodity_c_fast_execution_quality_production_artifacts import 
 )
 from app.services.commodity_c_fast_execution_quality_production_verifier import (  # noqa: E402
     CommodityCFastExecutionQualityProductionArtifactVerifier,
+    P0_QUERY_V6_BUNDLE_FILE_ORDER,
     ROLE_SIGNER_PURPOSES,
     runtime_artifact_signature_message,
 )
@@ -48,6 +49,8 @@ ROLE_MODELS = {
     "contract_spec_set": CFastExecutionQualitySignedContractSpecSetDTO,
     "custody_binding": CFastExecutionQualitySignedCustodyBindingDTO,
 }
+
+
 class RuntimeArtifactSigningError(ValueError):
     pass
 
@@ -175,6 +178,62 @@ def validate_runtime_artifact_draft(
     return role, selected
 
 
+def require_p0_exact_bundle_reconstruction(
+    draft: dict[str, object],
+    *,
+    bundle_paths: dict[str, Path | None],
+) -> None:
+    """Rebuild a P0 draft from all exact originals before key access."""
+
+    missing = [
+        role for role in P0_QUERY_V6_BUNDLE_FILE_ORDER if bundle_paths.get(role) is None
+    ]
+    if missing:
+        flags = ", ".join(f"--{role.replace('_', '-')}" for role in missing)
+        raise RuntimeArtifactSigningError(
+            f"signed_p0_acceptance requires all exact query-v6 bundle paths: {flags}"
+        )
+    try:
+        from commodity_c_fast_execution_quality_p0_bundle_v6 import (
+            P0BundleV6Error,
+            P0BundleV6Paths,
+            build_unsigned_p0_draft,
+        )
+    except ImportError as exc:  # pragma: no cover - repository packaging failure
+        raise RuntimeArtifactSigningError(
+            "P0 exact bundle builder is unavailable"
+        ) from exc
+
+    try:
+        model = CFastExecutionQualityP0AcceptanceV6DTO.model_validate(
+            {**draft, "signature": PLACEHOLDER_SIGNATURE}
+        )
+        paths = P0BundleV6Paths(
+            **{
+                role: bundle_paths[role]
+                for role in P0_QUERY_V6_BUNDLE_FILE_ORDER
+            }
+        )
+        reconstructed = build_unsigned_p0_draft(
+            paths,
+            generation_id=model.generation_id,
+            issued_at=model.issued_at_utc,
+            valid_until=model.valid_until_utc,
+            archived_at=model.archived_at_utc,
+            signer_key_id=model.signer_key_id,
+            reviewer_role=model.reviewer_role,
+            human_signature=model.human_signature,
+        )
+    except (OSError, P0BundleV6Error, ValidationError, ValueError) as exc:
+        raise RuntimeArtifactSigningError(
+            "P0 exact bundle reconstruction failed before signing"
+        ) from exc
+    if not hmac.compare_digest(canonical_json(draft), canonical_json(reconstructed)):
+        raise RuntimeArtifactSigningError(
+            "P0 draft does not exactly match reconstructed query-v6 bundle"
+        )
+
+
 def write_private_json_create_only(path: Path, payload: object) -> bytes:
     output = path.expanduser()
     output = output if output.is_absolute() else Path.cwd() / output
@@ -228,6 +287,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--private-key-file", type=Path, required=True)
     parser.add_argument("--role-keyring", type=Path, required=True)
     parser.add_argument("--expected-role-keyring-raw-sha256", required=True)
+    bundle = parser.add_argument_group(
+        "signed_p0_acceptance exact query-v6 bundle"
+    )
+    for role in P0_QUERY_V6_BUNDLE_FILE_ORDER:
+        bundle.add_argument(f"--{role.replace('_', '-')}", type=Path)
     return parser.parse_args()
 
 
@@ -252,9 +316,17 @@ def main() -> int:
         keyring = CFastExecutionQualityRoleTrustedKeysDTO.model_validate(
             keyring_payload
         )
-        # P0 embeds all of its evidence. Replay that evidence before private
-        # key material is opened so this tool cannot sign an unusable P0.
-        validate_runtime_artifact_draft(draft, keyring=keyring)
+        # Validate the envelope first. P0 additionally reconstructs the whole
+        # draft from every exact query-v6 original before key material opens.
+        role, _selected = validate_runtime_artifact_draft(draft, keyring=keyring)
+        if role == "signed_p0_acceptance":
+            require_p0_exact_bundle_reconstruction(
+                draft,
+                bundle_paths={
+                    name: getattr(args, name, None)
+                    for name in P0_QUERY_V6_BUNDLE_FILE_ORDER
+                },
+            )
         private_key = load_private_key(args.private_key_file)
         signed = sign_runtime_artifact(
             draft,
