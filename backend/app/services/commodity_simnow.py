@@ -1289,7 +1289,13 @@ class CommoditySimNowService:
                         payload.phase,
                         str(repriced["reference"]),
                         intent,
-                        c_fast_order_request_fingerprint(request),
+                        c_fast_order_request_fingerprint(
+                            request,
+                            resolved_gateway_name=(
+                                request.gateway_name
+                                or self.trade.settings.default_gateway_name
+                            ),
+                        ),
                         dispatch_abort_epoch,
                     )
                     try:

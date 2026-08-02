@@ -87,6 +87,21 @@ class ControlledRpcClient:
         self.joined = True
 
 
+class EmptyGatewayRpcClient(ControlledRpcClient):
+    def get_all_accounts(
+        self, *, timeout: int
+    ) -> list[dict[str, Any]]:
+        return [{"accountid": ACCOUNT_ID, "gateway_name": ""}]
+
+    def get_all_contracts(
+        self, *, timeout: int
+    ) -> list[dict[str, Any]]:
+        contracts = super().get_all_contracts(timeout=timeout)
+        for contract in contracts:
+            contract["gateway_name"] = ""
+        return contracts
+
+
 def make_real_trade_service(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -462,6 +477,101 @@ def test_real_trade_rpc_final_guard_rejects_stolen_capability_payload(
         )
 
     assert injected is True
+    assert not client.send_attempts
+
+
+def test_real_trade_rpc_final_guard_rejects_empty_gateway_default_substitution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, rpc, risk = make_real_trade_service(
+        tmp_path, monkeypatch
+    )
+    client = rpc.client
+    assert isinstance(client, ControlledRpcClient)
+    bind_test_execution_permit(service, selected_products=("ag",))
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    trade = service.trade
+    assert isinstance(trade, TradeService)
+    capability = service._c_fast_order_volume_capability()
+    original_check_order = risk._check_c_fast_order
+    injected = False
+
+    def substitute_default_gateway(payload) -> None:
+        nonlocal injected
+        original_check_order(payload)
+        if injected:
+            return
+        injected = True
+        trade.settings.default_gateway_name = "PAPER"
+        malicious = payload.model_copy(
+            update={"gateway_name": ""}
+        )
+        trade._send_c_fast_order(
+            malicious,
+            c_fast_order_owner=service,
+            c_fast_order_volume_capability=capability,
+            operator="gateway-substitution-probe",
+            pre_rpc_guard=service._c_fast_pre_rpc_guard,
+            send_linearization_lock=service._dispatch_abort_lock,
+        )
+
+    monkeypatch.setattr(
+        risk,
+        "_check_c_fast_order",
+        substitute_default_gateway,
+    )
+
+    with pytest.raises(CommoditySimNowStateError):
+        service.start_c_fast_shakedown(
+            preview["plan_hash"],
+            operator="admin",
+            role="admin",
+            source_ip=None,
+        )
+
+    assert injected is True
+    assert not client.send_attempts
+
+
+def test_real_trade_rpc_final_guard_rejects_default_gateway_drift_after_risk(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, rpc, risk = make_real_trade_service(
+        tmp_path,
+        monkeypatch,
+        client=EmptyGatewayRpcClient(),
+    )
+    client = rpc.client
+    assert isinstance(client, EmptyGatewayRpcClient)
+    service.settings.commodity_simnow_gateway_name = ""
+    service.settings.vnpy_gateway_name = ""
+    service.settings.default_gateway_name = "CTP"
+    bind_test_execution_permit(service, selected_products=("ag",))
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    original_check_order = risk._check_c_fast_order
+
+    def drift_default_gateway(payload) -> None:
+        original_check_order(payload)
+        service.settings.default_gateway_name = "PAPER"
+
+    monkeypatch.setattr(
+        risk, "_check_c_fast_order", drift_default_gateway
+    )
+
+    with pytest.raises(CommoditySimNowStateError):
+        service.start_c_fast_shakedown(
+            preview["plan_hash"],
+            operator="admin",
+            role="admin",
+            source_ip=None,
+        )
+
     assert not client.send_attempts
 
 

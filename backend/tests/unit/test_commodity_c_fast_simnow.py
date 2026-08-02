@@ -267,7 +267,10 @@ class ProductionWindowGenerationChangeTrade(FakeTrade):
         assert self.rpc is not None
         self.rpc.last_connected_at = "fake-generation-B"
         kwargs["pre_rpc_guard"](
-            c_fast_order_request_fingerprint(request)
+            c_fast_order_request_fingerprint(
+                request,
+                resolved_gateway_name=request.gateway_name,
+            )
         )
         pytest.fail("non-idempotent RPC must not be reached")
 
@@ -280,7 +283,10 @@ class ClockChangeAfterFirstChildTrade(FakeTrade):
 
     def send_order(self, request, **kwargs):
         kwargs["pre_rpc_guard"](
-            c_fast_order_request_fingerprint(request)
+            c_fast_order_request_fingerprint(
+                request,
+                resolved_gateway_name=request.gateway_name,
+            )
         )
         result = super().send_order(request, **kwargs)
         if len(self.requests) == 1:

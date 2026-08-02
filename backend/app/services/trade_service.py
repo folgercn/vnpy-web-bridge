@@ -47,14 +47,20 @@ _C_FAST_CAPABILITY_CONSTRUCTION_KEY = object()
 
 def c_fast_order_request_fingerprint(
     payload: OrderRequestDTO,
+    *,
+    resolved_gateway_name: str,
 ) -> str:
     """Canonical identity for every field that can affect one order send."""
 
+    if not isinstance(resolved_gateway_name, str) or not resolved_gateway_name:
+        raise ValueError("resolved C_FAST gateway_name is required")
     candidate = OrderRequestDTO.model_validate(
         payload.model_dump(mode="python")
     )
+    canonical_payload = candidate.model_dump(mode="json")
+    canonical_payload["gateway_name"] = resolved_gateway_name
     canonical = json.dumps(
-        candidate.model_dump(mode="json"),
+        canonical_payload,
         allow_nan=False,
         ensure_ascii=False,
         sort_keys=True,
@@ -300,7 +306,10 @@ class TradeService:
                             "C_FAST order-volume capability is invalid"
                         )
                     actual_order_request_sha256 = (
-                        c_fast_order_request_fingerprint(final_payload)
+                        c_fast_order_request_fingerprint(
+                            final_payload,
+                            resolved_gateway_name=gateway_name,
+                        )
                     )
 
                     def final_guard() -> Any:
