@@ -4,7 +4,9 @@ from fastapi import APIRouter, Depends, Request
 
 from app.core.errors import ok
 from app.core.security import CurrentUser, require_roles
-from app.schemas.trade import CancelAllRequestDTO, CancelRequestDTO, OrderRequestDTO
+from app.schemas.manual_execution_permit import ManualOrderSubmissionDTO
+from app.schemas.trade import CancelAllRequestDTO, CancelRequestDTO
+from app.services.manual_execution_permit import manual_execution_permit_service
 from app.services.trade_service import trade_service
 from app.services.vnpy_rpc_service import rpc_service
 from app.stores.memory_store import memory_store
@@ -26,12 +28,12 @@ def trades(_: CurrentUser = Depends(require_roles("viewer", "trader", "admin")))
 
 @router.post("/orders")
 def create_order(
-    payload: OrderRequestDTO,
+    payload: ManualOrderSubmissionDTO,
     request: Request,
     user: CurrentUser = Depends(require_roles("trader", "admin")),
 ) -> dict:
     return ok(
-        trade_service.send_order(
+        manual_execution_permit_service.submit(
             payload,
             source_ip=request.client.host if request.client else None,
             operator=user.username,

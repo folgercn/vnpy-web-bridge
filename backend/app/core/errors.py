@@ -63,6 +63,18 @@ class InvalidOrderRequestError(AppError):
     message = "下单参数非法"
 
 
+class ManualExecutionPermitError(AppError):
+    status_code = 403
+    code = "MANUAL_EXECUTION_PERMIT_INVALID"
+    message = "手工下单 Execution Permit 无效"
+
+
+class ManualExecutionPermitReplayError(ManualExecutionPermitError):
+    status_code = 409
+    code = "MANUAL_EXECUTION_PERMIT_REPLAY"
+    message = "手工下单 Execution Permit 已消费"
+
+
 class OrderNotFoundError(AppError):
     status_code = 404
     code = "ORDER_NOT_FOUND"

@@ -47,6 +47,58 @@ class FakeWatchlistService:
         return {"removed": len(self.rows[username]) != before, "watch_key": watch_key}
 
 
+def manual_order_submission_payload() -> dict:
+    return {
+        "order": {
+            "symbol": "rb2610",
+            "exchange": "SHFE",
+            "direction": "long",
+            "offset": "open",
+            "type": "limit",
+            "price": 3000,
+            "volume": 1,
+            "gateway_name": "CTP",
+            "reference": "manual:test:rb2610:1",
+            "confirm": True,
+        },
+        "execution_permit": {
+            "schema_version": "manual_execution_permit_v1",
+            "purpose": "manual_order_one_shot_execution_permit",
+            "permit_id": "manual-execution-permit-v1-" + "0" * 64,
+            "nonce": "nonce-manual-test-0001",
+            "issued_at_utc": "2026-08-02T00:00:00Z",
+            "not_before_utc": "2026-08-02T00:00:00Z",
+            "expires_at_utc": "2026-08-02T00:02:00Z",
+            "execution_environment": "SIMNOW",
+            "account_sha256": "0" * 64,
+            "operator": "trader",
+            "order": {
+                "symbol": "rb2610",
+                "exchange": "SHFE",
+                "direction": "long",
+                "offset": "open",
+                "type": "limit",
+                "price": 3000,
+                "volume": 1,
+                "gateway_name": "CTP",
+                "reference": "manual:test:rb2610:1",
+                "confirm": True,
+            },
+            "resolved_gateway_name": "CTP",
+            "signer_key_id": "manual-human-v1",
+            "human_issued": True,
+            "manual_order_authorized": True,
+            "one_shot": True,
+            "replay_allowed": False,
+            "production_allowed": False,
+            "live_trading_authorized": False,
+            "automatic_dispatch_authorized": False,
+            "c_fast_authority_reused": False,
+            "signature": "A" * 86 + "==",
+        },
+    }
+
+
 def test_status_returns_unified_success_payload(monkeypatch) -> None:
     with client_without_rpc(monkeypatch) as client:
         response = client.get("/api/status")
@@ -434,8 +486,17 @@ def test_viewer_cannot_create_order(monkeypatch) -> None:
     assert response.json()["error"]["code"] == "PERMISSION_DENIED"
 
 
-def test_trader_create_order_disabled_returns_trade_disabled(monkeypatch) -> None:
+def test_legacy_order_body_without_permit_fails_closed(monkeypatch) -> None:
     risk_service.disable_trade()
+    from app.api import routes_trade
+
+    monkeypatch.setattr(
+        routes_trade.manual_execution_permit_service,
+        "submit",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("manual permit service must not receive invalid envelope")
+        ),
+    )
     with client_without_rpc(monkeypatch) as client:
         response = client.post(
             "/api/orders",
@@ -452,16 +513,47 @@ def test_trader_create_order_disabled_returns_trade_disabled(monkeypatch) -> Non
             },
         )
 
-    assert response.status_code == 403
-    assert response.json()["error"]["code"] == "TRADE_DISABLED"
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
 
 
-def test_create_order_success_uses_trade_service(monkeypatch) -> None:
+def test_manual_order_envelope_is_default_off_without_permit_authority(
+    monkeypatch,
+) -> None:
     from app.api import routes_trade
 
     monkeypatch.setattr(
-        routes_trade.trade_service,
+        routes_trade.manual_execution_permit_service.settings,
+        "manual_execution_permit_enabled",
+        False,
+    )
+    monkeypatch.setattr(
+        routes_trade.trade_service.rpc,
         "send_order",
+        lambda *_args: (_ for _ in ()).throw(
+            AssertionError("RPC send must remain unreachable")
+        ),
+    )
+
+    with client_without_rpc(monkeypatch) as client:
+        response = client.post(
+            "/api/orders",
+            headers=auth_headers("trader"),
+            json=manual_order_submission_payload(),
+        )
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == (
+        "MANUAL_EXECUTION_PERMIT_INVALID"
+    )
+
+
+def test_create_order_success_uses_manual_execution_permit_service(monkeypatch) -> None:
+    from app.api import routes_trade
+
+    monkeypatch.setattr(
+        routes_trade.manual_execution_permit_service,
+        "submit",
         lambda payload, source_ip=None, operator="anonymous": {"vt_orderid": "CTP.1", "accepted": True},
     )
 
@@ -469,16 +561,7 @@ def test_create_order_success_uses_trade_service(monkeypatch) -> None:
         response = client.post(
             "/api/orders",
             headers=auth_headers("trader"),
-            json={
-                "symbol": "rb2610",
-                "exchange": "SHFE",
-                "direction": "long",
-                "offset": "open",
-                "type": "limit",
-                "price": 3000,
-                "volume": 1,
-                "confirm": True,
-            },
+            json=manual_order_submission_payload(),
         )
 
     assert response.status_code == 200
