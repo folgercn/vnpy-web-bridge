@@ -54,6 +54,18 @@ def test_build_is_deterministic_exact_closure_and_has_no_secret_or_authority(
         assert package.extractfile(subject.MANIFEST_ARCHIVE_PATH).read() == manifest_raw
 
 
+def test_real_head_build_round_trip_is_byte_deterministic() -> None:
+    first = subject.build_package(ROOT, "HEAD")
+    second = subject.build_package(ROOT, "HEAD")
+    assert first == second
+    archive, manifest_raw, payload = first
+    members = subject._archive_members(archive, payload)
+    assert members[subject.MANIFEST_ARCHIVE_PATH] == manifest_raw
+    assert [entry["path"] for entry in payload["entries"]] == sorted(
+        subject.SOURCE_PATHS
+    )
+
+
 def test_preflight_detects_interpreter_dependency_and_root_identity_tamper(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
