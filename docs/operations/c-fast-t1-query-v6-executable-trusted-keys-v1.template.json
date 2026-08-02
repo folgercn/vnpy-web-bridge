@@ -1,0 +1,10 @@
+{
+  "schema_version": "commodity_c_fast_t1_query_v6_executable_trusted_keys_v1",
+  "keys": [
+    {
+      "key_id": "PENDING_EXECUTABLE_SIGNER_KEY_ID",
+      "purpose": "t1_query_v6_executable_release_signer",
+      "public_key_base64": "PENDING_BASE64_ED25519_PUBLIC_KEY"
+    }
+  ]
+}
