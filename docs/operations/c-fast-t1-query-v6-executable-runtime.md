@@ -49,21 +49,26 @@ verifier 只重放 foundation、active pins、独立 key domain 与 executable s
 不会读取 DSN secret、consume、启动 child 或联网。signer 只 create-only 写入
 `0600` signed release。runner 在任何网络动作前依次执行：
 
-1. 校验 adapter custody/hash 与 secret-free DSN metadata；
+1. 对 `--manifest` 做稳定重读，要求 raw/canonical hash 与 foundation 已验证的
+   query manifest 完全一致，再校验 adapter custody/hash 与 secret-free DSN
+   metadata；
 2. 拒绝既有 consume、terminal 或 partial attempt directory；
 3. 完整重放 foundation、pins 与 executable release；
 4. create-only 写 consume，并从 custody descriptor 精确重开核验；
-5. staging exact adapter，再做一次完整 final revalidation；
+5. staging exact adapter，再做一次完整 final revalidation，并再次精确核验
+   runtime manifest；
 6. 使用 `python -I`、最小环境、无 stdin、独立 process session 和固定 timeout
-   启动 adapter；
+   启动 adapter；timeout、SIGINT/SIGTERM/SIGHUP 或异常会先 SIGTERM 整个 process
+   group，bounded wait 后仍存活则 SIGKILL，并确认 fork descendants 已退出；
 7. 验证 pre/post readonly proof、expected principal/endpoint、audit outputs，并
    create-only 写 terminal。
 
 consume 后、adapter launch 前任一步骤失败都会写
 `FAILED_BEFORE_NETWORK`。launch 后 timeout、signal、异常退出或证据无法确认会写
-`OUTCOME_UNKNOWN`，绝不自动重试。成功和 P0-blocked 分别写 `COMPLETED_PASS` 与
-`COMPLETED_BLOCKED`。任何 terminal/consume/partial state 均永久阻止同 attempt
-重放。
+`OUTCOME_UNKNOWN`；操作员或系统信号中断会在清理 process group 后写
+`INTERRUPTED`，两者都绝不自动重试。成功和 P0-blocked 分别写
+`COMPLETED_PASS` 与 `COMPLETED_BLOCKED`。任何 terminal/consume/partial state
+均永久阻止同 attempt 重放。
 
 ## Current runtime blocker
 

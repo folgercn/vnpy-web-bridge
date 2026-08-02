@@ -31,7 +31,7 @@
     "release_id": {"$ref": "#/$defs/id"},
     "attempt_id": {"$ref": "#/$defs/attemptId"},
     "terminal_state": {
-      "enum": ["COMPLETED_PASS", "COMPLETED_BLOCKED", "FAILED_BEFORE_NETWORK", "OUTCOME_UNKNOWN"]
+      "enum": ["COMPLETED_PASS", "COMPLETED_BLOCKED", "FAILED_BEFORE_NETWORK", "OUTCOME_UNKNOWN", "INTERRUPTED"]
     },
     "error_code": {"type": ["string", "null"], "minLength": 3, "maxLength": 96, "pattern": "^[A-Z0-9_]+$"},
     "started_at": {"$ref": "#/$defs/dateTime"},
@@ -141,7 +141,7 @@
       }}
     },
     {
-      "if": {"properties": {"terminal_state": {"const": "OUTCOME_UNKNOWN"}}, "required": ["terminal_state"]},
+      "if": {"properties": {"terminal_state": {"enum": ["OUTCOME_UNKNOWN", "INTERRUPTED"]}}, "required": ["terminal_state"]},
       "then": {"properties": {
         "error_code": {"type": "string"},
         "adapter_launch_attempted": {"const": true},

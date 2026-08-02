@@ -16,9 +16,12 @@ import hashlib
 import hmac
 import os
 from pathlib import Path
+import signal
 import stat
 import subprocess
 import sys
+import threading
+import time
 from typing import Any, Callable
 
 import commodity_c_fast_t1_query_v6_authority as foundation_v6
@@ -44,6 +47,8 @@ from commodity_c_fast_t1_one_shot import (
 ROOT = Path(__file__).resolve().parents[1]
 MAX_BYTES = 64 * 1024 * 1024
 RUNTIME_BLOCKER = "QUERY_V6_PINNED_PRECONNECT_ADAPTER_NOT_DEPLOYED"
+PROCESS_GROUP_TERM_SECONDS = 2.0
+PROCESS_GROUP_KILL_SECONDS = 2.0
 
 
 class QueryV6RuntimeError(RuntimeError):
@@ -116,6 +121,46 @@ def _verify_dsn_metadata(
     if any(attestation.get(field) != value for field, value in expected.items()):
         raise QueryV6RuntimeError(
             "DSN file metadata does not match the secret-free attestation"
+        )
+
+
+def verify_query_manifest_file(
+    manifest_path: Path,
+    verified: executable.VerifiedExecutableRelease,
+) -> None:
+    try:
+        info_before = manifest_path.lstat()
+        raw_before = read_regular_file_strict(
+            manifest_path,
+            "query-v6 runtime query manifest",
+            limit=MAX_BYTES,
+        )
+        payload = parse_json_bytes(raw_before, "query-v6 runtime query manifest")
+        raw_after = read_regular_file_strict(
+            manifest_path,
+            "query-v6 runtime query manifest final re-read",
+            limit=MAX_BYTES,
+        )
+        info_after = manifest_path.lstat()
+    except (OSError, OneShotError) as exc:
+        raise QueryV6RuntimeError(str(exc)) from exc
+    if (
+        raw_before != raw_after
+        or (info_before.st_dev, info_before.st_ino, info_before.st_size)
+        != (info_after.st_dev, info_after.st_ino, info_after.st_size)
+    ):
+        raise QueryV6RuntimeError("query-v6 runtime query manifest changed while read")
+    evidence = verified.foundation.evidence.query_manifest
+    if (
+        not hmac.compare_digest(_sha256(raw_before), evidence.raw_sha256)
+        or not hmac.compare_digest(
+            _sha256(canonical_json(payload)),
+            evidence.canonical_sha256,
+        )
+        or payload != evidence.payload
+    ):
+        raise QueryV6RuntimeError(
+            "runtime query manifest does not match verified foundation"
         )
 
 
@@ -238,7 +283,7 @@ def _terminal_payload(
     ):
         raise QueryV6RuntimeError("query-v6 terminal timeline is invalid")
     completed = terminal_state in {"COMPLETED_PASS", "COMPLETED_BLOCKED"}
-    unknown = terminal_state == "OUTCOME_UNKNOWN"
+    incomplete = terminal_state in {"OUTCOME_UNKNOWN", "INTERRUPTED"}
     return {
         "schema_version": "commodity_c_fast_t1_query_terminal_v6",
         "purpose": "c_fast_t1_query_v6_readonly_terminal",
@@ -266,8 +311,10 @@ def _terminal_payload(
         "adapter_launch_attempted": adapter_launch_attempted,
         "child_exit_code": child_exit_code,
         "child_signal": child_signal,
-        "production_query_attempted": completed or unknown,
-        "production_query_completed": True if completed else (None if unknown else False),
+        "production_query_attempted": completed or incomplete,
+        "production_query_completed": (
+            True if completed else (None if incomplete else False)
+        ),
         "readonly_proof_verified": completed,
         "readonly_principal_verified": completed,
         "endpoint_verified": completed,
@@ -443,18 +490,138 @@ def run_adapter(
     cwd: Path,
     timeout: int,
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        invocation,
-        cwd=cwd,
-        env=child_environment(),
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        check=False,
-        timeout=timeout,
-        start_new_session=True,
+    if (
+        threading.current_thread() is not threading.main_thread()
+        or not hasattr(signal, "pthread_sigmask")
+        or not hasattr(signal, "SIG_BLOCK")
+        or not hasattr(signal, "SIG_SETMASK")
+    ):
+        raise QueryV6RuntimeError(
+            "query-v6 adapter requires main-thread POSIX signal masking"
+        )
+    controlled_signals = tuple(
+        current
+        for current in (
+            getattr(signal, "SIGTERM", None),
+            getattr(signal, "SIGHUP", None),
+            getattr(signal, "SIGINT", None),
+        )
+        if current is not None
     )
+    previous_handlers: dict[signal.Signals, Any] = {}
+    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, controlled_signals)
+    process: subprocess.Popen[str] | None = None
+
+    def interrupt_for_shutdown(signum: int, _frame: Any) -> None:
+        raise KeyboardInterrupt(f"query-v6 runner received signal {signum}")
+
+    try:
+        for current in controlled_signals:
+            previous_handlers[current] = signal.getsignal(current)
+            signal.signal(current, interrupt_for_shutdown)
+        try:
+            process = subprocess.Popen(
+                invocation,
+                cwd=cwd,
+                env=child_environment(),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                shell=False,
+                start_new_session=True,
+            )
+        except OSError as exc:
+            raise QueryV6RuntimeError(
+                "query-v6 execution adapter could not be created"
+            ) from exc
+        try:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+            stdout, stderr = process.communicate(timeout=timeout)
+        except BaseException as exc:
+            if not _terminate_adapter_process_group(process):
+                raise QueryV6RuntimeError(
+                    "query-v6 adapter process-group cleanup could not be confirmed"
+                ) from exc
+            raise
+        if _process_group_exists(process.pid):
+            if not _terminate_adapter_process_group(process):
+                raise QueryV6RuntimeError(
+                    "query-v6 adapter descendant cleanup could not be confirmed"
+                )
+            raise QueryV6RuntimeError(
+                "query-v6 adapter left a descendant process after exit"
+            )
+        return subprocess.CompletedProcess(
+            invocation,
+            process.returncode,
+            stdout,
+            stderr,
+        )
+    finally:
+        for current, previous in previous_handlers.items():
+            signal.signal(current, previous)
+        try:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+        except BaseException:
+            pass
+
+
+def _process_group_exists(process_group_id: int) -> bool:
+    try:
+        os.killpg(process_group_id, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _wait_process_group_exit(
+    process_group_id: int,
+    timeout: float,
+    process: subprocess.Popen[str],
+) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        process.poll()
+        if not _process_group_exists(process_group_id):
+            return True
+        time.sleep(0.02)
+    process.poll()
+    return not _process_group_exists(process_group_id)
+
+
+def _terminate_adapter_process_group(process: subprocess.Popen[str]) -> bool:
+    process_group_id = process.pid
+    try:
+        os.killpg(process_group_id, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    except OSError:
+        return False
+    group_gone = _wait_process_group_exit(
+        process_group_id,
+        PROCESS_GROUP_TERM_SECONDS,
+        process,
+    )
+    if not group_gone:
+        try:
+            os.killpg(process_group_id, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            return False
+        group_gone = _wait_process_group_exit(
+            process_group_id,
+            PROCESS_GROUP_KILL_SECONDS,
+            process,
+        )
+    try:
+        process.wait(timeout=PROCESS_GROUP_KILL_SECONDS)
+    except subprocess.TimeoutExpired:
+        return False
+    return group_gone and not _process_group_exists(process_group_id)
 
 
 def run_authorized_attempt(
@@ -471,6 +638,7 @@ def run_authorized_attempt(
     require_root_owned_parent: bool = True,
     require_root_owned_adapter: bool = True,
 ) -> tuple[int, dict[str, Any]]:
+    verify_query_manifest_file(manifest_path, verified)
     adapter_raw = verify_execution_adapter(
         execution_adapter_path,
         verified,
@@ -563,6 +731,7 @@ def run_authorized_attempt(
                 final.pins,
                 now=final_at,
             )
+            verify_query_manifest_file(manifest_path, final)
             if _sha256(
                 read_regular_file_strict(
                     staged_adapter,
@@ -621,6 +790,10 @@ def run_authorized_attempt(
             state = "OUTCOME_UNKNOWN"
             error_code = "EXECUTION_ADAPTER_TIMEOUT"
             exit_code = 2
+        except KeyboardInterrupt:
+            state = "INTERRUPTED"
+            error_code = "EXECUTION_ADAPTER_INTERRUPTED"
+            exit_code = 130
         except Exception:
             state = "OUTCOME_UNKNOWN"
             error_code = "EXECUTION_ADAPTER_OUTCOME_UNKNOWN"

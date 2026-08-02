@@ -5,9 +5,13 @@ import copy
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
+import threading
+import time
 from types import SimpleNamespace
 from typing import Any
 
@@ -81,6 +85,21 @@ def _artifact(payload: dict[str, Any], label: str) -> foundation_v6.JsonArtifact
     )
 
 
+def _manifest_payload() -> dict[str, Any]:
+    return {
+        "snapshot_id": "snapshot-query-v6-exec-0001",
+        "audit_window": {
+            "start": "2026-08-01T00:00:00+00:00",
+            "end_exclusive": "2026-08-03T00:00:00+00:00",
+            "trading_day": "20260802",
+        },
+    }
+
+
+def _manifest_raw() -> bytes:
+    return subject.canonical_json(_manifest_payload()) + b"\n"
+
+
 def _foundation(
     custody: Path,
     dsn_file: Path,
@@ -110,16 +129,10 @@ def _foundation(
         "authority_granted": False,
     }
     dsn["dsn_file_identity_sha256"] = foundation_v6.dsn_identity_sha256(dsn)
-    manifest = _artifact(
-        {
-            "snapshot_id": "snapshot-query-v6-exec-0001",
-            "audit_window": {
-                "start": "2026-08-01T00:00:00+00:00",
-                "end_exclusive": "2026-08-03T00:00:00+00:00",
-                "trading_day": "20260802",
-            },
-        },
-        "manifest",
+    manifest = foundation_v6.JsonArtifact(
+        payload=_manifest_payload(),
+        raw_sha256=_sha(_manifest_raw()),
+        canonical_sha256=_sha(subject.canonical_json(_manifest_payload())),
     )
     readiness = _artifact({}, "readiness")
     l3 = _artifact({}, "l3")
@@ -294,7 +307,7 @@ def _fixture(tmp_path: Path) -> dict[str, Any]:
         now=NOW,
     )
     manifest_path = tmp_path / "manifest.json"
-    manifest_path.write_text("{}", encoding="utf-8")
+    manifest_path.write_bytes(_manifest_raw())
     return {
         "custody": custody,
         "dsn_file": dsn_file,
@@ -325,6 +338,58 @@ def _successful_validation() -> runtime.CompletedValidation:
         readonly_preflight_canonical_sha256="e" * 64,
         readonly_postflight_canonical_sha256="e" * 64,
     )
+
+
+def _pid_is_live(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    status = subprocess.run(
+        ["ps", "-o", "stat=", "-p", str(pid)],
+        check=False,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    return bool(status) and not status.startswith("Z")
+
+
+def _assert_pid_exits(pid: int) -> None:
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline and _pid_is_live(pid):
+        time.sleep(0.02)
+    assert not _pid_is_live(pid)
+
+
+def _forking_adapter(tmp_path: Path) -> tuple[list[str], Path, Path]:
+    script = tmp_path / "forking-adapter.py"
+    child_pid = tmp_path / "child.pid"
+    parent_pid = tmp_path / "parent.pid"
+    script.write_text(
+        """import os
+from pathlib import Path
+import sys
+import time
+
+child = os.fork()
+if child == 0:
+    Path(sys.argv[1]).write_text(str(os.getpid()), encoding="utf-8")
+    while True:
+        time.sleep(1)
+Path(sys.argv[2]).write_text(str(os.getpid()), encoding="utf-8")
+while True:
+    time.sleep(1)
+""",
+        encoding="utf-8",
+    )
+    invocation = [
+        sys.executable,
+        "-I",
+        str(script),
+        str(child_pid),
+        str(parent_pid),
+    ]
+    return invocation, child_pid, parent_pid
 
 
 def test_distinct_executable_signature_is_required_and_narrow(tmp_path: Path) -> None:
@@ -428,6 +493,33 @@ def test_consume_precedes_adapter_launch_and_replay_is_closed(tmp_path: Path) ->
     assert len(launches) == 1
 
 
+def test_wrong_runtime_manifest_blocks_before_consume(tmp_path: Path) -> None:
+    values = _fixture(tmp_path)
+    values["manifest_path"].write_text('{"wrong":true}\n', encoding="utf-8")
+    launches = 0
+
+    def launch(*_args: Any, **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        nonlocal launches
+        launches += 1
+        return subprocess.CompletedProcess([], 0, "", "")
+
+    with pytest.raises(runtime.QueryV6RuntimeError, match="verified foundation"):
+        runtime.run_authorized_attempt(
+            values["verified"],
+            values["release_path"],
+            values["manifest_path"],
+            values["dsn_file"],
+            values["adapter_path"],
+            lambda _at: values["verified"],
+            clock=lambda: NOW,
+            adapter_launcher=launch,
+            require_root_owned_parent=False,
+            require_root_owned_adapter=False,
+        )
+    assert launches == 0
+    assert not list(values["custody"].glob("*.query-consumed-v6.json"))
+
+
 def test_final_tamper_fails_before_network_and_writes_terminal(tmp_path: Path) -> None:
     values = _fixture(tmp_path)
     calls = 0
@@ -466,8 +558,17 @@ def test_final_tamper_fails_before_network_and_writes_terminal(tmp_path: Path) -
 
 def test_launch_boundary_failure_after_consume_is_terminalized(tmp_path: Path) -> None:
     values = _fixture(tmp_path)
-    values["manifest_path"].unlink()
     launches = 0
+    revalidations = 0
+
+    def remove_manifest_before_launch(
+        _at: datetime,
+    ) -> subject.VerifiedExecutableRelease:
+        nonlocal revalidations
+        revalidations += 1
+        if revalidations == 2:
+            values["manifest_path"].unlink()
+        return values["verified"]
 
     def launch(*_args: Any, **_kwargs: Any) -> subprocess.CompletedProcess[str]:
         nonlocal launches
@@ -480,7 +581,7 @@ def test_launch_boundary_failure_after_consume_is_terminalized(tmp_path: Path) -
         values["manifest_path"],
         values["dsn_file"],
         values["adapter_path"],
-        lambda _at: values["verified"],
+        remove_manifest_before_launch,
         clock=lambda: NOW,
         adapter_launcher=launch,
         output_validator=lambda *_args: _successful_validation(),
@@ -517,6 +618,80 @@ def test_timeout_is_terminal_outcome_unknown_and_never_replays(tmp_path: Path) -
     assert terminal["terminal_state"] == "OUTCOME_UNKNOWN"
     assert terminal["production_query_attempted"] is True
     assert terminal["production_query_completed"] is None
+
+
+def test_run_adapter_timeout_kills_forked_process_group(tmp_path: Path) -> None:
+    invocation, child_pid_path, parent_pid_path = _forking_adapter(tmp_path)
+    with pytest.raises(subprocess.TimeoutExpired):
+        runtime.run_adapter(invocation, cwd=tmp_path, timeout=1)
+    child_pid = int(child_pid_path.read_text(encoding="utf-8"))
+    parent_pid = int(parent_pid_path.read_text(encoding="utf-8"))
+    _assert_pid_exits(parent_pid)
+    _assert_pid_exits(child_pid)
+
+
+def test_run_adapter_interrupt_kills_forked_process_group(tmp_path: Path) -> None:
+    invocation, child_pid_path, parent_pid_path = _forking_adapter(tmp_path)
+
+    def interrupt_when_started() -> None:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if child_pid_path.exists() and parent_pid_path.exists():
+                os.kill(os.getpid(), signal.SIGINT)
+                return
+            time.sleep(0.01)
+
+    interrupter = threading.Thread(target=interrupt_when_started)
+    interrupter.start()
+    with pytest.raises(KeyboardInterrupt):
+        runtime.run_adapter(invocation, cwd=tmp_path, timeout=30)
+    interrupter.join(timeout=2)
+    assert not interrupter.is_alive()
+    child_pid = int(child_pid_path.read_text(encoding="utf-8"))
+    parent_pid = int(parent_pid_path.read_text(encoding="utf-8"))
+    _assert_pid_exits(parent_pid)
+    _assert_pid_exits(child_pid)
+
+
+def test_interrupt_terminalizes_and_prevents_replay(tmp_path: Path) -> None:
+    values = _fixture(tmp_path)
+    launches = 0
+
+    def interrupt(*_args: Any, **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        nonlocal launches
+        launches += 1
+        raise KeyboardInterrupt("test interrupt")
+
+    code, terminal = runtime.run_authorized_attempt(
+        values["verified"],
+        values["release_path"],
+        values["manifest_path"],
+        values["dsn_file"],
+        values["adapter_path"],
+        lambda _at: values["verified"],
+        clock=lambda: NOW,
+        adapter_launcher=interrupt,
+        require_root_owned_parent=False,
+        require_root_owned_adapter=False,
+    )
+    assert code == 130
+    assert terminal["terminal_state"] == "INTERRUPTED"
+    assert terminal["production_query_completed"] is None
+    assert launches == 1
+    with pytest.raises(runtime.QueryV6RuntimeError, match="already consumed"):
+        runtime.run_authorized_attempt(
+            values["verified"],
+            values["release_path"],
+            values["manifest_path"],
+            values["dsn_file"],
+            values["adapter_path"],
+            lambda _at: values["verified"],
+            clock=lambda: NOW,
+            adapter_launcher=interrupt,
+            require_root_owned_parent=False,
+            require_root_owned_adapter=False,
+        )
+    assert launches == 1
 
 
 def test_adapter_tamper_and_partial_state_block_before_launch(tmp_path: Path) -> None:
