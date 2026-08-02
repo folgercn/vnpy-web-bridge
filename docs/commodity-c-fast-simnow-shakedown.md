@@ -179,6 +179,14 @@ chain-tail 校验的 archive 为事实源，修复 pointer 并释放 active plan
 重启后按链顺序枚举和校验历史终态；缺失 predecessor、分叉、循环或单文件
 checksum 错误会返回 `CHAIN_BROKEN`。archive 成功但 current pointer 写失败时，
 终态重试复用原 archive，不重新生成完成时间、PnL 或 checksum。
+归档不再对 final path 原位 `O_EXCL` 写入：在 owner-only archive
+directory fd 和跨进程 lock 下先 create-only 写 reservation 与 hidden temp，
+file fsync 后用 hard-link 原子创建 final，directory fsync 后再清理中间件。
+在同一跨进程 lock 内、reservation/link 之前会重建 final chain，并要求
+candidate `previous_terminal_checksum` 精确等于当前 tail；因此两个进程
+不能同时从同一 predecessor 生成分叉。
+重启只会清理结构和 checksum 可验证的未提交 temp，或收养已 atomic-link
+的 final；partial/conflicting/unknown custody 保留 active plan 并 fail closed。
 如果进程在 archive 写成功、current pointer 写入前崩溃，启动恢复会校验该
 session 的 plan、execution、terminal checksum 与唯一 chain tail，以 archive
 为终态事实源修复 pointer，并删除旧 active plan；不会用旧 active 状态生成冲突
@@ -191,6 +199,19 @@ hash 稳定，再校验固定范围、精确 expected positions、session 和全
 活动委托均为零；两轮之间发生成交或状态推进时标记
 `UNSTABLE_TERMINAL_SNAPSHOT` 并等待重试。guard 的时间、前后快照 hash 和
 blocker 会写入终态或 halt evidence。
+完成 PnL replay 后、create-only archive 写入前还会执行 pre-publish barrier：
+连续重读两次完整 terminal facts，并与 guard 固定的 snapshot fingerprint、
+orders/trades/positions raw hash、send-intent state 逐项一致。迟到 trade、order、
+position 或 unresolved intent 漂移会保留 active plan，进入
+`HALTED_RECONCILE_REQUIRED`，且不生成 archive。最终 blocking RPC replay/guard
+在 callback event lock 外执行，避免与 reconnect `_call_lock`/callback join
+形成锁序死锁；回到 event lock 后必须将 callback/reconnect 单调 generation
+与 dispatch generation 精确复核，才能执行无 RPC 的 create-only commit。
+该路径仍绑定 process-local、owner-bound、one-shot capability；generation
+漂移或 commit 期间 reentrant callback 均 fail closed 且保留 active plan。
+该 app-level linearization 已完成；Issue #152
+仍负责跨 RPC transport/上游队列边界的真实时序 acceptance，不能由本地锁测试
+替代。
 
 ## PnL 证据
 

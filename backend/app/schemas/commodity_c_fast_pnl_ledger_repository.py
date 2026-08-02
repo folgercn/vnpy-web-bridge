@@ -22,6 +22,8 @@ class CommodityCFastPnlSourceAdapterBindingDTO(StrictLedgerModel):
         "cfast-simnow-not-provided-v1",
         "cfast-simnow-archive-reference-v3",
         "cfast-simnow-session-archive-replay-v4",
+        "cfast-simnow-settled-session-archive-replay-v1",
+        "cfast-simnow-fee-statement-replay-v5",
     ]
     layer_kind: Literal[
         "THEORETICAL_TARGET_PNL",
@@ -36,6 +38,8 @@ class CommodityCFastPnlSourceAdapterBindingDTO(StrictLedgerModel):
         "commodity_c_fast_actual_simnow_not_provided_source_facts_v1",
         "commodity_c_fast_actual_simnow_facts_v3",
         "commodity_c_fast_actual_simnow_facts_v4",
+        "commodity_c_fast_actual_simnow_settled_archive_facts_v1",
+        "commodity_c_fast_actual_simnow_facts_v5",
     ]
     source_kind: Literal[
         "SIGNED_EXACT_TARGET_MARKS",
@@ -44,6 +48,8 @@ class CommodityCFastPnlSourceAdapterBindingDTO(StrictLedgerModel):
         "ACTUAL_SIMNOW_FACTS_NOT_PROVIDED",
         "SIMNOW_AUTHORITATIVE_ORDER_TRADE_POSITION_RECONCILIATION",
         "SIMNOW_SESSION_ARCHIVE_RAW_TRADE_MARK_REPLAY_FEES_UNBOUND",
+        "SIMNOW_SETTLED_SESSION_ARCHIVE_RAW_TRADE_MARK_REPLAY_FEES_UNBOUND",
+        "SIMNOW_SESSION_ARCHIVE_RAW_TRADE_MARK_REPLAY_FEE_STATEMENT_BOUND",
     ]
     verification_rule: Literal[
         "FRESH_REPLAY_REALIZED_UNREALIZED_ROLL_SUM",
@@ -52,6 +58,8 @@ class CommodityCFastPnlSourceAdapterBindingDTO(StrictLedgerModel):
         "NOT_PROVIDED_ACTUAL_AMOUNTS_MUST_REMAIN_NULL",
         "ARCHIVE_REFERENCE_ONLY_NO_ACTUAL_AMOUNT_AUTHORITY",
         "FRESH_REPLAY_SESSION_RAW_TRADES_MARKS_MULTIPLIERS_FEES_UNBOUND",
+        "FRESH_REPLAY_SETTLED_SESSION_RAW_TRADES_MARKS_MULTIPLIERS_FEES_UNBOUND",
+        "FRESH_REPLAY_EXACT_ARCHIVE_TRADES_AND_SIGNED_FEE_STATEMENT",
     ]
     amount_authority: Literal[
         "DERIVED_RESEARCH_VALUE_ONLY",
@@ -59,6 +67,7 @@ class CommodityCFastPnlSourceAdapterBindingDTO(StrictLedgerModel):
         "UNCALIBRATED_INTERVAL_ONLY_NO_POINT_FILL_PROBABILITY",
         "UNVERIFIED_ACTUAL_AMOUNTS_MUST_REMAIN_NULL",
         "GROSS_AND_SLIPPAGE_REPLAYED_FEES_AND_NET_UNBOUND",
+        "GROSS_OFFICIAL_BROKER_ALL_IN_AND_NET_FRESH_REPLAYED",
     ]
 
 
@@ -81,7 +90,7 @@ class CommodityCFastPnlLedgerRepositoryExportDTO(StrictLedgerModel):
     source_adapters: tuple[
         CommodityCFastPnlSourceAdapterBindingDTO,
         ...,
-    ] = Field(min_length=6, max_length=6)
+    ] = Field(min_length=8, max_length=8)
     repository_semantics: Literal["APPEND_ONLY_CREATE_ONLY_CANONICAL_JSON_HASH_CHAIN"]
     recovery_semantics: Literal[
         "FSYNC_SEQUENCE_RESERVATION_THEN_PENDING_CREATE_ONLY_LINK_FRESH_REPLAY"
@@ -144,6 +153,14 @@ class CommodityCFastPnlLedgerRepositoryExportDTO(StrictLedgerModel):
             ),
             (
                 "cfast-simnow-session-archive-replay-v4",
+                "ACTUAL_SIMNOW_CALIBRATION_PNL",
+            ),
+            (
+                "cfast-simnow-settled-session-archive-replay-v1",
+                "ACTUAL_SIMNOW_CALIBRATION_PNL",
+            ),
+            (
+                "cfast-simnow-fee-statement-replay-v5",
                 "ACTUAL_SIMNOW_CALIBRATION_PNL",
             ),
         )

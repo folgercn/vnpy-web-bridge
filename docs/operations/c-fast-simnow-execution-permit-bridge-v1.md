@@ -151,8 +151,9 @@ overlay 要求人工提供四个已经存在的绝对 host directory；`create_h
 
 - `COMMODITY_C_FAST_SIMNOW_ARTIFACTS_HOST_DIR`：#160 install chain、#165
   Acceptance/consume/receipt、九件 artifacts 和 signed Execution Permit，只读；
-- `COMMODITY_C_FAST_SIMNOW_KEYRINGS_HOST_DIR`：Research/Acceptance/Execution
-  public keyrings，只读；
+- `COMMODITY_C_FAST_SIMNOW_KEYRINGS_HOST_DIR`：Research、Acceptance、Execution、
+  execution-quality admission 与 fee-statement public keyrings，只读；fee verifier
+  的 Settings path 必须指向该 mount 内文件并绑定 exact raw SHA256 pin；
 - `COMMODITY_C_FAST_SIMNOW_SNAPSHOT_HOST_DIR`：已安装 shakedown snapshot，只读；
 - `COMMODITY_C_FAST_SIMNOW_ONE_SHOT_HOST_DIR`：独立 root-owned `0700` one-shot
   custody，唯一可写 mount。

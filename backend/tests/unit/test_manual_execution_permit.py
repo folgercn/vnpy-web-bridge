@@ -477,6 +477,7 @@ def test_foreign_key_domain_enumeration_covers_all_commodity_key_sources(
         "commodity_c_fast_simnow_execution_permit_trusted_keyring_path",
         "commodity_c_fast_simnow_research_acceptance_trusted_keyring_path",
         "commodity_c_fast_simnow_research_keyring_path",
+        "commodity_c_fast_fee_statement_trusted_keyring_path",
     }
 
 
@@ -488,6 +489,7 @@ def test_foreign_key_domain_enumeration_covers_all_commodity_key_sources(
         "commodity_c_fast_simnow_execution_permit_trusted_keyring_path",
         "commodity_c_fast_simnow_research_acceptance_trusted_keyring_path",
         "commodity_c_fast_simnow_research_keyring_path",
+        "commodity_c_fast_fee_statement_trusted_keyring_path",
     ),
 )
 def test_manual_key_domain_cannot_reuse_any_external_c_fast_keyring(
