@@ -47,6 +47,7 @@ from app.services.commodity_simnow import (
     PRODUCT_SPECS,
     CommoditySimNowService,
 )
+from app.services.trade_service import c_fast_order_request_fingerprint
 from app.services.vnpy_rpc_service import RpcTimeoutError
 from pydantic import ValidationError
 from test_commodity_c_fast_shadow import (
@@ -265,7 +266,12 @@ class ProductionWindowGenerationChangeTrade(FakeTrade):
     def send_order(self, request, **kwargs):
         assert self.rpc is not None
         self.rpc.last_connected_at = "fake-generation-B"
-        kwargs["pre_rpc_guard"]()
+        kwargs["pre_rpc_guard"](
+            c_fast_order_request_fingerprint(
+                request,
+                resolved_gateway_name=request.gateway_name,
+            )
+        )
         pytest.fail("non-idempotent RPC must not be reached")
 
 
@@ -276,7 +282,12 @@ class ClockChangeAfterFirstChildTrade(FakeTrade):
         self.next_now = next_now
 
     def send_order(self, request, **kwargs):
-        kwargs["pre_rpc_guard"]()
+        kwargs["pre_rpc_guard"](
+            c_fast_order_request_fingerprint(
+                request,
+                resolved_gateway_name=request.gateway_name,
+            )
+        )
         result = super().send_order(request, **kwargs)
         if len(self.requests) == 1:
             assert self.service is not None
@@ -691,8 +702,9 @@ def test_c_fast_start_auto_dispatches_and_archives_reconciled_pnl(
     assert started["action"] == "open_submitted"
     requests = list(service.trade.requests)
     assert requests
+    assert service.trade.c_fast_send_count == len(requests)
     assert all(
-        row.get("max_order_volume_override") == 0.0
+        row.get("c_fast_order_volume_capability") is not None
         for row in service.trade.send_kwargs
     )
     receipt = service._load_c_fast_permit_receipt(

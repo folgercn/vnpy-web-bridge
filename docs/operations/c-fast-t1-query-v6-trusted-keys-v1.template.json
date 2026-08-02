@@ -1,0 +1,10 @@
+{
+  "schema_version": "commodity_c_fast_t1_query_v6_trusted_keys_v1",
+  "keys": [
+    {
+      "key_id": "PENDING_QUERY_V6_FOUNDATION_SIGNER_KEY_ID",
+      "purpose": "t1_query_v6_authority_foundation_signer",
+      "public_key_base64": "PENDING_ED25519_PUBLIC_KEY_BASE64"
+    }
+  ]
+}
