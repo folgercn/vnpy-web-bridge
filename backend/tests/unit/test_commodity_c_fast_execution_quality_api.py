@@ -71,7 +71,7 @@ def install_runtime(monkeypatch) -> FakeExecutionQualityRuntime:
     runtime = FakeExecutionQualityRuntime()
     monkeypatch.setattr(
         routes_commodity_c_fast_execution_quality,
-        "commodity_c_fast_execution_quality_runtime",
+        "commodity_c_fast_execution_quality_production_assembly",
         runtime,
     )
     return runtime

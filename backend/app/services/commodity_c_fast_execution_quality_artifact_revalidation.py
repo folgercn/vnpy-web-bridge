@@ -286,6 +286,10 @@ class CommodityCFastExecutionQualityArtifactRevalidator:
             "virtual_intent_plan_sha256": opened["virtual_intent_plan"].raw_sha256,
             "contract_spec_set_sha256": opened["contract_spec_set"].raw_sha256,
             "custody_binding_sha256": opened["custody_binding"].raw_sha256,
+            "verified_signer_domains": {
+                role: list(verified[role].verified_signer_domain_public_key_sha256)
+                for role in ARTIFACT_ROLES
+            },
             "p0_acceptance_state": "VERIFIED",
             "collection_admission_state": "VERIFIED",
             "execution_policy_state": "VERIFIED",
