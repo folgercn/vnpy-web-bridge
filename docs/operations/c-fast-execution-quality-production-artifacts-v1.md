@@ -178,10 +178,20 @@ PYTHONPATH=backend pytest -q \
   backend/tests/unit/test_commodity_c_fast_execution_quality_artifact_revalidation.py \
   backend/tests/unit/test_commodity_c_fast_execution_quality_production_assembly.py
 
-ruff check backend/app \
+ruff check \
+  backend/app/core/config.py \
+  backend/app/schemas/commodity_c_fast_execution_quality_production_artifacts.py \
+  backend/app/services/commodity_c_fast_execution_quality_artifact_revalidation.py \
+  backend/app/services/commodity_c_fast_execution_quality_production_assembly.py \
+  backend/app/services/commodity_c_fast_execution_quality_production_verifier.py \
+  backend/app/services/commodity_c_fast_l1_l5_audit_semantic_replay.py \
+  backend/app/services/commodity_c_fast_permit_runtime_smoke.py \
   scripts/commodity_c_fast_execution_quality_p0_bundle_v6.py \
   scripts/commodity_c_fast_execution_quality_sign_runtime_artifact.py \
   scripts/commodity_c_fast_t1_query_v6_executable.py \
+  backend/tests/conftest.py \
+  backend/tests/unit/test_commodity_c_fast_execution_quality_artifact_revalidation.py \
+  backend/tests/unit/test_commodity_c_fast_execution_quality_production_assembly.py \
   backend/tests/unit/test_commodity_c_fast_execution_quality_production_verifier.py \
   backend/tests/unit/test_commodity_c_fast_execution_quality_p0_bundle_v6.py
 ```
