@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vnpy-web-bridge:schema:commodity-c-fast-t1-query-v6-dsn-file-identity-v1",
+  "title": "C_FAST query-v6 secret-free DSN file identity attestation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "attestation_id", "observed_at",
+    "dsn_file_absolute_path_sha256", "device", "inode", "owner_uid",
+    "owner_gid", "mode", "link_count", "size_bytes",
+    "expected_readonly_principal_sha256", "expected_endpoint_identity_sha256",
+    "dsn_file_identity_sha256", "dsn_secret_included",
+    "dsn_content_hash_included", "dsn_secret_read", "network_accessed",
+    "authority_granted"
+  ],
+  "properties": {
+    "schema_version": {"const": "commodity_c_fast_t1_query_v6_dsn_file_identity_v1"},
+    "attestation_id": {"$ref": "#/$defs/id"},
+    "observed_at": {"$ref": "#/$defs/dateTime"},
+    "dsn_file_absolute_path_sha256": {"$ref": "#/$defs/sha256"},
+    "device": {"type": "integer", "minimum": 0},
+    "inode": {"type": "integer", "minimum": 1},
+    "owner_uid": {"type": "integer", "minimum": 0},
+    "owner_gid": {"type": "integer", "minimum": 0},
+    "mode": {"const": 384},
+    "link_count": {"const": 1},
+    "size_bytes": {"type": "integer", "minimum": 1, "maximum": 65536},
+    "expected_readonly_principal_sha256": {"$ref": "#/$defs/sha256"},
+    "expected_endpoint_identity_sha256": {"$ref": "#/$defs/sha256"},
+    "dsn_file_identity_sha256": {"$ref": "#/$defs/sha256"},
+    "dsn_secret_included": {"const": false},
+    "dsn_content_hash_included": {"const": false},
+    "dsn_secret_read": {"const": false},
+    "network_accessed": {"const": false},
+    "authority_granted": {"const": false}
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 8, "maxLength": 128, "pattern": "^[A-Za-z0-9._-]+$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "dateTime": {"type": "string", "format": "date-time"}
+  }
+}

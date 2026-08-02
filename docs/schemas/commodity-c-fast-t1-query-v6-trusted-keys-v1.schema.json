@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vnpy-web-bridge:schema:commodity-c-fast-t1-query-v6-trusted-keys-v1",
+  "title": "C_FAST query-v6 authority-foundation trusted keys",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "keys"],
+  "properties": {
+    "schema_version": {"const": "commodity_c_fast_t1_query_v6_trusted_keys_v1"},
+    "keys": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["key_id", "purpose", "public_key_base64"],
+        "properties": {
+          "key_id": {"$ref": "#/$defs/id"},
+          "purpose": {"const": "t1_query_v6_authority_foundation_signer"},
+          "public_key_base64": {"type": "string", "pattern": "^[A-Za-z0-9+/]{43}=$"}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 8, "maxLength": 128, "pattern": "^[A-Za-z0-9._-]+$"}
+  }
+}
