@@ -90,6 +90,22 @@ _BINDINGS: dict[ArtifactRole, tuple[ArtifactRole, ...]] = {
     "contract_spec_set": (),
     "custody_binding": tuple(ARTIFACT_ROLES[:-1]),
 }
+P0_QUERY_V6_BUNDLE_FILE_ORDER = (
+    "foundation_release",
+    "foundation_keyring",
+    "executable_release",
+    "executable_keyring",
+    "active_pin_set",
+    "manifest",
+    "consume_marker",
+    "launch_marker",
+    "terminal",
+    "audit_json",
+    "audit_csv",
+    "audit_markdown",
+    "readonly_proof",
+    "external_custody_identity",
+)
 _ROOT = Path(__file__).resolve().parents[3]
 _TERMINAL_SCHEMA = (
     _ROOT / "docs/schemas/commodity-c-fast-t1-query-terminal-v6.schema.json"
@@ -666,6 +682,63 @@ class CommodityCFastExecutionQualityProductionArtifactVerifier:
             raise CFastExecutionQualityProductionVerifierError(
                 "QUERY_V6_P0_EVIDENCE_BINDING_INVALID"
             )
+        raw_digests = p0.bundle_raw_sha256.model_dump(mode="json")
+        canonical_digests = p0.bundle_canonical_sha256.model_dump(mode="json")
+        sizes = p0.bundle_size_bytes.model_dump(mode="json")
+        bundle_index = {
+            "schema_version": "commodity_c_fast_execution_quality_p0_bundle_index_v6_v1",
+            "files": [
+                {
+                    "name": name,
+                    "size_bytes": sizes[name],
+                    "raw_sha256": raw_digests[name],
+                    "canonical_sha256": canonical_digests[name],
+                }
+                for name in P0_QUERY_V6_BUNDLE_FILE_ORDER
+            ],
+        }
+        archive = p0.external_archive
+        if (
+            sha256_bytes(canonical_json(bundle_index)) != p0.bundle_index_sha256
+            or raw_digests["terminal"] != p0.terminal_raw_sha256
+            or canonical_digests["terminal"] != p0.terminal_canonical_sha256
+            or raw_digests["readonly_proof"] != p0.readonly_proof_raw_sha256
+            or canonical_digests["readonly_proof"]
+            != p0.readonly_proof_canonical_sha256
+            or raw_digests["audit_json"] != p0.audit_raw_sha256
+            or canonical_digests["audit_json"] != p0.audit_canonical_sha256
+            or raw_digests["executable_release"]
+            != p0.executable_release_raw_sha256
+            or canonical_digests["executable_release"]
+            != p0.executable_release_canonical_sha256
+            or raw_digests["foundation_release"] != p0.foundation_raw_sha256
+            or canonical_digests["foundation_release"]
+            != p0.foundation_canonical_sha256
+            or raw_digests["audit_csv"] != terminal["artifact_sha256"]["audit_csv"]
+            or raw_digests["audit_markdown"]
+            != terminal["artifact_sha256"]["audit_markdown"]
+            or canonical_digests["manifest"] != audit["manifest_sha256"]
+            or canonical_digests["manifest"] != proof["manifest_sha256"]
+            or archive.custody_identity_raw_sha256
+            != raw_digests["external_custody_identity"]
+            or archive.custody_identity_canonical_sha256
+            != canonical_digests["external_custody_identity"]
+            or archive.archived_bundle_index_sha256 != p0.bundle_index_sha256
+            or archive.archived_at_utc != p0.archived_at_utc
+            or p0.consumed_at_utc != p0.started_at_utc
+            or p0.started_at_utc
+            != self._utc_datetime(terminal["started_at"], "QUERY_V6_TERMINAL_START")
+            or p0.final_revalidation_at_utc
+            != self._utc_datetime(
+                terminal["final_revalidation_at"],
+                "QUERY_V6_TERMINAL_FINAL_REVALIDATION",
+            )
+            or p0.ended_at_utc
+            != self._utc_datetime(terminal["ended_at"], "QUERY_V6_TERMINAL_END")
+        ):
+            raise CFastExecutionQualityProductionVerifierError(
+                "QUERY_V6_P0_EXACT_BUNDLE_BINDING_INVALID"
+            )
         for field, expected in (
             (
                 "readonly_preflight_canonical_sha256",
@@ -747,6 +820,11 @@ class CommodityCFastExecutionQualityProductionArtifactVerifier:
                 "QUERY_V6_P0_AUDIT_SIGNED_SCOPE_MISMATCH"
             )
         return audit["snapshot_id"], derived_contracts
+
+    def verify_p0_semantics(self, p0) -> tuple[str, tuple[str, ...]]:
+        """Replay one validated P0 envelope without requiring signature material."""
+
+        return self._verify_p0(p0)
 
     @staticmethod
     def _utc_datetime(value: object, label: str) -> datetime:

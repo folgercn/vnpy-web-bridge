@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Literal
 
 from pydantic import ConfigDict, Field, field_validator, model_validator
@@ -112,6 +112,17 @@ class CFastExecutionQualityP0AcceptanceV6DTO(_SignedRuntimeRoleBase):
     foundation_raw_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     foundation_canonical_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     execution_adapter_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    bundle_raw_sha256: "CFastExecutionQualityP0BundleRawDigestsDTO"
+    bundle_canonical_sha256: "CFastExecutionQualityP0BundleCanonicalDigestsDTO"
+    bundle_size_bytes: "CFastExecutionQualityP0BundleSizesDTO"
+    bundle_index_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    external_archive: "CFastExecutionQualityP0ExternalArchiveDTO"
+    consumed_at_utc: datetime
+    launch_claimed_at_utc: datetime
+    started_at_utc: datetime
+    final_revalidation_at_utc: datetime
+    ended_at_utc: datetime
+    archived_at_utc: datetime
     p0_accepted: Literal[True]
     exact_terminal_replayed: Literal[True]
     exact_readonly_proof_replayed: Literal[True]
@@ -128,6 +139,127 @@ class CFastExecutionQualityP0AcceptanceV6DTO(_SignedRuntimeRoleBase):
             if not normalized or normalized.startswith("PENDING_"):
                 raise ValueError("P0 human review is pending")
             return normalized
+        return value
+
+    @field_validator(
+        "consumed_at_utc",
+        "launch_claimed_at_utc",
+        "started_at_utc",
+        "final_revalidation_at_utc",
+        "ended_at_utc",
+        "archived_at_utc",
+    )
+    @classmethod
+    def require_timeline_utc(cls, value: datetime, info) -> datetime:
+        if (
+            value.tzinfo is None
+            or value.utcoffset() is None
+            or value.utcoffset().total_seconds() != 0
+        ):
+            raise ValueError(f"{info.field_name} must use UTC")
+        return value
+
+    @model_validator(mode="after")
+    def require_exact_p0_timeline(self):
+        if not (
+            self.consumed_at_utc
+            == self.started_at_utc
+            <= self.final_revalidation_at_utc
+            <= self.launch_claimed_at_utc
+            <= self.ended_at_utc
+            <= self.archived_at_utc
+            <= self.issued_at_utc
+        ):
+            raise ValueError("query-v6 P0 timeline is invalid")
+        if self.external_archive.archived_at_utc != self.archived_at_utc:
+            raise ValueError("external archive timeline is not exact")
+        if self.external_archive.archived_bundle_index_sha256 != self.bundle_index_sha256:
+            raise ValueError("external archive bundle index is not exact")
+        if self.valid_until_utc - self.issued_at_utc > timedelta(minutes=10):
+            raise ValueError("query-v6 P0 validity exceeds ten minutes")
+        return self
+
+
+class CFastExecutionQualityP0BundleRawDigestsDTO(StrictFiniteModel):
+    model_config = ConfigDict(frozen=True, revalidate_instances="always")
+
+    foundation_release: str = Field(pattern=r"^[0-9a-f]{64}$")
+    foundation_keyring: str = Field(pattern=r"^[0-9a-f]{64}$")
+    executable_release: str = Field(pattern=r"^[0-9a-f]{64}$")
+    executable_keyring: str = Field(pattern=r"^[0-9a-f]{64}$")
+    active_pin_set: str = Field(pattern=r"^[0-9a-f]{64}$")
+    manifest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    consume_marker: str = Field(pattern=r"^[0-9a-f]{64}$")
+    launch_marker: str = Field(pattern=r"^[0-9a-f]{64}$")
+    terminal: str = Field(pattern=r"^[0-9a-f]{64}$")
+    audit_json: str = Field(pattern=r"^[0-9a-f]{64}$")
+    audit_csv: str = Field(pattern=r"^[0-9a-f]{64}$")
+    audit_markdown: str = Field(pattern=r"^[0-9a-f]{64}$")
+    readonly_proof: str = Field(pattern=r"^[0-9a-f]{64}$")
+    external_custody_identity: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class CFastExecutionQualityP0BundleCanonicalDigestsDTO(StrictFiniteModel):
+    model_config = ConfigDict(frozen=True, revalidate_instances="always")
+
+    foundation_release: str = Field(pattern=r"^[0-9a-f]{64}$")
+    foundation_keyring: str = Field(pattern=r"^[0-9a-f]{64}$")
+    executable_release: str = Field(pattern=r"^[0-9a-f]{64}$")
+    executable_keyring: str = Field(pattern=r"^[0-9a-f]{64}$")
+    active_pin_set: str = Field(pattern=r"^[0-9a-f]{64}$")
+    manifest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    consume_marker: str = Field(pattern=r"^[0-9a-f]{64}$")
+    launch_marker: str = Field(pattern=r"^[0-9a-f]{64}$")
+    terminal: str = Field(pattern=r"^[0-9a-f]{64}$")
+    audit_json: str = Field(pattern=r"^[0-9a-f]{64}$")
+    audit_csv: None = None
+    audit_markdown: None = None
+    readonly_proof: str = Field(pattern=r"^[0-9a-f]{64}$")
+    external_custody_identity: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class CFastExecutionQualityP0BundleSizesDTO(StrictFiniteModel):
+    model_config = ConfigDict(frozen=True, revalidate_instances="always")
+
+    foundation_release: int = Field(gt=0, le=64 * 1024 * 1024)
+    foundation_keyring: int = Field(gt=0, le=64 * 1024 * 1024)
+    executable_release: int = Field(gt=0, le=64 * 1024 * 1024)
+    executable_keyring: int = Field(gt=0, le=64 * 1024 * 1024)
+    active_pin_set: int = Field(gt=0, le=64 * 1024 * 1024)
+    manifest: int = Field(gt=0, le=64 * 1024 * 1024)
+    consume_marker: int = Field(gt=0, le=64 * 1024 * 1024)
+    launch_marker: int = Field(gt=0, le=64 * 1024 * 1024)
+    terminal: int = Field(gt=0, le=64 * 1024 * 1024)
+    audit_json: int = Field(gt=0, le=64 * 1024 * 1024)
+    audit_csv: int = Field(gt=0, le=64 * 1024 * 1024)
+    audit_markdown: int = Field(gt=0, le=64 * 1024 * 1024)
+    readonly_proof: int = Field(gt=0, le=64 * 1024 * 1024)
+    external_custody_identity: int = Field(gt=0, le=64 * 1024 * 1024)
+
+
+class CFastExecutionQualityP0ExternalArchiveDTO(StrictFiniteModel):
+    model_config = ConfigDict(frozen=True, revalidate_instances="always")
+
+    custody_id: str = Field(pattern=r"^[A-Za-z0-9._-]{8,128}$")
+    asserted_archive_type: Literal["ASSERTED_WORM", "ASSERTED_APPEND_ONLY"]
+    archive_locator_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    custody_identity_raw_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    custody_identity_canonical_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    archived_bundle_index_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    archived_at_utc: datetime
+    independent_custody_asserted: Literal[True]
+    immutability_asserted: Literal[True]
+    verification_state: Literal["HUMAN_ASSERTION_NOT_MACHINE_VERIFIED"]
+
+    @field_validator("archived_at_utc")
+    @classmethod
+    def require_utc(cls, value: datetime) -> datetime:
+        if (
+            value.tzinfo is None
+            or value.utcoffset() is None
+            or value.utcoffset().total_seconds() != 0
+        ):
+            raise ValueError("archived_at_utc must use UTC")
         return value
 
 
@@ -204,8 +336,15 @@ class CFastExecutionQualitySignedCustodyBindingDTO(_SignedRuntimeRoleBase):
 __all__ = [
     "CFastExecutionQualityCollectionAdmissionV2DTO",
     "CFastExecutionQualityP0AcceptanceV6DTO",
+    "CFastExecutionQualityP0BundleCanonicalDigestsDTO",
+    "CFastExecutionQualityP0BundleRawDigestsDTO",
+    "CFastExecutionQualityP0BundleSizesDTO",
+    "CFastExecutionQualityP0ExternalArchiveDTO",
     "CFastExecutionQualityRoleTrustedKeysDTO",
     "CFastExecutionQualitySignedContractSpecSetDTO",
     "CFastExecutionQualitySignedCustodyBindingDTO",
     "CFastExecutionQualitySignedPlanDTO",
 ]
+
+
+CFastExecutionQualityP0AcceptanceV6DTO.model_rebuild()

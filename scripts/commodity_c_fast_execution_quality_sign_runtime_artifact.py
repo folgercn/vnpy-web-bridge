@@ -167,7 +167,7 @@ def validate_runtime_artifact_draft(
     if role == "signed_p0_acceptance":
         verifier = CommodityCFastExecutionQualityProductionArtifactVerifier()
         try:
-            verifier._verify_p0(model)
+            verifier.verify_p0_semantics(model)
         except ValueError as exc:
             raise RuntimeArtifactSigningError(
                 "P0 evidence semantic replay failed before signing"

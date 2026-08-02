@@ -31,6 +31,7 @@ from app.services.commodity_c_fast_execution_quality_artifact_revalidation impor
 from app.services.commodity_c_fast_execution_quality_production_verifier import (
     CFastExecutionQualityProductionVerifierError,
     CommodityCFastExecutionQualityProductionArtifactVerifier,
+    P0_QUERY_V6_BUNDLE_FILE_ORDER,
     runtime_artifact_signature_message,
 )
 from app.services import (
@@ -465,6 +466,58 @@ def generation(
             ROOT / "docs/schemas/commodity-c-fast-t1-query-terminal-v6.schema.json"
         ),
     )
+    bundle_raw_sha256 = {name: hashlib.sha256(f"raw:{name}".encode()).hexdigest() for name in P0_QUERY_V6_BUNDLE_FILE_ORDER}
+    bundle_canonical_sha256 = {
+        name: (
+            None
+            if name in {"audit_csv", "audit_markdown"}
+            else hashlib.sha256(f"canonical:{name}".encode()).hexdigest()
+        )
+        for name in P0_QUERY_V6_BUNDLE_FILE_ORDER
+    }
+    bundle_raw_sha256.update(
+        {
+            "foundation_release": terminal["foundation_raw_sha256"],
+            "executable_release": terminal["executable_release_raw_sha256"],
+            "terminal": hashlib.sha256(terminal_raw).hexdigest(),
+            "audit_json": audit_sha256,
+            "audit_csv": terminal["artifact_sha256"]["audit_csv"],
+            "audit_markdown": terminal["artifact_sha256"]["audit_markdown"],
+            "readonly_proof": hashlib.sha256(proof_raw).hexdigest(),
+        }
+    )
+    bundle_canonical_sha256.update(
+        {
+            "foundation_release": terminal["foundation_canonical_sha256"],
+            "executable_release": terminal["executable_release_canonical_sha256"],
+            "manifest": audit["manifest_sha256"],
+            "terminal": hashlib.sha256(canonical_json(terminal)).hexdigest(),
+            "audit_json": hashlib.sha256(canonical_json(audit)).hexdigest(),
+            "readonly_proof": hashlib.sha256(canonical_json(proof)).hexdigest(),
+        }
+    )
+    bundle_size_bytes = {name: 1 for name in P0_QUERY_V6_BUNDLE_FILE_ORDER}
+    bundle_size_bytes.update(
+        {
+            "terminal": len(terminal_raw),
+            "audit_json": len(audit_raw),
+            "readonly_proof": len(proof_raw),
+        }
+    )
+    bundle_index = {
+        "schema_version": "commodity_c_fast_execution_quality_p0_bundle_index_v6_v1",
+        "files": [
+            {
+                "name": name,
+                "size_bytes": bundle_size_bytes[name],
+                "raw_sha256": bundle_raw_sha256[name],
+                "canonical_sha256": bundle_canonical_sha256[name],
+            }
+            for name in P0_QUERY_V6_BUNDLE_FILE_ORDER
+        ],
+    }
+    bundle_index_sha256 = hashlib.sha256(canonical_json(bundle_index)).hexdigest()
+    archived_at = NOW - timedelta(minutes=1, seconds=30)
     p0_unsigned = {
             **common,
             "schema_version": "commodity_c_fast_execution_quality_p0_acceptance_v6_v1",
@@ -490,6 +543,32 @@ def generation(
             "foundation_raw_sha256": terminal["foundation_raw_sha256"],
             "foundation_canonical_sha256": terminal["foundation_canonical_sha256"],
             "execution_adapter_sha256": terminal["execution_adapter_sha256"],
+            "bundle_raw_sha256": bundle_raw_sha256,
+            "bundle_canonical_sha256": bundle_canonical_sha256,
+            "bundle_size_bytes": bundle_size_bytes,
+            "bundle_index_sha256": bundle_index_sha256,
+            "external_archive": {
+                "custody_id": "external-custody-test-v1",
+                "asserted_archive_type": "ASSERTED_APPEND_ONLY",
+                "archive_locator_sha256": "b" * 64,
+                "custody_identity_raw_sha256": bundle_raw_sha256[
+                    "external_custody_identity"
+                ],
+                "custody_identity_canonical_sha256": bundle_canonical_sha256[
+                    "external_custody_identity"
+                ],
+                "archived_bundle_index_sha256": bundle_index_sha256,
+                "archived_at_utc": archived_at.isoformat(),
+                "independent_custody_asserted": True,
+                "immutability_asserted": True,
+                "verification_state": "HUMAN_ASSERTION_NOT_MACHINE_VERIFIED",
+            },
+            "consumed_at_utc": terminal["started_at"],
+            "launch_claimed_at_utc": (NOW - timedelta(minutes=2, seconds=45)).isoformat(),
+            "started_at_utc": terminal["started_at"],
+            "final_revalidation_at_utc": terminal["final_revalidation_at"],
+            "ended_at_utc": terminal["ended_at"],
+            "archived_at_utc": archived_at.isoformat(),
             "p0_accepted": True,
             "exact_terminal_replayed": True,
             "exact_readonly_proof_replayed": True,

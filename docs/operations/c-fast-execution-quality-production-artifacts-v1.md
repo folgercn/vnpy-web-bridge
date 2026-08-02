@@ -51,6 +51,45 @@ then canonical unsigned payload), so a valid signature cannot be replayed as a
 different role. All signed runtime envelopes have a maximum ten-minute
 lifetime.
 
+The formal P0 input is the full query-v6 bundle, not a hand-assembled terminal
+summary. Build the unsigned draft with:
+
+```bash
+PYTHONPATH=backend python \
+  scripts/commodity_c_fast_execution_quality_p0_bundle_v6.py \
+  --foundation-release /private/query-v6/foundation.json \
+  --foundation-keyring /private/query-v6/foundation-keyring.json \
+  --executable-release /private/query-v6/executable.json \
+  --executable-keyring /private/query-v6/executable-keyring.json \
+  --active-pin-set /private/query-v6/pin-set.manifest.json \
+  --manifest /private/query-v6/manifest.json \
+  --consume-marker /private/query-v6/consume.json \
+  --launch-marker /private/query-v6/launch.json \
+  --terminal /private/query-v6/terminal.json \
+  --audit-json /private/query-v6/audit.json \
+  --audit-csv /private/query-v6/audit.csv \
+  --audit-markdown /private/query-v6/audit.md \
+  --readonly-proof /private/query-v6/readonly-proof.json \
+  --external-custody-identity /private/query-v6/external-custody.json \
+  --issued-at 2026-08-02T04:00:00Z \
+  --valid-until 2026-08-02T04:10:00Z \
+  --archived-at 2026-08-02T03:59:00Z \
+  --signer-key-id <signed-p0-role-key-id> \
+  --reviewer-role '<real human role>' \
+  --human-signature '<real review text>' \
+  --output /private/query-v6/unsigned-p0-v6.json
+```
+
+The builder stable-reads all fourteen distinct files twice, validates the
+foundation/executable/keyring/pin/consume/launch/terminal joins, binds the
+pretty JSON and rendered CSV/Markdown raw bytes, derives the bundle index,
+snapshot, ten exact contracts and lifecycle timeline, then calls the same P0
+semantic replay used by the signer. Its output is create-only `0600` pretty
+JSON and intentionally omits `signature`. It has no private-key argument,
+network client, authority or mutation path. External WORM/append-only custody
+is a human assertion bound by exact identity and bundle hashes; it is not
+misrepresented as machine-verifiable archive state.
+
 The five new envelopes are signed offline with the repository signer, which
 uses the same role-domain message function and exact canonical-newline writer
 as the production verifier contract:
@@ -66,8 +105,9 @@ PYTHONPATH=backend python \
 ```
 
 The signer is deliberately excluded from the production image.
-For `signed_p0_acceptance`, the signer replays the embedded terminal, proof and
-audit semantics before it opens private-key material. The other envelopes need
+For `signed_p0_acceptance`, the signer replays the embedded terminal, proof,
+audit and exact-bundle index semantics before it opens private-key material.
+The other envelopes need
 external upstream artifacts for their full joins, so the signer validates their
 envelope contract and the runtime performs the complete generation join.
 
