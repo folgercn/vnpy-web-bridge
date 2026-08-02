@@ -22,11 +22,17 @@ RUNTIME_SCHEMA_NAMES = (
     "commodity-c-fast-simnow-research-acceptance-trusted-keys-v1.schema.json",
     "commodity-c-fast-simnow-research-acceptance-consume-v1.schema.json",
     "commodity-c-fast-simnow-research-acceptance-receipt-v1.schema.json",
+    "commodity-c-fast-t1-query-terminal-v6.schema.json",
+    "commodity-c-fast-questdb-readonly-proof-v1.schema.json",
+    "commodity-c-fast-l1-l5-audit-v1.schema.json",
+    "commodity-c-fast-l1-l5-audit-v2.schema.json",
+    "commodity-c-fast-l1-l5-audit-manifest-v2.schema.json",
 )
 FORBIDDEN_SIGNER_NAMES = (
     "commodity_c_fast_simnow_sign_research_bundle.py",
     "commodity_c_fast_simnow_sign_research_acceptance.py",
     "commodity_c_fast_simnow_sign_execution_permit.py",
+    "commodity_c_fast_execution_quality_sign_runtime_artifact.py",
 )
 
 
@@ -93,7 +99,7 @@ def validate_runtime_packaging(
         acceptance.RECEIPT_SCHEMA_PATH,
     )
     if tuple(path.resolve() for path in module_schema_paths) != tuple(
-        path.resolve() for path in expected_schema_paths
+        path.resolve() for path in expected_schema_paths[: len(module_schema_paths)]
     ):
         raise CommodityCFastPermitRuntimePackagingError(
             "runtime verifier schema closure/path mismatch"

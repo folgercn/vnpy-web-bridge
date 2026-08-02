@@ -1,0 +1,148 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vnpy-web-bridge:schema:commodity-c-fast-execution-quality-p0-unsigned-draft-v6",
+  "title": "C_FAST query-v6 unsigned exact-bundle P0 draft",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "artifact_role", "purpose", "candidate_id",
+    "generation_id", "snapshot_id", "issued_at_utc", "valid_until_utc",
+    "exact_contracts", "signer_key_id",
+    "terminal_exact_json_base64", "terminal_raw_sha256", "terminal_canonical_sha256",
+    "readonly_proof_exact_json_base64", "readonly_proof_raw_sha256",
+    "readonly_proof_canonical_sha256", "audit_exact_json_base64",
+    "audit_raw_sha256", "audit_canonical_sha256", "manifest_exact_json_base64",
+    "executable_release_raw_sha256", "executable_release_canonical_sha256",
+    "foundation_raw_sha256", "foundation_canonical_sha256",
+    "execution_adapter_sha256", "bundle_raw_sha256", "bundle_canonical_sha256",
+    "bundle_size_bytes", "bundle_index_sha256", "external_archive",
+    "consumed_at_utc", "launch_claimed_at_utc", "started_at_utc",
+    "final_revalidation_at_utc", "ended_at_utc", "archived_at_utc",
+    "p0_accepted", "exact_terminal_replayed", "exact_readonly_proof_replayed",
+    "exact_audit_replayed", "signer_type", "reviewer_role", "human_signature",
+    "collection_authorized", "runtime_activation_authorized", "authority_granted",
+    "dispatch_allowed", "order_authorized", "position_mutation_authorized",
+    "database_mutation_authorized", "deployment_mutation_authorized",
+    "replacement_allowed", "production_allowed"
+  ],
+  "properties": {
+    "schema_version": {"const": "commodity_c_fast_execution_quality_p0_acceptance_v6_v1"},
+    "artifact_role": {"const": "signed_p0_acceptance"},
+    "purpose": {"const": "c_fast_query_v6_exact_terminal_p0_acceptance"},
+    "candidate_id": {"const": "C_FAST_CROSS_SECTION_NEUTRAL"},
+    "generation_id": {"$ref": "#/$defs/id"},
+    "snapshot_id": {"$ref": "#/$defs/id"},
+    "issued_at_utc": {"$ref": "#/$defs/dateTime"},
+    "valid_until_utc": {"$ref": "#/$defs/dateTime"},
+    "exact_contracts": {
+      "type": "array", "minItems": 10, "maxItems": 10,
+      "uniqueItems": true, "items": {"type": "string", "minLength": 1}
+    },
+    "signer_key_id": {"$ref": "#/$defs/id"},
+    "terminal_exact_json_base64": {"$ref": "#/$defs/base64"},
+    "terminal_raw_sha256": {"$ref": "#/$defs/sha256"},
+    "terminal_canonical_sha256": {"$ref": "#/$defs/sha256"},
+    "readonly_proof_exact_json_base64": {"$ref": "#/$defs/base64"},
+    "readonly_proof_raw_sha256": {"$ref": "#/$defs/sha256"},
+    "readonly_proof_canonical_sha256": {"$ref": "#/$defs/sha256"},
+    "audit_exact_json_base64": {"$ref": "#/$defs/base64"},
+    "audit_raw_sha256": {"$ref": "#/$defs/sha256"},
+    "audit_canonical_sha256": {"$ref": "#/$defs/sha256"},
+    "manifest_exact_json_base64": {"$ref": "#/$defs/base64"},
+    "executable_release_raw_sha256": {"$ref": "#/$defs/sha256"},
+    "executable_release_canonical_sha256": {"$ref": "#/$defs/sha256"},
+    "foundation_raw_sha256": {"$ref": "#/$defs/sha256"},
+    "foundation_canonical_sha256": {"$ref": "#/$defs/sha256"},
+    "execution_adapter_sha256": {"$ref": "#/$defs/sha256"},
+    "bundle_raw_sha256": {"$ref": "#/$defs/rawDigests"},
+    "bundle_canonical_sha256": {"$ref": "#/$defs/canonicalDigests"},
+    "bundle_size_bytes": {"$ref": "#/$defs/sizes"},
+    "bundle_index_sha256": {"$ref": "#/$defs/sha256"},
+    "external_archive": {"$ref": "#/$defs/externalArchive"},
+    "consumed_at_utc": {"$ref": "#/$defs/dateTime"},
+    "launch_claimed_at_utc": {"$ref": "#/$defs/dateTime"},
+    "started_at_utc": {"$ref": "#/$defs/dateTime"},
+    "final_revalidation_at_utc": {"$ref": "#/$defs/dateTime"},
+    "ended_at_utc": {"$ref": "#/$defs/dateTime"},
+    "archived_at_utc": {"$ref": "#/$defs/dateTime"},
+    "p0_accepted": {"const": true},
+    "exact_terminal_replayed": {"const": true},
+    "exact_readonly_proof_replayed": {"const": true},
+    "exact_audit_replayed": {"const": true},
+    "signer_type": {"const": "human"},
+    "reviewer_role": {"type": "string", "minLength": 1, "maxLength": 128, "not": {"pattern": "^PENDING_"}},
+    "human_signature": {"type": "string", "minLength": 1, "maxLength": 512, "not": {"pattern": "^PENDING_"}},
+    "collection_authorized": {"const": false},
+    "runtime_activation_authorized": {"const": false},
+    "authority_granted": {"const": false},
+    "dispatch_allowed": {"const": false},
+    "order_authorized": {"const": false},
+    "position_mutation_authorized": {"const": false},
+    "database_mutation_authorized": {"const": false},
+    "deployment_mutation_authorized": {"const": false},
+    "replacement_allowed": {"const": false},
+    "production_allowed": {"const": false},
+    "signature": false
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 8, "maxLength": 128, "pattern": "^[A-Za-z0-9._-]+$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "dateTime": {"type": "string", "format": "date-time"},
+    "base64": {"type": "string", "minLength": 16, "pattern": "^[A-Za-z0-9+/]+={0,2}$"},
+    "bundleNames": {
+      "type": "object",
+      "required": [
+        "foundation_release", "foundation_keyring", "executable_release",
+        "executable_keyring", "active_pin_set", "manifest", "consume_marker",
+        "launch_marker", "terminal", "audit_json", "audit_csv", "audit_markdown",
+        "readonly_proof", "external_custody_identity"
+      ]
+    },
+    "rawDigests": {
+      "allOf": [
+        {"$ref": "#/$defs/bundleNames"},
+        {"type": "object", "additionalProperties": {"$ref": "#/$defs/sha256"}}
+      ]
+    },
+    "canonicalDigests": {
+      "allOf": [
+        {"$ref": "#/$defs/bundleNames"},
+        {
+          "type": "object",
+          "properties": {
+            "audit_csv": {"const": null},
+            "audit_markdown": {"const": null}
+          },
+          "additionalProperties": {"$ref": "#/$defs/sha256"}
+        }
+      ]
+    },
+    "sizes": {
+      "allOf": [
+        {"$ref": "#/$defs/bundleNames"},
+        {"type": "object", "additionalProperties": {"type": "integer", "minimum": 1, "maximum": 67108864}}
+      ]
+    },
+    "externalArchive": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "custody_id", "asserted_archive_type", "archive_locator_sha256",
+        "custody_identity_raw_sha256", "custody_identity_canonical_sha256",
+        "archived_bundle_index_sha256", "archived_at_utc",
+        "independent_custody_asserted", "immutability_asserted", "verification_state"
+      ],
+      "properties": {
+        "custody_id": {"$ref": "#/$defs/id"},
+        "asserted_archive_type": {"enum": ["ASSERTED_WORM", "ASSERTED_APPEND_ONLY"]},
+        "archive_locator_sha256": {"$ref": "#/$defs/sha256"},
+        "custody_identity_raw_sha256": {"$ref": "#/$defs/sha256"},
+        "custody_identity_canonical_sha256": {"$ref": "#/$defs/sha256"},
+        "archived_bundle_index_sha256": {"$ref": "#/$defs/sha256"},
+        "archived_at_utc": {"$ref": "#/$defs/dateTime"},
+        "independent_custody_asserted": {"const": true},
+        "immutability_asserted": {"const": true},
+        "verification_state": {"const": "HUMAN_ASSERTION_NOT_MACHINE_VERIFIED"}
+      }
+    }
+  }
+}

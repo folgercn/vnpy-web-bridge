@@ -125,6 +125,21 @@ class SignedArtifactVerifier(Protocol):
     ) -> SignedArtifactVerification: ...
 
 
+class SignedArtifactBundleVerifier(Protocol):
+    """Verify one complete stable-read generation as a single unit.
+
+    Production roles have semantic dependencies (snapshot -> plan -> specs)
+    that cannot be safely reconstructed by seven isolated callbacks.  The
+    bundle callback receives only the exact bytes already retained by this
+    adapter and must return one result for every role.
+    """
+
+    def __call__(
+        self,
+        requests: Mapping[ArtifactRole, ArtifactVerificationRequest],
+    ) -> Mapping[ArtifactRole, SignedArtifactVerification]: ...
+
+
 @dataclass(frozen=True)
 class _ExactArtifact:
     path: Path
@@ -167,7 +182,8 @@ class CommodityCFastExecutionQualityArtifactRevalidator:
     """
 
     _artifact_paths: Mapping[ArtifactRole, Path]
-    _artifact_verifiers: Mapping[ArtifactRole, SignedArtifactVerifier]
+    _artifact_verifiers: Mapping[ArtifactRole, SignedArtifactVerifier] | None
+    _artifact_bundle_verifier: SignedArtifactBundleVerifier | None
     custody_root: Path
     expected_custody_root_path_sha256: str
     expected_custody_identity_sha256: str
@@ -177,7 +193,8 @@ class CommodityCFastExecutionQualityArtifactRevalidator:
         self,
         *,
         artifact_paths: Mapping[ArtifactRole, Path],
-        artifact_verifiers: Mapping[ArtifactRole, SignedArtifactVerifier],
+        artifact_verifiers: Mapping[ArtifactRole, SignedArtifactVerifier] | None = None,
+        artifact_bundle_verifier: SignedArtifactBundleVerifier | None = None,
         custody_root: Path,
         expected_custody_root_path_sha256: str,
         expected_custody_identity_sha256: str,
@@ -197,10 +214,23 @@ class CommodityCFastExecutionQualityArtifactRevalidator:
             "_artifact_paths",
             MappingProxyType(dict(artifact_paths)),
         )
+        if (artifact_verifiers is None) == (artifact_bundle_verifier is None):
+            raise CFastExecutionQualityArtifactRevalidationError(
+                "ARTIFACT_VERIFIER_MODE_INVALID"
+            )
         object.__setattr__(
             self,
             "_artifact_verifiers",
-            MappingProxyType(dict(artifact_verifiers)),
+            (
+                MappingProxyType(dict(artifact_verifiers))
+                if artifact_verifiers is not None
+                else None
+            ),
+        )
+        object.__setattr__(
+            self,
+            "_artifact_bundle_verifier",
+            artifact_bundle_verifier,
         )
         object.__setattr__(self, "custody_root", custody_root)
         object.__setattr__(
@@ -227,7 +257,9 @@ class CommodityCFastExecutionQualityArtifactRevalidator:
             raise CFastExecutionQualityArtifactRevalidationError(
                 "ARTIFACT_PATH_SET_INCOMPLETE"
             )
-        if set(self._artifact_verifiers) != set(ARTIFACT_ROLES):
+        if self._artifact_verifiers is not None and set(
+            self._artifact_verifiers
+        ) != set(ARTIFACT_ROLES):
             os.close(root.fd)
             raise CFastExecutionQualityArtifactRevalidationError(
                 "ARTIFACT_VERIFIER_SET_INCOMPLETE"
@@ -244,23 +276,38 @@ class CommodityCFastExecutionQualityArtifactRevalidator:
                 resolved_names.add(artifact.path.name)
                 opened[role] = artifact
 
+            requests = {
+                role: ArtifactVerificationRequest(
+                    role=role,
+                    path=opened[role].path,
+                    payload=opened[role].payload,
+                    raw=opened[role].raw,
+                    raw_sha256=opened[role].raw_sha256,
+                    canonical_sha256=opened[role].canonical_sha256,
+                    observed_at_utc=observed_at_utc,
+                )
+                for role in ARTIFACT_ROLES
+            }
+            if self._artifact_bundle_verifier is not None:
+                candidates = dict(self._artifact_bundle_verifier(requests))
+                if set(candidates) != set(ARTIFACT_ROLES):
+                    raise CFastExecutionQualityArtifactRevalidationError(
+                        "ARTIFACT_BUNDLE_VERIFIER_RESULT_SET_INCOMPLETE"
+                    )
+            else:
+                assert self._artifact_verifiers is not None
+                candidates = {
+                    role: self._artifact_verifiers[role](requests[role])
+                    for role in ARTIFACT_ROLES
+                }
+
             verified: dict[
                 ArtifactRole, CFastExecutionQualityArtifactVerificationDTO
             ] = {}
             signed_results: dict[ArtifactRole, SignedArtifactVerification] = {}
             for role in ARTIFACT_ROLES:
                 artifact = opened[role]
-                candidate = self._artifact_verifiers[role](
-                    ArtifactVerificationRequest(
-                        role=role,
-                        path=artifact.path,
-                        payload=artifact.payload,
-                        raw=artifact.raw,
-                        raw_sha256=artifact.raw_sha256,
-                        canonical_sha256=artifact.canonical_sha256,
-                        observed_at_utc=observed_at_utc,
-                    )
-                )
+                candidate = candidates[role]
                 if type(candidate) is not SignedArtifactVerification:
                     raise CFastExecutionQualityArtifactRevalidationError(
                         "ARTIFACT_VERIFIER_RESULT_TYPE_INVALID"

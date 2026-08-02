@@ -6,8 +6,6 @@ import importlib.util
 import json
 import os
 import sys
-import tempfile
-from collections.abc import Iterator
 from dataclasses import FrozenInstanceError
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -80,19 +78,6 @@ def _load_test_helpers(name: str, path: Path):
 
 SIDECAR = _load_test_helpers("artifact_revalidation_sidecar_helpers", SIDECAR_TEST_PATH)
 SCORER = _load_test_helpers("artifact_revalidation_scorer_helpers", SCORER_TEST_PATH)
-
-
-@pytest.fixture
-def secure_tmp_path() -> Iterator[Path]:
-    """Exercise the real full-chain guard outside root-owned sticky /tmp."""
-
-    with tempfile.TemporaryDirectory(
-        prefix="cfast-artifact-revalidation-",
-        dir=Path.home(),
-    ) as directory:
-        path = Path(directory)
-        path.chmod(0o700)
-        yield path
 
 
 def canonical(value: object) -> bytes:

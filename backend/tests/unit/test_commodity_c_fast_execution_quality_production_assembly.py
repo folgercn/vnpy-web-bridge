@@ -29,6 +29,9 @@ from app.services.commodity_c_fast_execution_quality_production_assembly import 
     CFastExecutionQualityProductionAssemblyError,
     CommodityCFastExecutionQualityProductionAssembly,
 )
+from app.services.commodity_c_fast_execution_quality_artifact_revalidation import (
+    ARTIFACT_ROLES,
+)
 from app.services.commodity_c_fast_execution_quality_readonly_repository import (
     CFastExecutionQualityReadonlyRepositoryError,
     CommodityCFastExecutionQualityReadonlyRepository,
@@ -253,7 +256,7 @@ def test_default_off_never_verifies_or_replays_components(
     assert all(status[field] is False for field in FALSE_AUTHORITY)
 
 
-def test_enabled_global_factory_binds_fixed_components_before_startup(
+def test_enabled_global_factory_blocks_incomplete_artifact_configuration(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -287,15 +290,68 @@ def test_enabled_global_factory_binds_fixed_components_before_startup(
     status = assembly.status()
 
     assert status["assembly_lifecycle_started"] is False
-    assert status["capabilities"]["durable_sidecar_runtime_bound"] is True
-    assert status["capabilities"]["readonly_repository_bound"] is True
-    assert status["capabilities"]["evidence_export_store_bound"] is True
+    assert status["assembly_state"] == "BLOCKED_READONLY_COMPONENT_BINDING_FAILED"
+    assert status["readonly_component_binding_error"] == (
+        "PRODUCTION_ASSEMBLY_ARTIFACT_PATH_SET_INVALID"
+    )
+    assert status["capabilities"]["durable_sidecar_runtime_bound"] is False
+    assert status["capabilities"]["readonly_repository_bound"] is False
+    assert status["capabilities"]["evidence_export_store_bound"] is False
     assert status["capabilities"]["questdb_evidence_adapter_bound"] is False
     with pytest.raises(
         CFastExecutionQualityProductionAssemblyError,
         match="PRODUCTION_ASSEMBLY_CURRENT_PROJECTION_UNAVAILABLE",
     ):
         assembly.intents()
+
+
+def test_post_verifier_component_failure_leaves_no_partial_runtime_capability(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    journal_root = tmp_path / "journal"
+    evidence_root = tmp_path / "exports"
+    for root in (journal_root, evidence_root):
+        root.mkdir(mode=0o700)
+        root.chmod(0o700)
+    configured_runtime = CommodityCFastExecutionQualityRuntime(
+        settings=Settings(
+            commodity_c_fast_execution_quality_runtime_enabled=True,
+            commodity_c_fast_execution_quality_artifact_paths_json=json.dumps(
+                {role: str(tmp_path / f"{role}.json") for role in ARTIFACT_ROLES}
+            ),
+            commodity_c_fast_execution_quality_journal_root=str(journal_root),
+            commodity_c_fast_execution_quality_evidence_export_root=str(evidence_root),
+        ),
+        clock=lambda: NOW,
+    )
+    monkeypatch.setattr(
+        assembly_module,
+        "commodity_c_fast_execution_quality_runtime",
+        configured_runtime,
+    )
+
+    def fail_after_verifier_construction(*_args, **_kwargs):
+        raise OSError("journal constructor failed")
+
+    monkeypatch.setattr(
+        assembly_module,
+        "OfflineExecutionQualitySidecar",
+        fail_after_verifier_construction,
+    )
+
+    assembly = assembly_module._build_production_assembly()
+
+    assert assembly.status()["assembly_state"] == (
+        "BLOCKED_READONLY_COMPONENT_BINDING_FAILED"
+    )
+    assert (
+        configured_runtime.status()["capabilities"]["full_revalidation_verifier_bound"]
+        is False
+    )
+    assert (
+        assembly.status()["capabilities"]["full_revalidation_verifier_bound"] is False
+    )
 
 
 def test_every_lifecycle_revalidates_replays_and_create_only_publishes(

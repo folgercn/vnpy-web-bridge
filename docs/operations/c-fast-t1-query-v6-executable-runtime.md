@@ -98,8 +98,12 @@ secret、consume 或联网前终止。
 解除 blocker 需要在目标机离线 build 后由 root create-only 安装 package 和 active
 pin generation，再以该 pin 中 exact adapter path 执行。build/install/preflight
 本身不接收 DSN、network release 或签署材料，也不联网。真实 M2 signed release、
-真实 SimNow/QuestDB 回调和 #114 P0 acceptance-v3 仍是后续独立切片；这里不伪造
-它们，也不自动复用旧 one-shot authority。
+真实 SimNow/QuestDB 回调仍是后续外部验收；这里不伪造它们，也不自动复用旧
+one-shot authority。正式
+`commodity_c_fast_execution_quality_p0_acceptance_v6_v1` 只能在真实查询完成且
+外部 custody 已建立后，由独立 keyless bundle builder 绑定 foundation、
+executable、active pins、manifest、consume、launch、terminal 和全部证据，再交由
+独立人工签署域签名；它不是旧 query-v3 P0 acceptance 的续签或别名。
 
 ## Execution impact
 
