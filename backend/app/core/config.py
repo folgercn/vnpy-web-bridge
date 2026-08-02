@@ -123,6 +123,13 @@ class Settings(BaseSettings):
     )
     commodity_c_fast_shadow_trusted_public_keys_json: str = "{}"
     commodity_c_fast_execution_quality_runtime_enabled: bool = False
+    commodity_c_fast_execution_quality_runtime_admission_path: str = ""
+    commodity_c_fast_execution_quality_runtime_admission_trusted_keyring_path: str = ""
+    commodity_c_fast_execution_quality_runtime_admission_expected_keyring_raw_sha256: str = ""
+    commodity_c_fast_execution_quality_runtime_admission_expected_owner_uid: int = Field(
+        default=0,
+        ge=0,
+    )
     commodity_c_fast_simnow_shakedown_enabled: bool = False
     commodity_c_fast_simnow_account_hashes: str = ""
     commodity_c_fast_simnow_state_path: str = (

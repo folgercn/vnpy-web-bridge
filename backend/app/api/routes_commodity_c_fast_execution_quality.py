@@ -4,8 +4,8 @@ from fastapi import APIRouter, Depends
 
 from app.core.errors import ok
 from app.core.security import CurrentUser, require_roles
-from app.services.commodity_c_fast_execution_quality_runtime import (
-    commodity_c_fast_execution_quality_runtime,
+from app.services.commodity_c_fast_execution_quality_production_assembly import (
+    commodity_c_fast_execution_quality_production_assembly,
 )
 from app.services.commodity_c_fast_execution_quality_tick_fanout import (
     commodity_c_fast_execution_quality_tick_fanout,
@@ -23,7 +23,7 @@ def status(
 
     return ok(
         {
-            **commodity_c_fast_execution_quality_runtime.status(),
+            **commodity_c_fast_execution_quality_production_assembly.status(),
             "tick_fanout": commodity_c_fast_execution_quality_tick_fanout.status(),
         }
     )
@@ -35,7 +35,7 @@ def reload(
 ) -> dict:
     """Revalidate only this isolated runtime; never start or dispatch it."""
 
-    return ok(commodity_c_fast_execution_quality_runtime.reload())
+    return ok(commodity_c_fast_execution_quality_production_assembly.reload())
 
 
 @router.post("/recover")
@@ -44,4 +44,4 @@ def recover(
 ) -> dict:
     """Replay only this runtime's revalidation lifecycle boundary."""
 
-    return ok(commodity_c_fast_execution_quality_runtime.recover())
+    return ok(commodity_c_fast_execution_quality_production_assembly.recover())

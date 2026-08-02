@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+from threading import RLock
+from types import MethodType
 
 import pytest
 
@@ -8,8 +10,14 @@ from app.core.config import Settings
 from app.core.errors import OrderConfirmRequiredError, OrderNotCancelableError, OrderNotFoundError, TradeDisabledError
 from app.schemas.trade import CancelAllRequestDTO, CancelRequestDTO, OrderRequestDTO
 from app.services.audit_service import AuditService
+from app.services.commodity_simnow import CommoditySimNowService
 from app.services.risk_service import RiskService
-from app.services.trade_service import TradeService, is_cancelable_status, normalize_status
+from app.services.trade_service import (
+    TradeService,
+    _CFastOrderVolumeCapability,
+    is_cancelable_status,
+    normalize_status,
+)
 from app.services.vnpy_rpc_service import rpc_service
 from vnpy.trader.constant import Direction, Exchange, Offset, OrderType, Status
 
@@ -130,7 +138,7 @@ def test_pre_rpc_guard_runs_after_risk_and_immediately_before_send(
     assert events == ["risk", "guard", "send"]
 
 
-def test_internal_volume_override_keeps_other_risk_checks(
+def test_public_send_cannot_select_a_volume_override(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -155,13 +163,130 @@ def test_internal_volume_override_keeps_other_risk_checks(
         ],
     )
 
-    service.send_order(
-        make_order(volume=2),
-        max_order_volume_override=0,
-        pre_rpc_guard=lambda: events.append("final"),
+    with pytest.raises(TypeError):
+        service.send_order(
+            make_order(volume=2),
+            max_order_volume_override=0,  # type: ignore[call-arg]
+            pre_rpc_guard=lambda: events.append("final"),
+        )
+
+    assert events == []
+
+
+def test_c_fast_volume_capability_cannot_be_forged_or_misused(
+    tmp_path,
+) -> None:
+    service = make_service(tmp_path)
+
+    with pytest.raises(TypeError, match="cannot be constructed"):
+        _CFastOrderVolumeCapability(
+            object(), construction_key=object()
+        )
+
+    with pytest.raises(RuntimeError, match="capability is invalid"):
+        service._send_c_fast_order(
+            make_order(
+                reference=(
+                    "commodity_cf:sh:0123456789abcdef:open:ag2610:1"
+                )
+            ),
+            c_fast_order_owner=object(),
+            c_fast_order_volume_capability=object(),
+            pre_rpc_guard=lambda: None,
+            send_linearization_lock=object(),
+        )
+
+    with pytest.raises(RuntimeError, match="capability is invalid"):
+        service._send_order(
+            make_order(),
+            source_ip=None,
+            operator="test",
+            pre_rpc_guard=None,
+            send_linearization_lock=None,
+            c_fast_order_owner=None,
+            c_fast_order_volume_capability=object(),
+        )
+
+
+def _capability_test_owner() -> CommoditySimNowService:
+    owner = object.__new__(CommoditySimNowService)
+    owner._dispatch_abort_lock = RLock()
+    return owner
+
+
+def test_c_fast_capability_rejects_unregistered_object_new_owner(
+    tmp_path,
+) -> None:
+    service = make_service(tmp_path)
+    owner = _capability_test_owner()
+    owner.trade = service
+
+    with pytest.raises(TypeError, match="owner is invalid"):
+        service._bind_c_fast_order_volume_capability(owner)
+
+
+def test_c_fast_capability_binds_exact_owner_guard_and_lock(
+    tmp_path,
+) -> None:
+    owner = _capability_test_owner()
+    wrong_owner = _capability_test_owner()
+    settings = Settings(
+        web_trade_enabled=True,
+        order_confirm_required=True,
+        default_gateway_name="CTP",
+        trade_reference_prefix="test_ref",
+    )
+    service = TradeService(
+        settings=settings,
+        audit=AuditService(tmp_path / "audit.log"),
+        risk=RiskService(settings),
+        _c_fast_capability_issuers=(owner, wrong_owner),
+    )
+    owner.trade = service
+    wrong_owner.trade = service
+    capability = service._bind_c_fast_order_volume_capability(owner)
+    request = make_order(
+        reference=(
+            "commodity_cf:sh:0123456789abcdef:open:ag2610:1"
+        )
     )
 
-    assert events == ["final", "send"]
+    with pytest.raises(RuntimeError, match="capability is invalid"):
+        service._send_c_fast_order(
+            request,
+            c_fast_order_owner=wrong_owner,
+            c_fast_order_volume_capability=capability,
+            pre_rpc_guard=wrong_owner._c_fast_pre_rpc_guard,
+            send_linearization_lock=wrong_owner._dispatch_abort_lock,
+        )
+
+    with pytest.raises(RuntimeError, match="guarded-send contract"):
+        service._send_c_fast_order(
+            request,
+            c_fast_order_owner=owner,
+            c_fast_order_volume_capability=capability,
+            pre_rpc_guard=MethodType(lambda _owner: None, owner),
+            send_linearization_lock=owner._dispatch_abort_lock,
+        )
+
+    with pytest.raises(RuntimeError, match="guarded-send contract"):
+        service._send_c_fast_order(
+            request,
+            c_fast_order_owner=owner,
+            c_fast_order_volume_capability=capability,
+            pre_rpc_guard=owner._c_fast_pre_rpc_guard,
+            send_linearization_lock=RLock(),
+        )
+
+    owner.trade = object()
+    with pytest.raises(RuntimeError, match="capability is invalid"):
+        service._send_c_fast_order(
+            request,
+            c_fast_order_owner=owner,
+            c_fast_order_volume_capability=capability,
+            pre_rpc_guard=owner._c_fast_pre_rpc_guard,
+            send_linearization_lock=owner._dispatch_abort_lock,
+        )
 
 
 def test_status_mapping_and_cancelable_status() -> None:

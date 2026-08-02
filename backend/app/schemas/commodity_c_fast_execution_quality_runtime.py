@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
@@ -57,6 +58,38 @@ def _require_utc(value: datetime, field: str) -> None:
         raise ValueError(f"{field} must use UTC")
 
 
+def _require_canonical_digest_domain(
+    value: tuple[str, ...],
+) -> tuple[str, ...]:
+    if tuple(sorted(set(value))) != value or any(
+        re.fullmatch(r"[0-9a-f]{64}", digest) is None for digest in value
+    ):
+        raise ValueError("signer domain must contain sorted unique SHA256 values")
+    return value
+
+
+class CFastExecutionQualityArtifactSignerDomainsDTO(StrictFiniteModel):
+    """Complete verified SHA256 domains of raw 32-byte Ed25519 public keys."""
+
+    model_config = ConfigDict(frozen=True, revalidate_instances="always")
+
+    signed_p0_acceptance: tuple[str, ...] = Field(min_length=1, max_length=64)
+    collection_admission: tuple[str, ...] = Field(min_length=1, max_length=64)
+    execution_policy: tuple[str, ...] = Field(min_length=1, max_length=64)
+    signed_snapshot: tuple[str, ...] = Field(min_length=1, max_length=64)
+    virtual_intent_plan: tuple[str, ...] = Field(min_length=1, max_length=64)
+    contract_spec_set: tuple[str, ...] = Field(min_length=1, max_length=64)
+    custody_binding: tuple[str, ...] = Field(min_length=1, max_length=64)
+
+    @field_validator("*")
+    @classmethod
+    def require_complete_canonical_domains(
+        cls,
+        value: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        return _require_canonical_digest_domain(value)
+
+
 class CFastExecutionQualityRuntimeRevalidationDTO(StrictFiniteModel):
     """Result returned by the future full signed-authority verifier.
 
@@ -86,6 +119,7 @@ class CFastExecutionQualityRuntimeRevalidationDTO(StrictFiniteModel):
     virtual_intent_plan_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     contract_spec_set_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     custody_binding_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    verified_signer_domains: CFastExecutionQualityArtifactSignerDomainsDTO
 
     p0_acceptance_state: Literal["VERIFIED"]
     collection_admission_state: Literal["VERIFIED"]
@@ -163,6 +197,14 @@ class CFastExecutionQualityArtifactVerificationDTO(StrictFiniteModel):
     valid_until_utc: datetime | None = None
     exact_contracts: tuple[str, ...] = Field(default=(), max_length=100)
     bound_artifact_raw_sha256: dict[ArtifactRole, str] = Field(default_factory=dict)
+    verified_signer_domain_public_key_sha256: tuple[str, ...] = Field(
+        min_length=1,
+        max_length=64,
+        description=(
+            "Sorted SHA256 values for every raw 32-byte Ed25519 public key in "
+            "the complete verified trust domain, including unused keys."
+        ),
+    )
     signature_verified: Literal[True]
     semantic_contract_verified: Literal[True]
 
@@ -204,3 +246,11 @@ class CFastExecutionQualityArtifactVerificationDTO(StrictFiniteModel):
             ):
                 raise ValueError("exact_contract is invalid")
         return value
+
+    @field_validator("verified_signer_domain_public_key_sha256")
+    @classmethod
+    def require_complete_canonical_signer_domain(
+        cls,
+        value: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        return _require_canonical_digest_domain(value)
