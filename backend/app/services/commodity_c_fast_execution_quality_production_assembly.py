@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from threading import RLock
 from typing import Any, Protocol
@@ -13,6 +14,13 @@ from app.services.commodity_c_fast_execution_quality_evidence_export import (
 )
 from app.services.commodity_c_fast_execution_quality_horizon_worker import (
     PreverifiedTickHorizonWorker,
+)
+from app.services.commodity_c_fast_execution_quality_artifact_revalidation import (
+    ARTIFACT_ROLES,
+    CommodityCFastExecutionQualityArtifactRevalidator,
+)
+from app.services.commodity_c_fast_execution_quality_production_verifier import (
+    CommodityCFastExecutionQualityProductionArtifactVerifier,
 )
 from app.services.commodity_c_fast_execution_quality_readonly_repository import (
     CommodityCFastExecutionQualityReadonlyRepository,
@@ -622,6 +630,43 @@ def _build_production_assembly() -> CommodityCFastExecutionQualityProductionAsse
     if not settings.commodity_c_fast_execution_quality_runtime_enabled:
         return assembly
     try:
+        artifact_paths_raw = json.loads(
+            settings.commodity_c_fast_execution_quality_artifact_paths_json
+        )
+        if (
+            not isinstance(artifact_paths_raw, dict)
+            or set(artifact_paths_raw) != set(ARTIFACT_ROLES)
+            or any(
+                not isinstance(value, str) or not value
+                for value in artifact_paths_raw.values()
+            )
+        ):
+            raise CFastExecutionQualityProductionAssemblyError(
+                "PRODUCTION_ASSEMBLY_ARTIFACT_PATH_SET_INVALID"
+            )
+        artifact_paths = {
+            role: Path(artifact_paths_raw[role]).expanduser() for role in ARTIFACT_ROLES
+        }
+        revalidator = CommodityCFastExecutionQualityArtifactRevalidator(
+            artifact_paths=artifact_paths,
+            artifact_bundle_verifier=(
+                CommodityCFastExecutionQualityProductionArtifactVerifier(
+                    settings=settings
+                )
+            ),
+            custody_root=Path(
+                settings.commodity_c_fast_execution_quality_artifact_custody_root
+            ).expanduser(),
+            expected_custody_root_path_sha256=(
+                settings.commodity_c_fast_execution_quality_artifact_expected_root_path_sha256
+            ),
+            expected_custody_identity_sha256=(
+                settings.commodity_c_fast_execution_quality_artifact_expected_identity_sha256
+            ),
+            expected_owner_uid=(
+                settings.commodity_c_fast_execution_quality_artifact_expected_owner_uid
+            ),
+        )
         sidecar = OfflineExecutionQualitySidecar(
             CreateOnlyExecutionQualityJournal(
                 Path(settings.commodity_c_fast_execution_quality_journal_root)
@@ -639,6 +684,12 @@ def _build_production_assembly() -> CommodityCFastExecutionQualityProductionAsse
         assembly.bind_tick_runtime_components(
             horizon_worker=PreverifiedTickHorizonWorker(sidecar),
             tick_fanout=commodity_c_fast_execution_quality_tick_fanout,
+        )
+        # Publish the verifier capability only after every read-only component
+        # has been constructed and bound successfully.  A later constructor
+        # failure must not leave the process-global runtime half configured.
+        commodity_c_fast_execution_quality_runtime.bind_full_revalidation_verifier(
+            revalidator
         )
     except Exception as exc:
         assembly.record_component_binding_failure(exc)

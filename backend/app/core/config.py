@@ -154,6 +154,18 @@ class Settings(BaseSettings):
         default=0,
         ge=0,
     )
+    commodity_c_fast_execution_quality_artifact_custody_root: str = ""
+    commodity_c_fast_execution_quality_artifact_paths_json: str = "{}"
+    commodity_c_fast_execution_quality_artifact_expected_root_path_sha256: str = ""
+    commodity_c_fast_execution_quality_artifact_expected_identity_sha256: str = ""
+    commodity_c_fast_execution_quality_artifact_expected_owner_uid: int = Field(
+        default=0,
+        ge=0,
+    )
+    commodity_c_fast_execution_quality_role_keyring_paths_json: str = "{}"
+    commodity_c_fast_execution_quality_role_keyring_raw_sha256_json: str = "{}"
+    commodity_c_fast_execution_quality_policy_v1_path: str = ""
+    commodity_c_fast_execution_quality_policy_v1_expected_raw_sha256: str = ""
     commodity_c_fast_execution_quality_journal_root: str = ""
     commodity_c_fast_execution_quality_evidence_export_root: str = ""
     commodity_c_fast_simnow_shakedown_enabled: bool = False
