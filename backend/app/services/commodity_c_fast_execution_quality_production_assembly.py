@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+from pathlib import Path
 from threading import RLock
-from typing import Protocol
+from typing import Any, Protocol
 
 from app.schemas.commodity_c_fast_execution_quality_runtime import (
     CFastExecutionQualityRuntimeRevalidationDTO,
     RevalidationTrigger,
+)
+from app.services.commodity_c_fast_execution_quality_evidence_export import (
+    CreateOnlyExecutionQualityEvidenceExportStore,
+)
+from app.services.commodity_c_fast_execution_quality_readonly_repository import (
+    CommodityCFastExecutionQualityReadonlyRepository,
 )
 from app.services.commodity_c_fast_execution_quality_runtime import (
     CommodityCFastExecutionQualityRuntime,
@@ -15,10 +22,10 @@ from app.services.commodity_c_fast_execution_quality_runtime_admission import (
     VerifiedCFastExecutionQualityRuntimeAdmission,
     commodity_c_fast_execution_quality_runtime_admission_verifier,
 )
-from app.services.commodity_c_fast_execution_quality_readonly_repository import (
-    CommodityCFastExecutionQualityReadonlyRepository,
+from app.services.commodity_c_fast_execution_quality_sidecar import (
+    CreateOnlyExecutionQualityJournal,
+    OfflineExecutionQualitySidecar,
 )
-
 
 _FALSE_AUTHORITY = {
     "collection_authorized": False,
@@ -43,6 +50,12 @@ _DENIED_CAPABILITIES = (
 )
 
 
+class CFastExecutionQualityProductionAssemblyError(ValueError):
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(code)
+
+
 class RuntimeAdmissionVerifier(Protocol):
     def verify_for_revalidation(
         self,
@@ -51,14 +64,13 @@ class RuntimeAdmissionVerifier(Protocol):
 
 
 class CommodityCFastExecutionQualityProductionAssembly:
-    """Default-off production assembly gate for the read-only sidecar.
+    """Default-off assembly for one fixed, read-only durable sidecar chain.
 
-    This first assembly slice verifies a fresh full-revalidation receipt and
-    the stable scope of an independently signed runtime admission on every
-    lifecycle transition. The admission is reusable within its short validity
-    window; every use still requires a fresh full revalidation of exact bytes.
-    Tick, repository, export and monitoring components are intentionally not
-    represented as built until later slices bind the complete capability.
+    When configured, the source sidecar, exact typed repository and immutable
+    export store are bound as one identity before application startup. Every
+    lifecycle freshly verifies signed scope, replays the same journal, and
+    create-only publishes its evidence projection. No component has database
+    write, RPC, account, order or position capability.
     """
 
     def __init__(
@@ -79,29 +91,69 @@ class CommodityCFastExecutionQualityProductionAssembly:
         self._last_trigger: RevalidationTrigger | None = None
         self._last_error: str | None = None
         self._admission: VerifiedCFastExecutionQualityRuntimeAdmission | None = None
+        self._sidecar: OfflineExecutionQualitySidecar | None = None
         self._readonly_repository: (
             CommodityCFastExecutionQualityReadonlyRepository | None
         ) = None
+        self._evidence_export_store: (
+            CreateOnlyExecutionQualityEvidenceExportStore | None
+        ) = None
+        self._component_binding_error: str | None = None
+        self._last_export_receipt: dict[str, object] | None = None
+        self._projection_revalidation_generation: int | None = None
+        self._projection_receipt_sha256: str | None = None
 
-    def bind_readonly_repository(
+    def bind_readonly_components(
         self,
+        *,
+        sidecar: OfflineExecutionQualitySidecar,
         repository: CommodityCFastExecutionQualityReadonlyRepository,
+        evidence_export_store: CreateOnlyExecutionQualityEvidenceExportStore,
     ) -> None:
+        if type(sidecar) is not OfflineExecutionQualitySidecar:
+            raise TypeError("PRODUCTION_ASSEMBLY_SIDECAR_TYPE_INVALID")
         if type(repository) is not CommodityCFastExecutionQualityReadonlyRepository:
             raise TypeError("PRODUCTION_ASSEMBLY_READONLY_REPOSITORY_TYPE_INVALID")
+        if (
+            type(evidence_export_store)
+            is not CreateOnlyExecutionQualityEvidenceExportStore
+        ):
+            raise TypeError("PRODUCTION_ASSEMBLY_EVIDENCE_EXPORT_STORE_TYPE_INVALID")
+        if not repository.is_bound_to(sidecar):
+            raise CFastExecutionQualityProductionAssemblyError(
+                "PRODUCTION_ASSEMBLY_REPOSITORY_SOURCE_MISMATCH"
+            )
         with self._lock:
             if self._started:
-                raise RuntimeError(
-                    "PRODUCTION_ASSEMBLY_REPOSITORY_BIND_AFTER_START_FORBIDDEN"
+                raise CFastExecutionQualityProductionAssemblyError(
+                    "PRODUCTION_ASSEMBLY_COMPONENT_BIND_AFTER_START_FORBIDDEN"
                 )
-            if (
-                self._readonly_repository is not None
-                and self._readonly_repository is not repository
-            ):
-                raise RuntimeError(
-                    "PRODUCTION_ASSEMBLY_READONLY_REPOSITORY_ALREADY_BOUND"
+            current = (
+                self._sidecar,
+                self._readonly_repository,
+                self._evidence_export_store,
+            )
+            requested = (sidecar, repository, evidence_export_store)
+            if any(value is not None for value in current) and current != requested:
+                raise CFastExecutionQualityProductionAssemblyError(
+                    "PRODUCTION_ASSEMBLY_COMPONENTS_ALREADY_BOUND"
                 )
+            self._sidecar = sidecar
             self._readonly_repository = repository
+            self._evidence_export_store = evidence_export_store
+            self._component_binding_error = None
+
+    def record_component_binding_failure(self, exc: BaseException) -> None:
+        with self._lock:
+            if self._started:
+                raise CFastExecutionQualityProductionAssemblyError(
+                    "PRODUCTION_ASSEMBLY_COMPONENT_FAILURE_AFTER_START_FORBIDDEN"
+                )
+            self._component_binding_error = str(
+                getattr(exc, "code", type(exc).__name__)
+            )
+            self._state = "BLOCKED_READONLY_COMPONENT_BINDING_FAILED"
+            self._last_error = self._component_binding_error
 
     def start(self) -> dict[str, object]:
         return self._run_lifecycle("startup")
@@ -116,6 +168,9 @@ class CommodityCFastExecutionQualityProductionAssembly:
         with self._lock:
             self._started = False
             self._admission = None
+            self._last_export_receipt = None
+            self._projection_revalidation_generation = None
+            self._projection_receipt_sha256 = None
             self._state = "STOPPED_NO_CAPABILITY"
             self._last_error = None
             try:
@@ -129,6 +184,74 @@ class CommodityCFastExecutionQualityProductionAssembly:
         with self._lock:
             return self._status_locked()
 
+    def intents(self) -> tuple[dict[str, Any], ...]:
+        with self._lock:
+            repository = self._require_current_projection_locked()
+            return repository.intents()
+
+    def execution_quality(self) -> tuple[dict[str, Any], ...]:
+        with self._lock:
+            repository = self._require_current_projection_locked()
+            return repository.execution_quality()
+
+    def evidence_export(self) -> dict[str, Any]:
+        with self._lock:
+            self._require_current_projection_locked()
+            source = self._sidecar
+            store = self._evidence_export_store
+            receipt = self._last_export_receipt
+            if source is None or store is None or receipt is None:
+                raise CFastExecutionQualityProductionAssemblyError(
+                    "PRODUCTION_ASSEMBLY_EVIDENCE_EXPORT_UNAVAILABLE"
+                )
+            filename = str(receipt["artifact_filename"])
+            exported = store.load(filename, source=source)
+            return {
+                "artifact_filename": filename,
+                "artifact_state": str(receipt["artifact_state"]),
+                "export": exported.model_dump(mode="json"),
+            }
+
+    def _require_current_projection_locked(
+        self,
+    ) -> CommodityCFastExecutionQualityReadonlyRepository:
+        repository = self._readonly_repository
+        admission = self._admission
+        if (
+            repository is None
+            or not self._started
+            or admission is None
+            or self._state != "SIGNED_ADMISSION_VERIFIED_ASSEMBLY_COMPONENTS_INCOMPLETE"
+            or self._last_export_receipt is None
+            or self._projection_revalidation_generation is None
+            or self._projection_receipt_sha256 is None
+        ):
+            raise CFastExecutionQualityProductionAssemblyError(
+                "PRODUCTION_ASSEMBLY_CURRENT_PROJECTION_UNAVAILABLE"
+            )
+        try:
+            runtime_status = self._runtime.status()
+            receipt = self._runtime.current_revalidation_receipt()
+            now = self._runtime.clock()
+            if (
+                now.tzinfo is None
+                or now.utcoffset() is None
+                or now.utcoffset().total_seconds() != 0
+                or runtime_status["revalidation_generation"]
+                != self._projection_revalidation_generation
+                or receipt.receipt_sha256 != self._projection_receipt_sha256
+                or not receipt.revalidated_at_utc <= now < receipt.valid_until_utc
+                or not admission.admission.not_before_utc
+                <= now
+                < admission.admission.expires_at_utc
+            ):
+                raise ValueError
+        except Exception as exc:
+            raise CFastExecutionQualityProductionAssemblyError(
+                "PRODUCTION_ASSEMBLY_CURRENT_PROJECTION_EXPIRED_OR_DRIFTED"
+            ) from exc
+        return repository
+
     def _run_lifecycle(
         self,
         trigger: RevalidationTrigger,
@@ -137,6 +260,9 @@ class CommodityCFastExecutionQualityProductionAssembly:
             self._started = True
             self._last_trigger = trigger
             self._admission = None
+            self._last_export_receipt = None
+            self._projection_revalidation_generation = None
+            self._projection_receipt_sha256 = None
             operation = {
                 "startup": self._runtime.start,
                 "reload": self._runtime.reload,
@@ -168,12 +294,46 @@ class CommodityCFastExecutionQualityProductionAssembly:
                 self._state = "BLOCKED_SIGNED_RUNTIME_ADMISSION_INVALID"
                 self._last_error = str(getattr(exc, "code", type(exc).__name__))
                 return self._status_locked()
-            if self._readonly_repository is not None:
-                repository_status = self._readonly_repository.recover()
-                if repository_status["blocked_fail_closed"] is not False:
-                    self._state = "BLOCKED_READONLY_REPOSITORY_FAILED"
-                    self._last_error = str(repository_status["last_error"])
-                    return self._status_locked()
+            if self._component_binding_error is not None:
+                self._state = "BLOCKED_READONLY_COMPONENT_BINDING_FAILED"
+                self._last_error = self._component_binding_error
+                return self._status_locked()
+            source = self._sidecar
+            repository = self._readonly_repository
+            export_store = self._evidence_export_store
+            if source is None or repository is None or export_store is None:
+                self._state = "SIGNED_ADMISSION_VERIFIED_ASSEMBLY_COMPONENTS_INCOMPLETE"
+                self._last_error = None
+                return self._status_locked()
+            repository_status = repository.recover()
+            if repository_status["blocked_fail_closed"] is not False:
+                self._state = "BLOCKED_READONLY_REPOSITORY_FAILED"
+                self._last_error = str(repository_status["last_error"])
+                return self._status_locked()
+            if tuple(repository_status["exact_contracts"]) != receipt.exact_contracts:
+                self._state = "BLOCKED_READONLY_REPOSITORY_SCOPE_MISMATCH"
+                self._last_error = "READONLY_REPOSITORY_EXACT_CONTRACTS_MISMATCH"
+                return self._status_locked()
+            try:
+                export_receipt = export_store.publish(source)
+            except Exception as exc:
+                self._state = "BLOCKED_EVIDENCE_EXPORT_FAILED"
+                self._last_error = str(getattr(exc, "code", type(exc).__name__))
+                return self._status_locked()
+            if (
+                export_receipt["source_journal_record_count"]
+                != repository_status["source_journal_record_count"]
+                or export_receipt["source_journal_tip_record_hash"]
+                != repository_status["source_journal_tip_record_hash"]
+            ):
+                self._state = "BLOCKED_READONLY_EXPORT_SNAPSHOT_DRIFT"
+                self._last_error = "READONLY_REPOSITORY_EXPORT_TIP_MISMATCH"
+                return self._status_locked()
+            self._last_export_receipt = export_receipt
+            self._projection_revalidation_generation = int(
+                runtime_status["revalidation_generation"]
+            )
+            self._projection_receipt_sha256 = receipt.receipt_sha256
             self._state = "SIGNED_ADMISSION_VERIFIED_ASSEMBLY_COMPONENTS_INCOMPLETE"
             self._last_error = None
             return self._status_locked()
@@ -186,6 +346,15 @@ class CommodityCFastExecutionQualityProductionAssembly:
             if self._readonly_repository is not None
             else None
         )
+        export_receipt = self._last_export_receipt
+        durable_components_bound = all(
+            value is not None
+            for value in (
+                self._sidecar,
+                self._readonly_repository,
+                self._evidence_export_store,
+            )
+        )
         return {
             **runtime_status,
             "schema_version": (
@@ -195,6 +364,7 @@ class CommodityCFastExecutionQualityProductionAssembly:
             "assembly_lifecycle_started": self._started,
             "assembly_last_trigger": self._last_trigger,
             "assembly_last_error": self._last_error,
+            "readonly_component_binding_error": self._component_binding_error,
             "signed_runtime_admission_verified": admission is not None,
             "runtime_admission_id": (
                 admission.admission.admission_id if admission is not None else None
@@ -203,6 +373,20 @@ class CommodityCFastExecutionQualityProductionAssembly:
                 admission.admission_raw_sha256 if admission is not None else None
             ),
             "readonly_repository": repository_status,
+            "evidence_export": {
+                "store_bound": self._evidence_export_store is not None,
+                "latest_artifact_filename": (
+                    str(export_receipt["artifact_filename"])
+                    if export_receipt is not None
+                    else None
+                ),
+                "latest_artifact_state": (
+                    str(export_receipt["artifact_state"])
+                    if export_receipt is not None
+                    else None
+                ),
+                "immutable_create_only": True,
+            },
             "runtime_active": False,
             "execution_quality_implemented": False,
             "capabilities": {
@@ -212,12 +396,12 @@ class CommodityCFastExecutionQualityProductionAssembly:
                 "tick_input_bound": False,
                 "tick_subscription_built": False,
                 "horizon_worker_built": False,
-                "durable_sidecar_runtime_bound": False,
-                "readonly_repository_bound": (self._readonly_repository is not None),
+                "durable_sidecar_runtime_bound": durable_components_bound,
+                "readonly_repository_bound": self._readonly_repository is not None,
                 "questdb_evidence_adapter_bound": False,
-                "evidence_export_store_bound": False,
-                "api_projection_bound": False,
-                "monitoring_projection_bound": False,
+                "evidence_export_store_bound": self._evidence_export_store is not None,
+                "api_projection_bound": durable_components_bound,
+                "monitoring_projection_bound": True,
             },
             "denied_capabilities": list(_DENIED_CAPABILITIES),
             "orders_sent": 0,
@@ -226,17 +410,41 @@ class CommodityCFastExecutionQualityProductionAssembly:
         }
 
 
-commodity_c_fast_execution_quality_production_assembly = (
-    CommodityCFastExecutionQualityProductionAssembly(
+def _build_production_assembly() -> CommodityCFastExecutionQualityProductionAssembly:
+    assembly = CommodityCFastExecutionQualityProductionAssembly(
         runtime=commodity_c_fast_execution_quality_runtime,
         admission_verifier=(
             commodity_c_fast_execution_quality_runtime_admission_verifier
         ),
     )
-)
+    settings = commodity_c_fast_execution_quality_runtime.settings
+    if not settings.commodity_c_fast_execution_quality_runtime_enabled:
+        return assembly
+    try:
+        sidecar = OfflineExecutionQualitySidecar(
+            CreateOnlyExecutionQualityJournal(
+                Path(settings.commodity_c_fast_execution_quality_journal_root)
+            )
+        )
+        repository = CommodityCFastExecutionQualityReadonlyRepository(sidecar)
+        export_store = CreateOnlyExecutionQualityEvidenceExportStore(
+            Path(settings.commodity_c_fast_execution_quality_evidence_export_root)
+        )
+        assembly.bind_readonly_components(
+            sidecar=sidecar,
+            repository=repository,
+            evidence_export_store=export_store,
+        )
+    except Exception as exc:
+        assembly.record_component_binding_failure(exc)
+    return assembly
+
+
+commodity_c_fast_execution_quality_production_assembly = _build_production_assembly()
 
 
 __all__ = [
+    "CFastExecutionQualityProductionAssemblyError",
     "CommodityCFastExecutionQualityProductionAssembly",
     "RuntimeAdmissionVerifier",
     "commodity_c_fast_execution_quality_production_assembly",

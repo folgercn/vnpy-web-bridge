@@ -6,8 +6,9 @@ import os
 import re
 import secrets
 import stat
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from pydantic import ValidationError
 
@@ -25,7 +26,6 @@ from app.services.commodity_c_fast_execution_quality_sidecar import (
     SidecarState,
 )
 from app.services.commodity_c_fast_shadow_common import sha256_json
-
 
 MAX_EXPORT_BYTES = 32 * 1024 * 1024
 MAX_EXPORT_FILES = 10_000
@@ -299,6 +299,7 @@ class CreateOnlyExecutionQualityEvidenceExportStore:
             "artifact_state": artifact_state,
             "artifact_filename": filename,
             "generation_id": exported.generation_id,
+            "source_journal_record_count": exported.source_journal_record_count,
             "source_journal_tip_record_hash": (exported.source_journal_tip_record_hash),
             "export_sha256": exported.export_sha256,
             "m2_acceptance_state": (
