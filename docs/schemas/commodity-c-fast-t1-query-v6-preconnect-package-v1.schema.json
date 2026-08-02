@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vnpy-web-bridge:schema:commodity-c-fast-t1-query-v6-preconnect-package-v1",
+  "title": "C_FAST query-v6 deterministic pre-connect adapter package",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "package_id",
+    "candidate_id",
+    "source_commit_sha",
+    "entrypoint",
+    "entries",
+    "python_executable_path",
+    "python_executable_sha256",
+    "python_dependencies",
+    "python_dependency_closure_sha256",
+    "deterministic_archive",
+    "v6_only_preconnect_adapter",
+    "legacy_authority_reused",
+    "dsn_secret_included",
+    "network_accessed",
+    "authority_granted",
+    "production_authorized"
+  ],
+  "properties": {
+    "schema_version": {"const": "commodity_c_fast_t1_query_v6_preconnect_package_v1"},
+    "package_id": {"$ref": "#/$defs/id"},
+    "candidate_id": {"const": "C_FAST_CROSS_SECTION_NEUTRAL"},
+    "source_commit_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "entrypoint": {"const": "scripts/commodity_c_fast_t1_query_v6_preconnect_adapter.py"},
+    "entries": {
+      "type": "array",
+      "minItems": 8,
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "sha256", "size", "mode"],
+        "properties": {
+          "path": {"type": "string", "pattern": "^(scripts|docs)/[^\\u0000]+$"},
+          "sha256": {"$ref": "#/$defs/sha256"},
+          "size": {"type": "integer", "minimum": 1, "maximum": 67108864},
+          "mode": {"enum": [292, 365]}
+        }
+      }
+    },
+    "python_executable_path": {"type": "string", "pattern": "^/[^\\u0000]+$"},
+    "python_executable_sha256": {"$ref": "#/$defs/sha256"},
+    "python_dependencies": {
+      "type": "array",
+      "minItems": 8,
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "version"],
+        "properties": {
+          "name": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"},
+          "version": {"type": "string", "minLength": 1, "maxLength": 128}
+        }
+      }
+    },
+    "python_dependency_closure_sha256": {"$ref": "#/$defs/sha256"},
+    "deterministic_archive": {"const": true},
+    "v6_only_preconnect_adapter": {"const": true},
+    "legacy_authority_reused": {"const": false},
+    "dsn_secret_included": {"const": false},
+    "network_accessed": {"const": false},
+    "authority_granted": {"const": false},
+    "production_authorized": {"const": false}
+  },
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[A-Za-z0-9._-]{8,128}$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

@@ -53,9 +53,7 @@ def _keyring(
 ) -> dict[str, Any]:
     return {
         "schema_version": (
-            subject.KEYRING_VERSION
-            if executable
-            else foundation_v6.KEYRING_VERSION
+            subject.KEYRING_VERSION if executable else foundation_v6.KEYRING_VERSION
         ),
         "keys": [
             {
@@ -65,9 +63,7 @@ def _keyring(
                     else "query-v6-foundation-test-key-0001"
                 ),
                 "purpose": (
-                    subject.KEY_PURPOSE
-                    if executable
-                    else foundation_v6.KEY_PURPOSE
+                    subject.KEY_PURPOSE if executable else foundation_v6.KEY_PURPOSE
                 ),
                 "public_key_base64": base64.b64encode(
                     private_key.public_key().public_bytes_raw()
@@ -110,9 +106,7 @@ def _foundation(
         "schema_version": foundation_v6.DSN_IDENTITY_VERSION,
         "attestation_id": "dsn-executable-test-0001",
         "observed_at": (NOW - timedelta(minutes=2)).isoformat(),
-        "dsn_file_absolute_path_sha256": _sha(
-            str(dsn_file.resolve()).encode()
-        ),
+        "dsn_file_absolute_path_sha256": _sha(str(dsn_file.resolve()).encode()),
         "device": dsn_info.st_dev,
         "inode": dsn_info.st_ino,
         "owner_uid": dsn_info.st_uid,
@@ -163,9 +157,7 @@ def _foundation(
     foundation_keyring = _keyring(foundation_signer, executable=False)
     payload = {
         "release_id": "foundation-release-test-0001",
-        "attempt_id": foundation_v6.release_attempt_id(
-            "foundation-release-test-0001"
-        ),
+        "attempt_id": foundation_v6.release_attempt_id("foundation-release-test-0001"),
         "issued_at": (NOW - timedelta(minutes=3)).isoformat(),
         "expires_at": (NOW + timedelta(minutes=8)).isoformat(),
         "signer_key_id": foundation_keyring["keys"][0]["key_id"],
@@ -185,9 +177,7 @@ def _foundation(
         "l3_outcome_canonical_sha256": l3.canonical_sha256,
         "query_manifest_raw_sha256": manifest.raw_sha256,
         "query_manifest_canonical_sha256": manifest.canonical_sha256,
-        "runtime_source_commit_sha": provenance.payload[
-            "runtime_source_commit_sha"
-        ],
+        "runtime_source_commit_sha": provenance.payload["runtime_source_commit_sha"],
         "runtime_image_reference": provenance.payload["image_reference"],
         "runtime_image_digest": provenance.payload["image_digest"],
         "runtime_image_id": provenance.payload["image_id"],
@@ -206,12 +196,8 @@ def _foundation(
             evidence.dsn_identity_attestation.canonical_sha256
         ),
         "dsn_file_identity_sha256": dsn["dsn_file_identity_sha256"],
-        "expected_readonly_principal_sha256": dsn[
-            "expected_readonly_principal_sha256"
-        ],
-        "expected_endpoint_identity_sha256": dsn[
-            "expected_endpoint_identity_sha256"
-        ],
+        "expected_readonly_principal_sha256": dsn["expected_readonly_principal_sha256"],
+        "expected_endpoint_identity_sha256": dsn["expected_endpoint_identity_sha256"],
         "query_child_sha256": "f" * 64,
         "audit_script_sha256": "0" * 64,
         "readonly_proof_schema_sha256": "1" * 64,
@@ -228,13 +214,28 @@ def _foundation(
     )
 
 
-def _pins(executable_keyring: dict[str, Any], adapter_raw: bytes) -> subject.ExecutablePins:
+def _pins(
+    executable_keyring: dict[str, Any],
+    adapter_raw: bytes,
+    adapter_path: Path = Path("/opt/c-fast-query-v6/adapter.py"),
+) -> subject.ExecutablePins:
     payload = {
         "schema_version": subject.PIN_SET_VERSION,
         "generation_id": "query-v6-executable-pins-test-0001",
         "executable_keyring_sha256": _sha(subject.canonical_json(executable_keyring)),
         **subject.source_and_schema_hashes(),
         "execution_adapter_sha256": _sha(adapter_raw),
+        "execution_adapter_absolute_path": str(adapter_path.resolve()),
+        "adapter_package_manifest_absolute_path": str(
+            (
+                adapter_path.parent / "query-v6-preconnect-package-manifest.json"
+            ).resolve()
+        ),
+        "adapter_package_manifest_sha256": "4" * 64,
+        "adapter_package_root_identity_sha256": "5" * 64,
+        "python_executable_path": str(Path(sys.executable).resolve()),
+        "python_executable_sha256": "6" * 64,
+        "python_dependency_closure_sha256": "7" * 64,
         "questdb_build_sha256": _sha(b"questdb-build-test"),
     }
     return subject.ExecutablePins(
@@ -246,8 +247,7 @@ def _pins(executable_keyring: dict[str, Any], adapter_raw: bytes) -> subject.Exe
 def _draft() -> dict[str, Any]:
     payload = json.loads(
         (
-            ROOT
-            / "docs/operations/c-fast-t1-query-v6-executable-release.template.json"
+            ROOT / "docs/operations/c-fast-t1-query-v6-executable-release.template.json"
         ).read_text(encoding="utf-8")
     )
     payload.update(
@@ -269,7 +269,9 @@ def _fixture(tmp_path: Path) -> dict[str, Any]:
     custody = tmp_path / "custody"
     custody.mkdir(mode=0o700)
     dsn_file = tmp_path / "dsn"
-    dsn_file.write_text("postgresql://readonly:test@localhost:8812/qdb", encoding="utf-8")
+    dsn_file.write_text(
+        "postgresql://readonly:test@localhost:8812/qdb", encoding="utf-8"
+    )
     dsn_file.chmod(0o600)
     adapter_raw = b"#!/usr/bin/env python3\n# pinned test adapter\n"
     adapter_path = tmp_path / "adapter.py"
@@ -284,7 +286,7 @@ def _fixture(tmp_path: Path) -> dict[str, Any]:
     foundation = _foundation(custody, dsn_file, foundation_signer)
     executable_signer = Ed25519PrivateKey.generate()
     executable_keyring = _keyring(executable_signer, executable=True)
-    pins = _pins(executable_keyring, adapter_raw)
+    pins = _pins(executable_keyring, adapter_raw, adapter_path)
     signed = signer.sign_release(
         _draft(),
         executable_keyring,
@@ -338,6 +340,28 @@ def _successful_validation() -> runtime.CompletedValidation:
         readonly_preflight_canonical_sha256="e" * 64,
         readonly_postflight_canonical_sha256="e" * 64,
     )
+
+
+def _successful_package_preflight(
+    verified: subject.VerifiedExecutableRelease,
+) -> Any:
+    execution = verified.payload["execution"]
+
+    def preflight(*_args: Any, **_kwargs: Any) -> dict[str, str]:
+        return {
+            "package_manifest_sha256": execution["adapter_package_manifest_sha256"],
+            "package_root_identity_sha256": execution[
+                "adapter_package_root_identity_sha256"
+            ],
+            "entrypoint": execution["execution_adapter_absolute_path"],
+            "python_executable_path": execution["python_executable_path"],
+            "python_executable_sha256": execution["python_executable_sha256"],
+            "python_dependency_closure_sha256": execution[
+                "python_dependency_closure_sha256"
+            ],
+        }
+
+    return preflight
 
 
 def _pid_is_live(pid: int) -> bool:
@@ -447,12 +471,25 @@ def test_executable_key_cannot_reuse_foundation_domain(tmp_path: Path) -> None:
 def test_consume_precedes_adapter_launch_and_replay_is_closed(tmp_path: Path) -> None:
     values = _fixture(tmp_path)
     launches: list[list[str]] = []
+    capabilities: list[bytes] = []
 
-    def launch(invocation: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+    def launch(
+        invocation: list[str], **kwargs: Any
+    ) -> subprocess.CompletedProcess[str]:
         consume_path = values["custody"] / (
             values["verified"].payload["attempt_id"] + ".query-consumed-v6.json"
         )
         assert consume_path.exists()
+        launch_path = values["custody"] / (
+            values["verified"].payload["attempt_id"] + ".query-child-launched-v6.json"
+        )
+        assert launch_path.exists()
+        launch_claim = json.loads(launch_path.read_text(encoding="utf-8"))
+        capability = kwargs["launch_capability"]
+        assert launch_claim["launch_capability_sha256"] == (
+            runtime.preconnect_adapter.launch_capability_sha256(capability)
+        )
+        capabilities.append(capability)
         launches.append(invocation)
         return subprocess.CompletedProcess(invocation, 0, "", "")
 
@@ -466,6 +503,7 @@ def test_consume_precedes_adapter_launch_and_replay_is_closed(tmp_path: Path) ->
         clock=lambda: NOW,
         adapter_launcher=launch,
         output_validator=lambda *_args: _successful_validation(),
+        package_preflight=_successful_package_preflight(values["verified"]),
         require_root_owned_parent=False,
         require_root_owned_adapter=False,
     )
@@ -475,6 +513,7 @@ def test_consume_precedes_adapter_launch_and_replay_is_closed(tmp_path: Path) ->
     assert terminal["orders_sent"] == 0
     assert terminal["positions_modified"] == 0
     assert len(launches) == 1
+    assert len(capabilities) == 1
     assert Path(launches[0][2]) == values["adapter_path"].resolve(strict=True)
     assert "query-v6-execution-adapter.py" not in launches[0][2]
 
@@ -489,38 +528,39 @@ def test_consume_precedes_adapter_launch_and_replay_is_closed(tmp_path: Path) ->
             clock=lambda: NOW,
             adapter_launcher=launch,
             output_validator=lambda *_args: _successful_validation(),
+            package_preflight=_successful_package_preflight(values["verified"]),
             require_root_owned_parent=False,
             require_root_owned_adapter=False,
         )
     assert len(launches) == 1
 
 
-def test_staged_archive_tamper_never_changes_executed_adapter(tmp_path: Path) -> None:
+def test_parent_full_preflight_blocks_tamper_immediately_before_popen(
+    tmp_path: Path,
+) -> None:
     values = _fixture(tmp_path)
-    revalidations = 0
-    launches: list[list[str]] = []
+    valid_preflight = _successful_package_preflight(values["verified"])
+    preflight_calls = 0
+    popen_calls = 0
+    network_attempts = 0
 
-    def tamper_staged_archive(
-        _at: datetime,
-    ) -> subject.VerifiedExecutableRelease:
-        nonlocal revalidations
-        revalidations += 1
-        if revalidations == 2:
-            staged = (
-                values["custody"]
-                / values["verified"].payload["attempt_id"]
-                / "query-v6-execution-adapter.py"
+    def preflight(*args: Any, **kwargs: Any) -> dict[str, str]:
+        nonlocal preflight_calls
+        preflight_calls += 1
+        if preflight_calls == 3:
+            raise runtime.preconnect_package.QueryV6PackageError(
+                "simulated interpreter tamper before Popen"
             )
-            staged.chmod(0o700)
-            staged.write_text("tampered archival copy", encoding="utf-8")
-        return values["verified"]
+        return valid_preflight(*args, **kwargs)
 
     def launch(
-        invocation: list[str],
-        **_kwargs: Any,
+        _invocation: list[str], **kwargs: Any
     ) -> subprocess.CompletedProcess[str]:
-        launches.append(invocation)
-        return subprocess.CompletedProcess(invocation, 0, "", "")
+        nonlocal popen_calls, network_attempts
+        kwargs["prelaunch_validator"]()
+        popen_calls += 1
+        network_attempts += 1
+        return subprocess.CompletedProcess([], 0, "", "")
 
     code, terminal = runtime.run_authorized_attempt(
         values["verified"],
@@ -528,17 +568,63 @@ def test_staged_archive_tamper_never_changes_executed_adapter(tmp_path: Path) ->
         values["manifest_path"],
         values["dsn_file"],
         values["adapter_path"],
-        tamper_staged_archive,
+        lambda _at: values["verified"],
         clock=lambda: NOW,
         adapter_launcher=launch,
-        output_validator=lambda *_args: _successful_validation(),
+        package_preflight=preflight,
         require_root_owned_parent=False,
         require_root_owned_adapter=False,
     )
-    assert code == 0
-    assert terminal["terminal_state"] == "COMPLETED_PASS"
-    assert len(launches) == 1
-    assert Path(launches[0][2]) == values["adapter_path"].resolve(strict=True)
+    assert code == 2
+    assert terminal["terminal_state"] == "FAILED_BEFORE_NETWORK"
+    assert terminal["adapter_launch_attempted"] is False
+    assert terminal["production_query_attempted"] is False
+    assert terminal["production_query_completed"] is False
+    assert preflight_calls == 3
+    assert popen_calls == 0
+    assert network_attempts == 0
+
+
+def test_atomic_dsn_path_replacement_fails_before_popen(
+    tmp_path: Path,
+) -> None:
+    values = _fixture(tmp_path)
+    popen_calls = 0
+    network_attempts = 0
+
+    def launch(
+        _invocation: list[str], **kwargs: Any
+    ) -> subprocess.CompletedProcess[str]:
+        nonlocal popen_calls, network_attempts
+        original_size = values["dsn_file"].stat().st_size
+        replacement = tmp_path / "dsn-replacement"
+        replacement.write_bytes(b"replacement-secret".ljust(original_size, b"x"))
+        replacement.chmod(0o600)
+        os.replace(replacement, values["dsn_file"])
+        kwargs["prelaunch_validator"]()
+        popen_calls += 1
+        network_attempts += 1
+        return subprocess.CompletedProcess([], 0, "", "")
+
+    code, terminal = runtime.run_authorized_attempt(
+        values["verified"],
+        values["release_path"],
+        values["manifest_path"],
+        values["dsn_file"],
+        values["adapter_path"],
+        lambda _at: values["verified"],
+        clock=lambda: NOW,
+        adapter_launcher=launch,
+        package_preflight=_successful_package_preflight(values["verified"]),
+        require_root_owned_parent=False,
+        require_root_owned_adapter=False,
+    )
+    assert code == 2
+    assert terminal["terminal_state"] == "FAILED_BEFORE_NETWORK"
+    assert terminal["adapter_launch_attempted"] is False
+    assert terminal["production_query_attempted"] is False
+    assert popen_calls == 0
+    assert network_attempts == 0
 
 
 @pytest.mark.parametrize("drift_target", ["adapter", "dsn"])
@@ -577,6 +663,7 @@ def test_final_adapter_or_dsn_drift_blocks_launch(
         drift_at_final_boundary,
         clock=lambda: NOW,
         adapter_launcher=launch,
+        package_preflight=_successful_package_preflight(values["verified"]),
         require_root_owned_parent=False,
         require_root_owned_adapter=False,
     )
@@ -607,6 +694,7 @@ def test_wrong_runtime_manifest_blocks_before_consume(tmp_path: Path) -> None:
             lambda _at: values["verified"],
             clock=lambda: NOW,
             adapter_launcher=launch,
+            package_preflight=_successful_package_preflight(values["verified"]),
             require_root_owned_parent=False,
             require_root_owned_adapter=False,
         )
@@ -641,6 +729,7 @@ def test_final_tamper_fails_before_network_and_writes_terminal(tmp_path: Path) -
         clock=lambda: NOW,
         adapter_launcher=launch,
         output_validator=lambda *_args: _successful_validation(),
+        package_preflight=_successful_package_preflight(values["verified"]),
         require_root_owned_parent=False,
         require_root_owned_adapter=False,
     )
@@ -679,6 +768,7 @@ def test_launch_boundary_failure_after_consume_is_terminalized(tmp_path: Path) -
         clock=lambda: NOW,
         adapter_launcher=launch,
         output_validator=lambda *_args: _successful_validation(),
+        package_preflight=_successful_package_preflight(values["verified"]),
         require_root_owned_parent=False,
         require_root_owned_adapter=False,
     )
@@ -693,7 +783,9 @@ def test_launch_boundary_failure_after_consume_is_terminalized(tmp_path: Path) -
 def test_timeout_is_terminal_outcome_unknown_and_never_replays(tmp_path: Path) -> None:
     values = _fixture(tmp_path)
 
-    def timeout(invocation: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+    def timeout(
+        invocation: list[str], **_kwargs: Any
+    ) -> subprocess.CompletedProcess[str]:
         raise subprocess.TimeoutExpired(invocation, 600)
 
     code, terminal = runtime.run_authorized_attempt(
@@ -705,6 +797,7 @@ def test_timeout_is_terminal_outcome_unknown_and_never_replays(tmp_path: Path) -
         lambda _at: values["verified"],
         clock=lambda: NOW,
         adapter_launcher=timeout,
+        package_preflight=_successful_package_preflight(values["verified"]),
         require_root_owned_parent=False,
         require_root_owned_adapter=False,
     )
@@ -712,6 +805,82 @@ def test_timeout_is_terminal_outcome_unknown_and_never_replays(tmp_path: Path) -
     assert terminal["terminal_state"] == "OUTCOME_UNKNOWN"
     assert terminal["production_query_attempted"] is True
     assert terminal["production_query_completed"] is None
+
+
+def test_default_run_adapter_preflight_failure_never_calls_popen_or_network(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    popen_calls = 0
+    network_attempts = 0
+
+    def forbidden_popen(*_args: Any, **_kwargs: Any) -> Any:
+        nonlocal popen_calls, network_attempts
+        popen_calls += 1
+        network_attempts += 1
+        raise AssertionError("Popen must remain unreachable")
+
+    def fail_prelaunch() -> None:
+        raise runtime.QueryV6PrelaunchError("simulated final package drift")
+
+    monkeypatch.setattr(runtime.subprocess, "Popen", forbidden_popen)
+    dsn_file = tmp_path / "dsn"
+    dsn_file.write_text("test-dsn", encoding="utf-8")
+    dsn_file.chmod(0o600)
+    dsn_descriptor = os.open(dsn_file, os.O_RDONLY)
+    try:
+        with pytest.raises(runtime.QueryV6PrelaunchError, match="package drift"):
+            runtime.run_adapter(
+                [sys.executable, "-I", str(tmp_path / "never-started.py")],
+                cwd=tmp_path,
+                timeout=10,
+                launch_capability=(b"p" * runtime.preconnect_adapter.CAPABILITY_BYTES),
+                dsn_descriptor=dsn_descriptor,
+                prelaunch_validator=fail_prelaunch,
+            )
+    finally:
+        os.close(dsn_descriptor)
+    assert popen_calls == 0
+    assert network_attempts == 0
+
+
+def test_secret_bearing_child_stderr_never_enters_terminal_or_artifacts(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    values = _fixture(tmp_path)
+    secret = "postgresql://readonly:SUPERSECRET@localhost:8812/qdb"
+
+    def launch(
+        invocation: list[str], **_kwargs: Any
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(invocation, 2, "", secret)
+
+    code, terminal = runtime.run_authorized_attempt(
+        values["verified"],
+        values["release_path"],
+        values["manifest_path"],
+        values["dsn_file"],
+        values["adapter_path"],
+        lambda _at: values["verified"],
+        clock=lambda: NOW,
+        adapter_launcher=launch,
+        package_preflight=_successful_package_preflight(values["verified"]),
+        require_root_owned_parent=False,
+        require_root_owned_adapter=False,
+    )
+    captured = capsys.readouterr()
+    assert code == 2
+    assert terminal["terminal_state"] == "OUTCOME_UNKNOWN"
+    assert secret not in (captured.out + captured.err)
+    assert secret.encode() not in runtime.canonical_json(terminal)
+    for path in values["custody"].rglob("*"):
+        if path.is_file():
+            assert secret.encode() not in path.read_bytes()
+    artifacts = (
+        values["custody"] / values["verified"].payload["attempt_id"] / "artifacts"
+    )
+    assert not list(artifacts.iterdir())
 
 
 def test_run_adapter_timeout_kills_forked_process_group(tmp_path: Path) -> None:
@@ -765,6 +934,7 @@ def test_interrupt_terminalizes_and_prevents_replay(tmp_path: Path) -> None:
         lambda _at: values["verified"],
         clock=lambda: NOW,
         adapter_launcher=interrupt,
+        package_preflight=_successful_package_preflight(values["verified"]),
         require_root_owned_parent=False,
         require_root_owned_adapter=False,
     )
@@ -782,6 +952,7 @@ def test_interrupt_terminalizes_and_prevents_replay(tmp_path: Path) -> None:
             lambda _at: values["verified"],
             clock=lambda: NOW,
             adapter_launcher=interrupt,
+            package_preflight=_successful_package_preflight(values["verified"]),
             require_root_owned_parent=False,
             require_root_owned_adapter=False,
         )
@@ -810,6 +981,7 @@ def test_adapter_tamper_and_partial_state_block_before_launch(tmp_path: Path) ->
             lambda _at: values["verified"],
             clock=lambda: NOW,
             adapter_launcher=launch,
+            package_preflight=_successful_package_preflight(values["verified"]),
             require_root_owned_parent=False,
             require_root_owned_adapter=False,
         )
@@ -828,6 +1000,7 @@ def test_adapter_tamper_and_partial_state_block_before_launch(tmp_path: Path) ->
             lambda _at: values["verified"],
             clock=lambda: NOW,
             adapter_launcher=launch,
+            package_preflight=_successful_package_preflight(values["verified"]),
             require_root_owned_parent=False,
             require_root_owned_adapter=False,
         )
