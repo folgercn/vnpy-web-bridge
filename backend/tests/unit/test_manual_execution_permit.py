@@ -471,6 +471,7 @@ def test_foreign_key_domain_enumeration_covers_all_commodity_key_sources(
 
     assert enumerated == {
         "commodity_simnow_trusted_public_keys_json",
+        "commodity_baseline_execution_permit_trusted_keyring_path",
         "commodity_c_fast_shadow_trusted_public_keys_json",
         "commodity_c_fast_execution_quality_runtime_admission_trusted_keyring_path",
         "commodity_c_fast_simnow_execution_permit_trusted_keyring_path",
@@ -482,6 +483,7 @@ def test_foreign_key_domain_enumeration_covers_all_commodity_key_sources(
 @pytest.mark.parametrize(
     "keyring_field",
     (
+        "commodity_baseline_execution_permit_trusted_keyring_path",
         "commodity_c_fast_execution_quality_runtime_admission_trusted_keyring_path",
         "commodity_c_fast_simnow_execution_permit_trusted_keyring_path",
         "commodity_c_fast_simnow_research_acceptance_trusted_keyring_path",
