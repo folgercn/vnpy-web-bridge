@@ -48,6 +48,27 @@ from app.services.commodity_c_fast_fee_binding_trust import (
 MAX_CHAIN_ENTRIES = 10_000
 SourceFacts = TypeVar("SourceFacts", bound=PnlSourceFactsBaseDTO)
 
+# Observation/event timestamps embedded in source facts. Validity boundaries
+# such as statement expiry and key not-after are deliberately excluded: they
+# may be later than the ledger entry without representing future observations.
+_SOURCE_CUTOFF_FIELDS = frozenset(
+    {
+        "as_of_at_utc",
+        "captured_at_utc",
+        "completed_at_utc",
+        "execution_captured_at_utc",
+        "issued_at_utc",
+        "previewed_at_utc",
+        "received_at",
+        "received_at_utc",
+        "started_at_utc",
+        "terminal_completed_at_utc",
+        "trade_at_utc",
+        "valuation_at_utc",
+        "verified_at_utc",
+    }
+)
+
 DERIVATION_RULES: dict[str, tuple[str, str]] = {
     "SIGNED_EXACT_TARGET_MARKS": (
         "cfast-theoretical-observed-virtual-fill-pnl-v2",
@@ -818,6 +839,10 @@ def build_four_layer_pnl_entry(
         plan_hash=plan_hash,
         valuation_day=valuation_day,
     )
+    _verify_created_at_covers_source_cutoffs(
+        created_at_utc=created_at_utc,
+        sources=sources,
+    )
 
     theoretical = _build_theoretical_layer(theoretical_facts)
     fee_adjusted = _build_fee_layer(
@@ -1446,6 +1471,43 @@ def _verify_source_identity(
         )
         if actual != expected:
             raise CFastPnlLedgerError("SOURCE_IDENTITY_MISMATCH")
+
+
+def _verify_created_at_covers_source_cutoffs(
+    *,
+    created_at_utc: str,
+    sources: tuple[PnlSourceFactsBaseDTO, ...],
+) -> None:
+    """Reject entries timestamped before any embedded observation cutoff."""
+
+    created_at = datetime.fromisoformat(created_at_utc.replace("Z", "+00:00"))
+    pending: list[Any] = [
+        source.model_dump(mode="python") for source in sources
+    ]
+    while pending:
+        value = pending.pop()
+        if isinstance(value, Mapping):
+            for field, item in value.items():
+                if field in _SOURCE_CUTOFF_FIELDS and item is not None:
+                    cutoff = (
+                        item
+                        if isinstance(item, datetime)
+                        else datetime.fromisoformat(
+                            str(item).replace("Z", "+00:00")
+                        )
+                    )
+                    if cutoff > created_at:
+                        raise CFastPnlLedgerError(
+                            "LEDGER_CREATED_AT_PRECEDES_SOURCE_CUTOFF"
+                        )
+                if isinstance(item, (Mapping, Sequence)) and not isinstance(
+                    item, (str, bytes, bytearray)
+                ):
+                    pending.append(item)
+        elif isinstance(value, Sequence) and not isinstance(
+            value, (str, bytes, bytearray)
+        ):
+            pending.extend(value)
 
 
 def _source_cutoffs(

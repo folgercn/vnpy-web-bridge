@@ -721,6 +721,30 @@ def test_happy_path_is_deterministic_and_fresh_source_bound() -> None:
         assert layer.lineage.source_artifact_sha256 == facts_hash
 
 
+@pytest.mark.parametrize(
+    "source_name",
+    ["theoretical", "fee", "execution", "actual"],
+)
+def test_build_rejects_created_at_before_any_source_cutoff(
+    source_name: str,
+) -> None:
+    payloads = source_inputs(as_of_at_utc="2026-09-02T08:01:00Z")
+    payloads[source_name]["as_of_at_utc"] = "2026-09-02T08:02:00Z"
+
+    assert_error(
+        "LEDGER_CREATED_AT_PRECEDES_SOURCE_CUTOFF",
+        build,
+        created_at="2026-09-02T08:01:59Z",
+        payloads=payloads,
+    )
+
+
+def test_build_allows_created_at_equal_to_latest_source_cutoff() -> None:
+    entry = build(created_at="2026-09-02T08:02:00Z")
+
+    assert entry.created_at_utc.isoformat() == "2026-09-02T08:02:00+00:00"
+
+
 def test_reload_fresh_replay_rejects_self_hashed_derivation_substitution() -> (
     None
 ):

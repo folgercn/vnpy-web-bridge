@@ -1659,6 +1659,23 @@ def test_append_only_fee_correction_counts_terminal_gross_once(
     )
     correction_sources = source_inputs(plan_hash=plan_hash)
     correction_sources["actual"] = v5.model_dump(mode="json")
+    with pytest.raises(CFastPnlLedgerError) as premature_error:
+        build(
+            sequence=2,
+            previous=primary.entry_hash,
+            created_at="2026-09-02T08:03:59Z",
+            payloads=correction_sources,
+            plan_hash=plan_hash,
+            fee_binding_trust_context=context,
+            economic_counting_state=(
+                "NON_COUNTING_FEE_BINDING_CORRECTION"
+            ),
+            supersedes_entry_hash=primary.entry_hash,
+        )
+    assert premature_error.value.code == (
+        "LEDGER_CREATED_AT_PRECEDES_SOURCE_CUTOFF"
+    )
+
     correction = build(
         sequence=2,
         previous=primary.entry_hash,
