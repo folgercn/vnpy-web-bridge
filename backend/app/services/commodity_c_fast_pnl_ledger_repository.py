@@ -26,6 +26,9 @@ from app.services.commodity_c_fast_pnl_ledger import (
     reload_and_verify_four_layer_pnl_entry,
     verify_four_layer_pnl_chain,
 )
+from app.services.commodity_c_fast_fee_binding_trust import (
+    FeeBindingTrustContext,
+)
 
 
 MAX_ENTRY_BYTES = 8 * 1024 * 1024
@@ -112,6 +115,32 @@ SOURCE_ADAPTER_BINDINGS = (
         ),
         amount_authority="GROSS_AND_SLIPPAGE_REPLAYED_FEES_AND_NET_UNBOUND",
     ),
+    CommodityCFastPnlSourceAdapterBindingDTO(
+        adapter_id="cfast-simnow-settled-session-archive-replay-v1",
+        layer_kind="ACTUAL_SIMNOW_CALIBRATION_PNL",
+        source_schema_version=(
+            "commodity_c_fast_actual_simnow_settled_archive_facts_v1"
+        ),
+        source_kind=(
+            "SIMNOW_SETTLED_SESSION_ARCHIVE_RAW_TRADE_MARK_REPLAY_FEES_UNBOUND"
+        ),
+        verification_rule=(
+            "FRESH_REPLAY_SETTLED_SESSION_RAW_TRADES_MARKS_MULTIPLIERS_FEES_UNBOUND"
+        ),
+        amount_authority="GROSS_AND_SLIPPAGE_REPLAYED_FEES_AND_NET_UNBOUND",
+    ),
+    CommodityCFastPnlSourceAdapterBindingDTO(
+        adapter_id="cfast-simnow-fee-statement-replay-v5",
+        layer_kind="ACTUAL_SIMNOW_CALIBRATION_PNL",
+        source_schema_version="commodity_c_fast_actual_simnow_facts_v5",
+        source_kind=(
+            "SIMNOW_SESSION_ARCHIVE_RAW_TRADE_MARK_REPLAY_FEE_STATEMENT_BOUND"
+        ),
+        verification_rule=(
+            "FRESH_REPLAY_EXACT_ARCHIVE_TRADES_AND_SIGNED_FEE_STATEMENT"
+        ),
+        amount_authority=("GROSS_OFFICIAL_BROKER_ALL_IN_AND_NET_FRESH_REPLAYED"),
+    ),
 )
 
 
@@ -134,7 +163,13 @@ def canonical_json_line(payload: Mapping[str, Any]) -> bytes:
 class CommodityCFastPnlLedgerRepository:
     """Create-only filesystem repository for one four-layer PnL ledger."""
 
-    def __init__(self, root: Path | str, ledger_id: str) -> None:
+    def __init__(
+        self,
+        root: Path | str,
+        ledger_id: str,
+        *,
+        fee_binding_trust_context: FeeBindingTrustContext | None = None,
+    ) -> None:
         if LEDGER_ID_PATTERN.fullmatch(ledger_id) is None:
             raise CFastPnlLedgerRepositoryError("REPOSITORY_LEDGER_ID_INVALID")
         self.root = Path(root)
@@ -142,14 +177,21 @@ class CommodityCFastPnlLedgerRepository:
         self.ledger_path = self.root / ledger_id
         self.entries_path = self.ledger_path / "entries"
         self.lock_path = self.ledger_path / ".append.lock"
+        self.fee_binding_trust_context = fee_binding_trust_context
 
     @classmethod
     def open_or_create(
         cls,
         root: Path | str,
         ledger_id: str,
+        *,
+        fee_binding_trust_context: FeeBindingTrustContext | None = None,
     ) -> "CommodityCFastPnlLedgerRepository":
-        repository = cls(root, ledger_id)
+        repository = cls(
+            root,
+            ledger_id,
+            fee_binding_trust_context=fee_binding_trust_context,
+        )
         repository._ensure_directories()
         with repository._locked() as locked:
             entries_descriptor, _, _ = locked
@@ -165,8 +207,14 @@ class CommodityCFastPnlLedgerRepository:
         cls,
         root: Path | str,
         ledger_id: str,
+        *,
+        fee_binding_trust_context: FeeBindingTrustContext | None = None,
     ) -> "CommodityCFastPnlLedgerRepository":
-        repository = cls(root, ledger_id)
+        repository = cls(
+            root,
+            ledger_id,
+            fee_binding_trust_context=fee_binding_trust_context,
+        )
         repository._validate_directories()
         with repository._locked() as locked:
             entries_descriptor, _, _ = locked
@@ -182,7 +230,10 @@ class CommodityCFastPnlLedgerRepository:
         payload: Mapping[str, Any],
     ) -> PnlLedgerAppendResult:
         try:
-            candidate = reload_and_verify_four_layer_pnl_entry(payload)
+            candidate = reload_and_verify_four_layer_pnl_entry(
+                payload,
+                fee_binding_trust_context=(self.fee_binding_trust_context),
+            )
         except CFastPnlLedgerError as exc:
             raise CFastPnlLedgerRepositoryError(
                 f"REPOSITORY_ENTRY_REJECTED:{exc.code}"
@@ -214,7 +265,8 @@ class CommodityCFastPnlLedgerRepository:
             self._validate_next_entry(entries, candidate)
             try:
                 verify_four_layer_pnl_chain(
-                    [entry.model_dump(mode="json") for entry in (*entries, candidate)]
+                    [entry.model_dump(mode="json") for entry in (*entries, candidate)],
+                    fee_binding_trust_context=(self.fee_binding_trust_context),
                 )
             except CFastPnlLedgerError as exc:
                 raise CFastPnlLedgerRepositoryError(
@@ -275,7 +327,8 @@ class CommodityCFastPnlLedgerRepository:
         entries = self.entries()
         try:
             return verify_four_layer_pnl_chain(
-                [entry.model_dump(mode="json") for entry in entries]
+                [entry.model_dump(mode="json") for entry in entries],
+                fee_binding_trust_context=(self.fee_binding_trust_context),
             )
         except CFastPnlLedgerError as exc:
             raise CFastPnlLedgerRepositoryError(
@@ -284,8 +337,15 @@ class CommodityCFastPnlLedgerRepository:
 
     def export(self) -> CommodityCFastPnlLedgerRepositoryExportDTO:
         entries = self.entries()
-        built = _build_repository_export(entries, self.ledger_id)
-        return reload_and_verify_repository_export(built.model_dump(mode="json"))
+        built = _build_repository_export(
+            entries,
+            self.ledger_id,
+            fee_binding_trust_context=self.fee_binding_trust_context,
+        )
+        return reload_and_verify_repository_export(
+            built.model_dump(mode="json"),
+            fee_binding_trust_context=self.fee_binding_trust_context,
+        )
 
     def export_json_bytes(self) -> bytes:
         return canonical_json_line(self.export().model_dump(mode="json"))
@@ -313,6 +373,8 @@ class CommodityCFastPnlLedgerRepository:
             f"`{audit.actual_fact_entry_count}`\n"
             f"- 有 archive fresh-replay Actual gross/slippage 的记录数："
             f"`{audit.actual_gross_replayed_entry_count}`\n"
+            f"- 有完整权威 fee statement 并发布 net 的记录数："
+            f"`{audit.actual_net_fee_bound_entry_count}`\n"
             f"- 审计状态：`{audit.audit_state}`\n"
             f"- Export SHA256：`{exported.export_sha256}`\n\n"
             "## Source adapters\n\n"
@@ -323,9 +385,12 @@ class CommodityCFastPnlLedgerRepository:
             "- `external_genesis_anchor_state="
             "NOT_PROVIDED_STRUCTURE_ONLY`。\n"
             "- `external_tip_anchor_state=NOT_PROVIDED_STRUCTURE_ONLY`。\n"
-            "- v4 只从外部 raw/terminal/chain-tip pins 绑定的 FULL_FILL COMPLETE "
-            "terminal archive 重放 gross/slippage；"
-            "当前 archive 没有权威 fee statement，fees 固定 UNBOUND，net 固定 null。\n"
+            "- v4 缺 fee statement 时仍固定 UNBOUND/net null；v5 只有在独立 "
+            "Ed25519 fee domain、exact archive/trade join 与完整规则全部通过时，"
+            "才发布 official、broker/customer、all-in 与 net。\n"
+            "- 已 append 的 settled UNBOUND terminal 只能通过显式 "
+            "`NON_COUNTING_FEE_BINDING_CORRECTION` 与 `supersedes_entry_hash` "
+            "追加 fee；原 entry 不覆盖，terminal gross 只计一次。\n"
             "- `countable_forward=false`，`authority_granted=false`，"
             "`dispatch_allowed=false`，`replacement_allowed=false`，"
             "`production_allowed=false`。\n"
@@ -564,7 +629,8 @@ class CommodityCFastPnlLedgerRepository:
         )
         try:
             verify_four_layer_pnl_chain(
-                [entry.model_dump(mode="json") for entry in entries]
+                [entry.model_dump(mode="json") for entry in entries],
+                fee_binding_trust_context=(self.fee_binding_trust_context),
             )
         except CFastPnlLedgerError as exc:
             raise CFastPnlLedgerRepositoryError(
@@ -689,7 +755,8 @@ class CommodityCFastPnlLedgerRepository:
         self._validate_next_entry(entries, candidate)
         try:
             verify_four_layer_pnl_chain(
-                [entry.model_dump(mode="json") for entry in (*entries, candidate)]
+                [entry.model_dump(mode="json") for entry in (*entries, candidate)],
+                fee_binding_trust_context=(self.fee_binding_trust_context),
             )
         except CFastPnlLedgerError as exc:
             raise CFastPnlLedgerRepositoryError(
@@ -740,7 +807,8 @@ class CommodityCFastPnlLedgerRepository:
         if entries:
             try:
                 verify_four_layer_pnl_chain(
-                    [entry.model_dump(mode="json") for entry in entries]
+                    [entry.model_dump(mode="json") for entry in entries],
+                    fee_binding_trust_context=(self.fee_binding_trust_context),
                 )
             except CFastPnlLedgerError as exc:
                 raise CFastPnlLedgerRepositoryError(
@@ -773,7 +841,10 @@ class CommodityCFastPnlLedgerRepository:
         if not isinstance(payload, dict):
             raise CFastPnlLedgerRepositoryError("REPOSITORY_ENTRY_JSON_INVALID")
         try:
-            entry = reload_and_verify_four_layer_pnl_entry(payload)
+            entry = reload_and_verify_four_layer_pnl_entry(
+                payload,
+                fee_binding_trust_context=(self.fee_binding_trust_context),
+            )
         except CFastPnlLedgerError as exc:
             raise CFastPnlLedgerRepositoryError(
                 f"REPOSITORY_ENTRY_INVALID:{exc.code}"
@@ -923,6 +994,8 @@ class CommodityCFastPnlLedgerRepository:
 
 def reload_and_verify_repository_export(
     payload_or_raw: Mapping[str, Any] | bytes,
+    *,
+    fee_binding_trust_context: FeeBindingTrustContext | None = None,
 ) -> CommodityCFastPnlLedgerRepositoryExportDTO:
     if isinstance(payload_or_raw, bytes):
         if not 0 < len(payload_or_raw) <= MAX_EXPORT_BYTES:
@@ -961,7 +1034,8 @@ def reload_and_verify_repository_export(
         raise CFastPnlLedgerRepositoryError("REPOSITORY_EXPORT_DTO_INVALID") from exc
     try:
         fresh_audit = verify_four_layer_pnl_chain(
-            [entry.model_dump(mode="json") for entry in reloaded.entries]
+            [entry.model_dump(mode="json") for entry in reloaded.entries],
+            fee_binding_trust_context=fee_binding_trust_context,
         )
     except CFastPnlLedgerError as exc:
         raise CFastPnlLedgerRepositoryError(
@@ -975,6 +1049,7 @@ def reload_and_verify_repository_export(
         tuple(reloaded.entries),
         reloaded.ledger_id,
         fresh_audit=fresh_audit,
+        fee_binding_trust_context=fee_binding_trust_context,
     )
     if expected != reloaded:
         raise CFastPnlLedgerRepositoryError("REPOSITORY_EXPORT_FRESH_REPLAY_MISMATCH")
@@ -986,6 +1061,7 @@ def _build_repository_export(
     ledger_id: str,
     *,
     fresh_audit: CommodityCFastPnlLedgerAuditDTO | None = None,
+    fee_binding_trust_context: FeeBindingTrustContext | None = None,
 ) -> CommodityCFastPnlLedgerRepositoryExportDTO:
     if not entries:
         raise CFastPnlLedgerRepositoryError("REPOSITORY_EMPTY")
@@ -994,7 +1070,8 @@ def _build_repository_export(
     if fresh_audit is None:
         try:
             fresh_audit = verify_four_layer_pnl_chain(
-                [entry.model_dump(mode="json") for entry in entries]
+                [entry.model_dump(mode="json") for entry in entries],
+                fee_binding_trust_context=fee_binding_trust_context,
             )
         except CFastPnlLedgerError as exc:
             raise CFastPnlLedgerRepositoryError(

@@ -4469,14 +4469,25 @@ def test_c_fast_terminal_archive_contains_fresh_replay_actual_inputs(
     archive = service._load_c_fast_terminal_archive(preview["session_id"])
     assert archive is not None
     execution = archive["execution"]
+    linearization = execution["terminal_publication_linearization"]
+    assert linearization["state"] == (
+        "CREATE_ONLY_PUBLISHED_UNDER_EVENT_LOCK"
+    )
+    assert linearization["event_scope"] == (
+        "ORDER_AND_TRADE_CALLBACK_MUTATIONS"
+    )
+    assert execution["terminal_guard"][
+        "order_trade_event_generation"
+    ] == linearization["event_generation"]
     raw = execution["terminal_raw_facts"]
-    assert raw["schema_version"] == "commodity_c_fast_terminal_raw_facts_v2"
+    assert raw["schema_version"] == "commodity_c_fast_terminal_raw_facts_v3"
     assert raw["scope"] == "C_FAST_SESSION_PLUS_FINAL_POSITIONS"
     assert raw["orders"]
     assert all(
         set(row)
         == {
             "vt_orderid",
+            "gateway_name",
             "reference",
             "vt_symbol",
             "direction",
@@ -4491,6 +4502,7 @@ def test_c_fast_terminal_archive_contains_fresh_replay_actual_inputs(
         == {
             "vt_tradeid",
             "vt_orderid",
+            "gateway_name",
             "reference",
             "vt_symbol",
             "direction",
@@ -5131,6 +5143,300 @@ def test_c_fast_terminal_guard_rejects_net_neutral_external_facts(
     assert not service._c_fast_terminal_archive_path(
         preview["session_id"]
     ).exists()
+
+
+def test_c_fast_terminal_guard_rejects_plan_reference_trade_without_child_join(
+    tmp_path: Path,
+) -> None:
+    service, rpc, snapshot, _ = prepare_c_fast_shakedown(tmp_path)
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    service.start_c_fast_shakedown(
+        preview["plan_hash"],
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+    assert service.current_plan is not None
+    ag = next(row for row in snapshot.targets if row.product == "ag")
+    rpc.positions = [
+        position("ag", ag.target_quantity, contract_month="2612")
+    ]
+    rpc.orders = []
+    rpc.trades = fills_for_submitted(service.current_plan)
+    rpc.trades.append(
+        {
+            **rpc.trades[0],
+            "vt_tradeid": "CTP.PLAN-REFERENCE-UNMATCHED",
+            "tradeid": "PLAN-REFERENCE-UNMATCHED",
+            "vt_orderid": "CTP.NOT-A-SUBMITTED-CHILD",
+            "orderid": "NOT-A-SUBMITTED-CHILD",
+        }
+    )
+
+    with pytest.raises(CommoditySimNowSafetyError):
+        service.auto_candidate_shakedown_advance()
+
+    assert service.current_plan is not None
+    guard = service.current_plan["halt"]["terminal_guard"]
+    assert "UNMATCHED_PLAN_SCOPE_TRADE_FACTS" in guard["blockers"]
+    assert guard["unmatched_plan_scope_trade_facts"] == [
+        {
+            "fact_key": "CTP:CTP.PLAN-REFERENCE-UNMATCHED",
+            "vt_tradeid": "CTP.PLAN-REFERENCE-UNMATCHED",
+            "vt_orderid": "CTP.NOT-A-SUBMITTED-CHILD",
+            "reference": rpc.trades[0]["reference"],
+            "match_count": 0,
+            "inconsistent_match_count": 0,
+        }
+    ]
+    assert not service._c_fast_terminal_archive_path(
+        preview["session_id"]
+    ).exists()
+
+
+def test_c_fast_terminal_settlement_rejects_non_full_complete_and_fractional_volume(
+    tmp_path: Path,
+) -> None:
+    service, _, _, _ = prepare_c_fast_shakedown(tmp_path)
+    execution = {
+        "expected_volume": 2,
+        "filled_volume": 1,
+        "orders": [
+            {
+                "trade_evidence_state": "SETTLED_COMPLETE",
+                "order_status": "cancelled",
+                "trade_count": 1,
+            }
+        ],
+    }
+
+    with pytest.raises(
+        CommoditySimNowStateError,
+        match="HALTED_RECONCILED",
+    ):
+        service._c_fast_terminal_settlement(
+            {"previous_positions": {}},
+            execution,
+            terminal_status="COMPLETE",
+            exact_trade_position_replay=True,
+        )
+
+    with pytest.raises(CommoditySimNowStateError, match="不是有效整数"):
+        service._c_fast_terminal_settlement(
+            {"previous_positions": {}},
+            {**execution, "expected_volume": 1.5},
+            terminal_status="HALTED_RECONCILED",
+            exact_trade_position_replay=True,
+        )
+
+
+@pytest.mark.parametrize(
+    "drift",
+    ["late_trade", "late_order", "late_position", "unresolved_intent"],
+)
+def test_c_fast_terminal_prepublish_barrier_rejects_post_guard_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    drift: str,
+) -> None:
+    service, rpc, snapshot, _ = prepare_c_fast_shakedown(tmp_path)
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    service.start_c_fast_shakedown(
+        preview["plan_hash"],
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+    assert service.current_plan is not None
+    ag = next(row for row in snapshot.targets if row.product == "ag")
+    rpc.positions = [
+        position("ag", ag.target_quantity, contract_month="2612")
+    ]
+    rpc.orders = []
+    rpc.trades = fills_for_submitted(service.current_plan)
+    barrier = service._c_fast_terminal_prepublish_barrier
+
+    def inject_before_archive_publish(
+        plan,
+        *,
+        terminal_guard,
+        terminal_raw_facts,
+    ):
+        submitted = plan["submitted"]["open"][0]
+        if drift == "late_trade":
+            rpc.trades.append(
+                {
+                    **rpc.trades[0],
+                    "vt_tradeid": "CTP.LATE-MATCHING-TRADE",
+                    "tradeid": "LATE-MATCHING-TRADE",
+                }
+            )
+        elif drift == "late_order":
+            rpc.orders.append(
+                {
+                    **submitted,
+                    "status": "cancelled",
+                }
+            )
+        elif drift == "late_position":
+            rpc.positions = [
+                position(
+                    "ag",
+                    ag.target_quantity + 1,
+                    contract_month="2612",
+                )
+            ]
+        else:
+            plan["send_intents"]["open"][0]["intent_status"] = "PENDING"
+        return barrier(
+            plan,
+            terminal_guard=terminal_guard,
+            terminal_raw_facts=terminal_raw_facts,
+        )
+
+    monkeypatch.setattr(
+        service,
+        "_c_fast_terminal_prepublish_barrier",
+        inject_before_archive_publish,
+    )
+
+    with pytest.raises(CommoditySimNowSafetyError):
+        service.auto_candidate_shakedown_advance()
+
+    assert service.current_plan is not None
+    assert service.current_plan["status"] == "HALTED_RECONCILE_REQUIRED"
+    assert "terminal_prepublish_barrier" in service.current_plan["halt"], (
+        service.current_plan["halt"]
+    )
+    barrier = service.current_plan["halt"][
+        "terminal_prepublish_barrier"
+    ]
+    assert barrier["state"] == "BLOCKED"
+    expected_blocker = (
+        "SEND_INTENT_DRIFT_BEFORE_ARCHIVE_PUBLISH"
+        if drift == "unresolved_intent"
+        else "TERMINAL_FACTS_DRIFTED_BEFORE_ARCHIVE_PUBLISH"
+    )
+    assert expected_blocker in barrier["blockers"]
+    assert not service._c_fast_terminal_archive_path(
+        preview["session_id"]
+    ).exists()
+    assert service._active_state_path().exists()
+
+
+def test_c_fast_terminal_publication_replays_callback_after_barrier_return(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, rpc, snapshot, _ = prepare_c_fast_shakedown(tmp_path)
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    service.start_c_fast_shakedown(
+        preview["plan_hash"],
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+    assert service.current_plan is not None
+    ag = next(row for row in snapshot.targets if row.product == "ag")
+    rpc.positions = [
+        position("ag", ag.target_quantity, contract_month="2612")
+    ]
+    rpc.orders = []
+    rpc.trades = fills_for_submitted(service.current_plan)
+    barrier = service._c_fast_terminal_prepublish_barrier
+    calls = 0
+
+    def inject_after_barrier(*args, **kwargs):
+        nonlocal calls
+        result = barrier(*args, **kwargs)
+        calls += 1
+        if calls == 1:
+            rpc.apply_trade_callback(
+                {
+                    **rpc.trades[0],
+                    "vt_tradeid": "CTP.LATE-AFTER-BARRIER",
+                    "tradeid": "LATE-AFTER-BARRIER",
+                }
+            )
+        return result
+
+    monkeypatch.setattr(
+        service,
+        "_c_fast_terminal_prepublish_barrier",
+        inject_after_barrier,
+    )
+
+    with pytest.raises(CommoditySimNowSafetyError):
+        service.auto_candidate_shakedown_advance()
+
+    assert calls == 1
+    assert service.current_plan is not None
+    assert service.current_plan["status"] == "HALTED_RECONCILE_REQUIRED"
+    assert not service._c_fast_terminal_archive_path(
+        preview["session_id"]
+    ).exists()
+    assert service._active_state_path().exists()
+
+
+def test_c_fast_terminal_publication_generation_drift_never_publishes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, rpc, snapshot, _ = prepare_c_fast_shakedown(tmp_path)
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    service.start_c_fast_shakedown(
+        preview["plan_hash"],
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+    assert service.current_plan is not None
+    ag = next(row for row in snapshot.targets if row.product == "ag")
+    rpc.positions = [
+        position("ag", ag.target_quantity, contract_month="2612")
+    ]
+    rpc.orders = []
+    rpc.trades = fills_for_submitted(service.current_plan)
+    publish = rpc.publish_c_fast_terminal_archive
+
+    def drift_before_lock(capability, ticket, **kwargs):
+        rpc.apply_trade_callback(
+            {
+                **rpc.trades[0],
+                "vt_tradeid": "CTP.GENERATION-DRIFT",
+                "tradeid": "GENERATION-DRIFT",
+            }
+        )
+        return publish(capability, ticket, **kwargs)
+
+    monkeypatch.setattr(
+        rpc,
+        "publish_c_fast_terminal_archive",
+        drift_before_lock,
+    )
+
+    with pytest.raises(CommoditySimNowSafetyError):
+        service.auto_candidate_shakedown_advance()
+
+    assert service.current_plan is not None
+    assert service.current_plan["status"] == "HALTED_RECONCILE_REQUIRED"
+    evidence = service.current_plan["halt"][
+        "terminal_publication_linearization"
+    ]
+    assert evidence["state"] == "BLOCKED"
+    assert evidence["blocker"] == "TERMINAL_PUBLICATION_GENERATION_DRIFT"
+    assert not service._c_fast_terminal_archive_path(
+        preview["session_id"]
+    ).exists()
+    assert service._active_state_path().exists()
 
 
 def test_c_fast_terminal_guard_rejects_order_after_first_snapshot(

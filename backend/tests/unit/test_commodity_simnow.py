@@ -6,6 +6,7 @@ import hashlib
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from threading import RLock
 from typing import Any
 
 import pytest
@@ -60,6 +61,69 @@ class FakeRpc:
         self.get_orders_error: Exception | None = None
         self.get_positions_error: Exception | None = None
         self.last_connected_at = "fake-generation-A"
+        self._event_lock = RLock()
+        self._event_generation = 0
+        self._terminal_owner: object | None = None
+        self._terminal_capability: object | None = None
+
+    def bind_c_fast_terminal_publication_owner(
+        self,
+        owner: object,
+    ) -> object:
+        with self._event_lock:
+            if self._terminal_owner is not owner:
+                self._terminal_capability = object()
+            self._terminal_owner = owner
+            if self._terminal_capability is None:
+                self._terminal_capability = object()
+            return self._terminal_capability
+
+    def prepare_c_fast_terminal_publication(
+        self,
+        capability: object,
+        *,
+        session_id: str,
+    ) -> dict[str, Any]:
+        with self._event_lock:
+            if capability is not self._terminal_capability:
+                raise ValueError("invalid terminal capability")
+            return {
+                "capability": capability,
+                "session_id": session_id,
+                "generation": self._event_generation,
+                "used": False,
+            }
+
+    def publish_c_fast_terminal_archive(
+        self,
+        capability: object,
+        ticket: dict[str, Any],
+        *,
+        session_id: str,
+        publisher,
+    ) -> Any:
+        with self._event_lock:
+            if (
+                capability is not self._terminal_capability
+                or ticket.get("capability") is not capability
+                or ticket.get("session_id") != session_id
+                or ticket.get("used") is True
+            ):
+                raise ValueError("invalid terminal ticket")
+            ticket["used"] = True
+            if ticket.get("generation") != self._event_generation:
+                raise ValueError("terminal callback generation drift")
+            return publisher(self._event_generation)
+
+    def apply_trade_callback(self, trade: dict[str, Any]) -> None:
+        with self._event_lock:
+            self.trades.append(trade)
+            self._event_generation += 1
+
+    def apply_order_callback(self, order: dict[str, Any]) -> None:
+        with self._event_lock:
+            self.orders.append(order)
+            self._event_generation += 1
 
     def status(self, *, probe: bool = False) -> dict[str, Any]:
         return {

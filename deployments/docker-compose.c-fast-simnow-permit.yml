@@ -12,6 +12,9 @@ services:
         bind:
           create_host_path: false
       - type: bind
+        # Shared read-only public-key root for Research, Acceptance,
+        # Execution, execution-quality admission and fee-statement keyrings.
+        # Exact in-container file paths and raw pins come from ../.env.
         source: ${COMMODITY_C_FAST_SIMNOW_KEYRINGS_HOST_DIR:?required_for_explicit_c_fast_simnow_mount}
         target: /run/c-fast-simnow/keyrings
         read_only: true

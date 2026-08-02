@@ -33,6 +33,7 @@ from app.core.errors import (
     CommoditySimNowDisabledError,
     CommoditySimNowSafetyError,
     CommoditySimNowStateError,
+    RpcCallError,
 )
 from app.schemas.commodity_c_fast_execution_permit import (
     CommodityCFastSimNowExecutionPermitDTO,
@@ -320,6 +321,26 @@ class CommoditySimNowService:
         self._c_fast_test_double_capability = object()
         self._baseline_trade_capabilities: dict[TradeService, object] = {}
         self._baseline_test_double_capability = object()
+        self._c_fast_terminal_publication_capability: object | None = None
+        self._c_fast_terminal_publication_capability_error: str | None = None
+        terminal_publication_binder = getattr(
+            self.rpc,
+            "bind_c_fast_terminal_publication_owner",
+            None,
+        )
+        if callable(terminal_publication_binder):
+            try:
+                self._c_fast_terminal_publication_capability = (
+                    terminal_publication_binder(self)
+                )
+            except Exception as exc:
+                self._c_fast_terminal_publication_capability_error = (
+                    exc.__class__.__name__
+                )
+        else:
+            self._c_fast_terminal_publication_capability_error = (
+                "CAPABILITY_BINDER_UNAVAILABLE"
+            )
         self._task: asyncio.Task[Any] | None = None
         self._state_load_error: str | None = None
         self._c_fast_authority_persist_error: str | None = None
@@ -1974,6 +1995,14 @@ class CommoditySimNowService:
                     "HALTED_RECONCILE_REQUIRED"
                     if (
                         halt.get("terminal_guard", {}).get("state")
+                        == "BLOCKED"
+                        or halt.get(
+                            "terminal_prepublish_barrier", {}
+                        ).get("state")
+                        == "BLOCKED"
+                        or halt.get(
+                            "terminal_publication_linearization", {}
+                        ).get("state")
                         == "BLOCKED"
                     )
                     else status_before_reconcile
@@ -4114,6 +4143,7 @@ class CommoditySimNowService:
                 }
             )
             plan["status"] = "SUBMISSION_OUTCOME_UNKNOWN"
+            halt["submission_outcome_unknown_observed"] = True
             self._persist_active_plan()
             return None
         expected = (
@@ -4841,71 +4871,230 @@ class CommoditySimNowService:
                 )
             session = archived
         else:
-            terminal_guard = self._c_fast_terminal_guard(
-                plan, reconciliation=reconciliation
-            )
-            terminal_execution_snapshot = (
-                terminal_guard.pop(
-                    "_terminal_execution_snapshot"
+            _, terminal_guard, terminal_raw_facts = (
+                self._build_c_fast_terminal_session_candidate(
+                    plan,
+                    status=status,
+                    reconciliation=reconciliation,
+                    event_generation=None,
                 )
             )
-            terminal_raw_facts = terminal_guard.pop(
-                "_terminal_raw_fact_snapshot"
+            self._c_fast_terminal_prepublish_barrier(
+                plan,
+                terminal_guard=terminal_guard,
+                terminal_raw_facts=terminal_raw_facts,
             )
-            self._verify_c_fast_archive_predecessor(
-                plan.get("previous_terminal_checksum")
+            prepare = getattr(
+                self.rpc,
+                "prepare_c_fast_terminal_publication",
+                None,
             )
-            session = self._load_c_fast_shakedown_state()
+            publish = getattr(
+                self.rpc,
+                "publish_c_fast_terminal_archive",
+                None,
+            )
+            capability = self._c_fast_terminal_publication_capability
             if (
-                not session
-                or session.get("session_id") != session_id
+                capability is None
+                or not callable(prepare)
+                or not callable(publish)
             ):
-                raise CommoditySimNowStateError(
-                    "C_FAST 测试终态会话证据缺失"
+                self._c_fast_terminal_publication_fail_closed(
+                    plan,
+                    blocker="TERMINAL_PUBLICATION_CAPABILITY_UNAVAILABLE",
+                    detail={
+                        "capability_error": (
+                            self._c_fast_terminal_publication_capability_error
+                        )
+                    },
                 )
-            execution_snapshot = terminal_execution_snapshot
-            archived_submitted = {
-                phase: [
-                    self._c_fast_archive_submitted_projection(row)
-                    for row in plan.get("submitted", {}).get(phase, [])
-                ]
-                for phase in ("close", "open")
-            }
-            execution = {
-                "schema_version":
-                "commodity_c_fast_simnow_shakedown_evidence_v1",
-                "started_at_utc": plan.get("started_at_utc"),
-                "submitted": archived_submitted,
-                "send_intents": plan.get("send_intents", {}),
-                "halt": plan.get("halt"),
-                "reconciliation":
-                reconciliation
-                or (plan.get("execution") or {}).get("reconciliation"),
-                "final_positions":
-                terminal_guard["final_positions"],
-                "terminal_guard": terminal_guard,
-                "terminal_raw_facts": terminal_raw_facts,
-                "execution_snapshot":
-                execution_snapshot,
-                "pnl": self._c_fast_pnl(
-                    plan, execution=execution_snapshot
-                ),
-            }
-            execution["state_checksum"] = _sha256_json(execution)
-            session["status"] = status
-            session["completed_at_utc"] = (
-                self.clock().astimezone(timezone.utc).isoformat()
-            )
-            session["execution"] = execution
-            session["terminal_checksum"] = (
-                self._c_fast_shakedown_terminal_checksum(session)
-            )
-            self._archive_c_fast_terminal_session(session)
+            try:
+                ticket = prepare(
+                    capability,
+                    session_id=session_id,
+                )
+            except Exception as exc:
+                self._c_fast_terminal_publication_fail_closed(
+                    plan,
+                    blocker="TERMINAL_PUBLICATION_TICKET_FAILED",
+                    detail={"error_type": exc.__class__.__name__},
+                )
+
+            def publish_under_event_lock(
+                event_generation: int,
+            ) -> dict[str, Any]:
+                final_session, final_guard, final_raw_facts = (
+                    self._build_c_fast_terminal_session_candidate(
+                        plan,
+                        status=status,
+                        reconciliation=reconciliation,
+                        event_generation=event_generation,
+                    )
+                )
+                self._c_fast_terminal_prepublish_barrier(
+                    plan,
+                    terminal_guard=final_guard,
+                    terminal_raw_facts=final_raw_facts,
+                )
+                self._archive_c_fast_terminal_session(final_session)
+                return final_session
+
+            try:
+                session = publish(
+                    capability,
+                    ticket,
+                    session_id=session_id,
+                    publisher=publish_under_event_lock,
+                )
+            except (CommoditySimNowSafetyError, CommoditySimNowStateError):
+                raise
+            except (RpcCallError, TypeError, ValueError) as exc:
+                detail = (
+                    dict(exc.detail)
+                    if isinstance(exc, RpcCallError)
+                    else {"error_type": exc.__class__.__name__}
+                )
+                self._c_fast_terminal_publication_fail_closed(
+                    plan,
+                    blocker="TERMINAL_PUBLICATION_GENERATION_DRIFT",
+                    detail=detail,
+                )
+            if not isinstance(session, dict):
+                self._c_fast_terminal_publication_fail_closed(
+                    plan,
+                    blocker="TERMINAL_PUBLICATION_RESULT_INVALID",
+                    detail={},
+                )
         self._save_c_fast_shakedown_state(session)
         self._active_state_path().unlink(missing_ok=True)
         self.c_fast_shakedown_auto_dispatch_authorized = False
         if self.current_plan is plan:
             self.current_plan = None
+
+    def _build_c_fast_terminal_session_candidate(
+        self,
+        plan: dict[str, Any],
+        *,
+        status: str,
+        reconciliation: dict[str, Any] | None,
+        event_generation: int | None,
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+        terminal_guard = self._c_fast_terminal_guard(
+            plan,
+            reconciliation=reconciliation,
+            terminal_status=status,
+        )
+        terminal_execution_snapshot = terminal_guard.pop(
+            "_terminal_execution_snapshot"
+        )
+        terminal_raw_facts = terminal_guard.pop(
+            "_terminal_raw_fact_snapshot"
+        )
+        terminal_settlement = terminal_guard.pop(
+            "_terminal_settlement"
+        )
+        self._verify_c_fast_archive_predecessor(
+            plan.get("previous_terminal_checksum")
+        )
+        session = self._load_c_fast_shakedown_state()
+        if (
+            not session
+            or session.get("session_id")
+            != plan.get("c_fast_shakedown_session_id")
+        ):
+            raise CommoditySimNowStateError(
+                "C_FAST 测试终态会话证据缺失"
+            )
+        archived_submitted = {
+            phase: [
+                self._c_fast_archive_submitted_projection(row)
+                for row in plan.get("submitted", {}).get(phase, [])
+            ]
+            for phase in ("close", "open")
+        }
+        if event_generation is not None:
+            terminal_guard.update(
+                {
+                    "order_trade_event_generation": event_generation,
+                    "terminal_publication_linearization_state": (
+                        "FINAL_REPLAY_UNDER_ORDER_TRADE_EVENT_LOCK"
+                    ),
+                }
+            )
+        execution = {
+            "schema_version": (
+                "commodity_c_fast_simnow_shakedown_evidence_v1"
+            ),
+            "started_at_utc": plan.get("started_at_utc"),
+            "submitted": archived_submitted,
+            "send_intents": plan.get("send_intents", {}),
+            "halt": plan.get("halt"),
+            "reconciliation": reconciliation
+            or (plan.get("execution") or {}).get("reconciliation"),
+            "final_positions": terminal_guard["final_positions"],
+            "terminal_guard": terminal_guard,
+            "terminal_raw_facts": terminal_raw_facts,
+            "execution_snapshot": terminal_execution_snapshot,
+            "settlement": terminal_settlement,
+            "pnl": self._c_fast_pnl(
+                plan,
+                execution=terminal_execution_snapshot,
+            ),
+        }
+        if event_generation is not None:
+            execution["terminal_publication_linearization"] = {
+                "schema_version": (
+                    "commodity_c_fast_terminal_publication_linearization_v1"
+                ),
+                "state": "CREATE_ONLY_PUBLISHED_UNDER_EVENT_LOCK",
+                "event_scope": "ORDER_AND_TRADE_CALLBACK_MUTATIONS",
+                "event_generation": event_generation,
+                "remote_rpc_timing_acceptance_state": (
+                    "PENDING_REAL_RUNTIME_ACCEPTANCE_ISSUE_152"
+                ),
+            }
+        execution["state_checksum"] = _sha256_json(execution)
+        session["status"] = status
+        session["completed_at_utc"] = (
+            self.clock().astimezone(timezone.utc).isoformat()
+        )
+        session["execution"] = execution
+        session["terminal_checksum"] = (
+            self._c_fast_shakedown_terminal_checksum(session)
+        )
+        return session, terminal_guard, terminal_raw_facts
+
+    def _c_fast_terminal_publication_fail_closed(
+        self,
+        plan: dict[str, Any],
+        *,
+        blocker: str,
+        detail: dict[str, Any],
+    ) -> None:
+        evidence = {
+            "state": "BLOCKED",
+            "blocker": blocker,
+            "detail": detail,
+            "remote_rpc_timing_acceptance_state": (
+                "PENDING_REAL_RUNTIME_ACCEPTANCE_ISSUE_152"
+            ),
+        }
+        halt = plan.setdefault("halt", {})
+        halt.update(
+            {
+                "reason": "c_fast_terminal_publication_linearization_failed",
+                "recovery_blocker": blocker,
+                "terminal_publication_linearization": evidence,
+            }
+        )
+        plan["status"] = "HALTED_RECONCILE_REQUIRED"
+        self._revoke_auto_dispatch("c_fast_shakedown")
+        self._persist_active_plan_during_halt(halt)
+        raise CommoditySimNowSafetyError(
+            "C_FAST 终态 publication 无法与 order/trade callback 线性化",
+            detail=evidence,
+        )
 
     @staticmethod
     def _c_fast_archive_integral_volume(
@@ -4960,6 +5149,7 @@ class CommoditySimNowService:
             "vt_orderid": str(
                 row.get("vt_orderid") or row.get("orderid") or ""
             ),
+            "gateway_name": self._row_gateway(row),
             "reference": str(row.get("reference") or ""),
             "vt_symbol": self._row_vt_symbol(row),
             "direction": _normalize_direction(row.get("direction")),
@@ -5007,6 +5197,7 @@ class CommoditySimNowService:
             "vt_orderid": str(
                 row.get("vt_orderid") or row.get("orderid") or ""
             ),
+            "gateway_name": self._row_gateway(row),
             "reference": str(row.get("reference") or ""),
             "vt_symbol": self._row_vt_symbol(row),
             "direction": _normalize_direction(row.get("direction")),
@@ -5036,6 +5227,7 @@ class CommoditySimNowService:
         plan: dict[str, Any],
         *,
         reconciliation: dict[str, Any] | None,
+        terminal_status: str,
     ) -> dict[str, Any]:
         evidence = reconciliation or (
             plan.get("execution") or {}
@@ -5185,6 +5377,16 @@ class CommoditySimNowService:
             if str(trade.get("reference") or "")
             in unresolved_intent_references
         ]
+        unmatched_plan_scope_trade_facts = sorted(
+            {
+                row["fact_key"]: row
+                for row in [
+                    *first["unmatched_plan_scope_trade_facts"],
+                    *second["unmatched_plan_scope_trade_facts"],
+                ]
+            }.values(),
+            key=lambda row: row["fact_key"],
+        )
         terminal_execution = self._execution_snapshot_from_facts(
             plan,
             second["_raw_orders"],
@@ -5221,6 +5423,8 @@ class CommoditySimNowService:
             blockers.append("NEW_EXTERNAL_TRADE_FACTS")
         if inconsistent_trade_rows:
             blockers.append("INCONSISTENT_SESSION_TRADE_EVIDENCE")
+        if unmatched_plan_scope_trade_facts:
+            blockers.append("UNMATCHED_PLAN_SCOPE_TRADE_FACTS")
         if conflicting_order_identities:
             blockers.append("CONFLICTING_ORDER_IDENTITIES")
         if conflicting_trade_identities:
@@ -5232,6 +5436,8 @@ class CommoditySimNowService:
             or unresolved_intent_trade_facts
         ):
             blockers.append("UNRESOLVED_INTENT_FACTS")
+        if unresolved_intent_references:
+            blockers.append("UNRESOLVED_SEND_INTENTS")
         if not plan.get("terminal_fact_watermark"):
             blockers.append("MISSING_TERMINAL_FACT_WATERMARK")
         captured_at = self.clock().astimezone(timezone.utc).isoformat()
@@ -5262,6 +5468,8 @@ class CommoditySimNowService:
             new_external_trade_facts,
             "inconsistent_trade_rows":
             inconsistent_trade_rows,
+            "unmatched_plan_scope_trade_facts":
+            unmatched_plan_scope_trade_facts,
             "conflicting_order_identities":
             conflicting_order_identities,
             "conflicting_trade_identities":
@@ -5272,9 +5480,17 @@ class CommoditySimNowService:
             unresolved_intent_order_facts,
             "unresolved_intent_trade_facts":
             unresolved_intent_trade_facts,
+            "unresolved_intent_references":
+            sorted(unresolved_intent_references),
+            "send_intent_state_sha256": _sha256_json(
+                plan.get("send_intents", {})
+            ),
             "first_snapshot": first["evidence"],
             "second_snapshot": second["evidence"],
             "facts_stable": facts_stable,
+            "terminal_snapshot_fingerprint": second[
+                "snapshot_fingerprint"
+            ],
             "state": "VALID" if not blockers else "BLOCKED",
             "blockers": blockers,
         }
@@ -5296,9 +5512,42 @@ class CommoditySimNowService:
                 "C_FAST 终态 guard 校验失败",
                 detail=guard,
             )
-        guard["_terminal_execution_snapshot"] = (
-            terminal_execution
+        replay_orders: list[dict[str, Any]] = []
+        for row in terminal_execution.get("orders", []):
+            filled_volume = self._c_fast_archive_integral_volume(
+                row.get("filled_volume"),
+                field="execution filled volume",
+                allow_zero=True,
+            )
+            if filled_volume:
+                replay_orders.append(
+                    {
+                        "vt_symbol": str(row["vt_symbol"]),
+                        "direction": str(row["direction"]),
+                        "volume": filled_volume,
+                    }
+                )
+        trade_implied_positions = self._apply_orders(
+            plan.get("previous_positions", {}), replay_orders
         )
+        exact_trade_position_replay = (
+            trade_implied_positions == final_positions
+        )
+        if exact_trade_position_replay:
+            terminal_execution = self._execution_snapshot_from_facts(
+                plan,
+                second["_raw_orders"],
+                second["_raw_trades"],
+                settled=True,
+            )
+        settlement = self._c_fast_terminal_settlement(
+            plan,
+            terminal_execution,
+            terminal_status=terminal_status,
+            exact_trade_position_replay=exact_trade_position_replay,
+        )
+        guard["_terminal_execution_snapshot"] = terminal_execution
+        guard["_terminal_settlement"] = settlement
         session_orders = [
             self._c_fast_archive_order_projection(row)
             for row in second["_raw_orders"]
@@ -5331,7 +5580,7 @@ class CommoditySimNowService:
             for row in submitted_rows
         }
         guard["_terminal_raw_fact_snapshot"] = {
-            "schema_version": "commodity_c_fast_terminal_raw_facts_v2",
+            "schema_version": "commodity_c_fast_terminal_raw_facts_v3",
             "scope": "C_FAST_SESSION_PLUS_FINAL_POSITIONS",
             "account_sha256": account_hash_after,
             "orders": session_orders,
@@ -5349,6 +5598,207 @@ class CommoditySimNowService:
             "captured_at_utc": second["evidence"]["captured_at_utc"],
         }
         return guard
+
+    def _c_fast_terminal_settlement(
+        self,
+        plan: dict[str, Any],
+        execution: dict[str, Any],
+        *,
+        terminal_status: str,
+        exact_trade_position_replay: bool,
+    ) -> dict[str, Any]:
+        if terminal_status not in {"COMPLETE", "HALTED_RECONCILED"}:
+            raise CommoditySimNowStateError(
+                "C_FAST 非终态计划不能发布 settled PnL"
+            )
+        expected = self._c_fast_archive_integral_volume(
+            execution.get("expected_volume"),
+            field="settlement expected volume",
+            allow_zero=True,
+        )
+        filled = self._c_fast_archive_integral_volume(
+            execution.get("filled_volume"),
+            field="settlement filled volume",
+            allow_zero=True,
+        )
+        rows = execution.get("orders", [])
+        actual_trade_count = sum(
+            self._c_fast_archive_integral_volume(
+                row.get("trade_count"),
+                field="settlement trade count",
+                allow_zero=True,
+            )
+            for row in rows
+        )
+        states = {
+            str(row.get("trade_evidence_state") or "")
+            for row in rows
+        }
+        statuses = {
+            _normalize_status(row.get("order_status"))
+            for row in rows
+        }
+        if filled > expected:
+            raise CommoditySimNowStateError(
+                "C_FAST 终态成交证据不能确定性结算"
+            )
+        base = {
+            "schema_version": "commodity_c_fast_terminal_settlement_v1",
+            "terminal_status": terminal_status,
+            "expected_volume": expected,
+            "filled_volume": filled,
+            "actual_trade_count": actual_trade_count,
+            "pre_trade_positions": dict(
+                sorted(plan.get("previous_positions", {}).items())
+            ),
+        }
+        if not exact_trade_position_replay:
+            return {
+                **base,
+                "state": "UNAVAILABLE_PENDING_EXACT_TRADE_POSITION_REPLAY",
+                "basis": "TERMINAL_POSITION_NOT_REPLAYED_FROM_JOINED_TRADES",
+                "order_outcome": None,
+                "unknown_outcome_settlement_state": "NOT_APPLICABLE",
+            }
+        if "INCONSISTENT" in states or any(
+            state not in {"COMPLETE", "SETTLED_COMPLETE"}
+            for state in states
+        ):
+            raise CommoditySimNowStateError(
+                "C_FAST 终态成交证据不能确定性结算"
+            )
+        unknown_observed = bool(
+            plan.get("halt", {}).get(
+                "submission_outcome_unknown_observed"
+            )
+            or any(
+                intent.get("intent_status") == "EVIDENCE_RECOVERED"
+                for phase in ("close", "open")
+                for intent in plan.get("send_intents", {}).get(phase, [])
+            )
+        )
+        if filled == expected and states <= {"COMPLETE"}:
+            outcome = "FULL_FILL"
+        elif filled > 0:
+            outcome = "PARTIAL_FILL"
+        elif "rejected" in statuses:
+            outcome = "REJECTED"
+        elif unknown_observed:
+            outcome = "TIMEOUT_OR_RESULT_UNKNOWN"
+        else:
+            outcome = "UNFILLED_CANCELLED"
+        if outcome != "FULL_FILL" and terminal_status != "HALTED_RECONCILED":
+            raise CommoditySimNowStateError(
+                "C_FAST 非 full settlement 必须来自 HALTED_RECONCILED 终态"
+            )
+        return {
+            **base,
+            "state": "SETTLED_COMPLETE",
+            "basis": (
+                "STABLE_TERMINAL_RAW_FACTS_POSITION_RECONCILIATION_"
+                "NO_ACTIVE_ORDER_OR_UNRESOLVED_INTENT"
+            ),
+            "order_outcome": outcome,
+            "unknown_outcome_settlement_state": (
+                "SETTLED_BY_TERMINAL_RAW_FACTS_AND_POSITION_RECONCILIATION"
+                if outcome == "TIMEOUT_OR_RESULT_UNKNOWN"
+                else "NOT_APPLICABLE"
+            ),
+        }
+
+    def _c_fast_terminal_prepublish_barrier(
+        self,
+        plan: dict[str, Any],
+        *,
+        terminal_guard: dict[str, Any],
+        terminal_raw_facts: dict[str, Any],
+    ) -> None:
+        """Fail closed if terminal facts drift after guard replay.
+
+        The real RPC callback-generation barrier remains a #152 runtime
+        acceptance item.  Until then, two stable reads plus an immediate
+        pre-publish comparison prevent known callback/order/position drift
+        from being written into the create-only terminal archive.
+        """
+
+        first = self._c_fast_terminal_fact_snapshot(plan)
+        second = self._c_fast_terminal_fact_snapshot(plan)
+        expected_fingerprint = str(
+            terminal_guard.get("terminal_snapshot_fingerprint") or ""
+        )
+        expected_intent_hash = str(
+            terminal_guard.get("send_intent_state_sha256") or ""
+        )
+        current_intent_hash = _sha256_json(
+            plan.get("send_intents", {})
+        )
+        expected_hashes = {
+            "orders_hash": terminal_raw_facts.get("all_orders_sha256"),
+            "trades_hash": terminal_raw_facts.get("all_trades_sha256"),
+            "positions_hash": terminal_raw_facts.get("all_positions_sha256"),
+        }
+        blockers: list[str] = []
+        if (
+            not expected_fingerprint
+            or first["snapshot_fingerprint"] != expected_fingerprint
+            or second["snapshot_fingerprint"] != expected_fingerprint
+        ):
+            blockers.append("TERMINAL_FACTS_DRIFTED_BEFORE_ARCHIVE_PUBLISH")
+        if any(
+            first["evidence"].get(field) != value
+            or second["evidence"].get(field) != value
+            for field, value in expected_hashes.items()
+        ):
+            blockers.append("TERMINAL_RAW_HASH_DRIFT_BEFORE_ARCHIVE_PUBLISH")
+        if (
+            not expected_intent_hash
+            or current_intent_hash != expected_intent_hash
+            or terminal_guard.get("unresolved_intent_references")
+        ):
+            blockers.append("SEND_INTENT_DRIFT_BEFORE_ARCHIVE_PUBLISH")
+        if not blockers:
+            return
+        barrier = {
+            "captured_at_utc": self.clock().astimezone(timezone.utc).isoformat(),
+            "state": "BLOCKED",
+            "blockers": blockers,
+            "expected_terminal_snapshot_fingerprint": expected_fingerprint,
+            "first_terminal_snapshot_fingerprint": first[
+                "snapshot_fingerprint"
+            ],
+            "second_terminal_snapshot_fingerprint": second[
+                "snapshot_fingerprint"
+            ],
+            "expected_raw_hashes": expected_hashes,
+            "first_raw_hashes": {
+                field: first["evidence"].get(field)
+                for field in expected_hashes
+            },
+            "second_raw_hashes": {
+                field: second["evidence"].get(field)
+                for field in expected_hashes
+            },
+            "expected_send_intent_state_sha256": expected_intent_hash,
+            "observed_send_intent_state_sha256": current_intent_hash,
+            "rpc_callback_barrier_state": (
+                "PENDING_REAL_RUNTIME_ACCEPTANCE_ISSUE_152"
+            ),
+        }
+        halt = plan.setdefault("halt", {})
+        halt.update(
+            {
+                "reason": "c_fast_terminal_prepublish_barrier_failed",
+                "recovery_blocker": blockers[0],
+                "terminal_prepublish_barrier": barrier,
+            }
+        )
+        plan["status"] = "HALTED_RECONCILE_REQUIRED"
+        self._revoke_auto_dispatch("c_fast_shakedown")
+        self._persist_active_plan_during_halt(halt)
+        raise CommoditySimNowSafetyError(
+            "C_FAST 终态事实在 archive 发布前发生漂移",
+            detail=barrier,
+        )
 
     def _c_fast_terminal_fact_watermark(
         self,
@@ -5509,6 +5959,11 @@ class CommoditySimNowService:
                 plan, orders, trades
             )
         )
+        unmatched_plan_scope_trade_facts = (
+            self._c_fast_unmatched_plan_scope_trade_facts(
+                plan, trades
+            )
+        )
         outside_scope = self._c_fast_outside_scope_positions(
             raw_positions
         )
@@ -5620,6 +6075,8 @@ class CommoditySimNowService:
             conflicting_trade_identities,
             "untrusted_intent_facts":
             untrusted_intent_facts,
+            "unmatched_plan_scope_trade_facts":
+            unmatched_plan_scope_trade_facts,
             "new_external_order_facts":
             new_external_order_facts,
             "new_external_trade_facts":
@@ -6172,6 +6629,81 @@ class CommoditySimNowService:
                 state == "INCONSISTENT" for state in states
             )
         )
+
+    def _c_fast_unmatched_plan_scope_trade_facts(
+        self,
+        plan: dict[str, Any],
+        trades: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        submitted = [
+            row
+            for phase in ("close", "open")
+            for row in plan.get("submitted", {}).get(phase, [])
+        ]
+        plan_references = {
+            str(row.get("reference") or "")
+            for phase in ("close", "open")
+            for rows in (
+                plan.get(f"{phase}_orders", []),
+                plan.get("send_intents", {}).get(phase, []),
+                plan.get("submitted", {}).get(phase, []),
+            )
+            for row in rows
+        }
+        plan_references.discard("")
+        submitted_order_ids = {
+            alias
+            for row in submitted
+            for order_id in self._order_ids(row)
+            for alias in _order_id_aliases(order_id)
+        }
+        result: list[dict[str, Any]] = []
+        for trade in trades:
+            reference = str(trade.get("reference") or "")
+            trade_order_ids = {
+                alias
+                for order_id in self._order_ids(trade)
+                for alias in _order_id_aliases(order_id)
+            }
+            if not (
+                reference in plan_references
+                or trade_order_ids.intersection(submitted_order_ids)
+            ):
+                continue
+            states = [
+                self._trade_child_match_state(trade, row)
+                for row in submitted
+            ]
+            if (
+                sum(state == "MATCH" for state in states) == 1
+                and not any(
+                    state == "INCONSISTENT" for state in states
+                )
+            ):
+                continue
+            result.append(
+                {
+                    "fact_key": self._c_fast_trade_fact_key(trade),
+                    "vt_tradeid": str(
+                        trade.get("vt_tradeid")
+                        or trade.get("tradeid")
+                        or "unknown"
+                    ),
+                    "vt_orderid": str(
+                        trade.get("vt_orderid")
+                        or trade.get("orderid")
+                        or "unknown"
+                    ),
+                    "reference": reference,
+                    "match_count": sum(
+                        state == "MATCH" for state in states
+                    ),
+                    "inconsistent_match_count": sum(
+                        state == "INCONSISTENT" for state in states
+                    ),
+                }
+            )
+        return sorted(result, key=lambda row: row["fact_key"])
 
     def _c_fast_shakedown_state_path(self) -> Path:
         return Path(
@@ -6965,17 +7497,23 @@ class CommoditySimNowService:
             str(row.get("trade_evidence_state") or "INCOMPLETE")
             for row in execution.get("orders", [])
         }
+        settled_non_full = (
+            execution.get("settlement_state") == "SETTLED_COMPLETE"
+        )
         inconsistent_child = "INCONSISTENT" in child_evidence_states
         incomplete_child = any(
-            state != "COMPLETE"
+            state not in {"COMPLETE", "SETTLED_COMPLETE"}
             for state in child_evidence_states
         )
         recovery_blocker = str(
             plan.get("halt", {}).get("recovery_blocker") or ""
         )
         if (
-            filled_volume != expected_volume
-            or incomplete_child
+            (
+                filled_volume != expected_volume
+                or incomplete_child
+            )
+            and not settled_non_full
             or recovery_blocker
             in {
                 "UNATTRIBUTED_FIXED_SCOPE_ACTIVE_ORDERS",
@@ -7068,11 +7606,17 @@ class CommoditySimNowService:
             self.clock().astimezone(timezone.utc).isoformat(),
             "countable_forward": False,
             "production_allowed": False,
-            "mark_source": "CURRENT_L1_MID",
+            "mark_source": (
+                "CURRENT_L1_MID"
+                if filled_volume
+                else "NOT_REQUIRED_ZERO_FILL"
+            ),
             "mark_state":
             "UNAVAILABLE"
             if unmarked_fill
-            else "AVAILABLE",
+            else "AVAILABLE"
+            if filled_volume
+            else "NOT_REQUIRED_ZERO_FILL",
             "mark_prices": mark_by_symbol,
             "mark_evidence": mark_evidence,
             "mark_errors": mark_errors,
@@ -7081,14 +7625,20 @@ class CommoditySimNowService:
             "execution_mark_to_market_pnl_cny":
             None
             if unmarked_fill
-            else cashflow + marked_inventory,
+            else cashflow + marked_inventory
+            if filled_volume
+            else 0.0,
             "adverse_slippage_cny": execution.get("slippage_cny"),
             "fees_state": "UNBOUND_NOT_ASSUMED_ZERO",
             "fees_cny": None,
             "net_pnl_state": "UNAVAILABLE_UNTIL_FEES_BOUND",
             "execution_snapshot_available":
             execution.get("available", False),
-            "trade_evidence_state": "COMPLETE",
+            "trade_evidence_state": (
+                "SETTLED_COMPLETE"
+                if settled_non_full
+                else "COMPLETE"
+            ),
             "execution_captured_at_utc":
             execution.get("captured_at_utc"),
             "expected_volume": expected_volume,
@@ -8156,6 +8706,7 @@ class CommoditySimNowService:
                         else "UNRESOLVED_SEND_INTENTS"
                     )
                     plan["status"] = "SUBMISSION_OUTCOME_UNKNOWN"
+                    halt["submission_outcome_unknown_observed"] = True
                     halt.update(
                         {
                             "phase": submission_recovery_phase,
@@ -8214,6 +8765,7 @@ class CommoditySimNowService:
                     )
                     if external_active:
                         plan["status"] = "SUBMISSION_OUTCOME_UNKNOWN"
+                        halt["submission_outcome_unknown_observed"] = True
                         halt.update(
                             {
                                 "phase": submission_recovery_phase,
@@ -8328,6 +8880,7 @@ class CommoditySimNowService:
                             )
                             return result
                         plan["status"] = "SUBMISSION_OUTCOME_UNKNOWN"
+                        halt["submission_outcome_unknown_observed"] = True
                         halt.update(
                             {
                                 "phase": submission_recovery_phase,
@@ -8895,6 +9448,7 @@ class CommoditySimNowService:
                     )
                 except Exception as exc:
                     plan["status"] = "SUBMISSION_OUTCOME_UNKNOWN"
+                    halt["submission_outcome_unknown_observed"] = True
                     halt["previous_status"] = f"SUBMITTING_{phase.upper()}"
                     halt["last_rpc_error_type"] = exc.__class__.__name__
                     halt["last_rpc_error_at_utc"] = self.clock().astimezone(timezone.utc).isoformat()
@@ -10061,6 +10615,8 @@ class CommoditySimNowService:
         plan: dict[str, Any],
         orders: list[dict[str, Any]],
         trades: list[dict[str, Any]],
+        *,
+        settled: bool = False,
     ) -> dict[str, Any]:
         order_by_id: dict[str, dict[str, Any]] = {}
         for order in orders:
@@ -10181,6 +10737,8 @@ class CommoditySimNowService:
                             or fill_volume > expected
                             else "COMPLETE"
                             if fill_volume == expected
+                            else "SETTLED_COMPLETE"
+                            if settled
                             else "INCOMPLETE"
                         ),
                         "decision_price": decision_price,
@@ -10218,7 +10776,16 @@ class CommoditySimNowService:
             "average_adverse_slippage_ticks": (
                 adverse_slippage_ticks_volume / filled_volume if filled_volume else None
             ),
-            "slippage_cny": slippage_cny if filled_volume else None,
+            "slippage_cny": (
+                slippage_cny if filled_volume or settled else None
+            ),
+            "settlement_state": (
+                "SETTLED_COMPLETE"
+                if settled and filled_volume != expected_volume
+                else "FULL_COMPLETE"
+                if settled
+                else "NOT_SETTLED"
+            ),
             "orders": rows,
         }
 

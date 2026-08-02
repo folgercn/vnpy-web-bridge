@@ -56,6 +56,35 @@ RETRYABLE_RPC_METHODS = {
 }
 
 
+class _CFastTerminalPublicationCapability:
+    __slots__ = ("service", "owner")
+
+    def __init__(self, service: "VnpyRpcService", owner: object) -> None:
+        self.service = service
+        self.owner = owner
+
+    def __reduce__(self) -> object:
+        raise TypeError("C_FAST terminal publication capability is process-local")
+
+
+class _CFastTerminalPublicationTicket:
+    __slots__ = ("capability", "event_generation", "session_id", "used")
+
+    def __init__(
+        self,
+        capability: _CFastTerminalPublicationCapability,
+        session_id: str,
+        event_generation: int,
+    ) -> None:
+        self.capability = capability
+        self.session_id = session_id
+        self.event_generation = event_generation
+        self.used = False
+
+    def __reduce__(self) -> object:
+        raise TypeError("C_FAST terminal publication ticket is process-local")
+
+
 class BridgeRpcClient(RpcClient):  # type: ignore[misc,valid-type]
     def __init__(self, service: "VnpyRpcService") -> None:
         super().__init__()
@@ -75,6 +104,12 @@ class VnpyRpcService:
         self.loop: asyncio.AbstractEventLoop | None = None
         self._call_lock = RLock()
         self._subscription_lock = RLock()
+        self._order_trade_event_lock = RLock()
+        self._order_trade_event_generation = 0
+        self._c_fast_terminal_publication_capability: (
+            _CFastTerminalPublicationCapability | None
+        ) = None
+        self._c_fast_terminal_publication_active = False
         self._market_subscriptions: set[str] = set()
         self._readonly_tick_listeners: list[Callable[[Mapping[str, Any]], object]] = []
         self._last_probe_at = 0.0
@@ -101,6 +136,111 @@ class VnpyRpcService:
                 raise ValueError("readonly Tick listeners must bind before start")
             if listener not in self._readonly_tick_listeners:
                 self._readonly_tick_listeners.append(listener)
+
+    def bind_c_fast_terminal_publication_owner(
+        self,
+        owner: object,
+    ) -> object:
+        """Bind one process-local owner to the narrow terminal publisher."""
+
+        if owner is None:
+            raise ValueError("C_FAST terminal publication owner is required")
+        with self._order_trade_event_lock:
+            existing = self._c_fast_terminal_publication_capability
+            if existing is not None:
+                if existing.owner is not owner:
+                    raise ValueError(
+                        "C_FAST terminal publication owner is already bound"
+                    )
+                return existing
+            capability = _CFastTerminalPublicationCapability(self, owner)
+            self._c_fast_terminal_publication_capability = capability
+            return capability
+
+    def prepare_c_fast_terminal_publication(
+        self,
+        capability: object,
+        *,
+        session_id: str,
+    ) -> object:
+        """Pin callback generation for one named terminal session."""
+
+        with self._order_trade_event_lock:
+            trusted = self._require_c_fast_terminal_capability(capability)
+            if (
+                not session_id.startswith("cfast-shakedown-")
+                or len(session_id) != len("cfast-shakedown-") + 32
+            ):
+                raise ValueError("C_FAST terminal publication session is invalid")
+            return _CFastTerminalPublicationTicket(
+                trusted,
+                session_id,
+                self._order_trade_event_generation,
+            )
+
+    def publish_c_fast_terminal_archive(
+        self,
+        capability: object,
+        ticket: object,
+        *,
+        session_id: str,
+        publisher: Callable[[int], Any],
+    ) -> Any:
+        """Run final replay and create-only publish under the event lock.
+
+        This capability is deliberately limited to the single bound C_FAST
+        owner and a one-shot session ticket.  It does not expose the lock or
+        authorize any RPC/trading operation.
+        """
+
+        with self._order_trade_event_lock:
+            trusted = self._require_c_fast_terminal_capability(capability)
+            if (
+                not isinstance(ticket, _CFastTerminalPublicationTicket)
+                or ticket.capability is not trusted
+                or ticket.session_id != session_id
+                or ticket.used
+            ):
+                raise ValueError("C_FAST terminal publication ticket is invalid")
+            ticket.used = True
+            if ticket.event_generation != self._order_trade_event_generation:
+                raise RpcCallError(
+                    "C_FAST callback generation drifted before publication",
+                    detail={
+                        "expected_event_generation": ticket.event_generation,
+                        "observed_event_generation": (
+                            self._order_trade_event_generation
+                        ),
+                    },
+                )
+            if self._c_fast_terminal_publication_active:
+                raise RpcCallError("C_FAST terminal publication is already active")
+            if not callable(publisher):
+                raise ValueError("C_FAST terminal publisher is required")
+            self._c_fast_terminal_publication_active = True
+            generation = self._order_trade_event_generation
+            try:
+                result = publisher(generation)
+                if self._order_trade_event_generation != generation:
+                    raise RpcCallError(
+                        "C_FAST callback generation changed inside publication"
+                    )
+                return result
+            finally:
+                self._c_fast_terminal_publication_active = False
+
+    def _require_c_fast_terminal_capability(
+        self,
+        capability: object,
+    ) -> _CFastTerminalPublicationCapability:
+        trusted = self._c_fast_terminal_publication_capability
+        if (
+            trusted is None
+            or capability is not trusted
+            or trusted.service is not self
+        ):
+            raise ValueError("C_FAST terminal publication capability is invalid")
+        return trusted
 
     def start(self) -> None:
         if self.started:
@@ -405,10 +545,22 @@ class VnpyRpcService:
             memory_store.save_tick(str(vt_symbol), payload)
         elif event_type.startswith(EVENT_ORDER):
             ws_type = "order"
-            memory_store.save_order(payload)
+            with self._order_trade_event_lock:
+                if self._c_fast_terminal_publication_active:
+                    raise RpcCallError(
+                        "order callback attempted reentrant terminal mutation"
+                    )
+                memory_store.save_order(payload)
+                self._order_trade_event_generation += 1
         elif event_type.startswith(EVENT_TRADE):
             ws_type = "trade"
-            memory_store.save_trade(payload)
+            with self._order_trade_event_lock:
+                if self._c_fast_terminal_publication_active:
+                    raise RpcCallError(
+                        "trade callback attempted reentrant terminal mutation"
+                    )
+                memory_store.save_trade(payload)
+                self._order_trade_event_generation += 1
 
         if ws_type and self.loop:
             message = ws_message(ws_type, payload)

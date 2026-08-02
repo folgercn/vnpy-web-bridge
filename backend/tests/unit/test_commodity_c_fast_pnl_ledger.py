@@ -22,6 +22,9 @@ from app.services.commodity_c_fast_pnl_ledger import (
     reload_and_verify_four_layer_pnl_entry,
     verify_four_layer_pnl_chain,
 )
+from app.services.commodity_c_fast_fee_binding_trust import (
+    FeeBindingTrustContext,
+)
 
 
 SNAPSHOT_HASH = "a" * 64
@@ -100,6 +103,7 @@ def verified_actual_source(
     orders = [
         {
             "vt_orderid": row["vt_orderid"],
+            "gateway_name": "CTP",
             "vt_symbol": row["vt_symbol"],
             "direction": row["direction"],
             "offset": row["offset"],
@@ -113,6 +117,7 @@ def verified_actual_source(
         {
             "vt_tradeid": "CTP.T1",
             "vt_orderid": "CTP.1",
+            "gateway_name": "CTP",
             "vt_symbol": "ag2609.SHFE",
             "direction": "long",
             "offset": "open",
@@ -124,6 +129,7 @@ def verified_actual_source(
         {
             "vt_tradeid": "CTP.T2",
             "vt_orderid": "CTP.2",
+            "gateway_name": "CTP",
             "vt_symbol": "cu2609.SHFE",
             "direction": "short",
             "offset": "open",
@@ -188,7 +194,7 @@ def verified_actual_source(
     trades_hash = row_hash(trades)
     positions_hash = row_hash(positions)
     terminal_raw_facts = {
-        "schema_version": "commodity_c_fast_terminal_raw_facts_v2",
+        "schema_version": "commodity_c_fast_terminal_raw_facts_v3",
         "scope": "C_FAST_SESSION_PLUS_FINAL_POSITIONS",
         "account_sha256": "1" * 64,
         "orders": orders,
@@ -220,6 +226,8 @@ def verified_actual_source(
     terminal_guard = {
         "state": "VALID",
         "observed_account_hash": "1" * 64,
+        "gateway_before": "CTP",
+        "gateway_after": "CTP",
         "final_positions": observed_positions,
         "second_snapshot": {
             "orders_hash": orders_hash,
@@ -622,6 +630,9 @@ def build(
     valuation_day: str = "2026-09-02",
     created_at: str = "2026-09-02T08:03:00Z",
     payloads: dict[str, dict[str, Any]] | None = None,
+    fee_binding_trust_context: FeeBindingTrustContext | None = None,
+    economic_counting_state: str = "PRIMARY",
+    supersedes_entry_hash: str | None = None,
 ):
     source = payloads or source_inputs(
         ledger_id=ledger_id,
@@ -643,6 +654,9 @@ def build(
         fee_adjusted_pnl=source["fee"],
         execution_quality_interval_pnl=source["execution"],
         actual_simnow_calibration_pnl=source["actual"],
+        fee_binding_trust_context=fee_binding_trust_context,
+        economic_counting_state=economic_counting_state,
+        supersedes_entry_hash=supersedes_entry_hash,
     )
 
 
@@ -861,6 +875,8 @@ def test_actual_v4_rejects_archive_tamper_and_duplicate_trade_identity() -> (
         ("orders", "vt_orderid", "CTP.external"),
         ("trades", "vt_orderid", "CTP.external"),
         ("trades", "reference", "CFAST:wrong:reference"),
+        ("orders", "gateway_name", "OTHER"),
+        ("trades", "gateway_name", "OTHER"),
         ("orders", "offset", "close"),
         ("trades", "offset", "close"),
         ("orders", "vt_symbol", "zn2609.SHFE"),
@@ -885,7 +901,7 @@ def test_actual_v4_rejects_rehashed_external_or_substituted_leg(
     )
 
 
-def test_actual_v4_allows_blank_trade_reference_but_rejects_order_rejection() -> (
+def test_actual_v4_rejects_blank_trade_reference_and_order_rejection() -> (
     None
 ):
     blank_reference, plan_hash = source_inputs_with_verified_actual()
@@ -894,7 +910,12 @@ def test_actual_v4_allows_blank_trade_reference_but_rejects_order_rejection() ->
         "trades"
     ][0]["reference"] = ""
     rehash_verified_session_archive(blank_actual)
-    assert build(payloads=blank_reference, plan_hash=plan_hash)
+    assert_error(
+        "INVALID_ACTUAL_SOURCE_FACTS",
+        build,
+        payloads=blank_reference,
+        plan_hash=plan_hash,
+    )
 
     rejected, plan_hash = source_inputs_with_verified_actual()
     rejected_actual = rejected["actual"]

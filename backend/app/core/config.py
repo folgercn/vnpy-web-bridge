@@ -201,6 +201,9 @@ class Settings(BaseSettings):
     commodity_c_fast_simnow_research_expected_signer_sha256: str = ""
     commodity_c_fast_simnow_research_acceptance_expected_signer_sha256: str = ""
     commodity_c_fast_simnow_research_artifact_paths_json: str = "{}"
+    commodity_c_fast_fee_statement_trusted_keyring_path: str = ""
+    commodity_c_fast_fee_statement_expected_keyring_raw_sha256: str = ""
+    commodity_c_fast_fee_statement_historical_trust_profiles_json: str = "[]"
     commodity_simnow_delivery_month_cutoff_day: int = Field(default=1, ge=1, le=15)
     commodity_simnow_sc_pre_delivery_cutoff_day: int = Field(default=15, ge=1, le=25)
 

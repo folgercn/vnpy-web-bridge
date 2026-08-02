@@ -10,6 +10,7 @@ import yaml
 
 from app.services.commodity_c_fast_permit_runtime_smoke import (
     FORBIDDEN_SIGNER_NAMES,
+    OFFLINE_OPERATOR_TOOL_NAMES,
     RUNTIME_MODULE_NAMES,
     RUNTIME_SCHEMA_NAMES,
     validate_runtime_packaging,
@@ -20,6 +21,7 @@ DOCKERFILE = ROOT / "Dockerfile"
 COMPOSE_OVERLAY = (
     ROOT / "deployments/docker-compose.c-fast-simnow-permit.yml"
 )
+ENV_EXAMPLE = ROOT / "backend/.env.example"
 
 
 def test_repository_permit_runtime_import_smoke_is_default_off() -> None:
@@ -30,6 +32,9 @@ def test_repository_permit_runtime_import_smoke_is_default_off() -> None:
     )
     assert result["runtime_modules"] == list(RUNTIME_MODULE_NAMES)
     assert result["runtime_schemas"] == list(RUNTIME_SCHEMA_NAMES)
+    assert result["offline_operator_tools"] == list(
+        OFFLINE_OPERATOR_TOOL_NAMES
+    )
     assert result["shakedown_enabled"] is False
     assert result["auto_dispatch_enabled"] is False
     assert result["execution_permit_enabled"] is False
@@ -46,7 +51,7 @@ def test_production_dockerfile_packages_only_exact_verifier_closure() -> None:
         line for line in lines if line.startswith("COPY scripts")
     } == {
         f"COPY scripts/{name} ./scripts/{name}"
-        for name in RUNTIME_MODULE_NAMES
+        for name in (*RUNTIME_MODULE_NAMES, *OFFLINE_OPERATOR_TOOL_NAMES)
     }
     assert {
         line for line in lines if line.startswith("COPY docs/schemas")
@@ -74,6 +79,8 @@ def _isolated_runtime_root(tmp_path: Path) -> Path:
     scripts.mkdir(parents=True)
     schemas.mkdir(parents=True)
     for name in RUNTIME_MODULE_NAMES:
+        shutil.copyfile(ROOT / "scripts" / name, scripts / name)
+    for name in OFFLINE_OPERATOR_TOOL_NAMES:
         shutil.copyfile(ROOT / "scripts" / name, scripts / name)
     for name in RUNTIME_SCHEMA_NAMES:
         shutil.copyfile(ROOT / "docs" / "schemas" / name, schemas / name)
@@ -109,6 +116,7 @@ def test_exact_isolated_image_closure_import_smoke(tmp_path: Path) -> None:
     assert "C_FAST_SIMNOW_PERMIT_RUNTIME_PACKAGED_DEFAULT_OFF" in result.stdout
     assert '"signers_packaged": false' in result.stdout
     assert '"orders_sent": 0' in result.stdout
+    assert "commodity_c_fast_fee_statement_verify.py" in result.stdout
 
 
 def test_isolated_image_smoke_rejects_standalone_signer(tmp_path: Path) -> None:
@@ -153,3 +161,33 @@ def test_mount_overlay_is_explicit_read_only_and_keeps_authority_off() -> None:
         and ":?required_for_explicit_c_fast_simnow_mount}" in volume["source"]
         for volume in volumes
     )
+
+
+def test_fee_keyring_settings_are_documented_and_share_read_only_mount() -> None:
+    env_keys = {
+        line.split("=", 1)[0]
+        for line in ENV_EXAMPLE.read_text(encoding="utf-8").splitlines()
+        if line and not line.startswith("#") and "=" in line
+    }
+    assert {
+        "COMMODITY_C_FAST_FEE_STATEMENT_TRUSTED_KEYRING_PATH",
+        "COMMODITY_C_FAST_FEE_STATEMENT_EXPECTED_KEYRING_RAW_SHA256",
+        "COMMODITY_C_FAST_FEE_STATEMENT_HISTORICAL_TRUST_PROFILES_JSON",
+    } <= env_keys
+
+    payload = yaml.safe_load(COMPOSE_OVERLAY.read_text(encoding="utf-8"))
+    keyring_mount = next(
+        volume
+        for volume in payload["services"]["web-bridge"]["volumes"]
+        if volume["target"] == "/run/c-fast-simnow/keyrings"
+    )
+    assert keyring_mount == {
+        "type": "bind",
+        "source": (
+            "${COMMODITY_C_FAST_SIMNOW_KEYRINGS_HOST_DIR:"
+            "?required_for_explicit_c_fast_simnow_mount}"
+        ),
+        "target": "/run/c-fast-simnow/keyrings",
+        "read_only": True,
+        "bind": {"create_host_path": False},
+    }

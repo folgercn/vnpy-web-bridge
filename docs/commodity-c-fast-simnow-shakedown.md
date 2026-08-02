@@ -191,6 +191,17 @@ hash 稳定，再校验固定范围、精确 expected positions、session 和全
 活动委托均为零；两轮之间发生成交或状态推进时标记
 `UNSTABLE_TERMINAL_SNAPSHOT` 并等待重试。guard 的时间、前后快照 hash 和
 blocker 会写入终态或 halt evidence。
+完成 PnL replay 后、create-only archive 写入前还会执行 pre-publish barrier：
+连续重读两次完整 terminal facts，并与 guard 固定的 snapshot fingerprint、
+orders/trades/positions raw hash、send-intent state 逐项一致。迟到 trade、order、
+position 或 unresolved intent 漂移会保留 active plan，进入
+`HALTED_RECONCILE_REQUIRED`，且不生成 archive。最终 replay、guard 和
+create-only archive publish 还运行在 RPC order/trade callback event lock 内，
+并绑定 prepare/publish 之间的单调 generation 与 process-local、owner-bound、
+one-shot capability；generation 漂移或 publication 期间 reentrant callback
+均 fail closed 且保留 active plan。该 app-level linearization 已完成；Issue #152
+仍负责跨 RPC transport/上游队列边界的真实时序 acceptance，不能由本地锁测试
+替代。
 
 ## PnL 证据
 

@@ -14,6 +14,9 @@ RUNTIME_MODULE_NAMES = (
     "commodity_c_fast_simnow_research_bundle.py",
     "commodity_c_fast_simnow_research_acceptance.py",
 )
+OFFLINE_OPERATOR_TOOL_NAMES = (
+    "commodity_c_fast_fee_statement_verify.py",
+)
 RUNTIME_SCHEMA_NAMES = (
     "commodity-c-fast-simnow-research-bundle-v1.schema.json",
     "commodity-c-fast-simnow-research-bundle-trusted-keys-v1.schema.json",
@@ -69,12 +72,20 @@ def validate_runtime_packaging(
         )
     for path in expected_module_paths:
         _require_regular(path, f"runtime verifier {path.name}")
+    operator_tool_paths = tuple(
+        scripts_root / name for name in OFFLINE_OPERATOR_TOOL_NAMES
+    )
+    for path in operator_tool_paths:
+        _require_regular(path, f"offline operator tool {path.name}")
     signer_paths = tuple(scripts_root / name for name in FORBIDDEN_SIGNER_NAMES)
     if require_signers_absent:
         packaged_python_names = tuple(
             sorted(path.name for path in scripts_root.glob("*.py"))
         )
-        if packaged_python_names != tuple(sorted(RUNTIME_MODULE_NAMES)):
+        expected_python_names = tuple(
+            sorted((*RUNTIME_MODULE_NAMES, *OFFLINE_OPERATOR_TOOL_NAMES))
+        )
+        if packaged_python_names != expected_python_names:
             raise CommodityCFastPermitRuntimePackagingError(
                 "runtime image contains code outside the exact verifier closure"
             )
@@ -156,6 +167,7 @@ def validate_runtime_packaging(
         "status": "C_FAST_SIMNOW_PERMIT_RUNTIME_PACKAGED_DEFAULT_OFF",
         "runtime_modules": list(RUNTIME_MODULE_NAMES),
         "runtime_schemas": list(RUNTIME_SCHEMA_NAMES),
+        "offline_operator_tools": list(OFFLINE_OPERATOR_TOOL_NAMES),
         "signers_packaged": any(path.exists() for path in signer_paths),
         "shakedown_enabled": False,
         "auto_dispatch_enabled": False,

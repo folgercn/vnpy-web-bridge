@@ -110,7 +110,7 @@ def test_append_reopen_audit_and_exports_are_deterministic(
     assert expected_json.endswith(b"\n")
     assert "不可变账本审计报告" in expected_report
     assert "NOT_PROVIDED_STRUCTURE_ONLY" in expected_report
-    assert "当前 archive 没有权威 fee statement" in expected_report
+    assert "v4 缺 fee statement 时仍固定 UNBOUND/net null" in expected_report
 
 
 def test_append_is_create_only_and_idempotent(tmp_path: Path) -> None:
@@ -519,6 +519,8 @@ def test_export_declares_strict_adapters_and_actual_null_boundary(
         "cfast-simnow-not-provided-v1",
         "cfast-simnow-archive-reference-v3",
         "cfast-simnow-session-archive-replay-v4",
+        "cfast-simnow-settled-session-archive-replay-v1",
+        "cfast-simnow-fee-statement-replay-v5",
     ]
     actual = exported.entries[0].actual_simnow_calibration_pnl
     assert actual.actual_state == "FACTS_BOUND"
