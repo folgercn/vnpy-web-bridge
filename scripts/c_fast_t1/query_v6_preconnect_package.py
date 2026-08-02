@@ -160,20 +160,97 @@ def _git_blob(source_root: Path, commit_sha: str, path: str) -> tuple[bytes, int
     return blob.stdout, 0o555 if fields[0] == "100755" else 0o444
 
 
-def _interpreter_identity(python_executable: Path) -> tuple[str, str]:
+def _stable_runtime_file(
+    path: Path,
+    label: str,
+    *,
+    require_root_owned: bool,
+    executable: bool = False,
+) -> tuple[Path, bytes]:
     try:
-        resolved = python_executable.resolve(strict=True)
-        info = resolved.lstat()
-        raw = resolved.read_bytes()
+        resolved = path.resolve(strict=True)
+    except OSError as exc:
+        raise QueryV6PackageError(f"{label} is unavailable") from exc
+    _safe_ancestors(resolved.parent, require_root_owned=require_root_owned)
+    try:
+        path_before = resolved.lstat()
+        descriptor = os.open(
+            resolved,
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+        try:
+            before = os.fstat(descriptor)
+            raw = _read_bounded_descriptor(descriptor, MAX_ARCHIVE_BYTES)
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            repeated = _read_bounded_descriptor(descriptor, MAX_ARCHIVE_BYTES)
+            after = os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+        path_after = resolved.lstat()
+    except OSError as exc:
+        raise QueryV6PackageError(f"{label} is unavailable") from exc
+    allowed = {0} if require_root_owned else {0, os.geteuid()}
+    mode = stat.S_IMODE(path_before.st_mode)
+    if (
+        not stat.S_ISREG(path_before.st_mode)
+        or path_before.st_nlink != 1
+        or path_before.st_uid not in allowed
+        or mode & 0o022
+        or (executable and not mode & 0o111)
+        or len(raw) > MAX_ARCHIVE_BYTES
+        or raw != repeated
+        or len(raw) != before.st_size
+        or _stat_identity(path_before) != _stat_identity(before)
+        or _stat_identity(before) != _stat_identity(after)
+        or _stat_identity(after) != _stat_identity(path_after)
+    ):
+        raise QueryV6PackageError(f"{label} custody is unsafe")
+    return resolved, raw
+
+
+def _interpreter_identity(
+    python_executable: Path,
+    *,
+    require_root_owned: bool = True,
+) -> tuple[str, str]:
+    logical = Path(os.path.abspath(python_executable))
+    _safe_ancestors(logical.parent, require_root_owned=require_root_owned)
+    try:
+        logical_before = logical.lstat()
     except OSError as exc:
         raise QueryV6PackageError("query-v6 Python interpreter is unavailable") from exc
-    if not stat.S_ISREG(info.st_mode) or not raw:
-        raise QueryV6PackageError("query-v6 Python interpreter is unsafe")
-    return str(resolved), _sha256(raw)
+    allowed = {0} if require_root_owned else {0, os.geteuid()}
+    if (
+        not (
+            stat.S_ISREG(logical_before.st_mode) or stat.S_ISLNK(logical_before.st_mode)
+        )
+        or logical_before.st_uid not in allowed
+        or logical_before.st_nlink != 1
+    ):
+        raise QueryV6PackageError("query-v6 Python interpreter custody is unsafe")
+    resolved, raw = _stable_runtime_file(
+        logical,
+        "query-v6 Python interpreter",
+        require_root_owned=require_root_owned,
+        executable=True,
+    )
+    try:
+        logical_after = logical.lstat()
+    except OSError as exc:
+        raise QueryV6PackageError("query-v6 Python interpreter is unavailable") from exc
+    if _stat_identity(logical_before) != _stat_identity(logical_after):
+        raise QueryV6PackageError("query-v6 Python interpreter changed while read")
+    if not stat.S_ISLNK(logical_before.st_mode) and logical != resolved:
+        raise QueryV6PackageError("query-v6 Python interpreter path is unsafe")
+    if not raw:
+        raise QueryV6PackageError("query-v6 Python interpreter custody is unsafe")
+    return str(logical), _sha256(raw)
 
 
 def dependency_closure(
     names: Iterable[str] = DEPENDENCY_NAMES,
+    *,
+    require_root_owned: bool = True,
 ) -> tuple[list[dict[str, str]], str]:
     records: list[dict[str, Any]] = []
     public: list[dict[str, str]] = []
@@ -184,24 +261,50 @@ def dependency_closure(
             raise QueryV6PackageError(f"query-v6 dependency is absent: {name}") from exc
         normalized = distribution.metadata.get("Name", name)
         version = distribution.version
+        distribution_root = Path(distribution.locate_file("")).resolve(strict=True)
+        _safe_ancestors(
+            distribution_root,
+            require_root_owned=require_root_owned,
+        )
         files: list[dict[str, Any]] = []
         for relative in sorted(distribution.files or (), key=lambda item: str(item)):
             path = Path(distribution.locate_file(relative))
             try:
-                info = path.lstat()
-                if stat.S_ISLNK(info.st_mode):
-                    resolved = path.resolve(strict=True)
-                    info = resolved.lstat()
-                    path = resolved
+                logical = Path(os.path.abspath(path))
+                _safe_ancestors(
+                    logical.parent,
+                    require_root_owned=require_root_owned,
+                )
+                unresolved = logical.lstat()
+                resolved = logical.resolve(strict=True)
+                info = resolved.lstat()
                 if not stat.S_ISREG(info.st_mode):
                     continue
-                raw = path.read_bytes()
             except OSError as exc:
                 raise QueryV6PackageError(
                     f"query-v6 dependency file is unavailable: {name}"
                 ) from exc
+            if not (
+                stat.S_ISREG(unresolved.st_mode) or stat.S_ISLNK(unresolved.st_mode)
+            ):
+                continue
+            allowed = {0} if require_root_owned else {0, os.geteuid()}
+            if unresolved.st_uid not in allowed or unresolved.st_nlink != 1:
+                raise QueryV6PackageError(
+                    f"query-v6 dependency file custody is unsafe: {name}"
+                )
+            resolved, raw = _stable_runtime_file(
+                logical,
+                f"query-v6 dependency file: {name}",
+                require_root_owned=require_root_owned,
+            )
             files.append(
-                {"path": str(relative), "size": len(raw), "sha256": _sha256(raw)}
+                {
+                    "path": str(relative),
+                    "absolute_path": str(resolved),
+                    "size": len(raw),
+                    "sha256": _sha256(raw),
+                }
             )
         if not files:
             raise QueryV6PackageError(f"query-v6 dependency closure is empty: {name}")
@@ -215,14 +318,28 @@ def build_package(
     commit_sha: str,
     *,
     python_executable: Path = Path(sys.executable),
+    require_root_owned_runtime: bool = True,
 ) -> tuple[bytes, bytes, dict[str, Any]]:
     exact_commit = _resolve_commit(source_root, commit_sha)
     blobs = {
         path: _git_blob(source_root, exact_commit, path)
         for path in sorted(SOURCE_PATHS)
     }
-    python_path, python_sha256 = _interpreter_identity(python_executable)
-    dependencies, closure_sha256 = dependency_closure()
+    python_path, python_sha256 = _interpreter_identity(
+        python_executable,
+        require_root_owned=require_root_owned_runtime,
+    )
+    try:
+        running_python = os.path.abspath(sys.executable)
+    except OSError as exc:
+        raise QueryV6PackageError("query-v6 running Python is unavailable") from exc
+    if python_path != running_python:
+        raise QueryV6PackageError(
+            "query-v6 package must be built by the exact pinned Python interpreter"
+        )
+    dependencies, closure_sha256 = dependency_closure(
+        require_root_owned=require_root_owned_runtime
+    )
     entries = [
         {
             "path": path,
@@ -505,16 +622,23 @@ def preflight_installed_runtime(
         ):
             raise QueryV6PackageError("query-v6 installed package entry mismatch")
     python_path, python_sha256 = _interpreter_identity(
-        Path(payload["python_executable_path"])
+        Path(payload["python_executable_path"]),
+        require_root_owned=require_root_owned,
     )
+    try:
+        running_python = os.path.abspath(sys.executable)
+    except OSError as exc:
+        raise QueryV6PackageError("query-v6 running Python is unavailable") from exc
     if (
         python_path != payload["python_executable_path"]
+        or python_path != running_python
         or python_sha256 != payload["python_executable_sha256"]
         or python_sha256 != expected_python_executable_sha256
     ):
         raise QueryV6PackageError("query-v6 Python interpreter binding mismatch")
     dependencies, closure = dependency_closure(
-        item["name"] for item in payload["python_dependencies"]
+        (item["name"] for item in payload["python_dependencies"]),
+        require_root_owned=require_root_owned,
     )
     if (
         dependencies != payload["python_dependencies"]

@@ -5,11 +5,13 @@ import os
 from pathlib import Path
 import sys
 import tarfile
+from types import SimpleNamespace
 
 import pytest
 
 
 ROOT = Path(__file__).resolve().parents[3]
+PYTHON = os.path.abspath(sys.executable)
 SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
@@ -34,7 +36,9 @@ def test_build_is_deterministic_exact_closure_and_has_no_secret_or_authority(
         lambda _root, _commit, path: (f"frozen:{path}\n".encode(), 0o444),
     )
     monkeypatch.setattr(
-        subject, "_interpreter_identity", lambda _path: ("/python", "b" * 64)
+        subject,
+        "_interpreter_identity",
+        lambda _path, **_kwargs: (PYTHON, "b" * 64),
     )
     monkeypatch.setattr(
         subject, "dependency_closure", lambda *_args, **_kwargs: _dependencies()
@@ -55,8 +59,8 @@ def test_build_is_deterministic_exact_closure_and_has_no_secret_or_authority(
 
 
 def test_real_head_build_round_trip_is_byte_deterministic() -> None:
-    first = subject.build_package(ROOT, "HEAD")
-    second = subject.build_package(ROOT, "HEAD")
+    first = subject.build_package(ROOT, "HEAD", require_root_owned_runtime=False)
+    second = subject.build_package(ROOT, "HEAD", require_root_owned_runtime=False)
     assert first == second
     archive, manifest_raw, payload = first
     members = subject._archive_members(archive, payload)
@@ -64,6 +68,67 @@ def test_real_head_build_round_trip_is_byte_deterministic() -> None:
     assert [entry["path"] for entry in payload["entries"]] == sorted(
         subject.SOURCE_PATHS
     )
+
+
+def test_root_runtime_custody_rejects_user_writable_interpreter_and_dependency(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    interpreter = tmp_path / "python"
+    interpreter.write_bytes(b"#!/bin/sh\n")
+    interpreter.chmod(0o755)
+    venv = tmp_path / "approved-test-venv" / "bin"
+    venv.mkdir(parents=True)
+    logical_interpreter = venv / "python"
+    logical_interpreter.symlink_to(interpreter)
+    logical_path, logical_sha256 = subject._interpreter_identity(
+        logical_interpreter,
+        require_root_owned=False,
+    )
+    assert logical_path == str(logical_interpreter)
+    assert logical_sha256 == subject._sha256(interpreter.read_bytes())
+    with pytest.raises(subject.QueryV6PackageError, match="custody|ancestor"):
+        subject._interpreter_identity(logical_interpreter, require_root_owned=True)
+
+    site_packages = tmp_path / "site-packages"
+    site_packages.mkdir()
+    dependency = site_packages / "unsafe_dependency.py"
+    dependency.write_text("VALUE = 1\n", encoding="utf-8")
+    fake_distribution = SimpleNamespace(
+        metadata={"Name": "unsafe-dependency"},
+        version="1.0",
+        files=[Path("unsafe_dependency.py")],
+        locate_file=lambda relative: site_packages / relative,
+    )
+    monkeypatch.setattr(
+        subject.importlib.metadata,
+        "distribution",
+        lambda _name: fake_distribution,
+    )
+    with pytest.raises(subject.QueryV6PackageError, match="custody|ancestor"):
+        subject.dependency_closure(
+            ["unsafe-dependency"],
+            require_root_owned=True,
+        )
+    outside_target = tmp_path / "outside_dependency.py"
+    outside_target.write_text("VALUE = 2\n", encoding="utf-8")
+    dependency.unlink()
+    dependency.symlink_to(outside_target)
+    with pytest.raises(subject.QueryV6PackageError, match="custody|ancestor"):
+        subject.dependency_closure(
+            ["unsafe-dependency"],
+            require_root_owned=True,
+        )
+    _, before = subject.dependency_closure(
+        ["unsafe-dependency"],
+        require_root_owned=False,
+    )
+    outside_target.write_text("VALUE = 3\n", encoding="utf-8")
+    _, after = subject.dependency_closure(
+        ["unsafe-dependency"],
+        require_root_owned=False,
+    )
+    assert before != after
 
 
 def test_preflight_detects_interpreter_dependency_and_root_identity_tamper(
@@ -94,7 +159,7 @@ def test_preflight_detects_interpreter_dependency_and_root_identity_tamper(
         "source_commit_sha": "a" * 40,
         "entrypoint": subject.ENTRYPOINT,
         "entries": entries,
-        "python_executable_path": "/python",
+        "python_executable_path": PYTHON,
         "python_executable_sha256": "b" * 64,
         "python_dependencies": dependencies,
         "python_dependency_closure_sha256": closure,
@@ -113,13 +178,34 @@ def test_preflight_detects_interpreter_dependency_and_root_identity_tamper(
     manifest_path = package_root / subject.MANIFEST_ARCHIVE_PATH
     manifest_path.write_bytes(subject.canonical_json(payload))
     manifest_path.chmod(0o444)
+    interpreter_hash = ["b" * 64]
     monkeypatch.setattr(
-        subject, "_interpreter_identity", lambda _path: ("/python", "b" * 64)
+        subject,
+        "_interpreter_identity",
+        lambda _path, **_kwargs: (PYTHON, interpreter_hash[0]),
     )
     monkeypatch.setattr(
         subject, "dependency_closure", lambda *_args, **_kwargs: _dependencies()
     )
     manifest_sha = subject._sha256(subject.canonical_json(payload))
+    report = subject.preflight_installed_runtime(
+        manifest_path,
+        expected_manifest_sha256=manifest_sha,
+        expected_python_executable_sha256="b" * 64,
+        expected_dependency_closure_sha256=closure,
+        require_root_owned=False,
+    )
+    assert report["python_executable_sha256"] == "b" * 64
+    interpreter_hash[0] = "c" * 64
+    with pytest.raises(subject.QueryV6PackageError, match="interpreter binding"):
+        subject.preflight_installed_runtime(
+            manifest_path,
+            expected_manifest_sha256=manifest_sha,
+            expected_python_executable_sha256="b" * 64,
+            expected_dependency_closure_sha256=closure,
+            require_root_owned=False,
+        )
+    interpreter_hash[0] = "b" * 64
     with pytest.raises(subject.QueryV6PackageError, match="root identity"):
         subject.preflight_installed_runtime(
             manifest_path,
@@ -186,7 +272,9 @@ def test_installer_computes_all_deployment_pins_and_publishes_last(
         lambda _root, _commit, path: (f"frozen:{path}\n".encode(), 0o444),
     )
     monkeypatch.setattr(
-        subject, "_interpreter_identity", lambda _path: ("/python", "b" * 64)
+        subject,
+        "_interpreter_identity",
+        lambda _path, **_kwargs: (PYTHON, "b" * 64),
     )
     monkeypatch.setattr(
         subject, "dependency_closure", lambda *_args, **_kwargs: _dependencies()
@@ -257,7 +345,9 @@ def test_installer_rejects_self_consistent_blob_rewrite_without_external_approva
         lambda _root, _commit, path: (variant[0] + b":" + path.encode(), 0o444),
     )
     monkeypatch.setattr(
-        subject, "_interpreter_identity", lambda _path: ("/python", "b" * 64)
+        subject,
+        "_interpreter_identity",
+        lambda _path, **_kwargs: (PYTHON, "b" * 64),
     )
     monkeypatch.setattr(
         subject, "dependency_closure", lambda *_args, **_kwargs: _dependencies()

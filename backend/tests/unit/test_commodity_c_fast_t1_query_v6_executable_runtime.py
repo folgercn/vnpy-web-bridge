@@ -342,6 +342,28 @@ def _successful_validation() -> runtime.CompletedValidation:
     )
 
 
+def _successful_package_preflight(
+    verified: subject.VerifiedExecutableRelease,
+) -> Any:
+    execution = verified.payload["execution"]
+
+    def preflight(*_args: Any, **_kwargs: Any) -> dict[str, str]:
+        return {
+            "package_manifest_sha256": execution["adapter_package_manifest_sha256"],
+            "package_root_identity_sha256": execution[
+                "adapter_package_root_identity_sha256"
+            ],
+            "entrypoint": execution["execution_adapter_absolute_path"],
+            "python_executable_path": execution["python_executable_path"],
+            "python_executable_sha256": execution["python_executable_sha256"],
+            "python_dependency_closure_sha256": execution[
+                "python_dependency_closure_sha256"
+            ],
+        }
+
+    return preflight
+
+
 def _pid_is_live(pid: int) -> bool:
     try:
         os.kill(pid, 0)
@@ -481,6 +503,7 @@ def test_consume_precedes_adapter_launch_and_replay_is_closed(tmp_path: Path) ->
         clock=lambda: NOW,
         adapter_launcher=launch,
         output_validator=lambda *_args: _successful_validation(),
+        package_preflight=_successful_package_preflight(values["verified"]),
         require_root_owned_parent=False,
         require_root_owned_adapter=False,
     )
@@ -505,10 +528,61 @@ def test_consume_precedes_adapter_launch_and_replay_is_closed(tmp_path: Path) ->
             clock=lambda: NOW,
             adapter_launcher=launch,
             output_validator=lambda *_args: _successful_validation(),
+            package_preflight=_successful_package_preflight(values["verified"]),
             require_root_owned_parent=False,
             require_root_owned_adapter=False,
         )
     assert len(launches) == 1
+
+
+def test_parent_full_preflight_blocks_tamper_immediately_before_popen(
+    tmp_path: Path,
+) -> None:
+    values = _fixture(tmp_path)
+    valid_preflight = _successful_package_preflight(values["verified"])
+    preflight_calls = 0
+    popen_calls = 0
+    network_attempts = 0
+
+    def preflight(*args: Any, **kwargs: Any) -> dict[str, str]:
+        nonlocal preflight_calls
+        preflight_calls += 1
+        if preflight_calls == 3:
+            raise runtime.preconnect_package.QueryV6PackageError(
+                "simulated interpreter tamper before Popen"
+            )
+        return valid_preflight(*args, **kwargs)
+
+    def launch(
+        _invocation: list[str], **kwargs: Any
+    ) -> subprocess.CompletedProcess[str]:
+        nonlocal popen_calls, network_attempts
+        kwargs["prelaunch_validator"]()
+        popen_calls += 1
+        network_attempts += 1
+        return subprocess.CompletedProcess([], 0, "", "")
+
+    code, terminal = runtime.run_authorized_attempt(
+        values["verified"],
+        values["release_path"],
+        values["manifest_path"],
+        values["dsn_file"],
+        values["adapter_path"],
+        lambda _at: values["verified"],
+        clock=lambda: NOW,
+        adapter_launcher=launch,
+        package_preflight=preflight,
+        require_root_owned_parent=False,
+        require_root_owned_adapter=False,
+    )
+    assert code == 2
+    assert terminal["terminal_state"] == "FAILED_BEFORE_NETWORK"
+    assert terminal["adapter_launch_attempted"] is False
+    assert terminal["production_query_attempted"] is False
+    assert terminal["production_query_completed"] is False
+    assert preflight_calls == 3
+    assert popen_calls == 0
+    assert network_attempts == 0
 
 
 @pytest.mark.parametrize("drift_target", ["adapter", "dsn"])
@@ -547,6 +621,7 @@ def test_final_adapter_or_dsn_drift_blocks_launch(
         drift_at_final_boundary,
         clock=lambda: NOW,
         adapter_launcher=launch,
+        package_preflight=_successful_package_preflight(values["verified"]),
         require_root_owned_parent=False,
         require_root_owned_adapter=False,
     )
@@ -577,6 +652,7 @@ def test_wrong_runtime_manifest_blocks_before_consume(tmp_path: Path) -> None:
             lambda _at: values["verified"],
             clock=lambda: NOW,
             adapter_launcher=launch,
+            package_preflight=_successful_package_preflight(values["verified"]),
             require_root_owned_parent=False,
             require_root_owned_adapter=False,
         )
@@ -611,6 +687,7 @@ def test_final_tamper_fails_before_network_and_writes_terminal(tmp_path: Path) -
         clock=lambda: NOW,
         adapter_launcher=launch,
         output_validator=lambda *_args: _successful_validation(),
+        package_preflight=_successful_package_preflight(values["verified"]),
         require_root_owned_parent=False,
         require_root_owned_adapter=False,
     )
@@ -649,6 +726,7 @@ def test_launch_boundary_failure_after_consume_is_terminalized(tmp_path: Path) -
         clock=lambda: NOW,
         adapter_launcher=launch,
         output_validator=lambda *_args: _successful_validation(),
+        package_preflight=_successful_package_preflight(values["verified"]),
         require_root_owned_parent=False,
         require_root_owned_adapter=False,
     )
@@ -677,6 +755,7 @@ def test_timeout_is_terminal_outcome_unknown_and_never_replays(tmp_path: Path) -
         lambda _at: values["verified"],
         clock=lambda: NOW,
         adapter_launcher=timeout,
+        package_preflight=_successful_package_preflight(values["verified"]),
         require_root_owned_parent=False,
         require_root_owned_adapter=False,
     )
@@ -684,6 +763,35 @@ def test_timeout_is_terminal_outcome_unknown_and_never_replays(tmp_path: Path) -
     assert terminal["terminal_state"] == "OUTCOME_UNKNOWN"
     assert terminal["production_query_attempted"] is True
     assert terminal["production_query_completed"] is None
+
+
+def test_default_run_adapter_preflight_failure_never_calls_popen_or_network(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    popen_calls = 0
+    network_attempts = 0
+
+    def forbidden_popen(*_args: Any, **_kwargs: Any) -> Any:
+        nonlocal popen_calls, network_attempts
+        popen_calls += 1
+        network_attempts += 1
+        raise AssertionError("Popen must remain unreachable")
+
+    def fail_prelaunch() -> None:
+        raise runtime.QueryV6PrelaunchError("simulated final package drift")
+
+    monkeypatch.setattr(runtime.subprocess, "Popen", forbidden_popen)
+    with pytest.raises(runtime.QueryV6PrelaunchError, match="package drift"):
+        runtime.run_adapter(
+            [sys.executable, "-I", str(tmp_path / "never-started.py")],
+            cwd=tmp_path,
+            timeout=10,
+            launch_capability=b"p" * runtime.preconnect_adapter.CAPABILITY_BYTES,
+            prelaunch_validator=fail_prelaunch,
+        )
+    assert popen_calls == 0
+    assert network_attempts == 0
 
 
 def test_run_adapter_timeout_kills_forked_process_group(tmp_path: Path) -> None:
@@ -737,6 +845,7 @@ def test_interrupt_terminalizes_and_prevents_replay(tmp_path: Path) -> None:
         lambda _at: values["verified"],
         clock=lambda: NOW,
         adapter_launcher=interrupt,
+        package_preflight=_successful_package_preflight(values["verified"]),
         require_root_owned_parent=False,
         require_root_owned_adapter=False,
     )
@@ -754,6 +863,7 @@ def test_interrupt_terminalizes_and_prevents_replay(tmp_path: Path) -> None:
             lambda _at: values["verified"],
             clock=lambda: NOW,
             adapter_launcher=interrupt,
+            package_preflight=_successful_package_preflight(values["verified"]),
             require_root_owned_parent=False,
             require_root_owned_adapter=False,
         )
@@ -782,6 +892,7 @@ def test_adapter_tamper_and_partial_state_block_before_launch(tmp_path: Path) ->
             lambda _at: values["verified"],
             clock=lambda: NOW,
             adapter_launcher=launch,
+            package_preflight=_successful_package_preflight(values["verified"]),
             require_root_owned_parent=False,
             require_root_owned_adapter=False,
         )
@@ -800,6 +911,7 @@ def test_adapter_tamper_and_partial_state_block_before_launch(tmp_path: Path) ->
             lambda _at: values["verified"],
             clock=lambda: NOW,
             adapter_launcher=launch,
+            package_preflight=_successful_package_preflight(values["verified"]),
             require_root_owned_parent=False,
             require_root_owned_adapter=False,
         )

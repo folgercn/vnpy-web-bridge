@@ -22,8 +22,9 @@ import subprocess
 import sys
 import threading
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
+from c_fast_t1 import query_v6_preconnect_package as preconnect_package
 import commodity_c_fast_t1_query_v6_authority as foundation_v6
 import commodity_c_fast_t1_query_v6_executable as executable
 import commodity_c_fast_t1_query_v6_preconnect_adapter as preconnect_adapter
@@ -56,6 +57,10 @@ class QueryV6RuntimeError(RuntimeError):
     """Expected fail-closed query-v6 runtime error."""
 
 
+class QueryV6PrelaunchError(QueryV6RuntimeError):
+    """A final package check failed before the adapter process existed."""
+
+
 @dataclass(frozen=True)
 class CompletedValidation:
     p0_pass: bool
@@ -65,6 +70,7 @@ class CompletedValidation:
 
 
 AdapterLauncher = Callable[..., subprocess.CompletedProcess[str]]
+PackagePreflight = Callable[..., Mapping[str, Any]]
 OutputValidator = Callable[
     [ArtifactPaths, executable.VerifiedExecutableRelease, int],
     CompletedValidation,
@@ -235,6 +241,42 @@ def verify_execution_adapter(
     if not hmac.compare_digest(_sha256(raw_before), _expected):
         raise QueryV6RuntimeError("query-v6 execution adapter binding mismatch")
     return raw_before
+
+
+def preflight_execution_package(
+    verified: executable.VerifiedExecutableRelease,
+    *,
+    preflight: PackagePreflight = preconnect_package.preflight_installed_runtime,
+    require_root_owned: bool = True,
+) -> Mapping[str, Any]:
+    execution = verified.payload["execution"]
+    report = preflight(
+        Path(execution["adapter_package_manifest_absolute_path"]),
+        expected_manifest_sha256=execution["adapter_package_manifest_sha256"],
+        expected_package_root_identity_sha256=execution[
+            "adapter_package_root_identity_sha256"
+        ],
+        expected_python_executable_sha256=execution["python_executable_sha256"],
+        expected_dependency_closure_sha256=execution[
+            "python_dependency_closure_sha256"
+        ],
+        require_root_owned=require_root_owned,
+    )
+    expected = {
+        "package_manifest_sha256": execution["adapter_package_manifest_sha256"],
+        "package_root_identity_sha256": execution[
+            "adapter_package_root_identity_sha256"
+        ],
+        "entrypoint": execution["execution_adapter_absolute_path"],
+        "python_executable_path": execution["python_executable_path"],
+        "python_executable_sha256": execution["python_executable_sha256"],
+        "python_dependency_closure_sha256": execution[
+            "python_dependency_closure_sha256"
+        ],
+    }
+    if any(report.get(field) != value for field, value in expected.items()):
+        raise QueryV6RuntimeError("query-v6 package preflight binding mismatch")
+    return report
 
 
 def _consume_payload(
@@ -537,6 +579,7 @@ def run_adapter(
     cwd: Path,
     timeout: int,
     launch_capability: bytes | None = None,
+    prelaunch_validator: Callable[[], None] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     if (
         threading.current_thread() is not threading.main_thread()
@@ -581,6 +624,8 @@ def run_adapter(
                     capability_read_fd
                 )
                 pass_fds = (capability_read_fd,)
+            if prelaunch_validator is not None:
+                prelaunch_validator()
             process = subprocess.Popen(
                 invocation,
                 cwd=cwd,
@@ -724,6 +769,9 @@ def run_authorized_attempt(
     clock: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     adapter_launcher: AdapterLauncher = run_adapter,
     output_validator: OutputValidator = validate_outputs,
+    package_preflight: PackagePreflight = (
+        preconnect_package.preflight_installed_runtime
+    ),
     require_root_owned_parent: bool = True,
     require_root_owned_adapter: bool = True,
 ) -> tuple[int, dict[str, Any]]:
@@ -731,6 +779,11 @@ def run_authorized_attempt(
     verify_execution_adapter(
         execution_adapter_path,
         verified,
+        require_root_owned=require_root_owned_adapter,
+    )
+    preflight_execution_package(
+        verified,
+        preflight=package_preflight,
         require_root_owned=require_root_owned_adapter,
     )
     _verify_dsn_metadata(dsn_file, verified)
@@ -821,13 +874,27 @@ def run_authorized_attempt(
                 custody / consume_name,
                 custody / launch_name,
             )
-            verify_query_manifest_file(manifest_path, final)
-            _verify_dsn_metadata(dsn_file, final)
-            verify_execution_adapter(
-                execution_adapter_path,
-                final,
-                require_root_owned=require_root_owned_adapter,
-            )
+
+            def final_prelaunch_check() -> None:
+                try:
+                    verify_query_manifest_file(manifest_path, final)
+                    _verify_dsn_metadata(dsn_file, final)
+                    verify_execution_adapter(
+                        execution_adapter_path,
+                        final,
+                        require_root_owned=require_root_owned_adapter,
+                    )
+                    preflight_execution_package(
+                        final,
+                        preflight=package_preflight,
+                        require_root_owned=require_root_owned_adapter,
+                    )
+                except Exception as exc:
+                    raise QueryV6PrelaunchError(
+                        "query-v6 final prelaunch validation failed"
+                    ) from exc
+
+            final_prelaunch_check()
             launch_capability = os.urandom(preconnect_adapter.CAPABILITY_BYTES)
             invocation_values = {
                 "dsn_file": str(dsn_file.resolve(strict=True)),
@@ -960,12 +1027,14 @@ def run_authorized_attempt(
             return 2, terminal
         result: subprocess.CompletedProcess[str] | None = None
         validation: CompletedValidation | None = None
+        adapter_launch_attempted = True
         try:
             result = adapter_launcher(
                 invocation,
                 cwd=attempt_dir,
                 timeout=verified.payload["execution"]["maximum_runtime_seconds"],
                 launch_capability=launch_capability,
+                prelaunch_validator=final_prelaunch_check,
             )
             if result.returncode not in {0, 1}:
                 raise QueryV6RuntimeError("execution adapter outcome is unknown")
@@ -973,6 +1042,11 @@ def run_authorized_attempt(
             state = "COMPLETED_PASS" if validation.p0_pass else "COMPLETED_BLOCKED"
             exit_code = 0 if validation.p0_pass else 1
             error_code = None
+        except QueryV6PrelaunchError:
+            state = "FAILED_BEFORE_NETWORK"
+            error_code = "PRE_NETWORK_LAUNCH_BOUNDARY_FAILED"
+            exit_code = 2
+            adapter_launch_attempted = False
         except subprocess.TimeoutExpired:
             state = "OUTCOME_UNKNOWN"
             error_code = "EXECUTION_ADAPTER_TIMEOUT"
@@ -999,11 +1073,11 @@ def run_authorized_attempt(
             consume_raw_sha256=consume_raw_sha256,
             consume_canonical_sha256=consume_canonical_sha256,
             started_at=consumed_at,
-            final_revalidation_at=final_at,
+            final_revalidation_at=(final_at if adapter_launch_attempted else None),
             ended_at=ended_at,
             terminal_state=state,
             error_code=error_code,
-            adapter_launch_attempted=True,
+            adapter_launch_attempted=adapter_launch_attempted,
             child_exit_code=child_exit_code,
             child_signal=child_signal,
             validation=validation,
