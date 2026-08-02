@@ -12,6 +12,16 @@
   "audit_evidence_schema_sha256": "PENDING_SHA256",
   "legacy_audit_evidence_schema_sha256": "PENDING_SHA256",
   "readonly_proof_schema_sha256": "PENDING_SHA256",
+  "child_launch_schema_sha256": "PENDING_SHA256",
+  "adapter_package_schema_sha256": "PENDING_SHA256",
+  "adapter_package_builder_sha256": "PENDING_SHA256",
   "execution_adapter_sha256": "PENDING_SHA256",
+  "execution_adapter_absolute_path": "PENDING_ROOT_INSTALLED_ABSOLUTE_PATH",
+  "adapter_package_manifest_absolute_path": "PENDING_ROOT_INSTALLED_ABSOLUTE_PATH",
+  "adapter_package_manifest_sha256": "PENDING_SHA256",
+  "adapter_package_root_identity_sha256": "PENDING_SHA256",
+  "python_executable_path": "PENDING_PINNED_ABSOLUTE_PATH",
+  "python_executable_sha256": "PENDING_SHA256",
+  "python_dependency_closure_sha256": "PENDING_SHA256",
   "questdb_build_sha256": "PENDING_SHA256"
 }

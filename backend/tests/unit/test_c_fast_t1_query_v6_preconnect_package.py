@@ -1,0 +1,421 @@
+from __future__ import annotations
+
+import io
+import os
+from pathlib import Path
+import sys
+import tarfile
+from types import SimpleNamespace
+
+import pytest
+
+
+ROOT = Path(__file__).resolve().parents[3]
+PYTHON = os.path.abspath(sys.executable)
+SCRIPTS = ROOT / "scripts"
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
+
+from c_fast_t1 import query_v6_preconnect_package as subject  # noqa: E402
+
+
+def _dependencies() -> tuple[list[dict[str, str]], str]:
+    return (
+        [{"name": name, "version": "1.0"} for name in subject.DEPENDENCY_NAMES],
+        "d" * 64,
+    )
+
+
+def test_build_is_deterministic_exact_closure_and_has_no_secret_or_authority(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(subject, "_resolve_commit", lambda *_args: "a" * 40)
+    monkeypatch.setattr(
+        subject,
+        "_git_blob",
+        lambda _root, _commit, path: (f"frozen:{path}\n".encode(), 0o444),
+    )
+    monkeypatch.setattr(
+        subject,
+        "_interpreter_identity",
+        lambda _path, **_kwargs: (PYTHON, "b" * 64),
+    )
+    monkeypatch.setattr(
+        subject, "dependency_closure", lambda *_args, **_kwargs: _dependencies()
+    )
+    first = subject.build_package(tmp_path, "HEAD")
+    second = subject.build_package(tmp_path, "HEAD")
+    assert first == second
+    archive, manifest_raw, manifest = first
+    assert manifest["legacy_authority_reused"] is False
+    assert manifest["dsn_secret_included"] is False
+    assert manifest["network_accessed"] is False
+    assert manifest["authority_granted"] is False
+    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as package:
+        assert sorted(package.getnames()) == sorted(
+            [subject.MANIFEST_ARCHIVE_PATH, *subject.SOURCE_PATHS]
+        )
+        assert package.extractfile(subject.MANIFEST_ARCHIVE_PATH).read() == manifest_raw
+
+
+def test_real_head_build_round_trip_is_byte_deterministic() -> None:
+    try:
+        first = subject.build_package(
+            ROOT,
+            "HEAD",
+            require_root_owned_runtime=False,
+        )
+    except subject.QueryV6PackageError as exc:
+        if str(exc) == "query-v6 installation ancestor is unsafe":
+            pytest.skip("host Python runtime is outside the test-only custody model")
+        raise
+    second = subject.build_package(ROOT, "HEAD", require_root_owned_runtime=False)
+    assert first == second
+    archive, manifest_raw, payload = first
+    members = subject._archive_members(archive, payload)
+    assert members[subject.MANIFEST_ARCHIVE_PATH] == manifest_raw
+    assert [entry["path"] for entry in payload["entries"]] == sorted(
+        subject.SOURCE_PATHS
+    )
+
+
+def test_test_only_custody_still_rejects_world_writable_ancestor(
+    tmp_path: Path,
+) -> None:
+    unsafe_parent = tmp_path / "unsafe-parent"
+    unsafe_parent.mkdir(mode=0o777)
+    unsafe_parent.chmod(0o777)
+    child = unsafe_parent / "child"
+    child.mkdir()
+    with pytest.raises(subject.QueryV6PackageError, match="ancestor is unsafe"):
+        subject._safe_ancestors(child, require_root_owned=False)
+    with pytest.raises(subject.QueryV6PackageError, match="ancestor is unsafe"):
+        subject._safe_ancestors(child, require_root_owned=True)
+
+
+def test_root_runtime_custody_rejects_user_writable_interpreter_and_dependency(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    interpreter = tmp_path / "python"
+    interpreter.write_bytes(b"#!/bin/sh\n")
+    interpreter.chmod(0o755)
+    venv = tmp_path / "approved-test-venv" / "bin"
+    venv.mkdir(parents=True)
+    logical_interpreter = venv / "python"
+    logical_interpreter.symlink_to(interpreter)
+    logical_path, logical_sha256 = subject._interpreter_identity(
+        logical_interpreter,
+        require_root_owned=False,
+    )
+    assert logical_path == str(logical_interpreter)
+    assert logical_sha256 == subject._sha256(interpreter.read_bytes())
+    with pytest.raises(subject.QueryV6PackageError, match="custody|ancestor"):
+        subject._interpreter_identity(logical_interpreter, require_root_owned=True)
+
+    site_packages = tmp_path / "site-packages"
+    site_packages.mkdir()
+    dependency = site_packages / "unsafe_dependency.py"
+    dependency.write_text("VALUE = 1\n", encoding="utf-8")
+    fake_distribution = SimpleNamespace(
+        metadata={"Name": "unsafe-dependency"},
+        version="1.0",
+        files=[Path("unsafe_dependency.py")],
+        locate_file=lambda relative: site_packages / relative,
+    )
+    monkeypatch.setattr(
+        subject.importlib.metadata,
+        "distribution",
+        lambda _name: fake_distribution,
+    )
+    with pytest.raises(subject.QueryV6PackageError, match="custody|ancestor"):
+        subject.dependency_closure(
+            ["unsafe-dependency"],
+            require_root_owned=True,
+        )
+    outside_target = tmp_path / "outside_dependency.py"
+    outside_target.write_text("VALUE = 2\n", encoding="utf-8")
+    dependency.unlink()
+    dependency.symlink_to(outside_target)
+    with pytest.raises(subject.QueryV6PackageError, match="custody|ancestor"):
+        subject.dependency_closure(
+            ["unsafe-dependency"],
+            require_root_owned=True,
+        )
+    _, before = subject.dependency_closure(
+        ["unsafe-dependency"],
+        require_root_owned=False,
+    )
+    outside_target.write_text("VALUE = 3\n", encoding="utf-8")
+    _, after = subject.dependency_closure(
+        ["unsafe-dependency"],
+        require_root_owned=False,
+    )
+    assert before != after
+
+
+def test_preflight_detects_interpreter_dependency_and_root_identity_tamper(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    package_root = tmp_path / "installed"
+    package_root.mkdir()
+    entries = []
+    for source_path in sorted(subject.SOURCE_PATHS):
+        entry = package_root / source_path
+        entry.parent.mkdir(parents=True, exist_ok=True)
+        raw = b"adapter" if source_path == subject.ENTRYPOINT else source_path.encode()
+        entry.write_bytes(raw)
+        entry.chmod(0o444)
+        entries.append(
+            {
+                "path": source_path,
+                "sha256": subject._sha256(raw),
+                "size": len(raw),
+                "mode": 0o444,
+            }
+        )
+    dependencies, closure = _dependencies()
+    payload = {
+        "schema_version": subject.SCHEMA_VERSION,
+        "package_id": "",
+        "candidate_id": "C_FAST_CROSS_SECTION_NEUTRAL",
+        "source_commit_sha": "a" * 40,
+        "entrypoint": subject.ENTRYPOINT,
+        "entries": entries,
+        "python_executable_path": PYTHON,
+        "python_executable_sha256": "b" * 64,
+        "python_dependencies": dependencies,
+        "python_dependency_closure_sha256": closure,
+        "deterministic_archive": True,
+        "v6_only_preconnect_adapter": True,
+        "legacy_authority_reused": False,
+        "dsn_secret_included": False,
+        "network_accessed": False,
+        "authority_granted": False,
+        "production_authorized": False,
+    }
+    identity = {key: value for key, value in payload.items() if key != "package_id"}
+    payload["package_id"] = "query-v6-preconnect-" + subject._sha256(
+        subject.canonical_json(identity)
+    )
+    manifest_path = package_root / subject.MANIFEST_ARCHIVE_PATH
+    manifest_path.write_bytes(subject.canonical_json(payload))
+    manifest_path.chmod(0o444)
+    interpreter_hash = ["b" * 64]
+    monkeypatch.setattr(
+        subject,
+        "_interpreter_identity",
+        lambda _path, **_kwargs: (PYTHON, interpreter_hash[0]),
+    )
+    monkeypatch.setattr(
+        subject, "dependency_closure", lambda *_args, **_kwargs: _dependencies()
+    )
+    manifest_sha = subject._sha256(subject.canonical_json(payload))
+    report = subject.preflight_installed_runtime(
+        manifest_path,
+        expected_manifest_sha256=manifest_sha,
+        expected_python_executable_sha256="b" * 64,
+        expected_dependency_closure_sha256=closure,
+        require_root_owned=False,
+    )
+    assert report["python_executable_sha256"] == "b" * 64
+    interpreter_hash[0] = "c" * 64
+    with pytest.raises(subject.QueryV6PackageError, match="interpreter binding"):
+        subject.preflight_installed_runtime(
+            manifest_path,
+            expected_manifest_sha256=manifest_sha,
+            expected_python_executable_sha256="b" * 64,
+            expected_dependency_closure_sha256=closure,
+            require_root_owned=False,
+        )
+    interpreter_hash[0] = "b" * 64
+    with pytest.raises(subject.QueryV6PackageError, match="root identity"):
+        subject.preflight_installed_runtime(
+            manifest_path,
+            expected_manifest_sha256=manifest_sha,
+            expected_package_root_identity_sha256="f" * 64,
+            expected_python_executable_sha256="b" * 64,
+            expected_dependency_closure_sha256=closure,
+            require_root_owned=False,
+        )
+    with pytest.raises(subject.QueryV6PackageError, match="interpreter binding"):
+        subject.preflight_installed_runtime(
+            manifest_path,
+            expected_manifest_sha256=manifest_sha,
+            expected_python_executable_sha256="c" * 64,
+            expected_dependency_closure_sha256=closure,
+            require_root_owned=False,
+        )
+    with pytest.raises(subject.QueryV6PackageError, match="dependency closure"):
+        subject.preflight_installed_runtime(
+            manifest_path,
+            expected_manifest_sha256=manifest_sha,
+            expected_python_executable_sha256="b" * 64,
+            expected_dependency_closure_sha256="e" * 64,
+            require_root_owned=False,
+        )
+
+
+def test_root_install_is_default_and_base_cannot_inject_computed_pins(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(os, "geteuid", lambda: 501)
+    with pytest.raises(subject.QueryV6PackageError, match="requires root"):
+        subject.install_package(
+            tmp_path / "archive.tar",
+            tmp_path / "manifest.json",
+            tmp_path / "install",
+            tmp_path / "active",
+            "a" * 64,
+            "a" * 40,
+            "query-v6-test-pins",
+            tmp_path / "keyring.json",
+            tmp_path / "questdb-build.txt",
+        )
+    with pytest.raises(subject.QueryV6PackageError, match="non-local fields"):
+        subject.build_active_pin_payload(
+            {
+                "generation_id": "query-v6-test-pins",
+                "executable_keyring_sha256": "a" * 64,
+                "questdb_build_sha256": "b" * 64,
+                "execution_adapter_sha256": "c" * 64,
+            },
+            {},
+            {},
+        )
+
+
+def test_installer_computes_all_deployment_pins_and_publishes_last(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(subject, "_resolve_commit", lambda *_args: "a" * 40)
+    monkeypatch.setattr(
+        subject,
+        "_git_blob",
+        lambda _root, _commit, path: (f"frozen:{path}\n".encode(), 0o444),
+    )
+    monkeypatch.setattr(
+        subject,
+        "_interpreter_identity",
+        lambda _path, **_kwargs: (PYTHON, "b" * 64),
+    )
+    monkeypatch.setattr(
+        subject, "dependency_closure", lambda *_args, **_kwargs: _dependencies()
+    )
+    archive, manifest_raw, manifest = subject.build_package(tmp_path, "HEAD")
+    archive_path = tmp_path / "package.tar"
+    manifest_path = tmp_path / "package.json"
+    keyring_path = tmp_path / "keyring.json"
+    build_path = tmp_path / "questdb-build.txt"
+    archive_path.write_bytes(archive)
+    manifest_path.write_bytes(manifest_raw)
+    keyring_path.write_text('{"keys":[]}', encoding="utf-8")
+    build_path.write_text("questdb-test-build\n", encoding="utf-8")
+    keyring_path.chmod(0o600)
+    build_path.chmod(0o444)
+    install_root = tmp_path / "installed"
+    active_root = tmp_path / "active-pins"
+    pins = subject.install_package(
+        archive_path,
+        manifest_path,
+        install_root,
+        active_root,
+        subject._sha256(manifest_raw),
+        manifest["source_commit_sha"],
+        "query-v6-root-generation-test-0001",
+        keyring_path,
+        build_path,
+        require_root=False,
+    )
+    entry_hashes = {entry["path"]: entry["sha256"] for entry in manifest["entries"]}
+    assert pins["execution_adapter_sha256"] == entry_hashes[subject.ENTRYPOINT]
+    assert (
+        pins["executable_verifier_sha256"]
+        == entry_hashes[subject.PIN_SOURCE_PATHS["executable_verifier_sha256"]]
+    )
+    assert pins["executable_keyring_sha256"] == subject._sha256(
+        subject.canonical_json({"keys": []})
+    )
+    assert pins["questdb_build_sha256"] == subject._sha256(b"questdb-test-build")
+    assert (active_root / "pin-set.manifest.json").read_bytes() == (
+        subject.canonical_json(pins)
+    )
+    with pytest.raises(
+        subject.QueryV6PackageError, match="destinations must be absent"
+    ):
+        subject.install_package(
+            archive_path,
+            manifest_path,
+            install_root,
+            active_root,
+            subject._sha256(manifest_raw),
+            manifest["source_commit_sha"],
+            "query-v6-root-generation-test-0002",
+            keyring_path,
+            build_path,
+            require_root=False,
+        )
+
+
+def test_installer_rejects_self_consistent_blob_rewrite_without_external_approval(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    variant = [b"approved"]
+    monkeypatch.setattr(subject, "_resolve_commit", lambda *_args: "a" * 40)
+    monkeypatch.setattr(
+        subject,
+        "_git_blob",
+        lambda _root, _commit, path: (variant[0] + b":" + path.encode(), 0o444),
+    )
+    monkeypatch.setattr(
+        subject,
+        "_interpreter_identity",
+        lambda _path, **_kwargs: (PYTHON, "b" * 64),
+    )
+    monkeypatch.setattr(
+        subject, "dependency_closure", lambda *_args, **_kwargs: _dependencies()
+    )
+    _, approved_manifest_raw, approved = subject.build_package(tmp_path, "HEAD")
+    variant[0] = b"self-consistent-rewrite"
+    rewritten_archive, rewritten_manifest_raw, rewritten = subject.build_package(
+        tmp_path, "HEAD"
+    )
+    assert rewritten["package_id"] != approved["package_id"]
+    archive_path = tmp_path / "rewritten.tar"
+    manifest_path = tmp_path / "rewritten.json"
+    keyring_path = tmp_path / "keyring.json"
+    build_path = tmp_path / "build.txt"
+    archive_path.write_bytes(rewritten_archive)
+    manifest_path.write_bytes(rewritten_manifest_raw)
+    keyring_path.write_text('{"keys":[]}', encoding="utf-8")
+    build_path.write_text("questdb-test-build", encoding="utf-8")
+    keyring_path.chmod(0o600)
+    build_path.chmod(0o444)
+    with pytest.raises(subject.QueryV6PackageError, match="approved package manifest"):
+        subject.install_package(
+            archive_path,
+            manifest_path,
+            tmp_path / "installed",
+            tmp_path / "active",
+            subject._sha256(approved_manifest_raw),
+            approved["source_commit_sha"],
+            "query-v6-root-generation-test-0003",
+            keyring_path,
+            build_path,
+            require_root=False,
+        )
+    assert not (tmp_path / "installed").exists()
+    assert not (tmp_path / "active").exists()
+    with pytest.raises(subject.QueryV6PackageError, match="approved source commit"):
+        subject.install_package(
+            archive_path,
+            manifest_path,
+            tmp_path / "installed-wrong-commit",
+            tmp_path / "active-wrong-commit",
+            subject._sha256(rewritten_manifest_raw),
+            "b" * 40,
+            "query-v6-root-generation-test-0004",
+            keyring_path,
+            build_path,
+            require_root=False,
+        )

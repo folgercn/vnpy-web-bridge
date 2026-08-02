@@ -37,12 +37,8 @@ from commodity_c_fast_t1_one_shot import (
 
 ROOT = Path(__file__).resolve().parents[1]
 VERIFIER_PATH = Path(__file__).resolve()
-SIGNER_PATH = VERIFIER_PATH.with_name(
-    "commodity_c_fast_t1_query_v6_executable_sign.py"
-)
-RUNNER_PATH = VERIFIER_PATH.with_name(
-    "commodity_c_fast_t1_query_v6_runtime.py"
-)
+SIGNER_PATH = VERIFIER_PATH.with_name("commodity_c_fast_t1_query_v6_executable_sign.py")
+RUNNER_PATH = VERIFIER_PATH.with_name("commodity_c_fast_t1_query_v6_runtime.py")
 RELEASE_SCHEMA_PATH = (
     ROOT
     / "docs/schemas/commodity-c-fast-t1-one-shot-query-executable-release-v6.schema.json"
@@ -52,8 +48,7 @@ KEYRING_SCHEMA_PATH = (
     / "docs/schemas/commodity-c-fast-t1-query-v6-executable-trusted-keys-v1.schema.json"
 )
 PIN_SET_SCHEMA_PATH = (
-    ROOT
-    / "docs/schemas/commodity-c-fast-t1-query-v6-executable-pin-set-v1.schema.json"
+    ROOT / "docs/schemas/commodity-c-fast-t1-query-v6-executable-pin-set-v1.schema.json"
 )
 CONSUME_SCHEMA_PATH = (
     ROOT / "docs/schemas/commodity-c-fast-t1-query-consume-v6.schema.json"
@@ -61,6 +56,13 @@ CONSUME_SCHEMA_PATH = (
 TERMINAL_SCHEMA_PATH = (
     ROOT / "docs/schemas/commodity-c-fast-t1-query-terminal-v6.schema.json"
 )
+CHILD_LAUNCH_SCHEMA_PATH = (
+    ROOT / "docs/schemas/commodity-c-fast-t1-query-child-launched-v6.schema.json"
+)
+ADAPTER_PACKAGE_SCHEMA_PATH = (
+    ROOT / "docs/schemas/commodity-c-fast-t1-query-v6-preconnect-package-v1.schema.json"
+)
+ADAPTER_PACKAGE_BUILDER_PATH = ROOT / "scripts/c_fast_t1/query_v6_preconnect_package.py"
 AUDIT_EVIDENCE_SCHEMA_PATH = (
     ROOT / "docs/schemas/commodity-c-fast-l1-l5-audit-v2.schema.json"
 )
@@ -188,10 +190,11 @@ def source_and_schema_hashes() -> dict[str, str]:
         "consume_schema_sha256": CONSUME_SCHEMA_PATH,
         "terminal_schema_sha256": TERMINAL_SCHEMA_PATH,
         "audit_evidence_schema_sha256": AUDIT_EVIDENCE_SCHEMA_PATH,
-        "legacy_audit_evidence_schema_sha256": (
-            LEGACY_AUDIT_EVIDENCE_SCHEMA_PATH
-        ),
+        "legacy_audit_evidence_schema_sha256": (LEGACY_AUDIT_EVIDENCE_SCHEMA_PATH),
         "readonly_proof_schema_sha256": READONLY_PROOF_SCHEMA_PATH,
+        "child_launch_schema_sha256": CHILD_LAUNCH_SCHEMA_PATH,
+        "adapter_package_schema_sha256": ADAPTER_PACKAGE_SCHEMA_PATH,
+        "adapter_package_builder_sha256": ADAPTER_PACKAGE_BUILDER_PATH,
     }
     return {field: sha256_bytes(_read(path, field)) for field, path in paths.items()}
 
@@ -228,24 +231,25 @@ def read_active_pins(
             or not stat.S_ISDIR(parent_info.st_mode)
             or stat.S_ISLNK(path_info_before.st_mode)
             or not stat.S_ISREG(path_info_before.st_mode)
-            or (require_root_owned and (parent_info.st_uid != 0 or path_info_before.st_uid != 0))
+            or (
+                require_root_owned
+                and (parent_info.st_uid != 0 or path_info_before.st_uid != 0)
+            )
             or stat.S_IMODE(parent_info.st_mode) & 0o022
             or stat.S_IMODE(path_info_before.st_mode) & 0o022
         ):
-            raise QueryV6ExecutableError(
-                "executable pin manifest custody is unsafe"
-            )
+            raise QueryV6ExecutableError("executable pin manifest custody is unsafe")
         raw_before = _read(path, "query-v6 executable active pin set")
         payload = parse_json_bytes(raw_before, "query-v6 executable active pin set")
         raw_after = _read(path, "query-v6 executable active pin set final re-read")
         path_info_after = path.lstat()
     except (OSError, OneShotError) as exc:
         raise QueryV6ExecutableError(str(exc)) from exc
-    if (
-        raw_before != raw_after
-        or (path_info_before.st_dev, path_info_before.st_ino, path_info_before.st_size)
-        != (path_info_after.st_dev, path_info_after.st_ino, path_info_after.st_size)
-    ):
+    if raw_before != raw_after or (
+        path_info_before.st_dev,
+        path_info_before.st_ino,
+        path_info_before.st_size,
+    ) != (path_info_after.st_dev, path_info_after.st_ino, path_info_after.st_size):
         raise QueryV6ExecutableError("executable pin manifest changed while read")
     pins = ExecutablePins(
         payload=payload,
@@ -388,7 +392,17 @@ def expected_execution_binding(pins: ExecutablePins) -> dict[str, Any]:
                 "audit_evidence_schema_sha256",
                 "legacy_audit_evidence_schema_sha256",
                 "readonly_proof_schema_sha256",
+                "child_launch_schema_sha256",
+                "adapter_package_schema_sha256",
+                "adapter_package_builder_sha256",
                 "execution_adapter_sha256",
+                "execution_adapter_absolute_path",
+                "adapter_package_manifest_absolute_path",
+                "adapter_package_manifest_sha256",
+                "adapter_package_root_identity_sha256",
+                "python_executable_path",
+                "python_executable_sha256",
+                "python_dependency_closure_sha256",
                 "questdb_build_sha256",
             )
         },
@@ -441,7 +455,9 @@ def validate_release_semantics(
         "pre_and_post_readonly_proof_required",
     ):
         if payload[field] is not True:
-            raise QueryV6ExecutableError(f"required executable safety fact is false: {field}")
+            raise QueryV6ExecutableError(
+                f"required executable safety fact is false: {field}"
+            )
     if payload["maximum_uses"] != 1 or payload["replay_allowed"] is not False:
         raise QueryV6ExecutableError("executable release is not strict one-shot")
     current = _utc(now, "verification time")
@@ -476,7 +492,9 @@ def verify_release(
     now: datetime,
 ) -> VerifiedExecutableRelease:
     validate_pins(pins)
-    release_raw = _read(release_path, "signed query-v6 executable release", private=True)
+    release_raw = _read(
+        release_path, "signed query-v6 executable release", private=True
+    )
     keyring_raw = _read(keyring_path, "query-v6 executable keyring", private=True)
     try:
         payload = parse_json_bytes(release_raw, "signed query-v6 executable release")
@@ -484,8 +502,14 @@ def verify_release(
     except OneShotError as exc:
         raise QueryV6ExecutableError(str(exc)) from exc
     keyring_sha256 = sha256_bytes(canonical_json(keyring))
-    _same(keyring_sha256, str(pins.executable_keyring_sha256), "active executable keyring")
-    _same(keyring_sha256, str(payload.get("trusted_keyring_sha256") or ""), "signed executable keyring")
+    _same(
+        keyring_sha256, str(pins.executable_keyring_sha256), "active executable keyring"
+    )
+    _same(
+        keyring_sha256,
+        str(payload.get("trusted_keyring_sha256") or ""),
+        "signed executable keyring",
+    )
     public_key, signer_hash, executable_materials = _validate_keyring(
         keyring, str(payload.get("signer_key_id") or "")
     )
@@ -559,7 +583,11 @@ def main() -> int:
             pins,
             now=now,
         )
-    except (OSError, QueryV6ExecutableError, foundation_v6.QueryV6AuthorityError) as exc:
+    except (
+        OSError,
+        QueryV6ExecutableError,
+        foundation_v6.QueryV6AuthorityError,
+    ) as exc:
         print(f"query-v6 executable verification failed: {exc}", file=sys.stderr)
         return 2
     print("status=QUERY_V6_EXECUTABLE_AUTHORITY_VERIFIED_NO_CONSUME")
