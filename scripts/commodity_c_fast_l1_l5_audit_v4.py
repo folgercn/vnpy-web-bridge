@@ -2255,10 +2255,11 @@ def _read_secret_fd(descriptor: int, label: str) -> bytes:
     return raw
 
 
-def connect_server_enforced_readonly(dsn_file: Path) -> Any:
+def connect_server_enforced_readonly_dsn(dsn: str) -> Any:
     if psycopg is None:
         raise AuditError("psycopg is not installed")
-    dsn = _read_secret_text_file(dsn_file, "QuestDB readonly DSN file")
+    if not isinstance(dsn, str) or not dsn or "\x00" in dsn:
+        raise AuditError("QuestDB readonly DSN is invalid")
     try:
         return psycopg.connect(
             dsn,
@@ -2270,6 +2271,12 @@ def connect_server_enforced_readonly(dsn_file: Path) -> Any:
         raise AuditError(
             "cannot connect to QuestDB using readonly DSN file"
         ) from exc
+
+
+def connect_server_enforced_readonly(dsn_file: Path) -> Any:
+    return connect_server_enforced_readonly_dsn(
+        _read_secret_text_file(dsn_file, "QuestDB readonly DSN file")
+    )
 
 
 def _read_query_gate_regular_bytes(

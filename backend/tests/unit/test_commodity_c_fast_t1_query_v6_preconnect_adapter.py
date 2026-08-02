@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -52,7 +53,9 @@ def _fixture(tmp_path: Path) -> tuple[SimpleNamespace, bytes]:
         )
     }
     paths["dsn_file"].write_text("never-opened-test-dsn", encoding="utf-8")
+    paths["dsn_file"].chmod(0o600)
     paths["manifest"].write_text("{}", encoding="utf-8")
+    dsn_info = paths["dsn_file"].lstat()
     args = SimpleNamespace(
         **paths,
         consume_marker=consume_path,
@@ -60,6 +63,14 @@ def _fixture(tmp_path: Path) -> tuple[SimpleNamespace, bytes]:
         expected_endpoint_identity_sha256=_sha(b"endpoint"),
         expected_readonly_principal_sha256=_sha(b"readonly"),
         expected_questdb_build_sha256=_sha(b"questdb"),
+        expected_dsn_file_identity_sha256=_sha(b"dsn-identity"),
+        expected_dsn_device=dsn_info.st_dev,
+        expected_dsn_inode=dsn_info.st_ino,
+        expected_dsn_owner_uid=dsn_info.st_uid,
+        expected_dsn_owner_gid=dsn_info.st_gid,
+        expected_dsn_mode=dsn_info.st_mode & 0o777,
+        expected_dsn_link_count=dsn_info.st_nlink,
+        expected_dsn_size_bytes=dsn_info.st_size,
         consume_raw_sha256=_sha(consume_raw),
         consume_canonical_sha256=_sha(subject.canonical_json(consume)),
         executable_release_raw_sha256="1" * 64,
@@ -110,6 +121,13 @@ def _fixture(tmp_path: Path) -> tuple[SimpleNamespace, bytes]:
     }
     _write_private(paths["launch_marker"], launch)
     return args, capability
+
+
+def _open_dsn(args: SimpleNamespace) -> int:
+    return os.open(
+        args.dsn_file,
+        os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+    )
 
 
 class _Connection:
@@ -164,6 +182,7 @@ def test_v6_claim_and_fake_connection_complete_once(tmp_path: Path) -> None:
         subject.run(
             args,
             capability=capability,
+            dsn_descriptor=_open_dsn(args),
             connector=lambda _path: connection,
             audit_module=_audit(args),
             runtime_preflight=lambda path, **_kwargs: preflights.append(path),
@@ -208,6 +227,7 @@ def test_identity_and_pre_post_drift_fail_closed(
         subject.run(
             args,
             capability=capability,
+            dsn_descriptor=_open_dsn(args),
             connector=lambda _path: _Connection(),
             audit_module=audit,
             runtime_preflight=lambda *_args, **_kwargs: None,
@@ -230,6 +250,7 @@ def test_capability_or_launch_claim_tamper_blocks_before_connector(
         subject.run(
             args,
             capability=b"x" * len(capability),
+            dsn_descriptor=_open_dsn(args),
             connector=connector,
             audit_module=_audit(args),
             runtime_preflight=lambda *_args, **_kwargs: None,
@@ -261,7 +282,7 @@ def test_adapter_cannot_start_standalone_without_inherited_capability() -> None:
         text=True,
     )
     assert result.returncode == 2
-    assert "launch capability descriptor is absent" in result.stderr
+    assert result.stderr.strip().endswith("PRECONNECT_BOUNDARY_FAILED")
 
 
 def test_runner_delivers_capability_only_through_inherited_pipe(tmp_path: Path) -> None:
@@ -269,18 +290,94 @@ def test_runner_delivers_capability_only_through_inherited_pipe(tmp_path: Path) 
     probe.write_text(
         "import os\n"
         f"fd=int(os.environ.pop('{subject.CAPABILITY_FD_ENV}'))\n"
+        f"dsn_fd=int(os.environ.pop('{subject.DSN_FD_ENV}'))\n"
         "value=os.read(fd, 64)\n"
+        "assert os.read(dsn_fd, 64) == b'test-dsn'\n"
         "os.close(fd)\n"
+        "os.close(dsn_fd)\n"
         "print(value.hex())\n",
         encoding="utf-8",
     )
+    dsn_file = tmp_path / "dsn"
+    dsn_file.write_bytes(b"test-dsn")
+    dsn_file.chmod(0o600)
+    dsn_descriptor = os.open(dsn_file, os.O_RDONLY)
     capability = b"q" * subject.CAPABILITY_BYTES
-    result = runtime.run_adapter(
-        [sys.executable, "-I", str(probe)],
-        cwd=tmp_path,
-        timeout=10,
-        launch_capability=capability,
-    )
+    try:
+        result = runtime.run_adapter(
+            [sys.executable, "-I", str(probe)],
+            cwd=tmp_path,
+            timeout=10,
+            launch_capability=capability,
+            dsn_descriptor=dsn_descriptor,
+        )
+    finally:
+        os.close(dsn_descriptor)
     assert result.returncode == 0
     assert result.stdout.strip() == capability.hex()
     assert subject.CAPABILITY_FD_ENV not in result.stdout
+    assert subject.DSN_FD_ENV not in result.stdout
+
+
+def test_atomic_dsn_path_replacement_never_reaches_connector(
+    tmp_path: Path,
+) -> None:
+    args, capability = _fixture(tmp_path)
+    descriptor = _open_dsn(args)
+    replacement = tmp_path / "replacement"
+    replacement.write_bytes(
+        b"replacement-secret".ljust(args.expected_dsn_size_bytes, b"x")
+    )
+    replacement.chmod(0o600)
+    os.replace(replacement, args.dsn_file)
+    connector_calls = 0
+
+    def connector(_dsn: str) -> _Connection:
+        nonlocal connector_calls
+        connector_calls += 1
+        return _Connection()
+
+    with pytest.raises(subject.QueryV6PreconnectError, match="identity mismatch"):
+        subject.run(
+            args,
+            capability=capability,
+            dsn_descriptor=descriptor,
+            connector=connector,
+            audit_module=_audit(args),
+            runtime_preflight=lambda *_args, **_kwargs: None,
+            require_root_owned=False,
+        )
+    assert connector_calls == 0
+
+
+@pytest.mark.parametrize(
+    "failure",
+    (
+        subject.QueryV6PreconnectError(
+            "postgresql://readonly:SUPERSECRET@localhost:8812/qdb"
+        ),
+        RuntimeError("postgresql://readonly:SUPERSECRET@localhost:8812/qdb"),
+    ),
+)
+def test_main_never_prints_secret_bearing_exception(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failure: Exception,
+) -> None:
+    dsn_file = tmp_path / "dsn"
+    dsn_file.write_text("SUPERSECRET", encoding="utf-8")
+    descriptor = os.open(dsn_file, os.O_RDONLY)
+    monkeypatch.setattr(subject, "RUNNING_AS_SCRIPT", True)
+    monkeypatch.setattr(subject.sys, "flags", SimpleNamespace(isolated=1))
+    monkeypatch.setattr(subject, "take_dsn_descriptor", lambda: descriptor)
+    monkeypatch.setattr(
+        subject, "read_launch_capability", lambda: (_ for _ in ()).throw(failure)
+    )
+
+    assert subject.main() == 2
+    captured = capsys.readouterr()
+    rendered = captured.out + captured.err
+    assert "SUPERSECRET" not in rendered
+    assert "postgresql://" not in rendered
+    assert captured.out == ""

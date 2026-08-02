@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import fcntl
 import hashlib
 import hmac
 import os
@@ -128,6 +129,109 @@ def _verify_dsn_metadata(
         raise QueryV6RuntimeError(
             "DSN file metadata does not match the secret-free attestation"
         )
+
+
+def _dsn_stat_identity(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_uid,
+        info.st_gid,
+        stat.S_IMODE(info.st_mode),
+        info.st_nlink,
+        info.st_size,
+    )
+
+
+def _expected_dsn_stat_identity(
+    verified: executable.VerifiedExecutableRelease,
+) -> tuple[int, ...]:
+    attestation = verified.foundation.evidence.dsn_identity_attestation.payload
+    return tuple(
+        int(attestation[field])
+        for field in (
+            "device",
+            "inode",
+            "owner_uid",
+            "owner_gid",
+            "mode",
+            "link_count",
+            "size_bytes",
+        )
+    )
+
+
+def verify_dsn_descriptor_boundary(
+    descriptor: int,
+    dsn_file: Path,
+    verified: executable.VerifiedExecutableRelease,
+) -> None:
+    _verify_dsn_metadata(dsn_file, verified)
+    try:
+        flags = fcntl.fcntl(descriptor, fcntl.F_GETFL)
+        descriptor_info = os.fstat(descriptor)
+        path_info = dsn_file.lstat()
+    except OSError as exc:
+        raise QueryV6RuntimeError("DSN descriptor boundary is unavailable") from exc
+    expected = _expected_dsn_stat_identity(verified)
+    if (
+        flags & os.O_ACCMODE != os.O_RDONLY
+        or not stat.S_ISREG(descriptor_info.st_mode)
+        or not stat.S_ISREG(path_info.st_mode)
+        or _dsn_stat_identity(descriptor_info) != expected
+        or _dsn_stat_identity(path_info) != expected
+    ):
+        raise QueryV6RuntimeError(
+            "DSN descriptor does not match the signed path identity"
+        )
+
+
+def open_verified_dsn_descriptor(
+    dsn_file: Path,
+    verified: executable.VerifiedExecutableRelease,
+) -> int:
+    _verify_dsn_metadata(dsn_file, verified)
+    descriptor: int | None = None
+    try:
+        path_before = dsn_file.lstat()
+        descriptor = os.open(
+            dsn_file,
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+        if descriptor <= 2:
+            duplicate = fcntl.fcntl(
+                descriptor,
+                getattr(fcntl, "F_DUPFD_CLOEXEC", fcntl.F_DUPFD),
+                3,
+            )
+            os.close(descriptor)
+            descriptor = duplicate
+            os.set_inheritable(descriptor, False)
+        descriptor_info = os.fstat(descriptor)
+        path_after = dsn_file.lstat()
+        expected = _expected_dsn_stat_identity(verified)
+        if (
+            not stat.S_ISREG(path_before.st_mode)
+            or not stat.S_ISREG(descriptor_info.st_mode)
+            or not stat.S_ISREG(path_after.st_mode)
+            or _dsn_stat_identity(path_before) != expected
+            or _dsn_stat_identity(descriptor_info) != expected
+            or _dsn_stat_identity(path_after) != expected
+        ):
+            raise QueryV6RuntimeError(
+                "DSN path changed while opening the signed descriptor"
+            )
+        verify_dsn_descriptor_boundary(descriptor, dsn_file, verified)
+        return descriptor
+    except Exception as exc:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        if isinstance(exc, OSError):
+            raise QueryV6RuntimeError("DSN descriptor cannot be opened") from exc
+        raise
 
 
 def verify_query_manifest_file(
@@ -520,6 +624,7 @@ def build_adapter_invocation(
 ) -> list[str]:
     foundation = verified.payload["foundation"]
     execution = verified.payload["execution"]
+    dsn_attestation = verified.foundation.evidence.dsn_identity_attestation.payload
     return [
         execution["python_executable_path"],
         "-I",
@@ -550,6 +655,22 @@ def build_adapter_invocation(
         foundation["expected_readonly_principal_sha256"],
         "--expected-questdb-build-sha256",
         execution["questdb_build_sha256"],
+        "--expected-dsn-file-identity-sha256",
+        foundation["dsn_file_identity_sha256"],
+        "--expected-dsn-device",
+        str(dsn_attestation["device"]),
+        "--expected-dsn-inode",
+        str(dsn_attestation["inode"]),
+        "--expected-dsn-owner-uid",
+        str(dsn_attestation["owner_uid"]),
+        "--expected-dsn-owner-gid",
+        str(dsn_attestation["owner_gid"]),
+        "--expected-dsn-mode",
+        str(dsn_attestation["mode"]),
+        "--expected-dsn-link-count",
+        str(dsn_attestation["link_count"]),
+        "--expected-dsn-size-bytes",
+        str(dsn_attestation["size_bytes"]),
         "--consume-raw-sha256",
         consume_raw_sha256,
         "--consume-canonical-sha256",
@@ -579,8 +700,13 @@ def run_adapter(
     cwd: Path,
     timeout: int,
     launch_capability: bytes | None = None,
+    dsn_descriptor: int | None = None,
     prelaunch_validator: Callable[[], None] | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    if (launch_capability is None) != (dsn_descriptor is None):
+        raise QueryV6RuntimeError(
+            "query-v6 capability and DSN descriptors must be delivered together"
+        )
     if (
         threading.current_thread() is not threading.main_thread()
         or not hasattr(signal, "pthread_sigmask")
@@ -619,11 +745,33 @@ def run_adapter(
                 if len(launch_capability) != preconnect_adapter.CAPABILITY_BYTES:
                     raise QueryV6RuntimeError("query-v6 launch capability is invalid")
                 capability_read_fd, capability_write_fd = os.pipe()
+                if capability_read_fd <= 2 or capability_write_fd <= 2:
+                    raise QueryV6RuntimeError(
+                        "query-v6 capability descriptors are invalid"
+                    )
+                if dsn_descriptor in (capability_read_fd, capability_write_fd):
+                    raise QueryV6RuntimeError(
+                        "query-v6 capability and DSN descriptors overlap"
+                    )
                 os.set_inheritable(capability_read_fd, True)
                 environment[preconnect_adapter.CAPABILITY_FD_ENV] = str(
                     capability_read_fd
                 )
-                pass_fds = (capability_read_fd,)
+                try:
+                    dsn_flags = fcntl.fcntl(dsn_descriptor, fcntl.F_GETFL)
+                    dsn_info = os.fstat(dsn_descriptor)
+                except OSError as exc:
+                    raise QueryV6RuntimeError(
+                        "query-v6 DSN descriptor is invalid"
+                    ) from exc
+                if dsn_flags & os.O_ACCMODE != os.O_RDONLY or not stat.S_ISREG(
+                    dsn_info.st_mode
+                ):
+                    raise QueryV6RuntimeError(
+                        "query-v6 DSN descriptor must be readonly and regular"
+                    )
+                environment[preconnect_adapter.DSN_FD_ENV] = str(dsn_descriptor)
+                pass_fds = (capability_read_fd, dsn_descriptor)
             if prelaunch_validator is not None:
                 prelaunch_validator()
             process = subprocess.Popen(
@@ -835,6 +983,7 @@ def run_authorized_attempt(
         )
         consume_canonical_sha256 = _sha256(canonical_json(consume))
         final_at: datetime | None = None
+        dsn_descriptor: int | None = None
         try:
             consume_raw = read_regular_file_at(
                 guard,
@@ -863,6 +1012,7 @@ def run_authorized_attempt(
                 final.pins,
                 now=final_at,
             )
+            dsn_descriptor = open_verified_dsn_descriptor(dsn_file, final)
             invocation = build_adapter_invocation(
                 execution_adapter_path.resolve(strict=True),
                 dsn_file,
@@ -879,6 +1029,15 @@ def run_authorized_attempt(
                 try:
                     verify_query_manifest_file(manifest_path, final)
                     _verify_dsn_metadata(dsn_file, final)
+                    if dsn_descriptor is None:
+                        raise QueryV6RuntimeError(
+                            "query-v6 DSN descriptor is no longer available"
+                        )
+                    verify_dsn_descriptor_boundary(
+                        dsn_descriptor,
+                        dsn_file,
+                        final,
+                    )
                     verify_execution_adapter(
                         execution_adapter_path,
                         final,
@@ -896,6 +1055,7 @@ def run_authorized_attempt(
 
             final_prelaunch_check()
             launch_capability = os.urandom(preconnect_adapter.CAPABILITY_BYTES)
+            dsn_attestation = final.foundation.evidence.dsn_identity_attestation.payload
             invocation_values = {
                 "dsn_file": str(dsn_file.resolve(strict=True)),
                 "manifest": str(manifest_path.resolve(strict=True)),
@@ -920,6 +1080,16 @@ def run_authorized_attempt(
                 "expected_questdb_build_sha256": final.payload["execution"][
                     "questdb_build_sha256"
                 ],
+                "expected_dsn_file_identity_sha256": final.payload["foundation"][
+                    "dsn_file_identity_sha256"
+                ],
+                "expected_dsn_device": str(dsn_attestation["device"]),
+                "expected_dsn_inode": str(dsn_attestation["inode"]),
+                "expected_dsn_owner_uid": str(dsn_attestation["owner_uid"]),
+                "expected_dsn_owner_gid": str(dsn_attestation["owner_gid"]),
+                "expected_dsn_mode": str(dsn_attestation["mode"]),
+                "expected_dsn_link_count": str(dsn_attestation["link_count"]),
+                "expected_dsn_size_bytes": str(dsn_attestation["size_bytes"]),
                 "consume_raw_sha256": consume_raw_sha256,
                 "consume_canonical_sha256": consume_canonical_sha256,
                 "executable_release_raw_sha256": final.raw_sha256,
@@ -1034,6 +1204,7 @@ def run_authorized_attempt(
                 cwd=attempt_dir,
                 timeout=verified.payload["execution"]["maximum_runtime_seconds"],
                 launch_capability=launch_capability,
+                dsn_descriptor=dsn_descriptor,
                 prelaunch_validator=final_prelaunch_check,
             )
             if result.returncode not in {0, 1}:
@@ -1093,6 +1264,11 @@ def run_authorized_attempt(
     except (FileExistsError, OneShotError) as exc:
         raise QueryV6RuntimeError(str(exc)) from exc
     finally:
+        if "dsn_descriptor" in locals() and dsn_descriptor is not None:
+            try:
+                os.close(dsn_descriptor)
+            except OSError:
+                pass
         guard.close()
 
 

@@ -585,6 +585,48 @@ def test_parent_full_preflight_blocks_tamper_immediately_before_popen(
     assert network_attempts == 0
 
 
+def test_atomic_dsn_path_replacement_fails_before_popen(
+    tmp_path: Path,
+) -> None:
+    values = _fixture(tmp_path)
+    popen_calls = 0
+    network_attempts = 0
+
+    def launch(
+        _invocation: list[str], **kwargs: Any
+    ) -> subprocess.CompletedProcess[str]:
+        nonlocal popen_calls, network_attempts
+        original_size = values["dsn_file"].stat().st_size
+        replacement = tmp_path / "dsn-replacement"
+        replacement.write_bytes(b"replacement-secret".ljust(original_size, b"x"))
+        replacement.chmod(0o600)
+        os.replace(replacement, values["dsn_file"])
+        kwargs["prelaunch_validator"]()
+        popen_calls += 1
+        network_attempts += 1
+        return subprocess.CompletedProcess([], 0, "", "")
+
+    code, terminal = runtime.run_authorized_attempt(
+        values["verified"],
+        values["release_path"],
+        values["manifest_path"],
+        values["dsn_file"],
+        values["adapter_path"],
+        lambda _at: values["verified"],
+        clock=lambda: NOW,
+        adapter_launcher=launch,
+        package_preflight=_successful_package_preflight(values["verified"]),
+        require_root_owned_parent=False,
+        require_root_owned_adapter=False,
+    )
+    assert code == 2
+    assert terminal["terminal_state"] == "FAILED_BEFORE_NETWORK"
+    assert terminal["adapter_launch_attempted"] is False
+    assert terminal["production_query_attempted"] is False
+    assert popen_calls == 0
+    assert network_attempts == 0
+
+
 @pytest.mark.parametrize("drift_target", ["adapter", "dsn"])
 def test_final_adapter_or_dsn_drift_blocks_launch(
     tmp_path: Path,
@@ -782,16 +824,63 @@ def test_default_run_adapter_preflight_failure_never_calls_popen_or_network(
         raise runtime.QueryV6PrelaunchError("simulated final package drift")
 
     monkeypatch.setattr(runtime.subprocess, "Popen", forbidden_popen)
-    with pytest.raises(runtime.QueryV6PrelaunchError, match="package drift"):
-        runtime.run_adapter(
-            [sys.executable, "-I", str(tmp_path / "never-started.py")],
-            cwd=tmp_path,
-            timeout=10,
-            launch_capability=b"p" * runtime.preconnect_adapter.CAPABILITY_BYTES,
-            prelaunch_validator=fail_prelaunch,
-        )
+    dsn_file = tmp_path / "dsn"
+    dsn_file.write_text("test-dsn", encoding="utf-8")
+    dsn_file.chmod(0o600)
+    dsn_descriptor = os.open(dsn_file, os.O_RDONLY)
+    try:
+        with pytest.raises(runtime.QueryV6PrelaunchError, match="package drift"):
+            runtime.run_adapter(
+                [sys.executable, "-I", str(tmp_path / "never-started.py")],
+                cwd=tmp_path,
+                timeout=10,
+                launch_capability=(b"p" * runtime.preconnect_adapter.CAPABILITY_BYTES),
+                dsn_descriptor=dsn_descriptor,
+                prelaunch_validator=fail_prelaunch,
+            )
+    finally:
+        os.close(dsn_descriptor)
     assert popen_calls == 0
     assert network_attempts == 0
+
+
+def test_secret_bearing_child_stderr_never_enters_terminal_or_artifacts(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    values = _fixture(tmp_path)
+    secret = "postgresql://readonly:SUPERSECRET@localhost:8812/qdb"
+
+    def launch(
+        invocation: list[str], **_kwargs: Any
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(invocation, 2, "", secret)
+
+    code, terminal = runtime.run_authorized_attempt(
+        values["verified"],
+        values["release_path"],
+        values["manifest_path"],
+        values["dsn_file"],
+        values["adapter_path"],
+        lambda _at: values["verified"],
+        clock=lambda: NOW,
+        adapter_launcher=launch,
+        package_preflight=_successful_package_preflight(values["verified"]),
+        require_root_owned_parent=False,
+        require_root_owned_adapter=False,
+    )
+    captured = capsys.readouterr()
+    assert code == 2
+    assert terminal["terminal_state"] == "OUTCOME_UNKNOWN"
+    assert secret not in (captured.out + captured.err)
+    assert secret.encode() not in runtime.canonical_json(terminal)
+    for path in values["custody"].rglob("*"):
+        if path.is_file():
+            assert secret.encode() not in path.read_bytes()
+    artifacts = (
+        values["custody"] / values["verified"].payload["attempt_id"] / "artifacts"
+    )
+    assert not list(artifacts.iterdir())
 
 
 def test_run_adapter_timeout_kills_forked_process_group(tmp_path: Path) -> None:

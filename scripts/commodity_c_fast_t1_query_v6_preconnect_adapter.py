@@ -4,14 +4,15 @@
 The parent runtime burns the executable release and creates a launch claim
 before this process exists.  This process accepts the corresponding opaque
 capability through an inherited pipe, revalidates the exact consume/claim,
-runtime package, interpreter and dependency closure, and only then opens the
-DSN.  It never imports or verifies a legacy query-v3/v4/v5 release, consume
-marker, launch gate or launch capability.
+runtime package, interpreter and dependency closure, and only then reads the
+inherited attested DSN descriptor.  It never imports or verifies a legacy
+query-v3/v4/v5 release, consume marker, launch gate or launch capability.
 """
 
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import hmac
 import importlib.util
@@ -28,11 +29,13 @@ from typing import Any, Callable, Mapping
 RUNNING_AS_SCRIPT = __name__ == "__main__"
 CAPABILITY_BYTES = 32
 CAPABILITY_FD_ENV = "BK_C_FAST_QUERY_V6_LAUNCH_CAPABILITY_FD"
+DSN_FD_ENV = "BK_C_FAST_QUERY_V6_DSN_FD"
 CAPABILITY_DOMAIN = b"vnpy-web-bridge:c-fast-t1:query-v6:launch-capability:v1"
 SCHEMA_VERSION = "commodity_c_fast_t1_query_child_launched_v6"
 PURPOSE = "c_fast_t1_query_v6_one_shot_launch_claim"
 CANDIDATE_ID = "C_FAST_CROSS_SECTION_NEUTRAL"
 MAX_JSON_BYTES = 8 * 1024 * 1024
+MAX_DSN_BYTES = 64 * 1024
 SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 ATTEMPT_RE = re.compile(r"^attempt-[0-9a-f]{64}$")
 
@@ -76,6 +79,14 @@ def invocation_binding_payload(values: Mapping[str, str]) -> dict[str, str]:
         "expected_endpoint_identity_sha256",
         "expected_readonly_principal_sha256",
         "expected_questdb_build_sha256",
+        "expected_dsn_file_identity_sha256",
+        "expected_dsn_device",
+        "expected_dsn_inode",
+        "expected_dsn_owner_uid",
+        "expected_dsn_owner_gid",
+        "expected_dsn_mode",
+        "expected_dsn_link_count",
+        "expected_dsn_size_bytes",
         "consume_raw_sha256",
         "consume_canonical_sha256",
         "executable_release_raw_sha256",
@@ -110,8 +121,24 @@ def invocation_binding_payload(values: Mapping[str, str]) -> dict[str, str]:
         if not path.is_absolute():
             raise QueryV6PreconnectError(f"query-v6 adapter {field} must be absolute")
         normalized[field] = str(path)
+    numeric_fields = {
+        "expected_dsn_device",
+        "expected_dsn_inode",
+        "expected_dsn_owner_uid",
+        "expected_dsn_owner_gid",
+        "expected_dsn_mode",
+        "expected_dsn_link_count",
+        "expected_dsn_size_bytes",
+    }
+    for field in numeric_fields:
+        if not normalized[field].isdigit():
+            raise QueryV6PreconnectError(f"query-v6 adapter {field} is invalid")
     for field, value in normalized.items():
-        if field not in path_fields and SHA_RE.fullmatch(value) is None:
+        if (
+            field not in path_fields
+            and field not in numeric_fields
+            and SHA_RE.fullmatch(value) is None
+        ):
             raise QueryV6PreconnectError(f"query-v6 adapter {field} is invalid")
     return normalized
 
@@ -261,6 +288,8 @@ def read_launch_capability() -> bytes:
     if not raw_fd.isdigit():
         raise QueryV6PreconnectError("query-v6 launch capability descriptor is absent")
     descriptor = int(raw_fd)
+    if descriptor <= 2:
+        raise QueryV6PreconnectError("query-v6 launch capability descriptor is invalid")
     try:
         chunks: list[bytes] = []
         remaining = CAPABILITY_BYTES + 1
@@ -284,6 +313,91 @@ def read_launch_capability() -> bytes:
     if len(capability) != CAPABILITY_BYTES or trailing:
         raise QueryV6PreconnectError("query-v6 launch capability is invalid")
     return capability
+
+
+def take_dsn_descriptor() -> int:
+    raw_fd = os.environ.pop(DSN_FD_ENV, "")
+    if not raw_fd.isdigit():
+        raise QueryV6PreconnectError("query-v6 DSN descriptor is absent")
+    descriptor = int(raw_fd)
+    if descriptor <= 2:
+        raise QueryV6PreconnectError("query-v6 DSN descriptor is invalid")
+    try:
+        os.set_inheritable(descriptor, False)
+    except OSError as exc:
+        raise QueryV6PreconnectError("query-v6 DSN descriptor is invalid") from exc
+    return descriptor
+
+
+def _read_bounded_descriptor(descriptor: int, limit: int) -> bytes:
+    chunks: list[bytes] = []
+    remaining = limit + 1
+    while remaining:
+        chunk = os.read(descriptor, min(65536, remaining))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def read_dsn_secret(descriptor: int, args: argparse.Namespace) -> str:
+    try:
+        flags = fcntl.fcntl(descriptor, fcntl.F_GETFL)
+        before = os.fstat(descriptor)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        first = _read_bounded_descriptor(descriptor, MAX_DSN_BYTES)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        second = _read_bounded_descriptor(descriptor, MAX_DSN_BYTES)
+        after = os.fstat(descriptor)
+    except OSError as exc:
+        raise QueryV6PreconnectError("query-v6 DSN descriptor cannot be read") from exc
+    expected = (
+        args.expected_dsn_device,
+        args.expected_dsn_inode,
+        args.expected_dsn_owner_uid,
+        args.expected_dsn_owner_gid,
+        args.expected_dsn_mode,
+        args.expected_dsn_link_count,
+        args.expected_dsn_size_bytes,
+    )
+    actual_before = (
+        before.st_dev,
+        before.st_ino,
+        before.st_uid,
+        before.st_gid,
+        stat.S_IMODE(before.st_mode),
+        before.st_nlink,
+        before.st_size,
+    )
+    actual_after = (
+        after.st_dev,
+        after.st_ino,
+        after.st_uid,
+        after.st_gid,
+        stat.S_IMODE(after.st_mode),
+        after.st_nlink,
+        after.st_size,
+    )
+    if (
+        flags & os.O_ACCMODE != os.O_RDONLY
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_uid != os.geteuid()
+        or stat.S_IMODE(before.st_mode) & 0o077
+        or actual_before != expected
+        or actual_after != expected
+        or first != second
+        or len(first) != before.st_size
+        or len(first) > MAX_DSN_BYTES
+    ):
+        raise QueryV6PreconnectError("query-v6 DSN descriptor identity mismatch")
+    try:
+        value = first.decode("utf-8").strip()
+    except UnicodeDecodeError as exc:
+        raise QueryV6PreconnectError("query-v6 DSN descriptor is not UTF-8") from exc
+    if not value or "\x00" in value:
+        raise QueryV6PreconnectError("query-v6 DSN descriptor is invalid")
+    return value
 
 
 LAUNCH_FIELDS = frozenset(
@@ -446,6 +560,14 @@ def _invocation_values(args: argparse.Namespace) -> dict[str, str]:
             "expected_endpoint_identity_sha256",
             "expected_readonly_principal_sha256",
             "expected_questdb_build_sha256",
+            "expected_dsn_file_identity_sha256",
+            "expected_dsn_device",
+            "expected_dsn_inode",
+            "expected_dsn_owner_uid",
+            "expected_dsn_owner_gid",
+            "expected_dsn_mode",
+            "expected_dsn_link_count",
+            "expected_dsn_size_bytes",
             "consume_raw_sha256",
             "consume_canonical_sha256",
             "executable_release_raw_sha256",
@@ -484,48 +606,52 @@ def run(
     args: argparse.Namespace,
     *,
     capability: bytes,
-    connector: Callable[[Path], Any] | None = None,
+    dsn_descriptor: int,
+    connector: Callable[[str], Any] | None = None,
     audit_module: ModuleType | None = None,
     runtime_preflight: Callable[..., Any] | None = None,
     require_root_owned: bool = True,
 ) -> int:
-    validate_output_paths(args)
-    verify_launch_claim(args, capability, require_root_owned=require_root_owned)
-    package = _package_module()
-    preflight = runtime_preflight or package.preflight_installed_runtime
-    preflight(
-        args.package_manifest,
-        expected_manifest_sha256=args.adapter_package_manifest_sha256,
-        expected_package_root_identity_sha256=(
-            args.adapter_package_root_identity_sha256
-        ),
-        expected_python_executable_sha256=args.python_executable_sha256,
-        expected_dependency_closure_sha256=(args.python_dependency_closure_sha256),
-        require_root_owned=require_root_owned,
-    )
-    audit = audit_module or _audit_module()
-    manifest, contracts, sessions, windows = audit.load_manifest(args.manifest)
-    if not hmac.compare_digest(
-        audit.canonical_manifest_sha256(manifest),
-        args.expected_manifest_sha256,
-    ):
-        raise QueryV6PreconnectError("query-v6 manifest binding mismatch")
-    # This is the last v6-only boundary before the DSN secret is opened.
-    verify_launch_claim(args, capability, require_root_owned=require_root_owned)
-    preflight(
-        args.package_manifest,
-        expected_manifest_sha256=args.adapter_package_manifest_sha256,
-        expected_package_root_identity_sha256=(
-            args.adapter_package_root_identity_sha256
-        ),
-        expected_python_executable_sha256=args.python_executable_sha256,
-        expected_dependency_closure_sha256=(args.python_dependency_closure_sha256),
-        require_root_owned=require_root_owned,
-    )
-    connection_factory = connector or audit.connect_server_enforced_readonly
-    conn = None
     try:
-        conn = connection_factory(args.dsn_file)
+        validate_output_paths(args)
+        verify_launch_claim(args, capability, require_root_owned=require_root_owned)
+        package = _package_module()
+        preflight = runtime_preflight or package.preflight_installed_runtime
+        preflight(
+            args.package_manifest,
+            expected_manifest_sha256=args.adapter_package_manifest_sha256,
+            expected_package_root_identity_sha256=(
+                args.adapter_package_root_identity_sha256
+            ),
+            expected_python_executable_sha256=args.python_executable_sha256,
+            expected_dependency_closure_sha256=(args.python_dependency_closure_sha256),
+            require_root_owned=require_root_owned,
+        )
+        audit = audit_module or _audit_module()
+        manifest, contracts, sessions, windows = audit.load_manifest(args.manifest)
+        if not hmac.compare_digest(
+            audit.canonical_manifest_sha256(manifest),
+            args.expected_manifest_sha256,
+        ):
+            raise QueryV6PreconnectError("query-v6 manifest binding mismatch")
+        # This is the last v6-only boundary before the DSN secret is opened.
+        verify_launch_claim(args, capability, require_root_owned=require_root_owned)
+        preflight(
+            args.package_manifest,
+            expected_manifest_sha256=args.adapter_package_manifest_sha256,
+            expected_package_root_identity_sha256=(
+                args.adapter_package_root_identity_sha256
+            ),
+            expected_python_executable_sha256=args.python_executable_sha256,
+            expected_dependency_closure_sha256=(args.python_dependency_closure_sha256),
+            require_root_owned=require_root_owned,
+        )
+        dsn = read_dsn_secret(dsn_descriptor, args)
+        os.close(dsn_descriptor)
+        dsn_descriptor = -1
+        connection_factory = connector or audit.connect_server_enforced_readonly_dsn
+        conn = None
+        conn = connection_factory(dsn)
         endpoint_hash = audit.connected_endpoint_identity_sha256(conn)
         if not hmac.compare_digest(
             endpoint_hash, args.expected_endpoint_identity_sha256
@@ -580,7 +706,12 @@ def run(
             json.dumps(proof, ensure_ascii=False, indent=2, sort_keys=True),
         )
     finally:
-        if conn is not None:
+        if dsn_descriptor >= 0:
+            try:
+                os.close(dsn_descriptor)
+            except OSError:
+                pass
+        if "conn" in locals() and conn is not None:
             try:
                 conn.close()
             except Exception:
@@ -607,6 +738,7 @@ def parse_args() -> argparse.Namespace:
         "expected-endpoint-identity-sha256",
         "expected-readonly-principal-sha256",
         "expected-questdb-build-sha256",
+        "expected-dsn-file-identity-sha256",
         "consume-raw-sha256",
         "consume-canonical-sha256",
         "executable-release-raw-sha256",
@@ -619,6 +751,16 @@ def parse_args() -> argparse.Namespace:
         "python-dependency-closure-sha256",
     ):
         parser.add_argument(f"--{flag}", required=True)
+    for flag in (
+        "expected-dsn-device",
+        "expected-dsn-inode",
+        "expected-dsn-owner-uid",
+        "expected-dsn-owner-gid",
+        "expected-dsn-mode",
+        "expected-dsn-link-count",
+        "expected-dsn-size-bytes",
+    ):
+        parser.add_argument(f"--{flag}", type=int, required=True)
     return parser.parse_args()
 
 
@@ -626,12 +768,40 @@ def main() -> int:
     if not RUNNING_AS_SCRIPT or sys.flags.isolated != 1:
         print("query-v6 adapter requires isolated Python (-I)", file=sys.stderr)
         return 2
+    dsn_descriptor: int | None = None
     try:
+        dsn_descriptor = take_dsn_descriptor()
+        capability_descriptor = os.environ.get(CAPABILITY_FD_ENV, "")
+        if capability_descriptor == str(dsn_descriptor):
+            raise QueryV6PreconnectError(
+                "query-v6 launch capability and DSN descriptors overlap"
+            )
         capability = read_launch_capability()
-        return run(parse_args(), capability=capability)
-    except Exception as exc:
-        print(f"query-v6 pre-connect adapter failed closed: {exc}", file=sys.stderr)
+        owned_dsn_descriptor = dsn_descriptor
+        dsn_descriptor = None
+        return run(
+            parse_args(),
+            capability=capability,
+            dsn_descriptor=owned_dsn_descriptor,
+        )
+    except QueryV6PreconnectError:
+        print(
+            "query-v6 pre-connect adapter failed closed: PRECONNECT_BOUNDARY_FAILED",
+            file=sys.stderr,
+        )
         return 2
+    except Exception:
+        print(
+            "query-v6 pre-connect adapter failed closed: UNEXPECTED_FAILURE",
+            file=sys.stderr,
+        )
+        return 2
+    finally:
+        if dsn_descriptor is not None:
+            try:
+                os.close(dsn_descriptor)
+            except OSError:
+                pass
 
 
 if __name__ == "__main__":
