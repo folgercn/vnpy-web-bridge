@@ -81,14 +81,16 @@ def _receipt(
     *,
     exact_contracts: list[str] | None = None,
     expires_at: datetime | None = None,
+    trigger: str = "startup",
+    observed_at: datetime = NOW,
 ) -> CFastExecutionQualityRuntimeRevalidationDTO:
     core = {
         "schema_version": (
             "commodity_c_fast_execution_quality_runtime_revalidation_v1"
         ),
-        "trigger": "startup",
-        "revalidated_at_utc": NOW.isoformat().replace("+00:00", "Z"),
-        "valid_until_utc": (expires_at or NOW + timedelta(minutes=5))
+        "trigger": trigger,
+        "revalidated_at_utc": observed_at.isoformat().replace("+00:00", "Z"),
+        "valid_until_utc": (expires_at or observed_at + timedelta(minutes=5))
         .isoformat()
         .replace("+00:00", "Z"),
         "exact_contracts": exact_contracts or ["SHFE.cu2612"],
@@ -313,6 +315,35 @@ def test_expiry_blocks_before_queue_or_worker_write(tmp_path: Path) -> None:
     assert result["offer_state"] == "BLOCKED_FAIL_CLOSED"
     assert subject.status()["last_error"] == "REVALIDATION_RECEIPT_EXPIRED"
     assert worker.status()["snapshot_record_count"] == 0
+    subject.stop()
+
+
+def test_stopped_fanout_refreshes_fresh_receipt_and_clears_local_block(
+    tmp_path: Path,
+) -> None:
+    now = [NOW]
+    subject, worker = _fanout(tmp_path, clock=lambda: now[0])
+    now[0] = NOW + timedelta(minutes=6)
+    assert subject.offer_tick(_tick())["offer_state"] == "BLOCKED_FAIL_CLOSED"
+    assert subject.stop()["worker_thread_running"] is False
+
+    refreshed = subject.refresh_preverified_subscription(
+        worker=worker,
+        revalidation_receipt=_receipt(
+            trigger="recovery",
+            observed_at=now[0],
+        ),
+    )
+
+    assert refreshed["blocked_fail_closed"] is False
+    assert refreshed["subscription_generation"] == 2
+    assert refreshed["tick_input_accepting"] is False
+    assert subject.start()["tick_input_accepting"] is True
+    assert subject.offer_tick(_tick())["offer_state"] == (
+        "ENQUEUED_PREVERIFIED_EXACT_CONTRACT"
+    )
+    subject.wait_until_idle()
+    assert worker.status()["snapshot_record_count"] == 1
     subject.stop()
 
 

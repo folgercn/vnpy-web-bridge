@@ -17,7 +17,17 @@ from app.schemas.commodity_c_fast_execution_quality_runtime import (
     ArtifactRole,
     CFastExecutionQualityArtifactVerificationDTO,
     CFastExecutionQualityRuntimeRevalidationDTO,
+    CFastExecutionQualityVerifiedRuntimeInputsDTO,
     RevalidationTrigger,
+)
+from app.schemas.commodity_c_fast_execution_policy import (
+    CFastExecutionQualityCollectionPolicyV2DTO,
+)
+from app.schemas.commodity_c_fast_execution_quality import (
+    CFastVirtualIntentPlanDTO,
+)
+from app.schemas.commodity_c_fast_execution_quality_score import (
+    CFastExecutionQualityContractSpecDTO,
 )
 
 
@@ -92,11 +102,27 @@ class ArtifactVerificationRequest:
     observed_at_utc: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class SignedArtifactVerification:
+    """Role verifier output tied to the exact bytes in its request.
+
+    Only the four fields needed by the Tick worker may carry a typed value.
+    The stable-file adapter validates their role, exact-contract and hash joins
+    before releasing one atomic runtime-input bundle.
+    """
+
+    verification: CFastExecutionQualityArtifactVerificationDTO
+    preverified_plan: CFastVirtualIntentPlanDTO | None = None
+    source_snapshot_receipt_sha256: str | None = None
+    score_policy: CFastExecutionQualityCollectionPolicyV2DTO | None = None
+    contract_specs: tuple[CFastExecutionQualityContractSpecDTO, ...] | None = None
+
+
 class SignedArtifactVerifier(Protocol):
     def __call__(
         self,
         request: ArtifactVerificationRequest,
-    ) -> CFastExecutionQualityArtifactVerificationDTO: ...
+    ) -> SignedArtifactVerification: ...
 
 
 @dataclass(frozen=True)
@@ -193,7 +219,7 @@ class CommodityCFastExecutionQualityArtifactRevalidator:
         self,
         trigger: RevalidationTrigger,
         observed_at_utc: datetime,
-    ) -> CFastExecutionQualityRuntimeRevalidationDTO:
+    ) -> CFastExecutionQualityVerifiedRuntimeInputsDTO:
         self._require_utc(observed_at_utc)
         root = self._open_custody_root()
         if set(self._artifact_paths) != set(ARTIFACT_ROLES):
@@ -221,6 +247,7 @@ class CommodityCFastExecutionQualityArtifactRevalidator:
             verified: dict[
                 ArtifactRole, CFastExecutionQualityArtifactVerificationDTO
             ] = {}
+            signed_results: dict[ArtifactRole, SignedArtifactVerification] = {}
             for role in ARTIFACT_ROLES:
                 artifact = opened[role]
                 candidate = self._artifact_verifiers[role](
@@ -234,8 +261,12 @@ class CommodityCFastExecutionQualityArtifactRevalidator:
                         observed_at_utc=observed_at_utc,
                     )
                 )
+                if type(candidate) is not SignedArtifactVerification:
+                    raise CFastExecutionQualityArtifactRevalidationError(
+                        "ARTIFACT_VERIFIER_RESULT_TYPE_INVALID"
+                    )
                 result = CFastExecutionQualityArtifactVerificationDTO.model_validate(
-                    candidate
+                    candidate.verification
                 )
                 if (
                     result.artifact_role != role
@@ -248,8 +279,10 @@ class CommodityCFastExecutionQualityArtifactRevalidator:
                         "ARTIFACT_VERIFIER_IDENTITY_MISMATCH"
                     )
                 verified[role] = result
+                signed_results[role] = candidate
 
             self._verify_join(verified, opened, observed_at_utc)
+            typed_inputs = self._verify_typed_inputs(signed_results)
             for role in ARTIFACT_ROLES:
                 reread = self._read_exact(role, self._artifact_paths[role], root)
                 original = opened[role]
@@ -299,9 +332,94 @@ class CommodityCFastExecutionQualityArtifactRevalidator:
             "custody_state": "VERIFIED",
             **_FALSE_AUTHORITY,
         }
-        return CFastExecutionQualityRuntimeRevalidationDTO.model_validate(
+        receipt = CFastExecutionQualityRuntimeRevalidationDTO.model_validate(
             {**core, "receipt_sha256": _sha256(_canonical_json(core))}
         )
+        bundle_core = {
+            "schema_version": (
+                "commodity_c_fast_execution_quality_verified_runtime_inputs_v1"
+            ),
+            "revalidation_receipt": receipt.model_dump(mode="json"),
+            "preverified_plan": typed_inputs["preverified_plan"].model_dump(
+                mode="json"
+            ),
+            "source_snapshot_receipt_sha256": typed_inputs[
+                "source_snapshot_receipt_sha256"
+            ],
+            "score_policy": typed_inputs["score_policy"].model_dump(mode="json"),
+            "score_policy_hash": _sha256(
+                _canonical_json(
+                    typed_inputs["score_policy"].model_dump(mode="json")
+                )
+            ),
+            "contract_specs": [
+                spec.model_dump(mode="json")
+                for spec in typed_inputs["contract_specs"]
+            ],
+        }
+        return CFastExecutionQualityVerifiedRuntimeInputsDTO.model_validate(
+            {
+                **bundle_core,
+                "verified_inputs_sha256": _sha256(_canonical_json(bundle_core)),
+            }
+        )
+
+    @staticmethod
+    def _verify_typed_inputs(
+        results: Mapping[ArtifactRole, SignedArtifactVerification],
+    ) -> dict[str, Any]:
+        expected_fields: dict[ArtifactRole, tuple[str, ...]] = {
+            "signed_p0_acceptance": (),
+            "collection_admission": (),
+            "execution_policy": ("score_policy",),
+            "signed_snapshot": ("source_snapshot_receipt_sha256",),
+            "virtual_intent_plan": ("preverified_plan",),
+            "contract_spec_set": ("contract_specs",),
+            "custody_binding": (),
+        }
+        fields = (
+            "preverified_plan",
+            "source_snapshot_receipt_sha256",
+            "score_policy",
+            "contract_specs",
+        )
+        for role in ARTIFACT_ROLES:
+            populated = tuple(
+                field for field in fields if getattr(results[role], field) is not None
+            )
+            if populated != expected_fields[role]:
+                raise CFastExecutionQualityArtifactRevalidationError(
+                    "ARTIFACT_TYPED_INPUT_ROLE_MISMATCH"
+                )
+        plan = results["virtual_intent_plan"].preverified_plan
+        source_receipt = results["signed_snapshot"].source_snapshot_receipt_sha256
+        policy = results["execution_policy"].score_policy
+        specs = results["contract_spec_set"].contract_specs
+        if (
+            type(plan) is not CFastVirtualIntentPlanDTO
+            or not isinstance(source_receipt, str)
+            or type(policy) is not CFastExecutionQualityCollectionPolicyV2DTO
+            or type(specs) is not tuple
+            or any(type(spec) is not CFastExecutionQualityContractSpecDTO for spec in specs)
+        ):
+            raise CFastExecutionQualityArtifactRevalidationError(
+                "ARTIFACT_TYPED_INPUT_TYPE_INVALID"
+            )
+        return {
+            "preverified_plan": CFastVirtualIntentPlanDTO.model_validate(
+                plan.model_dump(mode="json")
+            ),
+            "source_snapshot_receipt_sha256": source_receipt,
+            "score_policy": CFastExecutionQualityCollectionPolicyV2DTO.model_validate(
+                policy.model_dump(mode="json")
+            ),
+            "contract_specs": tuple(
+                CFastExecutionQualityContractSpecDTO.model_validate(
+                    spec.model_dump(mode="json")
+                )
+                for spec in specs
+            ),
+        }
 
     def _verify_join(
         self,

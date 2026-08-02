@@ -150,20 +150,6 @@ async def startup() -> None:
             "C_FAST execution-quality runtime remains isolated: %s",
             execution_quality_status["assembly_state"],
         )
-    if (
-        execution_quality_status["configured_enabled"] is False
-        or execution_quality_status["runtime_active"] is True
-    ):
-        execution_quality_tick_status = (
-            commodity_c_fast_execution_quality_tick_fanout.start()
-        )
-        if str(execution_quality_tick_status["fanout_state"]).startswith(
-            "BLOCKED_"
-        ):
-            logger.warning(
-                "C_FAST execution-quality Tick fan-out remains isolated: %s",
-                execution_quality_tick_status["fanout_state"],
-            )
     if settings.commodity_c_fast_simnow_execution_permit_enabled:
         # The runtime image must package the exact #165 verifier module before
         # this default-off bridge can be enabled.  Missing verifier code is a
@@ -196,7 +182,6 @@ async def startup() -> None:
 
 @app.on_event("shutdown")
 async def shutdown() -> None:
-    commodity_c_fast_execution_quality_tick_fanout.stop()
     commodity_c_fast_execution_quality_production_assembly.stop()
     await commodity_simnow_service.stop()
     await monitoring_service.stop()

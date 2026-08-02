@@ -11,6 +11,9 @@ from app.schemas.commodity_c_fast_execution_quality_runtime import (
 from app.services.commodity_c_fast_execution_quality_evidence_export import (
     CreateOnlyExecutionQualityEvidenceExportStore,
 )
+from app.services.commodity_c_fast_execution_quality_horizon_worker import (
+    PreverifiedTickHorizonWorker,
+)
 from app.services.commodity_c_fast_execution_quality_readonly_repository import (
     CommodityCFastExecutionQualityReadonlyRepository,
 )
@@ -25,6 +28,10 @@ from app.services.commodity_c_fast_execution_quality_runtime_admission import (
 from app.services.commodity_c_fast_execution_quality_sidecar import (
     CreateOnlyExecutionQualityJournal,
     OfflineExecutionQualitySidecar,
+)
+from app.services.commodity_c_fast_execution_quality_tick_fanout import (
+    CommodityCFastExecutionQualityTickFanout,
+    commodity_c_fast_execution_quality_tick_fanout,
 )
 
 _FALSE_AUTHORITY = {
@@ -98,6 +105,12 @@ class CommodityCFastExecutionQualityProductionAssembly:
         self._evidence_export_store: (
             CreateOnlyExecutionQualityEvidenceExportStore | None
         ) = None
+        self._horizon_worker: PreverifiedTickHorizonWorker | None = None
+        self._tick_fanout: CommodityCFastExecutionQualityTickFanout | None = None
+        self._registered_input_identity: (
+            tuple[str, str, str, tuple[str, ...]] | None
+        ) = None
+        self._verified_inputs_sha256: str | None = None
         self._component_binding_error: str | None = None
         self._last_export_receipt: dict[str, object] | None = None
         self._projection_revalidation_generation: int | None = None
@@ -143,6 +156,35 @@ class CommodityCFastExecutionQualityProductionAssembly:
             self._evidence_export_store = evidence_export_store
             self._component_binding_error = None
 
+    def bind_tick_runtime_components(
+        self,
+        *,
+        horizon_worker: PreverifiedTickHorizonWorker,
+        tick_fanout: CommodityCFastExecutionQualityTickFanout,
+    ) -> None:
+        if type(horizon_worker) is not PreverifiedTickHorizonWorker:
+            raise TypeError("PRODUCTION_ASSEMBLY_HORIZON_WORKER_TYPE_INVALID")
+        if type(tick_fanout) is not CommodityCFastExecutionQualityTickFanout:
+            raise TypeError("PRODUCTION_ASSEMBLY_TICK_FANOUT_TYPE_INVALID")
+        with self._lock:
+            if self._started:
+                raise CFastExecutionQualityProductionAssemblyError(
+                    "PRODUCTION_ASSEMBLY_TICK_COMPONENT_BIND_AFTER_START_FORBIDDEN"
+                )
+            if self._sidecar is None or not horizon_worker.is_bound_to(self._sidecar):
+                raise CFastExecutionQualityProductionAssemblyError(
+                    "PRODUCTION_ASSEMBLY_WORKER_SOURCE_MISMATCH"
+                )
+            current = (self._horizon_worker, self._tick_fanout)
+            requested = (horizon_worker, tick_fanout)
+            if any(value is not None for value in current) and current != requested:
+                raise CFastExecutionQualityProductionAssemblyError(
+                    "PRODUCTION_ASSEMBLY_TICK_COMPONENTS_ALREADY_BOUND"
+                )
+            self._horizon_worker = horizon_worker
+            self._tick_fanout = tick_fanout
+            self._component_binding_error = None
+
     def record_component_binding_failure(self, exc: BaseException) -> None:
         with self._lock:
             if self._started:
@@ -171,8 +213,21 @@ class CommodityCFastExecutionQualityProductionAssembly:
             self._last_export_receipt = None
             self._projection_revalidation_generation = None
             self._projection_receipt_sha256 = None
+            self._verified_inputs_sha256 = None
             self._state = "STOPPED_NO_CAPABILITY"
             self._last_error = None
+            if self._tick_fanout is not None:
+                try:
+                    fanout_status = self._tick_fanout.stop()
+                    if fanout_status["worker_thread_running"] is True:
+                        raise CFastExecutionQualityProductionAssemblyError(
+                            "PRODUCTION_ASSEMBLY_TICK_FANOUT_STOP_FAILED"
+                        )
+                except Exception as exc:
+                    self._state = "BLOCKED_TICK_FANOUT_STOP_FAILED"
+                    self._last_error = str(
+                        getattr(exc, "code", type(exc).__name__)
+                    )
             try:
                 self._runtime.stop()
             except Exception as exc:
@@ -221,7 +276,11 @@ class CommodityCFastExecutionQualityProductionAssembly:
             repository is None
             or not self._started
             or admission is None
-            or self._state != "SIGNED_ADMISSION_VERIFIED_ASSEMBLY_COMPONENTS_INCOMPLETE"
+            or self._state
+            not in {
+                "SIGNED_ADMISSION_VERIFIED_ASSEMBLY_COMPONENTS_INCOMPLETE",
+                "SIGNED_ADMISSION_VERIFIED_READONLY_TICK_RUNTIME_BOUND",
+            }
             or self._last_export_receipt is None
             or self._projection_revalidation_generation is None
             or self._projection_receipt_sha256 is None
@@ -263,6 +322,20 @@ class CommodityCFastExecutionQualityProductionAssembly:
             self._last_export_receipt = None
             self._projection_revalidation_generation = None
             self._projection_receipt_sha256 = None
+            self._verified_inputs_sha256 = None
+            if self._tick_fanout is not None:
+                try:
+                    fanout_stop = self._tick_fanout.stop()
+                    if fanout_stop["worker_thread_running"] is True:
+                        raise CFastExecutionQualityProductionAssemblyError(
+                            "PRODUCTION_ASSEMBLY_TICK_FANOUT_STOP_FAILED"
+                        )
+                except Exception as exc:
+                    self._state = "BLOCKED_TICK_FANOUT_STOP_FAILED"
+                    self._last_error = str(
+                        getattr(exc, "code", type(exc).__name__)
+                    )
+                    return self._status_locked()
             operation = {
                 "startup": self._runtime.start,
                 "reload": self._runtime.reload,
@@ -305,7 +378,78 @@ class CommodityCFastExecutionQualityProductionAssembly:
                 self._state = "SIGNED_ADMISSION_VERIFIED_ASSEMBLY_COMPONENTS_INCOMPLETE"
                 self._last_error = None
                 return self._status_locked()
-            repository_status = repository.recover()
+            worker = self._horizon_worker
+            fanout = self._tick_fanout
+            if (worker is None) != (fanout is None):
+                self._state = "BLOCKED_TICK_RUNTIME_COMPONENT_SET_INCOMPLETE"
+                self._last_error = "TICK_RUNTIME_COMPONENT_SET_INCOMPLETE"
+                return self._status_locked()
+            tick_runtime_bound = worker is not None and fanout is not None
+            if tick_runtime_bound:
+                try:
+                    verified_inputs = self._runtime.current_verified_runtime_inputs()
+                    if (
+                        verified_inputs.revalidation_receipt.receipt_sha256
+                        != receipt.receipt_sha256
+                    ):
+                        raise CFastExecutionQualityProductionAssemblyError(
+                            "PRODUCTION_ASSEMBLY_TYPED_INPUT_RECEIPT_DRIFT"
+                        )
+                    input_identity = (
+                        verified_inputs.preverified_plan.plan_hash,
+                        verified_inputs.source_snapshot_receipt_sha256,
+                        verified_inputs.score_policy_hash,
+                        tuple(
+                            spec.contract_spec_hash
+                            for spec in verified_inputs.contract_specs
+                        ),
+                    )
+                    if self._registered_input_identity is None:
+                        worker.register_preverified_plan(
+                            preverified_plan=verified_inputs.preverified_plan,
+                            source_snapshot_receipt_sha256=(
+                                verified_inputs.source_snapshot_receipt_sha256
+                            ),
+                            score_policy=verified_inputs.score_policy,
+                            score_policy_hash=verified_inputs.score_policy_hash,
+                            contract_specs=verified_inputs.contract_specs,
+                        )
+                        self._registered_input_identity = input_identity
+                    elif self._registered_input_identity != input_identity:
+                        raise CFastExecutionQualityProductionAssemblyError(
+                            "PRODUCTION_ASSEMBLY_FROZEN_TYPED_INPUT_DRIFT"
+                        )
+                    worker_status = worker.recover()
+                    if worker_status["blocked_fail_closed"] is not False:
+                        raise CFastExecutionQualityProductionAssemblyError(
+                            "PRODUCTION_ASSEMBLY_HORIZON_WORKER_RECOVERY_FAILED"
+                        )
+                    fanout_status = fanout.status()
+                    if fanout_status["preverified_worker_bound"] is True:
+                        fanout.refresh_preverified_subscription(
+                            worker=worker,
+                            revalidation_receipt=receipt,
+                        )
+                    else:
+                        fanout.bind_preverified_subscription(
+                            worker=worker,
+                            revalidation_receipt=receipt,
+                        )
+                    self._verified_inputs_sha256 = (
+                        verified_inputs.verified_inputs_sha256
+                    )
+                except Exception as exc:
+                    self._state = "BLOCKED_TYPED_TICK_RUNTIME_ASSEMBLY_FAILED"
+                    self._last_error = str(
+                        getattr(exc, "code", type(exc).__name__)
+                    )
+                    return self._status_locked()
+            try:
+                repository_status = repository.recover()
+            except Exception as exc:
+                self._state = "BLOCKED_READONLY_REPOSITORY_FAILED"
+                self._last_error = str(getattr(exc, "code", type(exc).__name__))
+                return self._status_locked()
             if repository_status["blocked_fail_closed"] is not False:
                 self._state = "BLOCKED_READONLY_REPOSITORY_FAILED"
                 self._last_error = str(repository_status["last_error"])
@@ -334,7 +478,30 @@ class CommodityCFastExecutionQualityProductionAssembly:
                 runtime_status["revalidation_generation"]
             )
             self._projection_receipt_sha256 = receipt.receipt_sha256
-            self._state = "SIGNED_ADMISSION_VERIFIED_ASSEMBLY_COMPONENTS_INCOMPLETE"
+            if tick_runtime_bound:
+                try:
+                    started_fanout = fanout.start()
+                    if (
+                        started_fanout["blocked_fail_closed"] is not False
+                        or started_fanout["worker_thread_running"] is not True
+                        or started_fanout["tick_input_accepting"] is not True
+                    ):
+                        raise CFastExecutionQualityProductionAssemblyError(
+                            "PRODUCTION_ASSEMBLY_TICK_FANOUT_START_FAILED"
+                        )
+                except Exception as exc:
+                    self._state = "BLOCKED_TICK_FANOUT_START_FAILED"
+                    self._last_error = str(
+                        getattr(exc, "code", type(exc).__name__)
+                    )
+                    return self._status_locked()
+                self._state = (
+                    "SIGNED_ADMISSION_VERIFIED_READONLY_TICK_RUNTIME_BOUND"
+                )
+            else:
+                self._state = (
+                    "SIGNED_ADMISSION_VERIFIED_ASSEMBLY_COMPONENTS_INCOMPLETE"
+                )
             self._last_error = None
             return self._status_locked()
 
@@ -347,6 +514,25 @@ class CommodityCFastExecutionQualityProductionAssembly:
             else None
         )
         export_receipt = self._last_export_receipt
+        worker_status = (
+            self._horizon_worker.status()
+            if self._horizon_worker is not None
+            else None
+        )
+        fanout_status = (
+            self._tick_fanout.status() if self._tick_fanout is not None else None
+        )
+        tick_runtime_ready = bool(
+            worker_status is not None
+            and worker_status["blocked_fail_closed"] is False
+            and worker_status["registered_intent_count"]
+            and worker_status["exact_contract_subscription_frozen"] is True
+            and fanout_status is not None
+            and fanout_status["blocked_fail_closed"] is False
+            and fanout_status["preverified_worker_bound"] is True
+            and fanout_status["worker_thread_running"] is True
+            and fanout_status["tick_input_accepting"] is True
+        )
         durable_components_bound = all(
             value is not None
             for value in (
@@ -372,6 +558,10 @@ class CommodityCFastExecutionQualityProductionAssembly:
             "runtime_admission_raw_sha256": (
                 admission.admission_raw_sha256 if admission is not None else None
             ),
+            "verified_runtime_inputs_sha256": self._verified_inputs_sha256,
+            "tick_runtime_ready": tick_runtime_ready,
+            "horizon_worker": worker_status,
+            "tick_fanout": fanout_status,
             "readonly_repository": repository_status,
             "evidence_export": {
                 "store_bound": self._evidence_export_store is not None,
@@ -393,9 +583,20 @@ class CommodityCFastExecutionQualityProductionAssembly:
                 **dict(runtime_status["capabilities"]),
                 "signed_runtime_admission_verifier_bound": True,
                 "signed_runtime_admission_verified": admission is not None,
-                "tick_input_bound": False,
-                "tick_subscription_built": False,
-                "horizon_worker_built": False,
+                "tick_input_bound": bool(
+                    fanout_status is not None
+                    and fanout_status["preverified_worker_bound"] is True
+                ),
+                "tick_subscription_built": bool(
+                    fanout_status is not None
+                    and fanout_status["local_exact_contract_subscription_built"]
+                    is True
+                ),
+                "horizon_worker_built": bool(
+                    worker_status is not None
+                    and worker_status["registered_intent_count"]
+                ),
+                "tick_runtime_ready": tick_runtime_ready,
                 "durable_sidecar_runtime_bound": durable_components_bound,
                 "readonly_repository_bound": self._readonly_repository is not None,
                 "questdb_evidence_adapter_bound": False,
@@ -434,6 +635,10 @@ def _build_production_assembly() -> CommodityCFastExecutionQualityProductionAsse
             sidecar=sidecar,
             repository=repository,
             evidence_export_store=export_store,
+        )
+        assembly.bind_tick_runtime_components(
+            horizon_worker=PreverifiedTickHorizonWorker(sidecar),
+            tick_fanout=commodity_c_fast_execution_quality_tick_fanout,
         )
     except Exception as exc:
         assembly.record_component_binding_failure(exc)

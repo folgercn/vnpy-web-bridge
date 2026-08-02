@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import importlib.util
 import json
 import os
+import sys
 import tempfile
 from collections.abc import Iterator
 from dataclasses import FrozenInstanceError
@@ -21,6 +23,7 @@ from app.services.commodity_c_fast_execution_quality_artifact_revalidation impor
     ArtifactVerificationRequest,
     CFastExecutionQualityArtifactRevalidationError,
     CommodityCFastExecutionQualityArtifactRevalidator,
+    SignedArtifactVerification,
 )
 from app.services.commodity_c_fast_execution_quality_runtime import (
     CommodityCFastExecutionQualityRuntime,
@@ -28,7 +31,14 @@ from app.services.commodity_c_fast_execution_quality_runtime import (
 
 
 NOW = datetime(2026, 9, 1, 1, 0, tzinfo=timezone.utc)
-CONTRACTS = ("SHFE.ag2612", "SHFE.cu2612")
+CONTRACTS = ("SHFE.cu2612",)
+ROOT = Path(__file__).resolve().parents[3]
+SIDECAR_TEST_PATH = (
+    ROOT / "backend/tests/unit/test_commodity_c_fast_execution_quality_sidecar.py"
+)
+SCORER_TEST_PATH = (
+    ROOT / "backend/tests/unit/test_commodity_c_fast_execution_quality_scorer.py"
+)
 FALSE_AUTHORITY = {
     "collection_authorized": False,
     "runtime_activation_authorized": False,
@@ -57,6 +67,19 @@ REQUIRED_BINDINGS = {
 SIGNER_DOMAINS = {
     role: (format(index + 8, "x") * 64,) for index, role in enumerate(ARTIFACT_ROLES)
 }
+
+
+def _load_test_helpers(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+SIDECAR = _load_test_helpers("artifact_revalidation_sidecar_helpers", SIDECAR_TEST_PATH)
+SCORER = _load_test_helpers("artifact_revalidation_scorer_helpers", SCORER_TEST_PATH)
 
 
 @pytest.fixture
@@ -148,31 +171,46 @@ def build_adapter(
         bindings = {role: raw_hashes[role] for role in REQUIRED_BINDINGS[request.role]}
         if bad_binding and request.role == "virtual_intent_plan":
             bindings["signed_snapshot"] = "f" * 64
-        return CFastExecutionQualityArtifactVerificationDTO(
-            schema_version=(
-                "commodity_c_fast_execution_quality_artifact_verification_v1"
+        plan = SIDECAR.plan()
+        return SignedArtifactVerification(
+            verification=CFastExecutionQualityArtifactVerificationDTO(
+                schema_version=(
+                    "commodity_c_fast_execution_quality_artifact_verification_v1"
+                ),
+                artifact_role=request.role,
+                candidate_id="C_FAST_CROSS_SECTION_NEUTRAL",
+                raw_sha256=request.raw_sha256,
+                canonical_sha256=request.canonical_sha256,
+                valid_until_utc=(
+                    expires_at
+                    if request.role
+                    in {
+                        "signed_p0_acceptance",
+                        "collection_admission",
+                        "signed_snapshot",
+                        "custody_binding",
+                    }
+                    else None
+                ),
+                exact_contracts=CONTRACTS,
+                bound_artifact_raw_sha256=bindings,
+                verified_signer_domain_public_key_sha256=(
+                    SIGNER_DOMAINS[request.role]
+                ),
+                signature_verified=True,
+                semantic_contract_verified=True,
+                **FALSE_AUTHORITY,
             ),
-            artifact_role=request.role,
-            candidate_id="C_FAST_CROSS_SECTION_NEUTRAL",
-            raw_sha256=request.raw_sha256,
-            canonical_sha256=request.canonical_sha256,
-            valid_until_utc=(
-                expires_at
-                if request.role
-                in {
-                    "signed_p0_acceptance",
-                    "collection_admission",
-                    "signed_snapshot",
-                    "custody_binding",
-                }
+            preverified_plan=(plan if request.role == "virtual_intent_plan" else None),
+            source_snapshot_receipt_sha256=(
+                plan.snapshot_hash if request.role == "signed_snapshot" else None
+            ),
+            score_policy=(SCORER.policy() if request.role == "execution_policy" else None),
+            contract_specs=(
+                (SCORER.contract_spec(),)
+                if request.role == "contract_spec_set"
                 else None
             ),
-            exact_contracts=CONTRACTS,
-            bound_artifact_raw_sha256=bindings,
-            verified_signer_domain_public_key_sha256=(SIGNER_DOMAINS[request.role]),
-            signature_verified=True,
-            semantic_contract_verified=True,
-            **FALSE_AUTHORITY,
         )
 
     verifiers = {role: verifier for role in ARTIFACT_ROLES}
@@ -273,7 +311,7 @@ def test_constructor_takes_immutable_path_and_verifier_snapshots(
         mutate_constructor_inputs=True,
     )
 
-    receipt = adapter("startup", NOW)
+    receipt = adapter("startup", NOW).revalidation_receipt
 
     assert receipt.exact_contracts == CONTRACTS
     assert receipt.verified_signer_domains.model_dump(mode="python") == (SIGNER_DOMAINS)
@@ -305,7 +343,9 @@ def test_exact_file_reader_handles_short_os_reads(
 
     monkeypatch.setattr(os, "read", short_read)
 
-    assert adapter("startup", NOW).exact_contracts == CONTRACTS
+    assert (
+        adapter("startup", NOW).revalidation_receipt.exact_contracts == CONTRACTS
+    )
 
 
 def test_initial_custody_revalidation_failure_closes_retained_fd(
