@@ -37,6 +37,9 @@ from app.core.errors import (
 from app.schemas.commodity_c_fast_execution_permit import (
     CommodityCFastSimNowExecutionPermitDTO,
 )
+from app.schemas.commodity_baseline_execution_permit import (
+    baseline_execution_plan_core_payload,
+)
 from app.schemas.commodity_c_fast_shadow import (
     CommodityCFastRuntimeSnapshotDTO,
     CommodityCFastShakedownSnapshotDTO,
@@ -58,6 +61,10 @@ from app.services.commodity_c_fast_one_shot_custody import (
     CommodityCFastOneShotCustodyError,
 )
 from app.services.commodity_c_fast_shadow import C_FAST_SECTOR_MAP_V1
+from app.services.commodity_baseline_execution_permit import (
+    CommodityBaselineExecutionPermitService,
+    PreparedCommodityBaselinePermit,
+)
 from app.services.risk_service import RiskService, risk_service
 from app.services.trade_service import (
     TradeService,
@@ -248,6 +255,9 @@ class CommoditySimNowService:
         audit: AuditService | None = None,
         tick_store: Any | None = None,
         clock: Callable[[], datetime] | None = None,
+        baseline_execution_permit: (
+            CommodityBaselineExecutionPermitService | None
+        ) = None,
     ) -> None:
         self.settings = settings or get_settings()
         self.rpc = rpc or rpc_service
@@ -270,6 +280,18 @@ class CommoditySimNowService:
         self.audit = audit or audit_service
         self.tick_store = tick_store or memory_store
         self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.baseline_execution_permit = (
+            baseline_execution_permit
+            or (
+                CommodityBaselineExecutionPermitService(
+                    settings=self.settings,
+                    rpc=self.rpc,
+                    clock=self.clock,
+                )
+                if isinstance(self.trade, TradeService)
+                else None
+            )
+        )
         self.enabled = False
         self.manual_approval = False
         self.simnow_mode = False
@@ -296,6 +318,8 @@ class CommoditySimNowService:
             TradeService, object
         ] = {}
         self._c_fast_test_double_capability = object()
+        self._baseline_trade_capabilities: dict[TradeService, object] = {}
+        self._baseline_test_double_capability = object()
         self._task: asyncio.Task[Any] | None = None
         self._state_load_error: str | None = None
         self._c_fast_authority_persist_error: str | None = None
@@ -342,6 +366,226 @@ class CommoditySimNowService:
         capability = trade._bind_c_fast_order_volume_capability(self)
         self._c_fast_trade_capabilities[trade] = capability
         return capability
+
+    def _baseline_execution_capability(self) -> object:
+        trade = self.trade
+        if not isinstance(trade, TradeService):
+            return self._baseline_test_double_capability
+        bound = self._baseline_trade_capabilities.get(trade)
+        if bound is not None:
+            return bound
+        capability = trade._bind_baseline_execution_capability(self)
+        self._baseline_trade_capabilities[trade] = capability
+        return capability
+
+    def _baseline_pre_rpc_guard(
+        self,
+        actual_order: OrderRequestDTO,
+        resolved_gateway_name: str,
+    ) -> None:
+        """Final non-C_FAST guard inside the shared RPC and abort locks."""
+
+        context = getattr(
+            self._dispatch_operation_context,
+            "baseline_pre_rpc_guard_context",
+            None,
+        )
+        if not isinstance(context, tuple) or len(context) != 7:
+            raise CommoditySimNowSafetyError(
+                "baseline final guard context 无效"
+            )
+        (
+            prepared,
+            plan,
+            phase,
+            child_index,
+            intent,
+            dispatch_abort_epoch,
+            price_policy_id,
+        ) = context
+        if (
+            plan is not self.current_plan
+            or not isinstance(plan, dict)
+            or self._is_shakedown_plan(plan)
+            and not plan.get("position_manager_shakedown_session_id")
+            or plan.get("c_fast_shakedown_session_id")
+            or not isinstance(intent, dict)
+            or intent.get("reference") != actual_order.reference
+        ):
+            raise CommoditySimNowSafetyError(
+                "baseline final guard ownership 已失效"
+            )
+        expected_order = OrderRequestDTO(
+            symbol=str(intent["symbol"]),
+            exchange=str(intent["exchange"]),
+            direction=str(intent["direction"]),
+            offset=str(intent["offset"]),
+            type="limit",
+            price=float(intent["price"]),
+            volume=int(intent["volume"]),
+            gateway_name=self.settings.commodity_simnow_gateway_name,
+            reference=str(intent["reference"]),
+            confirm=True,
+        )
+        if actual_order != expected_order:
+            raise CommoditySimNowSafetyError(
+                "baseline final order payload 与绑定 intent 不一致"
+            )
+        self._require_dispatch_epoch_active(dispatch_abort_epoch)
+        self._verify_bound_dispatch_quote_current(intent)
+        core_sha256 = self._baseline_execution_plan_core_sha256(plan)
+        identity = self._baseline_plan_identity(plan)
+        expected_risk = self._baseline_expected_risk_envelope(
+            list(plan[f"{phase}_orders"])
+        )
+        if self.baseline_execution_permit is not None:
+            self.baseline_execution_permit.final_guard(
+                prepared,
+                actual_order=actual_order,
+                child_index=child_index,
+                plan_hash=str(plan["plan_hash"]),
+                execution_plan_core_sha256=core_sha256,
+                execution_session_id=identity[2],
+                strategy_id=identity[0],
+                strategy_version=identity[1],
+                phase=phase,
+                account_sha256=str(plan["account_hash"]),
+                resolved_gateway_name=resolved_gateway_name,
+                price_policy_id=price_policy_id,
+                expected_risk_envelope=expected_risk,
+            )
+        self._require_dispatch_epoch_active(dispatch_abort_epoch)
+
+    def _baseline_plan_identity(
+        self,
+        plan: dict[str, Any],
+    ) -> tuple[str, str, str]:
+        if plan.get("c_fast_shakedown_session_id"):
+            raise CommoditySimNowSafetyError(
+                "C_FAST 计划不得使用 baseline authority"
+            )
+        if plan.get("position_manager_shakedown_session_id"):
+            return (
+                "MONTHLY_RELATIVE_VOL_THERMOSTAT_V1",
+                "commodity_relative_vol_position_manager_shakedown_v1",
+                str(plan["position_manager_shakedown_session_id"]),
+            )
+        session_id = str(plan.get("baseline_execution_session_id") or "")
+        if not session_id:
+            raise CommoditySimNowSafetyError(
+                "正式 baseline 缺少 execution session"
+            )
+        return (
+            "STATIC_CORE_EQUAL",
+            "commodity_static_core_equal_target_batch_v2",
+            session_id,
+        )
+
+    @staticmethod
+    def _baseline_execution_plan_core(plan: dict[str, Any]) -> dict[str, Any]:
+        return baseline_execution_plan_core_payload(plan)
+
+    def _baseline_execution_plan_core_sha256(
+        self,
+        plan: dict[str, Any],
+    ) -> str:
+        observed = _sha256_json(self._baseline_execution_plan_core(plan))
+        if observed != plan.get("execution_plan_core_sha256"):
+            raise CommoditySimNowSafetyError(
+                "baseline immutable execution core 已漂移"
+            )
+        return observed
+
+    def _baseline_expected_risk_envelope(
+        self,
+        orders: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        return {
+            "max_child_order_lots": (
+                self.settings.commodity_simnow_max_child_order_lots
+            ),
+            "max_orders_per_phase": (
+                self.settings.commodity_simnow_max_orders_per_phase
+            ),
+            "max_total_phase_lots": sum(
+                int(order["volume"]) for order in orders
+            ),
+            "max_symbol_position_lots": float(
+                self.settings.risk_max_symbol_position
+            ),
+            "max_product_weight": 0.15,
+            "max_gross_weight": 1.0,
+            "max_abs_net_weight": 0.10,
+            "max_sector_weight": 0.35,
+            "max_quote_age_seconds": (
+                self.settings.commodity_simnow_max_quote_age_seconds
+            ),
+            "max_spread_ticks": float(
+                self.settings.commodity_simnow_max_spread_ticks
+            ),
+        }
+
+    def _prepare_baseline_execution_permit(
+        self,
+        plan: dict[str, Any],
+        *,
+        phase: str,
+        orders: list[dict[str, Any]],
+        price_policy_id: str,
+    ) -> PreparedCommodityBaselinePermit | object:
+        if plan.get("c_fast_shakedown_session_id"):
+            raise CommoditySimNowSafetyError(
+                "C_FAST 计划不得加载 baseline permit"
+            )
+        if self.baseline_execution_permit is None:
+            # Narrow test-double path only.  Production TradeService always
+            # constructs an independent verifier above.
+            if isinstance(self.trade, TradeService):
+                raise CommoditySimNowSafetyError(
+                    "baseline Execution Permit verifier 不可用"
+                )
+            return object()
+        strategy_id, strategy_version, session_id = (
+            self._baseline_plan_identity(plan)
+        )
+        planned_orders_by_phase = {
+            candidate_phase: list(plan[f"{candidate_phase}_orders"])
+            for candidate_phase in ("close", "open")
+            if plan.get(f"{candidate_phase}_orders")
+        }
+        price_policy_ids_by_phase = {
+            candidate_phase: (
+                price_policy_id
+                if candidate_phase == phase
+                else "COMMODITY_SIMNOW_PROTECTED_TOUCH_PLUS_ONE_TICK_V1"
+            )
+            for candidate_phase in planned_orders_by_phase
+        }
+        return self.baseline_execution_permit.prepare(
+            plan_hash=str(plan["plan_hash"]),
+            execution_plan_core_sha256=(
+                self._baseline_execution_plan_core_sha256(plan)
+            ),
+            execution_session_id=session_id,
+            strategy_id=strategy_id,
+            strategy_version=strategy_version,
+            phase=phase,
+            account_sha256=str(plan["account_hash"]),
+            resolved_gateway_name=(
+                self.settings.commodity_simnow_gateway_name
+            ),
+            price_policy_ids_by_phase=price_policy_ids_by_phase,
+            planned_orders_by_phase=planned_orders_by_phase,
+            expected_risk_envelopes_by_phase={
+                candidate_phase: self._baseline_expected_risk_envelope(
+                    candidate_orders
+                )
+                for candidate_phase, candidate_orders in (
+                    planned_orders_by_phase.items()
+                )
+            },
+            require_companion_permit=(phase == "close"),
+        )
 
     def _c_fast_pre_rpc_guard(
         self,
@@ -470,6 +714,9 @@ class CommoditySimNowService:
             "manual_approval": self.manual_approval,
             "simnow_mode": self.simnow_mode,
             "production_allowed": self.production_allowed,
+            "baseline_execution_permit_configured": (
+                self.settings.commodity_baseline_execution_permit_enabled
+            ),
             "auto_dispatch_configured": self.settings.commodity_simnow_auto_dispatch_enabled,
             "auto_dispatch_allowed": auto_dispatch_allowed,
             "auto_dispatch_active": auto_dispatch_allowed and worker_alive,
@@ -911,7 +1158,16 @@ class CommoditySimNowService:
             )
         previous_positions = self._signed_positions(positions)
         roll_products = sorted(row.product for row in batch.targets if row.previous_exact_contract and row.previous_exact_contract != row.exact_contract and (row.previous_target_quantity or row.target_quantity))
+        baseline_execution_session_id = (
+            f"baseline-session-v1-{uuid.uuid4().hex}"
+        )
         plan_core = {
+            "schema_version": "commodity_simnow_active_plan_v1",
+            "baseline_execution_session_id": baseline_execution_session_id,
+            "strategy_id": "STATIC_CORE_EQUAL",
+            "strategy_version": (
+                "commodity_static_core_equal_target_batch_v2"
+            ),
             "batch_hash": batch_hash,
             "batch_id": batch.batch_id,
             "execution_lane": batch.execution_lane,
@@ -946,6 +1202,9 @@ class CommoditySimNowService:
             "submitted_at_utc": {"close": None, "open": None},
             "latest_exposure_snapshot": exposure_snapshot,
         }
+        self.current_plan["execution_plan_core_sha256"] = _sha256_json(
+            self._baseline_execution_plan_core(self.current_plan)
+        )
         self._persist_active_plan()
         if status == "COMPLETE":
             self._save_completed_state(self.current_plan)
@@ -1104,6 +1363,19 @@ class CommoditySimNowService:
                     ],
                 },
             )
+        price_policy_id = (
+            "COMMODITY_SIMNOW_ACCEPTANCE_PASSIVE_TOUCH_V1"
+            if use_acceptance_passive_limit
+            else "COMMODITY_SIMNOW_PROTECTED_TOUCH_PLUS_ONE_TICK_V1"
+        )
+        baseline_prepared: PreparedCommodityBaselinePermit | object | None = None
+        if not plan.get("c_fast_shakedown_session_id"):
+            baseline_prepared = self._prepare_baseline_execution_permit(
+                plan,
+                phase=payload.phase,
+                orders=orders,
+                price_policy_id=price_policy_id,
+            )
         plan.pop("halt", None)
         plan["status"] = f"SUBMITTING_{payload.phase.upper()}"
         self._persist_active_plan()
@@ -1254,17 +1526,6 @@ class CommoditySimNowService:
                     reference=repriced["reference"],
                     confirm=True,
                 )
-                def pre_rpc_guard() -> None:
-                    self._require_dispatch_epoch_active(
-                        dispatch_abort_epoch
-                    )
-                    self._verify_bound_dispatch_quote_current(
-                        intent
-                    )
-                    self._require_dispatch_epoch_active(
-                        dispatch_abort_epoch
-                    )
-
                 if plan.get("c_fast_shakedown_session_id"):
                     self._verify_c_fast_order_volume_capability_context(
                         plan
@@ -1315,15 +1576,52 @@ class CommoditySimNowService:
                     finally:
                         del guard_context.c_fast_pre_rpc_guard_context
                 else:
-                    result = self.trade.send_order(
-                        request,
-                        source_ip=source_ip,
-                        operator=operator,
-                        pre_rpc_guard=pre_rpc_guard,
-                        send_linearization_lock=(
-                            self._dispatch_abort_lock
-                        ),
+                    baseline_send = getattr(
+                        self.trade,
+                        "_send_baseline_permitted_order",
+                        None,
                     )
+                    if not callable(baseline_send):
+                        raise CommoditySimNowSafetyError(
+                            "baseline 私有下单入口不可用"
+                        )
+                    if baseline_prepared is None:
+                        raise CommoditySimNowSafetyError(
+                            "baseline Execution Permit context 缺失"
+                        )
+                    guard_context = self._dispatch_operation_context
+                    if hasattr(
+                        guard_context,
+                        "baseline_pre_rpc_guard_context",
+                    ):
+                        raise CommoditySimNowSafetyError(
+                            "baseline final guard context 已被占用"
+                        )
+                    guard_context.baseline_pre_rpc_guard_context = (
+                        baseline_prepared,
+                        plan,
+                        payload.phase,
+                        child_index,
+                        intent,
+                        dispatch_abort_epoch,
+                        price_policy_id,
+                    )
+                    try:
+                        result = baseline_send(
+                            request,
+                            baseline_execution_owner=self,
+                            baseline_execution_capability=(
+                                self._baseline_execution_capability()
+                            ),
+                            source_ip=source_ip,
+                            operator=operator,
+                            pre_rpc_guard=self._baseline_pre_rpc_guard,
+                            send_linearization_lock=(
+                                self._dispatch_abort_lock
+                            ),
+                        )
+                    finally:
+                        del guard_context.baseline_pre_rpc_guard_context
                 submitted_row = {
                     **repriced,
                     "decision_price": order["price"],
@@ -3602,6 +3900,10 @@ class CommoditySimNowService:
         plan = {
             "schema_version": "commodity_simnow_active_plan_v1",
             "position_manager_shakedown_session_id": session["session_id"],
+            "strategy_id": "MONTHLY_RELATIVE_VOL_THERMOSTAT_V1",
+            "strategy_version": (
+                "commodity_relative_vol_position_manager_shakedown_v1"
+            ),
             "plan_hash": plan_hash,
             "account_hash": safety["account_hash"],
             "source_snapshot_hash": session["source_snapshot_hash"],
@@ -3622,6 +3924,9 @@ class CommoditySimNowService:
             "status": stored_plan["phase_status"],
             "started_at_utc": self.clock().astimezone(timezone.utc).isoformat(),
         }
+        plan["execution_plan_core_sha256"] = _sha256_json(
+            self._baseline_execution_plan_core(plan)
+        )
         previous_plan = self.current_plan
         self.current_plan = plan
         try:
@@ -9950,6 +10255,12 @@ class CommoditySimNowService:
                 raise ValueError("invalid active account hash")
             if not isinstance(plan.get("targets"), list) or not isinstance(plan.get("submitted"), dict):
                 raise ValueError("invalid active plan shape")
+            if (
+                not plan.get("c_fast_shakedown_session_id")
+                and plan.get("execution_plan_core_sha256")
+                != _sha256_json(self._baseline_execution_plan_core(plan))
+            ):
+                raise ValueError("baseline immutable execution core mismatch")
             return plan
         except Exception as exc:
             self._state_load_error = f"active_plan:{exc.__class__.__name__}"

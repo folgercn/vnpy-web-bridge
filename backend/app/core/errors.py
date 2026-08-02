@@ -75,6 +75,26 @@ class ManualExecutionPermitReplayError(ManualExecutionPermitError):
     message = "手工下单 Execution Permit 已消费"
 
 
+class CommodityBaselineExecutionPermitError(AppError):
+    status_code = 403
+    code = "COMMODITY_BASELINE_EXECUTION_PERMIT_INVALID"
+    message = "Commodity baseline Execution Permit 无效"
+
+
+class CommodityBaselineExecutionPermitReplayError(
+    CommodityBaselineExecutionPermitError
+):
+    status_code = 409
+    code = "COMMODITY_BASELINE_EXECUTION_PERMIT_REPLAY"
+    message = "Commodity baseline Execution Permit 已消费"
+
+
+class PublicOrderExecutionDisabledError(AppError):
+    status_code = 403
+    code = "PUBLIC_ORDER_EXECUTION_DISABLED"
+    message = "公共下单入口已永久关闭；必须使用独立 Execution Permit 私有通道"
+
+
 class OrderNotFoundError(AppError):
     status_code = 404
     code = "ORDER_NOT_FOUND"

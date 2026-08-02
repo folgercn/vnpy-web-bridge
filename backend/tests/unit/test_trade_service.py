@@ -7,7 +7,11 @@ from types import MethodType
 import pytest
 
 from app.core.config import Settings
-from app.core.errors import OrderConfirmRequiredError, OrderNotCancelableError, OrderNotFoundError, TradeDisabledError
+from app.core.errors import (
+    OrderNotCancelableError,
+    OrderNotFoundError,
+    PublicOrderExecutionDisabledError,
+)
 from app.schemas.trade import CancelAllRequestDTO, CancelRequestDTO, OrderRequestDTO
 from app.services.audit_service import AuditService
 from app.services.commodity_simnow import CommoditySimNowService
@@ -83,35 +87,34 @@ def test_order_request_converts_to_vnpy_order_request(tmp_path) -> None:
     assert req.reference.startswith("test_ref_")
 
 
-def test_trade_disabled_rejects_before_rpc(monkeypatch, tmp_path) -> None:
+def test_public_send_is_disabled_before_rpc(monkeypatch, tmp_path) -> None:
     service = make_service(tmp_path, enabled=False)
     monkeypatch.setattr(rpc_service, "send_order", lambda *_: pytest.fail("RPC should not be called"))
 
-    with pytest.raises(TradeDisabledError):
+    with pytest.raises(PublicOrderExecutionDisabledError):
         service.send_order(make_order())
 
 
-def test_confirm_required_rejects_before_rpc(monkeypatch, tmp_path) -> None:
+def test_public_send_cannot_bypass_with_confirm_flag(monkeypatch, tmp_path) -> None:
     service = make_service(tmp_path, enabled=True, confirm_required=True)
     monkeypatch.setattr(rpc_service, "send_order", lambda *_: pytest.fail("RPC should not be called"))
 
-    with pytest.raises(OrderConfirmRequiredError):
+    with pytest.raises(PublicOrderExecutionDisabledError):
         service.send_order(make_order(confirm=False))
 
 
-def test_send_order_returns_vt_orderid(monkeypatch, tmp_path) -> None:
+def test_public_send_never_reaches_connected_rpc(monkeypatch, tmp_path) -> None:
     service = make_service(tmp_path)
     monkeypatch.setattr(rpc_service, "send_order", lambda *_: "CTP.123")
     monkeypatch.setattr(rpc_service, "status", lambda: {"connected": True})
     monkeypatch.setattr(rpc_service, "get_positions", lambda: [])
     monkeypatch.setattr(rpc_service, "get_contracts", lambda: [{"vt_symbol": "rb2610.SHFE", "pricetick": 1}])
 
-    result = service.send_order(make_order())
+    with pytest.raises(PublicOrderExecutionDisabledError):
+        service.send_order(make_order())
 
-    assert result == {"vt_orderid": "CTP.123", "accepted": True}
 
-
-def test_pre_rpc_guard_runs_after_risk_and_immediately_before_send(
+def test_public_send_rejects_guard_and_runs_neither_risk_nor_rpc(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -130,12 +133,53 @@ def test_pre_rpc_guard_runs_after_risk_and_immediately_before_send(
         ),
     )
 
-    service.send_order(
-        make_order(),
-        pre_rpc_guard=lambda: events.append("guard"),
+    with pytest.raises(PublicOrderExecutionDisabledError):
+        service.send_order(
+            make_order(),
+            pre_rpc_guard=lambda: events.append("guard"),
+        )
+
+    assert events == []
+
+
+def test_app_has_no_direct_trade_service_public_send_call() -> None:
+    app_root = Path(__file__).resolve().parents[2] / "app"
+    forbidden = ("trade_service.send_order(", "self.trade.send_order(")
+    hits = [
+        f"{path.relative_to(app_root)}:{pattern}"
+        for path in app_root.rglob("*.py")
+        for pattern in forbidden
+        if pattern in path.read_text(encoding="utf-8")
+    ]
+
+    assert hits == []
+
+
+def test_internal_send_without_any_capability_is_also_fail_closed(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    service = make_service(tmp_path)
+    monkeypatch.setattr(
+        rpc_service,
+        "send_order",
+        lambda *_: pytest.fail("RPC should not be called"),
     )
 
-    assert events == ["risk", "guard", "send"]
+    with pytest.raises(PublicOrderExecutionDisabledError):
+        service._send_order(
+            make_order(),
+            source_ip=None,
+            operator="test",
+            pre_rpc_guard=None,
+            send_linearization_lock=None,
+            c_fast_order_owner=None,
+            c_fast_order_volume_capability=None,
+            manual_execution_owner=None,
+            manual_execution_capability=None,
+            baseline_execution_owner=None,
+            baseline_execution_capability=None,
+        )
 
 
 def test_public_send_cannot_select_a_volume_override(

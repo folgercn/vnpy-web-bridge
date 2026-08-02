@@ -304,6 +304,11 @@ POST /api/orders/{vt_orderid}/cancel
 POST /api/orders/cancel-all
 ```
 
+`POST /api/orders` requires the independent one-shot manual Execution Permit.
+The capability-free `TradeService.send_order()` entry is permanently
+fail-closed; C_FAST and CommoditySimNow baseline execution use separate private
+permit capabilities.
+
 ### 风控
 
 ```http

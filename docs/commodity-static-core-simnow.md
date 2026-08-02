@@ -267,7 +267,7 @@ HALTED_PRE_SUBMIT_SAFE --重新完整授权且阶段前持仓未变化--> 原 RE
 CANCEL_PENDING -> 定向撤销本计划活动委托 -> HALTED_RECONCILE_REQUIRED
 ```
 
-每个 child order 调用 `send_order()` 前都会先原子持久化包含唯一 reference、价格、数量和方向的 send intent；RPC 返回后再将 order id 与 intent 一并确认为 submitted。若进程停在两次落盘之间，或首单同步异常且零 submitted，会统一按 send-intent outcome 分类。确定发生在 RPC 前的本地风控/参数拒绝可直接进入 `HALTED_PRE_SUBMIT_SAFE`；RPC timeout、连接异常、进程崩溃等不确定结果进入：
+每个 child order 进入私有 baseline-permit 派单通道前都会先原子持久化包含唯一 reference、价格、数量和方向的 send intent；公共 `TradeService.send_order()` 永久 fail closed。RPC 返回后再将 order id 与 intent 一并确认为 submitted。若进程停在两次落盘之间，或首单同步异常且零 submitted，会统一按 send-intent outcome 分类。确定发生在 RPC 前的本地风控/参数拒绝可直接进入 `HALTED_PRE_SUBMIT_SAFE`；RPC timeout、连接异常、进程崩溃等不确定结果进入：
 
 ```text
 SUBMISSION_OUTCOME_UNKNOWN
