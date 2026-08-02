@@ -24,7 +24,8 @@ trading、strategy activation、broad production 和 P0 acceptance 均固定为 
 - 与 foundation、provenance、readiness 和 outcome key material 完全隔离的
   executable keyring，并把其 canonical SHA256 写入 active pin set；
 - root-owned、不可 group/world 写且 bytes 与 pin set 完全一致的 query-v6
-  pre-connect execution adapter；
+  pre-connect execution adapter；adapter 自身及从其 parent 到 filesystem root 的
+  custody chain 都必须由 root 所有且不可 group/world 写，也不得含 symlink；
 - QuestDB exact build hash，以及只含 stat/path/principal/endpoint identity、绝不
   含 DSN secret 或 content hash 的 foundation DSN identity attestation；
 - 人工填写的全新 `release_id`、UTC `issued_at/not_before/expires_at`、
@@ -55,11 +56,13 @@ verifier 只重放 foundation、active pins、独立 key domain 与 executable s
 2. 拒绝既有 consume、terminal 或 partial attempt directory；
 3. 完整重放 foundation、pins 与 executable release；
 4. create-only 写 consume，并从 custody descriptor 精确重开核验；
-5. staging exact adapter，再做一次完整 final revalidation，并再次精确核验
-   runtime manifest；
-6. 使用 `python -I`、最小环境、无 stdin、独立 process session 和固定 timeout
-   启动 adapter；timeout、SIGINT/SIGTERM/SIGHUP 或异常会先 SIGTERM 整个 process
-   group，bounded wait 后仍存活则 SIGKILL，并确认 fork descendants 已退出；
+5. 在 attempt directory 保存一份 archival staged copy，再做一次完整 final
+   revalidation；staged copy 永远不是执行路径；
+6. 在紧邻 launch 处再次核验 root-custodied 原 adapter、DSN metadata 和 exact
+   runtime manifest，然后直接以原 adapter 的 resolved root-owned path、
+   `python -I`、最小环境、无 stdin、独立 process session 和固定 timeout 启动；
+   timeout、SIGINT/SIGTERM/SIGHUP 或异常会先 SIGTERM 整个 process group，
+   bounded wait 后仍存活则 SIGKILL，并确认 fork descendants 已退出；
 7. 验证 pre/post readonly proof、expected principal/endpoint、audit outputs，并
    create-only 写 terminal。
 

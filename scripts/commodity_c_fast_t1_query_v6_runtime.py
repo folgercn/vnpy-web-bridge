@@ -171,25 +171,50 @@ def verify_execution_adapter(
     require_root_owned: bool = True,
 ) -> bytes:
     try:
-        info_before = path.lstat()
+        unresolved_info = path.lstat()
+        resolved = path.resolve(strict=True)
+        info_before = resolved.lstat()
         if (
-            stat.S_ISLNK(info_before.st_mode)
+            stat.S_ISLNK(unresolved_info.st_mode)
+            or stat.S_ISLNK(info_before.st_mode)
             or not stat.S_ISREG(info_before.st_mode)
             or (require_root_owned and (info_before.st_uid != 0 or info_before.st_gid != 0))
             or stat.S_IMODE(info_before.st_mode) & 0o022
         ):
             raise QueryV6RuntimeError("query-v6 execution adapter custody is unsafe")
+        if require_root_owned:
+            absolute = Path(os.path.abspath(path))
+            if absolute != resolved:
+                raise QueryV6RuntimeError(
+                    "query-v6 execution adapter path contains a symlink"
+                )
+            current = resolved.parent
+            while True:
+                parent_info = current.lstat()
+                if (
+                    stat.S_ISLNK(parent_info.st_mode)
+                    or not stat.S_ISDIR(parent_info.st_mode)
+                    or parent_info.st_uid != 0
+                    or parent_info.st_gid != 0
+                    or stat.S_IMODE(parent_info.st_mode) & 0o022
+                ):
+                    raise QueryV6RuntimeError(
+                        "query-v6 execution adapter parent custody is unsafe"
+                    )
+                if current.parent == current:
+                    break
+                current = current.parent
         raw_before = read_regular_file_strict(
-            path,
+            resolved,
             "query-v6 execution adapter",
             limit=MAX_BYTES,
         )
         raw_after = read_regular_file_strict(
-            path,
+            resolved,
             "query-v6 execution adapter final re-read",
             limit=MAX_BYTES,
         )
-        info_after = path.lstat()
+        info_after = resolved.lstat()
     except (OSError, OneShotError) as exc:
         raise QueryV6RuntimeError(str(exc)) from exc
     if (
@@ -731,22 +756,21 @@ def run_authorized_attempt(
                 final.pins,
                 now=final_at,
             )
-            verify_query_manifest_file(manifest_path, final)
-            if _sha256(
-                read_regular_file_strict(
-                    staged_adapter,
-                    "staged query-v6 execution adapter final re-read",
-                )
-            ) != str(final.payload["execution"]["execution_adapter_sha256"]):
-                raise QueryV6RuntimeError("staged query-v6 adapter changed")
             invocation = build_adapter_invocation(
-                staged_adapter,
+                execution_adapter_path.resolve(strict=True),
                 dsn_file,
                 manifest_path,
                 paths,
                 final,
                 consume_raw_sha256,
                 consume_canonical_sha256,
+            )
+            verify_query_manifest_file(manifest_path, final)
+            _verify_dsn_metadata(dsn_file, final)
+            verify_execution_adapter(
+                execution_adapter_path,
+                final,
+                require_root_owned=require_root_owned_adapter,
             )
         except Exception:
             ended_at = max(consumed_at, _utc(clock(), "terminal time"))

@@ -475,6 +475,8 @@ def test_consume_precedes_adapter_launch_and_replay_is_closed(tmp_path: Path) ->
     assert terminal["orders_sent"] == 0
     assert terminal["positions_modified"] == 0
     assert len(launches) == 1
+    assert Path(launches[0][2]) == values["adapter_path"].resolve(strict=True)
+    assert "query-v6-execution-adapter.py" not in launches[0][2]
 
     with pytest.raises(runtime.QueryV6RuntimeError, match="already consumed"):
         runtime.run_authorized_attempt(
@@ -491,6 +493,98 @@ def test_consume_precedes_adapter_launch_and_replay_is_closed(tmp_path: Path) ->
             require_root_owned_adapter=False,
         )
     assert len(launches) == 1
+
+
+def test_staged_archive_tamper_never_changes_executed_adapter(tmp_path: Path) -> None:
+    values = _fixture(tmp_path)
+    revalidations = 0
+    launches: list[list[str]] = []
+
+    def tamper_staged_archive(
+        _at: datetime,
+    ) -> subject.VerifiedExecutableRelease:
+        nonlocal revalidations
+        revalidations += 1
+        if revalidations == 2:
+            staged = (
+                values["custody"]
+                / values["verified"].payload["attempt_id"]
+                / "query-v6-execution-adapter.py"
+            )
+            staged.chmod(0o700)
+            staged.write_text("tampered archival copy", encoding="utf-8")
+        return values["verified"]
+
+    def launch(
+        invocation: list[str],
+        **_kwargs: Any,
+    ) -> subprocess.CompletedProcess[str]:
+        launches.append(invocation)
+        return subprocess.CompletedProcess(invocation, 0, "", "")
+
+    code, terminal = runtime.run_authorized_attempt(
+        values["verified"],
+        values["release_path"],
+        values["manifest_path"],
+        values["dsn_file"],
+        values["adapter_path"],
+        tamper_staged_archive,
+        clock=lambda: NOW,
+        adapter_launcher=launch,
+        output_validator=lambda *_args: _successful_validation(),
+        require_root_owned_parent=False,
+        require_root_owned_adapter=False,
+    )
+    assert code == 0
+    assert terminal["terminal_state"] == "COMPLETED_PASS"
+    assert len(launches) == 1
+    assert Path(launches[0][2]) == values["adapter_path"].resolve(strict=True)
+
+
+@pytest.mark.parametrize("drift_target", ["adapter", "dsn"])
+def test_final_adapter_or_dsn_drift_blocks_launch(
+    tmp_path: Path,
+    drift_target: str,
+) -> None:
+    values = _fixture(tmp_path)
+    revalidations = 0
+    launches = 0
+
+    def drift_at_final_boundary(
+        _at: datetime,
+    ) -> subject.VerifiedExecutableRelease:
+        nonlocal revalidations
+        revalidations += 1
+        if revalidations == 2 and drift_target == "adapter":
+            values["adapter_path"].chmod(0o700)
+            values["adapter_path"].write_text("tampered root adapter", encoding="utf-8")
+            values["adapter_path"].chmod(0o500)
+        if revalidations == 2 and drift_target == "dsn":
+            values["dsn_file"].write_text("changed-dsn-size", encoding="utf-8")
+        return values["verified"]
+
+    def launch(*_args: Any, **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+        nonlocal launches
+        launches += 1
+        return subprocess.CompletedProcess([], 0, "", "")
+
+    code, terminal = runtime.run_authorized_attempt(
+        values["verified"],
+        values["release_path"],
+        values["manifest_path"],
+        values["dsn_file"],
+        values["adapter_path"],
+        drift_at_final_boundary,
+        clock=lambda: NOW,
+        adapter_launcher=launch,
+        require_root_owned_parent=False,
+        require_root_owned_adapter=False,
+    )
+    assert code == 2
+    assert terminal["terminal_state"] == "FAILED_BEFORE_NETWORK"
+    assert terminal["adapter_launch_attempted"] is False
+    assert terminal["production_query_attempted"] is False
+    assert launches == 0
 
 
 def test_wrong_runtime_manifest_blocks_before_consume(tmp_path: Path) -> None:
