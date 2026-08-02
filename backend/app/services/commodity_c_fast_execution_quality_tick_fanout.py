@@ -91,7 +91,12 @@ class CommodityCFastExecutionQualityTickFanout:
         self._worker: PreverifiedTickHorizonWorker | None = None
         self._receipt: CFastExecutionQualityRuntimeRevalidationDTO | None = None
         self._exact_contracts: frozenset[str] = frozenset()
-        self._state = "CREATED_DEFAULT_OFF_UNBOUND"
+        self._subscription_generation = 0
+        self._state = (
+            "DISABLED_DEFAULT_OFF"
+            if not self.settings.commodity_c_fast_execution_quality_runtime_enabled
+            else "CREATED_ENABLED_UNBOUND"
+        )
         self._blocked = False
         self._last_error: str | None = None
         self._next_ingest_seq = 0
@@ -108,31 +113,11 @@ class CommodityCFastExecutionQualityTickFanout:
         worker: PreverifiedTickHorizonWorker,
         revalidation_receipt: CFastExecutionQualityRuntimeRevalidationDTO,
     ) -> dict[str, object]:
-        if type(worker) is not PreverifiedTickHorizonWorker:
-            raise CFastExecutionQualityTickFanoutError(
-                "PREVERIFIED_HORIZON_WORKER_TYPE_INVALID"
-            )
-        try:
-            receipt = CFastExecutionQualityRuntimeRevalidationDTO.model_validate(
-                revalidation_receipt
-            )
-        except ValidationError as exc:
-            raise CFastExecutionQualityTickFanoutError(
-                "REVALIDATION_RECEIPT_INVALID"
-            ) from exc
-        now = self._utc_now()
-        if not receipt.revalidated_at_utc <= now < receipt.valid_until_utc:
-            raise CFastExecutionQualityTickFanoutError("REVALIDATION_RECEIPT_INACTIVE")
-        worker_status = worker.status()
-        if worker_status["blocked_fail_closed"] is not False:
-            raise CFastExecutionQualityTickFanoutError(
-                "PREVERIFIED_HORIZON_WORKER_BLOCKED"
-            )
-        accepted = tuple(worker_status["accepted_exact_contracts"])
-        if accepted != receipt.exact_contracts:
-            raise CFastExecutionQualityTickFanoutError(
-                "EXACT_CONTRACT_SUBSCRIPTION_MISMATCH"
-            )
+        receipt = self._validate_subscription_candidate(
+            worker,
+            revalidation_receipt,
+            require_frozen=False,
+        )
         with self._lock:
             if self._thread is not None:
                 raise CFastExecutionQualityTickFanoutError(
@@ -167,8 +152,57 @@ class CommodityCFastExecutionQualityTickFanout:
             self._worker = worker
             self._receipt = receipt
             self._exact_contracts = frozenset(receipt.exact_contracts)
+            self._subscription_generation = 1
             self._state = "PREVERIFIED_EXACT_CONTRACT_SUBSCRIPTION_BOUND_NOT_STARTED"
             self._last_error = None
+            return self._status_locked()
+
+    def refresh_preverified_subscription(
+        self,
+        *,
+        worker: PreverifiedTickHorizonWorker,
+        revalidation_receipt: CFastExecutionQualityRuntimeRevalidationDTO,
+    ) -> dict[str, object]:
+        """Explicitly recover one stopped binding with a fresh exact receipt.
+
+        The worker and its frozen contract set are immutable for the process.
+        Refresh exists only so startup/reload/recovery can replace the
+        short-lived revalidation receipt after the queue was drained.  It is
+        also the sole operation allowed to clear a fanout-local blocker.
+        """
+
+        receipt = self._validate_subscription_candidate(
+            worker,
+            revalidation_receipt,
+            require_frozen=True,
+        )
+        with self._lock:
+            if self._thread is not None or self._accepting:
+                raise CFastExecutionQualityTickFanoutError(
+                    "TICK_SUBSCRIPTION_REFRESH_REQUIRES_STOPPED_FANOUT"
+                )
+            if not self._queue.empty():
+                raise CFastExecutionQualityTickFanoutError(
+                    "TICK_SUBSCRIPTION_REFRESH_REQUIRES_DRAINED_QUEUE"
+                )
+            if self._worker is None or self._receipt is None:
+                raise CFastExecutionQualityTickFanoutError(
+                    "TICK_SUBSCRIPTION_REFRESH_REQUIRES_EXISTING_BINDING"
+                )
+            if self._worker is not worker:
+                raise CFastExecutionQualityTickFanoutError(
+                    "TICK_SUBSCRIPTION_WORKER_REPLACEMENT_FORBIDDEN"
+                )
+            if frozenset(receipt.exact_contracts) != self._exact_contracts:
+                raise CFastExecutionQualityTickFanoutError(
+                    "TICK_SUBSCRIPTION_CONTRACT_REFRESH_DRIFT"
+                )
+            self._receipt = receipt
+            self._subscription_generation += 1
+            self._blocked = False
+            self._last_error = None
+            self._stop_event.clear()
+            self._state = "PREVERIFIED_EXACT_CONTRACT_SUBSCRIPTION_REFRESHED_NOT_STARTED"
             return self._status_locked()
 
     def start(self) -> dict[str, object]:
@@ -513,6 +547,48 @@ class CommodityCFastExecutionQualityTickFanout:
             raise CFastExecutionQualityTickFanoutError("TICK_FANOUT_CLOCK_MUST_USE_UTC")
         return value
 
+    def _validate_subscription_candidate(
+        self,
+        worker: PreverifiedTickHorizonWorker,
+        revalidation_receipt: CFastExecutionQualityRuntimeRevalidationDTO,
+        *,
+        require_frozen: bool,
+    ) -> CFastExecutionQualityRuntimeRevalidationDTO:
+        if type(worker) is not PreverifiedTickHorizonWorker:
+            raise CFastExecutionQualityTickFanoutError(
+                "PREVERIFIED_HORIZON_WORKER_TYPE_INVALID"
+            )
+        try:
+            receipt = CFastExecutionQualityRuntimeRevalidationDTO.model_validate(
+                revalidation_receipt
+            )
+        except ValidationError as exc:
+            raise CFastExecutionQualityTickFanoutError(
+                "REVALIDATION_RECEIPT_INVALID"
+            ) from exc
+        now = self._utc_now()
+        if not receipt.revalidated_at_utc <= now < receipt.valid_until_utc:
+            raise CFastExecutionQualityTickFanoutError("REVALIDATION_RECEIPT_INACTIVE")
+        worker_status = worker.status()
+        if worker_status["blocked_fail_closed"] is not False:
+            raise CFastExecutionQualityTickFanoutError(
+                "PREVERIFIED_HORIZON_WORKER_BLOCKED"
+            )
+        accepted = tuple(worker_status["accepted_exact_contracts"])
+        if accepted != receipt.exact_contracts:
+            raise CFastExecutionQualityTickFanoutError(
+                "EXACT_CONTRACT_SUBSCRIPTION_MISMATCH"
+            )
+        if require_frozen and (
+            worker_status["exact_contract_subscription_frozen"] is not True
+            or tuple(worker_status["frozen_exact_contracts"])
+            != receipt.exact_contracts
+        ):
+            raise CFastExecutionQualityTickFanoutError(
+                "PREVERIFIED_EXACT_CONTRACT_FREEZE_MISMATCH"
+            )
+        return receipt
+
     def _receipt_active_locked(self, now: datetime) -> bool:
         receipt = self._receipt
         return bool(
@@ -558,6 +634,7 @@ class CommodityCFastExecutionQualityTickFanout:
             "worker_thread_running": thread_running,
             "tick_input_accepting": self._accepting,
             "preverified_worker_bound": self._worker is not None,
+            "subscription_generation": self._subscription_generation,
             "revalidation_receipt_sha256": (
                 self._receipt.receipt_sha256 if self._receipt is not None else None
             ),

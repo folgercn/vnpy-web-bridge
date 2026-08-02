@@ -64,6 +64,11 @@ class PreverifiedTickHorizonWorker:
         self._blocked = False
         self._frozen_exact_contracts: tuple[str, ...] | None = None
 
+    def is_bound_to(self, sidecar: OfflineExecutionQualitySidecar) -> bool:
+        """Prove identity with the durable source owned by the assembly."""
+
+        return self._sidecar is sidecar
+
     def register_preverified_plan(
         self,
         *,

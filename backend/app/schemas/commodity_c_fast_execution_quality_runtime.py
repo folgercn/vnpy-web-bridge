@@ -15,6 +15,15 @@ from pydantic import (
 )
 
 from app.schemas.commodity_c_fast_shadow import StrictFiniteModel
+from app.schemas.commodity_c_fast_execution_policy import (
+    CFastExecutionQualityCollectionPolicyV2DTO,
+)
+from app.schemas.commodity_c_fast_execution_quality import (
+    CFastVirtualIntentPlanDTO,
+)
+from app.schemas.commodity_c_fast_execution_quality_score import (
+    CFastExecutionQualityContractSpecDTO,
+)
 
 
 RevalidationTrigger = Literal["startup", "reload", "recovery"]
@@ -176,6 +185,64 @@ class CFastExecutionQualityRuntimeRevalidationDTO(StrictFiniteModel):
         core = self.model_dump(mode="json", exclude={"receipt_sha256"})
         if self.receipt_sha256 != _sha256_json(core):
             raise ValueError("receipt_sha256 mismatch")
+        return self
+
+
+class CFastExecutionQualityVerifiedRuntimeInputsDTO(StrictFiniteModel):
+    """Atomic typed inputs produced by the same exact artifact revalidation.
+
+    This is deliberately stricter than the hash-only receipt.  A production
+    lifecycle may register durable virtual intents only from this bundle, so
+    the plan, scoring policy and exact contract specifications cannot be read
+    again from a weaker or newer filesystem generation after verification.
+    """
+
+    model_config = ConfigDict(
+        frozen=True,
+        revalidate_instances="always",
+    )
+
+    schema_version: Literal[
+        "commodity_c_fast_execution_quality_verified_runtime_inputs_v1"
+    ]
+    verified_inputs_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    revalidation_receipt: CFastExecutionQualityRuntimeRevalidationDTO
+    preverified_plan: CFastVirtualIntentPlanDTO
+    source_snapshot_receipt_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    score_policy: CFastExecutionQualityCollectionPolicyV2DTO
+    score_policy_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    contract_specs: tuple[CFastExecutionQualityContractSpecDTO, ...] = Field(
+        min_length=1,
+        max_length=100,
+    )
+
+    @model_validator(mode="after")
+    def validate_atomic_typed_join(
+        self,
+    ) -> "CFastExecutionQualityVerifiedRuntimeInputsDTO":
+        if self.source_snapshot_receipt_sha256 != self.preverified_plan.snapshot_hash:
+            raise ValueError("source snapshot receipt must match plan snapshot hash")
+        expected_score_policy_hash = _sha256_json(
+            self.score_policy.model_dump(mode="json")
+        )
+        if self.score_policy_hash != expected_score_policy_hash:
+            raise ValueError("score_policy_hash mismatch")
+        if self.score_policy.foundation_policy_hash != self.preverified_plan.policy_hash:
+            raise ValueError("score policy foundation binding mismatch")
+        plan_contracts = tuple(
+            sorted({intent.exact_contract for intent in self.preverified_plan.intents})
+        )
+        spec_contracts = tuple(spec.exact_contract for spec in self.contract_specs)
+        if (
+            not self.preverified_plan.intents
+            or tuple(sorted(set(spec_contracts))) != spec_contracts
+            or plan_contracts != self.revalidation_receipt.exact_contracts
+            or spec_contracts != self.revalidation_receipt.exact_contracts
+        ):
+            raise ValueError("typed exact contract set mismatch")
+        core = self.model_dump(mode="json", exclude={"verified_inputs_sha256"})
+        if self.verified_inputs_sha256 != _sha256_json(core):
+            raise ValueError("verified_inputs_sha256 mismatch")
         return self
 
 

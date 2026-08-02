@@ -173,6 +173,7 @@ def test_each_lifecycle_entry_performs_full_revalidation() -> None:
         ]
         assert status["capabilities"] == {
             "full_revalidation_verifier_bound": True,
+            "typed_runtime_inputs_verified": False,
             "tick_input_bound": False,
             "tick_subscription_built": False,
             "horizon_worker_built": False,

@@ -7,6 +7,7 @@ from typing import Callable, Protocol
 from app.core.config import Settings, get_settings
 from app.schemas.commodity_c_fast_execution_quality_runtime import (
     CFastExecutionQualityRuntimeRevalidationDTO,
+    CFastExecutionQualityVerifiedRuntimeInputsDTO,
     RevalidationTrigger,
 )
 
@@ -56,7 +57,10 @@ class FullExecutionQualityRevalidationVerifier(Protocol):
         self,
         trigger: RevalidationTrigger,
         observed_at_utc: datetime,
-    ) -> CFastExecutionQualityRuntimeRevalidationDTO: ...
+    ) -> (
+        CFastExecutionQualityRuntimeRevalidationDTO
+        | CFastExecutionQualityVerifiedRuntimeInputsDTO
+    ): ...
 
 
 class CommodityCFastExecutionQualityRuntime:
@@ -86,6 +90,9 @@ class CommodityCFastExecutionQualityRuntime:
         self._last_error: str | None = None
         self._receipt: (
             CFastExecutionQualityRuntimeRevalidationDTO | None
+        ) = None
+        self._verified_inputs: (
+            CFastExecutionQualityVerifiedRuntimeInputsDTO | None
         ) = None
 
     def bind_full_revalidation_verifier(
@@ -123,6 +130,7 @@ class CommodityCFastExecutionQualityRuntime:
         with self._lock:
             self._started = False
             self._receipt = None
+            self._verified_inputs = None
             self._runtime_state = "STOPPED_NO_CAPABILITY"
             return self._status_locked()
 
@@ -142,6 +150,18 @@ class CommodityCFastExecutionQualityRuntime:
                 )
             return self._receipt.model_copy(deep=True)
 
+    def current_verified_runtime_inputs(
+        self,
+    ) -> CFastExecutionQualityVerifiedRuntimeInputsDTO:
+        """Return the typed inputs from the current exact revalidation only."""
+
+        with self._lock:
+            if not self._started or self._verified_inputs is None:
+                raise CFastExecutionQualityRuntimeError(
+                    "CURRENT_VERIFIED_RUNTIME_INPUTS_UNAVAILABLE"
+                )
+            return self._verified_inputs.model_copy(deep=True)
+
     def _run_lifecycle_revalidation(
         self,
         trigger: RevalidationTrigger,
@@ -149,6 +169,7 @@ class CommodityCFastExecutionQualityRuntime:
         with self._lock:
             self._started = True
             self._receipt = None
+            self._verified_inputs = None
             self._last_trigger = trigger
             if not self.settings.commodity_c_fast_execution_quality_runtime_enabled:
                 self._runtime_state = "DISABLED_DEFAULT_OFF"
@@ -167,11 +188,23 @@ class CommodityCFastExecutionQualityRuntime:
                     trigger,
                     observed_at_utc,
                 )
-                receipt = (
-                    CFastExecutionQualityRuntimeRevalidationDTO.model_validate(
-                        candidate
+                verified_inputs = None
+                if isinstance(
+                    candidate,
+                    CFastExecutionQualityVerifiedRuntimeInputsDTO,
+                ):
+                    verified_inputs = (
+                        CFastExecutionQualityVerifiedRuntimeInputsDTO.model_validate(
+                            candidate
+                        )
                     )
-                )
+                    receipt = verified_inputs.revalidation_receipt
+                else:
+                    receipt = (
+                        CFastExecutionQualityRuntimeRevalidationDTO.model_validate(
+                            candidate
+                        )
+                    )
                 self._validate_receipt(
                     receipt,
                     trigger=trigger,
@@ -187,6 +220,7 @@ class CommodityCFastExecutionQualityRuntime:
                 return self._status_locked()
 
             self._receipt = receipt
+            self._verified_inputs = verified_inputs
             self._generation += 1
             self._runtime_state = (
                 "REVALIDATED_FOUNDATION_ONLY_TICK_RUNTIME_NOT_BUILT"
@@ -241,6 +275,7 @@ class CommodityCFastExecutionQualityRuntime:
             "runtime_active": False,
             "execution_quality_implemented": False,
             "full_revalidation_complete": receipt is not None,
+            "typed_runtime_inputs_verified": self._verified_inputs is not None,
             "revalidation_generation": self._generation,
             "last_revalidation_trigger": self._last_trigger,
             "last_error": self._last_error,
@@ -305,6 +340,7 @@ class CommodityCFastExecutionQualityRuntime:
                 "full_revalidation_verifier_bound": (
                     self._full_revalidation_verifier is not None
                 ),
+                "typed_runtime_inputs_verified": self._verified_inputs is not None,
                 "tick_input_bound": False,
                 "tick_subscription_built": False,
                 "horizon_worker_built": False,

@@ -13,6 +13,7 @@ import pytest
 from app.core.config import Settings
 from app.schemas.commodity_c_fast_execution_quality_runtime import (
     CFastExecutionQualityRuntimeRevalidationDTO,
+    CFastExecutionQualityVerifiedRuntimeInputsDTO,
 )
 from app.services import (
     commodity_c_fast_execution_quality_production_assembly as assembly_module,
@@ -20,6 +21,9 @@ from app.services import (
 from app.services.commodity_c_fast_execution_quality_evidence_export import (
     CFastExecutionQualityEvidenceExportError,
     CreateOnlyExecutionQualityEvidenceExportStore,
+)
+from app.services.commodity_c_fast_execution_quality_horizon_worker import (
+    PreverifiedTickHorizonWorker,
 )
 from app.services.commodity_c_fast_execution_quality_production_assembly import (
     CFastExecutionQualityProductionAssemblyError,
@@ -36,11 +40,19 @@ from app.services.commodity_c_fast_execution_quality_sidecar import (
     CreateOnlyExecutionQualityJournal,
     OfflineExecutionQualitySidecar,
 )
+from app.services.commodity_c_fast_execution_quality_tick_fanout import (
+    CommodityCFastExecutionQualityTickFanout,
+)
+from app.services.commodity_c_fast_shadow_common import sha256_json
+from app.services.vnpy_rpc_service import VnpyRpcService
 
 NOW = datetime(2026, 9, 1, 1, 0, tzinfo=timezone.utc)
 ROOT = Path(__file__).resolve().parents[3]
 SIDECAR_TEST_PATH = (
     ROOT / "backend/tests/unit/test_commodity_c_fast_execution_quality_sidecar.py"
+)
+SCORER_TEST_PATH = (
+    ROOT / "backend/tests/unit/test_commodity_c_fast_execution_quality_scorer.py"
 )
 FALSE_AUTHORITY = {
     "collection_authorized": False,
@@ -66,6 +78,7 @@ def _load_test_helpers(name: str, path: Path):
 
 
 SIDECAR = _load_test_helpers("production_assembly_sidecar_helpers", SIDECAR_TEST_PATH)
+SCORER = _load_test_helpers("production_assembly_scorer_helpers", SCORER_TEST_PATH)
 
 
 def _sha256_json(value: object) -> str:
@@ -121,6 +134,29 @@ def revalidation(
     }
     return CFastExecutionQualityRuntimeRevalidationDTO.model_validate(
         {**core, "receipt_sha256": _sha256_json(core)}
+    )
+
+
+def verified_revalidation(
+    trigger: str,
+    observed_at_utc: datetime,
+) -> CFastExecutionQualityVerifiedRuntimeInputsDTO:
+    receipt = revalidation(trigger, observed_at_utc)
+    plan = SIDECAR.plan()
+    policy = SCORER.policy()
+    core = {
+        "schema_version": (
+            "commodity_c_fast_execution_quality_verified_runtime_inputs_v1"
+        ),
+        "revalidation_receipt": receipt.model_dump(mode="json"),
+        "preverified_plan": plan.model_dump(mode="json"),
+        "source_snapshot_receipt_sha256": plan.snapshot_hash,
+        "score_policy": policy.model_dump(mode="json"),
+        "score_policy_hash": sha256_json(policy.model_dump(mode="json")),
+        "contract_specs": [SCORER.contract_spec().model_dump(mode="json")],
+    }
+    return CFastExecutionQualityVerifiedRuntimeInputsDTO.model_validate(
+        {**core, "verified_inputs_sha256": _sha256_json(core)}
     )
 
 
@@ -530,6 +566,165 @@ def test_unexpected_runtime_stop_exception_is_blocked_at_assembly(
     assert status["assembly_lifecycle_started"] is False
     assert status["runtime_active"] is False
     assert all(status[field] is False for field in FALSE_AUTHORITY)
+
+
+def test_tick_runtime_rejects_hash_only_receipt_without_atomic_typed_inputs(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(commodity_c_fast_execution_quality_runtime_enabled=True)
+    underlying_runtime = CommodityCFastExecutionQualityRuntime(
+        settings=settings,
+        clock=lambda: NOW,
+    )
+    underlying_runtime.bind_full_revalidation_verifier(revalidation)
+    source_root = tmp_path / "hash-only-source"
+    source_root.mkdir()
+    source = SIDECAR.sidecar(source_root)
+    assembly = CommodityCFastExecutionQualityProductionAssembly(
+        runtime=underlying_runtime,
+        admission_verifier=FakeAdmissionVerifier(),
+    )
+    assembly.bind_readonly_components(
+        sidecar=source,
+        repository=CommodityCFastExecutionQualityReadonlyRepository(source),
+        evidence_export_store=export_store(tmp_path),
+    )
+    assembly.bind_tick_runtime_components(
+        horizon_worker=PreverifiedTickHorizonWorker(source),
+        tick_fanout=CommodityCFastExecutionQualityTickFanout(
+            settings=settings,
+            clock=lambda: NOW,
+            session_id="assembly-hash-only-session",
+        ),
+    )
+
+    status = assembly.start()
+
+    assert status["assembly_state"] == (
+        "BLOCKED_TYPED_TICK_RUNTIME_ASSEMBLY_FAILED"
+    )
+    assert status["assembly_last_error"] == (
+        "CURRENT_VERIFIED_RUNTIME_INPUTS_UNAVAILABLE"
+    )
+    assert status["tick_runtime_ready"] is False
+    assert status["capabilities"]["horizon_worker_built"] is False
+    assert status["runtime_active"] is False
+    assert status["execution_quality_implemented"] is False
+
+
+def test_real_rpc_tick_reaches_same_assembly_journal_and_all_horizons(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = [NOW]
+    settings = Settings(
+        commodity_c_fast_execution_quality_runtime_enabled=True,
+    )
+    underlying_runtime = CommodityCFastExecutionQualityRuntime(
+        settings=settings,
+        clock=lambda: now[0],
+    )
+    underlying_runtime.bind_full_revalidation_verifier(verified_revalidation)
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    source = SIDECAR.sidecar(source_root)
+    worker = PreverifiedTickHorizonWorker(source)
+    fanout = CommodityCFastExecutionQualityTickFanout(
+        settings=settings,
+        clock=lambda: now[0],
+        queue_size=16,
+        session_id="assembly-rpc-tick-session",
+    )
+    assembly = CommodityCFastExecutionQualityProductionAssembly(
+        runtime=underlying_runtime,
+        admission_verifier=FakeAdmissionVerifier(),
+    )
+    assembly.bind_readonly_components(
+        sidecar=source,
+        repository=CommodityCFastExecutionQualityReadonlyRepository(source),
+        evidence_export_store=export_store(tmp_path),
+    )
+    assembly.bind_tick_runtime_components(
+        horizon_worker=worker,
+        tick_fanout=fanout,
+    )
+    rpc = VnpyRpcService()
+    rpc.bind_readonly_tick_listener(fanout.offer_tick)
+    persisted: list[dict] = []
+    monkeypatch.setattr(
+        "app.services.vnpy_rpc_service.tick_persistence_service.enqueue_tick",
+        lambda payload: persisted.append(payload) or True,
+    )
+
+    status = assembly.start()
+
+    assert status["assembly_state"] == (
+        "SIGNED_ADMISSION_VERIFIED_READONLY_TICK_RUNTIME_BOUND"
+    )
+    assert status["tick_runtime_ready"] is True
+    assert status["capabilities"]["tick_input_bound"] is True
+    assert status["capabilities"]["tick_subscription_built"] is True
+    assert status["capabilities"]["horizon_worker_built"] is True
+    assert status["capabilities"]["questdb_evidence_adapter_bound"] is False
+
+    class TickEvent:
+        type = "eTick.cu2612.SHFE"
+        data: dict[str, object] = {}
+
+    for horizon_ms in (0, 250, 1_000, 5_000, 30_000, 60_000, 62_000):
+        now[0] = NOW + timedelta(milliseconds=horizon_ms)
+        TickEvent.data = {
+            "symbol": "cu2612",
+            "exchange": "SHFE",
+            "vt_symbol": "cu2612.SHFE",
+            "datetime": now[0].isoformat(),
+            "volume": 100 + horizon_ms,
+            **{
+                f"bid_price_{level}": 1_001 - level
+                for level in range(1, 6)
+            },
+            **{
+                f"ask_price_{level}": 1_001 + level
+                for level in range(1, 6)
+            },
+            **{f"bid_volume_{level}": 2 for level in range(1, 6)},
+            **{f"ask_volume_{level}": 2 for level in range(1, 6)},
+        }
+        rpc.handle_event("", TickEvent())
+        fanout.wait_until_idle()
+
+    worker_status = worker.status()
+    state = source.recover()
+    assert len(persisted) == 7
+    assert worker_status["snapshot_record_count"] == 7
+    assert worker_status["completion_counts"] == {
+        "SEALED_SELECTED_EVIDENCE": 6,
+        "SEALED_MISSING_NOT_IMPUTED": 0,
+        "PENDING_NOT_SEALED": 0,
+    }
+    assert len(state.intents) == 1
+    assert len(state.evidence) == 6
+    assert assembly.status()["runtime_active"] is False
+    assert assembly.status()["execution_quality_implemented"] is False
+    assert all(assembly.status()[field] is False for field in FALSE_AUTHORITY)
+
+    reloaded = assembly.reload()
+    assert reloaded["tick_runtime_ready"] is True
+    assert reloaded["tick_fanout"]["subscription_generation"] == 2
+    assert worker.status()["registered_intent_count"] == 1
+    assert len(source.recover().intents) == 1
+
+    TickEvent.data = {**TickEvent.data, "bid_price_1": float("nan")}
+    rpc.handle_event("", TickEvent())
+    fanout.wait_until_idle()
+    assert fanout.status()["blocked_fail_closed"] is True
+
+    recovered = assembly.recover()
+    assert recovered["tick_runtime_ready"] is True
+    assert recovered["tick_fanout"]["subscription_generation"] == 3
+    assert recovered["runtime_active"] is False
+    assert recovered["execution_quality_implemented"] is False
+    assert assembly.stop()["assembly_state"] == "STOPPED_NO_CAPABILITY"
 
 
 def test_assembly_and_repository_have_zero_trading_capability() -> None:
