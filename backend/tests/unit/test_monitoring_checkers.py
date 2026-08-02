@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+import json
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
-import json
 from threading import Lock
-import time
 
 from app.core.config import Settings
 from app.services.alert_service import AlertService
@@ -150,6 +150,25 @@ class FakeRisk:
         return {"max_daily_loss": self.max_daily_loss}
 
 
+class FakeCFastExecutionQuality:
+    def __init__(self, state: str, error: str | None = None) -> None:
+        self.state = state
+        self.error = error
+
+    def status(self) -> dict[str, object]:
+        return {
+            "assembly_state": self.state,
+            "configured_enabled": self.state != "DISABLED_DEFAULT_OFF",
+            "runtime_active": False,
+            "execution_quality_implemented": False,
+            "assembly_last_error": self.error,
+            "readonly_repository": {"blocked_fail_closed": bool(self.error)},
+            "evidence_export": {"immutable_create_only": True},
+            "orders_sent": 0,
+            "positions_modified": 0,
+        }
+
+
 def build_service(tmp_path, *, now: datetime, settings: Settings | None = None, **overrides) -> MonitoringService:
     settings = settings or Settings(
         monitor_failure_threshold=1,
@@ -196,6 +215,38 @@ def test_rpc_failure_suppresses_derived_checks(tmp_path) -> None:
     incident = next(item for item in snapshot["incidents"] if item["incident_id"] == "rpc_unavailable:CTP")
     assert incident["status"] == "firing"
     assert incident["severity"] == "info"
+
+
+def test_c_fast_execution_quality_monitoring_isolated_projection(tmp_path) -> None:
+    now = datetime(2026, 6, 18, 2, 0, tzinfo=timezone.utc)
+    blocked = FakeCFastExecutionQuality(
+        "BLOCKED_EVIDENCE_EXPORT_FAILED",
+        "EVIDENCE_EXPORT_ROOT_INVALID",
+    )
+    service = build_service(
+        tmp_path,
+        now=now,
+        c_fast_execution_quality=blocked,
+    )
+
+    snapshot = service.run_checks()
+
+    check = next(
+        row
+        for row in snapshot["checks"]
+        if row["name"] == "c_fast_execution_quality"
+    )
+    assert check["healthy"] is False
+    assert check["details"]["runtime_active"] is False
+    assert check["details"]["execution_quality_implemented"] is False
+    incident = next(
+        row
+        for row in snapshot["incidents"]
+        if row["incident_id"]
+        == "c_fast_execution_quality_sidecar_failed:C_FAST_CROSS_SECTION_NEUTRAL"
+    )
+    assert incident["severity"] == "warning"
+    assert incident["details"]["orders_sent"] == 0
 
 
 def test_rpc_suppression_resolves_existing_gateway_incident(tmp_path) -> None:

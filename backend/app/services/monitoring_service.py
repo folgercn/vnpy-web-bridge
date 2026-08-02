@@ -1,22 +1,31 @@
 from __future__ import annotations
 
 import asyncio
-from collections import deque
-from datetime import datetime, timedelta, timezone
 import json
 import logging
+from collections import deque
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Lock
-from typing import Any, Callable
+from typing import Any, Callable, Protocol
 
 from app.core.config import Settings, get_settings
 from app.core.errors import AppError
 from app.services.alert_service import AlertService, alert_service
 from app.services.calendar_service import calendar_service
-from app.services.market_data_service import QuestDbMarketDataService, market_data_service
+from app.services.commodity_c_fast_execution_quality_production_assembly import (
+    commodity_c_fast_execution_quality_production_assembly,
+)
+from app.services.market_data_service import (
+    QuestDbMarketDataService,
+    market_data_service,
+)
 from app.services.risk_service import RiskService, risk_service
 from app.services.strategy_service import StrategyService, strategy_service
-from app.services.tick_persistence import TickPersistenceService, tick_persistence_service
+from app.services.tick_persistence import (
+    TickPersistenceService,
+    tick_persistence_service,
+)
 from app.services.vnpy_rpc_service import VnpyRpcService, rpc_service
 from app.services.watchlist_service import WatchlistService, watchlist_service
 from app.stores.memory_store import MemoryStore, memory_store
@@ -24,6 +33,10 @@ from app.stores.memory_store import MemoryStore, memory_store
 logger = logging.getLogger(__name__)
 
 WindowEvent = tuple[datetime, str]
+
+
+class CFastExecutionQualityStatusProvider(Protocol):
+    def status(self) -> dict[str, object]: ...
 
 
 class MonitoringService:
@@ -39,6 +52,7 @@ class MonitoringService:
         strategies: StrategyService | None = None,
         risk: RiskService | None = None,
         store: MemoryStore | None = None,
+        c_fast_execution_quality: CFastExecutionQualityStatusProvider | None = None,
         now_func: Callable[[], datetime] | None = None,
     ) -> None:
         self.settings = settings or get_settings()
@@ -50,6 +64,10 @@ class MonitoringService:
         self.strategies = strategies or strategy_service
         self.risk = risk or risk_service
         self.store = store or memory_store
+        self.c_fast_execution_quality = (
+            c_fast_execution_quality
+            or commodity_c_fast_execution_quality_production_assembly
+        )
         self.now_func = now_func or (lambda: datetime.now(timezone.utc))
         self.started_at = self.now_func()
         self._lock = Lock()
@@ -129,6 +147,7 @@ class MonitoringService:
             self._check_questdb(checks, suppressed, now)
             self._check_postgres(checks, now)
         self._check_risk(checks, now)
+        self._check_c_fast_execution_quality(checks, now)
         self._check_http_5xx(checks, now)
         self._check_trade_failures(checks, now)
         self._resolve_suppressed_incidents(suppressed, now)
@@ -157,6 +176,60 @@ class MonitoringService:
         with self._lock:
             self._trade_failures.append((now, f"{kind}:{error_code}"))
             self._trim_window(self._trade_failures, now, self.settings.monitor_trade_failure_window_seconds)
+
+    def _check_c_fast_execution_quality(
+        self,
+        checks: list[dict[str, Any]],
+        now: datetime,
+    ) -> None:
+        try:
+            projection = self.c_fast_execution_quality.status()
+            state = str(projection.get("assembly_state") or "UNKNOWN")
+            healthy = not state.startswith("BLOCKED_")
+            summary = (
+                "C_FAST execution-quality sidecar healthy"
+                if healthy
+                else f"C_FAST execution-quality sidecar blocked: {state}"
+            )
+            details = _safe_details(
+                {
+                    "assembly_state": state,
+                    "configured_enabled": projection.get("configured_enabled"),
+                    "runtime_active": projection.get("runtime_active"),
+                    "execution_quality_implemented": projection.get(
+                        "execution_quality_implemented"
+                    ),
+                    "assembly_last_error": projection.get("assembly_last_error"),
+                    "readonly_repository": projection.get("readonly_repository"),
+                    "evidence_export": projection.get("evidence_export"),
+                    "orders_sent": projection.get("orders_sent"),
+                    "positions_modified": projection.get("positions_modified"),
+                }
+            )
+        except Exception as exc:
+            healthy = False
+            summary = "C_FAST execution-quality status projection failed"
+            details = {
+                "assembly_state": "STATUS_PROJECTION_FAILED",
+                "error_code": str(getattr(exc, "code", type(exc).__name__)),
+            }
+        incident = self.alerts.record_check(
+            rule_id="c_fast_execution_quality_sidecar_failed",
+            scope_id="C_FAST_CROSS_SECTION_NEUTRAL",
+            healthy=healthy,
+            severity="warning",
+            summary=summary,
+            now=now,
+            details=details,
+        )
+        check = _check(
+            "c_fast_execution_quality",
+            healthy,
+            summary,
+            incident,
+        )
+        check["details"] = details
+        checks.append(check)
 
     async def _run_loop(self) -> None:
         while True:

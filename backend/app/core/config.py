@@ -141,6 +141,8 @@ class Settings(BaseSettings):
         default=0,
         ge=0,
     )
+    commodity_c_fast_execution_quality_journal_root: str = ""
+    commodity_c_fast_execution_quality_evidence_export_root: str = ""
     commodity_c_fast_simnow_shakedown_enabled: bool = False
     commodity_c_fast_simnow_account_hashes: str = ""
     commodity_c_fast_simnow_state_path: str = (

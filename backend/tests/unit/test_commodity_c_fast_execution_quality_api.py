@@ -3,12 +3,10 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from fastapi.testclient import TestClient
-
 from app.core.security import CurrentUser, create_access_token
 from app.main import app
 from app.services.vnpy_rpc_service import rpc_service
-
+from fastapi.testclient import TestClient
 
 FALSE_AUTHORITY = {
     "collection_authorized": False,
@@ -39,6 +37,22 @@ class FakeExecutionQualityRuntime:
     def recover(self) -> dict[str, object]:
         self.calls.append("recovery")
         return self._projection("BLOCKED_FULL_REVALIDATION_VERIFIER_NOT_BOUND")
+
+    def intents(self) -> tuple[dict[str, object], ...]:
+        self.calls.append("intents")
+        return ({"intent_id": "cfast-virtual-intent-v1-" + "a" * 64},)
+
+    def execution_quality(self) -> tuple[dict[str, object], ...]:
+        self.calls.append("execution_quality")
+        return ({"target_key": "decision", "completion_state": "SEALED"},)
+
+    def evidence_export(self) -> dict[str, object]:
+        self.calls.append("evidence_export")
+        return {
+            "artifact_filename": "immutable.json",
+            "artifact_state": "ALREADY_PRESENT",
+            "export": {"export_sha256": "b" * 64},
+        }
 
     @staticmethod
     def _projection(state: str) -> dict[str, object]:
@@ -145,6 +159,53 @@ def test_lifecycle_revalidation_is_admin_only_and_has_no_start_route(
         assert status["runtime_active"] is False
         assert status["execution_quality_implemented"] is False
         assert all(status[key] is False for key in FALSE_AUTHORITY)
+
+
+def test_readonly_projection_endpoints_require_auth_and_allow_all_read_roles(
+    monkeypatch,
+) -> None:
+    runtime = install_runtime(monkeypatch)
+    with client_without_rpc(monkeypatch) as client:
+        unauthenticated = client.get("/api/commodity-c-fast/execution-quality/intents")
+        intents = client.get(
+            "/api/commodity-c-fast/execution-quality/intents",
+            headers=auth_headers("viewer"),
+        )
+        quality = client.get(
+            "/api/commodity-c-fast/execution-quality/execution-quality",
+            headers=auth_headers("trader"),
+        )
+        exported = client.get(
+            "/api/commodity-c-fast/execution-quality/evidence-export",
+            headers=auth_headers("admin"),
+        )
+
+    assert unauthenticated.status_code == 401
+    assert intents.status_code == quality.status_code == exported.status_code == 200
+    assert intents.json()["data"]["count"] == 1
+    assert quality.json()["data"]["count"] == 1
+    assert exported.json()["data"]["artifact_state"] == "ALREADY_PRESENT"
+    assert runtime.calls == ["intents", "execution_quality", "evidence_export"]
+
+
+def test_failed_current_projection_returns_503_without_mutation(
+    monkeypatch,
+) -> None:
+    runtime = install_runtime(monkeypatch)
+
+    def unavailable():
+        raise ValueError("PRODUCTION_ASSEMBLY_CURRENT_PROJECTION_UNAVAILABLE")
+
+    monkeypatch.setattr(runtime, "intents", unavailable)
+    with client_without_rpc(monkeypatch) as client:
+        response = client.get(
+            "/api/commodity-c-fast/execution-quality/intents",
+            headers=auth_headers("viewer"),
+        )
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "ValueError"
+    assert runtime.calls == []
 
 
 def test_lifecycle_api_has_no_market_rpc_or_trading_dependency() -> None:

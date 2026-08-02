@@ -1,8 +1,9 @@
 # C_FAST execution-quality runtime foundation
 
-本文档对应 Issue #217 的第一个可独立合并切片。它把 #144 的 pure scorer 与离线
-durable sidecar 之外缺失的 **Settings、startup 生命周期、完整重验接口和可审计
-状态** 固定下来，但仍然不接入真实 Tick、QuestDB 或交易能力。
+本文档记录 Issue #217 已合并的 runtime foundation，以及后续 production assembly
+只读接线。它把 #144 的 pure scorer 与离线 durable sidecar 接到 **Settings、startup
+生命周期、完整重验、immutable export、API 和 monitoring projection**；仍然不接入
+真实 QuestDB adapter 或任何交易能力。
 
 ## 本切片交付
 
@@ -21,6 +22,27 @@ durable sidecar 之外缺失的 **Settings、startup 生命周期、完整重验
 - 认证后的 viewer/trader/admin 可读取独立 status；只有 admin 可触发 reload
   或 recovery。API 不提供 start、execute、dispatch、order 或 position mutation
   路由，且两个 lifecycle mutation 仍只返回 fail-closed revalidation 状态。
+- runtime enabled 时，进程在 FastAPI startup 前从两个独立的 absolute `0700`
+  custody roots 固定构造既有 `CreateOnlyExecutionQualityJournal`、
+  `OfflineExecutionQualitySidecar`、exact typed readonly repository 与
+  `CreateOnlyExecutionQualityEvidenceExportStore`：
+
+```text
+COMMODITY_C_FAST_EXECUTION_QUALITY_JOURNAL_ROOT=
+COMMODITY_C_FAST_EXECUTION_QUALITY_EVIDENCE_EXPORT_ROOT=
+```
+
+- 每个成功 lifecycle 都从同一个 sidecar fresh replay repository，并将同一 tip
+  create-only 发布为 immutable export。repository 的 record count/tip 必须与 export
+  receipt 完全一致；并发增长导致不一致时本次 lifecycle fail closed，API 不发布旧
+  snapshot。
+- `/intents`、`/execution-quality`、`/evidence-export` 均为只读 GET；仅当当前 runtime
+  仍 started、receipt/admission 未过期、且当前 lifecycle generation 完整成功时可读。
+  后续 reload/recovery 失败或 stop 后旧 snapshot 会返回 `503`，不能形成 stale-success。
+- monitoring 增加独立 `c_fast_execution_quality` check；journal/repository/export 失败只
+  产生 C_FAST sidecar incident，不触发 baseline、其他 Shadow、行情或 SimNow mutation。
+- QuestDB evidence adapter 没有可信独立只读连接输入，因此保持明确
+  `questdb_evidence_adapter_bound=false`，不复用行情写入 DSN 冒充只读 capability。
 
 ## 能力隔离
 
@@ -53,8 +75,8 @@ orders_sent=0
 positions_modified=0
 ```
 
-即使设置 `COMMODITY_C_FAST_EXECUTION_QUALITY_RUNTIME_ENABLED=true`，成功重验后也
-只能进入：
+即使设置 `COMMODITY_C_FAST_EXECUTION_QUALITY_RUNTIME_ENABLED=true`，完成当前
+repository/export assembly 后仍只能进入：
 
 ```text
 REVALIDATED_FOUNDATION_ONLY_TICK_RUNTIME_NOT_BUILT
@@ -80,10 +102,9 @@ receipt trigger/time 不匹配、过期、hash 不一致、authority literal 不
 
 1. 真实 signed P0 acceptance 与 collection admission consumer；
 2. exact snapshot/plan/policy/spec/custody 的文件级完整 verifier；
-3. 与现有 Tick fan-out 的只读 listener 接口及 exact-contract subscription；
-4. decision + `250ms/1s/5s/30s/60s` worker 与 durable sidecar restart replay；
-5. intents/execution-quality/evidence-export 的只读 repository/QuestDB API 与监控；
-6. M2 一个完整 execution window 的真实零订单证据。
+3. 将现有 Tick fan-out、preverified horizon worker 与 production assembly 完整绑定；
+4. 独立、可信的 QuestDB read-only evidence adapter（当前明确 unbound）；
+5. M2 一个完整 execution window 的真实零订单证据。
 
 在上述能力全部构建并经过真实验收前，
 `execution_quality_implemented=false` 必须保持不变。

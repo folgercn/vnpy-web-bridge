@@ -1,11 +1,17 @@
 from __future__ import annotations
 
-import json
-from collections.abc import Callable
 from threading import RLock
 from typing import Any
 
-from app.services.commodity_c_fast_execution_quality_sidecar import SidecarState
+from app.schemas.commodity_c_fast_execution_quality_evidence_export import (
+    CFastExecutionQualityEvidenceExportDTO,
+)
+from app.services.commodity_c_fast_execution_quality_evidence_export import (
+    build_execution_quality_evidence_export,
+)
+from app.services.commodity_c_fast_execution_quality_sidecar import (
+    OfflineExecutionQualitySidecar,
+)
 
 
 class CFastExecutionQualityReadonlyRepositoryError(ValueError):
@@ -14,47 +20,34 @@ class CFastExecutionQualityReadonlyRepositoryError(ValueError):
         super().__init__(code)
 
 
-def _detached(value: object) -> Any:
-    return json.loads(
-        json.dumps(
-            value,
-            allow_nan=False,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-    )
-
-
 class CommodityCFastExecutionQualityReadonlyRepository:
-    """Failure-isolated read projection over a durable sidecar state loader.
+    """Failure-isolated exact projection over one fixed durable sidecar.
 
-    The repository receives only a zero-argument read callback. It cannot
-    append journal rows, connect to QuestDB or acquire order/account handles.
-    A loader failure trips only this repository until explicit recovery.
+    The repository owns no callback-shaped alternate state path. Recovery
+    always replays the bound ``OfflineExecutionQualitySidecar`` through the
+    existing strongly typed evidence-export builder. A replay or validation
+    failure trips only this repository until an explicit lifecycle recovery.
     """
 
-    def __init__(self, state_loader: Callable[[], SidecarState]) -> None:
-        if not callable(state_loader):
+    def __init__(self, source: OfflineExecutionQualitySidecar) -> None:
+        if type(source) is not OfflineExecutionQualitySidecar:
             raise CFastExecutionQualityReadonlyRepositoryError(
-                "READONLY_REPOSITORY_LOADER_INVALID"
+                "READONLY_REPOSITORY_SOURCE_TYPE_INVALID"
             )
-        self._state_loader = state_loader
+        self._source = source
         self._lock = RLock()
         self._blocked = False
         self._last_error: str | None = None
         self._generation = 0
-        self._snapshot: dict[str, Any] | None = None
+        self._snapshot: CFastExecutionQualityEvidenceExportDTO | None = None
+
+    def is_bound_to(self, source: OfflineExecutionQualitySidecar) -> bool:
+        return self._source is source
 
     def recover(self) -> dict[str, object]:
         with self._lock:
             try:
-                state = self._state_loader()
-                if type(state) is not SidecarState:
-                    raise CFastExecutionQualityReadonlyRepositoryError(
-                        "READONLY_REPOSITORY_STATE_TYPE_INVALID"
-                    )
-                snapshot = self._project(state)
+                snapshot = build_execution_quality_evidence_export(self._source)
             except Exception as exc:
                 self._blocked = True
                 self._snapshot = None
@@ -69,18 +62,20 @@ class CommodityCFastExecutionQualityReadonlyRepository:
     def intents(self) -> tuple[dict[str, Any], ...]:
         with self._lock:
             snapshot = self._require_snapshot_locked()
-            return tuple(_detached(row) for row in snapshot["intents"])
+            return tuple(row.model_dump(mode="json") for row in snapshot.intents)
 
     def execution_quality(self) -> tuple[dict[str, Any], ...]:
         with self._lock:
             snapshot = self._require_snapshot_locked()
-            return tuple(_detached(row) for row in snapshot["execution_quality"])
+            return tuple(row.model_dump(mode="json") for row in snapshot.evidence)
 
     def status(self) -> dict[str, object]:
         with self._lock:
             return self._status_locked()
 
-    def _require_snapshot_locked(self) -> dict[str, Any]:
+    def _require_snapshot_locked(
+        self,
+    ) -> CFastExecutionQualityEvidenceExportDTO:
         if self._blocked:
             raise CFastExecutionQualityReadonlyRepositoryError(
                 "READONLY_REPOSITORY_BLOCKED_REQUIRES_EXPLICIT_RECOVERY"
@@ -109,11 +104,23 @@ class CommodityCFastExecutionQualityReadonlyRepository:
             "blocked_fail_closed": self._blocked,
             "last_error": self._last_error,
             "recovery_generation": self._generation,
-            "intent_count": (
-                len(snapshot["intents"]) if snapshot is not None else None
-            ),
+            "intent_count": (snapshot.intent_count if snapshot is not None else None),
             "execution_quality_record_count": (
-                len(snapshot["execution_quality"]) if snapshot is not None else None
+                snapshot.evidence_record_count if snapshot is not None else None
+            ),
+            "source_journal_record_count": (
+                snapshot.source_journal_record_count if snapshot is not None else None
+            ),
+            "source_journal_tip_record_hash": (
+                snapshot.source_journal_tip_record_hash
+                if snapshot is not None
+                else None
+            ),
+            "projection_schema_version": (
+                snapshot.schema_version if snapshot is not None else None
+            ),
+            "exact_contracts": (
+                list(snapshot.exact_contracts) if snapshot is not None else []
             ),
             "read_only": True,
             "questdb_connected": False,
@@ -122,47 +129,6 @@ class CommodityCFastExecutionQualityReadonlyRepository:
             "execution_quality_implemented": False,
             "orders_sent": 0,
             "positions_modified": 0,
-        }
-
-    @staticmethod
-    def _project(state: SidecarState) -> dict[str, Any]:
-        intents: list[dict[str, Any]] = []
-        for intent_id, record in sorted(
-            state.intents.items(),
-            key=lambda item: item[1].sequence,
-        ):
-            anchor = state.anchors.get(intent_id)
-            intents.append(
-                {
-                    "intent_id": intent_id,
-                    "intent_record_hash": record.record_hash,
-                    "anchor_record_hash": (
-                        anchor.record_hash if anchor is not None else None
-                    ),
-                    "durably_created_at_utc": (
-                        anchor.payload["durably_created_at_utc"]
-                        if anchor is not None
-                        else None
-                    ),
-                    "intent": _detached(record.payload["intent"]),
-                }
-            )
-        evidence = [
-            {
-                "intent_id": str(record.payload["intent_id"]),
-                "target_key": str(record.payload["target_key"]),
-                "completion_state": str(record.payload["completion_state"]),
-                "record_hash": record.record_hash,
-                "payload": _detached(record.payload),
-            }
-            for record in sorted(
-                state.evidence.values(),
-                key=lambda item: item.sequence,
-            )
-        ]
-        return {
-            "intents": intents,
-            "execution_quality": evidence,
         }
 
 
