@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vnpy-web-bridge:schema:commodity-c-fast-t1-query-v6-executable-pin-set-v1",
+  "title": "C_FAST query-v6 executable authority active pin set",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "generation_id",
+    "executable_keyring_sha256",
+    "executable_signer_sha256",
+    "executable_verifier_sha256",
+    "executable_runner_sha256",
+    "executable_release_schema_sha256",
+    "executable_keyring_schema_sha256",
+    "consume_schema_sha256",
+    "terminal_schema_sha256",
+    "audit_evidence_schema_sha256",
+    "legacy_audit_evidence_schema_sha256",
+    "readonly_proof_schema_sha256",
+    "execution_adapter_sha256",
+    "questdb_build_sha256"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "commodity_c_fast_t1_query_v6_executable_pin_set_v1"
+    },
+    "generation_id": {"$ref": "#/$defs/id"},
+    "executable_keyring_sha256": {"$ref": "#/$defs/sha256"},
+    "executable_signer_sha256": {"$ref": "#/$defs/sha256"},
+    "executable_verifier_sha256": {"$ref": "#/$defs/sha256"},
+    "executable_runner_sha256": {"$ref": "#/$defs/sha256"},
+    "executable_release_schema_sha256": {"$ref": "#/$defs/sha256"},
+    "executable_keyring_schema_sha256": {"$ref": "#/$defs/sha256"},
+    "consume_schema_sha256": {"$ref": "#/$defs/sha256"},
+    "terminal_schema_sha256": {"$ref": "#/$defs/sha256"},
+    "audit_evidence_schema_sha256": {"$ref": "#/$defs/sha256"},
+    "legacy_audit_evidence_schema_sha256": {"$ref": "#/$defs/sha256"},
+    "readonly_proof_schema_sha256": {"$ref": "#/$defs/sha256"},
+    "execution_adapter_sha256": {"$ref": "#/$defs/sha256"},
+    "questdb_build_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 8,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._-]+$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

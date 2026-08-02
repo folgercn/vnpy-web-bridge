@@ -1,0 +1,171 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vnpy-web-bridge:schema:commodity-c-fast-t1-query-terminal-v6",
+  "title": "C_FAST query-v6 one-shot terminal record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "purpose", "candidate_id", "release_id", "attempt_id",
+    "terminal_state", "error_code", "started_at", "final_revalidation_at",
+    "ended_at", "executable_release_raw_sha256",
+    "executable_release_canonical_sha256", "foundation_raw_sha256",
+    "foundation_canonical_sha256", "consume_marker_raw_sha256",
+    "consume_marker_canonical_sha256", "execution_adapter_sha256",
+    "adapter_launch_attempted", "child_exit_code", "child_signal",
+    "production_query_attempted", "production_query_completed",
+    "readonly_proof_verified", "readonly_principal_verified",
+    "endpoint_verified", "readonly_preflight_canonical_sha256",
+    "readonly_postflight_canonical_sha256", "artifact_sha256", "p0_pass",
+    "write_probe_attempted", "database_mutations_observed",
+    "web_bridge_rpc_calls", "orders_sent", "positions_modified",
+    "dispatch_changed", "terminal_is_authority", "p0_acceptance_authorized",
+    "database_mutation_authorized", "collection_authorized",
+    "order_authorized", "position_mutation_authorized",
+    "dispatch_authorized", "trading_authorized", "production_authorized",
+    "replay_allowed"
+  ],
+  "properties": {
+    "schema_version": {"const": "commodity_c_fast_t1_query_terminal_v6"},
+    "purpose": {"const": "c_fast_t1_query_v6_readonly_terminal"},
+    "candidate_id": {"const": "C_FAST_CROSS_SECTION_NEUTRAL"},
+    "release_id": {"$ref": "#/$defs/id"},
+    "attempt_id": {"$ref": "#/$defs/attemptId"},
+    "terminal_state": {
+      "enum": ["COMPLETED_PASS", "COMPLETED_BLOCKED", "FAILED_BEFORE_NETWORK", "OUTCOME_UNKNOWN", "INTERRUPTED"]
+    },
+    "error_code": {"type": ["string", "null"], "minLength": 3, "maxLength": 96, "pattern": "^[A-Z0-9_]+$"},
+    "started_at": {"$ref": "#/$defs/dateTime"},
+    "final_revalidation_at": {"type": ["string", "null"], "format": "date-time"},
+    "ended_at": {"$ref": "#/$defs/dateTime"},
+    "executable_release_raw_sha256": {"$ref": "#/$defs/sha256"},
+    "executable_release_canonical_sha256": {"$ref": "#/$defs/sha256"},
+    "foundation_raw_sha256": {"$ref": "#/$defs/sha256"},
+    "foundation_canonical_sha256": {"$ref": "#/$defs/sha256"},
+    "consume_marker_raw_sha256": {"$ref": "#/$defs/sha256"},
+    "consume_marker_canonical_sha256": {"$ref": "#/$defs/sha256"},
+    "execution_adapter_sha256": {"$ref": "#/$defs/sha256"},
+    "adapter_launch_attempted": {"type": "boolean"},
+    "child_exit_code": {"type": ["integer", "null"], "minimum": 0, "maximum": 255},
+    "child_signal": {"type": ["integer", "null"], "minimum": 1, "maximum": 255},
+    "production_query_attempted": {"type": "boolean"},
+    "production_query_completed": {"type": ["boolean", "null"]},
+    "readonly_proof_verified": {"type": "boolean"},
+    "readonly_principal_verified": {"type": "boolean"},
+    "endpoint_verified": {"type": "boolean"},
+    "readonly_preflight_canonical_sha256": {"$ref": "#/$defs/nullableSha256"},
+    "readonly_postflight_canonical_sha256": {"$ref": "#/$defs/nullableSha256"},
+    "artifact_sha256": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["audit_json", "audit_csv", "audit_markdown", "readonly_proof"],
+      "properties": {
+        "audit_json": {"$ref": "#/$defs/nullableSha256"},
+        "audit_csv": {"$ref": "#/$defs/nullableSha256"},
+        "audit_markdown": {"$ref": "#/$defs/nullableSha256"},
+        "readonly_proof": {"$ref": "#/$defs/nullableSha256"}
+      }
+    },
+    "p0_pass": {"type": ["boolean", "null"]},
+    "write_probe_attempted": {"const": false},
+    "database_mutations_observed": {"enum": [0, null]},
+    "web_bridge_rpc_calls": {"const": 0},
+    "orders_sent": {"const": 0},
+    "positions_modified": {"const": 0},
+    "dispatch_changed": {"const": false},
+    "terminal_is_authority": {"const": false},
+    "p0_acceptance_authorized": {"const": false},
+    "database_mutation_authorized": {"const": false},
+    "collection_authorized": {"const": false},
+    "order_authorized": {"const": false},
+    "position_mutation_authorized": {"const": false},
+    "dispatch_authorized": {"const": false},
+    "trading_authorized": {"const": false},
+    "production_authorized": {"const": false},
+    "replay_allowed": {"const": false}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"terminal_state": {"enum": ["COMPLETED_PASS", "COMPLETED_BLOCKED"]}}, "required": ["terminal_state"]},
+      "then": {"properties": {
+        "error_code": {"const": null},
+        "adapter_launch_attempted": {"const": true},
+        "production_query_attempted": {"const": true},
+        "production_query_completed": {"const": true},
+        "readonly_proof_verified": {"const": true},
+        "readonly_principal_verified": {"const": true},
+        "endpoint_verified": {"const": true},
+        "database_mutations_observed": {"const": 0},
+        "final_revalidation_at": {"type": "string", "format": "date-time"},
+        "child_exit_code": {"enum": [0, 1]},
+        "child_signal": {"const": null},
+        "p0_pass": {"type": "boolean"},
+        "readonly_preflight_canonical_sha256": {"$ref": "#/$defs/sha256"},
+        "readonly_postflight_canonical_sha256": {"$ref": "#/$defs/sha256"},
+        "artifact_sha256": {"properties": {
+          "audit_json": {"$ref": "#/$defs/sha256"},
+          "audit_csv": {"$ref": "#/$defs/sha256"},
+          "audit_markdown": {"$ref": "#/$defs/sha256"},
+          "readonly_proof": {"$ref": "#/$defs/sha256"}
+        }}
+      }}
+    },
+    {
+      "if": {"properties": {"terminal_state": {"const": "COMPLETED_PASS"}}, "required": ["terminal_state"]},
+      "then": {"properties": {"p0_pass": {"const": true}, "child_exit_code": {"const": 0}}}
+    },
+    {
+      "if": {"properties": {"terminal_state": {"const": "COMPLETED_BLOCKED"}}, "required": ["terminal_state"]},
+      "then": {"properties": {"p0_pass": {"const": false}, "child_exit_code": {"const": 1}}}
+    },
+    {
+      "if": {"properties": {"terminal_state": {"const": "FAILED_BEFORE_NETWORK"}}, "required": ["terminal_state"]},
+      "then": {"properties": {
+        "error_code": {"type": "string"},
+        "adapter_launch_attempted": {"const": false},
+        "production_query_attempted": {"const": false},
+        "production_query_completed": {"const": false},
+        "readonly_proof_verified": {"const": false},
+        "readonly_principal_verified": {"const": false},
+        "endpoint_verified": {"const": false},
+        "database_mutations_observed": {"const": null},
+        "final_revalidation_at": {"const": null},
+        "child_exit_code": {"const": null},
+        "child_signal": {"const": null},
+        "p0_pass": {"const": null},
+        "readonly_preflight_canonical_sha256": {"const": null},
+        "readonly_postflight_canonical_sha256": {"const": null},
+        "artifact_sha256": {"properties": {
+          "audit_json": {"const": null}, "audit_csv": {"const": null},
+          "audit_markdown": {"const": null}, "readonly_proof": {"const": null}
+        }}
+      }}
+    },
+    {
+      "if": {"properties": {"terminal_state": {"enum": ["OUTCOME_UNKNOWN", "INTERRUPTED"]}}, "required": ["terminal_state"]},
+      "then": {"properties": {
+        "error_code": {"type": "string"},
+        "adapter_launch_attempted": {"const": true},
+        "production_query_attempted": {"const": true},
+        "production_query_completed": {"const": null},
+        "readonly_proof_verified": {"const": false},
+        "readonly_principal_verified": {"const": false},
+        "endpoint_verified": {"const": false},
+        "database_mutations_observed": {"const": null},
+        "p0_pass": {"const": null}
+      }}
+    },
+    {
+      "not": {
+        "properties": {"child_exit_code": {"type": "integer"}, "child_signal": {"type": "integer"}},
+        "required": ["child_exit_code", "child_signal"]
+      }
+    }
+  ],
+  "$defs": {
+    "id": {"type": "string", "minLength": 8, "maxLength": 128, "pattern": "^[A-Za-z0-9._-]+$"},
+    "attemptId": {"type": "string", "pattern": "^attempt-[0-9a-f]{64}$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "nullableSha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    "dateTime": {"type": "string", "format": "date-time"}
+  }
+}
