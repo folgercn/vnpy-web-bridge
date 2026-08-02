@@ -107,6 +107,7 @@ class CFastExecutionQualityP0AcceptanceV6DTO(_SignedRuntimeRoleBase):
     audit_exact_json_base64: str = Field(min_length=16)
     audit_raw_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     audit_canonical_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    manifest_exact_json_base64: str = Field(min_length=16)
     executable_release_raw_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     executable_release_canonical_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     foundation_raw_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")

@@ -90,6 +90,13 @@ network client, authority or mutation path. External WORM/append-only custody
 is a human assertion bound by exact identity and bundle hashes; it is not
 misrepresented as machine-verifiable archive state.
 
+The signed P0 embeds the exact manifest bytes as well as terminal, readonly
+proof and audit JSON. The shared audit-v4 semantic core reconstructs the
+manifest's exact-contract/vt-symbol mapping and recomputes segment, session,
+contract, execution-window, product, blocker, row-count, quality-breakdown and
+summary/P0 conclusions. Reported `classification` and summary fields are never
+accepted as their own proof.
+
 The five new envelopes are signed offline with the repository signer, which
 uses the same role-domain message function and exact canonical-newline writer
 as the production verifier contract:

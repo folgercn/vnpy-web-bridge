@@ -50,6 +50,10 @@ from commodity_c_fast_t1_one_shot import (  # noqa: E402
     validate_json_schema,
     write_json_create_only,
 )
+from app.services.commodity_c_fast_l1_l5_audit_semantic_replay import (  # noqa: E402
+    AuditSemanticReplayError,
+    replay_audit_evidence_semantics,
+)
 
 
 PLACEHOLDER_SIGNATURE = base64.b64encode(bytes(64)).decode("ascii")
@@ -403,6 +407,11 @@ def _validate_exact_bundle_joins(bundle: ExactBundle) -> None:
     audit = payloads["audit_json"]
     proof = payloads["readonly_proof"]
 
+    try:
+        replay_audit_evidence_semantics(audit, manifest)
+    except AuditSemanticReplayError as exc:
+        raise P0BundleV6Error("query-v6 audit semantic replay failed") from exc
+
     foundation_materials = _verify_release_signature(
         foundation,
         payloads["foundation_keyring"],
@@ -638,6 +647,7 @@ def build_unsigned_p0_draft(
         "audit_exact_json_base64": base64.b64encode(bundle.raw["audit_json"]).decode(),
         "audit_raw_sha256": bundle.raw_sha256["audit_json"],
         "audit_canonical_sha256": bundle.canonical_sha256["audit_json"],
+        "manifest_exact_json_base64": base64.b64encode(bundle.raw["manifest"]).decode(),
         "executable_release_raw_sha256": bundle.raw_sha256["executable_release"],
         "executable_release_canonical_sha256": bundle.canonical_sha256[
             "executable_release"

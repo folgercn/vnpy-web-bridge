@@ -43,6 +43,9 @@ from app.services.commodity_c_fast_execution_quality_runtime import (
 from app.services.commodity_c_fast_execution_quality_runtime_admission import (
     canonical_json,
 )
+from app.services.commodity_c_fast_l1_l5_audit_semantic_replay import (
+    replay_audit_evidence_semantics,
+)
 from app.services.commodity_c_fast_shadow_common import sha256_json
 
 
@@ -101,6 +104,10 @@ ONE_SHOT = _load(
 SIGNER = _load(
     "production_verifier_runtime_artifact_signer",
     ROOT / "scripts/commodity_c_fast_execution_quality_sign_runtime_artifact.py",
+)
+AUDIT_V4 = _load(
+    "production_verifier_frozen_audit_v4",
+    ROOT / "scripts/commodity_c_fast_l1_l5_audit_v4.py",
 )
 
 
@@ -311,6 +318,9 @@ def generation(
     *,
     overlap_domains: bool = False,
     audit_scope_splice: bool = False,
+    audit_vt_symbol_splice: bool = False,
+    audit_detail_summary_splice: bool = False,
+    audit_segment_classification_splice: bool = False,
     readonly_proof_drift: bool = False,
     hidden_contract_spec: bool = False,
     bypass_p0_signer_semantic_preflight: bool = False,
@@ -421,10 +431,12 @@ def generation(
         }
         for product in AUDIT.PRODUCTS
     ]
-    manifest, contracts, session_windows, windows = AUDIT.MODULE["load_manifest"](
-        AUDIT.write_manifest(tmp_path, audit_manifest)
+    manifest_path = AUDIT.write_manifest(tmp_path, audit_manifest)
+    manifest_exact_raw = canonical_json(audit_manifest) + b"\n"
+    manifest, contracts, session_windows, windows = AUDIT_V4.load_manifest(
+        manifest_path
     )
-    audit = AUDIT.MODULE["audit"](
+    audit = AUDIT_V4.audit(
         AUDIT.FakeConnection(AUDIT.complete_session_rows(execution_time)),
         manifest,
         contracts,
@@ -436,6 +448,15 @@ def generation(
     audit["generated_at"] = (NOW - timedelta(minutes=2, seconds=30)).isoformat()
     if audit_scope_splice:
         audit["contracts"][0]["exact_contract"] = "SHFE.ag9999"
+    if audit_vt_symbol_splice:
+        audit["contracts"][0]["vt_symbol"] = "cu9999.SHFE"
+    if audit_detail_summary_splice:
+        audit["contracts"][0]["all"]["rows"] = 0
+        audit["contracts"][0]["all"]["classification"] = "UNUSABLE"
+    if audit_segment_classification_splice:
+        audit["contracts"][0]["sessions"]["night_open"][
+            "classification"
+        ] = "UNUSABLE"
     audit_raw = _write_real_query_v6_evidence(
         tmp_path / "adapter-audit.json",
         audit,
@@ -484,16 +505,17 @@ def generation(
             "audit_csv": terminal["artifact_sha256"]["audit_csv"],
             "audit_markdown": terminal["artifact_sha256"]["audit_markdown"],
             "readonly_proof": hashlib.sha256(proof_raw).hexdigest(),
+            "manifest": hashlib.sha256(manifest_exact_raw).hexdigest(),
         }
     )
     bundle_canonical_sha256.update(
         {
             "foundation_release": terminal["foundation_canonical_sha256"],
             "executable_release": terminal["executable_release_canonical_sha256"],
-            "manifest": audit["manifest_sha256"],
             "terminal": hashlib.sha256(canonical_json(terminal)).hexdigest(),
             "audit_json": hashlib.sha256(canonical_json(audit)).hexdigest(),
             "readonly_proof": hashlib.sha256(canonical_json(proof)).hexdigest(),
+            "manifest": hashlib.sha256(canonical_json(audit_manifest)).hexdigest(),
         }
     )
     bundle_size_bytes = {name: 1 for name in P0_QUERY_V6_BUNDLE_FILE_ORDER}
@@ -502,6 +524,7 @@ def generation(
             "terminal": len(terminal_raw),
             "audit_json": len(audit_raw),
             "readonly_proof": len(proof_raw),
+            "manifest": len(manifest_exact_raw),
         }
     )
     bundle_index = {
@@ -536,6 +559,9 @@ def generation(
             "audit_exact_json_base64": base64.b64encode(audit_raw).decode(),
             "audit_raw_sha256": audit_sha256,
             "audit_canonical_sha256": hashlib.sha256(canonical_json(audit)).hexdigest(),
+            "manifest_exact_json_base64": base64.b64encode(
+                manifest_exact_raw
+            ).decode(),
             "executable_release_raw_sha256": terminal["executable_release_raw_sha256"],
             "executable_release_canonical_sha256": terminal[
                 "executable_release_canonical_sha256"
@@ -714,8 +740,10 @@ def generation(
     return revalidator, artifact_paths, settings
 
 
-def test_complete_signed_generation_returns_same_typed_inputs(tmp_path: Path) -> None:
-    revalidator, paths, _ = generation(tmp_path)
+def test_complete_signed_generation_returns_same_typed_inputs(
+    secure_tmp_path: Path,
+) -> None:
+    revalidator, paths, _ = generation(secure_tmp_path)
     p0_payload = json.loads(paths["signed_p0_acceptance"].read_text())
     for field in (
         "terminal_exact_json_base64",
@@ -754,6 +782,21 @@ def test_complete_signed_generation_returns_same_typed_inputs(tmp_path: Path) ->
     assert len(set(identities)) == 1
 
 
+def test_frozen_audit_v4_complete_evidence_replays_in_shared_core(
+    secure_tmp_path: Path,
+) -> None:
+    _, paths, _ = generation(secure_tmp_path)
+    p0 = json.loads(paths["signed_p0_acceptance"].read_text())
+    audit = json.loads(base64.b64decode(p0["audit_exact_json_base64"], validate=True))
+    manifest = json.loads(
+        base64.b64decode(p0["manifest_exact_json_base64"], validate=True)
+    )
+
+    assert replay_audit_evidence_semantics(audit, manifest) == tuple(
+        sorted(p0["exact_contracts"])
+    )
+
+
 def test_embedded_exact_json_rejects_duplicate_keys_and_nonfinite_constants() -> None:
     for raw in (b'{"x":1,"x":2}\n', b'{"x":NaN}\n'):
         with pytest.raises(
@@ -766,8 +809,8 @@ def test_embedded_exact_json_rejects_duplicate_keys_and_nonfinite_constants() ->
             )
 
 
-def test_cross_role_key_material_overlap_fails_closed(tmp_path: Path) -> None:
-    revalidator, _, _ = generation(tmp_path, overlap_domains=True)
+def test_cross_role_key_material_overlap_fails_closed(secure_tmp_path: Path) -> None:
+    revalidator, _, _ = generation(secure_tmp_path, overlap_domains=True)
 
     with pytest.raises(
         CFastExecutionQualityProductionVerifierError,
@@ -820,36 +863,61 @@ def test_role_signature_domain_rejects_cross_role_replay() -> None:
 
 
 def test_signed_audit_contract_splice_cannot_supply_runtime_scope(
-    tmp_path: Path,
+    secure_tmp_path: Path,
 ) -> None:
     revalidator, _, _ = generation(
-        tmp_path,
+        secure_tmp_path,
         audit_scope_splice=True,
         bypass_p0_signer_semantic_preflight=True,
     )
 
     with pytest.raises(
         CFastExecutionQualityProductionVerifierError,
-        match="QUERY_V6_P0_AUDIT_SIGNED_SCOPE_MISMATCH",
+        match="QUERY_V6_P0_AUDIT_SEMANTIC_REPLAY_INVALID",
+    ):
+        revalidator("startup", NOW)
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    (
+        "audit_vt_symbol_splice",
+        "audit_detail_summary_splice",
+        "audit_segment_classification_splice",
+    ),
+)
+def test_signed_audit_derived_semantic_tamper_fails_closed(
+    secure_tmp_path: Path,
+    tamper: str,
+) -> None:
+    revalidator, _, _ = generation(
+        secure_tmp_path,
+        bypass_p0_signer_semantic_preflight=True,
+        **{tamper: True},
+    )
+
+    with pytest.raises(
+        CFastExecutionQualityProductionVerifierError,
+        match="QUERY_V6_P0_AUDIT_SEMANTIC_REPLAY_INVALID",
     ):
         revalidator("startup", NOW)
 
 
 def test_official_signer_replays_self_contained_p0_before_signing(
-    tmp_path: Path,
+    secure_tmp_path: Path,
 ) -> None:
     with pytest.raises(
         SIGNER.RuntimeArtifactSigningError,
         match="P0 evidence semantic replay failed before signing",
     ):
-        generation(tmp_path, audit_scope_splice=True)
+        generation(secure_tmp_path, audit_scope_splice=True)
 
 
 def test_readonly_proof_claimed_stable_but_drifted_payload_fails_closed(
-    tmp_path: Path,
+    secure_tmp_path: Path,
 ) -> None:
     revalidator, _, _ = generation(
-        tmp_path,
+        secure_tmp_path,
         readonly_proof_drift=True,
         bypass_p0_signer_semantic_preflight=True,
     )
@@ -862,9 +930,9 @@ def test_readonly_proof_claimed_stable_but_drifted_payload_fails_closed(
 
 
 def test_contract_spec_envelope_cannot_hide_extra_contract(
-    tmp_path: Path,
+    secure_tmp_path: Path,
 ) -> None:
-    revalidator, _, _ = generation(tmp_path, hidden_contract_spec=True)
+    revalidator, _, _ = generation(secure_tmp_path, hidden_contract_spec=True)
 
     with pytest.raises(
         CFastExecutionQualityProductionVerifierError,
@@ -874,9 +942,9 @@ def test_contract_spec_envelope_cannot_hide_extra_contract(
 
 
 def test_human_review_fields_reject_whitespace_and_indented_pending(
-    tmp_path: Path,
+    secure_tmp_path: Path,
 ) -> None:
-    _, paths, _ = generation(tmp_path)
+    _, paths, _ = generation(secure_tmp_path)
     cases = (
         (
             CFastExecutionQualityP0AcceptanceV6DTO,
@@ -898,11 +966,11 @@ def test_human_review_fields_reject_whitespace_and_indented_pending(
 
 
 def test_official_runtime_signer_writes_verifier_exact_canonical_newline(
-    tmp_path: Path,
+    secure_tmp_path: Path,
 ) -> None:
-    _, paths, _ = generation(tmp_path)
+    _, paths, _ = generation(secure_tmp_path)
     signed = json.loads(paths["signed_p0_acceptance"].read_text())
-    output_root = tmp_path / "signer-output"
+    output_root = secure_tmp_path / "signer-output"
     output_root.mkdir(mode=0o700)
     output = output_root / "signed-p0.json"
 
@@ -915,8 +983,10 @@ def test_official_runtime_signer_writes_verifier_exact_canonical_newline(
         SIGNER.write_private_json_create_only(output, signed)
 
 
-def test_exact_artifact_tamper_fails_before_semantic_release(tmp_path: Path) -> None:
-    revalidator, paths, _ = generation(tmp_path)
+def test_exact_artifact_tamper_fails_before_semantic_release(
+    secure_tmp_path: Path,
+) -> None:
+    revalidator, paths, _ = generation(secure_tmp_path)
     payload = json.loads(paths["collection_admission"].read_text())
     payload["p0_accepted"] = False
     paths["collection_admission"].write_bytes(_raw(payload))
@@ -926,12 +996,12 @@ def test_exact_artifact_tamper_fails_before_semantic_release(tmp_path: Path) -> 
 
 
 def test_global_factory_binds_concrete_revalidator_when_config_complete(
-    tmp_path: Path,
+    secure_tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _revalidator, _paths, base = generation(tmp_path)
-    journal = tmp_path / "journal"
-    exports = tmp_path / "exports"
+    _revalidator, _paths, base = generation(secure_tmp_path)
+    journal = secure_tmp_path / "journal"
+    exports = secure_tmp_path / "exports"
     journal.mkdir(mode=0o700)
     exports.mkdir(mode=0o700)
     payload = base.model_dump()

@@ -4,7 +4,6 @@ import base64
 import binascii
 import hmac
 import json
-import re
 from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -14,6 +13,11 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from jsonschema import Draft202012Validator, FormatChecker
 from pydantic import ValidationError
 from referencing import Registry, Resource
+
+from app.services.commodity_c_fast_l1_l5_audit_semantic_replay import (
+    AuditSemanticReplayError,
+    replay_audit_evidence_semantics,
+)
 
 from app.core.config import Settings, get_settings
 from app.schemas.commodity_c_fast_execution_quality_production_artifacts import (
@@ -48,7 +52,6 @@ from app.services.commodity_c_fast_execution_quality_runtime_admission import (
     sha256_bytes,
 )
 from app.services.commodity_c_fast_shadow import (
-    C_FAST_PRODUCT_SPECS_V1,
     PRODUCTS,
     CommodityCFastShadowService,
 )
@@ -115,6 +118,9 @@ _READONLY_PROOF_SCHEMA = (
 )
 _AUDIT_SCHEMA = _ROOT / "docs/schemas/commodity-c-fast-l1-l5-audit-v2.schema.json"
 _AUDIT_V1_SCHEMA = _ROOT / "docs/schemas/commodity-c-fast-l1-l5-audit-v1.schema.json"
+_MANIFEST_SCHEMA = (
+    _ROOT / "docs/schemas/commodity-c-fast-l1-l5-audit-manifest-v2.schema.json"
+)
 _AUDIT_V1_RESOURCE_URI = "urn:vnpy-web-bridge:schema:commodity-c-fast-l1-l5-audit-v1"
 CUSTOM_SIGNATURE_DOMAIN = b"commodity_c_fast_execution_quality_role_signature_v1"
 
@@ -607,6 +613,10 @@ class CommodityCFastExecutionQualityProductionArtifactVerifier:
             p0.audit_exact_json_base64,
             "QUERY_V6_AUDIT",
         )
+        manifest, manifest_raw = self._decode_exact_json(
+            p0.manifest_exact_json_base64,
+            "QUERY_V6_MANIFEST",
+        )
         try:
             terminal_schema = json.loads(_TERMINAL_SCHEMA.read_text(encoding="utf-8"))
             proof_schema = json.loads(
@@ -631,6 +641,10 @@ class CommodityCFastExecutionQualityProductionArtifactVerifier:
                 format_checker=FormatChecker(),
                 registry=audit_registry,
             ).validate(audit)
+            Draft202012Validator(
+                json.loads(_MANIFEST_SCHEMA.read_text(encoding="utf-8")),
+                format_checker=FormatChecker(),
+            ).validate(manifest)
         except Exception as exc:
             raise CFastExecutionQualityProductionVerifierError(
                 "QUERY_V6_P0_EVIDENCE_SCHEMA_INVALID"
@@ -719,6 +733,9 @@ class CommodityCFastExecutionQualityProductionArtifactVerifier:
             != terminal["artifact_sha256"]["audit_markdown"]
             or canonical_digests["manifest"] != audit["manifest_sha256"]
             or canonical_digests["manifest"] != proof["manifest_sha256"]
+            or raw_digests["manifest"] != sha256_bytes(manifest_raw)
+            or canonical_digests["manifest"]
+            != sha256_bytes(canonical_json(manifest))
             or archive.custody_identity_raw_sha256
             != raw_digests["external_custody_identity"]
             or archive.custody_identity_canonical_sha256
@@ -783,38 +800,12 @@ class CommodityCFastExecutionQualityProductionArtifactVerifier:
                 "QUERY_V6_P0_EVIDENCE_TIME_ORDER_INVALID"
             )
 
-        current_contracts = [
-            item for item in audit["contracts"] if item["role"] == "current"
-        ]
-        by_product = {item["product"]: item for item in current_contracts}
-        product_results = {item["product"]: item for item in audit["products"]}
-        if (
-            len(current_contracts) != len(PRODUCTS)
-            or len(by_product) != len(PRODUCTS)
-            or set(by_product) != set(PRODUCTS)
-            or len(product_results) != len(PRODUCTS)
-            or set(product_results) != set(PRODUCTS)
-            or any(
-                item["classification"] != "L5_USABLE"
-                for item in product_results.values()
-            )
-            or any(
-                item["classification"] != "L5_USABLE"
-                or re.fullmatch(
-                    rf"{re.escape(C_FAST_PRODUCT_SPECS_V1[product]['exchange'])}\."
-                    rf"{re.escape(product)}[0-9]{{4}}",
-                    item["exact_contract"],
-                )
-                is None
-                for product, item in by_product.items()
-            )
-        ):
+        try:
+            derived_contracts = replay_audit_evidence_semantics(audit, manifest)
+        except AuditSemanticReplayError as exc:
             raise CFastExecutionQualityProductionVerifierError(
-                "QUERY_V6_P0_AUDIT_EXACT_CONTRACT_SET_INVALID"
-            )
-        derived_contracts = tuple(
-            sorted(item["exact_contract"] for item in current_contracts)
-        )
+                "QUERY_V6_P0_AUDIT_SEMANTIC_REPLAY_INVALID"
+            ) from exc
         if derived_contracts != p0.exact_contracts:
             raise CFastExecutionQualityProductionVerifierError(
                 "QUERY_V6_P0_AUDIT_SIGNED_SCOPE_MISMATCH"

@@ -36,6 +36,7 @@ COPY docs/schemas/commodity-c-fast-t1-query-terminal-v6.schema.json ./docs/schem
 COPY docs/schemas/commodity-c-fast-questdb-readonly-proof-v1.schema.json ./docs/schemas/commodity-c-fast-questdb-readonly-proof-v1.schema.json
 COPY docs/schemas/commodity-c-fast-l1-l5-audit-v1.schema.json ./docs/schemas/commodity-c-fast-l1-l5-audit-v1.schema.json
 COPY docs/schemas/commodity-c-fast-l1-l5-audit-v2.schema.json ./docs/schemas/commodity-c-fast-l1-l5-audit-v2.schema.json
+COPY docs/schemas/commodity-c-fast-l1-l5-audit-manifest-v2.schema.json ./docs/schemas/commodity-c-fast-l1-l5-audit-manifest-v2.schema.json
 COPY --from=frontend-build /app/frontend/dist ./frontend/dist
 
 ENV PYTHONPATH=/app/backend:/app/scripts
