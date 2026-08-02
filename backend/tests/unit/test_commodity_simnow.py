@@ -130,6 +130,7 @@ class FakeTrade:
     def __init__(self, fail_after: int | None = None, *, complete_cancel: bool = True) -> None:
         self.requests = []
         self.send_kwargs: list[dict[str, Any]] = []
+        self.c_fast_send_count = 0
         self.cancel_requests: list[str] = []
         self.fail_after = fail_after
         self.complete_cancel = complete_cancel
@@ -141,6 +142,10 @@ class FakeTrade:
         self.requests.append(request)
         self.send_kwargs.append(dict(kwargs))
         return {"vt_orderid": f"CTP.{len(self.requests)}", "accepted": True}
+
+    def _send_c_fast_order(self, request, **kwargs) -> dict[str, Any]:
+        self.c_fast_send_count += 1
+        return self.send_order(request, **kwargs)
 
     def cancel_order(self, vt_orderid: str, **kwargs) -> dict[str, Any]:
         self.cancel_requests.append(vt_orderid)
@@ -643,8 +648,9 @@ def test_acceptance_passive_limit_is_explicit_and_uses_touch_price(tmp_path: Pat
     )
 
     requests = service.trade.requests
+    assert service.trade.c_fast_send_count == 0
     assert all(
-        row.get("max_order_volume_override") is None
+        "c_fast_order_volume_capability" not in row
         for row in service.trade.send_kwargs
     )
     assert requests[0].price == service.tick_store.ticks["ag2610.SHFE"]["bid_price_1"]
