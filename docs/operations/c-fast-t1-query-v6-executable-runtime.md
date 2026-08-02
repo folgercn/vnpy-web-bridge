@@ -37,7 +37,9 @@ pin set 中 signer、verifier、runner、release/keyring/consume/terminal/audit/
 launch/package schema、package builder、adapter、package root identity、Python
 interpreter/dependencies 和 QuestDB build 的 SHA256 都必须来自待部署 exact bytes。
 root installer 只接受 generation/keyring/QuestDB build 三个外部 pin，其余 pin
-全部从已安装 exact bytes 自行计算。任何
+全部从已安装 exact bytes 自行计算；install 还必须显式接收运维预先批准的
+package manifest raw SHA256 与 exact 40 位 source commit，两者任一不匹配都在
+staging/pin publish 前失败。任何
 source、schema、keyring、pin generation 或 adapter rotation 都要求重新审核并
 签署 release。
 

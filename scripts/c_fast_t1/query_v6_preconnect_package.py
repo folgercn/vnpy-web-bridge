@@ -314,23 +314,72 @@ def _read_json(path: Path, label: str) -> tuple[bytes, dict[str, Any]]:
     return raw, payload
 
 
+def _stat_identity(info: os.stat_result) -> tuple[int, ...]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_uid,
+        info.st_gid,
+        stat.S_IFMT(info.st_mode),
+        stat.S_IMODE(info.st_mode),
+        info.st_nlink,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+def _read_bounded_descriptor(descriptor: int, limit: int) -> bytes:
+    chunks: list[bytes] = []
+    remaining = limit + 1
+    while remaining:
+        chunk = os.read(descriptor, min(1024 * 1024, remaining))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
 def _read_root_install_input(
-    path: Path, label: str, *, require_root_owned: bool
+    path: Path,
+    label: str,
+    *,
+    require_root_owned: bool,
+    limit: int = 8 * 1024 * 1024,
 ) -> bytes:
     _safe_ancestors(path.parent, require_root_owned=require_root_owned)
     try:
-        info = path.lstat()
-        raw = path.read_bytes()
+        path_before = path.lstat()
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+        try:
+            before = os.fstat(descriptor)
+            raw = _read_bounded_descriptor(descriptor, limit)
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            repeated = _read_bounded_descriptor(descriptor, limit)
+            after = os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+        path_after = path.lstat()
     except OSError as exc:
         raise QueryV6PackageError(f"{label} is unavailable") from exc
     allowed = {0} if require_root_owned else {0, os.geteuid()}
     if (
-        stat.S_ISLNK(info.st_mode)
-        or not stat.S_ISREG(info.st_mode)
-        or info.st_nlink != 1
-        or info.st_uid not in allowed
-        or stat.S_IMODE(info.st_mode) & 0o022
+        stat.S_ISLNK(path_before.st_mode)
+        or not stat.S_ISREG(path_before.st_mode)
+        or path_before.st_nlink != 1
+        or path_before.st_uid not in allowed
+        or stat.S_IMODE(path_before.st_mode) & 0o022
         or not raw
+        or len(raw) > limit
+        or len(raw) != before.st_size
+        or raw != repeated
+        or _stat_identity(path_before) != _stat_identity(before)
+        or _stat_identity(before) != _stat_identity(after)
+        or _stat_identity(after) != _stat_identity(path_after)
     ):
         raise QueryV6PackageError(f"{label} custody is unsafe")
     return raw
@@ -548,6 +597,8 @@ def install_package(
     manifest_path: Path,
     install_root: Path,
     active_pin_root: Path,
+    expected_manifest_sha256: str,
+    expected_source_commit_sha: str,
     generation_id: str,
     executable_keyring_path: Path,
     questdb_build_identity_path: Path,
@@ -557,8 +608,8 @@ def install_package(
     if require_root and os.geteuid() != 0:
         raise QueryV6PackageError("query-v6 package installation requires root")
     require_root_owned = require_root
-    _safe_ancestors(install_root.parent, require_root_owned=require_root_owned)
-    _safe_ancestors(active_pin_root.parent, require_root_owned=require_root_owned)
+    for parent in {install_root.parent, active_pin_root.parent}:
+        _safe_ancestors(parent, require_root_owned=require_root_owned)
     if install_root.exists() or active_pin_root.exists():
         raise QueryV6PackageError("query-v6 installation destinations must be absent")
     keyring_raw = _read_root_install_input(
@@ -588,11 +639,38 @@ def install_package(
         "executable_keyring_sha256": _sha256(canonical_json(keyring)),
         "questdb_build_sha256": _sha256(questdb_build.encode("utf-8")),
     }
-    archive_raw = archive_path.read_bytes()
-    manifest_raw, payload = _read_json(manifest_path, "query-v6 package manifest")
+    archive_raw = _read_root_install_input(
+        archive_path,
+        "query-v6 package archive",
+        require_root_owned=require_root_owned,
+        limit=MAX_ARCHIVE_BYTES,
+    )
+    manifest_raw = _read_root_install_input(
+        manifest_path,
+        "query-v6 package manifest",
+        require_root_owned=require_root_owned,
+    )
+    try:
+        payload = json.loads(manifest_raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise QueryV6PackageError("query-v6 package manifest is invalid") from exc
+    if not isinstance(payload, dict):
+        raise QueryV6PackageError("query-v6 package manifest must be an object")
     if manifest_raw != canonical_json(payload):
         raise QueryV6PackageError("query-v6 package manifest must be canonical")
-    _verify_package_manifest(payload)
+    if (
+        len(expected_manifest_sha256) != 64
+        or any(c not in "0123456789abcdef" for c in expected_manifest_sha256)
+        or not hmac.compare_digest(_sha256(manifest_raw), expected_manifest_sha256)
+    ):
+        raise QueryV6PackageError("query-v6 approved package manifest mismatch")
+    if (
+        len(expected_source_commit_sha) != 40
+        or any(c not in "0123456789abcdef" for c in expected_source_commit_sha)
+        or payload.get("source_commit_sha") != expected_source_commit_sha
+    ):
+        raise QueryV6PackageError("query-v6 approved source commit mismatch")
+    _verify_package_manifest(payload, expected_manifest_sha256)
     members = _archive_members(archive_raw, payload)
     staging = Path(
         tempfile.mkdtemp(prefix=".query-v6-install-", dir=install_root.parent)
@@ -665,6 +743,8 @@ def parse_args() -> argparse.Namespace:
     install.add_argument("--manifest", type=Path, required=True)
     install.add_argument("--install-root", type=Path, required=True)
     install.add_argument("--active-pin-root", type=Path, required=True)
+    install.add_argument("--expected-manifest-sha256", required=True)
+    install.add_argument("--expected-source-commit-sha", required=True)
     install.add_argument("--generation-id", required=True)
     install.add_argument("--executable-keyring", type=Path, required=True)
     install.add_argument("--questdb-build-identity", type=Path, required=True)
@@ -700,6 +780,8 @@ def main() -> int:
                 args.manifest,
                 args.install_root,
                 args.active_pin_root,
+                args.expected_manifest_sha256,
+                args.expected_source_commit_sha,
                 args.generation_id,
                 args.executable_keyring,
                 args.questdb_build_identity,

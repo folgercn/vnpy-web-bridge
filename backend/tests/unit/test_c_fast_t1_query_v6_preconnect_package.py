@@ -157,6 +157,8 @@ def test_root_install_is_default_and_base_cannot_inject_computed_pins(
             tmp_path / "manifest.json",
             tmp_path / "install",
             tmp_path / "active",
+            "a" * 64,
+            "a" * 40,
             "query-v6-test-pins",
             tmp_path / "keyring.json",
             tmp_path / "questdb-build.txt",
@@ -207,6 +209,8 @@ def test_installer_computes_all_deployment_pins_and_publishes_last(
         manifest_path,
         install_root,
         active_root,
+        subject._sha256(manifest_raw),
+        manifest["source_commit_sha"],
         "query-v6-root-generation-test-0001",
         keyring_path,
         build_path,
@@ -233,7 +237,71 @@ def test_installer_computes_all_deployment_pins_and_publishes_last(
             manifest_path,
             install_root,
             active_root,
+            subject._sha256(manifest_raw),
+            manifest["source_commit_sha"],
             "query-v6-root-generation-test-0002",
+            keyring_path,
+            build_path,
+            require_root=False,
+        )
+
+
+def test_installer_rejects_self_consistent_blob_rewrite_without_external_approval(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    variant = [b"approved"]
+    monkeypatch.setattr(subject, "_resolve_commit", lambda *_args: "a" * 40)
+    monkeypatch.setattr(
+        subject,
+        "_git_blob",
+        lambda _root, _commit, path: (variant[0] + b":" + path.encode(), 0o444),
+    )
+    monkeypatch.setattr(
+        subject, "_interpreter_identity", lambda _path: ("/python", "b" * 64)
+    )
+    monkeypatch.setattr(
+        subject, "dependency_closure", lambda *_args, **_kwargs: _dependencies()
+    )
+    _, approved_manifest_raw, approved = subject.build_package(tmp_path, "HEAD")
+    variant[0] = b"self-consistent-rewrite"
+    rewritten_archive, rewritten_manifest_raw, rewritten = subject.build_package(
+        tmp_path, "HEAD"
+    )
+    assert rewritten["package_id"] != approved["package_id"]
+    archive_path = tmp_path / "rewritten.tar"
+    manifest_path = tmp_path / "rewritten.json"
+    keyring_path = tmp_path / "keyring.json"
+    build_path = tmp_path / "build.txt"
+    archive_path.write_bytes(rewritten_archive)
+    manifest_path.write_bytes(rewritten_manifest_raw)
+    keyring_path.write_text('{"keys":[]}', encoding="utf-8")
+    build_path.write_text("questdb-test-build", encoding="utf-8")
+    keyring_path.chmod(0o600)
+    build_path.chmod(0o444)
+    with pytest.raises(subject.QueryV6PackageError, match="approved package manifest"):
+        subject.install_package(
+            archive_path,
+            manifest_path,
+            tmp_path / "installed",
+            tmp_path / "active",
+            subject._sha256(approved_manifest_raw),
+            approved["source_commit_sha"],
+            "query-v6-root-generation-test-0003",
+            keyring_path,
+            build_path,
+            require_root=False,
+        )
+    assert not (tmp_path / "installed").exists()
+    assert not (tmp_path / "active").exists()
+    with pytest.raises(subject.QueryV6PackageError, match="approved source commit"):
+        subject.install_package(
+            archive_path,
+            manifest_path,
+            tmp_path / "installed-wrong-commit",
+            tmp_path / "active-wrong-commit",
+            subject._sha256(rewritten_manifest_raw),
+            "b" * 40,
+            "query-v6-root-generation-test-0004",
             keyring_path,
             build_path,
             require_root=False,
