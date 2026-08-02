@@ -76,11 +76,25 @@ def orders() -> list[dict[str, Any]]:
     ]
 
 
-def risk_envelope() -> dict[str, Any]:
+def close_orders() -> list[dict[str, Any]]:
+    return [
+        {
+            "symbol": "cu2610",
+            "exchange": "SHFE",
+            "direction": "short",
+            "offset": "close",
+            "type": "limit",
+            "volume": 1,
+            "reference": "commodity_static_core:close:cu:1",
+        }
+    ]
+
+
+def risk_envelope(*, total_lots: int = 3) -> dict[str, Any]:
     return {
         "max_child_order_lots": 10,
         "max_orders_per_phase": 128,
-        "max_total_phase_lots": 3,
+        "max_total_phase_lots": total_lots,
         "max_symbol_position_lots": 5.0,
         "max_product_weight": 0.15,
         "max_gross_weight": 1.0,
@@ -91,7 +105,15 @@ def risk_envelope() -> dict[str, Any]:
     }
 
 
-def scoped_orders() -> list[dict[str, Any]]:
+def scoped_orders(*, phase: str = "open") -> list[dict[str, Any]]:
+    if phase == "close":
+        return [
+            {
+                **close_orders()[0],
+                "minimum_price": 60000.0,
+                "maximum_price": 90000.0,
+            }
+        ]
     return [
         {**orders()[0], "minimum_price": 900.0, "maximum_price": 1100.0},
         {**orders()[1], "minimum_price": 1800.0, "maximum_price": 2200.0},
@@ -115,14 +137,15 @@ def public_material(private: Ed25519PrivateKey) -> bytes:
 def signed_permit(
     private: Ed25519PrivateKey,
     *,
+    phase: str = "open",
     mutation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    scoped = scoped_orders()
+    scoped = scoped_orders(phase=phase)
     payload: dict[str, Any] = {
         "schema_version": "commodity_baseline_execution_permit_v1",
         "purpose": "commodity_baseline_phase_one_shot_execution_permit",
         "permit_id": "commodity-baseline-execution-permit-v1-" + "0" * 64,
-        "nonce": "baseline-permit-nonce-0001",
+        "nonce": f"baseline-permit-{phase}-nonce-0001",
         "issued_at_utc": NOW.isoformat(),
         "not_before_utc": NOW.isoformat(),
         "expires_at_utc": (NOW + timedelta(minutes=5)).isoformat(),
@@ -132,7 +155,7 @@ def signed_permit(
         "plan_hash": PLAN_HASH,
         "execution_plan_core_sha256": CORE_HASH,
         "execution_session_id": SESSION_ID,
-        "phase": "open",
+        "phase": phase,
         "account_sha256": ACCOUNT_SHA256,
         "resolved_gateway_name": "CTP",
         "price_policy_id": ("COMMODITY_SIMNOW_PROTECTED_TOUCH_PLUS_ONE_TICK_V1"),
@@ -143,7 +166,7 @@ def signed_permit(
         ),
         "order_set_sha256": baseline_order_set_sha256(scoped),
         "orders": scoped,
-        "risk_envelope": risk_envelope(),
+        "risk_envelope": risk_envelope(total_lots=sum(row["volume"] for row in scoped)),
         "signer_key_id": "baseline-signer-v1",
         "phase_dispatch_authorized": True,
         "one_shot": True,
@@ -176,7 +199,8 @@ def build_service(
 ) -> tuple[CommodityBaselineExecutionPermitService, FakeRpc, Ed25519PrivateKey]:
     private = private or Ed25519PrivateKey.generate()
     keyring_path = tmp_path / "trusted-keys.json"
-    permit_path = tmp_path / "permit.json"
+    close_permit_path = tmp_path / "close-permit.json"
+    open_permit_path = tmp_path / "open-permit.json"
     keyring = {
         "schema_version": ("commodity_baseline_execution_permit_trusted_keys_v1"),
         "purpose": "commodity_baseline_execution_permit_verification",
@@ -191,10 +215,18 @@ def build_service(
         ],
     }
     keyring_raw = write_canonical(keyring_path, keyring)
-    write_canonical(permit_path, signed_permit(private))
+    write_canonical(
+        close_permit_path,
+        signed_permit(private, phase="close"),
+    )
+    write_canonical(
+        open_permit_path,
+        signed_permit(private, phase="open"),
+    )
     settings = Settings(
         commodity_baseline_execution_permit_enabled=True,
-        commodity_baseline_execution_permit_path=str(permit_path),
+        commodity_baseline_execution_permit_close_path=str(close_permit_path),
+        commodity_baseline_execution_permit_open_path=str(open_permit_path),
         commodity_baseline_execution_permit_trusted_keyring_path=str(keyring_path),
         commodity_baseline_execution_permit_expected_keyring_raw_sha256=(
             sha256_bytes(keyring_raw)
@@ -231,9 +263,38 @@ def prepare(service: CommodityBaselineExecutionPermitService):
         phase="open",
         account_sha256=ACCOUNT_SHA256,
         resolved_gateway_name="CTP",
-        price_policy_id=("COMMODITY_SIMNOW_PROTECTED_TOUCH_PLUS_ONE_TICK_V1"),
-        planned_orders=orders(),
-        expected_risk_envelope=risk_envelope(),
+        price_policy_ids_by_phase={
+            "open": "COMMODITY_SIMNOW_PROTECTED_TOUCH_PLUS_ONE_TICK_V1"
+        },
+        planned_orders_by_phase={"open": orders()},
+        expected_risk_envelopes_by_phase={"open": risk_envelope()},
+        require_companion_permit=False,
+    )
+
+
+def prepare_close_pair(service: CommodityBaselineExecutionPermitService):
+    return service.prepare(
+        plan_hash=PLAN_HASH,
+        execution_plan_core_sha256=CORE_HASH,
+        execution_session_id=SESSION_ID,
+        strategy_id="STATIC_CORE_EQUAL",
+        strategy_version="commodity_static_core_equal_target_batch_v2",
+        phase="close",
+        account_sha256=ACCOUNT_SHA256,
+        resolved_gateway_name="CTP",
+        price_policy_ids_by_phase={
+            "close": "COMMODITY_SIMNOW_PROTECTED_TOUCH_PLUS_ONE_TICK_V1",
+            "open": "COMMODITY_SIMNOW_PROTECTED_TOUCH_PLUS_ONE_TICK_V1",
+        },
+        planned_orders_by_phase={
+            "close": close_orders(),
+            "open": orders(),
+        },
+        expected_risk_envelopes_by_phase={
+            "close": risk_envelope(total_lots=1),
+            "open": risk_envelope(),
+        },
+        require_companion_permit=True,
     )
 
 
@@ -283,13 +344,38 @@ def test_phase_permit_consumes_once_and_allows_exact_child_sequence(
         final(service, prepare(service), child_index=0, price=1000.0)
 
 
+def test_close_preflight_requires_both_independent_phase_permits(
+    tmp_path: Path,
+) -> None:
+    service, _, private = build_service(tmp_path)
+
+    prepared = prepare_close_pair(service)
+
+    assert prepared.phase == "close"
+    assert prepared.permit.phase == "close"
+    service.settings.commodity_baseline_execution_permit_open_path = str(
+        tmp_path / "missing-open.json"
+    )
+    with pytest.raises(CommodityBaselineExecutionPermitError) as caught:
+        prepare_close_pair(service)
+    assert caught.value.detail["reason"] == (
+        "BASELINE_EXECUTION_OPEN_PERMIT_READ_INVALID"
+    )
+
+    wrong_phase = tmp_path / "wrong-open.json"
+    write_canonical(wrong_phase, signed_permit(private, phase="close"))
+    service.settings.commodity_baseline_execution_permit_open_path = str(wrong_phase)
+    with pytest.raises(CommodityBaselineExecutionPermitError) as caught:
+        prepare_close_pair(service)
+    assert caught.value.detail["reason"] == ("BASELINE_EXECUTION_PERMIT_SCOPE_MISMATCH")
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     (
         ("plan_hash", "c" * 64),
         ("execution_plan_core_sha256", "c" * 64),
         ("execution_session_id", "different-session-v1"),
-        ("phase", "close"),
         ("account_sha256", "c" * 64),
         ("resolved_gateway_name", "OTHER"),
     ),
@@ -309,9 +395,12 @@ def test_plan_session_phase_account_and_gateway_scope_fail_closed(
         "phase": "open",
         "account_sha256": ACCOUNT_SHA256,
         "resolved_gateway_name": "CTP",
-        "price_policy_id": ("COMMODITY_SIMNOW_PROTECTED_TOUCH_PLUS_ONE_TICK_V1"),
-        "planned_orders": orders(),
-        "expected_risk_envelope": risk_envelope(),
+        "price_policy_ids_by_phase": {
+            "open": "COMMODITY_SIMNOW_PROTECTED_TOUCH_PLUS_ONE_TICK_V1"
+        },
+        "planned_orders_by_phase": {"open": orders()},
+        "expected_risk_envelopes_by_phase": {"open": risk_envelope()},
+        "require_companion_permit": False,
     }
     kwargs[field] = value
     with pytest.raises(CommodityBaselineExecutionPermitError):

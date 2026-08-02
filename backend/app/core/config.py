@@ -96,7 +96,8 @@ class Settings(BaseSettings):
     commodity_simnow_trusted_public_keys_json: str = "{}"
     commodity_simnow_state_path: str = "logs/commodity-simnow/state.json"
     commodity_baseline_execution_permit_enabled: bool = False
-    commodity_baseline_execution_permit_path: str = ""
+    commodity_baseline_execution_permit_close_path: str = ""
+    commodity_baseline_execution_permit_open_path: str = ""
     commodity_baseline_execution_permit_trusted_keyring_path: str = ""
     commodity_baseline_execution_permit_expected_keyring_raw_sha256: str = ""
     commodity_baseline_execution_permit_consume_root: str = (
@@ -250,7 +251,8 @@ class Settings(BaseSettings):
                 )
         if self.commodity_baseline_execution_permit_enabled:
             required_paths = (
-                self.commodity_baseline_execution_permit_path,
+                self.commodity_baseline_execution_permit_close_path,
+                self.commodity_baseline_execution_permit_open_path,
                 self.commodity_baseline_execution_permit_trusted_keyring_path,
                 self.commodity_baseline_execution_permit_consume_root,
             )

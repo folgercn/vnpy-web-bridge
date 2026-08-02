@@ -548,6 +548,19 @@ class CommoditySimNowService:
         strategy_id, strategy_version, session_id = (
             self._baseline_plan_identity(plan)
         )
+        planned_orders_by_phase = {
+            candidate_phase: list(plan[f"{candidate_phase}_orders"])
+            for candidate_phase in ("close", "open")
+            if plan.get(f"{candidate_phase}_orders")
+        }
+        price_policy_ids_by_phase = {
+            candidate_phase: (
+                price_policy_id
+                if candidate_phase == phase
+                else "COMMODITY_SIMNOW_PROTECTED_TOUCH_PLUS_ONE_TICK_V1"
+            )
+            for candidate_phase in planned_orders_by_phase
+        }
         return self.baseline_execution_permit.prepare(
             plan_hash=str(plan["plan_hash"]),
             execution_plan_core_sha256=(
@@ -561,11 +574,17 @@ class CommoditySimNowService:
             resolved_gateway_name=(
                 self.settings.commodity_simnow_gateway_name
             ),
-            price_policy_id=price_policy_id,
-            planned_orders=orders,
-            expected_risk_envelope=(
-                self._baseline_expected_risk_envelope(orders)
-            ),
+            price_policy_ids_by_phase=price_policy_ids_by_phase,
+            planned_orders_by_phase=planned_orders_by_phase,
+            expected_risk_envelopes_by_phase={
+                candidate_phase: self._baseline_expected_risk_envelope(
+                    candidate_orders
+                )
+                for candidate_phase, candidate_orders in (
+                    planned_orders_by_phase.items()
+                )
+            },
+            require_companion_permit=(phase == "close"),
         )
 
     def _c_fast_pre_rpc_guard(

@@ -123,24 +123,23 @@ class CommodityBaselineExecutionPermitService:
         phase: str,
         account_sha256: str,
         resolved_gateway_name: str,
-        price_policy_id: str,
-        planned_orders: list[dict[str, Any]],
-        expected_risk_envelope: dict[str, Any],
+        price_policy_ids_by_phase: dict[str, str],
+        planned_orders_by_phase: dict[str, list[dict[str, Any]]],
+        expected_risk_envelopes_by_phase: dict[str, dict[str, Any]],
+        require_companion_permit: bool,
     ) -> PreparedCommodityBaselinePermit:
         if not self.settings.commodity_baseline_execution_permit_enabled:
             self._raise("BASELINE_EXECUTION_PERMIT_DISABLED")
-        permit_path = Path(
-            self.settings.commodity_baseline_execution_permit_path
-        ).expanduser()
+        if (
+            phase not in {"close", "open"}
+            or not planned_orders_by_phase.get(phase)
+            or phase not in price_policy_ids_by_phase
+            or phase not in expected_risk_envelopes_by_phase
+        ):
+            self._raise("BASELINE_EXECUTION_PERMIT_PHASE_INPUT_INVALID")
         keyring_path = Path(
             self.settings.commodity_baseline_execution_permit_trusted_keyring_path
         ).expanduser()
-        if permit_path.resolve() == keyring_path.resolve():
-            self._raise("BASELINE_EXECUTION_PERMIT_PATH_COLLISION")
-        permit_payload, permit_raw = self._read_exact_canonical_json(
-            permit_path,
-            "BASELINE_EXECUTION_PERMIT",
-        )
         keyring_payload, keyring_raw = self._read_exact_canonical_json(
             keyring_path,
             "BASELINE_EXECUTION_PERMIT_KEYRING",
@@ -151,7 +150,6 @@ class CommodityBaselineExecutionPermitService:
         ):
             self._raise("BASELINE_EXECUTION_PERMIT_KEYRING_PIN_MISMATCH")
         try:
-            permit = CommodityBaselineExecutionPermitDTO.model_validate(permit_payload)
             keyring = CommodityBaselinePermitTrustedKeysDTO.model_validate(
                 keyring_payload
             )
@@ -159,25 +157,70 @@ class CommodityBaselineExecutionPermitService:
             raise CommodityBaselineExecutionPermitError(
                 detail={"reason": "BASELINE_EXECUTION_PERMIT_SCHEMA_INVALID"}
             ) from exc
-        self._verify_signature(permit, keyring)
-        self._verify_static_scope(
-            permit,
-            plan_hash=plan_hash,
-            execution_plan_core_sha256=execution_plan_core_sha256,
-            execution_session_id=execution_session_id,
-            strategy_id=strategy_id,
-            strategy_version=strategy_version,
-            phase=phase,
-            account_sha256=account_sha256,
-            resolved_gateway_name=resolved_gateway_name,
-            price_policy_id=price_policy_id,
-            planned_orders=planned_orders,
-            expected_risk_envelope=expected_risk_envelope,
-        )
+        phases = [phase]
+        companion = "open" if phase == "close" else "close"
+        if require_companion_permit and planned_orders_by_phase.get(companion):
+            if (
+                companion not in price_policy_ids_by_phase
+                or companion not in expected_risk_envelopes_by_phase
+            ):
+                self._raise("BASELINE_EXECUTION_PERMIT_PHASE_INPUT_INVALID")
+            phases.append(companion)
+        phase_paths = [self._permit_path(candidate) for candidate in phases]
+        if len({path.resolve() for path in phase_paths}) != len(phase_paths):
+            self._raise("BASELINE_EXECUTION_PERMIT_PATH_COLLISION")
+        verified: dict[
+            str,
+            tuple[CommodityBaselineExecutionPermitDTO, bytes, Path],
+        ] = {}
+        seen_ids: set[str] = set()
+        seen_nonces: set[str] = set()
+        for candidate_phase, permit_path in zip(
+            phases,
+            phase_paths,
+            strict=True,
+        ):
+            if permit_path.resolve() == keyring_path.resolve():
+                self._raise("BASELINE_EXECUTION_PERMIT_PATH_COLLISION")
+            permit_payload, permit_raw = self._read_exact_canonical_json(
+                permit_path,
+                f"BASELINE_EXECUTION_{candidate_phase.upper()}_PERMIT",
+            )
+            try:
+                candidate = CommodityBaselineExecutionPermitDTO.model_validate(
+                    permit_payload
+                )
+            except ValidationError as exc:
+                raise CommodityBaselineExecutionPermitError(
+                    detail={"reason": "BASELINE_EXECUTION_PERMIT_SCHEMA_INVALID"}
+                ) from exc
+            self._verify_signature(candidate, keyring)
+            self._verify_static_scope(
+                candidate,
+                plan_hash=plan_hash,
+                execution_plan_core_sha256=execution_plan_core_sha256,
+                execution_session_id=execution_session_id,
+                strategy_id=strategy_id,
+                strategy_version=strategy_version,
+                phase=candidate_phase,
+                account_sha256=account_sha256,
+                resolved_gateway_name=resolved_gateway_name,
+                price_policy_id=price_policy_ids_by_phase[candidate_phase],
+                planned_orders=planned_orders_by_phase[candidate_phase],
+                expected_risk_envelope=(
+                    expected_risk_envelopes_by_phase[candidate_phase]
+                ),
+            )
+            if candidate.permit_id in seen_ids or candidate.nonce in seen_nonces:
+                self._raise("BASELINE_EXECUTION_PHASE_PERMITS_NOT_INDEPENDENT")
+            seen_ids.add(candidate.permit_id)
+            seen_nonces.add(candidate.nonce)
+            verified[candidate_phase] = (candidate, permit_raw, permit_path)
         self._verify_live_account(
             account_sha256=account_sha256,
             resolved_gateway_name=resolved_gateway_name,
         )
+        permit, permit_raw, permit_path = verified[phase]
         return PreparedCommodityBaselinePermit(
             permit=permit,
             permit_raw=permit_raw,
@@ -192,8 +235,17 @@ class CommodityBaselineExecutionPermitService:
             phase=phase,
             account_sha256=account_sha256,
             resolved_gateway_name=resolved_gateway_name,
-            price_policy_id=price_policy_id,
+            price_policy_id=price_policy_ids_by_phase[phase],
         )
+
+    def _permit_path(self, phase: str) -> Path:
+        if phase == "close":
+            configured = self.settings.commodity_baseline_execution_permit_close_path
+        elif phase == "open":
+            configured = self.settings.commodity_baseline_execution_permit_open_path
+        else:
+            self._raise("BASELINE_EXECUTION_PHASE_INVALID")
+        return Path(configured).expanduser()
 
     def final_guard(
         self,

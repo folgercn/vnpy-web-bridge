@@ -257,6 +257,33 @@ def verify(args: argparse.Namespace) -> None:
             or permit.strategy_version != strategy_version
         ):
             raise ValueError("permit does not match active plan")
+        planned = list(plan[f"{permit.phase}_orders"])
+        authorized_shape = [
+            {
+                "symbol": row.symbol,
+                "exchange": row.exchange,
+                "direction": row.direction,
+                "offset": row.offset,
+                "type": row.type,
+                "volume": row.volume,
+                "reference": row.reference,
+            }
+            for row in permit.orders
+        ]
+        planned_shape = [
+            {
+                "symbol": str(row["symbol"]),
+                "exchange": str(row["exchange"]),
+                "direction": str(row["direction"]),
+                "offset": str(row["offset"]),
+                "type": "limit",
+                "volume": int(row["volume"]),
+                "reference": str(row["reference"]),
+            }
+            for row in planned
+        ]
+        if authorized_shape != planned_shape:
+            raise ValueError("permit order set does not match active plan")
     print("verification=PASS")
     print(f"permit_id={permit.permit_id}")
     print(f"keyring_raw_sha256={hashlib.sha256(args.keyring.read_bytes()).hexdigest()}")

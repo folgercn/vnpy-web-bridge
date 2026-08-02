@@ -2977,6 +2977,8 @@ def test_signed_reversal_runs_close_reconcile_open_reconcile(tmp_path: Path) -> 
     )
 
     plan = service.preview(batch, operator="admin", role="admin", source_ip=None)
+    baseline_permit = RecordingBaselinePermit()
+    service.baseline_execution_permit = baseline_permit  # type: ignore[assignment]
     assert plan["status"] == "READY_CLOSE"
     assert [row["offset"] for row in plan["close_orders"]] == [
         "closeyesterday",
@@ -3018,6 +3020,13 @@ def test_signed_reversal_runs_close_reconcile_open_reconcile(tmp_path: Path) -> 
     completed = service.reconcile(plan["plan_hash"], operator="admin", role="admin", source_ip=None)
 
     assert completed["status"] == "COMPLETE"
+    assert baseline_permit.prepare_calls[0]["phase"] == "close"
+    assert baseline_permit.prepare_calls[0]["require_companion_permit"] is True
+    assert set(
+        baseline_permit.prepare_calls[0]["planned_orders_by_phase"]
+    ) == {"close", "open"}
+    assert baseline_permit.prepare_calls[1]["phase"] == "open"
+    assert baseline_permit.prepare_calls[1]["require_companion_permit"] is False
     assert len(trade.requests) == 4
     assert all(request.gateway_name == "CTP" and request.confirm for request in trade.requests)
     persisted = json.loads((tmp_path / "commodity-state.json").read_text(encoding="utf-8"))

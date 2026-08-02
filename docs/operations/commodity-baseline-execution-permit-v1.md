@@ -32,7 +32,7 @@ python scripts/commodity_baseline_execution_permit.py keyring \
 Record the printed `keyring_raw_sha256`. Install only the public keyring on the
 runtime host. Keep its canonical bytes unchanged.
 
-## Draft, review, sign, and verify one phase
+## Draft, review, sign, and preinstall the phase pair
 
 Stop before the signing step if the active plan is not the intended account,
 strategy, session, phase, order set, or risk budget. The draft command verifies
@@ -45,6 +45,13 @@ python scripts/commodity_baseline_execution_permit.py draft \
   --signer-key-id baseline-permit-operator-v1 \
   --price-band-percent 3 \
   --output baseline-close.draft.json
+
+python scripts/commodity_baseline_execution_permit.py draft \
+  --active-plan logs/commodity-simnow/state.active.json \
+  --phase open \
+  --signer-key-id baseline-permit-operator-v1 \
+  --price-band-percent 3 \
+  --output baseline-open.draft.json
 ```
 
 Review every `minimum_price`, `maximum_price`, order, and risk limit. Transfer
@@ -56,16 +63,27 @@ python scripts/commodity_baseline_execution_permit.py sign \
   --private-key baseline-permit-offline.pem \
   --output baseline-close.signed.json
 
+python scripts/commodity_baseline_execution_permit.py sign \
+  --input baseline-open.draft.json \
+  --private-key baseline-permit-offline.pem \
+  --output baseline-open.signed.json
+
 python scripts/commodity_baseline_execution_permit.py verify \
   --permit baseline-close.signed.json \
   --keyring commodity-baseline-permit-keyring-v1.json \
   --active-plan logs/commodity-simnow/state.active.json
+
+python scripts/commodity_baseline_execution_permit.py verify \
+  --permit baseline-open.signed.json \
+  --keyring commodity-baseline-permit-keyring-v1.json \
+  --active-plan logs/commodity-simnow/state.active.json
 ```
 
-Never overwrite a prior signed permit or consumption marker. Install the signed
-file atomically at the configured permit path. After the close phase is safely
-reconciled and the plan reaches `READY_OPEN`, repeat the full workflow for an
-`open` permit.
+Never overwrite a prior signed permit or consumption marker. Before the one-key
+start/auto-dispatch action, atomically install both signed files at their fixed
+close/open paths. If both phases contain orders, the close preflight validates
+the complete pair before its first RPC call. Do not replace a permit while the
+plan is running. Open-only plans require only the open permit file to be valid.
 
 ## Runtime configuration
 
@@ -75,7 +93,8 @@ with broader permissions is rejected and is never chmod-mutated.
 
 ```dotenv
 COMMODITY_BASELINE_EXECUTION_PERMIT_ENABLED=true
-COMMODITY_BASELINE_EXECUTION_PERMIT_PATH=/run/secrets/commodity-baseline/active-permit.json
+COMMODITY_BASELINE_EXECUTION_PERMIT_CLOSE_PATH=/run/secrets/commodity-baseline/close-permit.json
+COMMODITY_BASELINE_EXECUTION_PERMIT_OPEN_PATH=/run/secrets/commodity-baseline/open-permit.json
 COMMODITY_BASELINE_EXECUTION_PERMIT_TRUSTED_KEYRING_PATH=/run/secrets/commodity-baseline/trusted-keys.json
 COMMODITY_BASELINE_EXECUTION_PERMIT_EXPECTED_KEYRING_RAW_SHA256=<64 lowercase hex>
 COMMODITY_BASELINE_EXECUTION_PERMIT_CONSUME_ROOT=/var/lib/vnpy-web-bridge/commodity-baseline-permit-consumed
@@ -84,6 +103,8 @@ COMMODITY_BASELINE_EXECUTION_PERMIT_MAX_TTL_SECONDS=600
 
 Load/restart the bridge only after installing the public keyring and pin. A
 missing/expired/tampered/wrong-phase permit results in zero order RPC calls.
+When both preinstalled permits remain inside their signed validity windows, the
+existing reconciler may advance close to open without a file swap or restart.
 The first child consumes the phase permit inside the shared RPC and dispatch
 abort locks. A timeout or unknown outcome burns the permit and halts the phase;
 restart recovery must reconcile existing send intents and never replays it.

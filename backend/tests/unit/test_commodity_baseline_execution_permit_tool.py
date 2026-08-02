@@ -56,7 +56,19 @@ def test_offline_draft_sign_keyring_and_verify_round_trip(
         "previous_positions": {},
         "expected_after_close": {},
         "expected_final_positions": {"SHFE.ag2610": 1},
-        "close_orders": [],
+        "close_orders": [
+            {
+                "product": "cu",
+                "vt_symbol": "cu2610.SHFE",
+                "symbol": "cu2610",
+                "exchange": "SHFE",
+                "direction": "short",
+                "offset": "close",
+                "volume": 1,
+                "price": 75000.0,
+                "reference": "commodity_static_core:close:cu:1",
+            }
+        ],
         "open_orders": [
             {
                 "product": "ag",
@@ -86,6 +98,8 @@ def test_offline_draft_sign_keyring_and_verify_round_trip(
     active_path.write_text(json.dumps(active), encoding="utf-8")
     draft_path = tmp_path / "draft.json"
     signed_path = tmp_path / "signed.json"
+    close_draft_path = tmp_path / "close-draft.json"
+    close_signed_path = tmp_path / "close-signed.json"
     keyring_path = tmp_path / "keyring.json"
 
     run(
@@ -100,6 +114,19 @@ def test_offline_draft_sign_keyring_and_verify_round_trip(
         "3",
         "--output",
         str(draft_path),
+    )
+    run(
+        "draft",
+        "--active-plan",
+        str(active_path),
+        "--phase",
+        "close",
+        "--signer-key-id",
+        "baseline-signer-v1",
+        "--price-band-percent",
+        "3",
+        "--output",
+        str(close_draft_path),
     )
     keyring_result = run(
         "keyring",
@@ -119,6 +146,15 @@ def test_offline_draft_sign_keyring_and_verify_round_trip(
         "--output",
         str(signed_path),
     )
+    run(
+        "sign",
+        "--input",
+        str(close_draft_path),
+        "--private-key",
+        str(private_path),
+        "--output",
+        str(close_signed_path),
+    )
     verify_result = run(
         "verify",
         "--permit",
@@ -128,6 +164,16 @@ def test_offline_draft_sign_keyring_and_verify_round_trip(
         "--active-plan",
         str(active_path),
     )
+    close_verify_result = run(
+        "verify",
+        "--permit",
+        str(close_signed_path),
+        "--keyring",
+        str(keyring_path),
+        "--active-plan",
+        str(active_path),
+    )
 
     assert "keyring_raw_sha256=" in keyring_result.stdout
     assert "verification=PASS" in verify_result.stdout
+    assert "verification=PASS" in close_verify_result.stdout
