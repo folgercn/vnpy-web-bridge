@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+from threading import Event, Thread
+
 import pytest
 
 from app.core.errors import RpcCallError, RpcTimeoutError, RpcUnavailableError
@@ -356,11 +359,53 @@ def test_c_fast_terminal_ticket_rejects_callback_generation_drift() -> None:
         )
 
 
-def test_c_fast_terminal_publisher_blocks_reentrant_callback_mutation() -> None:
+def test_c_fast_terminal_ticket_rejects_reconnect_generation_drift() -> None:
+    service = VnpyRpcService()
+    owner = object()
+    capability = service.bind_c_fast_terminal_publication_owner(owner)
+    session_id = f"cfast-shakedown-{'e' * 32}"
+    ticket = service.prepare_c_fast_terminal_publication(
+        capability,
+        session_id=session_id,
+    )
+
+    service._record_connected_generation(datetime.now(timezone.utc))
+
+    with pytest.raises(RpcCallError, match="generation drifted"):
+        service.publish_c_fast_terminal_archive(
+            capability,
+            ticket,
+            session_id=session_id,
+            publisher=lambda generation: generation,
+        )
+
+
+def test_c_fast_terminal_publisher_detects_callback_mutation_before_commit() -> None:
     service = VnpyRpcService()
     owner = object()
     capability = service.bind_c_fast_terminal_publication_owner(owner)
     session_id = f"cfast-shakedown-{'b' * 32}"
+    ticket = service.prepare_c_fast_terminal_publication(
+        capability,
+        session_id=session_id,
+    )
+
+    with pytest.raises(RpcCallError, match="changed before commit"):
+        service.publish_c_fast_terminal_archive(
+            capability,
+            ticket,
+            session_id=session_id,
+            publisher=lambda _generation: service.handle_event(
+                "", TradeEvent()
+            ),
+        )
+
+
+def test_c_fast_terminal_committer_blocks_reentrant_callback_mutation() -> None:
+    service = VnpyRpcService()
+    owner = object()
+    capability = service.bind_c_fast_terminal_publication_owner(owner)
+    session_id = f"cfast-shakedown-{'f' * 32}"
     ticket = service.prepare_c_fast_terminal_publication(
         capability,
         session_id=session_id,
@@ -371,10 +416,72 @@ def test_c_fast_terminal_publisher_blocks_reentrant_callback_mutation() -> None:
             capability,
             ticket,
             session_id=session_id,
-            publisher=lambda _generation: service.handle_event(
+            publisher=lambda _generation: "candidate",
+            committer=lambda _candidate: service.handle_event(
                 "", TradeEvent()
             ),
         )
+
+
+def test_c_fast_terminal_publication_does_not_deadlock_reconnect_callback() -> None:
+    service = VnpyRpcService()
+    owner = object()
+    capability = service.bind_c_fast_terminal_publication_owner(owner)
+    session_id = f"cfast-shakedown-{'d' * 32}"
+    ticket = service.prepare_c_fast_terminal_publication(
+        capability,
+        session_id=session_id,
+    )
+    publisher_started = Event()
+    reconnect_holds_call_lock = Event()
+    callback_joined = Event()
+    outcomes: list[object] = []
+
+    def publisher(_generation: int) -> str:
+        publisher_started.set()
+        assert reconnect_holds_call_lock.wait(2)
+        with service._call_lock:
+            return "candidate"
+
+    def publication() -> None:
+        try:
+            outcomes.append(
+                service.publish_c_fast_terminal_archive(
+                    capability,
+                    ticket,
+                    session_id=session_id,
+                    publisher=publisher,
+                    committer=lambda value: value,
+                )
+            )
+        except Exception as exc:
+            outcomes.append(exc)
+
+    def reconnect_joining_callback() -> None:
+        assert publisher_started.wait(2)
+        with service._call_lock:
+            reconnect_holds_call_lock.set()
+            callback = Thread(
+                target=lambda: service.handle_event("", TradeEvent())
+            )
+            callback.start()
+            callback.join(2)
+            assert not callback.is_alive()
+            callback_joined.set()
+
+    publish_thread = Thread(target=publication)
+    reconnect_thread = Thread(target=reconnect_joining_callback)
+    publish_thread.start()
+    reconnect_thread.start()
+    publish_thread.join(3)
+    reconnect_thread.join(3)
+
+    assert not publish_thread.is_alive()
+    assert not reconnect_thread.is_alive()
+    assert callback_joined.is_set()
+    assert len(outcomes) == 1
+    assert isinstance(outcomes[0], RpcCallError)
+    assert "changed before commit" in str(outcomes[0])
 
 
 def test_c_fast_terminal_capability_is_owner_bound_and_ticket_one_shot() -> None:

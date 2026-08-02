@@ -4,12 +4,14 @@ import asyncio
 import base64
 import binascii
 import calendar
+import fcntl
 import hashlib
 import json
 import logging
 import math
 import os
 import re
+import stat
 import uuid
 from collections.abc import Callable
 from datetime import date, datetime, timezone
@@ -83,6 +85,8 @@ TERMINAL_ORDER_STATUSES = {"all_traded", "cancelled", "rejected"}
 KNOWN_ORDER_STATUSES = (
     ACTIVE_ORDER_STATUSES | TERMINAL_ORDER_STATUSES
 )
+MAX_C_FAST_TERMINAL_ARCHIVE_BYTES = 16 * 1024 * 1024
+C_FAST_TERMINAL_ARCHIVE_LOCK = ".terminal-archive.lock"
 
 STATIC_CORE_SECTOR_MAP_ID = COMMODITY_FROZEN_SECTOR_MAP_V1_ID
 STATIC_CORE_SECTOR_MAP_V1 = commodity_frozen_sector_map_v1()
@@ -4921,7 +4925,7 @@ class CommoditySimNowService:
                     detail={"error_type": exc.__class__.__name__},
                 )
 
-            def publish_under_event_lock(
+            def build_outside_event_lock(
                 event_generation: int,
             ) -> dict[str, Any]:
                 final_session, final_guard, final_raw_facts = (
@@ -4937,6 +4941,11 @@ class CommoditySimNowService:
                     terminal_guard=final_guard,
                     terminal_raw_facts=final_raw_facts,
                 )
+                return final_session
+
+            def commit_under_event_lock(
+                final_session: dict[str, Any],
+            ) -> dict[str, Any]:
                 self._archive_c_fast_terminal_session(final_session)
                 return final_session
 
@@ -4945,7 +4954,8 @@ class CommoditySimNowService:
                     capability,
                     ticket,
                     session_id=session_id,
-                    publisher=publish_under_event_lock,
+                    publisher=build_outside_event_lock,
+                    committer=commit_under_event_lock,
                 )
             except (CommoditySimNowSafetyError, CommoditySimNowStateError):
                 raise
@@ -5018,7 +5028,8 @@ class CommoditySimNowService:
                 {
                     "order_trade_event_generation": event_generation,
                     "terminal_publication_linearization_state": (
-                        "FINAL_REPLAY_UNDER_ORDER_TRADE_EVENT_LOCK"
+                        "FINAL_REPLAY_OUTSIDE_LOCK_GENERATION_"
+                        "REVALIDATED_BEFORE_CREATE_ONLY_COMMIT"
                     ),
                 }
             )
@@ -5298,6 +5309,7 @@ class CommoditySimNowService:
             and second["rpc_generation_stable"]
             and first["rpc_generation_before"]
             == second["rpc_generation_after"]
+            == str(plan.get("dispatch_rpc_generation") or "")
         )
         conflicting_order_identities = sorted(
             {
@@ -7042,57 +7054,519 @@ class CommoditySimNowService:
             raise CommoditySimNowStateError(
                 "C_FAST 终态归档 checksum 无效"
             )
-        path = self._c_fast_terminal_archive_path(
-            str(session.get("session_id") or "")
-        )
-        if path.exists():
-            try:
-                existing = json.loads(path.read_text(encoding="utf-8"))
-            except Exception as exc:
-                raise CommoditySimNowStateError(
-                    "C_FAST 终态归档已存在但不可读取"
-                ) from exc
-            if (
-                not isinstance(existing, dict)
-                or existing.get("session_id")
-                != session.get("session_id")
-                or existing.get("terminal_checksum")
-                != session.get("terminal_checksum")
-                or not self._c_fast_plan_checksum_valid(existing)
-                or not self._c_fast_execution_checksum_valid(existing)
-                or not self._c_fast_shakedown_terminal_checksum_valid(
-                    existing
-                )
-            ):
-                raise CommoditySimNowStateError(
-                    "C_FAST 终态归档冲突，禁止覆盖"
-                )
-            return
-        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        path.parent.chmod(0o700)
+        session_id = str(session.get("session_id") or "")
+        self._c_fast_terminal_archive_path(session_id)
         raw = (
             json.dumps(session, ensure_ascii=False, indent=2) + "\n"
         ).encode("utf-8")
+        if len(raw) > MAX_C_FAST_TERMINAL_ARCHIVE_BYTES:
+            raise CommoditySimNowStateError(
+                "C_FAST 终态归档超过上限"
+            )
+        archive_fd = self._open_c_fast_terminal_archive_dir()
+        lock_fd: int | None = None
+        try:
+            lock_fd = self._open_c_fast_terminal_archive_lock(
+                archive_fd
+            )
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            self._recover_c_fast_terminal_archive_locked(
+                archive_fd,
+                session_id,
+            )
+            final_name = f"{session_id}.json"
+            existing = self._read_c_fast_archive_artifact_at(
+                archive_fd,
+                final_name,
+                required=False,
+            )
+            if existing is not None:
+                if existing[0] != raw:
+                    raise CommoditySimNowStateError(
+                        "C_FAST 终态归档冲突，禁止覆盖"
+                    )
+                return
+            reservation_name = f".{session_id}.reservation.json"
+            reservation = self._c_fast_terminal_reservation(
+                session,
+                raw,
+            )
+            reservation_raw = (
+                json.dumps(
+                    reservation,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n"
+            ).encode("utf-8")
+            self._write_c_fast_archive_artifact_at(
+                archive_fd,
+                reservation_name,
+                reservation_raw,
+            )
+            temporary_name = (
+                f".{session_id}.{uuid.uuid4().hex}.tmp"
+            )
+            self._write_c_fast_archive_artifact_at(
+                archive_fd,
+                temporary_name,
+                raw,
+            )
+            try:
+                os.link(
+                    temporary_name,
+                    final_name,
+                    src_dir_fd=archive_fd,
+                    dst_dir_fd=archive_fd,
+                    follow_symlinks=False,
+                )
+            except FileExistsError:
+                final = self._read_c_fast_archive_artifact_at(
+                    archive_fd,
+                    final_name,
+                    required=True,
+                )
+                if final is None or final[0] != raw:
+                    raise CommoditySimNowStateError(
+                        "C_FAST 终态归档冲突，禁止覆盖"
+                    )
+            os.fsync(archive_fd)
+            final = self._read_c_fast_archive_artifact_at(
+                archive_fd,
+                final_name,
+                required=True,
+            )
+            if final is None or final[0] != raw:
+                raise CommoditySimNowStateError(
+                    "C_FAST 终态归档 atomic publish 校验失败"
+                )
+            os.unlink(temporary_name, dir_fd=archive_fd)
+            os.unlink(reservation_name, dir_fd=archive_fd)
+            os.fsync(archive_fd)
+        except CommoditySimNowStateError:
+            raise
+        except OSError as exc:
+            raise CommoditySimNowStateError(
+                "C_FAST 终态归档 create-only publish 失败"
+            ) from exc
+        finally:
+            if lock_fd is not None:
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                finally:
+                    os.close(lock_fd)
+            os.close(archive_fd)
+
+    def _open_c_fast_terminal_archive_dir(self) -> int:
+        path = self._c_fast_terminal_archive_dir()
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            os.mkdir(path, 0o700)
+        except FileExistsError:
+            pass
+        observed_before = path.lstat()
+        if (
+            not stat.S_ISDIR(observed_before.st_mode)
+            or stat.S_ISLNK(observed_before.st_mode)
+            or observed_before.st_uid != os.geteuid()
+            or stat.S_IMODE(observed_before.st_mode) != 0o700
+        ):
+            raise OSError("archive directory custody invalid")
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_DIRECTORY", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = os.open(path, flags)
+            opened = os.fstat(descriptor)
+            observed = path.lstat()
+            if (
+                not stat.S_ISDIR(opened.st_mode)
+                or opened.st_uid != os.geteuid()
+                or stat.S_IMODE(opened.st_mode) != 0o700
+                or (opened.st_dev, opened.st_ino)
+                != (observed.st_dev, observed.st_ino)
+            ):
+                raise OSError("archive directory custody invalid")
+            return descriptor
+        except Exception:
+            if "descriptor" in locals():
+                os.close(descriptor)
+            raise
+
+    @staticmethod
+    def _open_c_fast_terminal_archive_lock(archive_fd: int) -> int:
+        flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(
+            C_FAST_TERMINAL_ARCHIVE_LOCK,
+            flags,
+            0o600,
+            dir_fd=archive_fd,
+        )
+        opened = os.fstat(descriptor)
+        observed = os.stat(
+            C_FAST_TERMINAL_ARCHIVE_LOCK,
+            dir_fd=archive_fd,
+            follow_symlinks=False,
+        )
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened.st_uid != os.geteuid()
+            or stat.S_IMODE(opened.st_mode) != 0o600
+            or opened.st_nlink != 1
+            or (opened.st_dev, opened.st_ino)
+            != (observed.st_dev, observed.st_ino)
+        ):
+            os.close(descriptor)
+            raise OSError("archive lock custody invalid")
+        return descriptor
+
+    @staticmethod
+    def _write_c_fast_archive_artifact_at(
+        archive_fd: int,
+        name: str,
+        raw: bytes,
+    ) -> None:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        flags |= getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
         try:
             descriptor = os.open(
-                path,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                name,
+                flags,
                 0o600,
+                dir_fd=archive_fd,
             )
         except FileExistsError:
-            return self._archive_c_fast_terminal_session(session)
+            existing = CommoditySimNowService._read_c_fast_archive_artifact_at(
+                archive_fd,
+                name,
+                required=True,
+            )
+            if existing is None or existing[0] != raw:
+                raise CommoditySimNowStateError(
+                    "C_FAST 终态归档中间件冲突"
+                )
+            return
         try:
-            with os.fdopen(descriptor, "wb", closefd=False) as handle:
-                handle.write(raw)
-                handle.flush()
-                os.fsync(handle.fileno())
+            remaining = memoryview(raw)
+            while remaining:
+                written = os.write(descriptor, remaining)
+                if written <= 0:
+                    raise OSError("short archive write")
+                remaining = remaining[written:]
+            os.fsync(descriptor)
+            metadata = os.fstat(descriptor)
+            if metadata.st_size != len(raw) or metadata.st_nlink != 1:
+                raise OSError("archive intermediate size mismatch")
         finally:
             os.close(descriptor)
-        directory_descriptor = os.open(path.parent, os.O_RDONLY)
+        os.fsync(archive_fd)
+
+    @staticmethod
+    def _read_c_fast_archive_artifact_at(
+        archive_fd: int,
+        name: str,
+        *,
+        required: bool,
+    ) -> tuple[bytes, os.stat_result] | None:
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
         try:
-            os.fsync(directory_descriptor)
+            descriptor = os.open(name, flags, dir_fd=archive_fd)
+        except FileNotFoundError:
+            if required:
+                raise
+            return None
+        try:
+            metadata = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_uid != os.geteuid()
+                or stat.S_IMODE(metadata.st_mode) != 0o600
+                or not 0 < metadata.st_size
+                <= MAX_C_FAST_TERMINAL_ARCHIVE_BYTES
+            ):
+                raise OSError("archive artifact custody invalid")
+            chunks: list[bytes] = []
+            remaining = metadata.st_size
+            while remaining:
+                chunk = os.read(descriptor, min(remaining, 1024 * 1024))
+                if not chunk:
+                    raise OSError("short archive read")
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            raw = b"".join(chunks)
+            current = os.stat(
+                name,
+                dir_fd=archive_fd,
+                follow_symlinks=False,
+            )
+            if (metadata.st_dev, metadata.st_ino, metadata.st_size) != (
+                current.st_dev,
+                current.st_ino,
+                current.st_size,
+            ):
+                raise OSError("archive artifact changed during read")
+            return raw, metadata
         finally:
-            os.close(directory_descriptor)
+            os.close(descriptor)
+
+    @staticmethod
+    def _c_fast_terminal_reservation(
+        session: dict[str, Any],
+        raw: bytes,
+    ) -> dict[str, Any]:
+        core = {
+            "schema_version": "commodity_c_fast_terminal_reservation_v1",
+            "session_id": str(session.get("session_id") or ""),
+            "terminal_checksum": str(
+                session.get("terminal_checksum") or ""
+            ),
+            "archive_raw_sha256": hashlib.sha256(raw).hexdigest(),
+        }
+        return {**core, "reservation_checksum": _sha256_json(core)}
+
+    def _validate_c_fast_terminal_reservation(
+        self,
+        raw: bytes,
+        *,
+        session_id: str,
+    ) -> dict[str, Any]:
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except Exception as exc:
+            raise CommoditySimNowStateError(
+                "C_FAST 终态归档 reservation 损坏"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise CommoditySimNowStateError(
+                "C_FAST 终态归档 reservation 损坏"
+            )
+        core = {
+            key: value
+            for key, value in payload.items()
+            if key != "reservation_checksum"
+        }
+        if (
+            set(payload)
+            != {
+                "schema_version",
+                "session_id",
+                "terminal_checksum",
+                "archive_raw_sha256",
+                "reservation_checksum",
+            }
+            or payload.get("schema_version")
+            != "commodity_c_fast_terminal_reservation_v1"
+            or payload.get("session_id") != session_id
+            or payload.get("reservation_checksum") != _sha256_json(core)
+        ):
+            raise CommoditySimNowStateError(
+                "C_FAST 终态归档 reservation 校验失败"
+            )
+        return payload
+
+    def _validate_c_fast_terminal_archive_raw(
+        self,
+        raw: bytes,
+        *,
+        session_id: str,
+    ) -> dict[str, Any]:
+        try:
+            session = json.loads(raw.decode("utf-8"))
+        except Exception as exc:
+            raise CommoditySimNowStateError(
+                "C_FAST 终态归档中间件损坏"
+            ) from exc
+        if (
+            not isinstance(session, dict)
+            or session.get("session_id") != session_id
+            or not self._c_fast_plan_checksum_valid(session)
+            or not self._c_fast_execution_checksum_valid(session)
+            or not self._c_fast_shakedown_terminal_checksum_valid(session)
+        ):
+            raise CommoditySimNowStateError(
+                "C_FAST 终态归档中间件校验失败"
+            )
+        return session
+
+    def _recover_c_fast_terminal_archive_locked(
+        self,
+        archive_fd: int,
+        session_id: str,
+    ) -> None:
+        reservation_name = f".{session_id}.reservation.json"
+        final_name = f"{session_id}.json"
+        temporary_pattern = re.compile(
+            rf"^\.{re.escape(session_id)}\.[0-9a-f]{{32}}\.tmp$"
+        )
+        names = os.listdir(archive_fd)
+        final_pattern = re.compile(
+            r"^cfast-shakedown-[0-9a-f]{32}\.json$"
+        )
+        reservation_pattern = re.compile(
+            r"^\.(cfast-shakedown-[0-9a-f]{32})\.reservation\.json$"
+        )
+        any_temporary_pattern = re.compile(
+            r"^\.(cfast-shakedown-[0-9a-f]{32})\."
+            r"[0-9a-f]{32}\.tmp$"
+        )
+        for name in names:
+            reservation_match = reservation_pattern.fullmatch(name)
+            temporary_match = any_temporary_pattern.fullmatch(name)
+            if name == C_FAST_TERMINAL_ARCHIVE_LOCK or final_pattern.fullmatch(
+                name
+            ):
+                continue
+            if reservation_match is not None:
+                if reservation_match.group(1) != session_id:
+                    raise CommoditySimNowStateError(
+                        "C_FAST 终态归档存在其他会话未完成 reservation"
+                    )
+                continue
+            if temporary_match is not None:
+                if temporary_match.group(1) != session_id:
+                    raise CommoditySimNowStateError(
+                        "C_FAST 终态归档存在其他会话未完成 pending"
+                    )
+                continue
+            raise CommoditySimNowStateError(
+                "C_FAST 终态归档存在未知 artifact"
+            )
+        temporary_names = [
+            name for name in names if temporary_pattern.fullmatch(name)
+        ]
+        if len(temporary_names) > 1:
+            raise CommoditySimNowStateError(
+                "C_FAST 终态归档存在多个中间件"
+            )
+        reservation_artifact = self._read_c_fast_archive_artifact_at(
+            archive_fd,
+            reservation_name,
+            required=False,
+        )
+        final_artifact = self._read_c_fast_archive_artifact_at(
+            archive_fd,
+            final_name,
+            required=False,
+        )
+        reservation = (
+            self._validate_c_fast_terminal_reservation(
+                reservation_artifact[0],
+                session_id=session_id,
+            )
+            if reservation_artifact is not None
+            else None
+        )
+        temporary = (
+            self._read_c_fast_archive_artifact_at(
+                archive_fd,
+                temporary_names[0],
+                required=True,
+            )
+            if temporary_names
+            else None
+        )
+        if reservation_artifact is not None and (
+            reservation_artifact[1].st_nlink != 1
+        ):
+            raise CommoditySimNowStateError(
+                "C_FAST 终态归档 reservation link 冲突"
+            )
+        changed = False
+        if final_artifact is not None:
+            final_session = self._validate_c_fast_terminal_archive_raw(
+                final_artifact[0],
+                session_id=session_id,
+            )
+            if reservation is not None and (
+                reservation.get("terminal_checksum")
+                != final_session.get("terminal_checksum")
+                or reservation.get("archive_raw_sha256")
+                != hashlib.sha256(final_artifact[0]).hexdigest()
+            ):
+                raise CommoditySimNowStateError(
+                    "C_FAST 终态归档 reservation/final 冲突"
+                )
+            if temporary is not None:
+                if (
+                    temporary[1].st_dev,
+                    temporary[1].st_ino,
+                ) != (
+                    final_artifact[1].st_dev,
+                    final_artifact[1].st_ino,
+                ):
+                    raise CommoditySimNowStateError(
+                        "C_FAST 终态归档 pending/final 冲突"
+                    )
+                if (
+                    temporary[1].st_nlink != 2
+                    or final_artifact[1].st_nlink != 2
+                ):
+                    raise CommoditySimNowStateError(
+                        "C_FAST 终态归档 pending/final link 冲突"
+                    )
+                os.unlink(temporary_names[0], dir_fd=archive_fd)
+                changed = True
+            elif final_artifact[1].st_nlink != 1:
+                raise CommoditySimNowStateError(
+                    "C_FAST 终态归档 final link 冲突"
+                )
+            if reservation is not None:
+                os.unlink(reservation_name, dir_fd=archive_fd)
+                changed = True
+        elif reservation is not None:
+            if temporary is not None:
+                if temporary[1].st_nlink != 1:
+                    raise CommoditySimNowStateError(
+                        "C_FAST 终态归档 pending link 冲突"
+                    )
+                pending_session = self._validate_c_fast_terminal_archive_raw(
+                    temporary[0],
+                    session_id=session_id,
+                )
+                if (
+                    reservation.get("terminal_checksum")
+                    != pending_session.get("terminal_checksum")
+                    or reservation.get("archive_raw_sha256")
+                    != hashlib.sha256(temporary[0]).hexdigest()
+                ):
+                    raise CommoditySimNowStateError(
+                        "C_FAST 终态归档 reservation/pending 冲突"
+                    )
+                os.unlink(temporary_names[0], dir_fd=archive_fd)
+                changed = True
+            os.unlink(reservation_name, dir_fd=archive_fd)
+            changed = True
+        elif temporary is not None:
+            raise CommoditySimNowStateError(
+                "C_FAST 终态归档 pending 缺少 reservation"
+            )
+        if changed:
+            os.fsync(archive_fd)
+
+    def _recover_c_fast_terminal_archive_artifacts(
+        self,
+        session_id: str,
+    ) -> None:
+        archive_fd = self._open_c_fast_terminal_archive_dir()
+        lock_fd: int | None = None
+        try:
+            lock_fd = self._open_c_fast_terminal_archive_lock(archive_fd)
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            self._recover_c_fast_terminal_archive_locked(
+                archive_fd,
+                session_id,
+            )
+        finally:
+            if lock_fd is not None:
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                finally:
+                    os.close(lock_fd)
+            os.close(archive_fd)
 
     def _load_c_fast_terminal_archive(
         self, session_id: str
@@ -7126,6 +7600,19 @@ class CommoditySimNowService:
         archive_dir = self._c_fast_terminal_archive_dir()
         if not archive_dir.exists():
             return [], "VALID"
+        try:
+            names = [path.name for path in archive_dir.iterdir()]
+        except OSError:
+            return [], "CHAIN_BROKEN"
+        final_pattern = re.compile(
+            r"^cfast-shakedown-[0-9a-f]{32}\.json$"
+        )
+        if any(
+            name != C_FAST_TERMINAL_ARCHIVE_LOCK
+            and final_pattern.fullmatch(name) is None
+            for name in names
+        ):
+            return [], "CHAIN_BROKEN"
         sessions = [
             self._load_c_fast_terminal_archive(path.stem)
             for path in archive_dir.glob("cfast-shakedown-*.json")
@@ -7671,6 +8158,9 @@ class CommoditySimNowService:
         )
         if is_c_fast and session_id:
             try:
+                self._recover_c_fast_terminal_archive_artifacts(
+                    str(session_id)
+                )
                 archived = self._load_c_fast_terminal_archive(
                     str(session_id)
                 )
@@ -7699,6 +8189,18 @@ class CommoditySimNowService:
                 self.current_plan = None
                 self._active_state_path().unlink(missing_ok=True)
                 return
+            # C_FAST terminal pointers are never sufficient by themselves.
+            # Missing/corrupt archive custody must retain the durable active
+            # plan so an operator sees a fail-closed recovery blocker.
+            if chain_state != "VALID" or (
+                isinstance(session, dict)
+                and session.get("status")
+                in {"COMPLETE", "HALTED_RECONCILED", "RESULT_UNKNOWN"}
+            ):
+                self._state_load_error = (
+                    "c_fast_terminal_archive_recovery_blocked"
+                )
+            return
         if (
             session
             and session.get("session_id") == session_id

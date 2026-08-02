@@ -101,6 +101,7 @@ class FakeRpc:
         *,
         session_id: str,
         publisher,
+        committer=None,
     ) -> Any:
         with self._event_lock:
             if (
@@ -113,7 +114,12 @@ class FakeRpc:
             ticket["used"] = True
             if ticket.get("generation") != self._event_generation:
                 raise ValueError("terminal callback generation drift")
-            return publisher(self._event_generation)
+            generation = self._event_generation
+        result = publisher(generation)
+        with self._event_lock:
+            if generation != self._event_generation:
+                raise ValueError("terminal callback generation drift")
+            return committer(result) if committer is not None else result
 
     def apply_trade_callback(self, trade: dict[str, Any]) -> None:
         with self._event_lock:

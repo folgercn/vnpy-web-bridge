@@ -15,7 +15,8 @@ cost 与 actual net PnL。缺少任何必要事实时，既有 v4 仍保持
   写出一个 canonical v5 source-facts artifact。
 - HTTP API 与 TradeService 下单 authority 不变。C_FAST terminal archive 路径新增
   RPC order/trade callback lock、单调 generation、owner-bound one-shot
-  publication capability，并在锁内重放 guard 后 create-only publish；它改变终态
+  publication capability；blocking replay 在锁外完成，锁内复核 generation
+  后仅做 create-only publish。它改变终态
   evidence 的线性化语义，但不提供新的发单、撤单或仓位 authority。
 - M2 / forward 计数：无变化；本地验证结果固定 `countable_forward=false`。
 

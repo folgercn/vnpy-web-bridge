@@ -110,6 +110,7 @@ class VnpyRpcService:
             _CFastTerminalPublicationCapability | None
         ) = None
         self._c_fast_terminal_publication_active = False
+        self._c_fast_terminal_publication_committing = False
         self._market_subscriptions: set[str] = set()
         self._readonly_tick_listeners: list[Callable[[Mapping[str, Any]], object]] = []
         self._last_probe_at = 0.0
@@ -185,8 +186,9 @@ class VnpyRpcService:
         *,
         session_id: str,
         publisher: Callable[[int], Any],
+        committer: Callable[[Any], Any] | None = None,
     ) -> Any:
-        """Run final replay and create-only publish under the event lock.
+        """Replay outside locks, then generation-check and commit under lock.
 
         This capability is deliberately limited to the single bound C_FAST
         owner and a one-shot session ticket.  It does not expose the lock or
@@ -217,16 +219,33 @@ class VnpyRpcService:
                 raise RpcCallError("C_FAST terminal publication is already active")
             if not callable(publisher):
                 raise ValueError("C_FAST terminal publisher is required")
+            if committer is not None and not callable(committer):
+                raise ValueError("C_FAST terminal committer is invalid")
             self._c_fast_terminal_publication_active = True
             generation = self._order_trade_event_generation
-            try:
-                result = publisher(generation)
+        try:
+            # Blocking RPC snapshots cannot run under the callback lock:
+            # reconnect owns _call_lock while joining callback threads.
+            result = publisher(generation)
+            with self._order_trade_event_lock:
                 if self._order_trade_event_generation != generation:
                     raise RpcCallError(
-                        "C_FAST callback generation changed inside publication"
+                        "C_FAST callback generation changed before commit"
                     )
-                return result
-            finally:
+                if committer is None:
+                    return result
+                self._c_fast_terminal_publication_committing = True
+                try:
+                    committed = committer(result)
+                    if self._order_trade_event_generation != generation:
+                        raise RpcCallError(
+                            "C_FAST callback generation changed inside commit"
+                        )
+                    return committed
+                finally:
+                    self._c_fast_terminal_publication_committing = False
+        finally:
+            with self._order_trade_event_lock:
                 self._c_fast_terminal_publication_active = False
 
     def _require_c_fast_terminal_capability(
@@ -257,7 +276,9 @@ class VnpyRpcService:
                 self.settings.vnpy_rpc_pub_address,
             )
             self.started = True
-            self.last_connected_at = datetime.now(ZoneInfo("Asia/Shanghai"))
+            self._record_connected_generation(
+                datetime.now(ZoneInfo("Asia/Shanghai"))
+            )
             self.last_error = None
             logger.info("vn.py RPC started")
         except Exception as exc:
@@ -265,6 +286,11 @@ class VnpyRpcService:
             self.started = False
             logger.exception("vn.py RPC start failed")
             raise RpcUnavailableError("RPC 启动失败", detail={"error": str(exc)}) from exc
+
+    def _record_connected_generation(self, connected_at: datetime) -> None:
+        with self._order_trade_event_lock:
+            self.last_connected_at = connected_at
+            self._order_trade_event_generation += 1
 
     def stop(self) -> None:
         if self.client and self.started:
@@ -546,7 +572,7 @@ class VnpyRpcService:
         elif event_type.startswith(EVENT_ORDER):
             ws_type = "order"
             with self._order_trade_event_lock:
-                if self._c_fast_terminal_publication_active:
+                if self._c_fast_terminal_publication_committing:
                     raise RpcCallError(
                         "order callback attempted reentrant terminal mutation"
                     )
@@ -555,7 +581,7 @@ class VnpyRpcService:
         elif event_type.startswith(EVENT_TRADE):
             ws_type = "trade"
             with self._order_trade_event_lock:
-                if self._c_fast_terminal_publication_active:
+                if self._c_fast_terminal_publication_committing:
                     raise RpcCallError(
                         "trade callback attempted reentrant terminal mutation"
                     )

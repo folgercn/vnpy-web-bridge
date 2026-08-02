@@ -4015,6 +4015,176 @@ def test_c_fast_restart_adopts_archive_after_pointer_write_failure(
     )["terminal_checksum"]
 
 
+def test_c_fast_terminal_partial_pending_write_preserves_restart_blocker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, rpc, snapshot, _ = prepare_c_fast_shakedown(tmp_path)
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    service.start_c_fast_shakedown(
+        preview["plan_hash"],
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+    assert service.current_plan is not None
+    ag = next(row for row in snapshot.targets if row.product == "ag")
+    rpc.positions = [
+        position("ag", ag.target_quantity, contract_month="2612")
+    ]
+    rpc.trades = fills_for_requests(list(service.trade.requests))
+    original_write = os.write
+    calls = 0
+
+    def crash_during_pending(descriptor: int, data) -> int:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            original_write(descriptor, data[: max(1, len(data) // 2)])
+            raise OSError("simulated partial pending write crash")
+        return original_write(descriptor, data)
+
+    monkeypatch.setattr(os, "write", crash_during_pending)
+    with pytest.raises(CommoditySimNowStateError):
+        service.auto_candidate_shakedown_advance()
+    monkeypatch.setattr(os, "write", original_write)
+
+    assert service.current_plan is not None
+    assert not service._c_fast_terminal_archive_path(
+        preview["session_id"]
+    ).exists()
+    recovered = CommoditySimNowService(
+        settings=service.settings,
+        rpc=service.rpc,
+        trade=service.trade,
+        risk=service.risk,
+        audit=service.audit,
+        tick_store=service.tick_store,
+        clock=service.clock,
+    )
+
+    assert recovered.current_plan is not None
+    assert recovered._state_load_error == (
+        "c_fast_terminal_archive_recovery_blocked"
+    )
+    assert not recovered._c_fast_terminal_archive_path(
+        preview["session_id"]
+    ).exists()
+
+
+def test_c_fast_terminal_restart_recovers_linked_pending_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, rpc, snapshot, _ = prepare_c_fast_shakedown(tmp_path)
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    service.start_c_fast_shakedown(
+        preview["plan_hash"],
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+    assert service.current_plan is not None
+    ag = next(row for row in snapshot.targets if row.product == "ag")
+    rpc.positions = [
+        position("ag", ag.target_quantity, contract_month="2612")
+    ]
+    rpc.trades = fills_for_requests(list(service.trade.requests))
+    original_unlink = os.unlink
+    failed = False
+
+    def crash_after_link(path, *args, **kwargs):
+        nonlocal failed
+        if str(path).endswith(".tmp") and not failed:
+            failed = True
+            raise OSError("simulated crash after atomic link")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "unlink", crash_after_link)
+    with pytest.raises(CommoditySimNowStateError):
+        service.auto_candidate_shakedown_advance()
+    monkeypatch.setattr(os, "unlink", original_unlink)
+
+    archive_path = service._c_fast_terminal_archive_path(
+        preview["session_id"]
+    )
+    assert archive_path.exists()
+    recovered = CommoditySimNowService(
+        settings=service.settings,
+        rpc=service.rpc,
+        trade=service.trade,
+        risk=service.risk,
+        audit=service.audit,
+        tick_store=service.tick_store,
+        clock=service.clock,
+    )
+
+    assert recovered.current_plan is None
+    assert recovered._state_load_error is None
+    assert archive_path.exists()
+    assert not list(
+        archive_path.parent.glob(
+            f".{preview['session_id']}.*.tmp"
+        )
+    )
+
+
+@pytest.mark.parametrize("archive_state", ["missing", "corrupt"])
+def test_c_fast_restart_never_clears_active_plan_from_pointer_only(
+    tmp_path: Path,
+    archive_state: str,
+) -> None:
+    service, rpc, snapshot, _ = prepare_c_fast_shakedown(tmp_path)
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    service.start_c_fast_shakedown(
+        preview["plan_hash"],
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+    active_raw = service._active_state_path().read_bytes()
+    assert service.current_plan is not None
+    ag = next(row for row in snapshot.targets if row.product == "ag")
+    rpc.positions = [
+        position("ag", ag.target_quantity, contract_month="2612")
+    ]
+    rpc.trades = fills_for_requests(list(service.trade.requests))
+    service.auto_candidate_shakedown_advance()
+    archive_path = service._c_fast_terminal_archive_path(
+        preview["session_id"]
+    )
+    if archive_state == "missing":
+        archive_path.unlink()
+    else:
+        archive_path.write_bytes(b"{\n")
+        archive_path.chmod(0o600)
+    service._active_state_path().write_bytes(active_raw)
+    service._active_state_path().chmod(0o600)
+
+    recovered = CommoditySimNowService(
+        settings=service.settings,
+        rpc=service.rpc,
+        trade=service.trade,
+        risk=service.risk,
+        audit=service.audit,
+        tick_store=service.tick_store,
+        clock=service.clock,
+    )
+
+    assert recovered.current_plan is not None
+    assert recovered.current_plan["plan_hash"] == preview["plan_hash"]
+    assert recovered._active_state_path().exists()
+    assert recovered._state_load_error == (
+        "c_fast_terminal_archive_recovery_blocked"
+    )
+
+
 def test_c_fast_pnl_is_unavailable_when_execution_snapshot_fails(
     tmp_path: Path,
 ) -> None:
@@ -5541,6 +5711,40 @@ def test_c_fast_terminal_guard_rejects_rpc_generation_aba(
     guard = service.current_plan["halt"]["terminal_guard"]
     assert guard["rpc_generation_valid"] is False
     assert "RPC_GENERATION_MISMATCH" in guard["blockers"]
+
+
+def test_c_fast_terminal_rejects_reconnect_after_dispatch(
+    tmp_path: Path,
+) -> None:
+    service, rpc, snapshot, _ = prepare_c_fast_shakedown(tmp_path)
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    service.start_c_fast_shakedown(
+        preview["plan_hash"],
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+    assert service.current_plan is not None
+    ag = next(row for row in snapshot.targets if row.product == "ag")
+    rpc.positions = [
+        position("ag", ag.target_quantity, contract_month="2612")
+    ]
+    rpc.orders = []
+    rpc.trades = fills_for_submitted(service.current_plan)
+    rpc.last_connected_at = "fake-generation-B"
+
+    with pytest.raises(CommoditySimNowSafetyError):
+        service.auto_candidate_shakedown_advance()
+
+    assert service.current_plan is not None
+    guard = service.current_plan["halt"]["terminal_guard"]
+    assert guard["rpc_generation_valid"] is False
+    assert "RPC_GENERATION_MISMATCH" in guard["blockers"]
+    assert not service._c_fast_terminal_archive_path(
+        preview["session_id"]
+    ).exists()
 
 
 @pytest.mark.parametrize(
