@@ -8,7 +8,13 @@ from threading import RLock
 from typing import Any, Callable
 
 from app.core.config import Settings, get_settings
-from app.core.errors import AppError, InvalidOrderRequestError, OrderNotCancelableError, OrderNotFoundError
+from app.core.errors import (
+    AppError,
+    InvalidOrderRequestError,
+    OrderNotCancelableError,
+    OrderNotFoundError,
+    PublicOrderExecutionDisabledError,
+)
 from app.schemas.common import STATUS_VALUE_MAP, to_plain_dict
 from app.schemas.manual_execution_permit import (
     manual_order_request_fingerprint,
@@ -47,6 +53,7 @@ CANCELABLE_STATUSES = {"submitting", "not_traded", "part_traded"}
 
 _C_FAST_CAPABILITY_CONSTRUCTION_KEY = object()
 _MANUAL_EXECUTION_CAPABILITY_CONSTRUCTION_KEY = object()
+_BASELINE_EXECUTION_CAPABILITY_CONSTRUCTION_KEY = object()
 
 
 def c_fast_order_request_fingerprint(
@@ -95,6 +102,17 @@ class _ManualExecutionCapability:
         self.owner = owner
 
 
+class _BaselineExecutionCapability:
+    """Opaque process-local authority for non-C_FAST CommoditySimNow."""
+
+    __slots__ = ("owner",)
+
+    def __init__(self, owner: object, *, construction_key: object) -> None:
+        if construction_key is not _BASELINE_EXECUTION_CAPABILITY_CONSTRUCTION_KEY:
+            raise TypeError("baseline execution capability cannot be constructed")
+        self.owner = owner
+
+
 class TradeService:
     def __init__(
         self,
@@ -104,6 +122,7 @@ class TradeService:
         rpc: VnpyRpcService | None = None,
         _c_fast_capability_issuers: tuple[object, ...] = (),
         _manual_execution_capability_issuers: tuple[object, ...] = (),
+        _baseline_execution_capability_issuers: tuple[object, ...] = (),
     ) -> None:
         self.settings = settings or get_settings()
         self.audit = audit or audit_service
@@ -122,6 +141,13 @@ class TradeService:
         self._manual_execution_capability_lock = RLock()
         self._manual_execution_capabilities: set[
             _ManualExecutionCapability
+        ] = set()
+        self._baseline_execution_capability_issuers = tuple(
+            _baseline_execution_capability_issuers
+        )
+        self._baseline_execution_capability_lock = RLock()
+        self._baseline_execution_capabilities: set[
+            _BaselineExecutionCapability
         ] = set()
 
     def _bind_c_fast_order_volume_capability(
@@ -284,6 +310,78 @@ class TradeService:
         ):
             raise RuntimeError("manual guarded-send contract is invalid")
 
+    def _bind_baseline_execution_capability(
+        self,
+        owner: object,
+    ) -> _BaselineExecutionCapability:
+        """Bind an opaque capability to an exact CommoditySimNow owner."""
+
+        from app.services.commodity_simnow import (
+            CommoditySimNowService,
+            commodity_simnow_service,
+        )
+
+        if (
+            type(owner) is not CommoditySimNowService
+            or getattr(owner, "trade", None) is not self
+            or (
+                owner is not commodity_simnow_service
+                and not any(
+                    owner is issuer
+                    for issuer in self._baseline_execution_capability_issuers
+                )
+            )
+        ):
+            raise TypeError("baseline execution capability owner is invalid")
+        capability = _BaselineExecutionCapability(
+            owner,
+            construction_key=_BASELINE_EXECUTION_CAPABILITY_CONSTRUCTION_KEY,
+        )
+        with self._baseline_execution_capability_lock:
+            self._baseline_execution_capabilities.add(capability)
+        return capability
+
+    def _validate_baseline_send_contract(
+        self,
+        *,
+        owner: object,
+        capability: object,
+        pre_rpc_guard: Callable[[OrderRequestDTO, str], Any],
+        send_linearization_lock: Any,
+    ) -> None:
+        from app.services.commodity_simnow import (
+            CommoditySimNowService,
+            commodity_simnow_service,
+        )
+
+        owner_allowed = bool(
+            type(owner) is CommoditySimNowService
+            and getattr(owner, "trade", None) is self
+            and (
+                owner is commodity_simnow_service
+                or any(
+                    owner is issuer
+                    for issuer in self._baseline_execution_capability_issuers
+                )
+            )
+        )
+        with self._baseline_execution_capability_lock:
+            capability_allowed = bool(
+                type(capability) is _BaselineExecutionCapability
+                and capability in self._baseline_execution_capabilities
+                and capability.owner is owner
+            )
+        if not owner_allowed or not capability_allowed:
+            raise RuntimeError("baseline execution capability is invalid")
+        if (
+            getattr(pre_rpc_guard, "__self__", None) is not owner
+            or getattr(pre_rpc_guard, "__func__", None)
+            is not CommoditySimNowService._baseline_pre_rpc_guard
+            or send_linearization_lock
+            is not getattr(owner, "_dispatch_abort_lock", None)
+        ):
+            raise RuntimeError("baseline guarded-send contract is invalid")
+
     def config_status(self) -> dict[str, Any]:
         return {
             "web_trade_enabled": self.settings.web_trade_enabled,
@@ -311,6 +409,8 @@ class TradeService:
             c_fast_order_volume_capability=None,
             manual_execution_owner=None,
             manual_execution_capability=None,
+            baseline_execution_owner=None,
+            baseline_execution_capability=None,
         )
 
     def _send_c_fast_order(
@@ -343,6 +443,8 @@ class TradeService:
             c_fast_order_volume_capability=c_fast_order_volume_capability,
             manual_execution_owner=None,
             manual_execution_capability=None,
+            baseline_execution_owner=None,
+            baseline_execution_capability=None,
         )
 
     def _send_manual_permitted_order(
@@ -373,6 +475,41 @@ class TradeService:
             c_fast_order_volume_capability=None,
             manual_execution_owner=manual_execution_owner,
             manual_execution_capability=manual_execution_capability,
+            baseline_execution_owner=None,
+            baseline_execution_capability=None,
+        )
+
+    def _send_baseline_permitted_order(
+        self,
+        payload: OrderRequestDTO,
+        *,
+        baseline_execution_owner: object,
+        baseline_execution_capability: object,
+        source_ip: str | None = None,
+        operator: str = "anonymous",
+        pre_rpc_guard: Callable[[OrderRequestDTO, str], Any],
+        send_linearization_lock: Any,
+    ) -> dict[str, Any]:
+        """Send one non-C_FAST SimNow child through its permit-only lane."""
+
+        self._validate_baseline_send_contract(
+            owner=baseline_execution_owner,
+            capability=baseline_execution_capability,
+            pre_rpc_guard=pre_rpc_guard,
+            send_linearization_lock=send_linearization_lock,
+        )
+        return self._send_order(
+            payload,
+            source_ip=source_ip,
+            operator=operator,
+            pre_rpc_guard=pre_rpc_guard,
+            send_linearization_lock=send_linearization_lock,
+            c_fast_order_owner=None,
+            c_fast_order_volume_capability=None,
+            manual_execution_owner=None,
+            manual_execution_capability=None,
+            baseline_execution_owner=baseline_execution_owner,
+            baseline_execution_capability=baseline_execution_capability,
         )
 
     def _send_order(
@@ -387,16 +524,37 @@ class TradeService:
         c_fast_order_volume_capability: object | None,
         manual_execution_owner: object | None = None,
         manual_execution_capability: object | None = None,
+        baseline_execution_owner: object | None = None,
+        baseline_execution_capability: object | None = None,
     ) -> dict[str, Any]:
         request_data = payload.model_dump()
         self.audit.record(action="order_request", request=request_data, operator=operator, source_ip=source_ip)
         try:
-            if (
-                c_fast_order_volume_capability is not None
-                and manual_execution_capability is not None
-            ):
+            capability_count = sum(
+                capability is not None
+                for capability in (
+                    c_fast_order_volume_capability,
+                    manual_execution_capability,
+                    baseline_execution_capability,
+                )
+            )
+            if capability_count > 1:
                 raise RuntimeError("order capabilities are mutually exclusive")
-            if manual_execution_capability is not None:
+            if capability_count == 0:
+                raise PublicOrderExecutionDisabledError()
+            if baseline_execution_capability is not None:
+                if baseline_execution_owner is None or pre_rpc_guard is None:
+                    raise RuntimeError(
+                        "baseline execution capability is invalid"
+                    )
+                self._validate_baseline_send_contract(
+                    owner=baseline_execution_owner,
+                    capability=baseline_execution_capability,
+                    pre_rpc_guard=pre_rpc_guard,
+                    send_linearization_lock=send_linearization_lock,
+                )
+                self.risk.check_order(payload)
+            elif manual_execution_capability is not None:
                 if (
                     manual_execution_owner is None
                     or pre_rpc_guard is None
@@ -450,7 +608,23 @@ class TradeService:
                         "guarded non-idempotent RPC unavailable"
                     )
                 final_guard: Callable[[], Any] = pre_rpc_guard
-                if manual_execution_capability is not None:
+                if baseline_execution_capability is not None:
+                    if baseline_execution_owner is None:
+                        raise RuntimeError(
+                            "baseline execution capability is invalid"
+                        )
+                    final_order = final_payload.model_copy(deep=True)
+
+                    def final_guard() -> Any:
+                        self._validate_baseline_send_contract(
+                            owner=baseline_execution_owner,
+                            capability=baseline_execution_capability,
+                            pre_rpc_guard=pre_rpc_guard,
+                            send_linearization_lock=send_linearization_lock,
+                        )
+                        return pre_rpc_guard(final_order, gateway_name)
+
+                elif manual_execution_capability is not None:
                     if manual_execution_owner is None:
                         raise RuntimeError(
                             "manual execution capability is invalid"

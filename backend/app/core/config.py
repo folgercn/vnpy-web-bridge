@@ -95,6 +95,18 @@ class Settings(BaseSettings):
     commodity_simnow_account_hashes: str = ""
     commodity_simnow_trusted_public_keys_json: str = "{}"
     commodity_simnow_state_path: str = "logs/commodity-simnow/state.json"
+    commodity_baseline_execution_permit_enabled: bool = False
+    commodity_baseline_execution_permit_path: str = ""
+    commodity_baseline_execution_permit_trusted_keyring_path: str = ""
+    commodity_baseline_execution_permit_expected_keyring_raw_sha256: str = ""
+    commodity_baseline_execution_permit_consume_root: str = (
+        "logs/commodity-simnow/baseline-execution-permit-consumed"
+    )
+    commodity_baseline_execution_permit_max_ttl_seconds: int = Field(
+        default=600,
+        ge=1,
+        le=600,
+    )
     commodity_simnow_min_source_month: str = "2026-08"
     commodity_simnow_max_child_order_lots: int = Field(
         default=10, ge=1, le=100
@@ -233,6 +245,53 @@ class Settings(BaseSettings):
             if not self.manual_execution_permit_consume_root.strip():
                 raise ValueError(
                     "MANUAL_EXECUTION_PERMIT_CONSUME_ROOT must be set"
+                )
+        if self.commodity_baseline_execution_permit_enabled:
+            required_paths = (
+                self.commodity_baseline_execution_permit_path,
+                self.commodity_baseline_execution_permit_trusted_keyring_path,
+                self.commodity_baseline_execution_permit_consume_root,
+            )
+            authority_paths = [
+                Path(value).expanduser().resolve() for value in required_paths
+            ]
+            protected_paths = {
+                Path(value).expanduser().resolve()
+                for value in (
+                    self.commodity_simnow_state_path,
+                    self.commodity_simnow_template_batch_path,
+                    self.commodity_position_manager_shadow_path,
+                    self.commodity_position_manager_shadow_state_path,
+                    self.commodity_position_manager_simnow_state_path,
+                    self.commodity_c_fast_shadow_snapshot_path,
+                    self.commodity_c_fast_shadow_state_path,
+                    self.commodity_c_fast_shadow_evidence_path,
+                )
+                if value.strip()
+            }
+            paths_overlap = any(
+                left == right
+                or left.is_relative_to(right)
+                or right.is_relative_to(left)
+                for index, left in enumerate(authority_paths)
+                for right in authority_paths[index + 1 :]
+            ) or any(
+                authority == protected
+                or authority.is_relative_to(protected)
+                or protected.is_relative_to(authority)
+                for authority in authority_paths
+                for protected in protected_paths
+            )
+            if (
+                any(not value.strip() for value in required_paths)
+                or paths_overlap
+                or not re.fullmatch(
+                    r"[0-9a-f]{64}",
+                    self.commodity_baseline_execution_permit_expected_keyring_raw_sha256,
+                )
+            ):
+                raise ValueError(
+                    "Commodity baseline execution permit paths and keyring pin must be complete and distinct"
                 )
         if self.commodity_c_fast_shadow_enabled:
             if not self.commodity_c_fast_shadow_snapshot_path.strip():

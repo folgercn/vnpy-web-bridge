@@ -131,6 +131,7 @@ class FakeTrade:
         self.requests = []
         self.send_kwargs: list[dict[str, Any]] = []
         self.c_fast_send_count = 0
+        self.baseline_send_count = 0
         self.cancel_requests: list[str] = []
         self.fail_after = fail_after
         self.complete_cancel = complete_cancel
@@ -145,6 +146,19 @@ class FakeTrade:
 
     def _send_c_fast_order(self, request, **kwargs) -> dict[str, Any]:
         self.c_fast_send_count += 1
+        return self.send_order(request, **kwargs)
+
+    def _send_baseline_permitted_order(
+        self,
+        request,
+        *,
+        pre_rpc_guard,
+        send_linearization_lock,
+        **kwargs,
+    ) -> dict[str, Any]:
+        self.baseline_send_count += 1
+        with send_linearization_lock:
+            pre_rpc_guard(request, request.gateway_name)
         return self.send_order(request, **kwargs)
 
     def cancel_order(self, vt_orderid: str, **kwargs) -> dict[str, Any]:
@@ -191,6 +205,19 @@ class RpcTimeoutTrade(FakeTrade):
 class FakeAudit:
     def record(self, **kwargs) -> None:
         return None
+
+
+class RecordingBaselinePermit:
+    def __init__(self) -> None:
+        self.prepare_calls: list[dict[str, Any]] = []
+        self.final_calls: list[dict[str, Any]] = []
+
+    def prepare(self, **kwargs):
+        self.prepare_calls.append(kwargs)
+        return object()
+
+    def final_guard(self, _prepared, **kwargs) -> None:
+        self.final_calls.append(kwargs)
 
 
 class FakeTickStore:
@@ -630,6 +657,8 @@ def test_acceptance_passive_limit_is_explicit_and_uses_touch_price(tmp_path: Pat
         execution_day="2026-07-17",
     )
     plan = service.preview(batch, operator="admin", role="admin", source_ip=None)
+    baseline_permit = RecordingBaselinePermit()
+    service.baseline_execution_permit = baseline_permit  # type: ignore[assignment]
 
     service.execute(
         CommodityPlanExecuteRequestDTO(
@@ -649,6 +678,9 @@ def test_acceptance_passive_limit_is_explicit_and_uses_touch_price(tmp_path: Pat
 
     requests = service.trade.requests
     assert service.trade.c_fast_send_count == 0
+    assert service.trade.baseline_send_count == len(requests)
+    assert baseline_permit.prepare_calls[0]["strategy_id"] == "STATIC_CORE_EQUAL"
+    assert len(baseline_permit.final_calls) == len(requests)
     assert all(
         "c_fast_order_volume_capability" not in row
         for row in service.trade.send_kwargs
@@ -1142,6 +1174,8 @@ def test_position_manager_shakedown_start_auto_submits_previewed_phase(tmp_path:
     preview = service.preview_position_manager_shakedown(
         ["ag"], operator="admin", role="admin", source_ip=None
     )
+    baseline_permit = RecordingBaselinePermit()
+    service.baseline_execution_permit = baseline_permit  # type: ignore[assignment]
 
     result = service.start_position_manager_shakedown(
         preview["preview"]["plan_hash"], operator="admin", role="admin", source_ip=None
@@ -1152,6 +1186,11 @@ def test_position_manager_shakedown_start_auto_submits_previewed_phase(tmp_path:
     assert service.current_plan["position_manager_shakedown_session_id"] == preview["preview"]["session_id"]
     assert service.current_plan["status"] == "OPEN_SUBMITTED"
     assert len(service.trade.requests) == 1
+    assert service.trade.baseline_send_count == 1
+    assert baseline_permit.prepare_calls[0]["strategy_id"] == (
+        "MONTHLY_RELATIVE_VOL_THERMOSTAT_V1"
+    )
+    assert len(baseline_permit.final_calls) == 1
     assert service.trade.requests[0].reference.startswith("commodity_pm:sh:")
     assert service.enabled is True
     assert service.manual_approval is True
@@ -3824,6 +3863,28 @@ def test_first_order_unknown_failure_uses_submission_outcome_state(tmp_path: Pat
     assert service.plan()["status"] == "SUBMISSION_OUTCOME_UNKNOWN"
     assert service.plan()["submitted"]["open"] == []
     assert service.plan()["send_intents"]["open"][0]["intent_status"] == "OUTCOME_UNKNOWN"
+    assert len(service.plan()["send_intents"]["open"]) == 1
+    assert service.trade.baseline_send_count == 1
+    recovered_trade = FakeTrade()
+    recovered_trade.rpc = rpc
+    recovered = CommoditySimNowService(
+        settings=service.settings,
+        rpc=rpc,  # type: ignore[arg-type]
+        trade=recovered_trade,  # type: ignore[arg-type]
+        risk=FakeRisk(),  # type: ignore[arg-type]
+        audit=FakeAudit(),  # type: ignore[arg-type]
+        tick_store=service.tick_store,
+        clock=lambda: NOW,
+    )
+
+    async def verify_restart_zero_send() -> None:
+        recovered.start()
+        assert recovered.plan()["status"] == "SUBMISSION_OUTCOME_UNKNOWN"
+        assert recovered_trade.baseline_send_count == 0
+        assert recovered_trade.requests == []
+        await recovered.stop()
+
+    asyncio.run(verify_restart_zero_send())
     reference = service.plan()["send_intents"]["open"][0]["reference"]
     rpc.orders = [
         {
