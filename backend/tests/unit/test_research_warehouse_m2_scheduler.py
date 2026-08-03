@@ -431,6 +431,70 @@ def test_live_ntp_clock_times_only_the_successful_address(
     assert sample.ntp_offset_milliseconds == 0
 
 
+def test_live_ntp_clock_retries_transient_transport_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolutions = []
+
+    def resolve(*_args, **_kwargs):
+        resolutions.append(True)
+        return [(2, 2, 17, "", ("203.0.113.1", 123))]
+
+    monkeypatch.setattr(m2_ntp.socket, "getaddrinfo", resolve)
+    sockets = iter(
+        (
+            FailingNtpSocket(server_time=1_000.0),
+            FakeNtpSocket(server_time=1_001.05),
+        )
+    )
+    monkeypatch.setattr(
+        m2_ntp.socket,
+        "socket",
+        lambda *_args: next(sockets),
+    )
+    wall_values = iter((1_000.0, 1_001.0, 1_001.1))
+    monotonic_values = iter((0.0, 1.0, 2.0, 2.1))
+    delays = []
+
+    sample = m2_ntp.query_trusted_clock(
+        wall_clock=lambda: next(wall_values),
+        monotonic_clock=lambda: next(monotonic_values),
+        sleep=delays.append,
+    )
+
+    assert sample.ntp_offset_milliseconds == 0
+    assert len(resolutions) == 2 * len(m2_ntp.NTP_SERVERS)
+    assert delays == [0.25]
+
+
+def test_live_ntp_clock_does_not_retry_invalid_bound_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        m2_ntp.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [(2, 2, 17, "", ("203.0.113.1", 123))],
+    )
+    socket_calls = []
+
+    def invalid_socket(*_args):
+        socket_calls.append(True)
+        return FakeNtpSocket(server_time=1_002.0)
+
+    monkeypatch.setattr(m2_ntp.socket, "socket", invalid_socket)
+    wall_values = iter((1_000.0, 1_000.1))
+    monotonic_values = iter((5.0, 5.1))
+
+    with pytest.raises(RegistryError, match="NTP offset"):
+        m2_ntp.query_trusted_clock(
+            wall_clock=lambda: next(wall_values),
+            monotonic_clock=lambda: next(monotonic_values),
+            sleep=lambda _seconds: pytest.fail("invalid response was retried"),
+        )
+
+    assert len(socket_calls) == 1
+
+
 def test_runtime_input_requires_exact_external_pins(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
