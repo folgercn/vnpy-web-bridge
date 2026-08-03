@@ -155,32 +155,61 @@ def derive_monitor_facts(
         for day, item in sorted(calendar.days.items())
         if item.is_official and monitor_from_day <= day <= expected
     ]
-    valid: dict[date, dict[str, Any]] = {}
+    candidates: dict[date, list[dict[str, Any]]] = {}
     verified_completion: dict[date, datetime] = {}
     hash_mismatches = 0
     unreviewed = 0
-    for receipt_path in sorted(runtime.run_receipts.glob("*.json")):
+    receipt_paths = sorted(runtime.run_receipts.glob("*.json")) + sorted(
+        runtime.history_run_receipts.glob("*.json")
+    )
+    for receipt_path in receipt_paths:
         try:
             receipt = load_run_receipt(receipt_path)
             trade_day = date.fromisoformat(receipt["trade_day"])
             if trade_day < monitor_from_day or trade_day > expected:
                 continue
-            completed_at = verify_daily_run_receipt(
-                receipt,
-                paths=paths,
-                registry=registry,
-                calendar=calendar,
-                calendar_availability_raw_sha256=(calendar_availability_raw_sha256),
-            )
-            valid[trade_day] = receipt
-            verified_completion[trade_day] = completed_at
-            unreviewed += _unreviewed_revisions(
-                receipt,
-                paths=paths,
-                registry=registry,
-            )
+            candidates.setdefault(trade_day, []).append(receipt)
         except (OSError, RegistryError, ValueError):
             hash_mismatches += 1
+    valid: dict[date, dict[str, Any]] = {}
+    for trade_day, receipts in candidates.items():
+        verified: list[tuple[datetime, dict[str, Any]]] = []
+        authority_mismatches = 0
+        other_mismatches = 0
+        for receipt in receipts:
+            try:
+                completed_at = verify_daily_run_receipt(
+                    receipt,
+                    paths=paths,
+                    registry=registry,
+                    calendar=calendar,
+                    calendar_availability_raw_sha256=(
+                        calendar_availability_raw_sha256
+                    ),
+                )
+                verified.append((completed_at, receipt))
+            except RegistryError as exc:
+                if str(exc) == "M2 run receipt authority binding mismatch":
+                    authority_mismatches += 1
+                else:
+                    other_mismatches += 1
+            except (OSError, ValueError):
+                other_mismatches += 1
+        if not verified:
+            hash_mismatches += authority_mismatches + other_mismatches
+            continue
+        # A current-authority history receipt supersedes a retained daily
+        # receipt from before calendar rotation.  Preserve every other
+        # verification failure as a monitor alarm.
+        hash_mismatches += other_mismatches
+        completed_at, receipt = max(verified, key=lambda item: item[0])
+        valid[trade_day] = receipt
+        verified_completion[trade_day] = completed_at
+        unreviewed += _unreviewed_revisions(
+            receipt,
+            paths=paths,
+            registry=registry,
+        )
     completed = [day for day in official_days if day in valid]
     missing = [day.isoformat() for day in official_days if day not in valid]
     latest = max(completed) if completed else None
