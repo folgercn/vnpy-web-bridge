@@ -1856,6 +1856,64 @@ def test_c_fast_each_child_refreshes_quote_and_risk_snapshot(
     ]
 
 
+@pytest.mark.parametrize("direction", ["long", "short"])
+def test_c_fast_final_guard_allows_fresh_quote_updates(
+    tmp_path: Path,
+    direction: str,
+) -> None:
+    service, _, _, _ = prepare_c_fast_shakedown(tmp_path)
+    vt_symbol = "ag2612.SHFE"
+    repriced = service._reprice_order(
+        {
+            "product": "ag",
+            "vt_symbol": vt_symbol,
+            "direction": direction,
+        }
+    )
+    intent = {
+        **repriced,
+        "price_mode": "protected",
+    }
+    quote = service.tick_store.ticks[vt_symbol]
+    tick = float(PRODUCT_SPECS["ag"]["price_tick"])
+    shift = 2 * tick if direction == "long" else -2 * tick
+    quote["bid_price_1"] += shift
+    quote["ask_price_1"] += shift
+    quote["bid_volume_1"] += 1
+    quote["ask_volume_1"] += 2
+
+    service._verify_bound_dispatch_quote_current(intent)
+
+    evidence = intent["pre_rpc_quote_revalidation"]
+    assert evidence["quote_changed"] is True
+    assert evidence["more_aggressive_than_current"] is False
+
+
+def test_c_fast_final_guard_rejects_price_not_bound_to_original_quote(
+    tmp_path: Path,
+) -> None:
+    service, _, _, _ = prepare_c_fast_shakedown(tmp_path)
+    vt_symbol = "ag2612.SHFE"
+    repriced = service._reprice_order(
+        {
+            "product": "ag",
+            "vt_symbol": vt_symbol,
+            "direction": "short",
+        }
+    )
+    intent = {
+        **repriced,
+        "price": repriced["price"] - 1,
+        "price_mode": "protected",
+    }
+
+    with pytest.raises(
+        CommoditySimNowSafetyError,
+        match="价格与绑定盘口不一致",
+    ):
+        service._verify_bound_dispatch_quote_current(intent)
+
+
 def test_c_fast_child_quote_failure_does_not_relabel_prior_ack(
     tmp_path: Path,
 ) -> None:
