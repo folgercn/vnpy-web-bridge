@@ -4787,6 +4787,9 @@ def test_c_fast_terminal_archive_contains_fresh_replay_actual_inputs(
     rpc.positions[0]["password"] = "sensitive-password"
     rpc.trades = fills_for_submitted(service.current_plan)
     for trade in rpc.trades:
+        trade["vt_tradeid"] = str(trade["vt_tradeid"]).split(".", 1)[-1]
+        trade["vt_orderid"] = str(trade["vt_orderid"]).split(".", 1)[-1]
+        trade["gateway_name"] = "CTP"
         trade["trade_at_utc"] = NOW.isoformat()
         trade["token"] = "sensitive-token"
     rpc.orders = [
@@ -4798,6 +4801,8 @@ def test_c_fast_terminal_archive_contains_fresh_replay_actual_inputs(
         for submitted in service.current_plan["submitted"][phase]
     ]
     for order in rpc.orders:
+        order["vt_orderid"] = str(order["vt_orderid"]).split(".", 1)[-1]
+        order["gateway_name"] = "CTP"
         order["account_original"] = "sensitive-account"
 
     service.auto_candidate_shakedown_advance()
@@ -4819,6 +4824,9 @@ def test_c_fast_terminal_archive_contains_fresh_replay_actual_inputs(
     assert raw["schema_version"] == "commodity_c_fast_terminal_raw_facts_v3"
     assert raw["scope"] == "C_FAST_SESSION_PLUS_FINAL_POSITIONS"
     assert raw["orders"]
+    assert all(row["vt_orderid"].startswith("CTP.") for row in raw["orders"])
+    assert all(row["vt_orderid"].startswith("CTP.") for row in raw["trades"])
+    assert all(row["vt_tradeid"].startswith("CTP.") for row in raw["trades"])
     assert all(
         set(row)
         == {

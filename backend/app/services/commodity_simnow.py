@@ -5157,8 +5157,8 @@ class CommoditySimNowService:
         self, row: dict[str, Any]
     ) -> dict[str, Any]:
         return {
-            "vt_orderid": str(
-                row.get("vt_orderid") or row.get("orderid") or ""
+            "vt_orderid": self._c_fast_archive_gateway_identity(
+                row, identity_kind="order"
             ),
             "gateway_name": self._row_gateway(row),
             "reference": str(row.get("reference") or ""),
@@ -5202,11 +5202,11 @@ class CommoditySimNowService:
                 "C_FAST 终态成交时间不是有效 UTC 时间"
             )
         return {
-            "vt_tradeid": str(
-                row.get("vt_tradeid") or row.get("tradeid") or ""
+            "vt_tradeid": self._c_fast_archive_gateway_identity(
+                row, identity_kind="trade"
             ),
-            "vt_orderid": str(
-                row.get("vt_orderid") or row.get("orderid") or ""
+            "vt_orderid": self._c_fast_archive_gateway_identity(
+                row, identity_kind="order"
             ),
             "gateway_name": self._row_gateway(row),
             "reference": str(row.get("reference") or ""),
@@ -5219,6 +5219,25 @@ class CommoditySimNowService:
             "price": self._c_fast_archive_positive_price(row.get("price")),
             "trade_at_utc": parsed_trade_time.isoformat(),
         }
+
+    def _c_fast_archive_gateway_identity(
+        self,
+        row: dict[str, Any],
+        *,
+        identity_kind: str,
+    ) -> str:
+        if identity_kind == "trade":
+            identity = str(
+                row.get("vt_tradeid") or row.get("tradeid") or ""
+            )
+        else:
+            identity = str(
+                row.get("vt_orderid") or row.get("orderid") or ""
+            )
+        gateway = self._row_gateway(row)
+        if identity and gateway and not identity.startswith(f"{gateway}."):
+            return f"{gateway}.{identity}"
+        return identity
 
     def _c_fast_archive_position_projection(
         self, row: dict[str, Any]
