@@ -615,6 +615,64 @@ def test_monitor_facts_derive_missing_revision_hash_disk_and_backup(
     assert degraded["last_backup_at"] is None
 
 
+def test_monitor_facts_accept_current_history_receipt_after_calendar_rotation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths, runtime = scheduler_paths(tmp_path)
+    registry = load_registry(REGISTRY_PATH)
+    daily_path = runtime.run_receipts / f"{DAY.isoformat()}.json"
+    history_path = runtime.history_run_receipts / f"{DAY.isoformat()}.json"
+    for receipt_path in (daily_path, history_path):
+        receipt_path.write_text("{}\n")
+        receipt_path.chmod(0o600)
+
+    monkeypatch.setattr(
+        "research_warehouse.m2_monitor_facts.load_run_receipt",
+        lambda path: {
+            "trade_day": DAY.isoformat(),
+            "candidate": "history" if path == history_path else "daily",
+        },
+    )
+
+    def verify(receipt: dict[str, object], **_kwargs: object) -> datetime:
+        if receipt["candidate"] == "daily":
+            raise RegistryError("M2 run receipt authority binding mismatch")
+        return NOW
+
+    monkeypatch.setattr(
+        "research_warehouse.m2_monitor_facts.verify_daily_run_receipt",
+        verify,
+    )
+    monkeypatch.setattr(
+        "research_warehouse.m2_monitor_facts._unreviewed_revisions",
+        lambda *_args, **_kwargs: 0,
+    )
+    monkeypatch.setattr(
+        "research_warehouse.m2_monitor_facts.verify_backup_anchor",
+        lambda **_kwargs: SimpleNamespace(created_at=NOW - timedelta(hours=1)),
+    )
+    backup_root = BackupPaths.initialize(tmp_path / "backup").root
+
+    facts = derive_monitor_facts(
+        paths=paths,
+        runtime=runtime,
+        registry=registry,
+        calendar=calendar(),
+        calendar_availability_raw_sha256="b" * 64,
+        monitor_from_day=DAY,
+        backup_root=backup_root,
+        backup_public_key_path=tmp_path / "backup.pub",
+        expected_backup_public_key_sha256="c" * 64,
+        expected_backup_head_anchor_raw_sha256="d" * 64,
+        now=NOW,
+    )
+
+    assert facts["latest_official_day"] == DAY.isoformat()
+    assert facts["missing_official_days"] == []
+    assert facts["hash_mismatch_count"] == 0
+
+
 def test_run_receipt_rechecks_real_custody_hash_and_revision(
     tmp_path: Path,
 ) -> None:
