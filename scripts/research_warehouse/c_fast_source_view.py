@@ -7,6 +7,7 @@ install, dispatch, access an account, or trade.
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -19,16 +20,10 @@ from .calendar_models import OfficialCalendar
 from .canonical import canonical_json, canonical_json_line, parse_json_strict, sha256
 from .file_integrity import read_regular_strict
 from .m2_isolation_contracts import false_authority
-from .m2_monitor_facts import verify_daily_run_receipt
-from .m2_receipts import validate_run_receipt
-from .m2_runtime_loader import RuntimeContext
 from .pit_source_view import (
-    MAX_AGGREGATE_RAW_BYTES,
-    MAX_SOURCE_RAW_BYTES,
     PitSourceViewError,
     _official_month_boundary,
     _pit_main,
-    _safe_relative_path,
     contract_rows_from_daily_raw,
 )
 from .pit_source_view_custody import (
@@ -48,8 +43,8 @@ from .static_core_baseline import (
 )
 from .timeutil import format_utc, parse_utc, require_utc
 
-EVIDENCE_SCHEMA = "vnpy_research_c_fast_pit_source_evidence_v1"
-DERIVATION_ID = "ROOT_PINNED_WAREHOUSE_C_FAST_PIT_SOURCE_V1"
+EVIDENCE_SCHEMA = "vnpy_research_c_fast_pit_source_evidence_v2"
+DERIVATION_ID = "ROOT_PINNED_WAREHOUSE_C_FAST_PIT_SOURCE_V2"
 SOURCE_VIEW_FILENAME = "source-view.json"
 LINEAGE_FILENAME = "lineage.jsonl"
 EVIDENCE_FILENAME = "source-evidence.jsonl"
@@ -62,8 +57,9 @@ IDENTITY_KEYS = {
     "contract_registry_raw_sha256",
     "operator_pins",
     "source_month",
-    "execution_day_receipt_completed_at",
-    "execution_day_receipt_raw_sha256",
+    "execution_open_observed_at",
+    "execution_open_receipt_raw_sha256",
+    "execution_open_tick_export_raw_sha256",
     "derivation_id",
 }
 EVIDENCE_KEYS = {
@@ -85,11 +81,12 @@ EVIDENCE_KEYS = {
 
 
 @dataclass(frozen=True)
-class VerifiedExecutionDayRaw:
+class VerifiedExecutionOpenObservation:
     official_day: str
-    completed_at: datetime
+    observed_at: datetime
     receipt_raw_sha256: str
-    sources: dict[str, bytes]
+    tick_export_raw_sha256: str
+    rows: dict[str, dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -100,88 +97,111 @@ class BuiltCFastSourceView:
     evidence_raw: bytes
 
 
-def verified_execution_day_raw(
+def load_execution_open_observation(
     *,
-    context: RuntimeContext,
-    chain: list[dict[str, Any]],
+    receipt_path: Path,
+    capture_path: Path,
+    tick_export_path: Path,
     official_day: date,
-) -> VerifiedExecutionDayRaw:
-    """Read one committed normal-day receipt without rewriting its availability."""
+) -> VerifiedExecutionOpenObservation:
+    """Verify an immutable CTP exchange-feed open observation and exact tick export."""
 
-    raw_day = official_day.isoformat()
-    receipt_path = context.runtime.run_receipts / f"{raw_day}.json"
     receipt_raw = read_regular_strict(
         receipt_path,
-        "C_FAST execution-day run receipt",
+        "C_FAST execution-open observation receipt",
         limit=4 * 1024 * 1024,
     )
-    receipt = validate_run_receipt(
-        parse_json_strict(receipt_raw, "C_FAST execution-day run receipt")
+    receipt = parse_json_strict(
+        receipt_raw, "C_FAST execution-open observation receipt"
     )
+    expected_keys = {
+        "schema_version",
+        "purpose",
+        "execution_day",
+        "observed_at",
+        "source",
+        "capture_raw_sha256",
+        "capture_raw_bytes",
+        "tick_export_raw_sha256",
+        "tick_export_raw_bytes",
+        "rows",
+        "authority",
+    }
     if (
-        receipt_raw != canonical_json_line(receipt)
-        or receipt_path.name != f"{receipt['trade_day']}.json"
-        or receipt["trade_day"] != raw_day
+        not isinstance(receipt, dict)
+        or set(receipt) != expected_keys
+        or receipt_raw != canonical_json_line(receipt)
+        or receipt.get("schema_version")
+        != "commodity_c_fast_execution_open_observation_v1"
+        or receipt.get("purpose") != "c_fast_execution_open_observation"
+        or receipt.get("source") != "SIMNOW_CTP_EXCHANGE_MARKET_DATA"
+        or receipt.get("authority") != "RESEARCH_EVIDENCE_ONLY"
+        or receipt.get("execution_day") != official_day.isoformat()
     ):
-        raise PitSourceViewError("C_FAST execution-day receipt byte/path mismatch")
-    verify_daily_run_receipt(
-        receipt,
-        paths=context.paths,
-        registry=context.registry,
-        calendar=context.calendar,
-        calendar_availability_raw_sha256=context.availability.raw_sha256,
+        raise PitSourceViewError("C_FAST execution-open receipt contract mismatch")
+    capture_raw = read_regular_strict(
+        capture_path, "C_FAST execution-open raw capture", limit=8 * 1024 * 1024
     )
-    manifest = {item["trade_day"]: item for item in chain}.get(raw_day)
-    if manifest is None or manifest["commit_receipt"] is None:
-        raise PitSourceViewError("C_FAST execution-day manifest is uncommitted")
-    revisions = {item["revision_id"]: item for item in manifest["revisions"]}
-    sources: dict[str, bytes] = {}
-    aggregate = 0
-    for source in receipt["sources"]:
-        revision = revisions.get(source["revision_id"])
-        if revision is None or any(
-            revision[field] != source[field]
-            for field in ("raw_sha256", "raw_bytes", "raw_relative_path")
-        ):
-            raise PitSourceViewError(
-                "C_FAST execution-day manifest/receipt revision mismatch"
-            )
-        raw_path = _safe_relative_path(
-            context.paths.root,
-            source["raw_relative_path"],
-            "C_FAST execution-day raw",
-        )
-        raw = read_regular_strict(
-            raw_path,
-            "C_FAST execution-day exact raw",
-            limit=MAX_SOURCE_RAW_BYTES,
-        )
-        if len(raw) != source["raw_bytes"] or sha256(raw) != source["raw_sha256"]:
-            raise PitSourceViewError("C_FAST execution-day raw bytes drifted")
-        aggregate += len(raw)
-        if aggregate > MAX_AGGREGATE_RAW_BYTES:
-            raise PitSourceViewError(
-                "C_FAST execution-day aggregate raw resource limit exceeded"
-            )
-        exchange = source["exchange"]
-        if exchange in sources:
-            raise PitSourceViewError("C_FAST execution-day exchange is duplicated")
-        sources[exchange] = raw
-    if set(sources) != {"SHFE", "INE"}:
-        raise PitSourceViewError("C_FAST execution-day source set mismatch")
-    completed_at = parse_utc(
-        receipt["completed_at"],
-        "C_FAST execution-day receipt completed_at",
+    if receipt.get("capture_raw_bytes") != len(capture_raw) or receipt.get(
+        "capture_raw_sha256"
+    ) != sha256(capture_raw):
+        raise PitSourceViewError("C_FAST execution-open raw capture binding mismatch")
+    tick_raw = read_regular_strict(
+        tick_export_path, "C_FAST execution-open tick export", limit=8 * 1024 * 1024
     )
-    if completed_at.astimezone(producer.CHINA_TZ).date() != official_day:
+    if receipt.get("tick_export_raw_bytes") != len(tick_raw) or receipt.get(
+        "tick_export_raw_sha256"
+    ) != sha256(tick_raw):
+        raise PitSourceViewError("C_FAST execution-open tick export binding mismatch")
+    ticks = parse_json_strict(tick_raw, "C_FAST execution-open tick export")
+    if not isinstance(ticks, list) or receipt.get("rows") != ticks:
+        raise PitSourceViewError("C_FAST execution-open receipt/tick rows mismatch")
+    observed_at = parse_utc(receipt.get("observed_at"), "execution-open observed_at")
+    if observed_at.astimezone(producer.CHINA_TZ).date() != official_day:
         raise PitSourceViewError(
-            "C_FAST execution-day receipt was not completed on execution day"
+            "C_FAST execution-open observation is not execution-day"
         )
-    return VerifiedExecutionDayRaw(
-        official_day=raw_day,
-        completed_at=completed_at,
+    rows: dict[str, dict[str, Any]] = {}
+    required_row_keys = {
+        "exact_contract",
+        "exchange",
+        "open_price",
+        "tick_datetime",
+        "trading_day",
+        "gateway_name",
+    }
+    for row in ticks:
+        if not isinstance(row, dict) or set(row) != required_row_keys:
+            raise PitSourceViewError("C_FAST execution-open tick row contract mismatch")
+        contract = row.get("exact_contract")
+        exchange = row.get("exchange")
+        price = row.get("open_price")
+        if (
+            not isinstance(contract, str)
+            or producer.CONTRACT_PATTERN.fullmatch(contract) is None
+            or exchange not in {"SHFE", "INE"}
+            or not isinstance(price, (int, float))
+            or isinstance(price, bool)
+            or not math.isfinite(float(price))
+            or float(price) >= 1_000_000_000
+            or float(price) <= 0
+            or row.get("trading_day") != official_day.isoformat()
+            or row.get("gateway_name") != "CTP"
+            or contract in rows
+        ):
+            raise PitSourceViewError("C_FAST execution-open tick row is invalid")
+        tick_at = parse_utc(row.get("tick_datetime"), "execution-open tick_datetime")
+        if tick_at > observed_at:
+            raise PitSourceViewError("C_FAST execution-open tick postdates observation")
+        rows[contract] = row
+    if not rows:
+        raise PitSourceViewError("C_FAST execution-open observation is empty")
+    return VerifiedExecutionOpenObservation(
+        official_day=official_day.isoformat(),
+        observed_at=observed_at,
         receipt_raw_sha256=sha256(receipt_raw),
-        sources=sources,
+        tick_export_raw_sha256=sha256(tick_raw),
+        rows=rows,
     )
 
 
@@ -194,7 +214,7 @@ def build_c_fast_source_view(
     history_receipt_raw_sha256: str,
     operator_pins: dict[str, str],
     daily_source_raw: dict[str, dict[str, bytes]],
-    execution_day_source: VerifiedExecutionDayRaw,
+    execution_day_source: VerifiedExecutionOpenObservation,
     contract_registry_raw: bytes,
     expected_contract_registry_raw_sha256: str,
     source_month: str,
@@ -227,8 +247,7 @@ def build_c_fast_source_view(
         "commit_anchor_ledger_raw_sha256",
     }
     if set(operator_pins) != required_operator_pins or any(
-        not isinstance(value, str)
-        or producer.SHA256_PATTERN.fullmatch(value) is None
+        not isinstance(value, str) or producer.SHA256_PATTERN.fullmatch(value) is None
         for value in operator_pins.values()
     ):
         raise PitSourceViewError("C_FAST operator pin set is incomplete or invalid")
@@ -236,8 +255,10 @@ def build_c_fast_source_view(
     if contract_registry_sha != expected_contract_registry_raw_sha256:
         raise PitSourceViewError("C_FAST contract registry root pin mismatch")
     if (
-        producer.SHA256_PATTERN.fullmatch(
-            execution_day_source.receipt_raw_sha256
+        producer.SHA256_PATTERN.fullmatch(execution_day_source.receipt_raw_sha256)
+        is None
+        or producer.SHA256_PATTERN.fullmatch(
+            execution_day_source.tick_export_raw_sha256
         )
         is None
     ):
@@ -246,14 +267,11 @@ def build_c_fast_source_view(
         calendar,
         source_month=source_month,
     )
-    if (
-        execution_day_source.official_day != execution_day.isoformat()
-        or set(execution_day_source.sources) != {"SHFE", "INE"}
-    ):
+    if execution_day_source.official_day != execution_day.isoformat():
         raise PitSourceViewError("C_FAST execution-day source identity mismatch")
     source_completed_at = require_utc(
-        execution_day_source.completed_at,
-        "C_FAST execution-day receipt completed_at",
+        execution_day_source.observed_at,
+        "C_FAST execution-open observed_at",
     )
     generated_at = require_utc(observed_at_utc, "C_FAST source observed_at")
     history_completed_at = parse_utc(
@@ -266,13 +284,11 @@ def build_c_fast_source_view(
         or generated_at.astimezone(producer.CHINA_TZ).date() != execution_day
     ):
         raise PitSourceViewError(
-            "C_FAST source must be built after all receipt completion on execution day"
+            "C_FAST source must be built after history completion and open observation on execution day"
         )
 
     receipt_days = [
-        day
-        for day in history_official_days
-        if day <= research_day.isoformat()
+        day for day in history_official_days if day <= research_day.isoformat()
     ]
     receipt_last_day = date.fromisoformat(history_official_days[-1])
     supplemental_days = sorted(
@@ -290,10 +306,7 @@ def build_c_fast_source_view(
         )
     if set(history_days) - set(daily_source_raw):
         raise PitSourceViewError("C_FAST Warehouse history exact days are incomplete")
-    if any(
-        set(daily_source_raw[day]) != {"SHFE", "INE"}
-        for day in history_days
-    ):
+    if any(set(daily_source_raw[day]) != {"SHFE", "INE"} for day in history_days):
         raise PitSourceViewError("C_FAST Warehouse history exchange set mismatch")
     following = sorted(
         day
@@ -334,7 +347,12 @@ def build_c_fast_source_view(
             },
             history_receipt_sha256=history_receipt_raw_sha256,
         )
-        reference_sha = sha256(execution_day_source.sources[exchange])
+        exchange_rows = [
+            row
+            for row in execution_day_source.rows.values()
+            if row["exchange"] == exchange
+        ]
+        reference_sha = sha256(canonical_json(exchange_rows))
         reference_bindings[exchange] = _binding(
             binding_id=f"open-{exchange.lower()}-{reference_sha[:24]}",
             source_class="REFERENCE_OPEN",
@@ -348,12 +366,15 @@ def build_c_fast_source_view(
                 "operator_pins": operator_pins,
                 "exchange": exchange,
                 "execution_day": execution_day.isoformat(),
-                "execution_receipt_completed_at": format_utc(
+                "execution_open_observed_at": format_utc(
                     source_completed_at,
-                    "C_FAST execution-day receipt completed_at",
+                    "C_FAST execution-open observed_at",
                 ),
-                "execution_receipt_raw_sha256": (
+                "execution_open_receipt_raw_sha256": (
                     execution_day_source.receipt_raw_sha256
+                ),
+                "execution_open_tick_export_raw_sha256": (
+                    execution_day_source.tick_export_raw_sha256
                 ),
             },
             history_receipt_sha256=history_receipt_raw_sha256,
@@ -407,17 +428,6 @@ def build_c_fast_source_view(
             for product in producer.PRODUCTS:
                 by_product[product].extend(extracted[product])
         daily_by_day[day] = by_product
-    execution_rows = {product: [] for product in producer.PRODUCTS}
-    for exchange in ("SHFE", "INE"):
-        extracted = contract_rows_from_daily_raw(
-            raw=execution_day_source.sources[exchange],
-            exchange=exchange,
-            official_day=execution_day.isoformat(),
-            include_ohlc=True,
-        )
-        for product in producer.PRODUCTS:
-            execution_rows[product].extend(extracted[product])
-
     products: list[dict[str, Any]] = []
     for product in producer.PRODUCTS:
         frozen_spec = producer.PRODUCT_SPECS[product]
@@ -427,12 +437,14 @@ def build_c_fast_source_view(
             daily_by_day[history_days[-1]][product],
         )
         exact_contract = main["exact_contract"]
-        execution_contract = {
-            row["exact_contract"]: row for row in execution_rows[product]
-        }.get(exact_contract)
+        execution_contract = execution_day_source.rows.get(exact_contract)
         if execution_contract is None:
             raise PitSourceViewError(
                 f"{product} PIT main lacks execution-day official open"
+            )
+        if execution_contract["exchange"] != frozen_spec["exchange"]:
+            raise PitSourceViewError(
+                f"{product} execution-open exchange binding mismatch"
             )
         last_day = _last_trading_day(
             calendar,
@@ -455,9 +467,9 @@ def build_c_fast_source_view(
                 "execution_reference": {
                     "source_binding_id": reference_bindings[exchange]["binding_id"],
                     "exact_contract": exact_contract,
-                    "official_open": execution_contract["open"],
+                    "official_open": execution_contract["open_price"],
                     "observed_at": generated_text,
-                    "raw_sha256": sha256(execution_day_source.sources[exchange]),
+                    "raw_sha256": reference_bindings[exchange]["raw_sha256"],
                 },
                 "contract_spec": {
                     "source_binding_id": spec_bindings[exchange]["binding_id"],
@@ -482,12 +494,13 @@ def build_c_fast_source_view(
         "contract_registry_raw_sha256": contract_registry_sha,
         "operator_pins": operator_pins,
         "source_month": source_month,
-        "execution_day_receipt_completed_at": format_utc(
+        "execution_open_observed_at": format_utc(
             source_completed_at,
-            "C_FAST execution-day receipt completed_at",
+            "C_FAST execution-open observed_at",
         ),
-        "execution_day_receipt_raw_sha256": (
-            execution_day_source.receipt_raw_sha256
+        "execution_open_receipt_raw_sha256": (execution_day_source.receipt_raw_sha256),
+        "execution_open_tick_export_raw_sha256": (
+            execution_day_source.tick_export_raw_sha256
         ),
         "derivation_id": DERIVATION_ID,
     }
@@ -533,9 +546,7 @@ def build_c_fast_source_view(
             "manifest_genesis_seal_sha256": operator_pins[
                 "manifest_genesis_seal_sha256"
             ],
-            "manifest_head_seal_sha256": operator_pins[
-                "manifest_head_seal_sha256"
-            ],
+            "manifest_head_seal_sha256": operator_pins["manifest_head_seal_sha256"],
             "manifest_head_commit_seal_sha256": operator_pins[
                 "manifest_head_commit_seal_sha256"
             ],
@@ -554,9 +565,7 @@ def build_c_fast_source_view(
         "research_as_of_official_day": research_day.isoformat(),
         "execution_day": execution_day.isoformat(),
         "generated_at": generated_text,
-        "history_receipt_completed_at": identity[
-            "history_receipt_completed_at"
-        ],
+        "history_receipt_completed_at": identity["history_receipt_completed_at"],
         "pins": identity,
         "source_view_raw_sha256": sha256(source_raw),
         "source_view_raw_bytes": len(source_raw),
@@ -580,7 +589,10 @@ def build_c_fast_source_view(
 
 def verify_built_c_fast_source_view(built: BuiltCFastSourceView) -> None:
     source = parse_json_strict(built.source_view_raw, "C_FAST source view")
-    if not isinstance(source, dict) or producer.canonical_json(source) != built.source_view_raw:
+    if (
+        not isinstance(source, dict)
+        or producer.canonical_json(source) != built.source_view_raw
+    ):
         raise PitSourceViewError("C_FAST source view is not canonical")
     replay = producer.produce_research_artifacts(built.source_view_raw)
     if dict(replay.artifacts) != built.artifacts:
@@ -614,7 +626,8 @@ def verify_built_c_fast_source_view(built: BuiltCFastSourceView) -> None:
         identity["calendar_anchor_raw_sha256"],
         identity["warehouse_registry_raw_sha256"],
         identity["contract_registry_raw_sha256"],
-        identity["execution_day_receipt_raw_sha256"],
+        identity["execution_open_receipt_raw_sha256"],
+        identity["execution_open_tick_export_raw_sha256"],
     ]
     if (
         not isinstance(operator_pins, dict)
@@ -639,12 +652,8 @@ def verify_built_c_fast_source_view(built: BuiltCFastSourceView) -> None:
         "registry_raw_sha256": identity["warehouse_registry_raw_sha256"],
         "calendar_raw_sha256": identity["calendar_raw_sha256"],
         "calendar_anchor_sha256": identity["calendar_anchor_raw_sha256"],
-        "commit_anchor_ledger_sha256": operator_pins[
-            "commit_anchor_ledger_raw_sha256"
-        ],
-        "manifest_genesis_seal_sha256": operator_pins[
-            "manifest_genesis_seal_sha256"
-        ],
+        "commit_anchor_ledger_sha256": operator_pins["commit_anchor_ledger_raw_sha256"],
+        "manifest_genesis_seal_sha256": operator_pins["manifest_genesis_seal_sha256"],
         "manifest_head_seal_sha256": operator_pins["manifest_head_seal_sha256"],
         "manifest_head_commit_seal_sha256": operator_pins[
             "manifest_head_commit_seal_sha256"
@@ -659,9 +668,7 @@ def verify_built_c_fast_source_view(built: BuiltCFastSourceView) -> None:
         "research_as_of_official_day": source["research_as_of_official_day"],
         "execution_day": source["execution_day"],
         "generated_at": source["generated_at"],
-        "history_receipt_completed_at": identity[
-            "history_receipt_completed_at"
-        ],
+        "history_receipt_completed_at": identity["history_receipt_completed_at"],
         "pins": identity,
         "source_view_raw_sha256": sha256(built.source_view_raw),
         "source_view_raw_bytes": len(built.source_view_raw),
@@ -672,8 +679,7 @@ def verify_built_c_fast_source_view(built: BuiltCFastSourceView) -> None:
     }
     if (
         source["source_view_id"] != expected_source_id
-        or identity["source_month"]
-        != str(source["research_as_of_official_day"])[:7]
+        or identity["source_month"] != str(source["research_as_of_official_day"])[:7]
     ):
         raise PitSourceViewError("C_FAST source evidence identity mismatch")
     if (
@@ -688,23 +694,22 @@ def verify_built_c_fast_source_view(built: BuiltCFastSourceView) -> None:
         "C_FAST history receipt completed_at",
     )
     receipt_completed_at = parse_utc(
-        identity["execution_day_receipt_completed_at"],
-        "C_FAST execution-day receipt completed_at",
+        identity["execution_open_observed_at"],
+        "C_FAST execution-open observed_at",
     )
     source_generated_at = parse_utc(source["generated_at"], "C_FAST generated_at")
     execution_day = date.fromisoformat(source["execution_day"])
     if (
         history_completed_at > source_generated_at
         or receipt_completed_at > source_generated_at
-        or receipt_completed_at.astimezone(producer.CHINA_TZ).date()
-        != execution_day
-        or source_generated_at.astimezone(producer.CHINA_TZ).date()
-        != execution_day
+        or receipt_completed_at.astimezone(producer.CHINA_TZ).date() != execution_day
+        or source_generated_at.astimezone(producer.CHINA_TZ).date() != execution_day
     ):
-        raise PitSourceViewError("C_FAST source predates its execution-day receipt")
+        raise PitSourceViewError(
+            "C_FAST source predates its execution-open observation"
+        )
     bindings = {
-        (row["source_class"], row["scope"]): row
-        for row in source["source_bindings"]
+        (row["source_class"], row["scope"]): row for row in source["source_bindings"]
     }
     history_days = [
         day
@@ -714,18 +719,12 @@ def verify_built_c_fast_source_view(built: BuiltCFastSourceView) -> None:
     expected_binding_lineages = {
         ("CALENDAR", "SHFE_INE"): {
             "calendar_raw_sha256": identity["calendar_raw_sha256"],
-            "calendar_anchor_raw_sha256": identity[
-                "calendar_anchor_raw_sha256"
-            ],
-            "history_receipt_raw_sha256": identity[
-                "history_receipt_raw_sha256"
-            ],
+            "calendar_anchor_raw_sha256": identity["calendar_anchor_raw_sha256"],
+            "history_receipt_raw_sha256": identity["history_receipt_raw_sha256"],
         },
         **{
             ("MARKET_DAILY", exchange): {
-                "history_receipt_raw_sha256": identity[
-                    "history_receipt_raw_sha256"
-                ],
+                "history_receipt_raw_sha256": identity["history_receipt_raw_sha256"],
                 "operator_pins": operator_pins,
                 "exchange": exchange,
                 "days": history_days,
@@ -737,11 +736,12 @@ def verify_built_c_fast_source_view(built: BuiltCFastSourceView) -> None:
                 "operator_pins": operator_pins,
                 "exchange": exchange,
                 "execution_day": source["execution_day"],
-                "execution_receipt_completed_at": identity[
-                    "execution_day_receipt_completed_at"
+                "execution_open_observed_at": identity["execution_open_observed_at"],
+                "execution_open_receipt_raw_sha256": identity[
+                    "execution_open_receipt_raw_sha256"
                 ],
-                "execution_receipt_raw_sha256": identity[
-                    "execution_day_receipt_raw_sha256"
+                "execution_open_tick_export_raw_sha256": identity[
+                    "execution_open_tick_export_raw_sha256"
                 ],
             }
             for exchange in ("SHFE", "INE")
@@ -761,12 +761,14 @@ def verify_built_c_fast_source_view(built: BuiltCFastSourceView) -> None:
         },
     }
     if set(bindings) != set(expected_binding_lineages) or any(
-        bindings[key]["lineage_sha256"]
-        != sha256(canonical_json(lineage_preimage))
+        bindings[key]["lineage_sha256"] != sha256(canonical_json(lineage_preimage))
         for key, lineage_preimage in expected_binding_lineages.items()
     ):
         raise PitSourceViewError("C_FAST source binding provenance mismatch")
-    if evidence != expected_evidence or canonical_json_line(evidence) != built.evidence_raw:
+    if (
+        evidence != expected_evidence
+        or canonical_json_line(evidence) != built.evidence_raw
+    ):
         raise PitSourceViewError("C_FAST source evidence binding mismatch")
 
 
