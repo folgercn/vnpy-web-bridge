@@ -28,3 +28,14 @@ def test_fork_pull_requests_cannot_write_build_caches() -> None:
     )
 
     assert WORKFLOW.count(same_repository_guard) >= 3
+
+
+def test_quick_checks_only_run_dependency_free_ci_contract_tests() -> None:
+    quick_checks = WORKFLOW.split("  quick-checks:\n", maxsplit=1)[1].split(
+        "  backend:\n", maxsplit=1
+    )[0]
+
+    assert "focused_tests.py" not in quick_checks
+    assert "backend/tests/unit/test_ci_backend_test_shards.py" in quick_checks
+    assert "backend/tests/unit/test_ci_change_classifier.py" in quick_checks
+    assert "backend/tests/unit/test_ci_workflow_contract.py" in quick_checks
