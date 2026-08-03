@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from .c_fast_source_view import (
@@ -39,6 +39,13 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--execution-open-receipt", type=Path, required=True)
     parser.add_argument("--execution-open-capture", type=Path, required=True)
     parser.add_argument("--execution-open-ticks", type=Path, required=True)
+    parser.add_argument(
+        "--execution-day",
+        help=(
+            "official execution day in the calendar month immediately after "
+            "source-month; defaults to that month's first official day"
+        ),
+    )
     parser.add_argument("--source-month", required=True)
     parser.add_argument("--output", type=Path, required=True)
     return parser
@@ -76,9 +83,14 @@ def main(argv: list[str] | None = None) -> int:
             pins=pins,
             manifest_public_key_path=args.manifest_public_key,
         )
-        research_day, execution_day, _cutoff_day = _official_month_boundary(
+        research_day, first_execution_day, _cutoff_day = _official_month_boundary(
             context.calendar,
             source_month=args.source_month,
+        )
+        execution_day = (
+            date.fromisoformat(args.execution_day)
+            if args.execution_day
+            else first_execution_day
         )
         daily_raw = verified_daily_raw(
             context=context,
@@ -99,6 +111,7 @@ def main(argv: list[str] | None = None) -> int:
             capture_path=args.execution_open_capture,
             tick_export_path=args.execution_open_ticks,
             official_day=execution_day,
+            calendar=context.calendar,
         )
         contract_registry_raw = read_regular_strict(
             args.contract_registry,

@@ -5157,8 +5157,8 @@ class CommoditySimNowService:
         self, row: dict[str, Any]
     ) -> dict[str, Any]:
         return {
-            "vt_orderid": str(
-                row.get("vt_orderid") or row.get("orderid") or ""
+            "vt_orderid": self._c_fast_archive_gateway_identity(
+                row, identity_kind="order"
             ),
             "gateway_name": self._row_gateway(row),
             "reference": str(row.get("reference") or ""),
@@ -5202,11 +5202,11 @@ class CommoditySimNowService:
                 "C_FAST 终态成交时间不是有效 UTC 时间"
             )
         return {
-            "vt_tradeid": str(
-                row.get("vt_tradeid") or row.get("tradeid") or ""
+            "vt_tradeid": self._c_fast_archive_gateway_identity(
+                row, identity_kind="trade"
             ),
-            "vt_orderid": str(
-                row.get("vt_orderid") or row.get("orderid") or ""
+            "vt_orderid": self._c_fast_archive_gateway_identity(
+                row, identity_kind="order"
             ),
             "gateway_name": self._row_gateway(row),
             "reference": str(row.get("reference") or ""),
@@ -5219,6 +5219,25 @@ class CommoditySimNowService:
             "price": self._c_fast_archive_positive_price(row.get("price")),
             "trade_at_utc": parsed_trade_time.isoformat(),
         }
+
+    def _c_fast_archive_gateway_identity(
+        self,
+        row: dict[str, Any],
+        *,
+        identity_kind: str,
+    ) -> str:
+        if identity_kind == "trade":
+            identity = str(
+                row.get("vt_tradeid") or row.get("tradeid") or ""
+            )
+        else:
+            identity = str(
+                row.get("vt_orderid") or row.get("orderid") or ""
+            )
+        gateway = self._row_gateway(row)
+        if identity and gateway and not identity.startswith(f"{gateway}."):
+            return f"{gateway}.{identity}"
+        return identity
 
     def _c_fast_archive_position_projection(
         self, row: dict[str, Any]
@@ -11046,44 +11065,84 @@ class CommoditySimNowService:
             key: bound.get(key)
             for key in current_identity
         }
-        if current_identity != bound_identity:
+        try:
+            bound_bid = float(bound_identity["bid_price_1"])
+            bound_ask = float(bound_identity["ask_price_1"])
+        except (TypeError, ValueError) as exc:
             raise CommoditySimNowSafetyError(
-                "child 派单盘口已更新，必须重新 preview",
-                detail={
-                    "vt_symbol": vt_symbol,
-                    "bound_quote_sha256": _sha256_json(
-                        bound_identity
-                    ),
-                    "current_quote_sha256": _sha256_json(
-                        current_identity
-                    ),
-                },
+                "child 派单绑定盘口字段无效",
+                detail={"vt_symbol": vt_symbol},
+            ) from exc
+        if bound_bid <= 0 or bound_ask < bound_bid:
+            raise CommoditySimNowSafetyError(
+                "child 派单绑定盘口字段无效",
+                detail={"vt_symbol": vt_symbol},
             )
 
         price_mode = str(intent.get("price_mode") or "")
         direction = str(intent.get("direction") or "")
         if price_mode == "acceptance_passive":
-            expected_price = (
+            bound_expected_price = (
+                bound_bid if direction == "long" else bound_ask
+            )
+            current_protection_price = (
                 bid if direction == "long" else ask
             )
         elif price_mode == "protected":
-            expected_price = self._protected_price(
-                direction,
-                current_identity,
-                tick,
+            bound_expected_price = self._protected_price(
+                direction, bound_identity, tick
+            )
+            current_protection_price = self._protected_price(
+                direction, current_identity, tick
             )
         else:
             raise CommoditySimNowSafetyError(
                 "child 派单价格模式绑定无效",
                 detail={"vt_symbol": vt_symbol},
             )
-        if float(intent.get("price") or 0) != _round_price(
-            expected_price, tick
+        intent_price = float(intent.get("price") or 0)
+        if intent_price != _round_price(
+            bound_expected_price, tick
         ):
             raise CommoditySimNowSafetyError(
                 "child 派单价格与绑定盘口不一致",
                 detail={"vt_symbol": vt_symbol},
             )
+        if direction not in {"long", "short"}:
+            raise CommoditySimNowSafetyError(
+                "child 派单方向无效",
+                detail={
+                    "vt_symbol": vt_symbol,
+                    "direction": direction,
+                },
+            )
+        current_protection_price = _round_price(
+            current_protection_price,
+            tick,
+        )
+        more_aggressive_than_current = (
+            direction == "long"
+            and intent_price > current_protection_price
+        ) or (
+            direction == "short"
+            and intent_price < current_protection_price
+        )
+        intent["pre_rpc_quote_revalidation"] = {
+            "verified_at_utc": self.clock()
+            .astimezone(timezone.utc)
+            .isoformat(),
+            "bound_quote_sha256": _sha256_json(
+                bound_identity
+            ),
+            "current_quote_sha256": _sha256_json(
+                current_identity
+            ),
+            "quote_changed": current_identity != bound_identity,
+            "current_protection_price": current_protection_price,
+            "more_aggressive_than_current": (
+                more_aggressive_than_current
+            ),
+        }
 
     def _signed_positions(self, positions: dict[str, dict[str, Any]]) -> dict[str, int]:
         return {vt: int(row["signed_quantity"]) for vt, row in sorted(positions.items()) if row["signed_quantity"]}

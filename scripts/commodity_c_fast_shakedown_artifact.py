@@ -21,7 +21,6 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
@@ -879,10 +878,6 @@ def verify(
     )
     checker._verify_shakedown_timing(snapshot)
     checker._verify_targets(snapshot)
-    if snapshot.execution_day != now.astimezone(
-        ZoneInfo("Asia/Shanghai")
-    ).date():
-        raise ValueError("execution day is not today")
     return snapshot
 
 

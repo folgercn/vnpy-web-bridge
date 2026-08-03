@@ -8,7 +8,7 @@ import base64
 import binascii
 import copy
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 import hashlib
 import hmac
 import os
@@ -727,12 +727,10 @@ def _verify_time_semantics(
             "Research Acceptance execution day does not match bundle"
         )
     execution_day = str(payload["execution_day"])
-    if (
-        accepted.astimezone(research.CHINA_TZ).date().isoformat()
-        != execution_day
-        or expires.astimezone(research.CHINA_TZ).date().isoformat()
-        != execution_day
-    ):
+    execution_date = date.fromisoformat(execution_day)
+    if not research._timestamp_belongs_to_execution_day(
+        accepted, execution_date
+    ) or not research._timestamp_belongs_to_execution_day(expires, execution_date):
         raise ResearchAcceptanceError(
             "Research Acceptance must stay on the SimNow execution day"
         )

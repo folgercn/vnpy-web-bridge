@@ -228,6 +228,15 @@ def validate_artifact_set(
     execution = lineage["execution_day"]
     calendar = payloads["calendar_authority"]
     official_days = calendar.get("official_days")
+    date_index_valid = bool(
+        isinstance(official_days, list)
+        and as_of in official_days
+        and execution in official_days
+    )
+    execution_is_immediate = bool(
+        date_index_valid
+        and official_days.index(execution) == official_days.index(as_of) + 1
+    )
     if (
         payloads["signal_evidence"].get("research_as_of_official_day")
         != as_of
@@ -236,11 +245,9 @@ def validate_artifact_set(
         != execution
         or calendar.get("research_as_of_official_day") != as_of
         or calendar.get("execution_day") != execution
-        or calendar.get("execution_is_immediate_next_official_day") is not True
-        or not isinstance(official_days, list)
-        or as_of not in official_days
-        or execution not in official_days
-        or official_days.index(execution) != official_days.index(as_of) + 1
+        or not date_index_valid
+        or calendar.get("execution_is_immediate_next_official_day")
+        is not execution_is_immediate
     ):
         raise RegistryError("sealed export cross-artifact date mismatch")
     targets = _rows_by_product(

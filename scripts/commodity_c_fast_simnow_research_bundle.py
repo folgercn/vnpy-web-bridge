@@ -371,6 +371,15 @@ def _validate_producer_artifact_projection(
     as_of = payload["research_as_of_official_day"]
     execution = payload["execution_day"]
     official_days = calendar.get("official_days")
+    date_index_valid = bool(
+        isinstance(official_days, list)
+        and as_of in official_days
+        and execution in official_days
+    )
+    execution_is_immediate = bool(
+        date_index_valid
+        and official_days.index(execution) == official_days.index(as_of) + 1
+    )
     if (
         manifest.get("research_as_of_official_day") != as_of
         or signal.get("research_as_of_official_day") != as_of
@@ -379,11 +388,9 @@ def _validate_producer_artifact_projection(
         or target.get("execution_day") != execution
         or prices.get("execution_day") != execution
         or calendar.get("execution_day") != execution
-        or calendar.get("execution_is_immediate_next_official_day") is not True
-        or not isinstance(official_days, list)
-        or as_of not in official_days
-        or execution not in official_days
-        or official_days.index(execution) != official_days.index(as_of) + 1
+        or not date_index_valid
+        or calendar.get("execution_is_immediate_next_official_day")
+        is not execution_is_immediate
     ):
         raise ResearchBundleError("producer cross-artifact date mismatch")
     if artifact_generated > parse_datetime(payload["generated_at"], "generated_at"):
@@ -707,6 +714,14 @@ def _parse_date(value: Any, label: str) -> date:
         raise ResearchBundleError(f"{label} must be an ISO date") from exc
 
 
+def _timestamp_belongs_to_execution_day(value: datetime, execution_day: date) -> bool:
+    local = value.astimezone(CHINA_TZ)
+    day_gap = (execution_day - local.date()).days
+    return local.date() == execution_day or bool(
+        local.hour >= 20 and 1 <= day_gap <= 3
+    )
+
+
 def _verify_time_semantics(
     payload: dict[str, Any],
     *,
@@ -737,11 +752,11 @@ def _verify_time_semantics(
         raise ResearchBundleError(
             "research source day must precede the SimNow execution day"
         )
-    if generated.astimezone(CHINA_TZ).date() != execution_day:
+    if not _timestamp_belongs_to_execution_day(generated, execution_day):
         raise ResearchBundleError(
             "research bundle must be generated on its execution day"
         )
-    if expires.astimezone(CHINA_TZ).date() != execution_day:
+    if not _timestamp_belongs_to_execution_day(expires, execution_day):
         raise ResearchBundleError(
             "research bundle must expire on its execution day"
         )
@@ -825,7 +840,7 @@ def _verify_target_row(
         row["reference_price_observed_at"],
         f"{product}.reference_price_observed_at",
     )
-    if observed.astimezone(CHINA_TZ).date() != execution_day:
+    if not _timestamp_belongs_to_execution_day(observed, execution_day):
         raise ResearchBundleError("reference open is not from execution day")
     if observed > generated_at:
         raise ResearchBundleError(

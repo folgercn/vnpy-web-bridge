@@ -80,7 +80,7 @@ baseline 与 shadow 都重新执行冻结 guardband：
 
 producer 在任何 source 计算前读取实际
 `commodity_c_fast_pure_producer_kernel.py` bytes，并核对冻结 SHA256
-`23539d801d6ee9ddccd0371c3793282eeedf63b13dd442f9447adc795bc1d995`。
+`d107564e4a79955cec0c5f6300f941eabbf7efd3511b82c589f406bf341eb8b8`。
 仅有自报 lineage 不足以通过；本地 kernel bytes 漂移即 fail closed。
 
 ## 运行

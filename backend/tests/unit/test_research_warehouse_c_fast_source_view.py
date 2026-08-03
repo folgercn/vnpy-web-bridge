@@ -1,3 +1,4 @@
+# ruff: noqa: E402
 from __future__ import annotations
 
 import json
@@ -43,6 +44,8 @@ UTC = timezone.utc
 def _build(
     *,
     observed_at_utc: datetime = datetime(2026, 8, 3, 9, 0, tzinfo=UTC),
+    execution_day: date = date(2026, 8, 3),
+    execution_source_observed_at: datetime | None = None,
     contract_registry_sha256: str | None = None,
     history_completed_at: str | None = None,
 ) -> BuiltCFastSourceView:
@@ -50,14 +53,28 @@ def _build(
     if history_completed_at is not None:
         history = {**history, "completed_at": history_completed_at}
     rows = dict(calendar.days)
+    previous_official = max(day for day, row in rows.items() if row.is_official)
     current = max(rows) + timedelta(days=1)
     while current <= date(2026, 10, 20):
+        is_official = current.weekday() < 5
         rows[current] = CalendarDay(
             day=current,
-            status="OFFICIAL_DAY" if current.weekday() < 5 else "CLOSED",
-            evening_session_natural_date=None,
+            status="OFFICIAL_DAY" if is_official else "CLOSED",
+            evening_session_natural_date=(
+                previous_official if is_official else None
+            ),
         )
+        if is_official:
+            previous_official = current
         current += timedelta(days=1)
+    if execution_day in rows and rows[execution_day].is_official:
+        rows[execution_day] = CalendarDay(
+            day=execution_day,
+            status="OFFICIAL_DAY",
+            evening_session_natural_date=max(
+                day for day, row in rows.items() if row.is_official and day < execution_day
+            ),
+        )
     calendar = OfficialCalendar.create(
         calendar_id=calendar.calendar_id,
         raw_sha256=calendar.raw_sha256,
@@ -78,8 +95,9 @@ def _build(
         }
         for day, sources in daily_raw.items()
     }
+    execution_day_bytes = execution_day.strftime("%Y%m%d").encode()
     execution_raw = {
-        exchange: raw.replace(b'"report_date":"20260731"', b'"report_date":"20260803"')
+        exchange: raw.replace(b'"report_date":"20260731"', b'"report_date":"' + execution_day_bytes + b'"')
         for exchange, raw in daily_raw["2026-07-31"].items()
     }
     execution_rows = {}
@@ -87,7 +105,7 @@ def _build(
         extracted = c_fast_source.contract_rows_from_daily_raw(
             raw=raw,
             exchange=exchange,
-            official_day="2026-08-03",
+            official_day=execution_day.isoformat(),
             include_ohlc=True,
         )
         for product_rows in extracted.values():
@@ -96,8 +114,10 @@ def _build(
                     "exact_contract": row["exact_contract"],
                     "exchange": exchange,
                     "open_price": row["open"],
-                    "tick_datetime": "2026-08-03T08:29:00.000000Z",
-                    "trading_day": "2026-08-03",
+                    "tick_datetime": (
+                        f"{execution_day.isoformat()}T08:29:00.000000Z"
+                    ),
+                    "trading_day": execution_day.isoformat(),
                     "gateway_name": "CTP",
                 }
     contract_registry_raw = _contract_registry()
@@ -116,8 +136,14 @@ def _build(
         },
         daily_source_raw=daily_raw,
         execution_day_source=VerifiedExecutionOpenObservation(
-            official_day="2026-08-03",
-            observed_at=datetime(2026, 8, 3, 8, 30, tzinfo=UTC),
+            official_day=execution_day.isoformat(),
+            observed_at=(
+                execution_source_observed_at
+                or datetime.combine(
+                    execution_day, datetime.min.time(), tzinfo=UTC
+                )
+                + timedelta(hours=8, minutes=30)
+            ),
             receipt_raw_sha256="9" * 64,
             tick_export_raw_sha256="a" * 64,
             rows=execution_rows,
@@ -153,6 +179,56 @@ def test_warehouse_c_fast_source_is_deterministic_and_sealed_export_ready() -> N
         ).source_view_canonical_sha256
     )
     assert lineage["source_view_canonical_sha256"] == sha256(first.source_view_raw)
+
+
+def test_warehouse_c_fast_source_allows_later_official_day_in_next_month() -> None:
+    built = _build(
+        execution_day=date(2026, 8, 4),
+        observed_at_utc=datetime(2026, 8, 4, 9, 0, tzinfo=UTC),
+    )
+
+    verify_built_c_fast_source_view(built)
+    source = json.loads(built.source_view_raw)
+    assert source["research_as_of_official_day"] == "2026-07-31"
+    assert source["execution_day"] == "2026-08-04"
+    assert source["official_days"][-3:] == [
+        "2026-08-03",
+        "2026-08-04",
+        "2026-08-05",
+    ]
+
+
+def test_warehouse_c_fast_source_allows_previous_evening_night_session() -> None:
+    calendar, _history, _daily_raw, _key = _inputs()
+    rows = dict(calendar.days)
+    rows[date(2026, 8, 4)] = CalendarDay(
+        day=date(2026, 8, 4),
+        status="OFFICIAL_DAY",
+        evening_session_natural_date=date(2026, 8, 3),
+    )
+    calendar = OfficialCalendar.create(
+        calendar_id=calendar.calendar_id,
+        raw_sha256=calendar.raw_sha256,
+        valid_from=calendar.valid_from,
+        valid_to=calendar.valid_to,
+        issued_at=calendar.issued_at,
+        exchanges=calendar.exchanges,
+        days=rows,
+        source_evidence=calendar.source_evidence,
+        source_evidence_root=calendar.source_evidence_root,
+    )
+
+    assert c_fast_source._timestamp_belongs_to_execution_day(
+        datetime(2026, 8, 3, 13, 1, tzinfo=UTC),
+        official_day=date(2026, 8, 4),
+        calendar=calendar,
+    )
+    built = _build(
+        execution_day=date(2026, 8, 4),
+        execution_source_observed_at=datetime(2026, 8, 3, 13, 1, tzinfo=UTC),
+        observed_at_utc=datetime(2026, 8, 3, 15, 59, tzinfo=UTC),
+    )
+    verify_built_c_fast_source_view(built)
 
 
 def test_warehouse_c_fast_source_tamper_and_missing_month_end_fail_closed() -> None:

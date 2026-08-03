@@ -1856,6 +1856,64 @@ def test_c_fast_each_child_refreshes_quote_and_risk_snapshot(
     ]
 
 
+@pytest.mark.parametrize("direction", ["long", "short"])
+def test_c_fast_final_guard_allows_fresh_quote_updates(
+    tmp_path: Path,
+    direction: str,
+) -> None:
+    service, _, _, _ = prepare_c_fast_shakedown(tmp_path)
+    vt_symbol = "ag2612.SHFE"
+    repriced = service._reprice_order(
+        {
+            "product": "ag",
+            "vt_symbol": vt_symbol,
+            "direction": direction,
+        }
+    )
+    intent = {
+        **repriced,
+        "price_mode": "protected",
+    }
+    quote = service.tick_store.ticks[vt_symbol]
+    tick = float(PRODUCT_SPECS["ag"]["price_tick"])
+    shift = 2 * tick if direction == "long" else -2 * tick
+    quote["bid_price_1"] += shift
+    quote["ask_price_1"] += shift
+    quote["bid_volume_1"] += 1
+    quote["ask_volume_1"] += 2
+
+    service._verify_bound_dispatch_quote_current(intent)
+
+    evidence = intent["pre_rpc_quote_revalidation"]
+    assert evidence["quote_changed"] is True
+    assert evidence["more_aggressive_than_current"] is False
+
+
+def test_c_fast_final_guard_rejects_price_not_bound_to_original_quote(
+    tmp_path: Path,
+) -> None:
+    service, _, _, _ = prepare_c_fast_shakedown(tmp_path)
+    vt_symbol = "ag2612.SHFE"
+    repriced = service._reprice_order(
+        {
+            "product": "ag",
+            "vt_symbol": vt_symbol,
+            "direction": "short",
+        }
+    )
+    intent = {
+        **repriced,
+        "price": repriced["price"] - 1,
+        "price_mode": "protected",
+    }
+
+    with pytest.raises(
+        CommoditySimNowSafetyError,
+        match="价格与绑定盘口不一致",
+    ):
+        service._verify_bound_dispatch_quote_current(intent)
+
+
 def test_c_fast_child_quote_failure_does_not_relabel_prior_ack(
     tmp_path: Path,
 ) -> None:
@@ -4729,6 +4787,9 @@ def test_c_fast_terminal_archive_contains_fresh_replay_actual_inputs(
     rpc.positions[0]["password"] = "sensitive-password"
     rpc.trades = fills_for_submitted(service.current_plan)
     for trade in rpc.trades:
+        trade["vt_tradeid"] = str(trade["vt_tradeid"]).split(".", 1)[-1]
+        trade["vt_orderid"] = str(trade["vt_orderid"]).split(".", 1)[-1]
+        trade["gateway_name"] = "CTP"
         trade["trade_at_utc"] = NOW.isoformat()
         trade["token"] = "sensitive-token"
     rpc.orders = [
@@ -4740,6 +4801,8 @@ def test_c_fast_terminal_archive_contains_fresh_replay_actual_inputs(
         for submitted in service.current_plan["submitted"][phase]
     ]
     for order in rpc.orders:
+        order["vt_orderid"] = str(order["vt_orderid"]).split(".", 1)[-1]
+        order["gateway_name"] = "CTP"
         order["account_original"] = "sensitive-account"
 
     service.auto_candidate_shakedown_advance()
@@ -4761,6 +4824,9 @@ def test_c_fast_terminal_archive_contains_fresh_replay_actual_inputs(
     assert raw["schema_version"] == "commodity_c_fast_terminal_raw_facts_v3"
     assert raw["scope"] == "C_FAST_SESSION_PLUS_FINAL_POSITIONS"
     assert raw["orders"]
+    assert all(row["vt_orderid"].startswith("CTP.") for row in raw["orders"])
+    assert all(row["vt_orderid"].startswith("CTP.") for row in raw["trades"])
+    assert all(row["vt_tradeid"].startswith("CTP.") for row in raw["trades"])
     assert all(
         set(row)
         == {

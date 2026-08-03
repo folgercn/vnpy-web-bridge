@@ -392,6 +392,26 @@ def _parse_datetime(value: Any, label: str) -> datetime:
     return parsed
 
 
+def _timestamp_belongs_to_execution_day(
+    value: datetime,
+    *,
+    execution_day: date,
+    official_days: list[date],
+) -> bool:
+    local = value.astimezone(CHINA_TZ)
+    if local.date() == execution_day:
+        return True
+    try:
+        execution_index = official_days.index(execution_day)
+    except ValueError:
+        return False
+    return bool(
+        local.hour >= 20
+        and execution_index > 0
+        and local.date() == official_days[execution_index - 1]
+    )
+
+
 def _finite_positive(value: Any, label: str) -> float:
     try:
         parsed = float(value)
@@ -581,9 +601,6 @@ def _validate_and_normalize_source_view(
         raise ProducerKernelError(
             "research day must be a completed prior source month"
         )
-    if generated_at.astimezone(CHINA_TZ).date() != execution_day:
-        raise ProducerKernelError("source view must be generated on execution day")
-
     raw_days = source["official_days"]
     if not isinstance(raw_days, list):
         raise ProducerKernelError("official_days must be one array")
@@ -599,10 +616,16 @@ def _validate_and_normalize_source_view(
         raise ProducerKernelError("source/execution day is absent from official calendar")
     source_index = official_days.index(research_day)
     execution_index = official_days.index(execution_day)
-    if execution_index != source_index + 1 or execution_index + 1 >= len(official_days):
+    if execution_index <= source_index or execution_index + 1 >= len(official_days):
         raise ProducerKernelError(
-            "execution day must immediately follow source day with one following official day"
+            "execution day must follow source day with one following official day"
         )
+    if not _timestamp_belongs_to_execution_day(
+        generated_at,
+        execution_day=execution_day,
+        official_days=official_days,
+    ):
+        raise ProducerKernelError("source view must be generated on execution day")
     history_days = official_days[: source_index + 1]
     if len(history_days) < max(TREND_HORIZONS) + 1:
         raise ProducerKernelError("official calendar has insufficient trend warmup")
@@ -787,7 +810,11 @@ def _validate_and_normalize_source_view(
         used_binding_ids.add(reference_binding["binding_id"])
         observed_at = _parse_datetime(reference["observed_at"], "reference observed_at")
         if (
-            observed_at.astimezone(CHINA_TZ).date() != execution_day
+            not _timestamp_belongs_to_execution_day(
+                observed_at,
+                execution_day=execution_day,
+                official_days=official_days,
+            )
             or observed_at > generated_at
             or observed_at > cutoff_at
         ):
@@ -1427,6 +1454,7 @@ def produce_research_artifacts(
         "research_as_of_official_day",
     )
     execution_day = _parse_date(source["execution_day"], "execution_day")
+    source_index = official_days.index(research_day)
     execution_index = official_days.index(execution_day)
     following_day = official_days[execution_index + 1]
 
@@ -1715,7 +1743,9 @@ def produce_research_artifacts(
             "research_as_of_official_day": source["research_as_of_official_day"],
             "execution_day": source["execution_day"],
             "following_official_day": following_day.isoformat(),
-            "execution_is_immediate_next_official_day": True,
+            "execution_is_immediate_next_official_day": (
+                execution_index == source_index + 1
+            ),
         }
     )
     artifact_payloads["calendar_authority"] = calendar

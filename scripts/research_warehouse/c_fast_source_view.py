@@ -18,6 +18,7 @@ import commodity_c_fast_pure_producer_kernel as producer
 
 from .calendar_models import OfficialCalendar
 from .canonical import canonical_json, canonical_json_line, parse_json_strict, sha256
+from .errors import RegistryError
 from .file_integrity import read_regular_strict
 from .m2_isolation_contracts import false_authority
 from .pit_source_view import (
@@ -42,6 +43,7 @@ from .static_core_baseline import (
     _registry,
 )
 from .timeutil import format_utc, parse_utc, require_utc
+from .trade_day_mapping import map_exchange_timestamp
 
 EVIDENCE_SCHEMA = "vnpy_research_c_fast_pit_source_evidence_v2"
 DERIVATION_ID = "ROOT_PINNED_WAREHOUSE_C_FAST_PIT_SOURCE_V2"
@@ -103,6 +105,7 @@ def load_execution_open_observation(
     capture_path: Path,
     tick_export_path: Path,
     official_day: date,
+    calendar: OfficialCalendar | None = None,
 ) -> VerifiedExecutionOpenObservation:
     """Verify an immutable CTP exchange-feed open observation and exact tick export."""
 
@@ -157,7 +160,11 @@ def load_execution_open_observation(
     if not isinstance(ticks, list) or receipt.get("rows") != ticks:
         raise PitSourceViewError("C_FAST execution-open receipt/tick rows mismatch")
     observed_at = parse_utc(receipt.get("observed_at"), "execution-open observed_at")
-    if observed_at.astimezone(producer.CHINA_TZ).date() != official_day:
+    if not _timestamp_belongs_to_execution_day(
+        observed_at,
+        official_day=official_day,
+        calendar=calendar,
+    ):
         raise PitSourceViewError(
             "C_FAST execution-open observation is not execution-day"
         )
@@ -203,6 +210,29 @@ def load_execution_open_observation(
         tick_export_raw_sha256=sha256(tick_raw),
         rows=rows,
     )
+
+
+def _timestamp_belongs_to_execution_day(
+    value: datetime,
+    *,
+    official_day: date,
+    calendar: OfficialCalendar | None,
+) -> bool:
+    local = value.astimezone(producer.CHINA_TZ)
+    if local.date() == official_day:
+        return True
+    if calendar is None or not (local.hour >= 20 or local.hour <= 3):
+        return False
+    try:
+        mapped = map_exchange_timestamp(
+            value,
+            exchange="SHFE",
+            session="NIGHT",
+            calendar=calendar,
+        )
+    except RegistryError:
+        return False
+    return mapped.trade_day == official_day
 
 
 def build_c_fast_source_view(
@@ -263,10 +293,29 @@ def build_c_fast_source_view(
         is None
     ):
         raise PitSourceViewError("C_FAST execution-day receipt SHA256 is invalid")
-    research_day, execution_day, _cutoff_day = _official_month_boundary(
+    research_day, first_execution_day, cutoff_day = _official_month_boundary(
         calendar,
         source_month=source_month,
     )
+    try:
+        execution_day = date.fromisoformat(execution_day_source.official_day)
+    except ValueError as exc:
+        raise PitSourceViewError("C_FAST execution-day source identity mismatch") from exc
+    expected_execution_month = (
+        (cutoff_day.year + 1, 1)
+        if cutoff_day.month == 12
+        else (cutoff_day.year, cutoff_day.month + 1)
+    )
+    calendar_row = calendar.days.get(execution_day)
+    if (
+        execution_day < first_execution_day
+        or (execution_day.year, execution_day.month) != expected_execution_month
+        or calendar_row is None
+        or not calendar_row.is_official
+    ):
+        raise PitSourceViewError(
+            "C_FAST execution day must be an official day in the month after source month"
+        )
     if execution_day_source.official_day != execution_day.isoformat():
         raise PitSourceViewError("C_FAST execution-day source identity mismatch")
     source_completed_at = require_utc(
@@ -281,7 +330,11 @@ def build_c_fast_source_view(
     if (
         source_completed_at > generated_at
         or history_completed_at > generated_at
-        or generated_at.astimezone(producer.CHINA_TZ).date() != execution_day
+        or not _timestamp_belongs_to_execution_day(
+            generated_at,
+            official_day=execution_day,
+            calendar=calendar,
+        )
     ):
         raise PitSourceViewError(
             "C_FAST source must be built after history completion and open observation on execution day"
@@ -315,11 +368,12 @@ def build_c_fast_source_view(
     )
     if not following:
         raise PitSourceViewError("calendar lacks a following C_FAST official day")
-    official_days = [
-        *history_days,
-        execution_day.isoformat(),
-        following[0].isoformat(),
-    ]
+    bridge_days = sorted(
+        day.isoformat()
+        for day, row in calendar.days.items()
+        if row.is_official and research_day < day <= execution_day
+    )
+    official_days = [*history_days, *bridge_days, following[0].isoformat()]
     generated_text = format_utc(generated_at, "C_FAST source generated_at")
 
     market_bindings: dict[str, dict[str, Any]] = {}
@@ -699,11 +753,22 @@ def verify_built_c_fast_source_view(built: BuiltCFastSourceView) -> None:
     )
     source_generated_at = parse_utc(source["generated_at"], "C_FAST generated_at")
     execution_day = date.fromisoformat(source["execution_day"])
+    source_official_days = [
+        date.fromisoformat(day) for day in source["official_days"]
+    ]
     if (
         history_completed_at > source_generated_at
         or receipt_completed_at > source_generated_at
-        or receipt_completed_at.astimezone(producer.CHINA_TZ).date() != execution_day
-        or source_generated_at.astimezone(producer.CHINA_TZ).date() != execution_day
+        or not producer._timestamp_belongs_to_execution_day(
+            receipt_completed_at,
+            execution_day=execution_day,
+            official_days=source_official_days,
+        )
+        or not producer._timestamp_belongs_to_execution_day(
+            source_generated_at,
+            execution_day=execution_day,
+            official_days=source_official_days,
+        )
     ):
         raise PitSourceViewError(
             "C_FAST source predates its execution-open observation"
