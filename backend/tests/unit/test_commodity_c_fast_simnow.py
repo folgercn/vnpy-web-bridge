@@ -85,7 +85,7 @@ def _publish_terminal_archive_process(
     try:
         service._archive_c_fast_terminal_session(session)
         outcomes.put("COMMITTED")
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - subprocess probe reports failures
         outcomes.put(f"{exc.__class__.__name__}:{exc}")
 
 
@@ -516,6 +516,8 @@ def bind_test_execution_permit(
             snapshot.execution_permit_id,
             "formula_target_binding_sha256":
             snapshot.formula_target_binding_sha256,
+            "source_snapshot_formula_target_binding_sha256":
+            snapshot.formula_target_binding_sha256,
             "expected_simnow_account_sha256": snapshot.account_sha256,
             "selected_products": list(selected_products),
             "selected_targets": selected_targets,
@@ -700,7 +702,7 @@ def test_c_fast_preview_builds_masked_signed_target_plan(
 def test_c_fast_start_auto_dispatches_and_archives_reconciled_pnl(
     tmp_path: Path,
 ) -> None:
-    service, rpc, snapshot, snapshot_hash = (
+    service, rpc, snapshot, _snapshot_hash = (
         prepare_c_fast_shakedown(tmp_path)
     )
     preview = service.preview_c_fast_shakedown(
@@ -758,7 +760,7 @@ def test_c_fast_one_shot_permit_is_consumed_before_plan_persist(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    service, _, snapshot, _ = prepare_c_fast_shakedown(tmp_path)
+    service, _, _snapshot, _ = prepare_c_fast_shakedown(tmp_path)
     preview = service.preview_c_fast_shakedown(
         ["ag"],
         operator="admin",
@@ -2099,7 +2101,7 @@ def test_c_fast_stop_preempts_blocked_child_loop(
                 role="admin",
                 source_ip=None,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - thread result is asserted below
             start_error.append(exc)
 
     def stop_session():
@@ -2616,7 +2618,7 @@ def _capture_thread_error(
 ) -> None:
     try:
         callback()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - callback failure is test evidence
         errors.append(exc)
 
 
@@ -2862,7 +2864,7 @@ def test_c_fast_pre_submit_stop_uses_strict_full_orders(
         "traded": child["volume"],
         "gateway_name": "CTP",
     }
-    monkeypatch.setattr(rpc, "get_orders", lambda: [])
+    monkeypatch.setattr(rpc, "get_orders", list)
     monkeypatch.setattr(
         rpc, "get_all_orders", lambda: [late]
     )
@@ -4199,7 +4201,7 @@ def test_c_fast_terminal_cross_instance_flock_revalidates_predecessor(
         return service, session
 
     first_service, first_session = candidate(tmp_path / "first")
-    second_service, second_session = candidate(tmp_path / "second")
+    _second_service, second_session = candidate(tmp_path / "second")
     context = get_context("spawn")
     start = context.Event()
     outcomes = context.Queue()

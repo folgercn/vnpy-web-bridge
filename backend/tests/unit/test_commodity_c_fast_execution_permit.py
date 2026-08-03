@@ -5,8 +5,8 @@ import hashlib
 from datetime import timedelta
 from pathlib import Path
 
-import pytest
 import app.services.commodity_c_fast_execution_permit as execution_permit_module
+import pytest
 from app.core.config import Settings
 from app.schemas.commodity_c_fast_shadow import (
     CommodityCFastShakedownSnapshotDTO,
@@ -97,7 +97,9 @@ def permit_fixture(tmp_path: Path) -> dict:
         "selected_target_index_sha256": "d" * 64,
         "custody_root_path_sha256": "e" * 64,
         "custody_identity_sha256": "f" * 64,
-        "formula_target_binding_sha256": snapshot.formula_target_binding_sha256,
+        # The Research and adapter domains have different canonical
+        # projections in production.  Keep them deliberately distinct here.
+        "formula_target_binding_sha256": "9" * 64,
         "expected_simnow_account_sha256": snapshot.account_sha256,
         "execution_day": snapshot.execution_day.isoformat(),
         "expires_at": (NOW + timedelta(minutes=9)).isoformat(),

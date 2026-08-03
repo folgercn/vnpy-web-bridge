@@ -421,7 +421,7 @@ class CommodityCFastExecutionPermitService:
             or permit.source_snapshot_sha256 != snapshot_sha256
             or permit.legacy_control_acceptance_id != snapshot.control_acceptance_id
             or permit.legacy_execution_permit_id != snapshot.execution_permit_id
-            or permit.formula_target_binding_sha256
+            or permit.source_snapshot_formula_target_binding_sha256
             != snapshot.formula_target_binding_sha256
             or permit.execution_day != snapshot.execution_day
             or permit.expected_simnow_account_sha256 != snapshot.account_sha256

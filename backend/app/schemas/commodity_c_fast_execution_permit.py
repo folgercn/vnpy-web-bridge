@@ -22,7 +22,7 @@ class CommodityCFastExecutionPermitTargetDTO(StrictFiniteModel):
     adapter_target_projection_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
     @model_validator(mode="after")
-    def validate_delta(self) -> "CommodityCFastExecutionPermitTargetDTO":
+    def validate_delta(self) -> CommodityCFastExecutionPermitTargetDTO:
         if (
             self.signed_target_quantity - self.previous_target_quantity
             != self.signed_target_delta
@@ -86,7 +86,13 @@ class CommodityCFastSimNowExecutionPermitDTO(StrictFiniteModel):
     legacy_execution_permit_id: str = Field(
         pattern=r"^cfast-permit-[A-Za-z0-9._-]{8,96}$"
     )
+    # The Research bundle and legacy adapter snapshot intentionally use
+    # different canonical projections.  Bind both domains explicitly rather
+    # than pretending their independently derived hashes are interchangeable.
     formula_target_binding_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    source_snapshot_formula_target_binding_sha256: str = Field(
+        pattern=r"^[0-9a-f]{64}$"
+    )
     expected_simnow_account_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     selected_products: list[Product] = Field(min_length=1, max_length=2)
     selected_targets: list[CommodityCFastExecutionPermitTargetDTO] = Field(
@@ -120,7 +126,7 @@ class CommodityCFastSimNowExecutionPermitDTO(StrictFiniteModel):
     signature: str = Field(min_length=88, max_length=88)
 
     @model_validator(mode="after")
-    def validate_scope(self) -> "CommodityCFastSimNowExecutionPermitDTO":
+    def validate_scope(self) -> CommodityCFastSimNowExecutionPermitDTO:
         products = list(self.selected_products)
         targets = [row.product for row in self.selected_targets]
         if (
@@ -156,7 +162,7 @@ class CommodityCFastExecutionPermitTrustedKeysDTO(StrictFiniteModel):
     @model_validator(mode="after")
     def validate_unique_keys(
         self,
-    ) -> "CommodityCFastExecutionPermitTrustedKeysDTO":
+    ) -> CommodityCFastExecutionPermitTrustedKeysDTO:
         ids = [row.key_id for row in self.trusted_keys]
         materials = [row.public_key_base64 for row in self.trusted_keys]
         if len(set(ids)) != len(ids) or len(set(materials)) != len(materials):
