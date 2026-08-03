@@ -12,10 +12,6 @@ import base64
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from cryptography.hazmat.primitives.asymmetric.ed25519 import (
-    Ed25519PrivateKey,
-)
-
 from app.schemas.commodity_c_fast_execution_permit import (
     CommodityCFastSimNowExecutionPermitDTO,
 )
@@ -29,6 +25,9 @@ from app.services.commodity_c_fast_execution_permit import (
 )
 from app.services.commodity_c_fast_research_acceptance_evidence import (
     VerifiedCommodityCFastResearchAcceptanceEvidence,
+)
+from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+    Ed25519PrivateKey,
 )
 
 PLACEHOLDER_SIGNATURE = base64.b64encode(bytes(64)).decode("ascii")
@@ -68,11 +67,9 @@ def prepare_unsigned_execution_permit(
     if (
         snapshot.execution_day.isoformat() != acceptance["execution_day"]
         or snapshot.account_sha256 != acceptance["expected_simnow_account_sha256"]
-        or snapshot.formula_target_binding_sha256
-        != acceptance["formula_target_binding_sha256"]
         or snapshot.max_selected_products < len(acceptance["selected_products"])
     ):
-        raise ValueError("legacy adapter snapshot scope/account/formula/day mismatch")
+        raise ValueError("legacy adapter snapshot scope/account/day mismatch")
     rows = {row.product: row for row in snapshot.targets}
     selected_targets: list[dict[str, Any]] = []
     for signed in acceptance["selected_targets"]:
@@ -136,6 +133,9 @@ def prepare_unsigned_execution_permit(
         "legacy_control_acceptance_id": snapshot.control_acceptance_id,
         "legacy_execution_permit_id": snapshot.execution_permit_id,
         "formula_target_binding_sha256": acceptance["formula_target_binding_sha256"],
+        "source_snapshot_formula_target_binding_sha256": (
+            snapshot.formula_target_binding_sha256
+        ),
         "expected_simnow_account_sha256": acceptance["expected_simnow_account_sha256"],
         "selected_products": acceptance["selected_products"],
         "selected_targets": selected_targets,

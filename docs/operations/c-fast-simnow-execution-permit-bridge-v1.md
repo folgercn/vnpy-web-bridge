@@ -66,6 +66,12 @@ selected targets、formula binding 和 custody binding。不要手工复制或�
 字段。`expires_at - not_before` 最大为 10 分钟，并且 permit 窗口必须完全位于
 Acceptance 窗口内。
 
+Research bundle 与 legacy adapter snapshot 使用不同的 canonical projection，
+因此 permit 分别绑定 `formula_target_binding_sha256`（Acceptance/Research）和
+`source_snapshot_formula_target_binding_sha256`（legacy snapshot）。两者不是同一
+哈希域，不要求数值相等；verifier 会分别对各自事实源复算，并继续逐项核对
+selected target 的合约、previous/target/delta 和 projection hash。
+
 ## 4. 独立签署
 
 所有下列环境变量先按第 5 节配置，然后执行：
