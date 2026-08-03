@@ -109,12 +109,12 @@ jobs:
       - name: Validate JSON schemas
         run: python scripts/ci/validate_json_schemas.py
 
-      - name: Run changed-area focused tests
-        shell: bash
+      - name: Run CI contract tests
         run: |
-          mapfile -t focused_tests < <(python scripts/ci/focused_tests.py \
-            --paths-file /tmp/changed-files.txt)
-          PYTHONPATH=backend:scripts:. pytest -q "${focused_tests[@]}"
+          PYTHONPATH=backend:scripts:. pytest -q \
+            backend/tests/unit/test_ci_backend_test_shards.py \
+            backend/tests/unit/test_ci_change_classifier.py \
+            backend/tests/unit/test_ci_workflow_contract.py
 
   backend:
     name: Backend tests (shard ${{ matrix.shard }})
