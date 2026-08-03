@@ -7,6 +7,10 @@ on:
   pull_request:
     branches: [main]
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   changes:
     name: Detect changed areas
@@ -18,7 +22,7 @@ jobs:
       query_v5_changed: ${{ steps.filter.outputs.query_v5_changed }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -31,84 +35,118 @@ jobs:
           CURRENT_SHA: ${{ github.sha }}
         run: |
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
-            echo "backend_changed=true" >> "$GITHUB_OUTPUT"
-            echo "frontend_changed=true" >> "$GITHUB_OUTPUT"
-            echo "image_changed=true" >> "$GITHUB_OUTPUT"
-            echo "query_v5_changed=true" >> "$GITHUB_OUTPUT"
+            python scripts/ci/classify_changes.py --force-all --github-output >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           if [ "$EVENT_NAME" = "pull_request" ]; then
             git fetch origin "$BASE_REF" --depth=1
-            changed_files="$(git diff --name-only "origin/$BASE_REF"...HEAD)"
+            git diff --name-only "origin/$BASE_REF"...HEAD > /tmp/changed-files.txt
           elif [ -n "$BEFORE_SHA" ] && [ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]; then
-            changed_files="$(git diff --name-only "$BEFORE_SHA" "$CURRENT_SHA")"
+            git diff --name-only "$BEFORE_SHA" "$CURRENT_SHA" > /tmp/changed-files.txt
           else
-            changed_files="$(git ls-tree -r --name-only "$CURRENT_SHA")"
+            git ls-tree -r --name-only "$CURRENT_SHA" > /tmp/changed-files.txt
           fi
 
-          backend_changed=false
-          frontend_changed=false
-          image_changed=false
-          query_v5_changed=false
+          python scripts/ci/classify_changes.py \
+            --paths-file /tmp/changed-files.txt \
+            --github-output >> "$GITHUB_OUTPUT"
 
-          while IFS= read -r file; do
-            [ -z "$file" ] && continue
-            case "$file" in
-              .github/workflows/*)
-                backend_changed=true
-                frontend_changed=true
-                image_changed=true
-                query_v5_changed=true
-                continue
-                ;;
-            esac
-            case "$file" in
-              .dockerignore|backend/requirements.txt|scripts/c_fast_t1/*query_v3*|scripts/c_fast_t1/*query_v4*|scripts/c_fast_t1/*query_v5*|scripts/commodity_c_fast_*|docs/operations/c-fast-t1-query-v5-*|docs/schemas/commodity-c-fast-*|backend/tests/unit/test_c_fast_t1_query_v3*|backend/tests/unit/test_c_fast_t1_query_v4*|backend/tests/unit/test_c_fast_t1_query_v5*)
-                query_v5_changed=true
-                ;;
-            esac
-            case "$file" in
-              backend/*|shared/*|requirements.txt|scripts/tick_*.py)
-                backend_changed=true
-                ;;
-              frontend/*|shared/*)
-                frontend_changed=true
-                ;;
-            esac
-            case "$file" in
-              Dockerfile|.dockerignore|backend/*|frontend/*|shared/*|test_rpc_readonly.py|test_rpc_trade_flow.py|deployments/*|scripts/deploy.sh|scripts/install-watchdog.sh|scripts/watchdog.py)
-                image_changed=true
-                ;;
-            esac
-          done <<EOF
-          $changed_files
-          EOF
-
-          echo "backend_changed=$backend_changed" >> "$GITHUB_OUTPUT"
-          echo "frontend_changed=$frontend_changed" >> "$GITHUB_OUTPUT"
-          echo "image_changed=$image_changed" >> "$GITHUB_OUTPUT"
-          echo "query_v5_changed=$query_v5_changed" >> "$GITHUB_OUTPUT"
-
-  backend:
-    name: Backend tests
+  quick-checks:
+    name: Quick checks
     needs: changes
-    if: needs.changes.outputs.backend_changed == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: scripts/ci/requirements-quick.txt
+
+      - name: Install quick-check dependencies
+        run: pip install -r scripts/ci/requirements-quick.txt
+
+      - name: Resolve changed files and check whitespace
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE_SHA: ${{ github.event.before }}
+          CURRENT_SHA: ${{ github.sha }}
+        run: |
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            git fetch origin "$BASE_REF" --depth=1
+            git diff --check "origin/$BASE_REF"...HEAD
+            git diff --name-only "origin/$BASE_REF"...HEAD > /tmp/changed-files.txt
+          elif [ -n "$BEFORE_SHA" ] && [ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]; then
+            git diff --check "$BEFORE_SHA" "$CURRENT_SHA"
+            git diff --name-only "$BEFORE_SHA" "$CURRENT_SHA" > /tmp/changed-files.txt
+          else
+            git show --check --oneline "$CURRENT_SHA"
+            git ls-tree -r --name-only "$CURRENT_SHA" > /tmp/changed-files.txt
+          fi
+
+      - name: Ruff changed Python files
+        shell: bash
+        run: |
+          mapfile -t python_files < <(while IFS= read -r path; do
+            if [[ "$path" == *.py && -f "$path" ]]; then printf '%s\n' "$path"; fi
+          done < /tmp/changed-files.txt)
+          if (( ${#python_files[@]} )); then
+            ruff check "${python_files[@]}"
+          fi
+
+      - name: Compile Python sources
+        run: python -m compileall -q backend scripts
+
+      - name: Validate JSON schemas
+        run: python scripts/ci/validate_json_schemas.py
+
+      - name: Run changed-area focused tests
+        shell: bash
+        run: |
+          mapfile -t focused_tests < <(python scripts/ci/focused_tests.py \
+            --paths-file /tmp/changed-files.txt)
+          PYTHONPATH=backend:scripts:. pytest -q "${focused_tests[@]}"
+
+  backend:
+    name: Backend tests (shard ${{ matrix.shard }})
+    needs: changes
+    if: needs.changes.outputs.backend_changed == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
 
       - name: Install backend dependencies
         run: pip install -r backend/requirements.txt
 
-      - name: Run backend unit tests
-        run: PYTHONPATH=backend pytest backend/tests/unit
+      - name: Validate deterministic shard manifest
+        run: python scripts/ci/backend_test_shards.py validate
+
+      - name: Run backend unit-test shard
+        shell: bash
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          mapfile -t test_files < <(python scripts/ci/backend_test_shards.py files --shard "$SHARD")
+          PYTHONPATH=backend:scripts:. pytest "${test_files[@]}"
 
   frontend:
     name: Frontend build and tests
@@ -120,10 +158,10 @@ jobs:
         working-directory: frontend
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: npm
@@ -145,17 +183,30 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4
 
       - name: Build production image
-        run: docker build --progress=plain -t vnpy-web-bridge:ci-${{ github.sha }} .
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: vnpy-web-bridge:ci-${{ github.sha }}
+          cache-from: type=gha,scope=production
+          cache-to: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'type=gha,mode=max,scope=production' || '' }}
 
       - name: Build readiness-v4 verifier image
-        run: |
-          docker build --progress=plain \
-            -f scripts/c_fast_t1/Containerfile.readiness-v4 \
-            --build-arg SOURCE_REVISION=${{ github.sha }} \
-            -t vnpy-web-bridge-c-fast-readiness-v4:ci-${{ github.sha }} .
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: scripts/c_fast_t1/Containerfile.readiness-v4
+          build-args: SOURCE_REVISION=${{ github.sha }}
+          load: true
+          tags: vnpy-web-bridge-c-fast-readiness-v4:ci-${{ github.sha }}
+          cache-from: type=gha,scope=readiness-v4
+          cache-to: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'type=gha,mode=max,scope=readiness-v4' || '' }}
 
   query-v5-real-oci:
     name: Query-v5 real OCI composition
@@ -164,17 +215,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: scripts/ci/requirements-query-v5.txt
 
       - name: Install verifier dependencies
-        run: pip install -r backend/requirements.txt
+        run: pip install -r scripts/ci/requirements-query-v5.txt
 
       - name: Run query-v5 attestation closure tests
         run: |
@@ -185,7 +238,7 @@ jobs:
             backend/tests/unit/test_c_fast_t1_query_v5_image_attestation.py
 
       - name: Set up Buildx for local OCI registry
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
         with:
           driver-opts: network=host
           buildkitd-config-inline: |
@@ -195,14 +248,21 @@ jobs:
 
       - name: Build, export, and fully attest exact query-v5 composition
         shell: bash
+        env:
+          CACHE_WRITE_ALLOWED: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
         run: |
           set -euo pipefail
           docker run -d --rm --network host --name query-v5-ci-registry registry:2
 
           v4_repository="c-fast/query-v4"
           v4_tag="localhost:5000/${v4_repository}:${GITHUB_SHA}"
+          v4_cache=(--cache-from type=gha,scope=query-v4)
+          if [ "$CACHE_WRITE_ALLOWED" = "true" ]; then
+            v4_cache+=(--cache-to type=gha,mode=max,scope=query-v4)
+          fi
           docker buildx build --progress=plain --platform linux/amd64 \
             --provenance=false --sbom=false \
+            "${v4_cache[@]}" \
             --output "type=registry,name=${v4_tag},oci-mediatypes=true" \
             -f scripts/c_fast_t1/Containerfile.query-v4 \
             --build-arg "SOURCE_REVISION=${GITHUB_SHA}" .
@@ -218,8 +278,13 @@ jobs:
 
           v5_repository="c-fast/query-v5"
           v5_tag="localhost:5000/${v5_repository}:${GITHUB_SHA}"
+          v5_cache=(--cache-from type=gha,scope=query-v5)
+          if [ "$CACHE_WRITE_ALLOWED" = "true" ]; then
+            v5_cache+=(--cache-to type=gha,mode=max,scope=query-v5)
+          fi
           docker buildx build --progress=plain --platform linux/amd64 \
             --provenance=false --sbom=false \
+            "${v5_cache[@]}" \
             --output "type=registry,name=${v5_tag},oci-mediatypes=true" \
             -f scripts/c_fast_t1/Containerfile.query-v5 \
             --build-arg "QUERY_V4_BASE_IMAGE=${v4_reference}" \
@@ -241,3 +306,34 @@ jobs:
             --query-v4-image-reference "${v4_reference}" \
             --query-v5-oci /tmp/query-v5.oci.tar \
             --query-v5-image-reference "${v5_reference}"
+
+  ci-gate:
+    name: CI Gate
+    if: always()
+    needs:
+      - changes
+      - quick-checks
+      - backend
+      - frontend
+      - docker
+      - query-v5-real-oci
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every applicable CI job
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+
+          needs = json.loads(os.environ["NEEDS_JSON"])
+          invalid = {
+              name: details["result"]
+              for name, details in needs.items()
+              if details["result"] not in {"success", "skipped"}
+          }
+          if invalid:
+              raise SystemExit(f"required CI jobs failed or were cancelled: {invalid}")
+          print("all applicable CI jobs succeeded; unrelated jobs may be skipped")
+          PY
