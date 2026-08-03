@@ -13,12 +13,14 @@ sys.path.insert(0, str(ROOT / "backend"))
 sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import commodity_c_fast_execution_open_observation as open_observation
 import commodity_c_fast_pure_producer_kernel as producer
 import research_warehouse.c_fast_source_view as c_fast_source
 from research_warehouse.c_fast_source_view import (
     BuiltCFastSourceView,
-    VerifiedExecutionDayRaw,
+    VerifiedExecutionOpenObservation,
     build_c_fast_source_view,
+    load_execution_open_observation,
     publish_built_c_fast_source_view,
     verify_built_c_fast_source_view,
 )
@@ -80,6 +82,24 @@ def _build(
         exchange: raw.replace(b'"report_date":"20260731"', b'"report_date":"20260803"')
         for exchange, raw in daily_raw["2026-07-31"].items()
     }
+    execution_rows = {}
+    for exchange, raw in execution_raw.items():
+        extracted = c_fast_source.contract_rows_from_daily_raw(
+            raw=raw,
+            exchange=exchange,
+            official_day="2026-08-03",
+            include_ohlc=True,
+        )
+        for product_rows in extracted.values():
+            for row in product_rows:
+                execution_rows[row["exact_contract"]] = {
+                    "exact_contract": row["exact_contract"],
+                    "exchange": exchange,
+                    "open_price": row["open"],
+                    "tick_datetime": "2026-08-03T08:29:00.000000Z",
+                    "trading_day": "2026-08-03",
+                    "gateway_name": "CTP",
+                }
     contract_registry_raw = _contract_registry()
     return build_c_fast_source_view(
         calendar=calendar,
@@ -95,11 +115,12 @@ def _build(
             "commit_anchor_ledger_raw_sha256": "8" * 64,
         },
         daily_source_raw=daily_raw,
-        execution_day_source=VerifiedExecutionDayRaw(
+        execution_day_source=VerifiedExecutionOpenObservation(
             official_day="2026-08-03",
-            completed_at=datetime(2026, 8, 3, 8, 30, tzinfo=UTC),
+            observed_at=datetime(2026, 8, 3, 8, 30, tzinfo=UTC),
             receipt_raw_sha256="9" * 64,
-            sources=execution_raw,
+            tick_export_raw_sha256="a" * 64,
+            rows=execution_rows,
         ),
         contract_registry_raw=contract_registry_raw,
         expected_contract_registry_raw_sha256=(
@@ -127,8 +148,9 @@ def test_warehouse_c_fast_source_is_deterministic_and_sealed_export_ready() -> N
     assert evidence["producer_replay"] == "EXACT_NINE_ARTIFACT_BYTES_VERIFIED"
     assert evidence["authority"] == false_authority()
     assert lineage["source_view_canonical_sha256"] == (
-        producer.produce_research_artifacts(first.source_view_raw)
-        .source_view_canonical_sha256
+        producer.produce_research_artifacts(
+            first.source_view_raw
+        ).source_view_canonical_sha256
     )
     assert lineage["source_view_canonical_sha256"] == sha256(first.source_view_raw)
 
@@ -166,11 +188,12 @@ def test_warehouse_c_fast_source_tamper_and_missing_month_end_fail_closed() -> N
                 "commit_anchor_ledger_raw_sha256": "8" * 64,
             },
             daily_source_raw=missing,
-            execution_day_source=VerifiedExecutionDayRaw(
+            execution_day_source=VerifiedExecutionOpenObservation(
                 official_day="2026-08-03",
-                completed_at=datetime(2026, 8, 3, 8, 30, tzinfo=UTC),
+                observed_at=datetime(2026, 8, 3, 8, 30, tzinfo=UTC),
                 receipt_raw_sha256="9" * 64,
-                sources=daily_raw["2026-07-31"],
+                tick_export_raw_sha256="a" * 64,
+                rows={},
             ),
             contract_registry_raw=_contract_registry(),
             expected_contract_registry_raw_sha256=sha256(_contract_registry()),
@@ -180,9 +203,9 @@ def test_warehouse_c_fast_source_tamper_and_missing_month_end_fail_closed() -> N
 
 
 def test_warehouse_c_fast_source_rejects_stale_observation_and_root_pin() -> None:
-    with pytest.raises(PitSourceViewError, match="after all receipt completion"):
+    with pytest.raises(PitSourceViewError, match="after history completion"):
         _build(observed_at_utc=datetime(2026, 8, 4, 9, 0, tzinfo=UTC))
-    with pytest.raises(PitSourceViewError, match="after all receipt completion"):
+    with pytest.raises(PitSourceViewError, match="after history completion"):
         _build(history_completed_at="2026-08-03T10:00:00.000000Z")
     with pytest.raises(PitSourceViewError, match="root pin mismatch"):
         _build(contract_registry_sha256="a" * 64)
@@ -250,3 +273,76 @@ def test_warehouse_c_fast_publish_failure_preserves_existing_parent_data(
     assert sentinel.read_text(encoding="utf-8") == "keep"
     assert output.is_dir()
     assert {path.name for path in output.iterdir()} == {"source-view.json"}
+
+
+def test_execution_open_observation_freezes_ctp_ticks_create_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tmp_path.chmod(0o700)
+    capture = tmp_path / "capture.json"
+    ticks = []
+    for index, product in enumerate(producer.PRODUCTS):
+        exchange = producer.PRODUCT_SPECS[product]["exchange"]
+        ticks.append(
+            {
+                "symbol": f"{product}2609",
+                "exchange": exchange,
+                "open_price": 1000 + index,
+                "datetime": "2026-08-03T05:00:00+00:00",
+                "trading_day": "20260803",
+                "gateway_name": "CTP",
+            }
+        )
+    capture.write_text(json.dumps({"data": ticks}), encoding="utf-8")
+    capture.chmod(0o600)
+    tick_output = tmp_path / "ticks.jsonl"
+    receipt_output = tmp_path / "receipt.json"
+    monkeypatch.setattr(
+        open_observation,
+        "_now_utc",
+        lambda: datetime(2026, 8, 3, 5, 1, tzinfo=UTC),
+    )
+    assert (
+        open_observation.main(
+            [
+                "--input",
+                str(capture),
+                "--execution-day",
+                "2026-08-03",
+                "--ticks-output",
+                str(tick_output),
+                "--receipt-output",
+                str(receipt_output),
+            ]
+        )
+        == 0
+    )
+    verified = load_execution_open_observation(
+        receipt_path=receipt_output,
+        capture_path=capture,
+        tick_export_path=tick_output,
+        official_day=date(2026, 8, 3),
+    )
+    assert len(verified.rows) == 10
+    capture.write_bytes(capture.read_bytes() + b" ")
+    with pytest.raises(PitSourceViewError, match="raw capture binding"):
+        load_execution_open_observation(
+            receipt_path=receipt_output,
+            capture_path=capture,
+            tick_export_path=tick_output,
+            official_day=date(2026, 8, 3),
+        )
+    with pytest.raises(FileExistsError):
+        open_observation.main(
+            [
+                "--input",
+                str(capture),
+                "--execution-day",
+                "2026-08-03",
+                "--ticks-output",
+                str(tick_output),
+                "--receipt-output",
+                str(receipt_output),
+            ]
+        )

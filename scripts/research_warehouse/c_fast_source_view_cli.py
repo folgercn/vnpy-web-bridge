@@ -9,8 +9,8 @@ from pathlib import Path
 
 from .c_fast_source_view import (
     build_c_fast_source_view,
+    load_execution_open_observation,
     publish_built_c_fast_source_view,
-    verified_execution_day_raw,
 )
 from .file_integrity import read_regular_strict
 from .m2_operator_state import load_operator_state, operator_state_lock
@@ -36,6 +36,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--manifest-public-key-sha256", required=True)
     parser.add_argument("--contract-registry", type=Path, required=True)
     parser.add_argument("--contract-registry-sha256", required=True)
+    parser.add_argument("--execution-open-receipt", type=Path, required=True)
+    parser.add_argument("--execution-open-capture", type=Path, required=True)
+    parser.add_argument("--execution-open-ticks", type=Path, required=True)
     parser.add_argument("--source-month", required=True)
     parser.add_argument("--output", type=Path, required=True)
     return parser
@@ -53,6 +56,9 @@ def main(argv: list[str] | None = None) -> int:
             args.history_receipt,
             args.manifest_public_key,
             args.contract_registry,
+            args.execution_open_receipt,
+            args.execution_open_capture,
+            args.execution_open_ticks,
         ),
     )
     pins = SourcePins(
@@ -88,9 +94,10 @@ def main(argv: list[str] | None = None) -> int:
                 source_month=args.source_month,
             )
         )
-        execution_source = verified_execution_day_raw(
-            context=context,
-            chain=chain,
+        execution_source = load_execution_open_observation(
+            receipt_path=args.execution_open_receipt,
+            capture_path=args.execution_open_capture,
+            tick_export_path=args.execution_open_ticks,
             official_day=execution_day,
         )
         contract_registry_raw = read_regular_strict(
@@ -109,9 +116,7 @@ def main(argv: list[str] | None = None) -> int:
                 "manifest_genesis_seal_sha256": state.payload[
                     "manifest_genesis_seal_sha256"
                 ],
-                "manifest_head_seal_sha256": state.payload[
-                    "manifest_head_seal_sha256"
-                ],
+                "manifest_head_seal_sha256": state.payload["manifest_head_seal_sha256"],
                 "manifest_head_commit_seal_sha256": state.payload[
                     "manifest_head_commit_seal_sha256"
                 ],
@@ -122,9 +127,7 @@ def main(argv: list[str] | None = None) -> int:
             daily_source_raw=daily_raw,
             execution_day_source=execution_source,
             contract_registry_raw=contract_registry_raw,
-            expected_contract_registry_raw_sha256=(
-                args.contract_registry_sha256
-            ),
+            expected_contract_registry_raw_sha256=(args.contract_registry_sha256),
             source_month=args.source_month,
             observed_at_utc=datetime.now(timezone.utc),
         )

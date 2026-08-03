@@ -11,14 +11,35 @@ artifacts。它补齐 #153 中 Warehouse 与 #160 sealed Research bundle 之间�
 - `source_month` 必须是已完整结束的前一自然月。
 - `research_as_of_official_day` 是该月最后一个官方交易日。
 - `execution_day` 是紧随其后的第一个官方交易日。
-- 运行前必须已有 execution-day 正常日采集 receipt、SHFE/INE exact raw 与已提交
-  manifest；source view 的 `generated_at/cutoff_at` 使用本次生成的真实观察时刻，
-  必须晚于 receipt 的 `completed_at` 且仍在同一 execution day，二者都会进入
-  provenance，禁止回填成历史时刻。
-- 因此 2026-07 source month 的首次合法生成点是在 2026-08-03 当日官方日数据
-  收口之后，而不是 2026-08-01 周末。
+- 运行前必须已有 source month 最后官方交易日及全部 warmup 日的正常日采集
+  receipt、SHFE/INE exact raw 与已提交 manifest。
+- execution day 的开盘价使用独立、create-only 的 SimNow CTP 交易所行情观察
+  receipt。receipt 精确绑定原始 tick export、execution day、CTP gateway、逐合约
+  open price 与观察时间；日行情端点的 `POST_CLOSE_ONLY` 数据不能冒充盘中证据。
+- source view 的 `generated_at/cutoff_at` 使用本次生成的真实观察时刻，必须晚于
+  history receipt 和 execution-open observation，且仍在同一 execution day，禁止
+  回填成历史时刻。
+- 因此 2026-07 source month 可在 2026-08-03 开盘价已由 CTP 交易所行情观察后
+  合法生成，不需要等待 8 月 3 日收盘数据；2026-08-01 周末仍不合法。
 
 ## 生成
+
+先把 Web Bridge `/api/market/data/ticks` 返回的 CTP tick 列表保存为原始 JSON。
+输入必须覆盖十个品种的 July PIT main exact contract，并保留 `datetime`、
+`trading_day`、`gateway_name=CTP` 和正数 `open_price`。在私有 create-only 目录中
+冻结规范化 tick 与 receipt：
+
+```bash
+PYTHONPATH=scripts python3 \
+  scripts/commodity_c_fast_execution_open_observation.py \
+  --input /private/capture/web-bridge-ticks.json \
+  --execution-day 2026-08-03 \
+  --ticks-output /private/execution-open/ticks.jsonl \
+  --receipt-output /private/execution-open/receipt.json
+```
+
+工具只接受 observation 时刻之前、同一 trading day 的 CTP tick；缺少任一品种或
+出现非法合约、空/非有限开盘价都会 fail closed。
 
 以下全部 SHA256 必须来自 root/operator 冻结台账，不能从当前文件反推：
 
@@ -33,6 +54,9 @@ PYTHONPATH=scripts python3 scripts/research_warehouse_c_fast_source_view.py \
   --manifest-public-key-sha256 <64-hex> \
   --contract-registry /private/static-core-contract-registry.json \
   --contract-registry-sha256 <64-hex> \
+  --execution-open-receipt /private/execution-open/receipt.json \
+  --execution-open-capture /private/capture/web-bridge-ticks.json \
+  --execution-open-ticks /private/execution-open/ticks.jsonl \
   --source-month 2026-07 \
   --output /private/create-only/c-fast-202607
 ```
@@ -54,7 +78,7 @@ PYTHONPATH=scripts python3 \
 
 验证器重新运行 frozen pure producer，要求九件 artifacts exact-byte 一致，同时校验
 sealed-export lineage 与 evidence hash binding。任一缺日、month-end 缺失、execution
-receipt 未提交、manifest/revision 漂移、contract registry 冲突、旧主合约缺少
+open observation/tick export 漂移、manifest/revision 漂移、contract registry 冲突、旧主合约缺少
 execution-day official open、DTE 不安全或字节被修改都会 fail closed。
 发布中途失败时保留 create-only 的 partial 目录供审计，不清理或覆盖父目录中的
 任何既有对象；operator 必须隔离该目录并换一个全新输出名重跑。
