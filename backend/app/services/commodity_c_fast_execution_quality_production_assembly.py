@@ -476,11 +476,19 @@ class CommodityCFastExecutionQualityProductionAssembly:
                         fanout.refresh_preverified_subscription(
                             worker=worker,
                             revalidation_receipt=receipt,
+                            active_until_utc=min(
+                                receipt.valid_until_utc,
+                                self._admission.admission.expires_at_utc,
+                            ),
                         )
                     else:
                         fanout.bind_preverified_subscription(
                             worker=worker,
                             revalidation_receipt=receipt,
+                            active_until_utc=min(
+                                receipt.valid_until_utc,
+                                self._admission.admission.expires_at_utc,
+                            ),
                         )
                     self._verified_inputs_sha256 = (
                         verified_inputs.verified_inputs_sha256
@@ -619,6 +627,23 @@ class CommodityCFastExecutionQualityProductionAssembly:
             if self._questdb_readonly_adapter is not None
             else None
         )
+        lifecycle_window_current = False
+        if admission is not None:
+            try:
+                now = self._runtime.clock()
+                receipt = self._runtime.current_revalidation_receipt()
+                lifecycle_window_current = bool(
+                    now.tzinfo is not None
+                    and now.utcoffset() is not None
+                    and now.utcoffset().total_seconds() == 0
+                    and receipt.receipt_sha256 == self._projection_receipt_sha256
+                    and receipt.revalidated_at_utc <= now < receipt.valid_until_utc
+                    and admission.admission.not_before_utc
+                    <= now
+                    < admission.admission.expires_at_utc
+                )
+            except Exception:
+                lifecycle_window_current = False
         tick_runtime_ready = bool(
             worker_status is not None
             and worker_status["blocked_fail_closed"] is False
@@ -640,7 +665,8 @@ class CommodityCFastExecutionQualityProductionAssembly:
         )
         questdb_receipt = self._questdb_readonly_receipt
         questdb_readonly_capability_verified = bool(
-            questdb_status is not None
+            lifecycle_window_current
+            and questdb_status is not None
             and questdb_status["blocked_fail_closed"] is False
             and questdb_status["server_enforced_readonly_verified"] is True
             and questdb_receipt is not None
@@ -680,6 +706,7 @@ class CommodityCFastExecutionQualityProductionAssembly:
             "assembly_last_error": self._last_error,
             "readonly_component_binding_error": self._component_binding_error,
             "signed_runtime_admission_verified": admission is not None,
+            "signed_runtime_window_current": lifecycle_window_current,
             "runtime_admission_id": (
                 admission.admission.admission_id if admission is not None else None
             ),

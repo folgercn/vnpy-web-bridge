@@ -236,18 +236,26 @@ def bind_test_questdb_adapter(
 
 
 class FakeAdmissionVerifier:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        clock=lambda: NOW,
+        lifetime: timedelta = timedelta(minutes=10),
+    ) -> None:
         self.receipts: list[str] = []
+        self.clock = clock
+        self.lifetime = lifetime
 
     def verify_for_revalidation(self, receipt):
         self.receipts.append(receipt.receipt_sha256)
+        now = self.clock()
         return SimpleNamespace(
             admission=SimpleNamespace(
                 admission_id=(
                     "cfast-execution-quality-runtime-admission-v1-" + "a" * 64
                 ),
-                not_before_utc=NOW - timedelta(minutes=1),
-                expires_at_utc=NOW + timedelta(minutes=10),
+                not_before_utc=now - timedelta(minutes=1),
+                expires_at_utc=now + self.lifetime,
             ),
             admission_raw_sha256="b" * 64,
         )
@@ -908,6 +916,74 @@ def test_reload_questdb_failure_drains_only_c_fast_tick_runtime(
     assert failed["tick_fanout"]["tick_input_accepting"] is False
     assert failed["questdb_readonly_evidence"]["blocked_fail_closed"] is True
     assert underlying_runtime.status()["full_revalidation_complete"] is False
+
+
+@pytest.mark.parametrize(
+    ("admission_lifetime", "advance"),
+    (
+        (timedelta(minutes=1), timedelta(minutes=2)),
+        (timedelta(minutes=5), timedelta(minutes=6)),
+    ),
+)
+def test_silent_signed_window_expiry_rejects_intake_and_reload_recovers(
+    tmp_path: Path,
+    admission_lifetime: timedelta,
+    advance: timedelta,
+) -> None:
+    now = [NOW]
+    settings = Settings(commodity_c_fast_execution_quality_runtime_enabled=True)
+    underlying_runtime = CommodityCFastExecutionQualityRuntime(
+        settings=settings,
+        clock=lambda: now[0],
+    )
+    underlying_runtime.bind_full_revalidation_verifier(verified_revalidation)
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    source = SIDECAR.sidecar(source_root)
+    worker = PreverifiedTickHorizonWorker(source)
+    fanout = CommodityCFastExecutionQualityTickFanout(
+        settings=settings,
+        clock=lambda: now[0],
+        session_id="assembly-silent-expiry-session",
+    )
+    assembly = CommodityCFastExecutionQualityProductionAssembly(
+        runtime=underlying_runtime,
+        admission_verifier=FakeAdmissionVerifier(
+            clock=lambda: now[0],
+            lifetime=admission_lifetime,
+        ),
+    )
+    assembly.bind_readonly_components(
+        sidecar=source,
+        repository=CommodityCFastExecutionQualityReadonlyRepository(source),
+        evidence_export_store=export_store(tmp_path),
+    )
+    assembly.bind_tick_runtime_components(
+        horizon_worker=worker,
+        tick_fanout=fanout,
+    )
+    bind_test_questdb_adapter(assembly, tmp_path)
+
+    assert assembly.start()["runtime_active"] is True
+    now[0] += advance
+
+    expired = assembly.status()
+    assert expired["signed_runtime_window_current"] is False
+    assert expired["runtime_active"] is False
+    assert expired["execution_quality_implemented"] is False
+    assert expired["capabilities"]["questdb_evidence_adapter_bound"] is False
+    assert expired["tick_fanout"]["blocked_fail_closed"] is True
+    assert expired["tick_fanout"]["tick_input_accepting"] is False
+    assert fanout.offer_tick({})["offer_state"] == "REJECTED_BLOCKED_FAIL_CLOSED"
+
+    recovered = assembly.reload()
+    assert recovered["signed_runtime_window_current"] is True
+    assert recovered["runtime_active"] is True
+    assert recovered["execution_quality_implemented"] is True
+    assert recovered["capabilities"]["questdb_evidence_adapter_bound"] is True
+    assert recovered["tick_fanout"]["blocked_fail_closed"] is False
+    assert recovered["tick_fanout"]["tick_input_accepting"] is True
+    assembly.stop()
 
 
 def test_assembly_and_repository_have_zero_trading_capability() -> None:
