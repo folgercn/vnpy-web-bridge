@@ -925,7 +925,7 @@ def test_actual_v4_rejects_rehashed_external_or_substituted_leg(
     )
 
 
-def test_actual_v4_rejects_blank_trade_reference_and_order_rejection() -> (
+def test_actual_v4_allows_joined_blank_trade_reference_and_rejects_order_rejection() -> (
     None
 ):
     blank_reference, plan_hash = source_inputs_with_verified_actual()
@@ -934,9 +934,7 @@ def test_actual_v4_rejects_blank_trade_reference_and_order_rejection() -> (
         "trades"
     ][0]["reference"] = ""
     rehash_verified_session_archive(blank_actual)
-    assert_error(
-        "INVALID_ACTUAL_SOURCE_FACTS",
-        build,
+    build(
         payloads=blank_reference,
         plan_hash=plan_hash,
     )

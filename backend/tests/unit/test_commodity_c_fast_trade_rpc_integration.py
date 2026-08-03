@@ -209,7 +209,7 @@ def test_real_trade_rpc_lock_disable_preempts_child_send(
 
 
 @pytest.mark.parametrize("mutation", ["stale_clock", "quote_update"])
-def test_real_trade_rpc_final_guard_rejects_changed_bound_quote(
+def test_real_trade_rpc_final_guard_revalidates_fresh_quote_updates(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     mutation: str,
@@ -282,9 +282,16 @@ def test_real_trade_rpc_final_guard_rejects_changed_bound_quote(
 
     start_thread.join(5)
     assert not start_thread.is_alive()
-    assert len(start_errors) == 1
-    assert isinstance(start_errors[0], CommoditySimNowStateError)
-    assert not client.send_attempts
+    if mutation == "stale_clock":
+        assert len(start_errors) == 1
+        assert isinstance(start_errors[0], CommoditySimNowStateError)
+        assert not client.send_attempts
+    else:
+        assert not start_errors
+        assert len(client.send_attempts) == 1
+        revalidation = intent["pre_rpc_quote_revalidation"]
+        assert revalidation["quote_changed"] is True
+        assert revalidation["more_aggressive_than_current"] is False
     assert intent["dispatch_quote"] == bound_quote
     assert intent["price"] == bound_price
 

@@ -7,11 +7,11 @@
   "consumer": {
     "audited_main_commit": "50b3674baf5ba4206be4de73b4c5ee6818aab269",
     "path": "scripts/commodity_c_fast_pure_producer_kernel.py",
-    "source_sha256": "23539d801d6ee9ddccd0371c3793282eeedf63b13dd442f9447adc795bc1d995",
+    "source_sha256": "d107564e4a79955cec0c5f6300f941eabbf7efd3511b82c589f406bf341eb8b8",
     "related_source_sha256": {
       "scripts/commodity_static_core_equal_formula_v1.py": "653aa9d43f0e9f3aeb78e2a53f27781b48d6a20fcf8e59996af204d1433a5b4e",
-      "scripts/commodity_static_core_equal_pure_producer.py": "a31167a034763f443b020c21c4d10d8a9f39729b69dec4e51d644c9701e8ea65",
-      "scripts/commodity_relative_vol_snapshot_producer.py": "a230d4196b2c095b32f2490031fc4c75eb84c96be5955a0427e9ef108740e588"
+      "scripts/commodity_static_core_equal_pure_producer.py": "4fe6f6d8f5ec7185ff8646dae1dce47ae5981f3390955cb06fab03938c71b597",
+      "scripts/commodity_relative_vol_snapshot_producer.py": "15ebddccb63677c7bb32883f153fa4d230d594230cb28cd4092c085927ef4dd0"
     },
     "sector_map_id": "COMMODITY_FROZEN_SECTOR_MAP_V1",
     "sector_map_sha256": "974a8eadcf947d18cc203e3c3c71f57a9b579fc556597df5bf9b3ea5b79945f7",

@@ -33,7 +33,7 @@ from zoneinfo import ZoneInfo
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-import commodity_c_fast_pure_producer_kernel as frozen
+import commodity_c_fast_pure_producer_kernel as frozen  # noqa: E402
 
 SOURCE_SCHEMA_VERSION = "commodity_relative_vol_position_manager_source_view_v1"
 SOURCE_PURPOSE = "VERIFIED_BOUNDED_PIT_BASELINE_INPUT_ONLY"
@@ -48,7 +48,7 @@ BASELINE_SCHEDULER_ID = "STATIC_CORE_EQUAL"
 SECTOR_MAP_ID = "POSITION_MANAGER_SECTOR_MAP_V1"
 GENESIS_SOURCE_MONTH = "2026-08"
 C_FAST_KERNEL_CODE_SHA256 = (
-    "23539d801d6ee9ddccd0371c3793282eeedf63b13dd442f9447adc795bc1d995"
+    "d107564e4a79955cec0c5f6300f941eabbf7efd3511b82c589f406bf341eb8b8"
 )
 
 FAST_LOOKBACK_DAYS = 21

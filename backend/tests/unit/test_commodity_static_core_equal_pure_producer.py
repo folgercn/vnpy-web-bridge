@@ -125,31 +125,31 @@ def test_golden_composite_is_deterministic_complete_and_non_authoritative() -> N
     }
     assert golden == {
         "freeze_contract": (
-            "cb986f201a613dded442abe729ae399b2e9090515379031998ca4b747a154a73"
+                "7530ef1534ed0868f5bf94287a10436eb52bc8498782ceff456f5f3b311767f2"
         ),
         "research_manifest": (
-            "f347415c5dc51b825f71dfd676e6a2f0fb9f8e070e51fb1eea7d7909459b799f"
+                "01d1ea4142fc52ca6f350224cf456747ddbebf7b124858a96562b680daa3ce00"
         ),
         "signal_evidence": (
-            "6aa346d63b8be945ca4dbc84bace19d60b5ac701344e6b9b8e9867ef92cf06b2"
+                "6cca34723524e0028167051ecb4a13cb581d7480f5df7d92a4a48cee33da88b4"
         ),
         "target_evidence": (
-            "c58f4e764e3a9dd56b0b948e157ee45cf2693938a4d75a7989d19cd75f8eee9f"
+                "0209c819e264e614e7bca1a404d8dfa398afd6d0f55a298ce0ec7b6b7d3a0e47"
         ),
         "allocation_evidence": (
-            "89de2d2e8be039da8484fc9b548273b39fabbec7fff13637bc7838d1122bd162"
+                "309a7f34499209226d2f61e7fef180a5e3486ab57f04fb7078a5451026b12839"
         ),
         "daily_roll_evidence": (
-            "1e1a2f728ea7d321762d5e03bdc5907ce207942a23de27d9030880b073ce2fbe"
+                "3187f13740d38bf75f66c9ff246dbbc6c923fc13d65a938ed2ad4ab57f8ec31e"
         ),
         "reference_price_evidence": (
-            "dc5b936982dd19a9a18df8ab5a8312ff4ec82b89fe94176215e3e01e9619fcf0"
+                "26ec39bff458ef1e252f8aa0cfa1a3054ed2bbab40a619e2005ce790a4bc3176"
         ),
         "calendar_authority": (
-            "5f31c8b8b19f86a5d585be20cda20e52385338e71fd2bd36fb447f13d1d95703"
+                "aadddf8075f53cd574242d567d213def14ef88e7435c8bf02a81e52d67bd9520"
         ),
         "contract_spec_evidence": (
-            "6e1e65e401b6a5fa6070e851e2a62224c0b72aba149a40102f5459a1be310a05"
+                "e6fe4d50cea36be1fae4659fcfea45384b9d88fbc6118521b0921e03211279e3"
         ),
     }
 
