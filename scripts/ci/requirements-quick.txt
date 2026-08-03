@@ -1,3 +1,4 @@
+-r ../../backend/requirements.txt
 jsonschema==4.26.0
 pytest==8.3.4
 ruff==0.12.7
