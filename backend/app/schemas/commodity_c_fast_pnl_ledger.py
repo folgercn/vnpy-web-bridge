@@ -1747,7 +1747,13 @@ def _replay_actual_simnow_session_archive(
         raise ValueError("execution snapshot is unavailable or incomplete")
 
     def identity(row: dict[str, Any], prefix: str) -> str:
-        return str(row.get(f"vt_{prefix}id") or row.get(f"{prefix}id") or "")
+        value = str(
+            row.get(f"vt_{prefix}id") or row.get(f"{prefix}id") or ""
+        )
+        gateway = str(row.get("gateway_name") or "")
+        if value and gateway and not value.startswith(f"{gateway}."):
+            return f"{gateway}.{value}"
+        return value
 
     order_ids = [identity(row, "order") for row in orders]
     trade_ids = [identity(row, "trade") for row in trades]
@@ -1763,12 +1769,10 @@ def _replay_actual_simnow_session_archive(
         or str(guard.get("gateway_after") or "") != resolved_gateway
         or any(
             str(row.get("gateway_name") or "") != resolved_gateway
-            or not identity(row, "order").startswith(f"{resolved_gateway}.")
             for row in orders
         )
         or any(
             str(row.get("gateway_name") or "") != resolved_gateway
-            or not identity(row, "trade").startswith(f"{resolved_gateway}.")
             for row in trades
         )
     ):
@@ -1849,7 +1853,7 @@ def _replay_actual_simnow_session_archive(
         matching_trades = [
             row
             for row in trades
-            if str(row.get("vt_orderid") or row.get("orderid") or "") == child_order_id
+            if identity(row, "order") == child_order_id
             and str(row.get("reference") or "") == child_reference
         ]
         child_filled_lots = sum(

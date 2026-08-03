@@ -739,7 +739,14 @@ def _calculate_archive_trade_charges(
         or raw.get("trades_sha256") != archive_facts.get("trades_sha256")
     ):
         raise ValueError("fee statement raw order/trade hash join mismatch")
-    trade_ids = [str(row.get("vt_tradeid") or "") for row in trades]
+    def gateway_identity(row: Mapping[str, Any], kind: str) -> str:
+        value = str(row.get(f"vt_{kind}id") or row.get(f"{kind}id") or "")
+        gateway = str(row.get("gateway_name") or "")
+        if value and gateway and not value.startswith(f"{gateway}."):
+            return f"{gateway}.{value}"
+        return value
+
+    trade_ids = [gateway_identity(row, "trade") for row in trades]
     if any(not value for value in trade_ids) or len(set(trade_ids)) != len(trade_ids):
         raise ValueError("fee trade identities are missing or duplicated")
 
@@ -750,7 +757,7 @@ def _calculate_archive_trade_charges(
     ) -> dict[str, Mapping[str, Any]]:
         result: dict[str, Mapping[str, Any]] = {}
         for row in rows:
-            order_id = str(row.get("vt_orderid") or "")
+            order_id = gateway_identity(row, "order")
             if not order_id or order_id in result:
                 raise ValueError(f"fee {label} order identity is missing or duplicated")
             result[order_id] = row
@@ -769,7 +776,6 @@ def _calculate_archive_trade_charges(
         gateway = str(order.get("gateway_name") or "")
         if (
             gateway != statement.gateway_name
-            or not order_id.startswith(f"{gateway}.")
             or str(order.get("reference") or "")
             != str(submitted_row.get("reference") or "")
             or not str(order.get("reference") or "")
@@ -786,19 +792,19 @@ def _calculate_archive_trade_charges(
 
     rules = {(rule.vt_symbol, rule.offset): rule for rule in statement.schedule.rules}
     charges: list[CommodityCFastTradeFeeChargeDTO] = []
-    for trade in sorted(trades, key=lambda row: str(row.get("vt_tradeid") or "")):
-        order_id = str(trade.get("vt_orderid") or "")
+    for trade in sorted(trades, key=lambda row: gateway_identity(row, "trade")):
+        trade_gateway = str(trade.get("gateway_name") or "")
+        if trade_gateway != statement.gateway_name:
+            raise ValueError("fee trade does not exactly join archived order")
+        order_id = gateway_identity(trade, "order")
         order = orders_by_id.get(order_id)
         if order is None:
             raise ValueError("fee trade is orphaned from archived order")
         symbol = str(trade.get("vt_symbol") or "")
         offset = _normalize_offset(trade.get("offset"))
         direction = _normalize_direction(trade.get("direction"))
-        trade_gateway = str(trade.get("gateway_name") or "")
         if (
-            trade_gateway != statement.gateway_name
-            or not str(trade.get("vt_tradeid") or "").startswith(f"{trade_gateway}.")
-            or symbol != str(order.get("vt_symbol") or "")
+            symbol != str(order.get("vt_symbol") or "")
             or direction != _normalize_direction(order.get("direction"))
             or offset != _normalize_offset(order.get("offset"))
             or not str(trade.get("reference") or "")
@@ -849,8 +855,8 @@ def _calculate_archive_trade_charges(
         )
         charges.append(
             CommodityCFastTradeFeeChargeDTO(
-                vt_tradeid=str(trade["vt_tradeid"]),
-                vt_orderid=str(trade.get("vt_orderid") or ""),
+                vt_tradeid=gateway_identity(trade, "trade"),
+                vt_orderid=order_id,
                 vt_symbol=symbol,
                 offset=offset,
                 rule_id=rule.rule_id,

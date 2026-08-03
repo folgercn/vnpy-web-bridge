@@ -507,6 +507,26 @@ def test_signed_fee_statement_exact_join_and_ledger_net_replay() -> None:
     assert entry.dispatch_allowed is False
 
 
+def test_fee_join_qualifies_raw_vnpy_ids_with_explicit_gateway() -> None:
+    sources, _ = source_inputs_with_verified_actual()
+    archive = copy.deepcopy(sources["actual"])
+    raw = archive["session_archive"]["execution"]["terminal_raw_facts"]
+    for order in raw["orders"]:
+        order["vt_orderid"] = str(order["vt_orderid"]).split(".", 1)[-1]
+    for trade in raw["trades"]:
+        trade["vt_tradeid"] = str(trade["vt_tradeid"]).split(".", 1)[-1]
+        trade["vt_orderid"] = str(trade["vt_orderid"]).split(".", 1)[-1]
+    rehash_verified_session_archive(archive)
+
+    evidence = _evidence(archive)
+
+    assert [row.vt_tradeid for row in evidence.trade_charges] == [
+        "CTP.T1",
+        "CTP.T2",
+    ]
+    assert all(row.vt_orderid.startswith("CTP.") for row in evidence.trade_charges)
+
+
 def test_self_signed_fee_binding_cannot_supply_its_own_trust_root(
     tmp_path: Path,
 ) -> None:
