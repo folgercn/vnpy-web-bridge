@@ -1833,7 +1833,7 @@ def _replay_actual_simnow_session_archive(
             row
             for row in orders
             if identity(row, "order") == child_order_id
-            and str(row.get("reference") or "") == child_reference
+            and str(row.get("reference") or "") in {"", child_reference}
         ]
         if len(matching_orders) != 1:
             raise ValueError("submitted child does not join one archived order")
@@ -1854,7 +1854,7 @@ def _replay_actual_simnow_session_archive(
             row
             for row in trades
             if identity(row, "order") == child_order_id
-            and str(row.get("reference") or "") == child_reference
+            and str(row.get("reference") or "") in {"", child_reference}
         ]
         child_filled_lots = sum(
             _strict_positive_int(trade.get("volume"), "trade volume")

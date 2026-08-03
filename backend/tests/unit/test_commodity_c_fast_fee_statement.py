@@ -513,9 +513,11 @@ def test_fee_join_qualifies_raw_vnpy_ids_with_explicit_gateway() -> None:
     raw = archive["session_archive"]["execution"]["terminal_raw_facts"]
     for order in raw["orders"]:
         order["vt_orderid"] = str(order["vt_orderid"]).split(".", 1)[-1]
+        order["reference"] = ""
     for trade in raw["trades"]:
         trade["vt_tradeid"] = str(trade["vt_tradeid"]).split(".", 1)[-1]
         trade["vt_orderid"] = str(trade["vt_orderid"]).split(".", 1)[-1]
+        trade["reference"] = ""
     rehash_verified_session_archive(archive)
 
     evidence = _evidence(archive)

@@ -777,8 +777,8 @@ def _calculate_archive_trade_charges(
         if (
             gateway != statement.gateway_name
             or str(order.get("reference") or "")
-            != str(submitted_row.get("reference") or "")
-            or not str(order.get("reference") or "")
+            not in {"", str(submitted_row.get("reference") or "")}
+            or not str(submitted_row.get("reference") or "")
             or str(order.get("vt_symbol") or "")
             != str(submitted_row.get("vt_symbol") or "")
             or _normalize_direction(order.get("direction"))
@@ -807,8 +807,11 @@ def _calculate_archive_trade_charges(
             symbol != str(order.get("vt_symbol") or "")
             or direction != _normalize_direction(order.get("direction"))
             or offset != _normalize_offset(order.get("offset"))
-            or not str(trade.get("reference") or "")
-            or str(trade.get("reference") or "") != str(order.get("reference") or "")
+            or str(trade.get("reference") or "")
+            not in {
+                "",
+                str(submitted_by_id[order_id].get("reference") or ""),
+            }
         ):
             raise ValueError("fee trade does not exactly join archived order")
         rule = rules.get((symbol, offset))
