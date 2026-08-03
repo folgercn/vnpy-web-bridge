@@ -1,0 +1,51 @@
+services:
+  web-bridge:
+    environment:
+      # This overlay remains off unless the operator explicitly sets true.
+      COMMODITY_C_FAST_EXECUTION_QUALITY_RUNTIME_ENABLED: ${COMMODITY_C_FAST_EXECUTION_QUALITY_RUNTIME_ENABLED:-false}
+      COMMODITY_C_FAST_EXECUTION_QUALITY_RUNTIME_ADMISSION_PATH: /run/c-fast-execution-quality/artifacts/runtime-admission.json
+      COMMODITY_C_FAST_EXECUTION_QUALITY_RUNTIME_ADMISSION_TRUSTED_KEYRING_PATH: /run/c-fast-execution-quality/keyrings/runtime-admission-keyring.json
+      COMMODITY_C_FAST_EXECUTION_QUALITY_ARTIFACT_CUSTODY_ROOT: /run/c-fast-execution-quality/artifacts
+      COMMODITY_C_FAST_EXECUTION_QUALITY_ARTIFACT_PATHS_JSON: >-
+        {"signed_p0_acceptance":"/run/c-fast-execution-quality/artifacts/signed_p0_acceptance.json","collection_admission":"/run/c-fast-execution-quality/artifacts/collection_admission.json","execution_policy":"/run/c-fast-execution-quality/artifacts/execution_policy.json","signed_snapshot":"/run/c-fast-execution-quality/artifacts/signed_snapshot.json","virtual_intent_plan":"/run/c-fast-execution-quality/artifacts/virtual_intent_plan.json","contract_spec_set":"/run/c-fast-execution-quality/artifacts/contract_spec_set.json","custody_binding":"/run/c-fast-execution-quality/artifacts/custody_binding.json"}
+      COMMODITY_C_FAST_EXECUTION_QUALITY_ROLE_KEYRING_PATHS_JSON: >-
+        {"signed_p0_acceptance":"/run/c-fast-execution-quality/keyrings/signed_p0_acceptance.json","collection_admission":"/run/c-fast-execution-quality/keyrings/collection_admission.json","execution_policy":"/run/c-fast-execution-quality/keyrings/execution_policy.json","signed_snapshot":"/run/c-fast-execution-quality/keyrings/signed_snapshot.json","virtual_intent_plan":"/run/c-fast-execution-quality/keyrings/virtual_intent_plan.json","contract_spec_set":"/run/c-fast-execution-quality/keyrings/contract_spec_set.json","custody_binding":"/run/c-fast-execution-quality/keyrings/custody_binding.json"}
+      COMMODITY_C_FAST_EXECUTION_QUALITY_POLICY_V1_PATH: /run/c-fast-execution-quality/artifacts/policy-v1.json
+      COMMODITY_C_FAST_EXECUTION_QUALITY_JOURNAL_ROOT: /run/c-fast-execution-quality/journal
+      COMMODITY_C_FAST_EXECUTION_QUALITY_EVIDENCE_EXPORT_ROOT: /run/c-fast-execution-quality/exports
+      COMMODITY_C_FAST_EXECUTION_QUALITY_QUESTDB_READONLY_DSN_PATH: /run/secrets/c-fast-execution-quality-readonly.dsn
+    volumes:
+      # This read-only custody root contains the exact seven signed role files,
+      # runtime admission, and policy-v1 ancestry.
+      - type: bind
+        source: ${COMMODITY_C_FAST_EXECUTION_QUALITY_ARTIFACTS_HOST_DIR:?required_for_c_fast_execution_quality}
+        target: /run/c-fast-execution-quality/artifacts
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${COMMODITY_C_FAST_EXECUTION_QUALITY_KEYRINGS_HOST_DIR:?required_for_c_fast_execution_quality}
+        target: /run/c-fast-execution-quality/keyrings
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${COMMODITY_C_FAST_EXECUTION_QUALITY_JOURNAL_HOST_DIR:?required_for_c_fast_execution_quality}
+        target: /run/c-fast-execution-quality/journal
+        read_only: false
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${COMMODITY_C_FAST_EXECUTION_QUALITY_EVIDENCE_EXPORT_HOST_DIR:?required_for_c_fast_execution_quality}
+        target: /run/c-fast-execution-quality/exports
+        read_only: false
+        bind:
+          create_host_path: false
+      - type: bind
+        # Exactly one owner-only 0600 file containing the built-in QuestDB
+        # read-only-principal DSN. It is never copied into the image.
+        source: ${COMMODITY_C_FAST_EXECUTION_QUALITY_QUESTDB_READONLY_DSN_HOST_PATH:?required_for_c_fast_execution_quality}
+        target: /run/secrets/c-fast-execution-quality-readonly.dsn
+        read_only: true
+        bind:
+          create_host_path: false

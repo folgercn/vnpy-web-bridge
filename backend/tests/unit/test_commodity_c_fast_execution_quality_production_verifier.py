@@ -1002,14 +1002,23 @@ def test_global_factory_binds_concrete_revalidator_when_config_complete(
     _revalidator, _paths, base = generation(secure_tmp_path)
     journal = secure_tmp_path / "journal"
     exports = secure_tmp_path / "exports"
+    readonly_dsn = secure_tmp_path / "questdb-readonly.dsn"
     journal.mkdir(mode=0o700)
     exports.mkdir(mode=0o700)
+    readonly_dsn.write_text("postgresql://readonly:secret@questdb:8812/qdb\n")
+    readonly_dsn.chmod(0o600)
     payload = base.model_dump()
     payload.update(
         {
             "commodity_c_fast_execution_quality_runtime_enabled": True,
             "commodity_c_fast_execution_quality_journal_root": str(journal),
             "commodity_c_fast_execution_quality_evidence_export_root": str(exports),
+            "commodity_c_fast_execution_quality_questdb_readonly_dsn_path": str(
+                readonly_dsn
+            ),
+            "commodity_c_fast_execution_quality_questdb_readonly_dsn_expected_owner_uid": (
+                os.geteuid()
+            ),
         }
     )
     settings = Settings(**payload)

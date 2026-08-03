@@ -9,6 +9,9 @@ from app.schemas.commodity_c_fast_execution_quality_runtime import (
     CFastExecutionQualityRuntimeRevalidationDTO,
     RevalidationTrigger,
 )
+from app.schemas.commodity_c_fast_execution_quality_questdb import (
+    CFastExecutionQualityQuestDBReadonlyEvidenceReceiptDTO,
+)
 from app.services.commodity_c_fast_execution_quality_evidence_export import (
     CreateOnlyExecutionQualityEvidenceExportStore,
 )
@@ -24,6 +27,9 @@ from app.services.commodity_c_fast_execution_quality_production_verifier import 
 )
 from app.services.commodity_c_fast_execution_quality_readonly_repository import (
     CommodityCFastExecutionQualityReadonlyRepository,
+)
+from app.services.commodity_c_fast_execution_quality_questdb_readonly import (
+    CommodityCFastExecutionQualityQuestDBReadonlyEvidenceAdapter,
 )
 from app.services.commodity_c_fast_execution_quality_runtime import (
     CommodityCFastExecutionQualityRuntime,
@@ -115,6 +121,12 @@ class CommodityCFastExecutionQualityProductionAssembly:
         ) = None
         self._horizon_worker: PreverifiedTickHorizonWorker | None = None
         self._tick_fanout: CommodityCFastExecutionQualityTickFanout | None = None
+        self._questdb_readonly_adapter: (
+            CommodityCFastExecutionQualityQuestDBReadonlyEvidenceAdapter | None
+        ) = None
+        self._questdb_readonly_receipt: (
+            CFastExecutionQualityQuestDBReadonlyEvidenceReceiptDTO | None
+        ) = None
         self._registered_input_identity: (
             tuple[str, str, str, tuple[str, ...]] | None
         ) = None
@@ -162,6 +174,30 @@ class CommodityCFastExecutionQualityProductionAssembly:
             self._sidecar = sidecar
             self._readonly_repository = repository
             self._evidence_export_store = evidence_export_store
+            self._component_binding_error = None
+
+    def bind_questdb_readonly_evidence_adapter(
+        self,
+        adapter: CommodityCFastExecutionQualityQuestDBReadonlyEvidenceAdapter,
+    ) -> None:
+        if (
+            type(adapter)
+            is not CommodityCFastExecutionQualityQuestDBReadonlyEvidenceAdapter
+        ):
+            raise TypeError("PRODUCTION_ASSEMBLY_QUESTDB_ADAPTER_TYPE_INVALID")
+        with self._lock:
+            if self._started:
+                raise CFastExecutionQualityProductionAssemblyError(
+                    "PRODUCTION_ASSEMBLY_QUESTDB_ADAPTER_BIND_AFTER_START_FORBIDDEN"
+                )
+            if (
+                self._questdb_readonly_adapter is not None
+                and self._questdb_readonly_adapter is not adapter
+            ):
+                raise CFastExecutionQualityProductionAssemblyError(
+                    "PRODUCTION_ASSEMBLY_QUESTDB_ADAPTER_ALREADY_BOUND"
+                )
+            self._questdb_readonly_adapter = adapter
             self._component_binding_error = None
 
     def bind_tick_runtime_components(
@@ -222,6 +258,7 @@ class CommodityCFastExecutionQualityProductionAssembly:
             self._projection_revalidation_generation = None
             self._projection_receipt_sha256 = None
             self._verified_inputs_sha256 = None
+            self._questdb_readonly_receipt = None
             self._state = "STOPPED_NO_CAPABILITY"
             self._last_error = None
             if self._tick_fanout is not None:
@@ -233,14 +270,14 @@ class CommodityCFastExecutionQualityProductionAssembly:
                         )
                 except Exception as exc:
                     self._state = "BLOCKED_TICK_FANOUT_STOP_FAILED"
-                    self._last_error = str(
-                        getattr(exc, "code", type(exc).__name__)
-                    )
+                    self._last_error = str(getattr(exc, "code", type(exc).__name__))
             try:
                 self._runtime.stop()
             except Exception as exc:
                 self._state = "BLOCKED_LIFECYCLE_OPERATION_FAILED"
                 self._last_error = str(getattr(exc, "code", type(exc).__name__))
+            if self._questdb_readonly_adapter is not None:
+                self._questdb_readonly_adapter.stop()
             return self._status_locked()
 
     def status(self) -> dict[str, object]:
@@ -288,6 +325,7 @@ class CommodityCFastExecutionQualityProductionAssembly:
             not in {
                 "SIGNED_ADMISSION_VERIFIED_ASSEMBLY_COMPONENTS_INCOMPLETE",
                 "SIGNED_ADMISSION_VERIFIED_READONLY_TICK_RUNTIME_BOUND",
+                "SIGNED_ADMISSION_VERIFIED_PRODUCTION_READONLY_RUNTIME_ACTIVE",
             }
             or self._last_export_receipt is None
             or self._projection_revalidation_generation is None
@@ -331,6 +369,9 @@ class CommodityCFastExecutionQualityProductionAssembly:
             self._projection_revalidation_generation = None
             self._projection_receipt_sha256 = None
             self._verified_inputs_sha256 = None
+            self._questdb_readonly_receipt = None
+            if self._questdb_readonly_adapter is not None:
+                self._questdb_readonly_adapter.stop()
             if self._tick_fanout is not None:
                 try:
                     fanout_stop = self._tick_fanout.stop()
@@ -340,9 +381,7 @@ class CommodityCFastExecutionQualityProductionAssembly:
                         )
                 except Exception as exc:
                     self._state = "BLOCKED_TICK_FANOUT_STOP_FAILED"
-                    self._last_error = str(
-                        getattr(exc, "code", type(exc).__name__)
-                    )
+                    self._last_error = str(getattr(exc, "code", type(exc).__name__))
                     return self._status_locked()
             operation = {
                 "startup": self._runtime.start,
@@ -448,9 +487,7 @@ class CommodityCFastExecutionQualityProductionAssembly:
                     )
                 except Exception as exc:
                     self._state = "BLOCKED_TYPED_TICK_RUNTIME_ASSEMBLY_FAILED"
-                    self._last_error = str(
-                        getattr(exc, "code", type(exc).__name__)
-                    )
+                    self._last_error = str(getattr(exc, "code", type(exc).__name__))
                     return self._status_locked()
             try:
                 repository_status = repository.recover()
@@ -481,6 +518,37 @@ class CommodityCFastExecutionQualityProductionAssembly:
                 self._state = "BLOCKED_READONLY_EXPORT_SNAPSHOT_DRIFT"
                 self._last_error = "READONLY_REPOSITORY_EXPORT_TIP_MISMATCH"
                 return self._status_locked()
+            try:
+                exported = export_store.load(
+                    str(export_receipt["artifact_filename"]),
+                    source=source,
+                )
+            except Exception as exc:
+                self._state = "BLOCKED_EVIDENCE_EXPORT_RELOAD_FAILED"
+                self._last_error = str(getattr(exc, "code", type(exc).__name__))
+                return self._status_locked()
+            adapter = self._questdb_readonly_adapter
+            if adapter is not None:
+                try:
+                    self._questdb_readonly_receipt = adapter.verify(
+                        revalidation_receipt=receipt,
+                        repository_status=repository_status,
+                        evidence_export=exported,
+                    )
+                except Exception as exc:
+                    adapter_error = str(getattr(exc, "code", type(exc).__name__))
+                    drain_error = self._drain_after_adapter_failure_locked()
+                    self._state = (
+                        "BLOCKED_QUESTDB_READONLY_EVIDENCE_DRAIN_FAILED"
+                        if drain_error is not None
+                        else "BLOCKED_QUESTDB_READONLY_EVIDENCE_FAILED"
+                    )
+                    self._last_error = (
+                        f"{adapter_error}|{drain_error}"
+                        if drain_error is not None
+                        else adapter_error
+                    )
+                    return self._status_locked()
             self._last_export_receipt = export_receipt
             self._projection_revalidation_generation = int(
                 runtime_status["revalidation_generation"]
@@ -499,19 +567,37 @@ class CommodityCFastExecutionQualityProductionAssembly:
                         )
                 except Exception as exc:
                     self._state = "BLOCKED_TICK_FANOUT_START_FAILED"
-                    self._last_error = str(
-                        getattr(exc, "code", type(exc).__name__)
-                    )
+                    self._last_error = str(getattr(exc, "code", type(exc).__name__))
                     return self._status_locked()
                 self._state = (
-                    "SIGNED_ADMISSION_VERIFIED_READONLY_TICK_RUNTIME_BOUND"
+                    "SIGNED_ADMISSION_VERIFIED_PRODUCTION_READONLY_RUNTIME_ACTIVE"
+                    if self._questdb_readonly_receipt is not None
+                    else "SIGNED_ADMISSION_VERIFIED_READONLY_TICK_RUNTIME_BOUND"
                 )
             else:
-                self._state = (
-                    "SIGNED_ADMISSION_VERIFIED_ASSEMBLY_COMPONENTS_INCOMPLETE"
-                )
+                self._state = "SIGNED_ADMISSION_VERIFIED_ASSEMBLY_COMPONENTS_INCOMPLETE"
             self._last_error = None
             return self._status_locked()
+
+    def _drain_after_adapter_failure_locked(self) -> str | None:
+        """Stop this runtime's intake after a read-only verification failure."""
+
+        failures: list[str] = []
+        if self._tick_fanout is not None:
+            try:
+                status = self._tick_fanout.stop()
+                if (
+                    status["worker_thread_running"] is True
+                    or status["tick_input_accepting"] is True
+                ):
+                    failures.append("TICK_FANOUT_NOT_DRAINED")
+            except Exception as exc:
+                failures.append(str(getattr(exc, "code", type(exc).__name__)))
+        try:
+            self._runtime.stop()
+        except Exception as exc:
+            failures.append(str(getattr(exc, "code", type(exc).__name__)))
+        return ",".join(failures) if failures else None
 
     def _status_locked(self) -> dict[str, object]:
         runtime_status = self._runtime.status()
@@ -523,12 +609,15 @@ class CommodityCFastExecutionQualityProductionAssembly:
         )
         export_receipt = self._last_export_receipt
         worker_status = (
-            self._horizon_worker.status()
-            if self._horizon_worker is not None
-            else None
+            self._horizon_worker.status() if self._horizon_worker is not None else None
         )
         fanout_status = (
             self._tick_fanout.status() if self._tick_fanout is not None else None
+        )
+        questdb_status = (
+            self._questdb_readonly_adapter.status()
+            if self._questdb_readonly_adapter is not None
+            else None
         )
         tick_runtime_ready = bool(
             worker_status is not None
@@ -548,6 +637,37 @@ class CommodityCFastExecutionQualityProductionAssembly:
                 self._readonly_repository,
                 self._evidence_export_store,
             )
+        )
+        questdb_receipt = self._questdb_readonly_receipt
+        questdb_readonly_capability_verified = bool(
+            questdb_status is not None
+            and questdb_status["blocked_fail_closed"] is False
+            and questdb_status["server_enforced_readonly_verified"] is True
+            and questdb_receipt is not None
+            and questdb_receipt.revalidation_receipt_sha256
+            == self._projection_receipt_sha256
+        )
+        evidence_checkpoint_current = bool(
+            questdb_readonly_capability_verified
+            and repository_status is not None
+            and questdb_receipt.source_journal_record_count
+            == repository_status["source_journal_record_count"]
+            and questdb_receipt.source_journal_tip_record_hash
+            == repository_status["source_journal_tip_record_hash"]
+            and export_receipt is not None
+            and questdb_receipt.export_sha256 == export_receipt["export_sha256"]
+            and worker_status is not None
+            and questdb_receipt.source_journal_record_count
+            == worker_status["source_journal_record_count"]
+            and questdb_receipt.source_journal_tip_record_hash
+            == worker_status["source_journal_tip_record_hash"]
+        )
+        complete_readonly_capability = bool(
+            self._state
+            == "SIGNED_ADMISSION_VERIFIED_PRODUCTION_READONLY_RUNTIME_ACTIVE"
+            and tick_runtime_ready
+            and durable_components_bound
+            and questdb_readonly_capability_verified
         )
         return {
             **runtime_status,
@@ -570,6 +690,13 @@ class CommodityCFastExecutionQualityProductionAssembly:
             "tick_runtime_ready": tick_runtime_ready,
             "horizon_worker": worker_status,
             "tick_fanout": fanout_status,
+            "questdb_readonly_evidence": questdb_status,
+            # This is a local checkpoint freshness signal. Tick ingestion may
+            # advance the create-only journal after lifecycle verification;
+            # that does not invalidate the independently verified read-only
+            # QuestDB capability, but callers must not mistake the last export
+            # for the live tip.
+            "evidence_checkpoint_current": evidence_checkpoint_current,
             "readonly_repository": repository_status,
             "evidence_export": {
                 "store_bound": self._evidence_export_store is not None,
@@ -585,8 +712,8 @@ class CommodityCFastExecutionQualityProductionAssembly:
                 ),
                 "immutable_create_only": True,
             },
-            "runtime_active": False,
-            "execution_quality_implemented": False,
+            "runtime_active": complete_readonly_capability,
+            "execution_quality_implemented": complete_readonly_capability,
             "capabilities": {
                 **dict(runtime_status["capabilities"]),
                 "signed_runtime_admission_verifier_bound": True,
@@ -597,8 +724,7 @@ class CommodityCFastExecutionQualityProductionAssembly:
                 ),
                 "tick_subscription_built": bool(
                     fanout_status is not None
-                    and fanout_status["local_exact_contract_subscription_built"]
-                    is True
+                    and fanout_status["local_exact_contract_subscription_built"] is True
                 ),
                 "horizon_worker_built": bool(
                     worker_status is not None
@@ -607,7 +733,9 @@ class CommodityCFastExecutionQualityProductionAssembly:
                 "tick_runtime_ready": tick_runtime_ready,
                 "durable_sidecar_runtime_bound": durable_components_bound,
                 "readonly_repository_bound": self._readonly_repository is not None,
-                "questdb_evidence_adapter_bound": False,
+                "questdb_evidence_adapter_bound": (
+                    questdb_readonly_capability_verified
+                ),
                 "evidence_export_store_bound": self._evidence_export_store is not None,
                 "api_projection_bound": durable_components_bound,
                 "monitoring_projection_bound": True,
@@ -684,6 +812,20 @@ def _build_production_assembly() -> CommodityCFastExecutionQualityProductionAsse
         assembly.bind_tick_runtime_components(
             horizon_worker=PreverifiedTickHorizonWorker(sidecar),
             tick_fanout=commodity_c_fast_execution_quality_tick_fanout,
+        )
+        assembly.bind_questdb_readonly_evidence_adapter(
+            CommodityCFastExecutionQualityQuestDBReadonlyEvidenceAdapter(
+                dsn_path=Path(
+                    settings.commodity_c_fast_execution_quality_questdb_readonly_dsn_path
+                ),
+                signed_p0_path=artifact_paths["signed_p0_acceptance"],
+                expected_dsn_owner_uid=(
+                    settings.commodity_c_fast_execution_quality_questdb_readonly_dsn_expected_owner_uid
+                ),
+                expected_p0_owner_uid=(
+                    settings.commodity_c_fast_execution_quality_artifact_expected_owner_uid
+                ),
+            )
         )
         # Publish the verifier capability only after every read-only component
         # has been constructed and bound successfully.  A later constructor
