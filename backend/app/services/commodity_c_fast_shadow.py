@@ -47,6 +47,14 @@ CFastContractLoader = Callable[
 ]
 MAX_CLOCK_SKEW = timedelta(minutes=5)
 
+
+def _timestamp_belongs_to_execution_day(value: datetime, execution_day) -> bool:
+    local = value.astimezone(CHINA_TZ)
+    day_gap = (execution_day - local.date()).days
+    return local.date() == execution_day or bool(
+        local.hour >= 20 and 1 <= day_gap <= 3
+    )
+
 # Plane-local copy of the shared immutable identity.  This candidate still
 # does not import CommoditySimNowService or mutable execution-service state.
 C_FAST_SECTOR_MAP_ID = COMMODITY_FROZEN_SECTOR_MAP_V1_ID
@@ -620,7 +628,7 @@ class CommodityCFastShadowService:
             raise CFastShadowInvalidError("SNAPSHOT_CREATED_TIMEZONE_MISSING")
         if created < cutoff:
             raise CFastShadowInvalidError("SNAPSHOT_CREATED_BEFORE_INPUT_CUTOFF")
-        if created.astimezone(CHINA_TZ).date() != snapshot.execution_day:
+        if not _timestamp_belongs_to_execution_day(created, snapshot.execution_day):
             raise CFastShadowInvalidError("SNAPSHOT_CREATED_DAY_MISMATCH")
         now = self._clock()
         if now.tzinfo is None or now.utcoffset() is None:
@@ -639,7 +647,7 @@ class CommodityCFastShadowService:
         now = self._clock()
         if now.tzinfo is None or now.utcoffset() is None:
             raise CFastShadowInvalidError("SERVICE_CLOCK_TIMEZONE_MISSING")
-        if now.astimezone(CHINA_TZ).date() != snapshot.execution_day:
+        if not _timestamp_belongs_to_execution_day(now, snapshot.execution_day):
             raise CFastShadowInvalidError(
                 "SNAPSHOT_ACCEPTANCE_WINDOW_CLOSED"
             )
@@ -677,7 +685,7 @@ class CommodityCFastShadowService:
         ):
             raise CFastShadowInvalidError("EXECUTION_PERMIT_WINDOW_TOO_LARGE")
         if any(
-            value.astimezone(CHINA_TZ).date() != snapshot.execution_day
+            not _timestamp_belongs_to_execution_day(value, snapshot.execution_day)
             for value in values
         ):
             raise CFastShadowInvalidError("SHAKEDOWN_DAY_MISMATCH")
@@ -794,7 +802,9 @@ class CommodityCFastShadowService:
             raise CFastShadowInvalidError(
                 "REFERENCE_PRICE_TIMEZONE_MISSING"
             )
-        if observed_at.astimezone(CHINA_TZ).date() != snapshot.execution_day:
+        if not _timestamp_belongs_to_execution_day(
+            observed_at, snapshot.execution_day
+        ):
             raise CFastShadowInvalidError("REFERENCE_PRICE_DAY_MISMATCH")
         if observed_at > snapshot.snapshot_created_at_utc:
             raise CFastShadowInvalidError(
