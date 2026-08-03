@@ -90,6 +90,7 @@ class CommodityCFastExecutionQualityTickFanout:
         self._accepting = False
         self._worker: PreverifiedTickHorizonWorker | None = None
         self._receipt: CFastExecutionQualityRuntimeRevalidationDTO | None = None
+        self._active_until_utc: datetime | None = None
         self._exact_contracts: frozenset[str] = frozenset()
         self._subscription_generation = 0
         self._state = (
@@ -112,12 +113,14 @@ class CommodityCFastExecutionQualityTickFanout:
         *,
         worker: PreverifiedTickHorizonWorker,
         revalidation_receipt: CFastExecutionQualityRuntimeRevalidationDTO,
+        active_until_utc: datetime | None = None,
     ) -> dict[str, object]:
         receipt = self._validate_subscription_candidate(
             worker,
             revalidation_receipt,
             require_frozen=False,
         )
+        active_until = self._validate_active_until(receipt, active_until_utc)
         with self._lock:
             if self._thread is not None:
                 raise CFastExecutionQualityTickFanoutError(
@@ -151,6 +154,7 @@ class CommodityCFastExecutionQualityTickFanout:
                 )
             self._worker = worker
             self._receipt = receipt
+            self._active_until_utc = active_until
             self._exact_contracts = frozenset(receipt.exact_contracts)
             self._subscription_generation = 1
             self._state = "PREVERIFIED_EXACT_CONTRACT_SUBSCRIPTION_BOUND_NOT_STARTED"
@@ -162,6 +166,7 @@ class CommodityCFastExecutionQualityTickFanout:
         *,
         worker: PreverifiedTickHorizonWorker,
         revalidation_receipt: CFastExecutionQualityRuntimeRevalidationDTO,
+        active_until_utc: datetime | None = None,
     ) -> dict[str, object]:
         """Explicitly recover one stopped binding with a fresh exact receipt.
 
@@ -176,6 +181,7 @@ class CommodityCFastExecutionQualityTickFanout:
             revalidation_receipt,
             require_frozen=True,
         )
+        active_until = self._validate_active_until(receipt, active_until_utc)
         with self._lock:
             if self._thread is not None or self._accepting:
                 raise CFastExecutionQualityTickFanoutError(
@@ -198,6 +204,7 @@ class CommodityCFastExecutionQualityTickFanout:
                     "TICK_SUBSCRIPTION_CONTRACT_REFRESH_DRIFT"
                 )
             self._receipt = receipt
+            self._active_until_utc = active_until
             self._subscription_generation += 1
             self._blocked = False
             self._last_error = None
@@ -343,6 +350,14 @@ class CommodityCFastExecutionQualityTickFanout:
 
     def status(self) -> dict[str, object]:
         with self._lock:
+            if self._accepting:
+                try:
+                    active = self._receipt_active_locked(self._utc_now())
+                except CFastExecutionQualityTickFanoutError as exc:
+                    self._block_locked(exc.code)
+                else:
+                    if not active:
+                        self._block_locked("SIGNED_RUNTIME_WINDOW_EXPIRED")
             return self._status_locked()
 
     def wait_until_idle(self) -> None:
@@ -589,11 +604,33 @@ class CommodityCFastExecutionQualityTickFanout:
             )
         return receipt
 
+    def _validate_active_until(
+        self,
+        receipt: CFastExecutionQualityRuntimeRevalidationDTO,
+        active_until_utc: datetime | None,
+    ) -> datetime:
+        active_until = active_until_utc or receipt.valid_until_utc
+        if (
+            not isinstance(active_until, datetime)
+            or active_until.tzinfo is None
+            or active_until.utcoffset() is None
+            or active_until.utcoffset().total_seconds() != 0
+            or active_until <= receipt.revalidated_at_utc
+            or active_until > receipt.valid_until_utc
+            or self._utc_now() >= active_until
+        ):
+            raise CFastExecutionQualityTickFanoutError(
+                "SIGNED_RUNTIME_ACTIVE_UNTIL_INVALID"
+            )
+        return active_until
+
     def _receipt_active_locked(self, now: datetime) -> bool:
         receipt = self._receipt
         return bool(
             receipt is not None
+            and self._active_until_utc is not None
             and receipt.revalidated_at_utc <= now < receipt.valid_until_utc
+            and now < self._active_until_utc
         )
 
     def _block_locked(self, code: str) -> None:
@@ -601,6 +638,7 @@ class CommodityCFastExecutionQualityTickFanout:
         self._blocked = True
         self._state = "BLOCKED_FAIL_CLOSED"
         self._last_error = code
+        self._stop_event.set()
 
     def _offer_result(self, state: str) -> dict[str, object]:
         with self._lock:
@@ -641,6 +679,11 @@ class CommodityCFastExecutionQualityTickFanout:
             "revalidation_valid_until_utc": (
                 self._receipt.valid_until_utc.isoformat().replace("+00:00", "Z")
                 if self._receipt is not None
+                else None
+            ),
+            "signed_runtime_active_until_utc": (
+                self._active_until_utc.isoformat().replace("+00:00", "Z")
+                if self._active_until_utc is not None
                 else None
             ),
             "subscribed_exact_contracts": sorted(self._exact_contracts),

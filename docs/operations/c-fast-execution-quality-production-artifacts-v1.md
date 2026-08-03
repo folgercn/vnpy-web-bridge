@@ -147,6 +147,8 @@ COMMODITY_C_FAST_EXECUTION_QUALITY_ROLE_KEYRING_PATHS_JSON
 COMMODITY_C_FAST_EXECUTION_QUALITY_ROLE_KEYRING_RAW_SHA256_JSON
 COMMODITY_C_FAST_EXECUTION_QUALITY_POLICY_V1_PATH
 COMMODITY_C_FAST_EXECUTION_QUALITY_POLICY_V1_EXPECTED_RAW_SHA256
+COMMODITY_C_FAST_EXECUTION_QUALITY_QUESTDB_READONLY_DSN_PATH
+COMMODITY_C_FAST_EXECUTION_QUALITY_QUESTDB_READONLY_DSN_EXPECTED_OWNER_UID
 ```
 
 Both JSON settings must contain exactly the seven role names. Production keeps
@@ -154,7 +156,31 @@ the owner UID at `0`. The factory constructs and binds the journal, repository,
 export store, worker and Tick fan-out before it publishes the process-global
 verifier capability. Any earlier component failure leaves that capability
 unbound. Missing or malformed configuration is a component-binding failure,
-never a downgrade to hash-only verification.
+never a downgrade to hash-only verification. The QuestDB path must name a
+pre-created absolute regular file, owned by the expected UID with exact mode
+`0600`. It is the only DSN consumed by the execution-quality adapter: the
+market-data writer/admin `QUESTDB_PG_DSN` and writer client are deliberately
+not fallback paths.
+
+The default-off deployment overlay is
+`deployments/docker-compose.c-fast-execution-quality.yml`. It mounts the exact
+seven-role artifact custody root and all public keyrings read-only, the journal
+and create-only export roots read-write, and the independent DSN file
+read-only. The DSN must be injected from the host and must not be copied into
+an image, `.env` value, artifact, journal or export. Before rendering the
+overlay, pre-create the host roots and set:
+
+```text
+COMMODITY_C_FAST_EXECUTION_QUALITY_ARTIFACTS_HOST_DIR
+COMMODITY_C_FAST_EXECUTION_QUALITY_KEYRINGS_HOST_DIR
+COMMODITY_C_FAST_EXECUTION_QUALITY_JOURNAL_HOST_DIR
+COMMODITY_C_FAST_EXECUTION_QUALITY_EVIDENCE_EXPORT_HOST_DIR
+COMMODITY_C_FAST_EXECUTION_QUALITY_QUESTDB_READONLY_DSN_HOST_PATH
+```
+
+Keep `COMMODITY_C_FAST_EXECUTION_QUALITY_RUNTIME_ENABLED=false` during mount
+and hash-pin validation. Explicit activation still requires every existing
+admission, custody, keyring and raw-hash setting.
 
 ## Lifecycle and current boundary
 
@@ -164,10 +190,28 @@ semantics, and return the plan/snapshot receipt/policy/spec tuple from that same
 generation. Any expiry, splice, tamper, path/inode drift, key overlap or typed
 join failure stops only this sidecar.
 
-The QuestDB evidence adapter and the real M2 zero-order window are still
-separate #217 acceptance work. Therefore `runtime_active=false`,
-`execution_quality_implemented=false`, all authority flags remain false, and
-the code must not be described as completed production acceptance.
+Every startup, reload and recovery also reopens the independent DSN, connects
+as the QuestDB built-in read-only principal, reruns the exact identity and
+observable read-only configuration queries twice on the same connection, and
+joins them to the signed query-v6 P0 terminal/proof and the just-reloaded
+journal/export tip. Only that complete code capability reports
+`runtime_active=true`, `execution_quality_implemented=true`, and
+`questdb_evidence_adapter_bound=true`. Any missing private DSN, admin/writer
+principal, endpoint/config drift, stale P0, journal/export mismatch, restart or
+duplicate failure trips and drains only this C_FAST sidecar and leaves those
+flags false.
+
+The lifecycle receipt is an explicit checkpoint, not a frozen claim that its
+export remains the latest after Tick ingestion. `evidence_checkpoint_current`
+becomes false when the durable journal advances, while the independently
+verified QuestDB read-only capability remains active. `status` never reconnects
+to QuestDB implicitly; a fresh checkpoint requires explicit reload/recovery.
+
+Capability flags do not constitute M2 acceptance. The real signed M2
+zero-order execution window remains external #217 work and must still archive
+deployed SHA, exact inputs, journal tip and output hashes before the issue can
+close. All execution, order, position, database-write and production authority
+flags remain false.
 
 ## Verification
 
@@ -183,6 +227,8 @@ ruff check \
   backend/app/schemas/commodity_c_fast_execution_quality_production_artifacts.py \
   backend/app/services/commodity_c_fast_execution_quality_artifact_revalidation.py \
   backend/app/services/commodity_c_fast_execution_quality_production_assembly.py \
+  backend/app/services/commodity_c_fast_execution_quality_questdb_readonly.py \
+  backend/app/schemas/commodity_c_fast_execution_quality_questdb.py \
   backend/app/services/commodity_c_fast_execution_quality_production_verifier.py \
   backend/app/services/commodity_c_fast_l1_l5_audit_semantic_replay.py \
   backend/app/services/commodity_c_fast_permit_runtime_smoke.py \
@@ -192,6 +238,7 @@ ruff check \
   backend/tests/conftest.py \
   backend/tests/unit/test_commodity_c_fast_execution_quality_artifact_revalidation.py \
   backend/tests/unit/test_commodity_c_fast_execution_quality_production_assembly.py \
+  backend/tests/unit/test_commodity_c_fast_execution_quality_questdb_readonly.py \
   backend/tests/unit/test_commodity_c_fast_execution_quality_production_verifier.py \
   backend/tests/unit/test_commodity_c_fast_execution_quality_p0_bundle_v6.py
 ```

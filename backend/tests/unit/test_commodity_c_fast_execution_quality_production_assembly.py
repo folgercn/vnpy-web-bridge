@@ -15,6 +15,9 @@ from app.schemas.commodity_c_fast_execution_quality_runtime import (
     CFastExecutionQualityRuntimeRevalidationDTO,
     CFastExecutionQualityVerifiedRuntimeInputsDTO,
 )
+from app.schemas.commodity_c_fast_execution_quality_questdb import (
+    CFastExecutionQualityQuestDBReadonlyEvidenceReceiptDTO,
+)
 from app.services import (
     commodity_c_fast_execution_quality_production_assembly as assembly_module,
 )
@@ -28,6 +31,10 @@ from app.services.commodity_c_fast_execution_quality_horizon_worker import (
 from app.services.commodity_c_fast_execution_quality_production_assembly import (
     CFastExecutionQualityProductionAssemblyError,
     CommodityCFastExecutionQualityProductionAssembly,
+)
+from app.services.commodity_c_fast_execution_quality_questdb_readonly import (
+    CFastExecutionQualityQuestDBReadonlyError,
+    CommodityCFastExecutionQualityQuestDBReadonlyEvidenceAdapter,
 )
 from app.services.commodity_c_fast_execution_quality_artifact_revalidation import (
     ARTIFACT_ROLES,
@@ -163,19 +170,92 @@ def verified_revalidation(
     )
 
 
+def bind_test_questdb_adapter(
+    assembly: CommodityCFastExecutionQualityProductionAssembly,
+    tmp_path: Path,
+) -> CommodityCFastExecutionQualityQuestDBReadonlyEvidenceAdapter:
+    adapter = CommodityCFastExecutionQualityQuestDBReadonlyEvidenceAdapter(
+        dsn_path=(tmp_path / "unused-readonly.dsn").absolute(),
+        signed_p0_path=(tmp_path / "unused-p0.json").absolute(),
+        expected_dsn_owner_uid=0,
+        expected_p0_owner_uid=0,
+        clock=lambda: NOW,
+    )
+
+    def verify(*, revalidation_receipt, repository_status, evidence_export):
+        core = {
+            "schema_version": (
+                "commodity_c_fast_execution_quality_questdb_readonly_receipt_v1"
+            ),
+            "trigger": revalidation_receipt.trigger,
+            "verified_at_utc": NOW.isoformat().replace("+00:00", "Z"),
+            "revalidation_receipt_sha256": revalidation_receipt.receipt_sha256,
+            "signed_p0_acceptance_raw_sha256": (
+                revalidation_receipt.signed_p0_acceptance_sha256
+            ),
+            "query_v6_terminal_raw_sha256": "1" * 64,
+            "query_v6_readonly_proof_raw_sha256": "2" * 64,
+            "exact_contracts": list(revalidation_receipt.exact_contracts),
+            "endpoint_identity_sha256": "3" * 64,
+            "questdb_build_sha256": "4" * 64,
+            "observable_readonly_metadata_sha256": "5" * 64,
+            "export_generation_id": evidence_export.generation_id,
+            "export_sha256": evidence_export.export_sha256,
+            "export_artifact_raw_sha256": "6" * 64,
+            "source_journal_record_count": repository_status[
+                "source_journal_record_count"
+            ],
+            "source_journal_tip_record_hash": repository_status[
+                "source_journal_tip_record_hash"
+            ],
+            "same_connection": True,
+            "readonly_principal_verified": True,
+            "endpoint_verified": True,
+            "observable_readonly_metadata_stable": True,
+            "query_v6_terminal_join_verified": True,
+            "journal_export_join_verified": True,
+            "select_statements_executed": 4,
+            "write_probe_attempted": False,
+            "database_mutations_observed": 0,
+            "orders_sent": 0,
+            "positions_modified": 0,
+            **FALSE_AUTHORITY,
+        }
+        receipt = CFastExecutionQualityQuestDBReadonlyEvidenceReceiptDTO.model_validate(
+            {**core, "receipt_sha256": _sha256_json(core)}
+        )
+        adapter._receipt = receipt
+        adapter._generation += 1
+        adapter._blocked = False
+        adapter._last_error = None
+        return receipt
+
+    adapter.verify = verify
+    assembly.bind_questdb_readonly_evidence_adapter(adapter)
+    return adapter
+
+
 class FakeAdmissionVerifier:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        clock=lambda: NOW,
+        lifetime: timedelta = timedelta(minutes=10),
+    ) -> None:
         self.receipts: list[str] = []
+        self.clock = clock
+        self.lifetime = lifetime
 
     def verify_for_revalidation(self, receipt):
         self.receipts.append(receipt.receipt_sha256)
+        now = self.clock()
         return SimpleNamespace(
             admission=SimpleNamespace(
                 admission_id=(
                     "cfast-execution-quality-runtime-admission-v1-" + "a" * 64
                 ),
-                not_before_utc=NOW - timedelta(minutes=1),
-                expires_at_utc=NOW + timedelta(minutes=10),
+                not_before_utc=now - timedelta(minutes=1),
+                expires_at_utc=now + self.lifetime,
             ),
             admission_raw_sha256="b" * 64,
         )
@@ -269,9 +349,7 @@ def test_enabled_global_factory_blocks_incomplete_artifact_configuration(
         settings=Settings(
             commodity_c_fast_execution_quality_runtime_enabled=True,
             commodity_c_fast_execution_quality_journal_root=str(journal_root),
-            commodity_c_fast_execution_quality_evidence_export_root=str(
-                evidence_root
-            ),
+            commodity_c_fast_execution_quality_evidence_export_root=str(evidence_root),
         ),
         clock=lambda: NOW,
     )
@@ -656,9 +734,7 @@ def test_tick_runtime_rejects_hash_only_receipt_without_atomic_typed_inputs(
 
     status = assembly.start()
 
-    assert status["assembly_state"] == (
-        "BLOCKED_TYPED_TICK_RUNTIME_ASSEMBLY_FAILED"
-    )
+    assert status["assembly_state"] == ("BLOCKED_TYPED_TICK_RUNTIME_ASSEMBLY_FAILED")
     assert status["assembly_last_error"] == (
         "CURRENT_VERIFIED_RUNTIME_INPUTS_UNAVAILABLE"
     )
@@ -704,6 +780,7 @@ def test_real_rpc_tick_reaches_same_assembly_journal_and_all_horizons(
         horizon_worker=worker,
         tick_fanout=fanout,
     )
+    bind_test_questdb_adapter(assembly, tmp_path)
     rpc = VnpyRpcService()
     rpc.bind_readonly_tick_listener(fanout.offer_tick)
     persisted: list[dict] = []
@@ -715,13 +792,16 @@ def test_real_rpc_tick_reaches_same_assembly_journal_and_all_horizons(
     status = assembly.start()
 
     assert status["assembly_state"] == (
-        "SIGNED_ADMISSION_VERIFIED_READONLY_TICK_RUNTIME_BOUND"
+        "SIGNED_ADMISSION_VERIFIED_PRODUCTION_READONLY_RUNTIME_ACTIVE"
     )
     assert status["tick_runtime_ready"] is True
     assert status["capabilities"]["tick_input_bound"] is True
     assert status["capabilities"]["tick_subscription_built"] is True
     assert status["capabilities"]["horizon_worker_built"] is True
-    assert status["capabilities"]["questdb_evidence_adapter_bound"] is False
+    assert status["capabilities"]["questdb_evidence_adapter_bound"] is True
+    assert status["runtime_active"] is True
+    assert status["execution_quality_implemented"] is True
+    assert status["evidence_checkpoint_current"] is True
 
     class TickEvent:
         type = "eTick.cu2612.SHFE"
@@ -735,19 +815,19 @@ def test_real_rpc_tick_reaches_same_assembly_journal_and_all_horizons(
             "vt_symbol": "cu2612.SHFE",
             "datetime": now[0].isoformat(),
             "volume": 100 + horizon_ms,
-            **{
-                f"bid_price_{level}": 1_001 - level
-                for level in range(1, 6)
-            },
-            **{
-                f"ask_price_{level}": 1_001 + level
-                for level in range(1, 6)
-            },
+            **{f"bid_price_{level}": 1_001 - level for level in range(1, 6)},
+            **{f"ask_price_{level}": 1_001 + level for level in range(1, 6)},
             **{f"bid_volume_{level}": 2 for level in range(1, 6)},
             **{f"ask_volume_{level}": 2 for level in range(1, 6)},
         }
         rpc.handle_event("", TickEvent())
         fanout.wait_until_idle()
+        if horizon_ms == 0:
+            after_first_tick = assembly.status()
+            assert after_first_tick["runtime_active"] is True
+            assert after_first_tick["execution_quality_implemented"] is True
+            assert after_first_tick["evidence_checkpoint_current"] is False
+            assert after_first_tick["tick_fanout"]["worker_thread_running"] is True
 
     worker_status = worker.status()
     state = source.recover()
@@ -760,13 +840,16 @@ def test_real_rpc_tick_reaches_same_assembly_journal_and_all_horizons(
     }
     assert len(state.intents) == 1
     assert len(state.evidence) == 6
-    assert assembly.status()["runtime_active"] is False
-    assert assembly.status()["execution_quality_implemented"] is False
+    assert assembly.status()["runtime_active"] is True
+    assert assembly.status()["execution_quality_implemented"] is True
+    assert assembly.status()["evidence_checkpoint_current"] is False
     assert all(assembly.status()[field] is False for field in FALSE_AUTHORITY)
 
     reloaded = assembly.reload()
     assert reloaded["tick_runtime_ready"] is True
     assert reloaded["tick_fanout"]["subscription_generation"] == 2
+    assert reloaded["runtime_active"] is True
+    assert reloaded["evidence_checkpoint_current"] is True
     assert worker.status()["registered_intent_count"] == 1
     assert len(source.recover().intents) == 1
 
@@ -778,9 +861,129 @@ def test_real_rpc_tick_reaches_same_assembly_journal_and_all_horizons(
     recovered = assembly.recover()
     assert recovered["tick_runtime_ready"] is True
     assert recovered["tick_fanout"]["subscription_generation"] == 3
-    assert recovered["runtime_active"] is False
-    assert recovered["execution_quality_implemented"] is False
+    assert recovered["runtime_active"] is True
+    assert recovered["execution_quality_implemented"] is True
+    assert recovered["evidence_checkpoint_current"] is True
     assert assembly.stop()["assembly_state"] == "STOPPED_NO_CAPABILITY"
+
+
+def test_reload_questdb_failure_drains_only_c_fast_tick_runtime(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(commodity_c_fast_execution_quality_runtime_enabled=True)
+    underlying_runtime = CommodityCFastExecutionQualityRuntime(
+        settings=settings,
+        clock=lambda: NOW,
+    )
+    underlying_runtime.bind_full_revalidation_verifier(verified_revalidation)
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    source = SIDECAR.sidecar(source_root)
+    worker = PreverifiedTickHorizonWorker(source)
+    fanout = CommodityCFastExecutionQualityTickFanout(
+        settings=settings,
+        clock=lambda: NOW,
+        session_id="assembly-questdb-failure-session",
+    )
+    assembly = CommodityCFastExecutionQualityProductionAssembly(
+        runtime=underlying_runtime,
+        admission_verifier=FakeAdmissionVerifier(),
+    )
+    assembly.bind_readonly_components(
+        sidecar=source,
+        repository=CommodityCFastExecutionQualityReadonlyRepository(source),
+        evidence_export_store=export_store(tmp_path),
+    )
+    assembly.bind_tick_runtime_components(
+        horizon_worker=worker,
+        tick_fanout=fanout,
+    )
+    adapter = bind_test_questdb_adapter(assembly, tmp_path)
+    assert assembly.start()["runtime_active"] is True
+
+    def fail_verify(**_):
+        adapter._block_locked("TEST_QUESTDB_ADAPTER_FAILED")
+        raise CFastExecutionQualityQuestDBReadonlyError("TEST_QUESTDB_ADAPTER_FAILED")
+
+    adapter.verify = fail_verify
+    failed = assembly.reload()
+
+    assert failed["assembly_state"] == "BLOCKED_QUESTDB_READONLY_EVIDENCE_FAILED"
+    assert failed["assembly_last_error"] == "TEST_QUESTDB_ADAPTER_FAILED"
+    assert failed["runtime_active"] is False
+    assert failed["execution_quality_implemented"] is False
+    assert failed["tick_fanout"]["worker_thread_running"] is False
+    assert failed["tick_fanout"]["tick_input_accepting"] is False
+    assert failed["questdb_readonly_evidence"]["blocked_fail_closed"] is True
+    assert underlying_runtime.status()["full_revalidation_complete"] is False
+
+
+@pytest.mark.parametrize(
+    ("admission_lifetime", "advance"),
+    (
+        (timedelta(minutes=1), timedelta(minutes=2)),
+        (timedelta(minutes=5), timedelta(minutes=6)),
+    ),
+)
+def test_silent_signed_window_expiry_rejects_intake_and_reload_recovers(
+    tmp_path: Path,
+    admission_lifetime: timedelta,
+    advance: timedelta,
+) -> None:
+    now = [NOW]
+    settings = Settings(commodity_c_fast_execution_quality_runtime_enabled=True)
+    underlying_runtime = CommodityCFastExecutionQualityRuntime(
+        settings=settings,
+        clock=lambda: now[0],
+    )
+    underlying_runtime.bind_full_revalidation_verifier(verified_revalidation)
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    source = SIDECAR.sidecar(source_root)
+    worker = PreverifiedTickHorizonWorker(source)
+    fanout = CommodityCFastExecutionQualityTickFanout(
+        settings=settings,
+        clock=lambda: now[0],
+        session_id="assembly-silent-expiry-session",
+    )
+    assembly = CommodityCFastExecutionQualityProductionAssembly(
+        runtime=underlying_runtime,
+        admission_verifier=FakeAdmissionVerifier(
+            clock=lambda: now[0],
+            lifetime=admission_lifetime,
+        ),
+    )
+    assembly.bind_readonly_components(
+        sidecar=source,
+        repository=CommodityCFastExecutionQualityReadonlyRepository(source),
+        evidence_export_store=export_store(tmp_path),
+    )
+    assembly.bind_tick_runtime_components(
+        horizon_worker=worker,
+        tick_fanout=fanout,
+    )
+    bind_test_questdb_adapter(assembly, tmp_path)
+
+    assert assembly.start()["runtime_active"] is True
+    now[0] += advance
+
+    expired = assembly.status()
+    assert expired["signed_runtime_window_current"] is False
+    assert expired["runtime_active"] is False
+    assert expired["execution_quality_implemented"] is False
+    assert expired["capabilities"]["questdb_evidence_adapter_bound"] is False
+    assert expired["tick_fanout"]["blocked_fail_closed"] is True
+    assert expired["tick_fanout"]["tick_input_accepting"] is False
+    assert fanout.offer_tick({})["offer_state"] == "REJECTED_BLOCKED_FAIL_CLOSED"
+
+    recovered = assembly.reload()
+    assert recovered["signed_runtime_window_current"] is True
+    assert recovered["runtime_active"] is True
+    assert recovered["execution_quality_implemented"] is True
+    assert recovered["capabilities"]["questdb_evidence_adapter_bound"] is True
+    assert recovered["tick_fanout"]["blocked_fail_closed"] is False
+    assert recovered["tick_fanout"]["tick_input_accepting"] is True
+    assembly.stop()
 
 
 def test_assembly_and_repository_have_zero_trading_capability() -> None:

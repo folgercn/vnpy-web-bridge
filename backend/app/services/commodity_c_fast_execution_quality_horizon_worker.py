@@ -406,6 +406,10 @@ class PreverifiedTickHorizonWorker:
                     else "PENDING_NOT_SEALED"
                 )
                 completion_counts[completion] += 1
+        source_journal_record_count = len(state.records)
+        source_journal_tip_record_hash = (
+            state.records[-1].record_hash if state.records else None
+        )
         return {
             "schema_version": (
                 "commodity_c_fast_execution_quality_horizon_worker_status_v1"
@@ -423,6 +427,8 @@ class PreverifiedTickHorizonWorker:
             ),
             "snapshot_record_count": len(state.snapshots),
             "evidence_record_count": len(state.evidence),
+            "source_journal_record_count": source_journal_record_count,
+            "source_journal_tip_record_hash": source_journal_tip_record_hash,
             "completion_counts": completion_counts,
             "horizon_schedule_ms": [250, 1_000, 5_000, 30_000, 60_000],
             "input_contract": (
