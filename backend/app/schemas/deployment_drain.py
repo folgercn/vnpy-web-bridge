@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import datetime, timedelta
+from pathlib import PurePosixPath
 from typing import Annotated, Any, Literal
 
 from pydantic import (
@@ -92,9 +93,7 @@ InitialBaselineCheckpointId = Annotated[
 ]
 InitialBaselineCommodityCheckpointId = Annotated[
     str,
-    Field(
-        pattern=r"^deployment-initial-baseline-commodity-checkpoint-[0-9a-f]{64}$"
-    ),
+    Field(pattern=r"^deployment-initial-baseline-commodity-checkpoint-[0-9a-f]{64}$"),
     AfterValidator(
         lambda value: _nonzero_prefixed(
             value, "deployment-initial-baseline-commodity-checkpoint-"
@@ -112,18 +111,12 @@ LegacyMigrationInventoryId = Annotated[
     str,
     Field(pattern=r"^legacy-migration-empty-inventory-[0-9a-f]{64}$"),
     AfterValidator(
-        lambda value: _nonzero_prefixed(
-            value, "legacy-migration-empty-inventory-"
-        )
+        lambda value: _nonzero_prefixed(value, "legacy-migration-empty-inventory-")
     ),
 ]
 LegacyMigrationCommodityCheckpointId = Annotated[
     str,
-    Field(
-        pattern=(
-            r"^deployment-legacy-migration-commodity-checkpoint-[0-9a-f]{64}$"
-        )
-    ),
+    Field(pattern=(r"^deployment-legacy-migration-commodity-checkpoint-[0-9a-f]{64}$")),
     AfterValidator(
         lambda value: _nonzero_prefixed(
             value, "deployment-legacy-migration-commodity-checkpoint-"
@@ -143,8 +136,29 @@ LegacyMigrationEvidenceId = Annotated[
     str,
     Field(pattern=r"^legacy-migration-reconciliation-[0-9a-f]{64}$"),
     AfterValidator(
+        lambda value: _nonzero_prefixed(value, "legacy-migration-reconciliation-")
+    ),
+]
+LegacyMigrationSourceArchiveId = Annotated[
+    str,
+    Field(pattern=r"^legacy-migration-source-archive-[0-9a-f]{64}$"),
+    AfterValidator(
+        lambda value: _nonzero_prefixed(value, "legacy-migration-source-archive-")
+    ),
+]
+DeploymentCustodyFileEntryId = Annotated[
+    str,
+    Field(pattern=r"^deployment-custody-file-entry-[0-9a-f]{64}$"),
+    AfterValidator(
+        lambda value: _nonzero_prefixed(value, "deployment-custody-file-entry-")
+    ),
+]
+DeploymentReconciliationCustodyInventoryId = Annotated[
+    str,
+    Field(pattern=r"^deployment-reconciliation-custody-inventory-[0-9a-f]{64}$"),
+    AfterValidator(
         lambda value: _nonzero_prefixed(
-            value, "legacy-migration-reconciliation-"
+            value, "deployment-reconciliation-custody-inventory-"
         )
     ),
 ]
@@ -610,7 +624,7 @@ class DeploymentDrainStateCommitmentDTO(StrictDeploymentDrainModel):
             raise ValueError("state commitment previous-link binding mismatch")
         state_updated_at = self.state.get("updated_at")
         if not isinstance(state_updated_at, str):
-            raise ValueError("committed state updated_at must be a timestamp")
+            raise TypeError("committed state updated_at must be a timestamp")
         try:
             parsed_updated_at = datetime.fromisoformat(
                 state_updated_at.replace("Z", "+00:00")
@@ -1063,7 +1077,7 @@ class CommodityInitialBaselineStateDTO(StrictDeploymentDrainModel):
     commodity_state_version: Literal["commodity-simnow-v1"]
     commodity_state_checkpoint_sha256: Sha256
     execution_plan_status: Literal["IDLE"]
-    execution_plan_hash: Literal[None]
+    execution_plan_hash: None
     plan_version: Literal[0]
     web_trade_enabled: Literal[False]
     execution_authority_revoked: Literal[True]
@@ -1092,7 +1106,7 @@ class DeploymentInitialBaselineCommodityCheckpointDTO(StrictDeploymentDrainModel
     current_execution_epoch: int = Field(strict=True, ge=2)
     captured_at: datetime
     execution_plan_status: Literal["IDLE"]
-    execution_plan_hash: Literal[None]
+    execution_plan_hash: None
     plan_version: Literal[0]
     state_version: Literal["web_bridge_initial_baseline_commodity_state_v1"]
     state: CommodityInitialBaselineStateDTO
@@ -1144,8 +1158,7 @@ class DeploymentInitialBaselineCommodityCheckpointDTO(StrictDeploymentDrainModel
             or self.state.rpc_generation != self.initial_rpc.fact_generation
             or self.state.active_orders_snapshot_sha256
             != self.active_orders_snapshot_sha256
-            or self.state.positions_snapshot_sha256
-            != self.positions_snapshot_sha256
+            or self.state.positions_snapshot_sha256 != self.positions_snapshot_sha256
         ):
             raise ValueError("initial Commodity state projection mismatch")
         core = self.model_dump(mode="json")
@@ -1169,28 +1182,28 @@ class DeploymentInitialBaselineDrainStateDTO(StrictDeploymentDrainModel):
     drain_epoch: Literal[0]
     execution_epoch: int = Field(strict=True, ge=2)
     runtime_instance_id: Identifier
-    active_request_id: Literal[None]
-    active_request_sha256: Literal[None]
-    active_receipt_id: Literal[None]
-    active_receipt_raw_sha256: Literal[None]
+    active_request_id: None
+    active_request_sha256: None
+    active_receipt_id: None
+    active_receipt_raw_sha256: None
     receipt_consumed: Literal[False]
-    consumed_at: Literal[None]
-    consume_id: Literal[None]
-    consumed_receipt_id: Literal[None]
-    consume_intent_raw_sha256: Literal[None]
-    consume_marker_raw_sha256: Literal[None]
-    consume_state_projection_sha256: Literal[None]
-    consumed_online_recheck_id: Literal[None]
-    consumed_online_recheck_raw_sha256: Literal[None]
-    preconsume_state_commitment_raw_sha256: Literal[None]
-    active_online_recheck_id: Literal[None]
-    active_online_recheck_raw_sha256: Literal[None]
-    active_recheck_checkpoint_raw_sha256: Literal[None]
-    online_rechecked_at: Literal[None]
-    last_invalidated_online_recheck_id: Literal[None]
-    last_invalidated_receipt_id: Literal[None]
+    consumed_at: None
+    consume_id: None
+    consumed_receipt_id: None
+    consume_intent_raw_sha256: None
+    consume_marker_raw_sha256: None
+    consume_state_projection_sha256: None
+    consumed_online_recheck_id: None
+    consumed_online_recheck_raw_sha256: None
+    preconsume_state_commitment_raw_sha256: None
+    active_online_recheck_id: None
+    active_online_recheck_raw_sha256: None
+    active_recheck_checkpoint_raw_sha256: None
+    online_rechecked_at: None
+    last_invalidated_online_recheck_id: None
+    last_invalidated_receipt_id: None
     blockers: list[str]
-    expires_at: Literal[None]
+    expires_at: None
     freeze_reason: Literal["initial_bootstrap_requires_reconciliation"]
     updated_at: datetime
 
@@ -1285,20 +1298,16 @@ class DeploymentInitialBaselineCheckpointDTO(StrictDeploymentDrainModel):
             raise ValueError("initial baseline RPC chain is not exact")
         if self.commodity_checkpoint.initial_rpc.account_hashes != [
             self.expected_account_hash
-        ] or (
-            self.fresh_rpc.account_hashes != [self.expected_account_hash]
-        ):
+        ] or (self.fresh_rpc.account_hashes != [self.expected_account_hash]):
             raise ValueError("initial baseline account scope changed")
         initial_execution_sha = deployment_rpc_execution_facts_sha256(
             self.commodity_checkpoint.initial_rpc
         )
         if (
-            self.initial_execution_facts_canonical_sha256
-            != initial_execution_sha
+            self.initial_execution_facts_canonical_sha256 != initial_execution_sha
             or self.fresh_execution_facts_canonical_sha256
             != self.fresh_rpc.execution_facts_canonical_sha256
-            or self.fresh_execution_facts_canonical_sha256
-            != initial_execution_sha
+            or self.fresh_execution_facts_canonical_sha256 != initial_execution_sha
             or self.commodity_checkpoint.initial_rpc.orders != self.fresh_rpc.orders
             or self.commodity_checkpoint.initial_rpc.active_orders
             != self.fresh_rpc.active_orders
@@ -1348,17 +1357,16 @@ class DeploymentInitialBaselineCheckpointDTO(StrictDeploymentDrainModel):
             ).encode("utf-8")
             + b"\n"
         )
-        if self.current_drain_state_raw_sha256 != hashlib.sha256(
-            current_state_raw
-        ).hexdigest():
+        if (
+            self.current_drain_state_raw_sha256
+            != hashlib.sha256(current_state_raw).hexdigest()
+        ):
             raise ValueError("initial baseline drain state raw hash mismatch")
         if (
-            self.current_drain_state.state_generation
-            != self.current_state_generation
+            self.current_drain_state.state_generation != self.current_state_generation
             or self.current_drain_state.runtime_instance_id
             != self.current_runtime_instance_id
-            or self.current_drain_state.execution_epoch
-            != self.current_execution_epoch
+            or self.current_drain_state.execution_epoch != self.current_execution_epoch
         ):
             raise ValueError("initial baseline drain state identity mismatch")
         core = self.model_dump(mode="json")
@@ -1429,17 +1437,17 @@ class _LegacyMigrationSourceStateBase(StrictDeploymentDrainModel):
     drain_epoch: int = Field(strict=True, ge=0)
     execution_epoch: int = Field(strict=True, ge=0)
     runtime_instance_id: Identifier
-    active_request_id: Literal[None]
-    active_request_sha256: Literal[None]
-    active_receipt_id: Literal[None]
-    active_receipt_raw_sha256: Literal[None]
+    active_request_id: None
+    active_request_sha256: None
+    active_receipt_id: None
+    active_receipt_raw_sha256: None
     receipt_consumed: Literal[False]
-    consumed_at: Literal[None]
-    consume_id: Literal[None]
-    last_invalidated_receipt_id: Literal[None]
+    consumed_at: None
+    consume_id: None
+    last_invalidated_receipt_id: None
     blockers: list[str]
-    expires_at: Literal[None]
-    freeze_reason: Literal[None]
+    expires_at: None
+    freeze_reason: None
     updated_at: datetime
 
     @field_serializer("updated_at", when_used="json")
@@ -1464,11 +1472,11 @@ class LegacyMigrationSourceStateV2DTO(_LegacyMigrationSourceStateBase):
     """Strict clean v2 source eligible for C1c baseline reconciliation."""
 
     schema_version: Literal["web_bridge_deployment_drain_state_v2"]
-    active_online_recheck_id: Literal[None]
-    active_online_recheck_raw_sha256: Literal[None]
-    active_recheck_checkpoint_raw_sha256: Literal[None]
-    online_rechecked_at: Literal[None]
-    last_invalidated_online_recheck_id: Literal[None]
+    active_online_recheck_id: None
+    active_online_recheck_raw_sha256: None
+    active_recheck_checkpoint_raw_sha256: None
+    online_rechecked_at: None
+    last_invalidated_online_recheck_id: None
 
 
 class LegacyEpochAnchorV1DTO(StrictDeploymentDrainModel):
@@ -1487,6 +1495,515 @@ class DeploymentEpochAnchorV2DTO(StrictDeploymentDrainModel):
     state_commitment_raw_sha256: Sha256
     drain_epoch: int = Field(strict=True, ge=0)
     execution_epoch: int = Field(strict=True, ge=0)
+
+
+class DeploymentLegacyMigrationSourceArchiveDTO(StrictDeploymentDrainModel):
+    """Sealed exact legacy bytes; migration eligibility remains unproven."""
+
+    schema_version: Literal["web_bridge_deployment_legacy_migration_source_archive_v1"]
+    purpose: Literal["seal_exact_legacy_migration_source_bytes"]
+    mode: Literal["LEGACY_MIGRATION_BASELINE"]
+    archive_id: LegacyMigrationSourceArchiveId
+    archive_core_sha256: Sha256
+    archive_path: str = Field(pattern=r"^migration-sources/archive-[0-9a-f]{64}\.json$")
+    source_schema_version: Literal[
+        "web_bridge_deployment_drain_state_v1",
+        "web_bridge_deployment_drain_state_v2",
+    ]
+    source_state_path: str = Field(
+        pattern=(r"^migration-sources/source-state-[0-9a-f]{64}\.json$")
+    )
+    source_state_raw_sha256: Sha256
+    source_state: dict[str, Any]
+    source_epoch_anchor_path: str = Field(
+        pattern=(r"^migration-sources/source-epoch-anchor-[0-9a-f]{64}\.json$")
+    )
+    source_epoch_anchor_raw_sha256: Sha256
+    source_epoch_anchor: LegacyEpochAnchorV1DTO
+    sealed_exact_source_bytes: Literal[True]
+    clean_migration_eligibility_verified: Literal[False]
+    custody_inventory_verified: Literal[False]
+    external_high_water_verified: Literal[False]
+    target_runtime_verified: Literal[False]
+    reconciliation_completed: Literal[False]
+    windows_fence_released: Literal[False]
+    authority_restore_allowed: Literal[False]
+    consume_authorized: Literal[False]
+    reconciliation_authorized: Literal[False]
+    deployment_authorized: Literal[False]
+    automatic_deploy_allowed: Literal[False]
+    production_allowed: Literal[False]
+    live_trading_authorized: Literal[False]
+    countable_forward: Literal[False]
+
+    @model_validator(mode="after")
+    def validate_archive(self) -> DeploymentLegacyMigrationSourceArchiveDTO:
+        if self.source_state.get("schema_version") != self.source_schema_version:
+            raise ValueError("legacy migration archived source version mismatch")
+        source_state_raw = (
+            json.dumps(
+                self.source_state,
+                allow_nan=False,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            + b"\n"
+        )
+        source_anchor_raw = (
+            json.dumps(
+                self.source_epoch_anchor.model_dump(mode="json"),
+                allow_nan=False,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            + b"\n"
+        )
+        if (
+            self.source_state_raw_sha256 != hashlib.sha256(source_state_raw).hexdigest()
+            or self.source_epoch_anchor_raw_sha256
+            != hashlib.sha256(source_anchor_raw).hexdigest()
+            or self.source_state_path
+            != (f"migration-sources/source-state-{self.source_state_raw_sha256}.json")
+            or self.source_epoch_anchor_path
+            != (
+                "migration-sources/source-epoch-anchor-"
+                f"{self.source_epoch_anchor_raw_sha256}.json"
+            )
+        ):
+            raise ValueError("legacy migration archived source hash binding mismatch")
+        core = self.model_dump(mode="json")
+        core.pop("archive_id")
+        core.pop("archive_core_sha256")
+        core.pop("archive_path")
+        expected = _strict_canonical_sha256(core)
+        if (
+            self.archive_core_sha256 != expected
+            or self.archive_id != f"legacy-migration-source-archive-{expected}"
+            or self.archive_path != f"migration-sources/archive-{expected}.json"
+        ):
+            raise ValueError("legacy migration source archive identity mismatch")
+        return self
+
+
+DeploymentCustodyFileRole = Literal[
+    "STATE",
+    "EPOCH_ANCHOR",
+    "STATE_COMMITMENT",
+    "RECEIPT",
+    "CHECKPOINT",
+    "RECHECK",
+    "CONSUME_INTENT",
+    "CONSUME_MARKER",
+    "LEGACY_SOURCE_ARCHIVE",
+]
+
+
+class DeploymentCustodyFileEntryDTO(StrictDeploymentDrainModel):
+    """One fd-observed regular file in the C2 input custody inventory."""
+
+    schema_version: Literal["web_bridge_deployment_custody_file_entry_v1"]
+    entry_id: DeploymentCustodyFileEntryId
+    entry_core_sha256: Sha256
+    role: DeploymentCustodyFileRole
+    relative_path: str = Field(min_length=1, max_length=512)
+    raw_sha256: Sha256
+    size: int = Field(strict=True, ge=1)
+    device: int = Field(strict=True, ge=1)
+    inode: int = Field(strict=True, ge=1)
+    uid: int = Field(strict=True, ge=0)
+    gid: int = Field(strict=True, ge=0)
+    mode: int = Field(strict=True, ge=0, le=0o7777)
+    nlink: Literal[1]
+    mtime_ns: int = Field(strict=True, ge=0)
+    ctime_ns: int = Field(strict=True, ge=0)
+
+    @model_validator(mode="after")
+    def validate_entry(self) -> DeploymentCustodyFileEntryDTO:
+        path = PurePosixPath(self.relative_path)
+        if (
+            path.is_absolute()
+            or str(path) != self.relative_path
+            or "\\" in self.relative_path
+            or any(part in {"", ".", ".."} for part in path.parts)
+            or any(ord(character) < 32 for character in self.relative_path)
+        ):
+            raise ValueError("deployment custody relative path is unsafe")
+        role_path_valid = {
+            "STATE": self.relative_path == "state.json",
+            "EPOCH_ANCHOR": self.relative_path == "epoch-anchor.json",
+            "STATE_COMMITMENT": (
+                len(path.parts) == 2
+                and path.parts[0] == "state-commitments"
+                and path.parts[1].endswith(".json")
+                and len(path.parts[1]) == 25
+                and path.parts[1][:-5].isdigit()
+            ),
+            "RECEIPT": (
+                len(path.parts) == 2
+                and path.parts[0] == "receipts"
+                and path.parts[1].endswith(".json")
+            ),
+            "CHECKPOINT": (
+                len(path.parts) == 2
+                and path.parts[0] == "checkpoints"
+                and path.parts[1].endswith(".json")
+            ),
+            "RECHECK": (
+                len(path.parts) == 2
+                and path.parts[0] == "rechecks"
+                and path.parts[1].endswith(".json")
+            ),
+            "CONSUME_INTENT": (
+                len(path.parts) == 2
+                and path.parts[0] == "consumes"
+                and path.parts[1].endswith(".consume-intent.json")
+            ),
+            "CONSUME_MARKER": (
+                len(path.parts) == 2
+                and path.parts[0] == "consumes"
+                and path.parts[1].endswith(".consume-marker.json")
+            ),
+            "LEGACY_SOURCE_ARCHIVE": (
+                len(path.parts) == 2
+                and path.parts[0] == "migration-sources"
+                and path.parts[1].endswith(".json")
+            ),
+        }[self.role]
+        if not role_path_valid:
+            raise ValueError("deployment custody role and path are inconsistent")
+        if self.mode & 0o077:
+            raise ValueError("deployment custody file mode is not owner-only")
+        core = self.model_dump(mode="json")
+        core.pop("entry_id")
+        core.pop("entry_core_sha256")
+        expected = _strict_canonical_sha256(core)
+        if (
+            self.entry_core_sha256 != expected
+            or self.entry_id != f"deployment-custody-file-entry-{expected}"
+        ):
+            raise ValueError("deployment custody file entry identity mismatch")
+        return self
+
+
+class DeploymentReconciliationCustodyInventoryDTO(StrictDeploymentDrainModel):
+    """C2 snapshot of the actual fd-pinned deployment-drain custody."""
+
+    schema_version: Literal["web_bridge_deployment_reconciliation_custody_inventory_v1"]
+    purpose: Literal["bind_actual_live_custody_for_owner_reconciliation"]
+    mode: Literal[
+        "PLANNED_RESTART",
+        "INITIAL_BASELINE",
+        "LEGACY_MIGRATION_BASELINE",
+    ]
+    inventory_id: DeploymentReconciliationCustodyInventoryId
+    inventory_core_sha256: Sha256
+    inventory_digest_sha256: Sha256
+    custody_root_path_sha256: Sha256
+    custody_root_device: int = Field(strict=True, ge=1)
+    custody_root_inode: int = Field(strict=True, ge=1)
+    custody_root_uid: int = Field(strict=True, ge=0)
+    custody_root_gid: int = Field(strict=True, ge=0)
+    custody_root_mode: int = Field(strict=True, ge=0, le=0o7777)
+    custody_root_nlink: int = Field(strict=True, ge=1)
+    lock_file_device: int = Field(strict=True, ge=1)
+    lock_file_inode: int = Field(strict=True, ge=1)
+    lock_file_uid: int = Field(strict=True, ge=0)
+    lock_file_gid: int = Field(strict=True, ge=0)
+    lock_file_mode: int = Field(strict=True, ge=0, le=0o7777)
+    lock_file_nlink: Literal[1]
+    genesis_commitment_raw_sha256: Sha256
+    genesis_commitment: DeploymentDrainStateCommitmentDTO
+    state_commitment_raw_sha256s: list[Sha256]
+    state_commitments: list[DeploymentDrainStateCommitmentDTO]
+    actual_state_raw_sha256: Sha256
+    actual_state: dict[str, Any]
+    actual_epoch_anchor_raw_sha256: Sha256
+    actual_epoch_anchor: DeploymentEpochAnchorV2DTO
+    actual_head_commitment_raw_sha256: Sha256
+    actual_head_commitment: DeploymentDrainStateCommitmentDTO
+    actual_state_generation: int = Field(strict=True, ge=2)
+    actual_drain_epoch: int = Field(strict=True, ge=0)
+    actual_execution_epoch: int = Field(strict=True, ge=1)
+    actual_runtime_instance_id: Identifier
+    entries: list[DeploymentCustodyFileEntryDTO]
+    captured_at: datetime
+    fd_pinned_root_verified: Literal[True]
+    deployment_flock_held: Literal[True]
+    actual_live_custody_verified: Literal[True]
+    custody_inventory_verified: Literal[True]
+    external_high_water_verified: Literal[False]
+    target_runtime_verified: Literal[False]
+    reconciliation_completed: Literal[False]
+    windows_fence_released: Literal[False]
+    authority_restore_allowed: Literal[False]
+    consume_authorized: Literal[False]
+    reconciliation_authorized: Literal[False]
+    deployment_authorized: Literal[False]
+    automatic_deploy_allowed: Literal[False]
+    production_allowed: Literal[False]
+    live_trading_authorized: Literal[False]
+    countable_forward: Literal[False]
+
+    @field_serializer("captured_at", when_used="json")
+    def serialize_captured_at(self, value: datetime) -> str:
+        return value.isoformat()
+
+    @model_validator(mode="after")
+    def validate_inventory(self) -> DeploymentReconciliationCustodyInventoryDTO:
+        _require_utc(self.captured_at, "reconciliation custody captured_at")
+        if self.custody_root_mode & 0o077 or self.lock_file_mode & 0o077:
+            raise ValueError("reconciliation custody identity is not owner-only")
+        entry_keys = [(entry.relative_path, entry.role) for entry in self.entries]
+        if (
+            not self.entries
+            or entry_keys != sorted(entry_keys)
+            or len({entry.relative_path for entry in self.entries}) != len(self.entries)
+            or len({entry.entry_id for entry in self.entries}) != len(self.entries)
+        ):
+            raise ValueError("reconciliation custody entries are not sorted and unique")
+        entries_json = [entry.model_dump(mode="json") for entry in self.entries]
+        if self.inventory_digest_sha256 != _strict_canonical_sha256(entries_json):
+            raise ValueError("reconciliation custody inventory digest mismatch")
+
+        if (
+            len(self.state_commitments) != self.actual_state_generation
+            or len(self.state_commitment_raw_sha256s) != self.actual_state_generation
+        ):
+            raise ValueError(
+                "reconciliation custody commitment inventory is incomplete"
+            )
+        computed_commitment_hashes: list[str] = []
+        previous_commitment_raw_sha256: str | None = None
+        previous_created_at: datetime | None = None
+        for expected_generation, commitment in enumerate(
+            self.state_commitments, start=1
+        ):
+            commitment_raw = (
+                json.dumps(
+                    commitment.model_dump(mode="json"),
+                    allow_nan=False,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                + b"\n"
+            )
+            commitment_raw_sha256 = hashlib.sha256(commitment_raw).hexdigest()
+            computed_commitment_hashes.append(commitment_raw_sha256)
+            if (
+                commitment.state_generation != expected_generation
+                or commitment.previous_state_commitment_raw_sha256
+                != previous_commitment_raw_sha256
+                or commitment.state.get("updated_at")
+                != commitment.created_at.isoformat()
+                or (
+                    previous_created_at is not None
+                    and commitment.created_at < previous_created_at
+                )
+            ):
+                raise ValueError("reconciliation custody commitment chain is invalid")
+            previous_commitment_raw_sha256 = commitment_raw_sha256
+            previous_created_at = commitment.created_at
+        if computed_commitment_hashes != self.state_commitment_raw_sha256s:
+            raise ValueError("reconciliation custody commitment hashes mismatch")
+        if (
+            self.state_commitments[0] != self.genesis_commitment
+            or self.state_commitment_raw_sha256s[0]
+            != self.genesis_commitment_raw_sha256
+            or self.state_commitments[-1] != self.actual_head_commitment
+            or self.state_commitment_raw_sha256s[-1]
+            != self.actual_head_commitment_raw_sha256
+        ):
+            raise ValueError("reconciliation custody commitment endpoints mismatch")
+        observed_commitment_entries = [
+            (entry.relative_path, entry.raw_sha256)
+            for entry in self.entries
+            if entry.role == "STATE_COMMITMENT"
+        ]
+        expected_commitment_entries = [
+            (
+                f"state-commitments/{generation:020d}.json",
+                raw_sha256,
+            )
+            for generation, raw_sha256 in enumerate(
+                self.state_commitment_raw_sha256s, start=1
+            )
+        ]
+        if observed_commitment_entries != expected_commitment_entries:
+            raise ValueError("reconciliation custody commitment entries are not exact")
+
+        genesis_raw = (
+            json.dumps(
+                self.genesis_commitment.model_dump(mode="json"),
+                allow_nan=False,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            + b"\n"
+        )
+        head_raw = (
+            json.dumps(
+                self.actual_head_commitment.model_dump(mode="json"),
+                allow_nan=False,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            + b"\n"
+        )
+        state_raw = (
+            json.dumps(
+                self.actual_state,
+                allow_nan=False,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            + b"\n"
+        )
+        anchor_raw = (
+            json.dumps(
+                self.actual_epoch_anchor.model_dump(mode="json"),
+                allow_nan=False,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            + b"\n"
+        )
+        if (
+            self.genesis_commitment.state_generation != 1
+            or self.genesis_commitment.previous_state_commitment_raw_sha256 is not None
+            or self.genesis_commitment_raw_sha256
+            != hashlib.sha256(genesis_raw).hexdigest()
+            or self.actual_head_commitment_raw_sha256
+            != hashlib.sha256(head_raw).hexdigest()
+            or self.actual_state_raw_sha256 != hashlib.sha256(state_raw).hexdigest()
+            or self.actual_epoch_anchor_raw_sha256
+            != hashlib.sha256(anchor_raw).hexdigest()
+            or self.actual_head_commitment.state != self.actual_state
+            or self.actual_head_commitment.state_raw_sha256
+            != self.actual_state_raw_sha256
+        ):
+            raise ValueError("reconciliation custody embedded artifact mismatch")
+        state = self.actual_state
+        expected_state_fields = {
+            "schema_version",
+            "state_generation",
+            "previous_state_commitment_raw_sha256",
+            "state",
+            "drain_epoch",
+            "execution_epoch",
+            "runtime_instance_id",
+            "active_request_id",
+            "active_request_sha256",
+            "active_receipt_id",
+            "active_receipt_raw_sha256",
+            "receipt_consumed",
+            "consumed_at",
+            "consume_id",
+            "consumed_receipt_id",
+            "consume_intent_raw_sha256",
+            "consume_marker_raw_sha256",
+            "consume_state_projection_sha256",
+            "consumed_online_recheck_id",
+            "consumed_online_recheck_raw_sha256",
+            "preconsume_state_commitment_raw_sha256",
+            "active_online_recheck_id",
+            "active_online_recheck_raw_sha256",
+            "active_recheck_checkpoint_raw_sha256",
+            "online_rechecked_at",
+            "last_invalidated_online_recheck_id",
+            "last_invalidated_receipt_id",
+            "blockers",
+            "expires_at",
+            "freeze_reason",
+            "updated_at",
+        }
+        if (
+            set(state) != expected_state_fields
+            or state.get("schema_version") != "web_bridge_deployment_drain_state_v3"
+            or state.get("state") != "RESTARTED_FROZEN"
+            or type(state.get("state_generation")) is not int
+            or state.get("state_generation") != self.actual_state_generation
+            or type(state.get("drain_epoch")) is not int
+            or state.get("drain_epoch") != self.actual_drain_epoch
+            or type(state.get("execution_epoch")) is not int
+            or state.get("execution_epoch") != self.actual_execution_epoch
+            or not isinstance(state.get("runtime_instance_id"), str)
+            or state.get("runtime_instance_id") != self.actual_runtime_instance_id
+            or type(state.get("receipt_consumed")) is not bool
+            or state.get("updated_at")
+            != self.actual_head_commitment.created_at.isoformat()
+            or self.actual_head_commitment.state_generation
+            != self.actual_state_generation
+            or self.actual_epoch_anchor.state_generation != self.actual_state_generation
+            or self.actual_epoch_anchor.state_commitment_raw_sha256
+            != self.actual_head_commitment_raw_sha256
+            or self.actual_epoch_anchor.drain_epoch != self.actual_drain_epoch
+            or self.actual_epoch_anchor.execution_epoch != self.actual_execution_epoch
+        ):
+            raise ValueError("reconciliation custody current head binding mismatch")
+        consumed = state.get("receipt_consumed") is True
+        genesis_source = self.genesis_commitment.genesis_source
+        derived_mode = (
+            "PLANNED_RESTART"
+            if consumed
+            else (
+                "INITIAL_BASELINE"
+                if genesis_source == "fresh_bootstrap"
+                else "LEGACY_MIGRATION_BASELINE"
+                if genesis_source in {"v1_migration", "v2_migration"}
+                else None
+            )
+        )
+        archive_entries = [
+            entry for entry in self.entries if entry.role == "LEGACY_SOURCE_ARCHIVE"
+        ]
+        if (
+            derived_mode is None
+            or self.mode != derived_mode
+            or (self.mode == "LEGACY_MIGRATION_BASELINE" and not archive_entries)
+        ):
+            raise ValueError("reconciliation custody mode cannot be derived uniquely")
+        expected_files = {
+            ("STATE", "state.json", self.actual_state_raw_sha256),
+            (
+                "EPOCH_ANCHOR",
+                "epoch-anchor.json",
+                self.actual_epoch_anchor_raw_sha256,
+            ),
+            (
+                "STATE_COMMITMENT",
+                "state-commitments/00000000000000000001.json",
+                self.genesis_commitment_raw_sha256,
+            ),
+            (
+                "STATE_COMMITMENT",
+                f"state-commitments/{self.actual_state_generation:020d}.json",
+                self.actual_head_commitment_raw_sha256,
+            ),
+        }
+        observed_files = {
+            (entry.role, entry.relative_path, entry.raw_sha256)
+            for entry in self.entries
+        }
+        if not expected_files.issubset(observed_files):
+            raise ValueError("reconciliation custody inventory omits a required root")
+        core = self.model_dump(mode="json")
+        core.pop("inventory_id")
+        core.pop("inventory_core_sha256")
+        expected = _strict_canonical_sha256(core)
+        if (
+            self.inventory_core_sha256 != expected
+            or self.inventory_id
+            != f"deployment-reconciliation-custody-inventory-{expected}"
+        ):
+            raise ValueError("reconciliation custody inventory identity mismatch")
+        return self
 
 
 class LegacyMigrationEmptyInventoryDTO(StrictDeploymentDrainModel):
@@ -1539,28 +2056,28 @@ class DeploymentLegacyMigrationDrainStateDTO(StrictDeploymentDrainModel):
     drain_epoch: int = Field(strict=True, ge=0)
     execution_epoch: int = Field(strict=True, ge=1)
     runtime_instance_id: Identifier
-    active_request_id: Literal[None]
-    active_request_sha256: Literal[None]
-    active_receipt_id: Literal[None]
-    active_receipt_raw_sha256: Literal[None]
+    active_request_id: None
+    active_request_sha256: None
+    active_receipt_id: None
+    active_receipt_raw_sha256: None
     receipt_consumed: Literal[False]
-    consumed_at: Literal[None]
-    consume_id: Literal[None]
-    consumed_receipt_id: Literal[None]
-    consume_intent_raw_sha256: Literal[None]
-    consume_marker_raw_sha256: Literal[None]
-    consume_state_projection_sha256: Literal[None]
-    consumed_online_recheck_id: Literal[None]
-    consumed_online_recheck_raw_sha256: Literal[None]
-    preconsume_state_commitment_raw_sha256: Literal[None]
-    active_online_recheck_id: Literal[None]
-    active_online_recheck_raw_sha256: Literal[None]
-    active_recheck_checkpoint_raw_sha256: Literal[None]
-    online_rechecked_at: Literal[None]
-    last_invalidated_online_recheck_id: Literal[None]
-    last_invalidated_receipt_id: Literal[None]
+    consumed_at: None
+    consume_id: None
+    consumed_receipt_id: None
+    consume_intent_raw_sha256: None
+    consume_marker_raw_sha256: None
+    consume_state_projection_sha256: None
+    consumed_online_recheck_id: None
+    consumed_online_recheck_raw_sha256: None
+    preconsume_state_commitment_raw_sha256: None
+    active_online_recheck_id: None
+    active_online_recheck_raw_sha256: None
+    active_recheck_checkpoint_raw_sha256: None
+    online_rechecked_at: None
+    last_invalidated_online_recheck_id: None
+    last_invalidated_receipt_id: None
     blockers: list[str]
-    expires_at: Literal[None]
+    expires_at: None
     freeze_reason: Literal["legacy_state_migrated_to_v3_requires_reconciliation"]
     updated_at: datetime
 
@@ -1604,7 +2121,7 @@ class DeploymentLegacyMigrationCommodityCheckpointDTO(StrictDeploymentDrainModel
     expected_account_hash: Sha256
     captured_at: datetime
     execution_plan_status: Literal["IDLE"]
-    execution_plan_hash: Literal[None]
+    execution_plan_hash: None
     plan_version: Literal[0]
     state_version: Literal["web_bridge_initial_baseline_commodity_state_v1"]
     state: CommodityInitialBaselineStateDTO
@@ -1640,9 +2157,7 @@ class DeploymentLegacyMigrationCommodityCheckpointDTO(StrictDeploymentDrainModel
         ):
             raise ValueError("legacy migration Commodity RPC is not frozen and scoped")
         state = self.state
-        if self.state_sha256 != _strict_canonical_sha256(
-            state.model_dump(mode="json")
-        ):
+        if self.state_sha256 != _strict_canonical_sha256(state.model_dump(mode="json")):
             raise ValueError("legacy migration Commodity state hash mismatch")
         active_sha = _strict_canonical_sha256(self.initial_rpc.active_orders)
         positions_sha = _strict_canonical_sha256(self.initial_rpc.positions)
@@ -1781,8 +2296,7 @@ class DeploymentLegacyMigrationCheckpointDTO(StrictDeploymentDrainModel):
             + b"\n"
         )
         if (
-            self.source_state_raw_sha256
-            != hashlib.sha256(source_raw).hexdigest()
+            self.source_state_raw_sha256 != hashlib.sha256(source_raw).hexdigest()
             or self.source_epoch_anchor_raw_sha256
             != hashlib.sha256(source_anchor_raw).hexdigest()
         ):
@@ -1849,14 +2363,14 @@ class DeploymentLegacyMigrationCheckpointDTO(StrictDeploymentDrainModel):
             ).encode("utf-8")
             + b"\n"
         )
-        if self.commodity_checkpoint_raw_sha256 != hashlib.sha256(
-            commodity_raw
-        ).hexdigest():
+        if (
+            self.commodity_checkpoint_raw_sha256
+            != hashlib.sha256(commodity_raw).hexdigest()
+        ):
             raise ValueError("legacy migration Commodity raw hash mismatch")
         if (
             len(self.state_commitments) != self.current_state_generation
-            or len(self.state_commitment_raw_sha256s)
-            != self.current_state_generation
+            or len(self.state_commitment_raw_sha256s) != self.current_state_generation
             or self.current_state_generation < 2
         ):
             raise ValueError("legacy migration commitment inventory is incomplete")
@@ -1949,12 +2463,10 @@ class DeploymentLegacyMigrationCheckpointDTO(StrictDeploymentDrainModel):
             or genesis.state_commitment_core_sha256
             != self.genesis_commitment_core_sha256
             or genesis.state_raw_sha256 != self.genesis_state_raw_sha256
-            or computed_commitment_hashes[0]
-            != self.genesis_commitment_raw_sha256
+            or computed_commitment_hashes[0] != self.genesis_commitment_raw_sha256
             or genesis.created_at < source.updated_at
             or genesis.state != expected_genesis_state
-            or current_commitment.commitment_id
-            != self.current_state_commitment_id
+            or current_commitment.commitment_id != self.current_state_commitment_id
             or current_commitment.state_commitment_core_sha256
             != self.current_state_commitment_core_sha256
             or computed_commitment_hashes[-1]
@@ -1982,8 +2494,7 @@ class DeploymentLegacyMigrationCheckpointDTO(StrictDeploymentDrainModel):
             != self.current_state_commitment_raw_sha256
             or self.current_epoch_anchor.drain_epoch
             != self.current_drain_state.drain_epoch
-            or self.current_epoch_anchor.execution_epoch
-            != self.current_execution_epoch
+            or self.current_epoch_anchor.execution_epoch != self.current_execution_epoch
         ):
             raise ValueError("legacy migration current anchor does not bind the head")
         initial = commodity.initial_rpc
@@ -1994,26 +2505,18 @@ class DeploymentLegacyMigrationCheckpointDTO(StrictDeploymentDrainModel):
             "reconciliation_run_id": self.reconciliation_run_id,
             "source_schema_version": self.source_schema_version,
             "source_state_raw_sha256": self.source_state_raw_sha256,
-            "source_epoch_anchor_raw_sha256": (
-                self.source_epoch_anchor_raw_sha256
-            ),
+            "source_epoch_anchor_raw_sha256": (self.source_epoch_anchor_raw_sha256),
             "inventory_raw_sha256": self.inventory_raw_sha256,
-            "genesis_commitment_raw_sha256": (
-                self.genesis_commitment_raw_sha256
-            ),
+            "genesis_commitment_raw_sha256": (self.genesis_commitment_raw_sha256),
             "current_state_commitment_raw_sha256": (
                 self.current_state_commitment_raw_sha256
             ),
-            "current_epoch_anchor_raw_sha256": (
-                self.current_epoch_anchor_raw_sha256
-            ),
+            "current_epoch_anchor_raw_sha256": (self.current_epoch_anchor_raw_sha256),
             "current_runtime_instance_id": self.current_runtime_instance_id,
             "current_execution_epoch": self.current_execution_epoch,
             "expected_account_hash": self.expected_account_hash,
         }
-        owner_digest = _strict_canonical_sha256(
-            {**identity_core, "capture": "INITIAL"}
-        )
+        owner_digest = _strict_canonical_sha256({**identity_core, "capture": "INITIAL"})
         fresh_digest = _strict_canonical_sha256(
             {**identity_core, "capture": "FRESH_RECHECK"}
         )
@@ -2044,12 +2547,10 @@ class DeploymentLegacyMigrationCheckpointDTO(StrictDeploymentDrainModel):
         if (
             self.initial_execution_facts_canonical_sha256 != initial_sha
             or self.fresh_execution_facts_canonical_sha256 != initial_sha
-            or self.orders_snapshot_sha256
-            != _strict_canonical_sha256(fresh.orders)
+            or self.orders_snapshot_sha256 != _strict_canonical_sha256(fresh.orders)
             or self.active_orders_snapshot_sha256
             != _strict_canonical_sha256(fresh.active_orders)
-            or self.trades_snapshot_sha256
-            != _strict_canonical_sha256(fresh.trades)
+            or self.trades_snapshot_sha256 != _strict_canonical_sha256(fresh.trades)
             or self.positions_snapshot_sha256
             != _strict_canonical_sha256(fresh.positions)
         ):
@@ -2064,12 +2565,10 @@ class DeploymentLegacyMigrationCheckpointDTO(StrictDeploymentDrainModel):
             raise ValueError("legacy migration facts are stale or misordered")
         if (
             commodity.checkpoint_id != self.commodity_checkpoint_id
-            or commodity.checkpoint_core_sha256
-            != self.commodity_checkpoint_core_sha256
+            or commodity.checkpoint_core_sha256 != self.commodity_checkpoint_core_sha256
             or commodity.active_orders_snapshot_sha256
             != self.active_orders_snapshot_sha256
-            or commodity.positions_snapshot_sha256
-            != self.positions_snapshot_sha256
+            or commodity.positions_snapshot_sha256 != self.positions_snapshot_sha256
         ):
             raise ValueError("legacy migration Commodity artifact mismatch")
         current_state_raw = (
@@ -2089,8 +2588,7 @@ class DeploymentLegacyMigrationCheckpointDTO(StrictDeploymentDrainModel):
             != self.current_state_generation
             or self.current_drain_state.runtime_instance_id
             != self.current_runtime_instance_id
-            or self.current_drain_state.execution_epoch
-            != self.current_execution_epoch
+            or self.current_drain_state.execution_epoch != self.current_execution_epoch
             or self.current_drain_state.drain_epoch != source.drain_epoch
         ):
             raise ValueError("legacy migration current drain state mismatch")

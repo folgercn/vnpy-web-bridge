@@ -1,0 +1,114 @@
+{
+  "additionalProperties": false,
+  "description": "One fd-observed regular file in the C2 input custody inventory.",
+  "properties": {
+    "schema_version": {
+      "const": "web_bridge_deployment_custody_file_entry_v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "entry_id": {
+      "pattern": "^deployment-custody-file-entry-[0-9a-f]{64}$",
+      "title": "Entry Id",
+      "type": "string"
+    },
+    "entry_core_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Entry Core Sha256",
+      "type": "string"
+    },
+    "role": {
+      "enum": [
+        "STATE",
+        "EPOCH_ANCHOR",
+        "STATE_COMMITMENT",
+        "RECEIPT",
+        "CHECKPOINT",
+        "RECHECK",
+        "CONSUME_INTENT",
+        "CONSUME_MARKER",
+        "LEGACY_SOURCE_ARCHIVE"
+      ],
+      "title": "Role",
+      "type": "string"
+    },
+    "relative_path": {
+      "maxLength": 512,
+      "minLength": 1,
+      "title": "Relative Path",
+      "type": "string"
+    },
+    "raw_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Raw Sha256",
+      "type": "string"
+    },
+    "size": {
+      "minimum": 1,
+      "title": "Size",
+      "type": "integer"
+    },
+    "device": {
+      "minimum": 1,
+      "title": "Device",
+      "type": "integer"
+    },
+    "inode": {
+      "minimum": 1,
+      "title": "Inode",
+      "type": "integer"
+    },
+    "uid": {
+      "minimum": 0,
+      "title": "Uid",
+      "type": "integer"
+    },
+    "gid": {
+      "minimum": 0,
+      "title": "Gid",
+      "type": "integer"
+    },
+    "mode": {
+      "maximum": 4095,
+      "minimum": 0,
+      "title": "Mode",
+      "type": "integer"
+    },
+    "nlink": {
+      "const": 1,
+      "title": "Nlink",
+      "type": "integer"
+    },
+    "mtime_ns": {
+      "minimum": 0,
+      "title": "Mtime Ns",
+      "type": "integer"
+    },
+    "ctime_ns": {
+      "minimum": 0,
+      "title": "Ctime Ns",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "schema_version",
+    "entry_id",
+    "entry_core_sha256",
+    "role",
+    "relative_path",
+    "raw_sha256",
+    "size",
+    "device",
+    "inode",
+    "uid",
+    "gid",
+    "mode",
+    "nlink",
+    "mtime_ns",
+    "ctime_ns"
+  ],
+  "title": "Web Bridge deployment custody file entry v1",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vnpy-web-bridge:schema:web-bridge-deployment-custody-file-entry-v1"
+}

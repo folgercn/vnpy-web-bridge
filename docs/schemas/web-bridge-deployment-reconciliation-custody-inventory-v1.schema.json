@@ -1,0 +1,634 @@
+{
+  "$defs": {
+    "DeploymentCustodyFileEntryDTO": {
+      "additionalProperties": false,
+      "description": "One fd-observed regular file in the C2 input custody inventory.",
+      "properties": {
+        "schema_version": {
+          "const": "web_bridge_deployment_custody_file_entry_v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "entry_id": {
+          "pattern": "^deployment-custody-file-entry-[0-9a-f]{64}$",
+          "title": "Entry Id",
+          "type": "string"
+        },
+        "entry_core_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Entry Core Sha256",
+          "type": "string"
+        },
+        "role": {
+          "enum": [
+            "STATE",
+            "EPOCH_ANCHOR",
+            "STATE_COMMITMENT",
+            "RECEIPT",
+            "CHECKPOINT",
+            "RECHECK",
+            "CONSUME_INTENT",
+            "CONSUME_MARKER",
+            "LEGACY_SOURCE_ARCHIVE"
+          ],
+          "title": "Role",
+          "type": "string"
+        },
+        "relative_path": {
+          "maxLength": 512,
+          "minLength": 1,
+          "title": "Relative Path",
+          "type": "string"
+        },
+        "raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Raw Sha256",
+          "type": "string"
+        },
+        "size": {
+          "minimum": 1,
+          "title": "Size",
+          "type": "integer"
+        },
+        "device": {
+          "minimum": 1,
+          "title": "Device",
+          "type": "integer"
+        },
+        "inode": {
+          "minimum": 1,
+          "title": "Inode",
+          "type": "integer"
+        },
+        "uid": {
+          "minimum": 0,
+          "title": "Uid",
+          "type": "integer"
+        },
+        "gid": {
+          "minimum": 0,
+          "title": "Gid",
+          "type": "integer"
+        },
+        "mode": {
+          "maximum": 4095,
+          "minimum": 0,
+          "title": "Mode",
+          "type": "integer"
+        },
+        "nlink": {
+          "const": 1,
+          "title": "Nlink",
+          "type": "integer"
+        },
+        "mtime_ns": {
+          "minimum": 0,
+          "title": "Mtime Ns",
+          "type": "integer"
+        },
+        "ctime_ns": {
+          "minimum": 0,
+          "title": "Ctime Ns",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "schema_version",
+        "entry_id",
+        "entry_core_sha256",
+        "role",
+        "relative_path",
+        "raw_sha256",
+        "size",
+        "device",
+        "inode",
+        "uid",
+        "gid",
+        "mode",
+        "nlink",
+        "mtime_ns",
+        "ctime_ns"
+      ],
+      "title": "DeploymentCustodyFileEntryDTO",
+      "type": "object"
+    },
+    "DeploymentDrainStateCommitmentDTO": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "web_bridge_deployment_drain_state_commitment_v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "purpose": {
+          "const": "commit_exact_non_authorizing_deployment_drain_state",
+          "title": "Purpose",
+          "type": "string"
+        },
+        "commitment_id": {
+          "pattern": "^deployment-drain-state-commitment-[0-9a-f]{64}$",
+          "title": "Commitment Id",
+          "type": "string"
+        },
+        "state_commitment_core_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "State Commitment Core Sha256",
+          "type": "string"
+        },
+        "state_generation": {
+          "minimum": 1,
+          "title": "State Generation",
+          "type": "integer"
+        },
+        "previous_state_commitment_raw_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Previous State Commitment Raw Sha256"
+        },
+        "state_raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "State Raw Sha256",
+          "type": "string"
+        },
+        "state": {
+          "additionalProperties": true,
+          "title": "State",
+          "type": "object"
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "genesis_source": {
+          "anyOf": [
+            {
+              "enum": [
+                "fresh_bootstrap",
+                "v1_migration",
+                "v2_migration"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Genesis Source"
+        },
+        "source_state_raw_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Source State Raw Sha256"
+        },
+        "source_epoch_anchor_raw_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Source Epoch Anchor Raw Sha256"
+        },
+        "deployment_authorized": {
+          "const": false,
+          "title": "Deployment Authorized",
+          "type": "boolean"
+        },
+        "consume_authorized": {
+          "const": false,
+          "title": "Consume Authorized",
+          "type": "boolean"
+        },
+        "reconciliation_authorized": {
+          "const": false,
+          "title": "Reconciliation Authorized",
+          "type": "boolean"
+        },
+        "countable_forward": {
+          "const": false,
+          "title": "Countable Forward",
+          "type": "boolean"
+        },
+        "automatic_deploy_allowed": {
+          "const": false,
+          "title": "Automatic Deploy Allowed",
+          "type": "boolean"
+        },
+        "production_allowed": {
+          "const": false,
+          "title": "Production Allowed",
+          "type": "boolean"
+        },
+        "live_trading_authorized": {
+          "const": false,
+          "title": "Live Trading Authorized",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "schema_version",
+        "purpose",
+        "commitment_id",
+        "state_commitment_core_sha256",
+        "state_generation",
+        "previous_state_commitment_raw_sha256",
+        "state_raw_sha256",
+        "state",
+        "created_at",
+        "genesis_source",
+        "source_state_raw_sha256",
+        "source_epoch_anchor_raw_sha256",
+        "deployment_authorized",
+        "consume_authorized",
+        "reconciliation_authorized",
+        "countable_forward",
+        "automatic_deploy_allowed",
+        "production_allowed",
+        "live_trading_authorized"
+      ],
+      "title": "DeploymentDrainStateCommitmentDTO",
+      "type": "object"
+    },
+    "DeploymentEpochAnchorV2DTO": {
+      "additionalProperties": false,
+      "description": "Exact current anchor embedded by self-contained reconciliation DTOs.",
+      "properties": {
+        "schema_version": {
+          "const": "web_bridge_deployment_drain_epoch_anchor_v2",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "state_generation": {
+          "minimum": 1,
+          "title": "State Generation",
+          "type": "integer"
+        },
+        "state_commitment_raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "State Commitment Raw Sha256",
+          "type": "string"
+        },
+        "drain_epoch": {
+          "minimum": 0,
+          "title": "Drain Epoch",
+          "type": "integer"
+        },
+        "execution_epoch": {
+          "minimum": 0,
+          "title": "Execution Epoch",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "schema_version",
+        "state_generation",
+        "state_commitment_raw_sha256",
+        "drain_epoch",
+        "execution_epoch"
+      ],
+      "title": "DeploymentEpochAnchorV2DTO",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "C2 snapshot of the actual fd-pinned deployment-drain custody.",
+  "properties": {
+    "schema_version": {
+      "const": "web_bridge_deployment_reconciliation_custody_inventory_v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "purpose": {
+      "const": "bind_actual_live_custody_for_owner_reconciliation",
+      "title": "Purpose",
+      "type": "string"
+    },
+    "mode": {
+      "enum": [
+        "PLANNED_RESTART",
+        "INITIAL_BASELINE",
+        "LEGACY_MIGRATION_BASELINE"
+      ],
+      "title": "Mode",
+      "type": "string"
+    },
+    "inventory_id": {
+      "pattern": "^deployment-reconciliation-custody-inventory-[0-9a-f]{64}$",
+      "title": "Inventory Id",
+      "type": "string"
+    },
+    "inventory_core_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Inventory Core Sha256",
+      "type": "string"
+    },
+    "inventory_digest_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Inventory Digest Sha256",
+      "type": "string"
+    },
+    "custody_root_path_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Custody Root Path Sha256",
+      "type": "string"
+    },
+    "custody_root_device": {
+      "minimum": 1,
+      "title": "Custody Root Device",
+      "type": "integer"
+    },
+    "custody_root_inode": {
+      "minimum": 1,
+      "title": "Custody Root Inode",
+      "type": "integer"
+    },
+    "custody_root_uid": {
+      "minimum": 0,
+      "title": "Custody Root Uid",
+      "type": "integer"
+    },
+    "custody_root_gid": {
+      "minimum": 0,
+      "title": "Custody Root Gid",
+      "type": "integer"
+    },
+    "custody_root_mode": {
+      "maximum": 4095,
+      "minimum": 0,
+      "title": "Custody Root Mode",
+      "type": "integer"
+    },
+    "custody_root_nlink": {
+      "minimum": 1,
+      "title": "Custody Root Nlink",
+      "type": "integer"
+    },
+    "lock_file_device": {
+      "minimum": 1,
+      "title": "Lock File Device",
+      "type": "integer"
+    },
+    "lock_file_inode": {
+      "minimum": 1,
+      "title": "Lock File Inode",
+      "type": "integer"
+    },
+    "lock_file_uid": {
+      "minimum": 0,
+      "title": "Lock File Uid",
+      "type": "integer"
+    },
+    "lock_file_gid": {
+      "minimum": 0,
+      "title": "Lock File Gid",
+      "type": "integer"
+    },
+    "lock_file_mode": {
+      "maximum": 4095,
+      "minimum": 0,
+      "title": "Lock File Mode",
+      "type": "integer"
+    },
+    "lock_file_nlink": {
+      "const": 1,
+      "title": "Lock File Nlink",
+      "type": "integer"
+    },
+    "genesis_commitment_raw_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Genesis Commitment Raw Sha256",
+      "type": "string"
+    },
+    "genesis_commitment": {
+      "$ref": "#/$defs/DeploymentDrainStateCommitmentDTO"
+    },
+    "state_commitment_raw_sha256s": {
+      "items": {
+        "pattern": "^[0-9a-f]{64}$",
+        "type": "string"
+      },
+      "title": "State Commitment Raw Sha256S",
+      "type": "array"
+    },
+    "state_commitments": {
+      "items": {
+        "$ref": "#/$defs/DeploymentDrainStateCommitmentDTO"
+      },
+      "title": "State Commitments",
+      "type": "array"
+    },
+    "actual_state_raw_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Actual State Raw Sha256",
+      "type": "string"
+    },
+    "actual_state": {
+      "additionalProperties": true,
+      "title": "Actual State",
+      "type": "object"
+    },
+    "actual_epoch_anchor_raw_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Actual Epoch Anchor Raw Sha256",
+      "type": "string"
+    },
+    "actual_epoch_anchor": {
+      "$ref": "#/$defs/DeploymentEpochAnchorV2DTO"
+    },
+    "actual_head_commitment_raw_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Actual Head Commitment Raw Sha256",
+      "type": "string"
+    },
+    "actual_head_commitment": {
+      "$ref": "#/$defs/DeploymentDrainStateCommitmentDTO"
+    },
+    "actual_state_generation": {
+      "minimum": 2,
+      "title": "Actual State Generation",
+      "type": "integer"
+    },
+    "actual_drain_epoch": {
+      "minimum": 0,
+      "title": "Actual Drain Epoch",
+      "type": "integer"
+    },
+    "actual_execution_epoch": {
+      "minimum": 1,
+      "title": "Actual Execution Epoch",
+      "type": "integer"
+    },
+    "actual_runtime_instance_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+      "title": "Actual Runtime Instance Id",
+      "type": "string"
+    },
+    "entries": {
+      "items": {
+        "$ref": "#/$defs/DeploymentCustodyFileEntryDTO"
+      },
+      "title": "Entries",
+      "type": "array"
+    },
+    "captured_at": {
+      "format": "date-time",
+      "title": "Captured At",
+      "type": "string"
+    },
+    "fd_pinned_root_verified": {
+      "const": true,
+      "title": "Fd Pinned Root Verified",
+      "type": "boolean"
+    },
+    "deployment_flock_held": {
+      "const": true,
+      "title": "Deployment Flock Held",
+      "type": "boolean"
+    },
+    "actual_live_custody_verified": {
+      "const": true,
+      "title": "Actual Live Custody Verified",
+      "type": "boolean"
+    },
+    "custody_inventory_verified": {
+      "const": true,
+      "title": "Custody Inventory Verified",
+      "type": "boolean"
+    },
+    "external_high_water_verified": {
+      "const": false,
+      "title": "External High Water Verified",
+      "type": "boolean"
+    },
+    "target_runtime_verified": {
+      "const": false,
+      "title": "Target Runtime Verified",
+      "type": "boolean"
+    },
+    "reconciliation_completed": {
+      "const": false,
+      "title": "Reconciliation Completed",
+      "type": "boolean"
+    },
+    "windows_fence_released": {
+      "const": false,
+      "title": "Windows Fence Released",
+      "type": "boolean"
+    },
+    "authority_restore_allowed": {
+      "const": false,
+      "title": "Authority Restore Allowed",
+      "type": "boolean"
+    },
+    "consume_authorized": {
+      "const": false,
+      "title": "Consume Authorized",
+      "type": "boolean"
+    },
+    "reconciliation_authorized": {
+      "const": false,
+      "title": "Reconciliation Authorized",
+      "type": "boolean"
+    },
+    "deployment_authorized": {
+      "const": false,
+      "title": "Deployment Authorized",
+      "type": "boolean"
+    },
+    "automatic_deploy_allowed": {
+      "const": false,
+      "title": "Automatic Deploy Allowed",
+      "type": "boolean"
+    },
+    "production_allowed": {
+      "const": false,
+      "title": "Production Allowed",
+      "type": "boolean"
+    },
+    "live_trading_authorized": {
+      "const": false,
+      "title": "Live Trading Authorized",
+      "type": "boolean"
+    },
+    "countable_forward": {
+      "const": false,
+      "title": "Countable Forward",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "schema_version",
+    "purpose",
+    "mode",
+    "inventory_id",
+    "inventory_core_sha256",
+    "inventory_digest_sha256",
+    "custody_root_path_sha256",
+    "custody_root_device",
+    "custody_root_inode",
+    "custody_root_uid",
+    "custody_root_gid",
+    "custody_root_mode",
+    "custody_root_nlink",
+    "lock_file_device",
+    "lock_file_inode",
+    "lock_file_uid",
+    "lock_file_gid",
+    "lock_file_mode",
+    "lock_file_nlink",
+    "genesis_commitment_raw_sha256",
+    "genesis_commitment",
+    "state_commitment_raw_sha256s",
+    "state_commitments",
+    "actual_state_raw_sha256",
+    "actual_state",
+    "actual_epoch_anchor_raw_sha256",
+    "actual_epoch_anchor",
+    "actual_head_commitment_raw_sha256",
+    "actual_head_commitment",
+    "actual_state_generation",
+    "actual_drain_epoch",
+    "actual_execution_epoch",
+    "actual_runtime_instance_id",
+    "entries",
+    "captured_at",
+    "fd_pinned_root_verified",
+    "deployment_flock_held",
+    "actual_live_custody_verified",
+    "custody_inventory_verified",
+    "external_high_water_verified",
+    "target_runtime_verified",
+    "reconciliation_completed",
+    "windows_fence_released",
+    "authority_restore_allowed",
+    "consume_authorized",
+    "reconciliation_authorized",
+    "deployment_authorized",
+    "automatic_deploy_allowed",
+    "production_allowed",
+    "live_trading_authorized",
+    "countable_forward"
+  ],
+  "title": "Web Bridge deployment reconciliation custody inventory v1",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vnpy-web-bridge:schema:web-bridge-deployment-reconciliation-custody-inventory-v1"
+}

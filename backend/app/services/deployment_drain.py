@@ -14,8 +14,9 @@ from threading import RLock, local
 from typing import Any
 
 from app.schemas.deployment_drain import (
-    DeploymentDrainStateCommitmentDTO,
     DeploymentDrainAcquireDTO,
+    DeploymentDrainStateCommitmentDTO,
+    DeploymentLegacyMigrationSourceArchiveDTO,
     DeploymentOnlineCheckpointDTO,
     DeploymentOnlineRecheckCheckpointDTO,
     DeploymentSafetySnapshotDTO,
@@ -28,17 +29,6 @@ from app.schemas.deployment_drain import (
     deployment_rpc_execution_facts_sha256,
     deployment_snapshot_blockers,
 )
-from app.services.deployment_state_commitment import (
-    DeploymentStateCommitmentError,
-    build_state_commitment,
-    parse_exact_state_commitment,
-)
-from app.services.deployment_online_recheck import (
-    MAX_RECHECK_AGE,
-    DeploymentOnlineRecheckError,
-    build_safe_restart_online_recheck,
-    verify_safe_restart_online_recheck,
-)
 from app.services.deployment_consume_wal import (
     DeploymentConsumeWalError,
     build_consume_intent,
@@ -47,6 +37,17 @@ from app.services.deployment_consume_wal import (
     canonical_consume_marker_bytes,
     parse_exact_consume_intent,
     parse_exact_consume_marker,
+)
+from app.services.deployment_online_recheck import (
+    MAX_RECHECK_AGE,
+    DeploymentOnlineRecheckError,
+    build_safe_restart_online_recheck,
+    verify_safe_restart_online_recheck,
+)
+from app.services.deployment_state_commitment import (
+    DeploymentStateCommitmentError,
+    build_state_commitment,
+    parse_exact_state_commitment,
 )
 
 STATE_VERSION = "web_bridge_deployment_drain_state_v3"
@@ -109,6 +110,7 @@ class DeploymentDrainService:
         self.checkpoint_dir = self.root / "checkpoints"
         self.recheck_dir = self.root / "rechecks"
         self.state_commitment_dir = self.root / "state-commitments"
+        self.migration_source_dir = self.root / "migration-sources"
         self.lock_path = self.root / ".deployment-drain.lock"
         self.state_path = self.root / "state.json"
         self.epoch_anchor_path = self.root / "epoch-anchor.json"
@@ -137,10 +139,12 @@ class DeploymentDrainService:
             self._prepare_directory(self.checkpoint_dir)
             self._prepare_directory(self.recheck_dir)
             self._prepare_directory(self.state_commitment_dir)
+            self._prepare_directory(self.migration_source_dir)
             self._prepare_lock_file()
             with self._exclusive_initialized():
                 self._cleanup_state_commitment_temporaries()
                 self._cleanup_consume_temporaries()
+                self._cleanup_migration_source_temporaries()
                 state = self._load_or_initial_state()
                 state = self._recover_consume_wal(state, startup=True)
                 self._verify_active_online_recheck_pointer(state)
@@ -1329,6 +1333,11 @@ class DeploymentDrainService:
                     "legacy epoch anchor is missing or unreadable",
                 ) from exc
             self._validate_legacy_epoch_anchor(state_v2, anchor_raw)
+            self._persist_legacy_migration_source_archive(
+                source_schema_version=version,
+                source_state_raw=state_raw,
+                source_epoch_anchor_raw=anchor_raw,
+            )
             state = self._migrate_v2_state(state_v2)
             migration_reason = (
                 "legacy_v1_consumption_evidence_quarantined"
@@ -1363,6 +1372,7 @@ class DeploymentDrainService:
             or any(self.checkpoint_dir.iterdir())
             or any(self.recheck_dir.iterdir())
             or any(self.state_commitment_dir.iterdir())
+            or any(self.migration_source_dir.iterdir())
         ):
             raise DeploymentDrainError(
                 "DEPLOYMENT_DRAIN_BOOTSTRAP_REQUIRED",
@@ -1861,6 +1871,111 @@ class DeploymentDrainService:
                 "state commitment readback did not match",
             )
         return _sha256(raw)
+
+    def _persist_legacy_migration_source_archive(
+        self,
+        *,
+        source_schema_version: str,
+        source_state_raw: bytes,
+        source_epoch_anchor_raw: bytes,
+    ) -> DeploymentLegacyMigrationSourceArchiveDTO:
+        """Seal exact legacy bytes before state/anchor materialization overwrites them."""
+
+        try:
+            source_state = json.loads(source_state_raw)
+            source_epoch_anchor = json.loads(source_epoch_anchor_raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise DeploymentDrainError(
+                "DEPLOYMENT_LEGACY_MIGRATION_SOURCE_INVALID",
+                "legacy migration source bytes are invalid",
+            ) from exc
+        if (
+            not isinstance(source_state, dict)
+            or not isinstance(source_epoch_anchor, dict)
+            or source_state_raw != _canonical_bytes(source_state) + b"\n"
+            or source_epoch_anchor_raw != _canonical_bytes(source_epoch_anchor) + b"\n"
+        ):
+            raise DeploymentDrainError(
+                "DEPLOYMENT_LEGACY_MIGRATION_SOURCE_NONCANONICAL",
+                "legacy migration source bytes must be canonical",
+            )
+        source_state_raw_sha256 = _sha256(source_state_raw)
+        source_epoch_anchor_raw_sha256 = _sha256(source_epoch_anchor_raw)
+        source_state_path = (
+            f"migration-sources/source-state-{source_state_raw_sha256}.json"
+        )
+        source_epoch_anchor_path = (
+            "migration-sources/source-epoch-anchor-"
+            f"{source_epoch_anchor_raw_sha256}.json"
+        )
+        core = {
+            "schema_version": (
+                "web_bridge_deployment_legacy_migration_source_archive_v1"
+            ),
+            "purpose": "seal_exact_legacy_migration_source_bytes",
+            "mode": "LEGACY_MIGRATION_BASELINE",
+            "source_schema_version": source_schema_version,
+            "source_state_path": source_state_path,
+            "source_state_raw_sha256": source_state_raw_sha256,
+            "source_state": source_state,
+            "source_epoch_anchor_path": source_epoch_anchor_path,
+            "source_epoch_anchor_raw_sha256": source_epoch_anchor_raw_sha256,
+            "source_epoch_anchor": source_epoch_anchor,
+            "sealed_exact_source_bytes": True,
+            "clean_migration_eligibility_verified": False,
+            "custody_inventory_verified": False,
+            "external_high_water_verified": False,
+            "target_runtime_verified": False,
+            "reconciliation_completed": False,
+            "windows_fence_released": False,
+            "authority_restore_allowed": False,
+            "consume_authorized": False,
+            "reconciliation_authorized": False,
+            "deployment_authorized": False,
+            "automatic_deploy_allowed": False,
+            "production_allowed": False,
+            "live_trading_authorized": False,
+            "countable_forward": False,
+        }
+        archive_core_sha256 = _sha256(_canonical_bytes(core))
+        archive_path = f"migration-sources/archive-{archive_core_sha256}.json"
+        try:
+            archive = DeploymentLegacyMigrationSourceArchiveDTO.model_validate(
+                {
+                    **core,
+                    "archive_id": (
+                        f"legacy-migration-source-archive-{archive_core_sha256}"
+                    ),
+                    "archive_core_sha256": archive_core_sha256,
+                    "archive_path": archive_path,
+                }
+            )
+        except (TypeError, ValueError) as exc:
+            raise DeploymentDrainError(
+                "DEPLOYMENT_LEGACY_MIGRATION_SOURCE_INVALID",
+                "legacy migration source archive is invalid",
+            ) from exc
+        archive_raw = _canonical_bytes(archive.model_dump(mode="json")) + b"\n"
+        artifacts = (
+            (self.root / source_state_path, source_state_raw),
+            (self.root / source_epoch_anchor_path, source_epoch_anchor_raw),
+            (self.root / archive_path, archive_raw),
+        )
+        for path, raw in artifacts:
+            try:
+                self._write_create_only_atomic(path, raw)
+            except FileExistsError:
+                if self._read_secure_file(path) != raw:
+                    raise DeploymentDrainError(
+                        "DEPLOYMENT_LEGACY_MIGRATION_SOURCE_COLLISION",
+                        "legacy migration source archive collides with existing bytes",
+                    )
+            if self._read_secure_file(path) != raw:
+                raise DeploymentDrainError(
+                    "DEPLOYMENT_LEGACY_MIGRATION_SOURCE_READBACK_FAILED",
+                    "legacy migration source archive readback did not match",
+                )
+        return archive
 
     def _load_committed_state(
         self,
@@ -3110,6 +3225,44 @@ class DeploymentDrainService:
             removed = True
         if removed:
             _fsync_directory(self.consume_dir)
+
+    def _cleanup_migration_source_temporaries(self) -> None:
+        removed = False
+        prefixes = (
+            "source-state-",
+            "source-epoch-anchor-",
+            "archive-",
+        )
+        for path in self.migration_source_dir.iterdir():
+            name = path.name
+            if not (name.startswith(".") and name.endswith(".tmp")):
+                continue
+            base_and_token = name[1:-4]
+            try:
+                base, token = base_and_token.rsplit(".", 1)
+            except ValueError:
+                continue
+            prefix = next(
+                (candidate for candidate in prefixes if base.startswith(candidate)),
+                None,
+            )
+            digest = base.removeprefix(prefix or "").removesuffix(".json")
+            if (
+                prefix is None
+                or not base.endswith(".json")
+                or len(digest) != 64
+                or any(character not in "0123456789abcdef" for character in digest)
+                or len(token) != 32
+                or any(character not in "0123456789abcdef" for character in token)
+            ):
+                continue
+            self._cleanup_create_only_temporary(
+                path,
+                self.migration_source_dir / base,
+            )
+            removed = True
+        if removed:
+            _fsync_directory(self.migration_source_dir)
 
     def _cleanup_create_only_temporary(self, temporary: Path, final: Path) -> None:
         info = temporary.lstat()

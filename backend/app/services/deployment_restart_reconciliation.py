@@ -3,15 +3,21 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from types import MappingProxyType
 from typing import Any
 
 from pydantic import ValidationError
 
 from app.schemas.deployment_drain import (
+    DeploymentDrainStateCommitmentDTO,
     DeploymentOnlineRecheckCheckpointDTO,
     DeploymentPostRestartCheckpointDTO,
     DeploymentRpcRecheckFactsDTO,
+    SafeRestartConsumeCommitMarkerDTO,
+    SafeRestartConsumeIntentDTO,
+    SafeRestartOnlineRecheckDTO,
     SafeRestartReceiptDTO,
     SafeRestartReconciliationEvidenceDTO,
 )
@@ -32,6 +38,24 @@ from app.services.deployment_state_commitment import (
 
 class DeploymentRestartReconciliationError(RuntimeError):
     """C1a planned-restart evidence is malformed or inconsistently bound."""
+
+
+@dataclass(frozen=True)
+class VerifiedPlannedRestartInputBundle:
+    """Read-only exact C1a input closure, before any Windows RPC evidence."""
+
+    receipt: SafeRestartReceiptDTO
+    consumed_recheck_checkpoint: DeploymentOnlineRecheckCheckpointDTO
+    consume_intent: SafeRestartConsumeIntentDTO
+    consume_marker: SafeRestartConsumeCommitMarkerDTO
+    consumed_online_recheck: SafeRestartOnlineRecheckDTO
+    commitments: tuple[DeploymentDrainStateCommitmentDTO, ...]
+    preconsume_commitment: DeploymentDrainStateCommitmentDTO
+    current_commitment: DeploymentDrainStateCommitmentDTO
+    current_commitment_raw: bytes
+    preconsume_state: MappingProxyType
+    current_state: MappingProxyType
+    current_epoch_anchor: MappingProxyType
 
 
 _STATE_V3_FIELDS = {
@@ -422,9 +446,7 @@ def _verify_consumed_restart_transitions(
         "last_invalidated_receipt_id": marker.receipt_id,
         "blockers": ["process_restarted_consumed_receipt_requires_reconciliation"],
         "expires_at": prestate["expires_at"],
-        "freeze_reason": (
-            "process_restarted_consumed_receipt_requires_reconciliation"
-        ),
+        "freeze_reason": ("process_restarted_consumed_receipt_requires_reconciliation"),
     }
     previous = consumed
     for state in states[2:]:
@@ -439,7 +461,7 @@ def _verify_consumed_restart_transitions(
         previous = state
 
 
-def _build_post_restart_checkpoint(
+def verify_planned_restart_input_bundle(
     *,
     receipt_raw: bytes,
     original_checkpoint_raw: bytes,
@@ -450,13 +472,10 @@ def _build_post_restart_checkpoint(
     preconsume_state_commitment_raw: bytes,
     state_commitment_chain_raw: list[bytes],
     current_epoch_anchor_raw: bytes,
-    reconciliation_run_id: str,
     current_runtime_instance_id: str,
     current_execution_epoch: int,
-    windows_rpc: DeploymentRpcRecheckFactsDTO | dict[str, Any],
-    captured_at: datetime | str,
-) -> DeploymentPostRestartCheckpointDTO:
-    """Build C1a PLANNED_RESTART evidence without granting any authority."""
+) -> VerifiedPlannedRestartInputBundle:
+    """Verify the complete exact C1a input closure without RPC or authority."""
 
     try:
         intent = parse_exact_consume_intent(consume_intent_raw)
@@ -611,6 +630,61 @@ def _build_post_restart_checkpoint(
         raise DeploymentRestartReconciliationError(
             "current committed drain state does not bind the consumed restart"
         )
+    return VerifiedPlannedRestartInputBundle(
+        receipt=receipt,
+        consumed_recheck_checkpoint=consumed_checkpoint,
+        consume_intent=intent,
+        consume_marker=marker,
+        consumed_online_recheck=online,
+        commitments=tuple(commitments),
+        preconsume_commitment=precommit,
+        current_commitment=current_commitment,
+        current_commitment_raw=current_commitment_raw,
+        preconsume_state=MappingProxyType(dict(prestate)),
+        current_state=MappingProxyType(dict(current_state)),
+        current_epoch_anchor=MappingProxyType(dict(anchor)),
+    )
+
+
+def _build_post_restart_checkpoint(
+    *,
+    receipt_raw: bytes,
+    original_checkpoint_raw: bytes,
+    consumed_recheck_checkpoint_raw: bytes,
+    consume_intent_raw: bytes,
+    consume_marker_raw: bytes,
+    consumed_online_recheck_raw: bytes,
+    preconsume_state_commitment_raw: bytes,
+    state_commitment_chain_raw: list[bytes],
+    current_epoch_anchor_raw: bytes,
+    reconciliation_run_id: str,
+    current_runtime_instance_id: str,
+    current_execution_epoch: int,
+    windows_rpc: DeploymentRpcRecheckFactsDTO | dict[str, Any],
+    captured_at: datetime | str,
+) -> DeploymentPostRestartCheckpointDTO:
+    """Build C1a PLANNED_RESTART evidence without granting any authority."""
+
+    bundle = verify_planned_restart_input_bundle(
+        receipt_raw=receipt_raw,
+        original_checkpoint_raw=original_checkpoint_raw,
+        consumed_recheck_checkpoint_raw=consumed_recheck_checkpoint_raw,
+        consume_intent_raw=consume_intent_raw,
+        consume_marker_raw=consume_marker_raw,
+        consumed_online_recheck_raw=consumed_online_recheck_raw,
+        preconsume_state_commitment_raw=preconsume_state_commitment_raw,
+        state_commitment_chain_raw=state_commitment_chain_raw,
+        current_epoch_anchor_raw=current_epoch_anchor_raw,
+        current_runtime_instance_id=current_runtime_instance_id,
+        current_execution_epoch=current_execution_epoch,
+    )
+    consumed_checkpoint = bundle.consumed_recheck_checkpoint
+    intent = bundle.consume_intent
+    marker = bundle.consume_marker
+    online = bundle.consumed_online_recheck
+    current_commitment = bundle.current_commitment
+    current_commitment_raw = bundle.current_commitment_raw
+    current_state = dict(bundle.current_state)
     try:
         rpc = DeploymentRpcRecheckFactsDTO.model_validate(windows_rpc)
     except (TypeError, ValueError, ValidationError) as exc:

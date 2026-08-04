@@ -4,6 +4,8 @@
 
 PR 1-guard 已删除 legacy CD workflow。PR 1-pre C1a/C1b/C1c 分别冻结 `PLANNED_RESTART` consumed lineage、fresh `INITIAL_BASELINE` genesis lineage 与 clean legacy v1/v2 migration baseline 的非授权对账合同。C1b 只接受至少已由实际在线 runtime 接管的 pristine fresh-bootstrap chain，不接受 migration/recovery/consumed 模式。C1c 只接受同时提供 exact legacy state raw、exact legacy epoch-anchor raw 和显式 empty inventory manifest 的 clean v1/v2 migration，严格复验 `source raw → migration genesis → current head → current epoch anchor` 以及 domain-separated 两拍 Windows facts。任何 consumption 痕迹、receipt/recheck/consume pointer、epoch gap、部分历史、source raw 缺失或事实漂移都必须拒绝并保持 `RESTARTED_FROZEN`，不得降级为无历史基线。C1a/C1b/C1c 都是 pure contract，不证明 supplied custody 是 actual latest，也不接线运行状态；C2 才能在 `flock` 和唯一 Commodity owner 内读取实时 custody/inventory、捕获并 create-only 持久化证据，D 才能验证 target runtime、释放 Windows fence 和恢复 authority。在此之前全局 reconciliation/authority restore 及所有 production/live/countable 授权均为 false，`scripts/deploy.sh` 继续硬冻结，也禁止直接 stop/start/recreate `web-bridge`。人工确认不能替代该门禁。
 
+C2a 先补齐 custody 基础：未来 legacy 迁移必须在覆盖前 create-only 封存 exact source bytes，并由从 `/` 逐组件 `openat(O_NOFOLLOW)` 锚定的 fd-pinned inventory 证明 actual state、anchor、连续 chain 与全部业务目录；每个 create-only 保留的历史 planned-restart 周期也必须逐组通过 C1a exact closure。已迁移但缺 exact source bytes 时永久 fail closed，不得从 hash 或 DTO 反投影伪造。C2a 不接线 Commodity/RPC、不生成 activation；C2b 才在同一 `flock → Commodity cycle → RPC` 事务中完成 owner capture，D 才能释放 fence 和恢复 authority。
+
 下文涉及 stop/start/up 的备份和恢复命令在冻结期间只允许用于非生产恢复演练；生产备份、恢复或紧急操作需要独立授权和可验证的 safe-restart receipt。历史 CD 曾把 `APP_ENV`、`JWT_SECRET_KEY`、`MONITOR_ENABLED` 写入最终 `.env`，但该行为已不再启用。
 
 ## QuestDB
