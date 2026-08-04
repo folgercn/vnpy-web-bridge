@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vnpy-web-bridge:schema:web-bridge-deployment-initial-baseline-commodity-checkpoint-v1",
+  "title": "Web Bridge deployment initial baseline Commodity checkpoint v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "purpose", "mode", "reconciliation_run_id", "checkpoint_id", "checkpoint_core_sha256", "genesis_commitment_raw_sha256", "current_state_commitment_raw_sha256", "current_runtime_instance_id", "current_execution_epoch", "captured_at", "execution_plan_status", "execution_plan_hash", "plan_version", "state_version", "state", "state_sha256", "initial_rpc", "active_orders_snapshot_sha256", "positions_snapshot_sha256", "web_trade_enabled", "execution_authority_revoked", "auto_dispatch_stopped", "active_orders", "unknown_outcome", "reconcile_required", "deployment_authorized", "automatic_deploy_allowed", "production_allowed", "live_trading_authorized", "countable_forward"],
+  "properties": {
+    "schema_version": {"const": "web_bridge_deployment_initial_baseline_commodity_checkpoint_v1"},
+    "purpose": {"const": "record_exact_non_authorizing_commodity_initial_baseline"},
+    "mode": {"const": "INITIAL_BASELINE"},
+    "reconciliation_run_id": {"$ref": "#/$defs/identifier"},
+    "checkpoint_id": {"type": "string", "pattern": "^deployment-initial-baseline-commodity-checkpoint-(?!0{64}$)[0-9a-f]{64}$"},
+    "checkpoint_core_sha256": {"$ref": "#/$defs/sha256"},
+    "genesis_commitment_raw_sha256": {"$ref": "#/$defs/sha256"},
+    "current_state_commitment_raw_sha256": {"$ref": "#/$defs/sha256"},
+    "current_runtime_instance_id": {"$ref": "#/$defs/identifier"},
+    "current_execution_epoch": {"type": "integer", "minimum": 2},
+    "captured_at": {"$ref": "#/$defs/dateTime"},
+    "execution_plan_status": {"const": "IDLE"},
+    "execution_plan_hash": {"type": "null"},
+    "plan_version": {"const": 0},
+    "state_version": {"const": "web_bridge_initial_baseline_commodity_state_v1"},
+    "state": {"$ref": "#/$defs/commodityState"},
+    "state_sha256": {"$ref": "#/$defs/sha256"},
+    "initial_rpc": {"$ref": "#/$defs/rpcFacts"},
+    "active_orders_snapshot_sha256": {"$ref": "#/$defs/sha256"},
+    "positions_snapshot_sha256": {"$ref": "#/$defs/sha256"},
+    "web_trade_enabled": {"const": false},
+    "execution_authority_revoked": {"const": true},
+    "auto_dispatch_stopped": {"const": true},
+    "active_orders": {"const": 0},
+    "unknown_outcome": {"const": false},
+    "reconcile_required": {"const": false},
+    "deployment_authorized": {"const": false},
+    "automatic_deploy_allowed": {"const": false},
+    "production_allowed": {"const": false},
+    "live_trading_authorized": {"const": false},
+    "countable_forward": {"const": false}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^(?!0{64}$)[0-9a-f]{64}$"},
+    "identifier": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$"},
+    "nonce": {"type": "string", "pattern": "^(?!0+$)[A-Za-z0-9_-]{16,128}$"},
+    "dateTime": {"type": "string", "format": "date-time", "pattern": "Z$"},
+    "commodityState": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema_version", "commodity_state_version", "commodity_state_checkpoint_sha256", "execution_plan_status", "execution_plan_hash", "plan_version", "web_trade_enabled", "execution_authority_revoked", "auto_dispatch_stopped", "unknown_outcome", "reconcile_required", "rpc_generation", "active_orders_snapshot_sha256", "positions_snapshot_sha256"],
+      "properties": {
+        "schema_version": {"const": "web_bridge_initial_baseline_commodity_state_v1"}, "commodity_state_version": {"const": "commodity-simnow-v1"}, "commodity_state_checkpoint_sha256": {"$ref": "#/$defs/sha256"},
+        "execution_plan_status": {"const": "IDLE"}, "execution_plan_hash": {"type": "null"}, "plan_version": {"const": 0}, "web_trade_enabled": {"const": false}, "execution_authority_revoked": {"const": true}, "auto_dispatch_stopped": {"const": true},
+        "unknown_outcome": {"const": false}, "reconcile_required": {"const": false}, "rpc_generation": {"type": "integer", "minimum": 0}, "active_orders_snapshot_sha256": {"$ref": "#/$defs/sha256"}, "positions_snapshot_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "rpcFacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "request_id", "challenge", "server_instance_id", "fact_generation", "captured_at", "execution_admission_frozen", "pending_send_outcomes", "strategy_execution_enabled", "account_hashes", "orders", "active_orders", "trades", "positions"],
+      "properties": {
+        "schema_version": {"const": "windows_rpc_deployment_safety_snapshot_v1"},
+        "request_id": {"$ref": "#/$defs/identifier"},
+        "challenge": {"$ref": "#/$defs/nonce"},
+        "server_instance_id": {"$ref": "#/$defs/identifier"},
+        "fact_generation": {"type": "integer", "minimum": 0},
+        "captured_at": {"$ref": "#/$defs/dateTime"},
+        "execution_admission_frozen": {"const": true},
+        "pending_send_outcomes": {"const": 0},
+        "strategy_execution_enabled": {"const": false},
+        "account_hashes": {"type": "array", "minItems": 1, "maxItems": 1, "items": {"$ref": "#/$defs/sha256"}},
+        "orders": {"type": "array", "items": {"type": "object"}},
+        "active_orders": {"const": []},
+        "trades": {"type": "array", "items": {"type": "object"}},
+        "positions": {"type": "array", "items": {"type": "object"}}
+      }
+    }
+  }
+}

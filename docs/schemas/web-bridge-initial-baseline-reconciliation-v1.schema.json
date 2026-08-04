@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vnpy-web-bridge:schema:web-bridge-initial-baseline-reconciliation-v1",
+  "title": "Web Bridge initial baseline reconciliation v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "purpose", "mode", "reconciliation_id", "reconciliation_core_sha256", "checkpoint_id", "checkpoint_raw_sha256", "checkpoint_core_sha256", "commodity_checkpoint_raw_sha256", "genesis_commitment_raw_sha256", "current_state_commitment_raw_sha256", "current_epoch_anchor_raw_sha256", "current_runtime_instance_id", "current_execution_epoch", "expected_account_hash", "reconciled_at", "fresh_initial_baseline_verified", "custody_inventory_verified", "initial_execution_facts_baseline_recorded", "execution_facts_reconciliation_completed", "semantic_safety_unchanged", "target_runtime_verified", "reconciliation_completed", "windows_fence_released", "authority_restore_allowed", "consume_authorized", "reconciliation_authorized", "deployment_authorized", "automatic_deploy_allowed", "production_allowed", "live_trading_authorized", "countable_forward"],
+  "properties": {
+    "schema_version": {"const": "web_bridge_initial_baseline_reconciliation_v1"},
+    "purpose": {"const": "record_non_authorizing_fresh_initial_baseline_evidence"},
+    "mode": {"const": "INITIAL_BASELINE"},
+    "reconciliation_id": {"type": "string", "pattern": "^initial-baseline-reconciliation-(?!0{64}$)[0-9a-f]{64}$"},
+    "reconciliation_core_sha256": {"$ref": "#/$defs/sha256"},
+    "checkpoint_id": {"type": "string", "pattern": "^deployment-initial-baseline-checkpoint-(?!0{64}$)[0-9a-f]{64}$"},
+    "checkpoint_raw_sha256": {"$ref": "#/$defs/sha256"}, "checkpoint_core_sha256": {"$ref": "#/$defs/sha256"}, "commodity_checkpoint_raw_sha256": {"$ref": "#/$defs/sha256"},
+    "genesis_commitment_raw_sha256": {"$ref": "#/$defs/sha256"}, "current_state_commitment_raw_sha256": {"$ref": "#/$defs/sha256"}, "current_epoch_anchor_raw_sha256": {"$ref": "#/$defs/sha256"},
+    "current_runtime_instance_id": {"$ref": "#/$defs/identifier"}, "current_execution_epoch": {"type": "integer", "minimum": 2}, "expected_account_hash": {"$ref": "#/$defs/sha256"}, "reconciled_at": {"$ref": "#/$defs/dateTime"},
+    "fresh_initial_baseline_verified": {"const": true}, "custody_inventory_verified": {"const": false}, "initial_execution_facts_baseline_recorded": {"const": true}, "execution_facts_reconciliation_completed": {"const": true},
+    "semantic_safety_unchanged": {"const": false}, "target_runtime_verified": {"const": false}, "reconciliation_completed": {"const": false}, "windows_fence_released": {"const": false}, "authority_restore_allowed": {"const": false},
+    "consume_authorized": {"const": false}, "reconciliation_authorized": {"const": false}, "deployment_authorized": {"const": false}, "automatic_deploy_allowed": {"const": false}, "production_allowed": {"const": false}, "live_trading_authorized": {"const": false}, "countable_forward": {"const": false}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^(?!0{64}$)[0-9a-f]{64}$"},
+    "identifier": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$"},
+    "dateTime": {"type": "string", "format": "date-time", "pattern": "Z$"}
+  }
+}

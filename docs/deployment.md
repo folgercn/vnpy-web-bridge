@@ -2,7 +2,7 @@
 
 ## Issue #267 legacy 部署冻结
 
-PR 1-guard 已删除 legacy CD workflow。PR 1-pre C1a 在 B2b one-shot consume WAL 之后增加仅限 `PLANNED_RESTART` 的非授权重启后对账合同：它 exact 绑定完整 receipt/recheck/consume/state commitment lineage，并要求新 runtime 下 fresh、仍冻结且无漂移的 Windows execution facts。C1a 不接线运行状态，只记录 execution-facts reconciliation；target runtime 尚未验证、Windows fence 尚未释放、全局 reconciliation/authority restore 仍为 false。初始 bootstrap、owner-only 持久激活和 Windows 解锁分别留 C1b/C2/D。所有 production/live/countable 授权仍为 false，`scripts/deploy.sh` 继续硬冻结，也禁止直接 stop/start/recreate `web-bridge`。人工确认不能替代该门禁。
+PR 1-guard 已删除 legacy CD workflow。PR 1-pre C1a/C1b 分别冻结 `PLANNED_RESTART` consumed lineage 与 fresh `INITIAL_BASELINE` genesis lineage 的非授权对账合同。C1b 只接受至少已由实际在线 runtime 接管的 pristine fresh-bootstrap chain，并通过可信 expected account hash、内容寻址的 exact Commodity baseline checkpoint raw 和两拍稳定 Windows facts 建立起始事实；它不接受 migration/recovery/consumed 模式，也不声称 pre-bootstrap facts unchanged 或真实 custody inventory 已验证。C1a/C1b 都不接线运行状态；target runtime 尚未验证、Windows fence 尚未释放、全局 reconciliation/authority restore 仍为 false。legacy migration、owner-only 持久激活和 Windows 解锁分别留 C1c/C2/D。所有 production/live/countable 授权仍为 false，`scripts/deploy.sh` 继续硬冻结，也禁止直接 stop/start/recreate `web-bridge`。人工确认不能替代该门禁。
 
 下文涉及 stop/start/up 的备份和恢复命令在冻结期间只允许用于非生产恢复演练；生产备份、恢复或紧急操作需要独立授权和可验证的 safe-restart receipt。历史 CD 曾把 `APP_ENV`、`JWT_SECRET_KEY`、`MONITOR_ENABLED` 写入最终 `.env`，但该行为已不再启用。
 
