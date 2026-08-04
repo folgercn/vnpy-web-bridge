@@ -13,7 +13,6 @@ import Strategies from '../pages/Strategies.vue'
 import CommoditySimNowPage from '../features/commodity-simnow/pages/CommoditySimNowPage.vue'
 import Logs from '../pages/Logs.vue'
 import DataManagement from '../pages/DataManagement.vue'
-import MakV2TestnetObserver from '../pages/MakV2TestnetObserver.vue'
 
 const routes: RouteRecordRaw[] = [
   { path: '/login', component: Login },
@@ -32,7 +31,6 @@ const routes: RouteRecordRaw[] = [
       { path: 'account', component: Account, meta: { title: '资金' } },
       { path: 'strategies', component: Strategies, meta: { title: '策略' } },
       { path: 'commodity-simnow', component: CommoditySimNowPage, meta: { title: '商品 SimNow' } },
-      { path: 'mak-v2-observer', component: MakV2TestnetObserver, meta: { title: 'MAK v2' } },
       { path: 'data', component: DataManagement, meta: { title: '数据管理' } },
       { path: 'logs', component: Logs, meta: { title: '日志' } }
     ]
