@@ -1,0 +1,176 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vnpy-web-bridge:schema:web-bridge-rollback-manifest-v1",
+  "title": "Web Bridge rollback manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "purpose",
+    "issue_number",
+    "rollback_id",
+    "created_at",
+    "source_commit_sha",
+    "release_plan_raw_sha256",
+    "deployment_evidence_raw_sha256",
+    "rollback_schema_sha256",
+    "operator_approval_required",
+    "automatic_rollback_allowed",
+    "state_high_water",
+    "units",
+    "compatibility_verified",
+    "safe_to_rollback",
+    "decision",
+    "blockers",
+    "production_allowed",
+    "live_trading_authorized"
+  ],
+  "properties": {
+    "schema_version": {"const": "web_bridge_rollback_manifest_v1"},
+    "purpose": {"const": "state_compatible_rollback_manifest"},
+    "issue_number": {"const": 267},
+    "rollback_id": {"type": "string", "pattern": "^rollback-(?!0{64}$)[0-9a-f]{64}$"},
+    "created_at": {"$ref": "#/$defs/dateTime"},
+    "source_commit_sha": {"$ref": "#/$defs/commit"},
+    "release_plan_raw_sha256": {"$ref": "#/$defs/sha256"},
+    "deployment_evidence_raw_sha256": {"$ref": "#/$defs/sha256"},
+    "rollback_schema_sha256": {"$ref": "#/$defs/sha256"},
+    "operator_approval_required": {"const": true},
+    "automatic_rollback_allowed": {"const": false},
+    "state_high_water": {"$ref": "#/$defs/highWater"},
+    "units": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/rollbackUnit"},
+      "uniqueItems": true
+    },
+    "compatibility_verified": {"type": "boolean"},
+    "safe_to_rollback": {"type": "boolean"},
+    "decision": {"enum": ["READY", "BLOCKED"]},
+    "blockers": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/blocker"},
+      "uniqueItems": true
+    },
+    "production_allowed": {"const": false},
+    "live_trading_authorized": {"const": false}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"decision": {"const": "READY"}}},
+      "then": {
+        "properties": {
+          "compatibility_verified": {"const": true},
+          "safe_to_rollback": {"const": true},
+          "blockers": {"maxItems": 0},
+          "state_high_water": {
+            "properties": {
+              "unknown_outcome": {"const": false},
+              "reconcile_required": {"const": false},
+              "active_orders": {"const": 0}
+            }
+          },
+          "units": {
+            "items": {
+              "allOf": [
+                {"$ref": "#/$defs/rollbackUnit"},
+                {
+                  "properties": {
+                    "compatibility": {"const": "compatible"},
+                    "action": {"const": "rollback"}
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"decision": {"const": "BLOCKED"}}},
+      "then": {
+        "properties": {
+          "safe_to_rollback": {"const": false},
+          "blockers": {"minItems": 1}
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "serviceId": {"type": "string", "pattern": "^[a-z][a-z0-9-]{1,63}$"},
+    "sha256": {"type": "string", "pattern": "^(?!0{64}$)[0-9a-f]{64}$"},
+    "commit": {"type": "string", "pattern": "^(?!0{40}$)[0-9a-f]{40}$"},
+    "imageDigest": {"type": "string", "pattern": "^sha256:(?!0{64}$)[0-9a-f]{64}$"},
+    "version": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$"},
+    "dateTime": {"type": "string", "format": "date-time"},
+    "highWater": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["captured_at", "state_schema_version", "state_schema_sha256", "state_snapshot_sha256", "journal_sequence", "leader_epoch", "fencing_token", "archive_high_water_sha256", "unknown_outcome", "reconcile_required", "active_orders"],
+      "properties": {
+        "captured_at": {"$ref": "#/$defs/dateTime"},
+        "state_schema_version": {"$ref": "#/$defs/version"},
+        "state_schema_sha256": {"$ref": "#/$defs/sha256"},
+        "state_snapshot_sha256": {"$ref": "#/$defs/sha256"},
+        "journal_sequence": {"type": "integer", "minimum": 0},
+        "leader_epoch": {"type": "integer", "minimum": 1},
+        "fencing_token": {"type": "integer", "minimum": 1},
+        "archive_high_water_sha256": {"$ref": "#/$defs/sha256"},
+        "unknown_outcome": {"type": "boolean"},
+        "reconcile_required": {"type": "boolean"},
+        "active_orders": {"type": "integer", "minimum": 0}
+      }
+    },
+    "rollbackUnit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["unit", "from_version", "to_version", "from_image_digest", "to_image_digest", "from_config_sha256", "to_config_sha256", "state_schema_version", "target_readable_state_versions", "state_version_readable_verified", "compatibility", "compatibility_evidence_sha256", "safe_restart_receipt_sha256", "safe_restart_receipt_freshness_verified", "safe_restart_receipt_state_binding_verified", "fencing_verified", "action"],
+      "properties": {
+        "unit": {"$ref": "#/$defs/serviceId"},
+        "from_version": {"$ref": "#/$defs/version"},
+        "to_version": {"$ref": "#/$defs/version"},
+        "from_image_digest": {"$ref": "#/$defs/imageDigest"},
+        "to_image_digest": {"$ref": "#/$defs/imageDigest"},
+        "from_config_sha256": {"$ref": "#/$defs/sha256"},
+        "to_config_sha256": {"$ref": "#/$defs/sha256"},
+        "state_schema_version": {"$ref": "#/$defs/version"},
+        "target_readable_state_versions": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/version"},
+          "uniqueItems": true
+        },
+        "state_version_readable_verified": {"type": "boolean"},
+        "compatibility": {"enum": ["compatible", "incompatible", "unknown"]},
+        "compatibility_evidence_sha256": {"$ref": "#/$defs/sha256"},
+        "safe_restart_receipt_sha256": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/sha256"}]},
+        "safe_restart_receipt_freshness_verified": {"type": "boolean"},
+        "safe_restart_receipt_state_binding_verified": {"type": "boolean"},
+        "fencing_verified": {"type": "boolean"},
+        "action": {"enum": ["rollback", "hold"]}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"action": {"const": "rollback"}}},
+          "then": {"properties": {"compatibility": {"const": "compatible"}, "state_version_readable_verified": {"const": true}, "fencing_verified": {"const": true}}}
+        },
+        {
+          "if": {"properties": {"unit": {"const": "execution-orchestrator"}, "action": {"const": "rollback"}}},
+          "then": {"properties": {"safe_restart_receipt_sha256": {"$ref": "#/$defs/sha256"}, "safe_restart_receipt_freshness_verified": {"const": true}, "safe_restart_receipt_state_binding_verified": {"const": true}}}
+        }
+      ]
+    },
+    "blocker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["unit", "code", "reason", "evidence_sha256", "manual_override_allowed"],
+      "properties": {
+        "unit": {"$ref": "#/$defs/serviceId"},
+        "code": {"enum": ["state_schema_incompatible", "config_incompatible", "image_unavailable", "digest_unverified", "high_water_unknown", "active_orders", "unknown_outcome", "reconcile_required", "missing_safe_restart_receipt", "archive_not_durable"]},
+        "reason": {"type": "string", "minLength": 1, "maxLength": 512},
+        "evidence_sha256": {"$ref": "#/$defs/sha256"},
+        "manual_override_allowed": {"const": false}
+      }
+    }
+  }
+}

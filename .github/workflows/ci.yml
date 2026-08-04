@@ -112,7 +112,9 @@ jobs:
           PYTHONPATH=backend:scripts:. pytest -q \
             backend/tests/unit/test_ci_backend_test_shards.py \
             backend/tests/unit/test_ci_change_classifier.py \
-            backend/tests/unit/test_ci_workflow_contract.py
+            backend/tests/unit/test_ci_workflow_contract.py \
+            backend/tests/unit/test_issue267_release_contract.py \
+            backend/tests/unit/test_pr_update_comment_gate.py
 
   backend:
     name: Backend tests (shard ${{ matrix.shard }})
