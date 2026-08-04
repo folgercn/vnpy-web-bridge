@@ -190,7 +190,7 @@ Rollback：不能恢复旧的 `image_changed → web-bridge` 自动部署。若 
 为避免半接线门禁被误当作可部署能力，PR 1-pre 分两步合并：
 
 - **1-pre-A（admission foundation）**：建立持久化全局 gate，并覆盖最终订单发送、交易启用/风控规则变更、CTA init/start/update；定义 receipt/recheck/consume 契约及离线结构校验。`scripts/deploy.sh` 即使验证通过也无条件阻塞，且不得消费 receipt。
-- **1-pre-B（online activation）**：补齐 Commodity command/plan/startup authority，在线原子快照、部署前二次核验、一次性消费和重启后 reconciliation。只有该步验收完成后才能移除部署硬冻结。
+- **1-pre-B（online activation）**：继续按独立 PR 激活；A1 先统一 Commodity 正向入口锁序为 `deployment gate → cycle → RPC`，并保证冻结启动不恢复 authority/worker；A2 再增加可信 durable online snapshot/checkpoint；随后才实现 crash-safe 一次性消费、证据绑定 reconciliation 和部署串链。只有全部步骤验收完成后才能移除部署硬冻结。
 
 1-pre-A 不得宣称完整 PR 1-pre 已完成；磁盘上的 receipt/recheck 文件不能代替运行进程持锁生成的在线证据。Execution Orchestrator 在 Phase 2 专用 receipt 契约落地前禁止重启。
 
@@ -201,6 +201,8 @@ Rollback：不能恢复旧的 `image_changed → web-bridge` 自动部署。若 
 DTO 属于语义层，可接收等价的 UTC datetime，持久化前统一输出 `Z`；receipt/recheck/consume 的原始 artifact schema 只接受 `Z` 文本。当前 epoch anchor 防止单文件缺失或回退以及正常崩溃写入不一致；不把 state 与 anchor 所在整个持久卷同时回滚纳入本地可检测威胁模型。Phase 6 必须用卷外审计/high-water 证据覆盖整卷快照回退。
 
 1-pre-B 的锁顺序固定为 `deployment gate → Commodity cycle lock → RPC call lock`；禁止从 Commodity cycle lock 内反向申请 deployment gate。合并前必须用真实 Trade/Commodity 并发测试证明 drain 与 send/snapshot 不死锁，且 consume/reconciliation 只能接收同锁在线证据。
+
+1-pre-B A1 完成后，Commodity 的 enable/restore/preview/start/execute/auto/public reconcile 等正向入口先获取全局 gate，嵌套入口复用外层 gate；read/status 与 disable/revoke/stop/halt 仅在 cycle 内串行，drain 期间只保留严格限定为 `CANCEL_PENDING`/`HALTED_RECONCILE_REQUIRED`/`HALTED_RECONCILED` 的内部 reconciliation 收口。非测试运行要求 Commodity、Trade、Risk、RPC 持有同一 gate 对象。构造阶段只读检查终态 custody，不得在确认 RUNNING 前清理或改写 active plan；DRAINING/RESTARTED_FROZEN 启动不恢复持久授权、不启动 auto worker。A1 不提供 online snapshot、consume 或 reconciliation authority，`scripts/deploy.sh` 仍无条件阻塞。
 
 Cutover：先以禁交易、无订单方式验证 lock acquisition、并发 command rejection、receipt expiry 和 release；该 PR 不改变 8080、镜像拓扑或订单 owner。
 

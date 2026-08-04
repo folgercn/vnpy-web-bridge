@@ -13,7 +13,8 @@ import os
 import re
 import stat
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, nullcontext
 from datetime import date, datetime, timezone
 from functools import wraps
 from pathlib import Path
@@ -35,6 +36,7 @@ from app.core.errors import (
     CommoditySimNowDisabledError,
     CommoditySimNowSafetyError,
     CommoditySimNowStateError,
+    DeploymentDrainActiveError,
     RpcCallError,
     RpcTimeoutError,
     RpcUnavailableError,
@@ -82,6 +84,10 @@ from app.services.commodity_c_fast_runtime_authorization import (
     CommodityCFastRuntimeAuthorizationService,
 )
 from app.services.commodity_c_fast_shadow import C_FAST_SECTOR_MAP_V1
+from app.services.deployment_drain import (
+    DeploymentDrainError,
+    DeploymentDrainService,
+)
 from app.services.risk_service import RiskService, risk_service
 from app.services.trade_service import (
     TradeService,
@@ -126,58 +132,70 @@ POSITION_MANAGER_SECTOR_MAP_V1 = commodity_frozen_sector_map_v1()
 POSITION_MANAGER_GENESIS_SOURCE_MONTH = "2026-08"
 
 
-def _serialized(method):
-    @wraps(method)
-    def wrapped(self, *args, **kwargs):
-        context = self._dispatch_operation_context
-        depth = int(getattr(context, "depth", 0))
-        if depth == 0:
-            (
-                context.entry_abort_epoch,
-                context.entry_pending_halt_epochs,
-            ) = (
-                self._dispatch_epoch_state_snapshot()
+def _serialized(method=None, *, deployment_mutation: bool = False):
+    def decorate(target):
+        @wraps(target)
+        def wrapped(self, *args, **kwargs):
+            deployment_guard = (
+                self._deployment_mutation_guard()
+                if deployment_mutation
+                else nullcontext()
             )
-        entry_abort_epoch = int(
-            context.entry_abort_epoch
-        )
-        entry_pending_halt_epochs = frozenset(
-            context.entry_pending_halt_epochs
-        )
-        requested_abort_epoch: int | None = None
-        if method.__name__ in {
-            "disable",
-            "revoke_all_execution_authority",
-            "revoke_c_fast_runtime_authorization",
-            "stop_c_fast_shakedown",
-            "stop_position_manager_shakedown",
-        }:
-            requested_abort_epoch = self._request_dispatch_abort()
-        if method.__name__ in {
-            "enable",
-            "start_c_fast_shakedown",
-            "start_position_manager_shakedown",
-        }:
-            kwargs["_dispatch_entry_abort_epoch"] = entry_abort_epoch
-            kwargs["_dispatch_entry_pending_halt_epochs"] = (
-                entry_pending_halt_epochs
-            )
-        context.depth = depth + 1
-        try:
-            with self._cycle_lock:
-                result = method(self, *args, **kwargs)
-                if requested_abort_epoch is not None:
-                    self._complete_dispatch_halt(
-                        requested_abort_epoch
-                    )
-                return result
-        finally:
-            context.depth = depth
-            if depth == 0:
-                del context.entry_abort_epoch
-                del context.entry_pending_halt_epochs
+            with deployment_guard:
+                return _serialized_under_deployment_gate(
+                    self, target, args, kwargs
+                )
 
-    return wrapped
+        wrapped._deployment_mutation = deployment_mutation
+        return wrapped
+
+    if method is None:
+        return decorate
+    return decorate(method)
+
+
+def _serialized_under_deployment_gate(self, method, args, kwargs):
+    context = self._dispatch_operation_context
+    depth = int(getattr(context, "depth", 0))
+    if depth == 0:
+        (
+            context.entry_abort_epoch,
+            context.entry_pending_halt_epochs,
+        ) = self._dispatch_epoch_state_snapshot()
+    entry_abort_epoch = int(context.entry_abort_epoch)
+    entry_pending_halt_epochs = frozenset(
+        context.entry_pending_halt_epochs
+    )
+    requested_abort_epoch: int | None = None
+    if method.__name__ in {
+        "disable",
+        "revoke_all_execution_authority",
+        "revoke_c_fast_runtime_authorization",
+        "stop_c_fast_shakedown",
+        "stop_position_manager_shakedown",
+    }:
+        requested_abort_epoch = self._request_dispatch_abort()
+    if method.__name__ in {
+        "enable",
+        "start_c_fast_shakedown",
+        "start_position_manager_shakedown",
+    }:
+        kwargs["_dispatch_entry_abort_epoch"] = entry_abort_epoch
+        kwargs["_dispatch_entry_pending_halt_epochs"] = (
+            entry_pending_halt_epochs
+        )
+    context.depth = depth + 1
+    try:
+        with self._cycle_lock:
+            result = method(self, *args, **kwargs)
+            if requested_abort_epoch is not None:
+                self._complete_dispatch_halt(requested_abort_epoch)
+            return result
+    finally:
+        context.depth = depth
+        if depth == 0:
+            del context.entry_abort_epoch
+            del context.entry_pending_halt_epochs
 
 
 def _canonical_json(value: Any) -> bytes:
@@ -286,6 +304,7 @@ class CommoditySimNowService:
         c_fast_runtime_authorization: (
             CommodityCFastRuntimeAuthorizationService | None
         ) = None,
+        deployment_drain: DeploymentDrainService | None = None,
     ) -> None:
         self.settings = settings or get_settings()
         self.rpc = rpc or rpc_service
@@ -305,6 +324,39 @@ class CommoditySimNowService:
                 rpc=self.rpc,
             )
         self.risk = risk or risk_service
+        trade_drain = getattr(self.trade, "deployment_drain", None)
+        rpc_drain = getattr(self.rpc, "deployment_drain", None)
+        risk_drain = getattr(self.risk, "deployment_drain", None)
+        if self.settings.app_env.lower() != "test" and any(
+            drain is None for drain in (trade_drain, rpc_drain, risk_drain)
+        ):
+            raise ValueError(
+                "production Commodity dependencies must expose deployment drain"
+            )
+        concrete_drains = [
+            drain
+            for drain in (trade_drain, rpc_drain, risk_drain)
+            if drain is not None
+        ]
+        if concrete_drains and any(
+            drain is not concrete_drains[0] for drain in concrete_drains[1:]
+        ):
+            raise ValueError(
+                "Commodity, Trade, RPC and Risk must share deployment drain"
+            )
+        shared_drain = concrete_drains[0] if concrete_drains else None
+        if (
+            deployment_drain is not None
+            and shared_drain is not None
+            and deployment_drain is not shared_drain
+        ):
+            raise ValueError(
+                "explicit deployment drain must match Trade/RPC deployment drain"
+            )
+        # Production Trade/RPC objects always expose the same process-wide
+        # service.  Legacy unit-test doubles without a drain remain supported;
+        # dedicated deployment tests inject the real service explicitly.
+        self.deployment_drain = deployment_drain or shared_drain
         self.audit = audit or audit_service
         self.tick_store = tick_store or memory_store
         self.clock = clock or (lambda: datetime.now(timezone.utc))
@@ -391,7 +443,80 @@ class CommoditySimNowService:
         self._dispatch_operation_context = local()
         self._completed_state = self._load_completed_state()
         self.current_plan = self._load_active_plan()
-        self._cleanup_terminal_shakedown_active_plan()
+        self._inspect_terminal_shakedown_active_plan()
+
+    @contextmanager
+    def _deployment_mutation_guard(self) -> Iterator[None]:
+        """Acquire the process-wide deployment gate before the cycle lock."""
+
+        context = self._dispatch_operation_context
+        gate_depth = int(getattr(context, "deployment_gate_depth", 0))
+        if gate_depth:
+            yield
+            return
+        if int(getattr(context, "depth", 0)):
+            raise DeploymentDrainActiveError(
+                detail={"gate_code": "DEPLOYMENT_LOCK_ORDER_VIOLATION"}
+            )
+        if self.deployment_drain is None:
+            # Compatibility for isolated legacy test doubles.  Production
+            # TradeService/VnpyRpcService always provide the shared gate.
+            context.deployment_gate_depth = 1
+            try:
+                yield
+            finally:
+                del context.deployment_gate_depth
+            return
+        try:
+            with self.deployment_drain.mutation_guard():
+                context.deployment_gate_depth = 1
+                try:
+                    yield
+                finally:
+                    del context.deployment_gate_depth
+        except DeploymentDrainError as exc:
+            raise DeploymentDrainActiveError(
+                detail={"gate_code": exc.code}
+            ) from exc
+
+    def _deployment_execution_frozen(self) -> bool:
+        if self.deployment_drain is None:
+            return False
+        try:
+            return self.deployment_drain.is_frozen()
+        except (DeploymentDrainError, OSError, ValueError):
+            logger.exception(
+                "deployment drain status unavailable; Commodity remains frozen"
+            )
+            return True
+
+    def _freeze_execution_authority_for_deployment(self) -> None:
+        """Fail closed at startup without restoring or dispatching authority."""
+
+        with self._cycle_lock:
+            self._revoke_auto_dispatch("all")
+            self.enabled = False
+            self.manual_approval = False
+            self.simnow_mode = False
+            self.auto_dispatch_authorized = False
+            self.shakedown_auto_dispatch_authorized = False
+            self.c_fast_shakedown_auto_dispatch_authorized = False
+            self.c_fast_continuous_authorized = False
+            self.template_authorized = False
+            if (
+                self.current_plan
+                and self.current_plan.get("status") != "COMPLETE"
+            ):
+                self._begin_safe_halt(
+                    "deployment_restart_frozen",
+                    operator="commodity-simnow-deployment-gate",
+                    source_ip=None,
+                    revoke_scope="all",
+                )
+            self._event(
+                "deployment_restart_execution_frozen",
+                result={"auto_worker_started": False},
+            )
 
     def bind_c_fast_snapshot_provider(
         self,
@@ -838,6 +963,19 @@ class CommoditySimNowService:
         }
 
     def start(self) -> None:
+        if self._deployment_execution_frozen():
+            self._freeze_execution_authority_for_deployment()
+            return
+        try:
+            with self._deployment_mutation_guard():
+                with self._cycle_lock:
+                    self._start_unfrozen()
+        except DeploymentDrainActiveError:
+            # Drain may linearize after the optimistic status check above.
+            self._freeze_execution_authority_for_deployment()
+
+    def _start_unfrozen(self) -> None:
+        self._cleanup_terminal_shakedown_active_plan()
         if (
             self.current_plan
             and self.current_plan.get("status") == "NOOP_FINALIZING"
@@ -1012,7 +1150,7 @@ class CommoditySimNowService:
         }
         return session, archived, dict(sorted(expected_positions.items()))
 
-    @_serialized
+    @_serialized(deployment_mutation=True)
     def _restore_c_fast_continuous_authority(self) -> dict[str, Any]:
         if self.current_plan:
             return {"action": "idle", "reason": "execution_slot_occupied"}
@@ -1125,7 +1263,7 @@ class CommoditySimNowService:
             **self.c_fast_shakedown_status(),
         }
 
-    @_serialized
+    @_serialized(deployment_mutation=True)
     def enable_c_fast_continuous(
         self,
         payload: CommodityCFastContinuousEnableRequestDTO,
@@ -1282,7 +1420,7 @@ class CommoditySimNowService:
             "production_allowed": False,
         }
 
-    @_serialized
+    @_serialized(deployment_mutation=True)
     def enable_c_fast_runtime_authorization(
         self,
         payload: CommodityCFastRuntimeAuthorizationEnableRequestDTO,
@@ -1464,7 +1602,7 @@ class CommoditySimNowService:
                     "failed to persist revoked C_FAST continuous authority"
                 )
 
-    @_serialized
+    @_serialized(deployment_mutation=True)
     def enable(
         self,
         payload: CommoditySimNowEnableRequestDTO,
@@ -1588,7 +1726,7 @@ class CommoditySimNowService:
                 },
             }
 
-    @_serialized
+    @_serialized(deployment_mutation=True)
     def start_template(
         self,
         payload: CommodityTemplateStartRequestDTO,
@@ -1707,7 +1845,7 @@ class CommoditySimNowService:
         )
         return result
 
-    @_serialized
+    @_serialized(deployment_mutation=True)
     def preview(
         self,
         batch: CommodityTargetBatchDTO,
@@ -1839,7 +1977,7 @@ class CommoditySimNowService:
         )
         return result
 
-    @_serialized
+    @_serialized(deployment_mutation=True)
     def execute(
         self,
         payload: CommodityPlanExecuteRequestDTO,
@@ -2366,7 +2504,7 @@ class CommoditySimNowService:
         )
         return result
 
-    @_serialized
+    @_serialized(deployment_mutation=True)
     def reconcile(
         self,
         plan_hash: str,
@@ -2425,6 +2563,33 @@ class CommoditySimNowService:
             )
             self._persist_active_plan_during_halt(halt)
             raise
+
+    @_serialized
+    def _reconcile_during_drain(
+        self,
+        plan_hash: str,
+        *,
+        operator: str,
+        role: str | None,
+        source_ip: str | None,
+    ) -> dict[str, Any]:
+        plan = self._require_plan(plan_hash)
+        if plan.get("status") not in {
+            "CANCEL_PENDING",
+            "HALTED_RECONCILE_REQUIRED",
+            "HALTED_RECONCILED",
+        }:
+            raise CommoditySimNowStateError(
+                "deployment drain reconciliation requires a halted plan",
+                detail={"status": plan.get("status")},
+            )
+        return self._reconcile_impl(
+            plan_hash,
+            operator=operator,
+            role=role,
+            source_ip=source_ip,
+            dispatch_mode="deployment_drain",
+        )
 
     def _reconcile_impl(
         self,
@@ -2627,7 +2792,7 @@ class CommoditySimNowService:
             )
         return result
 
-    @_serialized
+    @_serialized(deployment_mutation=True)
     def auto_advance(
         self,
         *,
@@ -2728,7 +2893,7 @@ class CommoditySimNowService:
 
         return {"action": "idle", "reason": f"plan_status_{status.lower()}", **self.status()}
 
-    @_serialized
+    @_serialized(deployment_mutation=True)
     def auto_candidate_shakedown_advance(
         self,
         *,
@@ -2850,7 +3015,7 @@ class CommoditySimNowService:
         halt = self._begin_safe_halt("unexpected_shakedown_plan_status", operator=operator, source_ip=source_ip)
         return {"action": "halted", "halt": halt}
 
-    @_serialized
+    @_serialized(deployment_mutation=True)
     def auto_position_manager_shakedown_advance(
         self,
         *,
@@ -2862,7 +3027,7 @@ class CommoditySimNowService:
             operator=operator, role=role, source_ip=source_ip
         )
 
-    @_serialized
+    @_serialized(deployment_mutation=True)
     def auto_c_fast_continuous_advance(
         self,
         *,
@@ -3033,7 +3198,7 @@ class CommoditySimNowService:
             )
             raise
 
-    @_serialized
+    @_serialized(deployment_mutation=True)
     def auto_template_advance(
         self,
         *,
@@ -3511,7 +3676,7 @@ class CommoditySimNowService:
             "session": session,
         }
 
-    @_serialized
+    @_serialized(deployment_mutation=True)
     def preview_c_fast_shakedown(
         self,
         selected_products: list[str],
@@ -3760,7 +3925,7 @@ class CommoditySimNowService:
         )
         return result
 
-    @_serialized
+    @_serialized(deployment_mutation=True)
     def start_c_fast_shakedown(
         self,
         plan_hash: str,
@@ -4604,7 +4769,7 @@ class CommoditySimNowService:
             "session": session,
         }
 
-    @_serialized
+    @_serialized(deployment_mutation=True)
     def preview_position_manager_shakedown(
         self,
         selected_products: list[str],
@@ -4731,7 +4896,7 @@ class CommoditySimNowService:
         )
         return result
 
-    @_serialized
+    @_serialized(deployment_mutation=True)
     def start_position_manager_shakedown(
         self,
         plan_hash: str,
@@ -9211,6 +9376,43 @@ class CommoditySimNowService:
             "filled_volume": filled_volume,
         }
 
+    def _inspect_terminal_shakedown_active_plan(self) -> None:
+        """Detect terminal custody blockers without mutating restart evidence."""
+
+        plan = self.current_plan
+        if not self._is_shakedown_plan(plan):
+            return
+        session_id = plan.get("c_fast_shakedown_session_id")
+        if not session_id:
+            return
+        session = self._load_c_fast_shakedown_state()
+        try:
+            archived = self._load_c_fast_terminal_archive(str(session_id))
+            chain, chain_state = self._c_fast_terminal_chain()
+        except Exception:
+            archived = None
+            chain = []
+            chain_state = "CHAIN_BROKEN"
+        committed = bool(
+            archived
+            and archived.get("plan_hash") == plan.get("plan_hash")
+            and chain_state == "VALID"
+            and chain
+            and chain[-1].get("terminal_checksum")
+            == archived.get("terminal_checksum")
+        )
+        if self._state_load_error is None and not committed and (
+            chain_state != "VALID"
+            or (
+                isinstance(session, dict)
+                and session.get("status")
+                in {"COMPLETE", "HALTED_RECONCILED", "RESULT_UNKNOWN"}
+            )
+        ):
+            self._state_load_error = (
+                "c_fast_terminal_archive_recovery_blocked"
+            )
+
     def _cleanup_terminal_shakedown_active_plan(self) -> None:
         plan = self.current_plan
         if not self._is_shakedown_plan(plan):
@@ -9267,6 +9469,10 @@ class CommoditySimNowService:
                     return
                 self.current_plan = None
                 self._active_state_path().unlink(missing_ok=True)
+                if self._state_load_error == (
+                    "c_fast_terminal_archive_recovery_blocked"
+                ):
+                    self._state_load_error = None
                 return
             # C_FAST terminal pointers are never sufficient by themselves.
             # Missing/corrupt archive custody must retain the durable active

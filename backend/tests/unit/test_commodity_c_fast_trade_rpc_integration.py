@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Event, Thread
@@ -136,6 +137,63 @@ def make_real_trade_service(
     service.trade = trade
     bind_test_execution_permit(service, selected_products=("ag", "al"))
     return service, rpc, risk
+
+
+def test_issue267_commodity_gate_precedes_cycle_and_real_rpc_send(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, rpc, _risk = make_real_trade_service(tmp_path, monkeypatch)
+    client = rpc.client
+    assert isinstance(client, ControlledRpcClient)
+    service.deployment_drain = rpc.deployment_drain
+    assert service.trade.deployment_drain is service.deployment_drain
+    assert service.risk.deployment_drain is service.deployment_drain
+
+    trace: list[str] = []
+    original_cycle = service._cycle_lock
+
+    class RecordingCycleLock:
+        def __enter__(self):
+            trace.append("cycle")
+            return original_cycle.__enter__()
+
+        def __exit__(self, *args):
+            return original_cycle.__exit__(*args)
+
+    monkeypatch.setattr(service, "_cycle_lock", RecordingCycleLock())
+    original_guard = service.deployment_drain.mutation_guard
+
+    @contextmanager
+    def recording_guard():
+        with original_guard():
+            trace.append("gate")
+            yield
+
+    monkeypatch.setattr(
+        service.deployment_drain, "mutation_guard", recording_guard
+    )
+    original_send = client.send_order
+
+    def recording_send(*args, **kwargs):
+        trace.append("rpc-send")
+        return original_send(*args, **kwargs)
+
+    monkeypatch.setattr(client, "send_order", recording_send)
+    preview = service.preview_c_fast_shakedown(
+        ["ag", "al"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    trace.clear()
+
+    service.start_c_fast_shakedown(
+        preview["plan_hash"],
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+
+    assert client.send_attempts
+    assert trace.index("gate") < trace.index("cycle") < trace.index("rpc-send")
 
 
 def test_real_trade_rpc_lock_disable_preempts_child_send(
