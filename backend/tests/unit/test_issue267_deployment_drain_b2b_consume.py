@@ -10,6 +10,7 @@ from app.schemas.deployment_drain import (
     DeploymentDrainAcquireDTO,
     DeploymentRpcFactsDTO,
     DeploymentRpcRecheckFactsDTO,
+    build_deployment_rpc_recheck_served_proof,
     deployment_rpc_execution_facts_sha256,
 )
 from app.services.commodity_simnow import CommoditySimNowService
@@ -22,6 +23,7 @@ from app.services.deployment_reconciliation_custody import (
     DeploymentReconciliationCustodyError,
     DeploymentReconciliationCustodyRepository,
 )
+from app.services.vnpy_rpc_service import VerifiedDeploymentRecheckCapture
 
 SHA_A = "a" * 64
 SHA_B = "b" * 64
@@ -120,6 +122,30 @@ class FakeRpc:
             trades=[],
             positions=self.facts.positions,
         )
+
+    def capture_deployment_recheck_served_proof(
+        self, **binding: object
+    ) -> VerifiedDeploymentRecheckCapture:
+        fresh = self.capture_deployment_recheck_facts(**binding)
+        observed = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        proof = build_deployment_rpc_recheck_served_proof(
+            fresh_rpc=fresh,
+            captured_at_utc_raw=fresh.captured_at.isoformat().replace("+00:00", "Z"),
+            cache_replayed=False,
+            served_at_utc_raw=observed,
+            served_fact_generation=fresh.fact_generation,
+            transport_observed_at_utc_raw=observed,
+            gateway_name="CTP",
+            rpc_request_endpoint_sha256=hashlib.sha256(
+                b"tcp://127.0.0.1:2014"
+            ).hexdigest(),
+            rpc_publish_endpoint_sha256=hashlib.sha256(
+                b"tcp://127.0.0.1:4102"
+            ).hexdigest(),
+            rpc_connection_started_at_utc_raw=observed,
+            rpc_connection_generation=1,
+        )
+        return VerifiedDeploymentRecheckCapture(facts=fresh, served_proof=proof)
 
     def send_order(self, *_args: object, **_kwargs: object) -> None:
         self.send_order_calls += 1

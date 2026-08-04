@@ -8,12 +8,14 @@ from pathlib import Path
 import pytest
 from app.schemas.deployment_drain import (
     DeploymentReconciliationActivationHeadDTO,
+    DeploymentReconciliationActivationHeadV2DTO,
     DeploymentReconciliationActivationIntentDTO,
     DeploymentReconciliationActivationMarkerDTO,
     DeploymentReconciliationOwnerBindingDTO,
     DeploymentReconciliationOwnerCapturePairDTO,
     DeploymentRpcFactsDTO,
     DeploymentRpcRecheckFactsDTO,
+    DeploymentRpcRecheckServedProofDTO,
     deployment_rpc_execution_facts_sha256,
 )
 from jsonschema import Draft202012Validator
@@ -39,6 +41,14 @@ SCHEMA_CASES = (
     (
         DeploymentReconciliationActivationHeadDTO,
         "web-bridge-deployment-reconciliation-activation-head-v1.schema.json",
+    ),
+    (
+        DeploymentRpcRecheckServedProofDTO,
+        "web-bridge-deployment-rpc-recheck-served-proof-v1.schema.json",
+    ),
+    (
+        DeploymentReconciliationActivationHeadV2DTO,
+        "web-bridge-deployment-reconciliation-activation-head-v2.schema.json",
     ),
 )
 FALSE_FIELDS = (
@@ -318,7 +328,7 @@ def _capture_pair() -> DeploymentReconciliationOwnerCapturePairDTO:
     )
 
 
-def _head(tmp_path: Path) -> DeploymentReconciliationActivationHeadDTO:
+def _head(tmp_path: Path) -> DeploymentReconciliationActivationHeadV2DTO:
     from test_issue267_reconciliation_c2b_activation import _owner
 
     owner, _rpc, _root = _owner(tmp_path / "schema-activation")
@@ -326,6 +336,38 @@ def _head(tmp_path: Path) -> DeploymentReconciliationActivationHeadDTO:
         operator="c2b-schema-closure",
         reason="build exact self-contained marker dependencies",
     )
+
+
+def _v1_head(tmp_path: Path) -> DeploymentReconciliationActivationHeadDTO:
+    payload = _head(tmp_path).model_dump(mode="json")
+    payload["schema_version"] = (
+        "web_bridge_deployment_reconciliation_activation_head_v1"
+    )
+    payload["purpose"] = "commit_non_authorizing_owner_reconciliation_activation"
+    for field in (
+        "fresh_rpc_served_proof_id",
+        "fresh_rpc_served_proof_raw_sha256",
+        "fresh_rpc_served_proof_core_sha256",
+        "fresh_rpc_served_proof_blob_path",
+        "gateway_name",
+        "rpc_request_endpoint_sha256",
+        "rpc_publish_endpoint_sha256",
+        "owner_binding_raw_sha256",
+        "owner_binding",
+        "intent_raw_sha256",
+        "intent",
+        "fresh_rpc_served_proof",
+        "served_proof_closure_verified",
+    ):
+        payload.pop(field)
+    _rehash(
+        payload,
+        "deployment-reconciliation-activation-head-",
+        "activation_head_id",
+        "activation_head_core_sha256",
+        "activation_head_path",
+    )
+    return DeploymentReconciliationActivationHeadDTO.model_validate(payload)
 
 
 def _marker(tmp_path: Path) -> DeploymentReconciliationActivationMarkerDTO:
@@ -565,13 +607,13 @@ def test_c2b_head_rejects_coherently_rehashed_marker_mismatch(
         "activation_head_path",
     )
     with pytest.raises(ValueError, match="head binding mismatch"):
-        DeploymentReconciliationActivationHeadDTO.model_validate(payload)
+        DeploymentReconciliationActivationHeadV2DTO.model_validate(payload)
 
 
 def test_c2b_head_v1_rejects_coherently_rehashed_predecessor_splice(
     tmp_path: Path,
 ) -> None:
-    payload = _head(tmp_path).model_dump(mode="json")
+    payload = _v1_head(tmp_path).model_dump(mode="json")
     payload.update(
         activation_sequence=2,
         previous_activation_head_id=(
@@ -589,6 +631,245 @@ def test_c2b_head_v1_rejects_coherently_rehashed_predecessor_splice(
     )
     with pytest.raises(ValueError):
         DeploymentReconciliationActivationHeadDTO.model_validate(payload)
+
+
+def test_c2b_v2_head_closes_exact_served_proof_and_keeps_v1_unchanged(
+    tmp_path: Path,
+) -> None:
+    head = _head(tmp_path)
+    assert head.schema_version == (
+        "web_bridge_deployment_reconciliation_activation_head_v2"
+    )
+    assert head.served_proof_closure_verified is True
+    assert head.fresh_rpc_served_proof.fresh_rpc_raw_sha256 == _raw(
+        head.marker.capture_pair.fresh_rpc.model_dump(mode="json")
+    )
+    assert "fresh_rpc" not in type(head.fresh_rpc_served_proof).model_fields
+    assert head.fresh_rpc_served_proof_blob_path == (
+        f"reconciliation-blobs/{head.fresh_rpc_served_proof_raw_sha256}.json"
+    )
+    for field in FALSE_FIELDS:
+        assert getattr(head, field) is False
+        assert getattr(head.fresh_rpc_served_proof, field) is False
+
+    v1_schema = json.loads(
+        (
+            ROOT
+            / "docs/schemas/web-bridge-deployment-reconciliation-activation-head-v1.schema.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert "fresh_rpc_served_proof" not in v1_schema["properties"]
+    assert v1_schema["properties"]["schema_version"]["const"].endswith(
+        "activation_head_v1"
+    )
+
+
+def test_c2b_served_proof_rejects_coherently_rehashed_generation_drift(
+    tmp_path: Path,
+) -> None:
+    payload = _head(tmp_path).fresh_rpc_served_proof.model_dump(mode="json")
+    payload["served_fact_generation"] += 1
+    _rehash(
+        payload,
+        "deployment-rpc-recheck-served-proof-",
+        "proof_id",
+        "proof_core_sha256",
+    )
+    with pytest.raises(ValueError, match="binding is invalid"):
+        DeploymentRpcRecheckServedProofDTO.model_validate(payload)
+
+
+def test_c2b_v2_head_rejects_coherently_rehashed_cross_intent_proof_splice(
+    tmp_path: Path,
+) -> None:
+    head = _head(tmp_path / "first")
+    other = _head(tmp_path / "other").fresh_rpc_served_proof
+    payload = head.model_dump(mode="json")
+    other_payload = other.model_dump(mode="json")
+    other_raw = _canonical(other_payload)
+    payload.update(
+        fresh_rpc_served_proof_id=other.proof_id,
+        fresh_rpc_served_proof_raw_sha256=hashlib.sha256(other_raw).hexdigest(),
+        fresh_rpc_served_proof_core_sha256=other.proof_core_sha256,
+        fresh_rpc_served_proof_blob_path=(
+            f"reconciliation-blobs/{hashlib.sha256(other_raw).hexdigest()}.json"
+        ),
+        fresh_rpc_served_proof=other_payload,
+    )
+    _rehash(
+        payload,
+        "deployment-reconciliation-activation-head-",
+        "activation_head_id",
+        "activation_head_core_sha256",
+        "activation_head_path",
+    )
+    with pytest.raises(ValueError, match="served proof closure mismatch"):
+        DeploymentReconciliationActivationHeadV2DTO.model_validate(payload)
+
+
+def test_c2b_v2_head_rejects_coherently_rehashed_proof_original_tuple_drift(
+    tmp_path: Path,
+) -> None:
+    payload = _head(tmp_path).model_dump(mode="json")
+    proof = payload["fresh_rpc_served_proof"]
+    proof.update(
+        original_server_instance_id="forged-original-server",
+        original_fact_generation=0,
+        original_execution_facts_canonical_sha256="a" * 64,
+    )
+    _rehash(
+        proof,
+        "deployment-rpc-recheck-served-proof-",
+        "proof_id",
+        "proof_core_sha256",
+    )
+    proof_raw = _canonical(proof)
+    payload.update(
+        fresh_rpc_served_proof_id=proof["proof_id"],
+        fresh_rpc_served_proof_raw_sha256=hashlib.sha256(proof_raw).hexdigest(),
+        fresh_rpc_served_proof_core_sha256=proof["proof_core_sha256"],
+        fresh_rpc_served_proof_blob_path=(
+            f"reconciliation-blobs/{hashlib.sha256(proof_raw).hexdigest()}.json"
+        ),
+    )
+    _rehash(
+        payload,
+        "deployment-reconciliation-activation-head-",
+        "activation_head_id",
+        "activation_head_core_sha256",
+        "activation_head_path",
+    )
+    with pytest.raises(ValueError, match="served proof closure mismatch"):
+        DeploymentReconciliationActivationHeadV2DTO.model_validate(payload)
+
+
+def test_c2b_v2_head_rejects_coherently_rehashed_endpoint_drift(
+    tmp_path: Path,
+) -> None:
+    payload = _head(tmp_path).model_dump(mode="json")
+    proof = payload["fresh_rpc_served_proof"]
+    proof.update(
+        gateway_name="ATTACKER",
+        rpc_request_endpoint_sha256="a" * 64,
+        rpc_publish_endpoint_sha256="b" * 64,
+    )
+    _rehash(
+        proof,
+        "deployment-rpc-recheck-served-proof-",
+        "proof_id",
+        "proof_core_sha256",
+    )
+    proof_raw = _canonical(proof)
+    payload.update(
+        gateway_name=proof["gateway_name"],
+        rpc_request_endpoint_sha256=proof["rpc_request_endpoint_sha256"],
+        rpc_publish_endpoint_sha256=proof["rpc_publish_endpoint_sha256"],
+        fresh_rpc_served_proof_id=proof["proof_id"],
+        fresh_rpc_served_proof_raw_sha256=hashlib.sha256(proof_raw).hexdigest(),
+        fresh_rpc_served_proof_core_sha256=proof["proof_core_sha256"],
+        fresh_rpc_served_proof_blob_path=(
+            f"reconciliation-blobs/{hashlib.sha256(proof_raw).hexdigest()}.json"
+        ),
+    )
+    _rehash(
+        payload,
+        "deployment-reconciliation-activation-head-",
+        "activation_head_id",
+        "activation_head_core_sha256",
+        "activation_head_path",
+    )
+    with pytest.raises(ValueError, match="served proof closure mismatch"):
+        DeploymentReconciliationActivationHeadV2DTO.model_validate(payload)
+
+
+def test_c2b_v2_head_rejects_rehashed_owner_chain_that_conflicts_with_intent(
+    tmp_path: Path,
+) -> None:
+    payload = _head(tmp_path).model_dump(mode="json")
+    binding = payload["owner_binding"]
+    binding.update(
+        gateway_name="ATTACKER",
+        rpc_request_endpoint_sha256="a" * 64,
+        rpc_publish_endpoint_sha256="b" * 64,
+    )
+    _rehash(
+        binding,
+        "deployment-reconciliation-owner-binding-",
+        "owner_binding_id",
+        "owner_binding_core_sha256",
+    )
+    payload.update(
+        owner_binding_raw_sha256=_raw(binding),
+        gateway_name=binding["gateway_name"],
+        rpc_request_endpoint_sha256=binding["rpc_request_endpoint_sha256"],
+        rpc_publish_endpoint_sha256=binding["rpc_publish_endpoint_sha256"],
+    )
+
+    proof = payload["fresh_rpc_served_proof"]
+    proof.update(
+        gateway_name=binding["gateway_name"],
+        rpc_request_endpoint_sha256=binding["rpc_request_endpoint_sha256"],
+        rpc_publish_endpoint_sha256=binding["rpc_publish_endpoint_sha256"],
+    )
+    _rehash(
+        proof,
+        "deployment-rpc-recheck-served-proof-",
+        "proof_id",
+        "proof_core_sha256",
+    )
+    proof_raw = _canonical(proof)
+    payload.update(
+        fresh_rpc_served_proof_id=proof["proof_id"],
+        fresh_rpc_served_proof_raw_sha256=hashlib.sha256(proof_raw).hexdigest(),
+        fresh_rpc_served_proof_core_sha256=proof["proof_core_sha256"],
+        fresh_rpc_served_proof_blob_path=(
+            f"reconciliation-blobs/{hashlib.sha256(proof_raw).hexdigest()}.json"
+        ),
+    )
+
+    marker = payload["marker"]
+    pair = marker["capture_pair"]
+    pair.update(
+        owner_binding_id=binding["owner_binding_id"],
+        owner_binding_core_sha256=binding["owner_binding_core_sha256"],
+    )
+    _rehash(
+        pair,
+        "deployment-reconciliation-capture-pair-",
+        "capture_pair_id",
+        "capture_pair_core_sha256",
+    )
+    pair_raw = _canonical(pair)
+    marker.update(
+        capture_pair_id=pair["capture_pair_id"],
+        capture_pair_raw_sha256=hashlib.sha256(pair_raw).hexdigest(),
+        capture_pair_core_sha256=pair["capture_pair_core_sha256"],
+    )
+    _rehash(
+        marker,
+        "deployment-reconciliation-activation-marker-",
+        "marker_id",
+        "marker_core_sha256",
+        "marker_path",
+    )
+    marker["marker_path"] = (
+        f"reconciliation-blobs/activation-marker-{marker['marker_core_sha256']}.json"
+    )
+    marker_raw = _canonical(marker)
+    payload.update(
+        marker_id=marker["marker_id"],
+        marker_raw_sha256=hashlib.sha256(marker_raw).hexdigest(),
+        marker_core_sha256=marker["marker_core_sha256"],
+    )
+    _rehash(
+        payload,
+        "deployment-reconciliation-activation-head-",
+        "activation_head_id",
+        "activation_head_core_sha256",
+        "activation_head_path",
+    )
+    with pytest.raises(ValueError, match="served proof closure mismatch"):
+        DeploymentReconciliationActivationHeadV2DTO.model_validate(payload)
 
 
 @pytest.mark.parametrize(("model", "filename"), SCHEMA_CASES)

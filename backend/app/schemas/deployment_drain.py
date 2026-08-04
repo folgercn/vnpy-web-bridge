@@ -205,6 +205,13 @@ DeploymentReconciliationActivationHeadId = Annotated[
         )
     ),
 ]
+DeploymentRpcRecheckServedProofId = Annotated[
+    str,
+    Field(pattern=r"^deployment-rpc-recheck-served-proof-[0-9a-f]{64}$"),
+    AfterValidator(
+        lambda value: _nonzero_prefixed(value, "deployment-rpc-recheck-served-proof-")
+    ),
+]
 OnlineRecheckId = Annotated[
     str,
     Field(pattern=r"^safe-restart-online-recheck-[0-9a-f]{64}$"),
@@ -464,6 +471,196 @@ class DeploymentRpcRecheckFactsDTO(StrictDeploymentDrainModel):
         ):
             raise ValueError("recheck execution facts hash mismatch")
         return self
+
+
+class DeploymentRpcRecheckServedProofDTO(StrictDeploymentDrainModel):
+    """Privacy-safe proof that the owner-bound Linux adapter accepted one response."""
+
+    schema_version: Literal["web_bridge_deployment_rpc_recheck_served_proof_v1"]
+    purpose: Literal["persist_transport_verified_recheck_served_proof"]
+    proof_id: DeploymentRpcRecheckServedProofId
+    proof_core_sha256: Sha256
+    rpc_method: Literal["recheck_deployment_safety_snapshot_v1"]
+    response_schema_version: Literal["windows_rpc_deployment_safety_recheck_v1"]
+    adapter_contract_version: Literal["vnpy-rpc-recheck-served-proof-v1"]
+    request_id: Identifier
+    owner_challenge: Nonce
+    recheck_id: RecheckId
+    fresh_challenge: Nonce
+    original_server_instance_id: Identifier
+    original_fact_generation: int = Field(strict=True, ge=0)
+    original_execution_facts_canonical_sha256: Sha256
+    server_instance_id: Identifier
+    fact_generation: int = Field(strict=True, ge=0)
+    execution_facts_canonical_sha256: Sha256
+    fresh_rpc_raw_sha256: Sha256
+    gateway_name: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+    rpc_request_endpoint_sha256: Sha256
+    rpc_publish_endpoint_sha256: Sha256
+    rpc_connection_started_at_utc_raw: str = Field(
+        pattern=r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[^+]+Z$"
+    )
+    rpc_connection_generation: int = Field(strict=True, ge=1)
+    captured_at_utc_raw: str = Field(pattern=r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[^+]+Z$")
+    cache_replayed: bool = Field(strict=True)
+    served_at_utc_raw: str = Field(pattern=r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[^+]+Z$")
+    served_fact_generation: int = Field(strict=True, ge=0)
+    transport_observed_at_utc_raw: str = Field(
+        pattern=r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[^+]+Z$"
+    )
+    freshness_basis: Literal["CAPTURED_AT_NON_CACHE", "SERVED_AT_CACHE_REPLAY"]
+    caller_cached_replay_allowed: Literal[True]
+    freshness_max_age_seconds: Literal[30]
+    future_skew_seconds: Literal[2]
+    linux_rpc_adapter_response_verified: Literal[True]
+    windows_response_authenticated: Literal[False]
+    external_high_water_verified: Literal[False]
+    target_runtime_verified: Literal[False]
+    reconciliation_completed: Literal[False]
+    windows_fence_released: Literal[False]
+    authority_restore_allowed: Literal[False]
+    consume_authorized: Literal[False]
+    reconciliation_authorized: Literal[False]
+    deployment_authorized: Literal[False]
+    automatic_deploy_allowed: Literal[False]
+    production_allowed: Literal[False]
+    live_trading_authorized: Literal[False]
+    countable_forward: Literal[False]
+
+    @staticmethod
+    def _parse_utc_text(value: str, field: str) -> datetime:
+        try:
+            parsed = datetime.fromisoformat(value.removesuffix("Z") + "+00:00")
+        except ValueError as exc:
+            raise ValueError(f"{field} must be canonical UTC text") from exc
+        if parsed.utcoffset() != timedelta(0):
+            raise ValueError(f"{field} must be UTC")
+        return parsed
+
+    @model_validator(mode="after")
+    def validate_served_proof(self) -> DeploymentRpcRecheckServedProofDTO:
+        captured = self._parse_utc_text(self.captured_at_utc_raw, "captured_at_utc_raw")
+        served = self._parse_utc_text(self.served_at_utc_raw, "served_at_utc_raw")
+        observed = self._parse_utc_text(
+            self.transport_observed_at_utc_raw,
+            "transport_observed_at_utc_raw",
+        )
+        connected = self._parse_utc_text(
+            self.rpc_connection_started_at_utc_raw,
+            "rpc_connection_started_at_utc_raw",
+        )
+        expected_basis = (
+            "SERVED_AT_CACHE_REPLAY" if self.cache_replayed else "CAPTURED_AT_NON_CACHE"
+        )
+        freshness_anchor = served if self.cache_replayed else captured
+        if (
+            self.served_fact_generation != self.fact_generation
+            or self.fact_generation < self.original_fact_generation
+            or served < captured
+            or connected > observed
+            or self.freshness_basis != expected_basis
+            or freshness_anchor > observed + timedelta(seconds=2)
+            or observed - freshness_anchor > timedelta(seconds=30)
+        ):
+            raise ValueError("recheck served proof binding is invalid")
+        core = self.model_dump(mode="json")
+        core.pop("proof_id")
+        core.pop("proof_core_sha256")
+        expected = _strict_canonical_sha256(core)
+        if (
+            self.proof_core_sha256 != expected
+            or self.proof_id != f"deployment-rpc-recheck-served-proof-{expected}"
+        ):
+            raise ValueError("recheck served proof identity mismatch")
+        return self
+
+
+def build_deployment_rpc_recheck_served_proof(
+    *,
+    fresh_rpc: DeploymentRpcRecheckFactsDTO,
+    captured_at_utc_raw: str,
+    cache_replayed: bool,
+    served_at_utc_raw: str,
+    served_fact_generation: int,
+    transport_observed_at_utc_raw: str,
+    gateway_name: str,
+    rpc_request_endpoint_sha256: str,
+    rpc_publish_endpoint_sha256: str,
+    rpc_connection_started_at_utc_raw: str,
+    rpc_connection_generation: int,
+) -> DeploymentRpcRecheckServedProofDTO:
+    """Build the exact privacy-safe proof inside the verified transport path."""
+
+    fresh_raw = (
+        json.dumps(
+            fresh_rpc.model_dump(mode="json"),
+            allow_nan=False,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        + b"\n"
+    )
+    payload: dict[str, Any] = {
+        "schema_version": "web_bridge_deployment_rpc_recheck_served_proof_v1",
+        "purpose": "persist_transport_verified_recheck_served_proof",
+        "rpc_method": "recheck_deployment_safety_snapshot_v1",
+        "response_schema_version": fresh_rpc.schema_version,
+        "adapter_contract_version": "vnpy-rpc-recheck-served-proof-v1",
+        "request_id": fresh_rpc.request_id,
+        "owner_challenge": fresh_rpc.owner_challenge,
+        "recheck_id": fresh_rpc.recheck_id,
+        "fresh_challenge": fresh_rpc.fresh_challenge,
+        "original_server_instance_id": fresh_rpc.original_server_instance_id,
+        "original_fact_generation": fresh_rpc.original_fact_generation,
+        "original_execution_facts_canonical_sha256": (
+            fresh_rpc.original_execution_facts_canonical_sha256
+        ),
+        "server_instance_id": fresh_rpc.server_instance_id,
+        "fact_generation": fresh_rpc.fact_generation,
+        "execution_facts_canonical_sha256": (
+            fresh_rpc.execution_facts_canonical_sha256
+        ),
+        "fresh_rpc_raw_sha256": hashlib.sha256(fresh_raw).hexdigest(),
+        "gateway_name": gateway_name,
+        "rpc_request_endpoint_sha256": rpc_request_endpoint_sha256,
+        "rpc_publish_endpoint_sha256": rpc_publish_endpoint_sha256,
+        "rpc_connection_started_at_utc_raw": rpc_connection_started_at_utc_raw,
+        "rpc_connection_generation": rpc_connection_generation,
+        "captured_at_utc_raw": captured_at_utc_raw,
+        "cache_replayed": cache_replayed,
+        "served_at_utc_raw": served_at_utc_raw,
+        "served_fact_generation": served_fact_generation,
+        "transport_observed_at_utc_raw": transport_observed_at_utc_raw,
+        "freshness_basis": (
+            "SERVED_AT_CACHE_REPLAY" if cache_replayed else "CAPTURED_AT_NON_CACHE"
+        ),
+        "caller_cached_replay_allowed": True,
+        "freshness_max_age_seconds": 30,
+        "future_skew_seconds": 2,
+        "linux_rpc_adapter_response_verified": True,
+        "windows_response_authenticated": False,
+        "external_high_water_verified": False,
+        "target_runtime_verified": False,
+        "reconciliation_completed": False,
+        "windows_fence_released": False,
+        "authority_restore_allowed": False,
+        "consume_authorized": False,
+        "reconciliation_authorized": False,
+        "deployment_authorized": False,
+        "automatic_deploy_allowed": False,
+        "production_allowed": False,
+        "live_trading_authorized": False,
+        "countable_forward": False,
+    }
+    digest = _strict_canonical_sha256(payload)
+    return DeploymentRpcRecheckServedProofDTO.model_validate(
+        {
+            **payload,
+            "proof_id": f"deployment-rpc-recheck-served-proof-{digest}",
+            "proof_core_sha256": digest,
+        }
+    )
 
 
 class DeploymentOnlineCheckpointDTO(StrictDeploymentDrainModel):
@@ -3431,6 +3628,132 @@ class DeploymentReconciliationActivationHeadDTO(StrictDeploymentDrainModel):
             != f"deployment-reconciliation-activation-head-{expected}"
         ):
             raise ValueError("reconciliation activation head identity mismatch")
+        return self
+
+
+class DeploymentReconciliationActivationHeadV2DTO(
+    DeploymentReconciliationActivationHeadDTO
+):
+    """C2b commit that closes the exact transport served-proof chain."""
+
+    schema_version: Literal["web_bridge_deployment_reconciliation_activation_head_v2"]
+    purpose: Literal[
+        "commit_non_authorizing_owner_reconciliation_activation_with_served_proof"
+    ]
+    fresh_rpc_served_proof_id: DeploymentRpcRecheckServedProofId
+    fresh_rpc_served_proof_raw_sha256: Sha256
+    fresh_rpc_served_proof_core_sha256: Sha256
+    fresh_rpc_served_proof_blob_path: str = Field(
+        pattern=r"^reconciliation-blobs/[0-9a-f]{64}\.json$"
+    )
+    gateway_name: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+    rpc_request_endpoint_sha256: Sha256
+    rpc_publish_endpoint_sha256: Sha256
+    owner_binding_raw_sha256: Sha256
+    owner_binding: DeploymentReconciliationOwnerBindingDTO
+    intent_raw_sha256: Sha256
+    intent: DeploymentReconciliationActivationIntentDTO
+    fresh_rpc_served_proof: DeploymentRpcRecheckServedProofDTO
+    served_proof_closure_verified: Literal[True]
+
+    @model_validator(mode="after")
+    def validate_served_proof_closure(
+        self,
+    ) -> DeploymentReconciliationActivationHeadV2DTO:
+        proof_raw = (
+            json.dumps(
+                self.fresh_rpc_served_proof.model_dump(mode="json"),
+                allow_nan=False,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            + b"\n"
+        )
+        fresh_rpc = self.marker.capture_pair.fresh_rpc
+        fresh_rpc_raw = (
+            json.dumps(
+                fresh_rpc.model_dump(mode="json"),
+                allow_nan=False,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            + b"\n"
+        )
+        owner_binding_raw = (
+            json.dumps(
+                self.owner_binding.model_dump(mode="json"),
+                allow_nan=False,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            + b"\n"
+        )
+        intent_raw = (
+            json.dumps(
+                self.intent.model_dump(mode="json"),
+                allow_nan=False,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            + b"\n"
+        )
+        proof = self.fresh_rpc_served_proof
+        if (
+            self.fresh_rpc_served_proof_id != proof.proof_id
+            or self.fresh_rpc_served_proof_core_sha256 != proof.proof_core_sha256
+            or self.fresh_rpc_served_proof_raw_sha256
+            != hashlib.sha256(proof_raw).hexdigest()
+            or self.fresh_rpc_served_proof_blob_path
+            != (f"reconciliation-blobs/{self.fresh_rpc_served_proof_raw_sha256}.json")
+            or proof.fresh_rpc_raw_sha256 != hashlib.sha256(fresh_rpc_raw).hexdigest()
+            or self.gateway_name != proof.gateway_name
+            or self.rpc_request_endpoint_sha256
+            != proof.rpc_request_endpoint_sha256
+            or self.rpc_publish_endpoint_sha256
+            != proof.rpc_publish_endpoint_sha256
+            or self.owner_binding_raw_sha256
+            != hashlib.sha256(owner_binding_raw).hexdigest()
+            or self.owner_binding.owner_binding_id
+            != self.marker.capture_pair.owner_binding_id
+            or self.owner_binding.owner_binding_core_sha256
+            != self.marker.capture_pair.owner_binding_core_sha256
+            or self.intent_raw_sha256 != hashlib.sha256(intent_raw).hexdigest()
+            or self.intent_raw_sha256
+            != self.marker.capture_pair.intent_raw_sha256
+            or self.intent.intent_id != self.intent_id
+            or self.intent.intent_id != self.marker.capture_pair.intent_id
+            or self.intent.intent_core_sha256
+            != self.marker.capture_pair.intent_core_sha256
+            or self.owner_binding_raw_sha256
+            != self.intent.owner_binding_raw_sha256
+            or self.owner_binding != self.intent.owner_binding
+            or self.gateway_name != self.owner_binding.gateway_name
+            or self.rpc_request_endpoint_sha256
+            != self.owner_binding.rpc_request_endpoint_sha256
+            or self.rpc_publish_endpoint_sha256
+            != self.owner_binding.rpc_publish_endpoint_sha256
+            or self.expected_account_hash != self.owner_binding.expected_account_hash
+            or proof.request_id != self.marker.capture_pair.rpc_request_id
+            or proof.owner_challenge != self.marker.capture_pair.owner_challenge
+            or proof.recheck_id != self.marker.capture_pair.fresh_capture_id
+            or proof.fresh_challenge != self.marker.capture_pair.fresh_challenge
+            or proof.server_instance_id != fresh_rpc.server_instance_id
+            or proof.fact_generation != fresh_rpc.fact_generation
+            or proof.original_server_instance_id
+            != fresh_rpc.original_server_instance_id
+            or proof.original_fact_generation != fresh_rpc.original_fact_generation
+            or proof.original_execution_facts_canonical_sha256
+            != fresh_rpc.original_execution_facts_canonical_sha256
+            or proof.execution_facts_canonical_sha256
+            != fresh_rpc.execution_facts_canonical_sha256
+            or proof._parse_utc_text(proof.captured_at_utc_raw, "captured_at_utc_raw")
+            != fresh_rpc.captured_at
+        ):
+            raise ValueError("reconciliation served proof closure mismatch")
         return self
 
 

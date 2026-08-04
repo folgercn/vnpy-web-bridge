@@ -17,13 +17,14 @@ from app.schemas.deployment_drain import (
     DeploymentInitialBaselineCommodityCheckpointDTO,
     DeploymentLegacyMigrationCommodityCheckpointDTO,
     DeploymentOnlineRecheckCheckpointDTO,
-    DeploymentReconciliationActivationHeadDTO,
+    DeploymentReconciliationActivationHeadV2DTO,
     DeploymentReconciliationActivationIntentDTO,
     DeploymentReconciliationActivationMarkerDTO,
     DeploymentReconciliationOwnerBindingDTO,
     DeploymentReconciliationOwnerCapturePairDTO,
     DeploymentRpcFactsDTO,
     DeploymentRpcRecheckFactsDTO,
+    DeploymentRpcRecheckServedProofDTO,
     SafeRestartOnlineRecheckDTO,
     deployment_rpc_execution_facts_sha256,
 )
@@ -187,11 +188,12 @@ class DeploymentReconciliationActivationService:
         *,
         operator: str,
         reason: str,
-    ) -> DeploymentReconciliationActivationHeadDTO:
+    ) -> DeploymentReconciliationActivationHeadV2DTO:
         if not isinstance(operator, str) or not operator.strip():
             raise ValueError("operator must be non-empty")
         if not isinstance(reason, str) or not reason.strip():
             raise ValueError("reason must be non-empty")
+        self._assert_production_rpc_transport()
         with self.repository.locked() as session:
             self.owner._bind_deployment_reconciliation_owner()
             before = session.snapshot(captured_at=self._now())
@@ -240,11 +242,20 @@ class DeploymentReconciliationActivationService:
                     intent=intent,
                     mode_inputs=mode_inputs,
                 )
+                served_proof, served_fresh_rpc, served_proof_raw = (
+                    self._load_or_create_fresh_served_proof(
+                        session=session,
+                        intent=intent,
+                        initial_rpc=initial_rpc,
+                    )
+                )
                 pair, pair_raw = self._load_or_create_capture_pair(
                     session=session,
                     intent=intent,
                     intent_raw=intent_raw,
                     initial_rpc=initial_rpc,
+                    served_proof=served_proof,
+                    fresh_rpc=served_fresh_rpc,
                 )
                 fresh_rpc = pair.fresh_rpc
                 captured_at = pair.captured_at
@@ -294,7 +305,14 @@ class DeploymentReconciliationActivationService:
                     payload=marker.model_dump(mode="json"),
                     content_basename=Path(marker.marker_path).name,
                 )
-                head = self._build_head(intent, marker, marker_raw)
+                self._assert_production_rpc_transport()
+                head = self._build_head(
+                    intent,
+                    marker,
+                    marker_raw,
+                    served_proof,
+                    served_proof_raw,
+                )
                 stored_head = session.write_head(
                     Path(head.activation_head_path).name,
                     head.model_dump(mode="json"),
@@ -306,6 +324,42 @@ class DeploymentReconciliationActivationService:
                     )
                 session.assert_live()
                 return head
+
+    def _assert_production_rpc_transport(self) -> None:
+        if self.owner.settings.app_env.lower() == "test":
+            return
+        from app.services.vnpy_rpc_service import BridgeRpcClient, VnpyRpcService
+
+        rpc = self.owner.rpc
+        shadowed_rpc_methods = {
+            name
+            for name in vars(rpc)
+            if callable(getattr(VnpyRpcService, name, None))
+        }
+        expected_binding = (
+            self.owner.settings.vnpy_rpc_req_address,
+            self.owner.settings.vnpy_rpc_pub_address,
+            self.owner.settings.vnpy_gateway_name,
+        )
+        if (
+            type(rpc) is not VnpyRpcService
+            or rpc.settings is not self.owner.settings
+            or not rpc.started
+            or type(rpc.client) is not BridgeRpcClient
+            or rpc.client.service is not rpc
+            or rpc._deployment_transport_binding != expected_binding
+            or rpc._deployment_transport_generation < 1
+            or rpc.last_connected_at is None
+            or shadowed_rpc_methods
+            or {
+                "get_deployment_safety_snapshot_v1",
+                "recheck_deployment_safety_snapshot_v1",
+            }.intersection(vars(rpc.client))
+        ):
+            raise DeploymentReconciliationActivationError(
+                "RECONCILIATION_RPC_TRANSPORT_INVALID",
+                "production C2b requires one sealed and owner-bound RPC transport",
+            )
 
     def _now(self) -> datetime:
         value = self.clock()
@@ -1019,10 +1073,20 @@ class DeploymentReconciliationActivationService:
             return expected.initial_rpc, expected_raw
 
         try:
-            initial = self.owner.rpc.capture_deployment_facts(
-                request_id=intent.rpc_request_id,
-                challenge=intent.owner_challenge,
-            )
+            arguments = {
+                "request_id": intent.rpc_request_id,
+                "challenge": intent.owner_challenge,
+            }
+            if self.owner.settings.app_env.lower() == "test":
+                initial = self.owner.rpc.capture_deployment_facts(**arguments)
+            else:
+                from app.services.vnpy_rpc_service import VnpyRpcService
+
+                self._assert_production_rpc_transport()
+                initial = VnpyRpcService.capture_deployment_facts(
+                    self.owner.rpc,
+                    **arguments,
+                )
         except Exception as exc:
             raise DeploymentReconciliationActivationError(
                 "RECONCILIATION_INITIAL_CAPTURE_INDETERMINATE",
@@ -1151,6 +1215,8 @@ class DeploymentReconciliationActivationService:
         intent: DeploymentReconciliationActivationIntentDTO,
         intent_raw: bytes,
         initial_rpc: DeploymentRpcFactsDTO | DeploymentRpcRecheckFactsDTO,
+        served_proof: DeploymentRpcRecheckServedProofDTO,
+        fresh_rpc: DeploymentRpcRecheckFactsDTO,
     ) -> tuple[DeploymentReconciliationOwnerCapturePairDTO, bytes]:
         basename = f"{intent.intent_id}.capture-pair.json"
         try:
@@ -1171,7 +1237,7 @@ class DeploymentReconciliationActivationService:
                 intent=intent,
                 intent_raw=intent_raw,
                 initial_rpc=initial_rpc,
-                fresh_rpc=pair.fresh_rpc,
+                fresh_rpc=fresh_rpc,
                 captured_at=pair.captured_at,
             )
             expected_raw = _artifact_bytes(expected.model_dump(mode="json"))
@@ -1188,7 +1254,6 @@ class DeploymentReconciliationActivationService:
             )
             return expected, expected_raw
 
-        fresh_rpc = self._fresh_capture(intent, initial_rpc)
         captured_at = fresh_rpc.captured_at
         pair = self._build_capture_pair(
             intent=intent,
@@ -1205,6 +1270,132 @@ class DeploymentReconciliationActivationService:
             payload=pair.model_dump(mode="json"),
         )
         return pair, raw
+
+    def _load_or_create_fresh_served_proof(
+        self,
+        *,
+        session: DeploymentReconciliationCustodySession,
+        intent: DeploymentReconciliationActivationIntentDTO,
+        initial_rpc: DeploymentRpcFactsDTO | DeploymentRpcRecheckFactsDTO,
+    ) -> tuple[
+        DeploymentRpcRecheckServedProofDTO,
+        DeploymentRpcRecheckFactsDTO,
+        bytes,
+    ]:
+        basename = f"{intent.intent_id}.fresh-served-proof.json"
+        pair_basename = f"{intent.intent_id}.capture-pair.json"
+        try:
+            existing = session.read_blob(basename)
+        except DeploymentReconciliationCustodyError as exc:
+            if exc.code not in {
+                "CUSTODY_DIRECTORY_OPEN_FAILED",
+                "CUSTODY_FILE_OPEN_FAILED",
+            }:
+                raise
+        else:
+            proof = _parse_exact(
+                existing.raw,
+                DeploymentRpcRecheckServedProofDTO,
+                "fresh RPC served proof",
+            )
+            try:
+                pair_blob = session.read_blob(pair_basename)
+            except DeploymentReconciliationCustodyError as exc:
+                if exc.code not in {
+                    "CUSTODY_DIRECTORY_OPEN_FAILED",
+                    "CUSTODY_FILE_OPEN_FAILED",
+                }:
+                    raise
+                capture = self._fresh_capture(intent, initial_rpc)
+                fresh_rpc = capture.facts
+            else:
+                pair = _parse_exact(
+                    pair_blob.raw,
+                    DeploymentReconciliationOwnerCapturePairDTO,
+                    "owner capture pair",
+                )
+                fresh_rpc = pair.fresh_rpc
+            self._assert_served_proof_bindings(intent, initial_rpc, proof, fresh_rpc)
+            self._write_stage_copies(
+                session=session,
+                stable_basename=basename,
+                raw=existing.raw,
+                payload=proof.model_dump(mode="json"),
+                content_basename=f"{existing.raw_sha256}.json",
+            )
+            return proof, fresh_rpc, existing.raw
+
+        try:
+            session.read_blob(pair_basename)
+        except DeploymentReconciliationCustodyError as exc:
+            if exc.code not in {
+                "CUSTODY_DIRECTORY_OPEN_FAILED",
+                "CUSTODY_FILE_OPEN_FAILED",
+            }:
+                raise
+        else:
+            raise DeploymentReconciliationActivationError(
+                "RECONCILIATION_SERVED_PROOF_MISSING",
+                "capture pair exists without its transport served proof",
+            )
+
+        capture = self._fresh_capture(intent, initial_rpc)
+        proof = capture.served_proof
+        fresh_rpc = capture.facts
+        self._assert_served_proof_bindings(intent, initial_rpc, proof, fresh_rpc)
+        raw = _artifact_bytes(proof.model_dump(mode="json"))
+        self._write_stage_copies(
+            session=session,
+            stable_basename=basename,
+            raw=raw,
+            payload=proof.model_dump(mode="json"),
+        )
+        return proof, fresh_rpc, raw
+
+    @staticmethod
+    def _assert_served_proof_bindings(
+        intent: DeploymentReconciliationActivationIntentDTO,
+        initial: DeploymentRpcFactsDTO | DeploymentRpcRecheckFactsDTO,
+        proof: DeploymentRpcRecheckServedProofDTO,
+        fresh_rpc: DeploymentRpcRecheckFactsDTO,
+    ) -> None:
+        initial_execution_sha = (
+            deployment_rpc_execution_facts_sha256(initial)
+            if isinstance(initial, DeploymentRpcFactsDTO)
+            else initial.execution_facts_canonical_sha256
+        )
+        if (
+            proof.request_id != intent.rpc_request_id
+            or proof.owner_challenge != intent.owner_challenge
+            or proof.recheck_id != intent.fresh_capture_id
+            or proof.fresh_challenge != intent.fresh_challenge
+            or proof.original_server_instance_id != initial.server_instance_id
+            or proof.original_fact_generation != initial.fact_generation
+            or proof.original_execution_facts_canonical_sha256 != initial_execution_sha
+            or proof.request_id != fresh_rpc.request_id
+            or proof.owner_challenge != fresh_rpc.owner_challenge
+            or proof.recheck_id != fresh_rpc.recheck_id
+            or proof.fresh_challenge != fresh_rpc.fresh_challenge
+            or proof.server_instance_id != fresh_rpc.server_instance_id
+            or proof.fact_generation != fresh_rpc.fact_generation
+            or proof.execution_facts_canonical_sha256
+            != fresh_rpc.execution_facts_canonical_sha256
+            or proof.gateway_name != intent.owner_binding.gateway_name
+            or proof.rpc_request_endpoint_sha256
+            != intent.owner_binding.rpc_request_endpoint_sha256
+            or proof.rpc_publish_endpoint_sha256
+            != intent.owner_binding.rpc_publish_endpoint_sha256
+            or proof.fresh_rpc_raw_sha256
+            != _sha256(_artifact_bytes(fresh_rpc.model_dump(mode="json")))
+            or DeploymentRpcRecheckServedProofDTO._parse_utc_text(
+                proof.captured_at_utc_raw, "captured_at_utc_raw"
+            )
+            != fresh_rpc.captured_at
+        ):
+            raise DeploymentReconciliationActivationError(
+                "RECONCILIATION_SERVED_PROOF_BINDING_INVALID",
+                "fresh served proof does not bind the intent and initial facts",
+            )
 
     def _commodity_state(
         self,
@@ -1246,30 +1437,54 @@ class DeploymentReconciliationActivationService:
         self,
         intent: DeploymentReconciliationActivationIntentDTO,
         initial: DeploymentRpcFactsDTO | DeploymentRpcRecheckFactsDTO,
-    ) -> DeploymentRpcRecheckFactsDTO:
+    ) -> Any:
         execution_sha = (
             deployment_rpc_execution_facts_sha256(initial)
             if isinstance(initial, DeploymentRpcFactsDTO)
             else initial.execution_facts_canonical_sha256
         )
         try:
-            fresh = self.owner.rpc.capture_deployment_recheck_facts(
-                request_id=intent.rpc_request_id,
-                owner_challenge=intent.owner_challenge,
-                recheck_id=intent.fresh_capture_id,
-                fresh_challenge=intent.fresh_challenge,
-                original_server_instance_id=initial.server_instance_id,
-                original_fact_generation=initial.fact_generation,
-                original_execution_facts_canonical_sha256=execution_sha,
-                allow_cached_replay=True,
-            )
+            arguments = {
+                "request_id": intent.rpc_request_id,
+                "owner_challenge": intent.owner_challenge,
+                "recheck_id": intent.fresh_capture_id,
+                "fresh_challenge": intent.fresh_challenge,
+                "original_server_instance_id": initial.server_instance_id,
+                "original_fact_generation": initial.fact_generation,
+                "original_execution_facts_canonical_sha256": execution_sha,
+            }
+            if self.owner.settings.app_env.lower() == "test":
+                capture = getattr(
+                    self.owner.rpc,
+                    "capture_deployment_recheck_served_proof",
+                    None,
+                )
+                if not callable(capture):
+                    raise TypeError("test RPC has no served-proof transport seam")
+                fresh = capture(**arguments)
+            else:
+                from app.services.vnpy_rpc_service import VnpyRpcService
+
+                self._assert_production_rpc_transport()
+                fresh = VnpyRpcService.capture_deployment_recheck_served_proof(
+                    self.owner.rpc,
+                    **arguments,
+                )
         except Exception as exc:
             raise DeploymentReconciliationActivationError(
                 "RECONCILIATION_FRESH_CAPTURE_INDETERMINATE",
                 "fresh Windows recheck did not complete deterministically",
             ) from exc
         try:
-            return DeploymentRpcRecheckFactsDTO.model_validate(fresh)
+            from app.services.vnpy_rpc_service import (
+                VerifiedDeploymentRecheckCapture,
+            )
+
+            if type(fresh) is not VerifiedDeploymentRecheckCapture:
+                raise TypeError("served-proof transport returned a bare DTO")
+            DeploymentRpcRecheckFactsDTO.model_validate(fresh.facts)
+            DeploymentRpcRecheckServedProofDTO.model_validate(fresh.served_proof)
+            return fresh
         except (TypeError, ValueError, ValidationError) as exc:
             raise DeploymentReconciliationActivationError(
                 "RECONCILIATION_FRESH_CAPTURE_INVALID",
@@ -1599,12 +1814,18 @@ class DeploymentReconciliationActivationService:
         intent: DeploymentReconciliationActivationIntentDTO,
         marker: DeploymentReconciliationActivationMarkerDTO,
         marker_raw: bytes,
-    ) -> DeploymentReconciliationActivationHeadDTO:
+        served_proof: DeploymentRpcRecheckServedProofDTO,
+        served_proof_raw: bytes,
+    ) -> DeploymentReconciliationActivationHeadV2DTO:
+        served_proof_raw_sha = _sha256(served_proof_raw)
         payload: dict[str, Any] = {
             "schema_version": (
-                "web_bridge_deployment_reconciliation_activation_head_v1"
+                "web_bridge_deployment_reconciliation_activation_head_v2"
             ),
-            "purpose": "commit_non_authorizing_owner_reconciliation_activation",
+            "purpose": (
+                "commit_non_authorizing_owner_reconciliation_activation_with_"
+                "served_proof"
+            ),
             "mode": intent.mode,
             "activation_sequence": intent.activation_sequence,
             "previous_activation_head_id": intent.previous_activation_head_id,
@@ -1628,10 +1849,37 @@ class DeploymentReconciliationActivationService:
             "expected_account_hash": intent.owner_binding.expected_account_hash,
             "activated_at": marker.prepared_at,
             "owner_reconciliation_activation_recorded": True,
+            "fresh_rpc_served_proof_id": served_proof.proof_id,
+            "fresh_rpc_served_proof_raw_sha256": served_proof_raw_sha,
+            "fresh_rpc_served_proof_core_sha256": (served_proof.proof_core_sha256),
+            "fresh_rpc_served_proof_blob_path": (
+                f"reconciliation-blobs/{served_proof_raw_sha}.json"
+            ),
+            "gateway_name": intent.owner_binding.gateway_name,
+            "rpc_request_endpoint_sha256": (
+                intent.owner_binding.rpc_request_endpoint_sha256
+            ),
+            "rpc_publish_endpoint_sha256": (
+                intent.owner_binding.rpc_publish_endpoint_sha256
+            ),
+            "owner_binding_raw_sha256": intent.owner_binding_raw_sha256,
+            "owner_binding": intent.owner_binding.model_dump(mode="json"),
+            "intent_raw_sha256": _sha256(
+                _artifact_bytes(intent.model_dump(mode="json"))
+            ),
+            "intent": intent.model_dump(mode="json"),
+            "fresh_rpc_served_proof": served_proof.model_dump(mode="json"),
+            "served_proof_closure_verified": True,
             **_authority_false_payload(),
         }
-        probe = DeploymentReconciliationActivationHeadDTO.model_construct(
-            **{**payload, "marker": marker},
+        probe = DeploymentReconciliationActivationHeadV2DTO.model_construct(
+            **{
+                **payload,
+                "marker": marker,
+                "owner_binding": intent.owner_binding,
+                "intent": intent,
+                "fresh_rpc_served_proof": served_proof,
+            },
             activation_head_id=(
                 "deployment-reconciliation-activation-head-" + "1" * 64
             ),
@@ -1647,7 +1895,7 @@ class DeploymentReconciliationActivationService:
         core.pop("activation_head_path")
         digest = _core_sha256(core)
         try:
-            return DeploymentReconciliationActivationHeadDTO.model_validate(
+            return DeploymentReconciliationActivationHeadV2DTO.model_validate(
                 {
                     **payload,
                     "activation_head_id": (

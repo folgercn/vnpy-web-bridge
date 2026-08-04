@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from threading import RLock
 from time import monotonic
@@ -21,6 +22,8 @@ from app.schemas.common import to_plain_dict, to_plain_list
 from app.schemas.deployment_drain import (
     DeploymentRpcFactsDTO,
     DeploymentRpcRecheckFactsDTO,
+    DeploymentRpcRecheckServedProofDTO,
+    build_deployment_rpc_recheck_served_proof,
 )
 from app.services.deployment_drain import (
     DeploymentDrainError,
@@ -52,6 +55,15 @@ except ImportError:  # pragma: no cover - covered in deployments with vn.py inst
     CancelRequest = HistoryRequest = None  # type: ignore[assignment]
     OrderRequest = None  # type: ignore[assignment]
     SubscribeRequest = None  # type: ignore[assignment]
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedDeploymentRecheckCapture:
+    """Process-local result emitted only after the transport validates proof."""
+
+    facts: DeploymentRpcRecheckFactsDTO
+    served_proof: DeploymentRpcRecheckServedProofDTO
+
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +146,8 @@ class VnpyRpcService:
         self.client: BridgeRpcClient | None = None
         self.started = False
         self.last_connected_at: datetime | None = None
+        self._deployment_transport_binding: tuple[str, str, str] | None = None
+        self._deployment_transport_generation = 0
         self.last_error: str | None = None
         self.loop: asyncio.AbstractEventLoop | None = None
         self._call_lock = RLock()
@@ -296,30 +310,40 @@ class VnpyRpcService:
         return trusted
 
     def start(self) -> None:
-        if self.started:
-            return
-        if RpcClient is object:
-            self.last_error = "vn.py 未安装"
-            raise RpcUnavailableError(self.last_error)
+        with self._call_lock:
+            if self.started:
+                return
+            if RpcClient is object:
+                self.last_error = "vn.py 未安装"
+                raise RpcUnavailableError(self.last_error)
 
-        self.client = BridgeRpcClient(self)
-        try:
-            self.client.subscribe_topic("")
-            self.client.start(
-                self.settings.vnpy_rpc_req_address,
-                self.settings.vnpy_rpc_pub_address,
-            )
-            self.started = True
-            self._record_connected_generation(
-                datetime.now(ZoneInfo("Asia/Shanghai"))
-            )
-            self.last_error = None
-            logger.info("vn.py RPC started")
-        except Exception as exc:
-            self.last_error = str(exc)
-            self.started = False
-            logger.exception("vn.py RPC start failed")
-            raise RpcUnavailableError("RPC 启动失败", detail={"error": str(exc)}) from exc
+            self.client = BridgeRpcClient(self)
+            try:
+                self.client.subscribe_topic("")
+                self.client.start(
+                    self.settings.vnpy_rpc_req_address,
+                    self.settings.vnpy_rpc_pub_address,
+                )
+                self.started = True
+                self._deployment_transport_binding = (
+                    self.settings.vnpy_rpc_req_address,
+                    self.settings.vnpy_rpc_pub_address,
+                    self.settings.vnpy_gateway_name,
+                )
+                self._deployment_transport_generation += 1
+                self._record_connected_generation(
+                    datetime.now(ZoneInfo("Asia/Shanghai"))
+                )
+                self.last_error = None
+                logger.info("vn.py RPC started")
+            except Exception as exc:
+                self.last_error = str(exc)
+                self.started = False
+                self._deployment_transport_binding = None
+                logger.exception("vn.py RPC start failed")
+                raise RpcUnavailableError(
+                    "RPC 启动失败", detail={"error": str(exc)}
+                ) from exc
 
     def _record_connected_generation(self, connected_at: datetime) -> None:
         with self._order_trade_event_lock:
@@ -327,13 +351,16 @@ class VnpyRpcService:
             self._order_trade_event_generation += 1
 
     def stop(self) -> None:
-        if self.client and self.started:
-            self.client.stop()
-            self.client.join()
-        self.started = False
-        self.client = None
-        self._last_probe_at = 0.0
-        self._last_probe_connected = None
+        with self._call_lock:
+            if self.client and self.started:
+                self.client.stop()
+                self.client.join()
+            self.started = False
+            self.client = None
+            self._deployment_transport_binding = None
+            self._deployment_transport_generation += 1
+            self._last_probe_at = 0.0
+            self._last_probe_connected = None
 
     def status(self, *, probe: bool = False) -> dict[str, Any]:
         connected = self.started
@@ -364,15 +391,15 @@ class VnpyRpcService:
         if name == "send_order":
             try:
                 with self.deployment_drain.mutation_guard():
-                    return self._call_under_deployment_gate(
-                        name, *args, timeout=timeout, **kwargs
+                    return VnpyRpcService._call_under_deployment_gate(
+                        self, name, *args, timeout=timeout, **kwargs
                     )
             except DeploymentDrainError as exc:
                 raise DeploymentDrainActiveError(
                     detail={"gate_code": exc.code}
                 ) from exc
-        return self._call_under_deployment_gate(
-            name, *args, timeout=timeout, **kwargs
+        return VnpyRpcService._call_under_deployment_gate(
+            self, name, *args, timeout=timeout, **kwargs
         )
 
     def _call_under_deployment_gate(
@@ -388,19 +415,28 @@ class VnpyRpcService:
         call_timeout = timeout or self.settings.vnpy_rpc_timeout_ms
         try:
             with self._call_lock:
-                return self._call_client(name, *args, timeout=call_timeout, **kwargs)
+                return VnpyRpcService._call_client(
+                    self, name, *args, timeout=call_timeout, **kwargs
+                )
         except TimeoutError as exc:
             self.last_error = str(exc)
-            self._rebuild_client_after_failure(name, str(exc))
+            VnpyRpcService._rebuild_client_after_failure(self, name, str(exc))
             raise RpcTimeoutError(detail={"method": name, "timeout_ms": call_timeout}) from exc
         except Exception as exc:
             self.last_error = str(exc)
             message = str(exc)
             if "timeout" in message.lower():
-                self._rebuild_client_after_failure(name, message)
+                VnpyRpcService._rebuild_client_after_failure(self, name, message)
                 raise RpcTimeoutError(detail={"method": name, "timeout_ms": call_timeout}) from exc
-            if self._is_recoverable_client_state_error(message):
-                return self._reconnect_and_maybe_retry(name, *args, timeout=call_timeout, original_error=message, **kwargs)
+            if VnpyRpcService._is_recoverable_client_state_error(self, message):
+                return VnpyRpcService._reconnect_and_maybe_retry(
+                    self,
+                    name,
+                    *args,
+                    timeout=call_timeout,
+                    original_error=message,
+                    **kwargs,
+                )
             raise RpcCallError(detail={"method": name, "error": message}) from exc
 
     def _call_client(self, name: str, *args: Any, timeout: int, **kwargs: Any) -> Any:
@@ -413,7 +449,7 @@ class VnpyRpcService:
         logger.warning("vn.py RPC client state error, reconnecting before handling %s: %s", name, original_error)
         try:
             with self._call_lock:
-                self._restart_client()
+                VnpyRpcService._restart_client(self)
                 if name not in RETRYABLE_RPC_METHODS:
                     raise RpcCallError(
                         detail={
@@ -423,7 +459,9 @@ class VnpyRpcService:
                             "retry_suppressed": "non_idempotent_method",
                         }
                     )
-                result = self._call_client(name, *args, timeout=timeout, **kwargs)
+                result = VnpyRpcService._call_client(
+                    self, name, *args, timeout=timeout, **kwargs
+                )
                 self.last_error = None
                 return result
         except TimeoutError as exc:
@@ -452,7 +490,7 @@ class VnpyRpcService:
         logger.warning("vn.py RPC call failed, rebuilding client before next request %s: %s", name, error)
         try:
             with self._call_lock:
-                self._restart_client()
+                VnpyRpcService._restart_client(self)
         except Exception:
             logger.warning("vn.py RPC client rebuild failed after %s error", name, exc_info=True)
 
@@ -470,9 +508,11 @@ class VnpyRpcService:
 
         self.started = False
         self.client = None
+        self._deployment_transport_binding = None
+        self._deployment_transport_generation += 1
         self._last_probe_at = 0.0
         self._last_probe_connected = None
-        self.start()
+        VnpyRpcService.start(self)
 
     def _is_recoverable_client_state_error(self, message: str) -> bool:
         return "operation cannot be accomplished in current state" in message.lower()
@@ -543,7 +583,8 @@ class VnpyRpcService:
             raise TypeError("allow_cached_replay must be a boolean")
 
         payload = to_plain_dict(
-            self.call(
+            VnpyRpcService.call(
+                self,
                 "get_deployment_safety_snapshot_v1",
                 request_id,
                 challenge,
@@ -674,7 +715,7 @@ class VnpyRpcService:
             }
         )
 
-    def capture_deployment_recheck_facts(
+    def _capture_deployment_recheck_result(
         self,
         *,
         request_id: str,
@@ -685,14 +726,15 @@ class VnpyRpcService:
         original_fact_generation: int,
         original_execution_facts_canonical_sha256: str,
         allow_cached_replay: bool = False,
-    ) -> DeploymentRpcRecheckFactsDTO:
+    ) -> tuple[DeploymentRpcRecheckFactsDTO, dict[str, Any]]:
         """Fetch one owner-bound, EventEngine-linearized fresh recheck."""
 
         if type(allow_cached_replay) is not bool:
             raise TypeError("allow_cached_replay must be a boolean")
 
         payload = to_plain_dict(
-            self.call(
+            VnpyRpcService.call(
+                self,
                 "recheck_deployment_safety_snapshot_v1",
                 request_id,
                 owner_challenge,
@@ -842,7 +884,7 @@ class VnpyRpcService:
                     "Windows deployment recheck is not canonical JSON"
                 ) from exc
 
-        return DeploymentRpcRecheckFactsDTO.model_validate(
+        facts_dto = DeploymentRpcRecheckFactsDTO.model_validate(
             {
                 "schema_version": payload["schema_version"],
                 "request_id": payload["owner_request_id"],
@@ -878,6 +920,113 @@ class VnpyRpcService:
                 "positions": canonical_rows(facts["positions"]),
             }
         )
+        return facts_dto, {
+            "captured_at_utc_raw": captured_at,
+            "cache_replayed": cache_replayed,
+            "served_at_utc_raw": served_at,
+            "served_fact_generation": served_fact_generation,
+            "transport_observed_at_utc_raw": observed_at.isoformat().replace(
+                "+00:00", "Z"
+            ),
+        }
+
+    def capture_deployment_recheck_facts(
+        self,
+        *,
+        request_id: str,
+        owner_challenge: str,
+        recheck_id: str,
+        fresh_challenge: str,
+        original_server_instance_id: str,
+        original_fact_generation: int,
+        original_execution_facts_canonical_sha256: str,
+        allow_cached_replay: bool = False,
+    ) -> DeploymentRpcRecheckFactsDTO:
+        """Compatibility API returning only normalized recheck facts."""
+
+        facts, _proof_fields = VnpyRpcService._capture_deployment_recheck_result(
+            self,
+            request_id=request_id,
+            owner_challenge=owner_challenge,
+            recheck_id=recheck_id,
+            fresh_challenge=fresh_challenge,
+            original_server_instance_id=original_server_instance_id,
+            original_fact_generation=original_fact_generation,
+            original_execution_facts_canonical_sha256=(
+                original_execution_facts_canonical_sha256
+            ),
+            allow_cached_replay=allow_cached_replay,
+        )
+        return facts
+
+    def capture_deployment_recheck_served_proof(
+        self,
+        *,
+        request_id: str,
+        owner_challenge: str,
+        recheck_id: str,
+        fresh_challenge: str,
+        original_server_instance_id: str,
+        original_fact_generation: int,
+        original_execution_facts_canonical_sha256: str,
+    ) -> VerifiedDeploymentRecheckCapture:
+        """Return a privacy-safe envelope verified by the bound Linux adapter."""
+
+        with self._call_lock:
+            facts, proof_fields = VnpyRpcService._capture_deployment_recheck_result(
+                self,
+                request_id=request_id,
+                owner_challenge=owner_challenge,
+                recheck_id=recheck_id,
+                fresh_challenge=fresh_challenge,
+                original_server_instance_id=original_server_instance_id,
+                original_fact_generation=original_fact_generation,
+                original_execution_facts_canonical_sha256=(
+                    original_execution_facts_canonical_sha256
+                ),
+                allow_cached_replay=True,
+            )
+            binding = self._deployment_transport_binding
+            connected_at = self.last_connected_at
+            connection_generation = self._deployment_transport_generation
+            if (
+                binding is None
+                or connected_at is None
+                or connection_generation < 1
+            ):
+                raise RpcCallError("RPC deployment transport connection is not attested")
+            request_endpoint, publish_endpoint, gateway_name = binding
+            proof = build_deployment_rpc_recheck_served_proof(
+                fresh_rpc=facts,
+                captured_at_utc_raw=str(proof_fields["captured_at_utc_raw"]),
+                cache_replayed=proof_fields["cache_replayed"],
+                served_at_utc_raw=str(proof_fields["served_at_utc_raw"]),
+                served_fact_generation=proof_fields["served_fact_generation"],
+                transport_observed_at_utc_raw=str(
+                    proof_fields["transport_observed_at_utc_raw"]
+                ),
+                gateway_name=gateway_name,
+                rpc_request_endpoint_sha256=hashlib.sha256(
+                    request_endpoint.encode("utf-8")
+                ).hexdigest(),
+                rpc_publish_endpoint_sha256=hashlib.sha256(
+                    publish_endpoint.encode("utf-8")
+                ).hexdigest(),
+                rpc_connection_started_at_utc_raw=connected_at.astimezone(timezone.utc)
+                .isoformat()
+                .replace("+00:00", "Z"),
+                rpc_connection_generation=connection_generation,
+            )
+            if (
+                self._deployment_transport_binding != binding
+                or self.last_connected_at != connected_at
+                or self._deployment_transport_generation != connection_generation
+            ):
+                raise RpcCallError("RPC deployment transport changed during capture")
+            return VerifiedDeploymentRecheckCapture(
+                facts=facts,
+                served_proof=proof,
+            )
 
     def send_order(self, order_request: "OrderRequest", gateway_name: str) -> Any:
         return self.call("send_order", order_request, gateway_name)

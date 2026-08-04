@@ -1,7 +1,7 @@
 {
   "schema_version": "web_bridge_release_dependencies_v1",
   "issue": 267,
-  "status": "phase_1_pre_c_c2b_non_authorizing_owner_reconciliation_activation_deploy_frozen",
+  "status": "phase_1_pre_c_c2b_served_proof_v2_activation_deploy_frozen",
   "ownership_contract": "docs/architecture/web-bridge-deployment-ownership-v1.json",
   "safety": {
     "classifier_consumption_allowed": false,
@@ -17,11 +17,11 @@
     "missing_closure_evidence": "block"
   },
   "legacy_restart_migration_contract": {
-    "current_code_stage": "phase_1_pre_c_c2b",
+    "current_code_stage": "phase_1_pre_c_c2b_served_proof_v2",
     "current_runtime_stage": "not_deployed_or_activated_by_this_contract",
     "c2b": {
-      "implementation_status": "merged_non_authorizing_owner_capture_and_activation_custody",
-      "commit_point": "create_only_activation_head_bound_to_actual_fd_pinned_custody_and_unique_commodity_owner_captures",
+      "implementation_status": "implemented_non_authorizing_owner_capture_with_owner_bound_linux_rpc_adapter_served_proof_v2_activation_custody",
+      "commit_point": "create_only_activation_head_v2_bound_to_actual_fd_pinned_custody_unique_commodity_owner_captures_and_owner_bound_linux_rpc_adapter_served_proof",
       "external_high_water_verified": false,
       "target_runtime_verified": false,
       "reconciliation_completed": false,
@@ -69,7 +69,7 @@
       },
       {
         "id": "phase_1_pre_c_c2b_frozen_bootstrap_activation",
-        "predecessor_artifact": "verified_windows_durable_fence_foundation_and_merged_c2b_code_and_signed_immutable_bootstrap_manifest",
+        "predecessor_artifact": "verified_windows_durable_fence_foundation_and_c2b_activation_head_v2_with_served_proof_closure_and_signed_immutable_bootstrap_manifest",
         "commit_point": "host_observer_receipt_for_exact_single_frozen_runtime_and_c2b_activation_head",
         "may_set_true": [],
         "requires": [
@@ -79,7 +79,8 @@
           "trading_disabled_authority_revoked_windows_fence_held_zero_active_orders",
           "single_replica_old_runtime_stopped_and_host_observed_new_identity",
           "windows_extension_exact_version_and_durable_fence_state",
-          "persisted_rpc_served_proof_exact_bytes_for_each_cache_replayed_capture"
+          "activation_head_v2_binds_privacy_safe_exact_served_proof_bytes_facts_hash_and_transport_observed_at",
+          "activation_head_v1_is_historical_non_eligible_and_cannot_be_backfilled"
         ],
         "recovery_query": "query_exact_bootstrap_attempt_and_host_identity_without_replacement_retry",
         "retry_identity": "deterministic_bootstrap_attempt_id",
@@ -106,13 +107,13 @@
       },
       {
         "id": "phase_1_pre_c_c2c_external_high_water",
-        "predecessor_artifact": "verified_c2b_frozen_bootstrap_activation_head",
-        "commit_point": "external_append_compare_and_swap_readback_bound_to_exact_c2b_head",
+        "predecessor_artifact": "verified_c2b_frozen_bootstrap_activation_head_v2_with_served_proof_closure",
+        "commit_point": "external_append_compare_and_swap_readback_bound_to_exact_c2b_head_v2",
         "may_set_true": ["external_high_water_verified"],
         "requires": [
           "preexisting_or_explicitly_ceremonial_out_of_volume_trust_root",
           "append_only_monotonic_external_sequence_and_predecessor",
-          "exact_c2b_head_marker_intent_inventory_state_anchor_runtime_epoch_binding",
+          "exact_c2b_head_v2_served_proof_marker_intent_inventory_state_anchor_runtime_epoch_binding",
           "authenticated_compare_and_swap_readback",
           "ceremony_signer_key_domain_two_person_approval_and_exact_inventory_schema_binding"
         ],
@@ -518,7 +519,7 @@
   ],
   "deploy_units": [
     {"id": "frontend", "phase": "phase_1", "implementation_status": "planned", "automatic_deploy_allowed": false, "safe_restart_contract": "independent_no_dependency_recreate"},
-    {"id": "web-bridge", "phase": "current_and_phase_1_compatibility", "implementation_status": "phase_1_pre_c_c2b_non_authorizing_owner_reconciliation_capture_and_activation_custody_deployment_frozen", "automatic_deploy_allowed": false, "safe_restart_contract": "actual_fd_pinned_custody_and_unique_commodity_owner_capture_activation_recorded_external_high_water_pending_target_runtime_unverified_windows_durable_token_transfer_pending_authority_and_deploy_restore_pending"},
+    {"id": "web-bridge", "phase": "current_and_phase_1_compatibility", "implementation_status": "phase_1_pre_c_c2b_served_proof_v2_non_authorizing_owner_reconciliation_activation_custody_deployment_frozen", "automatic_deploy_allowed": false, "safe_restart_contract": "actual_fd_pinned_custody_unique_commodity_owner_and_owner_bound_linux_rpc_adapter_served_proof_activation_head_v2_recorded_windows_response_unauthenticated_external_high_water_pending_target_runtime_unverified_windows_durable_token_transfer_pending_authority_and_deploy_restore_pending"},
     {"id": "control-api", "phase": "phase_2", "implementation_status": "planned", "automatic_deploy_allowed": false, "safe_restart_contract": "independent_after_execution_split"},
     {"id": "execution-orchestrator", "phase": "phase_2", "implementation_status": "planned", "automatic_deploy_allowed": false, "safe_restart_contract": "atomic_drain_short_ttl_receipt_recheck_fencing_reconcile"},
     {"id": "map-producer", "phase": "phase_3", "implementation_status": "planned_batch_job", "automatic_deploy_allowed": false, "safe_restart_contract": "immutable_run_id_and_single_candidate_writer"},

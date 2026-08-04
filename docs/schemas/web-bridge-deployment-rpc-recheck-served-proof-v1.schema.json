@@ -1,0 +1,290 @@
+{
+  "additionalProperties": false,
+  "description": "Privacy-safe proof that the owner-bound Linux adapter accepted one response.",
+  "properties": {
+    "schema_version": {
+      "const": "web_bridge_deployment_rpc_recheck_served_proof_v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "purpose": {
+      "const": "persist_transport_verified_recheck_served_proof",
+      "title": "Purpose",
+      "type": "string"
+    },
+    "proof_id": {
+      "pattern": "^deployment-rpc-recheck-served-proof-[0-9a-f]{64}$",
+      "title": "Proof Id",
+      "type": "string"
+    },
+    "proof_core_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Proof Core Sha256",
+      "type": "string"
+    },
+    "rpc_method": {
+      "const": "recheck_deployment_safety_snapshot_v1",
+      "title": "Rpc Method",
+      "type": "string"
+    },
+    "response_schema_version": {
+      "const": "windows_rpc_deployment_safety_recheck_v1",
+      "title": "Response Schema Version",
+      "type": "string"
+    },
+    "adapter_contract_version": {
+      "const": "vnpy-rpc-recheck-served-proof-v1",
+      "title": "Adapter Contract Version",
+      "type": "string"
+    },
+    "request_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+      "title": "Request Id",
+      "type": "string"
+    },
+    "owner_challenge": {
+      "pattern": "^[A-Za-z0-9_-]{16,128}$",
+      "title": "Owner Challenge",
+      "type": "string"
+    },
+    "recheck_id": {
+      "pattern": "^deployment-recheck-[0-9a-f]{64}$",
+      "title": "Recheck Id",
+      "type": "string"
+    },
+    "fresh_challenge": {
+      "pattern": "^[A-Za-z0-9_-]{16,128}$",
+      "title": "Fresh Challenge",
+      "type": "string"
+    },
+    "original_server_instance_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+      "title": "Original Server Instance Id",
+      "type": "string"
+    },
+    "original_fact_generation": {
+      "minimum": 0,
+      "title": "Original Fact Generation",
+      "type": "integer"
+    },
+    "original_execution_facts_canonical_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Original Execution Facts Canonical Sha256",
+      "type": "string"
+    },
+    "server_instance_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+      "title": "Server Instance Id",
+      "type": "string"
+    },
+    "fact_generation": {
+      "minimum": 0,
+      "title": "Fact Generation",
+      "type": "integer"
+    },
+    "execution_facts_canonical_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Execution Facts Canonical Sha256",
+      "type": "string"
+    },
+    "fresh_rpc_raw_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Fresh Rpc Raw Sha256",
+      "type": "string"
+    },
+    "gateway_name": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
+      "title": "Gateway Name",
+      "type": "string"
+    },
+    "rpc_request_endpoint_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Rpc Request Endpoint Sha256",
+      "type": "string"
+    },
+    "rpc_publish_endpoint_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Rpc Publish Endpoint Sha256",
+      "type": "string"
+    },
+    "rpc_connection_started_at_utc_raw": {
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[^+]+Z$",
+      "title": "Rpc Connection Started At Utc Raw",
+      "type": "string"
+    },
+    "rpc_connection_generation": {
+      "minimum": 1,
+      "title": "Rpc Connection Generation",
+      "type": "integer"
+    },
+    "captured_at_utc_raw": {
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[^+]+Z$",
+      "title": "Captured At Utc Raw",
+      "type": "string"
+    },
+    "cache_replayed": {
+      "title": "Cache Replayed",
+      "type": "boolean"
+    },
+    "served_at_utc_raw": {
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[^+]+Z$",
+      "title": "Served At Utc Raw",
+      "type": "string"
+    },
+    "served_fact_generation": {
+      "minimum": 0,
+      "title": "Served Fact Generation",
+      "type": "integer"
+    },
+    "transport_observed_at_utc_raw": {
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[^+]+Z$",
+      "title": "Transport Observed At Utc Raw",
+      "type": "string"
+    },
+    "freshness_basis": {
+      "enum": [
+        "CAPTURED_AT_NON_CACHE",
+        "SERVED_AT_CACHE_REPLAY"
+      ],
+      "title": "Freshness Basis",
+      "type": "string"
+    },
+    "caller_cached_replay_allowed": {
+      "const": true,
+      "title": "Caller Cached Replay Allowed",
+      "type": "boolean"
+    },
+    "freshness_max_age_seconds": {
+      "const": 30,
+      "title": "Freshness Max Age Seconds",
+      "type": "integer"
+    },
+    "future_skew_seconds": {
+      "const": 2,
+      "title": "Future Skew Seconds",
+      "type": "integer"
+    },
+    "linux_rpc_adapter_response_verified": {
+      "const": true,
+      "title": "Linux Rpc Adapter Response Verified",
+      "type": "boolean"
+    },
+    "windows_response_authenticated": {
+      "const": false,
+      "title": "Windows Response Authenticated",
+      "type": "boolean"
+    },
+    "external_high_water_verified": {
+      "const": false,
+      "title": "External High Water Verified",
+      "type": "boolean"
+    },
+    "target_runtime_verified": {
+      "const": false,
+      "title": "Target Runtime Verified",
+      "type": "boolean"
+    },
+    "reconciliation_completed": {
+      "const": false,
+      "title": "Reconciliation Completed",
+      "type": "boolean"
+    },
+    "windows_fence_released": {
+      "const": false,
+      "title": "Windows Fence Released",
+      "type": "boolean"
+    },
+    "authority_restore_allowed": {
+      "const": false,
+      "title": "Authority Restore Allowed",
+      "type": "boolean"
+    },
+    "consume_authorized": {
+      "const": false,
+      "title": "Consume Authorized",
+      "type": "boolean"
+    },
+    "reconciliation_authorized": {
+      "const": false,
+      "title": "Reconciliation Authorized",
+      "type": "boolean"
+    },
+    "deployment_authorized": {
+      "const": false,
+      "title": "Deployment Authorized",
+      "type": "boolean"
+    },
+    "automatic_deploy_allowed": {
+      "const": false,
+      "title": "Automatic Deploy Allowed",
+      "type": "boolean"
+    },
+    "production_allowed": {
+      "const": false,
+      "title": "Production Allowed",
+      "type": "boolean"
+    },
+    "live_trading_authorized": {
+      "const": false,
+      "title": "Live Trading Authorized",
+      "type": "boolean"
+    },
+    "countable_forward": {
+      "const": false,
+      "title": "Countable Forward",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "schema_version",
+    "purpose",
+    "proof_id",
+    "proof_core_sha256",
+    "rpc_method",
+    "response_schema_version",
+    "adapter_contract_version",
+    "request_id",
+    "owner_challenge",
+    "recheck_id",
+    "fresh_challenge",
+    "original_server_instance_id",
+    "original_fact_generation",
+    "original_execution_facts_canonical_sha256",
+    "server_instance_id",
+    "fact_generation",
+    "execution_facts_canonical_sha256",
+    "fresh_rpc_raw_sha256",
+    "gateway_name",
+    "rpc_request_endpoint_sha256",
+    "rpc_publish_endpoint_sha256",
+    "rpc_connection_started_at_utc_raw",
+    "rpc_connection_generation",
+    "captured_at_utc_raw",
+    "cache_replayed",
+    "served_at_utc_raw",
+    "served_fact_generation",
+    "transport_observed_at_utc_raw",
+    "freshness_basis",
+    "caller_cached_replay_allowed",
+    "freshness_max_age_seconds",
+    "future_skew_seconds",
+    "linux_rpc_adapter_response_verified",
+    "windows_response_authenticated",
+    "external_high_water_verified",
+    "target_runtime_verified",
+    "reconciliation_completed",
+    "windows_fence_released",
+    "authority_restore_allowed",
+    "consume_authorized",
+    "reconciliation_authorized",
+    "deployment_authorized",
+    "automatic_deploy_allowed",
+    "production_allowed",
+    "live_trading_authorized",
+    "countable_forward"
+  ],
+  "title": "Web Bridge deployment RPC recheck served proof v1",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vnpy-web-bridge:schema:web-bridge-deployment-rpc-recheck-served-proof-v1"
+}
