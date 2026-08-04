@@ -2,7 +2,7 @@
 
 ## Issue #267 legacy 部署冻结
 
-PR 1-guard 已删除 legacy CD workflow。PR 1-pre B2b 在 B2a state v3 commitment chain 基础上增加可信 Commodity owner-only one-shot consume API，并按 create-only intent → 不可逆 marker → consumed state commitment 写入 WAL；receipt/recheck 时间上下界在 marker atomic publish 前再次校验，时钟回拨也 fail closed。重启恢复保留并逐 receipt 复验所有历史消费证据，已提交消费始终进入冻结状态，只有 intent 的孤儿状态也保持阻塞。该能力不等于 reconciliation 或部署授权；所有 production/live/countable 授权仍为 false，`scripts/deploy.sh` 继续硬冻结，也禁止直接 stop/start/recreate `web-bridge`。人工确认不能替代该门禁。
+PR 1-guard 已删除 legacy CD workflow。PR 1-pre C1a 在 B2b one-shot consume WAL 之后增加仅限 `PLANNED_RESTART` 的非授权重启后对账合同：它 exact 绑定完整 receipt/recheck/consume/state commitment lineage，并要求新 runtime 下 fresh、仍冻结且无漂移的 Windows execution facts。C1a 不接线运行状态，只记录 execution-facts reconciliation；target runtime 尚未验证、Windows fence 尚未释放、全局 reconciliation/authority restore 仍为 false。初始 bootstrap、owner-only 持久激活和 Windows 解锁分别留 C1b/C2/D。所有 production/live/countable 授权仍为 false，`scripts/deploy.sh` 继续硬冻结，也禁止直接 stop/start/recreate `web-bridge`。人工确认不能替代该门禁。
 
 下文涉及 stop/start/up 的备份和恢复命令在冻结期间只允许用于非生产恢复演练；生产备份、恢复或紧急操作需要独立授权和可验证的 safe-restart receipt。历史 CD 曾把 `APP_ENV`、`JWT_SECRET_KEY`、`MONITOR_ENABLED` 写入最终 `.env`，但该行为已不再启用。
 

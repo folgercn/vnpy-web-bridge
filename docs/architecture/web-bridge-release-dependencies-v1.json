@@ -1,7 +1,7 @@
 {
   "schema_version": "web_bridge_release_dependencies_v1",
   "issue": 267,
-  "status": "phase_1_pre_b_b2b_owner_only_consume_wal_deploy_frozen",
+  "status": "phase_1_pre_c_c1a_planned_restart_reconciliation_contract_deploy_frozen",
   "ownership_contract": "docs/architecture/web-bridge-deployment-ownership-v1.json",
   "safety": {
     "classifier_consumption_allowed": false,
@@ -242,7 +242,7 @@
   ],
   "deploy_units": [
     {"id": "frontend", "phase": "phase_1", "implementation_status": "planned", "automatic_deploy_allowed": false, "safe_restart_contract": "independent_no_dependency_recreate"},
-    {"id": "web-bridge", "phase": "current_and_phase_1_compatibility", "implementation_status": "phase_1_pre_b_b2b_owner_only_one_shot_consume_wal_deployment_frozen", "automatic_deploy_allowed": false, "safe_restart_contract": "event_thread_linearized_windows_facts_owner_bound_fresh_recheck_intent_then_irreversible_marker_then_state_commitment_restart_preserves_consumption_evidence_reconciliation_pending"},
+    {"id": "web-bridge", "phase": "current_and_phase_1_compatibility", "implementation_status": "phase_1_pre_c_c1a_non_authorizing_planned_restart_reconciliation_contract_deployment_frozen", "automatic_deploy_allowed": false, "safe_restart_contract": "event_thread_linearized_windows_facts_owner_bound_fresh_recheck_one_shot_consume_wal_then_exact_post_restart_commitment_lineage_and_fresh_frozen_windows_fact_reconciliation_target_runtime_unverified_fence_release_pending"},
     {"id": "control-api", "phase": "phase_2", "implementation_status": "planned", "automatic_deploy_allowed": false, "safe_restart_contract": "independent_after_execution_split"},
     {"id": "execution-orchestrator", "phase": "phase_2", "implementation_status": "planned", "automatic_deploy_allowed": false, "safe_restart_contract": "atomic_drain_short_ttl_receipt_recheck_fencing_reconcile"},
     {"id": "map-producer", "phase": "phase_3", "implementation_status": "planned_batch_job", "automatic_deploy_allowed": false, "safe_restart_contract": "immutable_run_id_and_single_candidate_writer"},
@@ -355,7 +355,7 @@
     },
     {
       "id": "execution-source",
-      "match": {"exact": ["backend/app/schemas/deployment_drain.py", "backend/app/services/commodity_simnow.py", "backend/app/services/deployment_consume_wal.py", "backend/app/services/deployment_drain.py", "backend/app/services/deployment_drain_bootstrap.py", "backend/app/services/deployment_state_commitment.py", "backend/app/services/manual_execution_permit.py", "backend/app/services/risk_service.py", "backend/app/services/strategy_service.py", "backend/app/services/trade_service.py", "backend/app/services/vnpy_rpc_service.py"]},
+      "match": {"exact": ["backend/app/schemas/deployment_drain.py", "backend/app/services/commodity_simnow.py", "backend/app/services/deployment_consume_wal.py", "backend/app/services/deployment_drain.py", "backend/app/services/deployment_drain_bootstrap.py", "backend/app/services/deployment_restart_reconciliation.py", "backend/app/services/deployment_state_commitment.py", "backend/app/services/manual_execution_permit.py", "backend/app/services/risk_service.py", "backend/app/services/strategy_service.py", "backend/app/services/trade_service.py", "backend/app/services/vnpy_rpc_service.py"]},
       "classification": "infra_manual",
       "build_units": ["execution-orchestrator"],
       "pre_activation_build_units": ["legacy-web-bridge-app"],

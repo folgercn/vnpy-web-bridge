@@ -60,6 +60,20 @@ RecheckId = Annotated[
     Field(pattern=r"^deployment-recheck-[0-9a-f]{64}$"),
     AfterValidator(lambda value: _nonzero_prefixed(value, "deployment-recheck-")),
 ]
+PostRestartCheckpointId = Annotated[
+    str,
+    Field(pattern=r"^deployment-post-restart-checkpoint-[0-9a-f]{64}$"),
+    AfterValidator(
+        lambda value: _nonzero_prefixed(value, "deployment-post-restart-checkpoint-")
+    ),
+]
+ReconciliationEvidenceId = Annotated[
+    str,
+    Field(pattern=r"^safe-restart-reconciliation-[0-9a-f]{64}$"),
+    AfterValidator(
+        lambda value: _nonzero_prefixed(value, "safe-restart-reconciliation-")
+    ),
+]
 OnlineRecheckId = Annotated[
     str,
     Field(pattern=r"^safe-restart-online-recheck-[0-9a-f]{64}$"),
@@ -763,6 +777,208 @@ class SafeRestartConsumeCommitMarkerDTO(StrictDeploymentDrainModel):
             raise ValueError("consume marker core hash mismatch")
         if self.consume_marker_id != f"safe-restart-consume-marker-{expected}":
             raise ValueError("consume marker id does not match core hash")
+        return self
+
+
+class DeploymentPostRestartCheckpointDTO(StrictDeploymentDrainModel):
+    """Non-authorizing C1a checkpoint captured by the restarted process."""
+
+    schema_version: Literal["web_bridge_deployment_post_restart_checkpoint_v1"]
+    purpose: Literal["record_non_authorizing_planned_restart_reconciliation_checkpoint"]
+    mode: Literal["PLANNED_RESTART"]
+    reconciliation_run_id: Identifier
+    checkpoint_id: PostRestartCheckpointId
+    checkpoint_core_sha256: Sha256
+    consume_intent_id: ConsumeIntentId
+    consume_intent_raw_sha256: Sha256
+    consume_intent_core_sha256: Sha256
+    consume_marker_id: ConsumeMarkerId
+    consume_marker_raw_sha256: Sha256
+    consume_marker_core_sha256: Sha256
+    receipt_id: ReceiptId
+    receipt_raw_sha256: Sha256
+    receipt_core_sha256: Sha256
+    online_recheck_id: OnlineRecheckId
+    online_recheck_raw_sha256: Sha256
+    online_recheck_core_sha256: Sha256
+    request_id: Identifier
+    deployment_attempt_id: Identifier
+    release_plan_core_sha256: Sha256
+    restart_action_sha256: Sha256
+    drain_epoch: int = Field(strict=True, ge=1)
+    previous_runtime_instance_id: Identifier
+    previous_execution_epoch: int = Field(strict=True, ge=1)
+    current_runtime_instance_id: Identifier
+    current_execution_epoch: int = Field(strict=True, ge=2)
+    consumed_windows_server_instance_id: Identifier
+    consumed_owner_challenge_sha256: Sha256
+    consumed_recheck_id: RecheckId
+    consumed_fresh_challenge_sha256: Sha256
+    consumed_rpc_generation: int = Field(strict=True, ge=0)
+    consumed_execution_facts_canonical_sha256: Sha256
+    consumed_execution_state_sha256: Sha256
+    consumed_active_orders_snapshot_sha256: Sha256
+    consumed_positions_snapshot_sha256: Sha256
+    current_state_commitment_id: StateCommitmentId
+    current_state_commitment_raw_sha256: Sha256
+    current_epoch_anchor_raw_sha256: Sha256
+    current_state_generation: int = Field(strict=True, ge=1)
+    current_drain_state: dict[str, Any]
+    current_drain_state_raw_sha256: Sha256
+    post_restart_recheck_id: RecheckId
+    post_restart_fresh_challenge_sha256: Sha256
+    windows_rpc: DeploymentRpcRecheckFactsDTO
+    current_active_orders_snapshot_sha256: Sha256
+    current_positions_snapshot_sha256: Sha256
+    captured_at: datetime
+    windows_execution_admission_frozen: Literal[True]
+    semantic_safety_unchanged: Literal[True]
+    target_runtime_verified: Literal[False]
+    execution_facts_reconciliation_completed: Literal[True]
+    reconciliation_completed: Literal[False]
+    windows_fence_released: Literal[False]
+    authority_restore_allowed: Literal[False]
+    consume_authorized: Literal[False]
+    reconciliation_authorized: Literal[False]
+    deployment_authorized: Literal[False]
+    automatic_deploy_allowed: Literal[False]
+    production_allowed: Literal[False]
+    live_trading_authorized: Literal[False]
+    countable_forward: Literal[False]
+
+    @model_validator(mode="after")
+    def validate_checkpoint(self) -> DeploymentPostRestartCheckpointDTO:
+        _require_utc(self.captured_at, "post-restart checkpoint captured_at")
+        if self.windows_rpc.captured_at > self.captured_at:
+            raise ValueError("Windows recheck cannot follow checkpoint capture")
+        if self.current_runtime_instance_id == self.previous_runtime_instance_id:
+            raise ValueError("planned restart must use a new runtime instance")
+        if self.current_execution_epoch <= self.previous_execution_epoch:
+            raise ValueError("planned restart must advance the execution epoch")
+        if self.captured_at - self.windows_rpc.captured_at > timedelta(seconds=30):
+            raise ValueError("post-restart Windows recheck is stale")
+        if (
+            self.windows_rpc.request_id != self.request_id
+            or self.windows_rpc.recheck_id != self.post_restart_recheck_id
+            or hashlib.sha256(
+                self.windows_rpc.owner_challenge.encode("utf-8")
+            ).hexdigest()
+            != self.consumed_owner_challenge_sha256
+            or hashlib.sha256(
+                self.windows_rpc.fresh_challenge.encode("utf-8")
+            ).hexdigest()
+            != self.post_restart_fresh_challenge_sha256
+            or self.windows_rpc.server_instance_id
+            != self.consumed_windows_server_instance_id
+            or self.windows_rpc.original_server_instance_id
+            != self.consumed_windows_server_instance_id
+            or self.windows_rpc.fact_generation != self.consumed_rpc_generation
+            or self.windows_rpc.original_fact_generation != self.consumed_rpc_generation
+            or self.windows_rpc.execution_facts_canonical_sha256
+            != self.consumed_execution_facts_canonical_sha256
+            or self.windows_rpc.original_execution_facts_canonical_sha256
+            != self.consumed_execution_facts_canonical_sha256
+        ):
+            raise ValueError("post-restart Windows facts changed")
+        if (
+            self.post_restart_recheck_id == self.consumed_recheck_id
+            or self.post_restart_fresh_challenge_sha256
+            == self.consumed_fresh_challenge_sha256
+        ):
+            raise ValueError("post-restart Windows recheck was replayed")
+        if self.windows_rpc.pending_send_outcomes != 0:
+            raise ValueError("post-restart checkpoint has pending send outcomes")
+        if self.windows_rpc.active_orders:
+            raise ValueError("post-restart checkpoint has active orders")
+        current_state_raw = (
+            json.dumps(
+                self.current_drain_state,
+                allow_nan=False,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            + b"\n"
+        )
+        if (
+            self.current_drain_state_raw_sha256
+            != hashlib.sha256(current_state_raw).hexdigest()
+        ):
+            raise ValueError("post-restart drain state raw hash mismatch")
+        if self.current_drain_state.get("state_generation") != (
+            self.current_state_generation
+        ):
+            raise ValueError("post-restart drain state generation mismatch")
+        if self.current_active_orders_snapshot_sha256 != (
+            _strict_canonical_sha256(self.windows_rpc.active_orders)
+        ) or self.current_active_orders_snapshot_sha256 != (
+            self.consumed_active_orders_snapshot_sha256
+        ):
+            raise ValueError("post-restart active-order facts changed")
+        if self.current_positions_snapshot_sha256 != _strict_canonical_sha256(
+            self.windows_rpc.positions
+        ) or self.current_positions_snapshot_sha256 != (
+            self.consumed_positions_snapshot_sha256
+        ):
+            raise ValueError("post-restart position facts changed")
+        core = self.model_dump(mode="json")
+        core.pop("checkpoint_id")
+        core.pop("checkpoint_core_sha256")
+        expected = _strict_canonical_sha256(core)
+        if self.checkpoint_core_sha256 != expected:
+            raise ValueError("post-restart checkpoint core hash mismatch")
+        if self.checkpoint_id != (f"deployment-post-restart-checkpoint-{expected}"):
+            raise ValueError("post-restart checkpoint id does not match core hash")
+        return self
+
+
+class SafeRestartReconciliationEvidenceDTO(StrictDeploymentDrainModel):
+    """C1a evidence only; it neither verifies the target image nor unfreezes."""
+
+    schema_version: Literal["web_bridge_safe_restart_reconciliation_v1"]
+    purpose: Literal["record_non_authorizing_planned_restart_reconciliation_evidence"]
+    mode: Literal["PLANNED_RESTART"]
+    reconciliation_id: ReconciliationEvidenceId
+    reconciliation_core_sha256: Sha256
+    checkpoint_id: PostRestartCheckpointId
+    checkpoint_raw_sha256: Sha256
+    checkpoint_core_sha256: Sha256
+    consume_intent_id: ConsumeIntentId
+    consume_intent_raw_sha256: Sha256
+    consume_marker_id: ConsumeMarkerId
+    consume_marker_raw_sha256: Sha256
+    receipt_id: ReceiptId
+    online_recheck_id: OnlineRecheckId
+    online_recheck_raw_sha256: Sha256
+    current_runtime_instance_id: Identifier
+    current_execution_epoch: int = Field(strict=True, ge=2)
+    reconciled_at: datetime
+    post_restart_reconciliation_verified: Literal[True]
+    windows_execution_admission_frozen: Literal[True]
+    target_runtime_verified: Literal[False]
+    execution_facts_reconciliation_completed: Literal[True]
+    reconciliation_completed: Literal[False]
+    windows_fence_released: Literal[False]
+    authority_restore_allowed: Literal[False]
+    consume_authorized: Literal[False]
+    reconciliation_authorized: Literal[False]
+    deployment_authorized: Literal[False]
+    automatic_deploy_allowed: Literal[False]
+    production_allowed: Literal[False]
+    live_trading_authorized: Literal[False]
+    countable_forward: Literal[False]
+
+    @model_validator(mode="after")
+    def validate_evidence(self) -> SafeRestartReconciliationEvidenceDTO:
+        _require_utc(self.reconciled_at, "restart reconciliation reconciled_at")
+        core = self.model_dump(mode="json")
+        core.pop("reconciliation_id")
+        core.pop("reconciliation_core_sha256")
+        expected = _strict_canonical_sha256(core)
+        if self.reconciliation_core_sha256 != expected:
+            raise ValueError("restart reconciliation core hash mismatch")
+        if self.reconciliation_id != f"safe-restart-reconciliation-{expected}":
+            raise ValueError("restart reconciliation id does not match core hash")
         return self
 
 
