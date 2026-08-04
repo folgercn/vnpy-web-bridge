@@ -427,7 +427,7 @@
   "build_units": [
     {
       "id": "windows-fence-foundation-bundle",
-      "implementation_status": "planned_contract_frozen_runtime_not_installed",
+      "implementation_status": "planned_bundle_durable_core_implemented_not_installed",
       "build_file": "future:scripts/windows_fence_foundation/Containerfile.bundle",
       "context": ".",
       "deploy_units": [
@@ -665,9 +665,6 @@
       "classification": "infra_manual",
       "build_units": [
         "windows-fence-foundation-bundle"
-      ],
-      "pre_activation_build_units": [
-        "legacy-web-bridge-app"
       ],
       "verification_units": [
         "windows_fence_foundation_contract",

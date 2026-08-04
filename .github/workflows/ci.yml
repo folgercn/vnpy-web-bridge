@@ -20,6 +20,7 @@ jobs:
       frontend_changed: ${{ steps.filter.outputs.frontend_changed }}
       image_changed: ${{ steps.filter.outputs.image_changed }}
       query_v5_changed: ${{ steps.filter.outputs.query_v5_changed }}
+      windows_fence_changed: ${{ steps.filter.outputs.windows_fence_changed }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -238,6 +239,37 @@ jobs:
       - name: Run frontend quality gate
         run: npm run check
 
+  windows-fence-core:
+    name: Windows fence durable core (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.windows_fence_changed == 'true'
+    permissions:
+      contents: read
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install read-only test dependencies
+        run: pip install -r scripts/ci/requirements-quick.txt
+
+      - name: Run Windows fence offline tests
+        run: >-
+          python -m pytest -q
+          backend/tests/unit/test_windows_rpc_deployment_snapshot_v1.py
+          backend/tests/unit/test_windows_rpc_durable_fence_store_v1.py
+          backend/tests/unit/test_windows_rpc_durable_fence_admission_v1.py
+          backend/tests/unit/test_windows_rpc_durable_fence_bootstrap_v1.py
+
   docker:
     name: Production image build
     needs: changes
@@ -378,6 +410,7 @@ jobs:
       - legacy-cd-guard-plan
       - backend
       - frontend
+      - windows-fence-core
       - docker
       - query-v5-real-oci
     runs-on: ubuntu-latest

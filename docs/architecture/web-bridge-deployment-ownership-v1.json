@@ -472,7 +472,7 @@
     {
       "id": "windows-ctp-gateway",
       "deployment_mode": "external_windows_service",
-      "code_paths": ["external:C:/quant/run_rpc_server.py", "scripts/windows_rpc_deployment_snapshot_v1.py", "future:scripts/windows_rpc_durable_fence_v1.py", "future:docs/schemas/windows-rpc-durable-fence-*.schema.json"],
+      "code_paths": ["external:C:/quant/run_rpc_server.py", "scripts/windows_rpc_deployment_snapshot_v1.py", "scripts/windows_rpc_durable_fence_v1.py", "scripts/windows_fence_foundation/", "docs/schemas/windows-rpc-durable-fence-*.schema.json"],
       "startup_tasks": ["verify_exact_pinned_foundation_manifest_public_key", "recover_durable_fence_before_rpc_listen", "ctp_session", "query_rpc", "guarded_trade_rpc", "event_publish"],
       "state_owner": ["gateway_session", "broker_order_position_trade_facts", "durable_fence_state", "monotonic_fence_generation", "windows_boot_session_identity", "empty_foundation_token_inventory", "final_send_cancel_admission"],
       "order_rpc": {"allowed": false, "methods": [], "provides_methods": ["send_order", "cancel_order"], "caller": "execution-orchestrator", "requires_account_scoped_fencing": true},

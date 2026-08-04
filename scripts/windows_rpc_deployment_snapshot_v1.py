@@ -18,6 +18,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, fields, is_dataclass
 from datetime import date, datetime, timezone
 from enum import Enum
+from types import MappingProxyType
 from typing import Any
 
 SCHEMA_VERSION = "windows_rpc_deployment_safety_snapshot_v1"
@@ -254,6 +255,7 @@ class WindowsRpcDeploymentSnapshotV1:
         account_event_type: str = DEFAULT_ACCOUNT_EVENT_TYPE,
         clock: Callable[[], datetime] | None = None,
         recheck_cache_size: int = 128,
+        durable_admission: Any | None = None,
     ) -> None:
         if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive and finite")
@@ -274,6 +276,9 @@ class WindowsRpcDeploymentSnapshotV1:
         self.account_event_type = account_event_type
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.recheck_cache_size = recheck_cache_size
+        self.durable_admission = durable_admission
+        self._durable_fence_binding_json: str | None = None
+        self._durable_fence_binding_sha256: str | None = None
         self.server_instance_id = f"windows-rpc-{uuid.uuid4().hex}"
         self._fact_generation = 0
         self._admission = threading.Condition(threading.RLock())
@@ -289,12 +294,16 @@ class WindowsRpcDeploymentSnapshotV1:
         self._original_cancel_order: Callable[..., Any] | None = None
         self._registered = False
 
+        bound_snapshot = self.get_deployment_safety_snapshot_v1
+
         def rpc_callable(request_id: str, challenge: str) -> dict[str, Any]:
-            return self.get_deployment_safety_snapshot_v1(request_id, challenge)
+            return bound_snapshot(request_id, challenge)
 
         rpc_callable.__name__ = RPC_CALLABLE_NAME
         rpc_callable.__qualname__ = RPC_CALLABLE_NAME
         self.rpc_callable = rpc_callable
+
+        bound_recheck = self.recheck_deployment_safety_snapshot_v1
 
         def recheck_rpc_callable(
             request_id: str,
@@ -303,7 +312,7 @@ class WindowsRpcDeploymentSnapshotV1:
             fresh_challenge: str,
             expected_generation: int,
         ) -> dict[str, Any]:
-            return self.recheck_deployment_safety_snapshot_v1(
+            return bound_recheck(
                 request_id,
                 owner_challenge,
                 recheck_id,
@@ -314,6 +323,16 @@ class WindowsRpcDeploymentSnapshotV1:
         recheck_rpc_callable.__name__ = RECHECK_RPC_CALLABLE_NAME
         recheck_rpc_callable.__qualname__ = RECHECK_RPC_CALLABLE_NAME
         self.recheck_rpc_callable = recheck_rpc_callable
+
+    @property
+    def durable_fence_binding(self) -> Mapping[str, Any] | None:
+        if self._durable_fence_binding_json is None:
+            return None
+        return MappingProxyType(json.loads(self._durable_fence_binding_json))
+
+    @property
+    def durable_fence_binding_sha256(self) -> str | None:
+        return self._durable_fence_binding_sha256
 
     def register(self) -> Callable[[], dict[str, Any]]:
         if self._registered:
@@ -870,6 +889,73 @@ class WindowsRpcDeploymentSnapshotV1:
                 "strategy-capable Windows gateway cannot publish deployment "
                 f"safety snapshots: {','.join(exposed)}"
             )
+        self._validate_durable_admission()
+
+    def _validate_durable_admission(self) -> None:
+        if self.durable_admission is None:
+            return
+        frozen_snapshot = getattr(self.durable_admission, "frozen_snapshot", None)
+        if not callable(frozen_snapshot):
+            raise WindowsRpcDeploymentSnapshotError(
+                "durable admission does not expose a frozen projection"
+            )
+        projection = frozen_snapshot()
+        required = {
+            "schema_version": "windows_rpc_durable_fence_state_v1",
+            "fence_epoch": 1,
+            "admission_state": "FROZEN",
+            "token_state": "NONE",
+            "staged_token_inventory": [],
+            "active_token_inventory": [],
+            "grant_inventory": [],
+        }
+        if not isinstance(projection, Mapping) or any(
+            projection.get(field) != expected for field, expected in required.items()
+        ):
+            raise WindowsRpcDeploymentSnapshotError(
+                "durable admission is not exact FROZEN_NONE"
+            )
+        binding_fields = (
+            "schema_version",
+            "state_id",
+            "store_id",
+            "install_attempt_id",
+            "fence_epoch",
+            "admission_state",
+            "token_state",
+            "staged_token_inventory",
+            "active_token_inventory",
+            "grant_inventory",
+            "state_raw_sha256",
+            "inventory_sha256",
+            "handler_identities",
+        )
+        binding = {field: projection.get(field) for field in binding_fields}
+        if any(binding[field] is None for field in binding_fields):
+            raise WindowsRpcDeploymentSnapshotError(
+                "durable admission projection is incomplete"
+            )
+        server = getattr(self.rpc_engine, "server", None)
+        functions = getattr(server, "_functions", None)
+        if not isinstance(functions, Mapping) or any(
+            getattr(functions.get(name), "__self__", None) is not self.durable_admission
+            or getattr(functions.get(name), "__func__", None)
+            is not getattr(type(self.durable_admission), name, None)
+            for name in ("send_order", "cancel_order")
+        ):
+            raise WindowsRpcDeploymentSnapshotError(
+                "final mutation RPC is not bound to durable admission"
+            )
+        binding_sha256 = _canonical_sha256(binding)
+        if (
+            self._durable_fence_binding_sha256 is not None
+            and self._durable_fence_binding_sha256 != binding_sha256
+        ):
+            raise WindowsRpcDeploymentSnapshotError(
+                "durable admission binding changed after registration"
+            )
+        self._durable_fence_binding_json = _canonical_json(binding)
+        self._durable_fence_binding_sha256 = binding_sha256
 
     @staticmethod
     def _validate_identifier(value: str, field: str, *, minimum: int = 8) -> None:
@@ -935,6 +1021,7 @@ def register_windows_rpc_deployment_snapshot_v1(
     account_event_type: str = DEFAULT_ACCOUNT_EVENT_TYPE,
     clock: Callable[[], datetime] | None = None,
     recheck_cache_size: int = 128,
+    durable_admission: Any | None = None,
 ) -> WindowsRpcDeploymentSnapshotV1:
     """Construct and register the extension on ``rpc_engine.server``."""
 
@@ -950,6 +1037,7 @@ def register_windows_rpc_deployment_snapshot_v1(
         account_event_type=account_event_type,
         clock=clock,
         recheck_cache_size=recheck_cache_size,
+        durable_admission=durable_admission,
     )
     extension.register()
     return extension

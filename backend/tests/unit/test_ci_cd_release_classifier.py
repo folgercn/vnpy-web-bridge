@@ -49,27 +49,27 @@ def _plan(paths: list[str]) -> dict[str, object]:
         (
             ["scripts/windows_rpc_deployment_snapshot_v1.py"],
             "BLOCKED",
-            ["legacy-web-bridge-app"],
+            ["windows-fence-foundation-bundle"],
         ),
         (
             ["scripts/windows_fence_foundation/install_attempt.py"],
             "BLOCKED",
-            ["legacy-web-bridge-app"],
+            ["windows-fence-foundation-bundle"],
         ),
         (
             ["docs/schemas/windows-rpc-durable-fence-state-v1.schema.json"],
             "BLOCKED",
-            ["legacy-web-bridge-app"],
+            ["windows-fence-foundation-bundle"],
         ),
         (
             ["docs/operations/windows-rpc-durable-fence-foundation-v1.md"],
             "BLOCKED",
-            ["legacy-web-bridge-app"],
+            ["windows-fence-foundation-bundle"],
         ),
         (
             ["docs/architecture/windows-rpc-durable-fence-foundation-chain-v1.json"],
             "BLOCKED",
-            ["legacy-web-bridge-app"],
+            ["windows-fence-foundation-bundle"],
         ),
         (["future-unowned-path.txt"], "BLOCKED", []),
         ([], "BLOCKED", []),
@@ -124,6 +124,7 @@ def test_unknown_or_infrastructure_path_has_explicit_blocker() -> None:
         }
     ]
     assert windows["restart_units"] == []
+    assert windows["build_units"] == ["windows-fence-foundation-bundle"]
     assert windows["automatic_deploy_allowed"] is False
     assert windows["manual_deploy_allowed"] is False
 
