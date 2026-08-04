@@ -20,7 +20,20 @@
 
 <script setup lang="ts">
 import { reactive } from 'vue'
-import { useDialog, useMessage } from 'naive-ui'
+import {
+  NAlert,
+  NButton,
+  NCard,
+  NForm,
+  NFormItem,
+  NInput,
+  NInputNumber,
+  NRadioButton,
+  NRadioGroup,
+  NSelect,
+  useDialog,
+  useMessage
+} from 'naive-ui'
 import DataPanel from '../components/common/DataPanel.vue'
 import { sendOrder } from '../api/trade'
 import { exchangeOptions } from '../constants/exchanges'

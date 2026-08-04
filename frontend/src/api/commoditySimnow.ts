@@ -82,9 +82,25 @@ export interface CommodityPositionManagerShakedownSession {
     phase_status?: string
     order_count?: number
     total_lots?: number
-    close_orders?: Record<string, unknown>[]
-    open_orders?: Record<string, unknown>[]
+    close_orders?: CommodityShakedownOrder[]
+    open_orders?: CommodityShakedownOrder[]
   }
+}
+
+export interface CommodityShakedownOrder {
+  vt_symbol?: string
+  direction?: string
+  offset?: string
+  volume?: number
+  price?: number
+  reference?: string
+}
+
+export interface CommodityOperationResult {
+  enabled?: boolean
+  status?: string
+  plan_hash?: string
+  [key: string]: unknown
 }
 
 export interface CommodityPositionManagerShakedownStatus {
@@ -121,7 +137,7 @@ export const stopCommodityPositionManagerShakedown = (reason: string) =>
   })
 
 export const startCommodityStrategyTemplate = () =>
-  request<Record<string, unknown>>('/api/commodity-simnow/template/start', {
+  request<CommodityOperationResult>('/api/commodity-simnow/template/start', {
     method: 'POST',
     body: JSON.stringify({
       reason: 'one-click STATIC_CORE_EQUAL SimNow strategy start',
@@ -133,7 +149,7 @@ export const startCommodityStrategyTemplate = () =>
   })
 
 export const stopCommodityStrategyTemplate = () =>
-  request<Record<string, unknown>>('/api/commodity-simnow/disable', {
+  request<CommodityOperationResult>('/api/commodity-simnow/disable', {
     method: 'POST',
     body: JSON.stringify({ reason: 'one-click strategy stop' })
   })

@@ -52,7 +52,16 @@
 
 <script setup lang="ts">
 import { computed, h, onBeforeUnmount, onMounted, ref } from 'vue'
-import { NButton, NIcon, NSpace, NTag, type DataTableColumns } from 'naive-ui'
+import {
+  NButton,
+  NCard,
+  NDataTable,
+  NIcon,
+  NSpace,
+  NStatistic,
+  NTag,
+  type DataTableColumns
+} from 'naive-ui'
 import { ReloadOutlined } from '@vicons/antd'
 import DataPanel from '../components/common/DataPanel.vue'
 import { getMonitorIncidents, getMonitorSummary, getTelegramConfig, type MonitorIncident, type MonitorSummary } from '../api/monitoring'

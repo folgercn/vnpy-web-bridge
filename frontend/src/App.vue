@@ -9,7 +9,7 @@
 </template>
 
 <script setup lang="ts">
-import { darkTheme } from 'naive-ui'
+import { NConfigProvider, NDialogProvider, NMessageProvider, darkTheme } from 'naive-ui'
 import { useThemeStore } from './stores/theme'
 
 const theme = useThemeStore()

@@ -1,3 +1,6 @@
+@import url('./tokens.css');
+@import url('./utilities.css');
+
 * {
   box-sizing: border-box;
 }
@@ -24,27 +27,30 @@ body {
 
 .page {
   display: grid;
-  gap: 16px;
+  gap: var(--section-gap);
   min-width: 0;
+  width: 100%;
+  max-width: var(--page-max-width);
+  margin: 0 auto;
 }
 
 .grid-4 {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 12px;
+  gap: var(--space-3);
 }
 
 .grid-2 {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
+  gap: var(--space-3);
 }
 
 .toolbar {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-2);
   min-width: 0;
 }
 
@@ -53,7 +59,19 @@ body {
 }
 
 .mono {
-  font-family: "SFMono-Regular", Consolas, monospace;
+  font-family: SFMono-Regular, Consolas, monospace;
+}
+
+.template-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+
+.template-grid > div {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
 }
 
 .card-line {
@@ -79,14 +97,18 @@ body {
   max-width: 220px;
 }
 
-@media (max-width: 980px) {
+@media (width <= 980px) {
   .grid-4,
   .grid-2 {
     grid-template-columns: 1fr;
   }
+
+  .template-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
-@media (max-width: 640px) {
+@media (width <= 640px) {
   .page {
     gap: 10px;
   }
@@ -108,5 +130,9 @@ body {
     width: 100% !important;
     max-width: none !important;
     min-width: 0 !important;
+  }
+
+  .template-grid {
+    grid-template-columns: 1fr;
   }
 }

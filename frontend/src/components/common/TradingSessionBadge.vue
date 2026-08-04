@@ -13,6 +13,7 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { NTag } from 'naive-ui'
 import { getTradingSessionStatus } from '../../utils/tradingSessions'
 
 const props = defineProps<{

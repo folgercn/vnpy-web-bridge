@@ -12,6 +12,7 @@
 
 <script setup lang="ts">
 import { computed, ref } from 'vue'
+import { NButton, NCard, NInput } from 'naive-ui'
 import DataPanel from '../components/common/DataPanel.vue'
 import { useTerminalStore } from '../stores/terminal'
 

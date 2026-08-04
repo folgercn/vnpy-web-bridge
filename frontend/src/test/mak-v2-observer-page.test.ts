@@ -24,7 +24,8 @@ const messages = vi.hoisted(() => ({
   error: vi.fn()
 }))
 
-vi.mock('naive-ui', () => ({
+vi.mock('naive-ui', async (importOriginal) => ({
+  ...await importOriginal<typeof import('naive-ui')>(),
   useMessage: () => messages
 }))
 
@@ -119,6 +120,18 @@ function mountPage() {
   return mount(MakV2TestnetObserver, {
     global: {
       stubs: {
+        Card: SlotStub,
+        Space: SlotStub,
+        Tag: SlotStub,
+        Form: SlotStub,
+        FormItem: SlotStub,
+        Button: ButtonStub,
+        DataTable: DataTableStub,
+        Statistic: StatisticStub,
+        Input: true,
+        Checkbox: true,
+        Select: true,
+        InputNumber: true,
         NCard: SlotStub,
         NSpace: SlotStub,
         NTag: SlotStub,

@@ -1,0 +1,25 @@
+.stack-sm {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.stack-md {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.section-offset {
+  margin-top: var(--space-3);
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}

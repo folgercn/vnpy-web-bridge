@@ -8,7 +8,7 @@
 </template>
 
 <script setup lang="ts">
-import type { DataTableColumns } from 'naive-ui'
+import { NCard, NDataTable, type DataTableColumns } from 'naive-ui'
 
 withDefaults(defineProps<{
   title: string

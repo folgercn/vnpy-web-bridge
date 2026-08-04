@@ -72,7 +72,7 @@
 
 <script setup lang="ts">
 import { computed, h, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { NTag, useMessage } from 'naive-ui'
+import { NButton, NCard, NSelect, NTag, useMessage } from 'naive-ui'
 import {
   CandlestickSeries,
   createChart,
@@ -82,6 +82,7 @@ import {
   type UTCTimestamp
 } from 'lightweight-charts'
 import DataPanel from '../components/common/DataPanel.vue'
+import TradingSessionBadge from '../components/common/TradingSessionBadge.vue'
 import {
   compareContractMonths,
   contractSearchText,

@@ -15,7 +15,7 @@
 
 <script setup lang="ts">
 import { computed, h, ref } from 'vue'
-import { NButton, useMessage } from 'naive-ui'
+import { NButton, NCard, NDataTable, NSelect, useMessage } from 'naive-ui'
 import { cancelAll, cancelOrder } from '../api/trade'
 import { useTerminalStore } from '../stores/terminal'
 
