@@ -1,7 +1,7 @@
 {
   "schema_version": "web_bridge_release_dependencies_v1",
   "issue": 267,
-  "status": "phase_1_pre_c_c2a_fd_pinned_custody_foundation_deploy_frozen",
+  "status": "phase_1_pre_c_c2b_non_authorizing_owner_reconciliation_activation_deploy_frozen",
   "ownership_contract": "docs/architecture/web-bridge-deployment-ownership-v1.json",
   "safety": {
     "classifier_consumption_allowed": false,
@@ -15,6 +15,282 @@
     "unknown_dependency": "block",
     "ambiguous_match": "block",
     "missing_closure_evidence": "block"
+  },
+  "legacy_restart_migration_contract": {
+    "current_code_stage": "phase_1_pre_c_c2b",
+    "current_runtime_stage": "not_deployed_or_activated_by_this_contract",
+    "c2b": {
+      "implementation_status": "merged_non_authorizing_owner_capture_and_activation_custody",
+      "commit_point": "create_only_activation_head_bound_to_actual_fd_pinned_custody_and_unique_commodity_owner_captures",
+      "external_high_water_verified": false,
+      "target_runtime_verified": false,
+      "reconciliation_completed": false,
+      "windows_fence_released": false,
+      "authority_restore_allowed": false
+    },
+    "ordered_remaining_stages": [
+      {
+        "id": "phase_1_pre_c_c2b_windows_durable_fence_foundation",
+        "predecessor_artifact": "merged_windows_durable_fence_extension_and_signed_install_manifest",
+        "commit_point": "windows_restart_attestation_proves_durable_fail_closed_fence_held_and_final_order_admission_blocked",
+        "may_set_true": [],
+        "requires": [
+          "explicit_windows_operator_authorization_immediately_before_service_restart",
+          "host_observed_old_runtime_owner_frozen_trading_disabled_and_authority_revoked",
+          "fresh_windows_preflight_pending_send_outcomes_empty_and_active_orders_zero",
+          "read_only_preflight_account_positions_orders_rpc_and_current_extension",
+          "signed_exact_extension_hash_version_config_install_attempt_and_zero_order_preflight_receipt",
+          "durable_store_initialized_without_staged_or_active_target_token",
+          "post_restart_raw_account_gateway_boot_session_and_fence_held_proof",
+          "final_send_cancel_reject_without_active_token_and_bound_d3_grant"
+        ],
+        "recovery_query": "query_exact_windows_install_attempt_and_durable_fence_state",
+        "retry_identity": "deterministic_windows_fence_install_attempt_id",
+        "crash_states": {
+          "before_service_restart": "remain_old_extension_frozen_and_require_fresh_authorization",
+          "after_restart_before_attestation": "query_same_install_attempt_and_keep_fence_held",
+          "partial_install_or_unknown_version": "do_not_restart_again_keep_orders_blocked_and_require_operator_recovery",
+          "durable_store_unreadable": "windows_startup_and_final_order_admission_fail_closed"
+        },
+        "forbidden": [
+          "implicit_windows_restart_authorization",
+          "staged_or_active_target_token",
+          "external_high_water_verified",
+          "target_runtime_verified",
+          "reconciliation_completed",
+          "windows_fence_released",
+          "authority_restore_allowed",
+          "deployment_authorized",
+          "automatic_deploy_allowed",
+          "production_allowed",
+          "live_trading_authorized",
+          "countable_forward"
+        ]
+      },
+      {
+        "id": "phase_1_pre_c_c2b_frozen_bootstrap_activation",
+        "predecessor_artifact": "verified_windows_durable_fence_foundation_and_merged_c2b_code_and_signed_immutable_bootstrap_manifest",
+        "commit_point": "host_observer_receipt_for_exact_single_frozen_runtime_and_c2b_activation_head",
+        "may_set_true": [],
+        "requires": [
+          "explicit_receipt_bound_pre_d1_target_replacement_only",
+          "unique_m2_bootstrap_coordinator_with_root_owned_durable_attempt_journal",
+          "immutable_image_digest_exact_config_and_source_revision",
+          "trading_disabled_authority_revoked_windows_fence_held_zero_active_orders",
+          "single_replica_old_runtime_stopped_and_host_observed_new_identity",
+          "windows_extension_exact_version_and_durable_fence_state",
+          "persisted_rpc_served_proof_exact_bytes_for_each_cache_replayed_capture"
+        ],
+        "recovery_query": "query_exact_bootstrap_attempt_and_host_identity_without_replacement_retry",
+        "retry_identity": "deterministic_bootstrap_attempt_id",
+        "crash_states": {
+          "before_old_runtime_stop": "remain_old_runtime_frozen",
+          "after_stop_before_target_start": "remain_no_runtime_frozen_and_resume_same_attempt",
+          "after_start_before_receipt": "query_exact_host_identity_and_resume_same_attempt",
+          "identity_mismatch_or_second_replica": "stop_progress_and_keep_both_authorities_false"
+        },
+        "forbidden": [
+          "general_deploy_script_or_unbound_compose_recreate",
+          "second_runtime_replica",
+          "external_high_water_verified",
+          "target_runtime_verified",
+          "reconciliation_completed",
+          "windows_fence_released",
+          "authority_restore_allowed",
+          "deployment_authorized",
+          "automatic_deploy_allowed",
+          "production_allowed",
+          "live_trading_authorized",
+          "countable_forward"
+        ]
+      },
+      {
+        "id": "phase_1_pre_c_c2c_external_high_water",
+        "predecessor_artifact": "verified_c2b_frozen_bootstrap_activation_head",
+        "commit_point": "external_append_compare_and_swap_readback_bound_to_exact_c2b_head",
+        "may_set_true": ["external_high_water_verified"],
+        "requires": [
+          "preexisting_or_explicitly_ceremonial_out_of_volume_trust_root",
+          "append_only_monotonic_external_sequence_and_predecessor",
+          "exact_c2b_head_marker_intent_inventory_state_anchor_runtime_epoch_binding",
+          "authenticated_compare_and_swap_readback",
+          "ceremony_signer_key_domain_two_person_approval_and_exact_inventory_schema_binding"
+        ],
+        "recovery_query": "query_deterministic_activation_head_idempotency_key_then_compare_local_equal_behind_or_fork",
+        "retry_identity": "activation_head_derived_idempotency_key",
+        "crash_states": {
+          "remote_absent_local_pending": "retry_same_idempotency_key",
+          "remote_equal_local_uncommitted": "readback_then_commit_local_projection",
+          "remote_ahead": "whole_volume_rollback_fail_closed",
+          "remote_fork_or_local_ahead": "integrity_failure_fail_closed",
+          "external_unavailable": "remain_frozen"
+        },
+        "forbidden": [
+          "self_seed_empty_witness_as_verified",
+          "target_runtime_verified",
+          "reconciliation_completed",
+          "windows_fence_released",
+          "authority_restore_allowed",
+          "deployment_authorized",
+          "automatic_deploy_allowed",
+          "production_allowed",
+          "live_trading_authorized",
+          "countable_forward"
+        ]
+      },
+      {
+        "id": "phase_1_pre_d_d1_target_runtime_identity",
+        "predecessor_artifact": "verified_c2c_external_high_water_record",
+        "commit_point": "host_observer_compare_and_swap_lease_receipt",
+        "may_set_true": ["target_runtime_verified"],
+        "requires": [
+          "verified_c2c_external_high_water",
+          "independent_host_observer_not_target_self_report",
+          "immutable_image_digest_and_exact_config_digest",
+          "container_process_boot_runtime_epoch_custody_mount_network_acl_and_single_replica_identity",
+          "short_ttl_compare_and_swap_target_lease",
+          "planned_restart_target_matches_bound_receipt_or_baseline_matches_independent_target_manifest"
+        ],
+        "recovery_query": "host_observer_query_exact_lease_generation_and_target_identity",
+        "retry_identity": "target_runtime_identity_and_lease_generation",
+        "lease_must_be_valid_through": "d3_windows_capability_commit_and_post_commit_identity_proof",
+        "crash_states": {
+          "lease_created_local_receipt_absent": "query_exact_lease_generation",
+          "container_replaced_or_dual_replica": "invalidate_lease_and_fail_closed",
+          "lease_expired_or_renew_failed": "restart_d1_with_fresh_attestation"
+        },
+        "forbidden": [
+          "mutable_tag_as_identity",
+          "reconciliation_completed",
+          "windows_fence_released",
+          "authority_restore_allowed",
+          "deployment_authorized",
+          "automatic_deploy_allowed",
+          "production_allowed",
+          "live_trading_authorized",
+          "countable_forward"
+        ]
+      },
+      {
+        "id": "phase_1_pre_d_d2_windows_durable_token_transfer",
+        "predecessor_artifact": "verified_d1_target_lease_receipt",
+        "commit_point": "windows_create_only_staged_token_receipt_with_final_admission_still_rejecting_token",
+        "may_set_true": [],
+        "requires": [
+          "verified_d1_target_lease",
+          "host_observer_fresh_challenge_for_exact_container_image_config_boot_runtime_and_epoch",
+          "compare_and_swap_consume_or_renew_same_unexpired_target_lease",
+          "durable_fail_closed_windows_startup_fence",
+          "raw_account_row_and_gateway_scope",
+          "windows_boot_session_and_fact_generation",
+          "create_only_monotonic_account_gateway_execution_epoch_staged_token",
+          "staged_token_rejected_by_final_send_cancel",
+          "idempotent_queryable_staging_receipt_bound_to_lease_generation_and_expiry",
+          "fresh_non_cached_pre_and_post_staging_proofs",
+          "staging_receipt_and_post_proof_compare_and_swap_advance_external_high_water"
+        ],
+        "recovery_query": "query_same_staging_id_and_external_record_after_unknown_response",
+        "retry_identity": "deterministic_staging_id",
+        "lease_must_be_valid_through": "staging_receipt_post_proof_and_external_high_water_readback",
+        "crash_states": {
+          "before_windows_staging_commit": "retry_same_staging_id_while_lease_valid",
+          "after_windows_staging_commit_before_linux_or_external_record": "query_same_staging_id_and_resume_evidence_only",
+          "lease_expired_or_container_changed": "staged_token_remains_rejected_and_restart_d1",
+          "windows_restart": "durable_staged_token_remains_rejected"
+        },
+        "forbidden": [
+          "global_unfreeze",
+          "timeout_means_not_released",
+          "reconciliation_completed",
+          "windows_fence_released",
+          "authority_restore_allowed",
+          "deployment_authorized",
+          "automatic_deploy_allowed",
+          "production_allowed",
+          "live_trading_authorized",
+          "countable_forward"
+        ]
+      },
+      {
+        "id": "phase_1_pre_d_d3_atomic_capability_commit",
+        "predecessor_artifact": "verified_d2_staged_token_and_external_high_water_record",
+        "commit_point": "single_windows_compare_and_swap_permanently_revokes_old_token_and_activates_staged_target_token_bound_to_exact_durable_conditional_authority_grant_receipt",
+        "may_set_true": [
+          "reconciliation_completed",
+          "windows_fence_released"
+        ],
+        "conditional_may_set_true": {
+          "authority_restore_allowed": "mode_is_planned_restart_and_exact_pre_drain_authority_is_unexpired_unrevoked_and_byte_bound"
+        },
+        "mode_projection": {
+          "PLANNED_RESTART": "may_restore_only_exact_pre_drain_authority_after_capability_commit",
+          "INITIAL_BASELINE": "authority_remains_revoked_requires_new_signed_authorization",
+          "LEGACY_MIGRATION_BASELINE": "authority_remains_revoked_requires_new_signed_authorization"
+        },
+        "requires": [
+          "verified_d2_unique_staged_target_token_and_post_staging_proof",
+          "fresh_unconsumed_target_lease_and_host_observer_re_attestation",
+          "compare_and_swap_consume_or_renew_same_unexpired_target_lease",
+          "durable_local_conditional_authority_grant_intent_and_receipt_fsynced",
+          "windows_atomic_old_token_revoke_and_staged_target_token_activation",
+          "every_final_send_cancel_requires_active_token_and_exact_bound_d3_grant_receipt_hash",
+          "unknown_response_queries_same_activation_id_without_new_retry_id",
+          "fresh_windows_post_activation_proof_and_host_identity_proof",
+          "activation_receipt_and_post_proofs_compare_and_swap_advance_external_high_water",
+          "external_high_water_exact_readback_before_any_boolean_projection",
+          "old_owner_and_old_epoch_permanently_rejected",
+          "planned_restart_only_restores_byte_exact_pre_drain_unexpired_unrevoked_authority",
+          "initial_baseline_and_legacy_migration_keep_authority_revoked"
+        ],
+        "recovery_query": "query_exact_activation_id_then_derive_local_projection_from_windows_commit_receipt",
+        "retry_identity": "deterministic_activation_id",
+        "lease_must_be_valid_through": "windows_capability_commit_and_final_post_commit_identity_proof",
+        "crash_states": {
+          "conditional_grant_durable_before_windows_commit": "grant_inert_and_staged_token_rejected",
+          "windows_commit_unknown": "query_same_activation_id_no_new_token_or_grant",
+          "windows_committed_external_absent": "append_same_activation_record_then_exact_readback_before_local_projection",
+          "windows_committed_external_equal_local_projection_absent": "readback_then_rebuild_projection_from_exact_receipt_and_post_proofs",
+          "windows_committed_external_ahead_or_fork": "fail_closed_and_require_operator_integrity_recovery",
+          "post_commit_identity_mismatch": "halt_new_orders_and_require_new_reconciliation"
+        },
+        "forbidden": [
+          "deployment_authorized",
+          "automatic_deploy_allowed",
+          "production_allowed",
+          "live_trading_authorized",
+          "countable_forward"
+        ]
+      },
+      {
+        "id": "phase_1_pre_d_d4_deployment_gate_restore",
+        "predecessor_artifact": "verified_d3_capability_commit_or_non_restoring_mode_closure",
+        "commit_point": "durable_deployment_gate_receipt_after_fresh_read_only_acceptance",
+        "may_set_true": ["deployment_authorized"],
+        "requires": [
+          "exact_c2c_d1_d2_d3_evidence_chain_and_external_high_water",
+          "fresh_host_lease_windows_facts_and_custody_recheck",
+          "m2_trading_disabled_zero_active_order_read_only_acceptance",
+          "deploy_action_must_preserve_d1_bound_runtime_identity",
+          "any_future_identity_replacement_requires_new_frozen_bootstrap_d1_d4_cycle"
+        ],
+        "recovery_query": "query_exact_deployment_gate_receipt",
+        "retry_identity": "deterministic_deployment_gate_receipt_id",
+        "crash_states": {
+          "before_gate_receipt": "deploy_remains_blocked",
+          "after_gate_receipt_before_local_projection": "readback_exact_receipt_then_project",
+          "identity_or_evidence_changed": "invalidate_gate_and_restart_frozen_cycle"
+        },
+        "forbidden": [
+          "runtime_replacement_using_stale_d1_identity",
+          "automatic_deploy_allowed",
+          "production_allowed",
+          "live_trading_authorized",
+          "countable_forward"
+        ]
+      }
+    ],
+    "scripts_deploy_status": "hard_frozen_except_exact_receipt_bound_frozen_bootstrap_activation_until_d4",
+    "manual_approval_substitutes_for_missing_evidence": false
   },
   "classification_contract": {
     "path_format": "repository_relative_posix",
@@ -242,7 +518,7 @@
   ],
   "deploy_units": [
     {"id": "frontend", "phase": "phase_1", "implementation_status": "planned", "automatic_deploy_allowed": false, "safe_restart_contract": "independent_no_dependency_recreate"},
-    {"id": "web-bridge", "phase": "current_and_phase_1_compatibility", "implementation_status": "phase_1_pre_c_c2a_non_authorizing_fd_pinned_actual_custody_and_sealed_legacy_source_foundation_deployment_frozen", "automatic_deploy_allowed": false, "safe_restart_contract": "fd_pinned_actual_state_anchor_contiguous_chain_and_complete_inventory_with_future_legacy_exact_source_preservation_owner_rpc_activation_pending_target_runtime_unverified_fence_release_pending"},
+    {"id": "web-bridge", "phase": "current_and_phase_1_compatibility", "implementation_status": "phase_1_pre_c_c2b_non_authorizing_owner_reconciliation_capture_and_activation_custody_deployment_frozen", "automatic_deploy_allowed": false, "safe_restart_contract": "actual_fd_pinned_custody_and_unique_commodity_owner_capture_activation_recorded_external_high_water_pending_target_runtime_unverified_windows_durable_token_transfer_pending_authority_and_deploy_restore_pending"},
     {"id": "control-api", "phase": "phase_2", "implementation_status": "planned", "automatic_deploy_allowed": false, "safe_restart_contract": "independent_after_execution_split"},
     {"id": "execution-orchestrator", "phase": "phase_2", "implementation_status": "planned", "automatic_deploy_allowed": false, "safe_restart_contract": "atomic_drain_short_ttl_receipt_recheck_fencing_reconcile"},
     {"id": "map-producer", "phase": "phase_3", "implementation_status": "planned_batch_job", "automatic_deploy_allowed": false, "safe_restart_contract": "immutable_run_id_and_single_candidate_writer"},

@@ -131,6 +131,12 @@ Research、Acceptance、Runtime Authorization 和短时 Execution Permit 使用�
 | Broker orders/trades/positions | Windows Gateway/CTP 是事实 writer；Execution 只持久化关联 projection | 每次恢复必须重新查询并对账 | 研究层不能用账户事实改变策略目标 |
 | Tick/Execution Quality | Tick worker/QuestDB | spool、backpressure 和 replay 规则保持兼容 | API 只查询；Execution 不篡改历史数据 |
 | Monitoring incidents | monitor worker | 可恢复状态、独立告警去重 | 业务服务只暴露 health/metrics/facts |
+| Legacy restart external high-water | 独立 external witness 是唯一 writer | deployment volume/snapshot 域外 append-only CAS；记录 sequence、predecessor、exact activation head 与 ceremony signer/key/two-person approval | Web Bridge 只能提交绑定记录和 readback，不能覆盖或自种空 witness |
+| Target runtime identity/lease | M2 host observer 是唯一 writer | root-owned host store；container/image/config/boot/mount/network exact identity 与短 TTL CAS lease | 目标容器不得自证、续租或访问 observer credential |
+| Frozen bootstrap attempt | M2 bootstrap coordinator 是唯一 writer/executor | root-owned create-only attempt journal；只能 stop exact old runtime、start exact receipt-bound immutable target、查询同一 attempt | target/container/Web Bridge 不持有 runtime-control credential；崩溃不得另起 replacement |
+| Baseline target manifest | 独立 target-manifest signing key domain 是唯一 creator | 双人离线 ceremony 后 create-only custody；与 runtime authorization key 隔离 | Web Bridge/host observer 只能验签和绑定，不能生成 manifest |
+| Windows staged/active fencing token | Windows Gateway durable fence store 是唯一 writer | STAGED 永远被 send/cancel 拒绝；D3 CAS 原子永久撤旧并激活绑定 exact grant receipt/hash 的 target token | Linux 只能以 typed stage/query/activate 调用，不能覆盖 store 或把 timeout 当失败 |
+| Conditional authority grant | 当前唯一 Commodity owner；Phase 2 后为 Execution Orchestrator | host custody create-only intent/receipt；pre-CAS 单独无效，post-CAS 从 Windows exact receipt恢复 projection | INITIAL/LEGACY 不得恢复旧 authority；Control/API/observer/witness 不得写 grant |
 
 当前 `backend/app/main.py` 中由同一进程拥有的 `rpc_service`、`tick_persistence_service`、`monitoring_service`、`commodity_c_fast_shadow_service`、Execution Quality assembly 和 `commodity_simnow_service` 必须在后续迁移中逐项指定新 owner。未完成 durable migration 前，不得仅通过启动第二个进程来“拆分”，否则会形成双 writer 或双主。
 

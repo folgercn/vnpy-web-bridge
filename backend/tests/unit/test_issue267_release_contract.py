@@ -64,7 +64,7 @@ def test_release_dependency_contract_is_inert_and_fail_closed() -> None:
     assert MANIFEST["schema_version"] == "web_bridge_release_dependencies_v1"
     assert MANIFEST["issue"] == 267
     assert MANIFEST["status"] == (
-        "phase_1_pre_c_c2a_fd_pinned_custody_foundation_deploy_frozen"
+        "phase_1_pre_c_c2b_non_authorizing_owner_reconciliation_activation_deploy_frozen"
     )
 
     safety = MANIFEST["safety"]
@@ -81,6 +81,288 @@ def test_release_dependency_contract_is_inert_and_fail_closed() -> None:
     assert bootstrap["trusted_event"] == "pull_request_target"
     assert bootstrap["trusted_checkout"] == "github.event.pull_request.base.sha"
     assert "No subsequent issue-267 PR may merge" in bootstrap["activation_blocker"]
+
+
+def test_legacy_restart_remaining_stages_are_ordered_and_non_authorizing() -> None:
+    contract = MANIFEST["legacy_restart_migration_contract"]
+    assert contract["current_code_stage"] == "phase_1_pre_c_c2b"
+    assert contract["current_runtime_stage"] == (
+        "not_deployed_or_activated_by_this_contract"
+    )
+    assert contract["scripts_deploy_status"] == (
+        "hard_frozen_except_exact_receipt_bound_frozen_bootstrap_activation_until_d4"
+    )
+    assert contract["manual_approval_substitutes_for_missing_evidence"] is False
+    assert contract["c2b"] == {
+        "implementation_status": (
+            "merged_non_authorizing_owner_capture_and_activation_custody"
+        ),
+        "commit_point": (
+            "create_only_activation_head_bound_to_actual_fd_pinned_custody_and_"
+            "unique_commodity_owner_captures"
+        ),
+        "external_high_water_verified": False,
+        "target_runtime_verified": False,
+        "reconciliation_completed": False,
+        "windows_fence_released": False,
+        "authority_restore_allowed": False,
+    }
+
+    stages = contract["ordered_remaining_stages"]
+    assert [stage["id"] for stage in stages] == [
+        "phase_1_pre_c_c2b_windows_durable_fence_foundation",
+        "phase_1_pre_c_c2b_frozen_bootstrap_activation",
+        "phase_1_pre_c_c2c_external_high_water",
+        "phase_1_pre_d_d1_target_runtime_identity",
+        "phase_1_pre_d_d2_windows_durable_token_transfer",
+        "phase_1_pre_d_d3_atomic_capability_commit",
+        "phase_1_pre_d_d4_deployment_gate_restore",
+    ]
+    assert [stage["may_set_true"] for stage in stages] == [
+        [],
+        [],
+        ["external_high_water_verified"],
+        ["target_runtime_verified"],
+        [],
+        [
+            "reconciliation_completed",
+            "windows_fence_released",
+        ],
+        ["deployment_authorized"],
+    ]
+    by_id = {stage["id"]: stage for stage in stages}
+    windows_foundation = by_id["phase_1_pre_c_c2b_windows_durable_fence_foundation"]
+    bootstrap = by_id["phase_1_pre_c_c2b_frozen_bootstrap_activation"]
+    c2c = by_id["phase_1_pre_c_c2c_external_high_water"]
+    d1 = by_id["phase_1_pre_d_d1_target_runtime_identity"]
+    d2 = by_id["phase_1_pre_d_d2_windows_durable_token_transfer"]
+    d3 = by_id["phase_1_pre_d_d3_atomic_capability_commit"]
+    d4 = by_id["phase_1_pre_d_d4_deployment_gate_restore"]
+    assert (
+        "host_observed_old_runtime_owner_frozen_trading_disabled_and_authority_revoked"
+        in windows_foundation["requires"]
+    )
+    assert (
+        "fresh_windows_preflight_pending_send_outcomes_empty_and_active_orders_zero"
+        in windows_foundation["requires"]
+    )
+    assert (
+        "signed_exact_extension_hash_version_config_install_attempt_and_zero_order_preflight_receipt"
+        in windows_foundation["requires"]
+    )
+    assert "general_deploy_script_or_unbound_compose_recreate" in bootstrap["forbidden"]
+    assert "self_seed_empty_witness_as_verified" in c2c["forbidden"]
+    assert "independent_host_observer_not_target_self_report" in d1["requires"]
+    assert "staged_token_rejected_by_final_send_cancel" in d2["requires"]
+    assert "reconciliation_completed" in d2["forbidden"]
+    assert "windows_fence_released" in d2["forbidden"]
+    assert (
+        "windows_atomic_old_token_revoke_and_staged_target_token_activation"
+        in d3["requires"]
+    )
+    assert (
+        "every_final_send_cancel_requires_active_token_and_exact_bound_d3_grant_receipt_hash"
+        in d3["requires"]
+    )
+    assert (
+        "initial_baseline_and_legacy_migration_keep_authority_revoked" in d3["requires"]
+    )
+    assert (
+        "activation_receipt_and_post_proofs_compare_and_swap_advance_external_high_water"
+        in d3["requires"]
+    )
+    assert (
+        "external_high_water_exact_readback_before_any_boolean_projection"
+        in d3["requires"]
+    )
+    assert d3["conditional_may_set_true"] == {
+        "authority_restore_allowed": (
+            "mode_is_planned_restart_and_exact_pre_drain_authority_is_unexpired_"
+            "unrevoked_and_byte_bound"
+        )
+    }
+    assert d3["mode_projection"] == {
+        "PLANNED_RESTART": (
+            "may_restore_only_exact_pre_drain_authority_after_capability_commit"
+        ),
+        "INITIAL_BASELINE": (
+            "authority_remains_revoked_requires_new_signed_authorization"
+        ),
+        "LEGACY_MIGRATION_BASELINE": (
+            "authority_remains_revoked_requires_new_signed_authorization"
+        ),
+    }
+    assert "deployment_authorized" in d3["forbidden"]
+    assert "deploy_action_must_preserve_d1_bound_runtime_identity" in d4["requires"]
+    for stage in stages:
+        assert stage["predecessor_artifact"]
+        assert stage["commit_point"]
+        assert stage["recovery_query"]
+        assert stage["retry_identity"]
+        assert stage["crash_states"]
+        assert stage["requires"]
+        assert stage["forbidden"]
+        assert stage["forbidden"][-3:] == [
+            "production_allowed",
+            "live_trading_authorized",
+            "countable_forward",
+        ]
+
+
+def test_legacy_restart_stage_commit_and_recovery_semantics_are_exact() -> None:
+    stages = {
+        stage["id"]: stage
+        for stage in MANIFEST["legacy_restart_migration_contract"][
+            "ordered_remaining_stages"
+        ]
+    }
+    expected = {
+        "phase_1_pre_c_c2b_windows_durable_fence_foundation": {
+            "predecessor_artifact": "merged_windows_durable_fence_extension_and_signed_install_manifest",
+            "commit_point": "windows_restart_attestation_proves_durable_fail_closed_fence_held_and_final_order_admission_blocked",
+            "recovery_query": "query_exact_windows_install_attempt_and_durable_fence_state",
+            "retry_identity": "deterministic_windows_fence_install_attempt_id",
+            "crash_states": {
+                "before_service_restart": "remain_old_extension_frozen_and_require_fresh_authorization",
+                "after_restart_before_attestation": "query_same_install_attempt_and_keep_fence_held",
+                "partial_install_or_unknown_version": "do_not_restart_again_keep_orders_blocked_and_require_operator_recovery",
+                "durable_store_unreadable": "windows_startup_and_final_order_admission_fail_closed",
+            },
+        },
+        "phase_1_pre_c_c2b_frozen_bootstrap_activation": {
+            "predecessor_artifact": "verified_windows_durable_fence_foundation_and_merged_c2b_code_and_signed_immutable_bootstrap_manifest",
+            "commit_point": "host_observer_receipt_for_exact_single_frozen_runtime_and_c2b_activation_head",
+            "recovery_query": "query_exact_bootstrap_attempt_and_host_identity_without_replacement_retry",
+            "retry_identity": "deterministic_bootstrap_attempt_id",
+            "crash_states": {
+                "before_old_runtime_stop": "remain_old_runtime_frozen",
+                "after_stop_before_target_start": "remain_no_runtime_frozen_and_resume_same_attempt",
+                "after_start_before_receipt": "query_exact_host_identity_and_resume_same_attempt",
+                "identity_mismatch_or_second_replica": "stop_progress_and_keep_both_authorities_false",
+            },
+        },
+        "phase_1_pre_c_c2c_external_high_water": {
+            "predecessor_artifact": "verified_c2b_frozen_bootstrap_activation_head",
+            "commit_point": "external_append_compare_and_swap_readback_bound_to_exact_c2b_head",
+            "recovery_query": "query_deterministic_activation_head_idempotency_key_then_compare_local_equal_behind_or_fork",
+            "retry_identity": "activation_head_derived_idempotency_key",
+            "crash_states": {
+                "remote_absent_local_pending": "retry_same_idempotency_key",
+                "remote_equal_local_uncommitted": "readback_then_commit_local_projection",
+                "remote_ahead": "whole_volume_rollback_fail_closed",
+                "remote_fork_or_local_ahead": "integrity_failure_fail_closed",
+                "external_unavailable": "remain_frozen",
+            },
+        },
+        "phase_1_pre_d_d1_target_runtime_identity": {
+            "predecessor_artifact": "verified_c2c_external_high_water_record",
+            "commit_point": "host_observer_compare_and_swap_lease_receipt",
+            "recovery_query": "host_observer_query_exact_lease_generation_and_target_identity",
+            "retry_identity": "target_runtime_identity_and_lease_generation",
+            "crash_states": {
+                "lease_created_local_receipt_absent": "query_exact_lease_generation",
+                "container_replaced_or_dual_replica": "invalidate_lease_and_fail_closed",
+                "lease_expired_or_renew_failed": "restart_d1_with_fresh_attestation",
+            },
+        },
+        "phase_1_pre_d_d2_windows_durable_token_transfer": {
+            "predecessor_artifact": "verified_d1_target_lease_receipt",
+            "commit_point": "windows_create_only_staged_token_receipt_with_final_admission_still_rejecting_token",
+            "recovery_query": "query_same_staging_id_and_external_record_after_unknown_response",
+            "retry_identity": "deterministic_staging_id",
+            "crash_states": {
+                "before_windows_staging_commit": "retry_same_staging_id_while_lease_valid",
+                "after_windows_staging_commit_before_linux_or_external_record": "query_same_staging_id_and_resume_evidence_only",
+                "lease_expired_or_container_changed": "staged_token_remains_rejected_and_restart_d1",
+                "windows_restart": "durable_staged_token_remains_rejected",
+            },
+        },
+        "phase_1_pre_d_d3_atomic_capability_commit": {
+            "predecessor_artifact": "verified_d2_staged_token_and_external_high_water_record",
+            "commit_point": "single_windows_compare_and_swap_permanently_revokes_old_token_and_activates_staged_target_token_bound_to_exact_durable_conditional_authority_grant_receipt",
+            "recovery_query": "query_exact_activation_id_then_derive_local_projection_from_windows_commit_receipt",
+            "retry_identity": "deterministic_activation_id",
+            "crash_states": {
+                "conditional_grant_durable_before_windows_commit": "grant_inert_and_staged_token_rejected",
+                "windows_commit_unknown": "query_same_activation_id_no_new_token_or_grant",
+                "windows_committed_external_absent": "append_same_activation_record_then_exact_readback_before_local_projection",
+                "windows_committed_external_equal_local_projection_absent": "readback_then_rebuild_projection_from_exact_receipt_and_post_proofs",
+                "windows_committed_external_ahead_or_fork": "fail_closed_and_require_operator_integrity_recovery",
+                "post_commit_identity_mismatch": "halt_new_orders_and_require_new_reconciliation",
+            },
+        },
+        "phase_1_pre_d_d4_deployment_gate_restore": {
+            "predecessor_artifact": "verified_d3_capability_commit_or_non_restoring_mode_closure",
+            "commit_point": "durable_deployment_gate_receipt_after_fresh_read_only_acceptance",
+            "recovery_query": "query_exact_deployment_gate_receipt",
+            "retry_identity": "deterministic_deployment_gate_receipt_id",
+            "crash_states": {
+                "before_gate_receipt": "deploy_remains_blocked",
+                "after_gate_receipt_before_local_projection": "readback_exact_receipt_then_project",
+                "identity_or_evidence_changed": "invalidate_gate_and_restart_frozen_cycle",
+            },
+        },
+    }
+    for stage_id, exact in expected.items():
+        assert {field: stages[stage_id][field] for field in exact} == exact
+
+
+def test_legacy_restart_cross_contract_ownership_and_leases_are_explicit() -> None:
+    ownership = json.loads(
+        (ROOT / "docs/architecture/web-bridge-deployment-ownership-v1.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    migration = ownership["legacy_restart_migration_ownership"]
+    assert set(migration) == {
+        "status",
+        "external_high_water",
+        "host_target_observer",
+        "frozen_bootstrap_coordinator",
+        "baseline_target_manifest",
+        "windows_fencing_token_store",
+        "conditional_authority_grant",
+    }
+    for owner_id, contract in migration.items():
+        if owner_id == "status":
+            continue
+        assert set(contract) == {
+            "unique_writer",
+            "credential_domain",
+            "durable_store",
+            "network_capability",
+            "release_responsibility",
+            "rollback_responsibility",
+        }
+        assert all(contract.values())
+
+    stages = {
+        stage["id"]: stage
+        for stage in MANIFEST["legacy_restart_migration_contract"][
+            "ordered_remaining_stages"
+        ]
+    }
+    d1 = stages["phase_1_pre_d_d1_target_runtime_identity"]
+    d2 = stages["phase_1_pre_d_d2_windows_durable_token_transfer"]
+    d3 = stages["phase_1_pre_d_d3_atomic_capability_commit"]
+    assert d1["lease_must_be_valid_through"]
+    assert d2["lease_must_be_valid_through"]
+    assert d3["lease_must_be_valid_through"]
+    assert (
+        "compare_and_swap_consume_or_renew_same_unexpired_target_lease"
+        in d2["requires"]
+    )
+    assert (
+        "compare_and_swap_consume_or_renew_same_unexpired_target_lease"
+        in d3["requires"]
+    )
+    assert migration["external_high_water"]["release_responsibility"] == (
+        "phase_1_pre_web-bridge-unique-commodity-owner-submits_then_phase_2_"
+        "execution-orchestrator-after-explicit-owner-migration_external-witness-commits"
+    )
+    assert migration["frozen_bootstrap_coordinator"]["unique_writer"] == (
+        "m2-bootstrap-coordinator"
+    )
 
 
 def test_every_tracked_path_has_a_reviewed_rule() -> None:
