@@ -1,7 +1,7 @@
 {
   "schema_version": "web_bridge_release_dependencies_v1",
   "issue": 267,
-  "status": "phase_1_pre_b_a2_online_checkpoint_deploy_frozen",
+  "status": "phase_1_pre_b_b1a_fresh_recheck_contract_deploy_frozen",
   "ownership_contract": "docs/architecture/web-bridge-deployment-ownership-v1.json",
   "safety": {
     "classifier_consumption_allowed": false,
@@ -242,7 +242,7 @@
   ],
   "deploy_units": [
     {"id": "frontend", "phase": "phase_1", "implementation_status": "planned", "automatic_deploy_allowed": false, "safe_restart_contract": "independent_no_dependency_recreate"},
-    {"id": "web-bridge", "phase": "current_and_phase_1_compatibility", "implementation_status": "phase_1_pre_b_a2_online_checkpoint_installed_deployment_frozen", "automatic_deploy_allowed": false, "safe_restart_contract": "event_thread_linearized_windows_facts_content_addressed_checkpoint_restart_verified_pending_consume_reconcile"},
+    {"id": "web-bridge", "phase": "current_and_phase_1_compatibility", "implementation_status": "phase_1_pre_b_b1a_fresh_recheck_contract_installed_deployment_frozen", "automatic_deploy_allowed": false, "safe_restart_contract": "event_thread_linearized_windows_facts_fresh_recheck_contract_pending_trusted_persistence_consume_reconcile"},
     {"id": "control-api", "phase": "phase_2", "implementation_status": "planned", "automatic_deploy_allowed": false, "safe_restart_contract": "independent_after_execution_split"},
     {"id": "execution-orchestrator", "phase": "phase_2", "implementation_status": "planned", "automatic_deploy_allowed": false, "safe_restart_contract": "atomic_drain_short_ttl_receipt_recheck_fencing_reconcile"},
     {"id": "map-producer", "phase": "phase_3", "implementation_status": "planned_batch_job", "automatic_deploy_allowed": false, "safe_restart_contract": "immutable_run_id_and_single_candidate_writer"},

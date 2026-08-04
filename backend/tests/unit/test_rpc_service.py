@@ -5,8 +5,11 @@ from datetime import datetime, timedelta, timezone
 from threading import Event, Thread
 
 import pytest
-
 from app.core.errors import RpcCallError, RpcTimeoutError, RpcUnavailableError
+from app.schemas.deployment_drain import (
+    DeploymentRpcFactsDTO,
+    deployment_rpc_execution_facts_sha256,
+)
 from app.services.vnpy_rpc_service import VnpyRpcService
 from app.stores.memory_store import memory_store
 
@@ -82,6 +85,20 @@ class DeploymentSnapshotClient:
         return self.payload
 
 
+class DeploymentRecheckClient:
+    def __init__(self, payload: dict[str, object]) -> None:
+        self.payload = payload
+        self.calls: list[tuple[object, ...]] = []
+
+    def recheck_deployment_safety_snapshot_v1(
+        self,
+        *args: object,
+        timeout: int,
+    ):
+        self.calls.append((*args, timeout))
+        return self.payload
+
+
 def deployment_snapshot_payload() -> dict[str, object]:
     return {
         "schema_version": "windows_rpc_deployment_safety_snapshot_v1",
@@ -103,6 +120,57 @@ def deployment_snapshot_payload() -> dict[str, object]:
         "active_orders": [],
         "trades": [],
         "positions": [],
+    }
+
+
+def deployment_recheck_payload() -> dict[str, object]:
+    account_hash = hashlib.sha256(b"account-a").hexdigest()
+    facts = DeploymentRpcFactsDTO(
+        schema_version="windows_rpc_deployment_safety_snapshot_v1",
+        request_id="request-rpc-snapshot-0001",
+        challenge="rpc-snapshot-challenge-0001",
+        server_instance_id="windows-rpc-test-instance",
+        fact_generation=11,
+        captured_at=datetime.now(timezone.utc),
+        execution_admission_frozen=True,
+        pending_send_outcomes=0,
+        strategy_execution_enabled=False,
+        account_hashes=[account_hash],
+        orders=[{"status": "all_traded", "vt_orderid": "CTP.1"}],
+        active_orders=[],
+        trades=[],
+        positions=[],
+    )
+    facts_sha = deployment_rpc_execution_facts_sha256(facts)
+    return {
+        "schema_version": "windows_rpc_deployment_safety_recheck_v1",
+        "owner_request_id": facts.request_id,
+        "owner_challenge": facts.challenge,
+        "recheck_id": f"deployment-recheck-{'c' * 64}",
+        "fresh_challenge": "fresh-rpc-recheck-challenge-0001",
+        "expected_generation": 11,
+        "current_generation": 11,
+        "server_instance_id": facts.server_instance_id,
+        "original_server_instance_id": facts.server_instance_id,
+        "original_fact_generation": 11,
+        "original_execution_facts_canonical_sha256": facts_sha,
+        "execution_facts_canonical_sha256": facts_sha,
+        "captured_at_utc": datetime.now(timezone.utc).isoformat().replace(
+            "+00:00", "Z"
+        ),
+        "admission": {
+            "execution_frozen": True,
+            "send_order_frozen": True,
+            "cancel_order_frozen": True,
+        },
+        "pending": {"send_outcomes": 0},
+        "facts": {
+            "accounts": [{"accountid": "account-a"}],
+            "orders": [{"vt_orderid": "CTP.1", "status": "all_traded"}],
+            "active_orders": [],
+            "trades": [],
+            "positions": [],
+        },
     }
 
 
@@ -204,6 +272,131 @@ def test_deployment_snapshot_client_rejects_replay(failure: str) -> None:
         service.capture_deployment_facts(
             request_id="request-rpc-snapshot-0001",
             challenge="rpc-snapshot-challenge-0001",
+        )
+
+
+def test_deployment_recheck_client_binds_echoes_and_normalizes_facts() -> None:
+    payload = deployment_recheck_payload()
+    client = DeploymentRecheckClient(payload)
+    service = VnpyRpcService()
+    service.started = True
+    service.client = client  # type: ignore[assignment]
+
+    result = service.capture_deployment_recheck_facts(
+        request_id=str(payload["owner_request_id"]),
+        owner_challenge=str(payload["owner_challenge"]),
+        recheck_id=str(payload["recheck_id"]),
+        fresh_challenge=str(payload["fresh_challenge"]),
+        original_server_instance_id=str(
+            payload["original_server_instance_id"]
+        ),
+        original_fact_generation=11,
+        original_execution_facts_canonical_sha256=str(
+            payload["original_execution_facts_canonical_sha256"]
+        ),
+    )
+
+    assert client.calls == [
+        (
+            payload["owner_request_id"],
+            payload["owner_challenge"],
+            payload["recheck_id"],
+            payload["fresh_challenge"],
+            11,
+            service.settings.vnpy_rpc_timeout_ms,
+        )
+    ]
+    assert result.execution_admission_frozen is True
+    assert result.strategy_execution_enabled is False
+    assert result.pending_send_outcomes == 0
+    assert result.account_hashes == [hashlib.sha256(b"account-a").hexdigest()]
+    assert result.execution_facts_canonical_sha256 == (
+        payload["execution_facts_canonical_sha256"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (lambda value: value.update(unexpected=True), "fields are invalid"),
+        (
+            lambda value: value.update(owner_request_id="request-wrong-0001"),
+            "owner binding is invalid",
+        ),
+        (
+            lambda value: value.update(fresh_challenge="different-fresh-challenge"),
+            "owner binding is invalid",
+        ),
+        (
+            lambda value: value.update(original_server_instance_id="windows-other-instance"),
+            "owner binding is invalid",
+        ),
+        (
+            lambda value: value.update(expected_generation=12),
+            "owner binding is invalid",
+        ),
+        (
+            lambda value: value.update(
+                original_execution_facts_canonical_sha256="d" * 64
+            ),
+            "owner binding is invalid",
+        ),
+        (
+            lambda value: value.update(
+                captured_at_utc=(
+                    datetime.now(timezone.utc) - timedelta(minutes=1)
+                ).isoformat().replace("+00:00", "Z")
+            ),
+            "freshness window",
+        ),
+        (
+            lambda value: value["admission"].update(  # type: ignore[union-attr]
+                send_order_frozen=False
+            ),
+            "fence is invalid",
+        ),
+        (
+            lambda value: value.update(
+                execution_facts_canonical_sha256="e" * 64
+            ),
+            "execution facts hash mismatch",
+        ),
+    ],
+    ids=[
+        "extra-field",
+        "request-echo",
+        "fresh-challenge-echo",
+        "original-server-echo",
+        "generation-echo",
+        "original-hash-echo",
+        "stale-time",
+        "fence-open",
+        "facts-hash",
+    ],
+)
+def test_deployment_recheck_client_fails_closed(
+    mutation,
+    message: str,
+) -> None:
+    payload = deployment_recheck_payload()
+    mutation(payload)
+    service = VnpyRpcService()
+    service.started = True
+    service.client = DeploymentRecheckClient(payload)  # type: ignore[assignment]
+
+    with pytest.raises((RpcCallError, ValueError), match=message):
+        service.capture_deployment_recheck_facts(
+            request_id="request-rpc-snapshot-0001",
+            owner_challenge="rpc-snapshot-challenge-0001",
+            recheck_id=f"deployment-recheck-{'c' * 64}",
+            fresh_challenge="fresh-rpc-recheck-challenge-0001",
+            original_server_instance_id="windows-rpc-test-instance",
+            original_fact_generation=11,
+            original_execution_facts_canonical_sha256=str(
+                deployment_recheck_payload()[
+                    "original_execution_facts_canonical_sha256"
+                ]
+            ),
         )
 
 

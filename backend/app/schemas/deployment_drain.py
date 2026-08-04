@@ -47,6 +47,18 @@ ConsumeId = Annotated[
         lambda value: _nonzero_prefixed(value, "safe-restart-consume-")
     ),
 ]
+RecheckId = Annotated[
+    str,
+    Field(pattern=r"^deployment-recheck-[0-9a-f]{64}$"),
+    AfterValidator(lambda value: _nonzero_prefixed(value, "deployment-recheck-")),
+]
+OnlineRecheckId = Annotated[
+    str,
+    Field(pattern=r"^safe-restart-online-recheck-[0-9a-f]{64}$"),
+    AfterValidator(
+        lambda value: _nonzero_prefixed(value, "safe-restart-online-recheck-")
+    ),
+]
 Nonce = Annotated[
     str,
     Field(pattern=r"^[A-Za-z0-9_-]{16,128}$"),
@@ -222,6 +234,78 @@ class DeploymentRpcFactsDTO(StrictDeploymentDrainModel):
         return self
 
 
+def deployment_rpc_execution_facts_sha256(
+    facts: DeploymentRpcFactsDTO,
+) -> str:
+    """Hash only normalized execution facts, excluding request metadata."""
+
+    return _strict_canonical_sha256(
+        {
+            "execution_admission_frozen": (facts.execution_admission_frozen),
+            "pending_send_outcomes": facts.pending_send_outcomes,
+            "strategy_execution_enabled": facts.strategy_execution_enabled,
+            "account_hashes": facts.account_hashes,
+            "orders": facts.orders,
+            "active_orders": facts.active_orders,
+            "trades": facts.trades,
+            "positions": facts.positions,
+        }
+    )
+
+
+class DeploymentRpcRecheckFactsDTO(StrictDeploymentDrainModel):
+    schema_version: Literal["windows_rpc_deployment_safety_recheck_v1"]
+    request_id: Identifier
+    owner_challenge: Nonce
+    recheck_id: RecheckId
+    fresh_challenge: Nonce
+    original_server_instance_id: Identifier
+    original_fact_generation: int = Field(strict=True, ge=0)
+    original_execution_facts_canonical_sha256: Sha256
+    server_instance_id: Identifier
+    fact_generation: int = Field(strict=True, ge=0)
+    execution_facts_canonical_sha256: Sha256
+    captured_at: datetime
+    execution_admission_frozen: Literal[True]
+    pending_send_outcomes: int = Field(strict=True, ge=0)
+    strategy_execution_enabled: Literal[False]
+    account_hashes: list[Sha256]
+    orders: list[dict[str, Any]]
+    active_orders: list[dict[str, Any]]
+    trades: list[dict[str, Any]]
+    positions: list[dict[str, Any]]
+
+    @model_validator(mode="after")
+    def validate_recheck_facts(self) -> DeploymentRpcRecheckFactsDTO:
+        if self.fresh_challenge == self.owner_challenge:
+            raise ValueError("recheck challenge must be fresh")
+        if self.fact_generation < self.original_fact_generation:
+            raise ValueError("recheck RPC generation rolled back")
+        facts = DeploymentRpcFactsDTO.model_validate(
+            {
+                "schema_version": ("windows_rpc_deployment_safety_snapshot_v1"),
+                "request_id": self.request_id,
+                "challenge": self.owner_challenge,
+                "server_instance_id": self.server_instance_id,
+                "fact_generation": self.fact_generation,
+                "captured_at": self.captured_at,
+                "execution_admission_frozen": (self.execution_admission_frozen),
+                "pending_send_outcomes": self.pending_send_outcomes,
+                "strategy_execution_enabled": (self.strategy_execution_enabled),
+                "account_hashes": self.account_hashes,
+                "orders": self.orders,
+                "active_orders": self.active_orders,
+                "trades": self.trades,
+                "positions": self.positions,
+            }
+        )
+        if self.execution_facts_canonical_sha256 != (
+            deployment_rpc_execution_facts_sha256(facts)
+        ):
+            raise ValueError("recheck execution facts hash mismatch")
+        return self
+
+
 class DeploymentOnlineCheckpointDTO(StrictDeploymentDrainModel):
     schema_version: Literal["web_bridge_deployment_online_checkpoint_v1"]
     request_id: Identifier
@@ -263,6 +347,129 @@ class DeploymentOnlineCheckpointDTO(StrictDeploymentDrainModel):
             raise ValueError("checkpoint positions hash mismatch")
         if self.active_orders != len(self.rpc.active_orders):
             raise ValueError("checkpoint active-orders count mismatch")
+        return self
+
+
+class DeploymentOnlineRecheckCheckpointDTO(StrictDeploymentDrainModel):
+    schema_version: Literal["web_bridge_deployment_online_recheck_checkpoint_v1"]
+    checkpoint_role: Literal["RECHECK"]
+    recheck_id: RecheckId
+    original_checkpoint_raw_sha256: Sha256
+    request_id: Identifier
+    runtime_instance_id: Identifier
+    drain_epoch: int = Field(strict=True, ge=1)
+    execution_epoch: int = Field(strict=True, ge=1)
+    state_version: Literal["web_bridge_deployment_online_recheck_checkpoint_v1"]
+    state: dict[str, Any]
+    state_sha256: Sha256
+    rpc: DeploymentRpcRecheckFactsDTO
+    active_orders_snapshot_sha256: Sha256
+    positions_snapshot_sha256: Sha256
+    captured_at: datetime
+    deployment_authorized: Literal[False]
+    one_shot_consume_allowed: Literal[False]
+    automatic_deploy_allowed: Literal[False]
+    production_allowed: Literal[False]
+    live_trading_authorized: Literal[False]
+    countable_forward: Literal[False]
+
+    @model_validator(mode="after")
+    def validate_hash_bindings(
+        self,
+    ) -> DeploymentOnlineRecheckCheckpointDTO:
+        _require_utc(self.captured_at, "recheck checkpoint captured_at")
+        if self.rpc.captured_at > self.captured_at:
+            raise ValueError("recheck RPC cannot be captured after checkpoint")
+        if self.rpc.request_id != self.request_id:
+            raise ValueError("recheck checkpoint RPC request binding mismatch")
+        if self.rpc.recheck_id != self.recheck_id:
+            raise ValueError("recheck checkpoint id binding mismatch")
+        if self.state_sha256 != _strict_canonical_sha256(self.state):
+            raise ValueError("recheck checkpoint state hash mismatch")
+        if self.active_orders_snapshot_sha256 != _strict_canonical_sha256(
+            self.rpc.active_orders
+        ):
+            raise ValueError("recheck active-orders hash mismatch")
+        if self.positions_snapshot_sha256 != _strict_canonical_sha256(
+            self.rpc.positions
+        ):
+            raise ValueError("recheck positions hash mismatch")
+        return self
+
+
+class SafeRestartOnlineRecheckDTO(StrictDeploymentDrainModel):
+    schema_version: Literal["web_bridge_safe_restart_online_recheck_v1"]
+    purpose: Literal["record_non_authorizing_fresh_online_restart_recheck"]
+    online_recheck_id: OnlineRecheckId
+    recheck_core_sha256: Sha256
+    receipt_id: ReceiptId
+    receipt_raw_sha256: Sha256
+    original_checkpoint_raw_sha256: Sha256
+    recheck_checkpoint_raw_sha256: Sha256
+    request_id: Identifier
+    runtime_instance_id: Identifier
+    drain_epoch: int = Field(strict=True, ge=1)
+    execution_epoch: int = Field(strict=True, ge=1)
+    deployment_attempt_id: Identifier
+    release_plan_core_sha256: Sha256
+    restart_action_sha256: Sha256
+    windows_server_instance_id: Identifier
+    owner_challenge_sha256: Sha256
+    fresh_challenge_sha256: Sha256
+    original_rpc_generation: int = Field(strict=True, ge=0)
+    recheck_rpc_generation: int = Field(strict=True, ge=0)
+    original_execution_facts_canonical_sha256: Sha256
+    recheck_execution_facts_canonical_sha256: Sha256
+    original_state_sha256: Sha256
+    recheck_state_sha256: Sha256
+    original_active_orders_snapshot_sha256: Sha256
+    recheck_active_orders_snapshot_sha256: Sha256
+    original_positions_snapshot_sha256: Sha256
+    recheck_positions_snapshot_sha256: Sha256
+    checked_at: datetime
+    semantic_safety_unchanged: Literal[True]
+    one_shot_consume_allowed: Literal[False]
+    reconciliation_authorized: Literal[False]
+    deployment_authorized: Literal[False]
+    automatic_deploy_allowed: Literal[False]
+    production_allowed: Literal[False]
+    live_trading_authorized: Literal[False]
+    countable_forward: Literal[False]
+
+    @model_validator(mode="after")
+    def validate_recheck(self) -> SafeRestartOnlineRecheckDTO:
+        _require_utc(self.checked_at, "online recheck checked_at")
+        if self.recheck_rpc_generation != self.original_rpc_generation:
+            raise ValueError("online recheck generation changed")
+        if self.recheck_execution_facts_canonical_sha256 != (
+            self.original_execution_facts_canonical_sha256
+        ):
+            raise ValueError("online recheck execution facts changed")
+        if self.owner_challenge_sha256 == self.fresh_challenge_sha256:
+            raise ValueError("online recheck challenge was not fresh")
+        for original, rechecked in (
+            (self.original_state_sha256, self.recheck_state_sha256),
+            (
+                self.original_active_orders_snapshot_sha256,
+                self.recheck_active_orders_snapshot_sha256,
+            ),
+            (
+                self.original_positions_snapshot_sha256,
+                self.recheck_positions_snapshot_sha256,
+            ),
+        ):
+            if original != rechecked:
+                raise ValueError("online recheck safety hash changed")
+        if self.recheck_checkpoint_raw_sha256 == (self.original_checkpoint_raw_sha256):
+            raise ValueError("online recheck must use a fresh checkpoint")
+        core = self.model_dump(mode="json")
+        core.pop("online_recheck_id")
+        core.pop("recheck_core_sha256")
+        expected = _strict_canonical_sha256(core)
+        if self.recheck_core_sha256 != expected:
+            raise ValueError("online recheck core hash mismatch")
+        if self.online_recheck_id != (f"safe-restart-online-recheck-{expected}"):
+            raise ValueError("online recheck id does not match core hash")
         return self
 
 
