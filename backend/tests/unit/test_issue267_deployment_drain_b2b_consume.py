@@ -5,7 +5,6 @@ import os
 from datetime import datetime, timedelta, timezone
 
 import pytest
-
 from app.core.config import Settings
 from app.schemas.deployment_drain import (
     DeploymentDrainAcquireDTO,
@@ -19,7 +18,10 @@ from app.services.deployment_drain import (
     DeploymentDrainService,
 )
 from app.services.deployment_online_recheck import MAX_RECHECK_AGE
-
+from app.services.deployment_reconciliation_custody import (
+    DeploymentReconciliationCustodyError,
+    DeploymentReconciliationCustodyRepository,
+)
 
 SHA_A = "a" * 64
 SHA_B = "b" * 64
@@ -264,10 +266,165 @@ def test_real_owner_chain_consumes_once_and_is_identity_idempotent(tmp_path) -> 
             operator="another-operator",
         )
     assert conflict.value.code == "SAFE_RESTART_CONSUME_CONFLICT"
-    with pytest.raises(DeploymentDrainError) as guard:
-        with drain.mutation_guard():
-            pass
+    with pytest.raises(DeploymentDrainError) as guard, drain.mutation_guard():
+        pass
     assert guard.value.code == "DEPLOYMENT_DRAIN_ACTIVE"
+
+
+def test_c2a_custody_recognizes_exact_consumed_restart_lineage(tmp_path) -> None:
+    drain, service, _receipt, _recheck = prepared(tmp_path)
+    marker = service.consume_deployment_drain(
+        consumer_run_id="consumer-b2b-c2a-0001",
+        operator="test-operator",
+    )
+    restarted = DeploymentDrainService(
+        drain.root,
+        runtime_instance_id="runtime-online-b2b-c2a-new",
+        allow_initial_bootstrap=False,
+    )
+    status = restarted.status()
+
+    snapshot = DeploymentReconciliationCustodyRepository(restarted.root).snapshot()
+
+    assert status["state"] == "RESTARTED_FROZEN"
+    assert snapshot.inventory.mode == "PLANNED_RESTART"
+    assert snapshot.inventory.actual_runtime_instance_id == (
+        "runtime-online-b2b-c2a-new"
+    )
+    assert snapshot.inventory.actual_state["consume_id"] == (marker.consume_marker_id)
+    assert snapshot.inventory.custody_inventory_verified is True
+    assert snapshot.inventory.reconciliation_completed is False
+    assert snapshot.inventory.windows_fence_released is False
+    assert snapshot.inventory.authority_restore_allowed is False
+
+
+def test_c2a_custody_rejects_corrupt_planned_restart_checkpoint(tmp_path) -> None:
+    drain, service, receipt, _recheck = prepared(tmp_path)
+    service.consume_deployment_drain(
+        consumer_run_id="consumer-b2b-c2a-corrupt",
+        operator="test-operator",
+    )
+    restarted = DeploymentDrainService(
+        drain.root,
+        runtime_instance_id="runtime-online-b2b-c2a-corrupt-new",
+        allow_initial_bootstrap=False,
+    )
+    restarted.status()
+    drain._checkpoint_path(receipt["snapshot"]["checkpoint_sha256"]).write_bytes(
+        b"{}\n"
+    )
+
+    with pytest.raises(DeploymentReconciliationCustodyError) as caught:
+        DeploymentReconciliationCustodyRepository(restarted.root).snapshot()
+
+    assert caught.value.code == "CUSTODY_PLANNED_RESTART_CLOSURE_INVALID"
+
+
+def test_c2a_custody_rejects_orphan_planned_restart_artifact(tmp_path) -> None:
+    drain, service, _receipt, _recheck = prepared(tmp_path)
+    service.consume_deployment_drain(
+        consumer_run_id="consumer-b2b-c2a-orphan",
+        operator="test-operator",
+    )
+    restarted = DeploymentDrainService(
+        drain.root,
+        runtime_instance_id="runtime-online-b2b-c2a-orphan-new",
+        allow_initial_bootstrap=False,
+    )
+    restarted.status()
+    orphan = drain.checkpoint_dir / f"checkpoint-{'1' * 64}.json"
+    orphan.write_bytes(b"{}\n")
+    orphan.chmod(0o600)
+
+    with pytest.raises(DeploymentReconciliationCustodyError) as caught:
+        DeploymentReconciliationCustodyRepository(restarted.root).snapshot()
+
+    assert caught.value.code == "CUSTODY_PLANNED_RESTART_CLOSURE_INVALID"
+
+
+def test_c2a_custody_accepts_complete_history_before_current_restart(tmp_path) -> None:
+    drain, first_owner, _receipt, _recheck = prepared(tmp_path)
+    first_owner.consume_deployment_drain(
+        consumer_run_id="consumer-b2b-c2a-history-first",
+        operator="test-operator",
+    )
+    first_restart = DeploymentDrainService(
+        drain.root,
+        runtime_instance_id="runtime-online-b2b-c2a-history-middle",
+        allow_initial_bootstrap=False,
+    )
+    first_restart.status()
+    with first_restart._exclusive():
+        state = first_restart._load_state()
+        state.update(
+            state="RUNNING",
+            active_request_id=None,
+            active_request_sha256=None,
+            active_receipt_id=None,
+            active_receipt_raw_sha256=None,
+            receipt_consumed=False,
+            consumed_at=None,
+            consume_id=None,
+            consumed_receipt_id=None,
+            consume_intent_raw_sha256=None,
+            consume_marker_raw_sha256=None,
+            consume_state_projection_sha256=None,
+            consumed_online_recheck_id=None,
+            consumed_online_recheck_raw_sha256=None,
+            preconsume_state_commitment_raw_sha256=None,
+            active_online_recheck_id=None,
+            active_online_recheck_raw_sha256=None,
+            active_recheck_checkpoint_raw_sha256=None,
+            online_rechecked_at=None,
+            last_invalidated_online_recheck_id=None,
+            last_invalidated_receipt_id=None,
+            blockers=[],
+            expires_at=None,
+            freeze_reason="test_only_completed_reconciliation",
+            updated_at=datetime.now(timezone.utc).isoformat(),
+        )
+        first_restart._write_state(state)
+
+    second_owner = commodity(tmp_path, first_restart)
+    second_owner.acquire_deployment_drain(
+        request("runtime-online-b2b-c2a-history-middle")
+    )
+    second_owner.recheck_deployment_drain()
+    second_owner.consume_deployment_drain(
+        consumer_run_id="consumer-b2b-c2a-history-second",
+        operator="test-operator",
+    )
+    second_restart = DeploymentDrainService(
+        drain.root,
+        runtime_instance_id="runtime-online-b2b-c2a-history-current",
+        allow_initial_bootstrap=False,
+    )
+    second_restart.status()
+
+    snapshot = DeploymentReconciliationCustodyRepository(second_restart.root).snapshot()
+
+    assert snapshot.inventory.mode == "PLANNED_RESTART"
+    assert (
+        len(
+            [
+                entry
+                for entry in snapshot.inventory.entries
+                if entry.role == "CONSUME_MARKER"
+            ]
+        )
+        == 2
+    )
+
+    current_receipt_id = snapshot.inventory.actual_state["consumed_receipt_id"]
+    historical_marker = next(
+        path
+        for path in drain.consume_dir.glob("*.consume-marker.json")
+        if not path.name.startswith(f"{current_receipt_id}.")
+    )
+    historical_marker.unlink()
+    with pytest.raises(DeploymentReconciliationCustodyError) as caught:
+        DeploymentReconciliationCustodyRepository(second_restart.root).snapshot()
+    assert caught.value.code == "CUSTODY_PLANNED_RESTART_CLOSURE_INVALID"
 
 
 def test_wrong_owner_and_old_caller_supplied_consume_api_are_inactive(tmp_path) -> None:
@@ -321,9 +478,8 @@ def test_marker_before_state_crash_recovers_committed_consume_and_freezes(
     assert status["consumed_receipt_id"] == receipt["receipt_id"]
     assert all(status[field] is not None for field in CONSUMPTION_EVIDENCE_FIELDS)
     assert_no_authority(status)
-    with pytest.raises(DeploymentDrainError):
-        with restarted.mutation_guard():
-            pass
+    with pytest.raises(DeploymentDrainError), restarted.mutation_guard():
+        pass
 
 
 def test_intent_only_same_process_retry_commits(tmp_path, monkeypatch) -> None:
@@ -563,9 +719,8 @@ def test_completed_consume_restart_retains_all_evidence_and_guard_rejects(
         "process_restarted_consumed_receipt_requires_reconciliation"
     ]
     assert_no_authority(after)
-    with pytest.raises(DeploymentDrainError) as guard:
-        with restarted.mutation_guard():
-            pass
+    with pytest.raises(DeploymentDrainError) as guard, restarted.mutation_guard():
+        pass
     assert guard.value.code == "DEPLOYMENT_DRAIN_ACTIVE"
 
 

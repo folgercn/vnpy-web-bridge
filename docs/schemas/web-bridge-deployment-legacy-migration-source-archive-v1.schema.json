@@ -1,0 +1,211 @@
+{
+  "$defs": {
+    "LegacyEpochAnchorV1DTO": {
+      "additionalProperties": false,
+      "description": "Exact legacy high-water anchor accepted by the clean C1c path.",
+      "properties": {
+        "schema_version": {
+          "const": "web_bridge_deployment_drain_epoch_anchor_v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "drain_epoch": {
+          "minimum": 0,
+          "title": "Drain Epoch",
+          "type": "integer"
+        },
+        "execution_epoch": {
+          "minimum": 0,
+          "title": "Execution Epoch",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "schema_version",
+        "drain_epoch",
+        "execution_epoch"
+      ],
+      "title": "LegacyEpochAnchorV1DTO",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Sealed exact legacy bytes; migration eligibility remains unproven.",
+  "properties": {
+    "schema_version": {
+      "const": "web_bridge_deployment_legacy_migration_source_archive_v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "purpose": {
+      "const": "seal_exact_legacy_migration_source_bytes",
+      "title": "Purpose",
+      "type": "string"
+    },
+    "mode": {
+      "const": "LEGACY_MIGRATION_BASELINE",
+      "title": "Mode",
+      "type": "string"
+    },
+    "archive_id": {
+      "pattern": "^legacy-migration-source-archive-[0-9a-f]{64}$",
+      "title": "Archive Id",
+      "type": "string"
+    },
+    "archive_core_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Archive Core Sha256",
+      "type": "string"
+    },
+    "archive_path": {
+      "pattern": "^migration-sources/archive-[0-9a-f]{64}\\.json$",
+      "title": "Archive Path",
+      "type": "string"
+    },
+    "source_schema_version": {
+      "enum": [
+        "web_bridge_deployment_drain_state_v1",
+        "web_bridge_deployment_drain_state_v2"
+      ],
+      "title": "Source Schema Version",
+      "type": "string"
+    },
+    "source_state_path": {
+      "pattern": "^migration-sources/source-state-[0-9a-f]{64}\\.json$",
+      "title": "Source State Path",
+      "type": "string"
+    },
+    "source_state_raw_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Source State Raw Sha256",
+      "type": "string"
+    },
+    "source_state": {
+      "additionalProperties": true,
+      "title": "Source State",
+      "type": "object"
+    },
+    "source_epoch_anchor_path": {
+      "pattern": "^migration-sources/source-epoch-anchor-[0-9a-f]{64}\\.json$",
+      "title": "Source Epoch Anchor Path",
+      "type": "string"
+    },
+    "source_epoch_anchor_raw_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Source Epoch Anchor Raw Sha256",
+      "type": "string"
+    },
+    "source_epoch_anchor": {
+      "$ref": "#/$defs/LegacyEpochAnchorV1DTO"
+    },
+    "sealed_exact_source_bytes": {
+      "const": true,
+      "title": "Sealed Exact Source Bytes",
+      "type": "boolean"
+    },
+    "clean_migration_eligibility_verified": {
+      "const": false,
+      "title": "Clean Migration Eligibility Verified",
+      "type": "boolean"
+    },
+    "custody_inventory_verified": {
+      "const": false,
+      "title": "Custody Inventory Verified",
+      "type": "boolean"
+    },
+    "external_high_water_verified": {
+      "const": false,
+      "title": "External High Water Verified",
+      "type": "boolean"
+    },
+    "target_runtime_verified": {
+      "const": false,
+      "title": "Target Runtime Verified",
+      "type": "boolean"
+    },
+    "reconciliation_completed": {
+      "const": false,
+      "title": "Reconciliation Completed",
+      "type": "boolean"
+    },
+    "windows_fence_released": {
+      "const": false,
+      "title": "Windows Fence Released",
+      "type": "boolean"
+    },
+    "authority_restore_allowed": {
+      "const": false,
+      "title": "Authority Restore Allowed",
+      "type": "boolean"
+    },
+    "consume_authorized": {
+      "const": false,
+      "title": "Consume Authorized",
+      "type": "boolean"
+    },
+    "reconciliation_authorized": {
+      "const": false,
+      "title": "Reconciliation Authorized",
+      "type": "boolean"
+    },
+    "deployment_authorized": {
+      "const": false,
+      "title": "Deployment Authorized",
+      "type": "boolean"
+    },
+    "automatic_deploy_allowed": {
+      "const": false,
+      "title": "Automatic Deploy Allowed",
+      "type": "boolean"
+    },
+    "production_allowed": {
+      "const": false,
+      "title": "Production Allowed",
+      "type": "boolean"
+    },
+    "live_trading_authorized": {
+      "const": false,
+      "title": "Live Trading Authorized",
+      "type": "boolean"
+    },
+    "countable_forward": {
+      "const": false,
+      "title": "Countable Forward",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "schema_version",
+    "purpose",
+    "mode",
+    "archive_id",
+    "archive_core_sha256",
+    "archive_path",
+    "source_schema_version",
+    "source_state_path",
+    "source_state_raw_sha256",
+    "source_state",
+    "source_epoch_anchor_path",
+    "source_epoch_anchor_raw_sha256",
+    "source_epoch_anchor",
+    "sealed_exact_source_bytes",
+    "clean_migration_eligibility_verified",
+    "custody_inventory_verified",
+    "external_high_water_verified",
+    "target_runtime_verified",
+    "reconciliation_completed",
+    "windows_fence_released",
+    "authority_restore_allowed",
+    "consume_authorized",
+    "reconciliation_authorized",
+    "deployment_authorized",
+    "automatic_deploy_allowed",
+    "production_allowed",
+    "live_trading_authorized",
+    "countable_forward"
+  ],
+  "title": "Web Bridge deployment legacy migration source archive v1",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vnpy-web-bridge:schema:web-bridge-deployment-legacy-migration-source-archive-v1"
+}
