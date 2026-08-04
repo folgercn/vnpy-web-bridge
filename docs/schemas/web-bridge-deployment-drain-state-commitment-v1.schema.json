@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vnpy-web-bridge:schema:web-bridge-deployment-drain-state-commitment-v1",
+  "title": "Web Bridge deployment drain state commitment v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "purpose",
+    "commitment_id",
+    "state_commitment_core_sha256",
+    "state_generation",
+    "previous_state_commitment_raw_sha256",
+    "state_raw_sha256",
+    "state",
+    "created_at",
+    "genesis_source",
+    "source_state_raw_sha256",
+    "source_epoch_anchor_raw_sha256",
+    "deployment_authorized",
+    "consume_authorized",
+    "reconciliation_authorized",
+    "countable_forward",
+    "automatic_deploy_allowed",
+    "production_allowed",
+    "live_trading_authorized"
+  ],
+  "properties": {
+    "schema_version": {"const": "web_bridge_deployment_drain_state_commitment_v1"},
+    "purpose": {"const": "commit_exact_non_authorizing_deployment_drain_state"},
+    "commitment_id": {"type": "string", "pattern": "^deployment-drain-state-commitment-(?!0{64}$)[0-9a-f]{64}$"},
+    "state_commitment_core_sha256": {"$ref": "#/$defs/sha256"},
+    "state_generation": {"type": "integer", "minimum": 1},
+    "previous_state_commitment_raw_sha256": {"$ref": "#/$defs/nullableSha256"},
+    "state_raw_sha256": {"$ref": "#/$defs/sha256"},
+    "state": {
+      "type": "object",
+      "required": ["schema_version", "state_generation", "previous_state_commitment_raw_sha256", "updated_at"],
+      "properties": {
+        "schema_version": {"const": "web_bridge_deployment_drain_state_v3"},
+        "state_generation": {"type": "integer", "minimum": 1},
+        "previous_state_commitment_raw_sha256": {"$ref": "#/$defs/nullableSha256"},
+        "updated_at": {"$ref": "#/$defs/utcDateTime"}
+      }
+    },
+    "created_at": {"$ref": "#/$defs/dateTime"},
+    "genesis_source": {
+      "type": ["string", "null"],
+      "enum": ["fresh_bootstrap", "v1_migration", "v2_migration", null]
+    },
+    "source_state_raw_sha256": {"$ref": "#/$defs/nullableSha256"},
+    "source_epoch_anchor_raw_sha256": {"$ref": "#/$defs/nullableSha256"},
+    "deployment_authorized": {"const": false},
+    "consume_authorized": {"const": false},
+    "reconciliation_authorized": {"const": false},
+    "countable_forward": {"const": false},
+    "automatic_deploy_allowed": {"const": false},
+    "production_allowed": {"const": false},
+    "live_trading_authorized": {"const": false}
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "state_generation": {"const": 1},
+        "previous_state_commitment_raw_sha256": {"type": "null"},
+        "genesis_source": {"const": "fresh_bootstrap"},
+        "source_state_raw_sha256": {"type": "null"},
+        "source_epoch_anchor_raw_sha256": {"type": "null"}
+      }
+    },
+    {
+      "properties": {
+        "state_generation": {"const": 1},
+        "previous_state_commitment_raw_sha256": {"type": "null"},
+        "genesis_source": {"enum": ["v1_migration", "v2_migration"]},
+        "source_state_raw_sha256": {"$ref": "#/$defs/sha256"},
+        "source_epoch_anchor_raw_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    {
+      "properties": {
+        "state_generation": {"type": "integer", "minimum": 2},
+        "previous_state_commitment_raw_sha256": {"$ref": "#/$defs/sha256"},
+        "genesis_source": {"type": "null"},
+        "source_state_raw_sha256": {"type": "null"},
+        "source_epoch_anchor_raw_sha256": {"type": "null"}
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^(?!0{64}$)[0-9a-f]{64}$"},
+    "nullableSha256": {
+      "oneOf": [
+        {"$ref": "#/$defs/sha256"},
+        {"type": "null"}
+      ]
+    },
+    "dateTime": {"type": "string", "format": "date-time", "pattern": "Z$"},
+    "utcDateTime": {"type": "string", "format": "date-time", "pattern": "(?:Z|[+-]00:00)$"}
+  }
+}

@@ -59,6 +59,13 @@ OnlineRecheckId = Annotated[
         lambda value: _nonzero_prefixed(value, "safe-restart-online-recheck-")
     ),
 ]
+StateCommitmentId = Annotated[
+    str,
+    Field(pattern=r"^deployment-drain-state-commitment-[0-9a-f]{64}$"),
+    AfterValidator(
+        lambda value: _nonzero_prefixed(value, "deployment-drain-state-commitment-")
+    ),
+]
 Nonce = Annotated[
     str,
     Field(pattern=r"^[A-Za-z0-9_-]{16,128}$"),
@@ -470,6 +477,97 @@ class SafeRestartOnlineRecheckDTO(StrictDeploymentDrainModel):
             raise ValueError("online recheck core hash mismatch")
         if self.online_recheck_id != (f"safe-restart-online-recheck-{expected}"):
             raise ValueError("online recheck id does not match core hash")
+        return self
+
+
+class DeploymentDrainStateCommitmentDTO(StrictDeploymentDrainModel):
+    schema_version: Literal["web_bridge_deployment_drain_state_commitment_v1"]
+    purpose: Literal["commit_exact_non_authorizing_deployment_drain_state"]
+    commitment_id: StateCommitmentId
+    state_commitment_core_sha256: Sha256
+    state_generation: int = Field(strict=True, ge=1)
+    previous_state_commitment_raw_sha256: Sha256 | None
+    state_raw_sha256: Sha256
+    state: dict[str, Any]
+    created_at: datetime
+    genesis_source: Literal["fresh_bootstrap", "v1_migration", "v2_migration"] | None
+    source_state_raw_sha256: Sha256 | None
+    source_epoch_anchor_raw_sha256: Sha256 | None
+    deployment_authorized: Literal[False]
+    consume_authorized: Literal[False]
+    reconciliation_authorized: Literal[False]
+    countable_forward: Literal[False]
+    automatic_deploy_allowed: Literal[False]
+    production_allowed: Literal[False]
+    live_trading_authorized: Literal[False]
+
+    @model_validator(mode="after")
+    def validate_commitment(self) -> DeploymentDrainStateCommitmentDTO:
+        _require_utc(self.created_at, "state commitment created_at")
+        if self.state.get("schema_version") != ("web_bridge_deployment_drain_state_v3"):
+            raise ValueError("committed deployment drain state must be v3")
+        if self.state.get("state_generation") != self.state_generation:
+            raise ValueError("state commitment generation binding mismatch")
+        if self.state.get("previous_state_commitment_raw_sha256") != (
+            self.previous_state_commitment_raw_sha256
+        ):
+            raise ValueError("state commitment previous-link binding mismatch")
+        state_updated_at = self.state.get("updated_at")
+        if not isinstance(state_updated_at, str):
+            raise ValueError("committed state updated_at must be a timestamp")
+        try:
+            parsed_updated_at = datetime.fromisoformat(
+                state_updated_at.replace("Z", "+00:00")
+            )
+        except ValueError as exc:
+            raise ValueError("committed state updated_at is invalid") from exc
+        _require_utc(parsed_updated_at, "committed state updated_at")
+        if parsed_updated_at != self.created_at:
+            raise ValueError("state commitment created_at binding mismatch")
+
+        state_raw = (
+            json.dumps(
+                self.state,
+                allow_nan=False,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            + b"\n"
+        )
+        if self.state_raw_sha256 != hashlib.sha256(state_raw).hexdigest():
+            raise ValueError("committed state raw hash mismatch")
+
+        if self.previous_state_commitment_raw_sha256 is None:
+            if self.state_generation != 1 or self.genesis_source is None:
+                raise ValueError("genesis commitment metadata is incomplete")
+            if self.genesis_source == "fresh_bootstrap":
+                if (
+                    self.source_state_raw_sha256 is not None
+                    or self.source_epoch_anchor_raw_sha256 is not None
+                ):
+                    raise ValueError("fresh bootstrap cannot name migration sources")
+            elif (
+                self.source_state_raw_sha256 is None
+                or self.source_epoch_anchor_raw_sha256 is None
+            ):
+                raise ValueError("migration genesis must bind both source files")
+        elif (
+            self.state_generation == 1
+            or self.genesis_source is not None
+            or self.source_state_raw_sha256 is not None
+            or self.source_epoch_anchor_raw_sha256 is not None
+        ):
+            raise ValueError("non-genesis commitment cannot carry genesis metadata")
+
+        core = self.model_dump(mode="json")
+        core.pop("commitment_id")
+        core.pop("state_commitment_core_sha256")
+        expected = _strict_canonical_sha256(core)
+        if self.state_commitment_core_sha256 != expected:
+            raise ValueError("state commitment core hash mismatch")
+        if self.commitment_id != (f"deployment-drain-state-commitment-{expected}"):
+            raise ValueError("state commitment id does not match core hash")
         return self
 
 

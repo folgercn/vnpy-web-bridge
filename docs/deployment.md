@@ -2,7 +2,7 @@
 
 ## Issue #267 legacy 部署冻结
 
-PR 1-guard 已删除 legacy CD workflow。PR 1-pre 的原子 drain、短 TTL safe-restart receipt、绑定校验和部署前二次核验完成前，禁止在生产运行 `scripts/deploy.sh`，也禁止直接 stop/start/recreate `web-bridge`。人工确认不能替代该门禁。
+PR 1-guard 已删除 legacy CD workflow。PR 1-pre B2a 仅增加 state v3、create-only state commitment chain、epoch anchor v2，以及始终恢复为冻结状态的 v1/v2 迁移与崩溃恢复；B2b one-shot consume WAL、reconciliation 和部署串链尚未完成。所有 production/live/countable 授权仍为 false，禁止在生产运行 `scripts/deploy.sh`，也禁止直接 stop/start/recreate `web-bridge`。人工确认不能替代该门禁。
 
 下文涉及 stop/start/up 的备份和恢复命令在冻结期间只允许用于非生产恢复演练；生产备份、恢复或紧急操作需要独立授权和可验证的 safe-restart receipt。历史 CD 曾把 `APP_ENV`、`JWT_SECRET_KEY`、`MONITOR_ENABLED` 写入最终 `.env`，但该行为已不再启用。
 

@@ -19,6 +19,7 @@ SHA_A = "a" * 64
 SHA_B = "b" * 64
 V1 = "web_bridge_deployment_drain_state_v1"
 V2 = "web_bridge_deployment_drain_state_v2"
+V3 = "web_bridge_deployment_drain_state_v3"
 
 
 class Clock:
@@ -97,12 +98,67 @@ def write_v1(drain: DeploymentDrainService, **updates: object) -> dict[str, obje
         "active_recheck_checkpoint_raw_sha256",
         "online_rechecked_at",
         "last_invalidated_online_recheck_id",
+        "state_generation",
+        "previous_state_commitment_raw_sha256",
+        "consumed_receipt_id",
+        "consume_intent_raw_sha256",
+        "consume_marker_raw_sha256",
+        "consume_state_projection_sha256",
+        "consumed_online_recheck_id",
+        "consumed_online_recheck_raw_sha256",
+        "preconsume_state_commitment_raw_sha256",
     ):
         state.pop(field)
     state.update(schema_version=V1, **updates)
+    for path in drain.state_commitment_dir.iterdir():
+        path.unlink()
     drain._atomic_write(
         drain.state_path,
         json.dumps(state, sort_keys=True, separators=(",", ":")).encode() + b"\n",
+    )
+    legacy_anchor = {
+        "schema_version": "web_bridge_deployment_drain_epoch_anchor_v1",
+        "drain_epoch": state["drain_epoch"],
+        "execution_epoch": state["execution_epoch"],
+    }
+    drain._atomic_write(
+        drain.epoch_anchor_path,
+        json.dumps(legacy_anchor, sort_keys=True, separators=(",", ":")).encode()
+        + b"\n",
+    )
+    return state
+
+
+def write_v2(drain: DeploymentDrainService, **updates: object) -> dict[str, object]:
+    state = drain._load_state()
+    for field in (
+        "state_generation",
+        "previous_state_commitment_raw_sha256",
+        "consumed_receipt_id",
+        "consume_intent_raw_sha256",
+        "consume_marker_raw_sha256",
+        "consume_state_projection_sha256",
+        "consumed_online_recheck_id",
+        "consumed_online_recheck_raw_sha256",
+        "preconsume_state_commitment_raw_sha256",
+    ):
+        state.pop(field)
+    state.update(schema_version=V2, **updates)
+    for path in drain.state_commitment_dir.iterdir():
+        path.unlink()
+    drain._atomic_write(
+        drain.state_path,
+        json.dumps(state, sort_keys=True, separators=(",", ":")).encode() + b"\n",
+    )
+    legacy_anchor = {
+        "schema_version": "web_bridge_deployment_drain_epoch_anchor_v1",
+        "drain_epoch": state["drain_epoch"],
+        "execution_epoch": state["execution_epoch"],
+    }
+    drain._atomic_write(
+        drain.epoch_anchor_path,
+        json.dumps(legacy_anchor, sort_keys=True, separators=(",", ":")).encode()
+        + b"\n",
     )
     return state
 
@@ -133,7 +189,7 @@ def assert_no_authority(status: dict[str, object]) -> None:
     assert status["countable_forward"] is False
 
 
-def test_clean_v1_state_migrates_to_v2_without_granting_authority(
+def test_clean_v1_state_migrates_to_v3_without_granting_authority(
     tmp_path: Path,
 ) -> None:
     clock = Clock()
@@ -142,14 +198,21 @@ def test_clean_v1_state_migrates_to_v2_without_granting_authority(
     old.status()
     write_v1(old)
 
-    status = service(root, clock, "runtime-new").status()
+    migrated = service(root, clock, "runtime-new")
+    status = migrated.status()
 
-    assert status["schema_version"] == V2
-    assert status["state"] == "RUNNING"
+    assert status["schema_version"] == V3
+    assert status["state"] == "RESTARTED_FROZEN"
+    assert status["freeze_reason"] == (
+        "legacy_state_migrated_to_v3_requires_reconciliation"
+    )
     assert status["execution_epoch"] == 2
     assert status["active_online_recheck_id"] is None
     assert status["last_invalidated_online_recheck_id"] is None
     assert_no_authority(status)
+    with pytest.raises(DeploymentDrainError) as caught, migrated.mutation_guard():
+        pass
+    assert caught.value.code == "DEPLOYMENT_DRAIN_ACTIVE"
 
 
 @pytest.mark.parametrize(
@@ -198,7 +261,7 @@ def test_unknown_state_fields_are_rejected(tmp_path: Path, version: str) -> None
     if version == V1:
         state = write_v1(old)
     else:
-        state = old._load_state()
+        state = write_v2(old)
     state["unknown_authority"] = True
     old._atomic_write(
         old.state_path,
@@ -217,7 +280,7 @@ def test_recheck_pointers_must_be_all_present_or_all_absent(
     root = tmp_path / "partial-recheck"
     old = service(root, clock, "runtime-old")
     old.status()
-    state = old._load_state()
+    state = write_v2(old)
     state["active_online_recheck_id"] = "online-recheck-partial"
     old._atomic_write(
         old.state_path,
@@ -236,7 +299,7 @@ def test_v2_legacy_consumption_fields_can_never_be_restored(
     root = tmp_path / "v2-consumed"
     old = service(root, clock, "runtime-old")
     old.status()
-    state = old._load_state()
+    state = write_v2(old)
     state.update(
         receipt_consumed=True,
         consumed_at="2026-08-04T00:00:00+00:00",
@@ -289,9 +352,7 @@ def test_acquire_release_and_expiry_invalidate_recheck_pointers(
         reason="test release invalidation",
     )
     assert released["active_online_recheck_id"] is None
-    assert released["last_invalidated_online_recheck_id"] == (
-        release_recheck_id
-    )
+    assert released["last_invalidated_online_recheck_id"] == (release_recheck_id)
 
     drain.acquire_with_snapshot(request("runtime-one"), lambda: snapshot(clock))
     expiry_recheck_id = set_recheck(drain, "online-recheck-before-expiry")
@@ -299,7 +360,5 @@ def test_acquire_release_and_expiry_invalidate_recheck_pointers(
     expired = drain.status()
     assert expired["state"] == "DRAIN_BLOCKED"
     assert expired["active_online_recheck_id"] is None
-    assert expired["last_invalidated_online_recheck_id"] == (
-        expiry_recheck_id
-    )
+    assert expired["last_invalidated_online_recheck_id"] == (expiry_recheck_id)
     assert_no_authority(expired)
