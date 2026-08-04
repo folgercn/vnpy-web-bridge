@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import datetime, timedelta, timezone
 from threading import Event, Thread
 
 import pytest
+from app.services import vnpy_rpc_service as rpc_module
 from app.core.errors import RpcCallError, RpcTimeoutError, RpcUnavailableError
 from app.schemas.deployment_drain import (
     DeploymentRpcFactsDTO,
@@ -97,6 +99,29 @@ class DeploymentRecheckClient:
     ):
         self.calls.append((*args, timeout))
         return self.payload
+
+
+class BlockingDeploymentRecheckClient(DeploymentRecheckClient):
+    def __init__(self, payload: dict[str, object]) -> None:
+        super().__init__(payload)
+        self.entered = Event()
+        self.release = Event()
+
+    def recheck_deployment_safety_snapshot_v1(
+        self,
+        *args: object,
+        timeout: int,
+    ):
+        self.calls.append((*args, timeout))
+        self.entered.set()
+        assert self.release.wait(timeout=2)
+        return self.payload
+
+    def stop(self) -> None:
+        return None
+
+    def join(self) -> None:
+        return None
 
 
 def deployment_snapshot_payload() -> dict[str, object]:
@@ -220,7 +245,11 @@ def test_rpc_call_timeout_is_normalized(monkeypatch) -> None:
     service = VnpyRpcService()
     service.started = True
     service.client = TimeoutClient()  # type: ignore[assignment]
-    monkeypatch.setattr(service, "start", lambda: (_ for _ in ()).throw(RpcUnavailableError("start failed")))
+    monkeypatch.setattr(
+        VnpyRpcService,
+        "start",
+        lambda _service: (_ for _ in ()).throw(RpcUnavailableError("start failed")),
+    )
 
     with pytest.raises(RpcTimeoutError):
         service.call("get_all_contracts", timeout=1)
@@ -238,9 +267,7 @@ def test_deployment_snapshot_client_hashes_accounts_and_sorts_facts() -> None:
         challenge="rpc-snapshot-challenge-0001",
     )
 
-    assert facts.account_hashes == [
-        hashlib.sha256(b"account-a").hexdigest()
-    ]
+    assert facts.account_hashes == [hashlib.sha256(b"account-a").hexdigest()]
     assert [row["vt_orderid"] for row in facts.orders] == ["CTP.1", "CTP.2"]
     assert facts.fact_generation == 11
 
@@ -264,8 +291,10 @@ def test_deployment_snapshot_client_rejects_replay(failure: str) -> None:
     payload = deployment_snapshot_payload()
     if failure == "stale":
         payload["captured_at_utc"] = (
-            datetime.now(timezone.utc) - timedelta(minutes=1)
-        ).isoformat().replace("+00:00", "Z")
+            (datetime.now(timezone.utc) - timedelta(minutes=1))
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
     else:
         payload["challenge"] = "different-rpc-challenge-0001"
     service = VnpyRpcService()
@@ -282,8 +311,10 @@ def test_deployment_snapshot_client_rejects_replay(failure: str) -> None:
 def test_deployment_snapshot_client_rejects_stale_non_cache_with_replay_flag() -> None:
     payload = deployment_snapshot_payload()
     payload["captured_at_utc"] = (
-        datetime.now(timezone.utc) - timedelta(minutes=1)
-    ).isoformat().replace("+00:00", "Z")
+        (datetime.now(timezone.utc) - timedelta(minutes=1))
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
     service = VnpyRpcService()
     service.started = True
     service.client = DeploymentSnapshotClient(payload)  # type: ignore[assignment]
@@ -308,9 +339,7 @@ def test_deployment_recheck_client_binds_echoes_and_normalizes_facts() -> None:
         owner_challenge=str(payload["owner_challenge"]),
         recheck_id=str(payload["recheck_id"]),
         fresh_challenge=str(payload["fresh_challenge"]),
-        original_server_instance_id=str(
-            payload["original_server_instance_id"]
-        ),
+        original_server_instance_id=str(payload["original_server_instance_id"]),
         original_fact_generation=11,
         original_execution_facts_canonical_sha256=str(
             payload["original_execution_facts_canonical_sha256"]
@@ -331,29 +360,29 @@ def test_deployment_recheck_client_binds_echoes_and_normalizes_facts() -> None:
     assert result.strategy_execution_enabled is False
     assert result.pending_send_outcomes == 0
     assert result.account_hashes == [hashlib.sha256(b"account-a").hexdigest()]
-    assert result.execution_facts_canonical_sha256 == (
-        payload["execution_facts_canonical_sha256"]
+    assert (
+        result.execution_facts_canonical_sha256
+        == (payload["execution_facts_canonical_sha256"])
     )
 
 
 def test_deployment_recheck_client_explicitly_accepts_stale_cached_replay() -> None:
     payload = deployment_recheck_payload()
     payload["captured_at_utc"] = (
-        datetime.now(timezone.utc) - timedelta(minutes=1)
-    ).isoformat().replace("+00:00", "Z")
+        (datetime.now(timezone.utc) - timedelta(minutes=1))
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
     payload["cache_replayed"] = True
     service = VnpyRpcService()
     service.started = True
     service.client = DeploymentRecheckClient(payload)  # type: ignore[assignment]
-
     result = service.capture_deployment_recheck_facts(
         request_id=str(payload["owner_request_id"]),
         owner_challenge=str(payload["owner_challenge"]),
         recheck_id=str(payload["recheck_id"]),
         fresh_challenge=str(payload["fresh_challenge"]),
-        original_server_instance_id=str(
-            payload["original_server_instance_id"]
-        ),
+        original_server_instance_id=str(payload["original_server_instance_id"]),
         original_fact_generation=11,
         original_execution_facts_canonical_sha256=str(
             payload["original_execution_facts_canonical_sha256"]
@@ -365,6 +394,205 @@ def test_deployment_recheck_client_explicitly_accepts_stale_cached_replay() -> N
     assert result.fresh_challenge == payload["fresh_challenge"]
 
 
+@pytest.mark.parametrize("cache_replayed", [False, True])
+def test_deployment_recheck_served_proof_preserves_exact_transport_evidence(
+    cache_replayed: bool,
+) -> None:
+    payload = deployment_recheck_payload()
+    if cache_replayed:
+        payload["captured_at_utc"] = (
+            (datetime.now(timezone.utc) - timedelta(minutes=1))
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+        payload["cache_replayed"] = True
+    service = VnpyRpcService()
+    service.started = True
+    service.client = DeploymentRecheckClient(payload)  # type: ignore[assignment]
+    service._deployment_transport_binding = (
+        service.settings.vnpy_rpc_req_address,
+        service.settings.vnpy_rpc_pub_address,
+        service.settings.vnpy_gateway_name,
+    )
+    service._deployment_transport_generation = 1
+    service.last_connected_at = datetime.now(timezone.utc)
+
+    capture = service.capture_deployment_recheck_served_proof(
+        request_id=str(payload["owner_request_id"]),
+        owner_challenge=str(payload["owner_challenge"]),
+        recheck_id=str(payload["recheck_id"]),
+        fresh_challenge=str(payload["fresh_challenge"]),
+        original_server_instance_id=str(payload["original_server_instance_id"]),
+        original_fact_generation=11,
+        original_execution_facts_canonical_sha256=str(
+            payload["original_execution_facts_canonical_sha256"]
+        ),
+    )
+
+    proof = capture.served_proof
+    assert capture.facts.recheck_id == payload["recheck_id"]
+    assert proof.cache_replayed is cache_replayed
+    assert proof.captured_at_utc_raw == payload["captured_at_utc"]
+    assert proof.served_at_utc_raw == payload["served_at_utc"]
+    assert proof.served_fact_generation == payload["served_fact_generation"]
+    fresh_raw = (
+        json.dumps(
+            capture.facts.model_dump(mode="json"),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        + b"\n"
+    )
+    assert proof.fresh_rpc_raw_sha256 == hashlib.sha256(fresh_raw).hexdigest()
+    assert proof.freshness_basis == (
+        "SERVED_AT_CACHE_REPLAY" if cache_replayed else "CAPTURED_AT_NON_CACHE"
+    )
+    assert proof.linux_rpc_adapter_response_verified is True
+    assert proof.windows_response_authenticated is False
+    assert proof.rpc_connection_generation == 1
+    proof_raw = json.dumps(
+        proof.model_dump(mode="json"),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    assert "account-a" not in proof_raw
+    assert hashlib.sha256(b"account-a").hexdigest() not in proof_raw
+
+
+def test_deployment_recheck_served_proof_rejects_connection_generation_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = deployment_recheck_payload()
+    service = VnpyRpcService()
+    service.started = True
+    service.client = DeploymentRecheckClient(payload)  # type: ignore[assignment]
+    service._deployment_transport_binding = (
+        service.settings.vnpy_rpc_req_address,
+        service.settings.vnpy_rpc_pub_address,
+        service.settings.vnpy_gateway_name,
+    )
+    service._deployment_transport_generation = 1
+    service.last_connected_at = datetime.now(timezone.utc)
+    original = rpc_module.build_deployment_rpc_recheck_served_proof
+
+    def drift_generation(**kwargs):
+        proof = original(**kwargs)
+        service._deployment_transport_generation += 1
+        return proof
+
+    monkeypatch.setattr(
+        rpc_module,
+        "build_deployment_rpc_recheck_served_proof",
+        drift_generation,
+    )
+    with pytest.raises(RpcCallError, match="changed during capture"):
+        service.capture_deployment_recheck_served_proof(
+            request_id=str(payload["owner_request_id"]),
+            owner_challenge=str(payload["owner_challenge"]),
+            recheck_id=str(payload["recheck_id"]),
+            fresh_challenge=str(payload["fresh_challenge"]),
+            original_server_instance_id=str(payload["original_server_instance_id"]),
+            original_fact_generation=11,
+            original_execution_facts_canonical_sha256=str(
+                payload["original_execution_facts_canonical_sha256"]
+            ),
+        )
+
+
+def test_deployment_recheck_served_proof_serializes_stop_across_raw_response() -> None:
+    payload = deployment_recheck_payload()
+    client = BlockingDeploymentRecheckClient(payload)
+    service = VnpyRpcService()
+    service.started = True
+    service.client = client  # type: ignore[assignment]
+    service._deployment_transport_binding = (
+        service.settings.vnpy_rpc_req_address,
+        service.settings.vnpy_rpc_pub_address,
+        service.settings.vnpy_gateway_name,
+    )
+    service._deployment_transport_generation = 1
+    service.last_connected_at = datetime.now(timezone.utc)
+    captures: list[object] = []
+    errors: list[BaseException] = []
+    stop_attempted = Event()
+    stop_completed = Event()
+
+    def capture() -> None:
+        try:
+            captures.append(
+                service.capture_deployment_recheck_served_proof(
+                    request_id=str(payload["owner_request_id"]),
+                    owner_challenge=str(payload["owner_challenge"]),
+                    recheck_id=str(payload["recheck_id"]),
+                    fresh_challenge=str(payload["fresh_challenge"]),
+                    original_server_instance_id=str(
+                        payload["original_server_instance_id"]
+                    ),
+                    original_fact_generation=11,
+                    original_execution_facts_canonical_sha256=str(
+                        payload["original_execution_facts_canonical_sha256"]
+                    ),
+                )
+            )
+        except BaseException as exc:
+            errors.append(exc)
+
+    def stop() -> None:
+        stop_attempted.set()
+        service.stop()
+        stop_completed.set()
+
+    capture_thread = Thread(target=capture)
+    capture_thread.start()
+    assert client.entered.wait(timeout=1)
+    stop_thread = Thread(target=stop)
+    stop_thread.start()
+    assert stop_attempted.wait(timeout=1)
+    assert stop_completed.wait(timeout=0.05) is False
+    client.release.set()
+    capture_thread.join(timeout=2)
+    stop_thread.join(timeout=2)
+
+    assert errors == []
+    assert len(captures) == 1
+    assert stop_completed.is_set()
+    assert service._deployment_transport_generation == 2
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda value: value.update(cache_replayed=1),
+        lambda value: value.update(served_fact_generation=True),
+        lambda value: value.update(served_at_utc="2026-08-05T01:00:00+00:00"),
+    ],
+    ids=["bool-coercion", "int-coercion", "non-z-time"],
+)
+def test_deployment_recheck_served_proof_rejects_lexical_or_type_drift(
+    mutation,
+) -> None:
+    payload = deployment_recheck_payload()
+    mutation(payload)
+    service = VnpyRpcService()
+    service.started = True
+    service.client = DeploymentRecheckClient(payload)  # type: ignore[assignment]
+
+    with pytest.raises(RpcCallError):
+        service.capture_deployment_recheck_served_proof(
+            request_id=str(payload["owner_request_id"]),
+            owner_challenge=str(payload["owner_challenge"]),
+            recheck_id=str(payload["recheck_id"]),
+            fresh_challenge=str(payload["fresh_challenge"]),
+            original_server_instance_id=str(payload["original_server_instance_id"]),
+            original_fact_generation=11,
+            original_execution_facts_canonical_sha256=str(
+                payload["original_execution_facts_canonical_sha256"]
+            ),
+        )
+
+
 @pytest.mark.parametrize(
     ("mutation", "allow_cached_replay"),
     [
@@ -373,9 +601,9 @@ def test_deployment_recheck_client_explicitly_accepts_stale_cached_replay() -> N
         (lambda value: value.update(served_fact_generation=12), True),
         (
             lambda value: value.update(
-                served_at_utc=(
-                    datetime.now(timezone.utc) - timedelta(minutes=1)
-                ).isoformat().replace("+00:00", "Z")
+                served_at_utc=(datetime.now(timezone.utc) - timedelta(minutes=1))
+                .isoformat()
+                .replace("+00:00", "Z")
             ),
             True,
         ),
@@ -393,8 +621,10 @@ def test_deployment_recheck_stale_capture_requires_complete_replay_proof(
 ) -> None:
     payload = deployment_recheck_payload()
     payload["captured_at_utc"] = (
-        datetime.now(timezone.utc) - timedelta(minutes=1)
-    ).isoformat().replace("+00:00", "Z")
+        (datetime.now(timezone.utc) - timedelta(minutes=1))
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
     payload["cache_replayed"] = True
     mutation(payload)
     service = VnpyRpcService()
@@ -407,9 +637,7 @@ def test_deployment_recheck_stale_capture_requires_complete_replay_proof(
             owner_challenge=str(payload["owner_challenge"]),
             recheck_id=str(payload["recheck_id"]),
             fresh_challenge=str(payload["fresh_challenge"]),
-            original_server_instance_id=str(
-                payload["original_server_instance_id"]
-            ),
+            original_server_instance_id=str(payload["original_server_instance_id"]),
             original_fact_generation=11,
             original_execution_facts_canonical_sha256=str(
                 payload["original_execution_facts_canonical_sha256"]
@@ -431,7 +659,9 @@ def test_deployment_recheck_stale_capture_requires_complete_replay_proof(
             "owner binding is invalid",
         ),
         (
-            lambda value: value.update(original_server_instance_id="windows-other-instance"),
+            lambda value: value.update(
+                original_server_instance_id="windows-other-instance"
+            ),
             "owner binding is invalid",
         ),
         (
@@ -446,9 +676,9 @@ def test_deployment_recheck_stale_capture_requires_complete_replay_proof(
         ),
         (
             lambda value: value.update(
-                captured_at_utc=(
-                    datetime.now(timezone.utc) - timedelta(minutes=1)
-                ).isoformat().replace("+00:00", "Z")
+                captured_at_utc=(datetime.now(timezone.utc) - timedelta(minutes=1))
+                .isoformat()
+                .replace("+00:00", "Z")
             ),
             "freshness window",
         ),
@@ -459,9 +689,7 @@ def test_deployment_recheck_stale_capture_requires_complete_replay_proof(
             "fence is invalid",
         ),
         (
-            lambda value: value.update(
-                execution_facts_canonical_sha256="e" * 64
-            ),
+            lambda value: value.update(execution_facts_canonical_sha256="e" * 64),
             "execution facts hash mismatch",
         ),
     ],
@@ -516,7 +744,7 @@ def test_rpc_call_timeout_rebuilds_client_before_next_request(monkeypatch) -> No
         service.client = HealthyClient()  # type: ignore[assignment]
         service.last_error = None
 
-    monkeypatch.setattr(service, "start", start)
+    monkeypatch.setattr(VnpyRpcService, "start", lambda _service: start())
 
     with pytest.raises(RpcTimeoutError):
         service.call("get_all_contracts", timeout=1)
@@ -538,7 +766,9 @@ def test_rpc_call_error_is_normalized() -> None:
         service.call("get_all_contracts", timeout=1)
 
 
-def test_rpc_call_reconnects_and_retries_idempotent_bad_client_state(monkeypatch) -> None:
+def test_rpc_call_reconnects_and_retries_idempotent_bad_client_state(
+    monkeypatch,
+) -> None:
     service = VnpyRpcService()
     client = BadStateClient()
     service.started = True
@@ -548,7 +778,7 @@ def test_rpc_call_reconnects_and_retries_idempotent_bad_client_state(monkeypatch
         service.started = True
         service.client = HealthyClient()  # type: ignore[assignment]
 
-    monkeypatch.setattr(service, "start", start)
+    monkeypatch.setattr(VnpyRpcService, "start", lambda _service: start())
 
     result = service.call("get_all_contracts", timeout=1)
 
@@ -558,7 +788,9 @@ def test_rpc_call_reconnects_and_retries_idempotent_bad_client_state(monkeypatch
     assert service.last_error is None
 
 
-def test_rpc_call_rebuilds_but_does_not_retry_non_idempotent_bad_client_state(monkeypatch) -> None:
+def test_rpc_call_rebuilds_but_does_not_retry_non_idempotent_bad_client_state(
+    monkeypatch,
+) -> None:
     service = VnpyRpcService()
     client = BadStateClient()
     service.started = True
@@ -568,7 +800,7 @@ def test_rpc_call_rebuilds_but_does_not_retry_non_idempotent_bad_client_state(mo
         service.started = True
         service.client = HealthyClient()  # type: ignore[assignment]
 
-    monkeypatch.setattr(service, "start", start)
+    monkeypatch.setattr(VnpyRpcService, "start", lambda _service: start())
 
     with pytest.raises(RpcCallError) as exc_info:
         service.call("send_order", object(), "CTP", timeout=1)
@@ -592,7 +824,7 @@ def test_rpc_restart_client_clears_state_when_start_fails(monkeypatch) -> None:
         service.client = None
         raise RpcUnavailableError("start failed")
 
-    monkeypatch.setattr(service, "start", start)
+    monkeypatch.setattr(VnpyRpcService, "start", lambda _service: start())
 
     with pytest.raises(RpcUnavailableError):
         service._restart_client()
@@ -609,7 +841,11 @@ def test_rpc_status_probe_marks_connection_false_on_probe_failure(monkeypatch) -
     service = VnpyRpcService()
     service.started = True
     service.client = TimeoutClient()  # type: ignore[assignment]
-    monkeypatch.setattr(service, "start", lambda: (_ for _ in ()).throw(RpcUnavailableError("start failed")))
+    monkeypatch.setattr(
+        VnpyRpcService,
+        "start",
+        lambda _service: (_ for _ in ()).throw(RpcUnavailableError("start failed")),
+    )
 
     status = service.status(probe=True)
 
@@ -628,7 +864,7 @@ def test_rpc_status_probe_recovers_after_single_timeout(monkeypatch) -> None:
         service.started = True
         service.client = client  # type: ignore[assignment]
 
-    monkeypatch.setattr(service, "start", start)
+    monkeypatch.setattr(VnpyRpcService, "start", lambda _service: start())
 
     failed = service.status(probe=True)
     recovered = service.status(probe=True)
@@ -673,9 +909,14 @@ def test_handle_tick_event_ignores_unsubscribed_symbol() -> None:
     assert memory_store.get_tick("UNIT999.SHFE") is None
 
 
-def test_handle_tick_event_enqueues_unsubscribed_symbol_for_persistence(monkeypatch) -> None:
+def test_handle_tick_event_enqueues_unsubscribed_symbol_for_persistence(
+    monkeypatch,
+) -> None:
     saved: list[dict] = []
-    monkeypatch.setattr("app.services.vnpy_rpc_service.tick_persistence_service.enqueue_tick", saved.append)
+    monkeypatch.setattr(
+        "app.services.vnpy_rpc_service.tick_persistence_service.enqueue_tick",
+        saved.append,
+    )
     service = VnpyRpcService()
 
     service.handle_event("", TickEvent())
@@ -783,9 +1024,7 @@ def test_c_fast_terminal_publisher_detects_callback_mutation_before_commit() -> 
             capability,
             ticket,
             session_id=session_id,
-            publisher=lambda _generation: service.handle_event(
-                "", TradeEvent()
-            ),
+            publisher=lambda _generation: service.handle_event("", TradeEvent()),
         )
 
 
@@ -805,9 +1044,7 @@ def test_c_fast_terminal_committer_blocks_reentrant_callback_mutation() -> None:
             ticket,
             session_id=session_id,
             publisher=lambda _generation: "candidate",
-            committer=lambda _candidate: service.handle_event(
-                "", TradeEvent()
-            ),
+            committer=lambda _candidate: service.handle_event("", TradeEvent()),
         )
 
 
@@ -849,9 +1086,7 @@ def test_c_fast_terminal_publication_does_not_deadlock_reconnect_callback() -> N
         assert publisher_started.wait(2)
         with service._call_lock:
             reconnect_holds_call_lock.set()
-            callback = Thread(
-                target=lambda: service.handle_event("", TradeEvent())
-            )
+            callback = Thread(target=lambda: service.handle_event("", TradeEvent()))
             callback.start()
             callback.join(2)
             assert not callback.is_alive()
@@ -885,12 +1120,15 @@ def test_c_fast_terminal_capability_is_owner_bound_and_ticket_one_shot() -> None
         session_id=session_id,
     )
 
-    assert service.publish_c_fast_terminal_archive(
-        capability,
-        ticket,
-        session_id=session_id,
-        publisher=lambda generation: generation,
-    ) == 0
+    assert (
+        service.publish_c_fast_terminal_archive(
+            capability,
+            ticket,
+            session_id=session_id,
+            publisher=lambda generation: generation,
+        )
+        == 0
+    )
     with pytest.raises(ValueError, match="ticket is invalid"):
         service.publish_c_fast_terminal_archive(
             capability,

@@ -64,7 +64,7 @@ def test_release_dependency_contract_is_inert_and_fail_closed() -> None:
     assert MANIFEST["schema_version"] == "web_bridge_release_dependencies_v1"
     assert MANIFEST["issue"] == 267
     assert MANIFEST["status"] == (
-        "phase_1_pre_c_c2b_non_authorizing_owner_reconciliation_activation_deploy_frozen"
+        "phase_1_pre_c_c2b_served_proof_v2_activation_deploy_frozen"
     )
 
     safety = MANIFEST["safety"]
@@ -85,7 +85,7 @@ def test_release_dependency_contract_is_inert_and_fail_closed() -> None:
 
 def test_legacy_restart_remaining_stages_are_ordered_and_non_authorizing() -> None:
     contract = MANIFEST["legacy_restart_migration_contract"]
-    assert contract["current_code_stage"] == "phase_1_pre_c_c2b"
+    assert contract["current_code_stage"] == "phase_1_pre_c_c2b_served_proof_v2"
     assert contract["current_runtime_stage"] == (
         "not_deployed_or_activated_by_this_contract"
     )
@@ -95,11 +95,13 @@ def test_legacy_restart_remaining_stages_are_ordered_and_non_authorizing() -> No
     assert contract["manual_approval_substitutes_for_missing_evidence"] is False
     assert contract["c2b"] == {
         "implementation_status": (
-            "merged_non_authorizing_owner_capture_and_activation_custody"
+            "implemented_non_authorizing_owner_capture_with_owner_bound_linux_rpc_"
+            "adapter_served_proof_v2_activation_custody"
         ),
         "commit_point": (
-            "create_only_activation_head_bound_to_actual_fd_pinned_custody_and_"
-            "unique_commodity_owner_captures"
+            "create_only_activation_head_v2_bound_to_actual_fd_pinned_custody_"
+            "unique_commodity_owner_captures_and_owner_bound_linux_rpc_adapter_"
+            "served_proof"
         ),
         "external_high_water_verified": False,
         "target_runtime_verified": False,
@@ -138,6 +140,18 @@ def test_legacy_restart_remaining_stages_are_ordered_and_non_authorizing() -> No
     d2 = by_id["phase_1_pre_d_d2_windows_durable_token_transfer"]
     d3 = by_id["phase_1_pre_d_d3_atomic_capability_commit"]
     d4 = by_id["phase_1_pre_d_d4_deployment_gate_restore"]
+    assert bootstrap["predecessor_artifact"] == (
+        "verified_windows_durable_fence_foundation_and_c2b_activation_head_v2_"
+        "with_served_proof_closure_and_signed_immutable_bootstrap_manifest"
+    )
+    assert (
+        "activation_head_v2_binds_privacy_safe_exact_served_proof_bytes_facts_"
+        "hash_and_transport_observed_at" in bootstrap["requires"]
+    )
+    assert (
+        "activation_head_v1_is_historical_non_eligible_and_cannot_be_backfilled"
+        in bootstrap["requires"]
+    )
     assert (
         "host_observed_old_runtime_owner_frozen_trading_disabled_and_authority_revoked"
         in windows_foundation["requires"]
@@ -230,7 +244,7 @@ def test_legacy_restart_stage_commit_and_recovery_semantics_are_exact() -> None:
             },
         },
         "phase_1_pre_c_c2b_frozen_bootstrap_activation": {
-            "predecessor_artifact": "verified_windows_durable_fence_foundation_and_merged_c2b_code_and_signed_immutable_bootstrap_manifest",
+            "predecessor_artifact": "verified_windows_durable_fence_foundation_and_c2b_activation_head_v2_with_served_proof_closure_and_signed_immutable_bootstrap_manifest",
             "commit_point": "host_observer_receipt_for_exact_single_frozen_runtime_and_c2b_activation_head",
             "recovery_query": "query_exact_bootstrap_attempt_and_host_identity_without_replacement_retry",
             "retry_identity": "deterministic_bootstrap_attempt_id",
@@ -242,8 +256,8 @@ def test_legacy_restart_stage_commit_and_recovery_semantics_are_exact() -> None:
             },
         },
         "phase_1_pre_c_c2c_external_high_water": {
-            "predecessor_artifact": "verified_c2b_frozen_bootstrap_activation_head",
-            "commit_point": "external_append_compare_and_swap_readback_bound_to_exact_c2b_head",
+            "predecessor_artifact": "verified_c2b_frozen_bootstrap_activation_head_v2_with_served_proof_closure",
+            "commit_point": "external_append_compare_and_swap_readback_bound_to_exact_c2b_head_v2",
             "recovery_query": "query_deterministic_activation_head_idempotency_key_then_compare_local_equal_behind_or_fork",
             "retry_identity": "activation_head_derived_idempotency_key",
             "crash_states": {

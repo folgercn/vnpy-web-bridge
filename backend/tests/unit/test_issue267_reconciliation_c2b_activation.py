@@ -9,8 +9,10 @@ from pathlib import Path
 import pytest
 from app.core.config import Settings
 from app.schemas.deployment_drain import (
+    DeploymentReconciliationActivationHeadDTO,
     DeploymentRpcFactsDTO,
     DeploymentRpcRecheckFactsDTO,
+    build_deployment_rpc_recheck_served_proof,
     deployment_rpc_execution_facts_sha256,
 )
 from app.services.commodity_simnow import CommoditySimNowService
@@ -25,7 +27,13 @@ from app.services.deployment_reconciliation_activation import (
     DeploymentReconciliationActivationError,
 )
 from app.services.deployment_reconciliation_custody import (
+    DeploymentReconciliationCustodyError,
     DeploymentReconciliationCustodySession,
+)
+from app.services.vnpy_rpc_service import (
+    BridgeRpcClient,
+    VerifiedDeploymentRecheckCapture,
+    VnpyRpcService,
 )
 
 ACCOUNT_HASH = "a" * 64
@@ -61,6 +69,7 @@ class Rpc:
         self.fresh_calls: list[tuple[str, str, str, str]] = []
         self.initial: DeploymentRpcFactsDTO | None = None
         self.fail_fresh_once = False
+        self.cache_replayed_next = False
         self.reject_cached_replay_after_generation_advance = False
         self.after_fresh_hook = None
 
@@ -93,7 +102,7 @@ class Rpc:
         )
         return self.initial
 
-    def capture_deployment_recheck_facts(
+    def capture_deployment_recheck_served_proof(
         self,
         *,
         request_id: str,
@@ -103,9 +112,9 @@ class Rpc:
         original_server_instance_id: str,
         original_fact_generation: int,
         original_execution_facts_canonical_sha256: str,
-        allow_cached_replay: bool = False,
-    ) -> DeploymentRpcRecheckFactsDTO:
-        assert allow_cached_replay is True
+    ) -> VerifiedDeploymentRecheckCapture:
+        cache_replayed = self.cache_replayed_next
+        self.cache_replayed_next = False
         self.fresh_calls.append(
             (request_id, owner_challenge, recheck_id, fresh_challenge)
         )
@@ -147,10 +156,30 @@ class Rpc:
             self.after_fresh_hook()
         if self.fail_fresh_once:
             self.fail_fresh_once = False
+            self.cache_replayed_next = True
             raise TimeoutError("injected lost response after server completion")
         if self.reject_cached_replay_after_generation_advance:
             raise RuntimeError("cached recheck is stale after generation advance")
-        return result
+        proof = build_deployment_rpc_recheck_served_proof(
+            fresh_rpc=result,
+            captured_at_utc_raw=NOW.isoformat().replace("+00:00", "Z"),
+            cache_replayed=cache_replayed,
+            served_at_utc_raw=NOW.isoformat().replace("+00:00", "Z"),
+            served_fact_generation=result.fact_generation,
+            transport_observed_at_utc_raw=NOW.isoformat().replace("+00:00", "Z"),
+            gateway_name="CTP",
+            rpc_request_endpoint_sha256=hashlib.sha256(
+                b"tcp://127.0.0.1:2014"
+            ).hexdigest(),
+            rpc_publish_endpoint_sha256=hashlib.sha256(
+                b"tcp://127.0.0.1:4102"
+            ).hexdigest(),
+            rpc_connection_started_at_utc_raw=NOW.isoformat().replace(
+                "+00:00", "Z"
+            ),
+            rpc_connection_generation=1,
+        )
+        return VerifiedDeploymentRecheckCapture(facts=result, served_proof=proof)
 
 
 def _owner(tmp_path: Path) -> tuple[CommoditySimNowService, Rpc, Path]:
@@ -420,21 +449,23 @@ def test_fresh_timeout_recovers_without_repeating_persisted_initial_capture(
 
 
 @pytest.mark.parametrize(
-    ("writer_name", "suffix"),
+    ("writer_name", "suffix", "expected_fresh_calls"),
     [
-        ("write_blob", ".commodity-checkpoint.json"),
-        ("write_blob", ".capture-pair.json"),
-        ("write_blob", ".mode-checkpoint.json"),
-        ("write_blob", ".mode-evidence.json"),
-        ("write_blob", ".activation-marker.json"),
-        ("write_head", ".json"),
+        ("write_blob", ".commodity-checkpoint.json", 1),
+        ("write_blob", ".fresh-served-proof.json", 2),
+        ("write_blob", ".capture-pair.json", 1),
+        ("write_blob", ".mode-checkpoint.json", 1),
+        ("write_blob", ".mode-evidence.json", 1),
+        ("write_blob", ".activation-marker.json", 1),
+        ("write_head", ".json", 1),
     ],
 )
-def test_every_durable_crash_point_resumes_without_repeating_rpc(
+def test_every_durable_crash_point_resumes_with_bounded_rpc(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     writer_name: str,
     suffix: str,
+    expected_fresh_calls: int,
 ) -> None:
     owner, rpc, _root = _owner(tmp_path)
     original = getattr(DeploymentReconciliationCustodySession, writer_name)
@@ -466,7 +497,7 @@ def test_every_durable_crash_point_resumes_without_repeating_rpc(
     )
     assert head.owner_reconciliation_activation_recorded is True
     assert len(rpc.initial_calls) == 1
-    assert len(rpc.fresh_calls) == 1
+    assert len(rpc.fresh_calls) == expected_fresh_calls
 
 
 def test_capture_pair_recovers_after_freshness_window_without_rpc(
@@ -503,6 +534,307 @@ def test_capture_pair_recovers_after_freshness_window_without_rpc(
     assert head.owner_reconciliation_activation_recorded is True
     assert len(rpc.initial_calls) == 1
     assert len(rpc.fresh_calls) == 1
+
+
+def test_served_proof_recovers_after_freshness_window_with_same_id_rpc(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner, rpc, _root = _owner(tmp_path)
+    original = DeploymentReconciliationCustodySession.write_blob
+    crashed = False
+
+    def crash_after_proof(self, basename, payload):
+        nonlocal crashed
+        stored = original(self, basename, payload)
+        if not crashed and basename.endswith(".fresh-served-proof.json"):
+            crashed = True
+            raise RuntimeError("crash after durable served proof")
+        return stored
+
+    monkeypatch.setattr(
+        DeploymentReconciliationCustodySession, "write_blob", crash_after_proof
+    )
+    with pytest.raises(RuntimeError, match="durable served proof"):
+        owner.reconcile_deployment_custody(
+            operator="served-proof-recovery-operator",
+            reason="resume exact served proof after freshness window",
+        )
+    monkeypatch.setattr(DeploymentReconciliationCustodySession, "write_blob", original)
+    owner.clock = lambda: NOW + timedelta(minutes=5)
+
+    head = owner.reconcile_deployment_custody(
+        operator="served-proof-recovery-operator",
+        reason="resume exact served proof after freshness window",
+    )
+    assert head.served_proof_closure_verified is True
+    assert len(rpc.initial_calls) == 1
+    assert len(rpc.fresh_calls) == 2
+
+
+def test_existing_pair_without_served_proof_cannot_be_backfilled(
+    tmp_path: Path,
+) -> None:
+    owner, rpc, root = _owner(tmp_path)
+    head = owner.reconcile_deployment_custody(
+        operator="missing-proof-operator",
+        reason="reject pair whose served proof disappeared",
+    )
+    proof_slot = (
+        root / "reconciliation-blobs" / f"{head.intent_id}.fresh-served-proof.json"
+    )
+    proof_slot.unlink()
+
+    with pytest.raises(DeploymentReconciliationActivationError) as caught:
+        owner.reconcile_deployment_custody(
+            operator="missing-proof-operator",
+            reason="reject pair whose served proof disappeared",
+        )
+    assert caught.value.code == "RECONCILIATION_SERVED_PROOF_MISSING"
+    assert len(rpc.fresh_calls) == 1
+
+
+def test_tampered_stable_served_proof_is_rejected_without_rpc(
+    tmp_path: Path,
+) -> None:
+    owner, rpc, root = _owner(tmp_path)
+    head = owner.reconcile_deployment_custody(
+        operator="tampered-proof-operator",
+        reason="reject a modified stable served proof",
+    )
+    proof_slot = (
+        root / "reconciliation-blobs" / f"{head.intent_id}.fresh-served-proof.json"
+    )
+    payload = json.loads(proof_slot.read_bytes())
+    payload["served_fact_generation"] += 1
+    proof_slot.write_bytes(
+        json.dumps(
+            payload,
+            allow_nan=False,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        + b"\n"
+    )
+
+    with pytest.raises(DeploymentReconciliationActivationError) as caught:
+        owner.reconcile_deployment_custody(
+            operator="tampered-proof-operator",
+            reason="reject a modified stable served proof",
+        )
+    assert caught.value.code == "RECONCILIATION_OUTPUT_INVALID"
+    assert len(rpc.fresh_calls) == 1
+
+
+def test_v1_head_in_v2_state_slot_fails_create_only_collision(
+    tmp_path: Path,
+) -> None:
+    owner, _rpc, root = _owner(tmp_path)
+    head = owner.reconcile_deployment_custody(
+        operator="v1-head-collision-operator",
+        reason="reject historical v1 bytes in the v2 commit slot",
+    )
+    payload = head.model_dump(mode="json")
+    for field in (
+        "fresh_rpc_served_proof_id",
+        "fresh_rpc_served_proof_raw_sha256",
+        "fresh_rpc_served_proof_core_sha256",
+        "fresh_rpc_served_proof_blob_path",
+        "gateway_name",
+        "rpc_request_endpoint_sha256",
+        "rpc_publish_endpoint_sha256",
+        "owner_binding_raw_sha256",
+        "owner_binding",
+        "intent_raw_sha256",
+        "intent",
+        "fresh_rpc_served_proof",
+        "served_proof_closure_verified",
+    ):
+        payload.pop(field)
+    payload["schema_version"] = (
+        "web_bridge_deployment_reconciliation_activation_head_v1"
+    )
+    payload["purpose"] = "commit_non_authorizing_owner_reconciliation_activation"
+    core = dict(payload)
+    core.pop("activation_head_id")
+    core.pop("activation_head_core_sha256")
+    core.pop("activation_head_path")
+    digest = hashlib.sha256(
+        json.dumps(
+            core,
+            allow_nan=False,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    payload["activation_head_id"] = (
+        f"deployment-reconciliation-activation-head-{digest}"
+    )
+    payload["activation_head_core_sha256"] = digest
+    historical = DeploymentReconciliationActivationHeadDTO.model_validate(payload)
+    head_slot = root / historical.activation_head_path
+    head_slot.write_bytes(
+        json.dumps(
+            historical.model_dump(mode="json"),
+            allow_nan=False,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        + b"\n"
+    )
+
+    with pytest.raises(DeploymentReconciliationCustodyError) as caught:
+        owner.reconcile_deployment_custody(
+            operator="v1-head-collision-operator",
+            reason="reject historical v1 bytes in the v2 commit slot",
+        )
+    assert caught.value.code == "CUSTODY_OUTPUT_COLLISION"
+
+
+def test_schema_valid_bare_fresh_dto_cannot_bypass_served_proof(
+    tmp_path: Path,
+) -> None:
+    owner, rpc, root = _owner(tmp_path)
+    original = rpc.capture_deployment_recheck_served_proof
+
+    def bare_dto(**kwargs):
+        return original(**kwargs).facts
+
+    rpc.capture_deployment_recheck_served_proof = bare_dto
+    with pytest.raises(DeploymentReconciliationActivationError) as caught:
+        owner.reconcile_deployment_custody(
+            operator="bare-dto-operator",
+            reason="reject a schema-valid DTO without transport proof",
+        )
+    assert caught.value.code == "RECONCILIATION_FRESH_CAPTURE_INVALID"
+    assert list((root / "reconciliation-heads").glob("*.json")) == []
+
+
+def test_production_fake_rpc_is_rejected_before_any_c2b_artifact(
+    tmp_path: Path,
+) -> None:
+    owner, _rpc, root = _owner(tmp_path)
+    owner.settings.app_env = "production"
+
+    with pytest.raises(DeploymentReconciliationActivationError) as caught:
+        owner.reconcile_deployment_custody(
+            operator="production-transport-operator",
+            reason="reject fake RPC before any C2b durable write",
+        )
+    assert caught.value.code == "RECONCILIATION_RPC_TRANSPORT_INVALID"
+    assert list((root / "reconciliation-intents").glob("*.json")) == []
+    assert list((root / "reconciliation-heads").glob("*.json")) == []
+
+
+@pytest.mark.parametrize(
+    "shadow_name",
+    [
+        "call",
+        "_capture_deployment_recheck_result",
+        "_is_recoverable_client_state_error",
+        "_reconnect_and_maybe_retry",
+    ],
+)
+def test_production_exact_rpc_method_shadow_is_rejected_before_artifacts(
+    tmp_path: Path,
+    shadow_name: str,
+) -> None:
+    owner, _rpc, root = _owner(tmp_path)
+    owner.settings.app_env = "production"
+    rpc = VnpyRpcService(
+        settings=owner.settings,
+        deployment_drain=owner.deployment_drain,
+    )
+    rpc.client = object.__new__(BridgeRpcClient)
+    rpc.client.service = rpc
+    rpc.started = True
+    rpc.last_connected_at = NOW
+    rpc._deployment_transport_binding = (
+        owner.settings.vnpy_rpc_req_address,
+        owner.settings.vnpy_rpc_pub_address,
+        owner.settings.vnpy_gateway_name,
+    )
+    rpc._deployment_transport_generation = 1
+    setattr(rpc, shadow_name, lambda *_args, **_kwargs: {})
+    owner.rpc = rpc
+
+    with pytest.raises(DeploymentReconciliationActivationError) as caught:
+        owner.reconcile_deployment_custody(
+            operator="production-shadow-operator",
+            reason="reject exact RPC instance method shadowing",
+        )
+    assert caught.value.code == "RECONCILIATION_RPC_TRANSPORT_INVALID"
+    assert list((root / "reconciliation-intents").glob("*.json")) == []
+    assert list((root / "reconciliation-heads").glob("*.json")) == []
+
+
+def test_production_rpc_settings_mismatch_is_rejected_before_artifacts(
+    tmp_path: Path,
+) -> None:
+    owner, _rpc, root = _owner(tmp_path)
+    owner.settings.app_env = "production"
+    attacker_settings = owner.settings.model_copy(
+        update={"vnpy_rpc_req_address": "tcp://127.0.0.1:2999"}
+    )
+    rpc = VnpyRpcService(
+        settings=attacker_settings,
+        deployment_drain=owner.deployment_drain,
+    )
+    rpc.client = object.__new__(BridgeRpcClient)
+    rpc.client.service = rpc
+    rpc.started = True
+    rpc.last_connected_at = NOW
+    rpc._deployment_transport_binding = (
+        attacker_settings.vnpy_rpc_req_address,
+        attacker_settings.vnpy_rpc_pub_address,
+        attacker_settings.vnpy_gateway_name,
+    )
+    rpc._deployment_transport_generation = 1
+    owner.rpc = rpc
+
+    with pytest.raises(DeploymentReconciliationActivationError) as caught:
+        owner.reconcile_deployment_custody(
+            operator="production-settings-operator",
+            reason="reject owner and RPC endpoint identity mismatch",
+        )
+    assert caught.value.code == "RECONCILIATION_RPC_TRANSPORT_INVALID"
+    assert list((root / "reconciliation-intents").glob("*.json")) == []
+    assert list((root / "reconciliation-heads").glob("*.json")) == []
+
+
+def test_production_rpc_client_remote_method_shadow_is_rejected_before_artifacts(
+    tmp_path: Path,
+) -> None:
+    owner, _rpc, root = _owner(tmp_path)
+    owner.settings.app_env = "production"
+    rpc = VnpyRpcService(
+        settings=owner.settings,
+        deployment_drain=owner.deployment_drain,
+    )
+    rpc.client = object.__new__(BridgeRpcClient)
+    rpc.client.service = rpc
+    rpc.client.recheck_deployment_safety_snapshot_v1 = lambda *_args, **_kwargs: {}
+    rpc.started = True
+    rpc.last_connected_at = NOW
+    rpc._deployment_transport_binding = (
+        owner.settings.vnpy_rpc_req_address,
+        owner.settings.vnpy_rpc_pub_address,
+        owner.settings.vnpy_gateway_name,
+    )
+    rpc._deployment_transport_generation = 1
+    owner.rpc = rpc
+
+    with pytest.raises(DeploymentReconciliationActivationError) as caught:
+        owner.reconcile_deployment_custody(
+            operator="production-client-shadow-operator",
+            reason="reject remote method shadowing on the exact RPC client",
+        )
+    assert caught.value.code == "RECONCILIATION_RPC_TRANSPORT_INVALID"
+    assert list((root / "reconciliation-intents").glob("*.json")) == []
+    assert list((root / "reconciliation-heads").glob("*.json")) == []
 
 
 def test_lost_fresh_response_then_generation_advance_never_commits_head(
@@ -571,13 +903,9 @@ def test_coherently_rehashed_commodity_wal_fails_before_fresh_rpc(
         owner.reconcile_deployment_custody(
             operator="wal-rehash-operator", reason=reason
         )
-    monkeypatch.setattr(
-        DeploymentReconciliationCustodySession, "write_blob", original
-    )
+    monkeypatch.setattr(DeploymentReconciliationCustodySession, "write_blob", original)
 
-    wal_path = next(
-        (root / "reconciliation-blobs").glob("*.commodity-checkpoint.json")
-    )
+    wal_path = next((root / "reconciliation-blobs").glob("*.commodity-checkpoint.json"))
     payload = json.loads(wal_path.read_bytes())
     payload["initial_rpc"]["request_id"] = "coherently-rehashed-wrong-request"
     core = dict(payload)
@@ -616,7 +944,9 @@ def test_coherently_rehashed_commodity_wal_fails_before_fresh_rpc(
     assert len(rpc.fresh_calls) == 0
 
 
-@pytest.mark.parametrize("mode", ["INITIAL_BASELINE", "LEGACY_MIGRATION_BASELINE", "PLANNED_RESTART"])
+@pytest.mark.parametrize(
+    "mode", ["INITIAL_BASELINE", "LEGACY_MIGRATION_BASELINE", "PLANNED_RESTART"]
+)
 def test_all_modes_resume_from_durable_capture_pair_without_rpc(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -632,7 +962,7 @@ def test_all_modes_resume_from_durable_capture_pair_without_rpc(
     initial_count = 0
     fresh_count = 0
     original_initial = rpc.capture_deployment_facts
-    original_fresh = rpc.capture_deployment_recheck_facts
+    original_fresh = rpc.capture_deployment_recheck_served_proof
 
     def counted_initial(*args, **kwargs):
         nonlocal initial_count
@@ -645,7 +975,7 @@ def test_all_modes_resume_from_durable_capture_pair_without_rpc(
         return original_fresh(*args, **kwargs)
 
     rpc.capture_deployment_facts = counted_initial
-    rpc.capture_deployment_recheck_facts = counted_fresh
+    rpc.capture_deployment_recheck_served_proof = counted_fresh
     original_write = DeploymentReconciliationCustodySession.write_blob
     crashed = False
 
@@ -662,7 +992,9 @@ def test_all_modes_resume_from_durable_capture_pair_without_rpc(
     )
     reason = f"resume exact {mode.lower()} capture pair"
     with pytest.raises(RuntimeError, match="three-mode"):
-        owner.reconcile_deployment_custody(operator="three-mode-operator", reason=reason)
+        owner.reconcile_deployment_custody(
+            operator="three-mode-operator", reason=reason
+        )
     monkeypatch.setattr(
         DeploymentReconciliationCustodySession, "write_blob", original_write
     )
