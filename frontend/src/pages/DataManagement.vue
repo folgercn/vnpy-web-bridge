@@ -5,8 +5,8 @@
         <n-input v-model:value="filters.symbol" placeholder="合约代码" class="short-control" clearable />
         <n-select v-model:value="filters.exchange" :options="exchangeOptions" placeholder="交易所" class="short-control" clearable />
         <n-input v-model:value="filters.vt_symbol" placeholder="vt_symbol" class="symbol-control" clearable />
-        <n-input v-model:value="filters.start" type="datetime-local" class="time-control" clearable />
-        <n-input v-model:value="filters.end" type="datetime-local" class="time-control" clearable />
+        <n-date-picker v-model:formatted-value="filters.start" type="datetime" value-format="yyyy-MM-dd'T'HH:mm:ss" class="time-control" clearable />
+        <n-date-picker v-model:formatted-value="filters.end" type="datetime" value-format="yyyy-MM-dd'T'HH:mm:ss" class="time-control" clearable />
         <n-input-number v-model:value="filters.limit" :min="1" :max="5000" class="limit-control" />
         <n-button type="primary" @click="loadTicks">查询</n-button>
         <n-button @click="downloadCsv">导出CSV</n-button>
@@ -27,7 +27,7 @@
 
 <script setup lang="ts">
 import { onMounted, reactive, ref } from 'vue'
-import { useMessage } from 'naive-ui'
+import { NButton, NCard, NDatePicker, NInput, NInputNumber, NSelect, useMessage } from 'naive-ui'
 import DataPanel from '../components/common/DataPanel.vue'
 import { exchangeOptions } from '../constants/exchanges'
 import { exportMarketDataCsv, getMarketDataOverview, getMarketDataTicks, importMarketDataCsv } from '../api/market'

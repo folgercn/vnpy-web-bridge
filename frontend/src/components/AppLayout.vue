@@ -46,7 +46,19 @@
 
 <script setup lang="ts">
 import { computed, h, onMounted, ref } from 'vue'
-import { NIcon } from 'naive-ui'
+import {
+  NButton,
+  NDrawer,
+  NDrawerContent,
+  NDropdown,
+  NIcon,
+  NLayout,
+  NLayoutContent,
+  NLayoutHeader,
+  NLayoutSider,
+  NMenu,
+  NTag
+} from 'naive-ui'
 import {
   AccountBookOutlined,
   AreaChartOutlined,
@@ -86,6 +98,7 @@ const menuOptions = [
   item('成交', '/trades', AreaChartOutlined),
   item('资金', '/account', AccountBookOutlined),
   item('策略', '/strategies', SecurityScanOutlined),
+  item('商品 SimNow', '/commodity-simnow', SecurityScanOutlined),
   item('MAK v2', '/mak-v2-observer', LineChartOutlined),
   item('数据管理', '/data', DatabaseOutlined),
   item('日志', '/logs', FileTextOutlined)

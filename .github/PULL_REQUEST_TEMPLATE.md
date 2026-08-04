@@ -64,3 +64,11 @@ If AI assisted:
 - [ ] Architecture Impact reviewed
 - [ ] Existing contracts checked before adding new schemas
 - [ ] No shortcut implementation bypasses security boundaries
+
+## Frontend Review（涉及 `frontend/` 时）
+
+- [ ] 复用了共享组件，Naive UI 组件均显式局部 import
+- [ ] 按钮主次、warning/destructive 语义一致
+- [ ] 桌面、平板、手机和暗色模式已验证
+- [ ] RBAC、loading、error、empty、disabled 状态完整
+- [ ] `npm run check` 已通过
