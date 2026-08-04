@@ -181,7 +181,9 @@ def test_final_registry_is_sealed_and_identity_is_rechecked() -> None:
 
     assert server.registered is server._functions
 
-    harmless = lambda: None
+    def harmless() -> None:
+        return None
+
     with pytest.raises(WindowsRpcDurableFenceError, match="sealed"):
         server.register(harmless)
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -424,6 +425,7 @@ def test_production_launcher_has_no_recovery_a2_or_filesystem_injection() -> Non
     }
 
 
+@pytest.mark.skipif(os.name == "nt", reason="non-Windows platform guard")
 def test_production_launcher_rejects_non_windows_before_build() -> None:
     with pytest.raises(OSError, match="native Windows"):
         launch_windows_rpc_durable_fence_v1(

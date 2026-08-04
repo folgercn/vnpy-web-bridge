@@ -123,7 +123,7 @@ class Facts:
         self.overrides: dict[str, dict[str, object]] = {}
 
     def inspect(self, path: Path) -> PathSecurityFacts:
-        relative = str(path.relative_to(self.root)) if path != self.root else "."
+        relative = path.relative_to(self.root).as_posix() if path != self.root else "."
         is_file = relative.startswith("states/") or relative == "HEAD"
         values: dict[str, object] = {
             "path_sha256": SHA if relative == "." else OTHER_SHA,
