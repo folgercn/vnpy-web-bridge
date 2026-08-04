@@ -646,6 +646,10 @@ def test_windows_foundation_bundle_is_build_only_and_never_a_cd_target() -> None
     build_units = {unit["id"]: unit for unit in MANIFEST["build_units"]}
     deploy_units = {unit["id"]: unit for unit in MANIFEST["deploy_units"]}
     bundle = build_units["windows-fence-foundation-bundle"]
+    assert (
+        bundle["implementation_status"]
+        == "planned_bundle_durable_core_implemented_not_installed"
+    )
     windows = deploy_units["windows-ctp-gateway"]
     rule = next(
         rule
@@ -653,9 +657,6 @@ def test_windows_foundation_bundle_is_build_only_and_never_a_cd_target() -> None
         if rule["id"] == "windows-fence-foundation-sources"
     )
 
-    assert bundle["implementation_status"] == (
-        "planned_contract_frozen_runtime_not_installed"
-    )
     assert bundle["automatic_deploy_allowed"] is False
     assert bundle["deploy_units"] == ["windows-ctp-gateway"]
     assert bundle["deploy_units_semantics"] == (
@@ -667,7 +668,7 @@ def test_windows_foundation_bundle_is_build_only_and_never_a_cd_target() -> None
     assert windows["automatic_deploy_allowed"] is False
     assert rule["classification"] == "infra_manual"
     assert rule["build_units"] == ["windows-fence-foundation-bundle"]
-    assert rule["pre_activation_build_units"] == ["legacy-web-bridge-app"]
+    assert "pre_activation_build_units" not in rule
     assert rule["deploy_units"] == []
     assert (
         "ordinary_cd_install_restart_signing_or_windows_runtime_mutation_forbidden"

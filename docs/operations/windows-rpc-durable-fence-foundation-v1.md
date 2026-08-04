@@ -19,6 +19,34 @@ The foundation is delivered as seven independently reviewed changes:
 
 No intermediate merge proves that Windows is installed or fenced.
 
+WF-1 source, contract, schema, and focused test paths select the dedicated
+`windows_fence_changed` CI gate. That gate runs read-only offline tests on
+Ubuntu and Windows and has only repository read permission. It has no secret,
+package-write, deployment, service-control, or restart capability. These exact
+paths do not select the unrelated Linux production image; a mixed change that
+also modifies ordinary backend runtime code still selects the normal image
+build. The release plan remains `infra_manual`, has no deploy or restart unit,
+and maps only to the non-deploying Windows foundation bundle build unit.
+
+The WF-1 production entry is `launch_windows_rpc_durable_fence_v1`. Its
+public input contains only the store expectation and one immutable runtime
+configuration; recovery, Win32 inspection, vn.py engine construction, gateway
+connection, A2 attachment, and RPC listener start are fixed reviewed functions
+rather than caller-supplied lifecycle callbacks. Before constructing
+`MainEngine`, the entry binds the canonical runtime-config hash, gateway, A2
+source hash, launcher source hash, and canonical assembly inventory hash to the
+recovered genesis state. The generic callback bootstrap remains an offline
+test seam and is not the production entry.
+
+The A2 v1 wire response stays byte-compatible with its existing strict Linux
+consumer. In the protected assembly, A2 instead retains an immutable
+in-process `durable_fence_binding_sha256` over state/store/attempt IDs, state
+and inventory hashes, FROZEN/NONE inventories, and stable final-handler
+identities. Every A2 capture revalidates that binding and verifies the final
+registry still points directly to the no-downstream admission object. This is
+an in-process WF-1 binding, not authenticated remote provenance; WF-5 owns the
+signed attestation.
+
 The machine-readable cross-artifact contract is
 `docs/architecture/windows-rpc-durable-fence-foundation-chain-v1.json`.
 WF-2 through WF-5 verifiers must reject every equality, raw-byte digest,
@@ -48,6 +76,15 @@ active_grant = null
 them rather than infer forward compatibility. Missing, truncated, forked,
 unknown-version, rollback, unsafe-ACL, reparse-point, hardlink, or unreadable
 state keeps final order admission closed and the service not ready.
+
+Every final WF-1 send/cancel rejection uses the frozen contract code
+`WINDOWS_FENCE_ACTIVE_TOKEN_REQUIRED`. The runtime resolves the actual
+`NT SERVICE\\<service>` SID through Windows and requires it to be the sole
+write principal in the exact protected DACL. Broad, inherited, unparsed-write,
+hardlink, reparse, or alternate-stream facts fail closed. Volume identity is
+the SHA-256 of the canonical Windows volume GUID identity, independent of the
+separately checked volume serial. Root and state inventories are re-read before
+ready is returned, so a changed or forked inventory cannot pass recovery.
 
 The durable journal is a create-only hash chain. Directory inventory is the
 authority; a `HEAD` pointer is only a reconstructible cache. Local storage

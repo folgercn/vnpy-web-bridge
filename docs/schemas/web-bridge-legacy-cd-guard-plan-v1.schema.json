@@ -38,7 +38,12 @@
     "decision": {"enum": ["NO_DEPLOY", "BUILD_ONLY", "BLOCKED"]},
     "build_units": {
       "type": "array",
-      "items": {"const": "legacy-web-bridge-app"},
+      "items": {
+        "enum": [
+          "legacy-web-bridge-app",
+          "windows-fence-foundation-bundle"
+        ]
+      },
       "uniqueItems": true
     },
     "restart_units": {"type": "array", "maxItems": 0},

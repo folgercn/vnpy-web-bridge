@@ -69,3 +69,42 @@ def test_area_classification_examples() -> None:
     assert classify(["frontend/src/App.tsx"])["frontend_changed"]
     assert not any(classify(["docs/README.md"]).values())
     assert all(classify([], force_all=True).values())
+
+
+def test_windows_fence_exact_paths_use_the_dedicated_gate_without_generic_image() -> (
+    None
+):
+    paths = [
+        "scripts/windows_rpc_deployment_snapshot_v1.py",
+        "scripts/windows_rpc_durable_fence_v1.py",
+        "scripts/windows_fence_foundation/store.py",
+        "scripts/windows_fence_foundation/bootstrap_v1.py",
+        "docs/schemas/windows-rpc-durable-fence-state-v1.schema.json",
+        "docs/operations/windows-rpc-durable-fence-foundation-v1.md",
+        "docs/architecture/windows-rpc-durable-fence-foundation-chain-v1.json",
+        "backend/tests/unit/test_windows_rpc_durable_fence_store_v1.py",
+        "backend/tests/unit/test_windows_rpc_durable_fence_admission_v1.py",
+        "backend/tests/unit/test_windows_rpc_durable_fence_bootstrap_v1.py",
+        "backend/tests/integration/test_windows_fence_foundation_windows.py",
+    ]
+
+    for path in paths:
+        result = classify([path])
+        assert result["windows_fence_changed"], path
+        assert result["backend_changed"], path
+        assert not result["image_changed"], path
+        assert not result["frontend_changed"], path
+        assert not result["query_v5_changed"], path
+
+
+def test_mixed_windows_fence_and_backend_runtime_still_builds_generic_image() -> None:
+    result = classify(
+        [
+            "scripts/windows_rpc_durable_fence_v1.py",
+            "backend/app/main.py",
+        ]
+    )
+
+    assert result["windows_fence_changed"]
+    assert result["backend_changed"]
+    assert result["image_changed"]

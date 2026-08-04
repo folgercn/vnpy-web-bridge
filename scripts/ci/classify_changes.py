@@ -1,14 +1,26 @@
-#!/usr/bin/env python3
 """Classify changed paths for CI without broad, unauditable shell globs."""
 
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
 from pathlib import PurePosixPath
 
-
 WORKFLOW_PREFIX = ".github/workflows/"
+WINDOWS_FENCE_GLOBS = (
+    "scripts/windows_rpc_*",
+    "docs/schemas/windows-rpc-durable-fence-*.schema.json",
+    "docs/operations/windows-rpc-durable-fence-*.md",
+    "docs/architecture/windows-rpc-durable-fence-foundation-*.json",
+    "backend/tests/unit/test_issue267_windows_fence_foundation_*.py",
+    "backend/tests/unit/test_windows_rpc_deployment_snapshot_*.py",
+    "backend/tests/unit/test_windows_rpc_durable_fence_*.py",
+    "backend/tests/unit/test_windows_fence_foundation_*.py",
+    "backend/tests/integration/test_windows_rpc_durable_fence_*.py",
+    "backend/tests/integration/test_windows_fence_foundation_*.py",
+)
+WINDOWS_FENCE_PREFIXES = ("scripts/windows_fence_foundation/",)
 QUERY_CLOSURE_FILES = {
     ".dockerignore",
     "scripts/c_fast_t1/Containerfile.query-v3",
@@ -102,12 +114,19 @@ def _is_under(path: str, prefix: str) -> bool:
     return path == prefix.rstrip("/") or path.startswith(prefix)
 
 
+def _is_windows_fence_path(path: str) -> bool:
+    return any(path.startswith(prefix) for prefix in WINDOWS_FENCE_PREFIXES) or any(
+        fnmatch.fnmatchcase(path, pattern) for pattern in WINDOWS_FENCE_GLOBS
+    )
+
+
 def classify(paths: list[str], *, force_all: bool = False) -> dict[str, bool]:
     result = {
         "backend_changed": force_all,
         "frontend_changed": force_all,
         "image_changed": force_all,
         "query_v5_changed": force_all,
+        "windows_fence_changed": force_all,
     }
     for raw_path in paths:
         path = PurePosixPath(raw_path.strip()).as_posix()
@@ -115,6 +134,12 @@ def classify(paths: list[str], *, force_all: bool = False) -> dict[str, bool]:
             continue
         if path.startswith(WORKFLOW_PREFIX):
             return {key: True for key in result}
+        if _is_windows_fence_path(path):
+            result["backend_changed"] = True
+            result["windows_fence_changed"] = True
+            # The Windows foundation has a dedicated offline gate.  Its exact
+            # paths must not select the unrelated Linux production image.
+            continue
         if (
             _is_under(path, "backend/")
             or _is_under(path, "shared/")
@@ -128,18 +153,30 @@ def classify(paths: list[str], *, force_all: bool = False) -> dict[str, bool]:
         if _is_under(path, "frontend/") or _is_under(path, "shared/"):
             result["frontend_changed"] = True
         if (
-            path in {"Dockerfile", ".dockerignore", "test_rpc_readonly.py", "test_rpc_trade_flow.py"}
+            path
+            in {
+                "Dockerfile",
+                ".dockerignore",
+                "test_rpc_readonly.py",
+                "test_rpc_trade_flow.py",
+            }
             or _is_under(path, "backend/")
             or _is_under(path, "frontend/")
             or _is_under(path, "shared/")
             or _is_under(path, "scripts/")
             or _is_under(path, "docs/schemas/")
             or _is_under(path, "deployments/")
-            or path in {"scripts/deploy.sh", "scripts/install-watchdog.sh", "scripts/watchdog.py"}
+            or path
+            in {
+                "scripts/deploy.sh",
+                "scripts/install-watchdog.sh",
+                "scripts/watchdog.py",
+            }
         ):
             result["image_changed"] = True
         if path in QUERY_CLOSURE_FILES or (
-            path.startswith("docs/schemas/") and PurePosixPath(path).name in QUERY_SCHEMA_NAMES
+            path.startswith("docs/schemas/")
+            and PurePosixPath(path).name in QUERY_SCHEMA_NAMES
         ):
             result["query_v5_changed"] = True
     return result
