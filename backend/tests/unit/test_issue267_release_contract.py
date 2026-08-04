@@ -66,7 +66,9 @@ def _selected_rules(path: str) -> list[dict[str, object]]:
 def test_release_dependency_contract_is_inert_and_fail_closed() -> None:
     assert MANIFEST["schema_version"] == "web_bridge_release_dependencies_v1"
     assert MANIFEST["issue"] == 267
-    assert MANIFEST["status"] == "phase_1_pre_a_admission_foundation_deploy_frozen"
+    assert MANIFEST["status"] == (
+        "phase_1_pre_b_a1_commodity_lock_order_deploy_frozen"
+    )
 
     safety = MANIFEST["safety"]
     assert safety["classifier_consumption_allowed"] is False

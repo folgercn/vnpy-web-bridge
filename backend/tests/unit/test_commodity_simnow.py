@@ -330,6 +330,8 @@ def public_key_json(private_key: Ed25519PrivateKey) -> str:
 
 def make_settings(tmp_path: Path, private_key: Ed25519PrivateKey) -> Settings:
     return Settings(
+        app_env="test",
+        deployment_drain_state_root=str(tmp_path / "deployment-drain"),
         commodity_simnow_enabled=True,
         commodity_simnow_account_hashes=ACCOUNT_HASH,
         commodity_simnow_trusted_public_keys_json=public_key_json(private_key),

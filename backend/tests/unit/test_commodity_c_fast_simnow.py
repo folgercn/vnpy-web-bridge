@@ -4745,7 +4745,15 @@ def test_c_fast_terminal_restart_recovers_linked_pending_commit(
         clock=service.clock,
     )
 
-    assert recovered.current_plan is None
+    assert recovered.current_plan is not None
+
+    async def exercise() -> None:
+        recovered.start()
+        assert recovered.current_plan is None
+        await recovered.stop()
+
+    asyncio.run(exercise())
+
     assert recovered._state_load_error is None
     assert archive_path.exists()
     assert not list(
