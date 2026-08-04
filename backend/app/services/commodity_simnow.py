@@ -67,7 +67,9 @@ from app.schemas.common import STATUS_VALUE_MAP
 from app.schemas.deployment_drain import (
     DeploymentDrainAcquireDTO,
     DeploymentOnlineCheckpointDTO,
+    DeploymentOnlineRecheckCheckpointDTO,
     DeploymentSafetySnapshotDTO,
+    SafeRestartOnlineRecheckDTO,
 )
 from app.schemas.trade import OrderRequestDTO
 from app.services.audit_service import AuditService, audit_service
@@ -457,6 +459,16 @@ class CommoditySimNowService:
                 self,
                 self._capture_online_deployment_snapshot,
             )
+            recheck_binder = getattr(
+                self.deployment_drain,
+                "bind_online_recheck_provider",
+                None,
+            )
+            if callable(recheck_binder):
+                recheck_binder(
+                    self,
+                    self._capture_online_deployment_recheck,
+                )
 
     @contextmanager
     def _deployment_mutation_guard(self) -> Iterator[None]:
@@ -1014,6 +1026,226 @@ class CommoditySimNowService:
             del context.deployment_snapshot_request_id
             del context.deployment_snapshot_challenge
 
+    def recheck_deployment_drain(self) -> SafeRestartOnlineRecheckDTO:
+        """Capture a fresh owner-bound recheck without caller-supplied facts."""
+
+        if self.deployment_drain is None:
+            raise DeploymentDrainError(
+                "DEPLOYMENT_DRAIN_UNAVAILABLE",
+                "Commodity has no process-wide deployment gate",
+            )
+        self.deployment_drain.bind_online_recheck_provider(
+            self,
+            self._capture_online_deployment_recheck,
+        )
+        return self.deployment_drain.capture_online_recheck(owner=self)
+
+    def _deployment_checkpoint_projection(
+        self,
+        facts: Any,
+        *,
+        account_hash: str,
+    ) -> dict[str, Any]:
+        """Build the shared local safety projection for acquire and recheck."""
+
+        plan = self.current_plan
+        plan_status = str(plan.get("status") or "") if plan else "IDLE"
+        risk_status = self.risk.status()
+        runtime_active = (
+            str(
+                self.c_fast_runtime_authorization.status().get("state") or ""
+            ).upper()
+            == "ACTIVE"
+        )
+        authority = {
+            "enabled": bool(self.enabled),
+            "manual_approval": bool(self.manual_approval),
+            "simnow_mode": bool(self.simnow_mode),
+            "auto_dispatch_authorized": bool(self.auto_dispatch_authorized),
+            "shakedown_auto_dispatch_authorized": bool(
+                self.shakedown_auto_dispatch_authorized
+            ),
+            "c_fast_shakedown_auto_dispatch_authorized": bool(
+                self.c_fast_shakedown_auto_dispatch_authorized
+            ),
+            "c_fast_continuous_authorized": bool(
+                self.c_fast_continuous_authorized
+            ),
+            "template_authorized": bool(self.template_authorized),
+            "runtime_authorization_active": runtime_active,
+        }
+        worker_alive = bool(self._task and not self._task.done())
+        unknown_outcome = plan_status in {
+            "SUBMISSION_OUTCOME_UNKNOWN",
+            "CLOSE_SUBMISSION_PARTIAL",
+            "OPEN_SUBMISSION_PARTIAL",
+        }
+        reconcile_required = bool(
+            self._state_load_error
+            or facts.pending_send_outcomes
+            or self._deployment_positions_require_reconciliation(
+                facts.positions
+            )
+            or plan_status
+            in {
+                "CANCEL_PENDING",
+                "HALTED_RECONCILE_REQUIRED",
+                "HALTED_RECONCILED",
+                "SUBMISSION_OUTCOME_UNKNOWN",
+                "CLOSE_RECONCILIATION_MISMATCH",
+                "OPEN_RECONCILIATION_MISMATCH",
+            }
+            or any(
+                _normalize_status(order.get("status"))
+                not in KNOWN_ORDER_STATUSES
+                for order in facts.orders
+            )
+        )
+        return {
+            "plan_status": plan_status,
+            "plan_hash": (
+                str(plan.get("plan_hash") or "") if plan else None
+            ),
+            "risk_status": risk_status,
+            "execution_authority_revoked": not any(authority.values()),
+            "auto_dispatch_stopped": not worker_alive
+            and not any(
+                authority[name]
+                for name in (
+                    "auto_dispatch_authorized",
+                    "shakedown_auto_dispatch_authorized",
+                    "c_fast_shakedown_auto_dispatch_authorized",
+                    "c_fast_continuous_authorized",
+                    "template_authorized",
+                    "runtime_authorization_active",
+                )
+            ),
+            "unknown_outcome": unknown_outcome,
+            "reconcile_required": reconcile_required,
+            "state": {
+                "schema_version": (
+                    "web_bridge_deployment_execution_state_projection_v1"
+                ),
+                "account_hash": account_hash,
+                "active_plan": plan,
+                "completed_state": self._completed_state,
+                "state_load_error": self._state_load_error,
+                "authority": authority,
+                "risk": {
+                    "web_trade_enabled": bool(
+                        risk_status.get("web_trade_enabled")
+                    ),
+                    "emergency_stopped": bool(
+                        risk_status.get("emergency_stopped")
+                    ),
+                    "rules_version": risk_status.get("rules_version"),
+                },
+                "worker_alive": worker_alive,
+                "unknown_outcome": unknown_outcome,
+                "reconcile_required": reconcile_required,
+            },
+        }
+
+    def _capture_online_deployment_recheck(
+        self,
+    ) -> DeploymentOnlineRecheckCheckpointDTO:
+        if self.deployment_drain is None:
+            raise DeploymentDrainError(
+                "DEPLOYMENT_DRAIN_UNAVAILABLE",
+                "Commodity has no process-wide deployment gate",
+            )
+        binding = self.deployment_drain.online_recheck_capture_context()
+        with self._cycle_lock:
+            facts = self.rpc.capture_deployment_recheck_facts(
+                request_id=binding["request_id"],
+                owner_challenge=binding["owner_challenge"],
+                recheck_id=binding["recheck_id"],
+                fresh_challenge=binding["fresh_challenge"],
+                original_server_instance_id=(
+                    binding["original_server_instance_id"]
+                ),
+                original_fact_generation=binding["original_fact_generation"],
+                original_execution_facts_canonical_sha256=(
+                    binding[
+                        "original_execution_facts_canonical_sha256"
+                    ]
+                ),
+            )
+            captured_at = self.clock().astimezone(timezone.utc)
+            if (
+                facts.captured_at > captured_at + timedelta(seconds=2)
+                or captured_at - facts.captured_at > timedelta(seconds=30)
+            ):
+                raise DeploymentDrainError(
+                    "DEPLOYMENT_RECHECK_RPC_STALE",
+                    "Windows recheck is outside the online capture window",
+                )
+            if facts.server_instance_id != binding["original_server_instance_id"]:
+                raise DeploymentDrainError(
+                    "DEPLOYMENT_RECHECK_SERVER_DRIFT",
+                    "Windows server instance changed during deployment drain",
+                )
+            if facts.fact_generation != binding["original_fact_generation"]:
+                raise DeploymentDrainError(
+                    "DEPLOYMENT_RECHECK_GENERATION_DRIFT",
+                    "Windows fact generation changed during deployment drain",
+                )
+            if facts.execution_facts_canonical_sha256 != (
+                binding["original_execution_facts_canonical_sha256"]
+            ):
+                raise DeploymentDrainError(
+                    "DEPLOYMENT_RECHECK_FACTS_DRIFT",
+                    "Windows execution facts changed during deployment drain",
+                )
+            matches = sorted(
+                set(facts.account_hashes)
+                & _csv_set(self.settings.commodity_simnow_account_hashes)
+            )
+            if len(facts.account_hashes) != 1 or len(matches) != 1:
+                raise DeploymentDrainError(
+                    "DEPLOYMENT_RECHECK_ACCOUNT_MISMATCH",
+                    "online recheck must contain exactly one allowlisted account",
+                )
+            state = self._deployment_checkpoint_projection(
+                facts,
+                account_hash=matches[0],
+            )["state"]
+            return DeploymentOnlineRecheckCheckpointDTO.model_validate(
+                {
+                    "schema_version": (
+                        "web_bridge_deployment_online_recheck_checkpoint_v1"
+                    ),
+                    "checkpoint_role": "RECHECK",
+                    "recheck_id": binding["recheck_id"],
+                    "original_checkpoint_raw_sha256": (
+                        binding["original_checkpoint_raw_sha256"]
+                    ),
+                    "request_id": binding["request_id"],
+                    "runtime_instance_id": binding["runtime_instance_id"],
+                    "drain_epoch": binding["drain_epoch"],
+                    "execution_epoch": binding["execution_epoch"],
+                    "state_version": (
+                        "web_bridge_deployment_online_recheck_checkpoint_v1"
+                    ),
+                    "state": state,
+                    "state_sha256": _sha256_json(state),
+                    "rpc": facts.model_dump(mode="json"),
+                    "active_orders_snapshot_sha256": _sha256_json(
+                        facts.active_orders
+                    ),
+                    "positions_snapshot_sha256": _sha256_json(
+                        facts.positions
+                    ),
+                    "captured_at": captured_at,
+                    "deployment_authorized": False,
+                    "one_shot_consume_allowed": False,
+                    "automatic_deploy_allowed": False,
+                    "production_allowed": False,
+                    "live_trading_authorized": False,
+                    "countable_forward": False,
+                }
+            )
+
     def _capture_online_deployment_snapshot(
         self,
     ) -> DeploymentSafetySnapshotDTO:
@@ -1059,100 +1291,21 @@ class CommoditySimNowService:
                     "online snapshot must contain exactly one allowlisted account",
                 )
 
+            projection = self._deployment_checkpoint_projection(
+                facts,
+                account_hash=matches[0],
+            )
             plan = self.current_plan
-            plan_status = str(plan.get("status") or "") if plan else "IDLE"
-            plan_hash = str(plan.get("plan_hash") or "") if plan else None
-            risk_status = self.risk.status()
-            runtime_authorization = self.c_fast_runtime_authorization.status()
-            runtime_active = (
-                str(runtime_authorization.get("state") or "").upper()
-                == "ACTIVE"
-            )
-            authority_flags = {
-                "enabled": bool(self.enabled),
-                "manual_approval": bool(self.manual_approval),
-                "simnow_mode": bool(self.simnow_mode),
-                "auto_dispatch_authorized": bool(
-                    self.auto_dispatch_authorized
-                ),
-                "shakedown_auto_dispatch_authorized": bool(
-                    self.shakedown_auto_dispatch_authorized
-                ),
-                "c_fast_shakedown_auto_dispatch_authorized": bool(
-                    self.c_fast_shakedown_auto_dispatch_authorized
-                ),
-                "c_fast_continuous_authorized": bool(
-                    self.c_fast_continuous_authorized
-                ),
-                "template_authorized": bool(self.template_authorized),
-                "runtime_authorization_active": runtime_active,
-            }
-            execution_authority_revoked = not any(
-                authority_flags.values()
-            )
-            worker_alive = bool(self._task and not self._task.done())
-            auto_dispatch_stopped = not worker_alive and not any(
-                authority_flags[name]
-                for name in (
-                    "auto_dispatch_authorized",
-                    "shakedown_auto_dispatch_authorized",
-                    "c_fast_shakedown_auto_dispatch_authorized",
-                    "c_fast_continuous_authorized",
-                    "template_authorized",
-                    "runtime_authorization_active",
-                )
-            )
-            unknown_outcome = plan_status in {
-                "SUBMISSION_OUTCOME_UNKNOWN",
-                "CLOSE_SUBMISSION_PARTIAL",
-                "OPEN_SUBMISSION_PARTIAL",
-            }
-            positions_require_reconciliation = (
-                self._deployment_positions_require_reconciliation(
-                    facts.positions
-                )
-            )
-            reconcile_required = bool(
-                self._state_load_error
-                or facts.pending_send_outcomes
-                or positions_require_reconciliation
-                or plan_status
-                in {
-                    "CANCEL_PENDING",
-                    "HALTED_RECONCILE_REQUIRED",
-                    "HALTED_RECONCILED",
-                    "SUBMISSION_OUTCOME_UNKNOWN",
-                    "CLOSE_RECONCILIATION_MISMATCH",
-                    "OPEN_RECONCILIATION_MISMATCH",
-                }
-                or any(
-                    _normalize_status(order.get("status"))
-                    not in KNOWN_ORDER_STATUSES
-                    for order in facts.orders
-                )
-            )
-            state = {
-                "schema_version": (
-                    "web_bridge_deployment_execution_state_projection_v1"
-                ),
-                "account_hash": matches[0],
-                "active_plan": plan,
-                "completed_state": self._completed_state,
-                "state_load_error": self._state_load_error,
-                "authority": authority_flags,
-                "risk": {
-                    "web_trade_enabled": bool(
-                        risk_status.get("web_trade_enabled")
-                    ),
-                    "emergency_stopped": bool(
-                        risk_status.get("emergency_stopped")
-                    ),
-                    "rules_version": risk_status.get("rules_version"),
-                },
-                "worker_alive": worker_alive,
-                "unknown_outcome": unknown_outcome,
-                "reconcile_required": reconcile_required,
-            }
+            plan_status = projection["plan_status"]
+            plan_hash = projection["plan_hash"]
+            risk_status = projection["risk_status"]
+            execution_authority_revoked = projection[
+                "execution_authority_revoked"
+            ]
+            auto_dispatch_stopped = projection["auto_dispatch_stopped"]
+            unknown_outcome = projection["unknown_outcome"]
+            reconcile_required = projection["reconcile_required"]
+            state = projection["state"]
             checkpoint = DeploymentOnlineCheckpointDTO.model_validate(
                 {
                     "schema_version": (

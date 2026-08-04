@@ -12,6 +12,8 @@ from app.schemas.deployment_drain import (
     DeploymentDrainAcquireDTO,
     DeploymentOnlineCheckpointDTO,
     DeploymentRpcFactsDTO,
+    DeploymentRpcRecheckFactsDTO,
+    deployment_rpc_execution_facts_sha256,
 )
 from app.services.commodity_simnow import CommoditySimNowService
 from app.services.deployment_drain import (
@@ -19,7 +21,6 @@ from app.services.deployment_drain import (
     DeploymentDrainService,
 )
 from jsonschema import Draft202012Validator
-
 
 SHA_A = "a" * 64
 SHA_B = "b" * 64
@@ -54,6 +55,7 @@ class FakeRpc:
             ],
         )
         self.capture_calls = 0
+        self.recheck_calls = 0
         self.send_order_calls = 0
 
     def bind_c_fast_terminal_publication_owner(self, _owner: object) -> object:
@@ -69,6 +71,39 @@ class FakeRpc:
         assert request_id == self.facts.request_id
         assert challenge == self.facts.challenge
         return self.facts
+
+    def capture_deployment_recheck_facts(
+        self, **binding: object
+    ) -> DeploymentRpcRecheckFactsDTO:
+        self.recheck_calls += 1
+        return DeploymentRpcRecheckFactsDTO(
+            schema_version="windows_rpc_deployment_safety_recheck_v1",
+            request_id=str(binding["request_id"]),
+            owner_challenge=str(binding["owner_challenge"]),
+            recheck_id=str(binding["recheck_id"]),
+            fresh_challenge=str(binding["fresh_challenge"]),
+            original_server_instance_id=str(
+                binding["original_server_instance_id"]
+            ),
+            original_fact_generation=int(binding["original_fact_generation"]),
+            original_execution_facts_canonical_sha256=str(
+                binding["original_execution_facts_canonical_sha256"]
+            ),
+            server_instance_id=self.facts.server_instance_id,
+            fact_generation=self.facts.fact_generation,
+            execution_facts_canonical_sha256=(
+                deployment_rpc_execution_facts_sha256(self.facts)
+            ),
+            captured_at=datetime.now(timezone.utc),
+            execution_admission_frozen=True,
+            pending_send_outcomes=self.facts.pending_send_outcomes,
+            strategy_execution_enabled=False,
+            account_hashes=self.facts.account_hashes,
+            orders=self.facts.orders,
+            active_orders=self.facts.active_orders,
+            trades=self.facts.trades,
+            positions=self.facts.positions,
+        )
 
     def send_order(self, *_args: object, **_kwargs: object) -> None:
         self.send_order_calls += 1
@@ -218,6 +253,162 @@ def test_online_snapshot_persists_hash_bound_checkpoint_and_receipt(
         "positions_snapshot_sha256"
     ]
     assert checkpoint.rpc.account_hashes == [ACCOUNT_HASH]
+
+
+def test_b1b_recheck_persists_fixed_non_authorizing_chain(tmp_path) -> None:
+    drain = gate(tmp_path, runtime_id="runtime-online-b1b-old")
+    service, rpc, _risk = commodity(tmp_path, drain)
+    service.acquire_deployment_drain(request(drain.runtime_instance_id))
+
+    artifact = service.recheck_deployment_drain()
+    repeated = service.recheck_deployment_drain()
+    status = drain.status()
+
+    assert repeated == artifact
+    assert rpc.recheck_calls == 1
+    assert status["active_online_recheck_id"] == artifact.online_recheck_id
+    assert status["deployment_authorized"] is False
+    assert status["consume_authorized"] is False
+    assert status["countable_forward"] is False
+    artifact_path = drain._online_recheck_path(artifact.receipt_id)
+    assert artifact_path.stat().st_mode & 0o777 == 0o600
+    assert hashlib.sha256(artifact_path.read_bytes()).hexdigest() == status[
+        "active_online_recheck_raw_sha256"
+    ]
+    with pytest.raises(DeploymentDrainError) as release_info:
+        drain.release(
+            expected_drain_epoch=status["drain_epoch"],
+            request_id=request(drain.runtime_instance_id).request_id,
+            operator="test-operator",
+            reason="must not unfreeze a Windows-fenced owner",
+        )
+    assert release_info.value.code == (
+        "ONLINE_SNAPSHOT_RELEASE_INACTIVE_PHASE_1_PRE_B_A2"
+    )
+
+
+def test_b1b_restart_verifies_then_invalidates_old_recheck(tmp_path) -> None:
+    first = gate(tmp_path, runtime_id="runtime-online-b1b-old")
+    service, _rpc, _risk = commodity(tmp_path, first)
+    service.acquire_deployment_drain(request(first.runtime_instance_id))
+    artifact = service.recheck_deployment_drain()
+
+    restarted = DeploymentDrainService(
+        first.root,
+        runtime_instance_id="runtime-online-b1b-new",
+        allow_initial_bootstrap=True,
+    )
+    status = restarted.status()
+
+    assert status["state"] == "RESTARTED_FROZEN"
+    assert status["active_online_recheck_id"] is None
+    assert status["last_invalidated_online_recheck_id"] == (
+        artifact.online_recheck_id
+    )
+    assert status["deployment_authorized"] is False
+    assert status["countable_forward"] is False
+
+
+def test_b1b_capture_failure_cannot_release_windows_fence(
+    tmp_path, monkeypatch
+) -> None:
+    drain = gate(tmp_path, runtime_id="runtime-online-b1b-failure")
+    service, rpc, _risk = commodity(tmp_path, drain)
+    service.acquire_deployment_drain(request(drain.runtime_instance_id))
+
+    def fail_recheck(**_binding):
+        raise TimeoutError("injected Windows recheck timeout")
+
+    monkeypatch.setattr(rpc, "capture_deployment_recheck_facts", fail_recheck)
+    with pytest.raises(DeploymentDrainError):
+        service.recheck_deployment_drain()
+    status = drain.status()
+    with pytest.raises(DeploymentDrainError) as release_info:
+        drain.release(
+            expected_drain_epoch=status["drain_epoch"],
+            request_id=request(drain.runtime_instance_id).request_id,
+            operator="test-operator",
+            reason="capture failure must retain the Windows fence",
+        )
+    assert release_info.value.code == (
+        "ONLINE_SNAPSHOT_RELEASE_INACTIVE_PHASE_1_PRE_B_A2"
+    )
+    assert drain.status()["state"] == "DRAIN_BLOCKED"
+
+
+def test_b1b_recheck_checkpoint_tamper_fails_closed(tmp_path) -> None:
+    drain = gate(tmp_path, runtime_id="runtime-online-b1b-tamper")
+    service, _rpc, _risk = commodity(tmp_path, drain)
+    service.acquire_deployment_drain(request(drain.runtime_instance_id))
+    artifact = service.recheck_deployment_drain()
+    checkpoint_path = drain._checkpoint_path(
+        artifact.recheck_checkpoint_raw_sha256
+    )
+    checkpoint_path.write_text(
+        json.dumps(json.loads(checkpoint_path.read_text()), indent=2) + "\n"
+    )
+    checkpoint_path.chmod(0o600)
+
+    with pytest.raises(DeploymentDrainError) as exc_info:
+        service.recheck_deployment_drain()
+
+    assert exc_info.value.code == (
+        "SAFE_RESTART_RECHECK_CHECKPOINT_HASH_MISMATCH"
+    )
+
+
+def test_b1b_state_recheck_timestamp_must_match_artifact(tmp_path) -> None:
+    drain = gate(tmp_path, runtime_id="runtime-online-b1b-time-binding")
+    service, _rpc, _risk = commodity(tmp_path, drain)
+    service.acquire_deployment_drain(request(drain.runtime_instance_id))
+    service.recheck_deployment_drain()
+    state = drain._load_state()
+    state["online_rechecked_at"] = datetime(2030, 1, 1, tzinfo=timezone.utc).isoformat()
+    drain._atomic_write(
+        drain.state_path,
+        json.dumps(state, sort_keys=True, separators=(",", ":")).encode() + b"\n",
+    )
+
+    with pytest.raises(DeploymentDrainError) as exc_info:
+        drain.status()
+
+    assert exc_info.value.code == "SAFE_RESTART_RECHECK_BINDING_MISMATCH"
+
+
+def test_b1b_state_commit_failure_leaves_non_authorizing_orphan(
+    tmp_path, monkeypatch
+) -> None:
+    drain = gate(tmp_path, runtime_id="runtime-online-b1b-orphan")
+    service, _rpc, _risk = commodity(tmp_path, drain)
+    service.acquire_deployment_drain(request(drain.runtime_instance_id))
+    original_write_state = drain._write_state
+
+    def fail_pointer_commit(state):
+        if state.get("active_online_recheck_id") is not None:
+            raise OSError("injected state commit failure")
+        original_write_state(state)
+
+    monkeypatch.setattr(drain, "_write_state", fail_pointer_commit)
+    with pytest.raises(DeploymentDrainError) as exc_info:
+        service.recheck_deployment_drain()
+    assert exc_info.value.code == "SAFE_RESTART_RECHECK_STATE_COMMIT_FAILED"
+    assert drain.status()["deployment_authorized"] is False
+
+    with pytest.raises(DeploymentDrainError) as orphan_info:
+        service.recheck_deployment_drain()
+    assert orphan_info.value.code == "SAFE_RESTART_RECHECK_ORPHAN"
+    assert drain.status()["state"] == "DRAIN_BLOCKED"
+    assert drain.status()["deployment_authorized"] is False
+    with pytest.raises(DeploymentDrainError) as release_info:
+        drain.release(
+            expected_drain_epoch=drain.status()["drain_epoch"],
+            request_id=request(drain.runtime_instance_id).request_id,
+            operator="test-operator",
+            reason="orphan must retain the Windows fence",
+        )
+    assert release_info.value.code == (
+        "ONLINE_SNAPSHOT_RELEASE_INACTIVE_PHASE_1_PRE_B_A2"
+    )
 
 
 def test_online_snapshot_lock_order_is_gate_then_cycle_then_rpc(

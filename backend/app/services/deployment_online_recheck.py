@@ -51,11 +51,12 @@ def _parse_exact(raw: bytes, model: type):
     return value
 
 
-def build_safe_restart_online_recheck(
+def _build_safe_restart_online_recheck(
     *,
     receipt_raw: bytes,
     original_checkpoint_raw: bytes,
     recheck_checkpoint_raw: bytes,
+    checked_at: datetime,
 ) -> SafeRestartOnlineRecheckDTO:
     """Verify three exact-byte artifacts and emit non-authorizing evidence.
 
@@ -66,7 +67,7 @@ def build_safe_restart_online_recheck(
     receipt = _parse_exact(receipt_raw, SafeRestartReceiptDTO)
     original = _parse_exact(original_checkpoint_raw, DeploymentOnlineCheckpointDTO)
     recheck = _parse_exact(recheck_checkpoint_raw, DeploymentOnlineRecheckCheckpointDTO)
-    now = _utc_now()
+    now = checked_at
     if (
         now.tzinfo is None
         or now.utcoffset() is None
@@ -247,3 +248,43 @@ def build_safe_restart_online_recheck(
             "recheck_core_sha256": core_sha,
         }
     )
+
+
+def build_safe_restart_online_recheck(
+    *,
+    receipt_raw: bytes,
+    original_checkpoint_raw: bytes,
+    recheck_checkpoint_raw: bytes,
+) -> SafeRestartOnlineRecheckDTO:
+    """Build fresh evidence using only this module's trusted UTC clock."""
+
+    return _build_safe_restart_online_recheck(
+        receipt_raw=receipt_raw,
+        original_checkpoint_raw=original_checkpoint_raw,
+        recheck_checkpoint_raw=recheck_checkpoint_raw,
+        checked_at=_utc_now(),
+    )
+
+
+def verify_safe_restart_online_recheck(
+    *,
+    artifact_raw: bytes,
+    receipt_raw: bytes,
+    original_checkpoint_raw: bytes,
+    recheck_checkpoint_raw: bytes,
+) -> SafeRestartOnlineRecheckDTO:
+    """Rebuild an existing exact-byte artifact at its recorded capture time."""
+
+    artifact = _parse_exact(artifact_raw, SafeRestartOnlineRecheckDTO)
+    expected = _build_safe_restart_online_recheck(
+        receipt_raw=receipt_raw,
+        original_checkpoint_raw=original_checkpoint_raw,
+        recheck_checkpoint_raw=recheck_checkpoint_raw,
+        checked_at=artifact.checked_at,
+    )
+    expected_raw = _canonical_bytes(expected.model_dump(mode="json")) + b"\n"
+    if expected_raw != artifact_raw:
+        raise DeploymentOnlineRecheckError(
+            "online recheck artifact does not match its evidence chain"
+        )
+    return artifact
