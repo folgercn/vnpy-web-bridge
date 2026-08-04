@@ -179,9 +179,7 @@ def build_adapter(
                 ),
                 exact_contracts=CONTRACTS,
                 bound_artifact_raw_sha256=bindings,
-                verified_signer_domain_public_key_sha256=(
-                    SIGNER_DOMAINS[request.role]
-                ),
+                verified_signer_domain_public_key_sha256=(SIGNER_DOMAINS[request.role]),
                 signature_verified=True,
                 semantic_contract_verified=True,
                 **FALSE_AUTHORITY,
@@ -190,7 +188,9 @@ def build_adapter(
             source_snapshot_receipt_sha256=(
                 plan.snapshot_hash if request.role == "signed_snapshot" else None
             ),
-            score_policy=(SCORER.policy() if request.role == "execution_policy" else None),
+            score_policy=(
+                SCORER.policy() if request.role == "execution_policy" else None
+            ),
             contract_specs=(
                 (SCORER.contract_spec(),)
                 if request.role == "contract_spec_set"
@@ -277,6 +277,36 @@ def test_incomplete_spliced_expired_or_mutated_set_fails_closed(
         adapter("startup", NOW)
 
 
+def test_second_read_failure_is_reported_as_revalidation_mutation(
+    secure_tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = build_adapter(secure_tmp_path)
+    read_exact = CommodityCFastExecutionQualityArtifactRevalidator._read_exact
+    reads = 0
+
+    def fail_during_second_pass(self, role, path, root):
+        nonlocal reads
+        reads += 1
+        if reads > len(ARTIFACT_ROLES) and role == ARTIFACT_ROLES[0]:
+            raise CFastExecutionQualityArtifactRevalidationError(
+                f"{role.upper()}_FILE_CHANGED"
+            )
+        return read_exact(self, role, path, root)
+
+    monkeypatch.setattr(
+        CommodityCFastExecutionQualityArtifactRevalidator,
+        "_read_exact",
+        fail_during_second_pass,
+    )
+
+    with pytest.raises(
+        CFastExecutionQualityArtifactRevalidationError,
+        match="ARTIFACT_CHANGED_DURING_REVALIDATION",
+    ):
+        adapter("startup", NOW)
+
+
 def test_artifacts_must_be_distinct_canonical_files_inside_pinned_custody(
     secure_tmp_path: Path,
 ) -> None:
@@ -328,9 +358,7 @@ def test_exact_file_reader_handles_short_os_reads(
 
     monkeypatch.setattr(os, "read", short_read)
 
-    assert (
-        adapter("startup", NOW).revalidation_receipt.exact_contracts == CONTRACTS
-    )
+    assert adapter("startup", NOW).revalidation_receipt.exact_contracts == CONTRACTS
 
 
 def test_initial_custody_revalidation_failure_closes_retained_fd(

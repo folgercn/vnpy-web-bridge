@@ -331,7 +331,16 @@ class CommodityCFastExecutionQualityArtifactRevalidator:
             self._verify_join(verified, opened, observed_at_utc)
             typed_inputs = self._verify_typed_inputs(signed_results)
             for role in ARTIFACT_ROLES:
-                reread = self._read_exact(role, self._artifact_paths[role], root)
+                try:
+                    reread = self._read_exact(
+                        role,
+                        self._artifact_paths[role],
+                        root,
+                    )
+                except CFastExecutionQualityArtifactRevalidationError as exc:
+                    raise CFastExecutionQualityArtifactRevalidationError(
+                        "ARTIFACT_CHANGED_DURING_REVALIDATION"
+                    ) from exc
                 original = opened[role]
                 if reread.raw != original.raw or reread.identity != original.identity:
                     raise CFastExecutionQualityArtifactRevalidationError(
@@ -395,13 +404,10 @@ class CommodityCFastExecutionQualityArtifactRevalidator:
             ],
             "score_policy": typed_inputs["score_policy"].model_dump(mode="json"),
             "score_policy_hash": _sha256(
-                _canonical_json(
-                    typed_inputs["score_policy"].model_dump(mode="json")
-                )
+                _canonical_json(typed_inputs["score_policy"].model_dump(mode="json"))
             ),
             "contract_specs": [
-                spec.model_dump(mode="json")
-                for spec in typed_inputs["contract_specs"]
+                spec.model_dump(mode="json") for spec in typed_inputs["contract_specs"]
             ],
         }
         return CFastExecutionQualityVerifiedRuntimeInputsDTO.model_validate(
@@ -447,7 +453,9 @@ class CommodityCFastExecutionQualityArtifactRevalidator:
             or not isinstance(source_receipt, str)
             or type(policy) is not CFastExecutionQualityCollectionPolicyV2DTO
             or type(specs) is not tuple
-            or any(type(spec) is not CFastExecutionQualityContractSpecDTO for spec in specs)
+            or any(
+                type(spec) is not CFastExecutionQualityContractSpecDTO for spec in specs
+            )
         ):
             raise CFastExecutionQualityArtifactRevalidationError(
                 "ARTIFACT_TYPED_INPUT_TYPE_INVALID"
