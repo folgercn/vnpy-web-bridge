@@ -16,14 +16,23 @@ from typing import Any
 from app.schemas.deployment_drain import (
     DeploymentDrainAcquireDTO,
     DeploymentOnlineCheckpointDTO,
+    DeploymentOnlineRecheckCheckpointDTO,
     DeploymentSafetySnapshotDTO,
     SafeRestartConsumeMarkerDTO,
+    SafeRestartOnlineRecheckDTO,
     SafeRestartReceiptDTO,
     SafeRestartRecheckDTO,
+    deployment_rpc_execution_facts_sha256,
     deployment_snapshot_blockers,
 )
+from app.services.deployment_online_recheck import (
+    DeploymentOnlineRecheckError,
+    build_safe_restart_online_recheck,
+    verify_safe_restart_online_recheck,
+)
 
-STATE_VERSION = "web_bridge_deployment_drain_state_v1"
+STATE_VERSION = "web_bridge_deployment_drain_state_v2"
+LEGACY_STATE_VERSION = "web_bridge_deployment_drain_state_v1"
 STATES = {
     "RUNNING",
     "DRAINING",
@@ -71,25 +80,26 @@ class DeploymentDrainService:
             raise ValueError("initial bootstrap state is invalid")
         self.initial_bootstrap_state = initial_bootstrap_state
         self.require_fresh_bootstrap = require_fresh_bootstrap
-        self.allow_untrusted_snapshot_provider = (
-            allow_untrusted_snapshot_provider
-        )
+        self.allow_untrusted_snapshot_provider = allow_untrusted_snapshot_provider
         self._process_lock = RLock()
         self._lock_context = local()
         self.receipt_dir = self.root / "receipts"
         self.consume_dir = self.root / "consumes"
         self.checkpoint_dir = self.root / "checkpoints"
+        self.recheck_dir = self.root / "rechecks"
         self.lock_path = self.root / ".deployment-drain.lock"
         self.state_path = self.root / "state.json"
         self.epoch_anchor_path = self.root / "epoch-anchor.json"
         self._initialized = False
         self.execution_epoch = 0
-        self.verified_restart_checkpoint: (
-            DeploymentOnlineCheckpointDTO | None
-        ) = None
+        self.verified_restart_checkpoint: DeploymentOnlineCheckpointDTO | None = None
         self._online_snapshot_owner: object | None = None
         self._online_snapshot_provider: (
             Callable[[], DeploymentSafetySnapshotDTO] | None
+        ) = None
+        self._online_recheck_owner: object | None = None
+        self._online_recheck_provider: (
+            Callable[[], DeploymentOnlineRecheckCheckpointDTO] | None
         ) = None
 
     def _ensure_initialized(self) -> None:
@@ -102,9 +112,11 @@ class DeploymentDrainService:
             self._prepare_directory(self.receipt_dir)
             self._prepare_directory(self.consume_dir)
             self._prepare_directory(self.checkpoint_dir)
+            self._prepare_directory(self.recheck_dir)
             self._prepare_lock_file()
             with self._exclusive_initialized():
                 state = self._load_or_initial_state()
+                self._verify_active_online_recheck_pointer(state)
                 previous_state = state["state"]
                 restart_receipt_id = state.get("active_receipt_id")
                 if (
@@ -117,9 +129,7 @@ class DeploymentDrainService:
                     )
                     and state.get("active_receipt_raw_sha256") is not None
                 ):
-                    restart_receipt_id = state.get(
-                        "last_invalidated_receipt_id"
-                    )
+                    restart_receipt_id = state.get("last_invalidated_receipt_id")
                 restart_receipt_raw_sha256 = (
                     state.get("active_receipt_raw_sha256")
                     if restart_receipt_id
@@ -128,6 +138,7 @@ class DeploymentDrainService:
                 state["execution_epoch"] += 1
                 state["runtime_instance_id"] = self.runtime_instance_id
                 state["updated_at"] = self._now().isoformat()
+                self._invalidate_online_recheck(state)
                 if previous_state in {
                     "DRAINING",
                     "DRAIN_BLOCKED",
@@ -143,9 +154,10 @@ class DeploymentDrainService:
                     if restart_receipt_id is None:
                         state["active_receipt_raw_sha256"] = None
                     state["receipt_consumed"] = False
-                    if state.get("freeze_reason") != (
-                        "initial_bootstrap_requires_reconciliation"
-                    ):
+                    if state.get("freeze_reason") not in {
+                        "initial_bootstrap_requires_reconciliation",
+                        "legacy_v1_consumption_evidence_quarantined",
+                    }:
                         state["freeze_reason"] = (
                             "process_restarted_old_receipt_invalidated"
                         )
@@ -156,17 +168,13 @@ class DeploymentDrainService:
                         self.verified_restart_checkpoint = (
                             self._load_online_checkpoint_for_receipt(
                                 restart_receipt_id,
-                                expected_raw_sha256=(
-                                    restart_receipt_raw_sha256
-                                ),
+                                expected_raw_sha256=(restart_receipt_raw_sha256),
                             )
                         )
                     except DeploymentDrainError as exc:
                         state.update(
                             blockers=[f"checkpoint_verification_failed:{exc.code}"],
-                            freeze_reason=(
-                                "restart_checkpoint_verification_failed"
-                            ),
+                            freeze_reason=("restart_checkpoint_verification_failed"),
                             updated_at=self._now().isoformat(),
                         )
                         self._write_state(state)
@@ -182,6 +190,7 @@ class DeploymentDrainService:
                 and state["execution_epoch"] == self.execution_epoch
             ):
                 state = self._expire_if_needed(state)
+            self._verify_active_online_recheck_pointer(state)
             return self._public_state(state)
 
     def is_frozen(self) -> bool:
@@ -238,6 +247,14 @@ class DeploymentDrainService:
     ) -> None:
         if getattr(provider, "__self__", None) is not owner:
             raise TypeError("online snapshot provider must be bound to its owner")
+        if (
+            self._online_recheck_owner is not None
+            and self._online_recheck_owner is not owner
+        ):
+            raise DeploymentDrainError(
+                "DEPLOYMENT_SNAPSHOT_OWNER_CONFLICT",
+                "online snapshot and recheck must share one owner",
+            )
         if self._online_snapshot_owner is None:
             self._online_snapshot_owner = owner
             self._online_snapshot_provider = provider
@@ -247,6 +264,200 @@ class DeploymentDrainService:
                 "DEPLOYMENT_SNAPSHOT_OWNER_CONFLICT",
                 "another process-local owner already owns online snapshots",
             )
+
+    def bind_online_recheck_provider(
+        self,
+        owner: object,
+        provider: Callable[[], DeploymentOnlineRecheckCheckpointDTO],
+    ) -> None:
+        if getattr(provider, "__self__", None) is not owner:
+            raise TypeError("online recheck provider must be bound to its owner")
+        if (
+            self._online_snapshot_owner is not None
+            and self._online_snapshot_owner is not owner
+        ):
+            raise DeploymentDrainError(
+                "DEPLOYMENT_RECHECK_OWNER_CONFLICT",
+                "online snapshot and recheck must share one owner",
+            )
+        if self._online_recheck_owner is None:
+            self._online_recheck_owner = owner
+            self._online_recheck_provider = provider
+            return
+        if self._online_recheck_owner is not owner:
+            raise DeploymentDrainError(
+                "DEPLOYMENT_RECHECK_OWNER_CONFLICT",
+                "another process-local owner already owns online rechecks",
+            )
+
+    def capture_online_recheck(
+        self,
+        *,
+        owner: object,
+    ) -> SafeRestartOnlineRecheckDTO:
+        provider = self._online_recheck_provider
+        if owner is not self._online_recheck_owner or provider is None:
+            raise DeploymentDrainError(
+                "DEPLOYMENT_RECHECK_OWNER_INVALID",
+                "caller does not own the online recheck provider",
+            )
+        with self._exclusive():
+            state = self._load_state()
+            self._require_current_runtime(state)
+            state = self._expire_if_needed(state)
+            if state["state"] != "SAFE_TO_RESTART":
+                raise DeploymentDrainError(
+                    "SAFE_RESTART_RECHECK_NOT_AVAILABLE",
+                    "no live safe restart receipt is available",
+                )
+            if state["active_online_recheck_id"] is not None:
+                self._verify_active_online_recheck_pointer(state)
+                return self._read_active_online_recheck(state)
+
+            receipt = self._read_receipt(
+                state["active_receipt_id"],
+                expected_raw_sha256=state["active_receipt_raw_sha256"],
+            )
+            receipt_raw = self._read_secure_file(
+                self._receipt_path(receipt.receipt_id)
+            )
+            original = self._load_online_checkpoint_for_receipt(
+                receipt.receipt_id,
+                expected_raw_sha256=state["active_receipt_raw_sha256"],
+            )
+            if original is None:
+                raise DeploymentDrainError(
+                    "DEPLOYMENT_RECHECK_CHECKPOINT_REQUIRED",
+                    "fresh online recheck requires an A2 checkpoint",
+                )
+            original_raw = self._read_secure_file(
+                self._checkpoint_path(receipt.snapshot.checkpoint_sha256)
+            )
+            artifact_path = self._online_recheck_path(receipt.receipt_id)
+            if artifact_path.exists() or artifact_path.is_symlink():
+                state.update(
+                    state="DRAIN_BLOCKED",
+                    blockers=["online_recheck_orphan_or_collision"],
+                    freeze_reason=(
+                        "online_snapshot_online_recheck_orphan_or_collision"
+                    ),
+                    updated_at=self._now().isoformat(),
+                )
+                self._write_state(state)
+                raise DeploymentDrainError(
+                    "SAFE_RESTART_RECHECK_ORPHAN",
+                    "an uncommitted online recheck artifact already exists",
+                )
+
+            seed = _sha256(
+                b"issue267-b1b-online-recheck-v1\0"
+                + receipt_raw
+                + original_raw
+            )
+            context = {
+                "request_id": receipt.request_id,
+                "runtime_instance_id": original.runtime_instance_id,
+                "drain_epoch": receipt.drain_epoch,
+                "execution_epoch": receipt.execution_epoch,
+                "recheck_id": f"deployment-recheck-{seed}",
+                "fresh_challenge": f"fresh-recheck-{seed}",
+                "owner_challenge": original.rpc.challenge,
+                "original_checkpoint_raw_sha256": _sha256(original_raw),
+                "original_server_instance_id": original.rpc.server_instance_id,
+                "original_fact_generation": original.rpc.fact_generation,
+                "original_execution_facts_canonical_sha256": (
+                    deployment_rpc_execution_facts_sha256(original.rpc)
+                ),
+            }
+            self._lock_context.online_recheck_context = context
+            try:
+                checkpoint = provider()
+            except Exception as exc:
+                self._block_online_recheck_failure(state, exc.__class__.__name__)
+                if isinstance(exc, DeploymentDrainError):
+                    raise
+                raise DeploymentDrainError(
+                    "SAFE_RESTART_RECHECK_CAPTURE_FAILED",
+                    "trusted online recheck capture failed",
+                ) from exc
+            finally:
+                self._lock_context.online_recheck_context = None
+            if not isinstance(checkpoint, DeploymentOnlineRecheckCheckpointDTO):
+                self._block_online_recheck_failure(state, "invalid_provider_result")
+                raise DeploymentDrainError(
+                    "SAFE_RESTART_RECHECK_BINDING_MISMATCH",
+                    "online recheck provider returned an invalid checkpoint",
+                )
+
+            checkpoint_raw = (
+                _canonical_bytes(checkpoint.model_dump(mode="json")) + b"\n"
+            )
+            checkpoint_raw_sha = _sha256(checkpoint_raw)
+            checkpoint_path = self._checkpoint_path(checkpoint_raw_sha)
+            try:
+                self._write_create_only(checkpoint_path, checkpoint_raw)
+                if self._read_secure_file(checkpoint_path) != checkpoint_raw:
+                    raise DeploymentDrainError(
+                        "SAFE_RESTART_RECHECK_READBACK_FAILED",
+                        "recheck checkpoint readback did not match",
+                    )
+                artifact = build_safe_restart_online_recheck(
+                    receipt_raw=receipt_raw,
+                    original_checkpoint_raw=original_raw,
+                    recheck_checkpoint_raw=checkpoint_raw,
+                )
+                artifact_raw = (
+                    _canonical_bytes(artifact.model_dump(mode="json")) + b"\n"
+                )
+                self._write_create_only(artifact_path, artifact_raw)
+                if self._read_secure_file(artifact_path) != artifact_raw:
+                    raise DeploymentDrainError(
+                        "SAFE_RESTART_RECHECK_READBACK_FAILED",
+                        "online recheck artifact readback did not match",
+                    )
+            except (
+                DeploymentDrainError,
+                DeploymentOnlineRecheckError,
+                OSError,
+            ) as exc:
+                self._block_online_recheck_failure(state, exc.__class__.__name__)
+                raise DeploymentDrainError(
+                    "SAFE_RESTART_RECHECK_PERSIST_FAILED",
+                    "online recheck evidence was not committed",
+                ) from exc
+
+            state.update(
+                active_online_recheck_id=artifact.online_recheck_id,
+                active_online_recheck_raw_sha256=_sha256(artifact_raw),
+                active_recheck_checkpoint_raw_sha256=checkpoint_raw_sha,
+                online_rechecked_at=artifact.checked_at.isoformat(),
+                freeze_reason=(
+                    "online_snapshot_online_recheck_durable_consume_inactive"
+                ),
+                updated_at=self._now().isoformat(),
+            )
+            try:
+                self._write_state(state)
+            except (DeploymentDrainError, OSError) as exc:
+                raise DeploymentDrainError(
+                    "SAFE_RESTART_RECHECK_STATE_COMMIT_FAILED",
+                    "online recheck evidence exists but is not active",
+                ) from exc
+            return artifact
+
+    def online_recheck_capture_context(self) -> dict[str, Any]:
+        if int(getattr(self._lock_context, "depth", 0)) <= 0:
+            raise DeploymentDrainError(
+                "DEPLOYMENT_RECHECK_OUTSIDE_GATE",
+                "online recheck must be captured while holding the gate",
+            )
+        context = getattr(self._lock_context, "online_recheck_context", None)
+        if not isinstance(context, dict):
+            raise DeploymentDrainError(
+                "DEPLOYMENT_RECHECK_CONTEXT_INVALID",
+                "online recheck context is unavailable",
+            )
+        return dict(context)
 
     def acquire_online_snapshot(
         self,
@@ -295,15 +506,11 @@ class DeploymentDrainService:
                     try:
                         self._load_online_checkpoint_for_receipt(
                             state["active_receipt_id"],
-                            expected_raw_sha256=(
-                                state["active_receipt_raw_sha256"]
-                            ),
+                            expected_raw_sha256=(state["active_receipt_raw_sha256"]),
                         )
                         receipt = self._read_receipt(
                             state["active_receipt_id"],
-                            expected_raw_sha256=(
-                                state["active_receipt_raw_sha256"]
-                            ),
+                            expected_raw_sha256=(state["active_receipt_raw_sha256"]),
                         )
                     except DeploymentDrainError as exc:
                         online_fenced = str(
@@ -311,9 +518,7 @@ class DeploymentDrainService:
                         ).startswith("online_snapshot_")
                         state.update(
                             state="DRAIN_BLOCKED",
-                            blockers=[
-                                f"safe_receipt_verification_failed:{exc.code}"
-                            ],
+                            blockers=[f"safe_receipt_verification_failed:{exc.code}"],
                             freeze_reason=(
                                 "online_snapshot_safe_receipt_verification_failed"
                                 if online_fenced
@@ -348,6 +553,8 @@ class DeploymentDrainService:
                     active_receipt_id=None,
                     active_receipt_raw_sha256=None,
                     receipt_consumed=False,
+                    consumed_at=None,
+                    consume_id=None,
                     blockers=[],
                     expires_at=None,
                     freeze_reason=(
@@ -357,6 +564,7 @@ class DeploymentDrainService:
                     ),
                     updated_at=self._now().isoformat(),
                 )
+                self._invalidate_online_recheck(state)
                 self._write_state(state)
 
             try:
@@ -411,18 +619,19 @@ class DeploymentDrainService:
             receipt = SafeRestartReceiptDTO.model_validate(receipt_payload)
             raw = _canonical_bytes(receipt.model_dump(mode="json")) + b"\n"
             raw_sha = _sha256(raw)
-            self._write_create_only(
-                self._receipt_path(receipt.receipt_id), raw
-            )
+            self._write_create_only(self._receipt_path(receipt.receipt_id), raw)
             state.update(
                 state="SAFE_TO_RESTART",
                 active_receipt_id=receipt.receipt_id,
                 active_receipt_raw_sha256=raw_sha,
                 receipt_consumed=False,
+                consumed_at=None,
+                consume_id=None,
                 blockers=[],
                 expires_at=receipt.expires_at.isoformat(),
                 updated_at=issued_at.isoformat(),
             )
+            self._invalidate_online_recheck(state)
             self._write_state(state)
             return {
                 "state": self._public_state(state),
@@ -511,92 +720,11 @@ class DeploymentDrainService:
         consumer_run_id: str,
         operator: str,
     ) -> SafeRestartConsumeMarkerDTO:
-        with self._exclusive():
-            state = self._load_state()
-            self._require_current_runtime(state)
-            state = self._expire_if_needed(state)
-            if state["state"] != "SAFE_TO_RESTART":
-                raise DeploymentDrainError(
-                    "SAFE_RESTART_NOT_AVAILABLE",
-                    "no live safe restart receipt is available",
-                )
-            if state["receipt_consumed"]:
-                raise DeploymentDrainError(
-                    "SAFE_RESTART_ALREADY_CONSUMED",
-                    "safe restart receipt is one-shot",
-                )
-            receipt = self._read_receipt(recheck.receipt_id)
-            receipt_raw = self._read_secure_file(
-                self._receipt_path(receipt.receipt_id)
-            )
-            receipt_raw_sha = _sha256(receipt_raw)
-            self._verify_recheck(
-                state, receipt, receipt_raw_sha, recheck
-            )
-            consumed_at = self._now()
-            if not receipt.issued_at <= consumed_at < receipt.expires_at:
-                state = self._expire_receipt(state)
-                raise DeploymentDrainError(
-                    "SAFE_RESTART_EXPIRED", "safe restart receipt expired"
-                )
-            if not (
-                receipt.issued_at
-                <= recheck.snapshot.captured_at
-                <= recheck.checked_at
-                <= consumed_at
-            ):
-                raise DeploymentDrainError(
-                    "SAFE_RESTART_RECHECK_TIME_INVALID",
-                    "recheck timestamps are outside the receipt window",
-                )
-            if consumed_at - recheck.checked_at > timedelta(seconds=30):
-                raise DeploymentDrainError(
-                    "SAFE_RESTART_RECHECK_STALE",
-                    "recheck is older than 30 seconds",
-                )
-            recheck_canonical_sha = _sha256(
-                _canonical_bytes(recheck.model_dump(mode="json"))
-            )
-            marker_core = {
-                "schema_version": "web_bridge_safe_restart_consume_v1",
-                "purpose": "consume_safe_restart_receipt_once",
-                "receipt_id": receipt.receipt_id,
-                "receipt_raw_sha256": receipt_raw_sha,
-                "receipt_core_sha256": receipt.receipt_core_sha256,
-                "deployment_attempt_id": receipt.deployment_attempt_id,
-                "release_plan_core_sha256": receipt.release_plan_core_sha256,
-                "restart_action_sha256": receipt.restart_action_sha256,
-                "drain_epoch": receipt.drain_epoch,
-                "execution_epoch": receipt.execution_epoch,
-                "consumed_at": _utc_json_timestamp(consumed_at),
-                "consumer_run_id": consumer_run_id,
-                "operator": operator,
-                "recheck_canonical_sha256": recheck_canonical_sha,
-                "one_shot_consumed": True,
-                "automatic_deploy_allowed": False,
-                "production_allowed": False,
-                "live_trading_authorized": False,
-            }
-            core_sha = _sha256(_canonical_bytes(marker_core))
-            marker = SafeRestartConsumeMarkerDTO.model_validate(
-                {
-                    **marker_core,
-                    "consume_id": f"safe-restart-consume-{core_sha}",
-                    "consume_core_sha256": core_sha,
-                }
-            )
-            self._write_create_only(
-                self._consume_path(receipt.receipt_id),
-                _canonical_bytes(marker.model_dump(mode="json")) + b"\n",
-            )
-            state.update(
-                receipt_consumed=True,
-                consumed_at=consumed_at.isoformat(),
-                consume_id=marker.consume_id,
-                updated_at=consumed_at.isoformat(),
-            )
-            self._write_state(state)
-            return marker
+        del recheck, consumer_run_id, operator
+        raise DeploymentDrainError(
+            "SAFE_RESTART_CONSUMER_INACTIVE_PHASE_B1B",
+            "state v2 does not activate one-shot consumption",
+        )
 
     def release(
         self,
@@ -633,9 +761,7 @@ class DeploymentDrainService:
                     "SAFE_RESTART_ALREADY_CONSUMED",
                     "a consumed restart must reconcile in the new process",
                 )
-            if str(state.get("freeze_reason") or "").startswith(
-                "online_snapshot_"
-            ):
+            if str(state.get("freeze_reason") or "").startswith("online_snapshot_"):
                 raise DeploymentDrainError(
                     "ONLINE_SNAPSHOT_RELEASE_INACTIVE_PHASE_1_PRE_B_A2",
                     "A2 cannot release a Windows-fenced online drain",
@@ -707,9 +833,9 @@ class DeploymentDrainService:
             "restart_action_sha256": request.restart_action_sha256,
             "unit": "web-bridge",
             "issued_at": _utc_json_timestamp(issued_at),
-            "expires_at": (
-                issued_at + timedelta(seconds=request.ttl_seconds)
-            ).isoformat().replace("+00:00", "Z"),
+            "expires_at": (issued_at + timedelta(seconds=request.ttl_seconds))
+            .isoformat()
+            .replace("+00:00", "Z"),
             "ttl_seconds": request.ttl_seconds,
             "drain_epoch": drain_epoch,
             "execution_epoch": execution_epoch,
@@ -798,9 +924,7 @@ class DeploymentDrainService:
             last_invalidated_receipt_id=state["active_receipt_id"],
             active_receipt_id=None,
             active_receipt_raw_sha256=(
-                state.get("active_receipt_raw_sha256")
-                if online_fenced
-                else None
+                state.get("active_receipt_raw_sha256") if online_fenced else None
             ),
             blockers=["receipt_expired"],
             expires_at=None,
@@ -811,6 +935,7 @@ class DeploymentDrainService:
             ),
             updated_at=self._now().isoformat(),
         )
+        self._invalidate_online_recheck(state)
         self._write_state(state)
         return state
 
@@ -831,7 +956,18 @@ class DeploymentDrainService:
             freeze_reason=freeze_reason,
             updated_at=self._now().isoformat(),
         )
+        self._invalidate_online_recheck(state)
         return state
+
+    @staticmethod
+    def _invalidate_online_recheck(state: dict[str, Any]) -> None:
+        active_id = state.get("active_online_recheck_id")
+        if active_id is not None:
+            state["last_invalidated_online_recheck_id"] = active_id
+        state["active_online_recheck_id"] = None
+        state["active_online_recheck_raw_sha256"] = None
+        state["active_recheck_checkpoint_raw_sha256"] = None
+        state["online_rechecked_at"] = None
 
     def _public_state(self, state: dict[str, Any]) -> dict[str, Any]:
         runtime_current = bool(
@@ -841,11 +977,10 @@ class DeploymentDrainService:
         return {
             **state,
             "runtime_current": runtime_current,
-            "deployment_authorized": bool(
-                state["state"] == "SAFE_TO_RESTART"
-                and state["receipt_consumed"]
-                and runtime_current
-            ),
+            "deployment_authorized": False,
+            "consume_authorized": False,
+            "reconciliation_authorized": False,
+            "countable_forward": False,
             "automatic_deploy_allowed": False,
             "production_allowed": False,
             "live_trading_authorized": False,
@@ -868,8 +1003,20 @@ class DeploymentDrainService:
                     "DEPLOYMENT_DRAIN_ALREADY_BOOTSTRAPPED",
                     "custody state already exists",
                 )
-            state = self._load_state()
+            payload = json.loads(self._read_secure_file(self.state_path))
+            if not isinstance(payload, dict):
+                raise DeploymentDrainError(
+                    "DEPLOYMENT_DRAIN_STATE_INVALID",
+                    "state payload must be an object",
+                )
+            migrated = payload.get("schema_version") == LEGACY_STATE_VERSION
+            if migrated:
+                state = self._migrate_v1_state(payload)
+            else:
+                state = self._validate_state_payload(payload)
             self._validate_epoch_anchor(state)
+            if migrated:
+                self._write_state(state)
             return state
         if (
             not self.allow_initial_bootstrap
@@ -877,6 +1024,7 @@ class DeploymentDrainService:
             or any(self.receipt_dir.iterdir())
             or any(self.consume_dir.iterdir())
             or any(self.checkpoint_dir.iterdir())
+            or any(self.recheck_dir.iterdir())
         ):
             raise DeploymentDrainError(
                 "DEPLOYMENT_DRAIN_BOOTSTRAP_REQUIRED",
@@ -896,6 +1044,11 @@ class DeploymentDrainService:
             "receipt_consumed": False,
             "consumed_at": None,
             "consume_id": None,
+            "active_online_recheck_id": None,
+            "active_online_recheck_raw_sha256": None,
+            "active_recheck_checkpoint_raw_sha256": None,
+            "online_rechecked_at": None,
+            "last_invalidated_online_recheck_id": None,
             "last_invalidated_receipt_id": None,
             "blockers": [],
             "expires_at": None,
@@ -911,7 +1064,112 @@ class DeploymentDrainService:
 
     def _load_state(self) -> dict[str, Any]:
         payload = json.loads(self._read_secure_file(self.state_path))
+        return self._validate_state_payload(payload)
+
+    def _validate_state_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            raise DeploymentDrainError(
+                "DEPLOYMENT_DRAIN_STATE_INVALID",
+                "state payload must be an object",
+            )
         required = {
+            "schema_version",
+            "state",
+            "drain_epoch",
+            "execution_epoch",
+            "runtime_instance_id",
+            "active_request_id",
+            "active_request_sha256",
+            "active_receipt_id",
+            "active_receipt_raw_sha256",
+            "receipt_consumed",
+            "consumed_at",
+            "consume_id",
+            "active_online_recheck_id",
+            "active_online_recheck_raw_sha256",
+            "active_recheck_checkpoint_raw_sha256",
+            "online_rechecked_at",
+            "last_invalidated_online_recheck_id",
+            "last_invalidated_receipt_id",
+            "blockers",
+            "expires_at",
+            "freeze_reason",
+            "updated_at",
+        }
+        if set(payload) != required:
+            raise DeploymentDrainError(
+                "DEPLOYMENT_DRAIN_STATE_INVALID", "state fields are invalid"
+            )
+        if (
+            payload["schema_version"] != STATE_VERSION
+            or payload["state"] not in STATES
+            or type(payload["drain_epoch"]) is not int
+            or payload["drain_epoch"] < 0
+            or type(payload["execution_epoch"]) is not int
+            or payload["execution_epoch"] < 0
+            or payload["receipt_consumed"] is not False
+            or payload["consumed_at"] is not None
+            or payload["consume_id"] is not None
+        ):
+            raise DeploymentDrainError(
+                "DEPLOYMENT_DRAIN_STATE_INVALID", "state values are invalid"
+            )
+        recheck_values = (
+            payload["active_online_recheck_id"],
+            payload["active_online_recheck_raw_sha256"],
+            payload["active_recheck_checkpoint_raw_sha256"],
+            payload["online_rechecked_at"],
+        )
+        if any(value is None for value in recheck_values) != all(
+            value is None for value in recheck_values
+        ):
+            raise DeploymentDrainError(
+                "DEPLOYMENT_DRAIN_STATE_INVALID",
+                "online recheck pointers must be all present or all absent",
+            )
+        if all(value is not None for value in recheck_values):
+            recheck_id, raw_sha, checkpoint_raw_sha, rechecked_at = recheck_values
+            if (
+                not _is_prefixed_sha256(
+                    recheck_id, "safe-restart-online-recheck-"
+                )
+                or not _is_sha256(raw_sha)
+                or not _is_sha256(checkpoint_raw_sha)
+                or not isinstance(rechecked_at, str)
+            ):
+                raise DeploymentDrainError(
+                    "DEPLOYMENT_DRAIN_STATE_INVALID",
+                    "online recheck pointer values are invalid",
+                )
+            try:
+                parsed_rechecked_at = datetime.fromisoformat(
+                    rechecked_at.replace("Z", "+00:00")
+                )
+                if (
+                    parsed_rechecked_at.tzinfo is None
+                    or parsed_rechecked_at.utcoffset() is None
+                    or parsed_rechecked_at.utcoffset().total_seconds() != 0
+                ):
+                    raise ValueError("timestamp is not UTC")
+            except (AttributeError, ValueError) as exc:
+                raise DeploymentDrainError(
+                    "DEPLOYMENT_DRAIN_STATE_INVALID",
+                    "online recheck timestamp is invalid",
+                ) from exc
+        invalidated_id = payload["last_invalidated_online_recheck_id"]
+        if invalidated_id is not None and (
+            not _is_prefixed_sha256(
+                invalidated_id, "safe-restart-online-recheck-"
+            )
+        ):
+            raise DeploymentDrainError(
+                "DEPLOYMENT_DRAIN_STATE_INVALID",
+                "last invalidated online recheck id is invalid",
+            )
+        return payload
+
+    def _migrate_v1_state(self, payload: dict[str, Any]) -> dict[str, Any]:
+        legacy_required = {
             "schema_version",
             "state",
             "drain_epoch",
@@ -930,43 +1188,71 @@ class DeploymentDrainService:
             "freeze_reason",
             "updated_at",
         }
-        if set(payload) != required:
+        if set(payload) != legacy_required:
             raise DeploymentDrainError(
-                "DEPLOYMENT_DRAIN_STATE_INVALID", "state fields are invalid"
+                "DEPLOYMENT_DRAIN_STATE_INVALID",
+                "legacy state fields are invalid",
             )
         if (
-            payload["schema_version"] != STATE_VERSION
-            or payload["state"] not in STATES
+            payload["state"] not in STATES
             or type(payload["drain_epoch"]) is not int
             or payload["drain_epoch"] < 0
             or type(payload["execution_epoch"]) is not int
             or payload["execution_epoch"] < 0
         ):
             raise DeploymentDrainError(
-                "DEPLOYMENT_DRAIN_STATE_INVALID", "state values are invalid"
+                "DEPLOYMENT_DRAIN_STATE_INVALID",
+                "legacy state values are invalid",
             )
-        return payload
+        migrated = {
+            **payload,
+            "schema_version": STATE_VERSION,
+            "active_online_recheck_id": None,
+            "active_online_recheck_raw_sha256": None,
+            "active_recheck_checkpoint_raw_sha256": None,
+            "online_rechecked_at": None,
+            "last_invalidated_online_recheck_id": None,
+        }
+        has_consumption_evidence = bool(
+            payload["receipt_consumed"]
+            or payload["consumed_at"] is not None
+            or payload["consume_id"] is not None
+            or any(self.consume_dir.iterdir())
+        )
+        migrated["receipt_consumed"] = False
+        migrated["consumed_at"] = None
+        migrated["consume_id"] = None
+        if has_consumption_evidence:
+            if migrated["active_receipt_id"] is not None:
+                migrated["last_invalidated_receipt_id"] = migrated["active_receipt_id"]
+            migrated.update(
+                state="RESTARTED_FROZEN",
+                active_request_id=None,
+                active_request_sha256=None,
+                active_receipt_id=None,
+                active_receipt_raw_sha256=None,
+                blockers=["legacy_v1_consumption_evidence_quarantined"],
+                expires_at=None,
+                freeze_reason=("legacy_v1_consumption_evidence_quarantined"),
+                updated_at=self._now().isoformat(),
+            )
+        return self._validate_state_payload(migrated)
 
     def _write_state(self, state: dict[str, Any]) -> None:
-        self._atomic_write(
-            self.state_path, _canonical_bytes(state) + b"\n"
-        )
+        self._validate_state_payload(state)
+        self._atomic_write(self.state_path, _canonical_bytes(state) + b"\n")
         anchor = {
             "schema_version": "web_bridge_deployment_drain_epoch_anchor_v1",
             "drain_epoch": state["drain_epoch"],
             "execution_epoch": state["execution_epoch"],
         }
-        self._atomic_write(
-            self.epoch_anchor_path, _canonical_bytes(anchor) + b"\n"
-        )
+        self._atomic_write(self.epoch_anchor_path, _canonical_bytes(anchor) + b"\n")
 
     def _validate_epoch_anchor(self, state: dict[str, Any]) -> None:
         if not self.epoch_anchor_path.exists():
             if self.allow_initial_bootstrap:
                 anchor = {
-                    "schema_version": (
-                        "web_bridge_deployment_drain_epoch_anchor_v1"
-                    ),
+                    "schema_version": ("web_bridge_deployment_drain_epoch_anchor_v1"),
                     "drain_epoch": state["drain_epoch"],
                     "execution_epoch": state["execution_epoch"],
                 }
@@ -988,8 +1274,7 @@ class DeploymentDrainService:
             ) from exc
         if (
             set(anchor) != {"schema_version", "drain_epoch", "execution_epoch"}
-            or anchor["schema_version"]
-            != "web_bridge_deployment_drain_epoch_anchor_v1"
+            or anchor["schema_version"] != "web_bridge_deployment_drain_epoch_anchor_v1"
             or type(anchor["drain_epoch"]) is not int
             or type(anchor["execution_epoch"]) is not int
             or state["drain_epoch"] < anchor["drain_epoch"]
@@ -1011,10 +1296,7 @@ class DeploymentDrainService:
                 "SAFE_RESTART_RECEIPT_MISSING", "active receipt is missing"
             )
         raw = self._read_secure_file(self._receipt_path(receipt_id))
-        if (
-            expected_raw_sha256 is not None
-            and _sha256(raw) != expected_raw_sha256
-        ):
+        if expected_raw_sha256 is not None and _sha256(raw) != expected_raw_sha256:
             raise DeploymentDrainError(
                 "SAFE_RESTART_RECEIPT_RAW_HASH_MISMATCH",
                 "restart receipt exact bytes do not match durable state",
@@ -1028,9 +1310,7 @@ class DeploymentDrainService:
         expected_raw_sha256: str | None,
     ) -> DeploymentOnlineCheckpointDTO | None:
         try:
-            receipt_raw = self._read_secure_file(
-                self._receipt_path(receipt_id)
-            )
+            receipt_raw = self._read_secure_file(self._receipt_path(receipt_id))
             if (
                 expected_raw_sha256 is None
                 or _sha256(receipt_raw) != expected_raw_sha256
@@ -1120,6 +1400,116 @@ class DeploymentDrainService:
             )
         return checkpoint
 
+    def _block_online_recheck_failure(
+        self, state: dict[str, Any], detail: str
+    ) -> None:
+        state.update(
+            state="DRAIN_BLOCKED",
+            blockers=[f"online_recheck_failed:{detail}"],
+            freeze_reason=(
+                "online_snapshot_online_recheck_failed_windows_remains_fenced"
+            ),
+            updated_at=self._now().isoformat(),
+        )
+        self._invalidate_online_recheck(state)
+        self._write_state(state)
+
+    def _read_active_online_recheck(
+        self, state: dict[str, Any]
+    ) -> SafeRestartOnlineRecheckDTO:
+        receipt_id = state.get("active_receipt_id")
+        raw = self._read_secure_file(self._online_recheck_path(receipt_id))
+        if _sha256(raw) != state["active_online_recheck_raw_sha256"]:
+            raise DeploymentDrainError(
+                "SAFE_RESTART_RECHECK_RAW_HASH_MISMATCH",
+                "online recheck exact bytes do not match durable state",
+            )
+        try:
+            artifact = SafeRestartOnlineRecheckDTO.model_validate_json(raw)
+        except Exception as exc:
+            raise DeploymentDrainError(
+                "SAFE_RESTART_RECHECK_INVALID",
+                "online recheck artifact is invalid",
+            ) from exc
+        state_rechecked_at = datetime.fromisoformat(
+            state["online_rechecked_at"].replace("Z", "+00:00")
+        )
+        if (
+            artifact.online_recheck_id != state["active_online_recheck_id"]
+            or artifact.receipt_id != receipt_id
+            or artifact.recheck_checkpoint_raw_sha256
+            != state["active_recheck_checkpoint_raw_sha256"]
+            or artifact.checked_at != state_rechecked_at
+        ):
+            raise DeploymentDrainError(
+                "SAFE_RESTART_RECHECK_BINDING_MISMATCH",
+                "online recheck artifact does not match durable state",
+            )
+        return artifact
+
+    def _verify_active_online_recheck_pointer(
+        self, state: dict[str, Any]
+    ) -> None:
+        if state.get("active_online_recheck_id") is None:
+            return
+        artifact = self._read_active_online_recheck(state)
+        checkpoint_raw = self._read_secure_file(
+            self._checkpoint_path(artifact.recheck_checkpoint_raw_sha256)
+        )
+        if _sha256(checkpoint_raw) != artifact.recheck_checkpoint_raw_sha256:
+            raise DeploymentDrainError(
+                "SAFE_RESTART_RECHECK_CHECKPOINT_HASH_MISMATCH",
+                "recheck checkpoint exact bytes do not match the artifact",
+            )
+        try:
+            checkpoint = DeploymentOnlineRecheckCheckpointDTO.model_validate_json(
+                checkpoint_raw
+            )
+        except Exception as exc:
+            raise DeploymentDrainError(
+                "SAFE_RESTART_RECHECK_CHECKPOINT_INVALID",
+                "recheck checkpoint is invalid",
+            ) from exc
+        if checkpoint.original_checkpoint_raw_sha256 != (
+            artifact.original_checkpoint_raw_sha256
+        ):
+            raise DeploymentDrainError(
+                "SAFE_RESTART_RECHECK_BINDING_MISMATCH",
+                "recheck checkpoint does not match the original checkpoint",
+            )
+        receipt = self._read_receipt(
+            state.get("active_receipt_id"),
+            expected_raw_sha256=state.get("active_receipt_raw_sha256"),
+        )
+        receipt_raw = self._read_secure_file(self._receipt_path(receipt.receipt_id))
+        original = self._load_online_checkpoint_for_receipt(
+            receipt.receipt_id,
+            expected_raw_sha256=state.get("active_receipt_raw_sha256"),
+        )
+        if original is None:
+            raise DeploymentDrainError(
+                "DEPLOYMENT_RECHECK_CHECKPOINT_REQUIRED",
+                "active online recheck requires an A2 checkpoint",
+            )
+        original_raw = self._read_secure_file(
+            self._checkpoint_path(receipt.snapshot.checkpoint_sha256)
+        )
+        artifact_raw = self._read_secure_file(
+            self._online_recheck_path(receipt.receipt_id)
+        )
+        try:
+            verify_safe_restart_online_recheck(
+                artifact_raw=artifact_raw,
+                receipt_raw=receipt_raw,
+                original_checkpoint_raw=original_raw,
+                recheck_checkpoint_raw=checkpoint_raw,
+            )
+        except DeploymentOnlineRecheckError as exc:
+            raise DeploymentDrainError(
+                "SAFE_RESTART_RECHECK_CHAIN_INVALID",
+                "online recheck exact-byte chain is invalid",
+            ) from exc
+
     def _receipt_path(self, receipt_id: str) -> Path:
         if not receipt_id.startswith("safe-restart-") or "/" in receipt_id:
             raise DeploymentDrainError(
@@ -1134,10 +1524,23 @@ class DeploymentDrainService:
             )
         return self.consume_dir / f"{receipt_id}.consumed.json"
 
+    def _online_recheck_path(self, receipt_id: str | None) -> Path:
+        if (
+            not receipt_id
+            or not receipt_id.startswith("safe-restart-")
+            or "/" in receipt_id
+        ):
+            raise DeploymentDrainError(
+                "SAFE_RESTART_RECEIPT_ID_INVALID", "invalid receipt id"
+            )
+        return self.recheck_dir / f"{receipt_id}.online-recheck.json"
+
     def _checkpoint_path(self, checkpoint_sha256: str) -> Path:
         if (
             len(checkpoint_sha256) != 64
-            or any(character not in "0123456789abcdef" for character in checkpoint_sha256)
+            or any(
+                character not in "0123456789abcdef" for character in checkpoint_sha256
+            )
             or not checkpoint_sha256.strip("0")
         ):
             raise DeploymentDrainError(
@@ -1322,6 +1725,23 @@ def _utc_json_timestamp(value: datetime) -> str:
 
 def _sha256(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+
+def _is_sha256(value: object) -> bool:
+    return bool(
+        isinstance(value, str)
+        and len(value) == 64
+        and value.strip("0")
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _is_prefixed_sha256(value: object, prefix: str) -> bool:
+    return bool(
+        isinstance(value, str)
+        and value.startswith(prefix)
+        and _is_sha256(value.removeprefix(prefix))
+    )
 
 
 def _write_all(fd: int, data: bytes) -> None:

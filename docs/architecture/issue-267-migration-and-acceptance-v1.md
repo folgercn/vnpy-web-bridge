@@ -208,6 +208,8 @@ DTO 属于语义层，可接收等价的 UTC datetime，持久化前统一输出
 
 1-pre-B B1a 只冻结 fresh recheck 协议：Windows 新增 `recheck_deployment_safety_snapshot_v1(request_id, owner_challenge, recheck_id, fresh_challenge, expected_generation)`，必须命中 A2 已冻结 owner，在 EventEngine 上重新复制事实，并回显 original/current server、generation 与排除 request/timestamp/challenge 的规范化 execution-facts canonical SHA-256。Linux 新增独立 recheck checkpoint/artifact v1；不修改 A2 checkpoint v1，且只在 exact receipt/original checkpoint/recheck checkpoint 的 raw SHA、owner、epoch、server、generation、state 和规范化事实全部相等时生成证据。B1a 证据显式保持 `one_shot_consume_allowed=false`、`reconciliation_authorized=false`、`deployment_authorized=false`、`countable_forward=false`；不接线 Commodity owner、不持久化、不迁移 state v2、不激活 consume，`scripts/deploy.sh` 继续冻结。
 
+1-pre-B B1b 将 fresh recheck 接到唯一 Commodity owner：调用方不能提交 recheck DTO，DeploymentDrain 在 gate 内从 create-only custody 读取 receipt/original checkpoint 的 exact bytes，生成 fresh challenge，再按 `gate → Commodity cycle → Windows RPC` 顺序捕获事实。recheck checkpoint 先按内容 hash 持久化，随后写入每个 receipt 唯一的 create-only artifact 槽，最后才提交 state v2 指针；孤儿、碰撞、篡改、RPC 漂移和重启都 fail closed，旧 recheck 不恢复为权限。v1 消费痕迹迁移时隔离到 `RESTARTED_FROZEN`。B1b 仍保持 consume、reconciliation、deployment、production/live/countable 全部为 false，消费 WAL 与 state commitment 留给 B2，`scripts/deploy.sh` 继续冻结。
+
 Cutover：先以禁交易、无订单方式验证 lock acquisition、并发 command rejection、receipt expiry 和 release；该 PR 不改变 8080、镜像拓扑或订单 owner。
 
 Rollback：只在未持有有效 deployment lock 且无运行迁移时回滚；lock/receipt audit 保留。无法判断 lock 状态时保持冻结并 roll forward。
