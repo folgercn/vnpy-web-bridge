@@ -25,7 +25,7 @@
 - 根 `Dockerfile` 先构建 `frontend/`，再把 `frontend/dist`、`backend/`、`shared/`、签名验证脚本和 JSON Schema 一并复制到 Python runtime；
 - `backend/app/main.py` 同时注册 REST/WebSocket、提供 SPA 静态文件，并在 startup/shutdown 中管理 RPC、Tick persistence、Monitoring、C_FAST Shadow、Execution Quality 和 CommoditySimNow；
 - `deployments/docker-compose.prod.yml` 只把 `web-bridge` 作为应用部署单元，并由它暴露宿主端口 8080；
-- `.github/workflows/cd.yml` 将 `frontend/**`、`backend/**`、根 `Dockerfile` 和 `deployments/**` 等变化统一分类为 `web-bridge` 镜像变化；
+- PR 1-guard 前的 `.github/workflows/cd.yml` 会将 `frontend/**`、`backend/**`、根 `Dockerfile` 和 `deployments/**` 等变化统一分类为 `web-bridge` 镜像变化；该 workflow 已在 PR 1-guard 删除，PR 1-pre 前禁止自动或手工替换 legacy `web-bridge`；
 - `scripts/deploy.sh` 只允许部署 `web-bridge`，因此纯前端发布也会替换承载交易相关内存状态和后台循环的容器；
 - `deployments/docker-compose.c-fast-execution-quality.yml` 和 `deployments/docker-compose.c-fast-simnow-permit.yml` 继续通过 Compose overlay 把执行质量、artifact、keyring 和 SimNow 配置注入同一服务。
 

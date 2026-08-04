@@ -242,7 +242,7 @@
   ],
   "deploy_units": [
     {"id": "frontend", "phase": "phase_1", "implementation_status": "planned", "automatic_deploy_allowed": false, "safe_restart_contract": "independent_no_dependency_recreate"},
-    {"id": "web-bridge", "phase": "current_and_phase_1_compatibility", "implementation_status": "current", "automatic_deploy_allowed": false, "safe_restart_contract": "manual_realtime_execution_preflight_required"},
+    {"id": "web-bridge", "phase": "current_and_phase_1_compatibility", "implementation_status": "current", "automatic_deploy_allowed": false, "safe_restart_contract": "disabled_until_phase_1_pre_atomic_drain_short_ttl_receipt"},
     {"id": "control-api", "phase": "phase_2", "implementation_status": "planned", "automatic_deploy_allowed": false, "safe_restart_contract": "independent_after_execution_split"},
     {"id": "execution-orchestrator", "phase": "phase_2", "implementation_status": "planned", "automatic_deploy_allowed": false, "safe_restart_contract": "atomic_drain_short_ttl_receipt_recheck_fencing_reconcile"},
     {"id": "map-producer", "phase": "phase_3", "implementation_status": "planned_batch_job", "automatic_deploy_allowed": false, "safe_restart_contract": "immutable_run_id_and_single_candidate_writer"},

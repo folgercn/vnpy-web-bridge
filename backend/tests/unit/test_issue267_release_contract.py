@@ -452,6 +452,11 @@ def test_ready_release_requires_compatible_schemas_and_matching_execution_receip
             "from_config_sha256": EVIDENCE_SHA256,
             "to_config_sha256": EVIDENCE_SHA256,
             "safety_gate": "required_verified",
+            "receipt_plan_binding_verified": True,
+            "receipt_source_binding_verified": True,
+            "receipt_freshness_verified": True,
+            "pre_restart_recheck_verified": True,
+            "receipt_verification_evidence_sha256": EVIDENCE_SHA256,
             "safe_restart_receipt": {
                 "schema_version": "web_bridge_safe_restart_receipt_v1",
                 "receipt_id": f"safe-restart-{EVIDENCE_SHA256}",
@@ -460,8 +465,14 @@ def test_ready_release_requires_compatible_schemas_and_matching_execution_receip
                 "unit": "frontend",
                 "issued_at": "2026-08-04T00:00:00Z",
                 "expires_at": "2026-08-04T00:01:00Z",
+                "ttl_seconds": 60,
+                "execution_epoch": 1,
+                "plan_version": "v1",
                 "state_version": "v1",
                 "state_sha256": EVIDENCE_SHA256,
+                "active_orders_snapshot_sha256": EVIDENCE_SHA256,
+                "nonce": "receipt_nonce_001",
+                "checkpoint_sha256": EVIDENCE_SHA256,
                 "safe_to_restart": True,
                 "active_orders": 0,
                 "unknown_outcome": False,
@@ -474,6 +485,11 @@ def test_ready_release_requires_compatible_schemas_and_matching_execution_receip
     ]
     assert list(validator.iter_errors(plan))
     plan["restart"][0]["safe_restart_receipt"]["unit"] = "execution-orchestrator"
+    assert not list(validator.iter_errors(plan))
+
+    plan["restart"][0]["unit"] = "web-bridge"
+    assert list(validator.iter_errors(plan))
+    plan["restart"][0]["safe_restart_receipt"]["unit"] = "web-bridge"
     assert not list(validator.iter_errors(plan))
 
     plan["create"] = [

@@ -555,9 +555,9 @@ Web 端具备交易能力后，必须满足：
 - `docs/deployment.md`
 - `scripts/deploy.sh`
 - `.github/workflows/ci.yml`
-- `.github/workflows/cd.yml`
+- `.github/workflows/issue79-production-validation.yml`
 
-部署自动化主要面向 Macmini 自托管 runner。生产部署前应确认：
+Issue #267 PR 1-guard 已移除 legacy 自动部署 workflow；PR 1-pre 的原子 drain 和 safe-restart receipt 完成前，不允许通过 GitHub Actions、`scripts/deploy.sh` 或直接 Compose 操作替换/重启生产 `web-bridge`。保留的 Issue #79 workflow 只执行显式确认的生产验证。恢复受控部署前应确认：
 
 - vn.py RPC 服务可达。
 - `.env` 中认证、RPC、交易开关、风控和数据库配置正确。

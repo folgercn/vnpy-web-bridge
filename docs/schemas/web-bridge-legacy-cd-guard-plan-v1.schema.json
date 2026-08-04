@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vnpy-web-bridge:schema:web-bridge-legacy-cd-guard-plan-v1",
+  "title": "Web Bridge legacy CD guard plan v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "issue_number",
+    "source_commit_sha",
+    "changed_paths",
+    "selected_rule_ids",
+    "decision",
+    "build_units",
+    "restart_units",
+    "preserve_units",
+    "blocked_reasons",
+    "merge_gate_blocked",
+    "automatic_deploy_allowed",
+    "manual_deploy_allowed",
+    "production_allowed",
+    "live_trading_authorized"
+  ],
+  "properties": {
+    "schema_version": {"const": "web_bridge_legacy_cd_guard_plan_v1"},
+    "issue_number": {"const": 267},
+    "source_commit_sha": {"type": "string", "pattern": "^(?!0{40}$)[0-9a-f]{40}$"},
+    "changed_paths": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "uniqueItems": true
+    },
+    "selected_rule_ids": {
+      "type": "array",
+      "items": {"type": "string", "pattern": "^[a-z][a-z0-9-]{1,63}$"},
+      "uniqueItems": true
+    },
+    "decision": {"enum": ["NO_DEPLOY", "BUILD_ONLY", "BLOCKED"]},
+    "build_units": {
+      "type": "array",
+      "items": {"const": "legacy-web-bridge-app"},
+      "uniqueItems": true
+    },
+    "restart_units": {"type": "array", "maxItems": 0},
+    "preserve_units": {
+      "const": ["postgres", "questdb", "web-bridge"]
+    },
+    "blocked_reasons": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "code", "rule_id"],
+        "properties": {
+          "path": {"type": "string", "minLength": 1},
+          "code": {"enum": ["empty_change_set", "unknown_baseline", "unknown_path", "ambiguous_rule", "infra_manual", "unknown_dependency", "automatic_legacy_deploy_forbidden"]},
+          "rule_id": {"oneOf": [{"type": "null"}, {"type": "string", "minLength": 1}]}
+        }
+      },
+      "uniqueItems": true
+    },
+    "merge_gate_blocked": {"type": "boolean"},
+    "automatic_deploy_allowed": {"const": false},
+    "manual_deploy_allowed": {"const": false},
+    "production_allowed": {"const": false},
+    "live_trading_authorized": {"const": false}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"merge_gate_blocked": {"const": true}}},
+      "then": {"properties": {"decision": {"const": "BLOCKED"}, "blocked_reasons": {"minItems": 1}}}
+    },
+    {
+      "if": {
+        "properties": {
+          "blocked_reasons": {
+            "contains": {
+              "properties": {"code": {"enum": ["empty_change_set", "unknown_baseline", "unknown_path", "ambiguous_rule"]}},
+              "required": ["code"]
+            }
+          }
+        }
+      },
+      "then": {"properties": {"merge_gate_blocked": {"const": true}}}
+    },
+    {
+      "if": {"properties": {"decision": {"const": "BLOCKED"}}},
+      "then": {"properties": {"blocked_reasons": {"minItems": 1}}}
+    },
+    {
+      "if": {"properties": {"decision": {"enum": ["NO_DEPLOY", "BUILD_ONLY"]}}},
+      "then": {"properties": {"blocked_reasons": {"maxItems": 0}}}
+    }
+  ]
+}

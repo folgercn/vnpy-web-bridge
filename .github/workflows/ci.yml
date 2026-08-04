@@ -111,10 +111,73 @@ jobs:
         run: |
           PYTHONPATH=backend:scripts:. pytest -q \
             backend/tests/unit/test_ci_backend_test_shards.py \
+            backend/tests/unit/test_ci_cd_release_classifier.py \
             backend/tests/unit/test_ci_change_classifier.py \
             backend/tests/unit/test_ci_workflow_contract.py \
             backend/tests/unit/test_issue267_release_contract.py \
+            backend/tests/unit/test_issue267_legacy_cd_guard.py \
             backend/tests/unit/test_pr_update_comment_gate.py
+
+  legacy-cd-guard-plan:
+    name: Legacy CD guard plan
+    needs: changes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: scripts/ci/requirements-quick.txt
+
+      - name: Install guard-plan dependencies
+        run: pip install -r scripts/ci/requirements-quick.txt
+
+      - name: Resolve changed files
+        id: changed-files
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE_SHA: ${{ github.event.before }}
+          CURRENT_SHA: ${{ github.sha }}
+        run: |
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            git fetch origin "$BASE_REF" --depth=1
+            git diff --name-only --no-renames "origin/$BASE_REF"...HEAD > /tmp/changed-files.txt
+            echo "baseline_status=known" >> "$GITHUB_OUTPUT"
+          elif [ -n "$BEFORE_SHA" ] && [ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]; then
+            git diff --name-only --no-renames "$BEFORE_SHA" "$CURRENT_SHA" > /tmp/changed-files.txt
+            echo "baseline_status=known" >> "$GITHUB_OUTPUT"
+          else
+            git ls-tree -r --name-only "$CURRENT_SHA" > /tmp/changed-files.txt
+            echo "baseline_status=unknown" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Produce inert release plan
+        env:
+          CURRENT_SHA: ${{ github.sha }}
+        run: >-
+          python scripts/ci/plan_legacy_cd_guard.py
+          --paths-file /tmp/changed-files.txt
+          --source-commit-sha "$CURRENT_SHA"
+          --baseline-status "${{ steps.changed-files.outputs.baseline_status }}"
+          --output artifacts/issue-267-legacy-cd-guard-plan.json
+
+      - name: Upload release plan
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: issue-267-legacy-cd-guard-plan-${{ github.run_id }}
+          path: artifacts/issue-267-legacy-cd-guard-plan.json
+          if-no-files-found: error
+          retention-days: 30
 
   backend:
     name: Backend tests (shard ${{ matrix.shard }})
@@ -312,6 +375,7 @@ jobs:
     needs:
       - changes
       - quick-checks
+      - legacy-cd-guard-plan
       - backend
       - frontend
       - docker
@@ -332,6 +396,8 @@ jobs:
               for name, details in needs.items()
               if details["result"] not in {"success", "skipped"}
           }
+          if needs["legacy-cd-guard-plan"]["result"] != "success":
+              invalid["legacy-cd-guard-plan"] = needs["legacy-cd-guard-plan"]["result"]
           if invalid:
               raise SystemExit(f"required CI jobs failed or were cancelled: {invalid}")
           print("all applicable CI jobs succeeded; unrelated jobs may be skipped")
