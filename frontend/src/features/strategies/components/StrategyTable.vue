@@ -19,7 +19,10 @@ const props = defineProps<{
   canOperate: boolean
   pendingKey?: string
 }>()
-const emit = defineEmits<{ operate: [action: StrategyAction, name: string] }>()
+const emit = defineEmits<{
+  operate: [action: Exclude<StrategyAction, 'stop'>, name: string]
+  requestStop: [name: string]
+}>()
 
 const columns: DataTableColumns<StrategySummary> = [
   { title: '策略名称', key: 'strategy_name', fixed: 'left', width: 180 },
@@ -35,7 +38,7 @@ const columns: DataTableColumns<StrategySummary> = [
     fixed: 'right',
     render(row) {
       const name = row.strategy_name
-      const button = (label: string, action: StrategyAction, options: Pick<ButtonProps, 'type' | 'secondary'> = {}) =>
+      const button = (label: string, action: Exclude<StrategyAction, 'stop'>, options: Pick<ButtonProps, 'type' | 'secondary'> = {}) =>
         h(NButton, {
           size: 'small',
           disabled: !props.canOperate || Boolean(props.pendingKey),
@@ -46,7 +49,13 @@ const columns: DataTableColumns<StrategySummary> = [
       return h('div', { class: 'toolbar' }, [
         button('初始化', 'init'),
         button('启动', 'start', { type: 'primary', secondary: true }),
-        button('停止', 'stop', { type: 'error', secondary: true })
+        h(NButton, {
+          size: 'small',
+          type: 'error',
+          secondary: true,
+          disabled: !props.canOperate || Boolean(props.pendingKey),
+          onClick: () => emit('requestStop', name)
+        }, { default: () => '停止' })
       ])
     }
   }
