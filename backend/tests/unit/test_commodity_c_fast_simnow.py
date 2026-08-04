@@ -12,8 +12,29 @@ from threading import Event, Thread
 from time import monotonic, sleep
 from typing import Any
 
-import app.services.commodity_c_fast_one_shot_custody as one_shot_custody_module
 import pytest
+from pydantic import ValidationError
+from test_commodity_c_fast_shadow import (
+    sign_payload as official_sign_payload,
+)
+from test_commodity_c_fast_shadow import (
+    unsigned_payload,
+)
+from test_commodity_simnow import (
+    ACCOUNT_HASH,
+    NOW,
+    FakeTrade,
+    LocalRiskRejectTrade,
+    RpcTimeoutTrade,
+    enable_payload,
+    fills_for_requests,
+    make_key,
+    make_service,
+    make_settings,
+    position,
+)
+
+import app.services.commodity_c_fast_one_shot_custody as one_shot_custody_module
 from app.core.config import Settings
 from app.core.errors import (
     CommoditySimNowSafetyError,
@@ -29,6 +50,8 @@ from app.schemas.commodity_c_fast_shadow import (
 )
 from app.schemas.commodity_simnow import (
     CommodityCFastContinuousEnableRequestDTO,
+    CommodityCFastRuntimeAuthorizationEnableRequestDTO,
+    CommodityCFastRuntimeAuthorizationRevokeRequestDTO,
     CommodityCFastShakedownPreviewRequestDTO,
     CommoditySimNowDisableRequestDTO,
 )
@@ -53,26 +76,6 @@ from app.services.commodity_simnow import (
 )
 from app.services.trade_service import c_fast_order_request_fingerprint
 from app.services.vnpy_rpc_service import RpcTimeoutError
-from pydantic import ValidationError
-from test_commodity_c_fast_shadow import (
-    sign_payload as official_sign_payload,
-)
-from test_commodity_c_fast_shadow import (
-    unsigned_payload,
-)
-from test_commodity_simnow import (
-    ACCOUNT_HASH,
-    NOW,
-    FakeTrade,
-    LocalRiskRejectTrade,
-    RpcTimeoutTrade,
-    enable_payload,
-    fills_for_requests,
-    make_key,
-    make_service,
-    make_settings,
-    position,
-)
 
 
 def _publish_terminal_archive_process(
@@ -3447,6 +3450,285 @@ def test_c_fast_continuous_can_be_explicitly_reenabled_from_terminal_anchor(
         ]
         is True
     )
+
+
+def test_runtime_authorization_enable_preflight_binds_live_account(
+    tmp_path: Path,
+) -> None:
+    service, rpc, snapshot, _ = prepare_c_fast_shakedown(tmp_path)
+    complete_c_fast_continuous_session(service, rpc, snapshot)
+
+    class RuntimeAuthority:
+        revoked = False
+
+        def enable(self, **_kwargs):
+            return {
+                "state": "ACTIVE",
+                "authorization_id": "runtime-auth-test",
+                "expected_simnow_account_sha256": ACCOUNT_HASH,
+                "production_allowed": False,
+            }
+
+        def revoke(self, **_kwargs):
+            self.revoked = True
+            return {"state": "REVOKED"}
+
+        def status(self):
+            return {"state": "ACTIVE"}
+
+    authority = RuntimeAuthority()
+    service.c_fast_runtime_authorization = authority
+    result = service.enable_c_fast_runtime_authorization(
+        CommodityCFastRuntimeAuthorizationEnableRequestDTO(
+            reason="approve persistent SimNow runtime",
+            confirm_simnow_only=True,
+            confirm_signed_snapshots_only=True,
+            confirm_continuous=True,
+            confirm_no_production=True,
+            confirm_fail_closed_on_drift=True,
+        ),
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+
+    assert result["action"] == "runtime_authorization_enabled"
+    assert result["production_allowed"] is False
+    assert authority.revoked is False
+
+
+def test_runtime_authorization_enable_rpc_waiting_preserves_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, rpc, snapshot, _ = prepare_c_fast_shakedown(tmp_path)
+    complete_c_fast_continuous_session(service, rpc, snapshot)
+
+    class RuntimeAuthority:
+        revoked = False
+
+        def enable(self, **_kwargs):
+            return {
+                "state": "ACTIVE",
+                "authorization_id": "runtime-auth-test",
+                "expected_simnow_account_sha256": ACCOUNT_HASH,
+                "production_allowed": False,
+            }
+
+        def revoke(self, **_kwargs):
+            self.revoked = True
+            return {"state": "REVOKED"}
+
+        def status(self):
+            return {"state": "ACTIVE"}
+
+    authority = RuntimeAuthority()
+    service.c_fast_runtime_authorization = authority
+    monkeypatch.setattr(
+        service,
+        "_safety_snapshot",
+        lambda **_kwargs: (_ for _ in ()).throw(RpcCallError()),
+    )
+    result = service.enable_c_fast_runtime_authorization(
+        CommodityCFastRuntimeAuthorizationEnableRequestDTO(
+            reason="approve persistent SimNow runtime",
+            confirm_simnow_only=True,
+            confirm_signed_snapshots_only=True,
+            confirm_continuous=True,
+            confirm_no_production=True,
+            confirm_fail_closed_on_drift=True,
+        ),
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+
+    assert result["action"] == "runtime_authorization_enabled_waiting"
+    assert result["reason"] == "rpc_transient_failure"
+    assert authority.revoked is False
+    assert service.c_fast_continuous_authorized is False
+    assert service.c_fast_shakedown_auto_dispatch_authorized is False
+
+
+def test_runtime_authorization_enable_with_trade_disabled_waits_without_revoke(
+    tmp_path: Path,
+) -> None:
+    service, rpc, snapshot, _ = prepare_c_fast_shakedown(tmp_path)
+    complete_c_fast_continuous_session(service, rpc, snapshot)
+
+    class RuntimeAuthority:
+        revoked = False
+
+        def enable(self, **_kwargs):
+            return {
+                "state": "ACTIVE",
+                "authorization_id": "runtime-auth-test",
+                "expected_simnow_account_sha256": ACCOUNT_HASH,
+                "production_allowed": False,
+            }
+
+        def revoke(self, **_kwargs):
+            self.revoked = True
+            return {"state": "REVOKED"}
+
+        def status(self):
+            return {"state": "REVOKED" if self.revoked else "ACTIVE"}
+
+    authority = RuntimeAuthority()
+    service.c_fast_runtime_authorization = authority
+    service.risk.web_trade_enabled = False
+
+    result = service.enable_c_fast_runtime_authorization(
+        CommodityCFastRuntimeAuthorizationEnableRequestDTO(
+            reason="approve disabled-trading preflight",
+            confirm_simnow_only=True,
+            confirm_signed_snapshots_only=True,
+            confirm_continuous=True,
+            confirm_no_production=True,
+            confirm_fail_closed_on_drift=True,
+        ),
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+
+    assert result["action"] == "runtime_authorization_enabled_waiting"
+    assert result["reason"] == "web_trade_disabled"
+    assert authority.revoked is False
+    assert service.c_fast_continuous_authorized is False
+    assert service.c_fast_shakedown_auto_dispatch_authorized is False
+    assert (
+        service.c_fast_runtime_authorization_status()["operational_state"]
+        == "WAITING_WEB_TRADE_DISABLED"
+    )
+
+
+def test_runtime_authorization_revoke_preempts_blocked_child_loop(
+    tmp_path: Path,
+) -> None:
+    trade = BlockingAfterFirstChildTrade()
+    service, _, _, _ = prepare_c_fast_shakedown(tmp_path, trade=trade)
+    bind_test_execution_permit(service, selected_products=("ag", "al"))
+    preview = service.preview_c_fast_shakedown(
+        ["ag", "al"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+
+    class RuntimeAuthority:
+        revoked = False
+
+        def revoke(self, **_kwargs):
+            self.revoked = True
+            return {"state": "REVOKED"}
+
+        def status(self):
+            return {"state": "REVOKED" if self.revoked else "ACTIVE"}
+
+    authority = RuntimeAuthority()
+    service.c_fast_runtime_authorization = authority
+    start_error: list[Exception] = []
+    revoke_result: list[dict] = []
+
+    def start_session() -> None:
+        try:
+            service.start_c_fast_shakedown(
+                preview["plan_hash"],
+                operator="admin",
+                role="admin",
+                source_ip=None,
+            )
+        except Exception as exc:  # noqa: BLE001 - thread result is asserted
+            start_error.append(exc)
+
+    def revoke_runtime() -> None:
+        revoke_result.append(
+            service.revoke_c_fast_runtime_authorization(
+                CommodityCFastRuntimeAuthorizationRevokeRequestDTO(
+                    reason="operator emergency runtime revoke"
+                ),
+                operator="admin",
+                role="admin",
+                source_ip=None,
+            )
+        )
+
+    start_thread = Thread(target=start_session)
+    start_thread.start()
+    assert trade.first_child_sent.wait(5)
+    revoke_thread = Thread(target=revoke_runtime)
+    revoke_thread.start()
+    deadline = monotonic() + 5
+    while not service._dispatch_abort_requested and monotonic() < deadline:
+        sleep(0.01)
+    assert service._dispatch_abort_requested is True
+    trade.release_first_child.set()
+    start_thread.join(5)
+    revoke_thread.join(5)
+
+    assert not start_thread.is_alive()
+    assert not revoke_thread.is_alive()
+    assert len(trade.requests) == 1
+    assert start_error
+    assert revoke_result[0]["action"] == "runtime_authorization_revoked"
+    assert revoke_result[0]["halt"]["required"] is True
+    assert revoke_result[0]["halt"]["cancel_requested_order_ids"] == [
+        "CTP.1"
+    ]
+    assert service.current_plan["status"] == "HALTED_RECONCILE_REQUIRED"
+    assert authority.revoked is True
+
+
+def test_c_fast_continuous_trade_disabled_is_waiting_not_revoked(
+    tmp_path: Path,
+) -> None:
+    service, rpc, snapshot, _ = prepare_c_fast_shakedown(tmp_path)
+    complete_c_fast_continuous_session(service, rpc, snapshot)
+    service.risk.web_trade_enabled = False
+
+    result = service.auto_c_fast_continuous_advance()
+
+    assert result == {"action": "waiting", "reason": "web_trade_disabled"}
+    assert service.c_fast_continuous_authorized is True
+    assert service._load_c_fast_shakedown_state()["continuous_authorized"] is True
+
+
+@pytest.mark.parametrize("runtime_state", ["EXPIRED", "REVOKED"])
+def test_legacy_anchor_runtime_migration_does_not_restore_inactive_authority(
+    tmp_path: Path,
+    runtime_state: str,
+) -> None:
+    service, rpc, snapshot, _ = prepare_c_fast_shakedown(tmp_path)
+    complete_c_fast_continuous_session(service, rpc, snapshot)
+    service.settings = service.settings.model_copy(
+        update={"commodity_simnow_enabled": True}
+    )
+
+    recovered = CommoditySimNowService(
+        settings=service.settings,
+        rpc=service.rpc,
+        trade=service.trade,
+        risk=service.risk,
+        audit=service.audit,
+        tick_store=service.tick_store,
+        clock=service.clock,
+    )
+
+    class RuntimeAuthority:
+        def status(self):
+            return {
+                "state": runtime_state,
+                "authorization_id": "runtime-auth-original",
+            }
+
+    recovered.c_fast_runtime_authorization = RuntimeAuthority()
+    result = recovered._restore_c_fast_continuous_authority()
+
+    assert result["action"] == "waiting"
+    assert result["reason"] == "runtime_authorization_not_active"
+    assert recovered._c_fast_continuous_resume_requested() is False
+    assert recovered.c_fast_continuous_authorized is False
+    assert recovered.c_fast_shakedown_auto_dispatch_authorized is False
+
+
 
 
 def test_c_fast_planned_shutdown_preserves_and_restores_continuous_authority(

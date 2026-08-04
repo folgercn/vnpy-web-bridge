@@ -178,6 +178,19 @@ class CommodityCFastContinuousEnableRequestDTO(StrictModel):
     confirm_fail_closed_on_drift: Literal[True]
 
 
+class CommodityCFastRuntimeAuthorizationEnableRequestDTO(StrictModel):
+    reason: str = Field(min_length=8, max_length=500)
+    confirm_simnow_only: Literal[True]
+    confirm_signed_snapshots_only: Literal[True]
+    confirm_continuous: Literal[True]
+    confirm_no_production: Literal[True]
+    confirm_fail_closed_on_drift: Literal[True]
+
+
+class CommodityCFastRuntimeAuthorizationRevokeRequestDTO(StrictModel):
+    reason: str = Field(min_length=8, max_length=500)
+
+
 class CommodityPlanExecuteRequestDTO(StrictModel):
     plan_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     phase: Literal["close", "open"]

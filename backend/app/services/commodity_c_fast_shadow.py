@@ -26,6 +26,7 @@ from app.core.commodity_strategy_identity import (
 )
 from app.core.config import Settings, get_settings
 from app.schemas.commodity_c_fast_shadow import (
+    CommodityCFastRuntimeExecutableSnapshotDTO,
     CommodityCFastRuntimeSnapshotDTO,
     CommodityCFastShakedownSnapshotDTO,
     CommodityCFastShadowDTO,
@@ -500,12 +501,15 @@ class CommodityCFastShadowService:
         if not isinstance(raw, dict):
             raise CFastShadowInvalidError("SNAPSHOT_ROOT_INVALID")
         try:
-            model = (
-                CommodityCFastShakedownSnapshotDTO
-                if raw.get("schema_version")
-                == "commodity_c_fast_simnow_shakedown_snapshot_v1"
-                else CommodityCFastShadowDTO
-            )
+            schema_version = raw.get("schema_version")
+            if schema_version == "commodity_c_fast_simnow_shakedown_snapshot_v1":
+                model = CommodityCFastShakedownSnapshotDTO
+            elif schema_version == (
+                "commodity_map_c_fast_simnow_executable_target_snapshot_v1"
+            ):
+                model = CommodityCFastRuntimeExecutableSnapshotDTO
+            else:
+                model = CommodityCFastShadowDTO
             return model.model_validate(raw)
         except ValidationError as exc:
             raise CFastShadowInvalidError("SNAPSHOT_SCHEMA_INVALID") from exc

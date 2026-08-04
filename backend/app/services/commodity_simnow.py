@@ -39,18 +39,21 @@ from app.core.errors import (
     RpcTimeoutError,
     RpcUnavailableError,
 )
-from app.schemas.commodity_c_fast_execution_permit import (
-    CommodityCFastSimNowExecutionPermitDTO,
-)
 from app.schemas.commodity_baseline_execution_permit import (
     baseline_execution_plan_core_payload,
 )
+from app.schemas.commodity_c_fast_execution_permit import (
+    CommodityCFastSimNowExecutionPermitDTO,
+)
 from app.schemas.commodity_c_fast_shadow import (
+    CommodityCFastRuntimeExecutableSnapshotDTO,
     CommodityCFastRuntimeSnapshotDTO,
     CommodityCFastShakedownSnapshotDTO,
 )
 from app.schemas.commodity_simnow import (
     CommodityCFastContinuousEnableRequestDTO,
+    CommodityCFastRuntimeAuthorizationEnableRequestDTO,
+    CommodityCFastRuntimeAuthorizationRevokeRequestDTO,
     CommodityPlanExecuteRequestDTO,
     CommodityPositionManagerShadowDTO,
     CommoditySimNowDisableRequestDTO,
@@ -62,15 +65,23 @@ from app.schemas.common import STATUS_VALUE_MAP
 from app.schemas.trade import OrderRequestDTO
 from app.services.audit_service import AuditService, audit_service
 from app.services.calendar_service import calendar_service
-from app.services.commodity_c_fast_one_shot_custody import (
-    CommodityCFastOneShotCustody,
-    CommodityCFastOneShotCustodyError,
-)
-from app.services.commodity_c_fast_shadow import C_FAST_SECTOR_MAP_V1
 from app.services.commodity_baseline_execution_permit import (
     CommodityBaselineExecutionPermitService,
     PreparedCommodityBaselinePermit,
 )
+from app.services.commodity_c_fast_continuous_runtime import (
+    ContinuousDecision,
+    completed_snapshot_outcome,
+    resolve_continuous_authority,
+)
+from app.services.commodity_c_fast_one_shot_custody import (
+    CommodityCFastOneShotCustody,
+    CommodityCFastOneShotCustodyError,
+)
+from app.services.commodity_c_fast_runtime_authorization import (
+    CommodityCFastRuntimeAuthorizationService,
+)
+from app.services.commodity_c_fast_shadow import C_FAST_SECTOR_MAP_V1
 from app.services.risk_service import RiskService, risk_service
 from app.services.trade_service import (
     TradeService,
@@ -93,6 +104,7 @@ C_FAST_TERMINAL_ARCHIVE_LOCK = ".terminal-archive.lock"
 C_FAST_CONTINUOUS_RETRYABLE_CONTROL_CODES = {
     "SNAPSHOT_NOT_PREVIOUSLY_ACCEPTED",
     "SNAPSHOT_NOT_CURRENTLY_ACCEPTED",
+    "SNAPSHOT_FILE_NOT_FOUND",
 }
 
 STATIC_CORE_SECTOR_MAP_ID = COMMODITY_FROZEN_SECTOR_MAP_V1_ID
@@ -136,6 +148,7 @@ def _serialized(method):
         if method.__name__ in {
             "disable",
             "revoke_all_execution_authority",
+            "revoke_c_fast_runtime_authorization",
             "stop_c_fast_shakedown",
             "stop_position_manager_shakedown",
         }:
@@ -270,6 +283,9 @@ class CommoditySimNowService:
         baseline_execution_permit: (
             CommodityBaselineExecutionPermitService | None
         ) = None,
+        c_fast_runtime_authorization: (
+            CommodityCFastRuntimeAuthorizationService | None
+        ) = None,
     ) -> None:
         self.settings = settings or get_settings()
         self.rpc = rpc or rpc_service
@@ -302,6 +318,13 @@ class CommoditySimNowService:
                 )
                 if isinstance(self.trade, TradeService)
                 else None
+            )
+        )
+        self.c_fast_runtime_authorization = (
+            c_fast_runtime_authorization
+            or CommodityCFastRuntimeAuthorizationService(
+                settings=self.settings,
+                clock=self.clock,
             )
         )
         self.enabled = False
@@ -910,11 +933,23 @@ class CommoditySimNowService:
         if not self._c_fast_continuous_runtime_configured():
             return False
         session = self._load_c_fast_shakedown_state()
-        return bool(
+        requested = bool(
             isinstance(session, dict)
             and session.get("status") == "COMPLETE"
             and session.get("continuous_authorized") is True
         )
+        if not requested:
+            return False
+        runtime = self.c_fast_runtime_authorization.status()
+        if session.get("execution_authority_mode") == "RUNTIME_AUTHORIZATION":
+            return bool(
+                runtime.get("state") == "ACTIVE"
+                and runtime.get("authorization_id")
+                == session.get("runtime_authorization_id")
+            )
+        if runtime.get("state") in {"DISABLED", "NOT_ENABLED"}:
+            return True
+        return runtime.get("state") == "ACTIVE"
 
     def _c_fast_continuous_terminal_anchor(
         self,
@@ -990,6 +1025,32 @@ class CommoditySimNowService:
             or session.get("continuous_authorized") is not True
         ):
             return {"action": "idle", "reason": "no_persistent_authority"}
+        runtime = self.c_fast_runtime_authorization.status()
+        if session.get("execution_authority_mode") == "RUNTIME_AUTHORIZATION":
+            if runtime.get("state") != "ACTIVE":
+                self.c_fast_continuous_authorized = False
+                self.c_fast_shakedown_auto_dispatch_authorized = False
+                return {
+                    "action": "waiting",
+                    "reason": "runtime_authorization_not_active",
+                    "runtime_authorization_state": runtime.get("state"),
+                }
+            if runtime.get("authorization_id") != session.get(
+                "runtime_authorization_id"
+            ):
+                self._revoke_auto_dispatch("c_fast_shakedown")
+                raise CommoditySimNowSafetyError(
+                    "C_FAST 重启恢复 Runtime Authorization identity 漂移"
+                )
+        elif runtime.get("state") not in {"DISABLED", "NOT_ENABLED"}:
+            if runtime.get("state") != "ACTIVE":
+                self.c_fast_continuous_authorized = False
+                self.c_fast_shakedown_auto_dispatch_authorized = False
+                return {
+                    "action": "waiting",
+                    "reason": "runtime_authorization_not_active",
+                    "runtime_authorization_state": runtime.get("state"),
+                }
         try:
             rpc_status = self.rpc.status(probe=True)
         except (RpcUnavailableError, RpcTimeoutError, RpcCallError) as exc:
@@ -1010,7 +1071,7 @@ class CommoditySimNowService:
             anchored, _archived, expected = (
                 self._c_fast_continuous_terminal_anchor()
             )
-            safety = self._safety_snapshot(require_trade_enabled=True)
+            safety = self._safety_snapshot(require_trade_enabled=False)
             self._verify_c_fast_account(str(safety["account_hash"]))
             if safety["account_hash"] != anchored.get("account_hash"):
                 raise CommoditySimNowSafetyError(
@@ -1028,6 +1089,11 @@ class CommoditySimNowService:
                     "C_FAST 连续运行恢复前持仓与终态不一致",
                     detail={"expected": expected, "observed": observed},
                 )
+            if not safety["web_trade_enabled"]:
+                return {
+                    "action": "waiting",
+                    "reason": "web_trade_disabled",
+                }
         except (RpcUnavailableError, RpcTimeoutError, RpcCallError) as exc:
             return {
                 "action": "waiting",
@@ -1138,6 +1204,225 @@ class CommoditySimNowService:
         return result
 
     @_serialized
+    def c_fast_runtime_authorization_status(self) -> dict[str, Any]:
+        runtime = self.c_fast_runtime_authorization.status()
+        session = self._load_c_fast_shakedown_state()
+        plan_status = (
+            str(self.current_plan.get("status") or "")
+            if self.current_plan
+            else ""
+        )
+        if plan_status in {
+            "CANCEL_PENDING",
+            "SUBMISSION_OUTCOME_UNKNOWN",
+            "HALTED_RECONCILE_REQUIRED",
+            "HALTED_RECONCILED",
+            "HALTED_PRE_SUBMIT_SAFE",
+        }:
+            operational_state = "RECOVERY_ACTIVE_PLAN"
+            waiting = False
+            hard_blocked = True
+        elif self.current_plan:
+            operational_state = "EXECUTING"
+            waiting = False
+            hard_blocked = False
+        elif (
+            runtime.get("state") == "ACTIVE"
+            and not self.risk.status().get("web_trade_enabled")
+        ):
+            operational_state = "WAITING_WEB_TRADE_DISABLED"
+            waiting = True
+            hard_blocked = False
+        elif runtime.get("state") == "ACTIVE":
+            operational_state = "WAITING_NEW_SNAPSHOT"
+            waiting = True
+            hard_blocked = False
+        elif runtime.get("state") in {"DISABLED", "NOT_ENABLED"}:
+            operational_state = "WAITING_RUNTIME_AUTHORIZATION"
+            waiting = True
+            hard_blocked = False
+        else:
+            operational_state = "HARD_BLOCKED_RUNTIME_AUTHORIZATION"
+            waiting = False
+            hard_blocked = True
+        return {
+            "map_strategy_acceptance": {
+                "acceptance_id": runtime.get("map_acceptance_id"),
+                "state": runtime.get("map_acceptance_state", "UNKNOWN"),
+            },
+            "c_fast_allocation_acceptance": {
+                "acceptance_id": runtime.get(
+                    "c_fast_allocation_acceptance_id"
+                ),
+                "state": runtime.get(
+                    "c_fast_allocation_acceptance_state", "UNKNOWN"
+                ),
+            },
+            "runtime_authorization": runtime,
+            "current_snapshot": {
+                "state": (
+                    session.get("status")
+                    if isinstance(session, dict)
+                    else "MISSING"
+                ),
+                "snapshot_id": (
+                    session.get("source_snapshot_id")
+                    if isinstance(session, dict)
+                    else None
+                ),
+                "snapshot_sha256": (
+                    session.get("source_snapshot_hash")
+                    if isinstance(session, dict)
+                    else None
+                ),
+            },
+            "operational_state": operational_state,
+            "waiting": waiting,
+            "hard_blocked": hard_blocked,
+            "production_allowed": False,
+        }
+
+    @_serialized
+    def enable_c_fast_runtime_authorization(
+        self,
+        payload: CommodityCFastRuntimeAuthorizationEnableRequestDTO,
+        *,
+        operator: str,
+        role: str | None,
+        source_ip: str | None,
+    ) -> dict[str, Any]:
+        if self.current_plan:
+            raise CommoditySimNowStateError(
+                "存在 active plan，禁止启用 Runtime Authorization"
+            )
+        result = self.c_fast_runtime_authorization.enable(
+            authorized_by=operator,
+            reason=payload.reason,
+        )
+        try:
+            session, _archived, expected = (
+                self._c_fast_continuous_terminal_anchor()
+            )
+            safety = self._safety_snapshot(require_trade_enabled=False)
+            self._verify_c_fast_account(str(safety["account_hash"]))
+            if (
+                safety["account_hash"] != session.get("account_hash")
+                or safety["account_hash"]
+                != result.get("expected_simnow_account_sha256")
+            ):
+                raise CommoditySimNowSafetyError(
+                    "Runtime Authorization 启用账户与终态/授权不一致"
+                )
+            if self._c_fast_external_active_orders(None):
+                raise CommoditySimNowSafetyError(
+                    "Runtime Authorization 启用前存在活动委托"
+                )
+            if self._signed_positions(self._position_snapshot()) != expected:
+                raise CommoditySimNowSafetyError(
+                    "Runtime Authorization 启用前持仓与终态不一致"
+                )
+            if not safety["web_trade_enabled"]:
+                self.c_fast_continuous_authorized = False
+                self.c_fast_shakedown_auto_dispatch_authorized = False
+                waiting_result = {
+                    "action": "runtime_authorization_enabled_waiting",
+                    **result,
+                    "reason": "web_trade_disabled",
+                    "production_allowed": False,
+                }
+                self.audit.record(
+                    action="commodity_c_fast_runtime_authorization_enable_waiting",
+                    user_id=operator,
+                    role=role,
+                    request={"reason": payload.reason},
+                    result=waiting_result,
+                    source_ip=source_ip,
+                )
+                return waiting_result
+        except (RpcUnavailableError, RpcTimeoutError, RpcCallError) as exc:
+            self.c_fast_continuous_authorized = False
+            self.c_fast_shakedown_auto_dispatch_authorized = False
+            self._event(
+                "c_fast_runtime_authorization_waiting_for_rpc",
+                result={"error_type": exc.__class__.__name__},
+            )
+            waiting_result = {
+                "action": "runtime_authorization_enabled_waiting",
+                **result,
+                "reason": "rpc_transient_failure",
+                "error_type": exc.__class__.__name__,
+                "production_allowed": False,
+            }
+            self.audit.record(
+                action="commodity_c_fast_runtime_authorization_enable_waiting",
+                user_id=operator,
+                role=role,
+                request={"reason": payload.reason},
+                result=waiting_result,
+                source_ip=source_ip,
+            )
+            return waiting_result
+        except Exception:
+            self.c_fast_runtime_authorization.revoke(
+                revoked_by=operator,
+                reason="enable preflight failed",
+            )
+            raise
+        self._set_c_fast_continuous_authorized(True)
+        self.c_fast_shakedown_auto_dispatch_authorized = True
+        self.enabled = True
+        self.manual_approval = True
+        self.simnow_mode = True
+        self.audit.record(
+            action="commodity_c_fast_runtime_authorization_enable",
+            user_id=operator,
+            role=role,
+            request={"reason": payload.reason},
+            result=result,
+            source_ip=source_ip,
+        )
+        return {
+            "action": "runtime_authorization_enabled",
+            **result,
+            "production_allowed": False,
+        }
+
+    @_serialized
+    def revoke_c_fast_runtime_authorization(
+        self,
+        payload: CommodityCFastRuntimeAuthorizationRevokeRequestDTO,
+        *,
+        operator: str,
+        role: str | None,
+        source_ip: str | None,
+    ) -> dict[str, Any]:
+        result = self.c_fast_runtime_authorization.revoke(
+            revoked_by=operator,
+            reason=payload.reason,
+        )
+        halt = self._begin_safe_halt(
+            "runtime_authorization_revoked",
+            operator=operator,
+            source_ip=source_ip,
+            revoke_scope="c_fast_shakedown",
+        )
+        self.audit.record(
+            action="commodity_c_fast_runtime_authorization_revoke",
+            user_id=operator,
+            role=role,
+            request={"reason": payload.reason},
+            result={**result, "halt": halt},
+            source_ip=source_ip,
+        )
+        return {
+            "action": "runtime_authorization_revoked",
+            **result,
+            "revoke_reason": payload.reason,
+            "halt": halt,
+            "production_allowed": False,
+        }
+
+    @_serialized
     def _revoke_auto_dispatch(self, scope: str = "all") -> None:
         if scope not in {"all", "generic", "shakedown", "c_fast_shakedown"}:
             raise ValueError(f"unknown auto-dispatch authorization scope: {scope}")
@@ -1147,6 +1432,19 @@ class CommoditySimNowService:
         if scope in {"all", "shakedown"}:
             self.shakedown_auto_dispatch_authorized = False
         if scope in {"all", "c_fast_shakedown"}:
+            try:
+                if (
+                    self.c_fast_runtime_authorization.status().get("state")
+                    == "ACTIVE"
+                ):
+                    self.c_fast_runtime_authorization.revoke(
+                        revoked_by="commodity-simnow",
+                        reason="execution authority fail-closed",
+                    )
+            except Exception:
+                logger.exception(
+                    "failed to persist C_FAST Runtime Authorization revocation"
+                )
             self.c_fast_shakedown_auto_dispatch_authorized = False
             self.c_fast_continuous_authorized = False
             try:
@@ -2594,8 +2892,13 @@ class CommoditySimNowService:
             }
         snapshot_hash: str | None = None
         try:
-            safety = self._safety_snapshot(require_trade_enabled=True)
+            safety = self._safety_snapshot(require_trade_enabled=False)
             self._verify_c_fast_account(str(safety["account_hash"]))
+            if not safety["web_trade_enabled"]:
+                return {
+                    "action": "waiting",
+                    "reason": "web_trade_disabled",
+                }
             previous_session = self._load_c_fast_shakedown_state()
             if (
                 not isinstance(previous_session, dict)
@@ -2606,14 +2909,28 @@ class CommoditySimNowService:
                     "C_FAST 连续运行前序终态证据无效"
                 )
             snapshot_id, snapshot_hash = self._c_fast_snapshot_identity()
-            if snapshot_hash == previous_session.get(
-                "source_snapshot_hash"
+            identity_outcome = completed_snapshot_outcome(
+                previous_session,
+                snapshot_id=snapshot_id,
+                snapshot_sha256=snapshot_hash,
+            )
+            if (
+                identity_outcome.decision
+                == ContinuousDecision.ALREADY_COMPLETED
             ):
                 return {
                     "action": "idle",
                     "reason": "snapshot_already_completed",
                 }
-            snapshot, verified_hash, _permit = self._c_fast_snapshot()
+            if (
+                identity_outcome.decision
+                == ContinuousDecision.HARD_REVOKE
+            ):
+                raise CommoditySimNowSafetyError(
+                    "C_FAST 快照 identity/hash 与前序终态冲突",
+                    detail={"error_code": identity_outcome.reason},
+                )
+            snapshot, verified_hash = self._c_fast_any_verified_snapshot()
             if (
                 verified_hash != snapshot_hash
                 or snapshot.snapshot_id != snapshot_id
@@ -2678,7 +2995,11 @@ class CommoditySimNowService:
                 )
                 return {
                     "action": "waiting",
-                    "reason": "control_snapshot_not_yet_accepted",
+                    "reason": (
+                        "snapshot_temporarily_missing"
+                        if error_code == "SNAPSHOT_FILE_NOT_FOUND"
+                        else "control_snapshot_not_yet_accepted"
+                    ),
                     "error_code": error_code,
                 }
             self._revoke_auto_dispatch("c_fast_shakedown")
@@ -2974,6 +3295,99 @@ class CommoditySimNowService:
             )
         return snapshot, snapshot_hash, permit
 
+    def _c_fast_any_verified_snapshot(
+        self,
+    ) -> tuple[CommodityCFastRuntimeSnapshotDTO, str]:
+        provider = self._c_fast_snapshot_provider
+        if provider is None:
+            raise CommoditySimNowSafetyError(
+                "C_FAST Control Plane 快照源未绑定"
+            )
+        try:
+            snapshot, snapshot_hash = provider()
+        except Exception as exc:
+            raise CommoditySimNowSafetyError(
+                "C_FAST 签名快照未通过当前 Control Plane 验证",
+                detail={
+                    "error_type": exc.__class__.__name__,
+                    "error_code": getattr(exc, "code", None),
+                },
+            ) from exc
+        if not isinstance(
+            snapshot,
+            (
+                CommodityCFastShakedownSnapshotDTO,
+                CommodityCFastRuntimeExecutableSnapshotDTO,
+            ),
+        ):
+            raise CommoditySimNowSafetyError(
+                "C_FAST 快照 schema 不具备 SimNow 执行资格"
+            )
+        if (
+            snapshot.execution_lane != "simnow_shakedown"
+            or snapshot.countable_forward is not False
+            or snapshot.production_allowed is not False
+        ):
+            raise CommoditySimNowSafetyError(
+                "C_FAST SimNow 快照安全边界无效"
+            )
+        return snapshot, snapshot_hash
+
+    def _c_fast_resolved_authority(
+        self,
+        snapshot: CommodityCFastRuntimeSnapshotDTO,
+        snapshot_hash: str,
+        *,
+        account_hash: str,
+        selected_products: list[str],
+        current_session: dict[str, Any] | None = None,
+        terminal_chain: list[dict[str, Any]] | None = None,
+    ):
+        if (
+            isinstance(snapshot, CommodityCFastShakedownSnapshotDTO)
+            and self._c_fast_execution_permit_provider is None
+        ):
+            raise CommoditySimNowSafetyError(
+                "C_FAST 独立 SimNow Execution Permit 源未绑定；"
+                "旧 shakedown 内嵌 permit 不具备执行权限"
+            )
+        try:
+            resolved = resolve_continuous_authority(
+                snapshot=snapshot,
+                snapshot_sha256=snapshot_hash,
+                actual_account_sha256=account_hash,
+                selected_products=selected_products,
+                runtime_authorization=self.c_fast_runtime_authorization,
+                legacy_permit_provider=self._c_fast_execution_permit_provider,
+            )
+        except Exception as exc:
+            if isinstance(snapshot, CommodityCFastShakedownSnapshotDTO):
+                raise CommoditySimNowSafetyError(
+                    "C_FAST 独立 SimNow Execution Permit 未通过 Control Plane 验证",
+                    detail={
+                        "error_type": exc.__class__.__name__,
+                        "error_code": getattr(exc, "code", None),
+                    },
+                ) from exc
+            raise CommoditySimNowSafetyError(
+                "C_FAST 执行授权验证失败",
+                detail={
+                    "error_type": exc.__class__.__name__,
+                    "error_code": getattr(exc, "code", None),
+                },
+            ) from exc
+        if (
+            resolved.legacy_permit is not None
+            and current_session is not None
+            and terminal_chain is not None
+        ):
+            self._verify_c_fast_execution_permit_available(
+                resolved.legacy_permit,
+                current_session=current_session,
+                terminal_chain=terminal_chain,
+            )
+        return resolved
+
     def _c_fast_snapshot_identity(self) -> tuple[str, str]:
         provider = self._c_fast_snapshot_identity_provider
         if provider is None:
@@ -3186,20 +3600,40 @@ class CommoditySimNowService:
         ):
             raise CommoditySimNowSafetyError("C_FAST 测试品种选择无效")
 
-        snapshot, snapshot_hash, permit = self._c_fast_snapshot()
-        self._verify_c_fast_execution_permit_available(
-            permit,
+        snapshot, snapshot_hash = self._c_fast_any_verified_snapshot()
+        safety = self._safety_snapshot(require_trade_enabled=True)
+        self._verify_c_fast_account(str(safety["account_hash"]))
+        authority = self._c_fast_resolved_authority(
+            snapshot,
+            snapshot_hash,
+            account_hash=str(safety["account_hash"]),
+            selected_products=selected,
             current_session=existing,
             terminal_chain=chain,
         )
-        if (
-            selected != list(permit.selected_products)
-            or len(selected) > snapshot.max_selected_products
-        ):
-            raise CommoditySimNowSafetyError(
-                "C_FAST Execution Permit 品种范围必须与 Research Acceptance 完全一致"
+        if authority.legacy_permit is not None:
+            authorized_products = list(
+                authority.legacy_permit.selected_products
             )
-        if snapshot.max_child_order_lots != 0:
+            max_selected = snapshot.max_selected_products
+        else:
+            assert authority.runtime_authorization is not None
+            authorized_products = list(snapshot.runtime_selected_products)
+            max_selected = (
+                authority.runtime_authorization.authorization.max_selected_products
+            )
+        if selected != authorized_products or len(selected) > max_selected:
+            if authority.legacy_permit is not None:
+                raise CommoditySimNowSafetyError(
+                    "C_FAST Execution Permit 品种范围必须与 Research Acceptance 完全一致"
+                )
+            raise CommoditySimNowSafetyError(
+                "C_FAST 执行授权品种范围必须与签名目标完全一致"
+            )
+        if (
+            isinstance(snapshot, CommodityCFastShakedownSnapshotDTO)
+            and snapshot.max_child_order_lots != 0
+        ):
             raise CommoditySimNowSafetyError(
                 "C_FAST Execution Permit 不得设置单笔手数上限"
             )
@@ -3218,10 +3652,9 @@ class CommoditySimNowService:
                     "零目标差异品种不可用于 C_FAST 测试",
                     detail={"product": product},
                 )
-        safety = self._safety_snapshot(require_trade_enabled=True)
-        self._verify_c_fast_account(str(safety["account_hash"]))
         if (
-            permit.expected_simnow_account_sha256
+            authority.legacy_permit is not None
+            and authority.legacy_permit.expected_simnow_account_sha256
             != str(safety["account_hash"])
         ):
             raise CommoditySimNowSafetyError(
@@ -3252,10 +3685,38 @@ class CommoditySimNowService:
             "automatic_promotion_allowed": False,
             "source_snapshot_id": snapshot.snapshot_id,
             "source_snapshot_hash": snapshot_hash,
-            "control_acceptance_id": permit.acceptance_id,
-            "execution_permit_id": permit.permit_id,
+            "execution_authority_mode": authority.mode,
+            "runtime_authorization_id": (
+                authority.runtime_authorization.authorization.authorization_id
+                if authority.runtime_authorization is not None
+                else None
+            ),
+            "map_acceptance_id": (
+                authority.runtime_authorization.map_acceptance.acceptance_id
+                if authority.runtime_authorization is not None
+                else None
+            ),
+            "c_fast_allocation_acceptance_id": (
+                authority.runtime_authorization.allocation_acceptance.acceptance_id
+                if authority.runtime_authorization is not None
+                else None
+            ),
+            "control_acceptance_id": (
+                authority.legacy_permit.acceptance_id
+                if authority.legacy_permit is not None
+                else None
+            ),
+            "execution_permit_id": (
+                authority.legacy_permit.permit_id
+                if authority.legacy_permit is not None
+                else None
+            ),
             "acceptance_receipt_raw_sha256":
-            permit.acceptance_receipt_raw_sha256,
+            (
+                authority.legacy_permit.acceptance_receipt_raw_sha256
+                if authority.legacy_permit is not None
+                else None
+            ),
             "formula_target_binding_sha256":
             snapshot.formula_target_binding_sha256,
             "source_month": snapshot.source_month,
@@ -3375,27 +3836,55 @@ class CommoditySimNowService:
             raise CommoditySimNowStateError(
                 "共享执行槽已有 SimNow 计划，禁止 C_FAST 测试覆盖"
             )
-        snapshot, snapshot_hash, permit = self._c_fast_snapshot()
-        if (
-            snapshot_hash != session.get("source_snapshot_hash")
-            or snapshot.snapshot_id != session.get("source_snapshot_id")
-            or permit.acceptance_id
-            != session.get("control_acceptance_id")
-            or permit.permit_id
-            != session.get("execution_permit_id")
-            or permit.acceptance_receipt_raw_sha256
-            != session.get("acceptance_receipt_raw_sha256")
-            or snapshot.formula_target_binding_sha256
-            != session.get("formula_target_binding_sha256")
-        ):
-            raise CommoditySimNowSafetyError(
-                "C_FAST 签名快照在 preview 后发生变化"
-            )
+        snapshot, snapshot_hash = self._c_fast_any_verified_snapshot()
         safety = self._safety_snapshot(require_trade_enabled=True)
         self._verify_c_fast_account(str(safety["account_hash"]))
         if safety["account_hash"] != session.get("account_hash"):
             raise CommoditySimNowSafetyError(
                 "C_FAST SimNow 账户在 preview 后发生变化"
+            )
+        authority = self._c_fast_resolved_authority(
+            snapshot,
+            snapshot_hash,
+            account_hash=str(safety["account_hash"]),
+            selected_products=list(session["selected_products"]),
+        )
+        permit = authority.legacy_permit
+        authority_changed = authority.mode != session.get(
+            "execution_authority_mode", "LEGACY_EXECUTION_PERMIT"
+        )
+        if authority.runtime_authorization is not None:
+            authority_changed = authority_changed or any(
+                (
+                    authority.runtime_authorization.authorization.authorization_id,
+                    authority.runtime_authorization.map_acceptance.acceptance_id,
+                    authority.runtime_authorization.allocation_acceptance.acceptance_id,
+                )[index]
+                != session.get(key)
+                for index, key in enumerate(
+                    (
+                        "runtime_authorization_id",
+                        "map_acceptance_id",
+                        "c_fast_allocation_acceptance_id",
+                    )
+                )
+            )
+        elif permit is not None:
+            authority_changed = authority_changed or bool(
+                permit.acceptance_id != session.get("control_acceptance_id")
+                or permit.permit_id != session.get("execution_permit_id")
+                or permit.acceptance_receipt_raw_sha256
+                != session.get("acceptance_receipt_raw_sha256")
+            )
+        if (
+            snapshot_hash != session.get("source_snapshot_hash")
+            or snapshot.snapshot_id != session.get("source_snapshot_id")
+            or authority_changed
+            or snapshot.formula_target_binding_sha256
+            != session.get("formula_target_binding_sha256")
+        ):
+            raise CommoditySimNowSafetyError(
+                "C_FAST 签名快照在 preview 后发生变化"
             )
         stored_plan = session.get("plan")
         if not isinstance(stored_plan, dict):
@@ -3461,34 +3950,56 @@ class CommoditySimNowService:
                     "observed": final_start_positions,
                 },
             )
-        (
+        final_snapshot, final_snapshot_hash = (
+            self._c_fast_any_verified_snapshot()
+        )
+        final_authority = self._c_fast_resolved_authority(
             final_snapshot,
             final_snapshot_hash,
-            final_permit,
-        ) = self._c_fast_snapshot()
+            account_hash=str(safety["account_hash"]),
+            selected_products=list(session["selected_products"]),
+        )
         if (
             final_snapshot_hash != snapshot_hash
             or final_snapshot.snapshot_id != snapshot.snapshot_id
-            or final_permit.permit_id != permit.permit_id
-            or final_permit.acceptance_id != permit.acceptance_id
-            or final_permit.acceptance_receipt_raw_sha256
-            != permit.acceptance_receipt_raw_sha256
-            or list(final_permit.selected_products)
-            != list(session["selected_products"])
+            or final_authority.mode != authority.mode
+            or (
+                final_authority.runtime_authorization is not None
+                and (
+                    final_authority.runtime_authorization.authorization.authorization_id
+                    != session.get("runtime_authorization_id")
+                    or final_authority.runtime_authorization.map_acceptance.acceptance_id
+                    != session.get("map_acceptance_id")
+                    or final_authority.runtime_authorization.allocation_acceptance.acceptance_id
+                    != session.get("c_fast_allocation_acceptance_id")
+                )
+            )
+            or (
+                permit is not None
+                and (
+                    final_authority.legacy_permit is None
+                    or final_authority.legacy_permit.permit_id
+                    != permit.permit_id
+                )
+            )
         ):
             raise CommoditySimNowSafetyError(
                 "C_FAST Execution Permit 在 create-only 消费前失效"
             )
-        permit = final_permit
+        permit = final_authority.legacy_permit
         terminal_fact_watermark[
             "verified_from_utc"
         ] = terminal_fact_watermark_before[
             "captured_at_utc"
         ]
-        permit_receipt = self._consume_c_fast_execution_permit(
-            permit,
-            session_id=str(session["session_id"]),
-            source_snapshot_hash=snapshot_hash,
+        permit_receipt = (
+            self._consume_c_fast_execution_permit(
+                permit,
+                session_id=str(session["session_id"]),
+                source_snapshot_hash=snapshot_hash,
+            )
+            if permit is not None
+            else None
         )
         plan = {
             "schema_version": "commodity_simnow_active_plan_v1",
@@ -3496,12 +4007,22 @@ class CommoditySimNowService:
             "plan_hash": plan_hash,
             "account_hash": safety["account_hash"],
             "source_snapshot_hash": snapshot_hash,
-            "control_acceptance_id": permit.acceptance_id,
-            "execution_permit_id": permit.permit_id,
+            "execution_authority_mode": authority.mode,
+            "runtime_authorization_id":
+            session.get("runtime_authorization_id"),
+            "map_acceptance_id": session.get("map_acceptance_id"),
+            "c_fast_allocation_acceptance_id":
+            session.get("c_fast_allocation_acceptance_id"),
+            "control_acceptance_id": session.get("control_acceptance_id"),
+            "execution_permit_id": session.get("execution_permit_id"),
             "acceptance_receipt_raw_sha256":
-            permit.acceptance_receipt_raw_sha256,
+            session.get("acceptance_receipt_raw_sha256"),
             "permit_consumption_receipt_checksum":
-            permit_receipt["receipt_checksum"],
+            (
+                permit_receipt["receipt_checksum"]
+                if permit_receipt is not None
+                else None
+            ),
             "previous_terminal_checksum":
             session.get("previous_terminal_checksum"),
             "formula_target_binding_sha256":
@@ -3959,26 +4480,46 @@ class CommoditySimNowService:
         self._verify_c_fast_active_plan_chain(plan)
         self._verify_c_fast_account_position_scope()
         self._verify_c_fast_known_order_statuses()
-        snapshot, snapshot_hash, permit = self._c_fast_snapshot()
-        if (
-            snapshot_hash != plan.get("source_snapshot_hash")
-            or permit.acceptance_id
-            != plan.get("control_acceptance_id")
-            or permit.permit_id
-            != plan.get("execution_permit_id")
-            or permit.acceptance_receipt_raw_sha256
-            != plan.get("acceptance_receipt_raw_sha256")
-            or snapshot.formula_target_binding_sha256
-            != plan.get("formula_target_binding_sha256")
-        ):
-            raise CommoditySimNowSafetyError(
-                "C_FAST 测试运行时签名快照信任链校验失败"
-            )
+        snapshot, snapshot_hash = self._c_fast_any_verified_snapshot()
         safety = self._safety_snapshot(require_trade_enabled=True)
         self._verify_c_fast_account(str(safety["account_hash"]))
         if safety["account_hash"] != plan.get("account_hash"):
             raise CommoditySimNowSafetyError(
                 "C_FAST 测试运行时 SimNow 账户发生变化"
+            )
+        authority = self._c_fast_resolved_authority(
+            snapshot,
+            snapshot_hash,
+            account_hash=str(safety["account_hash"]),
+            selected_products=list(plan.get("selected_products") or []),
+        )
+        if authority.runtime_authorization is not None:
+            authority_matches = bool(
+                authority.mode == plan.get("execution_authority_mode")
+                and authority.runtime_authorization.authorization.authorization_id
+                == plan.get("runtime_authorization_id")
+                and authority.runtime_authorization.map_acceptance.acceptance_id
+                == plan.get("map_acceptance_id")
+                and authority.runtime_authorization.allocation_acceptance.acceptance_id
+                == plan.get("c_fast_allocation_acceptance_id")
+            )
+        else:
+            permit = authority.legacy_permit
+            authority_matches = bool(
+                permit is not None
+                and permit.acceptance_id == plan.get("control_acceptance_id")
+                and permit.permit_id == plan.get("execution_permit_id")
+                and permit.acceptance_receipt_raw_sha256
+                == plan.get("acceptance_receipt_raw_sha256")
+            )
+        if (
+            snapshot_hash != plan.get("source_snapshot_hash")
+            or not authority_matches
+            or snapshot.formula_target_binding_sha256
+            != plan.get("formula_target_binding_sha256")
+        ):
+            raise CommoditySimNowSafetyError(
+                "C_FAST 测试运行时签名快照或执行授权校验失败"
             )
         observed_generation = str(
             safety.get("rpc_last_connected_at") or ""
@@ -6652,6 +7193,49 @@ class CommoditySimNowService:
         self,
         plan: dict[str, Any],
     ) -> dict[str, Any]:
+        if plan.get("execution_authority_mode") == "RUNTIME_AUTHORIZATION":
+            self._verify_c_fast_shakedown_execution_trust(plan)
+            session = self._load_c_fast_shakedown_state()
+            durable = self._load_active_plan()
+            current_day = self._current_trading_day(
+                self._plan_symbols(plan)
+            ).isoformat()
+            if (
+                not isinstance(session, dict)
+                or durable is None
+                or session.get("plan_hash") != plan.get("plan_hash")
+                or durable.get("plan_hash") != plan.get("plan_hash")
+                or current_day != plan.get("execution_day")
+                or any(
+                    session.get(field) != plan.get(field)
+                    or durable.get(field) != plan.get(field)
+                    for field in (
+                        "source_snapshot_hash",
+                        "execution_authority_mode",
+                        "runtime_authorization_id",
+                        "map_acceptance_id",
+                        "c_fast_allocation_acceptance_id",
+                        "account_hash",
+                    )
+                )
+            ):
+                raise CommoditySimNowSafetyError(
+                    "C_FAST Runtime Authorization 最终发送绑定无效"
+                )
+            return {
+                "captured_at_utc":
+                self.clock().astimezone(timezone.utc).isoformat(),
+                "plan_hash": plan.get("plan_hash"),
+                "source_snapshot_hash": plan.get("source_snapshot_hash"),
+                "execution_day": plan.get("execution_day"),
+                "current_trading_day": current_day,
+                "runtime_authorization_id":
+                plan.get("runtime_authorization_id"),
+                "permit_consumption_receipt_checksum": None,
+                "acceptance_use_receipt_checksum": None,
+                "session_plan_checksum_revalidated": True,
+                "active_plan_checksum_revalidated": True,
+            }
         session = self._load_c_fast_shakedown_state()
         permit_id = str(plan.get("execution_permit_id") or "")
         acceptance_receipt_hash = str(
@@ -7271,6 +7855,19 @@ class CommoditySimNowService:
             raise CommoditySimNowSafetyError(
                 "C_FAST 单笔手数放宽执行上下文无效"
             )
+        if plan.get("execution_authority_mode") == "RUNTIME_AUTHORIZATION":
+            self._verify_c_fast_shakedown_execution_trust(plan)
+            status = self.c_fast_runtime_authorization.status()
+            child_cap = int(status.get("max_child_order_lots") or 0)
+            if child_cap <= 0 or any(
+                int(order.get("volume") or 0) > child_cap
+                for order in list(plan.get("close_orders") or [])
+                + list(plan.get("open_orders") or [])
+            ):
+                raise CommoditySimNowSafetyError(
+                    "C_FAST Runtime Authorization child-order scope 无效"
+                )
+            return
         session = self._load_c_fast_shakedown_state()
         permit_id = str(plan.get("execution_permit_id") or "")
         receipt = self._load_c_fast_permit_receipt(permit_id)

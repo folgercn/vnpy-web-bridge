@@ -102,6 +102,41 @@ class FakeCommoditySimNowService:
             "production_allowed": False,
         }
 
+    def c_fast_runtime_authorization_status(self) -> dict:
+        return {
+            "map_strategy_acceptance": {"state": "ACCEPTED"},
+            "c_fast_allocation_acceptance": {"state": "ACCEPTED"},
+            "runtime_authorization": {
+                "authorization_id": "runtime-auth-262",
+                "state": "ACTIVE",
+                "expires_at_utc": "2026-09-01T00:00:00+00:00",
+                "revoked_at_utc": None,
+                "revoke_reason": None,
+            },
+            "current_snapshot": {"state": "COMPLETE"},
+            "operational_state": "WAITING_NEW_SNAPSHOT",
+            "waiting": True,
+            "hard_blocked": False,
+            "production_allowed": False,
+        }
+
+    def enable_c_fast_runtime_authorization(self, payload, **kwargs) -> dict:
+        return {
+            "action": "runtime_authorization_enabled",
+            "authorization_id": "runtime-auth-262",
+            "state": "ACTIVE",
+            "production_allowed": False,
+        }
+
+    def revoke_c_fast_runtime_authorization(self, payload, **kwargs) -> dict:
+        return {
+            "action": "runtime_authorization_revoked",
+            "authorization_id": "runtime-auth-262",
+            "state": "REVOKED",
+            "revoke_reason": payload.reason,
+            "production_allowed": False,
+        }
+
     def list_events(self, limit: int) -> list[dict]:
         return []
 
@@ -331,6 +366,120 @@ def test_admin_can_enable_controller(monkeypatch) -> None:
     assert response.status_code == 200
     assert response.json()["data"]["enabled"] is True
     assert service.enabled is True
+
+
+def test_runtime_authorization_status_is_read_only_for_viewer_and_trader(
+    monkeypatch,
+) -> None:
+    install_service(monkeypatch)
+    with client_without_rpc(monkeypatch) as client:
+        viewer = client.get(
+            "/api/commodity-simnow/c-fast-shakedown/runtime-authorization/status",
+            headers=auth_headers("viewer"),
+        )
+        trader = client.get(
+            "/api/commodity-simnow/c-fast-shakedown/runtime-authorization/status",
+            headers=auth_headers("trader"),
+        )
+        admin = client.get(
+            "/api/commodity-simnow/c-fast-shakedown/runtime-authorization/status",
+            headers=auth_headers("admin"),
+        )
+        unauthenticated = client.get(
+            "/api/commodity-simnow/c-fast-shakedown/runtime-authorization/status",
+        )
+
+    assert viewer.status_code == 200
+    assert trader.status_code == 200
+    assert admin.status_code == 200
+    assert unauthenticated.status_code == 401
+    status = viewer.json()["data"]
+    assert status["map_strategy_acceptance"]["state"] == "ACCEPTED"
+    assert status["c_fast_allocation_acceptance"]["state"] == "ACCEPTED"
+    assert status["runtime_authorization"]["state"] == "ACTIVE"
+    assert status["current_snapshot"]["state"] == "COMPLETE"
+    assert status["operational_state"] == "WAITING_NEW_SNAPSHOT"
+    assert status["waiting"] is True
+    assert status["hard_blocked"] is False
+    assert status["production_allowed"] is False
+
+
+def test_runtime_authorization_enable_and_revoke_are_admin_only(
+    monkeypatch,
+) -> None:
+    install_service(monkeypatch)
+    enable_payload = {
+        "reason": "approve persistent SimNow runtime",
+        "confirm_simnow_only": True,
+        "confirm_signed_snapshots_only": True,
+        "confirm_continuous": True,
+        "confirm_no_production": True,
+        "confirm_fail_closed_on_drift": True,
+    }
+    revoke_payload = {
+        "reason": "operator revoked runtime authorization",
+    }
+    with client_without_rpc(monkeypatch) as client:
+        viewer_forbidden = client.post(
+            "/api/commodity-simnow/c-fast-shakedown/runtime-authorization/enable",
+            headers=auth_headers("viewer"),
+            json=enable_payload,
+        )
+        trader_forbidden = client.post(
+            "/api/commodity-simnow/c-fast-shakedown/runtime-authorization/revoke",
+            headers=auth_headers("trader"),
+            json=revoke_payload,
+        )
+        enabled = client.post(
+            "/api/commodity-simnow/c-fast-shakedown/runtime-authorization/enable",
+            headers=auth_headers("admin"),
+            json=enable_payload,
+        )
+        revoked = client.post(
+            "/api/commodity-simnow/c-fast-shakedown/runtime-authorization/revoke",
+            headers=auth_headers("admin"),
+            json=revoke_payload,
+        )
+
+    assert viewer_forbidden.status_code == 403
+    assert trader_forbidden.status_code == 403
+    assert enabled.status_code == 200
+    assert enabled.json()["data"] == {
+        "action": "runtime_authorization_enabled",
+        "authorization_id": "runtime-auth-262",
+        "state": "ACTIVE",
+        "production_allowed": False,
+    }
+    assert revoked.status_code == 200
+    assert revoked.json()["data"] == {
+        "action": "runtime_authorization_revoked",
+        "authorization_id": "runtime-auth-262",
+        "state": "REVOKED",
+        "revoke_reason": "operator revoked runtime authorization",
+        "production_allowed": False,
+    }
+
+
+def test_runtime_authorization_enable_requires_all_safety_confirmations(
+    monkeypatch,
+) -> None:
+    install_service(monkeypatch)
+    payload = {
+        "reason": "approve persistent SimNow runtime",
+        "confirm_simnow_only": True,
+        "confirm_signed_snapshots_only": True,
+        "confirm_continuous": True,
+        "confirm_no_production": False,
+        "confirm_fail_closed_on_drift": True,
+    }
+    with client_without_rpc(monkeypatch) as client:
+        response = client.post(
+            "/api/commodity-simnow/c-fast-shakedown/runtime-authorization/enable",
+            headers=auth_headers("admin"),
+            json=payload,
+        )
+
+    assert response.status_code == 422
 
 
 def test_one_click_template_start_requires_admin(monkeypatch) -> None:

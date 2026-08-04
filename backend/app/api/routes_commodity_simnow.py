@@ -6,6 +6,8 @@ from app.core.errors import ok
 from app.core.security import CurrentUser, require_roles
 from app.schemas.commodity_simnow import (
     CommodityCFastContinuousEnableRequestDTO,
+    CommodityCFastRuntimeAuthorizationEnableRequestDTO,
+    CommodityCFastRuntimeAuthorizationRevokeRequestDTO,
     CommodityCFastShakedownPreviewRequestDTO,
     CommodityCFastShakedownStartRequestDTO,
     CommodityCFastShakedownStopRequestDTO,
@@ -134,6 +136,45 @@ def c_fast_continuous_enable(
 ) -> dict:
     return ok(
         commodity_simnow_service.enable_c_fast_continuous(
+            payload,
+            operator=user.username,
+            role=user.role,
+            source_ip=request.client.host if request.client else None,
+        )
+    )
+
+
+@router.get("/c-fast-shakedown/runtime-authorization/status")
+def c_fast_runtime_authorization_status(
+    _: CurrentUser = Depends(require_roles("viewer", "trader", "admin")),
+) -> dict:
+    return ok(commodity_simnow_service.c_fast_runtime_authorization_status())
+
+
+@router.post("/c-fast-shakedown/runtime-authorization/enable")
+def c_fast_runtime_authorization_enable(
+    payload: CommodityCFastRuntimeAuthorizationEnableRequestDTO,
+    request: Request,
+    user: CurrentUser = Depends(require_roles("admin")),
+) -> dict:
+    return ok(
+        commodity_simnow_service.enable_c_fast_runtime_authorization(
+            payload,
+            operator=user.username,
+            role=user.role,
+            source_ip=request.client.host if request.client else None,
+        )
+    )
+
+
+@router.post("/c-fast-shakedown/runtime-authorization/revoke")
+def c_fast_runtime_authorization_revoke(
+    payload: CommodityCFastRuntimeAuthorizationRevokeRequestDTO,
+    request: Request,
+    user: CurrentUser = Depends(require_roles("admin")),
+) -> dict:
+    return ok(
+        commodity_simnow_service.revoke_c_fast_runtime_authorization(
             payload,
             operator=user.username,
             role=user.role,
