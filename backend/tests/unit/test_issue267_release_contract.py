@@ -64,7 +64,7 @@ def test_release_dependency_contract_is_inert_and_fail_closed() -> None:
     assert MANIFEST["schema_version"] == "web_bridge_release_dependencies_v1"
     assert MANIFEST["issue"] == 267
     assert MANIFEST["status"] == (
-        "phase_1_pre_c_c2b_served_proof_v2_activation_deploy_frozen"
+        "phase_1_pre_c_c2b_windows_foundation_contract_frozen_runtime_not_installed"
     )
 
     safety = MANIFEST["safety"]
@@ -85,7 +85,9 @@ def test_release_dependency_contract_is_inert_and_fail_closed() -> None:
 
 def test_legacy_restart_remaining_stages_are_ordered_and_non_authorizing() -> None:
     contract = MANIFEST["legacy_restart_migration_contract"]
-    assert contract["current_code_stage"] == "phase_1_pre_c_c2b_served_proof_v2"
+    assert contract["current_code_stage"] == (
+        "phase_1_pre_c_c2b_windows_foundation_contract_frozen"
+    )
     assert contract["current_runtime_stage"] == (
         "not_deployed_or_activated_by_this_contract"
     )
@@ -164,6 +166,51 @@ def test_legacy_restart_remaining_stages_are_ordered_and_non_authorizing() -> No
         "signed_exact_extension_hash_version_config_install_attempt_and_zero_order_preflight_receipt"
         in windows_foundation["requires"]
     )
+    assert windows_foundation["implementation_status"] == (
+        "contract_frozen_runtime_not_installed"
+    )
+    assert windows_foundation["predecessor_artifact"] == (
+        "merged_c2b_served_proof_v2_activation_custody"
+    )
+    assert windows_foundation["runtime_entry_prerequisites"] == (
+        "merged_exact_windows_durable_fence_extension_bundle_then_fresh_observer_"
+        "signed_preflight_then_offline_manifest_signed_over_exact_preflight_then_"
+        "observer_sealed_publish_readback_then_separate_explicit_restart_"
+        "authorization"
+    )
+    assert [item["sequence"] for item in windows_foundation["sub_pr_sequence"]] == list(
+        range(1, 8)
+    )
+    assert [item["id"] for item in windows_foundation["sub_pr_sequence"]] == [
+        "windows_foundation_contract_ownership_classifier",
+        "windows_durable_fence_extension_core",
+        "windows_reproducible_bundle_and_signed_install_manifest",
+        "windows_host_observed_frozen_zero_order_preflight",
+        "windows_deterministic_install_attempt_journal",
+        "windows_restart_attestation_and_foundation_closure",
+        "windows_operator_acceptance_harness_and_roll_forward_runbook",
+    ]
+    assert all(
+        item["runtime_mutation_allowed"] is False
+        for item in windows_foundation["sub_pr_sequence"]
+    )
+    assert windows_foundation["roll_forward_only"] == {
+        "required": True,
+        "same_attempt_retry_before_dispatch_reservation": True,
+        "same_attempt_at_or_after_dispatch_reservation": (
+            "query_only_never_SCM_dispatch"
+        ),
+        "successor_required_after_consumed_reservation_without_verified_start": True,
+        "unknown_install_action": (
+            "query_exact_attempt_keep_final_order_admission_blocked_and_do_not_"
+            "restart_again"
+        ),
+        "successor_requirements": (
+            "explicit_authorization_higher_version_store_schema_compatible_and_"
+            "supersedes_prior_attempt"
+        ),
+        "rollback_to_store_unaware_extension": "forbidden",
+    }
     assert "general_deploy_script_or_unbound_compose_recreate" in bootstrap["forbidden"]
     assert "self_seed_empty_witness_as_verified" in c2c["forbidden"]
     assert "independent_host_observer_not_target_self_report" in d1["requires"]
@@ -232,7 +279,7 @@ def test_legacy_restart_stage_commit_and_recovery_semantics_are_exact() -> None:
     }
     expected = {
         "phase_1_pre_c_c2b_windows_durable_fence_foundation": {
-            "predecessor_artifact": "merged_windows_durable_fence_extension_and_signed_install_manifest",
+            "predecessor_artifact": "merged_c2b_served_proof_v2_activation_custody",
             "commit_point": "windows_restart_attestation_proves_durable_fail_closed_fence_held_and_final_order_admission_blocked",
             "recovery_query": "query_exact_windows_install_attempt_and_durable_fence_state",
             "retry_identity": "deterministic_windows_fence_install_attempt_id",
@@ -334,13 +381,18 @@ def test_legacy_restart_cross_contract_ownership_and_leases_are_explicit() -> No
         "host_target_observer",
         "frozen_bootstrap_coordinator",
         "baseline_target_manifest",
+        "windows_foundation_manifest_signer",
+        "windows_foundation_host_observer",
+        "windows_foundation_restart_authorizer",
+        "windows_foundation_installer",
+        "windows_foundation_durable_fence_store",
         "windows_fencing_token_store",
         "conditional_authority_grant",
     }
     for owner_id, contract in migration.items():
         if owner_id == "status":
             continue
-        assert set(contract) == {
+        expected_fields = {
             "unique_writer",
             "credential_domain",
             "durable_store",
@@ -348,7 +400,67 @@ def test_legacy_restart_cross_contract_ownership_and_leases_are_explicit() -> No
             "release_responsibility",
             "rollback_responsibility",
         }
-        assert all(contract.values())
+        if owner_id.startswith("windows_foundation_"):
+            expected_fields.update(
+                {
+                    "acl_ownership",
+                    "automatic_deploy_allowed",
+                    "key_ownership",
+                    "restart_responsibility",
+                }
+            )
+            assert contract["automatic_deploy_allowed"] is False
+        assert set(contract) == expected_fields
+        assert all(
+            value
+            for field, value in contract.items()
+            if field != "automatic_deploy_allowed"
+        )
+
+    manifest_signer = migration["windows_foundation_manifest_signer"]
+    observer = migration["windows_foundation_host_observer"]
+    restart_authorizer = migration["windows_foundation_restart_authorizer"]
+    installer = migration["windows_foundation_installer"]
+    assert "dedicated_manifest_private_key" in manifest_signer["key_ownership"]
+    assert "dedicated_observer_evidence_private_key" in observer["key_ownership"]
+    assert (
+        "dedicated_restart_authorization_private_key"
+        in (restart_authorizer["key_ownership"])
+    )
+    assert "three_distinct_domains" in installer["key_ownership"]
+    assert (
+        len(
+            {
+                manifest_signer["credential_domain"],
+                observer["credential_domain"],
+                restart_authorizer["credential_domain"],
+            }
+        )
+        == 3
+    )
+    assert "exact_pinned_manifest_public_key" in manifest_signer["key_ownership"]
+    assert "exact_pinned_observer_evidence_public_key" in observer["key_ownership"]
+    assert (
+        "exact_pinned_restart_authorization_public_key"
+        in (restart_authorizer["key_ownership"])
+    )
+    assert manifest_signer["restart_responsibility"] == (
+        "none_signature_never_authorizes_restart"
+    )
+    assert (
+        "post-reservation-service-config-transition-plan"
+        in (manifest_signer["release_responsibility"])
+    )
+    assert "active-SCM-unchanged" in installer["network_capability"]
+    assert "event-3" in installer["network_capability"]
+    assert "event-4" in installer["network_capability"]
+    assert "before-restart" in installer["network_capability"]
+    assert "SCM-ETW-EventLog-call-trace" in observer["network_capability"]
+    assert "single-use-SCM-audit-evidence" in observer["release_responsibility"]
+    assert (
+        "never_execute_install_restart_or_order_action"
+        in (restart_authorizer["restart_responsibility"])
+    )
 
     stages = {
         stage["id"]: stage
@@ -359,6 +471,22 @@ def test_legacy_restart_cross_contract_ownership_and_leases_are_explicit() -> No
     d1 = stages["phase_1_pre_d_d1_target_runtime_identity"]
     d2 = stages["phase_1_pre_d_d2_windows_durable_token_transfer"]
     d3 = stages["phase_1_pre_d_d3_atomic_capability_commit"]
+    windows_sub_stages = {
+        stage["id"]: stage
+        for stage in stages["phase_1_pre_c_c2b_windows_durable_fence_foundation"][
+            "sub_pr_sequence"
+        ]
+    }
+    windows_install = windows_sub_stages[
+        "windows_deterministic_install_attempt_journal"
+    ]
+    windows_attestation = windows_sub_stages[
+        "windows_restart_attestation_and_foundation_closure"
+    ]
+    assert "active-SCM-still-preinstall" in windows_install["responsibility"]
+    assert "event-3-durable-nonce-reservation" in windows_install["responsibility"]
+    assert "event-4-transition-receipt" in windows_install["responsibility"]
+    assert "terminal-event-7-closure" in windows_attestation["responsibility"]
     assert d1["lease_must_be_valid_through"]
     assert d2["lease_must_be_valid_through"]
     assert d3["lease_must_be_valid_through"]
@@ -452,6 +580,18 @@ def test_high_risk_paths_resolve_to_conservative_rules() -> None:
     assert "scripts-runtime" in _matching_rule_ids(
         "scripts/commodity_simnow_shakedown.py"
     )
+    assert "windows-fence-foundation-sources" in _matching_rule_ids(
+        "scripts/windows_rpc_deployment_snapshot_v1.py"
+    )
+    assert "windows-fence-foundation-sources" in _matching_rule_ids(
+        "docs/schemas/windows-rpc-durable-fence-state-v1.schema.json"
+    )
+    assert "windows-fence-foundation-sources" in _matching_rule_ids(
+        "docs/operations/windows-rpc-durable-fence-foundation-v1.md"
+    )
+    assert "windows-fence-foundation-sources" in _matching_rule_ids(
+        "docs/architecture/windows-rpc-durable-fence-foundation-chain-v1.json"
+    )
     expected = {
         ".github/workflows/cd.yml": ("release-workflows", "infra_manual"),
         ".dockerignore": ("root-dockerignore-contract", "infra_manual"),
@@ -472,6 +612,26 @@ def test_high_risk_paths_resolve_to_conservative_rules() -> None:
             "c-fast-containerfiles",
             "build_only",
         ),
+        "scripts/windows_rpc_deployment_snapshot_v1.py": (
+            "windows-fence-foundation-sources",
+            "infra_manual",
+        ),
+        "scripts/windows_fence_foundation/install_attempt.py": (
+            "windows-fence-foundation-sources",
+            "infra_manual",
+        ),
+        "docs/schemas/windows-rpc-durable-fence-state-v1.schema.json": (
+            "windows-fence-foundation-sources",
+            "infra_manual",
+        ),
+        "docs/operations/windows-rpc-durable-fence-foundation-v1.md": (
+            "windows-fence-foundation-sources",
+            "infra_manual",
+        ),
+        "docs/architecture/windows-rpc-durable-fence-foundation-chain-v1.json": (
+            "windows-fence-foundation-sources",
+            "infra_manual",
+        ),
         "docs/schemas/web-bridge-release-plan-v1.schema.json": (
             "runtime-json-schemas",
             "build_only",
@@ -480,6 +640,39 @@ def test_high_risk_paths_resolve_to_conservative_rules() -> None:
     for path, result in expected.items():
         selected = _selected_rules(path)
         assert [(selected[0]["id"], selected[0]["classification"])] == [result]
+
+
+def test_windows_foundation_bundle_is_build_only_and_never_a_cd_target() -> None:
+    build_units = {unit["id"]: unit for unit in MANIFEST["build_units"]}
+    deploy_units = {unit["id"]: unit for unit in MANIFEST["deploy_units"]}
+    bundle = build_units["windows-fence-foundation-bundle"]
+    windows = deploy_units["windows-ctp-gateway"]
+    rule = next(
+        rule
+        for rule in MANIFEST["path_rules"]
+        if rule["id"] == "windows-fence-foundation-sources"
+    )
+
+    assert bundle["implementation_status"] == (
+        "planned_contract_frozen_runtime_not_installed"
+    )
+    assert bundle["automatic_deploy_allowed"] is False
+    assert bundle["deploy_units"] == ["windows-ctp-gateway"]
+    assert bundle["deploy_units_semantics"] == (
+        "dependency_mapping_only_not_a_cd_target_install_restart_or_deploy_authorization"
+    )
+    assert windows["implementation_status"] == (
+        "foundation_contract_frozen_runtime_not_installed"
+    )
+    assert windows["automatic_deploy_allowed"] is False
+    assert rule["classification"] == "infra_manual"
+    assert rule["build_units"] == ["windows-fence-foundation-bundle"]
+    assert rule["pre_activation_build_units"] == ["legacy-web-bridge-app"]
+    assert rule["deploy_units"] == []
+    assert (
+        "ordinary_cd_install_restart_signing_or_windows_runtime_mutation_forbidden"
+        in (rule["manual_scope_resolution"])
+    )
 
 
 def test_joint_dependency_references_and_rule_ids_are_valid() -> None:

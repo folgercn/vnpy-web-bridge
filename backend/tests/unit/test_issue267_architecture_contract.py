@@ -5,11 +5,8 @@ import json
 from collections import Counter
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[3]
-MANIFEST_PATH = (
-    ROOT / "docs/architecture/web-bridge-deployment-ownership-v1.json"
-)
+MANIFEST_PATH = ROOT / "docs/architecture/web-bridge-deployment-ownership-v1.json"
 MANIFEST = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
 
 
@@ -27,14 +24,15 @@ def test_manifest_freezes_issue267_scope_and_safe_defaults() -> None:
     assert MANIFEST["defaults"] == {
         "live_trading_authorized": False,
         "production_allowed": False,
+        "automatic_deploy_allowed": False,
         "private_keys_in_repository_or_runtime_images": False,
         "unspecified_network_access": "deny",
         "artifact_overwrite": "deny",
     }
     assert MANIFEST["target_contract_status"] == "planned_not_implemented"
-    assert MANIFEST["release_trigger_contract"][
-        "classifier_consumption_allowed"
-    ] is False
+    assert (
+        MANIFEST["release_trigger_contract"]["classifier_consumption_allowed"] is False
+    )
     assert MANIFEST["release_trigger_contract"]["unknown_path"] == "block"
 
 
@@ -115,14 +113,10 @@ def test_app_main_service_lifecycle_has_an_exact_target_owner() -> None:
     assert recorded_shutdown == lifecycle_calls("shutdown")
 
     target_ids = _units("target_deployment_units").keys()
-    for item in inventory["startup"] + inventory["bindings"] + inventory[
-        "shutdown"
-    ]:
+    for item in inventory["startup"] + inventory["bindings"] + inventory["shutdown"]:
         assert item["current_owner"] == "web-bridge"
         assert item["target_owner"] in target_ids
-        transition = item.get(
-            "transition_mode", inventory["default_transition_mode"]
-        )
+        transition = item.get("transition_mode", inventory["default_transition_mode"])
         assert transition in {
             "move_after_durable_contract_and_single_owner_cutover",
             "retire_replace",
@@ -140,9 +134,12 @@ def test_app_main_service_lifecycle_has_an_exact_target_owner() -> None:
         "commodity_c_fast_shadow_service.bind_contract_loader",
     }
     assert all(item["transition_mode"] == "retire_replace" for item in shadow.values())
-    assert "producer has no RPC loader" in shadow[
-        "commodity_c_fast_shadow_service.bind_contract_loader"
-    ]["replacement_contract"]
+    assert (
+        "producer has no RPC loader"
+        in shadow["commodity_c_fast_shadow_service.bind_contract_loader"][
+            "replacement_contract"
+        ]
+    )
 
 
 def test_target_units_cover_every_issue267_deployment_boundary() -> None:
@@ -178,18 +175,14 @@ def test_target_state_has_one_authoritative_owner() -> None:
         for unit in _units("target_deployment_units").values()
         for state in unit["state_owner"]
     ]
-    duplicates = sorted(
-        state for state, count in Counter(owners).items() if count > 1
-    )
+    duplicates = sorted(state for state, count in Counter(owners).items() if count > 1)
     assert duplicates == []
 
 
 def test_only_execution_boundaries_have_order_rpc_authority() -> None:
     target = _units("target_deployment_units")
     allowed = {
-        unit_id
-        for unit_id, unit in target.items()
-        if unit["order_rpc"]["allowed"]
+        unit_id for unit_id, unit in target.items() if unit["order_rpc"]["allowed"]
     }
     assert allowed == {"execution-orchestrator"}
     for unit_id, unit in target.items():
@@ -208,21 +201,18 @@ def test_only_execution_boundaries_have_order_rpc_authority() -> None:
 
     current = _units("current_deployment_units")
     assert {
-        unit_id
-        for unit_id, unit in current.items()
-        if unit["order_rpc"]["allowed"]
+        unit_id for unit_id, unit in current.items() if unit["order_rpc"]["allowed"]
     } == {"web-bridge"}
-    assert current["windows-ctp-gateway"]["order_rpc"][
-        "provides_methods"
-    ] == ["send_order", "cancel_order"]
+    assert current["windows-ctp-gateway"]["order_rpc"]["provides_methods"] == [
+        "send_order",
+        "cancel_order",
+    ]
 
 
 def test_only_signing_authority_can_read_private_keys() -> None:
     target = _units("target_deployment_units")
     allowed = {
-        unit_id
-        for unit_id, unit in target.items()
-        if unit["private_key"]["allowed"]
+        unit_id for unit_id, unit in target.items() if unit["private_key"]["allowed"]
     }
     assert allowed == {"signing-authority"}
     assert set(target["signing-authority"]["artifact_write"]) == {
@@ -242,9 +232,7 @@ def test_only_signing_authority_can_read_private_keys() -> None:
     assert key_policy["separate_runtime_identity_per_domain"] is True
     assert key_policy["cross_domain_key_reuse"] == "deny"
     signer_network = target["signing-authority"]["network_access"]
-    assert signer_network["outbound"] == [
-        "artifact-registry:submit_signed_artifact"
-    ]
+    assert signer_network["outbound"] == ["artifact-registry:submit_signed_artifact"]
     assert {"install", "enable", "revoke", "control_command", "order_rpc"} <= set(
         signer_network["denied_capabilities"]
     )
@@ -265,8 +253,7 @@ def test_frontend_and_control_api_cannot_restart_or_command_execution() -> None:
         "phase_2_plus:control-api:8080",
     ]
     assert all(
-        not trigger.startswith("backend/")
-        for trigger in frontend["release_trigger"]
+        not trigger.startswith("backend/") for trigger in frontend["release_trigger"]
     )
     assert control["order_rpc"]["allowed"] is False
     assert control["private_key"]["allowed"] is False
@@ -313,12 +300,10 @@ def test_runtime_authorization_and_consume_receipts_have_unique_writers() -> Non
     }
     target = _units("target_deployment_units")
     assert "consume_receipt" in target["artifact-registry"]["artifact_write"]
-    assert "consume_receipt" not in target["execution-orchestrator"][
-        "artifact_write"
-    ]
-    assert "consume_request_journal" in target["execution-orchestrator"][
-        "artifact_write"
-    ]
+    assert "consume_receipt" not in target["execution-orchestrator"]["artifact_write"]
+    assert (
+        "consume_request_journal" in target["execution-orchestrator"]["artifact_write"]
+    )
 
     revoke_edge = next(
         edge
@@ -327,9 +312,7 @@ def test_runtime_authorization_and_consume_receipts_have_unique_writers() -> Non
         and edge["source"] == "execution-orchestrator"
         and edge["target"] == "artifact-registry"
     )
-    assert {"request_revoke", "read_revoke_receipt"} <= set(
-        revoke_edge["capabilities"]
-    )
+    assert {"request_revoke", "read_revoke_receipt"} <= set(revoke_edge["capabilities"])
 
 
 def test_critical_network_edges_are_scoped_and_default_deny() -> None:
@@ -338,9 +321,7 @@ def test_critical_network_edges_are_scoped_and_default_deny() -> None:
     assert policy["authoritative"] is True
     assert policy["unit_network_access_fields_authoritative"] is False
     edges = {
-        (edge["phase"], edge["source"], edge["target"]): set(
-            edge["capabilities"]
-        )
+        (edge["phase"], edge["source"], edge["target"]): set(edge["capabilities"])
         for edge in policy["edges"]
     }
     assert edges[("phase_1", "frontend", "web-bridge")] == {
@@ -374,9 +355,9 @@ def test_critical_network_edges_are_scoped_and_default_deny() -> None:
     assert edges[("phase_3", "map-producer", "legacy-candidate-custody-adapter")] == {
         "create_unsigned_map_candidate"
     }
-    assert edges[("phase_3", "c-fast-producer", "legacy-candidate-custody-adapter")] == {
-        "create_unsigned_c_fast_candidate"
-    }
+    assert edges[
+        ("phase_3", "c-fast-producer", "legacy-candidate-custody-adapter")
+    ] == {"create_unsigned_c_fast_candidate"}
     assert edges[("phase_5", "market-data-worker", "windows-ctp-gateway")] == {
         "query",
         "subscribe",
@@ -396,12 +377,8 @@ def test_critical_network_edges_are_scoped_and_default_deny() -> None:
     assert actual.isdisjoint(forbidden)
 
     market = _units("target_deployment_units")["market-data-worker"]
-    assert "windows-gateway:2014:readonly_query" in market["network_access"][
-        "outbound"
-    ]
-    assert "windows-gateway:4102:subscribe" in market["network_access"][
-        "outbound"
-    ]
+    assert "windows-gateway:2014:readonly_query" in market["network_access"]["outbound"]
+    assert "windows-gateway:4102:subscribe" in market["network_access"]["outbound"]
 
 
 def test_producer_and_signer_code_closures_are_fail_closed() -> None:
@@ -435,6 +412,7 @@ def test_execution_quality_fanout_has_one_target_owner() -> None:
     assert fanout not in market["code_paths"]
     assert "execution_quality_fanout" not in market["startup_tasks"]
     assert "tick_fanout" in quality["startup_tasks"]
-    assert "backend/app/services/commodity_c_fast_execution_quality_*.py" in quality[
-        "code_paths"
-    ]
+    assert (
+        "backend/app/services/commodity_c_fast_execution_quality_*.py"
+        in quality["code_paths"]
+    )

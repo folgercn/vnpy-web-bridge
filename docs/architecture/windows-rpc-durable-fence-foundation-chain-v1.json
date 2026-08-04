@@ -1,0 +1,844 @@
+{
+  "schema_version": "windows_rpc_durable_fence_foundation_chain_v1",
+  "issue": 267,
+  "status": "contract_only_runtime_not_installed",
+  "raw_digest_algorithm": "sha256_of_exact_raw_bytes",
+  "validation_order": [
+    "zero_order_preflight",
+    "install_manifest",
+    "fence_state",
+    "publish_receipt",
+    "install_events_1_through_2",
+    "restart_authorization",
+    "install_event_3_restart_dispatch_reserved",
+    "service_config_transition_receipt",
+    "install_event_4_service_config_transition_verified",
+    "scm_dispatch_evidence",
+    "install_event_5_restart_dispatched",
+    "startup_receipt",
+    "install_event_6_start_observed",
+    "foundation_attestation",
+    "install_event_7_foundation_verified"
+  ],
+  "required_equalities": [
+    {
+      "id": "one_install_attempt",
+      "paths": [
+        "preflight.install_attempt_id",
+        "manifest.install_attempt_id",
+        "state.install_attempt_id",
+        "publish.install_attempt_id",
+        "events[*].install_attempt_id",
+        "restart_authorization.install_attempt_id",
+        "service_config_transition_receipt.install_attempt_id",
+        "scm_dispatch_evidence.install_attempt_id",
+        "startup_receipt.install_attempt_id",
+        "attestation.install_attempt_id"
+      ]
+    },
+    {
+      "id": "one_service",
+      "paths": [
+        "preflight.service_name",
+        "manifest.service_name",
+        "state.service_name",
+        "publish.service_name",
+        "events[*].service_name",
+        "restart_authorization.service_name",
+        "service_config_transition_receipt.service_name",
+        "scm_dispatch_evidence.service_name",
+        "startup_receipt.service_name",
+        "attestation.service_name"
+      ]
+    },
+    {
+      "id": "one_store_path",
+      "paths": [
+        "preflight.store_path_sha256",
+        "manifest.store_path_sha256",
+        "state.store_path_sha256",
+        "events[*].store_path_sha256",
+        "attestation.store_path_sha256"
+      ]
+    },
+    {
+      "id": "one_store_id",
+      "paths": [
+        "state.store_id",
+        "events[*].store_id",
+        "attestation.store_id"
+      ]
+    },
+    {
+      "id": "one_store_volume_serial",
+      "paths": [
+        "preflight.store_volume_serial",
+        "manifest.store_volume_serial",
+        "state.store_volume_serial",
+        "attestation.store_volume_serial"
+      ]
+    },
+    {
+      "id": "one_store_volume_identity",
+      "paths": [
+        "preflight.store_volume_identity_sha256",
+        "manifest.store_volume_identity_sha256",
+        "state.store_volume_identity_sha256",
+        "attestation.store_volume_identity_sha256"
+      ]
+    },
+    {
+      "id": "one_attempt_nonce",
+      "paths": [
+        "preflight.attempt_nonce_sha256",
+        "manifest.attempt_nonce_sha256",
+        "state.attempt_nonce_sha256"
+      ]
+    },
+    {
+      "id": "one_preflight_receipt_id",
+      "paths": [
+        "preflight.receipt_id",
+        "manifest.preflight_receipt_id",
+        "state.preflight_receipt_id"
+      ]
+    },
+    {
+      "id": "one_manifest_id",
+      "paths": [
+        "manifest.manifest_id",
+        "state.install_manifest_id"
+      ]
+    },
+    {
+      "id": "one_preflight_server_projection",
+      "paths": [
+        "preflight.server_instance_id",
+        "state.preflight_server_instance_id"
+      ]
+    },
+    {
+      "id": "one_preflight_fact_generation",
+      "paths": [
+        "preflight.fact_generation",
+        "state.preflight_fact_generation"
+      ]
+    },
+    {
+      "id": "one_preflight_execution_facts",
+      "paths": [
+        "preflight.execution_facts_canonical_sha256",
+        "state.preflight_execution_facts_sha256"
+      ]
+    },
+    {
+      "id": "one_account",
+      "paths": [
+        "preflight.expected_account_sha256",
+        "state.expected_account_sha256",
+        "attestation.expected_account_sha256"
+      ]
+    },
+    {
+      "id": "one_raw_account_row",
+      "paths": [
+        "preflight.raw_account_row_sha256",
+        "state.raw_account_row_sha256",
+        "attestation.raw_account_row_sha256"
+      ]
+    },
+    {
+      "id": "one_raw_account_canonical_payload",
+      "paths": [
+        "preflight.raw_account_row_canonical_json_base64",
+        "attestation.raw_account_row_canonical_json_base64"
+      ]
+    },
+    {
+      "id": "one_gateway_scope",
+      "paths": [
+        "preflight.gateway_scope_sha256",
+        "state.gateway_scope_sha256",
+        "attestation.gateway_scope_sha256"
+      ]
+    },
+    {
+      "id": "one_gateway_scope_canonical_payload",
+      "paths": [
+        "preflight.gateway_scope_canonical_json_base64",
+        "attestation.gateway_scope_canonical_json_base64"
+      ]
+    },
+    {
+      "id": "one_gateway_name",
+      "paths": [
+        "preflight.gateway_name",
+        "state.gateway_name",
+        "attestation.gateway_name"
+      ]
+    },
+    {
+      "id": "one_trusted_clock",
+      "paths": [
+        "preflight.trusted_clock_id",
+        "manifest.trusted_clock_id",
+        "state.trusted_clock_id",
+        "publish.trusted_clock_id",
+        "events[*].trusted_clock_id",
+        "restart_authorization.trusted_clock_id",
+        "service_config_transition_receipt.trusted_clock_id",
+        "scm_dispatch_evidence.trusted_clock_id",
+        "startup_receipt.trusted_clock_id",
+        "attestation.trusted_clock_id"
+      ]
+    },
+    {
+      "id": "one_host_boot",
+      "paths": [
+        "preflight.host_boot_id",
+        "restart_authorization.expected_host_boot_id",
+        "service_config_transition_receipt.host_boot_id",
+        "scm_dispatch_evidence.host_boot_id",
+        "startup_receipt.host_boot_id",
+        "attestation.host_boot_id"
+      ]
+    },
+    {
+      "id": "one_old_service_process_id",
+      "paths": [
+        "preflight.service_process_id",
+        "restart_authorization.expected_service_process_id",
+        "service_config_transition_receipt.expected_service_process_id"
+      ]
+    },
+    {
+      "id": "one_old_service_process_start",
+      "paths": [
+        "preflight.service_process_started_at_utc",
+        "restart_authorization.expected_service_process_started_at_utc",
+        "service_config_transition_receipt.expected_service_process_started_at_utc"
+      ]
+    },
+    {
+      "id": "one_bundle",
+      "paths": [
+        "preflight.bundle_sha256",
+        "manifest.bundle_sha256",
+        "state.bundle_sha256",
+        "publish.bundle_sha256"
+      ]
+    },
+    {
+      "id": "one_final_version_directory",
+      "paths": [
+        "manifest.final_version_directory_path_sha256",
+        "publish.final_version_directory_path_sha256"
+      ]
+    },
+    {
+      "id": "one_final_owner",
+      "paths": [
+        "manifest.expected_final_owner_sid_sha256",
+        "publish.final_directory_owner_sid_sha256",
+        "publish.components.extension.owner_sid_sha256",
+        "publish.components.launcher.owner_sid_sha256",
+        "publish.components.assembly.owner_sid_sha256",
+        "publish.components.config.owner_sid_sha256"
+      ]
+    },
+    {
+      "id": "one_final_directory_acl",
+      "paths": [
+        "manifest.expected_final_directory_acl_sddl_sha256",
+        "publish.final_directory_acl_sddl_sha256",
+        "publish.final_directory_acl_readback_sddl_sha256"
+      ]
+    },
+    {
+      "id": "one_component_acl",
+      "paths": [
+        "manifest.expected_component_acl_sddl_sha256",
+        "publish.components.extension.acl_sddl_sha256",
+        "publish.components.extension.acl_readback_sddl_sha256",
+        "publish.components.launcher.acl_sddl_sha256",
+        "publish.components.launcher.acl_readback_sddl_sha256",
+        "publish.components.assembly.acl_sddl_sha256",
+        "publish.components.assembly.acl_readback_sddl_sha256",
+        "publish.components.config.acl_sddl_sha256",
+        "publish.components.config.acl_readback_sddl_sha256"
+      ]
+    },
+    {
+      "id": "one_extension",
+      "paths": [
+        "manifest.extension_sha256",
+        "state.extension_sha256",
+        "publish.components.extension.manifest_sha256",
+        "publish.components.extension.published_sha256",
+        "publish.components.extension.readback_sha256",
+        "attestation.extension_sha256"
+      ]
+    },
+    {
+      "id": "one_launcher",
+      "paths": [
+        "manifest.launcher_sha256",
+        "state.launcher_sha256",
+        "publish.components.launcher.manifest_sha256",
+        "publish.components.launcher.published_sha256",
+        "publish.components.launcher.readback_sha256",
+        "attestation.launcher_sha256"
+      ]
+    },
+    {
+      "id": "one_assembly",
+      "paths": [
+        "manifest.assembly_sha256",
+        "state.assembly_sha256",
+        "publish.components.assembly.manifest_sha256",
+        "publish.components.assembly.published_sha256",
+        "publish.components.assembly.readback_sha256",
+        "attestation.assembly_sha256"
+      ]
+    },
+    {
+      "id": "one_config",
+      "paths": [
+        "manifest.config_sha256",
+        "state.config_sha256",
+        "publish.components.config.manifest_sha256",
+        "publish.components.config.published_sha256",
+        "publish.components.config.readback_sha256",
+        "attestation.config_sha256"
+      ]
+    },
+    {
+      "id": "one_extension_destination",
+      "paths": [
+        "manifest.extension_destination_path_sha256",
+        "publish.components.extension.destination_path_sha256"
+      ]
+    },
+    {
+      "id": "one_launcher_destination",
+      "paths": [
+        "manifest.launcher_destination_path_sha256",
+        "publish.components.launcher.destination_path_sha256"
+      ]
+    },
+    {
+      "id": "one_assembly_destination",
+      "paths": [
+        "manifest.assembly_destination_path_sha256",
+        "publish.components.assembly.destination_path_sha256"
+      ]
+    },
+    {
+      "id": "one_config_destination",
+      "paths": [
+        "manifest.config_destination_path_sha256",
+        "publish.components.config.destination_path_sha256"
+      ]
+    },
+    {
+      "id": "one_service_image_path",
+      "paths": [
+        "manifest.service_image_path_canonical_sha256",
+        "publish.target_service_image_path_canonical_sha256",
+        "service_config_transition_receipt.target_service_image_path_canonical_sha256",
+        "service_config_transition_receipt.target_service_image_path_readback_sha256",
+        "startup_receipt.service_image_path_canonical_sha256",
+        "attestation.service_image_path_canonical_sha256"
+      ]
+    },
+    {
+      "id": "one_preinstall_service_image_path",
+      "paths": [
+        "preflight.service_image_path_canonical_sha256",
+        "manifest.preinstall_service_image_path_canonical_sha256",
+        "publish.preinstall_service_image_path_canonical_sha256",
+        "publish.preinstall_service_image_path_readback_sha256",
+        "service_config_transition_receipt.preinstall_service_image_path_canonical_sha256",
+        "service_config_transition_receipt.safety_service_image_path_readback_sha256"
+      ]
+    },
+    {
+      "id": "one_service_config",
+      "paths": [
+        "manifest.service_config_canonical_sha256",
+        "publish.target_service_config_canonical_sha256",
+        "service_config_transition_receipt.target_service_config_canonical_sha256",
+        "service_config_transition_receipt.target_service_config_readback_sha256",
+        "startup_receipt.service_config_canonical_sha256",
+        "attestation.service_config_canonical_sha256"
+      ]
+    },
+    {
+      "id": "one_preinstall_service_config",
+      "paths": [
+        "preflight.service_config_canonical_sha256",
+        "manifest.preinstall_service_config_canonical_sha256",
+        "publish.preinstall_service_config_canonical_sha256",
+        "publish.preinstall_service_config_readback_sha256",
+        "service_config_transition_receipt.preinstall_service_config_canonical_sha256"
+      ]
+    },
+    {
+      "id": "one_service_config_owner",
+      "paths": [
+        "preflight.service_config_owner_sid_sha256",
+        "manifest.expected_service_config_owner_sid_sha256",
+        "publish.service_config_owner_sid_sha256",
+        "service_config_transition_receipt.service_config_owner_sid_sha256"
+      ]
+    },
+    {
+      "id": "one_service_config_acl",
+      "paths": [
+        "preflight.service_config_acl_sddl_sha256",
+        "manifest.expected_service_config_acl_sddl_sha256",
+        "publish.service_config_acl_sddl_sha256",
+        "publish.service_config_acl_readback_sddl_sha256",
+        "service_config_transition_receipt.service_config_acl_sddl_sha256",
+        "service_config_transition_receipt.service_config_acl_readback_sddl_sha256"
+      ]
+    },
+    {
+      "id": "one_safety_service_config",
+      "paths": [
+        "manifest.safety_service_config_canonical_sha256",
+        "publish.safety_service_config_canonical_sha256",
+        "service_config_transition_receipt.safety_service_config_canonical_sha256",
+        "service_config_transition_receipt.safety_service_config_readback_sha256"
+      ]
+    },
+    {
+      "id": "one_service_config_transition_plan",
+      "paths": [
+        "manifest.service_config_transition_plan_sha256",
+        "publish.service_config_transition_plan_sha256",
+        "restart_authorization.service_config_transition_plan_sha256",
+        "service_config_transition_receipt.transition_plan_sha256"
+      ]
+    },
+    {
+      "id": "one_running_launcher",
+      "paths": [
+        "manifest.launcher_sha256",
+        "attestation.process_image_sha256"
+      ]
+    },
+    {
+      "id": "one_loaded_extension",
+      "paths": [
+        "manifest.extension_sha256",
+        "attestation.loaded_extension_sha256"
+      ]
+    },
+    {
+      "id": "one_effective_config",
+      "paths": [
+        "manifest.config_sha256",
+        "attestation.effective_config_sha256"
+      ]
+    },
+    {
+      "id": "one_publish_seal",
+      "paths": [
+        "publish.seal_challenge_id",
+        "restart_authorization.publish_seal_challenge_id"
+      ]
+    },
+    {
+      "id": "one_publish_seal_expiry",
+      "paths": [
+        "publish.seal_expires_at_utc",
+        "restart_authorization.publish_seal_expires_at_utc"
+      ]
+    },
+    {
+      "id": "one_scm_audit_trace",
+      "paths": [
+        "scm_dispatch_evidence.audit_trace_raw_sha256",
+        "startup_receipt.scm_audit_trace_raw_sha256"
+      ]
+    },
+    {
+      "id": "one_scm_start_call_start",
+      "paths": [
+        "scm_dispatch_evidence.start_call_started_at_utc",
+        "startup_receipt.scm_call_started_at_utc"
+      ]
+    },
+    {
+      "id": "one_scm_start_call_return",
+      "paths": [
+        "scm_dispatch_evidence.start_call_returned_at_utc",
+        "startup_receipt.scm_call_returned_at_utc"
+      ]
+    },
+    {
+      "id": "one_scm_start_call_result",
+      "paths": [
+        "scm_dispatch_evidence.start_api_result",
+        "startup_receipt.scm_result"
+      ]
+    },
+    {
+      "id": "one_installer_principal",
+      "paths": [
+        "manifest.expected_installer_principal_sid_sha256",
+        "scm_dispatch_evidence.caller_principal_sid_sha256"
+      ]
+    },
+    {
+      "id": "one_installer_process_image",
+      "paths": [
+        "manifest.expected_installer_process_image_sha256",
+        "scm_dispatch_evidence.caller_process_image_sha256"
+      ]
+    },
+    {
+      "id": "one_new_service_process_id",
+      "paths": [
+        "startup_receipt.service_process_id",
+        "attestation.service_process_id"
+      ]
+    },
+    {
+      "id": "one_new_service_process_start",
+      "paths": [
+        "startup_receipt.service_process_started_at_utc",
+        "attestation.service_process_started_at_utc"
+      ]
+    },
+    {
+      "id": "one_restart_dispatch_nonce",
+      "paths": [
+        "restart_authorization.dispatch_nonce_sha256",
+        "service_config_transition_receipt.restart_dispatch_nonce_sha256",
+        "scm_dispatch_evidence.restart_dispatch_nonce_sha256",
+        "startup_receipt.restart_dispatch_nonce_sha256",
+        "events[2].restart_dispatch_nonce_sha256",
+        "events[3].restart_dispatch_nonce_sha256",
+        "events[4].restart_dispatch_nonce_sha256",
+        "events[5].restart_dispatch_nonce_sha256",
+        "events[6].restart_dispatch_nonce_sha256"
+      ]
+    },
+    {
+      "id": "one_restart_operation",
+      "paths": [
+        "restart_authorization.service_control_operation_id",
+        "service_config_transition_receipt.service_control_operation_id",
+        "scm_dispatch_evidence.service_control_operation_id",
+        "startup_receipt.service_control_operation_id",
+        "events[2].service_control_operation_id",
+        "events[3].service_control_operation_id",
+        "events[4].service_control_operation_id",
+        "events[5].service_control_operation_id",
+        "events[6].service_control_operation_id",
+        "attestation.service_control_operation_id"
+      ]
+    }
+  ],
+  "required_raw_digest_bindings": [
+    "manifest.preflight_receipt_raw_sha256=sha256(preflight.raw)",
+    "state.install_manifest_raw_sha256=sha256(manifest.raw)",
+    "state.preflight_receipt_raw_sha256=sha256(preflight.raw)",
+    "publish.install_manifest_raw_sha256=sha256(manifest.raw)",
+    "publish.preflight_receipt_raw_sha256=sha256(preflight.raw)",
+    "events[*].install_manifest_raw_sha256=sha256(manifest.raw)",
+    "events[*].preflight_receipt_raw_sha256=sha256(preflight.raw)",
+    "events[*].fence_state_raw_sha256=sha256(state.raw)",
+    "events[1..6].publish_receipt_raw_sha256=sha256(publish.raw)",
+    "restart_authorization.publish_receipt_raw_sha256=sha256(publish.raw)",
+    "restart_authorization.install_manifest_raw_sha256=sha256(manifest.raw)",
+    "restart_authorization.preflight_receipt_raw_sha256=sha256(preflight.raw)",
+    "restart_authorization.install_event_head_raw_sha256=sha256(events[1].raw)",
+    "events[2..6].restart_authorization_raw_sha256=sha256(restart_authorization.raw)",
+    "service_config_transition_receipt.install_manifest_raw_sha256=sha256(manifest.raw)",
+    "service_config_transition_receipt.preflight_receipt_raw_sha256=sha256(preflight.raw)",
+    "service_config_transition_receipt.publish_receipt_raw_sha256=sha256(publish.raw)",
+    "service_config_transition_receipt.restart_authorization_raw_sha256=sha256(restart_authorization.raw)",
+    "service_config_transition_receipt.reservation_event_raw_sha256=sha256(events[2].raw)",
+    "service_config_transition_receipt.reservation_event_id=events[2].event_id",
+    "events[3..6].service_config_transition_receipt_raw_sha256=sha256(service_config_transition_receipt.raw)",
+    "scm_dispatch_evidence.install_manifest_raw_sha256=sha256(manifest.raw)",
+    "scm_dispatch_evidence.restart_authorization_raw_sha256=sha256(restart_authorization.raw)",
+    "scm_dispatch_evidence.reservation_event_raw_sha256=sha256(events[2].raw)",
+    "scm_dispatch_evidence.service_config_transition_receipt_raw_sha256=sha256(service_config_transition_receipt.raw)",
+    "events[4..6].scm_dispatch_evidence_raw_sha256=sha256(scm_dispatch_evidence.raw)",
+    "startup_receipt.install_manifest_raw_sha256=sha256(manifest.raw)",
+    "startup_receipt.restart_authorization_raw_sha256=sha256(restart_authorization.raw)",
+    "startup_receipt.service_config_transition_receipt_raw_sha256=sha256(service_config_transition_receipt.raw)",
+    "startup_receipt.scm_dispatch_evidence_raw_sha256=sha256(scm_dispatch_evidence.raw)",
+    "startup_receipt.scm_audit_trace_raw_sha256=scm_dispatch_evidence.audit_trace_raw_sha256",
+    "startup_receipt.restart_dispatched_event_id=events[4].event_id",
+    "startup_receipt.restart_dispatched_event_raw_sha256=sha256(events[4].raw)",
+    "events[5].startup_receipt_raw_sha256=sha256(startup_receipt.raw)",
+    "attestation.install_manifest_raw_sha256=sha256(manifest.raw)",
+    "attestation.preflight_receipt_raw_sha256=sha256(preflight.raw)",
+    "attestation.fence_state_raw_sha256=sha256(state.raw)",
+    "attestation.publish_receipt_raw_sha256=sha256(publish.raw)",
+    "attestation.service_config_transition_receipt_raw_sha256=sha256(service_config_transition_receipt.raw)",
+    "attestation.start_observed_event_raw_sha256=sha256(events[5].raw)",
+    "attestation.restart_authorization_raw_sha256=sha256(restart_authorization.raw)",
+    "attestation.startup_receipt_raw_sha256=sha256(startup_receipt.raw)=events[5].startup_receipt_raw_sha256",
+    "events[6].foundation_attestation_raw_sha256=sha256(attestation.raw)"
+  ],
+  "normal_closure_profile": {
+    "terminal_event_type": "FOUNDATION_VERIFIED",
+    "exact_normal_event_count": 7,
+    "required_artifacts": [
+      "preflight", "manifest", "state", "publish", "restart_authorization",
+      "service_config_transition_receipt", "scm_dispatch_evidence", "startup_receipt", "attestation"
+    ],
+    "required_equalities_scope": "this_normal_closure_profile_only",
+    "required_raw_digest_bindings_scope": "this_normal_closure_profile_only"
+  },
+  "failure_frontier_binding_rules": {
+    "base_event_chain": {
+      "identity_and_signature_profile": "artifact_identity_and_signature_profile",
+      "raw_digest_bindings": ["events[*].install_manifest_raw_sha256=sha256(manifest.raw)", "events[*].preflight_receipt_raw_sha256=sha256(preflight.raw)", "events[*].fence_state_raw_sha256=sha256(state.raw)", "each_successor.previous_event_id=predecessor.event_id", "each_successor.previous_event_raw_sha256=sha256(predecessor.raw)"],
+      "equality_groups": ["one_install_attempt", "one_service", "one_store_path", "one_store_id", "one_trusted_clock"]
+    },
+    "publish": {
+      "identity_and_signature_profile": "artifact_identity_and_signature_profile",
+      "raw_digest_bindings": ["present_events.publish_receipt_raw_sha256=sha256(publish.raw)", "publish.install_manifest_raw_sha256=sha256(manifest.raw)", "publish.preflight_receipt_raw_sha256=sha256(preflight.raw)"],
+      "equality_groups": ["one_bundle", "one_final_version_directory", "one_extension", "one_launcher", "one_assembly", "one_config", "one_publish_seal"]
+    },
+    "restart_authorization": {
+      "identity_and_signature_profile": "artifact_identity_and_signature_profile",
+      "raw_digest_bindings": ["present_events.restart_authorization_raw_sha256=sha256(restart_authorization.raw)", "restart_authorization.install_manifest_raw_sha256=sha256(manifest.raw)", "restart_authorization.preflight_receipt_raw_sha256=sha256(preflight.raw)", "restart_authorization.publish_receipt_raw_sha256=sha256(publish.raw)", "restart_authorization.install_event_head_raw_sha256=sha256(events[1].raw)"],
+      "equality_groups": ["one_host_boot", "one_old_service_process_id", "one_old_service_process_start", "one_restart_dispatch_nonce", "one_restart_operation"]
+    },
+    "service_config_transition_receipt": {
+      "identity_and_signature_profile": "artifact_identity_and_signature_profile",
+      "raw_digest_bindings": ["present_events.service_config_transition_receipt_raw_sha256=sha256(service_config_transition_receipt.raw)", "service_config_transition_receipt.install_manifest_raw_sha256=sha256(manifest.raw)", "service_config_transition_receipt.preflight_receipt_raw_sha256=sha256(preflight.raw)", "service_config_transition_receipt.publish_receipt_raw_sha256=sha256(publish.raw)", "service_config_transition_receipt.restart_authorization_raw_sha256=sha256(restart_authorization.raw)", "service_config_transition_receipt.reservation_event_raw_sha256=sha256(events[2].raw)"],
+      "equality_groups": ["one_preinstall_service_image_path", "one_preinstall_service_config", "one_safety_service_config", "one_service_image_path", "one_service_config", "one_service_config_transition_plan", "one_restart_dispatch_nonce", "one_restart_operation"]
+    },
+    "scm_dispatch_evidence": {
+      "identity_and_signature_profile": "artifact_identity_and_signature_profile",
+      "raw_digest_bindings": ["present_events.scm_dispatch_evidence_raw_sha256=sha256(scm_dispatch_evidence.raw)", "scm_dispatch_evidence.install_manifest_raw_sha256=sha256(manifest.raw)", "scm_dispatch_evidence.restart_authorization_raw_sha256=sha256(restart_authorization.raw)", "scm_dispatch_evidence.reservation_event_raw_sha256=sha256(events[2].raw)", "scm_dispatch_evidence.service_config_transition_receipt_raw_sha256=sha256(service_config_transition_receipt.raw)"],
+      "equality_groups": ["one_host_boot", "one_installer_principal", "one_installer_process_image", "one_restart_dispatch_nonce", "one_restart_operation"]
+    },
+    "startup_receipt": {
+      "identity_and_signature_profile": "artifact_identity_and_signature_profile",
+      "raw_digest_bindings": ["present_events.startup_receipt_raw_sha256=sha256(startup_receipt.raw)", "startup_receipt.install_manifest_raw_sha256=sha256(manifest.raw)", "startup_receipt.restart_authorization_raw_sha256=sha256(restart_authorization.raw)", "startup_receipt.service_config_transition_receipt_raw_sha256=sha256(service_config_transition_receipt.raw)", "startup_receipt.scm_dispatch_evidence_raw_sha256=sha256(scm_dispatch_evidence.raw)", "startup_receipt.restart_dispatched_event_raw_sha256=sha256(events[4].raw)"],
+      "equality_groups": ["one_host_boot", "one_scm_audit_trace", "one_scm_start_call_start", "one_scm_start_call_return", "one_scm_start_call_result", "one_new_service_process_id", "one_new_service_process_start", "one_restart_dispatch_nonce", "one_restart_operation"]
+    }
+  },
+  "failure_frontier_identity_and_signature_scope": "verify_exact_raw_canonical_core_id_and_signature_for_all_present_artifacts_all_completed_prefix_events_and_the_terminal_FAILED_FROZEN_event_before_any_binding_or_equality_rule",
+  "failure_frontier_profiles": [
+    {
+      "failed_event_sequence": 2,
+      "last_completed_normal_event_type": "INSTALL_PREPARED",
+      "required_binding_rule_ids": ["base_event_chain"],
+      "artifact_presence": {"publish": false, "restart_authorization": false, "service_config_transition_receipt": false, "scm_dispatch_evidence": false, "startup_receipt": false, "attestation": false}
+    },
+    {
+      "failed_event_sequence": 3,
+      "last_completed_normal_event_type": "FILES_PUBLISHED",
+      "required_binding_rule_ids": ["base_event_chain", "publish"],
+      "artifact_presence": {"publish": true, "restart_authorization": false, "service_config_transition_receipt": false, "scm_dispatch_evidence": false, "startup_receipt": false, "attestation": false}
+    },
+    {
+      "failed_event_sequence": 4,
+      "last_completed_normal_event_type": "RESTART_DISPATCH_RESERVED",
+      "required_binding_rule_ids": ["base_event_chain", "publish", "restart_authorization"],
+      "artifact_presence": {"publish": true, "restart_authorization": true, "service_config_transition_receipt": false, "scm_dispatch_evidence": false, "startup_receipt": false, "attestation": false}
+    },
+    {
+      "failed_event_sequence": 5,
+      "last_completed_normal_event_type": "SERVICE_CONFIG_TRANSITION_VERIFIED",
+      "required_binding_rule_ids": ["base_event_chain", "publish", "restart_authorization", "service_config_transition_receipt"],
+      "artifact_presence": {"publish": true, "restart_authorization": true, "service_config_transition_receipt": true, "scm_dispatch_evidence": false, "startup_receipt": false, "attestation": false}
+    },
+    {
+      "failed_event_sequence": 6,
+      "last_completed_normal_event_type": "RESTART_DISPATCHED",
+      "required_binding_rule_ids": ["base_event_chain", "publish", "restart_authorization", "service_config_transition_receipt", "scm_dispatch_evidence"],
+      "artifact_presence": {"publish": true, "restart_authorization": true, "service_config_transition_receipt": true, "scm_dispatch_evidence": true, "startup_receipt": false, "attestation": false}
+    },
+    {
+      "failed_event_sequence": 7,
+      "last_completed_normal_event_type": "START_OBSERVED",
+      "required_binding_rule_ids": ["base_event_chain", "publish", "restart_authorization", "service_config_transition_receipt", "scm_dispatch_evidence", "startup_receipt"],
+      "artifact_presence": {"publish": true, "restart_authorization": true, "service_config_transition_receipt": true, "scm_dispatch_evidence": true, "startup_receipt": true, "attestation": false}
+    }
+  ],
+  "failure_frontier_verification_rule": "select_exactly_one_profile_by_FAILED_FROZEN_sequence_validate_only_artifacts_and_raw_bindings_present_through_last_completed_stage_reject_future_evidence_missing_required_evidence_or_normal_closure_equalities_applied_to_failure",
+  "time_and_freshness_rules": [
+    "preflight.challenge_issued_at_utc<=preflight.snapshot_served_at_utc<=preflight.observed_at_utc<=preflight.challenge_expires_at_utc",
+    "preflight.observed_at_utc-preflight.challenge_issued_at_utc<=preflight.maximum_preflight_age_seconds",
+    "preflight.observed_at_utc<=manifest.issued_at_utc<=manifest.expires_at_utc",
+    "manifest.issued_at_utc<=state.created_at_utc<=events[0].observed_at_utc",
+    "events[0].observed_at_utc<=publish.published_at_utc<=publish.seal_challenge_issued_at_utc<=publish.sealed_at_utc<=events[1].observed_at_utc<=preflight.challenge_expires_at_utc",
+    "publish.sealed_at_utc-publish.seal_challenge_issued_at_utc<=publish.maximum_seal_to_dispatch_seconds",
+    "publish.sealed_at_utc<=restart_authorization.issued_at_utc<=restart_authorization.not_before_utc<=events[2].observed_at_utc<=service_config_transition_receipt.applied_at_utc<=service_config_transition_receipt.readback_at_utc<=events[3].observed_at_utc<=scm_dispatch_evidence.trace_challenge_issued_at_utc<=scm_dispatch_evidence.stop_call_started_at_utc<=scm_dispatch_evidence.stop_call_returned_at_utc<=scm_dispatch_evidence.start_call_started_at_utc=startup_receipt.scm_call_started_at_utc<startup_receipt.service_process_started_at_utc<=scm_dispatch_evidence.start_call_returned_at_utc=startup_receipt.scm_call_returned_at_utc<=scm_dispatch_evidence.trace_captured_at_utc<=events[4].observed_at_utc<=restart_authorization.expires_at_utc",
+    "scm_dispatch_evidence.trace_captured_at_utc-scm_dispatch_evidence.trace_challenge_issued_at_utc<=scm_dispatch_evidence.maximum_trace_age_seconds",
+    "events[4].observed_at_utc<=publish.seal_expires_at_utc",
+    "events[0].observed_at_utc<=events[1].observed_at_utc<=events[2].observed_at_utc<=events[3].observed_at_utc<=events[4].observed_at_utc<=events[5].observed_at_utc<=events[6].observed_at_utc",
+    "scm_dispatch_evidence.trace_captured_at_utc<=events[4].observed_at_utc<=startup_receipt.observed_at_utc<=scm_dispatch_evidence.trace_expires_at_utc",
+    "startup_receipt.observed_at_utc<=events[5].observed_at_utc<=attestation.captured_at_utc<=attestation.served_at_utc<=events[6].observed_at_utc"
+  ],
+  "identity_transition_rules": [
+    "restart_authorization.expected_service_process_id=preflight.service_process_id",
+    "restart_authorization.expected_service_process_started_at_utc=preflight.service_process_started_at_utc",
+    "attestation.service_process_started_at_utc>preflight.service_process_started_at_utc",
+    "attestation.service_process_started_at_utc=startup_receipt.service_process_started_at_utc>startup_receipt.scm_call_started_at_utc>=events[3].observed_at_utc",
+    "attestation.service_process_id=startup_receipt.service_process_id",
+    "attestation.host_boot_id=startup_receipt.host_boot_id=preflight.host_boot_id",
+    "(attestation.service_process_id,attestation.service_process_started_at_utc)!=(preflight.service_process_id,preflight.service_process_started_at_utc)",
+    "attestation.server_instance_id!=preflight.server_instance_id",
+    "attestation.service_start_type=startup_receipt.service_start_type=manifest.target_service_start_type=DEMAND_START_and_recovery_failure_actions_disabled_and_automatic_policy_restore_authorized=false"
+  ],
+  "publish_immutability_rules": [
+    "publish.publish_mode=manifest.publish_mode=atomic_content_addressed_final_directory",
+    "publish.final_directory_create_only=true_and_overwrite_allowed=false",
+    "publish.installer_write_access_after_publish=manifest.installer_write_access_after_publish=false",
+    "publish.final_directory_unsafe_write_principals=[]",
+    "publish.active_service_config_matches_preinstall=true_and_target_service_config_not_applied=true_at_observer_seal",
+    "manifest.service_config_mutation_before_dispatch_reservation_authorized=publish.service_config_mutation_before_dispatch_reservation_authorized=false",
+    "manifest.unbound_service_config_mutation_after_observer_seal_authorized=publish.unbound_service_config_mutation_after_observer_seal_authorized=false",
+    "manifest.service_config_transition_after_dispatch_reservation_authorized=true_but_requires_fresh_restart_authorization_and_durable_event_3",
+    "service_config_transition_receipt.transition_manifest_bound=true_transition_applied_once=true_target_readback_verified=true_restart_dispatched=false",
+    "service_config_transition_receipt.first_applies_and_reads_back_safety_config_with_preinstall_ImagePath_DEMAND_START_and_recovery_failure_actions_disabled_before_target_ImagePath",
+    "service_config_transition_receipt.authorized_changed_fields=[FailureActions,ImagePath,RecoveryActions,StartType]_and_account_dependencies_unchanged",
+    "target_service_remains_DEMAND_START_with_recovery_failure_actions_disabled_and_automatic_policy_restore_is_not_authorized",
+    "SCM_restart_is_forbidden_until_event_4_binds_the_exact_transition_receipt_and_startup_receipt_must_prove_process_start_strictly_after_exact_SCM_call",
+    "dispatch_rechecks_preflight_host_boot_exact_old_process_identity_path_bytes_owner_acl_reparse_hardlink_service_config_and_transition_receipt_against_observer_seal_before_SCM_restart",
+    "event_5_and_startup_receipt_both_bind_host_observed_single_use_SCM_audit_trace_exact_caller_operation_nonce_API_sequence_result_and_trusted_timestamps"
+  ],
+  "canonical_payload_digest_rules": [
+    "strict_base64_decode(preflight.raw_account_row_canonical_json_base64)=strict_base64_decode(attestation.raw_account_row_canonical_json_base64)",
+    "decoded_raw_account_bytes_must_parse_as_strict_JSON_and_equal_RFC8785_JCS_reencoding",
+    "sha256(decoded_raw_account_bytes)=preflight.raw_account_row_sha256=state.raw_account_row_sha256=attestation.raw_account_row_sha256",
+    "strict_base64_decode(preflight.gateway_scope_canonical_json_base64)=strict_base64_decode(attestation.gateway_scope_canonical_json_base64)",
+    "decoded_gateway_scope_bytes_must_parse_as_strict_JSON_and_equal_RFC8785_JCS_reencoding",
+    "sha256(decoded_gateway_scope_bytes)=preflight.gateway_scope_sha256=state.gateway_scope_sha256=attestation.gateway_scope_sha256"
+  ],
+  "deterministic_install_attempt_identity": {
+    "domain_separator": "vnpy.issue267.windows-foundation.install-attempt-id.v1",
+    "canonicalization_profile": "windows-foundation-canonical-json-v1",
+    "input_object": {
+      "issue": {"const": 267},
+      "attempt_nonce_sha256": {"path": "preflight.attempt_nonce_sha256"},
+      "bundle_sha256": {"path": "preflight.bundle_sha256"},
+      "service_name": {"path": "preflight.service_name"},
+      "store_path_sha256": {"path": "preflight.store_path_sha256"},
+      "store_volume_serial": {"path": "preflight.store_volume_serial"},
+      "store_volume_identity_sha256": {"path": "preflight.store_volume_identity_sha256"},
+      "expected_account_sha256": {"path": "preflight.expected_account_sha256"},
+      "gateway_name": {"path": "preflight.gateway_name"},
+      "gateway_scope_sha256": {"path": "preflight.gateway_scope_sha256"}
+    },
+    "derivation": "windows-fence-install-+lowercase_hex_sha256(UTF8(domain_separator)+0x00+RFC8785_JCS_UTF8(input_object))",
+    "same_inputs_same_id_required": true,
+    "different_id_for_same_inputs_rejected": true,
+    "nonce_reuse_with_different_immutable_inputs_rejected": true
+  },
+  "event_chain": {
+    "normal_types": [
+      "INSTALL_PREPARED",
+      "FILES_PUBLISHED",
+      "RESTART_DISPATCH_RESERVED",
+      "SERVICE_CONFIG_TRANSITION_VERIFIED",
+      "RESTART_DISPATCHED",
+      "START_OBSERVED",
+      "FOUNDATION_VERIFIED"
+    ],
+    "sequences": [1, 2, 3, 4, 5, 6, 7],
+    "each_successor_binds_exact_previous_event_id_and_raw_sha256": true,
+    "event_ids_and_raw_digests_unique_within_attempt": true,
+    "restart_dispatch_count": 1,
+    "restart_dispatch_nonce_consumed_once": true,
+    "restart_dispatch_reservation_event_sequence": 3,
+    "reservation_publish_rule": "event_3_create_only_publish_fsync_directory_fsync_secure_readback_before_any_SCM_call",
+    "reservation_semantics": "event_3_durably_consumes_exact_authorization_nonce_and_service_control_operation_id_even_if_process_crashes_before_or_during_SCM_call",
+    "service_config_transition_event_sequence": 4,
+    "transition_semantics": "after_event_3_only_apply_exact_manifest_bound_ImagePath_transition_read_back_all_service_config_and_durably_publish_event_4_before_restart",
+    "head_at_or_after_reservation_recovery": "query_exact_service_operation_and_attempt_never_call_SCM_restart_again",
+    "crash_before_SCM_after_reservation": "remain_frozen_and_require_explicit_compatible_successor_attempt_never_reuse_consumed_authorization",
+    "foundation_verified_is_terminal": true,
+    "failed_frozen_is_terminal": true,
+    "unknown_response_action": "query_same_attempt_never_dispatch_restart_again"
+  },
+  "signing_domains": {
+    "manifest": "dedicated-windows-foundation-manifest-signing-v1",
+    "observer_evidence": "dedicated-windows-foundation-observer-evidence-v1",
+    "restart_authorization": "dedicated-windows-foundation-restart-authorization-v1",
+    "publish_receipt_signer": "observer_evidence",
+    "private_key_domains_pairwise_distinct": true,
+    "target_runtime_private_keys_allowed": false
+  },
+  "artifact_identity_and_signature_profile": {
+    "canonicalization_profile": "windows-foundation-canonical-json-v1",
+    "canonicalization_definition": "RFC8785_JCS_UTF8_after_strict_JSON_parse_reject_duplicate_keys_floats_nonfinite_numbers_and_non_NFC_strings",
+    "core_payload_definition": "entire_artifact_object_excluding_artifact_id_field_core_sha256_field_and_signature_field_if_present",
+    "core_sha256_definition": "lowercase_hex_sha256_of_canonical_core_payload",
+    "artifact_id_definition": "schema_specific_literal_prefix_plus_exact_core_sha256",
+    "signed_envelope_definition": "entire_artifact_object_excluding_signature_only_including_schema_purpose_id_core_authority_canonicalization_domain_role_key_domain_key_id_and_public_key_pin",
+    "signature_message_definition": "UTF8(signature_domain_separator)+0x00+RFC8785_JCS_UTF8(signed_envelope)",
+    "signature_decode_rule": "strict_canonical_base64_exactly_64_decoded_bytes_no_whitespace_or_alternate_encoding",
+    "verification_key_rule": "exact_role_and_key_domain_pinned_public_key_sha256_only_no_embedded_key_trust_or_cross_domain_fallback",
+    "artifacts": [
+      {"name": "preflight", "id_field": "receipt_id", "id_prefix": "windows-fence-preflight-", "core_field": "receipt_core_sha256", "signature_domain_separator": "vnpy.issue267.windows-foundation.zero-order-preflight.v1"},
+      {"name": "manifest", "id_field": "manifest_id", "id_prefix": "windows-fence-install-manifest-", "core_field": "manifest_core_sha256", "signature_domain_separator": "vnpy.issue267.windows-foundation.install-manifest.v1"},
+      {"name": "state", "id_field": "state_id", "id_prefix": "windows-fence-state-", "core_field": "state_core_sha256", "signature_domain_separator": null},
+      {"name": "publish", "id_field": "receipt_id", "id_prefix": "windows-fence-publish-receipt-", "core_field": "receipt_core_sha256", "signature_domain_separator": "vnpy.issue267.windows-foundation.publish-receipt.v1"},
+      {"name": "install_event", "id_field": "event_id", "id_prefix": "windows-fence-install-event-", "core_field": "event_core_sha256", "signature_domain_separator": null},
+      {"name": "restart_authorization", "id_field": "authorization_id", "id_prefix": "windows-fence-restart-authorization-", "core_field": "authorization_core_sha256", "signature_domain_separator": "vnpy.issue267.windows-foundation.restart-authorization.v1"},
+      {"name": "service_config_transition_receipt", "id_field": "receipt_id", "id_prefix": "windows-fence-service-config-transition-", "core_field": "receipt_core_sha256", "signature_domain_separator": null},
+      {"name": "scm_dispatch_evidence", "id_field": "evidence_id", "id_prefix": "windows-fence-scm-dispatch-evidence-", "core_field": "evidence_core_sha256", "signature_domain_separator": "vnpy.issue267.windows-foundation.scm-dispatch-evidence.v1"},
+      {"name": "startup_receipt", "id_field": "receipt_id", "id_prefix": "windows-fence-startup-receipt-", "core_field": "receipt_core_sha256", "signature_domain_separator": "vnpy.issue267.windows-foundation.startup-receipt.v1"},
+      {"name": "attestation", "id_field": "attestation_id", "id_prefix": "windows-fence-foundation-attestation-", "core_field": "attestation_core_sha256", "signature_domain_separator": "vnpy.issue267.windows-foundation.attestation.v1"}
+    ]
+  },
+  "mandatory_rejection_codes": [
+    "SCHEMA_INVALID",
+    "RAW_DIGEST_MISMATCH",
+    "INSTALL_ATTEMPT_MISMATCH",
+    "DETERMINISTIC_ATTEMPT_ID_MISMATCH",
+    "SERVICE_OR_STORE_IDENTITY_MISMATCH",
+    "STORE_VOLUME_IDENTITY_MISMATCH",
+    "PREFLIGHT_STATE_PROJECTION_MISMATCH",
+    "ACCOUNT_OR_GATEWAY_SCOPE_MISMATCH",
+    "CANONICAL_PAYLOAD_DIGEST_MISMATCH",
+    "COMPONENT_OR_ACL_READBACK_MISMATCH",
+    "SIGNING_DOMAIN_OR_PIN_MISMATCH",
+    "CANONICALIZATION_CORE_OR_ID_MISMATCH",
+    "SIGNATURE_MESSAGE_OR_BASE64_MISMATCH",
+    "PREFLIGHT_STALE_REPLAYED_OR_TIME_REVERSED",
+    "MANIFEST_EXPIRED_OR_TIME_REVERSED",
+    "RESTART_AUTHORIZATION_EXPIRED_EARLY_REPLAYED_OR_CONSUMED",
+    "EVENT_SEQUENCE_GAP_FORK_REORDER_REPEAT_OR_TERMINAL_SUCCESSOR",
+    "RESTART_OPERATION_OR_NONCE_MISMATCH",
+    "PUBLISH_SEAL_EXPIRED_OR_POST_SEAL_DRIFT",
+    "UNAUTHORIZED_SERVICE_CONFIG_TRANSITION",
+    "SERVICE_CONFIG_TRANSITION_BEFORE_RESERVATION_OR_RECEIPT_MISMATCH",
+    "UNSAFE_AUTO_START_OR_RECOVERY_POLICY",
+    "PROCESS_START_NOT_AFTER_BOUND_SCM_DISPATCH",
+    "SCM_AUDIT_TRACE_CALLER_OPERATION_OR_RESULT_MISMATCH",
+    "FAILURE_FRONTIER_EVIDENCE_SPLICE",
+    "FAILURE_FRONTIER_RAW_DIGEST_OR_IDENTITY_MISMATCH",
+    "OLD_SERVICE_IDENTITY_MISMATCH_OR_NEW_IDENTITY_NOT_OBSERVED",
+    "START_OBSERVED_HEAD_MISMATCH",
+    "FINAL_REGISTRY_HANDLER_IDENTITY_MISMATCH",
+    "UNDERLYING_GATEWAY_CALL_OBSERVED",
+    "LIVE_MUTATION_RPC_PROBE_FORBIDDEN",
+    "AUTHORITY_OR_TOKEN_NOT_FOUNDATION_FROZEN_NONE"
+  ],
+  "closure_direction": "START_OBSERVED_event_6_to_attestation_to_terminal_FOUNDATION_VERIFIED_event_7",
+  "implementation_requirement": "WF-2_through_WF-5_verifiers_must_reject_every_listed_mismatch_before_any_install_restart_or_foundation_closure_action",
+  "authority": {
+    "deployment_authorized": false,
+    "automatic_deploy_allowed": false,
+    "restart_authorized": false,
+    "production_allowed": false,
+    "live_trading_authorized": false,
+    "send_order_authorized": false,
+    "cancel_order_authorized": false
+  }
+}

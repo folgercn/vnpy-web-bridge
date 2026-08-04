@@ -1,0 +1,216 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vnpy.example/schemas/windows-rpc-durable-fence-install-event-v1.json",
+  "title": "Create-only Windows RPC durable fence install attempt event v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "purpose", "event_id", "event_core_sha256",
+    "install_attempt_id", "event_sequence", "previous_event_id",
+    "previous_event_raw_sha256", "event_type", "attempt_state",
+    "observed_at_utc", "trusted_clock_id", "service_name", "store_id", "store_path_sha256",
+    "install_manifest_raw_sha256", "preflight_receipt_raw_sha256",
+    "fence_state_raw_sha256", "publish_receipt_raw_sha256",
+    "restart_authorization_raw_sha256", "restart_dispatch_nonce_sha256",
+    "service_config_transition_receipt_raw_sha256",
+    "scm_dispatch_evidence_raw_sha256",
+    "startup_receipt_raw_sha256", "foundation_attestation_raw_sha256",
+    "service_control_operation_id", "admission_state", "token_state",
+    "staged_token", "active_token", "authority_grant", "details_sha256",
+    "authority"
+  ],
+  "properties": {
+    "schema_version": {"const": "windows_rpc_durable_fence_install_event_v1"},
+    "purpose": {"const": "append_create_only_windows_fence_install_attempt_event"},
+    "event_id": {"type": "string", "pattern": "^windows-fence-install-event-[0-9a-f]{64}$"},
+    "event_core_sha256": {"$ref": "#/$defs/sha256"},
+    "install_attempt_id": {"$ref": "#/$defs/attemptId"},
+    "event_sequence": {"type": "integer", "minimum": 1},
+    "previous_event_id": {"oneOf": [{"type": "null"}, {"type": "string", "pattern": "^windows-fence-install-event-[0-9a-f]{64}$"}]},
+    "previous_event_raw_sha256": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/sha256"}]},
+    "event_type": {"enum": ["INSTALL_PREPARED", "FILES_PUBLISHED", "RESTART_DISPATCH_RESERVED", "SERVICE_CONFIG_TRANSITION_VERIFIED", "RESTART_DISPATCHED", "START_OBSERVED", "FOUNDATION_VERIFIED", "FAILED_FROZEN"]},
+    "attempt_state": {"enum": ["PREPARED_FROZEN", "FILES_READY_FROZEN", "RESTART_DISPATCH_RESERVED_FROZEN", "SERVICE_CONFIG_READY_FROZEN", "RESTART_UNKNOWN_FROZEN", "STARTED_FROZEN", "VERIFIED_FROZEN", "FAILED_FROZEN"]},
+    "observed_at_utc": {"$ref": "#/$defs/utc"},
+    "trusted_clock_id": {"$ref": "#/$defs/identifier"},
+    "service_name": {"$ref": "#/$defs/serviceName"},
+    "store_id": {"type": "string", "pattern": "^windows-fence-store-[0-9a-f]{64}$"},
+    "store_path_sha256": {"$ref": "#/$defs/sha256"},
+    "install_manifest_raw_sha256": {"$ref": "#/$defs/sha256"},
+    "preflight_receipt_raw_sha256": {"$ref": "#/$defs/sha256"},
+    "fence_state_raw_sha256": {"$ref": "#/$defs/sha256"},
+    "publish_receipt_raw_sha256": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/sha256"}]},
+    "restart_authorization_raw_sha256": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/sha256"}]},
+    "restart_dispatch_nonce_sha256": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/sha256"}]},
+    "service_config_transition_receipt_raw_sha256": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/sha256"}]},
+    "scm_dispatch_evidence_raw_sha256": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/sha256"}]},
+    "startup_receipt_raw_sha256": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/sha256"}]},
+    "foundation_attestation_raw_sha256": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/sha256"}]},
+    "service_control_operation_id": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/identifier"}]},
+    "admission_state": {"const": "FROZEN"},
+    "token_state": {"const": "NONE"},
+    "staged_token": {"type": "null"},
+    "active_token": {"type": "null"},
+    "authority_grant": {"type": "null"},
+    "details_sha256": {"$ref": "#/$defs/sha256"},
+    "authority": {"$ref": "#/$defs/authority"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"event_type": {"const": "INSTALL_PREPARED"}}, "required": ["event_type"]},
+      "then": {"properties": {
+        "event_sequence": {"const": 1},
+        "attempt_state": {"const": "PREPARED_FROZEN"},
+        "previous_event_id": {"type": "null"},
+        "previous_event_raw_sha256": {"type": "null"},
+        "publish_receipt_raw_sha256": {"type": "null"},
+        "restart_authorization_raw_sha256": {"type": "null"},
+        "restart_dispatch_nonce_sha256": {"type": "null"},
+        "service_config_transition_receipt_raw_sha256": {"type": "null"},
+        "scm_dispatch_evidence_raw_sha256": {"type": "null"},
+        "startup_receipt_raw_sha256": {"type": "null"},
+        "foundation_attestation_raw_sha256": {"type": "null"},
+        "service_control_operation_id": {"type": "null"}
+      }}
+    },
+    {
+      "if": {"properties": {"event_type": {"const": "FILES_PUBLISHED"}}, "required": ["event_type"]},
+      "then": {"properties": {
+        "event_sequence": {"const": 2},
+        "attempt_state": {"const": "FILES_READY_FROZEN"},
+        "previous_event_id": {"type": "string"},
+        "previous_event_raw_sha256": {"type": "string"},
+        "publish_receipt_raw_sha256": {"type": "string"},
+        "restart_authorization_raw_sha256": {"type": "null"},
+        "restart_dispatch_nonce_sha256": {"type": "null"},
+        "service_config_transition_receipt_raw_sha256": {"type": "null"},
+        "scm_dispatch_evidence_raw_sha256": {"type": "null"},
+        "startup_receipt_raw_sha256": {"type": "null"},
+        "foundation_attestation_raw_sha256": {"type": "null"},
+        "service_control_operation_id": {"type": "null"}
+      }}
+    },
+    {
+      "if": {"properties": {"event_type": {"const": "RESTART_DISPATCH_RESERVED"}}, "required": ["event_type"]},
+      "then": {"properties": {
+        "event_sequence": {"const": 3},
+        "attempt_state": {"const": "RESTART_DISPATCH_RESERVED_FROZEN"},
+        "previous_event_id": {"type": "string"},
+        "previous_event_raw_sha256": {"type": "string"},
+        "publish_receipt_raw_sha256": {"type": "string"},
+        "restart_authorization_raw_sha256": {"type": "string"},
+        "restart_dispatch_nonce_sha256": {"type": "string"},
+        "service_config_transition_receipt_raw_sha256": {"type": "null"},
+        "scm_dispatch_evidence_raw_sha256": {"type": "null"},
+        "startup_receipt_raw_sha256": {"type": "null"},
+        "foundation_attestation_raw_sha256": {"type": "null"},
+        "service_control_operation_id": {"type": "string"}
+      }}
+    },
+    {
+      "if": {"properties": {"event_type": {"const": "SERVICE_CONFIG_TRANSITION_VERIFIED"}}, "required": ["event_type"]},
+      "then": {"properties": {
+        "event_sequence": {"const": 4},
+        "attempt_state": {"const": "SERVICE_CONFIG_READY_FROZEN"},
+        "previous_event_id": {"type": "string"},
+        "previous_event_raw_sha256": {"type": "string"},
+        "publish_receipt_raw_sha256": {"type": "string"},
+        "restart_authorization_raw_sha256": {"type": "string"},
+        "restart_dispatch_nonce_sha256": {"type": "string"},
+        "service_config_transition_receipt_raw_sha256": {"type": "string"},
+        "scm_dispatch_evidence_raw_sha256": {"type": "null"},
+        "startup_receipt_raw_sha256": {"type": "null"},
+        "foundation_attestation_raw_sha256": {"type": "null"},
+        "service_control_operation_id": {"type": "string"}
+      }}
+    },
+    {
+      "if": {"properties": {"event_type": {"const": "RESTART_DISPATCHED"}}, "required": ["event_type"]},
+      "then": {"properties": {
+        "event_sequence": {"const": 5},
+        "attempt_state": {"const": "RESTART_UNKNOWN_FROZEN"},
+        "previous_event_id": {"type": "string"},
+        "previous_event_raw_sha256": {"type": "string"},
+        "publish_receipt_raw_sha256": {"type": "string"},
+        "restart_authorization_raw_sha256": {"type": "string"},
+        "restart_dispatch_nonce_sha256": {"type": "string"},
+        "service_config_transition_receipt_raw_sha256": {"type": "string"},
+        "scm_dispatch_evidence_raw_sha256": {"type": "string"},
+        "startup_receipt_raw_sha256": {"type": "null"},
+        "foundation_attestation_raw_sha256": {"type": "null"},
+        "service_control_operation_id": {"type": "string"}
+      }}
+    },
+    {
+      "if": {"properties": {"event_type": {"const": "START_OBSERVED"}}, "required": ["event_type"]},
+      "then": {"properties": {
+        "event_sequence": {"const": 6},
+        "attempt_state": {"const": "STARTED_FROZEN"},
+        "previous_event_id": {"type": "string"},
+        "previous_event_raw_sha256": {"type": "string"},
+        "publish_receipt_raw_sha256": {"type": "string"},
+        "restart_authorization_raw_sha256": {"type": "string"},
+        "restart_dispatch_nonce_sha256": {"type": "string"},
+        "service_config_transition_receipt_raw_sha256": {"type": "string"},
+        "scm_dispatch_evidence_raw_sha256": {"type": "string"},
+        "startup_receipt_raw_sha256": {"type": "string"},
+        "foundation_attestation_raw_sha256": {"type": "null"},
+        "service_control_operation_id": {"type": "string"}
+      }}
+    },
+    {
+      "if": {"properties": {"event_type": {"const": "FOUNDATION_VERIFIED"}}, "required": ["event_type"]},
+      "then": {"properties": {
+        "event_sequence": {"const": 7},
+        "attempt_state": {"const": "VERIFIED_FROZEN"},
+        "previous_event_id": {"type": "string"},
+        "previous_event_raw_sha256": {"type": "string"},
+        "publish_receipt_raw_sha256": {"type": "string"},
+        "restart_authorization_raw_sha256": {"type": "string"},
+        "restart_dispatch_nonce_sha256": {"type": "string"},
+        "service_config_transition_receipt_raw_sha256": {"type": "string"},
+        "scm_dispatch_evidence_raw_sha256": {"type": "string"},
+        "startup_receipt_raw_sha256": {"type": "string"},
+        "foundation_attestation_raw_sha256": {"type": "string"},
+        "service_control_operation_id": {"type": "string"}
+      }}
+    },
+    {
+      "if": {"properties": {"event_type": {"const": "FAILED_FROZEN"}}, "required": ["event_type"]},
+      "then": {
+        "properties": {
+          "attempt_state": {"const": "FAILED_FROZEN"},
+          "previous_event_id": {"type": "string"},
+          "previous_event_raw_sha256": {"type": "string"},
+          "foundation_attestation_raw_sha256": {"type": "null"}
+        },
+        "oneOf": [
+          {"properties": {"event_sequence": {"const": 2}, "publish_receipt_raw_sha256": {"type": "null"}, "restart_authorization_raw_sha256": {"type": "null"}, "restart_dispatch_nonce_sha256": {"type": "null"}, "service_config_transition_receipt_raw_sha256": {"type": "null"}, "scm_dispatch_evidence_raw_sha256": {"type": "null"}, "startup_receipt_raw_sha256": {"type": "null"}, "service_control_operation_id": {"type": "null"}}},
+          {"properties": {"event_sequence": {"const": 3}, "publish_receipt_raw_sha256": {"type": "string"}, "restart_authorization_raw_sha256": {"type": "null"}, "restart_dispatch_nonce_sha256": {"type": "null"}, "service_config_transition_receipt_raw_sha256": {"type": "null"}, "scm_dispatch_evidence_raw_sha256": {"type": "null"}, "startup_receipt_raw_sha256": {"type": "null"}, "service_control_operation_id": {"type": "null"}}},
+          {"properties": {"event_sequence": {"const": 4}, "publish_receipt_raw_sha256": {"type": "string"}, "restart_authorization_raw_sha256": {"type": "string"}, "restart_dispatch_nonce_sha256": {"type": "string"}, "service_config_transition_receipt_raw_sha256": {"type": "null"}, "scm_dispatch_evidence_raw_sha256": {"type": "null"}, "startup_receipt_raw_sha256": {"type": "null"}, "service_control_operation_id": {"type": "string"}}},
+          {"properties": {"event_sequence": {"const": 5}, "publish_receipt_raw_sha256": {"type": "string"}, "restart_authorization_raw_sha256": {"type": "string"}, "restart_dispatch_nonce_sha256": {"type": "string"}, "service_config_transition_receipt_raw_sha256": {"type": "string"}, "scm_dispatch_evidence_raw_sha256": {"type": "null"}, "startup_receipt_raw_sha256": {"type": "null"}, "service_control_operation_id": {"type": "string"}}},
+          {"properties": {"event_sequence": {"const": 6}, "publish_receipt_raw_sha256": {"type": "string"}, "restart_authorization_raw_sha256": {"type": "string"}, "restart_dispatch_nonce_sha256": {"type": "string"}, "service_config_transition_receipt_raw_sha256": {"type": "string"}, "scm_dispatch_evidence_raw_sha256": {"type": "string"}, "startup_receipt_raw_sha256": {"type": "null"}, "service_control_operation_id": {"type": "string"}}},
+          {"properties": {"event_sequence": {"const": 7}, "publish_receipt_raw_sha256": {"type": "string"}, "restart_authorization_raw_sha256": {"type": "string"}, "restart_dispatch_nonce_sha256": {"type": "string"}, "service_config_transition_receipt_raw_sha256": {"type": "string"}, "scm_dispatch_evidence_raw_sha256": {"type": "string"}, "startup_receipt_raw_sha256": {"type": "string"}, "service_control_operation_id": {"type": "string"}}}
+        ]
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "attemptId": {"type": "string", "pattern": "^windows-fence-install-[0-9a-f]{64}$"},
+    "identifier": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$"},
+    "serviceName": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"},
+    "utc": {"type": "string", "format": "date-time", "pattern": "Z$"},
+    "authority": {
+      "type": "object", "additionalProperties": false,
+      "required": ["windows_fence_released", "authority_restore_allowed", "consume_authorized", "reconciliation_authorized", "deployment_authorized", "automatic_deploy_allowed", "production_allowed", "live_trading_authorized", "send_order_authorized", "cancel_order_authorized", "countable_forward"],
+      "properties": {
+        "windows_fence_released": {"const": false}, "authority_restore_allowed": {"const": false},
+        "consume_authorized": {"const": false}, "reconciliation_authorized": {"const": false},
+        "deployment_authorized": {"const": false}, "automatic_deploy_allowed": {"const": false},
+        "production_allowed": {"const": false}, "live_trading_authorized": {"const": false},
+        "send_order_authorized": {"const": false}, "cancel_order_authorized": {"const": false},
+        "countable_forward": {"const": false}
+      }
+    }
+  }
+}
