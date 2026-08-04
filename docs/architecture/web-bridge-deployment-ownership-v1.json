@@ -30,11 +30,66 @@
     "revoke_protocol": "control-api issues idempotent command; execution first persists fail-closed effective revoke, then requests artifact-registry receipt with authorization hash, actor, idempotency key and fencing epoch; receipt failures retry without re-enabling",
     "control_api_role": "idempotent_command_and_readonly_projection_only"
   },
+  "legacy_restart_migration_ownership": {
+    "status": "phase_1_pre_c_d_contract_only_not_deployed",
+    "external_high_water": {
+      "unique_writer": "external-witness",
+      "credential_domain": "external_witness_cas_identity",
+      "durable_store": "out_of_deployment_volume_append_only_witness",
+      "network_capability": "authenticated_append_compare_and_swap_readback_only",
+      "release_responsibility": "phase_1_pre_web-bridge-unique-commodity-owner-submits_then_phase_2_execution-orchestrator-after-explicit-owner-migration_external-witness-commits",
+      "rollback_responsibility": "external-witness-detects-local-volume-behind-or-fork-and-blocks"
+    },
+    "host_target_observer": {
+      "unique_writer": "m2-host-observer",
+      "credential_domain": "host_observer_identity_not_available_to_target_container",
+      "durable_store": "host_root_owned_target_identity_and_lease_store",
+      "network_capability": "local_container_runtime_read_and_target_lease_cas_only",
+      "release_responsibility": "m2-host-observer-attests-bootstrap-target-and-renews-exact-lease",
+      "rollback_responsibility": "invalidate-lease-on-container-event-expiry-or-identity-change"
+    },
+    "frozen_bootstrap_coordinator": {
+      "unique_writer": "m2-bootstrap-coordinator",
+      "credential_domain": "root_owned_host_runtime_control_not_available_to_target_container",
+      "durable_store": "host_root_owned_create_only_bootstrap_attempt_journal",
+      "network_capability": "stop_exact_old_runtime_start_exact_receipt_bound_target_query_attempt_only",
+      "release_responsibility": "execute-single-frozen-bootstrap-attempt-after-windows-fence-attestation",
+      "rollback_responsibility": "resume-or-recover-same-attempt-with-both-authorities-frozen"
+    },
+    "baseline_target_manifest": {
+      "unique_writer": "offline-signing-tools",
+      "credential_domain": "target_manifest_signing_key_separate_from_runtime_authorization",
+      "durable_store": "external_operator_custody_then_create_only_host_custody",
+      "network_capability": "none_offline_artifact_handoff",
+      "release_responsibility": "two_person_offline_signing_ceremony",
+      "rollback_responsibility": "revoke_manifest_and_require_new_signed_successor"
+    },
+    "windows_fencing_token_store": {
+      "unique_writer": "windows-ctp-gateway",
+      "credential_domain": "account_gateway_scoped_windows_fence_identity",
+      "durable_store": "windows_fail_closed_create_only_token_and_activation_receipt_store",
+      "network_capability": "typed_stage_query_activate_rpc_from_exact_frozen_linux_owner",
+      "release_responsibility": "windows-ctp-gateway-stages-then-atomically-revokes-old-and-activates-target",
+      "rollback_responsibility": "old-token-remains-permanently-rejected_roll-forward-only"
+    },
+    "conditional_authority_grant": {
+      "unique_writer": "web-bridge",
+      "credential_domain": "commodity-owner-local-authority-domain",
+      "durable_store": "host_custody_create_only_conditional_grant_receipts",
+      "network_capability": "bind-exact-receipt-hash-during-windows-activation-cas",
+      "release_responsibility": "planned-restart-only-byte-exact-restore_or_initial-legacy-remain-revoked",
+      "rollback_responsibility": "pre-cas-grant-inert_post-cas-recover-projection-from-windows-receipt"
+    }
+  },
   "target_network_policy": {
     "default": "deny",
     "authoritative": true,
     "unit_network_access_fields_authoritative": false,
     "edges": [
+      {"phase": "phase_1_pre_c", "source": "web-bridge", "target": "external-witness", "protocol": "authenticated_append_only_cas", "capabilities": ["append_bound_high_water", "query_exact_idempotency_key", "readback"], "principal": "frozen_reconciliation_owner", "authn": "external_witness_cas_identity"},
+      {"phase": "phase_1_pre_d", "source": "m2-host-observer", "target": "container-runtime", "protocol": "local_host_observation", "capabilities": ["attest_exact_target", "create_consume_renew_lease", "observe_container_events"], "principal": "root_owned_host_observer", "authn": "host_local_identity"},
+      {"phase": "phase_1_pre_c", "source": "m2-bootstrap-coordinator", "target": "container-runtime", "protocol": "local_receipt_bound_runtime_control", "capabilities": ["stop_exact_old_runtime", "start_exact_immutable_target", "query_exact_attempt"], "principal": "root_owned_bootstrap_coordinator", "authn": "host_local_runtime_control_identity"},
+      {"phase": "phase_1_pre_d", "source": "web-bridge", "target": "windows-ctp-gateway", "protocol": "typed_fencing_rpc", "capabilities": ["stage_token", "query_staging", "activate_bound_token", "query_activation"], "principal": "frozen_reconciliation_owner", "authn": "source_acl_account_scope_and_exact_d3_receipt_binding"},
       {"phase": "phase_1", "source": "frontend", "target": "web-bridge", "protocol": "http_websocket", "capabilities": ["api_proxy", "websocket_proxy"], "principal": "compose_frontend", "authn": "private_compose_network"},
       {"phase": "phase_2", "source": "frontend", "target": "control-api", "protocol": "http_websocket", "capabilities": ["api_proxy", "websocket_proxy"], "principal": "compose_frontend", "authn": "private_compose_network"},
       {"phase": "phase_2", "source": "control-api", "target": "execution-orchestrator", "protocol": "typed_private_api", "capabilities": ["status", "authorization_status", "preview", "start", "stop", "reconcile", "drain", "safe_to_restart", "enable_authorization", "revoke_authorization", "revalidate_authorization"], "principal": "control_api", "authn": "workload_identity_and_mtls_or_equivalent"},
