@@ -3314,8 +3314,18 @@ def test_c_fast_one_start_continues_with_next_accepted_snapshot(
 def test_c_fast_completed_snapshot_does_not_require_consumed_permit_again(
     tmp_path: Path,
 ) -> None:
-    service, rpc, snapshot, _ = prepare_c_fast_shakedown(tmp_path)
+    service, rpc, snapshot, snapshot_hash = prepare_c_fast_shakedown(
+        tmp_path
+    )
     complete_c_fast_continuous_session(service, rpc, snapshot)
+    service.bind_c_fast_snapshot_provider(
+        lambda: (_ for _ in ()).throw(
+            CommoditySimNowSafetyError("EXECUTION_PERMIT_EXPIRED")
+        )
+    )
+    service.bind_c_fast_snapshot_identity_provider(
+        lambda: (snapshot.snapshot_id, snapshot_hash)
+    )
     service.bind_c_fast_execution_permit_provider(
         lambda _snapshot, _snapshot_hash: (_ for _ in ()).throw(
             CommoditySimNowSafetyError("permit already consumed")

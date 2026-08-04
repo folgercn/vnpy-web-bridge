@@ -1071,3 +1071,35 @@ def test_control_snapshot_requires_current_accepted_file(
     write_snapshot(snapshot_path, tampered)
     with pytest.raises(CFastShadowInvalidError):
         service.accepted_snapshot_for_control()
+
+
+def test_completed_control_identity_bypasses_execution_window_revalidation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private_key = Ed25519PrivateKey.generate()
+    snapshot_path = tmp_path / "snapshot.json"
+    signed, snapshot_hash = sign_payload(unsigned_payload(), private_key)
+    write_snapshot(snapshot_path, signed)
+    service = CommodityCFastShadowService(
+        settings=settings(tmp_path, private_key, snapshot_path),
+        contract_loader=contract_loader,
+        clock=fixed_clock,
+    )
+    service.reload(operator="admin", role="admin", source_ip=None)
+    monkeypatch.setattr(
+        service,
+        "_verify_snapshot",
+        lambda _snapshot: (_ for _ in ()).throw(
+            CFastShadowInvalidError("EXECUTION_PERMIT_EXPIRED")
+        ),
+    )
+
+    with pytest.raises(CFastShadowInvalidError):
+        service.accepted_snapshot_for_control()
+
+    snapshot_id, observed_hash = (
+        service.accepted_snapshot_identity_for_completed_control()
+    )
+    assert snapshot_id == signed["snapshot_id"]
+    assert observed_hash == snapshot_hash
