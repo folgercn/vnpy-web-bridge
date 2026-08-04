@@ -43,8 +43,16 @@ COPY --from=frontend-build /app/frontend/dist ./frontend/dist
 ENV PYTHONPATH=/app/backend:/app/scripts
 
 RUN python -m py_compile test_rpc_readonly.py test_rpc_trade_flow.py \
+    backend/app/services/deployment_drain_bootstrap.py \
     scripts/commodity_c_fast_fee_statement_verify.py \
-    && python -m app.services.commodity_c_fast_permit_runtime_smoke
+    && python -m app.services.commodity_c_fast_permit_runtime_smoke \
+    && python -m app.services.deployment_drain_bootstrap \
+        --state-root /tmp/issue267-bootstrap-smoke \
+        --operator image-build \
+        --reason image-packaging-smoke \
+        --confirm-offline-trading-disabled \
+    && python -c "import json; from pathlib import Path; payload=json.loads(Path('/tmp/issue267-bootstrap-smoke/state.json').read_text()); assert payload['state'] == 'RESTARTED_FROZEN'" \
+    && rm -r /tmp/issue267-bootstrap-smoke
 
 ENV APP_ENV=production
 

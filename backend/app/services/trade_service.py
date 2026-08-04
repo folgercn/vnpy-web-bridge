@@ -1,15 +1,17 @@
 from __future__ import annotations
 
-from dataclasses import asdict, is_dataclass
-from datetime import datetime
 import hashlib
 import json
+from collections.abc import Callable
+from dataclasses import asdict, is_dataclass
+from datetime import datetime, timezone
 from threading import RLock
-from typing import Any, Callable
+from typing import Any
 
 from app.core.config import Settings, get_settings
 from app.core.errors import (
     AppError,
+    DeploymentDrainActiveError,
     InvalidOrderRequestError,
     OrderNotCancelableError,
     OrderNotFoundError,
@@ -21,6 +23,11 @@ from app.schemas.manual_execution_permit import (
 )
 from app.schemas.trade import CancelAllRequestDTO, CancelRequestDTO, OrderRequestDTO
 from app.services.audit_service import AuditService, audit_service
+from app.services.deployment_drain import (
+    DeploymentDrainError,
+    DeploymentDrainService,
+    deployment_drain_for,
+)
 from app.services.monitoring_service import monitoring_service
 from app.services.risk_service import RiskService, risk_service
 from app.services.vnpy_rpc_service import VnpyRpcService, rpc_service
@@ -123,11 +130,24 @@ class TradeService:
         _c_fast_capability_issuers: tuple[object, ...] = (),
         _manual_execution_capability_issuers: tuple[object, ...] = (),
         _baseline_execution_capability_issuers: tuple[object, ...] = (),
+        deployment_drain: DeploymentDrainService | None = None,
     ) -> None:
         self.settings = settings or get_settings()
         self.audit = audit or audit_service
         self.risk = risk or risk_service
         self.rpc = rpc or rpc_service
+        if deployment_drain is not None:
+            self.deployment_drain = deployment_drain
+        elif isinstance(self.rpc, VnpyRpcService):
+            self.deployment_drain = self.rpc.deployment_drain
+        else:
+            self.deployment_drain = deployment_drain_for(
+                self.settings.deployment_drain_state_root,
+                allow_initial_bootstrap=(
+                    self.settings.deployment_drain_initial_bootstrap_allowed
+                    or self.settings.app_env.lower() == "test"
+                ),
+            )
         self._c_fast_capability_lock = RLock()
         self._c_fast_capability_issuers = tuple(
             _c_fast_capability_issuers
@@ -527,6 +547,47 @@ class TradeService:
         baseline_execution_owner: object | None = None,
         baseline_execution_capability: object | None = None,
     ) -> dict[str, Any]:
+        try:
+            # This guard remains held through the final RPC call.  Drain
+            # acquisition therefore observes a completed send or prevents it.
+            with self.deployment_drain.mutation_guard():
+                return self._send_order_under_deployment_gate(
+                    payload,
+                    source_ip=source_ip,
+                    operator=operator,
+                    pre_rpc_guard=pre_rpc_guard,
+                    send_linearization_lock=send_linearization_lock,
+                    c_fast_order_owner=c_fast_order_owner,
+                    c_fast_order_volume_capability=(
+                        c_fast_order_volume_capability
+                    ),
+                    manual_execution_owner=manual_execution_owner,
+                    manual_execution_capability=manual_execution_capability,
+                    baseline_execution_owner=baseline_execution_owner,
+                    baseline_execution_capability=(
+                        baseline_execution_capability
+                    ),
+                )
+        except DeploymentDrainError as exc:
+            raise DeploymentDrainActiveError(
+                detail={"gate_code": exc.code}
+            ) from exc
+
+    def _send_order_under_deployment_gate(
+        self,
+        payload: OrderRequestDTO,
+        *,
+        source_ip: str | None,
+        operator: str,
+        pre_rpc_guard: Callable[..., Any] | None,
+        send_linearization_lock: Any | None,
+        c_fast_order_owner: object | None,
+        c_fast_order_volume_capability: object | None,
+        manual_execution_owner: object | None = None,
+        manual_execution_capability: object | None = None,
+        baseline_execution_owner: object | None = None,
+        baseline_execution_capability: object | None = None,
+    ) -> dict[str, Any]:
         request_data = payload.model_dump()
         self.audit.record(action="order_request", request=request_data, operator=operator, source_ip=source_ip)
         try:
@@ -785,7 +846,7 @@ class TradeService:
                 gateway_name = payload.gateway_name or getattr(order, "gateway_name", None) or self.settings.default_gateway_name
                 self.rpc.cancel_order(cancel_request, gateway_name)
                 items.append({"vt_orderid": vt_orderid, "cancel_requested": True, "error": None})
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - cancel-all is best effort
                 items.append({"vt_orderid": vt_orderid, "cancel_requested": False, "error": str(exc)})
                 monitoring_service.record_trade_failure("cancel_all", str(getattr(exc, "code", exc.__class__.__name__)))
 
@@ -829,7 +890,7 @@ class TradeService:
         )
 
     def make_reference(self) -> str:
-        timestamp = datetime.now().strftime("%Y%m%d%H%M%S%f")
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
         return f"{self.settings.trade_reference_prefix}_{timestamp}"
 
     def _matches_filter(self, order: Any, payload: CancelAllRequestDTO) -> bool:
@@ -838,9 +899,10 @@ class TradeService:
             return False
         if payload.exchange and order_data.get("exchange") != payload.exchange:
             return False
-        if payload.gateway_name and order_data.get("gateway_name") != payload.gateway_name:
-            return False
-        return True
+        return not (
+            payload.gateway_name
+            and order_data.get("gateway_name") != payload.gateway_name
+        )
 
 
 def normalize_status(status: Any) -> str:

@@ -239,6 +239,12 @@ class CommoditySimNowStateError(AppError):
     message = "商品组合 SimNow 状态不允许该操作"
 
 
+class DeploymentDrainActiveError(AppError):
+    status_code = 409
+    code = "DEPLOYMENT_DRAIN_ACTIVE"
+    message = "执行系统正在部署排空或重启冻结，拒绝新的执行动作"
+
+
 def ok(data: Any = None) -> dict[str, Any]:
     return {"ok": True, "data": data if data is not None else {}}
 

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any
 
 from app.core.config import Settings, get_settings
 from app.core.errors import (
     ClosePositionNotEnoughError,
+    DeploymentDrainActiveError,
     OrderConfirmRequiredError,
     RiskDailyLossLimitError,
     RiskExchangeNotAllowedError,
@@ -20,13 +23,29 @@ from app.core.errors import (
 from app.schemas.risk import RiskRulesPatchDTO
 from app.schemas.trade import OrderRequestDTO
 from app.services.calendar_service import CHINA_TZ, calendar_service
+from app.services.deployment_drain import (
+    DeploymentDrainError,
+    DeploymentDrainService,
+    deployment_drain_for,
+)
 from app.services.vnpy_rpc_service import rpc_service
 from app.stores.memory_store import memory_store
 
 
 class RiskService:
-    def __init__(self, settings: Settings | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        deployment_drain: DeploymentDrainService | None = None,
+    ) -> None:
         self.settings = settings or get_settings()
+        self.deployment_drain = deployment_drain or deployment_drain_for(
+            self.settings.deployment_drain_state_root,
+            allow_initial_bootstrap=(
+                self.settings.deployment_drain_initial_bootstrap_allowed
+                or self.settings.app_env.lower() == "test"
+            ),
+        )
         self.web_trade_enabled = self.settings.web_trade_enabled
         self.emergency_stopped = False
         self.rules_version = 1
@@ -53,16 +72,18 @@ class RiskService:
         return dict(self.rules)
 
     def update_rules(self, patch: RiskRulesPatchDTO) -> dict[str, Any]:
-        data = patch.model_dump(exclude_none=True)
-        if data:
-            self.rules.update(data)
-            self.rules_version += 1
-        return self.get_rules()
+        with self._mutation_guard():
+            data = patch.model_dump(exclude_none=True)
+            if data:
+                self.rules.update(data)
+                self.rules_version += 1
+            return self.get_rules()
 
     def enable_trade(self) -> dict[str, Any]:
-        self.web_trade_enabled = True
-        self.emergency_stopped = False
-        return self.status()
+        with self._mutation_guard():
+            self.web_trade_enabled = True
+            self.emergency_stopped = False
+            return self.status()
 
     def disable_trade(self) -> dict[str, Any]:
         self.web_trade_enabled = False
@@ -72,6 +93,16 @@ class RiskService:
         self.web_trade_enabled = False
         self.emergency_stopped = True
         return self.status()
+
+    @contextmanager
+    def _mutation_guard(self) -> Iterator[None]:
+        try:
+            with self.deployment_drain.mutation_guard():
+                yield
+        except DeploymentDrainError as exc:
+            raise DeploymentDrainActiveError(
+                detail={"gate_code": exc.code}
+            ) from exc
 
     def check_trade_allowed(self, *, confirm: bool) -> None:
         if not self.web_trade_enabled or self.emergency_stopped:

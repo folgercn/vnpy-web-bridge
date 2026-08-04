@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vnpy-web-bridge:schema:web-bridge-safe-restart-recheck-v1",
+  "title": "Web Bridge safe restart recheck v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "receipt_id", "receipt_raw_sha256", "deployment_attempt_id", "release_plan_core_sha256", "restart_action_sha256", "drain_epoch", "execution_epoch", "checked_at", "snapshot"],
+  "properties": {
+    "schema_version": {"const": "web_bridge_safe_restart_recheck_v1"},
+    "receipt_id": {"$ref": "#/$defs/receiptId"},
+    "receipt_raw_sha256": {"$ref": "#/$defs/sha256"},
+    "deployment_attempt_id": {"$ref": "#/$defs/identifier"},
+    "release_plan_core_sha256": {"$ref": "#/$defs/sha256"},
+    "restart_action_sha256": {"$ref": "#/$defs/sha256"},
+    "drain_epoch": {"type": "integer", "minimum": 1},
+    "execution_epoch": {"type": "integer", "minimum": 1},
+    "checked_at": {"$ref": "#/$defs/dateTime"},
+    "snapshot": {"$ref": "#/$defs/safeSnapshot"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^(?!0{64}$)[0-9a-f]{64}$"},
+    "receiptId": {"type": "string", "pattern": "^safe-restart-(?!0{64}$)[0-9a-f]{64}$"},
+    "identifier": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$"},
+    "dateTime": {"type": "string", "format": "date-time", "pattern": "Z$"},
+    "safeSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "captured_at", "execution_plan_status", "execution_plan_hash", "plan_version", "state_version", "state_sha256", "active_orders_snapshot_sha256", "positions_snapshot_sha256", "checkpoint_sha256", "rpc_generation", "web_trade_enabled", "execution_authority_revoked", "auto_dispatch_stopped", "active_orders", "unknown_outcome", "reconcile_required", "checkpoint_durable"],
+      "properties": {
+        "schema_version": {"const": "web_bridge_deployment_safety_snapshot_v1"},
+        "captured_at": {"$ref": "#/$defs/dateTime"},
+        "execution_plan_status": {"const": "IDLE"},
+        "execution_plan_hash": {"type": "null"},
+        "plan_version": {"type": "integer", "minimum": 0},
+        "state_version": {"type": "string", "minLength": 1, "maxLength": 128},
+        "state_sha256": {"$ref": "#/$defs/sha256"},
+        "active_orders_snapshot_sha256": {"$ref": "#/$defs/sha256"},
+        "positions_snapshot_sha256": {"$ref": "#/$defs/sha256"},
+        "checkpoint_sha256": {"$ref": "#/$defs/sha256"},
+        "rpc_generation": {"type": "integer", "minimum": 0},
+        "web_trade_enabled": {"const": false},
+        "execution_authority_revoked": {"const": true},
+        "auto_dispatch_stopped": {"const": true},
+        "active_orders": {"const": 0},
+        "unknown_outcome": {"const": false},
+        "reconcile_required": {"const": false},
+        "checkpoint_durable": {"const": true}
+      }
+    }
+  }
+}

@@ -66,11 +66,11 @@ def _selected_rules(path: str) -> list[dict[str, object]]:
 def test_release_dependency_contract_is_inert_and_fail_closed() -> None:
     assert MANIFEST["schema_version"] == "web_bridge_release_dependencies_v1"
     assert MANIFEST["issue"] == 267
-    assert MANIFEST["status"] == "phase_0b_contract_only_not_activated"
+    assert MANIFEST["status"] == "phase_1_pre_a_admission_foundation_deploy_frozen"
 
     safety = MANIFEST["safety"]
     assert safety["classifier_consumption_allowed"] is False
-    assert safety["production_cd_changed"] is False
+    assert safety["production_cd_changed"] is True
     assert safety["automatic_deploy_allowed"] is False
     assert safety["production_allowed"] is False
     assert safety["live_trading_authorized"] is False
@@ -459,37 +459,61 @@ def test_ready_release_requires_compatible_schemas_and_matching_execution_receip
             "receipt_verification_evidence_sha256": EVIDENCE_SHA256,
             "safe_restart_receipt": {
                 "schema_version": "web_bridge_safe_restart_receipt_v1",
+                "purpose": "authorize_one_bound_web_bridge_restart_attempt",
                 "receipt_id": f"safe-restart-{EVIDENCE_SHA256}",
-                "plan_id": f"release-plan-{EVIDENCE_SHA256}",
-                "source_commit_sha": SOURCE_COMMIT,
-                "unit": "frontend",
+                "receipt_core_sha256": EVIDENCE_SHA256,
+                "request_id": "request_00000001",
+                "deployment_attempt_id": "deployment_00000001",
+                "release_plan_id": f"release-plan-{EVIDENCE_SHA256}",
+                "release_plan_core_sha256": EVIDENCE_SHA256,
+                "restart_action_sha256": EVIDENCE_SHA256,
+                "unit": "web-bridge",
                 "issued_at": "2026-08-04T00:00:00Z",
                 "expires_at": "2026-08-04T00:01:00Z",
                 "ttl_seconds": 60,
+                "drain_epoch": 1,
                 "execution_epoch": 1,
-                "plan_version": "v1",
-                "state_version": "v1",
-                "state_sha256": EVIDENCE_SHA256,
-                "active_orders_snapshot_sha256": EVIDENCE_SHA256,
+                "issuer_source_commit_sha": SOURCE_COMMIT,
+                "issuer_image_digest": IMAGE_DIGEST,
+                "issuer_config_sha256": EVIDENCE_SHA256,
+                "issuer_runtime_instance_id": "runtime_00000001",
+                "target_source_commit_sha": SOURCE_COMMIT,
+                "target_image_digest": IMAGE_DIGEST,
+                "target_config_sha256": EVIDENCE_SHA256,
+                "rollback_image_digest": IMAGE_DIGEST,
+                "rollback_config_sha256": EVIDENCE_SHA256,
                 "nonce": "receipt_nonce_001",
-                "checkpoint_sha256": EVIDENCE_SHA256,
+                "snapshot": {
+                    "schema_version": "web_bridge_deployment_safety_snapshot_v1",
+                    "captured_at": "2026-08-04T00:00:00Z",
+                    "execution_plan_status": "IDLE",
+                    "execution_plan_hash": None,
+                    "plan_version": 1,
+                    "state_version": "v1",
+                    "state_sha256": EVIDENCE_SHA256,
+                    "active_orders_snapshot_sha256": EVIDENCE_SHA256,
+                    "positions_snapshot_sha256": EVIDENCE_SHA256,
+                    "checkpoint_sha256": EVIDENCE_SHA256,
+                    "rpc_generation": 1,
+                    "web_trade_enabled": False,
+                    "execution_authority_revoked": True,
+                    "auto_dispatch_stopped": True,
+                    "active_orders": 0,
+                    "unknown_outcome": False,
+                    "reconcile_required": False,
+                    "checkpoint_durable": True,
+                },
                 "safe_to_restart": True,
-                "active_orders": 0,
-                "unknown_outcome": False,
-                "reconcile_required": False,
-                "checkpoint_durable": True,
-                "evidence_sha256": EVIDENCE_SHA256,
+                "one_shot": True,
+                "automatic_deploy_allowed": False,
+                "production_allowed": False,
+                "live_trading_authorized": False,
             },
             "reason": "version update",
         }
     ]
     assert list(validator.iter_errors(plan))
-    plan["restart"][0]["safe_restart_receipt"]["unit"] = "execution-orchestrator"
-    assert not list(validator.iter_errors(plan))
-
     plan["restart"][0]["unit"] = "web-bridge"
-    assert list(validator.iter_errors(plan))
-    plan["restart"][0]["safe_restart_receipt"]["unit"] = "web-bridge"
     assert not list(validator.iter_errors(plan))
 
     plan["create"] = [
@@ -510,6 +534,53 @@ def test_ready_release_requires_compatible_schemas_and_matching_execution_receip
     plan["source_commit_sha"] = "0" * 40
     plan["planner_config_sha256"] = "0" * 64
     assert list(validator.iter_errors(plan))
+
+
+def test_safe_restart_standalone_and_embedded_contracts_stay_in_sync() -> None:
+    def normalized(value: object) -> object:
+        if isinstance(value, dict):
+            if value == {"$ref": "#/$defs/identifier"}:
+                return {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+                }
+            value = {key: normalized(item) for key, item in value.items()}
+        elif isinstance(value, list):
+            value = [normalized(item) for item in value]
+        encoded = json.dumps(value, sort_keys=True)
+        encoded = encoded.replace("safeRestartSnapshot", "safeSnapshot")
+        encoded = encoded.replace("safeRestartUtcDateTime", "dateTime")
+        return json.loads(encoded)
+
+    release = json.loads(
+        (ROOT / "docs/schemas/web-bridge-release-plan-v1.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    receipt = json.loads(
+        (
+            ROOT
+            / "docs/schemas/web-bridge-safe-restart-receipt-v1.schema.json"
+        ).read_text(encoding="utf-8")
+    )
+    recheck = json.loads(
+        (
+            ROOT
+            / "docs/schemas/web-bridge-safe-restart-recheck-v1.schema.json"
+        ).read_text(encoding="utf-8")
+    )
+    embedded = release["$defs"]["safeRestartReceipt"]
+
+    assert set(receipt["required"]) == set(embedded["required"])
+    assert normalized(receipt["properties"]) == normalized(
+        embedded["properties"]
+    )
+
+    standalone_snapshot = receipt["$defs"]["safeSnapshot"]
+    embedded_snapshot = release["$defs"]["safeRestartSnapshot"]
+    recheck_snapshot = recheck["$defs"]["safeSnapshot"]
+    assert normalized(standalone_snapshot) == normalized(embedded_snapshot)
+    assert standalone_snapshot == recheck_snapshot
 
 def _rollback_manifest() -> dict[str, object]:
     return {

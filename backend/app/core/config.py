@@ -95,6 +95,8 @@ class Settings(BaseSettings):
     commodity_simnow_account_hashes: str = ""
     commodity_simnow_trusted_public_keys_json: str = "{}"
     commodity_simnow_state_path: str = "logs/commodity-simnow/state.json"
+    deployment_drain_state_root: str = "logs/deployment-drain"
+    deployment_drain_initial_bootstrap_allowed: bool = False
     commodity_baseline_execution_permit_enabled: bool = False
     commodity_baseline_execution_permit_close_path: str = ""
     commodity_baseline_execution_permit_open_path: str = ""
@@ -545,6 +547,13 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "C_FAST Runtime Authorization artifact, keyring, state paths and keyring pin must be complete and distinct"
                 )
+        if (
+            self.app_env.lower() == "production"
+            and self.deployment_drain_initial_bootstrap_allowed
+        ):
+            raise ValueError(
+                "DEPLOYMENT_DRAIN_INITIAL_BOOTSTRAP_ALLOWED must be false in production"
+            )
         if self.app_env.lower() != "production":
             return self
         if self.jwt_secret_key == "change-me-in-production":
