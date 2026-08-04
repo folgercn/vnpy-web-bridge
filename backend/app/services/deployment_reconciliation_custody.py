@@ -13,11 +13,13 @@ import json
 import os
 import re
 import stat
+import uuid
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
+from threading import get_ident
 from types import MappingProxyType
 from typing import Any
 
@@ -68,6 +70,8 @@ _RESERVED_OUTPUT_DIRECTORIES = (
     "reconciliation-blobs",
     "reconciliation-heads",
 )
+_RESERVED_OUTPUT_DIRECTORY_SET = frozenset(_RESERVED_OUTPUT_DIRECTORIES)
+_OUTPUT_BASENAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,249}\.json$")
 _ROOT_ENTRIES = frozenset(
     (_LOCK_NAME, _STATE_NAME, _ANCHOR_NAME)
     + _INPUT_DIRECTORIES
@@ -165,6 +169,15 @@ class DeploymentReconciliationCustodySnapshot:
                 "CUSTODY_ENTRY_NOT_FOUND",
                 f"custody entry is absent: {relative_path}",
             ) from exc
+
+
+@dataclass(frozen=True)
+class DeploymentReconciliationStoredArtifact:
+    """One canonical, create-only C2 output observed by secure readback."""
+
+    relative_path: str
+    raw_sha256: str
+    raw: bytes
 
 
 def _canonical_bytes(value: object) -> bytes:
@@ -298,6 +311,7 @@ class DeploymentReconciliationCustodyRepository:
         self.max_entries = max_entries
         self.max_file_bytes = max_file_bytes
         self.max_total_bytes = max_total_bytes
+        self._session_capability = object()
 
     def snapshot(
         self, *, captured_at: datetime | None = None
@@ -327,13 +341,19 @@ class DeploymentReconciliationCustodyRepository:
                     "deployment lock path changed during acquisition",
                 )
             self._assert_root_path(root_fd, root_info)
-            yield DeploymentReconciliationCustodySession(
+            session = DeploymentReconciliationCustodySession(
                 repository=self,
                 root_fd=root_fd,
                 lock_fd=lock_fd,
                 root_info=root_info,
                 lock_info=lock_info,
+                capability=self._session_capability,
             )
+            session._activate()
+            try:
+                yield session
+            finally:
+                session._deactivate()
         finally:
             if lock_fd is not None:
                 try:
@@ -454,12 +474,371 @@ class DeploymentReconciliationCustodySession:
         lock_fd: int,
         root_info: os.stat_result,
         lock_info: os.stat_result,
+        capability: object,
     ) -> None:
+        if capability is not repository._session_capability:
+            raise DeploymentReconciliationCustodyError(
+                "CUSTODY_SESSION_UNTRUSTED",
+                "custody sessions must be created by their repository",
+            )
         self.repository = repository
         self.root_fd = root_fd
         self.lock_fd = lock_fd
         self.root_info = root_info
         self.lock_info = lock_info
+        self._active = False
+        self._owner_thread_id: int | None = None
+
+    def _activate(self) -> None:
+        if self._active:
+            raise DeploymentReconciliationCustodyError(
+                "CUSTODY_SESSION_STATE_INVALID", "custody session is already active"
+            )
+        self._owner_thread_id = get_ident()
+        self._active = True
+
+    def _deactivate(self) -> None:
+        self._active = False
+        self._owner_thread_id = None
+
+    def assert_live(self) -> None:
+        """Prove this call still runs in the thread holding the pinned flock."""
+
+        if not self._active:
+            raise DeploymentReconciliationCustodyError(
+                "CUSTODY_SESSION_CLOSED", "custody session is no longer active"
+            )
+        if self._owner_thread_id != get_ident():
+            raise DeploymentReconciliationCustodyError(
+                "CUSTODY_SESSION_THREAD_MISMATCH",
+                "custody session cannot cross thread ownership",
+            )
+        self._assert_session_identity()
+
+    def write_intent(
+        self, basename: str, payload: Mapping[str, Any]
+    ) -> DeploymentReconciliationStoredArtifact:
+        return self._write_output("reconciliation-intents", basename, payload)
+
+    def write_blob(
+        self, basename: str, payload: Mapping[str, Any]
+    ) -> DeploymentReconciliationStoredArtifact:
+        return self._write_output("reconciliation-blobs", basename, payload)
+
+    def write_head(
+        self, basename: str, payload: Mapping[str, Any]
+    ) -> DeploymentReconciliationStoredArtifact:
+        return self._write_output("reconciliation-heads", basename, payload)
+
+    def read_intent(self, basename: str) -> DeploymentReconciliationStoredArtifact:
+        return self._read_output("reconciliation-intents", basename)
+
+    def read_blob(self, basename: str) -> DeploymentReconciliationStoredArtifact:
+        return self._read_output("reconciliation-blobs", basename)
+
+    def read_head(self, basename: str) -> DeploymentReconciliationStoredArtifact:
+        return self._read_output("reconciliation-heads", basename)
+
+    def _write_output(
+        self,
+        directory_name: str,
+        basename: str,
+        payload: Mapping[str, Any],
+    ) -> DeploymentReconciliationStoredArtifact:
+        self.assert_live()
+        self._validate_output_location(directory_name, basename)
+        if not isinstance(payload, Mapping):
+            raise DeploymentReconciliationCustodyError(
+                "CUSTODY_OUTPUT_JSON_INVALID",
+                "custody output must be one JSON object",
+            )
+        raw = _canonical_bytes(dict(payload)) + b"\n"
+        _parse_exact_object(raw, f"{directory_name}/{basename}")
+        if len(raw) > self.repository.max_file_bytes:
+            raise DeploymentReconciliationCustodyError(
+                "CUSTODY_OUTPUT_SIZE_INVALID", "custody output exceeds the file limit"
+            )
+
+        directory_fd = self._open_output_directory(directory_name, create=True)
+        try:
+            existing = self._stat_output(directory_fd, basename)
+            if existing is not None:
+                return self._reuse_output(
+                    directory_fd, directory_name, basename, raw
+                )
+            temporary = f".{basename}.{uuid.uuid4().hex}.tmp"
+            temp_fd: int | None = None
+            temp_info: os.stat_result | None = None
+            publish_collision = False
+            try:
+                temp_fd = os.open(
+                    temporary,
+                    os.O_WRONLY
+                    | os.O_CREAT
+                    | os.O_EXCL
+                    | os.O_CLOEXEC
+                    | os.O_NOFOLLOW,
+                    0o600,
+                    dir_fd=directory_fd,
+                )
+                os.fchmod(temp_fd, 0o600)
+                temp_info = os.fstat(temp_fd)
+                self.repository._validate_regular(
+                    temp_info, f"temporary custody output {temporary}"
+                )
+                self._write_all(temp_fd, raw)
+                self._fsync(temp_fd, "custody output file")
+                os.close(temp_fd)
+                temp_fd = None
+                try:
+                    os.link(
+                        temporary,
+                        basename,
+                        src_dir_fd=directory_fd,
+                        dst_dir_fd=directory_fd,
+                        follow_symlinks=False,
+                    )
+                except FileExistsError:
+                    publish_collision = True
+                self._fsync(directory_fd, "custody output directory")
+            except OSError as exc:
+                raise DeploymentReconciliationCustodyError(
+                    "CUSTODY_OUTPUT_WRITE_FAILED",
+                    f"custody output cannot be published: {directory_name}/{basename}",
+                ) from exc
+            finally:
+                if temp_fd is not None:
+                    os.close(temp_fd)
+                if temp_info is not None:
+                    self._unlink_temporary(directory_fd, temporary, temp_info)
+
+            if publish_collision:
+                return self._reuse_output(
+                    directory_fd, directory_name, basename, raw
+                )
+            observed = self._read_output_raw(directory_fd, basename)
+            if observed != raw:
+                raise DeploymentReconciliationCustodyError(
+                    "CUSTODY_OUTPUT_READBACK_MISMATCH",
+                    f"custody output readback differs: {directory_name}/{basename}",
+                )
+            self.assert_live()
+            return self._stored_artifact(directory_name, basename, observed)
+        finally:
+            os.close(directory_fd)
+
+    def _read_output(
+        self, directory_name: str, basename: str
+    ) -> DeploymentReconciliationStoredArtifact:
+        self.assert_live()
+        self._validate_output_location(directory_name, basename)
+        directory_fd = self._open_output_directory(directory_name, create=False)
+        try:
+            raw = self._read_output_raw(directory_fd, basename)
+            self.assert_live()
+            return self._stored_artifact(directory_name, basename, raw)
+        finally:
+            os.close(directory_fd)
+
+    @staticmethod
+    def _validate_output_location(directory_name: str, basename: str) -> None:
+        if directory_name not in _RESERVED_OUTPUT_DIRECTORY_SET:
+            raise DeploymentReconciliationCustodyError(
+                "CUSTODY_OUTPUT_DIRECTORY_INVALID", "custody output role is invalid"
+            )
+        _validate_basename(basename)
+        if (
+            not _OUTPUT_BASENAME_RE.fullmatch(basename)
+            or basename.startswith(".")
+            or any(
+                token in basename.lower()
+                for token in (".tmp", ".bak", "backup", "~")
+            )
+        ):
+            raise DeploymentReconciliationCustodyError(
+                "CUSTODY_OUTPUT_NAME_INVALID", "custody output basename is invalid"
+            )
+
+    def _open_output_directory(self, name: str, *, create: bool) -> int:
+        self.assert_live()
+        created = False
+        try:
+            descriptor = self._open_directory_at(self.root_fd, name)
+        except DeploymentReconciliationCustodyError as exc:
+            if not create or exc.code != "CUSTODY_DIRECTORY_OPEN_FAILED":
+                raise
+            try:
+                os.mkdir(name, 0o700, dir_fd=self.root_fd)
+                created = True
+            except FileExistsError:
+                # A concurrent creator is not trusted as this session owns the flock.
+                raise DeploymentReconciliationCustodyError(
+                    "CUSTODY_OUTPUT_DIRECTORY_RACE",
+                    f"custody output directory appeared concurrently: {name}",
+                ) from exc
+            except OSError as mkdir_exc:
+                raise DeploymentReconciliationCustodyError(
+                    "CUSTODY_OUTPUT_DIRECTORY_CREATE_FAILED",
+                    f"custody output directory cannot be created: {name}",
+                ) from mkdir_exc
+            descriptor = self._open_directory_at(self.root_fd, name)
+
+        try:
+            if created:
+                os.fchmod(descriptor, 0o700)
+                self._fsync(descriptor, "custody output directory")
+                self._fsync(self.root_fd, "custody root directory")
+                refreshed = os.fstat(self.root_fd)
+                if (
+                    refreshed.st_dev != self.root_info.st_dev
+                    or refreshed.st_ino != self.root_info.st_ino
+                ):
+                    raise DeploymentReconciliationCustodyError(
+                        "CUSTODY_ROOT_REPLACED", "custody root changed during mkdir"
+                    )
+                self.repository._validate_directory(refreshed, "custody root")
+                self.root_info = refreshed
+                self.repository._assert_root_path(self.root_fd, refreshed)
+            return descriptor
+        except Exception:
+            os.close(descriptor)
+            raise
+
+    @staticmethod
+    def _stat_output(directory_fd: int, basename: str) -> os.stat_result | None:
+        try:
+            return os.stat(basename, dir_fd=directory_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise DeploymentReconciliationCustodyError(
+                "CUSTODY_OUTPUT_STAT_FAILED", "custody output cannot be inspected"
+            ) from exc
+
+    def _reuse_output(
+        self,
+        directory_fd: int,
+        directory_name: str,
+        basename: str,
+        expected: bytes,
+    ) -> DeploymentReconciliationStoredArtifact:
+        observed = self._read_output_raw(directory_fd, basename)
+        if observed != expected:
+            raise DeploymentReconciliationCustodyError(
+                "CUSTODY_OUTPUT_COLLISION",
+                f"custody output slot contains different bytes: {directory_name}/{basename}",
+            )
+        self._fsync(directory_fd, "custody output directory")
+        self.assert_live()
+        return self._stored_artifact(directory_name, basename, observed)
+
+    def _read_output_raw(self, directory_fd: int, basename: str) -> bytes:
+        fd = self.repository._open_regular_at(
+            directory_fd, basename, f"custody output {basename}"
+        )
+        try:
+            before = os.fstat(fd)
+            path_before = os.stat(
+                basename, dir_fd=directory_fd, follow_symlinks=False
+            )
+            if (
+                not _identity_matches_fd(path_before, before)
+                or before.st_size < 1
+                or before.st_size > self.repository.max_file_bytes
+            ):
+                raise DeploymentReconciliationCustodyError(
+                    "CUSTODY_OUTPUT_FILE_INVALID", "custody output is not securely bounded"
+                )
+            chunks: list[bytes] = []
+            remaining = before.st_size
+            while remaining:
+                chunk = os.read(fd, min(remaining, 1024 * 1024))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            raw = b"".join(chunks)
+            after = os.fstat(fd)
+            path_after = os.stat(
+                basename, dir_fd=directory_fd, follow_symlinks=False
+            )
+            if (
+                len(raw) != before.st_size
+                or not _same_stat(before, after)
+                or not _same_stat(path_before, path_after)
+                or not _identity_matches_fd(path_after, after)
+            ):
+                raise DeploymentReconciliationCustodyError(
+                    "CUSTODY_OUTPUT_CHANGED_DURING_READ",
+                    "custody output changed during secure readback",
+                )
+        finally:
+            os.close(fd)
+        _parse_exact_object(raw, basename)
+        return raw
+
+    @staticmethod
+    def _stored_artifact(
+        directory_name: str, basename: str, raw: bytes
+    ) -> DeploymentReconciliationStoredArtifact:
+        return DeploymentReconciliationStoredArtifact(
+            relative_path=str(PurePosixPath(directory_name, basename)),
+            raw_sha256=_sha256(raw),
+            raw=raw,
+        )
+
+    @staticmethod
+    def _write_all(fd: int, raw: bytes) -> None:
+        offset = 0
+        while offset < len(raw):
+            try:
+                written = os.write(fd, raw[offset:])
+            except OSError as exc:
+                raise DeploymentReconciliationCustodyError(
+                    "CUSTODY_OUTPUT_WRITE_FAILED", "custody output write failed"
+                ) from exc
+            if written <= 0:
+                raise DeploymentReconciliationCustodyError(
+                    "CUSTODY_OUTPUT_WRITE_FAILED", "custody output write made no progress"
+                )
+            offset += written
+
+    @staticmethod
+    def _fsync(fd: int, label: str) -> None:
+        try:
+            os.fsync(fd)
+        except OSError as exc:
+            raise DeploymentReconciliationCustodyError(
+                "CUSTODY_OUTPUT_FSYNC_FAILED", f"{label} fsync failed"
+            ) from exc
+
+    def _unlink_temporary(
+        self, directory_fd: int, temporary: str, expected: os.stat_result
+    ) -> None:
+        try:
+            current = os.stat(
+                temporary, dir_fd=directory_fd, follow_symlinks=False
+            )
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise DeploymentReconciliationCustodyError(
+                "CUSTODY_OUTPUT_TEMP_CLEANUP_FAILED",
+                "custody output temporary cannot be inspected",
+            ) from exc
+        if not _identity_matches_fd(current, expected):
+            raise DeploymentReconciliationCustodyError(
+                "CUSTODY_OUTPUT_TEMP_REPLACED",
+                "custody output temporary was replaced",
+            )
+        try:
+            os.unlink(temporary, dir_fd=directory_fd)
+            self._fsync(directory_fd, "custody output directory")
+        except OSError as exc:
+            raise DeploymentReconciliationCustodyError(
+                "CUSTODY_OUTPUT_TEMP_CLEANUP_FAILED",
+                "custody output temporary cannot be removed",
+            ) from exc
 
     def snapshot(
         self, *, captured_at: datetime | None = None

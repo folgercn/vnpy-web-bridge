@@ -1,0 +1,304 @@
+{
+  "additionalProperties": false,
+  "description": "Deterministic binding to the sole frozen Commodity reconciliation owner.",
+  "properties": {
+    "schema_version": {
+      "const": "web_bridge_deployment_reconciliation_owner_binding_v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "purpose": {
+      "const": "bind_unique_frozen_commodity_owner_for_reconciliation",
+      "title": "Purpose",
+      "type": "string"
+    },
+    "owner_binding_id": {
+      "pattern": "^deployment-reconciliation-owner-binding-[0-9a-f]{64}$",
+      "title": "Owner Binding Id",
+      "type": "string"
+    },
+    "owner_binding_core_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Owner Binding Core Sha256",
+      "type": "string"
+    },
+    "owner_kind": {
+      "const": "COMMODITY_SIMNOW",
+      "title": "Owner Kind",
+      "type": "string"
+    },
+    "deployment_runtime_instance_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+      "title": "Deployment Runtime Instance Id",
+      "type": "string"
+    },
+    "deployment_execution_epoch": {
+      "minimum": 1,
+      "title": "Deployment Execution Epoch",
+      "type": "integer"
+    },
+    "deployment_state_generation": {
+      "minimum": 2,
+      "title": "Deployment State Generation",
+      "type": "integer"
+    },
+    "deployment_state_commitment_raw_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Deployment State Commitment Raw Sha256",
+      "type": "string"
+    },
+    "custody_root_path_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Custody Root Path Sha256",
+      "type": "string"
+    },
+    "custody_root_device": {
+      "minimum": 1,
+      "title": "Custody Root Device",
+      "type": "integer"
+    },
+    "custody_root_inode": {
+      "minimum": 1,
+      "title": "Custody Root Inode",
+      "type": "integer"
+    },
+    "deployment_lock_device": {
+      "minimum": 1,
+      "title": "Deployment Lock Device",
+      "type": "integer"
+    },
+    "deployment_lock_inode": {
+      "minimum": 1,
+      "title": "Deployment Lock Inode",
+      "type": "integer"
+    },
+    "commodity_state_version": {
+      "const": "commodity-simnow-v1",
+      "title": "Commodity State Version",
+      "type": "string"
+    },
+    "commodity_state_path_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Commodity State Path Sha256",
+      "type": "string"
+    },
+    "commodity_state_file_present": {
+      "title": "Commodity State File Present",
+      "type": "boolean"
+    },
+    "commodity_state_device": {
+      "anyOf": [
+        {
+          "minimum": 1,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Commodity State Device"
+    },
+    "commodity_state_inode": {
+      "anyOf": [
+        {
+          "minimum": 1,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Commodity State Inode"
+    },
+    "commodity_state_uid": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Commodity State Uid"
+    },
+    "commodity_state_gid": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Commodity State Gid"
+    },
+    "commodity_state_mode": {
+      "anyOf": [
+        {
+          "maximum": 4095,
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Commodity State Mode"
+    },
+    "commodity_state_nlink": {
+      "anyOf": [
+        {
+          "const": 1,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Commodity State Nlink"
+    },
+    "commodity_state_raw_sha256": {
+      "anyOf": [
+        {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Commodity State Raw Sha256"
+    },
+    "commodity_state_checkpoint_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Commodity State Checkpoint Sha256",
+      "type": "string"
+    },
+    "gateway_name": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
+      "title": "Gateway Name",
+      "type": "string"
+    },
+    "rpc_request_endpoint_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Rpc Request Endpoint Sha256",
+      "type": "string"
+    },
+    "rpc_publish_endpoint_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Rpc Publish Endpoint Sha256",
+      "type": "string"
+    },
+    "expected_account_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Expected Account Hash",
+      "type": "string"
+    },
+    "account_allowlist": {
+      "items": {
+        "pattern": "^[0-9a-f]{64}$",
+        "type": "string"
+      },
+      "title": "Account Allowlist",
+      "type": "array"
+    },
+    "account_allowlist_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Account Allowlist Sha256",
+      "type": "string"
+    },
+    "expected_account_allowlisted": {
+      "const": true,
+      "title": "Expected Account Allowlisted",
+      "type": "boolean"
+    },
+    "web_trade_enabled": {
+      "const": false,
+      "title": "Web Trade Enabled",
+      "type": "boolean"
+    },
+    "execution_authority_revoked": {
+      "const": true,
+      "title": "Execution Authority Revoked",
+      "type": "boolean"
+    },
+    "auto_dispatch_stopped": {
+      "const": true,
+      "title": "Auto Dispatch Stopped",
+      "type": "boolean"
+    },
+    "deployment_authorized": {
+      "const": false,
+      "title": "Deployment Authorized",
+      "type": "boolean"
+    },
+    "automatic_deploy_allowed": {
+      "const": false,
+      "title": "Automatic Deploy Allowed",
+      "type": "boolean"
+    },
+    "production_allowed": {
+      "const": false,
+      "title": "Production Allowed",
+      "type": "boolean"
+    },
+    "live_trading_authorized": {
+      "const": false,
+      "title": "Live Trading Authorized",
+      "type": "boolean"
+    },
+    "countable_forward": {
+      "const": false,
+      "title": "Countable Forward",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "schema_version",
+    "purpose",
+    "owner_binding_id",
+    "owner_binding_core_sha256",
+    "owner_kind",
+    "deployment_runtime_instance_id",
+    "deployment_execution_epoch",
+    "deployment_state_generation",
+    "deployment_state_commitment_raw_sha256",
+    "custody_root_path_sha256",
+    "custody_root_device",
+    "custody_root_inode",
+    "deployment_lock_device",
+    "deployment_lock_inode",
+    "commodity_state_version",
+    "commodity_state_path_sha256",
+    "commodity_state_file_present",
+    "commodity_state_nlink",
+    "commodity_state_raw_sha256",
+    "commodity_state_checkpoint_sha256",
+    "gateway_name",
+    "rpc_request_endpoint_sha256",
+    "rpc_publish_endpoint_sha256",
+    "expected_account_hash",
+    "account_allowlist",
+    "account_allowlist_sha256",
+    "expected_account_allowlisted",
+    "web_trade_enabled",
+    "execution_authority_revoked",
+    "auto_dispatch_stopped",
+    "deployment_authorized",
+    "automatic_deploy_allowed",
+    "production_allowed",
+    "live_trading_authorized",
+    "countable_forward"
+  ],
+  "title": "Web Bridge deployment reconciliation owner binding v1",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vnpy-web-bridge:schema:web-bridge-deployment-reconciliation-owner-binding-v1"
+}

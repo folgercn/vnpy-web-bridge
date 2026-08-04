@@ -100,15 +100,17 @@ class DeploymentRecheckClient:
 
 
 def deployment_snapshot_payload() -> dict[str, object]:
+    served_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     return {
         "schema_version": "windows_rpc_deployment_safety_snapshot_v1",
         "request_id": "request-rpc-snapshot-0001",
         "challenge": "rpc-snapshot-challenge-0001",
         "server_instance_id": "windows-rpc-test-instance",
         "fact_generation": 11,
-        "captured_at_utc": datetime.now(timezone.utc).isoformat().replace(
-            "+00:00", "Z"
-        ),
+        "captured_at_utc": served_at,
+        "cache_replayed": False,
+        "served_at_utc": served_at,
+        "served_fact_generation": 11,
         "execution_admission_frozen": True,
         "pending_send_outcomes": 0,
         "strategy_execution_enabled": False,
@@ -142,6 +144,7 @@ def deployment_recheck_payload() -> dict[str, object]:
         positions=[],
     )
     facts_sha = deployment_rpc_execution_facts_sha256(facts)
+    served_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     return {
         "schema_version": "windows_rpc_deployment_safety_recheck_v1",
         "owner_request_id": facts.request_id,
@@ -155,9 +158,10 @@ def deployment_recheck_payload() -> dict[str, object]:
         "original_fact_generation": 11,
         "original_execution_facts_canonical_sha256": facts_sha,
         "execution_facts_canonical_sha256": facts_sha,
-        "captured_at_utc": datetime.now(timezone.utc).isoformat().replace(
-            "+00:00", "Z"
-        ),
+        "captured_at_utc": served_at,
+        "cache_replayed": False,
+        "served_at_utc": served_at,
+        "served_fact_generation": 11,
         "admission": {
             "execution_frozen": True,
             "send_order_frozen": True,
@@ -275,6 +279,23 @@ def test_deployment_snapshot_client_rejects_replay(failure: str) -> None:
         )
 
 
+def test_deployment_snapshot_client_rejects_stale_non_cache_with_replay_flag() -> None:
+    payload = deployment_snapshot_payload()
+    payload["captured_at_utc"] = (
+        datetime.now(timezone.utc) - timedelta(minutes=1)
+    ).isoformat().replace("+00:00", "Z")
+    service = VnpyRpcService()
+    service.started = True
+    service.client = DeploymentSnapshotClient(payload)  # type: ignore[assignment]
+
+    with pytest.raises(RpcCallError, match="freshness window"):
+        service.capture_deployment_facts(
+            request_id="request-rpc-snapshot-0001",
+            challenge="rpc-snapshot-challenge-0001",
+            allow_cached_replay=True,
+        )
+
+
 def test_deployment_recheck_client_binds_echoes_and_normalizes_facts() -> None:
     payload = deployment_recheck_payload()
     client = DeploymentRecheckClient(payload)
@@ -313,6 +334,88 @@ def test_deployment_recheck_client_binds_echoes_and_normalizes_facts() -> None:
     assert result.execution_facts_canonical_sha256 == (
         payload["execution_facts_canonical_sha256"]
     )
+
+
+def test_deployment_recheck_client_explicitly_accepts_stale_cached_replay() -> None:
+    payload = deployment_recheck_payload()
+    payload["captured_at_utc"] = (
+        datetime.now(timezone.utc) - timedelta(minutes=1)
+    ).isoformat().replace("+00:00", "Z")
+    payload["cache_replayed"] = True
+    service = VnpyRpcService()
+    service.started = True
+    service.client = DeploymentRecheckClient(payload)  # type: ignore[assignment]
+
+    result = service.capture_deployment_recheck_facts(
+        request_id=str(payload["owner_request_id"]),
+        owner_challenge=str(payload["owner_challenge"]),
+        recheck_id=str(payload["recheck_id"]),
+        fresh_challenge=str(payload["fresh_challenge"]),
+        original_server_instance_id=str(
+            payload["original_server_instance_id"]
+        ),
+        original_fact_generation=11,
+        original_execution_facts_canonical_sha256=str(
+            payload["original_execution_facts_canonical_sha256"]
+        ),
+        allow_cached_replay=True,
+    )
+
+    assert result.recheck_id == payload["recheck_id"]
+    assert result.fresh_challenge == payload["fresh_challenge"]
+
+
+@pytest.mark.parametrize(
+    ("mutation", "allow_cached_replay"),
+    [
+        (lambda value: value.update(cache_replayed=False), True),
+        (lambda value: value.update(cache_replayed=True), False),
+        (lambda value: value.update(served_fact_generation=12), True),
+        (
+            lambda value: value.update(
+                served_at_utc=(
+                    datetime.now(timezone.utc) - timedelta(minutes=1)
+                ).isoformat().replace("+00:00", "Z")
+            ),
+            True,
+        ),
+    ],
+    ids=[
+        "non-cache-response",
+        "caller-did-not-allow-cache",
+        "served-generation-mismatch",
+        "stale-served-proof",
+    ],
+)
+def test_deployment_recheck_stale_capture_requires_complete_replay_proof(
+    mutation,
+    allow_cached_replay: bool,
+) -> None:
+    payload = deployment_recheck_payload()
+    payload["captured_at_utc"] = (
+        datetime.now(timezone.utc) - timedelta(minutes=1)
+    ).isoformat().replace("+00:00", "Z")
+    payload["cache_replayed"] = True
+    mutation(payload)
+    service = VnpyRpcService()
+    service.started = True
+    service.client = DeploymentRecheckClient(payload)  # type: ignore[assignment]
+
+    with pytest.raises(RpcCallError, match="freshness window"):
+        service.capture_deployment_recheck_facts(
+            request_id=str(payload["owner_request_id"]),
+            owner_challenge=str(payload["owner_challenge"]),
+            recheck_id=str(payload["recheck_id"]),
+            fresh_challenge=str(payload["fresh_challenge"]),
+            original_server_instance_id=str(
+                payload["original_server_instance_id"]
+            ),
+            original_fact_generation=11,
+            original_execution_facts_canonical_sha256=str(
+                payload["original_execution_facts_canonical_sha256"]
+            ),
+            allow_cached_replay=allow_cached_replay,
+        )
 
 
 @pytest.mark.parametrize(

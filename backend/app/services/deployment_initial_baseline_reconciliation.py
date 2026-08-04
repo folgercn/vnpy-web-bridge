@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from types import MappingProxyType
 from typing import Any
 
 from pydantic import ValidationError
 
 from app.schemas.deployment_drain import (
     CommodityInitialBaselineStateDTO,
-    DeploymentInitialBaselineCommodityCheckpointDTO,
+    DeploymentDrainStateCommitmentDTO,
     DeploymentInitialBaselineCheckpointDTO,
+    DeploymentInitialBaselineCommodityCheckpointDTO,
     DeploymentRpcFactsDTO,
     DeploymentRpcRecheckFactsDTO,
     InitialBaselineReconciliationEvidenceDTO,
@@ -31,6 +35,19 @@ from app.services.deployment_state_commitment import (
 
 class DeploymentInitialBaselineError(RuntimeError):
     """C1b fresh initial-baseline evidence is invalid or inconsistently bound."""
+
+
+@dataclass(frozen=True)
+class VerifiedInitialBaselineInputBundle:
+    """Exact read-only C1b custody inputs, verified before any RPC capture."""
+
+    commitments: tuple[DeploymentDrainStateCommitmentDTO, ...]
+    genesis: DeploymentDrainStateCommitmentDTO
+    current: DeploymentDrainStateCommitmentDTO
+    current_epoch_anchor: Mapping[str, Any]
+    genesis_commitment_raw_sha256: str
+    current_commitment_raw_sha256: str
+    current_epoch_anchor_raw_sha256: str
 
 
 _BASELINE_EMPTY_FIELDS = {
@@ -256,14 +273,14 @@ def build_initial_baseline_commodity_checkpoint(
     )
 
 
-def _verify_fresh_bootstrap_chain(
+def verify_initial_baseline_input_bundle(
     *,
     genesis_state_commitment_raw: bytes,
     state_commitment_chain_raw: list[bytes],
     current_epoch_anchor_raw: bytes,
     current_runtime_instance_id: str,
     current_execution_epoch: int,
-):
+) -> VerifiedInitialBaselineInputBundle:
     if len(state_commitment_chain_raw) < 3 or (
         state_commitment_chain_raw[0] != genesis_state_commitment_raw
     ):
@@ -374,7 +391,22 @@ def _verify_fresh_bootstrap_chain(
         raise DeploymentInitialBaselineError(
             "current epoch anchor does not bind the bootstrap chain head"
         )
-    return genesis, current
+    return VerifiedInitialBaselineInputBundle(
+        commitments=tuple(commitments),
+        genesis=genesis,
+        current=current,
+        current_epoch_anchor=MappingProxyType(dict(anchor)),
+        genesis_commitment_raw_sha256=_sha256(genesis_state_commitment_raw),
+        current_commitment_raw_sha256=_sha256(state_commitment_chain_raw[-1]),
+        current_epoch_anchor_raw_sha256=_sha256(current_epoch_anchor_raw),
+    )
+
+
+def _verify_fresh_bootstrap_chain(**kwargs):
+    """Backward-compatible private tuple adapter."""
+
+    bundle = verify_initial_baseline_input_bundle(**kwargs)
+    return bundle.genesis, bundle.current
 
 
 def _verify_stable_baseline_facts(
@@ -485,15 +517,17 @@ def _build_initial_baseline_checkpoint(
     fresh_rpc: DeploymentRpcRecheckFactsDTO | dict[str, Any],
     captured_at: datetime | str,
 ) -> DeploymentInitialBaselineCheckpointDTO:
-    genesis, current = _verify_fresh_bootstrap_chain(
+    input_bundle = verify_initial_baseline_input_bundle(
         genesis_state_commitment_raw=genesis_state_commitment_raw,
         state_commitment_chain_raw=state_commitment_chain_raw,
         current_epoch_anchor_raw=current_epoch_anchor_raw,
         current_runtime_instance_id=current_runtime_instance_id,
         current_execution_epoch=current_execution_epoch,
     )
+    genesis = input_bundle.genesis
+    current = input_bundle.current
     current_raw = state_commitment_chain_raw[-1]
-    commodity, initial, fresh, captured, execution_sha = (
+    commodity, _initial, fresh, captured, execution_sha = (
         _verify_stable_baseline_facts(
             genesis_raw_sha256=_sha256(genesis_state_commitment_raw),
             current_raw_sha256=_sha256(current_raw),

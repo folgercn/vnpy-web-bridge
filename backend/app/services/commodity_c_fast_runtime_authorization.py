@@ -8,11 +8,12 @@ import json
 import os
 import re
 import stat
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import RLock
-from typing import Any, Callable
+from typing import Any
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -40,7 +41,6 @@ from app.schemas.commodity_c_fast_runtime_authorization import (
 from app.schemas.commodity_c_fast_shadow import (
     CommodityCFastRuntimeExecutableSnapshotDTO,
 )
-
 
 MAX_AUTHORITY_JSON_BYTES = 1024 * 1024
 EVENT_FILE_RE = re.compile(r"^(\d{12})-([0-9a-f]{64})\.json$")
@@ -817,6 +817,18 @@ class CommodityCFastRuntimeAuthorizationService:
                 }
             )
             return result
+
+    def readonly_state(self) -> str:
+        """Return fail-closed runtime state without creating audit events."""
+
+        if not self.enabled:
+            return "DISABLED"
+        with self._lock:
+            events = self._events()
+            if not events:
+                return "NOT_ENABLED"
+            latest = events[-1][0]
+            return "ACTIVE" if latest.event_type == "ENABLED" else latest.event_type
 
     def enable(self, *, authorized_by: str, reason: str) -> dict[str, Any]:
         if len(reason) < 8:

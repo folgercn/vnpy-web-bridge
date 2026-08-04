@@ -1,0 +1,4101 @@
+{
+  "$defs": {
+    "CommodityInitialBaselineStateDTO": {
+      "additionalProperties": false,
+      "description": "Exact safe projection captured from durable Commodity owner state.",
+      "properties": {
+        "schema_version": {
+          "const": "web_bridge_initial_baseline_commodity_state_v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "commodity_state_version": {
+          "const": "commodity-simnow-v1",
+          "title": "Commodity State Version",
+          "type": "string"
+        },
+        "commodity_state_checkpoint_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Commodity State Checkpoint Sha256",
+          "type": "string"
+        },
+        "execution_plan_status": {
+          "const": "IDLE",
+          "title": "Execution Plan Status",
+          "type": "string"
+        },
+        "execution_plan_hash": {
+          "title": "Execution Plan Hash",
+          "type": "null"
+        },
+        "plan_version": {
+          "const": 0,
+          "title": "Plan Version",
+          "type": "integer"
+        },
+        "web_trade_enabled": {
+          "const": false,
+          "title": "Web Trade Enabled",
+          "type": "boolean"
+        },
+        "execution_authority_revoked": {
+          "const": true,
+          "title": "Execution Authority Revoked",
+          "type": "boolean"
+        },
+        "auto_dispatch_stopped": {
+          "const": true,
+          "title": "Auto Dispatch Stopped",
+          "type": "boolean"
+        },
+        "unknown_outcome": {
+          "const": false,
+          "title": "Unknown Outcome",
+          "type": "boolean"
+        },
+        "reconcile_required": {
+          "const": false,
+          "title": "Reconcile Required",
+          "type": "boolean"
+        },
+        "rpc_generation": {
+          "minimum": 0,
+          "title": "Rpc Generation",
+          "type": "integer"
+        },
+        "active_orders_snapshot_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Active Orders Snapshot Sha256",
+          "type": "string"
+        },
+        "positions_snapshot_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Positions Snapshot Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "commodity_state_version",
+        "commodity_state_checkpoint_sha256",
+        "execution_plan_status",
+        "execution_plan_hash",
+        "plan_version",
+        "web_trade_enabled",
+        "execution_authority_revoked",
+        "auto_dispatch_stopped",
+        "unknown_outcome",
+        "reconcile_required",
+        "rpc_generation",
+        "active_orders_snapshot_sha256",
+        "positions_snapshot_sha256"
+      ],
+      "title": "CommodityInitialBaselineStateDTO",
+      "type": "object"
+    },
+    "DeploymentDrainStateCommitmentDTO": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "web_bridge_deployment_drain_state_commitment_v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "purpose": {
+          "const": "commit_exact_non_authorizing_deployment_drain_state",
+          "title": "Purpose",
+          "type": "string"
+        },
+        "commitment_id": {
+          "pattern": "^deployment-drain-state-commitment-[0-9a-f]{64}$",
+          "title": "Commitment Id",
+          "type": "string"
+        },
+        "state_commitment_core_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "State Commitment Core Sha256",
+          "type": "string"
+        },
+        "state_generation": {
+          "minimum": 1,
+          "title": "State Generation",
+          "type": "integer"
+        },
+        "previous_state_commitment_raw_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Previous State Commitment Raw Sha256"
+        },
+        "state_raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "State Raw Sha256",
+          "type": "string"
+        },
+        "state": {
+          "additionalProperties": true,
+          "title": "State",
+          "type": "object"
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "genesis_source": {
+          "anyOf": [
+            {
+              "enum": [
+                "fresh_bootstrap",
+                "v1_migration",
+                "v2_migration"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Genesis Source"
+        },
+        "source_state_raw_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Source State Raw Sha256"
+        },
+        "source_epoch_anchor_raw_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Source Epoch Anchor Raw Sha256"
+        },
+        "deployment_authorized": {
+          "const": false,
+          "title": "Deployment Authorized",
+          "type": "boolean"
+        },
+        "consume_authorized": {
+          "const": false,
+          "title": "Consume Authorized",
+          "type": "boolean"
+        },
+        "reconciliation_authorized": {
+          "const": false,
+          "title": "Reconciliation Authorized",
+          "type": "boolean"
+        },
+        "countable_forward": {
+          "const": false,
+          "title": "Countable Forward",
+          "type": "boolean"
+        },
+        "automatic_deploy_allowed": {
+          "const": false,
+          "title": "Automatic Deploy Allowed",
+          "type": "boolean"
+        },
+        "production_allowed": {
+          "const": false,
+          "title": "Production Allowed",
+          "type": "boolean"
+        },
+        "live_trading_authorized": {
+          "const": false,
+          "title": "Live Trading Authorized",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "schema_version",
+        "purpose",
+        "commitment_id",
+        "state_commitment_core_sha256",
+        "state_generation",
+        "previous_state_commitment_raw_sha256",
+        "state_raw_sha256",
+        "state",
+        "created_at",
+        "genesis_source",
+        "source_state_raw_sha256",
+        "source_epoch_anchor_raw_sha256",
+        "deployment_authorized",
+        "consume_authorized",
+        "reconciliation_authorized",
+        "countable_forward",
+        "automatic_deploy_allowed",
+        "production_allowed",
+        "live_trading_authorized"
+      ],
+      "title": "DeploymentDrainStateCommitmentDTO",
+      "type": "object"
+    },
+    "DeploymentEpochAnchorV2DTO": {
+      "additionalProperties": false,
+      "description": "Exact current anchor embedded by self-contained reconciliation DTOs.",
+      "properties": {
+        "schema_version": {
+          "const": "web_bridge_deployment_drain_epoch_anchor_v2",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "state_generation": {
+          "minimum": 1,
+          "title": "State Generation",
+          "type": "integer"
+        },
+        "state_commitment_raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "State Commitment Raw Sha256",
+          "type": "string"
+        },
+        "drain_epoch": {
+          "minimum": 0,
+          "title": "Drain Epoch",
+          "type": "integer"
+        },
+        "execution_epoch": {
+          "minimum": 0,
+          "title": "Execution Epoch",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "schema_version",
+        "state_generation",
+        "state_commitment_raw_sha256",
+        "drain_epoch",
+        "execution_epoch"
+      ],
+      "title": "DeploymentEpochAnchorV2DTO",
+      "type": "object"
+    },
+    "DeploymentInitialBaselineCheckpointDTO": {
+      "additionalProperties": false,
+      "description": "Non-authorizing C1b checkpoint rooted in fresh bootstrap custody.",
+      "properties": {
+        "schema_version": {
+          "const": "web_bridge_deployment_initial_baseline_checkpoint_v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "purpose": {
+          "const": "record_non_authorizing_fresh_initial_execution_baseline",
+          "title": "Purpose",
+          "type": "string"
+        },
+        "mode": {
+          "const": "INITIAL_BASELINE",
+          "title": "Mode",
+          "type": "string"
+        },
+        "reconciliation_run_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "title": "Reconciliation Run Id",
+          "type": "string"
+        },
+        "checkpoint_id": {
+          "pattern": "^deployment-initial-baseline-checkpoint-[0-9a-f]{64}$",
+          "title": "Checkpoint Id",
+          "type": "string"
+        },
+        "checkpoint_core_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Checkpoint Core Sha256",
+          "type": "string"
+        },
+        "genesis_commitment_id": {
+          "pattern": "^deployment-drain-state-commitment-[0-9a-f]{64}$",
+          "title": "Genesis Commitment Id",
+          "type": "string"
+        },
+        "genesis_commitment_raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Genesis Commitment Raw Sha256",
+          "type": "string"
+        },
+        "genesis_commitment_core_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Genesis Commitment Core Sha256",
+          "type": "string"
+        },
+        "genesis_state_raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Genesis State Raw Sha256",
+          "type": "string"
+        },
+        "current_state_commitment_id": {
+          "pattern": "^deployment-drain-state-commitment-[0-9a-f]{64}$",
+          "title": "Current State Commitment Id",
+          "type": "string"
+        },
+        "current_state_commitment_raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Current State Commitment Raw Sha256",
+          "type": "string"
+        },
+        "current_state_commitment_core_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Current State Commitment Core Sha256",
+          "type": "string"
+        },
+        "current_state_generation": {
+          "minimum": 3,
+          "title": "Current State Generation",
+          "type": "integer"
+        },
+        "state_commitment_chain_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "State Commitment Chain Sha256",
+          "type": "string"
+        },
+        "current_epoch_anchor_raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Current Epoch Anchor Raw Sha256",
+          "type": "string"
+        },
+        "current_runtime_instance_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "title": "Current Runtime Instance Id",
+          "type": "string"
+        },
+        "current_execution_epoch": {
+          "minimum": 2,
+          "title": "Current Execution Epoch",
+          "type": "integer"
+        },
+        "current_drain_state": {
+          "$ref": "#/$defs/DeploymentInitialBaselineDrainStateDTO"
+        },
+        "current_drain_state_raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Current Drain State Raw Sha256",
+          "type": "string"
+        },
+        "expected_account_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Expected Account Hash",
+          "type": "string"
+        },
+        "commodity_checkpoint_id": {
+          "pattern": "^deployment-initial-baseline-commodity-checkpoint-[0-9a-f]{64}$",
+          "title": "Commodity Checkpoint Id",
+          "type": "string"
+        },
+        "commodity_checkpoint_raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Commodity Checkpoint Raw Sha256",
+          "type": "string"
+        },
+        "commodity_checkpoint_core_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Commodity Checkpoint Core Sha256",
+          "type": "string"
+        },
+        "commodity_checkpoint": {
+          "$ref": "#/$defs/DeploymentInitialBaselineCommodityCheckpointDTO"
+        },
+        "fresh_rpc": {
+          "$ref": "#/$defs/DeploymentRpcRecheckFactsDTO"
+        },
+        "initial_execution_facts_canonical_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Initial Execution Facts Canonical Sha256",
+          "type": "string"
+        },
+        "fresh_execution_facts_canonical_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Fresh Execution Facts Canonical Sha256",
+          "type": "string"
+        },
+        "orders_snapshot_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Orders Snapshot Sha256",
+          "type": "string"
+        },
+        "active_orders_snapshot_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Active Orders Snapshot Sha256",
+          "type": "string"
+        },
+        "trades_snapshot_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Trades Snapshot Sha256",
+          "type": "string"
+        },
+        "positions_snapshot_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Positions Snapshot Sha256",
+          "type": "string"
+        },
+        "captured_at": {
+          "format": "date-time",
+          "title": "Captured At",
+          "type": "string"
+        },
+        "fresh_genesis_lineage_verified": {
+          "const": true,
+          "title": "Fresh Genesis Lineage Verified",
+          "type": "boolean"
+        },
+        "custody_inventory_verified": {
+          "const": false,
+          "title": "Custody Inventory Verified",
+          "type": "boolean"
+        },
+        "prior_execution_facts_available": {
+          "const": false,
+          "title": "Prior Execution Facts Available",
+          "type": "boolean"
+        },
+        "comparison_to_prebootstrap_facts_performed": {
+          "const": false,
+          "title": "Comparison To Prebootstrap Facts Performed",
+          "type": "boolean"
+        },
+        "initial_execution_facts_baseline_recorded": {
+          "const": true,
+          "title": "Initial Execution Facts Baseline Recorded",
+          "type": "boolean"
+        },
+        "execution_facts_reconciliation_completed": {
+          "const": true,
+          "title": "Execution Facts Reconciliation Completed",
+          "type": "boolean"
+        },
+        "semantic_safety_unchanged": {
+          "const": false,
+          "title": "Semantic Safety Unchanged",
+          "type": "boolean"
+        },
+        "target_runtime_verified": {
+          "const": false,
+          "title": "Target Runtime Verified",
+          "type": "boolean"
+        },
+        "reconciliation_completed": {
+          "const": false,
+          "title": "Reconciliation Completed",
+          "type": "boolean"
+        },
+        "windows_fence_released": {
+          "const": false,
+          "title": "Windows Fence Released",
+          "type": "boolean"
+        },
+        "authority_restore_allowed": {
+          "const": false,
+          "title": "Authority Restore Allowed",
+          "type": "boolean"
+        },
+        "consume_authorized": {
+          "const": false,
+          "title": "Consume Authorized",
+          "type": "boolean"
+        },
+        "reconciliation_authorized": {
+          "const": false,
+          "title": "Reconciliation Authorized",
+          "type": "boolean"
+        },
+        "deployment_authorized": {
+          "const": false,
+          "title": "Deployment Authorized",
+          "type": "boolean"
+        },
+        "automatic_deploy_allowed": {
+          "const": false,
+          "title": "Automatic Deploy Allowed",
+          "type": "boolean"
+        },
+        "production_allowed": {
+          "const": false,
+          "title": "Production Allowed",
+          "type": "boolean"
+        },
+        "live_trading_authorized": {
+          "const": false,
+          "title": "Live Trading Authorized",
+          "type": "boolean"
+        },
+        "countable_forward": {
+          "const": false,
+          "title": "Countable Forward",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "schema_version",
+        "purpose",
+        "mode",
+        "reconciliation_run_id",
+        "checkpoint_id",
+        "checkpoint_core_sha256",
+        "genesis_commitment_id",
+        "genesis_commitment_raw_sha256",
+        "genesis_commitment_core_sha256",
+        "genesis_state_raw_sha256",
+        "current_state_commitment_id",
+        "current_state_commitment_raw_sha256",
+        "current_state_commitment_core_sha256",
+        "current_state_generation",
+        "state_commitment_chain_sha256",
+        "current_epoch_anchor_raw_sha256",
+        "current_runtime_instance_id",
+        "current_execution_epoch",
+        "current_drain_state",
+        "current_drain_state_raw_sha256",
+        "expected_account_hash",
+        "commodity_checkpoint_id",
+        "commodity_checkpoint_raw_sha256",
+        "commodity_checkpoint_core_sha256",
+        "commodity_checkpoint",
+        "fresh_rpc",
+        "initial_execution_facts_canonical_sha256",
+        "fresh_execution_facts_canonical_sha256",
+        "orders_snapshot_sha256",
+        "active_orders_snapshot_sha256",
+        "trades_snapshot_sha256",
+        "positions_snapshot_sha256",
+        "captured_at",
+        "fresh_genesis_lineage_verified",
+        "custody_inventory_verified",
+        "prior_execution_facts_available",
+        "comparison_to_prebootstrap_facts_performed",
+        "initial_execution_facts_baseline_recorded",
+        "execution_facts_reconciliation_completed",
+        "semantic_safety_unchanged",
+        "target_runtime_verified",
+        "reconciliation_completed",
+        "windows_fence_released",
+        "authority_restore_allowed",
+        "consume_authorized",
+        "reconciliation_authorized",
+        "deployment_authorized",
+        "automatic_deploy_allowed",
+        "production_allowed",
+        "live_trading_authorized",
+        "countable_forward"
+      ],
+      "title": "DeploymentInitialBaselineCheckpointDTO",
+      "type": "object"
+    },
+    "DeploymentInitialBaselineCommodityCheckpointDTO": {
+      "additionalProperties": false,
+      "description": "Exact Commodity owner projection for the first frozen execution baseline.",
+      "properties": {
+        "schema_version": {
+          "const": "web_bridge_deployment_initial_baseline_commodity_checkpoint_v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "purpose": {
+          "const": "record_exact_non_authorizing_commodity_initial_baseline",
+          "title": "Purpose",
+          "type": "string"
+        },
+        "mode": {
+          "const": "INITIAL_BASELINE",
+          "title": "Mode",
+          "type": "string"
+        },
+        "reconciliation_run_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "title": "Reconciliation Run Id",
+          "type": "string"
+        },
+        "checkpoint_id": {
+          "pattern": "^deployment-initial-baseline-commodity-checkpoint-[0-9a-f]{64}$",
+          "title": "Checkpoint Id",
+          "type": "string"
+        },
+        "checkpoint_core_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Checkpoint Core Sha256",
+          "type": "string"
+        },
+        "genesis_commitment_raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Genesis Commitment Raw Sha256",
+          "type": "string"
+        },
+        "current_state_commitment_raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Current State Commitment Raw Sha256",
+          "type": "string"
+        },
+        "current_runtime_instance_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "title": "Current Runtime Instance Id",
+          "type": "string"
+        },
+        "current_execution_epoch": {
+          "minimum": 2,
+          "title": "Current Execution Epoch",
+          "type": "integer"
+        },
+        "captured_at": {
+          "format": "date-time",
+          "title": "Captured At",
+          "type": "string"
+        },
+        "execution_plan_status": {
+          "const": "IDLE",
+          "title": "Execution Plan Status",
+          "type": "string"
+        },
+        "execution_plan_hash": {
+          "title": "Execution Plan Hash",
+          "type": "null"
+        },
+        "plan_version": {
+          "const": 0,
+          "title": "Plan Version",
+          "type": "integer"
+        },
+        "state_version": {
+          "const": "web_bridge_initial_baseline_commodity_state_v1",
+          "title": "State Version",
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/CommodityInitialBaselineStateDTO"
+        },
+        "state_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "State Sha256",
+          "type": "string"
+        },
+        "initial_rpc": {
+          "$ref": "#/$defs/DeploymentRpcFactsDTO"
+        },
+        "active_orders_snapshot_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Active Orders Snapshot Sha256",
+          "type": "string"
+        },
+        "positions_snapshot_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Positions Snapshot Sha256",
+          "type": "string"
+        },
+        "web_trade_enabled": {
+          "const": false,
+          "title": "Web Trade Enabled",
+          "type": "boolean"
+        },
+        "execution_authority_revoked": {
+          "const": true,
+          "title": "Execution Authority Revoked",
+          "type": "boolean"
+        },
+        "auto_dispatch_stopped": {
+          "const": true,
+          "title": "Auto Dispatch Stopped",
+          "type": "boolean"
+        },
+        "active_orders": {
+          "const": 0,
+          "title": "Active Orders",
+          "type": "integer"
+        },
+        "unknown_outcome": {
+          "const": false,
+          "title": "Unknown Outcome",
+          "type": "boolean"
+        },
+        "reconcile_required": {
+          "const": false,
+          "title": "Reconcile Required",
+          "type": "boolean"
+        },
+        "deployment_authorized": {
+          "const": false,
+          "title": "Deployment Authorized",
+          "type": "boolean"
+        },
+        "automatic_deploy_allowed": {
+          "const": false,
+          "title": "Automatic Deploy Allowed",
+          "type": "boolean"
+        },
+        "production_allowed": {
+          "const": false,
+          "title": "Production Allowed",
+          "type": "boolean"
+        },
+        "live_trading_authorized": {
+          "const": false,
+          "title": "Live Trading Authorized",
+          "type": "boolean"
+        },
+        "countable_forward": {
+          "const": false,
+          "title": "Countable Forward",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "schema_version",
+        "purpose",
+        "mode",
+        "reconciliation_run_id",
+        "checkpoint_id",
+        "checkpoint_core_sha256",
+        "genesis_commitment_raw_sha256",
+        "current_state_commitment_raw_sha256",
+        "current_runtime_instance_id",
+        "current_execution_epoch",
+        "captured_at",
+        "execution_plan_status",
+        "execution_plan_hash",
+        "plan_version",
+        "state_version",
+        "state",
+        "state_sha256",
+        "initial_rpc",
+        "active_orders_snapshot_sha256",
+        "positions_snapshot_sha256",
+        "web_trade_enabled",
+        "execution_authority_revoked",
+        "auto_dispatch_stopped",
+        "active_orders",
+        "unknown_outcome",
+        "reconcile_required",
+        "deployment_authorized",
+        "automatic_deploy_allowed",
+        "production_allowed",
+        "live_trading_authorized",
+        "countable_forward"
+      ],
+      "title": "DeploymentInitialBaselineCommodityCheckpointDTO",
+      "type": "object"
+    },
+    "DeploymentInitialBaselineDrainStateDTO": {
+      "additionalProperties": false,
+      "description": "Exact pristine frozen state accepted by the C1b checkpoint DTO.",
+      "properties": {
+        "schema_version": {
+          "const": "web_bridge_deployment_drain_state_v3",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "state_generation": {
+          "minimum": 3,
+          "title": "State Generation",
+          "type": "integer"
+        },
+        "previous_state_commitment_raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Previous State Commitment Raw Sha256",
+          "type": "string"
+        },
+        "state": {
+          "const": "RESTARTED_FROZEN",
+          "title": "State",
+          "type": "string"
+        },
+        "drain_epoch": {
+          "const": 0,
+          "title": "Drain Epoch",
+          "type": "integer"
+        },
+        "execution_epoch": {
+          "minimum": 2,
+          "title": "Execution Epoch",
+          "type": "integer"
+        },
+        "runtime_instance_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "title": "Runtime Instance Id",
+          "type": "string"
+        },
+        "active_request_id": {
+          "title": "Active Request Id",
+          "type": "null"
+        },
+        "active_request_sha256": {
+          "title": "Active Request Sha256",
+          "type": "null"
+        },
+        "active_receipt_id": {
+          "title": "Active Receipt Id",
+          "type": "null"
+        },
+        "active_receipt_raw_sha256": {
+          "title": "Active Receipt Raw Sha256",
+          "type": "null"
+        },
+        "receipt_consumed": {
+          "const": false,
+          "title": "Receipt Consumed",
+          "type": "boolean"
+        },
+        "consumed_at": {
+          "title": "Consumed At",
+          "type": "null"
+        },
+        "consume_id": {
+          "title": "Consume Id",
+          "type": "null"
+        },
+        "consumed_receipt_id": {
+          "title": "Consumed Receipt Id",
+          "type": "null"
+        },
+        "consume_intent_raw_sha256": {
+          "title": "Consume Intent Raw Sha256",
+          "type": "null"
+        },
+        "consume_marker_raw_sha256": {
+          "title": "Consume Marker Raw Sha256",
+          "type": "null"
+        },
+        "consume_state_projection_sha256": {
+          "title": "Consume State Projection Sha256",
+          "type": "null"
+        },
+        "consumed_online_recheck_id": {
+          "title": "Consumed Online Recheck Id",
+          "type": "null"
+        },
+        "consumed_online_recheck_raw_sha256": {
+          "title": "Consumed Online Recheck Raw Sha256",
+          "type": "null"
+        },
+        "preconsume_state_commitment_raw_sha256": {
+          "title": "Preconsume State Commitment Raw Sha256",
+          "type": "null"
+        },
+        "active_online_recheck_id": {
+          "title": "Active Online Recheck Id",
+          "type": "null"
+        },
+        "active_online_recheck_raw_sha256": {
+          "title": "Active Online Recheck Raw Sha256",
+          "type": "null"
+        },
+        "active_recheck_checkpoint_raw_sha256": {
+          "title": "Active Recheck Checkpoint Raw Sha256",
+          "type": "null"
+        },
+        "online_rechecked_at": {
+          "title": "Online Rechecked At",
+          "type": "null"
+        },
+        "last_invalidated_online_recheck_id": {
+          "title": "Last Invalidated Online Recheck Id",
+          "type": "null"
+        },
+        "last_invalidated_receipt_id": {
+          "title": "Last Invalidated Receipt Id",
+          "type": "null"
+        },
+        "blockers": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Blockers",
+          "type": "array"
+        },
+        "expires_at": {
+          "title": "Expires At",
+          "type": "null"
+        },
+        "freeze_reason": {
+          "const": "initial_bootstrap_requires_reconciliation",
+          "title": "Freeze Reason",
+          "type": "string"
+        },
+        "updated_at": {
+          "format": "date-time",
+          "title": "Updated At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "state_generation",
+        "previous_state_commitment_raw_sha256",
+        "state",
+        "drain_epoch",
+        "execution_epoch",
+        "runtime_instance_id",
+        "active_request_id",
+        "active_request_sha256",
+        "active_receipt_id",
+        "active_receipt_raw_sha256",
+        "receipt_consumed",
+        "consumed_at",
+        "consume_id",
+        "consumed_receipt_id",
+        "consume_intent_raw_sha256",
+        "consume_marker_raw_sha256",
+        "consume_state_projection_sha256",
+        "consumed_online_recheck_id",
+        "consumed_online_recheck_raw_sha256",
+        "preconsume_state_commitment_raw_sha256",
+        "active_online_recheck_id",
+        "active_online_recheck_raw_sha256",
+        "active_recheck_checkpoint_raw_sha256",
+        "online_rechecked_at",
+        "last_invalidated_online_recheck_id",
+        "last_invalidated_receipt_id",
+        "blockers",
+        "expires_at",
+        "freeze_reason",
+        "updated_at"
+      ],
+      "title": "DeploymentInitialBaselineDrainStateDTO",
+      "type": "object"
+    },
+    "DeploymentLegacyMigrationCheckpointDTO": {
+      "additionalProperties": false,
+      "description": "Non-authorizing C1c checkpoint for a clean legacy migration.",
+      "properties": {
+        "schema_version": {
+          "const": "web_bridge_deployment_legacy_migration_checkpoint_v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "purpose": {
+          "const": "record_non_authorizing_clean_legacy_migration_baseline",
+          "title": "Purpose",
+          "type": "string"
+        },
+        "mode": {
+          "const": "LEGACY_MIGRATION_BASELINE",
+          "title": "Mode",
+          "type": "string"
+        },
+        "reconciliation_run_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "title": "Reconciliation Run Id",
+          "type": "string"
+        },
+        "checkpoint_id": {
+          "pattern": "^deployment-legacy-migration-checkpoint-[0-9a-f]{64}$",
+          "title": "Checkpoint Id",
+          "type": "string"
+        },
+        "checkpoint_core_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Checkpoint Core Sha256",
+          "type": "string"
+        },
+        "source_schema_version": {
+          "enum": [
+            "web_bridge_deployment_drain_state_v1",
+            "web_bridge_deployment_drain_state_v2"
+          ],
+          "title": "Source Schema Version",
+          "type": "string"
+        },
+        "source_state_raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Source State Raw Sha256",
+          "type": "string"
+        },
+        "source_epoch_anchor_raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Source Epoch Anchor Raw Sha256",
+          "type": "string"
+        },
+        "source_state": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LegacyMigrationSourceStateV1DTO"
+            },
+            {
+              "$ref": "#/$defs/LegacyMigrationSourceStateV2DTO"
+            }
+          ],
+          "title": "Source State"
+        },
+        "source_epoch_anchor": {
+          "$ref": "#/$defs/LegacyEpochAnchorV1DTO"
+        },
+        "inventory_id": {
+          "pattern": "^legacy-migration-empty-inventory-[0-9a-f]{64}$",
+          "title": "Inventory Id",
+          "type": "string"
+        },
+        "inventory_raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Inventory Raw Sha256",
+          "type": "string"
+        },
+        "inventory_core_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Inventory Core Sha256",
+          "type": "string"
+        },
+        "inventory": {
+          "$ref": "#/$defs/LegacyMigrationEmptyInventoryDTO"
+        },
+        "genesis_source": {
+          "enum": [
+            "v1_migration",
+            "v2_migration"
+          ],
+          "title": "Genesis Source",
+          "type": "string"
+        },
+        "genesis_commitment_id": {
+          "pattern": "^deployment-drain-state-commitment-[0-9a-f]{64}$",
+          "title": "Genesis Commitment Id",
+          "type": "string"
+        },
+        "genesis_commitment_raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Genesis Commitment Raw Sha256",
+          "type": "string"
+        },
+        "genesis_commitment_core_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Genesis Commitment Core Sha256",
+          "type": "string"
+        },
+        "genesis_state_raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Genesis State Raw Sha256",
+          "type": "string"
+        },
+        "current_state_commitment_id": {
+          "pattern": "^deployment-drain-state-commitment-[0-9a-f]{64}$",
+          "title": "Current State Commitment Id",
+          "type": "string"
+        },
+        "current_state_commitment_raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Current State Commitment Raw Sha256",
+          "type": "string"
+        },
+        "current_state_commitment_core_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Current State Commitment Core Sha256",
+          "type": "string"
+        },
+        "current_state_generation": {
+          "minimum": 2,
+          "title": "Current State Generation",
+          "type": "integer"
+        },
+        "state_commitment_chain_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "State Commitment Chain Sha256",
+          "type": "string"
+        },
+        "state_commitment_raw_sha256s": {
+          "items": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "title": "State Commitment Raw Sha256S",
+          "type": "array"
+        },
+        "state_commitments": {
+          "items": {
+            "$ref": "#/$defs/DeploymentDrainStateCommitmentDTO"
+          },
+          "title": "State Commitments",
+          "type": "array"
+        },
+        "current_epoch_anchor_raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Current Epoch Anchor Raw Sha256",
+          "type": "string"
+        },
+        "current_epoch_anchor": {
+          "$ref": "#/$defs/DeploymentEpochAnchorV2DTO"
+        },
+        "current_runtime_instance_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "title": "Current Runtime Instance Id",
+          "type": "string"
+        },
+        "current_execution_epoch": {
+          "minimum": 1,
+          "title": "Current Execution Epoch",
+          "type": "integer"
+        },
+        "current_drain_state": {
+          "$ref": "#/$defs/DeploymentLegacyMigrationDrainStateDTO"
+        },
+        "current_drain_state_raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Current Drain State Raw Sha256",
+          "type": "string"
+        },
+        "expected_account_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Expected Account Hash",
+          "type": "string"
+        },
+        "commodity_checkpoint_id": {
+          "pattern": "^deployment-legacy-migration-commodity-checkpoint-[0-9a-f]{64}$",
+          "title": "Commodity Checkpoint Id",
+          "type": "string"
+        },
+        "commodity_checkpoint_raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Commodity Checkpoint Raw Sha256",
+          "type": "string"
+        },
+        "commodity_checkpoint_core_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Commodity Checkpoint Core Sha256",
+          "type": "string"
+        },
+        "commodity_checkpoint": {
+          "$ref": "#/$defs/DeploymentLegacyMigrationCommodityCheckpointDTO"
+        },
+        "fresh_rpc": {
+          "$ref": "#/$defs/DeploymentRpcRecheckFactsDTO"
+        },
+        "initial_execution_facts_canonical_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Initial Execution Facts Canonical Sha256",
+          "type": "string"
+        },
+        "fresh_execution_facts_canonical_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Fresh Execution Facts Canonical Sha256",
+          "type": "string"
+        },
+        "orders_snapshot_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Orders Snapshot Sha256",
+          "type": "string"
+        },
+        "active_orders_snapshot_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Active Orders Snapshot Sha256",
+          "type": "string"
+        },
+        "trades_snapshot_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Trades Snapshot Sha256",
+          "type": "string"
+        },
+        "positions_snapshot_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Positions Snapshot Sha256",
+          "type": "string"
+        },
+        "captured_at": {
+          "format": "date-time",
+          "title": "Captured At",
+          "type": "string"
+        },
+        "legacy_source_exact_bytes_verified": {
+          "const": true,
+          "title": "Legacy Source Exact Bytes Verified",
+          "type": "boolean"
+        },
+        "legacy_migration_baseline_verified": {
+          "const": true,
+          "title": "Legacy Migration Baseline Verified",
+          "type": "boolean"
+        },
+        "initial_execution_facts_baseline_recorded": {
+          "const": true,
+          "title": "Initial Execution Facts Baseline Recorded",
+          "type": "boolean"
+        },
+        "execution_facts_reconciliation_completed": {
+          "const": true,
+          "title": "Execution Facts Reconciliation Completed",
+          "type": "boolean"
+        },
+        "semantic_safety_unchanged": {
+          "const": false,
+          "title": "Semantic Safety Unchanged",
+          "type": "boolean"
+        },
+        "external_high_water_verified": {
+          "const": false,
+          "title": "External High Water Verified",
+          "type": "boolean"
+        },
+        "custody_inventory_verified": {
+          "const": false,
+          "title": "Custody Inventory Verified",
+          "type": "boolean"
+        },
+        "target_runtime_verified": {
+          "const": false,
+          "title": "Target Runtime Verified",
+          "type": "boolean"
+        },
+        "reconciliation_completed": {
+          "const": false,
+          "title": "Reconciliation Completed",
+          "type": "boolean"
+        },
+        "windows_fence_released": {
+          "const": false,
+          "title": "Windows Fence Released",
+          "type": "boolean"
+        },
+        "authority_restore_allowed": {
+          "const": false,
+          "title": "Authority Restore Allowed",
+          "type": "boolean"
+        },
+        "consume_authorized": {
+          "const": false,
+          "title": "Consume Authorized",
+          "type": "boolean"
+        },
+        "reconciliation_authorized": {
+          "const": false,
+          "title": "Reconciliation Authorized",
+          "type": "boolean"
+        },
+        "deployment_authorized": {
+          "const": false,
+          "title": "Deployment Authorized",
+          "type": "boolean"
+        },
+        "automatic_deploy_allowed": {
+          "const": false,
+          "title": "Automatic Deploy Allowed",
+          "type": "boolean"
+        },
+        "production_allowed": {
+          "const": false,
+          "title": "Production Allowed",
+          "type": "boolean"
+        },
+        "live_trading_authorized": {
+          "const": false,
+          "title": "Live Trading Authorized",
+          "type": "boolean"
+        },
+        "countable_forward": {
+          "const": false,
+          "title": "Countable Forward",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "schema_version",
+        "purpose",
+        "mode",
+        "reconciliation_run_id",
+        "checkpoint_id",
+        "checkpoint_core_sha256",
+        "source_schema_version",
+        "source_state_raw_sha256",
+        "source_epoch_anchor_raw_sha256",
+        "source_state",
+        "source_epoch_anchor",
+        "inventory_id",
+        "inventory_raw_sha256",
+        "inventory_core_sha256",
+        "inventory",
+        "genesis_source",
+        "genesis_commitment_id",
+        "genesis_commitment_raw_sha256",
+        "genesis_commitment_core_sha256",
+        "genesis_state_raw_sha256",
+        "current_state_commitment_id",
+        "current_state_commitment_raw_sha256",
+        "current_state_commitment_core_sha256",
+        "current_state_generation",
+        "state_commitment_chain_sha256",
+        "state_commitment_raw_sha256s",
+        "state_commitments",
+        "current_epoch_anchor_raw_sha256",
+        "current_epoch_anchor",
+        "current_runtime_instance_id",
+        "current_execution_epoch",
+        "current_drain_state",
+        "current_drain_state_raw_sha256",
+        "expected_account_hash",
+        "commodity_checkpoint_id",
+        "commodity_checkpoint_raw_sha256",
+        "commodity_checkpoint_core_sha256",
+        "commodity_checkpoint",
+        "fresh_rpc",
+        "initial_execution_facts_canonical_sha256",
+        "fresh_execution_facts_canonical_sha256",
+        "orders_snapshot_sha256",
+        "active_orders_snapshot_sha256",
+        "trades_snapshot_sha256",
+        "positions_snapshot_sha256",
+        "captured_at",
+        "legacy_source_exact_bytes_verified",
+        "legacy_migration_baseline_verified",
+        "initial_execution_facts_baseline_recorded",
+        "execution_facts_reconciliation_completed",
+        "semantic_safety_unchanged",
+        "external_high_water_verified",
+        "custody_inventory_verified",
+        "target_runtime_verified",
+        "reconciliation_completed",
+        "windows_fence_released",
+        "authority_restore_allowed",
+        "consume_authorized",
+        "reconciliation_authorized",
+        "deployment_authorized",
+        "automatic_deploy_allowed",
+        "production_allowed",
+        "live_trading_authorized",
+        "countable_forward"
+      ],
+      "title": "DeploymentLegacyMigrationCheckpointDTO",
+      "type": "object"
+    },
+    "DeploymentLegacyMigrationCommodityCheckpointDTO": {
+      "additionalProperties": false,
+      "description": "Exact owner projection for a clean legacy migration baseline.",
+      "properties": {
+        "schema_version": {
+          "const": "web_bridge_deployment_legacy_migration_commodity_checkpoint_v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "purpose": {
+          "const": "record_exact_non_authorizing_legacy_migration_commodity_baseline",
+          "title": "Purpose",
+          "type": "string"
+        },
+        "mode": {
+          "const": "LEGACY_MIGRATION_BASELINE",
+          "title": "Mode",
+          "type": "string"
+        },
+        "reconciliation_run_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "title": "Reconciliation Run Id",
+          "type": "string"
+        },
+        "checkpoint_id": {
+          "pattern": "^deployment-legacy-migration-commodity-checkpoint-[0-9a-f]{64}$",
+          "title": "Checkpoint Id",
+          "type": "string"
+        },
+        "checkpoint_core_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Checkpoint Core Sha256",
+          "type": "string"
+        },
+        "source_schema_version": {
+          "enum": [
+            "web_bridge_deployment_drain_state_v1",
+            "web_bridge_deployment_drain_state_v2"
+          ],
+          "title": "Source Schema Version",
+          "type": "string"
+        },
+        "source_state_raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Source State Raw Sha256",
+          "type": "string"
+        },
+        "source_epoch_anchor_raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Source Epoch Anchor Raw Sha256",
+          "type": "string"
+        },
+        "inventory_id": {
+          "pattern": "^legacy-migration-empty-inventory-[0-9a-f]{64}$",
+          "title": "Inventory Id",
+          "type": "string"
+        },
+        "inventory_raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Inventory Raw Sha256",
+          "type": "string"
+        },
+        "inventory_core_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Inventory Core Sha256",
+          "type": "string"
+        },
+        "genesis_commitment_raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Genesis Commitment Raw Sha256",
+          "type": "string"
+        },
+        "current_state_commitment_raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Current State Commitment Raw Sha256",
+          "type": "string"
+        },
+        "current_epoch_anchor_raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Current Epoch Anchor Raw Sha256",
+          "type": "string"
+        },
+        "current_runtime_instance_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "title": "Current Runtime Instance Id",
+          "type": "string"
+        },
+        "current_execution_epoch": {
+          "minimum": 1,
+          "title": "Current Execution Epoch",
+          "type": "integer"
+        },
+        "expected_account_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Expected Account Hash",
+          "type": "string"
+        },
+        "captured_at": {
+          "format": "date-time",
+          "title": "Captured At",
+          "type": "string"
+        },
+        "execution_plan_status": {
+          "const": "IDLE",
+          "title": "Execution Plan Status",
+          "type": "string"
+        },
+        "execution_plan_hash": {
+          "title": "Execution Plan Hash",
+          "type": "null"
+        },
+        "plan_version": {
+          "const": 0,
+          "title": "Plan Version",
+          "type": "integer"
+        },
+        "state_version": {
+          "const": "web_bridge_initial_baseline_commodity_state_v1",
+          "title": "State Version",
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/CommodityInitialBaselineStateDTO"
+        },
+        "state_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "State Sha256",
+          "type": "string"
+        },
+        "initial_rpc": {
+          "$ref": "#/$defs/DeploymentRpcFactsDTO"
+        },
+        "active_orders_snapshot_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Active Orders Snapshot Sha256",
+          "type": "string"
+        },
+        "positions_snapshot_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Positions Snapshot Sha256",
+          "type": "string"
+        },
+        "web_trade_enabled": {
+          "const": false,
+          "title": "Web Trade Enabled",
+          "type": "boolean"
+        },
+        "execution_authority_revoked": {
+          "const": true,
+          "title": "Execution Authority Revoked",
+          "type": "boolean"
+        },
+        "auto_dispatch_stopped": {
+          "const": true,
+          "title": "Auto Dispatch Stopped",
+          "type": "boolean"
+        },
+        "active_orders": {
+          "const": 0,
+          "title": "Active Orders",
+          "type": "integer"
+        },
+        "unknown_outcome": {
+          "const": false,
+          "title": "Unknown Outcome",
+          "type": "boolean"
+        },
+        "reconcile_required": {
+          "const": false,
+          "title": "Reconcile Required",
+          "type": "boolean"
+        },
+        "consume_authorized": {
+          "const": false,
+          "title": "Consume Authorized",
+          "type": "boolean"
+        },
+        "reconciliation_authorized": {
+          "const": false,
+          "title": "Reconciliation Authorized",
+          "type": "boolean"
+        },
+        "deployment_authorized": {
+          "const": false,
+          "title": "Deployment Authorized",
+          "type": "boolean"
+        },
+        "automatic_deploy_allowed": {
+          "const": false,
+          "title": "Automatic Deploy Allowed",
+          "type": "boolean"
+        },
+        "production_allowed": {
+          "const": false,
+          "title": "Production Allowed",
+          "type": "boolean"
+        },
+        "live_trading_authorized": {
+          "const": false,
+          "title": "Live Trading Authorized",
+          "type": "boolean"
+        },
+        "countable_forward": {
+          "const": false,
+          "title": "Countable Forward",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "schema_version",
+        "purpose",
+        "mode",
+        "reconciliation_run_id",
+        "checkpoint_id",
+        "checkpoint_core_sha256",
+        "source_schema_version",
+        "source_state_raw_sha256",
+        "source_epoch_anchor_raw_sha256",
+        "inventory_id",
+        "inventory_raw_sha256",
+        "inventory_core_sha256",
+        "genesis_commitment_raw_sha256",
+        "current_state_commitment_raw_sha256",
+        "current_epoch_anchor_raw_sha256",
+        "current_runtime_instance_id",
+        "current_execution_epoch",
+        "expected_account_hash",
+        "captured_at",
+        "execution_plan_status",
+        "execution_plan_hash",
+        "plan_version",
+        "state_version",
+        "state",
+        "state_sha256",
+        "initial_rpc",
+        "active_orders_snapshot_sha256",
+        "positions_snapshot_sha256",
+        "web_trade_enabled",
+        "execution_authority_revoked",
+        "auto_dispatch_stopped",
+        "active_orders",
+        "unknown_outcome",
+        "reconcile_required",
+        "consume_authorized",
+        "reconciliation_authorized",
+        "deployment_authorized",
+        "automatic_deploy_allowed",
+        "production_allowed",
+        "live_trading_authorized",
+        "countable_forward"
+      ],
+      "title": "DeploymentLegacyMigrationCommodityCheckpointDTO",
+      "type": "object"
+    },
+    "DeploymentLegacyMigrationDrainStateDTO": {
+      "additionalProperties": false,
+      "description": "Exact frozen v3 state accepted after a clean v1/v2 migration.",
+      "properties": {
+        "schema_version": {
+          "const": "web_bridge_deployment_drain_state_v3",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "state_generation": {
+          "minimum": 2,
+          "title": "State Generation",
+          "type": "integer"
+        },
+        "previous_state_commitment_raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Previous State Commitment Raw Sha256",
+          "type": "string"
+        },
+        "state": {
+          "const": "RESTARTED_FROZEN",
+          "title": "State",
+          "type": "string"
+        },
+        "drain_epoch": {
+          "minimum": 0,
+          "title": "Drain Epoch",
+          "type": "integer"
+        },
+        "execution_epoch": {
+          "minimum": 1,
+          "title": "Execution Epoch",
+          "type": "integer"
+        },
+        "runtime_instance_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "title": "Runtime Instance Id",
+          "type": "string"
+        },
+        "active_request_id": {
+          "title": "Active Request Id",
+          "type": "null"
+        },
+        "active_request_sha256": {
+          "title": "Active Request Sha256",
+          "type": "null"
+        },
+        "active_receipt_id": {
+          "title": "Active Receipt Id",
+          "type": "null"
+        },
+        "active_receipt_raw_sha256": {
+          "title": "Active Receipt Raw Sha256",
+          "type": "null"
+        },
+        "receipt_consumed": {
+          "const": false,
+          "title": "Receipt Consumed",
+          "type": "boolean"
+        },
+        "consumed_at": {
+          "title": "Consumed At",
+          "type": "null"
+        },
+        "consume_id": {
+          "title": "Consume Id",
+          "type": "null"
+        },
+        "consumed_receipt_id": {
+          "title": "Consumed Receipt Id",
+          "type": "null"
+        },
+        "consume_intent_raw_sha256": {
+          "title": "Consume Intent Raw Sha256",
+          "type": "null"
+        },
+        "consume_marker_raw_sha256": {
+          "title": "Consume Marker Raw Sha256",
+          "type": "null"
+        },
+        "consume_state_projection_sha256": {
+          "title": "Consume State Projection Sha256",
+          "type": "null"
+        },
+        "consumed_online_recheck_id": {
+          "title": "Consumed Online Recheck Id",
+          "type": "null"
+        },
+        "consumed_online_recheck_raw_sha256": {
+          "title": "Consumed Online Recheck Raw Sha256",
+          "type": "null"
+        },
+        "preconsume_state_commitment_raw_sha256": {
+          "title": "Preconsume State Commitment Raw Sha256",
+          "type": "null"
+        },
+        "active_online_recheck_id": {
+          "title": "Active Online Recheck Id",
+          "type": "null"
+        },
+        "active_online_recheck_raw_sha256": {
+          "title": "Active Online Recheck Raw Sha256",
+          "type": "null"
+        },
+        "active_recheck_checkpoint_raw_sha256": {
+          "title": "Active Recheck Checkpoint Raw Sha256",
+          "type": "null"
+        },
+        "online_rechecked_at": {
+          "title": "Online Rechecked At",
+          "type": "null"
+        },
+        "last_invalidated_online_recheck_id": {
+          "title": "Last Invalidated Online Recheck Id",
+          "type": "null"
+        },
+        "last_invalidated_receipt_id": {
+          "title": "Last Invalidated Receipt Id",
+          "type": "null"
+        },
+        "blockers": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Blockers",
+          "type": "array"
+        },
+        "expires_at": {
+          "title": "Expires At",
+          "type": "null"
+        },
+        "freeze_reason": {
+          "const": "legacy_state_migrated_to_v3_requires_reconciliation",
+          "title": "Freeze Reason",
+          "type": "string"
+        },
+        "updated_at": {
+          "format": "date-time",
+          "title": "Updated At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "state_generation",
+        "previous_state_commitment_raw_sha256",
+        "state",
+        "drain_epoch",
+        "execution_epoch",
+        "runtime_instance_id",
+        "active_request_id",
+        "active_request_sha256",
+        "active_receipt_id",
+        "active_receipt_raw_sha256",
+        "receipt_consumed",
+        "consumed_at",
+        "consume_id",
+        "consumed_receipt_id",
+        "consume_intent_raw_sha256",
+        "consume_marker_raw_sha256",
+        "consume_state_projection_sha256",
+        "consumed_online_recheck_id",
+        "consumed_online_recheck_raw_sha256",
+        "preconsume_state_commitment_raw_sha256",
+        "active_online_recheck_id",
+        "active_online_recheck_raw_sha256",
+        "active_recheck_checkpoint_raw_sha256",
+        "online_rechecked_at",
+        "last_invalidated_online_recheck_id",
+        "last_invalidated_receipt_id",
+        "blockers",
+        "expires_at",
+        "freeze_reason",
+        "updated_at"
+      ],
+      "title": "DeploymentLegacyMigrationDrainStateDTO",
+      "type": "object"
+    },
+    "DeploymentPostRestartCheckpointDTO": {
+      "additionalProperties": false,
+      "description": "Non-authorizing C1a checkpoint captured by the restarted process.",
+      "properties": {
+        "schema_version": {
+          "const": "web_bridge_deployment_post_restart_checkpoint_v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "purpose": {
+          "const": "record_non_authorizing_planned_restart_reconciliation_checkpoint",
+          "title": "Purpose",
+          "type": "string"
+        },
+        "mode": {
+          "const": "PLANNED_RESTART",
+          "title": "Mode",
+          "type": "string"
+        },
+        "reconciliation_run_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "title": "Reconciliation Run Id",
+          "type": "string"
+        },
+        "checkpoint_id": {
+          "pattern": "^deployment-post-restart-checkpoint-[0-9a-f]{64}$",
+          "title": "Checkpoint Id",
+          "type": "string"
+        },
+        "checkpoint_core_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Checkpoint Core Sha256",
+          "type": "string"
+        },
+        "consume_intent_id": {
+          "pattern": "^safe-restart-consume-intent-[0-9a-f]{64}$",
+          "title": "Consume Intent Id",
+          "type": "string"
+        },
+        "consume_intent_raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Consume Intent Raw Sha256",
+          "type": "string"
+        },
+        "consume_intent_core_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Consume Intent Core Sha256",
+          "type": "string"
+        },
+        "consume_marker_id": {
+          "pattern": "^safe-restart-consume-marker-[0-9a-f]{64}$",
+          "title": "Consume Marker Id",
+          "type": "string"
+        },
+        "consume_marker_raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Consume Marker Raw Sha256",
+          "type": "string"
+        },
+        "consume_marker_core_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Consume Marker Core Sha256",
+          "type": "string"
+        },
+        "receipt_id": {
+          "pattern": "^safe-restart-[0-9a-f]{64}$",
+          "title": "Receipt Id",
+          "type": "string"
+        },
+        "receipt_raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Receipt Raw Sha256",
+          "type": "string"
+        },
+        "receipt_core_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Receipt Core Sha256",
+          "type": "string"
+        },
+        "online_recheck_id": {
+          "pattern": "^safe-restart-online-recheck-[0-9a-f]{64}$",
+          "title": "Online Recheck Id",
+          "type": "string"
+        },
+        "online_recheck_raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Online Recheck Raw Sha256",
+          "type": "string"
+        },
+        "online_recheck_core_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Online Recheck Core Sha256",
+          "type": "string"
+        },
+        "request_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "deployment_attempt_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "title": "Deployment Attempt Id",
+          "type": "string"
+        },
+        "release_plan_core_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Release Plan Core Sha256",
+          "type": "string"
+        },
+        "restart_action_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Restart Action Sha256",
+          "type": "string"
+        },
+        "drain_epoch": {
+          "minimum": 1,
+          "title": "Drain Epoch",
+          "type": "integer"
+        },
+        "previous_runtime_instance_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "title": "Previous Runtime Instance Id",
+          "type": "string"
+        },
+        "previous_execution_epoch": {
+          "minimum": 1,
+          "title": "Previous Execution Epoch",
+          "type": "integer"
+        },
+        "current_runtime_instance_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "title": "Current Runtime Instance Id",
+          "type": "string"
+        },
+        "current_execution_epoch": {
+          "minimum": 2,
+          "title": "Current Execution Epoch",
+          "type": "integer"
+        },
+        "consumed_windows_server_instance_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "title": "Consumed Windows Server Instance Id",
+          "type": "string"
+        },
+        "consumed_owner_challenge_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Consumed Owner Challenge Sha256",
+          "type": "string"
+        },
+        "consumed_recheck_id": {
+          "pattern": "^deployment-recheck-[0-9a-f]{64}$",
+          "title": "Consumed Recheck Id",
+          "type": "string"
+        },
+        "consumed_fresh_challenge_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Consumed Fresh Challenge Sha256",
+          "type": "string"
+        },
+        "consumed_rpc_generation": {
+          "minimum": 0,
+          "title": "Consumed Rpc Generation",
+          "type": "integer"
+        },
+        "consumed_execution_facts_canonical_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Consumed Execution Facts Canonical Sha256",
+          "type": "string"
+        },
+        "consumed_execution_state_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Consumed Execution State Sha256",
+          "type": "string"
+        },
+        "consumed_active_orders_snapshot_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Consumed Active Orders Snapshot Sha256",
+          "type": "string"
+        },
+        "consumed_positions_snapshot_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Consumed Positions Snapshot Sha256",
+          "type": "string"
+        },
+        "current_state_commitment_id": {
+          "pattern": "^deployment-drain-state-commitment-[0-9a-f]{64}$",
+          "title": "Current State Commitment Id",
+          "type": "string"
+        },
+        "current_state_commitment_raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Current State Commitment Raw Sha256",
+          "type": "string"
+        },
+        "current_epoch_anchor_raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Current Epoch Anchor Raw Sha256",
+          "type": "string"
+        },
+        "current_state_generation": {
+          "minimum": 1,
+          "title": "Current State Generation",
+          "type": "integer"
+        },
+        "current_drain_state": {
+          "additionalProperties": true,
+          "title": "Current Drain State",
+          "type": "object"
+        },
+        "current_drain_state_raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Current Drain State Raw Sha256",
+          "type": "string"
+        },
+        "post_restart_recheck_id": {
+          "pattern": "^deployment-recheck-[0-9a-f]{64}$",
+          "title": "Post Restart Recheck Id",
+          "type": "string"
+        },
+        "post_restart_fresh_challenge_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Post Restart Fresh Challenge Sha256",
+          "type": "string"
+        },
+        "windows_rpc": {
+          "$ref": "#/$defs/DeploymentRpcRecheckFactsDTO"
+        },
+        "current_active_orders_snapshot_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Current Active Orders Snapshot Sha256",
+          "type": "string"
+        },
+        "current_positions_snapshot_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Current Positions Snapshot Sha256",
+          "type": "string"
+        },
+        "captured_at": {
+          "format": "date-time",
+          "title": "Captured At",
+          "type": "string"
+        },
+        "windows_execution_admission_frozen": {
+          "const": true,
+          "title": "Windows Execution Admission Frozen",
+          "type": "boolean"
+        },
+        "semantic_safety_unchanged": {
+          "const": true,
+          "title": "Semantic Safety Unchanged",
+          "type": "boolean"
+        },
+        "target_runtime_verified": {
+          "const": false,
+          "title": "Target Runtime Verified",
+          "type": "boolean"
+        },
+        "execution_facts_reconciliation_completed": {
+          "const": true,
+          "title": "Execution Facts Reconciliation Completed",
+          "type": "boolean"
+        },
+        "reconciliation_completed": {
+          "const": false,
+          "title": "Reconciliation Completed",
+          "type": "boolean"
+        },
+        "windows_fence_released": {
+          "const": false,
+          "title": "Windows Fence Released",
+          "type": "boolean"
+        },
+        "authority_restore_allowed": {
+          "const": false,
+          "title": "Authority Restore Allowed",
+          "type": "boolean"
+        },
+        "consume_authorized": {
+          "const": false,
+          "title": "Consume Authorized",
+          "type": "boolean"
+        },
+        "reconciliation_authorized": {
+          "const": false,
+          "title": "Reconciliation Authorized",
+          "type": "boolean"
+        },
+        "deployment_authorized": {
+          "const": false,
+          "title": "Deployment Authorized",
+          "type": "boolean"
+        },
+        "automatic_deploy_allowed": {
+          "const": false,
+          "title": "Automatic Deploy Allowed",
+          "type": "boolean"
+        },
+        "production_allowed": {
+          "const": false,
+          "title": "Production Allowed",
+          "type": "boolean"
+        },
+        "live_trading_authorized": {
+          "const": false,
+          "title": "Live Trading Authorized",
+          "type": "boolean"
+        },
+        "countable_forward": {
+          "const": false,
+          "title": "Countable Forward",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "schema_version",
+        "purpose",
+        "mode",
+        "reconciliation_run_id",
+        "checkpoint_id",
+        "checkpoint_core_sha256",
+        "consume_intent_id",
+        "consume_intent_raw_sha256",
+        "consume_intent_core_sha256",
+        "consume_marker_id",
+        "consume_marker_raw_sha256",
+        "consume_marker_core_sha256",
+        "receipt_id",
+        "receipt_raw_sha256",
+        "receipt_core_sha256",
+        "online_recheck_id",
+        "online_recheck_raw_sha256",
+        "online_recheck_core_sha256",
+        "request_id",
+        "deployment_attempt_id",
+        "release_plan_core_sha256",
+        "restart_action_sha256",
+        "drain_epoch",
+        "previous_runtime_instance_id",
+        "previous_execution_epoch",
+        "current_runtime_instance_id",
+        "current_execution_epoch",
+        "consumed_windows_server_instance_id",
+        "consumed_owner_challenge_sha256",
+        "consumed_recheck_id",
+        "consumed_fresh_challenge_sha256",
+        "consumed_rpc_generation",
+        "consumed_execution_facts_canonical_sha256",
+        "consumed_execution_state_sha256",
+        "consumed_active_orders_snapshot_sha256",
+        "consumed_positions_snapshot_sha256",
+        "current_state_commitment_id",
+        "current_state_commitment_raw_sha256",
+        "current_epoch_anchor_raw_sha256",
+        "current_state_generation",
+        "current_drain_state",
+        "current_drain_state_raw_sha256",
+        "post_restart_recheck_id",
+        "post_restart_fresh_challenge_sha256",
+        "windows_rpc",
+        "current_active_orders_snapshot_sha256",
+        "current_positions_snapshot_sha256",
+        "captured_at",
+        "windows_execution_admission_frozen",
+        "semantic_safety_unchanged",
+        "target_runtime_verified",
+        "execution_facts_reconciliation_completed",
+        "reconciliation_completed",
+        "windows_fence_released",
+        "authority_restore_allowed",
+        "consume_authorized",
+        "reconciliation_authorized",
+        "deployment_authorized",
+        "automatic_deploy_allowed",
+        "production_allowed",
+        "live_trading_authorized",
+        "countable_forward"
+      ],
+      "title": "DeploymentPostRestartCheckpointDTO",
+      "type": "object"
+    },
+    "DeploymentReconciliationOwnerCapturePairDTO": {
+      "additionalProperties": false,
+      "description": "Stable consumed/initial facts plus a fresh bound-owner Windows recheck.",
+      "properties": {
+        "schema_version": {
+          "const": "web_bridge_deployment_reconciliation_capture_pair_v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "purpose": {
+          "const": "record_two_stable_frozen_owner_rpc_captures",
+          "title": "Purpose",
+          "type": "string"
+        },
+        "mode": {
+          "enum": [
+            "PLANNED_RESTART",
+            "INITIAL_BASELINE",
+            "LEGACY_MIGRATION_BASELINE"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "capture_pair_id": {
+          "pattern": "^deployment-reconciliation-capture-pair-[0-9a-f]{64}$",
+          "title": "Capture Pair Id",
+          "type": "string"
+        },
+        "capture_pair_core_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Capture Pair Core Sha256",
+          "type": "string"
+        },
+        "intent_id": {
+          "pattern": "^deployment-reconciliation-intent-[0-9a-f]{64}$",
+          "title": "Intent Id",
+          "type": "string"
+        },
+        "intent_raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Intent Raw Sha256",
+          "type": "string"
+        },
+        "intent_core_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Intent Core Sha256",
+          "type": "string"
+        },
+        "owner_binding_id": {
+          "pattern": "^deployment-reconciliation-owner-binding-[0-9a-f]{64}$",
+          "title": "Owner Binding Id",
+          "type": "string"
+        },
+        "owner_binding_core_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Owner Binding Core Sha256",
+          "type": "string"
+        },
+        "expected_account_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Expected Account Hash",
+          "type": "string"
+        },
+        "rpc_request_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "title": "Rpc Request Id",
+          "type": "string"
+        },
+        "owner_challenge": {
+          "pattern": "^[A-Za-z0-9_-]{16,128}$",
+          "title": "Owner Challenge",
+          "type": "string"
+        },
+        "initial_capture_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "title": "Initial Capture Id",
+          "type": "string"
+        },
+        "initial_challenge": {
+          "pattern": "^[A-Za-z0-9_-]{16,128}$",
+          "title": "Initial Challenge",
+          "type": "string"
+        },
+        "fresh_capture_id": {
+          "pattern": "^deployment-recheck-[0-9a-f]{64}$",
+          "title": "Fresh Capture Id",
+          "type": "string"
+        },
+        "fresh_challenge": {
+          "pattern": "^[A-Za-z0-9_-]{16,128}$",
+          "title": "Fresh Challenge",
+          "type": "string"
+        },
+        "commodity_state_raw_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Commodity State Raw Sha256"
+        },
+        "commodity_state_checkpoint_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Commodity State Checkpoint Sha256",
+          "type": "string"
+        },
+        "initial_rpc_raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Initial Rpc Raw Sha256",
+          "type": "string"
+        },
+        "initial_rpc": {
+          "discriminator": {
+            "mapping": {
+              "windows_rpc_deployment_safety_recheck_v1": "#/$defs/DeploymentRpcRecheckFactsDTO",
+              "windows_rpc_deployment_safety_snapshot_v1": "#/$defs/DeploymentRpcFactsDTO"
+            },
+            "propertyName": "schema_version"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/DeploymentRpcFactsDTO"
+            },
+            {
+              "$ref": "#/$defs/DeploymentRpcRecheckFactsDTO"
+            }
+          ],
+          "title": "Initial Rpc"
+        },
+        "fresh_rpc_raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Fresh Rpc Raw Sha256",
+          "type": "string"
+        },
+        "fresh_rpc": {
+          "$ref": "#/$defs/DeploymentRpcRecheckFactsDTO"
+        },
+        "initial_execution_facts_canonical_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Initial Execution Facts Canonical Sha256",
+          "type": "string"
+        },
+        "fresh_execution_facts_canonical_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Fresh Execution Facts Canonical Sha256",
+          "type": "string"
+        },
+        "captured_at": {
+          "format": "date-time",
+          "title": "Captured At",
+          "type": "string"
+        },
+        "same_owner_cycle_verified": {
+          "const": true,
+          "title": "Same Owner Cycle Verified",
+          "type": "boolean"
+        },
+        "two_capture_facts_verified": {
+          "const": true,
+          "title": "Two Capture Facts Verified",
+          "type": "boolean"
+        },
+        "external_high_water_verified": {
+          "const": false,
+          "title": "External High Water Verified",
+          "type": "boolean"
+        },
+        "target_runtime_verified": {
+          "const": false,
+          "title": "Target Runtime Verified",
+          "type": "boolean"
+        },
+        "reconciliation_completed": {
+          "const": false,
+          "title": "Reconciliation Completed",
+          "type": "boolean"
+        },
+        "windows_fence_released": {
+          "const": false,
+          "title": "Windows Fence Released",
+          "type": "boolean"
+        },
+        "authority_restore_allowed": {
+          "const": false,
+          "title": "Authority Restore Allowed",
+          "type": "boolean"
+        },
+        "consume_authorized": {
+          "const": false,
+          "title": "Consume Authorized",
+          "type": "boolean"
+        },
+        "reconciliation_authorized": {
+          "const": false,
+          "title": "Reconciliation Authorized",
+          "type": "boolean"
+        },
+        "deployment_authorized": {
+          "const": false,
+          "title": "Deployment Authorized",
+          "type": "boolean"
+        },
+        "automatic_deploy_allowed": {
+          "const": false,
+          "title": "Automatic Deploy Allowed",
+          "type": "boolean"
+        },
+        "production_allowed": {
+          "const": false,
+          "title": "Production Allowed",
+          "type": "boolean"
+        },
+        "live_trading_authorized": {
+          "const": false,
+          "title": "Live Trading Authorized",
+          "type": "boolean"
+        },
+        "countable_forward": {
+          "const": false,
+          "title": "Countable Forward",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "schema_version",
+        "purpose",
+        "mode",
+        "capture_pair_id",
+        "capture_pair_core_sha256",
+        "intent_id",
+        "intent_raw_sha256",
+        "intent_core_sha256",
+        "owner_binding_id",
+        "owner_binding_core_sha256",
+        "expected_account_hash",
+        "rpc_request_id",
+        "owner_challenge",
+        "initial_capture_id",
+        "initial_challenge",
+        "fresh_capture_id",
+        "fresh_challenge",
+        "commodity_state_raw_sha256",
+        "commodity_state_checkpoint_sha256",
+        "initial_rpc_raw_sha256",
+        "initial_rpc",
+        "fresh_rpc_raw_sha256",
+        "fresh_rpc",
+        "initial_execution_facts_canonical_sha256",
+        "fresh_execution_facts_canonical_sha256",
+        "captured_at",
+        "same_owner_cycle_verified",
+        "two_capture_facts_verified",
+        "external_high_water_verified",
+        "target_runtime_verified",
+        "reconciliation_completed",
+        "windows_fence_released",
+        "authority_restore_allowed",
+        "consume_authorized",
+        "reconciliation_authorized",
+        "deployment_authorized",
+        "automatic_deploy_allowed",
+        "production_allowed",
+        "live_trading_authorized",
+        "countable_forward"
+      ],
+      "title": "DeploymentReconciliationOwnerCapturePairDTO",
+      "type": "object"
+    },
+    "DeploymentRpcFactsDTO": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "windows_rpc_deployment_safety_snapshot_v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "request_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "challenge": {
+          "pattern": "^[A-Za-z0-9_-]{16,128}$",
+          "title": "Challenge",
+          "type": "string"
+        },
+        "server_instance_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "title": "Server Instance Id",
+          "type": "string"
+        },
+        "fact_generation": {
+          "minimum": 0,
+          "title": "Fact Generation",
+          "type": "integer"
+        },
+        "captured_at": {
+          "format": "date-time",
+          "title": "Captured At",
+          "type": "string"
+        },
+        "execution_admission_frozen": {
+          "const": true,
+          "title": "Execution Admission Frozen",
+          "type": "boolean"
+        },
+        "pending_send_outcomes": {
+          "minimum": 0,
+          "title": "Pending Send Outcomes",
+          "type": "integer"
+        },
+        "strategy_execution_enabled": {
+          "const": false,
+          "title": "Strategy Execution Enabled",
+          "type": "boolean"
+        },
+        "account_hashes": {
+          "items": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "title": "Account Hashes",
+          "type": "array"
+        },
+        "orders": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Orders",
+          "type": "array"
+        },
+        "active_orders": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Active Orders",
+          "type": "array"
+        },
+        "trades": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Trades",
+          "type": "array"
+        },
+        "positions": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Positions",
+          "type": "array"
+        }
+      },
+      "required": [
+        "schema_version",
+        "request_id",
+        "challenge",
+        "server_instance_id",
+        "fact_generation",
+        "captured_at",
+        "execution_admission_frozen",
+        "pending_send_outcomes",
+        "strategy_execution_enabled",
+        "account_hashes",
+        "orders",
+        "active_orders",
+        "trades",
+        "positions"
+      ],
+      "title": "DeploymentRpcFactsDTO",
+      "type": "object"
+    },
+    "DeploymentRpcRecheckFactsDTO": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "windows_rpc_deployment_safety_recheck_v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "request_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "owner_challenge": {
+          "pattern": "^[A-Za-z0-9_-]{16,128}$",
+          "title": "Owner Challenge",
+          "type": "string"
+        },
+        "recheck_id": {
+          "pattern": "^deployment-recheck-[0-9a-f]{64}$",
+          "title": "Recheck Id",
+          "type": "string"
+        },
+        "fresh_challenge": {
+          "pattern": "^[A-Za-z0-9_-]{16,128}$",
+          "title": "Fresh Challenge",
+          "type": "string"
+        },
+        "original_server_instance_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "title": "Original Server Instance Id",
+          "type": "string"
+        },
+        "original_fact_generation": {
+          "minimum": 0,
+          "title": "Original Fact Generation",
+          "type": "integer"
+        },
+        "original_execution_facts_canonical_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Original Execution Facts Canonical Sha256",
+          "type": "string"
+        },
+        "server_instance_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "title": "Server Instance Id",
+          "type": "string"
+        },
+        "fact_generation": {
+          "minimum": 0,
+          "title": "Fact Generation",
+          "type": "integer"
+        },
+        "execution_facts_canonical_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Execution Facts Canonical Sha256",
+          "type": "string"
+        },
+        "captured_at": {
+          "format": "date-time",
+          "title": "Captured At",
+          "type": "string"
+        },
+        "execution_admission_frozen": {
+          "const": true,
+          "title": "Execution Admission Frozen",
+          "type": "boolean"
+        },
+        "pending_send_outcomes": {
+          "minimum": 0,
+          "title": "Pending Send Outcomes",
+          "type": "integer"
+        },
+        "strategy_execution_enabled": {
+          "const": false,
+          "title": "Strategy Execution Enabled",
+          "type": "boolean"
+        },
+        "account_hashes": {
+          "items": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "title": "Account Hashes",
+          "type": "array"
+        },
+        "orders": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Orders",
+          "type": "array"
+        },
+        "active_orders": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Active Orders",
+          "type": "array"
+        },
+        "trades": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Trades",
+          "type": "array"
+        },
+        "positions": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Positions",
+          "type": "array"
+        }
+      },
+      "required": [
+        "schema_version",
+        "request_id",
+        "owner_challenge",
+        "recheck_id",
+        "fresh_challenge",
+        "original_server_instance_id",
+        "original_fact_generation",
+        "original_execution_facts_canonical_sha256",
+        "server_instance_id",
+        "fact_generation",
+        "execution_facts_canonical_sha256",
+        "captured_at",
+        "execution_admission_frozen",
+        "pending_send_outcomes",
+        "strategy_execution_enabled",
+        "account_hashes",
+        "orders",
+        "active_orders",
+        "trades",
+        "positions"
+      ],
+      "title": "DeploymentRpcRecheckFactsDTO",
+      "type": "object"
+    },
+    "InitialBaselineReconciliationEvidenceDTO": {
+      "additionalProperties": false,
+      "description": "C1b evidence only; C2 still owns real custody capture and activation.",
+      "properties": {
+        "schema_version": {
+          "const": "web_bridge_initial_baseline_reconciliation_v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "purpose": {
+          "const": "record_non_authorizing_fresh_initial_baseline_evidence",
+          "title": "Purpose",
+          "type": "string"
+        },
+        "mode": {
+          "const": "INITIAL_BASELINE",
+          "title": "Mode",
+          "type": "string"
+        },
+        "reconciliation_id": {
+          "pattern": "^initial-baseline-reconciliation-[0-9a-f]{64}$",
+          "title": "Reconciliation Id",
+          "type": "string"
+        },
+        "reconciliation_core_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Reconciliation Core Sha256",
+          "type": "string"
+        },
+        "checkpoint_id": {
+          "pattern": "^deployment-initial-baseline-checkpoint-[0-9a-f]{64}$",
+          "title": "Checkpoint Id",
+          "type": "string"
+        },
+        "checkpoint_raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Checkpoint Raw Sha256",
+          "type": "string"
+        },
+        "checkpoint_core_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Checkpoint Core Sha256",
+          "type": "string"
+        },
+        "commodity_checkpoint_raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Commodity Checkpoint Raw Sha256",
+          "type": "string"
+        },
+        "genesis_commitment_raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Genesis Commitment Raw Sha256",
+          "type": "string"
+        },
+        "current_state_commitment_raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Current State Commitment Raw Sha256",
+          "type": "string"
+        },
+        "current_epoch_anchor_raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Current Epoch Anchor Raw Sha256",
+          "type": "string"
+        },
+        "current_runtime_instance_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "title": "Current Runtime Instance Id",
+          "type": "string"
+        },
+        "current_execution_epoch": {
+          "minimum": 2,
+          "title": "Current Execution Epoch",
+          "type": "integer"
+        },
+        "expected_account_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Expected Account Hash",
+          "type": "string"
+        },
+        "reconciled_at": {
+          "format": "date-time",
+          "title": "Reconciled At",
+          "type": "string"
+        },
+        "fresh_initial_baseline_verified": {
+          "const": true,
+          "title": "Fresh Initial Baseline Verified",
+          "type": "boolean"
+        },
+        "custody_inventory_verified": {
+          "const": false,
+          "title": "Custody Inventory Verified",
+          "type": "boolean"
+        },
+        "initial_execution_facts_baseline_recorded": {
+          "const": true,
+          "title": "Initial Execution Facts Baseline Recorded",
+          "type": "boolean"
+        },
+        "execution_facts_reconciliation_completed": {
+          "const": true,
+          "title": "Execution Facts Reconciliation Completed",
+          "type": "boolean"
+        },
+        "semantic_safety_unchanged": {
+          "const": false,
+          "title": "Semantic Safety Unchanged",
+          "type": "boolean"
+        },
+        "target_runtime_verified": {
+          "const": false,
+          "title": "Target Runtime Verified",
+          "type": "boolean"
+        },
+        "reconciliation_completed": {
+          "const": false,
+          "title": "Reconciliation Completed",
+          "type": "boolean"
+        },
+        "windows_fence_released": {
+          "const": false,
+          "title": "Windows Fence Released",
+          "type": "boolean"
+        },
+        "authority_restore_allowed": {
+          "const": false,
+          "title": "Authority Restore Allowed",
+          "type": "boolean"
+        },
+        "consume_authorized": {
+          "const": false,
+          "title": "Consume Authorized",
+          "type": "boolean"
+        },
+        "reconciliation_authorized": {
+          "const": false,
+          "title": "Reconciliation Authorized",
+          "type": "boolean"
+        },
+        "deployment_authorized": {
+          "const": false,
+          "title": "Deployment Authorized",
+          "type": "boolean"
+        },
+        "automatic_deploy_allowed": {
+          "const": false,
+          "title": "Automatic Deploy Allowed",
+          "type": "boolean"
+        },
+        "production_allowed": {
+          "const": false,
+          "title": "Production Allowed",
+          "type": "boolean"
+        },
+        "live_trading_authorized": {
+          "const": false,
+          "title": "Live Trading Authorized",
+          "type": "boolean"
+        },
+        "countable_forward": {
+          "const": false,
+          "title": "Countable Forward",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "schema_version",
+        "purpose",
+        "mode",
+        "reconciliation_id",
+        "reconciliation_core_sha256",
+        "checkpoint_id",
+        "checkpoint_raw_sha256",
+        "checkpoint_core_sha256",
+        "commodity_checkpoint_raw_sha256",
+        "genesis_commitment_raw_sha256",
+        "current_state_commitment_raw_sha256",
+        "current_epoch_anchor_raw_sha256",
+        "current_runtime_instance_id",
+        "current_execution_epoch",
+        "expected_account_hash",
+        "reconciled_at",
+        "fresh_initial_baseline_verified",
+        "custody_inventory_verified",
+        "initial_execution_facts_baseline_recorded",
+        "execution_facts_reconciliation_completed",
+        "semantic_safety_unchanged",
+        "target_runtime_verified",
+        "reconciliation_completed",
+        "windows_fence_released",
+        "authority_restore_allowed",
+        "consume_authorized",
+        "reconciliation_authorized",
+        "deployment_authorized",
+        "automatic_deploy_allowed",
+        "production_allowed",
+        "live_trading_authorized",
+        "countable_forward"
+      ],
+      "title": "InitialBaselineReconciliationEvidenceDTO",
+      "type": "object"
+    },
+    "LegacyEpochAnchorV1DTO": {
+      "additionalProperties": false,
+      "description": "Exact legacy high-water anchor accepted by the clean C1c path.",
+      "properties": {
+        "schema_version": {
+          "const": "web_bridge_deployment_drain_epoch_anchor_v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "drain_epoch": {
+          "minimum": 0,
+          "title": "Drain Epoch",
+          "type": "integer"
+        },
+        "execution_epoch": {
+          "minimum": 0,
+          "title": "Execution Epoch",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "schema_version",
+        "drain_epoch",
+        "execution_epoch"
+      ],
+      "title": "LegacyEpochAnchorV1DTO",
+      "type": "object"
+    },
+    "LegacyMigrationEmptyInventoryDTO": {
+      "additionalProperties": false,
+      "description": "Content-addressed declaration; C2 still verifies the live inventory.",
+      "properties": {
+        "schema_version": {
+          "const": "web_bridge_legacy_migration_empty_inventory_v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "purpose": {
+          "const": "bind_declared_empty_legacy_migration_inventory",
+          "title": "Purpose",
+          "type": "string"
+        },
+        "mode": {
+          "const": "LEGACY_MIGRATION_BASELINE",
+          "title": "Mode",
+          "type": "string"
+        },
+        "inventory_id": {
+          "pattern": "^legacy-migration-empty-inventory-[0-9a-f]{64}$",
+          "title": "Inventory Id",
+          "type": "string"
+        },
+        "inventory_core_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Inventory Core Sha256",
+          "type": "string"
+        },
+        "source_schema_version": {
+          "enum": [
+            "web_bridge_deployment_drain_state_v1",
+            "web_bridge_deployment_drain_state_v2"
+          ],
+          "title": "Source Schema Version",
+          "type": "string"
+        },
+        "source_state_raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Source State Raw Sha256",
+          "type": "string"
+        },
+        "source_epoch_anchor_raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Source Epoch Anchor Raw Sha256",
+          "type": "string"
+        },
+        "receipts": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Receipts",
+          "type": "array"
+        },
+        "consumes": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Consumes",
+          "type": "array"
+        },
+        "checkpoints": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Checkpoints",
+          "type": "array"
+        },
+        "rechecks": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Rechecks",
+          "type": "array"
+        },
+        "inventory_declared_empty": {
+          "const": true,
+          "title": "Inventory Declared Empty",
+          "type": "boolean"
+        },
+        "custody_inventory_verified": {
+          "const": false,
+          "title": "Custody Inventory Verified",
+          "type": "boolean"
+        },
+        "deployment_authorized": {
+          "const": false,
+          "title": "Deployment Authorized",
+          "type": "boolean"
+        },
+        "production_allowed": {
+          "const": false,
+          "title": "Production Allowed",
+          "type": "boolean"
+        },
+        "live_trading_authorized": {
+          "const": false,
+          "title": "Live Trading Authorized",
+          "type": "boolean"
+        },
+        "countable_forward": {
+          "const": false,
+          "title": "Countable Forward",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "schema_version",
+        "purpose",
+        "mode",
+        "inventory_id",
+        "inventory_core_sha256",
+        "source_schema_version",
+        "source_state_raw_sha256",
+        "source_epoch_anchor_raw_sha256",
+        "receipts",
+        "consumes",
+        "checkpoints",
+        "rechecks",
+        "inventory_declared_empty",
+        "custody_inventory_verified",
+        "deployment_authorized",
+        "production_allowed",
+        "live_trading_authorized",
+        "countable_forward"
+      ],
+      "title": "LegacyMigrationEmptyInventoryDTO",
+      "type": "object"
+    },
+    "LegacyMigrationReconciliationEvidenceDTO": {
+      "additionalProperties": false,
+      "description": "C1c evidence only; C2/D retain custody, fence, and authority control.",
+      "properties": {
+        "schema_version": {
+          "const": "web_bridge_legacy_migration_reconciliation_v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "purpose": {
+          "const": "record_non_authorizing_clean_legacy_migration_evidence",
+          "title": "Purpose",
+          "type": "string"
+        },
+        "mode": {
+          "const": "LEGACY_MIGRATION_BASELINE",
+          "title": "Mode",
+          "type": "string"
+        },
+        "reconciliation_id": {
+          "pattern": "^legacy-migration-reconciliation-[0-9a-f]{64}$",
+          "title": "Reconciliation Id",
+          "type": "string"
+        },
+        "reconciliation_core_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Reconciliation Core Sha256",
+          "type": "string"
+        },
+        "checkpoint_id": {
+          "pattern": "^deployment-legacy-migration-checkpoint-[0-9a-f]{64}$",
+          "title": "Checkpoint Id",
+          "type": "string"
+        },
+        "checkpoint_raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Checkpoint Raw Sha256",
+          "type": "string"
+        },
+        "checkpoint_core_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Checkpoint Core Sha256",
+          "type": "string"
+        },
+        "checkpoint": {
+          "$ref": "#/$defs/DeploymentLegacyMigrationCheckpointDTO"
+        },
+        "inventory_id": {
+          "pattern": "^legacy-migration-empty-inventory-[0-9a-f]{64}$",
+          "title": "Inventory Id",
+          "type": "string"
+        },
+        "inventory_raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Inventory Raw Sha256",
+          "type": "string"
+        },
+        "commodity_checkpoint_id": {
+          "pattern": "^deployment-legacy-migration-commodity-checkpoint-[0-9a-f]{64}$",
+          "title": "Commodity Checkpoint Id",
+          "type": "string"
+        },
+        "commodity_checkpoint_raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Commodity Checkpoint Raw Sha256",
+          "type": "string"
+        },
+        "source_schema_version": {
+          "enum": [
+            "web_bridge_deployment_drain_state_v1",
+            "web_bridge_deployment_drain_state_v2"
+          ],
+          "title": "Source Schema Version",
+          "type": "string"
+        },
+        "source_state_raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Source State Raw Sha256",
+          "type": "string"
+        },
+        "source_epoch_anchor_raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Source Epoch Anchor Raw Sha256",
+          "type": "string"
+        },
+        "genesis_commitment_raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Genesis Commitment Raw Sha256",
+          "type": "string"
+        },
+        "current_state_commitment_raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Current State Commitment Raw Sha256",
+          "type": "string"
+        },
+        "current_epoch_anchor_raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Current Epoch Anchor Raw Sha256",
+          "type": "string"
+        },
+        "current_runtime_instance_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "title": "Current Runtime Instance Id",
+          "type": "string"
+        },
+        "current_execution_epoch": {
+          "minimum": 1,
+          "title": "Current Execution Epoch",
+          "type": "integer"
+        },
+        "expected_account_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Expected Account Hash",
+          "type": "string"
+        },
+        "reconciled_at": {
+          "format": "date-time",
+          "title": "Reconciled At",
+          "type": "string"
+        },
+        "legacy_source_exact_bytes_verified": {
+          "const": true,
+          "title": "Legacy Source Exact Bytes Verified",
+          "type": "boolean"
+        },
+        "legacy_migration_baseline_verified": {
+          "const": true,
+          "title": "Legacy Migration Baseline Verified",
+          "type": "boolean"
+        },
+        "initial_execution_facts_baseline_recorded": {
+          "const": true,
+          "title": "Initial Execution Facts Baseline Recorded",
+          "type": "boolean"
+        },
+        "execution_facts_reconciliation_completed": {
+          "const": true,
+          "title": "Execution Facts Reconciliation Completed",
+          "type": "boolean"
+        },
+        "semantic_safety_unchanged": {
+          "const": false,
+          "title": "Semantic Safety Unchanged",
+          "type": "boolean"
+        },
+        "external_high_water_verified": {
+          "const": false,
+          "title": "External High Water Verified",
+          "type": "boolean"
+        },
+        "custody_inventory_verified": {
+          "const": false,
+          "title": "Custody Inventory Verified",
+          "type": "boolean"
+        },
+        "target_runtime_verified": {
+          "const": false,
+          "title": "Target Runtime Verified",
+          "type": "boolean"
+        },
+        "reconciliation_completed": {
+          "const": false,
+          "title": "Reconciliation Completed",
+          "type": "boolean"
+        },
+        "windows_fence_released": {
+          "const": false,
+          "title": "Windows Fence Released",
+          "type": "boolean"
+        },
+        "authority_restore_allowed": {
+          "const": false,
+          "title": "Authority Restore Allowed",
+          "type": "boolean"
+        },
+        "consume_authorized": {
+          "const": false,
+          "title": "Consume Authorized",
+          "type": "boolean"
+        },
+        "reconciliation_authorized": {
+          "const": false,
+          "title": "Reconciliation Authorized",
+          "type": "boolean"
+        },
+        "deployment_authorized": {
+          "const": false,
+          "title": "Deployment Authorized",
+          "type": "boolean"
+        },
+        "automatic_deploy_allowed": {
+          "const": false,
+          "title": "Automatic Deploy Allowed",
+          "type": "boolean"
+        },
+        "production_allowed": {
+          "const": false,
+          "title": "Production Allowed",
+          "type": "boolean"
+        },
+        "live_trading_authorized": {
+          "const": false,
+          "title": "Live Trading Authorized",
+          "type": "boolean"
+        },
+        "countable_forward": {
+          "const": false,
+          "title": "Countable Forward",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "schema_version",
+        "purpose",
+        "mode",
+        "reconciliation_id",
+        "reconciliation_core_sha256",
+        "checkpoint_id",
+        "checkpoint_raw_sha256",
+        "checkpoint_core_sha256",
+        "checkpoint",
+        "inventory_id",
+        "inventory_raw_sha256",
+        "commodity_checkpoint_id",
+        "commodity_checkpoint_raw_sha256",
+        "source_schema_version",
+        "source_state_raw_sha256",
+        "source_epoch_anchor_raw_sha256",
+        "genesis_commitment_raw_sha256",
+        "current_state_commitment_raw_sha256",
+        "current_epoch_anchor_raw_sha256",
+        "current_runtime_instance_id",
+        "current_execution_epoch",
+        "expected_account_hash",
+        "reconciled_at",
+        "legacy_source_exact_bytes_verified",
+        "legacy_migration_baseline_verified",
+        "initial_execution_facts_baseline_recorded",
+        "execution_facts_reconciliation_completed",
+        "semantic_safety_unchanged",
+        "external_high_water_verified",
+        "custody_inventory_verified",
+        "target_runtime_verified",
+        "reconciliation_completed",
+        "windows_fence_released",
+        "authority_restore_allowed",
+        "consume_authorized",
+        "reconciliation_authorized",
+        "deployment_authorized",
+        "automatic_deploy_allowed",
+        "production_allowed",
+        "live_trading_authorized",
+        "countable_forward"
+      ],
+      "title": "LegacyMigrationReconciliationEvidenceDTO",
+      "type": "object"
+    },
+    "LegacyMigrationSourceStateV1DTO": {
+      "additionalProperties": false,
+      "description": "Strict clean v1 source eligible for C1c baseline reconciliation.",
+      "properties": {
+        "state": {
+          "const": "RUNNING",
+          "title": "State",
+          "type": "string"
+        },
+        "drain_epoch": {
+          "minimum": 0,
+          "title": "Drain Epoch",
+          "type": "integer"
+        },
+        "execution_epoch": {
+          "minimum": 0,
+          "title": "Execution Epoch",
+          "type": "integer"
+        },
+        "runtime_instance_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "title": "Runtime Instance Id",
+          "type": "string"
+        },
+        "active_request_id": {
+          "title": "Active Request Id",
+          "type": "null"
+        },
+        "active_request_sha256": {
+          "title": "Active Request Sha256",
+          "type": "null"
+        },
+        "active_receipt_id": {
+          "title": "Active Receipt Id",
+          "type": "null"
+        },
+        "active_receipt_raw_sha256": {
+          "title": "Active Receipt Raw Sha256",
+          "type": "null"
+        },
+        "receipt_consumed": {
+          "const": false,
+          "title": "Receipt Consumed",
+          "type": "boolean"
+        },
+        "consumed_at": {
+          "title": "Consumed At",
+          "type": "null"
+        },
+        "consume_id": {
+          "title": "Consume Id",
+          "type": "null"
+        },
+        "last_invalidated_receipt_id": {
+          "title": "Last Invalidated Receipt Id",
+          "type": "null"
+        },
+        "blockers": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Blockers",
+          "type": "array"
+        },
+        "expires_at": {
+          "title": "Expires At",
+          "type": "null"
+        },
+        "freeze_reason": {
+          "title": "Freeze Reason",
+          "type": "null"
+        },
+        "updated_at": {
+          "format": "date-time",
+          "title": "Updated At",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "web_bridge_deployment_drain_state_v1",
+          "title": "Schema Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "state",
+        "drain_epoch",
+        "execution_epoch",
+        "runtime_instance_id",
+        "active_request_id",
+        "active_request_sha256",
+        "active_receipt_id",
+        "active_receipt_raw_sha256",
+        "receipt_consumed",
+        "consumed_at",
+        "consume_id",
+        "last_invalidated_receipt_id",
+        "blockers",
+        "expires_at",
+        "freeze_reason",
+        "updated_at",
+        "schema_version"
+      ],
+      "title": "LegacyMigrationSourceStateV1DTO",
+      "type": "object"
+    },
+    "LegacyMigrationSourceStateV2DTO": {
+      "additionalProperties": false,
+      "description": "Strict clean v2 source eligible for C1c baseline reconciliation.",
+      "properties": {
+        "state": {
+          "const": "RUNNING",
+          "title": "State",
+          "type": "string"
+        },
+        "drain_epoch": {
+          "minimum": 0,
+          "title": "Drain Epoch",
+          "type": "integer"
+        },
+        "execution_epoch": {
+          "minimum": 0,
+          "title": "Execution Epoch",
+          "type": "integer"
+        },
+        "runtime_instance_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "title": "Runtime Instance Id",
+          "type": "string"
+        },
+        "active_request_id": {
+          "title": "Active Request Id",
+          "type": "null"
+        },
+        "active_request_sha256": {
+          "title": "Active Request Sha256",
+          "type": "null"
+        },
+        "active_receipt_id": {
+          "title": "Active Receipt Id",
+          "type": "null"
+        },
+        "active_receipt_raw_sha256": {
+          "title": "Active Receipt Raw Sha256",
+          "type": "null"
+        },
+        "receipt_consumed": {
+          "const": false,
+          "title": "Receipt Consumed",
+          "type": "boolean"
+        },
+        "consumed_at": {
+          "title": "Consumed At",
+          "type": "null"
+        },
+        "consume_id": {
+          "title": "Consume Id",
+          "type": "null"
+        },
+        "last_invalidated_receipt_id": {
+          "title": "Last Invalidated Receipt Id",
+          "type": "null"
+        },
+        "blockers": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Blockers",
+          "type": "array"
+        },
+        "expires_at": {
+          "title": "Expires At",
+          "type": "null"
+        },
+        "freeze_reason": {
+          "title": "Freeze Reason",
+          "type": "null"
+        },
+        "updated_at": {
+          "format": "date-time",
+          "title": "Updated At",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "web_bridge_deployment_drain_state_v2",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "active_online_recheck_id": {
+          "title": "Active Online Recheck Id",
+          "type": "null"
+        },
+        "active_online_recheck_raw_sha256": {
+          "title": "Active Online Recheck Raw Sha256",
+          "type": "null"
+        },
+        "active_recheck_checkpoint_raw_sha256": {
+          "title": "Active Recheck Checkpoint Raw Sha256",
+          "type": "null"
+        },
+        "online_rechecked_at": {
+          "title": "Online Rechecked At",
+          "type": "null"
+        },
+        "last_invalidated_online_recheck_id": {
+          "title": "Last Invalidated Online Recheck Id",
+          "type": "null"
+        }
+      },
+      "required": [
+        "state",
+        "drain_epoch",
+        "execution_epoch",
+        "runtime_instance_id",
+        "active_request_id",
+        "active_request_sha256",
+        "active_receipt_id",
+        "active_receipt_raw_sha256",
+        "receipt_consumed",
+        "consumed_at",
+        "consume_id",
+        "last_invalidated_receipt_id",
+        "blockers",
+        "expires_at",
+        "freeze_reason",
+        "updated_at",
+        "schema_version",
+        "active_online_recheck_id",
+        "active_online_recheck_raw_sha256",
+        "active_recheck_checkpoint_raw_sha256",
+        "online_rechecked_at",
+        "last_invalidated_online_recheck_id"
+      ],
+      "title": "LegacyMigrationSourceStateV2DTO",
+      "type": "object"
+    },
+    "SafeRestartReconciliationEvidenceDTO": {
+      "additionalProperties": false,
+      "description": "C1a evidence only; it neither verifies the target image nor unfreezes.",
+      "properties": {
+        "schema_version": {
+          "const": "web_bridge_safe_restart_reconciliation_v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "purpose": {
+          "const": "record_non_authorizing_planned_restart_reconciliation_evidence",
+          "title": "Purpose",
+          "type": "string"
+        },
+        "mode": {
+          "const": "PLANNED_RESTART",
+          "title": "Mode",
+          "type": "string"
+        },
+        "reconciliation_id": {
+          "pattern": "^safe-restart-reconciliation-[0-9a-f]{64}$",
+          "title": "Reconciliation Id",
+          "type": "string"
+        },
+        "reconciliation_core_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Reconciliation Core Sha256",
+          "type": "string"
+        },
+        "checkpoint_id": {
+          "pattern": "^deployment-post-restart-checkpoint-[0-9a-f]{64}$",
+          "title": "Checkpoint Id",
+          "type": "string"
+        },
+        "checkpoint_raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Checkpoint Raw Sha256",
+          "type": "string"
+        },
+        "checkpoint_core_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Checkpoint Core Sha256",
+          "type": "string"
+        },
+        "consume_intent_id": {
+          "pattern": "^safe-restart-consume-intent-[0-9a-f]{64}$",
+          "title": "Consume Intent Id",
+          "type": "string"
+        },
+        "consume_intent_raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Consume Intent Raw Sha256",
+          "type": "string"
+        },
+        "consume_marker_id": {
+          "pattern": "^safe-restart-consume-marker-[0-9a-f]{64}$",
+          "title": "Consume Marker Id",
+          "type": "string"
+        },
+        "consume_marker_raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Consume Marker Raw Sha256",
+          "type": "string"
+        },
+        "receipt_id": {
+          "pattern": "^safe-restart-[0-9a-f]{64}$",
+          "title": "Receipt Id",
+          "type": "string"
+        },
+        "online_recheck_id": {
+          "pattern": "^safe-restart-online-recheck-[0-9a-f]{64}$",
+          "title": "Online Recheck Id",
+          "type": "string"
+        },
+        "online_recheck_raw_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Online Recheck Raw Sha256",
+          "type": "string"
+        },
+        "current_runtime_instance_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "title": "Current Runtime Instance Id",
+          "type": "string"
+        },
+        "current_execution_epoch": {
+          "minimum": 2,
+          "title": "Current Execution Epoch",
+          "type": "integer"
+        },
+        "reconciled_at": {
+          "format": "date-time",
+          "title": "Reconciled At",
+          "type": "string"
+        },
+        "post_restart_reconciliation_verified": {
+          "const": true,
+          "title": "Post Restart Reconciliation Verified",
+          "type": "boolean"
+        },
+        "windows_execution_admission_frozen": {
+          "const": true,
+          "title": "Windows Execution Admission Frozen",
+          "type": "boolean"
+        },
+        "target_runtime_verified": {
+          "const": false,
+          "title": "Target Runtime Verified",
+          "type": "boolean"
+        },
+        "execution_facts_reconciliation_completed": {
+          "const": true,
+          "title": "Execution Facts Reconciliation Completed",
+          "type": "boolean"
+        },
+        "reconciliation_completed": {
+          "const": false,
+          "title": "Reconciliation Completed",
+          "type": "boolean"
+        },
+        "windows_fence_released": {
+          "const": false,
+          "title": "Windows Fence Released",
+          "type": "boolean"
+        },
+        "authority_restore_allowed": {
+          "const": false,
+          "title": "Authority Restore Allowed",
+          "type": "boolean"
+        },
+        "consume_authorized": {
+          "const": false,
+          "title": "Consume Authorized",
+          "type": "boolean"
+        },
+        "reconciliation_authorized": {
+          "const": false,
+          "title": "Reconciliation Authorized",
+          "type": "boolean"
+        },
+        "deployment_authorized": {
+          "const": false,
+          "title": "Deployment Authorized",
+          "type": "boolean"
+        },
+        "automatic_deploy_allowed": {
+          "const": false,
+          "title": "Automatic Deploy Allowed",
+          "type": "boolean"
+        },
+        "production_allowed": {
+          "const": false,
+          "title": "Production Allowed",
+          "type": "boolean"
+        },
+        "live_trading_authorized": {
+          "const": false,
+          "title": "Live Trading Authorized",
+          "type": "boolean"
+        },
+        "countable_forward": {
+          "const": false,
+          "title": "Countable Forward",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "schema_version",
+        "purpose",
+        "mode",
+        "reconciliation_id",
+        "reconciliation_core_sha256",
+        "checkpoint_id",
+        "checkpoint_raw_sha256",
+        "checkpoint_core_sha256",
+        "consume_intent_id",
+        "consume_intent_raw_sha256",
+        "consume_marker_id",
+        "consume_marker_raw_sha256",
+        "receipt_id",
+        "online_recheck_id",
+        "online_recheck_raw_sha256",
+        "current_runtime_instance_id",
+        "current_execution_epoch",
+        "reconciled_at",
+        "post_restart_reconciliation_verified",
+        "windows_execution_admission_frozen",
+        "target_runtime_verified",
+        "execution_facts_reconciliation_completed",
+        "reconciliation_completed",
+        "windows_fence_released",
+        "authority_restore_allowed",
+        "consume_authorized",
+        "reconciliation_authorized",
+        "deployment_authorized",
+        "automatic_deploy_allowed",
+        "production_allowed",
+        "live_trading_authorized",
+        "countable_forward"
+      ],
+      "title": "SafeRestartReconciliationEvidenceDTO",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Prepared C2 evidence closure; the activation head remains the commit point.",
+  "properties": {
+    "schema_version": {
+      "const": "web_bridge_deployment_reconciliation_activation_marker_v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "purpose": {
+      "const": "prepare_non_authorizing_owner_reconciliation_activation",
+      "title": "Purpose",
+      "type": "string"
+    },
+    "mode": {
+      "enum": [
+        "PLANNED_RESTART",
+        "INITIAL_BASELINE",
+        "LEGACY_MIGRATION_BASELINE"
+      ],
+      "title": "Mode",
+      "type": "string"
+    },
+    "marker_id": {
+      "pattern": "^deployment-reconciliation-activation-marker-[0-9a-f]{64}$",
+      "title": "Marker Id",
+      "type": "string"
+    },
+    "marker_core_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Marker Core Sha256",
+      "type": "string"
+    },
+    "marker_path": {
+      "pattern": "^reconciliation-blobs/activation-marker-[0-9a-f]{64}\\.json$",
+      "title": "Marker Path",
+      "type": "string"
+    },
+    "intent_id": {
+      "pattern": "^deployment-reconciliation-intent-[0-9a-f]{64}$",
+      "title": "Intent Id",
+      "type": "string"
+    },
+    "intent_raw_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Intent Raw Sha256",
+      "type": "string"
+    },
+    "intent_core_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Intent Core Sha256",
+      "type": "string"
+    },
+    "custody_inventory_id": {
+      "pattern": "^deployment-reconciliation-custody-inventory-[0-9a-f]{64}$",
+      "title": "Custody Inventory Id",
+      "type": "string"
+    },
+    "custody_inventory_raw_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Custody Inventory Raw Sha256",
+      "type": "string"
+    },
+    "capture_pair_id": {
+      "pattern": "^deployment-reconciliation-capture-pair-[0-9a-f]{64}$",
+      "title": "Capture Pair Id",
+      "type": "string"
+    },
+    "capture_pair_raw_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Capture Pair Raw Sha256",
+      "type": "string"
+    },
+    "capture_pair_core_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Capture Pair Core Sha256",
+      "type": "string"
+    },
+    "capture_pair": {
+      "$ref": "#/$defs/DeploymentReconciliationOwnerCapturePairDTO"
+    },
+    "mode_evidence_schema_version": {
+      "enum": [
+        "web_bridge_safe_restart_reconciliation_v1",
+        "web_bridge_initial_baseline_reconciliation_v1",
+        "web_bridge_legacy_migration_reconciliation_v1"
+      ],
+      "title": "Mode Evidence Schema Version",
+      "type": "string"
+    },
+    "mode_evidence_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+      "title": "Mode Evidence Id",
+      "type": "string"
+    },
+    "mode_evidence_raw_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Mode Evidence Raw Sha256",
+      "type": "string"
+    },
+    "mode_evidence_core_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Mode Evidence Core Sha256",
+      "type": "string"
+    },
+    "mode_evidence_blob_path": {
+      "pattern": "^reconciliation-blobs/[0-9a-f]{64}\\.json$",
+      "title": "Mode Evidence Blob Path",
+      "type": "string"
+    },
+    "mode_checkpoint_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+      "title": "Mode Checkpoint Id",
+      "type": "string"
+    },
+    "mode_checkpoint_raw_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Mode Checkpoint Raw Sha256",
+      "type": "string"
+    },
+    "mode_checkpoint_core_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Mode Checkpoint Core Sha256",
+      "type": "string"
+    },
+    "mode_checkpoint": {
+      "discriminator": {
+        "mapping": {
+          "web_bridge_deployment_initial_baseline_checkpoint_v1": "#/$defs/DeploymentInitialBaselineCheckpointDTO",
+          "web_bridge_deployment_legacy_migration_checkpoint_v1": "#/$defs/DeploymentLegacyMigrationCheckpointDTO",
+          "web_bridge_deployment_post_restart_checkpoint_v1": "#/$defs/DeploymentPostRestartCheckpointDTO"
+        },
+        "propertyName": "schema_version"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/DeploymentPostRestartCheckpointDTO"
+        },
+        {
+          "$ref": "#/$defs/DeploymentInitialBaselineCheckpointDTO"
+        },
+        {
+          "$ref": "#/$defs/DeploymentLegacyMigrationCheckpointDTO"
+        }
+      ],
+      "title": "Mode Checkpoint"
+    },
+    "mode_evidence": {
+      "discriminator": {
+        "mapping": {
+          "web_bridge_initial_baseline_reconciliation_v1": "#/$defs/InitialBaselineReconciliationEvidenceDTO",
+          "web_bridge_legacy_migration_reconciliation_v1": "#/$defs/LegacyMigrationReconciliationEvidenceDTO",
+          "web_bridge_safe_restart_reconciliation_v1": "#/$defs/SafeRestartReconciliationEvidenceDTO"
+        },
+        "propertyName": "schema_version"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/SafeRestartReconciliationEvidenceDTO"
+        },
+        {
+          "$ref": "#/$defs/InitialBaselineReconciliationEvidenceDTO"
+        },
+        {
+          "$ref": "#/$defs/LegacyMigrationReconciliationEvidenceDTO"
+        }
+      ],
+      "title": "Mode Evidence"
+    },
+    "current_state_commitment_raw_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Current State Commitment Raw Sha256",
+      "type": "string"
+    },
+    "current_runtime_instance_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+      "title": "Current Runtime Instance Id",
+      "type": "string"
+    },
+    "current_execution_epoch": {
+      "minimum": 1,
+      "title": "Current Execution Epoch",
+      "type": "integer"
+    },
+    "expected_account_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Expected Account Hash",
+      "type": "string"
+    },
+    "prepared_at": {
+      "format": "date-time",
+      "title": "Prepared At",
+      "type": "string"
+    },
+    "custody_inventory_verified": {
+      "const": true,
+      "title": "Custody Inventory Verified",
+      "type": "boolean"
+    },
+    "commodity_owner_verified": {
+      "const": true,
+      "title": "Commodity Owner Verified",
+      "type": "boolean"
+    },
+    "expected_account_allowlist_verified": {
+      "const": true,
+      "title": "Expected Account Allowlist Verified",
+      "type": "boolean"
+    },
+    "two_capture_facts_verified": {
+      "const": true,
+      "title": "Two Capture Facts Verified",
+      "type": "boolean"
+    },
+    "mode_reconciliation_evidence_verified": {
+      "const": true,
+      "title": "Mode Reconciliation Evidence Verified",
+      "type": "boolean"
+    },
+    "activation_marker_prepared": {
+      "const": true,
+      "title": "Activation Marker Prepared",
+      "type": "boolean"
+    },
+    "external_high_water_verified": {
+      "const": false,
+      "title": "External High Water Verified",
+      "type": "boolean"
+    },
+    "target_runtime_verified": {
+      "const": false,
+      "title": "Target Runtime Verified",
+      "type": "boolean"
+    },
+    "reconciliation_completed": {
+      "const": false,
+      "title": "Reconciliation Completed",
+      "type": "boolean"
+    },
+    "windows_fence_released": {
+      "const": false,
+      "title": "Windows Fence Released",
+      "type": "boolean"
+    },
+    "authority_restore_allowed": {
+      "const": false,
+      "title": "Authority Restore Allowed",
+      "type": "boolean"
+    },
+    "consume_authorized": {
+      "const": false,
+      "title": "Consume Authorized",
+      "type": "boolean"
+    },
+    "reconciliation_authorized": {
+      "const": false,
+      "title": "Reconciliation Authorized",
+      "type": "boolean"
+    },
+    "deployment_authorized": {
+      "const": false,
+      "title": "Deployment Authorized",
+      "type": "boolean"
+    },
+    "automatic_deploy_allowed": {
+      "const": false,
+      "title": "Automatic Deploy Allowed",
+      "type": "boolean"
+    },
+    "production_allowed": {
+      "const": false,
+      "title": "Production Allowed",
+      "type": "boolean"
+    },
+    "live_trading_authorized": {
+      "const": false,
+      "title": "Live Trading Authorized",
+      "type": "boolean"
+    },
+    "countable_forward": {
+      "const": false,
+      "title": "Countable Forward",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "schema_version",
+    "purpose",
+    "mode",
+    "marker_id",
+    "marker_core_sha256",
+    "marker_path",
+    "intent_id",
+    "intent_raw_sha256",
+    "intent_core_sha256",
+    "custody_inventory_id",
+    "custody_inventory_raw_sha256",
+    "capture_pair_id",
+    "capture_pair_raw_sha256",
+    "capture_pair_core_sha256",
+    "capture_pair",
+    "mode_evidence_schema_version",
+    "mode_evidence_id",
+    "mode_evidence_raw_sha256",
+    "mode_evidence_core_sha256",
+    "mode_evidence_blob_path",
+    "mode_checkpoint_id",
+    "mode_checkpoint_raw_sha256",
+    "mode_checkpoint_core_sha256",
+    "mode_checkpoint",
+    "mode_evidence",
+    "current_state_commitment_raw_sha256",
+    "current_runtime_instance_id",
+    "current_execution_epoch",
+    "expected_account_hash",
+    "prepared_at",
+    "custody_inventory_verified",
+    "commodity_owner_verified",
+    "expected_account_allowlist_verified",
+    "two_capture_facts_verified",
+    "mode_reconciliation_evidence_verified",
+    "activation_marker_prepared",
+    "external_high_water_verified",
+    "target_runtime_verified",
+    "reconciliation_completed",
+    "windows_fence_released",
+    "authority_restore_allowed",
+    "consume_authorized",
+    "reconciliation_authorized",
+    "deployment_authorized",
+    "automatic_deploy_allowed",
+    "production_allowed",
+    "live_trading_authorized",
+    "countable_forward"
+  ],
+  "title": "Web Bridge deployment reconciliation activation marker v1",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vnpy-web-bridge:schema:web-bridge-deployment-reconciliation-activation-marker-v1"
+}

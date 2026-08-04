@@ -535,8 +535,12 @@ class VnpyRpcService:
         *,
         request_id: str,
         challenge: str,
+        allow_cached_replay: bool = False,
     ) -> DeploymentRpcFactsDTO:
         """Fetch one Windows EventEngine-linearized read-only fact set."""
+
+        if type(allow_cached_replay) is not bool:
+            raise TypeError("allow_cached_replay must be a boolean")
 
         payload = to_plain_dict(
             self.call(
@@ -552,6 +556,9 @@ class VnpyRpcService:
             "server_instance_id",
             "fact_generation",
             "captured_at_utc",
+            "cache_replayed",
+            "served_at_utc",
+            "served_fact_generation",
             "execution_admission_frozen",
             "pending_send_outcomes",
             "strategy_execution_enabled",
@@ -573,26 +580,49 @@ class VnpyRpcService:
                 "Windows deployment snapshot challenge binding is invalid"
             )
         captured_at = payload.pop("captured_at_utc")
+        cache_replayed = payload.pop("cache_replayed")
+        served_at = payload.pop("served_at_utc")
+        served_fact_generation = payload.pop("served_fact_generation")
         if not isinstance(captured_at, str) or not captured_at.endswith("Z"):
             raise RpcCallError(
                 "Windows deployment snapshot timestamp is invalid"
             )
+        if (
+            type(cache_replayed) is not bool
+            or type(served_fact_generation) is not int
+            or not isinstance(served_at, str)
+            or not served_at.endswith("Z")
+        ):
+            raise RpcCallError("Windows deployment snapshot served proof is invalid")
         try:
             parsed_captured_at = datetime.fromisoformat(
                 captured_at.removesuffix("Z") + "+00:00"
+            )
+            parsed_served_at = datetime.fromisoformat(
+                served_at.removesuffix("Z") + "+00:00"
             )
         except ValueError as exc:
             raise RpcCallError(
                 "Windows deployment snapshot timestamp is invalid"
             ) from exc
-        if parsed_captured_at.utcoffset() != timedelta(0):
+        if (
+            parsed_captured_at.utcoffset() != timedelta(0)
+            or parsed_served_at.utcoffset() != timedelta(0)
+        ):
             raise RpcCallError(
                 "Windows deployment snapshot timestamp is not UTC"
             )
         observed_at = datetime.now(timezone.utc)
         if (
             parsed_captured_at > observed_at + timedelta(seconds=2)
-            or observed_at - parsed_captured_at > timedelta(seconds=30)
+            or parsed_served_at > observed_at + timedelta(seconds=2)
+            or observed_at - parsed_served_at > timedelta(seconds=30)
+            or parsed_served_at < parsed_captured_at
+            or served_fact_generation != payload.get("fact_generation")
+            or (
+                observed_at - parsed_captured_at > timedelta(seconds=30)
+                and not (allow_cached_replay and cache_replayed)
+            )
         ):
             raise RpcCallError(
                 "Windows deployment snapshot timestamp is outside freshness window"
@@ -654,8 +684,12 @@ class VnpyRpcService:
         original_server_instance_id: str,
         original_fact_generation: int,
         original_execution_facts_canonical_sha256: str,
+        allow_cached_replay: bool = False,
     ) -> DeploymentRpcRecheckFactsDTO:
         """Fetch one owner-bound, EventEngine-linearized fresh recheck."""
+
+        if type(allow_cached_replay) is not bool:
+            raise TypeError("allow_cached_replay must be a boolean")
 
         payload = to_plain_dict(
             self.call(
@@ -681,6 +715,9 @@ class VnpyRpcService:
             "original_execution_facts_canonical_sha256",
             "execution_facts_canonical_sha256",
             "captured_at_utc",
+            "cache_replayed",
+            "served_at_utc",
+            "served_fact_generation",
             "admission",
             "pending",
             "facts",
@@ -728,13 +765,26 @@ class VnpyRpcService:
                 "Windows deployment recheck facts are invalid"
             )
         captured_at = payload["captured_at_utc"]
+        cache_replayed = payload["cache_replayed"]
+        served_at = payload["served_at_utc"]
+        served_fact_generation = payload["served_fact_generation"]
         if not isinstance(captured_at, str) or not captured_at.endswith("Z"):
             raise RpcCallError(
                 "Windows deployment recheck timestamp is invalid"
             )
+        if (
+            type(cache_replayed) is not bool
+            or type(served_fact_generation) is not int
+            or not isinstance(served_at, str)
+            or not served_at.endswith("Z")
+        ):
+            raise RpcCallError("Windows deployment recheck served proof is invalid")
         try:
             parsed_captured_at = datetime.fromisoformat(
                 captured_at.removesuffix("Z") + "+00:00"
+            )
+            parsed_served_at = datetime.fromisoformat(
+                served_at.removesuffix("Z") + "+00:00"
             )
         except ValueError as exc:
             raise RpcCallError(
@@ -743,8 +793,16 @@ class VnpyRpcService:
         observed_at = datetime.now(timezone.utc)
         if (
             parsed_captured_at.utcoffset() != timedelta(0)
+            or parsed_served_at.utcoffset() != timedelta(0)
             or parsed_captured_at > observed_at + timedelta(seconds=2)
-            or observed_at - parsed_captured_at > timedelta(seconds=30)
+            or parsed_served_at > observed_at + timedelta(seconds=2)
+            or observed_at - parsed_served_at > timedelta(seconds=30)
+            or parsed_served_at < parsed_captured_at
+            or served_fact_generation != payload.get("current_generation")
+            or (
+                observed_at - parsed_captured_at > timedelta(seconds=30)
+                and not (allow_cached_replay and cache_replayed)
+            )
         ):
             raise RpcCallError(
                 "Windows deployment recheck timestamp is outside freshness window"

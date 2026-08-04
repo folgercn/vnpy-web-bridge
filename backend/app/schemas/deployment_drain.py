@@ -162,6 +162,49 @@ DeploymentReconciliationCustodyInventoryId = Annotated[
         )
     ),
 ]
+DeploymentReconciliationOwnerBindingId = Annotated[
+    str,
+    Field(pattern=r"^deployment-reconciliation-owner-binding-[0-9a-f]{64}$"),
+    AfterValidator(
+        lambda value: _nonzero_prefixed(
+            value, "deployment-reconciliation-owner-binding-"
+        )
+    ),
+]
+DeploymentReconciliationIntentId = Annotated[
+    str,
+    Field(pattern=r"^deployment-reconciliation-intent-[0-9a-f]{64}$"),
+    AfterValidator(
+        lambda value: _nonzero_prefixed(value, "deployment-reconciliation-intent-")
+    ),
+]
+DeploymentReconciliationCapturePairId = Annotated[
+    str,
+    Field(pattern=r"^deployment-reconciliation-capture-pair-[0-9a-f]{64}$"),
+    AfterValidator(
+        lambda value: _nonzero_prefixed(
+            value, "deployment-reconciliation-capture-pair-"
+        )
+    ),
+]
+DeploymentReconciliationActivationMarkerId = Annotated[
+    str,
+    Field(pattern=r"^deployment-reconciliation-activation-marker-[0-9a-f]{64}$"),
+    AfterValidator(
+        lambda value: _nonzero_prefixed(
+            value, "deployment-reconciliation-activation-marker-"
+        )
+    ),
+]
+DeploymentReconciliationActivationHeadId = Annotated[
+    str,
+    Field(pattern=r"^deployment-reconciliation-activation-head-[0-9a-f]{64}$"),
+    AfterValidator(
+        lambda value: _nonzero_prefixed(
+            value, "deployment-reconciliation-activation-head-"
+        )
+    ),
+]
 OnlineRecheckId = Annotated[
     str,
     Field(pattern=r"^safe-restart-online-recheck-[0-9a-f]{64}$"),
@@ -2712,6 +2755,682 @@ class LegacyMigrationReconciliationEvidenceDTO(StrictDeploymentDrainModel):
             f"legacy-migration-reconciliation-{expected}"
         ):
             raise ValueError("legacy migration evidence identity mismatch")
+        return self
+
+
+DeploymentReconciliationMode = Literal[
+    "PLANNED_RESTART",
+    "INITIAL_BASELINE",
+    "LEGACY_MIGRATION_BASELINE",
+]
+
+
+class DeploymentReconciliationOwnerBindingDTO(StrictDeploymentDrainModel):
+    """Deterministic binding to the sole frozen Commodity reconciliation owner."""
+
+    schema_version: Literal["web_bridge_deployment_reconciliation_owner_binding_v1"]
+    purpose: Literal["bind_unique_frozen_commodity_owner_for_reconciliation"]
+    owner_binding_id: DeploymentReconciliationOwnerBindingId
+    owner_binding_core_sha256: Sha256
+    owner_kind: Literal["COMMODITY_SIMNOW"]
+    deployment_runtime_instance_id: Identifier
+    deployment_execution_epoch: int = Field(strict=True, ge=1)
+    deployment_state_generation: int = Field(strict=True, ge=2)
+    deployment_state_commitment_raw_sha256: Sha256
+    custody_root_path_sha256: Sha256
+    custody_root_device: int = Field(strict=True, ge=1)
+    custody_root_inode: int = Field(strict=True, ge=1)
+    deployment_lock_device: int = Field(strict=True, ge=1)
+    deployment_lock_inode: int = Field(strict=True, ge=1)
+    commodity_state_version: Literal["commodity-simnow-v1"]
+    commodity_state_path_sha256: Sha256
+    commodity_state_file_present: bool = Field(strict=True)
+    commodity_state_device: int | None = Field(default=None, strict=True, ge=1)
+    commodity_state_inode: int | None = Field(default=None, strict=True, ge=1)
+    commodity_state_uid: int | None = Field(default=None, strict=True, ge=0)
+    commodity_state_gid: int | None = Field(default=None, strict=True, ge=0)
+    commodity_state_mode: int | None = Field(default=None, strict=True, ge=0, le=0o7777)
+    commodity_state_nlink: Literal[1] | None
+    commodity_state_raw_sha256: Sha256 | None
+    commodity_state_checkpoint_sha256: Sha256
+    gateway_name: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+    rpc_request_endpoint_sha256: Sha256
+    rpc_publish_endpoint_sha256: Sha256
+    expected_account_hash: Sha256
+    account_allowlist: list[Sha256]
+    account_allowlist_sha256: Sha256
+    expected_account_allowlisted: Literal[True]
+    web_trade_enabled: Literal[False]
+    execution_authority_revoked: Literal[True]
+    auto_dispatch_stopped: Literal[True]
+    deployment_authorized: Literal[False]
+    automatic_deploy_allowed: Literal[False]
+    production_allowed: Literal[False]
+    live_trading_authorized: Literal[False]
+    countable_forward: Literal[False]
+
+    @model_validator(mode="after")
+    def validate_owner_binding(self) -> DeploymentReconciliationOwnerBindingDTO:
+        if (
+            self.account_allowlist != sorted(set(self.account_allowlist))
+            or self.expected_account_hash not in self.account_allowlist
+            or self.account_allowlist_sha256
+            != _strict_canonical_sha256(self.account_allowlist)
+        ):
+            raise ValueError("reconciliation owner binding is not frozen and scoped")
+        state_file_fields = (
+            self.commodity_state_device,
+            self.commodity_state_inode,
+            self.commodity_state_uid,
+            self.commodity_state_gid,
+            self.commodity_state_mode,
+            self.commodity_state_nlink,
+            self.commodity_state_raw_sha256,
+        )
+        if self.commodity_state_file_present:
+            if any(value is None for value in state_file_fields) or (
+                self.commodity_state_mode is not None
+                and self.commodity_state_mode & 0o077
+            ):
+                raise ValueError("Commodity owner state file is not securely bound")
+        elif any(value is not None for value in state_file_fields):
+            raise ValueError("absent Commodity owner state file carries metadata")
+        core = self.model_dump(mode="json")
+        core.pop("owner_binding_id")
+        core.pop("owner_binding_core_sha256")
+        expected = _strict_canonical_sha256(core)
+        if (
+            self.owner_binding_core_sha256 != expected
+            or self.owner_binding_id
+            != f"deployment-reconciliation-owner-binding-{expected}"
+        ):
+            raise ValueError("reconciliation owner binding identity mismatch")
+        return self
+
+
+class DeploymentReconciliationActivationIntentDTO(StrictDeploymentDrainModel):
+    """Time-free deterministic intent prepared before either owner capture."""
+
+    schema_version: Literal["web_bridge_deployment_reconciliation_intent_v1"]
+    purpose: Literal["prepare_deterministic_owner_reconciliation_capture"]
+    mode: DeploymentReconciliationMode
+    intent_id: DeploymentReconciliationIntentId
+    intent_slot_sha256: Sha256
+    intent_core_sha256: Sha256
+    intent_path: str = Field(
+        pattern=(
+            r"^reconciliation-intents/deployment-reconciliation-intent-"
+            r"[0-9a-f]{64}\.json$"
+        )
+    )
+    reconciliation_run_id: Identifier
+    operator: str = Field(min_length=1, max_length=128)
+    reason: str = Field(min_length=1, max_length=512)
+    custody_inventory_id: DeploymentReconciliationCustodyInventoryId
+    custody_inventory_core_sha256: Sha256
+    custody_inventory_raw_sha256: Sha256
+    custody_inventory_digest_sha256: Sha256
+    genesis_commitment_raw_sha256: Sha256
+    current_state_commitment_raw_sha256: Sha256
+    current_state_raw_sha256: Sha256
+    current_epoch_anchor_raw_sha256: Sha256
+    current_state_generation: int = Field(strict=True, ge=2)
+    current_runtime_instance_id: Identifier
+    current_execution_epoch: int = Field(strict=True, ge=1)
+    owner_binding_raw_sha256: Sha256
+    owner_binding: DeploymentReconciliationOwnerBindingDTO
+    rpc_request_id: Identifier
+    owner_challenge: Nonce
+    initial_capture_id: Identifier
+    initial_challenge: Nonce
+    fresh_capture_id: RecheckId
+    fresh_challenge: Nonce
+    activation_sequence: Literal[1]
+    previous_activation_head_id: None
+    previous_activation_head_raw_sha256: None
+    previous_activation_head_core_sha256: None
+    external_high_water_verified: Literal[False]
+    target_runtime_verified: Literal[False]
+    reconciliation_completed: Literal[False]
+    windows_fence_released: Literal[False]
+    authority_restore_allowed: Literal[False]
+    consume_authorized: Literal[False]
+    reconciliation_authorized: Literal[False]
+    deployment_authorized: Literal[False]
+    automatic_deploy_allowed: Literal[False]
+    production_allowed: Literal[False]
+    live_trading_authorized: Literal[False]
+    countable_forward: Literal[False]
+
+    @model_validator(mode="after")
+    def validate_intent(self) -> DeploymentReconciliationActivationIntentDTO:
+        owner_raw = (
+            json.dumps(
+                self.owner_binding.model_dump(mode="json"),
+                allow_nan=False,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            + b"\n"
+        )
+        if (
+            not self.operator.strip()
+            or not self.reason.strip()
+            or self.owner_binding_raw_sha256 != hashlib.sha256(owner_raw).hexdigest()
+            or self.owner_binding.deployment_runtime_instance_id
+            != self.current_runtime_instance_id
+            or self.owner_binding.deployment_execution_epoch
+            != self.current_execution_epoch
+            or self.owner_binding.deployment_state_generation
+            != self.current_state_generation
+            or self.owner_binding.deployment_state_commitment_raw_sha256
+            != self.current_state_commitment_raw_sha256
+            or self.initial_challenge == self.fresh_challenge
+        ):
+            raise ValueError("reconciliation intent binding is inconsistent")
+        stable_slot = {
+            "domain": "issue267-c2b-intent-slot-v1",
+            "mode": self.mode,
+            "custody_inventory_digest_sha256": (self.custody_inventory_digest_sha256),
+            "genesis_commitment_raw_sha256": (self.genesis_commitment_raw_sha256),
+            "current_state_commitment_raw_sha256": (
+                self.current_state_commitment_raw_sha256
+            ),
+            "current_state_raw_sha256": self.current_state_raw_sha256,
+            "current_epoch_anchor_raw_sha256": (self.current_epoch_anchor_raw_sha256),
+            "current_state_generation": self.current_state_generation,
+            "current_runtime_instance_id": self.current_runtime_instance_id,
+            "current_execution_epoch": self.current_execution_epoch,
+            "owner_binding_core_sha256": self.owner_binding.owner_binding_core_sha256,
+            "expected_account_hash": self.owner_binding.expected_account_hash,
+            "activation_sequence": self.activation_sequence,
+            "previous_activation_head_raw_sha256": (
+                self.previous_activation_head_raw_sha256
+            ),
+        }
+        slot_digest = _strict_canonical_sha256(stable_slot)
+        if (
+            self.intent_slot_sha256 != slot_digest
+            or self.reconciliation_run_id != f"deployment-c2b-run-{slot_digest}"
+        ):
+            raise ValueError("reconciliation intent stable slot mismatch")
+        core = self.model_dump(mode="json")
+        core.pop("intent_id")
+        core.pop("intent_core_sha256")
+        core.pop("intent_path")
+        expected = _strict_canonical_sha256(core)
+        if (
+            self.intent_core_sha256 != expected
+            or self.intent_id != f"deployment-reconciliation-intent-{slot_digest}"
+            or self.intent_path != f"reconciliation-intents/{self.intent_id}.json"
+        ):
+            raise ValueError("reconciliation intent identity mismatch")
+        return self
+
+
+DeploymentReconciliationInitialRpcDTO = Annotated[
+    DeploymentRpcFactsDTO | DeploymentRpcRecheckFactsDTO,
+    Field(discriminator="schema_version"),
+]
+
+DeploymentReconciliationModeCheckpointDTO = Annotated[
+    DeploymentPostRestartCheckpointDTO
+    | DeploymentInitialBaselineCheckpointDTO
+    | DeploymentLegacyMigrationCheckpointDTO,
+    Field(discriminator="schema_version"),
+]
+DeploymentReconciliationModeEvidenceDTO = Annotated[
+    SafeRestartReconciliationEvidenceDTO
+    | InitialBaselineReconciliationEvidenceDTO
+    | LegacyMigrationReconciliationEvidenceDTO,
+    Field(discriminator="schema_version"),
+]
+
+
+class DeploymentReconciliationOwnerCapturePairDTO(StrictDeploymentDrainModel):
+    """Stable consumed/initial facts plus a fresh bound-owner Windows recheck."""
+
+    schema_version: Literal["web_bridge_deployment_reconciliation_capture_pair_v1"]
+    purpose: Literal["record_two_stable_frozen_owner_rpc_captures"]
+    mode: DeploymentReconciliationMode
+    capture_pair_id: DeploymentReconciliationCapturePairId
+    capture_pair_core_sha256: Sha256
+    intent_id: DeploymentReconciliationIntentId
+    intent_raw_sha256: Sha256
+    intent_core_sha256: Sha256
+    owner_binding_id: DeploymentReconciliationOwnerBindingId
+    owner_binding_core_sha256: Sha256
+    expected_account_hash: Sha256
+    rpc_request_id: Identifier
+    owner_challenge: Nonce
+    initial_capture_id: Identifier
+    initial_challenge: Nonce
+    fresh_capture_id: RecheckId
+    fresh_challenge: Nonce
+    commodity_state_raw_sha256: Sha256 | None
+    commodity_state_checkpoint_sha256: Sha256
+    initial_rpc_raw_sha256: Sha256
+    initial_rpc: DeploymentReconciliationInitialRpcDTO
+    fresh_rpc_raw_sha256: Sha256
+    fresh_rpc: DeploymentRpcRecheckFactsDTO
+    initial_execution_facts_canonical_sha256: Sha256
+    fresh_execution_facts_canonical_sha256: Sha256
+    captured_at: datetime
+    same_owner_cycle_verified: Literal[True]
+    two_capture_facts_verified: Literal[True]
+    external_high_water_verified: Literal[False]
+    target_runtime_verified: Literal[False]
+    reconciliation_completed: Literal[False]
+    windows_fence_released: Literal[False]
+    authority_restore_allowed: Literal[False]
+    consume_authorized: Literal[False]
+    reconciliation_authorized: Literal[False]
+    deployment_authorized: Literal[False]
+    automatic_deploy_allowed: Literal[False]
+    production_allowed: Literal[False]
+    live_trading_authorized: Literal[False]
+    countable_forward: Literal[False]
+
+    @model_validator(mode="after")
+    def validate_capture_pair(self) -> DeploymentReconciliationOwnerCapturePairDTO:
+        _require_utc(self.captured_at, "reconciliation capture pair captured_at")
+        initial_raw = (
+            json.dumps(
+                self.initial_rpc.model_dump(mode="json"),
+                allow_nan=False,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            + b"\n"
+        )
+        fresh_raw = (
+            json.dumps(
+                self.fresh_rpc.model_dump(mode="json"),
+                allow_nan=False,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            + b"\n"
+        )
+        initial_execution_sha = (
+            deployment_rpc_execution_facts_sha256(self.initial_rpc)
+            if isinstance(self.initial_rpc, DeploymentRpcFactsDTO)
+            else self.initial_rpc.execution_facts_canonical_sha256
+        )
+        comparable = (
+            "server_instance_id",
+            "fact_generation",
+            "account_hashes",
+            "orders",
+            "active_orders",
+            "trades",
+            "positions",
+        )
+        if (
+            self.owner_binding_id
+            != (
+                "deployment-reconciliation-owner-binding-"
+                f"{self.owner_binding_core_sha256}"
+            )
+            or self.initial_rpc_raw_sha256 != hashlib.sha256(initial_raw).hexdigest()
+            or self.fresh_rpc_raw_sha256 != hashlib.sha256(fresh_raw).hexdigest()
+            or self.initial_execution_facts_canonical_sha256 != initial_execution_sha
+            or self.fresh_execution_facts_canonical_sha256
+            != self.fresh_rpc.execution_facts_canonical_sha256
+            or self.fresh_execution_facts_canonical_sha256 != initial_execution_sha
+            or any(
+                getattr(self.initial_rpc, field) != getattr(self.fresh_rpc, field)
+                for field in comparable
+            )
+            or self.fresh_rpc.original_server_instance_id
+            != self.initial_rpc.server_instance_id
+            or self.fresh_rpc.original_fact_generation
+            != self.initial_rpc.fact_generation
+            or self.fresh_rpc.original_execution_facts_canonical_sha256
+            != initial_execution_sha
+            or self.initial_rpc.request_id != self.rpc_request_id
+            or self.fresh_rpc.request_id != self.rpc_request_id
+            or self.fresh_rpc.owner_challenge != self.owner_challenge
+            or self.fresh_rpc.recheck_id != self.fresh_capture_id
+            or self.fresh_rpc.fresh_challenge != self.fresh_challenge
+            or self.initial_rpc.account_hashes != [self.expected_account_hash]
+            or self.fresh_rpc.account_hashes != [self.expected_account_hash]
+            or self.initial_rpc.pending_send_outcomes != 0
+            or self.fresh_rpc.pending_send_outcomes != 0
+            or self.initial_rpc.active_orders
+            or self.fresh_rpc.active_orders
+            or self.initial_rpc.captured_at > self.fresh_rpc.captured_at
+            or self.fresh_rpc.captured_at > self.captured_at
+        ):
+            raise ValueError("reconciliation owner captures are not stable and frozen")
+        if self.mode == "PLANNED_RESTART":
+            if (
+                not isinstance(self.initial_rpc, DeploymentRpcRecheckFactsDTO)
+                or self.initial_rpc.recheck_id != self.initial_capture_id
+                or self.initial_rpc.owner_challenge != self.owner_challenge
+                or self.initial_rpc.fresh_challenge != self.initial_challenge
+            ):
+                raise ValueError("planned restart must reuse the consumed recheck")
+        else:
+            if (
+                not isinstance(self.initial_rpc, DeploymentRpcFactsDTO)
+                or self.initial_rpc.request_id != self.initial_capture_id
+                or self.initial_rpc.challenge != self.owner_challenge
+                or self.initial_challenge != self.owner_challenge
+            ):
+                raise ValueError("baseline mode must use its C1 initial RPC capture")
+            if self.captured_at - self.initial_rpc.captured_at > timedelta(seconds=30):
+                raise ValueError("baseline owner captures exceed the 30 second window")
+        core = self.model_dump(mode="json")
+        core.pop("capture_pair_id")
+        core.pop("capture_pair_core_sha256")
+        expected = _strict_canonical_sha256(core)
+        if (
+            self.capture_pair_core_sha256 != expected
+            or self.capture_pair_id
+            != f"deployment-reconciliation-capture-pair-{expected}"
+        ):
+            raise ValueError("reconciliation capture pair identity mismatch")
+        return self
+
+
+class DeploymentReconciliationActivationMarkerDTO(StrictDeploymentDrainModel):
+    """Prepared C2 evidence closure; the activation head remains the commit point."""
+
+    schema_version: Literal["web_bridge_deployment_reconciliation_activation_marker_v1"]
+    purpose: Literal["prepare_non_authorizing_owner_reconciliation_activation"]
+    mode: DeploymentReconciliationMode
+    marker_id: DeploymentReconciliationActivationMarkerId
+    marker_core_sha256: Sha256
+    marker_path: str = Field(
+        pattern=r"^reconciliation-blobs/activation-marker-[0-9a-f]{64}\.json$"
+    )
+    intent_id: DeploymentReconciliationIntentId
+    intent_raw_sha256: Sha256
+    intent_core_sha256: Sha256
+    custody_inventory_id: DeploymentReconciliationCustodyInventoryId
+    custody_inventory_raw_sha256: Sha256
+    capture_pair_id: DeploymentReconciliationCapturePairId
+    capture_pair_raw_sha256: Sha256
+    capture_pair_core_sha256: Sha256
+    capture_pair: DeploymentReconciliationOwnerCapturePairDTO
+    mode_evidence_schema_version: Literal[
+        "web_bridge_safe_restart_reconciliation_v1",
+        "web_bridge_initial_baseline_reconciliation_v1",
+        "web_bridge_legacy_migration_reconciliation_v1",
+    ]
+    mode_evidence_id: Identifier
+    mode_evidence_raw_sha256: Sha256
+    mode_evidence_core_sha256: Sha256
+    mode_evidence_blob_path: str = Field(
+        pattern=r"^reconciliation-blobs/[0-9a-f]{64}\.json$"
+    )
+    mode_checkpoint_id: Identifier
+    mode_checkpoint_raw_sha256: Sha256
+    mode_checkpoint_core_sha256: Sha256
+    mode_checkpoint: DeploymentReconciliationModeCheckpointDTO
+    mode_evidence: DeploymentReconciliationModeEvidenceDTO
+    current_state_commitment_raw_sha256: Sha256
+    current_runtime_instance_id: Identifier
+    current_execution_epoch: int = Field(strict=True, ge=1)
+    expected_account_hash: Sha256
+    prepared_at: datetime
+    custody_inventory_verified: Literal[True]
+    commodity_owner_verified: Literal[True]
+    expected_account_allowlist_verified: Literal[True]
+    two_capture_facts_verified: Literal[True]
+    mode_reconciliation_evidence_verified: Literal[True]
+    activation_marker_prepared: Literal[True]
+    external_high_water_verified: Literal[False]
+    target_runtime_verified: Literal[False]
+    reconciliation_completed: Literal[False]
+    windows_fence_released: Literal[False]
+    authority_restore_allowed: Literal[False]
+    consume_authorized: Literal[False]
+    reconciliation_authorized: Literal[False]
+    deployment_authorized: Literal[False]
+    automatic_deploy_allowed: Literal[False]
+    production_allowed: Literal[False]
+    live_trading_authorized: Literal[False]
+    countable_forward: Literal[False]
+
+    @model_validator(mode="after")
+    def validate_marker(self) -> DeploymentReconciliationActivationMarkerDTO:
+        _require_utc(self.prepared_at, "reconciliation activation prepared_at")
+        capture_pair_raw = (
+            json.dumps(
+                self.capture_pair.model_dump(mode="json"),
+                allow_nan=False,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            + b"\n"
+        )
+        checkpoint_raw = (
+            json.dumps(
+                self.mode_checkpoint.model_dump(mode="json"),
+                allow_nan=False,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            + b"\n"
+        )
+        evidence_raw = (
+            json.dumps(
+                self.mode_evidence.model_dump(mode="json"),
+                allow_nan=False,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            + b"\n"
+        )
+        expected_mode = {
+            "PLANNED_RESTART": (
+                "web_bridge_safe_restart_reconciliation_v1",
+                "safe-restart-reconciliation-",
+                "deployment-post-restart-checkpoint-",
+                DeploymentPostRestartCheckpointDTO,
+                SafeRestartReconciliationEvidenceDTO,
+            ),
+            "INITIAL_BASELINE": (
+                "web_bridge_initial_baseline_reconciliation_v1",
+                "initial-baseline-reconciliation-",
+                "deployment-initial-baseline-checkpoint-",
+                DeploymentInitialBaselineCheckpointDTO,
+                InitialBaselineReconciliationEvidenceDTO,
+            ),
+            "LEGACY_MIGRATION_BASELINE": (
+                "web_bridge_legacy_migration_reconciliation_v1",
+                "legacy-migration-reconciliation-",
+                "deployment-legacy-migration-checkpoint-",
+                DeploymentLegacyMigrationCheckpointDTO,
+                LegacyMigrationReconciliationEvidenceDTO,
+            ),
+        }[self.mode]
+        (
+            expected_schema,
+            evidence_prefix,
+            checkpoint_prefix,
+            checkpoint_type,
+            evidence_type,
+        ) = expected_mode
+        checkpoint_account_hash = getattr(
+            self.mode_checkpoint, "expected_account_hash", None
+        )
+        if checkpoint_account_hash is None:
+            checkpoint_accounts = self.mode_checkpoint.windows_rpc.account_hashes
+            checkpoint_account_hash = (
+                checkpoint_accounts[0] if len(checkpoint_accounts) == 1 else None
+            )
+        if (
+            self.mode_evidence_schema_version != expected_schema
+            or self.mode_evidence_schema_version != self.mode_evidence.schema_version
+            or not isinstance(self.mode_checkpoint, checkpoint_type)
+            or not isinstance(self.mode_evidence, evidence_type)
+            or self.capture_pair_id != self.capture_pair.capture_pair_id
+            or self.capture_pair_core_sha256
+            != self.capture_pair.capture_pair_core_sha256
+            or self.capture_pair_raw_sha256
+            != hashlib.sha256(capture_pair_raw).hexdigest()
+            or self.capture_pair.mode != self.mode
+            or self.capture_pair.intent_id != self.intent_id
+            or self.capture_pair.intent_raw_sha256 != self.intent_raw_sha256
+            or self.capture_pair.intent_core_sha256 != self.intent_core_sha256
+            or self.capture_pair.expected_account_hash != self.expected_account_hash
+            or self.capture_pair.captured_at != self.prepared_at
+            or self.mode_evidence_id != self.mode_evidence.reconciliation_id
+            or self.mode_evidence_core_sha256
+            != self.mode_evidence.reconciliation_core_sha256
+            or self.mode_evidence_raw_sha256 != hashlib.sha256(evidence_raw).hexdigest()
+            or self.mode_evidence_id
+            != f"{evidence_prefix}{self.mode_evidence_core_sha256}"
+            or self.mode_checkpoint_id != self.mode_checkpoint.checkpoint_id
+            or self.mode_checkpoint_core_sha256
+            != self.mode_checkpoint.checkpoint_core_sha256
+            or self.mode_checkpoint_raw_sha256
+            != hashlib.sha256(checkpoint_raw).hexdigest()
+            or self.mode_checkpoint_id
+            != f"{checkpoint_prefix}{self.mode_checkpoint_core_sha256}"
+            or self.mode_evidence.checkpoint_id != self.mode_checkpoint_id
+            or self.mode_evidence.checkpoint_raw_sha256
+            != self.mode_checkpoint_raw_sha256
+            or self.mode_evidence.checkpoint_core_sha256
+            != self.mode_checkpoint_core_sha256
+            or self.mode_checkpoint.mode != self.mode
+            or self.mode_evidence.mode != self.mode
+            or self.mode_checkpoint.current_state_commitment_raw_sha256
+            != self.current_state_commitment_raw_sha256
+            or getattr(
+                self.mode_evidence,
+                "current_state_commitment_raw_sha256",
+                self.current_state_commitment_raw_sha256,
+            )
+            != self.current_state_commitment_raw_sha256
+            or self.mode_checkpoint.current_runtime_instance_id
+            != self.current_runtime_instance_id
+            or self.mode_evidence.current_runtime_instance_id
+            != self.current_runtime_instance_id
+            or self.mode_checkpoint.current_execution_epoch
+            != self.current_execution_epoch
+            or self.mode_evidence.current_execution_epoch
+            != self.current_execution_epoch
+            or checkpoint_account_hash != self.expected_account_hash
+            or getattr(
+                self.mode_evidence,
+                "expected_account_hash",
+                self.expected_account_hash,
+            )
+            != self.expected_account_hash
+            or self.mode_checkpoint.captured_at > self.prepared_at
+            or self.mode_evidence.reconciled_at > self.prepared_at
+            or self.mode_evidence_blob_path
+            != f"reconciliation-blobs/{self.mode_evidence_raw_sha256}.json"
+        ):
+            raise ValueError("reconciliation marker mode evidence mismatch")
+        core = self.model_dump(mode="json")
+        core.pop("marker_id")
+        core.pop("marker_core_sha256")
+        core.pop("marker_path")
+        expected = _strict_canonical_sha256(core)
+        if (
+            self.marker_core_sha256 != expected
+            or self.marker_id
+            != f"deployment-reconciliation-activation-marker-{expected}"
+            or self.marker_path
+            != f"reconciliation-blobs/activation-marker-{expected}.json"
+        ):
+            raise ValueError("reconciliation activation marker identity mismatch")
+        return self
+
+
+class DeploymentReconciliationActivationHeadDTO(StrictDeploymentDrainModel):
+    """Unique create-only C2 activation commit for one custody chain head."""
+
+    schema_version: Literal["web_bridge_deployment_reconciliation_activation_head_v1"]
+    purpose: Literal["commit_non_authorizing_owner_reconciliation_activation"]
+    mode: DeploymentReconciliationMode
+    activation_head_id: DeploymentReconciliationActivationHeadId
+    activation_head_core_sha256: Sha256
+    activation_head_path: str = Field(
+        pattern=r"^reconciliation-heads/[0-9a-f]{64}\.json$"
+    )
+    activation_sequence: Literal[1]
+    previous_activation_head_id: None
+    previous_activation_head_raw_sha256: None
+    previous_activation_head_core_sha256: None
+    marker_id: DeploymentReconciliationActivationMarkerId
+    marker_raw_sha256: Sha256
+    marker_core_sha256: Sha256
+    marker: DeploymentReconciliationActivationMarkerDTO
+    intent_id: DeploymentReconciliationIntentId
+    custody_inventory_id: DeploymentReconciliationCustodyInventoryId
+    current_state_commitment_raw_sha256: Sha256
+    current_runtime_instance_id: Identifier
+    current_execution_epoch: int = Field(strict=True, ge=1)
+    expected_account_hash: Sha256
+    activated_at: datetime
+    owner_reconciliation_activation_recorded: Literal[True]
+    external_high_water_verified: Literal[False]
+    target_runtime_verified: Literal[False]
+    reconciliation_completed: Literal[False]
+    windows_fence_released: Literal[False]
+    authority_restore_allowed: Literal[False]
+    consume_authorized: Literal[False]
+    reconciliation_authorized: Literal[False]
+    deployment_authorized: Literal[False]
+    automatic_deploy_allowed: Literal[False]
+    production_allowed: Literal[False]
+    live_trading_authorized: Literal[False]
+    countable_forward: Literal[False]
+
+    @model_validator(mode="after")
+    def validate_activation_head(self) -> DeploymentReconciliationActivationHeadDTO:
+        _require_utc(self.activated_at, "reconciliation activated_at")
+        marker_raw = (
+            json.dumps(
+                self.marker.model_dump(mode="json"),
+                allow_nan=False,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            + b"\n"
+        )
+        if (
+            self.marker_raw_sha256 != hashlib.sha256(marker_raw).hexdigest()
+            or self.marker_id != self.marker.marker_id
+            or self.marker_core_sha256 != self.marker.marker_core_sha256
+            or self.mode != self.marker.mode
+            or self.intent_id != self.marker.intent_id
+            or self.custody_inventory_id != self.marker.custody_inventory_id
+            or self.current_state_commitment_raw_sha256
+            != self.marker.current_state_commitment_raw_sha256
+            or self.current_runtime_instance_id
+            != self.marker.current_runtime_instance_id
+            or self.current_execution_epoch != self.marker.current_execution_epoch
+            or self.expected_account_hash != self.marker.expected_account_hash
+            or self.activated_at != self.marker.prepared_at
+            or self.activation_head_path
+            != (f"reconciliation-heads/{self.current_state_commitment_raw_sha256}.json")
+        ):
+            raise ValueError("reconciliation activation head binding mismatch")
+        core = self.model_dump(mode="json")
+        core.pop("activation_head_id")
+        core.pop("activation_head_core_sha256")
+        core.pop("activation_head_path")
+        expected = _strict_canonical_sha256(core)
+        if (
+            self.activation_head_core_sha256 != expected
+            or self.activation_head_id
+            != f"deployment-reconciliation-activation-head-{expected}"
+        ):
+            raise ValueError("reconciliation activation head identity mismatch")
         return self
 
 

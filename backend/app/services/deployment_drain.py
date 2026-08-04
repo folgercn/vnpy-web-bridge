@@ -104,6 +104,10 @@ class DeploymentDrainService:
         self.require_fresh_bootstrap = require_fresh_bootstrap
         self.allow_untrusted_snapshot_provider = allow_untrusted_snapshot_provider
         self._process_lock = RLock()
+        # Provider identity is process-local and immutable once bound.  Keep its
+        # registry independent from the deployment transaction lock so C2 can
+        # validate its owner while already holding the cross-process flock.
+        self._provider_lock = RLock()
         self._lock_context = local()
         self.receipt_dir = self.root / "receipts"
         self.consume_dir = self.root / "consumes"
@@ -126,6 +130,8 @@ class DeploymentDrainService:
         self._online_recheck_provider: (
             Callable[[], DeploymentOnlineRecheckCheckpointDTO] | None
         ) = None
+        self._reconciliation_owner: object | None = None
+        self._reconciliation_provider: Callable[..., Any] | None = None
 
     def _ensure_initialized(self) -> None:
         """Activate custody lazily so importing service modules cannot fence runtime."""
@@ -297,23 +303,27 @@ class DeploymentDrainService:
     ) -> None:
         if getattr(provider, "__self__", None) is not owner:
             raise TypeError("online snapshot provider must be bound to its owner")
-        if (
-            self._online_recheck_owner is not None
-            and self._online_recheck_owner is not owner
-        ):
-            raise DeploymentDrainError(
-                "DEPLOYMENT_SNAPSHOT_OWNER_CONFLICT",
-                "online snapshot and recheck must share one owner",
-            )
-        if self._online_snapshot_owner is None:
-            self._online_snapshot_owner = owner
-            self._online_snapshot_provider = provider
-            return
-        if self._online_snapshot_owner is not owner:
-            raise DeploymentDrainError(
-                "DEPLOYMENT_SNAPSHOT_OWNER_CONFLICT",
-                "another process-local owner already owns online snapshots",
-            )
+        with self._provider_lock:
+            if any(
+                candidate is not None and candidate is not owner
+                for candidate in (
+                    self._online_recheck_owner,
+                    self._reconciliation_owner,
+                )
+            ):
+                raise DeploymentDrainError(
+                    "DEPLOYMENT_SNAPSHOT_OWNER_CONFLICT",
+                    "online snapshot and reconciliation must share one owner",
+                )
+            if self._online_snapshot_owner is None:
+                self._online_snapshot_owner = owner
+                self._online_snapshot_provider = provider
+                return
+            if self._online_snapshot_owner is not owner:
+                raise DeploymentDrainError(
+                    "DEPLOYMENT_SNAPSHOT_OWNER_CONFLICT",
+                    "another process-local owner already owns online snapshots",
+                )
 
     def bind_online_recheck_provider(
         self,
@@ -322,23 +332,84 @@ class DeploymentDrainService:
     ) -> None:
         if getattr(provider, "__self__", None) is not owner:
             raise TypeError("online recheck provider must be bound to its owner")
-        if (
-            self._online_snapshot_owner is not None
-            and self._online_snapshot_owner is not owner
-        ):
-            raise DeploymentDrainError(
-                "DEPLOYMENT_RECHECK_OWNER_CONFLICT",
-                "online snapshot and recheck must share one owner",
-            )
-        if self._online_recheck_owner is None:
-            self._online_recheck_owner = owner
-            self._online_recheck_provider = provider
-            return
-        if self._online_recheck_owner is not owner:
-            raise DeploymentDrainError(
-                "DEPLOYMENT_RECHECK_OWNER_CONFLICT",
-                "another process-local owner already owns online rechecks",
-            )
+        with self._provider_lock:
+            if any(
+                candidate is not None and candidate is not owner
+                for candidate in (
+                    self._online_snapshot_owner,
+                    self._reconciliation_owner,
+                )
+            ):
+                raise DeploymentDrainError(
+                    "DEPLOYMENT_RECHECK_OWNER_CONFLICT",
+                    "online recheck and reconciliation must share one owner",
+                )
+            if self._online_recheck_owner is None:
+                self._online_recheck_owner = owner
+                self._online_recheck_provider = provider
+                return
+            if self._online_recheck_owner is not owner:
+                raise DeploymentDrainError(
+                    "DEPLOYMENT_RECHECK_OWNER_CONFLICT",
+                    "another process-local owner already owns online rechecks",
+                )
+
+    def bind_reconciliation_provider(
+        self,
+        owner: object,
+        provider: Callable[..., Any],
+    ) -> None:
+        """Bind C2 reconciliation to the same unique process-local owner.
+
+        The provider is deliberately only an identity proof.  C2 holds the
+        deployment flock itself and must not call back through ``_exclusive``.
+        """
+
+        if getattr(provider, "__self__", None) is not owner:
+            raise TypeError("reconciliation provider must be bound to its owner")
+        with self._provider_lock:
+            if any(
+                candidate is not None and candidate is not owner
+                for candidate in (
+                    self._online_snapshot_owner,
+                    self._online_recheck_owner,
+                    self._reconciliation_owner,
+                )
+            ):
+                raise DeploymentDrainError(
+                    "DEPLOYMENT_RECONCILIATION_OWNER_CONFLICT",
+                    "reconciliation must share the unique Commodity owner",
+                )
+            if self._reconciliation_owner is None:
+                self._reconciliation_owner = owner
+                self._reconciliation_provider = provider
+                return
+            if (
+                self._reconciliation_owner is not owner
+                or self._reconciliation_provider != provider
+            ):
+                raise DeploymentDrainError(
+                    "DEPLOYMENT_RECONCILIATION_OWNER_CONFLICT",
+                    "another process-local owner already owns reconciliation",
+                )
+
+    def assert_reconciliation_provider(
+        self,
+        owner: object,
+        provider: Callable[..., Any],
+    ) -> None:
+        """Reject spoofed or stale C2 owner capabilities before any RPC."""
+
+        with self._provider_lock:
+            if (
+                owner is not self._reconciliation_owner
+                or provider != self._reconciliation_provider
+                or getattr(provider, "__self__", None) is not owner
+            ):
+                raise DeploymentDrainError(
+                    "DEPLOYMENT_RECONCILIATION_OWNER_INVALID",
+                    "caller does not own the reconciliation provider",
+                )
 
     def capture_online_recheck(
         self,

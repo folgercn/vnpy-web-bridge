@@ -6,8 +6,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
-from jsonschema import Draft202012Validator
-
 from app.schemas.deployment_drain import (
     CommodityInitialBaselineStateDTO,
     DeploymentInitialBaselineCommodityCheckpointDTO,
@@ -28,13 +26,14 @@ from app.services.deployment_initial_baseline_reconciliation import (
     canonical_initial_baseline_evidence_bytes,
     derive_initial_baseline_rpc_identity,
     verify_initial_baseline_checkpoint,
+    verify_initial_baseline_input_bundle,
     verify_initial_baseline_reconciliation_evidence,
 )
 from app.services.deployment_state_commitment import (
     build_state_commitment,
     parse_exact_state_commitment,
 )
-
+from jsonschema import Draft202012Validator
 
 ACCOUNT_HASH = "a" * 64
 ROOT = Path(__file__).resolve().parents[3]
@@ -549,3 +548,45 @@ def test_checkpoint_dto_itself_rejects_nonpristine_current_state(
 
     with pytest.raises(ValueError):
         type(checkpoint).model_validate(payload)
+
+
+def test_public_input_bundle_verifies_exact_custody_before_rpc(tmp_path) -> None:
+    arguments, current, _clock = _fixture(tmp_path, restart_count=2)
+
+    bundle = verify_initial_baseline_input_bundle(
+        genesis_state_commitment_raw=arguments["genesis_state_commitment_raw"],
+        state_commitment_chain_raw=arguments["state_commitment_chain_raw"],
+        current_epoch_anchor_raw=arguments["current_epoch_anchor_raw"],
+        current_runtime_instance_id=arguments["current_runtime_instance_id"],
+        current_execution_epoch=arguments["current_execution_epoch"],
+    )
+
+    assert len(bundle.commitments) == len(arguments["state_commitment_chain_raw"])
+    assert bundle.genesis is bundle.commitments[0]
+    assert bundle.current is bundle.commitments[-1]
+    assert bundle.current.state["runtime_instance_id"] == current.runtime_instance_id
+    assert bundle.current_epoch_anchor["state_generation"] == (
+        bundle.current.state_generation
+    )
+    assert bundle.current_commitment_raw_sha256 == hashlib.sha256(
+        arguments["state_commitment_chain_raw"][-1]
+    ).hexdigest()
+    with pytest.raises(TypeError):
+        bundle.current_epoch_anchor["state_generation"] = 1  # type: ignore[index]
+
+
+def test_public_input_bundle_rejects_runtime_not_bound_to_actual_head(
+    tmp_path,
+) -> None:
+    arguments, _current, _clock = _fixture(tmp_path)
+
+    with pytest.raises(DeploymentInitialBaselineError):
+        verify_initial_baseline_input_bundle(
+            genesis_state_commitment_raw=arguments[
+                "genesis_state_commitment_raw"
+            ],
+            state_commitment_chain_raw=arguments["state_commitment_chain_raw"],
+            current_epoch_anchor_raw=arguments["current_epoch_anchor_raw"],
+            current_runtime_instance_id="runtime-wrong-c2b-input",
+            current_execution_epoch=arguments["current_execution_epoch"],
+        )

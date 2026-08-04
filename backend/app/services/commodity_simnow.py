@@ -68,6 +68,7 @@ from app.schemas.deployment_drain import (
     DeploymentDrainAcquireDTO,
     DeploymentOnlineCheckpointDTO,
     DeploymentOnlineRecheckCheckpointDTO,
+    DeploymentReconciliationActivationHeadDTO,
     DeploymentSafetySnapshotDTO,
     SafeRestartConsumeCommitMarkerDTO,
     SafeRestartOnlineRecheckDTO,
@@ -1059,6 +1060,116 @@ class CommoditySimNowService:
             consumer_run_id=consumer_run_id,
             operator=operator,
         )
+
+    def reconcile_deployment_custody(
+        self,
+        *,
+        operator: str,
+        reason: str,
+    ) -> DeploymentReconciliationActivationHeadDTO:
+        """Run C2b only through this unique Commodity owner entrypoint."""
+
+        if self.deployment_drain is None:
+            raise DeploymentDrainError(
+                "DEPLOYMENT_DRAIN_UNAVAILABLE",
+                "Commodity has no process-wide deployment gate",
+            )
+        from app.services.deployment_reconciliation_activation import (
+            DeploymentReconciliationActivationService,
+        )
+        from app.services.deployment_reconciliation_custody import (
+            DeploymentReconciliationCustodyRepository,
+        )
+
+        repository = DeploymentReconciliationCustodyRepository(
+            Path(self.deployment_drain.root).expanduser().absolute()
+        )
+        return DeploymentReconciliationActivationService(
+            repository=repository,
+            commodity_owner=self,
+            clock=self.clock,
+        ).reconcile(operator=operator, reason=reason)
+
+    @contextmanager
+    def _deployment_reconciliation_capture_guard(self) -> Iterator[None]:
+        """Linearize C2 read-only capture under the unique Commodity owner.
+
+        The C2 coordinator already owns the deployment flock.  This guard
+        therefore takes only the Commodity cycle lock and must never enter the
+        drain service's nested ``_exclusive`` path.
+        """
+
+        if self.deployment_drain is None:
+            raise DeploymentDrainError(
+                "DEPLOYMENT_DRAIN_UNAVAILABLE",
+                "Commodity has no process-wide deployment gate",
+            )
+        context = self._dispatch_operation_context
+        if any(
+            int(getattr(context, field, 0))
+            for field in ("depth", "deployment_gate_depth", "reconciliation_depth")
+        ):
+            raise DeploymentDrainError(
+                "DEPLOYMENT_RECONCILIATION_LOCK_ORDER_VIOLATION",
+                "reconciliation cannot be nested in a Commodity mutation",
+            )
+        self._bind_deployment_reconciliation_owner()
+        context.reconciliation_depth = 1
+        try:
+            with self._cycle_lock:
+                self._assert_deployment_reconciliation_local_state()
+                yield
+                self._assert_deployment_reconciliation_local_state()
+        finally:
+            del context.reconciliation_depth
+
+    def _bind_deployment_reconciliation_owner(self) -> None:
+        if self.deployment_drain is None:
+            raise DeploymentDrainError(
+                "DEPLOYMENT_DRAIN_UNAVAILABLE",
+                "Commodity has no process-wide deployment gate",
+            )
+        provider = self._deployment_reconciliation_capture_guard
+        self.deployment_drain.bind_reconciliation_provider(self, provider)
+        self.deployment_drain.assert_reconciliation_provider(self, provider)
+
+    def _assert_deployment_reconciliation_local_state(self) -> None:
+        """Observe the frozen owner state; never mutate it into compliance."""
+
+        risk_status = self.risk.status()
+        readonly_state = getattr(
+            self.c_fast_runtime_authorization, "readonly_state", None
+        )
+        runtime_authorization_state = (
+            str(readonly_state()).upper()
+            if callable(readonly_state)
+            else str(getattr(self.c_fast_runtime_authorization, "state", "ACTIVE")).upper()
+        )
+        worker_alive = self._task is not None and not self._task.done()
+        active_authority = any(
+            (
+                self.enabled,
+                self.manual_approval,
+                self.simnow_mode,
+                self.auto_dispatch_authorized,
+                self.shakedown_auto_dispatch_authorized,
+                self.c_fast_shakedown_auto_dispatch_authorized,
+                self.c_fast_continuous_authorized,
+                self.template_authorized,
+            )
+        )
+        if (
+            self.current_plan is not None
+            or worker_alive
+            or self._state_load_error is not None
+            or bool(risk_status.get("web_trade_enabled"))
+            or runtime_authorization_state == "ACTIVE"
+            or active_authority
+        ):
+            raise DeploymentDrainError(
+                "DEPLOYMENT_RECONCILIATION_OWNER_NOT_FROZEN",
+                "Commodity owner must already be idle, durable and revoked",
+            )
 
     def _deployment_checkpoint_projection(
         self,
