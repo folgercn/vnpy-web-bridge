@@ -315,6 +315,9 @@ class CommoditySimNowService:
         self._c_fast_snapshot_provider: (
             Callable[[], tuple[CommodityCFastRuntimeSnapshotDTO, str]] | None
         ) = None
+        self._c_fast_snapshot_identity_provider: (
+            Callable[[], tuple[str, str]] | None
+        ) = None
         self._c_fast_execution_permit_provider: (
             Callable[
                 [CommodityCFastShakedownSnapshotDTO, str],
@@ -369,8 +372,20 @@ class CommoditySimNowService:
             [], tuple[CommodityCFastRuntimeSnapshotDTO, str]
         ],
     ) -> None:
+        def identity_provider() -> tuple[str, str]:
+            snapshot, snapshot_hash = provider()
+            return snapshot.snapshot_id, snapshot_hash
+
         with self._cycle_lock:
             self._c_fast_snapshot_provider = provider
+            self._c_fast_snapshot_identity_provider = identity_provider
+
+    def bind_c_fast_snapshot_identity_provider(
+        self,
+        provider: Callable[[], tuple[str, str]],
+    ) -> None:
+        with self._cycle_lock:
+            self._c_fast_snapshot_identity_provider = provider
 
     def bind_c_fast_execution_permit_provider(
         self,
@@ -2586,7 +2601,7 @@ class CommoditySimNowService:
                 raise CommoditySimNowSafetyError(
                     "C_FAST 连续运行前序终态证据无效"
                 )
-            snapshot, snapshot_hash = self._c_fast_verified_snapshot()
+            snapshot_id, snapshot_hash = self._c_fast_snapshot_identity()
             if snapshot_hash == previous_session.get(
                 "source_snapshot_hash"
             ):
@@ -2594,6 +2609,14 @@ class CommoditySimNowService:
                     "action": "idle",
                     "reason": "snapshot_already_completed",
                 }
+            snapshot, verified_hash, _permit = self._c_fast_snapshot()
+            if (
+                verified_hash != snapshot_hash
+                or snapshot.snapshot_id != snapshot_id
+            ):
+                raise CommoditySimNowSafetyError(
+                    "C_FAST 快照身份在连续运行检查期间发生变化"
+                )
             execution_day = self._current_trading_day(
                 [_exact_to_vt(row.exact_contract) for row in snapshot.targets]
             )
@@ -2924,6 +2947,31 @@ class CommoditySimNowService:
                 "C_FAST 独立 SimNow Execution Permit 类型无效"
             )
         return snapshot, snapshot_hash, permit
+
+    def _c_fast_snapshot_identity(self) -> tuple[str, str]:
+        provider = self._c_fast_snapshot_identity_provider
+        if provider is None:
+            raise CommoditySimNowSafetyError(
+                "C_FAST 已接受快照身份源未绑定"
+            )
+        try:
+            snapshot_id, snapshot_hash = provider()
+        except Exception as exc:
+            raise CommoditySimNowSafetyError(
+                "C_FAST 已接受快照身份未通过 Control Plane 验证",
+                detail={
+                    "error_type": exc.__class__.__name__,
+                    "error_code": getattr(exc, "code", None),
+                },
+            ) from exc
+        if (
+            not snapshot_id
+            or not re.fullmatch(r"[0-9a-f]{64}", snapshot_hash)
+        ):
+            raise CommoditySimNowSafetyError(
+                "C_FAST 已接受快照身份格式无效"
+            )
+        return snapshot_id, snapshot_hash
 
     def _c_fast_verified_snapshot(
         self,

@@ -170,6 +170,9 @@ async def startup() -> None:
     commodity_simnow_service.bind_c_fast_snapshot_provider(
         commodity_c_fast_shadow_service.accepted_snapshot_for_control
     )
+    commodity_simnow_service.bind_c_fast_snapshot_identity_provider(
+        commodity_c_fast_shadow_service.accepted_snapshot_identity_for_completed_control
+    )
     commodity_simnow_service.bind_c_fast_execution_permit_provider(
         commodity_c_fast_execution_permit_service.verified_permit_for_snapshot
     )

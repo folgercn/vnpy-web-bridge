@@ -165,6 +165,40 @@ class CommodityCFastShadowService:
                 )
             return snapshot.model_copy(deep=True), snapshot_hash
 
+    def accepted_snapshot_identity_for_completed_control(
+        self,
+    ) -> tuple[str, str]:
+        """Identify the already-accepted file without renewing execution time."""
+        with self._lock:
+            if not self.settings.commodity_c_fast_shadow_enabled:
+                raise CFastShadowInvalidError("SHADOW_DISABLED")
+            path_text = self.settings.commodity_c_fast_shadow_snapshot_path.strip()
+            if not path_text:
+                raise CFastShadowInvalidError("SNAPSHOT_PATH_NOT_CONFIGURED")
+            self._verify_path_isolation()
+            snapshot = self._load_snapshot(Path(path_text).expanduser())
+            self._verify_signature(snapshot)
+            if (
+                formula_target_binding_sha256(snapshot)
+                != snapshot.formula_target_binding_sha256
+            ):
+                raise CFastShadowInvalidError(
+                    "FORMULA_TARGET_BINDING_MISMATCH"
+                )
+            snapshot_hash = sha256_json(
+                unsigned_snapshot_payload(snapshot)
+            )
+            accepted = self._accepted_state
+            if (
+                not isinstance(accepted, dict)
+                or accepted.get("snapshot_hash") != snapshot_hash
+                or accepted.get("snapshot_id") != snapshot.snapshot_id
+            ):
+                raise CFastShadowInvalidError(
+                    "SNAPSHOT_NOT_PREVIOUSLY_ACCEPTED"
+                )
+            return snapshot.snapshot_id, snapshot_hash
+
     def reload(
         self,
         *,
