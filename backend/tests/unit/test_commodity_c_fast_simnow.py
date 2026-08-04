@@ -18,6 +18,7 @@ from app.core.config import Settings
 from app.core.errors import (
     CommoditySimNowSafetyError,
     CommoditySimNowStateError,
+    RpcCallError,
 )
 from app.schemas.commodity_c_fast_execution_permit import (
     CommodityCFastSimNowExecutionPermitDTO,
@@ -27,6 +28,7 @@ from app.schemas.commodity_c_fast_shadow import (
     CommodityCFastShakedownSnapshotDTO,
 )
 from app.schemas.commodity_simnow import (
+    CommodityCFastContinuousEnableRequestDTO,
     CommodityCFastShakedownPreviewRequestDTO,
     CommoditySimNowDisableRequestDTO,
 )
@@ -422,6 +424,42 @@ def prepare_c_fast_shakedown(
     )
     bind_test_execution_permit(service, selected_products=("ag",))
     return service, rpc, snapshot, snapshot_hash
+
+
+def complete_c_fast_continuous_session(
+    service: CommoditySimNowService,
+    rpc: object,
+    snapshot: CommodityCFastShakedownSnapshotDTO,
+) -> None:
+    preview = service.preview_c_fast_shakedown(
+        ["ag"], operator="admin", role="admin", source_ip=None
+    )["preview"]
+    service.start_c_fast_shakedown(
+        preview["plan_hash"],
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+    ag = next(row for row in snapshot.targets if row.product == "ag")
+    rpc.positions = [
+        position("ag", ag.target_quantity, contract_month="2612")
+    ]
+    rpc.trades = fills_for_requests(list(service.trade.requests))
+    service.auto_candidate_shakedown_advance()
+    assert service.current_plan is None
+    assert service.c_fast_continuous_authorized is True
+
+
+def continuous_enable_payload() -> CommodityCFastContinuousEnableRequestDTO:
+    return CommodityCFastContinuousEnableRequestDTO(
+        reason="operator approved continuous SimNow pilot",
+        selected_products=["ag"],
+        confirm_simnow_only=True,
+        confirm_signed_snapshots_only=True,
+        confirm_independent_execution_permit=True,
+        confirm_no_production=True,
+        confirm_fail_closed_on_drift=True,
+    )
 
 
 def bind_test_execution_permit(
@@ -3273,6 +3311,51 @@ def test_c_fast_one_start_continues_with_next_accepted_snapshot(
     assert broken[0]["chain_state"] == "CHAIN_BROKEN"
 
 
+def test_c_fast_completed_snapshot_does_not_require_consumed_permit_again(
+    tmp_path: Path,
+) -> None:
+    service, rpc, snapshot, _ = prepare_c_fast_shakedown(tmp_path)
+    complete_c_fast_continuous_session(service, rpc, snapshot)
+    service.bind_c_fast_execution_permit_provider(
+        lambda _snapshot, _snapshot_hash: (_ for _ in ()).throw(
+            CommoditySimNowSafetyError("permit already consumed")
+        )
+    )
+
+    result = service.auto_c_fast_continuous_advance()
+
+    assert result == {
+        "action": "idle",
+        "reason": "snapshot_already_completed",
+    }
+    assert service.c_fast_continuous_authorized is True
+
+
+def test_c_fast_continuous_cycle_retries_rpc_jitter_without_revocation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, rpc, snapshot, _ = prepare_c_fast_shakedown(tmp_path)
+    complete_c_fast_continuous_session(service, rpc, snapshot)
+    monkeypatch.setattr(
+        rpc,
+        "get_accounts",
+        lambda: (_ for _ in ()).throw(RpcCallError()),
+    )
+
+    result = service.auto_c_fast_continuous_advance()
+
+    assert result["action"] == "waiting"
+    assert result["reason"] == "rpc_transient_failure"
+    assert service.c_fast_continuous_authorized is True
+    assert (
+        service._load_c_fast_shakedown_state()[
+            "continuous_authorized"
+        ]
+        is True
+    )
+
+
 def test_c_fast_idle_stop_revokes_continuous_authority_and_restart_stays_closed(
     tmp_path: Path,
 ) -> None:
@@ -3320,6 +3403,138 @@ def test_c_fast_idle_stop_revokes_continuous_authority_and_restart_stays_closed(
     assert (
         recovered.auto_c_fast_continuous_advance()["reason"]
         == "continuous_authorization_not_active"
+    )
+
+
+def test_c_fast_continuous_can_be_explicitly_reenabled_from_terminal_anchor(
+    tmp_path: Path,
+) -> None:
+    service, rpc, snapshot, _ = prepare_c_fast_shakedown(tmp_path)
+    complete_c_fast_continuous_session(service, rpc, snapshot)
+    sent_before = len(service.trade.requests)
+    service.stop_c_fast_shakedown(
+        "operator paused continuous execution",
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+
+    result = service.enable_c_fast_continuous(
+        continuous_enable_payload(),
+        operator="admin",
+        role="admin",
+        source_ip=None,
+    )
+
+    assert result["action"] == "continuous_authorization_enabled"
+    assert result["selected_products"] == ["ag"]
+    assert result["independent_execution_permit_required"] is True
+    assert service.c_fast_continuous_authorized is True
+    assert len(service.trade.requests) == sent_before
+    assert (
+        service._load_c_fast_shakedown_state()[
+            "continuous_authorized"
+        ]
+        is True
+    )
+
+
+def test_c_fast_planned_shutdown_preserves_and_restores_continuous_authority(
+    tmp_path: Path,
+) -> None:
+    service, rpc, snapshot, _ = prepare_c_fast_shakedown(tmp_path)
+    complete_c_fast_continuous_session(service, rpc, snapshot)
+    sent_before = len(service.trade.requests)
+
+    asyncio.run(service.stop())
+
+    assert service.c_fast_continuous_authorized is False
+    assert (
+        service._load_c_fast_shakedown_state()[
+            "continuous_authorized"
+        ]
+        is True
+    )
+    recovered = CommoditySimNowService(
+        settings=service.settings,
+        rpc=service.rpc,
+        trade=service.trade,
+        risk=service.risk,
+        audit=service.audit,
+        tick_store=service.tick_store,
+        clock=service.clock,
+    )
+
+    result = recovered._restore_c_fast_continuous_authority()
+
+    assert result["action"] == "continuous_authorization_restored"
+    assert recovered.c_fast_continuous_authorized is True
+    assert len(service.trade.requests) == sent_before
+
+
+def test_c_fast_continuous_restore_retries_transient_rpc_disconnect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, rpc, snapshot, _ = prepare_c_fast_shakedown(tmp_path)
+    complete_c_fast_continuous_session(service, rpc, snapshot)
+    asyncio.run(service.stop())
+    recovered = CommoditySimNowService(
+        settings=service.settings,
+        rpc=service.rpc,
+        trade=service.trade,
+        risk=service.risk,
+        audit=service.audit,
+        tick_store=service.tick_store,
+        clock=service.clock,
+    )
+    monkeypatch.setattr(
+        rpc,
+        "status",
+        lambda *, probe=False: {
+            "connected": False,
+            "gateway_name": "CTP",
+        },
+    )
+
+    result = recovered._restore_c_fast_continuous_authority()
+
+    assert result == {"action": "waiting", "reason": "rpc_not_connected"}
+    assert recovered.c_fast_continuous_authorized is False
+    assert (
+        recovered._load_c_fast_shakedown_state()[
+            "continuous_authorized"
+        ]
+        is True
+    )
+
+
+def test_c_fast_continuous_restore_revokes_on_position_drift(
+    tmp_path: Path,
+) -> None:
+    service, rpc, snapshot, _ = prepare_c_fast_shakedown(tmp_path)
+    complete_c_fast_continuous_session(service, rpc, snapshot)
+    asyncio.run(service.stop())
+    rpc.positions = []
+    recovered = CommoditySimNowService(
+        settings=service.settings,
+        rpc=service.rpc,
+        trade=service.trade,
+        risk=service.risk,
+        audit=service.audit,
+        tick_store=service.tick_store,
+        clock=service.clock,
+    )
+
+    with pytest.raises(CommoditySimNowSafetyError):
+        recovered._restore_c_fast_continuous_authority()
+
+    assert recovered.c_fast_continuous_authorized is False
+    assert (
+        recovered._load_c_fast_shakedown_state()[
+            "continuous_authorized"
+        ]
+        is False
     )
 
 
