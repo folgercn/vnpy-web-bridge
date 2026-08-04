@@ -180,14 +180,18 @@ def test_missing_or_rolled_back_state_never_bootstraps_implicitly(
     assert service.status()["execution_epoch"] == 1
     state = service._load_state()
     service.state_path.unlink()
-    with pytest.raises(DeploymentDrainError) as deleted:
-        DeploymentDrainService(
-            root,
-            clock=Clock(),
-            runtime_instance_id="runtime-after-delete",
-            allow_initial_bootstrap=True,
-        ).status()
-    assert deleted.value.code == "DEPLOYMENT_DRAIN_BOOTSTRAP_REQUIRED"
+    recovered = DeploymentDrainService(
+        root,
+        clock=Clock(),
+        runtime_instance_id="runtime-after-delete",
+        allow_initial_bootstrap=True,
+    ).status()
+    assert recovered["state"] == "RESTARTED_FROZEN"
+    assert recovered["execution_epoch"] == 2
+    assert recovered["freeze_reason"] == (
+        "state_materialization_recovered_from_commitment"
+    )
+    assert recovered["deployment_authorized"] is False
 
     state["execution_epoch"] = 0
     service._atomic_write(
@@ -202,7 +206,7 @@ def test_missing_or_rolled_back_state_never_bootstraps_implicitly(
             runtime_instance_id="runtime-after-rollback",
             allow_initial_bootstrap=True,
         ).status()
-    assert rollback.value.code == "DEPLOYMENT_DRAIN_EPOCH_ROLLBACK"
+    assert rollback.value.code == "DEPLOYMENT_DRAIN_STATE_ROLLBACK"
 
 
 def test_acquire_is_idempotent_and_captures_inside_gate(tmp_path: Path) -> None:

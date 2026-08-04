@@ -372,7 +372,7 @@ def test_b1b_state_recheck_timestamp_must_match_artifact(tmp_path) -> None:
     with pytest.raises(DeploymentDrainError) as exc_info:
         drain.status()
 
-    assert exc_info.value.code == "SAFE_RESTART_RECHECK_BINDING_MISMATCH"
+    assert exc_info.value.code == "DEPLOYMENT_DRAIN_STATE_ROLLBACK"
 
 
 def test_b1b_state_commit_failure_leaves_non_authorizing_orphan(

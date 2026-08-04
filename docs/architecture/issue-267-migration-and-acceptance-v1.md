@@ -198,7 +198,7 @@ Rollback：不能恢复旧的 `image_changed → web-bridge` 自动部署。若 
 
 首次生产迁移必须先停止 `web-bridge`、确认交易禁用，再使用已验证的 Python 3.12 镜像（必须绑定 immutable digest）执行：`docker --context desktop-linux run --rm --network none --mount type=bind,src=/Users/fujun/services/vnpy-web-bridge/logs,dst=/custody <validation-image@sha256:digest> python -m app.services.deployment_drain_bootstrap --state-root /custody/deployment-drain --operator <操作员> --reason <原因> --confirm-offline-trading-disabled`。不得调用 M2 host 的 Python 3.9。Bootstrap 模块随 backend 打包，并在镜像 build 中执行 `py_compile` 和 frozen-state smoke；工具只允许 fresh custody、只执行一次，并初始化为 `RESTARTED_FROZEN`。容器使用与实际 `web-bridge` 相同的 root runtime UID，对同一 bind-mounted logs 写入后，应用的 owner 校验保持一致。它不授权部署或交易。必须等待 1-pre-B 的在线基线 reconciliation 完成后，才允许受控解冻。
 
-DTO 属于语义层，可接收等价的 UTC datetime，持久化前统一输出 `Z`；receipt/recheck/consume 的原始 artifact schema 只接受 `Z` 文本。当前 epoch anchor 防止单文件缺失或回退以及正常崩溃写入不一致；不把 state 与 anchor 所在整个持久卷同时回滚纳入本地可检测威胁模型。Phase 6 必须用卷外审计/high-water 证据覆盖整卷快照回退。
+DTO 属于语义层，可接收等价的 UTC datetime，持久化前统一输出 `Z`；receipt/recheck/consume 的原始 artifact schema 只接受 `Z` 文本。epoch anchor v2 与 create-only state commitment chain 防止单文件缺失、回退和正常崩溃写入不一致；不把 state、commitment chain 与 anchor 所在整个持久卷同时回滚纳入本地可检测威胁模型。Phase 6 必须用卷外审计/high-water 证据覆盖整卷快照回退。
 
 1-pre-B 的锁顺序固定为 `deployment gate → Commodity cycle lock → RPC call lock`；禁止从 Commodity cycle lock 内反向申请 deployment gate。合并前必须用真实 Trade/Commodity 并发测试证明 drain 与 send/snapshot 不死锁，且 consume/reconciliation 只能接收同锁在线证据。
 
@@ -209,6 +209,8 @@ DTO 属于语义层，可接收等价的 UTC datetime，持久化前统一输出
 1-pre-B B1a 只冻结 fresh recheck 协议：Windows 新增 `recheck_deployment_safety_snapshot_v1(request_id, owner_challenge, recheck_id, fresh_challenge, expected_generation)`，必须命中 A2 已冻结 owner，在 EventEngine 上重新复制事实，并回显 original/current server、generation 与排除 request/timestamp/challenge 的规范化 execution-facts canonical SHA-256。Linux 新增独立 recheck checkpoint/artifact v1；不修改 A2 checkpoint v1，且只在 exact receipt/original checkpoint/recheck checkpoint 的 raw SHA、owner、epoch、server、generation、state 和规范化事实全部相等时生成证据。B1a 证据显式保持 `one_shot_consume_allowed=false`、`reconciliation_authorized=false`、`deployment_authorized=false`、`countable_forward=false`；不接线 Commodity owner、不持久化、不迁移 state v2、不激活 consume，`scripts/deploy.sh` 继续冻结。
 
 1-pre-B B1b 将 fresh recheck 接到唯一 Commodity owner：调用方不能提交 recheck DTO，DeploymentDrain 在 gate 内从 create-only custody 读取 receipt/original checkpoint 的 exact bytes，生成 fresh challenge，再按 `gate → Commodity cycle → Windows RPC` 顺序捕获事实。recheck checkpoint 先按内容 hash 持久化，随后写入每个 receipt 唯一的 create-only artifact 槽，最后才提交 state v2 指针；孤儿、碰撞、篡改、RPC 漂移和重启都 fail closed，旧 recheck 不恢复为权限。v1 消费痕迹迁移时隔离到 `RESTARTED_FROZEN`。B1b 仍保持 consume、reconciliation、deployment、production/live/countable 全部为 false，消费 WAL 与 state commitment 留给 B2，`scripts/deploy.sh` 继续冻结。
+
+1-pre-B B2a 将 DeploymentDrain 持久状态升级为 state v3，并为每次状态转移追加 create-only state commitment：commitment 绑定 exact state bytes、单调 generation、前序 commitment raw SHA-256 和全部非授权布尔值；epoch anchor 升级为 v2，并绑定 chain head 与对应 state。fresh custody 建立 genesis；state v1/v2 迁移把原 state 与旧 anchor 的 exact raw SHA-256 绑定到 genesis。commitment 已落盘但 state/anchor 尚未推进等可证明的崩溃窗口，只允许恢复到链头并进入 `RESTARTED_FROZEN`，不得恢复运行或任何权限；缺口、碰撞、篡改、回退和无法证明的状态一律 fail closed。B2a 只建立 durable commitment/recovery foundation，B2b 的 one-shot consume intent/marker WAL 尚未实现；consume、reconciliation、deployment、production、live trading、countable forward 全部继续为 false，`scripts/deploy.sh` 仍冻结。
 
 Cutover：先以禁交易、无订单方式验证 lock acquisition、并发 command rejection、receipt expiry 和 release；该 PR 不改变 8080、镜像拓扑或订单 owner。
 

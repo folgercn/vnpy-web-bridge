@@ -1,7 +1,7 @@
 {
   "schema_version": "web_bridge_release_dependencies_v1",
   "issue": 267,
-  "status": "phase_1_pre_b_b1a_fresh_recheck_contract_deploy_frozen",
+  "status": "phase_1_pre_b_b2a_state_v3_commitment_chain_deploy_frozen",
   "ownership_contract": "docs/architecture/web-bridge-deployment-ownership-v1.json",
   "safety": {
     "classifier_consumption_allowed": false,
@@ -242,7 +242,7 @@
   ],
   "deploy_units": [
     {"id": "frontend", "phase": "phase_1", "implementation_status": "planned", "automatic_deploy_allowed": false, "safe_restart_contract": "independent_no_dependency_recreate"},
-    {"id": "web-bridge", "phase": "current_and_phase_1_compatibility", "implementation_status": "phase_1_pre_b_b1b_trusted_recheck_persistence_state_v2_deployment_frozen", "automatic_deploy_allowed": false, "safe_restart_contract": "event_thread_linearized_windows_facts_owner_bound_fresh_recheck_durable_non_authorizing_pending_consume_wal_reconcile"},
+    {"id": "web-bridge", "phase": "current_and_phase_1_compatibility", "implementation_status": "phase_1_pre_b_b2a_state_v3_create_only_commitment_chain_epoch_anchor_v2_deployment_frozen", "automatic_deploy_allowed": false, "safe_restart_contract": "event_thread_linearized_windows_facts_owner_bound_fresh_recheck_state_commitment_recovery_always_frozen_pending_b2b_consume_wal_reconcile"},
     {"id": "control-api", "phase": "phase_2", "implementation_status": "planned", "automatic_deploy_allowed": false, "safe_restart_contract": "independent_after_execution_split"},
     {"id": "execution-orchestrator", "phase": "phase_2", "implementation_status": "planned", "automatic_deploy_allowed": false, "safe_restart_contract": "atomic_drain_short_ttl_receipt_recheck_fencing_reconcile"},
     {"id": "map-producer", "phase": "phase_3", "implementation_status": "planned_batch_job", "automatic_deploy_allowed": false, "safe_restart_contract": "immutable_run_id_and_single_candidate_writer"},
@@ -355,7 +355,7 @@
     },
     {
       "id": "execution-source",
-      "match": {"exact": ["backend/app/schemas/deployment_drain.py", "backend/app/services/commodity_simnow.py", "backend/app/services/deployment_drain.py", "backend/app/services/deployment_drain_bootstrap.py", "backend/app/services/manual_execution_permit.py", "backend/app/services/risk_service.py", "backend/app/services/strategy_service.py", "backend/app/services/trade_service.py", "backend/app/services/vnpy_rpc_service.py"]},
+      "match": {"exact": ["backend/app/schemas/deployment_drain.py", "backend/app/services/commodity_simnow.py", "backend/app/services/deployment_drain.py", "backend/app/services/deployment_drain_bootstrap.py", "backend/app/services/deployment_state_commitment.py", "backend/app/services/manual_execution_permit.py", "backend/app/services/risk_service.py", "backend/app/services/strategy_service.py", "backend/app/services/trade_service.py", "backend/app/services/vnpy_rpc_service.py"]},
       "classification": "infra_manual",
       "build_units": ["execution-orchestrator"],
       "pre_activation_build_units": ["legacy-web-bridge-app"],

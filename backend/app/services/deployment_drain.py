@@ -14,6 +14,7 @@ from threading import RLock, local
 from typing import Any
 
 from app.schemas.deployment_drain import (
+    DeploymentDrainStateCommitmentDTO,
     DeploymentDrainAcquireDTO,
     DeploymentOnlineCheckpointDTO,
     DeploymentOnlineRecheckCheckpointDTO,
@@ -25,14 +26,22 @@ from app.schemas.deployment_drain import (
     deployment_rpc_execution_facts_sha256,
     deployment_snapshot_blockers,
 )
+from app.services.deployment_state_commitment import (
+    DeploymentStateCommitmentError,
+    build_state_commitment,
+    parse_exact_state_commitment,
+)
 from app.services.deployment_online_recheck import (
     DeploymentOnlineRecheckError,
     build_safe_restart_online_recheck,
     verify_safe_restart_online_recheck,
 )
 
-STATE_VERSION = "web_bridge_deployment_drain_state_v2"
+STATE_VERSION = "web_bridge_deployment_drain_state_v3"
+PREVIOUS_STATE_VERSION = "web_bridge_deployment_drain_state_v2"
 LEGACY_STATE_VERSION = "web_bridge_deployment_drain_state_v1"
+EPOCH_ANCHOR_VERSION = "web_bridge_deployment_drain_epoch_anchor_v2"
+LEGACY_EPOCH_ANCHOR_VERSION = "web_bridge_deployment_drain_epoch_anchor_v1"
 STATES = {
     "RUNNING",
     "DRAINING",
@@ -87,10 +96,12 @@ class DeploymentDrainService:
         self.consume_dir = self.root / "consumes"
         self.checkpoint_dir = self.root / "checkpoints"
         self.recheck_dir = self.root / "rechecks"
+        self.state_commitment_dir = self.root / "state-commitments"
         self.lock_path = self.root / ".deployment-drain.lock"
         self.state_path = self.root / "state.json"
         self.epoch_anchor_path = self.root / "epoch-anchor.json"
         self._initialized = False
+        self._state_materialization_recovered = False
         self.execution_epoch = 0
         self.verified_restart_checkpoint: DeploymentOnlineCheckpointDTO | None = None
         self._online_snapshot_owner: object | None = None
@@ -113,11 +124,21 @@ class DeploymentDrainService:
             self._prepare_directory(self.consume_dir)
             self._prepare_directory(self.checkpoint_dir)
             self._prepare_directory(self.recheck_dir)
+            self._prepare_directory(self.state_commitment_dir)
             self._prepare_lock_file()
             with self._exclusive_initialized():
+                self._cleanup_state_commitment_temporaries()
                 state = self._load_or_initial_state()
                 self._verify_active_online_recheck_pointer(state)
                 previous_state = state["state"]
+                if self._state_materialization_recovered:
+                    previous_state = "RESTARTED_FROZEN"
+                    state.update(
+                        blockers=["state_materialization_recovered_from_commitment"],
+                        freeze_reason=(
+                            "state_materialization_recovered_from_commitment"
+                        ),
+                    )
                 restart_receipt_id = state.get("active_receipt_id")
                 if (
                     restart_receipt_id is None
@@ -157,6 +178,8 @@ class DeploymentDrainService:
                     if state.get("freeze_reason") not in {
                         "initial_bootstrap_requires_reconciliation",
                         "legacy_v1_consumption_evidence_quarantined",
+                        "legacy_state_migrated_to_v3_requires_reconciliation",
+                        "state_materialization_recovered_from_commitment",
                     }:
                         state["freeze_reason"] = (
                             "process_restarted_old_receipt_invalidated"
@@ -318,9 +341,7 @@ class DeploymentDrainService:
                 state["active_receipt_id"],
                 expected_raw_sha256=state["active_receipt_raw_sha256"],
             )
-            receipt_raw = self._read_secure_file(
-                self._receipt_path(receipt.receipt_id)
-            )
+            receipt_raw = self._read_secure_file(self._receipt_path(receipt.receipt_id))
             original = self._load_online_checkpoint_for_receipt(
                 receipt.receipt_id,
                 expected_raw_sha256=state["active_receipt_raw_sha256"],
@@ -350,9 +371,7 @@ class DeploymentDrainService:
                 )
 
             seed = _sha256(
-                b"issue267-b1b-online-recheck-v1\0"
-                + receipt_raw
-                + original_raw
+                b"issue267-b1b-online-recheck-v1\0" + receipt_raw + original_raw
             )
             context = {
                 "request_id": receipt.request_id,
@@ -1003,21 +1022,69 @@ class DeploymentDrainService:
                     "DEPLOYMENT_DRAIN_ALREADY_BOOTSTRAPPED",
                     "custody state already exists",
                 )
-            payload = json.loads(self._read_secure_file(self.state_path))
+            state_raw = self._read_secure_file(self.state_path)
+            payload = json.loads(state_raw)
             if not isinstance(payload, dict):
                 raise DeploymentDrainError(
                     "DEPLOYMENT_DRAIN_STATE_INVALID",
                     "state payload must be an object",
                 )
-            migrated = payload.get("schema_version") == LEGACY_STATE_VERSION
-            if migrated:
-                state = self._migrate_v1_state(payload)
+            if any(self.state_commitment_dir.iterdir()):
+                return self._load_committed_state(
+                    allow_recovery=True,
+                    source_state_raw=state_raw,
+                )
+            version = payload.get("schema_version")
+            if version == LEGACY_STATE_VERSION:
+                state_v2 = self._migrate_v1_state(payload)
+                genesis_source = "v1_migration"
+            elif version == PREVIOUS_STATE_VERSION:
+                state_v2 = self._validate_v2_state_payload(payload)
+                genesis_source = "v2_migration"
+            elif version == STATE_VERSION:
+                raise DeploymentDrainError(
+                    "DEPLOYMENT_STATE_COMMITMENT_MISSING",
+                    "state v3 exists without its commitment chain",
+                )
             else:
-                state = self._validate_state_payload(payload)
-            self._validate_epoch_anchor(state)
-            if migrated:
-                self._write_state(state)
+                raise DeploymentDrainError(
+                    "DEPLOYMENT_DRAIN_STATE_INVALID",
+                    "state schema version is unsupported",
+                )
+            try:
+                anchor_raw = self._read_secure_file(self.epoch_anchor_path)
+            except OSError as exc:
+                raise DeploymentDrainError(
+                    "DEPLOYMENT_DRAIN_EPOCH_ANCHOR_INVALID",
+                    "legacy epoch anchor is missing or unreadable",
+                ) from exc
+            self._validate_legacy_epoch_anchor(state_v2, anchor_raw)
+            state = self._migrate_v2_state(state_v2)
+            migration_reason = (
+                "legacy_v1_consumption_evidence_quarantined"
+                if state["freeze_reason"]
+                == "legacy_v1_consumption_evidence_quarantined"
+                else "legacy_state_migrated_to_v3_requires_reconciliation"
+            )
+            state.update(
+                state="RESTARTED_FROZEN",
+                blockers=[migration_reason],
+                expires_at=None,
+                freeze_reason=migration_reason,
+                updated_at=self._now().isoformat(),
+            )
+            self._install_genesis_state(
+                state,
+                genesis_source=genesis_source,
+                source_state_raw_sha256=_sha256(state_raw),
+                source_epoch_anchor_raw_sha256=_sha256(anchor_raw),
+            )
             return state
+        if any(self.state_commitment_dir.iterdir()):
+            return self._load_committed_state(
+                allow_recovery=True,
+                source_state_raw=b"",
+            )
         if (
             not self.allow_initial_bootstrap
             or self.epoch_anchor_path.exists()
@@ -1025,6 +1092,7 @@ class DeploymentDrainService:
             or any(self.consume_dir.iterdir())
             or any(self.checkpoint_dir.iterdir())
             or any(self.recheck_dir.iterdir())
+            or any(self.state_commitment_dir.iterdir())
         ):
             raise DeploymentDrainError(
                 "DEPLOYMENT_DRAIN_BOOTSTRAP_REQUIRED",
@@ -1033,6 +1101,8 @@ class DeploymentDrainService:
         now = self._now().isoformat()
         state = {
             "schema_version": STATE_VERSION,
+            "state_generation": 1,
+            "previous_state_commitment_raw_sha256": None,
             "state": self.initial_bootstrap_state,
             "drain_epoch": 0,
             "execution_epoch": 0,
@@ -1044,6 +1114,13 @@ class DeploymentDrainService:
             "receipt_consumed": False,
             "consumed_at": None,
             "consume_id": None,
+            "consumed_receipt_id": None,
+            "consume_intent_raw_sha256": None,
+            "consume_marker_raw_sha256": None,
+            "consume_state_projection_sha256": None,
+            "consumed_online_recheck_id": None,
+            "consumed_online_recheck_raw_sha256": None,
+            "preconsume_state_commitment_raw_sha256": None,
             "active_online_recheck_id": None,
             "active_online_recheck_raw_sha256": None,
             "active_recheck_checkpoint_raw_sha256": None,
@@ -1059,12 +1136,16 @@ class DeploymentDrainService:
             ),
             "updated_at": now,
         }
-        self._write_state(state)
+        self._install_genesis_state(
+            state,
+            genesis_source="fresh_bootstrap",
+            source_state_raw_sha256=None,
+            source_epoch_anchor_raw_sha256=None,
+        )
         return state
 
     def _load_state(self) -> dict[str, Any]:
-        payload = json.loads(self._read_secure_file(self.state_path))
-        return self._validate_state_payload(payload)
+        return self._load_committed_state(allow_recovery=False)
 
     def _validate_state_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(payload, dict):
@@ -1074,6 +1155,8 @@ class DeploymentDrainService:
             )
         required = {
             "schema_version",
+            "state_generation",
+            "previous_state_commitment_raw_sha256",
             "state",
             "drain_epoch",
             "execution_epoch",
@@ -1085,6 +1168,13 @@ class DeploymentDrainService:
             "receipt_consumed",
             "consumed_at",
             "consume_id",
+            "consumed_receipt_id",
+            "consume_intent_raw_sha256",
+            "consume_marker_raw_sha256",
+            "consume_state_projection_sha256",
+            "consumed_online_recheck_id",
+            "consumed_online_recheck_raw_sha256",
+            "preconsume_state_commitment_raw_sha256",
             "active_online_recheck_id",
             "active_online_recheck_raw_sha256",
             "active_recheck_checkpoint_raw_sha256",
@@ -1102,6 +1192,8 @@ class DeploymentDrainService:
             )
         if (
             payload["schema_version"] != STATE_VERSION
+            or type(payload["state_generation"]) is not int
+            or payload["state_generation"] < 1
             or payload["state"] not in STATES
             or type(payload["drain_epoch"]) is not int
             or payload["drain_epoch"] < 0
@@ -1110,9 +1202,24 @@ class DeploymentDrainService:
             or payload["receipt_consumed"] is not False
             or payload["consumed_at"] is not None
             or payload["consume_id"] is not None
+            or payload["consumed_receipt_id"] is not None
+            or payload["consume_intent_raw_sha256"] is not None
+            or payload["consume_marker_raw_sha256"] is not None
+            or payload["consume_state_projection_sha256"] is not None
+            or payload["consumed_online_recheck_id"] is not None
+            or payload["consumed_online_recheck_raw_sha256"] is not None
+            or payload["preconsume_state_commitment_raw_sha256"] is not None
         ):
             raise DeploymentDrainError(
                 "DEPLOYMENT_DRAIN_STATE_INVALID", "state values are invalid"
+            )
+        previous_commitment = payload["previous_state_commitment_raw_sha256"]
+        if (payload["state_generation"] == 1 and previous_commitment is not None) or (
+            payload["state_generation"] > 1 and not _is_sha256(previous_commitment)
+        ):
+            raise DeploymentDrainError(
+                "DEPLOYMENT_DRAIN_STATE_INVALID",
+                "state commitment predecessor is invalid",
             )
         recheck_values = (
             payload["active_online_recheck_id"],
@@ -1130,9 +1237,7 @@ class DeploymentDrainService:
         if all(value is not None for value in recheck_values):
             recheck_id, raw_sha, checkpoint_raw_sha, rechecked_at = recheck_values
             if (
-                not _is_prefixed_sha256(
-                    recheck_id, "safe-restart-online-recheck-"
-                )
+                not _is_prefixed_sha256(recheck_id, "safe-restart-online-recheck-")
                 or not _is_sha256(raw_sha)
                 or not _is_sha256(checkpoint_raw_sha)
                 or not isinstance(rechecked_at, str)
@@ -1158,13 +1263,99 @@ class DeploymentDrainService:
                 ) from exc
         invalidated_id = payload["last_invalidated_online_recheck_id"]
         if invalidated_id is not None and (
-            not _is_prefixed_sha256(
-                invalidated_id, "safe-restart-online-recheck-"
-            )
+            not _is_prefixed_sha256(invalidated_id, "safe-restart-online-recheck-")
         ):
             raise DeploymentDrainError(
                 "DEPLOYMENT_DRAIN_STATE_INVALID",
                 "last invalidated online recheck id is invalid",
+            )
+        return payload
+
+    def _validate_v2_state_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        required = {
+            "schema_version",
+            "state",
+            "drain_epoch",
+            "execution_epoch",
+            "runtime_instance_id",
+            "active_request_id",
+            "active_request_sha256",
+            "active_receipt_id",
+            "active_receipt_raw_sha256",
+            "receipt_consumed",
+            "consumed_at",
+            "consume_id",
+            "active_online_recheck_id",
+            "active_online_recheck_raw_sha256",
+            "active_recheck_checkpoint_raw_sha256",
+            "online_rechecked_at",
+            "last_invalidated_online_recheck_id",
+            "last_invalidated_receipt_id",
+            "blockers",
+            "expires_at",
+            "freeze_reason",
+            "updated_at",
+        }
+        if set(payload) != required or (
+            payload.get("schema_version") != PREVIOUS_STATE_VERSION
+            or payload.get("state") not in STATES
+            or type(payload.get("drain_epoch")) is not int
+            or payload["drain_epoch"] < 0
+            or type(payload.get("execution_epoch")) is not int
+            or payload["execution_epoch"] < 0
+            or payload.get("receipt_consumed") is not False
+            or payload.get("consumed_at") is not None
+            or payload.get("consume_id") is not None
+        ):
+            raise DeploymentDrainError(
+                "DEPLOYMENT_DRAIN_STATE_INVALID",
+                "state v2 values are invalid",
+            )
+        recheck_values = (
+            payload["active_online_recheck_id"],
+            payload["active_online_recheck_raw_sha256"],
+            payload["active_recheck_checkpoint_raw_sha256"],
+            payload["online_rechecked_at"],
+        )
+        if any(value is None for value in recheck_values) != all(
+            value is None for value in recheck_values
+        ):
+            raise DeploymentDrainError(
+                "DEPLOYMENT_DRAIN_STATE_INVALID",
+                "state v2 online recheck pointers are incomplete",
+            )
+        if all(value is not None for value in recheck_values):
+            recheck_id, raw_sha, checkpoint_raw_sha, rechecked_at = recheck_values
+            if (
+                not _is_prefixed_sha256(recheck_id, "safe-restart-online-recheck-")
+                or not _is_sha256(raw_sha)
+                or not _is_sha256(checkpoint_raw_sha)
+                or not isinstance(rechecked_at, str)
+            ):
+                raise DeploymentDrainError(
+                    "DEPLOYMENT_DRAIN_STATE_INVALID",
+                    "state v2 online recheck pointers are invalid",
+                )
+            try:
+                parsed = datetime.fromisoformat(rechecked_at.replace("Z", "+00:00"))
+                if (
+                    parsed.tzinfo is None
+                    or parsed.utcoffset() is None
+                    or parsed.utcoffset().total_seconds() != 0
+                ):
+                    raise ValueError("timestamp is not UTC")
+            except (AttributeError, ValueError) as exc:
+                raise DeploymentDrainError(
+                    "DEPLOYMENT_DRAIN_STATE_INVALID",
+                    "state v2 online recheck timestamp is invalid",
+                ) from exc
+        invalidated_id = payload["last_invalidated_online_recheck_id"]
+        if invalidated_id is not None and not _is_prefixed_sha256(
+            invalidated_id, "safe-restart-online-recheck-"
+        ):
+            raise DeploymentDrainError(
+                "DEPLOYMENT_DRAIN_STATE_INVALID",
+                "state v2 invalidated recheck id is invalid",
             )
         return payload
 
@@ -1206,7 +1397,7 @@ class DeploymentDrainService:
             )
         migrated = {
             **payload,
-            "schema_version": STATE_VERSION,
+            "schema_version": PREVIOUS_STATE_VERSION,
             "active_online_recheck_id": None,
             "active_online_recheck_raw_sha256": None,
             "active_recheck_checkpoint_raw_sha256": None,
@@ -1236,45 +1427,343 @@ class DeploymentDrainService:
                 freeze_reason=("legacy_v1_consumption_evidence_quarantined"),
                 updated_at=self._now().isoformat(),
             )
-        return self._validate_state_payload(migrated)
+        return self._validate_v2_state_payload(migrated)
+
+    def _migrate_v2_state(self, payload: dict[str, Any]) -> dict[str, Any]:
+        state = {
+            **payload,
+            "schema_version": STATE_VERSION,
+            "state_generation": 1,
+            "previous_state_commitment_raw_sha256": None,
+            "consumed_receipt_id": None,
+            "consume_intent_raw_sha256": None,
+            "consume_marker_raw_sha256": None,
+            "consume_state_projection_sha256": None,
+            "consumed_online_recheck_id": None,
+            "consumed_online_recheck_raw_sha256": None,
+            "preconsume_state_commitment_raw_sha256": None,
+        }
+        return self._validate_state_payload(state)
 
     def _write_state(self, state: dict[str, Any]) -> None:
-        self._validate_state_payload(state)
-        self._atomic_write(self.state_path, _canonical_bytes(state) + b"\n")
-        anchor = {
-            "schema_version": "web_bridge_deployment_drain_epoch_anchor_v1",
-            "drain_epoch": state["drain_epoch"],
-            "execution_epoch": state["execution_epoch"],
-        }
-        self._atomic_write(self.epoch_anchor_path, _canonical_bytes(anchor) + b"\n")
-
-    def _validate_epoch_anchor(self, state: dict[str, Any]) -> None:
-        if not self.epoch_anchor_path.exists():
-            if self.allow_initial_bootstrap:
-                anchor = {
-                    "schema_version": ("web_bridge_deployment_drain_epoch_anchor_v1"),
-                    "drain_epoch": state["drain_epoch"],
-                    "execution_epoch": state["execution_epoch"],
-                }
-                self._atomic_write(
-                    self.epoch_anchor_path,
-                    _canonical_bytes(anchor) + b"\n",
-                )
-                return
+        current = self._load_committed_state(allow_recovery=False)
+        if (
+            state.get("state_generation") != current["state_generation"]
+            or state.get("previous_state_commitment_raw_sha256")
+            != current["previous_state_commitment_raw_sha256"]
+        ):
             raise DeploymentDrainError(
-                "DEPLOYMENT_DRAIN_EPOCH_ANCHOR_MISSING",
-                "durable state exists without its epoch anchor",
+                "DEPLOYMENT_DRAIN_STATE_STALE",
+                "state transition does not start at the committed generation",
             )
+        anchor = self._load_epoch_anchor_v2()
+        next_state = {
+            **state,
+            "state_generation": current["state_generation"] + 1,
+            "previous_state_commitment_raw_sha256": anchor[
+                "state_commitment_raw_sha256"
+            ],
+        }
+        self._validate_state_payload(next_state)
+        commitment_raw_sha = self._persist_state_commitment(next_state)
+        self._atomic_write(self.state_path, _canonical_bytes(next_state) + b"\n")
+        self._write_epoch_anchor_v2(next_state, commitment_raw_sha)
+        state.clear()
+        state.update(next_state)
+
+    def _install_genesis_state(
+        self,
+        state: dict[str, Any],
+        *,
+        genesis_source: str,
+        source_state_raw_sha256: str | None,
+        source_epoch_anchor_raw_sha256: str | None,
+    ) -> None:
+        self._validate_state_payload(state)
+        if (
+            state["state_generation"] != 1
+            or state["previous_state_commitment_raw_sha256"] is not None
+        ):
+            raise DeploymentDrainError(
+                "DEPLOYMENT_STATE_COMMITMENT_GENESIS_INVALID",
+                "genesis state must start at generation one",
+            )
+        commitment_raw_sha = self._persist_state_commitment(
+            state,
+            genesis_source=genesis_source,
+            source_state_raw_sha256=source_state_raw_sha256,
+            source_epoch_anchor_raw_sha256=(source_epoch_anchor_raw_sha256),
+        )
+        self._atomic_write(self.state_path, _canonical_bytes(state) + b"\n")
+        self._write_epoch_anchor_v2(state, commitment_raw_sha)
+
+    def _persist_state_commitment(
+        self,
+        state: dict[str, Any],
+        *,
+        genesis_source: str | None = None,
+        source_state_raw_sha256: str | None = None,
+        source_epoch_anchor_raw_sha256: str | None = None,
+    ) -> str:
         try:
-            anchor = json.loads(self._read_secure_file(self.epoch_anchor_path))
-        except (json.JSONDecodeError, OSError) as exc:
+            commitment = build_state_commitment(
+                state,
+                genesis_source=genesis_source,
+                source_state_raw_sha256=source_state_raw_sha256,
+                source_epoch_anchor_raw_sha256=(source_epoch_anchor_raw_sha256),
+            )
+        except DeploymentStateCommitmentError as exc:
+            raise DeploymentDrainError(
+                "DEPLOYMENT_STATE_COMMITMENT_INVALID",
+                "state commitment could not be built",
+            ) from exc
+        raw = _canonical_bytes(commitment.model_dump(mode="json")) + b"\n"
+        path = self._state_commitment_path(commitment.state_generation)
+        try:
+            self._write_create_only_atomic(path, raw)
+        except FileExistsError:
+            if self._read_secure_file(path) != raw:
+                raise DeploymentDrainError(
+                    "DEPLOYMENT_STATE_COMMITMENT_COLLISION",
+                    "state generation is already committed differently",
+                )
+        if self._read_secure_file(path) != raw:
+            raise DeploymentDrainError(
+                "DEPLOYMENT_STATE_COMMITMENT_READBACK_FAILED",
+                "state commitment readback did not match",
+            )
+        return _sha256(raw)
+
+    def _load_committed_state(
+        self,
+        *,
+        allow_recovery: bool,
+        source_state_raw: bytes | None = None,
+    ) -> dict[str, Any]:
+        chain = self._read_state_commitment_chain()
+        if not chain:
+            raise DeploymentDrainError(
+                "DEPLOYMENT_STATE_COMMITMENT_MISSING",
+                "state commitment chain is empty",
+            )
+        highest, highest_raw, highest_raw_sha = chain[-1]
+        highest_is_recovery_fence = self._is_state_recovery_fence(highest.state)
+        state_raw = (
+            source_state_raw
+            if source_state_raw is not None
+            else self._read_secure_file(self.state_path)
+        )
+        state_raw_sha = _sha256(state_raw)
+        highest_state_raw = _canonical_bytes(highest.state) + b"\n"
+        state_matches_highest = state_raw == highest_state_raw
+        if not state_matches_highest:
+            recoverable_hashes = {
+                commitment.state_raw_sha256 for commitment, _raw, _raw_sha in chain
+            }
+            if chain[0][0].source_state_raw_sha256 is not None:
+                recoverable_hashes.add(chain[0][0].source_state_raw_sha256)
+            missing_fresh_genesis = bool(
+                state_raw == b""
+                and chain[0][0].genesis_source == "fresh_bootstrap"
+                and chain[0][0].source_state_raw_sha256 is None
+            )
+            if not allow_recovery or (
+                state_raw_sha not in recoverable_hashes and not missing_fresh_genesis
+            ):
+                raise DeploymentDrainError(
+                    "DEPLOYMENT_DRAIN_STATE_ROLLBACK",
+                    "state bytes do not match the highest commitment",
+                )
+        state = self._validate_state_payload(dict(highest.state))
+        anchor_missing = False
+        try:
+            anchor_raw = self._read_secure_file(self.epoch_anchor_path)
+        except FileNotFoundError:
+            anchor_raw = b""
+            anchor_missing = True
+        except OSError as exc:
             raise DeploymentDrainError(
                 "DEPLOYMENT_DRAIN_EPOCH_ANCHOR_INVALID",
                 "epoch anchor is unreadable",
             ) from exc
+        try:
+            anchor_payload = None if anchor_missing else json.loads(anchor_raw)
+        except json.JSONDecodeError as exc:
+            raise DeploymentDrainError(
+                "DEPLOYMENT_DRAIN_EPOCH_ANCHOR_INVALID",
+                "epoch anchor is not valid JSON",
+            ) from exc
+        anchor_current = False
+        if isinstance(anchor_payload, dict) and (
+            anchor_payload.get("schema_version") == EPOCH_ANCHOR_VERSION
+        ):
+            anchor = self._validate_epoch_anchor_v2_payload(anchor_payload)
+            if anchor["state_generation"] > highest.state_generation:
+                raise DeploymentDrainError(
+                    "DEPLOYMENT_DRAIN_EPOCH_ROLLBACK",
+                    "epoch anchor is ahead of the commitment chain",
+                )
+            if anchor["state_generation"] == highest.state_generation:
+                anchor_current = bool(
+                    anchor["state_commitment_raw_sha256"] == highest_raw_sha
+                    and anchor["drain_epoch"] == state["drain_epoch"]
+                    and anchor["execution_epoch"] == state["execution_epoch"]
+                )
+                if not anchor_current:
+                    raise DeploymentDrainError(
+                        "DEPLOYMENT_DRAIN_EPOCH_ROLLBACK",
+                        "epoch anchor does not match its commitment",
+                    )
+            elif not allow_recovery:
+                raise DeploymentDrainError(
+                    "DEPLOYMENT_DRAIN_EPOCH_ROLLBACK",
+                    "epoch anchor does not match the highest commitment",
+                )
+            else:
+                previous_generation = highest.state_generation - 1
+                if (
+                    anchor["state_generation"] != previous_generation
+                    and not highest_is_recovery_fence
+                ):
+                    raise DeploymentDrainError(
+                        "DEPLOYMENT_DRAIN_EPOCH_ROLLBACK",
+                        "epoch anchor is not the immediate committed predecessor",
+                    )
+                anchored_generation = anchor["state_generation"]
+                previous, _previous_raw, previous_raw_sha = chain[
+                    anchored_generation - 1
+                ]
+                if (
+                    anchor["state_commitment_raw_sha256"] != previous_raw_sha
+                    or anchor["drain_epoch"] != previous.state["drain_epoch"]
+                    or anchor["execution_epoch"] != previous.state["execution_epoch"]
+                ):
+                    raise DeploymentDrainError(
+                        "DEPLOYMENT_DRAIN_EPOCH_ROLLBACK",
+                        "stale epoch anchor does not bind its commitment",
+                    )
+        elif anchor_missing:
+            fresh_genesis_window = bool(
+                allow_recovery
+                and chain[0][0].genesis_source == "fresh_bootstrap"
+                and (highest.state_generation == 1 or highest_is_recovery_fence)
+            )
+            if not fresh_genesis_window:
+                raise DeploymentDrainError(
+                    "DEPLOYMENT_DRAIN_EPOCH_ANCHOR_INVALID",
+                    "epoch anchor is missing outside fresh genesis recovery",
+                )
+        else:
+            genesis_source_anchor_sha = chain[0][0].source_epoch_anchor_raw_sha256
+            legacy_migration_window = bool(
+                allow_recovery
+                and genesis_source_anchor_sha is not None
+                and _sha256(anchor_raw) == genesis_source_anchor_sha
+                and (highest.state_generation == 1 or highest_is_recovery_fence)
+            )
+            if not legacy_migration_window:
+                raise DeploymentDrainError(
+                    "DEPLOYMENT_DRAIN_EPOCH_ROLLBACK",
+                    "legacy epoch anchor differs from the genesis source",
+                )
+        if _sha256(highest_raw) != highest_raw_sha:
+            raise DeploymentDrainError(
+                "DEPLOYMENT_STATE_COMMITMENT_HASH_MISMATCH",
+                "highest commitment hash changed during verification",
+            )
+        if not state_matches_highest or not anchor_current:
+            if highest_is_recovery_fence:
+                self._atomic_write(self.state_path, highest_state_raw)
+                self._write_epoch_anchor_v2(state, highest_raw_sha)
+                self._state_materialization_recovered = True
+                return state
+            return self._persist_state_recovery_fence(
+                state,
+                previous_commitment_raw_sha256=highest_raw_sha,
+            )
+        return state
+
+    def _persist_state_recovery_fence(
+        self,
+        state: dict[str, Any],
+        *,
+        previous_commitment_raw_sha256: str,
+    ) -> dict[str, Any]:
+        recovered = {
+            **state,
+            "state_generation": state["state_generation"] + 1,
+            "previous_state_commitment_raw_sha256": (previous_commitment_raw_sha256),
+            "state": "RESTARTED_FROZEN",
+            "blockers": ["state_materialization_recovered_from_commitment"],
+            "expires_at": None,
+            "freeze_reason": "state_materialization_recovered_from_commitment",
+            "updated_at": self._now().isoformat(),
+        }
+        self._validate_state_payload(recovered)
+        commitment_raw_sha = self._persist_state_commitment(recovered)
+        self._atomic_write(self.state_path, _canonical_bytes(recovered) + b"\n")
+        self._write_epoch_anchor_v2(recovered, commitment_raw_sha)
+        self._state_materialization_recovered = True
+        return recovered
+
+    @staticmethod
+    def _is_state_recovery_fence(state: dict[str, Any]) -> bool:
+        return bool(
+            state.get("state_generation", 0) > 1
+            and state.get("state") == "RESTARTED_FROZEN"
+            and state.get("blockers")
+            == ["state_materialization_recovered_from_commitment"]
+            and state.get("freeze_reason")
+            == "state_materialization_recovered_from_commitment"
+        )
+
+    def _read_state_commitment_chain(
+        self,
+    ) -> list[tuple[DeploymentDrainStateCommitmentDTO, bytes, str]]:
+        paths = sorted(self.state_commitment_dir.iterdir())
+        chain: list[tuple[DeploymentDrainStateCommitmentDTO, bytes, str]] = []
+        previous_raw_sha: str | None = None
+        for expected_generation, path in enumerate(paths, start=1):
+            expected_name = f"{expected_generation:020d}.json"
+            if path.name != expected_name or path.is_symlink():
+                raise DeploymentDrainError(
+                    "DEPLOYMENT_STATE_COMMITMENT_INVENTORY_INVALID",
+                    "state commitment inventory is not contiguous",
+                )
+            raw = self._read_secure_file(path)
+            try:
+                commitment = parse_exact_state_commitment(raw)
+            except DeploymentStateCommitmentError as exc:
+                raise DeploymentDrainError(
+                    "DEPLOYMENT_STATE_COMMITMENT_INVALID",
+                    "state commitment is invalid",
+                ) from exc
+            if (
+                commitment.state_generation != expected_generation
+                or commitment.previous_state_commitment_raw_sha256 != previous_raw_sha
+            ):
+                raise DeploymentDrainError(
+                    "DEPLOYMENT_STATE_COMMITMENT_CHAIN_INVALID",
+                    "state commitment predecessor chain is broken",
+                )
+            self._validate_state_payload(dict(commitment.state))
+            raw_sha = _sha256(raw)
+            chain.append((commitment, raw, raw_sha))
+            previous_raw_sha = raw_sha
+        return chain
+
+    def _validate_legacy_epoch_anchor(self, state: dict[str, Any], raw: bytes) -> None:
+        try:
+            anchor = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise DeploymentDrainError(
+                "DEPLOYMENT_DRAIN_EPOCH_ANCHOR_INVALID",
+                "legacy epoch anchor is unreadable",
+            ) from exc
         if (
-            set(anchor) != {"schema_version", "drain_epoch", "execution_epoch"}
-            or anchor["schema_version"] != "web_bridge_deployment_drain_epoch_anchor_v1"
+            not isinstance(anchor, dict)
+            or set(anchor) != {"schema_version", "drain_epoch", "execution_epoch"}
+            or anchor["schema_version"] != LEGACY_EPOCH_ANCHOR_VERSION
             or type(anchor["drain_epoch"]) is not int
             or type(anchor["execution_epoch"]) is not int
             or state["drain_epoch"] < anchor["drain_epoch"]
@@ -1282,8 +1771,58 @@ class DeploymentDrainService:
         ):
             raise DeploymentDrainError(
                 "DEPLOYMENT_DRAIN_EPOCH_ROLLBACK",
-                "durable state epoch is older than its high-water anchor",
+                "legacy state epoch is older than its high-water anchor",
             )
+
+    def _load_epoch_anchor_v2(self) -> dict[str, Any]:
+        try:
+            payload = json.loads(self._read_secure_file(self.epoch_anchor_path))
+        except (json.JSONDecodeError, OSError) as exc:
+            raise DeploymentDrainError(
+                "DEPLOYMENT_DRAIN_EPOCH_ANCHOR_INVALID",
+                "epoch anchor v2 is unreadable",
+            ) from exc
+        return self._validate_epoch_anchor_v2_payload(payload)
+
+    def _validate_epoch_anchor_v2_payload(self, payload: object) -> dict[str, Any]:
+        required = {
+            "schema_version",
+            "state_generation",
+            "state_commitment_raw_sha256",
+            "drain_epoch",
+            "execution_epoch",
+        }
+        if (
+            not isinstance(payload, dict)
+            or set(payload) != required
+            or (
+                payload.get("schema_version") != EPOCH_ANCHOR_VERSION
+                or type(payload.get("state_generation")) is not int
+                or payload["state_generation"] < 1
+                or not _is_sha256(payload.get("state_commitment_raw_sha256"))
+                or type(payload.get("drain_epoch")) is not int
+                or payload["drain_epoch"] < 0
+                or type(payload.get("execution_epoch")) is not int
+                or payload["execution_epoch"] < 0
+            )
+        ):
+            raise DeploymentDrainError(
+                "DEPLOYMENT_DRAIN_EPOCH_ANCHOR_INVALID",
+                "epoch anchor v2 values are invalid",
+            )
+        return payload
+
+    def _write_epoch_anchor_v2(
+        self, state: dict[str, Any], commitment_raw_sha256: str
+    ) -> None:
+        anchor = {
+            "schema_version": EPOCH_ANCHOR_VERSION,
+            "state_generation": state["state_generation"],
+            "state_commitment_raw_sha256": commitment_raw_sha256,
+            "drain_epoch": state["drain_epoch"],
+            "execution_epoch": state["execution_epoch"],
+        }
+        self._atomic_write(self.epoch_anchor_path, _canonical_bytes(anchor) + b"\n")
 
     def _read_receipt(
         self,
@@ -1400,9 +1939,7 @@ class DeploymentDrainService:
             )
         return checkpoint
 
-    def _block_online_recheck_failure(
-        self, state: dict[str, Any], detail: str
-    ) -> None:
+    def _block_online_recheck_failure(self, state: dict[str, Any], detail: str) -> None:
         state.update(
             state="DRAIN_BLOCKED",
             blockers=[f"online_recheck_failed:{detail}"],
@@ -1447,9 +1984,7 @@ class DeploymentDrainService:
             )
         return artifact
 
-    def _verify_active_online_recheck_pointer(
-        self, state: dict[str, Any]
-    ) -> None:
+    def _verify_active_online_recheck_pointer(self, state: dict[str, Any]) -> None:
         if state.get("active_online_recheck_id") is None:
             return
         artifact = self._read_active_online_recheck(state)
@@ -1534,6 +2069,14 @@ class DeploymentDrainService:
                 "SAFE_RESTART_RECEIPT_ID_INVALID", "invalid receipt id"
             )
         return self.recheck_dir / f"{receipt_id}.online-recheck.json"
+
+    def _state_commitment_path(self, generation: int) -> Path:
+        if type(generation) is not int or generation < 0:
+            raise DeploymentDrainError(
+                "DEPLOYMENT_STATE_COMMITMENT_GENERATION_INVALID",
+                "state commitment generation is invalid",
+            )
+        return self.state_commitment_dir / f"{generation:020d}.json"
 
     def _checkpoint_path(self, checkpoint_sha256: str) -> Path:
         if (
@@ -1696,6 +2239,55 @@ class DeploymentDrainService:
         finally:
             os.close(fd)
         _fsync_directory(path.parent)
+
+    def _write_create_only_atomic(self, path: Path, data: bytes) -> None:
+        """Publish complete immutable bytes without exposing a partial final file."""
+
+        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        fd = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+        )
+        try:
+            _write_all(fd, data)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        try:
+            os.link(temporary, path, follow_symlinks=False)
+            _fsync_directory(path.parent)
+        finally:
+            try:
+                temporary.unlink()
+                _fsync_directory(path.parent)
+            except FileNotFoundError:
+                pass
+
+    def _cleanup_state_commitment_temporaries(self) -> None:
+        prefix = "."
+        suffix = ".tmp"
+        removed = False
+        for path in self.state_commitment_dir.iterdir():
+            name = path.name
+            if not (name.startswith(prefix) and name.endswith(suffix)):
+                continue
+            parts = name.split(".")
+            if (
+                len(parts) != 5
+                or len(parts[1]) != 20
+                or not parts[1].isdigit()
+                or parts[2] != "json"
+                or len(parts[3]) != 32
+                or any(character not in "0123456789abcdef" for character in parts[3])
+                or parts[4] != "tmp"
+            ):
+                continue
+            self._read_secure_file(path)
+            path.unlink()
+            removed = True
+        if removed:
+            _fsync_directory(self.state_commitment_dir)
 
     def _now(self) -> datetime:
         value = self.clock()
