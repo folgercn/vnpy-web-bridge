@@ -206,6 +206,15 @@ class Settings(BaseSettings):
     commodity_c_fast_simnow_research_expected_signer_sha256: str = ""
     commodity_c_fast_simnow_research_acceptance_expected_signer_sha256: str = ""
     commodity_c_fast_simnow_research_artifact_paths_json: str = "{}"
+    commodity_c_fast_runtime_authorization_enabled: bool = False
+    commodity_c_fast_map_strategy_acceptance_path: str = ""
+    commodity_c_fast_allocation_acceptance_path: str = ""
+    commodity_c_fast_runtime_authorization_path: str = ""
+    commodity_c_fast_runtime_authorization_trusted_keyring_path: str = ""
+    commodity_c_fast_runtime_authorization_expected_keyring_raw_sha256: str = ""
+    commodity_c_fast_runtime_authorization_state_dir: str = (
+        "logs/commodity-c-fast-runtime-authorization"
+    )
     commodity_c_fast_fee_statement_trusted_keyring_path: str = ""
     commodity_c_fast_fee_statement_expected_keyring_raw_sha256: str = ""
     commodity_c_fast_fee_statement_historical_trust_profiles_json: str = "[]"
@@ -510,6 +519,31 @@ class Settings(BaseSettings):
             ):
                 raise ValueError(
                     "COMMODITY_C_FAST_SIMNOW_RESEARCH_ARTIFACT_PATHS_JSON must bind all nine #165 Research artifacts"
+                )
+        if self.commodity_c_fast_runtime_authorization_enabled:
+            runtime_authority_paths = (
+                self.commodity_c_fast_map_strategy_acceptance_path,
+                self.commodity_c_fast_allocation_acceptance_path,
+                self.commodity_c_fast_runtime_authorization_path,
+                self.commodity_c_fast_runtime_authorization_trusted_keyring_path,
+                self.commodity_c_fast_runtime_authorization_state_dir,
+            )
+            resolved_runtime_authority_paths = [
+                Path(value).expanduser().resolve()
+                for value in runtime_authority_paths
+                if value.strip()
+            ]
+            if (
+                any(not value.strip() for value in runtime_authority_paths)
+                or len(set(resolved_runtime_authority_paths))
+                != len(runtime_authority_paths)
+                or not re.fullmatch(
+                    r"[0-9a-f]{64}",
+                    self.commodity_c_fast_runtime_authorization_expected_keyring_raw_sha256,
+                )
+            ):
+                raise ValueError(
+                    "C_FAST Runtime Authorization artifact, keyring, state paths and keyring pin must be complete and distinct"
                 )
         if self.app_env.lower() != "production":
             return self

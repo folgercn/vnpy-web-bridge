@@ -138,6 +138,7 @@ def test_mount_overlay_is_explicit_read_only_and_keeps_authority_off() -> None:
     service = payload["services"]["web-bridge"]
 
     assert service["environment"] == {
+        "COMMODITY_C_FAST_RUNTIME_AUTHORIZATION_ENABLED": "false",
         "COMMODITY_C_FAST_SIMNOW_SHAKEDOWN_ENABLED": "false",
         "COMMODITY_C_FAST_SIMNOW_AUTO_DISPATCH_ENABLED": "false",
         "COMMODITY_C_FAST_SIMNOW_EXECUTION_PERMIT_ENABLED": "false",

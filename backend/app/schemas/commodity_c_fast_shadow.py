@@ -63,6 +63,14 @@ class CFastShakedownResearchBindingsDTO(CFastResearchBindingsDTO):
     input_bundle_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
+class CFastRuntimeResearchBindingsDTO(CFastResearchBindingsDTO):
+    snapshot_producer_status: Literal[
+        "IMPLEMENTED_SIGNED_MAP_C_FAST_RUNTIME_V1"
+    ]
+    producer_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    input_bundle_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class CFastGuardrailsDTO(StrictFiniteModel):
     source_product_abs_cap: Literal[0.2]
     source_sector_gross_cap: Literal[0.35]
@@ -208,8 +216,48 @@ class CommodityCFastShakedownSnapshotDTO(CommodityCFastShadowDTO):
     )
 
 
+class CommodityCFastRuntimeExecutableSnapshotDTO(CommodityCFastShadowDTO):
+    """Period-signed MAP → C_FAST target for persistent SimNow authority.
+
+    Unlike the legacy shakedown DTO, this schema deliberately has no period
+    Control Acceptance, short-lived Execution Permit, account or expiry fields.
+    Those belong to version Acceptances and Runtime Authorization respectively.
+    """
+
+    schema_version: Literal[
+        "commodity_map_c_fast_simnow_executable_target_snapshot_v1"
+    ]
+    mode: Literal["simnow_runtime"]
+    execution_lane: Literal["simnow_shakedown"]
+    countable_forward: Literal[False]
+    live_allowed: Literal[False]
+    research_bindings: CFastRuntimeResearchBindingsDTO
+    research_observed_at_utc: datetime
+    map_acceptance_id: str = Field(
+        pattern=r"^commodity-map-accept-v1-[0-9a-f]{64}$",
+    )
+    map_acceptance_raw_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    map_strategy_projection_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    map_signal_artifact_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    c_fast_allocation_acceptance_id: str = Field(
+        pattern=r"^commodity-c-fast-allocation-accept-v1-[0-9a-f]{64}$",
+    )
+    c_fast_allocation_acceptance_raw_sha256: str = Field(
+        pattern=r"^[0-9a-f]{64}$"
+    )
+    c_fast_allocation_projection_sha256: str = Field(
+        pattern=r"^[0-9a-f]{64}$"
+    )
+    runtime_selected_products: list[Product] = Field(min_length=1, max_length=2)
+    executable_target_binding_sha256: str = Field(
+        pattern=r"^[0-9a-f]{64}$"
+    )
+
+
 CommodityCFastRuntimeSnapshotDTO = (
-    CommodityCFastShadowDTO | CommodityCFastShakedownSnapshotDTO
+    CommodityCFastShadowDTO
+    | CommodityCFastShakedownSnapshotDTO
+    | CommodityCFastRuntimeExecutableSnapshotDTO
 )
 
 
