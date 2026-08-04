@@ -227,7 +227,7 @@ def test_real_trade_rpc_lock_disable_preempts_child_send(
                 role="admin",
                 source_ip=None,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - thread forwards failure
             start_errors.append(exc)
 
     def revoke() -> None:
@@ -300,7 +300,7 @@ def test_real_trade_rpc_final_guard_revalidates_fresh_quote_updates(
                 role="admin",
                 source_ip=None,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - thread forwards failure
             start_errors.append(exc)
 
     monkeypatch.setattr(
@@ -395,7 +395,7 @@ def test_real_trade_rpc_final_guard_revalidates_durable_authority(
                 role="admin",
                 source_ip=None,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - thread forwards failure
             start_errors.append(exc)
 
     monkeypatch.setattr(
@@ -645,7 +645,7 @@ def test_real_trade_rpc_send_linearizes_before_late_abort(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client = ControlledRpcClient(block_send=True)
-    service, rpc, risk = make_real_trade_service(
+    service, _rpc, risk = make_real_trade_service(
         tmp_path,
         monkeypatch,
         client=client,
@@ -666,7 +666,7 @@ def test_real_trade_rpc_send_linearizes_before_late_abort(
                 role="admin",
                 source_ip=None,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - thread forwards failure
             start_errors.append(exc)
 
     def revoke() -> None:
@@ -715,12 +715,13 @@ def test_real_trade_rpc_reconnect_never_retries_child_send(
     )
     replacement_client = ControlledRpcClient()
 
-    def controlled_restart() -> None:
+    def controlled_restart(restarting_rpc: VnpyRpcService) -> None:
+        assert restarting_rpc is rpc
         rpc.client = replacement_client  # type: ignore[assignment]
         rpc.started = True
         rpc.last_connected_at = datetime(2026, 9, 1, 8, 1, tzinfo=timezone.utc)
 
-    monkeypatch.setattr(rpc, "start", controlled_restart)
+    monkeypatch.setattr(VnpyRpcService, "start", controlled_restart)
     preview = service.preview_c_fast_shakedown(["ag", "al"], operator="admin", role="admin", source_ip=None)["preview"]
 
     with pytest.raises(CommoditySimNowStateError) as exc_info:
