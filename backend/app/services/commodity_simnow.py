@@ -39,11 +39,11 @@ from app.core.errors import (
     RpcTimeoutError,
     RpcUnavailableError,
 )
-from app.schemas.commodity_c_fast_execution_permit import (
-    CommodityCFastSimNowExecutionPermitDTO,
-)
 from app.schemas.commodity_baseline_execution_permit import (
     baseline_execution_plan_core_payload,
+)
+from app.schemas.commodity_c_fast_execution_permit import (
+    CommodityCFastSimNowExecutionPermitDTO,
 )
 from app.schemas.commodity_c_fast_shadow import (
     CommodityCFastRuntimeExecutableSnapshotDTO,
@@ -65,23 +65,23 @@ from app.schemas.common import STATUS_VALUE_MAP
 from app.schemas.trade import OrderRequestDTO
 from app.services.audit_service import AuditService, audit_service
 from app.services.calendar_service import calendar_service
-from app.services.commodity_c_fast_one_shot_custody import (
-    CommodityCFastOneShotCustody,
-    CommodityCFastOneShotCustodyError,
+from app.services.commodity_baseline_execution_permit import (
+    CommodityBaselineExecutionPermitService,
+    PreparedCommodityBaselinePermit,
 )
 from app.services.commodity_c_fast_continuous_runtime import (
     ContinuousDecision,
     completed_snapshot_outcome,
     resolve_continuous_authority,
 )
+from app.services.commodity_c_fast_one_shot_custody import (
+    CommodityCFastOneShotCustody,
+    CommodityCFastOneShotCustodyError,
+)
 from app.services.commodity_c_fast_runtime_authorization import (
     CommodityCFastRuntimeAuthorizationService,
 )
 from app.services.commodity_c_fast_shadow import C_FAST_SECTOR_MAP_V1
-from app.services.commodity_baseline_execution_permit import (
-    CommodityBaselineExecutionPermitService,
-    PreparedCommodityBaselinePermit,
-)
 from app.services.risk_service import RiskService, risk_service
 from app.services.trade_service import (
     TradeService,
@@ -148,6 +148,7 @@ def _serialized(method):
         if method.__name__ in {
             "disable",
             "revoke_all_execution_authority",
+            "revoke_c_fast_runtime_authorization",
             "stop_c_fast_shakedown",
             "stop_position_manager_shakedown",
         }:
@@ -1070,7 +1071,7 @@ class CommoditySimNowService:
             anchored, _archived, expected = (
                 self._c_fast_continuous_terminal_anchor()
             )
-            safety = self._safety_snapshot(require_trade_enabled=True)
+            safety = self._safety_snapshot(require_trade_enabled=False)
             self._verify_c_fast_account(str(safety["account_hash"]))
             if safety["account_hash"] != anchored.get("account_hash"):
                 raise CommoditySimNowSafetyError(
@@ -1088,6 +1089,11 @@ class CommoditySimNowService:
                     "C_FAST 连续运行恢复前持仓与终态不一致",
                     detail={"expected": expected, "observed": observed},
                 )
+            if not safety["web_trade_enabled"]:
+                return {
+                    "action": "waiting",
+                    "reason": "web_trade_disabled",
+                }
         except (RpcUnavailableError, RpcTimeoutError, RpcCallError) as exc:
             return {
                 "action": "waiting",
@@ -1220,6 +1226,13 @@ class CommoditySimNowService:
             operational_state = "EXECUTING"
             waiting = False
             hard_blocked = False
+        elif (
+            runtime.get("state") == "ACTIVE"
+            and not self.risk.status().get("web_trade_enabled")
+        ):
+            operational_state = "WAITING_WEB_TRADE_DISABLED"
+            waiting = True
+            hard_blocked = False
         elif runtime.get("state") == "ACTIVE":
             operational_state = "WAITING_NEW_SNAPSHOT"
             waiting = True
@@ -1290,7 +1303,7 @@ class CommoditySimNowService:
             session, _archived, expected = (
                 self._c_fast_continuous_terminal_anchor()
             )
-            safety = self._safety_snapshot(require_trade_enabled=True)
+            safety = self._safety_snapshot(require_trade_enabled=False)
             self._verify_c_fast_account(str(safety["account_hash"]))
             if (
                 safety["account_hash"] != session.get("account_hash")
@@ -1308,6 +1321,24 @@ class CommoditySimNowService:
                 raise CommoditySimNowSafetyError(
                     "Runtime Authorization 启用前持仓与终态不一致"
                 )
+            if not safety["web_trade_enabled"]:
+                self.c_fast_continuous_authorized = False
+                self.c_fast_shakedown_auto_dispatch_authorized = False
+                waiting_result = {
+                    "action": "runtime_authorization_enabled_waiting",
+                    **result,
+                    "reason": "web_trade_disabled",
+                    "production_allowed": False,
+                }
+                self.audit.record(
+                    action="commodity_c_fast_runtime_authorization_enable_waiting",
+                    user_id=operator,
+                    role=role,
+                    request={"reason": payload.reason},
+                    result=waiting_result,
+                    source_ip=source_ip,
+                )
+                return waiting_result
         except (RpcUnavailableError, RpcTimeoutError, RpcCallError) as exc:
             self.c_fast_continuous_authorized = False
             self.c_fast_shakedown_auto_dispatch_authorized = False
@@ -1369,20 +1400,25 @@ class CommoditySimNowService:
             revoked_by=operator,
             reason=payload.reason,
         )
-        self._set_c_fast_continuous_authorized(False)
-        self.c_fast_shakedown_auto_dispatch_authorized = False
+        halt = self._begin_safe_halt(
+            "runtime_authorization_revoked",
+            operator=operator,
+            source_ip=source_ip,
+            revoke_scope="c_fast_shakedown",
+        )
         self.audit.record(
             action="commodity_c_fast_runtime_authorization_revoke",
             user_id=operator,
             role=role,
             request={"reason": payload.reason},
-            result=result,
+            result={**result, "halt": halt},
             source_ip=source_ip,
         )
         return {
             "action": "runtime_authorization_revoked",
             **result,
             "revoke_reason": payload.reason,
+            "halt": halt,
             "production_allowed": False,
         }
 
@@ -2856,8 +2892,13 @@ class CommoditySimNowService:
             }
         snapshot_hash: str | None = None
         try:
-            safety = self._safety_snapshot(require_trade_enabled=True)
+            safety = self._safety_snapshot(require_trade_enabled=False)
             self._verify_c_fast_account(str(safety["account_hash"]))
+            if not safety["web_trade_enabled"]:
+                return {
+                    "action": "waiting",
+                    "reason": "web_trade_disabled",
+                }
             previous_session = self._load_c_fast_shakedown_state()
             if (
                 not isinstance(previous_session, dict)

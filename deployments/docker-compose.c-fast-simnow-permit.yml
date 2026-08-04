@@ -28,6 +28,9 @@ services:
         bind:
           create_host_path: false
       - type: bind
+        # Runtime Authorization state uses the dedicated
+        # /run/c-fast-simnow/one-shot/runtime-authorization-state subdirectory
+        # so legacy deployments retain the same explicit writable mount.
         source: ${COMMODITY_C_FAST_SIMNOW_ONE_SHOT_HOST_DIR:?required_for_explicit_c_fast_simnow_mount}
         target: /run/c-fast-simnow/one-shot
         read_only: false

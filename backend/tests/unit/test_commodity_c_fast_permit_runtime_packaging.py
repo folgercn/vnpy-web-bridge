@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 import yaml
 
@@ -161,6 +161,9 @@ def test_mount_overlay_is_explicit_read_only_and_keeps_authority_off() -> None:
         and volume["bind"] == {"create_host_path": False}
         and ":?required_for_explicit_c_fast_simnow_mount}" in volume["source"]
         for volume in volumes
+    )
+    assert "runtime-authorization-state" in COMPOSE_OVERLAY.read_text(
+        encoding="utf-8"
     )
 
 

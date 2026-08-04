@@ -33,10 +33,15 @@ Authorization，不允许通过 profile 或 API 切换到生产账户。
    上限和产品/板块/gross/net caps。
 5. 生成并签署 Runtime Authorization；artifact 与状态目录必须 owner-only，启用和
    revoke 都留下 create-only 审计记录。
-6. 使用 admin enable API 显式启用。启动过程不得自动创建或迁移授权。
-7. 在交易关闭状态完成账户、持仓、活动委托、RPC、terminal archive chain 和前序
-   signed target ownership 只读预检。
-8. 仅在上述结果一致后，按既有发布流程启用 SimNow 与自动派单。
+6. 在 Web 交易关闭状态使用 admin enable API；该调用完成账户、持仓、活动委托、
+   RPC、terminal archive chain 和前序 signed target ownership 只读预检，返回
+   `runtime_authorization_enabled_waiting/web_trade_disabled`，不会撤销 Runtime
+   Authorization 或下单。启动过程
+   不得自动创建或迁移授权。
+7. 确认 Runtime Authorization 状态仍为 `ACTIVE`，且运行状态明确显示
+   `WAITING_WEB_TRADE_DISABLED`。
+8. 仅在上述结果一致后，按既有发布流程启用 Web 交易与自动派单；恢复时必须重新
+   执行完整只读预检。
 
 ## M2 配置
 
@@ -49,13 +54,16 @@ COMMODITY_C_FAST_ALLOCATION_ACCEPTANCE_PATH=/run/c-fast-simnow/artifacts/allocat
 COMMODITY_C_FAST_RUNTIME_AUTHORIZATION_PATH=/run/c-fast-simnow/artifacts/runtime-authorization.json
 COMMODITY_C_FAST_RUNTIME_AUTHORIZATION_TRUSTED_KEYRING_PATH=/run/c-fast-simnow/keyrings/runtime-authority-keyring.json
 COMMODITY_C_FAST_RUNTIME_AUTHORIZATION_EXPECTED_KEYRING_RAW_SHA256=<canonical-keyring-raw-sha256>
-COMMODITY_C_FAST_RUNTIME_AUTHORIZATION_STATE_DIR=/run/c-fast-simnow/runtime-authorization-state
+COMMODITY_C_FAST_RUNTIME_AUTHORIZATION_STATE_DIR=/run/c-fast-simnow/one-shot/runtime-authorization-state
 ```
 
 `backend/.env.example` 提供空路径/default-off 模板；M2 permit Compose overlay
 只强制 `COMMODITY_C_FAST_RUNTIME_AUTHORIZATION_ENABLED=false`，不会保存账户、
 密钥、签名 artifact 或 keyring pin。私有部署 profile 才能填写绝对路径和 raw
-SHA256；启用前须保证 artifact/keyring 只读，state dir owner-only 且可写。
+SHA256；启用前须保证 artifact/keyring 只读。Runtime Authorization state 使用
+现有 owner-only 可写 one-shot 持久卷中的独立 `runtime-authorization-state/`
+子目录，保证 enable/revoke 审计链在容器重建后仍可恢复，同时不增加默认关闭时
+的 Compose 必填变量。
 
 ## API
 
