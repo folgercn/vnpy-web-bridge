@@ -9,9 +9,19 @@ from typing import Any, Callable, Mapping
 from zoneinfo import ZoneInfo
 
 from app.core.config import Settings, get_settings
-from app.core.errors import RpcCallError, RpcTimeoutError, RpcUnavailableError
+from app.core.errors import (
+    DeploymentDrainActiveError,
+    RpcCallError,
+    RpcTimeoutError,
+    RpcUnavailableError,
+)
 from app.schemas.common import to_plain_dict, to_plain_list
 from app.services.market_data_service import market_data_service
+from app.services.deployment_drain import (
+    DeploymentDrainError,
+    DeploymentDrainService,
+    deployment_drain_for,
+)
 from app.services.tick_persistence import tick_persistence_service
 from app.stores.memory_store import memory_store
 from app.ws.events import ws_message
@@ -95,8 +105,19 @@ class BridgeRpcClient(RpcClient):  # type: ignore[misc,valid-type]
 
 
 class VnpyRpcService:
-    def __init__(self, settings: Settings | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        deployment_drain: DeploymentDrainService | None = None,
+    ) -> None:
         self.settings = settings or get_settings()
+        self.deployment_drain = deployment_drain or deployment_drain_for(
+            self.settings.deployment_drain_state_root,
+            allow_initial_bootstrap=(
+                self.settings.deployment_drain_initial_bootstrap_allowed
+                or self.settings.app_env.lower() == "test"
+            ),
+        )
         self.client: BridgeRpcClient | None = None
         self.started = False
         self.last_connected_at: datetime | None = None
@@ -327,6 +348,27 @@ class VnpyRpcService:
         }
 
     def call(self, name: str, *args: Any, timeout: int | None = None, **kwargs: Any) -> Any:
+        if name == "send_order":
+            try:
+                with self.deployment_drain.mutation_guard():
+                    return self._call_under_deployment_gate(
+                        name, *args, timeout=timeout, **kwargs
+                    )
+            except DeploymentDrainError as exc:
+                raise DeploymentDrainActiveError(
+                    detail={"gate_code": exc.code}
+                ) from exc
+        return self._call_under_deployment_gate(
+            name, *args, timeout=timeout, **kwargs
+        )
+
+    def _call_under_deployment_gate(
+        self,
+        name: str,
+        *args: Any,
+        timeout: int | None = None,
+        **kwargs: Any,
+    ) -> Any:
         if not self.started or not self.client:
             raise RpcUnavailableError()
 
@@ -487,13 +529,22 @@ class VnpyRpcService:
         linearization_lock: Any | None = None,
     ) -> Any:
         """Linearize the final guard and non-idempotent send with abort."""
-        with self._call_lock:
-            if linearization_lock is None:
-                guard()
-                return self.send_order(order_request, gateway_name)
-            with linearization_lock:
-                guard()
-                return self.send_order(order_request, gateway_name)
+        try:
+            with self.deployment_drain.mutation_guard(), self._call_lock:
+                if linearization_lock is None:
+                    guard()
+                    return self._call_under_deployment_gate(
+                        "send_order", order_request, gateway_name
+                    )
+                with linearization_lock:
+                    guard()
+                    return self._call_under_deployment_gate(
+                        "send_order", order_request, gateway_name
+                    )
+        except DeploymentDrainError as exc:
+            raise DeploymentDrainActiveError(
+                detail={"gate_code": exc.code}
+            ) from exc
 
     def cancel_order(self, cancel_request: "CancelRequest", gateway_name: str) -> Any:
         return self.call("cancel_order", cancel_request, gateway_name)

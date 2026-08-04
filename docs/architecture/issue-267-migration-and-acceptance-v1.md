@@ -187,6 +187,21 @@ Rollback：不能恢复旧的 `image_changed → web-bridge` 自动部署。若 
 
 范围：在当前 `web-bridge` 尚未拆分时实现 deployment lock / `DRAINING` 状态、拒绝新 command/plan、短 TTL safe-to-restart receipt 和部署前二次核验。receipt 必须绑定 execution epoch、plan version、活动委托快照、nonce 与 checkpoint hash；失败后显式保持或解除 drain。
 
+为避免半接线门禁被误当作可部署能力，PR 1-pre 分两步合并：
+
+- **1-pre-A（admission foundation）**：建立持久化全局 gate，并覆盖最终订单发送、交易启用/风控规则变更、CTA init/start/update；定义 receipt/recheck/consume 契约及离线结构校验。`scripts/deploy.sh` 即使验证通过也无条件阻塞，且不得消费 receipt。
+- **1-pre-B（online activation）**：补齐 Commodity command/plan/startup authority，在线原子快照、部署前二次核验、一次性消费和重启后 reconciliation。只有该步验收完成后才能移除部署硬冻结。
+
+1-pre-A 不得宣称完整 PR 1-pre 已完成；磁盘上的 receipt/recheck 文件不能代替运行进程持锁生成的在线证据。Execution Orchestrator 在 Phase 2 专用 receipt 契约落地前禁止重启。
+
+运行环境默认 `DEPLOYMENT_DRAIN_INITIAL_BOOTSTRAP_ALLOWED=false`。首次 custody bootstrap 必须是显式、干净且非 production 的准备步骤；production 禁止打开该开关。`state.json` 缺失、epoch anchor 缺失或 epoch 回退均保持冻结，不得重建为 RUNNING。
+
+首次生产迁移必须先停止 `web-bridge`、确认交易禁用，再使用已验证的 Python 3.12 镜像（必须绑定 immutable digest）执行：`docker --context desktop-linux run --rm --network none --mount type=bind,src=/Users/fujun/services/vnpy-web-bridge/logs,dst=/custody <validation-image@sha256:digest> python -m app.services.deployment_drain_bootstrap --state-root /custody/deployment-drain --operator <操作员> --reason <原因> --confirm-offline-trading-disabled`。不得调用 M2 host 的 Python 3.9。Bootstrap 模块随 backend 打包，并在镜像 build 中执行 `py_compile` 和 frozen-state smoke；工具只允许 fresh custody、只执行一次，并初始化为 `RESTARTED_FROZEN`。容器使用与实际 `web-bridge` 相同的 root runtime UID，对同一 bind-mounted logs 写入后，应用的 owner 校验保持一致。它不授权部署或交易。必须等待 1-pre-B 的在线基线 reconciliation 完成后，才允许受控解冻。
+
+DTO 属于语义层，可接收等价的 UTC datetime，持久化前统一输出 `Z`；receipt/recheck/consume 的原始 artifact schema 只接受 `Z` 文本。当前 epoch anchor 防止单文件缺失或回退以及正常崩溃写入不一致；不把 state 与 anchor 所在整个持久卷同时回滚纳入本地可检测威胁模型。Phase 6 必须用卷外审计/high-water 证据覆盖整卷快照回退。
+
+1-pre-B 的锁顺序固定为 `deployment gate → Commodity cycle lock → RPC call lock`；禁止从 Commodity cycle lock 内反向申请 deployment gate。合并前必须用真实 Trade/Commodity 并发测试证明 drain 与 send/snapshot 不死锁，且 consume/reconciliation 只能接收同锁在线证据。
+
 Cutover：先以禁交易、无订单方式验证 lock acquisition、并发 command rejection、receipt expiry 和 release；该 PR 不改变 8080、镜像拓扑或订单 owner。
 
 Rollback：只在未持有有效 deployment lock 且无运行迁移时回滚；lock/receipt audit 保留。无法判断 lock 状态时保持冻结并 roll forward。

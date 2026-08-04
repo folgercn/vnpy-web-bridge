@@ -19,6 +19,47 @@ DEPLOY_MAINTENANCE_TTL_SECONDS=${DEPLOY_MAINTENANCE_TTL_SECONDS:-300}
 DEPLOY_SMOKE_URL=${DEPLOY_SMOKE_URL:-http://127.0.0.1:8080/api/health/live}
 DEPLOY_SMOKE_TIMEOUT_SECONDS=${DEPLOY_SMOKE_TIMEOUT_SECONDS:-180}
 
+# Phase 1-pre-A recognizes exactly one deploy target.  Reject malformed,
+# unknown or multi-service input before any filesystem, Docker or network use.
+if [[ "$DEPLOY_SERVICES" != "web-bridge" ]]; then
+  echo "Unsupported DEPLOY_SERVICES value: $DEPLOY_SERVICES" >&2
+  echo "Allowed value in Phase 1-pre-A: web-bridge" >&2
+  exit 2
+fi
+
+require_safe_restart_gate() {
+  : "${SAFE_RESTART_RECEIPT_PATH:?SAFE_RESTART_RECEIPT_PATH is required for web-bridge deployment}"
+  : "${SAFE_RESTART_RECHECK_PATH:?SAFE_RESTART_RECHECK_PATH is required for web-bridge deployment}"
+  : "${DEPLOY_RELEASE_PLAN_ID:?DEPLOY_RELEASE_PLAN_ID is required for web-bridge deployment}"
+  : "${DEPLOY_SOURCE_COMMIT_SHA:?DEPLOY_SOURCE_COMMIT_SHA is required for web-bridge deployment}"
+
+  local script_dir
+  local receipt_schema
+  local recheck_schema
+  script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+  receipt_schema=${SAFE_RESTART_RECEIPT_SCHEMA_PATH:-$script_dir/../docs/schemas/web-bridge-safe-restart-receipt-v1.schema.json}
+  recheck_schema=${SAFE_RESTART_RECHECK_SCHEMA_PATH:-$script_dir/../docs/schemas/web-bridge-safe-restart-recheck-v1.schema.json}
+  "${SAFE_RESTART_GATE_PYTHON:-python3}" "$script_dir/verify_safe_restart_gate.py" \
+    --receipt "$SAFE_RESTART_RECEIPT_PATH" \
+    --recheck "$SAFE_RESTART_RECHECK_PATH" \
+    --receipt-schema "$receipt_schema" \
+    --recheck-schema "$recheck_schema" \
+    --expected-plan-id "$DEPLOY_RELEASE_PLAN_ID" \
+    --expected-source-commit "$DEPLOY_SOURCE_COMMIT_SHA" \
+    --expected-unit web-bridge \
+    --max-recheck-age-seconds "${SAFE_RESTART_MAX_RECHECK_AGE_SECONDS:-30}"
+
+  # Phase 1-pre-A installs the admission/custody primitives but deliberately
+  # does not activate a production restart consumer.  Disk artifacts alone
+  # are not online recheck authority, even when structurally valid.
+  echo "web-bridge deployment remains frozen until Phase 1-pre-B online recheck activation" >&2
+  exit 2
+}
+
+# This must remain before traps, maintenance files, Docker discovery/login,
+# compose inspection, SSH, or any other deployment side effect.
+require_safe_restart_gate
+
 write_maintenance() {
   local status=$1
   local reason=${2:-}
@@ -182,19 +223,7 @@ echo "Deploy image: ${IMAGE_REPO}:${IMAGE_TAG}"
 echo "Deploy services: ${DEPLOY_SERVICES}"
 write_maintenance running "deploy in progress"
 
-deploy_args=()
-for service in $DEPLOY_SERVICES; do
-  case "$service" in
-    web-bridge)
-      deploy_args+=("$service")
-      ;;
-    *)
-      echo "Unsupported DEPLOY_SERVICES entry: $service" >&2
-      echo "Allowed services: web-bridge" >&2
-      exit 2
-      ;;
-  esac
-done
+deploy_args=(web-bridge)
 
 if [[ "$DEPLOY_SKIP_PULL" != "true" ]]; then
   "${COMPOSE_CMD[@]}" "${COMPOSE_ARGS[@]}" pull "${deploy_args[@]}"

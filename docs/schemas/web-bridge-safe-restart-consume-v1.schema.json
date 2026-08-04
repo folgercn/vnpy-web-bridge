@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vnpy-web-bridge:schema:web-bridge-safe-restart-consume-v1",
+  "title": "Web Bridge safe restart one-shot consume marker v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "purpose", "consume_id", "consume_core_sha256", "receipt_id", "receipt_raw_sha256", "receipt_core_sha256", "deployment_attempt_id", "release_plan_core_sha256", "restart_action_sha256", "drain_epoch", "execution_epoch", "consumed_at", "consumer_run_id", "operator", "recheck_canonical_sha256", "one_shot_consumed", "automatic_deploy_allowed", "production_allowed", "live_trading_authorized"],
+  "properties": {
+    "schema_version": {"const": "web_bridge_safe_restart_consume_v1"},
+    "purpose": {"const": "consume_safe_restart_receipt_once"},
+    "consume_id": {"$ref": "#/$defs/consumeId"},
+    "consume_core_sha256": {"$ref": "#/$defs/sha256", "description": "SHA-256 of RFC 8785/JCS canonical JSON for this object after removing consume_id and consume_core_sha256; consume_id must equal safe-restart-consume-{consume_core_sha256}."},
+    "receipt_id": {"$ref": "#/$defs/receiptId"},
+    "receipt_raw_sha256": {"$ref": "#/$defs/sha256"},
+    "receipt_core_sha256": {"$ref": "#/$defs/sha256"},
+    "deployment_attempt_id": {"$ref": "#/$defs/identifier"},
+    "release_plan_core_sha256": {"$ref": "#/$defs/sha256"},
+    "restart_action_sha256": {"$ref": "#/$defs/sha256"},
+    "drain_epoch": {"type": "integer", "minimum": 1},
+    "execution_epoch": {"type": "integer", "minimum": 1},
+    "consumed_at": {"$ref": "#/$defs/dateTime"},
+    "consumer_run_id": {"$ref": "#/$defs/identifier"},
+    "operator": {"type": "string", "minLength": 1, "maxLength": 128},
+    "recheck_canonical_sha256": {"$ref": "#/$defs/sha256", "description": "SHA-256 of RFC 8785/JCS canonical JSON for the validated recheck object."},
+    "one_shot_consumed": {"const": true},
+    "automatic_deploy_allowed": {"const": false},
+    "production_allowed": {"const": false},
+    "live_trading_authorized": {"const": false}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^(?!0{64}$)[0-9a-f]{64}$"},
+    "consumeId": {"type": "string", "pattern": "^safe-restart-consume-(?!0{64}$)[0-9a-f]{64}$"},
+    "receiptId": {"type": "string", "pattern": "^safe-restart-(?!0{64}$)[0-9a-f]{64}$"},
+    "identifier": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$"},
+    "dateTime": {"type": "string", "format": "date-time", "pattern": "Z$"}
+  }
+}

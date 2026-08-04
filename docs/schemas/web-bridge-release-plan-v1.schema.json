@@ -103,6 +103,7 @@
     "imageDigest": {"type": "string", "pattern": "^sha256:(?!0{64}$)[0-9a-f]{64}$"},
     "version": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$"},
     "dateTime": {"type": "string", "format": "date-time"},
+    "safeRestartUtcDateTime": {"type": "string", "format": "date-time", "pattern": "Z$"},
     "schemaCompatibility": {
       "type": "object",
       "additionalProperties": false,
@@ -148,29 +149,64 @@
     "safeRestartReceipt": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schema_version", "receipt_id", "plan_id", "source_commit_sha", "unit", "issued_at", "expires_at", "ttl_seconds", "execution_epoch", "plan_version", "state_version", "state_sha256", "active_orders_snapshot_sha256", "nonce", "checkpoint_sha256", "safe_to_restart", "active_orders", "unknown_outcome", "reconcile_required", "checkpoint_durable", "evidence_sha256"],
+      "required": ["schema_version", "purpose", "receipt_id", "receipt_core_sha256", "request_id", "deployment_attempt_id", "release_plan_id", "release_plan_core_sha256", "restart_action_sha256", "unit", "issued_at", "expires_at", "ttl_seconds", "drain_epoch", "execution_epoch", "issuer_source_commit_sha", "issuer_image_digest", "issuer_config_sha256", "issuer_runtime_instance_id", "target_source_commit_sha", "target_image_digest", "target_config_sha256", "rollback_image_digest", "rollback_config_sha256", "nonce", "snapshot", "safe_to_restart", "one_shot", "automatic_deploy_allowed", "production_allowed", "live_trading_authorized"],
       "properties": {
         "schema_version": {"const": "web_bridge_safe_restart_receipt_v1"},
+        "purpose": {"const": "authorize_one_bound_web_bridge_restart_attempt"},
         "receipt_id": {"$ref": "#/$defs/receiptId"},
-        "plan_id": {"$ref": "#/$defs/planId"},
-        "source_commit_sha": {"$ref": "#/$defs/commit"},
-        "unit": {"$ref": "#/$defs/serviceId"},
-        "issued_at": {"$ref": "#/$defs/dateTime"},
-        "expires_at": {"$ref": "#/$defs/dateTime"},
+        "receipt_core_sha256": {"$ref": "#/$defs/sha256", "description": "SHA-256 of RFC 8785/JCS canonical JSON for this object after removing receipt_id and receipt_core_sha256; receipt_id must equal safe-restart-{receipt_core_sha256}."},
+        "request_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$"},
+        "deployment_attempt_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$"},
+        "release_plan_id": {"$ref": "#/$defs/planId"},
+        "release_plan_core_sha256": {"$ref": "#/$defs/sha256", "description": "SHA-256 of RFC 8785/JCS canonical release-plan JSON with every restart action's safe_restart_receipt and receipt verification runtime fields removed."},
+        "restart_action_sha256": {"$ref": "#/$defs/sha256", "description": "SHA-256 of RFC 8785/JCS canonical restart-action JSON after removing safe_restart_receipt and all receipt verification runtime fields."},
+        "unit": {"const": "web-bridge"},
+        "issued_at": {"$ref": "#/$defs/safeRestartUtcDateTime"},
+        "expires_at": {"$ref": "#/$defs/safeRestartUtcDateTime"},
         "ttl_seconds": {"type": "integer", "minimum": 1, "maximum": 300},
+        "drain_epoch": {"type": "integer", "minimum": 1},
         "execution_epoch": {"type": "integer", "minimum": 1},
-        "plan_version": {"$ref": "#/$defs/version"},
-        "state_version": {"$ref": "#/$defs/version"},
+        "issuer_source_commit_sha": {"$ref": "#/$defs/commit"},
+        "issuer_image_digest": {"$ref": "#/$defs/imageDigest"},
+        "issuer_config_sha256": {"$ref": "#/$defs/sha256"},
+        "issuer_runtime_instance_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$"},
+        "target_source_commit_sha": {"$ref": "#/$defs/commit"},
+        "target_image_digest": {"$ref": "#/$defs/imageDigest"},
+        "target_config_sha256": {"$ref": "#/$defs/sha256"},
+        "rollback_image_digest": {"$ref": "#/$defs/imageDigest"},
+        "rollback_config_sha256": {"$ref": "#/$defs/sha256"},
+        "nonce": {"type": "string", "pattern": "^(?!0+$)[A-Za-z0-9_-]{16,128}$"},
+        "snapshot": {"$ref": "#/$defs/safeRestartSnapshot"},
+        "safe_to_restart": {"const": true},
+        "one_shot": {"const": true},
+        "automatic_deploy_allowed": {"const": false},
+        "production_allowed": {"const": false},
+        "live_trading_authorized": {"const": false}
+      }
+    },
+    "safeRestartSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "captured_at", "execution_plan_status", "execution_plan_hash", "plan_version", "state_version", "state_sha256", "active_orders_snapshot_sha256", "positions_snapshot_sha256", "checkpoint_sha256", "rpc_generation", "web_trade_enabled", "execution_authority_revoked", "auto_dispatch_stopped", "active_orders", "unknown_outcome", "reconcile_required", "checkpoint_durable"],
+      "properties": {
+        "schema_version": {"const": "web_bridge_deployment_safety_snapshot_v1"},
+        "captured_at": {"$ref": "#/$defs/safeRestartUtcDateTime"},
+        "execution_plan_status": {"const": "IDLE"},
+        "execution_plan_hash": {"type": "null"},
+        "plan_version": {"type": "integer", "minimum": 0},
+        "state_version": {"type": "string", "minLength": 1, "maxLength": 128},
         "state_sha256": {"$ref": "#/$defs/sha256"},
         "active_orders_snapshot_sha256": {"$ref": "#/$defs/sha256"},
-        "nonce": {"type": "string", "pattern": "^(?!0+$)[A-Za-z0-9_-]{16,128}$"},
+        "positions_snapshot_sha256": {"$ref": "#/$defs/sha256"},
         "checkpoint_sha256": {"$ref": "#/$defs/sha256"},
-        "safe_to_restart": {"const": true},
+        "rpc_generation": {"type": "integer", "minimum": 0},
+        "web_trade_enabled": {"const": false},
+        "execution_authority_revoked": {"const": true},
+        "auto_dispatch_stopped": {"const": true},
         "active_orders": {"const": 0},
         "unknown_outcome": {"const": false},
         "reconcile_required": {"const": false},
-        "checkpoint_durable": {"const": true},
-        "evidence_sha256": {"$ref": "#/$defs/sha256"}
+        "checkpoint_durable": {"const": true}
       }
     },
     "restartAction": {
@@ -211,17 +247,7 @@
         },
         {
           "if": {"properties": {"unit": {"const": "execution-orchestrator"}}},
-          "then": {
-            "properties": {
-              "safety_gate": {"const": "required_verified"},
-              "safe_restart_receipt": {
-                "allOf": [
-                  {"$ref": "#/$defs/safeRestartReceipt"},
-                  {"properties": {"unit": {"const": "execution-orchestrator"}}}
-                ]
-              }
-            }
-          }
+          "then": false
         },
         {
           "if": {"properties": {"safety_gate": {"const": "not_required"}}},

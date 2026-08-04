@@ -1,21 +1,24 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
 import pytest
-
 from app.core.config import Settings
 from app.core.errors import (
     ClosePositionNotEnoughError,
+    DeploymentDrainActiveError,
     RiskExchangeNotAllowedError,
     RiskMaxOrderVolumeError,
     RiskPriceProtectionError,
-    RiskTradingTimeError,
     RiskSymbolBlockedError,
+    RiskTradingTimeError,
     TradeDisabledError,
 )
 from app.schemas.risk import RiskRulesPatchDTO
 from app.schemas.trade import OrderRequestDTO
+from app.services.deployment_drain import DeploymentDrainError
 from app.services.risk_service import RiskService
 from app.services.vnpy_rpc_service import rpc_service
 from app.stores.memory_store import memory_store
@@ -48,9 +51,27 @@ def make_service(*, max_order_volume: int = 1) -> RiskService:
     )
 
 
+class FakeDeploymentDrain:
+    def __init__(self, state: str = "RUNNING") -> None:
+        self.state = state
+        self.guard_entries = 0
+
+    @contextmanager
+    def mutation_guard(self) -> Iterator[dict[str, str]]:
+        self.guard_entries += 1
+        if self.state != "RUNNING":
+            raise DeploymentDrainError(
+                "DEPLOYMENT_DRAIN_ACTIVE", "sensitive internal path omitted"
+            )
+        yield {"state": self.state}
+
+    def status(self) -> dict[str, str]:
+        return {"state": self.state}
+
+
 def allow_rpc(monkeypatch, *, contracts: list[dict] | None = None) -> None:
     monkeypatch.setattr(rpc_service, "status", lambda: {"connected": True})
-    monkeypatch.setattr(rpc_service, "get_positions", lambda: [])
+    monkeypatch.setattr(rpc_service, "get_positions", list)
     monkeypatch.setattr(
         rpc_service,
         "get_contracts",
@@ -72,6 +93,60 @@ def test_update_rules_bumps_version() -> None:
 
     assert result["max_order_volume"] == 2
     assert service.status()["rules_version"] == 2
+
+
+def test_frozen_drain_blocks_positive_risk_mutations_without_state_change() -> None:
+    drain = FakeDeploymentDrain("DRAINING")
+    service = RiskService(
+        Settings(web_trade_enabled=False, risk_max_order_volume=1),
+        deployment_drain=drain,  # type: ignore[arg-type]
+    )
+    rules_before = service.get_rules()
+
+    with pytest.raises(DeploymentDrainActiveError) as enable_error:
+        service.enable_trade()
+    with pytest.raises(DeploymentDrainActiveError) as rules_error:
+        service.update_rules(RiskRulesPatchDTO(max_order_volume=9))
+
+    assert enable_error.value.detail == {"gate_code": "DEPLOYMENT_DRAIN_ACTIVE"}
+    assert rules_error.value.detail == {"gate_code": "DEPLOYMENT_DRAIN_ACTIVE"}
+    assert service.web_trade_enabled is False
+    assert service.get_rules() == rules_before
+    assert service.rules_version == 1
+    assert drain.guard_entries == 2
+
+
+def test_frozen_drain_allows_disable_emergency_and_status() -> None:
+    drain = FakeDeploymentDrain("SAFE_TO_RESTART")
+    service = RiskService(
+        Settings(web_trade_enabled=True),
+        deployment_drain=drain,  # type: ignore[arg-type]
+    )
+
+    disabled = service.disable_trade()
+    stopped = service.emergency_stop()
+
+    assert disabled["web_trade_enabled"] is False
+    assert stopped["web_trade_enabled"] is False
+    assert stopped["emergency_stopped"] is True
+    assert service.status() == stopped
+    assert drain.guard_entries == 0
+
+
+def test_running_drain_preserves_positive_risk_behavior() -> None:
+    drain = FakeDeploymentDrain()
+    service = RiskService(
+        Settings(web_trade_enabled=False, risk_max_order_volume=1),
+        deployment_drain=drain,  # type: ignore[arg-type]
+    )
+
+    enabled = service.enable_trade()
+    rules = service.update_rules(RiskRulesPatchDTO(max_order_volume=3))
+
+    assert enabled["web_trade_enabled"] is True
+    assert rules["max_order_volume"] == 3
+    assert service.rules_version == 2
+    assert drain.guard_entries == 2
 
 
 def test_exchange_not_allowed(monkeypatch) -> None:
@@ -132,7 +207,7 @@ def test_price_protection(monkeypatch) -> None:
 def test_missing_contract_rejects_order(monkeypatch) -> None:
     service = make_service()
     allow_rpc(monkeypatch)
-    monkeypatch.setattr(rpc_service, "get_contracts", lambda: [])
+    monkeypatch.setattr(rpc_service, "get_contracts", list)
 
     with pytest.raises(RiskSymbolBlockedError):
         service.check_order(make_order())
