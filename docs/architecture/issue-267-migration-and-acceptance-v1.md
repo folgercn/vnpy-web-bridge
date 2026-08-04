@@ -204,6 +204,8 @@ DTO 属于语义层，可接收等价的 UTC datetime，持久化前统一输出
 
 1-pre-B A1 完成后，Commodity 的 enable/restore/preview/start/execute/auto/public reconcile 等正向入口先获取全局 gate，嵌套入口复用外层 gate；read/status 与 disable/revoke/stop/halt 仅在 cycle 内串行，drain 期间只保留严格限定为 `CANCEL_PENDING`/`HALTED_RECONCILE_REQUIRED`/`HALTED_RECONCILED` 的内部 reconciliation 收口。非测试运行要求 Commodity、Trade、Risk、RPC 持有同一 gate 对象。构造阶段只读检查终态 custody，不得在确认 RUNNING 前清理或改写 active plan；DRAINING/RESTARTED_FROZEN 启动不恢复持久授权、不启动 auto worker。A1 不提供 online snapshot、consume 或 reconciliation authority，`scripts/deploy.sh` 仍无条件阻塞。
 
+1-pre-B A2 使用 Windows Gateway 的非交易 snapshot fence `get_deployment_safety_snapshot_v1(request_id, challenge)`：扩展先接管最终 `send_order`/`cancel_order` admission、冻结新 mutation 并等待在途调用，再将 RPC 请求放入 vn.py EventEngine 队列，在事件线程的单一顺序点复制账户、全量委托、活动委托、成交和持仓；订单/成交/持仓/账户事件推进 `fact_generation`，send 已返回但回报尚未进入事件序列时计入 `pending_send_outcomes`，禁止用 Linux 侧连续多次 getter 冒充原子快照。Linux 在 `deployment gate → Commodity cycle → RPC` 下校验 request/challenge 回显、新鲜度、唯一 allowlisted 账户和该契约，将账户仅保存为 hash，并生成与 request/runtime/drain/execution epoch 绑定的 owner-only、create-only checkpoint；文件和目录 fsync、按安全 fd readback、exact-byte SHA-256 全部成功后才允许 `checkpoint_durable=true`。重启会先递增 execution epoch、保持 `RESTARTED_FROZEN`，再验证被作废 receipt 指向的 checkpoint；缺失、篡改、权限或交叉 hash 异常均 fail closed。Windows 扩展在本 PR 只提供版本化代码和测试，不部署或重启现有 Gateway。A2 不暴露 Windows unfreeze RPC，online drain 也不能走 legacy Linux release；双边保持冻结，等待 B/C/D 的 challenge-bound consume/reconciliation，`scripts/deploy.sh` 同样继续冻结。
+
 Cutover：先以禁交易、无订单方式验证 lock acquisition、并发 command rejection、receipt expiry 和 release；该 PR 不改变 8080、镜像拓扑或订单 owner。
 
 Rollback：只在未持有有效 deployment lock 且无运行迁移时回滚；lock/receipt audit 保留。无法判断 lock 状态时保持冻结并 roll forward。

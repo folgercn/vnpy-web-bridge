@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from threading import RLock
 from time import monotonic
 from typing import Any, Callable, Mapping
@@ -16,6 +18,7 @@ from app.core.errors import (
     RpcUnavailableError,
 )
 from app.schemas.common import to_plain_dict, to_plain_list
+from app.schemas.deployment_drain import DeploymentRpcFactsDTO
 from app.services.market_data_service import market_data_service
 from app.services.deployment_drain import (
     DeploymentDrainError,
@@ -60,6 +63,7 @@ RETRYABLE_RPC_METHODS = {
     "get_strategy_variables",
     "get_strategy_variable",
     "get_gateway_status",
+    "get_deployment_safety_snapshot_v1",
     "get_order",
     "get_bars",
     "query_history",
@@ -516,6 +520,120 @@ class VnpyRpcService:
     def get_active_orders_raw(self) -> list[Any]:
         orders = self.call_first(["get_all_active_orders", "get_all_orders"])
         return list(orders or [])
+
+    def capture_deployment_facts(
+        self,
+        *,
+        request_id: str,
+        challenge: str,
+    ) -> DeploymentRpcFactsDTO:
+        """Fetch one Windows EventEngine-linearized read-only fact set."""
+
+        payload = to_plain_dict(
+            self.call(
+                "get_deployment_safety_snapshot_v1",
+                request_id,
+                challenge,
+            )
+        )
+        required = {
+            "schema_version",
+            "request_id",
+            "challenge",
+            "server_instance_id",
+            "fact_generation",
+            "captured_at_utc",
+            "execution_admission_frozen",
+            "pending_send_outcomes",
+            "strategy_execution_enabled",
+            "accounts",
+            "orders",
+            "active_orders",
+            "trades",
+            "positions",
+        }
+        if set(payload) != required:
+            raise RpcCallError(
+                "Windows deployment snapshot fields are invalid"
+            )
+        if (
+            payload.get("request_id") != request_id
+            or payload.get("challenge") != challenge
+        ):
+            raise RpcCallError(
+                "Windows deployment snapshot challenge binding is invalid"
+            )
+        captured_at = payload.pop("captured_at_utc")
+        if not isinstance(captured_at, str) or not captured_at.endswith("Z"):
+            raise RpcCallError(
+                "Windows deployment snapshot timestamp is invalid"
+            )
+        try:
+            parsed_captured_at = datetime.fromisoformat(
+                captured_at.removesuffix("Z") + "+00:00"
+            )
+        except ValueError as exc:
+            raise RpcCallError(
+                "Windows deployment snapshot timestamp is invalid"
+            ) from exc
+        if parsed_captured_at.utcoffset() != timedelta(0):
+            raise RpcCallError(
+                "Windows deployment snapshot timestamp is not UTC"
+            )
+        observed_at = datetime.now(timezone.utc)
+        if (
+            parsed_captured_at > observed_at + timedelta(seconds=2)
+            or observed_at - parsed_captured_at > timedelta(seconds=30)
+        ):
+            raise RpcCallError(
+                "Windows deployment snapshot timestamp is outside freshness window"
+            )
+        accounts = to_plain_list(payload.pop("accounts"))
+        account_hashes: set[str] = set()
+        for account in accounts:
+            account_id = str(
+                account.get("accountid")
+                or account.get("account_id")
+                or account.get("vt_accountid")
+                or ""
+            )
+            if not account_id:
+                raise RpcCallError(
+                    "Windows deployment snapshot account identity is missing"
+                )
+            account_hashes.add(
+                hashlib.sha256(account_id.encode("utf-8")).hexdigest()
+            )
+
+        def canonical_rows(value: Any) -> list[dict[str, Any]]:
+            rows = to_plain_list(value)
+            try:
+                return sorted(
+                    rows,
+                    key=lambda row: json.dumps(
+                        row,
+                        allow_nan=False,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                )
+            except (TypeError, ValueError) as exc:
+                raise RpcCallError(
+                    "Windows deployment snapshot is not canonical JSON"
+                ) from exc
+
+        return DeploymentRpcFactsDTO.model_validate(
+            {
+                **payload,
+                "captured_at": parsed_captured_at,
+                "account_hashes": sorted(account_hashes),
+                "orders": canonical_rows(payload["orders"]),
+                "active_orders": canonical_rows(payload["active_orders"]),
+                "trades": canonical_rows(payload["trades"]),
+                "positions": canonical_rows(payload["positions"]),
+            }
+        )
 
     def send_order(self, order_request: "OrderRequest", gateway_name: str) -> Any:
         return self.call("send_order", order_request, gateway_name)

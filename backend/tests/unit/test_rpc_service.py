@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import hashlib
+from datetime import datetime, timedelta, timezone
 from threading import Event, Thread
 
 import pytest
@@ -67,6 +68,44 @@ class ProbeClient:
         return []
 
 
+class DeploymentSnapshotClient:
+    def __init__(self, payload: dict[str, object]) -> None:
+        self.payload = payload
+
+    def get_deployment_safety_snapshot_v1(
+        self,
+        request_id: str,
+        challenge: str,
+        *,
+        timeout: int,
+    ):
+        return self.payload
+
+
+def deployment_snapshot_payload() -> dict[str, object]:
+    return {
+        "schema_version": "windows_rpc_deployment_safety_snapshot_v1",
+        "request_id": "request-rpc-snapshot-0001",
+        "challenge": "rpc-snapshot-challenge-0001",
+        "server_instance_id": "windows-rpc-test-instance",
+        "fact_generation": 11,
+        "captured_at_utc": datetime.now(timezone.utc).isoformat().replace(
+            "+00:00", "Z"
+        ),
+        "execution_admission_frozen": True,
+        "pending_send_outcomes": 0,
+        "strategy_execution_enabled": False,
+        "accounts": [{"accountid": "account-a", "gateway_name": "CTP"}],
+        "orders": [
+            {"vt_orderid": "CTP.2", "status": "cancelled"},
+            {"vt_orderid": "CTP.1", "status": "all_traded"},
+        ],
+        "active_orders": [],
+        "trades": [],
+        "positions": [],
+    }
+
+
 class FlakyProbeClient:
     def __init__(self) -> None:
         self.calls = 0
@@ -113,6 +152,59 @@ def test_rpc_call_timeout_is_normalized(monkeypatch) -> None:
 
     with pytest.raises(RpcTimeoutError):
         service.call("get_all_contracts", timeout=1)
+
+
+def test_deployment_snapshot_client_hashes_accounts_and_sorts_facts() -> None:
+    service = VnpyRpcService()
+    service.started = True
+    service.client = DeploymentSnapshotClient(  # type: ignore[assignment]
+        deployment_snapshot_payload()
+    )
+
+    facts = service.capture_deployment_facts(
+        request_id="request-rpc-snapshot-0001",
+        challenge="rpc-snapshot-challenge-0001",
+    )
+
+    assert facts.account_hashes == [
+        hashlib.sha256(b"account-a").hexdigest()
+    ]
+    assert [row["vt_orderid"] for row in facts.orders] == ["CTP.1", "CTP.2"]
+    assert facts.fact_generation == 11
+
+
+def test_deployment_snapshot_client_rejects_contract_drift() -> None:
+    payload = deployment_snapshot_payload()
+    payload["unexpected"] = True
+    service = VnpyRpcService()
+    service.started = True
+    service.client = DeploymentSnapshotClient(payload)  # type: ignore[assignment]
+
+    with pytest.raises(RpcCallError, match="fields are invalid"):
+        service.capture_deployment_facts(
+            request_id="request-rpc-snapshot-0001",
+            challenge="rpc-snapshot-challenge-0001",
+        )
+
+
+@pytest.mark.parametrize("failure", ["stale", "challenge"])
+def test_deployment_snapshot_client_rejects_replay(failure: str) -> None:
+    payload = deployment_snapshot_payload()
+    if failure == "stale":
+        payload["captured_at_utc"] = (
+            datetime.now(timezone.utc) - timedelta(minutes=1)
+        ).isoformat().replace("+00:00", "Z")
+    else:
+        payload["challenge"] = "different-rpc-challenge-0001"
+    service = VnpyRpcService()
+    service.started = True
+    service.client = DeploymentSnapshotClient(payload)  # type: ignore[assignment]
+
+    with pytest.raises(RpcCallError):
+        service.capture_deployment_facts(
+            request_id="request-rpc-snapshot-0001",
+            challenge="rpc-snapshot-challenge-0001",
+        )
 
 
 def test_rpc_call_timeout_rebuilds_client_before_next_request(monkeypatch) -> None:

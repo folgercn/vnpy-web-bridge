@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import datetime, timedelta
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
@@ -73,6 +73,29 @@ def _canonical_sha256(value: object) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _strict_canonical_sha256(value: object) -> str:
+    encoded = json.dumps(
+        value,
+        allow_nan=False,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _normalize_order_status(value: object) -> str:
+    raw = str(value or "").strip()
+    return {
+        "提交中": "submitting",
+        "未成交": "not_traded",
+        "部分成交": "part_traded",
+        "全部成交": "all_traded",
+        "已撤销": "cancelled",
+        "拒单": "rejected",
+    }.get(raw, raw.lower().replace(" ", "_").replace("-", "_"))
+
+
 class StrictDeploymentDrainModel(BaseModel):
     """Semantic DTOs normalize UTC inputs; emitted artifact JSON is canonical Z."""
 
@@ -106,6 +129,140 @@ class DeploymentSafetySnapshotDTO(StrictDeploymentDrainModel):
     @model_validator(mode="after")
     def validate_snapshot(self) -> DeploymentSafetySnapshotDTO:
         _require_utc(self.captured_at, "captured_at")
+        return self
+
+
+class DeploymentRpcFactsDTO(StrictDeploymentDrainModel):
+    schema_version: Literal["windows_rpc_deployment_safety_snapshot_v1"]
+    request_id: Identifier
+    challenge: Nonce
+    server_instance_id: Identifier
+    fact_generation: int = Field(strict=True, ge=0)
+    captured_at: datetime
+    execution_admission_frozen: Literal[True]
+    pending_send_outcomes: int = Field(strict=True, ge=0)
+    strategy_execution_enabled: Literal[False]
+    account_hashes: list[Sha256]
+    orders: list[dict[str, Any]]
+    active_orders: list[dict[str, Any]]
+    trades: list[dict[str, Any]]
+    positions: list[dict[str, Any]]
+
+    @model_validator(mode="after")
+    def validate_facts(self) -> DeploymentRpcFactsDTO:
+        _require_utc(self.captured_at, "rpc captured_at")
+        _strict_canonical_sha256(self.model_dump(mode="json"))
+        if self.account_hashes != sorted(set(self.account_hashes)):
+            raise ValueError("account hashes must be unique and sorted")
+        for name in ("orders", "active_orders", "trades", "positions"):
+            rows = getattr(self, name)
+            canonical = [
+                json.dumps(
+                    row,
+                    allow_nan=False,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                for row in rows
+            ]
+            if canonical != sorted(canonical):
+                raise ValueError(f"{name} must be canonically sorted")
+            if len(canonical) != len(set(canonical)):
+                raise ValueError(f"{name} must not contain duplicate facts")
+        order_facts = {
+            json.dumps(
+                row,
+                allow_nan=False,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            for row in self.orders
+        }
+        active_facts = {
+            json.dumps(
+                row,
+                allow_nan=False,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            for row in self.active_orders
+        }
+        active_statuses = {
+            "submitting",
+            "submitting_order",
+            "not_traded",
+            "part_traded",
+        }
+        for row in self.active_orders:
+            encoded = json.dumps(
+                row,
+                allow_nan=False,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            if encoded not in order_facts:
+                raise ValueError("active order is missing from all orders")
+            if _normalize_order_status(row.get("status")) not in active_statuses:
+                raise ValueError("active order has a non-active status")
+        for row in self.orders:
+            if _normalize_order_status(row.get("status")) in active_statuses:
+                encoded = json.dumps(
+                    row,
+                    allow_nan=False,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                if encoded not in active_facts:
+                    raise ValueError("active all-order is missing from active orders")
+        return self
+
+
+class DeploymentOnlineCheckpointDTO(StrictDeploymentDrainModel):
+    schema_version: Literal["web_bridge_deployment_online_checkpoint_v1"]
+    request_id: Identifier
+    runtime_instance_id: Identifier
+    drain_epoch: int = Field(strict=True, ge=1)
+    execution_epoch: int = Field(strict=True, ge=1)
+    execution_plan_status: str = Field(min_length=1, max_length=64)
+    execution_plan_hash: Sha256 | None
+    plan_version: int = Field(strict=True, ge=0)
+    state_version: Literal["web_bridge_deployment_online_checkpoint_v1"]
+    state: dict[str, Any]
+    state_sha256: Sha256
+    rpc: DeploymentRpcFactsDTO
+    active_orders_snapshot_sha256: Sha256
+    positions_snapshot_sha256: Sha256
+    web_trade_enabled: bool
+    execution_authority_revoked: bool
+    auto_dispatch_stopped: bool
+    active_orders: int = Field(strict=True, ge=0)
+    unknown_outcome: bool
+    reconcile_required: bool
+    automatic_deploy_allowed: Literal[False]
+    production_allowed: Literal[False]
+    live_trading_authorized: Literal[False]
+
+    @model_validator(mode="after")
+    def validate_hash_bindings(self) -> DeploymentOnlineCheckpointDTO:
+        if self.rpc.request_id != self.request_id:
+            raise ValueError("checkpoint RPC request binding mismatch")
+        if self.state_sha256 != _strict_canonical_sha256(self.state):
+            raise ValueError("checkpoint state hash mismatch")
+        if self.active_orders_snapshot_sha256 != _strict_canonical_sha256(
+            self.rpc.active_orders
+        ):
+            raise ValueError("checkpoint active-orders hash mismatch")
+        if self.positions_snapshot_sha256 != _strict_canonical_sha256(
+            self.rpc.positions
+        ):
+            raise ValueError("checkpoint positions hash mismatch")
+        if self.active_orders != len(self.rpc.active_orders):
+            raise ValueError("checkpoint active-orders count mismatch")
         return self
 
 
