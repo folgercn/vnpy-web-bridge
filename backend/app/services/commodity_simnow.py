@@ -90,6 +90,10 @@ KNOWN_ORDER_STATUSES = (
 )
 MAX_C_FAST_TERMINAL_ARCHIVE_BYTES = 16 * 1024 * 1024
 C_FAST_TERMINAL_ARCHIVE_LOCK = ".terminal-archive.lock"
+C_FAST_CONTINUOUS_RETRYABLE_CONTROL_CODES = {
+    "SNAPSHOT_NOT_PREVIOUSLY_ACCEPTED",
+    "SNAPSHOT_NOT_CURRENTLY_ACCEPTED",
+}
 
 STATIC_CORE_SECTOR_MAP_ID = COMMODITY_FROZEN_SECTOR_MAP_V1_ID
 STATIC_CORE_SECTOR_MAP_V1 = commodity_frozen_sector_map_v1()
@@ -2665,6 +2669,28 @@ class CommoditySimNowService:
                 role=role,
                 source_ip=source_ip,
             )
+        except CommoditySimNowSafetyError as exc:
+            error_code = str(exc.detail.get("error_code") or "")
+            if error_code in C_FAST_CONTINUOUS_RETRYABLE_CONTROL_CODES:
+                self._event(
+                    "c_fast_continuous_waiting_for_control_acceptance",
+                    result={"error_code": error_code},
+                )
+                return {
+                    "action": "waiting",
+                    "reason": "control_snapshot_not_yet_accepted",
+                    "error_code": error_code,
+                }
+            self._revoke_auto_dispatch("c_fast_shakedown")
+            self._event(
+                "c_fast_continuous_halted",
+                result={
+                    "error_type": exc.__class__.__name__,
+                    "error_code": error_code or None,
+                    "source_snapshot_hash": snapshot_hash,
+                },
+            )
+            raise
         except (RpcUnavailableError, RpcTimeoutError, RpcCallError) as exc:
             self._event(
                 "c_fast_continuous_waiting_for_rpc",

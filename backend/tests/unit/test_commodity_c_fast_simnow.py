@@ -3813,6 +3813,43 @@ def test_c_fast_continuous_trust_failure_revokes_persisted_authority(
     )
 
 
+@pytest.mark.parametrize(
+    "error_code",
+    [
+        "SNAPSHOT_NOT_PREVIOUSLY_ACCEPTED",
+        "SNAPSHOT_NOT_CURRENTLY_ACCEPTED",
+    ],
+)
+def test_c_fast_continuous_waits_for_control_acceptance_without_revocation(
+    tmp_path: Path,
+    error_code: str,
+) -> None:
+    service, rpc, snapshot, _ = prepare_c_fast_shakedown(tmp_path)
+    complete_c_fast_continuous_session(service, rpc, snapshot)
+
+    class PendingControlAcceptanceError(RuntimeError):
+        code = error_code
+
+    service.bind_c_fast_snapshot_identity_provider(
+        lambda: (_ for _ in ()).throw(
+            PendingControlAcceptanceError(error_code)
+        )
+    )
+
+    result = service.auto_c_fast_continuous_advance()
+
+    assert result == {
+        "action": "waiting",
+        "reason": "control_snapshot_not_yet_accepted",
+        "error_code": error_code,
+    }
+    assert service.c_fast_continuous_authorized is True
+    assert (
+        service._load_c_fast_shakedown_state()["continuous_authorized"]
+        is True
+    )
+
+
 def test_c_fast_pre_submit_risk_failure_revokes_continuous_authority(
     tmp_path: Path,
 ) -> None:
