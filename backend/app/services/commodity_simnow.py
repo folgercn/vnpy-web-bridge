@@ -69,6 +69,7 @@ from app.schemas.deployment_drain import (
     DeploymentOnlineCheckpointDTO,
     DeploymentOnlineRecheckCheckpointDTO,
     DeploymentSafetySnapshotDTO,
+    SafeRestartConsumeCommitMarkerDTO,
     SafeRestartOnlineRecheckDTO,
 )
 from app.schemas.trade import OrderRequestDTO
@@ -1039,6 +1040,25 @@ class CommoditySimNowService:
             self._capture_online_deployment_recheck,
         )
         return self.deployment_drain.capture_online_recheck(owner=self)
+
+    def consume_deployment_drain(
+        self,
+        *,
+        consumer_run_id: str,
+        operator: str,
+    ) -> SafeRestartConsumeCommitMarkerDTO:
+        """Consume only the owner-bound durable recheck; caller supplies no facts."""
+
+        if self.deployment_drain is None:
+            raise DeploymentDrainError(
+                "DEPLOYMENT_DRAIN_UNAVAILABLE",
+                "Commodity has no process-wide deployment gate",
+            )
+        return self.deployment_drain.consume_active_online_recheck(
+            owner=self,
+            consumer_run_id=consumer_run_id,
+            operator=operator,
+        )
 
     def _deployment_checkpoint_projection(
         self,
