@@ -5,7 +5,14 @@ import json
 from datetime import datetime, timedelta
 from typing import Annotated, Any, Literal
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_serializer,
+    model_validator,
+)
 
 MAX_SAFE_RESTART_TTL = timedelta(seconds=300)
 
@@ -72,6 +79,33 @@ ReconciliationEvidenceId = Annotated[
     Field(pattern=r"^safe-restart-reconciliation-[0-9a-f]{64}$"),
     AfterValidator(
         lambda value: _nonzero_prefixed(value, "safe-restart-reconciliation-")
+    ),
+]
+InitialBaselineCheckpointId = Annotated[
+    str,
+    Field(pattern=r"^deployment-initial-baseline-checkpoint-[0-9a-f]{64}$"),
+    AfterValidator(
+        lambda value: _nonzero_prefixed(
+            value, "deployment-initial-baseline-checkpoint-"
+        )
+    ),
+]
+InitialBaselineCommodityCheckpointId = Annotated[
+    str,
+    Field(
+        pattern=r"^deployment-initial-baseline-commodity-checkpoint-[0-9a-f]{64}$"
+    ),
+    AfterValidator(
+        lambda value: _nonzero_prefixed(
+            value, "deployment-initial-baseline-commodity-checkpoint-"
+        )
+    ),
+]
+InitialBaselineEvidenceId = Annotated[
+    str,
+    Field(pattern=r"^initial-baseline-reconciliation-[0-9a-f]{64}$"),
+    AfterValidator(
+        lambda value: _nonzero_prefixed(value, "initial-baseline-reconciliation-")
     ),
 ]
 OnlineRecheckId = Annotated[
@@ -979,6 +1013,372 @@ class SafeRestartReconciliationEvidenceDTO(StrictDeploymentDrainModel):
             raise ValueError("restart reconciliation core hash mismatch")
         if self.reconciliation_id != f"safe-restart-reconciliation-{expected}":
             raise ValueError("restart reconciliation id does not match core hash")
+        return self
+
+
+class CommodityInitialBaselineStateDTO(StrictDeploymentDrainModel):
+    """Exact safe projection captured from durable Commodity owner state."""
+
+    schema_version: Literal["web_bridge_initial_baseline_commodity_state_v1"]
+    commodity_state_version: Literal["commodity-simnow-v1"]
+    commodity_state_checkpoint_sha256: Sha256
+    execution_plan_status: Literal["IDLE"]
+    execution_plan_hash: Literal[None]
+    plan_version: Literal[0]
+    web_trade_enabled: Literal[False]
+    execution_authority_revoked: Literal[True]
+    auto_dispatch_stopped: Literal[True]
+    unknown_outcome: Literal[False]
+    reconcile_required: Literal[False]
+    rpc_generation: int = Field(strict=True, ge=0)
+    active_orders_snapshot_sha256: Sha256
+    positions_snapshot_sha256: Sha256
+
+
+class DeploymentInitialBaselineCommodityCheckpointDTO(StrictDeploymentDrainModel):
+    """Exact Commodity owner projection for the first frozen execution baseline."""
+
+    schema_version: Literal[
+        "web_bridge_deployment_initial_baseline_commodity_checkpoint_v1"
+    ]
+    purpose: Literal["record_exact_non_authorizing_commodity_initial_baseline"]
+    mode: Literal["INITIAL_BASELINE"]
+    reconciliation_run_id: Identifier
+    checkpoint_id: InitialBaselineCommodityCheckpointId
+    checkpoint_core_sha256: Sha256
+    genesis_commitment_raw_sha256: Sha256
+    current_state_commitment_raw_sha256: Sha256
+    current_runtime_instance_id: Identifier
+    current_execution_epoch: int = Field(strict=True, ge=2)
+    captured_at: datetime
+    execution_plan_status: Literal["IDLE"]
+    execution_plan_hash: Literal[None]
+    plan_version: Literal[0]
+    state_version: Literal["web_bridge_initial_baseline_commodity_state_v1"]
+    state: CommodityInitialBaselineStateDTO
+    state_sha256: Sha256
+    initial_rpc: DeploymentRpcFactsDTO
+    active_orders_snapshot_sha256: Sha256
+    positions_snapshot_sha256: Sha256
+    web_trade_enabled: Literal[False]
+    execution_authority_revoked: Literal[True]
+    auto_dispatch_stopped: Literal[True]
+    active_orders: Literal[0]
+    unknown_outcome: Literal[False]
+    reconcile_required: Literal[False]
+    deployment_authorized: Literal[False]
+    automatic_deploy_allowed: Literal[False]
+    production_allowed: Literal[False]
+    live_trading_authorized: Literal[False]
+    countable_forward: Literal[False]
+
+    @model_validator(mode="after")
+    def validate_checkpoint(
+        self,
+    ) -> DeploymentInitialBaselineCommodityCheckpointDTO:
+        _require_utc(self.captured_at, "initial Commodity checkpoint captured_at")
+        if self.initial_rpc.captured_at > self.captured_at:
+            raise ValueError("initial RPC cannot follow Commodity checkpoint")
+        if self.initial_rpc.pending_send_outcomes or self.initial_rpc.active_orders:
+            raise ValueError("initial Commodity checkpoint is not frozen and idle")
+        if self.state_sha256 != _strict_canonical_sha256(
+            self.state.model_dump(mode="json")
+        ):
+            raise ValueError("initial Commodity state hash mismatch")
+        if self.active_orders_snapshot_sha256 != _strict_canonical_sha256(
+            self.initial_rpc.active_orders
+        ) or self.positions_snapshot_sha256 != _strict_canonical_sha256(
+            self.initial_rpc.positions
+        ):
+            raise ValueError("initial Commodity execution snapshot hash mismatch")
+        if (
+            self.state.execution_plan_status != self.execution_plan_status
+            or self.state.execution_plan_hash != self.execution_plan_hash
+            or self.state.plan_version != self.plan_version
+            or self.state.web_trade_enabled != self.web_trade_enabled
+            or self.state.execution_authority_revoked
+            != self.execution_authority_revoked
+            or self.state.auto_dispatch_stopped != self.auto_dispatch_stopped
+            or self.state.unknown_outcome != self.unknown_outcome
+            or self.state.reconcile_required != self.reconcile_required
+            or self.state.rpc_generation != self.initial_rpc.fact_generation
+            or self.state.active_orders_snapshot_sha256
+            != self.active_orders_snapshot_sha256
+            or self.state.positions_snapshot_sha256
+            != self.positions_snapshot_sha256
+        ):
+            raise ValueError("initial Commodity state projection mismatch")
+        core = self.model_dump(mode="json")
+        core.pop("checkpoint_id")
+        core.pop("checkpoint_core_sha256")
+        expected = _strict_canonical_sha256(core)
+        if self.checkpoint_core_sha256 != expected or self.checkpoint_id != (
+            f"deployment-initial-baseline-commodity-checkpoint-{expected}"
+        ):
+            raise ValueError("initial Commodity checkpoint identity mismatch")
+        return self
+
+
+class DeploymentInitialBaselineDrainStateDTO(StrictDeploymentDrainModel):
+    """Exact pristine frozen state accepted by the C1b checkpoint DTO."""
+
+    schema_version: Literal["web_bridge_deployment_drain_state_v3"]
+    state_generation: int = Field(strict=True, ge=3)
+    previous_state_commitment_raw_sha256: Sha256
+    state: Literal["RESTARTED_FROZEN"]
+    drain_epoch: Literal[0]
+    execution_epoch: int = Field(strict=True, ge=2)
+    runtime_instance_id: Identifier
+    active_request_id: Literal[None]
+    active_request_sha256: Literal[None]
+    active_receipt_id: Literal[None]
+    active_receipt_raw_sha256: Literal[None]
+    receipt_consumed: Literal[False]
+    consumed_at: Literal[None]
+    consume_id: Literal[None]
+    consumed_receipt_id: Literal[None]
+    consume_intent_raw_sha256: Literal[None]
+    consume_marker_raw_sha256: Literal[None]
+    consume_state_projection_sha256: Literal[None]
+    consumed_online_recheck_id: Literal[None]
+    consumed_online_recheck_raw_sha256: Literal[None]
+    preconsume_state_commitment_raw_sha256: Literal[None]
+    active_online_recheck_id: Literal[None]
+    active_online_recheck_raw_sha256: Literal[None]
+    active_recheck_checkpoint_raw_sha256: Literal[None]
+    online_rechecked_at: Literal[None]
+    last_invalidated_online_recheck_id: Literal[None]
+    last_invalidated_receipt_id: Literal[None]
+    blockers: list[str]
+    expires_at: Literal[None]
+    freeze_reason: Literal["initial_bootstrap_requires_reconciliation"]
+    updated_at: datetime
+
+    @field_serializer("updated_at", when_used="json")
+    def serialize_updated_at(self, value: datetime) -> str:
+        """Preserve the drain service's committed ``+00:00`` representation."""
+
+        return value.isoformat()
+
+    @model_validator(mode="after")
+    def validate_state(self) -> DeploymentInitialBaselineDrainStateDTO:
+        _require_utc(self.updated_at, "initial baseline drain state updated_at")
+        if self.blockers:
+            raise ValueError("initial baseline drain state blockers must be empty")
+        return self
+
+
+class DeploymentInitialBaselineCheckpointDTO(StrictDeploymentDrainModel):
+    """Non-authorizing C1b checkpoint rooted in fresh bootstrap custody."""
+
+    schema_version: Literal["web_bridge_deployment_initial_baseline_checkpoint_v1"]
+    purpose: Literal["record_non_authorizing_fresh_initial_execution_baseline"]
+    mode: Literal["INITIAL_BASELINE"]
+    reconciliation_run_id: Identifier
+    checkpoint_id: InitialBaselineCheckpointId
+    checkpoint_core_sha256: Sha256
+    genesis_commitment_id: StateCommitmentId
+    genesis_commitment_raw_sha256: Sha256
+    genesis_commitment_core_sha256: Sha256
+    genesis_state_raw_sha256: Sha256
+    current_state_commitment_id: StateCommitmentId
+    current_state_commitment_raw_sha256: Sha256
+    current_state_commitment_core_sha256: Sha256
+    current_state_generation: int = Field(strict=True, ge=3)
+    state_commitment_chain_sha256: Sha256
+    current_epoch_anchor_raw_sha256: Sha256
+    current_runtime_instance_id: Identifier
+    current_execution_epoch: int = Field(strict=True, ge=2)
+    current_drain_state: DeploymentInitialBaselineDrainStateDTO
+    current_drain_state_raw_sha256: Sha256
+    expected_account_hash: Sha256
+    commodity_checkpoint_id: InitialBaselineCommodityCheckpointId
+    commodity_checkpoint_raw_sha256: Sha256
+    commodity_checkpoint_core_sha256: Sha256
+    commodity_checkpoint: DeploymentInitialBaselineCommodityCheckpointDTO
+    fresh_rpc: DeploymentRpcRecheckFactsDTO
+    initial_execution_facts_canonical_sha256: Sha256
+    fresh_execution_facts_canonical_sha256: Sha256
+    orders_snapshot_sha256: Sha256
+    active_orders_snapshot_sha256: Sha256
+    trades_snapshot_sha256: Sha256
+    positions_snapshot_sha256: Sha256
+    captured_at: datetime
+    fresh_genesis_lineage_verified: Literal[True]
+    custody_inventory_verified: Literal[False]
+    prior_execution_facts_available: Literal[False]
+    comparison_to_prebootstrap_facts_performed: Literal[False]
+    initial_execution_facts_baseline_recorded: Literal[True]
+    execution_facts_reconciliation_completed: Literal[True]
+    semantic_safety_unchanged: Literal[False]
+    target_runtime_verified: Literal[False]
+    reconciliation_completed: Literal[False]
+    windows_fence_released: Literal[False]
+    authority_restore_allowed: Literal[False]
+    consume_authorized: Literal[False]
+    reconciliation_authorized: Literal[False]
+    deployment_authorized: Literal[False]
+    automatic_deploy_allowed: Literal[False]
+    production_allowed: Literal[False]
+    live_trading_authorized: Literal[False]
+    countable_forward: Literal[False]
+
+    @model_validator(mode="after")
+    def validate_checkpoint(self) -> DeploymentInitialBaselineCheckpointDTO:
+        _require_utc(self.captured_at, "initial baseline checkpoint captured_at")
+        if self.fresh_rpc.captured_at > self.captured_at:
+            raise ValueError("fresh RPC capture cannot follow checkpoint capture")
+        if (
+            self.commodity_checkpoint.initial_rpc.request_id
+            != self.fresh_rpc.request_id
+            or self.commodity_checkpoint.initial_rpc.challenge
+            != self.fresh_rpc.owner_challenge
+            or self.commodity_checkpoint.initial_rpc.server_instance_id
+            != self.fresh_rpc.original_server_instance_id
+            or self.commodity_checkpoint.initial_rpc.fact_generation
+            != self.fresh_rpc.original_fact_generation
+            or self.initial_execution_facts_canonical_sha256
+            != self.fresh_rpc.original_execution_facts_canonical_sha256
+            or self.fresh_execution_facts_canonical_sha256
+            != self.fresh_rpc.execution_facts_canonical_sha256
+        ):
+            raise ValueError("initial baseline RPC chain is not exact")
+        if self.commodity_checkpoint.initial_rpc.account_hashes != [
+            self.expected_account_hash
+        ] or (
+            self.fresh_rpc.account_hashes != [self.expected_account_hash]
+        ):
+            raise ValueError("initial baseline account scope changed")
+        initial_execution_sha = deployment_rpc_execution_facts_sha256(
+            self.commodity_checkpoint.initial_rpc
+        )
+        if (
+            self.initial_execution_facts_canonical_sha256
+            != initial_execution_sha
+            or self.fresh_execution_facts_canonical_sha256
+            != self.fresh_rpc.execution_facts_canonical_sha256
+            or self.fresh_execution_facts_canonical_sha256
+            != initial_execution_sha
+            or self.commodity_checkpoint.initial_rpc.orders != self.fresh_rpc.orders
+            or self.commodity_checkpoint.initial_rpc.active_orders
+            != self.fresh_rpc.active_orders
+            or self.commodity_checkpoint.initial_rpc.trades != self.fresh_rpc.trades
+            or self.commodity_checkpoint.initial_rpc.positions
+            != self.fresh_rpc.positions
+            or self.orders_snapshot_sha256
+            != _strict_canonical_sha256(self.fresh_rpc.orders)
+            or self.active_orders_snapshot_sha256
+            != _strict_canonical_sha256(self.fresh_rpc.active_orders)
+            or self.trades_snapshot_sha256
+            != _strict_canonical_sha256(self.fresh_rpc.trades)
+            or self.positions_snapshot_sha256
+            != _strict_canonical_sha256(self.fresh_rpc.positions)
+        ):
+            raise ValueError("initial baseline execution facts hash mismatch")
+        if (
+            self.commodity_checkpoint.initial_rpc.pending_send_outcomes != 0
+            or self.fresh_rpc.pending_send_outcomes != 0
+            or self.commodity_checkpoint.initial_rpc.active_orders
+            or self.fresh_rpc.active_orders
+            or self.commodity_checkpoint.initial_rpc.captured_at
+            > self.commodity_checkpoint.captured_at
+            or self.commodity_checkpoint.captured_at > self.fresh_rpc.captured_at
+            or self.fresh_rpc.captured_at > self.captured_at
+            or self.captured_at - self.commodity_checkpoint.initial_rpc.captured_at
+            > timedelta(seconds=30)
+        ):
+            raise ValueError("initial baseline facts are unsafe or stale")
+        if (
+            self.commodity_checkpoint.checkpoint_id != self.commodity_checkpoint_id
+            or self.commodity_checkpoint.checkpoint_core_sha256
+            != self.commodity_checkpoint_core_sha256
+            or self.commodity_checkpoint.active_orders_snapshot_sha256
+            != self.active_orders_snapshot_sha256
+            or self.commodity_checkpoint.positions_snapshot_sha256
+            != self.positions_snapshot_sha256
+        ):
+            raise ValueError("initial Commodity baseline projection is unsafe")
+        current_state_raw = (
+            json.dumps(
+                self.current_drain_state.model_dump(mode="json"),
+                allow_nan=False,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            + b"\n"
+        )
+        if self.current_drain_state_raw_sha256 != hashlib.sha256(
+            current_state_raw
+        ).hexdigest():
+            raise ValueError("initial baseline drain state raw hash mismatch")
+        if (
+            self.current_drain_state.state_generation
+            != self.current_state_generation
+            or self.current_drain_state.runtime_instance_id
+            != self.current_runtime_instance_id
+            or self.current_drain_state.execution_epoch
+            != self.current_execution_epoch
+        ):
+            raise ValueError("initial baseline drain state identity mismatch")
+        core = self.model_dump(mode="json")
+        core.pop("checkpoint_id")
+        core.pop("checkpoint_core_sha256")
+        expected = _strict_canonical_sha256(core)
+        if self.checkpoint_core_sha256 != expected or self.checkpoint_id != (
+            f"deployment-initial-baseline-checkpoint-{expected}"
+        ):
+            raise ValueError("initial baseline checkpoint identity mismatch")
+        return self
+
+
+class InitialBaselineReconciliationEvidenceDTO(StrictDeploymentDrainModel):
+    """C1b evidence only; C2 still owns real custody capture and activation."""
+
+    schema_version: Literal["web_bridge_initial_baseline_reconciliation_v1"]
+    purpose: Literal["record_non_authorizing_fresh_initial_baseline_evidence"]
+    mode: Literal["INITIAL_BASELINE"]
+    reconciliation_id: InitialBaselineEvidenceId
+    reconciliation_core_sha256: Sha256
+    checkpoint_id: InitialBaselineCheckpointId
+    checkpoint_raw_sha256: Sha256
+    checkpoint_core_sha256: Sha256
+    commodity_checkpoint_raw_sha256: Sha256
+    genesis_commitment_raw_sha256: Sha256
+    current_state_commitment_raw_sha256: Sha256
+    current_epoch_anchor_raw_sha256: Sha256
+    current_runtime_instance_id: Identifier
+    current_execution_epoch: int = Field(strict=True, ge=2)
+    expected_account_hash: Sha256
+    reconciled_at: datetime
+    fresh_initial_baseline_verified: Literal[True]
+    custody_inventory_verified: Literal[False]
+    initial_execution_facts_baseline_recorded: Literal[True]
+    execution_facts_reconciliation_completed: Literal[True]
+    semantic_safety_unchanged: Literal[False]
+    target_runtime_verified: Literal[False]
+    reconciliation_completed: Literal[False]
+    windows_fence_released: Literal[False]
+    authority_restore_allowed: Literal[False]
+    consume_authorized: Literal[False]
+    reconciliation_authorized: Literal[False]
+    deployment_authorized: Literal[False]
+    automatic_deploy_allowed: Literal[False]
+    production_allowed: Literal[False]
+    live_trading_authorized: Literal[False]
+    countable_forward: Literal[False]
+
+    @model_validator(mode="after")
+    def validate_evidence(self) -> InitialBaselineReconciliationEvidenceDTO:
+        _require_utc(self.reconciled_at, "initial baseline reconciled_at")
+        core = self.model_dump(mode="json")
+        core.pop("reconciliation_id")
+        core.pop("reconciliation_core_sha256")
+        expected = _strict_canonical_sha256(core)
+        if self.reconciliation_core_sha256 != expected or self.reconciliation_id != (
+            f"initial-baseline-reconciliation-{expected}"
+        ):
+            raise ValueError("initial baseline evidence identity mismatch")
         return self
 
 

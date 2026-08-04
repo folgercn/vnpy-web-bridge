@@ -67,7 +67,7 @@ def test_release_dependency_contract_is_inert_and_fail_closed() -> None:
     assert MANIFEST["schema_version"] == "web_bridge_release_dependencies_v1"
     assert MANIFEST["issue"] == 267
     assert MANIFEST["status"] == (
-        "phase_1_pre_c_c1a_planned_restart_reconciliation_contract_deploy_frozen"
+        "phase_1_pre_c_c1b_fresh_initial_baseline_contract_deploy_frozen"
     )
 
     safety = MANIFEST["safety"]
