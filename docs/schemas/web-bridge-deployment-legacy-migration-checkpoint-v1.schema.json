@@ -1,0 +1,1517 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vnpy-web-bridge:schema:web-bridge-deployment-legacy-migration-checkpoint-v1",
+  "title": "Web Bridge deployment legacy migration checkpoint v1",
+  "$defs": {
+    "CommodityInitialBaselineStateDTO": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "web_bridge_initial_baseline_commodity_state_v1",
+          "type": "string"
+        },
+        "commodity_state_version": {
+          "const": "commodity-simnow-v1",
+          "type": "string"
+        },
+        "commodity_state_checkpoint_sha256": {
+          "pattern": "^(?!0{64}$)[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "execution_plan_status": {
+          "const": "IDLE",
+          "type": "string"
+        },
+        "execution_plan_hash": {
+          "const": null,
+          "type": "null"
+        },
+        "plan_version": {
+          "const": 0,
+          "type": "integer"
+        },
+        "web_trade_enabled": {
+          "const": false,
+          "type": "boolean"
+        },
+        "execution_authority_revoked": {
+          "const": true,
+          "type": "boolean"
+        },
+        "auto_dispatch_stopped": {
+          "const": true,
+          "type": "boolean"
+        },
+        "unknown_outcome": {
+          "const": false,
+          "type": "boolean"
+        },
+        "reconcile_required": {
+          "const": false,
+          "type": "boolean"
+        },
+        "rpc_generation": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "active_orders_snapshot_sha256": {
+          "pattern": "^(?!0{64}$)[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "positions_snapshot_sha256": {
+          "pattern": "^(?!0{64}$)[0-9a-f]{64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "schema_version",
+        "commodity_state_version",
+        "commodity_state_checkpoint_sha256",
+        "execution_plan_status",
+        "execution_plan_hash",
+        "plan_version",
+        "web_trade_enabled",
+        "execution_authority_revoked",
+        "auto_dispatch_stopped",
+        "unknown_outcome",
+        "reconcile_required",
+        "rpc_generation",
+        "active_orders_snapshot_sha256",
+        "positions_snapshot_sha256"
+      ],
+      "type": "object"
+    },
+    "DeploymentDrainStateCommitmentDTO": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "web_bridge_deployment_drain_state_commitment_v1",
+          "type": "string"
+        },
+        "purpose": {
+          "const": "commit_exact_non_authorizing_deployment_drain_state",
+          "type": "string"
+        },
+        "commitment_id": {
+          "pattern": "^deployment-drain-state-commitment-(?!0{64}$)[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "state_commitment_core_sha256": {
+          "pattern": "^(?!0{64}$)[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "state_generation": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "previous_state_commitment_raw_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^(?!0{64}$)[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state_raw_sha256": {
+          "pattern": "^(?!0{64}$)[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "state": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "created_at": {
+          "format": "date-time",
+          "type": "string",
+          "pattern": "Z$"
+        },
+        "genesis_source": {
+          "anyOf": [
+            {
+              "enum": [
+                "fresh_bootstrap",
+                "v1_migration",
+                "v2_migration"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source_state_raw_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^(?!0{64}$)[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source_epoch_anchor_raw_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^(?!0{64}$)[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "deployment_authorized": {
+          "const": false,
+          "type": "boolean"
+        },
+        "consume_authorized": {
+          "const": false,
+          "type": "boolean"
+        },
+        "reconciliation_authorized": {
+          "const": false,
+          "type": "boolean"
+        },
+        "countable_forward": {
+          "const": false,
+          "type": "boolean"
+        },
+        "automatic_deploy_allowed": {
+          "const": false,
+          "type": "boolean"
+        },
+        "production_allowed": {
+          "const": false,
+          "type": "boolean"
+        },
+        "live_trading_authorized": {
+          "const": false,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "schema_version",
+        "purpose",
+        "commitment_id",
+        "state_commitment_core_sha256",
+        "state_generation",
+        "previous_state_commitment_raw_sha256",
+        "state_raw_sha256",
+        "state",
+        "created_at",
+        "genesis_source",
+        "source_state_raw_sha256",
+        "source_epoch_anchor_raw_sha256",
+        "deployment_authorized",
+        "consume_authorized",
+        "reconciliation_authorized",
+        "countable_forward",
+        "automatic_deploy_allowed",
+        "production_allowed",
+        "live_trading_authorized"
+      ],
+      "type": "object"
+    },
+    "DeploymentEpochAnchorV2DTO": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "web_bridge_deployment_drain_epoch_anchor_v2",
+          "type": "string"
+        },
+        "state_generation": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "state_commitment_raw_sha256": {
+          "pattern": "^(?!0{64}$)[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "drain_epoch": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "execution_epoch": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "schema_version",
+        "state_generation",
+        "state_commitment_raw_sha256",
+        "drain_epoch",
+        "execution_epoch"
+      ],
+      "type": "object"
+    },
+    "DeploymentLegacyMigrationCommodityCheckpointDTO": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "web_bridge_deployment_legacy_migration_commodity_checkpoint_v1",
+          "type": "string"
+        },
+        "purpose": {
+          "const": "record_exact_non_authorizing_legacy_migration_commodity_baseline",
+          "type": "string"
+        },
+        "mode": {
+          "const": "LEGACY_MIGRATION_BASELINE",
+          "type": "string"
+        },
+        "reconciliation_run_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "type": "string"
+        },
+        "checkpoint_id": {
+          "pattern": "^deployment-legacy-migration-commodity-checkpoint-(?!0{64}$)[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "checkpoint_core_sha256": {
+          "pattern": "^(?!0{64}$)[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "source_schema_version": {
+          "enum": [
+            "web_bridge_deployment_drain_state_v1",
+            "web_bridge_deployment_drain_state_v2"
+          ],
+          "type": "string"
+        },
+        "source_state_raw_sha256": {
+          "pattern": "^(?!0{64}$)[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "source_epoch_anchor_raw_sha256": {
+          "pattern": "^(?!0{64}$)[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "inventory_id": {
+          "pattern": "^legacy-migration-empty-inventory-(?!0{64}$)[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "inventory_raw_sha256": {
+          "pattern": "^(?!0{64}$)[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "inventory_core_sha256": {
+          "pattern": "^(?!0{64}$)[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "genesis_commitment_raw_sha256": {
+          "pattern": "^(?!0{64}$)[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "current_state_commitment_raw_sha256": {
+          "pattern": "^(?!0{64}$)[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "current_epoch_anchor_raw_sha256": {
+          "pattern": "^(?!0{64}$)[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "current_runtime_instance_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "type": "string"
+        },
+        "current_execution_epoch": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "expected_account_hash": {
+          "pattern": "^(?!0{64}$)[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "captured_at": {
+          "format": "date-time",
+          "type": "string",
+          "pattern": "Z$"
+        },
+        "execution_plan_status": {
+          "const": "IDLE",
+          "type": "string"
+        },
+        "execution_plan_hash": {
+          "const": null,
+          "type": "null"
+        },
+        "plan_version": {
+          "const": 0,
+          "type": "integer"
+        },
+        "state_version": {
+          "const": "web_bridge_initial_baseline_commodity_state_v1",
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/CommodityInitialBaselineStateDTO"
+        },
+        "state_sha256": {
+          "pattern": "^(?!0{64}$)[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "initial_rpc": {
+          "$ref": "#/$defs/DeploymentRpcFactsDTO"
+        },
+        "active_orders_snapshot_sha256": {
+          "pattern": "^(?!0{64}$)[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "positions_snapshot_sha256": {
+          "pattern": "^(?!0{64}$)[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "web_trade_enabled": {
+          "const": false,
+          "type": "boolean"
+        },
+        "execution_authority_revoked": {
+          "const": true,
+          "type": "boolean"
+        },
+        "auto_dispatch_stopped": {
+          "const": true,
+          "type": "boolean"
+        },
+        "active_orders": {
+          "const": 0,
+          "type": "integer"
+        },
+        "unknown_outcome": {
+          "const": false,
+          "type": "boolean"
+        },
+        "reconcile_required": {
+          "const": false,
+          "type": "boolean"
+        },
+        "consume_authorized": {
+          "const": false,
+          "type": "boolean"
+        },
+        "reconciliation_authorized": {
+          "const": false,
+          "type": "boolean"
+        },
+        "deployment_authorized": {
+          "const": false,
+          "type": "boolean"
+        },
+        "automatic_deploy_allowed": {
+          "const": false,
+          "type": "boolean"
+        },
+        "production_allowed": {
+          "const": false,
+          "type": "boolean"
+        },
+        "live_trading_authorized": {
+          "const": false,
+          "type": "boolean"
+        },
+        "countable_forward": {
+          "const": false,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "schema_version",
+        "purpose",
+        "mode",
+        "reconciliation_run_id",
+        "checkpoint_id",
+        "checkpoint_core_sha256",
+        "source_schema_version",
+        "source_state_raw_sha256",
+        "source_epoch_anchor_raw_sha256",
+        "inventory_id",
+        "inventory_raw_sha256",
+        "inventory_core_sha256",
+        "genesis_commitment_raw_sha256",
+        "current_state_commitment_raw_sha256",
+        "current_epoch_anchor_raw_sha256",
+        "current_runtime_instance_id",
+        "current_execution_epoch",
+        "expected_account_hash",
+        "captured_at",
+        "execution_plan_status",
+        "execution_plan_hash",
+        "plan_version",
+        "state_version",
+        "state",
+        "state_sha256",
+        "initial_rpc",
+        "active_orders_snapshot_sha256",
+        "positions_snapshot_sha256",
+        "web_trade_enabled",
+        "execution_authority_revoked",
+        "auto_dispatch_stopped",
+        "active_orders",
+        "unknown_outcome",
+        "reconcile_required",
+        "consume_authorized",
+        "reconciliation_authorized",
+        "deployment_authorized",
+        "automatic_deploy_allowed",
+        "production_allowed",
+        "live_trading_authorized",
+        "countable_forward"
+      ],
+      "type": "object"
+    },
+    "DeploymentLegacyMigrationDrainStateDTO": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "web_bridge_deployment_drain_state_v3",
+          "type": "string"
+        },
+        "state_generation": {
+          "minimum": 2,
+          "type": "integer"
+        },
+        "previous_state_commitment_raw_sha256": {
+          "pattern": "^(?!0{64}$)[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "state": {
+          "const": "RESTARTED_FROZEN",
+          "type": "string"
+        },
+        "drain_epoch": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "execution_epoch": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "runtime_instance_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "type": "string"
+        },
+        "active_request_id": {
+          "const": null,
+          "type": "null"
+        },
+        "active_request_sha256": {
+          "const": null,
+          "type": "null"
+        },
+        "active_receipt_id": {
+          "const": null,
+          "type": "null"
+        },
+        "active_receipt_raw_sha256": {
+          "const": null,
+          "type": "null"
+        },
+        "receipt_consumed": {
+          "const": false,
+          "type": "boolean"
+        },
+        "consumed_at": {
+          "const": null,
+          "type": "null"
+        },
+        "consume_id": {
+          "const": null,
+          "type": "null"
+        },
+        "consumed_receipt_id": {
+          "const": null,
+          "type": "null"
+        },
+        "consume_intent_raw_sha256": {
+          "const": null,
+          "type": "null"
+        },
+        "consume_marker_raw_sha256": {
+          "const": null,
+          "type": "null"
+        },
+        "consume_state_projection_sha256": {
+          "const": null,
+          "type": "null"
+        },
+        "consumed_online_recheck_id": {
+          "const": null,
+          "type": "null"
+        },
+        "consumed_online_recheck_raw_sha256": {
+          "const": null,
+          "type": "null"
+        },
+        "preconsume_state_commitment_raw_sha256": {
+          "const": null,
+          "type": "null"
+        },
+        "active_online_recheck_id": {
+          "const": null,
+          "type": "null"
+        },
+        "active_online_recheck_raw_sha256": {
+          "const": null,
+          "type": "null"
+        },
+        "active_recheck_checkpoint_raw_sha256": {
+          "const": null,
+          "type": "null"
+        },
+        "online_rechecked_at": {
+          "const": null,
+          "type": "null"
+        },
+        "last_invalidated_online_recheck_id": {
+          "const": null,
+          "type": "null"
+        },
+        "last_invalidated_receipt_id": {
+          "const": null,
+          "type": "null"
+        },
+        "blockers": {
+          "const": [
+            "legacy_state_migrated_to_v3_requires_reconciliation"
+          ]
+        },
+        "expires_at": {
+          "const": null,
+          "type": "null"
+        },
+        "freeze_reason": {
+          "const": "legacy_state_migrated_to_v3_requires_reconciliation",
+          "type": "string"
+        },
+        "updated_at": {
+          "format": "date-time",
+          "type": "string",
+          "pattern": "(Z|\\+00:00)$"
+        }
+      },
+      "required": [
+        "schema_version",
+        "state_generation",
+        "previous_state_commitment_raw_sha256",
+        "state",
+        "drain_epoch",
+        "execution_epoch",
+        "runtime_instance_id",
+        "active_request_id",
+        "active_request_sha256",
+        "active_receipt_id",
+        "active_receipt_raw_sha256",
+        "receipt_consumed",
+        "consumed_at",
+        "consume_id",
+        "consumed_receipt_id",
+        "consume_intent_raw_sha256",
+        "consume_marker_raw_sha256",
+        "consume_state_projection_sha256",
+        "consumed_online_recheck_id",
+        "consumed_online_recheck_raw_sha256",
+        "preconsume_state_commitment_raw_sha256",
+        "active_online_recheck_id",
+        "active_online_recheck_raw_sha256",
+        "active_recheck_checkpoint_raw_sha256",
+        "online_rechecked_at",
+        "last_invalidated_online_recheck_id",
+        "last_invalidated_receipt_id",
+        "blockers",
+        "expires_at",
+        "freeze_reason",
+        "updated_at"
+      ],
+      "type": "object"
+    },
+    "DeploymentRpcFactsDTO": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "windows_rpc_deployment_safety_snapshot_v1",
+          "type": "string"
+        },
+        "request_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "type": "string"
+        },
+        "challenge": {
+          "pattern": "^(?!0+$)[A-Za-z0-9_-]{16,128}$",
+          "type": "string"
+        },
+        "server_instance_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "type": "string"
+        },
+        "fact_generation": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "captured_at": {
+          "format": "date-time",
+          "type": "string",
+          "pattern": "Z$"
+        },
+        "execution_admission_frozen": {
+          "const": true,
+          "type": "boolean"
+        },
+        "pending_send_outcomes": {
+          "const": 0
+        },
+        "strategy_execution_enabled": {
+          "const": false,
+          "type": "boolean"
+        },
+        "account_hashes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "items": {
+            "type": "string",
+            "pattern": "^(?!0{64}$)[0-9a-f]{64}$"
+          }
+        },
+        "orders": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "active_orders": {
+          "const": []
+        },
+        "trades": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "positions": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "schema_version",
+        "request_id",
+        "challenge",
+        "server_instance_id",
+        "fact_generation",
+        "captured_at",
+        "execution_admission_frozen",
+        "pending_send_outcomes",
+        "strategy_execution_enabled",
+        "account_hashes",
+        "orders",
+        "active_orders",
+        "trades",
+        "positions"
+      ],
+      "type": "object"
+    },
+    "DeploymentRpcRecheckFactsDTO": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "windows_rpc_deployment_safety_recheck_v1",
+          "type": "string"
+        },
+        "request_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "type": "string"
+        },
+        "owner_challenge": {
+          "pattern": "^(?!0+$)[A-Za-z0-9_-]{16,128}$",
+          "type": "string"
+        },
+        "recheck_id": {
+          "pattern": "^deployment-recheck-(?!0{64}$)[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "fresh_challenge": {
+          "pattern": "^(?!0+$)[A-Za-z0-9_-]{16,128}$",
+          "type": "string"
+        },
+        "original_server_instance_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "type": "string"
+        },
+        "original_fact_generation": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "original_execution_facts_canonical_sha256": {
+          "pattern": "^(?!0{64}$)[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "server_instance_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "type": "string"
+        },
+        "fact_generation": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "execution_facts_canonical_sha256": {
+          "pattern": "^(?!0{64}$)[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "captured_at": {
+          "format": "date-time",
+          "type": "string",
+          "pattern": "Z$"
+        },
+        "execution_admission_frozen": {
+          "const": true,
+          "type": "boolean"
+        },
+        "pending_send_outcomes": {
+          "const": 0
+        },
+        "strategy_execution_enabled": {
+          "const": false,
+          "type": "boolean"
+        },
+        "account_hashes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "items": {
+            "type": "string",
+            "pattern": "^(?!0{64}$)[0-9a-f]{64}$"
+          }
+        },
+        "orders": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "active_orders": {
+          "const": []
+        },
+        "trades": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "positions": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "schema_version",
+        "request_id",
+        "owner_challenge",
+        "recheck_id",
+        "fresh_challenge",
+        "original_server_instance_id",
+        "original_fact_generation",
+        "original_execution_facts_canonical_sha256",
+        "server_instance_id",
+        "fact_generation",
+        "execution_facts_canonical_sha256",
+        "captured_at",
+        "execution_admission_frozen",
+        "pending_send_outcomes",
+        "strategy_execution_enabled",
+        "account_hashes",
+        "orders",
+        "active_orders",
+        "trades",
+        "positions"
+      ],
+      "type": "object"
+    },
+    "LegacyEpochAnchorV1DTO": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "web_bridge_deployment_drain_epoch_anchor_v1",
+          "type": "string"
+        },
+        "drain_epoch": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "execution_epoch": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "schema_version",
+        "drain_epoch",
+        "execution_epoch"
+      ],
+      "type": "object"
+    },
+    "LegacyMigrationEmptyInventoryDTO": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "web_bridge_legacy_migration_empty_inventory_v1",
+          "type": "string"
+        },
+        "purpose": {
+          "const": "bind_declared_empty_legacy_migration_inventory",
+          "type": "string"
+        },
+        "mode": {
+          "const": "LEGACY_MIGRATION_BASELINE",
+          "type": "string"
+        },
+        "inventory_id": {
+          "pattern": "^legacy-migration-empty-inventory-(?!0{64}$)[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "inventory_core_sha256": {
+          "pattern": "^(?!0{64}$)[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "source_schema_version": {
+          "enum": [
+            "web_bridge_deployment_drain_state_v1",
+            "web_bridge_deployment_drain_state_v2"
+          ],
+          "type": "string"
+        },
+        "source_state_raw_sha256": {
+          "pattern": "^(?!0{64}$)[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "source_epoch_anchor_raw_sha256": {
+          "pattern": "^(?!0{64}$)[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "receipts": {
+          "const": []
+        },
+        "consumes": {
+          "const": []
+        },
+        "checkpoints": {
+          "const": []
+        },
+        "rechecks": {
+          "const": []
+        },
+        "inventory_declared_empty": {
+          "const": true,
+          "type": "boolean"
+        },
+        "custody_inventory_verified": {
+          "const": false,
+          "type": "boolean"
+        },
+        "deployment_authorized": {
+          "const": false,
+          "type": "boolean"
+        },
+        "production_allowed": {
+          "const": false,
+          "type": "boolean"
+        },
+        "live_trading_authorized": {
+          "const": false,
+          "type": "boolean"
+        },
+        "countable_forward": {
+          "const": false,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "schema_version",
+        "purpose",
+        "mode",
+        "inventory_id",
+        "inventory_core_sha256",
+        "source_schema_version",
+        "source_state_raw_sha256",
+        "source_epoch_anchor_raw_sha256",
+        "receipts",
+        "consumes",
+        "checkpoints",
+        "rechecks",
+        "inventory_declared_empty",
+        "custody_inventory_verified",
+        "deployment_authorized",
+        "production_allowed",
+        "live_trading_authorized",
+        "countable_forward"
+      ],
+      "type": "object"
+    },
+    "LegacyMigrationSourceStateV1DTO": {
+      "additionalProperties": false,
+      "properties": {
+        "state": {
+          "const": "RUNNING",
+          "type": "string"
+        },
+        "drain_epoch": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "execution_epoch": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "runtime_instance_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "type": "string"
+        },
+        "active_request_id": {
+          "const": null,
+          "type": "null"
+        },
+        "active_request_sha256": {
+          "const": null,
+          "type": "null"
+        },
+        "active_receipt_id": {
+          "const": null,
+          "type": "null"
+        },
+        "active_receipt_raw_sha256": {
+          "const": null,
+          "type": "null"
+        },
+        "receipt_consumed": {
+          "const": false,
+          "type": "boolean"
+        },
+        "consumed_at": {
+          "const": null,
+          "type": "null"
+        },
+        "consume_id": {
+          "const": null,
+          "type": "null"
+        },
+        "last_invalidated_receipt_id": {
+          "const": null,
+          "type": "null"
+        },
+        "blockers": {
+          "const": []
+        },
+        "expires_at": {
+          "const": null,
+          "type": "null"
+        },
+        "freeze_reason": {
+          "const": null,
+          "type": "null"
+        },
+        "updated_at": {
+          "format": "date-time",
+          "type": "string",
+          "pattern": "(Z|\\+00:00)$"
+        },
+        "schema_version": {
+          "const": "web_bridge_deployment_drain_state_v1",
+          "type": "string"
+        }
+      },
+      "required": [
+        "state",
+        "drain_epoch",
+        "execution_epoch",
+        "runtime_instance_id",
+        "active_request_id",
+        "active_request_sha256",
+        "active_receipt_id",
+        "active_receipt_raw_sha256",
+        "receipt_consumed",
+        "consumed_at",
+        "consume_id",
+        "last_invalidated_receipt_id",
+        "blockers",
+        "expires_at",
+        "freeze_reason",
+        "updated_at",
+        "schema_version"
+      ],
+      "type": "object"
+    },
+    "LegacyMigrationSourceStateV2DTO": {
+      "additionalProperties": false,
+      "properties": {
+        "state": {
+          "const": "RUNNING",
+          "type": "string"
+        },
+        "drain_epoch": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "execution_epoch": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "runtime_instance_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "type": "string"
+        },
+        "active_request_id": {
+          "const": null,
+          "type": "null"
+        },
+        "active_request_sha256": {
+          "const": null,
+          "type": "null"
+        },
+        "active_receipt_id": {
+          "const": null,
+          "type": "null"
+        },
+        "active_receipt_raw_sha256": {
+          "const": null,
+          "type": "null"
+        },
+        "receipt_consumed": {
+          "const": false,
+          "type": "boolean"
+        },
+        "consumed_at": {
+          "const": null,
+          "type": "null"
+        },
+        "consume_id": {
+          "const": null,
+          "type": "null"
+        },
+        "last_invalidated_receipt_id": {
+          "const": null,
+          "type": "null"
+        },
+        "blockers": {
+          "const": []
+        },
+        "expires_at": {
+          "const": null,
+          "type": "null"
+        },
+        "freeze_reason": {
+          "const": null,
+          "type": "null"
+        },
+        "updated_at": {
+          "format": "date-time",
+          "type": "string",
+          "pattern": "(Z|\\+00:00)$"
+        },
+        "schema_version": {
+          "const": "web_bridge_deployment_drain_state_v2",
+          "type": "string"
+        },
+        "active_online_recheck_id": {
+          "const": null,
+          "type": "null"
+        },
+        "active_online_recheck_raw_sha256": {
+          "const": null,
+          "type": "null"
+        },
+        "active_recheck_checkpoint_raw_sha256": {
+          "const": null,
+          "type": "null"
+        },
+        "online_rechecked_at": {
+          "const": null,
+          "type": "null"
+        },
+        "last_invalidated_online_recheck_id": {
+          "const": null,
+          "type": "null"
+        }
+      },
+      "required": [
+        "state",
+        "drain_epoch",
+        "execution_epoch",
+        "runtime_instance_id",
+        "active_request_id",
+        "active_request_sha256",
+        "active_receipt_id",
+        "active_receipt_raw_sha256",
+        "receipt_consumed",
+        "consumed_at",
+        "consume_id",
+        "last_invalidated_receipt_id",
+        "blockers",
+        "expires_at",
+        "freeze_reason",
+        "updated_at",
+        "schema_version",
+        "active_online_recheck_id",
+        "active_online_recheck_raw_sha256",
+        "active_recheck_checkpoint_raw_sha256",
+        "online_rechecked_at",
+        "last_invalidated_online_recheck_id"
+      ],
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "web_bridge_deployment_legacy_migration_checkpoint_v1",
+      "type": "string"
+    },
+    "purpose": {
+      "const": "record_non_authorizing_clean_legacy_migration_baseline",
+      "type": "string"
+    },
+    "mode": {
+      "const": "LEGACY_MIGRATION_BASELINE",
+      "type": "string"
+    },
+    "reconciliation_run_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+      "type": "string"
+    },
+    "checkpoint_id": {
+      "pattern": "^deployment-legacy-migration-checkpoint-(?!0{64}$)[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "checkpoint_core_sha256": {
+      "pattern": "^(?!0{64}$)[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "source_schema_version": {
+      "enum": [
+        "web_bridge_deployment_drain_state_v1",
+        "web_bridge_deployment_drain_state_v2"
+      ],
+      "type": "string"
+    },
+    "source_state_raw_sha256": {
+      "pattern": "^(?!0{64}$)[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "source_epoch_anchor_raw_sha256": {
+      "pattern": "^(?!0{64}$)[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "source_state": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/LegacyMigrationSourceStateV1DTO"
+        },
+        {
+          "$ref": "#/$defs/LegacyMigrationSourceStateV2DTO"
+        }
+      ]
+    },
+    "source_epoch_anchor": {
+      "$ref": "#/$defs/LegacyEpochAnchorV1DTO"
+    },
+    "inventory_id": {
+      "pattern": "^legacy-migration-empty-inventory-(?!0{64}$)[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "inventory_raw_sha256": {
+      "pattern": "^(?!0{64}$)[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "inventory_core_sha256": {
+      "pattern": "^(?!0{64}$)[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "inventory": {
+      "$ref": "#/$defs/LegacyMigrationEmptyInventoryDTO"
+    },
+    "genesis_source": {
+      "enum": [
+        "v1_migration",
+        "v2_migration"
+      ],
+      "type": "string"
+    },
+    "genesis_commitment_id": {
+      "pattern": "^deployment-drain-state-commitment-(?!0{64}$)[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "genesis_commitment_raw_sha256": {
+      "pattern": "^(?!0{64}$)[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "genesis_commitment_core_sha256": {
+      "pattern": "^(?!0{64}$)[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "genesis_state_raw_sha256": {
+      "pattern": "^(?!0{64}$)[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "current_state_commitment_id": {
+      "pattern": "^deployment-drain-state-commitment-(?!0{64}$)[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "current_state_commitment_raw_sha256": {
+      "pattern": "^(?!0{64}$)[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "current_state_commitment_core_sha256": {
+      "pattern": "^(?!0{64}$)[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "current_state_generation": {
+      "minimum": 2,
+      "type": "integer"
+    },
+    "state_commitment_chain_sha256": {
+      "pattern": "^(?!0{64}$)[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "state_commitment_raw_sha256s": {
+      "items": {
+        "pattern": "^(?!0{64}$)[0-9a-f]{64}$",
+        "type": "string"
+      },
+      "type": "array",
+      "minItems": 2
+    },
+    "state_commitments": {
+      "items": {
+        "$ref": "#/$defs/DeploymentDrainStateCommitmentDTO"
+      },
+      "type": "array",
+      "minItems": 2
+    },
+    "current_epoch_anchor_raw_sha256": {
+      "pattern": "^(?!0{64}$)[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "current_epoch_anchor": {
+      "$ref": "#/$defs/DeploymentEpochAnchorV2DTO"
+    },
+    "current_runtime_instance_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+      "type": "string"
+    },
+    "current_execution_epoch": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "current_drain_state": {
+      "$ref": "#/$defs/DeploymentLegacyMigrationDrainStateDTO"
+    },
+    "current_drain_state_raw_sha256": {
+      "pattern": "^(?!0{64}$)[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "expected_account_hash": {
+      "pattern": "^(?!0{64}$)[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "commodity_checkpoint_id": {
+      "pattern": "^deployment-legacy-migration-commodity-checkpoint-(?!0{64}$)[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "commodity_checkpoint_raw_sha256": {
+      "pattern": "^(?!0{64}$)[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "commodity_checkpoint_core_sha256": {
+      "pattern": "^(?!0{64}$)[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "commodity_checkpoint": {
+      "$ref": "#/$defs/DeploymentLegacyMigrationCommodityCheckpointDTO"
+    },
+    "fresh_rpc": {
+      "$ref": "#/$defs/DeploymentRpcRecheckFactsDTO"
+    },
+    "initial_execution_facts_canonical_sha256": {
+      "pattern": "^(?!0{64}$)[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "fresh_execution_facts_canonical_sha256": {
+      "pattern": "^(?!0{64}$)[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "orders_snapshot_sha256": {
+      "pattern": "^(?!0{64}$)[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "active_orders_snapshot_sha256": {
+      "pattern": "^(?!0{64}$)[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "trades_snapshot_sha256": {
+      "pattern": "^(?!0{64}$)[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "positions_snapshot_sha256": {
+      "pattern": "^(?!0{64}$)[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "captured_at": {
+      "format": "date-time",
+      "type": "string",
+      "pattern": "Z$"
+    },
+    "legacy_source_exact_bytes_verified": {
+      "const": true,
+      "type": "boolean"
+    },
+    "legacy_migration_baseline_verified": {
+      "const": true,
+      "type": "boolean"
+    },
+    "initial_execution_facts_baseline_recorded": {
+      "const": true,
+      "type": "boolean"
+    },
+    "execution_facts_reconciliation_completed": {
+      "const": true,
+      "type": "boolean"
+    },
+    "semantic_safety_unchanged": {
+      "const": false,
+      "type": "boolean"
+    },
+    "external_high_water_verified": {
+      "const": false,
+      "type": "boolean"
+    },
+    "custody_inventory_verified": {
+      "const": false,
+      "type": "boolean"
+    },
+    "target_runtime_verified": {
+      "const": false,
+      "type": "boolean"
+    },
+    "reconciliation_completed": {
+      "const": false,
+      "type": "boolean"
+    },
+    "windows_fence_released": {
+      "const": false,
+      "type": "boolean"
+    },
+    "authority_restore_allowed": {
+      "const": false,
+      "type": "boolean"
+    },
+    "consume_authorized": {
+      "const": false,
+      "type": "boolean"
+    },
+    "reconciliation_authorized": {
+      "const": false,
+      "type": "boolean"
+    },
+    "deployment_authorized": {
+      "const": false,
+      "type": "boolean"
+    },
+    "automatic_deploy_allowed": {
+      "const": false,
+      "type": "boolean"
+    },
+    "production_allowed": {
+      "const": false,
+      "type": "boolean"
+    },
+    "live_trading_authorized": {
+      "const": false,
+      "type": "boolean"
+    },
+    "countable_forward": {
+      "const": false,
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "schema_version",
+    "purpose",
+    "mode",
+    "reconciliation_run_id",
+    "checkpoint_id",
+    "checkpoint_core_sha256",
+    "source_schema_version",
+    "source_state_raw_sha256",
+    "source_epoch_anchor_raw_sha256",
+    "source_state",
+    "source_epoch_anchor",
+    "inventory_id",
+    "inventory_raw_sha256",
+    "inventory_core_sha256",
+    "inventory",
+    "genesis_source",
+    "genesis_commitment_id",
+    "genesis_commitment_raw_sha256",
+    "genesis_commitment_core_sha256",
+    "genesis_state_raw_sha256",
+    "current_state_commitment_id",
+    "current_state_commitment_raw_sha256",
+    "current_state_commitment_core_sha256",
+    "current_state_generation",
+    "state_commitment_chain_sha256",
+    "state_commitment_raw_sha256s",
+    "state_commitments",
+    "current_epoch_anchor_raw_sha256",
+    "current_epoch_anchor",
+    "current_runtime_instance_id",
+    "current_execution_epoch",
+    "current_drain_state",
+    "current_drain_state_raw_sha256",
+    "expected_account_hash",
+    "commodity_checkpoint_id",
+    "commodity_checkpoint_raw_sha256",
+    "commodity_checkpoint_core_sha256",
+    "commodity_checkpoint",
+    "fresh_rpc",
+    "initial_execution_facts_canonical_sha256",
+    "fresh_execution_facts_canonical_sha256",
+    "orders_snapshot_sha256",
+    "active_orders_snapshot_sha256",
+    "trades_snapshot_sha256",
+    "positions_snapshot_sha256",
+    "captured_at",
+    "legacy_source_exact_bytes_verified",
+    "legacy_migration_baseline_verified",
+    "initial_execution_facts_baseline_recorded",
+    "execution_facts_reconciliation_completed",
+    "semantic_safety_unchanged",
+    "external_high_water_verified",
+    "custody_inventory_verified",
+    "target_runtime_verified",
+    "reconciliation_completed",
+    "windows_fence_released",
+    "authority_restore_allowed",
+    "consume_authorized",
+    "reconciliation_authorized",
+    "deployment_authorized",
+    "automatic_deploy_allowed",
+    "production_allowed",
+    "live_trading_authorized",
+    "countable_forward"
+  ],
+  "type": "object"
+}

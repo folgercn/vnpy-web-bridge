@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vnpy-web-bridge:schema:web-bridge-legacy-migration-empty-inventory-v1",
+  "title": "Web Bridge legacy migration empty inventory v1",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "web_bridge_legacy_migration_empty_inventory_v1",
+      "type": "string"
+    },
+    "purpose": {
+      "const": "bind_declared_empty_legacy_migration_inventory",
+      "type": "string"
+    },
+    "mode": {
+      "const": "LEGACY_MIGRATION_BASELINE",
+      "type": "string"
+    },
+    "inventory_id": {
+      "pattern": "^legacy-migration-empty-inventory-(?!0{64}$)[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "inventory_core_sha256": {
+      "pattern": "^(?!0{64}$)[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "source_schema_version": {
+      "enum": [
+        "web_bridge_deployment_drain_state_v1",
+        "web_bridge_deployment_drain_state_v2"
+      ],
+      "type": "string"
+    },
+    "source_state_raw_sha256": {
+      "pattern": "^(?!0{64}$)[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "source_epoch_anchor_raw_sha256": {
+      "pattern": "^(?!0{64}$)[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "receipts": {
+      "const": []
+    },
+    "consumes": {
+      "const": []
+    },
+    "checkpoints": {
+      "const": []
+    },
+    "rechecks": {
+      "const": []
+    },
+    "inventory_declared_empty": {
+      "const": true,
+      "type": "boolean"
+    },
+    "custody_inventory_verified": {
+      "const": false,
+      "type": "boolean"
+    },
+    "deployment_authorized": {
+      "const": false,
+      "type": "boolean"
+    },
+    "production_allowed": {
+      "const": false,
+      "type": "boolean"
+    },
+    "live_trading_authorized": {
+      "const": false,
+      "type": "boolean"
+    },
+    "countable_forward": {
+      "const": false,
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "schema_version",
+    "purpose",
+    "mode",
+    "inventory_id",
+    "inventory_core_sha256",
+    "source_schema_version",
+    "source_state_raw_sha256",
+    "source_epoch_anchor_raw_sha256",
+    "receipts",
+    "consumes",
+    "checkpoints",
+    "rechecks",
+    "inventory_declared_empty",
+    "custody_inventory_verified",
+    "deployment_authorized",
+    "production_allowed",
+    "live_trading_authorized",
+    "countable_forward"
+  ],
+  "type": "object"
+}
