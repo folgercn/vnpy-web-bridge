@@ -15,7 +15,7 @@ import stat
 import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, nullcontext
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from functools import wraps
 from pathlib import Path
 from threading import RLock, local
@@ -64,6 +64,11 @@ from app.schemas.commodity_simnow import (
     CommodityTemplateStartRequestDTO,
 )
 from app.schemas.common import STATUS_VALUE_MAP
+from app.schemas.deployment_drain import (
+    DeploymentDrainAcquireDTO,
+    DeploymentOnlineCheckpointDTO,
+    DeploymentSafetySnapshotDTO,
+)
 from app.schemas.trade import OrderRequestDTO
 from app.services.audit_service import AuditService, audit_service
 from app.services.calendar_service import calendar_service
@@ -444,6 +449,14 @@ class CommoditySimNowService:
         self._completed_state = self._load_completed_state()
         self.current_plan = self._load_active_plan()
         self._inspect_terminal_shakedown_active_plan()
+        if (
+            self.deployment_drain is not None
+            and self.settings.app_env.lower() != "test"
+        ):
+            self.deployment_drain.bind_online_snapshot_provider(
+                self,
+                self._capture_online_deployment_snapshot,
+            )
 
     @contextmanager
     def _deployment_mutation_guard(self) -> Iterator[None]:
@@ -973,6 +986,317 @@ class CommoditySimNowService:
         except DeploymentDrainActiveError:
             # Drain may linearize after the optimistic status check above.
             self._freeze_execution_authority_for_deployment()
+
+    def acquire_deployment_drain(
+        self,
+        request: DeploymentDrainAcquireDTO,
+    ) -> dict[str, Any]:
+        """Capture the A2 online checkpoint inside the global drain gate."""
+
+        if self.deployment_drain is None:
+            raise DeploymentDrainError(
+                "DEPLOYMENT_DRAIN_UNAVAILABLE",
+                "Commodity has no process-wide deployment gate",
+            )
+        self.deployment_drain.bind_online_snapshot_provider(
+            self,
+            self._capture_online_deployment_snapshot,
+        )
+        context = self._dispatch_operation_context
+        context.deployment_snapshot_request_id = request.request_id
+        context.deployment_snapshot_challenge = request.nonce
+        try:
+            return self.deployment_drain.acquire_online_snapshot(
+                request,
+                owner=self,
+            )
+        finally:
+            del context.deployment_snapshot_request_id
+            del context.deployment_snapshot_challenge
+
+    def _capture_online_deployment_snapshot(
+        self,
+    ) -> DeploymentSafetySnapshotDTO:
+        if self.deployment_drain is None:
+            raise DeploymentDrainError(
+                "DEPLOYMENT_DRAIN_UNAVAILABLE",
+                "Commodity has no process-wide deployment gate",
+            )
+        binding = self.deployment_drain.snapshot_capture_context()
+        context = self._dispatch_operation_context
+        request_id = getattr(
+            context, "deployment_snapshot_request_id", None
+        )
+        challenge = getattr(
+            context, "deployment_snapshot_challenge", None
+        )
+        if request_id != binding["request_id"] or not challenge:
+            raise DeploymentDrainError(
+                "DEPLOYMENT_SNAPSHOT_CHALLENGE_MISSING",
+                "online snapshot request challenge is unavailable",
+            )
+        with self._cycle_lock:
+            facts = self.rpc.capture_deployment_facts(
+                request_id=request_id,
+                challenge=challenge,
+            )
+            captured_at = self.clock().astimezone(timezone.utc)
+            if (
+                facts.captured_at > captured_at + timedelta(seconds=2)
+                or captured_at - facts.captured_at > timedelta(seconds=30)
+            ):
+                raise DeploymentDrainError(
+                    "DEPLOYMENT_SNAPSHOT_RPC_STALE",
+                    "Windows snapshot is outside the online capture window",
+                )
+            allowlisted = _csv_set(
+                self.settings.commodity_simnow_account_hashes
+            )
+            matches = sorted(set(facts.account_hashes) & allowlisted)
+            if len(facts.account_hashes) != 1 or len(matches) != 1:
+                raise DeploymentDrainError(
+                    "DEPLOYMENT_SNAPSHOT_ACCOUNT_MISMATCH",
+                    "online snapshot must contain exactly one allowlisted account",
+                )
+
+            plan = self.current_plan
+            plan_status = str(plan.get("status") or "") if plan else "IDLE"
+            plan_hash = str(plan.get("plan_hash") or "") if plan else None
+            risk_status = self.risk.status()
+            runtime_authorization = self.c_fast_runtime_authorization.status()
+            runtime_active = (
+                str(runtime_authorization.get("state") or "").upper()
+                == "ACTIVE"
+            )
+            authority_flags = {
+                "enabled": bool(self.enabled),
+                "manual_approval": bool(self.manual_approval),
+                "simnow_mode": bool(self.simnow_mode),
+                "auto_dispatch_authorized": bool(
+                    self.auto_dispatch_authorized
+                ),
+                "shakedown_auto_dispatch_authorized": bool(
+                    self.shakedown_auto_dispatch_authorized
+                ),
+                "c_fast_shakedown_auto_dispatch_authorized": bool(
+                    self.c_fast_shakedown_auto_dispatch_authorized
+                ),
+                "c_fast_continuous_authorized": bool(
+                    self.c_fast_continuous_authorized
+                ),
+                "template_authorized": bool(self.template_authorized),
+                "runtime_authorization_active": runtime_active,
+            }
+            execution_authority_revoked = not any(
+                authority_flags.values()
+            )
+            worker_alive = bool(self._task and not self._task.done())
+            auto_dispatch_stopped = not worker_alive and not any(
+                authority_flags[name]
+                for name in (
+                    "auto_dispatch_authorized",
+                    "shakedown_auto_dispatch_authorized",
+                    "c_fast_shakedown_auto_dispatch_authorized",
+                    "c_fast_continuous_authorized",
+                    "template_authorized",
+                    "runtime_authorization_active",
+                )
+            )
+            unknown_outcome = plan_status in {
+                "SUBMISSION_OUTCOME_UNKNOWN",
+                "CLOSE_SUBMISSION_PARTIAL",
+                "OPEN_SUBMISSION_PARTIAL",
+            }
+            positions_require_reconciliation = (
+                self._deployment_positions_require_reconciliation(
+                    facts.positions
+                )
+            )
+            reconcile_required = bool(
+                self._state_load_error
+                or facts.pending_send_outcomes
+                or positions_require_reconciliation
+                or plan_status
+                in {
+                    "CANCEL_PENDING",
+                    "HALTED_RECONCILE_REQUIRED",
+                    "HALTED_RECONCILED",
+                    "SUBMISSION_OUTCOME_UNKNOWN",
+                    "CLOSE_RECONCILIATION_MISMATCH",
+                    "OPEN_RECONCILIATION_MISMATCH",
+                }
+                or any(
+                    _normalize_status(order.get("status"))
+                    not in KNOWN_ORDER_STATUSES
+                    for order in facts.orders
+                )
+            )
+            state = {
+                "schema_version": (
+                    "web_bridge_deployment_execution_state_projection_v1"
+                ),
+                "account_hash": matches[0],
+                "active_plan": plan,
+                "completed_state": self._completed_state,
+                "state_load_error": self._state_load_error,
+                "authority": authority_flags,
+                "risk": {
+                    "web_trade_enabled": bool(
+                        risk_status.get("web_trade_enabled")
+                    ),
+                    "emergency_stopped": bool(
+                        risk_status.get("emergency_stopped")
+                    ),
+                    "rules_version": risk_status.get("rules_version"),
+                },
+                "worker_alive": worker_alive,
+                "unknown_outcome": unknown_outcome,
+                "reconcile_required": reconcile_required,
+            }
+            checkpoint = DeploymentOnlineCheckpointDTO.model_validate(
+                {
+                    "schema_version": (
+                        "web_bridge_deployment_online_checkpoint_v1"
+                    ),
+                    **binding,
+                    "execution_plan_status": plan_status,
+                    "execution_plan_hash": plan_hash,
+                    # A2 can authorize only IDLE.  Durable active-plan
+                    # revisions are deliberately deferred to state v2.
+                    "plan_version": 0 if plan is None else 1,
+                    "state_version": (
+                        "web_bridge_deployment_online_checkpoint_v1"
+                    ),
+                    "state": state,
+                    "state_sha256": _sha256_json(state),
+                    "rpc": facts.model_dump(mode="json"),
+                    "active_orders_snapshot_sha256": _sha256_json(
+                        facts.active_orders
+                    ),
+                    "positions_snapshot_sha256": _sha256_json(
+                        facts.positions
+                    ),
+                    "web_trade_enabled": bool(
+                        risk_status.get("web_trade_enabled")
+                    ),
+                    "execution_authority_revoked": (
+                        execution_authority_revoked
+                    ),
+                    "auto_dispatch_stopped": auto_dispatch_stopped,
+                    "active_orders": len(facts.active_orders),
+                    "unknown_outcome": unknown_outcome,
+                    "reconcile_required": reconcile_required,
+                    "automatic_deploy_allowed": False,
+                    "production_allowed": False,
+                    "live_trading_authorized": False,
+                }
+            )
+            checkpoint_sha256 = (
+                self.deployment_drain.persist_online_checkpoint(checkpoint)
+            )
+            return DeploymentSafetySnapshotDTO(
+                schema_version="web_bridge_deployment_safety_snapshot_v1",
+                captured_at=captured_at,
+                execution_plan_status=checkpoint.execution_plan_status,
+                execution_plan_hash=checkpoint.execution_plan_hash,
+                plan_version=checkpoint.plan_version,
+                state_version=checkpoint.state_version,
+                state_sha256=checkpoint.state_sha256,
+                active_orders_snapshot_sha256=(
+                    checkpoint.active_orders_snapshot_sha256
+                ),
+                positions_snapshot_sha256=(
+                    checkpoint.positions_snapshot_sha256
+                ),
+                checkpoint_sha256=checkpoint_sha256,
+                rpc_generation=checkpoint.rpc.fact_generation,
+                web_trade_enabled=checkpoint.web_trade_enabled,
+                execution_authority_revoked=(
+                    checkpoint.execution_authority_revoked
+                ),
+                auto_dispatch_stopped=checkpoint.auto_dispatch_stopped,
+                active_orders=checkpoint.active_orders,
+                unknown_outcome=checkpoint.unknown_outcome,
+                reconcile_required=checkpoint.reconcile_required,
+                checkpoint_durable=True,
+            )
+
+    def _deployment_positions_require_reconciliation(
+        self,
+        positions: list[dict[str, Any]],
+    ) -> bool:
+        """Compare live positions with the last durable approved target."""
+
+        try:
+            for position in positions:
+                quantities: dict[str, int] = {}
+                yd_raw = position.get("yd_volume")
+                if (
+                    not isinstance(yd_raw, bool)
+                    and yd_raw in (None, "", 0, 0.0)
+                    and position.get("ydPosition") is not None
+                ):
+                    yd_raw = position.get("ydPosition")
+                raw_quantities = {
+                    "volume": position.get("volume"),
+                    "frozen": position.get("frozen"),
+                    "yd_volume": yd_raw,
+                }
+                for field, raw in raw_quantities.items():
+                    if raw is None or raw == "":
+                        raw = 0
+                    if isinstance(raw, bool):
+                        return True
+                    number = float(raw)
+                    if (
+                        not math.isfinite(number)
+                        or number < 0
+                        or not number.is_integer()
+                    ):
+                        return True
+                    quantities[field] = int(number)
+                if (
+                    quantities["frozen"] > quantities["volume"]
+                    or quantities["yd_volume"] > quantities["volume"]
+                ):
+                    return True
+                volume = quantities["volume"]
+                if volume == 0:
+                    continue
+                symbol = str(position.get("symbol") or "")
+                exchange = _value(position.get("exchange") or "")
+                vt_symbol = str(position.get("vt_symbol") or "")
+                if vt_symbol:
+                    if "." not in vt_symbol:
+                        return True
+                    vt_symbol_name, vt_exchange = _split_vt(vt_symbol)
+                    if symbol and symbol != vt_symbol_name:
+                        return True
+                    if exchange and exchange != vt_exchange:
+                        return True
+                    symbol = vt_symbol_name
+                    exchange = vt_exchange
+                if not symbol or not exchange:
+                    return True
+                product = _product_from_symbol(symbol)
+                if (
+                    product not in PRODUCT_SPECS
+                    or exchange != PRODUCT_SPECS[product]["exchange"]
+                ):
+                    return True
+            observed = self._signed_positions(
+                self._position_snapshot(positions)
+            )
+            expected = {
+                _exact_to_vt(str(row["exact_contract"])): int(
+                    row["target_quantity"]
+                )
+                for row in self._completed_state.get("targets", [])
+                if int(row.get("target_quantity") or 0)
+            }
+        except (KeyError, TypeError, ValueError, CommoditySimNowSafetyError):
+            return True
+        return observed != dict(sorted(expected.items()))
 
     def _start_unfrozen(self) -> None:
         self._cleanup_terminal_shakedown_active_plan()

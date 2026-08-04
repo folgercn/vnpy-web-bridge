@@ -94,6 +94,7 @@ def _service(tmp_path: Path, clock: Clock) -> DeploymentDrainService:
         clock=clock,
         runtime_instance_id="runtime-one",
         allow_initial_bootstrap=True,
+        allow_untrusted_snapshot_provider=True,
     )
 
 
@@ -275,6 +276,58 @@ def test_expiry_never_unlocks_the_gate(tmp_path: Path) -> None:
         service.assert_mutation_allowed()
 
 
+def test_restarted_without_receipt_does_not_rebind_expired_receipt(
+    tmp_path: Path,
+) -> None:
+    clock = Clock()
+    service = _service(tmp_path, clock)
+    _acquire(service, clock)
+    clock.advance(60)
+    expired = service.status()
+    service.release(
+        expected_drain_epoch=expired["drain_epoch"],
+        request_id=expired["active_request_id"],
+        operator="release-operator",
+        reason="legacy expired snapshot cleared",
+    )
+    with service._exclusive():
+        state = service._load_state()
+        state.update(
+            state="DRAINING",
+            drain_epoch=state["drain_epoch"] + 1,
+            active_request_id="request-id-0002",
+            active_request_sha256=SHA_B,
+            active_receipt_id=None,
+            active_receipt_raw_sha256=None,
+            blockers=[],
+            freeze_reason=None,
+        )
+        service._write_state(state)
+
+    first_restart = DeploymentDrainService(
+        service.root,
+        clock=clock,
+        runtime_instance_id="runtime-two",
+        allow_initial_bootstrap=True,
+        allow_untrusted_snapshot_provider=True,
+    )
+    assert first_restart.status()["state"] == "RESTARTED_FROZEN"
+    second_restart = DeploymentDrainService(
+        service.root,
+        clock=clock,
+        runtime_instance_id="runtime-three",
+        allow_initial_bootstrap=True,
+        allow_untrusted_snapshot_provider=True,
+    )
+    observed = second_restart.status()
+
+    assert observed["state"] == "RESTARTED_FROZEN"
+    assert not any(
+        blocker.startswith("checkpoint_verification_failed:")
+        for blocker in observed["blockers"]
+    )
+
+
 def test_consume_and_reconciliation_stay_inactive_until_phase_1_pre_b(
     tmp_path: Path,
 ) -> None:
@@ -322,14 +375,48 @@ def test_restart_freezes_all_incomplete_drain_states(
     clock = Clock()
     service = _service(tmp_path, clock)
     if unsafe_state == "DRAINING":
-        with pytest.raises(RuntimeError):
-            service.acquire_with_snapshot(
-                _request(), lambda: (_ for _ in ()).throw(RuntimeError("boom"))
-            )
+        with service._exclusive():
+            state = service._load_state()
+            state["state"] = "DRAINING"
+            service._write_state(state)
     else:
         _acquire(service, clock, _snapshot(clock, active_orders=1))
     assert service.status()["state"] == unsafe_state
     assert _service(tmp_path, clock).status()["state"] == "RESTARTED_FROZEN"
+
+
+def test_snapshot_provider_failure_is_durably_blocked(tmp_path: Path) -> None:
+    clock = Clock()
+    service = _service(tmp_path, clock)
+
+    with pytest.raises(DeploymentDrainError) as exc_info:
+        service.acquire_with_snapshot(
+            _request(), lambda: (_ for _ in ()).throw(RuntimeError("boom"))
+        )
+
+    assert exc_info.value.code == "DEPLOYMENT_SNAPSHOT_CAPTURE_FAILED"
+    assert service.status()["state"] == "DRAIN_BLOCKED"
+    assert service.status()["blockers"] == [
+        "snapshot_capture_failed:RuntimeError"
+    ]
+
+
+def test_unbound_snapshot_provider_is_rejected_by_default(tmp_path: Path) -> None:
+    service = DeploymentDrainService(
+        tmp_path / "trusted-provider",
+        clock=Clock(),
+        runtime_instance_id="runtime-trusted-provider",
+        allow_initial_bootstrap=True,
+    )
+
+    with pytest.raises(DeploymentDrainError) as exc_info:
+        service.acquire_with_snapshot(
+            _request("runtime-trusted-provider"),
+            lambda: _snapshot(Clock()),
+        )
+
+    assert exc_info.value.code == "DEPLOYMENT_SNAPSHOT_PROVIDER_UNTRUSTED"
+    assert not service.state_path.exists()
 
 
 def test_mutation_guard_linearizes_with_acquire(tmp_path: Path) -> None:

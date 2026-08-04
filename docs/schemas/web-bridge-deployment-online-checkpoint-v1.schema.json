@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vnpy-web-bridge:schema:web-bridge-deployment-online-checkpoint-v1",
+  "title": "Web Bridge deployment online checkpoint v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "request_id", "runtime_instance_id", "drain_epoch", "execution_epoch", "execution_plan_status", "execution_plan_hash", "plan_version", "state_version", "state", "state_sha256", "rpc", "active_orders_snapshot_sha256", "positions_snapshot_sha256", "web_trade_enabled", "execution_authority_revoked", "auto_dispatch_stopped", "active_orders", "unknown_outcome", "reconcile_required", "automatic_deploy_allowed", "production_allowed", "live_trading_authorized"],
+  "properties": {
+    "schema_version": {"const": "web_bridge_deployment_online_checkpoint_v1"},
+    "request_id": {"$ref": "#/$defs/identifier"},
+    "runtime_instance_id": {"$ref": "#/$defs/identifier"},
+    "drain_epoch": {"type": "integer", "minimum": 1},
+    "execution_epoch": {"type": "integer", "minimum": 1},
+    "execution_plan_status": {"type": "string", "minLength": 1, "maxLength": 64},
+    "execution_plan_hash": {"oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+    "plan_version": {"type": "integer", "minimum": 0},
+    "state_version": {"const": "web_bridge_deployment_online_checkpoint_v1"},
+    "state": {"type": "object"},
+    "state_sha256": {"$ref": "#/$defs/sha256"},
+    "rpc": {"$ref": "#/$defs/rpcFacts"},
+    "active_orders_snapshot_sha256": {"$ref": "#/$defs/sha256"},
+    "positions_snapshot_sha256": {"$ref": "#/$defs/sha256"},
+    "web_trade_enabled": {"type": "boolean"},
+    "execution_authority_revoked": {"type": "boolean"},
+    "auto_dispatch_stopped": {"type": "boolean"},
+    "active_orders": {"type": "integer", "minimum": 0},
+    "unknown_outcome": {"type": "boolean"},
+    "reconcile_required": {"type": "boolean"},
+    "automatic_deploy_allowed": {"const": false},
+    "production_allowed": {"const": false},
+    "live_trading_authorized": {"const": false}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^(?!0{64}$)[0-9a-f]{64}$"},
+    "identifier": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$"},
+    "rpcFacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "request_id", "challenge", "server_instance_id", "fact_generation", "captured_at", "execution_admission_frozen", "pending_send_outcomes", "strategy_execution_enabled", "account_hashes", "orders", "active_orders", "trades", "positions"],
+      "properties": {
+        "schema_version": {"const": "windows_rpc_deployment_safety_snapshot_v1"},
+        "request_id": {"$ref": "#/$defs/identifier"},
+        "challenge": {"type": "string", "pattern": "^(?!0+$)[A-Za-z0-9_-]{16,128}$"},
+        "server_instance_id": {"$ref": "#/$defs/identifier"},
+        "fact_generation": {"type": "integer", "minimum": 0},
+        "captured_at": {"type": "string", "format": "date-time", "pattern": "Z$"},
+        "execution_admission_frozen": {"const": true},
+        "pending_send_outcomes": {"type": "integer", "minimum": 0},
+        "strategy_execution_enabled": {"const": false},
+        "account_hashes": {"type": "array", "items": {"$ref": "#/$defs/sha256"}, "uniqueItems": true},
+        "orders": {"type": "array", "items": {"type": "object"}},
+        "active_orders": {"type": "array", "items": {"type": "object"}},
+        "trades": {"type": "array", "items": {"type": "object"}},
+        "positions": {"type": "array", "items": {"type": "object"}}
+      }
+    }
+  }
+}

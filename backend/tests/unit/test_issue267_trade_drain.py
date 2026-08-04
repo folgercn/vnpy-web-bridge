@@ -190,6 +190,7 @@ def test_final_rpc_send_linearizes_before_drain_snapshot(tmp_path) -> None:
         tmp_path / "linearized-rpc-drain",
         runtime_instance_id="runtime-linearized",
         allow_initial_bootstrap=True,
+        allow_untrusted_snapshot_provider=True,
     )
     send_entered = threading.Event()
     release_send = threading.Event()

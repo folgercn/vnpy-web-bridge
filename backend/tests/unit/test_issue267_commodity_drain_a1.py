@@ -116,6 +116,7 @@ def _gate(tmp_path, name: str = "drain") -> DeploymentDrainService:
         tmp_path / name,
         runtime_instance_id=f"runtime-{name}",
         allow_initial_bootstrap=True,
+        allow_untrusted_snapshot_provider=True,
     )
     gate.status()
     return gate
