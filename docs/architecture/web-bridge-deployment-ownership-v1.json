@@ -4,6 +4,7 @@
   "defaults": {
     "production_allowed": false,
     "live_trading_authorized": false,
+    "automatic_deploy_allowed": false,
     "private_keys_in_repository_or_runtime_images": false,
     "unspecified_network_access": "deny",
     "artifact_overwrite": "deny"
@@ -32,6 +33,66 @@
   },
   "legacy_restart_migration_ownership": {
     "status": "phase_1_pre_c_d_contract_only_not_deployed",
+    "windows_foundation_manifest_signer": {
+      "unique_writer": "offline-windows-foundation-manifest-signer",
+      "credential_domain": "dedicated_windows_foundation_manifest_signing_key_offline_only",
+      "durable_store": "external_operator_key_custody_and_append_only_signing_audit",
+      "key_ownership": "dedicated_manifest_private_key_only_offline_manifest_signer_installer_and_windows_runtime_receive_only_exact_pinned_manifest_public_key_never_observer_evidence_or_restart_authorization_private_keys",
+      "acl_ownership": "offline_signer_operator_controls_private_key_and_signed_manifest_handoff",
+      "network_capability": "none_offline_signed_manifest_handoff",
+      "release_responsibility": "sign-exact-extension-version-config-install-attempt-fresh-zero-order-preflight-and-one-post-reservation-service-config-transition-plan_without-executing-transition-or-restart",
+      "restart_responsibility": "none_signature_never_authorizes_restart",
+      "rollback_responsibility": "revoke-or-expire-manifest-and-sign-new-successor_never_reuse_or_export_private_key",
+      "automatic_deploy_allowed": false
+    },
+    "windows_foundation_host_observer": {
+      "unique_writer": "windows-foundation-host-observer",
+      "credential_domain": "read_only_host_observer_identity_and_dedicated_evidence_signing_key_separate_from_installer_gateway_manifest_signer_and_restart_authorizer",
+      "durable_store": "host_observer_create_only_preflight_and_post_restart_attestation_custody",
+      "key_ownership": "dedicated_observer_evidence_private_key_only_host_observer_custody_verifiers_and_installer_receive_only_exact_pinned_observer_evidence_public_key_no_manifest_or_restart_private_key",
+      "acl_ownership": "observer_operator_owns_evidence_private_key_and_create_only_custody_installer_and_windows_service_cannot_write_attestations_or_read_private_key",
+      "network_capability": "read_only_windows_service_process_rpc_account_gateway_order_position_fence_query_exact_install_root_bytes_metadata_acl_readback_and-host-protected-SCM-ETW-EventLog-call-trace-readback",
+      "release_responsibility": "prove-old-runtime-owner-frozen-trading-disabled-authority-revoked-and-fresh-zero-pending-zero-active_then-independently-seal-exact-published-bytes-destination-owner-acl-hardlink-and-reparse-free-readback_then-sign-single-use-SCM-audit-evidence-binding-caller-boot-operation-nonce-API-result-and-trusted-timestamps_then-prove-new-boot-session-fence-held-empty-token-inventory-and-final-send-cancel-rejection",
+      "restart_responsibility": "none_observation_never_authorizes_or_executes_restart",
+      "rollback_responsibility": "reject-identity-drift-missing-proof-or-unknown-attempt-and-keep-orders-blocked",
+      "automatic_deploy_allowed": false
+    },
+    "windows_foundation_restart_authorizer": {
+      "unique_writer": "explicit-windows-foundation-restart-authorizer",
+      "credential_domain": "dedicated_single_dispatch_restart_authorization_signing_key_separate_from_manifest_observer_installer_and_gateway",
+      "durable_store": "external_operator_key_custody_and_create_only_restart_authorization_audit",
+      "key_ownership": "dedicated_restart_authorization_private_key_only_explicit_operator_authorizer_installer_receives_only_exact_pinned_restart_authorization_public_key_no_manifest_or_observer_private_key",
+      "acl_ownership": "explicit_operator_controls_restart_private_key_and_signed_authorization_handoff_installer_cannot_mint_extend_or_reissue_authorization",
+      "network_capability": "none_offline_or_local_signed_restart_authorization_handoff_only",
+      "release_responsibility": "issue-short-ttl-single-dispatch-authorization-bound-to-exact-attempt-manifest-preflight-observer-publish-seal-event-head-current-service-identity-dispatch-nonce-and-service-control-operation",
+      "restart_responsibility": "authorize_at_most_one_exact_service_restart_dispatch_but_never_execute_install_restart_or_order_action",
+      "rollback_responsibility": "expire_or_revoke_without_reusing_authorization_or_service_control_operation_id_unknown_dispatch_requires_query_only_recovery",
+      "automatic_deploy_allowed": false
+    },
+    "windows_foundation_installer": {
+      "unique_writer": "windows-foundation-installer",
+      "credential_domain": "windows_service_install_identity_separate_from_signer_observer_and_gateway",
+      "durable_store": "windows_owner_only_create_only_install_attempt_journal",
+      "key_ownership": "no_private_key_verification_only_exact_pinned_manifest_observer_evidence_and_restart_authorization_public_keys_from_three_distinct_domains",
+      "acl_ownership": "installer-owns-attempt-journal-and-temporary-stage-only_atomic-publish-transfers-content-addressed-final-directory-to-signed-owner-acl-and-removes-installer-and-all-unsafe-write-access_installer-cannot-write-observer-attestation-or-gateway-fence-store",
+      "network_capability": "local-filesystem-stage-verify-query-exact-attempt_seal-files-and-transition-plan-with-active-SCM-unchanged_then-after-fresh-restart-authorization-and-durable-event-3-first-set-demand-start-and-disable-recovery-failure-actions-with-preinstall-ImagePath-and-readback_then-apply-exact-target-ImagePath-while-retaining-safe-policy_readback-and-publish-event-4_before-restart_unbound-pre-reservation-post-transition-or-auto-policy-restore-denied",
+      "release_responsibility": "stage-and-readback-exact-signed-extension-config-and-attempt_then-atomic-create-only-final-publish_remove-installer-write-and-permit-independent-observer-seal_without-creating-staged-or-active-target-token",
+      "restart_responsibility": "durably-publish-fsync-and-readback-event-3-dispatch-reservation_then-apply-and-readback-safe-manual-no-recovery-transition-and-exact-target-ImagePath_publish-event-4_then-at-most-one-SCM-restart_and-observer-startup-receipt-proves-process-start-strictly-after-exact-SCM-call_head-at-or-after-reservation-is-query-only-never-redispatch",
+      "rollback_responsibility": "query-and-resume-same-deterministic-attempt_partial-or-unknown-install-never-blind-restart_old-version-rollback-denied_roll-forward-only",
+      "automatic_deploy_allowed": false
+    },
+    "windows_foundation_durable_fence_store": {
+      "unique_writer": "windows-ctp-gateway-durable-fence-extension",
+      "credential_domain": "account_gateway_service_and-install-attempt-scoped-windows-fence-identity",
+      "durable_store": "windows-owner-only-canonical-atomic-fsync-fail-closed-fence-store",
+      "key_ownership": "no_private_key_exact_pinned-manifest-public-key-verification-only",
+      "acl_ownership": "windows-service-identity-only_write_observer-and-installer-read-only_no-reparse-hardlink-or-inherited-broad-write",
+      "network_capability": "typed-readonly-install-attempt-fence-and-post-restart-query_from-allowlisted-m2-host_only",
+      "release_responsibility": "initialize-and-recover-held-with-empty-token-inventory_before-rpc-listen_and-reject-final-send-cancel-without-active-token-and-exact-bound-d3-grant",
+      "restart_responsibility": "missing-corrupt-unreadable-unknown-version-or-rollback-state-makes-startup-and-final-order-admission-fail-closed",
+      "rollback_responsibility": "monotonic-store-generation_old-extension-unaware-of-store-cannot-run_or-rollback_roll-forward-only",
+      "automatic_deploy_allowed": false
+    },
     "external_high_water": {
       "unique_writer": "external-witness",
       "credential_domain": "external_witness_cas_identity",
@@ -89,6 +150,10 @@
       {"phase": "phase_1_pre_c", "source": "web-bridge", "target": "external-witness", "protocol": "authenticated_append_only_cas", "capabilities": ["append_bound_high_water", "query_exact_idempotency_key", "readback"], "principal": "frozen_reconciliation_owner", "authn": "external_witness_cas_identity"},
       {"phase": "phase_1_pre_d", "source": "m2-host-observer", "target": "container-runtime", "protocol": "local_host_observation", "capabilities": ["attest_exact_target", "create_consume_renew_lease", "observe_container_events"], "principal": "root_owned_host_observer", "authn": "host_local_identity"},
       {"phase": "phase_1_pre_c", "source": "m2-bootstrap-coordinator", "target": "container-runtime", "protocol": "local_receipt_bound_runtime_control", "capabilities": ["stop_exact_old_runtime", "start_exact_immutable_target", "query_exact_attempt"], "principal": "root_owned_bootstrap_coordinator", "authn": "host_local_runtime_control_identity"},
+      {"phase": "phase_1_pre_c", "source": "offline-windows-foundation-manifest-signer", "target": "windows-foundation-installer", "protocol": "offline_signed_artifact_handoff", "capabilities": ["handoff_exact_signed_manifest_and_extension"], "principal": "dedicated_offline_windows_foundation_signer", "authn": "ed25519_signature_verified_by_exact_pinned_public_key"},
+      {"phase": "phase_1_pre_c", "source": "windows-foundation-host-observer", "target": "windows-ctp-gateway", "protocol": "allowlisted_readonly_host_filesystem_service_config_rpc_and-protected-SCM-audit-observation", "capabilities": ["observe_old_runtime_freeze", "capture_zero_order_preflight", "seal_exact_content_addressed_publish_bytes_owner_acl_reparse_hardlink_and_service_config", "capture-and-sign-single-use-SCM-ETW-EventLog-call-evidence-with-caller-boot-operation-nonce-result-and-trusted-timestamps", "query_exact_install_attempt", "attest_post_restart_fence-and-exact-audited-dispatch-to-new-service-identity", "prove_final_order_admission_rejection"], "principal": "dedicated_readonly_windows_foundation_observer", "authn": "host_observer_identity_source_acl_protected-audit-read-and-dedicated-evidence-signature"},
+      {"phase": "phase_1_pre_c", "source": "explicit-windows-foundation-restart-authorizer", "target": "windows-foundation-installer", "protocol": "offline_or_local_signed_single_dispatch_authorization_handoff", "capabilities": ["authorize_one_exact_service_control_operation"], "principal": "dedicated_explicit_restart_authorizer", "authn": "ed25519_signature_verified_by_exact_pinned_restart_authorization_public_key"},
+      {"phase": "phase_1_pre_c", "source": "windows-foundation-installer", "target": "windows-service-manager", "protocol": "local_signed_attempt_bound_install_control", "capabilities": ["stage_exact_extension_and_config", "atomic_create_only_content_addressed_publish_then_drop_write", "seal_transition_plan_while_active_service_config_remains_preinstall", "query_exact_attempt", "durably_reserve_and_consume_restart_nonce_before-service-config-transition", "set-demand-start-and-disable-recovery-failure-actions-with-preinstall-ImagePath-then-readback", "apply-exact-target-ImagePath-while-retaining-safe-policy-after-reservation", "readback-and-publish-transition-event-4-before-one-exact-service-restart", "dispatch-time-recheck-exact-observer-seal-and-transition-receipt"], "denied_capabilities": ["service-config-change-before-dispatch-reservation", "unbound-service-config-or-image-path-change", "restore-auto-start-or-recovery-policy", "change-service-account-or-dependencies", "restart-before-transition-event-4", "reuse-restart-authorization", "restart-when-attempt-head-at-or-after-reservation"], "principal": "dedicated_windows_foundation_installer", "authn": "windows_local_install_identity_and_three_distinct_exact_pinned_manifest_observer_evidence_and_restart_authorization_public_keys"},
       {"phase": "phase_1_pre_d", "source": "web-bridge", "target": "windows-ctp-gateway", "protocol": "typed_fencing_rpc", "capabilities": ["stage_token", "query_staging", "activate_bound_token", "query_activation"], "principal": "frozen_reconciliation_owner", "authn": "source_acl_account_scope_and_exact_d3_receipt_binding"},
       {"phase": "phase_1", "source": "frontend", "target": "web-bridge", "protocol": "http_websocket", "capabilities": ["api_proxy", "websocket_proxy"], "principal": "compose_frontend", "authn": "private_compose_network"},
       {"phase": "phase_2", "source": "frontend", "target": "control-api", "protocol": "http_websocket", "capabilities": ["api_proxy", "websocket_proxy"], "principal": "compose_frontend", "authn": "private_compose_network"},
@@ -195,9 +260,9 @@
     {
       "id": "windows-ctp-gateway",
       "deployment_mode": "external_windows_service",
-      "code_paths": ["external:C:/quant/run_rpc_server.py"],
+      "code_paths": ["external:C:/quant/run_rpc_server.py", "scripts/windows_rpc_deployment_snapshot_v1.py"],
       "startup_tasks": ["ctp_session", "query_rpc", "trade_rpc", "event_publish"],
-      "state_owner": ["gateway_session", "broker_order_position_trade_facts"],
+      "state_owner": ["gateway_session", "broker_order_position_trade_facts", "volatile_deployment_snapshot_fence", "volatile_pending_send_outcomes"],
       "order_rpc": {"allowed": false, "methods": [], "provides_methods": ["send_order", "cancel_order"]},
       "private_key": {"allowed": false, "public_keyring_allowed": false},
       "artifact_write": [],
@@ -407,16 +472,16 @@
     {
       "id": "windows-ctp-gateway",
       "deployment_mode": "external_windows_service",
-      "code_paths": ["external:C:/quant/run_rpc_server.py"],
-      "startup_tasks": ["ctp_session", "query_rpc", "trade_rpc", "event_publish"],
-      "state_owner": ["gateway_session", "broker_order_position_trade_facts"],
+      "code_paths": ["external:C:/quant/run_rpc_server.py", "scripts/windows_rpc_deployment_snapshot_v1.py", "future:scripts/windows_rpc_durable_fence_v1.py", "future:docs/schemas/windows-rpc-durable-fence-*.schema.json"],
+      "startup_tasks": ["verify_exact_pinned_foundation_manifest_public_key", "recover_durable_fence_before_rpc_listen", "ctp_session", "query_rpc", "guarded_trade_rpc", "event_publish"],
+      "state_owner": ["gateway_session", "broker_order_position_trade_facts", "durable_fence_state", "monotonic_fence_generation", "windows_boot_session_identity", "empty_foundation_token_inventory", "final_send_cancel_admission"],
       "order_rpc": {"allowed": false, "methods": [], "provides_methods": ["send_order", "cancel_order"], "caller": "execution-orchestrator", "requires_account_scoped_fencing": true},
-      "private_key": {"allowed": false, "public_keyring_allowed": false},
-      "artifact_write": [],
-      "network_access": {"inbound": ["execution-orchestrator:2014", "execution-orchestrator:4102", "market-data-worker:4102"], "outbound": ["simnow_ctp_fronts"]},
-      "durability": {"stores": ["broker_facts", "windows_runtime"], "restart_loss_risk": ["rpc_session", "event_continuity"]},
+      "private_key": {"allowed": false, "public_keyring_allowed": true, "public_key_scope": "exact_pinned_windows_foundation_manifest_key_only"},
+      "artifact_write": ["durable_fence_state", "fence_generation", "install_attempt_runtime_projection"],
+      "network_access": {"inbound": ["phase_1_pre_c:windows-foundation-host-observer:readonly-fence-and-attempt-query", "execution-orchestrator:2014", "execution-orchestrator:4102", "market-data-worker:4102"], "outbound": ["simnow_ctp_fronts"], "foundation_install_inbound_default": "deny_except_allowlisted_observer_query"},
+      "durability": {"stores": ["broker_facts", "windows_runtime", "windows_owner_only_durable_fence_store"], "required_state": ["held_fence", "monotonic_generation", "install_attempt_id", "extension_hash", "config_hash", "account_gateway_scope", "boot_session_identity", "empty_token_inventory"], "restart_loss_risk": ["rpc_session", "event_continuity"], "store_failure_policy": "startup_and_final_send_cancel_fail_closed"},
       "release_trigger": ["explicit_windows_operator_action"],
-      "restart_policy": "authorized_restart_then_execution_reconcile",
+      "restart_policy": "fresh-explicit-operator-authorization_after-host-observed-frozen-zero-order-preflight_then-single-exact-attempt-restart_post-attest-held-and-final-admission-blocked_partial-or-unknown-roll-forward-only",
       "phase": "phase_0"
     }
   ]

@@ -1,7 +1,7 @@
 {
   "schema_version": "web_bridge_release_dependencies_v1",
   "issue": 267,
-  "status": "phase_1_pre_c_c2b_served_proof_v2_activation_deploy_frozen",
+  "status": "phase_1_pre_c_c2b_windows_foundation_contract_frozen_runtime_not_installed",
   "ownership_contract": "docs/architecture/web-bridge-deployment-ownership-v1.json",
   "safety": {
     "classifier_consumption_allowed": false,
@@ -17,7 +17,7 @@
     "missing_closure_evidence": "block"
   },
   "legacy_restart_migration_contract": {
-    "current_code_stage": "phase_1_pre_c_c2b_served_proof_v2",
+    "current_code_stage": "phase_1_pre_c_c2b_windows_foundation_contract_frozen",
     "current_runtime_stage": "not_deployed_or_activated_by_this_contract",
     "c2b": {
       "implementation_status": "implemented_non_authorizing_owner_capture_with_owner_bound_linux_rpc_adapter_served_proof_v2_activation_custody",
@@ -31,7 +31,9 @@
     "ordered_remaining_stages": [
       {
         "id": "phase_1_pre_c_c2b_windows_durable_fence_foundation",
-        "predecessor_artifact": "merged_windows_durable_fence_extension_and_signed_install_manifest",
+        "implementation_status": "contract_frozen_runtime_not_installed",
+        "predecessor_artifact": "merged_c2b_served_proof_v2_activation_custody",
+        "runtime_entry_prerequisites": "merged_exact_windows_durable_fence_extension_bundle_then_fresh_observer_signed_preflight_then_offline_manifest_signed_over_exact_preflight_then_observer_sealed_publish_readback_then_separate_explicit_restart_authorization",
         "commit_point": "windows_restart_attestation_proves_durable_fail_closed_fence_held_and_final_order_admission_blocked",
         "may_set_true": [],
         "requires": [
@@ -51,6 +53,66 @@
           "after_restart_before_attestation": "query_same_install_attempt_and_keep_fence_held",
           "partial_install_or_unknown_version": "do_not_restart_again_keep_orders_blocked_and_require_operator_recovery",
           "durable_store_unreadable": "windows_startup_and_final_order_admission_fail_closed"
+        },
+        "sub_pr_sequence": [
+          {
+            "sequence": 1,
+            "id": "windows_foundation_contract_ownership_classifier",
+            "responsibility": "freeze_release_ownership_path_classification_artifact_contracts_and_non_authorizing_stage_order",
+            "acceptance_gate": "release_contract_and_classifier_tests_prove_infra_manual_no_cd_and_all_authority_false",
+            "runtime_mutation_allowed": false
+          },
+          {
+            "sequence": 2,
+            "id": "windows_durable_fence_extension_core",
+            "responsibility": "implement_durable_fail_closed_held_store_and_final_send_cancel_admission_without_installing_it",
+            "acceptance_gate": "offline_windows_unit_tests_prove_missing_corrupt_or_unknown_store_and_absent_active_token_reject_before_gateway",
+            "runtime_mutation_allowed": false
+          },
+          {
+            "sequence": 3,
+            "id": "windows_reproducible_bundle_and_signed_install_manifest",
+            "responsibility": "freeze_exact_extension_bundle_version_config_destination_acl_store_schema_canonical-signature-verifier_trust-domain-and-deterministic-attempt-identity_production-manifest-signing-waits-for-WF3-fresh-preflight",
+            "acceptance_gate": "offline_test_key_fixtures_reject_hash_signature_domain_expiry_path_and_downgrade_drift",
+            "runtime_mutation_allowed": false
+          },
+          {
+            "sequence": 4,
+            "id": "windows_host_observed_frozen_zero_order_preflight",
+            "responsibility": "bind_host_observed_old_owner_frozen_trade_disabled_authority_revoked_and_fresh_windows_pending_zero_active_order_zero_proofs",
+            "acceptance_gate": "stale_replayed_drifting_nonzero_or_v1_only_evidence_blocks_before_any_install_write",
+            "runtime_mutation_allowed": false
+          },
+          {
+            "sequence": 5,
+            "id": "windows_deterministic_install_attempt_journal",
+            "responsibility": "stage_then-atomic-create-only-content-addressed-final-publish_remove-installer-write_observer-seal-exact-path-bytes-owner-acl-and-transition-plan-with-active-SCM-still-preinstall_then-fresh-restart-authorization_event-3-durable-nonce-reservation_first-demand-start-disable-recovery-failure-actions-with-preinstall-ImagePath-and-readback_then-exact-target-ImagePath-transition-retaining-safe-policy-and-readback_event-4-transition-receipt_then-at-most-one-SCM-restart_host-observer-single-use-SCM-audit-evidence_event-5-and-observer-startup-receipt",
+            "acceptance_gate": "target-ImagePath-before-safe-policy-or-event-3_restart-before-event-4_auto-policy-restore_missing-or-spliced-SCM-audit-caller-operation-nonce-boot-result-trace_or-process-start-not-strictly-after-exact-audited-SCM-call-blocks_post-seal-or-post-transition-drift-blocks_event-3-and-event-4-fsync-readback-precede-restart_and-every-head-at-or-after-event-3-is-query-only-never-issues-a-second-restart",
+            "runtime_mutation_allowed": false
+          },
+          {
+            "sequence": 6,
+            "id": "windows_restart_attestation_and_foundation_closure",
+            "responsibility": "attest_exact-old-to-new-service-identity-transition_boot-session_running-image-loaded-extension-effective-config_held-store-empty-tokens-and-final-send-cancel-rejection_then-append-terminal-event-7-closure",
+            "acceptance_gate": "offline_restart_fixtures_and_negative_admission_probes_close_exact_manifest_preflight_attempt_and_post_restart_chain",
+            "runtime_mutation_allowed": false
+          },
+          {
+            "sequence": 7,
+            "id": "windows_operator_acceptance_harness_and_roll_forward_runbook",
+            "responsibility": "freeze_read_only_evidence_verifier_explicit_restart_ceremony_and_successor_only_recovery_protocol",
+            "acceptance_gate": "partial_unknown_or_store_aware_version_mismatch_requires_authorized_higher_version_successor_bound_to_prior_attempt",
+            "runtime_mutation_allowed": false
+          }
+        ],
+        "roll_forward_only": {
+          "required": true,
+          "same_attempt_retry_before_dispatch_reservation": true,
+          "same_attempt_at_or_after_dispatch_reservation": "query_only_never_SCM_dispatch",
+          "successor_required_after_consumed_reservation_without_verified_start": true,
+          "unknown_install_action": "query_exact_attempt_keep_final_order_admission_blocked_and_do_not_restart_again",
+          "successor_requirements": "explicit_authorization_higher_version_store_schema_compatible_and_supersedes_prior_attempt",
+          "rollback_to_store_unaware_extension": "forbidden"
         },
         "forbidden": [
           "implicit_windows_restart_authorization",
@@ -364,6 +426,18 @@
   },
   "build_units": [
     {
+      "id": "windows-fence-foundation-bundle",
+      "implementation_status": "planned_contract_frozen_runtime_not_installed",
+      "build_file": "future:scripts/windows_fence_foundation/Containerfile.bundle",
+      "context": ".",
+      "deploy_units": [
+        "windows-ctp-gateway"
+      ],
+      "deploy_units_semantics": "dependency_mapping_only_not_a_cd_target_install_restart_or_deploy_authorization",
+      "automatic_deploy_allowed": false,
+      "closure_mode": "exact_windows_extension_bundle_manifest_and_offline_verifier_closure"
+    },
+    {
       "id": "legacy-web-bridge-app",
       "implementation_status": "current_monolith",
       "build_file": "Dockerfile",
@@ -531,7 +605,7 @@
     {"id": "monitor-worker", "phase": "phase_5", "implementation_status": "planned", "automatic_deploy_allowed": false, "safe_restart_contract": "delivery_checkpoint_and_dedupe_preserved"},
     {"id": "questdb", "phase": "current", "implementation_status": "current", "automatic_deploy_allowed": false, "safe_restart_contract": "database_maintenance_after_writer_drain"},
     {"id": "postgres", "phase": "current", "implementation_status": "current", "automatic_deploy_allowed": false, "safe_restart_contract": "database_maintenance_with_backup_and_compatibility_plan"},
-    {"id": "windows-ctp-gateway", "phase": "external", "implementation_status": "current_external", "automatic_deploy_allowed": false, "safe_restart_contract": "explicit_windows_operator_authorization_then_execution_reconcile"}
+    {"id": "windows-ctp-gateway", "phase": "external", "implementation_status": "foundation_contract_frozen_runtime_not_installed", "automatic_deploy_allowed": false, "safe_restart_contract": "signed_exact_attempt_host_observed_frozen_zero_order_preflight_explicit_windows_operator_authorization_restart_attestation_and_roll_forward_only"}
   ],
   "path_rules": [
     {
@@ -574,6 +648,38 @@
       "build_units": [],
       "verification_units": ["deploy_script_contract", "watchdog_contract"],
       "deploy_units": []
+    },
+    {
+      "id": "windows-fence-foundation-sources",
+      "match": {
+        "glob": [
+          "scripts/windows_rpc_*",
+          "docs/schemas/windows-rpc-durable-fence-*.schema.json",
+          "docs/operations/windows-rpc-durable-fence-*.md",
+          "docs/architecture/windows-rpc-durable-fence-foundation-*.json"
+        ],
+        "prefix": [
+          "scripts/windows_fence_foundation/"
+        ]
+      },
+      "classification": "infra_manual",
+      "build_units": [
+        "windows-fence-foundation-bundle"
+      ],
+      "pre_activation_build_units": [
+        "legacy-web-bridge-app"
+      ],
+      "verification_units": [
+        "windows_fence_foundation_contract",
+        "windows_fence_extension_offline_unit",
+        "windows_fence_signed_manifest_verifier",
+        "windows_fence_frozen_zero_order_preflight",
+        "windows_fence_install_attempt_recovery",
+        "windows_fence_restart_attestation",
+        "windows_fence_roll_forward_only"
+      ],
+      "deploy_units": [],
+      "manual_scope_resolution": "build_and_verify_only; ordinary_cd_install_restart_signing_or_windows_runtime_mutation_forbidden"
     },
     {
       "id": "root-containerfile-contract",

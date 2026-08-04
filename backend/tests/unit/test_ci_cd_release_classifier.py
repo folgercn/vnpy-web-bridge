@@ -11,14 +11,14 @@ from scripts.ci.plan_legacy_cd_guard import create_plan
 
 ROOT = Path(__file__).resolve().parents[3]
 MANIFEST = json.loads(
-    (
-        ROOT / "docs/architecture/web-bridge-release-dependencies-v1.json"
-    ).read_text(encoding="utf-8")
+    (ROOT / "docs/architecture/web-bridge-release-dependencies-v1.json").read_text(
+        encoding="utf-8"
+    )
 )
 SCHEMA = json.loads(
-    (
-        ROOT / "docs/schemas/web-bridge-legacy-cd-guard-plan-v1.schema.json"
-    ).read_text(encoding="utf-8")
+    (ROOT / "docs/schemas/web-bridge-legacy-cd-guard-plan-v1.schema.json").read_text(
+        encoding="utf-8"
+    )
 )
 SOURCE_SHA = "a" * 40
 
@@ -46,6 +46,31 @@ def _plan(paths: list[str]) -> dict[str, object]:
         ),
         (["deployments/docker-compose.prod.yml"], "BLOCKED", []),
         ([".github/workflows/cd.yml"], "BLOCKED", []),
+        (
+            ["scripts/windows_rpc_deployment_snapshot_v1.py"],
+            "BLOCKED",
+            ["legacy-web-bridge-app"],
+        ),
+        (
+            ["scripts/windows_fence_foundation/install_attempt.py"],
+            "BLOCKED",
+            ["legacy-web-bridge-app"],
+        ),
+        (
+            ["docs/schemas/windows-rpc-durable-fence-state-v1.schema.json"],
+            "BLOCKED",
+            ["legacy-web-bridge-app"],
+        ),
+        (
+            ["docs/operations/windows-rpc-durable-fence-foundation-v1.md"],
+            "BLOCKED",
+            ["legacy-web-bridge-app"],
+        ),
+        (
+            ["docs/architecture/windows-rpc-durable-fence-foundation-chain-v1.json"],
+            "BLOCKED",
+            ["legacy-web-bridge-app"],
+        ),
         (["future-unowned-path.txt"], "BLOCKED", []),
         ([], "BLOCKED", []),
     ],
@@ -60,7 +85,9 @@ def test_guard_plan_is_fail_closed(
     assert plan["preserve_units"] == ["postgres", "questdb", "web-bridge"]
     assert plan["automatic_deploy_allowed"] is False
     assert plan["manual_deploy_allowed"] is False
-    assert plan["merge_gate_blocked"] is (not paths or "future-unowned-path.txt" in paths)
+    assert plan["merge_gate_blocked"] is (
+        not paths or "future-unowned-path.txt" in paths
+    )
 
 
 def test_mixed_docs_and_frontend_is_build_only_without_restart() -> None:
@@ -87,6 +114,18 @@ def test_unknown_or_infrastructure_path_has_explicit_blocker() -> None:
         }
     ]
     assert infrastructure["merge_gate_blocked"] is False
+
+    windows = _plan(["scripts/windows_rpc_deployment_snapshot_v1.py"])
+    assert windows["blocked_reasons"] == [
+        {
+            "path": "scripts/windows_rpc_deployment_snapshot_v1.py",
+            "code": "infra_manual",
+            "rule_id": "windows-fence-foundation-sources",
+        }
+    ]
+    assert windows["restart_units"] == []
+    assert windows["automatic_deploy_allowed"] is False
+    assert windows["manual_deploy_allowed"] is False
 
 
 def test_known_plus_unknown_and_ambiguous_rules_block_merge() -> None:
