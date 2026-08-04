@@ -5,6 +5,9 @@ export PATH="/Applications/Docker.app/Contents/Resources/bin:/opt/homebrew/bin:/
 
 DEPLOY_PATH=${DEPLOY_PATH:-/Users/fujun/services/vnpy-web-bridge}
 COMPOSE_FILE="$DEPLOY_PATH/deployments/docker-compose.prod.yml"
+PRIVATE_PROFILE_FILE="$DEPLOY_PATH/deployments/c-fast-simnow-profile.env"
+PRIVATE_RUNTIME_ENV_FILE="$DEPLOY_PATH/deployments/c-fast-simnow-runtime.env"
+PRIVATE_COMPOSE_FILE="$DEPLOY_PATH/deployments/docker-compose.c-fast-simnow-private.yml"
 IMAGE_REPO=${IMAGE_REPO:-ghcr.io/folgercn/vnpy-web-bridge-app}
 IMAGE_TAG=${IMAGE_TAG:-latest}
 DOCKER_CONFIG_DIR=${DOCKER_CONFIG_DIR:-$DEPLOY_PATH/.docker-ci}
@@ -82,10 +85,10 @@ PY
 
 dump_deploy_debug() {
   echo "Compose status after failed smoke:" >&2
-  "${COMPOSE_CMD[@]}" -f "$COMPOSE_FILE" ps >&2 || true
+  "${COMPOSE_CMD[@]}" "${COMPOSE_ARGS[@]}" ps >&2 || true
   for service in "${deploy_args[@]}"; do
     echo "Recent logs for $service:" >&2
-    "${COMPOSE_CMD[@]}" -f "$COMPOSE_FILE" logs --no-color --tail=200 "$service" >&2 || true
+    "${COMPOSE_CMD[@]}" "${COMPOSE_ARGS[@]}" logs --no-color --tail=200 "$service" >&2 || true
   done
 }
 
@@ -112,6 +115,50 @@ if [[ ! -f "$ENV_FILE" ]]; then
   exit 1
 fi
 chmod 600 "$ENV_FILE"
+
+COMPOSE_ARGS=(--env-file "$ENV_FILE" -f "$COMPOSE_FILE")
+if [[ -e "$PRIVATE_PROFILE_FILE" ]]; then
+  profile_enabled=$(python3 - "$PRIVATE_PROFILE_FILE" <<'PY'
+from __future__ import annotations
+
+import os
+from pathlib import Path
+import stat
+import sys
+
+path = Path(sys.argv[1])
+info = path.lstat()
+if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+    raise SystemExit("C_FAST SimNow profile marker must be a regular non-symlink file")
+if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077:
+    raise SystemExit("C_FAST SimNow profile marker must be owner-only and owned by deploy user")
+lines = [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+print("true" if lines == ["ENABLE_C_FAST_SIMNOW_PROFILE=true"] else "false")
+PY
+  )
+  if [[ "$profile_enabled" != "true" ]]; then
+    echo "Invalid C_FAST SimNow profile marker: $PRIVATE_PROFILE_FILE" >&2
+    exit 1
+  fi
+  python3 - "$PRIVATE_RUNTIME_ENV_FILE" "$PRIVATE_COMPOSE_FILE" <<'PY'
+from __future__ import annotations
+
+import os
+from pathlib import Path
+import stat
+import sys
+
+for raw in sys.argv[1:]:
+    path = Path(raw)
+    info = path.lstat()
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise SystemExit(f"private deployment input must be a regular non-symlink file: {path}")
+    if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077:
+        raise SystemExit(f"private deployment input must be owner-only and owned by deploy user: {path}")
+PY
+  COMPOSE_ARGS+=(--env-file "$PRIVATE_RUNTIME_ENV_FILE" -f "$PRIVATE_COMPOSE_FILE")
+  echo "C_FAST SimNow private deployment profile: enabled"
+fi
 
 if [[ "$IMAGE_REPO" == ghcr.io/* ]]; then
   if [[ -z "${GHCR_USERNAME:-}" || -z "${GHCR_TOKEN:-}" ]]; then
@@ -150,9 +197,9 @@ for service in $DEPLOY_SERVICES; do
 done
 
 if [[ "$DEPLOY_SKIP_PULL" != "true" ]]; then
-  "${COMPOSE_CMD[@]}" -f "$COMPOSE_FILE" pull "${deploy_args[@]}"
+  "${COMPOSE_CMD[@]}" "${COMPOSE_ARGS[@]}" pull "${deploy_args[@]}"
 fi
-"${COMPOSE_CMD[@]}" -f "$COMPOSE_FILE" up -d --remove-orphans "${deploy_args[@]}"
+"${COMPOSE_CMD[@]}" "${COMPOSE_ARGS[@]}" up -d --remove-orphans "${deploy_args[@]}"
 docker image prune -f >/dev/null 2>&1 || true
 
 if smoke_liveness; then

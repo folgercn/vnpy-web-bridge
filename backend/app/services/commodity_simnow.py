@@ -36,6 +36,8 @@ from app.core.errors import (
     CommoditySimNowSafetyError,
     CommoditySimNowStateError,
     RpcCallError,
+    RpcTimeoutError,
+    RpcUnavailableError,
 )
 from app.schemas.commodity_c_fast_execution_permit import (
     CommodityCFastSimNowExecutionPermitDTO,
@@ -48,6 +50,7 @@ from app.schemas.commodity_c_fast_shadow import (
     CommodityCFastShakedownSnapshotDTO,
 )
 from app.schemas.commodity_simnow import (
+    CommodityCFastContinuousEnableRequestDTO,
     CommodityPlanExecuteRequestDTO,
     CommodityPositionManagerShadowDTO,
     CommoditySimNowDisableRequestDTO,
@@ -820,6 +823,8 @@ class CommoditySimNowService:
                     operator="commodity-simnow-recovery",
                     source_ip=None,
                 )
+        if not self.current_plan:
+            self._restore_c_fast_continuous_authority()
         if self._task or not self.settings.commodity_simnow_enabled:
             return
         self._task = asyncio.create_task(self._run_auto_dispatch_loop())
@@ -828,13 +833,17 @@ class CommoditySimNowService:
         abort_epoch = self._request_dispatch_abort()
         halt_error: Exception | None = None
         try:
-            await asyncio.to_thread(
-                self._begin_safe_halt,
-                "service_stop",
-                operator="commodity-simnow-shutdown",
-                source_ip=None,
-                revoke_scope="all",
+            preserved = await asyncio.to_thread(
+                self._suspend_idle_c_fast_continuous_for_shutdown
             )
+            if not preserved:
+                await asyncio.to_thread(
+                    self._begin_safe_halt,
+                    "service_stop",
+                    operator="commodity-simnow-shutdown",
+                    source_ip=None,
+                    revoke_scope="all",
+                )
         except Exception as exc:
             halt_error = exc
         finally:
@@ -848,6 +857,266 @@ class CommoditySimNowService:
         if halt_error is not None:
             raise halt_error
         self._complete_dispatch_halt(abort_epoch)
+
+    @_serialized
+    def _suspend_idle_c_fast_continuous_for_shutdown(self) -> bool:
+        if self.current_plan or not self.c_fast_continuous_authorized:
+            return False
+        session = self._load_c_fast_shakedown_state()
+        if (
+            not isinstance(session, dict)
+            or session.get("status") != "COMPLETE"
+            or session.get("continuous_authorized") is not True
+        ):
+            return False
+        self.c_fast_continuous_authorized = False
+        self.c_fast_shakedown_auto_dispatch_authorized = False
+        self.enabled = False
+        self.manual_approval = False
+        self.simnow_mode = False
+        self._event(
+            "c_fast_continuous_suspended_for_service_restart",
+            result={"persistent_intent_preserved": True},
+        )
+        return True
+
+    def _c_fast_continuous_runtime_configured(self) -> bool:
+        return bool(
+            self.settings.commodity_c_fast_simnow_shakedown_enabled
+            and self.settings.commodity_c_fast_simnow_auto_dispatch_enabled
+            and self.settings.commodity_simnow_enabled
+        )
+
+    def _c_fast_continuous_resume_requested(self) -> bool:
+        if not self._c_fast_continuous_runtime_configured():
+            return False
+        session = self._load_c_fast_shakedown_state()
+        return bool(
+            isinstance(session, dict)
+            and session.get("status") == "COMPLETE"
+            and session.get("continuous_authorized") is True
+        )
+
+    def _c_fast_continuous_terminal_anchor(
+        self,
+        *,
+        selected_products: list[str] | None = None,
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, int]]:
+        session = self._load_c_fast_shakedown_state()
+        if (
+            not isinstance(session, dict)
+            or session.get("status") != "COMPLETE"
+        ):
+            raise CommoditySimNowSafetyError(
+                "C_FAST 连续运行终态指针无效"
+            )
+        session_id = str(session.get("session_id") or "")
+        archived = self._load_c_fast_terminal_archive(session_id)
+        if (
+            archived is None
+            or archived.get("continuous_authorized") is not True
+            or archived.get("terminal_checksum")
+            != session.get("terminal_checksum")
+        ):
+            raise CommoditySimNowSafetyError(
+                "C_FAST 连续运行缺少原始授权终态锚点"
+            )
+        scope = list(session.get("selected_products") or [])
+        if (
+            not scope
+            or len(scope)
+            > self.settings.commodity_c_fast_simnow_max_selected_products
+            or any(product not in PRODUCT_SPECS for product in scope)
+        ):
+            raise CommoditySimNowSafetyError(
+                "C_FAST 连续运行品种范围无效"
+            )
+        if selected_products is not None and selected_products != scope:
+            raise CommoditySimNowSafetyError(
+                "C_FAST 连续运行品种范围必须与终态授权完全一致",
+                detail={"required_selected_products": scope},
+            )
+        reconciliation = archived.get("execution", {}).get(
+            "reconciliation"
+        )
+        if (
+            not isinstance(reconciliation, dict)
+            or reconciliation.get("matched") is not True
+            or reconciliation.get("active_order_ids") not in (None, [])
+            or reconciliation.get("expected_positions")
+            != reconciliation.get("observed_positions")
+        ):
+            raise CommoditySimNowSafetyError(
+                "C_FAST 连续运行终态对账无效"
+            )
+        expected_positions = {
+            str(vt_symbol): int(quantity)
+            for vt_symbol, quantity in (
+                reconciliation.get("expected_positions") or {}
+            ).items()
+            if int(quantity)
+        }
+        return session, archived, dict(sorted(expected_positions.items()))
+
+    @_serialized
+    def _restore_c_fast_continuous_authority(self) -> dict[str, Any]:
+        if self.current_plan:
+            return {"action": "idle", "reason": "execution_slot_occupied"}
+        if not self._c_fast_continuous_runtime_configured():
+            return {"action": "idle", "reason": "runtime_not_configured"}
+        session = self._load_c_fast_shakedown_state()
+        if (
+            not isinstance(session, dict)
+            or session.get("status") != "COMPLETE"
+            or session.get("continuous_authorized") is not True
+        ):
+            return {"action": "idle", "reason": "no_persistent_authority"}
+        try:
+            rpc_status = self.rpc.status(probe=True)
+        except (RpcUnavailableError, RpcTimeoutError, RpcCallError) as exc:
+            return {
+                "action": "waiting",
+                "reason": "rpc_transient_failure",
+                "error_type": exc.__class__.__name__,
+            }
+        except Exception as exc:
+            return {
+                "action": "waiting",
+                "reason": "rpc_probe_failed",
+                "error_type": exc.__class__.__name__,
+            }
+        if not rpc_status.get("connected"):
+            return {"action": "waiting", "reason": "rpc_not_connected"}
+        try:
+            anchored, _archived, expected = (
+                self._c_fast_continuous_terminal_anchor()
+            )
+            safety = self._safety_snapshot(require_trade_enabled=True)
+            self._verify_c_fast_account(str(safety["account_hash"]))
+            if safety["account_hash"] != anchored.get("account_hash"):
+                raise CommoditySimNowSafetyError(
+                    "C_FAST 连续运行账户与终态授权不一致"
+                )
+            active_orders = self._c_fast_external_active_orders(None)
+            if active_orders:
+                raise CommoditySimNowSafetyError(
+                    "C_FAST 连续运行恢复前存在活动委托",
+                    detail={"active_order_count": len(active_orders)},
+                )
+            observed = self._signed_positions(self._position_snapshot())
+            if observed != expected:
+                raise CommoditySimNowSafetyError(
+                    "C_FAST 连续运行恢复前持仓与终态不一致",
+                    detail={"expected": expected, "observed": observed},
+                )
+        except (RpcUnavailableError, RpcTimeoutError, RpcCallError) as exc:
+            return {
+                "action": "waiting",
+                "reason": "rpc_transient_failure",
+                "error_type": exc.__class__.__name__,
+            }
+        except Exception as exc:
+            self._revoke_auto_dispatch("c_fast_shakedown")
+            self._event(
+                "c_fast_continuous_restore_rejected",
+                result={"error_type": exc.__class__.__name__},
+            )
+            raise
+        self.c_fast_continuous_authorized = True
+        self.c_fast_shakedown_auto_dispatch_authorized = True
+        self.enabled = True
+        self.manual_approval = True
+        self.simnow_mode = True
+        self._event(
+            "c_fast_continuous_restored",
+            result={
+                "selected_products": list(
+                    anchored.get("selected_products") or []
+                )
+            },
+        )
+        return {
+            "action": "continuous_authorization_restored",
+            **self.c_fast_shakedown_status(),
+        }
+
+    @_serialized
+    def enable_c_fast_continuous(
+        self,
+        payload: CommodityCFastContinuousEnableRequestDTO,
+        *,
+        operator: str,
+        role: str | None,
+        source_ip: str | None,
+    ) -> dict[str, Any]:
+        if not self._c_fast_continuous_runtime_configured():
+            raise CommoditySimNowDisabledError(
+                detail={
+                    "required_settings": [
+                        "COMMODITY_SIMNOW_ENABLED=true",
+                        "COMMODITY_C_FAST_SIMNOW_SHAKEDOWN_ENABLED=true",
+                        "COMMODITY_C_FAST_SIMNOW_AUTO_DISPATCH_ENABLED=true",
+                    ]
+                }
+            )
+        if self.current_plan:
+            raise CommoditySimNowStateError(
+                "共享执行槽已有 SimNow 计划，禁止启用连续运行"
+            )
+        selected = list(dict.fromkeys(payload.selected_products))
+        if selected != payload.selected_products:
+            raise CommoditySimNowSafetyError("连续运行品种范围包含重复项")
+        session, _archived, expected = (
+            self._c_fast_continuous_terminal_anchor(
+                selected_products=selected
+            )
+        )
+        safety = self._safety_snapshot(require_trade_enabled=True)
+        self._verify_c_fast_account(str(safety["account_hash"]))
+        if safety["account_hash"] != session.get("account_hash"):
+            raise CommoditySimNowSafetyError(
+                "C_FAST 连续运行账户与终态授权不一致"
+            )
+        active_orders = self._c_fast_external_active_orders(None)
+        if active_orders:
+            raise CommoditySimNowSafetyError(
+                "C_FAST 连续运行启用前存在活动委托",
+                detail={"active_order_count": len(active_orders)},
+            )
+        observed = self._signed_positions(self._position_snapshot())
+        if observed != expected:
+            raise CommoditySimNowSafetyError(
+                "C_FAST 连续运行启用前持仓与终态不一致",
+                detail={"expected": expected, "observed": observed},
+            )
+        self._set_c_fast_continuous_authorized(True)
+        self.c_fast_shakedown_auto_dispatch_authorized = True
+        self.enabled = True
+        self.manual_approval = True
+        self.simnow_mode = True
+        result = {
+            "action": "continuous_authorization_enabled",
+            "selected_products": selected,
+            "signed_snapshots_only": True,
+            "independent_execution_permit_required": True,
+            **self.c_fast_shakedown_status(),
+        }
+        self._event(
+            "c_fast_continuous_enabled",
+            result={"selected_products": selected},
+        )
+        self.audit.record(
+            action="commodity_c_fast_continuous_enable",
+            user_id=operator,
+            role=role,
+            request={
+                "reason": payload.reason,
+                "selected_products": selected,
+            },
+            result=result,
+            source_ip=source_ip,
+        )
+        return result
 
     @_serialized
     def _revoke_auto_dispatch(self, scope: str = "all") -> None:
@@ -2317,7 +2586,7 @@ class CommoditySimNowService:
                 raise CommoditySimNowSafetyError(
                     "C_FAST 连续运行前序终态证据无效"
                 )
-            snapshot, snapshot_hash, _permit = self._c_fast_snapshot()
+            snapshot, snapshot_hash = self._c_fast_verified_snapshot()
             if snapshot_hash == previous_session.get(
                 "source_snapshot_hash"
             ):
@@ -2373,6 +2642,16 @@ class CommoditySimNowService:
                 role=role,
                 source_ip=source_ip,
             )
+        except (RpcUnavailableError, RpcTimeoutError, RpcCallError) as exc:
+            self._event(
+                "c_fast_continuous_waiting_for_rpc",
+                result={"error_type": exc.__class__.__name__},
+            )
+            return {
+                "action": "waiting",
+                "reason": "rpc_transient_failure",
+                "error_type": exc.__class__.__name__,
+            }
         except Exception as exc:
             self._revoke_auto_dispatch("c_fast_shakedown")
             self._event(
@@ -2522,6 +2801,16 @@ class CommoditySimNowService:
                     await asyncio.to_thread(
                         self.auto_c_fast_continuous_advance
                     )
+                elif self._c_fast_continuous_resume_requested():
+                    restored = await asyncio.to_thread(
+                        self._restore_c_fast_continuous_authority
+                    )
+                    if restored.get("action") == (
+                        "continuous_authorization_restored"
+                    ):
+                        await asyncio.to_thread(
+                            self.auto_c_fast_continuous_advance
+                        )
                 elif self.settings.commodity_simnow_auto_dispatch_enabled and self.template_authorized:
                     await asyncio.to_thread(self.auto_template_advance)
                 elif self.settings.commodity_simnow_auto_dispatch_enabled:
@@ -2611,6 +2900,34 @@ class CommoditySimNowService:
         str,
         CommodityCFastSimNowExecutionPermitDTO,
     ]:
+        snapshot, snapshot_hash = self._c_fast_verified_snapshot()
+        permit_provider = self._c_fast_execution_permit_provider
+        if permit_provider is None:
+            raise CommoditySimNowSafetyError(
+                "C_FAST 独立 SimNow Execution Permit 源未绑定；"
+                "旧 shakedown 内嵌 permit 不具备执行权限"
+            )
+        try:
+            permit = permit_provider(snapshot, snapshot_hash)
+        except Exception as exc:
+            raise CommoditySimNowSafetyError(
+                "C_FAST 独立 SimNow Execution Permit 未通过 Control Plane 验证",
+                detail={
+                    "error_type": exc.__class__.__name__,
+                    "error_code": getattr(exc, "code", None),
+                },
+            ) from exc
+        if not isinstance(
+            permit, CommodityCFastSimNowExecutionPermitDTO
+        ):
+            raise CommoditySimNowSafetyError(
+                "C_FAST 独立 SimNow Execution Permit 类型无效"
+            )
+        return snapshot, snapshot_hash, permit
+
+    def _c_fast_verified_snapshot(
+        self,
+    ) -> tuple[CommodityCFastShakedownSnapshotDTO, str]:
         provider = self._c_fast_snapshot_provider
         if provider is None:
             raise CommoditySimNowSafetyError(
@@ -2638,29 +2955,7 @@ class CommoditySimNowService:
             raise CommoditySimNowSafetyError(
                 "C_FAST shakedown Execution Permit 边界无效"
             )
-        permit_provider = self._c_fast_execution_permit_provider
-        if permit_provider is None:
-            raise CommoditySimNowSafetyError(
-                "C_FAST 独立 SimNow Execution Permit 源未绑定；"
-                "旧 shakedown 内嵌 permit 不具备执行权限"
-            )
-        try:
-            permit = permit_provider(snapshot, snapshot_hash)
-        except Exception as exc:
-            raise CommoditySimNowSafetyError(
-                "C_FAST 独立 SimNow Execution Permit 未通过 Control Plane 验证",
-                detail={
-                    "error_type": exc.__class__.__name__,
-                    "error_code": getattr(exc, "code", None),
-                },
-            ) from exc
-        if not isinstance(
-            permit, CommodityCFastSimNowExecutionPermitDTO
-        ):
-            raise CommoditySimNowSafetyError(
-                "C_FAST 独立 SimNow Execution Permit 类型无效"
-            )
-        return snapshot, snapshot_hash, permit
+        return snapshot, snapshot_hash
 
     def _verify_c_fast_account(self, account_hash: str) -> None:
         allowed = _csv_set(
@@ -2713,6 +3008,8 @@ class CommoditySimNowService:
             ),
             "continuous_authorized":
             self.c_fast_continuous_authorized,
+            "continuous_resume_requested":
+            self._c_fast_continuous_resume_requested(),
             "authority_persistence_error":
             self._c_fast_authority_persist_error,
             "auto_dispatch_enabled":

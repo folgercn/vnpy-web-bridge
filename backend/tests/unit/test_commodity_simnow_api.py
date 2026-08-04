@@ -95,6 +95,13 @@ class FakeCommoditySimNowService:
             }
         }
 
+    def enable_c_fast_continuous(self, payload, **kwargs) -> dict:
+        return {
+            "action": "continuous_authorization_enabled",
+            "selected_products": payload.selected_products,
+            "production_allowed": False,
+        }
+
     def list_events(self, limit: int) -> list[dict]:
         return []
 
@@ -277,6 +284,25 @@ def test_c_fast_shakedown_reads_and_mutations_use_expected_rbac(
             headers=auth_headers("admin"),
             json={"reason": "operator requested stop"},
         )
+        continuous_payload = {
+            "reason": "operator approved continuous SimNow pilot",
+            "selected_products": ["ag"],
+            "confirm_simnow_only": True,
+            "confirm_signed_snapshots_only": True,
+            "confirm_independent_execution_permit": True,
+            "confirm_no_production": True,
+            "confirm_fail_closed_on_drift": True,
+        }
+        continuous_forbidden = client.post(
+            "/api/commodity-simnow/c-fast-shakedown/continuous/enable",
+            headers=auth_headers("trader"),
+            json=continuous_payload,
+        )
+        continuous_enabled = client.post(
+            "/api/commodity-simnow/c-fast-shakedown/continuous/enable",
+            headers=auth_headers("admin"),
+            json=continuous_payload,
+        )
 
     assert status.status_code == 200
     assert status.json()["data"]["production_allowed"] is False
@@ -286,6 +312,11 @@ def test_c_fast_shakedown_reads_and_mutations_use_expected_rbac(
     assert preview.json()["data"]["preview"]["selected_products"] == ["ag"]
     assert started.json()["data"]["action"] == "open_submitted"
     assert stopped.json()["data"]["halt"]["status"] == "CANCEL_PENDING"
+    assert continuous_forbidden.status_code == 403
+    assert (
+        continuous_enabled.json()["data"]["action"]
+        == "continuous_authorization_enabled"
+    )
 
 
 def test_admin_can_enable_controller(monkeypatch) -> None:

@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from app.core.errors import ok
 from app.core.security import CurrentUser, require_roles
 from app.schemas.commodity_simnow import (
+    CommodityCFastContinuousEnableRequestDTO,
     CommodityCFastShakedownPreviewRequestDTO,
     CommodityCFastShakedownStartRequestDTO,
     CommodityCFastShakedownStopRequestDTO,
@@ -118,6 +119,22 @@ def c_fast_shakedown_stop(
     return ok(
         commodity_simnow_service.stop_c_fast_shakedown(
             payload.reason,
+            operator=user.username,
+            role=user.role,
+            source_ip=request.client.host if request.client else None,
+        )
+    )
+
+
+@router.post("/c-fast-shakedown/continuous/enable")
+def c_fast_continuous_enable(
+    payload: CommodityCFastContinuousEnableRequestDTO,
+    request: Request,
+    user: CurrentUser = Depends(require_roles("admin")),
+) -> dict:
+    return ok(
+        commodity_simnow_service.enable_c_fast_continuous(
+            payload,
             operator=user.username,
             role=user.role,
             source_ip=request.client.host if request.client else None,
