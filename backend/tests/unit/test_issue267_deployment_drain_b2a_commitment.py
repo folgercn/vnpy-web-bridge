@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -169,6 +170,23 @@ def test_fresh_chain_is_contiguous_and_binds_exact_state_without_authority(
     assert anchor["schema_version"] == ("web_bridge_deployment_drain_epoch_anchor_v2")
     assert anchor["state_generation"] == 3
     assert anchor["state_commitment_raw_sha256"] == previous_raw_sha
+
+
+def test_published_commitment_hardlink_temp_is_recovered(tmp_path: Path) -> None:
+    clock = Clock()
+    root = tmp_path / "commitment-temp-recovery"
+    drain = service(root, clock, "runtime-commitment-temp")
+    drain.status()
+    final = drain._state_commitment_path(1)
+    temporary = final.with_name(f".{final.name}.{'e' * 32}.tmp")
+    os.link(final, temporary)
+
+    restarted = service(root, clock, "runtime-commitment-temp")
+    status = restarted.status()
+
+    assert status["state"] == "RUNNING"
+    assert not temporary.exists()
+    assert final.stat().st_nlink == 1
 
 
 def test_v2_migration_genesis_commits_exact_source_hashes(

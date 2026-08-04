@@ -19,6 +19,8 @@ from app.schemas.deployment_drain import (
     DeploymentOnlineCheckpointDTO,
     DeploymentOnlineRecheckCheckpointDTO,
     DeploymentSafetySnapshotDTO,
+    SafeRestartConsumeCommitMarkerDTO,
+    SafeRestartConsumeIntentDTO,
     SafeRestartConsumeMarkerDTO,
     SafeRestartOnlineRecheckDTO,
     SafeRestartReceiptDTO,
@@ -32,9 +34,19 @@ from app.services.deployment_state_commitment import (
     parse_exact_state_commitment,
 )
 from app.services.deployment_online_recheck import (
+    MAX_RECHECK_AGE,
     DeploymentOnlineRecheckError,
     build_safe_restart_online_recheck,
     verify_safe_restart_online_recheck,
+)
+from app.services.deployment_consume_wal import (
+    DeploymentConsumeWalError,
+    build_consume_intent,
+    build_consume_marker,
+    canonical_consume_intent_bytes,
+    canonical_consume_marker_bytes,
+    parse_exact_consume_intent,
+    parse_exact_consume_marker,
 )
 
 STATE_VERSION = "web_bridge_deployment_drain_state_v3"
@@ -128,7 +140,9 @@ class DeploymentDrainService:
             self._prepare_lock_file()
             with self._exclusive_initialized():
                 self._cleanup_state_commitment_temporaries()
+                self._cleanup_consume_temporaries()
                 state = self._load_or_initial_state()
+                state = self._recover_consume_wal(state, startup=True)
                 self._verify_active_online_recheck_pointer(state)
                 previous_state = state["state"]
                 if self._state_materialization_recovered:
@@ -174,11 +188,20 @@ class DeploymentDrainService:
                     state["active_receipt_id"] = None
                     if restart_receipt_id is None:
                         state["active_receipt_raw_sha256"] = None
-                    state["receipt_consumed"] = False
-                    if state.get("freeze_reason") not in {
+                    if state["receipt_consumed"]:
+                        state.update(
+                            blockers=[
+                                "process_restarted_consumed_receipt_requires_reconciliation"
+                            ],
+                            freeze_reason=(
+                                "process_restarted_consumed_receipt_requires_reconciliation"
+                            ),
+                        )
+                    elif state.get("freeze_reason") not in {
                         "initial_bootstrap_requires_reconciliation",
                         "legacy_v1_consumption_evidence_quarantined",
                         "legacy_state_migrated_to_v3_requires_reconciliation",
+                        "online_snapshot_consume_intent_orphaned_after_restart",
                         "state_materialization_recovered_from_commitment",
                     }:
                         state["freeze_reason"] = (
@@ -745,6 +768,248 @@ class DeploymentDrainService:
             "state v2 does not activate one-shot consumption",
         )
 
+    def consume_active_online_recheck(
+        self,
+        *,
+        owner: object,
+        consumer_run_id: str,
+        operator: str,
+    ) -> SafeRestartConsumeCommitMarkerDTO:
+        """Consume the internally verified active recheck exactly once."""
+
+        if (
+            owner is not self._online_snapshot_owner
+            or owner is not self._online_recheck_owner
+        ):
+            raise DeploymentDrainError(
+                "SAFE_RESTART_CONSUME_OWNER_INVALID",
+                "caller does not own the online snapshot and recheck providers",
+            )
+        if not consumer_run_id or not operator:
+            raise ValueError("consumer_run_id and operator are required")
+        self._lock_context.consume_call = True
+        try:
+            with self._exclusive():
+                return self._consume_active_online_recheck_locked(
+                    consumer_run_id=consumer_run_id,
+                    operator=operator,
+                )
+        finally:
+            self._lock_context.consume_call = False
+
+    def _consume_active_online_recheck_locked(
+        self,
+        *,
+        consumer_run_id: str,
+        operator: str,
+    ) -> SafeRestartConsumeCommitMarkerDTO:
+        state = self._load_state()
+        self._require_current_runtime(state)
+        state = self._recover_consume_wal(state, startup=False)
+        if state["receipt_consumed"]:
+            marker = self._read_committed_consume_marker(state)
+            if marker.consumer_run_id != consumer_run_id or marker.operator != operator:
+                raise DeploymentDrainError(
+                    "SAFE_RESTART_CONSUME_CONFLICT",
+                    "receipt was consumed by another audit identity",
+                )
+            return marker
+        state = self._expire_if_needed(state)
+        if state["state"] != "SAFE_TO_RESTART":
+            raise DeploymentDrainError(
+                "SAFE_RESTART_CONSUME_NOT_AVAILABLE",
+                "no active safe restart receipt can be consumed",
+            )
+        if state["active_online_recheck_id"] is None:
+            raise DeploymentDrainError(
+                "SAFE_RESTART_CONSUME_RECHECK_REQUIRED",
+                "one-shot consumption requires the active online recheck",
+            )
+        self._verify_active_online_recheck_pointer(state)
+        receipt = self._read_receipt(
+            state["active_receipt_id"],
+            expected_raw_sha256=state["active_receipt_raw_sha256"],
+        )
+        receipt_raw = self._read_secure_file(self._receipt_path(receipt.receipt_id))
+        recheck = self._read_active_online_recheck(state)
+        recheck_raw = self._read_secure_file(
+            self._online_recheck_path(receipt.receipt_id)
+        )
+        now = self._now()
+        recheck_deadline = recheck.checked_at + MAX_RECHECK_AGE
+        if (
+            now < receipt.issued_at
+            or now < recheck.checked_at
+            or now >= receipt.expires_at
+            or now > recheck_deadline
+        ):
+            raise DeploymentDrainError(
+                "SAFE_RESTART_CONSUME_RECHECK_STALE",
+                "receipt or online recheck is no longer fresh",
+            )
+        chain = self._read_state_commitment_chain()
+        precommit, _precommit_raw, precommit_raw_sha = chain[-1]
+        if precommit.state_generation != state["state_generation"]:
+            raise DeploymentDrainError(
+                "SAFE_RESTART_CONSUME_PRECOMMIT_MISMATCH",
+                "state does not match the commitment chain head",
+            )
+        intent_path = self._consume_intent_path(receipt.receipt_id)
+        existing_intent_raw: bytes | None = None
+        existing_intent: SafeRestartConsumeIntentDTO | None = None
+        if intent_path.exists() or intent_path.is_symlink():
+            existing_intent_raw = self._read_secure_file(intent_path)
+            existing_intent = self._parse_consume_intent(existing_intent_raw)
+            if (
+                existing_intent.consumer_run_id != consumer_run_id
+                or existing_intent.operator != operator
+            ):
+                raise DeploymentDrainError(
+                    "SAFE_RESTART_CONSUME_CONFLICT",
+                    "a different consume intent owns this receipt slot",
+                )
+            self._verify_consume_wal_bindings(existing_intent, None)
+        planned_consumed_at = existing_intent.prepared_at if existing_intent else now
+        projection = self._consume_state_projection(
+            state=state,
+            receipt=receipt,
+            receipt_raw_sha256=_sha256(receipt_raw),
+            recheck=recheck,
+            recheck_raw_sha256=_sha256(recheck_raw),
+            precommit_raw_sha256=precommit_raw_sha,
+            consumer_run_id=consumer_run_id,
+            operator=operator,
+            planned_consumed_at=planned_consumed_at,
+        )
+        projection_sha = _sha256(_canonical_bytes(projection))
+        intent_core = {
+            "schema_version": "web_bridge_safe_restart_consume_intent_v1",
+            "purpose": "prepare_one_shot_safe_restart_consumption",
+            "receipt_id": receipt.receipt_id,
+            "receipt_raw_sha256": _sha256(receipt_raw),
+            "receipt_core_sha256": receipt.receipt_core_sha256,
+            "online_recheck_id": recheck.online_recheck_id,
+            "online_recheck_raw_sha256": _sha256(recheck_raw),
+            "online_recheck_core_sha256": recheck.recheck_core_sha256,
+            "preconsume_state_commitment_id": precommit.commitment_id,
+            "preconsume_state_commitment_raw_sha256": precommit_raw_sha,
+            "preconsume_state_generation": precommit.state_generation,
+            "consume_state_projection": projection,
+            "consume_state_projection_sha256": projection_sha,
+            "request_id": receipt.request_id,
+            "runtime_instance_id": self.runtime_instance_id,
+            "deployment_attempt_id": receipt.deployment_attempt_id,
+            "release_plan_core_sha256": receipt.release_plan_core_sha256,
+            "restart_action_sha256": receipt.restart_action_sha256,
+            "drain_epoch": receipt.drain_epoch,
+            "execution_epoch": receipt.execution_epoch,
+            "prepared_at": planned_consumed_at,
+            "consume_not_after": min(receipt.expires_at, recheck_deadline),
+            "consumer_run_id": consumer_run_id,
+            "operator": operator,
+            "consume_intent_prepared": True,
+            "one_shot_consume_committed": False,
+            "consume_authorized": False,
+            "reconciliation_authorized": False,
+            "deployment_authorized": False,
+            "automatic_deploy_allowed": False,
+            "production_allowed": False,
+            "live_trading_authorized": False,
+            "countable_forward": False,
+        }
+        try:
+            intent = build_consume_intent(intent_core)
+            intent_raw = canonical_consume_intent_bytes(intent)
+        except DeploymentConsumeWalError as exc:
+            raise DeploymentDrainError(
+                "SAFE_RESTART_CONSUME_INTENT_INVALID",
+                "consume intent could not be built",
+            ) from exc
+        if intent_path.exists() or intent_path.is_symlink():
+            if existing_intent_raw != intent_raw:
+                raise DeploymentDrainError(
+                    "SAFE_RESTART_CONSUME_CONFLICT",
+                    "a different consume intent owns this receipt slot",
+                )
+        else:
+            self._persist_consume_artifact(
+                intent_path,
+                intent_raw,
+                error_code="SAFE_RESTART_CONSUME_INTENT_PERSIST_FAILED",
+            )
+        commit_time = self._now()
+        if (
+            commit_time < planned_consumed_at
+            or commit_time < receipt.issued_at
+            or commit_time < recheck.checked_at
+            or commit_time >= receipt.expires_at
+            or commit_time > recheck_deadline
+        ):
+            self._block_orphan_consume_intent(state)
+            raise DeploymentDrainError(
+                "SAFE_RESTART_CONSUME_RECHECK_STALE",
+                "consume intent expired before its commit marker",
+            )
+        try:
+            marker = build_consume_marker(
+                intent_raw,
+                committed_at=commit_time,
+            )
+            marker_raw = canonical_consume_marker_bytes(marker)
+        except DeploymentConsumeWalError as exc:
+            raise DeploymentDrainError(
+                "SAFE_RESTART_CONSUME_MARKER_INVALID",
+                "consume marker could not be built",
+            ) from exc
+        marker_path = self._consume_marker_path(receipt.receipt_id)
+        if marker_path.exists() or marker_path.is_symlink():
+            existing_raw = self._read_secure_file(marker_path)
+            existing = self._parse_consume_marker(existing_raw, intent_raw)
+            if existing_raw != marker_raw:
+                raise DeploymentDrainError(
+                    "SAFE_RESTART_CONSUME_CONFLICT",
+                    "a different consume marker owns this receipt slot",
+                )
+            marker = existing
+            marker_raw = existing_raw
+        else:
+
+            def validate_marker_publish_boundary() -> None:
+                publish_time = self._now()
+                if (
+                    publish_time < marker.committed_at
+                    or publish_time < receipt.issued_at
+                    or publish_time < recheck.checked_at
+                    or publish_time >= receipt.expires_at
+                    or publish_time > recheck_deadline
+                ):
+                    raise DeploymentDrainError(
+                        "SAFE_RESTART_CONSUME_RECHECK_STALE",
+                        "consume evidence expired before marker publication",
+                    )
+
+            self._persist_consume_artifact(
+                marker_path,
+                marker_raw,
+                error_code="SAFE_RESTART_CONSUME_MARKER_PERSIST_FAILED",
+                before_publish=validate_marker_publish_boundary,
+            )
+        self._activate_consumed_state(
+            state,
+            intent_raw=intent_raw,
+            marker=marker,
+            marker_raw=marker_raw,
+        )
+        try:
+            self._write_state(state)
+        except (DeploymentDrainError, OSError) as exc:
+            raise DeploymentDrainError(
+                "SAFE_RESTART_CONSUME_STATE_COMMIT_FAILED",
+                "consume marker committed but state did not converge",
+            ) from exc
+        self._verify_consumed_state(state, intent_raw, marker, marker_raw)
+        return marker
+
     def release(
         self,
         *,
@@ -961,6 +1226,11 @@ class DeploymentDrainService:
     def _to_running(
         self, state: dict[str, Any], *, freeze_reason: str
     ) -> dict[str, Any]:
+        if state["receipt_consumed"]:
+            raise DeploymentDrainError(
+                "SAFE_RESTART_RECONCILIATION_REQUIRED",
+                "consumed restart evidence cannot be cleared before reconciliation",
+            )
         state.update(
             state="RUNNING",
             active_request_id=None,
@@ -1199,19 +1469,77 @@ class DeploymentDrainService:
             or payload["drain_epoch"] < 0
             or type(payload["execution_epoch"]) is not int
             or payload["execution_epoch"] < 0
-            or payload["receipt_consumed"] is not False
-            or payload["consumed_at"] is not None
-            or payload["consume_id"] is not None
-            or payload["consumed_receipt_id"] is not None
-            or payload["consume_intent_raw_sha256"] is not None
-            or payload["consume_marker_raw_sha256"] is not None
-            or payload["consume_state_projection_sha256"] is not None
-            or payload["consumed_online_recheck_id"] is not None
-            or payload["consumed_online_recheck_raw_sha256"] is not None
-            or payload["preconsume_state_commitment_raw_sha256"] is not None
         ):
             raise DeploymentDrainError(
                 "DEPLOYMENT_DRAIN_STATE_INVALID", "state values are invalid"
+            )
+        consumption_values = (
+            payload["consumed_at"],
+            payload["consume_id"],
+            payload["consumed_receipt_id"],
+            payload["consume_intent_raw_sha256"],
+            payload["consume_marker_raw_sha256"],
+            payload["consume_state_projection_sha256"],
+            payload["consumed_online_recheck_id"],
+            payload["consumed_online_recheck_raw_sha256"],
+            payload["preconsume_state_commitment_raw_sha256"],
+        )
+        if payload["receipt_consumed"] is False:
+            if any(value is not None for value in consumption_values):
+                raise DeploymentDrainError(
+                    "DEPLOYMENT_DRAIN_STATE_INVALID",
+                    "unconsumed state cannot carry consumption evidence",
+                )
+        elif payload["receipt_consumed"] is True:
+            if any(value is None for value in consumption_values) or payload[
+                "state"
+            ] not in {"SAFE_TO_RESTART", "RESTARTED_FROZEN"}:
+                raise DeploymentDrainError(
+                    "DEPLOYMENT_DRAIN_STATE_INVALID",
+                    "consumed state evidence is incomplete or misplaced",
+                )
+            try:
+                consumed_at = datetime.fromisoformat(
+                    payload["consumed_at"].replace("Z", "+00:00")
+                )
+            except (AttributeError, ValueError) as exc:
+                raise DeploymentDrainError(
+                    "DEPLOYMENT_DRAIN_STATE_INVALID",
+                    "consumed timestamp is invalid",
+                ) from exc
+            if (
+                consumed_at.tzinfo is None
+                or consumed_at.utcoffset() is None
+                or consumed_at.utcoffset().total_seconds() != 0
+                or not _is_prefixed_sha256(
+                    payload["consume_id"], "safe-restart-consume-marker-"
+                )
+                or not _is_prefixed_sha256(
+                    payload["consumed_receipt_id"], "safe-restart-"
+                )
+                or not _is_prefixed_sha256(
+                    payload["consumed_online_recheck_id"],
+                    "safe-restart-online-recheck-",
+                )
+                or not all(
+                    _is_sha256(value)
+                    for value in (
+                        payload["consume_intent_raw_sha256"],
+                        payload["consume_marker_raw_sha256"],
+                        payload["consume_state_projection_sha256"],
+                        payload["consumed_online_recheck_raw_sha256"],
+                        payload["preconsume_state_commitment_raw_sha256"],
+                    )
+                )
+            ):
+                raise DeploymentDrainError(
+                    "DEPLOYMENT_DRAIN_STATE_INVALID",
+                    "consumed state evidence values are invalid",
+                )
+        else:
+            raise DeploymentDrainError(
+                "DEPLOYMENT_DRAIN_STATE_INVALID",
+                "receipt_consumed must be a strict boolean",
             )
         previous_commitment = payload["previous_state_commitment_raw_sha256"]
         if (payload["state_generation"] == 1 and previous_commitment is not None) or (
@@ -1752,6 +2080,441 @@ class DeploymentDrainService:
             previous_raw_sha = raw_sha
         return chain
 
+    def _consume_state_projection(
+        self,
+        *,
+        state: dict[str, Any],
+        receipt: SafeRestartReceiptDTO,
+        receipt_raw_sha256: str,
+        recheck: SafeRestartOnlineRecheckDTO,
+        recheck_raw_sha256: str,
+        precommit_raw_sha256: str,
+        consumer_run_id: str,
+        operator: str,
+        planned_consumed_at: datetime,
+    ) -> dict[str, Any]:
+        return {
+            "schema_version": ("web_bridge_safe_restart_consume_state_projection_v1"),
+            "state": "SAFE_TO_RESTART",
+            "receipt_consumed": True,
+            "receipt_id": receipt.receipt_id,
+            "receipt_raw_sha256": receipt_raw_sha256,
+            "online_recheck_id": recheck.online_recheck_id,
+            "online_recheck_raw_sha256": recheck_raw_sha256,
+            "preconsume_state_commitment_raw_sha256": precommit_raw_sha256,
+            "preconsume_state_generation": state["state_generation"],
+            "runtime_instance_id": state["runtime_instance_id"],
+            "drain_epoch": state["drain_epoch"],
+            "execution_epoch": state["execution_epoch"],
+            "consumer_run_id": consumer_run_id,
+            "operator": operator,
+            "planned_consumed_at": _utc_json_timestamp(planned_consumed_at),
+            "consume_authorized": False,
+            "reconciliation_authorized": False,
+            "deployment_authorized": False,
+            "automatic_deploy_allowed": False,
+            "production_allowed": False,
+            "live_trading_authorized": False,
+            "countable_forward": False,
+        }
+
+    def _persist_consume_artifact(
+        self,
+        path: Path,
+        raw: bytes,
+        *,
+        error_code: str,
+        before_publish: Callable[[], None] | None = None,
+    ) -> None:
+        try:
+            self._write_create_only_atomic(path, raw, before_publish=before_publish)
+            if self._read_secure_file(path) != raw:
+                raise DeploymentDrainError(
+                    error_code,
+                    "consume WAL artifact readback did not match",
+                )
+        except (DeploymentDrainError, OSError) as exc:
+            if isinstance(exc, DeploymentDrainError) and exc.code in {
+                error_code,
+                "SAFE_RESTART_CONSUME_RECHECK_STALE",
+            }:
+                raise
+            raise DeploymentDrainError(
+                error_code,
+                "consume WAL artifact could not be persisted",
+            ) from exc
+
+    def _parse_consume_intent(self, raw: bytes) -> SafeRestartConsumeIntentDTO:
+        try:
+            return parse_exact_consume_intent(raw)
+        except DeploymentConsumeWalError as exc:
+            raise DeploymentDrainError(
+                "SAFE_RESTART_CONSUME_INTENT_INVALID",
+                "consume intent is invalid or non-canonical",
+            ) from exc
+
+    def _parse_consume_marker(
+        self, raw: bytes, intent_raw: bytes
+    ) -> SafeRestartConsumeCommitMarkerDTO:
+        try:
+            return parse_exact_consume_marker(raw, intent_raw=intent_raw)
+        except DeploymentConsumeWalError as exc:
+            raise DeploymentDrainError(
+                "SAFE_RESTART_CONSUME_MARKER_INVALID",
+                "consume marker is invalid or does not bind its intent",
+            ) from exc
+
+    def _verify_consume_wal_bindings(
+        self,
+        intent: SafeRestartConsumeIntentDTO,
+        marker: SafeRestartConsumeCommitMarkerDTO | None,
+    ) -> tuple[SafeRestartReceiptDTO, SafeRestartOnlineRecheckDTO]:
+        chain = self._read_state_commitment_chain()
+        if intent.preconsume_state_generation > len(chain):
+            raise DeploymentDrainError(
+                "SAFE_RESTART_CONSUME_PRECOMMIT_MISMATCH",
+                "consume intent names a missing state generation",
+            )
+        precommit, _raw, precommit_raw_sha = chain[
+            intent.preconsume_state_generation - 1
+        ]
+        prestate = dict(precommit.state)
+        if (
+            precommit.commitment_id != intent.preconsume_state_commitment_id
+            or precommit_raw_sha != intent.preconsume_state_commitment_raw_sha256
+            or prestate["state"] != "SAFE_TO_RESTART"
+            or prestate["receipt_consumed"]
+            or prestate["active_receipt_id"] != intent.receipt_id
+            or prestate["active_receipt_raw_sha256"] != intent.receipt_raw_sha256
+            or prestate["active_online_recheck_id"] != intent.online_recheck_id
+            or prestate["active_online_recheck_raw_sha256"]
+            != intent.online_recheck_raw_sha256
+            or prestate["runtime_instance_id"] != intent.runtime_instance_id
+            or prestate["drain_epoch"] != intent.drain_epoch
+            or prestate["execution_epoch"] != intent.execution_epoch
+        ):
+            raise DeploymentDrainError(
+                "SAFE_RESTART_CONSUME_PRECOMMIT_MISMATCH",
+                "consume WAL does not bind its preconsume state commitment",
+            )
+        receipt_raw = self._read_secure_file(self._receipt_path(intent.receipt_id))
+        if _sha256(receipt_raw) != intent.receipt_raw_sha256:
+            raise DeploymentDrainError(
+                "SAFE_RESTART_CONSUME_CHAIN_INVALID",
+                "consume receipt exact bytes changed",
+            )
+        try:
+            receipt = SafeRestartReceiptDTO.model_validate_json(receipt_raw)
+        except Exception as exc:
+            raise DeploymentDrainError(
+                "SAFE_RESTART_CONSUME_CHAIN_INVALID",
+                "consume receipt is invalid",
+            ) from exc
+        recheck_raw = self._read_secure_file(
+            self._online_recheck_path(intent.receipt_id)
+        )
+        if _sha256(recheck_raw) != intent.online_recheck_raw_sha256:
+            raise DeploymentDrainError(
+                "SAFE_RESTART_CONSUME_CHAIN_INVALID",
+                "consume online recheck exact bytes changed",
+            )
+        try:
+            recheck = SafeRestartOnlineRecheckDTO.model_validate_json(recheck_raw)
+        except Exception as exc:
+            raise DeploymentDrainError(
+                "SAFE_RESTART_CONSUME_CHAIN_INVALID",
+                "consume online recheck is invalid",
+            ) from exc
+        original_raw = self._read_secure_file(
+            self._checkpoint_path(receipt.snapshot.checkpoint_sha256)
+        )
+        recheck_checkpoint_raw = self._read_secure_file(
+            self._checkpoint_path(recheck.recheck_checkpoint_raw_sha256)
+        )
+        try:
+            verify_safe_restart_online_recheck(
+                artifact_raw=recheck_raw,
+                receipt_raw=receipt_raw,
+                original_checkpoint_raw=original_raw,
+                recheck_checkpoint_raw=recheck_checkpoint_raw,
+            )
+        except DeploymentOnlineRecheckError as exc:
+            raise DeploymentDrainError(
+                "SAFE_RESTART_CONSUME_CHAIN_INVALID",
+                "consume WAL online recheck chain is invalid",
+            ) from exc
+        planned = intent.consume_state_projection.planned_consumed_at
+        expected_projection = self._consume_state_projection(
+            state=prestate,
+            receipt=receipt,
+            receipt_raw_sha256=_sha256(receipt_raw),
+            recheck=recheck,
+            recheck_raw_sha256=_sha256(recheck_raw),
+            precommit_raw_sha256=precommit_raw_sha,
+            consumer_run_id=intent.consumer_run_id,
+            operator=intent.operator,
+            planned_consumed_at=planned,
+        )
+        if (
+            intent.receipt_core_sha256 != receipt.receipt_core_sha256
+            or intent.online_recheck_core_sha256 != recheck.recheck_core_sha256
+            or intent.request_id != receipt.request_id
+            or intent.deployment_attempt_id != receipt.deployment_attempt_id
+            or intent.release_plan_core_sha256 != receipt.release_plan_core_sha256
+            or intent.restart_action_sha256 != receipt.restart_action_sha256
+            or intent.consume_state_projection.model_dump(mode="json")
+            != expected_projection
+            or intent.consume_state_projection_sha256
+            != _sha256(_canonical_bytes(expected_projection))
+        ):
+            raise DeploymentDrainError(
+                "SAFE_RESTART_CONSUME_CHAIN_INVALID",
+                "consume WAL artifact bindings are inconsistent",
+            )
+        if marker is not None and (
+            marker.receipt_id != receipt.receipt_id
+            or marker.online_recheck_id != recheck.online_recheck_id
+        ):
+            raise DeploymentDrainError(
+                "SAFE_RESTART_CONSUME_CHAIN_INVALID",
+                "consume marker does not bind the verified evidence",
+            )
+        return receipt, recheck
+
+    def _activate_consumed_state(
+        self,
+        state: dict[str, Any],
+        *,
+        intent_raw: bytes,
+        marker: SafeRestartConsumeCommitMarkerDTO,
+        marker_raw: bytes,
+    ) -> None:
+        intent = self._parse_consume_intent(intent_raw)
+        self._verify_consume_wal_bindings(intent, marker)
+        state.update(
+            state="SAFE_TO_RESTART",
+            receipt_consumed=True,
+            consumed_at=marker.committed_at.isoformat(),
+            consume_id=marker.consume_marker_id,
+            consumed_receipt_id=marker.receipt_id,
+            consume_intent_raw_sha256=_sha256(intent_raw),
+            consume_marker_raw_sha256=_sha256(marker_raw),
+            consume_state_projection_sha256=(marker.consume_state_projection_sha256),
+            consumed_online_recheck_id=marker.online_recheck_id,
+            consumed_online_recheck_raw_sha256=(marker.online_recheck_raw_sha256),
+            preconsume_state_commitment_raw_sha256=(
+                marker.preconsume_state_commitment_raw_sha256
+            ),
+            blockers=[],
+            freeze_reason="safe_restart_consumed_deployment_still_inactive",
+            updated_at=self._now().isoformat(),
+        )
+
+    def _verify_consumed_state(
+        self,
+        state: dict[str, Any],
+        intent_raw: bytes,
+        marker: SafeRestartConsumeCommitMarkerDTO,
+        marker_raw: bytes,
+    ) -> None:
+        intent = self._parse_consume_intent(intent_raw)
+        self._verify_consume_wal_bindings(intent, marker)
+        expected = (
+            marker.consume_marker_id,
+            marker.receipt_id,
+            _sha256(intent_raw),
+            _sha256(marker_raw),
+            marker.consume_state_projection_sha256,
+            marker.online_recheck_id,
+            marker.online_recheck_raw_sha256,
+            marker.preconsume_state_commitment_raw_sha256,
+        )
+        observed = (
+            state["consume_id"],
+            state["consumed_receipt_id"],
+            state["consume_intent_raw_sha256"],
+            state["consume_marker_raw_sha256"],
+            state["consume_state_projection_sha256"],
+            state["consumed_online_recheck_id"],
+            state["consumed_online_recheck_raw_sha256"],
+            state["preconsume_state_commitment_raw_sha256"],
+        )
+        try:
+            state_consumed_at = datetime.fromisoformat(
+                state["consumed_at"].replace("Z", "+00:00")
+            )
+        except (AttributeError, ValueError) as exc:
+            raise DeploymentDrainError(
+                "SAFE_RESTART_CONSUME_CHAIN_INVALID",
+                "consumed state timestamp is invalid",
+            ) from exc
+        if (
+            not state["receipt_consumed"]
+            or state_consumed_at != marker.committed_at
+            or observed != expected
+        ):
+            raise DeploymentDrainError(
+                "SAFE_RESTART_CONSUME_CHAIN_INVALID",
+                "consumed state does not bind the WAL artifacts",
+            )
+
+    def _read_committed_consume_marker(
+        self, state: dict[str, Any]
+    ) -> SafeRestartConsumeCommitMarkerDTO:
+        receipt_id = state.get("consumed_receipt_id")
+        intent_raw = self._read_secure_file(self._consume_intent_path(receipt_id))
+        marker_raw = self._read_secure_file(self._consume_marker_path(receipt_id))
+        marker = self._parse_consume_marker(marker_raw, intent_raw)
+        self._verify_consumed_state(state, intent_raw, marker, marker_raw)
+        return marker
+
+    def _recover_consume_wal(
+        self,
+        state: dict[str, Any],
+        *,
+        startup: bool,
+    ) -> dict[str, Any]:
+        if state.get("freeze_reason") == ("legacy_v1_consumption_evidence_quarantined"):
+            return state
+        receipt_id = (
+            state.get("consumed_receipt_id")
+            or state.get("active_receipt_id")
+            or state.get("last_invalidated_receipt_id")
+        )
+        inventory = sorted(self.consume_dir.iterdir())
+        if not inventory:
+            if state["receipt_consumed"]:
+                raise DeploymentDrainError(
+                    "SAFE_RESTART_CONSUME_CHAIN_INVALID",
+                    "consumed state is missing its WAL artifacts",
+                )
+            return state
+        slots: dict[str, dict[str, Path]] = {}
+        for path in inventory:
+            if path.is_symlink():
+                raise DeploymentDrainError(
+                    "SAFE_RESTART_CONSUME_CHAIN_INVALID",
+                    "consume WAL inventory contains a symlink",
+                )
+            if path.name.endswith(".consume-intent.json"):
+                slot_receipt_id = path.name[: -len(".consume-intent.json")]
+                kind = "intent"
+            elif path.name.endswith(".consume-marker.json"):
+                slot_receipt_id = path.name[: -len(".consume-marker.json")]
+                kind = "marker"
+            else:
+                raise DeploymentDrainError(
+                    "SAFE_RESTART_CONSUME_CHAIN_INVALID",
+                    "consume WAL inventory contains an unexpected artifact",
+                )
+            if (
+                not slot_receipt_id.startswith("safe-restart-")
+                or len(slot_receipt_id) != len("safe-restart-") + 64
+                or any(
+                    character not in "0123456789abcdef"
+                    for character in slot_receipt_id[len("safe-restart-") :]
+                )
+            ):
+                raise DeploymentDrainError(
+                    "SAFE_RESTART_CONSUME_CHAIN_INVALID",
+                    "consume WAL artifact has an invalid receipt slot",
+                )
+            slots.setdefault(slot_receipt_id, {})[kind] = path
+
+        orphan_slots: list[str] = []
+        for slot_receipt_id, artifacts in slots.items():
+            intent_path_for_slot = artifacts.get("intent")
+            marker_path_for_slot = artifacts.get("marker")
+            if intent_path_for_slot is None:
+                raise DeploymentDrainError(
+                    "SAFE_RESTART_CONSUME_CHAIN_INVALID",
+                    "consume marker exists without its intent",
+                )
+            intent_raw_for_slot = self._read_secure_file(intent_path_for_slot)
+            intent_for_slot = self._parse_consume_intent(intent_raw_for_slot)
+            if intent_for_slot.receipt_id != slot_receipt_id:
+                raise DeploymentDrainError(
+                    "SAFE_RESTART_CONSUME_CHAIN_INVALID",
+                    "consume intent is stored in the wrong receipt slot",
+                )
+            self._verify_consume_wal_bindings(intent_for_slot, None)
+            if marker_path_for_slot is None:
+                orphan_slots.append(slot_receipt_id)
+            else:
+                marker_raw_for_slot = self._read_secure_file(marker_path_for_slot)
+                marker_for_slot = self._parse_consume_marker(
+                    marker_raw_for_slot, intent_raw_for_slot
+                )
+                self._verify_consume_wal_bindings(intent_for_slot, marker_for_slot)
+        if len(orphan_slots) > 1 or (orphan_slots and orphan_slots[0] != receipt_id):
+            raise DeploymentDrainError(
+                "SAFE_RESTART_CONSUME_CHAIN_INVALID",
+                "consume WAL contains a non-current orphan intent",
+            )
+        if not receipt_id:
+            return state
+        intent_path = self._consume_intent_path(receipt_id)
+        marker_path = self._consume_marker_path(receipt_id)
+        if receipt_id not in slots:
+            if state["receipt_consumed"]:
+                raise DeploymentDrainError(
+                    "SAFE_RESTART_CONSUME_CHAIN_INVALID",
+                    "consumed state is missing its WAL artifacts",
+                )
+            return state
+        if not intent_path.exists():
+            raise DeploymentDrainError(
+                "SAFE_RESTART_CONSUME_CHAIN_INVALID",
+                "consume marker exists without its intent",
+            )
+        intent_raw = self._read_secure_file(intent_path)
+        intent = self._parse_consume_intent(intent_raw)
+        if intent.receipt_id != receipt_id:
+            raise DeploymentDrainError(
+                "SAFE_RESTART_CONSUME_CHAIN_INVALID",
+                "consume intent is stored in the wrong receipt slot",
+            )
+        self._verify_consume_wal_bindings(intent, None)
+        if not marker_path.exists():
+            if startup:
+                if state.get("freeze_reason") == (
+                    "online_snapshot_consume_intent_orphaned_after_restart"
+                ):
+                    return state
+                state.update(
+                    state="DRAIN_BLOCKED",
+                    blockers=["consume_intent_orphaned_after_restart"],
+                    freeze_reason=(
+                        "online_snapshot_consume_intent_orphaned_after_restart"
+                    ),
+                    updated_at=self._now().isoformat(),
+                )
+                self._write_state(state)
+            return state
+        marker_raw = self._read_secure_file(marker_path)
+        marker = self._parse_consume_marker(marker_raw, intent_raw)
+        self._verify_consume_wal_bindings(intent, marker)
+        if not state["receipt_consumed"]:
+            self._activate_consumed_state(
+                state,
+                intent_raw=intent_raw,
+                marker=marker,
+                marker_raw=marker_raw,
+            )
+            self._write_state(state)
+        else:
+            self._verify_consumed_state(state, intent_raw, marker, marker_raw)
+        return state
+
+    def _block_orphan_consume_intent(self, state: dict[str, Any]) -> None:
+        state.update(
+            state="DRAIN_BLOCKED",
+            blockers=["consume_intent_expired_before_marker"],
+            freeze_reason=("online_snapshot_consume_intent_expired_before_marker"),
+            updated_at=self._now().isoformat(),
+        )
+        self._write_state(state)
+
     def _validate_legacy_epoch_anchor(self, state: dict[str, Any], raw: bytes) -> None:
         try:
             anchor = json.loads(raw)
@@ -2059,6 +2822,28 @@ class DeploymentDrainService:
             )
         return self.consume_dir / f"{receipt_id}.consumed.json"
 
+    def _consume_intent_path(self, receipt_id: str | None) -> Path:
+        if (
+            not receipt_id
+            or not receipt_id.startswith("safe-restart-")
+            or "/" in receipt_id
+        ):
+            raise DeploymentDrainError(
+                "SAFE_RESTART_RECEIPT_ID_INVALID", "invalid receipt id"
+            )
+        return self.consume_dir / f"{receipt_id}.consume-intent.json"
+
+    def _consume_marker_path(self, receipt_id: str | None) -> Path:
+        if (
+            not receipt_id
+            or not receipt_id.startswith("safe-restart-")
+            or "/" in receipt_id
+        ):
+            raise DeploymentDrainError(
+                "SAFE_RESTART_RECEIPT_ID_INVALID", "invalid receipt id"
+            )
+        return self.consume_dir / f"{receipt_id}.consume-marker.json"
+
     def _online_recheck_path(self, receipt_id: str | None) -> Path:
         if (
             not receipt_id
@@ -2096,6 +2881,11 @@ class DeploymentDrainService:
     def _exclusive(self) -> Iterator[None]:
         self._ensure_initialized()
         with self._exclusive_initialized():
+            state = self._load_state()
+            self._recover_consume_wal(
+                state,
+                startup=not bool(getattr(self._lock_context, "consume_call", False)),
+            )
             yield
 
     @contextmanager
@@ -2195,6 +2985,7 @@ class DeploymentDrainService:
             not stat.S_ISREG(info.st_mode)
             or info.st_uid != os.getuid()
             or stat.S_IMODE(info.st_mode) & 0o077
+            or info.st_nlink != 1
         ):
             raise DeploymentDrainError(
                 "DEPLOYMENT_DRAIN_PATH_INSECURE",
@@ -2240,7 +3031,13 @@ class DeploymentDrainService:
             os.close(fd)
         _fsync_directory(path.parent)
 
-    def _write_create_only_atomic(self, path: Path, data: bytes) -> None:
+    def _write_create_only_atomic(
+        self,
+        path: Path,
+        data: bytes,
+        *,
+        before_publish: Callable[[], None] | None = None,
+    ) -> None:
         """Publish complete immutable bytes without exposing a partial final file."""
 
         temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
@@ -2255,6 +3052,8 @@ class DeploymentDrainService:
         finally:
             os.close(fd)
         try:
+            if before_publish is not None:
+                before_publish()
             os.link(temporary, path, follow_symlinks=False)
             _fsync_directory(path.parent)
         finally:
@@ -2283,11 +3082,72 @@ class DeploymentDrainService:
                 or parts[4] != "tmp"
             ):
                 continue
-            self._read_secure_file(path)
-            path.unlink()
+            final = self.state_commitment_dir / f"{parts[1]}.json"
+            self._cleanup_create_only_temporary(path, final)
             removed = True
         if removed:
             _fsync_directory(self.state_commitment_dir)
+
+    def _cleanup_consume_temporaries(self) -> None:
+        removed = False
+        for path in self.consume_dir.iterdir():
+            name = path.name
+            if not (name.startswith(".") and name.endswith(".tmp")):
+                continue
+            base_and_token = name[1:-4]
+            try:
+                base, token = base_and_token.rsplit(".", 1)
+            except ValueError:
+                continue
+            if (
+                not base.startswith("safe-restart-")
+                or not base.endswith((".consume-intent.json", ".consume-marker.json"))
+                or len(token) != 32
+                or any(character not in "0123456789abcdef" for character in token)
+            ):
+                continue
+            self._cleanup_create_only_temporary(path, self.consume_dir / base)
+            removed = True
+        if removed:
+            _fsync_directory(self.consume_dir)
+
+    def _cleanup_create_only_temporary(self, temporary: Path, final: Path) -> None:
+        info = temporary.lstat()
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.getuid()
+            or stat.S_IMODE(info.st_mode) & 0o077
+        ):
+            raise DeploymentDrainError(
+                "DEPLOYMENT_DRAIN_PATH_INSECURE",
+                f"deployment drain temporary is insecure: {temporary}",
+            )
+        if info.st_nlink == 1:
+            temporary.unlink()
+            return
+        if info.st_nlink != 2:
+            raise DeploymentDrainError(
+                "DEPLOYMENT_DRAIN_PATH_INSECURE",
+                f"deployment drain temporary has invalid links: {temporary}",
+            )
+        try:
+            final_info = final.lstat()
+        except FileNotFoundError as exc:
+            raise DeploymentDrainError(
+                "DEPLOYMENT_DRAIN_PATH_INSECURE",
+                f"deployment drain temporary has no published peer: {temporary}",
+            ) from exc
+        if (
+            not stat.S_ISREG(final_info.st_mode)
+            or final_info.st_uid != os.getuid()
+            or stat.S_IMODE(final_info.st_mode) & 0o077
+            or (final_info.st_dev, final_info.st_ino) != (info.st_dev, info.st_ino)
+        ):
+            raise DeploymentDrainError(
+                "DEPLOYMENT_DRAIN_PATH_INSECURE",
+                f"deployment drain published peer is invalid: {final}",
+            )
+        temporary.unlink()
 
     def _now(self) -> datetime:
         value = self.clock()

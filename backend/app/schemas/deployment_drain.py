@@ -16,9 +16,7 @@ def _nonzero_hex(value: str) -> str:
     return value
 
 
-Sha256 = Annotated[
-    str, Field(pattern=r"^[0-9a-f]{64}$"), AfterValidator(_nonzero_hex)
-]
+Sha256 = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$"), AfterValidator(_nonzero_hex)]
 CommitSha = Annotated[
     str, Field(pattern=r"^[0-9a-f]{40}$"), AfterValidator(_nonzero_hex)
 ]
@@ -27,9 +25,7 @@ ImageDigest = Annotated[
     Field(pattern=r"^sha256:[0-9a-f]{64}$"),
     AfterValidator(lambda value: "sha256:" + _nonzero_hex(value[7:])),
 ]
-Identifier = Annotated[
-    str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$")
-]
+Identifier = Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$")]
 PlanId = Annotated[
     str,
     Field(pattern=r"^release-plan-[0-9a-f]{64}$"),
@@ -43,8 +39,20 @@ ReceiptId = Annotated[
 ConsumeId = Annotated[
     str,
     Field(pattern=r"^safe-restart-consume-[0-9a-f]{64}$"),
+    AfterValidator(lambda value: _nonzero_prefixed(value, "safe-restart-consume-")),
+]
+ConsumeIntentId = Annotated[
+    str,
+    Field(pattern=r"^safe-restart-consume-intent-[0-9a-f]{64}$"),
     AfterValidator(
-        lambda value: _nonzero_prefixed(value, "safe-restart-consume-")
+        lambda value: _nonzero_prefixed(value, "safe-restart-consume-intent-")
+    ),
+]
+ConsumeMarkerId = Annotated[
+    str,
+    Field(pattern=r"^safe-restart-consume-marker-[0-9a-f]{64}$"),
+    AfterValidator(
+        lambda value: _nonzero_prefixed(value, "safe-restart-consume-marker-")
     ),
 ]
 RecheckId = Annotated[
@@ -571,6 +579,193 @@ class DeploymentDrainStateCommitmentDTO(StrictDeploymentDrainModel):
         return self
 
 
+class SafeRestartConsumeStateProjectionDTO(StrictDeploymentDrainModel):
+    schema_version: Literal["web_bridge_safe_restart_consume_state_projection_v1"]
+    state: Literal["SAFE_TO_RESTART"]
+    receipt_consumed: Literal[True]
+    receipt_id: ReceiptId
+    receipt_raw_sha256: Sha256
+    online_recheck_id: OnlineRecheckId
+    online_recheck_raw_sha256: Sha256
+    preconsume_state_commitment_raw_sha256: Sha256
+    preconsume_state_generation: int = Field(strict=True, ge=1)
+    runtime_instance_id: Identifier
+    drain_epoch: int = Field(strict=True, ge=1)
+    execution_epoch: int = Field(strict=True, ge=1)
+    consumer_run_id: Identifier
+    operator: str = Field(min_length=1, max_length=128)
+    planned_consumed_at: datetime
+    consume_authorized: Literal[False]
+    reconciliation_authorized: Literal[False]
+    deployment_authorized: Literal[False]
+    automatic_deploy_allowed: Literal[False]
+    production_allowed: Literal[False]
+    live_trading_authorized: Literal[False]
+    countable_forward: Literal[False]
+
+    @model_validator(mode="after")
+    def validate_projection(self) -> SafeRestartConsumeStateProjectionDTO:
+        _require_utc(
+            self.planned_consumed_at,
+            "consume state projection planned_consumed_at",
+        )
+        return self
+
+
+def _require_consume_projection_bindings(
+    owner: object,
+    projection: SafeRestartConsumeStateProjectionDTO,
+) -> None:
+    for field in (
+        "receipt_id",
+        "receipt_raw_sha256",
+        "online_recheck_id",
+        "online_recheck_raw_sha256",
+        "preconsume_state_commitment_raw_sha256",
+        "preconsume_state_generation",
+        "runtime_instance_id",
+        "drain_epoch",
+        "execution_epoch",
+        "consumer_run_id",
+        "operator",
+    ):
+        if getattr(owner, field) != getattr(projection, field):
+            raise ValueError("consume state projection outer binding mismatch")
+
+
+class SafeRestartConsumeIntentDTO(StrictDeploymentDrainModel):
+    """Durable WAL prepare record; it grants no restart authority."""
+
+    schema_version: Literal["web_bridge_safe_restart_consume_intent_v1"]
+    purpose: Literal["prepare_one_shot_safe_restart_consumption"]
+    consume_intent_id: ConsumeIntentId
+    consume_intent_core_sha256: Sha256
+    receipt_id: ReceiptId
+    receipt_raw_sha256: Sha256
+    receipt_core_sha256: Sha256
+    online_recheck_id: OnlineRecheckId
+    online_recheck_raw_sha256: Sha256
+    online_recheck_core_sha256: Sha256
+    preconsume_state_commitment_id: StateCommitmentId
+    preconsume_state_commitment_raw_sha256: Sha256
+    preconsume_state_generation: int = Field(strict=True, ge=1)
+    consume_state_projection: SafeRestartConsumeStateProjectionDTO
+    consume_state_projection_sha256: Sha256
+    request_id: Identifier
+    runtime_instance_id: Identifier
+    deployment_attempt_id: Identifier
+    release_plan_core_sha256: Sha256
+    restart_action_sha256: Sha256
+    drain_epoch: int = Field(strict=True, ge=1)
+    execution_epoch: int = Field(strict=True, ge=1)
+    prepared_at: datetime
+    consume_not_after: datetime
+    consumer_run_id: Identifier
+    operator: str = Field(min_length=1, max_length=128)
+    consume_intent_prepared: Literal[True]
+    one_shot_consume_committed: Literal[False]
+    consume_authorized: Literal[False]
+    reconciliation_authorized: Literal[False]
+    deployment_authorized: Literal[False]
+    automatic_deploy_allowed: Literal[False]
+    production_allowed: Literal[False]
+    live_trading_authorized: Literal[False]
+    countable_forward: Literal[False]
+
+    @model_validator(mode="after")
+    def validate_intent(self) -> SafeRestartConsumeIntentDTO:
+        _require_utc(self.prepared_at, "consume intent prepared_at")
+        _require_utc(self.consume_not_after, "consume intent consume_not_after")
+        if self.prepared_at > self.consume_not_after:
+            raise ValueError("consume intent window ends before it is prepared")
+        if not (
+            self.prepared_at
+            <= self.consume_state_projection.planned_consumed_at
+            <= self.consume_not_after
+        ):
+            raise ValueError("consume state projection falls outside intent window")
+        _require_consume_projection_bindings(self, self.consume_state_projection)
+        if self.consume_state_projection_sha256 != _strict_canonical_sha256(
+            self.consume_state_projection.model_dump(mode="json")
+        ):
+            raise ValueError("consume intent state projection hash mismatch")
+        core = self.model_dump(mode="json")
+        core.pop("consume_intent_id")
+        core.pop("consume_intent_core_sha256")
+        expected = _strict_canonical_sha256(core)
+        if self.consume_intent_core_sha256 != expected:
+            raise ValueError("consume intent core hash mismatch")
+        if self.consume_intent_id != f"safe-restart-consume-intent-{expected}":
+            raise ValueError("consume intent id does not match core hash")
+        return self
+
+
+class SafeRestartConsumeCommitMarkerDTO(StrictDeploymentDrainModel):
+    """Irreversible one-shot commit marker; it does not start a restart."""
+
+    schema_version: Literal["web_bridge_safe_restart_consume_marker_v1"]
+    purpose: Literal["commit_one_shot_safe_restart_consumption"]
+    consume_marker_id: ConsumeMarkerId
+    consume_marker_core_sha256: Sha256
+    consume_intent_id: ConsumeIntentId
+    consume_intent_raw_sha256: Sha256
+    consume_intent_core_sha256: Sha256
+    receipt_id: ReceiptId
+    receipt_raw_sha256: Sha256
+    receipt_core_sha256: Sha256
+    online_recheck_id: OnlineRecheckId
+    online_recheck_raw_sha256: Sha256
+    online_recheck_core_sha256: Sha256
+    preconsume_state_commitment_id: StateCommitmentId
+    preconsume_state_commitment_raw_sha256: Sha256
+    preconsume_state_generation: int = Field(strict=True, ge=1)
+    consume_state_projection: SafeRestartConsumeStateProjectionDTO
+    consume_state_projection_sha256: Sha256
+    request_id: Identifier
+    runtime_instance_id: Identifier
+    deployment_attempt_id: Identifier
+    release_plan_core_sha256: Sha256
+    restart_action_sha256: Sha256
+    drain_epoch: int = Field(strict=True, ge=1)
+    execution_epoch: int = Field(strict=True, ge=1)
+    committed_at: datetime
+    consume_not_after: datetime
+    consumer_run_id: Identifier
+    operator: str = Field(min_length=1, max_length=128)
+    one_shot_consume_committed: Literal[True]
+    restart_execution_started: Literal[False]
+    consume_authorized: Literal[False]
+    reconciliation_authorized: Literal[False]
+    deployment_authorized: Literal[False]
+    automatic_deploy_allowed: Literal[False]
+    production_allowed: Literal[False]
+    live_trading_authorized: Literal[False]
+    countable_forward: Literal[False]
+
+    @model_validator(mode="after")
+    def validate_marker(self) -> SafeRestartConsumeCommitMarkerDTO:
+        _require_utc(self.committed_at, "consume marker committed_at")
+        _require_utc(self.consume_not_after, "consume marker consume_not_after")
+        if self.committed_at > self.consume_not_after:
+            raise ValueError("consume marker was committed after its deadline")
+        if self.committed_at < self.consume_state_projection.planned_consumed_at:
+            raise ValueError("consume marker precedes its prepared state projection")
+        _require_consume_projection_bindings(self, self.consume_state_projection)
+        if self.consume_state_projection_sha256 != _strict_canonical_sha256(
+            self.consume_state_projection.model_dump(mode="json")
+        ):
+            raise ValueError("consume marker state projection hash mismatch")
+        core = self.model_dump(mode="json")
+        core.pop("consume_marker_id")
+        core.pop("consume_marker_core_sha256")
+        expected = _strict_canonical_sha256(core)
+        if self.consume_marker_core_sha256 != expected:
+            raise ValueError("consume marker core hash mismatch")
+        if self.consume_marker_id != f"safe-restart-consume-marker-{expected}":
+            raise ValueError("consume marker id does not match core hash")
+        return self
+
+
 class DeploymentDrainAcquireDTO(StrictDeploymentDrainModel):
     schema_version: Literal["web_bridge_deployment_drain_acquire_v1"]
     request_id: Identifier
@@ -630,9 +825,7 @@ class SafeRestartReceiptDTO(StrictDeploymentDrainModel):
     def validate_window(self) -> SafeRestartReceiptDTO:
         _require_utc(self.issued_at, "issued_at")
         _require_utc(self.expires_at, "expires_at")
-        if self.expires_at - self.issued_at != timedelta(
-            seconds=self.ttl_seconds
-        ):
+        if self.expires_at - self.issued_at != timedelta(seconds=self.ttl_seconds):
             raise ValueError("receipt TTL does not match its time window")
         if self.expires_at - self.issued_at > MAX_SAFE_RESTART_TTL:
             raise ValueError("safe restart receipt lifetime exceeds 300 seconds")
