@@ -18,13 +18,16 @@ from app.core.errors import (
     RpcUnavailableError,
 )
 from app.schemas.common import to_plain_dict, to_plain_list
-from app.schemas.deployment_drain import DeploymentRpcFactsDTO
-from app.services.market_data_service import market_data_service
+from app.schemas.deployment_drain import (
+    DeploymentRpcFactsDTO,
+    DeploymentRpcRecheckFactsDTO,
+)
 from app.services.deployment_drain import (
     DeploymentDrainError,
     DeploymentDrainService,
     deployment_drain_for,
 )
+from app.services.market_data_service import market_data_service
 from app.services.tick_persistence import tick_persistence_service
 from app.stores.memory_store import memory_store
 from app.ws.events import ws_message
@@ -34,7 +37,12 @@ try:
     from vnpy.rpc import RpcClient
     from vnpy.trader.constant import Exchange, Interval
     from vnpy.trader.event import EVENT_ORDER, EVENT_TICK, EVENT_TRADE
-    from vnpy.trader.object import CancelRequest, HistoryRequest, OrderRequest, SubscribeRequest
+    from vnpy.trader.object import (
+        CancelRequest,
+        HistoryRequest,
+        OrderRequest,
+        SubscribeRequest,
+    )
 except ImportError:  # pragma: no cover - covered in deployments with vn.py installed
     RpcClient = object  # type: ignore[assignment,misc]
     Exchange = Interval = None  # type: ignore[assignment]
@@ -64,6 +72,7 @@ RETRYABLE_RPC_METHODS = {
     "get_strategy_variable",
     "get_gateway_status",
     "get_deployment_safety_snapshot_v1",
+    "recheck_deployment_safety_snapshot_v1",
     "get_order",
     "get_bars",
     "query_history",
@@ -632,6 +641,183 @@ class VnpyRpcService:
                 "active_orders": canonical_rows(payload["active_orders"]),
                 "trades": canonical_rows(payload["trades"]),
                 "positions": canonical_rows(payload["positions"]),
+            }
+        )
+
+    def capture_deployment_recheck_facts(
+        self,
+        *,
+        request_id: str,
+        owner_challenge: str,
+        recheck_id: str,
+        fresh_challenge: str,
+        original_server_instance_id: str,
+        original_fact_generation: int,
+        original_execution_facts_canonical_sha256: str,
+    ) -> DeploymentRpcRecheckFactsDTO:
+        """Fetch one owner-bound, EventEngine-linearized fresh recheck."""
+
+        payload = to_plain_dict(
+            self.call(
+                "recheck_deployment_safety_snapshot_v1",
+                request_id,
+                owner_challenge,
+                recheck_id,
+                fresh_challenge,
+                original_fact_generation,
+            )
+        )
+        required = {
+            "schema_version",
+            "owner_request_id",
+            "owner_challenge",
+            "recheck_id",
+            "fresh_challenge",
+            "expected_generation",
+            "current_generation",
+            "server_instance_id",
+            "original_server_instance_id",
+            "original_fact_generation",
+            "original_execution_facts_canonical_sha256",
+            "execution_facts_canonical_sha256",
+            "captured_at_utc",
+            "admission",
+            "pending",
+            "facts",
+        }
+        if set(payload) != required:
+            raise RpcCallError(
+                "Windows deployment recheck fields are invalid"
+            )
+        if (
+            payload.get("owner_request_id") != request_id
+            or payload.get("owner_challenge") != owner_challenge
+            or payload.get("recheck_id") != recheck_id
+            or payload.get("fresh_challenge") != fresh_challenge
+            or payload.get("expected_generation")
+            != original_fact_generation
+            or payload.get("original_fact_generation")
+            != original_fact_generation
+            or payload.get("original_server_instance_id")
+            != original_server_instance_id
+            or payload.get("original_execution_facts_canonical_sha256")
+            != original_execution_facts_canonical_sha256
+        ):
+            raise RpcCallError(
+                "Windows deployment recheck owner binding is invalid"
+            )
+        admission = to_plain_dict(payload["admission"])
+        pending = to_plain_dict(payload["pending"])
+        facts = to_plain_dict(payload["facts"])
+        if admission != {
+            "execution_frozen": True,
+            "send_order_frozen": True,
+            "cancel_order_frozen": True,
+        } or set(pending) != {"send_outcomes"}:
+            raise RpcCallError(
+                "Windows deployment recheck fence is invalid"
+            )
+        if set(facts) != {
+            "accounts",
+            "orders",
+            "active_orders",
+            "trades",
+            "positions",
+        }:
+            raise RpcCallError(
+                "Windows deployment recheck facts are invalid"
+            )
+        captured_at = payload["captured_at_utc"]
+        if not isinstance(captured_at, str) or not captured_at.endswith("Z"):
+            raise RpcCallError(
+                "Windows deployment recheck timestamp is invalid"
+            )
+        try:
+            parsed_captured_at = datetime.fromisoformat(
+                captured_at.removesuffix("Z") + "+00:00"
+            )
+        except ValueError as exc:
+            raise RpcCallError(
+                "Windows deployment recheck timestamp is invalid"
+            ) from exc
+        observed_at = datetime.now(timezone.utc)
+        if (
+            parsed_captured_at.utcoffset() != timedelta(0)
+            or parsed_captured_at > observed_at + timedelta(seconds=2)
+            or observed_at - parsed_captured_at > timedelta(seconds=30)
+        ):
+            raise RpcCallError(
+                "Windows deployment recheck timestamp is outside freshness window"
+            )
+
+        account_hashes: set[str] = set()
+        for account in to_plain_list(facts["accounts"]):
+            account_id = str(
+                account.get("accountid")
+                or account.get("account_id")
+                or account.get("vt_accountid")
+                or ""
+            )
+            if not account_id:
+                raise RpcCallError(
+                    "Windows deployment recheck account identity is missing"
+                )
+            account_hashes.add(
+                hashlib.sha256(account_id.encode("utf-8")).hexdigest()
+            )
+
+        def canonical_rows(value: Any) -> list[dict[str, Any]]:
+            rows = to_plain_list(value)
+            try:
+                return sorted(
+                    rows,
+                    key=lambda row: json.dumps(
+                        row,
+                        allow_nan=False,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                )
+            except (TypeError, ValueError) as exc:
+                raise RpcCallError(
+                    "Windows deployment recheck is not canonical JSON"
+                ) from exc
+
+        return DeploymentRpcRecheckFactsDTO.model_validate(
+            {
+                "schema_version": payload["schema_version"],
+                "request_id": payload["owner_request_id"],
+                "owner_challenge": payload["owner_challenge"],
+                "recheck_id": payload["recheck_id"],
+                "fresh_challenge": payload["fresh_challenge"],
+                "original_server_instance_id": (
+                    payload["original_server_instance_id"]
+                ),
+                "original_fact_generation": (
+                    payload["original_fact_generation"]
+                ),
+                "original_execution_facts_canonical_sha256": (
+                    payload[
+                        "original_execution_facts_canonical_sha256"
+                    ]
+                ),
+                "server_instance_id": payload["server_instance_id"],
+                "fact_generation": payload["current_generation"],
+                "execution_facts_canonical_sha256": (
+                    payload["execution_facts_canonical_sha256"]
+                ),
+                "captured_at": parsed_captured_at,
+                "execution_admission_frozen": (
+                    admission["execution_frozen"]
+                ),
+                "pending_send_outcomes": pending["send_outcomes"],
+                "strategy_execution_enabled": False,
+                "account_hashes": sorted(account_hashes),
+                "orders": canonical_rows(facts["orders"]),
+                "active_orders": canonical_rows(facts["active_orders"]),
+                "trades": canonical_rows(facts["trades"]),
+                "positions": canonical_rows(facts["positions"]),
             }
         )
 

@@ -35,10 +35,15 @@ deployment_snapshot_v1 = register_windows_rpc_deployment_snapshot_v1(
 Registration fails if the MainEngine exposes CTA/strategy control methods.
 It replaces the RPC registry's final `send_order` and `cancel_order` entries
 with admission wrappers, then registers
-`get_deployment_safety_snapshot_v1(request_id, challenge)`. Snapshot capture
+`get_deployment_safety_snapshot_v1(request_id, challenge)` and the B1a
+`recheck_deployment_safety_snapshot_v1(request_id, owner_challenge,
+recheck_id, fresh_challenge, expected_generation)`. Snapshot capture
 sends no order, but it deliberately freezes Windows RPC order/cancel admission
 before waiting for in-flight mutations and copying facts on the EventEngine
-thread. A2 exposes no Windows unfreeze RPC.
+thread. A2 exposes no Windows unfreeze RPC. The recheck must match that
+permanently frozen owner, uses a fresh one-shot challenge and bounded
+fail-closed replay cache, and re-copies all facts on the EventEngine thread.
+It grants no unfreeze, deployment, reconciliation, or receipt-consume authority.
 
 ## Safety boundary
 

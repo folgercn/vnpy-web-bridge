@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import queue
 import threading
@@ -10,7 +11,11 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+
 from scripts.windows_rpc_deployment_snapshot_v1 import (
+    RECHECK_EVENT_TYPE,
+    RECHECK_RPC_CALLABLE_NAME,
+    RECHECK_SCHEMA_VERSION,
     RPC_CALLABLE_NAME,
     SCHEMA_VERSION,
     SNAPSHOT_EVENT_TYPE,
@@ -101,9 +106,7 @@ class FactSource:
         self.apps = {"RpcService": None}
         self.calls: list[str] = []
         self.call_threads: list[int] = []
-        self.accounts: list[Any] = [
-            {"gateway_name": "CTP", "accountid": "sim-account"}
-        ]
+        self.accounts: list[Any] = [{"gateway_name": "CTP", "accountid": "sim-account"}]
         self.orders: list[Any] = [
             OrderFact("CTP.2", Direction.LONG, 20.0),
             OrderFact("CTP.1", Direction.LONG, 10.0),
@@ -114,9 +117,7 @@ class FactSource:
             {
                 "vt_symbol": "rb2610.SHFE",
                 "volume": 0,
-                "observed_at": datetime(
-                    2026, 8, 4, 1, 2, 3, tzinfo=timezone.utc
-                ),
+                "observed_at": datetime(2026, 8, 4, 1, 2, 3, tzinfo=timezone.utc),
             }
         ]
 
@@ -149,12 +150,44 @@ def fixed_clock() -> datetime:
     return datetime(2026, 8, 4, 0, 0, tzinfo=timezone.utc)
 
 
+def canonical_sha256(value: Any) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def normalized_execution_facts(
+    facts: dict[str, Any], *, pending_send_outcomes: int = 0
+) -> dict[str, Any]:
+    return {
+        "execution_admission_frozen": True,
+        "pending_send_outcomes": pending_send_outcomes,
+        "strategy_execution_enabled": False,
+        "account_hashes": sorted(
+            {
+                hashlib.sha256(str(account["accountid"]).encode("utf-8")).hexdigest()
+                for account in facts["accounts"]
+            }
+        ),
+        "orders": facts["orders"],
+        "active_orders": facts["active_orders"],
+        "trades": facts["trades"],
+        "positions": facts["positions"],
+    }
+
+
 def install(
     event_engine: Any,
     source: FactSource,
     *,
     timeout_seconds: float = 1,
     server: FakeServer | None = None,
+    recheck_cache_size: int = 128,
 ) -> tuple[Any, FakeServer]:
     server = server or FakeServer()
     extension = register_windows_rpc_deployment_snapshot_v1(
@@ -164,6 +197,7 @@ def install(
         event_factory=event_factory,
         timeout_seconds=timeout_seconds,
         clock=fixed_clock,
+        recheck_cache_size=recheck_cache_size,
     )
     return extension, server
 
@@ -175,6 +209,7 @@ def test_registers_exact_readonly_rpc_name_and_event_handlers() -> None:
     assert set(server.registered) == {
         "cancel_order",
         RPC_CALLABLE_NAME,
+        RECHECK_RPC_CALLABLE_NAME,
         "send_order",
     }
     assert server.registered[RPC_CALLABLE_NAME] is extension.rpc_callable
@@ -184,9 +219,10 @@ def test_registers_exact_readonly_rpc_name_and_event_handlers() -> None:
         "ePosition.",
         "eAccount.",
         SNAPSHOT_EVENT_TYPE,
+        RECHECK_EVENT_TYPE,
     }
     assert extension.register() is extension.rpc_callable
-    assert len(server.registered) == 3
+    assert len(server.registered) == 4
 
 
 def test_sync_engine_returns_strict_stably_sorted_plain_json() -> None:
@@ -215,13 +251,17 @@ def test_sync_engine_returns_strict_stably_sorted_plain_json() -> None:
     ]
     assert snapshot["orders"][0]["direction"] == "long"
     assert snapshot["positions"][0]["observed_at"].endswith("Z")
-    assert source.calls == [
-        "accounts",
-        "orders",
-        "active_orders",
-        "trades",
-        "positions",
-    ] * 2
+    assert (
+        source.calls
+        == [
+            "accounts",
+            "orders",
+            "active_orders",
+            "trades",
+            "positions",
+        ]
+        * 2
+    )
     json.dumps(snapshot, allow_nan=False)
 
 
@@ -237,9 +277,12 @@ def test_order_and_trade_events_precede_snapshot_and_increment_generation() -> N
     )
     assert first["fact_generation"] == 2
     engine.put(FakeEvent("eOrder.", {"vt_orderid": "CTP.2"}))
-    assert extension.get_deployment_safety_snapshot_v1(
-        "request-events-0001", "challenge-events-0001"
-    )["fact_generation"] == 3
+    assert (
+        extension.get_deployment_safety_snapshot_v1(
+            "request-events-0001", "challenge-events-0001"
+        )["fact_generation"]
+        == 3
+    )
 
 
 def test_position_and_account_events_increment_generation() -> None:
@@ -253,6 +296,371 @@ def test_position_and_account_events_increment_generation() -> None:
     )
 
     assert snapshot["fact_generation"] == 2
+
+
+def test_fresh_recheck_echoes_owner_generation_admission_and_facts() -> None:
+    engine = SyncEventEngine()
+    source = FactSource()
+    extension, server = install(engine, source)
+    extension.get_deployment_safety_snapshot_v1(
+        "request-recheck-0001", "challenge-owner-recheck-0001"
+    )
+    engine.put(FakeEvent("eAccount."))
+
+    result = server.registered[RECHECK_RPC_CALLABLE_NAME](
+        "request-recheck-0001",
+        "challenge-owner-recheck-0001",
+        "recheck-fresh-0001",
+        "challenge-fresh-recheck-0001",
+        0,
+    )
+
+    assert result["schema_version"] == RECHECK_SCHEMA_VERSION
+    assert result["owner_request_id"] == "request-recheck-0001"
+    assert result["owner_challenge"] == "challenge-owner-recheck-0001"
+    assert result["recheck_id"] == "recheck-fresh-0001"
+    assert result["fresh_challenge"] == "challenge-fresh-recheck-0001"
+    assert result["expected_generation"] == 0
+    assert result["current_generation"] == 1
+    assert result["server_instance_id"] == extension.server_instance_id
+    assert result["original_server_instance_id"] == extension.server_instance_id
+    assert result["original_fact_generation"] == 0
+    assert (
+        result["original_execution_facts_canonical_sha256"]
+        == (result["execution_facts_canonical_sha256"])
+    )
+    assert result["execution_facts_canonical_sha256"] == canonical_sha256(
+        normalized_execution_facts(result["facts"])
+    )
+    assert result["captured_at_utc"] == "2026-08-04T00:00:00Z"
+    assert result["admission"] == {
+        "execution_frozen": True,
+        "send_order_frozen": True,
+        "cancel_order_frozen": True,
+    }
+    assert result["pending"] == {"send_outcomes": 0}
+    assert [row["vt_orderid"] for row in result["facts"]["orders"]] == [
+        "CTP.1",
+        "CTP.2",
+    ]
+    with pytest.raises(WindowsRpcDeploymentSnapshotError, match="frozen"):
+        server.registered["send_order"]("order", "CTP")
+    with pytest.raises(WindowsRpcDeploymentSnapshotError, match="frozen"):
+        server.registered["cancel_order"]("cancel", "CTP")
+
+
+def test_recheck_requires_the_existing_frozen_owner() -> None:
+    extension, _ = install(SyncEventEngine(), FactSource())
+    extension.get_deployment_safety_snapshot_v1(
+        "request-owner-0001", "challenge-owner-valid-0001"
+    )
+
+    with pytest.raises(WindowsRpcDeploymentSnapshotError, match="does not own"):
+        extension.recheck_deployment_safety_snapshot_v1(
+            "request-owner-0001",
+            "challenge-owner-wrong-0001",
+            "recheck-owner-0001",
+            "challenge-fresh-owner-0001",
+            0,
+        )
+
+
+def test_recheck_rejects_generation_rollback_claim() -> None:
+    extension, _ = install(SyncEventEngine(), FactSource())
+    extension.get_deployment_safety_snapshot_v1(
+        "request-generation-0001", "challenge-owner-generation-0001"
+    )
+
+    with pytest.raises(WindowsRpcDeploymentSnapshotError, match="rollback"):
+        extension.recheck_deployment_safety_snapshot_v1(
+            "request-generation-0001",
+            "challenge-owner-generation-0001",
+            "recheck-generation-0001",
+            "challenge-fresh-generation-0001",
+            1,
+        )
+
+
+def test_recheck_captures_fact_drift_at_a_new_generation() -> None:
+    engine = SyncEventEngine()
+    source = FactSource()
+    extension, _ = install(engine, source)
+    extension.get_deployment_safety_snapshot_v1(
+        "request-drift-0001", "challenge-owner-drift-0001"
+    )
+    source.orders = [OrderFact("CTP.9", Direction.LONG, 90.0)]
+    engine.put(FakeEvent("eOrder.", {"vt_orderid": "CTP.9"}))
+
+    result = extension.recheck_deployment_safety_snapshot_v1(
+        "request-drift-0001",
+        "challenge-owner-drift-0001",
+        "recheck-drift-0001",
+        "challenge-fresh-drift-0001",
+        0,
+    )
+
+    assert result["current_generation"] == 1
+    assert result["original_fact_generation"] == 0
+    assert (
+        result["original_execution_facts_canonical_sha256"]
+        != (result["execution_facts_canonical_sha256"])
+    )
+    assert result["execution_facts_canonical_sha256"] == canonical_sha256(
+        normalized_execution_facts(result["facts"])
+    )
+    assert result["facts"]["orders"] == [
+        {"direction": "long", "price": 90.0, "vt_orderid": "CTP.9"}
+    ]
+
+
+def test_repeated_original_capture_cannot_rebase_recheck_baseline() -> None:
+    engine = SyncEventEngine()
+    source = FactSource()
+    extension, _ = install(engine, source)
+    original = extension.get_deployment_safety_snapshot_v1(
+        "request-baseline-0001", "challenge-owner-baseline-0001"
+    )
+    original_facts = {
+        field: original[field]
+        for field in (
+            "accounts",
+            "orders",
+            "active_orders",
+            "trades",
+            "positions",
+        )
+    }
+    source.orders = [OrderFact("CTP.8", Direction.LONG, 80.0)]
+    engine.put(FakeEvent("eOrder.", {"vt_orderid": "CTP.8"}))
+    extension.get_deployment_safety_snapshot_v1(
+        "request-baseline-0001", "challenge-owner-baseline-0001"
+    )
+
+    result = extension.recheck_deployment_safety_snapshot_v1(
+        "request-baseline-0001",
+        "challenge-owner-baseline-0001",
+        "recheck-baseline-0001",
+        "challenge-fresh-baseline-0001",
+        0,
+    )
+
+    assert result["original_fact_generation"] == 0
+    assert result["current_generation"] == 1
+    assert result["original_execution_facts_canonical_sha256"] == (
+        canonical_sha256(normalized_execution_facts(original_facts))
+    )
+    assert result["execution_facts_canonical_sha256"] != canonical_sha256(
+        normalized_execution_facts(original_facts)
+    )
+
+
+def test_expected_generation_selects_its_exact_original_baseline() -> None:
+    engine = SyncEventEngine()
+    source = FactSource()
+    extension, _ = install(engine, source)
+    extension.get_deployment_safety_snapshot_v1(
+        "request-select-0001", "challenge-owner-select-0001"
+    )
+    source.orders = [OrderFact("CTP.7", Direction.LONG, 70.0)]
+    engine.put(FakeEvent("eOrder.", {"vt_orderid": "CTP.7"}))
+    selected = extension.get_deployment_safety_snapshot_v1(
+        "request-select-0001", "challenge-owner-select-0001"
+    )
+    selected_facts = {
+        field: selected[field]
+        for field in (
+            "accounts",
+            "orders",
+            "active_orders",
+            "trades",
+            "positions",
+        )
+    }
+
+    result = extension.recheck_deployment_safety_snapshot_v1(
+        "request-select-0001",
+        "challenge-owner-select-0001",
+        "recheck-select-0001",
+        "challenge-fresh-select-0001",
+        1,
+    )
+
+    assert result["original_fact_generation"] == 1
+    assert result["original_execution_facts_canonical_sha256"] == (
+        canonical_sha256(normalized_execution_facts(selected_facts))
+    )
+
+
+def test_original_capture_rejects_fact_drift_without_generation_change() -> None:
+    source = FactSource()
+    extension, _ = install(SyncEventEngine(), source)
+    extension.get_deployment_safety_snapshot_v1(
+        "request-no-generation-0001",
+        "challenge-owner-no-generation-0001",
+    )
+    source.orders = [OrderFact("CTP.6", Direction.LONG, 60.0)]
+
+    with pytest.raises(
+        WindowsRpcDeploymentSnapshotError,
+        match="without a generation change",
+    ):
+        extension.get_deployment_safety_snapshot_v1(
+            "request-no-generation-0001",
+            "challenge-owner-no-generation-0001",
+        )
+
+
+def test_recheck_response_loss_retry_returns_exact_cached_snapshot() -> None:
+    source = FactSource()
+    extension, _ = install(SyncEventEngine(), source)
+    extension.get_deployment_safety_snapshot_v1(
+        "request-retry-0001", "challenge-owner-retry-0001"
+    )
+    source.calls.clear()
+    parameters = (
+        "request-retry-0001",
+        "challenge-owner-retry-0001",
+        "recheck-retry-0001",
+        "challenge-fresh-retry-0001",
+        0,
+    )
+
+    first = extension.recheck_deployment_safety_snapshot_v1(*parameters)
+    canonical_first = json.dumps(first, sort_keys=True, separators=(",", ":"))
+    first["facts"]["orders"].clear()
+    second = extension.recheck_deployment_safety_snapshot_v1(*parameters)
+
+    assert json.dumps(second, sort_keys=True, separators=(",", ":")) == (
+        canonical_first
+    )
+    assert source.calls == [
+        "accounts",
+        "orders",
+        "active_orders",
+        "trades",
+        "positions",
+    ]
+
+
+def test_recheck_id_and_fresh_challenge_cannot_be_replayed() -> None:
+    extension, _ = install(SyncEventEngine(), FactSource())
+    extension.get_deployment_safety_snapshot_v1(
+        "request-replay-0001", "challenge-owner-replay-0001"
+    )
+    extension.recheck_deployment_safety_snapshot_v1(
+        "request-replay-0001",
+        "challenge-owner-replay-0001",
+        "recheck-replay-0001",
+        "challenge-fresh-replay-0001",
+        0,
+    )
+
+    with pytest.raises(WindowsRpcDeploymentSnapshotError, match="recheck_id"):
+        extension.recheck_deployment_safety_snapshot_v1(
+            "request-replay-0001",
+            "challenge-owner-replay-0001",
+            "recheck-replay-0001",
+            "challenge-fresh-replay-different-0001",
+            0,
+        )
+    with pytest.raises(WindowsRpcDeploymentSnapshotError, match="fresh_challenge"):
+        extension.recheck_deployment_safety_snapshot_v1(
+            "request-replay-0001",
+            "challenge-owner-replay-0001",
+            "recheck-replay-0002",
+            "challenge-fresh-replay-0001",
+            0,
+        )
+
+
+def test_concurrent_identical_rechecks_share_one_event_capture() -> None:
+    class BlockingFactSource(FactSource):
+        def __init__(self) -> None:
+            super().__init__()
+            self.recheck_started = threading.Event()
+            self.release_recheck = threading.Event()
+            self.block = False
+
+        def get_all_accounts(self) -> list[Any]:
+            if self.block:
+                self.recheck_started.set()
+                assert self.release_recheck.wait(timeout=2)
+            return super().get_all_accounts()
+
+    engine = AsyncEventEngine()
+    try:
+        source = BlockingFactSource()
+        extension, _ = install(engine, source)
+        extension.get_deployment_safety_snapshot_v1(
+            "request-concurrent-0001", "challenge-owner-concurrent-0001"
+        )
+        source.calls.clear()
+        source.block = True
+        parameters = (
+            "request-concurrent-0001",
+            "challenge-owner-concurrent-0001",
+            "recheck-concurrent-0001",
+            "challenge-fresh-concurrent-0001",
+            0,
+        )
+        results: list[dict[str, Any]] = []
+        errors: list[BaseException] = []
+
+        def invoke() -> None:
+            try:
+                results.append(
+                    extension.recheck_deployment_safety_snapshot_v1(*parameters)
+                )
+            except Exception as exc:  # noqa: BLE001 - collect thread failure
+                errors.append(exc)
+
+        first = threading.Thread(target=invoke)
+        second = threading.Thread(target=invoke)
+        first.start()
+        assert source.recheck_started.wait(timeout=1)
+        second.start()
+        source.release_recheck.set()
+        first.join(timeout=2)
+        second.join(timeout=2)
+
+        assert errors == []
+        assert len(results) == 2
+        assert results[0] == results[1]
+        assert source.calls == [
+            "accounts",
+            "orders",
+            "active_orders",
+            "trades",
+            "positions",
+        ]
+    finally:
+        engine.close()
+
+
+def test_completed_recheck_cache_is_bounded() -> None:
+    extension, _ = install(SyncEventEngine(), FactSource(), recheck_cache_size=2)
+    extension.get_deployment_safety_snapshot_v1(
+        "request-cache-0001", "challenge-owner-cache-0001"
+    )
+    for index in range(2):
+        extension.recheck_deployment_safety_snapshot_v1(
+            "request-cache-0001",
+            "challenge-owner-cache-0001",
+            f"recheck-cache-000{index}",
+            f"challenge-fresh-cache-000{index}",
+            0,
+        )
+    with pytest.raises(WindowsRpcDeploymentSnapshotError, match="capacity"):
+        extension.recheck_deployment_safety_snapshot_v1(
+            "request-cache-0001",
+            "challenge-owner-cache-0001",
+            "recheck-cache-0002",
+            "challenge-fresh-cache-0002",
+            0,
+        )
+
+    assert len(extension._rechecks) == 2
+    assert len(extension._fresh_challenges) == 2
 
 
 def test_async_engine_copies_all_facts_on_event_thread_in_queue_order() -> None:
@@ -280,9 +688,7 @@ def test_timeout_fails_when_event_engine_does_not_dispatch() -> None:
         def put(self, _event: FakeEvent) -> None:
             return
 
-    extension, _ = install(
-        DroppingEventEngine(), FactSource(), timeout_seconds=0.01
-    )
+    extension, _ = install(DroppingEventEngine(), FactSource(), timeout_seconds=0.01)
 
     with pytest.raises(TimeoutError, match="EventEngine"):
         extension.get_deployment_safety_snapshot_v1(
@@ -341,8 +747,9 @@ def test_registration_rejects_unknown_engine_or_app(registry: str) -> None:
         install(SyncEventEngine(), source)
 
 
-def test_send_reply_is_pending_until_delayed_event_and_fence_rejects_mutations(
-) -> None:
+def test_send_reply_is_pending_until_delayed_event_and_fence_rejects_mutations() -> (
+    None
+):
     engine = SyncEventEngine()
     extension, server = install(engine, FactSource())
     send = server.registered["send_order"]
@@ -378,9 +785,7 @@ def test_snapshot_waits_for_an_inflight_send_reply_before_event_capture() -> Non
         return "CTP.2002"
 
     server._functions["send_order"] = blocking_send
-    extension, server = install(
-        SyncEventEngine(), FactSource(), server=server
-    )
+    extension, server = install(SyncEventEngine(), FactSource(), server=server)
     send_result: list[str] = []
     snapshot_result: list[dict[str, Any]] = []
     send_thread = threading.Thread(
@@ -463,7 +868,10 @@ def test_import_and_registration_do_not_require_vnpy_when_factory_is_injected(
 
     monkeypatch.setattr("builtins.__import__", guarded_import)
     extension, _ = install(SyncEventEngine(), FactSource())
-    assert extension.get_deployment_safety_snapshot_v1(
-        "request-import-0001", "challenge-import-0001"
-    )["fact_generation"] == 0
+    assert (
+        extension.get_deployment_safety_snapshot_v1(
+            "request-import-0001", "challenge-import-0001"
+        )["fact_generation"]
+        == 0
+    )
     assert imported == []
