@@ -1,0 +1,528 @@
+{
+  "$defs": {
+    "DeploymentRpcFactsDTO": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "windows_rpc_deployment_safety_snapshot_v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "request_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "challenge": {
+          "pattern": "^[A-Za-z0-9_-]{16,128}$",
+          "title": "Challenge",
+          "type": "string"
+        },
+        "server_instance_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "title": "Server Instance Id",
+          "type": "string"
+        },
+        "fact_generation": {
+          "minimum": 0,
+          "title": "Fact Generation",
+          "type": "integer"
+        },
+        "captured_at": {
+          "format": "date-time",
+          "title": "Captured At",
+          "type": "string"
+        },
+        "execution_admission_frozen": {
+          "const": true,
+          "title": "Execution Admission Frozen",
+          "type": "boolean"
+        },
+        "pending_send_outcomes": {
+          "minimum": 0,
+          "title": "Pending Send Outcomes",
+          "type": "integer"
+        },
+        "strategy_execution_enabled": {
+          "const": false,
+          "title": "Strategy Execution Enabled",
+          "type": "boolean"
+        },
+        "account_hashes": {
+          "items": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "title": "Account Hashes",
+          "type": "array"
+        },
+        "orders": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Orders",
+          "type": "array"
+        },
+        "active_orders": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Active Orders",
+          "type": "array"
+        },
+        "trades": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Trades",
+          "type": "array"
+        },
+        "positions": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Positions",
+          "type": "array"
+        }
+      },
+      "required": [
+        "schema_version",
+        "request_id",
+        "challenge",
+        "server_instance_id",
+        "fact_generation",
+        "captured_at",
+        "execution_admission_frozen",
+        "pending_send_outcomes",
+        "strategy_execution_enabled",
+        "account_hashes",
+        "orders",
+        "active_orders",
+        "trades",
+        "positions"
+      ],
+      "title": "DeploymentRpcFactsDTO",
+      "type": "object"
+    },
+    "DeploymentRpcRecheckFactsDTO": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "windows_rpc_deployment_safety_recheck_v1",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "request_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "owner_challenge": {
+          "pattern": "^[A-Za-z0-9_-]{16,128}$",
+          "title": "Owner Challenge",
+          "type": "string"
+        },
+        "recheck_id": {
+          "pattern": "^deployment-recheck-[0-9a-f]{64}$",
+          "title": "Recheck Id",
+          "type": "string"
+        },
+        "fresh_challenge": {
+          "pattern": "^[A-Za-z0-9_-]{16,128}$",
+          "title": "Fresh Challenge",
+          "type": "string"
+        },
+        "original_server_instance_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "title": "Original Server Instance Id",
+          "type": "string"
+        },
+        "original_fact_generation": {
+          "minimum": 0,
+          "title": "Original Fact Generation",
+          "type": "integer"
+        },
+        "original_execution_facts_canonical_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Original Execution Facts Canonical Sha256",
+          "type": "string"
+        },
+        "server_instance_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+          "title": "Server Instance Id",
+          "type": "string"
+        },
+        "fact_generation": {
+          "minimum": 0,
+          "title": "Fact Generation",
+          "type": "integer"
+        },
+        "execution_facts_canonical_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Execution Facts Canonical Sha256",
+          "type": "string"
+        },
+        "captured_at": {
+          "format": "date-time",
+          "title": "Captured At",
+          "type": "string"
+        },
+        "execution_admission_frozen": {
+          "const": true,
+          "title": "Execution Admission Frozen",
+          "type": "boolean"
+        },
+        "pending_send_outcomes": {
+          "minimum": 0,
+          "title": "Pending Send Outcomes",
+          "type": "integer"
+        },
+        "strategy_execution_enabled": {
+          "const": false,
+          "title": "Strategy Execution Enabled",
+          "type": "boolean"
+        },
+        "account_hashes": {
+          "items": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "title": "Account Hashes",
+          "type": "array"
+        },
+        "orders": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Orders",
+          "type": "array"
+        },
+        "active_orders": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Active Orders",
+          "type": "array"
+        },
+        "trades": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Trades",
+          "type": "array"
+        },
+        "positions": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Positions",
+          "type": "array"
+        }
+      },
+      "required": [
+        "schema_version",
+        "request_id",
+        "owner_challenge",
+        "recheck_id",
+        "fresh_challenge",
+        "original_server_instance_id",
+        "original_fact_generation",
+        "original_execution_facts_canonical_sha256",
+        "server_instance_id",
+        "fact_generation",
+        "execution_facts_canonical_sha256",
+        "captured_at",
+        "execution_admission_frozen",
+        "pending_send_outcomes",
+        "strategy_execution_enabled",
+        "account_hashes",
+        "orders",
+        "active_orders",
+        "trades",
+        "positions"
+      ],
+      "title": "DeploymentRpcRecheckFactsDTO",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Stable consumed/initial facts plus a fresh bound-owner Windows recheck.",
+  "properties": {
+    "schema_version": {
+      "const": "web_bridge_deployment_reconciliation_capture_pair_v1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "purpose": {
+      "const": "record_two_stable_frozen_owner_rpc_captures",
+      "title": "Purpose",
+      "type": "string"
+    },
+    "mode": {
+      "enum": [
+        "PLANNED_RESTART",
+        "INITIAL_BASELINE",
+        "LEGACY_MIGRATION_BASELINE"
+      ],
+      "title": "Mode",
+      "type": "string"
+    },
+    "capture_pair_id": {
+      "pattern": "^deployment-reconciliation-capture-pair-[0-9a-f]{64}$",
+      "title": "Capture Pair Id",
+      "type": "string"
+    },
+    "capture_pair_core_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Capture Pair Core Sha256",
+      "type": "string"
+    },
+    "intent_id": {
+      "pattern": "^deployment-reconciliation-intent-[0-9a-f]{64}$",
+      "title": "Intent Id",
+      "type": "string"
+    },
+    "intent_raw_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Intent Raw Sha256",
+      "type": "string"
+    },
+    "intent_core_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Intent Core Sha256",
+      "type": "string"
+    },
+    "owner_binding_id": {
+      "pattern": "^deployment-reconciliation-owner-binding-[0-9a-f]{64}$",
+      "title": "Owner Binding Id",
+      "type": "string"
+    },
+    "owner_binding_core_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Owner Binding Core Sha256",
+      "type": "string"
+    },
+    "expected_account_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Expected Account Hash",
+      "type": "string"
+    },
+    "rpc_request_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+      "title": "Rpc Request Id",
+      "type": "string"
+    },
+    "owner_challenge": {
+      "pattern": "^[A-Za-z0-9_-]{16,128}$",
+      "title": "Owner Challenge",
+      "type": "string"
+    },
+    "initial_capture_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
+      "title": "Initial Capture Id",
+      "type": "string"
+    },
+    "initial_challenge": {
+      "pattern": "^[A-Za-z0-9_-]{16,128}$",
+      "title": "Initial Challenge",
+      "type": "string"
+    },
+    "fresh_capture_id": {
+      "pattern": "^deployment-recheck-[0-9a-f]{64}$",
+      "title": "Fresh Capture Id",
+      "type": "string"
+    },
+    "fresh_challenge": {
+      "pattern": "^[A-Za-z0-9_-]{16,128}$",
+      "title": "Fresh Challenge",
+      "type": "string"
+    },
+    "commodity_state_raw_sha256": {
+      "anyOf": [
+        {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Commodity State Raw Sha256"
+    },
+    "commodity_state_checkpoint_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Commodity State Checkpoint Sha256",
+      "type": "string"
+    },
+    "initial_rpc_raw_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Initial Rpc Raw Sha256",
+      "type": "string"
+    },
+    "initial_rpc": {
+      "discriminator": {
+        "mapping": {
+          "windows_rpc_deployment_safety_recheck_v1": "#/$defs/DeploymentRpcRecheckFactsDTO",
+          "windows_rpc_deployment_safety_snapshot_v1": "#/$defs/DeploymentRpcFactsDTO"
+        },
+        "propertyName": "schema_version"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/DeploymentRpcFactsDTO"
+        },
+        {
+          "$ref": "#/$defs/DeploymentRpcRecheckFactsDTO"
+        }
+      ],
+      "title": "Initial Rpc"
+    },
+    "fresh_rpc_raw_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Fresh Rpc Raw Sha256",
+      "type": "string"
+    },
+    "fresh_rpc": {
+      "$ref": "#/$defs/DeploymentRpcRecheckFactsDTO"
+    },
+    "initial_execution_facts_canonical_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Initial Execution Facts Canonical Sha256",
+      "type": "string"
+    },
+    "fresh_execution_facts_canonical_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Fresh Execution Facts Canonical Sha256",
+      "type": "string"
+    },
+    "captured_at": {
+      "format": "date-time",
+      "title": "Captured At",
+      "type": "string"
+    },
+    "same_owner_cycle_verified": {
+      "const": true,
+      "title": "Same Owner Cycle Verified",
+      "type": "boolean"
+    },
+    "two_capture_facts_verified": {
+      "const": true,
+      "title": "Two Capture Facts Verified",
+      "type": "boolean"
+    },
+    "external_high_water_verified": {
+      "const": false,
+      "title": "External High Water Verified",
+      "type": "boolean"
+    },
+    "target_runtime_verified": {
+      "const": false,
+      "title": "Target Runtime Verified",
+      "type": "boolean"
+    },
+    "reconciliation_completed": {
+      "const": false,
+      "title": "Reconciliation Completed",
+      "type": "boolean"
+    },
+    "windows_fence_released": {
+      "const": false,
+      "title": "Windows Fence Released",
+      "type": "boolean"
+    },
+    "authority_restore_allowed": {
+      "const": false,
+      "title": "Authority Restore Allowed",
+      "type": "boolean"
+    },
+    "consume_authorized": {
+      "const": false,
+      "title": "Consume Authorized",
+      "type": "boolean"
+    },
+    "reconciliation_authorized": {
+      "const": false,
+      "title": "Reconciliation Authorized",
+      "type": "boolean"
+    },
+    "deployment_authorized": {
+      "const": false,
+      "title": "Deployment Authorized",
+      "type": "boolean"
+    },
+    "automatic_deploy_allowed": {
+      "const": false,
+      "title": "Automatic Deploy Allowed",
+      "type": "boolean"
+    },
+    "production_allowed": {
+      "const": false,
+      "title": "Production Allowed",
+      "type": "boolean"
+    },
+    "live_trading_authorized": {
+      "const": false,
+      "title": "Live Trading Authorized",
+      "type": "boolean"
+    },
+    "countable_forward": {
+      "const": false,
+      "title": "Countable Forward",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "schema_version",
+    "purpose",
+    "mode",
+    "capture_pair_id",
+    "capture_pair_core_sha256",
+    "intent_id",
+    "intent_raw_sha256",
+    "intent_core_sha256",
+    "owner_binding_id",
+    "owner_binding_core_sha256",
+    "expected_account_hash",
+    "rpc_request_id",
+    "owner_challenge",
+    "initial_capture_id",
+    "initial_challenge",
+    "fresh_capture_id",
+    "fresh_challenge",
+    "commodity_state_raw_sha256",
+    "commodity_state_checkpoint_sha256",
+    "initial_rpc_raw_sha256",
+    "initial_rpc",
+    "fresh_rpc_raw_sha256",
+    "fresh_rpc",
+    "initial_execution_facts_canonical_sha256",
+    "fresh_execution_facts_canonical_sha256",
+    "captured_at",
+    "same_owner_cycle_verified",
+    "two_capture_facts_verified",
+    "external_high_water_verified",
+    "target_runtime_verified",
+    "reconciliation_completed",
+    "windows_fence_released",
+    "authority_restore_allowed",
+    "consume_authorized",
+    "reconciliation_authorized",
+    "deployment_authorized",
+    "automatic_deploy_allowed",
+    "production_allowed",
+    "live_trading_authorized",
+    "countable_forward"
+  ],
+  "title": "Web Bridge deployment reconciliation capture pair v1",
+  "type": "object",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vnpy-web-bridge:schema:web-bridge-deployment-reconciliation-capture-pair-v1"
+}

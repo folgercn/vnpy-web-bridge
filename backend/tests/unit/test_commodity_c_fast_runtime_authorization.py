@@ -10,9 +10,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-
 from app.core.commodity_strategy_identity import (
     commodity_c_fast_allocation_policy_projection,
     commodity_c_fast_allocation_policy_projection_sha256,
@@ -31,15 +28,16 @@ from app.services.commodity_c_fast_runtime_authorization import (
     canonical_json,
     sha256_bytes,
 )
-from app.services.commodity_c_fast_shadow_common import unsigned_snapshot_payload
 from app.services.commodity_c_fast_shadow import (
     CFastShadowInvalidError,
     CommodityCFastShadowService,
 )
-from test_commodity_c_fast_simnow import sign_payload as sign_legacy_snapshot
+from app.services.commodity_c_fast_shadow_common import unsigned_snapshot_payload
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from test_commodity_c_fast_shadow import sign_payload as sign_shadow_snapshot
 from test_commodity_c_fast_shadow import unsigned_payload
-
+from test_commodity_c_fast_simnow import sign_payload as sign_legacy_snapshot
 
 NOW = datetime(2026, 9, 1, 2, tzinfo=timezone.utc)
 ACCOUNT_SHA256 = "9" * 64
@@ -433,6 +431,21 @@ def test_expiry_auto_revokes_and_survives_restart(tmp_path: Path) -> None:
     assert service.status()["state"] == "EXPIRED"
     assert service.status()["state"] == "EXPIRED"
     assert len(list(service.state_dir.glob("*.json"))) == 2
+
+
+def test_readonly_state_is_fail_closed_without_appending_expiry_event(
+    tmp_path: Path,
+) -> None:
+    service, _snapshot, _snapshot_sha256 = _authority_fixture(
+        tmp_path, valid_until=NOW + timedelta(minutes=1)
+    )
+    service.enable(
+        authorized_by="admin", reason="approved bounded SimNow runtime"
+    )
+    service.clock = lambda: NOW + timedelta(minutes=2)
+
+    assert service.readonly_state() == "ACTIVE"
+    assert len(list(service.state_dir.glob("*.json"))) == 1
 
 
 def test_keyring_pin_mismatch_is_fail_closed(tmp_path: Path) -> None:

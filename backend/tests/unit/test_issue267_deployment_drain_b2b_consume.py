@@ -80,7 +80,11 @@ class FakeRpc:
         return object()
 
     def capture_deployment_facts(
-        self, *, request_id: str, challenge: str
+        self,
+        *,
+        request_id: str,
+        challenge: str,
+        allow_cached_replay: bool = False,
     ) -> DeploymentRpcFactsDTO:
         assert request_id == self.facts.request_id
         assert challenge == self.facts.challenge
@@ -89,6 +93,7 @@ class FakeRpc:
     def capture_deployment_recheck_facts(
         self, **binding: object
     ) -> DeploymentRpcRecheckFactsDTO:
+        binding.pop("allow_cached_replay", False)
         return DeploymentRpcRecheckFactsDTO(
             schema_version="windows_rpc_deployment_safety_recheck_v1",
             request_id=str(binding["request_id"]),

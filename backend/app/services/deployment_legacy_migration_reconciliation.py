@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from types import MappingProxyType
 from typing import Any
 
 from pydantic import ValidationError
 
 from app.schemas.deployment_drain import (
     CommodityInitialBaselineStateDTO,
+    DeploymentDrainStateCommitmentDTO,
     DeploymentLegacyMigrationCheckpointDTO,
     DeploymentLegacyMigrationCommodityCheckpointDTO,
     DeploymentRpcFactsDTO,
@@ -38,6 +42,26 @@ from app.services.deployment_state_commitment import (
 
 class DeploymentLegacyMigrationError(RuntimeError):
     """Legacy migration evidence is invalid or cannot prove a clean baseline."""
+
+
+@dataclass(frozen=True)
+class VerifiedLegacyMigrationInputBundle:
+    """Exact read-only C1c custody inputs, verified before any RPC capture."""
+
+    source_schema_version: str
+    source: LegacyMigrationSourceStateV1DTO | LegacyMigrationSourceStateV2DTO
+    source_epoch_anchor: LegacyEpochAnchorV1DTO
+    inventory: LegacyMigrationEmptyInventoryDTO
+    commitments: tuple[DeploymentDrainStateCommitmentDTO, ...]
+    genesis: DeploymentDrainStateCommitmentDTO
+    current: DeploymentDrainStateCommitmentDTO
+    current_epoch_anchor: Mapping[str, Any]
+    source_state_raw_sha256: str
+    source_epoch_anchor_raw_sha256: str
+    inventory_manifest_raw_sha256: str
+    genesis_commitment_raw_sha256: str
+    current_commitment_raw_sha256: str
+    current_epoch_anchor_raw_sha256: str
 
 
 _EMPTY_STATE_FIELDS = {
@@ -296,7 +320,7 @@ def _require_clean_migration_state(state: dict[str, Any], drain_epoch: int) -> N
         )
 
 
-def _verify_legacy_migration_chain(
+def verify_legacy_migration_input_bundle(
     *,
     source_state_raw: bytes,
     source_epoch_anchor_raw: bytes,
@@ -306,7 +330,7 @@ def _verify_legacy_migration_chain(
     current_epoch_anchor_raw: bytes,
     current_runtime_instance_id: str,
     current_execution_epoch: int,
-):
+) -> VerifiedLegacyMigrationInputBundle:
     source_version, source = _parse_exact_source(source_state_raw)
     anchor = _parse_exact(
         source_epoch_anchor_raw,
@@ -445,7 +469,35 @@ def _verify_legacy_migration_chain(
         raise DeploymentLegacyMigrationError(
             "current epoch anchor does not bind the migration head"
         )
-    return source_version, source, inventory, genesis, current
+    return VerifiedLegacyMigrationInputBundle(
+        source_schema_version=source_version,
+        source=source,
+        source_epoch_anchor=anchor,
+        inventory=inventory,
+        commitments=tuple(commitments),
+        genesis=genesis,
+        current=current,
+        current_epoch_anchor=MappingProxyType(dict(current_anchor)),
+        source_state_raw_sha256=_sha256(source_state_raw),
+        source_epoch_anchor_raw_sha256=_sha256(source_epoch_anchor_raw),
+        inventory_manifest_raw_sha256=_sha256(inventory_manifest_raw),
+        genesis_commitment_raw_sha256=_sha256(genesis_state_commitment_raw),
+        current_commitment_raw_sha256=_sha256(state_commitment_chain_raw[-1]),
+        current_epoch_anchor_raw_sha256=_sha256(current_epoch_anchor_raw),
+    )
+
+
+def _verify_legacy_migration_chain(**kwargs):
+    """Backward-compatible private tuple adapter."""
+
+    bundle = verify_legacy_migration_input_bundle(**kwargs)
+    return (
+        bundle.source_schema_version,
+        bundle.source,
+        bundle.inventory,
+        bundle.genesis,
+        bundle.current,
+    )
 
 
 def _build_legacy_migration_commodity_checkpoint(
@@ -721,18 +773,21 @@ def _build_legacy_migration_checkpoint(
     fresh_rpc: DeploymentRpcRecheckFactsDTO | dict[str, Any],
     captured_at: datetime | str,
 ) -> DeploymentLegacyMigrationCheckpointDTO:
-    source_version, source, inventory, genesis, current = (
-        _verify_legacy_migration_chain(
-            source_state_raw=source_state_raw,
-            source_epoch_anchor_raw=source_epoch_anchor_raw,
-            inventory_manifest_raw=inventory_manifest_raw,
-            genesis_state_commitment_raw=genesis_state_commitment_raw,
-            state_commitment_chain_raw=state_commitment_chain_raw,
-            current_epoch_anchor_raw=current_epoch_anchor_raw,
-            current_runtime_instance_id=current_runtime_instance_id,
-            current_execution_epoch=current_execution_epoch,
-        )
+    input_bundle = verify_legacy_migration_input_bundle(
+        source_state_raw=source_state_raw,
+        source_epoch_anchor_raw=source_epoch_anchor_raw,
+        inventory_manifest_raw=inventory_manifest_raw,
+        genesis_state_commitment_raw=genesis_state_commitment_raw,
+        state_commitment_chain_raw=state_commitment_chain_raw,
+        current_epoch_anchor_raw=current_epoch_anchor_raw,
+        current_runtime_instance_id=current_runtime_instance_id,
+        current_execution_epoch=current_execution_epoch,
     )
+    source_version = input_bundle.source_schema_version
+    source = input_bundle.source
+    inventory = input_bundle.inventory
+    genesis = input_bundle.genesis
+    current = input_bundle.current
     current_raw = state_commitment_chain_raw[-1]
     commodity, fresh, captured, execution_sha = _verify_stable_facts(
         reconciliation_run_id=reconciliation_run_id,

@@ -8,9 +8,7 @@ from pathlib import Path
 from jsonschema import Draft202012Validator
 
 ROOT = Path(__file__).resolve().parents[3]
-MANIFEST_PATH = (
-    ROOT / "docs/architecture/web-bridge-release-dependencies-v1.json"
-)
+MANIFEST_PATH = ROOT / "docs/architecture/web-bridge-release-dependencies-v1.json"
 MANIFEST = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
 EVIDENCE_SHA256 = "a" * 64
 SOURCE_COMMIT = "b" * 40
@@ -25,8 +23,7 @@ def _matching_rule_ids(path: str) -> list[str]:
             path in match.get("exact", [])
             or any(path.startswith(prefix) for prefix in match.get("prefix", []))
             or any(
-                fnmatch.fnmatchcase(path, pattern)
-                for pattern in match.get("glob", [])
+                fnmatch.fnmatchcase(path, pattern) for pattern in match.get("glob", [])
             )
         ):
             matches.append(rule["id"])
@@ -87,23 +84,33 @@ def test_release_dependency_contract_is_inert_and_fail_closed() -> None:
 
 
 def test_every_tracked_path_has_a_reviewed_rule() -> None:
-    tracked = subprocess.run(
-        ["git", "ls-files", "-z"],
-        cwd=ROOT,
-        check=True,
-        capture_output=True,
-    ).stdout.decode("utf-8").split("\0")
-    uncovered = sorted(path for path in tracked if path and not _matching_rule_ids(path))
+    tracked = (
+        subprocess.run(
+            ["git", "ls-files", "-z"],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+        )
+        .stdout.decode("utf-8")
+        .split("\0")
+    )
+    uncovered = sorted(
+        path for path in tracked if path and not _matching_rule_ids(path)
+    )
     assert uncovered == []
 
 
 def test_every_tracked_path_has_one_deterministic_effective_rule() -> None:
-    tracked = subprocess.run(
-        ["git", "ls-files", "-z"],
-        cwd=ROOT,
-        check=True,
-        capture_output=True,
-    ).stdout.decode("utf-8").split("\0")
+    tracked = (
+        subprocess.run(
+            ["git", "ls-files", "-z"],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+        )
+        .stdout.decode("utf-8")
+        .split("\0")
+    )
     ambiguous = {
         path: [rule["id"] for rule in selected]
         for path in tracked
@@ -157,6 +164,14 @@ def test_high_risk_paths_resolve_to_conservative_rules() -> None:
             "execution-source",
             "infra_manual",
         ),
+        "backend/app/services/deployment_reconciliation_activation.py": (
+            "execution-source",
+            "infra_manual",
+        ),
+        "backend/app/services/commodity_c_fast_runtime_authorization.py": (
+            "execution-source",
+            "infra_manual",
+        ),
         "scripts/c_fast_t1/Containerfile.query-v5": (
             "c-fast-containerfiles",
             "build_only",
@@ -175,9 +190,7 @@ def test_joint_dependency_references_and_rule_ids_are_valid() -> None:
     rule_ids = [rule["id"] for rule in MANIFEST["path_rules"]]
     joint_ids = {item["id"] for item in MANIFEST["joint_dependencies"]}
     build_ids = {item["id"] for item in MANIFEST["build_units"]}
-    resolver_tokens = set(
-        MANIFEST["classification_contract"]["resolver_tokens"]
-    )
+    resolver_tokens = set(MANIFEST["classification_contract"]["resolver_tokens"])
 
     assert len(rule_ids) == len(set(rule_ids))
     for rule in MANIFEST["path_rules"]:
@@ -188,9 +201,7 @@ def test_joint_dependency_references_and_rule_ids_are_valid() -> None:
                 assert unit in build_ids or unit in resolver_tokens
 
 
-def _identity(
-    *, container_hex: str, started_at: str, pid: int
-) -> dict[str, object]:
+def _identity(*, container_hex: str, started_at: str, pid: int) -> dict[str, object]:
     return {
         "present": True,
         "version": "v1",
@@ -278,8 +289,9 @@ def _deployment_evidence() -> dict[str, object]:
 
 def test_successful_deployment_requires_every_verification() -> None:
     schema = json.loads(
-        (ROOT / "docs/schemas/web-bridge-deployment-evidence-v1.schema.json")
-        .read_text(encoding="utf-8")
+        (ROOT / "docs/schemas/web-bridge-deployment-evidence-v1.schema.json").read_text(
+            encoding="utf-8"
+        )
     )
     validator = Draft202012Validator(schema)
     evidence = _deployment_evidence()
@@ -307,8 +319,9 @@ def test_successful_deployment_requires_every_verification() -> None:
 
 def test_blocked_deployment_can_record_pre_action_failure() -> None:
     schema = json.loads(
-        (ROOT / "docs/schemas/web-bridge-deployment-evidence-v1.schema.json")
-        .read_text(encoding="utf-8")
+        (ROOT / "docs/schemas/web-bridge-deployment-evidence-v1.schema.json").read_text(
+            encoding="utf-8"
+        )
     )
     validator = Draft202012Validator(schema)
     evidence = _deployment_evidence()
@@ -321,8 +334,9 @@ def test_blocked_deployment_can_record_pre_action_failure() -> None:
 
 def test_failed_deployment_can_record_disappeared_runtime() -> None:
     schema = json.loads(
-        (ROOT / "docs/schemas/web-bridge-deployment-evidence-v1.schema.json")
-        .read_text(encoding="utf-8")
+        (ROOT / "docs/schemas/web-bridge-deployment-evidence-v1.schema.json").read_text(
+            encoding="utf-8"
+        )
     )
     validator = Draft202012Validator(schema)
     evidence = _deployment_evidence()
@@ -353,8 +367,9 @@ def test_failed_deployment_can_record_disappeared_runtime() -> None:
 
 def test_successful_create_records_absent_before_and_present_after() -> None:
     schema = json.loads(
-        (ROOT / "docs/schemas/web-bridge-deployment-evidence-v1.schema.json")
-        .read_text(encoding="utf-8")
+        (ROOT / "docs/schemas/web-bridge-deployment-evidence-v1.schema.json").read_text(
+            encoding="utf-8"
+        )
     )
     validator = Draft202012Validator(schema)
     evidence = _deployment_evidence()
@@ -429,7 +444,9 @@ def _release_plan() -> dict[str, object]:
     }
 
 
-def test_ready_release_requires_compatible_schemas_and_matching_execution_receipt() -> None:
+def test_ready_release_requires_compatible_schemas_and_matching_execution_receipt() -> (
+    None
+):
     schema = json.loads(
         (ROOT / "docs/schemas/web-bridge-release-plan-v1.schema.json").read_text(
             encoding="utf-8"
@@ -561,28 +578,25 @@ def test_safe_restart_standalone_and_embedded_contracts_stay_in_sync() -> None:
     )
     receipt = json.loads(
         (
-            ROOT
-            / "docs/schemas/web-bridge-safe-restart-receipt-v1.schema.json"
+            ROOT / "docs/schemas/web-bridge-safe-restart-receipt-v1.schema.json"
         ).read_text(encoding="utf-8")
     )
     recheck = json.loads(
         (
-            ROOT
-            / "docs/schemas/web-bridge-safe-restart-recheck-v1.schema.json"
+            ROOT / "docs/schemas/web-bridge-safe-restart-recheck-v1.schema.json"
         ).read_text(encoding="utf-8")
     )
     embedded = release["$defs"]["safeRestartReceipt"]
 
     assert set(receipt["required"]) == set(embedded["required"])
-    assert normalized(receipt["properties"]) == normalized(
-        embedded["properties"]
-    )
+    assert normalized(receipt["properties"]) == normalized(embedded["properties"])
 
     standalone_snapshot = receipt["$defs"]["safeSnapshot"]
     embedded_snapshot = release["$defs"]["safeRestartSnapshot"]
     recheck_snapshot = recheck["$defs"]["safeSnapshot"]
     assert normalized(standalone_snapshot) == normalized(embedded_snapshot)
     assert standalone_snapshot == recheck_snapshot
+
 
 def _rollback_manifest() -> dict[str, object]:
     return {
@@ -650,8 +664,9 @@ def _rollback_manifest() -> dict[str, object]:
 
 def test_rollback_records_unsafe_state_but_ready_requires_safe_compatibility() -> None:
     schema = json.loads(
-        (ROOT / "docs/schemas/web-bridge-rollback-manifest-v1.schema.json")
-        .read_text(encoding="utf-8")
+        (ROOT / "docs/schemas/web-bridge-rollback-manifest-v1.schema.json").read_text(
+            encoding="utf-8"
+        )
     )
     validator = Draft202012Validator(schema)
     manifest = _rollback_manifest()

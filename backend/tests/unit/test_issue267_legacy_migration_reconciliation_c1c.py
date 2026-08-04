@@ -6,8 +6,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
-from jsonschema import Draft202012Validator
-
 from app.schemas.deployment_drain import (
     CommodityInitialBaselineStateDTO,
     DeploymentDrainStateCommitmentDTO,
@@ -38,13 +36,14 @@ from app.services.deployment_legacy_migration_reconciliation import (
     canonical_legacy_migration_inventory_bytes,
     derive_legacy_migration_rpc_identity,
     verify_legacy_migration_checkpoint,
+    verify_legacy_migration_input_bundle,
     verify_legacy_migration_reconciliation_evidence,
 )
 from app.services.deployment_state_commitment import (
     build_state_commitment,
     parse_exact_state_commitment,
 )
-
+from jsonschema import Draft202012Validator
 
 ACCOUNT_HASH = "a" * 64
 ROOT = Path(__file__).resolve().parents[3]
@@ -680,3 +679,59 @@ def test_checkpoint_dto_rejects_rehashed_pre_head_capture_window(tmp_path) -> No
 
     with pytest.raises(ValueError):
         type(checkpoint).model_validate(payload)
+
+
+@pytest.mark.parametrize("version", [V1, V2])
+def test_public_input_bundle_verifies_exact_migration_custody_before_rpc(
+    tmp_path,
+    version,
+) -> None:
+    arguments, current, _clock = _fixture(tmp_path, version=version, restarts=1)
+
+    bundle = verify_legacy_migration_input_bundle(
+        source_state_raw=arguments["source_state_raw"],
+        source_epoch_anchor_raw=arguments["source_epoch_anchor_raw"],
+        inventory_manifest_raw=arguments["inventory_manifest_raw"],
+        genesis_state_commitment_raw=arguments[
+            "genesis_state_commitment_raw"
+        ],
+        state_commitment_chain_raw=arguments["state_commitment_chain_raw"],
+        current_epoch_anchor_raw=arguments["current_epoch_anchor_raw"],
+        current_runtime_instance_id=arguments["current_runtime_instance_id"],
+        current_execution_epoch=arguments["current_execution_epoch"],
+    )
+
+    assert bundle.source_schema_version == version
+    assert bundle.source.schema_version == version
+    assert bundle.inventory.inventory_declared_empty is True
+    assert bundle.genesis is bundle.commitments[0]
+    assert bundle.current is bundle.commitments[-1]
+    assert bundle.current.state["runtime_instance_id"] == current.runtime_instance_id
+    assert bundle.source_state_raw_sha256 == _sha(arguments["source_state_raw"])
+    assert bundle.current_epoch_anchor_raw_sha256 == _sha(
+        arguments["current_epoch_anchor_raw"]
+    )
+    with pytest.raises(TypeError):
+        bundle.current_epoch_anchor["execution_epoch"] = 0  # type: ignore[index]
+
+
+def test_public_input_bundle_rejects_inventory_not_bound_to_exact_source(
+    tmp_path,
+) -> None:
+    arguments, _current, _clock = _fixture(tmp_path)
+    inventory = json.loads(arguments["inventory_manifest_raw"])
+    inventory["source_state_raw_sha256"] = "f" * 64
+
+    with pytest.raises(DeploymentLegacyMigrationError):
+        verify_legacy_migration_input_bundle(
+            source_state_raw=arguments["source_state_raw"],
+            source_epoch_anchor_raw=arguments["source_epoch_anchor_raw"],
+            inventory_manifest_raw=_artifact_bytes(inventory),
+            genesis_state_commitment_raw=arguments[
+                "genesis_state_commitment_raw"
+            ],
+            state_commitment_chain_raw=arguments["state_commitment_chain_raw"],
+            current_epoch_anchor_raw=arguments["current_epoch_anchor_raw"],
+            current_runtime_instance_id=arguments["current_runtime_instance_id"],
+            current_execution_epoch=arguments["current_execution_epoch"],
+        )

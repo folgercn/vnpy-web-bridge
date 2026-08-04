@@ -244,6 +244,9 @@ def test_sync_engine_returns_strict_stably_sorted_plain_json() -> None:
     assert snapshot["execution_admission_frozen"] is True
     assert snapshot["pending_send_outcomes"] == 0
     assert snapshot["captured_at_utc"] == "2026-08-04T00:00:00Z"
+    assert snapshot["cache_replayed"] is False
+    assert snapshot["served_at_utc"] == "2026-08-04T00:00:00Z"
+    assert snapshot["served_fact_generation"] == snapshot["fact_generation"]
     assert snapshot["strategy_execution_enabled"] is False
     assert [row["vt_orderid"] for row in snapshot["orders"]] == [
         "CTP.1",
@@ -333,6 +336,9 @@ def test_fresh_recheck_echoes_owner_generation_admission_and_facts() -> None:
         normalized_execution_facts(result["facts"])
     )
     assert result["captured_at_utc"] == "2026-08-04T00:00:00Z"
+    assert result["cache_replayed"] is False
+    assert result["served_at_utc"] == "2026-08-04T00:00:00Z"
+    assert result["served_fact_generation"] == result["current_generation"]
     assert result["admission"] == {
         "execution_frozen": True,
         "send_order_frozen": True,
@@ -526,13 +532,24 @@ def test_recheck_response_loss_retry_returns_exact_cached_snapshot() -> None:
     )
 
     first = extension.recheck_deployment_safety_snapshot_v1(*parameters)
-    canonical_first = json.dumps(first, sort_keys=True, separators=(",", ":"))
+    first_core = {
+        key: value
+        for key, value in first.items()
+        if key not in {"cache_replayed", "served_at_utc", "served_fact_generation"}
+    }
+    canonical_first = json.dumps(first_core, sort_keys=True, separators=(",", ":"))
     first["facts"]["orders"].clear()
     second = extension.recheck_deployment_safety_snapshot_v1(*parameters)
 
-    assert json.dumps(second, sort_keys=True, separators=(",", ":")) == (
-        canonical_first
-    )
+    second_core = {
+        key: value
+        for key, value in second.items()
+        if key not in {"cache_replayed", "served_at_utc", "served_fact_generation"}
+    }
+    assert json.dumps(second_core, sort_keys=True, separators=(",", ":")) == canonical_first
+    assert first["cache_replayed"] is False
+    assert second["cache_replayed"] is True
+    assert second["served_fact_generation"] == second["current_generation"]
     assert source.calls == [
         "accounts",
         "orders",
@@ -625,7 +642,21 @@ def test_concurrent_identical_rechecks_share_one_event_capture() -> None:
 
         assert errors == []
         assert len(results) == 2
-        assert results[0] == results[1]
+        cores = [
+            {
+                key: value
+                for key, value in result.items()
+                if key
+                not in {
+                    "cache_replayed",
+                    "served_at_utc",
+                    "served_fact_generation",
+                }
+            }
+            for result in results
+        ]
+        assert cores[0] == cores[1]
+        assert sorted(result["cache_replayed"] for result in results) == [False, True]
         assert source.calls == [
             "accounts",
             "orders",
@@ -635,6 +666,26 @@ def test_concurrent_identical_rechecks_share_one_event_capture() -> None:
         ]
     finally:
         engine.close()
+
+
+def test_cached_recheck_rejects_generation_advance_before_replay() -> None:
+    engine = SyncEventEngine()
+    extension, _ = install(engine, FactSource())
+    extension.get_deployment_safety_snapshot_v1(
+        "request-stale-cache-0001", "challenge-owner-stale-cache-0001"
+    )
+    parameters = (
+        "request-stale-cache-0001",
+        "challenge-owner-stale-cache-0001",
+        "recheck-stale-cache-0001",
+        "challenge-fresh-stale-cache-0001",
+        0,
+    )
+    extension.recheck_deployment_safety_snapshot_v1(*parameters)
+    engine.put(FakeEvent("ePosition.", {"vt_symbol": "rb2610.SHFE"}))
+
+    with pytest.raises(WindowsRpcDeploymentSnapshotError, match="cached recheck"):
+        extension.recheck_deployment_safety_snapshot_v1(*parameters)
 
 
 def test_completed_recheck_cache_is_bounded() -> None:
@@ -756,12 +807,10 @@ def test_send_reply_is_pending_until_delayed_event_and_fence_rejects_mutations()
     cancel = server.registered["cancel_order"]
 
     assert send("order-request", "CTP") == "CTP.1001"
-    snapshot = extension.get_deployment_safety_snapshot_v1(
-        "request-fence-0001", "challenge-fence-0001"
-    )
-
-    assert snapshot["pending_send_outcomes"] == 1
-    assert snapshot["execution_admission_frozen"] is True
+    with pytest.raises(WindowsRpcDeploymentSnapshotError, match="changed"):
+        extension.get_deployment_safety_snapshot_v1(
+            "request-fence-0001", "challenge-fence-0001"
+        )
     with pytest.raises(WindowsRpcDeploymentSnapshotError, match="frozen"):
         send("second-order", "CTP")
     with pytest.raises(WindowsRpcDeploymentSnapshotError, match="frozen"):
@@ -788,18 +837,23 @@ def test_snapshot_waits_for_an_inflight_send_reply_before_event_capture() -> Non
     extension, server = install(SyncEventEngine(), FactSource(), server=server)
     send_result: list[str] = []
     snapshot_result: list[dict[str, Any]] = []
+    snapshot_errors: list[BaseException] = []
     send_thread = threading.Thread(
         target=lambda: send_result.append(
             server.registered["send_order"]("order", "CTP")
         )
     )
-    snapshot_thread = threading.Thread(
-        target=lambda: snapshot_result.append(
-            extension.get_deployment_safety_snapshot_v1(
-                "request-inflight-0001", "challenge-inflight-0001"
+    def capture_snapshot() -> None:
+        try:
+            snapshot_result.append(
+                extension.get_deployment_safety_snapshot_v1(
+                    "request-inflight-0001", "challenge-inflight-0001"
+                )
             )
-        )
-    )
+        except BaseException as exc:  # noqa: BLE001 - thread reports to parent
+            snapshot_errors.append(exc)
+
+    snapshot_thread = threading.Thread(target=capture_snapshot)
     send_thread.start()
     assert entered.wait(timeout=1)
     snapshot_thread.start()
@@ -810,7 +864,9 @@ def test_snapshot_waits_for_an_inflight_send_reply_before_event_capture() -> Non
     snapshot_thread.join(timeout=2)
 
     assert send_result == ["CTP.2002"]
-    assert snapshot_result[0]["pending_send_outcomes"] == 1
+    assert snapshot_result == []
+    assert len(snapshot_errors) == 1
+    assert "changed" in str(snapshot_errors[0])
 
 
 def test_historical_same_order_id_does_not_settle_a_new_send() -> None:
@@ -819,11 +875,10 @@ def test_historical_same_order_id_does_not_settle_a_new_send() -> None:
     engine.put(FakeEvent("eOrder.", {"vt_orderid": "CTP.1001"}))
 
     server.registered["send_order"]("order", "CTP")
-    first = extension.get_deployment_safety_snapshot_v1(
-        "request-reused-id-0001", "challenge-reused-id-0001"
-    )
-
-    assert first["pending_send_outcomes"] == 1
+    with pytest.raises(WindowsRpcDeploymentSnapshotError, match="changed"):
+        extension.get_deployment_safety_snapshot_v1(
+            "request-reused-id-0001", "challenge-reused-id-0001"
+        )
     engine.put(FakeEvent("eOrder.", {"vt_orderid": "CTP.1001"}))
     second = extension.get_deployment_safety_snapshot_v1(
         "request-reused-id-0001", "challenge-reused-id-0001"

@@ -412,7 +412,20 @@ class WindowsRpcDeploymentSnapshotV1:
             raise WindowsRpcDeploymentSnapshotError(
                 "deployment snapshot completed without a result"
             )
-        return request.result
+        with self._admission:
+            self._require_frozen_owner(request_id, challenge)
+            if (
+                self._fact_generation != request.result["fact_generation"]
+                or self._pending_send_outcomes
+            ):
+                raise WindowsRpcDeploymentSnapshotError(
+                    "deployment snapshot changed before it was served"
+                )
+            return self._with_served_proof(
+                request.result,
+                cache_replayed=False,
+                served_fact_generation=self._fact_generation,
+            )
 
     def recheck_deployment_safety_snapshot_v1(
         self,
@@ -513,7 +526,46 @@ class WindowsRpcDeploymentSnapshotV1:
             raise WindowsRpcDeploymentSnapshotError(
                 "deployment snapshot recheck completed without a result"
             )
-        return json.loads(request.result_json)
+        with self._admission:
+            self._require_frozen_owner(request_id, owner_challenge)
+            result = json.loads(request.result_json)
+            if (
+                self._fact_generation != result["current_generation"]
+                or self._pending_send_outcomes
+            ):
+                raise WindowsRpcDeploymentSnapshotError(
+                    "cached recheck is stale or Windows pending state is unsafe"
+                )
+            return self._with_served_proof(
+                result,
+                cache_replayed=not created,
+                served_fact_generation=self._fact_generation,
+            )
+
+    def _with_served_proof(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        cache_replayed: bool,
+        served_fact_generation: int,
+    ) -> dict[str, Any]:
+        served_at = self.clock()
+        if served_at.tzinfo is None or served_at.utcoffset() is None:
+            raise WindowsRpcDeploymentSnapshotError(
+                "snapshot clock must return a timezone-aware datetime"
+            )
+        result = dict(payload)
+        result.update(
+            {
+                "cache_replayed": cache_replayed,
+                "served_at_utc": served_at.astimezone(timezone.utc)
+                .isoformat()
+                .replace("+00:00", "Z"),
+                "served_fact_generation": served_fact_generation,
+            }
+        )
+        _canonical_json(result)
+        return result
 
     def _guarded_send_order(self, *args: Any, **kwargs: Any) -> Any:
         original = self._original_send_order
