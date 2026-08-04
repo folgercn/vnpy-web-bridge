@@ -1,0 +1,59 @@
+name: Issue 79 production Tick validation
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: "Type ISSUE79_PRODUCTION for the destructive Issue #79 validation"
+        required: true
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  issue79-production-validation:
+    name: Issue 79 production Tick validation
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      github.repository == 'folgercn/vnpy-web-bridge' &&
+      github.repository_owner == 'folgercn' &&
+      github.actor == 'folgercn'
+    runs-on: [self-hosted, macOS, ARM64, vnpy-web-bridge]
+    timeout-minutes: 30
+    concurrency:
+      group: vnpy-web-bridge-production-validation
+      cancel-in-progress: false
+    steps:
+      - name: Require explicit production confirmation
+        env:
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          test "$CONFIRMATION" = "ISSUE79_PRODUCTION" || {
+            echo "confirmation must equal ISSUE79_PRODUCTION" >&2
+            exit 2
+          }
+
+      - name: Checkout validation revision
+        uses: actions/checkout@v4
+
+      - name: Run production validation and fault drills
+        env:
+          PATH: /Applications/Docker.app/Contents/Resources/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+        run: |
+          python3 scripts/tick_production_validation.py \
+            --mode full \
+            --confirm ISSUE79_PRODUCTION \
+            --deploy-path "${DEPLOY_PATH:-/Users/fujun/services/vnpy-web-bridge}" \
+            --output artifacts/issue-79-production-validation.json \
+            --markdown-output artifacts/issue-79-production-validation.md
+
+      - name: Upload sanitized validation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: issue-79-production-validation-${{ github.run_id }}
+          path: artifacts/issue-79-production-validation.*
+          if-no-files-found: warn
+          retention-days: 30

@@ -4,7 +4,7 @@ This runbook closes the production-only verification tracked by Issue #79. It us
 
 ## Safety gate
 
-The validation workflow is manual. Select `issue79-production-validation` in the CD workflow and enter the exact confirmation `ISSUE79_PRODUCTION`. Without both values, no production container is stopped or restarted.
+The validation workflow is manual and separate from deployment. Run `issue79-production-validation.yml` from `main` and enter the exact confirmation `ISSUE79_PRODUCTION`. Without the confirmation, no production container is stopped or restarted.
 
 The runner performs a preflight before fault injection and always starts QuestDB and Web Bridge again from a `finally` recovery path. It never deletes volumes, changes the deployment `.env`, or prints credentials, RPC addresses, database DSNs, Telegram tokens, or chat IDs.
 
@@ -22,9 +22,8 @@ The runner performs a preflight before fault injection and always starts QuestDB
 ## Trigger
 
 ```bash
-gh workflow run cd.yml \
-  --ref <validation-branch> \
-  -f operation=issue79-production-validation \
+gh workflow run issue79-production-validation.yml \
+  --ref main \
   -f confirmation=ISSUE79_PRODUCTION
 ```
 

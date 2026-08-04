@@ -173,11 +173,11 @@ Rollback：关闭新的 CI contract check；保留已生成 manifest 以便审�
 
 ### PR 1-guard：阻断旧 CD 自动替换 Execution
 
-范围：只修改 CD workflow/classifier/contract tests。任何 `backend/**`、`Dockerfile`、Frontend 拆分拓扑或 infrastructure change 的 main push 只 build/test 并输出明确 release plan，不得自动 `compose up web-bridge`；未知路径 fail closed。显式 backend 部署必须使用 workflow dispatch、服务列表、操作者确认和实时安全前检。
+范围：只修改 CD workflow/classifier/contract tests，并修正不完整的发布 schema 安全约束。任何 `backend/**`、`Dockerfile`、Frontend 拆分拓扑或 infrastructure change 的 main push 只 build/test 并输出明确 release plan，不得自动 `compose up web-bridge`；未知路径 fail closed。PR 1-pre 的原子 drain 和短 TTL receipt 可用前，手工 legacy `web-bridge` 发布也保持禁用，人工确认不能替代安全证据。
 
 Bootstrap：GitHub push 使用合并后 revision 的 workflow，因此本 guard 合并本身不得选择或替换 `web-bridge`；用 workflow contract test 和一次 docs-only/guard canary 证明 deploy job 未运行。
 
-Rollback：不能恢复旧的 `image_changed → web-bridge` 自动部署。若 guard 误阻塞，只能修正 classifier/roll forward；Execution 部署继续保持人工。
+Rollback：不能恢复旧的 `image_changed → web-bridge` 自动部署。若 guard 误阻塞，只能修正 classifier/roll forward；Execution 部署在 PR 1-pre 前保持禁用。
 
 证据：合并 push 的 release plan、deploy job skipped、`vnpy-web-bridge` ID/PID/StartedAt/RestartCount 不变。
 

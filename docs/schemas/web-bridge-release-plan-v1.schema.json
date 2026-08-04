@@ -148,7 +148,7 @@
     "safeRestartReceipt": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schema_version", "receipt_id", "plan_id", "source_commit_sha", "unit", "issued_at", "expires_at", "state_version", "state_sha256", "safe_to_restart", "active_orders", "unknown_outcome", "reconcile_required", "checkpoint_durable", "evidence_sha256"],
+      "required": ["schema_version", "receipt_id", "plan_id", "source_commit_sha", "unit", "issued_at", "expires_at", "ttl_seconds", "execution_epoch", "plan_version", "state_version", "state_sha256", "active_orders_snapshot_sha256", "nonce", "checkpoint_sha256", "safe_to_restart", "active_orders", "unknown_outcome", "reconcile_required", "checkpoint_durable", "evidence_sha256"],
       "properties": {
         "schema_version": {"const": "web_bridge_safe_restart_receipt_v1"},
         "receipt_id": {"$ref": "#/$defs/receiptId"},
@@ -157,8 +157,14 @@
         "unit": {"$ref": "#/$defs/serviceId"},
         "issued_at": {"$ref": "#/$defs/dateTime"},
         "expires_at": {"$ref": "#/$defs/dateTime"},
+        "ttl_seconds": {"type": "integer", "minimum": 1, "maximum": 300},
+        "execution_epoch": {"type": "integer", "minimum": 1},
+        "plan_version": {"$ref": "#/$defs/version"},
         "state_version": {"$ref": "#/$defs/version"},
         "state_sha256": {"$ref": "#/$defs/sha256"},
+        "active_orders_snapshot_sha256": {"$ref": "#/$defs/sha256"},
+        "nonce": {"type": "string", "pattern": "^(?!0+$)[A-Za-z0-9_-]{16,128}$"},
+        "checkpoint_sha256": {"$ref": "#/$defs/sha256"},
         "safe_to_restart": {"const": true},
         "active_orders": {"const": 0},
         "unknown_outcome": {"const": false},
@@ -170,7 +176,7 @@
     "restartAction": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["unit", "from_version", "to_version", "from_image_digest", "to_image_digest", "from_config_sha256", "to_config_sha256", "safety_gate", "safe_restart_receipt", "reason"],
+      "required": ["unit", "from_version", "to_version", "from_image_digest", "to_image_digest", "from_config_sha256", "to_config_sha256", "safety_gate", "safe_restart_receipt", "receipt_plan_binding_verified", "receipt_source_binding_verified", "receipt_freshness_verified", "pre_restart_recheck_verified", "receipt_verification_evidence_sha256", "reason"],
       "properties": {
         "unit": {"$ref": "#/$defs/serviceId"},
         "from_version": {"$ref": "#/$defs/version"},
@@ -181,9 +187,28 @@
         "to_config_sha256": {"$ref": "#/$defs/sha256"},
         "safety_gate": {"enum": ["not_required", "required_verified"]},
         "safe_restart_receipt": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/safeRestartReceipt"}]},
+        "receipt_plan_binding_verified": {"type": "boolean"},
+        "receipt_source_binding_verified": {"type": "boolean"},
+        "receipt_freshness_verified": {"type": "boolean"},
+        "pre_restart_recheck_verified": {"type": "boolean"},
+        "receipt_verification_evidence_sha256": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/sha256"}]},
         "reason": {"type": "string", "minLength": 1, "maxLength": 512}
       },
       "allOf": [
+        {
+          "if": {"properties": {"unit": {"const": "web-bridge"}}},
+          "then": {
+            "properties": {
+              "safety_gate": {"const": "required_verified"},
+              "safe_restart_receipt": {
+                "allOf": [
+                  {"$ref": "#/$defs/safeRestartReceipt"},
+                  {"properties": {"unit": {"const": "web-bridge"}}}
+                ]
+              }
+            }
+          }
+        },
         {
           "if": {"properties": {"unit": {"const": "execution-orchestrator"}}},
           "then": {
@@ -200,11 +225,11 @@
         },
         {
           "if": {"properties": {"safety_gate": {"const": "not_required"}}},
-          "then": {"properties": {"safe_restart_receipt": {"type": "null"}}}
+          "then": {"properties": {"safe_restart_receipt": {"type": "null"}, "receipt_plan_binding_verified": {"const": false}, "receipt_source_binding_verified": {"const": false}, "receipt_freshness_verified": {"const": false}, "pre_restart_recheck_verified": {"const": false}, "receipt_verification_evidence_sha256": {"type": "null"}}}
         },
         {
           "if": {"properties": {"safety_gate": {"const": "required_verified"}}},
-          "then": {"properties": {"safe_restart_receipt": {"$ref": "#/$defs/safeRestartReceipt"}}}
+          "then": {"properties": {"safe_restart_receipt": {"$ref": "#/$defs/safeRestartReceipt"}, "receipt_plan_binding_verified": {"const": true}, "receipt_source_binding_verified": {"const": true}, "receipt_freshness_verified": {"const": true}, "pre_restart_recheck_verified": {"const": true}, "receipt_verification_evidence_sha256": {"$ref": "#/$defs/sha256"}}}
         }
       ]
     },
@@ -227,7 +252,7 @@
       "required": ["unit", "code", "reason", "evidence_sha256", "manual_override_allowed"],
       "properties": {
         "unit": {"$ref": "#/$defs/serviceId"},
-        "code": {"enum": ["unknown_path", "unknown_dependency", "schema_incompatible", "missing_digest", "missing_safe_restart_receipt", "active_orders", "unknown_outcome", "reconcile_required", "checkpoint_not_durable", "config_incompatible"]},
+        "code": {"enum": ["unknown_path", "unknown_dependency", "infra_manual", "automatic_legacy_deploy_forbidden", "schema_incompatible", "missing_digest", "missing_safe_restart_receipt", "active_orders", "unknown_outcome", "reconcile_required", "checkpoint_not_durable", "config_incompatible"]},
         "reason": {"type": "string", "minLength": 1, "maxLength": 512},
         "evidence_sha256": {"$ref": "#/$defs/sha256"},
         "manual_override_allowed": {"const": false}
