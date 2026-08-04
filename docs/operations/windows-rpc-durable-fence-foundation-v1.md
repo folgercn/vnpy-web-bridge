@@ -129,6 +129,13 @@ authority flags, role, key domain, key ID, and pinned public-key hash. Base64
 must decode canonically to exactly 64 bytes; embedded or cross-domain keys are
 never trusted.
 
+The same identity/signature profile is a mandatory precondition for every
+artifact, completed prefix event, and the terminal `FAILED_FROZEN` event
+present at a failure frontier. Failure handling parses each exact raw byte
+sequence once, verifies canonical bytes, core/ID derivation, external
+role/domain key pin, and Ed25519 signature, and only then evaluates raw-digest,
+predecessor, stage, and equality bindings.
+
 Post-restart closure uses a one-way chain: `START_OBSERVED` event, signed
 foundation attestation, then terminal `FOUNDATION_VERIFIED` event. The
 attestation uses an in-process non-forwarding final-registry probe; live

@@ -4,12 +4,19 @@ import base64
 import copy
 import hashlib
 import json
+import unicodedata
 from datetime import datetime
 from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
 import pytest
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+    Ed25519PrivateKey,
+    Ed25519PublicKey,
+)
 from jsonschema import Draft202012Validator, FormatChecker, ValidationError
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -56,6 +63,21 @@ AUTHORITY = {
     "send_order_authorized": False,
     "cancel_order_authorized": False,
     "countable_forward": False,
+}
+
+TEST_SIGNING_IDENTITIES = {
+    "dedicated-windows-foundation-manifest-signing-v1": (
+        "windows-foundation-manifest-signer",
+        "windows-foundation-manifest-signer:offline-v1",
+    ),
+    "dedicated-windows-foundation-observer-evidence-v1": (
+        "windows-foundation-observer-evidence",
+        "windows-foundation-observer-evidence:host-key-v1",
+    ),
+    "dedicated-windows-foundation-restart-authorization-v1": (
+        "windows-foundation-restart-authorizer",
+        "windows-foundation-restart-authorizer:operator-v1",
+    ),
 }
 
 
@@ -957,16 +979,21 @@ def test_failed_event_requires_a_predecessor_and_known_failure_frontier() -> Non
 
 def _failure_artifacts() -> dict[str, dict[str, Any]]:
     artifacts: dict[str, dict[str, Any]] = {}
-    artifacts["preflight"] = _artifact(_preflight())
+    artifacts["preflight"] = _artifact("preflight", _preflight())
     manifest = _manifest()
-    manifest["preflight_receipt_raw_sha256"] = _raw_sha(artifacts["preflight"])
-    artifacts["manifest"] = _artifact(manifest)
+    manifest.update(
+        preflight_receipt_id=_artifact_value(artifacts["preflight"])["receipt_id"],
+        preflight_receipt_raw_sha256=_raw_sha(artifacts["preflight"]),
+    )
+    artifacts["manifest"] = _artifact("manifest", manifest)
     state = _state()
     state.update(
+        preflight_receipt_id=_artifact_value(artifacts["preflight"])["receipt_id"],
+        install_manifest_id=_artifact_value(artifacts["manifest"])["manifest_id"],
         install_manifest_raw_sha256=_raw_sha(artifacts["manifest"]),
         preflight_receipt_raw_sha256=_raw_sha(artifacts["preflight"]),
     )
-    artifacts["state"] = _artifact(state)
+    artifacts["state"] = _artifact("state", state)
 
     def add_event(sequence: int, event_type: str, attempt_state: str) -> None:
         value = _event()
@@ -1010,7 +1037,7 @@ def _failure_artifacts() -> dict[str, dict[str, Any]]:
             value["startup_receipt_raw_sha256"] = _raw_sha(
                 artifacts["startup_receipt"]
             )
-        artifacts[f"event_{sequence}"] = _artifact(value)
+        artifacts[f"event_{sequence}"] = _artifact("install_event", value)
 
     add_event(1, "INSTALL_PREPARED", "PREPARED_FROZEN")
     publish = _publish_receipt()
@@ -1018,7 +1045,7 @@ def _failure_artifacts() -> dict[str, dict[str, Any]]:
         install_manifest_raw_sha256=_raw_sha(artifacts["manifest"]),
         preflight_receipt_raw_sha256=_raw_sha(artifacts["preflight"]),
     )
-    artifacts["publish"] = _artifact(publish)
+    artifacts["publish"] = _artifact("publish", publish)
     add_event(2, "FILES_PUBLISHED", "FILES_READY_FROZEN")
 
     restart_authorization = _restart_authorization()
@@ -1028,7 +1055,9 @@ def _failure_artifacts() -> dict[str, dict[str, Any]]:
         publish_receipt_raw_sha256=_raw_sha(artifacts["publish"]),
         install_event_head_raw_sha256=_raw_sha(artifacts["event_2"]),
     )
-    artifacts["restart_authorization"] = _artifact(restart_authorization)
+    artifacts["restart_authorization"] = _artifact(
+        "restart_authorization", restart_authorization
+    )
     add_event(
         3, "RESTART_DISPATCH_RESERVED", "RESTART_DISPATCH_RESERVED_FROZEN"
     )
@@ -1042,7 +1071,9 @@ def _failure_artifacts() -> dict[str, dict[str, Any]]:
         reservation_event_id=_artifact_value(artifacts["event_3"])["event_id"],
         reservation_event_raw_sha256=_raw_sha(artifacts["event_3"]),
     )
-    artifacts["service_config_transition_receipt"] = _artifact(transition)
+    artifacts["service_config_transition_receipt"] = _artifact(
+        "service_config_transition_receipt", transition
+    )
     add_event(
         4,
         "SERVICE_CONFIG_TRANSITION_VERIFIED",
@@ -1058,7 +1089,9 @@ def _failure_artifacts() -> dict[str, dict[str, Any]]:
             artifacts["service_config_transition_receipt"]
         ),
     )
-    artifacts["scm_dispatch_evidence"] = _artifact(evidence)
+    artifacts["scm_dispatch_evidence"] = _artifact(
+        "scm_dispatch_evidence", evidence
+    )
     add_event(5, "RESTART_DISPATCHED", "RESTART_UNKNOWN_FROZEN")
 
     startup = _startup_receipt()
@@ -1072,7 +1105,7 @@ def _failure_artifacts() -> dict[str, dict[str, Any]]:
         restart_dispatched_event_id=_artifact_value(artifacts["event_5"])["event_id"],
         restart_dispatched_event_raw_sha256=_raw_sha(artifacts["event_5"]),
     )
-    artifacts["startup_receipt"] = _artifact(startup)
+    artifacts["startup_receipt"] = _artifact("startup_receipt", startup)
     add_event(6, "START_OBSERVED", "STARTED_FROZEN")
     normal_types = {
         1: ("INSTALL_PREPARED", "PREPARED_FROZEN"),
@@ -1092,21 +1125,202 @@ def _failure_artifacts() -> dict[str, dict[str, Any]]:
     return artifacts
 
 
-def _canonical_raw(value: dict[str, Any]) -> bytes:
-    return json.dumps(
-        value, ensure_ascii=False, separators=(",", ":"), sort_keys=True
-    ).encode("utf-8")
+def _canonical_raw(value: Any) -> bytes:
+    if value is None:
+        return b"null"
+    if value is True:
+        return b"true"
+    if value is False:
+        return b"false"
+    if isinstance(value, int):
+        if not -(2**53) + 1 <= value <= 2**53 - 1:
+            raise ValueError("JCS_INTEGER_OUTSIDE_EXACT_IEEE754_RANGE")
+        return str(value).encode("ascii")
+    if isinstance(value, float):
+        raise TypeError("JCS_FLOAT_FORBIDDEN_BY_FOUNDATION_PROFILE")
+    if isinstance(value, str):
+        if unicodedata.normalize("NFC", value) != value:
+            raise ValueError("JCS_STRING_NOT_NFC")
+        try:
+            value.encode("utf-8", errors="strict")
+        except UnicodeEncodeError as exc:
+            raise ValueError("JCS_STRING_INVALID_UNICODE") from exc
+        return json.dumps(value, ensure_ascii=False).encode("utf-8")
+    if isinstance(value, list):
+        return b"[" + b",".join(_canonical_raw(item) for item in value) + b"]"
+    if isinstance(value, dict):
+        if not all(isinstance(key, str) for key in value):
+            raise TypeError("JCS_OBJECT_KEYS_MUST_BE_STRINGS")
+        items = sorted(value.items(), key=lambda item: item[0].encode("utf-16-be"))
+        return (
+            b"{"
+            + b",".join(
+                _canonical_raw(key) + b":" + _canonical_raw(item)
+                for key, item in items
+            )
+            + b"}"
+        )
+    raise TypeError("JCS_UNSUPPORTED_JSON_TYPE")
 
 
-def _artifact(value: dict[str, Any]) -> dict[str, Any]:
+def _strict_json_object(raw: bytes) -> dict[str, Any]:
+    def reject_float(_: str) -> None:
+        raise ValueError("FOUNDATION_JSON_FLOAT_FORBIDDEN")
+
+    def reject_constant(_: str) -> None:
+        raise ValueError("FOUNDATION_JSON_NONFINITE_FORBIDDEN")
+
+    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        value: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError("FOUNDATION_JSON_DUPLICATE_KEY")
+            value[key] = item
+        return value
+
+    value = json.loads(
+        raw.decode("utf-8", errors="strict"),
+        object_pairs_hook=unique_object,
+        parse_float=reject_float,
+        parse_constant=reject_constant,
+    )
+    if not isinstance(value, dict):
+        raise TypeError("ARTIFACT_RAW_NOT_JSON_OBJECT")
+    if _canonical_raw(value) != raw:
+        raise ValueError("CANONICALIZATION_CORE_OR_ID_MISMATCH")
+    return value
+
+
+def _identity_spec(artifact_name: str) -> dict[str, Any]:
+    contract = json.loads(CHAIN_CONTRACT_PATH.read_text(encoding="utf-8"))
+    return next(
+        item
+        for item in contract["artifact_identity_and_signature_profile"]["artifacts"]
+        if item["name"] == artifact_name
+    )
+
+
+def _test_private_key(key_domain: str) -> Ed25519PrivateKey:
+    seed = hashlib.sha256(f"wf0-contract-test-key:{key_domain}".encode()).digest()
+    return Ed25519PrivateKey.from_private_bytes(seed)
+
+
+def _public_key_raw(private_key: Ed25519PrivateKey) -> bytes:
+    return private_key.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+
+
+def _signer_fields(artifact_name: str) -> tuple[str, str, str, str]:
+    if artifact_name == "restart_authorization":
+        return (
+            "restart_authorizer_role",
+            "restart_authorizer_key_domain",
+            "signer_key_id",
+            "signer_public_key_sha256",
+        )
+    return (
+        "signer_role",
+        "signer_key_domain",
+        "signer_key_id",
+        "signer_public_key_sha256",
+    )
+
+
+def _artifact(artifact_name: str, value: dict[str, Any]) -> dict[str, Any]:
+    spec = _identity_spec(artifact_name)
+    value = copy.deepcopy(value)
+    signed = spec["signature_domain_separator"] is not None
+    if signed:
+        role_field, domain_field, key_id_field, pin_field = _signer_fields(
+            artifact_name
+        )
+        identity = TEST_SIGNING_IDENTITIES[value[domain_field]]
+        if (value[role_field], value[key_id_field]) != identity:
+            raise ValueError("TEST_SIGNER_IDENTITY_MISMATCH")
+        private_key = _test_private_key(value[domain_field])
+        value[pin_field] = hashlib.sha256(_public_key_raw(private_key)).hexdigest()
+    value.pop("signature", None)
+    core_payload = {
+        key: item
+        for key, item in value.items()
+        if key not in {spec["id_field"], spec["core_field"]}
+    }
+    core = hashlib.sha256(_canonical_raw(core_payload)).hexdigest()
+    value[spec["core_field"]] = core
+    value[spec["id_field"]] = f"{spec['id_prefix']}{core}"
+    if signed:
+        message = (
+            spec["signature_domain_separator"].encode("utf-8")
+            + b"\x00"
+            + _canonical_raw(value)
+        )
+        value["signature"] = base64.b64encode(private_key.sign(message)).decode()
     return {"raw": _canonical_raw(value)}
 
 
+def _verify_identity_and_signature_value(
+    artifact_name: str, value: dict[str, Any]
+) -> None:
+    spec = _identity_spec(artifact_name)
+    core_payload = {
+        key: item
+        for key, item in value.items()
+        if key not in {spec["id_field"], spec["core_field"], "signature"}
+    }
+    expected_core = hashlib.sha256(_canonical_raw(core_payload)).hexdigest()
+    if (
+        value[spec["core_field"]] != expected_core
+        or value[spec["id_field"]] != f"{spec['id_prefix']}{expected_core}"
+    ):
+        raise ValueError("CANONICALIZATION_CORE_OR_ID_MISMATCH")
+    if spec["signature_domain_separator"] is None:
+        return
+    role_field, domain_field, key_id_field, pin_field = _signer_fields(artifact_name)
+    identity = TEST_SIGNING_IDENTITIES.get(value[domain_field])
+    if (
+        identity is None
+        or (value[role_field], value[key_id_field]) != identity
+        or value["signature_algorithm"] != "Ed25519"
+        or value["signature_domain_separator"]
+        != spec["signature_domain_separator"]
+    ):
+        raise ValueError("SIGNING_DOMAIN_OR_PIN_MISMATCH")
+    public_key_raw = _public_key_raw(_test_private_key(value[domain_field]))
+    if value[pin_field] != hashlib.sha256(public_key_raw).hexdigest():
+        raise ValueError("SIGNING_DOMAIN_OR_PIN_MISMATCH")
+    try:
+        signature = base64.b64decode(value["signature"], validate=True)
+    except (ValueError, TypeError) as exc:
+        raise ValueError("SIGNATURE_MESSAGE_OR_BASE64_MISMATCH") from exc
+    if (
+        len(signature) != 64
+        or base64.b64encode(signature).decode("ascii") != value["signature"]
+    ):
+        raise ValueError("SIGNATURE_MESSAGE_OR_BASE64_MISMATCH")
+    envelope = {key: item for key, item in value.items() if key != "signature"}
+    message = (
+        spec["signature_domain_separator"].encode("utf-8")
+        + b"\x00"
+        + _canonical_raw(envelope)
+    )
+    try:
+        Ed25519PublicKey.from_public_bytes(public_key_raw).verify(signature, message)
+    except InvalidSignature as exc:
+        raise ValueError("SIGNATURE_MESSAGE_OR_BASE64_MISMATCH") from exc
+
+
+def _verify_artifact_identity_and_signature(
+    artifact_name: str, artifact: dict[str, Any], value: dict[str, Any]
+) -> None:
+    if _canonical_raw(value) != artifact["raw"]:
+        raise ValueError("CANONICALIZATION_CORE_OR_ID_MISMATCH")
+    _verify_identity_and_signature_value(artifact_name, value)
+
+
 def _artifact_value(artifact: dict[str, Any]) -> dict[str, Any]:
-    value = json.loads(artifact["raw"])
-    if not isinstance(value, dict):
-        raise TypeError("ARTIFACT_RAW_NOT_JSON_OBJECT")
-    return value
+    return _strict_json_object(artifact["raw"])
 
 
 def _replace_artifact_field(
@@ -1155,14 +1369,14 @@ def _failed_event(
         )
     if sequence >= 7:
         event["startup_receipt_raw_sha256"] = _raw_sha(artifacts["startup_receipt"])
-    return event
+    return _artifact("install_event", event)
 
 
 def _verify_failure_frontier_profile(
-    event: dict[str, Any], artifacts: dict[str, dict[str, Any]]
+    event_artifact: dict[str, Any], artifacts: dict[str, dict[str, Any]]
 ) -> None:
     contract = json.loads(CHAIN_CONTRACT_PATH.read_text(encoding="utf-8"))
-    parsed = {name: _artifact_value(artifact) for name, artifact in artifacts.items()}
+    event = _artifact_value(event_artifact)
     matches = [
         profile
         for profile in contract["failure_frontier_profiles"]
@@ -1185,6 +1399,34 @@ def _verify_failure_frontier_profile(
         if present is not required:
             raise ValueError("FAILURE_FRONTIER_EVIDENCE_SPLICE")
     rule_ids = matches[0]["required_binding_rule_ids"]
+    if any(
+        contract["failure_frontier_binding_rules"][rule_id][
+            "identity_and_signature_profile"
+        ]
+        != "artifact_identity_and_signature_profile"
+        for rule_id in rule_ids
+    ):
+        raise ValueError("FAILURE_FRONTIER_IDENTITY_PROFILE_MISSING")
+    Draft202012Validator(
+        _schema("windows-rpc-durable-fence-install-event-v1.schema.json")
+    ).validate(event)
+    present_names = {
+        "preflight",
+        "manifest",
+        "state",
+        *rule_ids[1:],
+        *(f"event_{sequence}" for sequence in range(1, event["event_sequence"])),
+    }
+    parsed = {name: _artifact_value(artifacts[name]) for name in present_names}
+    for name in present_names:
+        _verify_artifact_identity_and_signature(
+            "install_event" if name.startswith("event_") else name,
+            artifacts[name],
+            parsed[name],
+        )
+    _verify_artifact_identity_and_signature(
+        "install_event", event_artifact, event
+    )
     artifact_schemas = {
         "preflight": "windows-rpc-durable-fence-zero-order-preflight-v1.schema.json",
         "manifest": "windows-rpc-durable-fence-install-manifest-v1.schema.json",
@@ -1466,7 +1708,8 @@ def test_failed_frontier_profiles_accept_exact_stage_and_reject_future_evidence(
 ) -> None:
     schema = _schema("windows-rpc-durable-fence-install-event-v1.schema.json")
     artifacts = _failure_artifacts()
-    event = _failed_event(sequence, artifacts)
+    event_artifact = _failed_event(sequence, artifacts)
+    event = _artifact_value(event_artifact)
     Draft202012Validator(schema).validate(event)
     artifact_schemas = {
         "preflight": "windows-rpc-durable-fence-zero-order-preflight-v1.schema.json",
@@ -1501,7 +1744,7 @@ def test_failed_frontier_profiles_accept_exact_stage_and_reject_future_evidence(
         Draft202012Validator(_schema(artifact_schemas[artifact_name])).validate(
             _artifact_value(artifacts[artifact_name])
         )
-    _verify_failure_frontier_profile(event, artifacts)
+    _verify_failure_frontier_profile(event_artifact, artifacts)
 
     future_field = {
         2: "publish_receipt_raw_sha256",
@@ -1516,21 +1759,23 @@ def test_failed_frontier_profiles_accept_exact_stage_and_reject_future_evidence(
     with pytest.raises(ValidationError):
         Draft202012Validator(schema).validate(tampered)
     with pytest.raises(ValueError, match="FAILURE_FRONTIER_EVIDENCE_SPLICE"):
-        _verify_failure_frontier_profile(tampered, artifacts)
+        _verify_failure_frontier_profile(
+            _artifact("install_event", tampered), artifacts
+        )
 
     base_identity_splice = copy.deepcopy(artifacts)
     _replace_artifact_field(
         base_identity_splice, "manifest", "service_name", "OtherService"
     )
-    with pytest.raises(ValueError, match="FAILURE_FRONTIER_RAW_DIGEST_MISMATCH"):
-        _verify_failure_frontier_profile(event, base_identity_splice)
+    with pytest.raises(ValueError):
+        _verify_failure_frontier_profile(event_artifact, base_identity_splice)
     if sequence >= 3:
         predecessor_splice = copy.deepcopy(artifacts)
         _replace_artifact_field(
             predecessor_splice, "event_2", "previous_event_raw_sha256", OTHER_SHA
         )
-        with pytest.raises(ValueError, match="FAILURE_FRONTIER_PREDECESSOR_MISMATCH"):
-            _verify_failure_frontier_profile(event, predecessor_splice)
+        with pytest.raises(ValueError):
+            _verify_failure_frontier_profile(event_artifact, predecessor_splice)
         prefix_event_id_splice = copy.deepcopy(artifacts)
         _replace_artifact_field(
             prefix_event_id_splice,
@@ -1538,8 +1783,8 @@ def test_failed_frontier_profiles_accept_exact_stage_and_reject_future_evidence(
             "event_id",
             f"windows-fence-install-event-{OTHER_SHA}",
         )
-        with pytest.raises(ValueError, match="FAILURE_FRONTIER_PREDECESSOR_MISMATCH"):
-            _verify_failure_frontier_profile(event, prefix_event_id_splice)
+        with pytest.raises(ValueError):
+            _verify_failure_frontier_profile(event_artifact, prefix_event_id_splice)
         prefix_evidence_splice = copy.deepcopy(artifacts)
         prefix_field = {
             3: "publish_receipt_raw_sha256",
@@ -1555,13 +1800,15 @@ def test_failed_frontier_profiles_accept_exact_stage_and_reject_future_evidence(
             OTHER_SHA,
         )
         with pytest.raises(ValueError):
-            _verify_failure_frontier_profile(event, prefix_evidence_splice)
+            _verify_failure_frontier_profile(event_artifact, prefix_evidence_splice)
 
     if sequence >= 3:
         digest_splice = copy.deepcopy(event)
         digest_splice["publish_receipt_raw_sha256"] = OTHER_SHA
-        with pytest.raises(ValueError, match="FAILURE_FRONTIER_RAW_DIGEST_MISMATCH"):
-            _verify_failure_frontier_profile(digest_splice, artifacts)
+        with pytest.raises(ValueError):
+            _verify_failure_frontier_profile(
+                _artifact("install_event", digest_splice), artifacts
+            )
     if sequence >= 4:
         identity_splice = copy.deepcopy(artifacts)
         _replace_artifact_field(
@@ -1570,8 +1817,8 @@ def test_failed_frontier_profiles_accept_exact_stage_and_reject_future_evidence(
             "install_attempt_id",
             f"windows-fence-install-{OTHER_SHA}",
         )
-        with pytest.raises(ValueError, match="FAILURE_FRONTIER_RAW_DIGEST_MISMATCH"):
-            _verify_failure_frontier_profile(event, identity_splice)
+        with pytest.raises(ValueError):
+            _verify_failure_frontier_profile(event_artifact, identity_splice)
         cross_raw_splice = copy.deepcopy(artifacts)
         _replace_artifact_field(
             cross_raw_splice,
@@ -1579,8 +1826,8 @@ def test_failed_frontier_profiles_accept_exact_stage_and_reject_future_evidence(
             "publish_receipt_raw_sha256",
             OTHER_SHA,
         )
-        with pytest.raises(ValueError, match="FAILURE_FRONTIER_RAW_DIGEST_MISMATCH"):
-            _verify_failure_frontier_profile(event, cross_raw_splice)
+        with pytest.raises(ValueError):
+            _verify_failure_frontier_profile(event_artifact, cross_raw_splice)
         auth_manifest_splice = copy.deepcopy(artifacts)
         _replace_artifact_field(
             auth_manifest_splice,
@@ -1588,8 +1835,8 @@ def test_failed_frontier_profiles_accept_exact_stage_and_reject_future_evidence(
             "install_manifest_raw_sha256",
             OTHER_SHA,
         )
-        with pytest.raises(ValueError, match="FAILURE_FRONTIER_RAW_DIGEST_MISMATCH"):
-            _verify_failure_frontier_profile(event, auth_manifest_splice)
+        with pytest.raises(ValueError):
+            _verify_failure_frontier_profile(event_artifact, auth_manifest_splice)
         operation_splice = copy.deepcopy(artifacts)
         _replace_artifact_field(
             operation_splice,
@@ -1597,8 +1844,8 @@ def test_failed_frontier_profiles_accept_exact_stage_and_reject_future_evidence(
             "service_control_operation_id",
             "windows-service-restart-9999",
         )
-        with pytest.raises(ValueError, match="FAILURE_FRONTIER_RAW_DIGEST_MISMATCH"):
-            _verify_failure_frontier_profile(event, operation_splice)
+        with pytest.raises(ValueError):
+            _verify_failure_frontier_profile(event_artifact, operation_splice)
         nonce_splice = copy.deepcopy(artifacts)
         _replace_artifact_field(
             nonce_splice,
@@ -1606,8 +1853,8 @@ def test_failed_frontier_profiles_accept_exact_stage_and_reject_future_evidence(
             "dispatch_nonce_sha256",
             OTHER_SHA,
         )
-        with pytest.raises(ValueError, match="FAILURE_FRONTIER_RAW_DIGEST_MISMATCH"):
-            _verify_failure_frontier_profile(event, nonce_splice)
+        with pytest.raises(ValueError):
+            _verify_failure_frontier_profile(event_artifact, nonce_splice)
     if sequence >= 5:
         event_id_splice = copy.deepcopy(artifacts)
         _replace_artifact_field(
@@ -1616,8 +1863,8 @@ def test_failed_frontier_profiles_accept_exact_stage_and_reject_future_evidence(
             "reservation_event_id",
             f"windows-fence-install-event-{OTHER_SHA}",
         )
-        with pytest.raises(ValueError, match="FAILURE_FRONTIER_RAW_DIGEST_MISMATCH"):
-            _verify_failure_frontier_profile(event, event_id_splice)
+        with pytest.raises(ValueError):
+            _verify_failure_frontier_profile(event_artifact, event_id_splice)
 
     equality_splice = copy.deepcopy(artifacts)
     equality_target = {
@@ -1633,7 +1880,7 @@ def test_failed_frontier_profiles_accept_exact_stage_and_reject_future_evidence(
         equality_splice, target_artifact, target_field, target_value
     )
     with pytest.raises(ValueError):
-        _verify_failure_frontier_profile(event, equality_splice)
+        _verify_failure_frontier_profile(event_artifact, equality_splice)
     if sequence >= 7:
         event_id_splice = copy.deepcopy(artifacts)
         _replace_artifact_field(
@@ -1642,8 +1889,8 @@ def test_failed_frontier_profiles_accept_exact_stage_and_reject_future_evidence(
             "restart_dispatched_event_id",
             f"windows-fence-install-event-{OTHER_SHA}",
         )
-        with pytest.raises(ValueError, match="FAILURE_FRONTIER_RAW_DIGEST_MISMATCH"):
-            _verify_failure_frontier_profile(event, event_id_splice)
+        with pytest.raises(ValueError):
+            _verify_failure_frontier_profile(event_artifact, event_id_splice)
 
 
 def test_startup_receipt_rejects_process_started_before_exact_scm_dispatch() -> None:
@@ -1652,6 +1899,79 @@ def test_startup_receipt_rejects_process_started_before_exact_scm_dispatch() -> 
     receipt["service_process_started_at_utc"] = "2026-08-05T00:00:34Z"
     with pytest.raises(ValueError, match="PROCESS_START_NOT_AFTER_BOUND_SCM_DISPATCH"):
         _verify_startup_dispatch_order(receipt)
+
+
+def _rebind_failure_sequence_4_to_restart_authorization(
+    artifacts: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    event_3 = _artifact_value(artifacts["event_3"])
+    event_3["restart_authorization_raw_sha256"] = _raw_sha(
+        artifacts["restart_authorization"]
+    )
+    artifacts["event_3"] = _artifact("install_event", event_3)
+    return _failed_event(4, artifacts)
+
+
+def test_failure_frontier_rejects_signature_core_id_and_canonical_raw_attacks() -> None:
+    invalid_signature = _failure_artifacts()
+    _replace_artifact_field(
+        invalid_signature,
+        "restart_authorization",
+        "signature",
+        "B" * 86 + "==",
+    )
+    event = _rebind_failure_sequence_4_to_restart_authorization(invalid_signature)
+    with pytest.raises(ValueError, match="SIGNATURE_MESSAGE_OR_BASE64_MISMATCH"):
+        _verify_failure_frontier_profile(event, invalid_signature)
+
+    forged_core_and_id = _failure_artifacts()
+    authorization = _artifact_value(forged_core_and_id["restart_authorization"])
+    authorization["authorization_core_sha256"] = OTHER_SHA
+    authorization["authorization_id"] = (
+        f"windows-fence-restart-authorization-{OTHER_SHA}"
+    )
+    forged_core_and_id["restart_authorization"]["raw"] = _canonical_raw(
+        authorization
+    )
+    event = _rebind_failure_sequence_4_to_restart_authorization(forged_core_and_id)
+    with pytest.raises(ValueError, match="CANONICALIZATION_CORE_OR_ID_MISMATCH"):
+        _verify_failure_frontier_profile(event, forged_core_and_id)
+
+    noncanonical = _failure_artifacts()
+    noncanonical["restart_authorization"]["raw"] = (
+        b" " + noncanonical["restart_authorization"]["raw"]
+    )
+    event = _rebind_failure_sequence_4_to_restart_authorization(noncanonical)
+    with pytest.raises(ValueError, match="CANONICALIZATION_CORE_OR_ID_MISMATCH"):
+        _verify_failure_frontier_profile(event, noncanonical)
+
+
+def test_strict_foundation_json_rejects_duplicate_float_nonfinite_and_non_nfc() -> None:
+    raw = _failure_artifacts()["restart_authorization"]["raw"]
+    variants = (
+        b'{"schema_version":"duplicate",' + raw[1:],
+        raw.replace(b'"maximum_restart_dispatches":1', b'"maximum_restart_dispatches":1.0'),
+        raw.replace(b'"maximum_restart_dispatches":1', b'"maximum_restart_dispatches":NaN'),
+        raw.replace(b"VnpyRpcService", "VnpyRpcServicee\u0301".encode()),
+    )
+    for variant in variants:
+        with pytest.raises((TypeError, ValueError)):
+            _artifact_value({"raw": variant})
+
+
+def test_terminal_failed_event_requires_exact_canonical_raw() -> None:
+    artifacts = _failure_artifacts()
+    event_artifact = _failed_event(4, artifacts)
+    duplicate = {
+        "raw": b'{"event_type":"FOUNDATION_VERIFIED",'
+        + event_artifact["raw"][1:]
+    }
+    with pytest.raises(ValueError, match="FOUNDATION_JSON_DUPLICATE_KEY"):
+        _verify_failure_frontier_profile(duplicate, artifacts)
+
+    noncanonical = {"raw": b" " + event_artifact["raw"]}
+    with pytest.raises(ValueError, match="CANONICALIZATION_CORE_OR_ID_MISMATCH"):
+        _verify_failure_frontier_profile(noncanonical, artifacts)
 
 
 def test_scm_dispatch_evidence_rejects_spliced_caller_trace_or_time() -> None:
@@ -1922,9 +2242,20 @@ def test_cross_artifact_chain_contract_freezes_all_reviewed_rejections() -> None
         expected_failure_rules
     )
     for rule in contract["failure_frontier_binding_rules"].values():
-        assert set(rule) == {"raw_digest_bindings", "equality_groups"}
+        assert set(rule) == {
+            "identity_and_signature_profile",
+            "raw_digest_bindings",
+            "equality_groups",
+        }
+        assert (
+            rule["identity_and_signature_profile"]
+            == "artifact_identity_and_signature_profile"
+        )
         assert rule["raw_digest_bindings"]
         assert set(rule["equality_groups"]) <= equality_ids
+    assert "terminal_FAILED_FROZEN_event" in contract[
+        "failure_frontier_identity_and_signature_scope"
+    ]
 
     assert len(contract["time_and_freshness_rules"]) == 12
     assert len(contract["identity_transition_rules"]) == 9

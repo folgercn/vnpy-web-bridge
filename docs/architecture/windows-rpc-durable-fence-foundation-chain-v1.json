@@ -599,30 +599,37 @@
   },
   "failure_frontier_binding_rules": {
     "base_event_chain": {
+      "identity_and_signature_profile": "artifact_identity_and_signature_profile",
       "raw_digest_bindings": ["events[*].install_manifest_raw_sha256=sha256(manifest.raw)", "events[*].preflight_receipt_raw_sha256=sha256(preflight.raw)", "events[*].fence_state_raw_sha256=sha256(state.raw)", "each_successor.previous_event_id=predecessor.event_id", "each_successor.previous_event_raw_sha256=sha256(predecessor.raw)"],
       "equality_groups": ["one_install_attempt", "one_service", "one_store_path", "one_store_id", "one_trusted_clock"]
     },
     "publish": {
+      "identity_and_signature_profile": "artifact_identity_and_signature_profile",
       "raw_digest_bindings": ["present_events.publish_receipt_raw_sha256=sha256(publish.raw)", "publish.install_manifest_raw_sha256=sha256(manifest.raw)", "publish.preflight_receipt_raw_sha256=sha256(preflight.raw)"],
       "equality_groups": ["one_bundle", "one_final_version_directory", "one_extension", "one_launcher", "one_assembly", "one_config", "one_publish_seal"]
     },
     "restart_authorization": {
+      "identity_and_signature_profile": "artifact_identity_and_signature_profile",
       "raw_digest_bindings": ["present_events.restart_authorization_raw_sha256=sha256(restart_authorization.raw)", "restart_authorization.install_manifest_raw_sha256=sha256(manifest.raw)", "restart_authorization.preflight_receipt_raw_sha256=sha256(preflight.raw)", "restart_authorization.publish_receipt_raw_sha256=sha256(publish.raw)", "restart_authorization.install_event_head_raw_sha256=sha256(events[1].raw)"],
       "equality_groups": ["one_host_boot", "one_old_service_process_id", "one_old_service_process_start", "one_restart_dispatch_nonce", "one_restart_operation"]
     },
     "service_config_transition_receipt": {
+      "identity_and_signature_profile": "artifact_identity_and_signature_profile",
       "raw_digest_bindings": ["present_events.service_config_transition_receipt_raw_sha256=sha256(service_config_transition_receipt.raw)", "service_config_transition_receipt.install_manifest_raw_sha256=sha256(manifest.raw)", "service_config_transition_receipt.preflight_receipt_raw_sha256=sha256(preflight.raw)", "service_config_transition_receipt.publish_receipt_raw_sha256=sha256(publish.raw)", "service_config_transition_receipt.restart_authorization_raw_sha256=sha256(restart_authorization.raw)", "service_config_transition_receipt.reservation_event_raw_sha256=sha256(events[2].raw)"],
       "equality_groups": ["one_preinstall_service_image_path", "one_preinstall_service_config", "one_safety_service_config", "one_service_image_path", "one_service_config", "one_service_config_transition_plan", "one_restart_dispatch_nonce", "one_restart_operation"]
     },
     "scm_dispatch_evidence": {
+      "identity_and_signature_profile": "artifact_identity_and_signature_profile",
       "raw_digest_bindings": ["present_events.scm_dispatch_evidence_raw_sha256=sha256(scm_dispatch_evidence.raw)", "scm_dispatch_evidence.install_manifest_raw_sha256=sha256(manifest.raw)", "scm_dispatch_evidence.restart_authorization_raw_sha256=sha256(restart_authorization.raw)", "scm_dispatch_evidence.reservation_event_raw_sha256=sha256(events[2].raw)", "scm_dispatch_evidence.service_config_transition_receipt_raw_sha256=sha256(service_config_transition_receipt.raw)"],
       "equality_groups": ["one_host_boot", "one_installer_principal", "one_installer_process_image", "one_restart_dispatch_nonce", "one_restart_operation"]
     },
     "startup_receipt": {
+      "identity_and_signature_profile": "artifact_identity_and_signature_profile",
       "raw_digest_bindings": ["present_events.startup_receipt_raw_sha256=sha256(startup_receipt.raw)", "startup_receipt.install_manifest_raw_sha256=sha256(manifest.raw)", "startup_receipt.restart_authorization_raw_sha256=sha256(restart_authorization.raw)", "startup_receipt.service_config_transition_receipt_raw_sha256=sha256(service_config_transition_receipt.raw)", "startup_receipt.scm_dispatch_evidence_raw_sha256=sha256(scm_dispatch_evidence.raw)", "startup_receipt.restart_dispatched_event_raw_sha256=sha256(events[4].raw)"],
       "equality_groups": ["one_host_boot", "one_scm_audit_trace", "one_scm_start_call_start", "one_scm_start_call_return", "one_scm_start_call_result", "one_new_service_process_id", "one_new_service_process_start", "one_restart_dispatch_nonce", "one_restart_operation"]
     }
   },
+  "failure_frontier_identity_and_signature_scope": "verify_exact_raw_canonical_core_id_and_signature_for_all_present_artifacts_all_completed_prefix_events_and_the_terminal_FAILED_FROZEN_event_before_any_binding_or_equality_rule",
   "failure_frontier_profiles": [
     {
       "failed_event_sequence": 2,
