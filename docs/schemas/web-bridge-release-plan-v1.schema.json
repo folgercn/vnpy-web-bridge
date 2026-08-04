@@ -1,0 +1,237 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vnpy-web-bridge:schema:web-bridge-release-plan-v1",
+  "title": "Web Bridge dependency-aware release plan v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "purpose",
+    "issue_number",
+    "plan_id",
+    "generated_at",
+    "source_commit_sha",
+    "planner_version",
+    "planner_image_digest",
+    "planner_config_sha256",
+    "ownership_manifest_sha256",
+    "changed_files_sha256",
+    "schema_compatibility",
+    "build",
+    "create",
+    "restart",
+    "preserve",
+    "block",
+    "decision",
+    "production_allowed",
+    "live_trading_authorized"
+  ],
+  "properties": {
+    "schema_version": {"const": "web_bridge_release_plan_v1"},
+    "purpose": {"const": "dependency_aware_release_plan"},
+    "issue_number": {"const": 267},
+    "plan_id": {"$ref": "#/$defs/planId"},
+    "generated_at": {"$ref": "#/$defs/dateTime"},
+    "source_commit_sha": {"$ref": "#/$defs/commit"},
+    "planner_version": {"$ref": "#/$defs/version"},
+    "planner_image_digest": {"$ref": "#/$defs/imageDigest"},
+    "planner_config_sha256": {"$ref": "#/$defs/sha256"},
+    "ownership_manifest_sha256": {"$ref": "#/$defs/sha256"},
+    "changed_files_sha256": {"$ref": "#/$defs/sha256"},
+    "schema_compatibility": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/schemaCompatibility"},
+      "uniqueItems": true
+    },
+    "build": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/buildAction"},
+      "uniqueItems": true
+    },
+    "create": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/createAction"},
+      "uniqueItems": true
+    },
+    "restart": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/restartAction"},
+      "uniqueItems": true
+    },
+    "preserve": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/preserveAction"},
+      "uniqueItems": true
+    },
+    "block": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/blockAction"},
+      "uniqueItems": true
+    },
+    "decision": {"enum": ["READY", "BLOCKED"]},
+    "production_allowed": {"const": false},
+    "live_trading_authorized": {"const": false}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"decision": {"const": "READY"}}},
+      "then": {
+        "properties": {
+          "block": {"maxItems": 0},
+          "schema_compatibility": {
+            "items": {
+              "allOf": [
+                {"$ref": "#/$defs/schemaCompatibility"},
+                {"properties": {"result": {"const": "compatible"}}}
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"decision": {"const": "BLOCKED"}}},
+      "then": {"properties": {"block": {"minItems": 1}}}
+    }
+  ],
+  "$defs": {
+    "serviceId": {"type": "string", "pattern": "^[a-z][a-z0-9-]{1,63}$"},
+    "planId": {"type": "string", "pattern": "^release-plan-(?!0{64}$)[0-9a-f]{64}$"},
+    "receiptId": {"type": "string", "pattern": "^safe-restart-(?!0{64}$)[0-9a-f]{64}$"},
+    "commit": {"type": "string", "pattern": "^(?!0{40}$)[0-9a-f]{40}$"},
+    "sha256": {"type": "string", "pattern": "^(?!0{64}$)[0-9a-f]{64}$"},
+    "imageDigest": {"type": "string", "pattern": "^sha256:(?!0{64}$)[0-9a-f]{64}$"},
+    "version": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$"},
+    "dateTime": {"type": "string", "format": "date-time"},
+    "schemaCompatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract_id", "producer_version", "consumer_version", "schema_sha256", "result", "evidence_sha256"],
+      "properties": {
+        "contract_id": {"type": "string", "pattern": "^[A-Za-z0-9._-]{3,128}$"},
+        "producer_version": {"$ref": "#/$defs/version"},
+        "consumer_version": {"$ref": "#/$defs/version"},
+        "schema_sha256": {"$ref": "#/$defs/sha256"},
+        "result": {"enum": ["compatible", "incompatible", "unknown"]},
+        "evidence_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "buildAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["unit", "version", "image_repository", "image_digest", "containerfile_sha256", "build_context_sha256", "config_sha256", "reason"],
+      "properties": {
+        "unit": {"$ref": "#/$defs/serviceId"},
+        "version": {"$ref": "#/$defs/version"},
+        "image_repository": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9./_-]{2,255}$"},
+        "image_digest": {"$ref": "#/$defs/imageDigest"},
+        "containerfile_sha256": {"$ref": "#/$defs/sha256"},
+        "build_context_sha256": {"$ref": "#/$defs/sha256"},
+        "config_sha256": {"$ref": "#/$defs/sha256"},
+        "reason": {"type": "string", "minLength": 1, "maxLength": 512}
+      }
+    },
+    "createAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["unit", "version", "image_digest", "config_sha256", "before_absence_evidence_sha256", "reason"],
+      "properties": {
+        "unit": {"$ref": "#/$defs/serviceId"},
+        "version": {"$ref": "#/$defs/version"},
+        "image_digest": {"$ref": "#/$defs/imageDigest"},
+        "config_sha256": {"$ref": "#/$defs/sha256"},
+        "before_absence_evidence_sha256": {"$ref": "#/$defs/sha256"},
+        "reason": {"type": "string", "minLength": 1, "maxLength": 512}
+      },
+      "not": {"properties": {"unit": {"const": "execution-orchestrator"}}, "required": ["unit"]}
+    },
+    "safeRestartReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "receipt_id", "plan_id", "source_commit_sha", "unit", "issued_at", "expires_at", "state_version", "state_sha256", "safe_to_restart", "active_orders", "unknown_outcome", "reconcile_required", "checkpoint_durable", "evidence_sha256"],
+      "properties": {
+        "schema_version": {"const": "web_bridge_safe_restart_receipt_v1"},
+        "receipt_id": {"$ref": "#/$defs/receiptId"},
+        "plan_id": {"$ref": "#/$defs/planId"},
+        "source_commit_sha": {"$ref": "#/$defs/commit"},
+        "unit": {"$ref": "#/$defs/serviceId"},
+        "issued_at": {"$ref": "#/$defs/dateTime"},
+        "expires_at": {"$ref": "#/$defs/dateTime"},
+        "state_version": {"$ref": "#/$defs/version"},
+        "state_sha256": {"$ref": "#/$defs/sha256"},
+        "safe_to_restart": {"const": true},
+        "active_orders": {"const": 0},
+        "unknown_outcome": {"const": false},
+        "reconcile_required": {"const": false},
+        "checkpoint_durable": {"const": true},
+        "evidence_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "restartAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["unit", "from_version", "to_version", "from_image_digest", "to_image_digest", "from_config_sha256", "to_config_sha256", "safety_gate", "safe_restart_receipt", "reason"],
+      "properties": {
+        "unit": {"$ref": "#/$defs/serviceId"},
+        "from_version": {"$ref": "#/$defs/version"},
+        "to_version": {"$ref": "#/$defs/version"},
+        "from_image_digest": {"$ref": "#/$defs/imageDigest"},
+        "to_image_digest": {"$ref": "#/$defs/imageDigest"},
+        "from_config_sha256": {"$ref": "#/$defs/sha256"},
+        "to_config_sha256": {"$ref": "#/$defs/sha256"},
+        "safety_gate": {"enum": ["not_required", "required_verified"]},
+        "safe_restart_receipt": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/safeRestartReceipt"}]},
+        "reason": {"type": "string", "minLength": 1, "maxLength": 512}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"unit": {"const": "execution-orchestrator"}}},
+          "then": {
+            "properties": {
+              "safety_gate": {"const": "required_verified"},
+              "safe_restart_receipt": {
+                "allOf": [
+                  {"$ref": "#/$defs/safeRestartReceipt"},
+                  {"properties": {"unit": {"const": "execution-orchestrator"}}}
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {"properties": {"safety_gate": {"const": "not_required"}}},
+          "then": {"properties": {"safe_restart_receipt": {"type": "null"}}}
+        },
+        {
+          "if": {"properties": {"safety_gate": {"const": "required_verified"}}},
+          "then": {"properties": {"safe_restart_receipt": {"$ref": "#/$defs/safeRestartReceipt"}}}
+        }
+      ]
+    },
+    "preserveAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["unit", "version", "image_digest", "config_sha256", "identity_must_remain_unchanged", "reason"],
+      "properties": {
+        "unit": {"$ref": "#/$defs/serviceId"},
+        "version": {"$ref": "#/$defs/version"},
+        "image_digest": {"$ref": "#/$defs/imageDigest"},
+        "config_sha256": {"$ref": "#/$defs/sha256"},
+        "identity_must_remain_unchanged": {"const": true},
+        "reason": {"type": "string", "minLength": 1, "maxLength": 512}
+      }
+    },
+    "blockAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["unit", "code", "reason", "evidence_sha256", "manual_override_allowed"],
+      "properties": {
+        "unit": {"$ref": "#/$defs/serviceId"},
+        "code": {"enum": ["unknown_path", "unknown_dependency", "schema_incompatible", "missing_digest", "missing_safe_restart_receipt", "active_orders", "unknown_outcome", "reconcile_required", "checkpoint_not_durable", "config_incompatible"]},
+        "reason": {"type": "string", "minLength": 1, "maxLength": 512},
+        "evidence_sha256": {"$ref": "#/$defs/sha256"},
+        "manual_override_allowed": {"const": false}
+      }
+    }
+  }
+}

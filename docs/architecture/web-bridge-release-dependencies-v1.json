@@ -1,0 +1,719 @@
+{
+  "schema_version": "web_bridge_release_dependencies_v1",
+  "issue": 267,
+  "status": "phase_0b_contract_only_not_activated",
+  "ownership_contract": "docs/architecture/web-bridge-deployment-ownership-v1.json",
+  "safety": {
+    "classifier_consumption_allowed": false,
+    "production_cd_changed": false,
+    "precise_deployment_claim_allowed": false,
+    "automatic_deploy_allowed": false,
+    "production_allowed": false,
+    "live_trading_authorized": false,
+    "countable_forward": false,
+    "unknown_path": "block",
+    "unknown_dependency": "block",
+    "ambiguous_match": "block",
+    "missing_closure_evidence": "block"
+  },
+  "classification_contract": {
+    "path_format": "repository_relative_posix",
+    "case_sensitive": true,
+    "directory_suffix": "/**",
+    "specificity_order": ["exact", "glob", "longest_prefix"],
+    "all_candidate_rules_are_evaluated": true,
+    "only_equally_highest_specificity_rules_are_selected": true,
+    "selected_build_and_verification_units_are_unioned": true,
+    "deployment_disposition_precedence": [
+      "unknown_block",
+      "infra_manual",
+      "contract_only",
+      "build_only",
+      "docs_none"
+    ],
+    "equal_specificity_cross_unit_overlap_requires_declared_joint_dependency": true,
+    "empty_change_set": "docs_none",
+    "output_fields": [
+      "candidate_rule_ids",
+      "selected_rule_ids",
+      "classification",
+      "build_units",
+      "verification_units",
+      "deploy_units",
+      "preserve_units",
+      "manual_approval_required",
+      "blocked_reasons",
+      "closure_evidence"
+    ],
+    "resolver_tokens": {
+      "closure_derived_build_units": "Union of build units proven to copy or import the changed path.",
+      "closure_derived_context_units": "Every existing build unit whose build context and ignore evaluation can be changed by this path; unresolved contexts block.",
+      "closure_derived_c_fast_t1_units": "Subset of existing c-fast-t1 build units whose exact Containerfile or base-image lineage changed.",
+      "closure_derived_exact_consumers": "Exact schema or contract consumers proven by COPY, import, file-open and verifier manifests.",
+      "closure_derived_database_clients": "Exact database clients proven to read or write the changed schema objects."
+    }
+  },
+  "classifications": {
+    "unknown_block": {
+      "automatic_build": false,
+      "automatic_deploy": false,
+      "manual_approval_required": true,
+      "meaning": "No reviewed ownership or dependency rule exists; update this contract before release."
+    },
+    "infra_manual": {
+      "automatic_build": false,
+      "automatic_deploy": false,
+      "manual_approval_required": true,
+      "meaning": "Infrastructure or release-control change; CI may validate listed units but no production compose action is authorized."
+    },
+    "contract_only": {
+      "automatic_build": false,
+      "automatic_deploy": false,
+      "manual_approval_required": false,
+      "meaning": "Architecture or classifier contract validation only; changing the contract does not activate it."
+    },
+    "build_only": {
+      "automatic_build": true,
+      "automatic_deploy": false,
+      "manual_approval_required": false,
+      "meaning": "Build and test affected immutable artifacts without changing a running service."
+    },
+    "docs_none": {
+      "automatic_build": false,
+      "automatic_deploy": false,
+      "manual_approval_required": false,
+      "meaning": "Documentation-only after higher-priority runtime schema, operation template, and contract rules have been excluded."
+    }
+  },
+  "build_units": [
+    {
+      "id": "legacy-web-bridge-app",
+      "implementation_status": "current_monolith",
+      "build_file": "Dockerfile",
+      "context": ".",
+      "deploy_units": ["web-bridge"],
+      "automatic_deploy_allowed": false,
+      "closure_mode": "parse_copy_plus_python_typescript_imports"
+    },
+    {
+      "id": "frontend",
+      "implementation_status": "planned_phase_1_build_file_absent",
+      "build_file": "future:frontend/Containerfile",
+      "context": ".",
+      "deploy_units": ["frontend"],
+      "automatic_deploy_allowed": false,
+      "closure_mode": "parse_copy_plus_typescript_imports"
+    },
+    {
+      "id": "control-api",
+      "implementation_status": "planned_phase_2_build_file_absent",
+      "build_file": "future:backend/Containerfile.control-api",
+      "context": ".",
+      "deploy_units": ["control-api"],
+      "automatic_deploy_allowed": false,
+      "closure_mode": "parse_copy_plus_python_imports"
+    },
+    {
+      "id": "execution-orchestrator",
+      "implementation_status": "planned_phase_2_build_file_absent",
+      "build_file": "future:backend/Containerfile.execution-orchestrator",
+      "context": ".",
+      "deploy_units": ["execution-orchestrator"],
+      "automatic_deploy_allowed": false,
+      "closure_mode": "parse_copy_plus_python_imports"
+    },
+    {
+      "id": "map-producer",
+      "implementation_status": "planned_phase_3_build_file_absent",
+      "build_file": "future:scripts/map/Containerfile",
+      "context": ".",
+      "deploy_units": ["map-producer"],
+      "automatic_deploy_allowed": false,
+      "closure_mode": "parse_copy_plus_python_imports"
+    },
+    {
+      "id": "c-fast-producer",
+      "implementation_status": "planned_phase_3_build_file_absent",
+      "build_file": "future:scripts/c_fast_producer/Containerfile",
+      "context": ".",
+      "deploy_units": ["c-fast-producer"],
+      "automatic_deploy_allowed": false,
+      "closure_mode": "parse_copy_plus_python_imports"
+    },
+    {
+      "id": "signing-authority",
+      "implementation_status": "planned_phase_4_manual_or_offline",
+      "build_file": "future:scripts/signing/Containerfile-or-offline-package-manifest",
+      "context": ".",
+      "deploy_units": ["signing-authority"],
+      "automatic_deploy_allowed": false,
+      "closure_mode": "explicit_offline_package_plus_python_imports"
+    },
+    {
+      "id": "artifact-registry",
+      "implementation_status": "planned_phase_4_build_file_absent",
+      "build_file": "future:backend/Containerfile.artifact-registry",
+      "context": ".",
+      "deploy_units": ["artifact-registry"],
+      "automatic_deploy_allowed": false,
+      "closure_mode": "parse_copy_plus_python_imports"
+    },
+    {
+      "id": "market-data-worker",
+      "implementation_status": "planned_phase_5_build_file_absent",
+      "build_file": "future:backend/Containerfile.market-data-worker",
+      "context": ".",
+      "deploy_units": ["market-data-worker"],
+      "automatic_deploy_allowed": false,
+      "closure_mode": "parse_copy_plus_python_imports"
+    },
+    {
+      "id": "execution-quality-worker",
+      "implementation_status": "planned_phase_5_build_file_absent",
+      "build_file": "future:backend/Containerfile.execution-quality-worker",
+      "context": ".",
+      "deploy_units": ["execution-quality-worker"],
+      "automatic_deploy_allowed": false,
+      "closure_mode": "parse_copy_plus_python_imports"
+    },
+    {
+      "id": "monitor-worker",
+      "implementation_status": "planned_phase_5_build_file_absent",
+      "build_file": "future:backend/Containerfile.monitor-worker",
+      "context": ".",
+      "deploy_units": ["monitor-worker"],
+      "automatic_deploy_allowed": false,
+      "closure_mode": "parse_copy_plus_python_imports"
+    },
+    {
+      "id": "c-fast-t1-runtime",
+      "implementation_status": "existing_build_only",
+      "build_file": "scripts/c_fast_t1/Containerfile",
+      "context": ".",
+      "deploy_units": [],
+      "automatic_deploy_allowed": false,
+      "closure_mode": "parse_copy_plus_python_imports"
+    },
+    {
+      "id": "c-fast-t1-one-shot",
+      "implementation_status": "existing_build_only",
+      "build_file": "scripts/c_fast_t1/Containerfile.one-shot",
+      "context": ".",
+      "deploy_units": [],
+      "automatic_deploy_allowed": false,
+      "closure_mode": "parse_copy_plus_python_imports"
+    },
+    {
+      "id": "c-fast-t1-query-v3",
+      "implementation_status": "existing_build_only",
+      "build_file": "scripts/c_fast_t1/Containerfile.query-v3",
+      "context": ".",
+      "deploy_units": [],
+      "automatic_deploy_allowed": false,
+      "closure_mode": "parse_copy_plus_python_imports"
+    },
+    {
+      "id": "c-fast-t1-query-v4",
+      "implementation_status": "existing_build_only",
+      "build_file": "scripts/c_fast_t1/Containerfile.query-v4",
+      "context": ".",
+      "deploy_units": [],
+      "automatic_deploy_allowed": false,
+      "closure_mode": "parse_copy_plus_python_imports"
+    },
+    {
+      "id": "c-fast-t1-query-v5",
+      "implementation_status": "existing_build_only_layer_on_v4",
+      "build_file": "scripts/c_fast_t1/Containerfile.query-v5",
+      "context": ".",
+      "deploy_units": [],
+      "automatic_deploy_allowed": false,
+      "closure_mode": "parse_copy_plus_python_imports_and_base_image_lineage"
+    },
+    {
+      "id": "c-fast-t1-readiness-v4",
+      "implementation_status": "existing_build_only",
+      "build_file": "scripts/c_fast_t1/Containerfile.readiness-v4",
+      "context": ".",
+      "deploy_units": [],
+      "automatic_deploy_allowed": false,
+      "closure_mode": "parse_copy_plus_python_imports"
+    }
+  ],
+  "deploy_units": [
+    {"id": "frontend", "phase": "phase_1", "implementation_status": "planned", "automatic_deploy_allowed": false, "safe_restart_contract": "independent_no_dependency_recreate"},
+    {"id": "web-bridge", "phase": "current_and_phase_1_compatibility", "implementation_status": "current", "automatic_deploy_allowed": false, "safe_restart_contract": "manual_realtime_execution_preflight_required"},
+    {"id": "control-api", "phase": "phase_2", "implementation_status": "planned", "automatic_deploy_allowed": false, "safe_restart_contract": "independent_after_execution_split"},
+    {"id": "execution-orchestrator", "phase": "phase_2", "implementation_status": "planned", "automatic_deploy_allowed": false, "safe_restart_contract": "atomic_drain_short_ttl_receipt_recheck_fencing_reconcile"},
+    {"id": "map-producer", "phase": "phase_3", "implementation_status": "planned_batch_job", "automatic_deploy_allowed": false, "safe_restart_contract": "immutable_run_id_and_single_candidate_writer"},
+    {"id": "c-fast-producer", "phase": "phase_3", "implementation_status": "planned_batch_job", "automatic_deploy_allowed": false, "safe_restart_contract": "immutable_run_id_and_single_candidate_writer"},
+    {"id": "signing-authority", "phase": "phase_4", "implementation_status": "planned_manual_or_offline", "automatic_deploy_allowed": false, "safe_restart_contract": "independent_signer_ceremony_and_trust_window"},
+    {"id": "artifact-registry", "phase": "phase_4", "implementation_status": "planned", "automatic_deploy_allowed": false, "safe_restart_contract": "single_writer_drain_and_receipt_high_water_mark"},
+    {"id": "market-data-worker", "phase": "phase_5", "implementation_status": "planned", "automatic_deploy_allowed": false, "safe_restart_contract": "spool_drain_checkpoint_and_single_writer"},
+    {"id": "execution-quality-worker", "phase": "phase_5", "implementation_status": "planned", "automatic_deploy_allowed": false, "safe_restart_contract": "journal_checkpoint_and_single_consumer"},
+    {"id": "monitor-worker", "phase": "phase_5", "implementation_status": "planned", "automatic_deploy_allowed": false, "safe_restart_contract": "delivery_checkpoint_and_dedupe_preserved"},
+    {"id": "questdb", "phase": "current", "implementation_status": "current", "automatic_deploy_allowed": false, "safe_restart_contract": "database_maintenance_after_writer_drain"},
+    {"id": "postgres", "phase": "current", "implementation_status": "current", "automatic_deploy_allowed": false, "safe_restart_contract": "database_maintenance_with_backup_and_compatibility_plan"},
+    {"id": "windows-ctp-gateway", "phase": "external", "implementation_status": "current_external", "automatic_deploy_allowed": false, "safe_restart_contract": "explicit_windows_operator_authorization_then_execution_reconcile"}
+  ],
+  "path_rules": [
+    {
+      "id": "release-contract-self",
+      "match": {"exact": ["docs/architecture/web-bridge-release-dependencies-v1.json", "docs/architecture/web-bridge-deployment-ownership-v1.json"]},
+      "classification": "contract_only",
+      "build_units": [],
+      "verification_units": ["release_dependency_contract", "architecture_ownership_contract"],
+      "deploy_units": []
+    },
+    {
+      "id": "release-workflows",
+      "match": {"prefix": [".github/workflows/"]},
+      "classification": "infra_manual",
+      "build_units": [],
+      "verification_units": ["workflow_contract", "changed_path_classifier", "ci_gate_contract"],
+      "deploy_units": []
+    },
+    {
+      "id": "repository-process-metadata",
+      "match": {"prefix": [".github/"], "exact": [".gitignore"]},
+      "classification": "contract_only",
+      "build_units": [],
+      "verification_units": ["repository_process_contract"],
+      "deploy_units": []
+    },
+    {
+      "id": "deployment-topology",
+      "match": {"prefix": ["deployments/"]},
+      "classification": "infra_manual",
+      "build_units": [],
+      "verification_units": ["compose_config", "deployment_topology", "secret_path_redaction"],
+      "deploy_units": [],
+      "manual_scope_resolution": "derive affected services from compose overlays; unknown service blocks"
+    },
+    {
+      "id": "deployment-control-scripts",
+      "match": {"exact": ["scripts/deploy.sh", "scripts/install-watchdog.sh", "scripts/watchdog.py"]},
+      "classification": "infra_manual",
+      "build_units": [],
+      "verification_units": ["deploy_script_contract", "watchdog_contract"],
+      "deploy_units": []
+    },
+    {
+      "id": "root-containerfile-contract",
+      "match": {"exact": ["Dockerfile"]},
+      "classification": "infra_manual",
+      "build_units": ["legacy-web-bridge-app"],
+      "verification_units": ["container_copy_closure", "production_image_smoke"],
+      "deploy_units": []
+    },
+    {
+      "id": "root-dockerignore-contract",
+      "match": {"exact": [".dockerignore"]},
+      "classification": "infra_manual",
+      "build_units": ["closure_derived_context_units"],
+      "verification_units": ["container_copy_closure", "build_context_closure", "production_image_smoke"],
+      "deploy_units": [],
+      "manual_scope_resolution": "recompute every root-context build unit; any absent or unresolved build file blocks"
+    },
+    {
+      "id": "frontend-source",
+      "match": {"prefix": ["frontend/"]},
+      "classification": "build_only",
+      "build_units": ["frontend"],
+      "pre_activation_build_units": ["legacy-web-bridge-app"],
+      "verification_units": ["frontend_check", "frontend_oci_build"],
+      "deploy_units": [],
+      "activation_requirement": "Phase 1 frontend image, compose split, classifier tests and frontend-only M2 evidence"
+    },
+    {
+      "id": "shared-trading-session-profile",
+      "match": {"exact": ["shared/trading_session_profiles.json"]},
+      "classification": "build_only",
+      "build_units": ["frontend", "control-api"],
+      "pre_activation_build_units": ["legacy-web-bridge-app"],
+      "verification_units": ["frontend_check", "backend_calendar_contract", "joint_contract_compatibility"],
+      "deploy_units": [],
+      "joint_dependency": "trading-session-profile"
+    },
+    {
+      "id": "shared-future-contracts",
+      "match": {"prefix": ["shared/"]},
+      "classification": "infra_manual",
+      "build_units": [],
+      "verification_units": ["shared_contract_dependency_resolution"],
+      "deploy_units": [],
+      "manual_scope_resolution": "resolve exact import consumers; broad shared changes cannot be assigned automatically"
+    },
+    {
+      "id": "control-api-source",
+      "match": {"prefix": ["backend/app/api/", "backend/app/core/", "backend/app/schemas/", "backend/app/ws/"]},
+      "classification": "build_only",
+      "build_units": ["control-api"],
+      "pre_activation_build_units": ["legacy-web-bridge-app"],
+      "verification_units": ["backend_api_tests", "python_import_closure", "api_contract_compatibility"],
+      "deploy_units": []
+    },
+    {
+      "id": "execution-source",
+      "match": {"exact": ["backend/app/services/commodity_simnow.py", "backend/app/services/manual_execution_permit.py", "backend/app/services/risk_service.py", "backend/app/services/trade_service.py", "backend/app/services/vnpy_rpc_service.py"]},
+      "classification": "infra_manual",
+      "build_units": ["execution-orchestrator"],
+      "pre_activation_build_units": ["legacy-web-bridge-app"],
+      "verification_units": ["execution_tests", "durable_state_compatibility", "fencing_and_safe_restart_contract"],
+      "deploy_units": [],
+      "manual_scope_resolution": "execution changes require safe-to-restart release plan and explicit approval"
+    },
+    {
+      "id": "execution-quality-source",
+      "match": {"glob": ["backend/app/services/commodity_c_fast_execution_quality_*.py"]},
+      "classification": "build_only",
+      "build_units": ["execution-quality-worker"],
+      "pre_activation_build_units": ["legacy-web-bridge-app"],
+      "verification_units": ["execution_quality_tests", "journal_and_evidence_compatibility"],
+      "deploy_units": []
+    },
+    {
+      "id": "market-data-source",
+      "match": {"exact": ["backend/app/services/market_data_service.py", "backend/app/services/tick_persistence.py"]},
+      "classification": "build_only",
+      "build_units": ["market-data-worker"],
+      "pre_activation_build_units": ["legacy-web-bridge-app"],
+      "verification_units": ["market_data_tests", "spool_replay_compatibility"],
+      "deploy_units": []
+    },
+    {
+      "id": "monitor-source",
+      "match": {"exact": ["backend/app/services/alert_service.py", "backend/app/services/monitoring_service.py", "backend/app/services/telegram_service.py"]},
+      "classification": "build_only",
+      "build_units": ["monitor-worker"],
+      "pre_activation_build_units": ["legacy-web-bridge-app"],
+      "verification_units": ["monitor_tests", "alert_dedupe_contract"],
+      "deploy_units": []
+    },
+    {
+      "id": "backend-runtime-fallback",
+      "match": {"prefix": ["backend/"]},
+      "classification": "infra_manual",
+      "build_units": ["legacy-web-bridge-app"],
+      "verification_units": ["backend_tests", "python_import_closure", "ownership_resolution_required"],
+      "deploy_units": [],
+      "manual_scope_resolution": "fallback path may cross future service boundaries"
+    },
+    {
+      "id": "legacy-root-runtime-inputs",
+      "match": {"exact": ["requirements.txt", "backend/requirements.txt", "test_rpc_readonly.py", "test_rpc_trade_flow.py"]},
+      "classification": "infra_manual",
+      "build_units": ["legacy-web-bridge-app"],
+      "verification_units": ["production_image_smoke", "python_dependency_compatibility"],
+      "deploy_units": []
+    },
+    {
+      "id": "c-fast-containerfiles",
+      "match": {"glob": ["scripts/c_fast_t1/Containerfile*"]},
+      "classification": "build_only",
+      "build_units": ["closure_derived_c_fast_t1_units"],
+      "verification_units": ["container_copy_closure", "c_fast_oci_contracts"],
+      "deploy_units": []
+    },
+    {
+      "id": "scripts-runtime",
+      "match": {"prefix": ["scripts/"]},
+      "classification": "infra_manual",
+      "build_units": ["closure_derived_build_units"],
+      "verification_units": ["python_import_closure", "container_copy_closure", "script_contract_tests"],
+      "deploy_units": [],
+      "manual_scope_resolution": "scripts contain producer, verifier, signer, release and execution-adjacent code; exact closure is mandatory"
+    },
+    {
+      "id": "runtime-json-schemas",
+      "match": {"prefix": ["docs/schemas/"]},
+      "classification": "build_only",
+      "build_units": ["closure_derived_build_units"],
+      "verification_units": ["json_schema_validation", "container_copy_closure", "python_typescript_import_closure", "artifact_compatibility"],
+      "deploy_units": [],
+      "joint_dependency": "artifact-contract"
+    },
+    {
+      "id": "runtime-operation-contracts",
+      "match": {"prefix": ["docs/operations/"]},
+      "classification": "build_only",
+      "build_units": ["closure_derived_build_units"],
+      "verification_units": ["operation_template_consumers", "container_copy_closure"],
+      "deploy_units": [],
+      "joint_dependency": "operation-contract"
+    },
+    {
+      "id": "architecture-and-process-docs",
+      "match": {"prefix": ["docs/architecture/", "docs/development/", "docs/process/", "docs/research/"]},
+      "classification": "docs_none",
+      "build_units": [],
+      "verification_units": ["markdown_links"],
+      "deploy_units": []
+    },
+    {
+      "id": "root-readme",
+      "match": {"exact": ["README.md"]},
+      "classification": "docs_none",
+      "build_units": [],
+      "verification_units": ["markdown_links"],
+      "deploy_units": []
+    },
+    {
+      "id": "documentation-fallback",
+      "match": {"prefix": ["docs/"]},
+      "classification": "docs_none",
+      "build_units": [],
+      "verification_units": ["markdown_links", "documentation_runtime_reference_exclusion"],
+      "deploy_units": []
+    }
+  ],
+  "joint_dependencies": [
+    {
+      "id": "trading-session-profile",
+      "paths": ["shared/trading_session_profiles.json"],
+      "build_units": ["frontend", "control-api"],
+      "pre_activation_build_units": ["legacy-web-bridge-app"],
+      "compatibility": "frontend and API must accept the same profile schema and values"
+    },
+    {
+      "id": "api-contract",
+      "paths": ["future:shared/api-contracts/**", "backend/app/schemas/**"],
+      "build_units": ["frontend", "control-api"],
+      "compatibility": "mixed-version REST and WebSocket compatibility window required"
+    },
+    {
+      "id": "execution-contract",
+      "paths": ["future:shared/execution-contracts/**"],
+      "build_units": ["control-api", "execution-orchestrator"],
+      "compatibility": "typed commands require expected version, idempotency and N-1 replay fixtures"
+    },
+    {
+      "id": "artifact-contract",
+      "paths": ["docs/schemas/**", "future:shared/artifact-contracts/**"],
+      "build_units": ["closure_derived_exact_consumers"],
+      "compatibility": "schema version, canonical bytes, hashes, lineage, trust pins and historical verifier results must remain compatible"
+    },
+    {
+      "id": "operation-contract",
+      "paths": ["docs/operations/**"],
+      "build_units": ["closure_derived_exact_consumers"],
+      "compatibility": "operation templates must resolve every consuming image or remain blocked"
+    },
+    {
+      "id": "database-schema",
+      "paths": ["future:backend/migrations/**"],
+      "build_units": ["closure_derived_database_clients"],
+      "deploy_units": [],
+      "classification": "infra_manual",
+      "compatibility": "expand-migrate-contract; N-1 reader and rollback or roll-forward evidence required"
+    },
+    {
+      "id": "compose-topology",
+      "paths": ["deployments/**"],
+      "build_units": [],
+      "deploy_units": [],
+      "classification": "infra_manual",
+      "compatibility": "resolve every changed service and prove preserve/restart list before any operator action"
+    }
+  ],
+  "closure_requirements": {
+    "container_copy": {
+      "required": true,
+      "containerfile_patterns": ["Dockerfile", "**/Dockerfile*", "**/Containerfile*"],
+      "requirements": [
+        "parse every COPY and ADD source after Docker ignore evaluation",
+        "track named and numeric multi-stage COPY lineage",
+        "map every repository source to each consuming build unit",
+        "recompute closure when a build file, ignore file or build context changes",
+        "block on wildcard expansion drift, missing source, remote ADD, generated untracked input or unresolved build argument",
+        "verify the built OCI inventory matches the declared closure"
+      ]
+    },
+    "python_import": {
+      "required": true,
+      "roots": ["backend/", "scripts/"],
+      "requirements": [
+        "resolve repository-local imports transitively from each entrypoint",
+        "record optional and dynamic imports with explicit allowlisted manifests",
+        "include package data, JSON schemas and files opened through repository-relative paths",
+        "block when one source is imported by units not present in the release plan",
+        "test import closure inside the built image"
+      ]
+    },
+    "typescript_import": {
+      "required": true,
+      "roots": ["frontend/src/", "frontend/scripts/", "frontend/vite.config.ts"],
+      "requirements": [
+        "resolve TypeScript, Vue, CSS and JSON imports transitively",
+        "include Vite public assets and HTML entrypoints",
+        "include shared/trading_session_profiles.json",
+        "treat package.json and package-lock.json as frontend build inputs",
+        "block unresolved aliases, generated assets or files outside the declared build context"
+      ]
+    },
+    "shared_contract": {
+      "required": true,
+      "requirements": [
+        "each shared path has an explicit consumer set",
+        "a shared change unions all consumer build and verification units",
+        "contract compatibility is proven before any consumer deployment",
+        "unknown shared path is infra_manual and cannot auto-deploy"
+      ]
+    }
+  },
+  "service_observability_contract": {
+    "implementation_status": "planned_not_implemented_for_split_units",
+    "version_required_fields": [
+      "service_id",
+      "source_revision",
+      "image_reference",
+      "image_digest",
+      "build_created_at_utc",
+      "config_hash",
+      "contract_versions",
+      "database_schema_versions",
+      "runtime_mode",
+      "production_allowed",
+      "live_trading_authorized",
+      "countable_forward"
+    ],
+    "health_required_fields": [
+      "service_id",
+      "status",
+      "checked_at_utc",
+      "process_started_at_utc",
+      "dependencies",
+      "last_error_code"
+    ],
+    "readiness_required_fields": [
+      "service_id",
+      "ready",
+      "checked_at_utc",
+      "version_compatible",
+      "config_loaded",
+      "dependencies_ready",
+      "state_recovered",
+      "blockers"
+    ],
+    "metrics_required_fields": [
+      "service_info",
+      "process_start_time_seconds",
+      "health_status",
+      "readiness_status",
+      "request_or_job_total",
+      "error_total",
+      "dependency_failure_total"
+    ],
+    "execution_additional_fields": [
+      "leader_epoch",
+      "fencing_token_hash",
+      "lease_expires_at_utc",
+      "plan_state",
+      "active_order_count",
+      "unknown_outcome_count",
+      "reconcile_required",
+      "safe_to_restart",
+      "safe_to_restart_receipt_hash"
+    ],
+    "artifact_registry_additional_fields": [
+      "writer_identity",
+      "receipt_high_water_mark",
+      "lineage_head_hash",
+      "pending_consume_count",
+      "pending_revoke_count"
+    ],
+    "worker_additional_fields": [
+      "worker_generation",
+      "queue_depth",
+      "checkpoint_or_watermark",
+      "oldest_pending_age_seconds",
+      "last_success_at_utc"
+    ],
+    "security": {
+      "secret_values": "forbidden",
+      "account_plaintext": "forbidden",
+      "private_paths": "masked_or_hashed_only",
+      "fencing_token_plaintext": "forbidden",
+      "authorization_payload": "metadata_and_hash_only"
+    }
+  },
+  "release_plan_contract": {
+    "implementation_status": "planned_not_consumed_by_cd",
+    "required_fields": [
+      "source_revision",
+      "changed_paths",
+      "candidate_rule_ids",
+      "selected_rule_ids",
+      "closure_evidence_digest",
+      "build_units",
+      "build_digests",
+      "verification_units",
+      "deploy_units",
+      "create_units",
+      "restart_units",
+      "preserve_units",
+      "blocked_reasons",
+      "manual_approval_required",
+      "config_hashes",
+      "contract_compatibility",
+      "rollback_digests"
+    ],
+    "activation_gates": [
+      "machine validator covers every tracked repository path",
+      "all COPY and import closure tests pass",
+      "future build files and deploy units exist before they can be selected",
+      "unknown and ambiguous paths block",
+      "infra changes never infer an automatic deploy",
+      "frontend-only and control-api-only M2 no-restart evidence exists",
+      "execution deploy is separately guarded by drain, short-TTL receipt, fencing and reconciliation",
+      "generic create actions reject execution-orchestrator; Phase 2 must define and validate a dedicated legacy-owner-revocation and downstream-fencing cutover receipt before first start",
+      "semantic validator rejects duplicate or conflicting unit actions and requires complete dependency closure",
+      "semantic validator binds release plan, action set, service evidence and safe-restart receipt hashes",
+      "semantic validator compares preserve identities byte-for-byte and proves restart identity transition",
+      "semantic validator verifies receipt unit, source commit, plan id, issued-at and expiry against the decision time",
+      "semantic validator verifies rollback state version readability, high-water binding, positive fencing and receipt freshness",
+      "PR update comment gate runs from pull_request_target against the trusted base revision and is configured as a required repository check",
+      "explicit ADR and PR approval activates classifier consumption"
+    ]
+  },
+  "semantic_validation_contract": {
+    "schema_validation_alone_is_sufficient": false,
+    "implementation_status": "required_before_classifier_or_cd_activation",
+    "failure_mode": "block_without_manual_override",
+    "required_cross_document_bindings": [
+      "release_plan source commit and canonical changed-file set",
+      "every selected build, create, restart and preserve unit exactly once",
+      "deployment evidence service set equals release plan create, restart and preserve set",
+      "service plan_action_sha256 equals canonical release-plan action bytes",
+      "execution safe-restart receipt equals the plan-bound receipt and remains unexpired",
+      "rollback source plan and deployment evidence raw digests",
+      "rollback state high-water, state schema readability, leader epoch and fencing token"
+    ],
+    "required_identity_comparisons": [
+      "preserve before and after identities are byte-identical",
+      "create before identity is absent and after identity is present",
+      "restart before and after identities differ and after.started_at is later",
+      "restart container, pid/restart-count or runtime generation proves a real transition"
+    ],
+    "required_time_checks": [
+      "receipt issued_at is not after the plan decision time",
+      "plan decision time is strictly before receipt expires_at",
+      "rollback receipt remains valid at rollback created_at"
+    ]
+  },
+  "pr_update_comment_gate_bootstrap": {
+    "workflow": ".github/workflows/pr-update-comment-gate.yml",
+    "trusted_event": "pull_request_target",
+    "trusted_checkout": "github.event.pull_request.base.sha",
+    "phase_0b_pr_enforcement": "manual_comment_evidence_because_new_pull_request_target_workflows_do_not_run_until_present_on_default_branch",
+    "post_merge_sequence": [
+      "open the next Phase 1 guard PR and post its exact 40-character head SHA after the push timestamp",
+      "verify PR update comment gate succeeds from the default-branch workflow",
+      "add PR update comment gate from GitHub Actions to main required status checks while preserving CI Gate strict mode",
+      "re-read branch protection and require both CI Gate and PR update comment gate before merging that PR"
+    ],
+    "activation_blocker": "No subsequent issue-267 PR may merge and no classifier or CD consumer may activate until both required checks are evidenced.",
+    "production_allowed": false,
+    "live_trading_authorized": false
+  }
+}

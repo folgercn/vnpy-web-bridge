@@ -1,0 +1,242 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vnpy-web-bridge:schema:web-bridge-deployment-evidence-v1",
+  "title": "Web Bridge deployment evidence v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "purpose",
+    "issue_number",
+    "evidence_id",
+    "captured_at",
+    "source_commit_sha",
+    "release_plan_raw_sha256",
+    "release_plan_canonical_sha256",
+    "release_plan_schema_sha256",
+    "evidence_schema_sha256",
+    "schema_compatibility_verified",
+    "release_plan_units_sha256",
+    "evidenced_units_sha256",
+    "unit_set_match_verified",
+    "services",
+    "safe_restart_receipt_sha256",
+    "outcome",
+    "orders_sent",
+    "positions_modified",
+    "production_allowed",
+    "live_trading_authorized",
+    "redaction"
+    ,"blockers"
+  ],
+  "properties": {
+    "schema_version": {"const": "web_bridge_deployment_evidence_v1"},
+    "purpose": {"const": "deployment_identity_and_safety_evidence"},
+    "issue_number": {"const": 267},
+    "evidence_id": {"type": "string", "pattern": "^deployment-evidence-(?!0{64}$)[0-9a-f]{64}$"},
+    "captured_at": {"$ref": "#/$defs/dateTime"},
+    "source_commit_sha": {"$ref": "#/$defs/commit"},
+    "release_plan_raw_sha256": {"$ref": "#/$defs/sha256"},
+    "release_plan_canonical_sha256": {"$ref": "#/$defs/sha256"},
+    "release_plan_schema_sha256": {"$ref": "#/$defs/sha256"},
+    "evidence_schema_sha256": {"$ref": "#/$defs/sha256"},
+    "schema_compatibility_verified": {"type": "boolean"},
+    "release_plan_units_sha256": {"$ref": "#/$defs/sha256"},
+    "evidenced_units_sha256": {"$ref": "#/$defs/sha256"},
+    "unit_set_match_verified": {"type": "boolean"},
+    "services": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/serviceEvidence"},
+      "uniqueItems": true
+    },
+    "safe_restart_receipt_sha256": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/sha256"},
+      "uniqueItems": true
+    },
+    "outcome": {"enum": ["SUCCEEDED", "FAILED", "BLOCKED"]},
+    "orders_sent": {"const": 0},
+    "positions_modified": {"const": 0},
+    "production_allowed": {"const": false},
+    "live_trading_authorized": {"const": false},
+    "redaction": {"$ref": "#/$defs/redaction"}
+    ,"blockers": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/blocker"},
+      "uniqueItems": true
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"outcome": {"const": "SUCCEEDED"}}},
+      "then": {
+        "properties": {
+          "services": {
+            "minItems": 1,
+            "items": {
+              "allOf": [
+                {"$ref": "#/$defs/serviceEvidence"},
+                {
+                  "properties": {
+                    "health_verified": {"const": true},
+                    "readiness_verified": {"const": true},
+                    "version_verified": {"const": true},
+                    "config_verified": {"const": true},
+                    "schema_compatibility_verified": {"const": true}
+                  }
+                },
+                {
+                  "if": {"properties": {"planned_action": {"const": "create"}}},
+                  "then": {
+                    "properties": {
+                      "before": {"$ref": "#/$defs/absentIdentity"},
+                      "after": {"$ref": "#/$defs/presentIdentity"},
+                      "identity_unchanged": {"const": false},
+                      "identity_transition_verified": {"const": true},
+                      "restart_observed": {"const": false},
+                      "safe_restart_receipt_sha256": {"type": "null"}
+                    }
+                  }
+                },
+                {
+                  "if": {"properties": {"planned_action": {"const": "preserve"}}},
+                  "then": {
+                    "properties": {
+                      "identity_unchanged": {"const": true},
+                      "before": {"$ref": "#/$defs/presentIdentity"},
+                      "after": {"$ref": "#/$defs/presentIdentity"},
+                      "restart_observed": {"const": false},
+                      "safe_restart_receipt_sha256": {"type": "null"}
+                    }
+                  }
+                },
+                {
+                  "if": {"properties": {"planned_action": {"const": "restart"}}},
+                  "then": {
+                    "properties": {
+                      "identity_unchanged": {"const": false},
+                      "before": {"$ref": "#/$defs/presentIdentity"},
+                      "after": {"$ref": "#/$defs/presentIdentity"},
+                      "identity_transition_verified": {"const": true},
+                      "restart_observed": {"const": true}
+                    }
+                  }
+                },
+                {
+                  "if": {"properties": {"unit": {"const": "execution-orchestrator"}, "planned_action": {"const": "restart"}}},
+                  "then": {"properties": {"safe_restart_receipt_sha256": {"$ref": "#/$defs/sha256"}}}
+                }
+              ]
+            }
+          },
+          "blockers": {"maxItems": 0},
+          "schema_compatibility_verified": {"const": true},
+          "unit_set_match_verified": {"const": true}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"outcome": {"enum": ["FAILED", "BLOCKED"]}}},
+      "then": {"properties": {"blockers": {"minItems": 1}}}
+    }
+  ],
+  "$defs": {
+    "serviceId": {"type": "string", "pattern": "^[a-z][a-z0-9-]{1,63}$"},
+    "sha256": {"type": "string", "pattern": "^(?!0{64}$)[0-9a-f]{64}$"},
+    "commit": {"type": "string", "pattern": "^(?!0{40}$)[0-9a-f]{40}$"},
+    "imageDigest": {"type": "string", "pattern": "^sha256:(?!0{64}$)[0-9a-f]{64}$"},
+    "version": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$"},
+    "dateTime": {"type": "string", "format": "date-time"},
+    "containerId": {"type": "string", "pattern": "^(?!0{64}$)[0-9a-f]{64}$"},
+    "identity": {
+      "oneOf": [
+        {"$ref": "#/$defs/presentIdentity"},
+        {"$ref": "#/$defs/absentIdentity"}
+      ]
+    },
+    "presentIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["present", "version", "image_digest", "config_sha256", "container_id", "pid", "started_at", "restart_count", "runtime_generation", "state_sha256"],
+      "properties": {
+        "present": {"const": true},
+        "version": {"$ref": "#/$defs/version"},
+        "image_digest": {"$ref": "#/$defs/imageDigest"},
+        "config_sha256": {"$ref": "#/$defs/sha256"},
+        "container_id": {"$ref": "#/$defs/containerId"},
+        "pid": {"type": "integer", "minimum": 1},
+        "started_at": {"$ref": "#/$defs/dateTime"},
+        "restart_count": {"type": "integer", "minimum": 0},
+        "runtime_generation": {"oneOf": [{"type": "integer", "minimum": 0}, {"type": "null"}]},
+        "state_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "absentIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["present", "observed_at", "reason", "evidence_sha256"],
+      "properties": {
+        "present": {"const": false},
+        "observed_at": {"$ref": "#/$defs/dateTime"},
+        "reason": {"enum": ["not_created", "not_found", "stopped", "crashed", "inspection_failed"]},
+        "evidence_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "serviceEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["unit", "planned_action", "plan_action_sha256", "before", "after", "identity_unchanged", "identity_transition_verified", "restart_observed", "health_verified", "readiness_verified", "version_verified", "config_verified", "schema_compatibility_verified", "safe_restart_receipt_sha256", "evidence_sha256"],
+      "properties": {
+        "unit": {"$ref": "#/$defs/serviceId"},
+        "planned_action": {"enum": ["create", "restart", "preserve"]},
+        "plan_action_sha256": {"$ref": "#/$defs/sha256"},
+        "before": {"$ref": "#/$defs/identity"},
+        "after": {"$ref": "#/$defs/identity"},
+        "identity_unchanged": {"type": "boolean"},
+        "identity_transition_verified": {"type": "boolean"},
+        "restart_observed": {"type": "boolean"},
+        "health_verified": {"type": "boolean"},
+        "readiness_verified": {"type": "boolean"},
+        "version_verified": {"type": "boolean"},
+        "config_verified": {"type": "boolean"},
+        "schema_compatibility_verified": {"type": "boolean"},
+        "safe_restart_receipt_sha256": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/sha256"}]},
+        "evidence_sha256": {"$ref": "#/$defs/sha256"}
+      },
+      "not": {
+        "properties": {
+          "unit": {"const": "execution-orchestrator"},
+          "planned_action": {"const": "create"}
+        },
+        "required": ["unit", "planned_action"]
+      }
+    },
+    "blocker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["unit", "code", "reason", "evidence_sha256", "manual_override_allowed"],
+      "properties": {
+        "unit": {"$ref": "#/$defs/serviceId"},
+        "code": {"enum": ["plan_unit_mismatch", "identity_mismatch", "health_failed", "readiness_failed", "version_mismatch", "config_mismatch", "schema_incompatible", "missing_safe_restart_receipt", "unsafe_restart"]},
+        "reason": {"type": "string", "minLength": 1, "maxLength": 512},
+        "evidence_sha256": {"$ref": "#/$defs/sha256"},
+        "manual_override_allowed": {"const": false}
+      }
+    },
+    "redaction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sanitized", "redaction_verified", "contains_private_key", "contains_secret", "contains_token", "contains_account_id", "contains_private_path", "redaction_policy_sha256"],
+      "properties": {
+        "sanitized": {"const": true},
+        "redaction_verified": {"const": true},
+        "contains_private_key": {"const": false},
+        "contains_secret": {"const": false},
+        "contains_token": {"const": false},
+        "contains_account_id": {"const": false},
+        "contains_private_path": {"const": false},
+        "redaction_policy_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    }
+  }
+}
