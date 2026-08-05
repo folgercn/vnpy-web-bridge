@@ -592,6 +592,28 @@ def test_windows_final_store_missing_corrupt_and_rollback_fail_closed(tmp_path) 
         )
 
 
+def test_windows_final_store_peer_advancing_multiple_versions_is_accepted(
+    tmp_path,
+) -> None:
+    from scripts.windows_fence_foundation.final_store_v1 import (
+        DurableFinalAdmissionStoreV1,
+    )
+
+    path = tmp_path / "final-admission.json"
+    writer = DurableFinalAdmissionStoreV1.bootstrap(
+        path, account_scope="account:prod", environment="simnow"
+    )
+    stale_peer = DurableFinalAdmissionStoreV1.bootstrap(
+        path, account_scope="account:prod", environment="simnow"
+    )
+    for _ in range(3):
+        writer.allocate_snapshot_generation()
+
+    advanced = stale_peer.allocate_snapshot_generation()
+    assert advanced["state_version"] == 4
+    assert advanced["snapshot_generation"] == 4
+
+
 @pytest.mark.skipif(os.name != "nt", reason="requires native Windows file semantics")
 def test_windows_final_store_native_create_replace_and_restart(tmp_path) -> None:
     from scripts.windows_fence_foundation.final_store_v1 import (

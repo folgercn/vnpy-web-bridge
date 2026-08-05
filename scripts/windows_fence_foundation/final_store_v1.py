@@ -153,6 +153,8 @@ def _read_ledger(path: Path) -> list[dict[str, Any]]:
 
 
 def _assert_ledger_head(state: Mapping[str, Any], ledger: list[dict[str, Any]]) -> None:
+    if not ledger:
+        raise _error("final admission ledger is empty", "WINDOWS_FINAL_STORE_ROLLBACK")
     head = ledger[-1]
     expected = {
         "state_version": state["state_version"],
@@ -163,6 +165,25 @@ def _assert_ledger_head(state: Mapping[str, Any], ledger: list[dict[str, Any]]) 
     if any(head[field] != value for field, value in expected.items()):
         raise _error(
             "final admission store rolled back from ledger head",
+            "WINDOWS_FINAL_STORE_ROLLBACK",
+        )
+
+
+def _assert_state_lineage(
+    state: Mapping[str, Any], ledger: list[dict[str, Any]]
+) -> None:
+    version = int(state["state_version"])
+    previous = state["previous_state_hash"]
+    if version == 0:
+        if previous != "":
+            raise _error(
+                "final admission store genesis predecessor is invalid",
+                "WINDOWS_FINAL_STORE_ROLLBACK",
+            )
+        return
+    if version > len(ledger) - 1 or previous != ledger[version - 1]["state_hash"]:
+        raise _error(
+            "final admission store predecessor is not in the durable ledger",
             "WINDOWS_FINAL_STORE_ROLLBACK",
         )
 
@@ -363,6 +384,7 @@ class DurableFinalAdmissionStoreV1:
             )
             ledger = _read_ledger(self.ledger_path)
             _assert_ledger_head(self._state, ledger)
+            _assert_state_lineage(self._state, ledger)
         self._anchor_hash = str(ledger[-1]["anchor_hash"])
         self._highest_version = int(self._state["state_version"])
         self._highest_hash = str(self._state["state_hash"])
@@ -522,6 +544,7 @@ class DurableFinalAdmissionStoreV1:
         )
         ledger = _read_ledger(self.ledger_path)
         _assert_ledger_head(current, ledger)
+        _assert_state_lineage(current, ledger)
         version = int(current["state_version"])
         if version < self._highest_version or (
             version == self._highest_version
@@ -530,9 +553,9 @@ class DurableFinalAdmissionStoreV1:
             raise _error(
                 "final admission store rolled back", "WINDOWS_FINAL_STORE_ROLLBACK"
             )
-        if (
-            version > self._highest_version
-            and current["previous_state_hash"] != self._highest_hash
+        if version > self._highest_version and (
+            self._highest_version >= len(ledger)
+            or ledger[self._highest_version]["state_hash"] != self._highest_hash
         ):
             raise _error(
                 "final admission store chain was replaced",
