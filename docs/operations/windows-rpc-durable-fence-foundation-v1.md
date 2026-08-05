@@ -19,6 +19,43 @@ The foundation is delivered as seven independently reviewed changes:
 
 No intermediate merge proves that Windows is installed or fenced.
 
+WF-2 produces a byte-reproducible, uncompressed deterministic archive with a
+detached canonical index. The fixed payload is the A2 extension, launcher,
+runtime assembly `.pyz`, and externally supplied canonical service config.
+Verification rejects unknown or aliased paths, duplicate/case-colliding names,
+metadata drift, compression, size expansion, and any component, source
+inventory, archive, or bundle hash mismatch. In an installed layout the
+launcher first matches the adjacent assembly against the hash pinned in the
+manifest-bound SCM ImagePath, then imports only from those verified bytes held
+in memory. The launcher itself is verified before process creation by the WF-4
+immutable publisher and independent observer; its post-load state hash check
+detects drift but is not claimed as a pre-execution self-verification. The
+fixed entry validates the adjacent extension, assembly, and config paths/hashes,
+strictly parses the service/store/runtime config, and launches the frozen
+runtime with the raw config hash required by the manifest/publish/state
+equality contract.
+
+The WF-2 install-manifest verifier accepts only canonical raw JSON with exact
+fields and constants, derives and checks the core hash and manifest ID, checks
+every caller-supplied preflight/target binding, enforces the trusted-clock
+validity window, and verifies canonical Ed25519 signatures against an external
+manifest public-key pin. Manifest, observer, and restart keys are distinct
+domains and cannot reuse key bytes, IDs, or hashes. Production code contains
+no signing API or private-key fixture. A verified WF-2 manifest still reports
+`install_ready=false` and `restart_authorized=false`; real signing remains
+blocked until WF-3 fresh preflight and the WF-6 ceremony.
+The verifier also re-derives the domain-separated deterministic install-attempt
+ID from the immutable preflight inputs and rejects a nonce whose prior durable
+binding names different inputs. Its nonce registry is a unique externally
+pinned directory identity (path, volume, owner, protected ACL, writer, and
+reparse-free facts), rechecked before and after every operation. Records use
+create-only atomic publication, file and directory fsync, and exact readback;
+all reads and creates stay anchored to the opened directory handle with
+no-follow semantics. Reservation is an offline signer-side operation and
+fails closed when that handle-relative primitive is unavailable; Windows and
+the installer perform read-only signature/identity verification and never use
+an unsafe path fallback. An arbitrary empty directory is not accepted.
+
 WF-1 source, contract, schema, and focused test paths select the dedicated
 `windows_fence_changed` CI gate. That gate runs read-only offline tests on
 Ubuntu and Windows and has only repository read permission. It has no secret,

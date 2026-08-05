@@ -375,6 +375,10 @@ def test_legacy_restart_cross_contract_ownership_and_leases_are_explicit() -> No
         )
     )
     migration = ownership["legacy_restart_migration_ownership"]
+    assert migration["status"] == (
+        "phase_1_pre_c_d_wf2_bundle_and_manifest_verifier_implemented_"
+        "not_signed_not_installed"
+    )
     assert set(migration) == {
         "status",
         "external_high_water",
@@ -648,8 +652,11 @@ def test_windows_foundation_bundle_is_build_only_and_never_a_cd_target() -> None
     bundle = build_units["windows-fence-foundation-bundle"]
     assert (
         bundle["implementation_status"]
-        == "planned_bundle_durable_core_implemented_not_installed"
+        == "wf2_bundle_and_manifest_verifier_implemented_not_signed_not_installed"
     )
+    assert bundle["build_file"] == "scripts/windows_fence_foundation/bundle_v1.py"
+    assert bundle["build_kind"] == "deterministic_artifact_builder"
+    assert (ROOT / bundle["build_file"]).is_file()
     windows = deploy_units["windows-ctp-gateway"]
     rule = next(
         rule
@@ -668,6 +675,13 @@ def test_windows_foundation_bundle_is_build_only_and_never_a_cd_target() -> None
     assert windows["automatic_deploy_allowed"] is False
     assert rule["classification"] == "infra_manual"
     assert rule["build_units"] == ["windows-fence-foundation-bundle"]
+    assert {
+        "backend/tests/unit/test_issue267_windows_fence_foundation_*.py",
+        "backend/tests/unit/test_windows_rpc_durable_fence_*.py",
+        "backend/tests/unit/test_windows_fence_foundation_*.py",
+        "backend/tests/integration/test_windows_rpc_durable_fence_*.py",
+        "backend/tests/integration/test_windows_fence_foundation_*.py",
+    } <= set(rule["match"]["glob"])
     assert "pre_activation_build_units" not in rule
     assert rule["deploy_units"] == []
     assert (

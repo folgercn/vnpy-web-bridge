@@ -57,6 +57,46 @@ def _plan(paths: list[str]) -> dict[str, object]:
             ["windows-fence-foundation-bundle"],
         ),
         (
+            ["scripts/windows_fence_foundation/bundle_v1.py"],
+            "BLOCKED",
+            ["windows-fence-foundation-bundle"],
+        ),
+        (
+            ["scripts/windows_fence_foundation/manifest_v1.py"],
+            "BLOCKED",
+            ["windows-fence-foundation-bundle"],
+        ),
+        (
+            ["scripts/windows_fence_foundation/target_contract_v1.py"],
+            "BLOCKED",
+            ["windows-fence-foundation-bundle"],
+        ),
+        (
+            ["scripts/windows_fence_foundation/trust_pins_v1.py"],
+            "BLOCKED",
+            ["windows-fence-foundation-bundle"],
+        ),
+        (
+            ["backend/tests/unit/test_windows_rpc_durable_fence_bundle_v1.py"],
+            "BLOCKED",
+            ["windows-fence-foundation-bundle"],
+        ),
+        (
+            ["backend/tests/unit/test_windows_rpc_durable_fence_manifest_v1.py"],
+            "BLOCKED",
+            ["windows-fence-foundation-bundle"],
+        ),
+        (
+            ["backend/tests/unit/test_windows_rpc_durable_fence_target_contract_v1.py"],
+            "BLOCKED",
+            ["windows-fence-foundation-bundle"],
+        ),
+        (
+            ["backend/tests/unit/test_issue267_windows_fence_foundation_schemas.py"],
+            "BLOCKED",
+            ["windows-fence-foundation-bundle"],
+        ),
+        (
             ["docs/schemas/windows-rpc-durable-fence-state-v1.schema.json"],
             "BLOCKED",
             ["windows-fence-foundation-bundle"],
@@ -85,6 +125,8 @@ def test_guard_plan_is_fail_closed(
     assert plan["preserve_units"] == ["postgres", "questdb", "web-bridge"]
     assert plan["automatic_deploy_allowed"] is False
     assert plan["manual_deploy_allowed"] is False
+    assert plan["production_allowed"] is False
+    assert plan["live_trading_authorized"] is False
     assert plan["merge_gate_blocked"] is (
         not paths or "future-unowned-path.txt" in paths
     )

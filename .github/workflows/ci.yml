@@ -240,7 +240,7 @@ jobs:
         run: npm run check
 
   windows-fence-core:
-    name: Windows fence durable core (${{ matrix.os }})
+    name: Windows fence foundation (${{ matrix.os }})
     needs: changes
     if: needs.changes.outputs.windows_fence_changed == 'true'
     permissions:
@@ -269,6 +269,9 @@ jobs:
           backend/tests/unit/test_windows_rpc_durable_fence_store_v1.py
           backend/tests/unit/test_windows_rpc_durable_fence_admission_v1.py
           backend/tests/unit/test_windows_rpc_durable_fence_bootstrap_v1.py
+          backend/tests/unit/test_windows_rpc_durable_fence_bundle_v1.py
+          backend/tests/unit/test_windows_rpc_durable_fence_manifest_v1.py
+          backend/tests/unit/test_windows_rpc_durable_fence_target_contract_v1.py
 
   docker:
     name: Production image build

@@ -9,6 +9,7 @@ import unicodedata
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import PureWindowsPath
 from typing import Any
 
 FOUNDATION_STATE_SCHEMA_VERSION = "windows_rpc_durable_fence_state_v1"
@@ -19,6 +20,14 @@ SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 VOLUME_SERIAL_RE = re.compile(r"^[A-F0-9]{8,32}$")
 IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$")
 SHORT_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_RESERVED_WINDOWS_NAMES = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    *(f"COM{number}" for number in range(1, 10)),
+    *(f"LPT{number}" for number in range(1, 10)),
+}
 
 AUTHORITY_FIELDS = frozenset(
     {
@@ -112,6 +121,38 @@ class StoreContractError(ValueError):
     def __init__(self, code: str) -> None:
         super().__init__(code)
         self.code = code
+
+
+def canonical_local_windows_path(value: str) -> str:
+    """Canonicalize one local drive path and reject aliases/device/network paths."""
+    if (
+        not isinstance(value, str)
+        or not value
+        or unicodedata.normalize("NFC", value) != value
+        or "%" in value
+        or "$" in value
+        or "/" in value
+        or value.startswith(("\\\\", "\\?\\", "\\.\\"))
+    ):
+        raise StoreContractError("WINDOWS_PATH_INVALID")
+    path = PureWindowsPath(value)
+    if not path.is_absolute() or not path.drive or len(path.drive) != 2:
+        raise StoreContractError("WINDOWS_PATH_NOT_LOCAL_ABSOLUTE")
+    if path.root != "\\":
+        raise StoreContractError("WINDOWS_PATH_INVALID")
+    parts = path.parts[1:]
+    if not parts:
+        raise StoreContractError("WINDOWS_PATH_ROOT_FORBIDDEN")
+    for part in parts:
+        if (
+            part in {"", ".", ".."}
+            or part.endswith((" ", "."))
+            or any(character in '<>:"|?*' for character in part)
+            or part.split(".", 1)[0].upper() in _RESERVED_WINDOWS_NAMES
+            or any(ord(character) < 32 for character in part)
+        ):
+            raise StoreContractError("WINDOWS_PATH_COMPONENT_INVALID")
+    return f"{path.drive.upper()}\\" + "\\".join(parts)
 
 
 @dataclass(frozen=True)
