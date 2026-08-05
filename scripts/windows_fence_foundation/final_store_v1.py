@@ -556,6 +556,7 @@ class DurableFinalAdmissionStoreV1:
         if version > self._highest_version and (
             self._highest_version >= len(ledger)
             or ledger[self._highest_version]["state_hash"] != self._highest_hash
+            or ledger[self._highest_version]["anchor_hash"] != self._anchor_hash
         ):
             raise _error(
                 "final admission store chain was replaced",

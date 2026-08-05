@@ -614,6 +614,50 @@ def test_windows_final_store_peer_advancing_multiple_versions_is_accepted(
     assert advanced["snapshot_generation"] == 4
 
 
+def test_windows_final_store_stale_peer_rejects_reanchored_history(tmp_path) -> None:
+    import json
+
+    from scripts.windows_fence_foundation.admission import WindowsRpcDurableFenceError
+    from scripts.windows_fence_foundation.contracts import canonical_json_bytes
+    from scripts.windows_fence_foundation.final_store_v1 import (
+        DurableFinalAdmissionStoreV1,
+        _anchor_digest,
+    )
+
+    path = tmp_path / "final-admission.json"
+    writer = DurableFinalAdmissionStoreV1.bootstrap(
+        path, account_scope="account:prod", environment="simnow"
+    )
+    stale_peer = DurableFinalAdmissionStoreV1.bootstrap(
+        path, account_scope="account:prod", environment="simnow"
+    )
+    writer.mutate(
+        lambda state: state.update({"current_epoch": 1, "current_fencing_token": 1})
+    )
+    writer.allocate_snapshot_generation()
+
+    ledger_path = path.with_name(f"{path.name}.ledger")
+    records = [json.loads(line) for line in ledger_path.read_bytes().splitlines()]
+    records[0]["current_epoch"] = 1
+    records[0]["current_fencing_token"] = 1
+    previous_anchor = ""
+    for record in records:
+        record["previous_anchor_hash"] = previous_anchor
+        record["anchor_hash"] = ""
+        record["anchor_hash"] = _anchor_digest(record)
+        previous_anchor = record["anchor_hash"]
+    ledger_path.write_bytes(
+        b"".join(canonical_json_bytes(record) + b"\n" for record in records)
+    )
+
+    fresh = DurableFinalAdmissionStoreV1.bootstrap(
+        path, account_scope="account:prod", environment="simnow"
+    )
+    assert fresh.snapshot()["state_version"] == 2
+    with pytest.raises(WindowsRpcDurableFenceError, match="chain was replaced"):
+        stale_peer.allocate_snapshot_generation()
+
+
 @pytest.mark.skipif(os.name != "nt", reason="requires native Windows file semantics")
 def test_windows_final_store_native_create_replace_and_restart(tmp_path) -> None:
     from scripts.windows_fence_foundation.final_store_v1 import (
