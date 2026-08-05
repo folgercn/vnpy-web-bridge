@@ -95,32 +95,35 @@ if _FOUNDATION_ARCHIVE_PATH.is_file():
     _VERIFIED_FOUNDATION_ARCHIVE_RAW = _archive_raw
     sys.meta_path.insert(0, _VerifiedAssemblyImporter(_archive_raw))
 
-from scripts.windows_fence_foundation.admission import (
+# These imports must remain after the installed-layout archive verification above.
+from scripts.windows_fence_foundation.admission import (  # noqa: E402
     FrozenNoneProjection,
     FrozenNoneStoreRecovery,
     WindowsRpcDurableFenceDenied,
     WindowsRpcDurableFenceError,
     WindowsRpcFinalAdmissionV1,
 )
-from scripts.windows_fence_foundation.assembly import (
+from scripts.windows_fence_foundation.assembly import (  # noqa: E402
     WindowsRpcFrozenAssemblyV1,
     assemble_windows_rpc_frozen_v1,
     attach_windows_rpc_deployment_snapshot_v1,
 )
-from scripts.windows_fence_foundation.bootstrap_v1 import (
+from scripts.windows_fence_foundation.bootstrap_v1 import (  # noqa: E402
     bootstrap_windows_rpc_frozen_v1,
 )
-from scripts.windows_fence_foundation.contracts import (
+from scripts.windows_fence_foundation.contracts import (  # noqa: E402
     StoreContractError,
     canonical_json_bytes,
     canonical_local_windows_path,
 )
-from scripts.windows_fence_foundation.store import (
+from scripts.windows_fence_foundation.store import (  # noqa: E402
     StoreExpectation,
     StoreRecovery,
     recover_frozen_none_store,
 )
-from scripts.windows_fence_foundation.win32_fs import WindowsFilesystemFactsAdapter
+from scripts.windows_fence_foundation.win32_fs import (  # noqa: E402
+    WindowsFilesystemFactsAdapter,
+)
 
 _RPC_ADDRESS_RE = re.compile(r"^tcp://(?:\*|127\.0\.0\.1|\[::1\]):[1-9][0-9]{0,4}$")
 _ASSEMBLY_COMPONENTS = (
