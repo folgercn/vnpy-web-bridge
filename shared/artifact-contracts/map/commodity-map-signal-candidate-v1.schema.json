@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vnpy.local/artifact-contracts/commodity-map-signal-candidate-v1.schema.json",
+  "title": "Unsigned MAP signal candidate",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "artifact_role", "status", "candidate_id", "producer_identity",
+    "strategy_identity", "strategy_model_version_sha256", "map_output_contract", "source",
+    "lineage", "signals", "research_evidence_only", "producer_identity_only",
+    "control_authorized", "deployment_authorized", "execution_authorized", "simnow_execution_authorized",
+    "runtime_activation_authorized", "network_authorized", "web_bridge_rpc_authorized", "order_authorized",
+    "order_submission_authorized", "position_mutation_authorized", "dispatch_authorized", "trading_authorized",
+    "production_authorized", "automatic_promotion_authorized", "production_allowed", "live_allowed",
+    "countable_forward", "authority_granted", "signing_requested", "custody_published"
+  ],
+  "properties": {
+    "schema_version": {"const": "commodity_map_signal_candidate_v1"},
+    "artifact_role": {"const": "unsigned_map_signal_candidate"},
+    "status": {"const": "UNSIGNED_MAP_SIGNAL_CANDIDATE"},
+    "candidate_id": {"type": "string", "pattern": "^map-signal-v1-[0-9a-f]{64}$"},
+    "producer_identity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["producer_id", "producer_version", "producer_code_sha256", "kernel_id", "kernel_code_sha256"],
+      "properties": {
+        "producer_id": {"const": "map-producer"},
+        "producer_version": {"const": "map-producer-v1"},
+        "producer_code_sha256": {"$ref": "#/$defs/sha256"},
+        "kernel_id": {"const": "commodity_c_fast_pure_producer_kernel_v1"},
+        "kernel_code_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "strategy_identity": {"const": "commodity_fast_tsmom_forward_freeze_v1"},
+    "strategy_model_version_sha256": {"$ref": "#/$defs/sha256"},
+    "map_output_contract": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema_version", "strategy_identity_field", "product_fields", "complete_product_set_required", "execution_fields_forbidden", "contract_sha256"],
+      "properties": {
+        "schema_version": {"const": "commodity_map_to_c_fast_projection_contract_v1"},
+        "strategy_identity_field": {"const": "strategy_identity"},
+        "product_fields": {"const": ["product", "sector", "trend_21_sign", "trend_63_sign", "trend_126_sign", "source_score", "vol60_annualized", "raw_risk_score", "source_target_weight"]},
+        "complete_product_set_required": {"const": true},
+        "execution_fields_forbidden": {"const": true},
+        "contract_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "source": {"$ref": "#/$defs/source_binding"},
+    "lineage": {"type": "object", "additionalProperties": false, "required": ["source_view_canonical_sha256", "source_receipt_sha256", "lineage_sha256", "frozen_lineage"], "properties": {"source_view_canonical_sha256": {"$ref": "#/$defs/sha256"}, "source_receipt_sha256": {"$ref": "#/$defs/sha256"}, "lineage_sha256": {"$ref": "#/$defs/sha256"}, "frozen_lineage": {"type": "object"}}},
+    "signals": {"type": "array", "minItems": 10, "maxItems": 10, "items": {"type": "object", "additionalProperties": false, "required": ["product", "sector", "trend_21_sign", "trend_63_sign", "trend_126_sign", "source_score", "vol60_annualized", "raw_risk_score", "source_target_weight"], "properties": {"product": {"type": "string", "enum": ["ag", "al", "au", "bu", "cu", "rb", "ru", "sc", "sp", "zn"]}, "sector": {"type": "string"}, "trend_21_sign": {"type": "integer", "enum": [-1, 0, 1]}, "trend_63_sign": {"type": "integer", "enum": [-1, 0, 1]}, "trend_126_sign": {"type": "integer", "enum": [-1, 0, 1]}, "source_score": {"type": "number"}, "vol60_annualized": {"type": "number", "exclusiveMinimum": 0}, "raw_risk_score": {"type": "number"}, "source_target_weight": {"type": "number"}}}},
+    "research_evidence_only": {"const": true},
+    "producer_identity_only": {"const": true},
+    "control_authorized": {"const": false}, "deployment_authorized": {"const": false}, "execution_authorized": {"const": false}, "simnow_execution_authorized": {"const": false}, "runtime_activation_authorized": {"const": false}, "network_authorized": {"const": false}, "web_bridge_rpc_authorized": {"const": false}, "order_authorized": {"const": false}, "order_submission_authorized": {"const": false}, "position_mutation_authorized": {"const": false}, "dispatch_authorized": {"const": false}, "trading_authorized": {"const": false}, "production_authorized": {"const": false}, "automatic_promotion_authorized": {"const": false}, "production_allowed": {"const": false}, "live_allowed": {"const": false}, "countable_forward": {"const": false}, "authority_granted": {"const": false}, "signing_requested": {"const": false}, "custody_published": {"const": false}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "source_binding": {"type": "object", "additionalProperties": false, "required": ["schema_version", "source_view_id", "source_view_canonical_sha256", "source_receipt_sha256", "research_as_of_official_day", "execution_day"], "properties": {"schema_version": {"const": "commodity_c_fast_pit_frozen_source_view_v1"}, "source_view_id": {"type": "string", "minLength": 8, "maxLength": 128}, "source_view_canonical_sha256": {"$ref": "#/$defs/sha256"}, "source_receipt_sha256": {"$ref": "#/$defs/sha256"}, "research_as_of_official_day": {"type": "string", "format": "date"}, "execution_day": {"type": "string", "format": "date"}}}
+  }
+}
