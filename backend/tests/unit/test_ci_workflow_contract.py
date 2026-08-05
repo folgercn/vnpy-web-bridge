@@ -104,6 +104,9 @@ def test_issue291_phase_a_gate_builds_primary_images_and_execution_proxy_closure
     build = WORKFLOW.split("  phase-a-build-check:\n", maxsplit=1)[1].split(
         "  backend:\n", maxsplit=1
     )[0]
+    assert "cache-dependency-path: backend/requirements.txt" in build
+    assert "pip install -r backend/requirements.txt" in build
+    assert "pip install -r scripts/ci/requirements-quick.txt" not in build
     for token in (
         "frontend/Containerfile",
         "deployments/phase-a/Containerfile.control-api",
