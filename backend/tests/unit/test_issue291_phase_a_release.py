@@ -324,7 +324,26 @@ def test_classifier_manifest_rules_are_one_to_one() -> None:
         )
 
 
+def _has_origin_main(cwd: Path) -> bool:
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "--verify", "refs/remotes/origin/main^{commit}"],
+            cwd=cwd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except OSError:
+        return False
+    return completed.returncode == 0
+
+
 def test_full_current_changed_paths_produce_allowed_dependency_closure() -> None:
+    if not _has_origin_main(ROOT):
+        pytest.skip(
+            "origin/main ref unavailable in shallow checkout; "
+            "dedicated Phase A gate uses fetch-depth: 0"
+        )
     tracked = subprocess.check_output(
         ["git", "diff", "--name-only", "origin/main"],
         cwd=ROOT,
