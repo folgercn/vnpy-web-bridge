@@ -676,6 +676,17 @@ class _VnpyExecutionRequestFactoryV1:
     )
 
     def __init__(self, gateway_name: str) -> None:
+        self.gateway_name = gateway_name
+        self.Direction: Any = None
+        self.Exchange: Any = None
+        self.Offset: Any = None
+        self.OrderType: Any = None
+        self.OrderRequest: Any = None
+        self.CancelRequest: Any = None
+
+    def _load_vnpy_types(self) -> None:
+        if self.OrderRequest is not None and self.CancelRequest is not None:
+            return
         try:
             from vnpy.trader.constant import Direction, Exchange, Offset, OrderType
             from vnpy.trader.object import CancelRequest, OrderRequest
@@ -684,7 +695,6 @@ class _VnpyExecutionRequestFactoryV1:
                 "vn.py request types are unavailable",
                 code="WINDOWS_FENCE_HANDLER_INVALID",
             ) from exc
-        self.gateway_name = gateway_name
         self.Direction = Direction
         self.Exchange = Exchange
         self.Offset = Offset
@@ -747,6 +757,7 @@ class _VnpyExecutionRequestFactoryV1:
             raise WindowsRpcDurableFenceDenied(
                 "send reference is invalid", code="WINDOWS_FENCE_REQUEST_INVALID"
             )
+        self._load_vnpy_types()
         return self.OrderRequest(
             symbol=symbol,
             exchange=self._enum(self.Exchange, request["exchange"], "exchange"),
@@ -759,6 +770,7 @@ class _VnpyExecutionRequestFactoryV1:
         )
 
     def cancel_request(self, facts: Mapping[str, str]) -> Any:
+        self._load_vnpy_types()
         return self.CancelRequest(
             orderid=facts["orderid"],
             symbol=facts["symbol"],

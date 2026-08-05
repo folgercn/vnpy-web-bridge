@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import inspect
 import os
+import sys
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import pytest
@@ -711,15 +712,114 @@ def test_windows_snapshot_generation_survives_restart_and_is_concurrently_unique
     assert len({item["snapshot_id"] for item in snapshots}) == 8
 
 
-def test_windows_native_request_adapter_binds_fixed_gateway_and_oms_cancel(
-    tmp_path: Path,
+def test_windows_typed_bootstrap_is_lazy_without_vnpy_and_mutation_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from app.execution import MutationContext
-    from app.execution.models import sha256_json
-    from vnpy.trader.constant import Status
-    from vnpy.trader.object import CancelRequest, OrderRequest
+    from scripts.windows_fence_foundation.final_admission_v1 import (
+        _receipt_digest,
+        _request_digest,
+    )
 
-    from scripts.windows_fence_foundation.final_admission_v1 import _receipt_digest
+    config = _runtime_config()
+    server = FakeServer()
+    runtime = SimpleNamespace(
+        config=config,
+        rpc_engine=SimpleNamespace(server=server),
+        fact_source=FactSource(),
+    )
+    for name in tuple(sys.modules):
+        if name == "vnpy" or name.startswith("vnpy."):
+            monkeypatch.delitem(sys.modules, name, raising=False)
+    monkeypatch.setitem(sys.modules, "vnpy", None)
+
+    admission = durable_module._attach_fixed_typed_fenced_methods(
+        runtime, config, tmp_path
+    )
+    admission.install_fence(epoch=1, fencing_token=1)
+    request = {
+        "symbol": "RB2610",
+        "exchange": "SHFE",
+        "direction": "LONG",
+        "type": "LIMIT",
+        "volume": 1,
+        "price": 3100,
+        "offset": "OPEN",
+    }
+    context = {
+        "account_scope": config.account_scope,
+        "environment": config.environment,
+        "leader_epoch": 1,
+        "fencing_token": 1,
+        "plan_id": "plan-000001",
+        "plan_hash": "a" * 64,
+        "intent_id": "intent-lazy-0001",
+        "idempotency_key": "send-key-lazy-000001",
+        "action": "send",
+        "receipt_id": "receipt-intent-lazy-0001",
+        "receipt_hash": "",
+        "request_hash": _request_digest(request),
+    }
+    context["receipt_hash"] = _receipt_digest(context)
+    admission.register_receipt(intent_id=context["intent_id"], receipt=context)
+    with pytest.raises(
+        WindowsRpcDurableFenceError, match="request types are unavailable"
+    ):
+        admission.send_order_fenced_v1(request, context)
+    assert server.send_calls == 0
+
+
+def test_windows_native_request_adapter_binds_fixed_gateway_and_oms_cancel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from enum import Enum
+
+    from scripts.windows_fence_foundation.final_admission_v1 import (
+        _receipt_digest,
+        _request_digest,
+    )
+
+    class Direction(Enum):
+        LONG = "LONG"
+        SHORT = "SHORT"
+
+    class Exchange(Enum):
+        SHFE = "SHFE"
+
+    class Offset(Enum):
+        OPEN = "OPEN"
+        NONE = "NONE"
+
+    class OrderType(Enum):
+        LIMIT = "LIMIT"
+
+    class OrderRequest:
+        def __init__(self, **kwargs: Any) -> None:
+            self.__dict__.update(kwargs)
+
+    class CancelRequest:
+        def __init__(self, **kwargs: Any) -> None:
+            self.__dict__.update(kwargs)
+
+    vnpy_module = ModuleType("vnpy")
+    trader_module = ModuleType("vnpy.trader")
+    constant_module = ModuleType("vnpy.trader.constant")
+    object_module = ModuleType("vnpy.trader.object")
+    constant_module.Direction = Direction
+    constant_module.Exchange = Exchange
+    constant_module.Offset = Offset
+    constant_module.OrderType = OrderType
+    object_module.OrderRequest = OrderRequest
+    object_module.CancelRequest = CancelRequest
+    vnpy_module.trader = trader_module
+    trader_module.constant = constant_module
+    trader_module.object = object_module
+    for name, module in {
+        "vnpy": vnpy_module,
+        "vnpy.trader": trader_module,
+        "vnpy.trader.constant": constant_module,
+        "vnpy.trader.object": object_module,
+    }.items():
+        monkeypatch.setitem(sys.modules, name, module)
 
     config = _runtime_config()
     calls: list[tuple[str, Any, str]] = []
@@ -763,7 +863,7 @@ def test_windows_native_request_adapter_binds_fixed_gateway_and_oms_cancel(
         assert request.orderid == "9001"
         calls.append(("cancel", request, gateway_name))
         if confirm_cancel[0]:
-            facts.orders[0]["status"] = Status.CANCELLED
+            facts.orders[0]["status"] = "cancelled"
 
     class NativeServer(FakeServer):
         def __init__(self) -> None:
@@ -783,21 +883,23 @@ def test_windows_native_request_adapter_binds_fixed_gateway_and_oms_cancel(
 
     def bound_context(
         *, action: str, intent_id: str, request: dict[str, Any]
-    ) -> MutationContext:
-        context = MutationContext(
-            account_scope=config.account_scope,
-            environment=config.environment,
-            leader_epoch=1,
-            fencing_token=1,
-            plan_id="plan-000001",
-            plan_hash="a" * 64,
-            intent_id=intent_id,
-            idempotency_key=f"{action}-key-{intent_id}",
-            action=action,
-            receipt_id=f"receipt-{intent_id}",
-            request_hash=sha256_json(request),
-        )
-        return replace(context, receipt_hash=_receipt_digest(context.as_dict()))
+    ) -> dict[str, Any]:
+        context: dict[str, Any] = {
+            "account_scope": config.account_scope,
+            "environment": config.environment,
+            "leader_epoch": 1,
+            "fencing_token": 1,
+            "plan_id": "plan-000001",
+            "plan_hash": "a" * 64,
+            "intent_id": intent_id,
+            "idempotency_key": f"{action}-key-{intent_id}",
+            "action": action,
+            "receipt_id": f"receipt-{intent_id}",
+            "receipt_hash": "",
+            "request_hash": _request_digest(request),
+        }
+        context["receipt_hash"] = _receipt_digest(context)
+        return context
 
     send_request = {
         "symbol": "RB2610",
@@ -812,22 +914,22 @@ def test_windows_native_request_adapter_binds_fixed_gateway_and_oms_cancel(
         action="send", intent_id="intent-send-0001", request=send_request
     )
     admission.register_receipt(
-        intent_id=send_context.intent_id, receipt=send_context.as_dict()
+        intent_id=send_context["intent_id"], receipt=send_context
     )
     sent = admission.send_order_fenced_v1(send_request, send_context)
     assert sent["state"] == "SUBMITTED"
     assert sent["broker_order_id"] == "CTP.9001"
-    assert calls[0][1].reference == send_context.intent_id
+    assert calls[0][1].reference == send_context["intent_id"]
 
     cancel_request = {
-        "target_intent_id": send_context.intent_id,
+        "target_intent_id": send_context["intent_id"],
         "broker_order_id": "CTP.9001",
     }
     cancel_context = bound_context(
         action="cancel", intent_id="intent-cancel-001", request=cancel_request
     )
     admission.register_receipt(
-        intent_id=cancel_context.intent_id, receipt=cancel_context.as_dict()
+        intent_id=cancel_context["intent_id"], receipt=cancel_context
     )
     cancelled = admission.cancel_order_fenced_v1(cancel_request, cancel_context)
     assert cancelled["state"] == "CANCELLED"
@@ -838,7 +940,7 @@ def test_windows_native_request_adapter_binds_fixed_gateway_and_oms_cancel(
         action="send", intent_id="intent-send-0002", request=foreign_request
     )
     admission.register_receipt(
-        intent_id=foreign_context.intent_id, receipt=foreign_context.as_dict()
+        intent_id=foreign_context["intent_id"], receipt=foreign_context
     )
     with pytest.raises(WindowsRpcDurableFenceDenied, match="foreign gateway"):
         admission.send_order_fenced_v1(foreign_request, foreign_context)
@@ -849,7 +951,7 @@ def test_windows_native_request_adapter_binds_fixed_gateway_and_oms_cancel(
         action="send", intent_id="intent-send-0003", request=empty_request
     )
     admission.register_receipt(
-        intent_id=empty_context.intent_id, receipt=empty_context.as_dict()
+        intent_id=empty_context["intent_id"], receipt=empty_context
     )
     with pytest.raises(WindowsRpcDurableFenceError, match="unknown outcome"):
         admission.send_order_fenced_v1(empty_request, empty_context)
@@ -860,8 +962,8 @@ def test_windows_native_request_adapter_binds_fixed_gateway_and_oms_cancel(
         action="cancel", intent_id="intent-cancel-002", request=cancel_request
     )
     admission.register_receipt(
-        intent_id=unknown_cancel_context.intent_id,
-        receipt=unknown_cancel_context.as_dict(),
+        intent_id=unknown_cancel_context["intent_id"],
+        receipt=unknown_cancel_context,
     )
     with pytest.raises(WindowsRpcDurableFenceError, match="unknown outcome"):
         admission.cancel_order_fenced_v1(cancel_request, unknown_cancel_context)
