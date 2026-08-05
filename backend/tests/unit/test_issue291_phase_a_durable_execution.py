@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 import pytest
 from app.execution import (
     DurableExecutionRepository,
@@ -559,7 +561,6 @@ def test_windows_final_store_missing_corrupt_and_rollback_fail_closed(tmp_path) 
         DurableFinalAdmissionStoreV1.bootstrap(
             path, account_scope="account:prod", environment="simnow"
         )
-
     missing_ledger = tmp_path / "missing-ledger.json"
     DurableFinalAdmissionStoreV1.bootstrap(
         missing_ledger, account_scope="account:prod", environment="simnow"
@@ -569,6 +570,29 @@ def test_windows_final_store_missing_corrupt_and_rollback_fail_closed(tmp_path) 
         DurableFinalAdmissionStoreV1(
             missing_ledger, account_scope="account:prod", environment="simnow"
         )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows file semantics")
+def test_windows_final_store_native_create_replace_and_restart(tmp_path) -> None:
+    from scripts.windows_fence_foundation.final_store_v1 import (
+        DurableFinalAdmissionStoreV1,
+    )
+
+    path = tmp_path / "final-admission.json"
+    store = DurableFinalAdmissionStoreV1.bootstrap(
+        path, account_scope="account:prod", environment="simnow"
+    )
+    assert path.is_file()
+    assert path.with_name(f"{path.name}.ledger").is_file()
+
+    store.mutate(
+        lambda state: state.update({"current_epoch": 1, "current_fencing_token": 1})
+    )
+    restarted = DurableFinalAdmissionStoreV1.bootstrap(
+        path, account_scope="account:prod", environment="simnow"
+    )
+    assert restarted.snapshot()["current_epoch"] == 1
+    assert restarted.snapshot()["current_fencing_token"] == 1
 
 
 def test_windows_receipt_is_create_only_and_cross_epoch_idempotency_is_rejected() -> (

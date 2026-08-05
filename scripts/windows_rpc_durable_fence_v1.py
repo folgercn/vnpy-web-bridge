@@ -416,8 +416,13 @@ class _WindowsExecutionFactsV1:
         "gateway_name",
     )
 
-    def __init__(self, runtime: _WindowsRpcRuntimeV1) -> None:
+    def __init__(
+        self,
+        runtime: _WindowsRpcRuntimeV1,
+        config: WindowsRpcRuntimeConfigV1 | None = None,
+    ) -> None:
         self.runtime = runtime
+        self.config = config or runtime.config
         self._lock = RLock()
         self._generation = 0
         self._intent_orders: dict[str, str] = {}
@@ -469,14 +474,12 @@ class _WindowsExecutionFactsV1:
             _execution_fact_row(item, self._POSITION_FIELDS)
             for item in self._facts("get_all_positions")
         ]
-        return {
-            self._key(row, "vt_positionid", "symbol"): row for row in rows
-        }
+        return {self._key(row, "vt_positionid", "symbol"): row for row in rows}
 
     def get_execution_snapshot_v1(self, request: Mapping[str, Any]) -> dict[str, Any]:
         expected = {
-            "account_scope": self.runtime.config.account_scope,
-            "environment": self.runtime.config.environment,
+            "account_scope": self.config.account_scope,
+            "environment": self.config.environment,
         }
         if not isinstance(request, Mapping) or dict(request) != {
             "environment": expected["environment"],
@@ -533,19 +536,15 @@ class _WindowsExecutionFactsV1:
                 )
         if matched is None:
             matched = next(
-                (
-                    row
-                    for row in orders.values()
-                    if row.get("reference") == intent_id
-                ),
+                (row for row in orders.values() if row.get("reference") == intent_id),
                 None,
             )
         if matched is None:
             return {
                 "intent_id": intent_id,
                 "state": "UNKNOWN_OUTCOME",
-                "account_scope": self.runtime.config.account_scope,
-                "environment": self.runtime.config.environment,
+                "account_scope": self.config.account_scope,
+                "environment": self.config.environment,
             }
         status = str(matched.get("status", "")).lower().replace(" ", "_")
         state = {
@@ -562,8 +561,8 @@ class _WindowsExecutionFactsV1:
             "state": state,
             "accepted": state != "REJECTED",
             "broker_order_id": bound_order_id,
-            "account_scope": self.runtime.config.account_scope,
-            "environment": self.runtime.config.environment,
+            "account_scope": self.config.account_scope,
+            "environment": self.config.environment,
         }
 
 
@@ -593,7 +592,7 @@ def _attach_fixed_typed_fenced_methods(
             "underlying send/cancel handlers are unavailable",
             code="RPC_MUTATION_HANDLERS_MISSING",
         )
-    facts = _WindowsExecutionFactsV1(runtime)
+    facts = _WindowsExecutionFactsV1(runtime, runtime_config)
 
     def send_bound(request: Mapping[str, Any], context: Mapping[str, Any]) -> Any:
         result = send_handler(request, context)
@@ -606,6 +605,7 @@ def _attach_fixed_typed_fenced_methods(
         if isinstance(result, Mapping):
             facts.record_outcome(context, result)
         return result
+
     # The execution ledger lives under the already verified service-owned WF-1
     # root at one fixed filename; callers cannot redirect it to an arbitrary
     # path or migration chain.

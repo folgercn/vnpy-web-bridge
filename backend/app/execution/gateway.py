@@ -460,10 +460,7 @@ class VnpyWindowsGateway:
         self._validate_receipt_result(receipt_result, context)
         result = self.transport.call(
             method,
-            {
-                "environment": self.environment,
-                "request": dict(request),
-            },
+            dict(request),
             context,
         )
         return self._validate_fenced_response(result, context)
@@ -586,7 +583,7 @@ class VnpyWindowsGateway:
         self, intent: SendIntent, context: MutationContext | None = None
     ) -> Mapping[str, Any]:
         self._require_started()
-        return self.transport.call(
+        result = self.transport.call(
             "query_intent_v1",
             {
                 "account_scope": self.account_scope,
@@ -596,6 +593,38 @@ class VnpyWindowsGateway:
             },
             context,
         )
+        expected = {
+            "intent_id": intent.intent_id,
+            "account_scope": self.account_scope,
+            "environment": self.environment,
+        }
+        if any(result.get(field) != value for field, value in expected.items()):
+            raise GatewayUnavailable("Windows intent query binding mismatch")
+        state = result.get("state")
+        if not isinstance(state, str) or state.upper() not in {
+            "UNKNOWN",
+            "UNKNOWN_OUTCOME",
+            "SUBMITTED",
+            "ACKNOWLEDGED",
+            "CANCELLED",
+            "TERMINAL",
+            "RECONCILED",
+            "REJECTED",
+        }:
+            raise GatewayUnavailable("Windows intent query state is invalid")
+        broker_order_id = result.get("broker_order_id")
+        if broker_order_id is not None and not isinstance(broker_order_id, str):
+            raise GatewayUnavailable("Windows intent query order binding is invalid")
+        if (
+            intent.broker_order_id
+            and broker_order_id
+            and intent.broker_order_id != broker_order_id
+        ):
+            raise GatewayUnavailable("Windows intent query order binding mismatch")
+        accepted = result.get("accepted")
+        if accepted is not None and not isinstance(accepted, bool):
+            raise GatewayUnavailable("Windows intent query acceptance is invalid")
+        return dict(result)
 
     def snapshot(self) -> GatewaySnapshot:
         self._require_started()

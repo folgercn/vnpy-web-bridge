@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from socket import AF_INET, SOCK_STREAM, socket
 from threading import Event, Thread
 from types import SimpleNamespace
 
@@ -8,6 +9,12 @@ import pytest
 from app.execution import GatewaySnapshot, MutationContext, VnpyWindowsGateway
 from app.execution.errors import GatewayTimeout
 from app.execution.gateway import ZmqRpcTransport
+
+
+def _free_tcp_address() -> str:
+    with socket(AF_INET, SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return f"tcp://127.0.0.1:{probe.getsockname()[1]}"
 
 
 class _Socket:
@@ -81,6 +88,42 @@ def test_req_timeout_discards_socket_then_same_intent_query_uses_rebuilt_socket(
         ),
         {},
     ]
+
+
+def test_transport_interoperates_with_vnpy_rpc_server_wire() -> None:
+    from vnpy.rpc import RpcServer
+
+    request_seen = []
+
+    def query_intent_v1(request):
+        request_seen.append(request)
+        return {"intent_id": request["intent_id"], "state": "ACKNOWLEDGED"}
+
+    server = RpcServer()
+    server.register(query_intent_v1)
+    req_address = _free_tcp_address()
+    pub_address = _free_tcp_address()
+    while pub_address == req_address:
+        pub_address = _free_tcp_address()
+    server.start(req_address, pub_address)
+    transport = ZmqRpcTransport(req_address)
+    try:
+        transport.start()
+        result = transport.call(
+            "query_intent_v1",
+            {"intent_id": "intent-000001", "account_scope": "account:prod"},
+        )
+        assert result == {
+            "intent_id": "intent-000001",
+            "state": "ACKNOWLEDGED",
+        }
+        assert request_seen == [
+            {"intent_id": "intent-000001", "account_scope": "account:prod"}
+        ]
+    finally:
+        transport.stop()
+        server.stop()
+        server.join()
 
 
 class _MutationTransport:
