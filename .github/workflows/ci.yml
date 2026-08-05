@@ -269,7 +269,7 @@ jobs:
             "${extra[@]}"
 
       - name: Upload Phase A release plan
-        if: always()
+        if: always() && hashFiles('artifacts/issue-291-phase-a-release-plan.json') != ''
         uses: actions/upload-artifact@v4
         with:
           name: issue-291-phase-a-release-plan-${{ github.run_id }}

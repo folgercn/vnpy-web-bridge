@@ -257,6 +257,18 @@ class WindowsRpcFencedAdmissionV1:
                 "receipt_intents": sorted(self._receipts),
             }
 
+    def allocate_snapshot_generation(self) -> tuple[int, str]:
+        """Allocate a durable observation generation without changing trade facts."""
+
+        with self._lock:
+            if self._durable_store is None:
+                raise WindowsRpcDurableFenceError(
+                    "snapshot generation requires the durable final store",
+                    code="WINDOWS_FINAL_STORE_MISSING",
+                )
+            durable = self._durable_store.allocate_snapshot_generation()
+            return int(durable["snapshot_generation"]), str(durable["state_hash"])
+
     def install_fence(self, *, epoch: int, fencing_token: int) -> dict[str, Any]:
         """Install a monotonic durable fence; equal values are idempotent."""
         with self._lock:

@@ -40,6 +40,7 @@ _FIELDS = {
     "state_version",
     "current_epoch",
     "current_fencing_token",
+    "snapshot_generation",
     "receipts",
     "idempotency",
     "previous_state_hash",
@@ -179,7 +180,12 @@ def _validate(raw: Any, *, account_scope: str, environment: str) -> dict[str, An
         or value["environment"] != environment
     ):
         raise _error("final admission store scope is foreign")
-    for field in ("state_version", "current_epoch", "current_fencing_token"):
+    for field in (
+        "state_version",
+        "current_epoch",
+        "current_fencing_token",
+        "snapshot_generation",
+    ):
         item = value[field]
         if isinstance(item, bool) or not isinstance(item, int) or item < 0:
             raise _error(f"final admission store {field} is invalid")
@@ -382,6 +388,7 @@ class DurableFinalAdmissionStoreV1:
             "state_version": 0,
             "current_epoch": 0,
             "current_fencing_token": 0,
+            "snapshot_generation": 0,
             "receipts": {},
             "idempotency": {},
             "previous_state_hash": "",
@@ -433,6 +440,14 @@ class DurableFinalAdmissionStoreV1:
         with self._lock, self._cross_process_lock():
             return self._refresh()
 
+    def allocate_snapshot_generation(self) -> dict[str, Any]:
+        """Durably allocate one globally unique observation generation."""
+
+        def allocate(state: dict[str, Any]) -> None:
+            state["snapshot_generation"] = int(state["snapshot_generation"]) + 1
+
+        return self.mutate(allocate)
+
     def mutate(self, writer: Callable[[dict[str, Any]], None]) -> dict[str, Any]:
         with self._lock, self._cross_process_lock():
             previous = self._refresh()
@@ -463,16 +478,34 @@ class DurableFinalAdmissionStoreV1:
         ):  # pragma: no cover - native Windows uses service ACL + byte-range lock
             import msvcrt
 
-            with self.lock_path.open("a+b") as handle:
-                handle.seek(0)
-                handle.write(b"0")
-                handle.flush()
-                msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            descriptor = os.open(
+                self.lock_path,
+                os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0),
+                0o600,
+            )
+            with os.fdopen(descriptor, "r+b") as handle:
+                handle.seek(0, os.SEEK_END)
+                size = handle.tell()
+                if size == 0:
+                    handle.seek(0)
+                    handle.write(b"0")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                elif size != 1:
+                    raise _error(
+                        "final admission lock file is invalid",
+                        "WINDOWS_FINAL_STORE_LOCK_INVALID",
+                    )
+                acquired = False
                 try:
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+                    acquired = True
                     yield
                 finally:
-                    handle.seek(0)
-                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                    if acquired:
+                        handle.seek(0)
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
             return
         with self.lock_path.open("a+", encoding="utf-8") as handle:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX)

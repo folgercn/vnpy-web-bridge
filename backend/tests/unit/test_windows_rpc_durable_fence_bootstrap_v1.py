@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import inspect
 import os
-from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -657,3 +658,210 @@ def test_windows_execution_query_is_bound_to_current_oms_order_facts() -> None:
         "account_scope": config.account_scope,
         "environment": config.environment,
     }
+
+
+def test_windows_snapshot_generation_survives_restart_and_is_concurrently_unique(
+    tmp_path: Path,
+) -> None:
+    from scripts.windows_fence_foundation.final_admission_v1 import (
+        WindowsRpcFencedAdmissionV1,
+    )
+
+    config = _runtime_config()
+    store_path = tmp_path / "execution-final-admission-v1.json"
+    request = {
+        "account_scope": config.account_scope,
+        "environment": config.environment,
+    }
+
+    def build() -> tuple[Any, Any]:
+        runtime = SimpleNamespace(config=config, fact_source=FactSource())
+        facts = durable_module._WindowsExecutionFactsV1(runtime)
+        admission = WindowsRpcFencedAdmissionV1.bootstrap(
+            store_path=str(store_path),
+            account_scope=config.account_scope,
+            environment=config.environment,
+            send_handler=lambda *_: {"state": "ACKNOWLEDGED"},
+            cancel_handler=lambda *_: {"state": "CANCELLED"},
+            query_handler=facts.query_intent_v1,
+        )
+        facts.bind_admission(admission)
+        return facts, admission
+
+    first, _first_admission = build()
+    assert first.get_execution_snapshot_v1(request)["generation"] == 1
+    assert first.get_execution_snapshot_v1(request)["generation"] == 2
+
+    restarted, _restarted_admission = build()
+    third = restarted.get_execution_snapshot_v1(request)
+    assert third["generation"] == 3
+    assert third["snapshot_id"].startswith("snapshot-0000000000000003-")
+
+    concurrent_peer, _peer_admission = build()
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        snapshots = list(
+            pool.map(
+                lambda index: (restarted, concurrent_peer)[
+                    index % 2
+                ].get_execution_snapshot_v1(request),
+                range(8),
+            )
+        )
+    assert sorted(item["generation"] for item in snapshots) == list(range(4, 12))
+    assert len({item["snapshot_id"] for item in snapshots}) == 8
+
+
+def test_windows_native_request_adapter_binds_fixed_gateway_and_oms_cancel(
+    tmp_path: Path,
+) -> None:
+    from app.execution import MutationContext
+    from app.execution.models import sha256_json
+    from vnpy.trader.constant import Status
+    from vnpy.trader.object import CancelRequest, OrderRequest
+
+    from scripts.windows_fence_foundation.final_admission_v1 import _receipt_digest
+
+    config = _runtime_config()
+    calls: list[tuple[str, Any, str]] = []
+    confirm_cancel = [True]
+
+    class NativeFacts(FactSource):
+        def __init__(self) -> None:
+            super().__init__()
+            self.orders: list[dict[str, Any]] = []
+
+        def get_all_orders(self) -> list[Any]:
+            return self.orders
+
+        def get_all_active_orders(self) -> list[Any]:
+            return [row for row in self.orders if row["status"] == "not_traded"]
+
+    facts = NativeFacts()
+
+    def native_send(request: Any, gateway_name: str) -> str:
+        assert isinstance(request, OrderRequest)
+        assert gateway_name == config.gateway_name
+        calls.append(("send", request, gateway_name))
+        if request.symbol == "EMPTY":
+            return ""
+        facts.orders.append(
+            {
+                "vt_orderid": "CTP.9001",
+                "orderid": "9001",
+                "symbol": request.symbol,
+                "exchange": request.exchange.name,
+                "reference": request.reference,
+                "gateway_name": gateway_name,
+                "status": "not_traded",
+            }
+        )
+        return "CTP.9001"
+
+    def native_cancel(request: Any, gateway_name: str) -> None:
+        assert isinstance(request, CancelRequest)
+        assert gateway_name == config.gateway_name
+        assert request.orderid == "9001"
+        calls.append(("cancel", request, gateway_name))
+        if confirm_cancel[0]:
+            facts.orders[0]["status"] = Status.CANCELLED
+
+    class NativeServer(FakeServer):
+        def __init__(self) -> None:
+            super().__init__()
+            self._functions["send_order"] = native_send
+            self._functions["cancel_order"] = native_cancel
+
+    server = NativeServer()
+    runtime = SimpleNamespace(
+        rpc_engine=SimpleNamespace(server=server),
+        fact_source=facts,
+    )
+    admission = durable_module._attach_fixed_typed_fenced_methods(
+        runtime, config, tmp_path
+    )
+    admission.install_fence(epoch=1, fencing_token=1)
+
+    def bound_context(
+        *, action: str, intent_id: str, request: dict[str, Any]
+    ) -> MutationContext:
+        context = MutationContext(
+            account_scope=config.account_scope,
+            environment=config.environment,
+            leader_epoch=1,
+            fencing_token=1,
+            plan_id="plan-000001",
+            plan_hash="a" * 64,
+            intent_id=intent_id,
+            idempotency_key=f"{action}-key-{intent_id}",
+            action=action,
+            receipt_id=f"receipt-{intent_id}",
+            request_hash=sha256_json(request),
+        )
+        return replace(context, receipt_hash=_receipt_digest(context.as_dict()))
+
+    send_request = {
+        "symbol": "RB2610",
+        "exchange": "SHFE",
+        "direction": "LONG",
+        "type": "LIMIT",
+        "volume": 1,
+        "price": 3100,
+        "offset": "OPEN",
+    }
+    send_context = bound_context(
+        action="send", intent_id="intent-send-0001", request=send_request
+    )
+    admission.register_receipt(
+        intent_id=send_context.intent_id, receipt=send_context.as_dict()
+    )
+    sent = admission.send_order_fenced_v1(send_request, send_context)
+    assert sent["state"] == "SUBMITTED"
+    assert sent["broker_order_id"] == "CTP.9001"
+    assert calls[0][1].reference == send_context.intent_id
+
+    cancel_request = {
+        "target_intent_id": send_context.intent_id,
+        "broker_order_id": "CTP.9001",
+    }
+    cancel_context = bound_context(
+        action="cancel", intent_id="intent-cancel-001", request=cancel_request
+    )
+    admission.register_receipt(
+        intent_id=cancel_context.intent_id, receipt=cancel_context.as_dict()
+    )
+    cancelled = admission.cancel_order_fenced_v1(cancel_request, cancel_context)
+    assert cancelled["state"] == "CANCELLED"
+    assert [item[0] for item in calls] == ["send", "cancel"]
+
+    foreign_request = {**send_request, "gateway_name": "FOREIGN"}
+    foreign_context = bound_context(
+        action="send", intent_id="intent-send-0002", request=foreign_request
+    )
+    admission.register_receipt(
+        intent_id=foreign_context.intent_id, receipt=foreign_context.as_dict()
+    )
+    with pytest.raises(WindowsRpcDurableFenceDenied, match="foreign gateway"):
+        admission.send_order_fenced_v1(foreign_request, foreign_context)
+    assert [item[0] for item in calls] == ["send", "cancel"]
+
+    empty_request = {**send_request, "symbol": "EMPTY"}
+    empty_context = bound_context(
+        action="send", intent_id="intent-send-0003", request=empty_request
+    )
+    admission.register_receipt(
+        intent_id=empty_context.intent_id, receipt=empty_context.as_dict()
+    )
+    with pytest.raises(WindowsRpcDurableFenceError, match="unknown outcome"):
+        admission.send_order_fenced_v1(empty_request, empty_context)
+
+    facts.orders[0]["status"] = "not_traded"
+    confirm_cancel[0] = False
+    unknown_cancel_context = bound_context(
+        action="cancel", intent_id="intent-cancel-002", request=cancel_request
+    )
+    admission.register_receipt(
+        intent_id=unknown_cancel_context.intent_id,
+        receipt=unknown_cancel_context.as_dict(),
+    )
+    with pytest.raises(WindowsRpcDurableFenceError, match="unknown outcome"):
+        admission.cancel_order_fenced_v1(cancel_request, unknown_cancel_context)

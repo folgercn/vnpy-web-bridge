@@ -6,6 +6,7 @@ import importlib.abc
 import importlib.util
 import io
 import json
+import math
 import os
 import re
 import sys
@@ -18,7 +19,7 @@ from hashlib import sha256
 from pathlib import Path
 from threading import RLock
 from types import MappingProxyType
-from typing import Any
+from typing import Any, ClassVar
 
 _FOUNDATION_ARCHIVE_NAME = "windows_fence_foundation_v1.pyz"
 _FOUNDATION_ARCHIVE_PATH = Path(__file__).resolve().with_name(_FOUNDATION_ARCHIVE_NAME)
@@ -364,7 +365,7 @@ class _WindowsRpcRuntimeV1:
 
 def _execution_fact_value(value: Any) -> Any:
     if isinstance(value, Enum):
-        return value.value
+        return value.name
     if isinstance(value, datetime):
         if value.tzinfo is None or value.utcoffset() is None:
             raise WindowsRpcDurableFenceError(
@@ -424,8 +425,16 @@ class _WindowsExecutionFactsV1:
         self.runtime = runtime
         self.config = config or runtime.config
         self._lock = RLock()
-        self._generation = 0
+        self._admission: WindowsRpcFencedAdmissionV1 | None = None
         self._intent_orders: dict[str, str] = {}
+
+    def bind_admission(self, admission: WindowsRpcFencedAdmissionV1) -> None:
+        if self._admission is not None:
+            raise WindowsRpcDurableFenceError(
+                "execution facts admission is already bound",
+                code="FINAL_RPC_HANDLER_IDENTITY_MISMATCH",
+            )
+        self._admission = admission
 
     def record_outcome(
         self, context: Mapping[str, Any], result: Mapping[str, Any]
@@ -493,12 +502,16 @@ class _WindowsExecutionFactsV1:
         positions = self._positions()
         active_orders = self._facts("get_all_active_orders")
         accounts = self._facts("get_all_accounts")
-        with self._lock:
-            self._generation += 1
-            generation = self._generation
         observed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        admission = self._admission
+        if admission is None:
+            raise WindowsRpcDurableFenceError(
+                "execution snapshot durable allocator is unavailable",
+                code="WINDOWS_FINAL_STORE_MISSING",
+            )
+        generation, store_hash = admission.allocate_snapshot_generation()
         return {
-            "snapshot_id": f"snapshot-{generation:016d}",
+            "snapshot_id": f"snapshot-{generation:016d}-{store_hash}",
             "generation": generation,
             "connected": bool(accounts),
             "active_order_count": len(active_orders),
@@ -565,6 +578,193 @@ class _WindowsExecutionFactsV1:
             "environment": self.config.environment,
         }
 
+    def resolve_cancel(self, request: Mapping[str, Any]) -> dict[str, str]:
+        if not isinstance(request, Mapping) or not {
+            "target_intent_id",
+            "broker_order_id",
+        }.issuperset(request):
+            raise WindowsRpcDurableFenceDenied(
+                "cancel request fields are not exact",
+                code="WINDOWS_FENCE_REQUEST_INVALID",
+            )
+        target_intent = request.get("target_intent_id")
+        broker_order_id = request.get("broker_order_id")
+        if not isinstance(target_intent, str) or not target_intent:
+            raise WindowsRpcDurableFenceDenied(
+                "cancel target intent is invalid",
+                code="WINDOWS_FENCE_REQUEST_INVALID",
+            )
+        with self._lock:
+            recorded = self._intent_orders.get(target_intent)
+        wanted = broker_order_id or recorded
+        orders = self._orders()
+        match = next(
+            (
+                row
+                for row in orders.values()
+                if (
+                    isinstance(wanted, str)
+                    and wanted in {row.get("orderid"), row.get("vt_orderid")}
+                )
+                or row.get("reference") == target_intent
+            ),
+            None,
+        )
+        if match is None:
+            raise WindowsRpcDurableFenceDenied(
+                "cancel order is absent from current OMS facts",
+                code="WINDOWS_FENCE_REQUEST_INVALID",
+            )
+        fact_gateway = match.get("gateway_name")
+        vt_orderid = self._key(match, "vt_orderid", "orderid")
+        if fact_gateway not in {None, "", self.config.gateway_name} or (
+            "." in vt_orderid
+            and vt_orderid.split(".", 1)[0] != self.config.gateway_name
+        ):
+            raise WindowsRpcDurableFenceDenied(
+                "cancel order belongs to a foreign gateway",
+                code="WINDOWS_FENCE_SCOPE_INVALID",
+            )
+        orderid = match.get("orderid")
+        if not isinstance(orderid, str) or not orderid:
+            orderid = vt_orderid.split(".", 1)[-1]
+        symbol = match.get("symbol")
+        exchange = match.get("exchange")
+        if not isinstance(symbol, str) or not symbol or not isinstance(exchange, str):
+            raise WindowsRpcDurableFenceError(
+                "cancel order facts are incomplete",
+                code="WINDOWS_EXECUTION_FACT_INVALID",
+            )
+        return {
+            "orderid": orderid,
+            "vt_orderid": vt_orderid,
+            "symbol": symbol,
+            "exchange": exchange,
+        }
+
+    def cancel_state(self, vt_orderid: str) -> str:
+        order = self._orders().get(vt_orderid)
+        if order is None:
+            return "UNKNOWN_OUTCOME"
+        status = str(order.get("status", "")).lower().replace(" ", "_")
+        if status in {"cancelled", "canceled", "all_traded", "alltraded"}:
+            return "CANCELLED"
+        if status == "rejected":
+            return "REJECTED"
+        return "UNKNOWN_OUTCOME"
+
+
+class _VnpyExecutionRequestFactoryV1:
+    """Exact-schema conversion from JSON facts to native vn.py requests."""
+
+    schema_version = "windows_execution_vnpy_request_factory_v1"
+    _SEND_FIELDS: ClassVar[frozenset[str]] = frozenset(
+        {
+            "symbol",
+            "exchange",
+            "direction",
+            "type",
+            "volume",
+            "price",
+            "offset",
+            "reference",
+            "gateway_name",
+        }
+    )
+    _SEND_REQUIRED: ClassVar[frozenset[str]] = frozenset(
+        {"symbol", "exchange", "direction", "type", "volume"}
+    )
+
+    def __init__(self, gateway_name: str) -> None:
+        try:
+            from vnpy.trader.constant import Direction, Exchange, Offset, OrderType
+            from vnpy.trader.object import CancelRequest, OrderRequest
+        except ImportError as exc:
+            raise WindowsRpcDurableFenceError(
+                "vn.py request types are unavailable",
+                code="WINDOWS_FENCE_HANDLER_INVALID",
+            ) from exc
+        self.gateway_name = gateway_name
+        self.Direction = Direction
+        self.Exchange = Exchange
+        self.Offset = Offset
+        self.OrderType = OrderType
+        self.OrderRequest = OrderRequest
+        self.CancelRequest = CancelRequest
+
+    @staticmethod
+    def _enum(enum_type: Any, value: Any, field: str) -> Any:
+        if not isinstance(value, str):
+            raise WindowsRpcDurableFenceDenied(
+                f"{field} is invalid", code="WINDOWS_FENCE_REQUEST_INVALID"
+            )
+        try:
+            return enum_type[value.strip().upper()]
+        except KeyError as exc:
+            raise WindowsRpcDurableFenceDenied(
+                f"{field} is outside the allowlist",
+                code="WINDOWS_FENCE_REQUEST_INVALID",
+            ) from exc
+
+    @staticmethod
+    def _number(value: Any, field: str, *, positive: bool) -> float:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise WindowsRpcDurableFenceDenied(
+                f"{field} is invalid", code="WINDOWS_FENCE_REQUEST_INVALID"
+            )
+        number = float(value)
+        if not math.isfinite(number) or (number <= 0 if positive else number < 0):
+            raise WindowsRpcDurableFenceDenied(
+                f"{field} is invalid", code="WINDOWS_FENCE_REQUEST_INVALID"
+            )
+        return number
+
+    def order_request(
+        self, request: Mapping[str, Any], context: Mapping[str, Any]
+    ) -> Any:
+        if (
+            not isinstance(request, Mapping)
+            or not self._SEND_REQUIRED.issubset(request)
+            or not set(request).issubset(self._SEND_FIELDS)
+        ):
+            raise WindowsRpcDurableFenceDenied(
+                "send request fields are not exact",
+                code="WINDOWS_FENCE_REQUEST_INVALID",
+            )
+        gateway = request.get("gateway_name")
+        if gateway is not None and gateway != self.gateway_name:
+            raise WindowsRpcDurableFenceDenied(
+                "send request names a foreign gateway",
+                code="WINDOWS_FENCE_SCOPE_INVALID",
+            )
+        symbol = request.get("symbol")
+        if not isinstance(symbol, str) or not symbol or len(symbol) > 64:
+            raise WindowsRpcDurableFenceDenied(
+                "send symbol is invalid", code="WINDOWS_FENCE_REQUEST_INVALID"
+            )
+        reference = request.get("reference", context.get("intent_id"))
+        if not isinstance(reference, str) or not reference or len(reference) > 64:
+            raise WindowsRpcDurableFenceDenied(
+                "send reference is invalid", code="WINDOWS_FENCE_REQUEST_INVALID"
+            )
+        return self.OrderRequest(
+            symbol=symbol,
+            exchange=self._enum(self.Exchange, request["exchange"], "exchange"),
+            direction=self._enum(self.Direction, request["direction"], "direction"),
+            type=self._enum(self.OrderType, request["type"], "type"),
+            volume=self._number(request["volume"], "volume", positive=True),
+            price=self._number(request.get("price", 0), "price", positive=False),
+            offset=self._enum(self.Offset, request.get("offset", "NONE"), "offset"),
+            reference=reference,
+        )
+
+    def cancel_request(self, facts: Mapping[str, str]) -> Any:
+        return self.CancelRequest(
+            orderid=facts["orderid"],
+            symbol=facts["symbol"],
+            exchange=self._enum(self.Exchange, facts["exchange"], "exchange"),
+        )
+
 
 def _attach_fixed_typed_fenced_methods(
     runtime: _WindowsRpcRuntimeV1,
@@ -593,17 +793,60 @@ def _attach_fixed_typed_fenced_methods(
             code="RPC_MUTATION_HANDLERS_MISSING",
         )
     facts = _WindowsExecutionFactsV1(runtime, runtime_config)
+    request_factory = getattr(runtime, "execution_request_factory", None)
+    if request_factory is None:
+        request_factory = _VnpyExecutionRequestFactoryV1(runtime_config.gateway_name)
+    if (
+        getattr(request_factory, "schema_version", None)
+        != _VnpyExecutionRequestFactoryV1.schema_version
+        or not callable(getattr(request_factory, "order_request", None))
+        or not callable(getattr(request_factory, "cancel_request", None))
+    ):
+        raise WindowsRpcDurableFenceError(
+            "strict vn.py request factory is unavailable",
+            code="WINDOWS_FENCE_HANDLER_INVALID",
+        )
 
     def send_bound(request: Mapping[str, Any], context: Mapping[str, Any]) -> Any:
-        result = send_handler(request, context)
-        if isinstance(result, Mapping):
-            facts.record_outcome(context, result)
+        native_request = request_factory.order_request(request, context)
+        vt_orderid = send_handler(native_request, runtime_config.gateway_name)
+        if not isinstance(vt_orderid, str) or not vt_orderid:
+            return {"state": "UNKNOWN_OUTCOME"}
+        if (
+            "." not in vt_orderid
+            or vt_orderid.split(".", 1)[0] != runtime_config.gateway_name
+        ):
+            raise WindowsRpcDurableFenceError(
+                "native send returned a foreign order identity",
+                code="WINDOWS_FENCE_RESPONSE_INVALID",
+            )
+        result = {
+            "accepted": True,
+            "state": "SUBMITTED",
+            "broker_order_id": vt_orderid,
+        }
+        facts.record_outcome(context, result)
         return result
 
     def cancel_bound(request: Mapping[str, Any], context: Mapping[str, Any]) -> Any:
-        result = cancel_handler(request, context)
-        if isinstance(result, Mapping):
-            facts.record_outcome(context, result)
+        cancel_facts = facts.resolve_cancel(request)
+        native_request = request_factory.cancel_request(cancel_facts)
+        facts.record_outcome(context, {"broker_order_id": cancel_facts["vt_orderid"]})
+        native_result = cancel_handler(native_request, runtime_config.gateway_name)
+        if native_result is not None:
+            raise WindowsRpcDurableFenceError(
+                "native cancel handler returned an invalid acknowledgement",
+                code="WINDOWS_FENCE_RESPONSE_INVALID",
+            )
+        state = facts.cancel_state(cancel_facts["vt_orderid"])
+        if state == "UNKNOWN_OUTCOME":
+            return {"state": state}
+        result = {
+            "accepted": state != "REJECTED",
+            "state": state,
+            "broker_order_id": cancel_facts["vt_orderid"],
+        }
+        facts.record_outcome(context, result)
         return result
 
     # The execution ledger lives under the already verified service-owned WF-1
@@ -618,6 +861,7 @@ def _attach_fixed_typed_fenced_methods(
         cancel_handler=cancel_bound,
         query_handler=facts.query_intent_v1,
     )
+    facts.bind_admission(admission)
     attach_windows_rpc_fenced_methods_v1(server, admission)
     server.register(facts.get_execution_snapshot_v1)
     return admission

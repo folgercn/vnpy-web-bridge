@@ -97,6 +97,10 @@ def test_issue291_phase_a_gate_builds_primary_images_and_execution_proxy_closure
     release = WORKFLOW.split("  phase-a-release-plan:\n", maxsplit=1)[1]
     assert "plan_phase_a_release.py" in release
     assert "issue-291-phase-a-release-plan" in release
+    assert (
+        "if: always() && hashFiles('artifacts/issue-291-phase-a-release-plan.json') != ''"
+        in release
+    )
     build = WORKFLOW.split("  phase-a-build-check:\n", maxsplit=1)[1].split(
         "  backend:\n", maxsplit=1
     )[0]

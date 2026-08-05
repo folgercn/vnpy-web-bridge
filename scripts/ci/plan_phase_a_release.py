@@ -13,20 +13,37 @@ execution-sensitive.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import re
 from collections.abc import Mapping
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 from jsonschema import Draft202012Validator
 
-from scripts.ci.classify_changes import (
-    PHASE_A_UNIT_METADATA,
-    classify_phase_a,
-)
-
 ROOT = Path(__file__).resolve().parents[2]
+CLASSIFIER_PATH = ROOT / "scripts/ci/classify_changes.py"
+
+
+def _load_classifier_dependency() -> ModuleType:
+    """Load the sibling classifier without depending on cwd or PYTHONPATH."""
+
+    spec = importlib.util.spec_from_file_location(
+        "phase_a_change_classifier", CLASSIFIER_PATH
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load Phase A classifier: {CLASSIFIER_PATH}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_classifier = _load_classifier_dependency()
+PHASE_A_UNIT_METADATA = _classifier.PHASE_A_UNIT_METADATA
+classify_phase_a = _classifier.classify_phase_a
+
 PLAN_SCHEMA_PATH = ROOT / "docs/schemas/issue-291-phase-a-release-plan-v1.schema.json"
 SOURCE_SHA = re.compile(r"^(?!0{40}$)[0-9a-f]{40}$")
 ROOT_DOCKERFILE_FORBIDDEN_MARKERS = (

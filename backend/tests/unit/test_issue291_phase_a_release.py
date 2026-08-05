@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -352,6 +354,40 @@ def test_full_current_changed_paths_produce_allowed_dependency_closure() -> None
     }
     assert plan["external_artifacts"] == ["windows-ctp-gateway"]
     assert plan["dependency_closure"]["external_artifacts"] == ["windows-ctp-gateway"]
+
+
+@pytest.mark.parametrize("working_directory", ("repo-root", "external"))
+def test_cli_entrypoint_resolves_repo_root_without_pythonpath(
+    tmp_path: Path, working_directory: str
+) -> None:
+    paths_file = tmp_path / "paths.txt"
+    output = tmp_path / f"plan-{working_directory}.json"
+    paths_file.write_text("frontend/src/App.tsx\n", encoding="utf-8")
+    clean_env = os.environ.copy()
+    clean_env.pop("PYTHONPATH", None)
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts/ci/plan_phase_a_release.py"),
+            "--paths-file",
+            str(paths_file),
+            "--source-commit-sha",
+            SHA,
+            "--output",
+            str(output),
+        ],
+        cwd=ROOT if working_directory == "repo-root" else tmp_path,
+        env=clean_env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+    plan = json.loads(output.read_text(encoding="utf-8"))
+    Draft202012Validator(PLAN_SCHEMA).validate(plan)
+    assert plan["decision"] == "BUILD_ONLY"
+    assert plan["changed_paths"] == ["frontend/src/App.tsx"]
 
 
 def test_phase_a_release_manifest_records_real_build_files_without_deploy_claim() -> (

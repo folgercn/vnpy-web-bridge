@@ -23,6 +23,26 @@ from app.execution.errors import (
 HASH = "b" * 64
 
 
+def _native_windows_store_increment(path: str) -> int:
+    from scripts.windows_fence_foundation.final_store_v1 import (
+        DurableFinalAdmissionStoreV1,
+    )
+
+    store = DurableFinalAdmissionStoreV1.bootstrap(
+        path, account_scope="account:prod", environment="simnow"
+    )
+    return int(
+        store.mutate(
+            lambda state: state.update(
+                {
+                    "current_epoch": state["current_epoch"] + 1,
+                    "current_fencing_token": state["current_fencing_token"] + 1,
+                }
+            )
+        )["state_version"]
+    )
+
+
 def command(command: str, key: str, version: int, payload: dict) -> dict:
     return {
         "schema_version": "web_bridge_control_execution_command_v1",
@@ -584,6 +604,17 @@ def test_windows_final_store_native_create_replace_and_restart(tmp_path) -> None
     )
     assert path.is_file()
     assert path.with_name(f"{path.name}.ledger").is_file()
+    lock_path = path.with_name(f".{path.name}.lock")
+    assert lock_path.read_bytes() == b"0"
+    for _ in range(3):
+        with store._cross_process_lock():
+            assert lock_path.read_bytes() == b"0"
+        assert lock_path.read_bytes() == b"0"
+
+    for _ in range(2):
+        DurableFinalAdmissionStoreV1.bootstrap(
+            path, account_scope="account:prod", environment="simnow"
+        )
 
     store.mutate(
         lambda state: state.update({"current_epoch": 1, "current_fencing_token": 1})
@@ -593,6 +624,18 @@ def test_windows_final_store_native_create_replace_and_restart(tmp_path) -> None
     )
     assert restarted.snapshot()["current_epoch"] == 1
     assert restarted.snapshot()["current_fencing_token"] == 1
+
+    from concurrent.futures import ProcessPoolExecutor
+    from multiprocessing import get_context
+
+    with ProcessPoolExecutor(
+        max_workers=2, mp_context=get_context("spawn")
+    ) as executor:
+        versions = sorted(
+            executor.map(_native_windows_store_increment, [str(path)] * 2)
+        )
+    assert versions == [2, 3]
+    assert len(lock_path.read_bytes()) == 1
 
 
 def test_windows_receipt_is_create_only_and_cross_epoch_idempotency_is_rejected() -> (
@@ -952,6 +995,40 @@ def test_reconcile_binds_snapshot_id_and_canonical_position_hash() -> None:
                 },
             )
         )
+
+
+def test_reconcile_accepts_fresh_post_windows_restart_generation() -> None:
+    from app.execution.models import sha256_json
+
+    service, repo, gateway, _token = prepare()
+
+    def durable_high_water(state):
+        state["broker"]["generation"] = 2
+
+    repo.mutate(durable_high_water)
+    gateway.snapshots.append(
+        GatewaySnapshot(
+            snapshot_id=f"snapshot-{'3':0>16}-{'d' * 64}",
+            generation=3,
+            connected=True,
+            position_snapshot_hash=sha256_json({}),
+            account_scope="account:default",
+            environment="test",
+        )
+    )
+    service.process_command(
+        command(
+            "reconcile",
+            "reconcile-restart-0001",
+            repo.state_version,
+            {
+                "reconciliation_run_id": "run-restart-0001",
+                "snapshot_id": f"snapshot-{'3':0>16}-{'d' * 64}",
+                "reason": "Windows gateway restarted",
+            },
+        )
+    )
+    assert repo.snapshot()["broker"]["generation"] == 3
 
 
 def test_same_process_rejects_valid_old_file_replacement(tmp_path) -> None:
