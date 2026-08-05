@@ -22,6 +22,7 @@ import math
 import os
 import stat
 import sys
+import uuid
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -211,16 +212,16 @@ def map_output_contract_sha256() -> str:
     return _sha256(canonical_json(_map_output_contract()))
 
 
-def approved_source_envelope(
+def build_approved_source_fixture(
     source_view: Mapping[str, Any] | bytes | bytearray,
     *,
     receipt_sha256: str | None = None,
 ) -> dict[str, Any]:
-    """Normalize a typed source view into the producer's approval envelope.
+    """Build a test/fixture request from an already approved source view.
 
-    Upstream custody is responsible for the real receipt; this helper only
-    carries the already verified facts into an isolated batch.  The producer
-    never treats a claim as runtime authority.
+    This helper only constructs request-shaped fixture data.  It does not
+    authenticate a receipt, establish custody, or self-authorize production;
+    runtime callers must receive the exact immutable envelope from custody.
     """
 
     if isinstance(source_view, (bytes, bytearray)):
@@ -263,6 +264,20 @@ def approved_source_envelope(
             "lineage_verified": True,
         },
     }
+
+
+def approved_source_envelope(
+    source_view: Mapping[str, Any] | bytes | bytearray,
+    *,
+    receipt_sha256: str | None = None,
+) -> dict[str, Any]:
+    """Compatibility alias for :func:`build_approved_source_fixture`.
+
+    The legacy name is retained for existing fixtures only; it never grants
+    approval or runtime authority.
+    """
+
+    return build_approved_source_fixture(source_view, receipt_sha256=receipt_sha256)
 
 
 def _prepare_source(source_input: Mapping[str, Any] | bytes | bytearray) -> tuple[dict[str, Any], str, str]:
@@ -573,47 +588,94 @@ def _read_pinned_file(path: Path) -> bytes:
 
 
 def _create_only_atomic(path: Path, raw: bytes) -> None:
+    """Publish one candidate through a pinned, non-following parent dirfd."""
+
     _reject_path_latest(path)
     parent = path.parent
+    parent_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        parent_flags |= os.O_NOFOLLOW
     try:
-        parent_stat = parent.lstat()
+        parent_fd = os.open(parent, parent_flags)
     except OSError as exc:
-        raise ProducerError("output parent cannot be stat-ed") from exc
-    if stat.S_ISLNK(parent_stat.st_mode) or not stat.S_ISDIR(parent_stat.st_mode):
-        raise ProducerError("output parent must be a real directory")
-    if path.exists() or path.is_symlink():
-        raise ProducerError("output already exists; overwrite is forbidden")
-    temporary = parent / f".{path.name}.{os.getpid()}.tmp"
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        raise ProducerError("output parent cannot be opened safely") from exc
+    temporary_name = f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
     fd = -1
     try:
-        fd = os.open(temporary, flags, 0o600)
-        written = 0
-        while written < len(raw):
-            written += os.write(fd, raw[written:])
-        os.fsync(fd)
-        os.close(fd)
-        fd = -1
+        parent_stat = os.fstat(parent_fd)
+        if not stat.S_ISDIR(parent_stat.st_mode):
+            raise ProducerError("output parent must be a real directory")
+
+        def revalidate_parent() -> None:
+            check_fd = -1
+            try:
+                check_fd = os.open(parent, parent_flags)
+                check_stat = os.fstat(check_fd)
+                if (check_stat.st_dev, check_stat.st_ino) != (
+                    parent_stat.st_dev,
+                    parent_stat.st_ino,
+                ):
+                    raise ProducerError("output parent changed during publish")
+            except ProducerError:
+                raise
+            except OSError as exc:
+                raise ProducerError("output parent changed during publish") from exc
+            finally:
+                if check_fd >= 0:
+                    os.close(check_fd)
+
+        revalidate_parent()
         try:
-            os.link(temporary, path, follow_symlinks=False)
+            os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise ProducerError("output already exists; overwrite is forbidden")
+
+        create_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
+        if hasattr(os, "O_NOFOLLOW"):
+            create_flags |= os.O_NOFOLLOW
+        try:
+            fd = os.open(temporary_name, create_flags, 0o600, dir_fd=parent_fd)
+            written = 0
+            while written < len(raw):
+                written += os.write(fd, raw[written:])
+            os.fsync(fd)
+            os.close(fd)
+            fd = -1
+            revalidate_parent()
+            try:
+                os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                raise ProducerError("output already exists; overwrite is forbidden")
+            os.link(
+                temporary_name,
+                path.name,
+                src_dir_fd=parent_fd,
+                dst_dir_fd=parent_fd,
+                follow_symlinks=False,
+            )
+            os.fsync(parent_fd)
+            revalidate_parent()
+        except ProducerError:
+            raise
         except FileExistsError as exc:
             raise ProducerError("output already exists; overwrite is forbidden") from exc
-        directory_fd = os.open(parent, os.O_RDONLY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
-    except OSError as exc:
-        if exc.errno == errno.EEXIST:
-            raise ProducerError("output already exists; overwrite is forbidden") from exc
-        raise ProducerError("atomic candidate publish failed") from exc
+        except OSError as exc:
+            if exc.errno == errno.EEXIST:
+                raise ProducerError("output already exists; overwrite is forbidden") from exc
+            raise ProducerError("atomic candidate publish failed") from exc
     finally:
         if fd >= 0:
             os.close(fd)
         try:
-            temporary.unlink()
+            os.unlink(temporary_name, dir_fd=parent_fd)
         except FileNotFoundError:
             pass
+        finally:
+            os.close(parent_fd)
 
 
 def _cli_json(payload: Mapping[str, Any]) -> None:

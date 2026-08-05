@@ -4,6 +4,7 @@ import ast
 import base64
 import hashlib
 import json
+import os
 import sys
 from copy import deepcopy
 from pathlib import Path
@@ -19,32 +20,56 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from c_fast_producer.producer import (
     CFAST_CANDIDATE_SCHEMA,
+    MAP_ACCEPTANCE_KEY_PURPOSE,
+    MAP_ACCEPTANCE_KEY_VERSION,
+    MAP_ACCEPTANCE_PRODUCER_ID,
+    MAP_ACCEPTANCE_PRODUCER_VERSION,
+    MAP_ACCEPTANCE_SCHEMA_REF,
+    MAP_ACCEPTANCE_TRUST_DOMAIN,
     produce_c_fast_candidate,
     verify_c_fast_candidate,
 )
 from c_fast_producer.producer import ProducerError as CFastProducerError
+from c_fast_producer.producer import (
+    _create_only_atomic as create_cfast_atomic,
+)
+from c_fast_producer.producer import (
+    _decode_json as decode_cfast_json,
+)
+from c_fast_producer.producer import (
+    _parser as cfast_parser,
+)
+from c_fast_producer.producer import (
+    canonical_json as cfast_canonical_json,
+)
 from map.producer import (
     MAP_CANDIDATE_SCHEMA,
-    approved_source_envelope,
+    build_approved_source_fixture,
     produce_map_candidate,
     verify_map_candidate,
 )
 from map.producer import (
     ProducerError as MapProducerError,
 )
+from map.producer import (
+    _create_only_atomic as create_map_atomic,
+)
 from test_commodity_c_fast_pure_producer_kernel import source_view
 
 from shared.artifact_contracts.v1 import new_artifact_envelope
 from shared.trust_contracts.v1 import (
     SIGNED_ARTIFACT_SCHEMA_VERSION,
+    ContractError,
     build_signed_artifact,
     build_signing_request,
+    canonical_json_line,
+    load_keyring,
     signing_bytes,
 )
 
 
 def _envelope() -> dict:
-    return approved_source_envelope(source_view())
+    return build_approved_source_fixture(source_view())
 
 
 def _map_acceptance(map_result) -> tuple[dict, dict]:
@@ -55,22 +80,22 @@ def _map_acceptance(map_result) -> tuple[dict, dict]:
     )
     keyring = {
         "schema_version": "web-bridge-trust-keyring-v1",
-        "domain": "map_acceptance",
-        "key_version": "v1",
+        "domain": MAP_ACCEPTANCE_TRUST_DOMAIN,
+        "key_version": MAP_ACCEPTANCE_KEY_VERSION,
         "keys": [{
             "key_id": "map-acceptance-test",
-            "domain": "map_acceptance",
-            "purpose": "unit-test-only",
+            "domain": MAP_ACCEPTANCE_TRUST_DOMAIN,
+            "purpose": MAP_ACCEPTANCE_KEY_PURPOSE,
             "public_key_base64": base64.b64encode(public).decode("ascii"),
             "status": "active",
         }],
     }
     artifact = new_artifact_envelope(
         artifact_type="map-acceptance",
-        trust_domain="map_acceptance",
-        producer_id="map-acceptance-reviewer",
-        producer_version="review-v1",
-        schema_ref="map-acceptance-v1",
+        trust_domain=MAP_ACCEPTANCE_TRUST_DOMAIN,
+        producer_id=MAP_ACCEPTANCE_PRODUCER_ID,
+        producer_version=MAP_ACCEPTANCE_PRODUCER_VERSION,
+        schema_ref=MAP_ACCEPTANCE_SCHEMA_REF,
         payload={
             "decision": "approved",
             "map_candidate_id": map_result.payload["candidate_id"],
@@ -79,19 +104,19 @@ def _map_acceptance(map_result) -> tuple[dict, dict]:
             "live_trading_authorized": False,
             "countable_forward": False,
         },
-        generated_at="2026-08-05T06:00:00Z",
+        generated_at="2020-01-01T00:00:00Z",
         scope={"candidate_id": map_result.payload["candidate_id"]},
         predecessor_refs=[],
         lineage=[map_result.artifact_sha256],
     )
     request = build_signing_request(
         artifact,
-        domain="map_acceptance",
+        domain=MAP_ACCEPTANCE_TRUST_DOMAIN,
         key_id="map-acceptance-test",
-        key_version="v1",
+        key_version=MAP_ACCEPTANCE_KEY_VERSION,
         request_id="map-acceptance-request-1",
-        requested_at="2026-08-05T06:00:00Z",
-        expires_at="2026-08-05T07:00:00Z",
+        requested_at="2020-01-01T00:00:00Z",
+        expires_at="2099-01-01T00:00:00Z",
     )
     unsigned = {
         "schema_version": SIGNED_ARTIFACT_SCHEMA_VERSION,
@@ -168,6 +193,114 @@ def test_source_and_predecessor_hashes_are_explicit() -> None:
     # The envelope's source hash is now stale and must not be silently repaired.
     with pytest.raises(CFastProducerError, match="source canonical hash"):
         produce_c_fast_candidate(map_result.raw, wrong_source, map_acceptance=approval, map_acceptance_keyring=keyring)
+
+
+def test_c_fast_verification_requires_map_and_source_replay() -> None:
+    source = _envelope()
+    map_result = produce_map_candidate(source)
+    approval, keyring = _map_acceptance(map_result)
+    c_result = produce_c_fast_candidate(
+        map_result.raw,
+        source,
+        map_acceptance=approval,
+        map_acceptance_keyring=keyring,
+    )
+    with pytest.raises(CFastProducerError, match="both MAP predecessor and source"):
+        verify_c_fast_candidate(
+            c_result.raw,
+            source_input=source,
+            map_acceptance=approval,
+            map_acceptance_keyring=keyring,
+        )
+    with pytest.raises(CFastProducerError, match="both MAP predecessor and source"):
+        verify_c_fast_candidate(
+            c_result.raw,
+            map_candidate_input=map_result.raw,
+            map_acceptance=approval,
+            map_acceptance_keyring=keyring,
+        )
+
+
+def test_canonical_jsonl_and_duplicate_key_framing_are_strict() -> None:
+    payload = {"alpha": 1, "beta": "two"}
+    canonical = cfast_canonical_json(payload)
+    assert decode_cfast_json(canonical, "candidate") == payload
+    assert decode_cfast_json(canonical + b"\n", "candidate") == payload
+    with pytest.raises(CFastProducerError, match="canonical JSON"):
+        decode_cfast_json(canonical + b" \n", "candidate")
+    with pytest.raises(CFastProducerError, match="duplicate JSON key"):
+        decode_cfast_json(b'{"alpha":1,"alpha":2}', "candidate")
+
+
+def test_map_acceptance_role_and_keyring_raw_pin_fail_closed(tmp_path: Path) -> None:
+    source = _envelope()
+    map_result = produce_map_candidate(source)
+    approval, keyring = _map_acceptance(map_result)
+    bad_role = deepcopy(keyring)
+    bad_role["keys"][0]["purpose"] = "fixture-only"
+    with pytest.raises(CFastProducerError, match="signer role"):
+        produce_c_fast_candidate(
+            map_result.raw,
+            source,
+            map_acceptance=approval,
+            map_acceptance_keyring=bad_role,
+        )
+
+    keyring_path = tmp_path / "map-acceptance-keyring.jsonl"
+    keyring_raw = canonical_json_line(keyring)
+    keyring_path.write_bytes(keyring_raw)
+    digest = hashlib.sha256(keyring_raw).hexdigest()
+    loaded, loaded_raw, loaded_digest = load_keyring(
+        keyring_path,
+        expected_domain=MAP_ACCEPTANCE_TRUST_DOMAIN,
+        expected_raw_sha256=digest,
+    )
+    assert loaded == keyring
+    assert loaded_raw == keyring_raw
+    assert loaded_digest == digest
+    with pytest.raises(ContractError, match="PIN_MISMATCH"):
+        load_keyring(
+            keyring_path,
+            expected_domain=MAP_ACCEPTANCE_TRUST_DOMAIN,
+            expected_raw_sha256="0" * 64,
+        )
+
+    produce_action = next(
+        action
+        for action in cfast_parser()._subparsers._group_actions[0].choices["produce"]._actions
+        if action.dest == "map_acceptance_keyring_sha256"
+    )
+    assert produce_action.required is True
+
+
+def test_create_only_outputs_reject_symlink_parent_and_replacement_race(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_parent = tmp_path / "real-parent"
+    real_parent.mkdir()
+    symlink_parent = tmp_path / "symlink-parent"
+    symlink_parent.symlink_to(real_parent, target_is_directory=True)
+    for creator, error_type in (
+        (create_map_atomic, MapProducerError),
+        (create_cfast_atomic, CFastProducerError),
+    ):
+        with pytest.raises(error_type, match="parent"):
+            creator(symlink_parent / "candidate.json", b"{}")
+
+    race_parent = tmp_path / "race-parent"
+    race_parent.mkdir()
+    target = race_parent / "candidate.json"
+    original_link = os.link
+    moved_parent = tmp_path / "moved-parent"
+
+    def replace_parent_before_link(src, dst, *args, **kwargs):
+        race_parent.rename(moved_parent)
+        race_parent.mkdir()
+        return original_link(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr("map.producer.os.link", replace_parent_before_link)
+    with pytest.raises(MapProducerError, match="parent changed"):
+        create_map_atomic(target, b"{}")
 
 
 def test_candidate_schemas_validate_golden_outputs() -> None:

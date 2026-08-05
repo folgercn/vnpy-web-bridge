@@ -61,8 +61,15 @@ pointer or a moving “latest” file.  A caller-supplied high-water set can rej
 already consumed MAP hashes; durable custody remains the owner of that set.
 
 Candidate output uses create-only atomic publication.  Existing paths are
-never overwritten.  The output directory is fsynced after the canonical bytes
+never overwritten.  The output parent is pinned with a non-following directory
+descriptor and revalidated around the link, so parent replacement or symlink
+races fail closed.  The output directory is fsynced after the canonical bytes
 are linked into place; signing and custody are separate later jobs.
+
+C_FAST `produce` also requires `--map-acceptance-keyring-sha256`.  The public
+keyring is loaded through the shared `load_keyring` verifier, which accepts
+only canonical JSONL and checks the expected raw SHA-256 pin before the
+domain/schema/producer/key-role pins are applied.
 
 ## CLI probes
 

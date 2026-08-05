@@ -17,13 +17,19 @@ import math
 import os
 import stat
 import sys
+import uuid
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from shared.artifact_contracts.v1 import validate_artifact_envelope
-from shared.trust_contracts.v1 import ContractError, verify_signed_artifact
+from shared.trust_contracts.v1 import (
+    ContractError,
+    load_keyring,
+    validate_keyring,
+    verify_signed_artifact,
+)
 
 try:
     import commodity_c_fast_pure_producer_kernel as kernel
@@ -51,6 +57,19 @@ SOURCE_ENVELOPE_ROLE = "approved_research_source"
 SOURCE_ENVELOPE_STATUS = "APPROVED_IMMUTABLE_SOURCE"
 MAP_OUTPUT_CONTRACT_SCHEMA = "commodity_map_to_c_fast_projection_contract_v1"
 MAX_INPUT_BYTES = 16 * 1024 * 1024
+
+# The MAP acceptance is a deliberately narrow trust-domain boundary.  Keep
+# these values in the producer rather than accepting caller-selected labels;
+# otherwise a valid signature could be replayed from another artifact role or
+# key purpose.
+MAP_ACCEPTANCE_SCHEMA_REF = "map-acceptance-v1"
+MAP_ACCEPTANCE_ARTIFACT_TYPE = "map-acceptance"
+MAP_ACCEPTANCE_TRUST_DOMAIN = "map_acceptance"
+MAP_ACCEPTANCE_PRODUCER_ID = "map-acceptance-reviewer"
+MAP_ACCEPTANCE_PRODUCER_VERSION = "review-v1"
+MAP_ACCEPTANCE_KEY_PURPOSE = "map_acceptance_signer"
+MAP_ACCEPTANCE_KEY_ID_PREFIX = "map-acceptance-"
+MAP_ACCEPTANCE_KEY_VERSION = "v1"
 
 _MAP_OUTPUT_FIELDS = (
     "product",
@@ -101,14 +120,32 @@ def _verify_map_acceptance(
     """Require a domain-signed approval pinned to the exact MAP bytes."""
 
     try:
+        ring = validate_keyring(
+            map_acceptance_keyring, expected_domain=MAP_ACCEPTANCE_TRUST_DOMAIN
+        )
         signed = verify_signed_artifact(
             map_acceptance,
             keyring=map_acceptance_keyring,
-            expected_domain="map_acceptance",
+            expected_domain=MAP_ACCEPTANCE_TRUST_DOMAIN,
         )
         envelope = validate_artifact_envelope(signed["artifact"])
     except (ContractError, KeyError, TypeError) as exc:
         raise ProducerError("MAP acceptance signature or envelope is invalid") from exc
+    signer_key_id = str(signed.get("signer_key_id") or "")
+    signer_key_version = str(signed.get("signer_key_version") or "")
+    matching_keys = [
+        item
+        for item in ring["keys"]
+        if item.get("key_id") == signer_key_id and item.get("status") == "active"
+    ]
+    if (
+        ring.get("key_version") != MAP_ACCEPTANCE_KEY_VERSION
+        or signer_key_version != MAP_ACCEPTANCE_KEY_VERSION
+        or len(matching_keys) != 1
+        or not signer_key_id.startswith(MAP_ACCEPTANCE_KEY_ID_PREFIX)
+        or matching_keys[0].get("purpose") != MAP_ACCEPTANCE_KEY_PURPOSE
+    ):
+        raise ProducerError("MAP acceptance signer role or version is invalid")
     approval = envelope.get("payload")
     expected_fields = {
         "decision",
@@ -119,8 +156,11 @@ def _verify_map_acceptance(
         "countable_forward",
     }
     if (
-        envelope.get("artifact_type") != "map-acceptance"
-        or envelope.get("trust_domain") != "map_acceptance"
+        envelope.get("artifact_type") != MAP_ACCEPTANCE_ARTIFACT_TYPE
+        or envelope.get("trust_domain") != MAP_ACCEPTANCE_TRUST_DOMAIN
+        or envelope.get("schema_ref") != MAP_ACCEPTANCE_SCHEMA_REF
+        or envelope.get("producer_id") != MAP_ACCEPTANCE_PRODUCER_ID
+        or envelope.get("producer_version") != MAP_ACCEPTANCE_PRODUCER_VERSION
         or not isinstance(approval, Mapping)
         or set(approval) != expected_fields
         or approval.get("decision") != "approved"
@@ -183,7 +223,14 @@ def _decode_json(raw: bytes, label: str) -> dict[str, Any]:
         )
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ProducerError(f"{label} is not strict JSON") from exc
-    if not isinstance(decoded, dict) or canonical_json(decoded) != raw:
+    if not isinstance(decoded, dict):
+        raise ProducerError(f"{label} must be canonical JSON object bytes")
+    canonical = canonical_json(decoded)
+    # Signer and keyring files use the repository-wide canonical JSONL
+    # contract.  Candidate/source inputs historically used the same canonical
+    # object without a newline, so accept exactly either spelling and reject
+    # all other whitespace/line framing.
+    if raw not in (canonical, canonical + b"\n"):
         raise ProducerError(f"{label} must be canonical JSON object bytes")
     return decoded
 
@@ -675,7 +722,20 @@ def verify_c_fast_candidate(
     expected_map_sha256: str | None = None,
     rejected_predecessor_sha256: Iterable[str] = (),
 ) -> CFastCandidateResult:
-    """Verify exact bytes, predecessor hash, policy and optional replay."""
+    """Verify exact bytes, predecessor hash, policy and deterministic replay.
+
+    A C_FAST payload is not independently self-authenticating: its target
+    allocation is meaningful only when replayed from the exact MAP bytes and
+    approved source that produced it.  Therefore both replay inputs and the
+    MAP acceptance/keyring are mandatory; shape-only verification is unsafe.
+    """
+
+    if map_candidate_input is None or source_input is None:
+        raise ProducerError(
+            "C_FAST verification requires both MAP predecessor and source replay inputs"
+        )
+    if map_acceptance is None or map_acceptance_keyring is None:
+        raise ProducerError("MAP acceptance and keyring are required for replay")
 
     if isinstance(candidate_input, (bytes, bytearray)):
         raw = bytes(candidate_input)
@@ -692,19 +752,16 @@ def verify_c_fast_candidate(
         raise ProducerError("C_FAST predecessor replay is rejected by high-water input")
     if expected_map_sha256 is not None and predecessor_hash != _sha(expected_map_sha256, "expected MAP predecessor hash"):
         raise ProducerError("C_FAST predecessor mismatch")
-    if map_candidate_input is not None and source_input is not None:
-        if map_acceptance is None or map_acceptance_keyring is None:
-            raise ProducerError("MAP acceptance and keyring are required for replay")
-        expected = produce_c_fast_candidate(
-            map_candidate_input,
-            source_input,
-            map_acceptance=map_acceptance,
-            map_acceptance_keyring=map_acceptance_keyring,
-            expected_map_sha256=expected_map_sha256,
-            rejected_predecessor_sha256=rejected_predecessor_sha256,
-        )
-        if expected.raw != raw:
-            raise ProducerError("C_FAST candidate failed deterministic replay or was tampered")
+    expected = produce_c_fast_candidate(
+        map_candidate_input,
+        source_input,
+        map_acceptance=map_acceptance,
+        map_acceptance_keyring=map_acceptance_keyring,
+        expected_map_sha256=expected_map_sha256,
+        rejected_predecessor_sha256=rejected_predecessor_sha256,
+    )
+    if expected.raw != raw:
+        raise ProducerError("C_FAST candidate failed deterministic replay or was tampered")
     return CFastCandidateResult(
         raw=raw,
         payload=payload,
@@ -756,45 +813,94 @@ def _read_pinned_file(path: Path) -> bytes:
 
 
 def _create_only_atomic(path: Path, raw: bytes) -> None:
+    """Publish one candidate through a pinned, non-following parent dirfd."""
+
     _reject_path_latest(path)
+    parent = path.parent
+    parent_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        parent_flags |= os.O_NOFOLLOW
     try:
-        parent_stat = path.parent.lstat()
+        parent_fd = os.open(parent, parent_flags)
     except OSError as exc:
-        raise ProducerError("output parent cannot be stat-ed") from exc
-    if stat.S_ISLNK(parent_stat.st_mode) or not stat.S_ISDIR(parent_stat.st_mode):
-        raise ProducerError("output parent must be a real directory")
-    if path.exists() or path.is_symlink():
-        raise ProducerError("output already exists; overwrite is forbidden")
-    temporary = path.parent / f".{path.name}.{os.getpid()}.tmp"
+        raise ProducerError("output parent cannot be opened safely") from exc
+    temporary_name = f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
     fd = -1
     try:
-        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        written = 0
-        while written < len(raw):
-            written += os.write(fd, raw[written:])
-        os.fsync(fd)
-        os.close(fd)
-        fd = -1
+        parent_stat = os.fstat(parent_fd)
+        if not stat.S_ISDIR(parent_stat.st_mode):
+            raise ProducerError("output parent must be a real directory")
+
+        def revalidate_parent() -> None:
+            check_fd = -1
+            try:
+                check_fd = os.open(parent, parent_flags)
+                check_stat = os.fstat(check_fd)
+                if (check_stat.st_dev, check_stat.st_ino) != (
+                    parent_stat.st_dev,
+                    parent_stat.st_ino,
+                ):
+                    raise ProducerError("output parent changed during publish")
+            except ProducerError:
+                raise
+            except OSError as exc:
+                raise ProducerError("output parent changed during publish") from exc
+            finally:
+                if check_fd >= 0:
+                    os.close(check_fd)
+
+        revalidate_parent()
         try:
-            os.link(temporary, path, follow_symlinks=False)
+            os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            raise ProducerError("output already exists; overwrite is forbidden")
+
+        create_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC
+        if hasattr(os, "O_NOFOLLOW"):
+            create_flags |= os.O_NOFOLLOW
+        try:
+            fd = os.open(temporary_name, create_flags, 0o600, dir_fd=parent_fd)
+            written = 0
+            while written < len(raw):
+                written += os.write(fd, raw[written:])
+            os.fsync(fd)
+            os.close(fd)
+            fd = -1
+            revalidate_parent()
+            try:
+                os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                raise ProducerError("output already exists; overwrite is forbidden")
+            os.link(
+                temporary_name,
+                path.name,
+                src_dir_fd=parent_fd,
+                dst_dir_fd=parent_fd,
+                follow_symlinks=False,
+            )
+            os.fsync(parent_fd)
+            revalidate_parent()
+        except ProducerError:
+            raise
         except FileExistsError as exc:
             raise ProducerError("output already exists; overwrite is forbidden") from exc
-        directory_fd = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
-    except OSError as exc:
-        if exc.errno == errno.EEXIST:
-            raise ProducerError("output already exists; overwrite is forbidden") from exc
-        raise ProducerError("atomic candidate publish failed") from exc
+        except OSError as exc:
+            if exc.errno == errno.EEXIST:
+                raise ProducerError("output already exists; overwrite is forbidden") from exc
+            raise ProducerError("atomic candidate publish failed") from exc
     finally:
         if fd >= 0:
             os.close(fd)
         try:
-            temporary.unlink()
+            os.unlink(temporary_name, dir_fd=parent_fd)
         except FileNotFoundError:
             pass
+        finally:
+            os.close(parent_fd)
 
 
 def _cli_json(payload: Mapping[str, Any]) -> None:
@@ -812,6 +918,11 @@ def _parser() -> argparse.ArgumentParser:
     produce.add_argument("--source", required=True, type=Path)
     produce.add_argument("--map-acceptance", required=True, type=Path)
     produce.add_argument("--map-acceptance-keyring", required=True, type=Path)
+    produce.add_argument(
+        "--map-acceptance-keyring-sha256",
+        required=True,
+        help="expected raw SHA-256 pin for the canonical keyring JSONL",
+    )
     produce.add_argument("--output", required=True, type=Path)
     produce.add_argument("--expected-map-sha256")
     produce.add_argument("--reject-predecessor-sha256", action="append", default=[])
@@ -834,9 +945,17 @@ def main(argv: list[str] | None = None) -> int:
         map_acceptance = _decode_json(
             _read_pinned_file(args.map_acceptance), "MAP acceptance"
         )
-        map_acceptance_keyring = _decode_json(
-            _read_pinned_file(args.map_acceptance_keyring), "MAP acceptance keyring"
-        )
+        try:
+            map_acceptance_keyring, _keyring_raw, _keyring_sha256 = load_keyring(
+                args.map_acceptance_keyring,
+                expected_domain=MAP_ACCEPTANCE_TRUST_DOMAIN,
+                expected_raw_sha256=_sha(
+                    args.map_acceptance_keyring_sha256,
+                    "expected MAP acceptance keyring SHA-256",
+                ),
+            )
+        except ContractError as exc:
+            raise ProducerError("MAP acceptance keyring is invalid or unpinned") from exc
         result = produce_c_fast_candidate(
             map_raw,
             source_raw,
