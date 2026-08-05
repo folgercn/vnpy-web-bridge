@@ -126,6 +126,7 @@ def test_issue291_phase_a_gate_builds_primary_images_and_execution_proxy_closure
         "WINDOWS_RPC_REQ_ADDRESS",
         "--entrypoint python",
         "--entrypoint nginx",
+        "--add-host control-api:127.0.0.1",
         "['python','/usr/local/bin/gateway_proxy.py']",
         "c['Cmd'] == ['request']",
         "c['User'] == '65532:65532'",
@@ -136,6 +137,9 @@ def test_issue291_phase_a_gate_builds_primary_images_and_execution_proxy_closure
         "test_issue291_phase_a_contract.py",
     ):
         assert token in build, token
+    assert (
+        "docker run --rm --add-host control-api:127.0.0.1 --entrypoint nginx" in build
+    )
     assert "socat -V" not in build
     changes = WORKFLOW.split("  changes:\n", maxsplit=1)[1].split(
         "  quick-checks:\n", maxsplit=1

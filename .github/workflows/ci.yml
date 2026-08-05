@@ -390,7 +390,7 @@ jobs:
           docker image inspect vnpy-web-bridge-control-api:phase-a-${{ github.sha }} >/dev/null
           docker image inspect vnpy-web-bridge-execution:phase-a-${{ github.sha }} >/dev/null
           docker image inspect vnpy-web-bridge-gateway-proxy:phase-a-${{ github.sha }} >/dev/null
-          docker run --rm --entrypoint nginx vnpy-web-bridge-frontend:phase-a-${{ github.sha }} -t -c /etc/nginx/nginx.conf
+          docker run --rm --add-host control-api:127.0.0.1 --entrypoint nginx vnpy-web-bridge-frontend:phase-a-${{ github.sha }} -t -c /etc/nginx/nginx.conf
           docker run --rm --entrypoint python vnpy-web-bridge-control-api:phase-a-${{ github.sha }} -c "from app.control_api import app; paths={getattr(r, 'path', '') for r in app.routes}; assert {'/health/live','/health/ready','/version'} <= paths"
           docker run --rm --entrypoint python vnpy-web-bridge-execution:phase-a-${{ github.sha }} -c "from app.execution_orchestrator import app; paths={getattr(r, 'path', '') for r in app.routes}; assert {'/health/live','/health/ready','/version'} <= paths"
           docker image inspect vnpy-web-bridge-gateway-proxy:phase-a-${{ github.sha }} | python -c "import json,sys; c=json.load(sys.stdin)[0]['Config']; assert c['Entrypoint'] == ['python','/usr/local/bin/gateway_proxy.py']; assert c['Cmd'] == ['request']; assert c['User'] == '65532:65532'"
