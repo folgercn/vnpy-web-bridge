@@ -1,0 +1,161 @@
+name: vnpy-web-bridge-phase-b
+
+# Phase B is an unreleased validation graph.  Phase A remains the production
+# entrypoint; this file is never included by docker-compose.prod.yml.
+include:
+  - path: ./docker-compose.phase-a.yml
+
+services:
+  artifact-custody:
+    image: ${ARTIFACT_CUSTODY_IMAGE:-vnpy-web-bridge-artifact-custody:phase-b}
+    build:
+      context: ..
+      dockerfile: deployments/phase-b/Containerfile.artifact-custody
+    command: ["--root", "/var/lib/phase-b-custody", "--writer-id", "artifact-custody", "--writer-epoch", "${CUSTODY_WRITER_EPOCH:-1}", "--schema-dir", "/app/docs/schemas", "run"]
+    environment:
+      PRODUCTION: "false"
+      LIVE_TRADING_AUTHORIZED: "false"
+      COUNTABLE_FORWARD: "false"
+    networks: [custody-private]
+    volumes:
+      - artifact_custody_state:/var/lib/phase-b-custody
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m,uid=65532,gid=65532,mode=700
+    healthcheck:
+      test: ["CMD", "python", "/app/scripts/phase_b_artifact_custody.py", "--root", "/var/lib/phase-b-custody", "health"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+  market-data-worker:
+    image: ${MARKET_DATA_WORKER_IMAGE:-vnpy-web-bridge-market-data-worker:phase-b}
+    build:
+      context: ..
+      dockerfile: deployments/phase-b/Containerfile.market-data-worker
+    command: ["--state-dir", "/var/lib/phase-b/market-data", "--run"]
+    environment:
+      PHASE_B_MARKET_DATA_STATE_DIR: /var/lib/phase-b/market-data
+      PHASE_B_RUNTIME_MODE: disabled
+      PRODUCTION: "false"
+      LIVE_TRADING_AUTHORIZED: "false"
+      COUNTABLE_FORWARD: "false"
+    network_mode: none
+    volumes:
+      - market_data_state:/var/lib/phase-b/market-data
+    read_only: true
+    tmpfs: [/tmp]
+    healthcheck:
+      test: ["CMD", "python", "-m", "phase_b_workers.market_data_worker", "--state-dir", "/var/lib/phase-b/market-data", "--ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+  execution-quality-worker:
+    image: ${EXECUTION_QUALITY_WORKER_IMAGE:-vnpy-web-bridge-execution-quality-worker:phase-b}
+    build:
+      context: ..
+      dockerfile: deployments/phase-b/Containerfile.execution-quality-worker
+    command: ["--state-dir", "/var/lib/phase-b/execution-quality", "--run"]
+    environment:
+      PHASE_B_EQ_STATE_DIR: /var/lib/phase-b/execution-quality
+      PHASE_B_VERIFIED_STREAM_DIR: /var/lib/market-data-stream/stream
+      PHASE_B_RUNTIME_MODE: disabled
+      PRODUCTION: "false"
+      LIVE_TRADING_AUTHORIZED: "false"
+      COUNTABLE_FORWARD: "false"
+    network_mode: none
+    volumes:
+      - execution_quality_state:/var/lib/phase-b/execution-quality
+      - market_data_state:/var/lib/market-data-stream:ro
+    read_only: true
+    tmpfs: [/tmp]
+    healthcheck:
+      test: ["CMD", "python", "-m", "phase_b_workers.execution_quality_worker", "--state-dir", "/var/lib/phase-b/execution-quality", "--ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+  monitor-worker:
+    image: ${MONITOR_WORKER_IMAGE:-vnpy-web-bridge-monitor-worker:phase-b}
+    build:
+      context: ..
+      dockerfile: deployments/phase-b/Containerfile.monitor-worker
+    command: ["--state-dir", "/var/lib/phase-b/monitor", "--run"]
+    environment:
+      PHASE_B_MONITOR_STATE_DIR: /var/lib/phase-b/monitor
+      PHASE_B_RUNTIME_MODE: disabled
+      PRODUCTION: "false"
+      LIVE_TRADING_AUTHORIZED: "false"
+      COUNTABLE_FORWARD: "false"
+    network_mode: none
+    volumes:
+      - monitor_state:/var/lib/phase-b/monitor
+    read_only: true
+    tmpfs: [/tmp]
+    healthcheck:
+      test: ["CMD", "python", "-m", "phase_b_workers.monitor_worker", "--state-dir", "/var/lib/phase-b/monitor", "--ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+
+  map-producer:
+    profiles: [batch]
+    image: ${MAP_PRODUCER_IMAGE:-vnpy-web-bridge-map-producer:phase-b}
+    build:
+      context: ..
+      dockerfile: deployments/phase-b/Containerfile.map-producer
+    command: ["produce", "--source", "/input/approved-research-source.json", "--output", "/out/map-candidate.json"]
+    environment:
+      PRODUCTION: "false"
+      LIVE_TRADING_AUTHORIZED: "false"
+      COUNTABLE_FORWARD: "false"
+    network_mode: none
+    volumes:
+      - phase_b_batch_input:/input:ro
+      - phase_b_batch_output:/out
+    read_only: true
+    tmpfs: [/tmp]
+
+  c-fast-producer:
+    profiles: [batch]
+    image: ${C_FAST_PRODUCER_IMAGE:-vnpy-web-bridge-c-fast-producer:phase-b}
+    build:
+      context: ..
+      dockerfile: deployments/phase-b/Containerfile.c-fast-producer
+    command: ["produce", "--source", "/input/approved-research-source.json", "--map-input", "/input/approved-map-candidate.json", "--map-acceptance", "/input/map-acceptance.json", "--map-acceptance-keyring", "/input/map-acceptance-keyring.json", "--output", "/out/c-fast-candidate.json"]
+    environment:
+      PRODUCTION: "false"
+      LIVE_TRADING_AUTHORIZED: "false"
+      COUNTABLE_FORWARD: "false"
+    network_mode: none
+    volumes:
+      - phase_b_batch_input:/input:ro
+      - phase_b_batch_output:/out
+    read_only: true
+    tmpfs: [/tmp]
+
+  signing-authority:
+    profiles: [offline-signing]
+    image: ${SIGNING_AUTHORITY_IMAGE:-vnpy-web-bridge-signing-authority:phase-b}
+    build:
+      context: ..
+      dockerfile: deployments/phase-b/Containerfile.signing-authority
+    command: ["--health"]
+    network_mode: none
+    read_only: true
+    tmpfs: [/tmp]
+    # No key mount, key path, key environment variable, HTTP port, or public
+    # endpoint.  An approved offline ceremony passes an inherited fd only.
+
+networks:
+  custody-private:
+    internal: true
+
+volumes:
+  artifact_custody_state:
+  market_data_state:
+  execution_quality_state:
+  monitor_state:
+  phase_b_batch_input:
+  phase_b_batch_output:

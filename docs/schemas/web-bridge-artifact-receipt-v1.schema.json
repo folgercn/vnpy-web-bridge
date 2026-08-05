@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vnpy-web-bridge.invalid/schemas/web-bridge-artifact-receipt-v1.schema.json",
+  "title": "Web Bridge artifact custody receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "receipt_type", "receipt_id", "artifact_id", "artifact_type", "trust_domain", "artifact_canonical_sha256", "artifact_raw_sha256", "schema_ref", "predecessor_refs", "lineage", "actor_id", "idempotency_key", "correlation_id", "expected_version", "resulting_version", "fencing_token", "status", "created_at", "previous_receipt_sha256"],
+  "properties": {
+    "schema_version": {"const": "web-bridge-artifact-receipt-v1"},
+    "receipt_type": {"enum": ["publish", "install", "consume", "revoke"]},
+    "receipt_id": {"type": "string", "pattern": "^receipt-[0-9a-f]{64}$"},
+    "artifact_id": {"type": "string", "pattern": "^artifact-[0-9a-f]{64}$"},
+    "artifact_type": {"type": "string"},
+    "trust_domain": {"type": "string"},
+    "artifact_canonical_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "artifact_raw_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "schema_ref": {"type": "string"},
+    "predecessor_refs": {"type": "array"},
+    "lineage": {"type": "array", "items": {"type": "string", "pattern": "^[0-9a-f]{64}$"}},
+    "actor_id": {"type": "string", "minLength": 1},
+    "idempotency_key": {"type": "string", "minLength": 1},
+    "correlation_id": {"type": "string", "minLength": 1},
+    "expected_version": {"type": "integer", "minimum": 0},
+    "resulting_version": {"type": "integer", "minimum": 1},
+    "fencing_token": {"type": ["string", "null"]},
+    "status": {"enum": ["accepted", "revoked"]},
+    "created_at": {"type": "string", "format": "date-time"},
+    "previous_receipt_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"}
+  }
+}

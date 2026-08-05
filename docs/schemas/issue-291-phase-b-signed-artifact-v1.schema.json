@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "issue-291-phase-b-signed-artifact-v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "request_id", "domain", "signer_key_id", "signer_key_version", "requested_at", "expires_at", "artifact", "signature"],
+  "properties": {
+    "schema_version": {"const": "web-bridge-signed-artifact-v1"},
+    "request_id": {"type": "string"},
+    "domain": {"enum": ["research", "map_acceptance", "c_fast_acceptance", "runtime_authorization", "execution_permit"]},
+    "signer_key_id": {"type": "string"},
+    "signer_key_version": {"type": "string", "pattern": "^v[0-9]+$"},
+    "requested_at": {"type": "string", "format": "date-time"},
+    "expires_at": {"type": "string", "format": "date-time"},
+    "artifact": {"type": "object"},
+    "signature": {"type": "string", "contentEncoding": "base64"}
+  }
+}
