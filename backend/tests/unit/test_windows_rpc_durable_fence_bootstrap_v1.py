@@ -593,7 +593,15 @@ def test_production_launcher_uses_only_fixed_runtime_lifecycle(
         "send_order_fenced_v1",
         "cancel_order_fenced_v1",
         "query_intent_v1",
+        "get_execution_snapshot_v1",
     }.issubset(server._functions)
+    execution_snapshot = server._functions["get_execution_snapshot_v1"](
+        {"account_scope": config.account_scope, "environment": config.environment}
+    )
+    assert execution_snapshot["connected"] is True
+    assert execution_snapshot["active_order_count"] == 0
+    assert execution_snapshot["account_scope"] == config.account_scope
+    assert execution_snapshot["environment"] == config.environment
     with pytest.raises(WindowsRpcDurableFenceDenied):
         server._functions["send_order_fenced_v1"](
             {"symbol": "RB"},
@@ -613,3 +621,39 @@ def test_production_launcher_uses_only_fixed_runtime_lifecycle(
             },
         )
     assert server.send_calls == 0
+
+
+def test_windows_execution_query_is_bound_to_current_oms_order_facts() -> None:
+    config = _runtime_config()
+
+    class OrderFacts(FactSource):
+        def get_all_orders(self) -> list[Any]:
+            return [
+                {
+                    "vt_orderid": "CTP.9001",
+                    "orderid": "9001",
+                    "symbol": "RB2610",
+                    "status": "all_traded",
+                    "reference": "intent-000001",
+                }
+            ]
+
+    runtime = SimpleNamespace(config=config, fact_source=OrderFacts())
+    facts = durable_module._WindowsExecutionFactsV1(runtime)
+    result = facts.query_intent_v1(
+        {
+            "account_scope": config.account_scope,
+            "environment": config.environment,
+            "intent_id": "intent-000001",
+            "broker_order_id": None,
+        },
+        None,
+    )
+    assert result == {
+        "intent_id": "intent-000001",
+        "state": "TERMINAL",
+        "accepted": True,
+        "broker_order_id": "CTP.9001",
+        "account_scope": config.account_scope,
+        "environment": config.environment,
+    }

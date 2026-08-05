@@ -284,7 +284,7 @@ def _fsync_directory(path: Path) -> None:
 
         handle = ctypes.windll.kernel32.CreateFileW(
             str(path),
-            0x80000000,
+            0xC0000000,
             0x00000007,
             None,
             3,
@@ -304,6 +304,39 @@ def _fsync_directory(path: Path) -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+def _windows_move_new_file(source: Path, target: Path) -> None:
+    """Persist an exclusive create through a write-through NTFS move."""
+
+    import ctypes
+    from ctypes import wintypes
+
+    move_file_ex = ctypes.windll.kernel32.MoveFileExW
+    move_file_ex.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD]
+    move_file_ex.restype = wintypes.BOOL
+    if not move_file_ex(str(source), str(target), 0x00000008):
+        raise ctypes.WinError()
+
+
+def _windows_replace_file(source: Path, target: Path) -> None:
+    """Atomically replace an existing file with write-through semantics."""
+
+    import ctypes
+    from ctypes import wintypes
+
+    replace_file = ctypes.windll.kernel32.ReplaceFileW
+    replace_file.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.LPCWSTR,
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.LPVOID,
+    ]
+    replace_file.restype = wintypes.BOOL
+    if not replace_file(str(target), str(source), None, 0x00000001, None, None):
+        raise ctypes.WinError()
 
 
 class DurableFinalAdmissionStoreV1:
@@ -362,6 +395,27 @@ class DurableFinalAdmissionStoreV1:
 
     @staticmethod
     def _create_only(path: Path, raw: bytes) -> None:
+        if os.name == "nt":  # pragma: no cover - exercised by native Windows acceptance
+            temporary: Path | None = None
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                descriptor, temporary_name = tempfile.mkstemp(
+                    prefix=f".{path.name}.", dir=path.parent
+                )
+                temporary = Path(temporary_name)
+                with os.fdopen(descriptor, "wb") as handle:
+                    handle.write(raw)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                _windows_move_new_file(temporary, path)
+            except FileExistsError:
+                return
+            except OSError as exc:
+                raise _error("final admission store bootstrap failed") from exc
+            finally:
+                if temporary is not None and temporary.exists():
+                    temporary.unlink()
+            return
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -464,7 +518,8 @@ class DurableFinalAdmissionStoreV1:
                 handle.write(raw)
                 handle.flush()
                 os.fsync(handle.fileno())
-            _fsync_directory(self.ledger_path.parent)
+            if os.name != "nt":
+                _fsync_directory(self.ledger_path.parent)
         except OSError as exc:
             raise _error("final admission ledger append failed") from exc
 
@@ -478,8 +533,11 @@ class DurableFinalAdmissionStoreV1:
                     handle.write(raw)
                     handle.flush()
                     os.fsync(handle.fileno())
-                os.replace(temporary, self.path)
-                _fsync_directory(self.path.parent)
+                if os.name == "nt":
+                    _windows_replace_file(Path(temporary), self.path)
+                else:
+                    os.replace(temporary, self.path)
+                    _fsync_directory(self.path.parent)
             finally:
                 if os.path.exists(temporary):
                     os.unlink(temporary)
