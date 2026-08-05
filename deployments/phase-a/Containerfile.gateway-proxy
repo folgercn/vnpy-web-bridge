@@ -1,0 +1,25 @@
+# Minimal, non-application image for the two fixed-target gateway proxies.
+FROM python:3.12-alpine
+
+RUN addgroup -S -g 65532 proxy \
+    && adduser -S -D -H -u 65532 -G proxy proxy \
+    && mkdir -p /etc/vnpy \
+    && chown root:root /etc/vnpy
+
+COPY deployments/phase-a/gateway-allowlist.json /etc/vnpy/gateway-allowlist.json
+COPY deployments/phase-a/gateway_proxy.py /usr/local/bin/gateway_proxy.py
+RUN chown root:root /etc/vnpy/gateway-allowlist.json /usr/local/bin/gateway_proxy.py \
+    && chmod 0444 /etc/vnpy/gateway-allowlist.json \
+    && chmod 0555 /usr/local/bin/gateway_proxy.py
+
+ENV GATEWAY_PROXY_VERSION=phase-a \
+    PROXY_HEALTH_PORT=18080
+LABEL org.opencontainers.image.title="vnpy-web-bridge-gateway-proxy" \
+      org.opencontainers.image.version="phase-a"
+
+EXPOSE 18080
+USER 65532:65532
+HEALTHCHECK --interval=10s --timeout=5s --retries=3 --start-period=5s \
+    CMD ["python", "/usr/local/bin/gateway_proxy.py", "health"]
+ENTRYPOINT ["python", "/usr/local/bin/gateway_proxy.py"]
+CMD ["request"]

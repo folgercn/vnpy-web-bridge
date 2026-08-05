@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from fastapi.testclient import TestClient
-
 from app.core.security import CurrentUser, create_access_token
 from app.main import app
 from app.services.vnpy_rpc_service import rpc_service
+from fastapi.testclient import TestClient
 
 
 def auth_headers(role: str = "viewer") -> dict[str, str]:
@@ -26,10 +25,22 @@ def install_strategy_route_mocks(monkeypatch) -> None:
     monkeypatch.setattr(
         routes_strategy.strategy_service,
         "list_strategies",
-        lambda: [{"strategy_name": "ma_demo", "class_name": "MaStrategy", "status": "stopped"}],
+        lambda: [
+            {
+                "strategy_name": "ma_demo",
+                "class_name": "MaStrategy",
+                "status": "stopped",
+            }
+        ],
     )
-    monkeypatch.setattr(routes_strategy.strategy_service, "get_setting", lambda name: {"fast_window": 10})
-    monkeypatch.setattr(routes_strategy.strategy_service, "get_variables", lambda name: {"pos": 0})
+    monkeypatch.setattr(
+        routes_strategy.strategy_service,
+        "get_setting",
+        lambda name: {"fast_window": 10},
+    )
+    monkeypatch.setattr(
+        routes_strategy.strategy_service, "get_variables", lambda name: {"pos": 0}
+    )
     monkeypatch.setattr(
         routes_strategy.strategy_service,
         "init_strategy",
@@ -38,12 +49,13 @@ def install_strategy_route_mocks(monkeypatch) -> None:
 
 
 def test_viewer_can_list_strategies(monkeypatch) -> None:
+    """Legacy strategy surface is removed from Control in Phase A."""
     install_strategy_route_mocks(monkeypatch)
     with client_without_rpc(monkeypatch) as client:
         response = client.get("/api/strategies", headers=auth_headers("viewer"))
 
-    assert response.status_code == 200
-    assert response.json()["data"][0]["strategy_name"] == "ma_demo"
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "CONTROL_SURFACE_UNAVAILABLE"
 
 
 def test_strategy_requires_auth(monkeypatch) -> None:
@@ -56,18 +68,24 @@ def test_strategy_requires_auth(monkeypatch) -> None:
 
 
 def test_viewer_cannot_init_strategy(monkeypatch) -> None:
+    """RBAC on the retired route cannot be mistaken for an execution API."""
     install_strategy_route_mocks(monkeypatch)
     with client_without_rpc(monkeypatch) as client:
-        response = client.post("/api/strategies/ma_demo/init", headers=auth_headers("viewer"))
+        response = client.post(
+            "/api/strategies/ma_demo/init", headers=auth_headers("viewer")
+        )
 
-    assert response.status_code == 403
-    assert response.json()["error"]["code"] == "PERMISSION_DENIED"
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "CONTROL_SURFACE_UNAVAILABLE"
 
 
 def test_admin_can_init_strategy(monkeypatch) -> None:
+    """Even an admin must use a typed Execution command, never the old route."""
     install_strategy_route_mocks(monkeypatch)
     with client_without_rpc(monkeypatch) as client:
-        response = client.post("/api/strategies/ma_demo/init", headers=auth_headers("admin"))
+        response = client.post(
+            "/api/strategies/ma_demo/init", headers=auth_headers("admin")
+        )
 
-    assert response.status_code == 200
-    assert response.json()["data"]["accepted"] is True
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "CONTROL_SURFACE_UNAVAILABLE"

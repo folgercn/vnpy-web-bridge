@@ -13,6 +13,13 @@ from scripts.windows_fence_foundation.admission import (
     WindowsRpcDurableFenceError,
     WindowsRpcFinalAdmissionV1,
 )
+from scripts.windows_fence_foundation.final_admission_v1 import (
+    CANCEL_METHOD,
+    INSTALL_FENCE_METHOD,
+    QUERY_METHOD,
+    REGISTER_RECEIPT_METHOD,
+    SEND_METHOD,
+)
 
 _PROTECTED_MUTATIONS = frozenset({"send_order", "cancel_order"})
 _FORBIDDEN_FOUNDATION_RPC = frozenset(
@@ -31,6 +38,66 @@ _A2_RPC_NAMES = frozenset(
         "recheck_deployment_safety_snapshot_v1",
     }
 )
+_TYPED_RPC_NAMES = frozenset(
+    {
+        INSTALL_FENCE_METHOD,
+        REGISTER_RECEIPT_METHOD,
+        SEND_METHOD,
+        CANCEL_METHOD,
+        QUERY_METHOD,
+        "get_execution_snapshot_v1",
+    }
+)
+
+
+def attach_windows_rpc_fenced_methods_v1(server: Any, admission: Any) -> None:
+    """Attach the separately named final typed execution lifecycle methods.
+
+    The WF-1 ``assemble_windows_rpc_frozen_v1`` path intentionally remains
+    denial-only.  Active runtimes must call this explicit hook with a
+    ``WindowsRpcFencedAdmissionV1`` instance; legacy method names are never
+    replaced here.
+    """
+
+    from scripts.windows_fence_foundation.final_admission_v1 import (
+        CANCEL_METHOD,
+        INSTALL_FENCE_METHOD,
+        QUERY_METHOD,
+        REGISTER_RECEIPT_METHOD,
+        SEND_METHOD,
+        WindowsRpcFencedAdmissionV1,
+    )
+
+    if not isinstance(admission, WindowsRpcFencedAdmissionV1):
+        raise WindowsRpcDurableFenceError(
+            "typed final admission object is required",
+            code="FINAL_RPC_HANDLER_IDENTITY_MISMATCH",
+        )
+    if not callable(getattr(server, "register", None)):
+        raise WindowsRpcDurableFenceError(
+            "RPC server registry is unavailable", code="RPC_REGISTRY_UNAVAILABLE"
+        )
+    active = getattr(server, "is_active", None)
+    if callable(active) and active():
+        raise WindowsRpcDurableFenceError(
+            "typed final handlers must attach before listen",
+            code="RPC_LISTENER_STARTED_EARLY",
+        )
+    handlers = {
+        INSTALL_FENCE_METHOD: admission.install_fence_v1,
+        REGISTER_RECEIPT_METHOD: admission.register_receipt_v1,
+        SEND_METHOD: admission.send_order_fenced_v1,
+        CANCEL_METHOD: admission.cancel_order_fenced_v1,
+        QUERY_METHOD: admission.query_intent_v1,
+    }
+    for handler in handlers.values():
+        server.register(handler)
+    functions = getattr(server, "_functions", {})
+    if any(functions.get(name) is not handler for name, handler in handlers.items()):
+        raise WindowsRpcDurableFenceError(
+            "typed final handler identity mismatch",
+            code="FINAL_RPC_HANDLER_IDENTITY_MISMATCH",
+        )
 
 
 class RuntimeBuilder(Protocol):
@@ -39,6 +106,10 @@ class RuntimeBuilder(Protocol):
 
 class SnapshotAttacher(Protocol):
     def __call__(self, runtime: Any, admission: WindowsRpcFinalAdmissionV1) -> Any: ...
+
+
+class TypedAdmissionAttacher(Protocol):
+    def __call__(self, runtime: Any) -> Any: ...
 
 
 class _SealedRpcRegistry(Mapping[str, Any]):
@@ -87,6 +158,7 @@ class WindowsRpcFrozenAssemblyV1:
     snapshot_extension: Any
     server: Any
     registry: _SealedRpcRegistry
+    typed_admission: Any | None = None
 
     def assert_not_listening(self) -> None:
         active = getattr(self.server, "is_active", None)
@@ -222,12 +294,14 @@ def assemble_windows_rpc_frozen_v1(
     recovery: FrozenNoneStoreRecovery,
     build_runtime: RuntimeBuilder,
     attach_snapshot: SnapshotAttacher,
+    attach_typed: TypedAdmissionAttacher | None = None,
 ) -> WindowsRpcFrozenAssemblyV1:
     """Build and seal one frozen runtime without connecting or listening."""
 
     admission = WindowsRpcFinalAdmissionV1(recovery)
     runtime = build_runtime()
     server = _server_for(runtime)
+    typed_admission = attach_typed(runtime) if attach_typed is not None else None
     _register_final_denials(server, admission)
     snapshot_extension = attach_snapshot(runtime, admission)
     if snapshot_extension is None:
@@ -266,7 +340,8 @@ def assemble_windows_rpc_frozen_v1(
             code="FOUNDATION_AUTHORITY_RPC_EXPOSED",
         )
     _probe_final_denials(functions)
-    protected = {name: functions[name] for name in _PROTECTED_MUTATIONS}
+    protected_names = _PROTECTED_MUTATIONS | (_TYPED_RPC_NAMES & set(functions))
+    protected = {name: functions[name] for name in protected_names}
     registry = _SealedRpcRegistry(functions, protected)
     # RpcServer implementations and tests sometimes retain a public alias such
     # as ``registered``.  Replace every exact old-registry alias before the old
@@ -281,6 +356,7 @@ def assemble_windows_rpc_frozen_v1(
         snapshot_extension=snapshot_extension,
         server=server,
         registry=registry,
+        typed_admission=typed_admission,
     )
     assembly.assert_ready_to_listen()
     return assembly
@@ -288,7 +364,9 @@ def assemble_windows_rpc_frozen_v1(
 
 __all__ = [
     "SnapshotAttacher",
+    "TypedAdmissionAttacher",
     "WindowsRpcFrozenAssemblyV1",
     "assemble_windows_rpc_frozen_v1",
     "attach_windows_rpc_deployment_snapshot_v1",
+    "attach_windows_rpc_fenced_methods_v1",
 ]

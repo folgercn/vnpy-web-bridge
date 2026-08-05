@@ -526,6 +526,7 @@ def test_fixed_listener_uses_server_activity_not_start_return_value() -> None:
 
 def test_production_launcher_uses_only_fixed_runtime_lifecycle(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     config = _runtime_config()
     state = Recovery().state
@@ -574,7 +575,7 @@ def test_production_launcher_uses_only_fixed_runtime_lifecycle(
     )
 
     assembly = launch_windows_rpc_durable_fence_v1(
-        store_root="store-root",
+        store_root=tmp_path / "store-root",
         store_expectation=_expectation(),
         runtime_config=config,
     )
@@ -584,3 +585,31 @@ def test_production_launcher_uses_only_fixed_runtime_lifecycle(
     assert getattr(server._functions["send_order"], "__self__", None) is (
         assembly.admission
     )
+    assert assembly.typed_admission is not None
+    assert assembly.typed_admission.snapshot()["receipt_intents"] == []
+    assert {
+        "install_fence_v1",
+        "register_receipt_v1",
+        "send_order_fenced_v1",
+        "cancel_order_fenced_v1",
+        "query_intent_v1",
+    }.issubset(server._functions)
+    with pytest.raises(WindowsRpcDurableFenceDenied):
+        server._functions["send_order_fenced_v1"](
+            {"symbol": "RB"},
+            {
+                "account_scope": config.account_scope,
+                "environment": config.environment,
+                "leader_epoch": 1,
+                "fencing_token": 1,
+                "plan_id": "plan-000001",
+                "plan_hash": "a" * 64,
+                "intent_id": "intent-000001",
+                "idempotency_key": "send-key-0000001",
+                "action": "send",
+                "receipt_id": "receipt-intent-000001",
+                "receipt_hash": "b" * 64,
+                "request_hash": "c" * 64,
+            },
+        )
+    assert server.send_calls == 0

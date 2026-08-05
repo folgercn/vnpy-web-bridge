@@ -1,0 +1,259 @@
+name: vnpy-web-bridge-phase-a
+
+services:
+  frontend-edge:
+    image: ${FRONTEND_IMAGE:-vnpy-web-bridge-frontend:phase-a}
+    build:
+      context: ..
+      dockerfile: frontend/Containerfile
+    environment:
+      PRODUCTION: "false"
+      LIVE_TRADING_AUTHORIZED: "false"
+      COUNTABLE_FORWARD: "false"
+    ports:
+      - "8080:8080"
+    networks:
+      - edge
+      - edge-control
+    depends_on:
+      control-api:
+        condition: service_started
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/cache/nginx
+      - /var/run
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8080/health/ready >/dev/null"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 5s
+
+  control-api:
+    image: ${CONTROL_API_IMAGE:-vnpy-web-bridge-control-api:phase-a}
+    build:
+      context: ..
+      dockerfile: deployments/phase-a/Containerfile.control-api
+    expose:
+      - "8081"
+    environment:
+      CONTROL_EXECUTION_BASE_URL: ${CONTROL_EXECUTION_BASE_URL:-http://execution-orchestrator:8090}
+      CONTROL_EXECUTION_TIMEOUT_SECONDS: ${CONTROL_EXECUTION_TIMEOUT_SECONDS:-5}
+      CONTROL_EXECUTION_SHARED_SECRET: ${CONTROL_EXECUTION_SHARED_SECRET:?CONTROL_EXECUTION_SHARED_SECRET must be supplied outside the repository}
+      CONTROL_API_VERSION: ${CONTROL_API_VERSION:-phase-a}
+      CONTROL_API_CORS_ORIGINS: ${CONTROL_API_CORS_ORIGINS:-http://localhost:8080,http://127.0.0.1:8080}
+      CONTROL_AUDIT_PROJECTION_PATH: /var/lib/vnpy-control/audit-projection.jsonl
+      CONTROL_AUDIT_LOG_PATH: /var/lib/vnpy-control/audit.log
+      DATABASE_URL: ${CONTROL_DATABASE_URL:?CONTROL_DATABASE_URL must be supplied outside the repository}
+      APP_ENV: ${APP_ENV:-phase-a}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?JWT_SECRET_KEY must be supplied outside the repository}
+      AUTH_USERS_JSON: ${AUTH_USERS_JSON:?AUTH_USERS_JSON must be supplied outside the repository}
+      WEB_TRADE_ENABLED: "false"
+      PRODUCTION: "false"
+      LIVE_TRADING_AUTHORIZED: "false"
+      COUNTABLE_FORWARD: "false"
+    networks:
+      - edge-control
+      - private-control
+      - control-data
+    depends_on:
+      execution-orchestrator:
+        condition: service_started
+      postgres:
+        condition: service_started
+    volumes:
+      - control_audit_projection:/var/lib/vnpy-control
+    read_only: true
+    tmpfs:
+      - /tmp
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import json,urllib.request; d=json.load(urllib.request.urlopen(\"http://127.0.0.1:8081/health/ready\", timeout=2)); raise SystemExit(0 if d.get(\"status\") == \"ready\" else 1)' "]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  execution-orchestrator:
+    image: ${EXECUTION_IMAGE:-vnpy-web-bridge-execution:phase-a}
+    build:
+      context: ..
+      dockerfile: deployments/phase-a/Containerfile.execution-orchestrator
+    expose:
+      - "8090"
+    environment:
+      EXECUTION_ORCHESTRATOR_PORT: "8090"
+      CONTROL_EXECUTION_SHARED_SECRET: ${CONTROL_EXECUTION_SHARED_SECRET:?CONTROL_EXECUTION_SHARED_SECRET must be supplied outside the repository}
+      CONTROL_EXECUTION_PRINCIPAL: ${CONTROL_EXECUTION_PRINCIPAL:?CONTROL_EXECUTION_PRINCIPAL must be supplied outside the repository}
+      CONTROL_EXECUTION_ROLE: ${CONTROL_EXECUTION_ROLE:?CONTROL_EXECUTION_ROLE must be supplied outside the repository}
+      EXECUTION_SERVICE_VERSION: ${EXECUTION_SERVICE_VERSION:-phase-a}
+      EXECUTION_SCOPE: ${EXECUTION_SCOPE:?EXECUTION_SCOPE must be supplied outside the repository}
+      EXECUTION_ENVIRONMENT: ${EXECUTION_ENVIRONMENT:?EXECUTION_ENVIRONMENT must be supplied outside the repository}
+      APP_ENV: ${APP_ENV:-phase-a}
+      EXECUTION_STATE_PATH: /var/lib/vnpy-execution/state.json
+      EXECUTION_TERMINAL_ARCHIVE_PATH: /var/lib/vnpy-execution/archive
+      EXECUTION_AUDIT_PATH: /var/lib/vnpy-execution/audit.jsonl
+      DATABASE_URL: ${EXECUTION_DATABASE_URL:?EXECUTION_DATABASE_URL must be supplied outside the repository}
+      # The adapter receives only the internal proxy endpoints.  It has no
+      # route to the external gateway network; the two sidecars below are the
+      # sole processes that can reach the required Windows targets.
+      EXECUTION_RPC_REQ_ADDRESS: tcp://gateway-rpc-request-proxy:${GATEWAY_RPC_REQ_PROXY_PORT:?GATEWAY_RPC_REQ_PROXY_PORT must be supplied outside the repository}
+      EXECUTION_RPC_PUB_ADDRESS: tcp://gateway-rpc-publish-proxy:${GATEWAY_RPC_PUB_PROXY_PORT:?GATEWAY_RPC_PUB_PROXY_PORT must be supplied outside the repository}
+      GATEWAY_PROXY_HEALTH_PORT: "18080"
+      WEB_TRADE_ENABLED: "false"
+      PRODUCTION: "false"
+      LIVE_TRADING_AUTHORIZED: "false"
+      COUNTABLE_FORWARD: "false"
+    networks:
+      - private-control
+      - execution-data
+      - gateway-proxy
+    depends_on:
+      postgres:
+        condition: service_healthy
+      gateway-rpc-request-proxy:
+        condition: service_healthy
+      gateway-rpc-publish-proxy:
+        condition: service_healthy
+    volumes:
+      - execution_durable_state:/var/lib/vnpy-execution
+      - execution_terminal_archive:/var/lib/vnpy-execution/archive
+      - execution_audit:/var/lib/vnpy-execution/audit
+    read_only: true
+    tmpfs:
+      - /tmp
+    healthcheck:
+      # Read the shared secret from the container environment at probe time;
+      # never interpolate it into Compose output or the visible command line.
+      test: ["CMD-SHELL", "python -c 'import json,os,urllib.request; p=os.environ[\"GATEWAY_PROXY_HEALTH_PORT\"]; deps=[json.load(urllib.request.urlopen(f\"http://{host}:{p}/health/ready\", timeout=2)) for host in (\"gateway-rpc-request-proxy\",\"gateway-rpc-publish-proxy\")]; assert all(d.get(\"status\")==\"ready\" for d in deps); r=urllib.request.Request(\"http://127.0.0.1:8090/health/ready\", headers={\"X-Control-Execution-Secret\":os.environ[\"CONTROL_EXECUTION_SHARED_SECRET\"]}); d=json.load(urllib.request.urlopen(r, timeout=2)); raise SystemExit(0 if d.get(\"status\") == \"ready\" else 1)' "]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  # These two sidecars are deliberately boring TCP proxies.  ZMQ REQ/REP
+  # frames are carried unchanged over TCP; the image's no-shell validator
+  # checks each environment address against its root-owned allowlist.  Each
+  # sidecar has exactly one listen port and one Windows target, so neither
+  # Control nor Execution receives a general-purpose egress capability.
+  gateway-rpc-request-proxy:
+    image: ${GATEWAY_PROXY_IMAGE:-vnpy-web-bridge-gateway-proxy:phase-a}
+    build:
+      context: ..
+      dockerfile: deployments/phase-a/Containerfile.gateway-proxy
+    environment:
+      PROXY_LISTEN_PORT: ${GATEWAY_RPC_REQ_PROXY_PORT:?GATEWAY_RPC_REQ_PROXY_PORT must be supplied outside the repository}
+      PROXY_HEALTH_PORT: "18080"
+      GATEWAY_PROXY_VERSION: ${GATEWAY_PROXY_VERSION:-phase-a}
+      WINDOWS_RPC_REQ_ADDRESS: ${WINDOWS_RPC_REQ_ADDRESS:?WINDOWS_RPC_REQ_ADDRESS must be supplied outside the repository}
+    command: ["request"]
+    expose:
+      - "${GATEWAY_RPC_REQ_PROXY_PORT:?GATEWAY_RPC_REQ_PROXY_PORT must be supplied outside the repository}"
+      - "18080"
+    networks:
+      - gateway-proxy
+      - gateway-egress
+    read_only: true
+    tmpfs:
+      - /tmp
+    healthcheck:
+      test: ["CMD", "python", "/usr/local/bin/gateway_proxy.py", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 5s
+
+  gateway-rpc-publish-proxy:
+    image: ${GATEWAY_PROXY_IMAGE:-vnpy-web-bridge-gateway-proxy:phase-a}
+    build:
+      context: ..
+      dockerfile: deployments/phase-a/Containerfile.gateway-proxy
+    environment:
+      PROXY_LISTEN_PORT: ${GATEWAY_RPC_PUB_PROXY_PORT:?GATEWAY_RPC_PUB_PROXY_PORT must be supplied outside the repository}
+      PROXY_HEALTH_PORT: "18080"
+      GATEWAY_PROXY_VERSION: ${GATEWAY_PROXY_VERSION:-phase-a}
+      WINDOWS_RPC_PUB_ADDRESS: ${WINDOWS_RPC_PUB_ADDRESS:?WINDOWS_RPC_PUB_ADDRESS must be supplied outside the repository}
+    command: ["publish"]
+    expose:
+      - "${GATEWAY_RPC_PUB_PROXY_PORT:?GATEWAY_RPC_PUB_PROXY_PORT must be supplied outside the repository}"
+      - "18080"
+    networks:
+      - gateway-proxy
+      - gateway-egress
+    read_only: true
+    tmpfs:
+      - /tmp
+    healthcheck:
+      test: ["CMD", "python", "/usr/local/bin/gateway_proxy.py", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 5s
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB must be supplied outside the repository}
+      POSTGRES_USER: ${POSTGRES_ADMIN_USER:?POSTGRES_ADMIN_USER must be supplied outside the repository}
+      POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:?POSTGRES_ADMIN_PASSWORD must be supplied outside the repository}
+      CONTROL_DB_USER: ${CONTROL_DB_USER:?CONTROL_DB_USER must be supplied outside the repository}
+      CONTROL_DB_PASSWORD: ${CONTROL_DB_PASSWORD:?CONTROL_DB_PASSWORD must be supplied outside the repository}
+      EXECUTION_DB_USER: ${EXECUTION_DB_USER:?EXECUTION_DB_USER must be supplied outside the repository}
+      EXECUTION_DB_PASSWORD: ${EXECUTION_DB_PASSWORD:?EXECUTION_DB_PASSWORD must be supplied outside the repository}
+      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+    networks:
+      - control-data
+      - execution-data
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./phase-a/postgres-init.sh:/docker-entrypoint-initdb.d/10-phase-a-roles.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  questdb:
+    image: questdb/questdb:9.4.3
+    networks:
+      - data-private
+    volumes:
+      - questdb_data:/var/lib/questdb
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/health >/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 12
+
+networks:
+  edge:
+    internal: false
+  edge-control:
+    # Frontend-to-Control proxy traffic is isolated from the public edge.
+    # Control must never inherit the Frontend container's general egress.
+    internal: true
+  private-control:
+    internal: true
+  control-data:
+    internal: true
+  execution-data:
+    internal: true
+  gateway-proxy:
+    # Internal-only bridge shared by Execution and the two narrowly scoped
+    # gateway proxies.  Execution never joins gateway-egress.
+    internal: true
+  gateway-egress:
+    # Only the request/publish proxies join this external segment.  The host
+    # firewall must additionally allowlist the exact Windows RPC addresses;
+    # that is an extra defense, not the sole container isolation evidence.
+    internal: false
+  data-private:
+    internal: true
+
+volumes:
+  control_audit_projection:
+  execution_durable_state:
+  execution_terminal_archive:
+  execution_audit:
+  postgres_data:
+  questdb_data:

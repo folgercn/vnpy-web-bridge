@@ -40,6 +40,8 @@ FOUNDATION_SOURCE_NAMES = (
     "assembly.py",
     "bootstrap_v1.py",
     "contracts.py",
+    "final_admission_v1.py",
+    "final_store_v1.py",
     "store.py",
     "win32_fs.py",
 )

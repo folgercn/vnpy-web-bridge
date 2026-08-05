@@ -1,6 +1,7 @@
 import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
 import AppLayout from '../components/AppLayout.vue'
+import PhaseBUnavailable from '../components/PhaseBUnavailable.vue'
 import Login from '../pages/Login.vue'
 import Dashboard from '../pages/Dashboard.vue'
 import Market from '../pages/Market.vue'
@@ -10,7 +11,6 @@ import Orders from '../pages/Orders.vue'
 import Trades from '../pages/Trades.vue'
 import Account from '../pages/Account.vue'
 import Strategies from '../pages/Strategies.vue'
-import CommoditySimNowPage from '../features/commodity-simnow/pages/CommoditySimNowPage.vue'
 import Logs from '../pages/Logs.vue'
 import DataManagement from '../pages/DataManagement.vue'
 
@@ -30,7 +30,12 @@ const routes: RouteRecordRaw[] = [
       { path: 'trades', component: Trades, meta: { title: '成交' } },
       { path: 'account', component: Account, meta: { title: '资金' } },
       { path: 'strategies', component: Strategies, meta: { title: '策略' } },
-      { path: 'commodity-simnow', component: CommoditySimNowPage, meta: { title: '商品 SimNow' } },
+      {
+        path: 'commodity-simnow',
+        component: PhaseBUnavailable,
+        props: { surface: '商品 SimNow' },
+        meta: { title: '商品 SimNow' }
+      },
       { path: 'data', component: DataManagement, meta: { title: '数据管理' } },
       { path: 'logs', component: Logs, meta: { title: '日志' } }
     ]

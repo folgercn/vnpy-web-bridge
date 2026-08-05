@@ -86,3 +86,75 @@ def test_windows_fence_gate_is_read_only_cross_platform_and_non_deploying() -> N
 
     gate = WORKFLOW.split("  ci-gate:\n", maxsplit=1)[1]
     assert "- windows-fence-core" in gate
+
+
+def test_issue291_phase_a_gate_builds_primary_images_and_execution_proxy_closure() -> (
+    None
+):
+    assert "--phase-a --github-output" in WORKFLOW
+    assert "phase_a_changed" in WORKFLOW
+    assert "execution_safety_required" in WORKFLOW
+    release = WORKFLOW.split("  phase-a-release-plan:\n", maxsplit=1)[1]
+    assert "plan_phase_a_release.py" in release
+    assert "issue-291-phase-a-release-plan" in release
+    build = WORKFLOW.split("  phase-a-build-check:\n", maxsplit=1)[1].split(
+        "  backend:\n", maxsplit=1
+    )[0]
+    for token in (
+        "frontend/Containerfile",
+        "deployments/phase-a/Containerfile.control-api",
+        "deployments/phase-a/Containerfile.execution-orchestrator",
+        "deployments/phase-a/Containerfile.gateway-proxy",
+        "gateway-rpc-request-proxy",
+        "gateway-rpc-publish-proxy",
+        "GATEWAY_RPC_REQ_PROXY_PORT",
+        "GATEWAY_RPC_PUB_PROXY_PORT",
+        "WINDOWS_RPC_REQ_ADDRESS",
+        "WINDOWS_RPC_PUB_ADDRESS",
+        "vnpy-web-bridge-gateway-proxy:phase-a-${{ github.sha }}",
+        "docker compose -f deployments/docker-compose.phase-a.yml config --quiet",
+        "CONTROL_EXECUTION_SHARED_SECRET",
+        "CONTROL_DB_PASSWORD",
+        "WINDOWS_RPC_REQ_ADDRESS",
+        "--entrypoint python",
+        "--entrypoint nginx",
+        "['python','/usr/local/bin/gateway_proxy.py']",
+        "c['Cmd'] == ['request']",
+        "c['User'] == '65532:65532'",
+        "value['service'] == 'gateway-rpc-proxy'",
+        "health/live",
+        "version",
+        "test_issue291_phase_a_release.py",
+        "test_issue291_phase_a_contract.py",
+    ):
+        assert token in build, token
+    assert "socat -V" not in build
+    changes = WORKFLOW.split("  changes:\n", maxsplit=1)[1].split(
+        "  quick-checks:\n", maxsplit=1
+    )[0]
+    assert (
+        'git ls-tree -r --name-only "$CURRENT_SHA" > /tmp/changed-files.txt' in changes
+    )
+    assert (
+        'if [ "$EVENT_NAME" = "workflow_dispatch" ]; then extra+=(--force-all); fi'
+        in changes
+    )
+    gate = WORKFLOW.split("  ci-gate:\n", maxsplit=1)[1]
+    assert "- phase-a-release-plan" in gate
+    assert "- phase-a-build-check" in gate
+
+
+def test_phase_a_ci_has_no_legacy_monolith_deploy_or_runtime_mutation() -> None:
+    section = WORKFLOW.split("  phase-a-build-check:\n", maxsplit=1)[1].split(
+        "  backend:\n", maxsplit=1
+    )[0]
+    for forbidden in (
+        "scripts/deploy.sh",
+        "ssh ",
+        "scp ",
+        "Restart-Service",
+        "docker compose up",
+        "production_allowed: true",
+        "live_trading_authorized: true",
+    ):
+        assert forbidden.lower() not in section.lower()

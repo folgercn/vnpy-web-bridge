@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/folgercn/vnpy-web-bridge/issue-291-phase-a-release-plan-v1.schema.json",
+  "title": "Issue #291 Phase A release plan",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "issue_number",
+    "phase",
+    "source_commit_sha",
+    "changed_paths",
+    "candidate_rule_ids",
+    "selected_rule_ids",
+    "decision",
+    "selected_units",
+    "dependency_closure",
+    "external_artifacts",
+    "build_units",
+    "verification_units",
+    "deploy_units",
+    "restart_units",
+    "preserve_units",
+    "execution_safety_required",
+    "blocked_reasons",
+    "manual_approval_required",
+    "automatic_deploy_allowed",
+    "manual_deploy_allowed",
+    "production_allowed",
+    "live_trading_authorized",
+    "countable_forward",
+    "deployed",
+    "accepted"
+  ],
+  "properties": {
+    "schema_version": {"const": "web_bridge_issue_291_phase_a_release_plan_v1"},
+    "issue_number": {"const": 291},
+    "phase": {"const": "A"},
+    "source_commit_sha": {"type": "string", "pattern": "^(?!0{40}$)[0-9a-f]{40}$"},
+    "changed_paths": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+    "candidate_rule_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "selected_rule_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "decision": {"enum": ["BLOCKED", "BUILD_ONLY", "CONTRACT_ONLY"]},
+    "selected_units": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"enum": ["frontend-edge", "control-api", "execution-orchestrator"]}
+    },
+    "dependency_closure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["services", "shared_contract_changed", "external_artifacts"],
+      "properties": {
+        "shared_contract_changed": {"type": "boolean"},
+        "services": {"type": "array", "items": {"$ref": "#/$defs/buildUnit"}, "uniqueItems": true},
+        "external_artifacts": {"type": "array", "items": {"enum": ["windows-ctp-gateway"]}, "uniqueItems": true}
+      }
+    },
+    "external_artifacts": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"enum": ["windows-ctp-gateway"]}
+    },
+    "build_units": {"type": "array", "items": {"$ref": "#/$defs/buildUnit"}, "uniqueItems": true},
+    "verification_units": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "deploy_units": {"const": []},
+    "restart_units": {"const": []},
+    "preserve_units": {"const": []},
+    "execution_safety_required": {"type": "boolean"},
+    "blocked_reasons": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "code", "rule_ids"],
+        "properties": {
+          "path": {"type": "string"},
+          "code": {"type": "string", "enum": ["unknown_path", "ambiguous_rule", "legacy_monolith_forbidden", "unknown_dependency", "unknown_baseline", "empty_change_set", "missing_build_file", "static_contract_violation", "static_contract_unavailable"]},
+          "rule_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+          "markers": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+          "units": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+          "unit": {"type": "string"}
+        }
+      }
+    },
+    "manual_approval_required": {"type": "boolean"},
+    "automatic_deploy_allowed": {"const": false},
+    "manual_deploy_allowed": {"const": false},
+    "production_allowed": {"const": false},
+    "live_trading_authorized": {"const": false},
+    "countable_forward": {"const": false},
+    "deployed": {"const": false},
+    "accepted": {"const": false}
+  },
+  "$defs": {
+    "buildUnit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["unit", "build_file", "build_file_exists", "entrypoint", "verification_units", "deploy_allowed"],
+      "properties": {
+        "unit": {"enum": ["frontend-edge", "control-api", "execution-orchestrator", "gateway-rpc-request-proxy", "gateway-rpc-publish-proxy"]},
+        "build_file": {"type": "string", "minLength": 1},
+        "build_file_exists": {"type": "boolean"},
+        "entrypoint": {"type": "string", "minLength": 1},
+        "command": {"enum": ["request", "publish"]},
+        "verification_units": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "deploy_allowed": {"const": false}
+      }
+    }
+  }
+}

@@ -1,5 +1,6 @@
 import { useTerminalStore } from '../stores/terminal'
 import { useAuthStore } from '../stores/auth'
+import { getWebSocketTicket } from '../api/ws'
 import { ref } from 'vue'
 
 export const wsUrl =
@@ -17,11 +18,22 @@ export class EventSocket {
   private socket: WebSocket | null = null
   private reconnectTimer = 0
 
-  connect() {
+  async connect() {
     if (this.socket && (this.socket.readyState === WebSocket.CONNECTING || this.socket.readyState === WebSocket.OPEN)) return
     this.status.value = this.socket ? 'reconnecting' : 'connecting'
-    const token = localStorage.getItem('access_token')
-    const url = token ? `${wsUrl}${wsUrl.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}` : wsUrl
+    let ticket: string
+    try {
+      const issued = await getWebSocketTicket()
+      ticket = issued.ticket
+    } catch {
+      this.scheduleReconnect()
+      return
+    }
+    // ``connect`` awaits a ticket request; ``close`` may run during that
+    // await and mark the socket disconnected.  Keep the runtime guard while
+    // avoiding an over-narrowed literal-union comparison in TypeScript.
+    if ((this.status.value as string) === 'disconnected') return
+    const url = `${wsUrl}${wsUrl.includes('?') ? '&' : '?'}ticket=${encodeURIComponent(ticket)}`
     this.socket = new WebSocket(url)
     this.socket.onopen = () => {
       this.status.value = 'connected'

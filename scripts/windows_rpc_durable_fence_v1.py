@@ -12,8 +12,11 @@ import sys
 import zipfile
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from enum import Enum
 from hashlib import sha256
 from pathlib import Path
+from threading import RLock
 from types import MappingProxyType
 from typing import Any
 
@@ -95,35 +98,64 @@ if _FOUNDATION_ARCHIVE_PATH.is_file():
     _VERIFIED_FOUNDATION_ARCHIVE_RAW = _archive_raw
     sys.meta_path.insert(0, _VerifiedAssemblyImporter(_archive_raw))
 
-# These imports must remain after the installed-layout archive verification above.
-from scripts.windows_fence_foundation.admission import (  # noqa: E402
+
+# Resolve foundation modules only after the installed-layout archive has been
+# verified and its importer installed.  Keeping these as local dynamic imports
+# preserves that ordering without suppressing E402 on seven module-level imports.
+def _load_verified_foundation_exports() -> tuple[Any, ...]:
+    admission = importlib.import_module("scripts.windows_fence_foundation.admission")
+    assembly = importlib.import_module("scripts.windows_fence_foundation.assembly")
+    bootstrap = importlib.import_module("scripts.windows_fence_foundation.bootstrap_v1")
+    contracts = importlib.import_module("scripts.windows_fence_foundation.contracts")
+    final_admission = importlib.import_module(
+        "scripts.windows_fence_foundation.final_admission_v1"
+    )
+    store = importlib.import_module("scripts.windows_fence_foundation.store")
+    win32_fs = importlib.import_module("scripts.windows_fence_foundation.win32_fs")
+    return (
+        admission.FrozenNoneProjection,
+        admission.FrozenNoneStoreRecovery,
+        admission.WindowsRpcDurableFenceDenied,
+        admission.WindowsRpcDurableFenceError,
+        admission.WindowsRpcFinalAdmissionV1,
+        assembly.WindowsRpcFrozenAssemblyV1,
+        assembly.assemble_windows_rpc_frozen_v1,
+        assembly.attach_windows_rpc_deployment_snapshot_v1,
+        assembly.attach_windows_rpc_fenced_methods_v1,
+        bootstrap.bootstrap_windows_rpc_frozen_v1,
+        contracts.StoreContractError,
+        contracts.canonical_json_bytes,
+        contracts.canonical_local_windows_path,
+        final_admission.WindowsRpcFencedAdmissionV1,
+        final_admission.WindowsRpcFinalAdmissionV2,
+        store.StoreExpectation,
+        store.StoreRecovery,
+        store.recover_frozen_none_store,
+        win32_fs.WindowsFilesystemFactsAdapter,
+    )
+
+
+(
     FrozenNoneProjection,
     FrozenNoneStoreRecovery,
     WindowsRpcDurableFenceDenied,
     WindowsRpcDurableFenceError,
     WindowsRpcFinalAdmissionV1,
-)
-from scripts.windows_fence_foundation.assembly import (  # noqa: E402
     WindowsRpcFrozenAssemblyV1,
     assemble_windows_rpc_frozen_v1,
     attach_windows_rpc_deployment_snapshot_v1,
-)
-from scripts.windows_fence_foundation.bootstrap_v1 import (  # noqa: E402
+    attach_windows_rpc_fenced_methods_v1,
     bootstrap_windows_rpc_frozen_v1,
-)
-from scripts.windows_fence_foundation.contracts import (  # noqa: E402
     StoreContractError,
     canonical_json_bytes,
     canonical_local_windows_path,
-)
-from scripts.windows_fence_foundation.store import (  # noqa: E402
+    WindowsRpcFencedAdmissionV1,
+    WindowsRpcFinalAdmissionV2,
     StoreExpectation,
     StoreRecovery,
     recover_frozen_none_store,
-)
-from scripts.windows_fence_foundation.win32_fs import (  # noqa: E402
     WindowsFilesystemFactsAdapter,
-)
+) = _load_verified_foundation_exports()
 
 _RPC_ADDRESS_RE = re.compile(r"^tcp://(?:\*|127\.0\.0\.1|\[::1\]):[1-9][0-9]{0,4}$")
 _ASSEMBLY_COMPONENTS = (
@@ -132,6 +164,8 @@ _ASSEMBLY_COMPONENTS = (
     "assembly.py",
     "bootstrap_v1.py",
     "contracts.py",
+    "final_admission_v1.py",
+    "final_store_v1.py",
     "store.py",
     "win32_fs.py",
 )
@@ -145,6 +179,8 @@ class WindowsRpcRuntimeConfigV1:
     gateway_name: str = "CTP"
     rep_address: str = "tcp://*:2014"
     pub_address: str = "tcp://*:4102"
+    account_scope: str = "account:windows"
+    environment: str = "simnow"
 
     def __post_init__(self) -> None:
         setting = dict(self.gateway_setting)
@@ -165,6 +201,18 @@ class WindowsRpcRuntimeConfigV1:
                 raise ValueError("RPC listener port is outside the valid range")
         if self.rep_address == self.pub_address:
             raise ValueError("RPC request and publish addresses must differ")
+        if (
+            not isinstance(self.account_scope, str)
+            or not self.account_scope
+            or self.account_scope == "account:default"
+        ):
+            raise ValueError("account_scope must be explicit")
+        if (
+            not isinstance(self.environment, str)
+            or not self.environment
+            or self.environment == "default"
+        ):
+            raise ValueError("environment must be explicit")
         canonical_json_bytes(setting)
         object.__setattr__(self, "gateway_setting", MappingProxyType(setting))
 
@@ -176,6 +224,8 @@ class WindowsRpcRuntimeConfigV1:
             "gateway_setting": dict(self.gateway_setting),
             "rep_address": self.rep_address,
             "pub_address": self.pub_address,
+            "account_scope": self.account_scope,
+            "environment": self.environment,
         }
         return sha256(canonical_json_bytes(payload)).hexdigest()
 
@@ -272,13 +322,29 @@ def _parse_installed_service_config_v1(
     ):
         raise ValueError("SERVICE_CONFIG_STORE_EXPECTATION_INVALID")
     runtime = value["runtime_config"]
-    if not isinstance(runtime, dict) or set(runtime) != {
-        "gateway_name",
-        "gateway_setting",
-        "rep_address",
-        "pub_address",
-    }:
+    if (
+        not isinstance(runtime, dict)
+        or not set(runtime).issubset(
+            {
+                "gateway_name",
+                "gateway_setting",
+                "rep_address",
+                "pub_address",
+                "account_scope",
+                "environment",
+            }
+        )
+        or not {
+            "gateway_name",
+            "gateway_setting",
+            "rep_address",
+            "pub_address",
+        }.issubset(runtime)
+    ):
         raise ValueError("SERVICE_CONFIG_RUNTIME_FIELDS_INVALID")
+    runtime = dict(runtime)
+    runtime.setdefault("account_scope", "account:windows")
+    runtime.setdefault("environment", "simnow")
     return _InstalledWindowsRpcServiceConfigV1(
         store_root=store_root,
         store_expectation=StoreExpectation(**expectation),
@@ -294,6 +360,267 @@ class _WindowsRpcRuntimeV1:
     rpc_engine: Any
     fact_source: Any
     config: WindowsRpcRuntimeConfigV1
+
+
+def _execution_fact_value(value: Any) -> Any:
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, datetime):
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise WindowsRpcDurableFenceError(
+                "execution fact datetime is naive",
+                code="WINDOWS_EXECUTION_FACT_INVALID",
+            )
+        return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
+def _execution_fact_row(value: Any, fields: tuple[str, ...]) -> dict[str, Any]:
+    source = value if isinstance(value, Mapping) else vars(value)
+    return {
+        field: _execution_fact_value(source[field])
+        for field in fields
+        if field in source and source[field] is not None
+    }
+
+
+class _WindowsExecutionFactsV1:
+    """Strict read-only projection over vn.py OMS facts and mutation outcomes."""
+
+    _ORDER_FIELDS = (
+        "vt_orderid",
+        "orderid",
+        "symbol",
+        "exchange",
+        "direction",
+        "offset",
+        "price",
+        "volume",
+        "traded",
+        "status",
+        "datetime",
+        "reference",
+        "gateway_name",
+    )
+    _POSITION_FIELDS = (
+        "vt_positionid",
+        "symbol",
+        "exchange",
+        "direction",
+        "volume",
+        "frozen",
+        "price",
+        "pnl",
+        "gateway_name",
+    )
+
+    def __init__(self, runtime: _WindowsRpcRuntimeV1) -> None:
+        self.runtime = runtime
+        self._lock = RLock()
+        self._generation = 0
+        self._intent_orders: dict[str, str] = {}
+
+    def record_outcome(
+        self, context: Mapping[str, Any], result: Mapping[str, Any]
+    ) -> None:
+        intent_id = context.get("intent_id")
+        order_id = result.get("broker_order_id") or result.get("vt_orderid")
+        if isinstance(intent_id, str) and isinstance(order_id, str) and order_id:
+            with self._lock:
+                self._intent_orders[intent_id] = order_id
+
+    def _facts(self, method: str) -> list[Any]:
+        reader = getattr(self.runtime.fact_source, method, None)
+        if not callable(reader):
+            raise WindowsRpcDurableFenceError(
+                f"Windows OMS fact reader is unavailable: {method}",
+                code="WINDOWS_EXECUTION_FACT_UNAVAILABLE",
+            )
+        result = reader()
+        if not isinstance(result, (list, tuple)):
+            raise WindowsRpcDurableFenceError(
+                f"Windows OMS fact reader is invalid: {method}",
+                code="WINDOWS_EXECUTION_FACT_INVALID",
+            )
+        return list(result)
+
+    @staticmethod
+    def _key(row: Mapping[str, Any], *names: str) -> str:
+        for name in names:
+            value = row.get(name)
+            if isinstance(value, str) and value:
+                return value
+        raise WindowsRpcDurableFenceError(
+            "Windows OMS fact identity is missing",
+            code="WINDOWS_EXECUTION_FACT_INVALID",
+        )
+
+    def _orders(self) -> dict[str, Any]:
+        rows = [
+            _execution_fact_row(item, self._ORDER_FIELDS)
+            for item in self._facts("get_all_orders")
+        ]
+        return {self._key(row, "vt_orderid", "orderid"): row for row in rows}
+
+    def _positions(self) -> dict[str, Any]:
+        rows = [
+            _execution_fact_row(item, self._POSITION_FIELDS)
+            for item in self._facts("get_all_positions")
+        ]
+        return {
+            self._key(row, "vt_positionid", "symbol"): row for row in rows
+        }
+
+    def get_execution_snapshot_v1(self, request: Mapping[str, Any]) -> dict[str, Any]:
+        expected = {
+            "account_scope": self.runtime.config.account_scope,
+            "environment": self.runtime.config.environment,
+        }
+        if not isinstance(request, Mapping) or dict(request) != {
+            "environment": expected["environment"],
+            "account_scope": expected["account_scope"],
+        }:
+            raise WindowsRpcDurableFenceDenied(
+                "execution snapshot scope is foreign",
+                code="WINDOWS_FENCE_SCOPE_INVALID",
+            )
+        orders = self._orders()
+        positions = self._positions()
+        active_orders = self._facts("get_all_active_orders")
+        accounts = self._facts("get_all_accounts")
+        with self._lock:
+            self._generation += 1
+            generation = self._generation
+        observed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        return {
+            "snapshot_id": f"snapshot-{generation:016d}",
+            "generation": generation,
+            "connected": bool(accounts),
+            "active_order_count": len(active_orders),
+            "position_snapshot_hash": sha256(
+                canonical_json_bytes(positions)
+            ).hexdigest(),
+            "observed_at": observed_at,
+            "orders": orders,
+            "positions": positions,
+            "account_scope": expected["account_scope"],
+            "environment": expected["environment"],
+            "fresh": True,
+        }
+
+    def query_intent_v1(
+        self, request: Mapping[str, Any], context: Mapping[str, Any] | None
+    ) -> dict[str, Any]:
+        intent_id = str(request["intent_id"])
+        requested_order_id = request.get("broker_order_id")
+        with self._lock:
+            recorded_order_id = self._intent_orders.get(intent_id)
+        order_id = requested_order_id or recorded_order_id
+        orders = self._orders()
+        matched: Mapping[str, Any] | None = None
+        if isinstance(order_id, str) and order_id:
+            matched = orders.get(order_id)
+            if matched is None:
+                matched = next(
+                    (
+                        row
+                        for row in orders.values()
+                        if order_id in {row.get("orderid"), row.get("vt_orderid")}
+                    ),
+                    None,
+                )
+        if matched is None:
+            matched = next(
+                (
+                    row
+                    for row in orders.values()
+                    if row.get("reference") == intent_id
+                ),
+                None,
+            )
+        if matched is None:
+            return {
+                "intent_id": intent_id,
+                "state": "UNKNOWN_OUTCOME",
+                "account_scope": self.runtime.config.account_scope,
+                "environment": self.runtime.config.environment,
+            }
+        status = str(matched.get("status", "")).lower().replace(" ", "_")
+        state = {
+            "all_traded": "TERMINAL",
+            "alltraded": "TERMINAL",
+            "cancelled": "CANCELLED",
+            "canceled": "CANCELLED",
+            "rejected": "REJECTED",
+            "submitting": "SUBMITTED",
+        }.get(status, "ACKNOWLEDGED")
+        bound_order_id = self._key(matched, "vt_orderid", "orderid")
+        return {
+            "intent_id": intent_id,
+            "state": state,
+            "accepted": state != "REJECTED",
+            "broker_order_id": bound_order_id,
+            "account_scope": self.runtime.config.account_scope,
+            "environment": self.runtime.config.environment,
+        }
+
+
+def _attach_fixed_typed_fenced_methods(
+    runtime: _WindowsRpcRuntimeV1,
+    runtime_config: WindowsRpcRuntimeConfigV1,
+    store_root: str | Path,
+) -> WindowsRpcFencedAdmissionV1:
+    """Create and attach the dormant typed execution lifecycle at startup.
+
+    The foundation remains frozen: this admission starts with no registered
+    receipts, so its typed send/cancel methods cannot reach the vn.py handlers
+    until the Linux Execution lifecycle installs a current fence and receipt.
+    """
+
+    server = runtime.rpc_engine.server
+    functions = getattr(server, "_functions", None)
+    if not isinstance(functions, dict):
+        raise WindowsRpcDurableFenceError(
+            "RPC server registry is unavailable",
+            code="RPC_REGISTRY_UNAVAILABLE",
+        )
+    send_handler = functions.get("send_order")
+    cancel_handler = functions.get("cancel_order")
+    if not callable(send_handler) or not callable(cancel_handler):
+        raise WindowsRpcDurableFenceError(
+            "underlying send/cancel handlers are unavailable",
+            code="RPC_MUTATION_HANDLERS_MISSING",
+        )
+    facts = _WindowsExecutionFactsV1(runtime)
+
+    def send_bound(request: Mapping[str, Any], context: Mapping[str, Any]) -> Any:
+        result = send_handler(request, context)
+        if isinstance(result, Mapping):
+            facts.record_outcome(context, result)
+        return result
+
+    def cancel_bound(request: Mapping[str, Any], context: Mapping[str, Any]) -> Any:
+        result = cancel_handler(request, context)
+        if isinstance(result, Mapping):
+            facts.record_outcome(context, result)
+        return result
+    # The execution ledger lives under the already verified service-owned WF-1
+    # root at one fixed filename; callers cannot redirect it to an arbitrary
+    # path or migration chain.
+    final_store_path = Path(store_root).absolute() / "execution-final-admission-v1.json"
+    admission = WindowsRpcFencedAdmissionV1.bootstrap(
+        store_path=str(final_store_path),
+        account_scope=runtime_config.account_scope,
+        environment=runtime_config.environment,
+        send_handler=send_bound,
+        cancel_handler=cancel_bound,
+        query_handler=facts.query_intent_v1,
+    )
+    attach_windows_rpc_fenced_methods_v1(server, admission)
+    server.register(facts.get_execution_snapshot_v1)
+    return admission
 
 
 def _production_windows_filesystem() -> WindowsFilesystemFactsAdapter:
@@ -421,6 +748,9 @@ def _launch_windows_rpc_durable_fence_bound_v1(
         recover_store=recover_bound,
         build_runtime=lambda: _build_fixed_vnpy_runtime(runtime_config),
         attach_snapshot=attach_windows_rpc_deployment_snapshot_v1,
+        attach_typed=lambda runtime: _attach_fixed_typed_fenced_methods(
+            runtime, runtime_config, store_root
+        ),
         connect_runtime=_connect_fixed_vnpy_runtime,
         listen_runtime=_listen_fixed_vnpy_runtime,
         filesystem=filesystem,
@@ -511,11 +841,14 @@ __all__ = [
     "StoreRecovery",
     "WindowsRpcDurableFenceDenied",
     "WindowsRpcDurableFenceError",
+    "WindowsRpcFencedAdmissionV1",
     "WindowsRpcFinalAdmissionV1",
+    "WindowsRpcFinalAdmissionV2",
     "WindowsRpcFrozenAssemblyV1",
     "WindowsRpcRuntimeConfigV1",
     "assemble_windows_rpc_frozen_v1",
     "attach_windows_rpc_deployment_snapshot_v1",
+    "attach_windows_rpc_fenced_methods_v1",
     "bootstrap_windows_rpc_frozen_v1",
     "launch_windows_rpc_durable_fence_v1",
     "recover_frozen_none_store",

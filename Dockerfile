@@ -1,14 +1,3 @@
-FROM node:22-slim AS frontend-build
-
-WORKDIR /app/frontend
-
-COPY frontend/package*.json ./
-RUN npm ci
-
-COPY frontend/ ./
-COPY shared /app/shared
-RUN npm run build
-
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -38,8 +27,6 @@ COPY docs/schemas/commodity-c-fast-questdb-readonly-proof-v1.schema.json ./docs/
 COPY docs/schemas/commodity-c-fast-l1-l5-audit-v1.schema.json ./docs/schemas/commodity-c-fast-l1-l5-audit-v1.schema.json
 COPY docs/schemas/commodity-c-fast-l1-l5-audit-v2.schema.json ./docs/schemas/commodity-c-fast-l1-l5-audit-v2.schema.json
 COPY docs/schemas/commodity-c-fast-l1-l5-audit-manifest-v2.schema.json ./docs/schemas/commodity-c-fast-l1-l5-audit-manifest-v2.schema.json
-COPY --from=frontend-build /app/frontend/dist ./frontend/dist
-
 ENV PYTHONPATH=/app/backend:/app/scripts
 
 RUN python -m py_compile test_rpc_readonly.py test_rpc_trade_flow.py \

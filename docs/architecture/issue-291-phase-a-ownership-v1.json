@@ -1,0 +1,889 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "schema_version": "web_bridge_issue_291_phase_a_ownership_v1",
+  "issue": 291,
+  "phase": "A",
+  "status": "contract_frozen_not_implemented",
+  "decision": "final_state_separation",
+  "supersedes": [
+    "issue_267_progressive_migration_route",
+    "issue_267_legacy_monolith_compatibility_window"
+  ],
+  "scope": {
+    "in_scope": [
+      "frontend_edge",
+      "control_api",
+      "execution_orchestrator",
+      "gateway_rpc_proxies",
+      "questdb",
+      "postgres",
+      "windows_ctp_gateway_boundary",
+      "typed_control_execution_contract",
+      "execution_durable_state_and_fencing_contract",
+      "phase_a_compose_and_health_contract"
+    ],
+    "out_of_scope": [
+      "map_producer_implementation",
+      "c_fast_producer_implementation",
+      "signing_authority_implementation",
+      "artifact_custody_implementation",
+      "tick_worker_implementation",
+      "execution_quality_worker_implementation",
+      "monitor_worker_implementation",
+      "release_classifier_and_production_deploy",
+      "legacy_state_migration",
+      "blue_green_or_rolling_release",
+      "production_or_live_trading"
+    ],
+    "forbidden": [
+      "old_web_bridge_compatibility_layer",
+      "dual_read_or_dual_write",
+      "N_minus_1_api_window",
+      "shared_order_rpc_principal",
+      "private_key_in_frontend_control_or_execution_image",
+      "production",
+      "live_trading",
+      "countable_forward"
+    ]
+  },
+  "safety_defaults": {
+    "production_allowed": false,
+    "live_trading_authorized": false,
+    "countable_forward": false,
+    "automatic_deploy_allowed": false,
+    "unknown_command": "reject",
+    "unknown_state": "fail_closed",
+    "network_default": "deny",
+    "stale_fencing_token": "reject",
+    "rpc_timeout": "query_same_intent_only",
+    "restart_default": "HALTED_RECONCILE_REQUIRED"
+  },
+  "process_entries": {
+    "frontend-edge": {
+      "service_id": "frontend-edge",
+      "image_id": "vnpy-web-bridge-frontend",
+      "entrypoint": "nginx -c /etc/nginx/nginx.conf -g 'daemon off;'",
+      "listen": "0.0.0.0:8080",
+      "health": [
+        "/health/live",
+        "/health/ready",
+        "/version"
+      ]
+    },
+    "control-api": {
+      "service_id": "control-api",
+      "image_id": "vnpy-web-bridge-control-api",
+      "entrypoint": "uvicorn app.control_api:app --host 0.0.0.0 --port 8081 --app-dir backend",
+      "listen": "0.0.0.0:8081",
+      "health": [
+        "/health/live",
+        "/health/ready",
+        "/version"
+      ]
+    },
+    "execution-orchestrator": {
+      "service_id": "execution-orchestrator",
+      "image_id": "vnpy-web-bridge-execution",
+      "entrypoint": "python -m app.execution_orchestrator",
+      "listen": "0.0.0.0:8090",
+      "health": [
+        "/health/live",
+        "/health/ready",
+        "/version"
+      ]
+    },
+    "gateway-rpc-request-proxy": {
+      "service_id": "gateway-rpc-request-proxy",
+      "image_id": "vnpy-web-bridge-gateway-proxy",
+      "entrypoint": "socat TCP-LISTEN:$PROXY_LISTEN_PORT,fork,reuseaddr TCP:$WINDOWS_RPC_REQ_ADDRESS",
+      "listen": "0.0.0.0:$GATEWAY_RPC_REQ_PROXY_PORT,0.0.0.0:18080",
+      "health": [
+        "/health/live",
+        "/health/ready",
+        "/version"
+      ]
+    },
+    "gateway-rpc-publish-proxy": {
+      "service_id": "gateway-rpc-publish-proxy",
+      "image_id": "vnpy-web-bridge-gateway-proxy",
+      "entrypoint": "socat TCP-LISTEN:$PROXY_LISTEN_PORT,fork,reuseaddr TCP:$WINDOWS_RPC_PUB_ADDRESS",
+      "listen": "0.0.0.0:$GATEWAY_RPC_PUB_PROXY_PORT,0.0.0.0:18080",
+      "health": [
+        "/health/live",
+        "/health/ready",
+        "/version"
+      ]
+    },
+    "questdb": {
+      "service_id": "questdb",
+      "image_id": "questdb/questdb:9.4.3",
+      "entrypoint": "image_default",
+      "listen": "questdb:9000,questdb:8812,questdb:9009",
+      "health": [
+        "tcp:questdb:8812"
+      ]
+    },
+    "postgres": {
+      "service_id": "postgres",
+      "image_id": "postgres:16-alpine",
+      "entrypoint": "image_default",
+      "listen": "postgres:5432",
+      "health": [
+        "pg_isready"
+      ]
+    },
+    "windows-ctp-gateway": {
+      "service_id": "windows-ctp-gateway",
+      "image_id": "external:VnpyRpcService",
+      "entrypoint": "external_service",
+      "listen": "tcp://192.168.100.187:2014,tcp://192.168.100.187:4102",
+      "health": [
+        "typed_rpc_snapshot"
+      ]
+    }
+  },
+  "deployment_units": [
+    {
+      "id": "frontend-edge",
+      "phase": "A",
+      "process_entry": "frontend-edge",
+      "code_paths": [
+        "frontend/**",
+        "deployments/phase-a/frontend/**"
+      ],
+      "state_owner": [
+        "static_asset_version"
+      ],
+      "order_rpc": {
+        "allowed": false,
+        "methods": []
+      },
+      "private_key": {
+        "allowed": false,
+        "domains": []
+      },
+      "network": {
+        "published_ports": [
+          "8080:8080"
+        ],
+        "outbound": [
+          "control-api:8081"
+        ],
+        "denied": [
+          "execution-orchestrator:8090",
+          "windows-ctp-gateway",
+          "questdb",
+          "postgres",
+          "signer",
+          "private_custody"
+        ]
+      },
+      "volumes": {
+        "read_only": [],
+        "read_write": []
+      },
+      "health": [
+        "/health/live",
+        "/health/ready",
+        "/version"
+      ],
+      "restart": "independent_frontend_only"
+    },
+    {
+      "id": "control-api",
+      "phase": "A",
+      "process_entry": "control-api",
+      "code_paths": [
+        "backend/app/control_api.py",
+        "backend/app/api/**",
+        "backend/app/core/**",
+        "backend/app/schemas/**",
+        "backend/app/services/audit_service.py",
+        "backend/app/services/auth_service.py",
+        "backend/tests/unit/test_control_api_*.py"
+      ],
+      "state_owner": [
+        "users_roles",
+        "typed_config",
+        "audit_index",
+        "command_receipt_projection"
+      ],
+      "order_rpc": {
+        "allowed": false,
+        "methods": []
+      },
+      "private_key": {
+        "allowed": false,
+        "domains": []
+      },
+      "network": {
+        "published_ports": [],
+        "outbound": [
+          "execution-orchestrator:8090",
+          "postgres:5432"
+        ],
+        "denied": [
+          "windows-ctp-gateway",
+          "questdb:write",
+          "signer:private_key",
+          "artifact_custody:write"
+        ]
+      },
+      "volumes": {
+        "read_only": [
+          "public_schemas"
+        ],
+        "read_write": [
+          "control_audit_projection"
+        ]
+      },
+      "health": [
+        "/health/live",
+        "/health/ready",
+        "/version"
+      ],
+      "restart": "independent_without_execution_recreate"
+    },
+    {
+      "id": "execution-orchestrator",
+      "phase": "A",
+      "process_entry": "execution-orchestrator",
+      "code_paths": [
+        "backend/app/execution_orchestrator.py",
+        "backend/app/execution_state.py",
+        "backend/app/execution_fencing.py",
+        "backend/app/services/trade_service.py",
+        "backend/app/services/commodity_simnow.py",
+        "backend/app/services/vnpy_rpc_service.py",
+        "backend/app/services/deployment_*.py",
+        "backend/tests/unit/test_execution_*.py"
+      ],
+      "state_owner": [
+        "active_plan",
+        "effective_authority",
+        "send_intent",
+        "unknown_outcome",
+          "broker_reconciliation",
+          "execution_archive",
+          "json_durable_state",
+          "leader_lease",
+        "leader_epoch",
+        "fencing_token"
+      ],
+      "order_rpc": {
+        "allowed": true,
+        "methods": [
+          "send_order",
+          "cancel_order"
+        ],
+        "provider": "windows-ctp-gateway",
+        "requires_fencing": true,
+        "requires_durable_intent": true
+      },
+      "private_key": {
+        "allowed": false,
+        "domains": []
+      },
+      "network": {
+        "published_ports": [],
+        "outbound": [
+          "gateway-rpc-request-proxy:$GATEWAY_RPC_REQ_PROXY_PORT",
+          "gateway-rpc-publish-proxy:$GATEWAY_RPC_PUB_PROXY_PORT",
+          "postgres:5432",
+          "artifact_custody:read"
+        ],
+        "denied": [
+          "frontend:write",
+          "control-api:database_write",
+          "gateway-egress",
+          "windows-ctp-gateway:direct",
+          "signer:private_key",
+          "map_producer",
+          "c_fast_producer"
+        ]
+      },
+      "volumes": {
+        "read_only": [
+          "validated_artifact_custody",
+          "public_schemas"
+        ],
+        "read_write": [
+          "execution_durable_state",
+          "execution_terminal_archive",
+          "execution_audit"
+        ]
+      },
+      "health": [
+        "/health/live",
+        "/health/ready",
+        "/version"
+      ],
+      "restart": "blocked_until_reconciled_and_fenced"
+    },
+    {
+      "id": "gateway-rpc-request-proxy",
+      "phase": "A",
+      "process_entry": "gateway-rpc-request-proxy",
+      "code_paths": [
+        "deployments/phase-a/Containerfile.gateway-proxy",
+        "deployments/docker-compose.phase-a.yml"
+      ],
+      "state_owner": [],
+      "order_rpc": {
+        "allowed": false,
+        "methods": []
+      },
+      "private_key": {
+        "allowed": false,
+        "domains": []
+      },
+      "network": {
+        "networks": [
+          "gateway-proxy",
+          "gateway-egress"
+        ],
+        "published_ports": [],
+        "outbound": [
+          "windows-ctp-gateway:2014"
+        ],
+        "denied": [
+          "frontend-edge",
+          "control-api",
+          "postgres",
+          "questdb",
+          "signer",
+          "private_custody"
+        ]
+      },
+      "volumes": {
+        "read_only": [],
+        "read_write": []
+      },
+      "health": [
+        "tcp:windows-ctp-gateway:2014"
+      ],
+      "restart": "independent_proxy_only"
+    },
+    {
+      "id": "gateway-rpc-publish-proxy",
+      "phase": "A",
+      "process_entry": "gateway-rpc-publish-proxy",
+      "code_paths": [
+        "deployments/phase-a/Containerfile.gateway-proxy",
+        "deployments/docker-compose.phase-a.yml"
+      ],
+      "state_owner": [],
+      "order_rpc": {
+        "allowed": false,
+        "methods": []
+      },
+      "private_key": {
+        "allowed": false,
+        "domains": []
+      },
+      "network": {
+        "networks": [
+          "gateway-proxy",
+          "gateway-egress"
+        ],
+        "published_ports": [],
+        "outbound": [
+          "windows-ctp-gateway:4102"
+        ],
+        "denied": [
+          "frontend-edge",
+          "control-api",
+          "postgres",
+          "questdb",
+          "signer",
+          "private_custody"
+        ]
+      },
+      "volumes": {
+        "read_only": [],
+        "read_write": []
+      },
+      "health": [
+        "tcp:windows-ctp-gateway:4102"
+      ],
+      "restart": "independent_proxy_only"
+    },
+    {
+      "id": "questdb",
+      "phase": "A",
+      "process_entry": "questdb",
+      "code_paths": [],
+      "state_owner": [
+        "tick_timeseries"
+      ],
+      "order_rpc": {
+        "allowed": false,
+        "methods": []
+      },
+      "private_key": {
+        "allowed": false,
+        "domains": []
+      },
+      "network": {
+        "networks": [
+          "data-private"
+        ],
+        "published_ports": [],
+        "outbound": [],
+        "denied": [
+          "windows-ctp-gateway",
+          "signer",
+          "execution-orchestrator:command"
+        ]
+      },
+      "volumes": {
+        "read_only": [],
+        "read_write": [
+          "questdb_data"
+        ]
+      },
+      "health": [
+        "tcp:questdb:8812"
+      ],
+      "restart": "database_policy"
+    },
+    {
+      "id": "postgres",
+      "phase": "A",
+      "process_entry": "postgres",
+      "code_paths": [],
+      "state_owner": [
+        "durable_database_records_by_schema_owner"
+      ],
+      "order_rpc": {
+        "allowed": false,
+        "methods": []
+      },
+      "private_key": {
+        "allowed": false,
+        "domains": []
+      },
+      "network": {
+        "networks": [
+          "control-data",
+          "execution-data"
+        ],
+        "published_ports": [],
+        "outbound": [],
+        "denied": [
+          "windows-ctp-gateway",
+          "signer",
+          "frontend"
+        ]
+      },
+      "volumes": {
+        "read_only": [],
+        "read_write": [
+          "postgres_data"
+        ]
+      },
+      "health": [
+        "pg_isready"
+      ],
+      "restart": "database_policy"
+    },
+    {
+      "id": "windows-ctp-gateway",
+      "phase": "A",
+      "process_entry": "windows-ctp-gateway",
+      "code_paths": [
+        "external:192.168.100.187"
+      ],
+      "state_owner": [
+        "ctp_session",
+        "broker_order_facts",
+        "broker_trade_facts",
+        "broker_position_facts",
+        "account_scoped_fence"
+      ],
+      "order_rpc": {
+        "allowed": false,
+        "methods": [],
+        "provides_methods": [
+          "send_order",
+          "cancel_order"
+        ],
+        "caller": "execution-orchestrator",
+        "requires_fencing": true
+      },
+      "private_key": {
+        "allowed": false,
+        "domains": []
+      },
+      "network": {
+        "published_ports": [],
+        "outbound": [],
+        "denied": [
+          "frontend",
+          "control-api",
+          "map-producer",
+          "c-fast-producer",
+          "signer"
+        ]
+      },
+      "volumes": {
+        "read_only": [
+          "windows_fence_store"
+        ],
+        "read_write": [
+          "windows_fence_store"
+        ]
+      },
+      "health": [
+        "typed_rpc_snapshot"
+      ],
+      "restart": "external_service_fail_closed"
+    }
+  ],
+  "reserved_phase_b_owners": [
+    "map-producer",
+    "c-fast-producer",
+    "signing-authority",
+    "artifact-custody",
+    "market-data-worker",
+    "execution-quality-worker",
+    "monitor-worker"
+  ],
+  "current_app_main_lifecycle": {
+    "source": "backend/app/main.py@origin/main",
+    "current_owner": "web-bridge",
+    "entries": [
+      {
+        "call": "market_data_service.start",
+        "target_owner": "market-data-worker",
+        "transition": "retire_replace"
+      },
+      {
+        "call": "tick_persistence_service.start",
+        "target_owner": "market-data-worker",
+        "transition": "retire_replace"
+      },
+      {
+        "call": "rpc_service.bind_loop",
+        "target_owner": "execution-orchestrator",
+        "transition": "move_after_contract"
+      },
+      {
+        "call": "rpc_service.bind_readonly_tick_listener",
+        "target_owner": "execution-quality-worker",
+        "transition": "retire_replace"
+      },
+      {
+        "call": "rpc_service.start",
+        "target_owner": "execution-orchestrator",
+        "transition": "move_after_contract"
+      },
+      {
+        "call": "commodity_c_fast_shadow_service.bind_contract_loader",
+        "target_owner": "c-fast-producer",
+        "transition": "retire_replace_no_rpc_dependency"
+      },
+      {
+        "call": "commodity_c_fast_shadow_service.start",
+        "target_owner": "c-fast-producer",
+        "transition": "retire_replace_no_rpc_dependency"
+      },
+      {
+        "call": "commodity_c_fast_execution_quality_production_assembly.start",
+        "target_owner": "execution-quality-worker",
+        "transition": "retire_replace"
+      },
+      {
+        "call": "commodity_c_fast_execution_permit_service.acceptance_evidence.bind_full_acceptance_verifier",
+        "target_owner": "signing-authority",
+        "transition": "retire_replace_phase_b"
+      },
+      {
+        "call": "commodity_simnow_service.bind_c_fast_snapshot_provider",
+        "target_owner": "execution-orchestrator",
+        "transition": "remove_research_provider_binding"
+      },
+      {
+        "call": "commodity_simnow_service.bind_c_fast_snapshot_identity_provider",
+        "target_owner": "execution-orchestrator",
+        "transition": "remove_research_provider_binding"
+      },
+      {
+        "call": "commodity_simnow_service.bind_c_fast_execution_permit_provider",
+        "target_owner": "execution-orchestrator",
+        "transition": "consume_verified_artifact_only"
+      },
+      {
+        "call": "commodity_simnow_service.start",
+        "target_owner": "execution-orchestrator",
+        "transition": "move_after_contract"
+      },
+      {
+        "call": "monitoring_service.start",
+        "target_owner": "monitor-worker",
+        "transition": "retire_replace"
+      },
+      {
+        "call": "commodity_c_fast_execution_quality_production_assembly.stop",
+        "target_owner": "execution-quality-worker",
+        "transition": "retire_replace"
+      },
+      {
+        "call": "commodity_simnow_service.stop",
+        "target_owner": "execution-orchestrator",
+        "transition": "move_after_contract"
+      },
+      {
+        "call": "monitoring_service.stop",
+        "target_owner": "monitor-worker",
+        "transition": "retire_replace"
+      },
+      {
+        "call": "rpc_service.stop",
+        "target_owner": "execution-orchestrator",
+        "transition": "move_after_contract"
+      },
+      {
+        "call": "tick_persistence_service.stop",
+        "target_owner": "market-data-worker",
+        "transition": "retire_replace"
+      },
+      {
+        "call": "market_data_service.stop",
+        "target_owner": "market-data-worker",
+        "transition": "retire_replace"
+      }
+    ]
+  },
+  "state_ownership": {
+    "active_plan": {
+      "owner": "execution-orchestrator",
+      "store": "execution_durable_state",
+      "non_owner_behavior": "control_api_read_only_projection_and_idempotent_command"
+    },
+    "effective_authority": {
+      "owner": "execution-orchestrator",
+      "store": "execution_durable_state",
+      "non_owner_behavior": "control_api_requests_enable_or_revoke; signer_only_creates_immutable_bytes"
+    },
+    "send_intent": {
+      "owner": "execution-orchestrator",
+      "store": "execution_durable_state",
+      "non_owner_behavior": "no_replay; timeout_requires_query_same_intent"
+    },
+    "unknown_outcome": {
+      "owner": "execution-orchestrator",
+      "store": "execution_durable_state",
+      "non_owner_behavior": "all_mutation_blocked_until_broker_reconciliation"
+    },
+    "leader_lease_and_fencing": {
+      "owner": "execution-orchestrator",
+      "store": "execution_durable_state",
+      "format": "JSON durable state with atomic fsync and compare_and_swap",
+      "non_owner_behavior": "standby_read_only; Postgres is not a lease owner"
+    },
+    "broker_facts": {
+      "owner": "windows-ctp-gateway",
+      "store": "windows_gateway_durable_facts",
+      "non_owner_behavior": "execution_persists_projection_and_reconciles; control_only_reads"
+    },
+    "audit_index": {
+      "owner": "control-api",
+      "store": "postgres_control_schema",
+      "non_owner_behavior": "execution_emits_receipts; cannot rewrite_control_audit"
+    }
+  },
+  "leader_fencing_contract": {
+    "scope": "account_and_environment",
+    "lease_store": "execution_durable_state_json",
+    "acquisition": "compare_and_swap_owner_epoch_and_expiry",
+    "epoch": "strictly_monotonic_never_reused",
+    "fencing_token": "strictly_monotonic_account_scoped_never_reused",
+    "mutation_binding": [
+      "leader_epoch",
+      "fencing_token",
+      "plan_id",
+      "plan_hash",
+      "intent_id",
+      "idempotency_key"
+    ],
+    "final_admission": "windows_gateway_rejects_missing_stale_or_unbound_token_for_send_and_cancel",
+    "lease_loss": "fail_closed_and_stop_mutation",
+    "db_unavailable": "fail_closed_and_stop_mutation",
+    "clock_rollback": "fail_closed_and_stop_mutation",
+    "restart": "HALTED_RECONCILE_REQUIRED_until_fresh_broker_snapshot_and_unknown_outcomes_closed",
+    "rpc_timeout": "unknown_outcome_query_same_intent_no_new_send",
+    "double_leader": "only_latest_cas_epoch_can_mutate; stale process rejected at gateway"
+  },
+  "compose_contract": {
+    "file": "deployments/docker-compose.phase-a.yml",
+    "services": [
+      "frontend-edge",
+      "control-api",
+      "execution-orchestrator",
+      "gateway-rpc-request-proxy",
+      "gateway-rpc-publish-proxy",
+      "questdb",
+      "postgres"
+    ],
+    "external_windows_gateway": "not_a_compose_service",
+    "networks": {
+      "edge": {
+        "internal": false,
+        "members": ["frontend-edge"]
+      },
+      "edge-control": {
+        "internal": true,
+        "members": [
+          "frontend-edge",
+          "control-api"
+        ]
+      },
+      "private-control": {
+        "internal": true,
+        "members": [
+          "control-api",
+          "execution-orchestrator"
+        ]
+      },
+      "control-data": {
+        "internal": true,
+        "members": [
+          "control-api",
+          "postgres"
+        ]
+      },
+      "execution-data": {
+        "internal": true,
+        "members": [
+          "execution-orchestrator",
+          "postgres"
+        ]
+      },
+      "gateway-proxy": {
+        "internal": true,
+        "members": [
+          "execution-orchestrator",
+          "gateway-rpc-request-proxy",
+          "gateway-rpc-publish-proxy"
+        ]
+      },
+      "gateway-egress": {
+        "internal": false,
+        "members": [
+          "gateway-rpc-request-proxy",
+          "gateway-rpc-publish-proxy"
+        ]
+      },
+      "data-private": {
+        "internal": true,
+        "members": [
+          "questdb"
+        ]
+      }
+    },
+    "published_ports": {
+      "frontend-edge": [
+        "8080:8080"
+      ],
+      "control-api": [],
+      "execution-orchestrator": [],
+      "gateway-rpc-request-proxy": [],
+      "gateway-rpc-publish-proxy": [],
+      "questdb": [],
+      "postgres": []
+    },
+    "health_requirements": [
+      "each_service_has_live_ready_version",
+      "frontend_ready_requires_control_api_ready",
+      "control_api_ready_requires_postgres_and_execution_command_endpoint",
+      "execution_ready_requires_durable_state_store_and_gateway_readonly_snapshot",
+      "questdb_and_postgres_use_native_healthchecks"
+    ],
+    "volume_rules": [
+      "frontend_has_no_runtime_secret_or_writable_state_volume",
+      "control_api_and_execution_use_distinct_database_roles_and_writable_schemas",
+      "execution_state_is_not_writable_by_control_api",
+      "backend_images_do_not_contain_frontend_dist",
+      "frontend_image_does_not_contain_backend_source_or_private_keys"
+    ]
+  },
+  "parallel_work_packages": [
+    {
+      "id": "contract-schema",
+      "owner": "phase-a-contract-lead",
+      "paths": [
+        "docs/architecture/issue-291-phase-a-*.json",
+        "docs/architecture/issue-291-phase-a-*.md",
+        "docs/schemas/web-bridge-control-execution-*.json",
+        "docs/schemas/web-bridge-execution-status-*.json",
+        "backend/tests/unit/test_issue291_phase_a_contract.py"
+      ],
+      "depends_on": [],
+      "conflicts_with": []
+    },
+    {
+      "id": "frontend-edge",
+      "owner": "frontend-edge-worker",
+      "paths": [
+        "frontend/**",
+        "deployments/phase-a/frontend/**"
+      ],
+      "depends_on": [
+        "contract-schema"
+      ],
+      "conflicts_with": [
+        "compose-integration"
+      ]
+    },
+    {
+      "id": "control-api",
+      "owner": "control-api-worker",
+      "paths": [
+        "backend/app/control_api.py",
+        "backend/app/api/control_*.py",
+        "backend/app/schemas/control_execution.py",
+        "backend/tests/unit/test_control_api_*.py"
+      ],
+      "depends_on": [
+        "contract-schema"
+      ],
+      "conflicts_with": [
+        "execution-orchestrator"
+      ]
+    },
+    {
+      "id": "execution-orchestrator",
+      "owner": "execution-runtime-worker",
+      "paths": [
+        "backend/app/execution_orchestrator.py",
+        "backend/app/execution_state.py",
+        "backend/app/execution_fencing.py",
+        "backend/tests/unit/test_execution_*.py"
+      ],
+      "depends_on": [
+        "contract-schema"
+      ],
+      "conflicts_with": [
+        "control-api"
+      ]
+    },
+    {
+      "id": "compose-integration",
+      "owner": "phase-a-integration-worker",
+      "paths": [
+        "deployments/docker-compose.phase-a.yml",
+        "deployments/phase-a/Containerfile.*",
+        "deployments/phase-a/health/**",
+        ".github/workflows/phase-a-*.yml"
+      ],
+      "depends_on": [
+        "frontend-edge",
+        "control-api",
+        "execution-orchestrator",
+        "contract-schema"
+      ],
+      "conflicts_with": []
+    }
+  ]
+}
