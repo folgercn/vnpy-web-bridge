@@ -56,6 +56,14 @@ def test_windows_fence_gate_is_read_only_cross_platform_and_non_deploying() -> N
     assert "backend/tests/unit/test_windows_rpc_durable_fence_store_v1.py" in job
     assert "backend/tests/unit/test_windows_rpc_durable_fence_admission_v1.py" in job
     assert "backend/tests/unit/test_windows_rpc_durable_fence_bootstrap_v1.py" in job
+    assert "backend/tests/unit/test_windows_rpc_durable_fence_bundle_v1.py" in job
+    assert "backend/tests/unit/test_windows_rpc_durable_fence_manifest_v1.py" in job
+    assert (
+        "backend/tests/unit/test_windows_rpc_durable_fence_target_contract_v1.py" in job
+    )
+    assert "cryptography==48.0.0" in (
+        Path(__file__).resolve().parents[3] / "scripts/ci/requirements-quick.txt"
+    ).read_text(encoding="utf-8")
     for forbidden in (
         "secrets.",
         "id-token:",
@@ -70,8 +78,11 @@ def test_windows_fence_gate_is_read_only_cross_platform_and_non_deploying() -> N
         "docker compose",
         "kubectl ",
         "Restart-Service",
+        "Start-Service",
+        "Stop-Service",
+        "sc.exe",
     ):
-        assert forbidden not in job
+        assert forbidden.lower() not in job.lower()
 
     gate = WORKFLOW.split("  ci-gate:\n", maxsplit=1)[1]
     assert "- windows-fence-core" in gate

@@ -32,7 +32,7 @@
     "control_api_role": "idempotent_command_and_readonly_projection_only"
   },
   "legacy_restart_migration_ownership": {
-    "status": "phase_1_pre_c_d_contract_only_not_deployed",
+    "status": "phase_1_pre_c_d_wf2_bundle_and_manifest_verifier_implemented_not_signed_not_installed",
     "windows_foundation_manifest_signer": {
       "unique_writer": "offline-windows-foundation-manifest-signer",
       "credential_domain": "dedicated_windows_foundation_manifest_signing_key_offline_only",

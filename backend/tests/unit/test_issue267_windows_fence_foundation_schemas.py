@@ -2115,7 +2115,9 @@ def test_cross_artifact_chain_contract_freezes_all_reviewed_rejections() -> None
     assert contract["schema_version"] == (
         "windows_rpc_durable_fence_foundation_chain_v1"
     )
-    assert contract["status"] == "contract_only_runtime_not_installed"
+    assert contract["status"] == (
+        "wf2_bundle_and_manifest_verifier_implemented_not_signed_not_installed"
+    )
     assert contract["raw_digest_algorithm"] == "sha256_of_exact_raw_bytes"
     assert contract["validation_order"] == [
         "zero_order_preflight",

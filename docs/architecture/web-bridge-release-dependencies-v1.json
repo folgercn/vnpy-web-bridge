@@ -427,8 +427,9 @@
   "build_units": [
     {
       "id": "windows-fence-foundation-bundle",
-      "implementation_status": "planned_bundle_durable_core_implemented_not_installed",
-      "build_file": "future:scripts/windows_fence_foundation/Containerfile.bundle",
+      "implementation_status": "wf2_bundle_and_manifest_verifier_implemented_not_signed_not_installed",
+      "build_file": "scripts/windows_fence_foundation/bundle_v1.py",
+      "build_kind": "deterministic_artifact_builder",
       "context": ".",
       "deploy_units": [
         "windows-ctp-gateway"
@@ -656,7 +657,12 @@
           "scripts/windows_rpc_*",
           "docs/schemas/windows-rpc-durable-fence-*.schema.json",
           "docs/operations/windows-rpc-durable-fence-*.md",
-          "docs/architecture/windows-rpc-durable-fence-foundation-*.json"
+          "docs/architecture/windows-rpc-durable-fence-foundation-*.json",
+          "backend/tests/unit/test_issue267_windows_fence_foundation_*.py",
+          "backend/tests/unit/test_windows_rpc_durable_fence_*.py",
+          "backend/tests/unit/test_windows_fence_foundation_*.py",
+          "backend/tests/integration/test_windows_rpc_durable_fence_*.py",
+          "backend/tests/integration/test_windows_fence_foundation_*.py"
         ],
         "prefix": [
           "scripts/windows_fence_foundation/"

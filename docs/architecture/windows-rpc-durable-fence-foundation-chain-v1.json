@@ -1,7 +1,7 @@
 {
   "schema_version": "windows_rpc_durable_fence_foundation_chain_v1",
   "issue": 267,
-  "status": "contract_only_runtime_not_installed",
+  "status": "wf2_bundle_and_manifest_verifier_implemented_not_signed_not_installed",
   "raw_digest_algorithm": "sha256_of_exact_raw_bytes",
   "validation_order": [
     "zero_order_preflight",
