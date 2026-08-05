@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import ast
 import json
 from collections import Counter
 from pathlib import Path
@@ -82,64 +81,26 @@ def test_every_unit_uses_the_same_auditable_field_contract() -> None:
 
 
 def test_app_main_service_lifecycle_has_an_exact_target_owner() -> None:
-    module = ast.parse((ROOT / "backend/app/main.py").read_text(encoding="utf-8"))
-    functions = {
-        node.name: node
-        for node in module.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and node.name in {"startup", "shutdown"}
-    }
+    # Phase A removes the monolith lifecycle entirely.  The old inventory is
+    # retained as historical ownership evidence, while the actual entrypoint
+    # is a pure Control alias; workers and RPC bind only in their new owners.
+    source = (ROOT / "backend/app/main.py").read_text(encoding="utf-8")
+    assert "from app.control_api import app" in source
+    assert "@app.on_event" not in source
+    assert "def startup" not in source
+    assert "def shutdown" not in source
 
-    def lifecycle_calls(function_name: str) -> set[str]:
-        calls: set[str] = set()
-        for node in ast.walk(functions[function_name]):
-            if not isinstance(node, ast.Call) or not isinstance(
-                node.func, ast.Attribute
-            ):
-                continue
-            name = ast.unparse(node.func)
-            if node.func.attr in {"start", "stop"} or node.func.attr.startswith(
-                "bind_"
-            ):
-                calls.add(name)
-        return calls
-
-    inventory = MANIFEST["current_app_main_lifecycle"]
-    recorded_startup = {
-        item["call"] for item in inventory["startup"] + inventory["bindings"]
-    }
-    recorded_shutdown = {item["call"] for item in inventory["shutdown"]}
-    assert recorded_startup == lifecycle_calls("startup")
-    assert recorded_shutdown == lifecycle_calls("shutdown")
-
-    target_ids = _units("target_deployment_units").keys()
-    for item in inventory["startup"] + inventory["bindings"] + inventory["shutdown"]:
-        assert item["current_owner"] == "web-bridge"
-        assert item["target_owner"] in target_ids
-        transition = item.get("transition_mode", inventory["default_transition_mode"])
-        assert transition in {
-            "move_after_durable_contract_and_single_owner_cutover",
-            "retire_replace",
-        }
-        if transition == "retire_replace":
-            assert item.get("replacement_contract")
-
-    shadow = {
-        item["call"]: item
-        for item in inventory["startup"] + inventory["bindings"]
-        if "shadow_service" in item["call"]
-    }
-    assert set(shadow) == {
-        "commodity_c_fast_shadow_service.start",
-        "commodity_c_fast_shadow_service.bind_contract_loader",
-    }
-    assert all(item["transition_mode"] == "retire_replace" for item in shadow.values())
-    assert (
-        "producer has no RPC loader"
-        in shadow["commodity_c_fast_shadow_service.bind_contract_loader"][
-            "replacement_contract"
-        ]
+    phase_a = json.loads(
+        (ROOT / "docs/architecture/issue-291-phase-a-ownership-v1.json").read_text(
+            encoding="utf-8"
+        )
     )
+    assert phase_a["current_app_main_lifecycle"]["current_owner"] == "web-bridge"
+    assert len(phase_a["current_app_main_lifecycle"]["entries"]) == 20
+    assert {unit["id"] for unit in phase_a["deployment_units"]} >= {
+        "control-api",
+        "execution-orchestrator",
+    }
 
 
 def test_target_units_cover_every_issue267_deployment_boundary() -> None:

@@ -9,17 +9,16 @@ from unittest.mock import Mock
 import pytest
 from app.core.config import Settings
 from app.core.errors import DeploymentDrainActiveError
-from app.schemas.trade import OrderRequestDTO
 from app.schemas.deployment_drain import (
     DeploymentDrainAcquireDTO,
     DeploymentSafetySnapshotDTO,
 )
-from app.services.deployment_drain import DeploymentDrainService
+from app.schemas.trade import OrderRequestDTO
 from app.services.commodity_simnow import commodity_simnow_service
-from app.services.trade_service import TradeService
+from app.services.deployment_drain import DeploymentDrainService
 from app.services.risk_service import risk_service
 from app.services.strategy_service import strategy_service
-from app.services.trade_service import trade_service
+from app.services.trade_service import TradeService, trade_service
 from app.services.vnpy_rpc_service import VnpyRpcService, rpc_service
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -74,9 +73,7 @@ def test_all_trade_send_lanes_stop_before_inner_send_when_frozen(
         )
         gate._write_state(state)
     service = TradeService(
-        settings=Settings(
-            deployment_drain_state_root=str(tmp_path / "unused")
-        ),
+        settings=Settings(deployment_drain_state_root=str(tmp_path / "unused")),
         deployment_drain=gate,
     )
     inner = Mock(return_value={"accepted": True})
@@ -98,9 +95,7 @@ def test_trade_send_holds_running_gate_through_inner_send(
         allow_initial_bootstrap=True,
     )
     service = TradeService(
-        settings=Settings(
-            deployment_drain_state_root=str(tmp_path / "unused")
-        ),
+        settings=Settings(deployment_drain_state_root=str(tmp_path / "unused")),
         deployment_drain=gate,
     )
     inner = Mock(return_value={"accepted": True})
@@ -116,6 +111,10 @@ def test_application_has_no_trade_send_bypass_outside_trade_service() -> None:
     allowed = {
         services / "services/trade_service.py",
         services / "services/vnpy_rpc_service.py",
+        # Issue #291 Phase A makes Execution Orchestrator the sole Linux-side
+        # send/cancel owner.  Its typed gateway call is intentionally outside
+        # the legacy TradeService boundary and is covered by execution tests.
+        services / "execution/orchestrator.py",
     }
     for path in services.rglob("*.py"):
         if path in allowed:
@@ -158,7 +157,9 @@ def test_global_execution_services_share_the_final_rpc_gate() -> None:
     assert trade_service.deployment_drain is rpc_service.deployment_drain
     assert risk_service.deployment_drain is rpc_service.deployment_drain
     assert strategy_service.deployment_drain is rpc_service.deployment_drain
-    assert commodity_simnow_service.trade.deployment_drain is rpc_service.deployment_drain
+    assert (
+        commodity_simnow_service.trade.deployment_drain is rpc_service.deployment_drain
+    )
 
 
 def test_application_never_awaits_while_holding_a_sync_deployment_gate() -> None:

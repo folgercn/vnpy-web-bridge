@@ -1,0 +1,57 @@
+# Phase A Control API image.  The build context is the repository root, but
+# frontend assets and the legacy monolith are intentionally not copied.
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app/backend
+
+WORKDIR /app
+
+COPY backend/requirements.txt /app/backend/requirements.txt
+RUN pip install --no-cache-dir -r /app/backend/requirements.txt
+
+RUN mkdir -p /app/backend/app/api /app/backend/app/core /app/backend/app/execution \
+    /app/backend/app/schemas /app/backend/app/services /app/docs/schemas
+COPY backend/app/__init__.py /app/backend/app/__init__.py
+COPY backend/app/control_api.py /app/backend/app/control_api.py
+COPY backend/app/control_execution_client.py /app/backend/app/control_execution_client.py
+COPY backend/app/control_execution_projection.py /app/backend/app/control_execution_projection.py
+COPY backend/app/control_ws_ticket.py /app/backend/app/control_ws_ticket.py
+COPY backend/app/api/__init__.py /app/backend/app/api/__init__.py
+COPY backend/app/api/routes_auth.py /app/backend/app/api/routes_auth.py
+COPY backend/app/api/routes_control_execution.py /app/backend/app/api/routes_control_execution.py
+COPY backend/app/api/routes_control_safe.py /app/backend/app/api/routes_control_safe.py
+COPY backend/app/api/control_execution.py /app/backend/app/api/control_execution.py
+COPY backend/app/core/__init__.py /app/backend/app/core/__init__.py
+COPY backend/app/core/config.py /app/backend/app/core/config.py
+COPY backend/app/core/errors.py /app/backend/app/core/errors.py
+COPY backend/app/core/logging.py /app/backend/app/core/logging.py
+COPY backend/app/core/security.py /app/backend/app/core/security.py
+COPY backend/app/execution/errors.py /app/backend/app/execution/errors.py
+COPY backend/app/execution/models.py /app/backend/app/execution/models.py
+COPY backend/app/schemas/__init__.py /app/backend/app/schemas/__init__.py
+COPY backend/app/schemas/auth.py /app/backend/app/schemas/auth.py
+COPY backend/app/schemas/control_execution.py /app/backend/app/schemas/control_execution.py
+COPY backend/app/services/__init__.py /app/backend/app/services/__init__.py
+COPY backend/app/services/audit_service.py /app/backend/app/services/audit_service.py
+COPY backend/app/services/calendar_service.py /app/backend/app/services/calendar_service.py
+COPY backend/app/services/watchlist_service.py /app/backend/app/services/watchlist_service.py
+COPY backend/app/data /app/backend/app/data
+COPY shared/trading_session_profiles.json /app/shared/trading_session_profiles.json
+COPY docs/schemas/web-bridge-control-execution-command-v1.schema.json /app/docs/schemas/web-bridge-control-execution-command-v1.schema.json
+COPY docs/schemas/web-bridge-execution-status-v1.schema.json /app/docs/schemas/web-bridge-execution-status-v1.schema.json
+
+RUN python -m compileall -q /app/backend/app
+
+# A fresh named volume inherits this fixed runtime identity and remains
+# writable after Compose makes the image filesystem read-only.
+RUN groupadd --system --gid 65532 vnpy \
+    && useradd --system --uid 65532 --gid 65532 --no-create-home \
+        --home-dir /nonexistent --shell /usr/sbin/nologin vnpy \
+    && mkdir -p /var/lib/vnpy-control \
+    && chown -R 65532:65532 /var/lib/vnpy-control
+
+EXPOSE 8081
+USER 65532:65532
+ENTRYPOINT ["uvicorn", "app.control_api:app", "--host", "0.0.0.0", "--port", "8081", "--app-dir", "backend"]

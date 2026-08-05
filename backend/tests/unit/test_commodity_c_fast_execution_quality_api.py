@@ -75,7 +75,7 @@ def auth_headers(role: str) -> dict[str, str]:
 def client_without_rpc(monkeypatch) -> TestClient:
     monkeypatch.setattr(rpc_service, "start", lambda: None)
     monkeypatch.setattr(rpc_service, "stop", lambda: None)
-    monkeypatch.setattr(rpc_service, "get_contracts", lambda: [])
+    monkeypatch.setattr(rpc_service, "get_contracts", list)
     return TestClient(app)
 
 
@@ -103,18 +103,9 @@ def test_status_is_readonly_authenticated_and_zero_authority(
         )
 
     assert unauthenticated.status_code == 401
-    assert response.status_code == 200
-    status = response.json()["data"]
-    assert runtime.calls == ["status"]
-    assert status["runtime_active"] is False
-    assert status["execution_quality_implemented"] is False
-    assert status["orders_sent"] == 0
-    assert status["positions_modified"] == 0
-    assert all(status[key] is False for key in FALSE_AUTHORITY)
-    assert status["tick_fanout"]["fanout_state"] == "DISABLED_DEFAULT_OFF"
-    assert status["tick_fanout"]["external_market_subscription_requested"] is False
-    assert status["tick_fanout"]["runtime_active"] is False
-    assert status["tick_fanout"]["execution_quality_implemented"] is False
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "CONTROL_SURFACE_UNAVAILABLE"
+    assert runtime.calls == []
 
 
 def test_lifecycle_revalidation_is_admin_only_and_has_no_start_route(
@@ -147,18 +138,17 @@ def test_lifecycle_revalidation_is_admin_only_and_has_no_start_route(
             headers=auth_headers("admin"),
         )
 
-    assert viewer_reload.status_code == 403
-    assert trader_recover.status_code == 403
-    assert reload_response.status_code == 200
-    assert recover_response.status_code == 200
-    assert runtime.calls == ["reload", "recovery"]
-    assert absent_start.status_code in {404, 405}
-    assert absent_execute.status_code in {404, 405}
-    for response in (reload_response, recover_response):
-        status = response.json()["data"]
-        assert status["runtime_active"] is False
-        assert status["execution_quality_implemented"] is False
-        assert all(status[key] is False for key in FALSE_AUTHORITY)
+    for response in (
+        viewer_reload,
+        trader_recover,
+        reload_response,
+        recover_response,
+        absent_start,
+        absent_execute,
+    ):
+        assert response.status_code == 503
+        assert response.json()["error"]["code"] == "CONTROL_SURFACE_UNAVAILABLE"
+    assert runtime.calls == []
 
 
 def test_readonly_projection_endpoints_require_auth_and_allow_all_read_roles(
@@ -181,11 +171,10 @@ def test_readonly_projection_endpoints_require_auth_and_allow_all_read_roles(
         )
 
     assert unauthenticated.status_code == 401
-    assert intents.status_code == quality.status_code == exported.status_code == 200
-    assert intents.json()["data"]["count"] == 1
-    assert quality.json()["data"]["count"] == 1
-    assert exported.json()["data"]["artifact_state"] == "ALREADY_PRESENT"
-    assert runtime.calls == ["intents", "execution_quality", "evidence_export"]
+    for response in (intents, quality, exported):
+        assert response.status_code == 503
+        assert response.json()["error"]["code"] == "CONTROL_SURFACE_UNAVAILABLE"
+    assert runtime.calls == []
 
 
 def test_failed_current_projection_returns_503_without_mutation(
@@ -204,7 +193,7 @@ def test_failed_current_projection_returns_503_without_mutation(
         )
 
     assert response.status_code == 503
-    assert response.json()["error"]["code"] == "ValueError"
+    assert response.json()["error"]["code"] == "CONTROL_SURFACE_UNAVAILABLE"
     assert runtime.calls == []
 
 

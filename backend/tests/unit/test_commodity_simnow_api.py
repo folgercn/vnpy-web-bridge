@@ -46,10 +46,17 @@ class FakeCommoditySimNowService:
         }
 
     def start_position_manager_shakedown(self, plan_hash, **kwargs) -> dict:
-        return {"execution_enabled": True, "action": "open_submitted", "session": {"plan_hash": plan_hash}}
+        return {
+            "execution_enabled": True,
+            "action": "open_submitted",
+            "session": {"plan_hash": plan_hash},
+        }
 
     def stop_position_manager_shakedown(self, reason, **kwargs) -> dict:
-        return {"execution_enabled": True, "halt": {"reason": reason, "status": "CANCEL_PENDING"}}
+        return {
+            "execution_enabled": True,
+            "halt": {"reason": reason, "status": "CANCEL_PENDING"},
+        }
 
     def c_fast_shakedown_status(self) -> dict:
         return {
@@ -200,18 +207,21 @@ def enable_payload() -> dict:
 
 
 def test_viewer_can_read_status_but_cannot_enable(monkeypatch) -> None:
+    """Commodity SimNow is Execution-owned and removed from Control."""
     install_service(monkeypatch)
     with client_without_rpc(monkeypatch) as client:
-        status = client.get("/api/commodity-simnow/status", headers=auth_headers("viewer"))
+        status = client.get(
+            "/api/commodity-simnow/status", headers=auth_headers("viewer")
+        )
         forbidden = client.post(
             "/api/commodity-simnow/enable",
             headers=auth_headers("viewer"),
             json=enable_payload(),
         )
 
-    assert status.status_code == 200
-    assert status.json()["data"]["production_allowed"] is False
-    assert forbidden.status_code == 403
+    for response in (status, forbidden):
+        assert response.status_code == 503
+        assert response.json()["error"]["code"] == "CONTROL_SURFACE_UNAVAILABLE"
 
 
 def test_viewer_can_read_position_manager_shadow(monkeypatch) -> None:
@@ -222,14 +232,8 @@ def test_viewer_can_read_position_manager_shadow(monkeypatch) -> None:
             headers=auth_headers("viewer"),
         )
 
-    assert response.status_code == 200
-    assert response.json()["data"] == {
-        "configured": True,
-        "valid": True,
-        "mode": "shadow_only",
-        "authority_granted": False,
-        "dispatch_allowed": False,
-    }
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "CONTROL_SURFACE_UNAVAILABLE"
 
 
 def test_position_manager_shakedown_preview_is_admin_only(monkeypatch) -> None:
@@ -250,13 +254,9 @@ def test_position_manager_shakedown_preview_is_admin_only(monkeypatch) -> None:
             json={"selected_products": ["ag"]},
         )
 
-    assert status.json()["data"]["execution_enabled"] is False
-    assert forbidden.status_code == 403
-    assert response.json()["data"]["preview"] == {
-        "status": "PREVIEW_READY",
-        "selected_products": ["ag"],
-        "countable_forward": False,
-    }
+    for result in (status, forbidden, response):
+        assert result.status_code == 503
+        assert result.json()["error"]["code"] == "CONTROL_SURFACE_UNAVAILABLE"
 
 
 def test_position_manager_shakedown_start_and_stop_are_admin_only(monkeypatch) -> None:
@@ -265,20 +265,23 @@ def test_position_manager_shakedown_start_and_stop_are_admin_only(monkeypatch) -
     with client_without_rpc(monkeypatch) as client:
         forbidden = client.post(
             "/api/commodity-simnow/position-manager-shakedown/start",
-            headers=auth_headers("trader"), json={"plan_hash": plan_hash},
+            headers=auth_headers("trader"),
+            json={"plan_hash": plan_hash},
         )
         started = client.post(
             "/api/commodity-simnow/position-manager-shakedown/start",
-            headers=auth_headers("admin"), json={"plan_hash": plan_hash},
+            headers=auth_headers("admin"),
+            json={"plan_hash": plan_hash},
         )
         stopped = client.post(
             "/api/commodity-simnow/position-manager-shakedown/stop",
-            headers=auth_headers("admin"), json={"reason": "operator requested stop"},
+            headers=auth_headers("admin"),
+            json={"reason": "operator requested stop"},
         )
 
-    assert forbidden.status_code == 403
-    assert started.json()["data"]["action"] == "open_submitted"
-    assert stopped.json()["data"]["halt"]["status"] == "CANCEL_PENDING"
+    for response in (forbidden, started, stopped):
+        assert response.status_code == 503
+        assert response.json()["error"]["code"] == "CONTROL_SURFACE_UNAVAILABLE"
 
 
 def test_c_fast_shakedown_reads_and_mutations_use_expected_rbac(
@@ -339,19 +342,19 @@ def test_c_fast_shakedown_reads_and_mutations_use_expected_rbac(
             json=continuous_payload,
         )
 
-    assert status.status_code == 200
-    assert status.json()["data"]["production_allowed"] is False
-    assert pnl.status_code == 200
-    assert sessions.status_code == 200
-    assert forbidden.status_code == 403
-    assert preview.json()["data"]["preview"]["selected_products"] == ["ag"]
-    assert started.json()["data"]["action"] == "open_submitted"
-    assert stopped.json()["data"]["halt"]["status"] == "CANCEL_PENDING"
-    assert continuous_forbidden.status_code == 403
-    assert (
-        continuous_enabled.json()["data"]["action"]
-        == "continuous_authorization_enabled"
-    )
+    for response in (
+        status,
+        pnl,
+        sessions,
+        forbidden,
+        preview,
+        started,
+        stopped,
+        continuous_forbidden,
+        continuous_enabled,
+    ):
+        assert response.status_code == 503
+        assert response.json()["error"]["code"] == "CONTROL_SURFACE_UNAVAILABLE"
 
 
 def test_admin_can_enable_controller(monkeypatch) -> None:
@@ -363,9 +366,9 @@ def test_admin_can_enable_controller(monkeypatch) -> None:
             json=enable_payload(),
         )
 
-    assert response.status_code == 200
-    assert response.json()["data"]["enabled"] is True
-    assert service.enabled is True
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "CONTROL_SURFACE_UNAVAILABLE"
+    assert service.enabled is False
 
 
 def test_runtime_authorization_status_is_read_only_for_viewer_and_trader(
@@ -389,19 +392,10 @@ def test_runtime_authorization_status_is_read_only_for_viewer_and_trader(
             "/api/commodity-simnow/c-fast-shakedown/runtime-authorization/status",
         )
 
-    assert viewer.status_code == 200
-    assert trader.status_code == 200
-    assert admin.status_code == 200
+    for response in (viewer, trader, admin):
+        assert response.status_code == 503
+        assert response.json()["error"]["code"] == "CONTROL_SURFACE_UNAVAILABLE"
     assert unauthenticated.status_code == 401
-    status = viewer.json()["data"]
-    assert status["map_strategy_acceptance"]["state"] == "ACCEPTED"
-    assert status["c_fast_allocation_acceptance"]["state"] == "ACCEPTED"
-    assert status["runtime_authorization"]["state"] == "ACTIVE"
-    assert status["current_snapshot"]["state"] == "COMPLETE"
-    assert status["operational_state"] == "WAITING_NEW_SNAPSHOT"
-    assert status["waiting"] is True
-    assert status["hard_blocked"] is False
-    assert status["production_allowed"] is False
 
 
 def test_runtime_authorization_enable_and_revoke_are_admin_only(
@@ -441,23 +435,9 @@ def test_runtime_authorization_enable_and_revoke_are_admin_only(
             json=revoke_payload,
         )
 
-    assert viewer_forbidden.status_code == 403
-    assert trader_forbidden.status_code == 403
-    assert enabled.status_code == 200
-    assert enabled.json()["data"] == {
-        "action": "runtime_authorization_enabled",
-        "authorization_id": "runtime-auth-262",
-        "state": "ACTIVE",
-        "production_allowed": False,
-    }
-    assert revoked.status_code == 200
-    assert revoked.json()["data"] == {
-        "action": "runtime_authorization_revoked",
-        "authorization_id": "runtime-auth-262",
-        "state": "REVOKED",
-        "revoke_reason": "operator revoked runtime authorization",
-        "production_allowed": False,
-    }
+    for response in (viewer_forbidden, trader_forbidden, enabled, revoked):
+        assert response.status_code == 503
+        assert response.json()["error"]["code"] == "CONTROL_SURFACE_UNAVAILABLE"
 
 
 def test_runtime_authorization_enable_requires_all_safety_confirmations(
@@ -479,7 +459,8 @@ def test_runtime_authorization_enable_requires_all_safety_confirmations(
             json=payload,
         )
 
-    assert response.status_code == 422
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "CONTROL_SURFACE_UNAVAILABLE"
 
 
 def test_one_click_template_start_requires_admin(monkeypatch) -> None:
@@ -503,10 +484,10 @@ def test_one_click_template_start_requires_admin(monkeypatch) -> None:
             json=payload,
         )
 
-    assert forbidden.status_code == 403
-    assert response.status_code == 200
-    assert response.json()["data"]["action"] == "strategy_template_started"
-    assert service.template_start_calls == 1
+    for result in (forbidden, response):
+        assert result.status_code == 503
+        assert result.json()["error"]["code"] == "CONTROL_SURFACE_UNAVAILABLE"
+    assert service.template_start_calls == 0
 
 
 def test_commodity_routes_require_authentication(monkeypatch) -> None:
@@ -531,6 +512,6 @@ def test_auto_advance_requires_admin(monkeypatch) -> None:
             headers=auth_headers("admin"),
         )
 
-    assert forbidden.status_code == 403
-    assert result.status_code == 200
-    assert result.json()["data"]["action"] == "open_submitted"
+    for response in (forbidden, result):
+        assert response.status_code == 503
+        assert response.json()["error"]["code"] == "CONTROL_SURFACE_UNAVAILABLE"

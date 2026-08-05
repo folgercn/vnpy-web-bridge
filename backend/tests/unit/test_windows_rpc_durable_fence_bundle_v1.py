@@ -142,6 +142,8 @@ def test_outer_and_assembly_zip_have_exact_fixed_metadata(
             "scripts/windows_fence_foundation/assembly.py",
             "scripts/windows_fence_foundation/bootstrap_v1.py",
             "scripts/windows_fence_foundation/contracts.py",
+            "scripts/windows_fence_foundation/final_admission_v1.py",
+            "scripts/windows_fence_foundation/final_store_v1.py",
             "scripts/windows_fence_foundation/store.py",
             "scripts/windows_fence_foundation/win32_fs.py",
             "scripts/windows_rpc_deployment_snapshot_v1.py",

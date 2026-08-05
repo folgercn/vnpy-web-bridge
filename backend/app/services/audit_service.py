@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 from threading import Lock
@@ -10,7 +11,8 @@ from zoneinfo import ZoneInfo
 
 class AuditService:
     def __init__(self, log_path: Path | None = None) -> None:
-        self.log_path = log_path or Path("logs/audit.log")
+        configured_path = os.getenv("CONTROL_AUDIT_LOG_PATH", "").strip()
+        self.log_path = log_path or Path(configured_path or "logs/audit.log")
         self._lock = Lock()
 
     def record(
@@ -28,8 +30,12 @@ class AuditService:
         source_ip: str | None = None,
     ) -> None:
         payload = {
-            "timestamp": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="milliseconds"),
-            "ts": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="milliseconds"),
+            "timestamp": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(
+                timespec="milliseconds"
+            ),
+            "ts": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(
+                timespec="milliseconds"
+            ),
             "user_id": user_id or operator,
             "role": role,
             "client_ip": source_ip,
@@ -60,7 +66,10 @@ class AuditService:
 
     def _is_sensitive_key(self, key: str) -> bool:
         normalized = key.lower()
-        return any(part in normalized for part in ("password", "passwd", "auth", "token", "secret"))
+        return any(
+            part in normalized
+            for part in ("password", "passwd", "auth", "token", "secret")
+        )
 
 
 audit_service = AuditService()

@@ -1,0 +1,155 @@
+{
+  "schema_version": "web_bridge_issue_291_phase_a_release_dependencies_v1",
+  "issue": 291,
+  "phase": "A",
+  "status": "build_contract_implemented_not_deployed_or_accepted",
+  "ownership_contract": "docs/architecture/issue-291-phase-a-ownership-v1.json",
+  "release_plan_schema": "docs/schemas/issue-291-phase-a-release-plan-v1.schema.json",
+  "safety": {
+    "classifier_consumption_allowed": true,
+    "automatic_build_allowed": true,
+    "automatic_deploy_allowed": false,
+    "manual_deploy_allowed": false,
+    "production_allowed": false,
+    "live_trading_authorized": false,
+    "countable_forward": false,
+    "deployed": false,
+    "accepted": false,
+    "unknown_path": "block",
+    "unknown_dependency": "block",
+    "ambiguous_match": "block"
+  },
+  "build_units": [
+    {
+      "id": "frontend-edge",
+      "implementation_status": "phase_a_build_defined_not_deployed_or_accepted",
+      "build_file": "frontend/Containerfile",
+      "entrypoint": "nginx -c /etc/nginx/nginx.conf -g 'daemon off;'",
+      "context": ".",
+      "deploy_units": [],
+      "automatic_deploy_allowed": false
+    },
+    {
+      "id": "control-api",
+      "implementation_status": "phase_a_build_defined_not_deployed_or_accepted",
+      "build_file": "deployments/phase-a/Containerfile.control-api",
+      "entrypoint": "uvicorn app.control_api:app --host 0.0.0.0 --port 8081 --app-dir backend",
+      "runtime_user": "65532:65532",
+      "context": ".",
+      "deploy_units": [],
+      "automatic_deploy_allowed": false
+    },
+    {
+      "id": "execution-orchestrator",
+      "implementation_status": "phase_a_build_defined_not_deployed_or_accepted",
+      "build_file": "deployments/phase-a/Containerfile.execution-orchestrator",
+      "entrypoint": "python -m app.execution_orchestrator",
+      "runtime_user": "65532:65532",
+      "context": ".",
+      "deploy_units": [],
+      "automatic_deploy_allowed": false,
+      "execution_safety_required": true
+    },
+    {
+      "id": "gateway-rpc-request-proxy",
+      "implementation_status": "phase_a_build_defined_not_deployed_or_accepted",
+      "build_file": "deployments/phase-a/Containerfile.gateway-proxy",
+      "entrypoint": "python /usr/local/bin/gateway_proxy.py",
+      "command": "request",
+      "runtime_user": "65532:65532",
+      "health": "/health/live,/health/ready",
+      "version": "/version",
+      "context": ".",
+      "deploy_units": [],
+      "automatic_deploy_allowed": false,
+      "dependency_of": ["execution-orchestrator"],
+      "required_target_env": "WINDOWS_RPC_REQ_ADDRESS",
+      "required_listen_env": "GATEWAY_RPC_REQ_PROXY_PORT"
+    },
+    {
+      "id": "gateway-rpc-publish-proxy",
+      "implementation_status": "phase_a_build_defined_not_deployed_or_accepted",
+      "build_file": "deployments/phase-a/Containerfile.gateway-proxy",
+      "entrypoint": "python /usr/local/bin/gateway_proxy.py",
+      "command": "publish",
+      "runtime_user": "65532:65532",
+      "health": "/health/live,/health/ready",
+      "version": "/version",
+      "context": ".",
+      "deploy_units": [],
+      "automatic_deploy_allowed": false,
+      "dependency_of": ["execution-orchestrator"],
+      "required_target_env": "WINDOWS_RPC_PUB_ADDRESS",
+      "required_listen_env": "GATEWAY_RPC_PUB_PROXY_PORT"
+    }
+  ],
+  "external_artifacts": [
+    {
+      "id": "windows-ctp-gateway",
+      "type": "external_runtime_artifact",
+      "owner": "windows-ctp-gateway",
+      "source_paths": [
+        "scripts/windows_rpc_*.py",
+        "scripts/windows_fence_foundation/"
+      ],
+      "consumers": [
+        "execution-orchestrator",
+        "gateway-rpc-request-proxy",
+        "gateway-rpc-publish-proxy"
+      ],
+      "automatic_deploy_allowed": false,
+      "production_allowed": false
+    }
+  ],
+  "shared_contracts": [
+    {
+      "id": "control-execution-command",
+      "paths": ["docs/schemas/web-bridge-control-execution-command-v1.schema.json", "backend/app/execution/models.py"],
+      "consumers": ["control-api", "execution-orchestrator"]
+    },
+    {
+      "id": "execution-status-projection",
+      "paths": ["docs/schemas/web-bridge-execution-status-v1.schema.json", "backend/app/schemas/control_execution.py"],
+      "consumers": ["control-api", "execution-orchestrator"]
+    },
+    {
+      "id": "trading-session-profile",
+      "paths": ["shared/trading_session_profiles.json"],
+      "consumers": ["frontend-edge", "control-api", "execution-orchestrator"]
+    }
+  ],
+  "path_rules": [
+    {"id": "phase-a-workflow", "match": {"exact": [], "glob": [], "prefix": [".github/workflows/"]}, "units": ["frontend-edge", "control-api", "execution-orchestrator"], "verification": ["phase_a_workflow_contract"], "kind": "infra", "shared": false, "safety": true, "external_artifacts": []},
+    {"id": "phase-a-compose", "match": {"exact": ["deployments/docker-compose.phase-a.yml", "deployments/docker-compose.prod.yml"], "glob": [], "prefix": []}, "units": ["frontend-edge", "control-api", "execution-orchestrator"], "verification": ["phase_a_compose_config"], "kind": "infra", "shared": false, "safety": true, "external_artifacts": []},
+    {"id": "phase-a-frontend-build", "match": {"exact": ["frontend/Containerfile", "frontend/nginx.conf", "frontend/package.json", "frontend/package-lock.json", "frontend/index.html", "frontend/vite.config.ts"], "glob": [], "prefix": ["frontend/src/", "frontend/public/"]}, "units": ["frontend-edge"], "verification": ["frontend_check", "frontend_health_version"], "kind": "source", "shared": false, "safety": false, "external_artifacts": []},
+    {"id": "phase-a-control-build", "match": {"exact": ["deployments/phase-a/Containerfile.control-api", "backend/app/control_api.py", "backend/app/control_execution_client.py", "backend/app/control_execution_projection.py", "backend/app/control_ws_ticket.py", "backend/app/api/control_execution.py", "backend/app/api/routes_control_execution.py", "backend/app/api/routes_control_safe.py", "backend/app/api/routes_auth.py", "backend/app/core/config.py", "backend/app/core/errors.py", "backend/app/core/logging.py", "backend/app/core/security.py", "backend/app/schemas/auth.py", "backend/app/services/audit_service.py", "backend/app/services/control_execution_client.py", "backend/app/services/execution_projection.py", "backend/app/services/calendar_service.py", "backend/app/services/watchlist_service.py", "backend/app/main.py"], "glob": [], "prefix": ["backend/app/core/", "backend/app/api/routes_control_", "backend/tests/unit/test_issue291_control_api"]}, "units": ["control-api"], "verification": ["control_api_tests", "control_api_health_version"], "kind": "source", "shared": false, "safety": false, "external_artifacts": []},
+    {"id": "phase-a-root-dockerfile", "match": {"exact": ["Dockerfile"], "glob": [], "prefix": []}, "units": ["control-api"], "verification": ["control_api_tests", "phase_a_root_dockerfile_contract"], "kind": "infra", "shared": false, "safety": false, "external_artifacts": []},
+    {"id": "phase-a-execution-build", "match": {"exact": ["deployments/phase-a/Containerfile.execution-orchestrator", "backend/app/execution_orchestrator.py"], "glob": [], "prefix": ["backend/app/execution/", "backend/tests/unit/test_issue291_phase_a_durable_execution", "backend/tests/unit/test_issue291_phase_a_leader_fencing", "backend/tests/unit/test_issue291_phase_a_commands"]}, "units": ["execution-orchestrator"], "verification": ["execution_typed_tests", "execution_health_version", "execution_safety_review"], "kind": "source", "shared": false, "safety": true, "external_artifacts": []},
+    {"id": "phase-a-gateway-proxy-build", "match": {"exact": ["deployments/phase-a/Containerfile.gateway-proxy", "deployments/phase-a/gateway-allowlist.json", "deployments/phase-a/gateway_proxy.py"], "glob": [], "prefix": []}, "units": ["execution-orchestrator"], "verification": ["gateway_proxy_contract", "gateway_proxy_target_required", "execution_safety_review"], "kind": "infra", "shared": false, "safety": true, "external_artifacts": []},
+    {"id": "phase-a-postgres-init", "match": {"exact": ["deployments/phase-a/postgres-init.sh"], "glob": [], "prefix": []}, "units": ["control-api", "execution-orchestrator"], "verification": ["phase_a_postgres_role_contract", "execution_safety_review"], "kind": "infra", "shared": false, "safety": true, "external_artifacts": []},
+    {"id": "phase-a-windows-fence-external-artifact", "match": {"exact": ["scripts/windows_rpc_durable_fence_v1.py", "scripts/windows_fence_foundation/__init__.py", "scripts/windows_fence_foundation/assembly.py", "scripts/windows_fence_foundation/final_admission_v1.py"], "glob": ["scripts/windows_rpc_*.py"], "prefix": ["scripts/windows_fence_foundation/"]}, "units": ["execution-orchestrator"], "verification": ["windows_fence_contract", "windows_fence_external_artifact", "execution_safety_review"], "kind": "infra", "shared": false, "safety": true, "external_artifacts": ["windows-ctp-gateway"]},
+    {"id": "phase-a-shared-control-execution-schema", "match": {"exact": ["backend/app/execution/models.py", "backend/app/execution/errors.py", "backend/app/schemas/control_execution.py", "docs/schemas/web-bridge-control-execution-command-v1.schema.json", "docs/schemas/web-bridge-execution-status-v1.schema.json"], "glob": [], "prefix": []}, "units": ["control-api", "execution-orchestrator"], "verification": ["typed_command_schema", "execution_status_schema"], "kind": "source", "shared": true, "safety": true, "external_artifacts": []},
+    {"id": "phase-a-shared-profile", "match": {"exact": ["shared/trading_session_profiles.json"], "glob": [], "prefix": []}, "units": ["frontend-edge", "control-api", "execution-orchestrator"], "verification": ["shared_contract_dependency_resolution"], "kind": "source", "shared": true, "safety": true, "external_artifacts": []},
+    {"id": "phase-a-backend-dependencies", "match": {"exact": ["backend/requirements.txt"], "glob": [], "prefix": []}, "units": ["control-api", "execution-orchestrator"], "verification": ["python_dependency_compatibility"], "kind": "source", "shared": false, "safety": true, "external_artifacts": []},
+    {"id": "phase-a-contract-documents", "match": {"exact": ["docs/architecture/issue-291-phase-a-contract-v1.md", "docs/architecture/issue-291-phase-a-ownership-v1.json", "docs/architecture/issue-291-phase-a-release-dependencies-v1.json", "backend/tests/unit/test_issue291_phase_a_contract.py", "backend/tests/unit/test_issue291_phase_a_compose.py", "backend/tests/unit/test_issue291_frontend_edge.py"], "glob": [], "prefix": []}, "units": [], "verification": ["phase_a_contract"], "kind": "contract", "shared": false, "safety": false, "external_artifacts": []},
+    {"id": "phase-a-ci-tests", "match": {"exact": [], "glob": [], "prefix": ["scripts/ci/", "backend/tests/unit/test_ci_"]}, "units": [], "verification": ["ci_contract"], "kind": "infra", "shared": false, "safety": true, "external_artifacts": []},
+    {"id": "phase-a-legacy-root", "match": {"exact": ["test_rpc_readonly.py", "test_rpc_trade_flow.py"], "glob": [], "prefix": []}, "units": [], "verification": ["legacy_monolith_absence"], "kind": "forbidden", "shared": false, "safety": true, "external_artifacts": []},
+    {"id": "phase-a-unrelated-docs", "match": {"exact": ["README.md"], "glob": [], "prefix": ["docs/"]}, "units": [], "verification": ["markdown_links"], "kind": "contract", "shared": false, "safety": false, "external_artifacts": []},
+    {"id": "phase-a-unrelated-tests", "match": {"exact": [], "glob": [], "prefix": ["backend/tests/"]}, "units": [], "verification": ["backend_tests"], "kind": "contract", "shared": false, "safety": false, "external_artifacts": []}
+  ],
+  "dependency_closure": {
+    "shared_contracts_union_consumers": true,
+    "frontend_only_never_selects_execution": true,
+    "control_only_never_selects_execution": true,
+    "execution_dependency_closure": ["gateway-rpc-request-proxy", "gateway-rpc-publish-proxy"],
+    "execution_external_artifacts": ["windows-ctp-gateway"],
+    "execution_proxy_units_are_execution_only": true,
+    "frontend_control_only_never_selects_gateway_proxies": true,
+    "execution_proxy_targets_required": ["WINDOWS_RPC_REQ_ADDRESS", "WINDOWS_RPC_PUB_ADDRESS"],
+    "execution_readiness_requires_both_gateway_proxies_healthy": true,
+    "execution_never_joins_gateway_egress": true,
+    "execution_change_requires_independent_safety_flag": true,
+    "unknown_or_ambiguous": "block"
+  },
+  "deployment_claim": "No Phase A image or service is deployed, promoted, or acceptance-tested by this manifest. It records build files and entrypoints only."
+}

@@ -1,0 +1,489 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vnpy-web-bridge.invalid/schema/web-bridge-control-execution-command-v1.schema.json",
+  "title": "Control API to Execution Orchestrator command",
+  "description": "Private, typed, idempotent and auditable command contract for Issue #291 Phase A.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "command_id",
+    "idempotency_key",
+    "correlation_id",
+    "issued_at",
+    "actor",
+    "command",
+    "expected",
+    "payload"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "web_bridge_control_execution_command_v1"
+    },
+    "command_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "idempotency_key": {
+      "type": "string",
+      "minLength": 16,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$"
+    },
+    "correlation_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "issued_at": {
+      "$ref": "#/$defs/utc_timestamp"
+    },
+    "actor": {
+      "$ref": "#/$defs/actor"
+    },
+    "command": {
+      "type": "string",
+      "enum": [
+        "status",
+        "overview",
+        "preview",
+        "enable",
+        "revoke",
+        "start",
+        "stop",
+        "reconcile",
+        "drain",
+        "safe_to_restart"
+      ]
+    },
+    "expected": {
+      "$ref": "#/$defs/expected_version"
+    },
+    "payload": {
+      "type": "object"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "command": {
+            "const": "status"
+          }
+        },
+        "required": [
+          "command"
+        ]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "$ref": "#/$defs/empty_payload"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "command": {
+            "const": "overview"
+          }
+        },
+        "required": [
+          "command"
+        ]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "$ref": "#/$defs/empty_payload"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "command": {
+            "const": "preview"
+          }
+        },
+        "required": [
+          "command"
+        ]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "$ref": "#/$defs/preview_payload"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "command": {
+            "const": "enable"
+          }
+        },
+        "required": [
+          "command"
+        ]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "$ref": "#/$defs/enable_payload"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "command": {
+            "const": "revoke"
+          }
+        },
+        "required": [
+          "command"
+        ]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "$ref": "#/$defs/revoke_payload"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "command": {
+            "const": "start"
+          }
+        },
+        "required": [
+          "command"
+        ]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "$ref": "#/$defs/start_payload"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "command": {
+            "const": "stop"
+          }
+        },
+        "required": [
+          "command"
+        ]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "$ref": "#/$defs/stop_payload"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "command": {
+            "const": "reconcile"
+          }
+        },
+        "required": [
+          "command"
+        ]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "$ref": "#/$defs/reconcile_payload"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "command": {
+            "const": "drain"
+          }
+        },
+        "required": [
+          "command"
+        ]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "$ref": "#/$defs/drain_payload"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "command": {
+            "const": "safe_to_restart"
+          }
+        },
+        "required": [
+          "command"
+        ]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "$ref": "#/$defs/safe_to_restart_payload"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 8,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "utc_timestamp": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,6})?Z$"
+    },
+    "actor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "service",
+        "principal",
+        "operator",
+        "role"
+      ],
+      "properties": {
+        "service": {
+          "const": "control-api"
+        },
+        "principal": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "operator": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "role": {
+          "type": "string",
+          "enum": [
+            "viewer",
+            "trader",
+            "admin",
+            "system"
+          ]
+        }
+      }
+    },
+    "expected_version": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state_version"
+      ],
+      "properties": {
+        "state_version": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "plan_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "authority_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "leader_epoch": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "fencing_token": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "empty_payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "maxProperties": 0
+    },
+    "reason": {
+      "type": "string",
+      "minLength": 8,
+      "maxLength": 500
+    },
+    "preview_payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "plan_hash",
+        "artifact_hash",
+        "mode"
+      ],
+      "properties": {
+        "plan_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "artifact_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "offline_preview",
+            "simnow_preview"
+          ]
+        }
+      }
+    },
+    "enable_payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "authority_artifact_id",
+        "authority_hash",
+        "expires_at",
+        "reason"
+      ],
+      "properties": {
+        "authority_artifact_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "authority_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "expires_at": {
+          "$ref": "#/$defs/utc_timestamp"
+        },
+        "reason": {
+          "$ref": "#/$defs/reason"
+        }
+      }
+    },
+    "revoke_payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reason"
+      ],
+      "properties": {
+        "reason": {
+          "$ref": "#/$defs/reason"
+        }
+      }
+    },
+    "start_payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "plan_id",
+        "plan_hash",
+        "reason"
+      ],
+      "properties": {
+        "plan_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "plan_hash": {
+          "$ref": "#/$defs/sha256"
+        },
+        "reason": {
+          "$ref": "#/$defs/reason"
+        }
+      }
+    },
+    "stop_payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reason"
+      ],
+      "properties": {
+        "reason": {
+          "$ref": "#/$defs/reason"
+        }
+      }
+    },
+    "reconcile_payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reconciliation_run_id",
+        "snapshot_id",
+        "reason"
+      ],
+      "properties": {
+        "reconciliation_run_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "snapshot_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "reason": {
+          "$ref": "#/$defs/reason"
+        }
+      }
+    },
+    "drain_payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "drain_id",
+        "reason"
+      ],
+      "properties": {
+        "drain_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "reason": {
+          "$ref": "#/$defs/reason"
+        },
+        "deadline_at": {
+          "$ref": "#/$defs/utc_timestamp"
+        }
+      }
+    },
+    "safe_to_restart_payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "receipt_id",
+        "reason"
+      ],
+      "properties": {
+        "receipt_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "reason": {
+          "$ref": "#/$defs/reason"
+        }
+      }
+    }
+  }
+}

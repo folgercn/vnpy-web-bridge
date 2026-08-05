@@ -21,6 +21,13 @@ jobs:
       image_changed: ${{ steps.filter.outputs.image_changed }}
       query_v5_changed: ${{ steps.filter.outputs.query_v5_changed }}
       windows_fence_changed: ${{ steps.filter.outputs.windows_fence_changed }}
+      phase_a_changed: ${{ steps.phase_a_filter.outputs.phase_a_changed }}
+      frontend_edge_changed: ${{ steps.phase_a_filter.outputs.frontend_edge_changed }}
+      control_api_changed: ${{ steps.phase_a_filter.outputs.control_api_changed }}
+      execution_orchestrator_changed: ${{ steps.phase_a_filter.outputs.execution_orchestrator_changed }}
+      execution_changed: ${{ steps.phase_a_filter.outputs.execution_changed }}
+      execution_safety_required: ${{ steps.phase_a_filter.outputs.execution_safety_required }}
+      phase_a_release_blocked: ${{ steps.phase_a_filter.outputs.release_blocked }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -36,6 +43,7 @@ jobs:
           CURRENT_SHA: ${{ github.sha }}
         run: |
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            git ls-tree -r --name-only "$CURRENT_SHA" > /tmp/changed-files.txt
             python scripts/ci/classify_changes.py --force-all --github-output >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -52,6 +60,24 @@ jobs:
           python scripts/ci/classify_changes.py \
             --paths-file /tmp/changed-files.txt \
             --github-output >> "$GITHUB_OUTPUT"
+
+      - name: Classify Issue #291 Phase A services
+        id: phase_a_filter
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set +e
+          extra=()
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then extra+=(--force-all); fi
+          python scripts/ci/classify_changes.py \
+            --paths-file /tmp/changed-files.txt \
+            --phase-a --github-output "${extra[@]}" >> "$GITHUB_OUTPUT"
+          status=$?
+          # Unknown/ambiguous paths are represented in the output and are
+          # failed by the dedicated release-plan job and CI Gate.  Keep this
+          # change-detection job able to publish all booleans first.
+          if [ "$status" -gt 1 ]; then exit "$status"; fi
 
   quick-checks:
     name: Quick checks
@@ -115,6 +141,7 @@ jobs:
             backend/tests/unit/test_ci_cd_release_classifier.py \
             backend/tests/unit/test_ci_change_classifier.py \
             backend/tests/unit/test_ci_workflow_contract.py \
+            backend/tests/unit/test_issue291_phase_a_release.py \
             backend/tests/unit/test_issue267_release_contract.py \
             backend/tests/unit/test_issue267_legacy_cd_guard.py \
             backend/tests/unit/test_pr_update_comment_gate.py
@@ -179,6 +206,195 @@ jobs:
           path: artifacts/issue-267-legacy-cd-guard-plan.json
           if-no-files-found: error
           retention-days: 30
+
+  phase-a-release-plan:
+    name: Issue #291 Phase A release plan
+    needs: changes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: scripts/ci/requirements-quick.txt
+
+      - name: Install release-plan dependencies
+        run: pip install -r scripts/ci/requirements-quick.txt
+
+      - name: Resolve changed files
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE_SHA: ${{ github.event.before }}
+          CURRENT_SHA: ${{ github.sha }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            git ls-tree -r --name-only "$CURRENT_SHA" > /tmp/changed-files.txt
+            echo known > /tmp/baseline-status.txt
+            echo true > /tmp/force-all.txt
+          elif [ "$EVENT_NAME" = "pull_request" ]; then
+            git fetch origin "$BASE_REF" --depth=1
+            git diff --name-only --no-renames "origin/$BASE_REF"...HEAD > /tmp/changed-files.txt
+            echo known > /tmp/baseline-status.txt
+            echo false > /tmp/force-all.txt
+          elif [ -n "$BEFORE_SHA" ] && [ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]; then
+            git diff --name-only --no-renames "$BEFORE_SHA" "$CURRENT_SHA" > /tmp/changed-files.txt
+            echo known > /tmp/baseline-status.txt
+            echo false > /tmp/force-all.txt
+          else
+            git ls-tree -r --name-only "$CURRENT_SHA" > /tmp/changed-files.txt
+            echo unknown > /tmp/baseline-status.txt
+            echo false > /tmp/force-all.txt
+          fi
+
+      - name: Produce non-deploying Phase A plan
+        env:
+          CURRENT_SHA: ${{ github.sha }}
+        run: |
+          extra=()
+          if [ "$(cat /tmp/force-all.txt)" = "true" ]; then extra+=(--force-all); fi
+          python scripts/ci/plan_phase_a_release.py \
+            --paths-file /tmp/changed-files.txt \
+            --source-commit-sha "$CURRENT_SHA" \
+            --baseline-status "$(cat /tmp/baseline-status.txt)" \
+            --output artifacts/issue-291-phase-a-release-plan.json \
+            "${extra[@]}"
+
+      - name: Upload Phase A release plan
+        if: always() && hashFiles('artifacts/issue-291-phase-a-release-plan.json') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: issue-291-phase-a-release-plan-${{ github.run_id }}
+          path: artifacts/issue-291-phase-a-release-plan.json
+          if-no-files-found: error
+          retention-days: 30
+
+  phase-a-build-check:
+    name: Issue #291 Phase A images, Compose, health and contracts
+    needs:
+      - changes
+      - phase-a-release-plan
+    if: needs.phase-a-release-plan.result == 'success' && needs.changes.outputs.phase_a_changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install Phase A test dependencies
+        run: pip install -r backend/requirements.txt
+
+      - name: Validate schemas, classifier and Phase A contracts
+        run: |
+          python scripts/ci/validate_json_schemas.py
+          PYTHONPATH=backend:scripts:. pytest -q \
+            backend/tests/unit/test_issue291_phase_a_release.py \
+            backend/tests/unit/test_issue291_phase_a_contract.py \
+            backend/tests/unit/test_issue291_phase_a_compose.py \
+            backend/tests/unit/test_issue291_frontend_edge.py \
+            backend/tests/unit/test_issue291_control_api.py \
+            backend/tests/unit/test_issue291_phase_a_commands.py \
+            backend/tests/unit/test_issue291_phase_a_durable_execution.py \
+            backend/tests/unit/test_issue291_phase_a_leader_fencing.py
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build frontend-edge image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: frontend/Containerfile
+          load: true
+          tags: vnpy-web-bridge-frontend:phase-a-${{ github.sha }}
+          cache-from: type=gha,scope=issue291-frontend-edge
+          cache-to: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'type=gha,mode=max,scope=issue291-frontend-edge' || '' }}
+
+      - name: Build control-api image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: deployments/phase-a/Containerfile.control-api
+          load: true
+          tags: vnpy-web-bridge-control-api:phase-a-${{ github.sha }}
+          cache-from: type=gha,scope=issue291-control-api
+          cache-to: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'type=gha,mode=max,scope=issue291-control-api' || '' }}
+
+      - name: Build execution-orchestrator image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: deployments/phase-a/Containerfile.execution-orchestrator
+          load: true
+          tags: vnpy-web-bridge-execution:phase-a-${{ github.sha }}
+          cache-from: type=gha,scope=issue291-execution-orchestrator
+          cache-to: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'type=gha,mode=max,scope=issue291-execution-orchestrator' || '' }}
+
+      - name: Build gateway proxy image (gateway-rpc-request-proxy + gateway-rpc-publish-proxy dependency units)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: deployments/phase-a/Containerfile.gateway-proxy
+          load: true
+          tags: vnpy-web-bridge-gateway-proxy:phase-a-${{ github.sha }}
+          cache-from: type=gha,scope=issue291-gateway-proxy
+          cache-to: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'type=gha,mode=max,scope=issue291-gateway-proxy' || '' }}
+
+      - name: Validate Phase A Compose configuration
+        env:
+          CONTROL_DATABASE_URL: postgresql://control:phase-a-control@postgres:5432/vnpy
+          EXECUTION_DATABASE_URL: postgresql://execution:phase-a-execution@postgres:5432/vnpy
+          CONTROL_EXECUTION_SHARED_SECRET: phase-a-ci-control-execution-secret-not-for-runtime
+          CONTROL_EXECUTION_PRINCIPAL: phase-a-ci-control
+          CONTROL_EXECUTION_ROLE: admin
+          EXECUTION_SCOPE: account:phase-a-ci
+          EXECUTION_ENVIRONMENT: phase-a-ci
+          GATEWAY_RPC_REQ_PROXY_PORT: "2014"
+          GATEWAY_RPC_PUB_PROXY_PORT: "4102"
+          WINDOWS_RPC_REQ_ADDRESS: tcp://192.0.2.1:2014
+          WINDOWS_RPC_PUB_ADDRESS: tcp://192.0.2.1:4102
+          GATEWAY_PROXY_IMAGE: vnpy-web-bridge-gateway-proxy:phase-a-${{ github.sha }}
+          JWT_SECRET_KEY: phase-a-ci-jwt-secret-not-for-runtime
+          AUTH_USERS_JSON: '[{"username":"ci","password_sha256":"ci"}]'
+          POSTGRES_DB: vnpy
+          POSTGRES_ADMIN_USER: postgres
+          POSTGRES_ADMIN_PASSWORD: phase-a
+          CONTROL_DB_USER: control
+          CONTROL_DB_PASSWORD: phase-a-control
+          EXECUTION_DB_USER: execution
+          EXECUTION_DB_PASSWORD: phase-a-execution
+        run: >-
+          docker compose -f deployments/docker-compose.phase-a.yml config --quiet
+
+      - name: Check image entrypoints and health/version modules
+        run: |
+          docker image inspect vnpy-web-bridge-frontend:phase-a-${{ github.sha }} >/dev/null
+          docker image inspect vnpy-web-bridge-control-api:phase-a-${{ github.sha }} >/dev/null
+          docker image inspect vnpy-web-bridge-execution:phase-a-${{ github.sha }} >/dev/null
+          docker image inspect vnpy-web-bridge-gateway-proxy:phase-a-${{ github.sha }} >/dev/null
+          docker run --rm --add-host control-api:127.0.0.1 --entrypoint nginx vnpy-web-bridge-frontend:phase-a-${{ github.sha }} -t -c /etc/nginx/nginx.conf
+          docker run --rm --entrypoint python vnpy-web-bridge-control-api:phase-a-${{ github.sha }} -c "from app.control_api import app; paths={getattr(r, 'path', '') for r in app.routes}; assert {'/health/live','/health/ready','/version'} <= paths"
+          docker run --rm --entrypoint python vnpy-web-bridge-execution:phase-a-${{ github.sha }} -c "from app.execution_orchestrator import app; paths={getattr(r, 'path', '') for r in app.routes}; assert {'/health/live','/health/ready','/version'} <= paths"
+          docker image inspect vnpy-web-bridge-gateway-proxy:phase-a-${{ github.sha }} | python -c "import json,sys; c=json.load(sys.stdin)[0]['Config']; assert c['Entrypoint'] == ['python','/usr/local/bin/gateway_proxy.py']; assert c['Cmd'] == ['request']; assert c['User'] == '65532:65532'"
+          docker run --rm vnpy-web-bridge-gateway-proxy:phase-a-${{ github.sha }} version | python -c "import json,sys; value=json.load(sys.stdin); assert value['service'] == 'gateway-rpc-proxy'; assert value['version']"
 
   backend:
     name: Backend tests (shard ${{ matrix.shard }})
@@ -416,6 +632,8 @@ jobs:
       - windows-fence-core
       - docker
       - query-v5-real-oci
+      - phase-a-release-plan
+      - phase-a-build-check
     runs-on: ubuntu-latest
     steps:
       - name: Require every applicable CI job

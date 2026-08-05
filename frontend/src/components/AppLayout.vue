@@ -33,6 +33,12 @@
         </div>
       </n-layout-header>
       <n-layout-content class="content">
+        <n-alert v-if="terminal.executionUnavailable" type="error" title="Execution projection unavailable" class="surface-alert">
+          {{ terminal.executionError }}
+        </n-alert>
+        <n-alert v-if="terminal.phaseBUnavailable" type="warning" title="Phase A control-only mode" class="surface-alert">
+          账户、行情、策略及订单写入等 Phase B 业务面当前不可用；页面会明确返回 CONTROL_SURFACE_UNAVAILABLE（503）。
+        </n-alert>
         <router-view />
       </n-layout-content>
     </n-layout>
@@ -48,6 +54,7 @@
 import { computed, h, onMounted, ref } from 'vue'
 import {
   NButton,
+  NAlert,
   NDrawer,
   NDrawerContent,
   NDropdown,
@@ -116,7 +123,7 @@ const themeLabel = computed(() => {
 onMounted(async () => {
   await terminal.refreshStatus().catch(() => undefined)
   await terminal.refreshSnapshots().catch(() => undefined)
-  eventSocket.connect()
+  void eventSocket.connect()
 })
 
 function item(label: string, key: string, icon: unknown) {
@@ -185,6 +192,10 @@ function logout() {
 
 .content {
   padding: 16px;
+}
+
+.surface-alert {
+  margin-bottom: 12px;
 }
 
 @media (max-width: 760px) {

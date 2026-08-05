@@ -12,6 +12,7 @@ from typing import Any, Protocol
 from scripts.windows_fence_foundation.admission import FrozenNoneStoreRecovery
 from scripts.windows_fence_foundation.assembly import (
     SnapshotAttacher,
+    TypedAdmissionAttacher,
     WindowsRpcFrozenAssemblyV1,
     assemble_windows_rpc_frozen_v1,
     attach_windows_rpc_deployment_snapshot_v1,
@@ -31,6 +32,7 @@ def bootstrap_windows_rpc_frozen_v1(
     recover_store: StoreRecoverer,
     build_runtime: Callable[[], Any],
     attach_snapshot: SnapshotAttacher = attach_windows_rpc_deployment_snapshot_v1,
+    attach_typed: TypedAdmissionAttacher | None = None,
     connect_runtime: Callable[[Any], Any],
     listen_runtime: Callable[[Any], Any],
     filesystem: Any | None = None,
@@ -48,6 +50,7 @@ def bootstrap_windows_rpc_frozen_v1(
         recovery=recovery,
         build_runtime=build_runtime,
         attach_snapshot=attach_snapshot,
+        attach_typed=attach_typed,
     )
     assembly.assert_ready_to_listen()
     assembly.assert_not_listening()

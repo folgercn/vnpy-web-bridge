@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from fastapi.testclient import TestClient
-
 from app.core.security import CurrentUser, create_access_token
 from app.main import app
 from app.services.vnpy_rpc_service import rpc_service
+from fastapi.testclient import TestClient
 
 
 class FakeCFastShadowService:
@@ -32,15 +31,13 @@ class FakeCFastShadowService:
 
 
 def auth_headers(role: str) -> dict[str, str]:
-    return {
-        "Authorization": f"Bearer {create_access_token(CurrentUser(role, role))}"
-    }
+    return {"Authorization": f"Bearer {create_access_token(CurrentUser(role, role))}"}
 
 
 def client_without_rpc(monkeypatch):
     monkeypatch.setattr(rpc_service, "start", lambda: None)
     monkeypatch.setattr(rpc_service, "stop", lambda: None)
-    monkeypatch.setattr(rpc_service, "get_contracts", lambda: [])
+    monkeypatch.setattr(rpc_service, "get_contracts", list)
     return TestClient(app)
 
 
@@ -57,6 +54,7 @@ def install_service(monkeypatch) -> FakeCFastShadowService:
 
 
 def test_status_is_readable_without_triggering_reload(monkeypatch) -> None:
+    """C_FAST shadow is a Phase-B producer, not a Control API surface."""
     service = install_service(monkeypatch)
     with client_without_rpc(monkeypatch) as client:
         response = client.get(
@@ -64,13 +62,13 @@ def test_status_is_readable_without_triggering_reload(monkeypatch) -> None:
             headers=auth_headers("viewer"),
         )
 
-    assert response.status_code == 200
-    assert response.json()["data"]["authority_granted"] is False
-    assert response.json()["data"]["dispatch_allowed"] is False
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "CONTROL_SURFACE_UNAVAILABLE"
     assert service.reload_calls == 0
 
 
 def test_reload_is_admin_only_and_has_no_execution_route(monkeypatch) -> None:
+    """Retired reload/execute paths fail closed for every authenticated role."""
     service = install_service(monkeypatch)
     with client_without_rpc(monkeypatch) as client:
         forbidden = client.post(
@@ -86,8 +84,7 @@ def test_reload_is_admin_only_and_has_no_execution_route(monkeypatch) -> None:
             headers=auth_headers("admin"),
         )
 
-    assert forbidden.status_code == 403
-    assert reloaded.status_code == 200
-    assert reloaded.json()["data"]["reloaded_by"] == "admin"
-    assert service.reload_calls == 1
-    assert no_execute.status_code in {404, 405}
+    for response in (forbidden, reloaded, no_execute):
+        assert response.status_code == 503
+        assert response.json()["error"]["code"] == "CONTROL_SURFACE_UNAVAILABLE"
+    assert service.reload_calls == 0
