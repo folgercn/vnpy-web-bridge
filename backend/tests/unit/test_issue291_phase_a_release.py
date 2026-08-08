@@ -190,7 +190,11 @@ def test_containerfile_classifier_matrix_is_unit_exact(
 
 @pytest.mark.parametrize(
     "path",
-    ("deployments/docker-compose.phase-a.yml", "deployments/docker-compose.prod.yml"),
+    (
+        "deployments/docker-compose.phase-a.yml",
+        "deployments/docker-compose.prod.yml",
+        "deployments/docker-compose.final.yml",
+    ),
 )
 def test_compose_paths_select_all_primary_units_and_execution_proxy_closure(
     path: str,
@@ -203,6 +207,21 @@ def test_compose_paths_select_all_primary_units_and_execution_proxy_closure(
         "frontend-edge",
     ]
     assert set(result["dependency_closure"]) == {
+        "control-api",
+        "execution-orchestrator",
+        "frontend-edge",
+        "gateway-rpc-request-proxy",
+        "gateway-rpc-publish-proxy",
+    }
+
+
+def test_final_compose_path_produces_phase_a_full_build_plan() -> None:
+    plan = create_plan(
+        ["deployments/docker-compose.final.yml"], source_commit_sha=SHA
+    )
+    assert plan["decision"] == "BUILD_ONLY"
+    assert plan["selected_rule_ids"] == ["phase-a-compose"]
+    assert {unit["unit"] for unit in plan["build_units"]} == {
         "control-api",
         "execution-orchestrator",
         "frontend-edge",

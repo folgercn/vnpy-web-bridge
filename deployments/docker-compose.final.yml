@@ -157,7 +157,7 @@ services:
     image: questdb/questdb:9.4.3
     networks: [questdb-data]
     volumes: [questdb_state:/var/lib/questdb]
-    healthcheck: { test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/health >/dev/null"], interval: 10s, timeout: 3s, retries: 12 }
+    healthcheck: { test: ["CMD-SHELL", "response=\"$$(curl -fsS 'http://127.0.0.1:9000/exec?query=select%201')\" && printf '%s' \"$$response\" | grep -Eq '\"dataset\"[[:space:]]*:[[:space:]]*\\[[[:space:]]*\\[[[:space:]]*1[[:space:]]*\\][[:space:]]*\\]'"], interval: 10s, timeout: 3s, retries: 12 }
 
   questdb-schema-bootstrap:
     image: postgres:16-alpine

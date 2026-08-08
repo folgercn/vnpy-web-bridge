@@ -378,7 +378,6 @@ PHASE_A_PHASE_C_PRESERVED_EXACT = (
     "deployments/phase-c/Containerfile.execution",
     "deployments/phase-c/docker-compose.offline-e2e.yml",
     "backend/app/execution/final_runtime.py",
-    "deployments/docker-compose.final.yml",
     "deployments/final/questdb-market-ticks.sql",
     "scripts/ci/final_runtime_compose_smoke.sh",
     "backend/tests/unit/test_issue291_final_execution.py",
@@ -460,6 +459,7 @@ PHASE_A_RULES = (
         exact=(
             "deployments/docker-compose.phase-a.yml",
             "deployments/docker-compose.prod.yml",
+            "deployments/docker-compose.final.yml",
         ),
         kind="infra",
         safety=True,
