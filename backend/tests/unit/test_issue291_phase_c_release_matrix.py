@@ -259,6 +259,12 @@ def test_offline_e2e_uses_canonical_images_and_receipts_not_phase_c_duplicates()
     assert "APP_ENV: phase-c-offline" in OFFLINE_E2E_COMPOSE
     assert "JWT_SECRET_KEY: ${JWT_SECRET_KEY:?required}" in OFFLINE_E2E_COMPOSE
     assert "immutable_image_ref" in OFFLINE_E2E
+    assert "receipt_image_tag()" in OFFLINE_E2E
+    assert "receipt['image_repository']}:{receipt['image_tag']}" in OFFLINE_E2E
+    assert "receipt_image_tag artifacts/issue-291-phase-c-e2e-control-api-receipt.json" in OFFLINE_E2E
+    assert "receipt_image_tag artifacts/issue-291-phase-c-e2e-artifact-custody-receipt.json" in OFFLINE_E2E
+    assert "receipt_image_tag artifacts/issue-291-phase-c-e2e-execution-orchestrator-receipt.json" in OFFLINE_E2E
+    assert '))["immutable_image_ref"])' not in OFFLINE_E2E
     for image_env in ("CONTROL_API_IMAGE", "ARTIFACT_CUSTODY_IMAGE", "EXECUTION_IMAGE"):
         assert image_env in OFFLINE_E2E
     assert "/api/phase-c/artifacts/upload-install" in OFFLINE_E2E

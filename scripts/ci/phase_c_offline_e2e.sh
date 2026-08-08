@@ -80,9 +80,22 @@ scripts/ci/phase_c_build_and_smoke.sh A control-api deployments/phase-a/Containe
 scripts/ci/phase_c_build_and_smoke.sh B artifact-custody deployments/phase-b/Containerfile.artifact-custody vnpy-web-bridge-artifact-custody "issue-291-phase-c-${source_sha}-artifact-custody" artifact-custody "$source_sha" artifacts/issue-291-phase-c-e2e-artifact-custody-receipt.json
 scripts/ci/phase_c_build_and_smoke.sh A execution-orchestrator deployments/phase-a/Containerfile.execution-orchestrator vnpy-web-bridge-execution "issue-291-phase-c-${source_sha}-execution-orchestrator" execution-orchestrator "$source_sha" artifacts/issue-291-phase-c-e2e-execution-orchestrator-receipt.json
 
-export CONTROL_API_IMAGE="$(python3 -c 'import json; print(json.load(open("artifacts/issue-291-phase-c-e2e-control-api-receipt.json"))["immutable_image_ref"])')"
-export ARTIFACT_CUSTODY_IMAGE="$(python3 -c 'import json; print(json.load(open("artifacts/issue-291-phase-c-e2e-artifact-custody-receipt.json"))["immutable_image_ref"])')"
-export EXECUTION_IMAGE="$(python3 -c 'import json; print(json.load(open("artifacts/issue-291-phase-c-e2e-execution-orchestrator-receipt.json"))["immutable_image_ref"])')"
+receipt_image_tag() {
+  python3 - "$1" <<'PY'
+import json
+import sys
+
+receipt = json.load(open(sys.argv[1], encoding="utf-8"))
+print(f"{receipt['image_repository']}:{receipt['image_tag']}")
+PY
+}
+
+# The E2E images were loaded into this runner, so Compose must use their local
+# tags.  The receipts retain image_digest/immutable_image_ref for release
+# evidence; those digest refs require a registry and are not local image names.
+export CONTROL_API_IMAGE="$(receipt_image_tag artifacts/issue-291-phase-c-e2e-control-api-receipt.json)"
+export ARTIFACT_CUSTODY_IMAGE="$(receipt_image_tag artifacts/issue-291-phase-c-e2e-artifact-custody-receipt.json)"
+export EXECUTION_IMAGE="$(receipt_image_tag artifacts/issue-291-phase-c-e2e-execution-orchestrator-receipt.json)"
 compose up --no-build --detach
 compose cp "$workdir/keyring.json" artifact-custody:/tmp/phase-c-e2e-keyring.json
 wait_for_control
