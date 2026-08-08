@@ -154,6 +154,27 @@ def test_final_compose_keeps_custody_single_writer_and_data_plane_isolated() -> 
     assert 'event_time_utc.isoformat() == "2026-08-08T01:02:03+00:00"' in smoke
 
 
+def test_final_compose_questdb_healthcheck_is_strict_and_readonly() -> None:
+    compose = yaml.safe_load(
+        (ROOT / "deployments/docker-compose.final.yml").read_text(encoding="utf-8")
+    )
+    healthcheck = compose["services"]["questdb"]["healthcheck"]
+
+    assert healthcheck["test"][0] == "CMD-SHELL"
+    command = healthcheck["test"][1]
+    assert "/exec?query=select%201" in command
+    assert "curl -fsS" in command
+    assert "response=" in command and " && " in command
+    assert "grep -Eq" in command
+    assert '"dataset"' in command
+    assert "[[:space:]]" in command
+    assert "/health" not in command
+    assert "market_ticks" not in command
+    assert healthcheck["interval"] == "10s"
+    assert healthcheck["timeout"] == "3s"
+    assert healthcheck["retries"] == 12
+
+
 def test_runtime_smoke_bootstraps_only_a_signed_target_plan_before_http_custody() -> None:
     smoke_compose = yaml.safe_load(
         (ROOT / "deployments/final/docker-compose.runtime-smoke.yml").read_text(
