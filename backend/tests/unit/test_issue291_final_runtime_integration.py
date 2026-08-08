@@ -175,6 +175,45 @@ def test_final_compose_questdb_healthcheck_is_strict_and_readonly() -> None:
     assert healthcheck["retries"] == 12
 
 
+def test_final_compose_gates_execution_quality_on_producer_initialized_stream() -> None:
+    compose = yaml.safe_load(
+        (ROOT / "deployments/docker-compose.final.yml").read_text(encoding="utf-8")
+    )
+    services = compose["services"]
+    market = services["market-data-worker"]
+    execution_quality = services["execution-quality-worker"]
+    healthcheck = market["healthcheck"]
+
+    assert healthcheck["test"][0] == "CMD-SHELL"
+    assert healthcheck["test"][1] == (
+        "test -d /var/lib/phase-b/market-data/stream && "
+        "test -f /var/lib/phase-b/market-data/stream/verified_ticks.jsonl && "
+        "test -f /var/lib/phase-b/market-data/stream/producer_watermark.json && "
+        "test -f /var/lib/phase-b/market-data/stream/tick_writer_acks.jsonl"
+    )
+    assert healthcheck["interval"] == "1s"
+    assert healthcheck["timeout"] == "1s"
+    assert healthcheck["retries"] == 10
+    assert execution_quality["depends_on"] == {
+        "market-data-worker": {"condition": "service_healthy"}
+    }
+
+    # The startup gate must not broaden either data-plane worker's isolation.
+    assert market["networks"] == ["market-ingress", "questdb-data"]
+    assert market["volumes"] == [
+        "market_data_state:/var/lib/phase-b/market-data",
+        "market_projection:/var/lib/phase-b/projection",
+    ]
+    assert market["read_only"] is True
+    assert execution_quality["network_mode"] == "none"
+    assert execution_quality["volumes"] == [
+        "execution_quality_state:/var/lib/phase-b/execution-quality",
+        "execution_quality_projection:/var/lib/phase-b/projection",
+        "market_data_state:/var/lib/market-data-stream:ro",
+    ]
+    assert execution_quality["read_only"] is True
+
+
 def test_runtime_smoke_bootstraps_only_a_signed_target_plan_before_http_custody() -> None:
     smoke_compose = yaml.safe_load(
         (ROOT / "deployments/final/docker-compose.runtime-smoke.yml").read_text(
