@@ -37,6 +37,7 @@ try:
         WorkerIdentity,
         WorkerMetrics,
         isoformat,
+        parse_time,
         sha256_hex,
     )
     from .durable import (
@@ -63,6 +64,7 @@ except ImportError:  # pragma: no cover
         WorkerIdentity,
         WorkerMetrics,
         isoformat,
+        parse_time,
         sha256_hex,
     )
     from phase_b_workers.durable import (
@@ -137,6 +139,10 @@ _MARKET_TICK_INSERT = (
     f"INSERT INTO market_ticks ({', '.join(MARKET_TICK_COLUMNS)}) "
     f"VALUES ({', '.join(['%s'] * len(MARKET_TICK_COLUMNS))})"
 )
+_MARKET_TICK_READBACK = (
+    f"SELECT {', '.join(MARKET_TICK_COLUMNS)} FROM market_ticks "
+    "WHERE ts = %s AND ingest_id = %s"
+)
 MARKET_TICK_SCHEMA_TYPES = {
     "ts": "TIMESTAMP",
     "received_at": "TIMESTAMP",
@@ -170,21 +176,9 @@ MARKET_TICK_SCHEMA_TYPES = {
         }
     },
 }
-_MARKET_TICKS_TABLE_SCHEMA_SQL = (
-    "SELECT designatedTimestamp, dedup, dedupKeyColumns "
-    "FROM tables() WHERE tableName = 'market_ticks'"
-)
 _MARKET_TICKS_COLUMN_SCHEMA_SQL = (
-    "SELECT column, type FROM table_columns('market_ticks')"
+    "SELECT \"column\", type, upsertKey, designated FROM table_columns('market_ticks')"
 )
-
-
-def _dedup_key_columns(value: object) -> tuple[str, ...]:
-    return tuple(
-        part.strip().strip("\"'")
-        for part in str(value or "").strip("[]() ").split(",")
-        if part.strip()
-    )
 
 
 def verify_market_ticks_schema(connection: Any) -> None:
@@ -195,26 +189,29 @@ def verify_market_ticks_schema(connection: Any) -> None:
     """
 
     with connection.cursor() as cursor:
-        cursor.execute(_MARKET_TICKS_TABLE_SCHEMA_SQL)
-        table = cursor.fetchone()
-        if not isinstance(table, tuple) or len(table) != 3:
-            raise DurableStateError("market_ticks table metadata is unavailable")
-        timestamp, dedup, keys = table
         cursor.execute(_MARKET_TICKS_COLUMN_SCHEMA_SQL)
         columns = cursor.fetchall()
-    normalized = {
-        str(name): str(data_type).upper().split("(", 1)[0].strip()
-        for name, data_type in columns
-    }
+    normalized: dict[str, str] = {}
+    upsert_keys: list[str] = []
+    designated: list[str] = []
+    for row in columns:
+        if not isinstance(row, tuple) or len(row) != 4:
+            raise DurableStateError("market_ticks column metadata is invalid")
+        name, data_type, upsert_key, timestamp = row
+        column = str(name)
+        normalized[column] = str(data_type).upper().split("(", 1)[0].strip()
+        if bool(upsert_key):
+            upsert_keys.append(column)
+        if bool(timestamp):
+            designated.append(column)
     missing = {
         name: expected
         for name, expected in MARKET_TICK_SCHEMA_TYPES.items()
         if normalized.get(name) != expected
     }
     if (
-        str(timestamp) != "ts"
-        or str(dedup).lower() not in {"true", "1"}
-        or _dedup_key_columns(keys) != ("ts", "ingest_id")
+        tuple(designated) != ("ts",)
+        or tuple(upsert_keys) != ("ts", "ingest_id")
         or missing
     ):
         raise DurableStateError("market_ticks prebuilt schema contract is invalid")
@@ -373,6 +370,34 @@ def verified_tick_to_market_tick_v3(tick: VerifiedTick) -> dict[str, object]:
     return row
 
 
+def _market_tick_row_matches(tick: VerifiedTick, actual: Mapping[str, object]) -> bool:
+    expected = verified_tick_to_market_tick_v3(tick)
+    # v3 has no separate source_event_id column.  The only source-event
+    # binding it can prove is the contract invariant ingest_id == source id.
+    if tick.source_event_id and tick.ingest_id != tick.source_event_id:
+        return False
+    for column, value in expected.items():
+        observed = actual.get(column)
+        if value is None:
+            if observed is not None:
+                return False
+        elif column in {"ts", "received_at"}:
+            try:
+                if isoformat(parse_time(observed)) != isoformat(parse_time(value)):
+                    return False
+            except (TypeError, ValueError):
+                return False
+        elif isinstance(value, float):
+            try:
+                if float(observed) != value:
+                    return False
+            except (TypeError, ValueError):
+                return False
+        elif observed != value:
+            return False
+    return True
+
+
 class ZmqPublishTickSource:
     """A SUB-only adapter for the trusted RpcClient PUB ``(topic, TickData)`` wire."""
 
@@ -498,17 +523,12 @@ class ZmqPublishTickSource:
         topic_text = (
             topic.decode("utf-8", "replace") if isinstance(topic, bytes) else topic
         )
-        if topic_text != "eTick" and not topic_text.startswith("eTick."):
+        if not topic_text.startswith("eTick."):
             raise TypeError("market-data publish topic is not a tick topic")
         payload = self._tick_payload(data)
-        if topic_text.startswith("eTick."):
-            suffix = topic_text.removeprefix("eTick.")
-            allowed_topics = {
-                str(payload["vt_symbol"]),
-                str(payload.get("symbol") or ""),
-            }
-            if suffix not in allowed_topics:
-                raise TypeError("market-data publish topic does not match tick symbol")
+        suffix = topic_text.removeprefix("eTick.")
+        if suffix != str(payload["vt_symbol"]):
+            raise TypeError("market-data publish topic does not match tick symbol")
         source_seq = self._next_source_seq()
         event_id = sha256_hex(
             {
@@ -621,7 +641,7 @@ class QuestDbTickWriter:
     def write_tick(self, tick: Mapping[str, object]) -> None:
         self.write_verified_tick(VerifiedTick.from_dict(tick))
 
-    def readback(self, ingest_id: str) -> Mapping[str, object] | None:
+    def readback(self, tick: VerifiedTick) -> Mapping[str, object] | None:
         """Read one row for a contract test or post-write verification."""
 
         with self._lock:
@@ -629,15 +649,13 @@ class QuestDbTickWriter:
             self._ensure_schema(connection)
             with connection.cursor() as cursor:
                 cursor.execute(
-                    "SELECT ingest_id, ingest_seq, vt_symbol, ts, received_at "
-                    "FROM market_ticks WHERE ingest_id = %s",
-                    (str(ingest_id),),
+                    _MARKET_TICK_READBACK,
+                    (verified_tick_to_market_tick_v3(tick)["ts"], tick.ingest_id),
                 )
                 row = cursor.fetchone()
         if row is None:
             return None
-        keys = ("ingest_id", "ingest_seq", "vt_symbol", "ts", "received_at")
-        return dict(zip(keys, row, strict=True))
+        return dict(zip(MARKET_TICK_COLUMNS, row, strict=True))
 
     def health(self) -> Mapping[str, object]:
         try:
@@ -923,13 +941,9 @@ class MarketDataWorker:
         if self.stream.is_acknowledged(tick):
             return
         readback = getattr(self.writer, "readback", None)
-        persisted = readback(tick.ingest_id) if callable(readback) else None
+        persisted = readback(tick) if callable(readback) else None
         if persisted is not None:
-            if (
-                str(persisted.get("ingest_id") or "") != tick.ingest_id
-                or int(persisted.get("ingest_seq") or 0) != tick.ingest_seq
-                or str(persisted.get("vt_symbol") or "") != tick.vt_symbol
-            ):
+            if not _market_tick_row_matches(tick, persisted):
                 raise DurableStateError("QuestDB readback does not match verified tick")
             self.stream.acknowledge_tick_write(tick)
             self.metrics.increment("ticks_persisted")

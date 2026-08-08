@@ -86,19 +86,16 @@ class CommitThenAckWriter(Writer):
 
     def write_verified_tick(self, tick):
         self.events.append(tick)
-        self.persisted[tick.ingest_id] = {
-            "ingest_id": tick.ingest_id,
-            "ingest_seq": tick.ingest_seq,
-            "vt_symbol": tick.vt_symbol,
-        }
+        self.persisted[tick.ingest_id] = verified_tick_to_market_tick_v3(tick)
 
-    def readback(self, ingest_id):
-        return self.persisted.get(ingest_id)
+    def readback(self, tick):
+        return self.persisted.get(tick.ingest_id)
 
 
 class FakeCursor:
-    def __init__(self, rows=(), fail_execute=False):
+    def __init__(self, rows=(), fail_execute=False, readbacks=()):
         self.rows = list(rows)
+        self.readbacks = list(readbacks)
         self.calls = []
         self.fail_execute = fail_execute
         self.last_sql = ""
@@ -116,19 +113,22 @@ class FakeCursor:
             raise OSError("poisoned pgwire connection")
 
     def fetchone(self):
-        if "FROM tables()" in self.last_sql:
-            return ("ts", True, "ts,ingest_id")
+        if "WHERE ts = %s AND ingest_id = %s" in self.last_sql:
+            return self.readbacks.pop(0) if self.readbacks else None
         return self.rows.pop(0) if self.rows else None
 
     def fetchall(self):
         if "FROM table_columns" in self.last_sql:
-            return list(MARKET_TICK_SCHEMA_TYPES.items())
+            return [
+                (name, data_type, name in {"ts", "ingest_id"}, name == "ts")
+                for name, data_type in MARKET_TICK_SCHEMA_TYPES.items()
+            ]
         return []
 
 
 class FakeConnection:
-    def __init__(self, rows=(), fail_execute=False):
-        self.cursor_value = FakeCursor(rows, fail_execute)
+    def __init__(self, rows=(), fail_execute=False, readbacks=()):
+        self.cursor_value = FakeCursor(rows, fail_execute, readbacks)
         self.closed = False
         self.commits = self.rollbacks = 0
 
@@ -295,10 +295,43 @@ def test_commit_before_ack_replays_via_readback_without_second_insert(
     monkeypatch.setattr(worker.stream, "acknowledge_tick_write", fail_after_commit)
     with pytest.raises(OSError, match="acknowledgement crash"):
         worker.process_one()
-    assert len(writer.events) == 1 and writer.readback(writer.events[0].ingest_id)
+    assert len(writer.events) == 1 and writer.readback(writer.events[0])
     assert worker.replay_pending_writes() == 1
     assert len(writer.events) == 1
     assert not worker.stream.pending_for_tick_writer()
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [("ts", "2026-08-09T00:00:00Z"), ("last_price", 999.0)],
+)
+def test_readback_never_acknowledges_same_ingest_id_with_different_row(
+    tmp_path, field, replacement
+):
+    worker = MarketDataWorker(tmp_path / "market", generation="g1", writer=Writer())
+    worker.recover()
+    tick = VerifiedTick.from_raw(
+        {"source_event_id": "same-id", "vt_symbol": "rb2610.SHFE", "last_price": 1},
+        stream_generation="g1",
+        ingest_seq=worker.stream.next_sequence(),
+        source="gateway-publish-proxy",
+    )
+    worker.stream.append(tick)
+    row = verified_tick_to_market_tick_v3(tick)
+    row[field] = replacement
+
+    class WrongRowWriter:
+        def readback(self, candidate):
+            assert candidate.ingest_id == tick.ingest_id
+            return row
+
+        def write_verified_tick(self, _candidate):
+            pytest.fail("wrong readback must never be overwritten")
+
+    worker.writer = WrongRowWriter()
+    with pytest.raises(DurableStateError, match="readback does not match"):
+        worker.replay_pending_writes()
+    assert not worker.stream.is_acknowledged(tick)
 
 
 def test_verified_tick_raw_hash_excludes_transport_identity_but_not_content():
@@ -371,7 +404,13 @@ def test_questdb_writer_is_insert_health_readback_only_and_recovers_connection(
     worker.accept(envelope())
     tick = worker.process_one()
     first = FakeConnection(
-        rows=[(1,), (tick.ingest_id, 1, tick.vt_symbol, "ts", "received")]
+        rows=[(1,)],
+        readbacks=[
+            tuple(
+                verified_tick_to_market_tick_v3(tick)[column]
+                for column in MARKET_TICK_COLUMNS
+            )
+        ],
     )
     connections = [first]
     writer = QuestDbTickWriter(
@@ -391,18 +430,24 @@ def test_questdb_writer_is_insert_health_readback_only_and_recovers_connection(
         for word in ("CREATE", "ALTER", "DROP", "DELETE", "UPDATE")
     )
     assert writer.health()["status"] == "healthy"
-    assert writer.readback(tick.ingest_id) == {
-        "ingest_id": tick.ingest_id,
-        "ingest_seq": 1,
-        "vt_symbol": tick.vt_symbol,
-        "ts": "ts",
-        "received_at": "received",
-    }
+    assert writer.readback(tick) == verified_tick_to_market_tick_v3(tick)
     assert all(
         "postgresql://not-logged" not in sql for sql, _ in first.cursor_value.calls
     )
-    assert any("FROM tables()" in sql for sql, _ in first.cursor_value.calls)
-    assert any("FROM table_columns" in sql for sql, _ in first.cursor_value.calls)
+    metadata = next(
+        sql for sql, _ in first.cursor_value.calls if "FROM table_columns" in sql
+    )
+    assert metadata == (
+        'SELECT "column", type, upsertKey, designated '
+        "FROM table_columns('market_ticks')"
+    )
+    readback_sql, readback_params = next(
+        call
+        for call in first.cursor_value.calls
+        if "WHERE ts = %s AND ingest_id = %s" in call[0]
+    )
+    assert readback_sql.startswith("SELECT ts, received_at, ingest_id")
+    assert readback_params == (tick.event_time_utc, tick.ingest_id)
     assert all(
         not any(word in sql.upper() for word in ("CREATE", "ALTER", "DROP"))
         for sql, _ in first.cursor_value.calls
@@ -467,7 +512,7 @@ def test_zmq_publish_source_is_sub_only_and_recovers_after_poisoned_socket(tmp_p
         ask_volume_1=4,
     )
     # This exact list is what RpcServer.send_pyobj() publishes.
-    second = FakeSocket([[b"eTick", tick_data]])
+    second = FakeSocket([[b"eTick.rb2610.SHFE", tick_data]])
     context = FakeContext([first, second])
     source = ZmqPublishTickSource(
         "tcp://publish-proxy:4102",
@@ -504,7 +549,9 @@ def test_zmq_publish_source_is_sub_only_and_recovers_after_poisoned_socket(tmp_p
 
 def test_market_worker_binds_typed_pub_source_through_envelope_validation(tmp_path):
     tick_data = rpc_tick()
-    socket = FakeSocket([["eTick", tick_data], ["eTick", tick_data]])
+    socket = FakeSocket(
+        [["eTick.rb2610.SHFE", tick_data], ["eTick.rb2610.SHFE", tick_data]]
+    )
     source = ZmqPublishTickSource(
         "tcp://publish-proxy:4102",
         state_dir=tmp_path / "market",
@@ -540,13 +587,13 @@ def test_zmq_source_rejects_non_tick_topic_even_if_data_has_tick_like_fields(tmp
         source.poll()
 
 
-def test_zmq_source_tick_suffix_must_match_vt_symbol_or_symbol(tmp_path):
+def test_zmq_source_tick_suffix_must_match_exact_vt_symbol(tmp_path):
     tick = rpc_tick()
     source = ZmqPublishTickSource(
         "tcp://publish-proxy:4102",
         state_dir=tmp_path,
         source_generation="gateway-g1",
-        context=FakeContext([FakeSocket([["eTick.rb2610", tick]])]),
+        context=FakeContext([FakeSocket([["eTick.rb2610.SHFE", tick]])]),
         zmq_module=FakeZmq,
     )
     received = []
@@ -556,6 +603,32 @@ def test_zmq_source_tick_suffix_must_match_vt_symbol_or_symbol(tmp_path):
     assert (
         GatewayTickEnvelope.from_dict(received[0]).payload["vt_symbol"] == "rb2610.SHFE"
     )
+
+    symbol_only = ZmqPublishTickSource(
+        "tcp://publish-proxy:4102",
+        state_dir=tmp_path,
+        source_generation="gateway-g1",
+        context=FakeContext([FakeSocket([["eTick.rb2610", tick]])]),
+        zmq_module=FakeZmq,
+    )
+    symbol_only.subscribe(
+        lambda _value: pytest.fail("symbol-only topic reached ingress")
+    )
+    with pytest.raises(TypeError, match="does not match"):
+        symbol_only.poll()
+    symbol_only.close()
+
+    empty = ZmqPublishTickSource(
+        "tcp://publish-proxy:4102",
+        state_dir=tmp_path,
+        source_generation="gateway-g1",
+        context=FakeContext([FakeSocket([["eTick", tick]])]),
+        zmq_module=FakeZmq,
+    )
+    empty.subscribe(lambda _value: pytest.fail("empty tick topic reached ingress"))
+    with pytest.raises(TypeError, match="not a tick topic"):
+        empty.poll()
+    empty.close()
 
     mismatch = ZmqPublishTickSource(
         "tcp://publish-proxy:4102",
@@ -679,15 +752,17 @@ def test_market_source_has_only_sub_receive_and_no_order_capabilities():
 
 def test_restricted_unpickler_accepts_real_rpc_list_wire_and_blocks_reduce(tmp_path):
     original = rpc_tick(last_price=123.5)
-    wire = pickle.dumps(["eTick.rb2610", original], protocol=pickle.HIGHEST_PROTOCOL)
+    wire = pickle.dumps(
+        ["eTick.rb2610.SHFE", original], protocol=pickle.HIGHEST_PROTOCOL
+    )
     decoded = restricted_tick_wire_loads(wire)
-    assert isinstance(decoded, list) and decoded[0] == "eTick.rb2610"
+    assert isinstance(decoded, list) and decoded[0] == "eTick.rb2610.SHFE"
     assert decoded[1].vt_symbol == "rb2610.SHFE"
     assert decoded[1].last_price == 123.5
 
     marker = tmp_path / "unpickle-rce-marker"
     malicious = pickle.dumps(
-        ["eTick", MaliciousPickle(marker)], protocol=pickle.HIGHEST_PROTOCOL
+        ["eTick.rb2610.SHFE", MaliciousPickle(marker)], protocol=pickle.HIGHEST_PROTOCOL
     )
     with pytest.raises(pickle.UnpicklingError, match="forbidden pickle global"):
         restricted_tick_wire_loads(malicious)
