@@ -20,6 +20,9 @@ COPY scripts/phase_b_workers/schemas/verified-tick-v1.schema.json /app/phase_b_w
 COPY scripts/phase_b_workers/schemas/worker-health-v1.schema.json /app/phase_b_workers/schemas/worker-health-v1.schema.json
 COPY scripts/phase_b_workers/schemas/worker-readiness-v1.schema.json /app/phase_b_workers/schemas/worker-readiness-v1.schema.json
 COPY scripts/phase_b_workers/schemas/worker-metrics-v1.schema.json /app/phase_b_workers/schemas/worker-metrics-v1.schema.json
+# The final-runtime smoke source is a tiny offline-only vn.py wire fixture;
+# it carries no gateway credentials or order capability.
+COPY deployments/final/market_source.py /app/smoke/market_source.py
 
 RUN python -m compileall -q /app/phase_b_workers \
     && groupadd --system --gid 65532 phaseb \

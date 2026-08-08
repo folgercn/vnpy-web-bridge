@@ -121,6 +121,7 @@ PHASE_C_WORKFLOW_EXACT = (
 )
 PHASE_C_SHARED_EXACT = (
     "deployments/phase-b/Containerfile.artifact-custody",
+    "scripts/ci/final_runtime_compose_smoke.sh",
 )
 PHASE_C_SHARED_PREFIXES = (
     "scripts/ci/phase_c_",

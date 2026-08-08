@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
 import yaml
 from app.phase_c.custody_service import (
     ArtifactCustodyService,
@@ -48,6 +50,14 @@ def test_custody_separates_control_from_execution_target_plan_read(tmp_path: Pat
             },
         )
         assert control.status_code == 401
+        legacy_execution = client.get(
+            "/internal/v1/artifacts/target-plan-0001",
+            headers={
+                "X-Phase-C-Principal": "phase-c-execution",
+                "X-Phase-C-Custody-Secret": "control-secret",
+            },
+        )
+        assert legacy_execution.status_code == 401
         execution = client.get(
             "/internal/v1/artifacts/target-plan-0001",
             headers={
@@ -59,6 +69,26 @@ def test_custody_separates_control_from_execution_target_plan_read(tmp_path: Pat
         assert client.get("/health/live").json()["status"] == "live"
         assert client.get("/health/ready").json()["status"] == "ready"
     assert (tmp_path / "projection" / "artifact-custody.json").is_file()
+
+
+def test_custody_rejects_reused_control_and_execution_secret(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    policy = {
+        name: {
+            "keyring_path": str(tmp_path / f"{name}.json"),
+            "keyring_raw_sha256": "0" * 64,
+            "key_purpose": "public-only",
+        }
+        for name in ("map_acceptance", "c_fast_acceptance", "runtime_authorization")
+    }
+    monkeypatch.setenv("PHASE_C_CUSTODY_ROOT", str(tmp_path / "custody"))
+    monkeypatch.setenv("PHASE_C_CUSTODY_SHARED_SECRET", "same-secret")
+    monkeypatch.setenv("PHASE_C_CUSTODY_EXECUTION_READ_SECRET", "same-secret")
+    monkeypatch.setenv("PHASE_C_CUSTODY_WRITER_EPOCH", "1")
+    monkeypatch.setenv("PHASE_C_CUSTODY_POLICIES_JSON", json.dumps(policy))
+    with pytest.raises(RuntimeError, match="configuration"):
+        CustodySettings.from_env()
 
 
 def test_final_compose_keeps_custody_single_writer_and_data_plane_isolated() -> None:
@@ -77,6 +107,9 @@ def test_final_compose_keeps_custody_single_writer_and_data_plane_isolated() -> 
     assert services["c-fast-producer"]["profiles"] == ["batch"]
     assert services["signing-authority"]["profiles"] == ["offline-signing"]
     assert "WAL DEDUP UPSERT KEYS(ts, ingest_id)" in (ROOT / "deployments/final/questdb-market-ticks.sql").read_text(encoding="utf-8")
+    assert "docker-compose.runtime-smoke.yml" in (
+        ROOT / "scripts/ci/final_runtime_compose_smoke.sh"
+    ).read_text(encoding="utf-8")
 
 
 def test_final_runtime_paths_expand_the_a_b_build_closure() -> None:

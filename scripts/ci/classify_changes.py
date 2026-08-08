@@ -383,6 +383,9 @@ PHASE_A_PHASE_C_PRESERVED_EXACT = (
     "scripts/ci/final_runtime_compose_smoke.sh",
     "backend/tests/unit/test_issue291_final_execution.py",
     "backend/tests/unit/test_issue291_final_runtime_integration.py",
+    "deployments/final/docker-compose.runtime-smoke.yml",
+    "deployments/final/Containerfile.questdb-schema",
+    "deployments/final/market_source.py",
 )
 PHASE_A_PHASE_C_PRESERVED_PREFIXES = (
     "backend/app/api/routes_phase_c_",

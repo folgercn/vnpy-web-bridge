@@ -1,0 +1,2 @@
+FROM postgres:16-alpine
+COPY deployments/final/questdb-market-ticks.sql /bootstrap/market_ticks.sql
