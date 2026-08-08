@@ -1,4 +1,4 @@
-import { request } from './client'
+import { ApiClientError, request } from './client'
 
 export interface PhaseCNegativeAuthority {
   production_allowed: false
@@ -130,7 +130,8 @@ export async function recoverPendingPhaseCAuthorization(): Promise<Authorization
     const result = await getPhaseCAuthorizationReceipt(pending.payload.idempotency_key)
     localStorage.removeItem(pendingKey)
     return result
-  } catch {
+  } catch (error) {
+    if (!(error instanceof ApiClientError) || error.code !== 'PHASE_C_UNKNOWN_OUTCOME') throw error
     // Retry only the same persisted payload/key after its unknown-outcome query.
     const result = await commandPhaseCAuthorization(pending.payload)
     localStorage.removeItem(pendingKey)
