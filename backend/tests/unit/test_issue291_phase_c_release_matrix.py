@@ -26,6 +26,9 @@ WORKFLOW = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
 COMPOSE_SMOKE = (ROOT / "scripts/ci/phase_c_compose_smoke.sh").read_text(
     encoding="utf-8"
 )
+OFFLINE_E2E = (ROOT / "scripts/ci/phase_c_offline_e2e.sh").read_text(
+    encoding="utf-8"
+)
 
 
 def _units(plan: dict[str, object]) -> set[tuple[str, str]]:
@@ -102,6 +105,7 @@ def test_phase_c_shared_contract_change_exercises_all_a_and_b_units() -> None:
         assert plan["decision"] == "BUILD_ONLY"
         assert _units(plan) == set(UNIT_METADATA)
         assert plan["phase_b_projection_required"] is True
+        assert plan["offline_e2e_required"] is True
 
 
 def test_phase_c_offline_e2e_assets_are_explicitly_preserved_and_shared() -> None:
@@ -118,7 +122,28 @@ def test_phase_c_offline_e2e_assets_are_explicitly_preserved_and_shared() -> Non
         assert phase_a["selected_rule_ids"] == ["phase-a-preserved-phase-c"]
         plan = create_plan([path], source_commit_sha=SHA)
         assert plan["decision"] == "BUILD_ONLY"
-        assert _units(plan) == set(UNIT_METADATA)
+        assert _units(plan) == {
+            ("A", "control-api"),
+            ("A", "execution-orchestrator"),
+            ("A", "gateway-rpc-request-proxy"),
+            ("A", "gateway-rpc-publish-proxy"),
+            ("B", "artifact-custody"),
+        }
+        assert plan["offline_e2e_required"] is True
+
+
+def test_phase_c_workflow_path_selects_only_canonical_service_owners() -> None:
+    plan = create_plan(
+        ["backend/app/api/routes_phase_c_workflow.py"], source_commit_sha=SHA
+    )
+    assert _units(plan) == {
+        ("A", "control-api"),
+        ("A", "execution-orchestrator"),
+        ("A", "gateway-rpc-request-proxy"),
+        ("A", "gateway-rpc-publish-proxy"),
+        ("B", "artifact-custody"),
+    }
+    assert plan["offline_e2e_required"] is True
 
 
 def test_plan_is_unconditionally_non_deploying_and_requires_receipts() -> None:
@@ -168,9 +193,13 @@ def test_ci_consumes_one_dynamic_matrix_and_keeps_compose_smoke_in_matrix_job() 
     assert "scripts/ci/phase_c_build_and_smoke.sh" in WORKFLOW
     assert "scripts/ci/phase_c_compose_smoke.sh" in WORKFLOW
     assert "phase-c-phase-b-projection-smoke:" in WORKFLOW
+    assert "phase-c-offline-e2e:" in WORKFLOW
+    assert "scripts/ci/phase_c_offline_e2e.sh" in WORKFLOW
+    assert "timeout-minutes: 25" in WORKFLOW
     assert "phase_b_projection_required" in WORKFLOW
     gate = WORKFLOW.split("  ci-gate:\n", maxsplit=1)[1]
     assert "- phase-c-phase-b-projection-smoke" in gate
+    assert "- phase-c-offline-e2e" in gate
     assert "Superseded by the dependency-aware Phase C A+B matrix plan" in WORKFLOW
 
 
@@ -193,3 +222,22 @@ def test_compose_smoke_pins_selected_image_to_exact_service_or_gateway_pair() ->
     assert '"gateway-rpc-request-proxy",\n        "gateway-rpc-publish-proxy",' in COMPOSE_SMOKE
     assert 'config --format json > "$rendered"' in COMPOSE_SMOKE
     assert 'if actual != image:' in COMPOSE_SMOKE
+
+
+def test_offline_e2e_uses_canonical_images_and_receipts_not_phase_c_duplicates() -> None:
+    assert "deployments/phase-a/Containerfile.control-api" in OFFLINE_E2E
+    assert "deployments/phase-b/Containerfile.artifact-custody" in OFFLINE_E2E
+    assert "deployments/phase-a/Containerfile.execution-orchestrator" in OFFLINE_E2E
+    assert "deployments/phase-c/Containerfile" not in OFFLINE_E2E
+    assert "PHASE_C_CUSTODY_POLICIES_JSON" in OFFLINE_E2E
+    assert "Ed25519PrivateKey.generate" in OFFLINE_E2E
+    assert "immutable_image_ref" in OFFLINE_E2E
+    for image_env in ("CONTROL_API_IMAGE", "ARTIFACT_CUSTODY_IMAGE", "EXECUTION_IMAGE"):
+        assert image_env in OFFLINE_E2E
+    assert "/api/phase-c/artifacts/upload-install" in OFFLINE_E2E
+    assert "/api/phase-c/authorization/commands" in OFFLINE_E2E
+    assert "compose restart control-api artifact-custody execution-orchestrator" in OFFLINE_E2E
+    assert "wait_for_control" in OFFLINE_E2E
+    assert "compose down --volumes --remove-orphans" in OFFLINE_E2E
+    for unit in ("control-api", "artifact-custody", "execution-orchestrator"):
+        assert f"issue-291-phase-c-e2e-{unit}-receipt.json" in OFFLINE_E2E

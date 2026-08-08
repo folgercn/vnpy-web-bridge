@@ -107,7 +107,7 @@ UNIT_METADATA: dict[tuple[str, str], dict[str, Any]] = {
 # must exercise every isolated image rather than silently relying on stale
 # matrix behaviour.  This is intentionally narrow; arbitrary docs remain
 # contract-only and unknown source paths still block.
-PHASE_C_SHARED_EXACT = (
+PHASE_C_WORKFLOW_EXACT = (
     "backend/app/phase_c_custody.py",
     "backend/app/phase_c_execution.py",
     "deployments/phase-c/Containerfile.custody",
@@ -115,19 +115,21 @@ PHASE_C_SHARED_EXACT = (
     "deployments/phase-c/docker-compose.offline-e2e.yml",
 )
 PHASE_C_SHARED_PREFIXES = (
-    "backend/app/api/routes_phase_c_",
-    "backend/app/phase_c/",
-    "backend/tests/unit/test_issue291_phase_c_",
     "scripts/ci/phase_c_",
     "scripts/phase_c_faults/",
     "docs/architecture/issue-291-phase-c-release-",
-    "docs/architecture/issue-291-phase-c-workflow-",
     "docs/architecture/issue-291-phase-c-fault-",
     "docs/schemas/issue-291-phase-c-release-",
     "docs/schemas/issue-291-phase-c-image-",
+    "docs/schemas/issue-291-phase-c-fault-",
+)
+PHASE_C_WORKFLOW_PREFIXES = (
+    "backend/app/api/routes_phase_c_",
+    "backend/app/phase_c/",
+    "backend/tests/unit/test_issue291_phase_c_",
+    "docs/architecture/issue-291-phase-c-workflow-",
     "docs/schemas/issue-291-phase-c-authorization-",
     "docs/schemas/issue-291-phase-c-signing-",
-    "docs/schemas/issue-291-phase-c-fault-",
     "shared/phase_c_workflow/",
 )
 
@@ -179,9 +181,39 @@ def _unit(phase: str, unit: str, verification_units: list[str], source_sha: str)
 
 
 def _phase_c_shared(paths: list[str]) -> bool:
+    return any(path.startswith(PHASE_C_SHARED_PREFIXES) for path in paths)
+
+
+def _phase_c_workflow(paths: list[str]) -> bool:
     return any(
-        path in PHASE_C_SHARED_EXACT or path.startswith(PHASE_C_SHARED_PREFIXES)
+        path in PHASE_C_WORKFLOW_EXACT
+        or path.startswith(PHASE_C_WORKFLOW_PREFIXES)
         for path in paths
+    )
+
+
+def _add_canonical_workflow_closure(
+    phase_a: dict[str, Any], phase_b: dict[str, Any]
+) -> None:
+    """Select existing service owners; Phase C creates no deployment unit."""
+
+    canonical_a = _classifier.classify_phase_a(
+        ["backend/app/control_api.py", "backend/app/execution_orchestrator.py"]
+    )
+    canonical_b = _classifier.classify_phase_b(
+        ["deployments/phase-b/Containerfile.artifact-custody"]
+    )
+    phase_a["selected_units"] = sorted(
+        set(phase_a["selected_units"]) | set(canonical_a["selected_units"])
+    )
+    phase_a["dependency_closure"] = sorted(
+        set(phase_a["dependency_closure"]) | set(canonical_a["dependency_closure"])
+    )
+    phase_a["verification_units"] = sorted(
+        set(phase_a["verification_units"]) | set(canonical_a["verification_units"])
+    )
+    phase_b["selected_units"] = sorted(
+        set(phase_b["selected_units"]) | set(canonical_b["selected_units"])
     )
 
 
@@ -197,8 +229,11 @@ def create_plan(
     normalised = sorted({_classifier._normalise_change_path(path) for path in paths})
     changed_paths = [path for path in normalised if path]
     shared = force_all or _phase_c_shared(changed_paths)
+    workflow = _phase_c_workflow(changed_paths)
     phase_a = _classifier.classify_phase_a(changed_paths, force_all=shared)
     phase_b = _classifier.classify_phase_b(changed_paths, force_all=shared)
+    if workflow and not shared:
+        _add_canonical_workflow_closure(phase_a, phase_b)
 
     blocked_reasons: list[dict[str, Any]] = []
     if not baseline_known:
@@ -243,6 +278,7 @@ def create_plan(
             "blocked": bool(phase_b["blocked_reasons"]),
         },
         "phase_b_projection_required": phase_b_projection_required,
+        "offline_e2e_required": shared or workflow,
         "decision": decision,
         "build_units": units,
         "blocked_reasons": blocked_reasons,
@@ -286,6 +322,11 @@ def main(argv: list[str] | None = None) -> int:
             stream.write(
                 "phase_b_projection_required="
                 + ("true" if plan["phase_b_projection_required"] else "false")
+                + "\n"
+            )
+            stream.write(
+                "offline_e2e_required="
+                + ("true" if plan["offline_e2e_required"] else "false")
                 + "\n"
             )
     print(json.dumps(plan, sort_keys=True))

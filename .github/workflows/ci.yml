@@ -654,6 +654,7 @@ jobs:
       phase_a_selected: ${{ steps.plan.outputs.phase_a_selected }}
       phase_b_selected: ${{ steps.plan.outputs.phase_b_selected }}
       phase_b_projection_required: ${{ steps.plan.outputs.phase_b_projection_required }}
+      offline_e2e_required: ${{ steps.plan.outputs.offline_e2e_required }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -771,6 +772,43 @@ jobs:
           CUSTODY_WRITER_EPOCH: "1"
           MAP_ACCEPTANCE_KEYRING_SHA256: "0000000000000000000000000000000000000000000000000000000000000000"
         run: scripts/ci/phase_b_projection_compose_smoke.sh
+
+  phase-c-offline-e2e:
+    name: Issue #291 Phase C canonical offline E2E
+    needs:
+      - phase-c-release-plan
+      - phase-c-build-and-smoke
+    if: >-
+      needs.phase-c-release-plan.result == 'success' &&
+      needs.phase-c-build-and-smoke.result == 'success' &&
+      needs.phase-c-release-plan.outputs.offline_e2e_required == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - name: Install E2E dependencies
+        run: pip install -r backend/requirements.txt
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4
+      - name: Run canonical Control to Custody to Execution offline E2E
+        run: scripts/ci/phase_c_offline_e2e.sh '${{ github.sha }}'
+      - name: Upload canonical immutable image receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: issue-291-phase-c-canonical-e2e-receipts-${{ github.run_id }}
+          path: artifacts/issue-291-phase-c-e2e-*-receipt.json
+          if-no-files-found: error
+          retention-days: 30
 
   backend:
     name: Backend tests (shard ${{ matrix.shard }})
@@ -1015,6 +1053,7 @@ jobs:
       - phase-c-release-plan
       - phase-c-build-and-smoke
       - phase-c-phase-b-projection-smoke
+      - phase-c-offline-e2e
     runs-on: ubuntu-latest
     steps:
       - name: Require every applicable CI job
