@@ -178,6 +178,11 @@ def test_issue291_final_runtime_job_pins_pytest_before_invocation() -> None:
         "  backend:\n", maxsplit=1
     )[0]
     assert "pytest==8.3.4" in job
+    assert "fastapi==0.115.6" in job
+    assert "httpx==0.28.1" in job
+    assert "jsonschema==4.26.0" in job
+    assert "referencing==0.37.0" in job
+    assert "jsonschema==4.26.0" in job
     assert (
         "PYTHONPATH=backend:scripts:. pytest -q backend/tests/unit/test_issue291_final_runtime_integration.py"
         in job
