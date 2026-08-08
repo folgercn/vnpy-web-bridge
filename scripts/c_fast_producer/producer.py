@@ -114,7 +114,13 @@ _SOURCE_ENVELOPE_KEYS = frozenset(
     }
 )
 _APPROVAL_KEYS = frozenset(
-    {"approved", "immutable", "receipt_verified", "custody_verified", "lineage_verified"}
+    {
+        "approved",
+        "immutable",
+        "receipt_verified",
+        "custody_verified",
+        "lineage_verified",
+    }
 )
 
 
@@ -182,7 +188,9 @@ def _verify_map_acceptance(
         or approval.get("live_trading_authorized") is not False
         or approval.get("countable_forward") is not False
     ):
-        raise ProducerError("MAP acceptance is not approved or does not pin the predecessor")
+        raise ProducerError(
+            "MAP acceptance is not approved or does not pin the predecessor"
+        )
 
 
 @dataclass(frozen=True)
@@ -322,7 +330,9 @@ def _map_contract_sha256() -> str:
     return _sha256(canonical_json(_map_contract()))
 
 
-def _prepare_source(source_input: Mapping[str, Any] | bytes | bytearray) -> tuple[dict[str, Any], str, str]:
+def _prepare_source(
+    source_input: Mapping[str, Any] | bytes | bytearray,
+) -> tuple[dict[str, Any], str, str]:
     if isinstance(source_input, (bytes, bytearray)):
         envelope = _decode_json(bytes(source_input), "source envelope")
     elif isinstance(source_input, Mapping):
@@ -330,7 +340,11 @@ def _prepare_source(source_input: Mapping[str, Any] | bytes | bytearray) -> tupl
     else:
         raise ProducerError("source input must be an approved envelope")
     _exact_keys(envelope, _SOURCE_ENVELOPE_KEYS, "source envelope")
-    if envelope["schema_version"] != SOURCE_ENVELOPE_SCHEMA or envelope["artifact_role"] != SOURCE_ENVELOPE_ROLE or envelope["status"] != SOURCE_ENVELOPE_STATUS:
+    if (
+        envelope["schema_version"] != SOURCE_ENVELOPE_SCHEMA
+        or envelope["artifact_role"] != SOURCE_ENVELOPE_ROLE
+        or envelope["status"] != SOURCE_ENVELOPE_STATUS
+    ):
         raise ProducerError("source envelope is not approved")
     approval = _exact_keys(envelope["approval"], _APPROVAL_KEYS, "source approval")
     if any(approval[field] is not True for field in _APPROVAL_KEYS):
@@ -339,12 +353,17 @@ def _prepare_source(source_input: Mapping[str, Any] | bytes | bytearray) -> tupl
         raise ProducerError("source view must be an object")
     try:
         bounded = kernel._bounded_source_view_input(envelope["source_view"])
-        normalized, _bindings, _days = kernel._validate_and_normalize_source_view(bounded)
+        normalized, _bindings, _days = kernel._validate_and_normalize_source_view(
+            bounded
+        )
     except Exception as exc:
         raise ProducerError("approved source failed frozen validation") from exc
     source_raw = kernel.canonical_json(normalized)
     source_hash = _sha256(source_raw)
-    if _sha(envelope["source_view_canonical_sha256"], "source view hash") != source_hash:
+    if (
+        _sha(envelope["source_view_canonical_sha256"], "source view hash")
+        != source_hash
+    ):
         raise ProducerError("source canonical hash mismatch")
     receipt_hash = _sha(envelope["source_receipt_sha256"], "source receipt hash")
     if canonical_json(envelope["source_view"]) != source_raw:
@@ -352,7 +371,9 @@ def _prepare_source(source_input: Mapping[str, Any] | bytes | bytearray) -> tupl
     return normalized, source_hash, receipt_hash
 
 
-def _decode_map(candidate_input: Mapping[str, Any] | bytes | bytearray) -> tuple[dict[str, Any], bytes]:
+def _decode_map(
+    candidate_input: Mapping[str, Any] | bytes | bytearray,
+) -> tuple[dict[str, Any], bytes]:
     if isinstance(candidate_input, (bytes, bytearray)):
         raw = bytes(candidate_input)
         return _decode_json(raw, "MAP candidate"), raw
@@ -399,31 +420,109 @@ def _check_map_predecessor(
         *_AUTHORITY_FIELDS,
     }
     _exact_keys(map_payload, expected, "MAP predecessor")
-    if map_payload["schema_version"] != MAP_CANDIDATE_SCHEMA or map_payload["artifact_role"] != MAP_CANDIDATE_ROLE or map_payload["status"] != MAP_STATUS:
+    if (
+        map_payload["schema_version"] != MAP_CANDIDATE_SCHEMA
+        or map_payload["artifact_role"] != MAP_CANDIDATE_ROLE
+        or map_payload["status"] != MAP_STATUS
+    ):
         raise ProducerError("MAP predecessor schema/role/status mismatch")
-    if map_payload["strategy_identity"] != MAP_STRATEGY_IDENTITY or map_payload["strategy_model_version_sha256"] != kernel.FROZEN_RULE_SHA256:
+    if (
+        map_payload["strategy_identity"] != MAP_STRATEGY_IDENTITY
+        or map_payload["strategy_model_version_sha256"] != kernel.FROZEN_RULE_SHA256
+    ):
         raise ProducerError("MAP predecessor strategy identity mismatch")
-    if map_payload["research_evidence_only"] is not True or map_payload["producer_identity_only"] is not True or any(map_payload[field] is not False for field in _AUTHORITY_FIELDS):
+    if (
+        map_payload["research_evidence_only"] is not True
+        or map_payload["producer_identity_only"] is not True
+        or any(map_payload[field] is not False for field in _AUTHORITY_FIELDS)
+    ):
         raise ProducerError("MAP predecessor is not unsigned research-only material")
-    identity = _exact_keys(map_payload["producer_identity"], {"producer_id", "producer_version", "producer_code_sha256", "kernel_id", "kernel_code_sha256"}, "MAP predecessor identity")
-    if identity["producer_id"] != MAP_PRODUCER_IDENTITY or identity["producer_version"] != MAP_PRODUCER_VERSION or identity["kernel_id"] != kernel.KERNEL_ID:
+    identity = _exact_keys(
+        map_payload["producer_identity"],
+        {
+            "producer_id",
+            "producer_version",
+            "producer_code_sha256",
+            "kernel_id",
+            "kernel_code_sha256",
+        },
+        "MAP predecessor identity",
+    )
+    if (
+        identity["producer_id"] != MAP_PRODUCER_IDENTITY
+        or identity["producer_version"] != MAP_PRODUCER_VERSION
+        or identity["kernel_id"] != kernel.KERNEL_ID
+    ):
         raise ProducerError("MAP predecessor producer identity mismatch")
-    if _sha(identity["producer_code_sha256"], "MAP producer code hash") != _map_producer_sha256():
+    if (
+        _sha(identity["producer_code_sha256"], "MAP producer code hash")
+        != _map_producer_sha256()
+    ):
         raise ProducerError("MAP predecessor producer digest mismatch")
-    if _sha(identity["kernel_code_sha256"], "MAP kernel code hash") != _module_sha256(kernel):
+    if _sha(identity["kernel_code_sha256"], "MAP kernel code hash") != _module_sha256(
+        kernel
+    ):
         raise ProducerError("MAP predecessor kernel digest mismatch")
-    contract = _exact_keys(map_payload["map_output_contract"], {"schema_version", "strategy_identity_field", "product_fields", "complete_product_set_required", "execution_fields_forbidden", "contract_sha256"}, "MAP output contract")
-    if contract["schema_version"] != MAP_OUTPUT_CONTRACT_SCHEMA or contract["contract_sha256"] != _map_contract_sha256() or contract["product_fields"] != list(_MAP_OUTPUT_FIELDS) or contract["execution_fields_forbidden"] is not True or contract["complete_product_set_required"] is not True:
+    contract = _exact_keys(
+        map_payload["map_output_contract"],
+        {
+            "schema_version",
+            "strategy_identity_field",
+            "product_fields",
+            "complete_product_set_required",
+            "execution_fields_forbidden",
+            "contract_sha256",
+        },
+        "MAP output contract",
+    )
+    if (
+        contract["schema_version"] != MAP_OUTPUT_CONTRACT_SCHEMA
+        or contract["contract_sha256"] != _map_contract_sha256()
+        or contract["product_fields"] != list(_MAP_OUTPUT_FIELDS)
+        or contract["execution_fields_forbidden"] is not True
+        or contract["complete_product_set_required"] is not True
+    ):
         raise ProducerError("MAP output contract mismatch")
-    map_source = _exact_keys(map_payload["source"], {"schema_version", "source_view_id", "source_view_canonical_sha256", "source_receipt_sha256", "research_as_of_official_day", "execution_day"}, "MAP source binding")
-    if map_source["schema_version"] != kernel.SOURCE_SCHEMA_VERSION or map_source["source_view_id"] != source["source_view_id"] or map_source["source_view_canonical_sha256"] != source_hash or map_source["source_receipt_sha256"] != receipt_hash:
+    map_source = _exact_keys(
+        map_payload["source"],
+        {
+            "schema_version",
+            "source_view_id",
+            "source_view_canonical_sha256",
+            "source_receipt_sha256",
+            "research_as_of_official_day",
+            "execution_day",
+        },
+        "MAP source binding",
+    )
+    if (
+        map_source["schema_version"] != kernel.SOURCE_SCHEMA_VERSION
+        or map_source["source_view_id"] != source["source_view_id"]
+        or map_source["source_view_canonical_sha256"] != source_hash
+        or map_source["source_receipt_sha256"] != receipt_hash
+    ):
         raise ProducerError("MAP predecessor/source mismatch")
     _sha(map_source["source_view_canonical_sha256"], "MAP source hash")
     _sha(map_source["source_receipt_sha256"], "MAP receipt hash")
     if map_payload["candidate_id"] != _map_candidate_id(source_hash):
         raise ProducerError("MAP predecessor candidate identity mismatch")
-    lineage = _exact_keys(map_payload["lineage"], {"source_view_canonical_sha256", "source_receipt_sha256", "lineage_sha256", "frozen_lineage"}, "MAP lineage")
-    if lineage["source_view_canonical_sha256"] != source_hash or lineage["source_receipt_sha256"] != receipt_hash or lineage["frozen_lineage"] != dict(kernel.LINEAGE) or lineage["lineage_sha256"] != _sha256(canonical_json(lineage["frozen_lineage"])):
+    lineage = _exact_keys(
+        map_payload["lineage"],
+        {
+            "source_view_canonical_sha256",
+            "source_receipt_sha256",
+            "lineage_sha256",
+            "frozen_lineage",
+        },
+        "MAP lineage",
+    )
+    if (
+        lineage["source_view_canonical_sha256"] != source_hash
+        or lineage["source_receipt_sha256"] != receipt_hash
+        or lineage["frozen_lineage"] != dict(kernel.LINEAGE)
+        or lineage["lineage_sha256"]
+        != _sha256(canonical_json(lineage["frozen_lineage"]))
+    ):
         raise ProducerError("MAP predecessor lineage mismatch")
     expected_signals: list[dict[str, Any]] = []
     products = {row["product"]: row for row in source["products"]}
@@ -431,7 +530,12 @@ def _check_map_predecessor(
     for product in kernel.PRODUCTS:
         signal, _roll = kernel._build_product_signal(products[product])
         signals[product] = signal
-    source_weights = kernel._cap_source_weights({product: float(signals[product]["raw_risk_score"]) for product in kernel.PRODUCTS})
+    source_weights = kernel._cap_source_weights(
+        {
+            product: float(signals[product]["raw_risk_score"])
+            for product in kernel.PRODUCTS
+        }
+    )
     for product in kernel.PRODUCTS:
         signal = signals[product]
         expected_signals.append(
@@ -512,7 +616,10 @@ def _build_candidate(
 ) -> dict[str, Any]:
     map_hash = _sha256(map_raw)
     map_rows = {row["product"]: row for row in map_payload["signals"]}
-    source_weights = {product: float(map_rows[product]["source_target_weight"]) for product in kernel.PRODUCTS}
+    source_weights = {
+        product: float(map_rows[product]["source_target_weight"])
+        for product in kernel.PRODUCTS
+    }
     buffered_weights = kernel._buffer_weights(source_weights)
     products = {row["product"]: row for row in source["products"]}
     unit_weights = {
@@ -523,20 +630,29 @@ def _build_candidate(
     }
     allocation = kernel._joint_integer_allocate(buffered_weights, unit_weights)
     execution_day = kernel._parse_date(source["execution_day"], "execution_day")
-    following_days = [day for day in source["official_days"] if day > source["execution_day"]]
+    following_days = [
+        day for day in source["official_days"] if day > source["execution_day"]
+    ]
     if not following_days:
         raise ProducerError("source has no following official day")
     following_day = kernel._parse_date(following_days[0], "following official day")
     targets: list[dict[str, Any]] = []
     for product in kernel.PRODUCTS:
         view = products[product]
-        main, _ranked = kernel._pit_main(product, execution_day, view["daily"][-1]["contracts"])
+        main, _ranked = kernel._pit_main(
+            product, execution_day, view["daily"][-1]["contracts"]
+        )
         exact_contract = str(main["exact_contract"])
         reference = view["execution_reference"]
         spec = view["contract_spec"]
-        if reference["exact_contract"] != exact_contract or spec["exact_contract"] != exact_contract:
+        if (
+            reference["exact_contract"] != exact_contract
+            or spec["exact_contract"] != exact_contract
+        ):
             raise ProducerError(f"{product} exact-contract splice")
-        last_day = kernel._parse_date(spec["official_last_trading_day"], "official last trading day")
+        last_day = kernel._parse_date(
+            spec["official_last_trading_day"], "official last trading day"
+        )
         dte = (last_day - execution_day).days
         following_dte = (last_day - following_day).days
         if dte < 11 or following_dte < 11:
@@ -653,9 +769,14 @@ def produce_c_fast_candidate(
         map_acceptance_keyring=map_acceptance_keyring,
     )
     map_hash = _sha256(map_raw)
-    if expected_map_sha256 is not None and map_hash != _sha(expected_map_sha256, "expected MAP predecessor hash"):
+    if expected_map_sha256 is not None and map_hash != _sha(
+        expected_map_sha256, "expected MAP predecessor hash"
+    ):
         raise ProducerError("MAP predecessor hash mismatch")
-    rejected = {_sha(value, "rejected predecessor hash") for value in rejected_predecessor_sha256}
+    rejected = {
+        _sha(value, "rejected predecessor hash")
+        for value in rejected_predecessor_sha256
+    }
     if map_hash in rejected:
         raise ProducerError("MAP predecessor replay is rejected by high-water input")
     _check_map_predecessor(map_payload, map_raw, source, source_hash, receipt_hash)
@@ -672,54 +793,203 @@ def produce_c_fast_candidate(
 
 def _validate_candidate_shape(payload: Mapping[str, Any]) -> None:
     expected = {
-        "schema_version", "artifact_role", "status", "candidate_id", "producer_identity",
-        "strategy_identity", "allocation_policy_identity", "policy_projection", "source",
-        "predecessor", "lineage", "targets", "allocation", "research_evidence_only",
-        "producer_identity_only", *_AUTHORITY_FIELDS,
+        "schema_version",
+        "artifact_role",
+        "status",
+        "candidate_id",
+        "producer_identity",
+        "strategy_identity",
+        "allocation_policy_identity",
+        "policy_projection",
+        "source",
+        "predecessor",
+        "lineage",
+        "targets",
+        "allocation",
+        "research_evidence_only",
+        "producer_identity_only",
+        *_AUTHORITY_FIELDS,
     }
     _exact_keys(payload, expected, "C_FAST candidate")
-    if payload["schema_version"] != CFAST_CANDIDATE_SCHEMA or payload["artifact_role"] != CFAST_CANDIDATE_ROLE or payload["status"] != CFAST_STATUS:
+    if (
+        payload["schema_version"] != CFAST_CANDIDATE_SCHEMA
+        or payload["artifact_role"] != CFAST_CANDIDATE_ROLE
+        or payload["status"] != CFAST_STATUS
+    ):
         raise ProducerError("C_FAST candidate schema/role/status mismatch")
-    if payload["strategy_identity"] != MAP_STRATEGY_IDENTITY or payload["allocation_policy_identity"] != CFAST_POLICY_IDENTITY:
+    if (
+        payload["strategy_identity"] != MAP_STRATEGY_IDENTITY
+        or payload["allocation_policy_identity"] != CFAST_POLICY_IDENTITY
+    ):
         raise ProducerError("C_FAST formal identity mismatch")
-    if payload["research_evidence_only"] is not True or payload["producer_identity_only"] is not True or any(payload[field] is not False for field in _AUTHORITY_FIELDS):
+    if (
+        payload["research_evidence_only"] is not True
+        or payload["producer_identity_only"] is not True
+        or any(payload[field] is not False for field in _AUTHORITY_FIELDS)
+    ):
         raise ProducerError("C_FAST candidate contains authority")
-    identity = _exact_keys(payload["producer_identity"], {"producer_id", "producer_version", "producer_code_sha256", "kernel_id", "kernel_code_sha256"}, "C_FAST producer identity")
-    if identity["producer_id"] != CFAST_PRODUCER_IDENTITY or identity["producer_version"] != CFAST_PRODUCER_VERSION or identity["kernel_id"] != kernel.KERNEL_ID:
+    identity = _exact_keys(
+        payload["producer_identity"],
+        {
+            "producer_id",
+            "producer_version",
+            "producer_code_sha256",
+            "kernel_id",
+            "kernel_code_sha256",
+        },
+        "C_FAST producer identity",
+    )
+    if (
+        identity["producer_id"] != CFAST_PRODUCER_IDENTITY
+        or identity["producer_version"] != CFAST_PRODUCER_VERSION
+        or identity["kernel_id"] != kernel.KERNEL_ID
+    ):
         raise ProducerError("C_FAST producer identity mismatch")
     _sha(identity["producer_code_sha256"], "C_FAST producer code hash")
     _sha(identity["kernel_code_sha256"], "C_FAST kernel code hash")
-    policy = _exact_keys(payload["policy_projection"], set(_policy_projection()), "C_FAST policy projection")
+    policy = _exact_keys(
+        payload["policy_projection"],
+        set(_policy_projection()),
+        "C_FAST policy projection",
+    )
     if policy != _policy_projection():
         raise ProducerError("C_FAST policy projection mismatch")
-    source = _exact_keys(payload["source"], {"schema_version", "source_view_id", "source_view_canonical_sha256", "source_receipt_sha256", "research_as_of_official_day", "execution_day"}, "C_FAST source binding")
+    source = _exact_keys(
+        payload["source"],
+        {
+            "schema_version",
+            "source_view_id",
+            "source_view_canonical_sha256",
+            "source_receipt_sha256",
+            "research_as_of_official_day",
+            "execution_day",
+        },
+        "C_FAST source binding",
+    )
     if source["schema_version"] != kernel.SOURCE_SCHEMA_VERSION:
         raise ProducerError("C_FAST source schema mismatch")
     _sha(source["source_view_canonical_sha256"], "C_FAST source hash")
     _sha(source["source_receipt_sha256"], "C_FAST receipt hash")
-    predecessor = _exact_keys(payload["predecessor"], {"artifact_role", "schema_version", "artifact_sha256", "candidate_id", "source_view_canonical_sha256", "producer_id"}, "C_FAST predecessor")
-    if predecessor["artifact_role"] != MAP_CANDIDATE_ROLE or predecessor["schema_version"] != MAP_CANDIDATE_SCHEMA or predecessor["producer_id"] != MAP_PRODUCER_IDENTITY:
+    predecessor = _exact_keys(
+        payload["predecessor"],
+        {
+            "artifact_role",
+            "schema_version",
+            "artifact_sha256",
+            "candidate_id",
+            "source_view_canonical_sha256",
+            "producer_id",
+        },
+        "C_FAST predecessor",
+    )
+    if (
+        predecessor["artifact_role"] != MAP_CANDIDATE_ROLE
+        or predecessor["schema_version"] != MAP_CANDIDATE_SCHEMA
+        or predecessor["producer_id"] != MAP_PRODUCER_IDENTITY
+    ):
         raise ProducerError("C_FAST predecessor role mismatch")
     _sha(predecessor["artifact_sha256"], "C_FAST predecessor hash")
-    if predecessor["source_view_canonical_sha256"] != source["source_view_canonical_sha256"]:
+    if (
+        predecessor["source_view_canonical_sha256"]
+        != source["source_view_canonical_sha256"]
+    ):
         raise ProducerError("C_FAST predecessor source mismatch")
-    lineage = _exact_keys(payload["lineage"], {"map_predecessor_sha256", "map_candidate_id", "source_view_canonical_sha256", "source_receipt_sha256", "lineage_sha256", "frozen_lineage"}, "C_FAST lineage")
-    if lineage["map_predecessor_sha256"] != predecessor["artifact_sha256"] or lineage["map_candidate_id"] != predecessor["candidate_id"] or lineage["source_view_canonical_sha256"] != source["source_view_canonical_sha256"] or lineage["source_receipt_sha256"] != source["source_receipt_sha256"] or lineage["frozen_lineage"] != dict(kernel.LINEAGE) or lineage["lineage_sha256"] != _sha256(canonical_json(lineage["frozen_lineage"])):
+    lineage = _exact_keys(
+        payload["lineage"],
+        {
+            "map_predecessor_sha256",
+            "map_candidate_id",
+            "source_view_canonical_sha256",
+            "source_receipt_sha256",
+            "lineage_sha256",
+            "frozen_lineage",
+        },
+        "C_FAST lineage",
+    )
+    if (
+        lineage["map_predecessor_sha256"] != predecessor["artifact_sha256"]
+        or lineage["map_candidate_id"] != predecessor["candidate_id"]
+        or lineage["source_view_canonical_sha256"]
+        != source["source_view_canonical_sha256"]
+        or lineage["source_receipt_sha256"] != source["source_receipt_sha256"]
+        or lineage["frozen_lineage"] != dict(kernel.LINEAGE)
+        or lineage["lineage_sha256"]
+        != _sha256(canonical_json(lineage["frozen_lineage"]))
+    ):
         raise ProducerError("C_FAST lineage mismatch")
     targets = payload["targets"]
-    if not isinstance(targets, list) or [row.get("product") for row in targets if isinstance(row, dict)] != list(kernel.PRODUCTS):
+    if not isinstance(targets, list) or [
+        row.get("product") for row in targets if isinstance(row, dict)
+    ] != list(kernel.PRODUCTS):
         raise ProducerError("C_FAST target product set/order mismatch")
-    target_fields = {"product", "sector", "trend_21_sign", "trend_63_sign", "trend_126_sign", "source_score", "vol60_annualized", "raw_risk_score", "source_target_weight", "buffered_target_weight", "exact_contract", "target_quantity", "reference_open_price", "multiplier", "price_tick", "pit_main_dte", "pit_main_following_official_day", "pit_main_following_dte"}
+    target_fields = {
+        "product",
+        "sector",
+        "trend_21_sign",
+        "trend_63_sign",
+        "trend_126_sign",
+        "source_score",
+        "vol60_annualized",
+        "raw_risk_score",
+        "source_target_weight",
+        "buffered_target_weight",
+        "exact_contract",
+        "target_quantity",
+        "reference_open_price",
+        "multiplier",
+        "price_tick",
+        "pit_main_dte",
+        "pit_main_following_official_day",
+        "pit_main_following_dte",
+    }
     for index, row in enumerate(targets):
         item = _exact_keys(row, target_fields, f"C_FAST target[{index}]")
-        if item["product"] != kernel.PRODUCTS[index] or item["sector"] != kernel.SECTOR_MAP[item["product"]]:
+        if (
+            item["product"] != kernel.PRODUCTS[index]
+            or item["sector"] != kernel.SECTOR_MAP[item["product"]]
+        ):
             raise ProducerError("C_FAST target product/sector mismatch")
-        for field in ("source_score", "vol60_annualized", "raw_risk_score", "source_target_weight", "buffered_target_weight", "reference_open_price", "price_tick"):
+        for field in (
+            "source_score",
+            "vol60_annualized",
+            "raw_risk_score",
+            "source_target_weight",
+            "buffered_target_weight",
+            "reference_open_price",
+            "price_tick",
+        ):
             _finite(item[field], f"C_FAST target {field}")
-        if isinstance(item["target_quantity"], bool) or not isinstance(item["target_quantity"], int):
+        if isinstance(item["target_quantity"], bool) or not isinstance(
+            item["target_quantity"], int
+        ):
             raise ProducerError("C_FAST target quantity must be an integer")
-    allocation = _exact_keys(payload["allocation"], {"buffered_target_sha256", "virtual_nav_cny", "algorithm", "neighbourhood_radius_lots", "beam_width", "net_error_penalty", "integer_limits_strict", "absolute_lot_cap", "raw_quantities", "quantities", "realized_weights", "squared_target_error", "residual_net", "objective", "gross", "sector_gross", "states_retained"}, "C_FAST allocation")
-    if allocation["algorithm"] != "FINITE_NEIGHBOURHOOD_BEAM_V1" or allocation["virtual_nav_cny"] != kernel.VIRTUAL_NAV_CNY:
+    allocation = _exact_keys(
+        payload["allocation"],
+        {
+            "buffered_target_sha256",
+            "virtual_nav_cny",
+            "algorithm",
+            "neighbourhood_radius_lots",
+            "beam_width",
+            "net_error_penalty",
+            "integer_limits_strict",
+            "absolute_lot_cap",
+            "raw_quantities",
+            "quantities",
+            "realized_weights",
+            "squared_target_error",
+            "residual_net",
+            "objective",
+            "gross",
+            "sector_gross",
+            "states_retained",
+        },
+        "C_FAST allocation",
+    )
+    if (
+        allocation["algorithm"] != "FINITE_NEIGHBOURHOOD_BEAM_V1"
+        or allocation["virtual_nav_cny"] != kernel.VIRTUAL_NAV_CNY
+    ):
         raise ProducerError("C_FAST allocator identity mismatch")
     _sha(allocation["buffered_target_sha256"], "buffered target hash")
 
@@ -759,10 +1029,15 @@ def verify_c_fast_candidate(
         raise ProducerError("C_FAST candidate must be canonical JSON")
     _validate_candidate_shape(payload)
     predecessor_hash = payload["predecessor"]["artifact_sha256"]
-    rejected = {_sha(value, "rejected predecessor hash") for value in rejected_predecessor_sha256}
+    rejected = {
+        _sha(value, "rejected predecessor hash")
+        for value in rejected_predecessor_sha256
+    }
     if predecessor_hash in rejected:
         raise ProducerError("C_FAST predecessor replay is rejected by high-water input")
-    if expected_map_sha256 is not None and predecessor_hash != _sha(expected_map_sha256, "expected MAP predecessor hash"):
+    if expected_map_sha256 is not None and predecessor_hash != _sha(
+        expected_map_sha256, "expected MAP predecessor hash"
+    ):
         raise ProducerError("C_FAST predecessor mismatch")
     expected = produce_c_fast_candidate(
         map_candidate_input,
@@ -773,7 +1048,9 @@ def verify_c_fast_candidate(
         rejected_predecessor_sha256=rejected_predecessor_sha256,
     )
     if expected.raw != raw:
-        raise ProducerError("C_FAST candidate failed deterministic replay or was tampered")
+        raise ProducerError(
+            "C_FAST candidate failed deterministic replay or was tampered"
+        )
     return CFastCandidateResult(
         raw=raw,
         payload=payload,
@@ -803,7 +1080,11 @@ def _read_pinned_file(path: Path) -> bytes:
         raise ProducerError("input file cannot be opened safely") from exc
     try:
         opened = os.fstat(fd)
-        if (opened.st_dev, opened.st_ino, opened.st_size) != (before.st_dev, before.st_ino, before.st_size):
+        if (opened.st_dev, opened.st_ino, opened.st_size) != (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+        ):
             raise ProducerError("input changed before read")
         chunks: list[bytes] = []
         total = 0
@@ -817,7 +1098,15 @@ def _read_pinned_file(path: Path) -> bytes:
                 raise ProducerError("input exceeds byte limit")
         after = os.fstat(fd)
         current = path.lstat()
-        if (after.st_dev, after.st_ino, after.st_size) != (opened.st_dev, opened.st_ino, opened.st_size) or (current.st_dev, current.st_ino, current.st_size) != (before.st_dev, before.st_ino, before.st_size):
+        if (after.st_dev, after.st_ino, after.st_size) != (
+            opened.st_dev,
+            opened.st_ino,
+            opened.st_size,
+        ) or (current.st_dev, current.st_ino, current.st_size) != (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+        ):
             raise ProducerError("input changed during read")
         return b"".join(chunks)
     finally:
@@ -899,10 +1188,14 @@ def _create_only_atomic(path: Path, raw: bytes) -> None:
         except ProducerError:
             raise
         except FileExistsError as exc:
-            raise ProducerError("output already exists; overwrite is forbidden") from exc
+            raise ProducerError(
+                "output already exists; overwrite is forbidden"
+            ) from exc
         except OSError as exc:
             if exc.errno == errno.EEXIST:
-                raise ProducerError("output already exists; overwrite is forbidden") from exc
+                raise ProducerError(
+                    "output already exists; overwrite is forbidden"
+                ) from exc
             raise ProducerError("atomic candidate publish failed") from exc
     finally:
         if fd >= 0:
@@ -921,7 +1214,11 @@ def _cli_json(payload: Mapping[str, Any]) -> None:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="offline C_FAST allocation producer")
-    parser.add_argument("--version", action="store_true", help="print the machine-readable producer version")
+    parser.add_argument(
+        "--version",
+        action="store_true",
+        help="print the machine-readable producer version",
+    )
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("health", help="print liveness for the batch image")
     sub.add_parser("ready", help="print readiness for the batch image")
@@ -946,17 +1243,38 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.version:
-            _cli_json({"status": "version", "producer_identity": CFAST_PRODUCER_IDENTITY, "version": CFAST_PRODUCER_VERSION, **_CAPABILITY_DENIALS})
+            _cli_json(
+                {
+                    "status": "version",
+                    "producer_identity": CFAST_PRODUCER_IDENTITY,
+                    "version": CFAST_PRODUCER_VERSION,
+                    **_CAPABILITY_DENIALS,
+                }
+            )
             return 0
         if args.command is None:
             parser.error("a command is required")
         if args.command == "health":
-            _cli_json({"status": "ok", "producer_identity": CFAST_PRODUCER_IDENTITY, "version": CFAST_PRODUCER_VERSION, **_CAPABILITY_DENIALS})
+            _cli_json(
+                {
+                    "status": "ok",
+                    "producer_identity": CFAST_PRODUCER_IDENTITY,
+                    "version": CFAST_PRODUCER_VERSION,
+                    **_CAPABILITY_DENIALS,
+                }
+            )
             return 0
         if args.command == "ready":
             _module_sha256(kernel)
             _producer_sha256()
-            _cli_json({"status": "ready", "producer_identity": CFAST_PRODUCER_IDENTITY, "version": CFAST_PRODUCER_VERSION, **_CAPABILITY_DENIALS})
+            _cli_json(
+                {
+                    "status": "ready",
+                    "producer_identity": CFAST_PRODUCER_IDENTITY,
+                    "version": CFAST_PRODUCER_VERSION,
+                    **_CAPABILITY_DENIALS,
+                }
+            )
             return 0
         map_raw = _read_pinned_file(args.map_input)
         source_raw = _read_pinned_file(args.source)
@@ -973,7 +1291,9 @@ def main(argv: list[str] | None = None) -> int:
                 ),
             )
         except ContractError as exc:
-            raise ProducerError("MAP acceptance keyring is invalid or unpinned") from exc
+            raise ProducerError(
+                "MAP acceptance keyring is invalid or unpinned"
+            ) from exc
         result = produce_c_fast_candidate(
             map_raw,
             source_raw,
@@ -983,10 +1303,26 @@ def main(argv: list[str] | None = None) -> int:
             rejected_predecessor_sha256=args.reject_predecessor_sha256,
         )
         _create_only_atomic(args.output, result.raw)
-        _cli_json({"status": "created", "producer_identity": CFAST_PRODUCER_IDENTITY, "version": CFAST_PRODUCER_VERSION, "candidate_id": result.payload["candidate_id"], "artifact_sha256": result.artifact_sha256, "map_predecessor_sha256": result.map_predecessor_sha256, "source_view_canonical_sha256": result.source_view_canonical_sha256})
+        _cli_json(
+            {
+                "status": "created",
+                "producer_identity": CFAST_PRODUCER_IDENTITY,
+                "version": CFAST_PRODUCER_VERSION,
+                "candidate_id": result.payload["candidate_id"],
+                "artifact_sha256": result.artifact_sha256,
+                "map_predecessor_sha256": result.map_predecessor_sha256,
+                "source_view_canonical_sha256": result.source_view_canonical_sha256,
+            }
+        )
         return 0
     except ProducerError as exc:
-        _cli_json({"status": "not_ready", "producer_identity": CFAST_PRODUCER_IDENTITY, "error": str(exc)})
+        _cli_json(
+            {
+                "status": "not_ready",
+                "producer_identity": CFAST_PRODUCER_IDENTITY,
+                "error": str(exc),
+            }
+        )
         return 2
 
 

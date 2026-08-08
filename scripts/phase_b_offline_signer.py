@@ -329,17 +329,35 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", type=Path)
     args = parser.parse_args(argv)
     if args.version or args.health or args.ready:
-        print(json.dumps({
-            "service": "signing-authority",
-            "version": "phase-b-signing-authority-v1",
-            "status": "ready" if args.ready else "ok",
-            "private_key_access": False,
-            "trade_rpc_access": False,
-            "network_endpoint": None,
-        }, sort_keys=True))
+        print(
+            json.dumps(
+                {
+                    "service": "signing-authority",
+                    "version": "phase-b-signing-authority-v1",
+                    "status": "ready" if args.ready else "ok",
+                    "private_key_access": False,
+                    "trade_rpc_access": False,
+                    "network_endpoint": None,
+                },
+                sort_keys=True,
+            )
+        )
         return 0
-    if any(value is None for value in (args.request, args.request_sha256, args.keyring, args.keyring_sha256, args.key_fd, args.key_sha256, args.output)):
-        parser.error("request, request-sha256, keyring, keyring-sha256, key-fd, key-sha256 and output are required for sign")
+    if any(
+        value is None
+        for value in (
+            args.request,
+            args.request_sha256,
+            args.keyring,
+            args.keyring_sha256,
+            args.key_fd,
+            args.key_sha256,
+            args.output,
+        )
+    ):
+        parser.error(
+            "request, request-sha256, keyring, keyring-sha256, key-fd, key-sha256 and output are required for sign"
+        )
     try:
         request = _read_canonical(args.request, expected_sha256=args.request_sha256)
         domain = request.get("domain")

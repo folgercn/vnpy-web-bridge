@@ -61,7 +61,9 @@ def _ensure_parent(path: Path) -> tuple[Path, os.stat_result]:
     try:
         info = parent.lstat()
     except OSError as exc:
-        raise DurableCorruptionError(f"durable parent is unavailable: {parent}") from exc
+        raise DurableCorruptionError(
+            f"durable parent is unavailable: {parent}"
+        ) from exc
     if (
         stat.S_ISLNK(info.st_mode)
         or not stat.S_ISDIR(info.st_mode)
@@ -123,7 +125,9 @@ def _open_parent(path: Path) -> tuple[int, os.stat_result]:
     return descriptor, current
 
 
-def _strict_json_line(raw: str, path: Path, line_number: int | None = None) -> dict[str, object]:
+def _strict_json_line(
+    raw: str, path: Path, line_number: int | None = None
+) -> dict[str, object]:
     suffix = f":{line_number}" if line_number is not None else ""
     if not raw.endswith("\n"):
         raise DurableCorruptionError(f"noncanonical JSONL at {path}{suffix}")
@@ -180,9 +184,15 @@ def atomic_write_json(path: Path, value: Mapping[str, object]) -> None:
             existing = os.stat(destination, dir_fd=parent_fd, follow_symlinks=False)
         except FileNotFoundError:
             existing = None
-        if existing is not None and (stat.S_ISLNK(existing.st_mode) or not stat.S_ISREG(existing.st_mode)):
-            raise DurableCorruptionError(f"checkpoint destination is not a regular file: {path}")
-        os.replace(temporary_name, destination, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        if existing is not None and (
+            stat.S_ISLNK(existing.st_mode) or not stat.S_ISREG(existing.st_mode)
+        ):
+            raise DurableCorruptionError(
+                f"checkpoint destination is not a regular file: {path}"
+            )
+        os.replace(
+            temporary_name, destination, src_dir_fd=parent_fd, dst_dir_fd=parent_fd
+        )
         os.fsync(parent_fd)
     except OSError as exc:
         raise DurableCorruptionError(f"checkpoint write failed: {path}") from exc
@@ -221,7 +231,9 @@ class AtomicCheckpoint:
             fd = -1
             try:
                 try:
-                    destination = os.stat(self.path.name, dir_fd=parent_fd, follow_symlinks=False)
+                    destination = os.stat(
+                        self.path.name, dir_fd=parent_fd, follow_symlinks=False
+                    )
                 except FileNotFoundError:
                     return dict(self.default)
                 if stat.S_ISLNK(destination.st_mode):
@@ -310,7 +322,9 @@ class AppendOnlyJsonl:
             parent_fd, _ = _open_parent(self.path)
             fd = -1
             try:
-                flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_CLOEXEC", 0)
+                flags = (
+                    os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_CLOEXEC", 0)
+                )
                 if hasattr(os, "O_NOFOLLOW"):
                     flags |= os.O_NOFOLLOW
                 fd = os.open(self.path.name, flags, 0o600, dir_fd=parent_fd)
@@ -322,17 +336,23 @@ class AppendOnlyJsonl:
                     or info.st_nlink != 1
                     or info.st_mode & 0o077
                 ):
-                    raise DurableCorruptionError(f"journal is not a regular file: {self.path}")
+                    raise DurableCorruptionError(
+                        f"journal is not a regular file: {self.path}"
+                    )
                 view = memoryview(line)
                 while view:
                     written = os.write(fd, view)
                     if written <= 0:
-                        raise DurableCorruptionError(f"journal write failed: {self.path}")
+                        raise DurableCorruptionError(
+                            f"journal write failed: {self.path}"
+                        )
                     view = view[written:]
                 os.fsync(fd)
                 os.fsync(parent_fd)
             except OSError as exc:
-                raise DurableCorruptionError(f"journal write failed: {self.path}") from exc
+                raise DurableCorruptionError(
+                    f"journal write failed: {self.path}"
+                ) from exc
             finally:
                 if fd >= 0:
                     os.close(fd)
@@ -347,7 +367,9 @@ class AppendOnlyJsonl:
             parent_fd, _ = _open_parent(self.path)
             fd = -1
             try:
-                flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_CLOEXEC", 0)
+                flags = (
+                    os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_CLOEXEC", 0)
+                )
                 if hasattr(os, "O_NOFOLLOW"):
                     flags |= os.O_NOFOLLOW
                 fd = os.open(self.path.name, flags, 0o600, dir_fd=parent_fd)
@@ -359,11 +381,15 @@ class AppendOnlyJsonl:
                     or info.st_nlink != 1
                     or info.st_mode & 0o077
                 ):
-                    raise DurableCorruptionError(f"journal is not a regular file: {self.path}")
+                    raise DurableCorruptionError(
+                        f"journal is not a regular file: {self.path}"
+                    )
                 os.fsync(fd)
                 os.fsync(parent_fd)
             except OSError as exc:
-                raise DurableCorruptionError(f"journal initialization failed: {self.path}") from exc
+                raise DurableCorruptionError(
+                    f"journal initialization failed: {self.path}"
+                ) from exc
             finally:
                 if fd >= 0:
                     os.close(fd)
@@ -393,7 +419,9 @@ class AppendOnlyJsonl:
                 or info.st_nlink != 1
                 or info.st_mode & 0o077
             ):
-                raise DurableCorruptionError(f"journal is not a regular file: {self.path}")
+                raise DurableCorruptionError(
+                    f"journal is not a regular file: {self.path}"
+                )
             raw = bytearray()
             while True:
                 chunk = os.read(fd, 1024 * 1024)
@@ -444,8 +472,12 @@ class AppendOnlySet:
                 prior = records.get(identity)
                 if prior is not None:
                     if prior != record:
-                        raise DuplicateRecordError(f"append-only set identity reused: {identity}")
-                    raise DurableCorruptionError(f"append-only set identity duplicated: {identity}")
+                        raise DuplicateRecordError(
+                            f"append-only set identity reused: {identity}"
+                        )
+                    raise DurableCorruptionError(
+                        f"append-only set identity duplicated: {identity}"
+                    )
                 values.add(identity)
                 records[identity] = dict(record)
             self._values = values
@@ -463,7 +495,9 @@ class AppendOnlySet:
             if text in values:
                 expected = {self.identity_key: text, **metadata}
                 if self._records is None or self._records[text] != expected:
-                    raise DuplicateRecordError(f"append-only set identity conflict: {text}")
+                    raise DuplicateRecordError(
+                        f"append-only set identity conflict: {text}"
+                    )
                 return False
             record = {self.identity_key: text, **metadata}
             self.journal.append(record)
@@ -578,7 +612,9 @@ class DurableVerifiedTickStream:
         try:
             import fcntl
         except ImportError as exc:  # pragma: no cover - Phase B is Unix-only
-            raise DurableCorruptionError("durable process locking is unavailable") from exc
+            raise DurableCorruptionError(
+                "durable process locking is unavailable"
+            ) from exc
         parent_fd, _ = _open_parent(self._lock_path)
         descriptor = -1
         try:
@@ -611,7 +647,10 @@ class DurableVerifiedTickStream:
             expected_seq = 1
             source_events: dict[str, str] = {}
             for record in self.journal.records():
-                if set(record) != {"record_type", "tick"} or record.get("record_type") != "verified_tick":
+                if (
+                    set(record) != {"record_type", "tick"}
+                    or record.get("record_type") != "verified_tick"
+                ):
                     raise DurableCorruptionError(
                         "unexpected record type in verified tick stream"
                     )
@@ -650,9 +689,15 @@ class DurableVerifiedTickStream:
             max_seq = expected_seq - 1
             watermark_seq = int(state.get("last_ingest_seq") or 0)
             watermark_hash = str(state.get("last_event_hash") or "")
-            expected_hash = max(index.values(), key=lambda item: item.ingest_seq).event_hash if index else ""
+            expected_hash = (
+                max(index.values(), key=lambda item: item.ingest_seq).event_hash
+                if index
+                else ""
+            )
             if watermark_seq > max_seq:
-                raise DurableCorruptionError("verified tick watermark is ahead of journal")
+                raise DurableCorruptionError(
+                    "verified tick watermark is ahead of journal"
+                )
             if watermark_seq < max_seq:
                 # A crash after the journal fsync and before the checkpoint
                 # fsync is recoverable from the strictly ordered journal.
@@ -679,7 +724,12 @@ class DurableVerifiedTickStream:
             tick = index.get(ingest_id)
             if tick is None:
                 raise DurableCorruptionError("acknowledgement references unknown tick")
-            if set(record) != {"ingest_id", "stream_generation", "ingest_seq", "event_hash"}:
+            if set(record) != {
+                "ingest_id",
+                "stream_generation",
+                "ingest_seq",
+                "event_hash",
+            }:
                 raise DurableCorruptionError("acknowledgement fields are invalid")
             if (
                 record.get("stream_generation") != tick.stream_generation
@@ -762,7 +812,11 @@ class DurableVerifiedTickStream:
         sequence = int(ingest_seq)
         with self._lock:
             return next(
-                (tick for tick in self._load_index().values() if tick.ingest_seq == sequence),
+                (
+                    tick
+                    for tick in self._load_index().values()
+                    if tick.ingest_seq == sequence
+                ),
                 None,
             )
 
@@ -807,7 +861,9 @@ class DurableVerifiedTickStream:
                 or persisted.ingest_seq != tick.ingest_seq
                 or persisted.event_hash != tick.event_hash
             ):
-                raise DurableCorruptionError("acknowledgement does not bind to persisted tick")
+                raise DurableCorruptionError(
+                    "acknowledgement does not bind to persisted tick"
+                )
             return self.acknowledgements.add(
                 tick.ingest_id,
                 stream_generation=tick.stream_generation,
@@ -843,13 +899,17 @@ class AppendOnlyEvidenceLog:
                 try:
                     evidence = ExecutionQualityEvidence.from_dict(record)
                 except (TypeError, ValueError) as exc:
-                    raise DurableCorruptionError("invalid execution-quality evidence") from exc
+                    raise DurableCorruptionError(
+                        "invalid execution-quality evidence"
+                    ) from exc
                 identity = evidence.evidence_id
                 digest = evidence.evidence_hash
                 if identity in index and index[identity] != digest:
                     raise DuplicateRecordError(f"evidence identity reused: {identity}")
                 if identity in index:
-                    raise DurableCorruptionError(f"evidence identity duplicated: {identity}")
+                    raise DurableCorruptionError(
+                        f"evidence identity duplicated: {identity}"
+                    )
                 index[identity] = digest
             self._index = index
         return self._index
@@ -892,7 +952,9 @@ class AppendOnlyEvidenceLog:
                     try:
                         return ExecutionQualityEvidence.from_dict(record)
                     except (TypeError, ValueError) as exc:
-                        raise DurableCorruptionError("invalid execution-quality evidence") from exc
+                        raise DurableCorruptionError(
+                            "invalid execution-quality evidence"
+                        ) from exc
         return None
 
 

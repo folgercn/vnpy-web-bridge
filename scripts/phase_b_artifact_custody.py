@@ -55,10 +55,21 @@ def _schemas(directory: Path | None) -> dict[str, dict[str, Any]]:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="phase-b-artifact-custody")
     parser.add_argument("--root", default=os.getenv("PHASE_B_CUSTODY_ROOT"))
-    parser.add_argument("--writer-id", default=os.getenv("PHASE_B_CUSTODY_WRITER_ID", "artifact-custody"))
-    parser.add_argument("--writer-epoch", type=int, default=_writer_epoch_from_environment())
-    parser.add_argument("--schema-dir", type=Path, default=Path(os.getenv("PHASE_B_SCHEMA_DIR", "docs/schemas")))
-    parser.add_argument("--projection-dir", default=os.getenv("PHASE_B_CUSTODY_PROJECTION_DIR"))
+    parser.add_argument(
+        "--writer-id",
+        default=os.getenv("PHASE_B_CUSTODY_WRITER_ID", "artifact-custody"),
+    )
+    parser.add_argument(
+        "--writer-epoch", type=int, default=_writer_epoch_from_environment()
+    )
+    parser.add_argument(
+        "--schema-dir",
+        type=Path,
+        default=Path(os.getenv("PHASE_B_SCHEMA_DIR", "docs/schemas")),
+    )
+    parser.add_argument(
+        "--projection-dir", default=os.getenv("PHASE_B_CUSTODY_PROJECTION_DIR")
+    )
     sub = parser.add_subparsers(dest="command", required=True)
     for name in ("version", "health", "ready", "audit", "run"):
         sub.add_parser(name)
@@ -79,7 +90,9 @@ def _parser() -> argparse.ArgumentParser:
     signed.add_argument("--correlation-id", required=True)
     signed.add_argument("--expected-version", required=True, type=int)
     record = sub.add_parser("record")
-    record.add_argument("--receipt-type", required=True, choices=("install", "consume", "revoke"))
+    record.add_argument(
+        "--receipt-type", required=True, choices=("install", "consume", "revoke")
+    )
     record.add_argument("--artifact-id", required=True)
     record.add_argument("--actor-id", required=True)
     record.add_argument("--idempotency-key", required=True)
@@ -102,8 +115,16 @@ def _projection_payload(*, audit: dict[str, Any]) -> dict[str, Any]:
     """Build a typed, explicitly non-authoritative custody projection."""
 
     payload = {
-        "health": {"service_id": "artifact-custody", "status": "healthy", "ready": True},
-        "readiness": {"service_id": "artifact-custody", "status": "ready", "ready": True},
+        "health": {
+            "service_id": "artifact-custody",
+            "status": "healthy",
+            "ready": True,
+        },
+        "readiness": {
+            "service_id": "artifact-custody",
+            "status": "ready",
+            "ready": True,
+        },
         "version": {
             "service_id": "artifact-custody",
             "contract_versions": ["phase_b_worker_contract_v1"],
@@ -148,7 +169,12 @@ def _publish_projection(directory: str | None, *, audit: dict[str, Any]) -> None
     os.chmod(root, 0o700)
     target = root / "artifact-custody.json"
     temporary = root / f".artifact-custody.{uuid.uuid4().hex}.tmp"
-    raw = (json.dumps(_projection_payload(audit=audit), sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+    raw = (
+        json.dumps(
+            _projection_payload(audit=audit), sort_keys=True, separators=(",", ":")
+        )
+        + "\n"
+    ).encode("utf-8")
     fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         view = memoryview(raw)
@@ -207,13 +233,19 @@ def main(argv: list[str] | None = None) -> int:
         print("phase-b-artifact-custody-v1")
         return 0
     if args.command == "health":
-        print(json.dumps({
-            "service": "artifact-custody",
-            "version": "phase-b-artifact-custody-v1",
-            "status": "ok",
-            "private_key_access": False,
-            "trade_rpc_access": False,
-        }, sort_keys=True, separators=(",", ":")))
+        print(
+            json.dumps(
+                {
+                    "service": "artifact-custody",
+                    "version": "phase-b-artifact-custody-v1",
+                    "status": "ok",
+                    "private_key_access": False,
+                    "trade_rpc_access": False,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
         return 0
     if args.command == "ready":
         try:
@@ -226,10 +258,16 @@ def main(argv: list[str] | None = None) -> int:
         print("CUSTODY_ROOT_REQUIRED", file=sys.stderr)
         return 2
     try:
-        if args.command in {"audit", "run", "publish", "publish-signed", "record"} and args.writer_epoch is None:
+        if (
+            args.command in {"audit", "run", "publish", "publish-signed", "record"}
+            and args.writer_epoch is None
+        ):
             raise CustodyError("CUSTODY_WRITER_EPOCH_REQUIRED")
         registry = _schemas(args.schema_dir)
-        if args.command in {"audit", "run", "publish", "publish-signed", "record"} and not registry:
+        if (
+            args.command in {"audit", "run", "publish", "publish-signed", "record"}
+            and not registry
+        ):
             raise CustodyError("CUSTODY_SCHEMA_REGISTRY_REQUIRED")
         with ArtifactCustody(
             args.root,
@@ -238,15 +276,30 @@ def main(argv: list[str] | None = None) -> int:
             schema_registry=registry,
         ) as custody:
             if args.command in {"ready", "audit"}:
-                payload = {"service": "artifact-custody", "version": "phase-b-artifact-custody-v1", "status": "ready", **custody.audit()}
+                payload = {
+                    "service": "artifact-custody",
+                    "version": "phase-b-artifact-custody-v1",
+                    "status": "ready",
+                    **custody.audit(),
+                }
             elif args.command == "run":
-                payload = {"service": "artifact-custody", "version": "phase-b-artifact-custody-v1", "status": "ready", **custody.audit()}
+                payload = {
+                    "service": "artifact-custody",
+                    "version": "phase-b-artifact-custody-v1",
+                    "status": "ready",
+                    **custody.audit(),
+                }
                 _publish_projection(args.projection_dir, audit=custody.audit())
-                print(json.dumps(payload, sort_keys=True, separators=(",", ":")), flush=True)
+                print(
+                    json.dumps(payload, sort_keys=True, separators=(",", ":")),
+                    flush=True,
+                )
                 stop = False
+
                 def _stop(*_signals: object) -> None:
                     nonlocal stop
                     stop = True
+
                 signal.signal(signal.SIGTERM, _stop)
                 signal.signal(signal.SIGINT, _stop)
                 while not stop:

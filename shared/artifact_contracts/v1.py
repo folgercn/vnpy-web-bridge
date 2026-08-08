@@ -54,7 +54,11 @@ _ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T")
 
 
 def _string(value: Any, code: str, *, max_bytes: int = 4096) -> str:
-    if not isinstance(value, str) or not value or len(value.encode("utf-8")) > max_bytes:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value.encode("utf-8")) > max_bytes
+    ):
         raise ContractError(code)
     return value
 
@@ -114,7 +118,9 @@ def _lineage(value: Any) -> list[str]:
     return result
 
 
-def payload_hashes(payload: Any, *, raw_payload: bytes | None = None) -> tuple[str, str, bytes]:
+def payload_hashes(
+    payload: Any, *, raw_payload: bytes | None = None
+) -> tuple[str, str, bytes]:
     canonical = canonical_json(payload)
     raw = canonical_json_line(payload) if raw_payload is None else raw_payload
     if not raw or len(raw) > 16 * 1024 * 1024:
@@ -215,9 +221,19 @@ def validate_artifact_envelope(payload: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(payload, Mapping):
         raise ContractError("ARTIFACT_ENVELOPE_ROOT_INVALID")
     if set(payload) != {
-        "schema_version", "artifact_id", "artifact_type", "trust_domain",
-        "producer_id", "producer_version", "schema_ref", "canonical_sha256",
-        "raw_sha256", "predecessor_refs", "lineage", "generated_at", "scope",
+        "schema_version",
+        "artifact_id",
+        "artifact_type",
+        "trust_domain",
+        "producer_id",
+        "producer_version",
+        "schema_ref",
+        "canonical_sha256",
+        "raw_sha256",
+        "predecessor_refs",
+        "lineage",
+        "generated_at",
+        "scope",
         "payload",
     }:
         raise ContractError("ARTIFACT_ENVELOPE_FIELDS_INVALID")
@@ -226,14 +242,20 @@ def validate_artifact_envelope(payload: Mapping[str, Any]) -> dict[str, Any]:
     artifact_type = _id(payload.get("artifact_type"), "ARTIFACT_TYPE_INVALID")
     trust_domain = _id(payload.get("trust_domain"), "ARTIFACT_TRUST_DOMAIN_INVALID")
     producer_id = _id(payload.get("producer_id"), "ARTIFACT_PRODUCER_ID_INVALID")
-    producer_version = _id(payload.get("producer_version"), "ARTIFACT_PRODUCER_VERSION_INVALID")
+    producer_version = _id(
+        payload.get("producer_version"), "ARTIFACT_PRODUCER_VERSION_INVALID"
+    )
     schema_ref = _id(payload.get("schema_ref"), "ARTIFACT_SCHEMA_REF_INVALID")
     artifact_id = _id(payload.get("artifact_id"), "ARTIFACT_ID_INVALID")
-    canonical_sha = _sha(payload.get("canonical_sha256"), "ARTIFACT_CANONICAL_HASH_INVALID")
+    canonical_sha = _sha(
+        payload.get("canonical_sha256"), "ARTIFACT_CANONICAL_HASH_INVALID"
+    )
     raw_sha = _sha(payload.get("raw_sha256"), "ARTIFACT_RAW_HASH_INVALID")
     predecessors = _predecessors(payload.get("predecessor_refs"))
     lineage = _lineage(payload.get("lineage"))
-    generated_at = _timestamp(payload.get("generated_at"), "ARTIFACT_GENERATED_AT_INVALID")
+    generated_at = _timestamp(
+        payload.get("generated_at"), "ARTIFACT_GENERATED_AT_INVALID"
+    )
     scope = payload.get("scope")
     if not isinstance(scope, Mapping):
         raise ContractError("ARTIFACT_SCOPE_INVALID")
@@ -294,7 +316,8 @@ def build_publish_request(
         raise ContractError("ARTIFACT_EXPECTED_VERSION_INVALID")
     return {
         "schema_version": ARTIFACT_PUBLISH_REQUEST_SCHEMA_VERSION,
-        "request_id": "publish-request-" + hashlib.sha256(
+        "request_id": "publish-request-"
+        + hashlib.sha256(
             canonical_json(
                 {
                     "artifact_id": envelope["artifact_id"],
@@ -407,11 +430,7 @@ def validate_receipt(payload: Mapping[str, Any]) -> dict[str, Any]:
     _id(receipt.get("correlation_id"), "RECEIPT_CORRELATION_INVALID")
     expected = receipt.get("expected_version")
     resulting = receipt.get("resulting_version")
-    if (
-        not isinstance(expected, int)
-        or isinstance(expected, bool)
-        or expected < 0
-    ):
+    if not isinstance(expected, int) or isinstance(expected, bool) or expected < 0:
         raise ContractError("RECEIPT_EXPECTED_VERSION_INVALID")
     if (
         not isinstance(resulting, int)

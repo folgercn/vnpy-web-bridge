@@ -92,7 +92,13 @@ _SOURCE_ENVELOPE_KEYS = frozenset(
     }
 )
 _APPROVAL_KEYS = frozenset(
-    {"approved", "immutable", "receipt_verified", "custody_verified", "lineage_verified"}
+    {
+        "approved",
+        "immutable",
+        "receipt_verified",
+        "custody_verified",
+        "lineage_verified",
+    }
 )
 
 
@@ -168,7 +174,9 @@ def _exact_keys(value: Any, expected: Iterable[str], label: str) -> dict[str, An
     if actual != expected_set:
         missing = sorted(expected_set - actual)
         extra = sorted(actual - expected_set)
-        raise ProducerError(f"{label} field set mismatch missing={missing} extra={extra}")
+        raise ProducerError(
+            f"{label} field set mismatch missing={missing} extra={extra}"
+        )
     return value
 
 
@@ -252,7 +260,9 @@ def build_approved_source_fixture(
         raise ProducerError("typed source must be a mapping or JSON bytes")
     try:
         bounded = kernel._bounded_source_view_input(source)
-        normalized, _bindings, _days = kernel._validate_and_normalize_source_view(bounded)
+        normalized, _bindings, _days = kernel._validate_and_normalize_source_view(
+            bounded
+        )
     except Exception as exc:
         if isinstance(exc, ProducerError):
             raise
@@ -292,7 +302,9 @@ def approved_source_envelope(
     return build_approved_source_fixture(source_view, receipt_sha256=receipt_sha256)
 
 
-def _prepare_source(source_input: Mapping[str, Any] | bytes | bytearray) -> tuple[dict[str, Any], str, str]:
+def _prepare_source(
+    source_input: Mapping[str, Any] | bytes | bytearray,
+) -> tuple[dict[str, Any], str, str]:
     if isinstance(source_input, (bytes, bytearray)):
         envelope = _decode_json(bytes(source_input), "source envelope")
     elif isinstance(source_input, Mapping):
@@ -313,12 +325,17 @@ def _prepare_source(source_input: Mapping[str, Any] | bytes | bytearray) -> tupl
         raise ProducerError("source envelope source_view must be an object")
     try:
         bounded = kernel._bounded_source_view_input(envelope["source_view"])
-        normalized, _bindings, _days = kernel._validate_and_normalize_source_view(bounded)
+        normalized, _bindings, _days = kernel._validate_and_normalize_source_view(
+            bounded
+        )
     except Exception as exc:
         raise ProducerError("approved source failed frozen validation") from exc
     source_raw = kernel.canonical_json(normalized)
     source_hash = _sha256(source_raw)
-    if _sha(envelope["source_view_canonical_sha256"], "source_view_canonical_sha256") != source_hash:
+    if (
+        _sha(envelope["source_view_canonical_sha256"], "source_view_canonical_sha256")
+        != source_hash
+    ):
         raise ProducerError("source canonical hash mismatch")
     _sha(envelope["source_receipt_sha256"], "source_receipt_sha256")
     # Normalize the nested view too: accepting alternate JSON spellings would
@@ -346,13 +363,18 @@ def _false_authority_fields(payload: dict[str, Any]) -> None:
         payload[field] = False
 
 
-def _build_candidate(source: Mapping[str, Any], source_hash: str, receipt_hash: str) -> dict[str, Any]:
+def _build_candidate(
+    source: Mapping[str, Any], source_hash: str, receipt_hash: str
+) -> dict[str, Any]:
     products = {row["product"]: row for row in source["products"]}
     signals: dict[str, dict[str, Any]] = {}
     for product in kernel.PRODUCTS:
         signal, _roll = kernel._build_product_signal(products[product])
         signals[product] = signal
-    raw_scores = {product: float(signals[product]["raw_risk_score"]) for product in kernel.PRODUCTS}
+    raw_scores = {
+        product: float(signals[product]["raw_risk_score"])
+        for product in kernel.PRODUCTS
+    }
     source_weights = kernel._cap_source_weights(raw_scores)
     lineage = dict(kernel.LINEAGE)
     lineage_sha = _sha256(canonical_json(lineage))
@@ -413,7 +435,9 @@ def _build_candidate(source: Mapping[str, Any], source_hash: str, receipt_hash: 
     return payload
 
 
-def produce_map_candidate(source_input: Mapping[str, Any] | bytes | bytearray) -> MapCandidateResult:
+def produce_map_candidate(
+    source_input: Mapping[str, Any] | bytes | bytearray,
+) -> MapCandidateResult:
     """Produce one deterministic unsigned MAP signal candidate."""
 
     source, source_hash, receipt_hash = _prepare_source(source_input)
@@ -445,7 +469,10 @@ def _validate_candidate_shape(payload: Mapping[str, Any]) -> None:
         *_AUTHORITY_FIELDS,
     }
     _exact_keys(payload, expected, "MAP candidate")
-    if payload["schema_version"] != MAP_CANDIDATE_SCHEMA or payload["artifact_role"] != MAP_CANDIDATE_ROLE:
+    if (
+        payload["schema_version"] != MAP_CANDIDATE_SCHEMA
+        or payload["artifact_role"] != MAP_CANDIDATE_ROLE
+    ):
         raise ProducerError("MAP candidate schema/role mismatch")
     if payload["status"] != MAP_STATUS:
         raise ProducerError("MAP candidate status is not unsigned")
@@ -453,16 +480,28 @@ def _validate_candidate_shape(payload: Mapping[str, Any]) -> None:
         raise ProducerError("MAP strategy identity mismatch")
     if payload["strategy_model_version_sha256"] != kernel.FROZEN_RULE_SHA256:
         raise ProducerError("MAP strategy model hash mismatch")
-    if payload["research_evidence_only"] is not True or payload["producer_identity_only"] is not True:
+    if (
+        payload["research_evidence_only"] is not True
+        or payload["producer_identity_only"] is not True
+    ):
         raise ProducerError("MAP candidate must remain research-only")
     if any(payload[field] is not False for field in _AUTHORITY_FIELDS):
         raise ProducerError("MAP candidate contains authority")
     identity = _exact_keys(
         payload["producer_identity"],
-        {"producer_id", "producer_version", "producer_code_sha256", "kernel_id", "kernel_code_sha256"},
+        {
+            "producer_id",
+            "producer_version",
+            "producer_code_sha256",
+            "kernel_id",
+            "kernel_code_sha256",
+        },
         "MAP producer identity",
     )
-    if identity["producer_id"] != MAP_PRODUCER_IDENTITY or identity["producer_version"] != MAP_PRODUCER_VERSION:
+    if (
+        identity["producer_id"] != MAP_PRODUCER_IDENTITY
+        or identity["producer_version"] != MAP_PRODUCER_VERSION
+    ):
         raise ProducerError("MAP producer identity mismatch")
     _sha(identity["producer_code_sha256"], "producer_code_sha256")
     _sha(identity["kernel_code_sha256"], "kernel_code_sha256")
@@ -470,16 +509,37 @@ def _validate_candidate_shape(payload: Mapping[str, Any]) -> None:
         raise ProducerError("MAP kernel identity mismatch")
     contract = _exact_keys(
         payload["map_output_contract"],
-        {"schema_version", "strategy_identity_field", "product_fields", "complete_product_set_required", "execution_fields_forbidden", "contract_sha256"},
+        {
+            "schema_version",
+            "strategy_identity_field",
+            "product_fields",
+            "complete_product_set_required",
+            "execution_fields_forbidden",
+            "contract_sha256",
+        },
         "MAP output contract",
     )
-    if contract["schema_version"] != MAP_OUTPUT_CONTRACT_SCHEMA or contract["contract_sha256"] != map_output_contract_sha256():
+    if (
+        contract["schema_version"] != MAP_OUTPUT_CONTRACT_SCHEMA
+        or contract["contract_sha256"] != map_output_contract_sha256()
+    ):
         raise ProducerError("MAP output contract identity mismatch")
-    if contract["product_fields"] != list(_MAP_OUTPUT_FIELDS) or contract["complete_product_set_required"] is not True or contract["execution_fields_forbidden"] is not True:
+    if (
+        contract["product_fields"] != list(_MAP_OUTPUT_FIELDS)
+        or contract["complete_product_set_required"] is not True
+        or contract["execution_fields_forbidden"] is not True
+    ):
         raise ProducerError("MAP output contract fields mismatch")
     source = _exact_keys(
         payload["source"],
-        {"schema_version", "source_view_id", "source_view_canonical_sha256", "source_receipt_sha256", "research_as_of_official_day", "execution_day"},
+        {
+            "schema_version",
+            "source_view_id",
+            "source_view_canonical_sha256",
+            "source_receipt_sha256",
+            "research_as_of_official_day",
+            "execution_day",
+        },
         "MAP source binding",
     )
     if source["schema_version"] != kernel.SOURCE_SCHEMA_VERSION:
@@ -488,29 +548,54 @@ def _validate_candidate_shape(payload: Mapping[str, Any]) -> None:
     _sha(source["source_receipt_sha256"], "MAP source receipt hash")
     lineage = _exact_keys(
         payload["lineage"],
-        {"source_view_canonical_sha256", "source_receipt_sha256", "lineage_sha256", "frozen_lineage"},
+        {
+            "source_view_canonical_sha256",
+            "source_receipt_sha256",
+            "lineage_sha256",
+            "frozen_lineage",
+        },
         "MAP lineage",
     )
-    if lineage["source_view_canonical_sha256"] != source["source_view_canonical_sha256"] or lineage["source_receipt_sha256"] != source["source_receipt_sha256"]:
+    if (
+        lineage["source_view_canonical_sha256"]
+        != source["source_view_canonical_sha256"]
+        or lineage["source_receipt_sha256"] != source["source_receipt_sha256"]
+    ):
         raise ProducerError("MAP lineage source mismatch")
     if lineage["lineage_sha256"] != _sha256(canonical_json(lineage["frozen_lineage"])):
         raise ProducerError("MAP lineage hash mismatch")
     if lineage["frozen_lineage"] != dict(kernel.LINEAGE):
         raise ProducerError("MAP frozen lineage mismatch")
     signals = payload["signals"]
-    if not isinstance(signals, list) or [row.get("product") for row in signals if isinstance(row, dict)] != list(kernel.PRODUCTS):
+    if not isinstance(signals, list) or [
+        row.get("product") for row in signals if isinstance(row, dict)
+    ] != list(kernel.PRODUCTS):
         raise ProducerError("MAP signal product set/order mismatch")
     for index, row in enumerate(signals):
         signal = _exact_keys(row, set(_MAP_OUTPUT_FIELDS), f"MAP signal[{index}]")
-        if signal["product"] != kernel.PRODUCTS[index] or signal["sector"] != kernel.SECTOR_MAP[signal["product"]]:
+        if (
+            signal["product"] != kernel.PRODUCTS[index]
+            or signal["sector"] != kernel.SECTOR_MAP[signal["product"]]
+        ):
             raise ProducerError("MAP signal product/sector mismatch")
-        for field in ("source_score", "vol60_annualized", "raw_risk_score", "source_target_weight"):
+        for field in (
+            "source_score",
+            "vol60_annualized",
+            "raw_risk_score",
+            "source_target_weight",
+        ):
             _finite(signal[field], f"MAP signal {field}")
-        if not isinstance(signal["trend_21_sign"], int) or signal["trend_21_sign"] not in {-1, 0, 1}:
+        if not isinstance(signal["trend_21_sign"], int) or signal[
+            "trend_21_sign"
+        ] not in {-1, 0, 1}:
             raise ProducerError("MAP trend sign is invalid")
-        if not isinstance(signal["trend_63_sign"], int) or signal["trend_63_sign"] not in {-1, 0, 1}:
+        if not isinstance(signal["trend_63_sign"], int) or signal[
+            "trend_63_sign"
+        ] not in {-1, 0, 1}:
             raise ProducerError("MAP trend sign is invalid")
-        if not isinstance(signal["trend_126_sign"], int) or signal["trend_126_sign"] not in {-1, 0, 1}:
+        if not isinstance(signal["trend_126_sign"], int) or signal[
+            "trend_126_sign"
+        ] not in {-1, 0, 1}:
             raise ProducerError("MAP trend sign is invalid")
 
 
@@ -538,11 +623,15 @@ def verify_map_candidate(
         raise ProducerError("MAP candidate must be canonical JSON")
     _validate_candidate_shape(payload)
     artifact_hash = _sha256(raw)
-    rejected = {_sha(value, "rejected candidate hash") for value in rejected_candidate_sha256}
+    rejected = {
+        _sha(value, "rejected candidate hash") for value in rejected_candidate_sha256
+    }
     if artifact_hash in rejected or payload["candidate_id"] in rejected:
         raise ProducerError("MAP candidate replay is rejected by high-water input")
     source = payload["source"]
-    if expected_source_sha256 is not None and source["source_view_canonical_sha256"] != _sha(expected_source_sha256, "expected source hash"):
+    if expected_source_sha256 is not None and source[
+        "source_view_canonical_sha256"
+    ] != _sha(expected_source_sha256, "expected source hash"):
         raise ProducerError("MAP source predecessor mismatch")
     if source_input is not None:
         normalized, source_hash, receipt_hash = _prepare_source(source_input)
@@ -578,7 +667,11 @@ def _read_pinned_file(path: Path) -> bytes:
         raise ProducerError("input file cannot be opened safely") from exc
     try:
         opened = os.fstat(fd)
-        if (opened.st_dev, opened.st_ino, opened.st_size) != (before.st_dev, before.st_ino, before.st_size):
+        if (opened.st_dev, opened.st_ino, opened.st_size) != (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+        ):
             raise ProducerError("input changed before read")
         chunks: list[bytes] = []
         total = 0
@@ -592,7 +685,15 @@ def _read_pinned_file(path: Path) -> bytes:
                 raise ProducerError("input exceeds byte limit")
         after = os.fstat(fd)
         current = path.lstat()
-        if (after.st_dev, after.st_ino, after.st_size) != (opened.st_dev, opened.st_ino, opened.st_size) or (current.st_dev, current.st_ino, current.st_size) != (before.st_dev, before.st_ino, before.st_size):
+        if (after.st_dev, after.st_ino, after.st_size) != (
+            opened.st_dev,
+            opened.st_ino,
+            opened.st_size,
+        ) or (current.st_dev, current.st_ino, current.st_size) != (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+        ):
             raise ProducerError("input changed during read")
         return b"".join(chunks)
     finally:
@@ -674,10 +775,14 @@ def _create_only_atomic(path: Path, raw: bytes) -> None:
         except ProducerError:
             raise
         except FileExistsError as exc:
-            raise ProducerError("output already exists; overwrite is forbidden") from exc
+            raise ProducerError(
+                "output already exists; overwrite is forbidden"
+            ) from exc
         except OSError as exc:
             if exc.errno == errno.EEXIST:
-                raise ProducerError("output already exists; overwrite is forbidden") from exc
+                raise ProducerError(
+                    "output already exists; overwrite is forbidden"
+                ) from exc
             raise ProducerError("atomic candidate publish failed") from exc
     finally:
         if fd >= 0:
@@ -696,7 +801,11 @@ def _cli_json(payload: Mapping[str, Any]) -> None:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="offline MAP signal producer")
-    parser.add_argument("--version", action="store_true", help="print the machine-readable producer version")
+    parser.add_argument(
+        "--version",
+        action="store_true",
+        help="print the machine-readable producer version",
+    )
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("health", help="print liveness for the batch image")
     sub.add_parser("ready", help="print readiness for the batch image")
@@ -712,27 +821,67 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.version:
-            _cli_json({"status": "version", "producer_identity": MAP_PRODUCER_IDENTITY, "version": MAP_PRODUCER_VERSION, **_CAPABILITY_DENIALS})
+            _cli_json(
+                {
+                    "status": "version",
+                    "producer_identity": MAP_PRODUCER_IDENTITY,
+                    "version": MAP_PRODUCER_VERSION,
+                    **_CAPABILITY_DENIALS,
+                }
+            )
             return 0
         if args.command is None:
             parser.error("a command is required")
         if args.command == "health":
-            _cli_json({"status": "ok", "producer_identity": MAP_PRODUCER_IDENTITY, "version": MAP_PRODUCER_VERSION, **_CAPABILITY_DENIALS})
+            _cli_json(
+                {
+                    "status": "ok",
+                    "producer_identity": MAP_PRODUCER_IDENTITY,
+                    "version": MAP_PRODUCER_VERSION,
+                    **_CAPABILITY_DENIALS,
+                }
+            )
             return 0
         if args.command == "ready":
             _module_sha256(kernel)
             _producer_sha256()
-            _cli_json({"status": "ready", "producer_identity": MAP_PRODUCER_IDENTITY, "version": MAP_PRODUCER_VERSION, **_CAPABILITY_DENIALS})
+            _cli_json(
+                {
+                    "status": "ready",
+                    "producer_identity": MAP_PRODUCER_IDENTITY,
+                    "version": MAP_PRODUCER_VERSION,
+                    **_CAPABILITY_DENIALS,
+                }
+            )
             return 0
         source_raw = _read_pinned_file(args.source)
         result = produce_map_candidate(source_raw)
-        if args.expected_source_sha256 is not None and result.source_view_canonical_sha256 != _sha(args.expected_source_sha256, "expected source hash"):
+        if (
+            args.expected_source_sha256 is not None
+            and result.source_view_canonical_sha256
+            != _sha(args.expected_source_sha256, "expected source hash")
+        ):
             raise ProducerError("source predecessor mismatch")
         _create_only_atomic(args.output, result.raw)
-        _cli_json({"status": "created", "producer_identity": MAP_PRODUCER_IDENTITY, "version": MAP_PRODUCER_VERSION, "candidate_id": result.payload["candidate_id"], "artifact_sha256": result.artifact_sha256, "source_view_canonical_sha256": result.source_view_canonical_sha256})
+        _cli_json(
+            {
+                "status": "created",
+                "producer_identity": MAP_PRODUCER_IDENTITY,
+                "version": MAP_PRODUCER_VERSION,
+                "candidate_id": result.payload["candidate_id"],
+                "artifact_sha256": result.artifact_sha256,
+                "source_view_canonical_sha256": result.source_view_canonical_sha256,
+            }
+        )
         return 0
     except ProducerError as exc:
-        _cli_json({"status": "not_ready", "producer_identity": MAP_PRODUCER_IDENTITY, "error": str(exc)})
+        _cli_json(
+            {
+                "status": "not_ready",
+                "producer_identity": MAP_PRODUCER_IDENTITY,
+                "error": str(exc),
+            }
+        )
         return 2
 
 

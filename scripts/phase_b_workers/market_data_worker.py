@@ -84,7 +84,11 @@ class JsonlTickWriter:
 
     def _load(self) -> set[str]:
         if self._ids is None:
-            self._ids = {str(row["ingest_id"]) for row in self.log.records() if row.get("ingest_id")}
+            self._ids = {
+                str(row["ingest_id"])
+                for row in self.log.records()
+                if row.get("ingest_id")
+            }
         return self._ids
 
     def write_tick(self, tick: Mapping[str, object]) -> None:
@@ -122,9 +126,16 @@ class MarketDataConfig:
     def from_environment(cls, state_dir: str | Path | None = None) -> MarketDataConfig:
         projection = os.getenv("PHASE_B_MARKET_PROJECTION_DIR", "").strip()
         return cls(
-            state_dir=Path(state_dir or os.getenv("PHASE_B_MARKET_DATA_STATE_DIR", "/var/lib/phase-b/market-data")),
+            state_dir=Path(
+                state_dir
+                or os.getenv(
+                    "PHASE_B_MARKET_DATA_STATE_DIR", "/var/lib/phase-b/market-data"
+                )
+            ),
             stream_generation=os.getenv("PHASE_B_STREAM_GENERATION", "generation-1"),
-            queue_maxsize=max(1, int(os.getenv("PHASE_B_MARKET_QUEUE_MAXSIZE", "2048"))),
+            queue_maxsize=max(
+                1, int(os.getenv("PHASE_B_MARKET_QUEUE_MAXSIZE", "2048"))
+            ),
             source_name=os.getenv("PHASE_B_MARKET_SOURCE", "readonly_market_source"),
             runtime_mode=os.getenv("PHASE_B_RUNTIME_MODE", "disabled"),
             projection_dir=Path(projection) if projection else None,
@@ -145,26 +156,40 @@ class MarketDataWorker:
         identity: WorkerIdentity | None = None,
     ) -> None:
         if not isinstance(config, MarketDataConfig):
-            config = MarketDataConfig(Path(config), generation or "generation-1", queue_size or 2048)
+            config = MarketDataConfig(
+                Path(config), generation or "generation-1", queue_size or 2048
+            )
         self.config = config
         config.state_dir.mkdir(parents=True, exist_ok=True)
         info = config.state_dir.lstat()
         if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-            raise DurableStateError("market-data state directory is not a real directory")
+            raise DurableStateError(
+                "market-data state directory is not a real directory"
+            )
         os.chmod(config.state_dir, 0o700)
-        self.identity = identity or WorkerIdentity.from_environment(self.service_id, runtime_mode=config.runtime_mode)
-        self.stream = DurableVerifiedTickStream(config.state_dir / "stream", generation=config.stream_generation)
+        self.identity = identity or WorkerIdentity.from_environment(
+            self.service_id, runtime_mode=config.runtime_mode
+        )
+        self.stream = DurableVerifiedTickStream(
+            config.state_dir / "stream", generation=config.stream_generation
+        )
         self.source_fence = AtomicCheckpoint(
             config.state_dir / "source_fence.json",
             default={"worker_generation": config.stream_generation, "sources": {}},
         )
-        self.writer = writer or JsonlTickWriter(config.state_dir / "persisted_ticks.jsonl")
-        self.ingress: BoundedIngressQueue[Mapping[str, object] | GatewayTickEnvelope] = BoundedIngressQueue(config.queue_maxsize)
+        self.writer = writer or JsonlTickWriter(
+            config.state_dir / "persisted_ticks.jsonl"
+        )
+        self.ingress: BoundedIngressQueue[
+            Mapping[str, object] | GatewayTickEnvelope
+        ] = BoundedIngressQueue(config.queue_maxsize)
         self.source = source
         self._source_bound = False
         self._last_error: str | None = None
         self._state_recovered = False
-        self.metrics = WorkerMetrics(self.service_id, isoformat(), worker_generation=config.stream_generation)
+        self.metrics = WorkerMetrics(
+            self.service_id, isoformat(), worker_generation=config.stream_generation
+        )
 
     def recover(self) -> None:
         self._state_recovered = False
@@ -174,8 +199,13 @@ class MarketDataWorker:
             self.stream.initialize()
             self.stream.stats()
             state = self.source_fence.read()
-            if str(state.get("worker_generation") or self.config.stream_generation) != self.config.stream_generation:
-                raise GenerationMismatch("market-data generation changed without a new state directory")
+            if (
+                str(state.get("worker_generation") or self.config.stream_generation)
+                != self.config.stream_generation
+            ):
+                raise GenerationMismatch(
+                    "market-data generation changed without a new state directory"
+                )
         except Exception as exc:
             self._last_error = type(exc).__name__
             raise
@@ -227,10 +257,16 @@ class MarketDataWorker:
         old_generation = str(prior.get("generation") or event.source_generation)
         old_seq = int(prior.get("seq") or 0)
         if old_generation != event.source_generation:
-            raise GenerationMismatch("source generation changed; rotate the stream explicitly")
+            raise GenerationMismatch(
+                "source generation changed; rotate the stream explicitly"
+            )
         if event.source_seq < old_seq:
             raise DurableStateError("stale source sequence")
-        if event.source_seq == old_seq and old_seq and prior.get("event_hash") != event.envelope_hash:
+        if (
+            event.source_seq == old_seq
+            and old_seq
+            and prior.get("event_hash") != event.envelope_hash
+        ):
             raise DurableStateError("source sequence was reused with different content")
 
     def _record_source_fence(self, event: GatewayTickEnvelope) -> None:
@@ -274,7 +310,9 @@ class MarketDataWorker:
         self.metrics.last_success_at_utc = isoformat()
 
     def ingest(self, raw: Mapping[str, object]) -> VerifiedTick:
-        event_id = str(raw.get("source_event_id") or raw.get("event_id") or raw.get("id") or "").strip()
+        event_id = str(
+            raw.get("source_event_id") or raw.get("event_id") or raw.get("id") or ""
+        ).strip()
         existing = self.stream.find_by_source_event_id(event_id) if event_id else None
         if existing is None and not event_id:
             existing = self.stream.find_by_raw_hash(sha256_hex(dict(raw)))
@@ -287,7 +325,9 @@ class MarketDataWorker:
                 source=self.config.source_name,
             )
             if candidate.raw_hash != existing.raw_hash:
-                raise DurableStateError("source_event_id was reused with different tick content")
+                raise DurableStateError(
+                    "source_event_id was reused with different tick content"
+                )
             try:
                 self._write(existing)
             except Exception as exc:
@@ -319,7 +359,12 @@ class MarketDataWorker:
         if tick is None:
             tick = self.stream.find_by_raw_hash(sha256_hex(raw))
         if tick is None:
-            tick = VerifiedTick.from_raw(raw, stream_generation=self.config.stream_generation, ingest_seq=self.stream.next_sequence(), source=event.source_service)
+            tick = VerifiedTick.from_raw(
+                raw,
+                stream_generation=self.config.stream_generation,
+                ingest_seq=self.stream.next_sequence(),
+                source=event.source_service,
+            )
             self.stream.append(tick)
             self.metrics.increment("ticks_durable")
         else:
@@ -331,7 +376,9 @@ class MarketDataWorker:
                 source=event.source_service,
             )
             if candidate.raw_hash != tick.raw_hash:
-                raise DurableStateError("source_event_id was reused with different tick content")
+                raise DurableStateError(
+                    "source_event_id was reused with different tick content"
+                )
         self._record_source_fence(event)
         self._write(tick)
         self.metrics.checkpoint_or_watermark = tick.ingest_seq
@@ -341,7 +388,11 @@ class MarketDataWorker:
     def process_one(self) -> VerifiedTick:
         value = self.ingress.get()
         self.metrics.queue_depth = self.ingress.qsize()
-        return self._process_envelope(value) if isinstance(value, GatewayTickEnvelope) else self.ingest(value)
+        return (
+            self._process_envelope(value)
+            if isinstance(value, GatewayTickEnvelope)
+            else self.ingest(value)
+        )
 
     def process_queue(self, *, limit: int | None = None) -> int:
         processed = 0
@@ -369,7 +420,9 @@ class MarketDataWorker:
     def query(self, symbols: Iterable[str]) -> list[Mapping[str, object]]:
         return [dict(row) for row in self.source.query(symbols)] if self.source else []
 
-    def run(self, *, stop_event: threading.Event | None = None, idle_seconds: float = 0.1) -> None:
+    def run(
+        self, *, stop_event: threading.Event | None = None, idle_seconds: float = 0.1
+    ) -> None:
         self.recover()
         self.replay_pending()
         self.bind_source()
@@ -390,7 +443,12 @@ class MarketDataWorker:
             "healthy" if not self._last_error else "degraded",
             isoformat(),
             self.metrics.started_at_utc,
-            {"verified_stream": self.stream.stats(), "tick_writer": writer_health() if callable(writer_health) else {"status": "configured"}},
+            {
+                "verified_stream": self.stream.stats(),
+                "tick_writer": writer_health()
+                if callable(writer_health)
+                else {"status": "configured"},
+            },
             self._last_error,
         )
 
@@ -411,7 +469,9 @@ class MarketDataWorker:
 
     def metrics_snapshot(self) -> dict[str, object]:
         self.metrics.queue_depth = self.ingress.qsize()
-        self.metrics.checkpoint_or_watermark = self.stream.stats().get("last_ingest_seq", 0)
+        self.metrics.checkpoint_or_watermark = self.stream.stats().get(
+            "last_ingest_seq", 0
+        )
         return self.metrics.as_dict()
 
     def version(self) -> dict[str, object]:
@@ -422,7 +482,9 @@ class MarketDataWorker:
             self.config.projection_dir,
             build_projection(
                 service_id=self.service_id,
-                generation=self.identity.source_revision + ":" + self.config.stream_generation,
+                generation=self.identity.source_revision
+                + ":"
+                + self.config.stream_generation,
                 health=self.health(),
                 readiness=self.readiness(),
                 version=self.identity,
@@ -455,7 +517,10 @@ def main(argv: list[str] | None = None) -> int:
         stop = threading.Event()
         for signum in (signal.SIGTERM, signal.SIGINT):
             signal.signal(signum, lambda *_: stop.set())
-        worker.run(stop_event=stop, idle_seconds=float(os.getenv("PHASE_B_MARKET_IDLE_SECONDS", "0.1")))
+        worker.run(
+            stop_event=stop,
+            idle_seconds=float(os.getenv("PHASE_B_MARKET_IDLE_SECONDS", "0.1")),
+        )
         return 0
     else:
         value = worker.health().as_dict()

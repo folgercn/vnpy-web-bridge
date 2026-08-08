@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+# Imports below intentionally follow test-path setup.
+# ruff: noqa: E402
+
 import ast
 import base64
 import hashlib
@@ -84,13 +87,15 @@ def _map_acceptance(map_result) -> tuple[dict, dict]:
         "schema_version": "web-bridge-trust-keyring-v1",
         "domain": MAP_ACCEPTANCE_TRUST_DOMAIN,
         "key_version": MAP_ACCEPTANCE_KEY_VERSION,
-        "keys": [{
-            "key_id": "map-acceptance-test",
-            "domain": MAP_ACCEPTANCE_TRUST_DOMAIN,
-            "purpose": MAP_ACCEPTANCE_KEY_PURPOSE,
-            "public_key_base64": base64.b64encode(public).decode("ascii"),
-            "status": "active",
-        }],
+        "keys": [
+            {
+                "key_id": "map-acceptance-test",
+                "domain": MAP_ACCEPTANCE_TRUST_DOMAIN,
+                "purpose": MAP_ACCEPTANCE_KEY_PURPOSE,
+                "public_key_base64": base64.b64encode(public).decode("ascii"),
+                "status": "active",
+            }
+        ],
     }
     artifact = new_artifact_envelope(
         artifact_type="map-acceptance",
@@ -139,19 +144,45 @@ def test_map_and_c_fast_are_deterministic_and_canonical() -> None:
     first = produce_map_candidate(source)
     second = produce_map_candidate(json.loads(json.dumps(source)))
     assert first.raw == second.raw
-    assert first.raw == json.dumps(first.payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    assert (
+        first.raw
+        == json.dumps(
+            first.payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode()
+    )
     assert first.payload["schema_version"] == MAP_CANDIDATE_SCHEMA
     assert first.payload["production_allowed"] is False
     assert verify_map_candidate(first.raw, source_input=source).raw == first.raw
     approval, keyring = _map_acceptance(first)
 
-    c_first = produce_c_fast_candidate(first.raw, source, map_acceptance=approval, map_acceptance_keyring=keyring)
-    c_second = produce_c_fast_candidate(first.raw, source, map_acceptance=approval, map_acceptance_keyring=keyring)
+    c_first = produce_c_fast_candidate(
+        first.raw, source, map_acceptance=approval, map_acceptance_keyring=keyring
+    )
+    c_second = produce_c_fast_candidate(
+        first.raw, source, map_acceptance=approval, map_acceptance_keyring=keyring
+    )
     assert c_first.raw == c_second.raw
-    assert c_first.raw == json.dumps(c_first.payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    assert (
+        c_first.raw
+        == json.dumps(
+            c_first.payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode()
+    )
     assert c_first.payload["schema_version"] == CFAST_CANDIDATE_SCHEMA
-    assert c_first.payload["predecessor"]["artifact_sha256"] == hashlib.sha256(first.raw).hexdigest()
-    assert verify_c_fast_candidate(c_first.raw, map_candidate_input=first.raw, source_input=source, map_acceptance=approval, map_acceptance_keyring=keyring).raw == c_first.raw
+    assert (
+        c_first.payload["predecessor"]["artifact_sha256"]
+        == hashlib.sha256(first.raw).hexdigest()
+    )
+    assert (
+        verify_c_fast_candidate(
+            c_first.raw,
+            map_candidate_input=first.raw,
+            source_input=source,
+            map_acceptance=approval,
+            map_acceptance_keyring=keyring,
+        ).raw
+        == c_first.raw
+    )
 
 
 def test_approval_tamper_map_tamper_and_replay_fail_closed() -> None:
@@ -166,7 +197,12 @@ def test_approval_tamper_map_tamper_and_replay_fail_closed() -> None:
     tampered_map = json.loads(map_result.raw)
     tampered_map["signals"][0]["source_target_weight"] += 0.01
     with pytest.raises(CFastProducerError, match="acceptance"):
-        produce_c_fast_candidate(tampered_map, source, map_acceptance=approval, map_acceptance_keyring=keyring)
+        produce_c_fast_candidate(
+            tampered_map,
+            source,
+            map_acceptance=approval,
+            map_acceptance_keyring=keyring,
+        )
 
     with pytest.raises(CFastProducerError, match="replay"):
         produce_c_fast_candidate(
@@ -194,7 +230,12 @@ def test_source_and_predecessor_hashes_are_explicit() -> None:
     wrong_source["source_view"]["source_view_id"] = "different-source-20260803"
     # The envelope's source hash is now stale and must not be silently repaired.
     with pytest.raises(CFastProducerError, match="source canonical hash"):
-        produce_c_fast_candidate(map_result.raw, wrong_source, map_acceptance=approval, map_acceptance_keyring=keyring)
+        produce_c_fast_candidate(
+            map_result.raw,
+            wrong_source,
+            map_acceptance=approval,
+            map_acceptance_keyring=keyring,
+        )
 
 
 def test_c_fast_verification_requires_map_and_source_replay() -> None:
@@ -269,7 +310,10 @@ def test_map_acceptance_role_and_keyring_raw_pin_fail_closed(tmp_path: Path) -> 
 
     produce_action = next(
         action
-        for action in cfast_parser()._subparsers._group_actions[0].choices["produce"]._actions
+        for action in cfast_parser()
+        ._subparsers._group_actions[0]
+        .choices["produce"]
+        ._actions
         if action.dest == "map_acceptance_keyring_sha256"
     )
     assert produce_action.required is True
@@ -287,7 +331,10 @@ def test_map_acceptance_role_and_keyring_raw_pin_fail_closed(tmp_path: Path) -> 
     ),
 )
 def test_producer_probe_outputs_explicitly_deny_runtime_capabilities(
-    producer_main, command: str, producer_identity: str, capsys: pytest.CaptureFixture[str]
+    producer_main,
+    command: str,
+    producer_identity: str,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     assert producer_main([command]) == 0
     payload = json.loads(capsys.readouterr().out)
@@ -335,9 +382,21 @@ def test_candidate_schemas_validate_golden_outputs() -> None:
     source = _envelope()
     map_result = produce_map_candidate(source)
     approval, keyring = _map_acceptance(map_result)
-    c_result = produce_c_fast_candidate(map_result.raw, source, map_acceptance=approval, map_acceptance_keyring=keyring)
-    map_schema = json.loads((ROOT / "shared/artifact-contracts/map/commodity-map-signal-candidate-v1.schema.json").read_text())
-    c_schema = json.loads((ROOT / "shared/artifact-contracts/c-fast/commodity-c-fast-target-candidate-v1.schema.json").read_text())
+    c_result = produce_c_fast_candidate(
+        map_result.raw, source, map_acceptance=approval, map_acceptance_keyring=keyring
+    )
+    map_schema = json.loads(
+        (
+            ROOT
+            / "shared/artifact-contracts/map/commodity-map-signal-candidate-v1.schema.json"
+        ).read_text()
+    )
+    c_schema = json.loads(
+        (
+            ROOT
+            / "shared/artifact-contracts/c-fast/commodity-c-fast-target-candidate-v1.schema.json"
+        ).read_text()
+    )
     assert list(Draft202012Validator(map_schema).iter_errors(map_result.payload)) == []
     assert list(Draft202012Validator(c_schema).iter_errors(c_result.payload)) == []
 
@@ -365,5 +424,10 @@ def test_producer_import_closure_is_stdlib_and_pure() -> None:
                 continue
             assert not forbidden_import_roots.intersection(names), (relative, names)
         text = (ROOT / relative).read_text()
-        for forbidden in ("TradeService", "send_order", "cancel_order", "execute_order"):
+        for forbidden in (
+            "TradeService",
+            "send_order",
+            "cancel_order",
+            "execute_order",
+        ):
             assert forbidden not in text

@@ -57,11 +57,15 @@ except ImportError:  # pragma: no cover
 
 
 class VerifiedTickSource(Protocol):
-    def iter_from(self, after_seq: int = 0, *, limit: int | None = None) -> Iterable[VerifiedTick]: ...
+    def iter_from(
+        self, after_seq: int = 0, *, limit: int | None = None
+    ) -> Iterable[VerifiedTick]: ...
 
 
 class EvidenceWriter(Protocol):
-    def append(self, evidence: ExecutionQualityEvidence | Mapping[str, object]) -> bool: ...
+    def append(
+        self, evidence: ExecutionQualityEvidence | Mapping[str, object]
+    ) -> bool: ...
 
 
 @dataclass(frozen=True)
@@ -74,11 +78,36 @@ class ExecutionQualityConfig:
     projection_dir: Path | None = None
 
     @classmethod
-    def from_environment(cls, state_dir: str | Path | None = None) -> ExecutionQualityConfig:
-        root = Path(state_dir or os.getenv("PHASE_B_EQ_STATE_DIR", "/var/lib/phase-b/execution-quality"))
-        stream = Path(os.getenv("PHASE_B_VERIFIED_STREAM_DIR", str(Path(os.getenv("PHASE_B_MARKET_DATA_STATE_DIR", "/var/lib/phase-b/market-data")) / "stream")))
+    def from_environment(
+        cls, state_dir: str | Path | None = None
+    ) -> ExecutionQualityConfig:
+        root = Path(
+            state_dir
+            or os.getenv("PHASE_B_EQ_STATE_DIR", "/var/lib/phase-b/execution-quality")
+        )
+        stream = Path(
+            os.getenv(
+                "PHASE_B_VERIFIED_STREAM_DIR",
+                str(
+                    Path(
+                        os.getenv(
+                            "PHASE_B_MARKET_DATA_STATE_DIR",
+                            "/var/lib/phase-b/market-data",
+                        )
+                    )
+                    / "stream"
+                ),
+            )
+        )
         projection = os.getenv("PHASE_B_EQ_PROJECTION_DIR", "").strip()
-        return cls(root, stream, os.getenv("PHASE_B_STREAM_GENERATION", "generation-1"), os.getenv("PHASE_B_EQ_ALGORITHM_VERSION", "eq_v1"), os.getenv("PHASE_B_RUNTIME_MODE", "disabled"), Path(projection) if projection else None)
+        return cls(
+            root,
+            stream,
+            os.getenv("PHASE_B_STREAM_GENERATION", "generation-1"),
+            os.getenv("PHASE_B_EQ_ALGORITHM_VERSION", "eq_v1"),
+            os.getenv("PHASE_B_RUNTIME_MODE", "disabled"),
+            Path(projection) if projection else None,
+        )
 
 
 class ExecutionQualityWorker:
@@ -96,24 +125,48 @@ class ExecutionQualityWorker:
     ) -> None:
         if not isinstance(config, ExecutionQualityConfig):
             root = Path(config)
-            config = ExecutionQualityConfig(root, Path(tick_stream_dir or root / "stream"), generation or "generation-1")
+            config = ExecutionQualityConfig(
+                root,
+                Path(tick_stream_dir or root / "stream"),
+                generation or "generation-1",
+            )
         self.config = config
         config.state_dir.mkdir(parents=True, exist_ok=True)
         info = config.state_dir.lstat()
         if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-            raise DurableCorruptionError("execution-quality state directory is not a real directory")
+            raise DurableCorruptionError(
+                "execution-quality state directory is not a real directory"
+            )
         os.chmod(config.state_dir, 0o700)
-        self.identity = identity or WorkerIdentity.from_environment(self.service_id, runtime_mode=config.runtime_mode)
+        self.identity = identity or WorkerIdentity.from_environment(
+            self.service_id, runtime_mode=config.runtime_mode
+        )
         # Opening the producer-owned mount is deliberately deferred to
         # recovery.  This lets `--ready` return a fail-closed JSON snapshot
         # while the market producer is still initializing its shared volume.
         self.stream = stream
-        self.evidence = evidence or AppendOnlyEvidenceLog(config.state_dir / "evidence.jsonl")
-        self.checkpoint = AtomicCheckpoint(config.state_dir / "checkpoint.json", default={"stream_generation": config.stream_generation, "last_ingest_seq": 0})
+        self.evidence = evidence or AppendOnlyEvidenceLog(
+            config.state_dir / "evidence.jsonl"
+        )
+        self.checkpoint = AtomicCheckpoint(
+            config.state_dir / "checkpoint.json",
+            default={
+                "stream_generation": config.stream_generation,
+                "last_ingest_seq": 0,
+            },
+        )
         state = self.checkpoint.read()
-        if str(state.get("stream_generation") or config.stream_generation) != config.stream_generation:
+        if (
+            str(state.get("stream_generation") or config.stream_generation)
+            != config.stream_generation
+        ):
             raise GenerationMismatch("execution-quality checkpoint generation mismatch")
-        self.metrics = WorkerMetrics(self.service_id, isoformat(), worker_generation=config.stream_generation, checkpoint_or_watermark=int(state.get("last_ingest_seq") or 0))
+        self.metrics = WorkerMetrics(
+            self.service_id,
+            isoformat(),
+            worker_generation=config.stream_generation,
+            checkpoint_or_watermark=int(state.get("last_ingest_seq") or 0),
+        )
         self._last_error: str | None = None
         self._state_recovered = False
         self._lock = threading.RLock()
@@ -129,8 +182,16 @@ class ExecutionQualityWorker:
 
     @staticmethod
     def measure(tick: VerifiedTick) -> dict[str, object]:
-        spread = tick.ask_price - tick.bid_price if tick.bid_price is not None and tick.ask_price is not None else None
-        midpoint = (tick.bid_price + tick.ask_price) / 2 if tick.bid_price is not None and tick.ask_price is not None else None
+        spread = (
+            tick.ask_price - tick.bid_price
+            if tick.bid_price is not None and tick.ask_price is not None
+            else None
+        )
+        midpoint = (
+            (tick.bid_price + tick.ask_price) / 2
+            if tick.bid_price is not None and tick.ask_price is not None
+            else None
+        )
         return {"spread": spread, "midpoint": midpoint, "last_price": tick.last_price}
 
     def recover(self) -> None:
@@ -153,12 +214,16 @@ class ExecutionQualityWorker:
                 try:
                     evidence = ExecutionQualityEvidence.from_dict(raw)
                 except (TypeError, ValueError) as exc:
-                    raise DurableCorruptionError("invalid execution-quality evidence") from exc
+                    raise DurableCorruptionError(
+                        "invalid execution-quality evidence"
+                    ) from exc
                 if (
                     evidence.stream_generation != self.config.stream_generation
                     or evidence.algorithm_version != self.config.algorithm_version
                 ):
-                    raise GenerationMismatch("execution-quality evidence generation/algorithm mismatch")
+                    raise GenerationMismatch(
+                        "execution-quality evidence generation/algorithm mismatch"
+                    )
                 tick = stream.get(evidence.ingest_id)  # type: ignore[attr-defined]
                 if (
                     tick is None
@@ -166,31 +231,56 @@ class ExecutionQualityWorker:
                     or tick.ingest_seq != evidence.ingest_seq
                     or tick.event_hash != evidence.source_event_hash
                 ):
-                    raise DurableCorruptionError("execution-quality evidence has no matching verified tick")
+                    raise DurableCorruptionError(
+                        "execution-quality evidence has no matching verified tick"
+                    )
             state = self.checkpoint.read()
-            if str(state.get("stream_generation") or self.config.stream_generation) != self.config.stream_generation:
-                raise GenerationMismatch("execution-quality checkpoint generation mismatch")
+            if (
+                str(state.get("stream_generation") or self.config.stream_generation)
+                != self.config.stream_generation
+            ):
+                raise GenerationMismatch(
+                    "execution-quality checkpoint generation mismatch"
+                )
             seq = int(state.get("last_ingest_seq") or 0)
-            checkpoint_algorithm = str(state.get("algorithm_version") or self.config.algorithm_version)
+            checkpoint_algorithm = str(
+                state.get("algorithm_version") or self.config.algorithm_version
+            )
             if checkpoint_algorithm != self.config.algorithm_version:
-                raise GenerationMismatch("execution-quality checkpoint algorithm mismatch")
+                raise GenerationMismatch(
+                    "execution-quality checkpoint algorithm mismatch"
+                )
             checkpoint_event_hash = str(state.get("last_event_hash") or "")
             checkpoint_evidence_hash = str(state.get("last_evidence_hash") or "")
             if seq == 0:
                 if checkpoint_event_hash or checkpoint_evidence_hash:
-                    raise DurableCorruptionError("empty execution-quality checkpoint contains hashes")
+                    raise DurableCorruptionError(
+                        "empty execution-quality checkpoint contains hashes"
+                    )
             else:
                 tick = stream.get_by_sequence(seq)  # type: ignore[attr-defined]
                 if tick is None:
                     raise GenerationMismatch("checkpoint has no durable tick anchor")
-                if tick.stream_generation != self.config.stream_generation or tick.event_hash != checkpoint_event_hash:
+                if (
+                    tick.stream_generation != self.config.stream_generation
+                    or tick.event_hash != checkpoint_event_hash
+                ):
                     raise GenerationMismatch("checkpoint tick hash/generation mismatch")
                 evidence = self.evidence.get_by_identity(
                     f"{self.config.stream_generation}:{tick.ingest_id}:{self.config.algorithm_version}"
                 )
-                if evidence is None or evidence.ingest_seq != seq or evidence.stream_generation != self.config.stream_generation:
-                    raise GenerationMismatch("checkpoint has no durable evidence anchor")
-                if evidence.source_event_hash != tick.event_hash or evidence.evidence_hash != checkpoint_evidence_hash:
+                if (
+                    evidence is None
+                    or evidence.ingest_seq != seq
+                    or evidence.stream_generation != self.config.stream_generation
+                ):
+                    raise GenerationMismatch(
+                        "checkpoint has no durable evidence anchor"
+                    )
+                if (
+                    evidence.source_event_hash != tick.event_hash
+                    or evidence.evidence_hash != checkpoint_evidence_hash
+                ):
                     raise DurableCorruptionError("checkpoint evidence hash mismatch")
         except Exception as exc:
             self._last_error = type(exc).__name__
@@ -200,13 +290,23 @@ class ExecutionQualityWorker:
             self._last_error = None
 
     def _next_evidence(self) -> tuple[VerifiedTick, ExecutionQualityEvidence] | None:
-        tick = next(self._stream_after_recovery().iter_from(self.last_ingest_seq, limit=1), None)
+        tick = next(
+            self._stream_after_recovery().iter_from(self.last_ingest_seq, limit=1), None
+        )
         if tick is None:
             return None
-        return tick, ExecutionQualityEvidence.for_tick(tick, metrics=self.measure(tick), algorithm_version=self.config.algorithm_version)
+        return tick, ExecutionQualityEvidence.for_tick(
+            tick,
+            metrics=self.measure(tick),
+            algorithm_version=self.config.algorithm_version,
+        )
 
     def _make_evidence(self, tick: VerifiedTick) -> ExecutionQualityEvidence:
-        return ExecutionQualityEvidence.for_tick(tick, metrics=self.measure(tick), algorithm_version=self.config.algorithm_version)
+        return ExecutionQualityEvidence.for_tick(
+            tick,
+            metrics=self.measure(tick),
+            algorithm_version=self.config.algorithm_version,
+        )
 
     def process_one(self) -> ExecutionQualityEvidence | None:
         with self._lock:
@@ -215,14 +315,29 @@ class ExecutionQualityWorker:
                 return None
             tick, evidence = item
             try:
-                if tick.stream_generation != self.config.stream_generation or tick.event_hash != tick.compute_event_hash():
-                    raise DurableCorruptionError("verified tick generation/hash mismatch")
+                if (
+                    tick.stream_generation != self.config.stream_generation
+                    or tick.event_hash != tick.compute_event_hash()
+                ):
+                    raise DurableCorruptionError(
+                        "verified tick generation/hash mismatch"
+                    )
                 inserted = self.evidence.append(evidence)
-                self.checkpoint.write({"stream_generation": self.config.stream_generation, "last_ingest_seq": tick.ingest_seq, "last_event_hash": tick.event_hash, "last_evidence_hash": evidence.evidence_hash, "algorithm_version": self.config.algorithm_version})
+                self.checkpoint.write(
+                    {
+                        "stream_generation": self.config.stream_generation,
+                        "last_ingest_seq": tick.ingest_seq,
+                        "last_event_hash": tick.event_hash,
+                        "last_evidence_hash": evidence.evidence_hash,
+                        "algorithm_version": self.config.algorithm_version,
+                    }
+                )
             except Exception as exc:
                 self._last_error = type(exc).__name__
                 raise
-            self.metrics.increment("evidence_durable" if inserted else "evidence_recovered")
+            self.metrics.increment(
+                "evidence_durable" if inserted else "evidence_recovered"
+            )
             self.metrics.checkpoint_or_watermark = tick.ingest_seq
             self.metrics.last_success_at_utc = isoformat()
             self._last_error = None
@@ -238,7 +353,12 @@ class ExecutionQualityWorker:
 
     replay = consume
 
-    def run(self, *, stop_event: threading.Event | None = None, interval_seconds: float = 1.0) -> None:
+    def run(
+        self,
+        *,
+        stop_event: threading.Event | None = None,
+        interval_seconds: float = 1.0,
+    ) -> None:
         self.recover()
         self.replay()
         self.publish_projection()
@@ -252,10 +372,27 @@ class ExecutionQualityWorker:
             stop_event.wait(max(0.01, float(interval_seconds)))
 
     def health(self) -> HealthSnapshot:
-        return HealthSnapshot(self.service_id, "healthy" if not self._last_error else "degraded", isoformat(), self.metrics.started_at_utc, {"verified_tick_stream": {"status": "healthy", "checkpoint": self.last_ingest_seq}, "evidence_store": {"status": "healthy"}}, self._last_error)
+        return HealthSnapshot(
+            self.service_id,
+            "healthy" if not self._last_error else "degraded",
+            isoformat(),
+            self.metrics.started_at_utc,
+            {
+                "verified_tick_stream": {
+                    "status": "healthy",
+                    "checkpoint": self.last_ingest_seq,
+                },
+                "evidence_store": {"status": "healthy"},
+            },
+            self._last_error,
+        )
 
     def readiness(self) -> ReadinessSnapshot:
-        blockers = ("consumer_recovery_required",) if not self._state_recovered or self._last_error else ()
+        blockers = (
+            ("consumer_recovery_required",)
+            if not self._state_recovered or self._last_error
+            else ()
+        )
         return ReadinessSnapshot(
             self.service_id,
             not blockers,
@@ -279,7 +416,9 @@ class ExecutionQualityWorker:
             self.config.projection_dir,
             build_projection(
                 service_id=self.service_id,
-                generation=self.identity.source_revision + ":" + self.config.stream_generation,
+                generation=self.identity.source_revision
+                + ":"
+                + self.config.stream_generation,
                 health=self.health(),
                 readiness=self.readiness(),
                 version=self.identity,
@@ -298,7 +437,9 @@ def main(argv: list[str] | None = None) -> int:
     group.add_argument("--consume", action="store_true")
     group.add_argument("--run", action="store_true")
     args = parser.parse_args(argv)
-    worker = ExecutionQualityWorker(ExecutionQualityConfig.from_environment(args.state_dir))
+    worker = ExecutionQualityWorker(
+        ExecutionQualityConfig.from_environment(args.state_dir)
+    )
     if args.version:
         value = worker.version()
     elif args.ready:
@@ -315,7 +456,10 @@ def main(argv: list[str] | None = None) -> int:
         stop = threading.Event()
         for signum in (signal.SIGTERM, signal.SIGINT):
             signal.signal(signum, lambda *_: stop.set())
-        worker.run(stop_event=stop, interval_seconds=float(os.getenv("PHASE_B_EQ_POLL_SECONDS", "1")))
+        worker.run(
+            stop_event=stop,
+            interval_seconds=float(os.getenv("PHASE_B_EQ_POLL_SECONDS", "1")),
+        )
         return 0
     else:
         value = worker.health().as_dict()

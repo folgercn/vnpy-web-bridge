@@ -218,7 +218,9 @@ def test_unsealed_key_fd_requires_hash_pin(tmp_path: Path) -> None:
     try:
         with pytest.raises(OfflineSignerError, match="SIGNER_KEY_FD_PIN_REQUIRED"):
             sign_request(
-                request(), keyring=keyring("research", private), key_fd=fd,
+                request(),
+                keyring=keyring("research", private),
+                key_fd=fd,
                 now=datetime(2026, 8, 5, 0, 5, tzinfo=timezone.utc),
             )
         with pytest.raises(OfflineSignerError, match="SIGNER_KEY_HASH_MISMATCH"):
@@ -250,7 +252,7 @@ def test_signing_request_rejects_domain_confusion_and_unknown_fields() -> None:
     with pytest.raises(ContractError, match="SIGNING_REQUEST_ARTIFACT_DOMAIN_MISMATCH"):
         build_signing_request(
             artifact("research"),
-        domain="execution_permit",
+            domain="execution_permit",
             key_id="permit-1",
             key_version="v1",
             request_id="request-1",

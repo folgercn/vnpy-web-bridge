@@ -480,7 +480,10 @@ class VerifiedTick:
             "event_hash",
         )
         expected_fields = {"contract_version", *cls.__dataclass_fields__}
-        if set(value) != expected_fields or value.get("contract_version") != CONTRACT_VERSION:
+        if (
+            set(value) != expected_fields
+            or value.get("contract_version") != CONTRACT_VERSION
+        ):
             missing = [name for name in required if name not in value]
             detail = ",".join(missing) if missing else "unexpected fields"
             raise ValueError(f"verified tick contract mismatch: {detail}")
@@ -643,7 +646,10 @@ class ExecutionQualityEvidence:
             or evidence.evidence_hash != sha256_hex(body)
         ):
             raise ValueError("execution-quality evidence hash mismatch")
-        if evidence.evidence_id != f"{evidence.stream_generation}:{evidence.ingest_id}:{evidence.algorithm_version}":
+        if (
+            evidence.evidence_id
+            != f"{evidence.stream_generation}:{evidence.ingest_id}:{evidence.algorithm_version}"
+        ):
             raise ValueError("execution-quality evidence identity mismatch")
         return evidence
 

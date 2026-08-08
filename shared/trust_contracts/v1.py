@@ -300,7 +300,10 @@ def _read_exact(path: Path, *, max_bytes: int = 4 * 1024 * 1024) -> bytes:
         finally:
             os.close(fd)
         final = path.lstat()
-        def identity(item: os.stat_result) -> tuple[int, int, int, int, int, int, int, int]:
+
+        def identity(
+            item: os.stat_result,
+        ) -> tuple[int, int, int, int, int, int, int, int]:
             return (
                 item.st_dev,
                 item.st_ino,
@@ -311,6 +314,7 @@ def _read_exact(path: Path, *, max_bytes: int = 4 * 1024 * 1024) -> bytes:
                 item.st_mtime_ns,
                 item.st_ctime_ns,
             )
+
         if len({identity(item) for item in (before, opened, after, final)}) != 1:
             raise ContractError("TRUST_FILE_CHANGED_DURING_READ")
         if len(raw) != opened.st_size or not raw:

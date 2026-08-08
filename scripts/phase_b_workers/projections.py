@@ -48,7 +48,9 @@ def build_projection(
         raise ProjectionError("PROJECTION_GENERATION_INVALID")
     payload = {
         "health": health.as_dict() if hasattr(health, "as_dict") else dict(health),
-        "readiness": readiness.as_dict() if hasattr(readiness, "as_dict") else dict(readiness),
+        "readiness": readiness.as_dict()
+        if hasattr(readiness, "as_dict")
+        else dict(readiness),
         "version": version.as_dict() if hasattr(version, "as_dict") else dict(version),
     }
     return {
@@ -65,11 +67,21 @@ def build_projection(
 
 
 def validate_projection(
-    value: Mapping[str, object], *, expected_service_id: str, max_age_seconds: float = 60.0
+    value: Mapping[str, object],
+    *,
+    expected_service_id: str,
+    max_age_seconds: float = 60.0,
 ) -> dict[str, object]:
     if set(value) != {
-        "schema_version", "service_id", "generation", "projected_at_utc", "payload",
-        "payload_sha256", "production", "live", "countable_forward",
+        "schema_version",
+        "service_id",
+        "generation",
+        "projected_at_utc",
+        "payload",
+        "payload_sha256",
+        "production",
+        "live",
+        "countable_forward",
     }:
         raise ProjectionError("PROJECTION_SCHEMA_INVALID")
     if value.get("schema_version") != PROJECTION_SCHEMA_VERSION:
@@ -79,18 +91,31 @@ def validate_projection(
     generation = value.get("generation")
     if not isinstance(generation, str) or not generation:
         raise ProjectionError("PROJECTION_GENERATION_INVALID")
-    if any(value.get(flag) is not False for flag in ("production", "live", "countable_forward")):
+    if any(
+        value.get(flag) is not False
+        for flag in ("production", "live", "countable_forward")
+    ):
         raise ProjectionError("PROJECTION_AUTHORITY_INVALID")
     payload = value.get("payload")
-    if not isinstance(payload, Mapping) or set(payload) != {"health", "readiness", "version"}:
+    if not isinstance(payload, Mapping) or set(payload) != {
+        "health",
+        "readiness",
+        "version",
+    }:
         raise ProjectionError("PROJECTION_PAYLOAD_INVALID")
     if value.get("payload_sha256") != sha256_hex(payload):
         raise ProjectionError("PROJECTION_HASH_MISMATCH")
-    if not isinstance(value.get("payload_sha256"), str) or _SHA256.fullmatch(str(value["payload_sha256"])) is None:
+    if (
+        not isinstance(value.get("payload_sha256"), str)
+        or _SHA256.fullmatch(str(value["payload_sha256"])) is None
+    ):
         raise ProjectionError("PROJECTION_HASH_INVALID")
     for key in ("health", "readiness", "version"):
         nested = payload[key]
-        if not isinstance(nested, Mapping) or nested.get("service_id") != expected_service_id:
+        if (
+            not isinstance(nested, Mapping)
+            or nested.get("service_id") != expected_service_id
+        ):
             raise ProjectionError("PROJECTION_SERVICE_ID_MISMATCH")
     version = payload["version"]
     if CONTRACT_VERSION not in version.get("contract_versions", []):
@@ -102,7 +127,9 @@ def validate_projection(
     return dict(value)
 
 
-def publish_projection(directory: str | Path | None, projection: Mapping[str, object]) -> None:
+def publish_projection(
+    directory: str | Path | None, projection: Mapping[str, object]
+) -> None:
     """Atomically replace the sole producer-owned projection file."""
 
     if directory is None:
@@ -116,7 +143,12 @@ def publish_projection(directory: str | Path | None, projection: Mapping[str, ob
     service_id = str(projection.get("service_id") or "")
     if not service_id:
         raise ProjectionError("PROJECTION_SERVICE_ID_INVALID")
-    raw = (json.dumps(dict(projection), ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+    raw = (
+        json.dumps(
+            dict(projection), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
+        + "\n"
+    ).encode("utf-8")
     temporary = root / f".{service_id}.{uuid.uuid4().hex}.tmp"
     target = root / f"{service_id}.json"
     fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600)
