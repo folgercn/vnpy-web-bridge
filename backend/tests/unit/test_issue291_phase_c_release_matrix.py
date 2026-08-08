@@ -29,6 +29,9 @@ COMPOSE_SMOKE = (ROOT / "scripts/ci/phase_c_compose_smoke.sh").read_text(
 OFFLINE_E2E = (ROOT / "scripts/ci/phase_c_offline_e2e.sh").read_text(
     encoding="utf-8"
 )
+OFFLINE_E2E_COMPOSE = (ROOT / "deployments/phase-c/docker-compose.offline-e2e.yml").read_text(
+    encoding="utf-8"
+)
 
 
 def _units(plan: dict[str, object]) -> set[tuple[str, str]]:
@@ -209,6 +212,7 @@ def test_compose_smoke_pins_selected_image_to_exact_service_or_gateway_pair() ->
     assert 'CONTROL_API_IMAGE="$image"' in COMPOSE_SMOKE
     assert 'EXECUTION_IMAGE="$image"' in COMPOSE_SMOKE
     assert 'GATEWAY_PROXY_IMAGE="$image"' in COMPOSE_SMOKE
+    assert "JWT_SECRET_KEY='phase-c-ci-not-a-runtime-secret-x'" in COMPOSE_SMOKE
     for assignment in (
         'ARTIFACT_CUSTODY_IMAGE="$image"',
         'C_FAST_PRODUCER_IMAGE="$image"',
@@ -231,6 +235,11 @@ def test_offline_e2e_uses_canonical_images_and_receipts_not_phase_c_duplicates()
     assert "deployments/phase-c/Containerfile" not in OFFLINE_E2E
     assert "PHASE_C_CUSTODY_POLICIES_JSON" in OFFLINE_E2E
     assert "Ed25519PrivateKey.generate" in OFFLINE_E2E
+    assert "secrets.token_urlsafe(48)" in OFFLINE_E2E
+    assert "failed to generate a compliant ephemeral Control JWT secret" in OFFLINE_E2E
+    assert "phase-c-e2e-jwt-secret" not in OFFLINE_E2E
+    assert "APP_ENV: phase-c-offline" in OFFLINE_E2E_COMPOSE
+    assert "JWT_SECRET_KEY: ${JWT_SECRET_KEY:?required}" in OFFLINE_E2E_COMPOSE
     assert "immutable_image_ref" in OFFLINE_E2E
     for image_env in ("CONTROL_API_IMAGE", "ARTIFACT_CUSTODY_IMAGE", "EXECUTION_IMAGE"):
         assert image_env in OFFLINE_E2E

@@ -37,7 +37,7 @@ case "$phase" in
     export EXECUTION_ENVIRONMENT='phase-c-ci'
     export GATEWAY_RPC_REQ_PROXY_PORT=2014 GATEWAY_RPC_PUB_PROXY_PORT=4102
     export WINDOWS_RPC_REQ_ADDRESS='tcp://192.0.2.1:2014' WINDOWS_RPC_PUB_ADDRESS='tcp://192.0.2.1:4102'
-    export JWT_SECRET_KEY='phase-c-ci-not-a-runtime-secret'
+    export JWT_SECRET_KEY='phase-c-ci-not-a-runtime-secret-x'
     export AUTH_USERS_JSON='[{"username":"ci","password_sha256":"ci"}]'
     export POSTGRES_DB=vnpy POSTGRES_ADMIN_USER=postgres POSTGRES_ADMIN_PASSWORD=phase-c
     export CONTROL_DB_USER=control CONTROL_DB_PASSWORD=phase-c-control

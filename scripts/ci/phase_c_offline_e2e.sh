@@ -63,7 +63,15 @@ PY
 export PHASE_C_CUSTODY_SHARED_SECRET=phase-c-e2e-custody-secret
 export PHASE_C_EXECUTION_SHARED_SECRET=phase-c-e2e-execution-secret
 export CONTROL_EXECUTION_SHARED_SECRET=phase-c-e2e-control-execution-secret
-export JWT_SECRET_KEY=phase-c-e2e-jwt-secret
+# APP_ENV=phase-c-offline exercises the same non-test Control startup guard as
+# a deployed process. Keep this token ephemeral: it is neither logged nor
+# written to the temporary handoff/receipt artifacts.
+export JWT_SECRET_KEY
+JWT_SECRET_KEY="$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')"
+if [ "${#JWT_SECRET_KEY}" -lt 32 ] || [ "$JWT_SECRET_KEY" = "change-me-in-production" ]; then
+  echo "failed to generate a compliant ephemeral Control JWT secret" >&2
+  exit 2
+fi
 export AUTH_USERS_JSON='[{"username":"ci","password_sha256":"ci"}]'
 export PHASE_C_CUSTODY_POLICIES_JSON
 PHASE_C_CUSTODY_POLICIES_JSON=$(<"$workdir/policies.json")
