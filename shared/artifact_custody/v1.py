@@ -347,28 +347,13 @@ class ArtifactCustody:
         except Exception as exc:
             raise CustodyError("CUSTODY_SCHEMA_VALIDATION_FAILED") from exc
 
-    def _load_artifacts(self) -> dict[str, dict[str, Any]]:
-        result: dict[str, dict[str, Any]] = {}
-        for name in os.listdir(self._dirs["artifacts"]):
-            if not name.startswith("artifact-") or not name.endswith(".json"):
-                raise CustodyError("CUSTODY_ARTIFACT_STORE_CORRUPT")
-            payload, _ = self._read_json(self._dirs["artifacts"], name)
-            try:
-                artifact = validate_artifact_envelope(payload)
-                assert_non_authoritative(artifact)
-            except ContractError as exc:
-                raise CustodyError("CUSTODY_ARTIFACT_INVALID") from exc
-            if (
-                name != f"{artifact['artifact_id']}.json"
-                or artifact["trust_domain"] not in KEY_DOMAINS
-            ):
-                raise CustodyError("CUSTODY_ARTIFACT_INVALID")
-            self._validate_schema(artifact)
-            result[artifact["artifact_id"]] = artifact
-        return result
-
     def _load_state(self) -> _State:
-        artifacts = self._load_artifacts()
+        # A publish envelope is committed inside its receipt ledger record.
+        # Keeping a second artifact file would reintroduce an unavoidable
+        # crash window between two create-only files, leaving an orphan.
+        if os.listdir(self._dirs["artifacts"]):
+            raise CustodyError("CUSTODY_ARTIFACT_STORE_CORRUPT")
+        artifacts: dict[str, dict[str, Any]] = {}
         receipt_names = sorted(os.listdir(self._dirs["receipts"]))
         receipts: list[dict[str, Any]] = []
         idempotency: dict[str, dict[str, Any]] = {}
@@ -390,6 +375,7 @@ class ArtifactCustody:
                 "sequence",
                 "writer_id",
                 "writer_epoch",
+                "artifact",
                 "receipt",
                 "receipt_sha256",
                 "previous_record_sha256",
@@ -427,6 +413,22 @@ class ArtifactCustody:
                 receipt = validate_receipt(record["receipt"])
             except ContractError as exc:
                 raise CustodyError("CUSTODY_RECEIPT_INVALID") from exc
+            inline = record["artifact"]
+            if receipt["receipt_type"] == "publish":
+                try:
+                    artifact = validate_artifact_envelope(inline)
+                    assert_non_authoritative(artifact)
+                except ContractError as exc:
+                    raise CustodyError("CUSTODY_ARTIFACT_INVALID") from exc
+                if (
+                    artifact["trust_domain"] not in KEY_DOMAINS
+                    or artifact["artifact_id"] in artifacts
+                ):
+                    raise CustodyError("CUSTODY_ARTIFACT_INVALID")
+                self._validate_schema(artifact)
+                artifacts[artifact["artifact_id"]] = artifact
+            elif inline is not None:
+                raise CustodyError("CUSTODY_RECORD_ARTIFACT_INVALID")
             receipt_raw = canonical_json_line(receipt)
             if record["receipt_sha256"] != sha256_bytes(receipt_raw):
                 raise CustodyError("CUSTODY_RECEIPT_HASH_MISMATCH")
@@ -523,46 +525,6 @@ class ArtifactCustody:
     def _artifact_bytes(self, artifact: Mapping[str, Any]) -> bytes:
         return canonical_json_line(validate_artifact_envelope(artifact))
 
-    def _store_artifact(self, artifact: Mapping[str, Any], state: _State) -> bool:
-        name = f"{artifact['artifact_id']}.json"
-        raw = self._artifact_bytes(artifact)
-        existing = state.artifacts.get(artifact["artifact_id"])
-        if existing is not None:
-            if canonical_json_line(existing) != raw:
-                raise CustodyError("CUSTODY_ARTIFACT_COLLISION")
-            return False
-        try:
-            self._publish_create_only("artifacts", name, raw)
-            return True
-        except CustodyError as exc:
-            if exc.code != "CUSTODY_CREATE_ONLY_CONFLICT":
-                raise
-            observed = self._read_bytes(self._dirs["artifacts"], name)
-            if observed != raw:
-                raise CustodyError("CUSTODY_ARTIFACT_COLLISION") from exc
-            return False
-
-    def _remove_uncommitted_artifact(self, artifact: Mapping[str, Any]) -> None:
-        """Remove only this invocation's unpublished artifact after a failed commit.
-
-        Artifact files have no meaning until their matching receipt record is
-        durable.  If record publication fails before its name appears, this
-        rollback prevents a retry from inheriting an orphaned artifact.  It is
-        deliberately descriptor-relative and verifies exact bytes first.
-        """
-
-        name = f"{artifact['artifact_id']}.json"
-        raw = self._artifact_bytes(artifact)
-        try:
-            if self._read_bytes(self._dirs["artifacts"], name) != raw:
-                raise CustodyError("CUSTODY_ARTIFACT_COLLISION")
-            os.unlink(name, dir_fd=self._dirs["artifacts"])
-            os.fsync(self._dirs["artifacts"])
-        except CustodyError:
-            raise
-        except OSError as exc:
-            raise CustodyError("CUSTODY_ARTIFACT_ROLLBACK_FAILED") from exc
-
     @staticmethod
     def _replay(
         state: _State,
@@ -620,7 +582,6 @@ class ArtifactCustody:
         idempotency_key: str,
         correlation_id: str,
         expected_version: int,
-        store_artifact: bool = False,
     ) -> dict[str, Any]:
         actor_id, idempotency_key, correlation_id, expected_version = _request_fields(
             actor_id=actor_id,
@@ -657,15 +618,13 @@ class ArtifactCustody:
             fencing_token=f"{self.writer_id}:{self.writer_epoch}",
             status="revoked" if receipt_type == "revoke" else "accepted",
         )
-        stored_new = False
-        if store_artifact:
-            stored_new = self._store_artifact(artifact, state)
         receipt_raw = canonical_json_line(receipt)
         record = {
             "schema_version": CUSTODY_RECORD_SCHEMA_VERSION,
             "sequence": state.version + 1,
             "writer_id": self.writer_id,
             "writer_epoch": self.writer_epoch,
+            "artifact": dict(artifact) if receipt_type == "publish" else None,
             "receipt": receipt,
             "receipt_sha256": sha256_bytes(receipt_raw),
             "previous_record_sha256": state.previous_record_sha256,
@@ -674,20 +633,7 @@ class ArtifactCustody:
             "countable_forward": False,
         }
         name = f"{state.version + 1:020d}-{receipt['receipt_id']}.json"
-        try:
-            self._publish_create_only("receipts", name, canonical_json_line(record))
-        except Exception:
-            # An fsync failure can be reported after link(2).  Retain the
-            # artifact whenever the receipt name is visible; otherwise it was
-            # never committed and is safe to remove.
-            try:
-                os.stat(name, dir_fd=self._dirs["receipts"], follow_symlinks=False)
-                receipt_visible = True
-            except FileNotFoundError:
-                receipt_visible = False
-            if stored_new and not receipt_visible:
-                self._remove_uncommitted_artifact(artifact)
-            raise
+        self._publish_create_only("receipts", name, canonical_json_line(record))
         self._load_state()
         return receipt
 
@@ -738,7 +684,6 @@ class ArtifactCustody:
             idempotency_key=idempotency_key,
             correlation_id=correlation_id,
             expected_version=expected_version,
-            store_artifact=True,
         )
 
     def record(

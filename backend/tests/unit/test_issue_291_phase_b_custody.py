@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -244,19 +243,15 @@ def test_expected_version_and_request_validation_happen_before_artifact_write(
             validate_receipt(receipt | {"extra": False})
 
 
-def test_failed_receipt_commit_removes_uncommitted_artifact(
+def test_publish_uses_single_receipt_commit_without_orphan_artifact(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = tmp_path / "custody"
     item = artifact()
     with custody(root) as store:
-        original = store._publish_create_only
-
         def fail_receipt(directory: str, final_name: str, raw: bytes) -> None:
             if directory == "receipts":
                 raise OSError("simulated receipt write failure")
-            original(directory, final_name, raw)
-
         monkeypatch.setattr(store, "_publish_create_only", fail_receipt)
         with pytest.raises(OSError, match="simulated receipt write failure"):
             store.publish(
@@ -276,7 +271,7 @@ def test_tamper_and_symlink_swap_are_detected(tmp_path: Path) -> None:
         store.publish(
             item, actor_id="producer", idempotency_key="p1", correlation_id="c1", expected_version=0
         )
-        stored = root / "artifacts" / f"{item['artifact_id']}.json"
+        stored = next((root / "receipts").iterdir())
         stored.write_text("{}\n", encoding="utf-8")
         with pytest.raises(CustodyError):
             store.audit()
@@ -286,16 +281,16 @@ def test_tamper_and_symlink_swap_are_detected(tmp_path: Path) -> None:
         store.publish(
             item, actor_id="producer", idempotency_key="p1", correlation_id="c1", expected_version=0
         )
-        stored = root2 / "artifacts" / f"{item['artifact_id']}.json"
+        stored = next((root2 / "receipts").iterdir())
         target = tmp_path / "replacement"
-        target.write_text(json.dumps(item), encoding="utf-8")
+        target.write_bytes(stored.read_bytes())
         stored.unlink()
         stored.symlink_to(target)
         with pytest.raises(CustodyError):
             store.audit()
 
 
-def test_crash_after_artifact_publish_recovers_without_overwrite(
+def test_crash_before_single_publish_commit_recovers_without_overwrite(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = tmp_path / "custody"

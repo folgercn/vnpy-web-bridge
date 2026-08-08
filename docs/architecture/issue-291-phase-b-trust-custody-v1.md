@@ -22,7 +22,9 @@ Trust domain 固定为：
 artifact 指定的 key id，不能尝试所有 key、旧 key 或默认 domain 作为 fallback。
 
 `artifact-custody` 是 artifact 和 install/consume/revoke receipt 的唯一持久 writer。
-Artifact 及 receipt 使用 canonical JSON line；artifact 带 canonical/raw SHA-256、
+Artifact envelope 内联在它的 publish receipt ledger record 中，以单一 create-only
+commit 避免 artifact/receipt 双文件崩溃窗口；artifact 及 receipt 使用 canonical JSON
+line；artifact 带 canonical/raw SHA-256、
 schema ref、producer identity、predecessor、lineage、scope 和 immutable id。发布和
 receipt append 都是 create-only：临时文件写满并 fsync，原子发布后 fsync 目录；读取
 使用 `O_NOFOLLOW`、fd identity 和 canonical/hash 重校验。期望版本、idempotency key、
