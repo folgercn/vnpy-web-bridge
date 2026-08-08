@@ -86,6 +86,7 @@ policies = {domain:{"keyring_path":"/tmp/phase-c-e2e-keyring.json","keyring_raw_
 PY
 
 export PHASE_C_CUSTODY_SHARED_SECRET=phase-c-e2e-custody-secret
+export PHASE_C_CUSTODY_EXECUTION_READ_SECRET=phase-c-e2e-execution-read-secret
 export PHASE_C_EXECUTION_SHARED_SECRET=phase-c-e2e-execution-secret
 export CONTROL_EXECUTION_SHARED_SECRET=phase-c-e2e-control-execution-secret
 # APP_ENV=phase-c-offline exercises the same non-test Control startup guard as

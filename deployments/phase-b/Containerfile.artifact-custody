@@ -11,10 +11,11 @@ COPY shared/phase_c_workflow /app/shared/phase_c_workflow
 COPY backend/app/__init__.py /app/app/__init__.py
 COPY backend/app/phase_c /app/app/phase_c
 COPY backend/app/phase_c_custody.py /app/app/phase_c_custody.py
+COPY scripts/phase_b_workers /app/phase_b_workers
 COPY scripts/phase_b_artifact_custody.py /app/scripts/phase_b_artifact_custody.py
 COPY docs/schemas /app/docs/schemas
 COPY shared/artifact-contracts /app/docs/schemas/producer
-RUN python -m compileall -q /app/shared /app/scripts/phase_b_artifact_custody.py
+RUN python -m compileall -q /app/shared /app/phase_b_workers /app/scripts/phase_b_artifact_custody.py
 RUN groupadd --system --gid 65532 custody \
     && useradd --system --uid 65532 --gid 65532 --no-create-home \
         --home-dir /nonexistent --shell /usr/sbin/nologin custody \
