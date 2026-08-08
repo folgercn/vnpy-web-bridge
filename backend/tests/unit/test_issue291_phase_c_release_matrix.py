@@ -265,6 +265,9 @@ def test_offline_e2e_uses_canonical_images_and_receipts_not_phase_c_duplicates()
     assert "receipt_image_tag artifacts/issue-291-phase-c-e2e-artifact-custody-receipt.json" in OFFLINE_E2E
     assert "receipt_image_tag artifacts/issue-291-phase-c-e2e-execution-orchestrator-receipt.json" in OFFLINE_E2E
     assert '))["immutable_image_ref"])' not in OFFLINE_E2E
+    assert 'compose exec -T artifact-custody python -c' in OFFLINE_E2E
+    assert 'sys.stdin.buffer.read()' in OFFLINE_E2E
+    assert 'compose cp "$workdir/keyring.json"' not in OFFLINE_E2E
     for image_env in ("CONTROL_API_IMAGE", "ARTIFACT_CUSTODY_IMAGE", "EXECUTION_IMAGE"):
         assert image_env in OFFLINE_E2E
     assert "/api/phase-c/artifacts/upload-install" in OFFLINE_E2E

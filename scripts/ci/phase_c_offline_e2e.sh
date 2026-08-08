@@ -97,7 +97,9 @@ export CONTROL_API_IMAGE="$(receipt_image_tag artifacts/issue-291-phase-c-e2e-co
 export ARTIFACT_CUSTODY_IMAGE="$(receipt_image_tag artifacts/issue-291-phase-c-e2e-artifact-custody-receipt.json)"
 export EXECUTION_IMAGE="$(receipt_image_tag artifacts/issue-291-phase-c-e2e-execution-orchestrator-receipt.json)"
 compose up --no-build --detach
-compose cp "$workdir/keyring.json" artifact-custody:/tmp/phase-c-e2e-keyring.json
+compose exec -T artifact-custody python -c \
+  'import sys; open("/tmp/phase-c-e2e-keyring.json", "wb").write(sys.stdin.buffer.read())' \
+  < "$workdir/keyring.json"
 wait_for_control
 
 upload_b64=$(base64 < "$workdir/upload.json" | tr -d '\n')
