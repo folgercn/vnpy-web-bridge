@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vnpy-web-bridge.invalid/schemas/issue-291-phase-c-authorization-command-v1.schema.json",
+  "title": "Issue 291 Phase C typed runtime authorization command v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "command_id", "idempotency_key", "expected_version", "action", "authorization_artifact_id", "custody_receipt_id", "reason"],
+  "properties": {
+    "schema_version": {"const": "web-bridge-phase-c-authorization-command-v1"},
+    "command_id": {"type": "string", "minLength": 8},
+    "idempotency_key": {"type": "string", "minLength": 8},
+    "expected_version": {"type": "integer", "minimum": 0},
+    "action": {"enum": ["enable", "revoke"]},
+    "authorization_artifact_id": {"type": "string", "minLength": 4},
+    "custody_receipt_id": {"type": "string", "minLength": 4},
+    "reason": {"type": "string", "minLength": 3, "maxLength": 500}
+  }
+}
