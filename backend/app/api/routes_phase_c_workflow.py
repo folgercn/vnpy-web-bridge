@@ -31,7 +31,10 @@ Admin = Annotated[CurrentUser, Depends(require_roles("admin"))]
 
 def _adapter_error(exc: WorkflowAdapterError) -> AppError:
     return AppError(
-        str(exc), code=exc.code, status_code=exc.status_code, detail={"fail_closed": True}
+        str(exc),
+        code=exc.code,
+        status_code=exc.status_code,
+        detail={"fail_closed": True},
     )
 
 
@@ -46,7 +49,9 @@ def workflow_status(_: Reader) -> dict[str, Any]:
 
 
 @router.post("/signing-requests/export")
-def export_signing_request(payload: SigningRequestCreateDTO, _: Admin) -> dict[str, Any]:
+def export_signing_request(
+    payload: SigningRequestCreateDTO, _: Admin
+) -> dict[str, Any]:
     """Export canonical bytes for an offline signer; never sign in-browser."""
     try:
         request = build_signing_request(
@@ -60,13 +65,18 @@ def export_signing_request(payload: SigningRequestCreateDTO, _: Admin) -> dict[s
         )
     except PhaseCWorkflowError as exc:
         raise AppError(
-            str(exc), code="PHASE_C_SIGNING_REQUEST_INVALID", status_code=422, detail={"fail_closed": True}
+            str(exc),
+            code="PHASE_C_SIGNING_REQUEST_INVALID",
+            status_code=422,
+            detail={"fail_closed": True},
         ) from exc
     return ok(request)
 
 
 @router.post("/artifacts/upload-install")
-def upload_and_install_signed_artifact(payload: SignedArtifactUploadDTO, _: Admin) -> dict[str, Any]:
+def upload_and_install_signed_artifact(
+    payload: SignedArtifactUploadDTO, _: Admin
+) -> dict[str, Any]:
     """Forward a pre-signed offline handoff to custody; Control does not retain it."""
     try:
         return ok(phase_c_workflow_client.install(payload).model_dump(mode="json"))
@@ -93,18 +103,27 @@ def custody_receipt(receipt_id: str, _: Reader) -> dict[str, Any]:
 @router.get("/custody/receipts-by-idempotency/{idempotency_key}")
 def custody_receipt_by_idempotency(idempotency_key: str, _: Reader) -> dict[str, Any]:
     try:
-        receipt = phase_c_workflow_client.custody_receipt_by_idempotency(idempotency_key)
+        receipt = phase_c_workflow_client.custody_receipt_by_idempotency(
+            idempotency_key
+        )
     except WorkflowAdapterError as exc:
         raise _adapter_error(exc) from exc
     if receipt is None:
-        raise AppError("custody receipt 尚不可判定", code="PHASE_C_UNKNOWN_OUTCOME", status_code=404, detail={"idempotency_key": idempotency_key, "query_same_intent_only": True})
+        raise AppError(
+            "custody receipt 尚不可判定",
+            code="PHASE_C_UNKNOWN_OUTCOME",
+            status_code=404,
+            detail={"idempotency_key": idempotency_key, "query_same_intent_only": True},
+        )
     return ok(receipt.model_dump(mode="json"))
 
 
 @router.get("/authorization/status")
 def authorization_status(_: Reader) -> dict[str, Any]:
     try:
-        return ok(phase_c_workflow_client.authorization_status().model_dump(mode="json"))
+        return ok(
+            phase_c_workflow_client.authorization_status().model_dump(mode="json")
+        )
     except WorkflowAdapterError as exc:
         raise _adapter_error(exc) from exc
 
@@ -112,7 +131,11 @@ def authorization_status(_: Reader) -> dict[str, Any]:
 @router.post("/authorization/commands")
 def authorization_command(payload: AuthorizationCommandDTO, _: Admin) -> dict[str, Any]:
     try:
-        return ok(phase_c_workflow_client.authorization_command(payload).model_dump(mode="json"))
+        return ok(
+            phase_c_workflow_client.authorization_command(payload).model_dump(
+                mode="json"
+            )
+        )
     except WorkflowAdapterError as exc:
         raise _adapter_error(exc) from exc
 
@@ -139,7 +162,9 @@ def authorization_receipt(idempotency_key: str, _: Reader) -> dict[str, Any]:
 @router.get("/execution/archive")
 def execution_projection(_: Reader) -> dict[str, Any]:
     try:
-        return ok(phase_c_workflow_client.execution_projection().model_dump(mode="json"))
+        return ok(
+            phase_c_workflow_client.execution_projection().model_dump(mode="json")
+        )
     except WorkflowAdapterError as exc:
         raise _adapter_error(exc) from exc
 

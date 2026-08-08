@@ -357,9 +357,7 @@ def create_app(service: ExecutionOrchestrator | None = None) -> Any:
             create_app as create_phase_c_app,
         )
 
-        phase_c_service = PhaseCExecutionService(
-            PhaseCExecutionSettings.from_env()
-        )
+        phase_c_service = PhaseCExecutionService(PhaseCExecutionSettings.from_env())
         app.mount("/internal/v1/phase-c", create_phase_c_app(phase_c_service))
 
     return app

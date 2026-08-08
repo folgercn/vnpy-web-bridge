@@ -27,9 +27,13 @@ class AuthorityNegativeDTO(StrictDTO):
 
 
 class SigningRequestCreateDTO(StrictDTO):
-    request_id: str = Field(min_length=4, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]+$")
+    request_id: str = Field(
+        min_length=4, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]+$"
+    )
     domain: Literal["map_acceptance", "c_fast_acceptance", "runtime_authorization"]
-    key_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+    key_id: str = Field(
+        min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$"
+    )
     key_version: str = Field(pattern=r"^v[0-9]+$")
     requested_at: str = Field(min_length=20, max_length=64)
     expires_at: str = Field(min_length=20, max_length=64)
@@ -37,7 +41,9 @@ class SigningRequestCreateDTO(StrictDTO):
 
 
 class SigningRequestDTO(StrictDTO):
-    schema_version: Literal["web-bridge-signing-request-v1"] = "web-bridge-signing-request-v1"
+    schema_version: Literal["web-bridge-signing-request-v1"] = (
+        "web-bridge-signing-request-v1"
+    )
     request_id: str
     domain: str
     key_id: str
@@ -48,10 +54,14 @@ class SigningRequestDTO(StrictDTO):
 
 
 class SignedArtifactUploadDTO(StrictDTO):
-    idempotency_key: str = Field(min_length=8, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]+$")
+    idempotency_key: str = Field(
+        min_length=8, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]+$"
+    )
     expected_custody_version: int = Field(ge=0)
     signing_request_id: str = Field(min_length=4, max_length=128)
-    correlation_id: str = Field(min_length=8, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]+$")
+    correlation_id: str = Field(
+        min_length=8, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]+$"
+    )
     signed_artifact: dict[str, Any]
 
 
@@ -61,7 +71,9 @@ class CustodyReceiptDTO(AuthorityNegativeDTO):
     artifact_id: str
     artifact_type: Literal["runtime-authorization"] = "runtime-authorization"
     trust_domain: Literal["runtime_authorization"] = "runtime_authorization"
-    schema_ref: Literal["phase-c-runtime-authorization-v1"] = "phase-c-runtime-authorization-v1"
+    schema_ref: Literal["phase-c-runtime-authorization-v1"] = (
+        "phase-c-runtime-authorization-v1"
+    )
     artifact_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     signer_key_id: str = "test-only"
     signer_key_version: str = "v1"
@@ -77,9 +89,15 @@ class CustodyReceiptDTO(AuthorityNegativeDTO):
 
 
 class AuthorizationCommandDTO(StrictDTO):
-    schema_version: Literal[AUTHORIZATION_COMMAND_SCHEMA_VERSION] = AUTHORIZATION_COMMAND_SCHEMA_VERSION
-    command_id: str = Field(min_length=8, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]+$")
-    idempotency_key: str = Field(min_length=8, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]+$")
+    schema_version: Literal[AUTHORIZATION_COMMAND_SCHEMA_VERSION] = (
+        AUTHORIZATION_COMMAND_SCHEMA_VERSION
+    )
+    command_id: str = Field(
+        min_length=8, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]+$"
+    )
+    idempotency_key: str = Field(
+        min_length=8, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]+$"
+    )
     expected_version: int = Field(ge=0)
     action: Literal["enable", "revoke"]
     authorization_artifact_id: str = Field(min_length=4, max_length=256)

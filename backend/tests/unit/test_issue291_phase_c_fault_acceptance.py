@@ -58,35 +58,71 @@ def test_phase_c_fault_harness_is_offline_deterministic_and_covers_required_faul
     assert all(item["status"] == "passed" for item in bundle["scenarios"])
     for item in bundle["scenarios"]:
         evidence = item["evidence"]
-        assert evidence["timeline"] == [record["sha256"] for record in evidence["records"]]
-        assert evidence["derived_sha256"] == sha256_json({
-            "case_id": item["case_id"],
-            "timeline": evidence["timeline"],
-            "unique_intent_ids": evidence["unique_intent_ids"],
-            "unique_receipt_ids": evidence["unique_receipt_ids"],
-            "gateway_event_count": evidence["gateway_event_count"],
-        })
-        assert all(record["sha256"] == sha256_json({
-            "record_type": record["record_type"],
-            "sequence": record["sequence"],
-            "payload": record["payload"],
-        }) for record in evidence["records"])
+        assert evidence["timeline"] == [
+            record["sha256"] for record in evidence["records"]
+        ]
+        assert evidence["derived_sha256"] == sha256_json(
+            {
+                "case_id": item["case_id"],
+                "timeline": evidence["timeline"],
+                "unique_intent_ids": evidence["unique_intent_ids"],
+                "unique_receipt_ids": evidence["unique_receipt_ids"],
+                "gateway_event_count": evidence["gateway_event_count"],
+            }
+        )
+        assert all(
+            record["sha256"]
+            == sha256_json(
+                {
+                    "record_type": record["record_type"],
+                    "sequence": record["sequence"],
+                    "payload": record["payload"],
+                }
+            )
+            for record in evidence["records"]
+        )
 
     process_cases = {item["case_id"]: item for item in bundle["scenarios"]}
     leader_types = {
         record["record_type"]
-        for record in process_cases["process_pause_lease_expiry_kill_restart"]["evidence"]["records"]
+        for record in process_cases["process_pause_lease_expiry_kill_restart"][
+            "evidence"
+        ]["records"]
     }
-    assert {"leader_process_paused", "leader_process_killed", "durable_leader_state"} <= leader_types
+    assert {
+        "leader_process_paused",
+        "leader_process_killed",
+        "durable_leader_state",
+    } <= leader_types
 
-    reset_records = process_cases["loopback_partition_reset_unknown_restart_reconcile"]["evidence"]["records"]
+    reset_records = process_cases["loopback_partition_reset_unknown_restart_reconcile"][
+        "evidence"
+    ]["records"]
     reset_types = {record["record_type"] for record in reset_records}
-    assert {"loopback_gateway_reset_connection", "same_intent_query", "reconcile_receipt"} <= reset_types
-    reset_state = next(record["payload"]["payload"] for record in reset_records if record["record_type"] == "durable_state_after_reset")
+    assert {
+        "loopback_gateway_reset_connection",
+        "same_intent_query",
+        "reconcile_receipt",
+    } <= reset_types
+    reset_state = next(
+        record["payload"]["payload"]
+        for record in reset_records
+        if record["record_type"] == "durable_state_after_reset"
+    )
     assert reset_state["unknown_outcomes"]
 
-    crash_records = process_cases["loopback_send_cancel_crash_boundaries"]["evidence"]["records"]
+    crash_records = process_cases["loopback_send_cancel_crash_boundaries"]["evidence"][
+        "records"
+    ]
     crash_types = [record["record_type"] for record in crash_records]
     assert crash_types.count("loopback_gateway_killed_at_boundary") == 2
-    assert next(record["payload"]["payload"] for record in crash_records if record["record_type"] == "durable_state_after_send_kill")["unknown_outcomes"]
-    assert next(record["payload"]["payload"] for record in crash_records if record["record_type"] == "durable_state_after_cancel_kill")["unknown_outcomes"]
+    assert next(
+        record["payload"]["payload"]
+        for record in crash_records
+        if record["record_type"] == "durable_state_after_send_kill"
+    )["unknown_outcomes"]
+    assert next(
+        record["payload"]["payload"]
+        for record in crash_records
+        if record["record_type"] == "durable_state_after_cancel_kill"
+    )["unknown_outcomes"]

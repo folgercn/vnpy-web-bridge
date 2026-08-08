@@ -26,12 +26,10 @@ WORKFLOW = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
 COMPOSE_SMOKE = (ROOT / "scripts/ci/phase_c_compose_smoke.sh").read_text(
     encoding="utf-8"
 )
-OFFLINE_E2E = (ROOT / "scripts/ci/phase_c_offline_e2e.sh").read_text(
-    encoding="utf-8"
-)
-OFFLINE_E2E_COMPOSE = (ROOT / "deployments/phase-c/docker-compose.offline-e2e.yml").read_text(
-    encoding="utf-8"
-)
+OFFLINE_E2E = (ROOT / "scripts/ci/phase_c_offline_e2e.sh").read_text(encoding="utf-8")
+OFFLINE_E2E_COMPOSE = (
+    ROOT / "deployments/phase-c/docker-compose.offline-e2e.yml"
+).read_text(encoding="utf-8")
 
 
 def _units(plan: dict[str, object]) -> set[tuple[str, str]]:
@@ -223,12 +221,17 @@ def test_compose_smoke_pins_selected_image_to_exact_service_or_gateway_pair() ->
         'SIGNING_AUTHORITY_IMAGE="$image"',
     ):
         assert assignment in COMPOSE_SMOKE
-    assert '"gateway-rpc-request-proxy",\n        "gateway-rpc-publish-proxy",' in COMPOSE_SMOKE
+    assert (
+        '"gateway-rpc-request-proxy",\n        "gateway-rpc-publish-proxy",'
+        in COMPOSE_SMOKE
+    )
     assert 'config --format json > "$rendered"' in COMPOSE_SMOKE
-    assert 'if actual != image:' in COMPOSE_SMOKE
+    assert "if actual != image:" in COMPOSE_SMOKE
 
 
-def test_offline_e2e_uses_canonical_images_and_receipts_not_phase_c_duplicates() -> None:
+def test_offline_e2e_uses_canonical_images_and_receipts_not_phase_c_duplicates() -> (
+    None
+):
     assert "deployments/phase-a/Containerfile.control-api" in OFFLINE_E2E
     assert "deployments/phase-b/Containerfile.artifact-custody" in OFFLINE_E2E
     assert "deployments/phase-a/Containerfile.execution-orchestrator" in OFFLINE_E2E
@@ -245,7 +248,10 @@ def test_offline_e2e_uses_canonical_images_and_receipts_not_phase_c_duplicates()
         assert image_env in OFFLINE_E2E
     assert "/api/phase-c/artifacts/upload-install" in OFFLINE_E2E
     assert "/api/phase-c/authorization/commands" in OFFLINE_E2E
-    assert "compose restart control-api artifact-custody execution-orchestrator" in OFFLINE_E2E
+    assert (
+        "compose restart control-api artifact-custody execution-orchestrator"
+        in OFFLINE_E2E
+    )
     assert "wait_for_control" in OFFLINE_E2E
     assert "compose down --volumes --remove-orphans" in OFFLINE_E2E
     for unit in ("control-api", "artifact-custody", "execution-orchestrator"):

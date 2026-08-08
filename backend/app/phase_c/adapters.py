@@ -59,15 +59,22 @@ def _ensure_signed_artifact(value: dict[str, Any]) -> tuple[str, str]:
         "artifact",
         "signature",
     }
-    if set(value) != required or value.get("schema_version") != "web-bridge-signed-artifact-v1":
-        raise WorkflowAdapterError("signed artifact does not match the offline handoff contract")
+    if (
+        set(value) != required
+        or value.get("schema_version") != "web-bridge-signed-artifact-v1"
+    ):
+        raise WorkflowAdapterError(
+            "signed artifact does not match the offline handoff contract"
+        )
     artifact = value.get("artifact")
     if not isinstance(artifact, dict):
         raise WorkflowAdapterError("signed artifact envelope is required")
     try:
         assert_false_authority_flags(artifact.get("payload", artifact))
     except PhaseCWorkflowError as exc:
-        raise WorkflowAdapterError("signed artifact attempts to grant authority") from exc
+        raise WorkflowAdapterError(
+            "signed artifact attempts to grant authority"
+        ) from exc
     artifact_id = artifact.get("artifact_id")
     if not isinstance(artifact_id, str) or not artifact_id:
         raise WorkflowAdapterError("signed artifact envelope lacks artifact_id")
@@ -89,7 +96,9 @@ class OfflineFakeCustodyAdapter:
         existing = self.receipts_by_key.get(request.idempotency_key)
         if existing:
             if existing[0] != fingerprint:
-                raise IdempotencyConflictError("idempotency key is bound to a different custody request")
+                raise IdempotencyConflictError(
+                    "idempotency key is bound to a different custody request"
+                )
             return CustodyReceiptDTO.model_validate(existing[1])
         if request.expected_custody_version != self.version:
             raise ExpectedVersionError("custody expected version is stale")
@@ -134,24 +143,40 @@ class OfflineFakeExecutionAdapter:
         )
 
     def command(
-        self, request: AuthorizationCommandDTO, *, custody_receipt: CustodyReceiptDTO | None
+        self,
+        request: AuthorizationCommandDTO,
+        *,
+        custody_receipt: CustodyReceiptDTO | None,
     ) -> AuthorizationStatusDTO:
         fingerprint = sha256(request.model_dump(mode="json"))
         existing = self.commands_by_key.get(request.idempotency_key)
         if existing:
             if existing[0] != fingerprint:
-                raise IdempotencyConflictError("idempotency key is bound to a different authorization command")
+                raise IdempotencyConflictError(
+                    "idempotency key is bound to a different authorization command"
+                )
             return AuthorizationStatusDTO.model_validate(existing[1])
         if request.expected_version != self.version:
-            raise ExpectedVersionError("execution authorization expected version is stale")
-        if custody_receipt is None or custody_receipt.receipt_id != request.custody_receipt_id:
-            raise WorkflowAdapterError("authorization command is not bound to a custody receipt")
+            raise ExpectedVersionError(
+                "execution authorization expected version is stale"
+            )
+        if (
+            custody_receipt is None
+            or custody_receipt.receipt_id != request.custody_receipt_id
+        ):
+            raise WorkflowAdapterError(
+                "authorization command is not bound to a custody receipt"
+            )
         if custody_receipt.artifact_id != request.authorization_artifact_id:
-            raise WorkflowAdapterError("authorization artifact and custody receipt do not match")
+            raise WorkflowAdapterError(
+                "authorization artifact and custody receipt do not match"
+            )
         # Model a network ambiguity after durable acceptance.  The caller must
         # retry/query with exactly the same idempotency key, never create a new one.
         self.version += 1
-        self.requested_state = "ENABLE_REQUESTED" if request.action == "enable" else "REVOKED"
+        self.requested_state = (
+            "ENABLE_REQUESTED" if request.action == "enable" else "REVOKED"
+        )
         self.artifact_id = request.authorization_artifact_id
         self.receipt_id = request.custody_receipt_id
         status = self.status().model_dump(mode="json")
@@ -168,7 +193,9 @@ class OfflineFakeExecutionAdapter:
         self.archive_log.append({"kind": "authorization-command", **event})
         if self.unknown_outcome_once:
             self.unknown_outcome_once = False
-            raise UnknownOutcomeError("authorization result is unknown; retry/query only with same idempotency key")
+            raise UnknownOutcomeError(
+                "authorization result is unknown; retry/query only with same idempotency key"
+            )
         return AuthorizationStatusDTO.model_validate(status)
 
     def by_key(self, idempotency_key: str) -> AuthorizationStatusDTO | None:
@@ -185,8 +212,12 @@ class OfflineFakeExecutionAdapter:
 
 @dataclass
 class OfflineFakeWorkflowAdapter:
-    custody: OfflineFakeCustodyAdapter = field(default_factory=OfflineFakeCustodyAdapter)
-    execution: OfflineFakeExecutionAdapter = field(default_factory=OfflineFakeExecutionAdapter)
+    custody: OfflineFakeCustodyAdapter = field(
+        default_factory=OfflineFakeCustodyAdapter
+    )
+    execution: OfflineFakeExecutionAdapter = field(
+        default_factory=OfflineFakeExecutionAdapter
+    )
 
 
 __all__ = [

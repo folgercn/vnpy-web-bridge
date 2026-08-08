@@ -26,13 +26,21 @@ def _headers(role: str) -> dict[str, str]:
 
 def _artifact() -> dict:
     return new_artifact_envelope(
-        artifact_type="runtime-authorization", trust_domain="runtime_authorization",
-        producer_id="phase-c-test", producer_version="v1", schema_ref="phase-c-runtime-authorization-v1",
-        generated_at="2026-08-08T00:00:00Z", scope={}, predecessor_refs=[], lineage=[], payload={
+        artifact_type="runtime-authorization",
+        trust_domain="runtime_authorization",
+        producer_id="phase-c-test",
+        producer_version="v1",
+        schema_ref="phase-c-runtime-authorization-v1",
+        generated_at="2026-08-08T00:00:00Z",
+        scope={},
+        predecessor_refs=[],
+        lineage=[],
+        payload={
             "production_allowed": False,
             "live_trading_authorized": False,
             "countable_forward": False,
-        })
+        },
+    )
 
 
 def _signed() -> dict:
@@ -59,7 +67,9 @@ def _upload(version: int = 0, key: str = "upload-key-0001") -> SignedArtifactUpl
     )
 
 
-def _command(receipt_id: str, version: int = 0, key: str = "enable-key-0001") -> AuthorizationCommandDTO:
+def _command(
+    receipt_id: str, version: int = 0, key: str = "enable-key-0001"
+) -> AuthorizationCommandDTO:
     return AuthorizationCommandDTO(
         command_id="command-0001",
         idempotency_key=key,
@@ -75,8 +85,11 @@ def test_signing_request_is_export_only_and_rejects_true_authority() -> None:
     exported = build_signing_request(
         artifact=_artifact(),
         domain="runtime_authorization",
-        request_id="request-0001", key_id="offline-test-key", key_version="v1",
-        requested_at="2026-08-08T00:00:00Z", expires_at="2099-01-01T00:00:00Z",
+        request_id="request-0001",
+        key_id="offline-test-key",
+        key_version="v1",
+        requested_at="2026-08-08T00:00:00Z",
+        expires_at="2099-01-01T00:00:00Z",
     )
     assert exported["request_id"] == "request-0001"
     assert exported["artifact"] == _artifact()
@@ -106,9 +119,14 @@ def test_offline_fake_full_chain_is_idempotent_versioned_and_never_effective() -
     assert result.requested_state == "ENABLE_REQUESTED"
     assert result.effective_state == "DISABLED"
     assert result.runtime_mutation_allowed is False
-    assert client.authorization_command(_command(receipt.receipt_id)).version == result.version
+    assert (
+        client.authorization_command(_command(receipt.receipt_id)).version
+        == result.version
+    )
     with pytest.raises(ExpectedVersionError):
-        client.authorization_command(_command(receipt.receipt_id, version=0, key="enable-key-0002"))
+        client.authorization_command(
+            _command(receipt.receipt_id, version=0, key="enable-key-0002")
+        )
     projection = client.execution_projection()
     assert projection.execution_mutation_allowed is False
     assert projection.audit and projection.archive
@@ -132,11 +150,20 @@ def test_api_enforces_rbac_and_exposes_only_fake_safe_projections(monkeypatch) -
 
     monkeypatch.setattr(routes, "phase_c_workflow_client", OfflineFakeWorkflowClient())
     with TestClient(app) as http:
-        assert http.get("/api/phase-c/workflow/status", headers=_headers("viewer")).status_code == 200
+        assert (
+            http.get(
+                "/api/phase-c/workflow/status", headers=_headers("viewer")
+            ).status_code
+            == 200
+        )
         export = http.post(
             "/api/phase-c/signing-requests/export",
             headers=_headers("viewer"),
-            json={"request_id": "request-0001", "domain": "runtime_authorization", "artifact": _artifact()},
+            json={
+                "request_id": "request-0001",
+                "domain": "runtime_authorization",
+                "artifact": _artifact(),
+            },
         )
         assert export.status_code == 403
         upload = http.post(

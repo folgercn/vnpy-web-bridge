@@ -96,10 +96,14 @@ def main(argv: list[str] | None = None) -> int:
         containerfile=args.containerfile,
         metadata_sha256=_sha256_bytes(metadata_path.read_bytes()),
     )
-    Draft202012Validator(json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))).validate(receipt)
+    Draft202012Validator(json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))).validate(
+        receipt
+    )
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    output.write_text(
+        json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     print(json.dumps(receipt, sort_keys=True))
     return 0
 

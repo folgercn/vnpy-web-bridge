@@ -253,7 +253,9 @@ def test_current_phase_b_paths_are_preserved_without_phase_a_units(path: str) ->
 
 def test_phase_b_only_paths_produce_no_phase_a_build_or_deploy_plan() -> None:
     paths = [
-        path for path in CURRENT_PHASE_B_CHANGED_PATHS if path not in PHASE_B_SHARED_CI_PATHS
+        path
+        for path in CURRENT_PHASE_B_CHANGED_PATHS
+        if path not in PHASE_B_SHARED_CI_PATHS
     ]
     plan = create_plan(paths, source_commit_sha=SHA)
     assert plan["decision"] == "CONTRACT_ONLY"
