@@ -267,6 +267,7 @@ PY
 docker exec -i "$market_container" python - <<'PY'
 import json
 import os
+from datetime import timezone
 from pathlib import Path
 
 import psycopg
@@ -280,7 +281,12 @@ with psycopg.connect(os.environ["PHASE_B_QUESTDB_PG_DSN"], connect_timeout=3) as
         cur.execute("SELECT count(*), min(vt_symbol), min(last_price), min(ts), min(ingest_id), min(ingest_seq) FROM market_ticks")
         count, symbol, price, event_time, ingest_id, ingest_seq = cur.fetchone()
         assert (count, symbol, float(price)) == (1, "RB2601.SHFE", 3500.0)
-        assert event_time.isoformat() == "2026-08-08T01:02:03+00:00"
+        event_time_utc = (
+            event_time.replace(tzinfo=timezone.utc)
+            if event_time.tzinfo is None
+            else event_time.astimezone(timezone.utc)
+        )
+        assert event_time_utc.isoformat() == "2026-08-08T01:02:03+00:00"
         assert isinstance(ingest_id, str) and len(ingest_id) == 32
         assert ingest_seq == 1
         cur.execute("SELECT \"column\", upsertKey, designated FROM table_columns('market_ticks')")

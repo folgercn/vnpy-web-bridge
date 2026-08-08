@@ -149,7 +149,9 @@ def test_final_compose_keeps_custody_single_writer_and_data_plane_isolated() -> 
     assert smoke.index('assert int(fence["last_source_seq"]) >= 2') < smoke.index(
         "SELECT count(*)"
     )
-    assert 'event_time.isoformat() == "2026-08-08T01:02:03+00:00"' in smoke
+    assert "event_time.replace(tzinfo=timezone.utc)" in smoke
+    assert "event_time.astimezone(timezone.utc)" in smoke
+    assert 'event_time_utc.isoformat() == "2026-08-08T01:02:03+00:00"' in smoke
 
 
 def test_runtime_smoke_bootstraps_only_a_signed_target_plan_before_http_custody() -> None:
