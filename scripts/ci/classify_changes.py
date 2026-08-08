@@ -366,6 +366,22 @@ PHASE_A_PHASE_B_PRESERVED_EXACT = (
 )
 PHASE_A_PHASE_B_PRESERVED_PREFIXES = PHASE_B_SCOPE_PREFIXES
 
+# Phase C owns its small workflow/fault contract surface.  These paths are
+# deliberately listed rather than opening broad backend, shared or scripts
+# prefixes: Phase C's combined planner expands them to the full A+B matrix,
+# while the legacy Phase A-only planner preserves them without selecting an
+# accidental Phase A runtime action.
+PHASE_A_PHASE_C_PRESERVED_PREFIXES = (
+    "backend/app/api/routes_phase_c_",
+    "backend/app/phase_c/",
+    "backend/tests/unit/test_issue291_phase_c_",
+    "docs/architecture/issue-291-phase-c-",
+    "docs/schemas/issue-291-phase-c-",
+    "scripts/ci/phase_c_",
+    "scripts/phase_c_faults/",
+    "shared/phase_c_workflow/",
+)
+
 
 def _phase_a_dependency_closure(selected_units: set[str]) -> set[str]:
     """Expand selected primary services to their reviewed image closure."""
@@ -599,6 +615,11 @@ PHASE_A_RULES = (
         "phase-a-preserved-phase-b",
         exact=PHASE_A_PHASE_B_PRESERVED_EXACT,
         prefix=PHASE_A_PHASE_B_PRESERVED_PREFIXES,
+        kind="preserved",
+    ),
+    _phase_a_rule(
+        "phase-a-preserved-phase-c",
+        prefix=PHASE_A_PHASE_C_PRESERVED_PREFIXES,
         kind="preserved",
     ),
     _phase_a_rule(

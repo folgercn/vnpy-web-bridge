@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vnpy-web-bridge:schema:issue-291-phase-c-release-matrix-v1",
+  "title": "Issue #291 Phase C build-only release matrix",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "issue_number", "phase", "plan_id", "source_commit_sha", "changed_paths", "phase_a", "phase_b", "decision", "build_units", "blocked_reasons", "automatic_deploy_allowed", "manual_deploy_allowed", "production_allowed", "live_trading_authorized", "countable_forward", "deployed", "accepted"],
+  "properties": {
+    "schema_version": {"const": "web_bridge_issue_291_phase_c_release_matrix_v1"},
+    "issue_number": {"const": 291},
+    "phase": {"const": "C"},
+    "plan_id": {"type": "string", "pattern": "^phase-c-(?!0{64}$)[0-9a-f]{64}$"},
+    "source_commit_sha": {"type": "string", "pattern": "^(?!0{40}$)[0-9a-f]{40}$"},
+    "changed_paths": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+    "phase_a": {"$ref": "#/$defs/phaseA"},
+    "phase_b": {"$ref": "#/$defs/phaseB"},
+    "decision": {"enum": ["BLOCKED", "BUILD_ONLY", "CONTRACT_ONLY"]},
+    "build_units": {"type": "array", "items": {"$ref": "#/$defs/buildUnit"}, "uniqueItems": true},
+    "blocked_reasons": {"type": "array", "items": {"$ref": "#/$defs/blockReason"}},
+    "automatic_deploy_allowed": {"const": false},
+    "manual_deploy_allowed": {"const": false},
+    "production_allowed": {"const": false},
+    "live_trading_authorized": {"const": false},
+    "countable_forward": {"const": false},
+    "deployed": {"const": false},
+    "accepted": {"const": false}
+  },
+  "allOf": [
+    {"if": {"properties": {"decision": {"const": "BLOCKED"}}}, "then": {"properties": {"blocked_reasons": {"minItems": 1}}}},
+    {"if": {"properties": {"decision": {"const": "BUILD_ONLY"}}}, "then": {"properties": {"build_units": {"minItems": 1}, "blocked_reasons": {"maxItems": 0}}}},
+    {"if": {"properties": {"decision": {"const": "CONTRACT_ONLY"}}}, "then": {"properties": {"build_units": {"maxItems": 0}, "blocked_reasons": {"maxItems": 0}}}}
+  ],
+  "$defs": {
+    "phaseA": {"type": "object", "additionalProperties": false, "required": ["selected_rule_ids", "selected_units", "dependency_closure", "blocked"], "properties": {"selected_rule_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}, "selected_units": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}, "dependency_closure": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}, "blocked": {"type": "boolean"}}},
+    "phaseB": {"type": "object", "additionalProperties": false, "required": ["selected_rule_ids", "selected_units", "blocked"], "properties": {"selected_rule_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}, "selected_units": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}, "blocked": {"type": "boolean"}}},
+    "buildUnit": {"type": "object", "additionalProperties": false, "required": ["phase", "unit", "containerfile", "containerfile_exists", "image_repository", "image_tag", "image_ref", "smoke_profile", "verification_units", "compose_file", "immutable_oci_digest_required", "build_receipt_required", "rollback_identity", "rollback_receipt_required", "deploy_allowed"], "properties": {"phase": {"enum": ["A", "B"]}, "unit": {"type": "string", "pattern": "^[a-z][a-z0-9-]{1,63}$"}, "containerfile": {"type": "string", "minLength": 1}, "containerfile_exists": {"type": "boolean"}, "image_repository": {"type": "string", "pattern": "^[a-z][a-z0-9._/-]{2,255}$"}, "image_tag": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"}, "image_ref": {"type": "string", "minLength": 1}, "smoke_profile": {"type": "string", "minLength": 1}, "verification_units": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}, "compose_file": {"enum": ["deployments/docker-compose.phase-a.yml", "deployments/docker-compose.phase-b.yml"]}, "immutable_oci_digest_required": {"const": true}, "build_receipt_required": {"const": true}, "rollback_identity": {"const": "build_receipt_pinned_oci_digest_only"}, "rollback_receipt_required": {"const": true}, "deploy_allowed": {"const": false}}},
+    "blockReason": {"type": "object", "additionalProperties": false, "required": ["phase", "path", "code", "rule_ids"], "properties": {"phase": {"enum": ["A", "B", "C"]}, "path": {"type": "string"}, "code": {"type": "string", "enum": ["unknown_path", "unknown_phase_b_path", "ambiguous_rule", "ambiguous_phase_b_rule", "legacy_monolith_forbidden", "unknown_dependency", "unknown_phase_b_consumer", "unknown_baseline", "empty_change_set", "missing_containerfile"]}, "rule_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}, "unit": {"type": "string"}}}
+  }
+}

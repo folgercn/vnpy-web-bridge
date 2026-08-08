@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vnpy-web-bridge:schema:issue-291-phase-c-image-receipt-v1",
+  "title": "Issue #291 Phase C immutable OCI build receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "issue_number", "phase", "unit", "receipt_id", "source_commit_sha", "containerfile", "containerfile_sha256", "image_repository", "image_tag", "image_digest", "immutable_image_ref", "build_metadata_sha256", "rollback_identity", "rollback_receipt", "automatic_deploy_allowed", "manual_deploy_allowed", "production_allowed", "live_trading_authorized", "countable_forward"],
+  "properties": {
+    "schema_version": {"const": "web_bridge_issue_291_phase_c_image_receipt_v1"},
+    "issue_number": {"const": 291},
+    "phase": {"enum": ["A", "B"]},
+    "unit": {"type": "string", "pattern": "^[a-z][a-z0-9-]{1,63}$"},
+    "receipt_id": {"type": "string", "pattern": "^phase-c-build-(?!0{64}$)[0-9a-f]{64}$"},
+    "source_commit_sha": {"type": "string", "pattern": "^(?!0{40}$)[0-9a-f]{40}$"},
+    "containerfile": {"type": "string", "minLength": 1},
+    "containerfile_sha256": {"$ref": "#/$defs/sha256"},
+    "image_repository": {"type": "string", "pattern": "^[a-z][a-z0-9._/-]{2,255}$"},
+    "image_tag": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
+    "image_digest": {"$ref": "#/$defs/digest"},
+    "immutable_image_ref": {"type": "string", "pattern": "^[a-z][a-z0-9._/-]{2,255}@sha256:(?!0{64}$)[0-9a-f]{64}$"},
+    "build_metadata_sha256": {"$ref": "#/$defs/sha256"},
+    "rollback_identity": {"type": "string", "pattern": "^[a-z][a-z0-9._/-]{2,255}@sha256:(?!0{64}$)[0-9a-f]{64}$"},
+    "rollback_receipt": {"$ref": "#/$defs/rollbackReceipt"},
+    "automatic_deploy_allowed": {"const": false},
+    "manual_deploy_allowed": {"const": false},
+    "production_allowed": {"const": false},
+    "live_trading_authorized": {"const": false},
+    "countable_forward": {"const": false}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^(?!0{64}$)[0-9a-f]{64}$"},
+    "digest": {"type": "string", "pattern": "^sha256:(?!0{64}$)[0-9a-f]{64}$"},
+    "rollbackReceipt": {"type": "object", "additionalProperties": false, "required": ["status", "target_identity", "automatic_rollback_allowed", "production_allowed", "live_trading_authorized", "countable_forward"], "properties": {"status": {"const": "build_only_hold"}, "target_identity": {"type": "string", "pattern": "^[a-z][a-z0-9._/-]{2,255}@sha256:(?!0{64}$)[0-9a-f]{64}$"}, "automatic_rollback_allowed": {"const": false}, "production_allowed": {"const": false}, "live_trading_authorized": {"const": false}, "countable_forward": {"const": false}}}
+  }
+}

@@ -488,12 +488,12 @@ def test_full_current_changed_paths_produce_allowed_dependency_closure() -> None
         "gateway-rpc-request-proxy",
         "gateway-rpc-publish-proxy",
     }
-    # The current Phase B PR is recognised as preserved by Phase A.  Its shared
-    # workflow still selects regular Phase A verification, but it has no
-    # Windows gateway artifact dependency.
+    # Phase C workflow/fault sources are explicitly preserved by the legacy
+    # Phase A planner.  The unified Phase C matrix, rather than this legacy
+    # plan, expands them to the A+B full validation closure.
     assert plan["external_artifacts"] == []
     assert plan["dependency_closure"]["external_artifacts"] == []
-    assert "phase-a-preserved-phase-b" in plan["selected_rule_ids"]
+    assert "phase-a-preserved-phase-c" in plan["selected_rule_ids"]
 
 
 @pytest.mark.parametrize("working_directory", ("repo-root", "external"))
