@@ -49,6 +49,14 @@ fencing/idempotency 的 consume/revoke request，并读取 pinned receipt；Cont
 * `deployments/phase-b/Containerfile.{signing-authority,artifact-custody}`：restricted
   images；只复制本合同和对应 CLI，不复制 `backend/app`、`scripts/**`、vn.py 或 key。
 
+Compose 的 batch 交接是单向、只读的命名卷边界：MAP 只写
+`phase_b_map_output`，离线 signer 读取它并只写 `phase_b_map_signing_handoff`；C_FAST
+只读该 handoff 并只写 `phase_b_cfast_output`；第二次 signer 读取 C_FAST 输出并只写
+`phase_b_custody_handoff`，custody 只读最后一个 handoff。每个 batch 卷使用
+UID/GID 65532、0700 的 tmpfs driver option，任何卷不在两个服务间共享 RW。生产者的
+MAP/C_FAST JSON Schemas 随 custody 镜像注册，并以 `$id`、文件 stem 和 payload
+`schema_version` 三种稳定引用键解析。
+
 `shared/artifact_custody/v1.py` 是 compose 使用的 epoch-fenced custody adapter；它通过
 CLI 运行，不提供 HTTP/control endpoint，必须与本合同保持同一 canonical/hash/receipt
 语义，并且最终部署只能保留一个 custody writer 根和一个 canonical API。

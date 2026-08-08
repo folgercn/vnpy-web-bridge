@@ -37,23 +37,49 @@ _KEY_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _VERSION_RE = re.compile(r"^v[0-9]+$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 NON_AUTHORITATIVE_FIELDS = (
+    "sensitive_material_present",
+    "packet_is_authority",
+    "receipt_is_authority",
+    "outcome_is_authority",
+    "bundle_is_execution_authority",
+    "official_forward_claimed",
     "production",
     "live",
     "countable_forward",
     "control_authorized",
     "deployment_authorized",
+    "deployment_mutation_authorized",
     "execution_authorized",
+    "simnow_execution_authorized",
     "runtime_activation_authorized",
+    "readiness_authorized",
     "order_authorized",
+    "permit_authorized",
+    "position_authorized",
     "trading_authorized",
+    "rpc_authorized",
+    "network_query_authorized",
+    "write_probe_authorized",
+    "database_mutation_authorized",
+    "collection_authorized",
+    "execution_quality_collection_authorized",
+    "strategy_activation_authorized",
+    "replacement_authorized",
+    "dynamic_selection_allowed",
+    "replay_allowed",
     "automatic_promotion_authorized",
     "production_allowed",
+    "production_authorized",
     "live_trading_authorized",
+    "live_allowed",
     "web_bridge_rpc_authorized",
     "order_submission_authorized",
     "position_mutation_authorized",
     "dispatch_authorized",
     "network_authorized",
+    "authority_granted",
+    "signing_requested",
+    "custody_published",
 )
 
 
@@ -274,16 +300,17 @@ def _read_exact(path: Path, *, max_bytes: int = 4 * 1024 * 1024) -> bytes:
         finally:
             os.close(fd)
         final = path.lstat()
-        identity = lambda item: (
-            item.st_dev,
-            item.st_ino,
-            item.st_mode,
-            item.st_uid,
-            item.st_gid,
-            item.st_size,
-            item.st_mtime_ns,
-            item.st_ctime_ns,
-        )
+        def identity(item: os.stat_result) -> tuple[int, int, int, int, int, int, int, int]:
+            return (
+                item.st_dev,
+                item.st_ino,
+                item.st_mode,
+                item.st_uid,
+                item.st_gid,
+                item.st_size,
+                item.st_mtime_ns,
+                item.st_ctime_ns,
+            )
         if len({identity(item) for item in (before, opened, after, final)}) != 1:
             raise ContractError("TRUST_FILE_CHANGED_DURING_READ")
         if len(raw) != opened.st_size or not raw:

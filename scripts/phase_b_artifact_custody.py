@@ -13,6 +13,7 @@ import argparse
 import json
 import os
 import signal
+import stat
 import sys
 import time
 from pathlib import Path
@@ -25,7 +26,7 @@ def _schemas(directory: Path | None) -> dict[str, dict[str, Any]]:
     if directory is None:
         return {}
     result: dict[str, dict[str, Any]] = {}
-    for path in directory.glob("*.schema.json"):
+    for path in directory.rglob("*.schema.json"):
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
@@ -35,6 +36,16 @@ def _schemas(directory: Path | None) -> dict[str, dict[str, Any]]:
         schema_id = payload.get("$id")
         if isinstance(schema_id, str) and schema_id:
             result[schema_id] = payload
+            result[schema_id.rsplit("/", 1)[-1].removesuffix(".schema.json")] = payload
+        properties = payload.get("properties")
+        schema_version = (
+            properties.get("schema_version", {}).get("const")
+            if isinstance(properties, dict)
+            and isinstance(properties.get("schema_version"), dict)
+            else None
+        )
+        if isinstance(schema_version, str) and schema_version:
+            result[schema_version] = payload
         result[path.name.removesuffix(".schema.json")] = payload
     return result
 
@@ -53,12 +64,14 @@ def _parser() -> argparse.ArgumentParser:
     publish.add_argument("--actor-id", required=True)
     publish.add_argument("--idempotency-key", required=True)
     publish.add_argument("--correlation-id", required=True)
+    publish.add_argument("--expected-version", required=True, type=int)
     record = sub.add_parser("record")
     record.add_argument("--receipt-type", required=True, choices=("install", "consume", "revoke"))
     record.add_argument("--artifact-id", required=True)
     record.add_argument("--actor-id", required=True)
     record.add_argument("--idempotency-key", required=True)
     record.add_argument("--correlation-id", required=True)
+    record.add_argument("--expected-version", required=True, type=int)
     return parser
 
 
@@ -70,6 +83,29 @@ def _load_json(path: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise CustodyError("CUSTODY_REQUEST_INVALID")
     return value
+
+
+def _ready(root: str | None) -> dict[str, Any]:
+    if not root:
+        raise CustodyError("CUSTODY_ROOT_REQUIRED")
+    path = Path(root)
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        raise CustodyError("CUSTODY_ROOT_UNAVAILABLE") from exc
+    if (
+        path.is_symlink()
+        or not stat.S_ISDIR(info.st_mode)
+        or stat.S_IMODE(info.st_mode) != 0o700
+    ):
+        raise CustodyError("CUSTODY_ROOT_NOT_READY")
+    return {
+        "service": "artifact-custody",
+        "version": "phase-b-artifact-custody-v1",
+        "status": "ready",
+        "private_key_access": False,
+        "trade_rpc_access": False,
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -86,12 +122,19 @@ def main(argv: list[str] | None = None) -> int:
             "trade_rpc_access": False,
         }, sort_keys=True, separators=(",", ":")))
         return 0
+    if args.command == "ready":
+        try:
+            print(json.dumps(_ready(args.root), sort_keys=True, separators=(",", ":")))
+            return 0
+        except CustodyError as exc:
+            print(exc.code, file=sys.stderr)
+            return 2
     if not args.root:
         print("CUSTODY_ROOT_REQUIRED", file=sys.stderr)
         return 2
     try:
         registry = _schemas(args.schema_dir)
-        if args.command in {"health", "ready", "audit", "run", "publish", "record"} and not registry:
+        if args.command in {"audit", "run", "publish", "record"} and not registry:
             raise CustodyError("CUSTODY_SCHEMA_REGISTRY_REQUIRED")
         with ArtifactCustody(
             args.root,
@@ -119,6 +162,7 @@ def main(argv: list[str] | None = None) -> int:
                     actor_id=args.actor_id,
                     idempotency_key=args.idempotency_key,
                     correlation_id=args.correlation_id,
+                    expected_version=args.expected_version,
                 )
             else:
                 payload = custody.record(
@@ -127,6 +171,7 @@ def main(argv: list[str] | None = None) -> int:
                     actor_id=args.actor_id,
                     idempotency_key=args.idempotency_key,
                     correlation_id=args.correlation_id,
+                    expected_version=args.expected_version,
                 )
         print(json.dumps(payload, sort_keys=True, separators=(",", ":")))
         return 0

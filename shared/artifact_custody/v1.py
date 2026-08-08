@@ -62,9 +62,43 @@ def _utc_now() -> str:
 
 
 def _safe_id(value: str, code: str) -> str:
-    if not isinstance(value, str) or _SAFE_NAME.fullmatch(value) is None:
+    if (
+        not isinstance(value, str)
+        or len(value.encode("utf-8")) > 192
+        or _SAFE_NAME.fullmatch(value) is None
+    ):
         raise CustodyError(code)
     return value
+
+
+def _expected_version(value: int) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise CustodyError("CUSTODY_EXPECTED_VERSION_INVALID")
+    return value
+
+
+def _request_fields(
+    *, actor_id: str, idempotency_key: str, correlation_id: str, expected_version: int
+) -> tuple[str, str, str, int]:
+    return (
+        _safe_id(actor_id, "CUSTODY_ACTOR_INVALID"),
+        _safe_id(idempotency_key, "CUSTODY_IDEMPOTENCY_INVALID"),
+        _safe_id(correlation_id, "CUSTODY_CORRELATION_INVALID"),
+        _expected_version(expected_version),
+    )
+
+
+def _identity(info: os.stat_result) -> tuple[int, int, int, int, int, int, int, int]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_mode,
+        info.st_uid,
+        info.st_gid,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
 
 
 class ArtifactCustody:
@@ -133,7 +167,7 @@ class ArtifactCustody:
                 flags |= os.O_NOFOLLOW
             self._root_fd = os.open(self.root, flags)
             root_stat = os.fstat(self._root_fd)
-            if not stat.S_ISDIR(root_stat.st_mode) or root_stat.st_mode & 0o022:
+            if not stat.S_ISDIR(root_stat.st_mode) or stat.S_IMODE(root_stat.st_mode) != 0o700:
                 raise CustodyError("CUSTODY_ROOT_PERMISSIONS_INVALID")
             lock_flags = os.O_RDWR | os.O_CREAT | os.O_CLOEXEC
             if hasattr(os, "O_NOFOLLOW"):
@@ -167,7 +201,7 @@ class ArtifactCustody:
         except OSError as exc:
             raise CustodyError("CUSTODY_DIRECTORY_INVALID") from exc
         info = os.fstat(fd)
-        if not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o022:
+        if not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o700:
             os.close(fd)
             raise CustodyError("CUSTODY_DIRECTORY_PERMISSIONS_INVALID")
         return fd
@@ -179,6 +213,11 @@ class ArtifactCustody:
             if match is None:
                 raise CustodyError("CUSTODY_EPOCH_LEDGER_CORRUPT")
             payload, _ = self._read_json(self._dirs["epochs"], name)
+            if (
+                not isinstance(payload.get("writer_epoch"), int)
+                or isinstance(payload["writer_epoch"], bool)
+            ):
+                raise CustodyError("CUSTODY_EPOCH_LEDGER_CORRUPT")
             expected = {
                 "schema_version": _EPOCH_SCHEMA_VERSION,
                 "writer_id": match.group(2),
@@ -210,6 +249,9 @@ class ArtifactCustody:
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
         try:
+            before_path = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if not stat.S_ISREG(before_path.st_mode) or before_path.st_nlink != 1:
+                raise CustodyError("CUSTODY_FILE_INVALID")
             fd = os.open(name, flags, dir_fd=directory_fd)
             try:
                 before = os.fstat(fd)
@@ -229,23 +271,15 @@ class ArtifactCustody:
                     chunks.append(chunk)
                     remaining -= len(chunk)
                 after = os.fstat(fd)
-                if (
-                    before.st_dev,
-                    before.st_ino,
-                    before.st_size,
-                    before.st_mtime_ns,
-                    before.st_ctime_ns,
-                ) != (
-                    after.st_dev,
-                    after.st_ino,
-                    after.st_size,
-                    after.st_mtime_ns,
-                    after.st_ctime_ns,
-                ):
+                if _identity(before) != _identity(before_path) or _identity(before) != _identity(after):
                     raise CustodyError("CUSTODY_FILE_CHANGED_DURING_READ")
-                return b"".join(chunks)
+                result = b"".join(chunks)
             finally:
                 os.close(fd)
+            after_path = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if _identity(before_path) != _identity(after_path):
+                raise CustodyError("CUSTODY_FILE_CHANGED_DURING_READ")
+            return result
         except CustodyError:
             raise
         except OSError as exc:
@@ -347,6 +381,10 @@ class ArtifactCustody:
             if match is None or int(match.group(1)) != sequence:
                 raise CustodyError("CUSTODY_RECEIPT_SEQUENCE_INVALID")
             record, raw = self._read_json(self._dirs["receipts"], name)
+            try:
+                assert_non_authoritative(record)
+            except ContractError as exc:
+                raise CustodyError("CUSTODY_RECORD_AUTHORITY_INVALID") from exc
             if set(record) != {
                 "schema_version",
                 "sequence",
@@ -360,13 +398,17 @@ class ArtifactCustody:
                 "countable_forward",
             }:
                 raise CustodyError("CUSTODY_RECORD_FIELDS_INVALID")
+            if record["schema_version"] != CUSTODY_RECORD_SCHEMA_VERSION:
+                raise CustodyError("CUSTODY_RECORD_INVALID")
             if (
-                record["schema_version"] != CUSTODY_RECORD_SCHEMA_VERSION
+                not isinstance(record["sequence"], int)
+                or isinstance(record["sequence"], bool)
                 or record["sequence"] != sequence
             ):
                 raise CustodyError("CUSTODY_RECORD_INVALID")
             if (
                 not isinstance(record["writer_epoch"], int)
+                or isinstance(record["writer_epoch"], bool)
                 or record["writer_epoch"] <= 0
             ):
                 raise CustodyError("CUSTODY_RECORD_EPOCH_INVALID")
@@ -481,48 +523,76 @@ class ArtifactCustody:
     def _artifact_bytes(self, artifact: Mapping[str, Any]) -> bytes:
         return canonical_json_line(validate_artifact_envelope(artifact))
 
-    def _store_artifact(self, artifact: Mapping[str, Any], state: _State) -> None:
+    def _store_artifact(self, artifact: Mapping[str, Any], state: _State) -> bool:
         name = f"{artifact['artifact_id']}.json"
         raw = self._artifact_bytes(artifact)
         existing = state.artifacts.get(artifact["artifact_id"])
         if existing is not None:
             if canonical_json_line(existing) != raw:
                 raise CustodyError("CUSTODY_ARTIFACT_COLLISION")
-            return
+            return False
         try:
             self._publish_create_only("artifacts", name, raw)
+            return True
         except CustodyError as exc:
             if exc.code != "CUSTODY_CREATE_ONLY_CONFLICT":
                 raise
             observed = self._read_bytes(self._dirs["artifacts"], name)
             if observed != raw:
                 raise CustodyError("CUSTODY_ARTIFACT_COLLISION") from exc
+            return False
 
-    def _append(
-        self,
-        receipt_type: str,
-        artifact: Mapping[str, Any],
+    def _remove_uncommitted_artifact(self, artifact: Mapping[str, Any]) -> None:
+        """Remove only this invocation's unpublished artifact after a failed commit.
+
+        Artifact files have no meaning until their matching receipt record is
+        durable.  If record publication fails before its name appears, this
+        rollback prevents a retry from inheriting an orphaned artifact.  It is
+        deliberately descriptor-relative and verifies exact bytes first.
+        """
+
+        name = f"{artifact['artifact_id']}.json"
+        raw = self._artifact_bytes(artifact)
+        try:
+            if self._read_bytes(self._dirs["artifacts"], name) != raw:
+                raise CustodyError("CUSTODY_ARTIFACT_COLLISION")
+            os.unlink(name, dir_fd=self._dirs["artifacts"])
+            os.fsync(self._dirs["artifacts"])
+        except CustodyError:
+            raise
+        except OSError as exc:
+            raise CustodyError("CUSTODY_ARTIFACT_ROLLBACK_FAILED") from exc
+
+    @staticmethod
+    def _replay(
+        state: _State,
         *,
+        receipt_type: str,
+        artifact_id: str,
         actor_id: str,
         idempotency_key: str,
         correlation_id: str,
-    ) -> dict[str, Any]:
-        actor_id = _safe_id(actor_id, "CUSTODY_ACTOR_INVALID")
-        idempotency_key = _safe_id(idempotency_key, "CUSTODY_IDEMPOTENCY_INVALID")
-        correlation_id = _safe_id(correlation_id, "CUSTODY_CORRELATION_INVALID")
-        state = self._load_state()
+        expected_version: int,
+    ) -> dict[str, Any] | None:
         replay = state.idempotency.get(idempotency_key)
-        if replay is not None:
-            old = replay["receipt"]
-            if (
-                old["receipt_type"] == receipt_type
-                and old["artifact_id"] == artifact["artifact_id"]
-                and old["actor_id"] == actor_id
-                and old["correlation_id"] == correlation_id
-            ):
-                return dict(old)
-            raise CustodyError("CUSTODY_IDEMPOTENCY_CONFLICT")
-        history = state.lifecycle.get(artifact["artifact_id"], ())
+        if replay is None:
+            return None
+        old = replay["receipt"]
+        if (
+            old["receipt_type"] == receipt_type
+            and old["artifact_id"] == artifact_id
+            and old["actor_id"] == actor_id
+            and old["correlation_id"] == correlation_id
+            and old["expected_version"] == expected_version
+        ):
+            return dict(old)
+        raise CustodyError("CUSTODY_IDEMPOTENCY_CONFLICT")
+
+    @staticmethod
+    def _validate_transition(
+        state: _State, *, receipt_type: str, artifact_id: str
+    ) -> None:
+        history = state.lifecycle.get(artifact_id, ())
         if receipt_type == "publish" and history:
             raise CustodyError("CUSTODY_ARTIFACT_ALREADY_PUBLISHED")
         if receipt_type == "install" and (
@@ -535,19 +605,61 @@ class ArtifactCustody:
             raise CustodyError("CUSTODY_CONSUME_TRANSITION_INVALID")
         if receipt_type == "revoke" and (not history or "revoke" in history):
             raise CustodyError("CUSTODY_REVOKE_TRANSITION_INVALID")
+
+    @staticmethod
+    def _check_expected(state: _State, expected_version: int) -> None:
+        if state.version != expected_version:
+            raise CustodyError("CUSTODY_EXPECTED_VERSION_MISMATCH")
+
+    def _append(
+        self,
+        receipt_type: str,
+        artifact: Mapping[str, Any],
+        *,
+        actor_id: str,
+        idempotency_key: str,
+        correlation_id: str,
+        expected_version: int,
+        store_artifact: bool = False,
+    ) -> dict[str, Any]:
+        actor_id, idempotency_key, correlation_id, expected_version = _request_fields(
+            actor_id=actor_id,
+            idempotency_key=idempotency_key,
+            correlation_id=correlation_id,
+            expected_version=expected_version,
+        )
+        state = self._load_state()
+        replay = self._replay(
+            state,
+            receipt_type=receipt_type,
+            artifact_id=artifact["artifact_id"],
+            actor_id=actor_id,
+            idempotency_key=idempotency_key,
+            correlation_id=correlation_id,
+            expected_version=expected_version,
+        )
+        if replay is not None:
+            return replay
+        self._check_expected(state, expected_version)
+        self._validate_transition(
+            state, receipt_type=receipt_type, artifact_id=artifact["artifact_id"]
+        )
         receipt = build_receipt(
             receipt_type=receipt_type,
             artifact=artifact,
             actor_id=actor_id,
             idempotency_key=idempotency_key,
             correlation_id=correlation_id,
-            expected_version=state.version,
-            resulting_version=state.version + 1,
+            expected_version=expected_version,
+            resulting_version=expected_version + 1,
             previous_receipt_sha256=state.previous_receipt_sha256,
             created_at=self.clock(),
             fencing_token=f"{self.writer_id}:{self.writer_epoch}",
             status="revoked" if receipt_type == "revoke" else "accepted",
         )
+        stored_new = False
+        if store_artifact:
+            stored_new = self._store_artifact(artifact, state)
         receipt_raw = canonical_json_line(receipt)
         record = {
             "schema_version": CUSTODY_RECORD_SCHEMA_VERSION,
@@ -562,7 +674,20 @@ class ArtifactCustody:
             "countable_forward": False,
         }
         name = f"{state.version + 1:020d}-{receipt['receipt_id']}.json"
-        self._publish_create_only("receipts", name, canonical_json_line(record))
+        try:
+            self._publish_create_only("receipts", name, canonical_json_line(record))
+        except Exception:
+            # An fsync failure can be reported after link(2).  Retain the
+            # artifact whenever the receipt name is visible; otherwise it was
+            # never committed and is safe to remove.
+            try:
+                os.stat(name, dir_fd=self._dirs["receipts"], follow_symlinks=False)
+                receipt_visible = True
+            except FileNotFoundError:
+                receipt_visible = False
+            if stored_new and not receipt_visible:
+                self._remove_uncommitted_artifact(artifact)
+            raise
         self._load_state()
         return receipt
 
@@ -573,7 +698,14 @@ class ArtifactCustody:
         actor_id: str,
         idempotency_key: str,
         correlation_id: str,
+        expected_version: int,
     ) -> dict[str, Any]:
+        actor_id, idempotency_key, correlation_id, expected_version = _request_fields(
+            actor_id=actor_id,
+            idempotency_key=idempotency_key,
+            correlation_id=correlation_id,
+            expected_version=expected_version,
+        )
         try:
             envelope = validate_artifact_envelope(artifact)
             assert_non_authoritative(envelope)
@@ -583,25 +715,30 @@ class ArtifactCustody:
             raise CustodyError("CUSTODY_TRUST_DOMAIN_INVALID")
         self._validate_schema(envelope)
         state = self._load_state()
-        self._validate_lineage(envelope, state)
-        replay = state.idempotency.get(idempotency_key)
+        replay = self._replay(
+            state,
+            receipt_type="publish",
+            artifact_id=envelope["artifact_id"],
+            actor_id=actor_id,
+            idempotency_key=idempotency_key,
+            correlation_id=correlation_id,
+            expected_version=expected_version,
+        )
         if replay is not None:
-            old = replay["receipt"]
-            if (
-                old["receipt_type"] == "publish"
-                and old["artifact_id"] == envelope["artifact_id"]
-                and old["actor_id"] == actor_id
-                and old["correlation_id"] == correlation_id
-            ):
-                return dict(old)
-            raise CustodyError("CUSTODY_IDEMPOTENCY_CONFLICT")
-        self._store_artifact(envelope, state)
+            return replay
+        self._check_expected(state, expected_version)
+        self._validate_lineage(envelope, state)
+        self._validate_transition(
+            state, receipt_type="publish", artifact_id=envelope["artifact_id"]
+        )
         return self._append(
             "publish",
             envelope,
             actor_id=actor_id,
             idempotency_key=idempotency_key,
             correlation_id=correlation_id,
+            expected_version=expected_version,
+            store_artifact=True,
         )
 
     def record(
@@ -612,19 +749,40 @@ class ArtifactCustody:
         actor_id: str,
         idempotency_key: str,
         correlation_id: str,
+        expected_version: int,
     ) -> dict[str, Any]:
         if receipt_type not in {"install", "consume", "revoke"}:
             raise CustodyError("CUSTODY_RECEIPT_TYPE_INVALID")
-        state = self._load_state()
-        artifact = state.artifacts.get(
-            _safe_id(artifact_id, "CUSTODY_ARTIFACT_ID_INVALID")
+        actor_id, idempotency_key, correlation_id, expected_version = _request_fields(
+            actor_id=actor_id,
+            idempotency_key=idempotency_key,
+            correlation_id=correlation_id,
+            expected_version=expected_version,
         )
+        state = self._load_state()
+        artifact = state.artifacts.get(_safe_id(artifact_id, "CUSTODY_ARTIFACT_ID_INVALID"))
         if artifact is None:
             raise CustodyError("CUSTODY_ARTIFACT_NOT_FOUND")
+        replay = self._replay(
+            state,
+            receipt_type=receipt_type,
+            artifact_id=artifact["artifact_id"],
+            actor_id=actor_id,
+            idempotency_key=idempotency_key,
+            correlation_id=correlation_id,
+            expected_version=expected_version,
+        )
+        if replay is not None:
+            return replay
+        self._check_expected(state, expected_version)
+        self._validate_transition(
+            state, receipt_type=receipt_type, artifact_id=artifact["artifact_id"]
+        )
         return self._append(
             receipt_type,
             artifact,
             actor_id=actor_id,
             idempotency_key=idempotency_key,
             correlation_id=correlation_id,
+            expected_version=expected_version,
         )

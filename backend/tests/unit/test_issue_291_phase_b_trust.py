@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -9,7 +10,7 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from scripts.phase_b_offline_signer import OfflineSignerError, sign_request
+from scripts.phase_b_offline_signer import OfflineSignerError, _read_canonical, sign_request
 from shared.artifact_contracts import new_artifact_envelope
 from shared.trust_contracts import (
     KEY_DOMAINS,
@@ -114,6 +115,7 @@ def test_offline_signer_accepts_only_ephemeral_readonly_fd_and_verifies(
             request(),
             keyring=ring,
             key_fd=fd,
+            key_sha256=hashlib.sha256(raw).hexdigest(),
             now=datetime(2026, 8, 5, 0, 5, tzinfo=timezone.utc),
         )
     finally:
@@ -156,6 +158,7 @@ def test_offline_signer_rejects_nonisolated_key_fd(
                 request(),
                 keyring=keyring("research", private),
                 key_fd=fd,
+                key_sha256=hashlib.sha256(raw).hexdigest(),
                 now=datetime(2026, 8, 5, 0, 5, tzinfo=timezone.utc),
             )
     finally:
@@ -179,6 +182,7 @@ def test_cross_domain_wrong_key_expired_and_authority_escalation_fail_closed(
                 request(),
                 keyring=keyring("research", other),
                 key_fd=fd,
+                key_sha256=hashlib.sha256(raw).hexdigest(),
                 now=datetime(2026, 8, 5, 0, 5, tzinfo=timezone.utc),
             )
     finally:
@@ -190,12 +194,52 @@ def test_cross_domain_wrong_key_expired_and_authority_escalation_fail_closed(
                 request(),
                 keyring=keyring("research", private),
                 key_fd=fd,
+                key_sha256=hashlib.sha256(raw).hexdigest(),
                 now=datetime(2026, 8, 5, 0, 11, tzinfo=timezone.utc),
             )
     finally:
         os.close(fd)
     with pytest.raises(ContractError, match="TRUST_AUTHORITY_FLAG_MUST_BE_FALSE"):
         request(live=True)
+
+
+def test_unsealed_key_fd_requires_hash_pin(tmp_path: Path) -> None:
+    private = Ed25519PrivateKey.generate()
+    raw = private.private_bytes(
+        serialization.Encoding.Raw,
+        serialization.PrivateFormat.Raw,
+        serialization.NoEncryption(),
+    )
+    fd = ephemeral_key_fd(tmp_path, raw)
+    try:
+        with pytest.raises(OfflineSignerError, match="SIGNER_KEY_FD_PIN_REQUIRED"):
+            sign_request(
+                request(), keyring=keyring("research", private), key_fd=fd,
+                now=datetime(2026, 8, 5, 0, 5, tzinfo=timezone.utc),
+            )
+        with pytest.raises(OfflineSignerError, match="SIGNER_KEY_HASH_MISMATCH"):
+            sign_request(
+                request(),
+                keyring=keyring("research", private),
+                key_fd=fd,
+                key_sha256="0" * 64,
+                now=datetime(2026, 8, 5, 0, 5, tzinfo=timezone.utc),
+            )
+    finally:
+        os.close(fd)
+
+
+def test_signer_request_path_requires_exact_hash_pin(tmp_path: Path) -> None:
+    path = tmp_path / "request.json"
+    raw = b'{"request":"pinned"}\n'
+    path.write_bytes(raw)
+    with pytest.raises(OfflineSignerError, match="SIGNER_REQUEST_PIN_REQUIRED"):
+        _read_canonical(path)
+    with pytest.raises(OfflineSignerError, match="SIGNER_REQUEST_HASH_MISMATCH"):
+        _read_canonical(path, expected_sha256="0" * 64)
+    assert _read_canonical(path, expected_sha256=hashlib.sha256(raw).hexdigest()) == {
+        "request": "pinned"
+    }
 
 
 def test_signing_request_rejects_domain_confusion_and_unknown_fields() -> None:

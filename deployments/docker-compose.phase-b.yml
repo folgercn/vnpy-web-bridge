@@ -8,6 +8,7 @@ include:
 services:
   artifact-custody:
     image: ${ARTIFACT_CUSTODY_IMAGE:-vnpy-web-bridge-artifact-custody:phase-b}
+    user: "65532:65532"
     build:
       context: ..
       dockerfile: deployments/phase-b/Containerfile.artifact-custody
@@ -19,17 +20,21 @@ services:
     networks: [custody-private]
     volumes:
       - artifact_custody_state:/var/lib/phase-b-custody
+      - phase_b_custody_handoff:/handoff:ro
     read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=64m,uid=65532,gid=65532,mode=700
     healthcheck:
-      test: ["CMD", "python", "/app/scripts/phase_b_artifact_custody.py", "--root", "/var/lib/phase-b-custody", "health"]
+      test: ["CMD", "python", "/app/scripts/phase_b_artifact_custody.py", "--root", "/var/lib/phase-b-custody", "ready"]
       interval: 10s
       timeout: 3s
       retries: 6
 
   market-data-worker:
     image: ${MARKET_DATA_WORKER_IMAGE:-vnpy-web-bridge-market-data-worker:phase-b}
+    user: "65532:65532"
     build:
       context: ..
       dockerfile: deployments/phase-b/Containerfile.market-data-worker
@@ -44,6 +49,8 @@ services:
     volumes:
       - market_data_state:/var/lib/phase-b/market-data
     read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
     tmpfs: [/tmp]
     healthcheck:
       test: ["CMD", "python", "-m", "phase_b_workers.market_data_worker", "--state-dir", "/var/lib/phase-b/market-data", "--ready"]
@@ -53,6 +60,7 @@ services:
 
   execution-quality-worker:
     image: ${EXECUTION_QUALITY_WORKER_IMAGE:-vnpy-web-bridge-execution-quality-worker:phase-b}
+    user: "65532:65532"
     build:
       context: ..
       dockerfile: deployments/phase-b/Containerfile.execution-quality-worker
@@ -69,6 +77,11 @@ services:
       - execution_quality_state:/var/lib/phase-b/execution-quality
       - market_data_state:/var/lib/market-data-stream:ro
     read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    depends_on:
+      market-data-worker:
+        condition: service_healthy
     tmpfs: [/tmp]
     healthcheck:
       test: ["CMD", "python", "-m", "phase_b_workers.execution_quality_worker", "--state-dir", "/var/lib/phase-b/execution-quality", "--ready"]
@@ -78,20 +91,28 @@ services:
 
   monitor-worker:
     image: ${MONITOR_WORKER_IMAGE:-vnpy-web-bridge-monitor-worker:phase-b}
+    user: "65532:65532"
     build:
       context: ..
       dockerfile: deployments/phase-b/Containerfile.monitor-worker
     command: ["--state-dir", "/var/lib/phase-b/monitor", "--run"]
     environment:
       PHASE_B_MONITOR_STATE_DIR: /var/lib/phase-b/monitor
+      PHASE_B_PROJECTION_DIR: /var/lib/phase-b/projections
       PHASE_B_RUNTIME_MODE: disabled
+      PHASE_B_MONITOR_NOTIFIER_ENABLED: "false"
+      PHASE_B_TELEGRAM_TOKEN: ""
+      PHASE_B_TELEGRAM_CHAT_ID: ""
       PRODUCTION: "false"
       LIVE_TRADING_AUTHORIZED: "false"
       COUNTABLE_FORWARD: "false"
     network_mode: none
     volumes:
       - monitor_state:/var/lib/phase-b/monitor
+      - monitor_projection_state:/var/lib/phase-b/projections:ro
     read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
     tmpfs: [/tmp]
     healthcheck:
       test: ["CMD", "python", "-m", "phase_b_workers.monitor_worker", "--state-dir", "/var/lib/phase-b/monitor", "--ready"]
@@ -102,6 +123,7 @@ services:
   map-producer:
     profiles: [batch]
     image: ${MAP_PRODUCER_IMAGE:-vnpy-web-bridge-map-producer:phase-b}
+    user: "65532:65532"
     build:
       context: ..
       dockerfile: deployments/phase-b/Containerfile.map-producer
@@ -113,17 +135,20 @@ services:
     network_mode: none
     volumes:
       - phase_b_batch_input:/input:ro
-      - phase_b_batch_output:/out
+      - phase_b_map_output:/out
     read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
     tmpfs: [/tmp]
 
   c-fast-producer:
     profiles: [batch]
     image: ${C_FAST_PRODUCER_IMAGE:-vnpy-web-bridge-c-fast-producer:phase-b}
+    user: "65532:65532"
     build:
       context: ..
       dockerfile: deployments/phase-b/Containerfile.c-fast-producer
-    command: ["produce", "--source", "/input/approved-research-source.json", "--map-input", "/input/approved-map-candidate.json", "--map-acceptance", "/input/map-acceptance.json", "--map-acceptance-keyring", "/input/map-acceptance-keyring.json", "--output", "/out/c-fast-candidate.json"]
+    command: ["produce", "--source", "/input/approved-research-source.json", "--map-input", "/map-input/map-candidate.json", "--map-acceptance", "/signing/map-acceptance.json", "--map-acceptance-keyring", "/signing/map-acceptance-keyring.json", "--map-acceptance-keyring-sha256", "${MAP_ACCEPTANCE_KEYRING_SHA256:?MAP_ACCEPTANCE_KEYRING_SHA256 required}", "--output", "/out/c-fast-candidate.json"]
     environment:
       PRODUCTION: "false"
       LIVE_TRADING_AUTHORIZED: "false"
@@ -131,19 +156,31 @@ services:
     network_mode: none
     volumes:
       - phase_b_batch_input:/input:ro
-      - phase_b_batch_output:/out
+      - phase_b_map_output:/map-input:ro
+      - phase_b_map_signing_handoff:/signing:ro
+      - phase_b_cfast_output:/out
     read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
     tmpfs: [/tmp]
 
   signing-authority:
     profiles: [offline-signing]
     image: ${SIGNING_AUTHORITY_IMAGE:-vnpy-web-bridge-signing-authority:phase-b}
+    user: "65532:65532"
     build:
       context: ..
       dockerfile: deployments/phase-b/Containerfile.signing-authority
     command: ["--health"]
     network_mode: none
     read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    volumes:
+      - phase_b_map_output:/handoff/map-input:ro
+      - phase_b_map_signing_handoff:/handoff/map-signed
+      - phase_b_cfast_output:/handoff/cfast-input:ro
+      - phase_b_custody_handoff:/handoff/cfast-signed
     tmpfs: [/tmp]
     # No key mount, key path, key environment variable, HTTP port, or public
     # endpoint.  An approved offline ceremony passes an inherited fd only.
@@ -154,8 +191,24 @@ networks:
 
 volumes:
   artifact_custody_state:
+    driver_opts: &phase_b_private_volume
+      type: tmpfs
+      device: tmpfs
+      o: uid=65532,gid=65532,mode=0700
   market_data_state:
+    driver_opts: *phase_b_private_volume
   execution_quality_state:
+    driver_opts: *phase_b_private_volume
   monitor_state:
+    driver_opts: *phase_b_private_volume
+  monitor_projection_state:
+    driver_opts: *phase_b_private_volume
   phase_b_batch_input:
-  phase_b_batch_output:
+  phase_b_map_output:
+    driver_opts: *phase_b_private_volume
+  phase_b_map_signing_handoff:
+    driver_opts: *phase_b_private_volume
+  phase_b_cfast_output:
+    driver_opts: *phase_b_private_volume
+  phase_b_custody_handoff:
+    driver_opts: *phase_b_private_volume

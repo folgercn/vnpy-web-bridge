@@ -8,6 +8,7 @@ COPY shared/artifact_custody /app/shared/artifact_custody
 COPY shared/trust_contracts /app/shared/trust_contracts
 COPY scripts/phase_b_artifact_custody.py /app/scripts/phase_b_artifact_custody.py
 COPY docs/schemas /app/docs/schemas
+COPY shared/artifact-contracts /app/docs/schemas/producer
 RUN python -m compileall -q /app/shared /app/scripts/phase_b_artifact_custody.py
 RUN groupadd --system --gid 65532 custody \
     && useradd --system --uid 65532 --gid 65532 --no-create-home \

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import base64
 import fcntl
+import hashlib
 import json
 import os
 import stat
@@ -36,16 +37,49 @@ class OfflineSignerError(RuntimeError):
         super().__init__(code)
 
 
-def _read_canonical(path: Path) -> dict[str, Any]:
+def _read_canonical(
+    path: Path, *, expected_sha256: str | None = None
+) -> dict[str, Any]:
+    if (
+        not isinstance(expected_sha256, str)
+        or len(expected_sha256) != 64
+        or expected_sha256.lower() != expected_sha256
+        or any(char not in "0123456789abcdef" for char in expected_sha256)
+    ):
+        raise OfflineSignerError("SIGNER_REQUEST_PIN_REQUIRED")
     flags = os.O_RDONLY | os.O_CLOEXEC
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     try:
+        before = path.lstat()
+        if (
+            stat.S_ISLNK(before.st_mode)
+            or not stat.S_ISREG(before.st_mode)
+            or before.st_nlink != 1
+            or before.st_size <= 0
+            or before.st_size > 20 * 1024 * 1024
+        ):
+            raise OfflineSignerError("SIGNER_INPUT_INVALID")
         fd = os.open(path, flags)
         try:
             info = os.fstat(fd)
             if (
+                info.st_dev,
+                info.st_ino,
+                info.st_mode,
+                info.st_uid,
+                info.st_gid,
+            ) != (
+                before.st_dev,
+                before.st_ino,
+                before.st_mode,
+                before.st_uid,
+                before.st_gid,
+            ):
+                raise OfflineSignerError("SIGNER_INPUT_CHANGED")
+            if (
                 not stat.S_ISREG(info.st_mode)
+                or info.st_nlink != 1
                 or info.st_size <= 0
                 or info.st_size > 20 * 1024 * 1024
             ):
@@ -74,9 +108,32 @@ def _read_canonical(path: Path) -> dict[str, Any]:
                 raise OfflineSignerError("SIGNER_INPUT_CHANGED")
         finally:
             os.close(fd)
+        final = path.lstat()
+        if (
+            final.st_dev,
+            final.st_ino,
+            final.st_mode,
+            final.st_uid,
+            final.st_gid,
+            final.st_size,
+            final.st_mtime_ns,
+            final.st_ctime_ns,
+        ) != (
+            before.st_dev,
+            before.st_ino,
+            before.st_mode,
+            before.st_uid,
+            before.st_gid,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        ) or stat.S_ISLNK(final.st_mode):
+            raise OfflineSignerError("SIGNER_INPUT_CHANGED")
         value = json.loads(raw.decode("utf-8"))
         if not isinstance(value, dict) or canonical_json_line(value) != raw:
             raise OfflineSignerError("SIGNER_INPUT_NOT_CANONICAL")
+        if hashlib.sha256(raw).hexdigest() != expected_sha256:
+            raise OfflineSignerError("SIGNER_REQUEST_HASH_MISMATCH")
         return value
     except OfflineSignerError:
         raise
@@ -84,7 +141,23 @@ def _read_canonical(path: Path) -> dict[str, Any]:
         raise OfflineSignerError("SIGNER_INPUT_READ_FAILED") from exc
 
 
-def _read_private_fd(key_fd: int) -> bytearray:
+def _sealed_fd(key_fd: int) -> bool:
+    getter = getattr(fcntl, "F_GET_SEALS", None)
+    required = (
+        getattr(fcntl, "F_SEAL_WRITE", 0)
+        | getattr(fcntl, "F_SEAL_GROW", 0)
+        | getattr(fcntl, "F_SEAL_SHRINK", 0)
+        | getattr(fcntl, "F_SEAL_SEAL", 0)
+    )
+    if getter is None or not required:
+        return False
+    try:
+        return (int(fcntl.fcntl(key_fd, getter)) & required) == required
+    except OSError:
+        return False
+
+
+def _read_private_fd(key_fd: int, *, expected_sha256: str | None = None) -> bytearray:
     try:
         access = fcntl.fcntl(key_fd, fcntl.F_GETFL) & os.O_ACCMODE
         info = os.fstat(key_fd)
@@ -96,6 +169,15 @@ def _read_private_fd(key_fd: int) -> bytearray:
         raise OfflineSignerError("SIGNER_KEY_FD_NOT_EPHEMERAL")
     if info.st_mode & 0o077:
         raise OfflineSignerError("SIGNER_KEY_FD_PERMISSIONS_INVALID")
+    if expected_sha256 is not None and (
+        not isinstance(expected_sha256, str)
+        or len(expected_sha256) != 64
+        or expected_sha256.lower() != expected_sha256
+        or any(char not in "0123456789abcdef" for char in expected_sha256)
+    ):
+        raise OfflineSignerError("SIGNER_KEY_HASH_INVALID")
+    if expected_sha256 is None and not _sealed_fd(key_fd):
+        raise OfflineSignerError("SIGNER_KEY_FD_PIN_REQUIRED")
     try:
         raw = bytearray(os.pread(key_fd, 33, 0))
         after = os.fstat(key_fd)
@@ -117,6 +199,11 @@ def _read_private_fd(key_fd: int) -> bytearray:
         for index in range(len(raw)):
             raw[index] = 0
         raise OfflineSignerError("SIGNER_KEY_FD_CHANGED")
+    digest = hashlib.sha256(raw).hexdigest()
+    if expected_sha256 is not None and digest != expected_sha256:
+        for index in range(len(raw)):
+            raw[index] = 0
+        raise OfflineSignerError("SIGNER_KEY_HASH_MISMATCH")
     fcntl.fcntl(
         key_fd, fcntl.F_SETFD, fcntl.fcntl(key_fd, fcntl.F_GETFD) | fcntl.FD_CLOEXEC
     )
@@ -135,6 +222,7 @@ def sign_request(
     *,
     keyring: Mapping[str, Any],
     key_fd: int,
+    key_sha256: str | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     try:
@@ -163,7 +251,7 @@ def sign_request(
             raise OfflineSignerError("SIGNER_REQUEST_OUTSIDE_VALIDITY")
     except ValueError as exc:
         raise OfflineSignerError("SIGNER_REQUEST_TIME_INVALID") from exc
-    private_raw = _read_private_fd(key_fd)
+    private_raw = _read_private_fd(key_fd, expected_sha256=key_sha256)
     try:
         private_key = Ed25519PrivateKey.from_private_bytes(bytes(private_raw))
         public_raw = private_key.public_key().public_bytes(
@@ -233,9 +321,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--health", action="store_true")
     parser.add_argument("--ready", action="store_true")
     parser.add_argument("--request", type=Path)
+    parser.add_argument("--request-sha256")
     parser.add_argument("--keyring", type=Path)
     parser.add_argument("--keyring-sha256")
     parser.add_argument("--key-fd", type=int)
+    parser.add_argument("--key-sha256")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args(argv)
     if args.version or args.health or args.ready:
@@ -248,10 +338,10 @@ def main(argv: list[str] | None = None) -> int:
             "network_endpoint": None,
         }, sort_keys=True))
         return 0
-    if any(value is None for value in (args.request, args.keyring, args.keyring_sha256, args.key_fd, args.output)):
-        parser.error("request, keyring, keyring-sha256, key-fd and output are required for sign")
+    if any(value is None for value in (args.request, args.request_sha256, args.keyring, args.keyring_sha256, args.key_fd, args.key_sha256, args.output)):
+        parser.error("request, request-sha256, keyring, keyring-sha256, key-fd, key-sha256 and output are required for sign")
     try:
-        request = _read_canonical(args.request)
+        request = _read_canonical(args.request, expected_sha256=args.request_sha256)
         domain = request.get("domain")
         if not isinstance(domain, str):
             raise OfflineSignerError("SIGNER_REQUEST_DOMAIN_INVALID")
@@ -260,7 +350,12 @@ def main(argv: list[str] | None = None) -> int:
             expected_domain=domain,
             expected_raw_sha256=args.keyring_sha256,
         )
-        signed = sign_request(request, keyring=keyring, key_fd=args.key_fd)
+        signed = sign_request(
+            request,
+            keyring=keyring,
+            key_fd=args.key_fd,
+            key_sha256=args.key_sha256,
+        )
         _write_create_only(args.output, canonical_json_line(signed))
     except (ContractError, OfflineSignerError) as exc:
         print(

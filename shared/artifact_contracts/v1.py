@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Mapping
 from datetime import datetime
-from typing import Any, Mapping
+from typing import Any
 
 from shared.trust_contracts.v1 import (
     ContractError,
@@ -19,11 +20,34 @@ from shared.trust_contracts.v1 import (
     sha256_bytes,
 )
 
-
 ARTIFACT_ENVELOPE_SCHEMA_VERSION = "web-bridge-artifact-envelope-v1"
 ARTIFACT_PUBLISH_REQUEST_SCHEMA_VERSION = "web-bridge-artifact-publish-request-v1"
 ARTIFACT_RECEIPT_SCHEMA_VERSION = "web-bridge-artifact-receipt-v1"
 RECEIPT_TYPES = ("publish", "install", "consume", "revoke")
+RECEIPT_FIELDS = frozenset(
+    {
+        "schema_version",
+        "receipt_type",
+        "receipt_id",
+        "artifact_id",
+        "artifact_type",
+        "trust_domain",
+        "artifact_canonical_sha256",
+        "artifact_raw_sha256",
+        "schema_ref",
+        "predecessor_refs",
+        "lineage",
+        "actor_id",
+        "idempotency_key",
+        "correlation_id",
+        "expected_version",
+        "resulting_version",
+        "fencing_token",
+        "status",
+        "created_at",
+        "previous_receipt_sha256",
+    }
+)
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$")
 _ISO_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T")
@@ -215,7 +239,7 @@ def validate_artifact_envelope(payload: Mapping[str, Any]) -> dict[str, Any]:
         raise ContractError("ARTIFACT_SCOPE_INVALID")
     if "payload" not in payload:
         raise ContractError("ARTIFACT_PAYLOAD_MISSING")
-    assert_non_authoritative(payload["payload"])
+    assert_non_authoritative(payload)
     canonical_actual, raw_actual, _ = payload_hashes(payload["payload"])
     if canonical_actual != canonical_sha:
         raise ContractError("ARTIFACT_CANONICAL_HASH_MISMATCH")
@@ -256,13 +280,17 @@ def build_publish_request(
     actor_id: str,
     idempotency_key: str,
     correlation_id: str,
-    expected_version: int = 0,
+    expected_version: int,
 ) -> dict[str, Any]:
     envelope = validate_artifact_envelope(artifact)
     actor_id = _id(actor_id, "ARTIFACT_ACTOR_INVALID")
     idempotency_key = _id(idempotency_key, "ARTIFACT_IDEMPOTENCY_INVALID")
     correlation_id = _id(correlation_id, "ARTIFACT_CORRELATION_INVALID")
-    if not isinstance(expected_version, int) or expected_version < 0:
+    if (
+        not isinstance(expected_version, int)
+        or isinstance(expected_version, bool)
+        or expected_version < 0
+    ):
         raise ContractError("ARTIFACT_EXPECTED_VERSION_INVALID")
     return {
         "schema_version": ARTIFACT_PUBLISH_REQUEST_SCHEMA_VERSION,
@@ -305,12 +333,22 @@ def build_receipt(
     envelope = validate_artifact_envelope(artifact)
     if receipt_type not in RECEIPT_TYPES:
         raise ContractError("RECEIPT_TYPE_INVALID")
+    if status not in {"accepted", "revoked"}:
+        raise ContractError("RECEIPT_STATUS_INVALID")
     actor_id = _id(actor_id, "RECEIPT_ACTOR_INVALID")
     idempotency_key = _id(idempotency_key, "RECEIPT_IDEMPOTENCY_INVALID")
     correlation_id = _id(correlation_id, "RECEIPT_CORRELATION_INVALID")
-    if not isinstance(expected_version, int) or expected_version < 0:
+    if (
+        not isinstance(expected_version, int)
+        or isinstance(expected_version, bool)
+        or expected_version < 0
+    ):
         raise ContractError("RECEIPT_EXPECTED_VERSION_INVALID")
-    if not isinstance(resulting_version, int) or resulting_version != expected_version + 1:
+    if (
+        not isinstance(resulting_version, int)
+        or isinstance(resulting_version, bool)
+        or resulting_version != expected_version + 1
+    ):
         raise ContractError("RECEIPT_RESULTING_VERSION_INVALID")
     if previous_receipt_sha256 is not None:
         _sha(previous_receipt_sha256, "RECEIPT_PREVIOUS_HASH_INVALID")
@@ -340,12 +378,15 @@ def build_receipt(
         "previous_receipt_sha256": previous_receipt_sha256,
     }
     receipt["receipt_id"] = receipt_id(receipt)
-    return receipt
+    return validate_receipt(receipt)
 
 
 def validate_receipt(payload: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(payload, Mapping):
         raise ContractError("RECEIPT_ROOT_INVALID")
+    if set(payload) != RECEIPT_FIELDS:
+        raise ContractError("RECEIPT_FIELDS_INVALID")
+    assert_non_authoritative(payload)
     if payload.get("schema_version") != ARTIFACT_RECEIPT_SCHEMA_VERSION:
         raise ContractError("RECEIPT_SCHEMA_INVALID")
     receipt_type = payload.get("receipt_type")
@@ -366,9 +407,17 @@ def validate_receipt(payload: Mapping[str, Any]) -> dict[str, Any]:
     _id(receipt.get("correlation_id"), "RECEIPT_CORRELATION_INVALID")
     expected = receipt.get("expected_version")
     resulting = receipt.get("resulting_version")
-    if not isinstance(expected, int) or expected < 0:
+    if (
+        not isinstance(expected, int)
+        or isinstance(expected, bool)
+        or expected < 0
+    ):
         raise ContractError("RECEIPT_EXPECTED_VERSION_INVALID")
-    if not isinstance(resulting, int) or resulting != expected + 1:
+    if (
+        not isinstance(resulting, int)
+        or isinstance(resulting, bool)
+        or resulting != expected + 1
+    ):
         raise ContractError("RECEIPT_RESULTING_VERSION_INVALID")
     if receipt.get("fencing_token") is not None:
         _id(receipt["fencing_token"], "RECEIPT_FENCING_INVALID")
