@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vnpy-web-bridge.invalid/schemas/issue-291-phase-c-signing-request-v1.schema.json",
+  "title": "Issue 291 Phase C offline signing request v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "request_id", "domain", "requested_by", "artifact", "artifact_sha256", "browser_signing", "private_key_access", "production_allowed", "live_trading_authorized", "countable_forward"],
+  "properties": {
+    "schema_version": {"const": "web-bridge-phase-c-signing-request-v1"},
+    "request_id": {"type": "string", "minLength": 4},
+    "domain": {"enum": ["map_acceptance", "c_fast_acceptance", "runtime_authorization"]},
+    "requested_by": {"type": "string", "minLength": 1},
+    "artifact": {"type": "object"},
+    "artifact_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "browser_signing": {"const": false},
+    "private_key_access": {"const": false},
+    "production_allowed": {"const": false},
+    "live_trading_authorized": {"const": false},
+    "countable_forward": {"const": false}
+  }
+}

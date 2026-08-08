@@ -231,6 +231,7 @@ jobs:
   phase-a-release-plan:
     name: Issue #291 Phase A release plan
     needs: changes
+    if: ${{ false }} # Superseded by the dependency-aware Phase C A+B matrix plan.
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -303,7 +304,7 @@ jobs:
     needs:
       - changes
       - phase-a-release-plan
-    if: needs.phase-a-release-plan.result == 'success' && needs.changes.outputs.phase_a_changed == 'true'
+    if: ${{ false }} # Superseded by the dependency-aware Phase C A+B matrix plan.
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -420,7 +421,8 @@ jobs:
   phase-b-ci:
     name: Issue #291 Phase B contracts and images (${{ matrix.name }})
     needs: changes
-    if: needs.changes.outputs.phase_b_changed == 'true'
+    if: ${{ false }} # Superseded by the dependency-aware Phase C A+B matrix plan.
+    # if: needs.changes.outputs.phase_b_changed == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -626,7 +628,7 @@ jobs:
   phase-b-projection-smoke:
     name: Issue #291 Phase B fresh-volume projection smoke
     needs: phase-b-ci
-    if: needs.phase-b-ci.result == 'success'
+    if: ${{ false }} # Superseded by the dependency-aware Phase C A+B matrix plan.
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -639,6 +641,174 @@ jobs:
           CUSTODY_WRITER_EPOCH: "1"
           MAP_ACCEPTANCE_KEYRING_SHA256: "0000000000000000000000000000000000000000000000000000000000000000"
         run: scripts/ci/phase_b_projection_compose_smoke.sh
+
+  phase-c-release-plan:
+    name: Issue #291 Phase C dependency-aware release matrix
+    needs: changes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      build_required: ${{ steps.plan.outputs.build_required }}
+      build_matrix: ${{ steps.plan.outputs.build_matrix }}
+      phase_a_selected: ${{ steps.plan.outputs.phase_a_selected }}
+      phase_b_selected: ${{ steps.plan.outputs.phase_b_selected }}
+      phase_b_projection_required: ${{ steps.plan.outputs.phase_b_projection_required }}
+      offline_e2e_required: ${{ steps.plan.outputs.offline_e2e_required }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: scripts/ci/requirements-quick.txt
+      - name: Install planner dependencies
+        run: pip install 'jsonschema>=4.23,<5'
+      - name: Resolve changed files and baseline
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE_SHA: ${{ github.event.before }}
+          CURRENT_SHA: ${{ github.sha }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            git ls-tree -r --name-only "$CURRENT_SHA" > /tmp/changed-files.txt
+            echo known > /tmp/baseline-status.txt; echo true > /tmp/force-all.txt
+          elif [ "$EVENT_NAME" = "pull_request" ]; then
+            git fetch origin "$BASE_REF" --depth=1
+            git diff --name-only --no-renames "origin/$BASE_REF"...HEAD > /tmp/changed-files.txt
+            echo known > /tmp/baseline-status.txt; echo false > /tmp/force-all.txt
+          elif [ -n "$BEFORE_SHA" ] && [ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]; then
+            git diff --name-only --no-renames "$BEFORE_SHA" "$CURRENT_SHA" > /tmp/changed-files.txt
+            echo known > /tmp/baseline-status.txt; echo false > /tmp/force-all.txt
+          else
+            git ls-tree -r --name-only "$CURRENT_SHA" > /tmp/changed-files.txt
+            echo unknown > /tmp/baseline-status.txt; echo false > /tmp/force-all.txt
+          fi
+      - name: Produce fail-closed build-only A+B matrix
+        id: plan
+        env:
+          CURRENT_SHA: ${{ github.sha }}
+        run: |
+          extra=(); if [ "$(cat /tmp/force-all.txt)" = true ]; then extra+=(--force-all); fi
+          python scripts/ci/phase_c_release_matrix.py --paths-file /tmp/changed-files.txt \
+            --source-commit-sha "$CURRENT_SHA" --baseline-status "$(cat /tmp/baseline-status.txt)" \
+            --output artifacts/issue-291-phase-c-release-matrix.json --github-output "$GITHUB_OUTPUT" "${extra[@]}"
+      - name: Upload Phase C release matrix
+        if: always() && hashFiles('artifacts/issue-291-phase-c-release-matrix.json') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: issue-291-phase-c-release-matrix-${{ github.run_id }}
+          path: artifacts/issue-291-phase-c-release-matrix.json
+          if-no-files-found: error
+          retention-days: 30
+
+  phase-c-build-and-smoke:
+    name: Issue #291 Phase C selected unit (${{ matrix.phase }} / ${{ matrix.unit }})
+    needs: phase-c-release-plan
+    if: needs.phase-c-release-plan.result == 'success' && needs.phase-c-release-plan.outputs.build_required == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.phase-c-release-plan.outputs.build_matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - name: Install test dependencies
+        run: pip install -r backend/requirements.txt
+      - name: Validate selected release contract
+        run: |
+          python scripts/ci/validate_json_schemas.py
+          PYTHONPATH=backend:scripts:. pytest -q backend/tests/unit/test_issue291_phase_c_release_matrix.py
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4
+      - name: Build selected image, smoke offline, and write immutable receipt
+        run: >-
+          scripts/ci/phase_c_build_and_smoke.sh
+          '${{ matrix.phase }}' '${{ matrix.unit }}' '${{ matrix.containerfile }}'
+          '${{ matrix.image_repository }}' '${{ matrix.image_tag }}' '${{ matrix.smoke_profile }}'
+          '${{ github.sha }}' 'artifacts/issue-291-phase-c-${{ matrix.phase }}-${{ matrix.unit }}-image-receipt.json'
+      - name: Validate selected Phase Compose configuration
+        run: >-
+          scripts/ci/phase_c_compose_smoke.sh '${{ matrix.phase }}' '${{ matrix.unit }}'
+          '${{ matrix.image_repository }}:${{ matrix.image_tag }}'
+      - name: Upload immutable image receipt
+        uses: actions/upload-artifact@v4
+        with:
+          name: issue-291-phase-c-${{ matrix.phase }}-${{ matrix.unit }}-receipt-${{ github.run_id }}
+          path: artifacts/issue-291-phase-c-${{ matrix.phase }}-${{ matrix.unit }}-image-receipt.json
+          if-no-files-found: error
+          retention-days: 30
+
+  phase-c-phase-b-projection-smoke:
+    name: Issue #291 Phase C Phase B fresh-volume projection smoke
+    needs:
+      - phase-c-release-plan
+      - phase-c-build-and-smoke
+    if: >-
+      needs.phase-c-release-plan.result == 'success' &&
+      needs.phase-c-build-and-smoke.result == 'success' &&
+      needs.phase-c-release-plan.outputs.phase_b_projection_required == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Build fresh Phase B dependency group and verify projections
+        env:
+          CUSTODY_WRITER_EPOCH: "1"
+          MAP_ACCEPTANCE_KEYRING_SHA256: "0000000000000000000000000000000000000000000000000000000000000000"
+        run: scripts/ci/phase_b_projection_compose_smoke.sh
+
+  phase-c-offline-e2e:
+    name: Issue #291 Phase C canonical offline E2E
+    needs:
+      - phase-c-release-plan
+      - phase-c-build-and-smoke
+    if: >-
+      needs.phase-c-release-plan.result == 'success' &&
+      needs.phase-c-build-and-smoke.result == 'success' &&
+      needs.phase-c-release-plan.outputs.offline_e2e_required == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - name: Install E2E dependencies
+        run: pip install -r backend/requirements.txt
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4
+      - name: Run canonical Control to Custody to Execution offline E2E
+        run: scripts/ci/phase_c_offline_e2e.sh '${{ github.sha }}'
+      - name: Upload canonical immutable image receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: issue-291-phase-c-canonical-e2e-receipts-${{ github.run_id }}
+          path: artifacts/issue-291-phase-c-e2e-*-receipt.json
+          if-no-files-found: error
+          retention-days: 30
 
   backend:
     name: Backend tests (shard ${{ matrix.shard }})
@@ -880,6 +1050,10 @@ jobs:
       - phase-a-build-check
       - phase-b-ci
       - phase-b-projection-smoke
+      - phase-c-release-plan
+      - phase-c-build-and-smoke
+      - phase-c-phase-b-projection-smoke
+      - phase-c-offline-e2e
     runs-on: ubuntu-latest
     steps:
       - name: Require every applicable CI job

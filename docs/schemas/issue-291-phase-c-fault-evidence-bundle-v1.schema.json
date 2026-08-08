@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "issue-291-phase-c-fault-evidence-bundle-v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "issue", "phase", "execution_mode", "production", "live", "countable_forward", "scenarios"],
+  "properties": {
+    "schema_version": {"const": "issue_291_phase_c_fault_evidence_bundle_v1"},
+    "issue": {"const": 291},
+    "phase": {"const": "C"},
+    "execution_mode": {"const": "offline_deterministic"},
+    "production": {"const": false},
+    "live": {"const": false},
+    "countable_forward": {"const": false},
+    "scenarios": {"type": "array", "minItems": 9, "items": {"$ref": "issue-291-phase-c-fault-scenario-v1.schema.json"}}
+  }
+}

@@ -106,6 +106,7 @@ const menuOptions = [
   item('资金', '/account', AccountBookOutlined),
   item('策略', '/strategies', SecurityScanOutlined),
   item('商品 SimNow', '/commodity-simnow', SecurityScanOutlined),
+  item('离线工件工作流', '/phase-c-workflow', SecurityScanOutlined),
   item('数据管理', '/data', DatabaseOutlined),
   item('日志', '/logs', FileTextOutlined)
 ]

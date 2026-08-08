@@ -13,6 +13,7 @@ import Account from '../pages/Account.vue'
 import Strategies from '../pages/Strategies.vue'
 import Logs from '../pages/Logs.vue'
 import DataManagement from '../pages/DataManagement.vue'
+import PhaseCWorkflowPage from '../features/phase-c/pages/PhaseCWorkflowPage.vue'
 
 const routes: RouteRecordRaw[] = [
   { path: '/login', component: Login },
@@ -37,6 +38,7 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '商品 SimNow' }
       },
       { path: 'data', component: DataManagement, meta: { title: '数据管理' } },
+      { path: 'phase-c-workflow', component: PhaseCWorkflowPage, meta: { title: '离线工件工作流' } },
       { path: 'logs', component: Logs, meta: { title: '日志' } }
     ]
   }

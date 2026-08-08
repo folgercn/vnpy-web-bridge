@@ -908,6 +908,25 @@ class ArtifactCustody:
                 return dict(signed)
         raise CustodyError("CUSTODY_SIGNED_ARTIFACT_NOT_FOUND")
 
+    def read_receipt(self, receipt_id: str) -> dict[str, Any]:
+        """Return one audited receipt without exposing custody records/artifacts."""
+        wanted = _safe_id(receipt_id, "CUSTODY_RECEIPT_ID_INVALID")
+        state = self._load_state()
+        for record in state.receipts:
+            receipt = record["receipt"]
+            if receipt["receipt_id"] == wanted:
+                return dict(receipt)
+        raise CustodyError("CUSTODY_RECEIPT_NOT_FOUND")
+
+    def read_receipt_by_idempotency(self, idempotency_key: str) -> dict[str, Any]:
+        """Query an existing receipt only; it can never create/replay a mutation."""
+        wanted = _safe_id(idempotency_key, "CUSTODY_IDEMPOTENCY_INVALID")
+        state = self._load_state()
+        record = state.idempotency.get(wanted)
+        if record is None:
+            raise CustodyError("CUSTODY_RECEIPT_NOT_FOUND")
+        return dict(record["receipt"])
+
     def record(
         self,
         receipt_type: str,

@@ -18,6 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api import routes_auth
 from app.api.routes_control_execution import router as control_execution_router
 from app.api.routes_control_safe import router as control_safe_router
+from app.api.routes_phase_c_workflow import router as phase_c_workflow_router
 from app.core.config import get_settings
 from app.core.errors import (
     AppError,
@@ -105,6 +106,9 @@ async def add_correlation_header(request: Request, call_next):
 
 app.include_router(routes_auth.router, prefix="/api")
 app.include_router(control_execution_router)
+# This must precede the legacy catch-all safe surface.  It contains only typed
+# Phase C projections/requests, never legacy Commodity/Trade endpoints.
+app.include_router(phase_c_workflow_router)
 app.include_router(control_safe_router)
 
 
