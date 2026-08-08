@@ -278,7 +278,7 @@ class FinalExecutionRuntime:
 
     def _receipt_for(self, plan: TargetPlan) -> VerifiedCustodyReceipt:
         try:
-            raw = self.custody.receipt(str(plan.raw["custody_receipt_id"]))
+            raw = self.custody.receipt(str(plan.raw["authority_receipt_id"]))
         except Exception as exc:  # custody response is unknown, never assume success
             raise AuthorityRejected(
                 "custody receipt lookup outcome is unknown"
@@ -292,7 +292,7 @@ class FinalExecutionRuntime:
                 "custody receipt is not strict verified evidence"
             ) from exc
         expected = {
-            "receipt_id": plan.raw["custody_receipt_id"],
+            "receipt_id": plan.raw["authority_receipt_id"],
             "artifact_id": plan.raw["authority_artifact_id"],
             "artifact_sha256": plan.raw["authority_artifact_sha256"],
             "signer_key_id": plan.raw["signer_key_id"],
@@ -301,7 +301,7 @@ class FinalExecutionRuntime:
             "expires_at": plan.raw["expires_at"],
         }
         if (
-            receipt.receipt_sha256 != plan.raw["custody_receipt_sha256"]
+            receipt.receipt_sha256 != plan.raw["authority_receipt_sha256"]
             or any(receipt.raw[field] != value for field, value in expected.items())
             or receipt.scope != plan.raw["scope"]
             or (self.allowed_scope is not None and receipt.scope != self.allowed_scope)
@@ -368,6 +368,12 @@ class FinalExecutionRuntime:
             or receipt.artifact_sha256 != artifact_hash
         ):
             raise PlanRejected("custody target plan artifact/receipt binding mismatch")
+        if (
+            receipt.scope != plan.raw["scope"]
+            or (self.allowed_scope is not None and receipt.scope != self.allowed_scope)
+            or receipt.expires_at() <= utc_now()
+        ):
+            raise PlanRejected("custody target plan receipt scope/expiry mismatch")
         self._plan_from_value(plan)
         self.plans.put(plan)
         return plan, receipt
@@ -425,6 +431,55 @@ class FinalExecutionRuntime:
             raise PlanRejected("target plan environment is not SIMNOW")
         self._receipt_for(plan)
 
+    def _halt_runner_after_failure(self, reason: str) -> None:
+        """Cancel acknowledged work before recording a terminal runner halt.
+
+        ``emergency_stop`` is the existing fenced cancellation/revocation
+        sequence.  If it cannot establish every cancellation outcome, it has
+        already retained UNKNOWN/HALTED state; do not overwrite that evidence
+        with a less-specific lifecycle transition.
+        """
+
+        self.orchestrator.emergency_stop(reason=reason)
+        self.orchestrator.fail_closed_halt(reason)
+
+    def _complete_after_reconcile(self) -> None:
+        """Archive only a terminal, freshly reconciled final target plan."""
+
+        state = self.orchestrator.repository.snapshot()
+        active = state["plan"]
+        if active.get("state") != "ACTIVE":
+            return
+        plan = self._plan(
+            str(active["plan_id"]), plan_hash=str(active["plan_hash"])
+        )
+        plan_intents = [
+            raw
+            for raw in state["send_intents"].values()
+            if isinstance(raw, Mapping)
+            and raw.get("plan_id") == plan.plan_id
+            and raw.get("plan_hash") == plan.plan_hash
+        ]
+        terminal_states = {"TERMINAL", "RECONCILED", "CANCELLED"}
+        if not plan_intents or any(
+            raw.get("state") not in terminal_states for raw in plan_intents
+        ):
+            return
+        final_hash = state["broker"].get("position_snapshot_hash")
+        if final_hash != plan.raw["expected_after_position_hash"]:
+            self.orchestrator.fail_closed_halt(
+                "SIMNOW final position does not match immutable target plan"
+            )
+            raise PlanRejected(
+                "SIMNOW final position does not match immutable target plan"
+            )
+        self.orchestrator.complete_active_plan(
+            plan_id=plan.plan_id,
+            plan_hash=plan.plan_hash,
+            receipt_id=str(plan.raw["authority_receipt_id"]),
+            final_position_hash=final_hash,
+        )
+
     def process_command(
         self, command: CommandEnvelope | Mapping[str, Any]
     ) -> CommandResponse:
@@ -445,6 +500,16 @@ class FinalExecutionRuntime:
                 or envelope.payload["artifact_hash"] != receipt.artifact_sha256
             ):
                 raise PlanRejected("SIMNOW preview plan/artifact hash mismatch")
+            response = self.orchestrator.process_command(envelope)
+            if response.result.get("accepted") is True:
+                self.orchestrator.bind_simnow_preview_evidence(
+                    plan_hash=plan.plan_hash,
+                    receipt_id=receipt.receipt_id,
+                    receipt_sha256=receipt.receipt_sha256,
+                    artifact_id=receipt.artifact_id,
+                    artifact_sha256=receipt.artifact_sha256,
+                )
+            return response
         if envelope.command == "enable":
             plan = self.plans.find_authority(
                 envelope.payload["authority_artifact_id"],
@@ -467,6 +532,12 @@ class FinalExecutionRuntime:
                 prior["plan"].get("state") != "PREVIEWED"
                 or prior["plan"].get("plan_id") != expected_preview_id
                 or prior["plan"].get("plan_hash") != plan.plan_hash
+                or prior["plan"].get("preview_mode") != "simnow_preview"
+                or not isinstance(prior["plan"].get("preview_receipt_id"), str)
+                or prior["plan"].get("preview_receipt_id") == "unknown00"
+                or prior["plan"].get("preview_receipt_sha256") == "0" * 64
+                or prior["plan"].get("preview_artifact_id") == "unknown00"
+                or prior["plan"].get("preview_artifact_sha256") == "0" * 64
                 or prior["reconciliation"].get("state") != "RECONCILED"
                 or prior["broker"].get("position_snapshot_hash")
                 != plan.raw["expected_before_position_hash"]
@@ -474,6 +545,18 @@ class FinalExecutionRuntime:
                 raise PlanRejected(
                     "SIMNOW start lacks matching preview/reconciliation/position proof"
                 )
+            preview_plan, preview_receipt = self._preview_from_custody(
+                str(prior["plan"]["preview_receipt_id"])
+            )
+            if (
+                preview_plan.plan_hash != plan.plan_hash
+                or preview_receipt.receipt_sha256
+                != prior["plan"]["preview_receipt_sha256"]
+                or preview_receipt.artifact_id != prior["plan"]["preview_artifact_id"]
+                or preview_receipt.artifact_sha256
+                != prior["plan"]["preview_artifact_sha256"]
+            ):
+                raise PlanRejected("SIMNOW preview custody evidence changed after restart")
             if (
                 envelope.expected.leader_epoch is None
                 or envelope.expected.fencing_token is None
@@ -497,21 +580,24 @@ class FinalExecutionRuntime:
                             plan.plan_id, order.reference, token=token
                         )
                     except Exception as exc:
-                        self.orchestrator.fail_closed_halt(
+                        self._halt_runner_after_failure(
                             f"SIMNOW runner order {order.reference} failed: {exc}"
                         )
                         raise
                     if result.get("accepted") is not True or str(
                         result.get("state", "")
                     ).upper() not in {"SUBMITTED", "ACKNOWLEDGED"}:
-                        self.orchestrator.fail_closed_halt(
+                        self._halt_runner_after_failure(
                             f"SIMNOW runner order {order.reference} was not accepted"
                         )
                         raise MutationRejected(
                             "SIMNOW runner order was rejected or has unknown outcome"
                         )
             return response
-        return self.orchestrator.process_command(envelope)
+        response = self.orchestrator.process_command(envelope)
+        if envelope.command == "reconcile" and response.result.get("accepted") is True:
+            self._complete_after_reconcile()
+        return response
 
     def _token(
         self, token: LeaderToken | Mapping[str, Any] | None

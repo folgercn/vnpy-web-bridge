@@ -283,6 +283,144 @@ class ExecutionOrchestrator:
         self.repository.mutate(writer)
         return self.status()
 
+    def complete_active_plan(
+        self,
+        *,
+        plan_id: str,
+        plan_hash: str,
+        receipt_id: str,
+        final_position_hash: str,
+    ) -> dict[str, Any]:
+        """Atomically archive an exactly reconciled final execution plan.
+
+        This is intentionally an internal primitive: Control has no completion
+        command and cannot forge final execution evidence.  The caller must
+        have just obtained a fresh broker reconciliation; all predicates are
+        repeated in the mutation candidate before authority is revoked.
+        """
+
+        validate_identifier(plan_id, "plan_id")
+        validate_identifier(receipt_id, "receipt_id")
+        validate_sha256(plan_hash, "plan_hash")
+        validate_sha256(final_position_hash, "final_position_hash")
+        terminal_states = {"TERMINAL", "RECONCILED", "CANCELLED"}
+
+        with self._command_lock:
+            def writer(state: dict[str, Any]) -> None:
+                plan = state["plan"]
+                if (
+                    plan.get("state") != "ACTIVE"
+                    or plan.get("plan_id") != plan_id
+                    or plan.get("plan_hash") != plan_hash
+                ):
+                    raise PlanRejected("final completion does not bind active plan")
+                if state["reconciliation"].get("state") != "RECONCILED":
+                    raise RestartReconciliationRequired(
+                        "final completion requires fresh reconciliation"
+                    )
+                if state["broker"].get("position_snapshot_hash") != final_position_hash:
+                    raise SnapshotRejected(
+                        "final position hash does not match reconciliation"
+                    )
+                if int(state["broker"].get("active_order_count", 0)) != 0:
+                    raise SnapshotRejected("broker still has active orders")
+                plan_intents = [
+                    raw
+                    for raw in state["send_intents"].values()
+                    if isinstance(raw, Mapping)
+                    and raw.get("plan_id") == plan_id
+                    and raw.get("plan_hash") == plan_hash
+                ]
+                if not plan_intents or any(
+                    raw.get("state") not in terminal_states for raw in plan_intents
+                ):
+                    raise PlanRejected(
+                        "final completion requires every plan intent terminal"
+                    )
+                if state.get("unknown_outcomes"):
+                    raise UnknownOutcomeError(
+                        "final completion cannot archive unknown broker outcomes"
+                    )
+                state["terminal_archive"].append(
+                    {
+                        "kind": "final_plan_completed",
+                        "plan_id": plan_id,
+                        "plan_hash": plan_hash,
+                        "plan_version": int(plan.get("version", 0)),
+                        "receipt_id": receipt_id,
+                        "final_position_hash": final_position_hash,
+                        "archived_at": format_utc(utc_now()),
+                    }
+                )
+                state["plan"] = PlanState(
+                    "TERMINAL",
+                    plan_id,
+                    plan_hash,
+                    int(plan.get("version", 0)) + 1,
+                    str(plan.get("preview_mode", "")),
+                    str(plan.get("preview_receipt_id", UNKNOWN_ID)),
+                    str(plan.get("preview_receipt_sha256", ZERO_HASH)),
+                    str(plan.get("preview_artifact_id", UNKNOWN_ID)),
+                    str(plan.get("preview_artifact_sha256", ZERO_HASH)),
+                ).as_dict()
+                authority = state["authority"]
+                state["authority"] = AuthorityState(
+                    "REVOKED",
+                    str(authority.get("artifact_id", UNKNOWN_ID)),
+                    str(authority.get("artifact_hash", ZERO_HASH)),
+                    str(authority.get("expires_at", EPOCH_TIMESTAMP)),
+                ).as_dict()
+                state["lifecycle"] = "READY"
+
+            self.repository.mutate(writer)
+        return self.status()
+
+    def bind_simnow_preview_evidence(
+        self,
+        *,
+        plan_hash: str,
+        receipt_id: str,
+        receipt_sha256: str,
+        artifact_id: str,
+        artifact_sha256: str,
+    ) -> dict[str, Any]:
+        """Persist custody proof after an internally verified SIMNOW preview.
+
+        Control cannot supply these fields: it supplies only the typed preview
+        receipt id.  The final runtime has already fetched and exact-verified
+        the receipt and target artifact before calling this internal method.
+        """
+
+        validate_sha256(plan_hash, "plan_hash")
+        validate_identifier(receipt_id, "receipt_id")
+        validate_sha256(receipt_sha256, "receipt_sha256")
+        validate_identifier(artifact_id, "artifact_id")
+        validate_sha256(artifact_sha256, "artifact_sha256")
+        with self._command_lock:
+            def writer(state: dict[str, Any]) -> None:
+                plan = state["plan"]
+                if (
+                    plan.get("state") != "PREVIEWED"
+                    or plan.get("plan_id") != f"preview-{plan_hash[:16]}"
+                    or plan.get("plan_hash") != plan_hash
+                    or plan.get("preview_mode") != "simnow_preview"
+                ):
+                    raise PlanRejected("SIMNOW preview evidence does not bind plan")
+                state["plan"] = PlanState(
+                    "PREVIEWED",
+                    str(plan["plan_id"]),
+                    plan_hash,
+                    int(plan.get("version", 0)) + 1,
+                    "simnow_preview",
+                    receipt_id,
+                    receipt_sha256,
+                    artifact_id,
+                    artifact_sha256,
+                ).as_dict()
+
+            self.repository.mutate(writer)
+        return self.status()
+
     def _projection(
         self, state: Mapping[str, Any], observed_at: datetime
     ) -> dict[str, Any]:
@@ -505,7 +643,12 @@ class ExecutionOrchestrator:
             plan_id = f"preview-{payload['plan_hash'][:16]}"
             prior_version = int(state["plan"].get("version", 0))
             state["plan"] = PlanState(
-                "PREVIEWED", plan_id, payload["plan_hash"], prior_version + 1
+                "PREVIEWED",
+                plan_id,
+                payload["plan_hash"],
+                prior_version + 1,
+                payload["mode"],
+                payload.get("receipt_id", UNKNOWN_ID),
             ).as_dict()
             return {"accepted": True, "plan": deepcopy(state["plan"])}
         if command == "enable":
@@ -549,6 +692,11 @@ class ExecutionOrchestrator:
                 payload["plan_id"],
                 payload_hash,
                 int(state["plan"].get("version", 0)) + 1,
+                str(state["plan"].get("preview_mode", "")),
+                str(state["plan"].get("preview_receipt_id", UNKNOWN_ID)),
+                str(state["plan"].get("preview_receipt_sha256", ZERO_HASH)),
+                str(state["plan"].get("preview_artifact_id", UNKNOWN_ID)),
+                str(state["plan"].get("preview_artifact_sha256", ZERO_HASH)),
             ).as_dict()
             state["lifecycle"] = "READY"
             return {"accepted": True, "plan": deepcopy(state["plan"])}
@@ -560,6 +708,11 @@ class ExecutionOrchestrator:
                 plan.get("plan_id", UNKNOWN_ID),
                 plan.get("plan_hash", ZERO_HASH),
                 int(plan.get("version", 0)) + 1,
+                str(plan.get("preview_mode", "")),
+                str(plan.get("preview_receipt_id", UNKNOWN_ID)),
+                str(plan.get("preview_receipt_sha256", ZERO_HASH)),
+                str(plan.get("preview_artifact_id", UNKNOWN_ID)),
+                str(plan.get("preview_artifact_sha256", ZERO_HASH)),
             ).as_dict()
             if prior_plan_state != "TERMINAL":
                 state["terminal_archive"].append(

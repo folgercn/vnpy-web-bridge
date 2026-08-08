@@ -313,8 +313,8 @@ _PLAN_FIELDS = frozenset(
         "environment",
         "authority_artifact_id",
         "authority_artifact_sha256",
-        "custody_receipt_id",
-        "custody_receipt_sha256",
+        "authority_receipt_id",
+        "authority_receipt_sha256",
         "signer_key_id",
         "signer_key_version",
         "keyring_raw_sha256",
@@ -352,7 +352,7 @@ class TargetPlan:
             "plan_id",
             "account_scope",
             "authority_artifact_id",
-            "custody_receipt_id",
+            "authority_receipt_id",
         ):
             _id(raw[field], f"target plan {field}")
         _short_string(raw["signer_key_id"], "target plan signer_key_id")
@@ -364,7 +364,7 @@ class TargetPlan:
         for field in (
             "plan_hash",
             "authority_artifact_sha256",
-            "custody_receipt_sha256",
+            "authority_receipt_sha256",
             "keyring_raw_sha256",
             "expected_before_position_hash",
             "expected_after_position_hash",

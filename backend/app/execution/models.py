@@ -451,6 +451,14 @@ class PlanState:
     plan_id: str = UNKNOWN_ID
     plan_hash: str = ZERO_HASH
     version: int = 0
+    # Preview provenance is durable execution evidence, rather than a hint
+    # retained by a transient Control request.  In particular, a final SIMNOW
+    # runner may start only from a simnow_preview bound to this receipt.
+    preview_mode: str = ""
+    preview_receipt_id: str = UNKNOWN_ID
+    preview_receipt_sha256: str = ZERO_HASH
+    preview_artifact_id: str = UNKNOWN_ID
+    preview_artifact_sha256: str = ZERO_HASH
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -458,6 +466,11 @@ class PlanState:
             "plan_id": self.plan_id,
             "plan_hash": self.plan_hash,
             "version": self.version,
+            "preview_mode": self.preview_mode,
+            "preview_receipt_id": self.preview_receipt_id,
+            "preview_receipt_sha256": self.preview_receipt_sha256,
+            "preview_artifact_id": self.preview_artifact_id,
+            "preview_artifact_sha256": self.preview_artifact_sha256,
         }
 
 
