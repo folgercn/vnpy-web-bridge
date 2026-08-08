@@ -18,7 +18,32 @@ else
 fi
 compose() { "${compose_command[@]}" --project-name "$project" -f "$compose_file" "$@"; }
 cleanup() { compose down --volumes --remove-orphans >/dev/null 2>&1 || true; rm -rf "$workdir"; }
-trap cleanup EXIT
+diagnose_failure() {
+  echo "phase-c-e2e: failure diagnostics (sensitive lines redacted)" >&2
+  compose ps >&2 || true
+  while read -r container; do
+    [[ -z "$container" ]] && continue
+    docker inspect --format '{{.Name}} oom={{.State.OOMKilled}} exit={{.State.ExitCode}} status={{.State.Status}}' "$container" >&2 || true
+  done < <(compose ps -aq 2>/dev/null || true)
+  compose logs --no-color --tail=80 2>&1 \
+    | sed -E '/upload|keyring|authorization|secret|token|password/ s/.*/[redacted sensitive log line]/I' >&2 || true
+}
+on_exit() {
+  local status=$?
+  if ((status != 0)); then diagnose_failure; fi
+  cleanup
+  exit "$status"
+}
+trap on_exit EXIT
+
+release_buildx_builder() {
+  local builder
+  builder="$(docker buildx inspect --format '{{.Name}}' 2>/dev/null || true)"
+  if [[ -n "$builder" ]]; then
+    echo "phase-c-e2e: releasing Buildx builder"
+    docker buildx rm "$builder" >/dev/null 2>&1 || true
+  fi
+}
 
 wait_for_control() {
   local attempt
@@ -76,9 +101,13 @@ export AUTH_USERS_JSON='[{"username":"ci","password_sha256":"ci"}]'
 export PHASE_C_CUSTODY_POLICIES_JSON
 PHASE_C_CUSTODY_POLICIES_JSON=$(<"$workdir/policies.json")
 
+echo "phase-c-e2e: build control-api"
 scripts/ci/phase_c_build_and_smoke.sh A control-api deployments/phase-a/Containerfile.control-api vnpy-web-bridge-control-api "issue-291-phase-c-${source_sha}-control-api" control-api "$source_sha" artifacts/issue-291-phase-c-e2e-control-api-receipt.json
+echo "phase-c-e2e: build artifact-custody"
 scripts/ci/phase_c_build_and_smoke.sh B artifact-custody deployments/phase-b/Containerfile.artifact-custody vnpy-web-bridge-artifact-custody "issue-291-phase-c-${source_sha}-artifact-custody" artifact-custody "$source_sha" artifacts/issue-291-phase-c-e2e-artifact-custody-receipt.json
+echo "phase-c-e2e: build execution-orchestrator"
 scripts/ci/phase_c_build_and_smoke.sh A execution-orchestrator deployments/phase-a/Containerfile.execution-orchestrator vnpy-web-bridge-execution "issue-291-phase-c-${source_sha}-execution-orchestrator" execution-orchestrator "$source_sha" artifacts/issue-291-phase-c-e2e-execution-orchestrator-receipt.json
+release_buildx_builder
 
 receipt_image_tag() {
   python3 - "$1" <<'PY'
@@ -96,10 +125,13 @@ PY
 export CONTROL_API_IMAGE="$(receipt_image_tag artifacts/issue-291-phase-c-e2e-control-api-receipt.json)"
 export ARTIFACT_CUSTODY_IMAGE="$(receipt_image_tag artifacts/issue-291-phase-c-e2e-artifact-custody-receipt.json)"
 export EXECUTION_IMAGE="$(receipt_image_tag artifacts/issue-291-phase-c-e2e-execution-orchestrator-receipt.json)"
+echo "phase-c-e2e: compose up"
 compose up --no-build --detach
+echo "phase-c-e2e: inject public keyring"
 compose exec -T artifact-custody python -c \
   'import sys; open("/tmp/phase-c-e2e-keyring.json", "wb").write(sys.stdin.buffer.read())' \
   < "$workdir/keyring.json"
+echo "phase-c-e2e: wait for control"
 wait_for_control
 
 upload_b64=$(base64 < "$workdir/upload.json" | tr -d '\n')

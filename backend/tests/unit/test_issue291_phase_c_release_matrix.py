@@ -268,6 +268,13 @@ def test_offline_e2e_uses_canonical_images_and_receipts_not_phase_c_duplicates()
     assert 'compose exec -T artifact-custody python -c' in OFFLINE_E2E
     assert 'sys.stdin.buffer.read()' in OFFLINE_E2E
     assert 'compose cp "$workdir/keyring.json"' not in OFFLINE_E2E
+    assert "release_buildx_builder()" in OFFLINE_E2E
+    assert "docker buildx rm \"$builder\"" in OFFLINE_E2E
+    assert "diagnose_failure()" in OFFLINE_E2E
+    assert "OOMKilled" in OFFLINE_E2E
+    assert "compose logs --no-color --tail=80" in OFFLINE_E2E
+    assert "redacted sensitive log line" in OFFLINE_E2E
+    assert 'phase-c-e2e: compose up' in OFFLINE_E2E
     for image_env in ("CONTROL_API_IMAGE", "ARTIFACT_CUSTODY_IMAGE", "EXECUTION_IMAGE"):
         assert image_env in OFFLINE_E2E
     assert "/api/phase-c/artifacts/upload-install" in OFFLINE_E2E
