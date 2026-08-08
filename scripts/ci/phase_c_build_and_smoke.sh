@@ -41,9 +41,8 @@ case "$smoke_profile" in
     docker run "${safe[@]}" --tmpfs /tmp:rw,noexec,nosuid,size=16m --entrypoint python "$image" -c "from app.execution_orchestrator import app; paths={getattr(r, 'path', '') for r in app.routes}; assert {'/health/live','/health/ready','/version'} <= paths"
     ;;
   gateway-request-proxy|gateway-publish-proxy)
-    expected=request; [[ "$smoke_profile" = gateway-publish-proxy ]] && expected=publish
     docker image inspect "$image" | python -c "import json,sys; c=json.load(sys.stdin)[0]['Config']; assert c['Entrypoint'] == ['python','/usr/local/bin/gateway_proxy.py']; assert c['User'] == '65532:65532'"
-    docker run "${safe[@]}" --tmpfs /tmp:rw,noexec,nosuid,size=16m "$image" "$expected" version | python -c "import json,sys; value=json.load(sys.stdin); assert value['service'] == 'gateway-rpc-proxy'; assert value['version']"
+    docker run "${safe[@]}" --tmpfs /tmp:rw,noexec,nosuid,size=16m "$image" version | python -c "import json,sys; value=json.load(sys.stdin); assert value['service'] == 'gateway-rpc-proxy'; assert value['version']"
     ;;
   artifact-custody)
     volume="phase-c-${unit}-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}"

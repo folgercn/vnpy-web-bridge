@@ -69,7 +69,7 @@ case "$phase" in
       artifact-custody) ARTIFACT_CUSTODY_IMAGE="$image"; export ARTIFACT_CUSTODY_IMAGE ;;
       c-fast-producer) C_FAST_PRODUCER_IMAGE="$image"; export C_FAST_PRODUCER_IMAGE; compose_profile=batch ;;
       execution-quality-worker) EXECUTION_QUALITY_WORKER_IMAGE="$image"; export EXECUTION_QUALITY_WORKER_IMAGE ;;
-      map-producer) MAP_PRODUCER_IMAGE="$image"; export MAP_PRODUCER_IMAGE ;;
+      map-producer) MAP_PRODUCER_IMAGE="$image"; export MAP_PRODUCER_IMAGE; compose_profile=batch ;;
       market-data-worker) MARKET_DATA_WORKER_IMAGE="$image"; export MARKET_DATA_WORKER_IMAGE ;;
       monitor-worker) MONITOR_WORKER_IMAGE="$image"; export MONITOR_WORKER_IMAGE ;;
       signing-authority) SIGNING_AUTHORITY_IMAGE="$image"; export SIGNING_AUTHORITY_IMAGE; compose_profile=offline-signing ;;
@@ -108,6 +108,10 @@ expected = {
         "gateway-rpc-publish-proxy",
     ),
 }
+expected_commands = {
+    "gateway-rpc-request-proxy": ["request"],
+    "gateway-rpc-publish-proxy": ["publish"],
+}
 if phase == "B":
     expected[(phase, unit)] = (unit,)
 targets = expected.get((phase, unit))
@@ -117,4 +121,11 @@ for service in targets:
     actual = services.get(service, {}).get("image")
     if actual != image:
         raise SystemExit(f"{service} image mismatch: expected {image!r}, got {actual!r}")
+    if service in expected_commands:
+        command = services.get(service, {}).get("command")
+        expected_command = expected_commands[service]
+        if command != expected_command:
+            raise SystemExit(
+                f"{service} command mismatch: expected {expected_command!r}, got {command!r}"
+            )
 PY

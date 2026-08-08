@@ -229,6 +229,9 @@ def test_compose_smoke_pins_selected_image_to_exact_service_or_gateway_pair() ->
     assert 'compose_profile=batch' in COMPOSE_SMOKE
     assert 'compose_profile=offline-signing' in COMPOSE_SMOKE
     assert 'compose_args=(--profile "$compose_profile"' in COMPOSE_SMOKE
+    assert 'map-producer) MAP_PRODUCER_IMAGE="$image"; export MAP_PRODUCER_IMAGE; compose_profile=batch' in COMPOSE_SMOKE
+    assert '"gateway-rpc-request-proxy": ["request"]' in COMPOSE_SMOKE
+    assert '"gateway-rpc-publish-proxy": ["publish"]' in COMPOSE_SMOKE
     assert "if actual != image:" in COMPOSE_SMOKE
 
 
@@ -238,7 +241,7 @@ def test_gateway_publish_smoke_uses_explicit_runtime_mode_not_baked_cmd() -> Non
     )
     assert "assert c['User'] == '65532:65532'" in build_smoke
     assert "assert c['Cmd'] == ['$expected']" not in build_smoke
-    assert '"$image" "$expected" version' in build_smoke
+    assert '"$image" version' in build_smoke
 
 
 def test_offline_e2e_uses_canonical_images_and_receipts_not_phase_c_duplicates() -> (
