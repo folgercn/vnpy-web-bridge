@@ -15,7 +15,9 @@ from app.execution import (
     InMemoryTargetPlanRepository,
     PlanRejected,
 )
+from app.execution.errors import GatewayConfigurationError, GatewayUnavailable
 from app.execution.final_runtime import FinalExecutionRuntime
+from app.execution_orchestrator import _HttpCustodyReadClient
 
 from shared.commodity_execution import (
     CommodityExecutionContractError,
@@ -405,6 +407,35 @@ def test_simnow_preview_fetches_receipt_then_exact_custody_artifact() -> None:
     )
     assert result.result["accepted"] is True
     assert service.plans.get(target["plan_id"]).plan_hash == target["plan_hash"]
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "file:///tmp/custody",
+        "http://user:pass@custody",
+        "https://custody/path",
+        "https://custody?next=http://internal",
+        "https://custody#fragment",
+    ],
+)
+def test_custody_http_client_rejects_ssrf_style_base_urls(url: str) -> None:
+    with pytest.raises(GatewayConfigurationError):
+        _HttpCustodyReadClient(base_url=url, secret="secret")
+
+
+def test_custody_http_client_rejects_redirect_response(monkeypatch) -> None:
+    from urllib.error import HTTPError
+
+    client = _HttpCustodyReadClient(base_url="https://custody", secret="secret")
+
+    class Redirect:
+        def open(self, *_args, **_kwargs):
+            raise HTTPError("https://custody/redirect", 302, "redirect", {}, None)
+
+    monkeypatch.setattr(client, "_opener", Redirect())
+    with pytest.raises(GatewayUnavailable):
+        client.probe()
 
 
 def test_partial_unknown_same_intent_cancel_fence_and_restart_reconcile(
