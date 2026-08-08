@@ -213,6 +213,7 @@ PHASE_B_RULES = (
         exact=(
             ".github/workflows/ci.yml",
             "scripts/ci/classify_changes.py",
+            "scripts/ci/phase_b_projection_compose_smoke.sh",
             "scripts/ci/validate_json_schemas.py",
         ),
         prefix=("backend/tests/unit/test_issue291_phase_b_ci",),
@@ -343,6 +344,7 @@ PHASE_B_SCOPE_EXACT = {
     "backend/requirements.phase-b-verifier.txt",
     "deployments/docker-compose.phase-b.yml",
     "scripts/ci/classify_changes.py",
+    "scripts/ci/phase_b_projection_compose_smoke.sh",
     "scripts/ci/validate_json_schemas.py",
     "scripts/commodity_c_fast_pure_producer_kernel.py",
     "scripts/phase_b_artifact_custody.py",

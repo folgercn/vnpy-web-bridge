@@ -579,7 +579,14 @@ jobs:
               commands=(--health --ready --version)
               case "${{ matrix.image }}" in
                 market-data-worker) state_dir=/var/lib/phase-b/market-data ;;
-                execution-quality-worker) state_dir=/var/lib/phase-b/execution-quality ;;
+                execution-quality-worker)
+                  state_dir=/var/lib/phase-b/execution-quality
+                  # This isolated consumer smoke deliberately has no
+                  # producer-owned verified-tick stream mounted.  Readiness
+                  # must remain fail-closed here; the projection compose smoke
+                  # proves it after the market-data producer initializes it.
+                  commands=(--health --version)
+                  ;;
                 monitor-worker)
                   state_dir=/var/lib/phase-b/monitor
                   # Projection absence must fail closed in the isolated image.
@@ -593,9 +600,10 @@ jobs:
               for command in "${commands[@]}"; do
                 docker run "${safe[@]}" "${state[@]}" "$image" --state-dir "$state_dir" "$command"
               done
-              # The same named volume is deliberately reused: readiness is a
+              # Where the isolated worker owns every readiness dependency, the
+              # same named volume is deliberately reused: readiness is a
               # bounded restart recovery check, never tmpfs-only state.
-              if [ "${{ matrix.image }}" != monitor-worker ]; then
+              if [[ "${{ matrix.image }}" != monitor-worker && "${{ matrix.image }}" != execution-quality-worker ]]; then
                 docker run "${safe[@]}" "${state[@]}" "$image" --state-dir "$state_dir" --ready
               fi
               ;;

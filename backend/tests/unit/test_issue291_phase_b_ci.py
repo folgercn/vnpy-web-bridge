@@ -45,6 +45,7 @@ def test_phase_b_shared_contracts_select_every_consumer() -> None:
         "docs/schemas/issue-291-phase-b-trust-keyring-v1.schema.json",
         "docs/schemas/web-bridge-artifact-envelope-v1.schema.json",
         "deployments/docker-compose.phase-b.yml",
+        "scripts/ci/phase_b_projection_compose_smoke.sh",
     ):
         result = classify_phase_b([path])
         assert result["phase_b_changed"] is True
@@ -108,6 +109,19 @@ def test_phase_b_workflow_builds_all_images_and_smokes_offline_only() -> None:
     assert "docker volume create" in job
     assert 'docker volume create "$volume"' in job
     assert 'state=(-v "$volume:$state_dir")' in job
+    assert (
+        "execution-quality-worker)\n"
+        "                  state_dir=/var/lib/phase-b/execution-quality\n"
+        "                  # This isolated consumer smoke deliberately has no\n"
+        "                  # producer-owned verified-tick stream mounted.  Readiness\n"
+        "                  # must remain fail-closed here; the projection compose smoke\n"
+        "                  # proves it after the market-data producer initializes it.\n"
+        "                  commands=(--health --version)"
+    ) in job
+    assert (
+        '"${{ matrix.image }}" != monitor-worker && "${{ matrix.image }}" != execution-quality-worker'
+        in job
+    )
     assert "--user 0" not in job
     assert "--tmpfs /state:" not in job
     for unit in PHASE_B_UNITS:
