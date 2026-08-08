@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
+import io
 import json
 import os
+import pickle
 import signal
 import stat
 import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, Self
 
 try:  # Installed only in the market-data worker image.
     import zmq
@@ -133,6 +137,83 @@ _MARKET_TICK_INSERT = (
 )
 
 
+class _SafeTickData:
+    """State-only target for a trusted vn.py ``TickData`` pickle global."""
+
+
+class _SafeExchange(str):
+    """A value-only replacement for vn.py's ``Exchange`` enum."""
+
+    def __new__(cls, value: str) -> Self:
+        return super().__new__(cls, str(value))
+
+
+_PICKLE_GLOBALS: dict[tuple[str, str], object] = {
+    ("vnpy.trader.object", "TickData"): _SafeTickData,
+    ("vnpy.trader.constant", "Exchange"): _SafeExchange,
+    ("datetime", "datetime"): datetime,
+    ("datetime", "date"): date,
+    ("datetime", "time"): time,
+    ("datetime", "timedelta"): timedelta,
+    ("datetime", "timezone"): timezone,
+    ("builtins", "str"): str,
+    ("builtins", "bytes"): bytes,
+    ("builtins", "int"): int,
+    ("builtins", "float"): float,
+    ("builtins", "bool"): bool,
+    ("builtins", "tuple"): tuple,
+    ("builtins", "list"): list,
+    ("builtins", "dict"): dict,
+    ("builtins", "set"): set,
+    ("builtins", "frozenset"): frozenset,
+}
+
+
+class _RestrictedTickUnpickler(pickle.Unpickler):
+    """Reject arbitrary pickle globals before they can execute code."""
+
+    def find_class(self, module: str, name: str) -> object:
+        allowed = _PICKLE_GLOBALS.get((module, name))
+        if allowed is None:
+            raise pickle.UnpicklingError(f"forbidden pickle global: {module}.{name}")
+        return allowed
+
+
+def restricted_tick_wire_loads(raw: bytes) -> object:
+    return _RestrictedTickUnpickler(io.BytesIO(raw)).load()
+
+
+class _SingleProcessFileLock:
+    """Non-blocking process lease for one publish cursor/state directory."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._fd: int | None = None
+
+    def acquire(self) -> None:
+        if self._fd is not None:
+            return
+        flags = os.O_CREAT | os.O_RDWR
+        flags |= getattr(os, "O_CLOEXEC", 0)
+        fd = os.open(self.path, flags, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            os.close(fd)
+            raise DurableStateError(
+                "market-data publish source is already owned"
+            ) from exc
+        self._fd = fd
+
+    def release(self) -> None:
+        fd, self._fd = self._fd, None
+        if fd is not None:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
+
+
 def verified_tick_to_market_tick_v3(tick: VerifiedTick) -> dict[str, object]:
     """Map only the verified-tick contract to the pre-created v3 schema.
 
@@ -197,13 +278,22 @@ class ZmqPublishTickSource:
                 "last_source_seq": 0,
             },
         )
+        self._process_lock = _SingleProcessFileLock(
+            Path(state_dir) / "publish_proxy_source.lock"
+        )
         self._sequence_lock = threading.RLock()
         self._socket: Any | None = None
         self._callback: Callable[[Mapping[str, object]], None] | None = None
 
     def subscribe(self, callback: Callable[[Mapping[str, object]], None]) -> None:
-        self._callback = callback
-        self._connect()
+        self._process_lock.acquire()
+        try:
+            self._callback = callback
+            self._connect()
+        except Exception:
+            self._callback = None
+            self._process_lock.release()
+            raise
 
     def _connect(self) -> None:
         if self._socket is not None:
@@ -274,7 +364,7 @@ class ZmqPublishTickSource:
         return {key: item for key, item in payload.items() if item is not None}
 
     def _decode_wire(self, wire: object) -> GatewayTickEnvelope:
-        if not isinstance(wire, tuple) or len(wire) != 2:
+        if not isinstance(wire, (list, tuple)) or len(wire) != 2:
             raise TypeError("market-data publish wire must be (topic, TickData)")
         topic, data = wire
         if not isinstance(topic, (str, bytes)):
@@ -282,7 +372,7 @@ class ZmqPublishTickSource:
         topic_text = (
             topic.decode("utf-8", "replace") if isinstance(topic, bytes) else topic
         )
-        if "tick" not in topic_text.lower():
+        if topic_text != "eTick" and not topic_text.startswith("eTick."):
             raise TypeError("market-data publish topic is not a tick topic")
         payload = self._tick_payload(data)
         source_seq = self._next_source_seq()
@@ -309,7 +399,7 @@ class ZmqPublishTickSource:
         try:
             if not self._socket.poll(max(0, int(timeout_ms))):
                 return 0
-            value = self._socket.recv_pyobj()
+            value = restricted_tick_wire_loads(self._socket.recv())
         except self._zmq.ZMQError as exc:
             self._reset()
             raise OSError("market-data publish ingress disconnected") from exc
@@ -317,7 +407,10 @@ class ZmqPublishTickSource:
         return 1
 
     def close(self) -> None:
-        self._reset()
+        try:
+            self._reset()
+        finally:
+            self._process_lock.release()
 
 
 class QuestDbTickWriter:
@@ -807,11 +900,11 @@ class MarketDataWorker:
         self, *, stop_event: threading.Event | None = None, idle_seconds: float = 0.1
     ) -> None:
         self.recover()
-        self.replay_pending()
-        self.bind_source()
-        self.publish_projection()
         stop_event = stop_event or threading.Event()
         try:
+            self.replay_pending()
+            self.bind_source()
+            self.publish_projection()
             while not stop_event.is_set():
                 try:
                     poll = getattr(self.source, "poll", None)

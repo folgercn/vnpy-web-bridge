@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import ast
 import json
+import os
+import pickle
+import subprocess
 import sys
 import threading
 from dataclasses import replace
@@ -36,6 +39,7 @@ from phase_b_workers.market_data_worker import (
     MarketDataWorker,
     QuestDbTickWriter,
     ZmqPublishTickSource,
+    restricted_tick_wire_loads,
     verified_tick_to_market_tick_v3,
 )
 from phase_b_workers.market_data_worker import main as market_data_main
@@ -133,11 +137,11 @@ class FakeSocket:
     def poll(self, _timeout):
         return bool(self.values)
 
-    def recv_pyobj(self):
+    def recv(self):
         value = self.values.pop(0)
         if isinstance(value, Exception):
             raise value
-        return value
+        return value if isinstance(value, bytes) else pickle.dumps(value)
 
     def close(self, linger=0):
         assert linger == 0
@@ -163,6 +167,27 @@ class FakeZmq:
         @staticmethod
         def instance():
             raise AssertionError("test supplies a fake context")
+
+
+class MaliciousPickle:
+    def __init__(self, marker):
+        self.marker = marker
+
+    def __reduce__(self):
+        return os.system, (f"touch {self.marker}",)
+
+
+def rpc_tick(**kwargs):
+    from vnpy.trader.constant import Exchange
+    from vnpy.trader.object import TickData
+
+    return TickData(
+        symbol=kwargs.pop("symbol", "rb2610"),
+        exchange=kwargs.pop("exchange", Exchange.SHFE),
+        datetime=kwargs.pop("datetime", datetime(2026, 8, 8, tzinfo=timezone.utc)),
+        gateway_name=kwargs.pop("gateway_name", "rpc"),
+        **kwargs,
+    )
 
 
 class Notifier:
@@ -340,21 +365,17 @@ def test_questdb_writer_drops_poisoned_connection_and_reconnects_for_replay(tmp_
 
 def test_zmq_publish_source_is_sub_only_and_recovers_after_poisoned_socket(tmp_path):
     first = FakeSocket([FakeZmqError("reset")])
-    tick_data = type(
-        "TickData",
-        (),
-        {
-            "vt_symbol": "rb2610.SHFE",
-            "datetime": datetime(2026, 8, 8, tzinfo=timezone.utc),
-            "last_price": 101.0,
-            "last_volume": 2,
-            "bid_price_1": 100.0,
-            "ask_price_1": 102.0,
-            "bid_volume_1": 3,
-            "ask_volume_1": 4,
-        },
-    )()
-    second = FakeSocket([(b"eTick", tick_data)])
+    tick_data = rpc_tick(
+        datetime=datetime(2026, 8, 8, tzinfo=timezone.utc),
+        last_price=101.0,
+        last_volume=2,
+        bid_price_1=100.0,
+        ask_price_1=102.0,
+        bid_volume_1=3,
+        ask_volume_1=4,
+    )
+    # This exact list is what RpcServer.send_pyobj() publishes.
+    second = FakeSocket([[b"eTick", tick_data]])
     context = FakeContext([first, second])
     source = ZmqPublishTickSource(
         "tcp://publish-proxy:4102",
@@ -375,6 +396,8 @@ def test_zmq_publish_source_is_sub_only_and_recovers_after_poisoned_socket(tmp_p
     assert received_envelope.capability == "market_data.read"
     assert received_envelope.payload == {
         "vt_symbol": "rb2610.SHFE",
+        "symbol": "rb2610",
+        "exchange": "SHFE",
         "datetime": datetime(2026, 8, 8, tzinfo=timezone.utc),
         "last_price": 101.0,
         "last_volume": 2,
@@ -388,8 +411,8 @@ def test_zmq_publish_source_is_sub_only_and_recovers_after_poisoned_socket(tmp_p
 
 
 def test_market_worker_binds_typed_pub_source_through_envelope_validation(tmp_path):
-    tick_data = type("TickData", (), {"vt_symbol": "rb2610.SHFE"})()
-    socket = FakeSocket([("eTick", tick_data), ("eTick", tick_data)])
+    tick_data = rpc_tick()
+    socket = FakeSocket([["eTick", tick_data], ["eTick", tick_data]])
     source = ZmqPublishTickSource(
         "tcp://publish-proxy:4102",
         state_dir=tmp_path / "market",
@@ -412,7 +435,7 @@ def test_market_worker_binds_typed_pub_source_through_envelope_validation(tmp_pa
 
 
 def test_zmq_source_rejects_non_tick_topic_even_if_data_has_tick_like_fields(tmp_path):
-    socket = FakeSocket([("eOrder", {"vt_symbol": "rb2610.SHFE"})])
+    socket = FakeSocket([["eOrder", rpc_tick()]])
     source = ZmqPublishTickSource(
         "tcp://publish-proxy:4102",
         state_dir=tmp_path,
@@ -425,16 +448,94 @@ def test_zmq_source_rejects_non_tick_topic_even_if_data_has_tick_like_fields(tmp
         source.poll()
 
 
+def test_zmq_source_single_process_lock_rejects_second_owner_then_releases(tmp_path):
+    first = ZmqPublishTickSource(
+        "tcp://publish-proxy:4102",
+        state_dir=tmp_path,
+        source_generation="gateway-g1",
+        context=FakeContext([FakeSocket()]),
+        zmq_module=FakeZmq,
+    )
+    second = ZmqPublishTickSource(
+        "tcp://publish-proxy:4102",
+        state_dir=tmp_path,
+        source_generation="gateway-g1",
+        context=FakeContext([FakeSocket()]),
+        zmq_module=FakeZmq,
+    )
+    first.subscribe(lambda _value: None)
+    with pytest.raises(DurableStateError, match="already owned"):
+        second.subscribe(lambda _value: None)
+    first.close()
+    second.subscribe(lambda _value: None)
+    second.close()
+
+
+def test_zmq_source_lock_is_enforced_across_processes_and_recovers_after_release(
+    tmp_path,
+):
+    lock_path = tmp_path / "publish_proxy_source.lock"
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import fcntl, os, sys; "
+                "fd=os.open(sys.argv[1], os.O_CREAT|os.O_RDWR, 0o600); "
+                "fcntl.flock(fd, fcntl.LOCK_EX); "
+                "print('locked', flush=True); sys.stdin.read()"
+            ),
+            str(lock_path),
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    assert holder.stdout and holder.stdout.readline().strip() == "locked"
+    source = ZmqPublishTickSource(
+        "tcp://publish-proxy:4102",
+        state_dir=tmp_path,
+        source_generation="gateway-g1",
+        context=FakeContext([FakeSocket()]),
+        zmq_module=FakeZmq,
+    )
+    with pytest.raises(DurableStateError, match="already owned"):
+        source.subscribe(lambda _value: None)
+    assert holder.stdin
+    holder.stdin.close()
+    assert holder.wait(timeout=5) == 0
+    source.subscribe(lambda _value: None)
+    source.close()
+
+
 def test_market_source_has_only_sub_receive_and_no_order_capabilities():
     source = (Path(__file__).resolve().parents[1] / "market_data_worker.py").read_text(
         encoding="utf-8"
     )
-    assert "recv_pyobj" in source and "recv_json" not in source
+    assert "restricted_tick_wire_loads(self._socket.recv())" in source
+    assert "recv_pyobj" not in source and "recv_json" not in source
     assert ".socket(self._zmq.SUB)" in source
     assert all(
         token not in source
         for token in ("send_order", "cancel_order", "get_account", "get_position")
     )
+
+
+def test_restricted_unpickler_accepts_real_rpc_list_wire_and_blocks_reduce(tmp_path):
+    original = rpc_tick(last_price=123.5)
+    wire = pickle.dumps(["eTick.rb2610", original], protocol=pickle.HIGHEST_PROTOCOL)
+    decoded = restricted_tick_wire_loads(wire)
+    assert isinstance(decoded, list) and decoded[0] == "eTick.rb2610"
+    assert decoded[1].vt_symbol == "rb2610.SHFE"
+    assert decoded[1].last_price == 123.5
+
+    marker = tmp_path / "unpickle-rce-marker"
+    malicious = pickle.dumps(
+        ["eTick", MaliciousPickle(marker)], protocol=pickle.HIGHEST_PROTOCOL
+    )
+    with pytest.raises(pickle.UnpicklingError, match="forbidden pickle global"):
+        restricted_tick_wire_loads(malicious)
+    assert not marker.exists()
 
 
 def test_market_config_uses_private_dsn_file_and_does_not_connect_without_endpoints(
