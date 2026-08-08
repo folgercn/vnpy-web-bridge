@@ -342,6 +342,26 @@ def create_app(service: ExecutionOrchestrator | None = None) -> Any:
         except RepositoryUnavailableError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
 
+    # Phase C remains inside this canonical execution-orchestrator process.
+    # It has a separate offline-only projection state file and never reaches
+    # the Trade/Gateway surface owned by the surrounding orchestrator.
+    phase_c_path = os.getenv("PHASE_C_EXECUTION_STATE_PATH", "").strip()
+    if phase_c_path:
+        from .phase_c.execution_service import (
+            ExecutionSettings as PhaseCExecutionSettings,
+        )
+        from .phase_c.execution_service import (
+            PhaseCExecutionService,
+        )
+        from .phase_c.execution_service import (
+            create_app as create_phase_c_app,
+        )
+
+        phase_c_service = PhaseCExecutionService(
+            PhaseCExecutionSettings.from_env()
+        )
+        app.mount("/internal/v1/phase-c", create_phase_c_app(phase_c_service))
+
     return app
 
 

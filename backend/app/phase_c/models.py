@@ -59,7 +59,16 @@ class CustodyReceiptDTO(AuthorityNegativeDTO):
     receipt_id: str
     receipt_type: Literal["install"]
     artifact_id: str
+    artifact_type: Literal["runtime-authorization"] = "runtime-authorization"
+    trust_domain: Literal["runtime_authorization"] = "runtime_authorization"
+    schema_ref: Literal["phase-c-runtime-authorization-v1"] = "phase-c-runtime-authorization-v1"
     artifact_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    signer_key_id: str = "test-only"
+    signer_key_version: str = "v1"
+    keyring_raw_sha256: str = Field(default="0" * 64, pattern=r"^[0-9a-f]{64}$")
+    signed_artifact_sha256: str = Field(default="0" * 64, pattern=r"^[0-9a-f]{64}$")
+    scope: dict[str, Any] = Field(default_factory=dict)
+    expires_at: str = "2099-01-01T00:00:00Z"
     custody_version: int = Field(ge=0)
     idempotency_key: str
     verified: Literal[True] = True

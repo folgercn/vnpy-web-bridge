@@ -68,6 +68,7 @@ import {
   getPhaseCAuthorizationStatus,
   getPhaseCExecutionProjection,
   getPhaseCWorkflowStatus,
+  recoverPendingPhaseCAuthorization,
   uploadPhaseCSignedArtifactWithRecovery,
   type AuthorizationStatus,
   type CustodyReceipt,
@@ -137,7 +138,13 @@ async function submitAuthorization(action: 'enable' | 'revoke') {
     await refresh()
   } catch (error) { message.error(error instanceof Error ? error.message : '命令被拒绝') }
 }
-onMounted(() => { void refresh().catch(error => message.error(error instanceof Error ? error.message : '读取状态失败')) })
+onMounted(() => {
+  void (async () => {
+    const recovered = await recoverPendingPhaseCAuthorization()
+    if (recovered) authorization.value = recovered
+    await refresh()
+  })().catch(error => message.error(error instanceof Error ? error.message : '读取状态失败'))
+})
 </script>
 
 <style scoped>

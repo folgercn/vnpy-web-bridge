@@ -30,7 +30,16 @@ export interface CustodyReceipt extends PhaseCNegativeAuthority {
   receipt_id: string
   receipt_type: 'install'
   artifact_id: string
+  artifact_type: 'runtime-authorization'
+  trust_domain: 'runtime_authorization'
+  schema_ref: 'phase-c-runtime-authorization-v1'
   artifact_sha256: string
+  signer_key_id: string
+  signer_key_version: string
+  keyring_raw_sha256: string
+  signed_artifact_sha256: string
+  scope: Record<string, unknown>
+  expires_at: string
   custody_version: number
   idempotency_key: string
   verified: true

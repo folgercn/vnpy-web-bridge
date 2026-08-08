@@ -1,26 +1,54 @@
 name: vnpy-phase-c-offline-e2e
 services:
+  control-api:
+    build: { context: ../.., dockerfile: deployments/phase-a/Containerfile.control-api }
+    expose: ["8081"]
+    environment:
+      PHASE_C_CUSTODY_URL: http://artifact-custody:8091
+      PHASE_C_EXECUTION_URL: http://execution-orchestrator:8090
+      PHASE_C_CUSTODY_SHARED_SECRET: ${PHASE_C_CUSTODY_SHARED_SECRET:?required}
+      PHASE_C_EXECUTION_SHARED_SECRET: ${PHASE_C_EXECUTION_SHARED_SECRET:?required}
+      CONTROL_EXECUTION_SHARED_SECRET: ${CONTROL_EXECUTION_SHARED_SECRET:?required}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?required}
+      AUTH_USERS_JSON: ${AUTH_USERS_JSON:?required}
+      APP_ENV: phase-c-offline
+    volumes: [control_phase_c_tmp:/var/lib/vnpy-control]
+    networks: [phase-c-private]
+    read_only: true
+    tmpfs: [/tmp]
   artifact-custody:
-    build: { context: ../.., dockerfile: deployments/phase-c/Containerfile.custody }
+    build: { context: ../.., dockerfile: deployments/phase-b/Containerfile.artifact-custody }
+    command: ["python", "-m", "uvicorn", "app.phase_c_custody:app", "--host", "0.0.0.0", "--port", "8091"]
     expose: ["8091"]
     environment:
       PHASE_C_CUSTODY_ROOT: /var/lib/phase-c-custody
       PHASE_C_CUSTODY_WRITER_EPOCH: "1"
       PHASE_C_CUSTODY_SHARED_SECRET: ${PHASE_C_CUSTODY_SHARED_SECRET:?required}
       PHASE_C_CUSTODY_POLICIES_JSON: ${PHASE_C_CUSTODY_POLICIES_JSON:?public-only policy required}
+    volumes: [artifact_custody_phase_c_ledger:/var/lib/phase-c-custody]
     networks: [phase-c-private]
     read_only: true
     tmpfs: [/tmp]
-  phase-c-execution:
-    build: { context: ../.., dockerfile: deployments/phase-c/Containerfile.execution }
+  execution-orchestrator:
+    build: { context: ../.., dockerfile: deployments/phase-a/Containerfile.execution-orchestrator }
     expose: ["8092"]
     environment:
-      PHASE_C_EXECUTION_STATE_PATH: /var/lib/phase-c-execution/state.json
+      EXECUTION_TEST_MODE: "true"
+      EXECUTION_SCOPE: phase-c-offline
+      EXECUTION_ENVIRONMENT: offline
+      EXECUTION_STATE_PATH: /var/lib/vnpy-execution/state.json
+      PHASE_C_EXECUTION_STATE_PATH: /var/lib/vnpy-execution/phase-c-state.json
       PHASE_C_EXECUTION_SHARED_SECRET: ${PHASE_C_EXECUTION_SHARED_SECRET:?required}
       PHASE_C_CUSTODY_URL: http://artifact-custody:8091
       PHASE_C_CUSTODY_SHARED_SECRET: ${PHASE_C_CUSTODY_SHARED_SECRET:?required}
+      CONTROL_EXECUTION_SHARED_SECRET: ${CONTROL_EXECUTION_SHARED_SECRET:?required}
     networks: [phase-c-private]
     read_only: true
+    volumes: [execution_phase_c_state:/var/lib/vnpy-execution]
     tmpfs: [/tmp]
 networks:
   phase-c-private: { internal: true }
+volumes:
+  artifact_custody_phase_c_ledger:
+  execution_phase_c_state:
+  control_phase_c_tmp:

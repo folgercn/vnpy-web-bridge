@@ -67,7 +67,7 @@ def test_sensitive_fields_cannot_be_exported() -> None:
 
 
 def test_execution_service_consumes_only_custody_receipt_and_keeps_runtime_disabled(tmp_path: Path) -> None:
-    receipt = {"receipt_id": "custody-install-1", "receipt_type": "install", "artifact_id": "artifact-1"}
+    receipt = {"receipt_id": "custody-install-1", "receipt_type": "install", "artifact_id": "artifact-1", "artifact_type": "runtime-authorization", "trust_domain": "runtime_authorization", "schema_ref": "phase-c-runtime-authorization-v1", "artifact_sha256": "a" * 64, "signer_key_id": "test", "signer_key_version": "v1", "keyring_raw_sha256": "b" * 64, "signed_artifact_sha256": "c" * 64, "scope": {}, "expires_at": "2099-01-01T00:00:00Z", "custody_version": 2, "idempotency_key": "install-idem", "verified": True, "installed": True, "custody_writer": "artifact-custody", "production_allowed": False, "live_trading_authorized": False, "countable_forward": False}
     service = PhaseCExecutionService(ExecutionSettings(tmp_path / "state.json", "execution-secret", "http://custody", "custody-secret"), receipt_lookup=lambda _: receipt)
     from fastapi.testclient import TestClient
     app = create_app(service)

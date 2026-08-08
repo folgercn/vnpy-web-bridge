@@ -1,12 +1,14 @@
 """Dedicated offline Phase C execution projection service (no trading imports)."""
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import hmac
 import json
 import os
 import tempfile
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -94,18 +96,34 @@ class PhaseCExecutionService:
             os.close(fd)
         os.replace(name, self.settings.state_path)
 
+    @contextmanager
+    def _locked(self):
+        lock_path = self.settings.state_path.with_suffix(self.settings.state_path.suffix + ".lock")
+        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
     def status(self) -> AuthorizationStatusDTO:
         state = self._load()
         return AuthorizationStatusDTO(version=state["version"], requested_state=state["requested_state"], artifact_id=state["artifact_id"], receipt_id=state["receipt_id"])
 
     def command(self, request: AuthorizationCommandDTO, *, receipt: dict[str, Any]) -> AuthorizationStatusDTO:
+        with self._locked():
+            return self._command_locked(request, receipt=receipt)
+
+    def _command_locked(self, request: AuthorizationCommandDTO, *, receipt: dict[str, Any]) -> AuthorizationStatusDTO:
         state = self._load(); fingerprint = hashlib.sha256(canonical_json(request.model_dump(mode="json"))).hexdigest()
         old = state["commands"].get(request.idempotency_key)
         if old:
             if old["fingerprint"] != fingerprint: raise IdempotencyConflictError("authorization idempotency conflict")
             return AuthorizationStatusDTO.model_validate(old["status"])
         if request.expected_version != state["version"]: raise ExpectedVersionError("authorization expected version conflict")
-        if receipt.get("receipt_id") != request.custody_receipt_id or receipt.get("artifact_id") != request.authorization_artifact_id or receipt.get("receipt_type") != "install":
+        required_receipt = {"receipt_id", "receipt_type", "artifact_id", "artifact_type", "trust_domain", "schema_ref", "artifact_sha256", "signer_key_id", "signer_key_version", "keyring_raw_sha256", "signed_artifact_sha256", "scope", "expires_at", "custody_version", "idempotency_key", "verified", "installed", "custody_writer", "production_allowed", "live_trading_authorized", "countable_forward"}
+        if set(receipt) != required_receipt or receipt.get("receipt_id") != request.custody_receipt_id or receipt.get("artifact_id") != request.authorization_artifact_id or receipt.get("receipt_type") != "install" or receipt.get("artifact_type") != "runtime-authorization" or receipt.get("trust_domain") != "runtime_authorization" or receipt.get("schema_ref") != "phase-c-runtime-authorization-v1" or any(receipt.get(flag) is not False for flag in ("production_allowed", "live_trading_authorized", "countable_forward")):
             raise WorkflowAdapterError("execution command lacks a verified custody install receipt")
         state["version"] += 1; state["requested_state"] = "ENABLE_REQUESTED" if request.action == "enable" else "REVOKED"; state["artifact_id"] = request.authorization_artifact_id; state["receipt_id"] = request.custody_receipt_id
         status = self.status_from(state).model_dump(mode="json")

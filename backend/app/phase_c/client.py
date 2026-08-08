@@ -104,18 +104,18 @@ class RemotePhaseCWorkflowClient:
         return CustodyReceiptDTO.model_validate(raw) if raw else None
 
     def authorization_status(self) -> AuthorizationStatusDTO:
-        return AuthorizationStatusDTO.model_validate(self._request(self.settings.execution_url, self.settings.execution_secret, "GET", "/internal/v1/authorization/status"))
+        return AuthorizationStatusDTO.model_validate(self._request(self.settings.execution_url, self.settings.execution_secret, "GET", "/internal/v1/phase-c/internal/v1/authorization/status"))
 
     def authorization_command(self, request: AuthorizationCommandDTO) -> AuthorizationStatusDTO:
-        raw = self._request(self.settings.execution_url, self.settings.execution_secret, "POST", "/internal/v1/authorization/commands", request.model_dump(mode="json"), mutation=True)
+        raw = self._request(self.settings.execution_url, self.settings.execution_secret, "POST", "/internal/v1/phase-c/internal/v1/authorization/commands", request.model_dump(mode="json"), mutation=True)
         return AuthorizationStatusDTO.model_validate(raw)
 
     def authorization_receipt(self, idempotency_key: str) -> AuthorizationStatusDTO | None:
-        raw = self._request(self.settings.execution_url, self.settings.execution_secret, "GET", f"/internal/v1/authorization/receipts/{idempotency_key}")
+        raw = self._request(self.settings.execution_url, self.settings.execution_secret, "GET", f"/internal/v1/phase-c/internal/v1/authorization/receipts/{idempotency_key}")
         return AuthorizationStatusDTO.model_validate(raw) if raw else None
 
     def execution_projection(self) -> ExecutionProjectionDTO:
-        return ExecutionProjectionDTO.model_validate(self._request(self.settings.execution_url, self.settings.execution_secret, "GET", "/internal/v1/projection"))
+        return ExecutionProjectionDTO.model_validate(self._request(self.settings.execution_url, self.settings.execution_secret, "GET", "/internal/v1/phase-c/internal/v1/projection"))
 
 
 class UnconfiguredPhaseCWorkflowClient:

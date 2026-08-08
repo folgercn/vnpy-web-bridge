@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import json
 import os
@@ -23,6 +24,7 @@ from shared.phase_c_workflow.v1 import (
     PhaseCWorkflowError,
     validate_phase_c_artifact,
 )
+from shared.trust_contracts.v1 import canonical_json_line
 
 
 def _schema(payload: Any) -> None:
@@ -79,11 +81,14 @@ class ArtifactCustodyService:
         )
 
     @staticmethod
-    def _receipt(raw: dict[str, Any]) -> CustodyReceiptDTO:
+    def _receipt(raw: dict[str, Any], *, signed: dict[str, Any], keyring_raw_sha256: str) -> CustodyReceiptDTO:
+        artifact = signed["artifact"]
         return CustodyReceiptDTO(
             receipt_id=raw["receipt_id"], receipt_type="install", artifact_id=raw["artifact_id"],
+            artifact_type=artifact["artifact_type"], trust_domain=artifact["trust_domain"], schema_ref=artifact["schema_ref"],
             artifact_sha256=raw["artifact_raw_sha256"], custody_version=raw["resulting_version"],
-            idempotency_key=raw["idempotency_key"],
+            idempotency_key=raw["idempotency_key"], signer_key_id=signed["signer_key_id"], signer_key_version=signed["signer_key_version"],
+            keyring_raw_sha256=keyring_raw_sha256, signed_artifact_sha256=hashlib.sha256(canonical_json_line(signed)).hexdigest(), scope=artifact["scope"], expires_at=signed["expires_at"],
         )
 
     def publish_install(self, payload: SignedArtifactUploadDTO, *, principal: str) -> CustodyReceiptDTO:
@@ -108,7 +113,7 @@ class ArtifactCustodyService:
                     idempotency_key=f"install-{payload.idempotency_key}", correlation_id=payload.correlation_id,
                     expected_version=published["resulting_version"],
                 )
-                return self._receipt(installed)
+                return self._receipt(installed, signed=signed, keyring_raw_sha256=policy.keyring_raw_sha256)
         except CustodyError as exc:
             if exc.code == "CUSTODY_EXPECTED_VERSION_MISMATCH":
                 raise ExpectedVersionError(exc.code) from exc
@@ -122,7 +127,9 @@ class ArtifactCustodyService:
         try:
             with self._custody() as custody:
                 raw = custody.read_receipt(receipt_id)
-            return self._receipt(raw) if raw["receipt_type"] == "install" else None
+                signed = custody.read_signed_artifact(raw["artifact_id"])
+            policy = self.settings.policies[signed["domain"]]
+            return self._receipt(raw, signed=signed, keyring_raw_sha256=policy.keyring_raw_sha256) if raw["receipt_type"] == "install" else None
         except CustodyError as exc:
             if exc.code == "CUSTODY_RECEIPT_NOT_FOUND":
                 return None
@@ -132,7 +139,9 @@ class ArtifactCustodyService:
         try:
             with self._custody() as custody:
                 raw = custody.read_receipt_by_idempotency(f"install-{idempotency_key}")
-            return self._receipt(raw) if raw["receipt_type"] == "install" else None
+                signed = custody.read_signed_artifact(raw["artifact_id"])
+            policy = self.settings.policies[signed["domain"]]
+            return self._receipt(raw, signed=signed, keyring_raw_sha256=policy.keyring_raw_sha256) if raw["receipt_type"] == "install" else None
         except CustodyError as exc:
             if exc.code == "CUSTODY_RECEIPT_NOT_FOUND":
                 return None

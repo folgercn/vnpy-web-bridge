@@ -3,9 +3,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PYTHONPATH=/app
 WORKDIR /app
 COPY deployments/phase-b/requirements-artifact.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
+RUN pip install --no-cache-dir fastapi==0.115.6 uvicorn[standard]==0.34.0 pydantic==2.13.0 httpx==0.28.1
 COPY shared/artifact_contracts /app/shared/artifact_contracts
 COPY shared/artifact_custody /app/shared/artifact_custody
 COPY shared/trust_contracts /app/shared/trust_contracts
+COPY shared/phase_c_workflow /app/shared/phase_c_workflow
+COPY backend/app/__init__.py /app/app/__init__.py
+COPY backend/app/phase_c /app/app/phase_c
+COPY backend/app/phase_c_custody.py /app/app/phase_c_custody.py
 COPY scripts/phase_b_artifact_custody.py /app/scripts/phase_b_artifact_custody.py
 COPY docs/schemas /app/docs/schemas
 COPY shared/artifact-contracts /app/docs/schemas/producer
