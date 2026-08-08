@@ -171,3 +171,14 @@ def test_phase_a_ci_has_no_legacy_monolith_deploy_or_runtime_mutation() -> None:
         "live_trading_authorized: true",
     ):
         assert forbidden.lower() not in section.lower()
+
+
+def test_issue291_final_runtime_job_pins_pytest_before_invocation() -> None:
+    job = WORKFLOW.split("  final-runtime-compose-smoke:\n", maxsplit=1)[1].split(
+        "  backend:\n", maxsplit=1
+    )[0]
+    assert "pytest==8.3.4" in job
+    assert (
+        "PYTHONPATH=backend:scripts:. pytest -q backend/tests/unit/test_issue291_final_runtime_integration.py"
+        in job
+    )

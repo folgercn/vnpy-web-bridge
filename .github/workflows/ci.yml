@@ -831,7 +831,7 @@ jobs:
           python-version: "3.12"
       - name: Validate final runtime composition is offline-only
         run: |
-          python -m pip install 'PyYAML>=6,<7' 'cryptography==48.0.0'
+          python -m pip install 'PyYAML>=6,<7' 'cryptography==48.0.0' 'pytest==8.3.4'
           PYTHONPATH=backend:scripts:. pytest -q backend/tests/unit/test_issue291_final_runtime_integration.py
           bash scripts/ci/final_runtime_compose_smoke.sh
 
