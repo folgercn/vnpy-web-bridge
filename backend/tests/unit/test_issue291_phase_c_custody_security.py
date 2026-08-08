@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import base64
+import multiprocessing
 from pathlib import Path
 
 import pytest
-from app.phase_c.adapters import WorkflowAdapterError
+from app.phase_c.adapters import ExpectedVersionError, WorkflowAdapterError
 from app.phase_c.custody_service import (
     ArtifactCustodyService,
     CustodyPolicy,
@@ -15,7 +16,7 @@ from app.phase_c.execution_service import (
     PhaseCExecutionService,
     create_app,
 )
-from app.phase_c.models import SignedArtifactUploadDTO
+from app.phase_c.models import AuthorizationCommandDTO, SignedArtifactUploadDTO
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -27,6 +28,24 @@ from shared.trust_contracts.v1 import (
     sha256_bytes,
     signing_bytes,
 )
+
+
+def _concurrent_command(state_path: str, receipt: dict, idempotency_key: str, queue) -> None:
+    service = PhaseCExecutionService(
+        ExecutionSettings(Path(state_path), "execution-secret", "http://custody", "custody-secret"),
+        receipt_lookup=lambda _: receipt,
+    )
+    try:
+        service.command(
+            AuthorizationCommandDTO(
+                command_id=f"command-{idempotency_key}", idempotency_key=idempotency_key,
+                expected_version=0, action="enable", authorization_artifact_id="artifact-1",
+                custody_receipt_id="custody-install-1", reason="concurrent acceptance",
+            ), receipt=receipt,
+        )
+        queue.put("success")
+    except ExpectedVersionError:
+        queue.put("conflict")
 
 
 def artifact(payload: dict | None = None) -> dict:
@@ -82,3 +101,17 @@ def test_execution_service_consumes_only_custody_receipt_and_keeps_runtime_disab
     state.write_bytes(tampered)
     with pytest.raises(WorkflowAdapterError, match="durable state"):
         service.status()
+
+
+def test_execution_same_expected_version_is_cross_process_atomic(tmp_path: Path) -> None:
+    receipt = {"receipt_id": "custody-install-1", "receipt_type": "install", "artifact_id": "artifact-1", "artifact_type": "runtime-authorization", "trust_domain": "runtime_authorization", "schema_ref": "phase-c-runtime-authorization-v1", "artifact_sha256": "a" * 64, "signer_key_id": "test", "signer_key_version": "v1", "keyring_raw_sha256": "b" * 64, "signed_artifact_sha256": "c" * 64, "scope": {}, "expires_at": "2099-01-01T00:00:00Z", "custody_version": 2, "idempotency_key": "install-idem", "verified": True, "installed": True, "custody_writer": "artifact-custody", "production_allowed": False, "live_trading_authorized": False, "countable_forward": False}
+    context = multiprocessing.get_context("spawn")
+    queue = context.Queue()
+    processes = [context.Process(target=_concurrent_command, args=(str(tmp_path / "state.json"), receipt, f"idem-key-000{i}", queue)) for i in (1, 2)]
+    for process in processes: process.start()
+    for process in processes: process.join(15); assert process.exitcode == 0
+    assert sorted(queue.get(timeout=2) for _ in processes) == ["conflict", "success"]
+    service = PhaseCExecutionService(ExecutionSettings(tmp_path / "state.json", "execution-secret", "http://custody", "custody-secret"), receipt_lookup=lambda _: receipt)
+    assert service.status().version == 1
+    projection = service.projection()
+    assert len(projection.audit) == len(projection.archive) == 1
