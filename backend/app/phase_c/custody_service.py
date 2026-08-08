@@ -26,6 +26,7 @@ from app.phase_c.adapters import (
 )
 from app.phase_c.models import CustodyReceiptDTO, SignedArtifactUploadDTO
 from shared.artifact_custody.v1 import ArtifactCustody, CustodyError
+from shared.commodity_execution import TARGET_PLAN_SCHEMA_VERSION, TargetPlan
 from shared.phase_c_workflow.v1 import (
     ARTIFACT_POLICY,
     PhaseCWorkflowError,
@@ -37,6 +38,12 @@ from shared.trust_contracts.v1 import canonical_json_line
 def _schema(payload: Any) -> None:
     if not isinstance(payload, dict):
         raise TypeError("payload must be an object")
+
+
+def _target_plan_schema(payload: Any) -> None:
+    if not isinstance(payload, dict):
+        raise TypeError("target plan payload must be an object")
+    TargetPlan.from_mapping(payload)
 
 
 @dataclass(frozen=True)
@@ -112,7 +119,11 @@ class ArtifactCustodyService:
             writer_id=self.settings.writer_id,
             writer_epoch=self.settings.writer_epoch,
             schema_registry={
-                schema: _schema for _kind, schema, _purpose in ARTIFACT_POLICY.values()
+                **{
+                    schema: _schema
+                    for _kind, schema, _purpose in ARTIFACT_POLICY.values()
+                },
+                TARGET_PLAN_SCHEMA_VERSION: _target_plan_schema,
             },
         )
 

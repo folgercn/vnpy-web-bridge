@@ -115,6 +115,8 @@ def test_phase_c_shared_contract_change_exercises_all_a_and_b_units() -> None:
     (
         "deployments/final/docker-compose.runtime-smoke.yml",
         "deployments/final/Containerfile.questdb-schema",
+        "deployments/final/Containerfile.artifact-bootstrap",
+        "deployments/final/artifact_bootstrap.py",
         "deployments/final/market_source.py",
         "scripts/ci/final_runtime_compose_smoke.sh",
     ),

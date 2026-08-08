@@ -385,6 +385,8 @@ PHASE_A_PHASE_C_PRESERVED_EXACT = (
     "backend/tests/unit/test_issue291_final_runtime_integration.py",
     "deployments/final/docker-compose.runtime-smoke.yml",
     "deployments/final/Containerfile.questdb-schema",
+    "deployments/final/Containerfile.artifact-bootstrap",
+    "deployments/final/artifact_bootstrap.py",
     "deployments/final/market_source.py",
 )
 PHASE_A_PHASE_C_PRESERVED_PREFIXES = (

@@ -6,6 +6,7 @@ import pickle
 import sys
 import time
 import types
+from datetime import datetime, timezone
 
 import zmq
 
@@ -26,6 +27,9 @@ def _tick_wire() -> bytes:
     tick.vt_symbol = "RB2601.SHFE"
     tick.symbol = "RB2601"
     tick.exchange = "SHFE"
+    # Fixed, timezone-aware time keeps every replay byte-identical market
+    # content; this smoke must prove dedup rather than merely early ingestion.
+    tick.datetime = datetime(2026, 8, 8, 1, 2, 3, tzinfo=timezone.utc)
     tick.last_price = 3500.0
     tick.last_volume = 1.0
     tick.bid_price_1 = 3499.0

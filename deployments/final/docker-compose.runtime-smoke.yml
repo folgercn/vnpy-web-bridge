@@ -16,6 +16,16 @@ services:
     security_opt: ["no-new-privileges:true"]
     tmpfs: [/tmp]
 
+  artifact-bootstrap:
+    build: {context: ../.., dockerfile: deployments/final/Containerfile.artifact-bootstrap}
+    profiles: [bootstrap]
+    network_mode: none
+    volumes: [custody_state:/var/lib/phase-c-custody, bootstrap_handoff:/handoff]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: [/tmp]
+
   artifact-custody:
     build: {context: ../.., dockerfile: deployments/phase-b/Containerfile.artifact-custody}
     entrypoint: ["python", "-m", "uvicorn"]
@@ -122,6 +132,7 @@ networks:
 volumes:
   custody_state:
   custody_projection:
+  bootstrap_handoff:
   market_state:
   market_projection:
   execution_quality_state:

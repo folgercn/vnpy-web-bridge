@@ -15,6 +15,8 @@ from app.phase_c.custody_service import (
 from fastapi.testclient import TestClient
 
 from scripts.ci.phase_c_release_matrix import UNIT_METADATA, create_plan
+from shared.artifact_custody.v1 import CustodyError
+from shared.commodity_execution import TARGET_PLAN_SCHEMA_VERSION
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -91,6 +93,27 @@ def test_custody_rejects_reused_control_and_execution_secret(
         CustodySettings.from_env()
 
 
+def test_custody_target_plan_schema_is_readable_but_fails_closed(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    with service._custody() as custody:
+        assert TARGET_PLAN_SCHEMA_VERSION in custody.schema_registry
+        with pytest.raises(CustodyError, match="CUSTODY_SCHEMA_UNKNOWN"):
+            custody._validate_schema({"schema_ref": "unreviewed-schema", "payload": {}})
+        with pytest.raises(CustodyError, match="CUSTODY_SCHEMA_VALIDATION_FAILED"):
+            custody._validate_schema(
+                {"schema_ref": TARGET_PLAN_SCHEMA_VERSION, "payload": {}}
+            )
+
+
+def test_custody_image_includes_only_the_target_plan_contract_closure() -> None:
+    containerfile = (
+        ROOT / "deployments/phase-b/Containerfile.artifact-custody"
+    ).read_text(encoding="utf-8")
+    assert "COPY shared/commodity_execution /app/shared/commodity_execution" in containerfile
+    assert "COPY backend/app/execution " not in containerfile
+    assert "COPY deployments/phase-a/" not in containerfile
+
+
 def test_final_compose_keeps_custody_single_writer_and_data_plane_isolated() -> None:
     raw = (ROOT / "deployments/docker-compose.final.yml").read_text(encoding="utf-8")
     document = yaml.safe_load(raw)
@@ -110,6 +133,39 @@ def test_final_compose_keeps_custody_single_writer_and_data_plane_isolated() -> 
     assert "docker-compose.runtime-smoke.yml" in (
         ROOT / "scripts/ci/final_runtime_compose_smoke.sh"
     ).read_text(encoding="utf-8")
+    smoke_source = (ROOT / "deployments/final/market_source.py").read_text(
+        encoding="utf-8"
+    )
+    smoke = (ROOT / "scripts/ci/final_runtime_compose_smoke.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "datetime(2026, 8, 8, 1, 2, 3, tzinfo=timezone.utc)" in smoke_source
+    assert smoke.index('assert int(fence["last_source_seq"]) >= 2') < smoke.index(
+        "SELECT count(*)"
+    )
+    assert 'event_time.isoformat() == "2026-08-08T01:02:03+00:00"' in smoke
+
+
+def test_runtime_smoke_bootstraps_only_a_signed_target_plan_before_http_custody() -> None:
+    smoke_compose = yaml.safe_load(
+        (ROOT / "deployments/final/docker-compose.runtime-smoke.yml").read_text(
+            encoding="utf-8"
+        )
+    )
+    bootstrap = smoke_compose["services"]["artifact-bootstrap"]
+    assert bootstrap["profiles"] == ["bootstrap"]
+    assert bootstrap["network_mode"] == "none"
+    assert "custody_state:/var/lib/phase-c-custody" in bootstrap["volumes"]
+    assert "bootstrap_handoff:/handoff" in bootstrap["volumes"]
+    smoke = (ROOT / "scripts/ci/final_runtime_compose_smoke.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "Ed25519PrivateKey.generate()" in smoke
+    assert "docker cp \"$workdir/keyring.json\"" in smoke
+    assert "docker cp \"$workdir/signed.json\"" in smoke
+    assert "docker wait \"$bootstrap_container\"" in smoke
+    assert "SMOKE_ARTIFACT_RAW_SHA256" in smoke
+    assert '"X-Phase-C-Principal": "phase-c-execution"' in smoke
 
 
 def test_final_runtime_paths_expand_the_a_b_build_closure() -> None:
