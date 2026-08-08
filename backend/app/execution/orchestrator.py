@@ -1162,6 +1162,36 @@ class ExecutionOrchestrator:
 
     send = send_order
 
+    def submit_planned_order(
+        self,
+        request: Mapping[str, Any],
+        *,
+        idempotency_key: str,
+        plan_id: str,
+        plan_hash: str,
+        leader_epoch: int,
+        fencing_token: int,
+        token: LeaderToken | Mapping[str, Any],
+        intent_id: str,
+    ) -> dict[str, Any]:
+        """Canonical adapter entry for an immutable target-plan child order.
+
+        ``FinalExecutionRuntime`` may only use this narrow adapter.  The
+        mutable core remains the sole owner of intent persistence, fencing,
+        UNKNOWN outcome handling, and the gateway send itself.
+        """
+
+        return self.send_order(
+            request,
+            idempotency_key=idempotency_key,
+            plan_id=plan_id,
+            plan_hash=plan_hash,
+            leader_epoch=leader_epoch,
+            fencing_token=fencing_token,
+            token=token,
+            intent_id=intent_id,
+        )
+
     def cancel_order(
         self,
         target_intent_id: str,
@@ -1202,6 +1232,31 @@ class ExecutionOrchestrator:
         )
 
     cancel = cancel_order
+
+    def cancel_planned_intent(
+        self,
+        target_intent_id: str,
+        *,
+        idempotency_key: str,
+        plan_id: str,
+        plan_hash: str,
+        leader_epoch: int,
+        fencing_token: int,
+        token: LeaderToken | Mapping[str, Any],
+        intent_id: str,
+    ) -> dict[str, Any]:
+        """Canonical adapter entry for cancelling an immutable-plan intent."""
+
+        return self.cancel_order(
+            target_intent_id,
+            idempotency_key=idempotency_key,
+            plan_id=plan_id,
+            plan_hash=plan_hash,
+            leader_epoch=leader_epoch,
+            fencing_token=fencing_token,
+            token=token,
+            intent_id=intent_id,
+        )
 
     def _mutate_order(
         self,

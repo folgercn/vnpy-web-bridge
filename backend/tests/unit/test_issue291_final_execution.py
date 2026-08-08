@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 from copy import deepcopy
 from pathlib import Path
 
@@ -381,6 +382,20 @@ def test_internal_order_uses_core_fence_and_local_gate() -> None:
             )
         )
     assert gateway.send_calls == []
+
+
+def test_final_runtime_uses_only_plan_scoped_execution_mutation_delegates() -> None:
+    runtime_path = (
+        Path(__file__).resolve().parents[2] / "app/execution/final_runtime.py"
+    )
+    tree = ast.parse(runtime_path.read_text(encoding="utf-8"))
+    attributes = {
+        node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)
+    }
+
+    assert {"submit_planned_order", "cancel_planned_intent"} <= attributes
+    assert "send_order" not in attributes
+    assert "cancel_order" not in attributes
 
 
 def test_offline_preview_never_bypasses_final_simnow_start() -> None:

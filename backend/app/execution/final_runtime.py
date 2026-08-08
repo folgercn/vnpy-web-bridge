@@ -645,7 +645,7 @@ class FinalExecutionRuntime:
         *,
         token: LeaderToken | Mapping[str, Any] | None,
     ) -> dict[str, Any]:
-        """Submit exactly one plan order through ``ExecutionOrchestrator.send_order``."""
+        """Submit one plan order through the canonical Execution adapter."""
 
         if not self.allow_simnow_execution:
             raise AuthorityRejected("SIMNOW execution is locally disabled")
@@ -677,7 +677,7 @@ class FinalExecutionRuntime:
                 "target plan is not the active reconciled execution plan"
             )
         leader = self._token(token)
-        return self.orchestrator.send_order(
+        return self.orchestrator.submit_planned_order(
             order.as_dict(),
             idempotency_key=idempotency_key,
             plan_id=plan.plan_id,
@@ -701,7 +701,7 @@ class FinalExecutionRuntime:
         *,
         token: LeaderToken | Mapping[str, Any] | None,
     ) -> dict[str, Any]:
-        """Cancel a plan-owned intent through the existing fenced core path."""
+        """Cancel a plan-owned intent through the canonical Execution adapter."""
 
         plan = self._plan(plan_id)
         intent_id = validate_identifier(intent_id, "intent_id")
@@ -718,7 +718,7 @@ class FinalExecutionRuntime:
                 "intent_id": intent_id,
             }
         )
-        return self.orchestrator.cancel_order(
+        return self.orchestrator.cancel_planned_intent(
             intent_id,
             idempotency_key=f"cancel-{cancel_seed[:30]}",
             plan_id=plan.plan_id,
