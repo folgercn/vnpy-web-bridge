@@ -731,7 +731,7 @@ class ExecutionOrchestrator:
             }
         raise CommandValidationError(f"unsupported command {command}")
 
-    def _prepare_control_cancellation(self) -> None:
+    def _prepare_control_cancellation(self, *, emergency_stop_only: bool = False) -> None:
         state = self.repository.snapshot()
         active_ids = [
             str(intent_id)
@@ -739,7 +739,11 @@ class ExecutionOrchestrator:
             if not str(intent_id).startswith("key:")
             and isinstance(raw, Mapping)
             and raw.get("action", "send") == "send"
-            and raw.get("state") in ACTIVE_INTENT_STATES
+            and (
+                raw.get("state") == "ACKNOWLEDGED"
+                if emergency_stop_only
+                else raw.get("state") in ACTIVE_INTENT_STATES
+            )
         ]
         if active_ids:
             token = self.fencer.token
@@ -755,6 +759,7 @@ class ExecutionOrchestrator:
                     leader_epoch=token.epoch,
                     fencing_token=token.fencing_token,
                     token=token,
+                    _emergency_stop_only=emergency_stop_only,
                 )
                 if not self._cancel_result_is_terminal(result):
                     self._mark_cancel_failure(
@@ -833,7 +838,7 @@ class ExecutionOrchestrator:
         """Cancel all active intents under the current fence, then revoke."""
 
         try:
-            self._prepare_control_cancellation()
+            self._prepare_control_cancellation(emergency_stop_only=True)
         except Exception:
             self._force_revoke_after_cancel_failure()
             raise
@@ -854,7 +859,11 @@ class ExecutionOrchestrator:
                 )
                 plan["state"] = "TERMINAL"
                 plan["version"] = int(plan.get("version", 0)) + 1
-            state["lifecycle"] = "READY"
+            state["lifecycle"] = (
+                "HALTED_UNKNOWN_OUTCOME"
+                if state.get("unknown_outcomes")
+                else "READY"
+            )
             state["audit"].append(
                 {
                     "kind": "emergency_stop",
@@ -1166,6 +1175,7 @@ class ExecutionOrchestrator:
         token: LeaderToken | Mapping[str, Any] | None = None,
         intent_id: str | None = None,
         now: datetime | None = None,
+        _emergency_stop_only: bool = False,
     ) -> dict[str, Any]:
         target_intent_id = validate_identifier(target_intent_id, "target_intent_id")
         state = self.repository.snapshot()
@@ -1188,6 +1198,7 @@ class ExecutionOrchestrator:
             intent_id=intent_id,
             target_intent_id=target_intent_id,
             now=now,
+            emergency_stop_only=_emergency_stop_only,
         )
 
     cancel = cancel_order
@@ -1206,6 +1217,7 @@ class ExecutionOrchestrator:
         intent_id: str | None,
         target_intent_id: str | None = None,
         now: datetime | None,
+        emergency_stop_only: bool = False,
     ) -> dict[str, Any]:
         with self._mutation_lock:
             current = now or utc_now()
@@ -1253,6 +1265,7 @@ class ExecutionOrchestrator:
                 now=current,
                 action=action,
                 target_intent_id=target_intent_id,
+                emergency_stop_only=emergency_stop_only,
             )
             expected_state_version = int(state["state_version"])
             active_plan = state["plan"]
@@ -1340,6 +1353,7 @@ class ExecutionOrchestrator:
                     action=action,
                     target_intent_id=target_intent_id,
                     transaction_candidate=True,
+                    emergency_stop_only=emergency_stop_only,
                 )
                 persist_intent(candidate)
 
@@ -1363,6 +1377,7 @@ class ExecutionOrchestrator:
                 now=utc_now(),
                 action=action,
                 target_intent_id=target_intent_id,
+                emergency_stop_only=emergency_stop_only,
             )
 
             try:
@@ -1449,15 +1464,17 @@ class ExecutionOrchestrator:
         action: str,
         target_intent_id: str | None,
         transaction_candidate: bool = False,
+        emergency_stop_only: bool = False,
     ) -> None:
         if self._local_halted:
             raise RestartReconciliationRequired("orchestrator is halted fail closed")
-        if state.get("unknown_outcomes"):
+        emergency_cancel = action == "cancel" and emergency_stop_only
+        if state.get("unknown_outcomes") and not emergency_cancel:
             raise UnknownOutcomeError("unknown broker outcome requires query/reconcile")
         if state.get("lifecycle") in {
             "HALTED_RECONCILE_REQUIRED",
             "HALTED_UNKNOWN_OUTCOME",
-        }:
+        } and not emergency_cancel:
             raise RestartReconciliationRequired(
                 "orchestrator lifecycle does not admit mutation"
             )
@@ -1465,7 +1482,10 @@ class ExecutionOrchestrator:
             raise RestartReconciliationRequired(
                 "orchestrator lifecycle does not admit mutation"
             )
-        if not state.get("reconciliation", {}).get("state") == "RECONCILED":
+        if (
+            state.get("reconciliation", {}).get("state") != "RECONCILED"
+            and not emergency_cancel
+        ):
             raise RestartReconciliationRequired("fresh broker reconciliation required")
         if action == "cancel" and target_intent_id:
             target = state.get("send_intents", {}).get(target_intent_id)
@@ -1477,6 +1497,10 @@ class ExecutionOrchestrator:
                 "unknown_outcomes", {}
             ):
                 raise UnknownOutcomeError("cannot cancel an unresolved intent")
+            if emergency_cancel and target.get("state") != "ACKNOWLEDGED":
+                raise MutationRejected(
+                    "emergency cancellation is limited to acknowledged intents"
+                )
         if transaction_candidate:
             self.fencer.validate_against_state(
                 state,

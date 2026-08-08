@@ -738,6 +738,46 @@ def test_runner_second_failure_cancels_first_ack_and_halts() -> None:
     assert core.status()["lifecycle"] == "HALTED_RECONCILE_REQUIRED"
 
 
+def test_runner_timeout_cancels_ack_sibling_without_replaying_unknown_intent() -> None:
+    service, core, repo, gateway, _ = runtime(execute=True)
+    target = plan()
+    second = deepcopy(target["orders"][0])
+    second["reference"] = "order-ref-0002"
+    source = {
+        key: value
+        for key, value in target.items()
+        if key not in {"plan_hash", "order_set_sha256"}
+    }
+    source["orders"] = [target["orders"][0], second]
+    target = build_target_plan(**source)
+    original_send = gateway.send_order
+
+    def timeout_second(request, context):
+        if len(gateway.send_calls) == 1:
+            gateway.send_calls.append((dict(request), context))
+            raise TimeoutError("second order outcome unknown")
+        return original_send(request, context)
+
+    gateway.send_order = timeout_second
+    with pytest.raises(GatewayTimeout):
+        reconcile_enable_start(service, core, repo, target)
+    token = core.fencer.token
+    assert token is not None
+    assert len(gateway.send_calls) == 2
+    assert len(gateway.cancel_calls) == 1
+    assert core.status()["lifecycle"] == "HALTED_UNKNOWN_OUTCOME"
+    unknown = next(iter(repo.snapshot()["unknown_outcomes"]))
+    assert gateway.cancel_calls[0][0]["target_intent_id"] != unknown
+    assert repo.snapshot()["reconciliation"]["state"] == "UNKNOWN"
+    replay = service.send_plan_order(
+        target["plan_id"], "order-ref-0002", token=token
+    )
+    assert replay["reused"] is True
+    assert replay["accepted"] is False
+    assert replay["intent_id"] == unknown
+    assert len(gateway.send_calls) == 2
+
+
 @pytest.mark.parametrize("expected_after,should_complete", [("0" * 64, True), ("d" * 64, False)])
 def test_reconcile_final_position_hash_completes_or_halts(
     expected_after: str, should_complete: bool

@@ -441,6 +441,11 @@ class FinalExecutionRuntime:
         """
 
         self.orchestrator.emergency_stop(reason=reason)
+        if self.orchestrator.repository.snapshot().get("unknown_outcomes"):
+            # The unknown intent must remain durable and reconciliation-gated;
+            # do not overwrite HALTED_UNKNOWN_OUTCOME after cancelling only
+            # the independently acknowledged siblings.
+            return
         self.orchestrator.fail_closed_halt(reason)
 
     def _finalization_evidence(self) -> dict[str, str] | None:
