@@ -3,10 +3,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from jsonschema import Draft202012Validator
 
-from scripts.ci.phase_c_build_receipt import create_receipt
 from scripts.ci.classify_changes import classify_phase_a
+from scripts.ci.phase_c_build_receipt import create_receipt
 from scripts.ci.phase_c_release_matrix import UNIT_METADATA, create_plan
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -107,6 +108,23 @@ def test_phase_c_shared_contract_change_exercises_all_a_and_b_units() -> None:
         assert _units(plan) == set(UNIT_METADATA)
         assert plan["phase_b_projection_required"] is True
         assert plan["offline_e2e_required"] is True
+
+
+@pytest.mark.parametrize(
+    "path",
+    (
+        "deployments/final/docker-compose.runtime-smoke.yml",
+        "deployments/final/Containerfile.questdb-schema",
+        "deployments/final/Containerfile.artifact-bootstrap",
+        "deployments/final/artifact_bootstrap.py",
+        "deployments/final/market_source.py",
+        "scripts/ci/final_runtime_compose_smoke.sh",
+    ),
+)
+def test_final_runtime_smoke_assets_expand_the_reviewed_matrix(path: str) -> None:
+    plan = create_plan([path], source_commit_sha=SHA)
+    assert plan["decision"] == "BUILD_ONLY"
+    assert _units(plan) == set(UNIT_METADATA)
 
 
 def test_phase_c_offline_e2e_assets_are_explicitly_preserved_and_shared() -> None:

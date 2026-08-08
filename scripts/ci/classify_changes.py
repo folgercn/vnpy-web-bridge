@@ -377,6 +377,17 @@ PHASE_A_PHASE_C_PRESERVED_EXACT = (
     "deployments/phase-c/Containerfile.custody",
     "deployments/phase-c/Containerfile.execution",
     "deployments/phase-c/docker-compose.offline-e2e.yml",
+    "backend/app/execution/final_runtime.py",
+    "deployments/docker-compose.final.yml",
+    "deployments/final/questdb-market-ticks.sql",
+    "scripts/ci/final_runtime_compose_smoke.sh",
+    "backend/tests/unit/test_issue291_final_execution.py",
+    "backend/tests/unit/test_issue291_final_runtime_integration.py",
+    "deployments/final/docker-compose.runtime-smoke.yml",
+    "deployments/final/Containerfile.questdb-schema",
+    "deployments/final/Containerfile.artifact-bootstrap",
+    "deployments/final/artifact_bootstrap.py",
+    "deployments/final/market_source.py",
 )
 PHASE_A_PHASE_C_PRESERVED_PREFIXES = (
     "backend/app/api/routes_phase_c_",
@@ -387,6 +398,7 @@ PHASE_A_PHASE_C_PRESERVED_PREFIXES = (
     "scripts/ci/phase_c_",
     "scripts/phase_c_faults/",
     "shared/phase_c_workflow/",
+    "shared/commodity_execution/",
 )
 
 

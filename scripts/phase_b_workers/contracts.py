@@ -452,7 +452,15 @@ class VerifiedTick:
                 raw.get("last_volume") or raw.get("lastVolume") or raw.get("volume")
             ),
         }
-        raw_hash = sha256_hex(_redact_mapping(raw))
+        # Source-event identifiers fence a producer, but are not market data.
+        # A PUB reconnect can legitimately redeliver the same TickData under a
+        # new transport event id.  Keep durable tick dedup content-based while
+        # the worker's source fence still rejects a reused id with changed
+        # payload.
+        content = dict(raw)
+        for identity_field in ("source_event_id", "event_id", "id"):
+            content.pop(identity_field, None)
+        raw_hash = sha256_hex(_redact_mapping(content))
         ingest_id = source_event_id or sha256_hex({"source": source, **body})[:32]
         tick = cls(
             stream_generation=stream_generation,

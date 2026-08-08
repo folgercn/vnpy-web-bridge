@@ -33,6 +33,7 @@ from .models import (
     IDEMPOTENCY_RE,
     IDENTIFIER_RE,
     SHA256_RE,
+    UNKNOWN_ID,
     UTC_RE,
     AuthorityState,
     BrokerState,
@@ -128,6 +129,7 @@ def _validate_audit_entry(value: Any) -> None:
         "reconcile_rejected": {"kind", "reason", "observed_at"},
         "cancel_rejected": {"kind", "target_intent_id", "reason", "observed_at"},
         "emergency_stop": {"kind", "reason", "observed_at"},
+        "fail_closed_halt": {"kind", "reason", "observed_at"},
         "test": {"kind", "observed_at"},
     }
     required = schemas.get(kind)
@@ -198,6 +200,43 @@ def _validate_archive_entry(value: Any) -> None:
         ):
             raise RepositoryUnavailableError(
                 "durable intent archive broker id is invalid"
+            )
+        _require_log_timestamp(value["archived_at"], "archived_at")
+        return
+    if kind == "final_plan_completed":
+        if set(value) != {
+            "kind",
+            "plan_id",
+            "plan_hash",
+            "plan_version",
+            "receipt_id",
+            "final_position_hash",
+            "archived_at",
+        }:
+            raise RepositoryUnavailableError(
+                "durable final plan archive fields are invalid"
+            )
+        for field in ("plan_id", "receipt_id"):
+            if not isinstance(value[field], str) or not IDENTIFIER_RE.fullmatch(
+                value[field]
+            ):
+                raise RepositoryUnavailableError(
+                    f"durable final plan archive {field} is invalid"
+                )
+        for field in ("plan_hash", "final_position_hash"):
+            if not isinstance(value[field], str) or not SHA256_RE.fullmatch(
+                value[field]
+            ):
+                raise RepositoryUnavailableError(
+                    f"durable final plan archive {field} is invalid"
+                )
+        if (
+            isinstance(value["plan_version"], bool)
+            or not isinstance(value["plan_version"], int)
+            or value["plan_version"] < 0
+        ):
+            raise RepositoryUnavailableError(
+                "durable final plan archive version is invalid"
             )
         _require_log_timestamp(value["archived_at"], "archived_at")
         return
@@ -347,7 +386,17 @@ def _validate_state(
     ):
         raise RepositoryUnavailableError("durable authority expiry is invalid")
     plan = state["plan"]
-    if set(plan) != {"state", "plan_id", "plan_hash", "version"}:
+    if set(plan) != {
+        "state",
+        "plan_id",
+        "plan_hash",
+        "version",
+        "preview_mode",
+        "preview_receipt_id",
+        "preview_receipt_sha256",
+        "preview_artifact_id",
+        "preview_artifact_sha256",
+    }:
         raise RepositoryUnavailableError("durable plan fields are invalid")
     if not isinstance(plan.get("plan_id"), str) or not IDENTIFIER_RE.fullmatch(
         plan["plan_id"]
@@ -363,6 +412,29 @@ def _validate_state(
         or plan["version"] < 0
     ):
         raise RepositoryUnavailableError("durable plan version is invalid")
+    if plan.get("preview_mode") not in {"", "offline_preview", "simnow_preview"}:
+        raise RepositoryUnavailableError("durable preview mode is invalid")
+    if not isinstance(plan.get("preview_receipt_id"), str) or not IDENTIFIER_RE.fullmatch(
+        plan["preview_receipt_id"]
+    ):
+        raise RepositoryUnavailableError("durable preview receipt id is invalid")
+    for field in ("preview_receipt_sha256", "preview_artifact_sha256"):
+        if not isinstance(plan.get(field), str) or not SHA256_RE.fullmatch(plan[field]):
+            raise RepositoryUnavailableError(f"durable {field} is invalid")
+    if not isinstance(plan.get("preview_artifact_id"), str) or not IDENTIFIER_RE.fullmatch(
+        plan["preview_artifact_id"]
+    ):
+        raise RepositoryUnavailableError("durable preview artifact id is invalid")
+    preview_defaults = (
+        plan["preview_receipt_id"] == UNKNOWN_ID
+        and plan["preview_receipt_sha256"] == "0" * 64
+        and plan["preview_artifact_id"] == UNKNOWN_ID
+        and plan["preview_artifact_sha256"] == "0" * 64
+    )
+    if plan["preview_mode"] == "simnow_preview" and preview_defaults:
+        raise RepositoryUnavailableError("SIMNOW preview is missing custody provenance")
+    if plan["preview_mode"] != "simnow_preview" and not preview_defaults:
+        raise RepositoryUnavailableError("non-SIMNOW preview retains custody provenance")
     lease = state["lease"]
     if set(lease) != {
         "scope",

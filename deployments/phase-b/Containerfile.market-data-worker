@@ -1,5 +1,6 @@
-# Phase B market-data worker.  Only the dependency-free worker package enters
-# this image; the web application and broad requirements are intentionally out.
+# Phase B market-data worker.  Its only third-party clients are a ZMQ SUB
+# socket for the gateway publish proxy and psycopg for QuestDB PGWire INSERTs.
+# The web application and broad requirements are intentionally out.
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -7,6 +8,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONPATH=/app
 
 WORKDIR /app
+COPY deployments/phase-b/requirements-market-data.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
 RUN mkdir -p /app/phase_b_workers/schemas
 COPY scripts/phase_b_workers/__init__.py /app/phase_b_workers/__init__.py
 COPY scripts/phase_b_workers/contracts.py /app/phase_b_workers/contracts.py
@@ -17,6 +20,9 @@ COPY scripts/phase_b_workers/schemas/verified-tick-v1.schema.json /app/phase_b_w
 COPY scripts/phase_b_workers/schemas/worker-health-v1.schema.json /app/phase_b_workers/schemas/worker-health-v1.schema.json
 COPY scripts/phase_b_workers/schemas/worker-readiness-v1.schema.json /app/phase_b_workers/schemas/worker-readiness-v1.schema.json
 COPY scripts/phase_b_workers/schemas/worker-metrics-v1.schema.json /app/phase_b_workers/schemas/worker-metrics-v1.schema.json
+# The final-runtime smoke source is a tiny offline-only vn.py wire fixture;
+# it carries no gateway credentials or order capability.
+COPY deployments/final/market_source.py /app/smoke/market_source.py
 
 RUN python -m compileall -q /app/phase_b_workers \
     && groupadd --system --gid 65532 phaseb \

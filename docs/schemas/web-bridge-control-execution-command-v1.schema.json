@@ -359,8 +359,37 @@
             "offline_preview",
             "simnow_preview"
           ]
+        },
+        "receipt_id": {
+          "$ref": "#/$defs/identifier"
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "simnow_preview"
+              }
+            },
+            "required": [
+              "mode"
+            ]
+          },
+          "then": {
+            "required": [
+              "receipt_id"
+            ]
+          },
+          "else": {
+            "not": {
+              "required": [
+                "receipt_id"
+              ]
+            }
+          }
+        }
+      ]
     },
     "enable_payload": {
       "type": "object",

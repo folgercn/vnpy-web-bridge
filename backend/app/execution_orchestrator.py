@@ -3,18 +3,26 @@
 from __future__ import annotations
 
 import hmac
+import json
 import os
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
+from urllib.request import HTTPRedirectHandler, build_opener
+from urllib.request import Request as UrlRequest
 
 from .execution import (
     CommandEnvelope,
     CommandValidationError,
     DurableExecutionRepository,
+    DurableTargetPlanRepository,
     ExecutionError,
     ExecutionOrchestrator,
     ExpectedVersionConflict,
     FencingError,
+    FinalExecutionRuntime,
     GatewayConfigurationError,
     GatewayTimeout,
     GatewayUnavailable,
@@ -25,6 +33,8 @@ from .execution import (
     VnpyWindowsGateway,
 )
 from .execution.errors import SnapshotRejected
+from .execution.final_runtime import CustodyReadClient
+from .execution.models import validate_identifier
 from .execution.readiness import GatewayReadinessProbe
 
 
@@ -117,18 +127,161 @@ def build_orchestrator() -> ExecutionOrchestrator:
     )
 
 
+def _final_runtime_required() -> bool:
+    return os.getenv("FINAL_EXECUTION_RUNTIME_REQUIRED", "").lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+
+
+class _HttpCustodyReadClient(CustodyReadClient):
+    """Narrow read-only custody client used only by final Execution.
+
+    The endpoint contract is intentionally explicit: receipt lookup, immutable
+    artifact lookup, and a health probe.  No signing, publishing, lifecycle or
+    broker capability is available on this client.
+    """
+
+    def __init__(self, *, base_url: str, secret: str) -> None:
+        parsed = urlsplit(base_url)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or parsed.path not in {"", "/"}
+            or not secret
+        ):
+            raise GatewayConfigurationError(
+                "final custody read configuration is invalid"
+            )
+        self.base_url = base_url.rstrip("/")
+        self.secret = secret
+        self._opener = build_opener(_NoRedirect())
+
+    def _request(
+        self, path: str, *, missing_is_none: bool = False
+    ) -> dict[str, Any] | None:
+        request = UrlRequest(
+            f"{self.base_url}{path}",
+            headers={
+                "X-Phase-C-Principal": "execution-orchestrator",
+                "X-Phase-C-Custody-Secret": self.secret,
+            },
+            method="GET",
+        )
+        try:
+            with self._opener.open(request, timeout=3.0) as response:
+                if response.status != 200:
+                    raise GatewayUnavailable("custody read returned non-200 status")
+                raw = response.read(1024 * 1024 + 1)
+        except HTTPError as exc:
+            if missing_is_none and exc.code == 404:
+                return None
+            raise GatewayUnavailable("custody read was rejected") from exc
+        except (URLError, OSError, TimeoutError) as exc:
+            raise GatewayUnavailable("custody read outcome is unknown") from exc
+        if len(raw) > 1024 * 1024:
+            raise GatewayUnavailable("custody response is too large")
+        try:
+            value = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise GatewayUnavailable("custody response is invalid JSON") from exc
+        if not isinstance(value, dict):
+            raise GatewayUnavailable("custody response is not an object")
+        return value
+
+    def receipt(self, receipt_id: str) -> dict[str, Any] | None:
+        return self._request(
+            f"/internal/v1/receipts/{validate_identifier(receipt_id, 'receipt_id')}",
+            missing_is_none=True,
+        )
+
+    def artifact(self, artifact_id: str) -> dict[str, Any] | None:
+        return self._request(
+            f"/internal/v1/artifacts/{validate_identifier(artifact_id, 'artifact_id')}",
+            missing_is_none=True,
+        )
+
+    def probe(self) -> None:
+        self._request("/health/live")
+
+
+class _NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, *_: Any, **__: Any) -> None:
+        return None
+
+
+def build_execution_service() -> ExecutionOrchestrator | FinalExecutionRuntime:
+    """Build raw Execution normally, or a fail-closed final SIMNOW runtime."""
+
+    core = build_orchestrator()
+    if not _final_runtime_required():
+        return core
+    if core.environment.upper() != "SIMNOW":
+        raise GatewayConfigurationError(
+            "FINAL_EXECUTION_RUNTIME_REQUIRED requires EXECUTION_ENVIRONMENT=SIMNOW"
+        )
+    root = os.getenv("EXECUTION_TARGET_PLAN_ROOT", "").strip()
+    custody_url = os.getenv("EXECUTION_CUSTODY_URL", "").strip()
+    custody_secret = os.getenv("EXECUTION_CUSTODY_SECRET", "").strip()
+    scope_raw = os.getenv("EXECUTION_ALLOWED_SCOPE_JSON", "").strip()
+    if not root or not custody_url or not custody_secret or not scope_raw:
+        raise GatewayConfigurationError(
+            "final Execution requires target-plan root, custody URL/secret and allowed scope"
+        )
+    try:
+        allowed_scope = json.loads(scope_raw)
+    except json.JSONDecodeError as exc:
+        raise GatewayConfigurationError(
+            "EXECUTION_ALLOWED_SCOPE_JSON must be JSON"
+        ) from exc
+    if not isinstance(allowed_scope, Mapping):
+        raise GatewayConfigurationError(
+            "EXECUTION_ALLOWED_SCOPE_JSON must be an object"
+        )
+    try:
+        max_order_volume = int(os.getenv("EXECUTION_SIMNOW_MAX_ORDER_VOLUME", "1"))
+    except ValueError as exc:
+        raise GatewayConfigurationError(
+            "EXECUTION_SIMNOW_MAX_ORDER_VOLUME must be an integer"
+        ) from exc
+    return FinalExecutionRuntime(
+        core,
+        plans=DurableTargetPlanRepository(Path(root)),
+        custody=_HttpCustodyReadClient(base_url=custody_url, secret=custody_secret),
+        allowed_scope=allowed_scope,
+        allow_simnow_execution=os.getenv("EXECUTION_ALLOW_SIMNOW_EXECUTION", "").lower()
+        in {"1", "true", "yes"},
+        max_order_volume=max_order_volume,
+    )
+
+
 startup_error: Exception | None = None
 try:
-    orchestrator: ExecutionOrchestrator | None = build_orchestrator()
+    execution_service: ExecutionOrchestrator | FinalExecutionRuntime | None = (
+        build_execution_service()
+    )
+    orchestrator: ExecutionOrchestrator | None = (
+        execution_service.orchestrator
+        if isinstance(execution_service, FinalExecutionRuntime)
+        else execution_service
+    )
 except (
     ExecutionError,
     ValueError,
 ) as exc:  # report startup failure through health, never trade
     orchestrator = None
+    execution_service = None
     startup_error = exc
 
 
-def create_app(service: ExecutionOrchestrator | None = None) -> Any:
+def create_app(
+    service: ExecutionOrchestrator | FinalExecutionRuntime | None = None,
+) -> Any:
     """Create the private FastAPI app; routes never expose order methods."""
 
     try:
@@ -143,15 +296,20 @@ def create_app(service: ExecutionOrchestrator | None = None) -> Any:
     # required query parameter named ``request``).
     globals()["Request"] = Request
 
-    instance = service or orchestrator
+    instance = service or execution_service
+    core = (
+        instance.orchestrator
+        if isinstance(instance, FinalExecutionRuntime)
+        else instance
+    )
     app = FastAPI(title="Execution Orchestrator", docs_url=None, redoc_url=None)
     readiness_probe = (
-        GatewayReadinessProbe(instance, timeout_seconds=_readiness_timeout_seconds())
-        if instance is not None
+        GatewayReadinessProbe(core, timeout_seconds=_readiness_timeout_seconds())
+        if core is not None
         else None
     )
 
-    def require_instance() -> ExecutionOrchestrator:
+    def require_instance() -> ExecutionOrchestrator | FinalExecutionRuntime:
         if instance is None:
             raise HTTPException(
                 status_code=503,
@@ -159,8 +317,16 @@ def create_app(service: ExecutionOrchestrator | None = None) -> Any:
             )
         return instance
 
+    def require_core() -> ExecutionOrchestrator:
+        if core is None:
+            raise HTTPException(
+                status_code=503,
+                detail=str(startup_error or "execution startup failed"),
+            )
+        return core
+
     def authenticate(request: Request, envelope: CommandEnvelope | None = None) -> None:
-        target = require_instance()
+        target = require_core()
         expected_secret = _control_secret()
         supplied_secret = request.headers.get("X-Control-Execution-Secret", "")
         if (not target.test_mode or expected_secret) and (
@@ -226,10 +392,9 @@ def create_app(service: ExecutionOrchestrator | None = None) -> Any:
     def commands(payload: dict[str, Any], request: Request) -> dict[str, Any]:
         try:
             envelope = CommandEnvelope.model_validate(payload)
-            target = require_instance()
             authenticate(request, envelope)
-            assert_http_fence(target, envelope)
-            response = target.process_command(envelope)
+            assert_http_fence(require_core(), envelope)
+            response = require_instance().process_command(envelope)
             return dict(response)
         except (ExpectedVersionConflict, IdempotencyConflictError) as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -247,7 +412,7 @@ def create_app(service: ExecutionOrchestrator | None = None) -> Any:
     def status(request: Request) -> dict[str, Any]:
         authenticate(request)
         try:
-            return require_instance().status()
+            return require_core().status()
         except RepositoryUnavailableError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
 
@@ -259,7 +424,7 @@ def create_app(service: ExecutionOrchestrator | None = None) -> Any:
     def health_ready(request: Request) -> dict[str, Any]:
         # Readiness is intentionally protected in non-test deployments while
         # liveness remains a process-only probe.
-        target = require_instance()
+        target = require_core()
         authenticate(request)
         if request.headers.get("X-Control-Service", "") != "control-api":
             raise HTTPException(
@@ -267,12 +432,15 @@ def create_app(service: ExecutionOrchestrator | None = None) -> Any:
             )
         try:
             snapshot = readiness_probe.probe() if readiness_probe is not None else None
+            if isinstance(instance, FinalExecutionRuntime):
+                instance.readiness()
             projection = target.status()
         except (
             GatewayTimeout,
             GatewayUnavailable,
             SnapshotRejected,
             RepositoryUnavailableError,
+            ExecutionError,
         ) as exc:
             raise HTTPException(
                 status_code=503,
@@ -304,14 +472,14 @@ def create_app(service: ExecutionOrchestrator | None = None) -> Any:
     def version() -> dict[str, str]:
         return {
             "service": "execution-orchestrator",
-            "service_version": instance.service_version if instance else "unconfigured",
+            "service_version": core.service_version if core else "unconfigured",
         }
 
     @app.get("/internal/v1/receipts/{idempotency_key}")
     def receipt(idempotency_key: str, request: Request) -> dict[str, Any]:
         authenticate(request)
         try:
-            value = require_instance().get_receipt(idempotency_key)
+            value = require_core().get_receipt(idempotency_key)
         except CommandValidationError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         if value is None:
@@ -322,7 +490,7 @@ def create_app(service: ExecutionOrchestrator | None = None) -> Any:
     def leader_acquire(payload: dict[str, Any], request: Request) -> dict[str, Any]:
         authenticate(request)
         try:
-            return require_instance().leader_acquire(str(payload.get("owner_id", "")))
+            return require_core().leader_acquire(str(payload.get("owner_id", "")))
         except ExecutionError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -330,7 +498,7 @@ def create_app(service: ExecutionOrchestrator | None = None) -> Any:
     def leader_renew(payload: dict[str, Any], request: Request) -> dict[str, Any]:
         authenticate(request)
         try:
-            return require_instance().leader_renew(payload.get("token"))
+            return require_core().leader_renew(payload.get("token"))
         except ExecutionError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -338,7 +506,7 @@ def create_app(service: ExecutionOrchestrator | None = None) -> Any:
     def leader_status(request: Request) -> dict[str, Any]:
         authenticate(request)
         try:
-            return require_instance().leader_status()
+            return require_core().leader_status()
         except RepositoryUnavailableError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
 
@@ -364,7 +532,7 @@ def create_app(service: ExecutionOrchestrator | None = None) -> Any:
 
 
 try:  # Keep the core importable in minimal offline tooling without FastAPI.
-    app = create_app(orchestrator)
+    app = create_app(execution_service)
 except RuntimeError:  # pragma: no cover - deployment image includes FastAPI
     app = None
 
@@ -372,8 +540,9 @@ except RuntimeError:  # pragma: no cover - deployment image includes FastAPI
 def main() -> None:
     import uvicorn
 
-    target = build_orchestrator()
-    target.start()
+    target = build_execution_service()
+    core = target.orchestrator if isinstance(target, FinalExecutionRuntime) else target
+    core.start()
     host = os.getenv("EXECUTION_HOST", "0.0.0.0")
     port = int(os.getenv("EXECUTION_PORT", "8090"))
     uvicorn.run(create_app(target), host=host, port=port)

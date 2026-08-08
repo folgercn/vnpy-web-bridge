@@ -113,6 +113,15 @@ PHASE_C_WORKFLOW_EXACT = (
     "deployments/phase-c/Containerfile.custody",
     "deployments/phase-c/Containerfile.execution",
     "deployments/phase-c/docker-compose.offline-e2e.yml",
+    "backend/app/execution/final_runtime.py",
+    "deployments/docker-compose.final.yml",
+    "scripts/ci/final_runtime_compose_smoke.sh",
+    "backend/tests/unit/test_issue291_final_execution.py",
+    "backend/tests/unit/test_issue291_final_runtime_integration.py",
+)
+PHASE_C_SHARED_EXACT = (
+    "deployments/phase-b/Containerfile.artifact-custody",
+    "scripts/ci/final_runtime_compose_smoke.sh",
 )
 PHASE_C_SHARED_PREFIXES = (
     "scripts/ci/phase_c_",
@@ -122,6 +131,9 @@ PHASE_C_SHARED_PREFIXES = (
     "docs/schemas/issue-291-phase-c-release-",
     "docs/schemas/issue-291-phase-c-image-",
     "docs/schemas/issue-291-phase-c-fault-",
+    "shared/commodity_execution/",
+    "scripts/phase_b_workers/",
+    "deployments/final/",
 )
 PHASE_C_WORKFLOW_PREFIXES = (
     "backend/app/api/routes_phase_c_",
@@ -132,7 +144,6 @@ PHASE_C_WORKFLOW_PREFIXES = (
     "docs/schemas/issue-291-phase-c-signing-",
     "shared/phase_c_workflow/",
 )
-
 # These workers form the fresh-volume projection chain.  A selected producer
 # or consumer must be verified with its real dependent services, while the
 # independent matrix still handles all selected images separately.
@@ -183,7 +194,10 @@ def _unit(
 
 
 def _phase_c_shared(paths: list[str]) -> bool:
-    return any(path.startswith(PHASE_C_SHARED_PREFIXES) for path in paths)
+    return any(
+        path in PHASE_C_SHARED_EXACT or path.startswith(PHASE_C_SHARED_PREFIXES)
+        for path in paths
+    )
 
 
 def _phase_c_workflow(paths: list[str]) -> bool:

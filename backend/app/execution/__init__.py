@@ -58,6 +58,10 @@ _LAZY_EXPORTS = {
     "ExecutionStateRepository": (".repository", "ExecutionStateRepository"),
     "InMemoryExecutionRepository": (".repository", "InMemoryExecutionRepository"),
     "JsonExecutionRepository": (".repository", "JsonExecutionRepository"),
+    "DurableTargetPlanRepository": (".final_runtime", "DurableTargetPlanRepository"),
+    "FinalExecutionRuntime": (".final_runtime", "FinalExecutionRuntime"),
+    "InMemoryTargetPlanRepository": (".final_runtime", "InMemoryTargetPlanRepository"),
+    "TargetPlanRepository": (".final_runtime", "TargetPlanRepository"),
 }
 
 
@@ -86,6 +90,7 @@ __all__ = [
     "DurableExecutionRepository",
     "DurableStateCorrupt",
     "DurableStateRepository",
+    "DurableTargetPlanRepository",
     "ExecutionError",
     "ExecutionGateway",
     "ExecutionOrchestrator",
@@ -93,6 +98,7 @@ __all__ = [
     "ExpectedVersion",
     "ExpectedVersionConflict",
     "FencingError",
+    "FinalExecutionRuntime",
     "GatewayConfigurationError",
     "GatewaySnapshot",
     "GatewayTimeout",
@@ -100,6 +106,7 @@ __all__ = [
     "IdempotencyConflictError",
     "InMemoryExecutionRepository",
     "InMemoryGateway",
+    "InMemoryTargetPlanRepository",
     "JsonExecutionRepository",
     "LeaderFencer",
     "LeaderToken",
@@ -116,6 +123,7 @@ __all__ = [
     "SendIntent",
     "SingleLeaderFencer",
     "SnapshotRejected",
+    "TargetPlanRepository",
     "UnknownCommandError",
     "UnknownOutcomeError",
     "VnpyWindowsGateway",

@@ -232,7 +232,7 @@ def _payload(command: str, value: Any) -> dict[str, Any]:
         "status": (set(), ()),
         "overview": (set(), ()),
         "preview": (
-            {"plan_hash", "artifact_hash", "mode"},
+            {"plan_hash", "artifact_hash", "mode", "receipt_id"},
             ("plan_hash", "artifact_hash", "mode"),
         ),
         "enable": (
@@ -264,6 +264,16 @@ def _payload(command: str, value: Any) -> dict[str, Any]:
         validate_sha256(raw["artifact_hash"], "payload.artifact_hash")
         if not isinstance(raw["mode"], str) or raw["mode"] not in MODES:
             raise CommandValidationError("payload.mode is not supported")
+        if raw["mode"] == "simnow_preview":
+            if "receipt_id" not in raw:
+                raise CommandValidationError(
+                    "simnow_preview requires payload.receipt_id"
+                )
+            validate_identifier(raw["receipt_id"], "payload.receipt_id")
+        elif "receipt_id" in raw:
+            raise CommandValidationError(
+                "offline_preview does not accept payload.receipt_id"
+            )
     elif command == "enable":
         validate_identifier(
             raw["authority_artifact_id"], "payload.authority_artifact_id"
@@ -441,6 +451,14 @@ class PlanState:
     plan_id: str = UNKNOWN_ID
     plan_hash: str = ZERO_HASH
     version: int = 0
+    # Preview provenance is durable execution evidence, rather than a hint
+    # retained by a transient Control request.  In particular, a final SIMNOW
+    # runner may start only from a simnow_preview bound to this receipt.
+    preview_mode: str = ""
+    preview_receipt_id: str = UNKNOWN_ID
+    preview_receipt_sha256: str = ZERO_HASH
+    preview_artifact_id: str = UNKNOWN_ID
+    preview_artifact_sha256: str = ZERO_HASH
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -448,6 +466,11 @@ class PlanState:
             "plan_id": self.plan_id,
             "plan_hash": self.plan_hash,
             "version": self.version,
+            "preview_mode": self.preview_mode,
+            "preview_receipt_id": self.preview_receipt_id,
+            "preview_receipt_sha256": self.preview_receipt_sha256,
+            "preview_artifact_id": self.preview_artifact_id,
+            "preview_artifact_sha256": self.preview_artifact_sha256,
         }
 
 

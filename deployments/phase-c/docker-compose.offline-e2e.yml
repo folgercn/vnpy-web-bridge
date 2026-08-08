@@ -27,6 +27,7 @@ services:
       PHASE_C_CUSTODY_ROOT: /var/lib/phase-c-custody
       PHASE_C_CUSTODY_WRITER_EPOCH: "1"
       PHASE_C_CUSTODY_SHARED_SECRET: ${PHASE_C_CUSTODY_SHARED_SECRET:?required}
+      PHASE_C_CUSTODY_EXECUTION_READ_SECRET: ${PHASE_C_CUSTODY_EXECUTION_READ_SECRET:?required}
       PHASE_C_CUSTODY_POLICIES_JSON: ${PHASE_C_CUSTODY_POLICIES_JSON:?public-only policy required}
     volumes: [artifact_custody_phase_c_ledger:/var/lib/phase-c-custody]
     networks: [phase-c-private]

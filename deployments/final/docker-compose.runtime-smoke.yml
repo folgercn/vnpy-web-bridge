@@ -1,0 +1,140 @@
+name: issue291-final-runtime-smoke
+
+services:
+  questdb:
+    image: questdb/questdb:9.4.3
+    networks: [data]
+
+  questdb-schema:
+    build: {context: ../.., dockerfile: deployments/final/Containerfile.questdb-schema}
+    networks: [data]
+    depends_on: {questdb: {condition: service_started}}
+    command: ["sh", "-ec", "until pg_isready -h questdb -p 8812 -U admin; do sleep 1; done; psql -v ON_ERROR_STOP=1 -h questdb -p 8812 -U admin -d qdb -f /bootstrap/market_ticks.sql"]
+    environment: {PGPASSWORD: quest}
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: [/tmp]
+
+  artifact-bootstrap:
+    build: {context: ../.., dockerfile: deployments/final/Containerfile.artifact-bootstrap}
+    profiles: [bootstrap]
+    network_mode: none
+    volumes: [custody_state:/var/lib/phase-c-custody, bootstrap_handoff:/handoff]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: [/tmp]
+
+  artifact-custody:
+    build: {context: ../.., dockerfile: deployments/phase-b/Containerfile.artifact-custody}
+    entrypoint: ["python", "-m", "uvicorn"]
+    command: ["app.phase_c_custody:app", "--host", "0.0.0.0", "--port", "8091"]
+    environment:
+      PHASE_C_CUSTODY_ROOT: /var/lib/phase-c-custody
+      PHASE_C_CUSTODY_WRITER_EPOCH: "1"
+      PHASE_C_CUSTODY_SHARED_SECRET: smoke-control-secret
+      PHASE_C_CUSTODY_EXECUTION_READ_SECRET: smoke-execution-read-secret
+      PHASE_C_CUSTODY_POLICIES_JSON: '{"map_acceptance":{"keyring_path":"/tmp/map.json","keyring_raw_sha256":"0000000000000000000000000000000000000000000000000000000000000000","key_purpose":"map"},"c_fast_acceptance":{"keyring_path":"/tmp/cfast.json","keyring_raw_sha256":"0000000000000000000000000000000000000000000000000000000000000000","key_purpose":"cfast"},"runtime_authorization":{"keyring_path":"/tmp/runtime.json","keyring_raw_sha256":"0000000000000000000000000000000000000000000000000000000000000000","key_purpose":"runtime"}}'
+      PHASE_C_CUSTODY_PROJECTION_DIR: /var/lib/phase-b/projection
+      PRODUCTION: "false"
+      LIVE_TRADING_AUTHORIZED: "false"
+      COUNTABLE_FORWARD: "false"
+    networks: [custody]
+    volumes: [custody_state:/var/lib/phase-c-custody, custody_projection:/var/lib/phase-b/projection]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: [/tmp]
+
+  market-source:
+    build: {context: ../.., dockerfile: deployments/phase-b/Containerfile.market-data-worker}
+    entrypoint: ["python", "/app/smoke/market_source.py"]
+    networks: [ingress]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: [/tmp]
+
+  market-data-worker:
+    build: {context: ../.., dockerfile: deployments/phase-b/Containerfile.market-data-worker}
+    command: ["--state-dir", "/var/lib/phase-b/market-data", "--run"]
+    environment:
+      PHASE_B_RUNTIME_MODE: final-runtime-smoke
+      PHASE_B_MARKET_DATA_STATE_DIR: /var/lib/phase-b/market-data
+      PHASE_B_MARKET_PROJECTION_DIR: /var/lib/phase-b/projection
+      PHASE_B_MARKET_PUBLISH_ENDPOINT: tcp://market-source:5555
+      PHASE_B_QUESTDB_PG_DSN: postgresql://admin:quest@questdb:8812/qdb
+      PRODUCTION: "false"
+      LIVE_TRADING_AUTHORIZED: "false"
+      COUNTABLE_FORWARD: "false"
+    networks: [ingress, data]
+    depends_on: {questdb-schema: {condition: service_completed_successfully}, market-source: {condition: service_started}}
+    volumes: [market_state:/var/lib/phase-b/market-data, market_projection:/var/lib/phase-b/projection]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: [/tmp]
+    healthcheck:
+      test: ["CMD", "python", "-m", "phase_b_workers.market_data_worker", "--state-dir", "/var/lib/phase-b/market-data", "--ready"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  execution-quality-worker:
+    build: {context: ../.., dockerfile: deployments/phase-b/Containerfile.execution-quality-worker}
+    command: ["--state-dir", "/var/lib/phase-b/execution-quality", "--run"]
+    environment:
+      PHASE_B_RUNTIME_MODE: final-runtime-smoke
+      PHASE_B_EQ_STATE_DIR: /var/lib/phase-b/execution-quality
+      PHASE_B_VERIFIED_STREAM_DIR: /var/lib/market-data-stream/stream
+      PHASE_B_EQ_PROJECTION_DIR: /var/lib/phase-b/projection
+      PRODUCTION: "false"
+      LIVE_TRADING_AUTHORIZED: "false"
+      COUNTABLE_FORWARD: "false"
+    network_mode: none
+    depends_on: {market-data-worker: {condition: service_healthy}}
+    volumes: [execution_quality_state:/var/lib/phase-b/execution-quality, execution_quality_projection:/var/lib/phase-b/projection, market_state:/var/lib/market-data-stream:ro]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: [/tmp]
+    healthcheck:
+      test: ["CMD", "python", "-m", "phase_b_workers.execution_quality_worker", "--state-dir", "/var/lib/phase-b/execution-quality", "--ready"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  monitor-worker:
+    build: {context: ../.., dockerfile: deployments/phase-b/Containerfile.monitor-worker}
+    command: ["--state-dir", "/var/lib/phase-b/monitor", "--run"]
+    environment:
+      PHASE_B_RUNTIME_MODE: final-runtime-smoke
+      PHASE_B_MONITOR_STATE_DIR: /var/lib/phase-b/monitor
+      PHASE_B_PROJECTION_DIR: /var/lib/phase-b/projections
+      PHASE_B_MONITOR_NOTIFIER_ENABLED: "false"
+      PRODUCTION: "false"
+      LIVE_TRADING_AUTHORIZED: "false"
+      COUNTABLE_FORWARD: "false"
+    network_mode: none
+    depends_on: {execution-quality-worker: {condition: service_healthy}}
+    volumes: [monitor_state:/var/lib/phase-b/monitor, custody_projection:/var/lib/phase-b/projections/artifact-custody:ro, market_projection:/var/lib/phase-b/projections/market-data-worker:ro, execution_quality_projection:/var/lib/phase-b/projections/execution-quality-worker:ro]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: [/tmp]
+
+networks:
+  custody: {internal: true}
+  ingress: {internal: true}
+  data: {internal: true}
+
+volumes:
+  custody_state:
+  custody_projection:
+  bootstrap_handoff:
+  market_state:
+  market_projection:
+  execution_quality_state:
+  execution_quality_projection:
+  monitor_state:

@@ -263,6 +263,26 @@ class ExecutionOrchestrator:
     status_projection = status
     get_status = status
 
+    def fail_closed_halt(self, reason: str) -> dict[str, Any]:
+        """Public internal safety brake used when a plan runner cannot continue."""
+
+        if not isinstance(reason, str) or not reason or len(reason) > 500:
+            raise MutationRejected("fail-closed halt reason is invalid")
+
+        def writer(state: dict[str, Any]) -> None:
+            state["lifecycle"] = "HALTED_RECONCILE_REQUIRED"
+            state["reconciliation"]["state"] = "REQUIRED"
+            state["audit"].append(
+                {
+                    "kind": "fail_closed_halt",
+                    "reason": reason,
+                    "observed_at": format_utc(utc_now()),
+                }
+            )
+
+        self.repository.mutate(writer)
+        return self.status()
+
     def _projection(
         self, state: Mapping[str, Any], observed_at: datetime
     ) -> dict[str, Any]:
@@ -357,21 +377,136 @@ class ExecutionOrchestrator:
     # Typed command endpoint
     # ------------------------------------------------------------------
     def process_command(
-        self, command: CommandEnvelope | Mapping[str, Any]
+        self,
+        command: CommandEnvelope | Mapping[str, Any],
+        *,
+        preview_evidence: Mapping[str, Any] | None = None,
+        finalization_evidence: Mapping[str, Any] | None = None,
     ) -> CommandResponse:
+        """Apply a typed Control command.
+
+        Evidence arguments are an internal FinalExecutionRuntime seam; they
+        are deliberately not part of ``CommandEnvelope`` and therefore cannot
+        be supplied through the HTTP/Control command schema.
+        """
+
         envelope = (
             command
             if isinstance(command, CommandEnvelope)
             else CommandEnvelope.from_mapping(command)
         )
+        preview = self._validated_preview_evidence(envelope, preview_evidence)
+        finalization = self._validated_finalization_evidence(
+            envelope, finalization_evidence
+        )
         with self._command_lock:
-            return self._process_envelope(envelope)
+            return self._process_envelope(envelope, preview, finalization)
 
     handle_command = process_command
     execute_command = process_command
     submit_command = process_command
 
-    def _process_envelope(self, envelope: CommandEnvelope) -> CommandResponse:
+    @staticmethod
+    def _validated_preview_evidence(
+        envelope: CommandEnvelope, evidence: Mapping[str, Any] | None
+    ) -> dict[str, str] | None:
+        if evidence is None:
+            if (
+                envelope.command == "preview"
+                and envelope.payload.get("mode") == "simnow_preview"
+            ):
+                raise MutationRejected(
+                    "SIMNOW preview requires verified internal evidence"
+                )
+            return None
+        if (
+            envelope.command != "preview"
+            or envelope.payload.get("mode") != "simnow_preview"
+        ):
+            raise MutationRejected(
+                "internal preview evidence is limited to SIMNOW preview"
+            )
+        if not isinstance(evidence, Mapping):
+            raise MutationRejected("internal preview evidence is invalid")
+        raw = deepcopy(dict(evidence))
+        fields = {
+            "plan_hash",
+            "receipt_id",
+            "receipt_sha256",
+            "artifact_id",
+            "artifact_sha256",
+        }
+        if set(raw) != fields:
+            raise MutationRejected("internal preview evidence fields are not exact")
+        validate_sha256(raw["plan_hash"], "preview_evidence.plan_hash")
+        validate_identifier(raw["receipt_id"], "preview_evidence.receipt_id")
+        validate_sha256(raw["receipt_sha256"], "preview_evidence.receipt_sha256")
+        validate_identifier(raw["artifact_id"], "preview_evidence.artifact_id")
+        validate_sha256(raw["artifact_sha256"], "preview_evidence.artifact_sha256")
+        if (
+            raw["plan_hash"] != envelope.payload["plan_hash"]
+            or raw["receipt_id"] != envelope.payload["receipt_id"]
+            or raw["artifact_sha256"] != envelope.payload["artifact_hash"]
+        ):
+            raise MutationRejected("internal preview evidence does not bind command")
+        return raw
+
+    @staticmethod
+    def _validated_finalization_evidence(
+        envelope: CommandEnvelope, evidence: Mapping[str, Any] | None
+    ) -> dict[str, str] | None:
+        if evidence is None:
+            return None
+        if envelope.command != "reconcile":
+            raise MutationRejected(
+                "internal finalization evidence is limited to reconciliation"
+            )
+        if not isinstance(evidence, Mapping):
+            raise MutationRejected("internal finalization evidence is invalid")
+        raw = deepcopy(dict(evidence))
+        fields = {
+            "plan_id",
+            "plan_hash",
+            "expected_after_position_hash",
+            "authority_artifact_id",
+            "authority_artifact_sha256",
+            "authority_receipt_id",
+            "authority_receipt_sha256",
+            "preview_receipt_id",
+            "preview_receipt_sha256",
+            "preview_artifact_id",
+            "preview_artifact_sha256",
+        }
+        if set(raw) != fields:
+            raise MutationRejected(
+                "internal finalization evidence fields are not exact"
+            )
+        for field in (
+            "plan_id",
+            "authority_artifact_id",
+            "authority_receipt_id",
+            "preview_receipt_id",
+            "preview_artifact_id",
+        ):
+            validate_identifier(raw[field], f"finalization_evidence.{field}")
+        for field in fields.difference(
+            {
+                "plan_id",
+                "authority_artifact_id",
+                "authority_receipt_id",
+                "preview_receipt_id",
+                "preview_artifact_id",
+            }
+        ):
+            validate_sha256(raw[field], f"finalization_evidence.{field}")
+        return raw
+
+    def _process_envelope(
+        self,
+        envelope: CommandEnvelope,
+        preview_evidence: Mapping[str, str] | None,
+        finalization_evidence: Mapping[str, str] | None,
+    ) -> CommandResponse:
         command_key = f"{envelope.actor.service}:{envelope.idempotency_key}"
         command_hash = envelope.command_hash()
         state = self.repository.snapshot()
@@ -396,7 +531,7 @@ class ExecutionOrchestrator:
         # state transaction.  A failed/uncertain read leaves no command receipt
         # and therefore cannot be mistaken for a completed reconcile.
         if envelope.command == "reconcile":
-            return self._reconcile_command(envelope)
+            return self._reconcile_command(envelope, finalization_evidence)
 
         if envelope.command in {"stop", "revoke", "drain"}:
             try:
@@ -416,7 +551,7 @@ class ExecutionOrchestrator:
         def writer(candidate: dict[str, Any]) -> dict[str, Any]:
             status = "COMPLETED"
             try:
-                result = self._apply_command(candidate, envelope)
+                result = self._apply_command(candidate, envelope, preview_evidence)
             except MutationRejected as exc:
                 # Rejected state transitions are durable audit facts, but they
                 # do not call the gateway.  Keep expected-version semantics
@@ -471,7 +606,10 @@ class ExecutionOrchestrator:
         return receipt.as_dict()
 
     def _apply_command(
-        self, state: dict[str, Any], envelope: CommandEnvelope
+        self,
+        state: dict[str, Any],
+        envelope: CommandEnvelope,
+        preview_evidence: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
         command = envelope.command
         payload = envelope.payload
@@ -484,8 +622,25 @@ class ExecutionOrchestrator:
         if command == "preview":
             plan_id = f"preview-{payload['plan_hash'][:16]}"
             prior_version = int(state["plan"].get("version", 0))
+            if preview_evidence is not None:
+                proof = preview_evidence
+            else:
+                proof = {
+                    "receipt_id": payload.get("receipt_id", UNKNOWN_ID),
+                    "receipt_sha256": ZERO_HASH,
+                    "artifact_id": UNKNOWN_ID,
+                    "artifact_sha256": ZERO_HASH,
+                }
             state["plan"] = PlanState(
-                "PREVIEWED", plan_id, payload["plan_hash"], prior_version + 1
+                "PREVIEWED",
+                plan_id,
+                payload["plan_hash"],
+                prior_version + 1,
+                payload["mode"],
+                proof["receipt_id"],
+                proof["receipt_sha256"],
+                proof["artifact_id"],
+                proof["artifact_sha256"],
             ).as_dict()
             return {"accepted": True, "plan": deepcopy(state["plan"])}
         if command == "enable":
@@ -529,6 +684,11 @@ class ExecutionOrchestrator:
                 payload["plan_id"],
                 payload_hash,
                 int(state["plan"].get("version", 0)) + 1,
+                str(state["plan"].get("preview_mode", "")),
+                str(state["plan"].get("preview_receipt_id", UNKNOWN_ID)),
+                str(state["plan"].get("preview_receipt_sha256", ZERO_HASH)),
+                str(state["plan"].get("preview_artifact_id", UNKNOWN_ID)),
+                str(state["plan"].get("preview_artifact_sha256", ZERO_HASH)),
             ).as_dict()
             state["lifecycle"] = "READY"
             return {"accepted": True, "plan": deepcopy(state["plan"])}
@@ -540,6 +700,11 @@ class ExecutionOrchestrator:
                 plan.get("plan_id", UNKNOWN_ID),
                 plan.get("plan_hash", ZERO_HASH),
                 int(plan.get("version", 0)) + 1,
+                str(plan.get("preview_mode", "")),
+                str(plan.get("preview_receipt_id", UNKNOWN_ID)),
+                str(plan.get("preview_receipt_sha256", ZERO_HASH)),
+                str(plan.get("preview_artifact_id", UNKNOWN_ID)),
+                str(plan.get("preview_artifact_sha256", ZERO_HASH)),
             ).as_dict()
             if prior_plan_state != "TERMINAL":
                 state["terminal_archive"].append(
@@ -566,7 +731,7 @@ class ExecutionOrchestrator:
             }
         raise CommandValidationError(f"unsupported command {command}")
 
-    def _prepare_control_cancellation(self) -> None:
+    def _prepare_control_cancellation(self, *, emergency_stop_only: bool = False) -> None:
         state = self.repository.snapshot()
         active_ids = [
             str(intent_id)
@@ -574,7 +739,11 @@ class ExecutionOrchestrator:
             if not str(intent_id).startswith("key:")
             and isinstance(raw, Mapping)
             and raw.get("action", "send") == "send"
-            and raw.get("state") in ACTIVE_INTENT_STATES
+            and (
+                raw.get("state") == "ACKNOWLEDGED"
+                if emergency_stop_only
+                else raw.get("state") in ACTIVE_INTENT_STATES
+            )
         ]
         if active_ids:
             token = self.fencer.token
@@ -590,6 +759,7 @@ class ExecutionOrchestrator:
                     leader_epoch=token.epoch,
                     fencing_token=token.fencing_token,
                     token=token,
+                    _emergency_stop_only=emergency_stop_only,
                 )
                 if not self._cancel_result_is_terminal(result):
                     self._mark_cancel_failure(
@@ -668,7 +838,7 @@ class ExecutionOrchestrator:
         """Cancel all active intents under the current fence, then revoke."""
 
         try:
-            self._prepare_control_cancellation()
+            self._prepare_control_cancellation(emergency_stop_only=True)
         except Exception:
             self._force_revoke_after_cancel_failure()
             raise
@@ -689,7 +859,11 @@ class ExecutionOrchestrator:
                 )
                 plan["state"] = "TERMINAL"
                 plan["version"] = int(plan.get("version", 0)) + 1
-            state["lifecycle"] = "READY"
+            state["lifecycle"] = (
+                "HALTED_UNKNOWN_OUTCOME"
+                if state.get("unknown_outcomes")
+                else "READY"
+            )
             state["audit"].append(
                 {
                     "kind": "emergency_stop",
@@ -731,7 +905,11 @@ class ExecutionOrchestrator:
         ):
             raise FencingError("expected fencing token does not match durable state")
 
-    def _reconcile_command(self, envelope: CommandEnvelope) -> CommandResponse:
+    def _reconcile_command(
+        self,
+        envelope: CommandEnvelope,
+        finalization_evidence: Mapping[str, str] | None = None,
+    ) -> CommandResponse:
         # Read-only snapshot/query calls are safe without a leader token.  They
         # never construct a new send/cancel intent.
         try:
@@ -815,13 +993,23 @@ class ExecutionOrchestrator:
                 "unknown_outcomes": unknown_count,
                 "lifecycle": candidate["lifecycle"],
             }
+            status = "COMPLETED" if unknown_count == 0 else "REJECTED"
+            if unknown_count == 0 and finalization_evidence is not None:
+                finalization = self._apply_finalization_evidence(
+                    candidate, finalization_evidence
+                )
+                result["finalization"] = finalization
+                result["lifecycle"] = candidate["lifecycle"]
+                if finalization["state"] == "POSITION_MISMATCH":
+                    result["accepted"] = False
+                    status = "REJECTED"
             key = f"{envelope.actor.service}:{envelope.idempotency_key}"
             receipt = self._receipt_for_candidate(
                 candidate,
                 envelope,
                 envelope.command_hash(),
                 result,
-                status="COMPLETED" if unknown_count == 0 else "REJECTED",
+                status=status,
             )
             candidate["receipts"][key] = receipt
             candidate["audit"].append({"kind": "command_receipt", **receipt})
@@ -834,6 +1022,95 @@ class ExecutionOrchestrator:
             result=deepcopy(dict(result)),
             reused=False,
         )
+
+    def _apply_finalization_evidence(
+        self, state: dict[str, Any], evidence: Mapping[str, str]
+    ) -> dict[str, Any]:
+        """Apply final-plan completion in the same durable reconcile write."""
+
+        plan = state["plan"]
+        authority = state["authority"]
+        proof_fields = (
+            "preview_receipt_id",
+            "preview_receipt_sha256",
+            "preview_artifact_id",
+            "preview_artifact_sha256",
+        )
+        if (
+            plan.get("state") != "ACTIVE"
+            or plan.get("plan_id") != evidence["plan_id"]
+            or plan.get("plan_hash") != evidence["plan_hash"]
+            or plan.get("preview_mode") != "simnow_preview"
+            or any(plan.get(field) != evidence[field] for field in proof_fields)
+            or authority.get("state") != "ENABLED"
+            or authority.get("artifact_id") != evidence["authority_artifact_id"]
+            or authority.get("artifact_hash")
+            != evidence["authority_artifact_sha256"]
+        ):
+            raise PlanRejected("internal finalization evidence does not bind active plan")
+        terminal_states = {"TERMINAL", "RECONCILED", "CANCELLED"}
+        plan_intents = [
+            raw
+            for raw in state["send_intents"].values()
+            if isinstance(raw, Mapping)
+            and raw.get("plan_id") == evidence["plan_id"]
+            and raw.get("plan_hash") == evidence["plan_hash"]
+        ]
+        if (
+            not plan_intents
+            or any(raw.get("state") not in terminal_states for raw in plan_intents)
+            or int(state["broker"].get("active_order_count", 0)) != 0
+        ):
+            return {"state": "PENDING"}
+        final_hash = state["broker"].get("position_snapshot_hash")
+        if final_hash != evidence["expected_after_position_hash"]:
+            state["lifecycle"] = "HALTED_RECONCILE_REQUIRED"
+            state["reconciliation"]["state"] = "REQUIRED"
+            state["audit"].append(
+                {
+                    "kind": "fail_closed_halt",
+                    "reason": "SIMNOW final position does not match immutable target plan",
+                    "observed_at": format_utc(utc_now()),
+                }
+            )
+            return {
+                "state": "POSITION_MISMATCH",
+                "final_position_hash": final_hash,
+            }
+        state["terminal_archive"].append(
+            {
+                "kind": "final_plan_completed",
+                "plan_id": evidence["plan_id"],
+                "plan_hash": evidence["plan_hash"],
+                "plan_version": int(plan.get("version", 0)),
+                "receipt_id": evidence["authority_receipt_id"],
+                "final_position_hash": final_hash,
+                "archived_at": format_utc(utc_now()),
+            }
+        )
+        state["plan"] = PlanState(
+            "TERMINAL",
+            evidence["plan_id"],
+            evidence["plan_hash"],
+            int(plan.get("version", 0)) + 1,
+            "simnow_preview",
+            evidence["preview_receipt_id"],
+            evidence["preview_receipt_sha256"],
+            evidence["preview_artifact_id"],
+            evidence["preview_artifact_sha256"],
+        ).as_dict()
+        state["authority"] = AuthorityState(
+            "REVOKED",
+            str(authority.get("artifact_id", UNKNOWN_ID)),
+            str(authority.get("artifact_hash", ZERO_HASH)),
+            str(authority.get("expires_at", EPOCH_TIMESTAMP)),
+        ).as_dict()
+        state["lifecycle"] = "READY"
+        return {
+            "state": "COMPLETED",
+            "final_position_hash": final_hash,
+            "plan": deepcopy(state["plan"]),
+        }
 
     def _apply_snapshot(
         self, state: dict[str, Any], snapshot: GatewaySnapshot, run_id: str
@@ -885,6 +1162,36 @@ class ExecutionOrchestrator:
 
     send = send_order
 
+    def submit_planned_order(
+        self,
+        request: Mapping[str, Any],
+        *,
+        idempotency_key: str,
+        plan_id: str,
+        plan_hash: str,
+        leader_epoch: int,
+        fencing_token: int,
+        token: LeaderToken | Mapping[str, Any],
+        intent_id: str,
+    ) -> dict[str, Any]:
+        """Canonical adapter entry for an immutable target-plan child order.
+
+        ``FinalExecutionRuntime`` may only use this narrow adapter.  The
+        mutable core remains the sole owner of intent persistence, fencing,
+        UNKNOWN outcome handling, and the gateway send itself.
+        """
+
+        return self.send_order(
+            request,
+            idempotency_key=idempotency_key,
+            plan_id=plan_id,
+            plan_hash=plan_hash,
+            leader_epoch=leader_epoch,
+            fencing_token=fencing_token,
+            token=token,
+            intent_id=intent_id,
+        )
+
     def cancel_order(
         self,
         target_intent_id: str,
@@ -898,6 +1205,7 @@ class ExecutionOrchestrator:
         token: LeaderToken | Mapping[str, Any] | None = None,
         intent_id: str | None = None,
         now: datetime | None = None,
+        _emergency_stop_only: bool = False,
     ) -> dict[str, Any]:
         target_intent_id = validate_identifier(target_intent_id, "target_intent_id")
         state = self.repository.snapshot()
@@ -920,9 +1228,35 @@ class ExecutionOrchestrator:
             intent_id=intent_id,
             target_intent_id=target_intent_id,
             now=now,
+            emergency_stop_only=_emergency_stop_only,
         )
 
     cancel = cancel_order
+
+    def cancel_planned_intent(
+        self,
+        target_intent_id: str,
+        *,
+        idempotency_key: str,
+        plan_id: str,
+        plan_hash: str,
+        leader_epoch: int,
+        fencing_token: int,
+        token: LeaderToken | Mapping[str, Any],
+        intent_id: str,
+    ) -> dict[str, Any]:
+        """Canonical adapter entry for cancelling an immutable-plan intent."""
+
+        return self.cancel_order(
+            target_intent_id,
+            idempotency_key=idempotency_key,
+            plan_id=plan_id,
+            plan_hash=plan_hash,
+            leader_epoch=leader_epoch,
+            fencing_token=fencing_token,
+            token=token,
+            intent_id=intent_id,
+        )
 
     def _mutate_order(
         self,
@@ -938,6 +1272,7 @@ class ExecutionOrchestrator:
         intent_id: str | None,
         target_intent_id: str | None = None,
         now: datetime | None,
+        emergency_stop_only: bool = False,
     ) -> dict[str, Any]:
         with self._mutation_lock:
             current = now or utc_now()
@@ -985,6 +1320,7 @@ class ExecutionOrchestrator:
                 now=current,
                 action=action,
                 target_intent_id=target_intent_id,
+                emergency_stop_only=emergency_stop_only,
             )
             expected_state_version = int(state["state_version"])
             active_plan = state["plan"]
@@ -1072,6 +1408,7 @@ class ExecutionOrchestrator:
                     action=action,
                     target_intent_id=target_intent_id,
                     transaction_candidate=True,
+                    emergency_stop_only=emergency_stop_only,
                 )
                 persist_intent(candidate)
 
@@ -1095,6 +1432,7 @@ class ExecutionOrchestrator:
                 now=utc_now(),
                 action=action,
                 target_intent_id=target_intent_id,
+                emergency_stop_only=emergency_stop_only,
             )
 
             try:
@@ -1181,15 +1519,17 @@ class ExecutionOrchestrator:
         action: str,
         target_intent_id: str | None,
         transaction_candidate: bool = False,
+        emergency_stop_only: bool = False,
     ) -> None:
         if self._local_halted:
             raise RestartReconciliationRequired("orchestrator is halted fail closed")
-        if state.get("unknown_outcomes"):
+        emergency_cancel = action == "cancel" and emergency_stop_only
+        if state.get("unknown_outcomes") and not emergency_cancel:
             raise UnknownOutcomeError("unknown broker outcome requires query/reconcile")
         if state.get("lifecycle") in {
             "HALTED_RECONCILE_REQUIRED",
             "HALTED_UNKNOWN_OUTCOME",
-        }:
+        } and not emergency_cancel:
             raise RestartReconciliationRequired(
                 "orchestrator lifecycle does not admit mutation"
             )
@@ -1197,7 +1537,10 @@ class ExecutionOrchestrator:
             raise RestartReconciliationRequired(
                 "orchestrator lifecycle does not admit mutation"
             )
-        if not state.get("reconciliation", {}).get("state") == "RECONCILED":
+        if (
+            state.get("reconciliation", {}).get("state") != "RECONCILED"
+            and not emergency_cancel
+        ):
             raise RestartReconciliationRequired("fresh broker reconciliation required")
         if action == "cancel" and target_intent_id:
             target = state.get("send_intents", {}).get(target_intent_id)
@@ -1209,6 +1552,10 @@ class ExecutionOrchestrator:
                 "unknown_outcomes", {}
             ):
                 raise UnknownOutcomeError("cannot cancel an unresolved intent")
+            if emergency_cancel and target.get("state") != "ACKNOWLEDGED":
+                raise MutationRejected(
+                    "emergency cancellation is limited to acknowledged intents"
+                )
         if transaction_candidate:
             self.fencer.validate_against_state(
                 state,
