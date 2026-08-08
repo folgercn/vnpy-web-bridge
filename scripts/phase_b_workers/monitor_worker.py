@@ -28,6 +28,11 @@ try:
         project_dependency,
     )
     from .durable import AppendOnlyIncidentLog, AtomicCheckpoint
+    from .projections import (
+        REQUIRED_PROJECTION_SERVICES,
+        ProjectionError,
+        validate_projection,
+    )
 except ImportError:  # pragma: no cover
     import sys
 
@@ -43,6 +48,11 @@ except ImportError:  # pragma: no cover
         project_dependency,
     )
     from phase_b_workers.durable import AppendOnlyIncidentLog, AtomicCheckpoint
+    from phase_b_workers.projections import (
+        REQUIRED_PROJECTION_SERVICES,
+        ProjectionError,
+        validate_projection,
+    )
 
 
 class ProjectionSource(Protocol):
@@ -54,8 +64,17 @@ class AlertNotifier(Protocol):
 
 
 class DirectoryProjectionSource:
-    def __init__(self, directory: str | Path | None) -> None:
+    def __init__(self, directory: str | Path | None, *, max_age_seconds: float = 60.0) -> None:
         self.directory = Path(directory) if directory else None
+        self.max_age_seconds = max_age_seconds
+
+    def _paths(self) -> dict[str, Path]:
+        if self.directory is None:
+            return {}
+        return {
+            service: self.directory / service / f"{service}.json"
+            for service in REQUIRED_PROJECTION_SERVICES
+        }
 
     def read(self) -> Iterable[Mapping[str, object]]:
         if self.directory is None:
@@ -67,12 +86,14 @@ class DirectoryProjectionSource:
         if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
             return []
         values: list[Mapping[str, object]] = []
-        for path in sorted(self.directory.glob("*.json")):
+        for service, path in sorted(self._paths().items()):
             try:
                 value = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                value = {"service_id": path.stem, "status": "unhealthy", "error_code": "projection_unreadable"}
-            values.append(dict(value) if isinstance(value, Mapping) else {"service_id": path.stem, "status": "unhealthy"})
+                if not isinstance(value, Mapping):
+                    raise ProjectionError("PROJECTION_SCHEMA_INVALID")
+                values.append(validate_projection(value, expected_service_id=service, max_age_seconds=self.max_age_seconds))
+            except (OSError, json.JSONDecodeError, ProjectionError, ValueError) as exc:
+                values.append({"service_id": service, "status": "unhealthy", "ready": False, "error_code": type(exc).__name__})
         return values
 
     def readiness(self) -> tuple[bool, str]:
@@ -80,8 +101,14 @@ class DirectoryProjectionSource:
             return False, "projection_dir_missing"
         if self.directory.is_symlink() or not self.directory.is_dir():
             return False, "projection_dir_invalid"
-        if not any(self.directory.glob("*.json")):
-            return False, "projection_source_empty"
+        for service, path in self._paths().items():
+            try:
+                value = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(value, Mapping):
+                    return False, f"projection_invalid:{service}"
+                validate_projection(value, expected_service_id=service, max_age_seconds=self.max_age_seconds)
+            except (OSError, json.JSONDecodeError, ProjectionError, ValueError):
+                return False, f"projection_invalid:{service}"
         return True, ""
 
 

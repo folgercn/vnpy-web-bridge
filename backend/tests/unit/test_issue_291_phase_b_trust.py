@@ -10,7 +10,11 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from scripts.phase_b_offline_signer import OfflineSignerError, _read_canonical, sign_request
+from scripts.phase_b_offline_signer import (
+    OfflineSignerError,
+    _read_canonical,
+    sign_request,
+)
 from shared.artifact_contracts import new_artifact_envelope
 from shared.trust_contracts import (
     KEY_DOMAINS,

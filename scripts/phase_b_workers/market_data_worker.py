@@ -34,6 +34,7 @@ try:
         DurableVerifiedTickStream,
         GenerationMismatch,
     )
+    from .projections import build_projection, publish_projection
 except ImportError:  # pragma: no cover
     import sys
 
@@ -58,6 +59,7 @@ except ImportError:  # pragma: no cover
         DurableVerifiedTickStream,
         GenerationMismatch,
     )
+    from phase_b_workers.projections import build_projection, publish_projection
 
 
 class ReadonlyMarketSource(Protocol):
@@ -114,15 +116,18 @@ class MarketDataConfig:
     queue_maxsize: int = 2048
     source_name: str = "readonly_market_source"
     runtime_mode: str = "disabled"
+    projection_dir: Path | None = None
 
     @classmethod
     def from_environment(cls, state_dir: str | Path | None = None) -> MarketDataConfig:
+        projection = os.getenv("PHASE_B_MARKET_PROJECTION_DIR", "").strip()
         return cls(
             state_dir=Path(state_dir or os.getenv("PHASE_B_MARKET_DATA_STATE_DIR", "/var/lib/phase-b/market-data")),
             stream_generation=os.getenv("PHASE_B_STREAM_GENERATION", "generation-1"),
             queue_maxsize=max(1, int(os.getenv("PHASE_B_MARKET_QUEUE_MAXSIZE", "2048"))),
             source_name=os.getenv("PHASE_B_MARKET_SOURCE", "readonly_market_source"),
             runtime_mode=os.getenv("PHASE_B_RUNTIME_MODE", "disabled"),
+            projection_dir=Path(projection) if projection else None,
         )
 
 
@@ -368,12 +373,14 @@ class MarketDataWorker:
         self.recover()
         self.replay_pending()
         self.bind_source()
+        self.publish_projection()
         stop_event = stop_event or threading.Event()
         while not stop_event.is_set():
             try:
                 self.process_queue()
             except Exception as exc:  # noqa: BLE001
                 self._last_error = type(exc).__name__
+            self.publish_projection()
             stop_event.wait(max(0.01, float(idle_seconds)))
 
     def health(self) -> HealthSnapshot:
@@ -410,6 +417,18 @@ class MarketDataWorker:
     def version(self) -> dict[str, object]:
         return self.identity.as_dict()
 
+    def publish_projection(self) -> None:
+        publish_projection(
+            self.config.projection_dir,
+            build_projection(
+                service_id=self.service_id,
+                generation=self.identity.source_revision + ":" + self.config.stream_generation,
+                health=self.health(),
+                readiness=self.readiness(),
+                version=self.identity,
+            ),
+        )
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Phase B market-data worker")
@@ -440,6 +459,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     else:
         value = worker.health().as_dict()
+    worker.publish_projection()
     print(json.dumps(value, ensure_ascii=False, sort_keys=True))
     return 0 if not args.ready or bool(value.get("ready")) else 1
 

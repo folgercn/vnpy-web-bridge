@@ -31,6 +31,7 @@ try:
         DurableVerifiedTickStream,
         GenerationMismatch,
     )
+    from .projections import build_projection, publish_projection
 except ImportError:  # pragma: no cover
     import sys
 
@@ -52,6 +53,7 @@ except ImportError:  # pragma: no cover
         DurableVerifiedTickStream,
         GenerationMismatch,
     )
+    from phase_b_workers.projections import build_projection, publish_projection
 
 
 class VerifiedTickSource(Protocol):
@@ -69,12 +71,14 @@ class ExecutionQualityConfig:
     stream_generation: str = "generation-1"
     algorithm_version: str = "eq_v1"
     runtime_mode: str = "disabled"
+    projection_dir: Path | None = None
 
     @classmethod
     def from_environment(cls, state_dir: str | Path | None = None) -> ExecutionQualityConfig:
         root = Path(state_dir or os.getenv("PHASE_B_EQ_STATE_DIR", "/var/lib/phase-b/execution-quality"))
         stream = Path(os.getenv("PHASE_B_VERIFIED_STREAM_DIR", str(Path(os.getenv("PHASE_B_MARKET_DATA_STATE_DIR", "/var/lib/phase-b/market-data")) / "stream")))
-        return cls(root, stream, os.getenv("PHASE_B_STREAM_GENERATION", "generation-1"), os.getenv("PHASE_B_EQ_ALGORITHM_VERSION", "eq_v1"), os.getenv("PHASE_B_RUNTIME_MODE", "disabled"))
+        projection = os.getenv("PHASE_B_EQ_PROJECTION_DIR", "").strip()
+        return cls(root, stream, os.getenv("PHASE_B_STREAM_GENERATION", "generation-1"), os.getenv("PHASE_B_EQ_ALGORITHM_VERSION", "eq_v1"), os.getenv("PHASE_B_RUNTIME_MODE", "disabled"), Path(projection) if projection else None)
 
 
 class ExecutionQualityWorker:
@@ -237,12 +241,14 @@ class ExecutionQualityWorker:
     def run(self, *, stop_event: threading.Event | None = None, interval_seconds: float = 1.0) -> None:
         self.recover()
         self.replay()
+        self.publish_projection()
         stop_event = stop_event or threading.Event()
         while not stop_event.is_set():
             try:
                 self.consume()
             except Exception as exc:  # noqa: BLE001
                 self._last_error = type(exc).__name__
+            self.publish_projection()
             stop_event.wait(max(0.01, float(interval_seconds)))
 
     def health(self) -> HealthSnapshot:
@@ -267,6 +273,18 @@ class ExecutionQualityWorker:
 
     def version(self) -> dict[str, object]:
         return self.identity.as_dict()
+
+    def publish_projection(self) -> None:
+        publish_projection(
+            self.config.projection_dir,
+            build_projection(
+                service_id=self.service_id,
+                generation=self.identity.source_revision + ":" + self.config.stream_generation,
+                health=self.health(),
+                readiness=self.readiness(),
+                version=self.identity,
+            ),
+        )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -301,6 +319,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     else:
         value = worker.health().as_dict()
+    worker.publish_projection()
     print(json.dumps(value, ensure_ascii=False, sort_keys=True))
     return 0 if not args.ready or bool(value.get("ready")) else 1
 

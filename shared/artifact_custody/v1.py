@@ -30,7 +30,9 @@ from shared.trust_contracts.v1 import (
     ContractError,
     assert_non_authoritative,
     canonical_json_line,
+    load_keyring,
     sha256_bytes,
+    verify_signed_artifact,
 )
 
 CUSTODY_RECORD_SCHEMA_VERSION = "web-bridge-custody-record-v1"
@@ -106,8 +108,10 @@ class ArtifactCustody:
 
     ``schema_registry`` is mandatory: each ``schema_ref`` is either a JSON
     Schema mapping or a validation callback. Unknown schemas fail closed.
-    Every new process incarnation must claim an epoch greater than every epoch
-    already recorded in this custody root.
+    A writer epoch is an explicit fence.  A process may re-open an unchanged
+    root with the *same* writer/epoch after a crash or container restart, but
+    another writer and every lower epoch are rejected.  The exclusive lock
+    makes that exception safe: two live processes can never share the fence.
     """
 
     def __init__(
@@ -208,6 +212,7 @@ class ArtifactCustody:
 
     def _claim_epoch(self) -> None:
         maximum = 0
+        claims: dict[int, str] = {}
         for name in os.listdir(self._dirs["epochs"]):
             match = _EPOCH_NAME.fullmatch(name)
             if match is None:
@@ -228,7 +233,19 @@ class ArtifactCustody:
             }
             if payload != expected:
                 raise CustodyError("CUSTODY_EPOCH_LEDGER_CORRUPT")
+            prior = claims.setdefault(expected["writer_epoch"], expected["writer_id"])
+            if prior != expected["writer_id"]:
+                raise CustodyError("CUSTODY_EPOCH_LEDGER_FORK")
             maximum = max(maximum, expected["writer_epoch"])
+        prior_writer = claims.get(self.writer_epoch)
+        if prior_writer is not None:
+            if prior_writer != self.writer_id:
+                raise CustodyError("CUSTODY_WRITER_EPOCH_FORK")
+            if self.writer_epoch != maximum:
+                raise CustodyError("CUSTODY_WRITER_EPOCH_STALE")
+            # Same writer + same epoch is the only legal restart path.  It is
+            # safe only while this process owns the root's single-writer lock.
+            return
         if self.writer_epoch <= maximum:
             raise CustodyError("CUSTODY_WRITER_EPOCH_STALE")
         claim = {
@@ -376,6 +393,8 @@ class ArtifactCustody:
                 "writer_id",
                 "writer_epoch",
                 "artifact",
+                "signed_artifact",
+                "signed_artifact_sha256",
                 "receipt",
                 "receipt_sha256",
                 "previous_record_sha256",
@@ -414,6 +433,8 @@ class ArtifactCustody:
             except ContractError as exc:
                 raise CustodyError("CUSTODY_RECEIPT_INVALID") from exc
             inline = record["artifact"]
+            signed = record["signed_artifact"]
+            signed_sha = record["signed_artifact_sha256"]
             if receipt["receipt_type"] == "publish":
                 try:
                     artifact = validate_artifact_envelope(inline)
@@ -426,8 +447,16 @@ class ArtifactCustody:
                 ):
                     raise CustodyError("CUSTODY_ARTIFACT_INVALID")
                 self._validate_schema(artifact)
+                if signed is not None:
+                    if not isinstance(signed, dict):
+                        raise CustodyError("CUSTODY_SIGNED_ARTIFACT_INVALID")
+                    signed_artifact = signed.get("artifact")
+                    if signed_artifact != artifact or signed_sha != sha256_bytes(canonical_json_line(signed)):
+                        raise CustodyError("CUSTODY_SIGNED_ARTIFACT_MISMATCH")
+                elif signed_sha is not None:
+                    raise CustodyError("CUSTODY_SIGNED_ARTIFACT_MISMATCH")
                 artifacts[artifact["artifact_id"]] = artifact
-            elif inline is not None:
+            elif inline is not None or signed is not None or signed_sha is not None:
                 raise CustodyError("CUSTODY_RECORD_ARTIFACT_INVALID")
             receipt_raw = canonical_json_line(receipt)
             if record["receipt_sha256"] != sha256_bytes(receipt_raw):
@@ -582,6 +611,7 @@ class ArtifactCustody:
         idempotency_key: str,
         correlation_id: str,
         expected_version: int,
+        signed_artifact: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         actor_id, idempotency_key, correlation_id, expected_version = _request_fields(
             actor_id=actor_id,
@@ -625,6 +655,12 @@ class ArtifactCustody:
             "writer_id": self.writer_id,
             "writer_epoch": self.writer_epoch,
             "artifact": dict(artifact) if receipt_type == "publish" else None,
+            "signed_artifact": dict(signed_artifact) if receipt_type == "publish" and signed_artifact is not None else None,
+            "signed_artifact_sha256": (
+                sha256_bytes(canonical_json_line(signed_artifact))
+                if receipt_type == "publish" and signed_artifact is not None
+                else None
+            ),
             "receipt": receipt,
             "receipt_sha256": sha256_bytes(receipt_raw),
             "previous_record_sha256": state.previous_record_sha256,
@@ -685,6 +721,95 @@ class ArtifactCustody:
             correlation_id=correlation_id,
             expected_version=expected_version,
         )
+
+    def publish_signed(
+        self,
+        signed_artifact: Mapping[str, Any],
+        *,
+        keyring_path: str | os.PathLike[str],
+        expected_domain: str,
+        expected_key_purpose: str,
+        expected_keyring_raw_sha256: str,
+        actor_id: str,
+        idempotency_key: str,
+        correlation_id: str,
+        expected_version: int,
+    ) -> dict[str, Any]:
+        """Verify then preserve a complete signed wrapper in the receipt chain.
+
+        The keyring is loaded through the pinned-byte trust API before any
+        mutable custody state is read or written.  The receipt remains bound to
+        the original envelope's canonical/raw/predecessor hashes; the immutable
+        record additionally retains the full signature wrapper for readback.
+        """
+
+        if expected_domain not in KEY_DOMAINS:
+            raise CustodyError("CUSTODY_TRUST_DOMAIN_INVALID")
+        try:
+            keyring, _raw, _digest = load_keyring(
+                keyring_path,
+                expected_domain=expected_domain,
+                expected_raw_sha256=expected_keyring_raw_sha256,
+            )
+            verified = verify_signed_artifact(
+                signed_artifact,
+                keyring=keyring,
+                expected_domain=expected_domain,
+                expected_key_purpose=expected_key_purpose,
+            )
+        except ContractError as exc:
+            raise CustodyError(f"CUSTODY_SIGNED_ARTIFACT_{exc.code}") from exc
+        envelope = verified["artifact"]
+        if not isinstance(envelope, Mapping):  # verify_signed_artifact guards this
+            raise CustodyError("CUSTODY_SIGNED_ARTIFACT_INVALID")
+        actor_id, idempotency_key, correlation_id, expected_version = _request_fields(
+            actor_id=actor_id,
+            idempotency_key=idempotency_key,
+            correlation_id=correlation_id,
+            expected_version=expected_version,
+        )
+        self._validate_schema(envelope)
+        state = self._load_state()
+        replay = self._replay(
+            state,
+            receipt_type="publish",
+            artifact_id=envelope["artifact_id"],
+            actor_id=actor_id,
+            idempotency_key=idempotency_key,
+            correlation_id=correlation_id,
+            expected_version=expected_version,
+        )
+        if replay is not None:
+            return replay
+        self._check_expected(state, expected_version)
+        self._validate_lineage(envelope, state)
+        self._validate_transition(state, receipt_type="publish", artifact_id=envelope["artifact_id"])
+        return self._append(
+            "publish",
+            envelope,
+            actor_id=actor_id,
+            idempotency_key=idempotency_key,
+            correlation_id=correlation_id,
+            expected_version=expected_version,
+            signed_artifact=verified,
+        )
+
+    def read_signed_artifact(self, artifact_id: str) -> dict[str, Any]:
+        """Read the canonical signed wrapper retained with a publish receipt."""
+
+        wanted = _safe_id(artifact_id, "CUSTODY_ARTIFACT_ID_INVALID")
+        for name in sorted(os.listdir(self._dirs["receipts"])):
+            record, _raw = self._read_json(self._dirs["receipts"], name)
+            signed = record.get("signed_artifact")
+            if (
+                isinstance(signed, dict)
+                and isinstance(record.get("artifact"), dict)
+                and record["artifact"].get("artifact_id") == wanted
+            ):
+                if record.get("signed_artifact_sha256") != sha256_bytes(canonical_json_line(signed)):
+                    raise CustodyError("CUSTODY_SIGNED_ARTIFACT_MISMATCH")
+                return dict(signed)
+        raise CustodyError("CUSTODY_SIGNED_ARTIFACT_NOT_FOUND")
 
     def record(
         self,

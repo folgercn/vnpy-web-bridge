@@ -1,12 +1,22 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 from pathlib import Path
 
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from shared.artifact_contracts import new_artifact_envelope, validate_receipt
 from shared.artifact_custody import ArtifactCustody, CustodyError
-from shared.trust_contracts import ContractError
+from shared.trust_contracts import (
+    ContractError,
+    build_signed_artifact,
+    build_signing_request,
+    canonical_json_line,
+    signing_bytes,
+)
 
 SCHEMA_REF = "issue-291-phase-b-test-payload-v1"
 SCHEMAS = {
@@ -204,8 +214,16 @@ def test_two_writers_and_stale_epoch_fail_closed(tmp_path: Path) -> None:
             custody(root, epoch=2)
     finally:
         first.close()
+    # A crashed/restarted process may safely resume its own fence after it has
+    # reacquired the single-writer lock; rollback and a different writer may not.
+    with custody(root, epoch=1):
+        pass
+    with custody(root, epoch=2):
+        pass
     with pytest.raises(CustodyError, match="CUSTODY_WRITER_EPOCH_STALE"):
         custody(root, epoch=1)
+    with pytest.raises(CustodyError, match="CUSTODY_WRITER_EPOCH_FORK"):
+        ArtifactCustody(root, writer_id="custody-b", writer_epoch=1, schema_registry=SCHEMAS)
 
 
 def test_expected_version_and_request_validation_happen_before_artifact_write(
@@ -312,3 +330,89 @@ def test_crash_before_single_publish_commit_recovers_without_overwrite(
             item, actor_id="producer", idempotency_key="p1", correlation_id="c1", expected_version=0
         )
         assert receipt["resulting_version"] == 1
+
+
+def test_map_candidate_signed_acceptance_is_preserved_and_pinned_in_custody(
+    tmp_path: Path,
+) -> None:
+    """E2E candidate -> signed runtime-style acceptance -> custody -> readback."""
+
+    private = Ed25519PrivateKey.generate()
+    public = private.public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw
+    )
+    keyring = {
+        "schema_version": "web-bridge-trust-keyring-v1",
+        "domain": "map_acceptance",
+        "key_version": "v1",
+        "keys": [{
+            "key_id": "ephemeral-map-acceptance",
+            "domain": "map_acceptance",
+            "purpose": "map-acceptance-only",
+            "public_key_base64": base64.b64encode(public).decode("ascii"),
+            "status": "active",
+        }],
+    }
+    keyring_path = tmp_path / "ephemeral-map-keyring.json"
+    keyring_raw = canonical_json_line(keyring)
+    keyring_path.write_bytes(keyring_raw)
+    candidate_raw = b'{"candidate_id":"map-candidate-1","signal":"RB"}'
+    accepted = new_artifact_envelope(
+        artifact_type="map-acceptance",
+        trust_domain="map_acceptance",
+        producer_id="runtime-style-acceptance",
+        producer_version="v1",
+        schema_ref=SCHEMA_REF,
+        payload={"value": 1, "production": False, "live": False, "countable_forward": False},
+        generated_at="2026-08-05T00:00:00Z",
+        scope={"candidate_sha256": hashlib.sha256(candidate_raw).hexdigest()},
+        predecessor_refs=[],
+        lineage=[],
+    )
+    request = build_signing_request(
+        accepted,
+        domain="map_acceptance",
+        key_id="ephemeral-map-acceptance",
+        key_version="v1",
+        request_id="map-acceptance-1",
+        requested_at="2026-08-01T00:00:00Z",
+        expires_at="2099-01-01T00:00:00Z",
+    )
+    unsigned = {
+        "schema_version": "web-bridge-signed-artifact-v1",
+        "request_id": request["request_id"], "domain": request["domain"],
+        "signer_key_id": request["key_id"], "signer_key_version": request["key_version"],
+        "requested_at": request["requested_at"], "expires_at": request["expires_at"],
+        "artifact": request["artifact"],
+    }
+    signed = build_signed_artifact(
+        request, signature_base64=base64.b64encode(private.sign(signing_bytes(unsigned))).decode("ascii")
+    )
+    root = tmp_path / "custody"
+    with custody(root) as store:
+        receipt = store.publish_signed(
+            signed,
+            keyring_path=keyring_path,
+            expected_domain="map_acceptance",
+            expected_key_purpose="map-acceptance-only",
+            expected_keyring_raw_sha256=hashlib.sha256(keyring_raw).hexdigest(),
+            actor_id="map-acceptance-runtime",
+            idempotency_key="signed-map-acceptance-1",
+            correlation_id="map-candidate-1",
+            expected_version=0,
+        )
+        assert receipt["artifact_canonical_sha256"] == accepted["canonical_sha256"]
+        assert receipt["artifact_raw_sha256"] == accepted["raw_sha256"]
+        assert store.read_signed_artifact(accepted["artifact_id"]) == signed
+        with pytest.raises(CustodyError, match="CUSTODY_SIGNED_ARTIFACT_TRUST_KEYRING_PIN_MISMATCH"):
+            store.publish_signed(
+                signed, keyring_path=keyring_path, expected_domain="map_acceptance", expected_key_purpose="map-acceptance-only",
+                expected_keyring_raw_sha256="0" * 64, actor_id="map-acceptance-runtime",
+                idempotency_key="bad-pin", correlation_id="map-candidate-1", expected_version=1,
+            )
+        with pytest.raises(CustodyError, match="CUSTODY_SIGNED_ARTIFACT_SIGNED_ARTIFACT_KEY_PURPOSE_MISMATCH"):
+            store.publish_signed(
+                signed, keyring_path=keyring_path, expected_domain="map_acceptance", expected_key_purpose="wrong-purpose",
+                expected_keyring_raw_sha256=hashlib.sha256(keyring_raw).hexdigest(), actor_id="map-acceptance-runtime",
+                idempotency_key="bad-purpose", correlation_id="map-candidate-1", expected_version=1,
+            )

@@ -29,6 +29,12 @@ schema ref、producer identity、predecessor、lineage、scope 和 immutable id�
 receipt append 都是 create-only：临时文件写满并 fsync，原子发布后 fsync 目录；读取
 使用 `O_NOFOLLOW`、fd identity 和 canonical/hash 重校验。期望版本、idempotency key、
 fencing token 和上一 receipt hash 防止 replay、TOCTOU、双 writer 和 stale writer。
+`publish-signed` 是签名包装进入 custody 的唯一 handoff：它加载 domain 和原始 SHA-256
+均被钉死的 public keyring，验证 domain/key version/key purpose/signature/validity 后，
+将完整 signed wrapper 与 envelope 一起写入不可变 receipt record。receipt 继续绑定原始
+artifact 的 canonical/raw SHA-256、predecessor 与 lineage；readback 不会丢弃签名。
+writer epoch 不允许默认值：持有 single-writer lock 的同一 writer 可用当前最高 epoch
+重启已存在账本，但 lower epoch、不同 writer 的同 epoch 或 ledger fork 一律拒绝。
 
 Custody 不持有私钥，不调用 signer，不拥有订单或交易 RPC。Execution 只能提交带
 fencing/idempotency 的 consume/revoke request，并读取 pinned receipt；Control API
@@ -55,7 +61,11 @@ Compose 的 batch 交接是单向、只读的命名卷边界：MAP 只写
 `phase_b_map_output`，离线 signer 读取它并只写 `phase_b_map_signing_handoff`；C_FAST
 只读该 handoff 并只写 `phase_b_cfast_output`；第二次 signer 读取 C_FAST 输出并只写
 `phase_b_custody_handoff`，custody 只读最后一个 handoff。每个 batch 卷使用
-UID/GID 65532、0700 的 tmpfs driver option，任何卷不在两个服务间共享 RW。生产者的
+UID/GID 65532、0700 的 tmpfs driver option，任何卷不在两个服务间共享 RW。Custody、
+market-data、execution-quality 与 monitor state 使用持久 named volume；三个 producer
+各自原子写入独立 projection volume，monitor 只读挂载三个 projection path，并校验
+schema、service identity、generation、payload hash 与 freshness。缺失、篡改或过期
+projection 使 monitor fail closed，且 network-none graph 的 notifier 保持 disabled。生产者的
 MAP/C_FAST JSON Schemas 随 custody 镜像注册，并以 `$id`、文件 stem 和 payload
 `schema_version` 三种稳定引用键解析。
 

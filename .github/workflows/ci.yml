@@ -555,7 +555,7 @@ jobs:
           safe=(
             --rm --network none --read-only --cap-drop ALL
             --security-opt no-new-privileges
-            --tmpfs /tmp:rw,noexec,nosuid,size=16m,uid=65532,gid=65532,mode=700
+            --tmpfs /tmp:rw,noexec,nosuid,size=16m,uid=65532,gid=65532,mode=0700
             --env PRODUCTION=false
             --env LIVE_TRADING_AUTHORIZED=false
             --env COUNTABLE_FORWARD=false
@@ -571,10 +571,17 @@ jobs:
               done
               ;;
             worker)
-              state=(--tmpfs /state:rw,noexec,nosuid,size=16m,uid=65532,gid=65532,mode=700)
+              volume="phase-b-${{ matrix.image }}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+              trap 'docker volume rm -f "$volume" >/dev/null || true' EXIT
+              docker volume create "$volume" >/dev/null
+              docker run --rm --user 0 -v "$volume:/state" --entrypoint /bin/sh "$image" -c 'chown 65532:65532 /state && chmod 0700 /state'
+              state=(-v "$volume:/state")
               for command in --health --ready --version; do
                 docker run "${safe[@]}" "${state[@]}" "$image" --state-dir /state "$command"
               done
+              # The same named volume is deliberately reused: readiness is a
+              # bounded restart recovery check, never tmpfs-only state.
+              docker run "${safe[@]}" "${state[@]}" "$image" --state-dir /state --ready
               ;;
             batch-producer)
               docker run "${safe[@]}" "$image" health

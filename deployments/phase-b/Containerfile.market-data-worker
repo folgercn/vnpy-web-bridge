@@ -11,6 +11,7 @@ RUN mkdir -p /app/phase_b_workers/schemas
 COPY scripts/phase_b_workers/__init__.py /app/phase_b_workers/__init__.py
 COPY scripts/phase_b_workers/contracts.py /app/phase_b_workers/contracts.py
 COPY scripts/phase_b_workers/durable.py /app/phase_b_workers/durable.py
+COPY scripts/phase_b_workers/projections.py /app/phase_b_workers/projections.py
 COPY scripts/phase_b_workers/market_data_worker.py /app/phase_b_workers/market_data_worker.py
 COPY scripts/phase_b_workers/schemas/verified-tick-v1.schema.json /app/phase_b_workers/schemas/verified-tick-v1.schema.json
 COPY scripts/phase_b_workers/schemas/worker-health-v1.schema.json /app/phase_b_workers/schemas/worker-health-v1.schema.json
@@ -22,7 +23,8 @@ RUN python -m compileall -q /app/phase_b_workers \
     && useradd --system --uid 65532 --gid 65532 --no-create-home \
         --home-dir /nonexistent --shell /usr/sbin/nologin phaseb \
     && mkdir -p /var/lib/phase-b/market-data \
-    && chown -R 65532:65532 /var/lib/phase-b
+    && chown -R 65532:65532 /var/lib/phase-b \
+    && chmod 0700 /var/lib/phase-b /var/lib/phase-b/market-data
 
 USER 65532:65532
 ENTRYPOINT ["python", "-m", "phase_b_workers.market_data_worker"]

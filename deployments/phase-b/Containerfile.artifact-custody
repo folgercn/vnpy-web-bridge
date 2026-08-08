@@ -14,7 +14,8 @@ RUN groupadd --system --gid 65532 custody \
     && useradd --system --uid 65532 --gid 65532 --no-create-home \
         --home-dir /nonexistent --shell /usr/sbin/nologin custody \
     && mkdir -p /var/lib/phase-b-custody \
-    && chown 65532:65532 /var/lib/phase-b-custody
+    && chown 65532:65532 /var/lib/phase-b-custody \
+    && chmod 0700 /var/lib/phase-b-custody
 VOLUME ["/var/lib/phase-b-custody"]
 USER 65532:65532
 ENTRYPOINT ["python", "/app/scripts/phase_b_artifact_custody.py"]

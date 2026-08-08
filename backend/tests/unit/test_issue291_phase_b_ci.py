@@ -7,6 +7,7 @@ from scripts.ci.classify_changes import PHASE_B_UNITS, classify_phase_b
 
 ROOT = Path(__file__).resolve().parents[3]
 WORKFLOW = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+PHASE_B_COMPOSE = (ROOT / "deployments/docker-compose.phase-b.yml").read_text(encoding="utf-8")
 
 
 def _phase_b_job() -> str:
@@ -96,7 +97,9 @@ def test_phase_b_workflow_builds_all_images_and_smokes_offline_only() -> None:
     assert "LIVE_TRADING_AUTHORIZED=false" in job
     assert "COUNTABLE_FORWARD=false" in job
     assert "docker volume create" in job
-    assert "--tmpfs /state:" in job
+    assert 'docker volume create "$volume"' in job
+    assert 'state=(-v "$volume:/state")' in job
+    assert "--tmpfs /state:" not in job
     for unit in PHASE_B_UNITS:
         assert f"Containerfile.{unit}" in job
     for forbidden in (
@@ -109,6 +112,21 @@ def test_phase_b_workflow_builds_all_images_and_smokes_offline_only() -> None:
         "WEB_TRADE_ENABLED=true",
     ):
         assert forbidden.lower() not in job.lower()
+
+
+def test_phase_b_compose_keeps_durable_state_and_projections_out_of_tmpfs() -> None:
+    for durable in (
+        "artifact_custody_state:", "market_data_state:", "execution_quality_state:",
+        "monitor_state:", "artifact_custody_projection_state:",
+        "market_data_projection_state:", "execution_quality_projection_state:",
+    ):
+        assert f"{durable}\n    driver_opts" not in PHASE_B_COMPOSE
+        assert f"{durable}\n      type: tmpfs" not in PHASE_B_COMPOSE
+    assert "${CUSTODY_WRITER_EPOCH:?CUSTODY_WRITER_EPOCH required}" in PHASE_B_COMPOSE
+    assert "artifact_custody_projection_state:/var/lib/phase-b/projections/artifact-custody:ro" in PHASE_B_COMPOSE
+    assert "market_data_projection_state:/var/lib/phase-b/projections/market-data-worker:ro" in PHASE_B_COMPOSE
+    assert "execution_quality_projection_state:/var/lib/phase-b/projections/execution-quality-worker:ro" in PHASE_B_COMPOSE
+    assert "PHASE_B_MONITOR_NOTIFIER_ENABLED: \"false\"" in PHASE_B_COMPOSE
 
 
 def test_ci_gate_requires_phase_b_job_but_allows_it_to_skip_when_irrelevant() -> None:

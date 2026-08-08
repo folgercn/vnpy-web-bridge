@@ -501,6 +501,7 @@ def verify_signed_artifact(
     *,
     keyring: Mapping[str, Any],
     expected_domain: str,
+    expected_key_purpose: str | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Verify one signed artifact with explicit domain/key selection."""
@@ -538,6 +539,8 @@ def verify_signed_artifact(
     entry, material = _active_key(ring, key_id)
     if entry["domain"] != domain:
         raise ContractError("SIGNED_ARTIFACT_KEY_DOMAIN_MISMATCH")
+    if expected_key_purpose is not None and entry["purpose"] != expected_key_purpose:
+        raise ContractError("SIGNED_ARTIFACT_KEY_PURPOSE_MISMATCH")
     signature_raw = payload.get("signature")
     if not isinstance(signature_raw, str):
         raise ContractError("SIGNED_ARTIFACT_SIGNATURE_MISSING")

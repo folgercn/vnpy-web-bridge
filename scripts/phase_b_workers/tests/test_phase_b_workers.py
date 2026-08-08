@@ -12,6 +12,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1].parent))
 
+from phase_b_artifact_custody import _publish_projection as publish_custody_projection
+
 from phase_b_workers.contracts import GatewayTickEnvelope, VerifiedTick
 from phase_b_workers.durable import (
     AppendOnlyJsonl,
@@ -22,12 +24,13 @@ from phase_b_workers.durable import (
     DurableVerifiedTickStream,
 )
 from phase_b_workers.execution_quality_worker import (
+    ExecutionQualityConfig,
     ExecutionQualityWorker,
 )
 from phase_b_workers.execution_quality_worker import (
     main as execution_quality_main,
 )
-from phase_b_workers.market_data_worker import MarketDataWorker
+from phase_b_workers.market_data_worker import MarketDataConfig, MarketDataWorker
 from phase_b_workers.market_data_worker import main as market_data_main
 from phase_b_workers.monitor_worker import MonitorConfig, MonitorWorker, NullNotifier
 
@@ -314,6 +317,44 @@ def test_monitor_projection_absence_blocks_readiness_and_network_notifier_is_dis
     assert worker.notifier.status()["status"] == "disabled"
     readiness = worker.readiness()
     assert not readiness.ready and "projection_dir_missing" in readiness.blockers
+
+
+def test_typed_producer_projections_make_monitor_ready_and_fail_closed_when_tampered(tmp_path):
+    projections = tmp_path / "projections"
+    market_projection = projections / "market-data-worker"
+    quality_projection = projections / "execution-quality-worker"
+    custody_projection = projections / "artifact-custody"
+    market = MarketDataWorker(
+        MarketDataConfig(tmp_path / "market", "g1", projection_dir=market_projection),
+        writer=Writer(),
+    )
+    market.recover()
+    market.publish_projection()
+    quality = ExecutionQualityWorker(
+        ExecutionQualityConfig(
+            tmp_path / "quality", tmp_path / "market" / "stream", "g1", projection_dir=quality_projection
+        )
+    )
+    quality.recover()
+    quality.publish_projection()
+    publish_custody_projection(
+        str(custody_projection),
+        audit={
+            "version": 0, "artifact_count": 0, "receipt_count": 0,
+            "previous_record_sha256": None, "production": False, "live": False,
+            "countable_forward": False,
+        },
+    )
+    monitor = MonitorWorker(MonitorConfig(tmp_path / "monitor", projections, generation="g1"))
+    monitor.recover()
+    assert monitor.readiness().ready
+    assert monitor.run_once()["projections"] == 3
+
+    path = market_projection / "market-data-worker.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["payload"]["health"]["status"] = "unhealthy"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    assert not monitor.readiness().ready
 
 
 def test_queue_overflow_is_visible():
