@@ -190,7 +190,7 @@ PY
 
 docker exec -e "SMOKE_ARTIFACT_ID=$artifact_id" \
   -e "SMOKE_ARTIFACT_RAW_SHA256=$artifact_raw_sha256" \
-  "$custody_container" python - <<'PY'
+  -i "$custody_container" python - <<'PY'
 import json
 import os
 from hashlib import sha256
@@ -245,7 +245,26 @@ else:
     raise AssertionError("legacy execution read unexpectedly authorised")
 PY
 
-docker exec "$market_container" python - <<'PY'
+# Validate exactly the projection file through the monitor's read-only mount
+# before entering any worker readiness loop.  This prevents a missing Custody
+# projection from looking like an unrelated timeout.
+docker exec -i "$monitor_container" python - <<'PY'
+import json
+from pathlib import Path
+
+from phase_b_workers.projections import validate_projection
+
+path = Path("/var/lib/phase-b/projections/artifact-custody/artifact-custody.json")
+try:
+    projection = json.loads(path.read_text(encoding="utf-8"))
+    validate_projection(projection, expected_service_id="artifact-custody")
+except Exception as exc:  # noqa: BLE001 - print the exact smoke contract error
+    raise SystemExit(
+        f"artifact-custody projection invalid at {path}: {type(exc).__name__}: {exc}"
+    ) from exc
+PY
+
+docker exec -i "$market_container" python - <<'PY'
 import json
 import os
 from pathlib import Path

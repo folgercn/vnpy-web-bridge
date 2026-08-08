@@ -13,6 +13,7 @@ from app.phase_c.custody_service import (
     create_app,
 )
 from fastapi.testclient import TestClient
+from phase_b_workers.projections import validate_projection
 
 from scripts.ci.phase_c_release_matrix import UNIT_METADATA, create_plan
 from shared.artifact_custody.v1 import CustodyError
@@ -70,7 +71,12 @@ def test_custody_separates_control_from_execution_target_plan_read(tmp_path: Pat
         assert execution.status_code == 404
         assert client.get("/health/live").json()["status"] == "live"
         assert client.get("/health/ready").json()["status"] == "ready"
-    assert (tmp_path / "projection" / "artifact-custody.json").is_file()
+    projection_path = tmp_path / "projection" / "artifact-custody.json"
+    assert projection_path.is_file()
+    projection = json.loads(projection_path.read_text(encoding="utf-8"))
+    assert validate_projection(
+        projection, expected_service_id="artifact-custody"
+    )["service_id"] == "artifact-custody"
 
 
 def test_custody_rejects_reused_control_and_execution_secret(
@@ -166,6 +172,12 @@ def test_runtime_smoke_bootstraps_only_a_signed_target_plan_before_http_custody(
     assert "docker wait \"$bootstrap_container\"" in smoke
     assert "SMOKE_ARTIFACT_RAW_SHA256" in smoke
     assert '"X-Phase-C-Principal": "phase-c-execution"' in smoke
+    assert (
+        "custody_projection:/var/lib/phase-b/projections/artifact-custody:ro"
+        in smoke_compose["services"]["monitor-worker"]["volumes"]
+    )
+    assert "docker exec -i \"$monitor_container\" python - <<'PY'" in smoke
+    assert "artifact-custody projection invalid at {path}" in smoke
 
 
 def test_final_runtime_paths_expand_the_a_b_build_closure() -> None:
