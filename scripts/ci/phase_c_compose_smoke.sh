@@ -6,6 +6,7 @@ set -euo pipefail
 phase="${1:?phase A or B required}"
 unit="${2:?selected unit required}"
 image="${3:?selected image reference required}"
+compose_profile=""
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$root"
 
@@ -66,12 +67,12 @@ case "$phase" in
     export MAP_ACCEPTANCE_KEYRING_SHA256=0000000000000000000000000000000000000000000000000000000000000000
     case "$unit" in
       artifact-custody) ARTIFACT_CUSTODY_IMAGE="$image"; export ARTIFACT_CUSTODY_IMAGE ;;
-      c-fast-producer) C_FAST_PRODUCER_IMAGE="$image"; export C_FAST_PRODUCER_IMAGE ;;
+      c-fast-producer) C_FAST_PRODUCER_IMAGE="$image"; export C_FAST_PRODUCER_IMAGE; compose_profile=batch ;;
       execution-quality-worker) EXECUTION_QUALITY_WORKER_IMAGE="$image"; export EXECUTION_QUALITY_WORKER_IMAGE ;;
       map-producer) MAP_PRODUCER_IMAGE="$image"; export MAP_PRODUCER_IMAGE ;;
       market-data-worker) MARKET_DATA_WORKER_IMAGE="$image"; export MARKET_DATA_WORKER_IMAGE ;;
       monitor-worker) MONITOR_WORKER_IMAGE="$image"; export MONITOR_WORKER_IMAGE ;;
-      signing-authority) SIGNING_AUTHORITY_IMAGE="$image"; export SIGNING_AUTHORITY_IMAGE ;;
+      signing-authority) SIGNING_AUTHORITY_IMAGE="$image"; export SIGNING_AUTHORITY_IMAGE; compose_profile=offline-signing ;;
       *) echo "unsupported Phase B unit: $unit" >&2; exit 2 ;;
     esac
     compose_file=deployments/docker-compose.phase-b.yml
@@ -82,8 +83,12 @@ esac
 docker image inspect "$image" >/dev/null
 rendered=$(mktemp /tmp/issue291-phase-c-compose.XXXXXX.json)
 trap 'rm -f "$rendered"' EXIT
-compose -f "$compose_file" config --quiet
-compose -f "$compose_file" config --format json > "$rendered"
+compose_args=(-f "$compose_file")
+if [[ -n "$compose_profile" ]]; then
+  compose_args=(--profile "$compose_profile" "${compose_args[@]}")
+fi
+compose "${compose_args[@]}" config --quiet
+compose "${compose_args[@]}" config --format json > "$rendered"
 python3 - "$phase" "$unit" "$image" "$rendered" <<'PY'
 import json
 import sys

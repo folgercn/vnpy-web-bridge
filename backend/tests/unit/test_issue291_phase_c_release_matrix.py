@@ -226,7 +226,19 @@ def test_compose_smoke_pins_selected_image_to_exact_service_or_gateway_pair() ->
         in COMPOSE_SMOKE
     )
     assert 'config --format json > "$rendered"' in COMPOSE_SMOKE
+    assert 'compose_profile=batch' in COMPOSE_SMOKE
+    assert 'compose_profile=offline-signing' in COMPOSE_SMOKE
+    assert 'compose_args=(--profile "$compose_profile"' in COMPOSE_SMOKE
     assert "if actual != image:" in COMPOSE_SMOKE
+
+
+def test_gateway_publish_smoke_uses_explicit_runtime_mode_not_baked_cmd() -> None:
+    build_smoke = (ROOT / "scripts/ci/phase_c_build_and_smoke.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "assert c['User'] == '65532:65532'" in build_smoke
+    assert "assert c['Cmd'] == ['$expected']" not in build_smoke
+    assert '"$image" "$expected" version' in build_smoke
 
 
 def test_offline_e2e_uses_canonical_images_and_receipts_not_phase_c_duplicates() -> (
