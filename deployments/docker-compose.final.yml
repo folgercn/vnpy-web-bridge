@@ -186,6 +186,7 @@ services:
     networks: [market-ingress, questdb-data]
     depends_on: { questdb-schema-bootstrap: { condition: service_completed_successfully } }
     volumes: [market_data_state:/var/lib/phase-b/market-data, market_projection:/var/lib/phase-b/projection]
+    healthcheck: { test: ["CMD-SHELL", "test -d /var/lib/phase-b/market-data/stream && test -f /var/lib/phase-b/market-data/stream/verified_ticks.jsonl && test -f /var/lib/phase-b/market-data/stream/producer_watermark.json && test -f /var/lib/phase-b/market-data/stream/tick_writer_acks.jsonl"], interval: 1s, timeout: 1s, retries: 10 }
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
@@ -197,7 +198,7 @@ services:
     command: ["--state-dir", "/var/lib/phase-b/execution-quality", "--run"]
     environment: { <<: *negative_flags, PHASE_B_RUNTIME_MODE: final-validation, PHASE_B_EQ_STATE_DIR: /var/lib/phase-b/execution-quality, PHASE_B_VERIFIED_STREAM_DIR: /var/lib/market-data-stream/stream, PHASE_B_EQ_PROJECTION_DIR: /var/lib/phase-b/projection }
     network_mode: none
-    depends_on: { market-data-worker: { condition: service_started } }
+    depends_on: { market-data-worker: { condition: service_healthy } }
     volumes: [execution_quality_state:/var/lib/phase-b/execution-quality, execution_quality_projection:/var/lib/phase-b/projection, market_data_state:/var/lib/market-data-stream:ro]
     read_only: true
     cap_drop: [ALL]
