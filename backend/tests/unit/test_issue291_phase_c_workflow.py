@@ -16,6 +16,7 @@ from app.phase_c.models import AuthorizationCommandDTO, SignedArtifactUploadDTO
 from fastapi.testclient import TestClient
 from jsonschema import Draft202012Validator
 
+from shared.artifact_contracts.v1 import new_artifact_envelope
 from shared.phase_c_workflow.v1 import build_signing_request
 
 
@@ -24,15 +25,14 @@ def _headers(role: str) -> dict[str, str]:
 
 
 def _artifact() -> dict:
-    return {
-        "artifact_id": "artifact-" + "a" * 64,
-        "artifact_type": "runtime-authorization",
-        "payload": {
+    return new_artifact_envelope(
+        artifact_type="runtime-authorization", trust_domain="runtime_authorization",
+        producer_id="phase-c-test", producer_version="v1", schema_ref="phase-c-runtime-authorization-v1",
+        generated_at="2026-08-08T00:00:00Z", scope={}, predecessor_refs=[], lineage=[], payload={
             "production_allowed": False,
             "live_trading_authorized": False,
             "countable_forward": False,
-        },
-    }
+        })
 
 
 def _signed() -> dict:
@@ -54,6 +54,7 @@ def _upload(version: int = 0, key: str = "upload-key-0001") -> SignedArtifactUpl
         idempotency_key=key,
         expected_custody_version=version,
         signing_request_id="request-0001",
+        correlation_id="correlation-0001",
         signed_artifact=_signed(),
     )
 
@@ -74,12 +75,11 @@ def test_signing_request_is_export_only_and_rejects_true_authority() -> None:
     exported = build_signing_request(
         artifact=_artifact(),
         domain="runtime_authorization",
-        request_id="request-0001",
-        requested_by="admin",
+        request_id="request-0001", key_id="offline-test-key", key_version="v1",
+        requested_at="2026-08-08T00:00:00Z", expires_at="2099-01-01T00:00:00Z",
     )
-    assert exported["browser_signing"] is False
-    assert exported["private_key_access"] is False
-    assert all(exported[name] is False for name in ("production_allowed", "live_trading_authorized", "countable_forward"))
+    assert exported["request_id"] == "request-0001"
+    assert exported["artifact"] == _artifact()
 
 
 def test_phase_c_schemas_are_strict_draft202012_contracts() -> None:

@@ -1,0 +1,26 @@
+name: vnpy-phase-c-offline-e2e
+services:
+  artifact-custody:
+    build: { context: ../.., dockerfile: deployments/phase-c/Containerfile.custody }
+    expose: ["8091"]
+    environment:
+      PHASE_C_CUSTODY_ROOT: /var/lib/phase-c-custody
+      PHASE_C_CUSTODY_WRITER_EPOCH: "1"
+      PHASE_C_CUSTODY_SHARED_SECRET: ${PHASE_C_CUSTODY_SHARED_SECRET:?required}
+      PHASE_C_CUSTODY_POLICIES_JSON: ${PHASE_C_CUSTODY_POLICIES_JSON:?public-only policy required}
+    networks: [phase-c-private]
+    read_only: true
+    tmpfs: [/tmp]
+  phase-c-execution:
+    build: { context: ../.., dockerfile: deployments/phase-c/Containerfile.execution }
+    expose: ["8092"]
+    environment:
+      PHASE_C_EXECUTION_STATE_PATH: /var/lib/phase-c-execution/state.json
+      PHASE_C_EXECUTION_SHARED_SECRET: ${PHASE_C_EXECUTION_SHARED_SECRET:?required}
+      PHASE_C_CUSTODY_URL: http://artifact-custody:8091
+      PHASE_C_CUSTODY_SHARED_SECRET: ${PHASE_C_CUSTODY_SHARED_SECRET:?required}
+    networks: [phase-c-private]
+    read_only: true
+    tmpfs: [/tmp]
+networks:
+  phase-c-private: { internal: true }

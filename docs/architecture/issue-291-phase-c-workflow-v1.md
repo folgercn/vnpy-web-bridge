@@ -12,7 +12,7 @@
 | Artifact Custody | 验证/保存 signed artifact，写 verify/install receipt | 私钥、Control/Browser state、订单/RPC |
 | Execution | 消费 custody receipt，保存 authorization/audit/archive state，生成只读 preview/status | 将 Control RBAC 当作 authority、接收浏览器订单、真实交易（本 Phase C） |
 
-Control 的本轮 `OfflineFakeWorkflowClient` 仅是合同测试替身：其 state 在 fake custody/execution adapter 内，而不是 Control projection。默认 Control client 是 fail-closed unconfigured client；fake 只有显式 `PHASE_C_OFFLINE_FAKE_ADAPTER_ENABLED=true` 才能启用。真实运行时必须注入独立 custody/execution client；不得把 fake adapter 当作部署实现。
+`OfflineFakeWorkflowClient` 仅是测试依赖注入替身，普通运行时没有环境变量可将其选中。默认 Control client 是 fail-closed unconfigured client；真实运行时只可注入独立 custody/execution private HTTP client。不得把 fake adapter 当作部署实现。
 
 ## 最小链路
 
@@ -32,11 +32,11 @@ Control typed enable/revoke command --> Execution --> status/audit/archive proje
 ```
 
 1. `POST /api/phase-c/signing-requests/export` 只能导出 `web-bridge-phase-c-signing-request-v1`。浏览器不签名，request 不含私钥或路径。
-2. `POST /api/phase-c/artifacts/upload-install` 只接收已经离线签名的 Phase B signed-artifact wrapper，并携带 caller idempotency key 与 custody expected version。Control 不缓存 artifact；Custody 是 receipt owner。
+2. `POST /api/phase-c/artifacts/upload-install` 只接收已经离线签名的 Phase B signed-artifact wrapper，并携带 caller idempotency key、correlation id 与 custody expected version。Control 不缓存 artifact；Custody 是 receipt owner。Custody 从自己的 root-owned public keyring path/raw SHA pin 选择 domain/key-purpose，复验 Ed25519、expiry 及 signed `request_id == upload signing_request_id`，再以 sole-writer ledger 写 publish/install receipt。
 3. `POST /api/phase-c/authorization/commands` 只允许 `enable` / `revoke` typed command，必须绑定 custody receipt、artifact id、expected execution version 与 idempotency key。
 4. `GET /api/phase-c/execution/{preview,status,audit,archive}` 仅返回 Execution adapter projection；Control 不持有 runtime state。
 
-所有 mutation 的 unknown outcome 都只能以**同一 idempotency key**重试或查询；不得生成新 key 进行 replay。stale expected version、同 key 不同 payload、receipt/artifact binding 不匹配均 fail closed。
+所有 mutation 的 unknown outcome 都只能以**同一 idempotency key**重试或查询；不得生成新 key 进行 replay。前端把 pending key、完整 payload 和 SHA-256 持久化，网络未知先查同 key receipt 后才可重试原 payload。stale expected version、同 key 不同 payload、receipt/artifact binding 不匹配均 fail closed。
 
 ## 访问控制与安全默认值
 

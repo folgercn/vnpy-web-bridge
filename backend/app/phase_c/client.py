@@ -1,14 +1,13 @@
-"""Control-side client for the Phase C workflow dependencies.
-
-The default exists only for test/local offline workflows.  Production must
-inject remote custody/execution clients; this module never becomes their state
-owner and has no signing, RPC or trading imports.
-"""
+"""Narrow Control clients for private custody and execution services."""
 
 from __future__ import annotations
 
+import asyncio
 import os
-from typing import Protocol
+from dataclasses import dataclass
+from typing import Any, Protocol
+
+import httpx
 
 from .adapters import OfflineFakeWorkflowAdapter, WorkflowAdapterError
 from .models import (
@@ -30,64 +29,97 @@ class PhaseCWorkflowClient(Protocol):
 
 
 class OfflineFakeWorkflowClient:
-    def __init__(self, adapter: OfflineFakeWorkflowAdapter | None = None) -> None:
-        self.adapter = adapter or OfflineFakeWorkflowAdapter()
+    """Test dependency injection only; never selected from runtime environment."""
+    def __init__(self, adapter: OfflineFakeWorkflowAdapter | None = None) -> None: self.adapter = adapter or OfflineFakeWorkflowAdapter()
+    def install(self, request: SignedArtifactUploadDTO) -> CustodyReceiptDTO: return self.adapter.custody.install(request)
+    def custody_receipt(self, receipt_id: str) -> CustodyReceiptDTO | None: return self.adapter.custody.receipt(receipt_id)
+    def authorization_status(self) -> AuthorizationStatusDTO: return self.adapter.execution.status()
+    def authorization_command(self, request: AuthorizationCommandDTO) -> AuthorizationStatusDTO: return self.adapter.execution.command(request, custody_receipt=self.adapter.custody.receipt(request.custody_receipt_id))
+    def authorization_receipt(self, idempotency_key: str) -> AuthorizationStatusDTO | None: return self.adapter.execution.by_key(idempotency_key)
+    def execution_projection(self) -> ExecutionProjectionDTO: return self.adapter.execution.projection()
 
-    def install(self, request: SignedArtifactUploadDTO) -> CustodyReceiptDTO:
-        return self.adapter.custody.install(request)
 
-    def custody_receipt(self, receipt_id: str) -> CustodyReceiptDTO | None:
-        return self.adapter.custody.receipt(receipt_id)
+@dataclass(frozen=True)
+class PhaseCRemoteSettings:
+    custody_url: str
+    execution_url: str
+    custody_secret: str
+    execution_secret: str
+    timeout_seconds: float = 3.0
 
-    def authorization_status(self) -> AuthorizationStatusDTO:
-        return self.adapter.execution.status()
-
-    def authorization_command(self, request: AuthorizationCommandDTO) -> AuthorizationStatusDTO:
-        return self.adapter.execution.command(
-            request, custody_receipt=self.adapter.custody.receipt(request.custody_receipt_id)
+    @classmethod
+    def from_env(cls) -> PhaseCRemoteSettings:
+        try:
+            timeout = min(15.0, max(0.1, float(os.getenv("PHASE_C_PRIVATE_TIMEOUT_SECONDS", "3"))))
+        except ValueError as exc:
+            raise ValueError("PHASE_C_PRIVATE_TIMEOUT_SECONDS is invalid") from exc
+        return cls(
+            os.environ["PHASE_C_CUSTODY_URL"].rstrip("/"), os.environ["PHASE_C_EXECUTION_URL"].rstrip("/"),
+            os.environ["PHASE_C_CUSTODY_SHARED_SECRET"], os.environ["PHASE_C_EXECUTION_SHARED_SECRET"], timeout,
         )
 
+
+class RemotePhaseCWorkflowClient:
+    """No retry is performed for mutations; timeout means unknown outcome."""
+
+    def __init__(self, settings: PhaseCRemoteSettings | None = None, *, transport: httpx.BaseTransport | None = None) -> None:
+        self.settings = settings or PhaseCRemoteSettings.from_env()
+        self.transport = transport
+
+    def _request(self, base: str, secret: str, method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any] | None:
+        try:
+            with httpx.Client(timeout=self.settings.timeout_seconds, transport=self.transport, headers={"X-Phase-C-Principal": "control-api", "X-Phase-C-Custody-Secret": secret, "X-Phase-C-Execution-Secret": secret}) as client:
+                response = client.request(method, f"{base}{path}", json=payload)
+        except (httpx.TimeoutException, asyncio.TimeoutError) as exc:
+            raise WorkflowAdapterError("private request outcome unknown; query same idempotency key") from exc
+        except httpx.HTTPError as exc:
+            raise WorkflowAdapterError("private Phase C dependency is unavailable") from exc
+        if response.status_code == 404:
+            return None
+        if response.status_code >= 400:
+            raise WorkflowAdapterError("private Phase C request was rejected")
+        try:
+            body = response.json()
+        except ValueError as exc:
+            raise WorkflowAdapterError("private Phase C response is invalid") from exc
+        return body if isinstance(body, dict) else None
+
+    def install(self, request: SignedArtifactUploadDTO) -> CustodyReceiptDTO:
+        raw = self._request(self.settings.custody_url, self.settings.custody_secret, "POST", "/internal/v1/publish-install", request.model_dump(mode="json"))
+        return CustodyReceiptDTO.model_validate(raw)
+
+    def custody_receipt(self, receipt_id: str) -> CustodyReceiptDTO | None:
+        raw = self._request(self.settings.custody_url, self.settings.custody_secret, "GET", f"/internal/v1/receipts/{receipt_id}")
+        return CustodyReceiptDTO.model_validate(raw) if raw else None
+
+    def authorization_status(self) -> AuthorizationStatusDTO:
+        return AuthorizationStatusDTO.model_validate(self._request(self.settings.execution_url, self.settings.execution_secret, "GET", "/internal/v1/authorization/status"))
+
+    def authorization_command(self, request: AuthorizationCommandDTO) -> AuthorizationStatusDTO:
+        raw = self._request(self.settings.execution_url, self.settings.execution_secret, "POST", "/internal/v1/authorization/commands", request.model_dump(mode="json"))
+        return AuthorizationStatusDTO.model_validate(raw)
+
     def authorization_receipt(self, idempotency_key: str) -> AuthorizationStatusDTO | None:
-        return self.adapter.execution.by_key(idempotency_key)
+        raw = self._request(self.settings.execution_url, self.settings.execution_secret, "GET", f"/internal/v1/authorization/receipts/{idempotency_key}")
+        return AuthorizationStatusDTO.model_validate(raw) if raw else None
 
     def execution_projection(self) -> ExecutionProjectionDTO:
-        return self.adapter.execution.projection()
+        return ExecutionProjectionDTO.model_validate(self._request(self.settings.execution_url, self.settings.execution_secret, "GET", "/internal/v1/projection"))
 
 
 class UnconfiguredPhaseCWorkflowClient:
-    """Fail closed until a real private custody/execution client is injected."""
-
     @staticmethod
     def _unavailable() -> None:
         raise WorkflowAdapterError("Phase C custody/execution dependency is not configured")
-
-    def install(self, request: SignedArtifactUploadDTO) -> CustodyReceiptDTO:
-        del request
-        self._unavailable()
-
-    def custody_receipt(self, receipt_id: str) -> CustodyReceiptDTO | None:
-        del receipt_id
-        self._unavailable()
-
-    def authorization_status(self) -> AuthorizationStatusDTO:
-        self._unavailable()
-
-    def authorization_command(self, request: AuthorizationCommandDTO) -> AuthorizationStatusDTO:
-        del request
-        self._unavailable()
-
-    def authorization_receipt(self, idempotency_key: str) -> AuthorizationStatusDTO | None:
-        del idempotency_key
-        self._unavailable()
-
-    def execution_projection(self) -> ExecutionProjectionDTO:
-        self._unavailable()
+    def install(self, request: SignedArtifactUploadDTO) -> CustodyReceiptDTO: del request; self._unavailable()
+    def custody_receipt(self, receipt_id: str) -> CustodyReceiptDTO | None: del receipt_id; self._unavailable()
+    def authorization_status(self) -> AuthorizationStatusDTO: self._unavailable()
+    def authorization_command(self, request: AuthorizationCommandDTO) -> AuthorizationStatusDTO: del request; self._unavailable()
+    def authorization_receipt(self, idempotency_key: str) -> AuthorizationStatusDTO | None: del idempotency_key; self._unavailable()
+    def execution_projection(self) -> ExecutionProjectionDTO: self._unavailable()
 
 
-# A fake is enabled only by a deliberate test/local flag.  A normal Control
-# process otherwise fails closed rather than silently becoming a state owner.
-phase_c_workflow_client: PhaseCWorkflowClient
-if os.getenv("PHASE_C_OFFLINE_FAKE_ADAPTER_ENABLED", "").strip().lower() == "true":
-    phase_c_workflow_client = OfflineFakeWorkflowClient()
-else:
+try:
+    phase_c_workflow_client: PhaseCWorkflowClient = RemotePhaseCWorkflowClient()
+except (KeyError, ValueError):
     phase_c_workflow_client = UnconfiguredPhaseCWorkflowClient()

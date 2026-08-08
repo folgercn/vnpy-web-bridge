@@ -177,7 +177,7 @@ class OfflineFakeExecutionAdapter:
 
     def projection(self) -> ExecutionProjectionDTO:
         return ExecutionProjectionDTO(
-            status="ARCHIVED" if self.archive_log else "OFFLINE_FAKE",
+            status="ARCHIVED" if self.archive_log else "OFFLINE",
             audit=deepcopy(self.audit_log),
             archive=deepcopy(self.archive_log),
         )

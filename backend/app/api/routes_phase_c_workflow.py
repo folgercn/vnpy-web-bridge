@@ -46,14 +46,17 @@ def workflow_status(_: Reader) -> dict[str, Any]:
 
 
 @router.post("/signing-requests/export")
-def export_signing_request(payload: SigningRequestCreateDTO, user: Admin) -> dict[str, Any]:
+def export_signing_request(payload: SigningRequestCreateDTO, _: Admin) -> dict[str, Any]:
     """Export canonical bytes for an offline signer; never sign in-browser."""
     try:
         request = build_signing_request(
             artifact=payload.artifact,
             domain=payload.domain,
             request_id=payload.request_id,
-            requested_by=user.username,
+            key_id=payload.key_id,
+            key_version=payload.key_version,
+            requested_at=payload.requested_at,
+            expires_at=payload.expires_at,
         )
     except PhaseCWorkflowError as exc:
         raise AppError(

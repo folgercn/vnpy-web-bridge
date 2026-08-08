@@ -63,7 +63,7 @@ import { NAlert, NButton, NCard, NDescriptions, NDescriptionsItem, NGi, NGrid, N
 import PageHeader from '../../../components/common/PageHeader.vue'
 import { useMediaQuery } from '../../../composables/useMediaQuery'
 import {
-  commandPhaseCAuthorization,
+  submitPhaseCAuthorizationWithRecovery,
   exportPhaseCSigningRequest,
   getPhaseCAuthorizationStatus,
   getPhaseCExecutionProjection,
@@ -113,7 +113,7 @@ async function refresh() {
 async function exportRequest() {
   try {
     exporting.value = true
-    signingRequest.value = await exportPhaseCSigningRequest({ request_id: id('signing-request'), domain: domain.value, artifact: parseObject(artifactText.value) })
+    signingRequest.value = await exportPhaseCSigningRequest({ request_id: id('signing-request'), domain: domain.value, key_id: 'offline-signer-key', key_version: 'v1', requested_at: new Date().toISOString(), expires_at: new Date(Date.now() + 300000).toISOString(), artifact: parseObject(artifactText.value) })
   } catch (error) { message.error(error instanceof Error ? error.message : '导出失败') } finally { exporting.value = false }
 }
 async function uploadArtifact() {
@@ -121,14 +121,14 @@ async function uploadArtifact() {
     uploading.value = true
     receipt.value = await uploadAndInstallPhaseCSignedArtifact({
       idempotency_key: id('custody'), expected_custody_version: receipt.value?.custody_version ?? 0,
-      signing_request_id: signingRequest.value?.request_id ?? 'offline-request-required', signed_artifact: parseObject(signedArtifactText.value)
+      signing_request_id: signingRequest.value?.request_id ?? 'offline-request-required', correlation_id: id('correlation'), signed_artifact: parseObject(signedArtifactText.value)
     })
   } catch (error) { message.error(error instanceof Error ? error.message : '上传失败') } finally { uploading.value = false }
 }
 async function submitAuthorization(action: 'enable' | 'revoke') {
   if (!receipt.value || !authorization.value) return
   try {
-    authorization.value = await commandPhaseCAuthorization({
+    authorization.value = await submitPhaseCAuthorizationWithRecovery({
       command_id: id('authorization-command'), idempotency_key: id('authorization'), expected_version: authorization.value.version,
       action, authorization_artifact_id: receipt.value.artifact_id, custody_receipt_id: receipt.value.receipt_id, reason: reason.value
     })

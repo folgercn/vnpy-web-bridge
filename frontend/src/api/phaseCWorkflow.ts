@@ -16,12 +16,13 @@ export interface PhaseCWorkflowStatus extends PhaseCNegativeAuthority {
   execution_mutation_allowed: false
 }
 
-export interface SigningRequestExport extends PhaseCNegativeAuthority {
+export interface SigningRequestExport {
   request_id: string
   domain: 'map_acceptance' | 'c_fast_acceptance' | 'runtime_authorization'
-  artifact_sha256: string
-  browser_signing: false
-  private_key_access: false
+  key_id: string
+  key_version: string
+  requested_at: string
+  expires_at: string
   artifact: Record<string, unknown>
 }
 
@@ -59,6 +60,10 @@ export const getPhaseCExecutionProjection = () => request<ExecutionProjection>('
 export const exportPhaseCSigningRequest = (payload: {
   request_id: string
   domain: SigningRequestExport['domain']
+  key_id: string
+  key_version: string
+  requested_at: string
+  expires_at: string
   artifact: Record<string, unknown>
 }) => request<SigningRequestExport>('/api/phase-c/signing-requests/export', {
   method: 'POST', body: JSON.stringify(payload)
@@ -68,6 +73,7 @@ export const uploadAndInstallPhaseCSignedArtifact = (payload: {
   idempotency_key: string
   expected_custody_version: number
   signing_request_id: string
+  correlation_id: string
   signed_artifact: Record<string, unknown>
 }) => request<CustodyReceipt>('/api/phase-c/artifacts/upload-install', {
   method: 'POST', body: JSON.stringify(payload)
@@ -84,3 +90,50 @@ export const commandPhaseCAuthorization = (payload: {
 }) => request<AuthorizationStatus>('/api/phase-c/authorization/commands', {
   method: 'POST', body: JSON.stringify(payload)
 })
+
+const pendingKey = 'phase-c.authorization.pending.v1'
+type PendingAuthorization = { payload: Parameters<typeof commandPhaseCAuthorization>[0], payloadHash: string }
+
+async function payloadHash(payload: unknown): Promise<string> {
+  const bytes = new TextEncoder().encode(JSON.stringify(payload))
+  const digest = await crypto.subtle.digest('SHA-256', bytes)
+  return Array.from(new Uint8Array(digest), value => value.toString(16).padStart(2, '0')).join('')
+}
+
+export const getPhaseCAuthorizationReceipt = (idempotencyKey: string) =>
+  request<AuthorizationStatus>(`/api/phase-c/authorization/receipts/${encodeURIComponent(idempotencyKey)}`)
+
+export async function submitPhaseCAuthorizationWithRecovery(payload: Parameters<typeof commandPhaseCAuthorization>[0]): Promise<AuthorizationStatus> {
+  const pending: PendingAuthorization = { payload, payloadHash: await payloadHash(payload) }
+  localStorage.setItem(pendingKey, JSON.stringify(pending))
+  try {
+    const result = await commandPhaseCAuthorization(payload)
+    localStorage.removeItem(pendingKey)
+    return result
+  } catch (error) {
+    // A network error is never permission to generate a second command: first
+    // query the durable receipt using exactly the persisted idempotency key.
+    try {
+      const result = await getPhaseCAuthorizationReceipt(payload.idempotency_key)
+      localStorage.removeItem(pendingKey)
+      return result
+    } catch { throw error }
+  }
+}
+
+export async function recoverPendingPhaseCAuthorization(): Promise<AuthorizationStatus | null> {
+  const raw = localStorage.getItem(pendingKey)
+  if (!raw) return null
+  const pending = JSON.parse(raw) as PendingAuthorization
+  if (pending.payloadHash !== await payloadHash(pending.payload)) throw new Error('pending Phase C payload hash mismatch')
+  try {
+    const result = await getPhaseCAuthorizationReceipt(pending.payload.idempotency_key)
+    localStorage.removeItem(pendingKey)
+    return result
+  } catch {
+    // Retry only the same persisted payload/key after its unknown-outcome query.
+    const result = await commandPhaseCAuthorization(pending.payload)
+    localStorage.removeItem(pendingKey)
+    return result
+  }
+}
