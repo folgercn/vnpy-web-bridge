@@ -20,7 +20,8 @@ services:
   artifact-custody:
     image: ${ARTIFACT_CUSTODY_IMAGE:-vnpy-web-bridge-artifact-custody:phase-c-offline}
     build: { context: ../.., dockerfile: deployments/phase-b/Containerfile.artifact-custody }
-    command: ["python", "-m", "uvicorn", "app.phase_c_custody:app", "--host", "0.0.0.0", "--port", "8091"]
+    entrypoint: ["python", "-m", "uvicorn"]
+    command: ["app.phase_c_custody:app", "--host", "0.0.0.0", "--port", "8091"]
     expose: ["8091"]
     environment:
       PHASE_C_CUSTODY_ROOT: /var/lib/phase-c-custody
