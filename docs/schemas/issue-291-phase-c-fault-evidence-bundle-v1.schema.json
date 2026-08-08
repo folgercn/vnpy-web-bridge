@@ -12,6 +12,6 @@
     "production": {"const": false},
     "live": {"const": false},
     "countable_forward": {"const": false},
-    "scenarios": {"type": "array", "minItems": 6, "items": {"$ref": "issue-291-phase-c-fault-scenario-v1.schema.json"}}
+    "scenarios": {"type": "array", "minItems": 9, "items": {"$ref": "issue-291-phase-c-fault-scenario-v1.schema.json"}}
   }
 }

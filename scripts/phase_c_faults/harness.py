@@ -7,6 +7,7 @@ offline test run, never a production/trading authorization.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -28,6 +29,7 @@ from app.execution.errors import (
 from app.execution.fencing import LeaderFencer
 from app.execution.models import sha256_json
 
+from scripts.phase_c_faults.process_runner import run_process_faults
 from scripts.windows_fence_foundation.admission import WindowsRpcDurableFenceDenied
 from scripts.windows_fence_foundation.final_admission_v1 import (
     WindowsRpcFencedAdmissionV1,
@@ -113,7 +115,43 @@ def _context(action: str, *, epoch: int = 3, token: int = 7) -> MutationContext:
     return replace(context, receipt_hash=_receipt_digest(context.as_dict()))
 
 
-def _case(case_id: str, assertions: list[str]) -> dict[str, Any]:
+def _identifiers(value: Any, key: str) -> set[str]:
+    if isinstance(value, Mapping):
+        found = {str(value[key])} if isinstance(value.get(key), str) else set()
+        for child in value.values():
+            found.update(_identifiers(child, key))
+        return found
+    if isinstance(value, list):
+        return set().union(*(_identifiers(child, key) for child in value)) if value else set()
+    return set()
+
+
+def _json_evidence(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(key): _json_evidence(child) for key, child in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_evidence(child) for child in value]
+    as_dict = getattr(value, "as_dict", None)
+    if callable(as_dict):
+        return _json_evidence(as_dict())
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    raise TypeError(f"unsupported evidence value: {type(value).__name__}")
+
+
+def _case(case_id: str, observations: list[dict[str, Any]]) -> dict[str, Any]:
+    records = []
+    for sequence, observation in enumerate(observations, start=1):
+        record_type = str(observation["record_type"])
+        payload = _json_evidence(dict(observation["payload"]))
+        records.append({"record_type": record_type, "sequence": sequence, "payload": payload, "sha256": sha256_json({"record_type": record_type, "sequence": sequence, "payload": payload})})
+    timeline = [record["sha256"] for record in records]
+    uniqueness = {
+        "unique_intent_ids": sorted(_identifiers(records, "intent_id")),
+        "unique_receipt_ids": sorted(_identifiers(records, "receipt_id")),
+        "gateway_event_count": sum("gateway" in record["record_type"] for record in records),
+    }
+    derived_sha256 = sha256_json({"case_id": case_id, "timeline": timeline, **uniqueness})
     return {
         "schema_version": SCENARIO_SCHEMA_VERSION,
         "case_id": case_id,
@@ -122,7 +160,7 @@ def _case(case_id: str, assertions: list[str]) -> dict[str, Any]:
         "production": False,
         "live": False,
         "countable_forward": False,
-        "assertions": assertions,
+        "evidence": {"records": records, "timeline": timeline, "derived_sha256": derived_sha256, **uniqueness},
     }
 
 
@@ -141,7 +179,9 @@ def _leader_faults() -> dict[str, Any]:
         old.admission(leader_epoch=first.epoch, fencing_token=first.fencing_token, token=first, now=start + timedelta(seconds=2))
     assert second.epoch > first.epoch and second.fencing_token > first.fencing_token
     return _case("double_leader_pause_expiry_partition_rejoin", [
-        "second live leader denied", "expired/partitioned old leader rejected after rejoin", "epoch and token strictly advance",
+        {"record_type": "first_leader_token", "payload": first.as_dict()},
+        {"record_type": "replacement_leader_token", "payload": second.as_dict()},
+        {"record_type": "durable_lease", "payload": repo.snapshot()["lease"]},
     ])
 
 
@@ -162,7 +202,12 @@ def _final_fence_stale_send_cancel() -> dict[str, Any]:
     with _raises(WindowsRpcDurableFenceDenied):
         admission.cancel_order_fenced_v1({"symbol": "RB", "volume": 1}, cancel)
     assert calls == []
-    return _case("stale_token_send_cancel_final_fence", ["stale send rejected", "stale cancel rejected", "native handlers not called"])
+    return _case("stale_token_send_cancel_final_fence", [
+        {"record_type": "windows_final_fence", "payload": admission.snapshot()},
+        {"record_type": "native_handler_calls", "payload": {"calls": calls}},
+        {"record_type": "send_receipt", "payload": send.as_dict()},
+        {"record_type": "cancel_receipt", "payload": cancel.as_dict()},
+    ])
 
 
 def _timeout_no_replay() -> dict[str, Any]:
@@ -174,7 +219,10 @@ def _timeout_no_replay() -> dict[str, Any]:
         _send(service, token, "send-phase-c-timeout-02")
     assert len(gateway.send_calls) == 1
     assert service.status()["lifecycle"] == "HALTED_UNKNOWN_OUTCOME"
-    return _case("rpc_timeout_unknown_same_intent_no_replay", ["timeout persisted unknown outcome", "new send denied", "one gateway send only"])
+    return _case("rpc_timeout_unknown_same_intent_no_replay", [
+        {"record_type": "durable_execution_state", "payload": service.repository.snapshot()},
+        {"record_type": "gateway_send_calls", "payload": {"calls": gateway.send_calls}},
+    ])
 
 
 def _crash_and_restart() -> dict[str, Any]:
@@ -203,7 +251,11 @@ def _crash_and_restart() -> dict[str, Any]:
     assert any(value.get("state") == "UNKNOWN_OUTCOME" for value in state["send_intents"].values())
     with _raises(UnknownOutcomeError):
         _send(restarted, token, "send-phase-c-after-restart")
-    return _case("crash_before_after_gateway_and_restart_reconcile", ["unavailable durable write calls no gateway", "cancel is durably CANCEL_REQUESTED before the gateway boundary", "restart converts active persisted intents to unknown", "restart mutation denied pending same-intent reconciliation"])
+    return _case("crash_before_after_gateway_and_restart_reconcile", [
+        {"record_type": "cancel_boundary_state", "payload": {"states": observed_cancel_states}},
+        {"record_type": "durable_execution_state_after_restart", "payload": state},
+        {"record_type": "gateway_send_calls", "payload": {"calls": gateway.send_calls}},
+    ])
 
 
 def _delayed_duplicate_callback() -> dict[str, Any]:
@@ -214,7 +266,10 @@ def _delayed_duplicate_callback() -> dict[str, Any]:
     service._mark_intent_result(intent_id, {"state": "ACKNOWLEDGED", "broker_order_id": "broker-phase-c-001"})
     archive = repo.snapshot()["terminal_archive"]
     assert len(gateway.send_calls) == 1 and not archive
-    return _case("delayed_duplicate_callback_idempotent", ["duplicate acknowledgement does not send again", "duplicate callback creates no terminal archive"])
+    return _case("delayed_duplicate_callback_idempotent", [
+        {"record_type": "durable_execution_state", "payload": repo.snapshot()},
+        {"record_type": "gateway_send_calls", "payload": {"calls": gateway.send_calls}},
+    ])
 
 
 def _custody_faults(root: Path) -> dict[str, Any]:
@@ -243,7 +298,10 @@ def _custody_faults(root: Path) -> dict[str, Any]:
         stored.symlink_to(replacement)
         with _raises(CustodyError):
             store.audit()
-    return _case("custody_tamper_replay_toctou_receipts", ["idempotency replay conflict rejected", "tampered receipt chain rejected on reopen", "symlink swap is rejected by no-follow custody read", "custody receipt is append-only and schema-pinned"])
+    return _case("custody_tamper_replay_toctou_receipts", [
+        {"record_type": "custody_receipt_path", "payload": {"path": receipt_path.name}},
+        {"record_type": "custody_symlink_swap", "payload": {"path": stored.name, "is_symlink": stored.is_symlink()}},
+    ])
 
 
 class _raises:
@@ -271,6 +329,11 @@ def run_fault_acceptance(workdir: Path) -> dict[str, Any]:
         _leader_faults(), _final_fence_stale_send_cancel(), _timeout_no_replay(),
         _crash_and_restart(), _delayed_duplicate_callback(), _custody_faults(workdir),
     ]
+    for process_case in run_process_faults(workdir / "process-faults"):
+        scenarios.append(_case(process_case["case_id"], [
+            {"record_type": str(record["event_type"]), "payload": dict(record)}
+            for record in process_case["records"]
+        ]))
     return {
         "schema_version": BUNDLE_SCHEMA_VERSION,
         "issue": 291,

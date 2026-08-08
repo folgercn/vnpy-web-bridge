@@ -3,7 +3,7 @@
   "$id": "issue-291-phase-c-fault-scenario-v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "case_id", "status", "execution_mode", "production", "live", "countable_forward", "assertions"],
+  "required": ["schema_version", "case_id", "status", "execution_mode", "production", "live", "countable_forward", "evidence"],
   "properties": {
     "schema_version": {"const": "issue_291_phase_c_fault_scenario_v1"},
     "case_id": {"type": "string", "minLength": 8},
@@ -12,6 +12,32 @@
     "production": {"const": false},
     "live": {"const": false},
     "countable_forward": {"const": false},
-    "assertions": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["records", "timeline", "derived_sha256", "unique_intent_ids", "unique_receipt_ids", "gateway_event_count"],
+      "properties": {
+        "records": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["record_type", "sequence", "payload", "sha256"],
+            "properties": {
+              "record_type": {"type": "string", "minLength": 1},
+              "sequence": {"type": "integer", "minimum": 1},
+              "payload": {"type": "object"},
+              "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+            }
+          }
+        },
+        "timeline": {"type": "array", "minItems": 1, "items": {"type": "string", "pattern": "^[0-9a-f]{64}$"}},
+        "derived_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "unique_intent_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "unique_receipt_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "gateway_event_count": {"type": "integer", "minimum": 0}
+      }
+    }
   }
 }
