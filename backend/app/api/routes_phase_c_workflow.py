@@ -90,6 +90,17 @@ def custody_receipt(receipt_id: str, _: Reader) -> dict[str, Any]:
     return ok(receipt.model_dump(mode="json"))
 
 
+@router.get("/custody/receipts-by-idempotency/{idempotency_key}")
+def custody_receipt_by_idempotency(idempotency_key: str, _: Reader) -> dict[str, Any]:
+    try:
+        receipt = phase_c_workflow_client.custody_receipt_by_idempotency(idempotency_key)
+    except WorkflowAdapterError as exc:
+        raise _adapter_error(exc) from exc
+    if receipt is None:
+        raise AppError("custody receipt 尚不可判定", code="PHASE_C_UNKNOWN_OUTCOME", status_code=404, detail={"idempotency_key": idempotency_key, "query_same_intent_only": True})
+    return ok(receipt.model_dump(mode="json"))
+
+
 @router.get("/authorization/status")
 def authorization_status(_: Reader) -> dict[str, Any]:
     try:

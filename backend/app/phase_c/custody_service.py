@@ -128,6 +128,16 @@ class ArtifactCustodyService:
                 return None
             raise WorkflowAdapterError(exc.code) from exc
 
+    def receipt_by_idempotency(self, idempotency_key: str) -> CustodyReceiptDTO | None:
+        try:
+            with self._custody() as custody:
+                raw = custody.read_receipt_by_idempotency(f"install-{idempotency_key}")
+            return self._receipt(raw) if raw["receipt_type"] == "install" else None
+        except CustodyError as exc:
+            if exc.code == "CUSTODY_RECEIPT_NOT_FOUND":
+                return None
+            raise WorkflowAdapterError(exc.code) from exc
+
 
 def create_app(service: ArtifactCustodyService | None = None) -> FastAPI:
     target = service or ArtifactCustodyService(CustodySettings.from_env())
@@ -150,6 +160,12 @@ def create_app(service: ArtifactCustodyService | None = None) -> FastAPI:
     @app.get("/internal/v1/receipts/{receipt_id}")
     def receipt(receipt_id: str, request: Request) -> dict[str, Any]:
         result = target.receipt(receipt_id) if auth(request) else None
+        if result is None:
+            raise HTTPException(404, "receipt not found")
+        return result.model_dump(mode="json")
+    @app.get("/internal/v1/receipts-by-idempotency/{idempotency_key}")
+    def receipt_by_idempotency(idempotency_key: str, request: Request) -> dict[str, Any]:
+        result = target.receipt_by_idempotency(idempotency_key) if auth(request) else None
         if result is None:
             raise HTTPException(404, "receipt not found")
         return result.model_dump(mode="json")

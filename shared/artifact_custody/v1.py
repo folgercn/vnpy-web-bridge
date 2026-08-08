@@ -918,6 +918,15 @@ class ArtifactCustody:
                 return dict(receipt)
         raise CustodyError("CUSTODY_RECEIPT_NOT_FOUND")
 
+    def read_receipt_by_idempotency(self, idempotency_key: str) -> dict[str, Any]:
+        """Query an existing receipt only; it can never create/replay a mutation."""
+        wanted = _safe_id(idempotency_key, "CUSTODY_IDEMPOTENCY_INVALID")
+        state = self._load_state()
+        record = state.idempotency.get(wanted)
+        if record is None:
+            raise CustodyError("CUSTODY_RECEIPT_NOT_FOUND")
+        return dict(record["receipt"])
+
     def record(
         self,
         receipt_type: str,

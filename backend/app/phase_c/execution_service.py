@@ -64,13 +64,32 @@ class PhaseCExecutionService:
     def _load(self) -> dict[str, Any]:
         if not self.settings.state_path.exists():
             return {"version": 0, "requested_state": "DISABLED", "artifact_id": None, "receipt_id": None, "commands": {}, "audit": [], "archive": []}
-        return json.loads(self.settings.state_path.read_text(encoding="utf-8"))
+        try:
+            raw = self.settings.state_path.read_bytes()
+            envelope = json.loads(raw)
+            if not isinstance(envelope, dict) or set(envelope) != {"schema_version", "payload", "payload_sha256"} or envelope["schema_version"] != "phase-c-execution-state-v1":
+                raise ValueError
+            payload = envelope["payload"]
+            if not isinstance(payload, dict) or hashlib.sha256(canonical_json(payload)).hexdigest() != envelope["payload_sha256"] or raw != canonical_json(envelope):
+                raise ValueError
+            required = {"version", "requested_state", "artifact_id", "receipt_id", "commands", "audit", "archive"}
+            if set(payload) != required or not isinstance(payload["version"], int) or payload["requested_state"] not in {"DISABLED", "ENABLE_REQUESTED", "REVOKED"} or not isinstance(payload["commands"], dict) or not isinstance(payload["audit"], list) or not isinstance(payload["archive"], list):
+                raise ValueError
+            return payload
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError) as exc:
+            raise WorkflowAdapterError("phase-c execution durable state is invalid") from exc
 
     def _save(self, value: dict[str, Any]) -> None:
-        raw = canonical_json(value)
+        payload = canonical_json(value)
+        raw = canonical_json({"schema_version": "phase-c-execution-state-v1", "payload": value, "payload_sha256": hashlib.sha256(payload).hexdigest()})
         fd, name = tempfile.mkstemp(prefix=".phase-c-execution-", dir=self.settings.state_path.parent)
         try:
-            os.write(fd, raw); os.fsync(fd)
+            view = memoryview(raw)
+            while view:
+                written = os.write(fd, view)
+                if written <= 0: raise OSError("state write failed")
+                view = view[written:]
+            os.fsync(fd)
         finally:
             os.close(fd)
         os.replace(name, self.settings.state_path)

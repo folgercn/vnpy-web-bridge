@@ -77,3 +77,8 @@ def test_execution_service_consumes_only_custody_receipt_and_keeps_runtime_disab
         assert response.status_code == 200
         assert response.json()["effective_state"] == "DISABLED"
         assert response.json()["runtime_mutation_allowed"] is False
+    state = tmp_path / "state.json"
+    tampered = state.read_bytes().replace(b"ENABLE_REQUESTED", b"ENABLE_REQUESTEDX")
+    state.write_bytes(tampered)
+    with pytest.raises(WorkflowAdapterError, match="durable state"):
+        service.status()

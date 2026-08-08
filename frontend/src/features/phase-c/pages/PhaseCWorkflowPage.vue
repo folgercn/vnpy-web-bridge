@@ -68,7 +68,7 @@ import {
   getPhaseCAuthorizationStatus,
   getPhaseCExecutionProjection,
   getPhaseCWorkflowStatus,
-  uploadAndInstallPhaseCSignedArtifact,
+  uploadPhaseCSignedArtifactWithRecovery,
   type AuthorizationStatus,
   type CustodyReceipt,
   type ExecutionProjection,
@@ -87,11 +87,7 @@ const exporting = ref(false)
 const uploading = ref(false)
 const domain = ref<'map_acceptance' | 'c_fast_acceptance' | 'runtime_authorization'>('runtime_authorization')
 const reason = ref('offline workflow request')
-const artifactText = ref(JSON.stringify({
-  artifact_id: `artifact-${'0'.repeat(64)}`,
-  artifact_type: 'runtime-authorization',
-  payload: { production_allowed: false, live_trading_authorized: false, countable_forward: false }
-}, null, 2))
+const artifactText = ref('')
 const signedArtifactText = ref('')
 const domainOptions = [
   { label: 'MAP acceptance', value: 'map_acceptance' },
@@ -105,6 +101,12 @@ function parseObject(text: string): Record<string, unknown> {
   if (!value || Array.isArray(value) || typeof value !== 'object') throw new Error('JSON 必须为 object')
   return value as Record<string, unknown>
 }
+function parseArtifactEnvelope(text: string): Record<string, unknown> {
+  const value = parseObject(text)
+  const required = ['schema_version', 'artifact_id', 'artifact_type', 'trust_domain', 'producer_id', 'producer_version', 'schema_ref', 'canonical_sha256', 'raw_sha256', 'predecessor_refs', 'lineage', 'generated_at', 'scope', 'payload']
+  if (required.some(key => !(key in value))) throw new Error('请粘贴完整 canonical artifact envelope')
+  return value
+}
 async function refresh() {
   ;[workflow.value, authorization.value, execution.value] = await Promise.all([
     getPhaseCWorkflowStatus(), getPhaseCAuthorizationStatus(), getPhaseCExecutionProjection()
@@ -113,13 +115,13 @@ async function refresh() {
 async function exportRequest() {
   try {
     exporting.value = true
-    signingRequest.value = await exportPhaseCSigningRequest({ request_id: id('signing-request'), domain: domain.value, key_id: 'offline-signer-key', key_version: 'v1', requested_at: new Date().toISOString(), expires_at: new Date(Date.now() + 300000).toISOString(), artifact: parseObject(artifactText.value) })
+    signingRequest.value = await exportPhaseCSigningRequest({ request_id: id('signing-request'), domain: domain.value, key_id: 'offline-signer-key', key_version: 'v1', requested_at: new Date().toISOString(), expires_at: new Date(Date.now() + 300000).toISOString(), artifact: parseArtifactEnvelope(artifactText.value) })
   } catch (error) { message.error(error instanceof Error ? error.message : '导出失败') } finally { exporting.value = false }
 }
 async function uploadArtifact() {
   try {
     uploading.value = true
-    receipt.value = await uploadAndInstallPhaseCSignedArtifact({
+    receipt.value = await uploadPhaseCSignedArtifactWithRecovery({
       idempotency_key: id('custody'), expected_custody_version: receipt.value?.custody_version ?? 0,
       signing_request_id: signingRequest.value?.request_id ?? 'offline-request-required', correlation_id: id('correlation'), signed_artifact: parseObject(signedArtifactText.value)
     })

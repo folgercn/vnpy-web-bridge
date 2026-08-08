@@ -28,11 +28,14 @@ export interface SigningRequestExport {
 
 export interface CustodyReceipt extends PhaseCNegativeAuthority {
   receipt_id: string
+  receipt_type: 'install'
   artifact_id: string
+  artifact_sha256: string
   custody_version: number
+  idempotency_key: string
   verified: true
   installed: true
-  fake_adapter: true
+  custody_writer: 'artifact-custody'
 }
 
 export interface AuthorizationStatus extends PhaseCNegativeAuthority {
@@ -45,10 +48,10 @@ export interface AuthorizationStatus extends PhaseCNegativeAuthority {
 }
 
 export interface ExecutionProjection extends PhaseCNegativeAuthority {
-  status: 'OFFLINE_FAKE' | 'ARCHIVED'
+  status: 'OFFLINE' | 'ARCHIVED'
   execution_mutation_allowed: false
-  runtime_state_owner: 'execution-adapter'
-  custody_state_owner: 'custody-adapter'
+  runtime_state_owner: 'phase-c-execution'
+  custody_state_owner: 'artifact-custody'
   audit: Record<string, unknown>[]
   archive: Record<string, unknown>[]
 }
@@ -78,6 +81,8 @@ export const uploadAndInstallPhaseCSignedArtifact = (payload: {
 }) => request<CustodyReceipt>('/api/phase-c/artifacts/upload-install', {
   method: 'POST', body: JSON.stringify(payload)
 })
+export const getPhaseCCustodyReceiptByIdempotency = (idempotencyKey: string) =>
+  request<CustodyReceipt>(`/api/phase-c/custody/receipts-by-idempotency/${encodeURIComponent(idempotencyKey)}`)
 
 export const commandPhaseCAuthorization = (payload: {
   command_id: string
@@ -136,5 +141,21 @@ export async function recoverPendingPhaseCAuthorization(): Promise<Authorization
     const result = await commandPhaseCAuthorization(pending.payload)
     localStorage.removeItem(pendingKey)
     return result
+  }
+}
+
+const pendingUploadKey = 'phase-c.custody.pending.v1'
+export async function uploadPhaseCSignedArtifactWithRecovery(payload: Parameters<typeof uploadAndInstallPhaseCSignedArtifact>[0]): Promise<CustodyReceipt> {
+  localStorage.setItem(pendingUploadKey, JSON.stringify({ payload, payloadHash: await payloadHash(payload) }))
+  try {
+    const result = await uploadAndInstallPhaseCSignedArtifact(payload)
+    localStorage.removeItem(pendingUploadKey)
+    return result
+  } catch (error) {
+    try {
+      const result = await getPhaseCCustodyReceiptByIdempotency(payload.idempotency_key)
+      localStorage.removeItem(pendingUploadKey)
+      return result
+    } catch { throw error }
   }
 }
