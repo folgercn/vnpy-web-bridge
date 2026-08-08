@@ -100,7 +100,10 @@ class ExecutionQualityWorker:
             raise DurableCorruptionError("execution-quality state directory is not a real directory")
         os.chmod(config.state_dir, 0o700)
         self.identity = identity or WorkerIdentity.from_environment(self.service_id, runtime_mode=config.runtime_mode)
-        self.stream = stream or DurableVerifiedTickStream(config.stream_dir, generation=config.stream_generation)
+        # Opening the producer-owned mount is deliberately deferred to
+        # recovery.  This lets `--ready` return a fail-closed JSON snapshot
+        # while the market producer is still initializing its shared volume.
+        self.stream = stream
         self.evidence = evidence or AppendOnlyEvidenceLog(config.state_dir / "evidence.jsonl")
         self.checkpoint = AtomicCheckpoint(config.state_dir / "checkpoint.json", default={"stream_generation": config.stream_generation, "last_ingest_seq": 0})
         state = self.checkpoint.read()
@@ -110,6 +113,11 @@ class ExecutionQualityWorker:
         self._last_error: str | None = None
         self._state_recovered = False
         self._lock = threading.RLock()
+
+    def _stream_after_recovery(self) -> VerifiedTickSource:
+        if self.stream is None:
+            raise DurableCorruptionError("verified tick stream has not recovered")
+        return self.stream
 
     @property
     def last_ingest_seq(self) -> int:
@@ -126,66 +134,69 @@ class ExecutionQualityWorker:
         # catches gaps, duplicate sequences, hash tampering, and stale
         # evidence even when the checkpoint itself still points at an older
         # item.
-        self.stream.stats()
-        evidence_records = self.evidence.records()
-        for raw in evidence_records:
-            try:
-                evidence = ExecutionQualityEvidence.from_dict(raw)
-            except (TypeError, ValueError) as exc:
-                self._state_recovered = False
-                raise DurableCorruptionError("invalid execution-quality evidence") from exc
-            if (
-                evidence.stream_generation != self.config.stream_generation
-                or evidence.algorithm_version != self.config.algorithm_version
-            ):
-                self._state_recovered = False
-                raise GenerationMismatch("execution-quality evidence generation/algorithm mismatch")
-            tick = self.stream.get(evidence.ingest_id)
-            if (
-                tick is None
-                or tick.stream_generation != self.config.stream_generation
-                or tick.ingest_seq != evidence.ingest_seq
-                or tick.event_hash != evidence.source_event_hash
-            ):
-                self._state_recovered = False
-                raise DurableCorruptionError("execution-quality evidence has no matching verified tick")
-        state = self.checkpoint.read()
-        if str(state.get("stream_generation") or self.config.stream_generation) != self.config.stream_generation:
-            self._state_recovered = False
-            raise GenerationMismatch("execution-quality checkpoint generation mismatch")
-        seq = int(state.get("last_ingest_seq") or 0)
-        checkpoint_algorithm = str(state.get("algorithm_version") or self.config.algorithm_version)
-        if checkpoint_algorithm != self.config.algorithm_version:
-            self._state_recovered = False
-            raise GenerationMismatch("execution-quality checkpoint algorithm mismatch")
-        checkpoint_event_hash = str(state.get("last_event_hash") or "")
-        checkpoint_evidence_hash = str(state.get("last_evidence_hash") or "")
-        if seq == 0:
-            if checkpoint_event_hash or checkpoint_evidence_hash:
-                self._state_recovered = False
-                raise DurableCorruptionError("empty execution-quality checkpoint contains hashes")
+        self._state_recovered = False
+        try:
+            if self.stream is None:
+                self.stream = DurableVerifiedTickStream(
+                    self.config.stream_dir,
+                    generation=self.config.stream_generation,
+                    read_only=True,
+                )
+            stream = self._stream_after_recovery()
+            stream.stats()  # type: ignore[attr-defined]
+            evidence_records = self.evidence.records()
+            for raw in evidence_records:
+                try:
+                    evidence = ExecutionQualityEvidence.from_dict(raw)
+                except (TypeError, ValueError) as exc:
+                    raise DurableCorruptionError("invalid execution-quality evidence") from exc
+                if (
+                    evidence.stream_generation != self.config.stream_generation
+                    or evidence.algorithm_version != self.config.algorithm_version
+                ):
+                    raise GenerationMismatch("execution-quality evidence generation/algorithm mismatch")
+                tick = stream.get(evidence.ingest_id)  # type: ignore[attr-defined]
+                if (
+                    tick is None
+                    or tick.stream_generation != self.config.stream_generation
+                    or tick.ingest_seq != evidence.ingest_seq
+                    or tick.event_hash != evidence.source_event_hash
+                ):
+                    raise DurableCorruptionError("execution-quality evidence has no matching verified tick")
+            state = self.checkpoint.read()
+            if str(state.get("stream_generation") or self.config.stream_generation) != self.config.stream_generation:
+                raise GenerationMismatch("execution-quality checkpoint generation mismatch")
+            seq = int(state.get("last_ingest_seq") or 0)
+            checkpoint_algorithm = str(state.get("algorithm_version") or self.config.algorithm_version)
+            if checkpoint_algorithm != self.config.algorithm_version:
+                raise GenerationMismatch("execution-quality checkpoint algorithm mismatch")
+            checkpoint_event_hash = str(state.get("last_event_hash") or "")
+            checkpoint_evidence_hash = str(state.get("last_evidence_hash") or "")
+            if seq == 0:
+                if checkpoint_event_hash or checkpoint_evidence_hash:
+                    raise DurableCorruptionError("empty execution-quality checkpoint contains hashes")
+            else:
+                tick = stream.get_by_sequence(seq)  # type: ignore[attr-defined]
+                if tick is None:
+                    raise GenerationMismatch("checkpoint has no durable tick anchor")
+                if tick.stream_generation != self.config.stream_generation or tick.event_hash != checkpoint_event_hash:
+                    raise GenerationMismatch("checkpoint tick hash/generation mismatch")
+                evidence = self.evidence.get_by_identity(
+                    f"{self.config.stream_generation}:{tick.ingest_id}:{self.config.algorithm_version}"
+                )
+                if evidence is None or evidence.ingest_seq != seq or evidence.stream_generation != self.config.stream_generation:
+                    raise GenerationMismatch("checkpoint has no durable evidence anchor")
+                if evidence.source_event_hash != tick.event_hash or evidence.evidence_hash != checkpoint_evidence_hash:
+                    raise DurableCorruptionError("checkpoint evidence hash mismatch")
+        except Exception as exc:
+            self._last_error = type(exc).__name__
+            raise
         else:
-            tick = self.stream.get_by_sequence(seq)
-            if tick is None:
-                self._state_recovered = False
-                raise GenerationMismatch("checkpoint has no durable tick anchor")
-            if tick.stream_generation != self.config.stream_generation or tick.event_hash != checkpoint_event_hash:
-                self._state_recovered = False
-                raise GenerationMismatch("checkpoint tick hash/generation mismatch")
-            evidence = self.evidence.get_by_identity(
-                f"{self.config.stream_generation}:{tick.ingest_id}:{self.config.algorithm_version}"
-            )
-            if evidence is None or evidence.ingest_seq != seq or evidence.stream_generation != self.config.stream_generation:
-                self._state_recovered = False
-                raise GenerationMismatch("checkpoint has no durable evidence anchor")
-            if evidence.source_event_hash != tick.event_hash or evidence.evidence_hash != checkpoint_evidence_hash:
-                self._state_recovered = False
-                raise DurableCorruptionError("checkpoint evidence hash mismatch")
-        self._state_recovered = True
-        self._last_error = None
+            self._state_recovered = True
+            self._last_error = None
 
     def _next_evidence(self) -> tuple[VerifiedTick, ExecutionQualityEvidence] | None:
-        tick = next(self.stream.iter_from(self.last_ingest_seq, limit=1), None)
+        tick = next(self._stream_after_recovery().iter_from(self.last_ingest_seq, limit=1), None)
         if tick is None:
             return None
         return tick, ExecutionQualityEvidence.for_tick(tick, metrics=self.measure(tick), algorithm_version=self.config.algorithm_version)
@@ -238,8 +249,17 @@ class ExecutionQualityWorker:
         return HealthSnapshot(self.service_id, "healthy" if not self._last_error else "degraded", isoformat(), self.metrics.started_at_utc, {"verified_tick_stream": {"status": "healthy", "checkpoint": self.last_ingest_seq}, "evidence_store": {"status": "healthy"}}, self._last_error)
 
     def readiness(self) -> ReadinessSnapshot:
-        blockers = ("consumer_recovery_required",) if self._last_error else ()
-        return ReadinessSnapshot(self.service_id, not blockers, isoformat(), CONTRACT_VERSION in self.identity.contract_versions, True, not bool(self._last_error), self._state_recovered and not bool(self._last_error), blockers)
+        blockers = ("consumer_recovery_required",) if not self._state_recovered or self._last_error else ()
+        return ReadinessSnapshot(
+            self.service_id,
+            not blockers,
+            isoformat(),
+            CONTRACT_VERSION in self.identity.contract_versions,
+            True,
+            not bool(blockers),
+            self._state_recovered and not bool(self._last_error),
+            blockers,
+        )
 
     def metrics_snapshot(self) -> dict[str, object]:
         self.metrics.checkpoint_or_watermark = self.last_ingest_seq
@@ -264,6 +284,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.version:
         value = worker.version()
     elif args.ready:
+        try:
+            worker.recover()
+        except Exception as exc:  # noqa: BLE001 - readiness reports a fail-closed snapshot
+            worker._last_error = type(exc).__name__
         value = worker.readiness().as_dict()
     elif args.metrics:
         value = worker.metrics_snapshot()
@@ -278,7 +302,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         value = worker.health().as_dict()
     print(json.dumps(value, ensure_ascii=False, sort_keys=True))
-    return 0
+    return 0 if not args.ready or bool(value.get("ready")) else 1
 
 
 if __name__ == "__main__":  # pragma: no cover

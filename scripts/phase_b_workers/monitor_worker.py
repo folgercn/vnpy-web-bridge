@@ -248,14 +248,21 @@ class MonitorWorker:
         self.generation, self.fence_epoch = config.generation, 0
         self.metrics = WorkerMetrics(self.service_id, isoformat(), worker_generation=config.generation)
         self._last_error: str | None = None
-        self._state_recovered = True
+        self._state_recovered = False
         self._lock = threading.RLock()
 
     def recover(self) -> None:
-        self.fence_epoch = self.repository.activate_generation(self.generation)
-        self.repository.pending(limit=1)
-        self.state.read()
-        self._state_recovered = True
+        self._state_recovered = False
+        try:
+            self.fence_epoch = self.repository.activate_generation(self.generation)
+            self.repository.pending(limit=1)
+            self.state.read()
+        except Exception as exc:
+            self._last_error = type(exc).__name__
+            raise
+        else:
+            self._state_recovered = True
+            self._last_error = None
 
     def _deliver_outbox(self) -> None:
         if not self.fence_epoch:
@@ -350,12 +357,12 @@ class MonitorWorker:
 
     def readiness(self) -> ReadinessSnapshot:
         blockers: list[str] = []
-        if self._last_error:
+        if not self._state_recovered or self._last_error:
             blockers.append("state_recovery_required")
         source_ready, reason = DirectoryProjectionSource(self.config.projection_dir).readiness()
         if not source_ready:
             blockers.append(reason)
-        return ReadinessSnapshot(self.service_id, not blockers, isoformat(), CONTRACT_VERSION in self.identity.contract_versions, True, not bool(blockers), self._state_recovered and not bool(blockers), tuple(blockers))
+        return ReadinessSnapshot(self.service_id, not blockers, isoformat(), CONTRACT_VERSION in self.identity.contract_versions, True, not bool(blockers), self._state_recovered and not bool(self._last_error), tuple(blockers))
 
     def metrics_snapshot(self) -> dict[str, object]: return self.metrics.as_dict()
     def version(self) -> dict[str, object]: return self.identity.as_dict()
@@ -374,7 +381,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     worker = MonitorWorker(MonitorConfig.from_environment(args.state_dir))
     if args.version: value = worker.version()
-    elif args.ready: value = worker.readiness().as_dict()
+    elif args.ready:
+        try:
+            worker.recover()
+        except Exception as exc:  # noqa: BLE001 - readiness reports a fail-closed snapshot
+            worker._last_error = type(exc).__name__
+        value = worker.readiness().as_dict()
     elif args.metrics: value = worker.metrics_snapshot()
     elif args.check: value = {"snapshot": worker.run_once(), "metrics": worker.metrics_snapshot()}
     elif args.run:
@@ -384,7 +396,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     else: value = worker.health().as_dict()
     print(json.dumps(value, ensure_ascii=False, sort_keys=True))
-    return 0
+    return 0 if not args.ready or bool(value.get("ready")) else 1
 
 
 if __name__ == "__main__": raise SystemExit(main())

@@ -200,13 +200,19 @@ class AtomicCheckpoint:
     """One JSON document replaced atomically after a successful side effect."""
 
     def __init__(
-        self, path: str | Path, *, default: Mapping[str, object] | None = None
+        self,
+        path: str | Path,
+        *,
+        default: Mapping[str, object] | None = None,
+        read_only: bool = False,
     ) -> None:
         self.path = Path(os.path.abspath(path))
         self.default = dict(default or {})
+        self.read_only = bool(read_only)
         self._lock = threading.RLock()
-        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        os.chmod(self.path.parent, 0o700)
+        if not self.read_only:
+            self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            os.chmod(self.path.parent, 0o700)
         _ensure_parent(self.path)
 
     def read(self) -> dict[str, object]:
@@ -254,8 +260,27 @@ class AtomicCheckpoint:
             return dict(value)
 
     def write(self, value: Mapping[str, object]) -> None:
+        if self.read_only:
+            raise DurableStateError(f"checkpoint is read-only: {self.path}")
         with self._lock:
             atomic_write_json(self.path, value)
+
+    def ensure_exists(self) -> None:
+        """Create the default checkpoint only for its owning producer."""
+
+        if self.read_only:
+            raise DurableStateError(f"checkpoint is read-only: {self.path}")
+        with self._lock:
+            parent_fd, _ = _open_parent(self.path)
+            try:
+                try:
+                    os.stat(self.path.name, dir_fd=parent_fd, follow_symlinks=False)
+                    return
+                except FileNotFoundError:
+                    pass
+            finally:
+                os.close(parent_fd)
+            self.write(self.default)
 
     def update(self, **changes: object) -> dict[str, object]:
         with self._lock:
@@ -268,14 +293,18 @@ class AtomicCheckpoint:
 class AppendOnlyJsonl:
     """Fsync-on-append JSONL journal with strict replay semantics."""
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, path: str | Path, *, read_only: bool = False) -> None:
         self.path = Path(os.path.abspath(path))
-        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        os.chmod(self.path.parent, 0o700)
+        self.read_only = bool(read_only)
+        if not self.read_only:
+            self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            os.chmod(self.path.parent, 0o700)
         _ensure_parent(self.path)
         self._lock = threading.RLock()
 
     def append(self, value: Mapping[str, object]) -> None:
+        if self.read_only:
+            raise DurableStateError(f"journal is read-only: {self.path}")
         line = (canonical_json(dict(value)) + "\n").encode("utf-8")
         with self._lock:
             parent_fd, _ = _open_parent(self.path)
@@ -304,6 +333,37 @@ class AppendOnlyJsonl:
                 os.fsync(parent_fd)
             except OSError as exc:
                 raise DurableCorruptionError(f"journal write failed: {self.path}") from exc
+            finally:
+                if fd >= 0:
+                    os.close(fd)
+                os.close(parent_fd)
+
+    def ensure_exists(self) -> None:
+        """Create an empty journal only for its owning producer."""
+
+        if self.read_only:
+            raise DurableStateError(f"journal is read-only: {self.path}")
+        with self._lock:
+            parent_fd, _ = _open_parent(self.path)
+            fd = -1
+            try:
+                flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_CLOEXEC", 0)
+                if hasattr(os, "O_NOFOLLOW"):
+                    flags |= os.O_NOFOLLOW
+                fd = os.open(self.path.name, flags, 0o600, dir_fd=parent_fd)
+                info = os.fstat(fd)
+                if (
+                    stat.S_ISLNK(info.st_mode)
+                    or not stat.S_ISREG(info.st_mode)
+                    or info.st_uid != os.geteuid()
+                    or info.st_nlink != 1
+                    or info.st_mode & 0o077
+                ):
+                    raise DurableCorruptionError(f"journal is not a regular file: {self.path}")
+                os.fsync(fd)
+                os.fsync(parent_fd)
+            except OSError as exc:
+                raise DurableCorruptionError(f"journal initialization failed: {self.path}") from exc
             finally:
                 if fd >= 0:
                     os.close(fd)
@@ -363,8 +423,10 @@ class AppendOnlyJsonl:
 class AppendOnlySet:
     """Durable id set for write acknowledgements and delivery dedupe."""
 
-    def __init__(self, path: str | Path, *, identity_key: str = "id") -> None:
-        self.journal = AppendOnlyJsonl(path)
+    def __init__(
+        self, path: str | Path, *, identity_key: str = "id", read_only: bool = False
+    ) -> None:
+        self.journal = AppendOnlyJsonl(path, read_only=read_only)
         self.identity_key = identity_key
         self._lock = threading.RLock()
         self._values: set[str] | None = None
@@ -419,22 +481,95 @@ class AppendOnlySet:
 class DurableVerifiedTickStream:
     """Producer-owned verified stream plus explicit writer acknowledgements."""
 
-    def __init__(self, directory: str | Path, *, generation: str) -> None:
+    def __init__(
+        self, directory: str | Path, *, generation: str, read_only: bool = False
+    ) -> None:
         self.directory = Path(directory)
-        self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-        os.chmod(self.directory, 0o700)
+        self.read_only = bool(read_only)
+        if not self.read_only:
+            self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            os.chmod(self.directory, 0o700)
+        self._validate_directory()
         self.generation = str(generation)
-        self.journal = AppendOnlyJsonl(self.directory / "verified_ticks.jsonl")
+        self.journal = AppendOnlyJsonl(
+            self.directory / "verified_ticks.jsonl", read_only=self.read_only
+        )
         self.watermark = AtomicCheckpoint(
             self.directory / "producer_watermark.json",
             default={"stream_generation": self.generation, "last_ingest_seq": 0},
+            read_only=self.read_only,
         )
         self.acknowledgements = AppendOnlySet(
-            self.directory / "tick_writer_acks.jsonl", identity_key="ingest_id"
+            self.directory / "tick_writer_acks.jsonl",
+            identity_key="ingest_id",
+            read_only=self.read_only,
         )
         self._lock_path = self.directory / ".stream.lock"
         self._lock = threading.RLock()
         self._index: dict[str, VerifiedTick] | None = None
+        if self.read_only:
+            self._validate_read_only_layout()
+            # Strict consumers validate the complete producer state at open
+            # time.  Unlike producer recovery this path never repairs a
+            # stale watermark or creates any stream artifact.
+            self._load_index()
+
+    def _validate_directory(self) -> None:
+        """Verify a consumer mount without changing it."""
+
+        try:
+            info = self.directory.lstat()
+        except OSError as exc:
+            raise DurableCorruptionError(
+                f"verified tick stream directory is unavailable: {self.directory}"
+            ) from exc
+        if (
+            stat.S_ISLNK(info.st_mode)
+            or not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != os.geteuid()
+            or info.st_mode & 0o077
+        ):
+            raise DurableCorruptionError(
+                f"verified tick stream directory is unsafe: {self.directory}"
+            )
+
+    def _validate_read_only_layout(self) -> None:
+        """Require producer-initialized artifacts before a consumer starts.
+
+        A read-only consumer must never create or repair producer state.  A
+        missing artifact therefore means the producer has not completed its
+        initialization, rather than an empty stream that can be trusted.
+        """
+
+        for path in (
+            self.journal.path,
+            self.watermark.path,
+            self.acknowledgements.journal.path,
+        ):
+            try:
+                info = path.lstat()
+            except OSError as exc:
+                raise DurableCorruptionError(
+                    f"producer-initialized stream artifact is missing: {path}"
+                ) from exc
+            if (
+                stat.S_ISLNK(info.st_mode)
+                or not stat.S_ISREG(info.st_mode)
+                or info.st_uid != os.geteuid()
+                or info.st_nlink != 1
+                or info.st_mode & 0o077
+            ):
+                raise DurableCorruptionError(f"stream artifact is unsafe: {path}")
+
+    def initialize(self) -> None:
+        """Initialize an empty producer stream before exposing it to readers."""
+
+        if self.read_only:
+            raise DurableStateError("read-only consumer cannot initialize a stream")
+        with self._lock, self._process_lock():
+            self.journal.ensure_exists()
+            self.acknowledgements.journal.ensure_exists()
+            self.watermark.ensure_exists()
 
     @contextmanager
     def _process_lock(self) -> Iterator[None]:
@@ -521,6 +656,10 @@ class DurableVerifiedTickStream:
             if watermark_seq < max_seq:
                 # A crash after the journal fsync and before the checkpoint
                 # fsync is recoverable from the strictly ordered journal.
+                if self.read_only:
+                    raise DurableCorruptionError(
+                        "read-only verified tick stream watermark is behind journal"
+                    )
                 self.watermark.write(
                     {
                         "stream_generation": self.generation,

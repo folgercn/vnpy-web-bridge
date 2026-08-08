@@ -162,13 +162,21 @@ class MarketDataWorker:
         self.metrics = WorkerMetrics(self.service_id, isoformat(), worker_generation=config.stream_generation)
 
     def recover(self) -> None:
-        self.stream.stats()
-        state = self.source_fence.read()
-        if str(state.get("worker_generation") or self.config.stream_generation) != self.config.stream_generation:
-            self._state_recovered = False
-            raise GenerationMismatch("market-data generation changed without a new state directory")
-        self._state_recovered = True
-        self._last_error = None
+        self._state_recovered = False
+        try:
+            # The producer owns stream initialization.  Consumers only start
+            # after this durable layout has been exposed by a ready producer.
+            self.stream.initialize()
+            self.stream.stats()
+            state = self.source_fence.read()
+            if str(state.get("worker_generation") or self.config.stream_generation) != self.config.stream_generation:
+                raise GenerationMismatch("market-data generation changed without a new state directory")
+        except Exception as exc:
+            self._last_error = type(exc).__name__
+            raise
+        else:
+            self._state_recovered = True
+            self._last_error = None
 
     def bind_source(self) -> None:
         if self.source is not None and not self._source_bound:
@@ -380,8 +388,19 @@ class MarketDataWorker:
         )
 
     def readiness(self) -> ReadinessSnapshot:
-        blockers = ("writer_recovery_required",) if self._last_error else ()
-        return ReadinessSnapshot(self.service_id, not blockers, isoformat(), CONTRACT_VERSION in self.identity.contract_versions, True, not bool(self._last_error), self._state_recovered and not bool(self._last_error), blockers)
+        blockers: list[str] = []
+        if not self._state_recovered or self._last_error:
+            blockers.append("writer_recovery_required")
+        return ReadinessSnapshot(
+            self.service_id,
+            not blockers,
+            isoformat(),
+            CONTRACT_VERSION in self.identity.contract_versions,
+            True,
+            not bool(blockers),
+            self._state_recovered and not bool(self._last_error),
+            tuple(blockers),
+        )
 
     def metrics_snapshot(self) -> dict[str, object]:
         self.metrics.queue_depth = self.ingress.qsize()
@@ -406,6 +425,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.version:
         value = worker.version()
     elif args.ready:
+        try:
+            worker.recover()
+        except Exception as exc:  # noqa: BLE001 - readiness reports a fail-closed snapshot
+            worker._last_error = type(exc).__name__
         value = worker.readiness().as_dict()
     elif args.metrics:
         value = worker.metrics_snapshot()
@@ -418,7 +441,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         value = worker.health().as_dict()
     print(json.dumps(value, ensure_ascii=False, sort_keys=True))
-    return 0
+    return 0 if not args.ready or bool(value.get("ready")) else 1
 
 
 if __name__ == "__main__":  # pragma: no cover

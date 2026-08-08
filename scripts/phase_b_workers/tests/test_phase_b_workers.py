@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import json
 import sys
 import threading
 from dataclasses import replace
@@ -20,8 +21,14 @@ from phase_b_workers.durable import (
     DurableStateError,
     DurableVerifiedTickStream,
 )
-from phase_b_workers.execution_quality_worker import ExecutionQualityWorker
+from phase_b_workers.execution_quality_worker import (
+    ExecutionQualityWorker,
+)
+from phase_b_workers.execution_quality_worker import (
+    main as execution_quality_main,
+)
 from phase_b_workers.market_data_worker import MarketDataWorker
+from phase_b_workers.market_data_worker import main as market_data_main
 from phase_b_workers.monitor_worker import MonitorConfig, MonitorWorker, NullNotifier
 
 
@@ -163,6 +170,90 @@ def test_market_run_recovers_and_replays_before_readiness(tmp_path):
     restarted.run(stop_event=stop)
     assert [tick.ingest_seq for tick in recovered_writer.events] == [1]
     assert restarted.readiness().ready
+
+
+def test_market_and_execution_quality_are_not_ready_before_recovery(tmp_path):
+    market = MarketDataWorker(tmp_path / "market", generation="g1", writer=Writer())
+    assert not market.readiness().ready
+    for snapshot in (
+        market.health().as_dict(),
+        market.readiness().as_dict(),
+        market.version(),
+    ):
+        assert all(
+            snapshot[name] is False
+            for name in ("private_key_access", "trade_rpc_access", "account_access", "order_access")
+        )
+    market.recover()
+    quality = ExecutionQualityWorker(
+        tmp_path / "quality", generation="g1", tick_stream_dir=tmp_path / "market" / "stream"
+    )
+    assert not quality.readiness().ready
+    for snapshot in (
+        quality.health().as_dict(),
+        quality.readiness().as_dict(),
+        quality.version(),
+    ):
+        assert all(
+            snapshot[name] is False
+            for name in ("private_key_access", "trade_rpc_access", "account_access", "order_access")
+        )
+
+
+def test_ready_cli_performs_bounded_recovery_and_reports_access_boundaries(
+    tmp_path, monkeypatch, capsys
+):
+    market_dir = tmp_path / "market"
+    monkeypatch.setenv("PHASE_B_EQ_STATE_DIR", str(tmp_path / "quality"))
+    monkeypatch.setenv("PHASE_B_VERIFIED_STREAM_DIR", str(market_dir / "stream"))
+    assert execution_quality_main(["--ready"]) == 1
+    unavailable = json.loads(capsys.readouterr().out)
+    assert not unavailable["ready"] and unavailable["blockers"] == ["consumer_recovery_required"]
+
+    monkeypatch.setenv("PHASE_B_MARKET_DATA_STATE_DIR", str(market_dir))
+    assert market_data_main(["--ready"]) == 0
+    market_ready = json.loads(capsys.readouterr().out)
+    assert market_ready["ready"] and market_ready["state_recovered"]
+    assert all(not market_ready[name] for name in ("private_key_access", "trade_rpc_access", "account_access", "order_access"))
+
+    assert execution_quality_main(["--ready"]) == 0
+    quality_ready = json.loads(capsys.readouterr().out)
+    assert quality_ready["ready"] and quality_ready["state_recovered"]
+    assert all(not quality_ready[name] for name in ("private_key_access", "trade_rpc_access", "account_access", "order_access"))
+
+
+def test_read_only_tick_stream_never_mutates_producer_artifacts(tmp_path):
+    stream_dir = tmp_path / "stream"
+    producer = DurableVerifiedTickStream(stream_dir, generation="g1")
+    producer.initialize()
+    before = {
+        path.name: (path.stat().st_mtime_ns, path.stat().st_mode)
+        for path in stream_dir.iterdir()
+        if path.name != ".stream.lock"
+    }
+    consumer = DurableVerifiedTickStream(stream_dir, generation="g1", read_only=True)
+    assert consumer.stats()["events"] == 0
+    after = {
+        path.name: (path.stat().st_mtime_ns, path.stat().st_mode)
+        for path in stream_dir.iterdir()
+        if path.name != ".stream.lock"
+    }
+    assert after == before
+
+
+def test_read_only_tick_stream_rejects_missing_or_corrupt_producer_state(tmp_path):
+    missing = tmp_path / "missing"
+    missing.mkdir(mode=0o700)
+    with pytest.raises(DurableCorruptionError, match="producer-initialized"):
+        DurableVerifiedTickStream(missing, generation="g1", read_only=True)
+
+    stream_dir = tmp_path / "stream"
+    producer = DurableVerifiedTickStream(stream_dir, generation="g1")
+    producer.initialize()
+    (stream_dir / "verified_ticks.jsonl").write_text('{"record_type": "bad"}\n', encoding="utf-8")
+    (stream_dir / "verified_ticks.jsonl").chmod(0o600)
+    with pytest.raises(DurableCorruptionError, match="noncanonical JSONL"):
+        DurableVerifiedTickStream(stream_dir, generation="g1", read_only=True)
 
 
 def test_execution_checkpoint_follows_evidence(tmp_path):

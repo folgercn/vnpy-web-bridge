@@ -169,6 +169,10 @@ class WorkerIdentity:
             "production_allowed": False,
             "live_trading_authorized": False,
             "countable_forward": False,
+            "private_key_access": False,
+            "trade_rpc_access": False,
+            "account_access": False,
+            "order_access": False,
             "package_version": WORKER_PACKAGE_VERSION,
         }
 
@@ -181,6 +185,10 @@ class HealthSnapshot:
     process_started_at_utc: str
     dependencies: Mapping[str, object] = field(default_factory=dict)
     last_error_code: str | None = None
+    private_key_access: bool = False
+    trade_rpc_access: bool = False
+    account_access: bool = False
+    order_access: bool = False
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -190,6 +198,10 @@ class HealthSnapshot:
             "process_started_at_utc": self.process_started_at_utc,
             "dependencies": _redact_mapping(self.dependencies),
             "last_error_code": self.last_error_code,
+            "private_key_access": False,
+            "trade_rpc_access": False,
+            "account_access": False,
+            "order_access": False,
         }
 
 
@@ -203,6 +215,10 @@ class ReadinessSnapshot:
     dependencies_ready: bool
     state_recovered: bool
     blockers: tuple[str, ...] = ()
+    private_key_access: bool = False
+    trade_rpc_access: bool = False
+    account_access: bool = False
+    order_access: bool = False
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -214,6 +230,10 @@ class ReadinessSnapshot:
             "dependencies_ready": bool(self.dependencies_ready),
             "state_recovered": bool(self.state_recovered),
             "blockers": list(self.blockers),
+            "private_key_access": False,
+            "trade_rpc_access": False,
+            "account_access": False,
+            "order_access": False,
         }
 
 
