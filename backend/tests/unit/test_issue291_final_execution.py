@@ -13,6 +13,7 @@ from app.execution import (
     InMemoryExecutionRepository,
     InMemoryGateway,
     InMemoryTargetPlanRepository,
+    MutationRejected,
     PlanRejected,
 )
 from app.execution.errors import GatewayConfigurationError, GatewayUnavailable
@@ -436,6 +437,30 @@ def test_custody_http_client_rejects_redirect_response(monkeypatch) -> None:
     monkeypatch.setattr(client, "_opener", Redirect())
     with pytest.raises(GatewayUnavailable):
         client.probe()
+
+
+def test_runner_rejected_first_order_halts_before_second_order() -> None:
+    service, core, repo, gateway, _ = runtime(execute=True)
+    target = plan()
+    second = deepcopy(target["orders"][0])
+    second["reference"] = "order-ref-0002"
+    source = {
+        key: value
+        for key, value in target.items()
+        if key not in {"plan_hash", "order_set_sha256"}
+    }
+    source["orders"] = [target["orders"][0], second]
+    target = build_target_plan(**source)
+
+    def reject(request, context):
+        gateway.send_calls.append((dict(request), context))
+        return {"accepted": False, "state": "REJECTED", "intent_id": context.intent_id}
+
+    gateway.send_order = reject
+    with pytest.raises(MutationRejected):
+        reconcile_enable_start(service, core, repo, target)
+    assert len(gateway.send_calls) == 1
+    assert core.status()["lifecycle"] == "HALTED_RECONCILE_REQUIRED"
 
 
 def test_partial_unknown_same_intent_cancel_fence_and_restart_reconcile(
