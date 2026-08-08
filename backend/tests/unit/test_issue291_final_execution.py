@@ -363,10 +363,11 @@ def test_partial_unknown_same_intent_cancel_fence_and_restart_reconcile(
 ) -> None:
     service, core, repo, gateway, _ = runtime(execute=True)
     target = plan()
-    token = reconcile_enable_start(service, core, repo, target)
     gateway.fail_send = TimeoutError("network partition")
     with pytest.raises(GatewayTimeout):
-        service.send_plan_order(target["plan_id"], "order-ref-0001", token=token)
+        reconcile_enable_start(service, core, repo, target)
+    token = core.fencer.token
+    assert token is not None
     assert len(gateway.send_calls) == 1
     # A same plan/order reference derives the same idempotency key and cannot
     # replay an unknown outbound broker call.

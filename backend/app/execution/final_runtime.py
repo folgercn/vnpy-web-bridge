@@ -438,7 +438,7 @@ class FinalExecutionRuntime:
         elif envelope.command == "start":
             if not self.allow_simnow_execution:
                 raise AuthorityRejected("SIMNOW execution is locally disabled")
-            self._plan(
+            plan = self._plan(
                 envelope.payload["plan_id"], plan_hash=envelope.payload["plan_hash"]
             )
             if (
@@ -451,6 +451,16 @@ class FinalExecutionRuntime:
                 fencing_token=envelope.expected.fencing_token,
                 token=self.orchestrator.fencer.token,
             )
+            response = self.orchestrator.process_command(envelope)
+            if response.result.get("accepted") is True:
+                token = self.orchestrator.fencer.token
+                if (
+                    token is None
+                ):  # admission above prevents this; preserve fail-closed behaviour
+                    raise MutationRejected("SIMNOW runner lost its leader token")
+                for order in plan.orders:
+                    self.send_plan_order(plan.plan_id, order.order_ref, token=token)
+            return response
         return self.orchestrator.process_command(envelope)
 
     def _token(
