@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "issue-291-phase-b-trust-keyring-v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "domain", "key_version", "keys"],
+  "properties": {
+    "schema_version": {"const": "web-bridge-trust-keyring-v1"},
+    "domain": {"enum": ["research", "map_acceptance", "c_fast_acceptance", "runtime_authorization", "execution_permit"]},
+    "key_version": {"type": "string", "pattern": "^v[0-9]+$"},
+    "keys": {
+      "type": "array", "minItems": 1,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["key_id", "domain", "purpose", "public_key_base64", "status"],
+        "properties": {
+          "key_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
+          "domain": {"enum": ["research", "map_acceptance", "c_fast_acceptance", "runtime_authorization", "execution_permit"]},
+          "purpose": {"type": "string", "minLength": 1, "maxLength": 128},
+          "public_key_base64": {"type": "string", "contentEncoding": "base64"},
+          "status": {"enum": ["active", "retired"]}
+        }
+      }
+    }
+  }
+}

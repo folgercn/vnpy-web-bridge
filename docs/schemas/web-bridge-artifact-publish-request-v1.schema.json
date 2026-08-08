@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vnpy-web-bridge.invalid/schemas/web-bridge-artifact-publish-request-v1.schema.json",
+  "title": "Web Bridge artifact publish request v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "request_id", "artifact", "actor_id", "idempotency_key", "correlation_id", "expected_version"],
+  "properties": {
+    "schema_version": {"const": "web-bridge-artifact-publish-request-v1"},
+    "request_id": {"type": "string", "pattern": "^publish-request-[0-9a-f]{64}$"},
+    "artifact": {"$ref": "web-bridge-artifact-envelope-v1.schema.json"},
+    "actor_id": {"type": "string", "minLength": 1},
+    "idempotency_key": {"type": "string", "minLength": 1},
+    "correlation_id": {"type": "string", "minLength": 1},
+    "expected_version": {"const": 0}
+  }
+}

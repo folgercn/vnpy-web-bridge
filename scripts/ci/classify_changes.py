@@ -171,6 +171,201 @@ PHASE_A_UNIT_METADATA = {
     },
 }
 
+# Phase B is an offline, non-deploying validation graph.  Its CI boundary is
+# intentionally narrower than the historical backend/image flags: ordinary
+# backend or documentation work must not make the expensive seven-image gate
+# mandatory, but every owned Phase B input and its CI contract must do so.
+PHASE_B_UNITS = (
+    "artifact-custody",
+    "c-fast-producer",
+    "execution-quality-worker",
+    "map-producer",
+    "market-data-worker",
+    "monitor-worker",
+    "signing-authority",
+)
+
+
+def _phase_b_rule(
+    rule_id: str,
+    *,
+    units: tuple[str, ...] = (),
+    exact: tuple[str, ...] = (),
+    prefix: tuple[str, ...] = (),
+    shared: bool = False,
+) -> dict[str, object]:
+    return {
+        "id": rule_id,
+        "units": units,
+        "match": {"exact": exact, "glob": (), "prefix": prefix},
+        "shared": shared,
+    }
+
+
+# Every shared contract selects its full Phase B consumer closure.  The CI job
+# builds all seven images rather than attempting an unreviewed per-image
+# optimisation, so the classifier's unit list is an auditable dependency
+# declaration rather than a release selector.
+PHASE_B_RULES = (
+    _phase_b_rule(
+        "phase-b-ci-contract",
+        units=PHASE_B_UNITS,
+        exact=(
+            ".github/workflows/ci.yml",
+            "scripts/ci/classify_changes.py",
+            "scripts/ci/phase_b_projection_compose_smoke.sh",
+            "scripts/ci/validate_json_schemas.py",
+        ),
+        prefix=("backend/tests/unit/test_issue291_phase_b_ci",),
+        shared=True,
+    ),
+    _phase_b_rule(
+        "phase-b-compose",
+        units=PHASE_B_UNITS,
+        exact=("deployments/docker-compose.phase-b.yml",),
+        shared=True,
+    ),
+    _phase_b_rule(
+        "phase-b-artifact-custody-image",
+        units=("artifact-custody",),
+        exact=("deployments/phase-b/Containerfile.artifact-custody",),
+    ),
+    _phase_b_rule(
+        "phase-b-c-fast-image",
+        units=("c-fast-producer",),
+        exact=("deployments/phase-b/Containerfile.c-fast-producer",),
+    ),
+    _phase_b_rule(
+        "phase-b-execution-quality-image",
+        units=("execution-quality-worker",),
+        exact=("deployments/phase-b/Containerfile.execution-quality-worker",),
+    ),
+    _phase_b_rule(
+        "phase-b-map-image",
+        units=("map-producer",),
+        exact=("deployments/phase-b/Containerfile.map-producer",),
+    ),
+    _phase_b_rule(
+        "phase-b-market-data-image",
+        units=("market-data-worker",),
+        exact=("deployments/phase-b/Containerfile.market-data-worker",),
+    ),
+    _phase_b_rule(
+        "phase-b-monitor-image",
+        units=("monitor-worker",),
+        exact=("deployments/phase-b/Containerfile.monitor-worker",),
+    ),
+    _phase_b_rule(
+        "phase-b-signing-image",
+        units=("signing-authority",),
+        exact=("deployments/phase-b/Containerfile.signing-authority",),
+    ),
+    _phase_b_rule(
+        "phase-b-artifact-dependencies",
+        units=("artifact-custody", "signing-authority"),
+        exact=("deployments/phase-b/requirements-artifact.txt",),
+    ),
+    _phase_b_rule(
+        "phase-b-artifact-runtime",
+        units=("artifact-custody",),
+        exact=("scripts/phase_b_artifact_custody.py",),
+    ),
+    _phase_b_rule(
+        "phase-b-signing-runtime",
+        units=("signing-authority",),
+        exact=("scripts/phase_b_offline_signer.py",),
+    ),
+    _phase_b_rule(
+        "phase-b-worker-runtime",
+        units=("execution-quality-worker", "market-data-worker", "monitor-worker"),
+        prefix=("scripts/phase_b_workers/",),
+    ),
+    _phase_b_rule(
+        "phase-b-map-runtime",
+        units=("map-producer",),
+        prefix=("scripts/map/",),
+    ),
+    _phase_b_rule(
+        "phase-b-c-fast-runtime",
+        units=("c-fast-producer",),
+        prefix=("scripts/c_fast_producer/",),
+    ),
+    _phase_b_rule(
+        "phase-b-producer-kernel",
+        units=("c-fast-producer", "map-producer"),
+        exact=("scripts/commodity_c_fast_pure_producer_kernel.py",),
+    ),
+    _phase_b_rule(
+        "phase-b-shared-contracts",
+        units=PHASE_B_UNITS,
+        prefix=(
+            "shared/artifact_contracts/",
+            "shared/artifact_custody/",
+            "shared/trust_contracts/",
+            "shared/artifact-contracts/",
+        ),
+        shared=True,
+    ),
+    _phase_b_rule(
+        "phase-b-contracts-and-tests",
+        units=PHASE_B_UNITS,
+        exact=("backend/requirements.phase-b-verifier.txt",),
+        prefix=(
+            "backend/tests/unit/test_issue_291_phase_b_",
+            "backend/tests/unit/test_phase_b_producers.py",
+            "docs/architecture/issue-291-phase-b-",
+            "docs/operations/phase-b-",
+            "docs/schemas/issue-291-phase-b-",
+            "docs/schemas/web-bridge-artifact-",
+        ),
+        shared=True,
+    ),
+)
+
+PHASE_B_SCOPE_PREFIXES = (
+    "deployments/phase-b/",
+    "scripts/phase_b_workers/",
+    "scripts/map/",
+    "scripts/c_fast_producer/",
+    "shared/artifact_contracts/",
+    "shared/artifact_custody/",
+    "shared/trust_contracts/",
+    "shared/artifact-contracts/",
+    "docs/architecture/issue-291-phase-b-",
+    "docs/operations/phase-b-",
+    "docs/schemas/issue-291-phase-b-",
+    "docs/schemas/web-bridge-artifact-",
+    "backend/tests/unit/test_issue_291_phase_b_",
+    "backend/tests/unit/test_phase_b_producers",
+    "backend/tests/unit/test_issue291_phase_b_ci",
+)
+PHASE_B_SCOPE_EXACT = {
+    ".github/workflows/ci.yml",
+    "backend/requirements.phase-b-verifier.txt",
+    "deployments/docker-compose.phase-b.yml",
+    "scripts/ci/classify_changes.py",
+    "scripts/ci/phase_b_projection_compose_smoke.sh",
+    "scripts/ci/validate_json_schemas.py",
+    "scripts/commodity_c_fast_pure_producer_kernel.py",
+    "scripts/phase_b_artifact_custody.py",
+    "scripts/phase_b_offline_signer.py",
+}
+
+# Phase A consumes this explicit Phase B ownership boundary when creating its
+# non-deploying release plan.  These files are preserved as Phase-B-owned: they
+# cannot select a Phase A image or turn an otherwise valid Phase A plan into an
+# unknown-path block.  The shared workflow and CI classifiers remain governed
+# by their existing Phase A rules so that cross-phase CI changes retain Phase A
+# verification coverage.
+PHASE_A_PHASE_B_PRESERVED_EXACT = (
+    "backend/requirements.phase-b-verifier.txt",
+    "deployments/docker-compose.phase-b.yml",
+    "scripts/commodity_c_fast_pure_producer_kernel.py",
+    "scripts/phase_b_artifact_custody.py",
+    "scripts/phase_b_offline_signer.py",
+)
+PHASE_A_PHASE_B_PRESERVED_PREFIXES = PHASE_B_SCOPE_PREFIXES
+
 
 def _phase_a_dependency_closure(selected_units: set[str]) -> set[str]:
     """Expand selected primary services to their reviewed image closure."""
@@ -401,6 +596,12 @@ PHASE_A_RULES = (
         safety=True,
     ),
     _phase_a_rule(
+        "phase-a-preserved-phase-b",
+        exact=PHASE_A_PHASE_B_PRESERVED_EXACT,
+        prefix=PHASE_A_PHASE_B_PRESERVED_PREFIXES,
+        kind="preserved",
+    ),
+    _phase_a_rule(
         "phase-a-legacy-root",
         verification=("legacy_monolith_absence",),
         exact=("test_rpc_readonly.py", "test_rpc_trade_flow.py"),
@@ -606,6 +807,105 @@ def classify_phase_a(paths: list[str], *, force_all: bool = False) -> dict[str, 
     }
 
 
+def _phase_b_selected_rules(path: str) -> list[dict[str, object]]:
+    scored = [
+        (score, rule)
+        for rule in PHASE_B_RULES
+        if (score := _phase_a_specificity(rule, path)) is not None
+    ]
+    if not scored:
+        return []
+    highest = max(score for score, _ in scored)
+    return [rule for score, rule in scored if score == highest]
+
+
+def _is_phase_b_scope(path: str) -> bool:
+    return path in PHASE_B_SCOPE_EXACT or path.startswith(PHASE_B_SCOPE_PREFIXES)
+
+
+def classify_phase_b(paths: list[str], *, force_all: bool = False) -> dict[str, object]:
+    """Classify the offline Phase B CI boundary without selecting deployment.
+
+    Unknown or equally-specific Phase B rules are blocking rather than silently
+    skipped.  Paths outside the Phase B boundary deliberately remain unrelated
+    so that the expensive image matrix runs only when its contracts can change.
+    """
+
+    if force_all:
+        return {
+            "phase_b_changed": True,
+            "phase_b_shared_contract_changed": True,
+            "phase_b_unknown_changed": False,
+            "phase_b_ambiguous_changed": False,
+            "phase_b_gate_blocked": False,
+            "selected_rule_ids": ["<force-all>"],
+            "candidate_rule_ids": ["<force-all>"],
+            "selected_units": list(PHASE_B_UNITS),
+            "blocked_reasons": [],
+            "changed_paths": [],
+        }
+
+    changed_paths = sorted({_normalise_change_path(path) for path in paths})
+    changed_paths = [path for path in changed_paths if path]
+    phase_b_paths = [path for path in changed_paths if _is_phase_b_scope(path)]
+    selected_rule_ids: set[str] = set()
+    candidate_rule_ids: set[str] = set()
+    selected_units: set[str] = set()
+    blocked_reasons: list[dict[str, object]] = []
+    shared_contract_changed = False
+
+    for path in phase_b_paths:
+        selected = _phase_b_selected_rules(path)
+        candidate_rule_ids.update(str(rule["id"]) for rule in selected)
+        if not selected:
+            blocked_reasons.append(
+                {"path": path, "code": "unknown_phase_b_path", "rule_ids": []}
+            )
+            continue
+        if len(selected) != 1:
+            blocked_reasons.append(
+                {
+                    "path": path,
+                    "code": "ambiguous_phase_b_rule",
+                    "rule_ids": sorted(str(rule["id"]) for rule in selected),
+                }
+            )
+            continue
+        rule = selected[0]
+        selected_rule_ids.add(str(rule["id"]))
+        selected_units.update(str(unit) for unit in rule["units"])
+        shared_contract_changed = shared_contract_changed or bool(rule["shared"])
+
+    invalid_units = sorted(selected_units - set(PHASE_B_UNITS))
+    if invalid_units:
+        blocked_reasons.append(
+            {
+                "path": "<classifier>",
+                "code": "unknown_phase_b_consumer",
+                "rule_ids": [],
+                "units": invalid_units,
+            }
+        )
+        selected_units.difference_update(invalid_units)
+
+    return {
+        "phase_b_changed": bool(phase_b_paths),
+        "phase_b_shared_contract_changed": shared_contract_changed,
+        "phase_b_unknown_changed": any(
+            item["code"] == "unknown_phase_b_path" for item in blocked_reasons
+        ),
+        "phase_b_ambiguous_changed": any(
+            item["code"] == "ambiguous_phase_b_rule" for item in blocked_reasons
+        ),
+        "phase_b_gate_blocked": bool(blocked_reasons),
+        "selected_rule_ids": sorted(selected_rule_ids),
+        "candidate_rule_ids": sorted(candidate_rule_ids),
+        "selected_units": sorted(selected_units),
+        "blocked_reasons": blocked_reasons,
+        "changed_paths": phase_b_paths,
+    }
+
+
 def _is_under(path: str, prefix: str) -> bool:
     return path == prefix.rstrip("/") or path.startswith(prefix)
 
@@ -689,11 +989,18 @@ def main() -> int:
         action="store_true",
         help="emit the independent Issue #291 Phase A service classifier",
     )
+    parser.add_argument(
+        "--phase-b",
+        action="store_true",
+        help="emit the independent Issue #291 Phase B CI classifier",
+    )
     args = parser.parse_args()
     paths = list(args.paths)
     if args.paths_file:
         with open(args.paths_file, encoding="utf-8") as source:
             paths.extend(line.rstrip("\n") for line in source)
+    if args.phase_a and args.phase_b:
+        parser.error("--phase-a and --phase-b are mutually exclusive")
     if args.phase_a:
         result = classify_phase_a(paths, force_all=args.force_all)
         if args.github_output:
@@ -706,6 +1013,15 @@ def main() -> int:
         else:
             print(json.dumps(result, sort_keys=True))
         return 1 if result["release_blocked"] else 0
+    if args.phase_b:
+        result = classify_phase_b(paths, force_all=args.force_all)
+        if args.github_output:
+            for key, value in result.items():
+                if isinstance(value, bool):
+                    print(f"{key}={'true' if value else 'false'}")
+        else:
+            print(json.dumps(result, sort_keys=True))
+        return 1 if result["phase_b_gate_blocked"] else 0
     result = classify(paths, force_all=args.force_all)
     if args.github_output:
         for key, value in result.items():

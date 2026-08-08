@@ -19,6 +19,7 @@ def test_ci_gate_is_stable_and_always_created() -> None:
     assert "name: CI Gate" in gate
     assert "if: always()" in gate
     assert 'not in {"success", "skipped"}' in gate
+    assert "- phase-b-projection-smoke" in gate
 
 
 def test_fork_pull_requests_cannot_write_build_caches() -> None:

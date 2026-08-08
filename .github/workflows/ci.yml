@@ -28,6 +28,9 @@ jobs:
       execution_changed: ${{ steps.phase_a_filter.outputs.execution_changed }}
       execution_safety_required: ${{ steps.phase_a_filter.outputs.execution_safety_required }}
       phase_a_release_blocked: ${{ steps.phase_a_filter.outputs.release_blocked }}
+      phase_b_changed: ${{ steps.phase_b_filter.outputs.phase_b_changed }}
+      phase_b_shared_contract_changed: ${{ steps.phase_b_filter.outputs.phase_b_shared_contract_changed }}
+      phase_b_gate_blocked: ${{ steps.phase_b_filter.outputs.phase_b_gate_blocked }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -77,6 +80,23 @@ jobs:
           # Unknown/ambiguous paths are represented in the output and are
           # failed by the dedicated release-plan job and CI Gate.  Keep this
           # change-detection job able to publish all booleans first.
+          if [ "$status" -gt 1 ]; then exit "$status"; fi
+
+      - name: Classify Issue #291 Phase B CI boundary
+        id: phase_b_filter
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set +e
+          extra=()
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then extra+=(--force-all); fi
+          python scripts/ci/classify_changes.py \
+            --paths-file /tmp/changed-files.txt \
+            --phase-b --github-output "${extra[@]}" >> "$GITHUB_OUTPUT"
+          status=$?
+          # The dedicated Phase B gate turns an unknown or ambiguous owned
+          # path into a failed required check after all outputs are published.
           if [ "$status" -gt 1 ]; then exit "$status"; fi
 
   quick-checks:
@@ -141,6 +161,7 @@ jobs:
             backend/tests/unit/test_ci_cd_release_classifier.py \
             backend/tests/unit/test_ci_change_classifier.py \
             backend/tests/unit/test_ci_workflow_contract.py \
+            backend/tests/unit/test_issue291_phase_b_ci.py \
             backend/tests/unit/test_issue291_phase_a_release.py \
             backend/tests/unit/test_issue267_release_contract.py \
             backend/tests/unit/test_issue267_legacy_cd_guard.py \
@@ -396,6 +417,229 @@ jobs:
           docker image inspect vnpy-web-bridge-gateway-proxy:phase-a-${{ github.sha }} | python -c "import json,sys; c=json.load(sys.stdin)[0]['Config']; assert c['Entrypoint'] == ['python','/usr/local/bin/gateway_proxy.py']; assert c['Cmd'] == ['request']; assert c['User'] == '65532:65532'"
           docker run --rm vnpy-web-bridge-gateway-proxy:phase-a-${{ github.sha }} version | python -c "import json,sys; value=json.load(sys.stdin); assert value['service'] == 'gateway-rpc-proxy'; assert value['version']"
 
+  phase-b-ci:
+    name: Issue #291 Phase B contracts and images (${{ matrix.name }})
+    needs: changes
+    if: needs.changes.outputs.phase_b_changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: artifact-custody
+            containerfile: deployments/phase-b/Containerfile.artifact-custody
+            image: artifact-custody
+            smoke: artifact-custody
+          - name: c-fast-producer
+            containerfile: deployments/phase-b/Containerfile.c-fast-producer
+            image: c-fast-producer
+            smoke: batch-producer
+          - name: execution-quality-worker
+            containerfile: deployments/phase-b/Containerfile.execution-quality-worker
+            image: execution-quality-worker
+            smoke: worker
+          - name: map-producer
+            containerfile: deployments/phase-b/Containerfile.map-producer
+            image: map-producer
+            smoke: batch-producer
+          - name: market-data-worker
+            containerfile: deployments/phase-b/Containerfile.market-data-worker
+            image: market-data-worker
+            smoke: worker
+          - name: monitor-worker
+            containerfile: deployments/phase-b/Containerfile.monitor-worker
+            image: monitor-worker
+            smoke: worker
+          - name: signing-authority
+            containerfile: deployments/phase-b/Containerfile.signing-authority
+            image: signing-authority
+            smoke: signing-authority
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Resolve changed files for fail-closed Phase B classification
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE_SHA: ${{ github.event.before }}
+          CURRENT_SHA: ${{ github.sha }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            git ls-tree -r --name-only "$CURRENT_SHA" > /tmp/changed-files.txt
+          elif [ "$EVENT_NAME" = "pull_request" ]; then
+            git fetch origin "$BASE_REF" --depth=1
+            git diff --name-only --no-renames "origin/$BASE_REF"...HEAD > /tmp/changed-files.txt
+          elif [ -n "$BEFORE_SHA" ] && [ "$BEFORE_SHA" != "0000000000000000000000000000000000000000" ]; then
+            git diff --name-only --no-renames "$BEFORE_SHA" "$CURRENT_SHA" > /tmp/changed-files.txt
+          else
+            git ls-tree -r --name-only "$CURRENT_SHA" > /tmp/changed-files.txt
+          fi
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install Phase B test dependencies
+        run: pip install -r backend/requirements.txt
+
+      - name: Enforce Phase B CI classification and contracts
+        run: |
+          python scripts/ci/classify_changes.py --paths-file /tmp/changed-files.txt --phase-b
+          python scripts/ci/validate_json_schemas.py
+          PYTHONPATH=backend:scripts:. pytest -q \
+            backend/tests/unit/test_issue_291_phase_b_custody.py \
+            backend/tests/unit/test_issue_291_phase_b_trust.py \
+            backend/tests/unit/test_phase_b_producers.py \
+            scripts/phase_b_workers/tests
+
+      - name: Validate standalone Phase B Compose configuration with CI-only pins
+        env:
+          ARTIFACT_CUSTODY_IMAGE: vnpy-web-bridge-artifact-custody:phase-b-${{ github.sha }}
+          C_FAST_PRODUCER_IMAGE: vnpy-web-bridge-c-fast-producer:phase-b-${{ github.sha }}
+          EXECUTION_QUALITY_WORKER_IMAGE: vnpy-web-bridge-execution-quality-worker:phase-b-${{ github.sha }}
+          MAP_PRODUCER_IMAGE: vnpy-web-bridge-map-producer:phase-b-${{ github.sha }}
+          MARKET_DATA_WORKER_IMAGE: vnpy-web-bridge-market-data-worker:phase-b-${{ github.sha }}
+          MONITOR_WORKER_IMAGE: vnpy-web-bridge-monitor-worker:phase-b-${{ github.sha }}
+          SIGNING_AUTHORITY_IMAGE: vnpy-web-bridge-signing-authority:phase-b-${{ github.sha }}
+          CUSTODY_WRITER_EPOCH: "1"
+          MAP_ACCEPTANCE_KEYRING_SHA256: "0000000000000000000000000000000000000000000000000000000000000000"
+          CONTROL_DATABASE_URL: postgresql://control:phase-b-control@postgres:5432/vnpy
+          EXECUTION_DATABASE_URL: postgresql://execution:phase-b-execution@postgres:5432/vnpy
+          CONTROL_EXECUTION_SHARED_SECRET: phase-b-ci-placeholder-not-a-runtime-secret
+          CONTROL_EXECUTION_PRINCIPAL: phase-b-ci
+          CONTROL_EXECUTION_ROLE: admin
+          EXECUTION_SCOPE: account:phase-b-ci
+          EXECUTION_ENVIRONMENT: phase-b-ci
+          GATEWAY_RPC_REQ_PROXY_PORT: "2014"
+          GATEWAY_RPC_PUB_PROXY_PORT: "4102"
+          WINDOWS_RPC_REQ_ADDRESS: tcp://192.0.2.1:2014
+          WINDOWS_RPC_PUB_ADDRESS: tcp://192.0.2.1:4102
+          GATEWAY_PROXY_IMAGE: vnpy-web-bridge-gateway-proxy:phase-a-placeholder
+          JWT_SECRET_KEY: phase-b-ci-placeholder-not-a-runtime-secret
+          AUTH_USERS_JSON: '[{"username":"ci","password_sha256":"ci"}]'
+          POSTGRES_DB: vnpy
+          POSTGRES_ADMIN_USER: postgres
+          POSTGRES_ADMIN_PASSWORD: phase-b
+          CONTROL_DB_USER: control
+          CONTROL_DB_PASSWORD: phase-b-control
+          EXECUTION_DB_USER: execution
+          EXECUTION_DB_PASSWORD: phase-b-execution
+        run: docker compose -f deployments/docker-compose.phase-b.yml config --quiet
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build Phase B image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ${{ matrix.containerfile }}
+          load: true
+          tags: vnpy-web-bridge-${{ matrix.image }}:phase-b-${{ github.sha }}
+          cache-from: type=gha,scope=issue291-phase-b-${{ matrix.name }}
+          cache-to: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && format('type=gha,mode=max,scope=issue291-phase-b-{0}', matrix.name) || '' }}
+
+      - name: Smoke health, ready and version without keys, RPC, or trading
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="vnpy-web-bridge-${{ matrix.image }}:phase-b-${GITHUB_SHA}"
+          docker image inspect "$image" >/dev/null
+          safe=(
+            --rm --network none --read-only --cap-drop ALL
+            --security-opt no-new-privileges
+            --tmpfs /tmp:rw,noexec,nosuid,size=16m,uid=65532,gid=65532,mode=0700
+            --env PRODUCTION=false
+            --env LIVE_TRADING_AUTHORIZED=false
+            --env COUNTABLE_FORWARD=false
+          )
+          case "${{ matrix.smoke }}" in
+            artifact-custody)
+              volume="phase-b-artifact-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+              projection="${volume}-projection"
+              trap 'docker volume rm -f "$volume" "$projection" >/dev/null || true' EXIT
+              docker volume create "$volume" >/dev/null
+              docker volume create "$projection" >/dev/null
+              for command in version health ready; do
+                docker run "${safe[@]}" -v "$volume:/var/lib/phase-b-custody" -v "$projection:/var/lib/phase-b/projection" "$image" --root /var/lib/phase-b-custody --schema-dir /app/docs/schemas "$command"
+              done
+              ;;
+            worker)
+              volume="phase-b-${{ matrix.image }}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+              trap 'docker volume rm -f "$volume" >/dev/null || true' EXIT
+              docker volume create "$volume" >/dev/null
+              commands=(--health --ready --version)
+              case "${{ matrix.image }}" in
+                market-data-worker) state_dir=/var/lib/phase-b/market-data ;;
+                execution-quality-worker)
+                  state_dir=/var/lib/phase-b/execution-quality
+                  # This isolated consumer smoke deliberately has no
+                  # producer-owned verified-tick stream mounted.  Readiness
+                  # must remain fail-closed here; the projection compose smoke
+                  # proves it after the market-data producer initializes it.
+                  commands=(--health --version)
+                  ;;
+                monitor-worker)
+                  state_dir=/var/lib/phase-b/monitor
+                  # Projection absence must fail closed in the isolated image.
+                  # Fresh-volume monitor readiness is proven by the standalone
+                  # compose smoke after all three producers have written.
+                  commands=(--health --version)
+                  ;;
+                *) echo "unknown worker image" >&2; exit 2 ;;
+              esac
+              state=(-v "$volume:$state_dir")
+              for command in "${commands[@]}"; do
+                docker run "${safe[@]}" "${state[@]}" "$image" --state-dir "$state_dir" "$command"
+              done
+              # Where the isolated worker owns every readiness dependency, the
+              # same named volume is deliberately reused: readiness is a
+              # bounded restart recovery check, never tmpfs-only state.
+              if [[ "${{ matrix.image }}" != monitor-worker && "${{ matrix.image }}" != execution-quality-worker ]]; then
+                docker run "${safe[@]}" "${state[@]}" "$image" --state-dir "$state_dir" --ready
+              fi
+              ;;
+            batch-producer)
+              docker run "${safe[@]}" "$image" health
+              docker run "${safe[@]}" "$image" ready
+              docker run "${safe[@]}" "$image" --version
+              ;;
+            signing-authority)
+              docker run "${safe[@]}" "$image" --health
+              docker run "${safe[@]}" "$image" --ready
+              docker run "${safe[@]}" "$image" --version
+              ;;
+            *)
+              echo "unknown Phase B smoke profile: ${{ matrix.smoke }}" >&2
+              exit 2
+              ;;
+          esac
+
+  phase-b-projection-smoke:
+    name: Issue #291 Phase B fresh-volume projection smoke
+    needs: phase-b-ci
+    if: needs.phase-b-ci.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Build standalone graph on fresh named volumes and prove monitor readiness
+        env:
+          CUSTODY_WRITER_EPOCH: "1"
+          MAP_ACCEPTANCE_KEYRING_SHA256: "0000000000000000000000000000000000000000000000000000000000000000"
+        run: scripts/ci/phase_b_projection_compose_smoke.sh
+
   backend:
     name: Backend tests (shard ${{ matrix.shard }})
     needs: changes
@@ -634,6 +878,8 @@ jobs:
       - query-v5-real-oci
       - phase-a-release-plan
       - phase-a-build-check
+      - phase-b-ci
+      - phase-b-projection-smoke
     runs-on: ubuntu-latest
     steps:
       - name: Require every applicable CI job

@@ -1,0 +1,7 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vnpy-web-bridge.invalid/schemas/web-bridge-artifact-publish-receipt-v1.schema.json",
+  "title": "Web Bridge artifact publish receipt v1",
+  "$ref": "web-bridge-artifact-receipt-v1.schema.json",
+  "allOf": [{"type": "object", "properties": {"receipt_type": {"const": "publish"}, "expected_version": {"const": 0}, "resulting_version": {"const": 1}}}]
+}

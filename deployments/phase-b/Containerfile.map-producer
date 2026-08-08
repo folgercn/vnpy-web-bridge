@@ -1,0 +1,24 @@
+# Phase B MAP batch image.  The copy set is intentionally limited to the
+# producer and frozen pure-kernel source; no application/runtime tree is
+# available in this image.
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app:/app/vendor
+WORKDIR /app
+
+COPY scripts/map /app/map_producer
+COPY scripts/commodity_c_fast_pure_producer_kernel.py /app/vendor/commodity_c_fast_pure_producer_kernel.py
+COPY shared/artifact-contracts/map /app/contracts/map
+
+RUN python -m py_compile \
+      /app/map_producer/__init__.py \
+      /app/map_producer/producer.py \
+      /app/vendor/commodity_c_fast_pure_producer_kernel.py
+
+# Numeric non-root identity; this batch image has no writable application
+# tree and no secret or key material.
+USER 65532:65532
+ENTRYPOINT ["python", "-m", "map_producer.producer"]
+CMD ["ready"]
