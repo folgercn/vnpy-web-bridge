@@ -251,6 +251,7 @@ class FinalExecutionRuntime:
         custody_receipt: Callable[[str], Mapping[str, Any] | None] | None = None,
         allowed_scope: Mapping[str, Any] | None = None,
         allow_simnow_execution: bool = False,
+        max_order_volume: int = 1,
     ) -> None:
         if orchestrator.environment.upper() != "SIMNOW":
             raise ValueError("final execution runtime requires SIMNOW environment")
@@ -267,6 +268,13 @@ class FinalExecutionRuntime:
         self.custody = custody
         self.allowed_scope = dict(allowed_scope) if allowed_scope is not None else None
         self.allow_simnow_execution = bool(allow_simnow_execution)
+        if (
+            not isinstance(max_order_volume, int)
+            or isinstance(max_order_volume, bool)
+            or max_order_volume < 1
+        ):
+            raise ValueError("final execution max order volume must be positive")
+        self.max_order_volume = max_order_volume
 
     def _receipt_for(self, plan: TargetPlan) -> VerifiedCustodyReceipt:
         try:
@@ -285,6 +293,8 @@ class FinalExecutionRuntime:
             ) from exc
         expected = {
             "receipt_id": plan.raw["custody_receipt_id"],
+            "artifact_id": plan.raw["authority_artifact_id"],
+            "artifact_sha256": plan.raw["authority_artifact_sha256"],
             "signer_key_id": plan.raw["signer_key_id"],
             "signer_key_version": plan.raw["signer_key_version"],
             "keyring_raw_sha256": plan.raw["keyring_raw_sha256"],
@@ -347,7 +357,9 @@ class FinalExecutionRuntime:
         try:
             artifact_hash = sha256_bytes(canonical_json_line(dict(artifact)))
             payload = artifact.get("payload")
-            plan = TargetPlan.from_mapping(payload)
+            plan = TargetPlan.from_mapping(
+                payload, max_order_volume=self.max_order_volume
+            )
         except CommodityExecutionContractError as exc:
             raise PlanRejected("custody target plan artifact is invalid") from exc
         if (
@@ -380,6 +392,14 @@ class FinalExecutionRuntime:
             raise PlanRejected("target plan is not installed in Execution")
         if plan_hash is not None and plan.plan_hash != plan_hash:
             raise PlanRejected("target plan hash does not match installed plan")
+        try:
+            plan = TargetPlan.from_mapping(
+                plan.as_dict(), max_order_volume=self.max_order_volume
+            )
+        except CommodityExecutionContractError as exc:
+            raise PlanRejected(
+                "installed target plan exceeds local order bound"
+            ) from exc
         if plan.raw["account_scope"] != self.orchestrator.scope:
             raise PlanRejected("target plan account scope does not match Execution")
         if plan.raw["environment"] != "SIMNOW":
@@ -391,7 +411,7 @@ class FinalExecutionRuntime:
         """Verify and retain an immutable plan; this cannot start or send anything."""
 
         try:
-            plan = TargetPlan.from_mapping(raw)
+            plan = TargetPlan.from_mapping(raw, max_order_volume=self.max_order_volume)
         except CommodityExecutionContractError as exc:
             raise PlanRejected("target plan contract is invalid") from exc
         self._plan_from_value(plan)
@@ -441,6 +461,19 @@ class FinalExecutionRuntime:
             plan = self._plan(
                 envelope.payload["plan_id"], plan_hash=envelope.payload["plan_hash"]
             )
+            prior = self.orchestrator.repository.snapshot()
+            expected_preview_id = f"preview-{plan.plan_hash[:16]}"
+            if (
+                prior["plan"].get("state") != "PREVIEWED"
+                or prior["plan"].get("plan_id") != expected_preview_id
+                or prior["plan"].get("plan_hash") != plan.plan_hash
+                or prior["reconciliation"].get("state") != "RECONCILED"
+                or prior["broker"].get("position_snapshot_hash")
+                != plan.raw["expected_before_position_hash"]
+            ):
+                raise PlanRejected(
+                    "SIMNOW start lacks matching preview/reconciliation/position proof"
+                )
             if (
                 envelope.expected.leader_epoch is None
                 or envelope.expected.fencing_token is None
@@ -459,7 +492,24 @@ class FinalExecutionRuntime:
                 ):  # admission above prevents this; preserve fail-closed behaviour
                     raise MutationRejected("SIMNOW runner lost its leader token")
                 for order in plan.orders:
-                    self.send_plan_order(plan.plan_id, order.order_ref, token=token)
+                    try:
+                        result = self.send_plan_order(
+                            plan.plan_id, order.reference, token=token
+                        )
+                    except Exception as exc:
+                        self.orchestrator.fail_closed_halt(
+                            f"SIMNOW runner order {order.reference} failed: {exc}"
+                        )
+                        raise
+                    if result.get("accepted") is not True or str(
+                        result.get("state", "")
+                    ).upper() not in {"SUBMITTED", "ACKNOWLEDGED"}:
+                        self.orchestrator.fail_closed_halt(
+                            f"SIMNOW runner order {order.reference} was not accepted"
+                        )
+                        raise MutationRejected(
+                            "SIMNOW runner order was rejected or has unknown outcome"
+                        )
             return response
         return self.orchestrator.process_command(envelope)
 
@@ -489,7 +539,7 @@ class FinalExecutionRuntime:
             {
                 "plan_id": plan.plan_id,
                 "plan_hash": plan.plan_hash,
-                "order_ref": order.order_ref,
+                "order_ref": order.reference,
             }
         )
         idempotency_key = f"send-{intent_seed[:32]}"
@@ -512,7 +562,7 @@ class FinalExecutionRuntime:
             )
         leader = self._token(token)
         return self.orchestrator.send_order(
-            order.request,
+            order.as_dict(),
             idempotency_key=idempotency_key,
             plan_id=plan.plan_id,
             plan_hash=plan.plan_hash,

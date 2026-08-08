@@ -128,6 +128,7 @@ def _validate_audit_entry(value: Any) -> None:
         "reconcile_rejected": {"kind", "reason", "observed_at"},
         "cancel_rejected": {"kind", "target_intent_id", "reason", "observed_at"},
         "emergency_stop": {"kind", "reason", "observed_at"},
+        "fail_closed_halt": {"kind", "reason", "observed_at"},
         "test": {"kind", "observed_at"},
     }
     required = schemas.get(kind)

@@ -72,10 +72,20 @@ def plan(source: dict | None = None) -> dict:
         keyring_raw_sha256=source["keyring_raw_sha256"],
         scope=source["scope"],
         expires_at=source["expires_at"],
+        phase="OPEN",
+        expected_before_position_hash="0" * 64,
+        expected_after_position_hash="0" * 64,
         orders=[
             {
-                "order_ref": "order-ref-0001",
-                "request": {"symbol": "RB", "volume": 1},
+                "symbol": "RB",
+                "exchange": "SHFE",
+                "direction": "LONG",
+                "type": "LIMIT",
+                "volume": 1,
+                "price": 1.0,
+                "offset": "OPEN",
+                "reference": "order-ref-0001",
+                "gateway_name": "gateway-0001",
             }
         ],
     )
@@ -126,6 +136,18 @@ def runtime(*, execute: bool = False, receipt_value: dict | None = None):
 
 def reconcile_enable_start(service, core, repo, target: dict):
     service.install_target_plan(target)
+    service.process_command(
+        command(
+            "preview",
+            "preview-final-0001",
+            repo.state_version,
+            {
+                "plan_hash": target["plan_hash"],
+                "artifact_hash": target["authority_artifact_sha256"],
+                "mode": "offline_preview",
+            },
+        )
+    )
     service.process_command(
         command(
             "reconcile",
@@ -192,8 +214,8 @@ def test_target_plan_hash_and_order_refs_are_immutable() -> None:
     target = plan()
     assert target["plan_hash"]
     tampered = deepcopy(target)
-    tampered["orders"][0]["request"]["volume"] = 2
-    with pytest.raises(CommodityExecutionContractError, match="hash mismatch"):
+    tampered["orders"][0]["volume"] = 2
+    with pytest.raises(CommodityExecutionContractError):
         from shared.commodity_execution import TargetPlan
 
         TargetPlan.from_mapping(tampered)
@@ -205,6 +227,33 @@ def test_target_plan_hash_and_order_refs_are_immutable() -> None:
         build_target_plan(
             **{key: value for key, value in duplicate.items() if key != "plan_hash"}
         )
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"unknown": True},
+        {"type": "MARKET"},
+        {"volume": 2},
+        {"price": float("nan")},
+        {"offset": "CLOSE"},
+    ],
+)
+def test_target_plan_rejects_non_limit_overbound_nan_unknown_and_mixed_phase(
+    change,
+) -> None:
+    raw = plan()
+    raw["orders"][0].update(change)
+    with pytest.raises(CommodityExecutionContractError):
+        raw["order_set_sha256"] = __import__(
+            "shared.commodity_execution.v1", fromlist=["sha256_json"]
+        ).sha256_json(raw["orders"])
+        raw["plan_hash"] = __import__(
+            "shared.commodity_execution.v1", fromlist=["sha256_json"]
+        ).sha256_json({key: value for key, value in raw.items() if key != "plan_hash"})
+        from shared.commodity_execution import TargetPlan
+
+        TargetPlan.from_mapping(raw)
 
 
 def test_start_requires_installed_receipt_bound_plan() -> None:

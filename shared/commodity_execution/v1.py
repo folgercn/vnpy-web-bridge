@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -21,6 +22,9 @@ _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$")
 _KEY_VERSION_RE = re.compile(r"^v[0-9]+$")
+_SYMBOL_RE = re.compile(r"^[A-Z][A-Z0-9]{0,31}$")
+_REFERENCE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$")
+_EXCHANGES = frozenset({"CFFEX", "CZCE", "DCE", "GFEX", "INE", "SHFE"})
 
 
 class CommodityExecutionContractError(ValueError):
@@ -97,22 +101,91 @@ def _detached_mapping(value: Any, field: str) -> dict[str, Any]:
 class TargetPlanOrder:
     """One immutable order reference and the exact gateway request payload."""
 
-    order_ref: str
-    request: dict[str, Any]
+    symbol: str
+    exchange: str
+    direction: str
+    type: str
+    volume: int
+    price: float
+    offset: str
+    reference: str
+    gateway_name: str
 
     @classmethod
-    def from_mapping(cls, raw: Any) -> TargetPlanOrder:
-        if not isinstance(raw, Mapping) or set(raw) != {"order_ref", "request"}:
+    def from_mapping(cls, raw: Any, *, max_order_volume: int = 1) -> TargetPlanOrder:
+        fields = {
+            "symbol",
+            "exchange",
+            "direction",
+            "type",
+            "volume",
+            "price",
+            "offset",
+            "reference",
+            "gateway_name",
+        }
+        if not isinstance(raw, Mapping) or set(raw) != fields:
             raise CommodityExecutionContractError(
                 "target plan order fields are invalid"
             )
-        request = _detached_mapping(raw["request"], "target plan order request")
-        if not request:
-            raise CommodityExecutionContractError("target plan order request is empty")
-        return cls(_id(raw["order_ref"], "target plan order_ref"), request)
+        if (
+            not isinstance(max_order_volume, int)
+            or isinstance(max_order_volume, bool)
+            or max_order_volume < 1
+        ):
+            raise CommodityExecutionContractError("local max order volume is invalid")
+        symbol, exchange, direction, order_type = (
+            raw["symbol"],
+            raw["exchange"],
+            raw["direction"],
+            raw["type"],
+        )
+        volume, price, offset = raw["volume"], raw["price"], raw["offset"]
+        gateway_name = raw["gateway_name"]
+        if (
+            not isinstance(symbol, str)
+            or _SYMBOL_RE.fullmatch(symbol) is None
+            or exchange not in _EXCHANGES
+            or direction not in {"LONG", "SHORT"}
+            or order_type != "LIMIT"
+            or isinstance(volume, bool)
+            or not isinstance(volume, int)
+            or not 0 < volume <= max_order_volume
+            or isinstance(price, bool)
+            or not isinstance(price, (int, float))
+            or not math.isfinite(price)
+            or price <= 0
+            or offset not in {"CLOSE", "OPEN"}
+            or not isinstance(gateway_name, str)
+            or _REFERENCE_RE.fullmatch(gateway_name) is None
+        ):
+            raise CommodityExecutionContractError(
+                "target plan order is not a strict SIMNOW limit order"
+            )
+        return cls(
+            symbol,
+            exchange,
+            direction,
+            order_type,
+            volume,
+            float(price),
+            offset,
+            _id(raw["reference"], "target plan reference"),
+            gateway_name,
+        )
 
     def as_dict(self) -> dict[str, Any]:
-        return {"order_ref": self.order_ref, "request": dict(self.request)}
+        return {
+            "symbol": self.symbol,
+            "exchange": self.exchange,
+            "direction": self.direction,
+            "type": self.type,
+            "volume": self.volume,
+            "price": self.price,
+            "offset": self.offset,
+            "reference": self.reference,
+            "gateway_name": self.gateway_name,
+        }
 
 
 _RECEIPT_FIELDS = frozenset(
@@ -248,6 +321,10 @@ _PLAN_FIELDS = frozenset(
         "scope",
         "expires_at",
         "orders",
+        "phase",
+        "expected_before_position_hash",
+        "expected_after_position_hash",
+        "order_set_sha256",
         "production_allowed",
         "live_trading_authorized",
         "countable_forward",
@@ -263,7 +340,7 @@ class TargetPlan:
     orders: tuple[TargetPlanOrder, ...]
 
     @classmethod
-    def from_mapping(cls, value: Any) -> TargetPlan:
+    def from_mapping(cls, value: Any, *, max_order_volume: int = 1) -> TargetPlan:
         raw = _detached_mapping(value, "target plan")
         if set(raw) != _PLAN_FIELDS:
             raise CommodityExecutionContractError("target plan fields are not exact")
@@ -289,6 +366,9 @@ class TargetPlan:
             "authority_artifact_sha256",
             "custody_receipt_sha256",
             "keyring_raw_sha256",
+            "expected_before_position_hash",
+            "expected_after_position_hash",
+            "order_set_sha256",
         ):
             _sha(raw[field], f"target plan {field}")
         if raw["environment"] != "SIMNOW":
@@ -317,11 +397,24 @@ class TargetPlan:
             raise CommodityExecutionContractError(
                 "target plan orders must be a non-empty array"
             )
-        orders = tuple(TargetPlanOrder.from_mapping(item) for item in orders_raw)
-        if len({item.order_ref for item in orders}) != len(orders):
+        orders = tuple(
+            TargetPlanOrder.from_mapping(item, max_order_volume=max_order_volume)
+            for item in orders_raw
+        )
+        if len({item.reference for item in orders}) != len(orders):
             raise CommodityExecutionContractError(
                 "target plan order references must be unique"
             )
+        if raw["phase"] not in {"CLOSE", "OPEN"} or any(
+            order.offset != raw["phase"] for order in orders
+        ):
+            raise CommodityExecutionContractError(
+                "target plan orders must be one phase"
+            )
+        if raw["order_set_sha256"] != sha256_json(
+            [order.as_dict() for order in orders]
+        ):
+            raise CommodityExecutionContractError("target plan order set hash mismatch")
         canonical = {key: raw[key] for key in raw if key != "plan_hash"}
         if sha256_json(canonical) != raw["plan_hash"]:
             raise CommodityExecutionContractError("target plan hash mismatch")
@@ -341,7 +434,7 @@ class TargetPlan:
     def order(self, order_ref: str) -> TargetPlanOrder:
         wanted = _id(order_ref, "order_ref")
         for item in self.orders:
-            if item.order_ref == wanted:
+            if item.reference == wanted:
                 return item
         raise CommodityExecutionContractError("target plan order_ref is not present")
 
@@ -360,6 +453,7 @@ def build_target_plan(**fields: Any) -> dict[str, Any]:
         "countable_forward",
     ):
         raw.setdefault(flag, False)
+    raw.setdefault("order_set_sha256", sha256_json(raw.get("orders", [])))
     raw.pop("plan_hash", None)
     raw["plan_hash"] = sha256_json(raw)
     return TargetPlan.from_mapping(raw).as_dict()

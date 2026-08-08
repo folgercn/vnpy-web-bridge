@@ -263,6 +263,26 @@ class ExecutionOrchestrator:
     status_projection = status
     get_status = status
 
+    def fail_closed_halt(self, reason: str) -> dict[str, Any]:
+        """Public internal safety brake used when a plan runner cannot continue."""
+
+        if not isinstance(reason, str) or not reason or len(reason) > 500:
+            raise MutationRejected("fail-closed halt reason is invalid")
+
+        def writer(state: dict[str, Any]) -> None:
+            state["lifecycle"] = "HALTED_RECONCILE_REQUIRED"
+            state["reconciliation"]["state"] = "REQUIRED"
+            state["audit"].append(
+                {
+                    "kind": "fail_closed_halt",
+                    "reason": reason,
+                    "observed_at": format_utc(utc_now()),
+                }
+            )
+
+        self.repository.mutate(writer)
+        return self.status()
+
     def _projection(
         self, state: Mapping[str, Any], observed_at: datetime
     ) -> dict[str, Any]:

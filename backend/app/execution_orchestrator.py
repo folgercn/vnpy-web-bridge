@@ -9,8 +9,9 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
+from urllib.request import HTTPRedirectHandler, build_opener
 from urllib.request import Request as UrlRequest
-from urllib.request import urlopen
 
 from .execution import (
     CommandEnvelope,
@@ -143,12 +144,23 @@ class _HttpCustodyReadClient(CustodyReadClient):
     """
 
     def __init__(self, *, base_url: str, secret: str) -> None:
-        if not base_url.startswith(("http://", "https://")) or not secret:
+        parsed = urlsplit(base_url)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+            or parsed.path not in {"", "/"}
+            or not secret
+        ):
             raise GatewayConfigurationError(
                 "final custody read configuration is invalid"
             )
         self.base_url = base_url.rstrip("/")
         self.secret = secret
+        self._opener = build_opener(_NoRedirect())
 
     def _request(
         self, path: str, *, missing_is_none: bool = False
@@ -162,7 +174,7 @@ class _HttpCustodyReadClient(CustodyReadClient):
             method="GET",
         )
         try:
-            with urlopen(request, timeout=3.0) as response:  # nosec B310: URL is trusted runtime config
+            with self._opener.open(request, timeout=3.0) as response:
                 if response.status != 200:
                     raise GatewayUnavailable("custody read returned non-200 status")
                 raw = response.read(1024 * 1024 + 1)
@@ -198,6 +210,11 @@ class _HttpCustodyReadClient(CustodyReadClient):
         self._request("/health/live")
 
 
+class _NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, *_: Any, **__: Any) -> None:
+        return None
+
+
 def build_execution_service() -> ExecutionOrchestrator | FinalExecutionRuntime:
     """Build raw Execution normally, or a fail-closed final SIMNOW runtime."""
 
@@ -226,6 +243,12 @@ def build_execution_service() -> ExecutionOrchestrator | FinalExecutionRuntime:
         raise GatewayConfigurationError(
             "EXECUTION_ALLOWED_SCOPE_JSON must be an object"
         )
+    try:
+        max_order_volume = int(os.getenv("EXECUTION_SIMNOW_MAX_ORDER_VOLUME", "1"))
+    except ValueError as exc:
+        raise GatewayConfigurationError(
+            "EXECUTION_SIMNOW_MAX_ORDER_VOLUME must be an integer"
+        ) from exc
     return FinalExecutionRuntime(
         core,
         plans=DurableTargetPlanRepository(Path(root)),
@@ -233,6 +256,7 @@ def build_execution_service() -> ExecutionOrchestrator | FinalExecutionRuntime:
         allowed_scope=allowed_scope,
         allow_simnow_execution=os.getenv("EXECUTION_ALLOW_SIMNOW_EXECUTION", "").lower()
         in {"1", "true", "yes"},
+        max_order_volume=max_order_volume,
     )
 
 
