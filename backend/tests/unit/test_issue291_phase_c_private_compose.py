@@ -11,3 +11,9 @@ def test_phase_c_offline_e2e_compose_is_private_and_has_no_fake_runtime_switch()
     assert "PHASE_C_OFFLINE_FAKE_ADAPTER_ENABLED" not in client
     assert "publish-install" in (root / "backend/app/phase_c/custody_service.py").read_text()
     assert "deployments/phase-c/Containerfile" not in compose
+    custody_image = (root / "deployments/phase-b/Containerfile.artifact-custody").read_text()
+    control_image = (root / "deployments/phase-a/Containerfile.control-api").read_text()
+    execution_image = (root / "deployments/phase-a/Containerfile.execution-orchestrator").read_text()
+    assert "/var/lib/phase-c-custody" in custody_image and "chown 65532:65532" in custody_image
+    assert "/var/lib/vnpy-control" in control_image and "chown -R 65532:65532" in control_image
+    assert "/var/lib/vnpy-execution" in execution_image and "chown -R 65532:65532" in execution_image
