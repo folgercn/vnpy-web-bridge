@@ -26,6 +26,7 @@ from shared.commodity_execution.v1 import (
     sha256_json,
     utc_now,
 )
+from shared.trust_contracts.v1 import canonical_json_line, sha256_bytes
 
 from .errors import AuthorityRejected, MutationRejected, PlanRejected
 from .models import CommandEnvelope, LeaderToken, validate_identifier
@@ -42,6 +43,18 @@ class TargetPlanRepository(Protocol):
     def find_authority(
         self, artifact_id: str, artifact_sha256: str
     ) -> TargetPlan | None: ...
+
+    def probe(self) -> None: ...
+
+
+class CustodyReadClient(Protocol):
+    """Read-only custody protocol; it has no publish, sign, or revoke method."""
+
+    def receipt(self, receipt_id: str) -> Mapping[str, Any] | None: ...
+
+    def artifact(self, artifact_id: str) -> Mapping[str, Any] | None: ...
+
+    def probe(self) -> None: ...
 
 
 class InMemoryTargetPlanRepository:
@@ -69,11 +82,16 @@ class InMemoryTargetPlanRepository:
         validate_identifier(artifact_id, "artifact_id")
         for plan in tuple(self._plans.values()):
             if (
-                plan.raw["artifact_id"] == artifact_id
-                and plan.raw["artifact_sha256"] == artifact_sha256
+                plan.raw["authority_artifact_id"] == artifact_id
+                and plan.raw["authority_artifact_sha256"] == artifact_sha256
             ):
                 return plan
         return None
+
+    def probe(self) -> None:
+        with self._lock:
+            for plan in self._plans.values():
+                TargetPlan.from_mapping(plan.as_dict())
 
 
 class DurableTargetPlanRepository:
@@ -187,10 +205,32 @@ class DurableTargetPlanRepository:
         for path in sorted(self.root.glob("*.json")):
             plan = self._read(path)
             if plan is not None and (
-                plan.raw["artifact_id"] == artifact_id
-                and plan.raw["artifact_sha256"] == artifact_sha256
+                plan.raw["authority_artifact_id"] == artifact_id
+                and plan.raw["authority_artifact_sha256"] == artifact_sha256
             ):
                 return plan
+        return None
+
+    def probe(self) -> None:
+        with self._locked():
+            for path in self.root.glob("*.json"):
+                if self._read(path) is None:
+                    raise PlanRejected("durable target plan disappeared during probe")
+
+
+class _CallableCustodyClient:
+    """Compatibility seam for offline tests; it cannot supply an artifact."""
+
+    def __init__(self, receipt: Callable[[str], Mapping[str, Any] | None]) -> None:
+        self._receipt = receipt
+
+    def receipt(self, receipt_id: str) -> Mapping[str, Any] | None:
+        return self._receipt(receipt_id)
+
+    def artifact(self, artifact_id: str) -> Mapping[str, Any] | None:
+        return None
+
+    def probe(self) -> None:
         return None
 
 
@@ -207,7 +247,8 @@ class FinalExecutionRuntime:
         orchestrator: ExecutionOrchestrator,
         *,
         plans: TargetPlanRepository,
-        custody_receipt: Callable[[str], Mapping[str, Any] | None],
+        custody: CustodyReadClient | None = None,
+        custody_receipt: Callable[[str], Mapping[str, Any] | None] | None = None,
         allowed_scope: Mapping[str, Any] | None = None,
         allow_simnow_execution: bool = False,
     ) -> None:
@@ -215,13 +256,21 @@ class FinalExecutionRuntime:
             raise ValueError("final execution runtime requires SIMNOW environment")
         self.orchestrator = orchestrator
         self.plans = plans
-        self.custody_receipt = custody_receipt
+        if custody is not None and custody_receipt is not None:
+            raise ValueError(
+                "provide either custody client or custody_receipt callback"
+            )
+        if custody is None:
+            if custody_receipt is None:
+                raise ValueError("final execution runtime requires a custody reader")
+            custody = _CallableCustodyClient(custody_receipt)
+        self.custody = custody
         self.allowed_scope = dict(allowed_scope) if allowed_scope is not None else None
         self.allow_simnow_execution = bool(allow_simnow_execution)
 
     def _receipt_for(self, plan: TargetPlan) -> VerifiedCustodyReceipt:
         try:
-            raw = self.custody_receipt(str(plan.raw["custody_receipt_id"]))
+            raw = self.custody.receipt(str(plan.raw["custody_receipt_id"]))
         except Exception as exc:  # custody response is unknown, never assume success
             raise AuthorityRejected(
                 "custody receipt lookup outcome is unknown"
@@ -236,8 +285,6 @@ class FinalExecutionRuntime:
             ) from exc
         expected = {
             "receipt_id": plan.raw["custody_receipt_id"],
-            "artifact_id": plan.raw["artifact_id"],
-            "artifact_sha256": plan.raw["artifact_sha256"],
             "signer_key_id": plan.raw["signer_key_id"],
             "signer_key_version": plan.raw["signer_key_version"],
             "keyring_raw_sha256": plan.raw["keyring_raw_sha256"],
@@ -254,6 +301,78 @@ class FinalExecutionRuntime:
                 "custody receipt does not match immutable target plan"
             )
         return receipt
+
+    def _preview_from_custody(
+        self, receipt_id: str
+    ) -> tuple[TargetPlan, VerifiedCustodyReceipt]:
+        """Fetch, cross-check and install a plan before a SIMNOW preview exists.
+
+        The Control command supplies only a receipt id.  Order requests never
+        traverse Control: they are read from the exact custody artifact here.
+        """
+
+        try:
+            raw_receipt = self.custody.receipt(receipt_id)
+        except Exception as exc:
+            raise AuthorityRejected(
+                "custody receipt lookup outcome is unknown"
+            ) from exc
+        if raw_receipt is None:
+            raise AuthorityRejected("custody receipt is unavailable")
+        try:
+            receipt = VerifiedCustodyReceipt.from_mapping(raw_receipt)
+        except CommodityExecutionContractError as exc:
+            raise AuthorityRejected(
+                "custody receipt is not strict verified evidence"
+            ) from exc
+        if receipt.raw["artifact_type"] != "simnow-target-plan":
+            raise PlanRejected("SIMNOW preview receipt does not identify a target plan")
+        try:
+            response = self.custody.artifact(receipt.artifact_id)
+        except Exception as exc:
+            raise AuthorityRejected(
+                "custody artifact lookup outcome is unknown"
+            ) from exc
+        if response is None:
+            raise AuthorityRejected("custody target plan artifact is unavailable")
+        if not isinstance(response, Mapping) or set(response) != {
+            "artifact_id",
+            "artifact_raw_sha256",
+            "artifact",
+        }:
+            raise PlanRejected("custody target plan artifact response is not exact")
+        artifact = response["artifact"]
+        if not isinstance(artifact, Mapping):
+            raise PlanRejected("custody target plan artifact is not an object")
+        try:
+            artifact_hash = sha256_bytes(canonical_json_line(dict(artifact)))
+            payload = artifact.get("payload")
+            plan = TargetPlan.from_mapping(payload)
+        except CommodityExecutionContractError as exc:
+            raise PlanRejected("custody target plan artifact is invalid") from exc
+        if (
+            response["artifact_id"] != receipt.artifact_id
+            or response["artifact_raw_sha256"] != artifact_hash
+            or receipt.artifact_sha256 != artifact_hash
+        ):
+            raise PlanRejected("custody target plan artifact/receipt binding mismatch")
+        self._plan_from_value(plan)
+        self.plans.put(plan)
+        return plan, receipt
+
+    def preview_from_custody(self, receipt_id: str) -> TargetPlan:
+        """Public internal helper retained for runners/tests; installs no authority."""
+
+        return self._preview_from_custody(receipt_id)[0]
+
+    def readiness(self) -> None:
+        """Required-mode readiness proves local state and custody are readable."""
+
+        self.plans.probe()
+        try:
+            self.custody.probe()
+        except Exception as exc:
+            raise AuthorityRejected("custody read-only readiness failed") from exc
 
     def _plan(self, plan_id: str, *, plan_hash: str | None = None) -> TargetPlan:
         plan = self.plans.get(plan_id)
@@ -296,6 +415,16 @@ class FinalExecutionRuntime:
             if isinstance(command, CommandEnvelope)
             else CommandEnvelope.from_mapping(command)
         )
+        if (
+            envelope.command == "preview"
+            and envelope.payload["mode"] == "simnow_preview"
+        ):
+            plan, receipt = self._preview_from_custody(envelope.payload["receipt_id"])
+            if (
+                envelope.payload["plan_hash"] != plan.plan_hash
+                or envelope.payload["artifact_hash"] != receipt.artifact_sha256
+            ):
+                raise PlanRejected("SIMNOW preview plan/artifact hash mismatch")
         if envelope.command == "enable":
             plan = self.plans.find_authority(
                 envelope.payload["authority_artifact_id"],
@@ -307,8 +436,20 @@ class FinalExecutionRuntime:
             if envelope.payload["expires_at"] != plan.raw["expires_at"]:
                 raise AuthorityRejected("enable authority expiry is not receipt-bound")
         elif envelope.command == "start":
+            if not self.allow_simnow_execution:
+                raise AuthorityRejected("SIMNOW execution is locally disabled")
             self._plan(
                 envelope.payload["plan_id"], plan_hash=envelope.payload["plan_hash"]
+            )
+            if (
+                envelope.expected.leader_epoch is None
+                or envelope.expected.fencing_token is None
+            ):
+                raise MutationRejected("SIMNOW start requires an explicit leader fence")
+            self.orchestrator.fencer.admission(
+                leader_epoch=envelope.expected.leader_epoch,
+                fencing_token=envelope.expected.fencing_token,
+                token=self.orchestrator.fencer.token,
             )
         return self.orchestrator.process_command(envelope)
 
@@ -420,6 +561,7 @@ class FinalExecutionRuntime:
 
 
 __all__ = [
+    "CustodyReadClient",
     "DurableTargetPlanRepository",
     "FinalExecutionRuntime",
     "InMemoryTargetPlanRepository",

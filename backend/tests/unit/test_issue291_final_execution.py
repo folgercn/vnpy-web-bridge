@@ -22,6 +22,7 @@ from shared.commodity_execution import (
     VerifiedCustodyReceipt,
     build_target_plan,
 )
+from shared.trust_contracts.v1 import canonical_json_line, sha256_bytes
 
 SCOPE = "account:simnow-final"
 ARTIFACT_HASH = "a" * 64
@@ -62,8 +63,8 @@ def plan(source: dict | None = None) -> dict:
         plan_id="plan-final-0001",
         account_scope=SCOPE,
         environment="SIMNOW",
-        artifact_id=source["artifact_id"],
-        artifact_sha256=source["artifact_sha256"],
+        authority_artifact_id=source["artifact_id"],
+        authority_artifact_sha256=source["artifact_sha256"],
         custody_receipt_id=source["receipt_id"],
         custody_receipt_sha256=verified.receipt_sha256,
         signer_key_id=source["signer_key_id"],
@@ -143,13 +144,14 @@ def reconcile_enable_start(service, core, repo, target: dict):
             "enable-final-000001",
             repo.state_version,
             {
-                "authority_artifact_id": target["artifact_id"],
-                "authority_hash": target["artifact_sha256"],
+                "authority_artifact_id": target["authority_artifact_id"],
+                "authority_hash": target["authority_artifact_sha256"],
                 "expires_at": target["expires_at"],
                 "reason": "verified custody authority",
             },
         )
     )
+    token = core.acquire_leader("leader-final-0001")
     response = service.process_command(
         command(
             "start",
@@ -160,9 +162,11 @@ def reconcile_enable_start(service, core, repo, target: dict):
                 "plan_hash": target["plan_hash"],
                 "reason": "start verified SIMNOW plan",
             },
+            fence={"leader_epoch": token.epoch, "fencing_token": token.fencing_token},
         )
     )
     assert response.result["accepted"] is True
+    return token
 
 
 @pytest.mark.parametrize(
@@ -204,8 +208,9 @@ def test_target_plan_hash_and_order_refs_are_immutable() -> None:
 
 
 def test_start_requires_installed_receipt_bound_plan() -> None:
-    service, _core, repo, gateway, _ = runtime()
+    service, core, repo, gateway, _ = runtime(execute=True)
     target = plan()
+    token = core.acquire_leader("leader-final-0001")
     with pytest.raises(PlanRejected):
         service.process_command(
             command(
@@ -216,6 +221,10 @@ def test_start_requires_installed_receipt_bound_plan() -> None:
                     "plan_id": target["plan_id"],
                     "plan_hash": target["plan_hash"],
                     "reason": "must be installed first",
+                },
+                fence={
+                    "leader_epoch": token.epoch,
+                    "fencing_token": token.fencing_token,
                 },
             )
         )
@@ -252,11 +261,101 @@ def test_exact_scope_and_expiry_are_revalidated_after_plan_hash_verification() -
 def test_internal_order_uses_core_fence_and_local_gate() -> None:
     service, core, repo, gateway, _ = runtime(execute=False)
     target = plan()
-    reconcile_enable_start(service, core, repo, target)
+    service.install_target_plan(target)
+    service.process_command(
+        command(
+            "reconcile",
+            "reconcile-final-0001",
+            repo.state_version,
+            {
+                "reconciliation_run_id": "run-final-0001",
+                "snapshot_id": "snapshot-default",
+                "reason": "fresh SIMNOW facts",
+            },
+        )
+    )
     token = core.acquire_leader("leader-final-0001")
     with pytest.raises(AuthorityRejected, match="locally disabled"):
-        service.send_plan_order(target["plan_id"], "order-ref-0001", token=token)
+        service.process_command(
+            command(
+                "start",
+                "start-final-000001",
+                repo.state_version,
+                {
+                    "plan_id": target["plan_id"],
+                    "plan_hash": target["plan_hash"],
+                    "reason": "must stay disabled",
+                },
+                fence={
+                    "leader_epoch": token.epoch,
+                    "fencing_token": token.fencing_token,
+                },
+            )
+        )
     assert gateway.send_calls == []
+
+
+def test_simnow_preview_fetches_receipt_then_exact_custody_artifact() -> None:
+    authority = receipt()
+    target = plan(authority)
+    artifact = {"payload": target}
+    artifact_hash = sha256_bytes(canonical_json_line(artifact))
+    plan_receipt = receipt() | {
+        "receipt_id": "custody-plan-000001",
+        "artifact_id": "artifact-plan-000001",
+        "artifact_type": "simnow-target-plan",
+        "schema_ref": "web-bridge-simnow-target-plan-v1",
+        "artifact_sha256": artifact_hash,
+    }
+
+    class Custody:
+        def receipt(self, receipt_id: str):
+            return {
+                plan_receipt["receipt_id"]: plan_receipt,
+                authority["receipt_id"]: authority,
+            }.get(receipt_id)
+
+        def artifact(self, artifact_id: str):
+            if artifact_id != plan_receipt["artifact_id"]:
+                return None
+            return {
+                "artifact_id": artifact_id,
+                "artifact_raw_sha256": artifact_hash,
+                "artifact": artifact,
+            }
+
+        def probe(self):
+            return None
+
+    repo = InMemoryExecutionRepository(scope=SCOPE)
+    core = ExecutionOrchestrator(
+        repo,
+        InMemoryGateway(account_scope=SCOPE, environment="SIMNOW"),
+        scope=SCOPE,
+        environment="SIMNOW",
+        test_mode=True,
+    )
+    service = FinalExecutionRuntime(
+        core,
+        plans=InMemoryTargetPlanRepository(),
+        custody=Custody(),
+        allowed_scope=authority["scope"],
+    )
+    result = service.process_command(
+        command(
+            "preview",
+            "preview-final-0001",
+            repo.state_version,
+            {
+                "plan_hash": target["plan_hash"],
+                "artifact_hash": artifact_hash,
+                "mode": "simnow_preview",
+                "receipt_id": plan_receipt["receipt_id"],
+            },
+        )
+    )
+    assert result.result["accepted"] is True
+    assert service.plans.get(target["plan_id"]).plan_hash == target["plan_hash"]
 
 
 def test_partial_unknown_same_intent_cancel_fence_and_restart_reconcile(
@@ -264,8 +363,7 @@ def test_partial_unknown_same_intent_cancel_fence_and_restart_reconcile(
 ) -> None:
     service, core, repo, gateway, _ = runtime(execute=True)
     target = plan()
-    reconcile_enable_start(service, core, repo, target)
-    token = core.acquire_leader("leader-final-0001")
+    token = reconcile_enable_start(service, core, repo, target)
     gateway.fail_send = TimeoutError("network partition")
     with pytest.raises(GatewayTimeout):
         service.send_plan_order(target["plan_id"], "order-ref-0001", token=token)

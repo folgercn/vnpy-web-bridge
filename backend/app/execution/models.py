@@ -232,7 +232,7 @@ def _payload(command: str, value: Any) -> dict[str, Any]:
         "status": (set(), ()),
         "overview": (set(), ()),
         "preview": (
-            {"plan_hash", "artifact_hash", "mode"},
+            {"plan_hash", "artifact_hash", "mode", "receipt_id"},
             ("plan_hash", "artifact_hash", "mode"),
         ),
         "enable": (
@@ -264,6 +264,16 @@ def _payload(command: str, value: Any) -> dict[str, Any]:
         validate_sha256(raw["artifact_hash"], "payload.artifact_hash")
         if not isinstance(raw["mode"], str) or raw["mode"] not in MODES:
             raise CommandValidationError("payload.mode is not supported")
+        if raw["mode"] == "simnow_preview":
+            if "receipt_id" not in raw:
+                raise CommandValidationError(
+                    "simnow_preview requires payload.receipt_id"
+                )
+            validate_identifier(raw["receipt_id"], "payload.receipt_id")
+        elif "receipt_id" in raw:
+            raise CommandValidationError(
+                "offline_preview does not accept payload.receipt_id"
+            )
     elif command == "enable":
         validate_identifier(
             raw["authority_artifact_id"], "payload.authority_artifact_id"

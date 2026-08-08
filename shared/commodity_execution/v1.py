@@ -176,11 +176,18 @@ class VerifiedCustodyReceipt:
         ):
             _sha(raw[field], f"custody receipt {field}")
         _utc(raw["expires_at"], "custody receipt expires_at")
+        accepted_artifact_contracts = {
+            (
+                "runtime-authorization",
+                "runtime_authorization",
+                "phase-c-runtime-authorization-v1",
+            ),
+            ("simnow-target-plan", "runtime_authorization", TARGET_PLAN_SCHEMA_VERSION),
+        }
         if (
             raw["receipt_type"] != "install"
-            or raw["artifact_type"] != "runtime-authorization"
-            or raw["trust_domain"] != "runtime_authorization"
-            or raw["schema_ref"] != "phase-c-runtime-authorization-v1"
+            or (raw["artifact_type"], raw["trust_domain"], raw["schema_ref"])
+            not in accepted_artifact_contracts
             or raw["verified"] is not True
             or raw["installed"] is not True
             or any(
@@ -231,8 +238,8 @@ _PLAN_FIELDS = frozenset(
         "plan_hash",
         "account_scope",
         "environment",
-        "artifact_id",
-        "artifact_sha256",
+        "authority_artifact_id",
+        "authority_artifact_sha256",
         "custody_receipt_id",
         "custody_receipt_sha256",
         "signer_key_id",
@@ -267,7 +274,7 @@ class TargetPlan:
         for field in (
             "plan_id",
             "account_scope",
-            "artifact_id",
+            "authority_artifact_id",
             "custody_receipt_id",
         ):
             _id(raw[field], f"target plan {field}")
@@ -279,7 +286,7 @@ class TargetPlan:
         )
         for field in (
             "plan_hash",
-            "artifact_sha256",
+            "authority_artifact_sha256",
             "custody_receipt_sha256",
             "keyring_raw_sha256",
         ):
