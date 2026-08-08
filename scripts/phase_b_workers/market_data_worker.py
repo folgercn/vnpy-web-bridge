@@ -47,6 +47,7 @@ try:
         DurableStateError,
         DurableVerifiedTickStream,
         GenerationMismatch,
+        _open_parent,
     )
     from .projections import build_projection, publish_projection
 except ImportError:  # pragma: no cover
@@ -72,6 +73,7 @@ except ImportError:  # pragma: no cover
         DurableStateError,
         DurableVerifiedTickStream,
         GenerationMismatch,
+        _open_parent,
     )
     from phase_b_workers.projections import build_projection, publish_projection
 
@@ -135,6 +137,87 @@ _MARKET_TICK_INSERT = (
     f"INSERT INTO market_ticks ({', '.join(MARKET_TICK_COLUMNS)}) "
     f"VALUES ({', '.join(['%s'] * len(MARKET_TICK_COLUMNS))})"
 )
+MARKET_TICK_SCHEMA_TYPES = {
+    "ts": "TIMESTAMP",
+    "received_at": "TIMESTAMP",
+    "ingest_id": "STRING",
+    "ingest_seq": "LONG",
+    "schema_version": "INT",
+    "vt_symbol": "SYMBOL",
+    "symbol": "SYMBOL",
+    "exchange": "SYMBOL",
+    "gateway_name": "SYMBOL",
+    "name": "STRING",
+    "trading_day": "STRING",
+    "action_day": "STRING",
+    **{
+        column: "DOUBLE"
+        for column in MARKET_TICK_COLUMNS
+        if column
+        not in {
+            "ts",
+            "received_at",
+            "ingest_id",
+            "ingest_seq",
+            "schema_version",
+            "vt_symbol",
+            "symbol",
+            "exchange",
+            "gateway_name",
+            "name",
+            "trading_day",
+            "action_day",
+        }
+    },
+}
+_MARKET_TICKS_TABLE_SCHEMA_SQL = (
+    "SELECT designatedTimestamp, dedup, dedupKeyColumns "
+    "FROM tables() WHERE tableName = 'market_ticks'"
+)
+_MARKET_TICKS_COLUMN_SCHEMA_SQL = (
+    "SELECT column, type FROM table_columns('market_ticks')"
+)
+
+
+def _dedup_key_columns(value: object) -> tuple[str, ...]:
+    return tuple(
+        part.strip().strip("\"'")
+        for part in str(value or "").strip("[]() ").split(",")
+        if part.strip()
+    )
+
+
+def verify_market_ticks_schema(connection: Any) -> None:
+    """Fail closed unless the externally bootstrapped v3 table is exact enough.
+
+    These are fixed metadata SELECTs.  The worker intentionally never creates,
+    alters, or repairs the table.
+    """
+
+    with connection.cursor() as cursor:
+        cursor.execute(_MARKET_TICKS_TABLE_SCHEMA_SQL)
+        table = cursor.fetchone()
+        if not isinstance(table, tuple) or len(table) != 3:
+            raise DurableStateError("market_ticks table metadata is unavailable")
+        timestamp, dedup, keys = table
+        cursor.execute(_MARKET_TICKS_COLUMN_SCHEMA_SQL)
+        columns = cursor.fetchall()
+    normalized = {
+        str(name): str(data_type).upper().split("(", 1)[0].strip()
+        for name, data_type in columns
+    }
+    missing = {
+        name: expected
+        for name, expected in MARKET_TICK_SCHEMA_TYPES.items()
+        if normalized.get(name) != expected
+    }
+    if (
+        str(timestamp) != "ts"
+        or str(dedup).lower() not in {"true", "1"}
+        or _dedup_key_columns(keys) != ("ts", "ingest_id")
+        or missing
+    ):
+        raise DurableStateError("market_ticks prebuilt schema contract is invalid")
 
 
 class _SafeTickData:
@@ -187,23 +270,66 @@ class _SingleProcessFileLock:
     """Non-blocking process lease for one publish cursor/state directory."""
 
     def __init__(self, path: Path) -> None:
-        self.path = path
+        self.path = Path(os.path.abspath(path))
+        self._name = self.path.name
         self._fd: int | None = None
+
+    @staticmethod
+    def _same_inode(first: os.stat_result, second: os.stat_result) -> bool:
+        return (first.st_dev, first.st_ino) == (second.st_dev, second.st_ino)
+
+    def _validate(
+        self, descriptor: int, parent_fd: int, expected_parent: os.stat_result
+    ) -> None:
+        info = os.fstat(descriptor)
+        named = os.stat(self._name, dir_fd=parent_fd, follow_symlinks=False)
+        current_parent = os.fstat(parent_fd)
+        if (
+            not self._same_inode(current_parent, expected_parent)
+            or stat.S_ISLNK(named.st_mode)
+            or not stat.S_ISREG(named.st_mode)
+            or named.st_uid != os.geteuid()
+            or named.st_mode & 0o077
+            or named.st_nlink != 1
+            or not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.geteuid()
+            or info.st_mode & 0o077
+            or info.st_nlink != 1
+            or not self._same_inode(named, info)
+        ):
+            raise DurableStateError("market-data publish source lock is unsafe")
 
     def acquire(self) -> None:
         if self._fd is not None:
             return
-        flags = os.O_CREAT | os.O_RDWR
-        flags |= getattr(os, "O_CLOEXEC", 0)
-        fd = os.open(self.path, flags, 0o600)
+        parent_fd, parent_info = _open_parent(self.path)
+        flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0)
+        if not getattr(os, "O_NOFOLLOW", 0):
+            os.close(parent_fd)
+            raise DurableStateError(
+                "market-data publish source lock requires O_NOFOLLOW"
+            )
+        flags |= os.O_NOFOLLOW
+        fd = -1
         try:
+            fd = os.open(self._name, flags, 0o600, dir_fd=parent_fd)
+            self._validate(fd, parent_fd, parent_info)
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self._validate(fd, parent_fd, parent_info)
+            self._fd = fd
+            fd = -1
         except BlockingIOError as exc:
-            os.close(fd)
             raise DurableStateError(
                 "market-data publish source is already owned"
             ) from exc
-        self._fd = fd
+        except OSError as exc:
+            raise DurableStateError(
+                "market-data publish source lock is unavailable"
+            ) from exc
+        finally:
+            if fd >= 0:
+                os.close(fd)
+            os.close(parent_fd)
 
     def release(self) -> None:
         fd, self._fd = self._fd, None
@@ -375,6 +501,14 @@ class ZmqPublishTickSource:
         if topic_text != "eTick" and not topic_text.startswith("eTick."):
             raise TypeError("market-data publish topic is not a tick topic")
         payload = self._tick_payload(data)
+        if topic_text.startswith("eTick."):
+            suffix = topic_text.removeprefix("eTick.")
+            allowed_topics = {
+                str(payload["vt_symbol"]),
+                str(payload.get("symbol") or ""),
+            }
+            if suffix not in allowed_topics:
+                raise TypeError("market-data publish topic does not match tick symbol")
         source_seq = self._next_source_seq()
         event_id = sha256_hex(
             {
@@ -431,6 +565,7 @@ class QuestDbTickWriter:
             raise ValueError("QuestDB PGWire DSN is required")
         self._connect = connect or self._default_connect
         self._connection: Any | None = None
+        self._schema_verified = False
         self._lock = threading.RLock()
 
     @staticmethod
@@ -442,10 +577,17 @@ class QuestDbTickWriter:
     def _open(self) -> Any:
         if self._connection is None or bool(getattr(self._connection, "closed", False)):
             self._connection = self._connect(self._dsn)
+            self._schema_verified = False
         return self._connection
+
+    def _ensure_schema(self, connection: Any) -> None:
+        if not self._schema_verified:
+            verify_market_ticks_schema(connection)
+            self._schema_verified = True
 
     def _drop_connection(self) -> None:
         connection, self._connection = self._connection, None
+        self._schema_verified = False
         if connection is not None:
             try:
                 connection.close()
@@ -459,6 +601,7 @@ class QuestDbTickWriter:
         try:
             with self._lock:
                 connection = self._open()
+                self._ensure_schema(connection)
                 with connection.cursor() as cursor:
                     cursor.execute(
                         _MARKET_TICK_INSERT,
@@ -483,6 +626,7 @@ class QuestDbTickWriter:
 
         with self._lock:
             connection = self._open()
+            self._ensure_schema(connection)
             with connection.cursor() as cursor:
                 cursor.execute(
                     "SELECT ingest_id, ingest_seq, vt_symbol, ts, received_at "
@@ -499,6 +643,7 @@ class QuestDbTickWriter:
         try:
             with self._lock:
                 connection = self._open()
+                self._ensure_schema(connection)
                 with connection.cursor() as cursor:
                     cursor.execute("SELECT 1")
                     cursor.fetchone()
@@ -776,6 +921,19 @@ class MarketDataWorker:
 
     def _write(self, tick: VerifiedTick) -> None:
         if self.stream.is_acknowledged(tick):
+            return
+        readback = getattr(self.writer, "readback", None)
+        persisted = readback(tick.ingest_id) if callable(readback) else None
+        if persisted is not None:
+            if (
+                str(persisted.get("ingest_id") or "") != tick.ingest_id
+                or int(persisted.get("ingest_seq") or 0) != tick.ingest_seq
+                or str(persisted.get("vt_symbol") or "") != tick.vt_symbol
+            ):
+                raise DurableStateError("QuestDB readback does not match verified tick")
+            self.stream.acknowledge_tick_write(tick)
+            self.metrics.increment("ticks_persisted")
+            self.metrics.last_success_at_utc = isoformat()
             return
         fn = getattr(self.writer, "write_verified_tick", None)
         if callable(fn):

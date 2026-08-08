@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1].parent))
 
 from phase_b_artifact_custody import _publish_projection as publish_custody_projection
 
+import phase_b_workers.market_data_worker as market_data_module
 from phase_b_workers.contracts import GatewayTickEnvelope, VerifiedTick
 from phase_b_workers.durable import (
     AppendOnlyJsonl,
@@ -35,6 +36,7 @@ from phase_b_workers.execution_quality_worker import (
 )
 from phase_b_workers.market_data_worker import (
     MARKET_TICK_COLUMNS,
+    MARKET_TICK_SCHEMA_TYPES,
     MarketDataConfig,
     MarketDataWorker,
     QuestDbTickWriter,
@@ -77,11 +79,29 @@ class UnhealthyWriter(Writer):
         return {"status": "degraded", "configured": True}
 
 
+class CommitThenAckWriter(Writer):
+    def __init__(self):
+        super().__init__()
+        self.persisted = {}
+
+    def write_verified_tick(self, tick):
+        self.events.append(tick)
+        self.persisted[tick.ingest_id] = {
+            "ingest_id": tick.ingest_id,
+            "ingest_seq": tick.ingest_seq,
+            "vt_symbol": tick.vt_symbol,
+        }
+
+    def readback(self, ingest_id):
+        return self.persisted.get(ingest_id)
+
+
 class FakeCursor:
     def __init__(self, rows=(), fail_execute=False):
         self.rows = list(rows)
         self.calls = []
         self.fail_execute = fail_execute
+        self.last_sql = ""
 
     def __enter__(self):
         return self
@@ -91,11 +111,19 @@ class FakeCursor:
 
     def execute(self, sql, params=None):
         self.calls.append((sql, params))
+        self.last_sql = sql
         if self.fail_execute:
             raise OSError("poisoned pgwire connection")
 
     def fetchone(self):
+        if "FROM tables()" in self.last_sql:
+            return ("ts", True, "ts,ingest_id")
         return self.rows.pop(0) if self.rows else None
+
+    def fetchall(self):
+        if "FROM table_columns" in self.last_sql:
+            return list(MARKET_TICK_SCHEMA_TYPES.items())
+        return []
 
 
 class FakeConnection:
@@ -247,6 +275,32 @@ def test_market_writer_failure_is_replayed(tmp_path):
     assert not worker.stream.pending_for_tick_writer()
 
 
+def test_commit_before_ack_replays_via_readback_without_second_insert(
+    tmp_path, monkeypatch
+):
+    writer = CommitThenAckWriter()
+    worker = MarketDataWorker(tmp_path / "market", generation="g1", writer=writer)
+    worker.recover()
+    worker.accept(envelope())
+    original_ack = worker.stream.acknowledge_tick_write
+    failed = False
+
+    def fail_after_commit(tick):
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise OSError("acknowledgement crash after committed insert")
+        return original_ack(tick)
+
+    monkeypatch.setattr(worker.stream, "acknowledge_tick_write", fail_after_commit)
+    with pytest.raises(OSError, match="acknowledgement crash"):
+        worker.process_one()
+    assert len(writer.events) == 1 and writer.readback(writer.events[0].ingest_id)
+    assert worker.replay_pending_writes() == 1
+    assert len(writer.events) == 1
+    assert not worker.stream.pending_for_tick_writer()
+
+
 def test_verified_tick_raw_hash_excludes_transport_identity_but_not_content():
     first = VerifiedTick.from_raw(
         {"source_event_id": "one", "vt_symbol": "rb2610.SHFE", "last_price": 1},
@@ -325,7 +379,11 @@ def test_questdb_writer_is_insert_health_readback_only_and_recovers_connection(
     )
     writer.write_verified_tick(tick)
     assert first.commits == 1
-    insert_sql, params = first.cursor_value.calls[0]
+    insert_sql, params = next(
+        call
+        for call in first.cursor_value.calls
+        if call[0].startswith("INSERT INTO market_ticks")
+    )
     assert insert_sql.startswith("INSERT INTO market_ticks")
     assert len(params) == len(MARKET_TICK_COLUMNS)
     assert all(
@@ -343,6 +401,40 @@ def test_questdb_writer_is_insert_health_readback_only_and_recovers_connection(
     assert all(
         "postgresql://not-logged" not in sql for sql, _ in first.cursor_value.calls
     )
+    assert any("FROM tables()" in sql for sql, _ in first.cursor_value.calls)
+    assert any("FROM table_columns" in sql for sql, _ in first.cursor_value.calls)
+    assert all(
+        not any(word in sql.upper() for word in ("CREATE", "ALTER", "DROP"))
+        for sql, _ in first.cursor_value.calls
+    )
+
+
+def test_questdb_writer_rejects_missing_prebuilt_schema_before_ready(tmp_path):
+    bad = FakeConnection()
+    bad.cursor_value.fetchall = lambda: [("ts", "TIMESTAMP")]
+    writer = QuestDbTickWriter("postgresql://not-logged", connect=lambda _dsn: bad)
+    worker = MarketDataWorker(tmp_path / "market", generation="g1", writer=writer)
+    with pytest.raises(OSError, match="writer is unavailable"):
+        worker.recover()
+    assert not worker.readiness().ready
+
+
+def test_questdb_writer_duplicate_insert_requires_verified_dedup_contract(tmp_path):
+    worker = MarketDataWorker(tmp_path / "market", generation="g1", writer=Writer())
+    worker.recover()
+    worker.accept(envelope())
+    tick = worker.process_one()
+    connection = FakeConnection()
+    writer = QuestDbTickWriter(
+        "postgresql://not-logged", connect=lambda _dsn: connection
+    )
+    writer.write_verified_tick(tick)
+    writer.write_verified_tick(tick)
+    inserts = [
+        sql for sql, _ in connection.cursor_value.calls if sql.startswith("INSERT INTO")
+    ]
+    assert len(inserts) == 2
+    assert writer._schema_verified
 
 
 def test_questdb_writer_drops_poisoned_connection_and_reconnects_for_replay(tmp_path):
@@ -448,6 +540,36 @@ def test_zmq_source_rejects_non_tick_topic_even_if_data_has_tick_like_fields(tmp
         source.poll()
 
 
+def test_zmq_source_tick_suffix_must_match_vt_symbol_or_symbol(tmp_path):
+    tick = rpc_tick()
+    source = ZmqPublishTickSource(
+        "tcp://publish-proxy:4102",
+        state_dir=tmp_path,
+        source_generation="gateway-g1",
+        context=FakeContext([FakeSocket([["eTick.rb2610", tick]])]),
+        zmq_module=FakeZmq,
+    )
+    received = []
+    source.subscribe(received.append)
+    assert source.poll() == 1
+    source.close()
+    assert (
+        GatewayTickEnvelope.from_dict(received[0]).payload["vt_symbol"] == "rb2610.SHFE"
+    )
+
+    mismatch = ZmqPublishTickSource(
+        "tcp://publish-proxy:4102",
+        state_dir=tmp_path,
+        source_generation="gateway-g1",
+        context=FakeContext([FakeSocket([["eTick.au2401.SHFE", tick]])]),
+        zmq_module=FakeZmq,
+    )
+    mismatch.subscribe(lambda _value: pytest.fail("mismatched topic reached ingress"))
+    with pytest.raises(TypeError, match="does not match"):
+        mismatch.poll()
+    mismatch.close()
+
+
 def test_zmq_source_single_process_lock_rejects_second_owner_then_releases(tmp_path):
     first = ZmqPublishTickSource(
         "tcp://publish-proxy:4102",
@@ -506,6 +628,40 @@ def test_zmq_source_lock_is_enforced_across_processes_and_recovers_after_release
     assert holder.wait(timeout=5) == 0
     source.subscribe(lambda _value: None)
     source.close()
+
+
+def test_zmq_source_lock_fails_closed_for_symlink_wide_mode_and_replacement(
+    tmp_path, monkeypatch
+):
+    lock_path = tmp_path / "publish_proxy_source.lock"
+    target = tmp_path / "target"
+    target.write_text("target", encoding="utf-8")
+    target.chmod(0o600)
+    lock_path.symlink_to(target)
+    with pytest.raises(DurableStateError, match="lock"):
+        market_data_module._SingleProcessFileLock(lock_path).acquire()
+    lock_path.unlink()
+    lock_path.write_text("wide", encoding="utf-8")
+    lock_path.chmod(0o644)
+    with pytest.raises(DurableStateError, match="unsafe"):
+        market_data_module._SingleProcessFileLock(lock_path).acquire()
+    lock_path.unlink()
+
+    original_flock = market_data_module.fcntl.flock
+    replaced = False
+
+    def replace_after_lock(fd, operation):
+        nonlocal replaced
+        original_flock(fd, operation)
+        if not replaced and operation & market_data_module.fcntl.LOCK_EX:
+            replaced = True
+            lock_path.unlink()
+            lock_path.write_text("replacement", encoding="utf-8")
+            lock_path.chmod(0o600)
+
+    monkeypatch.setattr(market_data_module.fcntl, "flock", replace_after_lock)
+    with pytest.raises(DurableStateError, match="unsafe"):
+        market_data_module._SingleProcessFileLock(lock_path).acquire()
 
 
 def test_market_source_has_only_sub_receive_and_no_order_capabilities():
