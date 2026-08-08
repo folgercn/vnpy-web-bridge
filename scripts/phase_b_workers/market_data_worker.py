@@ -8,10 +8,20 @@ import os
 import signal
 import stat
 import threading
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
+
+try:  # Installed only in the market-data worker image.
+    import zmq
+except ImportError:  # pragma: no cover - dependency absence is a deployment error
+    zmq = None  # type: ignore[assignment]
+
+try:  # Installed only in the market-data worker image.
+    import psycopg
+except ImportError:  # pragma: no cover - dependency absence is a deployment error
+    psycopg = None  # type: ignore[assignment]
 
 try:
     from . import CONTRACT_VERSION
@@ -62,9 +72,7 @@ except ImportError:  # pragma: no cover
     from phase_b_workers.projections import build_projection, publish_projection
 
 
-class ReadonlyMarketSource(Protocol):
-    def query(self, symbols: Iterable[str]) -> Iterable[Mapping[str, object]]: ...
-
+class ReadonlyTickSource(Protocol):
     def subscribe(self, callback: Callable[[Mapping[str, object]], None]) -> None: ...
 
     def close(self) -> None: ...
@@ -72,6 +80,348 @@ class ReadonlyMarketSource(Protocol):
 
 class TickWriter(Protocol):
     def write_tick(self, tick: Mapping[str, object]) -> None: ...
+
+
+MARKET_TICK_COLUMNS = (
+    "ts",
+    "received_at",
+    "ingest_id",
+    "ingest_seq",
+    "schema_version",
+    "vt_symbol",
+    "symbol",
+    "exchange",
+    "gateway_name",
+    "name",
+    "trading_day",
+    "action_day",
+    "last_price",
+    "last_volume",
+    "volume",
+    "turnover",
+    "open_interest",
+    "open_price",
+    "high_price",
+    "low_price",
+    "pre_close",
+    "limit_up",
+    "limit_down",
+    "bid_price_1",
+    "bid_price_2",
+    "bid_price_3",
+    "bid_price_4",
+    "bid_price_5",
+    "ask_price_1",
+    "ask_price_2",
+    "ask_price_3",
+    "ask_price_4",
+    "ask_price_5",
+    "bid_volume_1",
+    "bid_volume_2",
+    "bid_volume_3",
+    "bid_volume_4",
+    "bid_volume_5",
+    "ask_volume_1",
+    "ask_volume_2",
+    "ask_volume_3",
+    "ask_volume_4",
+    "ask_volume_5",
+)
+_MARKET_TICK_INSERT = (
+    f"INSERT INTO market_ticks ({', '.join(MARKET_TICK_COLUMNS)}) "
+    f"VALUES ({', '.join(['%s'] * len(MARKET_TICK_COLUMNS))})"
+)
+
+
+def verified_tick_to_market_tick_v3(tick: VerifiedTick) -> dict[str, object]:
+    """Map only the verified-tick contract to the pre-created v3 schema.
+
+    ``VerifiedTick`` deliberately carries L1 prices/volumes only.  Every v3
+    field with no exact contract counterpart stays ``None``: the worker must
+    never manufacture L2-L5, turnover, trading-day, or gateway metadata.
+    """
+
+    symbol, separator, exchange = tick.vt_symbol.rpartition(".")
+    if not separator:
+        symbol, exchange = tick.vt_symbol, None
+    row = {column: None for column in MARKET_TICK_COLUMNS}
+    row.update(
+        {
+            "ts": tick.event_time_utc,
+            "received_at": tick.received_at_utc,
+            "ingest_id": tick.ingest_id,
+            "ingest_seq": tick.ingest_seq,
+            "schema_version": 3,
+            "vt_symbol": tick.vt_symbol,
+            "symbol": symbol,
+            "exchange": exchange,
+            "last_price": tick.last_price,
+            "last_volume": tick.last_volume,
+            "bid_price_1": tick.bid_price,
+            "ask_price_1": tick.ask_price,
+            "bid_volume_1": tick.bid_volume,
+            "ask_volume_1": tick.ask_volume,
+        }
+    )
+    return row
+
+
+class ZmqPublishTickSource:
+    """A SUB-only adapter for the trusted RpcClient PUB ``(topic, TickData)`` wire."""
+
+    def __init__(
+        self,
+        endpoint: str,
+        *,
+        state_dir: Path,
+        source_generation: str,
+        source_service: str = "gateway-publish-proxy",
+        context: Any | None = None,
+        zmq_module: Any | None = None,
+    ) -> None:
+        self.endpoint = str(endpoint).strip()
+        if not self.endpoint:
+            raise ValueError("market-data publish endpoint is required")
+        self._zmq = zmq_module or zmq
+        if self._zmq is None:
+            raise RuntimeError("pyzmq is required for market-data ingress")
+        self._context = context or self._zmq.Context.instance()
+        self.source_generation = str(source_generation).strip()
+        self.source_service = str(source_service).strip()
+        if not self.source_generation or not self.source_service:
+            raise ValueError("market-data source identity is required")
+        self._cursor = AtomicCheckpoint(
+            Path(state_dir) / "publish_proxy_cursor.json",
+            default={
+                "source_generation": self.source_generation,
+                "last_source_seq": 0,
+            },
+        )
+        self._sequence_lock = threading.RLock()
+        self._socket: Any | None = None
+        self._callback: Callable[[Mapping[str, object]], None] | None = None
+
+    def subscribe(self, callback: Callable[[Mapping[str, object]], None]) -> None:
+        self._callback = callback
+        self._connect()
+
+    def _connect(self) -> None:
+        if self._socket is not None:
+            return
+        socket = self._context.socket(self._zmq.SUB)
+        socket.setsockopt(self._zmq.SUBSCRIBE, b"")
+        socket.connect(self.endpoint)
+        self._socket = socket
+
+    def _reset(self) -> None:
+        socket, self._socket = self._socket, None
+        if socket is not None:
+            socket.close(linger=0)
+
+    def _next_source_seq(self) -> int:
+        with self._sequence_lock:
+            prior = self._cursor.read()
+            if (
+                str(prior.get("source_generation") or self.source_generation)
+                != self.source_generation
+            ):
+                raise GenerationMismatch("publish source generation changed")
+            sequence = int(prior.get("last_source_seq") or 0) + 1
+            self._cursor.write(
+                {
+                    "source_generation": self.source_generation,
+                    "last_source_seq": sequence,
+                }
+            )
+            return sequence
+
+    @staticmethod
+    def _tick_payload(value: object) -> dict[str, object]:
+        """Select only tick fields from a decoded vn.py object.
+
+        The adapter deliberately does not pass through ``__dict__``.  This
+        means a future/order/account object decoded from the same private PUB
+        channel cannot acquire ingress authority through incidental fields.
+        """
+
+        def field(name: str) -> object | None:
+            return (
+                value.get(name)
+                if isinstance(value, Mapping)
+                else getattr(value, name, None)
+            )
+
+        payload = {
+            "vt_symbol": field("vt_symbol"),
+            "symbol": field("symbol"),
+            "exchange": field("exchange"),
+            "datetime": field("datetime"),
+            "last_price": field("last_price"),
+            "last_volume": field("last_volume"),
+            "bid_price": field("bid_price_1"),
+            "ask_price": field("ask_price_1"),
+            "bid_volume": field("bid_volume_1"),
+            "ask_volume": field("ask_volume_1"),
+        }
+        if not str(payload["vt_symbol"] or "").strip():
+            symbol = str(payload["symbol"] or "").strip()
+            exchange = str(payload["exchange"] or "").strip()
+            payload["vt_symbol"] = (
+                f"{symbol}.{exchange}" if symbol and exchange else symbol
+            )
+        if not str(payload["vt_symbol"] or "").strip():
+            raise TypeError("market-data publish message is not a TickData payload")
+        return {key: item for key, item in payload.items() if item is not None}
+
+    def _decode_wire(self, wire: object) -> GatewayTickEnvelope:
+        if not isinstance(wire, tuple) or len(wire) != 2:
+            raise TypeError("market-data publish wire must be (topic, TickData)")
+        topic, data = wire
+        if not isinstance(topic, (str, bytes)):
+            raise TypeError("market-data publish topic is invalid")
+        topic_text = (
+            topic.decode("utf-8", "replace") if isinstance(topic, bytes) else topic
+        )
+        if "tick" not in topic_text.lower():
+            raise TypeError("market-data publish topic is not a tick topic")
+        payload = self._tick_payload(data)
+        source_seq = self._next_source_seq()
+        event_id = sha256_hex(
+            {
+                "source_generation": self.source_generation,
+                "source_seq": source_seq,
+                "topic": topic_text,
+                "payload": payload,
+            }
+        )[:32]
+        return GatewayTickEnvelope.create(
+            event_id=event_id,
+            source_service=self.source_service,
+            source_generation=self.source_generation,
+            source_seq=source_seq,
+            payload=payload,
+        )
+
+    def poll(self, timeout_ms: int = 0) -> int:
+        if self._callback is None:
+            raise RuntimeError("market-data source has not been bound")
+        self._connect()
+        try:
+            if not self._socket.poll(max(0, int(timeout_ms))):
+                return 0
+            value = self._socket.recv_pyobj()
+        except self._zmq.ZMQError as exc:
+            self._reset()
+            raise OSError("market-data publish ingress disconnected") from exc
+        self._callback(self._decode_wire(value).as_dict())
+        return 1
+
+    def close(self) -> None:
+        self._reset()
+
+
+class QuestDbTickWriter:
+    """Narrow PGWire writer for a schema that is owned/pre-created elsewhere.
+
+    This adapter intentionally has no schema-management API.  Its only SQL is
+    INSERT, the small health SELECT, and an explicit test/readback SELECT.
+    """
+
+    def __init__(
+        self,
+        dsn: str,
+        *,
+        connect: Callable[..., Any] | None = None,
+    ) -> None:
+        self._dsn = str(dsn).strip()
+        if not self._dsn:
+            raise ValueError("QuestDB PGWire DSN is required")
+        self._connect = connect or self._default_connect
+        self._connection: Any | None = None
+        self._lock = threading.RLock()
+
+    @staticmethod
+    def _default_connect(dsn: str) -> Any:
+        if psycopg is None:
+            raise RuntimeError("psycopg is required for QuestDB tick writes")
+        return psycopg.connect(dsn, connect_timeout=5)
+
+    def _open(self) -> Any:
+        if self._connection is None or bool(getattr(self._connection, "closed", False)):
+            self._connection = self._connect(self._dsn)
+        return self._connection
+
+    def _drop_connection(self) -> None:
+        connection, self._connection = self._connection, None
+        if connection is not None:
+            try:
+                connection.close()
+            except Exception as close_error:  # noqa: BLE001
+                # Closing a poisoned connection is best-effort and credentials
+                # or driver details must never be emitted from this worker.
+                _ = close_error
+
+    def write_verified_tick(self, tick: VerifiedTick) -> None:
+        row = verified_tick_to_market_tick_v3(tick)
+        try:
+            with self._lock:
+                connection = self._open()
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        _MARKET_TICK_INSERT,
+                        tuple(row[column] for column in MARKET_TICK_COLUMNS),
+                    )
+                connection.commit()
+        except Exception:
+            with self._lock:
+                if self._connection is not None:
+                    try:
+                        self._connection.rollback()
+                    except Exception as rollback_error:  # noqa: BLE001
+                        _ = rollback_error
+                self._drop_connection()
+            raise
+
+    def write_tick(self, tick: Mapping[str, object]) -> None:
+        self.write_verified_tick(VerifiedTick.from_dict(tick))
+
+    def readback(self, ingest_id: str) -> Mapping[str, object] | None:
+        """Read one row for a contract test or post-write verification."""
+
+        with self._lock:
+            connection = self._open()
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT ingest_id, ingest_seq, vt_symbol, ts, received_at "
+                    "FROM market_ticks WHERE ingest_id = %s",
+                    (str(ingest_id),),
+                )
+                row = cursor.fetchone()
+        if row is None:
+            return None
+        keys = ("ingest_id", "ingest_seq", "vt_symbol", "ts", "received_at")
+        return dict(zip(keys, row, strict=True))
+
+    def health(self) -> Mapping[str, object]:
+        try:
+            with self._lock:
+                connection = self._open()
+                with connection.cursor() as cursor:
+                    cursor.execute("SELECT 1")
+                    cursor.fetchone()
+            return {"status": "healthy", "configured": True}
+        except Exception as exc:  # noqa: BLE001 - driver exceptions are opaque
+            with self._lock:
+                self._drop_connection()
+            return {
+                "status": "degraded",
+                "configured": True,
+                "error": type(exc).__name__,
+            }
+
+    def close(self) -> None:
+        with self._lock:
+            self._drop_connection()
 
 
 class JsonlTickWriter:
@@ -108,11 +458,6 @@ class JsonlTickWriter:
         return {"status": "healthy", "written_ticks": len(self._load())}
 
 
-# Deployment adapters can replace this implementation while preserving the
-# narrow tick-write protocol; the name documents the intended QuestDB sink.
-QuestDbTickWriter = JsonlTickWriter
-
-
 @dataclass(frozen=True)
 class MarketDataConfig:
     state_dir: Path
@@ -121,10 +466,18 @@ class MarketDataConfig:
     source_name: str = "readonly_market_source"
     runtime_mode: str = "disabled"
     projection_dir: Path | None = None
+    publish_endpoint: str | None = None
+    questdb_pg_dsn: str | None = None
 
     @classmethod
     def from_environment(cls, state_dir: str | Path | None = None) -> MarketDataConfig:
         projection = os.getenv("PHASE_B_MARKET_PROJECTION_DIR", "").strip()
+        dsn = os.getenv("PHASE_B_QUESTDB_PG_DSN", "").strip()
+        dsn_file = os.getenv("PHASE_B_QUESTDB_PG_DSN_FILE", "").strip()
+        if dsn_file:
+            if dsn:
+                raise ValueError("set only one QuestDB DSN source")
+            dsn = _read_secret_file(Path(dsn_file))
         return cls(
             state_dir=Path(
                 state_dir
@@ -139,7 +492,23 @@ class MarketDataConfig:
             source_name=os.getenv("PHASE_B_MARKET_SOURCE", "readonly_market_source"),
             runtime_mode=os.getenv("PHASE_B_RUNTIME_MODE", "disabled"),
             projection_dir=Path(projection) if projection else None,
+            publish_endpoint=(
+                os.getenv("PHASE_B_MARKET_PUBLISH_ENDPOINT", "").strip() or None
+            ),
+            questdb_pg_dsn=dsn or None,
         )
+
+
+def _read_secret_file(path: Path) -> str:
+    info = path.lstat()
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise ValueError("QuestDB DSN file is not a regular file")
+    if info.st_mode & 0o077:
+        raise ValueError("QuestDB DSN file permissions are too broad")
+    value = path.read_text(encoding="utf-8").strip()
+    if not value:
+        raise ValueError("QuestDB DSN file is empty")
+    return value
 
 
 class MarketDataWorker:
@@ -150,7 +519,7 @@ class MarketDataWorker:
         config: MarketDataConfig | str | Path,
         *,
         generation: str | None = None,
-        source: ReadonlyMarketSource | None = None,
+        source: ReadonlyTickSource | None = None,
         writer: TickWriter | None = None,
         queue_size: int | None = None,
         identity: WorkerIdentity | None = None,
@@ -177,13 +546,23 @@ class MarketDataWorker:
             config.state_dir / "source_fence.json",
             default={"worker_generation": config.stream_generation, "sources": {}},
         )
-        self.writer = writer or JsonlTickWriter(
-            config.state_dir / "persisted_ticks.jsonl"
+        self.writer = writer or (
+            QuestDbTickWriter(config.questdb_pg_dsn)
+            if config.questdb_pg_dsn
+            else JsonlTickWriter(config.state_dir / "persisted_ticks.jsonl")
         )
         self.ingress: BoundedIngressQueue[
             Mapping[str, object] | GatewayTickEnvelope
         ] = BoundedIngressQueue(config.queue_maxsize)
-        self.source = source
+        self.source = source or (
+            ZmqPublishTickSource(
+                config.publish_endpoint,
+                state_dir=config.state_dir,
+                source_generation=config.stream_generation,
+            )
+            if config.publish_endpoint
+            else None
+        )
         self._source_bound = False
         self._last_error: str | None = None
         self._state_recovered = False
@@ -206,6 +585,11 @@ class MarketDataWorker:
                 raise GenerationMismatch(
                     "market-data generation changed without a new state directory"
                 )
+            writer_health = getattr(self.writer, "health", None)
+            if callable(writer_health):
+                status = str(dict(writer_health()).get("status") or "")
+                if status not in {"healthy", "disabled"}:
+                    raise OSError("market-data tick writer is unavailable")
         except Exception as exc:
             self._last_error = type(exc).__name__
             raise
@@ -215,7 +599,7 @@ class MarketDataWorker:
 
     def bind_source(self) -> None:
         if self.source is not None and not self._source_bound:
-            self.source.subscribe(self.enqueue)
+            self.source.subscribe(self.accept)
             self._source_bound = True
 
     def enqueue(self, raw: Mapping[str, object]) -> None:
@@ -313,18 +697,24 @@ class MarketDataWorker:
         event_id = str(
             raw.get("source_event_id") or raw.get("event_id") or raw.get("id") or ""
         ).strip()
+        candidate = VerifiedTick.from_raw(
+            raw,
+            stream_generation=self.config.stream_generation,
+            ingest_seq=self.stream.next_sequence(),
+            source=self.config.source_name,
+        )
         existing = self.stream.find_by_source_event_id(event_id) if event_id else None
-        if existing is None and not event_id:
-            existing = self.stream.find_by_raw_hash(sha256_hex(dict(raw)))
+        if existing is None:
+            existing = self.stream.find_by_raw_hash(candidate.raw_hash)
         if existing is not None:
             self.metrics.increment("ticks_deduplicated")
-            candidate = VerifiedTick.from_raw(
+            replay = VerifiedTick.from_raw(
                 raw,
                 stream_generation=self.config.stream_generation,
                 ingest_seq=existing.ingest_seq,
                 source=self.config.source_name,
             )
-            if candidate.raw_hash != existing.raw_hash:
+            if replay.raw_hash != existing.raw_hash:
                 raise DurableStateError(
                     "source_event_id was reused with different tick content"
                 )
@@ -335,12 +725,7 @@ class MarketDataWorker:
                 raise
             self.metrics.checkpoint_or_watermark = existing.ingest_seq
             return existing
-        tick = VerifiedTick.from_raw(
-            raw,
-            stream_generation=self.config.stream_generation,
-            ingest_seq=self.stream.next_sequence(),
-            source=self.config.source_name,
-        )
+        tick = candidate
         self.stream.append(tick)
         self.metrics.increment("ticks_durable")
         try:
@@ -355,16 +740,17 @@ class MarketDataWorker:
     def _process_envelope(self, event: GatewayTickEnvelope) -> VerifiedTick:
         self._assert_source_fence(event)
         raw = {**dict(event.payload), "source_event_id": event.event_id}
+        candidate = VerifiedTick.from_raw(
+            raw,
+            stream_generation=self.config.stream_generation,
+            ingest_seq=self.stream.next_sequence(),
+            source=event.source_service,
+        )
         tick = self.stream.find_by_source_event_id(event.event_id)
         if tick is None:
-            tick = self.stream.find_by_raw_hash(sha256_hex(raw))
+            tick = self.stream.find_by_raw_hash(candidate.raw_hash)
         if tick is None:
-            tick = VerifiedTick.from_raw(
-                raw,
-                stream_generation=self.config.stream_generation,
-                ingest_seq=self.stream.next_sequence(),
-                source=event.source_service,
-            )
+            tick = candidate
             self.stream.append(tick)
             self.metrics.increment("ticks_durable")
         else:
@@ -417,9 +803,6 @@ class MarketDataWorker:
 
     replay_pending_writes = replay_pending
 
-    def query(self, symbols: Iterable[str]) -> list[Mapping[str, object]]:
-        return [dict(row) for row in self.source.query(symbols)] if self.source else []
-
     def run(
         self, *, stop_event: threading.Event | None = None, idle_seconds: float = 0.1
     ) -> None:
@@ -428,13 +811,24 @@ class MarketDataWorker:
         self.bind_source()
         self.publish_projection()
         stop_event = stop_event or threading.Event()
-        while not stop_event.is_set():
-            try:
-                self.process_queue()
-            except Exception as exc:  # noqa: BLE001
-                self._last_error = type(exc).__name__
-            self.publish_projection()
-            stop_event.wait(max(0.01, float(idle_seconds)))
+        try:
+            while not stop_event.is_set():
+                try:
+                    poll = getattr(self.source, "poll", None)
+                    if callable(poll):
+                        poll(max(0, int(float(idle_seconds) * 1000)))
+                    self.process_queue()
+                except Exception as exc:  # noqa: BLE001
+                    self._last_error = type(exc).__name__
+                self.publish_projection()
+                stop_event.wait(max(0.01, float(idle_seconds)))
+        finally:
+            close_source = getattr(self.source, "close", None)
+            if callable(close_source):
+                close_source()
+            close_writer = getattr(self.writer, "close", None)
+            if callable(close_writer):
+                close_writer()
 
     def health(self) -> HealthSnapshot:
         writer_health = getattr(self.writer, "health", None)

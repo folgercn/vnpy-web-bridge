@@ -1,5 +1,6 @@
-# Phase B market-data worker.  Only the dependency-free worker package enters
-# this image; the web application and broad requirements are intentionally out.
+# Phase B market-data worker.  Its only third-party clients are a ZMQ SUB
+# socket for the gateway publish proxy and psycopg for QuestDB PGWire INSERTs.
+# The web application and broad requirements are intentionally out.
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -7,6 +8,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONPATH=/app
 
 WORKDIR /app
+COPY deployments/phase-b/requirements-market-data.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
 RUN mkdir -p /app/phase_b_workers/schemas
 COPY scripts/phase_b_workers/__init__.py /app/phase_b_workers/__init__.py
 COPY scripts/phase_b_workers/contracts.py /app/phase_b_workers/contracts.py

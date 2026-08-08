@@ -30,7 +30,14 @@ from phase_b_workers.execution_quality_worker import (
 from phase_b_workers.execution_quality_worker import (
     main as execution_quality_main,
 )
-from phase_b_workers.market_data_worker import MarketDataConfig, MarketDataWorker
+from phase_b_workers.market_data_worker import (
+    MARKET_TICK_COLUMNS,
+    MarketDataConfig,
+    MarketDataWorker,
+    QuestDbTickWriter,
+    ZmqPublishTickSource,
+    verified_tick_to_market_tick_v3,
+)
 from phase_b_workers.market_data_worker import main as market_data_main
 from phase_b_workers.monitor_worker import MonitorConfig, MonitorWorker, NullNotifier
 
@@ -59,6 +66,103 @@ class Writer:
         if self.fail:
             raise OSError("writer unavailable")
         self.events.append(tick)
+
+
+class UnhealthyWriter(Writer):
+    def health(self):
+        return {"status": "degraded", "configured": True}
+
+
+class FakeCursor:
+    def __init__(self, rows=(), fail_execute=False):
+        self.rows = list(rows)
+        self.calls = []
+        self.fail_execute = fail_execute
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        return False
+
+    def execute(self, sql, params=None):
+        self.calls.append((sql, params))
+        if self.fail_execute:
+            raise OSError("poisoned pgwire connection")
+
+    def fetchone(self):
+        return self.rows.pop(0) if self.rows else None
+
+
+class FakeConnection:
+    def __init__(self, rows=(), fail_execute=False):
+        self.cursor_value = FakeCursor(rows, fail_execute)
+        self.closed = False
+        self.commits = self.rollbacks = 0
+
+    def cursor(self):
+        return self.cursor_value
+
+    def commit(self):
+        self.commits += 1
+
+    def rollback(self):
+        self.rollbacks += 1
+
+    def close(self):
+        self.closed = True
+
+
+class FakeZmqError(Exception):
+    pass
+
+
+class FakeSocket:
+    def __init__(self, values=()):
+        self.values = list(values)
+        self.options = []
+        self.endpoint = None
+        self.closed = False
+
+    def setsockopt(self, option, value):
+        self.options.append((option, value))
+
+    def connect(self, endpoint):
+        self.endpoint = endpoint
+
+    def poll(self, _timeout):
+        return bool(self.values)
+
+    def recv_pyobj(self):
+        value = self.values.pop(0)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    def close(self, linger=0):
+        assert linger == 0
+        self.closed = True
+
+
+class FakeContext:
+    def __init__(self, sockets):
+        self.sockets = list(sockets)
+        self.kinds = []
+
+    def socket(self, kind):
+        self.kinds.append(kind)
+        return self.sockets.pop(0)
+
+
+class FakeZmq:
+    SUB = 1
+    SUBSCRIBE = 2
+    ZMQError = FakeZmqError
+
+    class Context:
+        @staticmethod
+        def instance():
+            raise AssertionError("test supplies a fake context")
 
 
 class Notifier:
@@ -116,6 +220,249 @@ def test_market_writer_failure_is_replayed(tmp_path):
     writer.fail = False
     assert worker.replay_pending_writes() == 1
     assert not worker.stream.pending_for_tick_writer()
+
+
+def test_verified_tick_raw_hash_excludes_transport_identity_but_not_content():
+    first = VerifiedTick.from_raw(
+        {"source_event_id": "one", "vt_symbol": "rb2610.SHFE", "last_price": 1},
+        stream_generation="g1",
+        ingest_seq=1,
+        source="gateway-publish-proxy",
+    )
+    replay = VerifiedTick.from_raw(
+        {"source_event_id": "two", "vt_symbol": "rb2610.SHFE", "last_price": 1},
+        stream_generation="g1",
+        ingest_seq=2,
+        source="gateway-publish-proxy",
+    )
+    changed = VerifiedTick.from_raw(
+        {"source_event_id": "one", "vt_symbol": "rb2610.SHFE", "last_price": 2},
+        stream_generation="g1",
+        ingest_seq=3,
+        source="gateway-publish-proxy",
+    )
+    assert first.raw_hash == replay.raw_hash
+    assert first.raw_hash != changed.raw_hash
+
+
+def test_verified_tick_maps_only_exact_v3_fields_and_nulls_the_rest(tmp_path):
+    worker = MarketDataWorker(tmp_path / "market", generation="g1", writer=Writer())
+    worker.recover()
+    worker.accept(
+        envelope(
+            event_time_utc="2026-08-08T01:02:03+00:00",
+            last_price=101.5,
+            last_volume=7,
+            bid_price=100.5,
+            ask_price=102.5,
+            bid_volume=3,
+            ask_volume=4,
+        )
+    )
+    row = verified_tick_to_market_tick_v3(worker.process_one())
+    assert tuple(row) == MARKET_TICK_COLUMNS
+    assert row["symbol"] == "rb2610" and row["exchange"] == "SHFE"
+    assert row["last_price"] == 101.5 and row["last_volume"] == 7.0
+    assert row["bid_price_1"] == 100.5 and row["ask_volume_1"] == 4.0
+    for field in (
+        "gateway_name",
+        "name",
+        "trading_day",
+        "action_day",
+        "volume",
+        "turnover",
+        "open_interest",
+        "open_price",
+        "high_price",
+        "low_price",
+        "pre_close",
+        "limit_up",
+        "limit_down",
+        "bid_price_2",
+        "ask_volume_5",
+    ):
+        assert row[field] is None
+
+
+def test_questdb_writer_is_insert_health_readback_only_and_recovers_connection(
+    tmp_path,
+):
+    worker = MarketDataWorker(tmp_path / "market", generation="g1", writer=Writer())
+    worker.recover()
+    worker.accept(envelope())
+    tick = worker.process_one()
+    first = FakeConnection(
+        rows=[(1,), (tick.ingest_id, 1, tick.vt_symbol, "ts", "received")]
+    )
+    connections = [first]
+    writer = QuestDbTickWriter(
+        "postgresql://not-logged", connect=lambda _dsn: connections.pop(0)
+    )
+    writer.write_verified_tick(tick)
+    assert first.commits == 1
+    insert_sql, params = first.cursor_value.calls[0]
+    assert insert_sql.startswith("INSERT INTO market_ticks")
+    assert len(params) == len(MARKET_TICK_COLUMNS)
+    assert all(
+        word not in insert_sql.upper()
+        for word in ("CREATE", "ALTER", "DROP", "DELETE", "UPDATE")
+    )
+    assert writer.health()["status"] == "healthy"
+    assert writer.readback(tick.ingest_id) == {
+        "ingest_id": tick.ingest_id,
+        "ingest_seq": 1,
+        "vt_symbol": tick.vt_symbol,
+        "ts": "ts",
+        "received_at": "received",
+    }
+    assert all(
+        "postgresql://not-logged" not in sql for sql, _ in first.cursor_value.calls
+    )
+
+
+def test_questdb_writer_drops_poisoned_connection_and_reconnects_for_replay(tmp_path):
+    worker = MarketDataWorker(tmp_path / "market", generation="g1", writer=Writer())
+    worker.recover()
+    worker.accept(envelope())
+    tick = worker.process_one()
+    poisoned = FakeConnection(fail_execute=True)
+    recovered = FakeConnection()
+    connections = [poisoned, recovered]
+    writer = QuestDbTickWriter(
+        "postgresql://not-logged", connect=lambda _dsn: connections.pop(0)
+    )
+    with pytest.raises(OSError, match="poisoned"):
+        writer.write_verified_tick(tick)
+    assert poisoned.closed and poisoned.rollbacks == 1
+    writer.write_verified_tick(tick)
+    assert recovered.commits == 1
+
+
+def test_zmq_publish_source_is_sub_only_and_recovers_after_poisoned_socket(tmp_path):
+    first = FakeSocket([FakeZmqError("reset")])
+    tick_data = type(
+        "TickData",
+        (),
+        {
+            "vt_symbol": "rb2610.SHFE",
+            "datetime": datetime(2026, 8, 8, tzinfo=timezone.utc),
+            "last_price": 101.0,
+            "last_volume": 2,
+            "bid_price_1": 100.0,
+            "ask_price_1": 102.0,
+            "bid_volume_1": 3,
+            "ask_volume_1": 4,
+        },
+    )()
+    second = FakeSocket([(b"eTick", tick_data)])
+    context = FakeContext([first, second])
+    source = ZmqPublishTickSource(
+        "tcp://publish-proxy:4102",
+        state_dir=tmp_path,
+        source_generation="gateway-g1",
+        context=context,
+        zmq_module=FakeZmq,
+    )
+    received = []
+    source.subscribe(received.append)
+    assert context.kinds == [FakeZmq.SUB]
+    assert first.options == [(FakeZmq.SUBSCRIBE, b"")]
+    with pytest.raises(OSError, match="disconnected"):
+        source.poll()
+    assert first.closed
+    assert source.poll() == 1
+    received_envelope = GatewayTickEnvelope.from_dict(received[0])
+    assert received_envelope.capability == "market_data.read"
+    assert received_envelope.payload == {
+        "vt_symbol": "rb2610.SHFE",
+        "datetime": datetime(2026, 8, 8, tzinfo=timezone.utc),
+        "last_price": 101.0,
+        "last_volume": 2,
+        "bid_price": 100.0,
+        "ask_price": 102.0,
+        "bid_volume": 3,
+        "ask_volume": 4,
+    }
+    source.close()
+    assert second.closed
+
+
+def test_market_worker_binds_typed_pub_source_through_envelope_validation(tmp_path):
+    tick_data = type("TickData", (), {"vt_symbol": "rb2610.SHFE"})()
+    socket = FakeSocket([("eTick", tick_data), ("eTick", tick_data)])
+    source = ZmqPublishTickSource(
+        "tcp://publish-proxy:4102",
+        state_dir=tmp_path / "market",
+        source_generation="gateway-g1",
+        context=FakeContext([socket]),
+        zmq_module=FakeZmq,
+    )
+    writer = Writer()
+    worker = MarketDataWorker(
+        tmp_path / "market", generation="g1", source=source, writer=writer
+    )
+    worker.recover()
+    worker.bind_source()
+    assert source.poll() == 1
+    worker.process_one()
+    assert source.poll() == 1
+    worker.process_one()
+    assert len(writer.events) == 1
+    assert worker.metrics.counters["ticks_deduplicated"] == 1
+
+
+def test_zmq_source_rejects_non_tick_topic_even_if_data_has_tick_like_fields(tmp_path):
+    socket = FakeSocket([("eOrder", {"vt_symbol": "rb2610.SHFE"})])
+    source = ZmqPublishTickSource(
+        "tcp://publish-proxy:4102",
+        state_dir=tmp_path,
+        source_generation="gateway-g1",
+        context=FakeContext([socket]),
+        zmq_module=FakeZmq,
+    )
+    source.subscribe(lambda _value: pytest.fail("order topic reached tick ingress"))
+    with pytest.raises(TypeError, match="not a tick topic"):
+        source.poll()
+
+
+def test_market_source_has_only_sub_receive_and_no_order_capabilities():
+    source = (Path(__file__).resolve().parents[1] / "market_data_worker.py").read_text(
+        encoding="utf-8"
+    )
+    assert "recv_pyobj" in source and "recv_json" not in source
+    assert ".socket(self._zmq.SUB)" in source
+    assert all(
+        token not in source
+        for token in ("send_order", "cancel_order", "get_account", "get_position")
+    )
+
+
+def test_market_config_uses_private_dsn_file_and_does_not_connect_without_endpoints(
+    tmp_path, monkeypatch
+):
+    dsn_file = tmp_path / "questdb.dsn"
+    dsn_file.write_text(
+        "postgresql://secret-user:secret@questdb/qdb\n", encoding="utf-8"
+    )
+    dsn_file.chmod(0o600)
+    monkeypatch.setenv("PHASE_B_QUESTDB_PG_DSN_FILE", str(dsn_file))
+    config = MarketDataConfig.from_environment(tmp_path / "market")
+    assert config.questdb_pg_dsn and "secret" in config.questdb_pg_dsn
+    assert config.publish_endpoint is None
+    worker = MarketDataWorker(config)
+    assert worker.source is None
+    dsn_file.chmod(0o644)
+    with pytest.raises(ValueError, match="permissions"):
+        MarketDataConfig.from_environment(tmp_path / "other")
+
+
+def test_market_ready_fails_closed_when_configured_tick_writer_is_unhealthy(tmp_path):
+    worker = MarketDataWorker(
+        tmp_path / "market", generation="g1", writer=UnhealthyWriter()
+    )
+    with pytest.raises(OSError, match="writer is unavailable"):
+        worker.recover()
+    assert not worker.readiness().ready
 
 
 def test_durable_state_rejects_symlink_noncanonical_and_unsafe_journals(tmp_path):
