@@ -54,11 +54,17 @@ class AlertNotifier(Protocol):
 
 
 class DirectoryProjectionSource:
-    def __init__(self, directory: str | Path) -> None:
-        self.directory = Path(directory)
+    def __init__(self, directory: str | Path | None) -> None:
+        self.directory = Path(directory) if directory else None
 
     def read(self) -> Iterable[Mapping[str, object]]:
-        if not self.directory.exists():
+        if self.directory is None:
+            return []
+        try:
+            info = self.directory.lstat()
+        except OSError:
+            return []
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
             return []
         values: list[Mapping[str, object]] = []
         for path in sorted(self.directory.glob("*.json")):
@@ -68,6 +74,15 @@ class DirectoryProjectionSource:
                 value = {"service_id": path.stem, "status": "unhealthy", "error_code": "projection_unreadable"}
             values.append(dict(value) if isinstance(value, Mapping) else {"service_id": path.stem, "status": "unhealthy"})
         return values
+
+    def readiness(self) -> tuple[bool, str]:
+        if self.directory is None or not self.directory.exists():
+            return False, "projection_dir_missing"
+        if self.directory.is_symlink() or not self.directory.is_dir():
+            return False, "projection_dir_invalid"
+        if not any(self.directory.glob("*.json")):
+            return False, "projection_source_empty"
+        return True, ""
 
 
 class TelegramNotifier:
@@ -89,8 +104,15 @@ class TelegramNotifier:
 
 
 class NullNotifier:
+    def __init__(self, *, reason: str = "disabled") -> None:
+        self.reason = reason
+
     def send(self, incident: IncidentEvent) -> bool:
-        return True
+        del incident
+        return False
+
+    def status(self) -> dict[str, object]:
+        return {"status": "disabled", "reason": self.reason}
 
 
 class SqliteIncidentOutbox:
@@ -170,15 +192,21 @@ def configured_worker_secret() -> str:
 @dataclass(frozen=True)
 class MonitorConfig:
     state_dir: Path
-    projection_dir: Path
+    projection_dir: Path | None
     runtime_mode: str = "disabled"
     source_revision: str = "unknown"
     generation: str = "generation-1"
+    telegram_enabled: bool = False
+    telegram_egress_permitted: bool = False
 
     @classmethod
     def from_environment(cls, state_dir: str | Path | None = None) -> MonitorConfig:
         root = Path(state_dir or os.getenv("PHASE_B_MONITOR_STATE_DIR", "/var/lib/phase-b/monitor"))
-        return cls(root, Path(os.getenv("PHASE_B_PROJECTION_DIR", "/var/lib/phase-b/projections")), os.getenv("PHASE_B_RUNTIME_MODE", "disabled"), os.getenv("SOURCE_REVISION", "unknown"), os.getenv("PHASE_B_MONITOR_GENERATION", "generation-1"))
+        enabled = os.getenv("PHASE_B_TELEGRAM_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+        egress_permitted = os.getenv("PHASE_B_TELEGRAM_EGRESS_PERMITTED", "false").strip().lower() in {"1", "true", "yes", "on"}
+        projection_value = os.getenv("PHASE_B_PROJECTION_DIR", "").strip()
+        projection = Path(projection_value) if projection_value else None
+        return cls(root, projection, os.getenv("PHASE_B_RUNTIME_MODE", "disabled"), os.getenv("SOURCE_REVISION", "unknown"), os.getenv("PHASE_B_MONITOR_GENERATION", "generation-1"), enabled, egress_permitted)
 
 
 class MonitorStateRepository(Protocol):
@@ -202,10 +230,18 @@ class MonitorWorker:
             config = MonitorConfig(root, root / "projections", generation=generation or "generation-1")
         self.config = config
         config.state_dir.mkdir(parents=True, exist_ok=True)
+        info = config.state_dir.lstat()
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise RuntimeError("monitor state directory is not a real directory")
+        os.chmod(config.state_dir, 0o700)
         self.identity = identity or WorkerIdentity.from_environment(self.service_id, runtime_mode=config.runtime_mode)
         self.source = source or DirectoryProjectionSource(config.projection_dir)
         token, chat = os.getenv("PHASE_B_TELEGRAM_TOKEN", ""), os.getenv("PHASE_B_TELEGRAM_CHAT_ID", "")
-        self.notifier = notifier or (TelegramNotifier(token, chat) if token and chat else NullNotifier())
+        self.notifier = notifier or (
+            TelegramNotifier(token, chat)
+            if config.telegram_enabled and config.telegram_egress_permitted and token and chat
+            else NullNotifier(reason="network_disabled_or_not_configured")
+        )
         self.state = state or JsonMonitorStateRepository(config.state_dir / "monitor_state.json")
         self.incidents = AppendOnlyIncidentLog(config.state_dir / "incidents.jsonl")
         self.repository = SqliteIncidentOutbox(config.state_dir / "monitor.sqlite3")
@@ -224,6 +260,10 @@ class MonitorWorker:
     def _deliver_outbox(self) -> None:
         if not self.fence_epoch:
             self.recover()
+        if isinstance(self.notifier, NullNotifier):
+            if self.repository.pending(limit=1):
+                self.metrics.increment("alerts_disabled")
+            return
         for item in self.repository.pending():
             raw = item.get("payload")
             if not isinstance(raw, Mapping):
@@ -262,6 +302,8 @@ class MonitorWorker:
 
     def run_once(self) -> dict[str, object]:
         with self._lock:
+            if not self.fence_epoch:
+                self.recover()
             projections = list(self.source.read())
             transitions: list[dict[str, object]] = []
             durable = self.state.read()
@@ -276,8 +318,13 @@ class MonitorWorker:
                 state = "resolved" if healthy else "open"
                 if not isinstance(prior, Mapping) or prior.get("state") != state:
                     incident = IncidentEvent.create(service_id=service, episode_key=key, severity="critical" if not healthy and safe.get("ready") is False else "warning", state=state, summary="worker healthy" if healthy else f"worker unhealthy ({status})", source_revision=self.config.source_revision, details=safe)
-                    self.incidents.append(incident)
-                    transitions.append(incident.as_dict())
+                    inserted = self.repository.record(incident)
+                    if inserted:
+                        self.incidents.append(incident)
+                        transitions.append(incident.as_dict())
+                        self.metrics.increment("incidents_created")
+                    else:
+                        self.metrics.increment("incidents_deduplicated")
                     if isinstance(episodes, dict):
                         episodes[key] = {"state": state, "incident_id": incident.incident_id, "updated_at_utc": incident.occurred_at_utc}
             durable["episodes"] = episodes
@@ -296,11 +343,19 @@ class MonitorWorker:
             stop_event.wait(max(0.05, float(interval_seconds)))
 
     def health(self) -> HealthSnapshot:
-        return HealthSnapshot(self.service_id, "healthy" if not self._last_error else "degraded", isoformat(), self.metrics.started_at_utc, {"projection_source": {"status": "healthy"}, "incident_state": {"status": "healthy"}}, self._last_error)
+        projection = DirectoryProjectionSource(self.config.projection_dir).readiness()
+        notifier = self.notifier.status() if hasattr(self.notifier, "status") else {"status": "configured"}
+        status = "healthy" if not self._last_error else "degraded"
+        return HealthSnapshot(self.service_id, status, isoformat(), self.metrics.started_at_utc, {"projection_source": {"status": "healthy" if projection[0] else "unavailable", "reason": projection[1]}, "notifier": notifier, "incident_state": {"status": "healthy"}}, self._last_error)
 
     def readiness(self) -> ReadinessSnapshot:
-        blockers = ("state_recovery_required",) if self._last_error else ()
-        return ReadinessSnapshot(self.service_id, not blockers, isoformat(), CONTRACT_VERSION in self.identity.contract_versions, True, not bool(self._last_error), self._state_recovered and not bool(self._last_error), blockers)
+        blockers: list[str] = []
+        if self._last_error:
+            blockers.append("state_recovery_required")
+        source_ready, reason = DirectoryProjectionSource(self.config.projection_dir).readiness()
+        if not source_ready:
+            blockers.append(reason)
+        return ReadinessSnapshot(self.service_id, not blockers, isoformat(), CONTRACT_VERSION in self.identity.contract_versions, True, not bool(blockers), self._state_recovered and not bool(blockers), tuple(blockers))
 
     def metrics_snapshot(self) -> dict[str, object]: return self.metrics.as_dict()
     def version(self) -> dict[str, object]: return self.identity.as_dict()

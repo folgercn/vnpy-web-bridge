@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import signal
+import stat
 import threading
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
@@ -26,6 +27,7 @@ try:
     from .durable import (
         AppendOnlyEvidenceLog,
         AtomicCheckpoint,
+        DurableCorruptionError,
         DurableVerifiedTickStream,
         GenerationMismatch,
     )
@@ -46,6 +48,7 @@ except ImportError:  # pragma: no cover
     from phase_b_workers.durable import (
         AppendOnlyEvidenceLog,
         AtomicCheckpoint,
+        DurableCorruptionError,
         DurableVerifiedTickStream,
         GenerationMismatch,
     )
@@ -92,6 +95,10 @@ class ExecutionQualityWorker:
             config = ExecutionQualityConfig(root, Path(tick_stream_dir or root / "stream"), generation or "generation-1")
         self.config = config
         config.state_dir.mkdir(parents=True, exist_ok=True)
+        info = config.state_dir.lstat()
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise DurableCorruptionError("execution-quality state directory is not a real directory")
+        os.chmod(config.state_dir, 0o700)
         self.identity = identity or WorkerIdentity.from_environment(self.service_id, runtime_mode=config.runtime_mode)
         self.stream = stream or DurableVerifiedTickStream(config.stream_dir, generation=config.stream_generation)
         self.evidence = evidence or AppendOnlyEvidenceLog(config.state_dir / "evidence.jsonl")
@@ -101,7 +108,7 @@ class ExecutionQualityWorker:
             raise GenerationMismatch("execution-quality checkpoint generation mismatch")
         self.metrics = WorkerMetrics(self.service_id, isoformat(), worker_generation=config.stream_generation, checkpoint_or_watermark=int(state.get("last_ingest_seq") or 0))
         self._last_error: str | None = None
-        self._state_recovered = True
+        self._state_recovered = False
         self._lock = threading.RLock()
 
     @property
@@ -115,14 +122,65 @@ class ExecutionQualityWorker:
         return {"spread": spread, "midpoint": midpoint, "last_price": tick.last_price}
 
     def recover(self) -> None:
+        # Load both durable journals before trusting the checkpoint.  This
+        # catches gaps, duplicate sequences, hash tampering, and stale
+        # evidence even when the checkpoint itself still points at an older
+        # item.
+        self.stream.stats()
+        evidence_records = self.evidence.records()
+        for raw in evidence_records:
+            try:
+                evidence = ExecutionQualityEvidence.from_dict(raw)
+            except (TypeError, ValueError) as exc:
+                self._state_recovered = False
+                raise DurableCorruptionError("invalid execution-quality evidence") from exc
+            if (
+                evidence.stream_generation != self.config.stream_generation
+                or evidence.algorithm_version != self.config.algorithm_version
+            ):
+                self._state_recovered = False
+                raise GenerationMismatch("execution-quality evidence generation/algorithm mismatch")
+            tick = self.stream.get(evidence.ingest_id)
+            if (
+                tick is None
+                or tick.stream_generation != self.config.stream_generation
+                or tick.ingest_seq != evidence.ingest_seq
+                or tick.event_hash != evidence.source_event_hash
+            ):
+                self._state_recovered = False
+                raise DurableCorruptionError("execution-quality evidence has no matching verified tick")
         state = self.checkpoint.read()
         if str(state.get("stream_generation") or self.config.stream_generation) != self.config.stream_generation:
             self._state_recovered = False
             raise GenerationMismatch("execution-quality checkpoint generation mismatch")
         seq = int(state.get("last_ingest_seq") or 0)
-        if seq and not any(int(row.get("ingest_seq") or 0) == seq for row in self.evidence.records()):
+        checkpoint_algorithm = str(state.get("algorithm_version") or self.config.algorithm_version)
+        if checkpoint_algorithm != self.config.algorithm_version:
             self._state_recovered = False
-            raise GenerationMismatch("checkpoint has no durable evidence anchor")
+            raise GenerationMismatch("execution-quality checkpoint algorithm mismatch")
+        checkpoint_event_hash = str(state.get("last_event_hash") or "")
+        checkpoint_evidence_hash = str(state.get("last_evidence_hash") or "")
+        if seq == 0:
+            if checkpoint_event_hash or checkpoint_evidence_hash:
+                self._state_recovered = False
+                raise DurableCorruptionError("empty execution-quality checkpoint contains hashes")
+        else:
+            tick = self.stream.get_by_sequence(seq)
+            if tick is None:
+                self._state_recovered = False
+                raise GenerationMismatch("checkpoint has no durable tick anchor")
+            if tick.stream_generation != self.config.stream_generation or tick.event_hash != checkpoint_event_hash:
+                self._state_recovered = False
+                raise GenerationMismatch("checkpoint tick hash/generation mismatch")
+            evidence = self.evidence.get_by_identity(
+                f"{self.config.stream_generation}:{tick.ingest_id}:{self.config.algorithm_version}"
+            )
+            if evidence is None or evidence.ingest_seq != seq or evidence.stream_generation != self.config.stream_generation:
+                self._state_recovered = False
+                raise GenerationMismatch("checkpoint has no durable evidence anchor")
+            if evidence.source_event_hash != tick.event_hash or evidence.evidence_hash != checkpoint_evidence_hash:
+                self._state_recovered = False
+                raise DurableCorruptionError("checkpoint evidence hash mismatch")
         self._state_recovered = True
         self._last_error = None
 
@@ -142,6 +200,8 @@ class ExecutionQualityWorker:
                 return None
             tick, evidence = item
             try:
+                if tick.stream_generation != self.config.stream_generation or tick.event_hash != tick.compute_event_hash():
+                    raise DurableCorruptionError("verified tick generation/hash mismatch")
                 inserted = self.evidence.append(evidence)
                 self.checkpoint.write({"stream_generation": self.config.stream_generation, "last_ingest_seq": tick.ingest_seq, "last_event_hash": tick.event_hash, "last_evidence_hash": evidence.evidence_hash, "algorithm_version": self.config.algorithm_version})
             except Exception as exc:
@@ -164,6 +224,8 @@ class ExecutionQualityWorker:
     replay = consume
 
     def run(self, *, stop_event: threading.Event | None = None, interval_seconds: float = 1.0) -> None:
+        self.recover()
+        self.replay()
         stop_event = stop_event or threading.Event()
         while not stop_event.is_set():
             try:

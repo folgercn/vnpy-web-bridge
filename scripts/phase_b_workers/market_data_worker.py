@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import signal
+import stat
 import threading
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
@@ -142,6 +143,10 @@ class MarketDataWorker:
             config = MarketDataConfig(Path(config), generation or "generation-1", queue_size or 2048)
         self.config = config
         config.state_dir.mkdir(parents=True, exist_ok=True)
+        info = config.state_dir.lstat()
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise DurableStateError("market-data state directory is not a real directory")
+        os.chmod(config.state_dir, 0o700)
         self.identity = identity or WorkerIdentity.from_environment(self.service_id, runtime_mode=config.runtime_mode)
         self.stream = DurableVerifiedTickStream(config.state_dir / "stream", generation=config.stream_generation)
         self.source_fence = AtomicCheckpoint(
@@ -153,7 +158,7 @@ class MarketDataWorker:
         self.source = source
         self._source_bound = False
         self._last_error: str | None = None
-        self._state_recovered = True
+        self._state_recovered = False
         self.metrics = WorkerMetrics(self.service_id, isoformat(), worker_generation=config.stream_generation)
 
     def recover(self) -> None:
@@ -180,7 +185,12 @@ class MarketDataWorker:
         self.metrics.queue_depth = self.ingress.qsize()
 
     def accept(self, value: GatewayTickEnvelope | Mapping[str, object]) -> None:
-        envelope = value if isinstance(value, GatewayTickEnvelope) else GatewayTickEnvelope.from_dict(value)
+        # Re-run the full ingress validator even for an already constructed
+        # envelope; callers must not be able to bypass capability/hash/order
+        # field checks by handing us a forged dataclass instance.
+        envelope = GatewayTickEnvelope.from_dict(
+            value.as_dict() if isinstance(value, GatewayTickEnvelope) else value
+        )
         try:
             self.ingress.put(envelope)
         except BackpressureError:
@@ -192,6 +202,14 @@ class MarketDataWorker:
     def _assert_source_fence(self, event: GatewayTickEnvelope) -> None:
         state = self.source_fence.read()
         sources = dict(state.get("sources") or {})
+        events = dict(state.get("events") or {})
+        prior_event = events.get(event.event_id)
+        if isinstance(prior_event, Mapping) and (
+            prior_event.get("generation") != event.source_generation
+            or int(prior_event.get("seq") or 0) != event.source_seq
+            or prior_event.get("event_hash") != event.envelope_hash
+        ):
+            raise DurableStateError("source_event_id was reused with different content")
         prior = dict(sources.get(event.source_service) or {})
         old_generation = str(prior.get("generation") or event.source_generation)
         old_seq = int(prior.get("seq") or 0)
@@ -201,6 +219,34 @@ class MarketDataWorker:
             raise DurableStateError("stale source sequence")
         if event.source_seq == old_seq and old_seq and prior.get("event_hash") != event.envelope_hash:
             raise DurableStateError("source sequence was reused with different content")
+
+    def _record_source_fence(self, event: GatewayTickEnvelope) -> None:
+        """Durably bind ingress identity before any fallible sink write.
+
+        A crash after the verified stream append must not permit the same
+        source event id to be replayed with altered envelope metadata.
+        """
+
+        state = self.source_fence.read()
+        sources = dict(state.get("sources") or {})
+        events = dict(state.get("events") or {})
+        sources[event.source_service] = {
+            "generation": event.source_generation,
+            "seq": event.source_seq,
+            "event_hash": event.envelope_hash,
+        }
+        events[event.event_id] = {
+            "generation": event.source_generation,
+            "seq": event.source_seq,
+            "event_hash": event.envelope_hash,
+        }
+        self.source_fence.write(
+            {
+                "worker_generation": self.config.stream_generation,
+                "sources": sources,
+                "events": events,
+            }
+        )
 
     def _write(self, tick: VerifiedTick) -> None:
         if self.stream.is_acknowledged(tick):
@@ -221,6 +267,14 @@ class MarketDataWorker:
             existing = self.stream.find_by_raw_hash(sha256_hex(dict(raw)))
         if existing is not None:
             self.metrics.increment("ticks_deduplicated")
+            candidate = VerifiedTick.from_raw(
+                raw,
+                stream_generation=self.config.stream_generation,
+                ingest_seq=existing.ingest_seq,
+                source=self.config.source_name,
+            )
+            if candidate.raw_hash != existing.raw_hash:
+                raise DurableStateError("source_event_id was reused with different tick content")
             try:
                 self._write(existing)
             except Exception as exc:
@@ -257,11 +311,16 @@ class MarketDataWorker:
             self.metrics.increment("ticks_durable")
         else:
             self.metrics.increment("ticks_deduplicated")
+            candidate = VerifiedTick.from_raw(
+                raw,
+                stream_generation=self.config.stream_generation,
+                ingest_seq=tick.ingest_seq,
+                source=event.source_service,
+            )
+            if candidate.raw_hash != tick.raw_hash:
+                raise DurableStateError("source_event_id was reused with different tick content")
+        self._record_source_fence(event)
         self._write(tick)
-        state = self.source_fence.read()
-        sources = dict(state.get("sources") or {})
-        sources[event.source_service] = {"generation": event.source_generation, "seq": event.source_seq, "event_hash": event.envelope_hash}
-        self.source_fence.write({"worker_generation": self.config.stream_generation, "sources": sources})
         self.metrics.checkpoint_or_watermark = tick.ingest_seq
         self._last_error = None
         return tick
@@ -298,6 +357,8 @@ class MarketDataWorker:
         return [dict(row) for row in self.source.query(symbols)] if self.source else []
 
     def run(self, *, stop_event: threading.Event | None = None, idle_seconds: float = 0.1) -> None:
+        self.recover()
+        self.replay_pending()
         self.bind_source()
         stop_event = stop_event or threading.Event()
         while not stop_event.is_set():

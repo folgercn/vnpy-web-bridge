@@ -11,11 +11,14 @@ import hashlib
 import json
 import math
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from . import CONTRACT_VERSION, WORKER_PACKAGE_VERSION
+
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def utc_now() -> datetime:
@@ -292,9 +295,24 @@ class GatewayTickEnvelope:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, object]) -> GatewayTickEnvelope:
+        required = {
+            "contract_version",
+            "event_id",
+            "source_service",
+            "source_generation",
+            "source_seq",
+            "observed_at_utc",
+            "capability",
+            "payload",
+            "envelope_hash",
+        }
+        if set(value) != required or value.get("contract_version") != CONTRACT_VERSION:
+            raise ValueError("gateway tick envelope contract mismatch")
         payload = value.get("payload")
         if not isinstance(payload, Mapping):
             raise TypeError("gateway tick payload must be an object")
+        if isinstance(value.get("source_seq"), bool):
+            raise TypeError("gateway tick source sequence is invalid")
         envelope = cls(
             event_id=str(value.get("event_id") or ""),
             source_service=str(value.get("source_service") or ""),
@@ -308,6 +326,7 @@ class GatewayTickEnvelope:
         if (
             not envelope.event_id
             or not envelope.source_service
+            or not envelope.source_generation
             or envelope.source_seq < 1
         ):
             raise ValueError("gateway tick identity/source sequence is invalid")
@@ -434,11 +453,19 @@ class VerifiedTick:
             "ingest_seq",
             "event_time_utc",
             "vt_symbol",
+            "source",
+            "source_event_id",
+            "received_at_utc",
+            "raw_hash",
             "event_hash",
         )
-        missing = [name for name in required if name not in value]
-        if missing:
-            raise ValueError(f"verified tick missing fields: {','.join(missing)}")
+        expected_fields = {"contract_version", *cls.__dataclass_fields__}
+        if set(value) != expected_fields or value.get("contract_version") != CONTRACT_VERSION:
+            missing = [name for name in required if name not in value]
+            detail = ",".join(missing) if missing else "unexpected fields"
+            raise ValueError(f"verified tick contract mismatch: {detail}")
+        if isinstance(value["ingest_seq"], bool):
+            raise TypeError("verified tick ingest sequence is invalid")
         tick = cls(
             stream_generation=str(value["stream_generation"]),
             ingest_id=str(value["ingest_id"]),
@@ -459,6 +486,16 @@ class VerifiedTick:
             raw_hash=str(value.get("raw_hash") or ""),
             event_hash=str(value["event_hash"]),
         )
+        if (
+            not tick.stream_generation
+            or not tick.ingest_id
+            or tick.ingest_seq < 1
+            or not tick.vt_symbol
+            or not tick.source
+            or not _SHA256_RE.fullmatch(tick.raw_hash)
+            or not _SHA256_RE.fullmatch(tick.event_hash)
+        ):
+            raise ValueError("verified tick identity/hash is invalid")
         if tick.event_hash != tick.compute_event_hash():
             raise ValueError("verified tick event_hash mismatch")
         return tick
@@ -516,6 +553,7 @@ class ExecutionQualityEvidence:
         # Default to the durable source observation, not wall-clock processing
         # time, so crash replay recreates the identical evidence hash.
         measured = isoformat(measured_at or parse_time(tick.received_at_utc))
+        safe_metrics = _redact_mapping(metrics)
         body = {
             "contract_version": CONTRACT_VERSION,
             "stream_generation": tick.stream_generation,
@@ -524,7 +562,7 @@ class ExecutionQualityEvidence:
             "source_event_hash": tick.event_hash,
             "measured_at_utc": measured,
             "algorithm_version": algorithm_version,
-            "metrics": dict(metrics),
+            "metrics": safe_metrics,
         }
         evidence_hash = sha256_hex(body)
         return cls(
@@ -532,6 +570,62 @@ class ExecutionQualityEvidence:
             evidence_hash=evidence_hash,
             **{key: value for key, value in body.items() if key != "contract_version"},
         )
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> ExecutionQualityEvidence:
+        required = {
+            "contract_version",
+            "evidence_id",
+            "stream_generation",
+            "ingest_id",
+            "ingest_seq",
+            "source_event_hash",
+            "measured_at_utc",
+            "algorithm_version",
+            "metrics",
+            "evidence_hash",
+        }
+        if set(value) != required or value.get("contract_version") != CONTRACT_VERSION:
+            raise ValueError("execution-quality evidence contract mismatch")
+        metrics = value.get("metrics")
+        if not isinstance(metrics, Mapping):
+            raise TypeError("execution-quality evidence metrics must be an object")
+        if isinstance(value["ingest_seq"], bool):
+            raise TypeError("execution-quality evidence ingest sequence is invalid")
+        evidence = cls(
+            evidence_id=str(value["evidence_id"]),
+            stream_generation=str(value["stream_generation"]),
+            ingest_id=str(value["ingest_id"]),
+            ingest_seq=int(value["ingest_seq"]),
+            source_event_hash=str(value["source_event_hash"]),
+            measured_at_utc=isoformat(parse_time(value["measured_at_utc"])),
+            algorithm_version=str(value["algorithm_version"]),
+            metrics=dict(metrics),
+            evidence_hash=str(value["evidence_hash"]),
+        )
+        body = {
+            "contract_version": CONTRACT_VERSION,
+            "stream_generation": evidence.stream_generation,
+            "ingest_id": evidence.ingest_id,
+            "ingest_seq": evidence.ingest_seq,
+            "source_event_hash": evidence.source_event_hash,
+            "measured_at_utc": evidence.measured_at_utc,
+            "algorithm_version": evidence.algorithm_version,
+            "metrics": dict(evidence.metrics),
+        }
+        if (
+            not evidence.stream_generation
+            or not evidence.ingest_id
+            or evidence.ingest_seq < 1
+            or not evidence.algorithm_version
+            or not _SHA256_RE.fullmatch(evidence.source_event_hash)
+            or not _SHA256_RE.fullmatch(evidence.evidence_hash)
+            or evidence.evidence_hash != sha256_hex(body)
+        ):
+            raise ValueError("execution-quality evidence hash mismatch")
+        if evidence.evidence_id != f"{evidence.stream_generation}:{evidence.ingest_id}:{evidence.algorithm_version}":
+            raise ValueError("execution-quality evidence identity mismatch")
+        return evidence
 
     def as_dict(self) -> dict[str, object]:
         return {
