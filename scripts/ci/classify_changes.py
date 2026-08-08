@@ -349,6 +349,21 @@ PHASE_B_SCOPE_EXACT = {
     "scripts/phase_b_offline_signer.py",
 }
 
+# Phase A consumes this explicit Phase B ownership boundary when creating its
+# non-deploying release plan.  These files are preserved as Phase-B-owned: they
+# cannot select a Phase A image or turn an otherwise valid Phase A plan into an
+# unknown-path block.  The shared workflow and CI classifiers remain governed
+# by their existing Phase A rules so that cross-phase CI changes retain Phase A
+# verification coverage.
+PHASE_A_PHASE_B_PRESERVED_EXACT = (
+    "backend/requirements.phase-b-verifier.txt",
+    "deployments/docker-compose.phase-b.yml",
+    "scripts/commodity_c_fast_pure_producer_kernel.py",
+    "scripts/phase_b_artifact_custody.py",
+    "scripts/phase_b_offline_signer.py",
+)
+PHASE_A_PHASE_B_PRESERVED_PREFIXES = PHASE_B_SCOPE_PREFIXES
+
 
 def _phase_a_dependency_closure(selected_units: set[str]) -> set[str]:
     """Expand selected primary services to their reviewed image closure."""
@@ -577,6 +592,12 @@ PHASE_A_RULES = (
         prefix=("scripts/ci/", "backend/tests/unit/test_ci_"),
         kind="infra",
         safety=True,
+    ),
+    _phase_a_rule(
+        "phase-a-preserved-phase-b",
+        exact=PHASE_A_PHASE_B_PRESERVED_EXACT,
+        prefix=PHASE_A_PHASE_B_PRESERVED_PREFIXES,
+        kind="preserved",
     ),
     _phase_a_rule(
         "phase-a-legacy-root",

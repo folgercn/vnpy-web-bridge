@@ -24,6 +24,83 @@ PLAN_SCHEMA = json.loads(
 )
 SHA = "a" * 40
 
+# Phase B paths in the PR that introduced its offline validation graph.  This
+# is intentionally an explicit contract rather than a broad "everything under
+# backend" exception: a new unowned path must still fail closed in Phase A.
+CURRENT_PHASE_B_CHANGED_PATHS = (
+    ".github/workflows/ci.yml",
+    "backend/requirements.phase-b-verifier.txt",
+    "backend/tests/unit/test_ci_workflow_contract.py",
+    "backend/tests/unit/test_issue291_phase_b_ci.py",
+    "backend/tests/unit/test_issue_291_phase_b_custody.py",
+    "backend/tests/unit/test_issue_291_phase_b_trust.py",
+    "backend/tests/unit/test_phase_b_producers.py",
+    "deployments/docker-compose.phase-b.yml",
+    "deployments/phase-b/Containerfile.artifact-custody",
+    "deployments/phase-b/Containerfile.c-fast-producer",
+    "deployments/phase-b/Containerfile.execution-quality-worker",
+    "deployments/phase-b/Containerfile.map-producer",
+    "deployments/phase-b/Containerfile.market-data-worker",
+    "deployments/phase-b/Containerfile.monitor-worker",
+    "deployments/phase-b/Containerfile.signing-authority",
+    "deployments/phase-b/requirements-artifact.txt",
+    "docs/architecture/issue-291-phase-b-trust-custody-v1.md",
+    "docs/operations/phase-b-producer-contract-v1.md",
+    "docs/schemas/issue-291-phase-b-custody-record-v1.schema.json",
+    "docs/schemas/issue-291-phase-b-signed-artifact-v1.schema.json",
+    "docs/schemas/issue-291-phase-b-signing-request-v1.schema.json",
+    "docs/schemas/issue-291-phase-b-trust-keyring-v1.schema.json",
+    "docs/schemas/web-bridge-artifact-consume-receipt-v1.schema.json",
+    "docs/schemas/web-bridge-artifact-envelope-v1.schema.json",
+    "docs/schemas/web-bridge-artifact-install-receipt-v1.schema.json",
+    "docs/schemas/web-bridge-artifact-publish-receipt-v1.schema.json",
+    "docs/schemas/web-bridge-artifact-publish-request-v1.schema.json",
+    "docs/schemas/web-bridge-artifact-receipt-v1.schema.json",
+    "docs/schemas/web-bridge-artifact-revoke-receipt-v1.schema.json",
+    "scripts/c_fast_producer/__init__.py",
+    "scripts/c_fast_producer/producer.py",
+    "scripts/ci/classify_changes.py",
+    "scripts/ci/phase_b_projection_compose_smoke.sh",
+    "scripts/ci/validate_json_schemas.py",
+    "scripts/map/__init__.py",
+    "scripts/map/producer.py",
+    "scripts/phase_b_artifact_custody.py",
+    "scripts/phase_b_offline_signer.py",
+    "scripts/phase_b_workers/README.md",
+    "scripts/phase_b_workers/__init__.py",
+    "scripts/phase_b_workers/contracts.py",
+    "scripts/phase_b_workers/durable.py",
+    "scripts/phase_b_workers/execution_quality_worker.py",
+    "scripts/phase_b_workers/market_data_worker.py",
+    "scripts/phase_b_workers/monitor_worker.py",
+    "scripts/phase_b_workers/projections.py",
+    "scripts/phase_b_workers/schemas/execution-quality-evidence-v1.schema.json",
+    "scripts/phase_b_workers/schemas/monitor-incident-v1.schema.json",
+    "scripts/phase_b_workers/schemas/verified-tick-v1.schema.json",
+    "scripts/phase_b_workers/schemas/worker-health-v1.schema.json",
+    "scripts/phase_b_workers/schemas/worker-metrics-v1.schema.json",
+    "scripts/phase_b_workers/schemas/worker-readiness-v1.schema.json",
+    "scripts/phase_b_workers/tests/__init__.py",
+    "scripts/phase_b_workers/tests/test_phase_b_workers.py",
+    "shared/artifact-contracts/c-fast/commodity-approved-research-source-v1.schema.json",
+    "shared/artifact-contracts/c-fast/commodity-c-fast-target-candidate-v1.schema.json",
+    "shared/artifact-contracts/map/commodity-approved-research-source-v1.schema.json",
+    "shared/artifact-contracts/map/commodity-map-signal-candidate-v1.schema.json",
+    "shared/artifact_contracts/__init__.py",
+    "shared/artifact_contracts/v1.py",
+    "shared/artifact_custody/__init__.py",
+    "shared/artifact_custody/v1.py",
+    "shared/trust_contracts/__init__.py",
+    "shared/trust_contracts/v1.py",
+)
+PHASE_B_SHARED_CI_PATHS = {
+    ".github/workflows/ci.yml",
+    "backend/tests/unit/test_ci_workflow_contract.py",
+    "scripts/ci/classify_changes.py",
+    "scripts/ci/phase_b_projection_compose_smoke.sh",
+    "scripts/ci/validate_json_schemas.py",
+}
+
 
 def test_frontend_and_control_changes_are_independent_from_execution() -> None:
     frontend = classify_phase_a(["frontend/src/App.tsx"])
@@ -147,6 +224,46 @@ def test_postgres_init_selects_only_database_consumers_and_execution_closure() -
 
 def test_unknown_phase_a_deployment_asset_fails_closed() -> None:
     result = classify_phase_a(["deployments/phase-a/unreviewed-entrypoint.sh"])
+    assert result["release_blocked"] is True
+    assert result["unknown_changed"] is True
+    assert result["selected_units"] == []
+
+
+@pytest.mark.parametrize("path", CURRENT_PHASE_B_CHANGED_PATHS)
+def test_current_phase_b_paths_are_preserved_without_phase_a_units(path: str) -> None:
+    result = classify_phase_a([path])
+    assert result["release_blocked"] is False
+
+    if path in PHASE_B_SHARED_CI_PATHS:
+        # Workflow and CI changes retain their existing Phase A verification
+        # behavior because their contracts are intentionally cross-phase.
+        assert "phase-a-preserved-phase-b" not in result["selected_rule_ids"]
+    else:
+        assert result["selected_rule_ids"] == ["phase-a-preserved-phase-b"]
+    if path == ".github/workflows/ci.yml":
+        assert result["selected_units"] == [
+            "control-api",
+            "execution-orchestrator",
+            "frontend-edge",
+        ]
+    else:
+        assert result["selected_units"] == []
+        assert result["dependency_closure"] == []
+
+
+def test_phase_b_only_paths_produce_no_phase_a_build_or_deploy_plan() -> None:
+    paths = [
+        path for path in CURRENT_PHASE_B_CHANGED_PATHS if path not in PHASE_B_SHARED_CI_PATHS
+    ]
+    plan = create_plan(paths, source_commit_sha=SHA)
+    assert plan["decision"] == "CONTRACT_ONLY"
+    assert plan["selected_units"] == []
+    assert plan["build_units"] == []
+    assert plan["deploy_units"] == []
+
+
+def test_unknown_non_phase_b_path_remains_blocked() -> None:
+    result = classify_phase_a(["scripts/phase_b_workers_new/unreviewed.py"])
     assert result["release_blocked"] is True
     assert result["unknown_changed"] is True
     assert result["selected_units"] == []
@@ -371,8 +488,12 @@ def test_full_current_changed_paths_produce_allowed_dependency_closure() -> None
         "gateway-rpc-request-proxy",
         "gateway-rpc-publish-proxy",
     }
-    assert plan["external_artifacts"] == ["windows-ctp-gateway"]
-    assert plan["dependency_closure"]["external_artifacts"] == ["windows-ctp-gateway"]
+    # The current Phase B PR is recognised as preserved by Phase A.  Its shared
+    # workflow still selects regular Phase A verification, but it has no
+    # Windows gateway artifact dependency.
+    assert plan["external_artifacts"] == []
+    assert plan["dependency_closure"]["external_artifacts"] == []
+    assert "phase-a-preserved-phase-b" in plan["selected_rule_ids"]
 
 
 @pytest.mark.parametrize("working_directory", ("repo-root", "external"))
