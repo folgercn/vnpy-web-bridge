@@ -117,10 +117,23 @@ PHASE_C_SHARED_PREFIXES = (
     "docs/architecture/issue-291-phase-c-workflow-",
     "docs/architecture/issue-291-phase-c-fault-",
     "docs/schemas/issue-291-phase-c-release-",
+    "docs/schemas/issue-291-phase-c-image-",
     "docs/schemas/issue-291-phase-c-authorization-",
     "docs/schemas/issue-291-phase-c-signing-",
     "docs/schemas/issue-291-phase-c-fault-",
     "shared/phase_c_workflow/",
+)
+
+# These workers form the fresh-volume projection chain.  A selected producer
+# or consumer must be verified with its real dependent services, while the
+# independent matrix still handles all selected images separately.
+PHASE_B_PROJECTION_UNITS = frozenset(
+    {
+        "artifact-custody",
+        "market-data-worker",
+        "execution-quality-worker",
+        "monitor-worker",
+    }
 )
 
 
@@ -197,6 +210,10 @@ def create_plan(
                 {"phase": item["phase"], "path": item["containerfile"], "code": "missing_containerfile", "rule_ids": [], "unit": item["unit"]}
             )
 
+    phase_b_projection_required = bool(
+        PHASE_B_PROJECTION_UNITS.intersection(phase_b["selected_units"])
+    )
+
     decision = "BLOCKED" if blocked_reasons else ("BUILD_ONLY" if units else "CONTRACT_ONLY")
     plan_core = {
         "schema_version": "web_bridge_issue_291_phase_c_release_matrix_v1",
@@ -215,6 +232,7 @@ def create_plan(
             "selected_units": phase_b["selected_units"],
             "blocked": bool(phase_b["blocked_reasons"]),
         },
+        "phase_b_projection_required": phase_b_projection_required,
         "decision": decision,
         "build_units": units,
         "blocked_reasons": blocked_reasons,
@@ -255,6 +273,11 @@ def main(argv: list[str] | None = None) -> int:
             stream.write("build_matrix=" + json.dumps(matrix, separators=(",", ":")) + "\n")
             stream.write(f"phase_a_selected={'true' if plan['phase_a']['selected_units'] else 'false'}\n")
             stream.write(f"phase_b_selected={'true' if plan['phase_b']['selected_units'] else 'false'}\n")
+            stream.write(
+                "phase_b_projection_required="
+                + ("true" if plan["phase_b_projection_required"] else "false")
+                + "\n"
+            )
     print(json.dumps(plan, sort_keys=True))
     return 1 if plan["decision"] == "BLOCKED" else 0
 

@@ -28,3 +28,10 @@ For every selected entry CI also validates the applicable Phase A or Phase B
 Compose configuration using CI-only placeholders.  The image smoke remains in
 the same matrix job so a service that was not selected cannot be built or
 implicitly smoke-tested through a broad Compose invocation.
+
+The selected image is injected into its exact Compose service before rendered
+configuration is parsed and compared.  Gateway request/publish are one shared
+image pin and both services must equal that same selected reference.  Phase B
+artifact-custody, market-data, execution-quality, or monitor selections also
+run the existing fresh-volume projection dependency group after the selected
+matrix jobs succeed; batch-only producers do not trigger that unrelated group.

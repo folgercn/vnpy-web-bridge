@@ -22,6 +22,9 @@ RECEIPT_SCHEMA = json.loads(
     )
 )
 WORKFLOW = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+COMPOSE_SMOKE = (ROOT / "scripts/ci/phase_c_compose_smoke.sh").read_text(
+    encoding="utf-8"
+)
 
 
 def _units(plan: dict[str, object]) -> set[tuple[str, str]]:
@@ -56,6 +59,15 @@ def test_phase_b_image_change_selects_one_independent_unit() -> None:
     assert plan["decision"] == "BUILD_ONLY"
     assert _units(plan) == {("B", "market-data-worker")}
     assert plan["phase_a"]["selected_units"] == []
+    assert plan["phase_b_projection_required"] is True
+
+
+def test_phase_b_batch_only_change_does_not_run_projection_dependency_group() -> None:
+    plan = create_plan(
+        ["deployments/phase-b/Containerfile.map-producer"], source_commit_sha=SHA
+    )
+    assert _units(plan) == {("B", "map-producer")}
+    assert plan["phase_b_projection_required"] is False
 
 
 def test_unknown_or_ambiguous_phase_inputs_block_whole_matrix(monkeypatch) -> None:
@@ -81,12 +93,14 @@ def test_unknown_or_ambiguous_phase_inputs_block_whole_matrix(monkeypatch) -> No
 
 
 def test_phase_c_shared_contract_change_exercises_all_a_and_b_units() -> None:
-    plan = create_plan(
-        ["docs/schemas/issue-291-phase-c-release-matrix-v1.schema.json"],
-        source_commit_sha=SHA,
-    )
-    assert plan["decision"] == "BUILD_ONLY"
-    assert _units(plan) == set(UNIT_METADATA)
+    for path in (
+        "docs/schemas/issue-291-phase-c-release-matrix-v1.schema.json",
+        "docs/schemas/issue-291-phase-c-image-receipt-v1.schema.json",
+    ):
+        plan = create_plan([path], source_commit_sha=SHA)
+        assert plan["decision"] == "BUILD_ONLY"
+        assert _units(plan) == set(UNIT_METADATA)
+        assert plan["phase_b_projection_required"] is True
 
 
 def test_plan_is_unconditionally_non_deploying_and_requires_receipts() -> None:
@@ -135,4 +149,29 @@ def test_ci_consumes_one_dynamic_matrix_and_keeps_compose_smoke_in_matrix_job() 
     assert "fromJSON(needs.phase-c-release-plan.outputs.build_matrix)" in WORKFLOW
     assert "scripts/ci/phase_c_build_and_smoke.sh" in WORKFLOW
     assert "scripts/ci/phase_c_compose_smoke.sh" in WORKFLOW
+    assert "phase-c-phase-b-projection-smoke:" in WORKFLOW
+    assert "phase_b_projection_required" in WORKFLOW
+    gate = WORKFLOW.split("  ci-gate:\n", maxsplit=1)[1]
+    assert "- phase-c-phase-b-projection-smoke" in gate
     assert "Superseded by the dependency-aware Phase C A+B matrix plan" in WORKFLOW
+
+
+def test_compose_smoke_pins_selected_image_to_exact_service_or_gateway_pair() -> None:
+    assert 'unit="${2:?selected unit required}"' in COMPOSE_SMOKE
+    assert 'FRONTEND_IMAGE="$image"' in COMPOSE_SMOKE
+    assert 'CONTROL_API_IMAGE="$image"' in COMPOSE_SMOKE
+    assert 'EXECUTION_IMAGE="$image"' in COMPOSE_SMOKE
+    assert 'GATEWAY_PROXY_IMAGE="$image"' in COMPOSE_SMOKE
+    for assignment in (
+        'ARTIFACT_CUSTODY_IMAGE="$image"',
+        'C_FAST_PRODUCER_IMAGE="$image"',
+        'EXECUTION_QUALITY_WORKER_IMAGE="$image"',
+        'MAP_PRODUCER_IMAGE="$image"',
+        'MARKET_DATA_WORKER_IMAGE="$image"',
+        'MONITOR_WORKER_IMAGE="$image"',
+        'SIGNING_AUTHORITY_IMAGE="$image"',
+    ):
+        assert assignment in COMPOSE_SMOKE
+    assert '"gateway-rpc-request-proxy",\n        "gateway-rpc-publish-proxy",' in COMPOSE_SMOKE
+    assert 'config --format json > "$rendered"' in COMPOSE_SMOKE
+    assert 'if actual != image:' in COMPOSE_SMOKE

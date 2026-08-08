@@ -4,7 +4,7 @@
   "title": "Issue #291 Phase C build-only release matrix",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "issue_number", "phase", "plan_id", "source_commit_sha", "changed_paths", "phase_a", "phase_b", "decision", "build_units", "blocked_reasons", "automatic_deploy_allowed", "manual_deploy_allowed", "production_allowed", "live_trading_authorized", "countable_forward", "deployed", "accepted"],
+  "required": ["schema_version", "issue_number", "phase", "plan_id", "source_commit_sha", "changed_paths", "phase_a", "phase_b", "phase_b_projection_required", "decision", "build_units", "blocked_reasons", "automatic_deploy_allowed", "manual_deploy_allowed", "production_allowed", "live_trading_authorized", "countable_forward", "deployed", "accepted"],
   "properties": {
     "schema_version": {"const": "web_bridge_issue_291_phase_c_release_matrix_v1"},
     "issue_number": {"const": 291},
@@ -14,6 +14,7 @@
     "changed_paths": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
     "phase_a": {"$ref": "#/$defs/phaseA"},
     "phase_b": {"$ref": "#/$defs/phaseB"},
+    "phase_b_projection_required": {"type": "boolean"},
     "decision": {"enum": ["BLOCKED", "BUILD_ONLY", "CONTRACT_ONLY"]},
     "build_units": {"type": "array", "items": {"$ref": "#/$defs/buildUnit"}, "uniqueItems": true},
     "blocked_reasons": {"type": "array", "items": {"$ref": "#/$defs/blockReason"}},
