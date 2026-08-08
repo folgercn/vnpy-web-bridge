@@ -1,9 +1,7 @@
 name: vnpy-web-bridge-phase-b
 
-# Phase B is an unreleased validation graph.  Phase A remains the production
-# entrypoint; this file is never included by docker-compose.prod.yml.
-include:
-  - path: ./docker-compose.phase-a.yml
+# Standalone, unreleased Phase-B validation graph.  It deliberately has no
+# Phase-A include and no Control, Execution, Gateway, or database service.
 
 services:
   artifact-custody:
@@ -23,7 +21,7 @@ services:
       - phase_b_custody_handoff:/handoff:ro
     read_only: true
     cap_drop: [ALL]
-    security_opt: [no-new-privileges:true]
+    security_opt: ["no-new-privileges:true"]
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=64m,uid=65532,gid=65532,mode=700
     healthcheck:
@@ -50,7 +48,7 @@ services:
       - market_data_state:/var/lib/phase-b/market-data
     read_only: true
     cap_drop: [ALL]
-    security_opt: [no-new-privileges:true]
+    security_opt: ["no-new-privileges:true"]
     tmpfs: [/tmp]
     healthcheck:
       test: ["CMD", "python", "-m", "phase_b_workers.market_data_worker", "--state-dir", "/var/lib/phase-b/market-data", "--ready"]
@@ -78,7 +76,7 @@ services:
       - market_data_state:/var/lib/market-data-stream:ro
     read_only: true
     cap_drop: [ALL]
-    security_opt: [no-new-privileges:true]
+    security_opt: ["no-new-privileges:true"]
     depends_on:
       market-data-worker:
         condition: service_healthy
@@ -112,7 +110,7 @@ services:
       - monitor_projection_state:/var/lib/phase-b/projections:ro
     read_only: true
     cap_drop: [ALL]
-    security_opt: [no-new-privileges:true]
+    security_opt: ["no-new-privileges:true"]
     tmpfs: [/tmp]
     healthcheck:
       test: ["CMD", "python", "-m", "phase_b_workers.monitor_worker", "--state-dir", "/var/lib/phase-b/monitor", "--ready"]
@@ -138,7 +136,7 @@ services:
       - phase_b_map_output:/out
     read_only: true
     cap_drop: [ALL]
-    security_opt: [no-new-privileges:true]
+    security_opt: ["no-new-privileges:true"]
     tmpfs: [/tmp]
 
   c-fast-producer:
@@ -161,7 +159,7 @@ services:
       - phase_b_cfast_output:/out
     read_only: true
     cap_drop: [ALL]
-    security_opt: [no-new-privileges:true]
+    security_opt: ["no-new-privileges:true"]
     tmpfs: [/tmp]
 
   signing-authority:
@@ -175,7 +173,7 @@ services:
     network_mode: none
     read_only: true
     cap_drop: [ALL]
-    security_opt: [no-new-privileges:true]
+    security_opt: ["no-new-privileges:true"]
     volumes:
       - phase_b_map_output:/handoff/map-input:ro
       - phase_b_map_signing_handoff:/handoff/map-signed
@@ -204,6 +202,7 @@ volumes:
   monitor_projection_state:
     driver_opts: *phase_b_private_volume
   phase_b_batch_input:
+    driver_opts: *phase_b_private_volume
   phase_b_map_output:
     driver_opts: *phase_b_private_volume
   phase_b_map_signing_handoff:

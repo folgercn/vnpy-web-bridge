@@ -42,6 +42,7 @@ from c_fast_producer.producer import (
 from c_fast_producer.producer import (
     canonical_json as cfast_canonical_json,
 )
+from c_fast_producer.producer import main as cfast_main
 from map.producer import (
     MAP_CANDIDATE_SCHEMA,
     build_approved_source_fixture,
@@ -54,6 +55,7 @@ from map.producer import (
 from map.producer import (
     _create_only_atomic as create_map_atomic,
 )
+from map.producer import main as map_main
 from test_commodity_c_fast_pure_producer_kernel import source_view
 
 from shared.artifact_contracts.v1 import new_artifact_envelope
@@ -271,6 +273,32 @@ def test_map_acceptance_role_and_keyring_raw_pin_fail_closed(tmp_path: Path) -> 
         if action.dest == "map_acceptance_keyring_sha256"
     )
     assert produce_action.required is True
+
+
+@pytest.mark.parametrize(
+    ("producer_main", "command", "producer_identity"),
+    (
+        (map_main, "--version", "map-producer"),
+        (map_main, "health", "map-producer"),
+        (map_main, "ready", "map-producer"),
+        (cfast_main, "--version", "c-fast-producer"),
+        (cfast_main, "health", "c-fast-producer"),
+        (cfast_main, "ready", "c-fast-producer"),
+    ),
+)
+def test_producer_probe_outputs_explicitly_deny_runtime_capabilities(
+    producer_main, command: str, producer_identity: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert producer_main([command]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["producer_identity"] == producer_identity
+    assert payload["private_key_access"] is False
+    assert payload["trade_rpc_access"] is False
+    assert payload["account_access"] is False
+    assert payload["order_access"] is False
+    assert payload["production_allowed"] is False
+    assert payload["live_trading_authorized"] is False
+    assert payload["countable_forward"] is False
 
 
 def test_create_only_outputs_reject_symlink_parent_and_replacement_race(

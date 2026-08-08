@@ -49,6 +49,18 @@ MAP_SOURCE_ENVELOPE_STATUS = "APPROVED_IMMUTABLE_SOURCE"
 MAP_OUTPUT_CONTRACT_SCHEMA = "commodity_map_to_c_fast_projection_contract_v1"
 MAX_INPUT_BYTES = 16 * 1024 * 1024
 
+# These batch probes are consumed by the offline scheduler and must state the
+# absence of authority, rather than leaving it to an image or network audit.
+_CAPABILITY_DENIALS = {
+    "private_key_access": False,
+    "trade_rpc_access": False,
+    "account_access": False,
+    "order_access": False,
+    "production_allowed": False,
+    "live_trading_authorized": False,
+    "countable_forward": False,
+}
+
 _MAP_OUTPUT_FIELDS = (
     "product",
     "sector",
@@ -684,8 +696,8 @@ def _cli_json(payload: Mapping[str, Any]) -> None:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="offline MAP signal producer")
-    parser.add_argument("--version", action="version", version=f"{MAP_PRODUCER_IDENTITY} {MAP_PRODUCER_VERSION}")
-    sub = parser.add_subparsers(dest="command", required=True)
+    parser.add_argument("--version", action="store_true", help="print the machine-readable producer version")
+    sub = parser.add_subparsers(dest="command")
     sub.add_parser("health", help="print liveness for the batch image")
     sub.add_parser("ready", help="print readiness for the batch image")
     produce = sub.add_parser("produce", help="create one unsigned MAP candidate")
@@ -696,15 +708,21 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
+    parser = _parser()
+    args = parser.parse_args(argv)
     try:
+        if args.version:
+            _cli_json({"status": "version", "producer_identity": MAP_PRODUCER_IDENTITY, "version": MAP_PRODUCER_VERSION, **_CAPABILITY_DENIALS})
+            return 0
+        if args.command is None:
+            parser.error("a command is required")
         if args.command == "health":
-            _cli_json({"status": "ok", "producer_identity": MAP_PRODUCER_IDENTITY, "version": MAP_PRODUCER_VERSION})
+            _cli_json({"status": "ok", "producer_identity": MAP_PRODUCER_IDENTITY, "version": MAP_PRODUCER_VERSION, **_CAPABILITY_DENIALS})
             return 0
         if args.command == "ready":
             _module_sha256(kernel)
             _producer_sha256()
-            _cli_json({"status": "ready", "producer_identity": MAP_PRODUCER_IDENTITY, "version": MAP_PRODUCER_VERSION})
+            _cli_json({"status": "ready", "producer_identity": MAP_PRODUCER_IDENTITY, "version": MAP_PRODUCER_VERSION, **_CAPABILITY_DENIALS})
             return 0
         source_raw = _read_pinned_file(args.source)
         result = produce_map_candidate(source_raw)

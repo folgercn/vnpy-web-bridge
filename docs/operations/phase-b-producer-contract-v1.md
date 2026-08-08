@@ -51,6 +51,13 @@ Both outputs are unsigned, research-only candidates.  All authority booleans
 are fixed to `false`; neither job creates an acceptance, installs an artifact,
 or changes a runtime state.
 
+Every MAP and C_FAST `--version`, `health`, and `ready` response is canonical
+JSON and explicitly reports the following denials: `private_key_access=false`,
+`trade_rpc_access=false`, `account_access=false`, `order_access=false`,
+`production_allowed=false`, `live_trading_authorized=false`, and
+`countable_forward=false`.  A scheduler must treat these declarations as a
+boundary assertion, not an authority grant.
+
 ## File and replay rules
 
 The CLI accepts explicit source and predecessor file paths.  It rejects
@@ -86,6 +93,41 @@ python -m c_fast_producer.producer ready
 `produce` is a batch action requiring explicit `--source`, `--map-input` (for
 C_FAST) and `--output`; it has no listener or HTTP mode.  The image entrypoint
 defaults to the `ready` probe so schedulers can run a non-mutating check.
+
+## Compose acceptance
+
+`deployments/docker-compose.phase-b.yml` is a standalone, offline Phase-B
+graph.  It has seven units: artifact custody, market-data worker,
+execution-quality worker, monitor worker, MAP, C_FAST, and the offline signing
+authority.  It does not include Phase A or declare Control, Execution,
+Gateway, or database services.  MAP and C_FAST are `batch` profile jobs; the
+signing authority is an `offline-signing` profile job.  Their canonical
+handoff is MAP (write) -> offline signing (read MAP/write signed MAP) -> C_FAST
+(read signed MAP/write C_FAST) -> offline signing (read C_FAST/write signed
+C_FAST) -> custody (read-only).
+
+All batch handoff volumes are UID/GID 65532 tmpfs volumes with mode `0700`.
+Each producer gets a distinct writable output volume; a volume shared by MAP
+and C_FAST is mounted read-only by both, never read-write.  All producer and
+signing jobs use `network_mode: none`; custody has an isolated internal
+network.
+
+Before any Compose command, set the exact raw SHA-256 pin for the canonical
+MAP-acceptance keyring.  Compose intentionally refuses to render the C_FAST
+job when it is absent.
+
+```bash
+export MAP_ACCEPTANCE_KEYRING_SHA256='<exact 64-character keyring SHA-256>'
+docker compose -f deployments/docker-compose.phase-b.yml config
+docker compose -f deployments/docker-compose.phase-b.yml --profile batch run --rm --no-deps map-producer --version
+docker compose -f deployments/docker-compose.phase-b.yml --profile batch run --rm --no-deps map-producer ready
+docker compose -f deployments/docker-compose.phase-b.yml --profile batch run --rm --no-deps c-fast-producer --version
+docker compose -f deployments/docker-compose.phase-b.yml --profile batch run --rm --no-deps c-fast-producer ready
+```
+
+Those are non-mutating image/probe acceptance commands.  Running `produce` or
+an offline-signing ceremony requires explicitly staged immutable input and
+handoff artifacts; it is not part of a health check.
 
 ## Image boundary
 
