@@ -871,6 +871,7 @@ jobs:
       - phase-a-release-plan
       - phase-a-build-check
       - phase-b-ci
+      - phase-b-projection-smoke
     runs-on: ubuntu-latest
     steps:
       - name: Require every applicable CI job
