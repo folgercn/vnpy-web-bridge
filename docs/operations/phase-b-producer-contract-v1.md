@@ -113,11 +113,13 @@ signing jobs use `network_mode: none`; custody has an isolated internal
 network.
 
 Before any Compose command, set the exact raw SHA-256 pin for the canonical
-MAP-acceptance keyring.  Compose intentionally refuses to render the C_FAST
-job when it is absent.
+MAP-acceptance keyring **and an explicit positive custody writer epoch**.
+Compose intentionally refuses to render either protected command when either
+value is absent; the epoch is a writer fence and must not be silently reset.
 
 ```bash
 export MAP_ACCEPTANCE_KEYRING_SHA256='<exact 64-character keyring SHA-256>'
+export CUSTODY_WRITER_EPOCH='<positive monotonically fenced integer>'
 docker compose -f deployments/docker-compose.phase-b.yml config
 docker compose -f deployments/docker-compose.phase-b.yml --profile batch run --rm --no-deps map-producer --version
 docker compose -f deployments/docker-compose.phase-b.yml --profile batch run --rm --no-deps map-producer ready

@@ -52,7 +52,7 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
-    tmpfs: [/tmp:rw,noexec,nosuid,size=64m,uid=65532,gid=65532,mode=0700]
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=64m,uid=65532,gid=65532,mode=0700"]
     healthcheck:
       test: ["CMD", "python", "-m", "phase_b_workers.market_data_worker", "--state-dir", "/var/lib/phase-b/market-data", "--ready"]
       interval: 10s
@@ -85,7 +85,7 @@ services:
     depends_on:
       market-data-worker:
         condition: service_healthy
-    tmpfs: [/tmp:rw,noexec,nosuid,size=64m,uid=65532,gid=65532,mode=0700]
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=64m,uid=65532,gid=65532,mode=0700"]
     healthcheck:
       test: ["CMD", "python", "-m", "phase_b_workers.execution_quality_worker", "--state-dir", "/var/lib/phase-b/execution-quality", "--ready"]
       interval: 10s
@@ -118,7 +118,7 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
-    tmpfs: [/tmp:rw,noexec,nosuid,size=64m,uid=65532,gid=65532,mode=0700]
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=64m,uid=65532,gid=65532,mode=0700"]
     healthcheck:
       test: ["CMD", "python", "-m", "phase_b_workers.monitor_worker", "--state-dir", "/var/lib/phase-b/monitor", "--ready"]
       interval: 10s
@@ -144,7 +144,7 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
-    tmpfs: [/tmp:rw,noexec,nosuid,size=64m,uid=65532,gid=65532,mode=0700]
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=64m,uid=65532,gid=65532,mode=0700"]
 
   c-fast-producer:
     profiles: [batch]
@@ -167,7 +167,7 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
-    tmpfs: [/tmp:rw,noexec,nosuid,size=64m,uid=65532,gid=65532,mode=0700]
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=64m,uid=65532,gid=65532,mode=0700"]
 
   signing-authority:
     profiles: [offline-signing]
@@ -186,7 +186,7 @@ services:
       - phase_b_map_signing_handoff:/handoff/map-signed
       - phase_b_cfast_output:/handoff/cfast-input:ro
       - phase_b_custody_handoff:/handoff/cfast-signed
-    tmpfs: [/tmp:rw,noexec,nosuid,size=64m,uid=65532,gid=65532,mode=0700]
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=64m,uid=65532,gid=65532,mode=0700"]
     # No key mount, key path, key environment variable, HTTP port, or public
     # endpoint.  An approved offline ceremony passes an inherited fd only.
 

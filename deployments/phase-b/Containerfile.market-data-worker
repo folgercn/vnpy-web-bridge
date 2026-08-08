@@ -22,10 +22,11 @@ RUN python -m compileall -q /app/phase_b_workers \
     && groupadd --system --gid 65532 phaseb \
     && useradd --system --uid 65532 --gid 65532 --no-create-home \
         --home-dir /nonexistent --shell /usr/sbin/nologin phaseb \
-    && mkdir -p /var/lib/phase-b/market-data \
+    && mkdir -p /var/lib/phase-b/market-data /var/lib/phase-b/projection \
     && chown -R 65532:65532 /var/lib/phase-b \
-    && chmod 0700 /var/lib/phase-b /var/lib/phase-b/market-data
+    && chmod 0700 /var/lib/phase-b /var/lib/phase-b/market-data /var/lib/phase-b/projection
 
+VOLUME ["/var/lib/phase-b/market-data", "/var/lib/phase-b/projection"]
 USER 65532:65532
 ENTRYPOINT ["python", "-m", "phase_b_workers.market_data_worker"]
 CMD ["--health"]

@@ -509,6 +509,7 @@ jobs:
           MARKET_DATA_WORKER_IMAGE: vnpy-web-bridge-market-data-worker:phase-b-${{ github.sha }}
           MONITOR_WORKER_IMAGE: vnpy-web-bridge-monitor-worker:phase-b-${{ github.sha }}
           SIGNING_AUTHORITY_IMAGE: vnpy-web-bridge-signing-authority:phase-b-${{ github.sha }}
+          CUSTODY_WRITER_EPOCH: "1"
           MAP_ACCEPTANCE_KEYRING_SHA256: "0000000000000000000000000000000000000000000000000000000000000000"
           CONTROL_DATABASE_URL: postgresql://control:phase-b-control@postgres:5432/vnpy
           EXECUTION_DATABASE_URL: postgresql://execution:phase-b-execution@postgres:5432/vnpy
@@ -563,25 +564,40 @@ jobs:
           case "${{ matrix.smoke }}" in
             artifact-custody)
               volume="phase-b-artifact-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-              trap 'docker volume rm -f "$volume" >/dev/null || true' EXIT
+              projection="${volume}-projection"
+              trap 'docker volume rm -f "$volume" "$projection" >/dev/null || true' EXIT
               docker volume create "$volume" >/dev/null
-              docker run --rm --user 0 -v "$volume:/state" --entrypoint /bin/sh "$image" -c 'chown 65532:65532 /state && chmod 0700 /state'
+              docker volume create "$projection" >/dev/null
               for command in version health ready; do
-                docker run "${safe[@]}" -v "$volume:/state" "$image" --root /state --schema-dir /app/docs/schemas "$command"
+                docker run "${safe[@]}" -v "$volume:/var/lib/phase-b-custody" -v "$projection:/var/lib/phase-b/projection" "$image" --root /var/lib/phase-b-custody --schema-dir /app/docs/schemas "$command"
               done
               ;;
             worker)
               volume="phase-b-${{ matrix.image }}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
               trap 'docker volume rm -f "$volume" >/dev/null || true' EXIT
               docker volume create "$volume" >/dev/null
-              docker run --rm --user 0 -v "$volume:/state" --entrypoint /bin/sh "$image" -c 'chown 65532:65532 /state && chmod 0700 /state'
-              state=(-v "$volume:/state")
-              for command in --health --ready --version; do
-                docker run "${safe[@]}" "${state[@]}" "$image" --state-dir /state "$command"
+              commands=(--health --ready --version)
+              case "${{ matrix.image }}" in
+                market-data-worker) state_dir=/var/lib/phase-b/market-data ;;
+                execution-quality-worker) state_dir=/var/lib/phase-b/execution-quality ;;
+                monitor-worker)
+                  state_dir=/var/lib/phase-b/monitor
+                  # Projection absence must fail closed in the isolated image.
+                  # Fresh-volume monitor readiness is proven by the standalone
+                  # compose smoke after all three producers have written.
+                  commands=(--health --version)
+                  ;;
+                *) echo "unknown worker image" >&2; exit 2 ;;
+              esac
+              state=(-v "$volume:$state_dir")
+              for command in "${commands[@]}"; do
+                docker run "${safe[@]}" "${state[@]}" "$image" --state-dir "$state_dir" "$command"
               done
               # The same named volume is deliberately reused: readiness is a
               # bounded restart recovery check, never tmpfs-only state.
-              docker run "${safe[@]}" "${state[@]}" "$image" --state-dir /state --ready
+              if [ "${{ matrix.image }}" != monitor-worker ]; then
+                docker run "${safe[@]}" "${state[@]}" "$image" --state-dir "$state_dir" --ready
+              fi
               ;;
             batch-producer)
               docker run "${safe[@]}" "$image" health
@@ -598,6 +614,23 @@ jobs:
               exit 2
               ;;
           esac
+
+  phase-b-projection-smoke:
+    name: Issue #291 Phase B fresh-volume projection smoke
+    needs: phase-b-ci
+    if: needs.phase-b-ci.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Build standalone graph on fresh named volumes and prove monitor readiness
+        env:
+          CUSTODY_WRITER_EPOCH: "1"
+          MAP_ACCEPTANCE_KEYRING_SHA256: "0000000000000000000000000000000000000000000000000000000000000000"
+        run: scripts/ci/phase_b_projection_compose_smoke.sh
 
   backend:
     name: Backend tests (shard ${{ matrix.shard }})

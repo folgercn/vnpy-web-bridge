@@ -31,14 +31,26 @@ receipt append 都是 create-only：临时文件写满并 fsync，原子发布�
 fencing token 和上一 receipt hash 防止 replay、TOCTOU、双 writer 和 stale writer。
 `publish-signed` 是签名包装进入 custody 的唯一 handoff：它加载 domain 和原始 SHA-256
 均被钉死的 public keyring，验证 domain/key version/key purpose/signature/validity 后，
-将完整 signed wrapper 与 envelope 一起写入不可变 receipt record。receipt 继续绑定原始
-artifact 的 canonical/raw SHA-256、predecessor 与 lineage；readback 不会丢弃签名。
+将完整 signed wrapper、已验证的 public-only keyring snapshot、expected domain/key purpose
+和该 keyring canonical raw SHA-256 pin 一起写入不可变 receipt record。receipt 继续绑定原始
+artifact 的 canonical/raw SHA-256、predecessor 与 lineage；audit、restart 和 readback 都会
+用记录内的 snapshot/pin/domain/purpose 重新严格验证 wrapper 签名，不能依赖后来可变的
+keyring 路径。readback 不会丢弃签名。
 writer epoch 不允许默认值：持有 single-writer lock 的同一 writer 可用当前最高 epoch
 重启已存在账本，但 lower epoch、不同 writer 的同 epoch 或 ledger fork 一律拒绝。
 
 Custody 不持有私钥，不调用 signer，不拥有订单或交易 RPC。Execution 只能提交带
 fencing/idempotency 的 consume/revoke request，并读取 pinned receipt；Control API
 只能发 typed request/读 metadata，不能直接写 custody volume。
+
+### 签名审计威胁边界
+
+Custody 的 append chain 检测普通 record/hash 重写；即使攻击者能重算可变 receipt record
+hash、wrapper hash 或后续 `previous_record_sha256`，也无法在没有对应私钥的情况下修改
+signed wrapper、public keyring snapshot、expected domain/purpose 或 raw pin 后仍通过 Ed25519
+复验。此保证不把 custody 变成私钥保护、外部 WORM 或独立高水位服务：拥有签名私钥的攻击者
+仍可重新签发，拥有 custody 文件系统写权限的攻击者仍可删除整个账本；两类风险必须由离线
+signing ceremony 和卷外保留/审计控制处理。
 
 ## 目录与实现
 

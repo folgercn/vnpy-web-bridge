@@ -26,6 +26,7 @@ RUN python -m compileall -q /app/phase_b_workers \
     && chown -R 65532:65532 /var/lib/phase-b \
     && chmod 0700 /var/lib/phase-b /var/lib/phase-b/monitor /var/lib/phase-b/projections
 
+VOLUME ["/var/lib/phase-b/monitor"]
 USER 65532:65532
 ENTRYPOINT ["python", "-m", "phase_b_workers.monitor_worker"]
 CMD ["--health"]

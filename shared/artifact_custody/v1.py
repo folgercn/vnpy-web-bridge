@@ -171,7 +171,10 @@ class ArtifactCustody:
                 flags |= os.O_NOFOLLOW
             self._root_fd = os.open(self.root, flags)
             root_stat = os.fstat(self._root_fd)
-            if not stat.S_ISDIR(root_stat.st_mode) or stat.S_IMODE(root_stat.st_mode) != 0o700:
+            if (
+                not stat.S_ISDIR(root_stat.st_mode)
+                or stat.S_IMODE(root_stat.st_mode) != 0o700
+            ):
                 raise CustodyError("CUSTODY_ROOT_PERMISSIONS_INVALID")
             lock_flags = os.O_RDWR | os.O_CREAT | os.O_CLOEXEC
             if hasattr(os, "O_NOFOLLOW"):
@@ -218,9 +221,8 @@ class ArtifactCustody:
             if match is None:
                 raise CustodyError("CUSTODY_EPOCH_LEDGER_CORRUPT")
             payload, _ = self._read_json(self._dirs["epochs"], name)
-            if (
-                not isinstance(payload.get("writer_epoch"), int)
-                or isinstance(payload["writer_epoch"], bool)
+            if not isinstance(payload.get("writer_epoch"), int) or isinstance(
+                payload["writer_epoch"], bool
             ):
                 raise CustodyError("CUSTODY_EPOCH_LEDGER_CORRUPT")
             expected = {
@@ -288,7 +290,9 @@ class ArtifactCustody:
                     chunks.append(chunk)
                     remaining -= len(chunk)
                 after = os.fstat(fd)
-                if _identity(before) != _identity(before_path) or _identity(before) != _identity(after):
+                if _identity(before) != _identity(before_path) or _identity(
+                    before
+                ) != _identity(after):
                     raise CustodyError("CUSTODY_FILE_CHANGED_DURING_READ")
                 result = b"".join(chunks)
             finally:
@@ -395,6 +399,10 @@ class ArtifactCustody:
                 "artifact",
                 "signed_artifact",
                 "signed_artifact_sha256",
+                "signed_artifact_keyring",
+                "signed_artifact_keyring_raw_sha256",
+                "signed_artifact_expected_domain",
+                "signed_artifact_expected_key_purpose",
                 "receipt",
                 "receipt_sha256",
                 "previous_record_sha256",
@@ -450,13 +458,65 @@ class ArtifactCustody:
                 if signed is not None:
                     if not isinstance(signed, dict):
                         raise CustodyError("CUSTODY_SIGNED_ARTIFACT_INVALID")
+                    keyring = record["signed_artifact_keyring"]
+                    keyring_pin = record["signed_artifact_keyring_raw_sha256"]
+                    expected_domain = record["signed_artifact_expected_domain"]
+                    expected_key_purpose = record[
+                        "signed_artifact_expected_key_purpose"
+                    ]
+                    if (
+                        not isinstance(keyring, dict)
+                        or not isinstance(keyring_pin, str)
+                        or not isinstance(expected_domain, str)
+                        or not isinstance(expected_key_purpose, str)
+                        or expected_domain not in KEY_DOMAINS
+                        or not expected_key_purpose
+                        or keyring_pin != sha256_bytes(canonical_json_line(keyring))
+                    ):
+                        raise CustodyError(
+                            "CUSTODY_SIGNED_ARTIFACT_TRUST_SNAPSHOT_INVALID"
+                        )
+                    try:
+                        verified = verify_signed_artifact(
+                            signed,
+                            keyring=keyring,
+                            expected_domain=expected_domain,
+                            expected_key_purpose=expected_key_purpose,
+                        )
+                    except ContractError as exc:
+                        raise CustodyError(
+                            f"CUSTODY_SIGNED_ARTIFACT_{exc.code}"
+                        ) from exc
                     signed_artifact = signed.get("artifact")
-                    if signed_artifact != artifact or signed_sha != sha256_bytes(canonical_json_line(signed)):
+                    if (
+                        verified != signed
+                        or signed_artifact != artifact
+                        or signed_sha != sha256_bytes(canonical_json_line(signed))
+                    ):
                         raise CustodyError("CUSTODY_SIGNED_ARTIFACT_MISMATCH")
-                elif signed_sha is not None:
+                elif any(
+                    record[key] is not None
+                    for key in (
+                        "signed_artifact_sha256",
+                        "signed_artifact_keyring",
+                        "signed_artifact_keyring_raw_sha256",
+                        "signed_artifact_expected_domain",
+                        "signed_artifact_expected_key_purpose",
+                    )
+                ):
                     raise CustodyError("CUSTODY_SIGNED_ARTIFACT_MISMATCH")
                 artifacts[artifact["artifact_id"]] = artifact
-            elif inline is not None or signed is not None or signed_sha is not None:
+            elif inline is not None or any(
+                record[key] is not None
+                for key in (
+                    "signed_artifact",
+                    "signed_artifact_sha256",
+                    "signed_artifact_keyring",
+                    "signed_artifact_keyring_raw_sha256",
+                    "signed_artifact_expected_domain",
+                    "signed_artifact_expected_key_purpose",
+                )
+            ):
                 raise CustodyError("CUSTODY_RECORD_ARTIFACT_INVALID")
             receipt_raw = canonical_json_line(receipt)
             if record["receipt_sha256"] != sha256_bytes(receipt_raw):
@@ -612,6 +672,10 @@ class ArtifactCustody:
         correlation_id: str,
         expected_version: int,
         signed_artifact: Mapping[str, Any] | None = None,
+        signed_artifact_keyring: Mapping[str, Any] | None = None,
+        signed_artifact_keyring_raw_sha256: str | None = None,
+        signed_artifact_expected_domain: str | None = None,
+        signed_artifact_expected_key_purpose: str | None = None,
     ) -> dict[str, Any]:
         actor_id, idempotency_key, correlation_id, expected_version = _request_fields(
             actor_id=actor_id,
@@ -655,10 +719,32 @@ class ArtifactCustody:
             "writer_id": self.writer_id,
             "writer_epoch": self.writer_epoch,
             "artifact": dict(artifact) if receipt_type == "publish" else None,
-            "signed_artifact": dict(signed_artifact) if receipt_type == "publish" and signed_artifact is not None else None,
+            "signed_artifact": dict(signed_artifact)
+            if receipt_type == "publish" and signed_artifact is not None
+            else None,
             "signed_artifact_sha256": (
                 sha256_bytes(canonical_json_line(signed_artifact))
                 if receipt_type == "publish" and signed_artifact is not None
+                else None
+            ),
+            "signed_artifact_keyring": (
+                dict(signed_artifact_keyring)
+                if receipt_type == "publish" and signed_artifact_keyring is not None
+                else None
+            ),
+            "signed_artifact_keyring_raw_sha256": (
+                signed_artifact_keyring_raw_sha256
+                if receipt_type == "publish" and signed_artifact_keyring is not None
+                else None
+            ),
+            "signed_artifact_expected_domain": (
+                signed_artifact_expected_domain
+                if receipt_type == "publish" and signed_artifact_keyring is not None
+                else None
+            ),
+            "signed_artifact_expected_key_purpose": (
+                signed_artifact_expected_key_purpose
+                if receipt_type == "publish" and signed_artifact_keyring is not None
                 else None
             ),
             "receipt": receipt,
@@ -746,7 +832,7 @@ class ArtifactCustody:
         if expected_domain not in KEY_DOMAINS:
             raise CustodyError("CUSTODY_TRUST_DOMAIN_INVALID")
         try:
-            keyring, _raw, _digest = load_keyring(
+            keyring, _raw, digest = load_keyring(
                 keyring_path,
                 expected_domain=expected_domain,
                 expected_raw_sha256=expected_keyring_raw_sha256,
@@ -783,7 +869,9 @@ class ArtifactCustody:
             return replay
         self._check_expected(state, expected_version)
         self._validate_lineage(envelope, state)
-        self._validate_transition(state, receipt_type="publish", artifact_id=envelope["artifact_id"])
+        self._validate_transition(
+            state, receipt_type="publish", artifact_id=envelope["artifact_id"]
+        )
         return self._append(
             "publish",
             envelope,
@@ -792,12 +880,19 @@ class ArtifactCustody:
             correlation_id=correlation_id,
             expected_version=expected_version,
             signed_artifact=verified,
+            signed_artifact_keyring=keyring,
+            signed_artifact_keyring_raw_sha256=digest,
+            signed_artifact_expected_domain=expected_domain,
+            signed_artifact_expected_key_purpose=expected_key_purpose,
         )
 
     def read_signed_artifact(self, artifact_id: str) -> dict[str, Any]:
         """Read the canonical signed wrapper retained with a publish receipt."""
 
         wanted = _safe_id(artifact_id, "CUSTODY_ARTIFACT_ID_INVALID")
+        # Audit performs the strict snapshot pin/domain/purpose/signature
+        # verification before exposing a retained wrapper.
+        self._load_state()
         for name in sorted(os.listdir(self._dirs["receipts"])):
             record, _raw = self._read_json(self._dirs["receipts"], name)
             signed = record.get("signed_artifact")
@@ -806,7 +901,9 @@ class ArtifactCustody:
                 and isinstance(record.get("artifact"), dict)
                 and record["artifact"].get("artifact_id") == wanted
             ):
-                if record.get("signed_artifact_sha256") != sha256_bytes(canonical_json_line(signed)):
+                if record.get("signed_artifact_sha256") != sha256_bytes(
+                    canonical_json_line(signed)
+                ):
                     raise CustodyError("CUSTODY_SIGNED_ARTIFACT_MISMATCH")
                 return dict(signed)
         raise CustodyError("CUSTODY_SIGNED_ARTIFACT_NOT_FOUND")
@@ -830,7 +927,9 @@ class ArtifactCustody:
             expected_version=expected_version,
         )
         state = self._load_state()
-        artifact = state.artifacts.get(_safe_id(artifact_id, "CUSTODY_ARTIFACT_ID_INVALID"))
+        artifact = state.artifacts.get(
+            _safe_id(artifact_id, "CUSTODY_ARTIFACT_ID_INVALID")
+        )
         if artifact is None:
             raise CustodyError("CUSTODY_ARTIFACT_NOT_FOUND")
         replay = self._replay(
