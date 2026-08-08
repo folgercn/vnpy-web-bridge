@@ -443,42 +443,63 @@ class FinalExecutionRuntime:
         self.orchestrator.emergency_stop(reason=reason)
         self.orchestrator.fail_closed_halt(reason)
 
-    def _complete_after_reconcile(self) -> None:
-        """Archive only a terminal, freshly reconciled final target plan."""
+    def _finalization_evidence(self) -> dict[str, str] | None:
+        """Re-verify runtime-only proof before a reconcile can complete a plan."""
 
         state = self.orchestrator.repository.snapshot()
         active = state["plan"]
         if active.get("state") != "ACTIVE":
-            return
+            return None
         plan = self._plan(
             str(active["plan_id"]), plan_hash=str(active["plan_hash"])
         )
-        plan_intents = [
-            raw
-            for raw in state["send_intents"].values()
-            if isinstance(raw, Mapping)
-            and raw.get("plan_id") == plan.plan_id
-            and raw.get("plan_hash") == plan.plan_hash
-        ]
-        terminal_states = {"TERMINAL", "RECONCILED", "CANCELLED"}
-        if not plan_intents or any(
-            raw.get("state") not in terminal_states for raw in plan_intents
+        proof = {
+            field: active.get(field)
+            for field in (
+                "preview_receipt_id",
+                "preview_receipt_sha256",
+                "preview_artifact_id",
+                "preview_artifact_sha256",
+            )
+        }
+        if (
+            active.get("preview_mode") != "simnow_preview"
+            or any(not isinstance(value, str) for value in proof.values())
+            or proof["preview_receipt_id"] == "unknown00"
+            or proof["preview_receipt_sha256"] == "0" * 64
+            or proof["preview_artifact_id"] == "unknown00"
+            or proof["preview_artifact_sha256"] == "0" * 64
         ):
-            return
-        final_hash = state["broker"].get("position_snapshot_hash")
-        if final_hash != plan.raw["expected_after_position_hash"]:
-            self.orchestrator.fail_closed_halt(
-                "SIMNOW final position does not match immutable target plan"
-            )
-            raise PlanRejected(
-                "SIMNOW final position does not match immutable target plan"
-            )
-        self.orchestrator.complete_active_plan(
-            plan_id=plan.plan_id,
-            plan_hash=plan.plan_hash,
-            receipt_id=str(plan.raw["authority_receipt_id"]),
-            final_position_hash=final_hash,
+            raise PlanRejected("SIMNOW active plan lacks durable preview proof")
+        preview_plan, preview_receipt = self._preview_from_custody(
+            str(proof["preview_receipt_id"])
         )
+        if (
+            preview_plan.plan_hash != plan.plan_hash
+            or preview_receipt.receipt_sha256 != proof["preview_receipt_sha256"]
+            or preview_receipt.artifact_id != proof["preview_artifact_id"]
+            or preview_receipt.artifact_sha256 != proof["preview_artifact_sha256"]
+        ):
+            raise PlanRejected("SIMNOW preview custody evidence changed after restart")
+        return {
+            "plan_id": plan.plan_id,
+            "plan_hash": plan.plan_hash,
+            "expected_after_position_hash": str(
+                plan.raw["expected_after_position_hash"]
+            ),
+            "authority_artifact_id": str(plan.raw["authority_artifact_id"]),
+            "authority_artifact_sha256": str(
+                plan.raw["authority_artifact_sha256"]
+            ),
+            "authority_receipt_id": str(plan.raw["authority_receipt_id"]),
+            "authority_receipt_sha256": str(
+                plan.raw["authority_receipt_sha256"]
+            ),
+            "preview_receipt_id": str(proof["preview_receipt_id"]),
+            "preview_receipt_sha256": str(proof["preview_receipt_sha256"]),
+            "preview_artifact_id": str(proof["preview_artifact_id"]),
+            "preview_artifact_sha256": str(proof["preview_artifact_sha256"]),
+        }
 
     def process_command(
         self, command: CommandEnvelope | Mapping[str, Any]
@@ -500,16 +521,16 @@ class FinalExecutionRuntime:
                 or envelope.payload["artifact_hash"] != receipt.artifact_sha256
             ):
                 raise PlanRejected("SIMNOW preview plan/artifact hash mismatch")
-            response = self.orchestrator.process_command(envelope)
-            if response.result.get("accepted") is True:
-                self.orchestrator.bind_simnow_preview_evidence(
-                    plan_hash=plan.plan_hash,
-                    receipt_id=receipt.receipt_id,
-                    receipt_sha256=receipt.receipt_sha256,
-                    artifact_id=receipt.artifact_id,
-                    artifact_sha256=receipt.artifact_sha256,
-                )
-            return response
+            return self.orchestrator.process_command(
+                envelope,
+                preview_evidence={
+                    "plan_hash": plan.plan_hash,
+                    "receipt_id": receipt.receipt_id,
+                    "receipt_sha256": receipt.receipt_sha256,
+                    "artifact_id": receipt.artifact_id,
+                    "artifact_sha256": receipt.artifact_sha256,
+                },
+            )
         if envelope.command == "enable":
             plan = self.plans.find_authority(
                 envelope.payload["authority_artifact_id"],
@@ -594,10 +615,14 @@ class FinalExecutionRuntime:
                             "SIMNOW runner order was rejected or has unknown outcome"
                         )
             return response
-        response = self.orchestrator.process_command(envelope)
-        if envelope.command == "reconcile" and response.result.get("accepted") is True:
-            self._complete_after_reconcile()
-        return response
+        finalization_evidence = (
+            self._finalization_evidence()
+            if envelope.command == "reconcile"
+            else None
+        )
+        return self.orchestrator.process_command(
+            envelope, finalization_evidence=finalization_evidence
+        )
 
     def _token(
         self, token: LeaderToken | Mapping[str, Any] | None

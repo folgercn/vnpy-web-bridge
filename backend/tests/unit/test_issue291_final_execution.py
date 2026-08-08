@@ -605,21 +605,52 @@ def test_simnow_preview_fetches_receipt_then_exact_custody_artifact() -> None:
         custody=Custody(),
         allowed_scope=authority["scope"],
     )
-    result = service.process_command(
-        command(
-            "preview",
-            "preview-final-0001",
-            repo.state_version,
-            {
-                "plan_hash": target["plan_hash"],
-                "artifact_hash": artifact_hash,
-                "mode": "simnow_preview",
-                "receipt_id": plan_receipt["receipt_id"],
-            },
-        )
+    envelope = command(
+        "preview",
+        "preview-final-0001",
+        repo.state_version,
+        {
+            "plan_hash": target["plan_hash"],
+            "artifact_hash": artifact_hash,
+            "mode": "simnow_preview",
+            "receipt_id": plan_receipt["receipt_id"],
+        },
     )
+    before = repo.state_version
+    result = service.process_command(envelope)
     assert result.result["accepted"] is True
     assert service.plans.get(target["plan_id"]).plan_hash == target["plan_hash"]
+    state = repo.snapshot()
+    assert state["state_version"] == before + 1 == result.receipt["state_version"]
+    assert result.result["plan"] == state["plan"]
+    assert result.receipt["result"]["plan"] == state["plan"]
+    assert state["plan"]["preview_receipt_sha256"] != "0" * 64
+    assert state["plan"]["preview_artifact_sha256"] == artifact_hash
+    retry = service.process_command(envelope)
+    assert retry.reused is True
+    assert retry.receipt == result.receipt
+    assert repo.state_version == before + 1
+
+
+def test_core_rejects_simnow_preview_without_internal_proof() -> None:
+    _service, core, repo, _gateway, _ = runtime()
+    before = repo.state_version
+    with pytest.raises(MutationRejected, match="verified internal evidence"):
+        core.process_command(
+            command(
+                "preview",
+                "preview-core-only01",
+                before,
+                {
+                    "plan_hash": "a" * 64,
+                    "artifact_hash": "b" * 64,
+                    "mode": "simnow_preview",
+                    "receipt_id": "custody-plan-000001",
+                },
+            )
+        )
+    assert repo.state_version == before
+    assert repo.snapshot()["plan"]["state"] == "IDLE"
 
 
 @pytest.mark.parametrize(
@@ -738,8 +769,12 @@ def test_reconcile_final_position_hash_completes_or_halts(
         },
     )
     if should_complete:
-        service.process_command(command_value)
+        before = repo.state_version
+        response = service.process_command(command_value)
         state = repo.snapshot()
+        assert state["state_version"] == before + 1 == response.receipt["state_version"]
+        assert response.result == response.receipt["result"]
+        assert response.result["finalization"]["plan"] == state["plan"]
         assert state["plan"]["state"] == "TERMINAL"
         assert state["authority"]["state"] == "REVOKED"
         archive = state["terminal_archive"][-1]
@@ -747,9 +782,17 @@ def test_reconcile_final_position_hash_completes_or_halts(
         assert archive["plan_hash"] == target["plan_hash"]
         assert archive["receipt_id"] == target["authority_receipt_id"]
         assert archive["final_position_hash"] == "0" * 64
+        archive_count = len(state["terminal_archive"])
+        retry = service.process_command(command_value)
+        assert retry.reused is True
+        assert len(repo.snapshot()["terminal_archive"]) == archive_count
     else:
-        with pytest.raises(PlanRejected, match="final position"):
-            service.process_command(command_value)
+        before = repo.state_version
+        response = service.process_command(command_value)
+        assert response.result["accepted"] is False
+        assert response.result["finalization"]["state"] == "POSITION_MISMATCH"
+        assert response.receipt["status"] == "REJECTED"
+        assert response.receipt["state_version"] == before + 1
         assert core.status()["lifecycle"] == "HALTED_RECONCILE_REQUIRED"
 
 
