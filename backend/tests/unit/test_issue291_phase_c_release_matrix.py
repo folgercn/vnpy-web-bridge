@@ -6,6 +6,7 @@ from pathlib import Path
 from jsonschema import Draft202012Validator
 
 from scripts.ci.phase_c_build_receipt import create_receipt
+from scripts.ci.classify_changes import classify_phase_a
 from scripts.ci.phase_c_release_matrix import UNIT_METADATA, create_plan
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -101,6 +102,23 @@ def test_phase_c_shared_contract_change_exercises_all_a_and_b_units() -> None:
         assert plan["decision"] == "BUILD_ONLY"
         assert _units(plan) == set(UNIT_METADATA)
         assert plan["phase_b_projection_required"] is True
+
+
+def test_phase_c_offline_e2e_assets_are_explicitly_preserved_and_shared() -> None:
+    paths = (
+        "backend/app/phase_c_custody.py",
+        "backend/app/phase_c_execution.py",
+        "deployments/phase-c/Containerfile.custody",
+        "deployments/phase-c/Containerfile.execution",
+        "deployments/phase-c/docker-compose.offline-e2e.yml",
+    )
+    for path in paths:
+        phase_a = classify_phase_a([path])
+        assert phase_a["release_blocked"] is False
+        assert phase_a["selected_rule_ids"] == ["phase-a-preserved-phase-c"]
+        plan = create_plan([path], source_commit_sha=SHA)
+        assert plan["decision"] == "BUILD_ONLY"
+        assert _units(plan) == set(UNIT_METADATA)
 
 
 def test_plan_is_unconditionally_non_deploying_and_requires_receipts() -> None:

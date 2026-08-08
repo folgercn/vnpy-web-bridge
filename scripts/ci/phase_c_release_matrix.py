@@ -107,6 +107,13 @@ UNIT_METADATA: dict[tuple[str, str], dict[str, Any]] = {
 # must exercise every isolated image rather than silently relying on stale
 # matrix behaviour.  This is intentionally narrow; arbitrary docs remain
 # contract-only and unknown source paths still block.
+PHASE_C_SHARED_EXACT = (
+    "backend/app/phase_c_custody.py",
+    "backend/app/phase_c_execution.py",
+    "deployments/phase-c/Containerfile.custody",
+    "deployments/phase-c/Containerfile.execution",
+    "deployments/phase-c/docker-compose.offline-e2e.yml",
+)
 PHASE_C_SHARED_PREFIXES = (
     "backend/app/api/routes_phase_c_",
     "backend/app/phase_c/",
@@ -172,7 +179,10 @@ def _unit(phase: str, unit: str, verification_units: list[str], source_sha: str)
 
 
 def _phase_c_shared(paths: list[str]) -> bool:
-    return any(path.startswith(PHASE_C_SHARED_PREFIXES) for path in paths)
+    return any(
+        path in PHASE_C_SHARED_EXACT or path.startswith(PHASE_C_SHARED_PREFIXES)
+        for path in paths
+    )
 
 
 def create_plan(

@@ -371,6 +371,13 @@ PHASE_A_PHASE_B_PRESERVED_PREFIXES = PHASE_B_SCOPE_PREFIXES
 # prefixes: Phase C's combined planner expands them to the full A+B matrix,
 # while the legacy Phase A-only planner preserves them without selecting an
 # accidental Phase A runtime action.
+PHASE_A_PHASE_C_PRESERVED_EXACT = (
+    "backend/app/phase_c_custody.py",
+    "backend/app/phase_c_execution.py",
+    "deployments/phase-c/Containerfile.custody",
+    "deployments/phase-c/Containerfile.execution",
+    "deployments/phase-c/docker-compose.offline-e2e.yml",
+)
 PHASE_A_PHASE_C_PRESERVED_PREFIXES = (
     "backend/app/api/routes_phase_c_",
     "backend/app/phase_c/",
@@ -619,6 +626,7 @@ PHASE_A_RULES = (
     ),
     _phase_a_rule(
         "phase-a-preserved-phase-c",
+        exact=PHASE_A_PHASE_C_PRESERVED_EXACT,
         prefix=PHASE_A_PHASE_C_PRESERVED_PREFIXES,
         kind="preserved",
     ),
