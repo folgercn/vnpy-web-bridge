@@ -115,3 +115,15 @@ def test_execution_same_expected_version_is_cross_process_atomic(tmp_path: Path)
     assert service.status().version == 1
     projection = service.projection()
     assert len(projection.audit) == len(projection.archive) == 1
+
+
+@pytest.mark.parametrize(("change", "allowed_scope"), [
+    ({"expires_at": "2000-01-01T00:00:00Z"}, {}),
+    ({"scope": {"environment": "wrong"}}, {"environment": "offline"}),
+])
+def test_execution_rejects_expired_or_scope_mismatched_receipt(tmp_path: Path, change: dict, allowed_scope: dict) -> None:
+    receipt = {"receipt_id": "custody-install-1", "receipt_type": "install", "artifact_id": "artifact-1", "artifact_type": "runtime-authorization", "trust_domain": "runtime_authorization", "schema_ref": "phase-c-runtime-authorization-v1", "artifact_sha256": "a" * 64, "signer_key_id": "test", "signer_key_version": "v1", "keyring_raw_sha256": "b" * 64, "signed_artifact_sha256": "c" * 64, "scope": {}, "expires_at": "2099-01-01T00:00:00Z", "custody_version": 2, "idempotency_key": "install-idem", "verified": True, "installed": True, "custody_writer": "artifact-custody", "production_allowed": False, "live_trading_authorized": False, "countable_forward": False} | change
+    service = PhaseCExecutionService(ExecutionSettings(tmp_path / "state.json", "execution-secret", "http://custody", "custody-secret", allowed_scope), receipt_lookup=lambda _: receipt)
+    request = AuthorizationCommandDTO(command_id="command-0001", idempotency_key="idem-key-0001", expected_version=0, action="enable", authorization_artifact_id="artifact-1", custody_receipt_id="custody-install-1", reason="offline only")
+    with pytest.raises(WorkflowAdapterError, match="verified custody"):
+        service.command(request, receipt=receipt)

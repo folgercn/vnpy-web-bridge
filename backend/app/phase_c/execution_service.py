@@ -9,7 +9,8 @@ import os
 import tempfile
 from collections.abc import Callable
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +36,7 @@ class ExecutionSettings:
     secret: str
     custody_url: str
     custody_secret: str
+    allowed_scope: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_env(cls) -> ExecutionSettings:
@@ -43,6 +45,7 @@ class ExecutionSettings:
             os.environ["PHASE_C_EXECUTION_SHARED_SECRET"],
             os.environ["PHASE_C_CUSTODY_URL"],
             os.environ["PHASE_C_CUSTODY_SHARED_SECRET"],
+            json.loads(os.getenv("PHASE_C_EXECUTION_ALLOWED_SCOPE_JSON", "{}")),
         )
 
 
@@ -123,7 +126,11 @@ class PhaseCExecutionService:
             return AuthorizationStatusDTO.model_validate(old["status"])
         if request.expected_version != state["version"]: raise ExpectedVersionError("authorization expected version conflict")
         required_receipt = {"receipt_id", "receipt_type", "artifact_id", "artifact_type", "trust_domain", "schema_ref", "artifact_sha256", "signer_key_id", "signer_key_version", "keyring_raw_sha256", "signed_artifact_sha256", "scope", "expires_at", "custody_version", "idempotency_key", "verified", "installed", "custody_writer", "production_allowed", "live_trading_authorized", "countable_forward"}
-        if set(receipt) != required_receipt or receipt.get("receipt_id") != request.custody_receipt_id or receipt.get("artifact_id") != request.authorization_artifact_id or receipt.get("receipt_type") != "install" or receipt.get("artifact_type") != "runtime-authorization" or receipt.get("trust_domain") != "runtime_authorization" or receipt.get("schema_ref") != "phase-c-runtime-authorization-v1" or any(receipt.get(flag) is not False for flag in ("production_allowed", "live_trading_authorized", "countable_forward")):
+        try:
+            expires_at = datetime.fromisoformat(str(receipt.get("expires_at", "")).replace("Z", "+00:00"))
+        except ValueError:
+            expires_at = None
+        if set(receipt) != required_receipt or receipt.get("receipt_id") != request.custody_receipt_id or receipt.get("artifact_id") != request.authorization_artifact_id or receipt.get("receipt_type") != "install" or receipt.get("artifact_type") != "runtime-authorization" or receipt.get("trust_domain") != "runtime_authorization" or receipt.get("schema_ref") != "phase-c-runtime-authorization-v1" or not isinstance(expires_at, datetime) or expires_at.tzinfo is None or expires_at <= datetime.now(timezone.utc) or receipt.get("scope") != self.settings.allowed_scope or any(receipt.get(flag) is not False for flag in ("production_allowed", "live_trading_authorized", "countable_forward")):
             raise WorkflowAdapterError("execution command lacks a verified custody install receipt")
         state["version"] += 1; state["requested_state"] = "ENABLE_REQUESTED" if request.action == "enable" else "REVOKED"; state["artifact_id"] = request.authorization_artifact_id; state["receipt_id"] = request.custody_receipt_id
         status = self.status_from(state).model_dump(mode="json")
