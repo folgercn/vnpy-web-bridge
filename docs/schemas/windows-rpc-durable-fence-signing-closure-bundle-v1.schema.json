@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vnpy.example/schemas/windows-rpc-durable-fence-signing-closure-bundle-v1.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "purpose", "install_attempt_id", "service_name", "chain_order", "artifact_raw_sha256", "restart_authorized", "automatic_restart_allowed", "live_trading_authorized"],
+  "properties": {
+    "schema_version": {"const": "windows_rpc_durable_fence_signing_closure_bundle_v1"},
+    "purpose": {"const": "record_verified_offline_windows_fence_signing_closure_without_execution_authority"},
+    "install_attempt_id": {"type": "string", "pattern": "^windows-fence-install-[0-9a-f]{64}$"},
+    "service_name": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"},
+    "chain_order": {"type": "array", "minItems": 15, "maxItems": 15, "items": {"type": "string"}},
+    "artifact_raw_sha256": {"type": "object", "minProperties": 15, "maxProperties": 15, "additionalProperties": {"type": "string", "pattern": "^[0-9a-f]{64}$"}},
+    "restart_authorized": {"const": false}, "automatic_restart_allowed": {"const": false}, "live_trading_authorized": {"const": false}
+  }
+}
