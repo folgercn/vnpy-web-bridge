@@ -163,6 +163,7 @@ def test_outer_and_assembly_zip_have_exact_fixed_metadata(
             "scripts/windows_fence_foundation/credential_config_v1.py",
             "scripts/windows_fence_foundation/final_admission_v1.py",
             "scripts/windows_fence_foundation/final_store_v1.py",
+            "scripts/windows_fence_foundation/generate_installer_trust_anchor_v1.py",
             "scripts/windows_fence_foundation/installer_bootstrap_v1.py",
             "scripts/windows_fence_foundation/installer_entry_v1.py",
             "scripts/windows_fence_foundation/installer_trust_anchor_v1.py",

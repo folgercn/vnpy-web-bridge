@@ -6,6 +6,8 @@ import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
+from .trust_pins_v1 import FoundationPublicKeyPin
+
 
 class InstallerBootstrapTrustAnchorError(RuntimeError):
     """The distributable lacks a non-placeholder public trust root."""
@@ -18,6 +20,9 @@ class InstallerBootstrapTrustAnchorV1:
     keyring_path: Path
     keyring_raw_sha256: str
     expected_source_sha256: str
+    manifest: FoundationPublicKeyPin
+    observer: FoundationPublicKeyPin
+    restart: FoundationPublicKeyPin
 
     def __post_init__(self) -> None:
         if (
@@ -30,6 +35,8 @@ class InstallerBootstrapTrustAnchorV1:
                 or value == "0" * 64
                 for value in (self.keyring_raw_sha256, self.expected_source_sha256)
             )
+            or len({self.manifest.key_id, self.observer.key_id, self.restart.key_id})
+            != 3
         ):
             raise InstallerBootstrapTrustAnchorError("INSTALLER_TRUST_ANCHOR_INVALID")
 

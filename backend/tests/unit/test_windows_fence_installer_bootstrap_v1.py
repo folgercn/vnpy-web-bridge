@@ -10,12 +10,15 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from scripts.windows_fence_foundation.contracts import canonical_json_bytes
+from scripts.windows_fence_foundation.generate_installer_trust_anchor_v1 import (
+    generate_installer_trust_anchor_v1,
+)
 from scripts.windows_fence_foundation.installer_bootstrap_v1 import (
     KEYRING_PURPOSE,
     KEYRING_SCHEMA_VERSION,
     WindowsFinalInstallerBootstrapError,
     _canonical_keyring,
-    build_verified_final_installer_inputs_v1,
+    build_verified_final_installer_inputs_for_test_v1,
 )
 from scripts.windows_fence_foundation.installer_trust_anchor_v1 import (
     InstallerBootstrapTrustAnchorError,
@@ -106,7 +109,7 @@ def test_bootstrap_keyring_is_canonical_sha_pinned_and_domain_separated() -> Non
 @pytest.mark.skipif(os.name == "nt", reason="Windows bootstrap path is native-only")
 def test_bootstrap_never_accepts_portable_inputs() -> None:
     with pytest.raises(WindowsFinalInstallerBootstrapError, match="REQUIRED"):
-        build_verified_final_installer_inputs_v1(
+        build_verified_final_installer_inputs_for_test_v1(
             bundle_path=Path("bundle.zip"),
             manifest_path=Path("manifest.json"),
             keyring_path=Path("keyring.json"),
@@ -118,9 +121,30 @@ def test_bootstrap_never_accepts_portable_inputs() -> None:
 
 
 def test_production_anchor_rejects_placeholder_hashes() -> None:
+    raw = _keyring_raw()
+    pins = _canonical_keyring(raw, hashlib.sha256(raw).hexdigest())
     with pytest.raises(InstallerBootstrapTrustAnchorError, match="ANCHOR_INVALID"):
         InstallerBootstrapTrustAnchorV1(
             keyring_path=Path("/ProgramData/vnpy/keyring.json"),
             keyring_raw_sha256="0" * 64,
             expected_source_sha256="a" * 64,
+            manifest=pins.manifest,
+            observer=pins.observer,
+            restart=pins.restart,
         )
+
+
+def test_public_only_anchor_generator_emits_pinned_module(tmp_path: Path) -> None:
+    keyring = tmp_path / "public-keyring.json"
+    output = tmp_path / "_installer_trust_anchor_generated_v1.py"
+    raw = _keyring_raw()
+    keyring.write_bytes(raw)
+    generate_installer_trust_anchor_v1(
+        public_keyring_path=keyring,
+        keyring_canonical_path=Path("/ProgramData/vnpy/keyring.json"),
+        expected_source_sha256="a" * 64,
+        output=output,
+    )
+    generated = output.read_text(encoding="utf-8")
+    assert hashlib.sha256(raw).hexdigest() in generated
+    assert "public_key_raw" in generated

@@ -221,7 +221,9 @@ if os.name == "nt":  # pragma: win32 cover
     _BROAD_WRITE_SIDS = {"S-1-1-0", "S-1-5-11", "S-1-5-32-545"}
     _OBJ_CASE_INSENSITIVE = 0x40
     _FILE_CREATE = 2
+    _FILE_OPEN = 1
     _FILE_NON_DIRECTORY_FILE = 0x40
+    _FILE_DIRECTORY_FILE = 0x1
     _FILE_SYNCHRONOUS_IO_NONALERT = 0x20
     _FILE_OPEN_REPARSE_POINT = 0x00200000
 
@@ -639,6 +641,74 @@ class WindowsFilesystemFactsAdapter:
             raw=raw,
             protected_sddl=protected_sddl,
         )
+
+    @staticmethod
+    def _open_relative_to_opened_parent(
+        *, parent: WindowsOpenedDirectoryAnchorV1, name: str, directory: bool
+    ) -> int:
+        if (
+            not name
+            or "\\" in name
+            or "/" in name
+            or "\x00" in name
+            or parent._handle is None
+        ):
+            raise OSError("invalid relative opened-handle target")
+        buffer = ctypes.create_unicode_buffer(name)
+        unicode_name = _UNICODE_STRING(
+            len(name.encode("utf-16-le")), (len(name) + 1) * 2, buffer
+        )
+        attributes = _OBJECT_ATTRIBUTES(
+            ctypes.sizeof(_OBJECT_ATTRIBUTES),
+            parent._handle,
+            ctypes.pointer(unicode_name),
+            _OBJ_CASE_INSENSITIVE,
+            None,
+            None,
+        )
+        status = _IO_STATUS_BLOCK()
+        handle = wintypes.HANDLE()
+        result = _ntdll.NtCreateFile(
+            ctypes.byref(handle),
+            _DELETE | _READ_CONTROL | _FILE_READ_ATTRIBUTES,
+            ctypes.byref(attributes),
+            ctypes.byref(status),
+            None,
+            0,
+            _FILE_SHARE_ALL,
+            _FILE_OPEN,
+            (
+                _FILE_SYNCHRONOUS_IO_NONALERT
+                | _FILE_OPEN_REPARSE_POINT
+                | (0 if not directory else _FILE_DIRECTORY_FILE)
+            ),
+            None,
+            0,
+        )
+        if result != 0:
+            raise OSError(
+                f"NtCreateFile relative open failed: 0x{result & 0xFFFFFFFF:08X}"
+            )
+        return handle.value
+
+    def delete_empty_object_relative_to_opened_parent(
+        self, *, parent: WindowsOpenedDirectoryAnchorV1, name: str, directory: bool
+    ) -> None:
+        """Delete only a leaf opened beneath the retained RootDirectory handle."""
+        handle = self._open_relative_to_opened_parent(
+            parent=parent, name=name, directory=directory
+        )
+        try:
+            delete = ctypes.c_ubyte(1)
+            if not _kernel32.SetFileInformationByHandle(
+                handle,
+                _FILE_DISPOSITION_INFO,
+                ctypes.byref(delete),
+                ctypes.sizeof(delete),
+            ):
+                raise ctypes.WinError(ctypes.get_last_error())
+        finally:
+            _kernel32.CloseHandle(handle)
 
     @staticmethod
     def apply_protected_security_by_handle(

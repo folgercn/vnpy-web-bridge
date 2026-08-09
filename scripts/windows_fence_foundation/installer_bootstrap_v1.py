@@ -22,9 +22,12 @@ from .bundle_v1 import COMPONENT_PATHS, verify_windows_fence_bundle_v1
 from .contracts import canonical_json_bytes
 from .installer_entry_v1 import (
     VerifiedFinalInstallerInputsV1,
-    run_installed_final_windows_installer_entry_v1,
+    _run_installed_final_windows_installer_entry_v1,
 )
-from .installer_trust_anchor_v1 import load_production_installer_trust_anchor_v1
+from .installer_trust_anchor_v1 import (
+    InstallerBootstrapTrustAnchorV1,
+    load_production_installer_trust_anchor_v1,
+)
 from .manifest_v1 import (
     WindowsInstallAttemptNonceRegistryV1,
     parse_install_manifest_candidate_v1,
@@ -168,7 +171,7 @@ def _manifest_bindings_from_native_facts(
         ) from exc
 
 
-def build_verified_final_installer_inputs_v1(
+def _build_verified_final_installer_inputs_v1(
     *,
     bundle_path: Path,
     manifest_path: Path,
@@ -177,6 +180,7 @@ def build_verified_final_installer_inputs_v1(
     keyring_raw_sha256: str,
     nonce_registry_root: Path,
     reserve_nonce: bool,
+    anchor: InstallerBootstrapTrustAnchorV1 | None = None,
 ) -> VerifiedFinalInstallerInputsV1:
     """Build sealed inputs from signed bytes and host-captured preinstall facts."""
     if os.name != "nt":
@@ -195,6 +199,12 @@ def build_verified_final_installer_inputs_v1(
             "BOOTSTRAP_INPUT_READ_FAILED"
         ) from exc
     pins = _canonical_keyring(keyring_raw, keyring_raw_sha256)
+    if anchor is not None and (
+        pins.manifest != anchor.manifest
+        or pins.observer != anchor.observer
+        or pins.restart != anchor.restart
+    ):
+        raise WindowsFinalInstallerBootstrapError("INSTALLER_TRUST_ANCHOR_PIN_MISMATCH")
     candidate = parse_install_manifest_candidate_v1(manifest_raw)
     store_binding = {
         key: candidate[key]
@@ -265,6 +275,15 @@ def build_verified_final_installer_inputs_v1(
     )
 
 
+def build_verified_final_installer_inputs_for_test_v1(
+    **kwargs: Any,
+) -> VerifiedFinalInstallerInputsV1:
+    """Portable test helper; it cannot reserve a nonce or invoke installation."""
+    if os.name == "nt" or kwargs.get("reserve_nonce") is not False:
+        raise WindowsFinalInstallerBootstrapError("INSTALLER_BOOTSTRAP_TEST_ONLY")
+    return _build_verified_final_installer_inputs_v1(**kwargs)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="windows-final-installer-bootstrap-v1")
     parser.add_argument("--bundle", type=Path, required=True)
@@ -273,7 +292,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dry-run", action="store_true")
     options = parser.parse_args(argv)
     anchor = load_production_installer_trust_anchor_v1()
-    inputs = build_verified_final_installer_inputs_v1(
+    inputs = _build_verified_final_installer_inputs_v1(
         bundle_path=options.bundle,
         manifest_path=options.manifest,
         keyring_path=anchor.keyring_path,
@@ -281,9 +300,10 @@ def main(argv: list[str] | None = None) -> int:
         keyring_raw_sha256=anchor.keyring_raw_sha256,
         nonce_registry_root=options.nonce_registry_root,
         reserve_nonce=not options.dry_run,
+        anchor=anchor,
     )
     print(
-        run_installed_final_windows_installer_entry_v1(inputs, dry_run=options.dry_run)
+        _run_installed_final_windows_installer_entry_v1(inputs, dry_run=options.dry_run)
     )
     return 0
 
@@ -292,7 +312,7 @@ __all__ = [
     "KEYRING_PURPOSE",
     "KEYRING_SCHEMA_VERSION",
     "WindowsFinalInstallerBootstrapError",
-    "build_verified_final_installer_inputs_v1",
+    "build_verified_final_installer_inputs_for_test_v1",
     "main",
 ]
 

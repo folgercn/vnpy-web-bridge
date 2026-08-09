@@ -50,7 +50,7 @@ class VerifiedFinalInstallerInputsV1:
             raise WindowsInstalledInstallerEntryError("INSTALLER_ENTRY_INPUT_INVALID")
 
 
-def run_installed_final_windows_installer_entry_v1(
+def _run_installed_final_windows_installer_entry_v1(
     inputs: VerifiedFinalInstallerInputsV1, *, dry_run: bool = False
 ) -> InstallResultV1 | str:
     """Construct only the native host; portable/fake hosts are impossible here."""
@@ -72,6 +72,15 @@ def run_installed_final_windows_installer_entry_v1(
     )
     installer.stage_and_publish(bundle_raw=inputs.bundle_raw)
     return installer.reserve_event3_and_apply_target()
+
+
+def run_installed_final_windows_installer_entry_for_test_v1(
+    inputs: VerifiedFinalInstallerInputsV1, *, dry_run: bool = False
+) -> InstallResultV1 | str:
+    """Portable contract helper; native installation stays sealed to bootstrap."""
+    if os.name == "nt":
+        raise WindowsInstalledInstallerEntryError("INSTALLER_ENTRY_TEST_ONLY")
+    return _run_installed_final_windows_installer_entry_v1(inputs, dry_run=dry_run)
 
 
 def native_windows_installer_host_preflight_v1() -> str:
@@ -104,7 +113,7 @@ __all__ = [
     "WindowsInstalledInstallerEntryError",
     "main",
     "native_windows_installer_host_preflight_v1",
-    "run_installed_final_windows_installer_entry_v1",
+    "run_installed_final_windows_installer_entry_for_test_v1",
 ]
 
 
