@@ -188,6 +188,33 @@ class ManifestVerificationError(ValueError):
         self.code = code
 
 
+def _matches_windows_nonce_registry_root_facts(
+    *,
+    actual: PathSecurityFacts,
+    expected: PathSecurityFacts,
+    owner_sid: str,
+    acl_sddl: str,
+) -> bool:
+    """Require one Win32-adapter fact set to match the sealed root pin exactly."""
+    return (
+        actual == expected
+        and hashlib.sha256(owner_sid.encode("utf-8")).hexdigest()
+        == actual.owner_sid_sha256
+        and hashlib.sha256(acl_sddl.encode("utf-8")).hexdigest()
+        == actual.acl_sddl_sha256
+        and actual.directory
+        and not actual.regular_file
+        and not actual.reparse_point
+        and actual.parent_chain_reparse_free
+        and actual.hardlink_count == 1
+        and not actual.alternate_data_streams
+        and actual.dacl_protected
+        and actual.inherited_ace_count == 0
+        and not actual.unsafe_write_principals
+        and actual.write_principal_sid_sha256s == (actual.owner_sid_sha256,)
+    )
+
+
 @dataclass(frozen=True)
 class FilesystemInstallAttemptNonceRegistryV1:
     """Atomic create-only nonce binding used by the offline manifest verifier."""
@@ -370,18 +397,21 @@ class WindowsInstallAttemptNonceRegistryV1:
             raise ManifestVerificationError("WINDOWS_NONCE_REGISTRY_REQUIRED")
         root = Path(self.root).absolute()
         object.__setattr__(self, "root", root)
-        if (
-            hashlib.sha256(str(root).encode("utf-8")).hexdigest()
-            != self.expected_root_facts.path_sha256
-            or hashlib.sha256(self.owner_sid.encode("utf-8")).hexdigest()
-            != self.expected_root_facts.owner_sid_sha256
-            or hashlib.sha256(self.acl_sddl.encode("utf-8")).hexdigest()
-            != self.expected_root_facts.acl_sddl_sha256
+        try:
+            actual = self.filesystem.inspect(root)
+        except OSError as exc:
+            raise ManifestVerificationError(
+                "WINDOWS_NONCE_REGISTRY_ROOT_INVALID"
+            ) from exc
+        if not _matches_windows_nonce_registry_root_facts(
+            actual=actual,
+            expected=self.expected_root_facts,
+            owner_sid=self.owner_sid,
+            acl_sddl=self.acl_sddl,
         ):
             raise ManifestVerificationError(
                 "WINDOWS_NONCE_REGISTRY_EXPECTATION_INVALID"
             )
-        self._verify_root_facts()
 
     def _verify_root_facts(self) -> PathSecurityFacts:
         try:
@@ -390,18 +420,11 @@ class WindowsInstallAttemptNonceRegistryV1:
             raise ManifestVerificationError(
                 "WINDOWS_NONCE_REGISTRY_ROOT_INVALID"
             ) from exc
-        if (
-            actual != self.expected_root_facts
-            or not actual.directory
-            or actual.regular_file
-            or actual.reparse_point
-            or not actual.parent_chain_reparse_free
-            or actual.hardlink_count != 1
-            or actual.alternate_data_streams
-            or not actual.dacl_protected
-            or actual.inherited_ace_count
-            or actual.unsafe_write_principals
-            or actual.write_principal_sid_sha256s != (actual.owner_sid_sha256,)
+        if not _matches_windows_nonce_registry_root_facts(
+            actual=actual,
+            expected=self.expected_root_facts,
+            owner_sid=self.owner_sid,
+            acl_sddl=self.acl_sddl,
         ):
             raise ManifestVerificationError(
                 "WINDOWS_NONCE_REGISTRY_ROOT_FACTS_MISMATCH"

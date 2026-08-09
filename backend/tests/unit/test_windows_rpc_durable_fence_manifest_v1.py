@@ -7,6 +7,7 @@ import json
 import os
 import re
 import tempfile
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -25,6 +26,7 @@ from scripts.windows_fence_foundation.manifest_v1 import (
     FilesystemInstallAttemptNonceRegistryV1,
     ManifestVerificationError,
     WindowsInstallAttemptNonceRegistryV1,
+    _matches_windows_nonce_registry_root_facts,
     derive_install_attempt_id_v1,
     verify_and_reserve_install_manifest_v1,
     verify_install_manifest_v1,
@@ -103,6 +105,71 @@ def test_windows_nonce_registry_never_accepts_portable_adapter(
         )
 
 
+def _windows_nonce_registry_root_facts() -> PathSecurityFacts:
+    owner_sid = "S-1-5-21-test-owner"
+    acl_sddl = f"O:{owner_sid}D:PAI(A;;FA;;;{owner_sid})"
+    owner_hash = hashlib.sha256(owner_sid.encode("utf-8")).hexdigest()
+    return PathSecurityFacts(
+        path_sha256="a" * 64,
+        volume_serial="A1B2C3D4",
+        volume_identity_sha256="b" * 64,
+        file_identity="A1B2C3D4:0000000000000001",
+        owner_sid_sha256=owner_hash,
+        acl_sddl_sha256=hashlib.sha256(acl_sddl.encode("utf-8")).hexdigest(),
+        unsafe_write_principals=(),
+        write_principal_sid_sha256s=(owner_hash,),
+        regular_file=False,
+        directory=True,
+        reparse_point=False,
+        parent_chain_reparse_free=True,
+        hardlink_count=1,
+        alternate_data_streams=False,
+        dacl_protected=True,
+        inherited_ace_count=0,
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("path_sha256", "c" * 64),
+        ("volume_serial", "D4C3B2A1"),
+        ("volume_identity_sha256", "d" * 64),
+        ("file_identity", "A1B2C3D4:0000000000000002"),
+        ("owner_sid_sha256", "e" * 64),
+        ("acl_sddl_sha256", "f" * 64),
+        ("unsafe_write_principals", ("unsafe",)),
+        ("write_principal_sid_sha256s", ("e" * 64,)),
+        ("regular_file", True),
+        ("directory", False),
+        ("reparse_point", True),
+        ("parent_chain_reparse_free", False),
+        ("hardlink_count", 2),
+        ("alternate_data_streams", True),
+        ("dacl_protected", False),
+        ("inherited_ace_count", 1),
+    ),
+)
+def test_windows_nonce_registry_root_fact_match_requires_exact_adapter_facts(
+    field: str, value: object
+) -> None:
+    expected = _windows_nonce_registry_root_facts()
+    owner_sid = "S-1-5-21-test-owner"
+    acl_sddl = f"O:{owner_sid}D:PAI(A;;FA;;;{owner_sid})"
+    assert _matches_windows_nonce_registry_root_facts(
+        actual=expected,
+        expected=expected,
+        owner_sid=owner_sid,
+        acl_sddl=acl_sddl,
+    )
+    assert not _matches_windows_nonce_registry_root_facts(
+        actual=replace(expected, **{field: value}),
+        expected=expected,
+        owner_sid=owner_sid,
+        acl_sddl=acl_sddl,
+    )
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows opened-handle smoke")
 def test_windows_nonce_registry_create_readback_and_replay(tmp_path: Path) -> None:
     import win32api  # type: ignore[import-not-found]
@@ -123,6 +190,7 @@ def test_windows_nonce_registry_create_readback_and_replay(tmp_path: Path) -> No
         owner_sid=owner,
         acl_sddl=sddl,
     )
+    assert registry._verify_root_facts() == facts
     nonce = "a" * 64
     immutable = "b" * 64
     assert (
