@@ -644,7 +644,11 @@ class WindowsFilesystemFactsAdapter:
 
     @staticmethod
     def _open_relative_to_opened_parent(
-        *, parent: WindowsOpenedDirectoryAnchorV1, name: str, directory: bool
+        *,
+        parent: WindowsOpenedDirectoryAnchorV1,
+        name: str,
+        directory: bool,
+        read_data: bool = False,
     ) -> int:
         if (
             not name
@@ -670,7 +674,10 @@ class WindowsFilesystemFactsAdapter:
         handle = wintypes.HANDLE()
         result = _ntdll.NtCreateFile(
             ctypes.byref(handle),
-            _DELETE | _READ_CONTROL | _FILE_READ_ATTRIBUTES,
+            _DELETE
+            | _READ_CONTROL
+            | _FILE_READ_ATTRIBUTES
+            | (_GENERIC_READ if read_data else 0),
             ctypes.byref(attributes),
             ctypes.byref(status),
             None,
@@ -707,6 +714,56 @@ class WindowsFilesystemFactsAdapter:
                 ctypes.sizeof(delete),
             ):
                 raise ctypes.WinError(ctypes.get_last_error())
+        finally:
+            _kernel32.CloseHandle(handle)
+
+    def read_verify_delete_relative_to_opened_parent(
+        self,
+        *,
+        parent: WindowsOpenedDirectoryAnchorV1,
+        name: str,
+        expected_raw_sha256: str,
+        expected_owner_sid_sha256: str,
+        expected_acl_sddl_sha256: str,
+        directory: bool = False,
+    ) -> PathSecurityFacts:
+        """Verify bytes/facts and delete through the same RootDirectory handle."""
+        handle = self._open_relative_to_opened_parent(
+            parent=parent, name=name, directory=directory, read_data=not directory
+        )
+        try:
+            info = self._handle_info(handle)
+            raw = (
+                b""
+                if directory
+                else self._read_exact(handle, (info.size_high << 32) | info.size_low)
+            )
+            facts = self._facts(handle, parent.path / name, info=info)
+            if (
+                (
+                    not directory
+                    and hashlib.sha256(raw).hexdigest() != expected_raw_sha256
+                )
+                or facts.owner_sid_sha256 != expected_owner_sid_sha256
+                or facts.acl_sddl_sha256 != expected_acl_sddl_sha256
+                or facts.reparse_point
+                or not facts.parent_chain_reparse_free
+                or facts.hardlink_count != 1
+                or facts.alternate_data_streams
+                or not facts.dacl_protected
+                or facts.inherited_ace_count
+                or facts.unsafe_write_principals
+            ):
+                raise OSError("relative delete verification failed")
+            delete = ctypes.c_ubyte(1)
+            if not _kernel32.SetFileInformationByHandle(
+                handle,
+                _FILE_DISPOSITION_INFO,
+                ctypes.byref(delete),
+                ctypes.sizeof(delete),
+            ):
+                raise ctypes.WinError(ctypes.get_last_error())
+            return facts
         finally:
             _kernel32.CloseHandle(handle)
 

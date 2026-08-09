@@ -823,20 +823,6 @@ class NativeWindowsFenceInstallerHostV1(WindowsFenceInstallerHostV1):
                         raise WindowsFinalInstallerError(
                             "INSTALL_ORPHAN_CLEANUP_UNSAFE"
                         )
-                    item = filesystem.read_file(path / name)
-                    file_facts = item.facts
-                    if (
-                        hashlib.sha256(item.raw).hexdigest() != component_sha256s[role]
-                        or file_facts.owner_sid_sha256 != owner_sid_sha256
-                        or file_facts.acl_sddl_sha256 != component_acl_sddl_sha256
-                        or not file_facts.regular_file
-                        or file_facts.reparse_point
-                        or file_facts.hardlink_count != 1
-                        or file_facts.alternate_data_streams
-                    ):
-                        raise WindowsFinalInstallerError(
-                            "INSTALL_ORPHAN_CLEANUP_UNSAFE"
-                        )
                     parent_anchor.assert_named_path_is_opened_parent()
                     if (
                         bundle_anchor.assert_named_path_is_opened_parent()
@@ -845,8 +831,12 @@ class NativeWindowsFenceInstallerHostV1(WindowsFenceInstallerHostV1):
                         raise WindowsFinalInstallerError(
                             "INSTALL_ORPHAN_CLEANUP_UNSAFE"
                         )
-                    filesystem.delete_empty_object_relative_to_opened_parent(
-                        parent=bundle_anchor, name=name, directory=False
+                    filesystem.read_verify_delete_relative_to_opened_parent(
+                        parent=bundle_anchor,
+                        name=name,
+                        expected_raw_sha256=component_sha256s[role],
+                        expected_owner_sid_sha256=owner_sid_sha256,
+                        expected_acl_sddl_sha256=component_acl_sddl_sha256,
                     )
                     parent_anchor.assert_named_path_is_opened_parent()
                     if (
@@ -861,8 +851,13 @@ class NativeWindowsFenceInstallerHostV1(WindowsFenceInstallerHostV1):
                     raise WindowsFinalInstallerError("INSTALL_ORPHAN_CLEANUP_UNSAFE")
                 if bundle_anchor.assert_named_path_is_opened_parent() != bundle_before:
                     raise WindowsFinalInstallerError("INSTALL_ORPHAN_CLEANUP_UNSAFE")
-                filesystem.delete_empty_object_relative_to_opened_parent(
-                    parent=parent_anchor, name=path.name, directory=True
+                filesystem.read_verify_delete_relative_to_opened_parent(
+                    parent=parent_anchor,
+                    name=path.name,
+                    expected_raw_sha256="",
+                    expected_owner_sid_sha256=final_owner_sid_sha256,
+                    expected_acl_sddl_sha256=final_directory_acl_sddl_sha256,
+                    directory=True,
                 )
         except OSError:
             raise WindowsFinalInstallerError("INSTALL_ORPHAN_CLEANUP_FAILED") from None
