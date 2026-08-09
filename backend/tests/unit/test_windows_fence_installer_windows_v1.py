@@ -7,10 +7,6 @@ from types import SimpleNamespace
 import pytest
 
 from scripts.windows_fence_foundation.contracts import canonical_json_bytes
-from scripts.windows_fence_foundation.installer_entry_v1 import (
-    WindowsInstalledInstallerEntryError,
-    run_installed_final_windows_installer_entry_for_test_v1,
-)
 from scripts.windows_fence_foundation.installer_windows_v1 import (
     FinalWindowsFenceInstallerV1,
     InstallCheckpointV1,
@@ -380,7 +376,7 @@ def test_native_pywin32_sddl_compatibility_accepts_text_or_tuple_only() -> None:
         NativeWindowsFenceInstallerHostV1._pywin32_sddl_text(())
 
 
-@pytest.mark.skipif(os.name == "nt", reason="non-Windows entry contract")
-def test_installed_entry_never_accepts_portable_or_fake_inputs() -> None:
-    with pytest.raises(WindowsInstalledInstallerEntryError, match="WINDOWS_INSTALLER"):
-        run_installed_final_windows_installer_entry_for_test_v1(object())  # type: ignore[arg-type]
+def test_installed_entry_exposes_no_portable_install_helper() -> None:
+    import scripts.windows_fence_foundation.installer_entry_v1 as entry
+
+    assert not hasattr(entry, "run_installed_final_windows_installer_entry_for_test_v1")

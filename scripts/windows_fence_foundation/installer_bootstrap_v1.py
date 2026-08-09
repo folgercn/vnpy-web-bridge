@@ -8,9 +8,6 @@ configuration, authority, credentials, or a private key.
 from __future__ import annotations
 
 import argparse
-import base64
-import hashlib
-import json
 import os
 import zipfile
 from collections.abc import Mapping
@@ -19,14 +16,16 @@ from pathlib import Path
 from typing import Any
 
 from .bundle_v1 import COMPONENT_PATHS, verify_windows_fence_bundle_v1
-from .contracts import canonical_json_bytes
 from .installer_entry_v1 import (
     VerifiedFinalInstallerInputsV1,
     _run_installed_final_windows_installer_entry_v1,
 )
 from .installer_trust_anchor_v1 import (
-    InstallerBootstrapTrustAnchorV1,
+    KEYRING_PURPOSE,
+    KEYRING_SCHEMA_VERSION,
+    canonical_public_keyring_v1,
     load_production_installer_trust_anchor_v1,
+    validate_anchor_keyring_bytes_v1,
 )
 from .manifest_v1 import (
     WindowsInstallAttemptNonceRegistryV1,
@@ -39,106 +38,21 @@ from .target_contract_v1 import (
     derive_windows_foundation_target_v1,
     parse_windows_foundation_target_policy_v1,
 )
-from .trust_pins_v1 import FoundationPublicKeyPin, WindowsFoundationTrustPinsV1
-from .win32_fs import PathSecurityFacts, WindowsFilesystemFactsAdapter
-
-KEYRING_SCHEMA_VERSION = "windows_rpc_durable_fence_trust_keyring_v1"
-KEYRING_PURPOSE = "pin_windows_fence_public_verification_keys_and_nonce_root"
-_KEYRING_FIELDS = frozenset(
-    {
-        "schema_version",
-        "purpose",
-        "manifest",
-        "observer",
-        "restart",
-        "nonce_registry_root_facts",
-        "nonce_registry_owner_sid",
-        "nonce_registry_acl_sddl",
-    }
-)
-_PIN_FIELDS = frozenset(
-    {"key_domain", "role", "key_id", "public_key_b64", "public_key_sha256"}
-)
-_FACT_FIELDS = frozenset(PathSecurityFacts.__dataclass_fields__)
+from .trust_pins_v1 import WindowsFoundationTrustPinsV1
+from .win32_fs import WindowsFilesystemFactsAdapter
 
 
 class WindowsFinalInstallerBootstrapError(RuntimeError):
     """Stable fail-closed bootstrap error."""
 
 
-def _read_exact(path: Path, expected_sha256: str, code: str) -> bytes:
-    if not isinstance(expected_sha256, str) or len(expected_sha256) != 64:
-        raise WindowsFinalInstallerBootstrapError(f"{code}_EXPECTED_SHA_INVALID")
-    try:
-        raw = path.read_bytes()
-    except OSError as exc:
-        raise WindowsFinalInstallerBootstrapError(f"{code}_READ_FAILED") from exc
-    if hashlib.sha256(raw).hexdigest() != expected_sha256:
-        raise WindowsFinalInstallerBootstrapError(f"{code}_SHA_MISMATCH")
-    return raw
-
-
 def _canonical_keyring(
     raw: bytes, expected_raw_sha256: str
 ) -> WindowsFoundationTrustPinsV1:
-    if hashlib.sha256(raw).hexdigest() != expected_raw_sha256:
-        raise WindowsFinalInstallerBootstrapError("KEYRING_RAW_SHA_MISMATCH")
     try:
-        value = json.loads(raw.decode("utf-8", errors="strict"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise WindowsFinalInstallerBootstrapError("KEYRING_JSON_INVALID") from exc
-    if (
-        not isinstance(value, dict)
-        or canonical_json_bytes(value) != raw
-        or set(value) != _KEYRING_FIELDS
-    ):
-        raise WindowsFinalInstallerBootstrapError("KEYRING_NOT_CANONICAL")
-    if (
-        value["schema_version"] != KEYRING_SCHEMA_VERSION
-        or value["purpose"] != KEYRING_PURPOSE
-    ):
-        raise WindowsFinalInstallerBootstrapError("KEYRING_CONSTANT_MISMATCH")
-
-    def pin(name: str) -> FoundationPublicKeyPin:
-        item = value[name]
-        if not isinstance(item, dict) or set(item) != _PIN_FIELDS:
-            raise WindowsFinalInstallerBootstrapError("KEYRING_PIN_FIELDS_INVALID")
-        try:
-            raw_key = base64.b64decode(item["public_key_b64"], validate=True)
-        except (ValueError, TypeError) as exc:
-            raise WindowsFinalInstallerBootstrapError(
-                "KEYRING_PIN_ENCODING_INVALID"
-            ) from exc
-        return FoundationPublicKeyPin(
-            key_domain=item["key_domain"],
-            role=item["role"],
-            key_id=item["key_id"],
-            public_key_raw=raw_key,
-            public_key_sha256=item["public_key_sha256"],
-        )
-
-    facts = value["nonce_registry_root_facts"]
-    if not isinstance(facts, dict) or set(facts) != _FACT_FIELDS:
-        raise WindowsFinalInstallerBootstrapError("KEYRING_NONCE_FACTS_INVALID")
-    try:
-        nonce_facts = PathSecurityFacts(
-            **{
-                key: tuple(item)
-                if key in {"unsafe_write_principals", "write_principal_sid_sha256s"}
-                else item
-                for key, item in facts.items()
-            }
-        )
-        return WindowsFoundationTrustPinsV1(
-            manifest=pin("manifest"),
-            observer=pin("observer"),
-            restart=pin("restart"),
-            nonce_registry_root_facts=nonce_facts,
-            nonce_registry_owner_sid=value["nonce_registry_owner_sid"],
-            nonce_registry_acl_sddl=value["nonce_registry_acl_sddl"],
-        )
-    except Exception as exc:  # trust dataclasses intentionally expose only stable codes
-        raise WindowsFinalInstallerBootstrapError("KEYRING_TRUST_PINS_INVALID") from exc
+        return canonical_public_keyring_v1(raw, expected_raw_sha256)
+    except Exception as exc:
+        raise WindowsFinalInstallerBootstrapError(str(exc)) from exc
 
 
 def _manifest_bindings_from_native_facts(
@@ -175,22 +89,19 @@ def _build_verified_final_installer_inputs_v1(
     *,
     bundle_path: Path,
     manifest_path: Path,
-    keyring_path: Path,
-    expected_source_sha256: str,
-    keyring_raw_sha256: str,
     nonce_registry_root: Path,
     reserve_nonce: bool,
-    anchor: InstallerBootstrapTrustAnchorV1 | None = None,
 ) -> VerifiedFinalInstallerInputsV1:
-    """Build sealed inputs from signed bytes and host-captured preinstall facts."""
+    """Build sealed inputs from the sole generated-anchor production path."""
     if os.name != "nt":
         raise WindowsFinalInstallerBootstrapError(
             "WINDOWS_INSTALLER_BOOTSTRAP_REQUIRED"
         )
-    bundle_raw = _read_exact(bundle_path, expected_source_sha256, "BUNDLE_SOURCE")
+    anchor = load_production_installer_trust_anchor_v1()
     try:
+        bundle_raw = bundle_path.read_bytes()
         manifest_raw = manifest_path.read_bytes()
-        keyring_raw = keyring_path.read_bytes()
+        keyring_raw = anchor.keyring_path.read_bytes()
         index_raw = bundle_path.with_suffix(
             bundle_path.suffix + ".index.json"
         ).read_bytes()
@@ -198,8 +109,14 @@ def _build_verified_final_installer_inputs_v1(
         raise WindowsFinalInstallerBootstrapError(
             "BOOTSTRAP_INPUT_READ_FAILED"
         ) from exc
-    pins = _canonical_keyring(keyring_raw, keyring_raw_sha256)
-    if anchor is not None and (
+    try:
+        validate_anchor_keyring_bytes_v1(anchor, keyring_raw)
+        pins = _canonical_keyring(keyring_raw, anchor.keyring_raw_sha256)
+    except Exception as exc:
+        raise WindowsFinalInstallerBootstrapError(
+            "INSTALLER_TRUST_KEYRING_MISMATCH"
+        ) from exc
+    if (
         pins.manifest != anchor.manifest
         or pins.observer != anchor.observer
         or pins.restart != anchor.restart
@@ -221,6 +138,10 @@ def _build_verified_final_installer_inputs_v1(
     bundle = verify_windows_fence_bundle_v1(
         bundle_raw, index_raw, expected_store_binding=store_binding
     )
+    if bundle.expected_source_sha256 != anchor.expected_source_sha256:
+        raise WindowsFinalInstallerBootstrapError("INSTALLER_TRUST_SOURCE_REVISION_MISMATCH")
+    if candidate["bundle_sha256"] != bundle.bundle_sha256:
+        raise WindowsFinalInstallerBootstrapError("BUNDLE_MANIFEST_SHA_MISMATCH")
     host = NativeWindowsFenceInstallerHostV1()
     projection = _manifest_bindings_from_native_facts(
         candidate, bundle=bundle, host=host
@@ -275,15 +196,6 @@ def _build_verified_final_installer_inputs_v1(
     )
 
 
-def build_verified_final_installer_inputs_for_test_v1(
-    **kwargs: Any,
-) -> VerifiedFinalInstallerInputsV1:
-    """Portable test helper; it cannot reserve a nonce or invoke installation."""
-    if os.name == "nt" or kwargs.get("reserve_nonce") is not False:
-        raise WindowsFinalInstallerBootstrapError("INSTALLER_BOOTSTRAP_TEST_ONLY")
-    return _build_verified_final_installer_inputs_v1(**kwargs)
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="windows-final-installer-bootstrap-v1")
     parser.add_argument("--bundle", type=Path, required=True)
@@ -291,16 +203,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--nonce-registry-root", type=Path, required=True)
     parser.add_argument("--dry-run", action="store_true")
     options = parser.parse_args(argv)
-    anchor = load_production_installer_trust_anchor_v1()
     inputs = _build_verified_final_installer_inputs_v1(
         bundle_path=options.bundle,
         manifest_path=options.manifest,
-        keyring_path=anchor.keyring_path,
-        expected_source_sha256=anchor.expected_source_sha256,
-        keyring_raw_sha256=anchor.keyring_raw_sha256,
         nonce_registry_root=options.nonce_registry_root,
         reserve_nonce=not options.dry_run,
-        anchor=anchor,
     )
     print(
         _run_installed_final_windows_installer_entry_v1(inputs, dry_run=options.dry_run)
@@ -312,7 +219,6 @@ __all__ = [
     "KEYRING_PURPOSE",
     "KEYRING_SCHEMA_VERSION",
     "WindowsFinalInstallerBootstrapError",
-    "build_verified_final_installer_inputs_for_test_v1",
     "main",
 ]
 

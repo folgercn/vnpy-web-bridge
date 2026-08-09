@@ -82,6 +82,7 @@ class _VerifiedAssemblyImporter(importlib.abc.MetaPathFinder, importlib.abc.Load
             module.__path__ = [filename.rsplit("/", 1)[0]]
         # The source bytes are the hash-pinned archive held in memory above.
         exec(compile(source, filename, "exec"), module.__dict__)  # noqa: S102
+        module.__verified_foundation_raw_sha256__ = sha256(source).hexdigest()
 
 
 if _FOUNDATION_ARCHIVE_PATH.is_file():

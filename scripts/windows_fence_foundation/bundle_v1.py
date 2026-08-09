@@ -22,6 +22,10 @@ from .contracts import (
     canonical_json_bytes,
     canonical_local_windows_path,
 )
+from .installer_trust_anchor_v1 import (
+    InstallerBootstrapTrustAnchorError,
+    render_installer_trust_anchor_generated_module_v1,
+)
 
 BUNDLE_INDEX_SCHEMA_VERSION = "windows_rpc_durable_fence_bundle_index_v1"
 BUNDLE_INDEX_PURPOSE = "identify_reproducible_windows_fence_offline_bundle"
@@ -45,6 +49,7 @@ FOUNDATION_SOURCE_NAMES = (
     "final_admission_v1.py",
     "final_store_v1.py",
     "installer_entry_v1.py",
+    "_installer_trust_anchor_generated_v1.py",
     "generate_installer_trust_anchor_v1.py",
     "installer_trust_anchor_v1.py",
     "installer_bootstrap_v1.py",
@@ -74,6 +79,7 @@ _INDEX_FIELDS = frozenset(
         "purpose",
         "bundle_format",
         "bundle_sha256",
+        "expected_source_sha256",
         "components",
         "assembly_archive_raw_sha256",
         "assembly_source_inventory_sha256",
@@ -130,6 +136,7 @@ class BuiltWindowsFenceBundleV1:
     index_raw_sha256: str
     assembly_archive_raw_sha256: str
     assembly_source_inventory_sha256: str
+    expected_source_sha256: str
 
 
 @dataclass(frozen=True)
@@ -138,6 +145,7 @@ class VerifiedWindowsFenceBundleV1:
     index_raw_sha256: str
     assembly_archive_raw_sha256: str
     assembly_source_inventory_sha256: str
+    expected_source_sha256: str
     component_sha256s: Mapping[str, str]
     component_sizes: Mapping[str, int]
 
@@ -255,7 +263,9 @@ def _read_canonical_json_object(raw: bytes, *, maximum_bytes: int) -> dict[str, 
     return value
 
 
-def _foundation_source_entries(source_root: Path) -> dict[str, bytes]:
+def _foundation_source_entries(
+    source_root: Path, *, generated_anchor_raw: bytes
+) -> dict[str, bytes]:
     foundation_root = source_root / "scripts" / "windows_fence_foundation"
     entries: dict[str, bytes] = {SYNTHETIC_SCRIPTS_INIT: b""}
     try:
@@ -263,6 +273,9 @@ def _foundation_source_entries(source_root: Path) -> dict[str, bytes]:
             source_root / "scripts" / "windows_rpc_deployment_snapshot_v1.py"
         ).read_bytes()
         for name in FOUNDATION_SOURCE_NAMES:
+            if name == "_installer_trust_anchor_generated_v1.py":
+                entries[f"scripts/windows_fence_foundation/{name}"] = generated_anchor_raw
+                continue
             entries[f"scripts/windows_fence_foundation/{name}"] = (
                 foundation_root / name
             ).read_bytes()
@@ -463,11 +476,28 @@ def build_windows_fence_bundle_v1(
     *,
     config_raw: bytes,
     expected_store_binding: Mapping[str, object],
+    public_keyring_raw: bytes | None = None,
+    keyring_canonical_path: Path | None = None,
+    expected_source_sha256: str | None = None,
 ) -> BuiltWindowsFenceBundleV1:
     """Build deterministic bundle and detached index without writing files."""
 
     source_root = Path(source_root).absolute()
     _validate_runtime_config(config_raw, expected_store_binding=expected_store_binding)
+    if (
+        not isinstance(public_keyring_raw, bytes)
+        or keyring_canonical_path is None
+        or expected_source_sha256 is None
+    ):
+        raise WindowsFenceBundleError("INSTALLER_TRUST_ANCHOR_PUBLIC_INPUT_REQUIRED")
+    try:
+        generated_anchor_raw = render_installer_trust_anchor_generated_module_v1(
+            public_keyring_raw=public_keyring_raw,
+            keyring_canonical_path=Path(keyring_canonical_path),
+            expected_source_sha256=expected_source_sha256,
+        )
+    except (InstallerBootstrapTrustAnchorError, OSError, TypeError, ValueError) as exc:
+        raise WindowsFenceBundleError("INSTALLER_TRUST_ANCHOR_GENERATION_FAILED") from exc
     try:
         wrapper_raw = (
             source_root / "scripts" / "windows_rpc_service_wrapper_v1.py"
@@ -481,7 +511,9 @@ def build_windows_fence_bundle_v1(
     except (OSError, PermissionError) as exc:
         raise WindowsFenceBundleError("BUNDLE_SOURCE_UNREADABLE") from exc
 
-    assembly_entries = _foundation_source_entries(source_root)
+    assembly_entries = _foundation_source_entries(
+        source_root, generated_anchor_raw=generated_anchor_raw
+    )
     assembly_inventory = _source_inventory(assembly_entries)
     assembly_source_sha256 = _source_inventory_identity(assembly_inventory)
     assembly_raw = _build_zip(assembly_entries)
@@ -507,6 +539,7 @@ def build_windows_fence_bundle_v1(
         "purpose": BUNDLE_INDEX_PURPOSE,
         "bundle_format": BUNDLE_FORMAT,
         "bundle_sha256": bundle_sha256,
+        "expected_source_sha256": expected_source_sha256,
         "components": _component_inventory(component_entries),
         "assembly_archive_raw_sha256": assembly_archive_sha256,
         "assembly_source_inventory_sha256": assembly_source_sha256,
@@ -520,6 +553,7 @@ def build_windows_fence_bundle_v1(
         index_raw_sha256=_sha256(index_raw),
         assembly_archive_raw_sha256=assembly_archive_sha256,
         assembly_source_inventory_sha256=assembly_source_sha256,
+        expected_source_sha256=expected_source_sha256,
     )
 
 
@@ -629,8 +663,17 @@ def verify_windows_fence_bundle_v1(
         index.get("schema_version") != BUNDLE_INDEX_SCHEMA_VERSION
         or index.get("purpose") != BUNDLE_INDEX_PURPOSE
         or index.get("bundle_format") != BUNDLE_FORMAT
+        or not isinstance(index.get("expected_source_sha256"), str)
     ):
         raise WindowsFenceBundleError("BUNDLE_INDEX_VERSION_INVALID")
+    if (
+        not re.fullmatch(
+            r"[0-9a-f]{40}(?:[0-9a-f]{24})?", index["expected_source_sha256"]
+        )
+        or index["expected_source_sha256"]
+        == "0" * len(index["expected_source_sha256"])
+    ):
+        raise WindowsFenceBundleError("BUNDLE_SOURCE_REVISION_INVALID")
     bundle_sha256 = _sha256(bundle_raw)
     if index.get("bundle_sha256") != bundle_sha256:
         raise WindowsFenceBundleError("BUNDLE_RAW_SHA256_MISMATCH")
@@ -700,6 +743,7 @@ def verify_windows_fence_bundle_v1(
         index_raw_sha256=_sha256(index_raw),
         assembly_archive_raw_sha256=assembly_archive_sha256,
         assembly_source_inventory_sha256=assembly_source_sha256,
+        expected_source_sha256=index["expected_source_sha256"],
         component_sha256s=component_sha256s,
         component_sizes=component_sizes,
     )

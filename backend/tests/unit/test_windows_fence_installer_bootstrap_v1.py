@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import os
 from pathlib import Path
 
 import pytest
@@ -18,11 +17,11 @@ from scripts.windows_fence_foundation.installer_bootstrap_v1 import (
     KEYRING_SCHEMA_VERSION,
     WindowsFinalInstallerBootstrapError,
     _canonical_keyring,
-    build_verified_final_installer_inputs_for_test_v1,
 )
 from scripts.windows_fence_foundation.installer_trust_anchor_v1 import (
     InstallerBootstrapTrustAnchorError,
     InstallerBootstrapTrustAnchorV1,
+    load_production_installer_trust_anchor_v1,
 )
 from scripts.windows_fence_foundation.trust_pins_v1 import (
     MANIFEST_KEY_DOMAIN,
@@ -106,18 +105,9 @@ def test_bootstrap_keyring_is_canonical_sha_pinned_and_domain_separated() -> Non
         _canonical_keyring(raw, "0" * 64)
 
 
-@pytest.mark.skipif(os.name == "nt", reason="Windows bootstrap path is native-only")
-def test_bootstrap_never_accepts_portable_inputs() -> None:
-    with pytest.raises(WindowsFinalInstallerBootstrapError, match="REQUIRED"):
-        build_verified_final_installer_inputs_for_test_v1(
-            bundle_path=Path("bundle.zip"),
-            manifest_path=Path("manifest.json"),
-            keyring_path=Path("keyring.json"),
-            expected_source_sha256="a" * 64,
-            keyring_raw_sha256="b" * 64,
-            nonce_registry_root=Path("nonce"),
-            reserve_nonce=False,
-        )
+def test_direct_source_import_cannot_bypass_generated_archive_anchor() -> None:
+    with pytest.raises(InstallerBootstrapTrustAnchorError, match="ANCHOR_MISSING"):
+        load_production_installer_trust_anchor_v1()
 
 
 def test_production_anchor_rejects_placeholder_hashes() -> None:

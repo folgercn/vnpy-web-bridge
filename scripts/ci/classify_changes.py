@@ -17,6 +17,7 @@ WINDOWS_FENCE_GLOBS = (
     "backend/tests/unit/test_windows_rpc_deployment_snapshot_*.py",
     "backend/tests/unit/test_windows_rpc_durable_fence_*.py",
     "backend/tests/unit/test_windows_fence_foundation_*.py",
+    "backend/tests/unit/windows_fence_*_fixture_v1.py",
     "backend/tests/integration/test_windows_rpc_durable_fence_*.py",
     "backend/tests/integration/test_windows_fence_foundation_*.py",
 )
