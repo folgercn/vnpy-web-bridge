@@ -45,6 +45,7 @@ FOUNDATION_SOURCE_NAMES = (
     "final_admission_v1.py",
     "final_store_v1.py",
     "installer_entry_v1.py",
+    "installer_bootstrap_v1.py",
     "installer_windows_v1.py",
     "manifest_v1.py",
     "native_windows_installer_host_v1.py",

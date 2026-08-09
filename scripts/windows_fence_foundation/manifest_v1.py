@@ -20,6 +20,10 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from .contracts import AUTHORITY_FIELDS, canonical_json_bytes
+from .target_contract_v1 import (
+    WindowsFoundationTargetContractError,
+    parse_windows_foundation_target_policy_v1,
+)
 from .trust_pins_v1 import (
     MANIFEST_KEY_DOMAIN,
     MANIFEST_SIGNER_ROLE,
@@ -54,6 +58,10 @@ MANIFEST_FIELDS = frozenset(
         "manifest_core_sha256",
         "install_attempt_id",
         "attempt_nonce_sha256",
+        "expected_account_sha256",
+        "gateway_name",
+        "gateway_scope_sha256",
+        "target_policy",
         "issued_at_utc",
         "expires_at_utc",
         "trusted_clock_id",
@@ -122,9 +130,7 @@ MANIFEST_FIELDS = frozenset(
 
 EXPECTED_BINDING_FIELDS = frozenset(
     [
-        "install_attempt_id",
-        "attempt_nonce_sha256",
-        "trusted_clock_id",
+        "target_policy",
         "service_name",
         "store_path_sha256",
         "store_volume_serial",
@@ -160,8 +166,6 @@ EXPECTED_BINDING_FIELDS = frozenset(
         "expected_installer_process_image_sha256",
         "python_class_sha256",
         "python_path_sha256",
-        "preflight_receipt_id",
-        "preflight_receipt_raw_sha256",
     ]
 )
 
@@ -409,6 +413,17 @@ def _parse_canonical_object(raw: bytes) -> dict[str, Any]:
     return value
 
 
+def parse_install_manifest_candidate_v1(raw: bytes) -> Mapping[str, Any]:
+    """Strictly parse a candidate before its signature is trusted.
+
+    This deliberately performs no filesystem action and is only for deriving
+    native facts which are then compared by ``verify_install_manifest_v1``.
+    """
+    value = _parse_canonical_object(raw)
+    _require_schema(value)
+    return MappingProxyType(value)
+
+
 def _require_schema(value: dict[str, Any]) -> None:
     if set(value) != MANIFEST_FIELDS:
         raise ManifestVerificationError("MANIFEST_SCHEMA_FIELDS_MISMATCH")
@@ -453,12 +468,40 @@ def _require_schema(value: dict[str, Any]) -> None:
         for field in SHA_FIELDS
     ):
         raise ManifestVerificationError("MANIFEST_SCHEMA_INVALID")
+    try:
+        policy = parse_windows_foundation_target_policy_v1(value["target_policy"])
+    except WindowsFoundationTargetContractError as exc:
+        raise ManifestVerificationError("MANIFEST_TARGET_POLICY_INVALID") from exc
+    if dict(policy.manifest_value()) != value["target_policy"]:
+        raise ManifestVerificationError("MANIFEST_TARGET_POLICY_INVALID")
+    if (
+        value["service_name"] != policy.service_name
+        or value["store_path_sha256"]
+        != hashlib.sha256(policy.store_root_path.encode("utf-8")).hexdigest()
+        or value["store_volume_serial"] != policy.store_volume_serial
+        or value["store_volume_identity_sha256"] != policy.store_volume_identity_sha256
+        or value["store_owner_sid_sha256"] != policy.store_owner_sid_sha256
+        or value["store_directory_acl_sddl_sha256"]
+        != policy.store_directory_acl_sddl_sha256
+        or value["store_state_acl_sddl_sha256"] != policy.store_state_acl_sddl_sha256
+        or value["expected_final_owner_sid_sha256"] != policy.final_owner_sid_sha256
+        or value["expected_final_directory_acl_sddl_sha256"]
+        != policy.final_directory_acl_sddl_sha256
+        or value["expected_component_acl_sddl_sha256"]
+        != policy.component_acl_sddl_sha256
+        or value["expected_service_config_owner_sid_sha256"]
+        != policy.service_config_owner_sid_sha256
+        or value["expected_service_config_acl_sddl_sha256"]
+        != policy.service_config_acl_sddl_sha256
+    ):
+        raise ManifestVerificationError("MANIFEST_TARGET_POLICY_BINDING_MISMATCH")
     patterns = {
         "manifest_id": rf"^{MANIFEST_ID_PREFIX}[0-9a-f]{{64}}$",
         "install_attempt_id": r"^windows-fence-install-[0-9a-f]{64}$",
         "preflight_receipt_id": r"^windows-fence-preflight-[0-9a-f]{64}$",
         "trusted_clock_id": r"^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
         "service_name": r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
+        "gateway_name": r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
         "store_volume_serial": r"^[A-F0-9]{8,32}$",
         "signer_key_id": rf"^{re.escape(MANIFEST_SIGNER_ROLE)}:[A-Za-z0-9][A-Za-z0-9._:-]{{7,127}}$",
     }
@@ -526,8 +569,7 @@ def verify_install_manifest_v1(
     """Verify identity, external pin, signature, time, and all caller bindings."""
     if not isinstance(trust_pins, WindowsFoundationTrustPinsV1):
         raise ManifestVerificationError("TRUST_PINS_INVALID")
-    value = _parse_canonical_object(raw)
-    _require_schema(value)
+    value = dict(parse_install_manifest_candidate_v1(raw))
 
     if (
         not isinstance(expected_bindings, Mapping)
@@ -551,6 +593,9 @@ def verify_install_manifest_v1(
         "store_path_sha256",
         "store_volume_serial",
         "store_volume_identity_sha256",
+        "expected_account_sha256",
+        "gateway_name",
+        "gateway_scope_sha256",
     ):
         if value[field] != install_attempt_inputs[field]:
             raise ManifestVerificationError("INSTALL_ATTEMPT_MANIFEST_BINDING_MISMATCH")
@@ -657,6 +702,7 @@ __all__ = [
     "ManifestVerificationError",
     "VerifiedInstallManifestV1",
     "derive_install_attempt_id_v1",
+    "parse_install_manifest_candidate_v1",
     "verify_and_reserve_install_manifest_v1",
     "verify_install_manifest_v1",
 ]

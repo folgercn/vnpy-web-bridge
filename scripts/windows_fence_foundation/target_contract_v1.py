@@ -81,6 +81,36 @@ _EXPECTED_IMAGE_ARGUMENT_TEMPLATE = (
     "{config_sha256}",
 )
 
+TARGET_POLICY_MANIFEST_FIELDS = frozenset(
+    {
+        "service_name",
+        "final_versions_root",
+        "service_executable_path",
+        "service_python_class",
+        "image_argument_template",
+        "service_account_sid_sha256",
+        "service_dependencies",
+        "store_root_path",
+        "store_volume_serial",
+        "store_volume_identity_sha256",
+        "store_owner_sid_sha256",
+        "store_directory_acl_sddl_sha256",
+        "store_state_acl_sddl_sha256",
+        "final_owner_sid_sha256",
+        "final_directory_acl_sddl_sha256",
+        "component_acl_sddl_sha256",
+        "final_owner_sid",
+        "final_directory_acl_sddl",
+        "component_acl_sddl",
+        "service_config_owner_sid_sha256",
+        "service_config_acl_sddl_sha256",
+        "service_config_owner_sid",
+        "service_config_acl_sddl",
+        "installer_principal_sid_sha256",
+        "installer_process_image_sha256",
+    }
+)
+
 
 class WindowsFoundationTargetContractError(ValueError):
     """Stable fail-closed error raised by the pure target contract."""
@@ -240,6 +270,80 @@ class WindowsFoundationTargetPolicyV1:
         ):
             raise WindowsFoundationTargetContractError("SERVICE_DEPENDENCIES_INVALID")
 
+    def manifest_value(self) -> Mapping[str, Any]:
+        """The entire reconstructible target policy which must be signed."""
+        return MappingProxyType(
+            {
+                "service_name": self.service_name,
+                "final_versions_root": self.final_versions_root,
+                "service_executable_path": self.service_executable_path,
+                "service_python_class": self.service_python_class,
+                "image_argument_template": list(self.image_argument_template),
+                "service_account_sid_sha256": self.service_account_sid_sha256,
+                "service_dependencies": list(self.service_dependencies),
+                "store_root_path": self.store_root_path,
+                "store_volume_serial": self.store_volume_serial,
+                "store_volume_identity_sha256": self.store_volume_identity_sha256,
+                "store_owner_sid_sha256": self.store_owner_sid_sha256,
+                "store_directory_acl_sddl_sha256": self.store_directory_acl_sddl_sha256,
+                "store_state_acl_sddl_sha256": self.store_state_acl_sddl_sha256,
+                "final_owner_sid_sha256": self.final_owner_sid_sha256,
+                "final_directory_acl_sddl_sha256": self.final_directory_acl_sddl_sha256,
+                "component_acl_sddl_sha256": self.component_acl_sddl_sha256,
+                "final_owner_sid": self.final_owner_sid,
+                "final_directory_acl_sddl": self.final_directory_acl_sddl,
+                "component_acl_sddl": self.component_acl_sddl,
+                "service_config_owner_sid_sha256": self.service_config_owner_sid_sha256,
+                "service_config_acl_sddl_sha256": self.service_config_acl_sddl_sha256,
+                "service_config_owner_sid": self.service_config_owner_sid,
+                "service_config_acl_sddl": self.service_config_acl_sddl,
+                "installer_principal_sid_sha256": self.installer_principal_sid_sha256,
+                "installer_process_image_sha256": self.installer_process_image_sha256,
+            }
+        )
+
+
+def parse_windows_foundation_target_policy_v1(
+    value: Mapping[str, Any],
+) -> WindowsFoundationTargetPolicyV1:
+    """Parse only the complete raw policy carried by a signed manifest."""
+    if not isinstance(value, Mapping) or set(value) != TARGET_POLICY_MANIFEST_FIELDS:
+        raise WindowsFoundationTargetContractError(
+            "TARGET_POLICY_MANIFEST_FIELDS_INVALID"
+        )
+    try:
+        return WindowsFoundationTargetPolicyV1(
+            service_name=value["service_name"],
+            final_versions_root=value["final_versions_root"],
+            service_executable_path=value["service_executable_path"],
+            service_python_class=value["service_python_class"],
+            image_argument_template=tuple(value["image_argument_template"]),
+            service_account_sid_sha256=value["service_account_sid_sha256"],
+            service_dependencies=tuple(value["service_dependencies"]),
+            store_root_path=value["store_root_path"],
+            store_volume_serial=value["store_volume_serial"],
+            store_volume_identity_sha256=value["store_volume_identity_sha256"],
+            store_owner_sid_sha256=value["store_owner_sid_sha256"],
+            store_directory_acl_sddl_sha256=value["store_directory_acl_sddl_sha256"],
+            store_state_acl_sddl_sha256=value["store_state_acl_sddl_sha256"],
+            final_owner_sid_sha256=value["final_owner_sid_sha256"],
+            final_directory_acl_sddl_sha256=value["final_directory_acl_sddl_sha256"],
+            component_acl_sddl_sha256=value["component_acl_sddl_sha256"],
+            final_owner_sid=value["final_owner_sid"],
+            final_directory_acl_sddl=value["final_directory_acl_sddl"],
+            component_acl_sddl=value["component_acl_sddl"],
+            service_config_owner_sid_sha256=value["service_config_owner_sid_sha256"],
+            service_config_acl_sddl_sha256=value["service_config_acl_sddl_sha256"],
+            service_config_owner_sid=value["service_config_owner_sid"],
+            service_config_acl_sddl=value["service_config_acl_sddl"],
+            installer_principal_sid_sha256=value["installer_principal_sid_sha256"],
+            installer_process_image_sha256=value["installer_process_image_sha256"],
+        )
+    except (KeyError, TypeError) as exc:
+        raise WindowsFoundationTargetContractError(
+            "TARGET_POLICY_MANIFEST_INVALID"
+        ) from exc
+
 
 @dataclass(frozen=True)
 class WindowsFoundationTargetProjectionV1:
@@ -386,6 +490,7 @@ def derive_windows_foundation_target_v1(
         "automatic_policy_restore_authorized": False,
     }
     bindings = {
+        "target_policy": dict(policy.manifest_value()),
         "service_name": policy.service_name,
         "store_path_sha256": hashlib.sha256(
             policy.store_root_path.encode("utf-8")
@@ -501,9 +606,11 @@ def derive_windows_foundation_target_v1(
 
 
 __all__ = [
+    "TARGET_POLICY_MANIFEST_FIELDS",
     "WindowsFoundationTargetContractError",
     "WindowsFoundationTargetPolicyV1",
     "WindowsFoundationTargetProjectionV1",
     "canonical_windows_absolute_path",
     "derive_windows_foundation_target_v1",
+    "parse_windows_foundation_target_policy_v1",
 ]

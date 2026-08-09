@@ -10,6 +10,7 @@ from scripts.windows_fence_foundation.target_contract_v1 import (
     WindowsFoundationTargetPolicyV1,
     canonical_windows_absolute_path,
     derive_windows_foundation_target_v1,
+    parse_windows_foundation_target_policy_v1,
 )
 
 SHA = "a" * 64
@@ -149,6 +150,18 @@ def test_target_projection_binds_content_addressed_paths_and_safe_scm_transition
         projection.target_service_config["image_path"]["application_path"] = (  # type: ignore[index]
             r"C:\unsafe.exe"
         )
+
+
+def test_signed_target_policy_is_complete_and_reconstructible() -> None:
+    policy = _policy()
+    raw = dict(policy.manifest_value())
+    assert parse_windows_foundation_target_policy_v1(raw) == policy
+    assert raw["final_versions_root"].endswith(r"\versions")
+    assert raw["service_python_class"] == policy.service_python_class
+    assert raw["image_argument_template"][-1] == "{config_sha256}"
+    del raw["component_acl_sddl"]
+    with pytest.raises(WindowsFoundationTargetContractError):
+        parse_windows_foundation_target_policy_v1(raw)
 
 
 def test_any_bundle_or_component_change_changes_derived_manifest_binding() -> None:

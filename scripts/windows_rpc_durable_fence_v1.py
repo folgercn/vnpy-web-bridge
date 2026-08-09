@@ -182,6 +182,7 @@ _ASSEMBLY_COMPONENTS = (
     "credential_config_v1.py",
     "final_admission_v1.py",
     "final_store_v1.py",
+    "installer_bootstrap_v1.py",
     "installer_entry_v1.py",
     "installer_windows_v1.py",
     "manifest_v1.py",

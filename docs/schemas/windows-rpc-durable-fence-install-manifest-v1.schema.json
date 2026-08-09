@@ -6,7 +6,7 @@
   "additionalProperties": false,
   "required": [
     "schema_version", "purpose", "manifest_id", "manifest_core_sha256",
-    "install_attempt_id", "attempt_nonce_sha256", "issued_at_utc", "expires_at_utc", "trusted_clock_id",
+    "install_attempt_id", "attempt_nonce_sha256", "expected_account_sha256", "gateway_name", "gateway_scope_sha256", "target_policy", "issued_at_utc", "expires_at_utc", "trusted_clock_id",
     "service_name", "store_path_sha256", "store_volume_serial",
     "store_volume_identity_sha256",
     "store_id", "store_owner_sid_sha256", "store_directory_acl_sddl_sha256", "store_state_acl_sddl_sha256",
@@ -47,6 +47,10 @@
     "manifest_core_sha256": {"$ref": "#/$defs/sha256"},
     "install_attempt_id": {"$ref": "#/$defs/attemptId"},
     "attempt_nonce_sha256": {"$ref": "#/$defs/sha256"},
+    "expected_account_sha256": {"$ref": "#/$defs/sha256"},
+    "gateway_name": {"$ref": "#/$defs/serviceName"},
+    "gateway_scope_sha256": {"$ref": "#/$defs/sha256"},
+    "target_policy": {"$ref": "#/$defs/targetPolicy"},
     "issued_at_utc": {"$ref": "#/$defs/utc"},
     "expires_at_utc": {"$ref": "#/$defs/utc"},
     "trusted_clock_id": {"$ref": "#/$defs/identifier"},
@@ -128,6 +132,37 @@
         "production_allowed": {"const": false}, "live_trading_authorized": {"const": false},
         "send_order_authorized": {"const": false}, "cancel_order_authorized": {"const": false},
         "countable_forward": {"const": false}
+      }
+    },
+    "targetPolicy": {
+      "type": "object", "additionalProperties": false,
+      "required": ["service_name", "final_versions_root", "service_executable_path", "service_python_class", "image_argument_template", "service_account_sid_sha256", "service_dependencies", "store_root_path", "store_volume_serial", "store_volume_identity_sha256", "store_owner_sid_sha256", "store_directory_acl_sddl_sha256", "store_state_acl_sddl_sha256", "final_owner_sid_sha256", "final_directory_acl_sddl_sha256", "component_acl_sddl_sha256", "final_owner_sid", "final_directory_acl_sddl", "component_acl_sddl", "service_config_owner_sid_sha256", "service_config_acl_sddl_sha256", "service_config_owner_sid", "service_config_acl_sddl", "installer_principal_sid_sha256", "installer_process_image_sha256"],
+      "properties": {
+        "service_name": {"$ref": "#/$defs/serviceName"},
+        "final_versions_root": {"type": "string", "minLength": 3},
+        "service_executable_path": {"type": "string", "minLength": 3},
+        "service_python_class": {"const": "windows_rpc_service_wrapper_v1.VnpyRpcServiceWrapperV1"},
+        "image_argument_template": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+        "service_account_sid_sha256": {"$ref": "#/$defs/sha256"},
+        "service_dependencies": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/serviceName"}},
+        "store_root_path": {"type": "string", "minLength": 3},
+        "store_volume_serial": {"type": "string", "pattern": "^[A-F0-9]{8,32}$"},
+        "store_volume_identity_sha256": {"$ref": "#/$defs/sha256"},
+        "store_owner_sid_sha256": {"$ref": "#/$defs/sha256"},
+        "store_directory_acl_sddl_sha256": {"$ref": "#/$defs/sha256"},
+        "store_state_acl_sddl_sha256": {"$ref": "#/$defs/sha256"},
+        "final_owner_sid_sha256": {"$ref": "#/$defs/sha256"},
+        "final_directory_acl_sddl_sha256": {"$ref": "#/$defs/sha256"},
+        "component_acl_sddl_sha256": {"$ref": "#/$defs/sha256"},
+        "final_owner_sid": {"type": "string", "minLength": 1},
+        "final_directory_acl_sddl": {"type": "string", "minLength": 1},
+        "component_acl_sddl": {"type": "string", "minLength": 1},
+        "service_config_owner_sid_sha256": {"$ref": "#/$defs/sha256"},
+        "service_config_acl_sddl_sha256": {"$ref": "#/$defs/sha256"},
+        "service_config_owner_sid": {"type": "string", "minLength": 1},
+        "service_config_acl_sddl": {"type": "string", "minLength": 1},
+        "installer_principal_sid_sha256": {"$ref": "#/$defs/sha256"},
+        "installer_process_image_sha256": {"$ref": "#/$defs/sha256"}
       }
     }
   }
