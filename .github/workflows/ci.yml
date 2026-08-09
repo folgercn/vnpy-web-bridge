@@ -917,6 +917,10 @@ jobs:
       - name: Install read-only test dependencies
         run: pip install -r scripts/ci/requirements-quick.txt
 
+      - name: Install pinned pywin32 for Windows fence checks
+        if: runner.os == 'Windows'
+        run: pip install pywin32==306
+
       - name: Run Windows fence offline tests
         run: >-
           python -m pytest -q
@@ -927,6 +931,35 @@ jobs:
           backend/tests/unit/test_windows_rpc_durable_fence_bundle_v1.py
           backend/tests/unit/test_windows_rpc_durable_fence_manifest_v1.py
           backend/tests/unit/test_windows_rpc_durable_fence_target_contract_v1.py
+          backend/tests/unit/test_windows_rpc_credential_config_v1.py
+          backend/tests/unit/test_windows_fence_installer_windows_v1.py
+          backend/tests/unit/test_windows_fence_installer_bootstrap_v1.py
+
+      - name: Smoke native final-installer host without service mutation
+        if: runner.os == 'Windows'
+        run: |-
+          python -m scripts.windows_fence_foundation.installer_entry_v1 --native-host-preflight
+
+      - name: Smoke Windows temp filesystem and machine-DPAPI rollback only
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |-
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP ("vnpy-fence-ci-" + [guid]::NewGuid().ToString("N"))
+          $blob = Join-Path $root "credential.dpapi"
+          New-Item -ItemType Directory -Path $root | Out-Null
+          try {
+            $acl = Get-Acl -LiteralPath $root
+            $acl.SetAccessRuleProtection($true, $false)
+            $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($env:USERNAME, "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
+            $acl.SetAccessRule($rule)
+            Set-Acl -LiteralPath $root -AclObject $acl
+            python -c "import sys,win32crypt; p=bytes(win32crypt.CryptProtectData(b'{}','vnpy-fence-ci',None,None,None,0x4)); open(sys.argv[1],'wb').write(p); assert bytes(win32crypt.CryptUnprotectData(open(sys.argv[1],'rb').read(),None,None,None,0)[1]) == b'{}'" $blob
+            if (-not (Test-Path -LiteralPath $blob)) { throw 'DPAPI_CREATE_READ_FAILED' }
+          } finally {
+            if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
+          }
+          if (Test-Path -LiteralPath $root) { throw 'DRY_INSTALL_ROLLBACK_FAILED' }
 
   docker:
     name: Production image build

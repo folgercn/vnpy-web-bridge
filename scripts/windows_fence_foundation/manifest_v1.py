@@ -20,12 +20,20 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from .contracts import AUTHORITY_FIELDS, canonical_json_bytes
+from .target_contract_v1 import (
+    WindowsFoundationTargetContractError,
+    parse_windows_foundation_target_policy_v1,
+)
 from .trust_pins_v1 import (
     MANIFEST_KEY_DOMAIN,
     MANIFEST_SIGNER_ROLE,
     WindowsFoundationTrustPinsV1,
 )
-from .win32_fs import FilesystemFactsAdapter, PathSecurityFacts
+from .win32_fs import (
+    FilesystemFactsAdapter,
+    PathSecurityFacts,
+    WindowsFilesystemFactsAdapter,
+)
 
 MAX_MANIFEST_BYTES = 256 * 1024
 MANIFEST_SCHEMA_VERSION = "windows_rpc_durable_fence_install_manifest_v1"
@@ -54,6 +62,10 @@ MANIFEST_FIELDS = frozenset(
         "manifest_core_sha256",
         "install_attempt_id",
         "attempt_nonce_sha256",
+        "expected_account_sha256",
+        "gateway_name",
+        "gateway_scope_sha256",
+        "target_policy",
         "issued_at_utc",
         "expires_at_utc",
         "trusted_clock_id",
@@ -61,6 +73,10 @@ MANIFEST_FIELDS = frozenset(
         "store_path_sha256",
         "store_volume_serial",
         "store_volume_identity_sha256",
+        "store_id",
+        "store_owner_sid_sha256",
+        "store_directory_acl_sddl_sha256",
+        "store_state_acl_sddl_sha256",
         "bundle_sha256",
         "publish_mode",
         "final_version_directory_path_sha256",
@@ -68,6 +84,8 @@ MANIFEST_FIELDS = frozenset(
         "expected_final_directory_acl_sddl_sha256",
         "expected_component_acl_sddl_sha256",
         "extension_version",
+        "wrapper_sha256",
+        "wrapper_destination_path_sha256",
         "extension_sha256",
         "extension_destination_path_sha256",
         "launcher_sha256",
@@ -94,6 +112,8 @@ MANIFEST_FIELDS = frozenset(
         "automatic_policy_restore_authorized",
         "expected_installer_principal_sid_sha256",
         "expected_installer_process_image_sha256",
+        "python_class_sha256",
+        "python_path_sha256",
         "target_state_schema_version",
         "preflight_receipt_id",
         "preflight_receipt_raw_sha256",
@@ -114,18 +134,22 @@ MANIFEST_FIELDS = frozenset(
 
 EXPECTED_BINDING_FIELDS = frozenset(
     [
-        "install_attempt_id",
-        "attempt_nonce_sha256",
-        "trusted_clock_id",
+        "target_policy",
         "service_name",
         "store_path_sha256",
         "store_volume_serial",
         "store_volume_identity_sha256",
+        "store_id",
+        "store_owner_sid_sha256",
+        "store_directory_acl_sddl_sha256",
+        "store_state_acl_sddl_sha256",
         "bundle_sha256",
         "final_version_directory_path_sha256",
         "expected_final_owner_sid_sha256",
         "expected_final_directory_acl_sddl_sha256",
         "expected_component_acl_sddl_sha256",
+        "wrapper_sha256",
+        "wrapper_destination_path_sha256",
         "extension_sha256",
         "extension_destination_path_sha256",
         "launcher_sha256",
@@ -144,8 +168,8 @@ EXPECTED_BINDING_FIELDS = frozenset(
         "service_config_transition_plan_sha256",
         "expected_installer_principal_sid_sha256",
         "expected_installer_process_image_sha256",
-        "preflight_receipt_id",
-        "preflight_receipt_raw_sha256",
+        "python_class_sha256",
+        "python_path_sha256",
     ]
 )
 
@@ -162,6 +186,30 @@ class ManifestVerificationError(ValueError):
     def __init__(self, code: str) -> None:
         super().__init__(code)
         self.code = code
+
+
+def _matches_windows_nonce_registry_root_facts(
+    *,
+    actual: PathSecurityFacts,
+    expected: PathSecurityFacts,
+    owner_sid: str,
+) -> bool:
+    """Require one Win32-adapter fact set to match the sealed root pin exactly."""
+    return (
+        actual == expected
+        and hashlib.sha256(owner_sid.encode("utf-8")).hexdigest()
+        == actual.owner_sid_sha256
+        and actual.directory
+        and not actual.regular_file
+        and not actual.reparse_point
+        and actual.parent_chain_reparse_free
+        and actual.hardlink_count == 1
+        and not actual.alternate_data_streams
+        and actual.dacl_protected
+        and actual.inherited_ace_count == 0
+        and not actual.unsafe_write_principals
+        and actual.write_principal_sid_sha256s == (actual.owner_sid_sha256,)
+    )
 
 
 @dataclass(frozen=True)
@@ -324,6 +372,146 @@ class FilesystemInstallAttemptNonceRegistryV1:
 
 
 @dataclass(frozen=True)
+class WindowsInstallAttemptNonceRegistryV1:
+    """Windows-only nonce registry anchored by opened directory handles.
+
+    The portable POSIX registry above is intentionally not accepted here: a
+    Windows installer needs CreateFileW create-only semantics, Windows volume
+    GUID/file-index identity, protected owner/DACL facts, and ADS/reparse
+    checks from the same opened handles.
+    """
+
+    root: Path
+    filesystem: WindowsFilesystemFactsAdapter
+    expected_root_facts: PathSecurityFacts
+    owner_sid: str
+    acl_sddl: str
+
+    def __post_init__(self) -> None:
+        if os.name != "nt" or not isinstance(
+            self.filesystem, WindowsFilesystemFactsAdapter
+        ):
+            raise ManifestVerificationError("WINDOWS_NONCE_REGISTRY_REQUIRED")
+        root = Path(self.root).absolute()
+        object.__setattr__(self, "root", root)
+        try:
+            actual = self.filesystem.inspect(root)
+        except OSError as exc:
+            raise ManifestVerificationError(
+                "WINDOWS_NONCE_REGISTRY_ROOT_INVALID"
+            ) from exc
+        if not _matches_windows_nonce_registry_root_facts(
+            actual=actual,
+            expected=self.expected_root_facts,
+            owner_sid=self.owner_sid,
+        ):
+            raise ManifestVerificationError(
+                "WINDOWS_NONCE_REGISTRY_EXPECTATION_INVALID"
+            )
+
+    def _verify_root_facts(self) -> PathSecurityFacts:
+        try:
+            actual = self.filesystem.inspect(self.root)
+        except OSError as exc:
+            raise ManifestVerificationError(
+                "WINDOWS_NONCE_REGISTRY_ROOT_INVALID"
+            ) from exc
+        if not _matches_windows_nonce_registry_root_facts(
+            actual=actual,
+            expected=self.expected_root_facts,
+            owner_sid=self.owner_sid,
+        ):
+            raise ManifestVerificationError(
+                "WINDOWS_NONCE_REGISTRY_ROOT_FACTS_MISMATCH"
+            )
+        return actual
+
+    def _verify_record(
+        self, *, raw: bytes, facts: PathSecurityFacts, path: Path
+    ) -> None:
+        if (
+            facts.path_sha256 != hashlib.sha256(str(path).encode("utf-8")).hexdigest()
+            or facts.volume_serial != self.expected_root_facts.volume_serial
+            or facts.volume_identity_sha256
+            != self.expected_root_facts.volume_identity_sha256
+            or not facts.regular_file
+            or facts.directory
+            or facts.reparse_point
+            or not facts.parent_chain_reparse_free
+            or facts.hardlink_count != 1
+            or facts.alternate_data_streams
+            or not facts.dacl_protected
+            or facts.inherited_ace_count
+            or facts.unsafe_write_principals
+            or facts.owner_sid_sha256 != self.expected_root_facts.owner_sid_sha256
+            or facts.acl_sddl_sha256 != self.expected_root_facts.acl_sddl_sha256
+            or facts.write_principal_sid_sha256s
+            != (self.expected_root_facts.owner_sid_sha256,)
+            or not raw
+        ):
+            raise ManifestVerificationError("WINDOWS_NONCE_RECORD_FACTS_MISMATCH")
+
+    def compare_and_record(
+        self, *, nonce_sha256: str, immutable_inputs_sha256: str
+    ) -> str:
+        if (
+            not isinstance(nonce_sha256, str)
+            or SHA_RE.fullmatch(nonce_sha256) is None
+            or not isinstance(immutable_inputs_sha256, str)
+            or SHA_RE.fullmatch(immutable_inputs_sha256) is None
+        ):
+            raise ManifestVerificationError("NONCE_REGISTRY_BINDING_INVALID")
+        record = canonical_json_bytes(
+            {
+                "schema_version": "windows_rpc_durable_fence_nonce_binding_v1",
+                "purpose": "reject_install_attempt_nonce_reuse_with_changed_inputs",
+                "attempt_nonce_sha256": nonce_sha256,
+                "immutable_inputs_sha256": immutable_inputs_sha256,
+            }
+        )
+        path = self.root / f"{nonce_sha256}.json"
+        self._verify_root_facts()
+        try:
+            with self.filesystem.open_directory_anchor(self.root) as anchor:
+                before = anchor.assert_named_path_is_opened_parent()
+                try:
+                    item = self.filesystem.write_file_create_only_relative_to_opened_parent(
+                        parent=anchor,
+                        name=path.name,
+                        raw=record,
+                        protected_sddl=self.acl_sddl,
+                    )
+                except FileExistsError:
+                    item = self.filesystem.read_file(path)
+                    self._verify_record(raw=item.raw, facts=item.facts, path=path)
+                    if item.raw != record:
+                        raise ManifestVerificationError(
+                            "INSTALL_ATTEMPT_NONCE_REUSE_CONFLICT"
+                        )
+                    result = "MATCHED_EXISTING"
+                else:
+                    self._verify_record(raw=item.raw, facts=item.facts, path=path)
+                    if item.raw != record:
+                        raise ManifestVerificationError(
+                            "WINDOWS_NONCE_RECORD_READBACK_MISMATCH"
+                        )
+                    result = "CREATED"
+                after = anchor.assert_named_path_is_opened_parent()
+                if after != before:
+                    raise ManifestVerificationError(
+                        "WINDOWS_NONCE_REGISTRY_OPEN_HANDLE_CHANGED"
+                    )
+        except ManifestVerificationError:
+            raise
+        except OSError as exc:
+            raise ManifestVerificationError(
+                "WINDOWS_NONCE_REGISTRY_WRITE_FAILED"
+            ) from exc
+        self._verify_root_facts()
+        return result
+
+
+@dataclass(frozen=True)
 class VerifiedInstallManifestV1(Mapping[str, Any]):
     value: Mapping[str, Any]
     raw_sha256: str
@@ -393,6 +581,17 @@ def _parse_canonical_object(raw: bytes) -> dict[str, Any]:
     return value
 
 
+def parse_install_manifest_candidate_v1(raw: bytes) -> Mapping[str, Any]:
+    """Strictly parse a candidate before its signature is trusted.
+
+    This deliberately performs no filesystem action and is only for deriving
+    native facts which are then compared by ``verify_install_manifest_v1``.
+    """
+    value = _parse_canonical_object(raw)
+    _require_schema(value)
+    return MappingProxyType(value)
+
+
 def _require_schema(value: dict[str, Any]) -> None:
     if set(value) != MANIFEST_FIELDS:
         raise ManifestVerificationError("MANIFEST_SCHEMA_FIELDS_MISMATCH")
@@ -437,12 +636,40 @@ def _require_schema(value: dict[str, Any]) -> None:
         for field in SHA_FIELDS
     ):
         raise ManifestVerificationError("MANIFEST_SCHEMA_INVALID")
+    try:
+        policy = parse_windows_foundation_target_policy_v1(value["target_policy"])
+    except WindowsFoundationTargetContractError as exc:
+        raise ManifestVerificationError("MANIFEST_TARGET_POLICY_INVALID") from exc
+    if dict(policy.manifest_value()) != value["target_policy"]:
+        raise ManifestVerificationError("MANIFEST_TARGET_POLICY_INVALID")
+    if (
+        value["service_name"] != policy.service_name
+        or value["store_path_sha256"]
+        != hashlib.sha256(policy.store_root_path.encode("utf-8")).hexdigest()
+        or value["store_volume_serial"] != policy.store_volume_serial
+        or value["store_volume_identity_sha256"] != policy.store_volume_identity_sha256
+        or value["store_owner_sid_sha256"] != policy.store_owner_sid_sha256
+        or value["store_directory_acl_sddl_sha256"]
+        != policy.store_directory_acl_sddl_sha256
+        or value["store_state_acl_sddl_sha256"] != policy.store_state_acl_sddl_sha256
+        or value["expected_final_owner_sid_sha256"] != policy.final_owner_sid_sha256
+        or value["expected_final_directory_acl_sddl_sha256"]
+        != policy.final_directory_acl_sddl_sha256
+        or value["expected_component_acl_sddl_sha256"]
+        != policy.component_acl_sddl_sha256
+        or value["expected_service_config_owner_sid_sha256"]
+        != policy.service_config_owner_sid_sha256
+        or value["expected_service_config_acl_sddl_sha256"]
+        != policy.service_config_acl_sddl_sha256
+    ):
+        raise ManifestVerificationError("MANIFEST_TARGET_POLICY_BINDING_MISMATCH")
     patterns = {
         "manifest_id": rf"^{MANIFEST_ID_PREFIX}[0-9a-f]{{64}}$",
         "install_attempt_id": r"^windows-fence-install-[0-9a-f]{64}$",
         "preflight_receipt_id": r"^windows-fence-preflight-[0-9a-f]{64}$",
         "trusted_clock_id": r"^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$",
         "service_name": r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
+        "gateway_name": r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
         "store_volume_serial": r"^[A-F0-9]{8,32}$",
         "signer_key_id": rf"^{re.escape(MANIFEST_SIGNER_ROLE)}:[A-Za-z0-9][A-Za-z0-9._:-]{{7,127}}$",
     }
@@ -510,8 +737,7 @@ def verify_install_manifest_v1(
     """Verify identity, external pin, signature, time, and all caller bindings."""
     if not isinstance(trust_pins, WindowsFoundationTrustPinsV1):
         raise ManifestVerificationError("TRUST_PINS_INVALID")
-    value = _parse_canonical_object(raw)
-    _require_schema(value)
+    value = dict(parse_install_manifest_candidate_v1(raw))
 
     if (
         not isinstance(expected_bindings, Mapping)
@@ -535,6 +761,9 @@ def verify_install_manifest_v1(
         "store_path_sha256",
         "store_volume_serial",
         "store_volume_identity_sha256",
+        "expected_account_sha256",
+        "gateway_name",
+        "gateway_scope_sha256",
     ):
         if value[field] != install_attempt_inputs[field]:
             raise ManifestVerificationError("INSTALL_ATTEMPT_MANIFEST_BINDING_MISMATCH")
@@ -609,7 +838,8 @@ def verify_and_reserve_install_manifest_v1(
     trust_pins: WindowsFoundationTrustPinsV1,
     expected_bindings: Mapping[str, object],
     install_attempt_inputs: Mapping[str, object],
-    nonce_registry: FilesystemInstallAttemptNonceRegistryV1,
+    nonce_registry: FilesystemInstallAttemptNonceRegistryV1
+    | WindowsInstallAttemptNonceRegistryV1,
     now: datetime,
 ) -> VerifiedInstallManifestV1:
     """Reverify raw bytes and atomically reserve their nonce on the offline signer."""
@@ -620,7 +850,10 @@ def verify_and_reserve_install_manifest_v1(
         install_attempt_inputs=install_attempt_inputs,
         now=now,
     )
-    if not isinstance(nonce_registry, FilesystemInstallAttemptNonceRegistryV1):
+    if not isinstance(
+        nonce_registry,
+        (FilesystemInstallAttemptNonceRegistryV1, WindowsInstallAttemptNonceRegistryV1),
+    ):
         raise ManifestVerificationError("INSTALL_ATTEMPT_NONCE_REGISTRY_INVALID")
     if nonce_registry.expected_root_facts != trust_pins.nonce_registry_root_facts:
         raise ManifestVerificationError("INSTALL_ATTEMPT_NONCE_REGISTRY_PIN_MISMATCH")
@@ -640,7 +873,9 @@ __all__ = [
     "FilesystemInstallAttemptNonceRegistryV1",
     "ManifestVerificationError",
     "VerifiedInstallManifestV1",
+    "WindowsInstallAttemptNonceRegistryV1",
     "derive_install_attempt_id_v1",
+    "parse_install_manifest_candidate_v1",
     "verify_and_reserve_install_manifest_v1",
     "verify_install_manifest_v1",
 ]

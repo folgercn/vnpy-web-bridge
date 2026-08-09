@@ -152,6 +152,55 @@ def _manifest() -> dict[str, Any]:
         "manifest_core_sha256": SHA,
         "install_attempt_id": ATTEMPT_ID,
         "attempt_nonce_sha256": SHA,
+        "expected_account_sha256": SHA,
+        "gateway_name": "CTP",
+        "gateway_scope_sha256": SHA,
+        "target_policy": {
+            "service_name": "VnpyRpcService",
+            "final_versions_root": r"C:\ProgramData\vnpy-web-bridge\windows-fence\versions",
+            "service_executable_path": r"C:\veighna_studio\pythonservice.exe",
+            "service_python_class": "windows_rpc_service_wrapper_v1.VnpyRpcServiceWrapperV1",
+            "image_argument_template": [
+                "{wrapper}",
+                "--wrapper-sha256",
+                "{wrapper_sha256}",
+                "{launcher}",
+                "--launcher-sha256",
+                "{launcher_sha256}",
+                "--extension",
+                "{extension}",
+                "--extension-sha256",
+                "{extension_sha256}",
+                "--assembly",
+                "{assembly}",
+                "--assembly-sha256",
+                "{assembly_sha256}",
+                "--config",
+                "{config}",
+                "--config-sha256",
+                "{config_sha256}",
+            ],
+            "service_account_sid_sha256": SHA,
+            "service_dependencies": ["Tcpip"],
+            "store_root_path": r"C:\ProgramData\vnpy-web-bridge\windows-fence\store",
+            "store_volume_serial": "A1B2C3D4",
+            "store_volume_identity_sha256": SHA,
+            "store_owner_sid_sha256": SHA,
+            "store_directory_acl_sddl_sha256": SHA,
+            "store_state_acl_sddl_sha256": SHA,
+            "final_owner_sid_sha256": SHA,
+            "final_directory_acl_sddl_sha256": SHA,
+            "component_acl_sddl_sha256": SHA,
+            "final_owner_sid": "S-1-5-18",
+            "final_directory_acl_sddl": "O:SYD:PAI",
+            "component_acl_sddl": "O:SYD:PAI(A;;FA;;;SY)",
+            "service_config_owner_sid_sha256": SHA,
+            "service_config_acl_sddl_sha256": SHA,
+            "service_config_owner_sid": "S-1-5-18",
+            "service_config_acl_sddl": "O:SYD:PAI",
+            "installer_principal_sid_sha256": SHA,
+            "installer_process_image_sha256": SHA,
+        },
         "issued_at_utc": "2026-08-05T00:00:10Z",
         "expires_at_utc": "2026-08-05T00:05:00Z",
         "trusted_clock_id": "windows-trusted-clock-0001",
@@ -159,6 +208,10 @@ def _manifest() -> dict[str, Any]:
         "store_path_sha256": SHA,
         "store_volume_serial": "A1B2C3D4",
         "store_volume_identity_sha256": SHA,
+        "store_id": f"windows-fence-store-{SHA}",
+        "store_owner_sid_sha256": SHA,
+        "store_directory_acl_sddl_sha256": SHA,
+        "store_state_acl_sddl_sha256": SHA,
         "bundle_sha256": SHA,
         "publish_mode": "atomic_content_addressed_final_directory",
         "final_version_directory_path_sha256": SHA,
@@ -166,6 +219,8 @@ def _manifest() -> dict[str, Any]:
         "expected_final_directory_acl_sddl_sha256": SHA,
         "expected_component_acl_sddl_sha256": SHA,
         "extension_version": "windows-rpc-durable-fence-foundation-v1",
+        "wrapper_sha256": SHA,
+        "wrapper_destination_path_sha256": SHA,
         "extension_sha256": SHA,
         "extension_destination_path_sha256": SHA,
         "launcher_sha256": SHA,
@@ -192,6 +247,8 @@ def _manifest() -> dict[str, Any]:
         "automatic_policy_restore_authorized": False,
         "expected_installer_principal_sid_sha256": SHA,
         "expected_installer_process_image_sha256": SHA,
+        "python_class_sha256": SHA,
+        "python_path_sha256": SHA,
         "target_state_schema_version": "windows_rpc_durable_fence_state_v1",
         "preflight_receipt_id": f"windows-fence-preflight-{SHA}",
         "preflight_receipt_raw_sha256": SHA,
@@ -1034,9 +1091,7 @@ def _failure_artifacts() -> dict[str, dict[str, Any]]:
                 artifacts["scm_dispatch_evidence"]
             )
         if sequence >= 6:
-            value["startup_receipt_raw_sha256"] = _raw_sha(
-                artifacts["startup_receipt"]
-            )
+            value["startup_receipt_raw_sha256"] = _raw_sha(artifacts["startup_receipt"])
         artifacts[f"event_{sequence}"] = _artifact("install_event", value)
 
     add_event(1, "INSTALL_PREPARED", "PREPARED_FROZEN")
@@ -1058,9 +1113,7 @@ def _failure_artifacts() -> dict[str, dict[str, Any]]:
     artifacts["restart_authorization"] = _artifact(
         "restart_authorization", restart_authorization
     )
-    add_event(
-        3, "RESTART_DISPATCH_RESERVED", "RESTART_DISPATCH_RESERVED_FROZEN"
-    )
+    add_event(3, "RESTART_DISPATCH_RESERVED", "RESTART_DISPATCH_RESERVED_FROZEN")
 
     transition = _service_config_transition_receipt()
     transition.update(
@@ -1089,9 +1142,7 @@ def _failure_artifacts() -> dict[str, dict[str, Any]]:
             artifacts["service_config_transition_receipt"]
         ),
     )
-    artifacts["scm_dispatch_evidence"] = _artifact(
-        "scm_dispatch_evidence", evidence
-    )
+    artifacts["scm_dispatch_evidence"] = _artifact("scm_dispatch_evidence", evidence)
     add_event(5, "RESTART_DISPATCHED", "RESTART_UNKNOWN_FROZEN")
 
     startup = _startup_receipt()
@@ -1155,8 +1206,7 @@ def _canonical_raw(value: Any) -> bytes:
         return (
             b"{"
             + b",".join(
-                _canonical_raw(key) + b":" + _canonical_raw(item)
-                for key, item in items
+                _canonical_raw(key) + b":" + _canonical_raw(item) for key, item in items
             )
             + b"}"
         )
@@ -1283,8 +1333,7 @@ def _verify_identity_and_signature_value(
         identity is None
         or (value[role_field], value[key_id_field]) != identity
         or value["signature_algorithm"] != "Ed25519"
-        or value["signature_domain_separator"]
-        != spec["signature_domain_separator"]
+        or value["signature_domain_separator"] != spec["signature_domain_separator"]
     ):
         raise ValueError("SIGNING_DOMAIN_OR_PIN_MISMATCH")
     public_key_raw = _public_key_raw(_test_private_key(value[domain_field]))
@@ -1424,9 +1473,7 @@ def _verify_failure_frontier_profile(
             artifacts[name],
             parsed[name],
         )
-    _verify_artifact_identity_and_signature(
-        "install_event", event_artifact, event
-    )
+    _verify_artifact_identity_and_signature("install_event", event_artifact, event)
     artifact_schemas = {
         "preflight": "windows-rpc-durable-fence-zero-order-preflight-v1.schema.json",
         "manifest": "windows-rpc-durable-fence-install-manifest-v1.schema.json",
@@ -1531,11 +1578,11 @@ def _verify_failure_frontier_profile(
                     raise ValueError("FAILURE_FRONTIER_PREDECESSOR_MISMATCH")
             else:
                 prefix_predecessor_name = f"event_{sequence - 1}"
-                if prefix_event["previous_event_id"] != parsed[
-                    prefix_predecessor_name
-                ]["event_id"] or prefix_event[
-                    "previous_event_raw_sha256"
-                ] != _raw_sha(artifacts[prefix_predecessor_name]):
+                if prefix_event["previous_event_id"] != parsed[prefix_predecessor_name][
+                    "event_id"
+                ] or prefix_event["previous_event_raw_sha256"] != _raw_sha(
+                    artifacts[prefix_predecessor_name]
+                ):
                     raise ValueError("FAILURE_FRONTIER_PREDECESSOR_MISMATCH")
         previous_name = f"event_{event['event_sequence'] - 1}"
         if event["previous_event_id"] != parsed[previous_name]["event_id"] or event[
@@ -1637,8 +1684,7 @@ def _verify_failure_frontier_profile(
         name: parsed[name] for name in present_roots if name != "events"
     }
     equality_fixture["events"] = [
-        parsed[f"event_{sequence}"]
-        for sequence in range(1, event["event_sequence"])
+        parsed[f"event_{sequence}"] for sequence in range(1, event["event_sequence"])
     ] + [event]
     contract_equalities = {
         group["id"]: group["paths"] for group in contract["required_equalities"]
@@ -1930,9 +1976,7 @@ def test_failure_frontier_rejects_signature_core_id_and_canonical_raw_attacks() 
     authorization["authorization_id"] = (
         f"windows-fence-restart-authorization-{OTHER_SHA}"
     )
-    forged_core_and_id["restart_authorization"]["raw"] = _canonical_raw(
-        authorization
-    )
+    forged_core_and_id["restart_authorization"]["raw"] = _canonical_raw(authorization)
     event = _rebind_failure_sequence_4_to_restart_authorization(forged_core_and_id)
     with pytest.raises(ValueError, match="CANONICALIZATION_CORE_OR_ID_MISMATCH"):
         _verify_failure_frontier_profile(event, forged_core_and_id)
@@ -1950,8 +1994,12 @@ def test_strict_foundation_json_rejects_duplicate_float_nonfinite_and_non_nfc() 
     raw = _failure_artifacts()["restart_authorization"]["raw"]
     variants = (
         b'{"schema_version":"duplicate",' + raw[1:],
-        raw.replace(b'"maximum_restart_dispatches":1', b'"maximum_restart_dispatches":1.0'),
-        raw.replace(b'"maximum_restart_dispatches":1', b'"maximum_restart_dispatches":NaN'),
+        raw.replace(
+            b'"maximum_restart_dispatches":1', b'"maximum_restart_dispatches":1.0'
+        ),
+        raw.replace(
+            b'"maximum_restart_dispatches":1', b'"maximum_restart_dispatches":NaN'
+        ),
         raw.replace(b"VnpyRpcService", "VnpyRpcServicee\u0301".encode()),
     )
     for variant in variants:
@@ -1963,8 +2011,7 @@ def test_terminal_failed_event_requires_exact_canonical_raw() -> None:
     artifacts = _failure_artifacts()
     event_artifact = _failed_event(4, artifacts)
     duplicate = {
-        "raw": b'{"event_type":"FOUNDATION_VERIFIED",'
-        + event_artifact["raw"][1:]
+        "raw": b'{"event_type":"FOUNDATION_VERIFIED",' + event_artifact["raw"][1:]
     }
     with pytest.raises(ValueError, match="FOUNDATION_JSON_DUPLICATE_KEY"):
         _verify_failure_frontier_profile(duplicate, artifacts)
@@ -2255,9 +2302,10 @@ def test_cross_artifact_chain_contract_freezes_all_reviewed_rejections() -> None
         )
         assert rule["raw_digest_bindings"]
         assert set(rule["equality_groups"]) <= equality_ids
-    assert "terminal_FAILED_FROZEN_event" in contract[
-        "failure_frontier_identity_and_signature_scope"
-    ]
+    assert (
+        "terminal_FAILED_FROZEN_event"
+        in contract["failure_frontier_identity_and_signature_scope"]
+    )
 
     assert len(contract["time_and_freshness_rules"]) == 12
     assert len(contract["identity_transition_rules"]) == 9

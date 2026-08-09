@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 import subprocess
 import sys
 import zipfile
@@ -10,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from backend.tests.unit.windows_fence_public_fixture_v1 import public_keyring_raw_v1
 import scripts.windows_rpc_durable_fence_v1 as durable_module
 from scripts.windows_fence_foundation.bundle_v1 import (
     COMPONENT_PATHS,
@@ -23,7 +25,6 @@ from scripts.windows_fence_foundation.bundle_v1 import (
     verify_windows_fence_bundle_v1,
 )
 from scripts.windows_fence_foundation.contracts import canonical_json_bytes
-from scripts.windows_rpc_durable_fence_v1 import _runtime_closure_hashes
 
 ROOT = Path(__file__).resolve().parents[3]
 CONFIG_RAW = canonical_json_bytes(
@@ -39,15 +40,30 @@ CONFIG_RAW = canonical_json_bytes(
             ).hexdigest(),
             "store_volume_serial": "A1B2C3D4",
             "store_volume_identity_sha256": "a" * 64,
-            "owner_sid_sha256": "a" * 64,
-            "directory_acl_sddl_sha256": "a" * 64,
+            "owner_sid_sha256": hashlib.sha256(b"test-owner").hexdigest(),
+            "directory_acl_sddl_sha256": hashlib.sha256(b"test-acl").hexdigest(),
             "state_acl_sddl_sha256": "a" * 64,
+        },
+        "installer_store_bootstrap": {
+            "root_path": r"C:\ProgramData\vnpy-web-bridge\windows-fence\store",
+            "root_path_sha256": hashlib.sha256(
+                rb"C:\ProgramData\vnpy-web-bridge\windows-fence\store"
+            ).hexdigest(),
+            "owner_sid": "test-owner",
+            "directory_acl_sddl": "test-acl",
         },
         "runtime_config": {
             "gateway_name": "CTP",
-            "gateway_setting": {
-                "password": "redacted-test-value",
-                "user": "redacted-test-value",
+            "account_scope": "account:windows",
+            "environment": "simnow",
+            "credential_descriptor": {
+                "path": r"C:\ProgramData\vnpy-web-bridge\windows-fence\credentials\credential-descriptor-v1.json",
+                "path_sha256": hashlib.sha256(
+                    rb"C:\ProgramData\vnpy-web-bridge\windows-fence\credentials\credential-descriptor-v1.json"
+                ).hexdigest(),
+                "raw_sha256": "b" * 64,
+                "owner_sid_sha256": "c" * 64,
+                "acl_sddl_sha256": "d" * 64,
             },
             "pub_address": "tcp://*:4102",
             "rep_address": "tcp://*:2014",
@@ -61,17 +77,29 @@ STORE_BINDING = {
     ).hexdigest(),
     "store_volume_serial": "A1B2C3D4",
     "store_volume_identity_sha256": "a" * 64,
-    "owner_sid_sha256": "a" * 64,
-    "directory_acl_sddl_sha256": "a" * 64,
+    "owner_sid_sha256": hashlib.sha256(b"test-owner").hexdigest(),
+    "directory_acl_sddl_sha256": hashlib.sha256(b"test-acl").hexdigest(),
     "state_acl_sddl_sha256": "a" * 64,
 }
+PUBLIC_KEYRING_RAW = public_keyring_raw_v1()
+KEYRING_CANONICAL_PATH = Path("C:/ProgramData/vnpy-web-bridge/installer-keyring.json")
+EXPECTED_SOURCE_SHA256 = os.environ.get("GITHUB_SHA", "a" * 64)
+
+
+def _build_bundle(source_root: Path = ROOT) -> BuiltWindowsFenceBundleV1:
+    return build_windows_fence_bundle_v1(
+        source_root,
+        config_raw=CONFIG_RAW,
+        expected_store_binding=STORE_BINDING,
+        public_keyring_raw=PUBLIC_KEYRING_RAW,
+        keyring_canonical_path=KEYRING_CANONICAL_PATH,
+        expected_source_sha256=EXPECTED_SOURCE_SHA256,
+    )
 
 
 @pytest.fixture(scope="module")
 def built() -> BuiltWindowsFenceBundleV1:
-    return build_windows_fence_bundle_v1(
-        ROOT, config_raw=CONFIG_RAW, expected_store_binding=STORE_BINDING
-    )
+    return _build_bundle()
 
 
 def _outer_entries(raw: bytes) -> dict[str, bytes]:
@@ -97,9 +125,7 @@ def _ordinary_zip(entries: dict[str, bytes], *, compression: int) -> bytes:
 def test_bundle_is_byte_reproducible_and_detached_index_verifies(
     built: BuiltWindowsFenceBundleV1,
 ) -> None:
-    rebuilt = build_windows_fence_bundle_v1(
-        ROOT, config_raw=CONFIG_RAW, expected_store_binding=STORE_BINDING
-    )
+    rebuilt = _build_bundle()
     verified = verify_windows_fence_bundle_v1(
         built.bundle_raw, built.index_raw, expected_store_binding=STORE_BINDING
     )
@@ -113,8 +139,10 @@ def test_bundle_is_byte_reproducible_and_detached_index_verifies(
         built.assembly_source_inventory_sha256
     )
     assert set(verified.component_sha256s) == set(COMPONENT_PATHS)
-    assert b"redacted-test-value" not in built.index_raw
-    assert "redacted-test-value" not in repr(built)
+    assert (
+        b"gateway_setting"
+        not in _outer_entries(built.bundle_raw)[COMPONENT_PATHS["config"]]
+    )
 
 
 def test_outer_and_assembly_zip_have_exact_fixed_metadata(
@@ -138,13 +166,25 @@ def test_outer_and_assembly_zip_have_exact_fixed_metadata(
         assert [item.filename for item in archive.infolist()] == [
             "scripts/__init__.py",
             "scripts/windows_fence_foundation/__init__.py",
+            "scripts/windows_fence_foundation/_installer_trust_anchor_generated_v1.py",
             "scripts/windows_fence_foundation/admission.py",
             "scripts/windows_fence_foundation/assembly.py",
             "scripts/windows_fence_foundation/bootstrap_v1.py",
+            "scripts/windows_fence_foundation/bundle_v1.py",
             "scripts/windows_fence_foundation/contracts.py",
+            "scripts/windows_fence_foundation/credential_config_v1.py",
             "scripts/windows_fence_foundation/final_admission_v1.py",
             "scripts/windows_fence_foundation/final_store_v1.py",
+            "scripts/windows_fence_foundation/generate_installer_trust_anchor_v1.py",
+            "scripts/windows_fence_foundation/installer_bootstrap_v1.py",
+            "scripts/windows_fence_foundation/installer_entry_v1.py",
+            "scripts/windows_fence_foundation/installer_trust_anchor_v1.py",
+            "scripts/windows_fence_foundation/installer_windows_v1.py",
+            "scripts/windows_fence_foundation/manifest_v1.py",
+            "scripts/windows_fence_foundation/native_windows_installer_host_v1.py",
             "scripts/windows_fence_foundation/store.py",
+            "scripts/windows_fence_foundation/target_contract_v1.py",
+            "scripts/windows_fence_foundation/trust_pins_v1.py",
             "scripts/windows_fence_foundation/win32_fs.py",
             "scripts/windows_rpc_deployment_snapshot_v1.py",
         ]
@@ -154,13 +194,25 @@ def test_outer_and_assembly_zip_have_exact_fixed_metadata(
         )
 
 
-def test_assembly_source_inventory_matches_runtime_closure(
+def test_generated_anchor_is_a_mandatory_indexed_assembly_source(
     built: BuiltWindowsFenceBundleV1,
 ) -> None:
-    assert (
-        built.assembly_source_inventory_sha256
-        == _runtime_closure_hashes()["assembly_sha256"]
+    index = json.loads(built.index_raw)
+    source = next(
+        item
+        for item in index["assembly_sources"]
+        if item["path"]
+        == "windows_fence_foundation/_installer_trust_anchor_generated_v1.py"
     )
+    assert source["raw_sha256"] != "0" * 64
+    assert built.expected_source_sha256 == EXPECTED_SOURCE_SHA256
+
+
+def test_formal_bundle_build_without_public_material_fails_closed() -> None:
+    with pytest.raises(WindowsFenceBundleError, match="PUBLIC_INPUT_REQUIRED"):
+        build_windows_fence_bundle_v1(
+            ROOT, config_raw=CONFIG_RAW, expected_store_binding=STORE_BINDING
+        )
 
 
 def test_installed_launcher_imports_archive_and_hashes_published_bytes(
@@ -178,8 +230,11 @@ def test_installed_launcher_imports_archive_and_hashes_published_bytes(
         f"'--assembly-sha256',{built.assembly_archive_raw_sha256!r}];"
         f"m=runpy.run_path({str(tmp_path / Path(COMPONENT_PATHS['launcher']).name)!r});"
         "from scripts import windows_rpc_deployment_snapshot_v1 as extension;"
+        "from scripts.windows_fence_foundation.installer_trust_anchor_v1 import load_production_installer_trust_anchor_v1;"
+        "anchor=load_production_installer_trust_anchor_v1();"
         "closure=m['_runtime_closure_hashes']();"
         "closure['extension_imported_from_archive']=extension.__file__.startswith('<verified-foundation-assembly>');"
+        "closure['anchor_source_sha256']=anchor.expected_source_sha256;"
         "print(json.dumps(closure,sort_keys=True))"
     )
     result = subprocess.run(
@@ -197,6 +252,7 @@ def test_installed_launcher_imports_archive_and_hashes_published_bytes(
     assert closure["launcher_sha256"] == verified.component_sha256s["launcher"]
     assert closure["extension_sha256"] == verified.component_sha256s["extension"]
     assert closure["extension_imported_from_archive"] is True
+    assert closure["anchor_source_sha256"] == EXPECTED_SOURCE_SHA256
 
     bad = command.replace(built.assembly_archive_raw_sha256, "0" * 64)
     rejected = subprocess.run(
@@ -207,6 +263,30 @@ def test_installed_launcher_imports_archive_and_hashes_published_bytes(
     )
     assert rejected.returncode != 0
     assert "FOUNDATION_ASSEMBLY_PREIMPORT_BINDING_MISMATCH" in rejected.stderr
+
+
+def test_published_pythonclass_imports_from_clean_pythonpath(
+    tmp_path: Path, built: BuiltWindowsFenceBundleV1
+) -> None:
+    wrapper = _outer_entries(built.bundle_raw)[COMPONENT_PATHS["wrapper"]]
+    (tmp_path / "windows_rpc_service_wrapper_v1.py").write_bytes(wrapper)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            (
+                f"import sys;sys.path.insert(0,{str(tmp_path)!r});"
+                "import windows_rpc_service_wrapper_v1 as module;"
+                "assert module.SERVICE_WRAPPER_REGISTRY_V1['python_class']=="
+                "'windows_rpc_service_wrapper_v1.VnpyRpcServiceWrapperV1'"
+            ),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_installed_main_validates_all_components_loads_config_and_launches(
@@ -228,6 +308,19 @@ def test_installed_main_validates_all_components_loads_config_and_launches(
 
     monkeypatch.setattr(
         durable_module, "_launch_windows_rpc_durable_fence_bound_v1", fake_launch
+    )
+    monkeypatch.setattr(
+        durable_module,
+        "load_local_credential_descriptor_v1",
+        lambda *_args, **_kwargs: type("Descriptor", (), {"gateway_name": "CTP"})(),
+    )
+    monkeypatch.setattr(
+        durable_module,
+        "load_gateway_setting_from_local_blob_v1",
+        lambda *_args, **_kwargs: {"user": "unit-only"},
+    )
+    monkeypatch.setattr(
+        durable_module, "_production_windows_filesystem", lambda: object()
     )
     verified = verify_windows_fence_bundle_v1(
         built.bundle_raw, built.index_raw, expected_store_binding=STORE_BINDING
@@ -268,12 +361,13 @@ def test_one_byte_component_change_changes_component_assembly_and_bundle(
     (scripts / "windows_rpc_durable_fence_v1.py").write_bytes(
         (ROOT / "scripts" / "windows_rpc_durable_fence_v1.py").read_bytes()
     )
+    (scripts / "windows_rpc_service_wrapper_v1.py").write_bytes(
+        (ROOT / "scripts" / "windows_rpc_service_wrapper_v1.py").read_bytes()
+    )
     target = foundation / "store.py"
     target.write_bytes(target.read_bytes() + b"\n# deterministic-drift\n")
 
-    changed = build_windows_fence_bundle_v1(
-        tmp_path, config_raw=CONFIG_RAW, expected_store_binding=STORE_BINDING
-    )
+    changed = _build_bundle(tmp_path)
     assert changed.assembly_source_inventory_sha256 != (
         built.assembly_source_inventory_sha256
     )
@@ -462,7 +556,7 @@ def test_config_must_be_exact_canonical_json() -> None:
     "mutate",
     [
         lambda value: value.update({"unexpected": True}),
-        lambda value: value["runtime_config"].update({"gateway_setting": {}}),
+        lambda value: value["runtime_config"].update({"credential_descriptor": {}}),
         lambda value: value["runtime_config"].update({"gateway_name": "bad gateway"}),
         lambda value: value["runtime_config"].update(
             {"rep_address": "tcp://0.0.0.0:2014"}
@@ -480,7 +574,7 @@ def test_config_must_match_fixed_runtime_contract(mutate: object) -> None:
     mutate(value)  # type: ignore[operator]
     with pytest.raises(
         WindowsFenceBundleError,
-        match="BUNDLE_RUNTIME_CONFIG_(FIELDS|VALUE)_INVALID",
+        match="BUNDLE_(RUNTIME_CONFIG_(FIELDS|VALUE)_INVALID|CREDENTIAL_DESCRIPTOR_INVALID)",
     ):
         build_windows_fence_bundle_v1(
             ROOT,

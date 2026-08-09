@@ -7,6 +7,7 @@ import json
 import os
 import re
 import tempfile
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -24,6 +25,8 @@ from scripts.windows_fence_foundation.manifest_v1 import (
     SIGNATURE_DOMAIN,
     FilesystemInstallAttemptNonceRegistryV1,
     ManifestVerificationError,
+    WindowsInstallAttemptNonceRegistryV1,
+    _matches_windows_nonce_registry_root_facts,
     derive_install_attempt_id_v1,
     verify_and_reserve_install_manifest_v1,
     verify_install_manifest_v1,
@@ -86,6 +89,157 @@ def _registry(
     )
 
 
+@pytest.mark.skipif(os.name == "nt", reason="portable-rejection contract")
+def test_windows_nonce_registry_never_accepts_portable_adapter(
+    pins: WindowsFoundationTrustPinsV1,
+) -> None:
+    with pytest.raises(
+        ManifestVerificationError, match="WINDOWS_NONCE_REGISTRY_REQUIRED"
+    ):
+        WindowsInstallAttemptNonceRegistryV1(
+            REGISTRY_ROOT,
+            filesystem=_SecureTestFilesystem(),  # type: ignore[arg-type]
+            expected_root_facts=pins.nonce_registry_root_facts,
+            owner_sid=pins.nonce_registry_owner_sid,
+            acl_sddl=pins.nonce_registry_acl_sddl,
+        )
+
+
+def _windows_nonce_registry_root_facts() -> PathSecurityFacts:
+    owner_sid = "S-1-5-21-test-owner"
+    acl_sddl = f"O:{owner_sid}D:PAI(A;;FA;;;{owner_sid})"
+    owner_hash = hashlib.sha256(owner_sid.encode("utf-8")).hexdigest()
+    return PathSecurityFacts(
+        path_sha256="a" * 64,
+        volume_serial="A1B2C3D4",
+        volume_identity_sha256="b" * 64,
+        file_identity="A1B2C3D4:0000000000000001",
+        owner_sid_sha256=owner_hash,
+        acl_sddl_sha256=hashlib.sha256(acl_sddl.encode("utf-8")).hexdigest(),
+        unsafe_write_principals=(),
+        write_principal_sid_sha256s=(owner_hash,),
+        regular_file=False,
+        directory=True,
+        reparse_point=False,
+        parent_chain_reparse_free=True,
+        hardlink_count=1,
+        alternate_data_streams=False,
+        dacl_protected=True,
+        inherited_ace_count=0,
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("path_sha256", "c" * 64),
+        ("volume_serial", "D4C3B2A1"),
+        ("volume_identity_sha256", "d" * 64),
+        ("file_identity", "A1B2C3D4:0000000000000002"),
+        ("owner_sid_sha256", "e" * 64),
+        ("acl_sddl_sha256", "f" * 64),
+        ("unsafe_write_principals", ("unsafe",)),
+        ("write_principal_sid_sha256s", ("e" * 64,)),
+        ("regular_file", True),
+        ("directory", False),
+        ("reparse_point", True),
+        ("parent_chain_reparse_free", False),
+        ("hardlink_count", 2),
+        ("alternate_data_streams", True),
+        ("dacl_protected", False),
+        ("inherited_ace_count", 1),
+    ),
+)
+def test_windows_nonce_registry_root_fact_match_requires_exact_adapter_facts(
+    field: str, value: object
+) -> None:
+    expected = _windows_nonce_registry_root_facts()
+    owner_sid = "S-1-5-21-test-owner"
+    assert _matches_windows_nonce_registry_root_facts(
+        actual=expected,
+        expected=expected,
+        owner_sid=owner_sid,
+    )
+    assert not _matches_windows_nonce_registry_root_facts(
+        actual=replace(expected, **{field: value}),
+        expected=expected,
+        owner_sid=owner_sid,
+    )
+
+
+def test_windows_nonce_registry_root_fact_match_uses_canonical_acl_fact() -> None:
+    expected = _windows_nonce_registry_root_facts()
+    owner_sid = "S-1-5-21-test-owner"
+    equivalent_raw_acl_sddl = f"D:PAI(A;;FA;;;{owner_sid})O:{owner_sid}"
+
+    assert hashlib.sha256(equivalent_raw_acl_sddl.encode("utf-8")).hexdigest() != (
+        expected.acl_sddl_sha256
+    )
+    assert _matches_windows_nonce_registry_root_facts(
+        actual=expected,
+        expected=expected,
+        owner_sid=owner_sid,
+    )
+
+
+def test_windows_nonce_record_rejects_effective_acl_hash_drift() -> None:
+    expected = _windows_nonce_registry_root_facts()
+    registry = object.__new__(WindowsInstallAttemptNonceRegistryV1)
+    object.__setattr__(registry, "expected_root_facts", expected)
+    path = Path("/nonce-registry/" + "a" * 64 + ".json")
+    record_facts = replace(
+        expected,
+        path_sha256=hashlib.sha256(str(path).encode("utf-8")).hexdigest(),
+        regular_file=True,
+        directory=False,
+        acl_sddl_sha256="f" * 64,
+    )
+
+    with pytest.raises(ManifestVerificationError, match="WINDOWS_NONCE_RECORD_FACTS_MISMATCH"):
+        registry._verify_record(raw=b"{}", facts=record_facts, path=path)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows opened-handle smoke")
+def test_windows_nonce_registry_create_readback_and_replay(tmp_path: Path) -> None:
+    import win32api  # type: ignore[import-not-found]
+    import win32security  # type: ignore[import-not-found]
+
+    from scripts.windows_fence_foundation.win32_fs import WindowsFilesystemFactsAdapter
+
+    sid, _domain, _kind = win32security.LookupAccountName(None, win32api.GetUserName())
+    owner = win32security.ConvertSidToStringSid(sid)
+    sddl = f"O:{owner}D:PAI(A;;FA;;;{owner})"
+    filesystem = WindowsFilesystemFactsAdapter()
+    filesystem.apply_protected_security_by_handle(tmp_path, sddl=sddl, directory=True)
+    facts = filesystem.inspect(tmp_path)
+    registry = WindowsInstallAttemptNonceRegistryV1(
+        tmp_path,
+        filesystem=filesystem,
+        expected_root_facts=facts,
+        owner_sid=owner,
+        acl_sddl=sddl,
+    )
+    assert registry._verify_root_facts() == facts
+    nonce = "a" * 64
+    immutable = "b" * 64
+    assert (
+        registry.compare_and_record(
+            nonce_sha256=nonce, immutable_inputs_sha256=immutable
+        )
+        == "CREATED"
+    )
+    assert (
+        registry.compare_and_record(
+            nonce_sha256=nonce, immutable_inputs_sha256=immutable
+        )
+        == "MATCHED_EXISTING"
+    )
+    with pytest.raises(ManifestVerificationError, match="REUSE_CONFLICT"):
+        registry.compare_and_record(
+            nonce_sha256=nonce, immutable_inputs_sha256="c" * 64
+        )
+
+
 def _private(seed: int) -> Ed25519PrivateKey:
     return Ed25519PrivateKey.from_private_bytes(bytes([seed]) * 32)
 
@@ -124,6 +278,8 @@ def pins(
         observer=_pin(observer, OBSERVER_KEY_DOMAIN, OBSERVER_SIGNER_ROLE, "unit-key2"),
         restart=_pin(restart, RESTART_KEY_DOMAIN, RESTART_SIGNER_ROLE, "unit-key3"),
         nonce_registry_root_facts=_registry_facts(REGISTRY_ROOT),
+        nonce_registry_owner_sid="test-owner",
+        nonce_registry_acl_sddl="test-acl",
     )
 
 
@@ -131,16 +287,75 @@ def _sha(label: str) -> str:
     return hashlib.sha256(label.encode()).hexdigest()
 
 
+def _target_policy() -> dict[str, object]:
+    final_owner = "S-1-5-18"
+    final_acl = "O:SYD:PAI"
+    component_acl = "O:SYD:PAI(A;;FA;;;SY)"
+    registry_owner = "S-1-5-18"
+    registry_acl = "O:SYD:PAI"
+    return {
+        "service_name": "VnpyRpcService",
+        "final_versions_root": r"C:\ProgramData\vnpy-web-bridge\windows-fence\versions",
+        "service_executable_path": r"C:\veighna_studio\pythonservice.exe",
+        "service_python_class": "windows_rpc_service_wrapper_v1.VnpyRpcServiceWrapperV1",
+        "image_argument_template": [
+            "{wrapper}",
+            "--wrapper-sha256",
+            "{wrapper_sha256}",
+            "{launcher}",
+            "--launcher-sha256",
+            "{launcher_sha256}",
+            "--extension",
+            "{extension}",
+            "--extension-sha256",
+            "{extension_sha256}",
+            "--assembly",
+            "{assembly}",
+            "--assembly-sha256",
+            "{assembly_sha256}",
+            "--config",
+            "{config}",
+            "--config-sha256",
+            "{config_sha256}",
+        ],
+        "service_account_sid_sha256": _sha("service-account"),
+        "service_dependencies": ["Tcpip"],
+        "store_root_path": r"C:\ProgramData\vnpy-web-bridge\windows-fence\store",
+        "store_volume_serial": "A1B2C3D4",
+        "store_volume_identity_sha256": _sha("store-volume"),
+        "store_owner_sid_sha256": _sha("store-owner"),
+        "store_directory_acl_sddl_sha256": _sha("store-directory-acl"),
+        "store_state_acl_sddl_sha256": _sha("store-state-acl"),
+        "final_owner_sid_sha256": _sha(final_owner),
+        "final_directory_acl_sddl_sha256": _sha(final_acl),
+        "component_acl_sddl_sha256": _sha(component_acl),
+        "final_owner_sid": final_owner,
+        "final_directory_acl_sddl": final_acl,
+        "component_acl_sddl": component_acl,
+        "service_config_owner_sid_sha256": _sha(registry_owner),
+        "service_config_acl_sddl_sha256": _sha(registry_acl),
+        "service_config_owner_sid": registry_owner,
+        "service_config_acl_sddl": registry_acl,
+        "installer_principal_sid_sha256": _sha("installer-principal"),
+        "installer_process_image_sha256": _sha("installer-process"),
+    }
+
+
 def _unsigned_manifest(pin: FoundationPublicKeyPin) -> dict[str, object]:
     sha_fields = [
         "attempt_nonce_sha256",
         "store_path_sha256",
         "store_volume_identity_sha256",
+        "store_owner_sid_sha256",
+        "store_directory_acl_sddl_sha256",
+        "store_state_acl_sddl_sha256",
         "bundle_sha256",
         "final_version_directory_path_sha256",
         "expected_final_owner_sid_sha256",
         "expected_final_directory_acl_sddl_sha256",
         "expected_component_acl_sddl_sha256",
+        "wrapper_sha256",
+        "wrapper_destination_path_sha256",
         "extension_sha256",
         "extension_destination_path_sha256",
         "launcher_sha256",
@@ -159,9 +374,12 @@ def _unsigned_manifest(pin: FoundationPublicKeyPin) -> dict[str, object]:
         "service_config_transition_plan_sha256",
         "expected_installer_principal_sid_sha256",
         "expected_installer_process_image_sha256",
+        "python_class_sha256",
+        "python_path_sha256",
         "preflight_receipt_raw_sha256",
     ]
     value: dict[str, object] = {field: _sha(field) for field in sha_fields}
+    policy = _target_policy()
     value.update(
         {
             "schema_version": "windows_rpc_durable_fence_install_manifest_v1",
@@ -172,6 +390,7 @@ def _unsigned_manifest(pin: FoundationPublicKeyPin) -> dict[str, object]:
             "trusted_clock_id": "unit.clock.v1",
             "service_name": "VnpyRpcService",
             "store_volume_serial": "A1B2C3D4",
+            "store_id": "windows-fence-store-" + _sha("store-id"),
             "publish_mode": "atomic_content_addressed_final_directory",
             "extension_version": "windows-rpc-durable-fence-foundation-v1",
             "installer_write_access_after_publish": False,
@@ -195,6 +414,33 @@ def _unsigned_manifest(pin: FoundationPublicKeyPin) -> dict[str, object]:
             "signer_key_domain": pin.key_domain,
             "signer_key_id": pin.key_id,
             "signer_public_key_sha256": pin.public_key_sha256,
+            "expected_account_sha256": _sha("expected-account"),
+            "gateway_name": "CTP",
+            "gateway_scope_sha256": _sha("gateway-scope"),
+            "target_policy": policy,
+        }
+    )
+    value.update(
+        {
+            "store_path_sha256": _sha(str(policy["store_root_path"])),
+            "store_volume_serial": policy["store_volume_serial"],
+            "store_volume_identity_sha256": policy["store_volume_identity_sha256"],
+            "store_owner_sid_sha256": policy["store_owner_sid_sha256"],
+            "store_directory_acl_sddl_sha256": policy[
+                "store_directory_acl_sddl_sha256"
+            ],
+            "store_state_acl_sddl_sha256": policy["store_state_acl_sddl_sha256"],
+            "expected_final_owner_sid_sha256": policy["final_owner_sid_sha256"],
+            "expected_final_directory_acl_sddl_sha256": policy[
+                "final_directory_acl_sddl_sha256"
+            ],
+            "expected_component_acl_sddl_sha256": policy["component_acl_sddl_sha256"],
+            "expected_service_config_owner_sid_sha256": policy[
+                "service_config_owner_sid_sha256"
+            ],
+            "expected_service_config_acl_sddl_sha256": policy[
+                "service_config_acl_sddl_sha256"
+            ],
         }
     )
     value["install_attempt_id"] = derive_install_attempt_id_v1(_attempt_inputs(value))[
@@ -211,9 +457,9 @@ def _attempt_inputs(value: dict[str, object]) -> dict[str, object]:
         "store_path_sha256": value["store_path_sha256"],
         "store_volume_serial": value["store_volume_serial"],
         "store_volume_identity_sha256": value["store_volume_identity_sha256"],
-        "expected_account_sha256": _sha("expected-account"),
-        "gateway_name": "CTP",
-        "gateway_scope_sha256": _sha("gateway-scope"),
+        "expected_account_sha256": value["expected_account_sha256"],
+        "gateway_name": value["gateway_name"],
+        "gateway_scope_sha256": value["gateway_scope_sha256"],
     }
 
 
@@ -624,6 +870,8 @@ def test_three_trust_domains_are_pairwise_distinct(
             observer=observer,
             restart=pins.restart,
             nonce_registry_root_facts=pins.nonce_registry_root_facts,
+            nonce_registry_owner_sid=pins.nonce_registry_owner_sid,
+            nonce_registry_acl_sddl=pins.nonce_registry_acl_sddl,
         )
 
 

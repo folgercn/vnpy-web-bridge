@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import os
 from dataclasses import replace
@@ -27,6 +28,10 @@ OWNER = "f" * 64
 DIR_ACL = "d" * 64
 FILE_ACL = "e" * 64
 WRITER = "f" * 64
+WIN32_FS_SOURCE = (
+    Path(__file__).resolve().parents[3]
+    / "scripts/windows_fence_foundation/win32_fs.py"
+).read_text(encoding="utf-8")
 
 
 def _state() -> dict[str, object]:
@@ -435,6 +440,236 @@ def test_unsafe_head_is_ignored_without_being_read(tmp_path: Path) -> None:
     result = recover_frozen_none_store(root, expected=expected, fs=facts)
     assert result.ready is True
     assert result.head_status == "UNSAFE_RECONSTRUCTIBLE"
+
+
+def test_windows_relative_unicode_strings_use_explicit_lpwstr_casts() -> None:
+    assert WIN32_FS_SOURCE.count("ctypes.cast(buffer, wintypes.LPWSTR)") == 2
+    assert WIN32_FS_SOURCE.count("len(encoded_name) + 2") == 2
+
+
+def test_windows_ntcreatefile_static_signature_and_calls_are_eleven_arguments() -> None:
+    tree = ast.parse(WIN32_FS_SOURCE)
+    signature = next(
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Attribute)
+        and isinstance(node.targets[0].value, ast.Attribute)
+        and isinstance(node.targets[0].value.value, ast.Name)
+        and node.targets[0].value.value.id == "_ntdll"
+        and node.targets[0].value.attr == "NtCreateFile"
+        and node.targets[0].attr == "argtypes"
+    )
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "_ntdll"
+        and node.func.attr == "NtCreateFile"
+    ]
+    rewind_signature = next(
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Attribute)
+        and isinstance(node.targets[0].value, ast.Attribute)
+        and isinstance(node.targets[0].value.value, ast.Name)
+        and node.targets[0].value.value.id == "_kernel32"
+        and node.targets[0].value.attr == "SetFilePointerEx"
+        and node.targets[0].attr == "argtypes"
+    )
+    rewind_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "_kernel32"
+        and node.func.attr == "SetFilePointerEx"
+    ]
+
+    assert isinstance(signature, ast.List)
+    assert len(signature.elts) == 11
+    assert tuple(ast.unparse(item) for item in signature.elts) == (
+        "ctypes.POINTER(wintypes.HANDLE)",
+        "wintypes.ULONG",
+        "ctypes.POINTER(_OBJECT_ATTRIBUTES)",
+        "ctypes.POINTER(_IO_STATUS_BLOCK)",
+        "ctypes.c_void_p",
+        "wintypes.ULONG",
+        "wintypes.ULONG",
+        "wintypes.ULONG",
+        "wintypes.ULONG",
+        "ctypes.c_void_p",
+        "wintypes.ULONG",
+    )
+    assert len(calls) == 2
+    assert all(len(call.args) == 11 and not call.keywords for call in calls)
+    assert isinstance(rewind_signature, ast.List)
+    assert tuple(ast.unparse(item) for item in rewind_signature.elts) == (
+        "wintypes.HANDLE",
+        "ctypes.c_longlong",
+        "ctypes.POINTER(ctypes.c_longlong)",
+        "wintypes.DWORD",
+    )
+    assert len(rewind_calls) == 1
+    assert [ast.unparse(argument) for argument in rewind_calls[0].args] == [
+        "handle",
+        "0",
+        "None",
+        "_FILE_BEGIN",
+    ]
+
+    create, opened = calls
+    assert "_SYNCHRONIZE = 0x00100000" in WIN32_FS_SOURCE
+    assert ast.unparse(create.args[1]) == (
+        "_GENERIC_READ | _GENERIC_WRITE | _READ_CONTROL | _FILE_READ_ATTRIBUTES "
+        "| _WRITE_DAC | _WRITE_OWNER | _DELETE | _SYNCHRONIZE"
+    )
+    assert ast.unparse(opened.args[1]) == (
+        "_DELETE | _READ_CONTROL | _FILE_READ_ATTRIBUTES | "
+        "(_GENERIC_READ if read_data else 0) | _SYNCHRONIZE"
+    )
+    assert [ast.unparse(argument) for argument in create.args[6:9]] == [
+        "0",
+        "_FILE_CREATE",
+        "_FILE_NON_DIRECTORY_FILE | _FILE_SYNCHRONOUS_IO_NONALERT | _FILE_OPEN_REPARSE_POINT",
+    ]
+    assert [ast.unparse(argument) for argument in opened.args[6:9]] == [
+        "_FILE_SHARE_ALL",
+        "_FILE_OPEN",
+        "_FILE_SYNCHRONOUS_IO_NONALERT | _FILE_OPEN_REPARSE_POINT | (0 if not directory else _FILE_DIRECTORY_FILE)",
+    ]
+    assert "CREATE_ONLY_WRITE_FAILED_AND_CLEANUP_FAILED" in WIN32_FS_SOURCE
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows ctypes structures")
+def test_windows_relative_unicode_string_accepts_explicit_lpwstr_buffer() -> None:
+    import ctypes
+    from ctypes import wintypes
+
+    from scripts.windows_fence_foundation import win32_fs
+
+    name = "nonce.json"
+    encoded_name = name.encode("utf-16-le")
+    buffer = ctypes.create_unicode_buffer(name)
+    unicode_name = win32_fs._UNICODE_STRING(
+        len(encoded_name),
+        len(encoded_name) + 2,
+        ctypes.cast(buffer, wintypes.LPWSTR),
+    )
+    assert unicode_name.buffer == name
+    assert unicode_name.length == len(encoded_name)
+    assert unicode_name.maximum_length == len(encoded_name) + 2
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows ntdll binding")
+def test_windows_ntcreatefile_runtime_signature_has_eleven_arguments() -> None:
+    import ctypes
+    from ctypes import wintypes
+
+    from scripts.windows_fence_foundation import win32_fs
+
+    assert len(win32_fs._ntdll.NtCreateFile.argtypes) == 11
+    assert win32_fs._ntdll.NtCreateFile.restype is ctypes.c_long
+    assert win32_fs._SYNCHRONIZE == 0x00100000
+    assert win32_fs._FILE_BEGIN == 0
+    assert tuple(win32_fs._kernel32.SetFilePointerEx.argtypes) == (
+        wintypes.HANDLE,
+        ctypes.c_longlong,
+        ctypes.POINTER(ctypes.c_longlong),
+        wintypes.DWORD,
+    )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows handle deletion")
+def test_windows_relative_create_cleans_up_after_write_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts.windows_fence_foundation import win32_fs
+
+    adapter = WindowsFilesystemFactsAdapter()
+    target = tmp_path / "failed-create.json"
+    monkeypatch.setattr(win32_fs._kernel32, "WriteFile", lambda *_args: False)
+
+    with adapter.open_directory_anchor(tmp_path) as parent, pytest.raises(
+        OSError
+    ) as raised:
+        adapter.write_file_create_only_relative_to_opened_parent(
+            parent=parent,
+            name=target.name,
+            raw=b"{}",
+            protected_sddl="",
+        )
+
+    assert "CREATE_ONLY_WRITE_FAILED_AND_CLEANUP_FAILED" not in str(raised.value)
+    assert not target.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows handle deletion")
+def test_windows_relative_create_redacts_cleanup_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts.windows_fence_foundation import win32_fs
+
+    adapter = WindowsFilesystemFactsAdapter()
+    target = tmp_path / "failed-cleanup-create.json"
+    original_write = win32_fs._kernel32.WriteFile
+    original_disposition = win32_fs._kernel32.SetFileInformationByHandle
+    monkeypatch.setattr(win32_fs._kernel32, "WriteFile", lambda *_args: False)
+    monkeypatch.setattr(
+        win32_fs._kernel32, "SetFileInformationByHandle", lambda *_args: False
+    )
+
+    try:
+        with adapter.open_directory_anchor(tmp_path) as parent, pytest.raises(
+            OSError, match="^CREATE_ONLY_WRITE_FAILED_AND_CLEANUP_FAILED$"
+        ) as raised:
+            adapter.write_file_create_only_relative_to_opened_parent(
+                parent=parent,
+                name=target.name,
+                raw=b"{}",
+                protected_sddl="",
+            )
+    finally:
+        monkeypatch.setattr(win32_fs._kernel32, "WriteFile", original_write)
+        monkeypatch.setattr(
+            win32_fs._kernel32,
+            "SetFileInformationByHandle",
+            original_disposition,
+        )
+        target.unlink(missing_ok=True)
+
+    assert raised.value.__cause__ is None
+    assert raised.value.__suppress_context__ is True
+    assert target.name not in str(raised.value)
+    assert "WinError" not in str(raised.value)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows handle and ACL APIs")
+def test_windows_relative_create_reads_back_from_rewound_handle(tmp_path: Path) -> None:
+    import win32api  # type: ignore[import-not-found]
+    import win32security  # type: ignore[import-not-found]
+
+    adapter = WindowsFilesystemFactsAdapter()
+    sid, _domain, _kind = win32security.LookupAccountName(None, win32api.GetUserName())
+    owner = win32security.ConvertSidToStringSid(sid)
+    target = tmp_path / "rewound-readback.json"
+
+    with adapter.open_directory_anchor(tmp_path) as parent:
+        created = adapter.write_file_create_only_relative_to_opened_parent(
+            parent=parent,
+            name=target.name,
+            raw=b"readback",
+            protected_sddl=f"O:{owner}D:PAI(A;;FA;;;{owner})",
+        )
+
+    assert created.raw == b"readback"
+    assert created.facts.regular_file
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires Win32 handle and ACL APIs")

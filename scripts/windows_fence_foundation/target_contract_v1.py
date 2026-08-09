@@ -19,8 +19,12 @@ from .contracts import (
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 VOLUME_SERIAL_RE = re.compile(r"^[A-F0-9]{8,32}$")
 SERVICE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+PYTHON_CLASS_RE = re.compile(
+    r"^windows_rpc_service_wrapper_v1\.VnpyRpcServiceWrapperV1$"
+)
 _COMPONENT_FILENAMES = MappingProxyType(
     {
+        "wrapper": "windows_rpc_service_wrapper_v1.py",
         "extension": "windows_rpc_deployment_snapshot_v1.py",
         "launcher": "windows_rpc_durable_fence_v1.py",
         "assembly": "windows_fence_foundation_v1.pyz",
@@ -29,9 +33,12 @@ _COMPONENT_FILENAMES = MappingProxyType(
 )
 _IMAGE_PLACEHOLDERS = frozenset(
     {
+        "{wrapper}",
+        "{wrapper_sha256}",
         "{extension}",
         "{extension_sha256}",
         "{launcher}",
+        "{launcher_sha256}",
         "{assembly}",
         "{assembly_sha256}",
         "{config}",
@@ -41,9 +48,12 @@ _IMAGE_PLACEHOLDERS = frozenset(
 )
 _REQUIRED_IMAGE_PLACEHOLDERS = frozenset(
     {
+        "{wrapper}",
+        "{wrapper_sha256}",
         "{extension}",
         "{extension_sha256}",
         "{launcher}",
+        "{launcher_sha256}",
         "{assembly}",
         "{assembly_sha256}",
         "{config}",
@@ -51,7 +61,12 @@ _REQUIRED_IMAGE_PLACEHOLDERS = frozenset(
     }
 )
 _EXPECTED_IMAGE_ARGUMENT_TEMPLATE = (
+    "{wrapper}",
+    "--wrapper-sha256",
+    "{wrapper_sha256}",
     "{launcher}",
+    "--launcher-sha256",
+    "{launcher_sha256}",
     "--extension",
     "{extension}",
     "--extension-sha256",
@@ -64,6 +79,36 @@ _EXPECTED_IMAGE_ARGUMENT_TEMPLATE = (
     "{config}",
     "--config-sha256",
     "{config_sha256}",
+)
+
+TARGET_POLICY_MANIFEST_FIELDS = frozenset(
+    {
+        "service_name",
+        "final_versions_root",
+        "service_executable_path",
+        "service_python_class",
+        "image_argument_template",
+        "service_account_sid_sha256",
+        "service_dependencies",
+        "store_root_path",
+        "store_volume_serial",
+        "store_volume_identity_sha256",
+        "store_owner_sid_sha256",
+        "store_directory_acl_sddl_sha256",
+        "store_state_acl_sddl_sha256",
+        "final_owner_sid_sha256",
+        "final_directory_acl_sddl_sha256",
+        "component_acl_sddl_sha256",
+        "final_owner_sid",
+        "final_directory_acl_sddl",
+        "component_acl_sddl",
+        "service_config_owner_sid_sha256",
+        "service_config_acl_sddl_sha256",
+        "service_config_owner_sid",
+        "service_config_acl_sddl",
+        "installer_principal_sid_sha256",
+        "installer_process_image_sha256",
+    }
 )
 
 
@@ -128,6 +173,7 @@ class WindowsFoundationTargetPolicyV1:
     service_name: str
     final_versions_root: str
     service_executable_path: str
+    service_python_class: str
     image_argument_template: tuple[str, ...]
     service_account_sid_sha256: str
     service_dependencies: tuple[str, ...]
@@ -140,8 +186,13 @@ class WindowsFoundationTargetPolicyV1:
     final_owner_sid_sha256: str
     final_directory_acl_sddl_sha256: str
     component_acl_sddl_sha256: str
+    final_owner_sid: str
+    final_directory_acl_sddl: str
+    component_acl_sddl: str
     service_config_owner_sid_sha256: str
     service_config_acl_sddl_sha256: str
+    service_config_owner_sid: str
+    service_config_acl_sddl: str
     installer_principal_sid_sha256: str
     installer_process_image_sha256: str
 
@@ -153,6 +204,8 @@ class WindowsFoundationTargetPolicyV1:
             "final_versions_root",
             canonical_windows_absolute_path(self.final_versions_root),
         )
+        if not PYTHON_CLASS_RE.fullmatch(self.service_python_class):
+            raise WindowsFoundationTargetContractError("SERVICE_PYTHON_CLASS_INVALID")
         object.__setattr__(
             self,
             "service_executable_path",
@@ -191,6 +244,23 @@ class WindowsFoundationTargetPolicyV1:
             "installer_process_image_sha256",
         ):
             _require_sha(getattr(self, field), field)
+        for raw_field, digest_field in (
+            ("final_owner_sid", "final_owner_sid_sha256"),
+            ("final_directory_acl_sddl", "final_directory_acl_sddl_sha256"),
+            ("component_acl_sddl", "component_acl_sddl_sha256"),
+            ("service_config_owner_sid", "service_config_owner_sid_sha256"),
+            ("service_config_acl_sddl", "service_config_acl_sddl_sha256"),
+        ):
+            raw = getattr(self, raw_field)
+            if (
+                not isinstance(raw, str)
+                or not raw
+                or hashlib.sha256(raw.encode("utf-8")).hexdigest()
+                != getattr(self, digest_field)
+            ):
+                raise WindowsFoundationTargetContractError(
+                    "TARGET_SECURITY_POLICY_INVALID"
+                )
         if (
             type(self.service_dependencies) is not tuple
             or not self.service_dependencies
@@ -200,12 +270,88 @@ class WindowsFoundationTargetPolicyV1:
         ):
             raise WindowsFoundationTargetContractError("SERVICE_DEPENDENCIES_INVALID")
 
+    def manifest_value(self) -> Mapping[str, Any]:
+        """The entire reconstructible target policy which must be signed."""
+        return MappingProxyType(
+            {
+                "service_name": self.service_name,
+                "final_versions_root": self.final_versions_root,
+                "service_executable_path": self.service_executable_path,
+                "service_python_class": self.service_python_class,
+                "image_argument_template": list(self.image_argument_template),
+                "service_account_sid_sha256": self.service_account_sid_sha256,
+                "service_dependencies": list(self.service_dependencies),
+                "store_root_path": self.store_root_path,
+                "store_volume_serial": self.store_volume_serial,
+                "store_volume_identity_sha256": self.store_volume_identity_sha256,
+                "store_owner_sid_sha256": self.store_owner_sid_sha256,
+                "store_directory_acl_sddl_sha256": self.store_directory_acl_sddl_sha256,
+                "store_state_acl_sddl_sha256": self.store_state_acl_sddl_sha256,
+                "final_owner_sid_sha256": self.final_owner_sid_sha256,
+                "final_directory_acl_sddl_sha256": self.final_directory_acl_sddl_sha256,
+                "component_acl_sddl_sha256": self.component_acl_sddl_sha256,
+                "final_owner_sid": self.final_owner_sid,
+                "final_directory_acl_sddl": self.final_directory_acl_sddl,
+                "component_acl_sddl": self.component_acl_sddl,
+                "service_config_owner_sid_sha256": self.service_config_owner_sid_sha256,
+                "service_config_acl_sddl_sha256": self.service_config_acl_sddl_sha256,
+                "service_config_owner_sid": self.service_config_owner_sid,
+                "service_config_acl_sddl": self.service_config_acl_sddl,
+                "installer_principal_sid_sha256": self.installer_principal_sid_sha256,
+                "installer_process_image_sha256": self.installer_process_image_sha256,
+            }
+        )
+
+
+def parse_windows_foundation_target_policy_v1(
+    value: Mapping[str, Any],
+) -> WindowsFoundationTargetPolicyV1:
+    """Parse only the complete raw policy carried by a signed manifest."""
+    if not isinstance(value, Mapping) or set(value) != TARGET_POLICY_MANIFEST_FIELDS:
+        raise WindowsFoundationTargetContractError(
+            "TARGET_POLICY_MANIFEST_FIELDS_INVALID"
+        )
+    try:
+        return WindowsFoundationTargetPolicyV1(
+            service_name=value["service_name"],
+            final_versions_root=value["final_versions_root"],
+            service_executable_path=value["service_executable_path"],
+            service_python_class=value["service_python_class"],
+            image_argument_template=tuple(value["image_argument_template"]),
+            service_account_sid_sha256=value["service_account_sid_sha256"],
+            service_dependencies=tuple(value["service_dependencies"]),
+            store_root_path=value["store_root_path"],
+            store_volume_serial=value["store_volume_serial"],
+            store_volume_identity_sha256=value["store_volume_identity_sha256"],
+            store_owner_sid_sha256=value["store_owner_sid_sha256"],
+            store_directory_acl_sddl_sha256=value["store_directory_acl_sddl_sha256"],
+            store_state_acl_sddl_sha256=value["store_state_acl_sddl_sha256"],
+            final_owner_sid_sha256=value["final_owner_sid_sha256"],
+            final_directory_acl_sddl_sha256=value["final_directory_acl_sddl_sha256"],
+            component_acl_sddl_sha256=value["component_acl_sddl_sha256"],
+            final_owner_sid=value["final_owner_sid"],
+            final_directory_acl_sddl=value["final_directory_acl_sddl"],
+            component_acl_sddl=value["component_acl_sddl"],
+            service_config_owner_sid_sha256=value["service_config_owner_sid_sha256"],
+            service_config_acl_sddl_sha256=value["service_config_acl_sddl_sha256"],
+            service_config_owner_sid=value["service_config_owner_sid"],
+            service_config_acl_sddl=value["service_config_acl_sddl"],
+            installer_principal_sid_sha256=value["installer_principal_sid_sha256"],
+            installer_process_image_sha256=value["installer_process_image_sha256"],
+        )
+    except (KeyError, TypeError) as exc:
+        raise WindowsFoundationTargetContractError(
+            "TARGET_POLICY_MANIFEST_INVALID"
+        ) from exc
+
 
 @dataclass(frozen=True)
 class WindowsFoundationTargetProjectionV1:
     manifest_bindings: Mapping[str, Any]
     component_paths: Mapping[str, str]
     store_policy: Mapping[str, Any]
+    publish_security: Mapping[str, Any]
+    registry_security: Mapping[str, str]
     preinstall_service_config: Mapping[str, Any]
     safety_service_config: Mapping[str, Any]
     target_service_config: Mapping[str, Any]
@@ -238,11 +384,14 @@ def derive_windows_foundation_target_v1(
     *,
     policy: WindowsFoundationTargetPolicyV1,
     bundle_sha256: str,
+    wrapper_sha256: str,
     extension_sha256: str,
     launcher_sha256: str,
     assembly_sha256: str,
     config_sha256: str,
     preinstall_image_path: Mapping[str, Any],
+    preinstall_python_class: str,
+    preinstall_python_path: str,
     preinstall_start_type: str,
     preinstall_failure_actions: list[Mapping[str, Any]],
     preinstall_recovery_actions: list[Mapping[str, Any]],
@@ -250,6 +399,7 @@ def derive_windows_foundation_target_v1(
     """Derive exact path and service-config hashes without mutating the host."""
     for field, value in (
         ("bundle_sha256", bundle_sha256),
+        ("wrapper_sha256", wrapper_sha256),
         ("extension_sha256", extension_sha256),
         ("launcher_sha256", launcher_sha256),
         ("assembly_sha256", assembly_sha256),
@@ -269,6 +419,9 @@ def derive_windows_foundation_target_v1(
         for item in preinstall_image["arguments"]
     ):
         raise WindowsFoundationTargetContractError("PREINSTALL_IMAGE_PATH_INVALID")
+    if not isinstance(preinstall_python_class, str) or not preinstall_python_class:
+        raise WindowsFoundationTargetContractError("PREINSTALL_PYTHON_CLASS_INVALID")
+    preinstall_python_path = canonical_windows_absolute_path(preinstall_python_path)
 
     final_directory = _join(policy.final_versions_root, bundle_sha256)
     component_paths = {
@@ -276,12 +429,14 @@ def derive_windows_foundation_target_v1(
         for name, filename in _COMPONENT_FILENAMES.items()
     }
     component_sha256s = {
+        "wrapper": wrapper_sha256,
         "extension": extension_sha256,
         "launcher": launcher_sha256,
         "assembly": assembly_sha256,
         "config": config_sha256,
     }
     target_image = _render_image_path(policy, component_paths, component_sha256s)
+    target_python_path = str(PureWindowsPath(component_paths["wrapper"]).parent)
     common = {
         "service_name": policy.service_name,
         "service_account_sid_sha256": policy.service_account_sid_sha256,
@@ -290,6 +445,8 @@ def derive_windows_foundation_target_v1(
     preinstall = {
         **common,
         "image_path": preinstall_image,
+        "python_class": preinstall_python_class,
+        "python_path": preinstall_python_path,
         "start_type": preinstall_start_type,
         "failure_actions": list(preinstall_failure_actions),
         "recovery_actions": list(preinstall_recovery_actions),
@@ -297,6 +454,8 @@ def derive_windows_foundation_target_v1(
     safety = {
         **common,
         "image_path": preinstall_image,
+        "python_class": preinstall_python_class,
+        "python_path": preinstall_python_path,
         "start_type": "DEMAND_START",
         "failure_actions": [],
         "recovery_actions": [],
@@ -304,6 +463,8 @@ def derive_windows_foundation_target_v1(
     target = {
         **common,
         "image_path": target_image,
+        "python_class": policy.service_python_class,
+        "python_path": target_python_path,
         "start_type": "DEMAND_START",
         "failure_actions": [],
         "recovery_actions": [],
@@ -315,6 +476,8 @@ def derive_windows_foundation_target_v1(
         "authorized_changed_fields": [
             "FailureActions",
             "ImagePath",
+            "PythonClass",
+            "PythonPath",
             "RecoveryActions",
             "StartType",
         ],
@@ -327,12 +490,17 @@ def derive_windows_foundation_target_v1(
         "automatic_policy_restore_authorized": False,
     }
     bindings = {
+        "target_policy": dict(policy.manifest_value()),
         "service_name": policy.service_name,
         "store_path_sha256": hashlib.sha256(
             policy.store_root_path.encode("utf-8")
         ).hexdigest(),
         "store_volume_serial": policy.store_volume_serial,
         "store_volume_identity_sha256": policy.store_volume_identity_sha256,
+        "store_id": "windows-fence-store-" + bundle_sha256,
+        "store_owner_sid_sha256": policy.store_owner_sid_sha256,
+        "store_directory_acl_sddl_sha256": policy.store_directory_acl_sddl_sha256,
+        "store_state_acl_sddl_sha256": policy.store_state_acl_sddl_sha256,
         "bundle_sha256": bundle_sha256,
         "publish_mode": "atomic_content_addressed_final_directory",
         "final_version_directory_path_sha256": hashlib.sha256(
@@ -344,6 +512,10 @@ def derive_windows_foundation_target_v1(
         ),
         "expected_component_acl_sddl_sha256": policy.component_acl_sddl_sha256,
         "extension_version": "windows-rpc-durable-fence-foundation-v1",
+        "wrapper_sha256": wrapper_sha256,
+        "wrapper_destination_path_sha256": hashlib.sha256(
+            component_paths["wrapper"].encode("utf-8")
+        ).hexdigest(),
         "extension_sha256": extension_sha256,
         "extension_destination_path_sha256": hashlib.sha256(
             component_paths["extension"].encode("utf-8")
@@ -388,6 +560,12 @@ def derive_windows_foundation_target_v1(
         "expected_installer_process_image_sha256": (
             policy.installer_process_image_sha256
         ),
+        "python_class_sha256": hashlib.sha256(
+            policy.service_python_class.encode("utf-8")
+        ).hexdigest(),
+        "python_path_sha256": hashlib.sha256(
+            target_python_path.encode("utf-8")
+        ).hexdigest(),
         "target_state_schema_version": "windows_rpc_durable_fence_state_v1",
     }
     store_policy = {
@@ -396,6 +574,15 @@ def derive_windows_foundation_target_v1(
         "directory_acl_sddl_sha256": policy.store_directory_acl_sddl_sha256,
         "state_acl_sddl_sha256": policy.store_state_acl_sddl_sha256,
         "sole_writer_must_equal_service_sid": True,
+    }
+    publish_security = {
+        "final_owner_sid": policy.final_owner_sid,
+        "final_directory_acl_sddl": policy.final_directory_acl_sddl,
+        "component_acl_sddl": policy.component_acl_sddl,
+    }
+    registry_security = {
+        "owner_sid": policy.service_config_owner_sid,
+        "acl_sddl": policy.service_config_acl_sddl,
     }
 
     def freeze(item: Any) -> Any:
@@ -409,6 +596,8 @@ def derive_windows_foundation_target_v1(
         manifest_bindings=freeze(bindings),
         component_paths=freeze(component_paths),
         store_policy=freeze(store_policy),
+        publish_security=freeze(publish_security),
+        registry_security=freeze(registry_security),
         preinstall_service_config=freeze(preinstall),
         safety_service_config=freeze(safety),
         target_service_config=freeze(target),
@@ -417,9 +606,11 @@ def derive_windows_foundation_target_v1(
 
 
 __all__ = [
+    "TARGET_POLICY_MANIFEST_FIELDS",
     "WindowsFoundationTargetContractError",
     "WindowsFoundationTargetPolicyV1",
     "WindowsFoundationTargetProjectionV1",
     "canonical_windows_absolute_path",
     "derive_windows_foundation_target_v1",
+    "parse_windows_foundation_target_policy_v1",
 ]

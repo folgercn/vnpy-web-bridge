@@ -22,6 +22,10 @@ from .contracts import (
     canonical_json_bytes,
     canonical_local_windows_path,
 )
+from .installer_trust_anchor_v1 import (
+    InstallerBootstrapTrustAnchorError,
+    render_installer_trust_anchor_generated_module_v1,
+)
 
 BUNDLE_INDEX_SCHEMA_VERSION = "windows_rpc_durable_fence_bundle_index_v1"
 BUNDLE_INDEX_PURPOSE = "identify_reproducible_windows_fence_offline_bundle"
@@ -40,21 +44,34 @@ FOUNDATION_SOURCE_NAMES = (
     "assembly.py",
     "bootstrap_v1.py",
     "contracts.py",
+    "credential_config_v1.py",
+    "bundle_v1.py",
     "final_admission_v1.py",
     "final_store_v1.py",
+    "installer_entry_v1.py",
+    "_installer_trust_anchor_generated_v1.py",
+    "generate_installer_trust_anchor_v1.py",
+    "installer_trust_anchor_v1.py",
+    "installer_bootstrap_v1.py",
+    "installer_windows_v1.py",
+    "manifest_v1.py",
+    "native_windows_installer_host_v1.py",
     "store.py",
+    "target_contract_v1.py",
+    "trust_pins_v1.py",
     "win32_fs.py",
 )
 SYNTHETIC_SCRIPTS_INIT = "scripts/__init__.py"
 ASSEMBLY_EXTENSION_PATH = "scripts/windows_rpc_deployment_snapshot_v1.py"
 
 COMPONENT_PATHS = {
+    "wrapper": "components/windows_rpc_service_wrapper_v1.py",
     "extension": "components/windows_rpc_deployment_snapshot_v1.py",
     "launcher": "components/windows_rpc_durable_fence_v1.py",
     "assembly": "components/windows_fence_foundation_v1.pyz",
     "config": "components/windows_rpc_service_config_v1.json",
 }
-COMPONENT_ORDER = ("extension", "launcher", "assembly", "config")
+COMPONENT_ORDER = ("wrapper", "extension", "launcher", "assembly", "config")
 
 _INDEX_FIELDS = frozenset(
     {
@@ -62,6 +79,7 @@ _INDEX_FIELDS = frozenset(
         "purpose",
         "bundle_format",
         "bundle_sha256",
+        "expected_source_sha256",
         "components",
         "assembly_archive_raw_sha256",
         "assembly_source_inventory_sha256",
@@ -80,6 +98,7 @@ _SERVICE_CONFIG_FIELDS = frozenset(
         "purpose",
         "store_root",
         "store_expectation",
+        "installer_store_bootstrap",
         "runtime_config",
     }
 )
@@ -117,6 +136,7 @@ class BuiltWindowsFenceBundleV1:
     index_raw_sha256: str
     assembly_archive_raw_sha256: str
     assembly_source_inventory_sha256: str
+    expected_source_sha256: str
 
 
 @dataclass(frozen=True)
@@ -125,6 +145,7 @@ class VerifiedWindowsFenceBundleV1:
     index_raw_sha256: str
     assembly_archive_raw_sha256: str
     assembly_source_inventory_sha256: str
+    expected_source_sha256: str
     component_sha256s: Mapping[str, str]
     component_sizes: Mapping[str, int]
 
@@ -242,7 +263,9 @@ def _read_canonical_json_object(raw: bytes, *, maximum_bytes: int) -> dict[str, 
     return value
 
 
-def _foundation_source_entries(source_root: Path) -> dict[str, bytes]:
+def _foundation_source_entries(
+    source_root: Path, *, generated_anchor_raw: bytes
+) -> dict[str, bytes]:
     foundation_root = source_root / "scripts" / "windows_fence_foundation"
     entries: dict[str, bytes] = {SYNTHETIC_SCRIPTS_INIT: b""}
     try:
@@ -250,6 +273,9 @@ def _foundation_source_entries(source_root: Path) -> dict[str, bytes]:
             source_root / "scripts" / "windows_rpc_deployment_snapshot_v1.py"
         ).read_bytes()
         for name in FOUNDATION_SOURCE_NAMES:
+            if name == "_installer_trust_anchor_generated_v1.py":
+                entries[f"scripts/windows_fence_foundation/{name}"] = generated_anchor_raw
+                continue
             entries[f"scripts/windows_fence_foundation/{name}"] = (
                 foundation_root / name
             ).read_bytes()
@@ -269,6 +295,7 @@ def _validate_runtime_config(
         or value["purpose"] != "launch_fixed_frozen_windows_rpc_service"
         or not isinstance(value["store_root"], str)
         or not isinstance(value["store_expectation"], dict)
+        or not isinstance(value["installer_store_bootstrap"], dict)
         or not isinstance(value["runtime_config"], dict)
     ):
         raise WindowsFenceBundleError("BUNDLE_RUNTIME_CONFIG_VALUE_INVALID")
@@ -324,24 +351,69 @@ def _validate_runtime_config(
         )
     ):
         raise WindowsFenceBundleError("BUNDLE_STORE_TARGET_BINDING_MISMATCH")
+    bootstrap = value["installer_store_bootstrap"]
+    if set(bootstrap) != {
+        "root_path",
+        "root_path_sha256",
+        "owner_sid",
+        "directory_acl_sddl",
+    }:
+        raise WindowsFenceBundleError("BUNDLE_STORE_BOOTSTRAP_INVALID")
+    try:
+        bootstrap_root = canonical_local_windows_path(bootstrap["root_path"])
+    except StoreContractError as exc:
+        raise WindowsFenceBundleError("BUNDLE_STORE_BOOTSTRAP_INVALID") from exc
+    if (
+        bootstrap_root != store_root
+        or bootstrap_root != bootstrap["root_path"]
+        or bootstrap["root_path_sha256"] != _sha256(bootstrap_root.encode("utf-8"))
+        or bootstrap["root_path_sha256"] != expectation["store_path_sha256"]
+        or not isinstance(bootstrap["owner_sid"], str)
+        or not isinstance(bootstrap["directory_acl_sddl"], str)
+        or _sha256(bootstrap["owner_sid"].encode("utf-8"))
+        != expectation["owner_sid_sha256"]
+        or _sha256(bootstrap["directory_acl_sddl"].encode("utf-8"))
+        != expectation["directory_acl_sddl_sha256"]
+    ):
+        raise WindowsFenceBundleError("BUNDLE_STORE_BOOTSTRAP_INVALID")
     runtime = value["runtime_config"]
     if set(runtime) != {
         "gateway_name",
-        "gateway_setting",
         "rep_address",
         "pub_address",
+        "account_scope",
+        "environment",
+        "credential_descriptor",
     }:
         raise WindowsFenceBundleError("BUNDLE_RUNTIME_CONFIG_VALUE_INVALID")
-    setting = runtime["gateway_setting"]
+    descriptor = runtime["credential_descriptor"]
+    if not isinstance(descriptor, dict) or set(descriptor) != {
+        "path",
+        "path_sha256",
+        "raw_sha256",
+        "owner_sid_sha256",
+        "acl_sddl_sha256",
+    }:
+        raise WindowsFenceBundleError("BUNDLE_CREDENTIAL_DESCRIPTOR_INVALID")
+    try:
+        descriptor_path = canonical_local_windows_path(descriptor["path"])
+    except StoreContractError as exc:
+        raise WindowsFenceBundleError("BUNDLE_CREDENTIAL_DESCRIPTOR_INVALID") from exc
     if (
-        not isinstance(setting, dict)
-        or not setting
-        or any(not isinstance(key, str) for key in setting)
+        descriptor_path != descriptor["path"]
+        or descriptor["path_sha256"] != _sha256(descriptor_path.encode("utf-8"))
         or any(
-            type(item) not in {str, bool, int, type(None)} for item in setting.values()
+            not isinstance(descriptor[field], str)
+            or _SHA256_RE.fullmatch(descriptor[field]) is None
+            for field in (
+                "path_sha256",
+                "raw_sha256",
+                "owner_sid_sha256",
+                "acl_sddl_sha256",
+            )
         )
     ):
-        raise WindowsFenceBundleError("BUNDLE_RUNTIME_CONFIG_VALUE_INVALID")
+        raise WindowsFenceBundleError("BUNDLE_CREDENTIAL_DESCRIPTOR_INVALID")
     if (
         not isinstance(runtime["gateway_name"], str)
         or _GATEWAY_NAME_RE.fullmatch(runtime["gateway_name"]) is None
@@ -404,12 +476,32 @@ def build_windows_fence_bundle_v1(
     *,
     config_raw: bytes,
     expected_store_binding: Mapping[str, object],
+    public_keyring_raw: bytes | None = None,
+    keyring_canonical_path: Path | None = None,
+    expected_source_sha256: str | None = None,
 ) -> BuiltWindowsFenceBundleV1:
     """Build deterministic bundle and detached index without writing files."""
 
     source_root = Path(source_root).absolute()
     _validate_runtime_config(config_raw, expected_store_binding=expected_store_binding)
+    if (
+        not isinstance(public_keyring_raw, bytes)
+        or keyring_canonical_path is None
+        or expected_source_sha256 is None
+    ):
+        raise WindowsFenceBundleError("INSTALLER_TRUST_ANCHOR_PUBLIC_INPUT_REQUIRED")
     try:
+        generated_anchor_raw = render_installer_trust_anchor_generated_module_v1(
+            public_keyring_raw=public_keyring_raw,
+            keyring_canonical_path=Path(keyring_canonical_path),
+            expected_source_sha256=expected_source_sha256,
+        )
+    except (InstallerBootstrapTrustAnchorError, OSError, TypeError, ValueError) as exc:
+        raise WindowsFenceBundleError("INSTALLER_TRUST_ANCHOR_GENERATION_FAILED") from exc
+    try:
+        wrapper_raw = (
+            source_root / "scripts" / "windows_rpc_service_wrapper_v1.py"
+        ).read_bytes()
         extension_raw = (
             source_root / "scripts" / "windows_rpc_deployment_snapshot_v1.py"
         ).read_bytes()
@@ -419,7 +511,9 @@ def build_windows_fence_bundle_v1(
     except (OSError, PermissionError) as exc:
         raise WindowsFenceBundleError("BUNDLE_SOURCE_UNREADABLE") from exc
 
-    assembly_entries = _foundation_source_entries(source_root)
+    assembly_entries = _foundation_source_entries(
+        source_root, generated_anchor_raw=generated_anchor_raw
+    )
     assembly_inventory = _source_inventory(assembly_entries)
     assembly_source_sha256 = _source_inventory_identity(assembly_inventory)
     assembly_raw = _build_zip(assembly_entries)
@@ -427,6 +521,7 @@ def build_windows_fence_bundle_v1(
         raise WindowsFenceBundleError("ASSEMBLY_ARCHIVE_TOO_LARGE")
 
     component_entries = {
+        COMPONENT_PATHS["wrapper"]: wrapper_raw,
         COMPONENT_PATHS["extension"]: extension_raw,
         COMPONENT_PATHS["launcher"]: launcher_raw,
         COMPONENT_PATHS["assembly"]: assembly_raw,
@@ -444,6 +539,7 @@ def build_windows_fence_bundle_v1(
         "purpose": BUNDLE_INDEX_PURPOSE,
         "bundle_format": BUNDLE_FORMAT,
         "bundle_sha256": bundle_sha256,
+        "expected_source_sha256": expected_source_sha256,
         "components": _component_inventory(component_entries),
         "assembly_archive_raw_sha256": assembly_archive_sha256,
         "assembly_source_inventory_sha256": assembly_source_sha256,
@@ -457,6 +553,7 @@ def build_windows_fence_bundle_v1(
         index_raw_sha256=_sha256(index_raw),
         assembly_archive_raw_sha256=assembly_archive_sha256,
         assembly_source_inventory_sha256=assembly_source_sha256,
+        expected_source_sha256=expected_source_sha256,
     )
 
 
@@ -566,8 +663,17 @@ def verify_windows_fence_bundle_v1(
         index.get("schema_version") != BUNDLE_INDEX_SCHEMA_VERSION
         or index.get("purpose") != BUNDLE_INDEX_PURPOSE
         or index.get("bundle_format") != BUNDLE_FORMAT
+        or not isinstance(index.get("expected_source_sha256"), str)
     ):
         raise WindowsFenceBundleError("BUNDLE_INDEX_VERSION_INVALID")
+    if (
+        not re.fullmatch(
+            r"[0-9a-f]{40}(?:[0-9a-f]{24})?", index["expected_source_sha256"]
+        )
+        or index["expected_source_sha256"]
+        == "0" * len(index["expected_source_sha256"])
+    ):
+        raise WindowsFenceBundleError("BUNDLE_SOURCE_REVISION_INVALID")
     bundle_sha256 = _sha256(bundle_raw)
     if index.get("bundle_sha256") != bundle_sha256:
         raise WindowsFenceBundleError("BUNDLE_RAW_SHA256_MISMATCH")
@@ -637,6 +743,7 @@ def verify_windows_fence_bundle_v1(
         index_raw_sha256=_sha256(index_raw),
         assembly_archive_raw_sha256=assembly_archive_sha256,
         assembly_source_inventory_sha256=assembly_source_sha256,
+        expected_source_sha256=index["expected_source_sha256"],
         component_sha256s=component_sha256s,
         component_sizes=component_sizes,
     )

@@ -10,10 +10,14 @@ from scripts.windows_fence_foundation.target_contract_v1 import (
     WindowsFoundationTargetPolicyV1,
     canonical_windows_absolute_path,
     derive_windows_foundation_target_v1,
+    parse_windows_foundation_target_policy_v1,
 )
 
 SHA = "a" * 64
 OTHER_SHA = "b" * 64
+FINAL_OWNER = "S-1-5-18"
+FINAL_ACL = "O:SYD:PAI"
+COMPONENT_ACL = "O:SYD:PAI(A;;FA;;;SY)"
 
 
 def _policy() -> WindowsFoundationTargetPolicyV1:
@@ -21,8 +25,14 @@ def _policy() -> WindowsFoundationTargetPolicyV1:
         service_name="VnpyRpcService",
         final_versions_root=r"C:\ProgramData\vnpy-web-bridge\windows-fence\versions",
         service_executable_path=r"C:\veighna_studio\pythonservice.exe",
+        service_python_class="windows_rpc_service_wrapper_v1.VnpyRpcServiceWrapperV1",
         image_argument_template=(
+            "{wrapper}",
+            "--wrapper-sha256",
+            "{wrapper_sha256}",
             "{launcher}",
+            "--launcher-sha256",
+            "{launcher_sha256}",
             "--extension",
             "{extension}",
             "--extension-sha256",
@@ -44,11 +54,18 @@ def _policy() -> WindowsFoundationTargetPolicyV1:
         store_owner_sid_sha256=SHA,
         store_directory_acl_sddl_sha256=SHA,
         store_state_acl_sddl_sha256=SHA,
-        final_owner_sid_sha256=SHA,
-        final_directory_acl_sddl_sha256=SHA,
-        component_acl_sddl_sha256=SHA,
-        service_config_owner_sid_sha256=SHA,
-        service_config_acl_sddl_sha256=SHA,
+        final_owner_sid_sha256=hashlib.sha256(FINAL_OWNER.encode()).hexdigest(),
+        final_directory_acl_sddl_sha256=hashlib.sha256(FINAL_ACL.encode()).hexdigest(),
+        component_acl_sddl_sha256=hashlib.sha256(COMPONENT_ACL.encode()).hexdigest(),
+        final_owner_sid=FINAL_OWNER,
+        final_directory_acl_sddl=FINAL_ACL,
+        component_acl_sddl=COMPONENT_ACL,
+        service_config_owner_sid_sha256=hashlib.sha256(
+            FINAL_OWNER.encode()
+        ).hexdigest(),
+        service_config_acl_sddl_sha256=hashlib.sha256(FINAL_ACL.encode()).hexdigest(),
+        service_config_owner_sid=FINAL_OWNER,
+        service_config_acl_sddl=FINAL_ACL,
         installer_principal_sid_sha256=SHA,
         installer_process_image_sha256=SHA,
     )
@@ -58,6 +75,7 @@ def _projection():
     return derive_windows_foundation_target_v1(
         policy=_policy(),
         bundle_sha256=SHA,
+        wrapper_sha256=SHA,
         extension_sha256=SHA,
         launcher_sha256=SHA,
         assembly_sha256=SHA,
@@ -66,6 +84,8 @@ def _projection():
             "application_path": r"C:\veighna_studio\pythonservice.exe",
             "arguments": [],
         },
+        preinstall_python_class="legacy.module.Service",
+        preinstall_python_path=r"C:\quant",
         preinstall_start_type="AUTO_START",
         preinstall_failure_actions=[{"action": "restart"}],
         preinstall_recovery_actions=[{"action": "restart"}],
@@ -132,11 +152,24 @@ def test_target_projection_binds_content_addressed_paths_and_safe_scm_transition
         )
 
 
+def test_signed_target_policy_is_complete_and_reconstructible() -> None:
+    policy = _policy()
+    raw = dict(policy.manifest_value())
+    assert parse_windows_foundation_target_policy_v1(raw) == policy
+    assert raw["final_versions_root"].endswith(r"\versions")
+    assert raw["service_python_class"] == policy.service_python_class
+    assert raw["image_argument_template"][-1] == "{config_sha256}"
+    del raw["component_acl_sddl"]
+    with pytest.raises(WindowsFoundationTargetContractError):
+        parse_windows_foundation_target_policy_v1(raw)
+
+
 def test_any_bundle_or_component_change_changes_derived_manifest_binding() -> None:
     baseline = _projection().manifest_bindings
     changed = derive_windows_foundation_target_v1(
         policy=_policy(),
         bundle_sha256=OTHER_SHA,
+        wrapper_sha256=OTHER_SHA,
         extension_sha256=OTHER_SHA,
         launcher_sha256=SHA,
         assembly_sha256=SHA,
@@ -145,6 +178,8 @@ def test_any_bundle_or_component_change_changes_derived_manifest_binding() -> No
             "application_path": r"C:\veighna_studio\pythonservice.exe",
             "arguments": [],
         },
+        preinstall_python_class="legacy.module.Service",
+        preinstall_python_path=r"C:\quant",
         preinstall_start_type="AUTO_START",
         preinstall_failure_actions=[],
         preinstall_recovery_actions=[],
@@ -189,6 +224,7 @@ def test_projection_rejects_untrusted_preinstall_shapes_and_unknown_start_type()
     kwargs = {
         "policy": _policy(),
         "bundle_sha256": SHA,
+        "wrapper_sha256": SHA,
         "extension_sha256": SHA,
         "launcher_sha256": SHA,
         "assembly_sha256": SHA,
@@ -197,6 +233,8 @@ def test_projection_rejects_untrusted_preinstall_shapes_and_unknown_start_type()
             "application_path": r"C:\old\service.exe",
             "arguments": [],
         },
+        "preinstall_python_class": "legacy.module.Service",
+        "preinstall_python_path": r"C:\quant",
         "preinstall_start_type": "AUTO_START",
         "preinstall_failure_actions": [],
         "preinstall_recovery_actions": [],

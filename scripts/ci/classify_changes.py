@@ -17,6 +17,7 @@ WINDOWS_FENCE_GLOBS = (
     "backend/tests/unit/test_windows_rpc_deployment_snapshot_*.py",
     "backend/tests/unit/test_windows_rpc_durable_fence_*.py",
     "backend/tests/unit/test_windows_fence_foundation_*.py",
+    "backend/tests/unit/windows_fence_*_fixture_v1.py",
     "backend/tests/integration/test_windows_rpc_durable_fence_*.py",
     "backend/tests/integration/test_windows_fence_foundation_*.py",
 )
@@ -574,6 +575,10 @@ PHASE_A_RULES = (
             "scripts/windows_fence_foundation/__init__.py",
             "scripts/windows_fence_foundation/assembly.py",
             "scripts/windows_fence_foundation/final_admission_v1.py",
+            "scripts/windows_fence_foundation/credential_config_v1.py",
+            "scripts/windows_fence_foundation/installer_windows_v1.py",
+            "scripts/windows_fence_foundation/native_windows_installer_host_v1.py",
+            "scripts/windows_rpc_service_wrapper_v1.py",
         ),
         glob=("scripts/windows_rpc_*.py",),
         prefix=("scripts/windows_fence_foundation/",),

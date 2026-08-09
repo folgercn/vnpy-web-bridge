@@ -509,12 +509,9 @@ def test_full_current_changed_paths_produce_allowed_dependency_closure() -> None
         "gateway-rpc-request-proxy",
         "gateway-rpc-publish-proxy",
     }
-    # Phase C workflow/fault sources are explicitly preserved by the legacy
-    # Phase A planner.  The unified Phase C matrix, rather than this legacy
-    # plan, expands them to the A+B full validation closure.
-    assert plan["external_artifacts"] == []
-    assert plan["dependency_closure"]["external_artifacts"] == []
-    assert "phase-a-preserved-phase-c" in plan["selected_rule_ids"]
+    assert plan["external_artifacts"] == ["windows-ctp-gateway"]
+    assert plan["dependency_closure"]["external_artifacts"] == ["windows-ctp-gateway"]
+    assert "phase-a-windows-fence-external-artifact" in plan["selected_rule_ids"]
 
 
 @pytest.mark.parametrize("working_directory", ("repo-root", "external"))
