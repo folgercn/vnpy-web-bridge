@@ -49,7 +49,17 @@ def _raw_sha(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-def _event(raw: bytes, *, sequence: int, event_type: str, previous_raw: bytes | None) -> dict[str, Any]:
+def _utc(value: object) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise OfflineSigningError("SIGNING_CHAIN_TIME_INVALID") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise OfflineSigningError("SIGNING_CHAIN_TIME_INVALID")
+    return parsed
+
+
+def _event(raw: bytes, *, sequence: int, event_type: str, previous_raw: bytes | None, previous_id: str | None) -> dict[str, Any]:
     value = _strict_object(raw)
     if (
         value.get("schema_version") != "windows_rpc_durable_fence_install_event_v1"
@@ -62,6 +72,7 @@ def _event(raw: bytes, *, sequence: int, event_type: str, previous_raw: bytes | 
         ).hexdigest()
         or value.get("event_id") != "windows-fence-install-event-" + value["event_core_sha256"]
         or value.get("previous_event_raw_sha256") != (None if previous_raw is None else _raw_sha(previous_raw))
+        or value.get("previous_event_id") != previous_id
     ):
         raise OfflineSigningError("SIGNING_CHAIN_EVENT_INVALID")
     return value
@@ -90,6 +101,7 @@ def verify_signing_closure_chain_v1(
         raise OfflineSigningError("SIGNING_CHAIN_FROZEN_STATE_BINDING_MISMATCH")
     events: list[dict[str, Any]] = []
     previous: bytes | None = None
+    previous_id: str | None = None
     for sequence, event_type, name in (
         (1, "INSTALL_PREPARED", "event_1_prepared"),
         (2, "FILES_PUBLISHED", "event_2_published"),
@@ -99,10 +111,28 @@ def verify_signing_closure_chain_v1(
         (6, "START_OBSERVED", "event_6_started"),
         (7, "FOUNDATION_VERIFIED", "event_7_verified"),
     ):
-        event = _event(artifacts[name], sequence=sequence, event_type=event_type, previous_raw=previous)
+        event = _event(artifacts[name], sequence=sequence, event_type=event_type, previous_raw=previous, previous_id=previous_id)
         events.append(event)
         previous = artifacts[name]
+        previous_id = str(event["event_id"])
     transition = _strict_object(artifacts["transition_receipt"])
+    now_utc = now
+    if (
+        restart.get("restart_authorized") is not True
+        or restart.get("automatic_restart_allowed") is not False
+        or restart.get("maximum_restart_dispatches") != 1
+        or restart.get("dispatch_consumption_required") is not True
+        or not _utc(restart["not_before_utc"]) <= now_utc < _utc(restart["expires_at_utc"])
+        or restart.get("install_event_head_raw_sha256") != _raw_sha(artifacts["event_2_published"])
+        or restart.get("service_control_operation_id") != events[2].get("service_control_operation_id")
+        or restart.get("dispatch_nonce_sha256") != events[2].get("restart_dispatch_nonce_sha256")
+    ):
+        raise OfflineSigningError("SIGNING_CHAIN_RESTART_AUTHORIZATION_INVALID")
+    nonce = restart["dispatch_nonce_sha256"]
+    operation = restart["service_control_operation_id"]
+    for item in (events[2], transition, scm, events[3], events[4], startup, events[5], attestation, events[6]):
+        if item.get("restart_dispatch_nonce_sha256") != nonce or item.get("service_control_operation_id") != operation:
+            raise OfflineSigningError("SIGNING_CHAIN_RESTART_DISPATCH_BINDING_MISMATCH")
     bindings = (
         (manifest, "preflight_receipt_raw_sha256", artifacts["zero_preflight"]),
         (publish, "install_manifest_raw_sha256", artifacts["manifest"]),
@@ -139,6 +169,27 @@ def verify_signing_closure_chain_v1(
             or event.get("authority_grant") is not None
         ):
             raise OfflineSigningError("SIGNING_CHAIN_EVENT_FROZEN_BINDING_MISMATCH")
+    # Static subset of the frozen architecture contract's temporal rules.
+    ordered_times = (
+        _utc(publish["sealed_at_utc"]),
+        _utc(restart["issued_at_utc"]),
+        _utc(restart["not_before_utc"]),
+        _utc(events[2]["observed_at_utc"]),
+        _utc(transition["applied_at_utc"]),
+        _utc(transition["readback_at_utc"]),
+        _utc(events[3]["observed_at_utc"]),
+        _utc(scm["trace_challenge_issued_at_utc"]),
+        _utc(scm["stop_call_started_at_utc"]),
+        _utc(scm["stop_call_returned_at_utc"]),
+        _utc(scm["start_call_started_at_utc"]),
+        _utc(startup["service_process_started_at_utc"]),
+        _utc(scm["start_call_returned_at_utc"]),
+        _utc(scm["trace_captured_at_utc"]),
+        _utc(events[4]["observed_at_utc"]),
+        _utc(restart["expires_at_utc"]),
+    )
+    if any(left > right for left, right in zip(ordered_times, ordered_times[1:])):
+        raise OfflineSigningError("SIGNING_CHAIN_TIME_ORDER_INVALID")
     install_attempt = str(preflight["install_attempt_id"])
     service_name = str(preflight["service_name"])
     for item in (manifest, publish, restart, transition, scm, startup, attestation, *events):
