@@ -3,21 +3,46 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
+import shutil
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+from cryptography.hazmat.primitives import serialization
+from jsonschema import Draft202012Validator
 
 from backend.tests.unit import test_issue267_windows_fence_foundation_schemas as fixture
+from backend.tests.unit.test_windows_rpc_durable_fence_bundle_v1 import (
+    CONFIG_RAW,
+    KEYRING_CANONICAL_PATH,
+    STORE_BINDING,
+)
+from backend.tests.unit.test_windows_rpc_durable_fence_manifest_v1 import _target_policy
 from scripts.windows_fence_foundation.contracts import canonical_json_bytes
+from scripts.windows_fence_foundation.installer_trust_anchor_v1 import (
+    canonical_public_keyring_v1,
+)
+from scripts.windows_fence_foundation.manifest_v1 import (
+    EXPECTED_BINDING_FIELDS,
+    verify_install_manifest_v1,
+)
+from scripts.windows_fence_foundation.offline_sign_cli_v1 import run as sign_run
 from scripts.windows_fence_foundation.offline_signing_v1 import (
     OfflineSigningError,
     consume_replay_token_create_only_v1,
+    verify_public_artifact_v1,
 )
 from scripts.windows_fence_foundation.release_bundle_v1 import (
     CHAIN_ORDER,
     verify_signing_closure_chain_v1,
+)
+from scripts.windows_fence_foundation.release_input_builder_cli_v1 import (
+    main as release_input_main,
+)
+from scripts.windows_fence_foundation.release_input_builder_cli_v1 import (
+    verify_release_build_audit_v1,
 )
 from scripts.windows_fence_foundation.release_input_builder_v1 import (
     _require_clean_approved_worktree,
@@ -28,6 +53,8 @@ from scripts.windows_fence_foundation.trust_pins_v1 import (
     OBSERVER_KEY_DOMAIN,
     RESTART_KEY_DOMAIN,
 )
+
+ROOT = Path(__file__).resolve().parents[3]
 
 
 def _raw(artifact: dict[str, object]) -> bytes:
@@ -423,3 +450,246 @@ def test_release_source_requires_exact_clean_non_submodule_git_worktree(
             ["git", "-C", str(repo), "checkout", "-q", "--", "REVISION"], check=True
         )
     assert _thaw({"value": (1, {"nested": (2,)})}) == {"value": [1, {"nested": [2]}]}
+
+
+def _git(repo: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(repo), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _commit_repository(repo: Path, filename: str = "REVISION") -> str:
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    _git(repo, "config", "user.email", "unit@example.invalid")
+    _git(repo, "config", "user.name", "unit")
+    (repo / filename).write_text("unit\n", encoding="utf-8")
+    _git(repo, "add", filename)
+    _git(repo, "commit", "-qm", "unit")
+    return _git(repo, "rev-parse", "HEAD")
+
+
+def test_release_source_rejects_a_real_git_submodule(tmp_path: Path) -> None:
+    child = tmp_path / "child"
+    child_head = _commit_repository(child)
+    parent = tmp_path / "parent"
+    _commit_repository(parent)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "protocol.file.allow=always",
+            "-C",
+            str(parent),
+            "submodule",
+            "add",
+            "-q",
+            str(child),
+            "source",
+        ],
+        check=True,
+    )
+    _git(parent, "commit", "-qm", "add source submodule")
+    with pytest.raises(OfflineSigningError, match="RELEASE_SOURCE_WORKTREE_REQUIRED"):
+        _require_clean_approved_worktree(parent / "source", child_head)
+
+
+def _release_source_repository(tmp_path: Path) -> tuple[Path, str]:
+    source = tmp_path / "release-source"
+    shutil.copytree(ROOT / "scripts", source / "scripts")
+    subprocess.run(["git", "init", "-q", str(source)], check=True)
+    _git(source, "config", "user.email", "unit@example.invalid")
+    _git(source, "config", "user.name", "unit")
+    _git(source, "add", "scripts")
+    _git(source, "commit", "-qm", "release source")
+    return source, _git(source, "rev-parse", "HEAD")
+
+
+def _manifest_attempt_inputs(value: dict[str, object]) -> dict[str, object]:
+    return {
+        field: value[field]
+        for field in (
+            "attempt_nonce_sha256",
+            "bundle_sha256",
+            "service_name",
+            "store_path_sha256",
+            "store_volume_serial",
+            "store_volume_identity_sha256",
+            "expected_account_sha256",
+            "gateway_name",
+            "gateway_scope_sha256",
+        )
+    }
+
+
+def test_release_input_build_fd_sign_and_receipt_tamper_rejection(
+    tmp_path: Path,
+) -> None:
+    source, source_sha = _release_source_repository(tmp_path)
+    keyring_raw = _keyring(tmp_path)
+    pins = canonical_public_keyring_v1(
+        keyring_raw, hashlib.sha256(keyring_raw).hexdigest()
+    )
+    preflight = fixture._preflight()
+    preflight.update(
+        challenge_expires_at_utc="2026-08-05T00:00:50Z",
+        snapshot_served_at_utc="2026-08-05T00:00:19Z",
+        observed_at_utc="2026-08-05T00:00:20Z",
+    )
+    preflight_raw = _raw(fixture._artifact("preflight", preflight))
+    release_input = {
+        "source_root": str(source),
+        "inputs": {
+            "approved_source_sha256": source_sha,
+            "config_raw": base64.b64encode(CONFIG_RAW).decode("ascii"),
+            "store_binding": STORE_BINDING,
+            "keyring_raw": base64.b64encode(keyring_raw).decode("ascii"),
+            "keyring_path": str(KEYRING_CANONICAL_PATH),
+            "target_policy": _target_policy(),
+            "preinstall_image_path": {
+                "application_path": r"C:\\veighna_studio\\pythonservice.exe",
+                "arguments": ["--legacy-rpc"],
+            },
+            "preinstall_python_class": "legacy_rpc.LegacyService",
+            "preinstall_python_path": r"C:\\veighna_studio",
+            "preinstall_start_type": "DISABLED",
+            "preinstall_failure_actions": [],
+            "preinstall_recovery_actions": [],
+            "attempt_nonce_sha256": hashlib.sha256(b"release-input-nonce").hexdigest(),
+            "issued_at_utc": "2026-08-05T00:00:20Z",
+            "expires_at_utc": "2026-08-05T00:00:50Z",
+            "trusted_clock_id": "unit.release.clock.v1",
+            "preflight_raw": base64.b64encode(preflight_raw).decode("ascii"),
+        },
+    }
+    input_path = tmp_path / "release-input.json"
+    bundle_path = tmp_path / "bundle.zip"
+    index_path = tmp_path / "bundle-index.json"
+    draft_path = tmp_path / "manifest-draft.json"
+    audit_path = tmp_path / "release-build.audit.json"
+    input_path.write_bytes(canonical_json_bytes(release_input))
+    assert (
+        release_input_main(
+            [
+                "--release-input",
+                str(input_path),
+                "--bundle-output",
+                str(bundle_path),
+                "--index-output",
+                str(index_path),
+                "--manifest-output",
+                str(draft_path),
+                "--audit-output",
+                str(audit_path),
+                "--now-utc",
+                "2026-08-05T00:00:20Z",
+            ]
+        )
+        == 0
+    )
+    artifacts = {
+        "bundle": bundle_path.read_bytes(),
+        "index": index_path.read_bytes(),
+        "manifest": draft_path.read_bytes(),
+    }
+    audit_raw = audit_path.read_bytes()
+    audit_schema = json.loads(
+        (
+            ROOT / "docs/schemas/windows-fence-release-build-audit-v1.schema.json"
+        ).read_text(encoding="utf-8")
+    )
+    Draft202012Validator(audit_schema).validate(json.loads(audit_raw))
+    assert verify_release_build_audit_v1(audit_raw, artifacts=artifacts)["artifacts"]
+
+    keyring_path = tmp_path / "keyring.json"
+    preflight_path = tmp_path / "preflight.json"
+    keyring_path.write_bytes(keyring_raw)
+    preflight_path.write_bytes(preflight_raw)
+    private = fixture._test_private_key(MANIFEST_KEY_DOMAIN)
+    key_path = tmp_path / "manifest-key"
+    key_path.write_bytes(
+        base64.b64encode(
+            private.private_bytes(
+                serialization.Encoding.Raw,
+                serialization.PrivateFormat.Raw,
+                serialization.NoEncryption(),
+            )
+        )
+    )
+    key_path.chmod(0o400)
+    key_fd = os.open(key_path, os.O_RDONLY)
+    signed_path = tmp_path / "manifest.json"
+    ledger_path = tmp_path / "ledger"
+    ledger_path.mkdir(mode=0o700)
+    try:
+        assert (
+            sign_run(
+                "manifest",
+                [
+                    "--draft",
+                    str(draft_path),
+                    "--output",
+                    str(signed_path),
+                    "--audit-output",
+                    str(tmp_path / "manifest-sign.audit.json"),
+                    "--public-keyring",
+                    str(keyring_path),
+                    "--private-key-fd",
+                    str(key_fd),
+                    "--preflight-receipt",
+                    str(preflight_path),
+                    "--now-utc",
+                    "2026-08-05T00:00:20Z",
+                    "--replay-ledger-dir",
+                    str(ledger_path),
+                ],
+            )
+            == 0
+        )
+    finally:
+        os.close(key_fd)
+    signed_raw = signed_path.read_bytes()
+    signed_value = json.loads(signed_raw)
+    assert verify_public_artifact_v1(signed_raw, pin=pins.manifest).raw_sha256 == (
+        hashlib.sha256(signed_raw).hexdigest()
+    )
+    verified = verify_install_manifest_v1(
+        signed_raw,
+        trust_pins=pins,
+        expected_bindings={
+            field: signed_value[field] for field in EXPECTED_BINDING_FIELDS
+        },
+        install_attempt_inputs=_manifest_attempt_inputs(signed_value),
+        now=datetime(2026, 8, 5, 0, 0, 20, tzinfo=timezone.utc),
+    )
+    assert verified["bundle_sha256"] == hashlib.sha256(artifacts["bundle"]).hexdigest()
+
+    for artifact, artifact_raw in artifacts.items():
+        for field, replacement in (
+            ("raw_sha256", "0" * 64),
+            ("size_bytes", 1),
+        ):
+            tampered = json.loads(audit_raw)
+            tampered["artifacts"][artifact][field] = replacement
+            tampered["aggregate_raw_sha256"] = hashlib.sha256(
+                canonical_json_bytes(tampered["artifacts"])
+            ).hexdigest()
+            with pytest.raises(
+                OfflineSigningError, match="RELEASE_BUILD_AUDIT_ARTIFACT_MISMATCH"
+            ):
+                verify_release_build_audit_v1(
+                    canonical_json_bytes(tampered), artifacts=artifacts
+                )
+        for altered in (
+            b"\x00" + artifact_raw[1:],
+            artifact_raw + b"\x00",
+        ):
+            tampered_artifacts = dict(artifacts)
+            tampered_artifacts[artifact] = altered
+            with pytest.raises(
+                OfflineSigningError, match="RELEASE_BUILD_AUDIT_ARTIFACT_MISMATCH"
+            ):
+                verify_release_build_audit_v1(audit_raw, artifacts=tampered_artifacts)

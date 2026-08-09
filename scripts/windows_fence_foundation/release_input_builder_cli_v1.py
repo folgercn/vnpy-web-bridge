@@ -9,7 +9,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from jsonschema import Draft202012Validator, FormatChecker
+from jsonschema import Draft202012Validator, FormatChecker, ValidationError
 
 from .contracts import canonical_json_bytes
 from .installer_trust_anchor_v1 import canonical_public_keyring_v1
@@ -19,6 +19,45 @@ from .offline_signing_v1 import (
     write_canonical_create_only_v1,
 )
 from .release_input_builder_v1 import build_release_input_manifest_v1
+
+_RELEASE_BUILD_AUDIT_SCHEMA = (
+    Path(__file__).resolve().parents[2]
+    / "docs"
+    / "schemas"
+    / "windows-fence-release-build-audit-v1.schema.json"
+)
+
+
+def verify_release_build_audit_v1(
+    audit_raw: bytes, *, artifacts: dict[str, bytes]
+) -> dict[str, object]:
+    """Validate one release-build receipt against the exact emitted bytes."""
+    if set(artifacts) != {"bundle", "index", "manifest"} or any(
+        type(raw) is not bytes for raw in artifacts.values()
+    ):
+        raise OfflineSigningError("RELEASE_BUILD_AUDIT_ARTIFACT_SET_INVALID")
+    try:
+        audit = json.loads(audit_raw)
+        if not isinstance(audit, dict) or canonical_json_bytes(audit) != audit_raw:
+            raise OfflineSigningError("RELEASE_BUILD_AUDIT_NOT_CANONICAL")
+        schema = json.loads(_RELEASE_BUILD_AUDIT_SCHEMA.read_text(encoding="utf-8"))
+        Draft202012Validator(schema, format_checker=FormatChecker()).validate(audit)
+    except OfflineSigningError:
+        raise
+    except (OSError, json.JSONDecodeError, ValidationError, ValueError) as exc:
+        raise OfflineSigningError("RELEASE_BUILD_AUDIT_SCHEMA_INVALID") from exc
+    expected_aggregate = hashlib.sha256(
+        canonical_json_bytes(audit["artifacts"])
+    ).hexdigest()
+    if audit["aggregate_raw_sha256"] != expected_aggregate:
+        raise OfflineSigningError("RELEASE_BUILD_AUDIT_AGGREGATE_MISMATCH")
+    for name, raw in artifacts.items():
+        record = audit["artifacts"][name]
+        if record["raw_sha256"] != hashlib.sha256(raw).hexdigest() or record[
+            "size_bytes"
+        ] != len(raw):
+            raise OfflineSigningError("RELEASE_BUILD_AUDIT_ARTIFACT_MISMATCH")
+    return audit
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -78,8 +117,19 @@ def main(argv: list[str] | None = None) -> int:
         audit["aggregate_raw_sha256"] = hashlib.sha256(
             canonical_json_bytes(audit["artifacts"])
         ).hexdigest()
+        audit_raw = canonical_json_bytes(audit)
+        verify_release_build_audit_v1(
+            audit_raw,
+            artifacts={"bundle": bundle, "index": index_raw, "manifest": manifest_raw},
+        )
         write_canonical_create_only_v1(options.audit_output, audit)
-    except (OfflineSigningError, OSError, ValueError, json.JSONDecodeError) as exc:
+    except (
+        OfflineSigningError,
+        OSError,
+        ValueError,
+        json.JSONDecodeError,
+        ValidationError,
+    ) as exc:
         parser.error(f"release-input build failed: {exc}")
     return 0
 
