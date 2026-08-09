@@ -11,6 +11,7 @@ from pathlib import Path
 from .installer_trust_anchor_v1 import canonical_public_keyring_v1
 from .offline_signing_v1 import OfflineSigningError, write_audit_create_only_v1, write_binary_create_only_v1, write_canonical_create_only_v1
 from .release_input_builder_v1 import build_release_input_manifest_v1
+from jsonschema import Draft202012Validator, FormatChecker
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -24,8 +25,8 @@ def main(argv: list[str] | None = None) -> int:
     options = parser.parse_args(argv)
     try:
         value = json.loads(options.release_input.read_text(encoding="utf-8"))
-        if not isinstance(value, dict) or set(value) != {"source_root", "inputs"} or not isinstance(value["inputs"], dict):
-            raise OfflineSigningError("RELEASE_INPUT_SCHEMA_INVALID")
+        schema = json.loads((Path(__file__).resolve().parents[2] / "docs" / "schemas" / "windows-fence-release-input-v1.schema.json").read_text(encoding="utf-8"))
+        Draft202012Validator(schema, format_checker=FormatChecker()).validate(value)
         inputs = dict(value["inputs"])
         for field in ("config_raw", "keyring_raw", "preflight_raw"):
             inputs[field] = base64.b64decode(inputs[field], validate=True)
