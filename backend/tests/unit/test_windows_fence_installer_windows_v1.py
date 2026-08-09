@@ -380,3 +380,5 @@ def test_installed_entry_exposes_no_portable_install_helper() -> None:
     import scripts.windows_fence_foundation.installer_entry_v1 as entry
 
     assert not hasattr(entry, "run_installed_final_windows_installer_entry_for_test_v1")
+    assert not hasattr(entry, "VerifiedFinalInstallerInputsV1")
+    assert not hasattr(entry, "_run_installed_final_windows_installer_entry_v1")

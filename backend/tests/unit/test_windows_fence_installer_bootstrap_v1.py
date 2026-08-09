@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import inspect
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,7 @@ from scripts.windows_fence_foundation.installer_bootstrap_v1 import (
     KEYRING_SCHEMA_VERSION,
     WindowsFinalInstallerBootstrapError,
     _canonical_keyring,
+    run_sealed_final_windows_installer_v1,
 )
 from scripts.windows_fence_foundation.installer_trust_anchor_v1 import (
     InstallerBootstrapTrustAnchorError,
@@ -108,6 +110,21 @@ def test_bootstrap_keyring_is_canonical_sha_pinned_and_domain_separated() -> Non
 def test_direct_source_import_cannot_bypass_generated_archive_anchor() -> None:
     with pytest.raises(InstallerBootstrapTrustAnchorError, match="ANCHOR_MISSING"):
         load_production_installer_trust_anchor_v1()
+
+
+def test_sealed_entry_rejects_legacy_verified_inputs_boundary() -> None:
+    import scripts.windows_fence_foundation.installer_bootstrap_v1 as bootstrap
+    import scripts.windows_fence_foundation.installer_entry_v1 as entry
+
+    assert not hasattr(entry, "VerifiedFinalInstallerInputsV1")
+    assert not hasattr(entry, "_run_installed_final_windows_installer_entry_v1")
+    assert not hasattr(bootstrap, "_build_verified_final_installer_inputs_v1")
+    assert tuple(inspect.signature(run_sealed_final_windows_installer_v1).parameters) == (
+        "bundle_path",
+        "manifest_path",
+        "nonce_registry_root",
+        "dry_run",
+    )
 
 
 def test_production_anchor_rejects_placeholder_hashes() -> None:

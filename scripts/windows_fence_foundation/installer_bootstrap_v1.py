@@ -1,8 +1,9 @@
 """Sealed Windows final-installer bootstrap.
 
-The command line deliberately carries paths plus immutable raw digests only.
-It never accepts an unsigned target projection, expected-bindings JSON, service
-configuration, authority, credentials, or a private key.
+The command line deliberately carries only bundle, manifest, and nonce-root
+paths. It never accepts a keyring, expected hash, target projection,
+expected-bindings JSON, service configuration, authority, credentials, or a
+private key.
 """
 
 from __future__ import annotations
@@ -16,10 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from .bundle_v1 import COMPONENT_PATHS, verify_windows_fence_bundle_v1
-from .installer_entry_v1 import (
-    VerifiedFinalInstallerInputsV1,
-    _run_installed_final_windows_installer_entry_v1,
-)
+from .installer_windows_v1 import FinalWindowsFenceInstallerV1, InstallResultV1
 from .installer_trust_anchor_v1 import (
     KEYRING_PURPOSE,
     KEYRING_SCHEMA_VERSION,
@@ -85,14 +83,14 @@ def _manifest_bindings_from_native_facts(
         ) from exc
 
 
-def _build_verified_final_installer_inputs_v1(
+def run_sealed_final_windows_installer_v1(
     *,
     bundle_path: Path,
     manifest_path: Path,
     nonce_registry_root: Path,
-    reserve_nonce: bool,
-) -> VerifiedFinalInstallerInputsV1:
-    """Build sealed inputs from the sole generated-anchor production path."""
+    dry_run: bool,
+) -> InstallResultV1 | str:
+    """The sole native installation entry; all trust inputs stay internal."""
     if os.name != "nt":
         raise WindowsFinalInstallerBootstrapError(
             "WINDOWS_INSTALLER_BOOTSTRAP_REQUIRED"
@@ -167,7 +165,7 @@ def _build_verified_final_installer_inputs_v1(
         "install_attempt_inputs": attempt_inputs,
         "now": datetime.now(timezone.utc),
     }
-    if reserve_nonce:
+    if not dry_run:
         manifest = verify_and_reserve_install_manifest_v1(
             **kwargs,
             nonce_registry=WindowsInstallAttemptNonceRegistryV1(
@@ -187,13 +185,20 @@ def _build_verified_final_installer_inputs_v1(
         raise WindowsFinalInstallerBootstrapError(
             "BUNDLE_PUBLIC_CONFIG_READ_FAILED"
         ) from exc
-    return VerifiedFinalInstallerInputsV1(
-        bundle_raw=bundle_raw,
-        bundle=bundle,
+    if not host.is_real_windows_host:
+        raise WindowsFinalInstallerBootstrapError("WINDOWS_INSTALLER_BOOTSTRAP_REQUIRED")
+    if dry_run:
+        # Native facts above already performed the query-only host preflight.
+        return "WINDOWS_INSTALLER_NATIVE_PREFLIGHT_OK"
+    installer = FinalWindowsFenceInstallerV1(
+        host=host,
         manifest=manifest,
+        bundle=bundle,
         target_projection=projection,
         public_config_raw=public_config_raw,
     )
+    installer.stage_and_publish(bundle_raw=bundle_raw)
+    return installer.reserve_event3_and_apply_target()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -203,15 +208,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--nonce-registry-root", type=Path, required=True)
     parser.add_argument("--dry-run", action="store_true")
     options = parser.parse_args(argv)
-    inputs = _build_verified_final_installer_inputs_v1(
+    result = run_sealed_final_windows_installer_v1(
         bundle_path=options.bundle,
         manifest_path=options.manifest,
         nonce_registry_root=options.nonce_registry_root,
-        reserve_nonce=not options.dry_run,
+        dry_run=options.dry_run,
     )
-    print(
-        _run_installed_final_windows_installer_entry_v1(inputs, dry_run=options.dry_run)
-    )
+    print(result)
     return 0
 
 
@@ -220,6 +223,7 @@ __all__ = [
     "KEYRING_SCHEMA_VERSION",
     "WindowsFinalInstallerBootstrapError",
     "main",
+    "run_sealed_final_windows_installer_v1",
 ]
 
 
