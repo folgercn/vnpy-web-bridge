@@ -155,19 +155,48 @@ def test_windows_nonce_registry_root_fact_match_requires_exact_adapter_facts(
 ) -> None:
     expected = _windows_nonce_registry_root_facts()
     owner_sid = "S-1-5-21-test-owner"
-    acl_sddl = f"O:{owner_sid}D:PAI(A;;FA;;;{owner_sid})"
     assert _matches_windows_nonce_registry_root_facts(
         actual=expected,
         expected=expected,
         owner_sid=owner_sid,
-        acl_sddl=acl_sddl,
     )
     assert not _matches_windows_nonce_registry_root_facts(
         actual=replace(expected, **{field: value}),
         expected=expected,
         owner_sid=owner_sid,
-        acl_sddl=acl_sddl,
     )
+
+
+def test_windows_nonce_registry_root_fact_match_uses_canonical_acl_fact() -> None:
+    expected = _windows_nonce_registry_root_facts()
+    owner_sid = "S-1-5-21-test-owner"
+    equivalent_raw_acl_sddl = f"D:PAI(A;;FA;;;{owner_sid})O:{owner_sid}"
+
+    assert hashlib.sha256(equivalent_raw_acl_sddl.encode("utf-8")).hexdigest() != (
+        expected.acl_sddl_sha256
+    )
+    assert _matches_windows_nonce_registry_root_facts(
+        actual=expected,
+        expected=expected,
+        owner_sid=owner_sid,
+    )
+
+
+def test_windows_nonce_record_rejects_effective_acl_hash_drift() -> None:
+    expected = _windows_nonce_registry_root_facts()
+    registry = object.__new__(WindowsInstallAttemptNonceRegistryV1)
+    object.__setattr__(registry, "expected_root_facts", expected)
+    path = Path("/nonce-registry/" + "a" * 64 + ".json")
+    record_facts = replace(
+        expected,
+        path_sha256=hashlib.sha256(str(path).encode("utf-8")).hexdigest(),
+        regular_file=True,
+        directory=False,
+        acl_sddl_sha256="f" * 64,
+    )
+
+    with pytest.raises(ManifestVerificationError, match="WINDOWS_NONCE_RECORD_FACTS_MISMATCH"):
+        registry._verify_record(raw=b"{}", facts=record_facts, path=path)
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows opened-handle smoke")

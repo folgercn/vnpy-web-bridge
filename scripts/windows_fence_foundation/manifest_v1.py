@@ -193,15 +193,12 @@ def _matches_windows_nonce_registry_root_facts(
     actual: PathSecurityFacts,
     expected: PathSecurityFacts,
     owner_sid: str,
-    acl_sddl: str,
 ) -> bool:
     """Require one Win32-adapter fact set to match the sealed root pin exactly."""
     return (
         actual == expected
         and hashlib.sha256(owner_sid.encode("utf-8")).hexdigest()
         == actual.owner_sid_sha256
-        and hashlib.sha256(acl_sddl.encode("utf-8")).hexdigest()
-        == actual.acl_sddl_sha256
         and actual.directory
         and not actual.regular_file
         and not actual.reparse_point
@@ -407,7 +404,6 @@ class WindowsInstallAttemptNonceRegistryV1:
             actual=actual,
             expected=self.expected_root_facts,
             owner_sid=self.owner_sid,
-            acl_sddl=self.acl_sddl,
         ):
             raise ManifestVerificationError(
                 "WINDOWS_NONCE_REGISTRY_EXPECTATION_INVALID"
@@ -424,7 +420,6 @@ class WindowsInstallAttemptNonceRegistryV1:
             actual=actual,
             expected=self.expected_root_facts,
             owner_sid=self.owner_sid,
-            acl_sddl=self.acl_sddl,
         ):
             raise ManifestVerificationError(
                 "WINDOWS_NONCE_REGISTRY_ROOT_FACTS_MISMATCH"
