@@ -473,8 +473,33 @@ def test_windows_ntcreatefile_static_signature_and_calls_are_eleven_arguments() 
 
     assert isinstance(signature, ast.List)
     assert len(signature.elts) == 11
+    assert tuple(ast.unparse(item) for item in signature.elts) == (
+        "ctypes.POINTER(wintypes.HANDLE)",
+        "wintypes.ULONG",
+        "ctypes.POINTER(_OBJECT_ATTRIBUTES)",
+        "ctypes.POINTER(_IO_STATUS_BLOCK)",
+        "ctypes.c_void_p",
+        "wintypes.ULONG",
+        "wintypes.ULONG",
+        "wintypes.ULONG",
+        "wintypes.ULONG",
+        "ctypes.c_void_p",
+        "wintypes.ULONG",
+    )
     assert len(calls) == 2
     assert all(len(call.args) == 11 and not call.keywords for call in calls)
+
+    create, opened = calls
+    assert [ast.unparse(argument) for argument in create.args[6:9]] == [
+        "0",
+        "_FILE_CREATE",
+        "_FILE_NON_DIRECTORY_FILE | _FILE_SYNCHRONOUS_IO_NONALERT | _FILE_OPEN_REPARSE_POINT",
+    ]
+    assert [ast.unparse(argument) for argument in opened.args[6:9]] == [
+        "_FILE_SHARE_ALL",
+        "_FILE_OPEN",
+        "_FILE_SYNCHRONOUS_IO_NONALERT | _FILE_OPEN_REPARSE_POINT | (0 if not directory else _FILE_DIRECTORY_FILE)",
+    ]
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires Windows ctypes structures")
