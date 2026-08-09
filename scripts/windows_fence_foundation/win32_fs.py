@@ -205,6 +205,7 @@ if os.name == "nt":  # pragma: win32 cover
     _FILE_ATTRIBUTE_NORMAL = 0x80
     _FILE_DISPOSITION_INFO = 4
     _FILE_RENAME_INFO = 3
+    _FILE_BEGIN = 0
     _FILE_ATTRIBUTE_DIRECTORY = 0x10
     _FILE_ATTRIBUTE_REPARSE_POINT = 0x400
     _OWNER_SECURITY_INFORMATION = 0x1
@@ -362,6 +363,13 @@ if os.name == "nt":  # pragma: win32 cover
         wintypes.DWORD,
     ]
     _kernel32.SetFileInformationByHandle.restype = wintypes.BOOL
+    _kernel32.SetFilePointerEx.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_longlong,
+        ctypes.POINTER(ctypes.c_longlong),
+        wintypes.DWORD,
+    ]
+    _kernel32.SetFilePointerEx.restype = wintypes.BOOL
     _kernel32.LocalFree.argtypes = [ctypes.c_void_p]
     _kernel32.LocalFree.restype = ctypes.c_void_p
     _kernel32.GetFinalPathNameByHandleW.argtypes = [
@@ -557,6 +565,8 @@ class WindowsFilesystemFactsAdapter:
                 )
                 before = self._handle_info(handle)
                 size = (before.size_high << 32) | before.size_low
+                if not _kernel32.SetFilePointerEx(handle, 0, None, _FILE_BEGIN):
+                    raise ctypes.WinError(ctypes.get_last_error())
                 raw_readback = self._read_exact(handle, size)
                 after = self._handle_info(handle)
                 if self._identity(before) != self._identity(after):

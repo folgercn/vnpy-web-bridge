@@ -470,6 +470,27 @@ def test_windows_ntcreatefile_static_signature_and_calls_are_eleven_arguments() 
         and node.func.value.id == "_ntdll"
         and node.func.attr == "NtCreateFile"
     ]
+    rewind_signature = next(
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Attribute)
+        and isinstance(node.targets[0].value, ast.Attribute)
+        and isinstance(node.targets[0].value.value, ast.Name)
+        and node.targets[0].value.value.id == "_kernel32"
+        and node.targets[0].value.attr == "SetFilePointerEx"
+        and node.targets[0].attr == "argtypes"
+    )
+    rewind_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "_kernel32"
+        and node.func.attr == "SetFilePointerEx"
+    ]
 
     assert isinstance(signature, ast.List)
     assert len(signature.elts) == 11
@@ -488,6 +509,20 @@ def test_windows_ntcreatefile_static_signature_and_calls_are_eleven_arguments() 
     )
     assert len(calls) == 2
     assert all(len(call.args) == 11 and not call.keywords for call in calls)
+    assert isinstance(rewind_signature, ast.List)
+    assert tuple(ast.unparse(item) for item in rewind_signature.elts) == (
+        "wintypes.HANDLE",
+        "ctypes.c_longlong",
+        "ctypes.POINTER(ctypes.c_longlong)",
+        "wintypes.DWORD",
+    )
+    assert len(rewind_calls) == 1
+    assert [ast.unparse(argument) for argument in rewind_calls[0].args] == [
+        "handle",
+        "0",
+        "None",
+        "_FILE_BEGIN",
+    ]
 
     create, opened = calls
     assert "_SYNCHRONIZE = 0x00100000" in WIN32_FS_SOURCE
@@ -535,12 +570,20 @@ def test_windows_relative_unicode_string_accepts_explicit_lpwstr_buffer() -> Non
 @pytest.mark.skipif(os.name != "nt", reason="requires Windows ntdll binding")
 def test_windows_ntcreatefile_runtime_signature_has_eleven_arguments() -> None:
     import ctypes
+    from ctypes import wintypes
 
     from scripts.windows_fence_foundation import win32_fs
 
     assert len(win32_fs._ntdll.NtCreateFile.argtypes) == 11
     assert win32_fs._ntdll.NtCreateFile.restype is ctypes.c_long
     assert win32_fs._SYNCHRONIZE == 0x00100000
+    assert win32_fs._FILE_BEGIN == 0
+    assert tuple(win32_fs._kernel32.SetFilePointerEx.argtypes) == (
+        wintypes.HANDLE,
+        ctypes.c_longlong,
+        ctypes.POINTER(ctypes.c_longlong),
+        wintypes.DWORD,
+    )
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires Windows handle deletion")
@@ -605,6 +648,28 @@ def test_windows_relative_create_redacts_cleanup_failure(
     assert raised.value.__suppress_context__ is True
     assert target.name not in str(raised.value)
     assert "WinError" not in str(raised.value)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows handle and ACL APIs")
+def test_windows_relative_create_reads_back_from_rewound_handle(tmp_path: Path) -> None:
+    import win32api  # type: ignore[import-not-found]
+    import win32security  # type: ignore[import-not-found]
+
+    adapter = WindowsFilesystemFactsAdapter()
+    sid, _domain, _kind = win32security.LookupAccountName(None, win32api.GetUserName())
+    owner = win32security.ConvertSidToStringSid(sid)
+    target = tmp_path / "rewound-readback.json"
+
+    with adapter.open_directory_anchor(tmp_path) as parent:
+        created = adapter.write_file_create_only_relative_to_opened_parent(
+            parent=parent,
+            name=target.name,
+            raw=b"readback",
+            protected_sddl=f"O:{owner}D:PAI(A;;FA;;;{owner})",
+        )
+
+    assert created.raw == b"readback"
+    assert created.facts.regular_file
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires Win32 handle and ACL APIs")
