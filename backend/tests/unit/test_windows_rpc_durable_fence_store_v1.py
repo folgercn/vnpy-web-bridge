@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import os
 from dataclasses import replace
@@ -446,6 +447,36 @@ def test_windows_relative_unicode_strings_use_explicit_lpwstr_casts() -> None:
     assert WIN32_FS_SOURCE.count("len(encoded_name) + 2") == 2
 
 
+def test_windows_ntcreatefile_static_signature_and_calls_are_eleven_arguments() -> None:
+    tree = ast.parse(WIN32_FS_SOURCE)
+    signature = next(
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Attribute)
+        and isinstance(node.targets[0].value, ast.Attribute)
+        and isinstance(node.targets[0].value.value, ast.Name)
+        and node.targets[0].value.value.id == "_ntdll"
+        and node.targets[0].value.attr == "NtCreateFile"
+        and node.targets[0].attr == "argtypes"
+    )
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "_ntdll"
+        and node.func.attr == "NtCreateFile"
+    ]
+
+    assert isinstance(signature, ast.List)
+    assert len(signature.elts) == 11
+    assert len(calls) == 2
+    assert all(len(call.args) == 11 and not call.keywords for call in calls)
+
+
 @pytest.mark.skipif(os.name != "nt", reason="requires Windows ctypes structures")
 def test_windows_relative_unicode_string_accepts_explicit_lpwstr_buffer() -> None:
     import ctypes
@@ -464,6 +495,16 @@ def test_windows_relative_unicode_string_accepts_explicit_lpwstr_buffer() -> Non
     assert unicode_name.buffer == name
     assert unicode_name.length == len(encoded_name)
     assert unicode_name.maximum_length == len(encoded_name) + 2
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows ntdll binding")
+def test_windows_ntcreatefile_runtime_signature_has_eleven_arguments() -> None:
+    import ctypes
+
+    from scripts.windows_fence_foundation import win32_fs
+
+    assert len(win32_fs._ntdll.NtCreateFile.argtypes) == 11
+    assert win32_fs._ntdll.NtCreateFile.restype is ctypes.c_long
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires Win32 handle and ACL APIs")

@@ -435,7 +435,6 @@ if os.name == "nt":  # pragma: win32 cover
         wintypes.ULONG,
         wintypes.ULONG,
         wintypes.ULONG,
-        wintypes.ULONG,
         ctypes.c_void_p,
         wintypes.ULONG,
     ]
