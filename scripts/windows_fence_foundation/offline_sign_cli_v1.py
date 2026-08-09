@@ -49,8 +49,18 @@ def run(role: str, argv: list[str] | None = None) -> int:
             options.execution_facts is None or options.snapshot is None
         ):
             raise OfflineSigningError("SIGNING_PREFLIGHT_SOURCE_FACTS_REQUIRED")
-        if schema in {"windows_rpc_durable_fence_zero_order_preflight_v1", "windows_rpc_durable_fence_restart_authorization_v1"} and options.replay_ledger_dir is None:
+        if schema in {"windows_rpc_durable_fence_zero_order_preflight_v1", "windows_rpc_durable_fence_restart_authorization_v1", "windows_rpc_durable_fence_install_manifest_v1"} and options.replay_ledger_dir is None:
             raise OfflineSigningError("SIGNING_REPLAY_LEDGER_REQUIRED")
+        # Reserve public one-shot identities before private-key access or output.
+        if schema == "windows_rpc_durable_fence_zero_order_preflight_v1":
+            consume_replay_token_create_only_v1(options.replay_ledger_dir, token_sha256=str(draft["challenge_nonce_sha256"]), purpose="preflight-challenge")
+            consume_replay_token_create_only_v1(options.replay_ledger_dir, token_sha256=hashlib.sha256(str(draft["replay_guard_id"]).encode()).hexdigest(), purpose="preflight-replay-guard")
+        if schema == "windows_rpc_durable_fence_install_manifest_v1":
+            consume_replay_token_create_only_v1(options.replay_ledger_dir, token_sha256=str(draft["attempt_nonce_sha256"]), purpose="manifest-attempt-nonce")
+            consume_replay_token_create_only_v1(options.replay_ledger_dir, token_sha256=hashlib.sha256(str(draft["install_attempt_id"]).encode()).hexdigest(), purpose="manifest-install-attempt")
+        if schema == "windows_rpc_durable_fence_restart_authorization_v1":
+            consume_replay_token_create_only_v1(options.replay_ledger_dir, token_sha256=str(draft["dispatch_nonce_sha256"]), purpose="restart-dispatch")
+            consume_replay_token_create_only_v1(options.replay_ledger_dir, token_sha256=hashlib.sha256(str(draft["authorization_id"]).encode()).hexdigest(), purpose="restart-authorization")
         signed = sign_artifact_with_fd_v1(
             draft,
             private_key_fd=options.private_key_fd,
@@ -62,12 +72,6 @@ def run(role: str, argv: list[str] | None = None) -> int:
             snapshot_raw=(None if options.snapshot is None else options.snapshot.read_bytes()),
         )
         raw = write_canonical_create_only_v1(options.output, signed)
-        if schema == "windows_rpc_durable_fence_zero_order_preflight_v1":
-            consume_replay_token_create_only_v1(options.replay_ledger_dir, token_sha256=str(draft["challenge_nonce_sha256"]), purpose="preflight-challenge")
-            consume_replay_token_create_only_v1(options.replay_ledger_dir, token_sha256=hashlib.sha256(str(draft["replay_guard_id"]).encode()).hexdigest(), purpose="preflight-replay-guard")
-        if schema == "windows_rpc_durable_fence_restart_authorization_v1":
-            consume_replay_token_create_only_v1(options.replay_ledger_dir, token_sha256=str(draft["dispatch_nonce_sha256"]), purpose="restart-dispatch")
-            consume_replay_token_create_only_v1(options.replay_ledger_dir, token_sha256=hashlib.sha256(str(draft["authorization_id"]).encode()).hexdigest(), purpose="restart-authorization")
         write_audit_create_only_v1(options.audit_output, artifact_raw=raw, action=f"sign-{role}")
     except (OfflineSigningError, OSError, ValueError) as exc:
         print(f"offline {role} signing failed: {exc}", file=sys.stderr)
