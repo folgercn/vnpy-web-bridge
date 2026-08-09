@@ -88,6 +88,7 @@ def test_windows_fence_exact_paths_use_the_dedicated_gate_without_generic_image(
         "scripts/windows_fence_foundation/release_bundle_v1.py",
         "scripts/windows_fence_foundation/release_input_builder_v1.py",
         "scripts/windows_fence_foundation/release_input_builder_cli_v1.py",
+        "docs/schemas/windows-fence-release-build-audit-v1.schema.json",
         "docs/schemas/windows-fence-release-input-v1.schema.json",
         "docs/schemas/windows-rpc-durable-fence-signing-closure-bundle-v1.schema.json",
         "docs/operations/windows-rpc-durable-fence-offline-signing-closure-v1.md",

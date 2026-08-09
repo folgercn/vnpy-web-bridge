@@ -8,6 +8,12 @@ The signer receives an inherited read-only private-key descriptor through
 variable, log value, bundle member, or runtime/installer hand-off. Public
 keyrings remain the only key material used by installer/runtime verification.
 
+Perform positive FD signing only on a controlled Unix/macOS offline host: it
+uses `fcntl(F_GETFL)` to prove that the inherited descriptor is read-only.
+Windows intentionally has no portable equivalent and the signer must fail
+closed with `SIGNING_PRIVATE_KEY_FD_ACCESS_UNVERIFIABLE`; Windows CI may build
+and verify public artifacts, but must not perform positive private-key signing.
+
 Use three independently provisioned Ed25519 keys: manifest, observer evidence,
 and restart authorization. The implementation rejects reused public bytes,
 key IDs, hashes, roles, or domains. Every artifact and its audit sidecar must

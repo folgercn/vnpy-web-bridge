@@ -10,10 +10,16 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+import scripts.windows_fence_foundation.offline_signing_v1 as offline_signing
 from backend.tests.unit.test_issue267_windows_fence_foundation_schemas import _preflight
+from backend.tests.unit.windows_fence_public_fixture_v1 import public_keyring_raw_v1
 from scripts.windows_fence_foundation.contracts import (
     canonical_json_bytes,
 )
+from scripts.windows_fence_foundation.installer_trust_anchor_v1 import (
+    canonical_public_keyring_v1,
+)
+from scripts.windows_fence_foundation.offline_sign_cli_v1 import run as sign_run
 from scripts.windows_fence_foundation.offline_signing_v1 import (
     OfflineSigningError,
     require_fresh_zero_preflight_v1,
@@ -90,6 +96,64 @@ def _key_fd(tmp_path: Path, private: Ed25519PrivateKey) -> int:
     )
     path.chmod(0o400)
     return os.open(path, os.O_RDONLY)
+
+
+def test_windows_fd_signing_cli_fails_closed_without_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Model the Windows branch, which cannot prove inherited FD access mode."""
+    monkeypatch.setattr(offline_signing, "fcntl", None)
+    keyring_raw = public_keyring_raw_v1()
+    pin = canonical_public_keyring_v1(
+        keyring_raw, hashlib.sha256(keyring_raw).hexdigest()
+    ).observer
+    facts = _facts()
+    draft_path = tmp_path / "draft.json"
+    keyring_path = tmp_path / "keyring.json"
+    facts_path = tmp_path / "facts.json"
+    snapshot_path = tmp_path / "snapshot.json"
+    output_path = tmp_path / "signed.json"
+    audit_path = tmp_path / "signed.audit.json"
+    key_path = tmp_path / "private-key"
+    ledger_path = tmp_path / "ledger"
+    draft_path.write_bytes(canonical_json_bytes(_draft(pin)))
+    keyring_path.write_bytes(keyring_raw)
+    facts_path.write_bytes(facts)
+    snapshot_path.write_bytes(facts)
+    key_path.write_bytes(b"not-read-when-fcntl-is-unavailable")
+    key_path.chmod(0o400)
+    ledger_path.mkdir(mode=0o700)
+    descriptor = os.open(key_path, os.O_RDONLY)
+    try:
+        assert (
+            sign_run(
+                "observer",
+                [
+                    "--draft",
+                    str(draft_path),
+                    "--output",
+                    str(output_path),
+                    "--audit-output",
+                    str(audit_path),
+                    "--public-keyring",
+                    str(keyring_path),
+                    "--private-key-fd",
+                    str(descriptor),
+                    "--execution-facts",
+                    str(facts_path),
+                    "--snapshot",
+                    str(snapshot_path),
+                    "--replay-ledger-dir",
+                    str(ledger_path),
+                ],
+            )
+            == 2
+        )
+    finally:
+        os.close(descriptor)
+    assert "SIGNING_PRIVATE_KEY_FD_ACCESS_UNVERIFIABLE" in capsys.readouterr().err
+    assert not output_path.exists()
+    assert not audit_path.exists()
 
 
 @pytest.mark.skipif(

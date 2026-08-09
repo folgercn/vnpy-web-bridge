@@ -11,6 +11,7 @@ WORKFLOW_PREFIX = ".github/workflows/"
 WINDOWS_FENCE_GLOBS = (
     "scripts/windows_rpc_*",
     "docs/schemas/windows-rpc-durable-fence-*.schema.json",
+    "docs/schemas/windows-fence-release-build-audit-v1.schema.json",
     "docs/schemas/windows-fence-release-input-v1.schema.json",
     "docs/operations/windows-rpc-durable-fence-*.md",
     "docs/architecture/windows-rpc-durable-fence-foundation-*.json",

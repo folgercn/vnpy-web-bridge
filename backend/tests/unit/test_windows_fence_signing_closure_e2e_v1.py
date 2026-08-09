@@ -525,6 +525,10 @@ def _manifest_attempt_inputs(value: dict[str, object]) -> dict[str, object]:
     }
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="positive FD signing requires Unix/macOS fcntl read-only-FD proof",
+)
 def test_release_input_build_fd_sign_and_receipt_tamper_rejection(
     tmp_path: Path,
 ) -> None:
