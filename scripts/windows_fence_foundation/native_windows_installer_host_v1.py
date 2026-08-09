@@ -746,6 +746,9 @@ class NativeWindowsFenceInstallerHostV1(WindowsFenceInstallerHostV1):
         destination_root: str,
         install_attempt_id: str,
         bundle_sha256: str,
+        component_sha256s: Mapping[str, str],
+        owner_sid_sha256: str,
+        component_acl_sddl_sha256: str,
     ) -> None:
         self._require_windows()
         path = Path(destination_root)
@@ -753,6 +756,8 @@ class NativeWindowsFenceInstallerHostV1(WindowsFenceInstallerHostV1):
             not install_attempt_id.startswith("windows-fence-install-")
             or len(bundle_sha256) != 64
             or path.name != bundle_sha256
+            or set(component_sha256s)
+            != {"wrapper", "extension", "launcher", "assembly", "config"}
         ):
             raise WindowsFinalInstallerError("INSTALL_ORPHAN_IDENTITY_INVALID")
         try:
@@ -779,18 +784,37 @@ class NativeWindowsFenceInstallerHostV1(WindowsFenceInstallerHostV1):
             }
         ):
             raise WindowsFinalInstallerError("INSTALL_ORPHAN_CLEANUP_UNSAFE")
+        role_names = {
+            "wrapper": "windows_rpc_service_wrapper_v1.py",
+            "extension": "windows_rpc_deployment_snapshot_v1.py",
+            "launcher": "windows_rpc_durable_fence_v1.py",
+            "assembly": "windows_fence_foundation_v1.pyz",
+            "config": "windows_rpc_service_config_v1.json",
+        }
         try:
-            for name in inventory.names:
-                file_facts = filesystem.read_file(path / name).facts
-                if (
-                    not file_facts.regular_file
-                    or file_facts.reparse_point
-                    or file_facts.hardlink_count != 1
-                    or file_facts.alternate_data_streams
-                ):
-                    raise WindowsFinalInstallerError("INSTALL_ORPHAN_CLEANUP_UNSAFE")
-                filesystem.delete_empty_object_by_handle(path / name, directory=False)
-            filesystem.delete_empty_object_by_handle(path, directory=True)
+            with filesystem.open_directory_anchor(path.parent) as anchor:
+                anchor.assert_named_path_is_opened_parent()
+                for role, name in role_names.items():
+                    item = filesystem.read_file(path / name)
+                    file_facts = item.facts
+                    if (
+                        hashlib.sha256(item.raw).hexdigest() != component_sha256s[role]
+                        or file_facts.owner_sid_sha256 != owner_sid_sha256
+                        or file_facts.acl_sddl_sha256 != component_acl_sddl_sha256
+                        or not file_facts.regular_file
+                        or file_facts.reparse_point
+                        or file_facts.hardlink_count != 1
+                        or file_facts.alternate_data_streams
+                    ):
+                        raise WindowsFinalInstallerError(
+                            "INSTALL_ORPHAN_CLEANUP_UNSAFE"
+                        )
+                    anchor.assert_named_path_is_opened_parent()
+                    filesystem.delete_empty_object_by_handle(
+                        path / name, directory=False
+                    )
+                anchor.assert_named_path_is_opened_parent()
+                filesystem.delete_empty_object_by_handle(path, directory=True)
         except OSError:
             raise WindowsFinalInstallerError("INSTALL_ORPHAN_CLEANUP_FAILED") from None
 

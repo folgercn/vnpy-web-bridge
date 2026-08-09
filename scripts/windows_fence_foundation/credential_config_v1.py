@@ -123,6 +123,7 @@ class WindowsSecureCredentialBlobWriterV1:
         self._parent_owner = parent_owner_sid_sha256
         self._parent_acl = parent_acl_sddl_sha256
         self._blob_owner = _digest(blob_owner_sid.encode("utf-8"))
+        self._blob_owner_sid = blob_owner_sid
         self._blob_acl = _digest(blob_acl_sddl.encode("utf-8"))
         self._blob_sddl = blob_acl_sddl
 
@@ -146,6 +147,26 @@ class WindowsSecureCredentialBlobWriterV1:
             raise CredentialConfigError("CREDENTIAL_BLOB_PARENT_SECURITY_INVALID")
         return facts
 
+    def _require_sddl_owner(self) -> None:
+        try:
+            import win32security  # type: ignore[import-not-found]
+
+            descriptor = (
+                win32security.ConvertStringSecurityDescriptorToSecurityDescriptor(
+                    self._blob_sddl, 1
+                )
+            )
+            owner = win32security.ConvertSidToStringSid(
+                descriptor.GetSecurityDescriptorOwner()
+            )
+        except Exception:  # noqa: BLE001 - security provider errors are redacted
+            raise CredentialConfigError("CREDENTIAL_BLOB_ACL_INVALID") from None
+        if (
+            owner != self._blob_owner_sid
+            or _digest(owner.encode("utf-8")) != self._blob_owner
+        ):
+            raise CredentialConfigError("CREDENTIAL_BLOB_OWNER_MISMATCH")
+
     def write_create_only(self, *, path: str, raw: bytes) -> None:
         if os.name != "nt":
             raise CredentialConfigError("CREDENTIAL_DPAPI_WINDOWS_REQUIRED")
@@ -160,6 +181,7 @@ class WindowsSecureCredentialBlobWriterV1:
             from .win32_fs import WindowsFilesystemFactsAdapter
 
             filesystem = WindowsFilesystemFactsAdapter()
+            self._require_sddl_owner()
             parent_before = self._secure_parent(filesystem)
             item = filesystem.write_file_create_only(
                 blob, raw=raw, protected_sddl=self._blob_sddl

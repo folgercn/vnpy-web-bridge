@@ -188,6 +188,9 @@ if os.name == "nt":  # pragma: win32 cover
     _FILE_READ_ATTRIBUTES = 0x0080
     _READ_CONTROL = 0x00020000
     _FILE_LIST_DIRECTORY = 0x0001
+    _FILE_ADD_FILE = 0x0002
+    _FILE_ADD_SUBDIRECTORY = 0x0004
+    _FILE_DELETE_CHILD = 0x0040
     _FILE_SHARE_ALL = 0x00000007
     _GENERIC_READ = 0x80000000
     _GENERIC_WRITE = 0x40000000
@@ -460,7 +463,12 @@ class WindowsFilesystemFactsAdapter:
             raise OSError("empty create-only file is not allowed")
         handle = _kernel32.CreateFileW(
             str(path.absolute()),
-            _GENERIC_READ | _GENERIC_WRITE | _READ_CONTROL | _FILE_READ_ATTRIBUTES,
+            _GENERIC_READ
+            | _GENERIC_WRITE
+            | _READ_CONTROL
+            | _FILE_READ_ATTRIBUTES
+            | _WRITE_DAC
+            | _WRITE_OWNER,
             0,
             None,
             _CREATE_NEW,
@@ -470,15 +478,15 @@ class WindowsFilesystemFactsAdapter:
         if handle == _INVALID_HANDLE:
             raise ctypes.WinError(ctypes.get_last_error())
         try:
-            buffer = ctypes.create_string_buffer(raw)
-            written = wintypes.DWORD()
-            if not _kernel32.WriteFile(
-                handle, buffer, len(raw), ctypes.byref(written), None
-            ) or written.value != len(raw):
-                raise ctypes.WinError(ctypes.get_last_error())
-            if not _kernel32.FlushFileBuffers(handle):
-                raise ctypes.WinError(ctypes.get_last_error())
             try:
+                buffer = ctypes.create_string_buffer(raw)
+                written = wintypes.DWORD()
+                if not _kernel32.WriteFile(
+                    handle, buffer, len(raw), ctypes.byref(written), None
+                ) or written.value != len(raw):
+                    raise ctypes.WinError(ctypes.get_last_error())
+                if not _kernel32.FlushFileBuffers(handle):
+                    raise ctypes.WinError(ctypes.get_last_error())
                 import win32security  # type: ignore[import-not-found]
 
                 descriptor = (
@@ -497,17 +505,25 @@ class WindowsFilesystemFactsAdapter:
                     descriptor.GetSecurityDescriptorDacl(),
                     None,
                 )
-            except Exception as exc:
-                raise OSError("protected handle ACL apply failed") from exc
-            before = self._handle_info(handle)
-            size = (before.size_high << 32) | before.size_low
-            raw_readback = self._read_exact(handle, size)
-            after = self._handle_info(handle)
-            if self._identity(before) != self._identity(after):
-                raise OSError("created file changed during handle readback")
-            return SecureFileRead(
-                raw=raw_readback, facts=self._facts(handle, path, info=after)
-            )
+                before = self._handle_info(handle)
+                size = (before.size_high << 32) | before.size_low
+                raw_readback = self._read_exact(handle, size)
+                after = self._handle_info(handle)
+                if self._identity(before) != self._identity(after):
+                    raise OSError("created file changed during handle readback")
+                return SecureFileRead(
+                    raw=raw_readback, facts=self._facts(handle, path, info=after)
+                )
+            except Exception:
+                delete = ctypes.c_ubyte(1)
+                if not _kernel32.SetFileInformationByHandle(
+                    handle,
+                    _FILE_DISPOSITION_INFO,
+                    ctypes.byref(delete),
+                    ctypes.sizeof(delete),
+                ):
+                    raise OSError("create-only file failed frozen") from None
+                raise
         finally:
             _kernel32.CloseHandle(handle)
 
@@ -570,7 +586,7 @@ class WindowsFilesystemFactsAdapter:
         if handle == _INVALID_HANDLE:
             raise ctypes.WinError(ctypes.get_last_error())
         try:
-            delete = wintypes.BOOL(True)
+            delete = ctypes.c_ubyte(1)
             if not _kernel32.SetFileInformationByHandle(
                 handle,
                 _FILE_DISPOSITION_INFO,
@@ -656,10 +672,21 @@ class WindowsFilesystemFactsAdapter:
         sid_text = self._sid_text(ctypes.cast(sid, ctypes.c_void_p))
         return hashlib.sha256(sid_text.encode("ascii")).hexdigest()
 
-    def _open(self, path: Path, *, directory: bool, read_data: bool) -> int:
+    def _open(
+        self,
+        path: Path,
+        *,
+        directory: bool,
+        read_data: bool,
+        mutate_directory: bool = False,
+    ) -> int:
         access = _READ_CONTROL | _FILE_READ_ATTRIBUTES
         if read_data:
             access |= _FILE_LIST_DIRECTORY if directory else 0x80000000
+        if mutate_directory:
+            if not directory:
+                raise OSError("mutating handle must be a directory")
+            access |= _FILE_ADD_FILE | _FILE_ADD_SUBDIRECTORY | _FILE_DELETE_CHILD
         handle = _kernel32.CreateFileW(
             str(path.absolute()),
             access,
@@ -932,7 +959,9 @@ class WindowsOpenedDirectoryAnchorV1:
     def __init__(self, filesystem: WindowsFilesystemFactsAdapter, path: Path) -> None:
         self._filesystem = filesystem
         self.path = path
-        self._handle = filesystem._open(path, directory=True, read_data=False)
+        self._handle = filesystem._open(
+            path, directory=True, read_data=False, mutate_directory=True
+        )
         self._initial = filesystem._facts(self._handle, path)
         if (
             not self._initial.directory

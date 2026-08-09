@@ -154,6 +154,9 @@ class WindowsFenceInstallerHostV1(Protocol):
         destination_root: str,
         install_attempt_id: str,
         bundle_sha256: str,
+        component_sha256s: Mapping[str, str],
+        owner_sid_sha256: str,
+        component_acl_sddl_sha256: str,
     ) -> None: ...
 
     def query_same_restart_attempt_only(self, *, install_attempt_id: str) -> str: ...
@@ -433,6 +436,11 @@ class FinalWindowsFenceInstallerV1:
                 ),
                 install_attempt_id=manifest["install_attempt_id"],
                 bundle_sha256=self._bundle.bundle_sha256,
+                component_sha256s=self._bundle.component_sha256s,
+                owner_sid_sha256=manifest["expected_final_owner_sid_sha256"],
+                component_acl_sddl_sha256=manifest[
+                    "expected_component_acl_sddl_sha256"
+                ],
             )
             self._host.restore_pre_event3_backup(backup_id=self._backup_id)
             raise WindowsFinalInstallerError("INSTALL_PRE_EVENT3_ROLLED_BACK") from exc
