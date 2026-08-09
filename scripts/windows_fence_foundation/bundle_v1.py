@@ -40,6 +40,7 @@ FOUNDATION_SOURCE_NAMES = (
     "assembly.py",
     "bootstrap_v1.py",
     "contracts.py",
+    "credential_config_v1.py",
     "final_admission_v1.py",
     "final_store_v1.py",
     "store.py",
@@ -49,12 +50,13 @@ SYNTHETIC_SCRIPTS_INIT = "scripts/__init__.py"
 ASSEMBLY_EXTENSION_PATH = "scripts/windows_rpc_deployment_snapshot_v1.py"
 
 COMPONENT_PATHS = {
+    "wrapper": "components/windows_rpc_service_wrapper_v1.py",
     "extension": "components/windows_rpc_deployment_snapshot_v1.py",
     "launcher": "components/windows_rpc_durable_fence_v1.py",
     "assembly": "components/windows_fence_foundation_v1.pyz",
     "config": "components/windows_rpc_service_config_v1.json",
 }
-COMPONENT_ORDER = ("extension", "launcher", "assembly", "config")
+COMPONENT_ORDER = ("wrapper", "extension", "launcher", "assembly", "config")
 
 _INDEX_FIELDS = frozenset(
     {
@@ -80,6 +82,7 @@ _SERVICE_CONFIG_FIELDS = frozenset(
         "purpose",
         "store_root",
         "store_expectation",
+        "installer_store_bootstrap",
         "runtime_config",
     }
 )
@@ -269,6 +272,7 @@ def _validate_runtime_config(
         or value["purpose"] != "launch_fixed_frozen_windows_rpc_service"
         or not isinstance(value["store_root"], str)
         or not isinstance(value["store_expectation"], dict)
+        or not isinstance(value["installer_store_bootstrap"], dict)
         or not isinstance(value["runtime_config"], dict)
     ):
         raise WindowsFenceBundleError("BUNDLE_RUNTIME_CONFIG_VALUE_INVALID")
@@ -324,24 +328,62 @@ def _validate_runtime_config(
         )
     ):
         raise WindowsFenceBundleError("BUNDLE_STORE_TARGET_BINDING_MISMATCH")
+    bootstrap = value["installer_store_bootstrap"]
+    if set(bootstrap) != {"root_path", "root_path_sha256", "owner_sid", "directory_acl_sddl"}:
+        raise WindowsFenceBundleError("BUNDLE_STORE_BOOTSTRAP_INVALID")
+    try:
+        bootstrap_root = canonical_local_windows_path(bootstrap["root_path"])
+    except StoreContractError as exc:
+        raise WindowsFenceBundleError("BUNDLE_STORE_BOOTSTRAP_INVALID") from exc
+    if (
+        bootstrap_root != store_root
+        or bootstrap_root != bootstrap["root_path"]
+        or bootstrap["root_path_sha256"] != _sha256(bootstrap_root.encode("utf-8"))
+        or bootstrap["root_path_sha256"] != expectation["store_path_sha256"]
+        or not isinstance(bootstrap["owner_sid"], str)
+        or not isinstance(bootstrap["directory_acl_sddl"], str)
+        or _sha256(bootstrap["owner_sid"].encode("utf-8")) != expectation["owner_sid_sha256"]
+        or _sha256(bootstrap["directory_acl_sddl"].encode("utf-8")) != expectation["directory_acl_sddl_sha256"]
+    ):
+        raise WindowsFenceBundleError("BUNDLE_STORE_BOOTSTRAP_INVALID")
     runtime = value["runtime_config"]
     if set(runtime) != {
         "gateway_name",
-        "gateway_setting",
         "rep_address",
         "pub_address",
+        "account_scope",
+        "environment",
+        "credential_descriptor",
     }:
         raise WindowsFenceBundleError("BUNDLE_RUNTIME_CONFIG_VALUE_INVALID")
-    setting = runtime["gateway_setting"]
+    descriptor = runtime["credential_descriptor"]
+    if not isinstance(descriptor, dict) or set(descriptor) != {
+        "path",
+        "path_sha256",
+        "raw_sha256",
+        "owner_sid_sha256",
+        "acl_sddl_sha256",
+    }:
+        raise WindowsFenceBundleError("BUNDLE_CREDENTIAL_DESCRIPTOR_INVALID")
+    try:
+        descriptor_path = canonical_local_windows_path(descriptor["path"])
+    except StoreContractError as exc:
+        raise WindowsFenceBundleError("BUNDLE_CREDENTIAL_DESCRIPTOR_INVALID") from exc
     if (
-        not isinstance(setting, dict)
-        or not setting
-        or any(not isinstance(key, str) for key in setting)
+        descriptor_path != descriptor["path"]
+        or descriptor["path_sha256"] != _sha256(descriptor_path.encode("utf-8"))
         or any(
-            type(item) not in {str, bool, int, type(None)} for item in setting.values()
+            not isinstance(descriptor[field], str)
+            or _SHA256_RE.fullmatch(descriptor[field]) is None
+            for field in (
+                "path_sha256",
+                "raw_sha256",
+                "owner_sid_sha256",
+                "acl_sddl_sha256",
+            )
         )
     ):
-        raise WindowsFenceBundleError("BUNDLE_RUNTIME_CONFIG_VALUE_INVALID")
+        raise WindowsFenceBundleError("BUNDLE_CREDENTIAL_DESCRIPTOR_INVALID")
     if (
         not isinstance(runtime["gateway_name"], str)
         or _GATEWAY_NAME_RE.fullmatch(runtime["gateway_name"]) is None
@@ -410,6 +452,9 @@ def build_windows_fence_bundle_v1(
     source_root = Path(source_root).absolute()
     _validate_runtime_config(config_raw, expected_store_binding=expected_store_binding)
     try:
+        wrapper_raw = (
+            source_root / "scripts" / "windows_rpc_service_wrapper_v1.py"
+        ).read_bytes()
         extension_raw = (
             source_root / "scripts" / "windows_rpc_deployment_snapshot_v1.py"
         ).read_bytes()
@@ -427,6 +472,7 @@ def build_windows_fence_bundle_v1(
         raise WindowsFenceBundleError("ASSEMBLY_ARCHIVE_TOO_LARGE")
 
     component_entries = {
+        COMPONENT_PATHS["wrapper"]: wrapper_raw,
         COMPONENT_PATHS["extension"]: extension_raw,
         COMPONENT_PATHS["launcher"]: launcher_raw,
         COMPONENT_PATHS["assembly"]: assembly_raw,

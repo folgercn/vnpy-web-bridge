@@ -39,15 +39,30 @@ CONFIG_RAW = canonical_json_bytes(
             ).hexdigest(),
             "store_volume_serial": "A1B2C3D4",
             "store_volume_identity_sha256": "a" * 64,
-            "owner_sid_sha256": "a" * 64,
-            "directory_acl_sddl_sha256": "a" * 64,
+            "owner_sid_sha256": hashlib.sha256(b"test-owner").hexdigest(),
+            "directory_acl_sddl_sha256": hashlib.sha256(b"test-acl").hexdigest(),
             "state_acl_sddl_sha256": "a" * 64,
+        },
+        "installer_store_bootstrap": {
+            "root_path": r"C:\ProgramData\vnpy-web-bridge\windows-fence\store",
+            "root_path_sha256": hashlib.sha256(
+                rb"C:\ProgramData\vnpy-web-bridge\windows-fence\store"
+            ).hexdigest(),
+            "owner_sid": "test-owner",
+            "directory_acl_sddl": "test-acl",
         },
         "runtime_config": {
             "gateway_name": "CTP",
-            "gateway_setting": {
-                "password": "redacted-test-value",
-                "user": "redacted-test-value",
+            "account_scope": "account:windows",
+            "environment": "simnow",
+            "credential_descriptor": {
+                "path": r"C:\ProgramData\vnpy-web-bridge\windows-fence\credentials\credential-descriptor-v1.json",
+                "path_sha256": hashlib.sha256(
+                    rb"C:\ProgramData\vnpy-web-bridge\windows-fence\credentials\credential-descriptor-v1.json"
+                ).hexdigest(),
+                "raw_sha256": "b" * 64,
+                "owner_sid_sha256": "c" * 64,
+                "acl_sddl_sha256": "d" * 64,
             },
             "pub_address": "tcp://*:4102",
             "rep_address": "tcp://*:2014",
@@ -61,8 +76,8 @@ STORE_BINDING = {
     ).hexdigest(),
     "store_volume_serial": "A1B2C3D4",
     "store_volume_identity_sha256": "a" * 64,
-    "owner_sid_sha256": "a" * 64,
-    "directory_acl_sddl_sha256": "a" * 64,
+    "owner_sid_sha256": hashlib.sha256(b"test-owner").hexdigest(),
+    "directory_acl_sddl_sha256": hashlib.sha256(b"test-acl").hexdigest(),
     "state_acl_sddl_sha256": "a" * 64,
 }
 
@@ -113,8 +128,7 @@ def test_bundle_is_byte_reproducible_and_detached_index_verifies(
         built.assembly_source_inventory_sha256
     )
     assert set(verified.component_sha256s) == set(COMPONENT_PATHS)
-    assert b"redacted-test-value" not in built.index_raw
-    assert "redacted-test-value" not in repr(built)
+    assert b"gateway_setting" not in _outer_entries(built.bundle_raw)[COMPONENT_PATHS["config"]]
 
 
 def test_outer_and_assembly_zip_have_exact_fixed_metadata(
@@ -142,6 +156,7 @@ def test_outer_and_assembly_zip_have_exact_fixed_metadata(
             "scripts/windows_fence_foundation/assembly.py",
             "scripts/windows_fence_foundation/bootstrap_v1.py",
             "scripts/windows_fence_foundation/contracts.py",
+            "scripts/windows_fence_foundation/credential_config_v1.py",
             "scripts/windows_fence_foundation/final_admission_v1.py",
             "scripts/windows_fence_foundation/final_store_v1.py",
             "scripts/windows_fence_foundation/store.py",
@@ -229,6 +244,17 @@ def test_installed_main_validates_all_components_loads_config_and_launches(
     monkeypatch.setattr(
         durable_module, "_launch_windows_rpc_durable_fence_bound_v1", fake_launch
     )
+    monkeypatch.setattr(
+        durable_module,
+        "load_local_credential_descriptor_v1",
+        lambda *_args, **_kwargs: type("Descriptor", (), {"gateway_name": "CTP"})(),
+    )
+    monkeypatch.setattr(
+        durable_module,
+        "load_gateway_setting_from_local_blob_v1",
+        lambda *_args, **_kwargs: {"user": "unit-only"},
+    )
+    monkeypatch.setattr(durable_module, "_production_windows_filesystem", lambda: object())
     verified = verify_windows_fence_bundle_v1(
         built.bundle_raw, built.index_raw, expected_store_binding=STORE_BINDING
     )
@@ -267,6 +293,9 @@ def test_one_byte_component_change_changes_component_assembly_and_bundle(
     )
     (scripts / "windows_rpc_durable_fence_v1.py").write_bytes(
         (ROOT / "scripts" / "windows_rpc_durable_fence_v1.py").read_bytes()
+    )
+    (scripts / "windows_rpc_service_wrapper_v1.py").write_bytes(
+        (ROOT / "scripts" / "windows_rpc_service_wrapper_v1.py").read_bytes()
     )
     target = foundation / "store.py"
     target.write_bytes(target.read_bytes() + b"\n# deterministic-drift\n")
@@ -462,7 +491,7 @@ def test_config_must_be_exact_canonical_json() -> None:
     "mutate",
     [
         lambda value: value.update({"unexpected": True}),
-        lambda value: value["runtime_config"].update({"gateway_setting": {}}),
+        lambda value: value["runtime_config"].update({"credential_descriptor": {}}),
         lambda value: value["runtime_config"].update({"gateway_name": "bad gateway"}),
         lambda value: value["runtime_config"].update(
             {"rep_address": "tcp://0.0.0.0:2014"}
@@ -480,7 +509,7 @@ def test_config_must_match_fixed_runtime_contract(mutate: object) -> None:
     mutate(value)  # type: ignore[operator]
     with pytest.raises(
         WindowsFenceBundleError,
-        match="BUNDLE_RUNTIME_CONFIG_(FIELDS|VALUE)_INVALID",
+        match="BUNDLE_(RUNTIME_CONFIG_(FIELDS|VALUE)_INVALID|CREDENTIAL_DESCRIPTOR_INVALID)",
     ):
         build_windows_fence_bundle_v1(
             ROOT,

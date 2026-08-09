@@ -111,6 +111,9 @@ def _load_verified_foundation_exports() -> tuple[Any, ...]:
     final_admission = importlib.import_module(
         "scripts.windows_fence_foundation.final_admission_v1"
     )
+    credential = importlib.import_module(
+        "scripts.windows_fence_foundation.credential_config_v1"
+    )
     store = importlib.import_module("scripts.windows_fence_foundation.store")
     win32_fs = importlib.import_module("scripts.windows_fence_foundation.win32_fs")
     return (
@@ -129,6 +132,11 @@ def _load_verified_foundation_exports() -> tuple[Any, ...]:
         contracts.canonical_local_windows_path,
         final_admission.WindowsRpcFencedAdmissionV1,
         final_admission.WindowsRpcFinalAdmissionV2,
+        credential.CredentialConfigError,
+        credential.CredentialDescriptorBindingV1,
+        credential.WindowsDpapiCredentialReaderV1,
+        credential.load_gateway_setting_from_local_blob_v1,
+        credential.load_local_credential_descriptor_v1,
         store.StoreExpectation,
         store.StoreRecovery,
         store.recover_frozen_none_store,
@@ -152,6 +160,11 @@ def _load_verified_foundation_exports() -> tuple[Any, ...]:
     canonical_local_windows_path,
     WindowsRpcFencedAdmissionV1,
     WindowsRpcFinalAdmissionV2,
+    CredentialConfigError,
+    CredentialDescriptorBindingV1,
+    WindowsDpapiCredentialReaderV1,
+    load_gateway_setting_from_local_blob_v1,
+    load_local_credential_descriptor_v1,
     StoreExpectation,
     StoreRecovery,
     recover_frozen_none_store,
@@ -165,6 +178,7 @@ _ASSEMBLY_COMPONENTS = (
     "assembly.py",
     "bootstrap_v1.py",
     "contracts.py",
+    "credential_config_v1.py",
     "final_admission_v1.py",
     "final_store_v1.py",
     "store.py",
@@ -235,7 +249,12 @@ class WindowsRpcRuntimeConfigV1:
 class _InstalledWindowsRpcServiceConfigV1:
     store_root: str
     store_expectation: StoreExpectation
-    runtime_config: WindowsRpcRuntimeConfigV1
+    gateway_name: str
+    rep_address: str
+    pub_address: str
+    account_scope: str
+    environment: str
+    credential_descriptor: CredentialDescriptorBindingV1
     raw_sha256: str
 
 
@@ -269,6 +288,7 @@ def _parse_installed_service_config_v1(
         "purpose",
         "store_root",
         "store_expectation",
+        "installer_store_bootstrap",
         "runtime_config",
     }:
         raise ValueError("SERVICE_CONFIG_FIELDS_INVALID")
@@ -297,6 +317,14 @@ def _parse_installed_service_config_v1(
     }
     if not isinstance(expectation, dict) or set(expectation) != expectation_fields:
         raise ValueError("SERVICE_CONFIG_STORE_EXPECTATION_INVALID")
+    bootstrap = value["installer_store_bootstrap"]
+    if not isinstance(bootstrap, dict) or set(bootstrap) != {
+        "root_path",
+        "root_path_sha256",
+        "owner_sid",
+        "directory_acl_sddl",
+    }:
+        raise ValueError("SERVICE_CONFIG_STORE_BOOTSTRAP_INVALID")
     hashes = (
         "store_path_sha256",
         "store_volume_identity_sha256",
@@ -323,33 +351,36 @@ def _parse_installed_service_config_v1(
     ):
         raise ValueError("SERVICE_CONFIG_STORE_EXPECTATION_INVALID")
     runtime = value["runtime_config"]
-    if (
-        not isinstance(runtime, dict)
-        or not set(runtime).issubset(
-            {
-                "gateway_name",
-                "gateway_setting",
-                "rep_address",
-                "pub_address",
-                "account_scope",
-                "environment",
-            }
-        )
-        or not {
-            "gateway_name",
-            "gateway_setting",
-            "rep_address",
-            "pub_address",
-        }.issubset(runtime)
-    ):
+    if not isinstance(runtime, dict) or set(runtime) != {
+        "gateway_name",
+        "rep_address",
+        "pub_address",
+        "account_scope",
+        "environment",
+        "credential_descriptor",
+    }:
         raise ValueError("SERVICE_CONFIG_RUNTIME_FIELDS_INVALID")
-    runtime = dict(runtime)
-    runtime.setdefault("account_scope", "account:windows")
-    runtime.setdefault("environment", "simnow")
+    try:
+        credential = CredentialDescriptorBindingV1(**runtime["credential_descriptor"])
+    except (TypeError, CredentialConfigError) as exc:
+        raise ValueError("SERVICE_CONFIG_CREDENTIAL_DESCRIPTOR_INVALID") from exc
+    public = {
+        "gateway_name": runtime["gateway_name"],
+        "rep_address": runtime["rep_address"],
+        "pub_address": runtime["pub_address"],
+        "account_scope": runtime["account_scope"],
+        "environment": runtime["environment"],
+    }
+    # Reuse the strict public-field validators without retaining a secret.
+    try:
+        WindowsRpcRuntimeConfigV1(gateway_setting={"_probe": None}, **public)
+    except ValueError as exc:
+        raise ValueError("SERVICE_CONFIG_RUNTIME_VALUE_INVALID") from exc
     return _InstalledWindowsRpcServiceConfigV1(
         store_root=store_root,
         store_expectation=StoreExpectation(**expectation),
-        runtime_config=WindowsRpcRuntimeConfigV1(**runtime),
+        credential_descriptor=credential,
+        **public,
         raw_sha256=sha256(raw).hexdigest(),
     )
 
@@ -1050,7 +1081,10 @@ def _validated_adjacent_component(
     return path, expected_sha256, raw
 
 
-def _main(arguments: list[str]) -> None:
+def run_installed_windows_rpc_entry_v1(
+    arguments: list[str],
+) -> WindowsRpcFrozenAssemblyV1:
+    """Hash-pinned service entry; secrets enter only after descriptor readback."""
     expected_flags = [
         "--extension",
         "--extension-sha256",
@@ -1082,12 +1116,38 @@ def _main(arguments: list[str]) -> None:
     service_config = _parse_installed_service_config_v1(config_raw)
     if service_config.raw_sha256 != config_sha256:
         raise RuntimeError("CONFIG_BINDING_MISMATCH")
-    _launch_windows_rpc_durable_fence_bound_v1(
+    filesystem = _production_windows_filesystem()
+    descriptor = load_local_credential_descriptor_v1(
+        service_config.credential_descriptor, filesystem=filesystem
+    )
+    if descriptor.gateway_name != service_config.gateway_name:
+        raise RuntimeError("CREDENTIAL_GATEWAY_BINDING_MISMATCH")
+    try:
+        gateway_setting = load_gateway_setting_from_local_blob_v1(
+            descriptor,
+            filesystem=filesystem,
+            reader=WindowsDpapiCredentialReaderV1(),
+        )
+        runtime_config = WindowsRpcRuntimeConfigV1(
+            gateway_setting=gateway_setting,
+            gateway_name=service_config.gateway_name,
+            rep_address=service_config.rep_address,
+            pub_address=service_config.pub_address,
+            account_scope=service_config.account_scope,
+            environment=service_config.environment,
+        )
+    except CredentialConfigError as exc:
+        raise RuntimeError(exc.code) from exc
+    return _launch_windows_rpc_durable_fence_bound_v1(
         store_root=service_config.store_root,
         store_expectation=service_config.store_expectation,
-        runtime_config=service_config.runtime_config,
+        runtime_config=runtime_config,
         config_binding_sha256=service_config.raw_sha256,
     )
+
+
+def _main(arguments: list[str]) -> None:
+    run_installed_windows_rpc_entry_v1(arguments)
 
 
 __all__ = [
@@ -1108,6 +1168,7 @@ __all__ = [
     "bootstrap_windows_rpc_frozen_v1",
     "launch_windows_rpc_durable_fence_v1",
     "recover_frozen_none_store",
+    "run_installed_windows_rpc_entry_v1",
 ]
 
 

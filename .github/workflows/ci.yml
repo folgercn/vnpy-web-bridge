@@ -927,6 +927,8 @@ jobs:
           backend/tests/unit/test_windows_rpc_durable_fence_bundle_v1.py
           backend/tests/unit/test_windows_rpc_durable_fence_manifest_v1.py
           backend/tests/unit/test_windows_rpc_durable_fence_target_contract_v1.py
+          backend/tests/unit/test_windows_rpc_credential_config_v1.py
+          backend/tests/unit/test_windows_fence_installer_windows_v1.py
 
   docker:
     name: Production image build

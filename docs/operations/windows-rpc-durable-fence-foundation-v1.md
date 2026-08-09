@@ -20,8 +20,13 @@ The foundation is delivered as seven independently reviewed changes:
 No intermediate merge proves that Windows is installed or fenced.
 
 WF-2 produces a byte-reproducible, uncompressed deterministic archive with a
-detached canonical index. The fixed payload is the A2 extension, launcher,
-runtime assembly `.pyz`, and externally supplied canonical service config.
+detached canonical index. The fixed payload is the canonical pywin32
+`ServiceFramework` wrapper, A2 extension, launcher, runtime assembly `.pyz`,
+and externally supplied canonical public service config. That config contains
+no gateway credentials: it binds only a local credential descriptor path, raw
+hash, owner and protected-DACL hash. The descriptor binds a separate
+operator-created local DPAPI blob, which never enters the repository, bundle,
+index, logs, command line, or environment.
 Verification rejects unknown or aliased paths, duplicate/case-colliding names,
 metadata drift, compression, size expansion, and any component, source
 inventory, archive, or bundle hash mismatch. In an installed layout the
@@ -30,7 +35,8 @@ manifest-bound SCM ImagePath, then imports only from those verified bytes held
 in memory. The launcher itself is verified before process creation by the WF-4
 immutable publisher and independent observer; its post-load state hash check
 detects drift but is not claimed as a pre-execution self-verification. The
-fixed entry validates the adjacent extension, assembly, and config paths/hashes,
+wrapper validates itself and the launcher before executing in-memory launcher
+bytes; the fixed entry validates the adjacent extension, assembly, and config paths/hashes,
 strictly parses the service/store/runtime config, and launches the frozen
 runtime with the raw config hash required by the manifest/publish/state
 equality contract.
@@ -148,7 +154,8 @@ component bytes, destination, ACL readback, owner, hardlink count, and
 reparse-free parent chain must all verify first.
 The manifest is signed only after the fresh preflight exists. It fixes the
 content-addressed final directory, every component destination, the service
-ImagePath/configuration, owner SID, directory/file ACL policy, and the rule
+ImagePath/configuration, pywin32 `PythonClass`/`PythonPath`, owner SID,
+directory/file ACL policy, and the rule
 that the installer loses write access after atomic create-only publication.
 It also binds the observer-captured preinstall SCM configuration and the exact
 preinstall-to-target transition plan. At observer seal time the active SCM
