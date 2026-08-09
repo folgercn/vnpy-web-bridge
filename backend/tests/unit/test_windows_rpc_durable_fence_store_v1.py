@@ -27,6 +27,10 @@ OWNER = "f" * 64
 DIR_ACL = "d" * 64
 FILE_ACL = "e" * 64
 WRITER = "f" * 64
+WIN32_FS_SOURCE = (
+    Path(__file__).resolve().parents[3]
+    / "scripts/windows_fence_foundation/win32_fs.py"
+).read_text(encoding="utf-8")
 
 
 def _state() -> dict[str, object]:
@@ -435,6 +439,31 @@ def test_unsafe_head_is_ignored_without_being_read(tmp_path: Path) -> None:
     result = recover_frozen_none_store(root, expected=expected, fs=facts)
     assert result.ready is True
     assert result.head_status == "UNSAFE_RECONSTRUCTIBLE"
+
+
+def test_windows_relative_unicode_strings_use_explicit_lpwstr_casts() -> None:
+    assert WIN32_FS_SOURCE.count("ctypes.cast(buffer, wintypes.LPWSTR)") == 2
+    assert WIN32_FS_SOURCE.count("len(encoded_name) + 2") == 2
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows ctypes structures")
+def test_windows_relative_unicode_string_accepts_explicit_lpwstr_buffer() -> None:
+    import ctypes
+    from ctypes import wintypes
+
+    from scripts.windows_fence_foundation import win32_fs
+
+    name = "nonce.json"
+    encoded_name = name.encode("utf-16-le")
+    buffer = ctypes.create_unicode_buffer(name)
+    unicode_name = win32_fs._UNICODE_STRING(
+        len(encoded_name),
+        len(encoded_name) + 2,
+        ctypes.cast(buffer, wintypes.LPWSTR),
+    )
+    assert unicode_name.buffer == name
+    assert unicode_name.length == len(encoded_name)
+    assert unicode_name.maximum_length == len(encoded_name) + 2
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires Win32 handle and ACL APIs")

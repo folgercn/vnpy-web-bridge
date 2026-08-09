@@ -595,11 +595,12 @@ class WindowsFilesystemFactsAdapter:
             or not raw
         ):
             raise OSError("invalid relative create-only target")
+        encoded_name = name.encode("utf-16-le")
         buffer = ctypes.create_unicode_buffer(name)
         unicode_name = _UNICODE_STRING(
-            len(name.encode("utf-16-le")),
-            (len(name) + 1) * 2,
-            buffer,
+            len(encoded_name),
+            len(encoded_name) + 2,
+            ctypes.cast(buffer, wintypes.LPWSTR),
         )
         attributes = _OBJECT_ATTRIBUTES(
             ctypes.sizeof(_OBJECT_ATTRIBUTES),
@@ -658,9 +659,12 @@ class WindowsFilesystemFactsAdapter:
             or parent._handle is None
         ):
             raise OSError("invalid relative opened-handle target")
+        encoded_name = name.encode("utf-16-le")
         buffer = ctypes.create_unicode_buffer(name)
         unicode_name = _UNICODE_STRING(
-            len(name.encode("utf-16-le")), (len(name) + 1) * 2, buffer
+            len(encoded_name),
+            len(encoded_name) + 2,
+            ctypes.cast(buffer, wintypes.LPWSTR),
         )
         attributes = _OBJECT_ATTRIBUTES(
             ctypes.sizeof(_OBJECT_ATTRIBUTES),
