@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -17,6 +18,10 @@ from scripts.windows_fence_foundation.offline_signing_v1 import (
 from scripts.windows_fence_foundation.release_bundle_v1 import (
     CHAIN_ORDER,
     verify_signing_closure_chain_v1,
+)
+from scripts.windows_fence_foundation.release_input_builder_v1 import (
+    _require_clean_approved_worktree,
+    _thaw,
 )
 from scripts.windows_fence_foundation.trust_pins_v1 import (
     MANIFEST_KEY_DOMAIN,
@@ -377,3 +382,44 @@ def test_three_key_full_closure_and_reservation_tamper_rejections(
             public_keyring_raw=keyring,
             now=datetime(2026, 8, 5, 0, 0, 40, tzinfo=timezone.utc),
         )
+
+
+def test_release_source_requires_exact_clean_non_submodule_git_worktree(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "unit@example.invalid"],
+        check=True,
+    )
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "unit"], check=True)
+    (repo / "REVISION").write_text("unit\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "REVISION"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "unit"], check=True)
+    head = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    _require_clean_approved_worktree(repo, head)
+    for mutation, approved in (
+        ("untracked", head),
+        ("dirty", head),
+        ("wrong", "0" * 40),
+    ):
+        if mutation == "untracked":
+            (repo / "new").write_text("x", encoding="utf-8")
+        elif mutation == "dirty":
+            (repo / "REVISION").write_text("changed\n", encoding="utf-8")
+        with pytest.raises(
+            OfflineSigningError, match="RELEASE_SOURCE_REVISION_OR_CLEANLINESS_INVALID"
+        ):
+            _require_clean_approved_worktree(repo, approved)
+        subprocess.run(["git", "-C", str(repo), "clean", "-fdq"], check=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "checkout", "-q", "--", "REVISION"], check=True
+        )
+    assert _thaw({"value": (1, {"nested": (2,)})}) == {"value": [1, {"nested": [2]}]}
