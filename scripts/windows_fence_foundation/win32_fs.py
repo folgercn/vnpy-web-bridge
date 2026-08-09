@@ -572,7 +572,9 @@ class WindowsFilesystemFactsAdapter:
                     ctypes.byref(delete),
                     ctypes.sizeof(delete),
                 ):
-                    raise OSError("create-only file failed frozen") from None
+                    raise OSError(
+                        "CREATE_ONLY_WRITE_FAILED_AND_CLEANUP_FAILED"
+                    ) from None
                 raise
         finally:
             _kernel32.CloseHandle(handle)
@@ -620,6 +622,7 @@ class WindowsFilesystemFactsAdapter:
             | _FILE_READ_ATTRIBUTES
             | _WRITE_DAC
             | _WRITE_OWNER
+            | _DELETE
             | _SYNCHRONIZE,
             ctypes.byref(attributes),
             ctypes.byref(status),

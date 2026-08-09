@@ -493,7 +493,7 @@ def test_windows_ntcreatefile_static_signature_and_calls_are_eleven_arguments() 
     assert "_SYNCHRONIZE = 0x00100000" in WIN32_FS_SOURCE
     assert ast.unparse(create.args[1]) == (
         "_GENERIC_READ | _GENERIC_WRITE | _READ_CONTROL | _FILE_READ_ATTRIBUTES "
-        "| _WRITE_DAC | _WRITE_OWNER | _SYNCHRONIZE"
+        "| _WRITE_DAC | _WRITE_OWNER | _DELETE | _SYNCHRONIZE"
     )
     assert ast.unparse(opened.args[1]) == (
         "_DELETE | _READ_CONTROL | _FILE_READ_ATTRIBUTES | "
@@ -509,6 +509,7 @@ def test_windows_ntcreatefile_static_signature_and_calls_are_eleven_arguments() 
         "_FILE_OPEN",
         "_FILE_SYNCHRONOUS_IO_NONALERT | _FILE_OPEN_REPARSE_POINT | (0 if not directory else _FILE_DIRECTORY_FILE)",
     ]
+    assert "CREATE_ONLY_WRITE_FAILED_AND_CLEANUP_FAILED" in WIN32_FS_SOURCE
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires Windows ctypes structures")
@@ -540,6 +541,30 @@ def test_windows_ntcreatefile_runtime_signature_has_eleven_arguments() -> None:
     assert len(win32_fs._ntdll.NtCreateFile.argtypes) == 11
     assert win32_fs._ntdll.NtCreateFile.restype is ctypes.c_long
     assert win32_fs._SYNCHRONIZE == 0x00100000
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows handle deletion")
+def test_windows_relative_create_cleans_up_after_write_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts.windows_fence_foundation import win32_fs
+
+    adapter = WindowsFilesystemFactsAdapter()
+    target = tmp_path / "failed-create.json"
+    monkeypatch.setattr(win32_fs._kernel32, "WriteFile", lambda *_args: False)
+
+    with adapter.open_directory_anchor(tmp_path) as parent, pytest.raises(
+        OSError
+    ) as raised:
+        adapter.write_file_create_only_relative_to_opened_parent(
+            parent=parent,
+            name=target.name,
+            raw=b"{}",
+            protected_sddl="",
+        )
+
+    assert "CREATE_ONLY_WRITE_FAILED_AND_CLEANUP_FAILED" not in str(raised.value)
+    assert not target.exists()
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires Win32 handle and ACL APIs")
