@@ -305,3 +305,17 @@ def test_native_host_never_falls_back_to_portable_filesystem_publish() -> None:
             final_directory_acl_sddl="O:SYD:PAI",
             component_acl_sddl="O:SYD:PAI",
         )
+
+
+def test_native_failure_actions_requires_pywin32_legal_empty_dictionary() -> None:
+    empty = {
+        "ResetPeriod": 0,
+        "RebootMsg": None,
+        "Command": None,
+        "Actions": [],
+    }
+    assert NativeWindowsFenceInstallerHostV1._empty_failure_actions(empty)
+    assert not NativeWindowsFenceInstallerHostV1._empty_failure_actions({})
+    assert not NativeWindowsFenceInstallerHostV1._empty_failure_actions(
+        {**empty, "Actions": [(1, 1000)]}
+    )

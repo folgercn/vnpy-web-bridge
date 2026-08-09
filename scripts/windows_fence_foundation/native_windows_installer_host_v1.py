@@ -56,6 +56,18 @@ class NativeWindowsFenceInstallerHostV1(WindowsFenceInstallerHostV1):
         return rf"SYSTEM\CurrentControlSet\Services\{name}"
 
     @staticmethod
+    def _empty_failure_actions(value: Any) -> bool:
+        """Match pywin32's documented SERVICE_FAILURE_ACTIONS dictionary."""
+        return (
+            isinstance(value, Mapping)
+            and set(value) == {"ResetPeriod", "RebootMsg", "Command", "Actions"}
+            and value["ResetPeriod"] == 0
+            and value["RebootMsg"] is None
+            and value["Command"] is None
+            and value["Actions"] in ((), [])
+        )
+
+    @staticmethod
     def _win32() -> Any:
         try:
             import win32service  # type: ignore[import-not-found]
@@ -152,12 +164,7 @@ class NativeWindowsFenceInstallerHostV1(WindowsFenceInstallerHostV1):
                 raise WindowsFinalInstallerError(
                     "SCM_FAILURE_ACTIONS_QUERY_FAILED"
                 ) from exc
-            if (
-                failure is not None
-                and failure != ()
-                and failure != {}
-                and failure != []
-            ):
+            if not self._empty_failure_actions(failure):
                 raise WindowsFinalInstallerError(
                     "SCM_FAILURE_ACTIONS_NOT_CANONICAL_EMPTY"
                 )
@@ -645,7 +652,16 @@ class NativeWindowsFenceInstallerHostV1(WindowsFenceInstallerHostV1):
                 None,
                 None,
             )
-            ws.ChangeServiceConfig2(service, ws.SERVICE_CONFIG_FAILURE_ACTIONS, None)
+            ws.ChangeServiceConfig2(
+                service,
+                ws.SERVICE_CONFIG_FAILURE_ACTIONS,
+                {
+                    "ResetPeriod": 0,
+                    "RebootMsg": None,
+                    "Command": None,
+                    "Actions": (),
+                },
+            )
         except Exception as exc:
             raise WindowsFinalInstallerError("SCM_TARGET_APPLY_FAILED") from exc
         finally:
