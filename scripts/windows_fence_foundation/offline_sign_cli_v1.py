@@ -12,6 +12,7 @@ from .installer_trust_anchor_v1 import canonical_public_keyring_v1
 from .offline_signing_v1 import (
     OfflineSigningError,
     consume_replay_token_create_only_v1,
+    ensure_private_key_fd_supported_v1,
     read_canonical_artifact_v1,
     sign_artifact_with_fd_v1,
     write_audit_create_only_v1,
@@ -33,6 +34,9 @@ def run(role: str, argv: list[str] | None = None) -> int:
     parser.add_argument("--replay-ledger-dir", type=Path)
     options = parser.parse_args(argv)
     try:
+        # Reject unsupported private-FD platforms before reserving a nonce or
+        # publishing any artifact. The guard reads no private key material.
+        ensure_private_key_fd_supported_v1()
         keyring_raw = options.public_keyring.read_bytes()
         pins = canonical_public_keyring_v1(
             keyring_raw, hashlib.sha256(keyring_raw).hexdigest()

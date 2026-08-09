@@ -132,16 +132,21 @@ def read_canonical_artifact_v1(path: Path) -> tuple[bytes, dict[str, Any]]:
     return raw, _strict_object(raw)
 
 
+def ensure_private_key_fd_supported_v1() -> None:
+    """Require the platform proof needed before any signer-side output occurs."""
+    if fcntl is None:
+        raise OfflineSigningError("SIGNING_PRIVATE_KEY_FD_ACCESS_UNVERIFIABLE")
+
+
 def read_ed25519_private_key_from_readonly_fd_v1(descriptor: int) -> Ed25519PrivateKey:
     """Read one offline key from an inherited read-only regular-file FD only."""
+    ensure_private_key_fd_supported_v1()
     if (
         isinstance(descriptor, bool)
         or not isinstance(descriptor, int)
         or descriptor < 3
     ):
         raise OfflineSigningError("SIGNING_PRIVATE_KEY_FD_INVALID")
-    if fcntl is None:
-        raise OfflineSigningError("SIGNING_PRIVATE_KEY_FD_ACCESS_UNVERIFIABLE")
     try:
         flags = fcntl.fcntl(descriptor, fcntl.F_GETFL)
         before = os.fstat(descriptor)

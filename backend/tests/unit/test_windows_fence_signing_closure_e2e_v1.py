@@ -386,6 +386,9 @@ def _chain_artifacts(tmp_path: Path) -> tuple[dict[str, bytes], bytes]:
     return {name: _raw(artifacts[name]) for name in CHAIN_ORDER}, _keyring(tmp_path)
 
 
+@pytest.mark.skipif(
+    os.name == "nt", reason="closure reservation fixture requires POSIX dirfd I/O"
+)
 def test_three_key_full_closure_and_reservation_tamper_rejections(
     tmp_path: Path,
 ) -> None:

@@ -154,6 +154,7 @@ def test_windows_fd_signing_cli_fails_closed_without_output(
     assert "SIGNING_PRIVATE_KEY_FD_ACCESS_UNVERIFIABLE" in capsys.readouterr().err
     assert not output_path.exists()
     assert not audit_path.exists()
+    assert list(ledger_path.iterdir()) == []
 
 
 @pytest.mark.skipif(
