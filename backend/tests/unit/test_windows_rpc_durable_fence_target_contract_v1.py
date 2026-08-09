@@ -14,6 +14,9 @@ from scripts.windows_fence_foundation.target_contract_v1 import (
 
 SHA = "a" * 64
 OTHER_SHA = "b" * 64
+FINAL_OWNER = "S-1-5-18"
+FINAL_ACL = "O:SYD:PAI"
+COMPONENT_ACL = "O:SYD:PAI(A;;FA;;;SY)"
 
 
 def _policy() -> WindowsFoundationTargetPolicyV1:
@@ -21,7 +24,7 @@ def _policy() -> WindowsFoundationTargetPolicyV1:
         service_name="VnpyRpcService",
         final_versions_root=r"C:\ProgramData\vnpy-web-bridge\windows-fence\versions",
         service_executable_path=r"C:\veighna_studio\pythonservice.exe",
-        service_python_class="scripts.windows_rpc_service_wrapper_v1.VnpyRpcServiceWrapperV1",
+        service_python_class="windows_rpc_service_wrapper_v1.VnpyRpcServiceWrapperV1",
         image_argument_template=(
             "{wrapper}",
             "--wrapper-sha256",
@@ -50,11 +53,18 @@ def _policy() -> WindowsFoundationTargetPolicyV1:
         store_owner_sid_sha256=SHA,
         store_directory_acl_sddl_sha256=SHA,
         store_state_acl_sddl_sha256=SHA,
-        final_owner_sid_sha256=SHA,
-        final_directory_acl_sddl_sha256=SHA,
-        component_acl_sddl_sha256=SHA,
-        service_config_owner_sid_sha256=SHA,
-        service_config_acl_sddl_sha256=SHA,
+        final_owner_sid_sha256=hashlib.sha256(FINAL_OWNER.encode()).hexdigest(),
+        final_directory_acl_sddl_sha256=hashlib.sha256(FINAL_ACL.encode()).hexdigest(),
+        component_acl_sddl_sha256=hashlib.sha256(COMPONENT_ACL.encode()).hexdigest(),
+        final_owner_sid=FINAL_OWNER,
+        final_directory_acl_sddl=FINAL_ACL,
+        component_acl_sddl=COMPONENT_ACL,
+        service_config_owner_sid_sha256=hashlib.sha256(
+            FINAL_OWNER.encode()
+        ).hexdigest(),
+        service_config_acl_sddl_sha256=hashlib.sha256(FINAL_ACL.encode()).hexdigest(),
+        service_config_owner_sid=FINAL_OWNER,
+        service_config_acl_sddl=FINAL_ACL,
         installer_principal_sid_sha256=SHA,
         installer_process_image_sha256=SHA,
     )

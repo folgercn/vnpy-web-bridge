@@ -128,7 +128,10 @@ def test_bundle_is_byte_reproducible_and_detached_index_verifies(
         built.assembly_source_inventory_sha256
     )
     assert set(verified.component_sha256s) == set(COMPONENT_PATHS)
-    assert b"gateway_setting" not in _outer_entries(built.bundle_raw)[COMPONENT_PATHS["config"]]
+    assert (
+        b"gateway_setting"
+        not in _outer_entries(built.bundle_raw)[COMPONENT_PATHS["config"]]
+    )
 
 
 def test_outer_and_assembly_zip_have_exact_fixed_metadata(
@@ -224,6 +227,30 @@ def test_installed_launcher_imports_archive_and_hashes_published_bytes(
     assert "FOUNDATION_ASSEMBLY_PREIMPORT_BINDING_MISMATCH" in rejected.stderr
 
 
+def test_published_pythonclass_imports_from_clean_pythonpath(
+    tmp_path: Path, built: BuiltWindowsFenceBundleV1
+) -> None:
+    wrapper = _outer_entries(built.bundle_raw)[COMPONENT_PATHS["wrapper"]]
+    (tmp_path / "windows_rpc_service_wrapper_v1.py").write_bytes(wrapper)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            (
+                f"import sys;sys.path.insert(0,{str(tmp_path)!r});"
+                "import windows_rpc_service_wrapper_v1 as module;"
+                "assert module.SERVICE_WRAPPER_REGISTRY_V1['python_class']=="
+                "'windows_rpc_service_wrapper_v1.VnpyRpcServiceWrapperV1'"
+            ),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_installed_main_validates_all_components_loads_config_and_launches(
     tmp_path: Path,
     built: BuiltWindowsFenceBundleV1,
@@ -254,7 +281,9 @@ def test_installed_main_validates_all_components_loads_config_and_launches(
         "load_gateway_setting_from_local_blob_v1",
         lambda *_args, **_kwargs: {"user": "unit-only"},
     )
-    monkeypatch.setattr(durable_module, "_production_windows_filesystem", lambda: object())
+    monkeypatch.setattr(
+        durable_module, "_production_windows_filesystem", lambda: object()
+    )
     verified = verify_windows_fence_bundle_v1(
         built.bundle_raw, built.index_raw, expected_store_binding=STORE_BINDING
     )

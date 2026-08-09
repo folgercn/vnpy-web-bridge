@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,7 @@ from scripts.windows_fence_foundation.contracts import canonical_json_bytes
 from scripts.windows_fence_foundation.credential_config_v1 import (
     CredentialConfigError,
     CredentialDescriptorBindingV1,
+    WindowsSecureCredentialBlobWriterV1,
     load_gateway_setting_from_local_blob_v1,
     load_local_credential_descriptor_v1,
 )
@@ -130,3 +132,19 @@ def test_non_authorized_writer_or_reparse_descriptor_is_rejected() -> None:
     )
     with pytest.raises(CredentialConfigError, match="SECURITY"):
         load_local_credential_descriptor_v1(binding, filesystem=fs)  # type: ignore[arg-type]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="non-Windows fail-closed contract")
+def test_production_blob_writer_is_windows_only_and_does_not_fallback() -> None:
+    writer = WindowsSecureCredentialBlobWriterV1(
+        parent_path=r"C:\ProgramData\vnpy-web-bridge\credentials",
+        parent_owner_sid_sha256="a" * 64,
+        parent_acl_sddl_sha256="b" * 64,
+        blob_owner_sid="S-1-5-18",
+        blob_acl_sddl="O:SYD:PAI",
+    )
+    with pytest.raises(CredentialConfigError, match="WINDOWS_REQUIRED"):
+        writer.write_create_only(
+            path=r"C:\ProgramData\vnpy-web-bridge\credentials\blob.dpapi",
+            raw=b"machine-scoped-dpapi-blob",
+        )

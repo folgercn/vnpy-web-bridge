@@ -158,8 +158,8 @@ class VnpyRpcServiceWrapperV1(_ServiceFramework):
 
 SERVICE_WRAPPER_REGISTRY_V1 = MappingProxyType(
     {
-        "python_class": "scripts.windows_rpc_service_wrapper_v1.VnpyRpcServiceWrapperV1",
-        "python_path_module": "scripts.windows_rpc_service_wrapper_v1",
+        "python_class": "windows_rpc_service_wrapper_v1.VnpyRpcServiceWrapperV1",
+        "python_path_module": "windows_rpc_service_wrapper_v1",
         "service_name": VnpyRpcServiceWrapperV1._svc_name_,
     }
 )

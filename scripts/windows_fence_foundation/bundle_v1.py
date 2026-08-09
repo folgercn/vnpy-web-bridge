@@ -329,7 +329,12 @@ def _validate_runtime_config(
     ):
         raise WindowsFenceBundleError("BUNDLE_STORE_TARGET_BINDING_MISMATCH")
     bootstrap = value["installer_store_bootstrap"]
-    if set(bootstrap) != {"root_path", "root_path_sha256", "owner_sid", "directory_acl_sddl"}:
+    if set(bootstrap) != {
+        "root_path",
+        "root_path_sha256",
+        "owner_sid",
+        "directory_acl_sddl",
+    }:
         raise WindowsFenceBundleError("BUNDLE_STORE_BOOTSTRAP_INVALID")
     try:
         bootstrap_root = canonical_local_windows_path(bootstrap["root_path"])
@@ -342,8 +347,10 @@ def _validate_runtime_config(
         or bootstrap["root_path_sha256"] != expectation["store_path_sha256"]
         or not isinstance(bootstrap["owner_sid"], str)
         or not isinstance(bootstrap["directory_acl_sddl"], str)
-        or _sha256(bootstrap["owner_sid"].encode("utf-8")) != expectation["owner_sid_sha256"]
-        or _sha256(bootstrap["directory_acl_sddl"].encode("utf-8")) != expectation["directory_acl_sddl_sha256"]
+        or _sha256(bootstrap["owner_sid"].encode("utf-8"))
+        != expectation["owner_sid_sha256"]
+        or _sha256(bootstrap["directory_acl_sddl"].encode("utf-8"))
+        != expectation["directory_acl_sddl_sha256"]
     ):
         raise WindowsFenceBundleError("BUNDLE_STORE_BOOTSTRAP_INVALID")
     runtime = value["runtime_config"]

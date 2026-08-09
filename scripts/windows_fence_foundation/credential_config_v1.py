@@ -93,6 +93,127 @@ class CredentialBlobWriterV1(Protocol):
     def write_create_only(self, *, path: str, raw: bytes) -> None: ...
 
 
+class WindowsSecureCredentialBlobWriterV1:
+    """Create one machine-DPAPI blob with a pinned parent and protected DACL.
+
+    This is intentionally an operator-side writer, not a general filesystem
+    helper.  It verifies the parent through the Windows opened-handle facts
+    adapter before *and* after the create-only write, then reads the new blob
+    through an opened handle before returning.  No existing blob is replaced.
+    """
+
+    def __init__(
+        self,
+        *,
+        parent_path: str,
+        parent_owner_sid_sha256: str,
+        parent_acl_sddl_sha256: str,
+        blob_owner_sid: str,
+        blob_acl_sddl: str,
+    ) -> None:
+        try:
+            self._parent_path = canonical_local_windows_path(parent_path)
+        except StoreContractError as exc:
+            raise CredentialConfigError("CREDENTIAL_BLOB_PARENT_INVALID") from exc
+        for value in (parent_owner_sid_sha256, parent_acl_sddl_sha256):
+            if not isinstance(value, str) or _SHA.fullmatch(value) is None:
+                raise CredentialConfigError("CREDENTIAL_BLOB_PARENT_INVALID")
+        if not isinstance(blob_owner_sid, str) or not isinstance(blob_acl_sddl, str):
+            raise CredentialConfigError("CREDENTIAL_BLOB_ACL_INVALID")
+        self._parent_owner = parent_owner_sid_sha256
+        self._parent_acl = parent_acl_sddl_sha256
+        self._blob_owner = _digest(blob_owner_sid.encode("utf-8"))
+        self._blob_acl = _digest(blob_acl_sddl.encode("utf-8"))
+        self._blob_sddl = blob_acl_sddl
+
+    @staticmethod
+    def _apply_protected_security(path: Path, *, sddl: str) -> None:
+        try:
+            import win32security  # type: ignore[import-not-found]
+
+            descriptor = (
+                win32security.ConvertStringSecurityDescriptorToSecurityDescriptor(
+                    sddl, 1
+                )
+            )
+            win32security.SetFileSecurity(
+                str(path),
+                win32security.OWNER_SECURITY_INFORMATION
+                | win32security.DACL_SECURITY_INFORMATION,
+                descriptor,
+            )
+        except Exception as exc:
+            raise CredentialConfigError("CREDENTIAL_BLOB_ACL_APPLY_FAILED") from exc
+
+    def _secure_parent(self, filesystem: FilesystemFactsAdapter) -> PathSecurityFacts:
+        try:
+            facts = filesystem.inspect(Path(self._parent_path))
+        except OSError as exc:
+            raise CredentialConfigError("CREDENTIAL_BLOB_PARENT_READ_FAILED") from exc
+        if (
+            not facts.directory
+            or facts.reparse_point
+            or not facts.parent_chain_reparse_free
+            or facts.hardlink_count != 1
+            or facts.alternate_data_streams
+            or not facts.dacl_protected
+            or facts.inherited_ace_count
+            or facts.unsafe_write_principals
+            or facts.owner_sid_sha256 != self._parent_owner
+            or facts.acl_sddl_sha256 != self._parent_acl
+        ):
+            raise CredentialConfigError("CREDENTIAL_BLOB_PARENT_SECURITY_INVALID")
+        return facts
+
+    def write_create_only(self, *, path: str, raw: bytes) -> None:
+        if os.name != "nt":
+            raise CredentialConfigError("CREDENTIAL_DPAPI_WINDOWS_REQUIRED")
+        try:
+            canonical_path = canonical_local_windows_path(path)
+        except StoreContractError as exc:
+            raise CredentialConfigError("CREDENTIAL_BLOB_PATH_INVALID") from exc
+        blob = Path(canonical_path)
+        if str(blob.parent) != self._parent_path or not raw:
+            raise CredentialConfigError("CREDENTIAL_BLOB_PATH_INVALID")
+        try:
+            from .win32_fs import WindowsFilesystemFactsAdapter
+
+            filesystem = WindowsFilesystemFactsAdapter()
+            parent_before = self._secure_parent(filesystem)
+            descriptor = os.open(
+                blob, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_BINARY, 0o600
+            )
+            try:
+                written = os.write(descriptor, raw)
+                if written != len(raw):
+                    raise OSError("short credential blob write")
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            self._apply_protected_security(blob, sddl=self._blob_sddl)
+            item = filesystem.read_file(blob)
+            self._secure_parent(filesystem)
+        except CredentialConfigError:
+            raise
+        except FileExistsError as exc:
+            raise CredentialConfigError("CREDENTIAL_BLOB_CREATE_ONLY_CONFLICT") from exc
+        except OSError as exc:
+            raise CredentialConfigError("CREDENTIAL_BLOB_WRITE_FAILED") from exc
+        _secure_regular_file(
+            item.facts,
+            owner=self._blob_owner,
+            acl=self._blob_acl,
+            code="CREDENTIAL_BLOB_SECURITY_INVALID",
+        )
+        if (
+            item.facts.path_sha256 != _digest(canonical_path.encode("utf-8"))
+            or _digest(item.raw) != _digest(raw)
+            or parent_before.file_identity
+            != self._secure_parent(filesystem).file_identity
+        ):
+            raise CredentialConfigError("CREDENTIAL_BLOB_POST_WRITE_READBACK_MISMATCH")
+
+
 def _digest(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
@@ -312,11 +433,13 @@ def provision_local_dpapi_blob_v1(
     *,
     prompt: Callable[[], Mapping[str, Any]],
     blob_path: str,
-    writer: CredentialBlobWriterV1,
+    writer: WindowsSecureCredentialBlobWriterV1,
 ) -> str:
     """Operator-only local prompt path.  It returns only the blob digest."""
     if os.name != "nt":
         raise CredentialConfigError("CREDENTIAL_DPAPI_WINDOWS_REQUIRED")
+    if not isinstance(writer, WindowsSecureCredentialBlobWriterV1):
+        raise CredentialConfigError("CREDENTIAL_BLOB_SECURE_WRITER_REQUIRED")
     try:
         canonical_path = canonical_local_windows_path(blob_path)
         secret = dict(prompt())
@@ -356,6 +479,7 @@ __all__ = [
     "InstallerStoreBootstrapV1",
     "LocalCredentialDescriptorV1",
     "WindowsDpapiCredentialReaderV1",
+    "WindowsSecureCredentialBlobWriterV1",
     "load_gateway_setting_from_local_blob_v1",
     "load_local_credential_descriptor_v1",
     "parse_installer_store_bootstrap_v1",

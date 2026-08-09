@@ -43,6 +43,8 @@ class NativeWindowsFenceInstallerHostV1(WindowsFenceInstallerHostV1):
 
     def __init__(self) -> None:
         self._journal_root: Path | None = None
+        self._journal_owner_sha256: str | None = None
+        self._journal_acl_sddl: str | None = None
 
     @staticmethod
     def _require_windows() -> None:
@@ -82,16 +84,22 @@ class NativeWindowsFenceInstallerHostV1(WindowsFenceInstallerHostV1):
     def _parse_command_line(value: str) -> list[str]:
         """Use Windows' own parser, not POSIX tokenisation, for SCM ImagePath."""
         try:
-            from ctypes import byref, c_int, windll
+            from ctypes import POINTER, byref, c_int, c_void_p, windll, wintypes
 
             count = c_int()
-            argv = windll.shell32.CommandLineToArgvW(value, byref(count))
+            command_line_to_argv = windll.shell32.CommandLineToArgvW
+            command_line_to_argv.argtypes = [wintypes.LPCWSTR, POINTER(c_int)]
+            command_line_to_argv.restype = POINTER(wintypes.LPWSTR)
+            local_free = windll.kernel32.LocalFree
+            local_free.argtypes = [c_void_p]
+            local_free.restype = c_void_p
+            argv = command_line_to_argv(value, byref(count))
             if not argv or count.value < 1:
                 raise OSError("CommandLineToArgvW failed")
             try:
                 result = [argv[index] for index in range(count.value)]
             finally:
-                windll.kernel32.LocalFree(argv)
+                local_free(argv)
             if any(not item or "\x00" in item for item in result):
                 raise OSError("invalid SCM command line")
             return result
@@ -144,7 +152,12 @@ class NativeWindowsFenceInstallerHostV1(WindowsFenceInstallerHostV1):
                 raise WindowsFinalInstallerError(
                     "SCM_FAILURE_ACTIONS_QUERY_FAILED"
                 ) from exc
-            if failure not in {None, (), {}, []}:
+            if (
+                failure is not None
+                and failure != ()
+                and failure != {}
+                and failure != []
+            ):
                 raise WindowsFinalInstallerError(
                     "SCM_FAILURE_ACTIONS_NOT_CANONICAL_EMPTY"
                 )
@@ -219,10 +232,12 @@ class NativeWindowsFenceInstallerHostV1(WindowsFenceInstallerHostV1):
             python_path=python_path,
             registry_owner_sid_sha256=hashlib.sha256(owner.encode()).hexdigest(),
             registry_acl_sddl_sha256=hashlib.sha256(sddl.encode()).hexdigest(),
+            registry_owner_sid=owner,
+            registry_acl_sddl=sddl,
         )
 
     @staticmethod
-    def _apply_directory_security(path: Path, *, sddl: str) -> None:
+    def _apply_path_security(path: Path, *, sddl: str) -> None:
         try:
             import win32security  # type: ignore[import-not-found]
 
@@ -255,7 +270,7 @@ class NativeWindowsFenceInstallerHostV1(WindowsFenceInstallerHostV1):
         try:
             if not root.exists():
                 root.mkdir(parents=True, mode=0o700)
-                self._apply_directory_security(root, sddl=directory_acl_sddl)
+                self._apply_path_security(root, sddl=directory_acl_sddl)
             fs = WindowsFilesystemFactsAdapter()
             facts = fs.inspect(root)
         except OSError as exc:
@@ -285,7 +300,7 @@ class NativeWindowsFenceInstallerHostV1(WindowsFenceInstallerHostV1):
         try:
             if not journal.exists():
                 journal.mkdir(mode=0o700)
-                self._apply_directory_security(journal, sddl=directory_acl_sddl)
+                self._apply_path_security(journal, sddl=directory_acl_sddl)
             journal_facts = fs.inspect(journal)
         except OSError as exc:
             raise WindowsFinalInstallerError("INSTALL_JOURNAL_CREATE_FAILED") from exc
@@ -303,6 +318,8 @@ class NativeWindowsFenceInstallerHostV1(WindowsFenceInstallerHostV1):
         ):
             raise WindowsFinalInstallerError("INSTALL_JOURNAL_SECURITY_MISMATCH")
         self._journal_root = journal
+        self._journal_owner_sha256 = expected_owner
+        self._journal_acl_sddl = directory_acl_sddl
 
     def _journal_path(self, name: str) -> Path:
         if self._journal_root is None:
@@ -335,6 +352,8 @@ class NativeWindowsFenceInstallerHostV1(WindowsFenceInstallerHostV1):
                     "dependencies": list(readback.dependencies),
                     "python_class": readback.python_class,
                     "python_path": readback.python_path,
+                    "registry_owner_sid": readback.registry_owner_sid,
+                    "registry_acl_sddl": readback.registry_acl_sddl,
                 },
             }
         )
@@ -355,7 +374,14 @@ class NativeWindowsFenceInstallerHostV1(WindowsFenceInstallerHostV1):
         return identifier
 
     def publish_same_volume_content_addressed_create_only(
-        self, *, bundle_raw: bytes, bundle_sha256: str, destination_root: str
+        self,
+        *,
+        bundle_raw: bytes,
+        bundle_sha256: str,
+        destination_root: str,
+        final_owner_sid: str,
+        final_directory_acl_sddl: str,
+        component_acl_sddl: str,
     ) -> tuple[str, Mapping[str, WindowsPathReadbackV1]]:
         self._require_windows()
         if hashlib.sha256(bundle_raw).hexdigest() != bundle_sha256:
@@ -378,23 +404,55 @@ class NativeWindowsFenceInstallerHostV1(WindowsFenceInstallerHostV1):
             raise WindowsFinalInstallerError("INSTALL_FINAL_ALREADY_EXISTS")
         staging = parent / f".staging-{bundle_sha256}-{uuid.uuid4().hex}"
         try:
-            staging.mkdir(mode=0o700)
-            with zipfile.ZipFile(__import__("io").BytesIO(bundle_raw)) as archive:
-                for item in archive.infolist():
-                    if (
-                        item.is_dir()
-                        or not item.filename.startswith("components/")
-                        or "/" in item.filename[len("components/") :]
-                    ):
-                        raise WindowsFinalInstallerError(
-                            "INSTALL_BUNDLE_ARCHIVE_INVALID"
-                        )
-                    target = staging / item.filename.rsplit("/", 1)[1]
-                    with target.open("xb") as output:
-                        output.write(archive.read(item))
-                        output.flush()
-                        os.fsync(output.fileno())
-            os.replace(staging, final)
+            # Keep the parent opened for the entire publish and compare every
+            # pathname operation to that immutable handle identity.  This
+            # turns a parent replacement/reparse race into a hard failure
+            # before the following state boundary can be accepted.
+            with fs.open_directory_anchor(parent) as anchor:
+                anchor.assert_named_path_is_opened_parent()
+                staging.mkdir(mode=0o700)
+                anchor.assert_named_path_is_opened_parent()
+                with zipfile.ZipFile(__import__("io").BytesIO(bundle_raw)) as archive:
+                    for item in archive.infolist():
+                        if (
+                            item.is_dir()
+                            or not item.filename.startswith("components/")
+                            or "/" in item.filename[len("components/") :]
+                        ):
+                            raise WindowsFinalInstallerError(
+                                "INSTALL_BUNDLE_ARCHIVE_INVALID"
+                            )
+                        target = staging / item.filename.rsplit("/", 1)[1]
+                        with target.open("xb") as output:
+                            output.write(archive.read(item))
+                            output.flush()
+                            os.fsync(output.fileno())
+                        anchor.assert_named_path_is_opened_parent()
+                if final.exists():
+                    raise WindowsFinalInstallerError("INSTALL_FINAL_ALREADY_EXISTS")
+                anchor.assert_named_path_is_opened_parent()
+                os.replace(staging, final)
+                anchor.assert_named_path_is_opened_parent()
+                self._apply_path_security(final, sddl=final_directory_acl_sddl)
+                for path in final.iterdir():
+                    self._apply_path_security(path, sddl=component_acl_sddl)
+                    anchor.assert_named_path_is_opened_parent()
+                final_facts = fs.inspect(final)
+            if (
+                not final_facts.directory
+                or final_facts.reparse_point
+                or not final_facts.parent_chain_reparse_free
+                or final_facts.hardlink_count != 1
+                or final_facts.alternate_data_streams
+                or not final_facts.dacl_protected
+                or final_facts.inherited_ace_count
+                or final_facts.unsafe_write_principals
+                or final_facts.owner_sid_sha256
+                != hashlib.sha256(final_owner_sid.encode()).hexdigest()
+                or final_facts.acl_sddl_sha256
+                != hashlib.sha256(final_directory_acl_sddl.encode()).hexdigest()
+            ):
+                raise WindowsFinalInstallerError("INSTALL_FINAL_ACL_READBACK_MISMATCH")
         except Exception as exc:
             shutil.rmtree(staging, ignore_errors=True)
             if isinstance(exc, WindowsFinalInstallerError):
@@ -447,8 +505,29 @@ class NativeWindowsFenceInstallerHostV1(WindowsFenceInstallerHostV1):
         root = self._journal_path(install_attempt_id)
         try:
             root.mkdir()
+            if self._journal_acl_sddl is None or self._journal_owner_sha256 is None:
+                raise WindowsFinalInstallerError("INSTALL_JOURNAL_NOT_INITIALIZED")
+            self._apply_path_security(root, sddl=self._journal_acl_sddl)
         except FileExistsError:
             pass
+        try:
+            facts = WindowsFilesystemFactsAdapter().inspect(root)
+        except OSError as exc:
+            raise WindowsFinalInstallerError("INSTALL_EVENT_ROOT_READ_FAILED") from exc
+        if (
+            not facts.directory
+            or facts.reparse_point
+            or not facts.parent_chain_reparse_free
+            or facts.hardlink_count != 1
+            or facts.alternate_data_streams
+            or not facts.dacl_protected
+            or facts.inherited_ace_count
+            or facts.unsafe_write_principals
+            or facts.owner_sid_sha256 != self._journal_owner_sha256
+            or facts.acl_sddl_sha256
+            != hashlib.sha256(self._journal_acl_sddl.encode()).hexdigest()
+        ):
+            raise WindowsFinalInstallerError("INSTALL_EVENT_ROOT_SECURITY_MISMATCH")
         raw = canonical_json_bytes(
             {
                 "schema_version": "windows_fence_installer_event_v1",
@@ -486,7 +565,49 @@ class NativeWindowsFenceInstallerHostV1(WindowsFenceInstallerHostV1):
             raise WindowsFinalInstallerError("SCM_TARGET_IMAGE_INVALID")
         return subprocess.list2cmdline([image["application_path"], *image["arguments"]])
 
-    def _apply_unchecked(self, target: Mapping[str, Any]) -> None:
+    def _apply_registry_security(
+        self, *, service_name: str, owner_sid: str, acl_sddl: str
+    ) -> None:
+        try:
+            import win32security  # type: ignore[import-not-found]
+
+            key = winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                self._service_key(service_name),
+                0,
+                winreg.KEY_READ | winreg.KEY_WRITE | 0x00040000 | 0x00080000,
+            )
+            try:
+                descriptor = (
+                    win32security.ConvertStringSecurityDescriptorToSecurityDescriptor(
+                        acl_sddl, 1
+                    )
+                )
+                owner = win32security.ConvertStringSidToSid(owner_sid)
+                win32security.SetSecurityInfo(
+                    key,
+                    win32security.SE_REGISTRY_KEY,
+                    win32security.OWNER_SECURITY_INFORMATION
+                    | win32security.DACL_SECURITY_INFORMATION
+                    | win32security.PROTECTED_DACL_SECURITY_INFORMATION,
+                    owner,
+                    None,
+                    descriptor.GetSecurityDescriptorDacl(),
+                    None,
+                )
+            finally:
+                winreg.CloseKey(key)
+        except Exception as exc:
+            raise WindowsFinalInstallerError(
+                "PYWIN32_REGISTRY_SECURITY_APPLY_FAILED"
+            ) from exc
+
+    def _apply_unchecked(
+        self,
+        target: Mapping[str, Any],
+        *,
+        registry_security: Mapping[str, str] | None = None,
+    ) -> None:
         self._require_windows()
         ws = self._win32()
         service_name = target.get("service_name")
@@ -550,9 +671,28 @@ class NativeWindowsFenceInstallerHostV1(WindowsFenceInstallerHostV1):
                 winreg.CloseKey(key)
         except Exception as exc:
             raise WindowsFinalInstallerError("PYWIN32_REGISTRY_APPLY_FAILED") from exc
+        security = registry_security
+        if security is None:
+            security = {
+                "owner_sid": target.get("registry_owner_sid"),
+                "acl_sddl": target.get("registry_acl_sddl"),
+            }
+        if not isinstance(security.get("owner_sid"), str) or not isinstance(
+            security.get("acl_sddl"), str
+        ):
+            raise WindowsFinalInstallerError("PYWIN32_REGISTRY_SECURITY_TARGET_INVALID")
+        self._apply_registry_security(
+            service_name=service_name,
+            owner_sid=security["owner_sid"],
+            acl_sddl=security["acl_sddl"],
+        )
 
     def apply_exact_scm_and_pywin32_registry_once(
-        self, *, expected_before: WindowsScmReadbackV1, target: Mapping[str, Any]
+        self,
+        *,
+        expected_before: WindowsScmReadbackV1,
+        target: Mapping[str, Any],
+        registry_security: Mapping[str, str],
     ) -> None:
         current = self.query_scm_readback(expected_before.service_name)
         if (
@@ -563,7 +703,7 @@ class NativeWindowsFenceInstallerHostV1(WindowsFenceInstallerHostV1):
             != expected_before.registry_acl_sddl_sha256
         ):
             raise WindowsFinalInstallerError("SCM_PRECONDITION_READBACK_MISMATCH")
-        self._apply_unchecked(target)
+        self._apply_unchecked(target, registry_security=registry_security)
 
     def restore_pre_event3_backup(self, *, backup_id: str) -> None:
         path = self._journal_path("backups") / f"{backup_id}.json"
@@ -574,8 +714,46 @@ class NativeWindowsFenceInstallerHostV1(WindowsFenceInstallerHostV1):
             raise WindowsFinalInstallerError("SCM_BACKUP_READ_FAILED") from exc
         self._apply_unchecked(target)
 
+    def remove_pre_event3_published_orphan(self, *, destination_root: str) -> None:
+        self._require_windows()
+        path = Path(destination_root)
+        if not path.exists():
+            return
+        try:
+            facts = WindowsFilesystemFactsAdapter().inspect(path)
+        except OSError as exc:
+            raise WindowsFinalInstallerError("INSTALL_ORPHAN_READ_FAILED") from exc
+        if (
+            not facts.directory
+            or facts.reparse_point
+            or not facts.parent_chain_reparse_free
+            or facts.hardlink_count != 1
+            or facts.alternate_data_streams
+        ):
+            raise WindowsFinalInstallerError("INSTALL_ORPHAN_CLEANUP_UNSAFE")
+        try:
+            shutil.rmtree(path)
+        except OSError as exc:
+            raise WindowsFinalInstallerError("INSTALL_ORPHAN_CLEANUP_FAILED") from exc
+
     def query_same_restart_attempt_only(self, **_kwargs: object) -> str:
-        raise WindowsFinalInstallerError("SCM_RESTART_QUERY_ADAPTER_NOT_CONFIGURED")
+        install_attempt_id = _kwargs.get("install_attempt_id")
+        if not isinstance(install_attempt_id, str):
+            raise WindowsFinalInstallerError("SCM_RESTART_QUERY_INPUT_INVALID")
+        path = self._journal_path(install_attempt_id) / "03.json"
+        try:
+            value = json.loads(path.read_bytes())
+        except Exception as exc:
+            raise WindowsFinalInstallerError(
+                "SCM_RESTART_QUERY_EVIDENCE_MISSING"
+            ) from exc
+        if (
+            value.get("install_attempt_id") != install_attempt_id
+            or value.get("event_sequence") != 3
+            or value.get("state") != "RESTART_DISPATCH_RESERVED_FROZEN"
+        ):
+            raise WindowsFinalInstallerError("SCM_RESTART_QUERY_EVIDENCE_MISMATCH")
+        return "NO_RESTART_DISPATCHED_FROZEN"
 
 
 __all__ = ["NativeWindowsFenceInstallerHostV1"]

@@ -8,7 +8,7 @@ import re
 import stat
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, Self
 
 MAX_FOUNDATION_STATE_BYTES = 1024 * 1024
 _WINDOWS_MUTATING_ACCESS_MASK = 0x500D0116 | 0x40  # includes FILE_DELETE_CHILD
@@ -407,6 +407,17 @@ class WindowsFilesystemFactsAdapter:
         finally:
             _kernel32.CloseHandle(handle)
 
+    def open_directory_anchor(self, path: Path) -> WindowsOpenedDirectoryAnchorV1:
+        """Keep an opened parent handle and reject path substitution on use.
+
+        Windows mutating APIs used by the legacy Python surface still take a
+        pathname.  Callers therefore retain this parent handle throughout a
+        publish and prove the named parent is the same object immediately
+        before and after every mutating boundary.  A caller may not treat a
+        successful pathname operation as safe without these identity checks.
+        """
+        return WindowsOpenedDirectoryAnchorV1(self, path)
+
     def resolve_service_sid_sha256(self, service_name: str) -> str:
         account_name = f"NT SERVICE\\{service_name}"
         sid_size = wintypes.DWORD()
@@ -707,6 +718,47 @@ class WindowsFilesystemFactsAdapter:
         if flags & _ACE_INHERITED_OBJECT_TYPE_PRESENT:
             offset += 16
         return ctypes.c_void_p(pointer.value + offset)
+
+
+class WindowsOpenedDirectoryAnchorV1:
+    """Lifetime-bound opened parent directory identity guard for publishing."""
+
+    def __init__(self, filesystem: WindowsFilesystemFactsAdapter, path: Path) -> None:
+        self._filesystem = filesystem
+        self.path = path
+        self._handle = filesystem._open(path, directory=True, read_data=False)
+        self._initial = filesystem._facts(self._handle, path)
+        if (
+            not self._initial.directory
+            or self._initial.reparse_point
+            or not self._initial.parent_chain_reparse_free
+        ):
+            self.close()
+            raise OSError("unsafe opened parent directory")
+
+    def assert_named_path_is_opened_parent(self) -> PathSecurityFacts:
+        """Compare the current named parent against the original open handle."""
+        current = self._filesystem.inspect(self.path)
+        if (
+            current.file_identity != self._initial.file_identity
+            or current.volume_serial != self._initial.volume_serial
+            or current.volume_identity_sha256 != self._initial.volume_identity_sha256
+            or current.reparse_point
+            or not current.parent_chain_reparse_free
+        ):
+            raise OSError("parent directory path substitution detected")
+        return current
+
+    def close(self) -> None:
+        if self._handle is not None:
+            _kernel32.CloseHandle(self._handle)
+            self._handle = None
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.close()
 
 
 __all__ = [

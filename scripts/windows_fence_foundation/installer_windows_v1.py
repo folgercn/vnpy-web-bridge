@@ -19,7 +19,7 @@ from .credential_config_v1 import (
     CredentialConfigError,
     parse_installer_store_bootstrap_v1,
 )
-from .manifest_v1 import VerifiedInstallManifestV1
+from .manifest_v1 import EXPECTED_BINDING_FIELDS, VerifiedInstallManifestV1
 
 
 class WindowsFinalInstallerError(RuntimeError):
@@ -67,6 +67,8 @@ class WindowsScmReadbackV1:
     python_path: str
     registry_owner_sid_sha256: str
     registry_acl_sddl_sha256: str
+    registry_owner_sid: str
+    registry_acl_sddl: str
 
     def canonical_sha256(self) -> str:
         return hashlib.sha256(
@@ -116,7 +118,14 @@ class WindowsFenceInstallerHostV1(Protocol):
     ) -> str: ...
 
     def publish_same_volume_content_addressed_create_only(
-        self, *, bundle_raw: bytes, bundle_sha256: str, destination_root: str
+        self,
+        *,
+        bundle_raw: bytes,
+        bundle_sha256: str,
+        destination_root: str,
+        final_owner_sid: str,
+        final_directory_acl_sddl: str,
+        component_acl_sddl: str,
     ) -> tuple[str, Mapping[str, WindowsPathReadbackV1]]: ...
 
     def append_install_event_create_only(
@@ -129,10 +138,16 @@ class WindowsFenceInstallerHostV1(Protocol):
     ) -> str: ...
 
     def apply_exact_scm_and_pywin32_registry_once(
-        self, *, expected_before: WindowsScmReadbackV1, target: Mapping[str, Any]
+        self,
+        *,
+        expected_before: WindowsScmReadbackV1,
+        target: Mapping[str, Any],
+        registry_security: Mapping[str, str],
     ) -> None: ...
 
     def restore_pre_event3_backup(self, *, backup_id: str) -> None: ...
+
+    def remove_pre_event3_published_orphan(self, *, destination_root: str) -> None: ...
 
     def query_same_restart_attempt_only(self, *, install_attempt_id: str) -> str: ...
 
@@ -194,6 +209,16 @@ def _exact_scm(expected: Mapping[str, Any], actual: WindowsScmReadbackV1) -> Non
         raise WindowsFinalInstallerError("SCM_OR_PYWIN32_READBACK_MISMATCH")
 
 
+def _exact_registry_security(
+    actual: WindowsScmReadbackV1, *, owner_sha256: str, acl_sha256: str
+) -> None:
+    if (
+        actual.registry_owner_sid_sha256 != owner_sha256
+        or actual.registry_acl_sddl_sha256 != acl_sha256
+    ):
+        raise WindowsFinalInstallerError("PYWIN32_REGISTRY_SECURITY_READBACK_MISMATCH")
+
+
 class FinalWindowsFenceInstallerV1:
     """No fallback installer: it can only progress one exact frozen attempt."""
 
@@ -212,6 +237,40 @@ class FinalWindowsFenceInstallerV1:
         self._manifest = manifest
         self._bundle = bundle
         self._target = target_projection
+        bindings = target_projection.manifest_bindings
+        if (
+            not isinstance(bindings, Mapping)
+            or set(bindings) < set(EXPECTED_BINDING_FIELDS)
+            or any(
+                bindings[field] != manifest[field] for field in EXPECTED_BINDING_FIELDS
+            )
+        ):
+            raise WindowsFinalInstallerError(
+                "INSTALLER_TARGET_MANIFEST_BINDING_MISMATCH"
+            )
+        for field, projection_name in (
+            ("preinstall_service_config_canonical_sha256", "preinstall_service_config"),
+            ("safety_service_config_canonical_sha256", "safety_service_config"),
+            ("service_config_canonical_sha256", "target_service_config"),
+        ):
+            projection = getattr(target_projection, projection_name, None)
+            if (
+                not isinstance(projection, Mapping)
+                or _sha(projection) != manifest[field]
+            ):
+                raise WindowsFinalInstallerError("INSTALLER_TARGET_CONFIG_MISMATCH")
+        registry_security = getattr(target_projection, "registry_security", None)
+        if (
+            not isinstance(registry_security, Mapping)
+            or set(registry_security) != {"owner_sid", "acl_sddl"}
+            or not isinstance(registry_security["owner_sid"], str)
+            or not isinstance(registry_security["acl_sddl"], str)
+            or hashlib.sha256(registry_security["owner_sid"].encode()).hexdigest()
+            != manifest["expected_service_config_owner_sid_sha256"]
+            or hashlib.sha256(registry_security["acl_sddl"].encode()).hexdigest()
+            != manifest["expected_service_config_acl_sddl_sha256"]
+        ):
+            raise WindowsFinalInstallerError("INSTALLER_REGISTRY_SECURITY_MISMATCH")
         try:
             bootstrap = parse_installer_store_bootstrap_v1(
                 public_config_raw, expected_raw_sha256=manifest["config_sha256"]
@@ -267,6 +326,11 @@ class FinalWindowsFenceInstallerV1:
         preinstall = self._host.query_scm_readback(manifest["service_name"])
         expected_preinstall = self._target.preinstall_service_config
         _exact_scm(expected_preinstall, preinstall)
+        _exact_registry_security(
+            preinstall,
+            owner_sha256=manifest["expected_service_config_owner_sid_sha256"],
+            acl_sha256=manifest["expected_service_config_acl_sddl_sha256"],
+        )
         self._backup_id = self._host.backup_scm_and_pywin32_registry_create_only(
             service_name=manifest["service_name"], readback=preinstall
         )
@@ -289,6 +353,7 @@ class FinalWindowsFenceInstallerV1:
                     destination_root=str(
                         self._target.component_paths["wrapper"].rsplit("\\", 1)[0]
                     ),
+                    **dict(self._target.publish_security),
                 )
             )
             for role in ("wrapper", "extension", "launcher", "assembly", "config"):
@@ -310,6 +375,11 @@ class FinalWindowsFenceInstallerV1:
             )
             self._checkpoint = InstallCheckpointV1.FILES_PUBLISHED
         except Exception as exc:
+            self._host.remove_pre_event3_published_orphan(
+                destination_root=str(
+                    self._target.component_paths["wrapper"].rsplit("\\", 1)[0]
+                )
+            )
             self._host.restore_pre_event3_backup(backup_id=self._backup_id)
             raise WindowsFinalInstallerError("INSTALL_PRE_EVENT3_ROLLED_BACK") from exc
         return self.result()
@@ -335,10 +405,29 @@ class FinalWindowsFenceInstallerV1:
             before = self._host.query_scm_readback(manifest["service_name"])
             _exact_scm(self._target.preinstall_service_config, before)
             self._host.apply_exact_scm_and_pywin32_registry_once(
-                expected_before=before, target=self._target.target_service_config
+                expected_before=before,
+                target=self._target.safety_service_config,
+                registry_security=self._target.registry_security,
+            )
+            safety = self._host.query_scm_readback(manifest["service_name"])
+            _exact_scm(self._target.safety_service_config, safety)
+            _exact_registry_security(
+                safety,
+                owner_sha256=manifest["expected_service_config_owner_sid_sha256"],
+                acl_sha256=manifest["expected_service_config_acl_sddl_sha256"],
+            )
+            self._host.apply_exact_scm_and_pywin32_registry_once(
+                expected_before=safety,
+                target=self._target.target_service_config,
+                registry_security=self._target.registry_security,
             )
             after = self._host.query_scm_readback(manifest["service_name"])
             _exact_scm(self._target.target_service_config, after)
+            _exact_registry_security(
+                after,
+                owner_sha256=manifest["expected_service_config_owner_sid_sha256"],
+                acl_sha256=manifest["expected_service_config_acl_sddl_sha256"],
+            )
             bindings = self._target.manifest_bindings
             if (
                 hashlib.sha256(after.python_class.encode()).hexdigest()
@@ -348,7 +437,17 @@ class FinalWindowsFenceInstallerV1:
             ):
                 raise WindowsFinalInstallerError("PYWIN32_REGISTRY_BINDING_MISMATCH")
             self._transition_receipt = _sha(
-                {"before": before.canonical_sha256(), "after": after.canonical_sha256()}
+                {
+                    "before": before.canonical_sha256(),
+                    "safety": safety.canonical_sha256(),
+                    "after": after.canonical_sha256(),
+                }
+            )
+            self._host.append_install_event_create_only(
+                install_attempt_id=manifest["install_attempt_id"],
+                event_sequence=4,
+                state=InstallCheckpointV1.TARGET_READY.value,
+                details_sha256=self._transition_receipt,
             )
             self._checkpoint = InstallCheckpointV1.TARGET_READY
             return self.result()
