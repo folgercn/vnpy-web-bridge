@@ -423,6 +423,42 @@ def write_canonical_create_only_v1(path: Path, payload: Mapping[str, Any]) -> by
     return raw
 
 
+def write_binary_create_only_v1(path: Path, raw: bytes) -> str:
+    """Publish exact opaque bytes with the same retained-dirfd safety contract."""
+    if type(raw) is not bytes or not raw:
+        raise OfflineSigningError("SIGNING_BINARY_OUTPUT_INVALID")
+    output = Path(path)
+    if not output.is_absolute():
+        output = Path.cwd() / output
+    parent = output.parent.resolve(strict=True)
+    if parent != output.parent or output.name in {"", ".", ".."}:
+        raise OfflineSigningError("SIGNING_OUTPUT_PARENT_UNSAFE")
+    directory = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        before = os.fstat(directory)
+        if not stat.S_ISDIR(before.st_mode) or before.st_uid != os.geteuid() or stat.S_IMODE(before.st_mode) & 0o077:
+            raise OfflineSigningError("SIGNING_OUTPUT_PARENT_UNSAFE")
+        descriptor = os.open(output.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600, dir_fd=directory)
+        try:
+            os.write(descriptor, raw)
+            os.fsync(descriptor)
+            identity = os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+        observed = os.stat(output.name, dir_fd=directory, follow_symlinks=False)
+        read_fd = os.open(output.name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=directory)
+        try:
+            readback = os.read(read_fd, len(raw) + 1)
+        finally:
+            os.close(read_fd)
+        if (identity.st_dev, identity.st_ino, identity.st_size) != (observed.st_dev, observed.st_ino, observed.st_size) or readback != raw:
+            raise OfflineSigningError("SIGNING_OUTPUT_READBACK_MISMATCH")
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+    return hashlib.sha256(raw).hexdigest()
+
+
 def write_audit_create_only_v1(path: Path, *, artifact_raw: bytes, action: str) -> bytes:
     if not isinstance(action, str) or not action:
         raise OfflineSigningError("SIGNING_AUDIT_ACTION_INVALID")
