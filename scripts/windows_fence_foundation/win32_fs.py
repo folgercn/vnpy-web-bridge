@@ -193,6 +193,7 @@ if os.name == "nt":  # pragma: win32 cover
     _FILE_ADD_SUBDIRECTORY = 0x0004
     _FILE_DELETE_CHILD = 0x0040
     _FILE_SHARE_ALL = 0x00000007
+    _SYNCHRONIZE = 0x00100000
     _GENERIC_READ = 0x80000000
     _GENERIC_WRITE = 0x40000000
     _DELETE = 0x00010000
@@ -618,7 +619,8 @@ class WindowsFilesystemFactsAdapter:
             | _READ_CONTROL
             | _FILE_READ_ATTRIBUTES
             | _WRITE_DAC
-            | _WRITE_OWNER,
+            | _WRITE_OWNER
+            | _SYNCHRONIZE,
             ctypes.byref(attributes),
             ctypes.byref(status),
             None,
@@ -680,7 +682,8 @@ class WindowsFilesystemFactsAdapter:
             _DELETE
             | _READ_CONTROL
             | _FILE_READ_ATTRIBUTES
-            | (_GENERIC_READ if read_data else 0),
+            | (_GENERIC_READ if read_data else 0)
+            | _SYNCHRONIZE,
             ctypes.byref(attributes),
             ctypes.byref(status),
             None,

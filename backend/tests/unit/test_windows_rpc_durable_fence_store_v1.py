@@ -490,6 +490,15 @@ def test_windows_ntcreatefile_static_signature_and_calls_are_eleven_arguments() 
     assert all(len(call.args) == 11 and not call.keywords for call in calls)
 
     create, opened = calls
+    assert "_SYNCHRONIZE = 0x00100000" in WIN32_FS_SOURCE
+    assert ast.unparse(create.args[1]) == (
+        "_GENERIC_READ | _GENERIC_WRITE | _READ_CONTROL | _FILE_READ_ATTRIBUTES "
+        "| _WRITE_DAC | _WRITE_OWNER | _SYNCHRONIZE"
+    )
+    assert ast.unparse(opened.args[1]) == (
+        "_DELETE | _READ_CONTROL | _FILE_READ_ATTRIBUTES | "
+        "(_GENERIC_READ if read_data else 0) | _SYNCHRONIZE"
+    )
     assert [ast.unparse(argument) for argument in create.args[6:9]] == [
         "0",
         "_FILE_CREATE",
@@ -530,6 +539,7 @@ def test_windows_ntcreatefile_runtime_signature_has_eleven_arguments() -> None:
 
     assert len(win32_fs._ntdll.NtCreateFile.argtypes) == 11
     assert win32_fs._ntdll.NtCreateFile.restype is ctypes.c_long
+    assert win32_fs._SYNCHRONIZE == 0x00100000
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires Win32 handle and ACL APIs")
