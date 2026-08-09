@@ -211,8 +211,8 @@ def load_production_installer_trust_anchor_v1() -> InstallerBootstrapTrustAnchor
             raise InstallerBootstrapTrustAnchorError(
                 "INSTALLER_TRUST_ANCHOR_IMPORT_UNVERIFIED"
             )
-        PRODUCTION_INSTALLER_TRUST_ANCHOR_V1 = getattr(
-            module, "PRODUCTION_INSTALLER_TRUST_ANCHOR_V1"
+        PRODUCTION_INSTALLER_TRUST_ANCHOR_V1 = (
+            module.PRODUCTION_INSTALLER_TRUST_ANCHOR_V1
         )
     except Exception as exc:
         if isinstance(exc, InstallerBootstrapTrustAnchorError):
@@ -235,10 +235,10 @@ def validate_anchor_keyring_bytes_v1(
 
 
 __all__ = [
-    "InstallerBootstrapTrustAnchorError",
-    "InstallerBootstrapTrustAnchorV1",
     "KEYRING_PURPOSE",
     "KEYRING_SCHEMA_VERSION",
+    "InstallerBootstrapTrustAnchorError",
+    "InstallerBootstrapTrustAnchorV1",
     "canonical_public_keyring_v1",
     "load_production_installer_trust_anchor_v1",
     "render_installer_trust_anchor_generated_module_v1",

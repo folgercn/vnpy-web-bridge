@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vnpy.example/schemas/windows-rpc-durable-fence-signing-reservation-receipt-v1.json",
+  "title": "Create-only Windows fence offline signing reservation receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "purpose", "reservation_kind", "token_sha256", "reserved_artifact_schema_version", "reserved_artifact_id", "reserved_artifact_core_sha256", "reserved_signature_domain_separator"],
+  "properties": {
+    "schema_version": {"const": "windows_rpc_durable_fence_signing_reservation_receipt_v1"},
+    "purpose": {"const": "record_create_only_offline_signing_reservation_without_private_material"},
+    "reservation_kind": {"enum": ["preflight_challenge", "preflight_replay_guard", "manifest_attempt_nonce", "manifest_install_attempt", "restart_dispatch", "restart_authorization"]},
+    "token_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "reserved_artifact_schema_version": {"enum": ["windows_rpc_durable_fence_zero_order_preflight_v1", "windows_rpc_durable_fence_install_manifest_v1", "windows_rpc_durable_fence_restart_authorization_v1"]},
+    "reserved_artifact_id": {"type": "string", "pattern": "^windows-fence-(preflight|install-manifest|restart-authorization)-[0-9a-f]{64}$"},
+    "reserved_artifact_core_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "reserved_signature_domain_separator": {"enum": ["vnpy.issue267.windows-foundation.zero-order-preflight.v1", "vnpy.issue267.windows-foundation.install-manifest.v1", "vnpy.issue267.windows-foundation.restart-authorization.v1"]}
+  }
+}

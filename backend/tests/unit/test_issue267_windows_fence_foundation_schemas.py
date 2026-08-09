@@ -695,6 +695,7 @@ def _attestation() -> dict[str, Any]:
         "start_observed_event_type": "START_OBSERVED",
         "restart_authorization_raw_sha256": SHA,
         "startup_receipt_raw_sha256": SHA,
+        "restart_dispatch_nonce_sha256": SHA,
         "service_control_operation_id": "windows-service-restart-0001",
         **_common_state(),
         "store_volume_serial": "A1B2C3D4",
