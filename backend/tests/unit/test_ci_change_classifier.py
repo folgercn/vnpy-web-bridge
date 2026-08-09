@@ -100,6 +100,8 @@ def test_windows_fence_exact_paths_use_the_dedicated_gate_without_generic_image(
         "backend/tests/unit/test_windows_rpc_durable_fence_bundle_v1.py",
         "backend/tests/unit/test_windows_rpc_durable_fence_manifest_v1.py",
         "backend/tests/unit/test_windows_rpc_durable_fence_target_contract_v1.py",
+        "backend/tests/unit/test_windows_fence_offline_signing_v1.py",
+        "backend/tests/unit/test_windows_fence_signing_closure_e2e_v1.py",
         "backend/tests/unit/windows_fence_public_fixture_v1.py",
         "backend/tests/integration/test_windows_fence_foundation_windows.py",
     ]

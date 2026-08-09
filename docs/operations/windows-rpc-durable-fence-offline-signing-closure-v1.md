@@ -15,18 +15,22 @@ be written to pre-existing private directories with create-only publication,
 fsync, and canonical readback.
 
 The observer signer alone consumes the preflight challenge nonce and replay
-guard in a create-only offline ledger. Manifest signing only reserves the
-existing install-attempt nonce registry; it does not consume the preflight
-challenge. Restart authorization consumes its separate dispatch nonce and
-authorization identity, so downstream verification can safely reference the
-same signed preflight without replaying any authority.
+guard in a create-only offline ledger. Manifest signing consumes its attempt
+nonce and immutable install-attempt identity; restart authorization consumes
+its dispatch nonce and authorization identity. Each ledger file is itself a
+canonical reservation receipt, bound to the target artifact schema, ID, core,
+and signature domain without using another key. Supply the six raw receipts to
+the closure input directory under the `*_reservation` names; closure includes
+their raw SHA-256 values and rejects any replay, token, ID, core, domain, or
+raw-artifact splice.
 
 Before manifest or restart work, verify a canonical observer-signed zero-order
 preflight that is no more than 30 seconds old and independently reports frozen
 runtime, trading disabled, revoked execution authority, zero pending sends and
 no active orders. The signing closure validates the fixed sequence:
-zero-preflight, manifest, event 1, publish, event 2, restart authorization,
-event 3, transition, event 4, SCM evidence, event 5, startup, event 6,
-attestation, event 7.
+preflight reservations, zero-preflight, manifest reservations, manifest, event
+1, publish, event 2, restart reservations, restart authorization, event 3,
+transition, event 4, SCM evidence, event 5, startup, event 6, attestation,
+event 7.
 The manifest itself has `restart_authorized=false`; it never substitutes for
 the separate one-dispatch restart authorization.

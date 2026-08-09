@@ -30,7 +30,11 @@ def _verify_unsigned_manifest(raw: bytes) -> dict[str, object]:
     from .offline_signing_v1 import _strict_object
 
     value = _strict_object(raw)
-    if "signature" in value or value.get("schema_version") != "windows_rpc_durable_fence_install_manifest_v1":
+    if (
+        "signature" in value
+        or value.get("schema_version")
+        != "windows_rpc_durable_fence_install_manifest_v1"
+    ):
         raise OfflineSigningError("SIGNING_UNSIGNED_MANIFEST_DRAFT_REQUIRED")
     _verify_identity_and_frozen_facts(value)
     return value
@@ -46,7 +50,9 @@ def main(argv: list[str] | None = None) -> int:
         raw, _value = read_canonical_artifact_v1(options.input)
         draft = build_manifest_draft_v1(raw)
         output = write_canonical_create_only_v1(options.output, draft)
-        write_audit_create_only_v1(options.audit_output, artifact_raw=output, action="build-manifest-draft")
+        write_audit_create_only_v1(
+            options.audit_output, artifact_raw=output, action="build-manifest-draft"
+        )
     except (OfflineSigningError, OSError, ValueError) as exc:
         parser.error(f"offline manifest draft build failed: {exc}")
     return 0

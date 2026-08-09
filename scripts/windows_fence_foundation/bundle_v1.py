@@ -274,7 +274,9 @@ def _foundation_source_entries(
         ).read_bytes()
         for name in FOUNDATION_SOURCE_NAMES:
             if name == "_installer_trust_anchor_generated_v1.py":
-                entries[f"scripts/windows_fence_foundation/{name}"] = generated_anchor_raw
+                entries[f"scripts/windows_fence_foundation/{name}"] = (
+                    generated_anchor_raw
+                )
                 continue
             entries[f"scripts/windows_fence_foundation/{name}"] = (
                 foundation_root / name
@@ -497,7 +499,9 @@ def build_windows_fence_bundle_v1(
             expected_source_sha256=expected_source_sha256,
         )
     except (InstallerBootstrapTrustAnchorError, OSError, TypeError, ValueError) as exc:
-        raise WindowsFenceBundleError("INSTALLER_TRUST_ANCHOR_GENERATION_FAILED") from exc
+        raise WindowsFenceBundleError(
+            "INSTALLER_TRUST_ANCHOR_GENERATION_FAILED"
+        ) from exc
     try:
         wrapper_raw = (
             source_root / "scripts" / "windows_rpc_service_wrapper_v1.py"
@@ -666,13 +670,9 @@ def verify_windows_fence_bundle_v1(
         or not isinstance(index.get("expected_source_sha256"), str)
     ):
         raise WindowsFenceBundleError("BUNDLE_INDEX_VERSION_INVALID")
-    if (
-        not re.fullmatch(
-            r"[0-9a-f]{40}(?:[0-9a-f]{24})?", index["expected_source_sha256"]
-        )
-        or index["expected_source_sha256"]
-        == "0" * len(index["expected_source_sha256"])
-    ):
+    if not re.fullmatch(
+        r"[0-9a-f]{40}(?:[0-9a-f]{24})?", index["expected_source_sha256"]
+    ) or index["expected_source_sha256"] == "0" * len(index["expected_source_sha256"]):
         raise WindowsFenceBundleError("BUNDLE_SOURCE_REVISION_INVALID")
     bundle_sha256 = _sha256(bundle_raw)
     if index.get("bundle_sha256") != bundle_sha256:

@@ -36,11 +36,8 @@ from jsonschema import Draft202012Validator, FormatChecker, ValidationError
 from .contracts import AUTHORITY_FIELDS, StoreContractError, canonical_json_bytes
 from .trust_pins_v1 import (
     MANIFEST_KEY_DOMAIN,
-    MANIFEST_SIGNER_ROLE,
     OBSERVER_KEY_DOMAIN,
-    OBSERVER_SIGNER_ROLE,
     RESTART_KEY_DOMAIN,
-    RESTART_SIGNER_ROLE,
     FoundationPublicKeyPin,
 )
 
@@ -137,7 +134,11 @@ def read_canonical_artifact_v1(path: Path) -> tuple[bytes, dict[str, Any]]:
 
 def read_ed25519_private_key_from_readonly_fd_v1(descriptor: int) -> Ed25519PrivateKey:
     """Read one offline key from an inherited read-only regular-file FD only."""
-    if isinstance(descriptor, bool) or not isinstance(descriptor, int) or descriptor < 3:
+    if (
+        isinstance(descriptor, bool)
+        or not isinstance(descriptor, int)
+        or descriptor < 3
+    ):
         raise OfflineSigningError("SIGNING_PRIVATE_KEY_FD_INVALID")
     if fcntl is None:
         raise OfflineSigningError("SIGNING_PRIVATE_KEY_FD_ACCESS_UNVERIFIABLE")
@@ -205,7 +206,9 @@ def _signature_fields(value: Mapping[str, Any]) -> tuple[str, str, str, str, str
         str(value.get("signer_key_domain")),
         str(value.get("signer_key_id")),
         str(value.get("signer_public_key_sha256")),
-        "manifest" if schema == "windows_rpc_durable_fence_install_manifest_v1" else "receipt_or_evidence",
+        "manifest"
+        if schema == "windows_rpc_durable_fence_install_manifest_v1"
+        else "receipt_or_evidence",
     )
 
 
@@ -218,9 +221,17 @@ def _core_fields(value: Mapping[str, Any]) -> tuple[str, str, str]:
     if schema == "windows_rpc_durable_fence_install_manifest_v1":
         return "manifest_id", "manifest_core_sha256", "windows-fence-install-manifest-"
     if schema == "windows_rpc_durable_fence_restart_authorization_v1":
-        return "authorization_id", "authorization_core_sha256", "windows-fence-restart-authorization-"
+        return (
+            "authorization_id",
+            "authorization_core_sha256",
+            "windows-fence-restart-authorization-",
+        )
     if schema == "windows_rpc_durable_fence_foundation_attestation_v1":
-        return "attestation_id", "attestation_core_sha256", "windows-fence-foundation-attestation-"
+        return (
+            "attestation_id",
+            "attestation_core_sha256",
+            "windows-fence-foundation-attestation-",
+        )
     prefixes = {
         "windows_rpc_durable_fence_zero_order_preflight_v1": "windows-fence-preflight-",
         "windows_rpc_durable_fence_publish_receipt_v1": "windows-fence-publish-receipt-",
@@ -230,7 +241,9 @@ def _core_fields(value: Mapping[str, Any]) -> tuple[str, str, str]:
     if schema in prefixes:
         return (
             "evidence_id" if schema.endswith("evidence_v1") else "receipt_id",
-            "evidence_core_sha256" if schema.endswith("evidence_v1") else "receipt_core_sha256",
+            "evidence_core_sha256"
+            if schema.endswith("evidence_v1")
+            else "receipt_core_sha256",
             prefixes[schema],
         )
     raise OfflineSigningError("SIGNING_ARTIFACT_SCHEMA_UNSUPPORTED")
@@ -243,14 +256,22 @@ def _verify_identity_and_frozen_facts(value: Mapping[str, Any]) -> None:
         raise OfflineSigningError("SIGNING_DOMAIN_MISSING")
     core = hashlib.sha256(
         canonical_json_bytes(
-            {key: item for key, item in value.items() if key not in {id_field, core_field, "signature"}}
+            {
+                key: item
+                for key, item in value.items()
+                if key not in {id_field, core_field, "signature"}
+            }
         )
     ).hexdigest()
-    if value.get(core_field) != core or value.get(id_field) != _expected_id(prefix, core):
+    if value.get(core_field) != core or value.get(id_field) != _expected_id(
+        prefix, core
+    ):
         raise OfflineSigningError("SIGNING_ARTIFACT_CORE_OR_ID_MISMATCH")
     authority = value.get("authority")
-    if not isinstance(authority, dict) or set(authority) != AUTHORITY_FIELDS or any(
-        type(item) is not bool or item for item in authority.values()
+    if (
+        not isinstance(authority, dict)
+        or set(authority) != AUTHORITY_FIELDS
+        or any(type(item) is not bool or item for item in authority.values())
     ):
         raise OfflineSigningError("SIGNING_AUTHORITY_NOT_FROZEN")
     for key, expected in (
@@ -267,28 +288,46 @@ def _verify_identity_and_frozen_facts(value: Mapping[str, Any]) -> None:
 
 def _assert_pin(value: Mapping[str, Any], pin: FoundationPublicKeyPin) -> None:
     role, domain, key_id, public_sha, _kind = _signature_fields(value)
-    if role != pin.role or domain != pin.key_domain or key_id != pin.key_id or public_sha != pin.public_key_sha256:
+    if (
+        role != pin.role
+        or domain != pin.key_domain
+        or key_id != pin.key_id
+        or public_sha != pin.public_key_sha256
+    ):
         raise OfflineSigningError("SIGNING_PUBLIC_PIN_MISMATCH")
     separator = value.get("signature_domain_separator")
-    allowed = {MANIFEST_KEY_DOMAIN: {MANIFEST_DOMAIN}, OBSERVER_KEY_DOMAIN: OBSERVER_DOMAINS, RESTART_KEY_DOMAIN: {RESTART_DOMAIN}}.get(pin.key_domain)
-    if separator not in allowed or value.get("canonicalization_profile") != CANONICALIZATION_PROFILE or value.get("signature_algorithm") != "Ed25519":
+    allowed = {
+        MANIFEST_KEY_DOMAIN: {MANIFEST_DOMAIN},
+        OBSERVER_KEY_DOMAIN: OBSERVER_DOMAINS,
+        RESTART_KEY_DOMAIN: {RESTART_DOMAIN},
+    }.get(pin.key_domain)
+    if (
+        separator not in allowed
+        or value.get("canonicalization_profile") != CANONICALIZATION_PROFILE
+        or value.get("signature_algorithm") != "Ed25519"
+    ):
         raise OfflineSigningError("SIGNING_DOMAIN_MISMATCH")
 
 
 def _require_preflight_source_facts(
-    value: Mapping[str, Any], *, execution_facts_raw: bytes | None, snapshot_raw: bytes | None
+    value: Mapping[str, Any],
+    *,
+    execution_facts_raw: bytes | None,
+    snapshot_raw: bytes | None,
 ) -> None:
     """Bind zero state to the original canonical facts, never summary fields alone."""
-    if value.get("schema_version") != "windows_rpc_durable_fence_zero_order_preflight_v1":
+    if (
+        value.get("schema_version")
+        != "windows_rpc_durable_fence_zero_order_preflight_v1"
+    ):
         return
     if execution_facts_raw is None or snapshot_raw is None:
         raise OfflineSigningError("SIGNING_PREFLIGHT_SOURCE_FACTS_REQUIRED")
     execution = _strict_object(execution_facts_raw)
     snapshot = _strict_object(snapshot_raw)
-    if (
-        value.get("execution_facts_canonical_sha256") != _sha(execution_facts_raw)
-        or value.get("snapshot_raw_sha256") != _sha(snapshot_raw)
-    ):
+    if value.get("execution_facts_canonical_sha256") != _sha(
+        execution_facts_raw
+    ) or value.get("snapshot_raw_sha256") != _sha(snapshot_raw):
         raise OfflineSigningError("SIGNING_PREFLIGHT_SOURCE_FACTS_HASH_MISMATCH")
     for facts in (execution, snapshot):
         if (
@@ -304,10 +343,15 @@ def _sha(raw: bytes) -> str:
 
 
 def sign_artifact_with_fd_v1(
-    draft: Mapping[str, Any], *, private_key_fd: int, pin: FoundationPublicKeyPin,
+    draft: Mapping[str, Any],
+    *,
+    private_key_fd: int,
+    pin: FoundationPublicKeyPin,
     observer_pin: FoundationPublicKeyPin | None = None,
-    fresh_preflight_raw: bytes | None = None, now: datetime | None = None,
-    execution_facts_raw: bytes | None = None, snapshot_raw: bytes | None = None,
+    fresh_preflight_raw: bytes | None = None,
+    now: datetime | None = None,
+    execution_facts_raw: bytes | None = None,
+    snapshot_raw: bytes | None = None,
 ) -> dict[str, Any]:
     if not isinstance(draft, Mapping) or "signature" in draft:
         raise OfflineSigningError("SIGNING_UNSIGNED_DRAFT_REQUIRED")
@@ -329,14 +373,24 @@ def sign_artifact_with_fd_v1(
         if value.get("preflight_receipt_raw_sha256") != preflight.raw_sha256:
             raise OfflineSigningError("SIGNING_PREFLIGHT_BINDING_MISMATCH")
     private = read_ed25519_private_key_from_readonly_fd_v1(private_key_fd)
-    actual = private.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
-    if not hmac.compare_digest(hashlib.sha256(actual).hexdigest(), pin.public_key_sha256):
+    actual = private.public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw
+    )
+    if not hmac.compare_digest(
+        hashlib.sha256(actual).hexdigest(), pin.public_key_sha256
+    ):
         raise OfflineSigningError("SIGNING_PRIVATE_KEY_PUBLIC_PIN_MISMATCH")
-    signature = private.sign(str(value["signature_domain_separator"]).encode() + b"\x00" + canonical_json_bytes(value))
+    signature = private.sign(
+        str(value["signature_domain_separator"]).encode()
+        + b"\x00"
+        + canonical_json_bytes(value)
+    )
     return {**value, "signature": base64.b64encode(signature).decode("ascii")}
 
 
-def verify_public_artifact_v1(raw: bytes, *, pin: FoundationPublicKeyPin) -> VerifiedPublicArtifactV1:
+def verify_public_artifact_v1(
+    raw: bytes, *, pin: FoundationPublicKeyPin
+) -> VerifiedPublicArtifactV1:
     value = _strict_object(raw)
     if "signature" not in value:
         raise OfflineSigningError("SIGNING_SIGNATURE_MISSING")
@@ -352,24 +406,45 @@ def verify_public_artifact_v1(raw: bytes, *, pin: FoundationPublicKeyPin) -> Ver
     try:
         Ed25519PublicKey.from_public_bytes(pin.public_key_raw).verify(
             signature,
-            str(value["signature_domain_separator"]).encode() + b"\x00" + canonical_json_bytes({key: item for key, item in value.items() if key != "signature"}),
+            str(value["signature_domain_separator"]).encode()
+            + b"\x00"
+            + canonical_json_bytes(
+                {key: item for key, item in value.items() if key != "signature"}
+            ),
         )
     except (InvalidSignature, ValueError) as exc:
         raise OfflineSigningError("SIGNING_SIGNATURE_INVALID") from exc
-    return VerifiedPublicArtifactV1(value=value, raw_sha256=hashlib.sha256(raw).hexdigest())
+    return VerifiedPublicArtifactV1(
+        value=value, raw_sha256=hashlib.sha256(raw).hexdigest()
+    )
 
 
-def require_fresh_zero_preflight_v1(raw: bytes, *, pin: FoundationPublicKeyPin, now: datetime) -> VerifiedPublicArtifactV1:
+def require_fresh_zero_preflight_v1(
+    raw: bytes, *, pin: FoundationPublicKeyPin, now: datetime
+) -> VerifiedPublicArtifactV1:
     verified = verify_public_artifact_v1(raw, pin=pin)
     value = verified.value
-    if value.get("schema_version") != "windows_rpc_durable_fence_zero_order_preflight_v1":
+    if (
+        value.get("schema_version")
+        != "windows_rpc_durable_fence_zero_order_preflight_v1"
+    ):
         raise OfflineSigningError("SIGNING_PREFLIGHT_SCHEMA_REQUIRED")
     try:
-        observed = datetime.fromisoformat(str(value["observed_at_utc"]).replace("Z", "+00:00"))
-        expires = datetime.fromisoformat(str(value["challenge_expires_at_utc"]).replace("Z", "+00:00"))
+        observed = datetime.fromisoformat(
+            str(value["observed_at_utc"]).replace("Z", "+00:00")
+        )
+        expires = datetime.fromisoformat(
+            str(value["challenge_expires_at_utc"]).replace("Z", "+00:00")
+        )
     except ValueError as exc:
         raise OfflineSigningError("SIGNING_PREFLIGHT_TIME_INVALID") from exc
-    if now.tzinfo is None or now.utcoffset() is None or observed > now or now >= expires or (now - observed).total_seconds() > 30:
+    if (
+        now.tzinfo is None
+        or now.utcoffset() is None
+        or observed > now
+        or now >= expires
+        or (now - observed).total_seconds() > 30
+    ):
         raise OfflineSigningError("SIGNING_PREFLIGHT_NOT_ZERO_OR_FRESH")
     return verified
 
@@ -379,15 +454,27 @@ def write_canonical_create_only_v1(path: Path, payload: Mapping[str, Any]) -> by
     if not output.is_absolute():
         output = Path.cwd() / output
     parent = output.parent.resolve(strict=True)
-    if parent != output.parent or not parent.is_dir() or parent.is_symlink() or output.name in {"", ".", ".."}:
+    if (
+        parent != output.parent
+        or not parent.is_dir()
+        or parent.is_symlink()
+        or output.name in {"", ".", ".."}
+    ):
         raise OfflineSigningError("SIGNING_OUTPUT_PARENT_UNSAFE")
     raw = canonical_json_bytes(dict(payload))
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     try:
-        directory = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
+        directory = os.open(
+            parent,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
         try:
             before = os.fstat(directory)
-            if not stat.S_ISDIR(before.st_mode) or before.st_uid != os.geteuid() or stat.S_IMODE(before.st_mode) & 0o077:
+            if (
+                not stat.S_ISDIR(before.st_mode)
+                or before.st_uid != os.geteuid()
+                or stat.S_IMODE(before.st_mode) & 0o077
+            ):
                 raise OfflineSigningError("SIGNING_OUTPUT_PARENT_UNSAFE")
             descriptor = os.open(output.name, flags, 0o600, dir_fd=directory)
             try:
@@ -396,17 +483,24 @@ def write_canonical_create_only_v1(path: Path, payload: Mapping[str, Any]) -> by
                 created = os.fstat(descriptor)
             finally:
                 os.close(descriptor)
-            observed_info = os.stat(output.name, dir_fd=directory, follow_symlinks=False)
+            observed_info = os.stat(
+                output.name, dir_fd=directory, follow_symlinks=False
+            )
             after = os.fstat(directory)
             if (
-                (created.st_dev, created.st_ino, created.st_size) != (observed_info.st_dev, observed_info.st_ino, observed_info.st_size)
+                (created.st_dev, created.st_ino, created.st_size)
+                != (observed_info.st_dev, observed_info.st_ino, observed_info.st_size)
                 or (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
                 or observed_info.st_uid != os.geteuid()
                 or stat.S_IMODE(observed_info.st_mode) & 0o077
                 or not stat.S_ISREG(observed_info.st_mode)
             ):
                 raise OfflineSigningError("SIGNING_OUTPUT_READBACK_MISMATCH")
-            read_fd = os.open(output.name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=directory)
+            read_fd = os.open(
+                output.name,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=directory,
+            )
             try:
                 observed = os.read(read_fd, len(raw) + 1)
             finally:
@@ -433,12 +527,24 @@ def write_binary_create_only_v1(path: Path, raw: bytes) -> str:
     parent = output.parent.resolve(strict=True)
     if parent != output.parent or output.name in {"", ".", ".."}:
         raise OfflineSigningError("SIGNING_OUTPUT_PARENT_UNSAFE")
-    directory = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
+    directory = os.open(
+        parent,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+    )
     try:
         before = os.fstat(directory)
-        if not stat.S_ISDIR(before.st_mode) or before.st_uid != os.geteuid() or stat.S_IMODE(before.st_mode) & 0o077:
+        if (
+            not stat.S_ISDIR(before.st_mode)
+            or before.st_uid != os.geteuid()
+            or stat.S_IMODE(before.st_mode) & 0o077
+        ):
             raise OfflineSigningError("SIGNING_OUTPUT_PARENT_UNSAFE")
-        descriptor = os.open(output.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600, dir_fd=directory)
+        descriptor = os.open(
+            output.name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=directory,
+        )
         try:
             os.write(descriptor, raw)
             os.fsync(descriptor)
@@ -446,12 +552,18 @@ def write_binary_create_only_v1(path: Path, raw: bytes) -> str:
         finally:
             os.close(descriptor)
         observed = os.stat(output.name, dir_fd=directory, follow_symlinks=False)
-        read_fd = os.open(output.name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=directory)
+        read_fd = os.open(
+            output.name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=directory
+        )
         try:
             readback = os.read(read_fd, len(raw) + 1)
         finally:
             os.close(read_fd)
-        if (identity.st_dev, identity.st_ino, identity.st_size) != (observed.st_dev, observed.st_ino, observed.st_size) or readback != raw:
+        if (identity.st_dev, identity.st_ino, identity.st_size) != (
+            observed.st_dev,
+            observed.st_ino,
+            observed.st_size,
+        ) or readback != raw:
             raise OfflineSigningError("SIGNING_OUTPUT_READBACK_MISMATCH")
         os.fsync(directory)
     finally:
@@ -459,7 +571,9 @@ def write_binary_create_only_v1(path: Path, raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-def write_audit_create_only_v1(path: Path, *, artifact_raw: bytes, action: str) -> bytes:
+def write_audit_create_only_v1(
+    path: Path, *, artifact_raw: bytes, action: str
+) -> bytes:
     if not isinstance(action, str) or not action:
         raise OfflineSigningError("SIGNING_AUDIT_ACTION_INVALID")
     payload = {
@@ -472,14 +586,70 @@ def write_audit_create_only_v1(path: Path, *, artifact_raw: bytes, action: str) 
     return write_canonical_create_only_v1(path, payload)
 
 
-def consume_replay_token_create_only_v1(directory: Path, *, token_sha256: str, purpose: str) -> None:
-    """Durably consume one public digest using the same retained-dirfd primitive."""
-    if not isinstance(token_sha256, str) or len(token_sha256) != 64 or any(c not in "0123456789abcdef" for c in token_sha256):
+_RESERVATION_KINDS = frozenset(
+    {
+        "preflight_challenge",
+        "preflight_replay_guard",
+        "manifest_attempt_nonce",
+        "manifest_install_attempt",
+        "restart_dispatch",
+        "restart_authorization",
+    }
+)
+
+
+def consume_replay_token_create_only_v1(
+    directory: Path,
+    *,
+    token_sha256: str,
+    reservation_kind: str,
+    artifact: Mapping[str, Any],
+) -> bytes:
+    """Create the durable reservation receipt before signing or publication.
+
+    The receipt is the reservation itself, not an audit copy.  It contains only
+    public draft identity facts, so it never requires or exposes private key
+    material.  Its immutable binding makes a ledger receipt unusable for a
+    different signed artifact during final closure verification.
+    """
+    if (
+        not isinstance(token_sha256, str)
+        or len(token_sha256) != 64
+        or any(c not in "0123456789abcdef" for c in token_sha256)
+    ):
         raise OfflineSigningError("SIGNING_REPLAY_TOKEN_INVALID")
-    if not isinstance(purpose, str) or not purpose:
-        raise OfflineSigningError("SIGNING_REPLAY_PURPOSE_INVALID")
-    # A public digest is safe as a filename; the output has no private material.
-    write_canonical_create_only_v1(
-        Path(directory) / f"{purpose}-{token_sha256}.consumed.json",
-        {"schema_version": "windows_rpc_durable_fence_replay_consumption_v1", "purpose": purpose, "token_sha256": token_sha256},
+    if reservation_kind not in _RESERVATION_KINDS:
+        raise OfflineSigningError("SIGNING_RESERVATION_KIND_INVALID")
+    if not isinstance(artifact, Mapping):
+        raise OfflineSigningError("SIGNING_RESERVATION_ARTIFACT_INVALID")
+    schema = artifact.get("schema_version")
+    try:
+        id_field, core_field, _prefix = _core_fields(artifact)
+        artifact_id = artifact[id_field]
+        artifact_core = artifact[core_field]
+        domain = artifact["signature_domain_separator"]
+    except (KeyError, OfflineSigningError) as exc:
+        raise OfflineSigningError("SIGNING_RESERVATION_ARTIFACT_INVALID") from exc
+    if schema not in {
+        "windows_rpc_durable_fence_zero_order_preflight_v1",
+        "windows_rpc_durable_fence_install_manifest_v1",
+        "windows_rpc_durable_fence_restart_authorization_v1",
+    } or not all(
+        isinstance(value, str) for value in (artifact_id, artifact_core, domain)
+    ):
+        raise OfflineSigningError("SIGNING_RESERVATION_ARTIFACT_INVALID")
+    payload = {
+        "schema_version": "windows_rpc_durable_fence_signing_reservation_receipt_v1",
+        "purpose": "record_create_only_offline_signing_reservation_without_private_material",
+        "reservation_kind": reservation_kind,
+        "token_sha256": token_sha256,
+        "reserved_artifact_schema_version": schema,
+        "reserved_artifact_id": artifact_id,
+        "reserved_artifact_core_sha256": artifact_core,
+        "reserved_signature_domain_separator": domain,
+    }
+    # A public digest is safe as a filename; output bytes are the authoritative
+    # receipt consumed by closure verification, rather than a secondary audit.
+    return write_canonical_create_only_v1(
+        Path(directory) / f"{reservation_kind}-{token_sha256}.reservation.json", payload
     )

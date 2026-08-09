@@ -17,7 +17,6 @@ from pathlib import Path
 from typing import Any
 
 from .bundle_v1 import COMPONENT_PATHS, verify_windows_fence_bundle_v1
-from .installer_windows_v1 import FinalWindowsFenceInstallerV1, InstallResultV1
 from .installer_trust_anchor_v1 import (
     KEYRING_PURPOSE,
     KEYRING_SCHEMA_VERSION,
@@ -25,6 +24,7 @@ from .installer_trust_anchor_v1 import (
     load_production_installer_trust_anchor_v1,
     validate_anchor_keyring_bytes_v1,
 )
+from .installer_windows_v1 import FinalWindowsFenceInstallerV1, InstallResultV1
 from .manifest_v1 import (
     WindowsInstallAttemptNonceRegistryV1,
     parse_install_manifest_candidate_v1,
@@ -137,7 +137,9 @@ def run_sealed_final_windows_installer_v1(
         bundle_raw, index_raw, expected_store_binding=store_binding
     )
     if bundle.expected_source_sha256 != anchor.expected_source_sha256:
-        raise WindowsFinalInstallerBootstrapError("INSTALLER_TRUST_SOURCE_REVISION_MISMATCH")
+        raise WindowsFinalInstallerBootstrapError(
+            "INSTALLER_TRUST_SOURCE_REVISION_MISMATCH"
+        )
     if candidate["bundle_sha256"] != bundle.bundle_sha256:
         raise WindowsFinalInstallerBootstrapError("BUNDLE_MANIFEST_SHA_MISMATCH")
     host = NativeWindowsFenceInstallerHostV1()
@@ -186,7 +188,9 @@ def run_sealed_final_windows_installer_v1(
             "BUNDLE_PUBLIC_CONFIG_READ_FAILED"
         ) from exc
     if not host.is_real_windows_host:
-        raise WindowsFinalInstallerBootstrapError("WINDOWS_INSTALLER_BOOTSTRAP_REQUIRED")
+        raise WindowsFinalInstallerBootstrapError(
+            "WINDOWS_INSTALLER_BOOTSTRAP_REQUIRED"
+        )
     if dry_run:
         # Native facts above already performed the query-only host preflight.
         return "WINDOWS_INSTALLER_NATIVE_PREFLIGHT_OK"

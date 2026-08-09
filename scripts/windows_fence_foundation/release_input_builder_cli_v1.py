@@ -1,4 +1,5 @@
 """Offline-only release-input builder; never contacts Windows, M2, or SCM."""
+
 from __future__ import annotations
 
 import argparse
@@ -8,10 +9,16 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from .installer_trust_anchor_v1 import canonical_public_keyring_v1
-from .offline_signing_v1 import OfflineSigningError, write_audit_create_only_v1, write_binary_create_only_v1, write_canonical_create_only_v1
-from .release_input_builder_v1 import build_release_input_manifest_v1
 from jsonschema import Draft202012Validator, FormatChecker
+
+from .installer_trust_anchor_v1 import canonical_public_keyring_v1
+from .offline_signing_v1 import (
+    OfflineSigningError,
+    write_audit_create_only_v1,
+    write_binary_create_only_v1,
+    write_canonical_create_only_v1,
+)
+from .release_input_builder_v1 import build_release_input_manifest_v1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -25,17 +32,41 @@ def main(argv: list[str] | None = None) -> int:
     options = parser.parse_args(argv)
     try:
         value = json.loads(options.release_input.read_text(encoding="utf-8"))
-        schema = json.loads((Path(__file__).resolve().parents[2] / "docs" / "schemas" / "windows-fence-release-input-v1.schema.json").read_text(encoding="utf-8"))
+        schema = json.loads(
+            (
+                Path(__file__).resolve().parents[2]
+                / "docs"
+                / "schemas"
+                / "windows-fence-release-input-v1.schema.json"
+            ).read_text(encoding="utf-8")
+        )
         Draft202012Validator(schema, format_checker=FormatChecker()).validate(value)
         inputs = dict(value["inputs"])
         for field in ("config_raw", "keyring_raw", "preflight_raw"):
             inputs[field] = base64.b64decode(inputs[field], validate=True)
-        pins = canonical_public_keyring_v1(inputs["keyring_raw"], hashlib.sha256(inputs["keyring_raw"]).hexdigest())
-        bundle, index, manifest = build_release_input_manifest_v1(Path(value["source_root"]), release_input=inputs, pins=pins, now=datetime.fromisoformat(options.now_utc.replace("Z", "+00:00")))
+        pins = canonical_public_keyring_v1(
+            inputs["keyring_raw"], hashlib.sha256(inputs["keyring_raw"]).hexdigest()
+        )
+        bundle, index, manifest = build_release_input_manifest_v1(
+            Path(value["source_root"]),
+            release_input=inputs,
+            pins=pins,
+            now=datetime.fromisoformat(options.now_utc.replace("Z", "+00:00")),
+        )
         bundle_sha256 = write_binary_create_only_v1(options.bundle_output, bundle)
-        index_raw = write_canonical_create_only_v1(options.index_output, json.loads(index))
-        manifest_raw = write_canonical_create_only_v1(options.manifest_output, json.loads(manifest))
-        write_audit_create_only_v1(options.audit_output, artifact_raw=hashlib.sha256(bundle_sha256.encode() + index_raw + manifest_raw).digest(), action="build-release-input")
+        index_raw = write_canonical_create_only_v1(
+            options.index_output, json.loads(index)
+        )
+        manifest_raw = write_canonical_create_only_v1(
+            options.manifest_output, json.loads(manifest)
+        )
+        write_audit_create_only_v1(
+            options.audit_output,
+            artifact_raw=hashlib.sha256(
+                bundle_sha256.encode() + index_raw + manifest_raw
+            ).digest(),
+            action="build-release-input",
+        )
     except (OfflineSigningError, OSError, ValueError, json.JSONDecodeError) as exc:
         parser.error(f"release-input build failed: {exc}")
     return 0
