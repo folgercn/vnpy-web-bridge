@@ -567,6 +567,46 @@ def test_windows_relative_create_cleans_up_after_write_failure(
     assert not target.exists()
 
 
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows handle deletion")
+def test_windows_relative_create_redacts_cleanup_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scripts.windows_fence_foundation import win32_fs
+
+    adapter = WindowsFilesystemFactsAdapter()
+    target = tmp_path / "failed-cleanup-create.json"
+    original_write = win32_fs._kernel32.WriteFile
+    original_disposition = win32_fs._kernel32.SetFileInformationByHandle
+    monkeypatch.setattr(win32_fs._kernel32, "WriteFile", lambda *_args: False)
+    monkeypatch.setattr(
+        win32_fs._kernel32, "SetFileInformationByHandle", lambda *_args: False
+    )
+
+    try:
+        with adapter.open_directory_anchor(tmp_path) as parent, pytest.raises(
+            OSError, match="^CREATE_ONLY_WRITE_FAILED_AND_CLEANUP_FAILED$"
+        ) as raised:
+            adapter.write_file_create_only_relative_to_opened_parent(
+                parent=parent,
+                name=target.name,
+                raw=b"{}",
+                protected_sddl="",
+            )
+    finally:
+        monkeypatch.setattr(win32_fs._kernel32, "WriteFile", original_write)
+        monkeypatch.setattr(
+            win32_fs._kernel32,
+            "SetFileInformationByHandle",
+            original_disposition,
+        )
+        target.unlink(missing_ok=True)
+
+    assert raised.value.__cause__ is None
+    assert raised.value.__suppress_context__ is True
+    assert target.name not in str(raised.value)
+    assert "WinError" not in str(raised.value)
+
+
 @pytest.mark.skipif(os.name != "nt", reason="requires Win32 handle and ACL APIs")
 def test_windows_adapter_handle_smoke(tmp_path: Path) -> None:
     state = tmp_path / "state.json"
