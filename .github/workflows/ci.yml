@@ -935,6 +935,7 @@ jobs:
           backend/tests/unit/test_windows_fence_installer_windows_v1.py
           backend/tests/unit/test_windows_fence_installer_bootstrap_v1.py
           backend/tests/unit/test_windows_fence_offline_signing_v1.py
+          backend/tests/unit/test_issue267_windows_fence_foundation_schemas.py
 
       - name: Smoke native final-installer host without service mutation
         if: runner.os == 'Windows'

@@ -23,10 +23,12 @@ from .offline_signing_v1 import (
     write_audit_create_only_v1,
     write_canonical_create_only_v1,
 )
+from .contracts import parse_frozen_none_state
 
 CHAIN_ORDER = (
     "zero_preflight",
     "manifest",
+    "fence_state",
     "event_1_prepared",
     "publish_receipt",
     "event_2_published",
@@ -83,6 +85,9 @@ def verify_signing_closure_chain_v1(
     attestation = verify_public_artifact_v1(artifacts["attestation"], pin=pins.observer).value
     if manifest.get("restart_authorized") is not False or manifest.get("automatic_restart_allowed") is not False:
         raise OfflineSigningError("SIGNING_CHAIN_MANIFEST_RESTART_FORBIDDEN")
+    state = parse_frozen_none_state(artifacts["fence_state"])
+    if state["install_manifest_raw_sha256"] != _raw_sha(artifacts["manifest"]) or state["preflight_receipt_raw_sha256"] != _raw_sha(artifacts["zero_preflight"]):
+        raise OfflineSigningError("SIGNING_CHAIN_FROZEN_STATE_BINDING_MISMATCH")
     events: list[dict[str, Any]] = []
     previous: bytes | None = None
     for sequence, event_type, name in (
@@ -122,6 +127,18 @@ def verify_signing_closure_chain_v1(
     for owner, field, raw in bindings:
         if owner.get(field) != _raw_sha(raw):
             raise OfflineSigningError("SIGNING_CHAIN_RAW_BINDING_MISMATCH")
+    for event in events:
+        if (
+            event.get("install_manifest_raw_sha256") != _raw_sha(artifacts["manifest"])
+            or event.get("preflight_receipt_raw_sha256") != _raw_sha(artifacts["zero_preflight"])
+            or event.get("fence_state_raw_sha256") != _raw_sha(artifacts["fence_state"])
+            or event.get("admission_state") != "FROZEN"
+            or event.get("token_state") != "NONE"
+            or event.get("staged_token") is not None
+            or event.get("active_token") is not None
+            or event.get("authority_grant") is not None
+        ):
+            raise OfflineSigningError("SIGNING_CHAIN_EVENT_FROZEN_BINDING_MISMATCH")
     install_attempt = str(preflight["install_attempt_id"])
     service_name = str(preflight["service_name"])
     for item in (manifest, publish, restart, transition, scm, startup, attestation, *events):

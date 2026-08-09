@@ -31,6 +31,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
     Ed25519PublicKey,
 )
+from jsonschema import Draft202012Validator, FormatChecker, ValidationError
 
 from .contracts import AUTHORITY_FIELDS, StoreContractError, canonical_json_bytes
 from .trust_pins_v1 import (
@@ -45,6 +46,7 @@ from .trust_pins_v1 import (
 
 MAX_ARTIFACT_BYTES = 512 * 1024
 MAX_PRIVATE_KEY_BYTES = 16 * 1024
+_SCHEMA_ROOT = Path(__file__).resolve().parents[2] / "docs" / "schemas"
 CANONICALIZATION_PROFILE = "windows-foundation-canonical-json-v1"
 MANIFEST_DOMAIN = "vnpy.issue267.windows-foundation.install-manifest.v1"
 RESTART_DOMAIN = "vnpy.issue267.windows-foundation.restart-authorization.v1"
@@ -99,6 +101,30 @@ def _strict_object(raw: bytes) -> dict[str, Any]:
     except (UnicodeDecodeError, json.JSONDecodeError, StoreContractError) as exc:
         raise OfflineSigningError("SIGNING_ARTIFACT_JSON_INVALID") from exc
     return value
+
+
+def _validate_schema(value: Mapping[str, Any], *, signed: bool) -> None:
+    schema_version = value.get("schema_version")
+    filenames = {
+        "windows_rpc_durable_fence_install_manifest_v1": "windows-rpc-durable-fence-install-manifest-v1.schema.json",
+        "windows_rpc_durable_fence_zero_order_preflight_v1": "windows-rpc-durable-fence-zero-order-preflight-v1.schema.json",
+        "windows_rpc_durable_fence_restart_authorization_v1": "windows-rpc-durable-fence-restart-authorization-v1.schema.json",
+        "windows_rpc_durable_fence_publish_receipt_v1": "windows-rpc-durable-fence-publish-receipt-v1.schema.json",
+        "windows_rpc_durable_fence_scm_dispatch_evidence_v1": "windows-rpc-durable-fence-scm-dispatch-evidence-v1.schema.json",
+        "windows_rpc_durable_fence_startup_receipt_v1": "windows-rpc-durable-fence-startup-receipt-v1.schema.json",
+        "windows_rpc_durable_fence_foundation_attestation_v1": "windows-rpc-durable-fence-foundation-attestation-v1.schema.json",
+    }
+    filename = filenames.get(schema_version)
+    if filename is None:
+        raise OfflineSigningError("SIGNING_ARTIFACT_SCHEMA_UNSUPPORTED")
+    candidate = dict(value)
+    if not signed:
+        candidate["signature"] = base64.b64encode(bytes(64)).decode("ascii")
+    try:
+        schema = json.loads((_SCHEMA_ROOT / filename).read_text(encoding="utf-8"))
+        Draft202012Validator(schema, format_checker=FormatChecker()).validate(candidate)
+    except (OSError, json.JSONDecodeError, ValidationError) as exc:
+        raise OfflineSigningError("SIGNING_ARTIFACT_SCHEMA_INVALID") from exc
 
 
 def read_canonical_artifact_v1(path: Path) -> tuple[bytes, dict[str, Any]]:
@@ -211,6 +237,7 @@ def _core_fields(value: Mapping[str, Any]) -> tuple[str, str, str]:
 
 
 def _verify_identity_and_frozen_facts(value: Mapping[str, Any]) -> None:
+    _validate_schema(value, signed="signature" in value)
     id_field, core_field, prefix = _core_fields(value)
     if not isinstance(value.get("signature_domain_separator"), str):
         raise OfflineSigningError("SIGNING_DOMAIN_MISSING")
@@ -352,22 +379,40 @@ def write_canonical_create_only_v1(path: Path, payload: Mapping[str, Any]) -> by
     if not output.is_absolute():
         output = Path.cwd() / output
     parent = output.parent.resolve(strict=True)
-    if parent != output.parent or not parent.is_dir() or parent.is_symlink():
-        raise OfflineSigningError("SIGNING_OUTPUT_PARENT_UNSAFE")
-    mode = stat.S_IMODE(parent.stat().st_mode)
-    if parent.stat().st_uid != os.geteuid() or mode & 0o077:
+    if parent != output.parent or not parent.is_dir() or parent.is_symlink() or output.name in {"", ".", ".."}:
         raise OfflineSigningError("SIGNING_OUTPUT_PARENT_UNSAFE")
     raw = canonical_json_bytes(dict(payload))
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     try:
-        descriptor = os.open(output, flags, 0o600)
+        directory = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
         try:
-            os.write(descriptor, raw)
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
-        directory = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-        try:
+            before = os.fstat(directory)
+            if not stat.S_ISDIR(before.st_mode) or before.st_uid != os.geteuid() or stat.S_IMODE(before.st_mode) & 0o077:
+                raise OfflineSigningError("SIGNING_OUTPUT_PARENT_UNSAFE")
+            descriptor = os.open(output.name, flags, 0o600, dir_fd=directory)
+            try:
+                os.write(descriptor, raw)
+                os.fsync(descriptor)
+                created = os.fstat(descriptor)
+            finally:
+                os.close(descriptor)
+            observed_info = os.stat(output.name, dir_fd=directory, follow_symlinks=False)
+            after = os.fstat(directory)
+            if (
+                (created.st_dev, created.st_ino, created.st_size) != (observed_info.st_dev, observed_info.st_ino, observed_info.st_size)
+                or (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
+                or observed_info.st_uid != os.geteuid()
+                or stat.S_IMODE(observed_info.st_mode) & 0o077
+                or not stat.S_ISREG(observed_info.st_mode)
+            ):
+                raise OfflineSigningError("SIGNING_OUTPUT_READBACK_MISMATCH")
+            read_fd = os.open(output.name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0), dir_fd=directory)
+            try:
+                observed = os.read(read_fd, len(raw) + 1)
+            finally:
+                os.close(read_fd)
+            if observed != raw or _strict_object(observed) != dict(payload):
+                raise OfflineSigningError("SIGNING_OUTPUT_READBACK_MISMATCH")
             os.fsync(directory)
         finally:
             os.close(directory)
@@ -375,9 +420,6 @@ def write_canonical_create_only_v1(path: Path, payload: Mapping[str, Any]) -> by
         raise OfflineSigningError("SIGNING_OUTPUT_EXISTS") from exc
     except OSError as exc:
         raise OfflineSigningError("SIGNING_OUTPUT_WRITE_FAILED") from exc
-    observed, parsed = read_canonical_artifact_v1(output)
-    if observed != raw or parsed != dict(payload):
-        raise OfflineSigningError("SIGNING_OUTPUT_READBACK_MISMATCH")
     return raw
 
 
@@ -392,3 +434,16 @@ def write_audit_create_only_v1(path: Path, *, artifact_raw: bytes, action: str) 
         "artifact_size_bytes": len(artifact_raw),
     }
     return write_canonical_create_only_v1(path, payload)
+
+
+def consume_replay_token_create_only_v1(directory: Path, *, token_sha256: str, purpose: str) -> None:
+    """Durably consume one public digest using the same retained-dirfd primitive."""
+    if not isinstance(token_sha256, str) or len(token_sha256) != 64 or any(c not in "0123456789abcdef" for c in token_sha256):
+        raise OfflineSigningError("SIGNING_REPLAY_TOKEN_INVALID")
+    if not isinstance(purpose, str) or not purpose:
+        raise OfflineSigningError("SIGNING_REPLAY_PURPOSE_INVALID")
+    # A public digest is safe as a filename; the output has no private material.
+    write_canonical_create_only_v1(
+        Path(directory) / f"{purpose}-{token_sha256}.consumed.json",
+        {"schema_version": "windows_rpc_durable_fence_replay_consumption_v1", "purpose": purpose, "token_sha256": token_sha256},
+    )

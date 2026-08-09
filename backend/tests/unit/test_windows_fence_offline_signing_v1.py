@@ -24,6 +24,7 @@ from scripts.windows_fence_foundation.trust_pins_v1 import (
     OBSERVER_SIGNER_ROLE,
     FoundationPublicKeyPin,
 )
+from backend.tests.unit.test_issue267_windows_fence_foundation_schemas import _preflight
 
 
 def _pin(private: Ed25519PrivateKey) -> FoundationPublicKeyPin:
@@ -39,30 +40,22 @@ def _pin(private: Ed25519PrivateKey) -> FoundationPublicKeyPin:
 
 def _draft(pin: FoundationPublicKeyPin, **override: object) -> dict[str, object]:
     facts_raw = canonical_json_bytes({"pending_send_outcomes": 0, "active_orders": [], "positions": []})
-    value: dict[str, object] = {
-        "schema_version": "windows_rpc_durable_fence_zero_order_preflight_v1",
-        "purpose": "unit-only-canonical-preflight",
-        "install_attempt_id": "windows-fence-install-" + "a" * 64,
-        "service_name": "VnpyRpcService",
-        "observed_at_utc": "2026-08-09T00:00:00Z",
+    value: dict[str, object] = _preflight()
+    value.pop("signature")
+    value.pop("receipt_id")
+    value.pop("receipt_core_sha256")
+    value.update({
+        "challenge_issued_at_utc": "2026-08-09T00:00:00Z",
+        "snapshot_served_at_utc": "2026-08-09T00:00:01Z",
+        "observed_at_utc": "2026-08-09T00:00:02Z",
         "challenge_expires_at_utc": "2026-08-09T00:00:30Z",
-        "pending_send_outcomes": 0,
-        "active_orders": [],
-        "web_trade_enabled": False,
-        "old_runtime_frozen": True,
-        "execution_authority_revoked": True,
-        "zero_order_preflight_verified": True,
         "execution_facts_canonical_sha256": hashlib.sha256(facts_raw).hexdigest(),
         "snapshot_raw_sha256": hashlib.sha256(facts_raw).hexdigest(),
-        "authority": {field: False for field in AUTHORITY_FIELDS},
-        "canonicalization_profile": "windows-foundation-canonical-json-v1",
-        "signature_domain_separator": "vnpy.issue267.windows-foundation.zero-order-preflight.v1",
-        "signature_algorithm": "Ed25519",
         "signer_role": pin.role,
         "signer_key_domain": pin.key_domain,
         "signer_key_id": pin.key_id,
         "signer_public_key_sha256": pin.public_key_sha256,
-    }
+    })
     value.update(override)
     core = hashlib.sha256(canonical_json_bytes(value)).hexdigest()
     value["receipt_core_sha256"] = core
@@ -109,7 +102,7 @@ def test_signing_rejects_nonzero_or_live_preflight(field: str, value: object, tm
     pin = _pin(private)
     descriptor = _key_fd(tmp_path, private)
     try:
-        with pytest.raises(OfflineSigningError, match="PREFLIGHT_NOT_ZERO_OR_FRESH"):
+        with pytest.raises(OfflineSigningError, match="SCHEMA_INVALID|PREFLIGHT_NOT_ZERO_OR_FRESH"):
             sign_artifact_with_fd_v1(_draft(pin, **{field: value}), private_key_fd=descriptor, pin=pin, execution_facts_raw=_facts(), snapshot_raw=_facts())
     finally:
         os.close(descriptor)
@@ -121,7 +114,7 @@ def test_key_domain_reuse_and_stale_preflight_fail_closed(tmp_path: Path) -> Non
     pin = _pin(private)
     descriptor = _key_fd(tmp_path, private)
     try:
-        with pytest.raises(OfflineSigningError, match="PUBLIC_PIN_MISMATCH"):
+        with pytest.raises(OfflineSigningError, match="SCHEMA_INVALID|PUBLIC_PIN_MISMATCH"):
             sign_artifact_with_fd_v1(_draft(pin, signer_key_domain="dedicated-windows-foundation-manifest-signing-v1"), private_key_fd=descriptor, pin=pin, execution_facts_raw=_facts(), snapshot_raw=_facts())
         signed = sign_artifact_with_fd_v1(_draft(pin), private_key_fd=descriptor, pin=pin, execution_facts_raw=_facts(), snapshot_raw=_facts())
     finally:

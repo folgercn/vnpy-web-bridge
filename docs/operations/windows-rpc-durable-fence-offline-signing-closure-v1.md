@@ -14,6 +14,13 @@ key IDs, hashes, roles, or domains. Every artifact and its audit sidecar must
 be written to pre-existing private directories with create-only publication,
 fsync, and canonical readback.
 
+The observer signer alone consumes the preflight challenge nonce and replay
+guard in a create-only offline ledger. Manifest signing only reserves the
+existing install-attempt nonce registry; it does not consume the preflight
+challenge. Restart authorization consumes its separate dispatch nonce and
+authorization identity, so downstream verification can safely reference the
+same signed preflight without replaying any authority.
+
 Before manifest or restart work, verify a canonical observer-signed zero-order
 preflight that is no more than 30 seconds old and independently reports frozen
 runtime, trading disabled, revoked execution authority, zero pending sends and

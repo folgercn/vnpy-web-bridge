@@ -15,6 +15,7 @@ from .offline_signing_v1 import (
     sign_artifact_with_fd_v1,
     write_audit_create_only_v1,
     write_canonical_create_only_v1,
+    consume_replay_token_create_only_v1,
 )
 
 
@@ -29,6 +30,7 @@ def run(role: str, argv: list[str] | None = None) -> int:
     parser.add_argument("--now-utc")
     parser.add_argument("--execution-facts", type=Path)
     parser.add_argument("--snapshot", type=Path)
+    parser.add_argument("--replay-ledger-dir", type=Path)
     options = parser.parse_args(argv)
     try:
         keyring_raw = options.public_keyring.read_bytes()
@@ -47,6 +49,8 @@ def run(role: str, argv: list[str] | None = None) -> int:
             options.execution_facts is None or options.snapshot is None
         ):
             raise OfflineSigningError("SIGNING_PREFLIGHT_SOURCE_FACTS_REQUIRED")
+        if schema in {"windows_rpc_durable_fence_zero_order_preflight_v1", "windows_rpc_durable_fence_restart_authorization_v1"} and options.replay_ledger_dir is None:
+            raise OfflineSigningError("SIGNING_REPLAY_LEDGER_REQUIRED")
         signed = sign_artifact_with_fd_v1(
             draft,
             private_key_fd=options.private_key_fd,
@@ -58,6 +62,12 @@ def run(role: str, argv: list[str] | None = None) -> int:
             snapshot_raw=(None if options.snapshot is None else options.snapshot.read_bytes()),
         )
         raw = write_canonical_create_only_v1(options.output, signed)
+        if schema == "windows_rpc_durable_fence_zero_order_preflight_v1":
+            consume_replay_token_create_only_v1(options.replay_ledger_dir, token_sha256=str(draft["challenge_nonce_sha256"]), purpose="preflight-challenge")
+            consume_replay_token_create_only_v1(options.replay_ledger_dir, token_sha256=hashlib.sha256(str(draft["replay_guard_id"]).encode()).hexdigest(), purpose="preflight-replay-guard")
+        if schema == "windows_rpc_durable_fence_restart_authorization_v1":
+            consume_replay_token_create_only_v1(options.replay_ledger_dir, token_sha256=str(draft["dispatch_nonce_sha256"]), purpose="restart-dispatch")
+            consume_replay_token_create_only_v1(options.replay_ledger_dir, token_sha256=hashlib.sha256(str(draft["authorization_id"]).encode()).hexdigest(), purpose="restart-authorization")
         write_audit_create_only_v1(options.audit_output, artifact_raw=raw, action=f"sign-{role}")
     except (OfflineSigningError, OSError, ValueError) as exc:
         print(f"offline {role} signing failed: {exc}", file=sys.stderr)

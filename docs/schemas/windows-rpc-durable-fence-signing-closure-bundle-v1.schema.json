@@ -9,8 +9,8 @@
     "purpose": {"const": "record_verified_offline_windows_fence_signing_closure_without_execution_authority"},
     "install_attempt_id": {"type": "string", "pattern": "^windows-fence-install-[0-9a-f]{64}$"},
     "service_name": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"},
-    "chain_order": {"type": "array", "minItems": 15, "maxItems": 15, "items": {"type": "string"}},
-    "artifact_raw_sha256": {"type": "object", "minProperties": 15, "maxProperties": 15, "additionalProperties": {"type": "string", "pattern": "^[0-9a-f]{64}$"}},
+    "chain_order": {"type": "array", "minItems": 16, "maxItems": 16, "items": {"type": "string"}},
+    "artifact_raw_sha256": {"type": "object", "minProperties": 16, "maxProperties": 16, "additionalProperties": {"type": "string", "pattern": "^[0-9a-f]{64}$"}},
     "restart_authorized": {"const": false}, "automatic_restart_allowed": {"const": false}, "live_trading_authorized": {"const": false}
   }
 }
