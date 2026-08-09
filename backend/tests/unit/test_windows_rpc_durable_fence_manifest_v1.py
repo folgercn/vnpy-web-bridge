@@ -24,6 +24,7 @@ from scripts.windows_fence_foundation.manifest_v1 import (
     SIGNATURE_DOMAIN,
     FilesystemInstallAttemptNonceRegistryV1,
     ManifestVerificationError,
+    WindowsInstallAttemptNonceRegistryV1,
     derive_install_attempt_id_v1,
     verify_and_reserve_install_manifest_v1,
     verify_install_manifest_v1,
@@ -86,6 +87,62 @@ def _registry(
     )
 
 
+@pytest.mark.skipif(os.name == "nt", reason="portable-rejection contract")
+def test_windows_nonce_registry_never_accepts_portable_adapter(
+    pins: WindowsFoundationTrustPinsV1,
+) -> None:
+    with pytest.raises(
+        ManifestVerificationError, match="WINDOWS_NONCE_REGISTRY_REQUIRED"
+    ):
+        WindowsInstallAttemptNonceRegistryV1(
+            REGISTRY_ROOT,
+            filesystem=_SecureTestFilesystem(),  # type: ignore[arg-type]
+            expected_root_facts=pins.nonce_registry_root_facts,
+            owner_sid=pins.nonce_registry_owner_sid,
+            acl_sddl=pins.nonce_registry_acl_sddl,
+        )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows opened-handle smoke")
+def test_windows_nonce_registry_create_readback_and_replay(tmp_path: Path) -> None:
+    import win32api  # type: ignore[import-not-found]
+    import win32security  # type: ignore[import-not-found]
+
+    from scripts.windows_fence_foundation.win32_fs import WindowsFilesystemFactsAdapter
+
+    sid, _domain, _kind = win32security.LookupAccountName(None, win32api.GetUserName())
+    owner = win32security.ConvertSidToStringSid(sid)
+    sddl = f"O:{owner}D:PAI(A;;FA;;;{owner})"
+    filesystem = WindowsFilesystemFactsAdapter()
+    filesystem.apply_protected_security_by_handle(tmp_path, sddl=sddl, directory=True)
+    facts = filesystem.inspect(tmp_path)
+    registry = WindowsInstallAttemptNonceRegistryV1(
+        tmp_path,
+        filesystem=filesystem,
+        expected_root_facts=facts,
+        owner_sid=owner,
+        acl_sddl=sddl,
+    )
+    nonce = "a" * 64
+    immutable = "b" * 64
+    assert (
+        registry.compare_and_record(
+            nonce_sha256=nonce, immutable_inputs_sha256=immutable
+        )
+        == "CREATED"
+    )
+    assert (
+        registry.compare_and_record(
+            nonce_sha256=nonce, immutable_inputs_sha256=immutable
+        )
+        == "MATCHED_EXISTING"
+    )
+    with pytest.raises(ManifestVerificationError, match="REUSE_CONFLICT"):
+        registry.compare_and_record(
+            nonce_sha256=nonce, immutable_inputs_sha256="c" * 64
+        )
+
+
 def _private(seed: int) -> Ed25519PrivateKey:
     return Ed25519PrivateKey.from_private_bytes(bytes([seed]) * 32)
 
@@ -124,6 +181,8 @@ def pins(
         observer=_pin(observer, OBSERVER_KEY_DOMAIN, OBSERVER_SIGNER_ROLE, "unit-key2"),
         restart=_pin(restart, RESTART_KEY_DOMAIN, RESTART_SIGNER_ROLE, "unit-key3"),
         nonce_registry_root_facts=_registry_facts(REGISTRY_ROOT),
+        nonce_registry_owner_sid="test-owner",
+        nonce_registry_acl_sddl="test-acl",
     )
 
 
@@ -714,6 +773,8 @@ def test_three_trust_domains_are_pairwise_distinct(
             observer=observer,
             restart=pins.restart,
             nonce_registry_root_facts=pins.nonce_registry_root_facts,
+            nonce_registry_owner_sid=pins.nonce_registry_owner_sid,
+            nonce_registry_acl_sddl=pins.nonce_registry_acl_sddl,
         )
 
 

@@ -184,6 +184,7 @@ if os.name == "nt":  # pragma: win32 cover
 
     _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     _advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    _ntdll = ctypes.WinDLL("ntdll", use_last_error=True)
     _INVALID_HANDLE = wintypes.HANDLE(-1).value
     _FILE_READ_ATTRIBUTES = 0x0080
     _READ_CONTROL = 0x00020000
@@ -218,6 +219,11 @@ if os.name == "nt":  # pragma: win32 cover
     _ACE_OBJECT_TYPE_PRESENT = 0x1
     _ACE_INHERITED_OBJECT_TYPE_PRESENT = 0x2
     _BROAD_WRITE_SIDS = {"S-1-1-0", "S-1-5-11", "S-1-5-32-545"}
+    _OBJ_CASE_INSENSITIVE = 0x40
+    _FILE_CREATE = 2
+    _FILE_NON_DIRECTORY_FILE = 0x40
+    _FILE_SYNCHRONOUS_IO_NONALERT = 0x20
+    _FILE_OPEN_REPARSE_POINT = 0x00200000
 
     class _BY_HANDLE_FILE_INFORMATION(ctypes.Structure):
         _fields_ = [
@@ -232,6 +238,26 @@ if os.name == "nt":  # pragma: win32 cover
             ("file_index_high", wintypes.DWORD),
             ("file_index_low", wintypes.DWORD),
         ]
+
+    class _UNICODE_STRING(ctypes.Structure):
+        _fields_ = [
+            ("length", wintypes.USHORT),
+            ("maximum_length", wintypes.USHORT),
+            ("buffer", wintypes.LPWSTR),
+        ]
+
+    class _OBJECT_ATTRIBUTES(ctypes.Structure):
+        _fields_ = [
+            ("length", wintypes.ULONG),
+            ("root_directory", wintypes.HANDLE),
+            ("object_name", ctypes.POINTER(_UNICODE_STRING)),
+            ("attributes", wintypes.ULONG),
+            ("security_descriptor", ctypes.c_void_p),
+            ("security_quality_of_service", ctypes.c_void_p),
+        ]
+
+    class _IO_STATUS_BLOCK(ctypes.Structure):
+        _fields_ = [("status", ctypes.c_long), ("information", ctypes.c_size_t)]
 
     class _ACL_SIZE_INFORMATION(ctypes.Structure):
         _fields_ = [
@@ -397,6 +423,21 @@ if os.name == "nt":  # pragma: win32 cover
         ctypes.POINTER(wintypes.DWORD),
     ]
     _advapi32.LookupAccountNameW.restype = wintypes.BOOL
+    _ntdll.NtCreateFile.argtypes = [
+        ctypes.POINTER(wintypes.HANDLE),
+        wintypes.ULONG,
+        ctypes.POINTER(_OBJECT_ATTRIBUTES),
+        ctypes.POINTER(_IO_STATUS_BLOCK),
+        ctypes.c_void_p,
+        wintypes.ULONG,
+        wintypes.ULONG,
+        wintypes.ULONG,
+        wintypes.ULONG,
+        wintypes.ULONG,
+        ctypes.c_void_p,
+        wintypes.ULONG,
+    ]
+    _ntdll.NtCreateFile.restype = ctypes.c_long
 
 
 class WindowsFilesystemFactsAdapter:
@@ -477,6 +518,13 @@ class WindowsFilesystemFactsAdapter:
         )
         if handle == _INVALID_HANDLE:
             raise ctypes.WinError(ctypes.get_last_error())
+        return self._write_created_handle(
+            handle, path=path, raw=raw, protected_sddl=protected_sddl
+        )
+
+    def _write_created_handle(
+        self, handle: int, *, path: Path, raw: bytes, protected_sddl: str
+    ) -> SecureFileRead:
         try:
             try:
                 buffer = ctypes.create_string_buffer(raw)
@@ -526,6 +574,71 @@ class WindowsFilesystemFactsAdapter:
                 raise
         finally:
             _kernel32.CloseHandle(handle)
+
+    def write_file_create_only_relative_to_opened_parent(
+        self,
+        *,
+        parent: WindowsOpenedDirectoryAnchorV1,
+        name: str,
+        raw: bytes,
+        protected_sddl: str,
+    ) -> SecureFileRead:
+        """Create a leaf through NT RootDirectory, never a mutable full path."""
+        if (
+            not name
+            or "\\" in name
+            or "/" in name
+            or "\x00" in name
+            or parent._handle is None
+            or not raw
+        ):
+            raise OSError("invalid relative create-only target")
+        buffer = ctypes.create_unicode_buffer(name)
+        unicode_name = _UNICODE_STRING(
+            len(name.encode("utf-16-le")),
+            (len(name) + 1) * 2,
+            buffer,
+        )
+        attributes = _OBJECT_ATTRIBUTES(
+            ctypes.sizeof(_OBJECT_ATTRIBUTES),
+            parent._handle,
+            ctypes.pointer(unicode_name),
+            _OBJ_CASE_INSENSITIVE,
+            None,
+            None,
+        )
+        status = _IO_STATUS_BLOCK()
+        handle = wintypes.HANDLE()
+        result = _ntdll.NtCreateFile(
+            ctypes.byref(handle),
+            _GENERIC_READ
+            | _GENERIC_WRITE
+            | _READ_CONTROL
+            | _FILE_READ_ATTRIBUTES
+            | _WRITE_DAC
+            | _WRITE_OWNER,
+            ctypes.byref(attributes),
+            ctypes.byref(status),
+            None,
+            _FILE_ATTRIBUTE_NORMAL,
+            0,
+            _FILE_CREATE,
+            _FILE_NON_DIRECTORY_FILE
+            | _FILE_SYNCHRONOUS_IO_NONALERT
+            | _FILE_OPEN_REPARSE_POINT,
+            None,
+            0,
+        )
+        if result != 0:
+            if result == -1073741771:  # STATUS_OBJECT_NAME_COLLISION
+                raise FileExistsError(name)
+            raise OSError(f"NtCreateFile failed: 0x{result & 0xFFFFFFFF:08X}")
+        return self._write_created_handle(
+            handle.value,
+            path=parent.path / name,
+            raw=raw,
+            protected_sddl=protected_sddl,
+        )
 
     @staticmethod
     def apply_protected_security_by_handle(

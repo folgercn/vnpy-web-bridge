@@ -53,6 +53,8 @@ class WindowsFoundationTrustPinsV1:
     observer: FoundationPublicKeyPin
     restart: FoundationPublicKeyPin
     nonce_registry_root_facts: PathSecurityFacts
+    nonce_registry_owner_sid: str
+    nonce_registry_acl_sddl: str
 
     def __post_init__(self) -> None:
         facts = self.nonce_registry_root_facts
@@ -76,6 +78,17 @@ class WindowsFoundationTrustPinsV1:
             or facts.inherited_ace_count != 0
         ):
             raise TrustPinError("NONCE_REGISTRY_ROOT_FACTS_INVALID")
+        if (
+            not isinstance(self.nonce_registry_owner_sid, str)
+            or not self.nonce_registry_owner_sid
+            or not isinstance(self.nonce_registry_acl_sddl, str)
+            or not self.nonce_registry_acl_sddl
+            or hashlib.sha256(self.nonce_registry_owner_sid.encode("utf-8")).hexdigest()
+            != facts.owner_sid_sha256
+            or hashlib.sha256(self.nonce_registry_acl_sddl.encode("utf-8")).hexdigest()
+            != facts.acl_sddl_sha256
+        ):
+            raise TrustPinError("NONCE_REGISTRY_SECURITY_EXPECTATION_INVALID")
         if any(
             not isinstance(pin, FoundationPublicKeyPin)
             for pin in (self.manifest, self.observer, self.restart)

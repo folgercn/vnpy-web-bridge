@@ -157,6 +157,8 @@ class WindowsFenceInstallerHostV1(Protocol):
         component_sha256s: Mapping[str, str],
         owner_sid_sha256: str,
         component_acl_sddl_sha256: str,
+        final_owner_sid_sha256: str,
+        final_directory_acl_sddl_sha256: str,
     ) -> None: ...
 
     def query_same_restart_attempt_only(self, *, install_attempt_id: str) -> str: ...
@@ -440,6 +442,10 @@ class FinalWindowsFenceInstallerV1:
                 owner_sid_sha256=manifest["expected_final_owner_sid_sha256"],
                 component_acl_sddl_sha256=manifest[
                     "expected_component_acl_sddl_sha256"
+                ],
+                final_owner_sid_sha256=manifest["expected_final_owner_sid_sha256"],
+                final_directory_acl_sddl_sha256=manifest[
+                    "expected_final_directory_acl_sddl_sha256"
                 ],
             )
             self._host.restore_pre_event3_backup(backup_id=self._backup_id)

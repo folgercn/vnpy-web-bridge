@@ -749,6 +749,8 @@ class NativeWindowsFenceInstallerHostV1(WindowsFenceInstallerHostV1):
         component_sha256s: Mapping[str, str],
         owner_sid_sha256: str,
         component_acl_sddl_sha256: str,
+        final_owner_sid_sha256: str,
+        final_directory_acl_sddl_sha256: str,
     ) -> None:
         self._require_windows()
         path = Path(destination_root)
@@ -774,6 +776,11 @@ class NativeWindowsFenceInstallerHostV1(WindowsFenceInstallerHostV1):
             or not facts.parent_chain_reparse_free
             or facts.hardlink_count != 1
             or facts.alternate_data_streams
+            or not facts.dacl_protected
+            or facts.inherited_ace_count
+            or facts.unsafe_write_principals
+            or facts.owner_sid_sha256 != final_owner_sid_sha256
+            or facts.acl_sddl_sha256 != final_directory_acl_sddl_sha256
             or set(inventory.names)
             != {
                 "windows_rpc_service_wrapper_v1.py",
@@ -792,9 +799,30 @@ class NativeWindowsFenceInstallerHostV1(WindowsFenceInstallerHostV1):
             "config": "windows_rpc_service_config_v1.json",
         }
         try:
-            with filesystem.open_directory_anchor(path.parent) as anchor:
-                anchor.assert_named_path_is_opened_parent()
+            with (
+                filesystem.open_directory_anchor(path.parent) as parent_anchor,
+                filesystem.open_directory_anchor(path) as bundle_anchor,
+            ):
+                parent_before = parent_anchor.assert_named_path_is_opened_parent()
+                bundle_before = bundle_anchor.assert_named_path_is_opened_parent()
+                if (
+                    bundle_before != facts
+                    or bundle_before.owner_sid_sha256 != final_owner_sid_sha256
+                    or bundle_before.acl_sddl_sha256 != final_directory_acl_sddl_sha256
+                    or not bundle_before.dacl_protected
+                    or bundle_before.inherited_ace_count
+                    or bundle_before.unsafe_write_principals
+                ):
+                    raise WindowsFinalInstallerError("INSTALL_ORPHAN_CLEANUP_UNSAFE")
                 for role, name in role_names.items():
+                    parent_anchor.assert_named_path_is_opened_parent()
+                    if (
+                        bundle_anchor.assert_named_path_is_opened_parent()
+                        != bundle_before
+                    ):
+                        raise WindowsFinalInstallerError(
+                            "INSTALL_ORPHAN_CLEANUP_UNSAFE"
+                        )
                     item = filesystem.read_file(path / name)
                     file_facts = item.facts
                     if (
@@ -809,11 +837,30 @@ class NativeWindowsFenceInstallerHostV1(WindowsFenceInstallerHostV1):
                         raise WindowsFinalInstallerError(
                             "INSTALL_ORPHAN_CLEANUP_UNSAFE"
                         )
-                    anchor.assert_named_path_is_opened_parent()
+                    parent_anchor.assert_named_path_is_opened_parent()
+                    if (
+                        bundle_anchor.assert_named_path_is_opened_parent()
+                        != bundle_before
+                    ):
+                        raise WindowsFinalInstallerError(
+                            "INSTALL_ORPHAN_CLEANUP_UNSAFE"
+                        )
                     filesystem.delete_empty_object_by_handle(
                         path / name, directory=False
                     )
-                anchor.assert_named_path_is_opened_parent()
+                    parent_anchor.assert_named_path_is_opened_parent()
+                    if (
+                        bundle_anchor.assert_named_path_is_opened_parent()
+                        != bundle_before
+                    ):
+                        raise WindowsFinalInstallerError(
+                            "INSTALL_ORPHAN_CLEANUP_UNSAFE"
+                        )
+                parent_after = parent_anchor.assert_named_path_is_opened_parent()
+                if parent_after != parent_before:
+                    raise WindowsFinalInstallerError("INSTALL_ORPHAN_CLEANUP_UNSAFE")
+                if bundle_anchor.assert_named_path_is_opened_parent() != bundle_before:
+                    raise WindowsFinalInstallerError("INSTALL_ORPHAN_CLEANUP_UNSAFE")
                 filesystem.delete_empty_object_by_handle(path, directory=True)
         except OSError:
             raise WindowsFinalInstallerError("INSTALL_ORPHAN_CLEANUP_FAILED") from None

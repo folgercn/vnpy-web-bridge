@@ -183,9 +183,15 @@ class WindowsSecureCredentialBlobWriterV1:
             filesystem = WindowsFilesystemFactsAdapter()
             self._require_sddl_owner()
             parent_before = self._secure_parent(filesystem)
-            item = filesystem.write_file_create_only(
-                blob, raw=raw, protected_sddl=self._blob_sddl
-            )
+            with filesystem.open_directory_anchor(blob.parent) as parent_anchor:
+                parent_anchor.assert_named_path_is_opened_parent()
+                item = filesystem.write_file_create_only_relative_to_opened_parent(
+                    parent=parent_anchor,
+                    name=blob.name,
+                    raw=raw,
+                    protected_sddl=self._blob_sddl,
+                )
+                parent_anchor.assert_named_path_is_opened_parent()
             self._secure_parent(filesystem)
         except CredentialConfigError:
             raise

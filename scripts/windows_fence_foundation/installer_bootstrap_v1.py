@@ -24,8 +24,9 @@ from .installer_entry_v1 import (
     VerifiedFinalInstallerInputsV1,
     run_installed_final_windows_installer_entry_v1,
 )
+from .installer_trust_anchor_v1 import load_production_installer_trust_anchor_v1
 from .manifest_v1 import (
-    FilesystemInstallAttemptNonceRegistryV1,
+    WindowsInstallAttemptNonceRegistryV1,
     parse_install_manifest_candidate_v1,
     verify_and_reserve_install_manifest_v1,
     verify_install_manifest_v1,
@@ -48,6 +49,8 @@ _KEYRING_FIELDS = frozenset(
         "observer",
         "restart",
         "nonce_registry_root_facts",
+        "nonce_registry_owner_sid",
+        "nonce_registry_acl_sddl",
     }
 )
 _PIN_FIELDS = frozenset(
@@ -128,6 +131,8 @@ def _canonical_keyring(
             observer=pin("observer"),
             restart=pin("restart"),
             nonce_registry_root_facts=nonce_facts,
+            nonce_registry_owner_sid=value["nonce_registry_owner_sid"],
+            nonce_registry_acl_sddl=value["nonce_registry_acl_sddl"],
         )
     except Exception as exc:  # trust dataclasses intentionally expose only stable codes
         raise WindowsFinalInstallerBootstrapError("KEYRING_TRUST_PINS_INVALID") from exc
@@ -234,10 +239,12 @@ def build_verified_final_installer_inputs_v1(
     if reserve_nonce:
         manifest = verify_and_reserve_install_manifest_v1(
             **kwargs,
-            nonce_registry=FilesystemInstallAttemptNonceRegistryV1(
+            nonce_registry=WindowsInstallAttemptNonceRegistryV1(
                 nonce_registry_root,
                 filesystem=WindowsFilesystemFactsAdapter(),
                 expected_root_facts=pins.nonce_registry_root_facts,
+                owner_sid=pins.nonce_registry_owner_sid,
+                acl_sddl=pins.nonce_registry_acl_sddl,
             ),
         )
     else:
@@ -262,18 +269,16 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="windows-final-installer-bootstrap-v1")
     parser.add_argument("--bundle", type=Path, required=True)
     parser.add_argument("--manifest", type=Path, required=True)
-    parser.add_argument("--keyring", type=Path, required=True)
-    parser.add_argument("--expected-source-sha256", required=True)
-    parser.add_argument("--keyring-raw-sha256", required=True)
     parser.add_argument("--nonce-registry-root", type=Path, required=True)
     parser.add_argument("--dry-run", action="store_true")
     options = parser.parse_args(argv)
+    anchor = load_production_installer_trust_anchor_v1()
     inputs = build_verified_final_installer_inputs_v1(
         bundle_path=options.bundle,
         manifest_path=options.manifest,
-        keyring_path=options.keyring,
-        expected_source_sha256=options.expected_source_sha256,
-        keyring_raw_sha256=options.keyring_raw_sha256,
+        keyring_path=anchor.keyring_path,
+        expected_source_sha256=anchor.expected_source_sha256,
+        keyring_raw_sha256=anchor.keyring_raw_sha256,
         nonce_registry_root=options.nonce_registry_root,
         reserve_nonce=not options.dry_run,
     )

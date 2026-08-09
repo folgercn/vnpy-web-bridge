@@ -17,6 +17,10 @@ from scripts.windows_fence_foundation.installer_bootstrap_v1 import (
     _canonical_keyring,
     build_verified_final_installer_inputs_v1,
 )
+from scripts.windows_fence_foundation.installer_trust_anchor_v1 import (
+    InstallerBootstrapTrustAnchorError,
+    InstallerBootstrapTrustAnchorV1,
+)
 from scripts.windows_fence_foundation.trust_pins_v1 import (
     MANIFEST_KEY_DOMAIN,
     MANIFEST_SIGNER_ROLE,
@@ -48,8 +52,8 @@ def _keyring_raw() -> bytes:
         "volume_serial": "A1B2C3D4",
         "volume_identity_sha256": "b" * 64,
         "file_identity": "A1B2C3D4:1",
-        "owner_sid_sha256": "c" * 64,
-        "acl_sddl_sha256": "d" * 64,
+        "owner_sid_sha256": hashlib.sha256(b"test-owner").hexdigest(),
+        "acl_sddl_sha256": hashlib.sha256(b"test-acl").hexdigest(),
         "unsafe_write_principals": [],
         "write_principal_sid_sha256s": ["e" * 64],
         "regular_file": False,
@@ -84,6 +88,8 @@ def _keyring_raw() -> bytes:
                 suffix="bootstrap-key-003",
             ),
             "nonce_registry_root_facts": facts,
+            "nonce_registry_owner_sid": "test-owner",
+            "nonce_registry_acl_sddl": "test-acl",
         }
     )
 
@@ -108,4 +114,13 @@ def test_bootstrap_never_accepts_portable_inputs() -> None:
             keyring_raw_sha256="b" * 64,
             nonce_registry_root=Path("nonce"),
             reserve_nonce=False,
+        )
+
+
+def test_production_anchor_rejects_placeholder_hashes() -> None:
+    with pytest.raises(InstallerBootstrapTrustAnchorError, match="ANCHOR_INVALID"):
+        InstallerBootstrapTrustAnchorV1(
+            keyring_path=Path("/ProgramData/vnpy/keyring.json"),
+            keyring_raw_sha256="0" * 64,
+            expected_source_sha256="a" * 64,
         )

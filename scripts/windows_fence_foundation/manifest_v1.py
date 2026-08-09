@@ -29,7 +29,11 @@ from .trust_pins_v1 import (
     MANIFEST_SIGNER_ROLE,
     WindowsFoundationTrustPinsV1,
 )
-from .win32_fs import FilesystemFactsAdapter, PathSecurityFacts
+from .win32_fs import (
+    FilesystemFactsAdapter,
+    PathSecurityFacts,
+    WindowsFilesystemFactsAdapter,
+)
 
 MAX_MANIFEST_BYTES = 256 * 1024
 MANIFEST_SCHEMA_VERSION = "windows_rpc_durable_fence_install_manifest_v1"
@@ -339,6 +343,152 @@ class FilesystemInstallAttemptNonceRegistryV1:
                 os.close(directory_descriptor)
             if final_identity != opened_identity:
                 raise ManifestVerificationError("NONCE_REGISTRY_OPEN_HANDLE_CHANGED")
+        self._verify_root_facts()
+        return result
+
+
+@dataclass(frozen=True)
+class WindowsInstallAttemptNonceRegistryV1:
+    """Windows-only nonce registry anchored by opened directory handles.
+
+    The portable POSIX registry above is intentionally not accepted here: a
+    Windows installer needs CreateFileW create-only semantics, Windows volume
+    GUID/file-index identity, protected owner/DACL facts, and ADS/reparse
+    checks from the same opened handles.
+    """
+
+    root: Path
+    filesystem: WindowsFilesystemFactsAdapter
+    expected_root_facts: PathSecurityFacts
+    owner_sid: str
+    acl_sddl: str
+
+    def __post_init__(self) -> None:
+        if os.name != "nt" or not isinstance(
+            self.filesystem, WindowsFilesystemFactsAdapter
+        ):
+            raise ManifestVerificationError("WINDOWS_NONCE_REGISTRY_REQUIRED")
+        root = Path(self.root).absolute()
+        object.__setattr__(self, "root", root)
+        if (
+            hashlib.sha256(str(root).encode("utf-8")).hexdigest()
+            != self.expected_root_facts.path_sha256
+            or hashlib.sha256(self.owner_sid.encode("utf-8")).hexdigest()
+            != self.expected_root_facts.owner_sid_sha256
+            or hashlib.sha256(self.acl_sddl.encode("utf-8")).hexdigest()
+            != self.expected_root_facts.acl_sddl_sha256
+        ):
+            raise ManifestVerificationError(
+                "WINDOWS_NONCE_REGISTRY_EXPECTATION_INVALID"
+            )
+        self._verify_root_facts()
+
+    def _verify_root_facts(self) -> PathSecurityFacts:
+        try:
+            actual = self.filesystem.inspect(self.root)
+        except OSError as exc:
+            raise ManifestVerificationError(
+                "WINDOWS_NONCE_REGISTRY_ROOT_INVALID"
+            ) from exc
+        if (
+            actual != self.expected_root_facts
+            or not actual.directory
+            or actual.regular_file
+            or actual.reparse_point
+            or not actual.parent_chain_reparse_free
+            or actual.hardlink_count != 1
+            or actual.alternate_data_streams
+            or not actual.dacl_protected
+            or actual.inherited_ace_count
+            or actual.unsafe_write_principals
+            or actual.write_principal_sid_sha256s != (actual.owner_sid_sha256,)
+        ):
+            raise ManifestVerificationError(
+                "WINDOWS_NONCE_REGISTRY_ROOT_FACTS_MISMATCH"
+            )
+        return actual
+
+    def _verify_record(
+        self, *, raw: bytes, facts: PathSecurityFacts, path: Path
+    ) -> None:
+        if (
+            facts.path_sha256 != hashlib.sha256(str(path).encode("utf-8")).hexdigest()
+            or facts.volume_serial != self.expected_root_facts.volume_serial
+            or facts.volume_identity_sha256
+            != self.expected_root_facts.volume_identity_sha256
+            or not facts.regular_file
+            or facts.directory
+            or facts.reparse_point
+            or not facts.parent_chain_reparse_free
+            or facts.hardlink_count != 1
+            or facts.alternate_data_streams
+            or not facts.dacl_protected
+            or facts.inherited_ace_count
+            or facts.unsafe_write_principals
+            or facts.owner_sid_sha256 != self.expected_root_facts.owner_sid_sha256
+            or facts.acl_sddl_sha256 != self.expected_root_facts.acl_sddl_sha256
+            or facts.write_principal_sid_sha256s
+            != (self.expected_root_facts.owner_sid_sha256,)
+            or not raw
+        ):
+            raise ManifestVerificationError("WINDOWS_NONCE_RECORD_FACTS_MISMATCH")
+
+    def compare_and_record(
+        self, *, nonce_sha256: str, immutable_inputs_sha256: str
+    ) -> str:
+        if (
+            not isinstance(nonce_sha256, str)
+            or SHA_RE.fullmatch(nonce_sha256) is None
+            or not isinstance(immutable_inputs_sha256, str)
+            or SHA_RE.fullmatch(immutable_inputs_sha256) is None
+        ):
+            raise ManifestVerificationError("NONCE_REGISTRY_BINDING_INVALID")
+        record = canonical_json_bytes(
+            {
+                "schema_version": "windows_rpc_durable_fence_nonce_binding_v1",
+                "purpose": "reject_install_attempt_nonce_reuse_with_changed_inputs",
+                "attempt_nonce_sha256": nonce_sha256,
+                "immutable_inputs_sha256": immutable_inputs_sha256,
+            }
+        )
+        path = self.root / f"{nonce_sha256}.json"
+        self._verify_root_facts()
+        try:
+            with self.filesystem.open_directory_anchor(self.root) as anchor:
+                before = anchor.assert_named_path_is_opened_parent()
+                try:
+                    item = self.filesystem.write_file_create_only_relative_to_opened_parent(
+                        parent=anchor,
+                        name=path.name,
+                        raw=record,
+                        protected_sddl=self.acl_sddl,
+                    )
+                except FileExistsError:
+                    item = self.filesystem.read_file(path)
+                    self._verify_record(raw=item.raw, facts=item.facts, path=path)
+                    if item.raw != record:
+                        raise ManifestVerificationError(
+                            "INSTALL_ATTEMPT_NONCE_REUSE_CONFLICT"
+                        )
+                    result = "MATCHED_EXISTING"
+                else:
+                    self._verify_record(raw=item.raw, facts=item.facts, path=path)
+                    if item.raw != record:
+                        raise ManifestVerificationError(
+                            "WINDOWS_NONCE_RECORD_READBACK_MISMATCH"
+                        )
+                    result = "CREATED"
+                after = anchor.assert_named_path_is_opened_parent()
+                if after != before:
+                    raise ManifestVerificationError(
+                        "WINDOWS_NONCE_REGISTRY_OPEN_HANDLE_CHANGED"
+                    )
+        except ManifestVerificationError:
+            raise
+        except OSError as exc:
+            raise ManifestVerificationError(
+                "WINDOWS_NONCE_REGISTRY_WRITE_FAILED"
+            ) from exc
         self._verify_root_facts()
         return result
 
@@ -670,7 +820,8 @@ def verify_and_reserve_install_manifest_v1(
     trust_pins: WindowsFoundationTrustPinsV1,
     expected_bindings: Mapping[str, object],
     install_attempt_inputs: Mapping[str, object],
-    nonce_registry: FilesystemInstallAttemptNonceRegistryV1,
+    nonce_registry: FilesystemInstallAttemptNonceRegistryV1
+    | WindowsInstallAttemptNonceRegistryV1,
     now: datetime,
 ) -> VerifiedInstallManifestV1:
     """Reverify raw bytes and atomically reserve their nonce on the offline signer."""
@@ -681,7 +832,10 @@ def verify_and_reserve_install_manifest_v1(
         install_attempt_inputs=install_attempt_inputs,
         now=now,
     )
-    if not isinstance(nonce_registry, FilesystemInstallAttemptNonceRegistryV1):
+    if not isinstance(
+        nonce_registry,
+        (FilesystemInstallAttemptNonceRegistryV1, WindowsInstallAttemptNonceRegistryV1),
+    ):
         raise ManifestVerificationError("INSTALL_ATTEMPT_NONCE_REGISTRY_INVALID")
     if nonce_registry.expected_root_facts != trust_pins.nonce_registry_root_facts:
         raise ManifestVerificationError("INSTALL_ATTEMPT_NONCE_REGISTRY_PIN_MISMATCH")
@@ -701,6 +855,7 @@ __all__ = [
     "FilesystemInstallAttemptNonceRegistryV1",
     "ManifestVerificationError",
     "VerifiedInstallManifestV1",
+    "WindowsInstallAttemptNonceRegistryV1",
     "derive_install_attempt_id_v1",
     "parse_install_manifest_candidate_v1",
     "verify_and_reserve_install_manifest_v1",
