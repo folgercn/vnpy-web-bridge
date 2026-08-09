@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import subprocess
 from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
@@ -24,6 +25,61 @@ from .target_contract_v1 import (
 from .trust_pins_v1 import WindowsFoundationTrustPinsV1
 
 PLACEHOLDER_SIGNATURE = base64.b64encode(bytes(64)).decode("ascii")
+
+
+def _thaw(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(key): _thaw(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_thaw(item) for item in value]
+    return value
+
+
+def _require_clean_approved_worktree(source_root: Path, approved: str) -> None:
+    try:
+        top = subprocess.run(
+            ["git", "-C", str(source_root), "rev-parse", "--show-toplevel"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        head = subprocess.run(
+            ["git", "-C", str(source_root), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        status = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(source_root),
+                "status",
+                "--porcelain",
+                "--untracked-files=all",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        superproject = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(source_root),
+                "rev-parse",
+                "--show-superproject-working-tree",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise OfflineSigningError("RELEASE_SOURCE_WORKTREE_REQUIRED") from exc
+    if Path(top).resolve() != source_root.resolve() or superproject:
+        raise OfflineSigningError("RELEASE_SOURCE_WORKTREE_REQUIRED")
+    if head != approved or status:
+        raise OfflineSigningError("RELEASE_SOURCE_REVISION_OR_CLEANLINESS_INVALID")
 
 
 def build_release_input_manifest_v1(
@@ -59,6 +115,9 @@ def build_release_input_manifest_v1(
         or len(release_input["approved_source_sha256"]) != 40
     ):
         raise OfflineSigningError("RELEASE_INPUT_FIELDS_INVALID")
+    _require_clean_approved_worktree(
+        source_root, release_input["approved_source_sha256"]
+    )
     preflight = require_fresh_zero_preflight_v1(
         release_input["preflight_raw"], pin=pins.observer, now=now
     )
@@ -104,7 +163,7 @@ def build_release_input_manifest_v1(
     }
     attempt_id, _immutable = derive_install_attempt_id_v1(attempt_inputs)
     draft: dict[str, Any] = {
-        **target.manifest_bindings,
+        **_thaw(target.manifest_bindings),
         "schema_version": "windows_rpc_durable_fence_install_manifest_v1",
         "purpose": "authorize_exact_windows_fence_files_and_one_post_reservation_service_config_transition_without_restart",
         "install_attempt_id": attempt_id,

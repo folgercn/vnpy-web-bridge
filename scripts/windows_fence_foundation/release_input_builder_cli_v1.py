@@ -11,10 +11,10 @@ from pathlib import Path
 
 from jsonschema import Draft202012Validator, FormatChecker
 
+from .contracts import canonical_json_bytes
 from .installer_trust_anchor_v1 import canonical_public_keyring_v1
 from .offline_signing_v1 import (
     OfflineSigningError,
-    write_audit_create_only_v1,
     write_binary_create_only_v1,
     write_canonical_create_only_v1,
 )
@@ -53,20 +53,32 @@ def main(argv: list[str] | None = None) -> int:
             pins=pins,
             now=datetime.fromisoformat(options.now_utc.replace("Z", "+00:00")),
         )
-        bundle_sha256 = write_binary_create_only_v1(options.bundle_output, bundle)
+        write_binary_create_only_v1(options.bundle_output, bundle)
         index_raw = write_canonical_create_only_v1(
             options.index_output, json.loads(index)
         )
         manifest_raw = write_canonical_create_only_v1(
             options.manifest_output, json.loads(manifest)
         )
-        write_audit_create_only_v1(
-            options.audit_output,
-            artifact_raw=hashlib.sha256(
-                bundle_sha256.encode() + index_raw + manifest_raw
-            ).digest(),
-            action="build-release-input",
-        )
+        audit = {
+            "schema_version": "windows_fence_release_build_audit_v1",
+            "purpose": "record_create_only_release_build_outputs",
+            "artifacts": {
+                name: {
+                    "raw_sha256": hashlib.sha256(raw).hexdigest(),
+                    "size_bytes": len(raw),
+                }
+                for name, raw in {
+                    "bundle": bundle,
+                    "index": index_raw,
+                    "manifest": manifest_raw,
+                }.items()
+            },
+        }
+        audit["aggregate_raw_sha256"] = hashlib.sha256(
+            canonical_json_bytes(audit["artifacts"])
+        ).hexdigest()
+        write_canonical_create_only_v1(options.audit_output, audit)
     except (OfflineSigningError, OSError, ValueError, json.JSONDecodeError) as exc:
         parser.error(f"release-input build failed: {exc}")
     return 0
