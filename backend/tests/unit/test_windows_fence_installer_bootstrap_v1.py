@@ -132,7 +132,7 @@ def test_production_anchor_rejects_placeholder_hashes() -> None:
     pins = _canonical_keyring(raw, hashlib.sha256(raw).hexdigest())
     with pytest.raises(InstallerBootstrapTrustAnchorError, match="ANCHOR_INVALID"):
         InstallerBootstrapTrustAnchorV1(
-            keyring_path=Path("/ProgramData/vnpy/keyring.json"),
+            keyring_path=Path("C:/ProgramData/vnpy/keyring.json"),
             keyring_raw_sha256="0" * 64,
             expected_source_sha256="a" * 64,
             manifest=pins.manifest,
@@ -148,10 +148,34 @@ def test_public_only_anchor_generator_emits_pinned_module(tmp_path: Path) -> Non
     keyring.write_bytes(raw)
     generate_installer_trust_anchor_v1(
         public_keyring_path=keyring,
-        keyring_canonical_path=Path("/ProgramData/vnpy/keyring.json"),
+        keyring_canonical_path=Path("C:/ProgramData/vnpy/keyring.json"),
         expected_source_sha256="a" * 64,
         output=output,
     )
     generated = output.read_text(encoding="utf-8")
     assert hashlib.sha256(raw).hexdigest() in generated
     assert "public_key_raw" in generated
+    assert "C:/ProgramData/vnpy/keyring.json" in generated
+
+
+@pytest.mark.parametrize(
+    "keyring_path",
+    (
+        Path("ProgramData/vnpy/keyring.json"),
+        Path("/ProgramData/vnpy/keyring.json"),
+        Path("C:ProgramData/vnpy/keyring.json"),
+    ),
+)
+def test_public_only_anchor_rejects_non_absolute_windows_keyring_paths(
+    tmp_path: Path, keyring_path: Path
+) -> None:
+    keyring = tmp_path / "public-keyring.json"
+    keyring.write_bytes(_keyring_raw())
+
+    with pytest.raises(InstallerBootstrapTrustAnchorError, match="GENERATION_INPUT_INVALID"):
+        generate_installer_trust_anchor_v1(
+            public_keyring_path=keyring,
+            keyring_canonical_path=keyring_path,
+            expected_source_sha256="a" * 64,
+            output=tmp_path / "_installer_trust_anchor_generated_v1.py",
+        )

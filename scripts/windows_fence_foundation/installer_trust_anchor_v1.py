@@ -6,9 +6,10 @@ import base64
 import hashlib
 import importlib
 import json
+import ntpath
 import re
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from .contracts import canonical_json_bytes
 from .trust_pins_v1 import FoundationPublicKeyPin, WindowsFoundationTrustPinsV1
@@ -45,6 +46,20 @@ def _is_expected_source_sha256(value: object) -> bool:
         and _SOURCE_SHA_RE.fullmatch(value) is not None
         and value != "0" * len(value)
     )
+
+
+def _canonical_windows_absolute_path(value: object) -> PureWindowsPath | None:
+    """Return a local Windows absolute path without using the host OS semantics."""
+    if not isinstance(value, Path):
+        return None
+    candidate = PureWindowsPath(str(value))
+    if (
+        not ntpath.isabs(str(value))
+        or not candidate.is_absolute()
+        or re.fullmatch(r"[A-Za-z]:", candidate.drive) is None
+    ):
+        return None
+    return candidate
 
 
 def canonical_public_keyring_v1(
@@ -117,7 +132,8 @@ def render_installer_trust_anchor_generated_module_v1(
     """Render generated public-only bytes; private key input is impossible."""
     keyring_sha256 = hashlib.sha256(public_keyring_raw).hexdigest()
     pins = canonical_public_keyring_v1(public_keyring_raw, keyring_sha256)
-    if not keyring_canonical_path.is_absolute() or not _is_expected_source_sha256(
+    canonical_keyring_path = _canonical_windows_absolute_path(keyring_canonical_path)
+    if canonical_keyring_path is None or not _is_expected_source_sha256(
         expected_source_sha256
     ):
         raise InstallerBootstrapTrustAnchorError(
@@ -138,7 +154,7 @@ def render_installer_trust_anchor_generated_module_v1(
         "from .installer_trust_anchor_v1 import InstallerBootstrapTrustAnchorV1\n"
         "from .trust_pins_v1 import FoundationPublicKeyPin\n\n"
         "PRODUCTION_INSTALLER_TRUST_ANCHOR_V1 = InstallerBootstrapTrustAnchorV1(\n"
-        f"    keyring_path=Path({str(keyring_canonical_path)!r}),\n"
+        f"    keyring_path=Path({canonical_keyring_path.as_posix()!r}),\n"
         f"    keyring_raw_sha256={keyring_sha256!r},\n"
         f"    expected_source_sha256={expected_source_sha256!r},\n"
         f"{pin('manifest')}{pin('observer')}{pin('restart')})\n"
@@ -160,7 +176,7 @@ class InstallerBootstrapTrustAnchorV1:
     def __post_init__(self) -> None:
         if (
             not isinstance(self.keyring_path, Path)
-            or not self.keyring_path.is_absolute()
+            or _canonical_windows_absolute_path(self.keyring_path) is None
             or any(
                 not isinstance(value, str)
                 or (

@@ -64,6 +64,10 @@ def test_windows_fence_gate_is_read_only_cross_platform_and_non_deploying() -> N
     )
     assert "installer_entry_v1 --native-host-preflight" in job
     assert "if: runner.os == 'Windows'" in job
+    assert job.count("pip install pywin32==306") == 1
+    assert job.index("pip install pywin32==306") < job.index(
+        "Run Windows fence offline tests"
+    )
     assert "cryptography==48.0.0" in (
         Path(__file__).resolve().parents[3] / "scripts/ci/requirements-quick.txt"
     ).read_text(encoding="utf-8")

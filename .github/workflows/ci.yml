@@ -917,6 +917,10 @@ jobs:
       - name: Install read-only test dependencies
         run: pip install -r scripts/ci/requirements-quick.txt
 
+      - name: Install pinned pywin32 for Windows fence checks
+        if: runner.os == 'Windows'
+        run: pip install pywin32==306
+
       - name: Run Windows fence offline tests
         run: >-
           python -m pytest -q
@@ -934,7 +938,6 @@ jobs:
       - name: Smoke native final-installer host without service mutation
         if: runner.os == 'Windows'
         run: |-
-          pip install pywin32
           python -m scripts.windows_fence_foundation.installer_entry_v1 --native-host-preflight
 
       - name: Smoke Windows temp filesystem and machine-DPAPI rollback only

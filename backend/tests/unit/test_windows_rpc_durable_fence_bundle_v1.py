@@ -82,7 +82,7 @@ STORE_BINDING = {
     "state_acl_sddl_sha256": "a" * 64,
 }
 PUBLIC_KEYRING_RAW = public_keyring_raw_v1()
-KEYRING_CANONICAL_PATH = Path("/ProgramData/vnpy-web-bridge/installer-keyring.json")
+KEYRING_CANONICAL_PATH = Path("C:/ProgramData/vnpy-web-bridge/installer-keyring.json")
 EXPECTED_SOURCE_SHA256 = os.environ.get("GITHUB_SHA", "a" * 64)
 
 
