@@ -7,6 +7,10 @@ from types import SimpleNamespace
 import pytest
 
 from scripts.windows_fence_foundation.contracts import canonical_json_bytes
+from scripts.windows_fence_foundation.installer_entry_v1 import (
+    WindowsInstalledInstallerEntryError,
+    run_installed_final_windows_installer_entry_v1,
+)
 from scripts.windows_fence_foundation.installer_windows_v1 import (
     FinalWindowsFenceInstallerV1,
     InstallCheckpointV1,
@@ -25,6 +29,9 @@ from scripts.windows_fence_foundation.native_windows_installer_host_v1 import (
 SHA = "a" * 64
 REGISTRY_OWNER_SHA = hashlib.sha256(b"SYSTEM").hexdigest()
 REGISTRY_ACL_SHA = hashlib.sha256(b"O:SYD:PAI").hexdigest()
+FINAL_OWNER_SHA = hashlib.sha256(b"SYSTEM").hexdigest()
+FINAL_DIRECTORY_ACL_SHA = hashlib.sha256(b"O:SYD:PAI").hexdigest()
+COMPONENT_ACL_SHA = hashlib.sha256(b"O:SYD:PAI").hexdigest()
 
 
 def _config(*, target: bool, safety: bool = False) -> dict[str, object]:
@@ -92,8 +99,8 @@ class _Host:
             files[role] = WindowsPathReadbackV1(
                 path=path,
                 raw_sha256=SHA,
-                owner_sid_sha256=SHA,
-                acl_sddl_sha256=SHA,
+                owner_sid_sha256=FINAL_OWNER_SHA,
+                acl_sddl_sha256=COMPONENT_ACL_SHA,
                 regular_file=True,
                 reparse_point=False,
                 parent_chain_reparse_free=True,
@@ -126,7 +133,10 @@ class _Host:
 
 
 def _installer(
-    host: _Host, *, mutate_target: object | None = None
+    host: _Host,
+    *,
+    mutate_target: object | None = None,
+    mutate_manifest: object | None = None,
 ) -> FinalWindowsFenceInstallerV1:
     components = {
         role: SHA for role in ("wrapper", "extension", "launcher", "assembly", "config")
@@ -136,8 +146,9 @@ def _installer(
     }
     bindings: dict[str, str] = {
         "bundle_sha256": SHA,
-        "expected_final_owner_sid_sha256": SHA,
-        "expected_component_acl_sddl_sha256": SHA,
+        "expected_final_owner_sid_sha256": FINAL_OWNER_SHA,
+        "expected_final_directory_acl_sddl_sha256": FINAL_DIRECTORY_ACL_SHA,
+        "expected_component_acl_sddl_sha256": COMPONENT_ACL_SHA,
     }
     for role, path in paths.items():
         bindings[f"{role}_destination_path_sha256"] = hashlib.sha256(
@@ -200,6 +211,9 @@ def _installer(
             "store_state_acl_sddl_sha256": SHA,
             "expected_service_config_owner_sid_sha256": REGISTRY_OWNER_SHA,
             "expected_service_config_acl_sddl_sha256": REGISTRY_ACL_SHA,
+            "expected_final_owner_sid_sha256": FINAL_OWNER_SHA,
+            "expected_final_directory_acl_sddl_sha256": FINAL_DIRECTORY_ACL_SHA,
+            "expected_component_acl_sddl_sha256": COMPONENT_ACL_SHA,
             "preinstall_service_config_canonical_sha256": hashlib.sha256(
                 canonical_json_bytes(_config(target=False))
             ).hexdigest(),
@@ -212,6 +226,8 @@ def _installer(
         }
     )
     manifest_value.update(bindings)
+    if mutate_manifest is not None:
+        mutate_manifest(manifest_value)  # type: ignore[operator]
     bindings.update(manifest_value)
     manifest = VerifiedInstallManifestV1(
         value=manifest_value,
@@ -269,6 +285,37 @@ def test_forged_target_projection_is_rejected_before_filesystem_actions() -> Non
         _installer(_Host(), mutate_target=_forge)
 
 
+@pytest.mark.parametrize(
+    "field,weak_sddl",
+    [
+        ("final_directory_acl_sddl", "O:SYD:PAI(A;;DC;;;WD)"),
+        ("component_acl_sddl", "O:SYD:PAI(A;;FA;;;WD)"),
+    ],
+)
+def test_signed_but_broad_publish_dacl_is_rejected(field: str, weak_sddl: str) -> None:
+    def _forge_target(target: SimpleNamespace) -> None:
+        target.publish_security[field] = weak_sddl
+        manifest_field = {
+            "final_directory_acl_sddl": "expected_final_directory_acl_sddl_sha256",
+            "component_acl_sddl": "expected_component_acl_sddl_sha256",
+        }[field]
+        target.manifest_bindings[manifest_field] = hashlib.sha256(
+            weak_sddl.encode()
+        ).hexdigest()
+
+    def _forge_manifest(value: dict[str, object]) -> None:
+        manifest_field = {
+            "final_directory_acl_sddl": "expected_final_directory_acl_sddl_sha256",
+            "component_acl_sddl": "expected_component_acl_sddl_sha256",
+        }[field]
+        value[manifest_field] = hashlib.sha256(weak_sddl.encode()).hexdigest()
+
+    with pytest.raises(WindowsFinalInstallerError, match="PUBLISH_SECURITY"):
+        _installer(
+            _Host(), mutate_target=_forge_target, mutate_manifest=_forge_manifest
+        )
+
+
 def test_event3_applies_and_reads_safety_before_target_and_event4() -> None:
     host = _Host()
     installer = _installer(host)
@@ -319,3 +366,21 @@ def test_native_failure_actions_requires_pywin32_legal_empty_dictionary() -> Non
     assert not NativeWindowsFenceInstallerHostV1._empty_failure_actions(
         {**empty, "Actions": [(1, 1000)]}
     )
+
+
+def test_native_pywin32_sddl_compatibility_accepts_text_or_tuple_only() -> None:
+    assert (
+        NativeWindowsFenceInstallerHostV1._pywin32_sddl_text("O:SYD:PAI") == "O:SYD:PAI"
+    )
+    assert (
+        NativeWindowsFenceInstallerHostV1._pywin32_sddl_text(("O:SYD:PAI", 1))
+        == "O:SYD:PAI"
+    )
+    with pytest.raises(WindowsFinalInstallerError, match="SDDL_INVALID"):
+        NativeWindowsFenceInstallerHostV1._pywin32_sddl_text(())
+
+
+@pytest.mark.skipif(os.name == "nt", reason="non-Windows entry contract")
+def test_installed_entry_never_accepts_portable_or_fake_inputs() -> None:
+    with pytest.raises(WindowsInstalledInstallerEntryError, match="WINDOWS_INSTALLER"):
+        run_installed_final_windows_installer_entry_v1(object())  # type: ignore[arg-type]

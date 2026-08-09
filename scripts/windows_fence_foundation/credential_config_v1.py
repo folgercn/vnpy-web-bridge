@@ -53,8 +53,8 @@ class CredentialDescriptorBindingV1:
     def __post_init__(self) -> None:
         try:
             path = canonical_local_windows_path(self.path)
-        except StoreContractError as exc:
-            raise CredentialConfigError("CREDENTIAL_DESCRIPTOR_PATH_INVALID") from exc
+        except StoreContractError:
+            raise CredentialConfigError("CREDENTIAL_DESCRIPTOR_PATH_INVALID") from None
         if path != self.path or self.path_sha256 != _digest(path.encode("utf-8")):
             raise CredentialConfigError("CREDENTIAL_DESCRIPTOR_PATH_INVALID")
         for value in (
@@ -113,8 +113,8 @@ class WindowsSecureCredentialBlobWriterV1:
     ) -> None:
         try:
             self._parent_path = canonical_local_windows_path(parent_path)
-        except StoreContractError as exc:
-            raise CredentialConfigError("CREDENTIAL_BLOB_PARENT_INVALID") from exc
+        except StoreContractError:
+            raise CredentialConfigError("CREDENTIAL_BLOB_PARENT_INVALID") from None
         for value in (parent_owner_sid_sha256, parent_acl_sddl_sha256):
             if not isinstance(value, str) or _SHA.fullmatch(value) is None:
                 raise CredentialConfigError("CREDENTIAL_BLOB_PARENT_INVALID")
@@ -126,30 +126,11 @@ class WindowsSecureCredentialBlobWriterV1:
         self._blob_acl = _digest(blob_acl_sddl.encode("utf-8"))
         self._blob_sddl = blob_acl_sddl
 
-    @staticmethod
-    def _apply_protected_security(path: Path, *, sddl: str) -> None:
-        try:
-            import win32security  # type: ignore[import-not-found]
-
-            descriptor = (
-                win32security.ConvertStringSecurityDescriptorToSecurityDescriptor(
-                    sddl, 1
-                )
-            )
-            win32security.SetFileSecurity(
-                str(path),
-                win32security.OWNER_SECURITY_INFORMATION
-                | win32security.DACL_SECURITY_INFORMATION,
-                descriptor,
-            )
-        except Exception as exc:
-            raise CredentialConfigError("CREDENTIAL_BLOB_ACL_APPLY_FAILED") from exc
-
     def _secure_parent(self, filesystem: FilesystemFactsAdapter) -> PathSecurityFacts:
         try:
             facts = filesystem.inspect(Path(self._parent_path))
-        except OSError as exc:
-            raise CredentialConfigError("CREDENTIAL_BLOB_PARENT_READ_FAILED") from exc
+        except OSError:
+            raise CredentialConfigError("CREDENTIAL_BLOB_PARENT_READ_FAILED") from None
         if (
             not facts.directory
             or facts.reparse_point
@@ -170,8 +151,8 @@ class WindowsSecureCredentialBlobWriterV1:
             raise CredentialConfigError("CREDENTIAL_DPAPI_WINDOWS_REQUIRED")
         try:
             canonical_path = canonical_local_windows_path(path)
-        except StoreContractError as exc:
-            raise CredentialConfigError("CREDENTIAL_BLOB_PATH_INVALID") from exc
+        except StoreContractError:
+            raise CredentialConfigError("CREDENTIAL_BLOB_PATH_INVALID") from None
         blob = Path(canonical_path)
         if str(blob.parent) != self._parent_path or not raw:
             raise CredentialConfigError("CREDENTIAL_BLOB_PATH_INVALID")
@@ -180,25 +161,18 @@ class WindowsSecureCredentialBlobWriterV1:
 
             filesystem = WindowsFilesystemFactsAdapter()
             parent_before = self._secure_parent(filesystem)
-            descriptor = os.open(
-                blob, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_BINARY, 0o600
+            item = filesystem.write_file_create_only(
+                blob, raw=raw, protected_sddl=self._blob_sddl
             )
-            try:
-                written = os.write(descriptor, raw)
-                if written != len(raw):
-                    raise OSError("short credential blob write")
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
-            self._apply_protected_security(blob, sddl=self._blob_sddl)
-            item = filesystem.read_file(blob)
             self._secure_parent(filesystem)
         except CredentialConfigError:
             raise
-        except FileExistsError as exc:
-            raise CredentialConfigError("CREDENTIAL_BLOB_CREATE_ONLY_CONFLICT") from exc
-        except OSError as exc:
-            raise CredentialConfigError("CREDENTIAL_BLOB_WRITE_FAILED") from exc
+        except FileExistsError:
+            raise CredentialConfigError(
+                "CREDENTIAL_BLOB_CREATE_ONLY_CONFLICT"
+            ) from None
+        except OSError:
+            raise CredentialConfigError("CREDENTIAL_BLOB_WRITE_FAILED") from None
         _secure_regular_file(
             item.facts,
             owner=self._blob_owner,
@@ -240,8 +214,8 @@ def _secure_regular_file(
 def _parse_descriptor(raw: bytes) -> LocalCredentialDescriptorV1:
     try:
         value = json.loads(raw.decode("utf-8", errors="strict"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise CredentialConfigError("CREDENTIAL_DESCRIPTOR_JSON_INVALID") from exc
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise CredentialConfigError("CREDENTIAL_DESCRIPTOR_JSON_INVALID") from None
     if not isinstance(value, dict) or canonical_json_bytes(value) != raw:
         raise CredentialConfigError("CREDENTIAL_DESCRIPTOR_NOT_CANONICAL")
     expected = {
@@ -262,8 +236,8 @@ def _parse_descriptor(raw: bytes) -> LocalCredentialDescriptorV1:
         raise CredentialConfigError("CREDENTIAL_DESCRIPTOR_FIELDS_INVALID")
     try:
         blob_path = canonical_local_windows_path(value["blob_path"])
-    except StoreContractError as exc:
-        raise CredentialConfigError("CREDENTIAL_BLOB_PATH_INVALID") from exc
+    except StoreContractError:
+        raise CredentialConfigError("CREDENTIAL_BLOB_PATH_INVALID") from None
     if blob_path != value["blob_path"] or value["blob_path_sha256"] != _digest(
         blob_path.encode("utf-8")
     ):
@@ -300,8 +274,8 @@ def load_local_credential_descriptor_v1(
     path = Path(binding.path)
     try:
         item = filesystem.read_file(path)
-    except OSError as exc:
-        raise CredentialConfigError("CREDENTIAL_DESCRIPTOR_READ_FAILED") from exc
+    except OSError:
+        raise CredentialConfigError("CREDENTIAL_DESCRIPTOR_READ_FAILED") from None
     _secure_regular_file(
         item.facts,
         owner=binding.owner_sid_sha256,
@@ -328,8 +302,8 @@ def parse_installer_store_bootstrap_v1(
         raise CredentialConfigError("INSTALLER_PUBLIC_CONFIG_HASH_MISMATCH")
     try:
         value = json.loads(raw.decode("utf-8", errors="strict"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise CredentialConfigError("INSTALLER_PUBLIC_CONFIG_JSON_INVALID") from exc
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise CredentialConfigError("INSTALLER_PUBLIC_CONFIG_JSON_INVALID") from None
     required = {
         "schema_version",
         "purpose",
@@ -356,8 +330,8 @@ def parse_installer_store_bootstrap_v1(
     try:
         root = canonical_local_windows_path(value["store_root"])
         bootstrap_root = canonical_local_windows_path(bootstrap["root_path"])
-    except StoreContractError as exc:
-        raise CredentialConfigError("INSTALLER_STORE_BOOTSTRAP_INVALID") from exc
+    except StoreContractError:
+        raise CredentialConfigError("INSTALLER_STORE_BOOTSTRAP_INVALID") from None
     if (
         root != value["store_root"]
         or bootstrap_root != root
@@ -386,8 +360,8 @@ def load_gateway_setting_from_local_blob_v1(
     """Decrypt the independently secured blob without logging or returning it raw."""
     try:
         item = filesystem.read_file(Path(descriptor.blob_path))
-    except OSError as exc:
-        raise CredentialConfigError("CREDENTIAL_BLOB_READ_FAILED") from exc
+    except OSError:
+        raise CredentialConfigError("CREDENTIAL_BLOB_READ_FAILED") from None
     _secure_regular_file(
         item.facts,
         owner=descriptor.blob_owner_sid_sha256,
@@ -401,8 +375,8 @@ def load_gateway_setting_from_local_blob_v1(
         raise CredentialConfigError("CREDENTIAL_BLOB_BINDING_MISMATCH")
     try:
         value = json.loads(reader.decrypt(item.raw).decode("utf-8", errors="strict"))
-    except Exception as exc:
-        raise CredentialConfigError("CREDENTIAL_BLOB_DECRYPT_FAILED") from exc
+    except Exception:  # noqa: BLE001 - provider errors are deliberately redacted
+        raise CredentialConfigError("CREDENTIAL_BLOB_DECRYPT_FAILED") from None
     if (
         not isinstance(value, dict)
         or not value
@@ -425,8 +399,8 @@ class WindowsDpapiCredentialReaderV1:
             import win32crypt  # type: ignore[import-not-found]
 
             return bytes(win32crypt.CryptUnprotectData(raw, None, None, None, 0)[1])
-        except Exception as exc:
-            raise CredentialConfigError("CREDENTIAL_DPAPI_DECRYPT_FAILED") from exc
+        except Exception:  # noqa: BLE001 - DPAPI errors are deliberately redacted
+            raise CredentialConfigError("CREDENTIAL_DPAPI_DECRYPT_FAILED") from None
 
 
 def provision_local_dpapi_blob_v1(
@@ -465,8 +439,8 @@ def provision_local_dpapi_blob_v1(
         return _digest(protected)
     except CredentialConfigError:
         raise
-    except Exception as exc:
-        raise CredentialConfigError("CREDENTIAL_PROVISION_FAILED") from exc
+    except Exception:  # noqa: BLE001 - prompt/provider errors are redacted
+        raise CredentialConfigError("CREDENTIAL_PROVISION_FAILED") from None
 
 
 __all__ = [

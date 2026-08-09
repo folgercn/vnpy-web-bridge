@@ -189,8 +189,17 @@ if os.name == "nt":  # pragma: win32 cover
     _READ_CONTROL = 0x00020000
     _FILE_LIST_DIRECTORY = 0x0001
     _FILE_SHARE_ALL = 0x00000007
+    _GENERIC_READ = 0x80000000
+    _GENERIC_WRITE = 0x40000000
+    _DELETE = 0x00010000
+    _WRITE_DAC = 0x00040000
+    _WRITE_OWNER = 0x00080000
+    _CREATE_NEW = 1
     _OPEN_EXISTING = 3
     _OPEN_REPARSE_BACKUP = 0x02200000
+    _FILE_ATTRIBUTE_NORMAL = 0x80
+    _FILE_DISPOSITION_INFO = 4
+    _FILE_RENAME_INFO = 3
     _FILE_ATTRIBUTE_DIRECTORY = 0x10
     _FILE_ATTRIBUTE_REPARSE_POINT = 0x400
     _OWNER_SECURITY_INFORMATION = 0x1
@@ -264,6 +273,14 @@ if os.name == "nt":  # pragma: win32 cover
             ("stream_name", wintypes.WCHAR * 1),
         ]
 
+    class _FILE_RENAME_INFO_V1(ctypes.Structure):
+        _fields_ = [
+            ("replace_if_exists", ctypes.c_ubyte),
+            ("root_directory", wintypes.HANDLE),
+            ("file_name_length", wintypes.DWORD),
+            ("file_name", wintypes.WCHAR * 1),
+        ]
+
     _kernel32.CreateFileW.argtypes = [
         wintypes.LPCWSTR,
         wintypes.DWORD,
@@ -296,6 +313,23 @@ if os.name == "nt":  # pragma: win32 cover
         ctypes.c_void_p,
     ]
     _kernel32.ReadFile.restype = wintypes.BOOL
+    _kernel32.WriteFile.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+        ctypes.c_void_p,
+    ]
+    _kernel32.WriteFile.restype = wintypes.BOOL
+    _kernel32.FlushFileBuffers.argtypes = [wintypes.HANDLE]
+    _kernel32.FlushFileBuffers.restype = wintypes.BOOL
+    _kernel32.SetFileInformationByHandle.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+    ]
+    _kernel32.SetFileInformationByHandle.restype = wintypes.BOOL
     _kernel32.LocalFree.argtypes = [ctypes.c_void_p]
     _kernel32.LocalFree.restype = ctypes.c_void_p
     _kernel32.GetFinalPathNameByHandleW.argtypes = [
@@ -417,6 +451,178 @@ class WindowsFilesystemFactsAdapter:
         successful pathname operation as safe without these identity checks.
         """
         return WindowsOpenedDirectoryAnchorV1(self, path)
+
+    def write_file_create_only(
+        self, path: Path, *, raw: bytes, protected_sddl: str
+    ) -> SecureFileRead:
+        """Write once through CreateFileW and read/fact-check that same handle."""
+        if not raw:
+            raise OSError("empty create-only file is not allowed")
+        handle = _kernel32.CreateFileW(
+            str(path.absolute()),
+            _GENERIC_READ | _GENERIC_WRITE | _READ_CONTROL | _FILE_READ_ATTRIBUTES,
+            0,
+            None,
+            _CREATE_NEW,
+            _OPEN_REPARSE_BACKUP | _FILE_ATTRIBUTE_NORMAL,
+            None,
+        )
+        if handle == _INVALID_HANDLE:
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            buffer = ctypes.create_string_buffer(raw)
+            written = wintypes.DWORD()
+            if not _kernel32.WriteFile(
+                handle, buffer, len(raw), ctypes.byref(written), None
+            ) or written.value != len(raw):
+                raise ctypes.WinError(ctypes.get_last_error())
+            if not _kernel32.FlushFileBuffers(handle):
+                raise ctypes.WinError(ctypes.get_last_error())
+            try:
+                import win32security  # type: ignore[import-not-found]
+
+                descriptor = (
+                    win32security.ConvertStringSecurityDescriptorToSecurityDescriptor(
+                        protected_sddl, 1
+                    )
+                )
+                win32security.SetSecurityInfo(
+                    handle,
+                    win32security.SE_FILE_OBJECT,
+                    win32security.OWNER_SECURITY_INFORMATION
+                    | win32security.DACL_SECURITY_INFORMATION
+                    | win32security.PROTECTED_DACL_SECURITY_INFORMATION,
+                    descriptor.GetSecurityDescriptorOwner(),
+                    None,
+                    descriptor.GetSecurityDescriptorDacl(),
+                    None,
+                )
+            except Exception as exc:
+                raise OSError("protected handle ACL apply failed") from exc
+            before = self._handle_info(handle)
+            size = (before.size_high << 32) | before.size_low
+            raw_readback = self._read_exact(handle, size)
+            after = self._handle_info(handle)
+            if self._identity(before) != self._identity(after):
+                raise OSError("created file changed during handle readback")
+            return SecureFileRead(
+                raw=raw_readback, facts=self._facts(handle, path, info=after)
+            )
+        finally:
+            _kernel32.CloseHandle(handle)
+
+    @staticmethod
+    def apply_protected_security_by_handle(
+        path: Path, *, sddl: str, directory: bool
+    ) -> None:
+        """Apply owner/protected DACL to the object opened without reparse follow."""
+        attributes = _OPEN_REPARSE_BACKUP
+        if directory:
+            attributes |= _FILE_ATTRIBUTE_DIRECTORY
+        handle = _kernel32.CreateFileW(
+            str(path.absolute()),
+            _READ_CONTROL | _WRITE_DAC | _WRITE_OWNER | _FILE_READ_ATTRIBUTES,
+            0,
+            None,
+            _OPEN_EXISTING,
+            attributes,
+            None,
+        )
+        if handle == _INVALID_HANDLE:
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            import win32security  # type: ignore[import-not-found]
+
+            descriptor = (
+                win32security.ConvertStringSecurityDescriptorToSecurityDescriptor(
+                    sddl, 1
+                )
+            )
+            win32security.SetSecurityInfo(
+                handle,
+                win32security.SE_FILE_OBJECT,
+                win32security.OWNER_SECURITY_INFORMATION
+                | win32security.DACL_SECURITY_INFORMATION
+                | win32security.PROTECTED_DACL_SECURITY_INFORMATION,
+                descriptor.GetSecurityDescriptorOwner(),
+                None,
+                descriptor.GetSecurityDescriptorDacl(),
+                None,
+            )
+        finally:
+            _kernel32.CloseHandle(handle)
+
+    @staticmethod
+    def delete_empty_object_by_handle(path: Path, *, directory: bool) -> None:
+        """Delete only the object opened without following a reparse point."""
+        attributes = _OPEN_REPARSE_BACKUP
+        if directory:
+            attributes |= _FILE_ATTRIBUTE_DIRECTORY
+        handle = _kernel32.CreateFileW(
+            str(path.absolute()),
+            _DELETE | _READ_CONTROL | _FILE_READ_ATTRIBUTES,
+            0,
+            None,
+            _OPEN_EXISTING,
+            attributes,
+            None,
+        )
+        if handle == _INVALID_HANDLE:
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            delete = wintypes.BOOL(True)
+            if not _kernel32.SetFileInformationByHandle(
+                handle,
+                _FILE_DISPOSITION_INFO,
+                ctypes.byref(delete),
+                ctypes.sizeof(delete),
+            ):
+                raise ctypes.WinError(ctypes.get_last_error())
+        finally:
+            _kernel32.CloseHandle(handle)
+
+    @staticmethod
+    def rename_create_only_to_opened_parent(
+        source: Path, *, target_name: str, parent: WindowsOpenedDirectoryAnchorV1
+    ) -> None:
+        """Publish via FileRenameInfo rooted at the retained parent handle."""
+        if (
+            not target_name
+            or "\\" in target_name
+            or "/" in target_name
+            or parent._handle is None
+        ):
+            raise OSError("invalid handle-rooted rename target")
+        handle = _kernel32.CreateFileW(
+            str(source.absolute()),
+            _DELETE | _READ_CONTROL | _FILE_READ_ATTRIBUTES,
+            0,
+            None,
+            _OPEN_EXISTING,
+            _OPEN_REPARSE_BACKUP | _FILE_ATTRIBUTE_DIRECTORY,
+            None,
+        )
+        if handle == _INVALID_HANDLE:
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            encoded = target_name.encode("utf-16-le")
+            size = _FILE_RENAME_INFO_V1.file_name.offset + len(encoded) + 2
+            buffer = ctypes.create_string_buffer(size)
+            info = _FILE_RENAME_INFO_V1.from_buffer(buffer)
+            info.replace_if_exists = False
+            info.root_directory = parent._handle
+            info.file_name_length = len(encoded)
+            ctypes.memmove(
+                ctypes.addressof(buffer) + _FILE_RENAME_INFO_V1.file_name.offset,
+                encoded,
+                len(encoded),
+            )
+            if not _kernel32.SetFileInformationByHandle(
+                handle, _FILE_RENAME_INFO, buffer, size
+            ):
+                raise ctypes.WinError(ctypes.get_last_error())
+        finally:
+            _kernel32.CloseHandle(handle)
 
     def resolve_service_sid_sha256(self, service_name: str) -> str:
         account_name = f"NT SERVICE\\{service_name}"

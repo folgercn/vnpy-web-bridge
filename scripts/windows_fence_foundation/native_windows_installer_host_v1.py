@@ -11,7 +11,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import shutil
 import subprocess
 import uuid
 import zipfile
@@ -90,6 +89,15 @@ class NativeWindowsFenceInstallerHostV1(WindowsFenceInstallerHostV1):
             or not value
         ):
             raise WindowsFinalInstallerError("PYWIN32_REGISTRY_VALUE_INVALID")
+        return value
+
+    @staticmethod
+    def _pywin32_sddl_text(value: Any) -> str:
+        """pywin32 builds return either SDDL text or ``(text, revision)``."""
+        if isinstance(value, tuple):
+            value = value[0] if value else None
+        if not isinstance(value, str) or not value:
+            raise WindowsFinalInstallerError("PYWIN32_REGISTRY_SDDL_INVALID")
         return value
 
     @staticmethod
@@ -211,13 +219,13 @@ class NativeWindowsFenceInstallerHostV1(WindowsFenceInstallerHostV1):
                 owner = win32security.ConvertSidToStringSid(
                     security.GetSecurityDescriptorOwner()
                 )
-                sddl = (
+                sddl = self._pywin32_sddl_text(
                     win32security.ConvertSecurityDescriptorToStringSecurityDescriptor(
                         security,
                         1,
                         win32security.OWNER_SECURITY_INFORMATION
                         | win32security.DACL_SECURITY_INFORMATION,
-                    )[0]
+                    )
                 )
             finally:
                 winreg.CloseKey(key)
@@ -244,20 +252,10 @@ class NativeWindowsFenceInstallerHostV1(WindowsFenceInstallerHostV1):
         )
 
     @staticmethod
-    def _apply_path_security(path: Path, *, sddl: str) -> None:
+    def _apply_path_security(path: Path, *, sddl: str, directory: bool) -> None:
         try:
-            import win32security  # type: ignore[import-not-found]
-
-            descriptor = (
-                win32security.ConvertStringSecurityDescriptorToSecurityDescriptor(
-                    sddl, 1
-                )
-            )
-            win32security.SetFileSecurity(
-                str(path),
-                win32security.OWNER_SECURITY_INFORMATION
-                | win32security.DACL_SECURITY_INFORMATION,
-                descriptor,
+            WindowsFilesystemFactsAdapter.apply_protected_security_by_handle(
+                path, sddl=sddl, directory=directory
             )
         except Exception as exc:
             raise WindowsFinalInstallerError(
@@ -277,7 +275,7 @@ class NativeWindowsFenceInstallerHostV1(WindowsFenceInstallerHostV1):
         try:
             if not root.exists():
                 root.mkdir(parents=True, mode=0o700)
-                self._apply_path_security(root, sddl=directory_acl_sddl)
+                self._apply_path_security(root, sddl=directory_acl_sddl, directory=True)
             fs = WindowsFilesystemFactsAdapter()
             facts = fs.inspect(root)
         except OSError as exc:
@@ -307,7 +305,9 @@ class NativeWindowsFenceInstallerHostV1(WindowsFenceInstallerHostV1):
         try:
             if not journal.exists():
                 journal.mkdir(mode=0o700)
-                self._apply_path_security(journal, sddl=directory_acl_sddl)
+                self._apply_path_security(
+                    journal, sddl=directory_acl_sddl, directory=True
+                )
             journal_facts = fs.inspect(journal)
         except OSError as exc:
             raise WindowsFinalInstallerError("INSTALL_JOURNAL_CREATE_FAILED") from exc
@@ -365,16 +365,13 @@ class NativeWindowsFenceInstallerHostV1(WindowsFenceInstallerHostV1):
             }
         )
         try:
-            descriptor = os.open(
-                path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_BINARY, 0o600
+            written = WindowsFilesystemFactsAdapter().write_file_create_only(
+                path, raw=raw, protected_sddl=self._journal_acl_sddl or ""
             )
-            try:
-                os.write(descriptor, raw)
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
+            if written.raw != raw:
+                raise WindowsFinalInstallerError("SCM_BACKUP_HANDLE_READBACK_MISMATCH")
         except FileExistsError:
-            if path.read_bytes() != raw:
+            if WindowsFilesystemFactsAdapter().read_file(path).raw != raw:
                 raise WindowsFinalInstallerError("SCM_BACKUP_CREATE_ONLY_CONFLICT")
         except OSError as exc:
             raise WindowsFinalInstallerError("SCM_BACKUP_WRITE_FAILED") from exc
@@ -430,19 +427,31 @@ class NativeWindowsFenceInstallerHostV1(WindowsFenceInstallerHostV1):
                                 "INSTALL_BUNDLE_ARCHIVE_INVALID"
                             )
                         target = staging / item.filename.rsplit("/", 1)[1]
-                        with target.open("xb") as output:
-                            output.write(archive.read(item))
-                            output.flush()
-                            os.fsync(output.fileno())
+                        expected_raw = archive.read(item)
+                        written = fs.write_file_create_only(
+                            target,
+                            raw=expected_raw,
+                            protected_sddl=component_acl_sddl,
+                        )
+                        if written.raw != expected_raw:
+                            raise WindowsFinalInstallerError(
+                                "INSTALL_COMPONENT_HANDLE_READBACK_MISMATCH"
+                            )
                         anchor.assert_named_path_is_opened_parent()
                 if final.exists():
                     raise WindowsFinalInstallerError("INSTALL_FINAL_ALREADY_EXISTS")
                 anchor.assert_named_path_is_opened_parent()
-                os.replace(staging, final)
+                fs.rename_create_only_to_opened_parent(
+                    staging, target_name=final.name, parent=anchor
+                )
                 anchor.assert_named_path_is_opened_parent()
-                self._apply_path_security(final, sddl=final_directory_acl_sddl)
+                self._apply_path_security(
+                    final, sddl=final_directory_acl_sddl, directory=True
+                )
                 for path in final.iterdir():
-                    self._apply_path_security(path, sddl=component_acl_sddl)
+                    self._apply_path_security(
+                        path, sddl=component_acl_sddl, directory=False
+                    )
                     anchor.assert_named_path_is_opened_parent()
                 final_facts = fs.inspect(final)
             if (
@@ -461,7 +470,8 @@ class NativeWindowsFenceInstallerHostV1(WindowsFenceInstallerHostV1):
             ):
                 raise WindowsFinalInstallerError("INSTALL_FINAL_ACL_READBACK_MISMATCH")
         except Exception as exc:
-            shutil.rmtree(staging, ignore_errors=True)
+            # Do not pathname-delete an unverified staging tree after a fault.
+            # It remains an inert, non-installed forensic orphan.
             if isinstance(exc, WindowsFinalInstallerError):
                 raise
             raise WindowsFinalInstallerError("INSTALL_ATOMIC_PUBLISH_FAILED") from exc
@@ -514,7 +524,7 @@ class NativeWindowsFenceInstallerHostV1(WindowsFenceInstallerHostV1):
             root.mkdir()
             if self._journal_acl_sddl is None or self._journal_owner_sha256 is None:
                 raise WindowsFinalInstallerError("INSTALL_JOURNAL_NOT_INITIALIZED")
-            self._apply_path_security(root, sddl=self._journal_acl_sddl)
+            self._apply_path_security(root, sddl=self._journal_acl_sddl, directory=True)
         except FileExistsError:
             pass
         try:
@@ -546,16 +556,15 @@ class NativeWindowsFenceInstallerHostV1(WindowsFenceInstallerHostV1):
         )
         path = root / f"{event_sequence:02d}.json"
         try:
-            descriptor = os.open(
-                path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_BINARY, 0o600
+            written = WindowsFilesystemFactsAdapter().write_file_create_only(
+                path, raw=raw, protected_sddl=self._journal_acl_sddl or ""
             )
-            try:
-                os.write(descriptor, raw)
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
+            if written.raw != raw:
+                raise WindowsFinalInstallerError(
+                    "INSTALL_EVENT_HANDLE_READBACK_MISMATCH"
+                )
         except FileExistsError:
-            if path.read_bytes() != raw:
+            if WindowsFilesystemFactsAdapter().read_file(path).raw != raw:
                 raise WindowsFinalInstallerError("INSTALL_EVENT_CREATE_ONLY_CONFLICT")
         except OSError as exc:
             raise WindowsFinalInstallerError("INSTALL_EVENT_WRITE_FAILED") from exc
@@ -724,33 +733,66 @@ class NativeWindowsFenceInstallerHostV1(WindowsFenceInstallerHostV1):
     def restore_pre_event3_backup(self, *, backup_id: str) -> None:
         path = self._journal_path("backups") / f"{backup_id}.json"
         try:
-            value = json.loads(path.read_bytes())
+            read = WindowsFilesystemFactsAdapter().read_file(path)
+            value = json.loads(read.raw)
             target = value["readback"]
         except Exception as exc:
             raise WindowsFinalInstallerError("SCM_BACKUP_READ_FAILED") from exc
         self._apply_unchecked(target)
 
-    def remove_pre_event3_published_orphan(self, *, destination_root: str) -> None:
+    def remove_pre_event3_published_orphan(
+        self,
+        *,
+        destination_root: str,
+        install_attempt_id: str,
+        bundle_sha256: str,
+    ) -> None:
         self._require_windows()
         path = Path(destination_root)
-        if not path.exists():
-            return
+        if (
+            not install_attempt_id.startswith("windows-fence-install-")
+            or len(bundle_sha256) != 64
+            or path.name != bundle_sha256
+        ):
+            raise WindowsFinalInstallerError("INSTALL_ORPHAN_IDENTITY_INVALID")
         try:
-            facts = WindowsFilesystemFactsAdapter().inspect(path)
+            filesystem = WindowsFilesystemFactsAdapter()
+            inventory = filesystem.list_directory(path)
+            facts = inventory.facts
         except OSError as exc:
-            raise WindowsFinalInstallerError("INSTALL_ORPHAN_READ_FAILED") from exc
+            if getattr(exc, "winerror", None) in {2, 3}:
+                return
+            raise WindowsFinalInstallerError("INSTALL_ORPHAN_READ_FAILED") from None
         if (
             not facts.directory
             or facts.reparse_point
             or not facts.parent_chain_reparse_free
             or facts.hardlink_count != 1
             or facts.alternate_data_streams
+            or set(inventory.names)
+            != {
+                "windows_rpc_service_wrapper_v1.py",
+                "windows_rpc_deployment_snapshot_v1.py",
+                "windows_rpc_durable_fence_v1.py",
+                "windows_fence_foundation_v1.pyz",
+                "windows_rpc_service_config_v1.json",
+            }
         ):
             raise WindowsFinalInstallerError("INSTALL_ORPHAN_CLEANUP_UNSAFE")
         try:
-            shutil.rmtree(path)
-        except OSError as exc:
-            raise WindowsFinalInstallerError("INSTALL_ORPHAN_CLEANUP_FAILED") from exc
+            for name in inventory.names:
+                file_facts = filesystem.read_file(path / name).facts
+                if (
+                    not file_facts.regular_file
+                    or file_facts.reparse_point
+                    or file_facts.hardlink_count != 1
+                    or file_facts.alternate_data_streams
+                ):
+                    raise WindowsFinalInstallerError("INSTALL_ORPHAN_CLEANUP_UNSAFE")
+                filesystem.delete_empty_object_by_handle(path / name, directory=False)
+            filesystem.delete_empty_object_by_handle(path, directory=True)
+        except OSError:
+            raise WindowsFinalInstallerError("INSTALL_ORPHAN_CLEANUP_FAILED") from None
 
     def query_same_restart_attempt_only(self, **_kwargs: object) -> str:
         install_attempt_id = _kwargs.get("install_attempt_id")
@@ -758,7 +800,8 @@ class NativeWindowsFenceInstallerHostV1(WindowsFenceInstallerHostV1):
             raise WindowsFinalInstallerError("SCM_RESTART_QUERY_INPUT_INVALID")
         path = self._journal_path(install_attempt_id) / "03.json"
         try:
-            value = json.loads(path.read_bytes())
+            read = WindowsFilesystemFactsAdapter().read_file(path)
+            value = json.loads(read.raw)
         except Exception as exc:
             raise WindowsFinalInstallerError(
                 "SCM_RESTART_QUERY_EVIDENCE_MISSING"

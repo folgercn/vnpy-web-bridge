@@ -8,6 +8,7 @@ test doubles only and are rejected before an install can become ready.
 from __future__ import annotations
 
 import hashlib
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
@@ -147,7 +148,13 @@ class WindowsFenceInstallerHostV1(Protocol):
 
     def restore_pre_event3_backup(self, *, backup_id: str) -> None: ...
 
-    def remove_pre_event3_published_orphan(self, *, destination_root: str) -> None: ...
+    def remove_pre_event3_published_orphan(
+        self,
+        *,
+        destination_root: str,
+        install_attempt_id: str,
+        bundle_sha256: str,
+    ) -> None: ...
 
     def query_same_restart_attempt_only(self, *, install_attempt_id: str) -> str: ...
 
@@ -219,6 +226,28 @@ def _exact_registry_security(
         raise WindowsFinalInstallerError("PYWIN32_REGISTRY_SECURITY_READBACK_MISMATCH")
 
 
+def _publish_sddl_is_safe(value: str) -> bool:
+    """Reject broad writers and DELETE_CHILD before any publish can begin."""
+    normalized = value.upper()
+    if "D:P" not in normalized:
+        return False
+    ace_pattern = re.compile(r"\([AD];[^;]*;([^;]*);[^;]*;[^;]*;([^)]+)\)")
+    for rights, trustee in ace_pattern.findall(normalized):
+        if rights in {"DC", "0X00000040"} or "DC" in rights:
+            return False
+        if trustee in {
+            "WD",
+            "BU",
+            "AU",
+            "AN",
+            "S-1-1-0",
+            "S-1-5-11",
+            "S-1-5-32-545",
+        } and rights not in {"", "GR", "GX", "RC"}:
+            return False
+    return True
+
+
 class FinalWindowsFenceInstallerV1:
     """No fallback installer: it can only progress one exact frozen attempt."""
 
@@ -271,6 +300,29 @@ class FinalWindowsFenceInstallerV1:
             != manifest["expected_service_config_acl_sddl_sha256"]
         ):
             raise WindowsFinalInstallerError("INSTALLER_REGISTRY_SECURITY_MISMATCH")
+        publish_security = getattr(target_projection, "publish_security", None)
+        if (
+            not isinstance(publish_security, Mapping)
+            or set(publish_security)
+            != {"final_owner_sid", "final_directory_acl_sddl", "component_acl_sddl"}
+            or any(
+                not isinstance(value, str) or not value
+                for value in publish_security.values()
+            )
+            or hashlib.sha256(publish_security["final_owner_sid"].encode()).hexdigest()
+            != manifest["expected_final_owner_sid_sha256"]
+            or hashlib.sha256(
+                publish_security["final_directory_acl_sddl"].encode()
+            ).hexdigest()
+            != manifest["expected_final_directory_acl_sddl_sha256"]
+            or hashlib.sha256(
+                publish_security["component_acl_sddl"].encode()
+            ).hexdigest()
+            != manifest["expected_component_acl_sddl_sha256"]
+            or not _publish_sddl_is_safe(publish_security["final_directory_acl_sddl"])
+            or not _publish_sddl_is_safe(publish_security["component_acl_sddl"])
+        ):
+            raise WindowsFinalInstallerError("INSTALLER_PUBLISH_SECURITY_MISMATCH")
         try:
             bootstrap = parse_installer_store_bootstrap_v1(
                 public_config_raw, expected_raw_sha256=manifest["config_sha256"]
@@ -378,7 +430,9 @@ class FinalWindowsFenceInstallerV1:
             self._host.remove_pre_event3_published_orphan(
                 destination_root=str(
                     self._target.component_paths["wrapper"].rsplit("\\", 1)[0]
-                )
+                ),
+                install_attempt_id=manifest["install_attempt_id"],
+                bundle_sha256=self._bundle.bundle_sha256,
             )
             self._host.restore_pre_event3_backup(backup_id=self._backup_id)
             raise WindowsFinalInstallerError("INSTALL_PRE_EVENT3_ROLLED_BACK") from exc

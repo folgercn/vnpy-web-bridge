@@ -62,6 +62,8 @@ def test_windows_fence_gate_is_read_only_cross_platform_and_non_deploying() -> N
     assert (
         "backend/tests/unit/test_windows_rpc_durable_fence_target_contract_v1.py" in job
     )
+    assert "installer_entry_v1 --native-host-preflight" in job
+    assert "if: runner.os == 'Windows'" in job
     assert "cryptography==48.0.0" in (
         Path(__file__).resolve().parents[3] / "scripts/ci/requirements-quick.txt"
     ).read_text(encoding="utf-8")

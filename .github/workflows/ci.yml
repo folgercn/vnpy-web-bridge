@@ -930,6 +930,12 @@ jobs:
           backend/tests/unit/test_windows_rpc_credential_config_v1.py
           backend/tests/unit/test_windows_fence_installer_windows_v1.py
 
+      - name: Smoke native final-installer host without service mutation
+        if: runner.os == 'Windows'
+        run: |-
+          pip install pywin32
+          python -m scripts.windows_fence_foundation.installer_entry_v1 --native-host-preflight
+
   docker:
     name: Production image build
     needs: changes
