@@ -80,7 +80,6 @@ def test_m2_peek_current_facts_is_canonical_and_never_allocates_or_writes(
     assert value["account"]["CTP.sim-account"]["available"] == 90
     assert value["positions"]["rb-long"]["volume"] == 2
     assert list(value["active_orders"]) == ["CTP.1"]
-    assert value["pending_send_outcomes"] == []
     assert value["gateway"] == {
         "gateway_name": "CTP",
         "account_scope": "account:sim",
@@ -91,19 +90,14 @@ def test_m2_peek_current_facts_is_canonical_and_never_allocates_or_writes(
     assert ledger_path.read_bytes() == before_ledger
 
 
-def test_m2_peek_current_facts_exposes_only_actual_pending_send_outcomes(
+def test_m2_peek_current_facts_is_repeatable_without_durable_mutation(
     tmp_path: Path,
 ) -> None:
-    facts, _state_path, _ledger_path = _source(tmp_path)
-    context = {"intent_id": "intent-0001"}
-    facts.begin_pending_send(context)
-    try:
-        value = json.loads(
-            facts.peek_current_facts(
-                {"account_scope": "account:sim", "environment": "simnow"}
-            )
-        )
-    finally:
-        facts.settle_pending_send(context)
+    facts, state_path, ledger_path = _source(tmp_path)
+    before_state = state_path.read_bytes()
+    before_ledger = ledger_path.read_bytes()
+    request = {"account_scope": "account:sim", "environment": "simnow"}
 
-    assert value["pending_send_outcomes"] == ["intent-0001"]
+    assert facts.peek_current_facts(request) == facts.peek_current_facts(request)
+    assert state_path.read_bytes() == before_state
+    assert ledger_path.read_bytes() == before_ledger

@@ -14,20 +14,23 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .contracts import canonical_json_bytes
-from .installer_windows_v1 import WindowsFinalInstallerError
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$")
 
 
+class RestartDispatchAuditError(ValueError):
+    """The non-executing audit input was incomplete or invalid."""
+
+
 def _identifier(value: Any, field: str) -> str:
     if not isinstance(value, str) or _IDENTIFIER_RE.fullmatch(value) is None:
-        raise WindowsFinalInstallerError(f"RESTART_AUDIT_{field.upper()}_INVALID")
+        raise RestartDispatchAuditError(f"RESTART_AUDIT_{field.upper()}_INVALID")
     return value
 
 
 def _caller(value: Mapping[str, Any]) -> dict[str, Any]:
     if set(value) != {"sid", "pid", "session_id"}:
-        raise WindowsFinalInstallerError("RESTART_AUDIT_CALLER_FACTS_MISSING")
+        raise RestartDispatchAuditError("RESTART_AUDIT_CALLER_FACTS_MISSING")
     sid = value["sid"]
     pid = value["pid"]
     session_id = value["session_id"]
@@ -41,7 +44,7 @@ def _caller(value: Mapping[str, Any]) -> dict[str, Any]:
         or not isinstance(session_id, int)
         or session_id < 0
     ):
-        raise WindowsFinalInstallerError("RESTART_AUDIT_CALLER_FACTS_MISSING")
+        raise RestartDispatchAuditError("RESTART_AUDIT_CALLER_FACTS_MISSING")
     return {"sid": sid, "pid": pid, "session_id": session_id}
 
 
@@ -60,7 +63,7 @@ def build_restart_dispatch_audit_v1(
     """
 
     if captured_at.tzinfo is None or captured_at.utcoffset() is None:
-        raise WindowsFinalInstallerError("RESTART_AUDIT_CLOCK_INVALID")
+        raise RestartDispatchAuditError("RESTART_AUDIT_CLOCK_INVALID")
     nonce = _identifier(restart_dispatch_nonce, "restart_dispatch_nonce")
     payload = {
         "schema_version": "windows_fence_restart_dispatch_audit_v1",
@@ -88,4 +91,4 @@ def build_restart_dispatch_audit_v1(
     return canonical_json_bytes(payload)
 
 
-__all__ = ["build_restart_dispatch_audit_v1"]
+__all__ = ["RestartDispatchAuditError", "build_restart_dispatch_audit_v1"]
