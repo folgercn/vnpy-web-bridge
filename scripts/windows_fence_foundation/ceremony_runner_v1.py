@@ -108,7 +108,10 @@ class WindowsFenceCeremonyActionsV1(Protocol):
         *,
         context: CeremonyStepContextV1,
         signed_restart_authorization: bytes,
-        scm_dispatch_evidence_raw: bytes,
+    ) -> None: ...
+
+    def append_event_5(
+        self, *, context: CeremonyStepContextV1, scm_dispatch_evidence_raw: bytes
     ) -> CeremonyEventEvidenceV1: ...
 
     def capture_scm_dispatch_evidence_draft(
@@ -237,13 +240,22 @@ class NativeWindowsFenceCeremonyActionsV1:
         *,
         context: CeremonyStepContextV1,
         signed_restart_authorization: bytes,
-        scm_dispatch_evidence_raw: bytes,
-    ) -> CeremonyEventEvidenceV1:
-        raw = self._installer.dispatch_reserved_restart_once(
-            restart_authorization_raw=signed_restart_authorization,
-            scm_dispatch_evidence_raw=scm_dispatch_evidence_raw,
+    ) -> None:
+        del context
+        self._installer.dispatch_reserved_restart_once(
+            restart_authorization_raw=signed_restart_authorization
         )
-        return self._event(context, 5, raw)
+
+    def append_event_5(
+        self, *, context: CeremonyStepContextV1, scm_dispatch_evidence_raw: bytes
+    ) -> CeremonyEventEvidenceV1:
+        return self._event(
+            context,
+            5,
+            self._installer.append_signed_evidence_event(
+                event_sequence=5, evidence_raw=scm_dispatch_evidence_raw
+            ),
+        )
 
     def capture_scm_dispatch_evidence_draft(
         self, *, context: CeremonyStepContextV1
@@ -254,12 +266,11 @@ class NativeWindowsFenceCeremonyActionsV1:
     def await_event_6(
         self, *, context: CeremonyStepContextV1, startup_receipt_raw: bytes
     ) -> CeremonyEventEvidenceV1:
-        self._installer.query_service_runtime_readback()
         return self._event(
             context,
             6,
-            self._installer.append_observation_event(
-                event_sequence=6, observation_raw=startup_receipt_raw
+            self._installer.append_signed_evidence_event(
+                event_sequence=6, evidence_raw=startup_receipt_raw
             ),
         )
 
@@ -270,12 +281,11 @@ class NativeWindowsFenceCeremonyActionsV1:
     def await_event_7(
         self, *, context: CeremonyStepContextV1, attestation_raw: bytes
     ) -> CeremonyEventEvidenceV1:
-        self._installer.query_service_runtime_readback()
         return self._event(
             context,
             7,
-            self._installer.append_observation_event(
-                event_sequence=7, observation_raw=attestation_raw
+            self._installer.append_signed_evidence_event(
+                event_sequence=7, evidence_raw=attestation_raw
             ),
         )
 
@@ -420,7 +430,7 @@ class WindowsFenceCeremonyRunnerV1:
             context=context,
             sequence=5,
             cause="event_5_restart_unknown",
-            action=lambda: self._capture_and_dispatch_event_5(
+            action=lambda: self._dispatch_capture_and_append_event_5(
                 actions,
                 context=context,
                 signed_restart_authorization=artifacts["restart_authorization"],
@@ -455,7 +465,7 @@ class WindowsFenceCeremonyRunnerV1:
             restart_dispatches=1,
         )
 
-    def _capture_and_dispatch_event_5(
+    def _dispatch_capture_and_append_event_5(
         self,
         actions: WindowsFenceCeremonyActionsV1,
         *,
@@ -463,14 +473,18 @@ class WindowsFenceCeremonyRunnerV1:
         signed_restart_authorization: bytes,
         artifacts: Mapping[str, bytes],
     ) -> CeremonyEventEvidenceV1:
+        # Dispatch is the mutation boundary. The SCM observer may only read
+        # after it; an unsigned draft never reaches the native journal.
+        actions.dispatch_restart_once_for_event_5(
+            context=context, signed_restart_authorization=signed_restart_authorization
+        )
         scm_dispatch_evidence_raw = self._verify_observer_handoff(
             draft=actions.capture_scm_dispatch_evidence_draft(context=context),
             raw=artifacts["scm_dispatch_evidence"],
             expected_schema="windows_rpc_durable_fence_scm_dispatch_evidence_v1",
         )
-        return actions.dispatch_restart_once_for_event_5(
+        return actions.append_event_5(
             context=context,
-            signed_restart_authorization=signed_restart_authorization,
             scm_dispatch_evidence_raw=scm_dispatch_evidence_raw,
         )
 
@@ -606,18 +620,25 @@ class WindowsFenceCeremonyRunnerV1:
     def _verify_live_artifacts(
         self, artifacts: Mapping[str, bytes]
     ) -> Mapping[str, Any]:
-        """Admit only the signed preflight/manifest before Event1."""
+        """Admit static signed inputs; observer handoffs arrive post-mutation."""
         required = {
             "zero_preflight",
             "manifest",
             "publish_receipt",
             "restart_authorization",
+        }
+        permitted = required | {
             "scm_dispatch_evidence",
             "startup_receipt",
             "attestation",
         }
-        if set(artifacts) != required or any(
-            type(raw) is not bytes or not raw for raw in artifacts.values()
+        if (
+            not required.issubset(artifacts)
+            or not set(artifacts).issubset(permitted)
+            or any(
+                type(artifacts[name]) is not bytes or not artifacts[name]
+                for name in required
+            )
         ):
             raise WindowsFenceCeremonyError("CEREMONY_LIVE_ARTIFACT_SET_REQUIRED")
         if (

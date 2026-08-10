@@ -336,18 +336,11 @@ def test_event5_joins_verified_scm_dispatch_artifact_raw_hash() -> None:
     installer.stage_and_publish(bundle_raw=b"fixed")
     installer.reserve_event3_and_apply_target()
     restart_raw = b"signed-restart-authorization"
-    scm_raw = b"signed-scm-dispatch-evidence"
-    assert (
-        installer.dispatch_reserved_restart_once(
-            restart_authorization_raw=restart_raw, scm_dispatch_evidence_raw=scm_raw
-        )
-        == b"event-5"
-    )
+    installer.dispatch_reserved_restart_once(restart_authorization_raw=restart_raw)
     assert host.restart_dispatch == {
         "install_attempt_id": "windows-fence-install-" + SHA,
         "service_name": "VnpyRpcService",
         "restart_authorization_raw_sha256": hashlib.sha256(restart_raw).hexdigest(),
-        "scm_dispatch_evidence_raw_sha256": hashlib.sha256(scm_raw).hexdigest(),
     }
 
 

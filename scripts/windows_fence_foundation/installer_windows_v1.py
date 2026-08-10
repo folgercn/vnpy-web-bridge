@@ -554,9 +554,9 @@ class FinalWindowsFenceInstallerV1:
             raise WindowsFinalInstallerError("INSTALL_EVENT_READBACK_FAILED") from exc
 
     def dispatch_reserved_restart_once(
-        self, *, restart_authorization_raw: bytes, scm_dispatch_evidence_raw: bytes
-    ) -> bytes:
-        """The only Event5 mutation, after existing Event3/4 completion."""
+        self, *, restart_authorization_raw: bytes
+    ) -> None:
+        """Dispatch once after Event3/4; Event5 follows signed SCM readback."""
         if self._checkpoint is not InstallCheckpointV1.TARGET_READY:
             raise WindowsFinalInstallerError("INSTALL_RESTART_DISPATCH_STATE_INVALID")
         if (
@@ -564,23 +564,15 @@ class FinalWindowsFenceInstallerV1:
             or not restart_authorization_raw
         ):
             raise WindowsFinalInstallerError("INSTALL_RESTART_AUTHORIZATION_INVALID")
-        if (
-            type(scm_dispatch_evidence_raw) is not bytes
-            or not scm_dispatch_evidence_raw
-        ):
-            raise WindowsFinalInstallerError("INSTALL_SCM_DISPATCH_EVIDENCE_INVALID")
         dispatch = getattr(self._host, "dispatch_reserved_restart_once", None)
         if not callable(dispatch):
             raise WindowsFinalInstallerError("INSTALL_RESTART_DISPATCH_UNAVAILABLE")
         try:
-            return dispatch(
+            dispatch(
                 install_attempt_id=self._manifest["install_attempt_id"],
                 service_name=self._manifest["service_name"],
                 restart_authorization_raw_sha256=hashlib.sha256(
                     restart_authorization_raw
-                ).hexdigest(),
-                scm_dispatch_evidence_raw_sha256=hashlib.sha256(
-                    scm_dispatch_evidence_raw
                 ).hexdigest(),
             )
         except WindowsFinalInstallerError:
@@ -608,24 +600,25 @@ class FinalWindowsFenceInstallerV1:
             raise WindowsFinalInstallerError("INSTALL_RUNTIME_READBACK_INVALID")
         return value
 
-    def append_observation_event(
-        self, *, event_sequence: int, observation_raw: bytes
+    def append_signed_evidence_event(
+        self, *, event_sequence: int, evidence_raw: bytes
     ) -> bytes:
-        """Append Event6 or Event7 into the existing installer journal only."""
+        """Append an existing v1 signed evidence raw-hash join only."""
         expected = {
+            5: ("RESTART_DISPATCHED_FROZEN", 4),
             6: ("START_OBSERVED_FROZEN", 5),
             7: ("FOUNDATION_VERIFIED_FROZEN", 6),
         }.get(event_sequence)
         if self._checkpoint is not InstallCheckpointV1.TARGET_READY or expected is None:
             raise WindowsFinalInstallerError("INSTALL_OBSERVATION_EVENT_STATE_INVALID")
-        if type(observation_raw) is not bytes or not observation_raw:
-            raise WindowsFinalInstallerError("INSTALL_OBSERVATION_EVENT_INVALID")
+        if type(evidence_raw) is not bytes or not evidence_raw:
+            raise WindowsFinalInstallerError("INSTALL_SIGNED_EVIDENCE_EVENT_INVALID")
         self.read_event_readback(event_sequence=expected[1])
         self._host.append_install_event_create_only(
             install_attempt_id=self._manifest["install_attempt_id"],
             event_sequence=event_sequence,
             state=expected[0],
-            details_sha256=hashlib.sha256(observation_raw).hexdigest(),
+            details_sha256=hashlib.sha256(evidence_raw).hexdigest(),
         )
         return self.read_event_readback(event_sequence=event_sequence)
 

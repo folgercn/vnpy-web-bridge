@@ -133,6 +133,7 @@ class _Actions:
         self.fail_at = fail_at
         self.restart_dispatches = 0
         self.observer_artifacts = observer_artifacts
+        self.signed_joins: dict[int, str] = {}
 
     @staticmethod
     def _event(
@@ -180,15 +181,26 @@ class _Actions:
         *,
         context: CeremonyStepContextV1,
         signed_restart_authorization: bytes,
-        scm_dispatch_evidence_raw: bytes,
     ):
-        assert signed_restart_authorization and scm_dispatch_evidence_raw
-        self._call("event_5")
+        del context
+        assert signed_restart_authorization
+        self._call("event_5_dispatch")
         self.restart_dispatches += 1
+
+    def append_event_5(
+        self, *, context: CeremonyStepContextV1, scm_dispatch_evidence_raw: bytes
+    ):
+        assert (
+            scm_dispatch_evidence_raw
+            == self.observer_artifacts["scm_dispatch_evidence"]
+        )
+        self._call("event_5_append")
+        self.signed_joins[5] = hashlib.sha256(scm_dispatch_evidence_raw).hexdigest()
         return self._event(context, 5)
 
     def capture_scm_dispatch_evidence_draft(self, *, context: CeremonyStepContextV1):
         del context
+        self._call("capture_scm")
         return _unsigned_observer_draft(
             self.observer_artifacts["scm_dispatch_evidence"]
         )
@@ -196,21 +208,25 @@ class _Actions:
     def await_event_6(
         self, *, context: CeremonyStepContextV1, startup_receipt_raw: bytes
     ):
-        assert startup_receipt_raw
-        self._call("event_6")
+        assert startup_receipt_raw == self.observer_artifacts["startup_receipt"]
+        self._call("event_6_append")
+        self.signed_joins[6] = hashlib.sha256(startup_receipt_raw).hexdigest()
         return self._event(context, 6)
 
     def capture_startup_receipt_draft(self, *, context: CeremonyStepContextV1):
         del context
+        self._call("capture_startup")
         return _unsigned_observer_draft(self.observer_artifacts["startup_receipt"])
 
     def await_event_7(self, *, context: CeremonyStepContextV1, attestation_raw: bytes):
-        assert attestation_raw
-        self._call("event_7")
+        assert attestation_raw == self.observer_artifacts["attestation"]
+        self._call("event_7_append")
+        self.signed_joins[7] = hashlib.sha256(attestation_raw).hexdigest()
         return self._event(context, 7)
 
     def capture_attestation_draft(self, *, context: CeremonyStepContextV1):
         del context
+        self._call("capture_attestation")
         return _unsigned_observer_draft(self.observer_artifacts["attestation"])
 
     def query_same_attempt_only(self, *, context: CeremonyStepContextV1, cause: str):
@@ -262,10 +278,19 @@ def test_live_admission_requires_signed_v1_artifacts_and_reuses_event_journal(
         "events_1_to_2",
         "event_3",
         "event_4",
-        "event_5",
-        "event_6",
-        "event_7",
+        "event_5_dispatch",
+        "capture_scm",
+        "event_5_append",
+        "capture_startup",
+        "event_6_append",
+        "capture_attestation",
+        "event_7_append",
     ]
+    assert actions.signed_joins == {
+        5: hashlib.sha256(artifacts["scm_dispatch_evidence"]).hexdigest(),
+        6: hashlib.sha256(artifacts["startup_receipt"]).hexdigest(),
+        7: hashlib.sha256(artifacts["attestation"]).hexdigest(),
+    }
 
 
 def test_live_event3_failure_is_query_only_and_never_restarts(tmp_path) -> None:
@@ -297,40 +322,47 @@ def test_live_event3_failure_is_query_only_and_never_restarts(tmp_path) -> None:
             0,
         ),
         (
-            "event_5",
+            "event_5_dispatch",
             [
                 "query:attempt_frontier",
                 "events_1_to_2",
                 "event_3",
                 "event_4",
-                "event_5",
+                "event_5_dispatch",
                 "query:event_5_restart_unknown",
             ],
             0,
         ),
         (
-            "event_6",
+            "event_6_append",
             [
                 "query:attempt_frontier",
                 "events_1_to_2",
                 "event_3",
                 "event_4",
-                "event_5",
-                "event_6",
+                "event_5_dispatch",
+                "capture_scm",
+                "event_5_append",
+                "capture_startup",
+                "event_6_append",
                 "query:event_6_unknown",
             ],
             1,
         ),
         (
-            "event_7",
+            "event_7_append",
             [
                 "query:attempt_frontier",
                 "events_1_to_2",
                 "event_3",
                 "event_4",
-                "event_5",
-                "event_6",
-                "event_7",
+                "event_5_dispatch",
+                "capture_scm",
+                "event_5_append",
+                "capture_startup",
+                "event_6_append",
+                "capture_attestation",
+                "event_7_append",
                 "query:event_7_unknown",
             ],
             1,
@@ -359,7 +391,10 @@ def test_live_rejects_signed_observer_artifact_for_a_different_draft(tmp_path) -
         "events_1_to_2",
         "event_3",
         "event_4",
-        "event_5",
+        "event_5_dispatch",
+        "capture_scm",
+        "event_5_append",
+        "capture_startup",
         "query:event_6_unknown",
     ]
     assert actions.restart_dispatches == 1
@@ -374,10 +409,102 @@ def test_concrete_native_actions_reject_test_doubles() -> None:
         )
 
 
-def test_live_rejects_missing_signed_artifact_before_action(tmp_path) -> None:
+def test_live_missing_event5_signed_handoff_fails_closed_after_dispatch(
+    tmp_path,
+) -> None:
     artifacts, keyring = _live_artifacts(tmp_path)
-    artifacts.pop("publish_receipt")
-    actions = _Actions(artifacts)
-    with pytest.raises(WindowsFenceCeremonyError, match="LIVE_ARTIFACT_SET_REQUIRED"):
+    actions = _Actions(dict(artifacts))
+    artifacts.pop("scm_dispatch_evidence")
+    with pytest.raises(WindowsFenceCeremonyError, match="POST_EVENT3_QUERY_ONLY"):
         _runner(keyring).run_once(artifacts=artifacts, dry_run=False, actions=actions)
-    assert actions.calls == []
+    assert actions.calls == [
+        "query:attempt_frontier",
+        "events_1_to_2",
+        "event_3",
+        "event_4",
+        "event_5_dispatch",
+        "capture_scm",
+        "query:event_5_restart_unknown",
+    ]
+    assert actions.restart_dispatches == 1
+
+
+@pytest.mark.parametrize(
+    ("missing", "expected_calls", "expected_joins"),
+    [
+        (
+            "startup_receipt",
+            [
+                "query:attempt_frontier",
+                "events_1_to_2",
+                "event_3",
+                "event_4",
+                "event_5_dispatch",
+                "capture_scm",
+                "event_5_append",
+                "capture_startup",
+                "query:event_6_unknown",
+            ],
+            (5,),
+        ),
+        (
+            "attestation",
+            [
+                "query:attempt_frontier",
+                "events_1_to_2",
+                "event_3",
+                "event_4",
+                "event_5_dispatch",
+                "capture_scm",
+                "event_5_append",
+                "capture_startup",
+                "event_6_append",
+                "capture_attestation",
+                "query:event_7_unknown",
+            ],
+            (5, 6),
+        ),
+    ],
+)
+def test_live_missing_later_signed_handoff_fails_closed_after_observation(
+    tmp_path,
+    missing,
+    expected_calls,
+    expected_joins,
+) -> None:
+    artifacts, keyring = _live_artifacts(tmp_path)
+    actions = _Actions(dict(artifacts))
+    artifacts.pop(missing)
+    with pytest.raises(WindowsFenceCeremonyError, match="POST_EVENT3_QUERY_ONLY"):
+        _runner(keyring).run_once(artifacts=artifacts, dry_run=False, actions=actions)
+    assert actions.calls == expected_calls
+    assert tuple(actions.signed_joins) == expected_joins
+    assert actions.restart_dispatches == 1
+
+
+def test_live_event5_raw_hash_join_mismatch_fails_closed_after_dispatch(
+    tmp_path,
+) -> None:
+    artifacts, keyring = _live_artifacts(tmp_path)
+    actions = _Actions(dict(artifacts))
+    actions.observer_artifacts["scm_dispatch_evidence"] = artifacts["attestation"]
+    with pytest.raises(WindowsFenceCeremonyError, match="POST_EVENT3_QUERY_ONLY"):
+        _runner(keyring).run_once(artifacts=artifacts, dry_run=False, actions=actions)
+    assert actions.calls == [
+        "query:attempt_frontier",
+        "events_1_to_2",
+        "event_3",
+        "event_4",
+        "event_5_dispatch",
+        "capture_scm",
+        "query:event_5_restart_unknown",
+    ]
+    assert actions.signed_joins == {}
+    assert actions.restart_dispatches == 1
+
+
+def test_existing_v1_closure_remains_dry_run_verifiable(tmp_path) -> None:
+    chain, keyring = _chain_artifacts(tmp_path)
+    result = _runner(keyring).verify_dry_run(chain)
+    assert result.mode == "dry-run"
+    assert result.completed_events == (1, 2, 3, 4, 5, 6, 7)

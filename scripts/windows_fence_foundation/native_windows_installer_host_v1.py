@@ -658,22 +658,28 @@ class NativeWindowsFenceInstallerHostV1(WindowsFenceInstallerHostV1):
         install_attempt_id: str,
         service_name: str,
         restart_authorization_raw_sha256: str,
-        scm_dispatch_evidence_raw_sha256: str,
-    ) -> bytes:
-        """Append Event5 to the existing journal before the sole SCM dispatch."""
+    ) -> None:
+        """Perform the one SCM stop/start; Event5 is appended after readback."""
         self._require_windows()
         if (
             not isinstance(restart_authorization_raw_sha256, str)
             or len(restart_authorization_raw_sha256) != 64
-            or not isinstance(scm_dispatch_evidence_raw_sha256, str)
-            or len(scm_dispatch_evidence_raw_sha256) != 64
         ):
             raise WindowsFinalInstallerError("SCM_RESTART_AUTHORIZATION_INVALID")
-        # Event 3 is the pre-existing durable reservation.  Reading it before
-        # Event 5 prevents a caller from using this concrete path early.
-        self.read_install_event_read_only(
+        # Event 3 is the pre-existing durable reservation. Reading it before
+        # SCM prevents a caller from using this concrete path early.
+        reservation_raw = self.read_install_event_read_only(
             install_attempt_id=install_attempt_id, event_sequence=3
         )
+        try:
+            reservation = json.loads(reservation_raw)
+        except (TypeError, ValueError) as exc:
+            raise WindowsFinalInstallerError("SCM_RESTART_RESERVATION_INVALID") from exc
+        if (
+            not isinstance(reservation, dict)
+            or reservation.get("state") != "RESTART_DISPATCH_RESERVED_FROZEN"
+        ):
+            raise WindowsFinalInstallerError("SCM_RESTART_RESERVATION_INVALID")
         event_5_path = self._journal_path(install_attempt_id) / "05.json"
         try:
             WindowsFilesystemFactsAdapter().read_file(event_5_path)
@@ -686,14 +692,26 @@ class NativeWindowsFenceInstallerHostV1(WindowsFenceInstallerHostV1):
             # create-only idempotence must never be interpreted as permission
             # to call SCM twice.
             raise WindowsFinalInstallerError("SCM_RESTART_ALREADY_DISPATCHED")
-        self.append_install_event_create_only(
-            install_attempt_id=install_attempt_id,
-            event_sequence=5,
-            state="RESTART_DISPATCHED_FROZEN",
-            # This is the existing Event5 raw-hash join.  A synthetic hash of
-            # restart inputs cannot substitute for signed SCM audit evidence.
-            details_sha256=scm_dispatch_evidence_raw_sha256,
-        )
+        # Event5 itself must carry the signed post-dispatch SCM evidence, so
+        # it cannot also serve as the pre-dispatch exactly-once marker. This
+        # opaque create-only marker remains inside the existing protected
+        # journal and is never accepted as closure evidence.
+        marker_path = self._journal_path(install_attempt_id) / "restart-dispatch.marker"
+        marker_raw = restart_authorization_raw_sha256.encode("ascii")
+        if self._journal_acl_sddl is None:
+            raise WindowsFinalInstallerError("INSTALL_JOURNAL_NOT_INITIALIZED")
+        try:
+            marker = WindowsFilesystemFactsAdapter().write_file_create_only(
+                marker_path,
+                raw=marker_raw,
+                protected_sddl=self._journal_acl_sddl,
+            )
+            if marker.raw != marker_raw:
+                raise WindowsFinalInstallerError("SCM_RESTART_MARKER_READBACK_MISMATCH")
+        except FileExistsError as exc:
+            raise WindowsFinalInstallerError("SCM_RESTART_ALREADY_DISPATCHED") from exc
+        except OSError as exc:
+            raise WindowsFinalInstallerError("SCM_RESTART_MARKER_WRITE_FAILED") from exc
         ws = self._win32()
         manager = service = None
         try:
@@ -714,9 +732,6 @@ class NativeWindowsFenceInstallerHostV1(WindowsFenceInstallerHostV1):
                 ws.CloseServiceHandle(service)
             if manager is not None:
                 ws.CloseServiceHandle(manager)
-        return self.read_install_event_read_only(
-            install_attempt_id=install_attempt_id, event_sequence=5
-        )
 
     @staticmethod
     def _command_line(image: Mapping[str, Any]) -> str:
@@ -1030,17 +1045,31 @@ class NativeWindowsFenceInstallerHostV1(WindowsFenceInstallerHostV1):
             raise WindowsFinalInstallerError("SCM_RESTART_QUERY_EVIDENCE_MISMATCH")
         try:
             WindowsFilesystemFactsAdapter().read_file(
-                self._journal_path(install_attempt_id) / "05.json"
+                self._journal_path(install_attempt_id) / "restart-dispatch.marker"
             )
         except FileNotFoundError:
-            return "NO_RESTART_DISPATCHED_FROZEN"
+            try:
+                WindowsFilesystemFactsAdapter().read_file(
+                    self._journal_path(install_attempt_id) / "05.json"
+                )
+            except FileNotFoundError:
+                return "NO_RESTART_DISPATCHED_FROZEN"
+            except OSError as exc:
+                raise WindowsFinalInstallerError(
+                    "SCM_RESTART_QUERY_EVIDENCE_MISMATCH"
+                ) from exc
         except OSError as exc:
             raise WindowsFinalInstallerError(
                 "SCM_RESTART_QUERY_EVIDENCE_MISMATCH"
             ) from exc
-        self.read_install_event_read_only(
-            install_attempt_id=install_attempt_id, event_sequence=5
-        )
+        try:
+            self.read_install_event_read_only(
+                install_attempt_id=install_attempt_id, event_sequence=5
+            )
+        except WindowsFinalInstallerError:
+            # The protected marker proves the sole dispatch may have happened,
+            # but closure Event5 was never written without signed SCM evidence.
+            pass
         return "RESTART_DISPATCHED_OR_UNKNOWN_FROZEN"
 
 
