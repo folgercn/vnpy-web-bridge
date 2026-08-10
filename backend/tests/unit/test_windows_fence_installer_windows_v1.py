@@ -77,6 +77,7 @@ class _Host:
         self.fail_on_apply = fail_on_apply
         self.restored = False
         self.events: list[int] = []
+        self.event_raw: dict[int, bytes] = {}
         self.applied: list[dict[str, object]] = []
         self.restart_dispatch: dict[str, object] | None = None
 
@@ -110,8 +111,21 @@ class _Host:
         return "publish-1", files
 
     def append_install_event_create_only(self, **kwargs: object) -> str:
-        self.events.append(kwargs["event_sequence"])  # type: ignore[arg-type]
-        return f"event-{kwargs['event_sequence']}"
+        sequence = kwargs["event_sequence"]  # type: ignore[assignment]
+        self.events.append(sequence)  # type: ignore[arg-type]
+        self.event_raw[sequence] = canonical_json_bytes(  # type: ignore[index]
+            {
+                "schema_version": "windows_fence_installer_event_v1",
+                "install_attempt_id": "windows-fence-install-" + SHA,
+                "event_sequence": sequence,
+                "state": kwargs["state"],
+                "details_sha256": kwargs["details_sha256"],
+            }
+        )
+        return f"event-{sequence}"
+
+    def read_install_event_read_only(self, **kwargs: object) -> bytes:
+        return self.event_raw[kwargs["event_sequence"]]  # type: ignore[index]
 
     def apply_exact_scm_and_pywin32_registry_once(self, **kwargs: object) -> None:
         self.applied.append(kwargs["target"])  # type: ignore[arg-type]
@@ -327,6 +341,15 @@ def test_event3_applies_and_reads_safety_before_target_and_event4() -> None:
         "DEMAND_START",
     ]
     assert host.applied[0]["image_path"] != host.applied[1]["image_path"]
+    assert host.events == [1, 2, 3, 4]
+
+
+def test_secure_journal_frontier_rehydrates_event3_without_republishing() -> None:
+    host = _Host()
+    _installer(host).stage_and_publish(bundle_raw=b"fixed")
+    resumed = _installer(host)
+    resumed.resume_from_secure_journal(frontier_sequence=2)
+    resumed.reserve_event3_and_apply_target()
     assert host.events == [1, 2, 3, 4]
 
 

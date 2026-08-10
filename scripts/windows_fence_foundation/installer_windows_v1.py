@@ -8,6 +8,7 @@ test doubles only and are rejected before an install can become ready.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -454,19 +455,23 @@ class FinalWindowsFenceInstallerV1:
 
     def reserve_event3_and_apply_target(self) -> InstallResultV1:
         """Event 3 is irreversible: later uncertainty may only query/fail frozen."""
-        if (
-            self._checkpoint is not InstallCheckpointV1.FILES_PUBLISHED
-            or self._backup_id is None
-        ):
+        if self._checkpoint is not InstallCheckpointV1.FILES_PUBLISHED:
             raise WindowsFinalInstallerError("INSTALL_EVENT3_STATE_INVALID")
         manifest = self._manifest
+        event_2_raw = self.read_event_readback(event_sequence=2)
+        event_3_details = (
+            {"event_2_raw_sha256": hashlib.sha256(event_2_raw).hexdigest()}
+            if self._backup_id == "journal-resume"
+            else {
+                "publish_receipt": self._publish_receipt,
+                "backup_id": self._backup_id,
+            }
+        )
         self._host.append_install_event_create_only(
             install_attempt_id=manifest["install_attempt_id"],
             event_sequence=3,
             state=InstallCheckpointV1.EVENT3_RESERVED.value,
-            details_sha256=_sha(
-                {"publish_receipt": self._publish_receipt, "backup_id": self._backup_id}
-            ),
+            details_sha256=_sha(event_3_details),
         )
         self._checkpoint = InstallCheckpointV1.EVENT3_RESERVED
         try:
@@ -552,6 +557,47 @@ class FinalWindowsFenceInstallerV1:
             raise
         except Exception as exc:
             raise WindowsFinalInstallerError("INSTALL_EVENT_READBACK_FAILED") from exc
+
+    def resume_from_secure_journal(self, *, frontier_sequence: int) -> None:
+        """Rehydrate only a completed journal prefix for the same attempt.
+
+        This does not recreate a backup, publish files, or apply SCM state.  It
+        merely re-establishes the in-memory checkpoint required by the existing
+        v1 operations after their create-only journal records have been read.
+        """
+        expected = {
+            1: InstallCheckpointV1.PREPARED.value,
+            2: InstallCheckpointV1.FILES_PUBLISHED.value,
+            3: InstallCheckpointV1.EVENT3_RESERVED.value,
+            4: InstallCheckpointV1.TARGET_READY.value,
+            5: "RESTART_DISPATCHED_FROZEN",
+            6: "START_OBSERVED_FROZEN",
+            7: "FOUNDATION_VERIFIED_FROZEN",
+        }
+        if frontier_sequence not in range(2, 8):
+            raise WindowsFinalInstallerError("INSTALL_RESUME_FRONTIER_INVALID")
+        for sequence in range(1, frontier_sequence + 1):
+            try:
+                value = json.loads(self.read_event_readback(event_sequence=sequence))
+            except (TypeError, ValueError) as exc:
+                raise WindowsFinalInstallerError(
+                    "INSTALL_RESUME_JOURNAL_INVALID"
+                ) from exc
+            if (
+                not isinstance(value, dict)
+                or value.get("install_attempt_id")
+                != self._manifest["install_attempt_id"]
+                or value.get("event_sequence") != sequence
+                or value.get("state") != expected[sequence]
+            ):
+                raise WindowsFinalInstallerError("INSTALL_RESUME_JOURNAL_INVALID")
+        self._backup_id = "journal-resume"
+        if frontier_sequence == 2:
+            self._checkpoint = InstallCheckpointV1.FILES_PUBLISHED
+        elif frontier_sequence == 3:
+            self._checkpoint = InstallCheckpointV1.EVENT3_RESERVED
+        else:
+            self._checkpoint = InstallCheckpointV1.TARGET_READY
 
     def dispatch_reserved_restart_once(
         self, *, restart_authorization_raw: bytes
