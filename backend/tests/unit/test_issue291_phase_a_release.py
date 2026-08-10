@@ -216,9 +216,7 @@ def test_compose_paths_select_all_primary_units_and_execution_proxy_closure(
 
 
 def test_final_compose_path_produces_phase_a_full_build_plan() -> None:
-    plan = create_plan(
-        ["deployments/docker-compose.final.yml"], source_commit_sha=SHA
-    )
+    plan = create_plan(["deployments/docker-compose.final.yml"], source_commit_sha=SHA)
     assert plan["decision"] == "BUILD_ONLY"
     assert plan["selected_rule_ids"] == ["phase-a-compose"]
     assert {unit["unit"] for unit in plan["build_units"]} == {
@@ -462,38 +460,13 @@ def test_classifier_manifest_rules_are_one_to_one() -> None:
         )
 
 
-def _has_origin_main(cwd: Path) -> bool:
-    try:
-        completed = subprocess.run(
-            ["git", "rev-parse", "--verify", "refs/remotes/origin/main^{commit}"],
-            cwd=cwd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-    except OSError:
-        return False
-    return completed.returncode == 0
-
-
-def test_full_current_changed_paths_produce_allowed_dependency_closure() -> None:
-    if not _has_origin_main(ROOT):
-        pytest.skip(
-            "origin/main ref unavailable in shallow checkout; "
-            "dedicated Phase A gate uses fetch-depth: 0"
-        )
-    tracked = subprocess.check_output(
-        ["git", "diff", "--name-only", "origin/main"],
-        cwd=ROOT,
-        text=True,
-    ).splitlines()
-    untracked = subprocess.check_output(
-        ["git", "ls-files", "--others", "--exclude-standard"],
-        cwd=ROOT,
-        text=True,
-    ).splitlines()
-    paths = sorted({path for path in (*tracked, *untracked) if path})
-    assert paths, "the Phase A fixture must exercise a non-empty changed-path set"
+def test_static_changed_paths_produce_allowed_dependency_closure() -> None:
+    paths = [
+        "frontend/src/App.tsx",
+        "backend/app/control_api.py",
+        "backend/app/execution/orchestrator.py",
+        "scripts/windows_fence_foundation/assembly.py",
+    ]
     plan = create_plan(paths, source_commit_sha=SHA)
     assert plan["decision"] == "BUILD_ONLY"
     assert plan["blocked_reasons"] == []

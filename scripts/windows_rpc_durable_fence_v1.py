@@ -14,6 +14,7 @@ import zipfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from enum import Enum
 from hashlib import sha256
 from pathlib import Path
@@ -415,7 +416,28 @@ def _execution_fact_value(value: Any) -> Any:
                 code="WINDOWS_EXECUTION_FACT_INVALID",
             )
         return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-    if value is None or isinstance(value, (str, int, float, bool)):
+    if isinstance(value, (float, Decimal)):
+        try:
+            decimal_value = Decimal(str(value))
+        except (InvalidOperation, ValueError) as exc:
+            raise WindowsRpcDurableFenceError(
+                "execution fact number is invalid",
+                code="WINDOWS_EXECUTION_FACT_INVALID",
+            ) from exc
+        if not decimal_value.is_finite():
+            raise WindowsRpcDurableFenceError(
+                "execution fact number is non-finite",
+                code="WINDOWS_EXECUTION_FACT_INVALID",
+            )
+        if decimal_value == decimal_value.to_integral_value():
+            integer_value = int(decimal_value)
+            if -(2**53) + 1 <= integer_value <= 2**53 - 1:
+                return integer_value
+        decimal_text = format(decimal_value, "f")
+        if "." in decimal_text:
+            decimal_text = decimal_text.rstrip("0").rstrip(".")
+        return "0" if decimal_text == "-0" else decimal_text
+    if value is None or isinstance(value, (str, int, bool)):
         return value
     return str(value)
 
@@ -456,6 +478,14 @@ class _WindowsExecutionFactsV1:
         "frozen",
         "price",
         "pnl",
+        "gateway_name",
+    )
+    _ACCOUNT_FIELDS = (
+        "accountid",
+        "vt_accountid",
+        "balance",
+        "frozen",
+        "available",
         "gateway_name",
     )
 
@@ -526,6 +556,62 @@ class _WindowsExecutionFactsV1:
             for item in self._facts("get_all_positions")
         ]
         return {self._key(row, "vt_positionid", "symbol"): row for row in rows}
+
+    def _accounts(self) -> dict[str, Any]:
+        rows = [
+            _execution_fact_row(item, self._ACCOUNT_FIELDS)
+            for item in self._facts("get_all_accounts")
+        ]
+        return {self._key(row, "vt_accountid", "accountid"): row for row in rows}
+
+    def peek_current_facts(self, request: Mapping[str, Any]) -> bytes:
+        """Return canonical current facts without a disk write or generation bump."""
+
+        expected = {
+            "account_scope": self.config.account_scope,
+            "environment": self.config.environment,
+        }
+        if not isinstance(request, Mapping) or dict(request) != expected:
+            raise WindowsRpcDurableFenceDenied(
+                "execution facts scope is foreign", code="WINDOWS_FENCE_SCOPE_INVALID"
+            )
+        admission = self._admission
+        if admission is None:
+            raise WindowsRpcDurableFenceError(
+                "execution facts admission is unavailable",
+                code="WINDOWS_FINAL_STORE_MISSING",
+            )
+        accounts = self._accounts()
+        orders = self._orders()
+        positions = self._positions()
+        active_orders = {
+            self._key(row, "vt_orderid", "orderid"): row
+            for row in (
+                _execution_fact_row(item, self._ORDER_FIELDS)
+                for item in self._facts("get_all_active_orders")
+            )
+        }
+        return canonical_json_bytes(
+            {
+                "schema_version": "windows_execution_current_facts_v1",
+                "account": accounts,
+                "positions": positions,
+                "active_orders": active_orders,
+                "gateway": {
+                    "gateway_name": self.config.gateway_name,
+                    "account_scope": expected["account_scope"],
+                    "environment": expected["environment"],
+                    "connected": bool(accounts),
+                },
+                "execution": {"orders": orders},
+                "admission": admission.peek_current_facts(),
+            }
+        )
+
+    def peek_current_facts_v1(self, request: Mapping[str, Any]) -> dict[str, Any]:
+        """Read-only RPC projection for ceremony consumers."""
+
+        return json.loads(self.peek_current_facts(request))
 
     def get_execution_snapshot_v1(self, request: Mapping[str, Any]) -> dict[str, Any]:
         expected = {
@@ -918,6 +1004,7 @@ def _attach_fixed_typed_fenced_methods(
     facts.bind_admission(admission)
     attach_windows_rpc_fenced_methods_v1(server, admission)
     server.register(facts.get_execution_snapshot_v1)
+    server.register(facts.peek_current_facts_v1)
     return admission
 
 
