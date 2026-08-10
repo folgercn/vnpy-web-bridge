@@ -10,6 +10,8 @@ from scripts.windows_fence_foundation.ceremony_runner_v1 import (
     WindowsFenceCeremonyRunnerV1,
 )
 from scripts.windows_fence_foundation.host_observer_v1 import (
+    NativeWindowsHostObserverV1,
+    NativeWindowsReadOnlyFactsAdapterV1,
     WindowsHostObservationError,
     _canonical_observer_draft_v1,
 )
@@ -71,3 +73,25 @@ def test_ceremony_live_path_is_disabled_after_verification(monkeypatch) -> None:
     )
     with pytest.raises(WindowsFenceCeremonyError, match="LIVE_MUTATION_PATH_DISABLED"):
         runner.run_once(artifacts={}, dry_run=False)
+
+
+def test_capture_draft_rejects_self_reported_real_host() -> None:
+    class Fake:
+        is_real_windows_host = True
+
+        def capture_observer_facts(self, _kind):
+            return {}
+
+    with pytest.raises(WindowsHostObservationError, match="REAL_WINDOWS_HOST_REQUIRED"):
+        NativeWindowsHostObserverV1().capture_draft("zero_preflight", seam=Fake())
+
+
+def test_native_adapter_requires_both_canonical_source_commands() -> None:
+    adapter = NativeWindowsReadOnlyFactsAdapterV1(
+        service_name="VnpyRpcService", store_path=r"C:\fence"
+    )
+    with pytest.raises(WindowsHostObservationError, match="NATIVE_SOURCE_REQUIRED|REAL_WINDOWS"):
+        # The adapter is intentionally not usable as a fixture on this host.
+        NativeWindowsHostObserverV1(facts_source=adapter).capture_draft(
+            "zero_preflight", seam=NativeWindowsHostObserverV1(facts_source=adapter)
+        )
