@@ -23,7 +23,11 @@ from scripts.windows_fence_foundation.ceremony_runner_v1 import (
 )
 from scripts.windows_fence_foundation.host_observer_v1 import (
     NativeWindowsHostObserverV1,
+    NativeWindowsReadOnlyFactsAdapterV1,
     WindowsHostObservationError,
+)
+from scripts.windows_fence_foundation.native_windows_installer_host_v1 import (
+    NativeWindowsFenceInstallerHostV1,
 )
 
 ATTEMPT_ID = fixture.ATTEMPT_ID
@@ -37,7 +41,9 @@ def _unsigned(
     for key in (*identity, "signature"):
         facts.pop(key)
     raw_bindings = {
-        key: f"offline-contract:{key}".encode()
+        key: json.dumps(
+            {"raw_binding": key}, separators=(",", ":"), sort_keys=True
+        ).encode()
         for key in facts
         if key.endswith("_raw_sha256")
     }
@@ -105,6 +111,129 @@ def test_observer_raw_fact_hash_mismatch_fails_closed() -> None:
         NativeWindowsHostObserverV1().capture_publish_receipt(offline_contract=contract)
 
 
+def test_observer_noncanonical_raw_binding_fails_closed() -> None:
+    contract = _OfflineReadOnlyFacts()
+    raw = b'{"z":0,"a":1}'
+    contract.publish[0]["install_manifest_raw_sha256"] = hashlib.sha256(raw).hexdigest()
+    contract.publish = (
+        contract.publish[0],
+        {**contract.publish[1], "install_manifest_raw_sha256": raw},
+    )
+    with pytest.raises(
+        WindowsHostObservationError, match="RAW_BINDING_CANONICAL_INVALID"
+    ):
+        NativeWindowsHostObserverV1().capture_publish_receipt(offline_contract=contract)
+
+
+def test_native_capture_methods_reduce_only_private_native_fixture(monkeypatch) -> None:
+    """The fixture replaces no public/caller production seam."""
+    contracts = _OfflineReadOnlyFacts()
+    native_host = object.__new__(NativeWindowsFenceInstallerHostV1)
+    source = NativeWindowsReadOnlyFactsAdapterV1(
+        service_name=SERVICE_NAME,
+        store_path=r"C:\\ProgramData\\vnpy-web-bridge\\windows-fence\\store",
+        installer_host=native_host,
+    )
+    event_raws = {
+        sequence: json.dumps(
+            {"event_sequence": sequence}, separators=(",", ":"), sort_keys=True
+        ).encode()
+        for sequence in range(1, 7)
+    }
+    seen: list[tuple[str, tuple[int, ...]]] = []
+
+    def native_readbacks(*, event_sequences: tuple[int, ...]):
+        return {"event_raws": {key: event_raws[key] for key in event_sequences}}
+
+    def reduce_native(*, kind: str, readbacks):
+        seen.append((kind, tuple(readbacks["event_raws"])))
+        return {
+            "publish_receipt": contracts.publish,
+            "scm_dispatch_evidence": contracts.scm,
+            "startup_receipt": contracts.startup,
+            "attestation": contracts.attestation,
+        }[kind]
+
+    monkeypatch.setattr(source, "_native_readbacks", native_readbacks)
+    monkeypatch.setattr(source, "_facts_from_native_readbacks", reduce_native)
+    captures = {
+        "publish_receipt": source.capture_publish_receipt_facts(),
+        "scm_dispatch_evidence": source.capture_scm_dispatch_evidence_facts(),
+        "startup_receipt": source.capture_startup_receipt_facts(),
+        "attestation": source.capture_attestation_facts(),
+    }
+    assert seen == [
+        ("publish_receipt", (1, 2)),
+        ("scm_dispatch_evidence", (3, 4)),
+        ("startup_receipt", (3, 4, 5)),
+        ("attestation", (3, 4, 5, 6)),
+    ]
+    for kind, captured in captures.items():
+        draft = NativeWindowsHostObserverV1._draft_from_read_only_facts(kind, captured)
+        value = json.loads(draft)
+        identity, core, prefix = {
+            "publish_receipt": (
+                "receipt_id",
+                "receipt_core_sha256",
+                "windows-fence-publish-receipt-",
+            ),
+            "scm_dispatch_evidence": (
+                "evidence_id",
+                "evidence_core_sha256",
+                "windows-fence-scm-dispatch-evidence-",
+            ),
+            "startup_receipt": (
+                "receipt_id",
+                "receipt_core_sha256",
+                "windows-fence-startup-receipt-",
+            ),
+            "attestation": (
+                "attestation_id",
+                "attestation_core_sha256",
+                "windows-fence-foundation-attestation-",
+            ),
+        }[kind]
+        unsigned = dict(value)
+        unsigned.pop(identity)
+        unsigned.pop(core)
+        assert (
+            value[core]
+            == hashlib.sha256(
+                json.dumps(unsigned, separators=(",", ":"), sort_keys=True).encode()
+            ).hexdigest()
+        )
+        assert value[identity] == prefix + value[core]
+
+
+@pytest.mark.parametrize(
+    ("kind", "code"),
+    [
+        ("publish_receipt", "PUBLISH_CUSTODY_UNAVAILABLE"),
+        ("scm_dispatch_evidence", "SCM_AUDIT_TRACE_UNAVAILABLE"),
+        ("startup_receipt", "SCM_AUDIT_TRACE_UNAVAILABLE"),
+        ("attestation", "M2_ATTESTATION_FACTS_UNAVAILABLE"),
+    ],
+)
+def test_native_reducer_fails_closed_when_required_production_source_is_absent(
+    kind: str, code: str
+) -> None:
+    with pytest.raises(WindowsHostObservationError, match=code):
+        NativeWindowsReadOnlyFactsAdapterV1._facts_from_native_readbacks(
+            kind=kind,
+            readbacks={"event_raws": {1: b'{"event_sequence":1}'}},
+        )
+
+
+def test_native_reducer_rejects_noncanonical_journal_raw() -> None:
+    with pytest.raises(
+        WindowsHostObservationError, match="RAW_BINDING_CANONICAL_INVALID"
+    ):
+        NativeWindowsReadOnlyFactsAdapterV1._facts_from_native_readbacks(
+            kind="publish_receipt",
+            readbacks={"event_raws": {1: b'{"z":0,"a":1}'}},
+        )
+
+
 def test_observer_default_requires_real_windows_native_capability() -> None:
     with pytest.raises(WindowsHostObservationError, match="NATIVE_SOURCE_REQUIRED"):
         NativeWindowsHostObserverV1().capture_attestation()
@@ -117,6 +246,21 @@ def test_observer_production_constructor_has_no_command_or_fact_arguments() -> N
             store_path=r"C:\\ProgramData\\vnpy-web-bridge\\windows-fence\\store",
             execution_facts_command=("untrusted.exe",),  # type: ignore[call-arg]
         )
+
+
+def test_fake_facts_source_cannot_enter_production_selection(monkeypatch) -> None:
+    native_host = object.__new__(NativeWindowsFenceInstallerHostV1)
+    observer = NativeWindowsHostObserverV1(
+        service_name=SERVICE_NAME,
+        store_path=r"C:\\ProgramData\\vnpy-web-bridge\\windows-fence\\store",
+        installer_host=native_host,
+        facts_source=_OfflineReadOnlyFacts(),
+    )
+    monkeypatch.setattr(
+        "scripts.windows_fence_foundation.host_observer_v1.os.name", "nt"
+    )
+    with pytest.raises(WindowsHostObservationError, match="NATIVE_SOURCE_REQUIRED"):
+        observer._source(None)
 
 
 def _unsigned_observer_draft(raw: bytes) -> bytes:

@@ -90,6 +90,18 @@ def _canonical_b64_sha(value: object, expected_sha: object) -> None:
         raise WindowsHostObservationError("OBSERVER_CANONICAL_FACT_INVALID")
 
 
+def _canonical_raw_binding(raw: bytes) -> None:
+    """Require every raw-hash join to bind canonical JSON object bytes."""
+    try:
+        value = json.loads(raw)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise WindowsHostObservationError(
+            "OBSERVER_RAW_BINDING_CANONICAL_INVALID"
+        ) from exc
+    if not isinstance(value, Mapping) or canonical_json_bytes(value) != raw:
+        raise WindowsHostObservationError("OBSERVER_RAW_BINDING_CANONICAL_INVALID")
+
+
 def _canonical_observer_draft_v1(kind: str, facts: Mapping[str, Any]) -> bytes:
     """Validate and canonicalize one unsigned observer artifact draft.
 
@@ -199,7 +211,15 @@ class NativeWindowsReadOnlyFactsAdapterV1:
         self.store_path = store_path
         self._installer_host = installer_host
 
-    def _native_readbacks(self, *, event_sequence: int) -> None:
+    def _native_readbacks(
+        self, *, event_sequences: tuple[int, ...]
+    ) -> Mapping[str, object]:
+        """Read the current protected journal/SCM/process evidence once.
+
+        This deliberately returns only bytes or canonical JSON derived from
+        existing native readbacks.  It never accepts an artifact, a command,
+        or facts selected by the caller.
+        """
         if (
             os.name != "nt"
             or type(self._installer_host) is not NativeWindowsFenceInstallerHostV1
@@ -209,7 +229,7 @@ class NativeWindowsReadOnlyFactsAdapterV1:
         try:
             fs = WindowsFilesystemFactsAdapter()
             store = Path(self.store_path)
-            fs.list_directory(store)
+            store_inventory = fs.list_directory(store)
             journal = fs.list_directory(store / "installer-journal-v1")
             attempts = [
                 name
@@ -218,13 +238,47 @@ class NativeWindowsReadOnlyFactsAdapterV1:
             ]
             if len(attempts) != 1:
                 raise WindowsHostObservationError("OBSERVER_JOURNAL_ATTEMPT_AMBIGUOUS")
-            self._installer_host.read_install_event_read_only(
-                install_attempt_id=attempts[0], event_sequence=event_sequence
-            )
-            self._installer_host.query_scm_readback(self.service_name)
-            self._installer_host.query_service_runtime_readback(
+            events = {
+                sequence: self._installer_host.read_install_event_read_only(
+                    install_attempt_id=attempts[0], event_sequence=sequence
+                )
+                for sequence in event_sequences
+            }
+            scm = self._installer_host.query_scm_readback(self.service_name)
+            runtime = self._installer_host.query_service_runtime_readback(
                 service_name=self.service_name
             )
+            if (
+                not isinstance(runtime, Mapping)
+                or runtime.get("service_name") != self.service_name
+            ):
+                raise WindowsHostObservationError("OBSERVER_RUNTIME_READBACK_INVALID")
+            return {
+                "install_attempt_id": attempts[0],
+                "store_inventory_raw": canonical_json_bytes(
+                    {"names": list(store_inventory.names)}
+                ),
+                "journal_inventory_raw": canonical_json_bytes(
+                    {"names": list(journal.names)}
+                ),
+                "event_raws": events,
+                "scm_readback_raw": canonical_json_bytes(
+                    {
+                        "service_name": scm.service_name,
+                        "image_path": dict(scm.image_path),
+                        "start_type": scm.start_type,
+                        "failure_actions": list(scm.failure_actions),
+                        "recovery_actions": list(scm.recovery_actions),
+                        "service_account_sid_sha256": scm.service_account_sid_sha256,
+                        "dependencies": list(scm.dependencies),
+                        "python_class": scm.python_class,
+                        "python_path": scm.python_path,
+                        "registry_owner_sid_sha256": scm.registry_owner_sid_sha256,
+                        "registry_acl_sddl_sha256": scm.registry_acl_sddl_sha256,
+                    }
+                ),
+                "runtime_readback_raw": canonical_json_bytes(dict(runtime)),
+            }
         except WindowsHostObservationError:
             raise
         except Exception as exc:
@@ -232,39 +286,63 @@ class NativeWindowsReadOnlyFactsAdapterV1:
                 "OBSERVER_NATIVE_READBACK_FAILED"
             ) from exc
 
-    def _unavailable(
-        self, *, event_sequence: int, code: str
+    @staticmethod
+    def _facts_from_native_readbacks(
+        *, kind: str, readbacks: Mapping[str, object]
     ) -> tuple[Mapping[str, Any], Mapping[str, bytes]]:
-        self._native_readbacks(event_sequence=event_sequence)
-        raise WindowsHostObservationError(code)
+        """Reduce native evidence only when its v1 source is implemented.
+
+        The concrete reads above intentionally run before this gate.  The
+        remaining v1 fields require immutable publish custody, a protected SCM
+        audit trace, or an in-process M2 read-only source that this repository
+        does not yet provide.  Do not replace these gates with caller facts or
+        a generic command source.
+        """
+        event_raws = readbacks.get("event_raws")
+        if not isinstance(event_raws, Mapping):
+            raise WindowsHostObservationError("OBSERVER_NATIVE_READBACK_INVALID")
+        for raw in event_raws.values():
+            if type(raw) is not bytes:
+                raise WindowsHostObservationError("OBSERVER_NATIVE_READBACK_INVALID")
+            _canonical_raw_binding(raw)
+        if kind == "publish_receipt":
+            raise WindowsHostObservationError("OBSERVER_PUBLISH_CUSTODY_UNAVAILABLE")
+        if kind in {"scm_dispatch_evidence", "startup_receipt"}:
+            raise WindowsHostObservationError("OBSERVER_SCM_AUDIT_TRACE_UNAVAILABLE")
+        if kind == "attestation":
+            raise WindowsHostObservationError(
+                "OBSERVER_M2_ATTESTATION_FACTS_UNAVAILABLE"
+            )
+        raise WindowsHostObservationError("OBSERVER_ARTIFACT_KIND_INVALID")
+
+    def _capture(
+        self, *, kind: str, event_sequences: tuple[int, ...]
+    ) -> tuple[Mapping[str, Any], Mapping[str, bytes]]:
+        return self._facts_from_native_readbacks(
+            kind=kind, readbacks=self._native_readbacks(event_sequences=event_sequences)
+        )
 
     def capture_publish_receipt_facts(
         self,
     ) -> tuple[Mapping[str, Any], Mapping[str, bytes]]:
-        return self._unavailable(
-            event_sequence=2, code="OBSERVER_PUBLISH_FACTS_UNAVAILABLE"
-        )
+        return self._capture(kind="publish_receipt", event_sequences=(1, 2))
 
     def capture_scm_dispatch_evidence_facts(
         self,
     ) -> tuple[Mapping[str, Any], Mapping[str, bytes]]:
-        return self._unavailable(
-            event_sequence=5, code="OBSERVER_SCM_AUDIT_TRACE_UNAVAILABLE"
-        )
+        # Event 5 is appended only after this unsigned draft is signed.  Its
+        # absence here is therefore required, not an observer failure.
+        return self._capture(kind="scm_dispatch_evidence", event_sequences=(3, 4))
 
     def capture_startup_receipt_facts(
         self,
     ) -> tuple[Mapping[str, Any], Mapping[str, bytes]]:
-        return self._unavailable(
-            event_sequence=5, code="OBSERVER_STARTUP_FACTS_UNAVAILABLE"
-        )
+        return self._capture(kind="startup_receipt", event_sequences=(3, 4, 5))
 
     def capture_attestation_facts(
         self,
     ) -> tuple[Mapping[str, Any], Mapping[str, bytes]]:
-        return self._unavailable(
-            event_sequence=5, code="OBSERVER_M2_ATTESTATION_FACTS_UNAVAILABLE"
-        )
+        return self._capture(kind="attestation", event_sequences=(3, 4, 5, 6))
 
 
 class NativeWindowsHostObserverV1:
@@ -366,8 +444,10 @@ class NativeWindowsHostObserverV1:
                 not isinstance(field, str)
                 or not field.endswith("_raw_sha256")
                 or type(raw) is not bytes
-                or facts.get(field) != hashlib.sha256(raw).hexdigest()
             ):
+                raise WindowsHostObservationError("OBSERVER_RAW_BINDING_MISMATCH")
+            _canonical_raw_binding(raw)
+            if facts.get(field) != hashlib.sha256(raw).hexdigest():
                 raise WindowsHostObservationError("OBSERVER_RAW_BINDING_MISMATCH")
         if not raw_bindings:
             raise WindowsHostObservationError("OBSERVER_RAW_BINDING_REQUIRED")
