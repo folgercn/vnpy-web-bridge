@@ -6,10 +6,19 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from scripts.windows_fence_foundation.installer_windows_v1 import (
+    WindowsFinalInstallerError,
+)
+from scripts.windows_fence_foundation.native_windows_installer_host_v1 import (
+    NativeWindowsFenceInstallerHostV1,
+)
 from scripts.windows_fence_foundation.restart_dispatch_audit_v1 import (
+    RESTART_DISPATCH_AUDIT_EVENT_SEQUENCE,
+    RESTART_DISPATCH_AUDIT_STATE,
     RestartDispatchAuditError,
+    _append_restart_dispatch_audit_to_native_seam_v1,
     build_restart_dispatch_audit_v1,
-    emit_restart_dispatch_audit_v1,
+    persist_restart_dispatch_audit_v1,
 )
 
 CAPTURED_AT = datetime(2030, 1, 1, 12, tzinfo=timezone.utc)
@@ -121,25 +130,125 @@ def test_restart_dispatch_audit_dry_run_is_explicit_and_does_not_fake_scm_result
     assert "scm_calls" not in value
 
 
-def test_restart_dispatch_audit_emits_once_to_caller_owned_journal_seam() -> None:
-    received: list[bytes] = []
+class _FakeNativeInstallEventSeam:
+    def __init__(self) -> None:
+        self.events: dict[tuple[str, int], dict[str, object]] = {}
 
-    raw = emit_restart_dispatch_audit_v1(
-        journal_append=received.append,
+    def append_install_event_create_only(
+        self,
+        *,
+        install_attempt_id: str,
+        event_sequence: int,
+        state: str,
+        details_sha256: str,
+        reject_existing: bool = False,
+    ) -> str:
+        key = (install_attempt_id, event_sequence)
+        if key in self.events and reject_existing:
+            raise WindowsFinalInstallerError("INSTALL_EVENT_CREATE_ONLY_CONFLICT")
+        if key in self.events:
+            return "event-existing"
+        self.events[key] = {
+            "install_attempt_id": install_attempt_id,
+            "event_sequence": event_sequence,
+            "state": state,
+            "details_sha256": details_sha256,
+            "reject_existing": reject_existing,
+        }
+        return "event-created"
+
+
+def _raw() -> bytes:
+    return build_restart_dispatch_audit_v1(
         install_attempt_id="windows-fence-install-0001",
         policy="OBSERVED_SCM_FACTS",
         observed_scm_facts=_observed_facts(),
         captured_at=CAPTURED_AT,
     )
 
-    assert received == [raw]
 
-    with pytest.raises(RestartDispatchAuditError, match="OBSERVED_FACTS_MISSING"):
-        emit_restart_dispatch_audit_v1(
-            journal_append=received.append,
+def test_restart_dispatch_audit_native_seam_binds_canonical_raw_once() -> None:
+    native_seam = _FakeNativeInstallEventSeam()
+    install_attempt_id = "windows-fence-install-0001"
+    raw = _raw()
+
+    _append_restart_dispatch_audit_to_native_seam_v1(
+        native_seam=native_seam,
+        install_attempt_id=install_attempt_id,
+        raw=raw,
+    )
+
+    assert native_seam.events == {
+        (install_attempt_id, RESTART_DISPATCH_AUDIT_EVENT_SEQUENCE): {
+            "install_attempt_id": install_attempt_id,
+            "event_sequence": RESTART_DISPATCH_AUDIT_EVENT_SEQUENCE,
+            "state": RESTART_DISPATCH_AUDIT_STATE,
+            "details_sha256": hashlib.sha256(raw).hexdigest(),
+            "reject_existing": True,
+        }
+    }
+
+
+def test_restart_dispatch_audit_native_seam_duplicate_nonce_conflicts() -> None:
+    native_seam = _FakeNativeInstallEventSeam()
+    install_attempt_id = "windows-fence-install-0001"
+    raw = _raw()
+
+    _append_restart_dispatch_audit_to_native_seam_v1(
+        native_seam=native_seam,
+        install_attempt_id=install_attempt_id,
+        raw=raw,
+    )
+
+    with pytest.raises(WindowsFinalInstallerError, match="CREATE_ONLY_CONFLICT"):
+        _append_restart_dispatch_audit_to_native_seam_v1(
+            native_seam=native_seam,
+            install_attempt_id=install_attempt_id,
+            raw=raw,
+        )
+
+    assert len(native_seam.events) == 1
+
+
+def test_restart_dispatch_audit_rejects_fake_native_host() -> None:
+    with pytest.raises(RestartDispatchAuditError, match="NATIVE_HOST_REQUIRED"):
+        persist_restart_dispatch_audit_v1(
+            native_host=_FakeNativeInstallEventSeam(),  # type: ignore[arg-type]
             install_attempt_id="windows-fence-install-0001",
             policy="OBSERVED_SCM_FACTS",
-            observed_scm_facts=None,
+            observed_scm_facts=_observed_facts(),
             captured_at=CAPTURED_AT,
         )
-    assert received == [raw]
+
+
+def test_restart_dispatch_audit_requires_a_real_windows_host() -> None:
+    with pytest.raises(RestartDispatchAuditError, match="NATIVE_WINDOWS_REQUIRED"):
+        persist_restart_dispatch_audit_v1(
+            native_host=NativeWindowsFenceInstallerHostV1(),
+            install_attempt_id="windows-fence-install-0001",
+            policy="OBSERVED_SCM_FACTS",
+            observed_scm_facts=_observed_facts(),
+            captured_at=CAPTURED_AT,
+        )
+
+
+def test_restart_dispatch_audit_uninitialized_native_host_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        NativeWindowsFenceInstallerHostV1,
+        "is_real_windows_host",
+        property(lambda _host: True),
+    )
+
+    with pytest.raises(
+        RestartDispatchAuditError,
+        match="NATIVE_PERSISTENCE_FAILED:INSTALL_JOURNAL_NOT_INITIALIZED",
+    ):
+        persist_restart_dispatch_audit_v1(
+            native_host=NativeWindowsFenceInstallerHostV1(),
+            install_attempt_id="windows-fence-install-0001",
+            policy="OBSERVED_SCM_FACTS",
+            observed_scm_facts=_observed_facts(),
+            captured_at=CAPTURED_AT,
+        )

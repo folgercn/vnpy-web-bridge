@@ -1,8 +1,8 @@
-"""Canonical restart-dispatch facts with no SCM or filesystem capability.
+"""Canonical restart-dispatch facts with a native create-only journal adapter.
 
-Native code captures SCM observations and supplies them to this pure module.  A
-caller-owned protected journal append seam may receive the resulting bytes, but
-this module never opens a journal, starts a service, or stops a service.
+This module never opens a journal, starts a service, or stops a service. Its
+only persistence path is the already-protected native installer-host event
+seam.
 """
 
 from __future__ import annotations
@@ -14,18 +14,30 @@ from datetime import datetime, timezone
 from typing import Any, Literal, Protocol
 
 from .contracts import canonical_json_bytes
+from .installer_windows_v1 import WindowsFinalInstallerError
+from .native_windows_installer_host_v1 import NativeWindowsFenceInstallerHostV1
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$")
 _RESULT_RE = re.compile(r"^[A-Z][A-Z0-9_]{2,127}$")
 _SID_RE = re.compile(r"^S-\d+(?:-\d+)+$")
 
 RestartDispatchAuditPolicy = Literal["OBSERVED_SCM_FACTS", "DRY_RUN_NON_EXECUTING"]
+RESTART_DISPATCH_AUDIT_EVENT_SEQUENCE = 5
+RESTART_DISPATCH_AUDIT_STATE = "RESTART_DISPATCHED_FROZEN"
 
 
-class CreateOnlyJournalAppend(Protocol):
-    """Caller-owned append seam that guarantees its own protected create-only write."""
+class NativeInstallEventCreateOnlySeam(Protocol):
+    """The exact protected native installer-event persistence seam."""
 
-    def __call__(self, raw: bytes) -> None: ...
+    def append_install_event_create_only(
+        self,
+        *,
+        install_attempt_id: str,
+        event_sequence: int,
+        state: str,
+        details_sha256: str,
+        reject_existing: bool = False,
+    ) -> str: ...
 
 
 class RestartDispatchAuditError(ValueError):
@@ -189,32 +201,68 @@ def build_restart_dispatch_audit_v1(
     return canonical_json_bytes(payload)
 
 
-def emit_restart_dispatch_audit_v1(
+def _append_restart_dispatch_audit_to_native_seam_v1(
     *,
-    journal_append: CreateOnlyJournalAppend,
+    native_seam: NativeInstallEventCreateOnlySeam,
+    install_attempt_id: str,
+    raw: bytes,
+) -> None:
+    """Append a canonical audit only through the installer create-only event seam."""
+
+    native_seam.append_install_event_create_only(
+        install_attempt_id=install_attempt_id,
+        event_sequence=RESTART_DISPATCH_AUDIT_EVENT_SEQUENCE,
+        state=RESTART_DISPATCH_AUDIT_STATE,
+        details_sha256=hashlib.sha256(raw).hexdigest(),
+        reject_existing=True,
+    )
+
+
+def persist_restart_dispatch_audit_v1(
+    *,
+    native_host: NativeWindowsFenceInstallerHostV1,
     install_attempt_id: str,
     policy: RestartDispatchAuditPolicy,
     observed_scm_facts: Mapping[str, Any] | None,
     captured_at: datetime,
 ) -> bytes:
-    """Build then hand bytes once to the caller-provided protected journal seam."""
+    """Persist once through the initialized native host's protected event journal.
 
-    if not callable(journal_append):
-        raise RestartDispatchAuditError("RESTART_AUDIT_JOURNAL_APPEND_INVALID")
+    The fixed restart-dispatched event sequence binds one audit to one install
+    attempt. Any replay is rejected through the host's create-only conflict
+    detection; host initialization and Windows security checks remain
+    authoritative.
+    """
+
+    if type(native_host) is not NativeWindowsFenceInstallerHostV1:
+        raise RestartDispatchAuditError("RESTART_AUDIT_NATIVE_HOST_REQUIRED")
+    if not native_host.is_real_windows_host:
+        raise RestartDispatchAuditError("RESTART_AUDIT_NATIVE_WINDOWS_REQUIRED")
     raw = build_restart_dispatch_audit_v1(
         install_attempt_id=install_attempt_id,
         policy=policy,
         observed_scm_facts=observed_scm_facts,
         captured_at=captured_at,
     )
-    journal_append(raw)
+    try:
+        _append_restart_dispatch_audit_to_native_seam_v1(
+            native_seam=native_host,
+            install_attempt_id=install_attempt_id,
+            raw=raw,
+        )
+    except WindowsFinalInstallerError as exc:
+        raise RestartDispatchAuditError(
+            f"RESTART_AUDIT_NATIVE_PERSISTENCE_FAILED:{exc}"
+        ) from exc
     return raw
 
 
 __all__ = [
-    "CreateOnlyJournalAppend",
+    "RESTART_DISPATCH_AUDIT_EVENT_SEQUENCE",
+    "RESTART_DISPATCH_AUDIT_STATE",
+    "NativeInstallEventCreateOnlySeam",
     "RestartDispatchAuditError",
     "RestartDispatchAuditPolicy",
     "build_restart_dispatch_audit_v1",
-    "emit_restart_dispatch_audit_v1",
+    "persist_restart_dispatch_audit_v1",
 ]
