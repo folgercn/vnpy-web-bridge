@@ -4,9 +4,15 @@ from datetime import datetime, timedelta, timezone
 from threading import Event
 
 import pytest
-from app.execution import GatewaySnapshot, InMemoryExecutionRepository, InMemoryGateway
+from app.execution import (
+    GatewaySnapshot,
+    InMemoryExecutionRepository,
+    InMemoryGateway,
+    VnpyWindowsGateway,
+)
 from app.execution.models import format_utc
 from app.execution.orchestrator import ExecutionOrchestrator
+from app.execution.readiness import GatewayReadinessProbe
 from app.execution_orchestrator import create_app
 from fastapi.testclient import TestClient
 
@@ -26,13 +32,15 @@ class SlowGateway(InMemoryGateway):
         return _snapshot()
 
 
-def _ready_service(gateway: InMemoryGateway) -> ExecutionOrchestrator:
+def _ready_service(
+    gateway: InMemoryGateway | VnpyWindowsGateway,
+) -> ExecutionOrchestrator:
     repository = InMemoryExecutionRepository(scope="account:readiness")
     service = ExecutionOrchestrator(
         repository=repository,
         gateway=gateway,
         scope="account:readiness",
-        environment="simnow",
+        environment=gateway.environment,
         test_mode=True,
     )
 
@@ -136,6 +144,81 @@ def test_readiness_rejects_regressed_generation() -> None:
     with TestClient(create_app(service)) as client:
         response = client.get("/health/ready", headers=_headers())
     assert response.status_code == 503
+
+
+def test_final_validation_pure_readiness_ignores_durable_generation_floor() -> None:
+    class PurePeekTransport:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def start(self):
+            return None
+
+        def stop(self):
+            return None
+
+        def call(self, method, payload, context=None):
+            self.calls.append((method, payload, context))
+            return {
+                "schema_version": "windows_execution_current_facts_v1",
+                "account": {"CTP.sim-account": {"gateway_name": "CTP"}},
+                "positions": {},
+                "active_orders": {},
+                "gateway": {
+                    "gateway_name": "CTP",
+                    "account_scope": "account:readiness",
+                    "environment": "simnow",
+                    "connected": True,
+                },
+                "execution": {"orders": {}},
+                "admission": {
+                    "account_scope": "account:readiness",
+                    "environment": "simnow",
+                    "durable_state_version": 5,
+                    "durable_state_hash": "a" * 64,
+                    "snapshot_generation": 0,
+                    "fence": {
+                        "active": False,
+                        "current_epoch": 0,
+                        "current_fencing_token": 0,
+                        "high_water_epoch": 0,
+                        "high_water_fencing_token": 0,
+                    },
+                    "receipt_intents": [],
+                },
+            }
+
+    transport = PurePeekTransport()
+    gateway = VnpyWindowsGateway(
+        req_address="tcp://127.0.0.1:2014",
+        pub_address="tcp://127.0.0.1:4102",
+        account_scope="account:readiness",
+        environment="SIMNOW",
+        transport=transport,
+        readonly_transport=transport,
+        readiness_snapshot_source="final-validation-peek-current-facts-v1",
+    )
+    gateway.start()
+    service = _ready_service(gateway)
+
+    def advance(state):
+        state["broker"]["generation"] = 5
+
+    service.repository.mutate(advance)
+    before = service.repository.snapshot()
+
+    snapshot = GatewayReadinessProbe(service, timeout_seconds=0.2).probe()
+
+    assert snapshot.generation == 0
+    assert snapshot.environment == "SIMNOW"
+    assert service.repository.snapshot() == before
+    assert transport.calls == [
+        (
+            "peek_current_facts_v1",
+            {"account_scope": "account:readiness", "environment": "simnow"},
+            None,
+        )
+    ]
 
 
 def test_readiness_healthy_probe_is_current_read_only_and_authenticated() -> None:

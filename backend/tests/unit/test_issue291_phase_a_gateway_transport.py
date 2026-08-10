@@ -1,14 +1,20 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 from socket import AF_INET, SOCK_STREAM, socket
 from threading import Event, Thread
 from types import SimpleNamespace
 
 import pytest
 from app.execution import GatewaySnapshot, MutationContext, VnpyWindowsGateway
-from app.execution.errors import GatewayTimeout
+from app.execution.errors import (
+    GatewayConfigurationError,
+    GatewayTimeout,
+    GatewayUnavailable,
+)
 from app.execution.gateway import ZmqRpcTransport
+from app.execution.models import sha256_json
 
 
 def _free_tcp_address() -> str:
@@ -193,8 +199,6 @@ class _ReadonlyTransport:
 
 
 def test_readiness_snapshot_has_independent_socket_during_mutation() -> None:
-    from app.execution.models import sha256_json
-
     entered, release = Event(), Event()
     mutation = _MutationTransport(entered, release)
     readonly = _ReadonlyTransport()
@@ -233,3 +237,216 @@ def test_readiness_snapshot_has_independent_socket_during_mutation() -> None:
     thread.join(1)
     assert outcome[0]["state"] == "ACKNOWLEDGED"
     assert mutation.calls.count("send_order_fenced_v1") == 1
+
+
+class _FinalValidationPeekTransport:
+    def __init__(self, facts):
+        self.facts = facts
+        self.calls = []
+
+    def start(self):
+        return None
+
+    def stop(self):
+        return None
+
+    def call(self, method, payload, context=None):
+        self.calls.append((method, payload, context))
+        if method == "get_execution_snapshot_v1":
+            return GatewaySnapshot(
+                snapshot_id="snapshot-durable",
+                generation=7,
+                connected=True,
+                account_scope="account:prod",
+                environment="SIMNOW",
+            ).as_dict()
+        return self.facts
+
+
+def _final_validation_facts() -> dict:
+    return {
+        "schema_version": "windows_execution_current_facts_v1",
+        "account": {"CTP.sim-account": {"gateway_name": "CTP", "available": 90}},
+        "positions": {"rb-long": {"symbol": "rb", "volume": 2}},
+        "active_orders": {"CTP.1": {"symbol": "rb", "status": "NOTTRADED"}},
+        "gateway": {
+            "gateway_name": "CTP",
+            "account_scope": "account:prod",
+            "environment": "simnow",
+            "connected": True,
+        },
+        "execution": {"orders": {"CTP.1": {"symbol": "rb"}}},
+        "admission": {
+            "account_scope": "account:prod",
+            "environment": "simnow",
+            "durable_state_version": 4,
+            "durable_state_hash": "a" * 64,
+            "snapshot_generation": 0,
+            "fence": {
+                "active": False,
+                "current_epoch": 0,
+                "current_fencing_token": 0,
+                "high_water_epoch": 0,
+                "high_water_fencing_token": 0,
+            },
+            "receipt_intents": [],
+        },
+    }
+
+
+def _final_validation_gateway(transport):
+    gateway = VnpyWindowsGateway(
+        req_address="tcp://127.0.0.1:2014",
+        pub_address="tcp://127.0.0.1:4102",
+        account_scope="account:prod",
+        environment="SIMNOW",
+        transport=transport,
+        readonly_transport=transport,
+        readiness_snapshot_source="final-validation-peek-current-facts-v1",
+    )
+    gateway.start()
+    return gateway
+
+
+def test_final_validation_readiness_uses_fixed_pure_peek_and_hash_binds_facts() -> None:
+    facts = _final_validation_facts()
+    transport = _FinalValidationPeekTransport(facts)
+    snapshot = _final_validation_gateway(transport).readiness_snapshot()
+
+    assert transport.calls == [
+        (
+            "peek_current_facts_v1",
+            {"account_scope": "account:prod", "environment": "simnow"},
+            None,
+        )
+    ]
+    assert snapshot.snapshot_id == f"snapshot-peek-{sha256_json(facts)}"
+    assert snapshot.position_snapshot_hash == sha256_json(facts["positions"])
+    assert snapshot.active_order_count == 1
+    assert snapshot.generation == 0
+    assert facts["admission"]["snapshot_generation"] == 0
+    assert snapshot.orders == facts["active_orders"]
+    assert snapshot.positions == facts["positions"]
+    assert snapshot.account_scope == "account:prod"
+    assert snapshot.environment == "SIMNOW"
+    assert snapshot.fresh is True
+
+
+def test_final_validation_does_not_replace_durable_snapshot_path() -> None:
+    transport = _FinalValidationPeekTransport(_final_validation_facts())
+    snapshot = _final_validation_gateway(transport).snapshot()
+
+    assert snapshot.generation == 7
+    assert transport.calls == [
+        (
+            "get_execution_snapshot_v1",
+            {"environment": "SIMNOW", "account_scope": "account:prod"},
+            None,
+        )
+    ]
+
+
+def test_final_validation_snapshot_fails_closed_when_durable_rpc_is_absent() -> None:
+    class ValidationOnlyTransport(_FinalValidationPeekTransport):
+        def call(self, method, payload, context=None):
+            self.calls.append((method, payload, context))
+            raise GatewayUnavailable("method is not registered")
+
+    transport = ValidationOnlyTransport(_final_validation_facts())
+
+    with pytest.raises(GatewayUnavailable, match="not registered"):
+        _final_validation_gateway(transport).snapshot()
+    assert [method for method, _payload, _context in transport.calls] == [
+        "get_execution_snapshot_v1"
+    ]
+
+
+def test_final_validation_peek_rejects_nonfixed_service_environment() -> None:
+    with pytest.raises(
+        GatewayConfigurationError,
+        match="requires EXECUTION_ENVIRONMENT=SIMNOW",
+    ):
+        VnpyWindowsGateway(
+            req_address="tcp://127.0.0.1:2014",
+            pub_address="tcp://127.0.0.1:4102",
+            account_scope="account:prod",
+            environment="simnow",
+            readiness_snapshot_source="final-validation-peek-current-facts-v1",
+        )
+
+
+def test_final_validation_from_env_maps_only_readiness_to_fixed_windows_scope(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("EXECUTION_RPC_REQ_ADDRESS", "tcp://127.0.0.1:2014")
+    monkeypatch.setenv("EXECUTION_RPC_PUB_ADDRESS", "tcp://127.0.0.1:4102")
+    monkeypatch.setenv("EXECUTION_SCOPE", "account:prod")
+    monkeypatch.delenv("EXECUTION_ACCOUNT_SCOPE", raising=False)
+    monkeypatch.setenv("EXECUTION_ENVIRONMENT", "SIMNOW")
+    monkeypatch.setenv(
+        "EXECUTION_READINESS_SNAPSHOT_SOURCE",
+        "final-validation-peek-current-facts-v1",
+    )
+    transport = _FinalValidationPeekTransport(_final_validation_facts())
+    gateway = VnpyWindowsGateway.from_env()
+    gateway.transport = transport
+    gateway.readonly_transport = transport
+    gateway.start()
+
+    snapshot = gateway.readiness_snapshot()
+
+    assert snapshot.environment == "SIMNOW"
+    assert transport.calls == [
+        (
+            "peek_current_facts_v1",
+            {"account_scope": "account:prod", "environment": "simnow"},
+            None,
+        )
+    ]
+    compose = Path("deployments/docker-compose.final.yml").read_text(encoding="utf-8")
+    assert "EXECUTION_ENVIRONMENT: SIMNOW" in compose
+    assert (
+        "EXECUTION_READINESS_SNAPSHOT_SOURCE: "
+        "final-validation-peek-current-facts-v1" in compose
+    )
+
+
+def test_final_validation_readiness_exposes_only_active_orders() -> None:
+    facts = _final_validation_facts()
+    facts["active_orders"] = {}
+    expected_snapshot_id = f"snapshot-peek-{sha256_json(facts)}"
+    transport = _FinalValidationPeekTransport(facts)
+
+    snapshot = _final_validation_gateway(transport).readiness_snapshot()
+
+    assert facts["execution"]["orders"]
+    assert snapshot.snapshot_id == expected_snapshot_id
+    assert snapshot.active_order_count == 0
+    assert snapshot.orders == {}
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda facts: facts.pop("active_orders"),
+        lambda facts: facts["gateway"].update({"account_scope": "account:foreign"}),
+        lambda facts: facts["gateway"].update({"environment": "SIMNOW"}),
+        lambda facts: facts.update({"observed_at": "1970-01-01T00:00:00Z"}),
+    ],
+    ids=[
+        "malformed",
+        "foreign-gateway",
+        "foreign-windows-environment",
+        "stale-like-extra-fact",
+    ],
+)
+def test_final_validation_readiness_rejects_non_exact_or_foreign_facts(mutate) -> None:
+    facts = _final_validation_facts()
+    mutate(facts)
+    transport = _FinalValidationPeekTransport(facts)
+
+    with pytest.raises(GatewayUnavailable, match="final-validation current facts"):
+        _final_validation_gateway(transport).readiness_snapshot()
+    assert [method for method, _payload, _context in transport.calls] == [
+        "peek_current_facts_v1"
+    ]
