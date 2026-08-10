@@ -34,7 +34,16 @@ class GatewayReadinessProbe:
 
         def worker() -> None:
             try:
-                outcome.put((True, self._service.gateway.snapshot()))
+                gateway = self._service.gateway
+                outcome.put(
+                    (
+                        True,
+                        (
+                            gateway.readiness_snapshot(),
+                            gateway.readiness_snapshot_uses_durable_generation(),
+                        ),
+                    )
+                )
             except (
                 ExecutionError,
                 OSError,
@@ -61,9 +70,16 @@ class GatewayReadinessProbe:
             raise GatewayUnavailable(
                 f"gateway readiness probe failed: {value}"
             ) from value
-        return self._validate(value)
+        snapshot, generation_floor_required = value
+        if not isinstance(generation_floor_required, bool):
+            raise GatewayUnavailable("gateway readiness generation contract is invalid")
+        return self._validate(
+            snapshot, generation_floor_required=generation_floor_required
+        )
 
-    def _validate(self, value: Any) -> GatewaySnapshot:
+    def _validate(
+        self, value: Any, *, generation_floor_required: bool = True
+    ) -> GatewaySnapshot:
         snapshot = self._service._coerce_snapshot(value)
         try:
             validate_identifier(snapshot.snapshot_id, "snapshot_id")
@@ -92,9 +108,12 @@ class GatewayReadinessProbe:
             or snapshot.generation < 0
         ):
             raise SnapshotRejected("gateway readiness generation is invalid")
-        durable_generation = self._service.repository.snapshot()["broker"]["generation"]
-        if snapshot.generation < durable_generation:
-            raise SnapshotRejected("gateway readiness generation regressed")
+        if generation_floor_required:
+            durable_generation = self._service.repository.snapshot()["broker"][
+                "generation"
+            ]
+            if snapshot.generation < durable_generation:
+                raise SnapshotRejected("gateway readiness generation regressed")
         return snapshot
 
 

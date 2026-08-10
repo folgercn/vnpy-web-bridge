@@ -21,6 +21,7 @@ from .models import (
     canonical_json,
     format_utc,
     parse_utc,
+    sha256_json,
     utc_now,
     validate_idempotency_key,
     validate_identifier,
@@ -110,6 +111,10 @@ class ExecutionGateway(Protocol):
 
     def snapshot(self) -> GatewaySnapshot: ...
 
+    def readiness_snapshot(self) -> GatewaySnapshot: ...
+
+    def readiness_snapshot_uses_durable_generation(self) -> bool: ...
+
     def start(self) -> None: ...
 
     def stop(self) -> None: ...
@@ -135,6 +140,12 @@ class NullGateway:
 
     def snapshot(self) -> GatewaySnapshot:
         raise GatewayUnavailable("no Windows gateway is configured")
+
+    def readiness_snapshot(self) -> GatewaySnapshot:
+        return self.snapshot()
+
+    def readiness_snapshot_uses_durable_generation(self) -> bool:
+        return True
 
     def start(self) -> None:
         return None
@@ -246,6 +257,7 @@ class ZmqRpcTransport:
             "query_intent_v1",
             "query_intent",
             "get_execution_snapshot_v1",
+            "peek_current_facts_v1",
         }:
             raise GatewayConfigurationError(
                 "Windows RPC method is outside the typed execution surface"
@@ -288,6 +300,12 @@ class ZmqRpcTransport:
 class VnpyWindowsGateway:
     """Real typed Execution→Windows CTP gateway adapter."""
 
+    _DURABLE_SNAPSHOT_SOURCE = "durable-snapshot-v1"
+    _FINAL_VALIDATION_PEEK_SOURCE = "final-validation-peek-current-facts-v1"
+    _FINAL_VALIDATION_GATEWAY_NAME = "CTP"
+    _FINAL_VALIDATION_SERVICE_ENVIRONMENT = "SIMNOW"
+    _FINAL_VALIDATION_WINDOWS_ENVIRONMENT = "simnow"
+
     def __init__(
         self,
         *,
@@ -298,6 +316,7 @@ class VnpyWindowsGateway:
         timeout_ms: int = 10_000,
         transport: RpcTransport | None = None,
         readonly_transport: RpcTransport | None = None,
+        readiness_snapshot_source: str = _DURABLE_SNAPSHOT_SOURCE,
     ) -> None:
         if not req_address or not req_address.startswith(("tcp://", "ipc://")):
             raise GatewayConfigurationError(
@@ -321,11 +340,26 @@ class VnpyWindowsGateway:
             ) from exc
         if timeout_ms < 1:
             raise GatewayConfigurationError("gateway timeout must be positive")
+        if readiness_snapshot_source not in {
+            self._DURABLE_SNAPSHOT_SOURCE,
+            self._FINAL_VALIDATION_PEEK_SOURCE,
+        }:
+            raise GatewayConfigurationError(
+                "EXECUTION_READINESS_SNAPSHOT_SOURCE is not supported"
+            )
+        if (
+            readiness_snapshot_source == self._FINAL_VALIDATION_PEEK_SOURCE
+            and environment != self._FINAL_VALIDATION_SERVICE_ENVIRONMENT
+        ):
+            raise GatewayConfigurationError(
+                "final-validation peek requires EXECUTION_ENVIRONMENT=SIMNOW"
+            )
         self.req_address = req_address
         self.pub_address = pub_address
         self.account_scope = account_scope
         self.environment = environment
         self.timeout_ms = timeout_ms
+        self.readiness_snapshot_source = readiness_snapshot_source
         self.transport = transport or ZmqRpcTransport(
             req_address, timeout_ms=timeout_ms
         )
@@ -346,6 +380,10 @@ class VnpyWindowsGateway:
         )
         environment = os.getenv("EXECUTION_ENVIRONMENT", "").strip()
         raw_timeout = os.getenv("EXECUTION_RPC_TIMEOUT_MS", "10000")
+        readiness_snapshot_source = os.getenv(
+            "EXECUTION_READINESS_SNAPSHOT_SOURCE",
+            cls._DURABLE_SNAPSHOT_SOURCE,
+        ).strip()
         try:
             timeout = int(raw_timeout)
         except ValueError as exc:
@@ -358,6 +396,7 @@ class VnpyWindowsGateway:
             account_scope=scope,
             environment=environment,
             timeout_ms=timeout,
+            readiness_snapshot_source=readiness_snapshot_source,
         )
 
     def start(self) -> None:
@@ -698,6 +737,150 @@ class VnpyWindowsGateway:
                 "Windows gateway returned an invalid snapshot"
             ) from exc
 
+    def readiness_snapshot(self) -> GatewaySnapshot:
+        self._require_started()
+        if self.readiness_snapshot_source == self._FINAL_VALIDATION_PEEK_SOURCE:
+            return self._snapshot_from_final_validation_peek()
+        return self.snapshot()
+
+    def readiness_snapshot_uses_durable_generation(self) -> bool:
+        return self.readiness_snapshot_source != self._FINAL_VALIDATION_PEEK_SOURCE
+
+    @staticmethod
+    def _canonical_fact_rows(value: Any, *, field: str) -> Mapping[str, Any]:
+        if not isinstance(value, Mapping) or any(
+            not isinstance(key, str) or not isinstance(row, Mapping)
+            for key, row in value.items()
+        ):
+            raise TypeError(f"{field} facts are invalid")
+        canonical_json(dict(value))
+        return value
+
+    def _snapshot_from_final_validation_peek(self) -> GatewaySnapshot:
+        """Derive a local snapshot from the fixed validation-only peek RPC.
+
+        This path deliberately consumes no broker-provided snapshot identity or
+        time.  The resulting identity is bound to the entire canonical facts
+        object, while freshness means when this process served that read.
+        """
+
+        result = self.readonly_transport.call(
+            "peek_current_facts_v1",
+            {
+                "account_scope": self.account_scope,
+                "environment": self._FINAL_VALIDATION_WINDOWS_ENVIRONMENT,
+            },
+            None,
+        )
+        try:
+            required = {
+                "schema_version",
+                "account",
+                "positions",
+                "active_orders",
+                "gateway",
+                "execution",
+                "admission",
+            }
+            if not isinstance(result, Mapping) or set(result) != required:
+                raise TypeError("current facts fields are not exact")
+            if result["schema_version"] != "windows_execution_current_facts_v1":
+                raise TypeError("current facts schema is invalid")
+            self._canonical_fact_rows(result["account"], field="account")
+            positions = self._canonical_fact_rows(result["positions"], field="position")
+            active_orders = self._canonical_fact_rows(
+                result["active_orders"], field="active order"
+            )
+            gateway = result["gateway"]
+            if (
+                not isinstance(gateway, Mapping)
+                or dict(gateway)
+                != {
+                    "gateway_name": self._FINAL_VALIDATION_GATEWAY_NAME,
+                    "account_scope": self.account_scope,
+                    "environment": self._FINAL_VALIDATION_WINDOWS_ENVIRONMENT,
+                    "connected": gateway.get("connected"),
+                }
+                or not isinstance(gateway["connected"], bool)
+            ):
+                raise TypeError("current facts gateway binding is invalid")
+            execution = result["execution"]
+            if not isinstance(execution, Mapping) or set(execution) != {"orders"}:
+                raise TypeError("current facts execution fields are not exact")
+            self._canonical_fact_rows(execution["orders"], field="order")
+            admission = result["admission"]
+            admission_fields = {
+                "account_scope",
+                "environment",
+                "durable_state_version",
+                "durable_state_hash",
+                "snapshot_generation",
+                "fence",
+                "receipt_intents",
+            }
+            if not isinstance(admission, Mapping) or set(admission) != admission_fields:
+                raise TypeError("current facts admission fields are not exact")
+            if (
+                admission["account_scope"] != self.account_scope
+                or admission["environment"]
+                != self._FINAL_VALIDATION_WINDOWS_ENVIRONMENT
+            ):
+                raise TypeError("current facts admission scope is invalid")
+            for field in ("durable_state_version", "snapshot_generation"):
+                if (
+                    isinstance(admission[field], bool)
+                    or not isinstance(admission[field], int)
+                    or admission[field] < 0
+                ):
+                    raise TypeError("current facts admission generation is invalid")
+            validate_sha256(admission["durable_state_hash"], "durable_state_hash")
+            fence = admission["fence"]
+            if not isinstance(fence, Mapping) or set(fence) != {
+                "active",
+                "current_epoch",
+                "current_fencing_token",
+                "high_water_epoch",
+                "high_water_fencing_token",
+            }:
+                raise TypeError("current facts fence fields are not exact")
+            if not isinstance(fence["active"], bool) or any(
+                isinstance(fence[field], bool)
+                or not isinstance(fence[field], int)
+                or fence[field] < 0
+                for field in (
+                    "current_epoch",
+                    "current_fencing_token",
+                    "high_water_epoch",
+                    "high_water_fencing_token",
+                )
+            ):
+                raise TypeError("current facts fence is invalid")
+            receipt_intents = admission["receipt_intents"]
+            if (
+                not isinstance(receipt_intents, list)
+                or any(not isinstance(value, str) for value in receipt_intents)
+                or receipt_intents != sorted(set(receipt_intents))
+            ):
+                raise TypeError("current facts receipts are invalid")
+            raw_facts_hash = sha256_json(dict(result))
+            return GatewaySnapshot(
+                snapshot_id=f"snapshot-peek-{raw_facts_hash}",
+                generation=admission["snapshot_generation"],
+                connected=gateway["connected"],
+                active_order_count=len(active_orders),
+                position_snapshot_hash=sha256_json(dict(positions)),
+                observed_at=format_utc(utc_now()),
+                orders=active_orders,
+                positions=positions,
+                account_scope=self.account_scope,
+                environment=self.environment,
+                fresh=True,
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise GatewayUnavailable(
+                "Windows gateway returned invalid final-validation current facts"
+            ) from exc
+
 
 class InMemoryGateway:
     """Deterministic gateway fake that records all mutation attempts."""
@@ -779,6 +962,12 @@ class InMemoryGateway:
             account_scope=self.account_scope,
             environment=self.environment,
         )
+
+    def readiness_snapshot(self) -> GatewaySnapshot:
+        return self.snapshot()
+
+    def readiness_snapshot_uses_durable_generation(self) -> bool:
+        return True
 
     def start(self) -> None:
         return None
