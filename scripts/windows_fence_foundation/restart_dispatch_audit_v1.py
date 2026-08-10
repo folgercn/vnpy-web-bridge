@@ -1,8 +1,8 @@
-"""Create-only audit facts for a deliberately non-executing restart dispatch.
+"""Canonical restart-dispatch facts with no SCM or filesystem capability.
 
-This module has no SCM dependency and cannot stop or start a service. Native
-callers must supply facts observed from the actual caller token/process;
-missing facts fail closed instead of receiving defaults.
+Native code captures SCM observations and supplies them to this pure module.  A
+caller-owned protected journal append seam may receive the resulting bytes, but
+this module never opens a journal, starts a service, or stops a service.
 """
 
 from __future__ import annotations
@@ -11,15 +11,25 @@ import hashlib
 import re
 from collections.abc import Mapping
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal, Protocol
 
 from .contracts import canonical_json_bytes
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$")
+_RESULT_RE = re.compile(r"^[A-Z][A-Z0-9_]{2,127}$")
+_SID_RE = re.compile(r"^S-\d+(?:-\d+)+$")
+
+RestartDispatchAuditPolicy = Literal["OBSERVED_SCM_FACTS", "DRY_RUN_NON_EXECUTING"]
+
+
+class CreateOnlyJournalAppend(Protocol):
+    """Caller-owned append seam that guarantees its own protected create-only write."""
+
+    def __call__(self, raw: bytes) -> None: ...
 
 
 class RestartDispatchAuditError(ValueError):
-    """The non-executing audit input was incomplete or invalid."""
+    """The restart-dispatch facts or journal seam were invalid."""
 
 
 def _identifier(value: Any, field: str) -> str:
@@ -28,15 +38,25 @@ def _identifier(value: Any, field: str) -> str:
     return value
 
 
-def _caller(value: Mapping[str, Any]) -> dict[str, Any]:
-    if set(value) != {"sid", "pid", "session_id"}:
+def _timestamp(value: Any, field: str) -> str:
+    if (
+        not isinstance(value, datetime)
+        or value.tzinfo is None
+        or value.utcoffset() is None
+    ):
+        raise RestartDispatchAuditError(f"RESTART_AUDIT_{field.upper()}_INVALID")
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _caller(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != {"sid", "pid", "session_id"}:
         raise RestartDispatchAuditError("RESTART_AUDIT_CALLER_FACTS_MISSING")
     sid = value["sid"]
     pid = value["pid"]
     session_id = value["session_id"]
     if (
         not isinstance(sid, str)
-        or not sid
+        or _SID_RE.fullmatch(sid) is None
         or isinstance(pid, bool)
         or not isinstance(pid, int)
         or pid < 1
@@ -48,47 +68,153 @@ def _caller(value: Mapping[str, Any]) -> dict[str, Any]:
     return {"sid": sid, "pid": pid, "session_id": session_id}
 
 
-def build_restart_dispatch_audit_v1(
-    *,
-    install_attempt_id: str,
-    service_control_operation_id: str,
-    restart_dispatch_nonce: str,
-    caller: Mapping[str, Any],
-    captured_at: datetime,
-) -> bytes:
-    """Build canonical evidence for an intentionally unexecuted dispatch.
+def _scm_call(value: Any, operation: str) -> dict[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != {
+        "attempted",
+        "started_at",
+        "completed_at",
+        "result",
+    }:
+        raise RestartDispatchAuditError(
+            f"RESTART_AUDIT_{operation.upper()}_FACTS_MISSING"
+        )
+    attempted = value["attempted"]
+    if not isinstance(attempted, bool):
+        raise RestartDispatchAuditError(
+            f"RESTART_AUDIT_{operation.upper()}_ATTEMPT_INVALID"
+        )
+    if not attempted:
+        if any(
+            value[name] is not None for name in ("started_at", "completed_at", "result")
+        ):
+            raise RestartDispatchAuditError(
+                f"RESTART_AUDIT_{operation.upper()}_UNATTEMPTED_INVALID"
+            )
+        return {
+            "attempted": False,
+            "started_at_utc": None,
+            "completed_at_utc": None,
+            "result": None,
+        }
+    started_at = value["started_at"]
+    completed_at = value["completed_at"]
+    result = value["result"]
+    if not isinstance(result, str) or _RESULT_RE.fullmatch(result) is None:
+        raise RestartDispatchAuditError(
+            f"RESTART_AUDIT_{operation.upper()}_RESULT_INVALID"
+        )
+    started_at_utc = _timestamp(started_at, f"{operation}_started_at")
+    completed_at_utc = _timestamp(completed_at, f"{operation}_completed_at")
+    if completed_at.astimezone(timezone.utc) < started_at.astimezone(timezone.utc):
+        raise RestartDispatchAuditError(
+            f"RESTART_AUDIT_{operation.upper()}_TIMESTAMPS_INVALID"
+        )
+    return {
+        "attempted": True,
+        "started_at_utc": started_at_utc,
+        "completed_at_utc": completed_at_utc,
+        "result": result,
+    }
 
-    SCM timestamps/results are null because neither SCM call is made. The
-    policy result documents non-execution; it is not a simulated SCM response.
-    """
 
-    if captured_at.tzinfo is None or captured_at.utcoffset() is None:
-        raise RestartDispatchAuditError("RESTART_AUDIT_CLOCK_INVALID")
-    nonce = _identifier(restart_dispatch_nonce, "restart_dispatch_nonce")
-    payload = {
-        "schema_version": "windows_fence_restart_dispatch_audit_v1",
-        "purpose": "record_non_executing_restart_dispatch_attempt",
-        "install_attempt_id": _identifier(install_attempt_id, "install_attempt_id"),
-        "service_control_operation_id": _identifier(
-            service_control_operation_id, "service_control_operation_id"
-        ),
-        "restart_dispatch_nonce_sha256": hashlib.sha256(nonce.encode()).hexdigest(),
-        "captured_at_utc": captured_at.astimezone(timezone.utc)
-        .isoformat()
-        .replace("+00:00", "Z"),
-        "caller": _caller(caller),
-        "restart_dispatched": False,
+def _observed_scm_facts(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != {
+        "operation_id",
+        "restart_dispatch_nonce",
+        "caller",
+        "scm_calls",
+    }:
+        raise RestartDispatchAuditError("RESTART_AUDIT_OBSERVED_FACTS_MISSING")
+    scm_calls = value["scm_calls"]
+    if not isinstance(scm_calls, Mapping) or set(scm_calls) != {"stop", "start"}:
+        raise RestartDispatchAuditError("RESTART_AUDIT_SCM_CALL_FACTS_MISSING")
+    return {
+        "operation_id": _identifier(value["operation_id"], "operation_id"),
+        "restart_dispatch_nonce_sha256": hashlib.sha256(
+            _identifier(
+                value["restart_dispatch_nonce"], "restart_dispatch_nonce"
+            ).encode()
+        ).hexdigest(),
+        "caller": _caller(value["caller"]),
         "scm_calls": {
-            operation: {
-                "attempted": False,
-                "started_at_utc": None,
-                "completed_at_utc": None,
-                "result": "NOT_EXECUTED_POLICY_DISABLED",
-            }
+            operation: _scm_call(scm_calls[operation], operation)
             for operation in ("stop", "start")
         },
     }
+
+
+def build_restart_dispatch_audit_v1(
+    *,
+    install_attempt_id: str,
+    policy: RestartDispatchAuditPolicy,
+    observed_scm_facts: Mapping[str, Any] | None,
+    captured_at: datetime,
+) -> bytes:
+    """Build canonical facts from a caller-owned observation or explicit dry policy.
+
+    ``OBSERVED_SCM_FACTS`` requires actual captured facts.  The dry seam requires
+    no SCM facts and records only its non-executing policy; it never fabricates a
+    result, timestamp, or attempted call.
+    """
+
+    if policy not in {"OBSERVED_SCM_FACTS", "DRY_RUN_NON_EXECUTING"}:
+        raise RestartDispatchAuditError("RESTART_AUDIT_POLICY_INVALID")
+    payload: dict[str, Any] = {
+        "schema_version": "windows_fence_restart_dispatch_audit_v1",
+        "install_attempt_id": _identifier(install_attempt_id, "install_attempt_id"),
+        "captured_at_utc": _timestamp(captured_at, "captured_at"),
+        "policy": policy,
+    }
+    if policy == "DRY_RUN_NON_EXECUTING":
+        if observed_scm_facts is not None:
+            raise RestartDispatchAuditError("RESTART_AUDIT_DRY_RUN_FACTS_FORBIDDEN")
+        payload.update(
+            {
+                "purpose": "record_explicit_non_executing_restart_dispatch_policy",
+                "restart_dispatched": False,
+                "observed_scm_facts": None,
+            }
+        )
+    else:
+        facts = _observed_scm_facts(observed_scm_facts)
+        payload.update(
+            {
+                "purpose": "record_observed_restart_dispatch_facts",
+                "restart_dispatched": any(
+                    call["attempted"] for call in facts["scm_calls"].values()
+                ),
+                "observed_scm_facts": facts,
+            }
+        )
     return canonical_json_bytes(payload)
 
 
-__all__ = ["RestartDispatchAuditError", "build_restart_dispatch_audit_v1"]
+def emit_restart_dispatch_audit_v1(
+    *,
+    journal_append: CreateOnlyJournalAppend,
+    install_attempt_id: str,
+    policy: RestartDispatchAuditPolicy,
+    observed_scm_facts: Mapping[str, Any] | None,
+    captured_at: datetime,
+) -> bytes:
+    """Build then hand bytes once to the caller-provided protected journal seam."""
+
+    if not callable(journal_append):
+        raise RestartDispatchAuditError("RESTART_AUDIT_JOURNAL_APPEND_INVALID")
+    raw = build_restart_dispatch_audit_v1(
+        install_attempt_id=install_attempt_id,
+        policy=policy,
+        observed_scm_facts=observed_scm_facts,
+        captured_at=captured_at,
+    )
+    journal_append(raw)
+    return raw
+
+
+__all__ = [
+    "CreateOnlyJournalAppend",
+    "RestartDispatchAuditError",
+    "RestartDispatchAuditPolicy",
+    "build_restart_dispatch_audit_v1",
+    "emit_restart_dispatch_audit_v1",
+]
