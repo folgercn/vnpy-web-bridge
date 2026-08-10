@@ -673,17 +673,23 @@ class WindowsFenceCeremonyRunnerV1:
             draft=draft, raw=raw, expected_schema=schema
         )
         if sequence == 5:
-            action = lambda: actions.append_event_5(
-                context=context, scm_dispatch_evidence_raw=evidence_raw
-            )
+
+            def action() -> CeremonyEventEvidenceV1:
+                return actions.append_event_5(
+                    context=context, scm_dispatch_evidence_raw=evidence_raw
+                )
         elif sequence == 6:
-            action = lambda: actions.await_event_6(
-                context=context, startup_receipt_raw=evidence_raw
-            )
+
+            def action() -> CeremonyEventEvidenceV1:
+                return actions.await_event_6(
+                    context=context, startup_receipt_raw=evidence_raw
+                )
         elif sequence == 7:
-            action = lambda: actions.await_event_7(
-                context=context, attestation_raw=evidence_raw
-            )
+
+            def action() -> CeremonyEventEvidenceV1:
+                return actions.await_event_7(
+                    context=context, attestation_raw=evidence_raw
+                )
         else:
             raise WindowsFenceCeremonyError("CEREMONY_OBSERVER_EVENT_INVALID")
         return self._run_post_event3_step(
