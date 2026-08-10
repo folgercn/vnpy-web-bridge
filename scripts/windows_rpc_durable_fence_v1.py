@@ -14,6 +14,7 @@ import zipfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from enum import Enum
 from hashlib import sha256
 from pathlib import Path
@@ -415,7 +416,28 @@ def _execution_fact_value(value: Any) -> Any:
                 code="WINDOWS_EXECUTION_FACT_INVALID",
             )
         return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-    if value is None or isinstance(value, (str, int, float, bool)):
+    if isinstance(value, (float, Decimal)):
+        try:
+            decimal_value = Decimal(str(value))
+        except (InvalidOperation, ValueError) as exc:
+            raise WindowsRpcDurableFenceError(
+                "execution fact number is invalid",
+                code="WINDOWS_EXECUTION_FACT_INVALID",
+            ) from exc
+        if not decimal_value.is_finite():
+            raise WindowsRpcDurableFenceError(
+                "execution fact number is non-finite",
+                code="WINDOWS_EXECUTION_FACT_INVALID",
+            )
+        if decimal_value == decimal_value.to_integral_value():
+            integer_value = int(decimal_value)
+            if -(2**53) + 1 <= integer_value <= 2**53 - 1:
+                return integer_value
+        decimal_text = format(decimal_value, "f")
+        if "." in decimal_text:
+            decimal_text = decimal_text.rstrip("0").rstrip(".")
+        return "0" if decimal_text == "-0" else decimal_text
+    if value is None or isinstance(value, (str, int, bool)):
         return value
     return str(value)
 
