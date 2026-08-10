@@ -17,6 +17,7 @@ from scripts.windows_fence_foundation.ceremony_runner_v1 import (
     CeremonyQueryEvidenceV1,
     CeremonyReservationEvidenceV1,
     CeremonyStepContextV1,
+    NativeWindowsFenceCeremonyActionsV1,
     WindowsFenceCeremonyError,
     WindowsFenceCeremonyRunnerV1,
 )
@@ -107,6 +108,15 @@ def test_observer_raw_fact_hash_mismatch_fails_closed() -> None:
 def test_observer_default_requires_real_windows_native_capability() -> None:
     with pytest.raises(WindowsHostObservationError, match="REAL_WINDOWS_HOST_REQUIRED"):
         NativeWindowsHostObserverV1().capture_attestation()
+
+
+def test_observer_production_constructor_has_no_command_or_fact_arguments() -> None:
+    with pytest.raises(TypeError):
+        NativeWindowsHostObserverV1(
+            service_name=SERVICE_NAME,
+            store_path=r"C:\\ProgramData\\vnpy-web-bridge\\windows-fence\\store",
+            execution_facts_command=("untrusted.exe",),  # type: ignore[call-arg]
+        )
 
 
 class _Actions:
@@ -236,6 +246,81 @@ def test_live_event3_failure_is_query_only_and_never_restarts(tmp_path) -> None:
         "query:event_3_unknown",
     ]
     assert actions.restart_dispatches == 0
+
+
+@pytest.mark.parametrize(
+    ("fail_at", "expected_calls", "restart_dispatches"),
+    [
+        (
+            "event_4",
+            [
+                "query:attempt_frontier",
+                "events_1_to_2",
+                "event_3",
+                "event_4",
+                "query:event_4_unknown",
+            ],
+            0,
+        ),
+        (
+            "event_5",
+            [
+                "query:attempt_frontier",
+                "events_1_to_2",
+                "event_3",
+                "event_4",
+                "event_5",
+                "query:event_5_restart_unknown",
+            ],
+            0,
+        ),
+        (
+            "event_6",
+            [
+                "query:attempt_frontier",
+                "events_1_to_2",
+                "event_3",
+                "event_4",
+                "event_5",
+                "event_6",
+                "query:event_6_unknown",
+            ],
+            1,
+        ),
+        (
+            "event_7",
+            [
+                "query:attempt_frontier",
+                "events_1_to_2",
+                "event_3",
+                "event_4",
+                "event_5",
+                "event_6",
+                "event_7",
+                "query:event_7_unknown",
+            ],
+            1,
+        ),
+    ],
+)
+def test_live_event4_to_7_failures_are_query_only_and_never_retry_restart(
+    tmp_path, fail_at, expected_calls, restart_dispatches
+) -> None:
+    artifacts, keyring = _live_artifacts(tmp_path)
+    actions = _Actions(fail_at=fail_at)
+    with pytest.raises(WindowsFenceCeremonyError, match="POST_EVENT3_QUERY_ONLY"):
+        _runner(keyring).run_once(artifacts=artifacts, dry_run=False, actions=actions)
+    assert actions.calls == expected_calls
+    assert actions.restart_dispatches == restart_dispatches
+
+
+def test_concrete_native_actions_reject_test_doubles() -> None:
+    with pytest.raises(WindowsFenceCeremonyError, match="NATIVE_ACTIONS_REQUIRED"):
+        NativeWindowsFenceCeremonyActionsV1(
+            installer=object(),  # type: ignore[arg-type]
+            observer=object(),  # type: ignore[arg-type]
+            bundle_raw=b"bundle",
+        )
 
 
 def test_live_rejects_missing_signed_artifact_before_action(tmp_path) -> None:

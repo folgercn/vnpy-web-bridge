@@ -11,9 +11,7 @@ import base64
 import hashlib
 import json
 import os
-import subprocess
 from collections.abc import Mapping
-from ctypes import byref, create_unicode_buffer, wintypes
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
@@ -23,6 +21,7 @@ from jsonschema import Draft202012Validator, ValidationError
 from .contracts import canonical_json_bytes
 from .installer_windows_v1 import WindowsScmReadbackV1
 from .native_windows_installer_host_v1 import NativeWindowsFenceInstallerHostV1
+from .win32_fs import WindowsFilesystemFactsAdapter
 
 
 class WindowsHostObservationError(ValueError):
@@ -179,12 +178,14 @@ class WindowsReadOnlyFactsSourceV1(Protocol):
 
 
 class NativeWindowsReadOnlyFactsAdapterV1:
-    """Concrete, query-only Windows fact adapter.
+    """Concrete native observer source; no command or caller-fact seam exists.
 
-    The two commands are deliberately injected as *readers* so the production
-    deployment can pin its RPC snapshot helper.  Their stdout is the source
-    artifact; it must be one canonical JSON object, with no whitespace or
-    wrapper added by this adapter.
+    SCM, process and journal facts are collected here through the already
+    sealed native host and the handle-anchored filesystem adapter.  The v1
+    schemas additionally require a protected SCM audit trace and in-process
+    M2 facts, for which this repository has no concrete reader.  Those paths
+    therefore fail closed after the native readbacks, rather than accepting a
+    command, a fixture, or caller-provided facts as production evidence.
     """
 
     def __init__(
@@ -192,224 +193,78 @@ class NativeWindowsReadOnlyFactsAdapterV1:
         *,
         service_name: str,
         store_path: str,
-        execution_facts_command: tuple[str, ...] | None = None,
-        snapshot_command: tuple[str, ...] | None = None,
-        execution_facts_command_sha256: str | None = None,
-        snapshot_command_sha256: str | None = None,
+        installer_host: NativeWindowsFenceInstallerHostV1,
     ) -> None:
         self.service_name = service_name
         self.store_path = store_path
-        self.execution_facts_command = execution_facts_command
-        self.snapshot_command = snapshot_command
-        self.execution_facts_command_sha256 = execution_facts_command_sha256
-        self.snapshot_command_sha256 = snapshot_command_sha256
+        self._installer_host = installer_host
 
-    @staticmethod
-    def _require_native() -> tuple[Any, Any, Any]:
-        if os.name != "nt":
+    def _native_readbacks(self, *, event_sequence: int) -> None:
+        if (
+            os.name != "nt"
+            or type(self._installer_host) is not NativeWindowsFenceInstallerHostV1
+            or not self._installer_host.is_real_windows_host
+        ):
             raise WindowsHostObservationError("OBSERVER_REAL_WINDOWS_HOST_REQUIRED")
         try:
-            from ctypes import windll
-
-            import win32process  # type: ignore[import-not-found]
-            import win32service  # type: ignore[import-not-found]
+            fs = WindowsFilesystemFactsAdapter()
+            store = Path(self.store_path)
+            fs.list_directory(store)
+            journal = fs.list_directory(store / "installer-journal-v1")
+            attempts = [
+                name
+                for name in journal.names
+                if name.startswith("windows-fence-install-")
+            ]
+            if len(attempts) != 1:
+                raise WindowsHostObservationError("OBSERVER_JOURNAL_ATTEMPT_AMBIGUOUS")
+            self._installer_host.read_install_event_read_only(
+                install_attempt_id=attempts[0], event_sequence=event_sequence
+            )
+            self._installer_host.query_scm_readback(self.service_name)
+            self._installer_host.query_service_runtime_readback(
+                service_name=self.service_name
+            )
+        except WindowsHostObservationError:
+            raise
         except Exception as exc:
             raise WindowsHostObservationError(
-                "OBSERVER_NATIVE_SOURCE_UNAVAILABLE"
+                "OBSERVER_NATIVE_READBACK_FAILED"
             ) from exc
-        return win32service, win32process, windll
 
-    @staticmethod
-    def _read_canonical_command(
-        command: tuple[str, ...] | None,
-        expected_command_sha256: str | None,
-        code: str,
-    ) -> tuple[dict[str, Any], bytes]:
-        if not command or any(
-            not isinstance(item, str) or not item for item in command
-        ):
-            raise WindowsHostObservationError("OBSERVER_FACT_SOURCE_UNAVAILABLE")
-        executable = Path(command[0])
-        if (
-            not executable.is_absolute()
-            or not isinstance(expected_command_sha256, str)
-            or len(expected_command_sha256) != 64
-        ):
-            raise WindowsHostObservationError("OBSERVER_READER_PIN_REQUIRED")
-        try:
-            if (
-                hashlib.sha256(executable.read_bytes()).hexdigest()
-                != expected_command_sha256
-            ):
-                raise WindowsHostObservationError("OBSERVER_READER_PIN_MISMATCH")
-        except OSError as exc:
-            raise WindowsHostObservationError("OBSERVER_READER_READ_FAILED") from exc
-        try:
-            completed = subprocess.run(
-                list(command), check=True, capture_output=True, timeout=10, shell=False
-            )
-            raw = completed.stdout
-        except (OSError, subprocess.SubprocessError) as exc:
-            raise WindowsHostObservationError(code) from exc
-        try:
-            if (
-                hashlib.sha256(executable.read_bytes()).hexdigest()
-                != expected_command_sha256
-            ):
-                raise WindowsHostObservationError(
-                    "OBSERVER_READER_CHANGED_DURING_QUERY"
-                )
-        except OSError as exc:
-            raise WindowsHostObservationError("OBSERVER_READER_READ_FAILED") from exc
-        if not isinstance(raw, bytes):
-            raise WindowsHostObservationError("OBSERVER_CANONICAL_SOURCE_INVALID")
-        try:
-            value = json.loads(
-                raw.decode("utf-8"),
-                object_pairs_hook=NativeWindowsReadOnlyFactsAdapterV1._unique_pairs,
-                parse_float=lambda _value: (_ for _ in ()).throw(
-                    ValueError("float is forbidden")
-                ),
-            )
-        except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
-            raise WindowsHostObservationError(
-                "OBSERVER_CANONICAL_SOURCE_INVALID"
-            ) from exc
-        try:
-            canonical = canonical_json_bytes(value)
-        except Exception as exc:
-            raise WindowsHostObservationError(
-                "OBSERVER_CANONICAL_SOURCE_INVALID"
-            ) from exc
-        if not isinstance(value, dict) or canonical != raw:
-            raise WindowsHostObservationError("OBSERVER_CANONICAL_SOURCE_INVALID")
-        return value, raw
-
-    @staticmethod
-    def _unique_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-        result: dict[str, Any] = {}
-        for key, value in pairs:
-            if key in result:
-                raise ValueError("duplicate JSON key")
-            result[key] = value
-        return result
-
-    @staticmethod
-    def _process_time_utc(value: Any) -> str:
-        try:
-            timestamp = (
-                value.timestamp()
-                if hasattr(value, "timestamp")
-                else (int(value) / 10_000_000 - 11_644_473_600)
-            )
-            return (
-                datetime.fromtimestamp(timestamp, timezone.utc)
-                .isoformat()
-                .replace("+00:00", "Z")
-            )
-        except (OverflowError, TypeError, ValueError) as exc:
-            raise WindowsHostObservationError("OBSERVER_PROCESS_TIME_INVALID") from exc
-
-    def _capture_native_facts_with_raw(
-        self,
-    ) -> tuple[Mapping[str, Any], bytes | None, bytes | None]:
-        ws, wp, windll = self._require_native()
-        try:
-            manager = ws.OpenSCManager(None, None, ws.SC_MANAGER_CONNECT)
-            service = ws.OpenService(
-                manager, self.service_name, ws.SERVICE_QUERY_STATUS
-            )
-            status = ws.QueryServiceStatusEx(service)
-            ws.CloseServiceHandle(service)
-            ws.CloseServiceHandle(manager)
-            pid = int(status.get("ProcessId", 0))
-            if pid <= 0:
-                raise OSError("service has no live process")
-            process = wp.OpenProcess(wp.PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-            creation, _, _, _ = wp.GetProcessTimes(process)
-            wp.CloseHandle(process)
-            tick = int(windll.kernel32.GetTickCount64())
-            volume_serial = wintypes.DWORD()
-            if not windll.kernel32.GetVolumeInformationW(
-                self.store_path, None, 0, byref(volume_serial), None, None, None, 0
-            ):
-                raise OSError("GetVolumeInformationW failed")
-            volume_root = self.store_path[:3]
-            volume_name = create_unicode_buffer(1024)
-            if not windll.kernel32.GetVolumeNameForVolumeMountPointW(
-                volume_root, volume_name, len(volume_name)
-            ):
-                raise OSError("GetVolumeNameForVolumeMountPointW failed")
-            volume_guid = volume_name.value.rstrip("\\").upper()
-            if not volume_guid.startswith("\\\\?\\VOLUME{"):
-                raise OSError("invalid volume GUID")
-        except Exception as exc:
-            raise WindowsHostObservationError(
-                "OBSERVER_NATIVE_FACT_CAPTURE_FAILED"
-            ) from exc
-        execution, execution_raw = self._read_canonical_command(
-            self.execution_facts_command,
-            self.execution_facts_command_sha256,
-            "OBSERVER_EXECUTION_FACTS_SOURCE_FAILED",
-        )
-        snapshot, snapshot_raw = self._read_canonical_command(
-            self.snapshot_command,
-            self.snapshot_command_sha256,
-            "OBSERVER_SNAPSHOT_SOURCE_FAILED",
-        )
-        if any(
-            source.get("pending_send_outcomes") != 0
-            or source.get("active_orders") != []
-            or source.get("positions") != []
-            for source in (execution, snapshot)
-        ):
-            raise WindowsHostObservationError("OBSERVER_ZERO_ORDER_REQUIRED")
-        facts = dict(snapshot)
-        facts.update(
-            {
-                "service_name": self.service_name,
-                "service_process_id": pid,
-                "service_process_started_at_utc": self._process_time_utc(creation),
-                "host_boot_id": f"windows-boot-tick-{tick:016x}",
-                "store_volume_serial": f"{int(volume_serial.value):08X}",
-                "store_volume_identity_sha256": hashlib.sha256(
-                    volume_guid.encode("ascii")
-                ).hexdigest(),
-                "execution_facts_canonical_sha256": hashlib.sha256(
-                    execution_raw
-                ).hexdigest(),
-                "snapshot_raw_sha256": hashlib.sha256(snapshot_raw).hexdigest(),
-            }
-        )
-        return facts, execution_raw, snapshot_raw
-
-    def _explicit_facts(self) -> tuple[Mapping[str, Any], Mapping[str, bytes]]:
-        facts, execution_raw, snapshot_raw = self._capture_native_facts_with_raw()
-        assert execution_raw is not None and snapshot_raw is not None
-        return facts, {
-            "execution_facts_canonical_sha256": execution_raw,
-            "snapshot_raw_sha256": snapshot_raw,
-        }
+    def _unavailable(
+        self, *, event_sequence: int, code: str
+    ) -> tuple[Mapping[str, Any], Mapping[str, bytes]]:
+        self._native_readbacks(event_sequence=event_sequence)
+        raise WindowsHostObservationError(code)
 
     def capture_publish_receipt_facts(
         self,
     ) -> tuple[Mapping[str, Any], Mapping[str, bytes]]:
-        return self._explicit_facts()
+        return self._unavailable(
+            event_sequence=2, code="OBSERVER_PUBLISH_FACTS_UNAVAILABLE"
+        )
 
     def capture_scm_dispatch_evidence_facts(
         self,
     ) -> tuple[Mapping[str, Any], Mapping[str, bytes]]:
-        return self._explicit_facts()
+        return self._unavailable(
+            event_sequence=5, code="OBSERVER_SCM_AUDIT_TRACE_UNAVAILABLE"
+        )
 
     def capture_startup_receipt_facts(
         self,
     ) -> tuple[Mapping[str, Any], Mapping[str, bytes]]:
-        return self._explicit_facts()
+        return self._unavailable(
+            event_sequence=5, code="OBSERVER_STARTUP_FACTS_UNAVAILABLE"
+        )
 
     def capture_attestation_facts(
         self,
     ) -> tuple[Mapping[str, Any], Mapping[str, bytes]]:
-        return self._explicit_facts()
+        return self._unavailable(
+            event_sequence=5, code="OBSERVER_M2_ATTESTATION_FACTS_UNAVAILABLE"
+        )
 
 
 class NativeWindowsHostObserverV1:
@@ -418,11 +273,22 @@ class NativeWindowsHostObserverV1:
     def __init__(
         self,
         *,
+        service_name: str | None = None,
+        store_path: str | None = None,
         installer_host: NativeWindowsFenceInstallerHostV1 | None = None,
         facts_source: WindowsReadOnlyFactsSourceV1 | None = None,
     ) -> None:
         self._installer_host = installer_host or NativeWindowsFenceInstallerHostV1()
-        self._facts_source = facts_source
+        if facts_source is None and service_name is not None and store_path is not None:
+            self._facts_source: WindowsReadOnlyFactsSourceV1 | None = (
+                NativeWindowsReadOnlyFactsAdapterV1(
+                    service_name=service_name,
+                    store_path=store_path,
+                    installer_host=self._installer_host,
+                )
+            )
+        else:
+            self._facts_source = facts_source
 
     @property
     def is_real_windows_host(self) -> bool:
@@ -441,24 +307,13 @@ class NativeWindowsHostObserverV1:
         if not self.is_real_windows_host:
             raise WindowsHostObservationError("OBSERVER_REAL_WINDOWS_HOST_REQUIRED")
         try:
-            completed = subprocess.run(
-                ["sc.exe", "queryex", service_name],
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=10,
+            return self._installer_host.query_service_runtime_readback(
+                service_name=service_name
             )
-        except (OSError, subprocess.SubprocessError) as exc:
+        except Exception as exc:
             raise WindowsHostObservationError(
                 "OBSERVER_SCM_STATUS_QUERY_FAILED"
             ) from exc
-        # Preserve exact readback only as a hash; it avoids treating localized
-        # sc.exe output as a stable structured API while retaining evidence.
-        return {
-            "service_name": service_name,
-            "status_raw_sha256": hashlib.sha256(completed.stdout.encode()).hexdigest(),
-            "query_only": True,
-        }
 
     def capture_publish_receipt(
         self, *, offline_contract: WindowsReadOnlyFactsSourceV1 | None = None

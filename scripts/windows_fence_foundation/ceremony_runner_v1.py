@@ -16,11 +16,14 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from .contracts import canonical_json_bytes
+from .host_observer_v1 import NativeWindowsHostObserverV1
 from .installer_trust_anchor_v1 import (
     canonical_public_keyring_v1,
     load_production_installer_trust_anchor_v1,
     validate_anchor_keyring_bytes_v1,
 )
+from .installer_windows_v1 import FinalWindowsFenceInstallerV1
+from .native_windows_installer_host_v1 import NativeWindowsFenceInstallerHostV1
 from .offline_signing_v1 import (
     OfflineSigningError,
     require_fresh_zero_preflight_v1,
@@ -126,6 +129,155 @@ class CeremonyResultV1:
     restart_dispatches: int
 
 
+class NativeWindowsFenceCeremonyActionsV1:
+    """Thin concrete binding to the existing final installer/native host.
+
+    This is intentionally not a second installer or ledger.  It turns the
+    existing journal records and observer drafts into the runner's opaque
+    evidence objects.  Missing production observer capabilities remain
+    terminal and are handled by the runner's same-attempt query-only rule.
+    """
+
+    def __init__(
+        self,
+        *,
+        installer: FinalWindowsFenceInstallerV1,
+        observer: NativeWindowsHostObserverV1,
+        bundle_raw: bytes,
+    ) -> None:
+        if (
+            type(installer) is not FinalWindowsFenceInstallerV1
+            or type(observer) is not NativeWindowsHostObserverV1
+            or type(getattr(installer, "_host", None))
+            is not NativeWindowsFenceInstallerHostV1
+            or type(bundle_raw) is not bytes
+            or not bundle_raw
+        ):
+            raise WindowsFenceCeremonyError("CEREMONY_NATIVE_ACTIONS_REQUIRED")
+        self._installer = installer
+        self._observer = observer
+        self._bundle_raw = bundle_raw
+
+    @staticmethod
+    def _event(
+        context: CeremonyStepContextV1, sequence: int, raw: bytes
+    ) -> CeremonyEventEvidenceV1:
+        return CeremonyEventEvidenceV1(
+            event_sequence=sequence,
+            install_attempt_id=context.install_attempt_id,
+            service_name=context.service_name,
+            raw=raw,
+            previous_event_raw_sha256=(
+                None
+                if context.previous_event is None
+                else context.previous_event.raw_sha256
+            ),
+        )
+
+    def run_events_1_to_2(
+        self, *, context: CeremonyStepContextV1
+    ) -> tuple[CeremonyEventEvidenceV1, CeremonyEventEvidenceV1]:
+        self._installer.stage_and_publish(bundle_raw=self._bundle_raw)
+        return (
+            self._event(
+                context, 1, self._installer.read_event_readback(event_sequence=1)
+            ),
+            self._event(
+                CeremonyStepContextV1(
+                    context.install_attempt_id,
+                    context.service_name,
+                    self._event(
+                        context,
+                        1,
+                        self._installer.read_event_readback(event_sequence=1),
+                    ),
+                ),
+                2,
+                self._installer.read_event_readback(event_sequence=2),
+            ),
+        )
+
+    def reserve_event_3_durable_create_only(
+        self, *, context: CeremonyStepContextV1
+    ) -> CeremonyReservationEvidenceV1:
+        self._installer.reserve_event3_and_apply_target()
+        event = self._event(
+            context, 3, self._installer.read_event_readback(event_sequence=3)
+        )
+        return CeremonyReservationEvidenceV1(
+            event=event,
+            reservation_id=event.raw_sha256,
+            durable_create_only=True,
+        )
+
+    def run_event_4(self, *, context: CeremonyStepContextV1) -> CeremonyEventEvidenceV1:
+        self._installer.query_service_runtime_readback()
+        return self._event(
+            context, 4, self._installer.read_event_readback(event_sequence=4)
+        )
+
+    def dispatch_restart_once_for_event_5(
+        self,
+        *,
+        context: CeremonyStepContextV1,
+        signed_restart_authorization: bytes,
+    ) -> CeremonyEventEvidenceV1:
+        raw = self._installer.dispatch_reserved_restart_once(
+            restart_authorization_raw=signed_restart_authorization
+        )
+        # The unsigned draft is handed to the existing offline signer outside
+        # this process.  A missing protected SCM audit source fails closed here.
+        self._observer.capture_scm_dispatch_evidence()
+        return self._event(context, 5, raw)
+
+    def await_event_6(
+        self, *, context: CeremonyStepContextV1
+    ) -> CeremonyEventEvidenceV1:
+        self._installer.query_service_runtime_readback()
+        draft = self._observer.capture_startup_receipt()
+        return self._event(
+            context,
+            6,
+            self._installer.append_observation_event(
+                event_sequence=6, observation_raw=draft
+            ),
+        )
+
+    def await_event_7(
+        self, *, context: CeremonyStepContextV1
+    ) -> CeremonyEventEvidenceV1:
+        self._installer.query_service_runtime_readback()
+        draft = self._observer.capture_attestation()
+        return self._event(
+            context,
+            7,
+            self._installer.append_observation_event(
+                event_sequence=7, observation_raw=draft
+            ),
+        )
+
+    def query_same_attempt_only(
+        self, *, context: CeremonyStepContextV1, cause: str
+    ) -> CeremonyQueryEvidenceV1:
+        del cause
+        frontier = 0
+        raw = b""
+        for sequence in range(7, 0, -1):
+            try:
+                raw = self._installer.read_event_readback(event_sequence=sequence)
+                frontier = sequence
+                break
+            except Exception:
+                continue
+        if frontier >= 3:
+            self._installer.query_unknown_restart_only()
+        if not raw:
+            raw = b"native-journal-empty"
+        return CeremonyQueryEvidenceV1(
+            context.install_attempt_id, context.service_name, raw, frontier
+        )
+
+
 class WindowsFenceCeremonyRunnerV1:
     """Advance 1→7 once, turning every post-event-3 uncertainty into query-only."""
 
@@ -183,6 +335,26 @@ class WindowsFenceCeremonyRunnerV1:
             context = self._next_context(context, event_1)
             self._require_event(event_2, sequence=2, context=context)
             context = self._next_context(context, event_2)
+        except Exception as exc:
+            raise WindowsFenceCeremonyError("CEREMONY_PRE_EVENT3_FAILED") from exc
+
+        # These signatures are intentionally not admitted before Event2: the
+        # publish receipt is observer evidence of that just-completed publish,
+        # and the restart authorization is only usable after that receipt.
+        try:
+            publish = self._verify_signed_publish_receipt(
+                artifacts,
+                preflight=admission["preflight"],
+                manifest=admission["manifest"],
+            )
+            self._verify_signed_restart_authorization(
+                artifacts,
+                preflight=admission["preflight"],
+                manifest=admission["manifest"],
+                publish=publish,
+            )
+        except WindowsFenceCeremonyError:
+            raise
         except Exception as exc:
             raise WindowsFenceCeremonyError("CEREMONY_PRE_EVENT3_FAILED") from exc
 
@@ -364,12 +536,7 @@ class WindowsFenceCeremonyRunnerV1:
     def _verify_live_artifacts(
         self, artifacts: Mapping[str, bytes]
     ) -> Mapping[str, Any]:
-        """Admit exactly the signed v1 inputs available before event 1.
-
-        Post-restart receipts and all event artifacts are intentionally absent:
-        they must be produced through the installer journal, not pre-supplied
-        to the runner.
-        """
+        """Admit only the signed preflight/manifest before Event1."""
         required = {
             "zero_preflight",
             "manifest",
@@ -395,35 +562,13 @@ class WindowsFenceCeremonyRunnerV1:
             manifest = verify_public_artifact_v1(
                 artifacts["manifest"], pin=pins.manifest
             ).value
-            publish = verify_public_artifact_v1(
-                artifacts["publish_receipt"], pin=pins.observer
-            ).value
-            restart = verify_public_artifact_v1(
-                artifacts["restart_authorization"], pin=pins.restart
-            ).value
             preflight_sha = hashlib.sha256(artifacts["zero_preflight"]).hexdigest()
-            manifest_sha = hashlib.sha256(artifacts["manifest"]).hexdigest()
-            publish_sha = hashlib.sha256(artifacts["publish_receipt"]).hexdigest()
             if (
                 manifest.get("schema_version")
                 != "windows_rpc_durable_fence_install_manifest_v1"
-                or publish.get("schema_version")
-                != "windows_rpc_durable_fence_publish_receipt_v1"
-                or restart.get("schema_version")
-                != "windows_rpc_durable_fence_restart_authorization_v1"
                 or manifest.get("preflight_receipt_raw_sha256") != preflight_sha
-                or publish.get("install_manifest_raw_sha256") != manifest_sha
-                or publish.get("preflight_receipt_raw_sha256") != preflight_sha
-                or restart.get("install_manifest_raw_sha256") != manifest_sha
-                or restart.get("preflight_receipt_raw_sha256") != preflight_sha
-                or restart.get("publish_receipt_raw_sha256") != publish_sha
                 or manifest.get("restart_authorized") is not False
                 or manifest.get("automatic_restart_allowed") is not False
-                or restart.get("restart_authorized") is not True
-                or restart.get("automatic_restart_allowed") is not False
-                or restart.get("maximum_restart_dispatches") != 1
-                or restart.get("dispatch_consumption_required") is not True
-                or not self._valid_restart_window(restart)
             ):
                 raise OfflineSigningError("SIGNING_CHAIN_RESTART_AUTHORIZATION_INVALID")
             install_attempt_id = preflight.get("install_attempt_id")
@@ -433,18 +578,97 @@ class WindowsFenceCeremonyRunnerV1:
                 or not install_attempt_id.startswith("windows-fence-install-")
                 or not isinstance(service_name, str)
                 or not service_name
-                or any(
-                    item.get("install_attempt_id") != install_attempt_id
-                    or item.get("service_name") != service_name
-                    for item in (manifest, publish, restart)
-                )
+                or manifest.get("install_attempt_id") != install_attempt_id
+                or manifest.get("service_name") != service_name
             ):
                 raise OfflineSigningError("SIGNING_CHAIN_IDENTITY_MISMATCH")
         except (KeyError, OfflineSigningError, ValueError) as exc:
             raise WindowsFenceCeremonyError(
                 "CEREMONY_LIVE_ARTIFACT_VERIFICATION_FAILED"
             ) from exc
-        return {"install_attempt_id": install_attempt_id, "service_name": service_name}
+        return {
+            "install_attempt_id": install_attempt_id,
+            "service_name": service_name,
+            "preflight": preflight,
+            "manifest": manifest,
+        }
+
+    def _verify_signed_publish_receipt(
+        self,
+        artifacts: Mapping[str, bytes],
+        *,
+        preflight: Mapping[str, Any],
+        manifest: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        try:
+            pins = canonical_public_keyring_v1(
+                self._public_keyring_raw, self._expected_keyring_sha256
+            )
+            publish = verify_public_artifact_v1(
+                artifacts["publish_receipt"], pin=pins.observer
+            ).value
+            if (
+                publish.get("schema_version")
+                != "windows_rpc_durable_fence_publish_receipt_v1"
+                or publish.get("install_manifest_raw_sha256")
+                != hashlib.sha256(artifacts["manifest"]).hexdigest()
+                or publish.get("preflight_receipt_raw_sha256")
+                != hashlib.sha256(artifacts["zero_preflight"]).hexdigest()
+                or publish.get("install_attempt_id")
+                != preflight.get("install_attempt_id")
+                or publish.get("service_name") != preflight.get("service_name")
+                or manifest.get("install_attempt_id")
+                != preflight.get("install_attempt_id")
+            ):
+                raise OfflineSigningError("SIGNING_CHAIN_PUBLISH_RECEIPT_INVALID")
+            return publish
+        except (KeyError, OfflineSigningError, ValueError) as exc:
+            raise WindowsFenceCeremonyError(
+                "CEREMONY_LIVE_ARTIFACT_VERIFICATION_FAILED"
+            ) from exc
+
+    def _verify_signed_restart_authorization(
+        self,
+        artifacts: Mapping[str, bytes],
+        *,
+        preflight: Mapping[str, Any],
+        manifest: Mapping[str, Any],
+        publish: Mapping[str, Any],
+    ) -> None:
+        try:
+            pins = canonical_public_keyring_v1(
+                self._public_keyring_raw, self._expected_keyring_sha256
+            )
+            restart = verify_public_artifact_v1(
+                artifacts["restart_authorization"], pin=pins.restart
+            ).value
+            if (
+                restart.get("schema_version")
+                != "windows_rpc_durable_fence_restart_authorization_v1"
+                or restart.get("install_manifest_raw_sha256")
+                != hashlib.sha256(artifacts["manifest"]).hexdigest()
+                or restart.get("preflight_receipt_raw_sha256")
+                != hashlib.sha256(artifacts["zero_preflight"]).hexdigest()
+                or restart.get("publish_receipt_raw_sha256")
+                != hashlib.sha256(artifacts["publish_receipt"]).hexdigest()
+                or restart.get("install_attempt_id")
+                != preflight.get("install_attempt_id")
+                or restart.get("service_name") != preflight.get("service_name")
+                or publish.get("install_attempt_id")
+                != preflight.get("install_attempt_id")
+                or manifest.get("install_attempt_id")
+                != preflight.get("install_attempt_id")
+                or restart.get("restart_authorized") is not True
+                or restart.get("automatic_restart_allowed") is not False
+                or restart.get("maximum_restart_dispatches") != 1
+                or restart.get("dispatch_consumption_required") is not True
+                or not self._valid_restart_window(restart)
+            ):
+                raise OfflineSigningError("SIGNING_CHAIN_RESTART_AUTHORIZATION_INVALID")
+        except (KeyError, OfflineSigningError, ValueError) as exc:
+            raise WindowsFenceCeremonyError(
+                "CEREMONY_LIVE_ARTIFACT_VERIFICATION_FAILED"
+            ) from exc
 
     def _valid_restart_window(self, restart: Mapping[str, Any]) -> bool:
         try:
@@ -509,6 +733,7 @@ if __name__ == "__main__":
 
 __all__ = [
     "CeremonyEventEvidenceV1",
+    "NativeWindowsFenceCeremonyActionsV1",
     "CeremonyQueryEvidenceV1",
     "CeremonyReservationEvidenceV1",
     "CeremonyResultV1",

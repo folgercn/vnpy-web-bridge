@@ -1,7 +1,8 @@
 """Native Windows implementation of the final fence installer host protocol.
 
-This module has no network, credential, order, or restart operation.  It only
-performs the manifest-bound file publish and SCM/pywin32 registry transition.
+This module has no network, credential, or order operation.  It performs only
+the manifest-bound file publish, SCM/pywin32 registry transition, and the one
+post-event-3 SCM restart/readback tied to the existing installer journal.
 Every unsupported Windows/pywin32 capability fails closed rather than falling
 back to a portable implementation.
 """
@@ -15,6 +16,7 @@ import subprocess
 import uuid
 import zipfile
 from collections.abc import Mapping
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -570,6 +572,156 @@ class NativeWindowsFenceInstallerHostV1(WindowsFenceInstallerHostV1):
             raise WindowsFinalInstallerError("INSTALL_EVENT_WRITE_FAILED") from exc
         return hashlib.sha256(raw).hexdigest()
 
+    def read_install_event_read_only(
+        self, *, install_attempt_id: str, event_sequence: int
+    ) -> bytes:
+        """Read one existing create-only journal event through native FS facts."""
+        self._require_windows()
+        if (
+            not isinstance(install_attempt_id, str)
+            or not install_attempt_id
+            or isinstance(event_sequence, bool)
+            or not isinstance(event_sequence, int)
+            or event_sequence not in range(1, 8)
+        ):
+            raise WindowsFinalInstallerError("INSTALL_EVENT_READ_INPUT_INVALID")
+        try:
+            item = WindowsFilesystemFactsAdapter().read_file(
+                self._journal_path(install_attempt_id) / f"{event_sequence:02d}.json"
+            )
+            value = json.loads(item.raw)
+        except Exception as exc:
+            raise WindowsFinalInstallerError("INSTALL_EVENT_READ_FAILED") from exc
+        if (
+            not isinstance(value, dict)
+            or canonical_json_bytes(value) != item.raw
+            or value.get("schema_version") != "windows_fence_installer_event_v1"
+            or value.get("install_attempt_id") != install_attempt_id
+            or value.get("event_sequence") != event_sequence
+            or not isinstance(value.get("state"), str)
+            or not isinstance(value.get("details_sha256"), str)
+            or len(value["details_sha256"]) != 64
+        ):
+            raise WindowsFinalInstallerError("INSTALL_EVENT_READ_MISMATCH")
+        return item.raw
+
+    def query_service_runtime_readback(self, *, service_name: str) -> Mapping[str, Any]:
+        """Read SCM status and process start identity without `sc.exe`."""
+        self._require_windows()
+        ws = self._win32()
+        manager = service = process = None
+        win32process: Any | None = None
+        try:
+            import win32process  # type: ignore[import-not-found]
+
+            manager = ws.OpenSCManager(None, None, ws.SC_MANAGER_CONNECT)
+            service = ws.OpenService(manager, service_name, ws.SERVICE_QUERY_STATUS)
+            status = ws.QueryServiceStatusEx(service)
+            pid = int(status.get("ProcessId", 0))
+            if pid <= 0:
+                raise WindowsFinalInstallerError("SCM_SERVICE_PROCESS_UNAVAILABLE")
+            process = win32process.OpenProcess(
+                win32process.PROCESS_QUERY_LIMITED_INFORMATION, False, pid
+            )
+            creation, _, _, _ = win32process.GetProcessTimes(process)
+            timestamp = (
+                creation.timestamp()
+                if hasattr(creation, "timestamp")
+                else int(creation) / 10_000_000 - 11_644_473_600
+            )
+            return {
+                "service_name": service_name,
+                "service_process_id": pid,
+                "service_process_started_at_utc": datetime.fromtimestamp(
+                    timestamp, timezone.utc
+                )
+                .isoformat()
+                .replace("+00:00", "Z"),
+                "service_state": int(status.get("CurrentState", 0)),
+                "query_only": True,
+            }
+        except WindowsFinalInstallerError:
+            raise
+        except Exception as exc:
+            raise WindowsFinalInstallerError("SCM_RUNTIME_READBACK_FAILED") from exc
+        finally:
+            if process is not None and win32process is not None:
+                win32process.CloseHandle(process)
+            if service is not None:
+                ws.CloseServiceHandle(service)
+            if manager is not None:
+                ws.CloseServiceHandle(manager)
+
+    def dispatch_reserved_restart_once(
+        self,
+        *,
+        install_attempt_id: str,
+        service_name: str,
+        restart_authorization_raw_sha256: str,
+    ) -> bytes:
+        """Append Event5 to the existing journal before the sole SCM dispatch."""
+        self._require_windows()
+        if (
+            not isinstance(restart_authorization_raw_sha256, str)
+            or len(restart_authorization_raw_sha256) != 64
+        ):
+            raise WindowsFinalInstallerError("SCM_RESTART_AUTHORIZATION_INVALID")
+        # Event 3 is the pre-existing durable reservation.  Reading it before
+        # Event 5 prevents a caller from using this concrete path early.
+        self.read_install_event_read_only(
+            install_attempt_id=install_attempt_id, event_sequence=3
+        )
+        event_5_path = self._journal_path(install_attempt_id) / "05.json"
+        try:
+            WindowsFilesystemFactsAdapter().read_file(event_5_path)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise WindowsFinalInstallerError("SCM_RESTART_EVENT_READ_FAILED") from exc
+        else:
+            # A timeout after this record is a permanent query-only boundary:
+            # create-only idempotence must never be interpreted as permission
+            # to call SCM twice.
+            raise WindowsFinalInstallerError("SCM_RESTART_ALREADY_DISPATCHED")
+        details = hashlib.sha256(
+            canonical_json_bytes(
+                {
+                    "install_attempt_id": install_attempt_id,
+                    "service_name": service_name,
+                    "restart_authorization_raw_sha256": restart_authorization_raw_sha256,
+                }
+            )
+        ).hexdigest()
+        self.append_install_event_create_only(
+            install_attempt_id=install_attempt_id,
+            event_sequence=5,
+            state="RESTART_DISPATCHED_FROZEN",
+            details_sha256=details,
+        )
+        ws = self._win32()
+        manager = service = None
+        try:
+            manager = ws.OpenSCManager(None, None, ws.SC_MANAGER_CONNECT)
+            service = ws.OpenService(
+                manager,
+                service_name,
+                ws.SERVICE_START | ws.SERVICE_STOP | ws.SERVICE_QUERY_STATUS,
+            )
+            status = ws.QueryServiceStatusEx(service)
+            if int(status.get("CurrentState", 0)) != ws.SERVICE_STOPPED:
+                ws.ControlService(service, ws.SERVICE_CONTROL_STOP)
+            ws.StartService(service, None)
+        except Exception as exc:
+            raise WindowsFinalInstallerError("SCM_RESTART_DISPATCH_UNKNOWN") from exc
+        finally:
+            if service is not None:
+                ws.CloseServiceHandle(service)
+            if manager is not None:
+                ws.CloseServiceHandle(manager)
+        return self.read_install_event_read_only(
+            install_attempt_id=install_attempt_id, event_sequence=5
+        )
+
     @staticmethod
     def _command_line(image: Mapping[str, Any]) -> str:
         if (
@@ -880,7 +1032,20 @@ class NativeWindowsFenceInstallerHostV1(WindowsFenceInstallerHostV1):
             or value.get("state") != "RESTART_DISPATCH_RESERVED_FROZEN"
         ):
             raise WindowsFinalInstallerError("SCM_RESTART_QUERY_EVIDENCE_MISMATCH")
-        return "NO_RESTART_DISPATCHED_FROZEN"
+        try:
+            WindowsFilesystemFactsAdapter().read_file(
+                self._journal_path(install_attempt_id) / "05.json"
+            )
+        except FileNotFoundError:
+            return "NO_RESTART_DISPATCHED_FROZEN"
+        except OSError as exc:
+            raise WindowsFinalInstallerError(
+                "SCM_RESTART_QUERY_EVIDENCE_MISMATCH"
+            ) from exc
+        self.read_install_event_read_only(
+            install_attempt_id=install_attempt_id, event_sequence=5
+        )
+        return "RESTART_DISPATCHED_OR_UNKNOWN_FROZEN"
 
 
 __all__ = ["NativeWindowsFenceInstallerHostV1"]

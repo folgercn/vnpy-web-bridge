@@ -538,6 +538,89 @@ class FinalWindowsFenceInstallerV1:
             install_attempt_id=self._manifest["install_attempt_id"]
         )
 
+    def read_event_readback(self, *, event_sequence: int) -> bytes:
+        """Read the existing native journal; no event may be caller supplied."""
+        reader = getattr(self._host, "read_install_event_read_only", None)
+        if not callable(reader):
+            raise WindowsFinalInstallerError("INSTALL_EVENT_READBACK_UNAVAILABLE")
+        try:
+            return reader(
+                install_attempt_id=self._manifest["install_attempt_id"],
+                event_sequence=event_sequence,
+            )
+        except WindowsFinalInstallerError:
+            raise
+        except Exception as exc:
+            raise WindowsFinalInstallerError("INSTALL_EVENT_READBACK_FAILED") from exc
+
+    def dispatch_reserved_restart_once(
+        self, *, restart_authorization_raw: bytes
+    ) -> bytes:
+        """The only Event5 mutation, after existing Event3/4 completion."""
+        if self._checkpoint is not InstallCheckpointV1.TARGET_READY:
+            raise WindowsFinalInstallerError("INSTALL_RESTART_DISPATCH_STATE_INVALID")
+        if (
+            type(restart_authorization_raw) is not bytes
+            or not restart_authorization_raw
+        ):
+            raise WindowsFinalInstallerError("INSTALL_RESTART_AUTHORIZATION_INVALID")
+        dispatch = getattr(self._host, "dispatch_reserved_restart_once", None)
+        if not callable(dispatch):
+            raise WindowsFinalInstallerError("INSTALL_RESTART_DISPATCH_UNAVAILABLE")
+        try:
+            return dispatch(
+                install_attempt_id=self._manifest["install_attempt_id"],
+                service_name=self._manifest["service_name"],
+                restart_authorization_raw_sha256=hashlib.sha256(
+                    restart_authorization_raw
+                ).hexdigest(),
+            )
+        except WindowsFinalInstallerError:
+            raise
+        except Exception as exc:
+            raise WindowsFinalInstallerError(
+                "INSTALL_RESTART_DISPATCH_UNKNOWN"
+            ) from exc
+
+    def query_service_runtime_readback(self) -> Mapping[str, Any]:
+        """Event6/7 read-only SCM/process source; no portable fallback exists."""
+        reader = getattr(self._host, "query_service_runtime_readback", None)
+        if not callable(reader):
+            raise WindowsFinalInstallerError("INSTALL_RUNTIME_READBACK_UNAVAILABLE")
+        try:
+            value = reader(service_name=self._manifest["service_name"])
+        except WindowsFinalInstallerError:
+            raise
+        except Exception as exc:
+            raise WindowsFinalInstallerError("INSTALL_RUNTIME_READBACK_FAILED") from exc
+        if (
+            not isinstance(value, Mapping)
+            or value.get("service_name") != self._manifest["service_name"]
+        ):
+            raise WindowsFinalInstallerError("INSTALL_RUNTIME_READBACK_INVALID")
+        return value
+
+    def append_observation_event(
+        self, *, event_sequence: int, observation_raw: bytes
+    ) -> bytes:
+        """Append Event6 or Event7 into the existing installer journal only."""
+        expected = {
+            6: ("START_OBSERVED_FROZEN", 5),
+            7: ("FOUNDATION_VERIFIED_FROZEN", 6),
+        }.get(event_sequence)
+        if self._checkpoint is not InstallCheckpointV1.TARGET_READY or expected is None:
+            raise WindowsFinalInstallerError("INSTALL_OBSERVATION_EVENT_STATE_INVALID")
+        if type(observation_raw) is not bytes or not observation_raw:
+            raise WindowsFinalInstallerError("INSTALL_OBSERVATION_EVENT_INVALID")
+        self.read_event_readback(event_sequence=expected[1])
+        self._host.append_install_event_create_only(
+            install_attempt_id=self._manifest["install_attempt_id"],
+            event_sequence=event_sequence,
+            state=expected[0],
+            details_sha256=hashlib.sha256(observation_raw).hexdigest(),
+        )
+        return self.read_event_readback(event_sequence=event_sequence)
+
     def result(self) -> InstallResultV1:
         if self._backup_id is None:
             raise WindowsFinalInstallerError("INSTALL_RESULT_UNAVAILABLE")
