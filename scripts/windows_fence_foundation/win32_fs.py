@@ -532,6 +532,32 @@ class WindowsFilesystemFactsAdapter:
             handle, path=path, raw=raw, protected_sddl=protected_sddl
         )
 
+    def read_file_relative_to_opened_parent(
+        self,
+        *,
+        parent: WindowsOpenedDirectoryAnchorV1,
+        name: str,
+        maximum_bytes: int = MAX_FOUNDATION_STATE_BYTES,
+    ) -> SecureFileRead:
+        """Read a leaf through the retained RootDirectory handle."""
+        handle = self._open_relative_to_opened_parent(
+            parent=parent, name=name, directory=False, read_data=True
+        )
+        try:
+            before = self._handle_info(handle)
+            size = (before.size_high << 32) | before.size_low
+            if size > maximum_bytes:
+                raise OSError("foundation state exceeds size bound")
+            raw = self._read_exact(handle, size)
+            after = self._handle_info(handle)
+            if self._identity(before) != self._identity(after):
+                raise OSError("foundation state changed during handle read")
+            return SecureFileRead(
+                raw=raw, facts=self._facts(handle, parent.path / name, info=after)
+            )
+        finally:
+            _kernel32.CloseHandle(handle)
+
     def _write_created_handle(
         self, handle: int, *, path: Path, raw: bytes, protected_sddl: str
     ) -> SecureFileRead:

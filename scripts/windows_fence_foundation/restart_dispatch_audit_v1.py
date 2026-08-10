@@ -1,8 +1,8 @@
 """Canonical restart-dispatch facts with a native create-only journal adapter.
 
 This module never opens a journal, starts a service, or stops a service. Its
-only persistence path is the already-protected native installer-host event
-seam.
+only persistence and recovery path is the already-protected native
+installer-host journal seam.
 """
 
 from __future__ import annotations
@@ -214,17 +214,50 @@ def persist_restart_dispatch_audit_v1(
         captured_at=captured_at,
     )
     try:
+        expected_details_sha256 = hashlib.sha256(raw).hexdigest()
+        persisted_details_sha256 = (
+            native_host.persist_restart_dispatch_audit_raw_create_only(
+                install_attempt_id=install_attempt_id,
+                raw=raw,
+            )
+        )
+        if persisted_details_sha256 != expected_details_sha256:
+            raise RestartDispatchAuditError("RESTART_AUDIT_RAW_HASH_MISMATCH")
         native_host.append_install_event_create_only(
             install_attempt_id=install_attempt_id,
             event_sequence=RESTART_DISPATCH_AUDIT_EVENT_SEQUENCE,
             state=RESTART_DISPATCH_AUDIT_STATE,
-            details_sha256=hashlib.sha256(raw).hexdigest(),
+            details_sha256=expected_details_sha256,
+        )
+        readback = native_host.read_restart_dispatch_audit_raw_verified(
+            install_attempt_id=install_attempt_id
         )
     except WindowsFinalInstallerError as exc:
         raise RestartDispatchAuditError(
             f"RESTART_AUDIT_NATIVE_PERSISTENCE_FAILED:{exc}"
         ) from exc
-    return raw
+    if readback != raw:
+        raise RestartDispatchAuditError("RESTART_AUDIT_RAW_READBACK_MISMATCH")
+    return readback
+
+
+def readback_restart_dispatch_audit_v1(
+    *, native_host: NativeWindowsFenceInstallerHostV1, install_attempt_id: str
+) -> bytes:
+    """Recover only an Event5-bound raw audit from the native journal."""
+
+    if type(native_host) is not NativeWindowsFenceInstallerHostV1:
+        raise RestartDispatchAuditError("RESTART_AUDIT_NATIVE_HOST_REQUIRED")
+    if not native_host.is_real_windows_host:
+        raise RestartDispatchAuditError("RESTART_AUDIT_NATIVE_WINDOWS_REQUIRED")
+    try:
+        return native_host.read_restart_dispatch_audit_raw_verified(
+            install_attempt_id=install_attempt_id
+        )
+    except WindowsFinalInstallerError as exc:
+        raise RestartDispatchAuditError(
+            f"RESTART_AUDIT_NATIVE_READBACK_FAILED:{exc}"
+        ) from exc
 
 
 __all__ = [
@@ -234,4 +267,5 @@ __all__ = [
     "RestartDispatchAuditPolicy",
     "build_restart_dispatch_audit_v1",
     "persist_restart_dispatch_audit_v1",
+    "readback_restart_dispatch_audit_v1",
 ]
