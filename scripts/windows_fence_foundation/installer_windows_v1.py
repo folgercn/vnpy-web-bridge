@@ -138,14 +138,6 @@ class WindowsFenceInstallerHostV1(Protocol):
         details_sha256: str,
     ) -> str: ...
 
-    def record_restart_dispatch_audit_create_only(
-        self,
-        *,
-        install_attempt_id: str,
-        service_control_operation_id: str,
-        restart_dispatch_nonce: str,
-    ) -> str: ...
-
     def apply_exact_scm_and_pywin32_registry_once(
         self,
         *,
