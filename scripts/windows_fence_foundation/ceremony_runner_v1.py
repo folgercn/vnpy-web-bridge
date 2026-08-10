@@ -303,7 +303,9 @@ class WindowsFenceCeremonyRunnerV1:
             raise WindowsFenceCeremonyError("CEREMONY_JOURNAL_ROOT_REQUIRED")
         try:
             facts = root.stat()
-            if not stat.S_ISDIR(facts.st_mode) or stat.S_IMODE(facts.st_mode) & 0o077:
+            if not stat.S_ISDIR(facts.st_mode) or (
+                os.name != "nt" and stat.S_IMODE(facts.st_mode) & 0o077
+            ):
                 raise WindowsFenceCeremonyError("CEREMONY_JOURNAL_ROOT_UNSAFE")
             if hasattr(os, "geteuid") and facts.st_uid != os.geteuid():
                 raise WindowsFenceCeremonyError("CEREMONY_JOURNAL_ROOT_UNSAFE")
