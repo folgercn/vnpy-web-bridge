@@ -46,6 +46,7 @@ _TYPED_RPC_NAMES = frozenset(
         CANCEL_METHOD,
         QUERY_METHOD,
         "get_execution_snapshot_v1",
+        "peek_current_facts_v1",
     }
 )
 

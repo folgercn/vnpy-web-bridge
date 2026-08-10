@@ -257,6 +257,38 @@ class WindowsRpcFencedAdmissionV1:
                 "receipt_intents": sorted(self._receipts),
             }
 
+    def peek_current_facts(self) -> dict[str, Any]:
+        """Return the current durable fence facts without allocating a generation.
+
+        This is intentionally distinct from ``allocate_snapshot_generation``:
+        a ceremony may inspect the current state, but cannot turn that read into
+        a durable transition or observation reservation.
+        """
+
+        with self._lock:
+            self._refresh_durable()
+            if self._durable_store is None:
+                raise WindowsRpcDurableFenceError(
+                    "current facts require the durable final store",
+                    code="WINDOWS_FINAL_STORE_MISSING",
+                )
+            durable = self._durable_store.snapshot()
+            return {
+                "account_scope": self.account_scope,
+                "environment": self.environment,
+                "durable_state_version": int(durable["state_version"]),
+                "durable_state_hash": str(durable["state_hash"]),
+                "snapshot_generation": int(durable["snapshot_generation"]),
+                "fence": {
+                    "active": self._active,
+                    "current_epoch": self._epoch,
+                    "current_fencing_token": self._fencing_token,
+                    "high_water_epoch": self._high_water_epoch,
+                    "high_water_fencing_token": self._high_water_fencing_token,
+                },
+                "receipt_intents": sorted(self._receipts),
+            }
+
     def allocate_snapshot_generation(self) -> tuple[int, str]:
         """Allocate a durable observation generation without changing trade facts."""
 

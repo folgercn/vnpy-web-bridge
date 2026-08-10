@@ -14,7 +14,8 @@ import os
 import subprocess
 import uuid
 import zipfile
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,7 @@ from .installer_windows_v1 import (
     WindowsPathReadbackV1,
     WindowsScmReadbackV1,
 )
+from .restart_dispatch_audit_v1 import build_restart_dispatch_audit_v1
 from .win32_fs import WindowsFilesystemFactsAdapter
 
 try:  # Windows-only registry API; import must remain safe for CI contract tests.
@@ -40,10 +42,17 @@ class NativeWindowsFenceInstallerHostV1(WindowsFenceInstallerHostV1):
     def is_real_windows_host(self) -> bool:
         return os.name == "nt"
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        caller_facts_reader: Callable[[], Mapping[str, Any]] | None = None,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
         self._journal_root: Path | None = None
         self._journal_owner_sha256: str | None = None
         self._journal_acl_sddl: str | None = None
+        self._caller_facts_reader = caller_facts_reader or self._native_caller_facts
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
 
     @staticmethod
     def _require_windows() -> None:
@@ -75,6 +84,36 @@ class NativeWindowsFenceInstallerHostV1(WindowsFenceInstallerHostV1):
         except Exception as exc:
             raise WindowsFinalInstallerError(
                 "WINDOWS_PYWIN32_SERVICE_API_REQUIRED"
+            ) from exc
+
+    @staticmethod
+    def _native_caller_facts() -> Mapping[str, Any]:
+        """Read caller identity from the current native Windows token/process."""
+
+        try:
+            import ctypes
+            from ctypes import byref, wintypes
+
+            import win32api  # type: ignore[import-not-found]
+            import win32con  # type: ignore[import-not-found]
+            import win32security  # type: ignore[import-not-found]
+
+            process = win32api.GetCurrentProcess()
+            token = win32security.OpenProcessToken(process, win32con.TOKEN_QUERY)
+            try:
+                sid = win32security.ConvertSidToStringSid(
+                    win32security.GetTokenInformation(token, win32security.TokenUser)[0]
+                )
+            finally:
+                token.Close()
+            pid = int(win32api.GetCurrentProcessId())
+            session_id = wintypes.DWORD()
+            if not ctypes.windll.kernel32.ProcessIdToSessionId(pid, byref(session_id)):
+                raise OSError("ProcessIdToSessionId failed")
+            return {"sid": sid, "pid": pid, "session_id": int(session_id.value)}
+        except Exception as exc:
+            raise WindowsFinalInstallerError(
+                "RESTART_AUDIT_CALLER_FACTS_MISSING"
             ) from exc
 
     @staticmethod
@@ -568,6 +607,79 @@ class NativeWindowsFenceInstallerHostV1(WindowsFenceInstallerHostV1):
                 raise WindowsFinalInstallerError("INSTALL_EVENT_CREATE_ONLY_CONFLICT")
         except OSError as exc:
             raise WindowsFinalInstallerError("INSTALL_EVENT_WRITE_FAILED") from exc
+        return hashlib.sha256(raw).hexdigest()
+
+    def record_restart_dispatch_audit_create_only(
+        self,
+        *,
+        install_attempt_id: str,
+        service_control_operation_id: str,
+        restart_dispatch_nonce: str,
+    ) -> str:
+        """Append non-executing restart evidence to the protected journal.
+
+        No SCM stop/start API is reachable from this method. Caller identity is
+        read from the current native process; a test seam may only supply
+        read-only caller facts.
+        """
+
+        self._require_windows()
+        try:
+            caller = self._caller_facts_reader()
+            captured_at = self._clock()
+            raw = build_restart_dispatch_audit_v1(
+                install_attempt_id=install_attempt_id,
+                service_control_operation_id=service_control_operation_id,
+                restart_dispatch_nonce=restart_dispatch_nonce,
+                caller=caller,
+                captured_at=captured_at,
+            )
+        except WindowsFinalInstallerError:
+            raise
+        except Exception as exc:
+            raise WindowsFinalInstallerError("RESTART_AUDIT_FACT_CAPTURE_FAILED") from exc
+        root = self._journal_path(install_attempt_id)
+        try:
+            facts = WindowsFilesystemFactsAdapter().inspect(root)
+        except OSError as exc:
+            raise WindowsFinalInstallerError("INSTALL_EVENT_ROOT_READ_FAILED") from exc
+        if (
+            not facts.directory
+            or facts.reparse_point
+            or not facts.parent_chain_reparse_free
+            or facts.hardlink_count != 1
+            or facts.alternate_data_streams
+            or not facts.dacl_protected
+            or facts.inherited_ace_count
+            or facts.unsafe_write_principals
+            or facts.owner_sid_sha256 != self._journal_owner_sha256
+            or self._journal_acl_sddl is None
+            or facts.acl_sddl_sha256
+            != hashlib.sha256(self._journal_acl_sddl.encode()).hexdigest()
+        ):
+            raise WindowsFinalInstallerError("INSTALL_EVENT_ROOT_SECURITY_MISMATCH")
+        audit_id = hashlib.sha256(
+            canonical_json_bytes(
+                {
+                    "operation": service_control_operation_id,
+                    "nonce": restart_dispatch_nonce,
+                }
+            )
+        ).hexdigest()
+        path = root / f"restart-dispatch-audit-{audit_id}.json"
+        try:
+            written = WindowsFilesystemFactsAdapter().write_file_create_only(
+                path, raw=raw, protected_sddl=self._journal_acl_sddl
+            )
+            if written.raw != raw:
+                raise WindowsFinalInstallerError(
+                    "RESTART_AUDIT_HANDLE_READBACK_MISMATCH"
+                )
+        except FileExistsError:
+            if WindowsFilesystemFactsAdapter().read_file(path).raw != raw:
+                raise WindowsFinalInstallerError("RESTART_AUDIT_CREATE_ONLY_CONFLICT")
+        except OSError as exc:
+            raise WindowsFinalInstallerError("RESTART_AUDIT_WRITE_FAILED") from exc
         return hashlib.sha256(raw).hexdigest()
 
     @staticmethod

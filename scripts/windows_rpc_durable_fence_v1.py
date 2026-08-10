@@ -458,6 +458,14 @@ class _WindowsExecutionFactsV1:
         "pnl",
         "gateway_name",
     )
+    _ACCOUNT_FIELDS = (
+        "accountid",
+        "vt_accountid",
+        "balance",
+        "frozen",
+        "available",
+        "gateway_name",
+    )
 
     def __init__(
         self,
@@ -469,6 +477,7 @@ class _WindowsExecutionFactsV1:
         self._lock = RLock()
         self._admission: WindowsRpcFencedAdmissionV1 | None = None
         self._intent_orders: dict[str, str] = {}
+        self._pending_send_outcomes: set[str] = set()
 
     def bind_admission(self, admission: WindowsRpcFencedAdmissionV1) -> None:
         if self._admission is not None:
@@ -486,6 +495,26 @@ class _WindowsExecutionFactsV1:
         if isinstance(intent_id, str) and isinstance(order_id, str) and order_id:
             with self._lock:
                 self._intent_orders[intent_id] = order_id
+
+    def begin_pending_send(self, context: Mapping[str, Any]) -> None:
+        intent_id = context.get("intent_id")
+        if not isinstance(intent_id, str) or not intent_id:
+            raise WindowsRpcDurableFenceError(
+                "pending send intent identity is invalid",
+                code="WINDOWS_EXECUTION_FACT_INVALID",
+            )
+        with self._lock:
+            self._pending_send_outcomes.add(intent_id)
+
+    def settle_pending_send(self, context: Mapping[str, Any]) -> None:
+        intent_id = context.get("intent_id")
+        if not isinstance(intent_id, str) or not intent_id:
+            raise WindowsRpcDurableFenceError(
+                "pending send intent identity is invalid",
+                code="WINDOWS_EXECUTION_FACT_INVALID",
+            )
+        with self._lock:
+            self._pending_send_outcomes.discard(intent_id)
 
     def _facts(self, method: str) -> list[Any]:
         reader = getattr(self.runtime.fact_source, method, None)
@@ -527,19 +556,75 @@ class _WindowsExecutionFactsV1:
         ]
         return {self._key(row, "vt_positionid", "symbol"): row for row in rows}
 
-    def get_execution_snapshot_v1(self, request: Mapping[str, Any]) -> dict[str, Any]:
+    def _accounts(self) -> dict[str, Any]:
+        rows = [
+            _execution_fact_row(item, self._ACCOUNT_FIELDS)
+            for item in self._facts("get_all_accounts")
+        ]
+        return {self._key(row, "vt_accountid", "accountid"): row for row in rows}
+
+    def _scope_request(self, request: Mapping[str, Any]) -> dict[str, str]:
         expected = {
             "account_scope": self.config.account_scope,
             "environment": self.config.environment,
         }
-        if not isinstance(request, Mapping) or dict(request) != {
-            "environment": expected["environment"],
-            "account_scope": expected["account_scope"],
-        }:
+        if not isinstance(request, Mapping) or dict(request) != expected:
             raise WindowsRpcDurableFenceDenied(
                 "execution snapshot scope is foreign",
                 code="WINDOWS_FENCE_SCOPE_INVALID",
             )
+        return expected
+
+    def peek_current_facts(self, request: Mapping[str, Any]) -> bytes:
+        """Return canonical current facts without a disk write or generation bump."""
+
+        expected = self._scope_request(request)
+        admission = self._admission
+        if admission is None:
+            raise WindowsRpcDurableFenceError(
+                "execution facts admission is unavailable",
+                code="WINDOWS_FINAL_STORE_MISSING",
+            )
+        accounts = self._accounts()
+        orders = self._orders()
+        positions = self._positions()
+        active_orders = {
+            self._key(row, "vt_orderid", "orderid"): row
+            for row in (
+                _execution_fact_row(item, self._ORDER_FIELDS)
+                for item in self._facts("get_all_active_orders")
+            )
+        }
+        with self._lock:
+            pending_send_outcomes = sorted(self._pending_send_outcomes)
+        payload = {
+            "schema_version": "windows_execution_current_facts_v1",
+            "account": accounts,
+            "positions": positions,
+            "active_orders": active_orders,
+            "pending_send_outcomes": pending_send_outcomes,
+            "gateway": {
+                "gateway_name": self.config.gateway_name,
+                "account_scope": expected["account_scope"],
+                "environment": expected["environment"],
+                "connected": bool(accounts),
+            },
+            "execution": {"orders": orders},
+            "admission": admission.peek_current_facts(),
+        }
+        return canonical_json_bytes(payload)
+
+    def peek_current_facts_v1(self, request: Mapping[str, Any]) -> dict[str, Any]:
+        """Read-only RPC projection for ceremony consumers.
+
+        The bytes are canonicalized before decoding so the RPC mapping and the
+        raw ceremony input are exactly the same facts.
+        """
+
+        return json.loads(self.peek_current_facts(request))
+
+    def get_execution_snapshot_v1(self, request: Mapping[str, Any]) -> dict[str, Any]:
+        expected = self._scope_request(request)
         orders = self._orders()
         positions = self._positions()
         active_orders = self._facts("get_all_active_orders")
@@ -862,25 +947,29 @@ def _attach_fixed_typed_fenced_methods(
         )
 
     def send_bound(request: Mapping[str, Any], context: Mapping[str, Any]) -> Any:
-        native_request = request_factory.order_request(request, context)
-        vt_orderid = send_handler(native_request, runtime_config.gateway_name)
-        if not isinstance(vt_orderid, str) or not vt_orderid:
-            return {"state": "UNKNOWN_OUTCOME"}
-        if (
-            "." not in vt_orderid
-            or vt_orderid.split(".", 1)[0] != runtime_config.gateway_name
-        ):
-            raise WindowsRpcDurableFenceError(
-                "native send returned a foreign order identity",
-                code="WINDOWS_FENCE_RESPONSE_INVALID",
-            )
-        result = {
-            "accepted": True,
-            "state": "SUBMITTED",
-            "broker_order_id": vt_orderid,
-        }
-        facts.record_outcome(context, result)
-        return result
+        facts.begin_pending_send(context)
+        try:
+            native_request = request_factory.order_request(request, context)
+            vt_orderid = send_handler(native_request, runtime_config.gateway_name)
+            if not isinstance(vt_orderid, str) or not vt_orderid:
+                return {"state": "UNKNOWN_OUTCOME"}
+            if (
+                "." not in vt_orderid
+                or vt_orderid.split(".", 1)[0] != runtime_config.gateway_name
+            ):
+                raise WindowsRpcDurableFenceError(
+                    "native send returned a foreign order identity",
+                    code="WINDOWS_FENCE_RESPONSE_INVALID",
+                )
+            result = {
+                "accepted": True,
+                "state": "SUBMITTED",
+                "broker_order_id": vt_orderid,
+            }
+            facts.record_outcome(context, result)
+            return result
+        finally:
+            facts.settle_pending_send(context)
 
     def cancel_bound(request: Mapping[str, Any], context: Mapping[str, Any]) -> Any:
         cancel_facts = facts.resolve_cancel(request)
@@ -918,6 +1007,7 @@ def _attach_fixed_typed_fenced_methods(
     facts.bind_admission(admission)
     attach_windows_rpc_fenced_methods_v1(server, admission)
     server.register(facts.get_execution_snapshot_v1)
+    server.register(facts.peek_current_facts_v1)
     return admission
 
 
