@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
+import stat
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -59,6 +61,7 @@ class CeremonyQueryEvidenceV1:
     install_attempt_id: str
     service_name: str
     raw: bytes
+    frontier_sequence: int
 
 
 @dataclass(frozen=True)
@@ -142,10 +145,12 @@ class WindowsFenceCeremonyRunnerV1:
         public_keyring_raw: bytes,
         expected_public_keyring_sha256: str,
         now: datetime,
+        journal_root: Path | None = None,
     ) -> None:
         self._public_keyring_raw = public_keyring_raw
         self._expected_keyring_sha256 = expected_public_keyring_sha256
         self._now = now
+        self._journal_root = journal_root
 
     def verify_dry_run(self, artifacts: Mapping[str, bytes]) -> CeremonyResultV1:
         closure = self._verify_closure(artifacts)
@@ -177,11 +182,18 @@ class WindowsFenceCeremonyRunnerV1:
         if actions is None:
             raise WindowsFenceCeremonyError("CEREMONY_LIVE_ACTIONS_REQUIRED")
         authorization = self._require_immediate_live_authorization(live_authorization)
+        self._require_journal_root()
         context = CeremonyStepContextV1(
             install_attempt_id=authorization.install_attempt_id,
             service_name=authorization.service_name,
             previous_event=None,
         )
+        if self._marker_exists(authorization.install_attempt_id):
+            self._query_frontier(actions, context=context)
+            raise WindowsFenceCeremonyError("CEREMONY_POST_EVENT3_QUERY_ONLY")
+        frontier = self._query_frontier(actions, context=context)
+        if frontier.frontier_sequence >= 3:
+            raise WindowsFenceCeremonyError("CEREMONY_POST_EVENT3_QUERY_ONLY")
         try:
             event_1, event_2 = actions.run_events_1_to_2(context=context)
             self._require_event(event_1, sequence=1, context=context)
@@ -194,6 +206,11 @@ class WindowsFenceCeremonyRunnerV1:
         # The event-3 call itself is an uncertainty boundary: a timeout can
         # mean its durable create-only reservation committed remotely.
         try:
+            self._create_only_marker(
+                authorization.install_attempt_id,
+                "event-03-intent.json",
+                {"event_sequence": 3, "intent": "durable_create_only"},
+            )
             reservation = actions.reserve_event_3_durable_create_only(context=context)
             if (
                 type(reservation) is not CeremonyReservationEvidenceV1
@@ -206,6 +223,11 @@ class WindowsFenceCeremonyRunnerV1:
                 )
             event_3 = reservation.event
             self._require_event(event_3, sequence=3, context=context)
+            self._create_only_marker(
+                authorization.install_attempt_id,
+                "event-03-reserved.json",
+                {"event_sequence": 3, "event_raw_sha256": event_3.raw_sha256},
+            )
             context = self._next_context(context, event_3)
         except Exception as exc:
             self._query_only_after_event3(
@@ -226,8 +248,8 @@ class WindowsFenceCeremonyRunnerV1:
             context=context,
             sequence=5,
             cause="event_5_restart_unknown",
-            action=lambda: actions.dispatch_restart_once_for_event_5(
-                context=context, authorization=authorization
+            action=lambda: self._reserve_and_dispatch_event_5(
+                actions, context=context, authorization=authorization
             ),
         )
         context = self._next_context(context, event_5)
@@ -253,6 +275,97 @@ class WindowsFenceCeremonyRunnerV1:
             completed_events=(1, 2, 3, 4, 5, 6, 7),
             restart_dispatches=1,
         )
+
+    def _reserve_and_dispatch_event_5(
+        self,
+        actions: WindowsFenceCeremonyActionsV1,
+        *,
+        context: CeremonyStepContextV1,
+        authorization: ImmediateLiveAuthorizationV1,
+    ) -> CeremonyEventEvidenceV1:
+        self._create_only_marker(
+            context.install_attempt_id,
+            "restart-dispatch-reserved.json",
+            {"event_sequence": 5, "authorization_id": authorization.authorization_id},
+        )
+        return actions.dispatch_restart_once_for_event_5(
+            context=context, authorization=authorization
+        )
+
+    def _require_journal_root(self) -> None:
+        root = self._journal_root
+        if (
+            root is None
+            or not root.is_absolute()
+            or root.is_symlink()
+            or not root.is_dir()
+        ):
+            raise WindowsFenceCeremonyError("CEREMONY_JOURNAL_ROOT_REQUIRED")
+        try:
+            facts = root.stat()
+            if not stat.S_ISDIR(facts.st_mode) or stat.S_IMODE(facts.st_mode) & 0o077:
+                raise WindowsFenceCeremonyError("CEREMONY_JOURNAL_ROOT_UNSAFE")
+            if hasattr(os, "geteuid") and facts.st_uid != os.geteuid():
+                raise WindowsFenceCeremonyError("CEREMONY_JOURNAL_ROOT_UNSAFE")
+        except OSError as exc:
+            raise WindowsFenceCeremonyError("CEREMONY_JOURNAL_ROOT_UNSAFE") from exc
+
+    def _marker_exists(self, attempt_id: str) -> bool:
+        assert self._journal_root is not None
+        attempt_root = self._journal_root / attempt_id
+        for name in (
+            "event-03-intent.json",
+            "event-03-reserved.json",
+            "restart-dispatch-reserved.json",
+        ):
+            marker = attempt_root / name
+            if marker.is_symlink():
+                raise WindowsFenceCeremonyError("CEREMONY_JOURNAL_PATH_UNSAFE")
+            if marker.exists():
+                try:
+                    if not marker.is_file() or marker.stat().st_nlink != 1:
+                        raise WindowsFenceCeremonyError("CEREMONY_JOURNAL_PATH_UNSAFE")
+                except OSError as exc:
+                    raise WindowsFenceCeremonyError(
+                        "CEREMONY_JOURNAL_PATH_UNSAFE"
+                    ) from exc
+                return True
+        return False
+
+    def _create_only_marker(
+        self, attempt_id: str, name: str, payload: Mapping[str, object]
+    ) -> None:
+        assert self._journal_root is not None
+        path = self._journal_root / attempt_id / name
+        try:
+            path.parent.mkdir(mode=0o700)
+        except FileExistsError:
+            pass
+        if path.parent.is_symlink():
+            raise WindowsFenceCeremonyError("CEREMONY_JOURNAL_PATH_UNSAFE")
+        raw = canonical_json_bytes(
+            {
+                "schema_version": "windows_rpc_durable_fence_ceremony_marker_v1",
+                "install_attempt_id": attempt_id,
+                **dict(payload),
+            }
+        )
+        try:
+            descriptor = os.open(
+                path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+            )
+            try:
+                if os.write(descriptor, raw) != len(raw):
+                    raise OSError("short marker write")
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        except FileExistsError as exc:
+            raise WindowsFenceCeremonyError("CEREMONY_MARKER_ALREADY_EXISTS") from exc
+        except OSError as exc:
+            raise WindowsFenceCeremonyError("CEREMONY_MARKER_WRITE_FAILED") from exc
 
     def _require_immediate_live_authorization(
         self, value: ImmediateLiveAuthorizationV1 | None
@@ -335,6 +448,31 @@ class WindowsFenceCeremonyRunnerV1:
             raise WindowsFenceCeremonyError("CEREMONY_POST_EVENT3_QUERY_ONLY") from exc
 
     @staticmethod
+    def _query_frontier(
+        actions: WindowsFenceCeremonyActionsV1,
+        *,
+        context: CeremonyStepContextV1,
+    ) -> CeremonyQueryEvidenceV1:
+        try:
+            query = actions.query_same_attempt_only(
+                context=context, cause="attempt_frontier"
+            )
+            if (
+                type(query) is not CeremonyQueryEvidenceV1
+                or query.install_attempt_id != context.install_attempt_id
+                or query.service_name != context.service_name
+                or type(query.raw) is not bytes
+                or not query.raw
+                or query.frontier_sequence not in range(0, 8)
+            ):
+                raise WindowsFenceCeremonyError("CEREMONY_QUERY_EVIDENCE_INVALID")
+            return query
+        except WindowsFenceCeremonyError:
+            raise
+        except Exception as exc:
+            raise WindowsFenceCeremonyError("CEREMONY_ATTEMPT_QUERY_FAILED") from exc
+
+    @staticmethod
     def _query_only_after_event3(
         actions: WindowsFenceCeremonyActionsV1,
         *,
@@ -349,6 +487,8 @@ class WindowsFenceCeremonyRunnerV1:
                 or query.service_name != context.service_name
                 or type(query.raw) is not bytes
                 or not query.raw
+                or query.frontier_sequence < 3
+                or query.frontier_sequence > 7
             ):
                 raise WindowsFenceCeremonyError("CEREMONY_QUERY_EVIDENCE_INVALID")
         except Exception:  # noqa: BLE001 - no post-event-3 recovery may mutate.
