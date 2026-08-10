@@ -11,7 +11,7 @@ import hashlib
 import re
 from collections.abc import Mapping
 from datetime import datetime, timezone
-from typing import Any, Literal, Protocol
+from typing import Any, Literal
 
 from .contracts import canonical_json_bytes
 from .installer_windows_v1 import WindowsFinalInstallerError
@@ -24,20 +24,6 @@ _SID_RE = re.compile(r"^S-\d+(?:-\d+)+$")
 RestartDispatchAuditPolicy = Literal["OBSERVED_SCM_FACTS", "DRY_RUN_NON_EXECUTING"]
 RESTART_DISPATCH_AUDIT_EVENT_SEQUENCE = 5
 RESTART_DISPATCH_AUDIT_STATE = "RESTART_DISPATCHED_FROZEN"
-
-
-class NativeInstallEventCreateOnlySeam(Protocol):
-    """The exact protected native installer-event persistence seam."""
-
-    def append_install_event_create_only(
-        self,
-        *,
-        install_attempt_id: str,
-        event_sequence: int,
-        state: str,
-        details_sha256: str,
-        reject_existing: bool = False,
-    ) -> str: ...
 
 
 class RestartDispatchAuditError(ValueError):
@@ -201,23 +187,6 @@ def build_restart_dispatch_audit_v1(
     return canonical_json_bytes(payload)
 
 
-def _append_restart_dispatch_audit_to_native_seam_v1(
-    *,
-    native_seam: NativeInstallEventCreateOnlySeam,
-    install_attempt_id: str,
-    raw: bytes,
-) -> None:
-    """Append a canonical audit only through the installer create-only event seam."""
-
-    native_seam.append_install_event_create_only(
-        install_attempt_id=install_attempt_id,
-        event_sequence=RESTART_DISPATCH_AUDIT_EVENT_SEQUENCE,
-        state=RESTART_DISPATCH_AUDIT_STATE,
-        details_sha256=hashlib.sha256(raw).hexdigest(),
-        reject_existing=True,
-    )
-
-
 def persist_restart_dispatch_audit_v1(
     *,
     native_host: NativeWindowsFenceInstallerHostV1,
@@ -245,10 +214,11 @@ def persist_restart_dispatch_audit_v1(
         captured_at=captured_at,
     )
     try:
-        _append_restart_dispatch_audit_to_native_seam_v1(
-            native_seam=native_host,
+        native_host.append_install_event_create_only(
             install_attempt_id=install_attempt_id,
-            raw=raw,
+            event_sequence=RESTART_DISPATCH_AUDIT_EVENT_SEQUENCE,
+            state=RESTART_DISPATCH_AUDIT_STATE,
+            details_sha256=hashlib.sha256(raw).hexdigest(),
         )
     except WindowsFinalInstallerError as exc:
         raise RestartDispatchAuditError(
@@ -260,7 +230,6 @@ def persist_restart_dispatch_audit_v1(
 __all__ = [
     "RESTART_DISPATCH_AUDIT_EVENT_SEQUENCE",
     "RESTART_DISPATCH_AUDIT_STATE",
-    "NativeInstallEventCreateOnlySeam",
     "RestartDispatchAuditError",
     "RestartDispatchAuditPolicy",
     "build_restart_dispatch_audit_v1",

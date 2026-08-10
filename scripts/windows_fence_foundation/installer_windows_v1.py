@@ -136,7 +136,6 @@ class WindowsFenceInstallerHostV1(Protocol):
         event_sequence: int,
         state: str,
         details_sha256: str,
-        reject_existing: bool = False,
     ) -> str: ...
 
     def apply_exact_scm_and_pywin32_registry_once(

@@ -518,10 +518,7 @@ class NativeWindowsFenceInstallerHostV1(WindowsFenceInstallerHostV1):
         event_sequence: int,
         state: str,
         details_sha256: str,
-        reject_existing: bool = False,
     ) -> str:
-        if not isinstance(reject_existing, bool):
-            raise WindowsFinalInstallerError("INSTALL_EVENT_REJECT_EXISTING_INVALID")
         root = self._journal_path(install_attempt_id)
         try:
             root.mkdir()
@@ -567,10 +564,7 @@ class NativeWindowsFenceInstallerHostV1(WindowsFenceInstallerHostV1):
                     "INSTALL_EVENT_HANDLE_READBACK_MISMATCH"
                 )
         except FileExistsError:
-            if (
-                reject_existing
-                or WindowsFilesystemFactsAdapter().read_file(path).raw != raw
-            ):
+            if WindowsFilesystemFactsAdapter().read_file(path).raw != raw:
                 raise WindowsFinalInstallerError("INSTALL_EVENT_CREATE_ONLY_CONFLICT")
         except OSError as exc:
             raise WindowsFinalInstallerError("INSTALL_EVENT_WRITE_FAILED") from exc
