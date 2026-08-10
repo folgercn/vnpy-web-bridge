@@ -3,11 +3,16 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from scripts.windows_fence_foundation.native_windows_installer_host_v1 import (
     NativeWindowsFenceInstallerHostV1,
+)
+from scripts.windows_fence_foundation.installer_windows_v1 import (
+    WindowsFinalInstallerError,
 )
 from scripts.windows_fence_foundation.restart_dispatch_audit_v1 import (
     RESTART_DISPATCH_AUDIT_EVENT_SEQUENCE,
@@ -15,6 +20,7 @@ from scripts.windows_fence_foundation.restart_dispatch_audit_v1 import (
     RestartDispatchAuditError,
     build_restart_dispatch_audit_v1,
     persist_restart_dispatch_audit_v1,
+    readback_restart_dispatch_audit_v1,
 )
 
 CAPTURED_AT = datetime(2030, 1, 1, 12, tzinfo=timezone.utc)
@@ -126,12 +132,18 @@ def test_restart_dispatch_audit_dry_run_is_explicit_and_does_not_fake_scm_result
     assert "scm_calls" not in value
 
 
-def test_restart_dispatch_audit_calls_only_existing_native_seam(
+def test_restart_dispatch_audit_persists_raw_before_event5_and_recovers_exact_bytes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     host = NativeWindowsFenceInstallerHostV1()
     install_attempt_id = "windows-fence-install-0001"
-    calls: list[dict[str, object]] = []
+    calls: list[tuple[str, object]] = []
+    expected_raw = build_restart_dispatch_audit_v1(
+        install_attempt_id=install_attempt_id,
+        policy="OBSERVED_SCM_FACTS",
+        observed_scm_facts=_observed_facts(),
+        captured_at=CAPTURED_AT,
+    )
 
     monkeypatch.setattr(
         NativeWindowsFenceInstallerHostV1,
@@ -148,19 +160,47 @@ def test_restart_dispatch_audit_calls_only_existing_native_seam(
         details_sha256: str,
     ) -> str:
         calls.append(
-            {
-                "install_attempt_id": install_attempt_id,
-                "event_sequence": event_sequence,
-                "state": state,
-                "details_sha256": details_sha256,
-            }
+            (
+                "event5",
+                {
+                    "install_attempt_id": install_attempt_id,
+                    "event_sequence": event_sequence,
+                    "state": state,
+                    "details_sha256": details_sha256,
+                },
+            )
         )
         return "event-created"
+
+    def persist_restart_dispatch_audit_raw_create_only(
+        _host: NativeWindowsFenceInstallerHostV1,
+        *,
+        install_attempt_id: str,
+        raw: bytes,
+    ) -> str:
+        calls.append(("raw", (install_attempt_id, raw)))
+        return hashlib.sha256(raw).hexdigest()
+
+    def read_restart_dispatch_audit_raw_verified(
+        _host: NativeWindowsFenceInstallerHostV1, *, install_attempt_id: str
+    ) -> bytes:
+        calls.append(("readback", install_attempt_id))
+        return expected_raw
 
     monkeypatch.setattr(
         NativeWindowsFenceInstallerHostV1,
         "append_install_event_create_only",
         append_install_event_create_only,
+    )
+    monkeypatch.setattr(
+        NativeWindowsFenceInstallerHostV1,
+        "persist_restart_dispatch_audit_raw_create_only",
+        persist_restart_dispatch_audit_raw_create_only,
+    )
+    monkeypatch.setattr(
+        NativeWindowsFenceInstallerHostV1,
+        "read_restart_dispatch_audit_raw_verified",
+        read_restart_dispatch_audit_raw_verified,
     )
 
     raw = persist_restart_dispatch_audit_v1(
@@ -172,13 +212,153 @@ def test_restart_dispatch_audit_calls_only_existing_native_seam(
     )
 
     assert calls == [
+        ("raw", (install_attempt_id, raw)),
+        (
+            "event5",
+            {
+                "install_attempt_id": install_attempt_id,
+                "event_sequence": RESTART_DISPATCH_AUDIT_EVENT_SEQUENCE,
+                "state": RESTART_DISPATCH_AUDIT_STATE,
+                "details_sha256": hashlib.sha256(raw).hexdigest(),
+            },
+        ),
+        ("readback", install_attempt_id),
+    ]
+
+
+def test_restart_dispatch_audit_raw_native_journal_is_fixed_and_fail_closed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    host = NativeWindowsFenceInstallerHostV1()
+    host._journal_acl_sddl = "D:PA"
+    install_attempt_id = "windows-fence-install-0001"
+    raw = build_restart_dispatch_audit_v1(
+        install_attempt_id=install_attempt_id,
+        policy="OBSERVED_SCM_FACTS",
+        observed_scm_facts=_observed_facts(),
+        captured_at=CAPTURED_AT,
+    )
+    journal_root = tmp_path / "installer-journal-v1"
+    host._journal_root = journal_root
+    writes: list[Path] = []
+    contents: dict[Path, bytes] = {}
+
+    class FakeFilesystem:
+        def write_file_create_only(
+            self, path: Path, *, raw: bytes, protected_sddl: str
+        ) -> SimpleNamespace:
+            assert protected_sddl == "D:PA"
+            writes.append(path)
+            if path in contents:
+                raise FileExistsError(path)
+            contents[path] = raw
+            return SimpleNamespace(raw=raw)
+
+        def read_file(self, path: Path) -> SimpleNamespace:
+            return SimpleNamespace(raw=contents[path])
+
+    monkeypatch.setattr(host, "_require_windows", lambda: None)
+    monkeypatch.setattr(
+        host,
+        "_secure_install_event_root",
+        lambda *, install_attempt_id, create: journal_root / install_attempt_id,
+    )
+    monkeypatch.setattr(
+        "scripts.windows_fence_foundation.native_windows_installer_host_v1.WindowsFilesystemFactsAdapter",
+        FakeFilesystem,
+    )
+
+    assert (
+        host.persist_restart_dispatch_audit_raw_create_only(
+            install_attempt_id=install_attempt_id, raw=raw
+        )
+        == hashlib.sha256(raw).hexdigest()
+    )
+    raw_path = journal_root / install_attempt_id / "restart-dispatch-audit.raw"
+    assert writes == [raw_path]
+
+    with pytest.raises(WindowsFinalInstallerError, match="CREATE_ONLY_CONFLICT"):
+        host.persist_restart_dispatch_audit_raw_create_only(
+            install_attempt_id=install_attempt_id, raw=raw
+        )
+    with pytest.raises(WindowsFinalInstallerError, match="INSTALL_ATTEMPT_ID_INVALID"):
+        host.persist_restart_dispatch_audit_raw_create_only(
+            install_attempt_id="../foreign-attempt", raw=raw
+        )
+    with pytest.raises(
+        WindowsFinalInstallerError, match="RAW_INSTALL_ATTEMPT_MISMATCH"
+    ):
+        host.persist_restart_dispatch_audit_raw_create_only(
+            install_attempt_id="windows-fence-install-0002", raw=raw
+        )
+    assert writes == [raw_path, raw_path]
+    assert all(path == raw_path for path in writes)
+
+    event_path = journal_root / install_attempt_id / "05.json"
+    contents[event_path] = json.dumps(
         {
+            "schema_version": "windows_fence_installer_event_v1",
             "install_attempt_id": install_attempt_id,
-            "event_sequence": RESTART_DISPATCH_AUDIT_EVENT_SEQUENCE,
-            "state": RESTART_DISPATCH_AUDIT_STATE,
+            "event_sequence": 5,
+            "state": "RESTART_DISPATCHED_FROZEN",
             "details_sha256": hashlib.sha256(raw).hexdigest(),
         }
-    ]
+    ).encode()
+    assert (
+        host.read_restart_dispatch_audit_raw_verified(
+            install_attempt_id=install_attempt_id
+        )
+        == raw
+    )
+    assert writes == [raw_path, raw_path]
+
+    contents[event_path] = contents[event_path].replace(b"a", b"b", 1)
+    with pytest.raises(WindowsFinalInstallerError, match="EVENT5_HASH_MISMATCH"):
+        host.read_restart_dispatch_audit_raw_verified(
+            install_attempt_id=install_attempt_id
+        )
+
+
+def test_restart_dispatch_audit_duplicate_raw_conflict_stops_before_event5(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    host = NativeWindowsFenceInstallerHostV1()
+    monkeypatch.setattr(
+        NativeWindowsFenceInstallerHostV1,
+        "is_real_windows_host",
+        property(lambda _host: True),
+    )
+    monkeypatch.setattr(
+        NativeWindowsFenceInstallerHostV1,
+        "persist_restart_dispatch_audit_raw_create_only",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            WindowsFinalInstallerError(
+                "RESTART_DISPATCH_AUDIT_RAW_CREATE_ONLY_CONFLICT"
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        NativeWindowsFenceInstallerHostV1,
+        "append_install_event_create_only",
+        lambda *_args, **_kwargs: pytest.fail("Event5 must not follow raw conflict"),
+    )
+
+    with pytest.raises(RestartDispatchAuditError, match="RAW_CREATE_ONLY_CONFLICT"):
+        persist_restart_dispatch_audit_v1(
+            native_host=host,
+            install_attempt_id="windows-fence-install-0001",
+            policy="OBSERVED_SCM_FACTS",
+            observed_scm_facts=_observed_facts(),
+            captured_at=CAPTURED_AT,
+        )
+
+
+def test_restart_dispatch_audit_readback_requires_native_windows_host() -> None:
+    with pytest.raises(RestartDispatchAuditError, match="NATIVE_WINDOWS_REQUIRED"):
+        readback_restart_dispatch_audit_v1(
+            native_host=NativeWindowsFenceInstallerHostV1(),
+            install_attempt_id="windows-fence-install-0001",
+        )
 
 
 def test_restart_dispatch_audit_rejects_fake_native_host() -> None:

@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 import uuid
 import zipfile
@@ -26,6 +27,10 @@ from .installer_windows_v1 import (
     WindowsScmReadbackV1,
 )
 from .win32_fs import WindowsFilesystemFactsAdapter
+
+_INSTALL_ATTEMPT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_RESTART_DISPATCH_AUDIT_RAW_FILENAME = "restart-dispatch-audit.raw"
 
 try:  # Windows-only registry API; import must remain safe for CI contract tests.
     import winreg  # type: ignore[import-not-found]
@@ -333,6 +338,129 @@ class NativeWindowsFenceInstallerHostV1(WindowsFenceInstallerHostV1):
             raise WindowsFinalInstallerError("INSTALL_JOURNAL_NOT_INITIALIZED")
         return self._journal_root / name
 
+    @staticmethod
+    def _restart_dispatch_audit_attempt_id(install_attempt_id: str) -> str:
+        if (
+            not isinstance(install_attempt_id, str)
+            or _INSTALL_ATTEMPT_ID_RE.fullmatch(install_attempt_id) is None
+        ):
+            raise WindowsFinalInstallerError(
+                "RESTART_DISPATCH_AUDIT_INSTALL_ATTEMPT_ID_INVALID"
+            )
+        return install_attempt_id
+
+    def _secure_install_event_root(
+        self, *, install_attempt_id: str, create: bool
+    ) -> Path:
+        root = self._journal_path(install_attempt_id)
+        if create:
+            try:
+                root.mkdir()
+                if self._journal_acl_sddl is None or self._journal_owner_sha256 is None:
+                    raise WindowsFinalInstallerError("INSTALL_JOURNAL_NOT_INITIALIZED")
+                self._apply_path_security(
+                    root, sddl=self._journal_acl_sddl, directory=True
+                )
+            except FileExistsError:
+                pass
+        try:
+            facts = WindowsFilesystemFactsAdapter().inspect(root)
+        except OSError as exc:
+            raise WindowsFinalInstallerError("INSTALL_EVENT_ROOT_READ_FAILED") from exc
+        if (
+            not facts.directory
+            or facts.reparse_point
+            or not facts.parent_chain_reparse_free
+            or facts.hardlink_count != 1
+            or facts.alternate_data_streams
+            or not facts.dacl_protected
+            or facts.inherited_ace_count
+            or facts.unsafe_write_principals
+            or facts.owner_sid_sha256 != self._journal_owner_sha256
+            or self._journal_acl_sddl is None
+            or facts.acl_sddl_sha256
+            != hashlib.sha256(self._journal_acl_sddl.encode()).hexdigest()
+        ):
+            raise WindowsFinalInstallerError("INSTALL_EVENT_ROOT_SECURITY_MISMATCH")
+        return root
+
+    def persist_restart_dispatch_audit_raw_create_only(
+        self, *, install_attempt_id: str, raw: bytes
+    ) -> str:
+        """Create the one fixed raw audit file below its protected attempt root."""
+
+        install_attempt_id = self._restart_dispatch_audit_attempt_id(install_attempt_id)
+        self._journal_path(install_attempt_id)
+        self._require_windows()
+        try:
+            payload = json.loads(raw)
+        except (TypeError, ValueError) as exc:
+            raise WindowsFinalInstallerError(
+                "RESTART_DISPATCH_AUDIT_RAW_INVALID"
+            ) from exc
+        if (
+            not isinstance(payload, dict)
+            or payload.get("install_attempt_id") != install_attempt_id
+        ):
+            raise WindowsFinalInstallerError(
+                "RESTART_DISPATCH_AUDIT_RAW_INSTALL_ATTEMPT_MISMATCH"
+            )
+        root = self._secure_install_event_root(
+            install_attempt_id=install_attempt_id, create=True
+        )
+        path = root / _RESTART_DISPATCH_AUDIT_RAW_FILENAME
+        try:
+            written = WindowsFilesystemFactsAdapter().write_file_create_only(
+                path, raw=raw, protected_sddl=self._journal_acl_sddl or ""
+            )
+            if written.raw != raw:
+                raise WindowsFinalInstallerError(
+                    "RESTART_DISPATCH_AUDIT_RAW_HANDLE_READBACK_MISMATCH"
+                )
+        except FileExistsError as exc:
+            raise WindowsFinalInstallerError(
+                "RESTART_DISPATCH_AUDIT_RAW_CREATE_ONLY_CONFLICT"
+            ) from exc
+        except OSError as exc:
+            raise WindowsFinalInstallerError(
+                "RESTART_DISPATCH_AUDIT_RAW_WRITE_FAILED"
+            ) from exc
+        return hashlib.sha256(raw).hexdigest()
+
+    def read_restart_dispatch_audit_raw_verified(
+        self, *, install_attempt_id: str
+    ) -> bytes:
+        """Read the fixed raw audit only when Event5 binds its exact SHA-256."""
+
+        install_attempt_id = self._restart_dispatch_audit_attempt_id(install_attempt_id)
+        self._journal_path(install_attempt_id)
+        self._require_windows()
+        root = self._secure_install_event_root(
+            install_attempt_id=install_attempt_id, create=False
+        )
+        fs = WindowsFilesystemFactsAdapter()
+        try:
+            event = json.loads(fs.read_file(root / "05.json").raw)
+            raw = fs.read_file(root / _RESTART_DISPATCH_AUDIT_RAW_FILENAME).raw
+        except (OSError, TypeError, ValueError) as exc:
+            raise WindowsFinalInstallerError(
+                "RESTART_DISPATCH_AUDIT_RAW_READBACK_FAILED"
+            ) from exc
+        if (
+            not isinstance(event, dict)
+            or event.get("schema_version") != "windows_fence_installer_event_v1"
+            or event.get("install_attempt_id") != install_attempt_id
+            or event.get("event_sequence") != 5
+            or event.get("state") != "RESTART_DISPATCHED_FROZEN"
+            or not isinstance(event.get("details_sha256"), str)
+            or _SHA256_RE.fullmatch(event["details_sha256"]) is None
+            or hashlib.sha256(raw).hexdigest() != event["details_sha256"]
+        ):
+            raise WindowsFinalInstallerError(
+                "RESTART_DISPATCH_AUDIT_RAW_EVENT5_HASH_MISMATCH"
+            )
+        return raw
+
     def backup_scm_and_pywin32_registry_create_only(
         self, *, service_name: str, readback: WindowsScmReadbackV1
     ) -> str:
@@ -519,32 +647,9 @@ class NativeWindowsFenceInstallerHostV1(WindowsFenceInstallerHostV1):
         state: str,
         details_sha256: str,
     ) -> str:
-        root = self._journal_path(install_attempt_id)
-        try:
-            root.mkdir()
-            if self._journal_acl_sddl is None or self._journal_owner_sha256 is None:
-                raise WindowsFinalInstallerError("INSTALL_JOURNAL_NOT_INITIALIZED")
-            self._apply_path_security(root, sddl=self._journal_acl_sddl, directory=True)
-        except FileExistsError:
-            pass
-        try:
-            facts = WindowsFilesystemFactsAdapter().inspect(root)
-        except OSError as exc:
-            raise WindowsFinalInstallerError("INSTALL_EVENT_ROOT_READ_FAILED") from exc
-        if (
-            not facts.directory
-            or facts.reparse_point
-            or not facts.parent_chain_reparse_free
-            or facts.hardlink_count != 1
-            or facts.alternate_data_streams
-            or not facts.dacl_protected
-            or facts.inherited_ace_count
-            or facts.unsafe_write_principals
-            or facts.owner_sid_sha256 != self._journal_owner_sha256
-            or facts.acl_sddl_sha256
-            != hashlib.sha256(self._journal_acl_sddl.encode()).hexdigest()
-        ):
-            raise WindowsFinalInstallerError("INSTALL_EVENT_ROOT_SECURITY_MISMATCH")
+        root = self._secure_install_event_root(
+            install_attempt_id=install_attempt_id, create=True
+        )
         raw = canonical_json_bytes(
             {
                 "schema_version": "windows_fence_installer_event_v1",
