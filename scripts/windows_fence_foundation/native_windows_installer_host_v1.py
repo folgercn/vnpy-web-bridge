@@ -408,15 +408,25 @@ class NativeWindowsFenceInstallerHostV1(WindowsFenceInstallerHostV1):
         root = self._secure_install_event_root(
             install_attempt_id=install_attempt_id, create=True
         )
-        path = root / _RESTART_DISPATCH_AUDIT_RAW_FILENAME
+        fs = WindowsFilesystemFactsAdapter()
         try:
-            written = WindowsFilesystemFactsAdapter().write_file_create_only(
-                path, raw=raw, protected_sddl=self._journal_acl_sddl or ""
-            )
-            if written.raw != raw:
-                raise WindowsFinalInstallerError(
-                    "RESTART_DISPATCH_AUDIT_RAW_HANDLE_READBACK_MISMATCH"
+            with fs.open_directory_anchor(root) as attempt_root:
+                attempt_root.assert_named_path_is_opened_parent()
+                self._secure_install_event_root(
+                    install_attempt_id=install_attempt_id, create=False
                 )
+                attempt_root.assert_named_path_is_opened_parent()
+                written = fs.write_file_create_only_relative_to_opened_parent(
+                    parent=attempt_root,
+                    name=_RESTART_DISPATCH_AUDIT_RAW_FILENAME,
+                    raw=raw,
+                    protected_sddl=self._journal_acl_sddl or "",
+                )
+                if written.raw != raw:
+                    raise WindowsFinalInstallerError(
+                        "RESTART_DISPATCH_AUDIT_RAW_HANDLE_READBACK_MISMATCH"
+                    )
+                attempt_root.assert_named_path_is_opened_parent()
         except FileExistsError as exc:
             raise WindowsFinalInstallerError(
                 "RESTART_DISPATCH_AUDIT_RAW_CREATE_ONLY_CONFLICT"
@@ -440,8 +450,22 @@ class NativeWindowsFenceInstallerHostV1(WindowsFenceInstallerHostV1):
         )
         fs = WindowsFilesystemFactsAdapter()
         try:
-            event = json.loads(fs.read_file(root / "05.json").raw)
-            raw = fs.read_file(root / _RESTART_DISPATCH_AUDIT_RAW_FILENAME).raw
+            with fs.open_directory_anchor(root) as attempt_root:
+                attempt_root.assert_named_path_is_opened_parent()
+                self._secure_install_event_root(
+                    install_attempt_id=install_attempt_id, create=False
+                )
+                attempt_root.assert_named_path_is_opened_parent()
+                event = json.loads(
+                    fs.read_file_relative_to_opened_parent(
+                        parent=attempt_root, name="05.json"
+                    ).raw
+                )
+                raw = fs.read_file_relative_to_opened_parent(
+                    parent=attempt_root,
+                    name=_RESTART_DISPATCH_AUDIT_RAW_FILENAME,
+                ).raw
+                attempt_root.assert_named_path_is_opened_parent()
         except (OSError, TypeError, ValueError) as exc:
             raise WindowsFinalInstallerError(
                 "RESTART_DISPATCH_AUDIT_RAW_READBACK_FAILED"

@@ -5,14 +5,15 @@ import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Self
 
 import pytest
 
-from scripts.windows_fence_foundation.native_windows_installer_host_v1 import (
-    NativeWindowsFenceInstallerHostV1,
-)
 from scripts.windows_fence_foundation.installer_windows_v1 import (
     WindowsFinalInstallerError,
+)
+from scripts.windows_fence_foundation.native_windows_installer_host_v1 import (
+    NativeWindowsFenceInstallerHostV1,
 )
 from scripts.windows_fence_foundation.restart_dispatch_audit_v1 import (
     RESTART_DISPATCH_AUDIT_EVENT_SEQUENCE,
@@ -240,21 +241,52 @@ def test_restart_dispatch_audit_raw_native_journal_is_fixed_and_fail_closed(
     )
     journal_root = tmp_path / "installer-journal-v1"
     host._journal_root = journal_root
-    writes: list[Path] = []
+    opened_parents: list[Path] = []
+    writes: list[tuple[Path, str]] = []
+    reads: list[tuple[Path, str]] = []
     contents: dict[Path, bytes] = {}
 
+    class FakeOpenedParent:
+        def __init__(self, path: Path) -> None:
+            self.path = path
+
+        def __enter__(self) -> Self:
+            opened_parents.append(self.path)
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def assert_named_path_is_opened_parent(self) -> None:
+            return None
+
     class FakeFilesystem:
-        def write_file_create_only(
-            self, path: Path, *, raw: bytes, protected_sddl: str
+        def open_directory_anchor(self, path: Path) -> FakeOpenedParent:
+            return FakeOpenedParent(path)
+
+        def write_file_create_only_relative_to_opened_parent(
+            self,
+            *,
+            parent: FakeOpenedParent,
+            name: str,
+            raw: bytes,
+            protected_sddl: str,
         ) -> SimpleNamespace:
             assert protected_sddl == "D:PA"
-            writes.append(path)
+            assert name == "restart-dispatch-audit.raw"
+            path = parent.path / name
+            writes.append((parent.path, name))
             if path in contents:
                 raise FileExistsError(path)
             contents[path] = raw
             return SimpleNamespace(raw=raw)
 
-        def read_file(self, path: Path) -> SimpleNamespace:
+        def read_file_relative_to_opened_parent(
+            self, *, parent: FakeOpenedParent, name: str
+        ) -> SimpleNamespace:
+            assert name in {"05.json", "restart-dispatch-audit.raw"}
+            path = parent.path / name
+            reads.append((parent.path, name))
             return SimpleNamespace(raw=contents[path])
 
     monkeypatch.setattr(host, "_require_windows", lambda: None)
@@ -275,7 +307,7 @@ def test_restart_dispatch_audit_raw_native_journal_is_fixed_and_fail_closed(
         == hashlib.sha256(raw).hexdigest()
     )
     raw_path = journal_root / install_attempt_id / "restart-dispatch-audit.raw"
-    assert writes == [raw_path]
+    assert writes == [(raw_path.parent, raw_path.name)]
 
     with pytest.raises(WindowsFinalInstallerError, match="CREATE_ONLY_CONFLICT"):
         host.persist_restart_dispatch_audit_raw_create_only(
@@ -291,8 +323,8 @@ def test_restart_dispatch_audit_raw_native_journal_is_fixed_and_fail_closed(
         host.persist_restart_dispatch_audit_raw_create_only(
             install_attempt_id="windows-fence-install-0002", raw=raw
         )
-    assert writes == [raw_path, raw_path]
-    assert all(path == raw_path for path in writes)
+    assert writes == [(raw_path.parent, raw_path.name)] * 2
+    assert opened_parents == [raw_path.parent, raw_path.parent]
 
     event_path = journal_root / install_attempt_id / "05.json"
     contents[event_path] = json.dumps(
@@ -310,12 +342,50 @@ def test_restart_dispatch_audit_raw_native_journal_is_fixed_and_fail_closed(
         )
         == raw
     )
-    assert writes == [raw_path, raw_path]
+    assert reads == [
+        (raw_path.parent, "05.json"),
+        (raw_path.parent, raw_path.name),
+    ]
 
     contents[event_path] = contents[event_path].replace(b"a", b"b", 1)
     with pytest.raises(WindowsFinalInstallerError, match="EVENT5_HASH_MISMATCH"):
         host.read_restart_dispatch_audit_raw_verified(
             install_attempt_id=install_attempt_id
+        )
+
+
+def test_restart_dispatch_audit_reparse_attempt_root_fails_closed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    host = NativeWindowsFenceInstallerHostV1()
+    host._journal_acl_sddl = "D:PA"
+    install_attempt_id = "windows-fence-install-0001"
+    host._journal_root = tmp_path / "installer-journal-v1"
+    raw = build_restart_dispatch_audit_v1(
+        install_attempt_id=install_attempt_id,
+        policy="OBSERVED_SCM_FACTS",
+        observed_scm_facts=_observed_facts(),
+        captured_at=CAPTURED_AT,
+    )
+    monkeypatch.setattr(host, "_require_windows", lambda: None)
+    monkeypatch.setattr(
+        host,
+        "_secure_install_event_root",
+        lambda *, install_attempt_id, create: tmp_path / install_attempt_id,
+    )
+
+    class ReparseFilesystem:
+        def open_directory_anchor(self, _path: Path) -> None:
+            raise OSError("unsafe opened parent directory")
+
+    monkeypatch.setattr(
+        "scripts.windows_fence_foundation.native_windows_installer_host_v1.WindowsFilesystemFactsAdapter",
+        ReparseFilesystem,
+    )
+
+    with pytest.raises(WindowsFinalInstallerError, match="RAW_WRITE_FAILED"):
+        host.persist_restart_dispatch_audit_raw_create_only(
+            install_attempt_id=install_attempt_id, raw=raw
         )
 
 
