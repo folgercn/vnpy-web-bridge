@@ -1,87 +1,117 @@
+"""Offline contract tests only; they never claim Windows production acceptance."""
+
 from __future__ import annotations
 
 import hashlib
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
+import json
+from datetime import datetime, timezone
 
 import pytest
 
+from backend.tests.unit import test_issue267_windows_fence_foundation_schemas as fixture
+from backend.tests.unit.test_windows_fence_signing_closure_e2e_v1 import (
+    _chain_artifacts,
+)
 from scripts.windows_fence_foundation.ceremony_runner_v1 import (
     CeremonyEventEvidenceV1,
     CeremonyQueryEvidenceV1,
     CeremonyReservationEvidenceV1,
     CeremonyStepContextV1,
-    ImmediateLiveAuthorizationV1,
     WindowsFenceCeremonyError,
     WindowsFenceCeremonyRunnerV1,
 )
 from scripts.windows_fence_foundation.host_observer_v1 import (
     NativeWindowsHostObserverV1,
     WindowsHostObservationError,
-    _canonical_observer_draft_v1,
 )
 
-
-def test_observer_rejects_caller_supplied_identity() -> None:
-    with pytest.raises(WindowsHostObservationError, match="IDENTITY_SUPPLIED"):
-        _canonical_observer_draft_v1(
-            "zero_preflight",
-            {"receipt_id": "hand-authored", "receipt_core_sha256": "a" * 64},
-        )
-
-
-def test_observer_rejects_stale_zero_preflight() -> None:
-    now = datetime.now(timezone.utc)
-    with pytest.raises(WindowsHostObservationError, match="NOT_FRESH"):
-        _canonical_observer_draft_v1(
-            "zero_preflight",
-            {
-                "observed_at_utc": (now - timedelta(seconds=30))
-                .isoformat()
-                .replace("+00:00", "Z"),
-                "challenge_issued_at_utc": (now - timedelta(seconds=40))
-                .isoformat()
-                .replace("+00:00", "Z"),
-                "snapshot_served_at_utc": (now - timedelta(seconds=61))
-                .isoformat()
-                .replace("+00:00", "Z"),
-                "challenge_expires_at_utc": (now + timedelta(seconds=10))
-                .isoformat()
-                .replace("+00:00", "Z"),
-            },
-        )
-
-
-ATTEMPT_ID = "windows-fence-install-" + "a" * 64
+ATTEMPT_ID = fixture.ATTEMPT_ID
 SERVICE_NAME = "VnpyRpcService"
 
 
-def _runner(journal_root: Path | None = None) -> WindowsFenceCeremonyRunnerV1:
-    return WindowsFenceCeremonyRunnerV1(
-        public_keyring_raw=b"",
-        expected_public_keyring_sha256=hashlib.sha256(b"").hexdigest(),
-        now=datetime(2026, 8, 10, 12, tzinfo=timezone.utc),
-        journal_root=journal_root,
+def _unsigned(
+    factory, identity: tuple[str, str]
+) -> tuple[dict[str, object], dict[str, bytes]]:
+    facts = factory()
+    for key in (*identity, "signature"):
+        facts.pop(key)
+    raw_bindings = {
+        key: f"offline-contract:{key}".encode()
+        for key in facts
+        if key.endswith("_raw_sha256")
+    }
+    facts.update(
+        {key: hashlib.sha256(raw).hexdigest() for key, raw in raw_bindings.items()}
     )
+    return facts, raw_bindings
 
 
-def _authorization() -> ImmediateLiveAuthorizationV1:
-    return ImmediateLiveAuthorizationV1(
-        authorization_id="manual-ceremony-approval-1",
-        install_attempt_id=ATTEMPT_ID,
-        service_name=SERVICE_NAME,
-        issued_at=datetime(2026, 8, 10, 11, tzinfo=timezone.utc),
-        expires_at=datetime(2026, 8, 10, 13, tzinfo=timezone.utc),
-        restart_authorized=True,
-        automatic_restart_allowed=False,
-        maximum_restart_dispatches=1,
+class _OfflineReadOnlyFacts:
+    """Strict named seam; deliberately not a production native adapter."""
+
+    def __init__(self) -> None:
+        self.publish = _unsigned(
+            fixture._publish_receipt, ("receipt_id", "receipt_core_sha256")
+        )
+        self.scm = _unsigned(
+            fixture._scm_dispatch_evidence, ("evidence_id", "evidence_core_sha256")
+        )
+        self.startup = _unsigned(
+            fixture._startup_receipt, ("receipt_id", "receipt_core_sha256")
+        )
+        self.attestation = _unsigned(
+            fixture._attestation, ("attestation_id", "attestation_core_sha256")
+        )
+
+    def capture_publish_receipt_facts(self):
+        return self.publish
+
+    def capture_scm_dispatch_evidence_facts(self):
+        return self.scm
+
+    def capture_startup_receipt_facts(self):
+        return self.startup
+
+    def capture_attestation_facts(self):
+        return self.attestation
+
+
+@pytest.mark.parametrize(
+    ("method", "schema_version"),
+    [
+        ("capture_publish_receipt", "windows_rpc_durable_fence_publish_receipt_v1"),
+        (
+            "capture_scm_dispatch_evidence",
+            "windows_rpc_durable_fence_scm_dispatch_evidence_v1",
+        ),
+        ("capture_startup_receipt", "windows_rpc_durable_fence_startup_receipt_v1"),
+        ("capture_attestation", "windows_rpc_durable_fence_foundation_attestation_v1"),
+    ],
+)
+def test_observer_explicit_methods_emit_existing_v1_unsigned_drafts_offline_contract(
+    method: str, schema_version: str
+) -> None:
+    raw = getattr(NativeWindowsHostObserverV1(), method)(
+        offline_contract=_OfflineReadOnlyFacts()
     )
+    assert json.loads(raw)["schema_version"] == schema_version
+
+
+def test_observer_raw_fact_hash_mismatch_fails_closed() -> None:
+    contract = _OfflineReadOnlyFacts()
+    contract.publish[1]["install_manifest_raw_sha256"] = "0" * 64
+    with pytest.raises(WindowsHostObservationError, match="RAW_BINDING_MISMATCH"):
+        NativeWindowsHostObserverV1().capture_publish_receipt(offline_contract=contract)
+
+
+def test_observer_default_requires_real_windows_native_capability() -> None:
+    with pytest.raises(WindowsHostObservationError, match="REAL_WINDOWS_HOST_REQUIRED"):
+        NativeWindowsHostObserverV1().capture_attestation()
 
 
 class _Actions:
-    def __init__(self, *, fail_at: str | None = None) -> None:
+    def __init__(self, fail_at: str | None = None) -> None:
         self.calls: list[str] = []
-        self.contexts: list[CeremonyStepContextV1] = []
         self.fail_at = fail_at
         self.restart_dispatches = 0
 
@@ -101,124 +131,88 @@ class _Actions:
             ),
         )
 
-    def _call(self, name: str, context: CeremonyStepContextV1) -> None:
+    def _call(self, name: str) -> None:
         self.calls.append(name)
-        self.contexts.append(context)
         if self.fail_at == name:
             raise TimeoutError(name)
 
-    def run_events_1_to_2(
-        self, *, context: CeremonyStepContextV1
-    ) -> tuple[CeremonyEventEvidenceV1, CeremonyEventEvidenceV1]:
-        self._call("events_1_to_2", context)
-        event_1 = self._event(context, 1)
-        return event_1, self._event(
+    def run_events_1_to_2(self, *, context: CeremonyStepContextV1):
+        self._call("events_1_to_2")
+        one = self._event(context, 1)
+        return one, self._event(
             CeremonyStepContextV1(
-                install_attempt_id=context.install_attempt_id,
-                service_name=context.service_name,
-                previous_event=event_1,
+                context.install_attempt_id, context.service_name, one
             ),
             2,
         )
 
-    def reserve_event_3_durable_create_only(
-        self, *, context: CeremonyStepContextV1
-    ) -> CeremonyReservationEvidenceV1:
-        self._call("event_3", context)
+    def reserve_event_3_durable_create_only(self, *, context: CeremonyStepContextV1):
+        self._call("event_3")
         return CeremonyReservationEvidenceV1(
-            event=self._event(context, 3),
-            reservation_id="create-only-reservation-1",
-            durable_create_only=True,
+            self._event(context, 3), "journal-event-3", True
         )
 
-    def run_event_4(self, *, context: CeremonyStepContextV1) -> CeremonyEventEvidenceV1:
-        self._call("event_4", context)
+    def run_event_4(self, *, context: CeremonyStepContextV1):
+        self._call("event_4")
         return self._event(context, 4)
 
     def dispatch_restart_once_for_event_5(
-        self,
-        *,
-        context: CeremonyStepContextV1,
-        authorization: ImmediateLiveAuthorizationV1,
-    ) -> CeremonyEventEvidenceV1:
-        assert authorization == _authorization()
+        self, *, context: CeremonyStepContextV1, signed_restart_authorization: bytes
+    ):
+        assert signed_restart_authorization
+        self._call("event_5")
         self.restart_dispatches += 1
-        self._call("event_5", context)
         return self._event(context, 5)
 
-    def await_event_6(
-        self, *, context: CeremonyStepContextV1
-    ) -> CeremonyEventEvidenceV1:
-        self._call("event_6", context)
+    def await_event_6(self, *, context: CeremonyStepContextV1):
+        self._call("event_6")
         return self._event(context, 6)
 
-    def await_event_7(
-        self, *, context: CeremonyStepContextV1
-    ) -> CeremonyEventEvidenceV1:
-        self._call("event_7", context)
+    def await_event_7(self, *, context: CeremonyStepContextV1):
+        self._call("event_7")
         return self._event(context, 7)
 
-    def query_same_attempt_only(
-        self, *, context: CeremonyStepContextV1, cause: str
-    ) -> CeremonyQueryEvidenceV1:
+    def query_same_attempt_only(self, *, context: CeremonyStepContextV1, cause: str):
         self.calls.append(f"query:{cause}")
-        self.contexts.append(context)
         return CeremonyQueryEvidenceV1(
-            install_attempt_id=context.install_attempt_id,
-            service_name=context.service_name,
-            raw=b"same-attempt-query",
-            frontier_sequence=0 if cause == "attempt_frontier" else 3,
+            context.install_attempt_id,
+            context.service_name,
+            b"installer-journal-query",
+            0 if cause == "attempt_frontier" else 3,
         )
 
 
-def test_ceremony_live_requires_explicit_immediate_authorization() -> None:
-    actions = _Actions()
-    with pytest.raises(
-        WindowsFenceCeremonyError, match="IMMEDIATE_LIVE_AUTHORIZATION_REQUIRED"
-    ):
-        _runner().run_once(artifacts={}, dry_run=False, actions=actions)
-    assert actions.calls == []
-
-
-def test_ceremony_defaults_to_dry_run(monkeypatch: pytest.MonkeyPatch) -> None:
-    runner = _runner()
-    monkeypatch.setattr(
-        runner,
-        "_verify_closure",
-        lambda _artifacts: {
-            "install_attempt_id": ATTEMPT_ID,
-            "service_name": SERVICE_NAME,
-        },
+def _runner(keyring: bytes) -> WindowsFenceCeremonyRunnerV1:
+    return WindowsFenceCeremonyRunnerV1(
+        public_keyring_raw=keyring,
+        expected_public_keyring_sha256=hashlib.sha256(keyring).hexdigest(),
+        now=datetime(2026, 8, 5, 0, 0, 25, tzinfo=timezone.utc),
     )
 
-    result = runner.run_once(artifacts={})
 
-    assert result.mode == "dry-run"
-    assert result.restart_dispatches == 0
+def _live_artifacts(tmp_path):
+    chain, keyring = _chain_artifacts(tmp_path)
+    return {
+        key: chain[key]
+        for key in (
+            "zero_preflight",
+            "manifest",
+            "publish_receipt",
+            "restart_authorization",
+        )
+    }, keyring
 
 
-def test_ceremony_live_orchestrates_returned_event_evidence_without_closure(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
+def test_live_admission_requires_signed_v1_artifacts_and_reuses_event_journal(
+    tmp_path,
 ) -> None:
-    runner = _runner(tmp_path)
-    monkeypatch.setattr(
-        runner,
-        "_verify_closure",
-        lambda _artifacts: pytest.fail("live must not require an event-5/6/7 closure"),
-    )
+    artifacts, keyring = _live_artifacts(tmp_path)
     actions = _Actions()
-
-    result = runner.run_once(
-        artifacts={},
-        dry_run=False,
-        actions=actions,
-        live_authorization=_authorization(),
+    result = _runner(keyring).run_once(
+        artifacts=artifacts, dry_run=False, actions=actions
     )
-
-    assert result.mode == "live"
     assert result.completed_events == (1, 2, 3, 4, 5, 6, 7)
-    assert result.restart_dispatches == actions.restart_dispatches == 1
+    assert actions.restart_dispatches == result.restart_dispatches == 1
     assert actions.calls == [
         "query:attempt_frontier",
         "events_1_to_2",
@@ -228,172 +222,26 @@ def test_ceremony_live_orchestrates_returned_event_evidence_without_closure(
         "event_6",
         "event_7",
     ]
-    assert [
-        None if item.previous_event is None else item.previous_event.event_sequence
-        for item in actions.contexts
-    ] == [None, None, 2, 3, 4, 5, 6]
 
 
-def test_ceremony_existing_event3_frontier_is_query_only(tmp_path: Path) -> None:
-    class ExistingAttempt(_Actions):
-        def query_same_attempt_only(
-            self, *, context: CeremonyStepContextV1, cause: str
-        ) -> CeremonyQueryEvidenceV1:
-            self.calls.append(f"query:{cause}")
-            self.contexts.append(context)
-            return CeremonyQueryEvidenceV1(
-                install_attempt_id=context.install_attempt_id,
-                service_name=context.service_name,
-                raw=b"existing-frontier",
-                frontier_sequence=3,
-            )
-
-    actions = ExistingAttempt()
+def test_live_event3_failure_is_query_only_and_never_restarts(tmp_path) -> None:
+    artifacts, keyring = _live_artifacts(tmp_path)
+    actions = _Actions(fail_at="event_3")
     with pytest.raises(WindowsFenceCeremonyError, match="POST_EVENT3_QUERY_ONLY"):
-        _runner(tmp_path).run_once(
-            artifacts={},
-            dry_run=False,
-            actions=actions,
-            live_authorization=_authorization(),
-        )
-    assert actions.calls == ["query:attempt_frontier"]
+        _runner(keyring).run_once(artifacts=artifacts, dry_run=False, actions=actions)
+    assert actions.calls == [
+        "query:attempt_frontier",
+        "events_1_to_2",
+        "event_3",
+        "query:event_3_unknown",
+    ]
+    assert actions.restart_dispatches == 0
 
 
-def test_ceremony_existing_local_marker_is_query_only(tmp_path: Path) -> None:
-    attempt_root = tmp_path / ATTEMPT_ID
-    attempt_root.mkdir()
-    (attempt_root / "event-03-reserved.json").write_bytes(b"marker")
+def test_live_rejects_missing_signed_artifact_before_action(tmp_path) -> None:
+    artifacts, keyring = _live_artifacts(tmp_path)
+    artifacts.pop("publish_receipt")
     actions = _Actions()
-    with pytest.raises(WindowsFenceCeremonyError, match="POST_EVENT3_QUERY_ONLY"):
-        _runner(tmp_path).run_once(
-            artifacts={},
-            dry_run=False,
-            actions=actions,
-            live_authorization=_authorization(),
-        )
-    assert actions.calls == ["query:attempt_frontier"]
-
-
-def test_ceremony_event3_intent_blocks_second_process(tmp_path: Path) -> None:
-    first = _Actions(fail_at="event_3")
-    with pytest.raises(WindowsFenceCeremonyError, match="POST_EVENT3_QUERY_ONLY"):
-        _runner(tmp_path).run_once(
-            artifacts={},
-            dry_run=False,
-            actions=first,
-            live_authorization=_authorization(),
-        )
-    second = _Actions()
-    with pytest.raises(WindowsFenceCeremonyError, match="POST_EVENT3_QUERY_ONLY"):
-        _runner(tmp_path).run_once(
-            artifacts={},
-            dry_run=False,
-            actions=second,
-            live_authorization=_authorization(),
-        )
-    assert second.calls == ["query:attempt_frontier"]
-
-
-@pytest.mark.parametrize(
-    ("fail_at", "cause", "expected_calls"),
-    [
-        (
-            "event_3",
-            "event_3_unknown",
-            [
-                "query:attempt_frontier",
-                "events_1_to_2",
-                "event_3",
-                "query:event_3_unknown",
-            ],
-        ),
-        (
-            "event_4",
-            "event_4_unknown",
-            [
-                "query:attempt_frontier",
-                "events_1_to_2",
-                "event_3",
-                "event_4",
-                "query:event_4_unknown",
-            ],
-        ),
-        (
-            "event_5",
-            "event_5_restart_unknown",
-            [
-                "query:attempt_frontier",
-                "events_1_to_2",
-                "event_3",
-                "event_4",
-                "event_5",
-                "query:event_5_restart_unknown",
-            ],
-        ),
-        (
-            "event_6",
-            "event_6_unknown",
-            [
-                "query:attempt_frontier",
-                "events_1_to_2",
-                "event_3",
-                "event_4",
-                "event_5",
-                "event_6",
-                "query:event_6_unknown",
-            ],
-        ),
-        (
-            "event_7",
-            "event_7_unknown",
-            [
-                "query:attempt_frontier",
-                "events_1_to_2",
-                "event_3",
-                "event_4",
-                "event_5",
-                "event_6",
-                "event_7",
-                "query:event_7_unknown",
-            ],
-        ),
-    ],
-)
-def test_ceremony_post_event3_unknown_is_same_attempt_query_only(
-    fail_at: str, cause: str, expected_calls: list[str], tmp_path: Path
-) -> None:
-    actions = _Actions(fail_at=fail_at)
-
-    with pytest.raises(WindowsFenceCeremonyError, match="POST_EVENT3_QUERY_ONLY"):
-        _runner(tmp_path).run_once(
-            artifacts={},
-            dry_run=False,
-            actions=actions,
-            live_authorization=_authorization(),
-        )
-
-    assert actions.calls == expected_calls
-    assert actions.contexts[-1].install_attempt_id == ATTEMPT_ID
-    assert actions.contexts[-1].service_name == SERVICE_NAME
-    assert actions.restart_dispatches <= 1
-
-
-def test_capture_draft_rejects_self_reported_real_host() -> None:
-    class Fake:
-        is_real_windows_host = True
-
-        def capture_observer_facts(self, _kind):
-            return {}
-
-    with pytest.raises(WindowsHostObservationError, match="REAL_WINDOWS_HOST_REQUIRED"):
-        NativeWindowsHostObserverV1().capture_draft("zero_preflight", seam=Fake())
-
-
-def test_native_adapter_requires_both_canonical_source_commands() -> None:
-    with pytest.raises(
-        WindowsHostObservationError, match="NATIVE_SOURCE_REQUIRED|REAL_WINDOWS"
-    ):
-        # The adapter is intentionally not usable as a fixture on this host.
-        NativeWindowsHostObserverV1().capture_draft(
-            "zero_preflight", seam=NativeWindowsHostObserverV1()
-        )
+    with pytest.raises(WindowsFenceCeremonyError, match="LIVE_ARTIFACT_SET_REQUIRED"):
+        _runner(keyring).run_once(artifacts=artifacts, dry_run=False, actions=actions)
+    assert actions.calls == []

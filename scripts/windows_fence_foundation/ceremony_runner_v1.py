@@ -9,20 +9,23 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import os
-import stat
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from .contracts import canonical_json_bytes
 from .installer_trust_anchor_v1 import (
+    canonical_public_keyring_v1,
     load_production_installer_trust_anchor_v1,
     validate_anchor_keyring_bytes_v1,
 )
-from .offline_signing_v1 import OfflineSigningError
+from .offline_signing_v1 import (
+    OfflineSigningError,
+    require_fresh_zero_preflight_v1,
+    verify_public_artifact_v1,
+)
 from .release_bundle_v1 import CHAIN_ORDER, verify_signing_closure_chain_v1
 
 
@@ -74,19 +77,6 @@ class CeremonyStepContextV1:
 
 
 @dataclass(frozen=True)
-class ImmediateLiveAuthorizationV1:
-    """Explicit, short-lived authorization for one manually initiated ceremony."""
-
-    authorization_id: str
-    install_attempt_id: str
-    service_name: str
-    issued_at: datetime
-    expires_at: datetime
-    restart_authorized: bool
-    automatic_restart_allowed: bool
-    maximum_restart_dispatches: int
-
-
 class WindowsFenceCeremonyActionsV1(Protocol):
     """Injected action seam; never exposed by the safe CLI.
 
@@ -111,7 +101,7 @@ class WindowsFenceCeremonyActionsV1(Protocol):
         self,
         *,
         context: CeremonyStepContextV1,
-        authorization: ImmediateLiveAuthorizationV1,
+        signed_restart_authorization: bytes,
     ) -> CeremonyEventEvidenceV1: ...
 
     def await_event_6(
@@ -145,12 +135,10 @@ class WindowsFenceCeremonyRunnerV1:
         public_keyring_raw: bytes,
         expected_public_keyring_sha256: str,
         now: datetime,
-        journal_root: Path | None = None,
     ) -> None:
         self._public_keyring_raw = public_keyring_raw
         self._expected_keyring_sha256 = expected_public_keyring_sha256
         self._now = now
-        self._journal_root = journal_root
 
     def verify_dry_run(self, artifacts: Mapping[str, bytes]) -> CeremonyResultV1:
         closure = self._verify_closure(artifacts)
@@ -168,7 +156,6 @@ class WindowsFenceCeremonyRunnerV1:
         artifacts: Mapping[str, bytes],
         dry_run: bool = True,
         actions: WindowsFenceCeremonyActionsV1 | None = None,
-        live_authorization: ImmediateLiveAuthorizationV1 | None = None,
     ) -> CeremonyResultV1:
         if dry_run:
             closure = self._verify_closure(artifacts)
@@ -181,16 +168,12 @@ class WindowsFenceCeremonyRunnerV1:
             )
         if actions is None:
             raise WindowsFenceCeremonyError("CEREMONY_LIVE_ACTIONS_REQUIRED")
-        authorization = self._require_immediate_live_authorization(live_authorization)
-        self._require_journal_root()
+        admission = self._verify_live_artifacts(artifacts)
         context = CeremonyStepContextV1(
-            install_attempt_id=authorization.install_attempt_id,
-            service_name=authorization.service_name,
+            install_attempt_id=str(admission["install_attempt_id"]),
+            service_name=str(admission["service_name"]),
             previous_event=None,
         )
-        if self._marker_exists(authorization.install_attempt_id):
-            self._query_frontier(actions, context=context)
-            raise WindowsFenceCeremonyError("CEREMONY_POST_EVENT3_QUERY_ONLY")
         frontier = self._query_frontier(actions, context=context)
         if frontier.frontier_sequence >= 3:
             raise WindowsFenceCeremonyError("CEREMONY_POST_EVENT3_QUERY_ONLY")
@@ -206,11 +189,6 @@ class WindowsFenceCeremonyRunnerV1:
         # The event-3 call itself is an uncertainty boundary: a timeout can
         # mean its durable create-only reservation committed remotely.
         try:
-            self._create_only_marker(
-                authorization.install_attempt_id,
-                "event-03-intent.json",
-                {"event_sequence": 3, "intent": "durable_create_only"},
-            )
             reservation = actions.reserve_event_3_durable_create_only(context=context)
             if (
                 type(reservation) is not CeremonyReservationEvidenceV1
@@ -223,11 +201,6 @@ class WindowsFenceCeremonyRunnerV1:
                 )
             event_3 = reservation.event
             self._require_event(event_3, sequence=3, context=context)
-            self._create_only_marker(
-                authorization.install_attempt_id,
-                "event-03-reserved.json",
-                {"event_sequence": 3, "event_raw_sha256": event_3.raw_sha256},
-            )
             context = self._next_context(context, event_3)
         except Exception as exc:
             self._query_only_after_event3(
@@ -249,7 +222,9 @@ class WindowsFenceCeremonyRunnerV1:
             sequence=5,
             cause="event_5_restart_unknown",
             action=lambda: self._reserve_and_dispatch_event_5(
-                actions, context=context, authorization=authorization
+                actions,
+                context=context,
+                signed_restart_authorization=artifacts["restart_authorization"],
             ),
         )
         context = self._next_context(context, event_5)
@@ -270,8 +245,8 @@ class WindowsFenceCeremonyRunnerV1:
         )
         return CeremonyResultV1(
             mode="live",
-            install_attempt_id=authorization.install_attempt_id,
-            service_name=authorization.service_name,
+            install_attempt_id=context.install_attempt_id,
+            service_name=context.service_name,
             completed_events=(1, 2, 3, 4, 5, 6, 7),
             restart_dispatches=1,
         )
@@ -281,123 +256,11 @@ class WindowsFenceCeremonyRunnerV1:
         actions: WindowsFenceCeremonyActionsV1,
         *,
         context: CeremonyStepContextV1,
-        authorization: ImmediateLiveAuthorizationV1,
+        signed_restart_authorization: bytes,
     ) -> CeremonyEventEvidenceV1:
-        self._create_only_marker(
-            context.install_attempt_id,
-            "restart-dispatch-reserved.json",
-            {"event_sequence": 5, "authorization_id": authorization.authorization_id},
-        )
         return actions.dispatch_restart_once_for_event_5(
-            context=context, authorization=authorization
+            context=context, signed_restart_authorization=signed_restart_authorization
         )
-
-    def _require_journal_root(self) -> None:
-        root = self._journal_root
-        if (
-            root is None
-            or not root.is_absolute()
-            or root.is_symlink()
-            or not root.is_dir()
-        ):
-            raise WindowsFenceCeremonyError("CEREMONY_JOURNAL_ROOT_REQUIRED")
-        try:
-            facts = root.stat()
-            if not stat.S_ISDIR(facts.st_mode) or (
-                os.name != "nt" and stat.S_IMODE(facts.st_mode) & 0o077
-            ):
-                raise WindowsFenceCeremonyError("CEREMONY_JOURNAL_ROOT_UNSAFE")
-            if hasattr(os, "geteuid") and facts.st_uid != os.geteuid():
-                raise WindowsFenceCeremonyError("CEREMONY_JOURNAL_ROOT_UNSAFE")
-        except OSError as exc:
-            raise WindowsFenceCeremonyError("CEREMONY_JOURNAL_ROOT_UNSAFE") from exc
-
-    def _marker_exists(self, attempt_id: str) -> bool:
-        assert self._journal_root is not None
-        attempt_root = self._journal_root / attempt_id
-        for name in (
-            "event-03-intent.json",
-            "event-03-reserved.json",
-            "restart-dispatch-reserved.json",
-        ):
-            marker = attempt_root / name
-            if marker.is_symlink():
-                raise WindowsFenceCeremonyError("CEREMONY_JOURNAL_PATH_UNSAFE")
-            if marker.exists():
-                try:
-                    if not marker.is_file() or marker.stat().st_nlink != 1:
-                        raise WindowsFenceCeremonyError("CEREMONY_JOURNAL_PATH_UNSAFE")
-                except OSError as exc:
-                    raise WindowsFenceCeremonyError(
-                        "CEREMONY_JOURNAL_PATH_UNSAFE"
-                    ) from exc
-                return True
-        return False
-
-    def _create_only_marker(
-        self, attempt_id: str, name: str, payload: Mapping[str, object]
-    ) -> None:
-        assert self._journal_root is not None
-        path = self._journal_root / attempt_id / name
-        try:
-            path.parent.mkdir(mode=0o700)
-        except FileExistsError:
-            pass
-        if path.parent.is_symlink():
-            raise WindowsFenceCeremonyError("CEREMONY_JOURNAL_PATH_UNSAFE")
-        raw = canonical_json_bytes(
-            {
-                "schema_version": "windows_rpc_durable_fence_ceremony_marker_v1",
-                "install_attempt_id": attempt_id,
-                **dict(payload),
-            }
-        )
-        try:
-            descriptor = os.open(
-                path,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-                0o600,
-            )
-            try:
-                if os.write(descriptor, raw) != len(raw):
-                    raise OSError("short marker write")
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
-        except FileExistsError as exc:
-            raise WindowsFenceCeremonyError("CEREMONY_MARKER_ALREADY_EXISTS") from exc
-        except OSError as exc:
-            raise WindowsFenceCeremonyError("CEREMONY_MARKER_WRITE_FAILED") from exc
-
-    def _require_immediate_live_authorization(
-        self, value: ImmediateLiveAuthorizationV1 | None
-    ) -> ImmediateLiveAuthorizationV1:
-        if type(value) is not ImmediateLiveAuthorizationV1:
-            raise WindowsFenceCeremonyError(
-                "CEREMONY_IMMEDIATE_LIVE_AUTHORIZATION_REQUIRED"
-            )
-        if (
-            type(value.authorization_id) is not str
-            or not value.authorization_id
-            or type(value.install_attempt_id) is not str
-            or not value.install_attempt_id.startswith("windows-fence-install-")
-            or type(value.service_name) is not str
-            or not value.service_name
-            or type(value.issued_at) is not datetime
-            or value.issued_at.tzinfo is None
-            or value.issued_at.utcoffset() is None
-            or type(value.expires_at) is not datetime
-            or value.expires_at.tzinfo is None
-            or value.expires_at.utcoffset() is None
-            or not value.issued_at <= self._now < value.expires_at
-            or value.restart_authorized is not True
-            or value.automatic_restart_allowed is not False
-            or value.maximum_restart_dispatches != 1
-        ):
-            raise WindowsFenceCeremonyError(
-                "CEREMONY_IMMEDIATE_LIVE_AUTHORIZATION_INVALID"
-            )
-        return value
 
     @staticmethod
     def _next_context(
@@ -465,7 +328,7 @@ class WindowsFenceCeremonyRunnerV1:
                 or query.service_name != context.service_name
                 or type(query.raw) is not bytes
                 or not query.raw
-                or query.frontier_sequence not in range(0, 8)
+                or query.frontier_sequence not in range(8)
             ):
                 raise WindowsFenceCeremonyError("CEREMONY_QUERY_EVIDENCE_INVALID")
             return query
@@ -497,6 +360,103 @@ class WindowsFenceCeremonyRunnerV1:
             # Query failure is still terminal.  Never compensate, retry a
             # mutation, or dispatch a second restart after event 3.
             return
+
+    def _verify_live_artifacts(
+        self, artifacts: Mapping[str, bytes]
+    ) -> Mapping[str, Any]:
+        """Admit exactly the signed v1 inputs available before event 1.
+
+        Post-restart receipts and all event artifacts are intentionally absent:
+        they must be produced through the installer journal, not pre-supplied
+        to the runner.
+        """
+        required = {
+            "zero_preflight",
+            "manifest",
+            "publish_receipt",
+            "restart_authorization",
+        }
+        if set(artifacts) != required or any(
+            type(raw) is not bytes or not raw for raw in artifacts.values()
+        ):
+            raise WindowsFenceCeremonyError("CEREMONY_LIVE_ARTIFACT_SET_REQUIRED")
+        if (
+            hashlib.sha256(self._public_keyring_raw).hexdigest()
+            != self._expected_keyring_sha256
+        ):
+            raise WindowsFenceCeremonyError("CEREMONY_TRUST_KEYRING_PIN_MISMATCH")
+        try:
+            pins = canonical_public_keyring_v1(
+                self._public_keyring_raw, self._expected_keyring_sha256
+            )
+            preflight = require_fresh_zero_preflight_v1(
+                artifacts["zero_preflight"], pin=pins.observer, now=self._now
+            ).value
+            manifest = verify_public_artifact_v1(
+                artifacts["manifest"], pin=pins.manifest
+            ).value
+            publish = verify_public_artifact_v1(
+                artifacts["publish_receipt"], pin=pins.observer
+            ).value
+            restart = verify_public_artifact_v1(
+                artifacts["restart_authorization"], pin=pins.restart
+            ).value
+            preflight_sha = hashlib.sha256(artifacts["zero_preflight"]).hexdigest()
+            manifest_sha = hashlib.sha256(artifacts["manifest"]).hexdigest()
+            publish_sha = hashlib.sha256(artifacts["publish_receipt"]).hexdigest()
+            if (
+                manifest.get("schema_version")
+                != "windows_rpc_durable_fence_install_manifest_v1"
+                or publish.get("schema_version")
+                != "windows_rpc_durable_fence_publish_receipt_v1"
+                or restart.get("schema_version")
+                != "windows_rpc_durable_fence_restart_authorization_v1"
+                or manifest.get("preflight_receipt_raw_sha256") != preflight_sha
+                or publish.get("install_manifest_raw_sha256") != manifest_sha
+                or publish.get("preflight_receipt_raw_sha256") != preflight_sha
+                or restart.get("install_manifest_raw_sha256") != manifest_sha
+                or restart.get("preflight_receipt_raw_sha256") != preflight_sha
+                or restart.get("publish_receipt_raw_sha256") != publish_sha
+                or manifest.get("restart_authorized") is not False
+                or manifest.get("automatic_restart_allowed") is not False
+                or restart.get("restart_authorized") is not True
+                or restart.get("automatic_restart_allowed") is not False
+                or restart.get("maximum_restart_dispatches") != 1
+                or restart.get("dispatch_consumption_required") is not True
+                or not self._valid_restart_window(restart)
+            ):
+                raise OfflineSigningError("SIGNING_CHAIN_RESTART_AUTHORIZATION_INVALID")
+            install_attempt_id = preflight.get("install_attempt_id")
+            service_name = preflight.get("service_name")
+            if (
+                not isinstance(install_attempt_id, str)
+                or not install_attempt_id.startswith("windows-fence-install-")
+                or not isinstance(service_name, str)
+                or not service_name
+                or any(
+                    item.get("install_attempt_id") != install_attempt_id
+                    or item.get("service_name") != service_name
+                    for item in (manifest, publish, restart)
+                )
+            ):
+                raise OfflineSigningError("SIGNING_CHAIN_IDENTITY_MISMATCH")
+        except (KeyError, OfflineSigningError, ValueError) as exc:
+            raise WindowsFenceCeremonyError(
+                "CEREMONY_LIVE_ARTIFACT_VERIFICATION_FAILED"
+            ) from exc
+        return {"install_attempt_id": install_attempt_id, "service_name": service_name}
+
+    def _valid_restart_window(self, restart: Mapping[str, Any]) -> bool:
+        try:
+            not_before = datetime.fromisoformat(
+                str(restart["not_before_utc"]).replace("Z", "+00:00")
+            ).astimezone(timezone.utc)
+            expires = datetime.fromisoformat(
+                str(restart["expires_at_utc"]).replace("Z", "+00:00")
+            ).astimezone(timezone.utc)
+        except (TypeError, ValueError):
+            return False
+        return not_before <= self._now.astimezone(timezone.utc) < expires
 
     def _verify_closure(self, artifacts: Mapping[str, bytes]) -> Mapping[str, object]:
         if (
@@ -553,7 +513,6 @@ __all__ = [
     "CeremonyReservationEvidenceV1",
     "CeremonyResultV1",
     "CeremonyStepContextV1",
-    "ImmediateLiveAuthorizationV1",
     "WindowsFenceCeremonyActionsV1",
     "WindowsFenceCeremonyError",
     "WindowsFenceCeremonyRunnerV1",

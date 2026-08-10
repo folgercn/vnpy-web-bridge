@@ -12,8 +12,8 @@ import hashlib
 import json
 import os
 import subprocess
-from ctypes import byref, create_unicode_buffer, wintypes
 from collections.abc import Mapping
+from ctypes import byref, create_unicode_buffer, wintypes
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
@@ -158,23 +158,24 @@ def _validate_fresh_zero_order_facts(value: Mapping[str, Any]) -> None:
     )
 
 
-class WindowsReadOnlyHostSeamV1(Protocol):
-    """All production methods are observations; fakes implement the same seam."""
-
-    @property
-    def is_real_windows_host(self) -> bool: ...
-
-    def query_scm_readback(self, service_name: str) -> WindowsScmReadbackV1: ...
-
-    def query_service_status(self, service_name: str) -> Mapping[str, Any]: ...
-
-    def capture_observer_facts(self, kind: str) -> Mapping[str, Any]: ...
-
-
 class WindowsReadOnlyFactsSourceV1(Protocol):
-    """Reviewed adapter for the native Windows/M2 query-only fact source."""
+    """Explicit query-only captures; no caller-selected artifact kind."""
 
-    def capture_observer_facts(self, kind: str) -> Mapping[str, Any]: ...
+    def capture_publish_receipt_facts(
+        self,
+    ) -> tuple[Mapping[str, Any], Mapping[str, bytes]]: ...
+
+    def capture_scm_dispatch_evidence_facts(
+        self,
+    ) -> tuple[Mapping[str, Any], Mapping[str, bytes]]: ...
+
+    def capture_startup_receipt_facts(
+        self,
+    ) -> tuple[Mapping[str, Any], Mapping[str, bytes]]: ...
+
+    def capture_attestation_facts(
+        self,
+    ) -> tuple[Mapping[str, Any], Mapping[str, bytes]]: ...
 
 
 class NativeWindowsReadOnlyFactsAdapterV1:
@@ -208,9 +209,10 @@ class NativeWindowsReadOnlyFactsAdapterV1:
         if os.name != "nt":
             raise WindowsHostObservationError("OBSERVER_REAL_WINDOWS_HOST_REQUIRED")
         try:
-            import win32service  # type: ignore[import-not-found]
-            import win32process  # type: ignore[import-not-found]
             from ctypes import windll
+
+            import win32process  # type: ignore[import-not-found]
+            import win32service  # type: ignore[import-not-found]
         except Exception as exc:
             raise WindowsHostObservationError(
                 "OBSERVER_NATIVE_SOURCE_UNAVAILABLE"
@@ -308,10 +310,9 @@ class NativeWindowsReadOnlyFactsAdapterV1:
         except (OverflowError, TypeError, ValueError) as exc:
             raise WindowsHostObservationError("OBSERVER_PROCESS_TIME_INVALID") from exc
 
-    def capture_observer_facts_with_raw(
-        self, kind: str
+    def _capture_native_facts_with_raw(
+        self,
     ) -> tuple[Mapping[str, Any], bytes | None, bytes | None]:
-        del kind
         ws, wp, windll = self._require_native()
         try:
             manager = ws.OpenSCManager(None, None, ws.SC_MANAGER_CONNECT)
@@ -382,9 +383,33 @@ class NativeWindowsReadOnlyFactsAdapterV1:
         )
         return facts, execution_raw, snapshot_raw
 
-    def capture_observer_facts(self, kind: str) -> Mapping[str, Any]:
-        facts, _, _ = self.capture_observer_facts_with_raw(kind)
-        return facts
+    def _explicit_facts(self) -> tuple[Mapping[str, Any], Mapping[str, bytes]]:
+        facts, execution_raw, snapshot_raw = self._capture_native_facts_with_raw()
+        assert execution_raw is not None and snapshot_raw is not None
+        return facts, {
+            "execution_facts_canonical_sha256": execution_raw,
+            "snapshot_raw_sha256": snapshot_raw,
+        }
+
+    def capture_publish_receipt_facts(
+        self,
+    ) -> tuple[Mapping[str, Any], Mapping[str, bytes]]:
+        return self._explicit_facts()
+
+    def capture_scm_dispatch_evidence_facts(
+        self,
+    ) -> tuple[Mapping[str, Any], Mapping[str, bytes]]:
+        return self._explicit_facts()
+
+    def capture_startup_receipt_facts(
+        self,
+    ) -> tuple[Mapping[str, Any], Mapping[str, bytes]]:
+        return self._explicit_facts()
+
+    def capture_attestation_facts(
+        self,
+    ) -> tuple[Mapping[str, Any], Mapping[str, bytes]]:
+        return self._explicit_facts()
 
 
 class NativeWindowsHostObserverV1:
@@ -435,71 +460,95 @@ class NativeWindowsHostObserverV1:
             "query_only": True,
         }
 
-    def capture_observer_facts(self, kind: str) -> Mapping[str, Any]:
+    def capture_publish_receipt(
+        self, *, offline_contract: WindowsReadOnlyFactsSourceV1 | None = None
+    ) -> bytes:
+        return self._capture_publish_receipt(offline_contract=offline_contract)
+
+    def capture_scm_dispatch_evidence(
+        self, *, offline_contract: WindowsReadOnlyFactsSourceV1 | None = None
+    ) -> bytes:
+        return self._capture_scm_dispatch_evidence(offline_contract=offline_contract)
+
+    def capture_startup_receipt(
+        self, *, offline_contract: WindowsReadOnlyFactsSourceV1 | None = None
+    ) -> bytes:
+        return self._capture_startup_receipt(offline_contract=offline_contract)
+
+    def capture_attestation(
+        self, *, offline_contract: WindowsReadOnlyFactsSourceV1 | None = None
+    ) -> bytes:
+        return self._capture_attestation(offline_contract=offline_contract)
+
+    def _source(
+        self, offline_contract: WindowsReadOnlyFactsSourceV1 | None
+    ) -> WindowsReadOnlyFactsSourceV1:
+        if offline_contract is not None:
+            # This explicit parameter is an offline contract seam only.  It is
+            # never selected implicitly by production code.
+            return offline_contract
         if not self.is_real_windows_host:
             raise WindowsHostObservationError("OBSERVER_REAL_WINDOWS_HOST_REQUIRED")
-        if self._facts_source is None:
-            raise WindowsHostObservationError("OBSERVER_FACT_SOURCE_UNAVAILABLE")
-        try:
-            facts = self._facts_source.capture_observer_facts(kind)
-        except Exception as exc:
-            raise WindowsHostObservationError("OBSERVER_FACT_CAPTURE_FAILED") from exc
-        if not isinstance(facts, Mapping):
-            raise WindowsHostObservationError("OBSERVER_FACT_SOURCE_INVALID")
-        return facts
-
-    def capture_draft(self, kind: str, *, seam: WindowsReadOnlyHostSeamV1) -> bytes:
-        """Build one signed-artifact draft from a read-only host seam.
-
-        The seam is deliberately the only source of facts.  There is no
-        ``facts=`` escape hatch: callers cannot hand-author an unsigned
-        preflight or substitute a fixture for the production observer.
-        Production adapters must reject non-Windows hosts; tests may use an
-        explicit fake implementing the same query-only protocol.
-        """
-        if not isinstance(kind, str) or kind not in _DRAFT_SPECS:
-            raise WindowsHostObservationError("OBSERVER_ARTIFACT_KIND_INVALID")
-        if (
-            type(seam) is not NativeWindowsHostObserverV1
-            or not seam.is_real_windows_host
-        ):
-            raise WindowsHostObservationError("OBSERVER_REAL_WINDOWS_HOST_REQUIRED")
-        draft, _, _ = self.capture_draft_with_sources(kind, seam=seam)
-        return draft
-
-    def capture_draft_with_sources(
-        self, kind: str, *, seam: WindowsReadOnlyHostSeamV1
-    ) -> tuple[bytes, bytes, bytes]:
-        if not isinstance(kind, str) or kind != "zero_preflight":
-            raise WindowsHostObservationError("OBSERVER_CANONICAL_SOURCE_REQUIRED")
-        if (
-            type(seam) is not NativeWindowsHostObserverV1
-            or not seam.is_real_windows_host
-        ):
-            raise WindowsHostObservationError("OBSERVER_REAL_WINDOWS_HOST_REQUIRED")
-        source = seam._facts_source
-        if type(source) is not NativeWindowsReadOnlyFactsAdapterV1:
+        if type(self._facts_source) is not NativeWindowsReadOnlyFactsAdapterV1:
             raise WindowsHostObservationError("OBSERVER_NATIVE_SOURCE_REQUIRED")
-        facts, execution_raw, snapshot_raw = source.capture_observer_facts_with_raw(
-            kind
+        return self._facts_source
+
+    @staticmethod
+    def _draft_from_read_only_facts(kind: str, captured: object) -> bytes:
+        try:
+            facts, raw_bindings = captured  # type: ignore[misc]
+        except (TypeError, ValueError) as exc:
+            raise WindowsHostObservationError("OBSERVER_FACT_SOURCE_INVALID") from exc
+        if not isinstance(facts, Mapping) or not isinstance(raw_bindings, Mapping):
+            raise WindowsHostObservationError("OBSERVER_FACT_SOURCE_INVALID")
+        for field, raw in raw_bindings.items():
+            if (
+                not isinstance(field, str)
+                or not field.endswith("_raw_sha256")
+                or type(raw) is not bytes
+                or facts.get(field) != hashlib.sha256(raw).hexdigest()
+            ):
+                raise WindowsHostObservationError("OBSERVER_RAW_BINDING_MISMATCH")
+        if not raw_bindings:
+            raise WindowsHostObservationError("OBSERVER_RAW_BINDING_REQUIRED")
+        return _canonical_observer_draft_v1(kind, facts)
+
+    def _capture_publish_receipt(
+        self, *, offline_contract: WindowsReadOnlyFactsSourceV1 | None
+    ) -> bytes:
+        return self._draft_from_read_only_facts(
+            "publish_receipt",
+            self._source(offline_contract).capture_publish_receipt_facts(),
         )
-        if execution_raw is None or snapshot_raw is None:
-            raise WindowsHostObservationError("OBSERVER_CANONICAL_SOURCE_REQUIRED")
-        if (
-            facts.get("execution_facts_canonical_sha256")
-            != hashlib.sha256(execution_raw).hexdigest()
-            or facts.get("snapshot_raw_sha256")
-            != hashlib.sha256(snapshot_raw).hexdigest()
-        ):
-            raise WindowsHostObservationError("OBSERVER_CANONICAL_SOURCE_HASH_MISMATCH")
-        return _canonical_observer_draft_v1(kind, facts), execution_raw, snapshot_raw
+
+    def _capture_scm_dispatch_evidence(
+        self, *, offline_contract: WindowsReadOnlyFactsSourceV1 | None
+    ) -> bytes:
+        return self._draft_from_read_only_facts(
+            "scm_dispatch_evidence",
+            self._source(offline_contract).capture_scm_dispatch_evidence_facts(),
+        )
+
+    def _capture_startup_receipt(
+        self, *, offline_contract: WindowsReadOnlyFactsSourceV1 | None
+    ) -> bytes:
+        return self._draft_from_read_only_facts(
+            "startup_receipt",
+            self._source(offline_contract).capture_startup_receipt_facts(),
+        )
+
+    def _capture_attestation(
+        self, *, offline_contract: WindowsReadOnlyFactsSourceV1 | None
+    ) -> bytes:
+        return self._draft_from_read_only_facts(
+            "attestation", self._source(offline_contract).capture_attestation_facts()
+        )
 
 
 __all__ = [
     "NativeWindowsHostObserverV1",
     "NativeWindowsReadOnlyFactsAdapterV1",
     "WindowsHostObservationError",
-    "WindowsReadOnlyHostSeamV1",
     "WindowsReadOnlyFactsSourceV1",
     "_canonical_observer_draft_v1",
 ]
