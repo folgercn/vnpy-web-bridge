@@ -22,7 +22,10 @@ from .installer_trust_anchor_v1 import (
     load_production_installer_trust_anchor_v1,
     validate_anchor_keyring_bytes_v1,
 )
-from .installer_windows_v1 import FinalWindowsFenceInstallerV1
+from .installer_windows_v1 import (
+    FinalWindowsFenceInstallerV1,
+    WindowsFinalInstallerError,
+)
 from .native_windows_installer_host_v1 import NativeWindowsFenceInstallerHostV1
 from .offline_signing_v1 import (
     OfflineSigningError,
@@ -105,15 +108,26 @@ class WindowsFenceCeremonyActionsV1(Protocol):
         *,
         context: CeremonyStepContextV1,
         signed_restart_authorization: bytes,
+        scm_dispatch_evidence_raw: bytes,
     ) -> CeremonyEventEvidenceV1: ...
+
+    def capture_scm_dispatch_evidence_draft(
+        self, *, context: CeremonyStepContextV1
+    ) -> bytes: ...
 
     def await_event_6(
-        self, *, context: CeremonyStepContextV1
+        self, *, context: CeremonyStepContextV1, startup_receipt_raw: bytes
     ) -> CeremonyEventEvidenceV1: ...
 
-    def await_event_7(
+    def capture_startup_receipt_draft(
         self, *, context: CeremonyStepContextV1
+    ) -> bytes: ...
+
+    def await_event_7(
+        self, *, context: CeremonyStepContextV1, attestation_raw: bytes
     ) -> CeremonyEventEvidenceV1: ...
+
+    def capture_attestation_draft(self, *, context: CeremonyStepContextV1) -> bytes: ...
 
     def query_same_attempt_only(
         self, *, context: CeremonyStepContextV1, cause: str
@@ -134,7 +148,9 @@ class NativeWindowsFenceCeremonyActionsV1:
 
     This is intentionally not a second installer or ledger.  It turns the
     existing journal records and observer drafts into the runner's opaque
-    evidence objects.  Missing production observer capabilities remain
+    evidence objects.  Drafts are handed to the existing offline v1 observer
+    signer; only its verified raw output is joined into Events 5-7. Missing
+    production observer capabilities remain
     terminal and are handled by the runner's same-attempt query-only rule.
     """
 
@@ -221,40 +237,51 @@ class NativeWindowsFenceCeremonyActionsV1:
         *,
         context: CeremonyStepContextV1,
         signed_restart_authorization: bytes,
+        scm_dispatch_evidence_raw: bytes,
     ) -> CeremonyEventEvidenceV1:
         raw = self._installer.dispatch_reserved_restart_once(
-            restart_authorization_raw=signed_restart_authorization
+            restart_authorization_raw=signed_restart_authorization,
+            scm_dispatch_evidence_raw=scm_dispatch_evidence_raw,
         )
-        # The unsigned draft is handed to the existing offline signer outside
-        # this process.  A missing protected SCM audit source fails closed here.
-        self._observer.capture_scm_dispatch_evidence()
         return self._event(context, 5, raw)
 
-    def await_event_6(
+    def capture_scm_dispatch_evidence_draft(
         self, *, context: CeremonyStepContextV1
+    ) -> bytes:
+        del context
+        return self._observer.capture_scm_dispatch_evidence()
+
+    def await_event_6(
+        self, *, context: CeremonyStepContextV1, startup_receipt_raw: bytes
     ) -> CeremonyEventEvidenceV1:
         self._installer.query_service_runtime_readback()
-        draft = self._observer.capture_startup_receipt()
         return self._event(
             context,
             6,
             self._installer.append_observation_event(
-                event_sequence=6, observation_raw=draft
+                event_sequence=6, observation_raw=startup_receipt_raw
             ),
         )
 
+    def capture_startup_receipt_draft(self, *, context: CeremonyStepContextV1) -> bytes:
+        del context
+        return self._observer.capture_startup_receipt()
+
     def await_event_7(
-        self, *, context: CeremonyStepContextV1
+        self, *, context: CeremonyStepContextV1, attestation_raw: bytes
     ) -> CeremonyEventEvidenceV1:
         self._installer.query_service_runtime_readback()
-        draft = self._observer.capture_attestation()
         return self._event(
             context,
             7,
             self._installer.append_observation_event(
-                event_sequence=7, observation_raw=draft
+                event_sequence=7, observation_raw=attestation_raw
             ),
         )
+
+    def capture_attestation_draft(self, *, context: CeremonyStepContextV1) -> bytes:
+        del context
+        return self._observer.capture_attestation()
 
     def query_same_attempt_only(
         self, *, context: CeremonyStepContextV1, cause: str
@@ -267,7 +294,7 @@ class NativeWindowsFenceCeremonyActionsV1:
                 raw = self._installer.read_event_readback(event_sequence=sequence)
                 frontier = sequence
                 break
-            except Exception:
+            except WindowsFinalInstallerError:
                 continue
         if frontier >= 3:
             self._installer.query_unknown_restart_only()
@@ -393,10 +420,11 @@ class WindowsFenceCeremonyRunnerV1:
             context=context,
             sequence=5,
             cause="event_5_restart_unknown",
-            action=lambda: self._reserve_and_dispatch_event_5(
+            action=lambda: self._capture_and_dispatch_event_5(
                 actions,
                 context=context,
                 signed_restart_authorization=artifacts["restart_authorization"],
+                artifacts=artifacts,
             ),
         )
         context = self._next_context(context, event_5)
@@ -405,7 +433,9 @@ class WindowsFenceCeremonyRunnerV1:
             context=context,
             sequence=6,
             cause="event_6_unknown",
-            action=lambda: actions.await_event_6(context=context),
+            action=lambda: self._capture_and_await_event_6(
+                actions, context=context, artifacts=artifacts
+            ),
         )
         context = self._next_context(context, event_6)
         self._run_post_event3_step(
@@ -413,7 +443,9 @@ class WindowsFenceCeremonyRunnerV1:
             context=context,
             sequence=7,
             cause="event_7_unknown",
-            action=lambda: actions.await_event_7(context=context),
+            action=lambda: self._capture_and_await_event_7(
+                actions, context=context, artifacts=artifacts
+            ),
         )
         return CeremonyResultV1(
             mode="live",
@@ -423,16 +455,54 @@ class WindowsFenceCeremonyRunnerV1:
             restart_dispatches=1,
         )
 
-    def _reserve_and_dispatch_event_5(
+    def _capture_and_dispatch_event_5(
         self,
         actions: WindowsFenceCeremonyActionsV1,
         *,
         context: CeremonyStepContextV1,
         signed_restart_authorization: bytes,
+        artifacts: Mapping[str, bytes],
     ) -> CeremonyEventEvidenceV1:
-        return actions.dispatch_restart_once_for_event_5(
-            context=context, signed_restart_authorization=signed_restart_authorization
+        scm_dispatch_evidence_raw = self._verify_observer_handoff(
+            draft=actions.capture_scm_dispatch_evidence_draft(context=context),
+            raw=artifacts["scm_dispatch_evidence"],
+            expected_schema="windows_rpc_durable_fence_scm_dispatch_evidence_v1",
         )
+        return actions.dispatch_restart_once_for_event_5(
+            context=context,
+            signed_restart_authorization=signed_restart_authorization,
+            scm_dispatch_evidence_raw=scm_dispatch_evidence_raw,
+        )
+
+    def _capture_and_await_event_6(
+        self,
+        actions: WindowsFenceCeremonyActionsV1,
+        *,
+        context: CeremonyStepContextV1,
+        artifacts: Mapping[str, bytes],
+    ) -> CeremonyEventEvidenceV1:
+        startup_receipt_raw = self._verify_observer_handoff(
+            draft=actions.capture_startup_receipt_draft(context=context),
+            raw=artifacts["startup_receipt"],
+            expected_schema="windows_rpc_durable_fence_startup_receipt_v1",
+        )
+        return actions.await_event_6(
+            context=context, startup_receipt_raw=startup_receipt_raw
+        )
+
+    def _capture_and_await_event_7(
+        self,
+        actions: WindowsFenceCeremonyActionsV1,
+        *,
+        context: CeremonyStepContextV1,
+        artifacts: Mapping[str, bytes],
+    ) -> CeremonyEventEvidenceV1:
+        attestation_raw = self._verify_observer_handoff(
+            draft=actions.capture_attestation_draft(context=context),
+            raw=artifacts["attestation"],
+            expected_schema="windows_rpc_durable_fence_foundation_attestation_v1",
+        )
+        return actions.await_event_7(context=context, attestation_raw=attestation_raw)
 
     @staticmethod
     def _next_context(
@@ -542,6 +612,9 @@ class WindowsFenceCeremonyRunnerV1:
             "manifest",
             "publish_receipt",
             "restart_authorization",
+            "scm_dispatch_evidence",
+            "startup_receipt",
+            "attestation",
         }
         if set(artifacts) != required or any(
             type(raw) is not bytes or not raw for raw in artifacts.values()
@@ -592,6 +665,31 @@ class WindowsFenceCeremonyRunnerV1:
             "preflight": preflight,
             "manifest": manifest,
         }
+
+    def _verify_observer_handoff(
+        self, *, draft: bytes, raw: bytes, expected_schema: str
+    ) -> bytes:
+        """Accept only the existing v1 signer output for this exact draft."""
+        if type(draft) is not bytes or not draft or type(raw) is not bytes or not raw:
+            raise WindowsFenceCeremonyError("CEREMONY_OBSERVER_HANDOFF_INVALID")
+        try:
+            pins = canonical_public_keyring_v1(
+                self._public_keyring_raw, self._expected_keyring_sha256
+            )
+            verified = verify_public_artifact_v1(raw, pin=pins.observer).value
+            unsigned = {
+                key: value for key, value in verified.items() if key != "signature"
+            }
+            if (
+                verified.get("schema_version") != expected_schema
+                or canonical_json_bytes(unsigned) != draft
+            ):
+                raise OfflineSigningError("SIGNING_OBSERVER_HANDOFF_MISMATCH")
+        except (OfflineSigningError, ValueError) as exc:
+            raise WindowsFenceCeremonyError(
+                "CEREMONY_OBSERVER_HANDOFF_VERIFICATION_FAILED"
+            ) from exc
+        return raw
 
     def _verify_signed_publish_receipt(
         self,
@@ -733,11 +831,11 @@ if __name__ == "__main__":
 
 __all__ = [
     "CeremonyEventEvidenceV1",
-    "NativeWindowsFenceCeremonyActionsV1",
     "CeremonyQueryEvidenceV1",
     "CeremonyReservationEvidenceV1",
     "CeremonyResultV1",
     "CeremonyStepContextV1",
+    "NativeWindowsFenceCeremonyActionsV1",
     "WindowsFenceCeremonyActionsV1",
     "WindowsFenceCeremonyError",
     "WindowsFenceCeremonyRunnerV1",

@@ -26,6 +26,7 @@ from scripts.windows_fence_foundation.offline_signing_v1 import (
     sign_artifact_with_fd_v1,
     verify_public_artifact_v1,
     write_audit_create_only_v1,
+    write_binary_create_only_v1,
     write_canonical_create_only_v1,
 )
 from scripts.windows_fence_foundation.trust_pins_v1 import (
@@ -189,6 +190,23 @@ def test_fd_only_sign_verify_and_create_only_audit(tmp_path: Path) -> None:
     assert write_audit_create_only_v1(audit, artifact_raw=raw, action="unit")
     with pytest.raises(OfflineSigningError, match="OUTPUT_EXISTS"):
         write_canonical_create_only_v1(artifact, signed)
+
+
+def test_windows_offline_output_contract_skips_only_posix_owner_mode_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Windows CI must not interpret POSIX mode bits as an ACL verdict."""
+    parent = tmp_path / "windows-temp"
+    parent.mkdir(mode=0o755)
+    parent.chmod(0o755)
+    if os.name != "nt":
+        with pytest.raises(OfflineSigningError, match="OUTPUT_PARENT_UNSAFE"):
+            write_canonical_create_only_v1(parent / "posix-rejected.json", {"v": 1})
+    monkeypatch.setattr(
+        offline_signing, "_posix_owner_mode_proof_required_v1", lambda: False
+    )
+    assert write_canonical_create_only_v1(parent / "windows.json", {"v": 1})
+    assert write_binary_create_only_v1(parent / "windows.raw", b"offline-contract")
 
 
 @pytest.mark.parametrize(

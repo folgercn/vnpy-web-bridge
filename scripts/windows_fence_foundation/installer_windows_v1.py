@@ -554,7 +554,7 @@ class FinalWindowsFenceInstallerV1:
             raise WindowsFinalInstallerError("INSTALL_EVENT_READBACK_FAILED") from exc
 
     def dispatch_reserved_restart_once(
-        self, *, restart_authorization_raw: bytes
+        self, *, restart_authorization_raw: bytes, scm_dispatch_evidence_raw: bytes
     ) -> bytes:
         """The only Event5 mutation, after existing Event3/4 completion."""
         if self._checkpoint is not InstallCheckpointV1.TARGET_READY:
@@ -564,6 +564,11 @@ class FinalWindowsFenceInstallerV1:
             or not restart_authorization_raw
         ):
             raise WindowsFinalInstallerError("INSTALL_RESTART_AUTHORIZATION_INVALID")
+        if (
+            type(scm_dispatch_evidence_raw) is not bytes
+            or not scm_dispatch_evidence_raw
+        ):
+            raise WindowsFinalInstallerError("INSTALL_SCM_DISPATCH_EVIDENCE_INVALID")
         dispatch = getattr(self._host, "dispatch_reserved_restart_once", None)
         if not callable(dispatch):
             raise WindowsFinalInstallerError("INSTALL_RESTART_DISPATCH_UNAVAILABLE")
@@ -573,6 +578,9 @@ class FinalWindowsFenceInstallerV1:
                 service_name=self._manifest["service_name"],
                 restart_authorization_raw_sha256=hashlib.sha256(
                     restart_authorization_raw
+                ).hexdigest(),
+                scm_dispatch_evidence_raw_sha256=hashlib.sha256(
+                    scm_dispatch_evidence_raw
                 ).hexdigest(),
             )
         except WindowsFinalInstallerError:

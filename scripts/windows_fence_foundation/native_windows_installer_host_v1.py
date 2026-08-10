@@ -658,12 +658,15 @@ class NativeWindowsFenceInstallerHostV1(WindowsFenceInstallerHostV1):
         install_attempt_id: str,
         service_name: str,
         restart_authorization_raw_sha256: str,
+        scm_dispatch_evidence_raw_sha256: str,
     ) -> bytes:
         """Append Event5 to the existing journal before the sole SCM dispatch."""
         self._require_windows()
         if (
             not isinstance(restart_authorization_raw_sha256, str)
             or len(restart_authorization_raw_sha256) != 64
+            or not isinstance(scm_dispatch_evidence_raw_sha256, str)
+            or len(scm_dispatch_evidence_raw_sha256) != 64
         ):
             raise WindowsFinalInstallerError("SCM_RESTART_AUTHORIZATION_INVALID")
         # Event 3 is the pre-existing durable reservation.  Reading it before
@@ -683,20 +686,13 @@ class NativeWindowsFenceInstallerHostV1(WindowsFenceInstallerHostV1):
             # create-only idempotence must never be interpreted as permission
             # to call SCM twice.
             raise WindowsFinalInstallerError("SCM_RESTART_ALREADY_DISPATCHED")
-        details = hashlib.sha256(
-            canonical_json_bytes(
-                {
-                    "install_attempt_id": install_attempt_id,
-                    "service_name": service_name,
-                    "restart_authorization_raw_sha256": restart_authorization_raw_sha256,
-                }
-            )
-        ).hexdigest()
         self.append_install_event_create_only(
             install_attempt_id=install_attempt_id,
             event_sequence=5,
             state="RESTART_DISPATCHED_FROZEN",
-            details_sha256=details,
+            # This is the existing Event5 raw-hash join.  A synthetic hash of
+            # restart inputs cannot substitute for signed SCM audit evidence.
+            details_sha256=scm_dispatch_evidence_raw_sha256,
         )
         ws = self._win32()
         manager = service = None

@@ -342,6 +342,11 @@ class NativeWindowsHostObserverV1:
             # This explicit parameter is an offline contract seam only.  It is
             # never selected implicitly by production code.
             return offline_contract
+        # A default observer has no facts source by construction.  Report that
+        # stable configuration error before checking the host platform, so the
+        # offline and Windows CI contracts do not diverge.
+        if self._facts_source is None:
+            raise WindowsHostObservationError("OBSERVER_NATIVE_SOURCE_REQUIRED")
         if not self.is_real_windows_host:
             raise WindowsHostObservationError("OBSERVER_REAL_WINDOWS_HOST_REQUIRED")
         if type(self._facts_source) is not NativeWindowsReadOnlyFactsAdapterV1:

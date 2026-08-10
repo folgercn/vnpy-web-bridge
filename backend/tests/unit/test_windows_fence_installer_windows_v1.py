@@ -78,6 +78,7 @@ class _Host:
         self.restored = False
         self.events: list[int] = []
         self.applied: list[dict[str, object]] = []
+        self.restart_dispatch: dict[str, object] | None = None
 
     def query_scm_readback(self, _service: str) -> WindowsScmReadbackV1:
         return self.current
@@ -126,6 +127,10 @@ class _Host:
 
     def query_same_restart_attempt_only(self, **_kwargs: object) -> str:
         return "QUERY_ONLY"
+
+    def dispatch_reserved_restart_once(self, **kwargs: object) -> bytes:
+        self.restart_dispatch = dict(kwargs)
+        return b"event-5"
 
 
 def _installer(
@@ -323,6 +328,27 @@ def test_event3_applies_and_reads_safety_before_target_and_event4() -> None:
     ]
     assert host.applied[0]["image_path"] != host.applied[1]["image_path"]
     assert host.events == [1, 2, 3, 4]
+
+
+def test_event5_joins_verified_scm_dispatch_artifact_raw_hash() -> None:
+    host = _Host()
+    installer = _installer(host)
+    installer.stage_and_publish(bundle_raw=b"fixed")
+    installer.reserve_event3_and_apply_target()
+    restart_raw = b"signed-restart-authorization"
+    scm_raw = b"signed-scm-dispatch-evidence"
+    assert (
+        installer.dispatch_reserved_restart_once(
+            restart_authorization_raw=restart_raw, scm_dispatch_evidence_raw=scm_raw
+        )
+        == b"event-5"
+    )
+    assert host.restart_dispatch == {
+        "install_attempt_id": "windows-fence-install-" + SHA,
+        "service_name": "VnpyRpcService",
+        "restart_authorization_raw_sha256": hashlib.sha256(restart_raw).hexdigest(),
+        "scm_dispatch_evidence_raw_sha256": hashlib.sha256(scm_raw).hexdigest(),
+    }
 
 
 def test_target_transition_requires_pythonclass_and_pythonpath_readback() -> None:

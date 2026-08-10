@@ -106,7 +106,7 @@ def test_observer_raw_fact_hash_mismatch_fails_closed() -> None:
 
 
 def test_observer_default_requires_real_windows_native_capability() -> None:
-    with pytest.raises(WindowsHostObservationError, match="REAL_WINDOWS_HOST_REQUIRED"):
+    with pytest.raises(WindowsHostObservationError, match="NATIVE_SOURCE_REQUIRED"):
         NativeWindowsHostObserverV1().capture_attestation()
 
 
@@ -119,11 +119,20 @@ def test_observer_production_constructor_has_no_command_or_fact_arguments() -> N
         )
 
 
+def _unsigned_observer_draft(raw: bytes) -> bytes:
+    value = json.loads(raw)
+    value.pop("signature")
+    return json.dumps(value, separators=(",", ":"), sort_keys=True).encode()
+
+
 class _Actions:
-    def __init__(self, fail_at: str | None = None) -> None:
+    def __init__(
+        self, observer_artifacts: dict[str, bytes], fail_at: str | None = None
+    ) -> None:
         self.calls: list[str] = []
         self.fail_at = fail_at
         self.restart_dispatches = 0
+        self.observer_artifacts = observer_artifacts
 
     @staticmethod
     def _event(
@@ -167,20 +176,42 @@ class _Actions:
         return self._event(context, 4)
 
     def dispatch_restart_once_for_event_5(
-        self, *, context: CeremonyStepContextV1, signed_restart_authorization: bytes
+        self,
+        *,
+        context: CeremonyStepContextV1,
+        signed_restart_authorization: bytes,
+        scm_dispatch_evidence_raw: bytes,
     ):
-        assert signed_restart_authorization
+        assert signed_restart_authorization and scm_dispatch_evidence_raw
         self._call("event_5")
         self.restart_dispatches += 1
         return self._event(context, 5)
 
-    def await_event_6(self, *, context: CeremonyStepContextV1):
+    def capture_scm_dispatch_evidence_draft(self, *, context: CeremonyStepContextV1):
+        del context
+        return _unsigned_observer_draft(
+            self.observer_artifacts["scm_dispatch_evidence"]
+        )
+
+    def await_event_6(
+        self, *, context: CeremonyStepContextV1, startup_receipt_raw: bytes
+    ):
+        assert startup_receipt_raw
         self._call("event_6")
         return self._event(context, 6)
 
-    def await_event_7(self, *, context: CeremonyStepContextV1):
+    def capture_startup_receipt_draft(self, *, context: CeremonyStepContextV1):
+        del context
+        return _unsigned_observer_draft(self.observer_artifacts["startup_receipt"])
+
+    def await_event_7(self, *, context: CeremonyStepContextV1, attestation_raw: bytes):
+        assert attestation_raw
         self._call("event_7")
         return self._event(context, 7)
+
+    def capture_attestation_draft(self, *, context: CeremonyStepContextV1):
+        del context
+        return _unsigned_observer_draft(self.observer_artifacts["attestation"])
 
     def query_same_attempt_only(self, *, context: CeremonyStepContextV1, cause: str):
         self.calls.append(f"query:{cause}")
@@ -209,6 +240,9 @@ def _live_artifacts(tmp_path):
             "manifest",
             "publish_receipt",
             "restart_authorization",
+            "scm_dispatch_evidence",
+            "startup_receipt",
+            "attestation",
         )
     }, keyring
 
@@ -217,7 +251,7 @@ def test_live_admission_requires_signed_v1_artifacts_and_reuses_event_journal(
     tmp_path,
 ) -> None:
     artifacts, keyring = _live_artifacts(tmp_path)
-    actions = _Actions()
+    actions = _Actions(artifacts)
     result = _runner(keyring).run_once(
         artifacts=artifacts, dry_run=False, actions=actions
     )
@@ -236,7 +270,7 @@ def test_live_admission_requires_signed_v1_artifacts_and_reuses_event_journal(
 
 def test_live_event3_failure_is_query_only_and_never_restarts(tmp_path) -> None:
     artifacts, keyring = _live_artifacts(tmp_path)
-    actions = _Actions(fail_at="event_3")
+    actions = _Actions(artifacts, fail_at="event_3")
     with pytest.raises(WindowsFenceCeremonyError, match="POST_EVENT3_QUERY_ONLY"):
         _runner(keyring).run_once(artifacts=artifacts, dry_run=False, actions=actions)
     assert actions.calls == [
@@ -307,11 +341,28 @@ def test_live_event4_to_7_failures_are_query_only_and_never_retry_restart(
     tmp_path, fail_at, expected_calls, restart_dispatches
 ) -> None:
     artifacts, keyring = _live_artifacts(tmp_path)
-    actions = _Actions(fail_at=fail_at)
+    actions = _Actions(artifacts, fail_at=fail_at)
     with pytest.raises(WindowsFenceCeremonyError, match="POST_EVENT3_QUERY_ONLY"):
         _runner(keyring).run_once(artifacts=artifacts, dry_run=False, actions=actions)
     assert actions.calls == expected_calls
     assert actions.restart_dispatches == restart_dispatches
+
+
+def test_live_rejects_signed_observer_artifact_for_a_different_draft(tmp_path) -> None:
+    artifacts, keyring = _live_artifacts(tmp_path)
+    actions = _Actions(dict(artifacts))
+    actions.observer_artifacts["startup_receipt"] = artifacts["attestation"]
+    with pytest.raises(WindowsFenceCeremonyError, match="POST_EVENT3_QUERY_ONLY"):
+        _runner(keyring).run_once(artifacts=artifacts, dry_run=False, actions=actions)
+    assert actions.calls == [
+        "query:attempt_frontier",
+        "events_1_to_2",
+        "event_3",
+        "event_4",
+        "event_5",
+        "query:event_6_unknown",
+    ]
+    assert actions.restart_dispatches == 1
 
 
 def test_concrete_native_actions_reject_test_doubles() -> None:
@@ -326,7 +377,7 @@ def test_concrete_native_actions_reject_test_doubles() -> None:
 def test_live_rejects_missing_signed_artifact_before_action(tmp_path) -> None:
     artifacts, keyring = _live_artifacts(tmp_path)
     artifacts.pop("publish_receipt")
-    actions = _Actions()
+    actions = _Actions(artifacts)
     with pytest.raises(WindowsFenceCeremonyError, match="LIVE_ARTIFACT_SET_REQUIRED"):
         _runner(keyring).run_once(artifacts=artifacts, dry_run=False, actions=actions)
     assert actions.calls == []

@@ -454,6 +454,35 @@ def require_fresh_zero_preflight_v1(
     return verified
 
 
+def _posix_owner_mode_proof_required_v1() -> bool:
+    """Windows native ACL checks are a separate production seam."""
+    return os.name != "nt"
+
+
+def _write_create_only_windows_v1(path: Path, raw: bytes) -> bytes:
+    """Windows CI/offline create-only write without POSIX dirfd assumptions.
+
+    This cannot make production signing ready: the production private-key FD
+    proof remains fail-closed on Windows, while the native durable journal
+    retains its handle-anchored protected-ACL gate.
+    """
+    try:
+        if path.parent.is_symlink() or path.is_symlink():
+            raise OfflineSigningError("SIGNING_OUTPUT_PARENT_UNSAFE")
+        with path.open("xb") as output:
+            output.write(raw)
+            output.flush()
+            os.fsync(output.fileno())
+        observed = path.read_bytes()
+    except FileExistsError as exc:
+        raise OfflineSigningError("SIGNING_OUTPUT_EXISTS") from exc
+    except OSError as exc:
+        raise OfflineSigningError("SIGNING_OUTPUT_WRITE_FAILED") from exc
+    if observed != raw:
+        raise OfflineSigningError("SIGNING_OUTPUT_READBACK_MISMATCH")
+    return raw
+
+
 def write_canonical_create_only_v1(path: Path, payload: Mapping[str, Any]) -> bytes:
     output = Path(path)
     if not output.is_absolute():
@@ -467,6 +496,11 @@ def write_canonical_create_only_v1(path: Path, payload: Mapping[str, Any]) -> by
     ):
         raise OfflineSigningError("SIGNING_OUTPUT_PARENT_UNSAFE")
     raw = canonical_json_bytes(dict(payload))
+    if os.name == "nt":
+        observed = _write_create_only_windows_v1(output, raw)
+        if _strict_object(observed) != dict(payload):
+            raise OfflineSigningError("SIGNING_OUTPUT_READBACK_MISMATCH")
+        return observed
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     try:
         directory = os.open(
@@ -475,10 +509,12 @@ def write_canonical_create_only_v1(path: Path, payload: Mapping[str, Any]) -> by
         )
         try:
             before = os.fstat(directory)
-            if (
-                not stat.S_ISDIR(before.st_mode)
-                or before.st_uid != os.geteuid()
-                or stat.S_IMODE(before.st_mode) & 0o077
+            if not stat.S_ISDIR(before.st_mode) or (
+                _posix_owner_mode_proof_required_v1()
+                and (
+                    before.st_uid != os.geteuid()
+                    or stat.S_IMODE(before.st_mode) & 0o077
+                )
             ):
                 raise OfflineSigningError("SIGNING_OUTPUT_PARENT_UNSAFE")
             descriptor = os.open(output.name, flags, 0o600, dir_fd=directory)
@@ -496,8 +532,13 @@ def write_canonical_create_only_v1(path: Path, payload: Mapping[str, Any]) -> by
                 (created.st_dev, created.st_ino, created.st_size)
                 != (observed_info.st_dev, observed_info.st_ino, observed_info.st_size)
                 or (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
-                or observed_info.st_uid != os.geteuid()
-                or stat.S_IMODE(observed_info.st_mode) & 0o077
+                or (
+                    _posix_owner_mode_proof_required_v1()
+                    and (
+                        observed_info.st_uid != os.geteuid()
+                        or stat.S_IMODE(observed_info.st_mode) & 0o077
+                    )
+                )
                 or not stat.S_ISREG(observed_info.st_mode)
             ):
                 raise OfflineSigningError("SIGNING_OUTPUT_READBACK_MISMATCH")
@@ -532,16 +573,17 @@ def write_binary_create_only_v1(path: Path, raw: bytes) -> str:
     parent = output.parent.resolve(strict=True)
     if parent != output.parent or output.name in {"", ".", ".."}:
         raise OfflineSigningError("SIGNING_OUTPUT_PARENT_UNSAFE")
+    if os.name == "nt":
+        return hashlib.sha256(_write_create_only_windows_v1(output, raw)).hexdigest()
     directory = os.open(
         parent,
         os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
     )
     try:
         before = os.fstat(directory)
-        if (
-            not stat.S_ISDIR(before.st_mode)
-            or before.st_uid != os.geteuid()
-            or stat.S_IMODE(before.st_mode) & 0o077
+        if not stat.S_ISDIR(before.st_mode) or (
+            _posix_owner_mode_proof_required_v1()
+            and (before.st_uid != os.geteuid() or stat.S_IMODE(before.st_mode) & 0o077)
         ):
             raise OfflineSigningError("SIGNING_OUTPUT_PARENT_UNSAFE")
         descriptor = os.open(
