@@ -174,6 +174,21 @@ def _load_verified_foundation_exports() -> tuple[Any, ...]:
 ) = _load_verified_foundation_exports()
 
 _RPC_ADDRESS_RE = re.compile(r"^tcp://(?:\*|127\.0\.0\.1|\[::1\]):[1-9][0-9]{0,4}$")
+_VALIDATION_GATEWAY_NAME = "CTP"
+_VALIDATION_ACCOUNT_SCOPE = "account:windows"
+_VALIDATION_ENVIRONMENT = "simnow"
+_VALIDATION_DURABLE_STORE_PATH = r"C:\quant\durable\execution-final-admission-v1.json"
+_VALIDATION_TRANSIENT_RPC_METHODS = frozenset(
+    {
+        "install_fence_v1",
+        "register_receipt_v1",
+        "send_order_fenced_v1",
+        "cancel_order_fenced_v1",
+        "query_intent_v1",
+        "get_execution_snapshot_v1",
+        "peek_current_facts_v1",
+    }
+)
 _ASSEMBLY_COMPONENTS = (
     "__init__.py",
     "admission.py",
@@ -493,9 +508,12 @@ class _WindowsExecutionFactsV1:
         self,
         runtime: _WindowsRpcRuntimeV1,
         config: WindowsRpcRuntimeConfigV1 | None = None,
+        *,
+        require_fixed_gateway: bool = False,
     ) -> None:
         self.runtime = runtime
         self.config = config or runtime.config
+        self.require_fixed_gateway = require_fixed_gateway
         self._lock = RLock()
         self._admission: WindowsRpcFencedAdmissionV1 | None = None
         self._intent_orders: dict[str, str] = {}
@@ -564,6 +582,17 @@ class _WindowsExecutionFactsV1:
         ]
         return {self._key(row, "vt_accountid", "accountid"): row for row in rows}
 
+    def _require_fixed_gateway(
+        self, rows: Mapping[str, Mapping[str, Any]], *, kind: str
+    ) -> None:
+        if any(
+            row.get("gateway_name") != self.config.gateway_name for row in rows.values()
+        ):
+            raise WindowsRpcDurableFenceDenied(
+                f"{kind} facts belong to a foreign or missing gateway",
+                code="WINDOWS_FENCE_SCOPE_INVALID",
+            )
+
     def peek_current_facts(self, request: Mapping[str, Any]) -> bytes:
         """Return canonical current facts without a disk write or generation bump."""
 
@@ -591,6 +620,11 @@ class _WindowsExecutionFactsV1:
                 for item in self._facts("get_all_active_orders")
             )
         }
+        if self.require_fixed_gateway:
+            self._require_fixed_gateway(accounts, kind="account")
+            self._require_fixed_gateway(positions, kind="position")
+            self._require_fixed_gateway(orders, kind="order")
+            self._require_fixed_gateway(active_orders, kind="active order")
         return canonical_json_bytes(
             {
                 "schema_version": "windows_execution_current_facts_v1",
@@ -910,6 +944,8 @@ def _attach_fixed_typed_fenced_methods(
     runtime: _WindowsRpcRuntimeV1,
     runtime_config: WindowsRpcRuntimeConfigV1,
     store_root: str | Path,
+    *,
+    require_fixed_gateway: bool = False,
 ) -> WindowsRpcFencedAdmissionV1:
     """Create and attach the dormant typed execution lifecycle at startup.
 
@@ -932,7 +968,11 @@ def _attach_fixed_typed_fenced_methods(
             "underlying send/cancel handlers are unavailable",
             code="RPC_MUTATION_HANDLERS_MISSING",
         )
-    facts = _WindowsExecutionFactsV1(runtime, runtime_config)
+    facts = _WindowsExecutionFactsV1(
+        runtime,
+        runtime_config,
+        require_fixed_gateway=require_fixed_gateway,
+    )
     request_factory = getattr(runtime, "execution_request_factory", None)
     if request_factory is None:
         request_factory = _VnpyExecutionRequestFactoryV1(runtime_config.gateway_name)
@@ -1003,9 +1043,155 @@ def _attach_fixed_typed_fenced_methods(
     )
     facts.bind_admission(admission)
     attach_windows_rpc_fenced_methods_v1(server, admission)
-    server.register(facts.get_execution_snapshot_v1)
-    server.register(facts.peek_current_facts_v1)
+    snapshot_handler = facts.get_execution_snapshot_v1
+    peek_handler = facts.peek_current_facts_v1
+    server.register(snapshot_handler)
+    server.register(peek_handler)
+    functions = getattr(server, "_functions", None)
+    if (
+        not isinstance(functions, Mapping)
+        or functions.get(snapshot_handler.__name__) is not snapshot_handler
+        or functions.get(peek_handler.__name__) is not peek_handler
+    ):
+        raise WindowsRpcDurableFenceError(
+            "execution facts RPC registration is incomplete",
+            code="RPC_REGISTRY_UNAVAILABLE",
+        )
     return admission
+
+
+def _replace_legacy_methods_with_permanent_frozen_denials_v1(server: Any) -> None:
+    """Install terminal FROZEN denials with no callable downstream."""
+
+    functions = getattr(server, "_functions", None)
+    if not isinstance(functions, dict):
+        raise WindowsRpcDurableFenceError(
+            "legacy RPC server registry is unavailable", code="RPC_REGISTRY_UNAVAILABLE"
+        )
+
+    def send_order(*_args: Any, **_kwargs: Any) -> None:
+        raise WindowsRpcDurableFenceDenied(
+            "send_order rejected by validation FROZEN admission",
+            code="WINDOWS_FENCE_ACTIVE_TOKEN_REQUIRED",
+        )
+
+    def cancel_order(*_args: Any, **_kwargs: Any) -> None:
+        raise WindowsRpcDurableFenceDenied(
+            "cancel_order rejected by validation FROZEN admission",
+            code="WINDOWS_FENCE_ACTIVE_TOKEN_REQUIRED",
+        )
+
+    server.register(send_order)
+    server.register(cancel_order)
+    # The legacy RpcServer dispatches directly through this registry.  Assign
+    # the exact frozen handlers too, so a partial register implementation
+    # cannot leave one original mutation callable reachable on failure paths.
+    functions["send_order"] = send_order
+    functions["cancel_order"] = cancel_order
+
+
+def _clear_validation_transient_rpc_methods_v1(server: Any) -> None:
+    """Clear partially attached validation RPCs and restore permanent denials."""
+
+    functions = getattr(server, "_functions", None)
+    if not isinstance(functions, dict):
+        raise WindowsRpcDurableFenceError(
+            "legacy RPC server registry is unavailable", code="RPC_REGISTRY_UNAVAILABLE"
+        )
+    for name in _VALIDATION_TRANSIENT_RPC_METHODS:
+        functions.pop(name, None)
+    _replace_legacy_methods_with_permanent_frozen_denials_v1(server)
+
+
+def _validation_durable_store_path_v1() -> Path:
+    """Private test seam; public callers cannot redirect this deployment path."""
+
+    return Path(_VALIDATION_DURABLE_STORE_PATH)
+
+
+def attach_windows_rpc_validation_only_v1(
+    *,
+    rpc_engine: Any,
+    event_engine: Any,
+    main_engine: Any,
+) -> None:
+    """Attach a frozen, read-only validation surface before ``rpc_engine.start``.
+
+    This public seam is intentionally for an already built legacy
+    ``RpcServiceApp`` only.  It accepts no caller-supplied handlers, starts no
+    gateway, and removes every typed mutation lifecycle RPC after the existing
+    fixed attachment has registered the read-only facts projection.
+    """
+
+    if event_engine is None or main_engine is None or rpc_engine is None:
+        raise WindowsRpcDurableFenceError(
+            "legacy vn.py runtime is incomplete", code="RPC_REGISTRY_UNAVAILABLE"
+        )
+    store_path = _validation_durable_store_path_v1()
+    if (
+        not store_path.is_absolute()
+        or store_path.name != "execution-final-admission-v1.json"
+    ):
+        raise WindowsRpcDurableFenceError(
+            "validation durable store path must be fixed and absolute",
+            code="WINDOWS_FINAL_STORE_INVALID",
+        )
+    server = getattr(rpc_engine, "server", None)
+    functions = getattr(server, "_functions", None)
+    active = getattr(server, "is_active", None)
+    if not isinstance(functions, dict) or not callable(
+        getattr(server, "register", None)
+    ):
+        raise WindowsRpcDurableFenceError(
+            "legacy RPC server registry is unavailable", code="RPC_REGISTRY_UNAVAILABLE"
+        )
+    if callable(active) and active():
+        raise WindowsRpcDurableFenceError(
+            "validation attach must run before rpc_engine.start",
+            code="RPC_LISTENER_STARTED_EARLY",
+        )
+    if getattr(server, "_windows_validation_only_attach_v1", None) is not None:
+        raise WindowsRpcDurableFenceError(
+            "validation runtime is already attached",
+            code="WINDOWS_VALIDATION_ATTACH_ALREADY_ATTACHED",
+        )
+    # Leave the sentinel behind even if a later attachment check fails: retrying
+    # a partially frozen legacy registry could recreate a mutable route.
+    server._windows_validation_only_attach_v1 = object()
+    runtime_config = WindowsRpcRuntimeConfigV1(
+        gateway_setting={"validation_only": True},
+        gateway_name=_VALIDATION_GATEWAY_NAME,
+        account_scope=_VALIDATION_ACCOUNT_SCOPE,
+        environment=_VALIDATION_ENVIRONMENT,
+    )
+    runtime = _WindowsRpcRuntimeV1(
+        event_engine=event_engine,
+        main_engine=main_engine,
+        rpc_engine=rpc_engine,
+        fact_source=main_engine,
+        config=runtime_config,
+    )
+    try:
+        # Freeze legacy names before any typed registration can occur.  The
+        # typed attachment therefore captures no live gateway callable.
+        _replace_legacy_methods_with_permanent_frozen_denials_v1(server)
+        _attach_fixed_typed_fenced_methods(
+            runtime,
+            runtime_config,
+            store_path.parent,
+            require_fixed_gateway=True,
+        )
+        functions = getattr(server, "_functions", None)
+        if not isinstance(functions, dict) or "peek_current_facts_v1" not in functions:
+            raise WindowsRpcDurableFenceError(
+                "validation facts RPC registration is incomplete",
+                code="RPC_REGISTRY_UNAVAILABLE",
+            )
+        for name in _VALIDATION_TRANSIENT_RPC_METHODS - {"peek_current_facts_v1"}:
+            functions.pop(name, None)
+    except BaseException:
+        _clear_validation_transient_rpc_methods_v1(server)
+        raise
 
 
 def _production_windows_filesystem() -> WindowsFilesystemFactsAdapter:
@@ -1263,6 +1449,7 @@ __all__ = [
     "assemble_windows_rpc_frozen_v1",
     "attach_windows_rpc_deployment_snapshot_v1",
     "attach_windows_rpc_fenced_methods_v1",
+    "attach_windows_rpc_validation_only_v1",
     "bootstrap_windows_rpc_frozen_v1",
     "launch_windows_rpc_durable_fence_v1",
     "recover_frozen_none_store",

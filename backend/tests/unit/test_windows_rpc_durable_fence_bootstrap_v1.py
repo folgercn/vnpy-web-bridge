@@ -596,7 +596,37 @@ def test_production_launcher_uses_only_fixed_runtime_lifecycle(
         "cancel_order_fenced_v1",
         "query_intent_v1",
         "get_execution_snapshot_v1",
+        "peek_current_facts_v1",
     }.issubset(server._functions)
+    final_store_path = tmp_path / "store-root" / "execution-final-admission-v1.json"
+    store_before_peek = final_store_path.read_bytes()
+    peek = server._functions["peek_current_facts_v1"](
+        {"account_scope": config.account_scope, "environment": config.environment}
+    )
+    assert peek["schema_version"] == "windows_execution_current_facts_v1"
+    assert peek["gateway"] == {
+        "gateway_name": config.gateway_name,
+        "account_scope": config.account_scope,
+        "environment": config.environment,
+        "connected": True,
+    }
+    assert peek["admission"]["snapshot_generation"] == 0
+    assert peek["admission"]["fence"] == {
+        "active": False,
+        "current_epoch": 0,
+        "current_fencing_token": 0,
+        "high_water_epoch": 0,
+        "high_water_fencing_token": 0,
+    }
+    assert final_store_path.read_bytes() == store_before_peek
+    with pytest.raises(WindowsRpcDurableFenceDenied):
+        server._functions["peek_current_facts_v1"](
+            {"account_scope": "account:foreign", "environment": config.environment}
+        )
+    for name in ("send_order", "cancel_order"):
+        with pytest.raises(WindowsRpcDurableFenceDenied):
+            server._functions[name](object(), config.gateway_name)
+    assert server.send_calls == server.cancel_calls == 0
     execution_snapshot = server._functions["get_execution_snapshot_v1"](
         {"account_scope": config.account_scope, "environment": config.environment}
     )
@@ -622,7 +652,247 @@ def test_production_launcher_uses_only_fixed_runtime_lifecycle(
                 "request_hash": "c" * 64,
             },
         )
-    assert server.send_calls == 0
+    assert server.send_calls == server.cancel_calls == 0
+
+
+def test_windows_typed_attach_fails_when_facts_rpc_registration_is_dropped(
+    tmp_path: Path,
+) -> None:
+    class DropPeekServer(FakeServer):
+        def register(self, handler: Any) -> None:
+            if handler.__name__ == "peek_current_facts_v1":
+                return
+            super().register(handler)
+
+    config = _runtime_config()
+    server = DropPeekServer()
+    runtime = SimpleNamespace(
+        config=config,
+        rpc_engine=SimpleNamespace(server=server),
+        fact_source=FactSource(),
+    )
+
+    with pytest.raises(
+        WindowsRpcDurableFenceError, match="execution facts RPC registration"
+    ):
+        durable_module._attach_fixed_typed_fenced_methods(runtime, config, tmp_path)
+
+
+def test_public_validation_only_attach_freezes_legacy_rpc_and_exposes_pure_peek(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _runtime_config()
+    assert set(
+        inspect.signature(
+            durable_module.attach_windows_rpc_validation_only_v1
+        ).parameters
+    ) == {"rpc_engine", "event_engine", "main_engine"}
+    server = FakeServer()
+    rpc_engine = SimpleNamespace(server=server)
+    event_engine = SyncEventEngine()
+    main_engine = FactSource()
+    store_path = tmp_path / "execution-final-admission-v1.json"
+    monkeypatch.setattr(
+        durable_module, "_validation_durable_store_path_v1", lambda: store_path
+    )
+    original_send = server._functions["send_order"]
+    original_cancel = server._functions["cancel_order"]
+
+    result = durable_module.attach_windows_rpc_validation_only_v1(
+        rpc_engine=rpc_engine,
+        event_engine=event_engine,
+        main_engine=main_engine,
+    )
+
+    assert result is None
+    assert server._functions["send_order"] is not original_send
+    assert server._functions["cancel_order"] is not original_cancel
+    assert set(server._functions).isdisjoint(
+        {
+            "install_fence_v1",
+            "register_receipt_v1",
+            "send_order_fenced_v1",
+            "cancel_order_fenced_v1",
+            "query_intent_v1",
+            "get_execution_snapshot_v1",
+        }
+    )
+    for name in ("send_order", "cancel_order"):
+        with pytest.raises(WindowsRpcDurableFenceDenied):
+            server._functions[name](object(), config.gateway_name)
+    assert server.send_calls == server.cancel_calls == 0
+
+    store_before_peek = store_path.read_bytes()
+    peek = server._functions["peek_current_facts_v1"](
+        {"account_scope": config.account_scope, "environment": config.environment}
+    )
+    assert peek["gateway"]["gateway_name"] == config.gateway_name
+    assert peek["gateway"]["account_scope"] == config.account_scope
+    assert peek["gateway"]["environment"] == config.environment
+    assert peek["admission"]["snapshot_generation"] == 0
+    assert store_path.read_bytes() == store_before_peek
+    with pytest.raises(WindowsRpcDurableFenceDenied):
+        server._functions["peek_current_facts_v1"](
+            {"account_scope": "account:foreign", "environment": config.environment}
+        )
+
+    frozen_send = server._functions["send_order"]
+    with pytest.raises(WindowsRpcDurableFenceError, match="already attached"):
+        durable_module.attach_windows_rpc_validation_only_v1(
+            rpc_engine=rpc_engine,
+            event_engine=event_engine,
+            main_engine=main_engine,
+        )
+    assert server._functions["send_order"] is frozen_send
+    assert server.send_calls == server.cancel_calls == 0
+
+
+def test_public_validation_attach_cleans_all_registered_transient_rpc_on_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server = FakeServer()
+    monkeypatch.setattr(
+        durable_module,
+        "_validation_durable_store_path_v1",
+        lambda: tmp_path / "execution-final-admission-v1.json",
+    )
+
+    def fail_after_registration(runtime: Any, *_args: Any, **_kwargs: Any) -> None:
+        for name in durable_module._VALIDATION_TRANSIENT_RPC_METHODS:
+            runtime.rpc_engine.server._functions[name] = lambda: None
+        raise WindowsRpcDurableFenceError(
+            "injected validation attach failure", code="RPC_REGISTRY_UNAVAILABLE"
+        )
+
+    monkeypatch.setattr(
+        durable_module, "_attach_fixed_typed_fenced_methods", fail_after_registration
+    )
+
+    with pytest.raises(WindowsRpcDurableFenceError, match="injected validation"):
+        durable_module.attach_windows_rpc_validation_only_v1(
+            rpc_engine=SimpleNamespace(server=server),
+            event_engine=SyncEventEngine(),
+            main_engine=FactSource(),
+        )
+
+    assert set(server._functions).isdisjoint(
+        durable_module._VALIDATION_TRANSIENT_RPC_METHODS
+    )
+    for name in ("send_order", "cancel_order"):
+        with pytest.raises(WindowsRpcDurableFenceDenied, match="FROZEN"):
+            server._functions[name](object(), "CTP")
+    assert server.send_calls == server.cancel_calls == 0
+
+
+def test_public_validation_attach_failure_clears_transient_rpc_and_keeps_denials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class DropPeekServer(FakeServer):
+        def register(self, handler: Any) -> None:
+            if handler.__name__ == "peek_current_facts_v1":
+                return
+            super().register(handler)
+
+    store_path = tmp_path / "execution-final-admission-v1.json"
+    monkeypatch.setattr(
+        durable_module, "_validation_durable_store_path_v1", lambda: store_path
+    )
+    server = DropPeekServer()
+
+    with pytest.raises(
+        WindowsRpcDurableFenceError, match="execution facts RPC registration"
+    ):
+        durable_module.attach_windows_rpc_validation_only_v1(
+            rpc_engine=SimpleNamespace(server=server),
+            event_engine=SyncEventEngine(),
+            main_engine=FactSource(),
+        )
+
+    assert set(server._functions).isdisjoint(
+        durable_module._VALIDATION_TRANSIENT_RPC_METHODS
+    )
+    for name in ("send_order", "cancel_order"):
+        with pytest.raises(WindowsRpcDurableFenceDenied, match="FROZEN"):
+            server._functions[name](object(), "CTP")
+    assert server.send_calls == server.cancel_calls == 0
+
+
+@pytest.mark.parametrize(
+    ("method", "row"),
+    [
+        ("get_all_accounts", {"accountid": "sim-account"}),
+        ("get_all_positions", {"symbol": "RB2610"}),
+        ("get_all_orders", {"vt_orderid": "CTP.1"}),
+        ("get_all_active_orders", {"vt_orderid": "CTP.2"}),
+        ("get_all_accounts", {"accountid": "sim-account", "gateway_name": "FOREIGN"}),
+        ("get_all_positions", {"symbol": "RB2610", "gateway_name": "FOREIGN"}),
+        ("get_all_orders", {"vt_orderid": "CTP.1", "gateway_name": "FOREIGN"}),
+        (
+            "get_all_active_orders",
+            {"vt_orderid": "CTP.2", "gateway_name": "FOREIGN"},
+        ),
+    ],
+)
+def test_validation_peek_rejects_missing_or_foreign_oms_gateway(
+    method: str,
+    row: dict[str, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store_path = tmp_path / "execution-final-admission-v1.json"
+    monkeypatch.setattr(
+        durable_module, "_validation_durable_store_path_v1", lambda: store_path
+    )
+    main_engine = FactSource()
+    setattr(main_engine, method, lambda: [row])
+    server = FakeServer()
+    durable_module.attach_windows_rpc_validation_only_v1(
+        rpc_engine=SimpleNamespace(server=server),
+        event_engine=SyncEventEngine(),
+        main_engine=main_engine,
+    )
+
+    with pytest.raises(WindowsRpcDurableFenceDenied, match="foreign or missing"):
+        server._functions["peek_current_facts_v1"](
+            {"account_scope": "account:windows", "environment": "simnow"}
+        )
+
+
+def test_windows_execution_facts_gateway_validation_is_opt_in(tmp_path: Path) -> None:
+    from scripts.windows_fence_foundation.final_admission_v1 import (
+        WindowsRpcFencedAdmissionV1,
+    )
+
+    config = _runtime_config()
+    runtime = SimpleNamespace(config=config, fact_source=FactSource())
+    admission = WindowsRpcFencedAdmissionV1.bootstrap(
+        store_path=str(tmp_path / "execution-final-admission-v1.json"),
+        account_scope=config.account_scope,
+        environment=config.environment,
+        send_handler=lambda *_args: {"state": "ACKNOWLEDGED"},
+        cancel_handler=lambda *_args: {"state": "CANCELLED"},
+    )
+    request = {
+        "account_scope": config.account_scope,
+        "environment": config.environment,
+    }
+    permissive = durable_module._WindowsExecutionFactsV1(runtime)
+    permissive.bind_admission(admission)
+    assert permissive.peek_current_facts_v1(request)["account"]["sim-account"] == {
+        "accountid": "sim-account",
+        "gateway_name": "CTP",
+    }
+
+    runtime.fact_source.get_all_accounts = lambda: [{"accountid": "sim-account"}]
+    assert permissive.peek_current_facts_v1(request)["account"]["sim-account"] == {
+        "accountid": "sim-account"
+    }
+    strict = durable_module._WindowsExecutionFactsV1(
+        runtime, require_fixed_gateway=True
+    )
+    strict.bind_admission(admission)
+    with pytest.raises(WindowsRpcDurableFenceDenied, match="foreign or missing"):
+        strict.peek_current_facts_v1(request)
 
 
 def test_windows_execution_query_is_bound_to_current_oms_order_facts() -> None:
