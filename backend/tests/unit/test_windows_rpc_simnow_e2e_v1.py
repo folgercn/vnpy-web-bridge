@@ -34,7 +34,7 @@ def _gateway_setting() -> dict[str, Any]:
         "行情服务器": "tcp://180.168.146.187:10211",
         "产品名称": "test-product",
         "授权编码": "test-auth",
-        "柜台环境": "测试",
+        "柜台环境": "实盘",
     }
 
 
@@ -333,6 +333,8 @@ def test_simnow_e2e_attach_reads_only_the_actual_ctp_connect_binding(
     _attach(monkeypatch, tmp_path, server, main_engine=engine)
 
     assert "send_order_fenced_v1" in server._functions
+    assert binding.broker_id == "9999"
+    assert binding.environment == "实盘"
     assert binding.trade_front == "tcp://180.168.146.187:10201"
 
 
@@ -458,7 +460,8 @@ def test_simnow_e2e_runbook_keeps_active_profile_and_m2_negative_gates() -> None
         ({"交易服务器": "tcp://182.254.243.31:30001"}, FactSource(), True),
         ({"行情服务器": "tcp://182.254.243.31:30011"}, FactSource(), True),
         ({"行情服务器": "tcp://180.168.146.187:10212"}, FactSource(), True),
-        ({"柜台环境": "实盘"}, FactSource(), True),
+        ({"经纪商代码": "0000"}, FactSource(), True),
+        ({"柜台环境": "测试"}, FactSource(), True),
         ({}, FactSource(account_username="foreign-account"), False),
         ({}, FactSource(extra_account_username="second-account"), False),
         ({}, FactSource(td_login_status=False), False),

@@ -1242,6 +1242,7 @@ class _SimNowCtpConnectBindingV1:
     """The exact CTP connection values handed to ``MainEngine.connect``."""
 
     username: str
+    broker_id: str
     environment: str
     trade_front: str
     market_front: str
@@ -1283,12 +1284,13 @@ def _record_simnow_e2e_ctp_connect_binding_v1(
             code="WINDOWS_SIMNOW_E2E_GATEWAY_INVALID",
         )
     username = gateway_setting.get("用户名")
+    broker_id = gateway_setting.get("经纪商代码")
     environment = gateway_setting.get("柜台环境")
     trade_front = gateway_setting.get("交易服务器")
     market_front = gateway_setting.get("行情服务器")
     if not all(
         isinstance(value, str) and value and value == value.strip()
-        for value in (username, environment, trade_front, market_front)
+        for value in (username, broker_id, environment, trade_front, market_front)
     ):
         raise WindowsRpcDurableFenceDenied(
             "SimNow E2E CTP connect setting is invalid",
@@ -1304,6 +1306,7 @@ def _record_simnow_e2e_ctp_connect_binding_v1(
         )
     binding = _SimNowCtpConnectBindingV1(
         username=username,
+        broker_id=broker_id,
         environment=environment,
         trade_front=trade_front,
         market_front=market_front,
@@ -1330,6 +1333,7 @@ def connect_windows_rpc_simnow_e2e_v1(
             code="WINDOWS_SIMNOW_E2E_GATEWAY_INVALID",
         )
     username = gateway_setting.get("用户名")
+    broker_id = gateway_setting.get("经纪商代码")
     environment = gateway_setting.get("柜台环境")
     trade_front = _simnow_front_v1(
         gateway_setting.get("交易服务器"), _ISSUE291_SIMNOW_TRADE_FRONTS
@@ -1343,7 +1347,11 @@ def connect_windows_rpc_simnow_e2e_v1(
         or username != username.strip()
         or sha256(username.encode("utf-8")).hexdigest()
         != _ISSUE291_SIMNOW_ACCOUNT_SHA256
-        or environment != "测试"
+        # SimNow current fronts use the CTP production-key crypto library.
+        # This transport/API setting does not grant production/live/countable
+        # authority; attach keeps those independent fixed False gates below.
+        or broker_id != "9999"
+        or environment != "实盘"
         or _ISSUE291_SIMNOW_FRONT_PAIRS[trade_front] != market_front
     ):
         raise WindowsRpcDurableFenceDenied(
@@ -1421,7 +1429,12 @@ def _validate_simnow_e2e_runtime_v1(main_engine: Any) -> None:
 
     binding = _simnow_e2e_connect_binding_v1(main_engine)
     username = binding.username
-    if not username or username != username.strip() or binding.environment != "测试":
+    if (
+        not username
+        or username != username.strip()
+        or binding.broker_id != "9999"
+        or binding.environment != "实盘"
+    ):
         raise WindowsRpcDurableFenceDenied(
             "SimNow E2E gateway identity or environment is invalid",
             code="WINDOWS_SIMNOW_E2E_GATEWAY_INVALID",
