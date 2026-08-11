@@ -45,9 +45,10 @@ Before exposing any typed RPC, the attach verifies all of the following:
 - the runtime binding captured at the actual CTP connect has `柜台环境` exactly
   `实盘`, `经纪商代码` exactly `9999`, a non-empty canonical `用户名`, and one
   exact front pair:
-  `180.168.146.187:10201` with `180.168.146.187:10211`,
-  `180.168.146.187:10202` with `180.168.146.187:10212`, or
-  `180.168.146.187:10130` with `180.168.146.187:10131` (an exact optional
+  `182.254.243.31:30001` with `182.254.243.31:30011`,
+  `182.254.243.31:30002` with `182.254.243.31:30012`,
+  `182.254.243.31:30003` with `182.254.243.31:30013`, or
+  `182.254.243.31:40001` with `182.254.243.31:40011` (an exact optional
   `tcp://` prefix is accepted).
   Independently allowlisted but mismatched ports fail. No attach caller input
   can replace this binding.
