@@ -917,9 +917,9 @@ jobs:
       - name: Install read-only test dependencies
         run: pip install -r scripts/ci/requirements-quick.txt
 
-      - name: Install pinned pywin32 for Windows fence checks
+      - name: Install pinned Windows RPC dependencies for fence checks
         if: runner.os == 'Windows'
-        run: pip install pywin32==306
+        run: pip install pywin32==306 pyzmq==26.3.0 vnpy==4.4.0 --no-deps
 
       - name: Run Windows fence offline tests
         run: >-

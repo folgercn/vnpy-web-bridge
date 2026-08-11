@@ -189,6 +189,14 @@ _VALIDATION_TRANSIENT_RPC_METHODS = frozenset(
         "peek_current_facts_v1",
     }
 )
+_RECONCILIATION_ONLY_RPC_METHODS = frozenset(
+    {
+        "send_order",
+        "cancel_order",
+        "peek_current_facts_v1",
+        "get_execution_snapshot_v1",
+    }
+)
 _ASSEMBLY_COMPONENTS = (
     "__init__.py",
     "admission.py",
@@ -1103,6 +1111,42 @@ def _clear_validation_transient_rpc_methods_v1(server: Any) -> None:
     _replace_legacy_methods_with_permanent_frozen_denials_v1(server)
 
 
+def _seal_reconciliation_only_rpc_surface_v1(server: Any) -> None:
+    """Keep only frozen legacy denials and the two reconciliation readers."""
+
+    functions = getattr(server, "_functions", None)
+    if not isinstance(functions, dict):
+        raise WindowsRpcDurableFenceError(
+            "legacy RPC server registry is unavailable", code="RPC_REGISTRY_UNAVAILABLE"
+        )
+    if not all(
+        callable(functions.get(name)) for name in _RECONCILIATION_ONLY_RPC_METHODS
+    ):
+        raise WindowsRpcDurableFenceError(
+            "reconciliation RPC registration is incomplete",
+            code="RPC_REGISTRY_UNAVAILABLE",
+        )
+    for name in tuple(functions):
+        if name not in _RECONCILIATION_ONLY_RPC_METHODS:
+            functions.pop(name)
+
+
+def _clear_reconciliation_only_rpc_methods_v1(server: Any) -> None:
+    """Remove every reconciliation reader after failure and retain frozen denials."""
+
+    functions = getattr(server, "_functions", None)
+    if not isinstance(functions, dict):
+        raise WindowsRpcDurableFenceError(
+            "legacy RPC server registry is unavailable", code="RPC_REGISTRY_UNAVAILABLE"
+        )
+    for name in _VALIDATION_TRANSIENT_RPC_METHODS:
+        functions.pop(name, None)
+    for name in tuple(functions):
+        if name not in {"send_order", "cancel_order"}:
+            functions.pop(name)
+    _replace_legacy_methods_with_permanent_frozen_denials_v1(server)
+
+
 def _validation_durable_store_path_v1() -> Path:
     """Private test seam; public callers cannot redirect this deployment path."""
 
@@ -1150,7 +1194,10 @@ def attach_windows_rpc_validation_only_v1(
             "validation attach must run before rpc_engine.start",
             code="RPC_LISTENER_STARTED_EARLY",
         )
-    if getattr(server, "_windows_validation_only_attach_v1", None) is not None:
+    if (
+        getattr(server, "_windows_validation_only_attach_v1", None) is not None
+        or getattr(server, "_windows_reconciliation_only_attach_v1", None) is not None
+    ):
         raise WindowsRpcDurableFenceError(
             "validation runtime is already attached",
             code="WINDOWS_VALIDATION_ATTACH_ALREADY_ATTACHED",
@@ -1191,6 +1238,86 @@ def attach_windows_rpc_validation_only_v1(
             functions.pop(name, None)
     except BaseException:
         _clear_validation_transient_rpc_methods_v1(server)
+        raise
+
+
+def attach_windows_rpc_reconciliation_only_v1(
+    *,
+    rpc_engine: Any,
+    event_engine: Any,
+    main_engine: Any,
+) -> None:
+    """Attach the fixed, frozen Windows reconciliation-only RPC surface.
+
+    The listener must still be stopped.  This one-way attach exposes only the
+    fixed-scope current-facts peek and durable execution snapshot readers;
+    legacy mutations remain terminal FROZEN denials.
+    """
+
+    if event_engine is None or main_engine is None or rpc_engine is None:
+        raise WindowsRpcDurableFenceError(
+            "legacy vn.py runtime is incomplete", code="RPC_REGISTRY_UNAVAILABLE"
+        )
+    store_path = _validation_durable_store_path_v1()
+    if (
+        not store_path.is_absolute()
+        or store_path.name != "execution-final-admission-v1.json"
+    ):
+        raise WindowsRpcDurableFenceError(
+            "reconciliation durable store path must be fixed and absolute",
+            code="WINDOWS_FINAL_STORE_INVALID",
+        )
+    server = getattr(rpc_engine, "server", None)
+    functions = getattr(server, "_functions", None)
+    active = getattr(server, "is_active", None)
+    if (
+        not isinstance(functions, dict)
+        or not callable(getattr(server, "register", None))
+        or not callable(active)
+    ):
+        raise WindowsRpcDurableFenceError(
+            "legacy RPC server registry is unavailable", code="RPC_REGISTRY_UNAVAILABLE"
+        )
+    if active():
+        raise WindowsRpcDurableFenceError(
+            "reconciliation attach must run before rpc_engine.start",
+            code="RPC_LISTENER_STARTED_EARLY",
+        )
+    if (
+        getattr(server, "_windows_reconciliation_only_attach_v1", None) is not None
+        or getattr(server, "_windows_validation_only_attach_v1", None) is not None
+    ):
+        raise WindowsRpcDurableFenceError(
+            "reconciliation runtime is already attached",
+            code="WINDOWS_RECONCILIATION_ATTACH_ALREADY_ATTACHED",
+        )
+    # Preserve the terminal marker before any registry mutation.  A failed
+    # attach must not be retried over a partially modified legacy runtime.
+    server._windows_reconciliation_only_attach_v1 = object()
+    runtime_config = WindowsRpcRuntimeConfigV1(
+        gateway_setting={"reconciliation_only": True},
+        gateway_name=_VALIDATION_GATEWAY_NAME,
+        account_scope=_VALIDATION_ACCOUNT_SCOPE,
+        environment=_VALIDATION_ENVIRONMENT,
+    )
+    runtime = _WindowsRpcRuntimeV1(
+        event_engine=event_engine,
+        main_engine=main_engine,
+        rpc_engine=rpc_engine,
+        fact_source=main_engine,
+        config=runtime_config,
+    )
+    try:
+        _replace_legacy_methods_with_permanent_frozen_denials_v1(server)
+        _attach_fixed_typed_fenced_methods(
+            runtime,
+            runtime_config,
+            store_path.parent,
+            require_fixed_gateway=True,
+        )
+        _seal_reconciliation_only_rpc_surface_v1(server)
+    except BaseException:
+        _clear_reconciliation_only_rpc_methods_v1(server)
         raise
 
 
@@ -1449,6 +1576,7 @@ __all__ = [
     "assemble_windows_rpc_frozen_v1",
     "attach_windows_rpc_deployment_snapshot_v1",
     "attach_windows_rpc_fenced_methods_v1",
+    "attach_windows_rpc_reconciliation_only_v1",
     "attach_windows_rpc_validation_only_v1",
     "bootstrap_windows_rpc_frozen_v1",
     "launch_windows_rpc_durable_fence_v1",
