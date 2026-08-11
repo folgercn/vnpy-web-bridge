@@ -30,8 +30,8 @@ def _gateway_setting() -> dict[str, Any]:
         "用户名": SIM_ACCOUNT,
         "密码": "test-only-secret",
         "经纪商代码": "9999",
-        "交易服务器": "tcp://182.254.243.31:30001",
-        "行情服务器": "tcp://182.254.243.31:30011",
+        "交易服务器": "tcp://180.168.146.187:10201",
+        "行情服务器": "tcp://180.168.146.187:10211",
         "产品名称": "test-product",
         "授权编码": "test-auth",
         "柜台环境": "测试",
@@ -296,6 +296,14 @@ def test_simnow_e2e_attach_has_exact_controlled_signature_and_negative_gates() -
             )
 
 
+def test_simnow_e2e_front_allowlist_is_current_and_exact() -> None:
+    assert dict(durable_module._ISSUE291_SIMNOW_FRONT_PAIRS) == {
+        "180.168.146.187:10201": "180.168.146.187:10211",
+        "180.168.146.187:10202": "180.168.146.187:10212",
+        "180.168.146.187:10130": "180.168.146.187:10131",
+    }
+
+
 def test_simnow_e2e_attach_reads_only_the_actual_ctp_connect_binding(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -320,12 +328,12 @@ def test_simnow_e2e_attach_reads_only_the_actual_ctp_connect_binding(
         engine.gateway.md_api, durable_module._SIMNOW_E2E_CONNECT_BINDING_ATTRIBUTE
     )
     assert engine.connect_calls == [(actual_setting, "CTP")]
-    actual_setting["交易服务器"] = "tcp://180.168.146.187:10130"
+    actual_setting["交易服务器"] = "tcp://182.254.243.31:30001"
 
     _attach(monkeypatch, tmp_path, server, main_engine=engine)
 
     assert "send_order_fenced_v1" in server._functions
-    assert binding.trade_front == "tcp://182.254.243.31:30001"
+    assert binding.trade_front == "tcp://180.168.146.187:10201"
 
 
 def test_simnow_e2e_attach_rejects_missing_actual_ctp_connect_binding(
@@ -384,6 +392,43 @@ def test_simnow_e2e_connect_rejects_an_already_connected_gateway(
     )
 
 
+@pytest.mark.parametrize(
+    ("trade_front", "market_front"),
+    [
+        ("180.168.146.187:10201", "180.168.146.187:10211"),
+        ("180.168.146.187:10202", "180.168.146.187:10212"),
+        ("180.168.146.187:10130", "180.168.146.187:10131"),
+    ],
+)
+def test_simnow_e2e_connect_accepts_only_current_exact_front_pairs(
+    trade_front: str, market_front: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    engine = FactSource()
+    monkeypatch.setattr(
+        durable_module,
+        "_ISSUE291_SIMNOW_ACCOUNT_SHA256",
+        sha256(SIM_ACCOUNT.encode("utf-8")).hexdigest(),
+    )
+    setting = {
+        **_gateway_setting(),
+        "交易服务器": f"tcp://{trade_front}",
+        "行情服务器": f"tcp://{market_front}",
+    }
+
+    durable_module.connect_windows_rpc_simnow_e2e_v1(
+        main_engine=engine, gateway_setting=setting
+    )
+
+    binding = getattr(
+        engine.gateway, durable_module._SIMNOW_E2E_CONNECT_BINDING_ATTRIBUTE
+    )
+    assert (binding.trade_front, binding.market_front) == (
+        f"tcp://{trade_front}",
+        f"tcp://{market_front}",
+    )
+    assert engine.connect_calls == [(setting, "CTP")]
+
+
 def test_simnow_e2e_runbook_keeps_active_profile_and_m2_negative_gates() -> None:
     runbook = (
         Path(__file__).resolve().parents[3]
@@ -395,6 +440,12 @@ def test_simnow_e2e_runbook_keeps_active_profile_and_m2_negative_gates() -> None
         "-PolicyStore RSOP",
         "DefaultInboundAction -ne 'Block'",
         "DisabledInterfaceAliases",
+        "180.168.146.187:10201",
+        "180.168.146.187:10211",
+        "180.168.146.187:10202",
+        "180.168.146.187:10212",
+        "180.168.146.187:10130",
+        "180.168.146.187:10131",
         "## M2-only negative gate",
         "M2 non-member negative gate: PASS",
     ):
@@ -404,9 +455,9 @@ def test_simnow_e2e_runbook_keeps_active_profile_and_m2_negative_gates() -> None
 @pytest.mark.parametrize(
     ("setting_update", "engine", "connect_rejected"),
     [
-        ({"交易服务器": "tcp://180.168.146.187:10130"}, FactSource(), True),
-        ({"行情服务器": "tcp://180.168.146.187:10131"}, FactSource(), True),
-        ({"行情服务器": "tcp://182.254.243.31:30012"}, FactSource(), True),
+        ({"交易服务器": "tcp://182.254.243.31:30001"}, FactSource(), True),
+        ({"行情服务器": "tcp://182.254.243.31:30011"}, FactSource(), True),
+        ({"行情服务器": "tcp://180.168.146.187:10212"}, FactSource(), True),
         ({"柜台环境": "实盘"}, FactSource(), True),
         ({}, FactSource(account_username="foreign-account"), False),
         ({}, FactSource(extra_account_username="second-account"), False),
