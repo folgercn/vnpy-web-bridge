@@ -352,7 +352,7 @@ def test_reconcile_rejects_stale_or_disconnected_broker_facts() -> None:
 def test_reconcile_snapshot_clock_skew_and_staleness_boundaries(
     monkeypatch, delta: timedelta, accepted: bool
 ) -> None:
-    from app.execution.models import format_utc
+    from app.execution.models import format_utc, sha256_json
 
     now = datetime(2030, 1, 1, tzinfo=timezone.utc)
     monkeypatch.setattr("app.execution.orchestrator.utc_now", lambda: now)
@@ -362,6 +362,7 @@ def test_reconcile_snapshot_clock_skew_and_staleness_boundaries(
         snapshot_id="snapshot-clock-boundary",
         generation=1,
         connected=True,
+        position_snapshot_hash=sha256_json({}),
         account_scope="account:default",
         environment="test",
         observed_at=format_utc(now + delta),

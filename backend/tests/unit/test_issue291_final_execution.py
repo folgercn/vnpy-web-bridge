@@ -11,12 +11,14 @@ from app.execution import (
     DurableTargetPlanRepository,
     ExecutionOrchestrator,
     FencingError,
+    GatewaySnapshot,
     GatewayTimeout,
     InMemoryExecutionRepository,
     InMemoryGateway,
     InMemoryTargetPlanRepository,
     MutationRejected,
     PlanRejected,
+    RepositoryUnavailableError,
 )
 from app.execution.errors import GatewayConfigurationError, GatewayUnavailable
 from app.execution.final_runtime import FinalExecutionRuntime
@@ -26,6 +28,8 @@ from shared.commodity_execution import (
     CommodityExecutionContractError,
     VerifiedCustodyReceipt,
     build_target_plan,
+    sha256_json,
+    target_position_projection_hash,
 )
 from shared.trust_contracts.v1 import canonical_json_line, sha256_bytes
 
@@ -61,7 +65,37 @@ def receipt() -> dict:
     }
 
 
-def plan(source: dict | None = None) -> dict:
+def target_position_rows(**overrides: object) -> dict:
+    row = {
+        "vt_positionid": "RB.SHFE.LONG.gateway-0001",
+        "symbol": "RB",
+        "exchange": "SHFE",
+        "direction": "LONG",
+        "volume": 1,
+        "frozen": 0,
+        "price": 1.0,
+        "pnl": 0.0,
+        "commission": 0.0,
+        "gateway_name": "gateway-0001",
+    }
+    row.update(overrides)
+    return {str(row["vt_positionid"]): row}
+
+
+def target_position_hash(
+    positions: dict | None = None,
+    *,
+    account_scope: str = SCOPE,
+    environment: str = "SIMNOW",
+) -> str:
+    return target_position_projection_hash(
+        target_position_rows() if positions is None else positions,
+        account_scope=account_scope,
+        environment=environment,
+    )
+
+
+def plan(source: dict | None = None, *, expected_after: str | None = None) -> dict:
     source = source or receipt()
     verified = VerifiedCustodyReceipt.from_mapping(source)
     return build_target_plan(
@@ -78,8 +112,8 @@ def plan(source: dict | None = None) -> dict:
         scope=source["scope"],
         expires_at=source["expires_at"],
         phase="OPEN",
-        expected_before_position_hash="0" * 64,
-        expected_after_position_hash="0" * 64,
+        expected_before_position_hash=sha256_json({}),
+        expected_after_position_hash=expected_after or target_position_hash(),
         orders=[
             {
                 "symbol": "RB",
@@ -93,6 +127,18 @@ def plan(source: dict | None = None) -> dict:
                 "gateway_name": "gateway-0001",
             }
         ],
+    )
+
+
+def final_position_snapshot(positions: dict, *, generation: int = 2) -> GatewaySnapshot:
+    return GatewaySnapshot(
+        snapshot_id=f"snapshot-final-{generation:04d}",
+        generation=generation,
+        connected=True,
+        position_snapshot_hash=sha256_json(positions),
+        positions=positions,
+        account_scope=SCOPE,
+        environment="SIMNOW",
     )
 
 
@@ -451,7 +497,10 @@ def test_offline_preview_never_bypasses_final_simnow_start() -> None:
                     "plan_hash": target["plan_hash"],
                     "reason": "offline must not execute",
                 },
-                fence={"leader_epoch": token.epoch, "fencing_token": token.fencing_token},
+                fence={
+                    "leader_epoch": token.epoch,
+                    "fencing_token": token.fencing_token,
+                },
             )
         )
     assert gateway.send_calls == []
@@ -784,28 +833,63 @@ def test_runner_timeout_cancels_ack_sibling_without_replaying_unknown_intent() -
     unknown = next(iter(repo.snapshot()["unknown_outcomes"]))
     assert gateway.cancel_calls[0][0]["target_intent_id"] != unknown
     assert repo.snapshot()["reconciliation"]["state"] == "UNKNOWN"
-    replay = service.send_plan_order(
-        target["plan_id"], "order-ref-0002", token=token
-    )
+    replay = service.send_plan_order(target["plan_id"], "order-ref-0002", token=token)
     assert replay["reused"] is True
     assert replay["accepted"] is False
     assert replay["intent_id"] == unknown
     assert len(gateway.send_calls) == 2
 
 
-@pytest.mark.parametrize("expected_after,should_complete", [("0" * 64, True), ("d" * 64, False)])
-def test_reconcile_final_position_hash_completes_or_halts(
-    expected_after: str, should_complete: bool
+@pytest.mark.parametrize(
+    ("expected_after", "actual_positions", "should_complete"),
+    [
+        (
+            target_position_hash(),
+            target_position_rows(
+                frozen=9,
+                price=999.5,
+                pnl=-42.25,
+                commission=123.45,
+            ),
+            True,
+        ),
+        (target_position_hash(), target_position_rows(volume=2), False),
+        (target_position_hash(), target_position_rows(direction="SHORT"), False),
+        (target_position_hash(), target_position_rows(symbol="CU"), False),
+        (target_position_hash(), target_position_rows(exchange="DCE"), False),
+        (
+            target_position_hash(),
+            target_position_rows(gateway_name="foreign-gateway"),
+            False,
+        ),
+        (target_position_hash(), target_position_rows(gateway_name=""), False),
+        (target_position_hash(), target_position_rows(volume=-1), False),
+        (target_position_hash(), target_position_rows(volume="1"), False),
+        # TargetPlan v1 plans signed with the former full-row after semantics
+        # must not complete, even when those same complete rows are observed.
+        (
+            sha256_json(target_position_rows()),
+            target_position_rows(),
+            False,
+        ),
+        (
+            target_position_hash(account_scope="account:foreign"),
+            target_position_rows(),
+            False,
+        ),
+        (
+            target_position_hash(environment="foreign"),
+            target_position_rows(),
+            False,
+        ),
+    ],
+)
+def test_reconcile_final_target_projection_completes_or_halts(
+    expected_after: str, actual_positions: dict, should_complete: bool
 ) -> None:
-    service, core, repo, _gateway, _ = runtime(execute=True)
-    target = plan()
-    source = {
-        key: value
-        for key, value in target.items()
-        if key not in {"plan_hash", "order_set_sha256"}
-    }
-    source["expected_after_position_hash"] = expected_after
-    target = build_target_plan(**source)
+    service, core, repo, gateway, _ = runtime(execute=True)
+    target = plan(expected_after=expected_after)
+    assert target["expected_before_position_hash"] == sha256_json({})
     reconcile_enable_start(service, core, repo, target)
     intent_id = next(iter(repo.snapshot()["send_intents"]))
 
@@ -813,13 +897,14 @@ def test_reconcile_final_position_hash_completes_or_halts(
         state["send_intents"][intent_id]["state"] = "TERMINAL"
 
     repo.mutate(terminalize)
+    gateway.snapshots.append(final_position_snapshot(actual_positions))
     command_value = command(
         "reconcile",
         f"reconcile-final-{expected_after[0]}002",
         repo.state_version,
         {
             "reconciliation_run_id": f"run-final-{expected_after[0]}002",
-            "snapshot_id": "snapshot-default",
+            "snapshot_id": "snapshot-final-0002",
             "reason": "terminal final position check",
         },
     )
@@ -836,7 +921,9 @@ def test_reconcile_final_position_hash_completes_or_halts(
         assert archive["kind"] == "final_plan_completed"
         assert archive["plan_hash"] == target["plan_hash"]
         assert archive["receipt_id"] == target["authority_receipt_id"]
-        assert archive["final_position_hash"] == "0" * 64
+        assert archive["positions"] == actual_positions
+        assert archive["final_position_hash"] == sha256_json(actual_positions)
+        assert archive["target_position_hash"] == expected_after
         archive_count = len(state["terminal_archive"])
         retry = service.process_command(command_value)
         assert retry.reused is True
@@ -849,6 +936,83 @@ def test_reconcile_final_position_hash_completes_or_halts(
         assert response.receipt["status"] == "REJECTED"
         assert response.receipt["state_version"] == before + 1
         assert core.status()["lifecycle"] == "HALTED_RECONCILE_REQUIRED"
+
+
+def test_target_position_projection_normalizes_aggregates_and_rejects_bad_rows() -> (
+    None
+):
+    first = target_position_rows(
+        vt_positionid="first-row",
+        symbol="rb",
+        exchange="shfe",
+        direction="long",
+        gateway_name="gateway-0001",
+        volume=1,
+        price=1.0,
+    )
+    second = target_position_rows(
+        vt_positionid="second-row",
+        symbol="RB",
+        exchange="SHFE",
+        direction="LONG",
+        gateway_name="GATEWAY-0001",
+        volume=2,
+        price=999.0,
+    )
+    rows = first | second
+    assert target_position_hash(rows) == target_position_hash(
+        target_position_rows(volume=3)
+    )
+    assert target_position_hash({}) == target_position_hash(
+        target_position_rows(volume=0)
+    )
+    assert target_position_hash(account_scope=f" {SCOPE} ") == target_position_hash()
+    assert target_position_hash(account_scope=SCOPE.upper()) != target_position_hash()
+    for invalid in (
+        target_position_rows(gateway_name=""),
+        target_position_rows(volume=-1),
+        target_position_rows(volume="1"),
+        target_position_rows(symbol="INVALID!"),
+        target_position_rows(exchange="NYSE"),
+        target_position_rows(direction="FLAT"),
+        target_position_rows(gateway_name="short"),
+    ):
+        with pytest.raises(CommodityExecutionContractError):
+            target_position_hash(invalid)
+    with pytest.raises(CommodityExecutionContractError):
+        target_position_hash(account_scope="bad")
+
+
+def test_durable_final_archive_accepts_legacy_readonly_and_requires_new_full_hash(
+    tmp_path: Path,
+) -> None:
+    repository = DurableExecutionRepository(tmp_path / "execution.json", scope=SCOPE)
+    legacy = {
+        "kind": "final_plan_completed",
+        "plan_id": "plan-final-0001",
+        "plan_hash": "a" * 64,
+        "plan_version": 1,
+        "receipt_id": "custody-install-0001",
+        "final_position_hash": "0" * 64,
+        "archived_at": "2030-01-01T00:00:00Z",
+    }
+    repository.append_terminal_archive(legacy)
+    restarted = DurableExecutionRepository(tmp_path / "execution.json", scope=SCOPE)
+    assert restarted.snapshot()["terminal_archive"] == [legacy]
+
+    positions = target_position_rows(price=999.5, pnl=-42.25)
+    current = {
+        **legacy,
+        "plan_id": "plan-final-0002",
+        "plan_hash": "b" * 64,
+        "final_position_hash": sha256_json(positions),
+        "target_position_hash": target_position_hash(positions),
+        "positions": positions,
+    }
+    assert restarted.append_terminal_archive(current) == current
+    invalid = {**current, "positions": target_position_rows(volume=2)}
+    with pytest.raises(RepositoryUnavailableError, match="full position hash"):
+        restarted.append_terminal_archive(invalid)
 
 
 def test_partial_unknown_same_intent_cancel_fence_and_restart_reconcile(

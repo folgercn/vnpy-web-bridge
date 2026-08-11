@@ -11,6 +11,9 @@ from .v1 import (
     TargetPlanOrder,
     VerifiedCustodyReceipt,
     build_target_plan,
+    canonical_target_position_projection,
+    sha256_json,
+    target_position_projection_hash,
 )
 
 __all__ = [
@@ -20,4 +23,7 @@ __all__ = [
     "TargetPlanOrder",
     "VerifiedCustodyReceipt",
     "build_target_plan",
+    "canonical_target_position_projection",
+    "sha256_json",
+    "target_position_projection_hash",
 ]

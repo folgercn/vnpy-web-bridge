@@ -48,6 +48,103 @@ def sha256_json(value: Any) -> str:
     return hashlib.sha256(canonical_json(value)).hexdigest()
 
 
+def _projection_text(value: Any, field: str) -> str:
+    if not isinstance(value, str):
+        raise CommodityExecutionContractError(f"target position {field} is invalid")
+    normalized = value.strip()
+    if not normalized:
+        raise CommodityExecutionContractError(f"target position {field} is invalid")
+    return normalized.upper()
+
+
+def _projection_account_scope(value: Any) -> str:
+    if not isinstance(value, str):
+        raise CommodityExecutionContractError(
+            "target position account_scope is invalid"
+        )
+    normalized = value.strip()
+    if _ID_RE.fullmatch(normalized) is None:
+        raise CommodityExecutionContractError(
+            "target position account_scope is invalid"
+        )
+    return normalized
+
+
+def _projection_position_fields(raw: Mapping[str, Any]) -> tuple[str, str, str, str]:
+    gateway_name = _projection_text(raw.get("gateway_name"), "gateway_name")
+    symbol = _projection_text(raw.get("symbol"), "symbol")
+    exchange = _projection_text(raw.get("exchange"), "exchange")
+    direction = _projection_text(raw.get("direction"), "direction")
+    if (
+        _REFERENCE_RE.fullmatch(gateway_name) is None
+        or _SYMBOL_RE.fullmatch(symbol) is None
+        or exchange not in _EXCHANGES
+        or direction not in {"LONG", "SHORT"}
+    ):
+        raise CommodityExecutionContractError("target position semantics are invalid")
+    return gateway_name, symbol, exchange, direction
+
+
+def canonical_target_position_projection(
+    positions: Any, *, account_scope: Any, environment: Any
+) -> dict[str, Any]:
+    """Return the stable target-position projection for TargetPlan v1.
+
+    ``expected_after_position_hash`` is intentionally *not* a hash of opaque
+    broker rows.  It commits only to account/environment and aggregated
+    non-zero gateway/symbol/exchange/direction/volume positions.  Dynamic
+    broker facts (for example price, pnl, frozen, commissions and row IDs) are
+    retained elsewhere as complete facts, but are excluded here.
+
+    A former full-row expected-after hash has different semantics and must be
+    regenerated and re-signed; it must never be mixed with this projection.
+    """
+
+    if not isinstance(positions, Mapping):
+        raise CommodityExecutionContractError("target positions must be an object")
+    normalized_scope = _projection_account_scope(account_scope)
+    normalized_environment = _projection_text(environment, "environment")
+    aggregates: dict[tuple[str, str, str, str], int] = {}
+    for row_key, raw in positions.items():
+        if not isinstance(row_key, str) or not isinstance(raw, Mapping):
+            raise CommodityExecutionContractError("target position row is invalid")
+        volume = raw.get("volume")
+        if isinstance(volume, bool) or not isinstance(volume, int) or volume < 0:
+            raise CommodityExecutionContractError("target position volume is invalid")
+        if volume == 0:
+            continue
+        semantic_key = _projection_position_fields(raw)
+        aggregates[semantic_key] = aggregates.get(semantic_key, 0) + volume
+    return {
+        "account_scope": normalized_scope,
+        "environment": normalized_environment,
+        "positions": [
+            {
+                "gateway_name": gateway_name,
+                "symbol": symbol,
+                "exchange": exchange,
+                "direction": direction,
+                "volume": volume,
+            }
+            for (gateway_name, symbol, exchange, direction), volume in sorted(
+                aggregates.items()
+            )
+        ],
+    }
+
+
+def target_position_projection_hash(
+    positions: Any, *, account_scope: Any, environment: Any
+) -> str:
+    """Hash :func:`canonical_target_position_projection` for TargetPlan v1."""
+
+    return sha256_json(
+        canonical_target_position_projection(
+            positions, account_scope=account_scope, environment=environment
+        )
+    )
+
+
 def _id(value: Any, field: str) -> str:
     if not isinstance(value, str) or _ID_RE.fullmatch(value) is None:
         raise CommodityExecutionContractError(f"{field} is invalid")

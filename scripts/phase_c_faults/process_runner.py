@@ -23,7 +23,7 @@ from app.execution import DurableExecutionRepository, ExecutionOrchestrator, Nul
 from app.execution.errors import GatewayTimeout
 from app.execution.fencing import LeaderFencer
 from app.execution.gateway import GatewaySnapshot, MutationContext
-from app.execution.models import SendIntent
+from app.execution.models import SendIntent, sha256_json
 
 HASH = "b" * 64
 SCOPE = "account:phase-c-process"
@@ -113,6 +113,7 @@ def _gateway_worker(event_path: str, mode: str) -> None:
                     snapshot_id="snapshot-phase-c-process-001",
                     generation=generation,
                     connected=True,
+                    position_snapshot_hash=sha256_json({}),
                     account_scope=SCOPE,
                     environment=ENVIRONMENT,
                 ).as_dict()
