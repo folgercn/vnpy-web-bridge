@@ -207,7 +207,7 @@ class _ReadonlyTransport:
 
 
 class _FinalAdmissionWireTransport:
-    def __init__(self) -> None:
+    def __init__(self, *, environment: str = "simnow") -> None:
         from scripts.windows_fence_foundation.final_admission_v1 import (
             WindowsRpcFencedAdmissionV1,
         )
@@ -231,12 +231,12 @@ class _FinalAdmissionWireTransport:
                 "state": "REJECTED",
                 "accepted": False,
                 "account_scope": "account:prod",
-                "environment": "simnow",
+                "environment": environment,
             }
 
         self.admission = WindowsRpcFencedAdmissionV1(
             account_scope="account:prod",
-            environment="simnow",
+            environment=environment,
             send_handler=send_handler,
             cancel_handler=cancel_handler,
             query_handler=query_handler,
@@ -409,6 +409,104 @@ def test_simnow_durable_fence_wire_maps_only_windows_environment() -> None:
         },
         send[2],
     )
+
+
+def test_simnow_cancel_fence_wire_rehashes_receipt() -> None:
+    transport = _FinalAdmissionWireTransport()
+    gateway = VnpyWindowsGateway(
+        req_address="tcp://127.0.0.1:2014",
+        pub_address="tcp://127.0.0.1:4102",
+        account_scope="account:prod",
+        environment="SIMNOW",
+        transport=transport,
+        readonly_transport=transport,
+    )
+    gateway.start()
+    request = {"broker_order_id": "CTP.1"}
+    context = MutationContext(
+        account_scope="account:prod",
+        environment="SIMNOW",
+        leader_epoch=3,
+        fencing_token=7,
+        plan_id="plan-000001",
+        plan_hash="b" * 64,
+        intent_id="intent-cancel-0001",
+        idempotency_key="cancel-key-wire-0001",
+        action="cancel",
+        receipt_id="receipt-intent-cancel-0001",
+        receipt_hash=sha256_json(
+            {
+                "account_scope": "account:prod",
+                "environment": "SIMNOW",
+                "intent_id": "intent-cancel-0001",
+                "idempotency_key": "cancel-key-wire-0001",
+                "plan_id": "plan-000001",
+                "plan_hash": "b" * 64,
+                "request_hash": sha256_json(request),
+                "action": "cancel",
+            }
+        ),
+        request_hash=sha256_json(request),
+    )
+
+    result = gateway.cancel_order(request, context)
+
+    install, register, cancel = transport.calls
+    assert result["environment"] == "simnow"
+    assert result["receipt_hash"] != context.receipt_hash
+    assert install[1]["environment"] == "simnow"
+    assert register[1]["receipt"]["environment"] == "simnow"
+    assert register[1]["receipt"]["receipt_hash"] == result["receipt_hash"]
+    assert cancel[0] == "cancel_order_fenced_v1"
+    assert cancel[2].environment == "simnow"
+
+
+def test_non_simnow_fence_wire_preserves_context_and_receipt_hash() -> None:
+    transport = _FinalAdmissionWireTransport(environment="PAPER")
+    gateway = VnpyWindowsGateway(
+        req_address="tcp://127.0.0.1:2014",
+        pub_address="tcp://127.0.0.1:4102",
+        account_scope="account:prod",
+        environment="PAPER",
+        transport=transport,
+        readonly_transport=transport,
+    )
+    gateway.start()
+    request = {"symbol": "RB"}
+    context = MutationContext(
+        account_scope="account:prod",
+        environment="PAPER",
+        leader_epoch=3,
+        fencing_token=7,
+        plan_id="plan-000001",
+        plan_hash="b" * 64,
+        intent_id="intent-paper-0001",
+        idempotency_key="send-key-paper-0001",
+        action="send",
+        receipt_id="receipt-intent-paper-0001",
+        receipt_hash=sha256_json(
+            {
+                "account_scope": "account:prod",
+                "environment": "PAPER",
+                "intent_id": "intent-paper-0001",
+                "idempotency_key": "send-key-paper-0001",
+                "plan_id": "plan-000001",
+                "plan_hash": "b" * 64,
+                "request_hash": sha256_json(request),
+                "action": "send",
+            }
+        ),
+        request_hash=sha256_json(request),
+    )
+
+    result = gateway.send_order(request, context)
+
+    install, register, send = transport.calls
+    assert result["environment"] == context.environment == "PAPER"
+    assert result["receipt_hash"] == context.receipt_hash
+    assert install[1]["environment"] == "PAPER"
+    assert register[1]["receipt"] == context.as_dict()
+    assert send[2] is context
 
 
 def test_readiness_snapshot_has_independent_socket_during_mutation() -> None:
