@@ -12,6 +12,7 @@ from app.execution import (
     GatewaySnapshot,
     InMemoryExecutionRepository,
     MutationContext,
+    SendIntent,
     VnpyWindowsGateway,
 )
 from app.execution.errors import (
@@ -203,6 +204,309 @@ class _ReadonlyTransport:
             account_scope="account:prod",
             environment="simnow",
         ).as_dict()
+
+
+class _FinalAdmissionWireTransport:
+    def __init__(self, *, environment: str = "simnow") -> None:
+        from scripts.windows_fence_foundation.final_admission_v1 import (
+            WindowsRpcFencedAdmissionV1,
+        )
+
+        self.calls = []
+        self.send_calls = 0
+        self.cancel_calls = 0
+        self.query_handler_calls = 0
+
+        def send_handler(_request, _context):
+            self.send_calls += 1
+            return {"state": "ACKNOWLEDGED", "accepted": True}
+
+        def cancel_handler(_request, _context):
+            self.cancel_calls += 1
+            return {"state": "CANCELLED", "accepted": True}
+
+        def query_handler(_request, _context):
+            self.query_handler_calls += 1
+            return {
+                "state": "REJECTED",
+                "accepted": False,
+                "account_scope": "account:prod",
+                "environment": environment,
+            }
+
+        self.admission = WindowsRpcFencedAdmissionV1(
+            account_scope="account:prod",
+            environment=environment,
+            send_handler=send_handler,
+            cancel_handler=cancel_handler,
+            query_handler=query_handler,
+        )
+
+    def start(self) -> None:
+        return None
+
+    def stop(self) -> None:
+        return None
+
+    def call(self, method, payload, context=None):
+        self.calls.append((method, payload, context))
+        return getattr(self.admission, method)(payload, context)
+
+
+def test_final_admission_query_rejects_only_definitive_missing_receipt() -> None:
+    from scripts.windows_fence_foundation.admission import WindowsRpcDurableFenceDenied
+    from scripts.windows_fence_foundation.final_admission_v1 import (
+        WindowsRpcFencedAdmissionV1,
+        _receipt_digest,
+    )
+
+    query_calls = []
+    admission = WindowsRpcFencedAdmissionV1(
+        account_scope="account:prod",
+        environment="simnow",
+        send_handler=lambda *_args: pytest.fail("send must not be called"),
+        cancel_handler=lambda *_args: pytest.fail("cancel must not be called"),
+        query_handler=lambda request, context: query_calls.append(
+            (request, context)
+        )
+        or {
+            "state": "ACKNOWLEDGED",
+            "accepted": True,
+            "account_scope": "account:prod",
+            "environment": "simnow",
+        },
+    )
+    query = {
+        "account_scope": "account:prod",
+        "environment": "simnow",
+        "intent_id": "intent-000001",
+        "broker_order_id": None,
+    }
+
+    assert admission.query_intent_v1(query) == {
+        "intent_id": "intent-000001",
+        "state": "REJECTED",
+        "accepted": False,
+        "account_scope": "account:prod",
+        "environment": "simnow",
+    }
+    assert query_calls == []
+    with pytest.raises(WindowsRpcDurableFenceDenied, match="not registered"):
+        admission.query_intent_v1({**query, "broker_order_id": "CTP.1"})
+    assert query_calls == []
+
+    receipt = {
+        "intent_id": "intent-000001",
+        "receipt_id": "receipt-intent-000001",
+        "receipt_hash": "",
+        "request_hash": "a" * 64,
+        "account_scope": "account:prod",
+        "environment": "simnow",
+        "leader_epoch": 1,
+        "fencing_token": 1,
+        "idempotency_key": "send-key-query-0001",
+        "plan_id": "plan-000001",
+        "plan_hash": "b" * 64,
+        "action": "send",
+    }
+    receipt["receipt_hash"] = _receipt_digest(receipt)
+    admission.install_fence(epoch=1, fencing_token=1)
+    admission.register_receipt(intent_id=receipt["intent_id"], receipt=receipt)
+
+    assert admission.query_intent_v1(query) == {
+        "intent_id": "intent-000001",
+        "state": "ACKNOWLEDGED",
+        "accepted": True,
+        "account_scope": "account:prod",
+        "environment": "simnow",
+    }
+    assert query_calls == [(query, None)]
+
+
+def test_simnow_durable_fence_wire_maps_only_windows_environment() -> None:
+    transport = _FinalAdmissionWireTransport()
+    gateway = VnpyWindowsGateway(
+        req_address="tcp://127.0.0.1:2014",
+        pub_address="tcp://127.0.0.1:4102",
+        account_scope="account:prod",
+        environment="SIMNOW",
+        transport=transport,
+        readonly_transport=transport,
+    )
+    gateway.start()
+    request = {"symbol": "RB"}
+    context = MutationContext(
+        account_scope="account:prod",
+        environment="SIMNOW",
+        leader_epoch=3,
+        fencing_token=7,
+        plan_id="plan-000001",
+        plan_hash="b" * 64,
+        intent_id="intent-000001",
+        idempotency_key="send-key-wire-00001",
+        action="send",
+        receipt_id="receipt-intent-000001",
+        receipt_hash=sha256_json(
+            {
+                "account_scope": "account:prod",
+                "environment": "SIMNOW",
+                "intent_id": "intent-000001",
+                "idempotency_key": "send-key-wire-00001",
+                "plan_id": "plan-000001",
+                "plan_hash": "b" * 64,
+                "request_hash": sha256_json(request),
+                "action": "send",
+            }
+        ),
+        request_hash=sha256_json(request),
+    )
+
+    send_result = gateway.send_order(request, context)
+    query_result = gateway.query_intent(
+        SendIntent(
+            intent_id=context.intent_id,
+            idempotency_key=context.idempotency_key,
+            state="UNKNOWN_OUTCOME",
+            plan_id=context.plan_id,
+            plan_hash=context.plan_hash,
+            leader_epoch=context.leader_epoch,
+            fencing_token=context.fencing_token,
+            created_at="2030-01-01T00:00:00Z",
+            request_hash=context.request_hash,
+            receipt_id=context.receipt_id,
+            receipt_hash=context.receipt_hash,
+        ),
+        context,
+    )
+
+    assert gateway.environment == context.environment == "SIMNOW"
+    assert send_result["environment"] == query_result["environment"] == "simnow"
+    assert send_result["receipt_hash"] != context.receipt_hash
+    assert transport.admission.snapshot()["receipt_intents"] == [context.intent_id]
+    install, register, send, query = transport.calls
+    assert install == (
+        "install_fence_v1",
+        {
+            "account_scope": "account:prod",
+            "environment": "simnow",
+            "leader_epoch": 3,
+            "fencing_token": 7,
+        },
+        None,
+    )
+    assert register[0] == "register_receipt_v1"
+    assert register[1]["receipt"]["environment"] == "simnow"
+    assert register[2] is None
+    assert send[0] == "send_order_fenced_v1"
+    assert send[2].environment == "simnow"
+    assert query == (
+        "query_intent_v1",
+        {
+            "account_scope": "account:prod",
+            "environment": "simnow",
+            "intent_id": "intent-000001",
+            "broker_order_id": None,
+        },
+        send[2],
+    )
+
+
+def test_simnow_cancel_fence_wire_rehashes_receipt() -> None:
+    transport = _FinalAdmissionWireTransport()
+    gateway = VnpyWindowsGateway(
+        req_address="tcp://127.0.0.1:2014",
+        pub_address="tcp://127.0.0.1:4102",
+        account_scope="account:prod",
+        environment="SIMNOW",
+        transport=transport,
+        readonly_transport=transport,
+    )
+    gateway.start()
+    request = {"broker_order_id": "CTP.1"}
+    context = MutationContext(
+        account_scope="account:prod",
+        environment="SIMNOW",
+        leader_epoch=3,
+        fencing_token=7,
+        plan_id="plan-000001",
+        plan_hash="b" * 64,
+        intent_id="intent-cancel-0001",
+        idempotency_key="cancel-key-wire-0001",
+        action="cancel",
+        receipt_id="receipt-intent-cancel-0001",
+        receipt_hash=sha256_json(
+            {
+                "account_scope": "account:prod",
+                "environment": "SIMNOW",
+                "intent_id": "intent-cancel-0001",
+                "idempotency_key": "cancel-key-wire-0001",
+                "plan_id": "plan-000001",
+                "plan_hash": "b" * 64,
+                "request_hash": sha256_json(request),
+                "action": "cancel",
+            }
+        ),
+        request_hash=sha256_json(request),
+    )
+
+    result = gateway.cancel_order(request, context)
+
+    install, register, cancel = transport.calls
+    assert result["environment"] == "simnow"
+    assert result["receipt_hash"] != context.receipt_hash
+    assert install[1]["environment"] == "simnow"
+    assert register[1]["receipt"]["environment"] == "simnow"
+    assert register[1]["receipt"]["receipt_hash"] == result["receipt_hash"]
+    assert cancel[0] == "cancel_order_fenced_v1"
+    assert cancel[2].environment == "simnow"
+
+
+def test_non_simnow_fence_wire_preserves_context_and_receipt_hash() -> None:
+    transport = _FinalAdmissionWireTransport(environment="PAPER")
+    gateway = VnpyWindowsGateway(
+        req_address="tcp://127.0.0.1:2014",
+        pub_address="tcp://127.0.0.1:4102",
+        account_scope="account:prod",
+        environment="PAPER",
+        transport=transport,
+        readonly_transport=transport,
+    )
+    gateway.start()
+    request = {"symbol": "RB"}
+    context = MutationContext(
+        account_scope="account:prod",
+        environment="PAPER",
+        leader_epoch=3,
+        fencing_token=7,
+        plan_id="plan-000001",
+        plan_hash="b" * 64,
+        intent_id="intent-paper-0001",
+        idempotency_key="send-key-paper-0001",
+        action="send",
+        receipt_id="receipt-intent-paper-0001",
+        receipt_hash=sha256_json(
+            {
+                "account_scope": "account:prod",
+                "environment": "PAPER",
+                "intent_id": "intent-paper-0001",
+                "idempotency_key": "send-key-paper-0001",
+                "plan_id": "plan-000001",
+                "plan_hash": "b" * 64,
+                "request_hash": sha256_json(request),
+                "action": "send",
+            }
+        ),
+        request_hash=sha256_json(request),
+    )
+
+    result = gateway.send_order(request, context)
+
+    install, register, send = transport.calls
+    assert result["environment"] == context.environment == "PAPER"
+    assert result["receipt_hash"] == context.receipt_hash
+    assert install[1]["environment"] == "PAPER"
+    assert register[1]["receipt"] == context.as_dict()
+    assert send[2] is context
 
 
 def test_readiness_snapshot_has_independent_socket_during_mutation() -> None:
@@ -502,6 +806,73 @@ def test_equal_pure_peek_reconcile_keeps_unknown_halted_without_new_send() -> No
     assert state["lifecycle"] == "HALTED_UNKNOWN_OUTCOME"
     assert state["send_intents"][intent_id]["state"] == "UNKNOWN_OUTCOME"
     assert intent_id in state["unknown_outcomes"]
+
+
+def test_missing_receipt_reconcile_clears_unknown_without_order_mutation() -> None:
+    class MissingReceiptTransport(_FinalAdmissionWireTransport):
+        def __init__(self, facts):
+            super().__init__()
+            self.facts = facts
+
+        def call(self, method, payload, context=None):
+            if method == "peek_current_facts_v1":
+                self.calls.append((method, payload, context))
+                return self.facts
+            return super().call(method, payload, context)
+
+    facts = _final_validation_facts()
+    facts["active_orders"] = {}
+    facts["execution"]["orders"] = {}
+    transport = MissingReceiptTransport(facts)
+    service = _reconcile_service(_final_validation_gateway(transport))
+    intent_id = "intent-missing-receipt-0001"
+    idempotency_key = "send-key-missing-receipt-0001"
+
+    def record_unknown(state: dict) -> None:
+        state["broker"].update(
+            {
+                "generation": 0,
+                "connected": True,
+                "last_snapshot_at": "2020-01-01T00:00:00Z",
+            }
+        )
+        state["send_intents"][intent_id] = {
+            "intent_id": intent_id,
+            "idempotency_key": idempotency_key,
+            "state": "UNKNOWN_OUTCOME",
+            "plan_id": "plan-missing-receipt-0001",
+            "plan_hash": "b" * 64,
+            "leader_epoch": 1,
+            "fencing_token": 1,
+            "created_at": "2020-01-01T00:00:00Z",
+        }
+        state["intent_keys"][idempotency_key] = intent_id
+        state["unknown_outcomes"][intent_id] = {"reason": "pre-install timeout"}
+        state["reconciliation"].update({"state": "UNKNOWN", "unknown_outcomes": 1})
+        state["lifecycle"] = "HALTED_UNKNOWN_OUTCOME"
+
+    service.repository.mutate(record_unknown)
+    response = service.process_command(
+        _reconcile_command(
+            f"snapshot-peek-{sha256_json(facts)}", service.repository.state_version
+        )
+    )
+
+    state = service.repository.snapshot()
+    assert response.result == {
+        "accepted": True,
+        "snapshot_id": f"snapshot-peek-{sha256_json(facts)}",
+        "unknown_outcomes": 0,
+        "lifecycle": "READY",
+    }
+    assert state["send_intents"][intent_id]["state"] == "RECONCILED"
+    assert state["unknown_outcomes"] == {}
+    assert transport.send_calls == transport.cancel_calls == 0
+    assert transport.query_handler_calls == 0
+    assert [method for method, _payload, _context in transport.calls] == [
+        "peek_current_facts_v1",
+        "query_intent_v1",
+    ]
 
 
 def test_final_validation_reconcile_rejects_regressed_pure_peek_generation() -> None:

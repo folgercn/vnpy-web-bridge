@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from threading import RLock
 from typing import Any, Protocol, runtime_checkable
 
@@ -456,53 +456,82 @@ class VnpyWindowsGateway:
                 "gateway receipt binding is invalid"
             ) from exc
 
+    def _windows_wire_context(self, context: MutationContext) -> MutationContext:
+        """Map the fixed service SimNow label to the Windows fence label."""
+
+        if self.environment != self._FINAL_VALIDATION_SERVICE_ENVIRONMENT:
+            return context
+        wire_environment = self._FINAL_VALIDATION_WINDOWS_ENVIRONMENT
+        return replace(
+            context,
+            environment=wire_environment,
+            receipt_hash=sha256_json(
+                {
+                    "account_scope": context.account_scope,
+                    "environment": wire_environment,
+                    "intent_id": context.intent_id,
+                    "idempotency_key": context.idempotency_key,
+                    "plan_id": context.plan_id,
+                    "plan_hash": context.plan_hash,
+                    "request_hash": context.request_hash,
+                    "action": context.action,
+                }
+            ),
+        )
+
+    def _windows_wire_environment(self) -> str:
+        if self.environment == self._FINAL_VALIDATION_SERVICE_ENVIRONMENT:
+            return self._FINAL_VALIDATION_WINDOWS_ENVIRONMENT
+        return self.environment
+
     def _call_mutation(
         self, method: str, request: Mapping[str, Any], context: MutationContext
     ) -> Mapping[str, Any]:
         self._require_started()
         self._validate_context(context)
+        wire_context = self._windows_wire_context(context)
         # The Windows admission is advanced and receipt-bound immediately
         # before every mutation.  A missing/foreign/stale remote lifecycle
         # response fails closed before the order method is reached.
         fence_result = self.transport.call(
             "install_fence_v1",
             {
-                "account_scope": context.account_scope,
-                "environment": context.environment,
-                "leader_epoch": context.leader_epoch,
-                "fencing_token": context.fencing_token,
+                "account_scope": wire_context.account_scope,
+                "environment": wire_context.environment,
+                "leader_epoch": wire_context.leader_epoch,
+                "fencing_token": wire_context.fencing_token,
             },
             None,
         )
-        self._validate_fence_result(fence_result, context)
+        self._validate_fence_result(fence_result, wire_context)
         receipt_result = self.transport.call(
             "register_receipt_v1",
             {
-                "intent_id": context.intent_id,
+                "intent_id": wire_context.intent_id,
                 "receipt": {
-                    "intent_id": context.intent_id,
-                    "receipt_id": context.receipt_id,
-                    "receipt_hash": context.receipt_hash,
-                    "request_hash": context.request_hash,
-                    "account_scope": context.account_scope,
-                    "environment": context.environment,
-                    "leader_epoch": context.leader_epoch,
-                    "fencing_token": context.fencing_token,
-                    "idempotency_key": context.idempotency_key,
-                    "plan_id": context.plan_id,
-                    "plan_hash": context.plan_hash,
-                    "action": context.action,
+                    "intent_id": wire_context.intent_id,
+                    "receipt_id": wire_context.receipt_id,
+                    "receipt_hash": wire_context.receipt_hash,
+                    "request_hash": wire_context.request_hash,
+                    "account_scope": wire_context.account_scope,
+                    "environment": wire_context.environment,
+                    "leader_epoch": wire_context.leader_epoch,
+                    "fencing_token": wire_context.fencing_token,
+                    "idempotency_key": wire_context.idempotency_key,
+                    "plan_id": wire_context.plan_id,
+                    "plan_hash": wire_context.plan_hash,
+                    "action": wire_context.action,
                 },
             },
             None,
         )
-        self._validate_receipt_result(receipt_result, context)
+        self._validate_receipt_result(receipt_result, wire_context)
         result = self.transport.call(
             method,
             dict(request),
-            context,
+            wire_context,
         )
-        return self._validate_fenced_response(result, context)
+        return self._validate_fenced_response(result, wire_context)
 
     def _validate_fence_result(
         self, result: Mapping[str, Any], context: MutationContext
@@ -622,20 +651,24 @@ class VnpyWindowsGateway:
         self, intent: SendIntent, context: MutationContext | None = None
     ) -> Mapping[str, Any]:
         self._require_started()
+        wire_context = (
+            self._windows_wire_context(context) if context is not None else None
+        )
+        windows_environment = self._windows_wire_environment()
         result = self.transport.call(
             "query_intent_v1",
             {
                 "account_scope": self.account_scope,
-                "environment": self.environment,
+                "environment": windows_environment,
                 "intent_id": intent.intent_id,
                 "broker_order_id": intent.broker_order_id,
             },
-            context,
+            wire_context,
         )
         expected = {
             "intent_id": intent.intent_id,
             "account_scope": self.account_scope,
-            "environment": self.environment,
+            "environment": windows_environment,
         }
         if any(result.get(field) != value for field, value in expected.items()):
             raise GatewayUnavailable("Windows intent query binding mismatch")

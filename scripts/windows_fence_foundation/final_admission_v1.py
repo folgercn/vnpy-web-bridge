@@ -700,6 +700,14 @@ class WindowsRpcFencedAdmissionV1:
             self._refresh_durable()
             receipt = self._receipts.get(intent_id)
             if receipt is None:
+                if request["broker_order_id"] is None:
+                    return {
+                        "intent_id": intent_id,
+                        "state": "REJECTED",
+                        "accepted": False,
+                        "account_scope": self.account_scope,
+                        "environment": self.environment,
+                    }
                 raise WindowsRpcDurableFenceDenied(
                     "query intent was not registered",
                     code="WINDOWS_FENCE_RECEIPT_INVALID",
