@@ -171,6 +171,18 @@ class OfflineFakeExecutionAdapter:
             raise WorkflowAdapterError(
                 "authorization artifact and custody receipt do not match"
             )
+        if request.action == "enable" and (
+            custody_receipt.artifact_type,
+            custody_receipt.trust_domain,
+            custody_receipt.schema_ref,
+        ) != (
+            "runtime-authorization",
+            "runtime_authorization",
+            "phase-c-runtime-authorization-v1",
+        ):
+            raise WorkflowAdapterError(
+                "enable authorization requires a runtime-authorization custody receipt"
+            )
         # Model a network ambiguity after durable acceptance.  The caller must
         # retry/query with exactly the same idempotency key, never create a new one.
         self.version += 1

@@ -128,7 +128,10 @@ def test_final_compose_keeps_custody_single_writer_and_data_plane_isolated() -> 
     assert services["artifact-custody"]["command"][0] == "app.phase_c_custody:app"
     assert "artifact_custody_projection:/var/lib/phase-b/projection" in raw
     assert services["execution-orchestrator"]["environment"]["FINAL_EXECUTION_RUNTIME_REQUIRED"] == "true"
-    assert services["execution-orchestrator"]["environment"]["EXECUTION_ALLOW_SIMNOW_EXECUTION"] == "false"
+    assert (
+        services["execution-orchestrator"]["environment"]["EXECUTION_ALLOW_SIMNOW_EXECUTION"]
+        == "${EXECUTION_ALLOW_SIMNOW_EXECUTION:-false}"
+    )
     assert "gateway-egress" not in services["execution-orchestrator"]["networks"]
     assert services["market-data-worker"]["networks"] == ["market-ingress", "questdb-data"]
     assert services["gateway-rpc-publish-proxy"]["networks"] == ["gateway-proxy", "gateway-egress", "market-ingress"]

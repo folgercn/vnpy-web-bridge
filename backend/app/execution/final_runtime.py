@@ -18,7 +18,14 @@ from pathlib import Path
 from threading import RLock
 from typing import Any, Protocol
 
+from shared.artifact_contracts.v1 import (
+    ContractError as ArtifactContractError,
+)
+from shared.artifact_contracts.v1 import (
+    validate_artifact_envelope,
+)
 from shared.commodity_execution.v1 import (
+    TARGET_PLAN_SCHEMA_VERSION,
     CommodityExecutionContractError,
     TargetPlan,
     VerifiedCustodyReceipt,
@@ -291,6 +298,18 @@ class FinalExecutionRuntime:
             raise AuthorityRejected(
                 "custody receipt is not strict verified evidence"
             ) from exc
+        if (
+            receipt.raw["artifact_type"],
+            receipt.raw["trust_domain"],
+            receipt.raw["schema_ref"],
+        ) != (
+            "runtime-authorization",
+            "runtime_authorization",
+            "phase-c-runtime-authorization-v1",
+        ):
+            raise AuthorityRejected(
+                "custody receipt does not identify runtime authorization"
+            )
         expected = {
             "receipt_id": plan.raw["authority_receipt_id"],
             "artifact_id": plan.raw["authority_artifact_id"],
@@ -335,7 +354,15 @@ class FinalExecutionRuntime:
             raise AuthorityRejected(
                 "custody receipt is not strict verified evidence"
             ) from exc
-        if receipt.raw["artifact_type"] != "simnow-target-plan":
+        if (
+            receipt.raw["artifact_type"],
+            receipt.raw["trust_domain"],
+            receipt.raw["schema_ref"],
+        ) != (
+            "simnow-target-plan",
+            "runtime_authorization",
+            TARGET_PLAN_SCHEMA_VERSION,
+        ):
             raise PlanRejected("SIMNOW preview receipt does not identify a target plan")
         try:
             response = self.custody.artifact(receipt.artifact_id)
@@ -351,25 +378,32 @@ class FinalExecutionRuntime:
             "artifact",
         }:
             raise PlanRejected("custody target plan artifact response is not exact")
-        artifact = response["artifact"]
-        if not isinstance(artifact, Mapping):
+        artifact_value = response["artifact"]
+        if not isinstance(artifact_value, Mapping):
             raise PlanRejected("custody target plan artifact is not an object")
         try:
-            artifact_hash = sha256_bytes(canonical_json_line(dict(artifact)))
-            payload = artifact.get("payload")
+            artifact = validate_artifact_envelope(artifact_value)
+            envelope_raw_sha256 = sha256_bytes(canonical_json_line(artifact))
+            payload = artifact["payload"]
             plan = TargetPlan.from_mapping(
                 payload, max_order_volume=self.max_order_volume
             )
-        except CommodityExecutionContractError as exc:
+        except (ArtifactContractError, CommodityExecutionContractError) as exc:
             raise PlanRejected("custody target plan artifact is invalid") from exc
         if (
             response["artifact_id"] != receipt.artifact_id
-            or response["artifact_raw_sha256"] != artifact_hash
-            or receipt.artifact_sha256 != artifact_hash
+            or response["artifact_raw_sha256"] != envelope_raw_sha256
+            or receipt.artifact_sha256 != artifact["raw_sha256"]
         ):
             raise PlanRejected("custody target plan artifact/receipt binding mismatch")
         if (
-            receipt.scope != plan.raw["scope"]
+            artifact["artifact_id"] != receipt.artifact_id
+            or artifact["artifact_type"] != receipt.raw["artifact_type"]
+            or artifact["trust_domain"] != receipt.raw["trust_domain"]
+            or artifact["schema_ref"] != receipt.raw["schema_ref"]
+            or artifact["scope"] != receipt.scope
+            or artifact["scope"] != plan.raw["scope"]
+            or receipt.scope != plan.raw["scope"]
             or (self.allowed_scope is not None and receipt.scope != self.allowed_scope)
             or receipt.expires_at() <= utc_now()
         ):
