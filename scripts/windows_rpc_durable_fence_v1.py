@@ -178,6 +178,20 @@ _VALIDATION_GATEWAY_NAME = "CTP"
 _VALIDATION_ACCOUNT_SCOPE = "account:windows"
 _VALIDATION_ENVIRONMENT = "simnow"
 _VALIDATION_DURABLE_STORE_PATH = r"C:\quant\durable\execution-final-admission-v1.json"
+_ISSUE291_SIMNOW_ACCOUNT_SHA256 = (
+    "175c9e4d1e44dfe7c822c887507e7a6b38b3ea2bc10e9057e4783a97cba53995"
+)
+_ISSUE291_SIMNOW_FRONT_PAIRS = MappingProxyType(
+    {
+        "182.254.243.31:30001": "182.254.243.31:30011",
+        "182.254.243.31:30002": "182.254.243.31:30012",
+        "182.254.243.31:30003": "182.254.243.31:30013",
+    }
+)
+_ISSUE291_SIMNOW_TRADE_FRONTS = frozenset(_ISSUE291_SIMNOW_FRONT_PAIRS)
+_ISSUE291_SIMNOW_MARKET_FRONTS = frozenset(_ISSUE291_SIMNOW_FRONT_PAIRS.values())
+_SIMNOW_E2E_CONNECT_BINDING_ATTRIBUTE = "_windows_simnow_e2e_connect_binding_v1"
+_SIMNOW_E2E_CONNECT_BINDING_SEAL = object()
 _VALIDATION_TRANSIENT_RPC_METHODS = frozenset(
     {
         "install_fence_v1",
@@ -187,6 +201,13 @@ _VALIDATION_TRANSIENT_RPC_METHODS = frozenset(
         "query_intent_v1",
         "get_execution_snapshot_v1",
         "peek_current_facts_v1",
+    }
+)
+_SIMNOW_E2E_RPC_METHODS = frozenset(
+    {
+        "send_order",
+        "cancel_order",
+        *_VALIDATION_TRANSIENT_RPC_METHODS,
     }
 )
 _RECONCILIATION_ONLY_RPC_METHODS = frozenset(
@@ -954,6 +975,9 @@ def _attach_fixed_typed_fenced_methods(
     store_root: str | Path,
     *,
     require_fixed_gateway: bool = False,
+    max_order_volume: int | None = None,
+    native_send_handler: Any | None = None,
+    native_cancel_handler: Any | None = None,
 ) -> WindowsRpcFencedAdmissionV1:
     """Create and attach the dormant typed execution lifecycle at startup.
 
@@ -962,6 +986,13 @@ def _attach_fixed_typed_fenced_methods(
     until the Linux Execution lifecycle installs a current fence and receipt.
     """
 
+    if max_order_volume is not None and (
+        type(max_order_volume) is not int or max_order_volume < 1
+    ):
+        raise WindowsRpcDurableFenceError(
+            "controlled mutation max_order_volume is invalid",
+            code="WINDOWS_FENCE_REQUEST_INVALID",
+        )
     server = runtime.rpc_engine.server
     functions = getattr(server, "_functions", None)
     if not isinstance(functions, dict):
@@ -969,8 +1000,16 @@ def _attach_fixed_typed_fenced_methods(
             "RPC server registry is unavailable",
             code="RPC_REGISTRY_UNAVAILABLE",
         )
-    send_handler = functions.get("send_order")
-    cancel_handler = functions.get("cancel_order")
+    send_handler = (
+        native_send_handler
+        if native_send_handler is not None
+        else functions.get("send_order")
+    )
+    cancel_handler = (
+        native_cancel_handler
+        if native_cancel_handler is not None
+        else functions.get("cancel_order")
+    )
     if not callable(send_handler) or not callable(cancel_handler):
         raise WindowsRpcDurableFenceError(
             "underlying send/cancel handlers are unavailable",
@@ -996,6 +1035,13 @@ def _attach_fixed_typed_fenced_methods(
         )
 
     def send_bound(request: Mapping[str, Any], context: Mapping[str, Any]) -> Any:
+        if max_order_volume is not None:
+            volume = request.get("volume") if isinstance(request, Mapping) else None
+            if type(volume) is not int or volume != max_order_volume:
+                raise WindowsRpcDurableFenceDenied(
+                    "controlled mutation volume is outside the fixed limit",
+                    code="WINDOWS_FENCE_REQUEST_INVALID",
+                )
         native_request = request_factory.order_request(request, context)
         vt_orderid = send_handler(native_request, runtime_config.gateway_name)
         if not isinstance(vt_orderid, str) or not vt_orderid:
@@ -1147,10 +1193,402 @@ def _clear_reconciliation_only_rpc_methods_v1(server: Any) -> None:
     _replace_legacy_methods_with_permanent_frozen_denials_v1(server)
 
 
+def _seal_simnow_e2e_rpc_surface_v1(server: Any) -> None:
+    """Expose only the fixed SimNow typed lifecycle and two read facts RPCs."""
+
+    functions = getattr(server, "_functions", None)
+    if not isinstance(functions, dict):
+        raise WindowsRpcDurableFenceError(
+            "legacy RPC server registry is unavailable", code="RPC_REGISTRY_UNAVAILABLE"
+        )
+    if not all(callable(functions.get(name)) for name in _SIMNOW_E2E_RPC_METHODS):
+        raise WindowsRpcDurableFenceError(
+            "SimNow E2E RPC registration is incomplete",
+            code="RPC_REGISTRY_UNAVAILABLE",
+        )
+    for name in tuple(functions):
+        if name not in _SIMNOW_E2E_RPC_METHODS:
+            functions.pop(name)
+
+
+def _clear_simnow_e2e_rpc_methods_v1(server: Any) -> None:
+    """Leave only permanent frozen legacy denials after SimNow E2E failure."""
+
+    functions = getattr(server, "_functions", None)
+    if not isinstance(functions, dict):
+        raise WindowsRpcDurableFenceError(
+            "legacy RPC server registry is unavailable", code="RPC_REGISTRY_UNAVAILABLE"
+        )
+    for name in tuple(functions):
+        if name not in {"send_order", "cancel_order"}:
+            functions.pop(name)
+    _replace_legacy_methods_with_permanent_frozen_denials_v1(server)
+
+
 def _validation_durable_store_path_v1() -> Path:
     """Private test seam; public callers cannot redirect this deployment path."""
 
     return Path(_VALIDATION_DURABLE_STORE_PATH)
+
+
+def _simnow_e2e_durable_store_path_v1() -> Path:
+    """Private fixed-store seam for the Issue 291 SimNow E2E attach."""
+
+    return Path(_VALIDATION_DURABLE_STORE_PATH)
+
+
+@dataclass(frozen=True)
+class _SimNowCtpConnectBindingV1:
+    """The exact CTP connection values handed to ``MainEngine.connect``."""
+
+    username: str
+    environment: str
+    trade_front: str
+    market_front: str
+    _seal: object
+
+
+def _simnow_front_v1(
+    value: Any,
+    allowlist: frozenset[str],
+) -> str:
+    """Return one exact plain-TCP SimNow front without exposing its input."""
+
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise WindowsRpcDurableFenceDenied(
+            "SimNow E2E gateway front is invalid",
+            code="WINDOWS_SIMNOW_E2E_GATEWAY_INVALID",
+        )
+    endpoint = value.removeprefix("tcp://")
+    if endpoint not in allowlist or value not in {endpoint, f"tcp://{endpoint}"}:
+        raise WindowsRpcDurableFenceDenied(
+            "SimNow E2E gateway front is outside the fixed allowlist",
+            code="WINDOWS_SIMNOW_E2E_GATEWAY_INVALID",
+        )
+    return endpoint
+
+
+def _record_simnow_e2e_ctp_connect_binding_v1(
+    main_engine: Any, gateway_setting: Mapping[str, Any]
+) -> None:
+    """Record the CTP input that was just handed to the real connect call."""
+
+    get_gateway = getattr(main_engine, "get_gateway", None)
+    gateway = get_gateway(_VALIDATION_GATEWAY_NAME) if callable(get_gateway) else None
+    td_api = getattr(gateway, "td_api", None)
+    md_api = getattr(gateway, "md_api", None)
+    if gateway is None or td_api is None or md_api is None:
+        raise WindowsRpcDurableFenceDenied(
+            "SimNow E2E CTP gateway is unavailable after connect",
+            code="WINDOWS_SIMNOW_E2E_GATEWAY_INVALID",
+        )
+    username = gateway_setting.get("用户名")
+    environment = gateway_setting.get("柜台环境")
+    trade_front = gateway_setting.get("交易服务器")
+    market_front = gateway_setting.get("行情服务器")
+    if not all(
+        isinstance(value, str) and value and value == value.strip()
+        for value in (username, environment, trade_front, market_front)
+    ):
+        raise WindowsRpcDurableFenceDenied(
+            "SimNow E2E CTP connect setting is invalid",
+            code="WINDOWS_SIMNOW_E2E_GATEWAY_INVALID",
+        )
+    if any(
+        getattr(target, _SIMNOW_E2E_CONNECT_BINDING_ATTRIBUTE, None) is not None
+        for target in (gateway, td_api, md_api)
+    ):
+        raise WindowsRpcDurableFenceError(
+            "SimNow E2E CTP connect binding is already recorded",
+            code="WINDOWS_SIMNOW_E2E_CONNECT_ALREADY_BOUND",
+        )
+    binding = _SimNowCtpConnectBindingV1(
+        username=username,
+        environment=environment,
+        trade_front=trade_front,
+        market_front=market_front,
+        _seal=_SIMNOW_E2E_CONNECT_BINDING_SEAL,
+    )
+    try:
+        for target in (gateway, td_api, md_api):
+            setattr(target, _SIMNOW_E2E_CONNECT_BINDING_ATTRIBUTE, binding)
+    except (AttributeError, TypeError) as exc:
+        raise WindowsRpcDurableFenceError(
+            "SimNow E2E CTP runtime cannot retain connect binding",
+            code="WINDOWS_SIMNOW_E2E_CONNECT_BINDING_UNAVAILABLE",
+        ) from exc
+
+
+def connect_windows_rpc_simnow_e2e_v1(
+    *, main_engine: Any, gateway_setting: Mapping[str, Any]
+) -> None:
+    """Connect CTP and retain that exact connection's private runtime binding."""
+
+    if not isinstance(gateway_setting, Mapping):
+        raise WindowsRpcDurableFenceDenied(
+            "SimNow E2E gateway setting is unavailable",
+            code="WINDOWS_SIMNOW_E2E_GATEWAY_INVALID",
+        )
+    username = gateway_setting.get("用户名")
+    environment = gateway_setting.get("柜台环境")
+    trade_front = _simnow_front_v1(
+        gateway_setting.get("交易服务器"), _ISSUE291_SIMNOW_TRADE_FRONTS
+    )
+    market_front = _simnow_front_v1(
+        gateway_setting.get("行情服务器"), _ISSUE291_SIMNOW_MARKET_FRONTS
+    )
+    if (
+        not isinstance(username, str)
+        or not username
+        or username != username.strip()
+        or sha256(username.encode("utf-8")).hexdigest()
+        != _ISSUE291_SIMNOW_ACCOUNT_SHA256
+        or environment != "测试"
+        or _ISSUE291_SIMNOW_FRONT_PAIRS[trade_front] != market_front
+    ):
+        raise WindowsRpcDurableFenceDenied(
+            "SimNow E2E connect request is not the pinned Issue 291 account/environment",
+            code="WINDOWS_SIMNOW_E2E_GATEWAY_INVALID",
+        )
+    get_gateway = getattr(main_engine, "get_gateway", None)
+    gateway = get_gateway(_VALIDATION_GATEWAY_NAME) if callable(get_gateway) else None
+    td_api = getattr(gateway, "td_api", None)
+    md_api = getattr(gateway, "md_api", None)
+    if gateway is None or td_api is None or md_api is None:
+        raise WindowsRpcDurableFenceDenied(
+            "SimNow E2E CTP gateway is unavailable before connect",
+            code="WINDOWS_SIMNOW_E2E_GATEWAY_INVALID",
+        )
+    if any(
+        getattr(target, field, None) is True
+        for target in (td_api, md_api)
+        for field in ("connect_status", "login_status")
+    ):
+        raise WindowsRpcDurableFenceDenied(
+            "SimNow E2E requires a fresh disconnected CTP gateway",
+            code="WINDOWS_SIMNOW_E2E_GATEWAY_ALREADY_CONNECTED",
+        )
+    if any(
+        getattr(target, _SIMNOW_E2E_CONNECT_BINDING_ATTRIBUTE, None) is not None
+        for target in (gateway, td_api, md_api)
+    ):
+        raise WindowsRpcDurableFenceError(
+            "SimNow E2E CTP connect binding is already recorded",
+            code="WINDOWS_SIMNOW_E2E_CONNECT_ALREADY_BOUND",
+        )
+    connect = getattr(main_engine, "connect", None)
+    if not callable(connect):
+        raise WindowsRpcDurableFenceDenied(
+            "SimNow E2E main engine cannot connect CTP",
+            code="WINDOWS_SIMNOW_E2E_GATEWAY_INVALID",
+        )
+    # This private copy is both the exact mapping passed to vn.py and the only
+    # source recorded below.  Attach receives no equivalent caller argument.
+    connected_setting = dict(gateway_setting)
+    connect(connected_setting, _VALIDATION_GATEWAY_NAME)
+    _record_simnow_e2e_ctp_connect_binding_v1(main_engine, connected_setting)
+
+
+def _simnow_e2e_connect_binding_v1(main_engine: Any) -> _SimNowCtpConnectBindingV1:
+    """Read the single binding installed by the actual CTP connect seam."""
+
+    get_gateway = getattr(main_engine, "get_gateway", None)
+    gateway = get_gateway(_VALIDATION_GATEWAY_NAME) if callable(get_gateway) else None
+    td_api = getattr(gateway, "td_api", None)
+    md_api = getattr(gateway, "md_api", None)
+    binding = getattr(gateway, _SIMNOW_E2E_CONNECT_BINDING_ATTRIBUTE, None)
+    if (
+        not isinstance(binding, _SimNowCtpConnectBindingV1)
+        or binding._seal is not _SIMNOW_E2E_CONNECT_BINDING_SEAL
+        or getattr(td_api, _SIMNOW_E2E_CONNECT_BINDING_ATTRIBUTE, None) is not binding
+        or getattr(md_api, _SIMNOW_E2E_CONNECT_BINDING_ATTRIBUTE, None) is not binding
+    ):
+        raise WindowsRpcDurableFenceDenied(
+            "SimNow E2E CTP connect binding is unavailable",
+            code="WINDOWS_SIMNOW_E2E_GATEWAY_INVALID",
+        )
+    return binding
+
+
+def _simnow_account_field_v1(account: Any, field: str) -> Any:
+    if isinstance(account, Mapping):
+        return account.get(field)
+    return getattr(account, field, None)
+
+
+def _validate_simnow_e2e_runtime_v1(main_engine: Any) -> None:
+    """Bind the temporary E2E seam to the live SimNow CTP identity."""
+
+    binding = _simnow_e2e_connect_binding_v1(main_engine)
+    username = binding.username
+    if not username or username != username.strip() or binding.environment != "测试":
+        raise WindowsRpcDurableFenceDenied(
+            "SimNow E2E gateway identity or environment is invalid",
+            code="WINDOWS_SIMNOW_E2E_GATEWAY_INVALID",
+        )
+    trade_front = _simnow_front_v1(binding.trade_front, _ISSUE291_SIMNOW_TRADE_FRONTS)
+    market_front = _simnow_front_v1(
+        binding.market_front, _ISSUE291_SIMNOW_MARKET_FRONTS
+    )
+    if _ISSUE291_SIMNOW_FRONT_PAIRS[trade_front] != market_front:
+        raise WindowsRpcDurableFenceDenied(
+            "SimNow E2E trade and market fronts are not a fixed pair",
+            code="WINDOWS_SIMNOW_E2E_GATEWAY_INVALID",
+        )
+
+    get_gateway = getattr(main_engine, "get_gateway", None)
+    gateway = get_gateway(_VALIDATION_GATEWAY_NAME) if callable(get_gateway) else None
+    td_api = getattr(gateway, "td_api", None)
+    md_api = getattr(gateway, "md_api", None)
+    if (
+        getattr(td_api, "userid", None) != username
+        or getattr(md_api, "userid", None) != username
+        or getattr(td_api, "login_status", None) is not True
+        or getattr(md_api, "login_status", None) is not True
+    ):
+        raise WindowsRpcDurableFenceDenied(
+            "SimNow E2E CTP gateway login binding is invalid",
+            code="WINDOWS_SIMNOW_E2E_GATEWAY_INVALID",
+        )
+
+    get_engine = getattr(main_engine, "get_engine", None)
+    oms = get_engine("oms") if callable(get_engine) else None
+    oms_accounts = getattr(oms, "accounts", None)
+    expected_vt_accountid = f"{_VALIDATION_GATEWAY_NAME}.{username}"
+    if not isinstance(oms_accounts, Mapping) or set(oms_accounts) != {
+        expected_vt_accountid
+    }:
+        raise WindowsRpcDurableFenceDenied(
+            "SimNow E2E current account key binding is invalid",
+            code="WINDOWS_SIMNOW_E2E_ACCOUNT_INVALID",
+        )
+    account = oms_accounts[expected_vt_accountid]
+    if (
+        _simnow_account_field_v1(account, "accountid") != username
+        or _simnow_account_field_v1(account, "vt_accountid") != expected_vt_accountid
+        or _simnow_account_field_v1(account, "gateway_name") != _VALIDATION_GATEWAY_NAME
+    ):
+        raise WindowsRpcDurableFenceDenied(
+            "SimNow E2E current account fact binding is invalid",
+            code="WINDOWS_SIMNOW_E2E_ACCOUNT_INVALID",
+        )
+    account_key = expected_vt_accountid.removeprefix(f"{_VALIDATION_GATEWAY_NAME}.")
+    if (
+        account_key != username
+        or sha256(account_key.encode("utf-8")).hexdigest()
+        != _ISSUE291_SIMNOW_ACCOUNT_SHA256
+    ):
+        raise WindowsRpcDurableFenceDenied(
+            "SimNow E2E current account hash is not the pinned Issue 291 account",
+            code="WINDOWS_SIMNOW_E2E_ACCOUNT_INVALID",
+        )
+
+
+def attach_windows_rpc_simnow_e2e_v1(
+    *,
+    rpc_engine: Any,
+    event_engine: Any,
+    main_engine: Any,
+    explicit_e2e_authorized: bool,
+    production_authorized: bool,
+    live_trading_authorized: bool,
+    countable_forward: bool,
+    max_order_volume: int,
+) -> None:
+    """Attach the one-way Issue 291 SimNow controlled mutation surface.
+
+    This is intentionally a pre-listener, fixed-scope seam for the Execution
+    network path.  It accepts no caller-selected methods, runtime config, or
+    durable-store path; only typed fenced mutations can reach vn.py.
+    """
+
+    if (
+        explicit_e2e_authorized is not True
+        or production_authorized is not False
+        or live_trading_authorized is not False
+        or countable_forward is not False
+        or type(max_order_volume) is not int
+        or max_order_volume != 1
+    ):
+        raise WindowsRpcDurableFenceDenied(
+            "SimNow E2E authorization is not the fixed controlled mutation grant",
+            code="WINDOWS_SIMNOW_E2E_AUTHORIZATION_INVALID",
+        )
+    if event_engine is None or main_engine is None or rpc_engine is None:
+        raise WindowsRpcDurableFenceError(
+            "legacy vn.py runtime is incomplete", code="RPC_REGISTRY_UNAVAILABLE"
+        )
+    store_path = _simnow_e2e_durable_store_path_v1()
+    if (
+        not store_path.is_absolute()
+        or store_path.name != "execution-final-admission-v1.json"
+    ):
+        raise WindowsRpcDurableFenceError(
+            "SimNow E2E durable store path must be fixed and absolute",
+            code="WINDOWS_FINAL_STORE_INVALID",
+        )
+    server = getattr(rpc_engine, "server", None)
+    functions = getattr(server, "_functions", None)
+    active = getattr(server, "is_active", None)
+    if (
+        not isinstance(functions, dict)
+        or not callable(getattr(server, "register", None))
+        or not callable(active)
+    ):
+        raise WindowsRpcDurableFenceError(
+            "legacy RPC server registry is unavailable", code="RPC_REGISTRY_UNAVAILABLE"
+        )
+    if active():
+        raise WindowsRpcDurableFenceError(
+            "SimNow E2E attach must run before rpc_engine.start",
+            code="RPC_LISTENER_STARTED_EARLY",
+        )
+    if any(
+        getattr(server, marker, None) is not None
+        for marker in (
+            "_windows_simnow_e2e_attach_v1",
+            "_windows_validation_only_attach_v1",
+            "_windows_reconciliation_only_attach_v1",
+        )
+    ):
+        raise WindowsRpcDurableFenceError(
+            "SimNow E2E runtime is already attached",
+            code="WINDOWS_SIMNOW_E2E_ATTACH_ALREADY_ATTACHED",
+        )
+    # Retain the terminal marker across later errors: retrying a partially
+    # frozen mutation registry must never recreate an unfenced legacy route.
+    server._windows_simnow_e2e_attach_v1 = object()
+    try:
+        native_send_handler = functions.get("send_order")
+        native_cancel_handler = functions.get("cancel_order")
+        _replace_legacy_methods_with_permanent_frozen_denials_v1(server)
+        _validate_simnow_e2e_runtime_v1(main_engine)
+        runtime_config = WindowsRpcRuntimeConfigV1(
+            gateway_setting={"simnow_e2e": True},
+            gateway_name=_VALIDATION_GATEWAY_NAME,
+            account_scope=_VALIDATION_ACCOUNT_SCOPE,
+            environment=_VALIDATION_ENVIRONMENT,
+        )
+        runtime = _WindowsRpcRuntimeV1(
+            event_engine=event_engine,
+            main_engine=main_engine,
+            rpc_engine=rpc_engine,
+            fact_source=main_engine,
+            config=runtime_config,
+        )
+        _attach_fixed_typed_fenced_methods(
+            runtime,
+            runtime_config,
+            store_path.parent,
+            require_fixed_gateway=True,
+            max_order_volume=max_order_volume,
+            native_send_handler=native_send_handler,
+            native_cancel_handler=native_cancel_handler,
+        )
+        _seal_simnow_e2e_rpc_surface_v1(server)
+    except BaseException:
+        _clear_simnow_e2e_rpc_methods_v1(server)
+        raise
 
 
 def attach_windows_rpc_validation_only_v1(
@@ -1197,6 +1635,7 @@ def attach_windows_rpc_validation_only_v1(
     if (
         getattr(server, "_windows_validation_only_attach_v1", None) is not None
         or getattr(server, "_windows_reconciliation_only_attach_v1", None) is not None
+        or getattr(server, "_windows_simnow_e2e_attach_v1", None) is not None
     ):
         raise WindowsRpcDurableFenceError(
             "validation runtime is already attached",
@@ -1286,6 +1725,7 @@ def attach_windows_rpc_reconciliation_only_v1(
     if (
         getattr(server, "_windows_reconciliation_only_attach_v1", None) is not None
         or getattr(server, "_windows_validation_only_attach_v1", None) is not None
+        or getattr(server, "_windows_simnow_e2e_attach_v1", None) is not None
     ):
         raise WindowsRpcDurableFenceError(
             "reconciliation runtime is already attached",
@@ -1577,8 +2017,10 @@ __all__ = [
     "attach_windows_rpc_deployment_snapshot_v1",
     "attach_windows_rpc_fenced_methods_v1",
     "attach_windows_rpc_reconciliation_only_v1",
+    "attach_windows_rpc_simnow_e2e_v1",
     "attach_windows_rpc_validation_only_v1",
     "bootstrap_windows_rpc_frozen_v1",
+    "connect_windows_rpc_simnow_e2e_v1",
     "launch_windows_rpc_durable_fence_v1",
     "recover_frozen_none_store",
     "run_installed_windows_rpc_entry_v1",
