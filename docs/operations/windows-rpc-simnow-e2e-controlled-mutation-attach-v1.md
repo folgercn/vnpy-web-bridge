@@ -43,9 +43,11 @@ into an evidence artifact.
 Before exposing any typed RPC, the attach verifies all of the following:
 
 - the runtime binding captured at the actual CTP connect has `柜台环境` exactly
-  `测试`, a non-empty canonical `用户名`, and one exact front pair: `30001` with
-  `30011`, `30002` with `30012`, or `30003` with `30013`, all on
-  `182.254.243.31` (an exact optional `tcp://` prefix is accepted).
+  `测试`, a non-empty canonical `用户名`, and one exact front pair:
+  `180.168.146.187:10201` with `180.168.146.187:10211`,
+  `180.168.146.187:10202` with `180.168.146.187:10212`, or
+  `180.168.146.187:10130` with `180.168.146.187:10131` (an exact optional
+  `tcp://` prefix is accepted).
   Independently allowlisted but mismatched ports fail. No attach caller input
   can replace this binding.
 - `main_engine.get_gateway("CTP")` has matching td/md `userid` values and both
