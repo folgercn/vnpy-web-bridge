@@ -7,11 +7,18 @@ from threading import Event, Thread
 from types import SimpleNamespace
 
 import pytest
-from app.execution import GatewaySnapshot, MutationContext, VnpyWindowsGateway
+from app.execution import (
+    ExecutionOrchestrator,
+    GatewaySnapshot,
+    InMemoryExecutionRepository,
+    MutationContext,
+    VnpyWindowsGateway,
+)
 from app.execution.errors import (
     GatewayConfigurationError,
     GatewayTimeout,
     GatewayUnavailable,
+    SnapshotRejected,
 )
 from app.execution.gateway import ZmqRpcTransport
 from app.execution.models import sha256_json
@@ -257,6 +264,7 @@ class _FinalValidationPeekTransport:
                 snapshot_id="snapshot-durable",
                 generation=7,
                 connected=True,
+                position_snapshot_hash=sha256_json({}),
                 account_scope="account:prod",
                 environment="simnow",
             ).as_dict()
@@ -308,6 +316,39 @@ def _final_validation_gateway(transport):
     return gateway
 
 
+def _reconcile_command(snapshot_id: str, version: int) -> dict:
+    return {
+        "schema_version": "web_bridge_control_execution_command_v1",
+        "command_id": "command-reconcile-0001",
+        "idempotency_key": "reconcile-transport-0001",
+        "correlation_id": "correlation-reconcile-0001",
+        "issued_at": "2030-01-01T00:00:00Z",
+        "actor": {
+            "service": "control-api",
+            "principal": "tester",
+            "operator": "tester",
+            "role": "admin",
+        },
+        "command": "reconcile",
+        "expected": {"state_version": version},
+        "payload": {
+            "reconciliation_run_id": "run-transport-0001",
+            "snapshot_id": snapshot_id,
+            "reason": "verify read-only snapshot transport",
+        },
+    }
+
+
+def _reconcile_service(gateway: VnpyWindowsGateway) -> ExecutionOrchestrator:
+    return ExecutionOrchestrator(
+        InMemoryExecutionRepository(scope="account:prod"),
+        gateway,
+        scope="account:prod",
+        environment=gateway.environment,
+        test_mode=True,
+    )
+
+
 def test_final_validation_readiness_uses_fixed_pure_peek_and_hash_binds_facts() -> None:
     facts = _final_validation_facts()
     transport = _FinalValidationPeekTransport(facts)
@@ -344,6 +385,69 @@ def test_final_validation_does_not_replace_durable_snapshot_path() -> None:
             {"environment": "simnow", "account_scope": "account:prod"},
             None,
         )
+    ]
+
+
+def test_final_validation_reconcile_uses_only_pure_peek_snapshot() -> None:
+    facts = _final_validation_facts()
+    facts["active_orders"] = {}
+    facts["execution"]["orders"] = {}
+    transport = _FinalValidationPeekTransport(facts)
+    gateway = _final_validation_gateway(transport)
+    service = _reconcile_service(gateway)
+    snapshot_id = f"snapshot-peek-{sha256_json(facts)}"
+
+    response = service.process_command(
+        _reconcile_command(snapshot_id, service.repository.state_version)
+    )
+
+    assert response.result["accepted"] is True
+    assert response.result["snapshot_id"] == snapshot_id
+    assert [method for method, _payload, _context in transport.calls] == [
+        "peek_current_facts_v1"
+    ]
+
+
+def test_normal_reconcile_keeps_durable_snapshot_transport() -> None:
+    transport = _FinalValidationPeekTransport(_final_validation_facts())
+    gateway = VnpyWindowsGateway(
+        req_address="tcp://127.0.0.1:2014",
+        pub_address="tcp://127.0.0.1:4102",
+        account_scope="account:prod",
+        environment="simnow",
+        transport=transport,
+        readonly_transport=transport,
+    )
+    gateway.start()
+    service = _reconcile_service(gateway)
+
+    response = service.process_command(
+        _reconcile_command("snapshot-durable", service.repository.state_version)
+    )
+
+    assert response.result["accepted"] is True
+    assert [method for method, _payload, _context in transport.calls] == [
+        "get_execution_snapshot_v1"
+    ]
+
+
+def test_final_validation_reconcile_snapshot_mismatch_fails_closed() -> None:
+    facts = _final_validation_facts()
+    facts["active_orders"] = {}
+    facts["execution"]["orders"] = {}
+    transport = _FinalValidationPeekTransport(facts)
+    service = _reconcile_service(_final_validation_gateway(transport))
+
+    with pytest.raises(SnapshotRejected, match="does not match"):
+        service.process_command(
+            _reconcile_command(
+                "snapshot-requested", service.repository.state_version
+            )
+        )
+
+    assert service.status()["lifecycle"] == "HALTED_RECONCILE_REQUIRED"
+    assert [method for method, _payload, _context in transport.calls] == [
+        "peek_current_facts_v1"
     ]
 
 

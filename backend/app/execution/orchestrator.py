@@ -917,9 +917,10 @@ class ExecutionOrchestrator:
         finalization_evidence: Mapping[str, str] | None = None,
     ) -> CommandResponse:
         # Read-only snapshot/query calls are safe without a leader token.  They
-        # never construct a new send/cancel intent.
+        # never construct a new send/cancel intent.  Reuse the readiness
+        # snapshot source so final validation binds reconcile to its pure peek.
         try:
-            snapshot = self._coerce_snapshot(self.gateway.snapshot())
+            snapshot = self._coerce_snapshot(self.gateway.readiness_snapshot())
         except Exception as exc:
             if isinstance(
                 exc, (GatewayUnavailable, GatewayTimeout, TimeoutError, ConnectionError)
