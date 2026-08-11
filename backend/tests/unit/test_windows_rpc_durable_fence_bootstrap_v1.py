@@ -821,32 +821,37 @@ def test_windows_reconciliation_only_attach_uses_native_rpc_server(
         durable_module, "_validation_durable_store_path_v1", lambda: store_path
     )
     server = RpcServer()
-    server.register(send_order)
-    server.register(cancel_order)
-    assert not server.is_active()
+    try:
+        server.register(send_order)
+        server.register(cancel_order)
+        assert not server.is_active()
 
-    durable_module.attach_windows_rpc_reconciliation_only_v1(
-        rpc_engine=SimpleNamespace(server=server),
-        event_engine=SyncEventEngine(),
-        main_engine=FactSource(),
-    )
+        durable_module.attach_windows_rpc_reconciliation_only_v1(
+            rpc_engine=SimpleNamespace(server=server),
+            event_engine=SyncEventEngine(),
+            main_engine=FactSource(),
+        )
 
-    assert not server.is_active()
-    assert set(server._functions) == {
-        "send_order",
-        "cancel_order",
-        "peek_current_facts_v1",
-        "get_execution_snapshot_v1",
-    }
-    for name in ("send_order", "cancel_order"):
-        with pytest.raises(WindowsRpcDurableFenceDenied, match="FROZEN"):
-            server._functions[name](object(), "CTP")
-    assert calls == []
+        assert not server.is_active()
+        assert set(server._functions) == {
+            "send_order",
+            "cancel_order",
+            "peek_current_facts_v1",
+            "get_execution_snapshot_v1",
+        }
+        for name in ("send_order", "cancel_order"):
+            with pytest.raises(WindowsRpcDurableFenceDenied, match="FROZEN"):
+                server._functions[name](object(), "CTP")
+        assert calls == []
 
-    request = {"account_scope": "account:windows", "environment": "simnow"}
-    first = server._functions["get_execution_snapshot_v1"](request)
-    second = server._functions["get_execution_snapshot_v1"](request)
-    assert (first["generation"], second["generation"]) == (1, 2)
+        request = {"account_scope": "account:windows", "environment": "simnow"}
+        first = server._functions["get_execution_snapshot_v1"](request)
+        second = server._functions["get_execution_snapshot_v1"](request)
+        assert (first["generation"], second["generation"]) == (1, 2)
+    finally:
+        server._socket_rep.close(linger=0)
+        server._socket_pub.close(linger=0)
+        server._context.destroy(linger=0)
 
 
 @pytest.mark.parametrize(
