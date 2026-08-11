@@ -53,7 +53,7 @@ Before exposing any typed RPC, the attach verifies all of the following:
 - the live OMS account mapping has exactly one key, exactly
   `CTP.<connect-binding userid>`, and its account facts match that identity. SHA-256 of
   the canonical raw account id must match the module-pinned Issue 291 hash
-  `175c9e4d1e44dfe7c822c887507e7a6b38b3ea2bc10e9057e4783a97cba53995`.
+  `9d8809bc4525db5796ac9ec140130371352b92041169e02a6da1e4c31d609559`.
   This is `sha256(raw_account_id_utf8)`, not a JSON list/account-keys hash.
   There is no caller-supplied expected hash, and the raw account id must not be
   written into this runbook or deployment evidence.

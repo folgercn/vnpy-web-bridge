@@ -258,7 +258,7 @@ def _install_fake_vnpy(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_simnow_e2e_attach_has_exact_controlled_signature_and_negative_gates() -> None:
     assert (
         durable_module._ISSUE291_SIMNOW_ACCOUNT_SHA256
-        == "175c9e4d1e44dfe7c822c887507e7a6b38b3ea2bc10e9057e4783a97cba53995"
+        == "9d8809bc4525db5796ac9ec140130371352b92041169e02a6da1e4c31d609559"
     )
     assert set(
         inspect.signature(durable_module.attach_windows_rpc_simnow_e2e_v1).parameters
