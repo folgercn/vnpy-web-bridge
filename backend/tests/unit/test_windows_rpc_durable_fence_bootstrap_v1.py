@@ -747,6 +747,226 @@ def test_public_validation_only_attach_freezes_legacy_rpc_and_exposes_pure_peek(
     assert server.send_calls == server.cancel_calls == 0
 
 
+def test_public_reconciliation_only_attach_exposes_only_fixed_readers_and_snapshots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _runtime_config()
+    assert set(
+        inspect.signature(
+            durable_module.attach_windows_rpc_reconciliation_only_v1
+        ).parameters
+    ) == {"rpc_engine", "event_engine", "main_engine"}
+    store_path = tmp_path / "execution-final-admission-v1.json"
+    monkeypatch.setattr(
+        durable_module, "_validation_durable_store_path_v1", lambda: store_path
+    )
+    server = FakeServer()
+    rpc_engine = SimpleNamespace(server=server)
+    event_engine = SyncEventEngine()
+    main_engine = FactSource()
+
+    assert (
+        durable_module.attach_windows_rpc_reconciliation_only_v1(
+            rpc_engine=rpc_engine,
+            event_engine=event_engine,
+            main_engine=main_engine,
+        )
+        is None
+    )
+    assert set(server._functions) == {
+        "send_order",
+        "cancel_order",
+        "peek_current_facts_v1",
+        "get_execution_snapshot_v1",
+    }
+    for name in ("send_order", "cancel_order"):
+        with pytest.raises(WindowsRpcDurableFenceDenied, match="FROZEN"):
+            server._functions[name](object(), config.gateway_name)
+    assert server.send_calls == server.cancel_calls == 0
+
+    request = {
+        "account_scope": config.account_scope,
+        "environment": config.environment,
+    }
+    store_before_peek = store_path.read_bytes()
+    peek = server._functions["peek_current_facts_v1"](request)
+    assert peek["admission"]["snapshot_generation"] == 0
+    assert store_path.read_bytes() == store_before_peek
+    first = server._functions["get_execution_snapshot_v1"](request)
+    second = server._functions["get_execution_snapshot_v1"](request)
+    assert (first["generation"], second["generation"]) == (1, 2)
+    assert store_path.read_bytes() != store_before_peek
+    with pytest.raises(WindowsRpcDurableFenceDenied, match="scope is foreign"):
+        server._functions["get_execution_snapshot_v1"](
+            {"account_scope": "account:foreign", "environment": config.environment}
+        )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows RpcServer")
+def test_windows_reconciliation_only_attach_uses_native_rpc_server(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vnpy.rpc import RpcServer
+
+    calls: list[str] = []
+
+    def send_order(*_args: Any, **_kwargs: Any) -> None:
+        calls.append("send")
+
+    def cancel_order(*_args: Any, **_kwargs: Any) -> None:
+        calls.append("cancel")
+
+    store_path = tmp_path / "execution-final-admission-v1.json"
+    monkeypatch.setattr(
+        durable_module, "_validation_durable_store_path_v1", lambda: store_path
+    )
+    server = RpcServer()
+    server.register(send_order)
+    server.register(cancel_order)
+    assert not server.is_active()
+
+    durable_module.attach_windows_rpc_reconciliation_only_v1(
+        rpc_engine=SimpleNamespace(server=server),
+        event_engine=SyncEventEngine(),
+        main_engine=FactSource(),
+    )
+
+    assert not server.is_active()
+    assert set(server._functions) == {
+        "send_order",
+        "cancel_order",
+        "peek_current_facts_v1",
+        "get_execution_snapshot_v1",
+    }
+    for name in ("send_order", "cancel_order"):
+        with pytest.raises(WindowsRpcDurableFenceDenied, match="FROZEN"):
+            server._functions[name](object(), "CTP")
+    assert calls == []
+
+    request = {"account_scope": "account:windows", "environment": "simnow"}
+    first = server._functions["get_execution_snapshot_v1"](request)
+    second = server._functions["get_execution_snapshot_v1"](request)
+    assert (first["generation"], second["generation"]) == (1, 2)
+
+
+@pytest.mark.parametrize(
+    ("first_name", "second_name"),
+    [
+        ("validation_only", "reconciliation_only"),
+        ("reconciliation_only", "validation_only"),
+    ],
+)
+def test_validation_and_reconciliation_attaches_are_mutually_exclusive(
+    first_name: str,
+    second_name: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        durable_module,
+        "_validation_durable_store_path_v1",
+        lambda: tmp_path / "execution-final-admission-v1.json",
+    )
+    server = FakeServer()
+    rpc_engine = SimpleNamespace(server=server)
+    attaches = {
+        "validation_only": durable_module.attach_windows_rpc_validation_only_v1,
+        "reconciliation_only": durable_module.attach_windows_rpc_reconciliation_only_v1,
+    }
+    attaches[first_name](
+        rpc_engine=rpc_engine,
+        event_engine=SyncEventEngine(),
+        main_engine=FactSource(),
+    )
+    functions_before = dict(server._functions)
+    frozen_handlers = {
+        name: server._functions[name] for name in ("send_order", "cancel_order")
+    }
+
+    with pytest.raises(WindowsRpcDurableFenceError, match="already attached"):
+        attaches[second_name](
+            rpc_engine=rpc_engine,
+            event_engine=SyncEventEngine(),
+            main_engine=FactSource(),
+        )
+
+    assert server._functions == functions_before
+    for name, handler in frozen_handlers.items():
+        assert server._functions[name] is handler
+        with pytest.raises(WindowsRpcDurableFenceDenied, match="FROZEN"):
+            handler(object(), "CTP")
+    assert server.send_calls == server.cancel_calls == 0
+
+
+def test_reconciliation_only_attach_rejects_started_or_reused_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        durable_module,
+        "_validation_durable_store_path_v1",
+        lambda: tmp_path / "execution-final-admission-v1.json",
+    )
+    server = FakeServer()
+    server._active = True
+    with pytest.raises(WindowsRpcDurableFenceError, match="before rpc_engine.start"):
+        durable_module.attach_windows_rpc_reconciliation_only_v1(
+            rpc_engine=SimpleNamespace(server=server),
+            event_engine=SyncEventEngine(),
+            main_engine=FactSource(),
+        )
+
+    server._active = False
+    durable_module.attach_windows_rpc_reconciliation_only_v1(
+        rpc_engine=SimpleNamespace(server=server),
+        event_engine=SyncEventEngine(),
+        main_engine=FactSource(),
+    )
+    with pytest.raises(WindowsRpcDurableFenceError, match="already attached"):
+        durable_module.attach_windows_rpc_reconciliation_only_v1(
+            rpc_engine=SimpleNamespace(server=server),
+            event_engine=SyncEventEngine(),
+            main_engine=FactSource(),
+        )
+
+
+def test_reconciliation_only_attach_failure_leaves_only_frozen_legacy_denials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server = FakeServer()
+    monkeypatch.setattr(
+        durable_module,
+        "_validation_durable_store_path_v1",
+        lambda: tmp_path / "execution-final-admission-v1.json",
+    )
+
+    def fail_after_registration(runtime: Any, *_args: Any, **_kwargs: Any) -> None:
+        runtime.rpc_engine.server._functions["get_execution_snapshot_v1"] = lambda: None
+        raise WindowsRpcDurableFenceError(
+            "injected reconciliation attach failure", code="RPC_REGISTRY_UNAVAILABLE"
+        )
+
+    monkeypatch.setattr(
+        durable_module, "_attach_fixed_typed_fenced_methods", fail_after_registration
+    )
+    with pytest.raises(WindowsRpcDurableFenceError, match="injected reconciliation"):
+        durable_module.attach_windows_rpc_reconciliation_only_v1(
+            rpc_engine=SimpleNamespace(server=server),
+            event_engine=SyncEventEngine(),
+            main_engine=FactSource(),
+        )
+
+    assert set(server._functions) == {"send_order", "cancel_order"}
+    for name in ("send_order", "cancel_order"):
+        with pytest.raises(WindowsRpcDurableFenceDenied, match="FROZEN"):
+            server._functions[name](object(), "CTP")
+    with pytest.raises(WindowsRpcDurableFenceError, match="already attached"):
+        durable_module.attach_windows_rpc_reconciliation_only_v1(
+            rpc_engine=SimpleNamespace(server=server),
+            event_engine=SyncEventEngine(),
+            main_engine=FactSource(),
+        )
+
+
 def test_public_validation_attach_cleans_all_registered_transient_rpc_on_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
