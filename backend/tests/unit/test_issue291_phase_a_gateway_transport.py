@@ -213,23 +213,33 @@ class _FinalAdmissionWireTransport:
         )
 
         self.calls = []
-        self.admission = WindowsRpcFencedAdmissionV1(
-            account_scope="account:prod",
-            environment="simnow",
-            send_handler=lambda _request, _context: {
-                "state": "ACKNOWLEDGED",
-                "accepted": True,
-            },
-            cancel_handler=lambda _request, _context: {
-                "state": "CANCELLED",
-                "accepted": True,
-            },
-            query_handler=lambda _request, _context: {
+        self.send_calls = 0
+        self.cancel_calls = 0
+        self.query_handler_calls = 0
+
+        def send_handler(_request, _context):
+            self.send_calls += 1
+            return {"state": "ACKNOWLEDGED", "accepted": True}
+
+        def cancel_handler(_request, _context):
+            self.cancel_calls += 1
+            return {"state": "CANCELLED", "accepted": True}
+
+        def query_handler(_request, _context):
+            self.query_handler_calls += 1
+            return {
                 "state": "REJECTED",
                 "accepted": False,
                 "account_scope": "account:prod",
                 "environment": "simnow",
-            },
+            }
+
+        self.admission = WindowsRpcFencedAdmissionV1(
+            account_scope="account:prod",
+            environment="simnow",
+            send_handler=send_handler,
+            cancel_handler=cancel_handler,
+            query_handler=query_handler,
         )
 
     def start(self) -> None:
@@ -241,6 +251,76 @@ class _FinalAdmissionWireTransport:
     def call(self, method, payload, context=None):
         self.calls.append((method, payload, context))
         return getattr(self.admission, method)(payload, context)
+
+
+def test_final_admission_query_rejects_only_definitive_missing_receipt() -> None:
+    from scripts.windows_fence_foundation.admission import WindowsRpcDurableFenceDenied
+    from scripts.windows_fence_foundation.final_admission_v1 import (
+        WindowsRpcFencedAdmissionV1,
+        _receipt_digest,
+    )
+
+    query_calls = []
+    admission = WindowsRpcFencedAdmissionV1(
+        account_scope="account:prod",
+        environment="simnow",
+        send_handler=lambda *_args: pytest.fail("send must not be called"),
+        cancel_handler=lambda *_args: pytest.fail("cancel must not be called"),
+        query_handler=lambda request, context: query_calls.append(
+            (request, context)
+        )
+        or {
+            "state": "ACKNOWLEDGED",
+            "accepted": True,
+            "account_scope": "account:prod",
+            "environment": "simnow",
+        },
+    )
+    query = {
+        "account_scope": "account:prod",
+        "environment": "simnow",
+        "intent_id": "intent-000001",
+        "broker_order_id": None,
+    }
+
+    assert admission.query_intent_v1(query) == {
+        "intent_id": "intent-000001",
+        "state": "REJECTED",
+        "accepted": False,
+        "account_scope": "account:prod",
+        "environment": "simnow",
+    }
+    assert query_calls == []
+    with pytest.raises(WindowsRpcDurableFenceDenied, match="not registered"):
+        admission.query_intent_v1({**query, "broker_order_id": "CTP.1"})
+    assert query_calls == []
+
+    receipt = {
+        "intent_id": "intent-000001",
+        "receipt_id": "receipt-intent-000001",
+        "receipt_hash": "",
+        "request_hash": "a" * 64,
+        "account_scope": "account:prod",
+        "environment": "simnow",
+        "leader_epoch": 1,
+        "fencing_token": 1,
+        "idempotency_key": "send-key-query-0001",
+        "plan_id": "plan-000001",
+        "plan_hash": "b" * 64,
+        "action": "send",
+    }
+    receipt["receipt_hash"] = _receipt_digest(receipt)
+    admission.install_fence(epoch=1, fencing_token=1)
+    admission.register_receipt(intent_id=receipt["intent_id"], receipt=receipt)
+
+    assert admission.query_intent_v1(query) == {
+        "intent_id": "intent-000001",
+        "state": "ACKNOWLEDGED",
+        "accepted": True,
+        "account_scope": "account:prod",
+        "environment": "simnow",
+    }
+    assert query_calls == [(query, None)]
 
 
 def test_simnow_durable_fence_wire_maps_only_windows_environment() -> None:
@@ -628,6 +708,73 @@ def test_equal_pure_peek_reconcile_keeps_unknown_halted_without_new_send() -> No
     assert state["lifecycle"] == "HALTED_UNKNOWN_OUTCOME"
     assert state["send_intents"][intent_id]["state"] == "UNKNOWN_OUTCOME"
     assert intent_id in state["unknown_outcomes"]
+
+
+def test_missing_receipt_reconcile_clears_unknown_without_order_mutation() -> None:
+    class MissingReceiptTransport(_FinalAdmissionWireTransport):
+        def __init__(self, facts):
+            super().__init__()
+            self.facts = facts
+
+        def call(self, method, payload, context=None):
+            if method == "peek_current_facts_v1":
+                self.calls.append((method, payload, context))
+                return self.facts
+            return super().call(method, payload, context)
+
+    facts = _final_validation_facts()
+    facts["active_orders"] = {}
+    facts["execution"]["orders"] = {}
+    transport = MissingReceiptTransport(facts)
+    service = _reconcile_service(_final_validation_gateway(transport))
+    intent_id = "intent-missing-receipt-0001"
+    idempotency_key = "send-key-missing-receipt-0001"
+
+    def record_unknown(state: dict) -> None:
+        state["broker"].update(
+            {
+                "generation": 0,
+                "connected": True,
+                "last_snapshot_at": "2020-01-01T00:00:00Z",
+            }
+        )
+        state["send_intents"][intent_id] = {
+            "intent_id": intent_id,
+            "idempotency_key": idempotency_key,
+            "state": "UNKNOWN_OUTCOME",
+            "plan_id": "plan-missing-receipt-0001",
+            "plan_hash": "b" * 64,
+            "leader_epoch": 1,
+            "fencing_token": 1,
+            "created_at": "2020-01-01T00:00:00Z",
+        }
+        state["intent_keys"][idempotency_key] = intent_id
+        state["unknown_outcomes"][intent_id] = {"reason": "pre-install timeout"}
+        state["reconciliation"].update({"state": "UNKNOWN", "unknown_outcomes": 1})
+        state["lifecycle"] = "HALTED_UNKNOWN_OUTCOME"
+
+    service.repository.mutate(record_unknown)
+    response = service.process_command(
+        _reconcile_command(
+            f"snapshot-peek-{sha256_json(facts)}", service.repository.state_version
+        )
+    )
+
+    state = service.repository.snapshot()
+    assert response.result == {
+        "accepted": True,
+        "snapshot_id": f"snapshot-peek-{sha256_json(facts)}",
+        "unknown_outcomes": 0,
+        "lifecycle": "READY",
+    }
+    assert state["send_intents"][intent_id]["state"] == "RECONCILED"
+    assert state["unknown_outcomes"] == {}
+    assert transport.send_calls == transport.cancel_calls == 0
+    assert transport.query_handler_calls == 0
+    assert [method for method, _payload, _context in transport.calls] == [
+        "peek_current_facts_v1",
+        "query_intent_v1",
+    ]
 
 
 def test_final_validation_reconcile_rejects_regressed_pure_peek_generation() -> None:
