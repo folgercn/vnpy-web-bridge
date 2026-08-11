@@ -258,7 +258,7 @@ class _FinalValidationPeekTransport:
                 generation=7,
                 connected=True,
                 account_scope="account:prod",
-                environment="SIMNOW",
+                environment="simnow",
             ).as_dict()
         return self.facts
 
@@ -337,6 +337,31 @@ def test_final_validation_does_not_replace_durable_snapshot_path() -> None:
     snapshot = _final_validation_gateway(transport).snapshot()
 
     assert snapshot.generation == 7
+    assert snapshot.environment == "SIMNOW"
+    assert transport.calls == [
+        (
+            "get_execution_snapshot_v1",
+            {"environment": "simnow", "account_scope": "account:prod"},
+            None,
+        )
+    ]
+
+
+def test_durable_snapshot_keeps_service_environment_binding() -> None:
+    transport = _FinalValidationPeekTransport(_final_validation_facts())
+    gateway = VnpyWindowsGateway(
+        req_address="tcp://127.0.0.1:2014",
+        pub_address="tcp://127.0.0.1:4102",
+        account_scope="account:prod",
+        environment="SIMNOW",
+        transport=transport,
+        readonly_transport=transport,
+    )
+    gateway.start()
+
+    snapshot = gateway.snapshot()
+
+    assert snapshot.environment == "simnow"
     assert transport.calls == [
         (
             "get_execution_snapshot_v1",
