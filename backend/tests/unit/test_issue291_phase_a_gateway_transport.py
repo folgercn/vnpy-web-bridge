@@ -349,6 +349,19 @@ def _reconcile_service(gateway: VnpyWindowsGateway) -> ExecutionOrchestrator:
     )
 
 
+def _record_broker_generation(service: ExecutionOrchestrator, generation: int) -> None:
+    def writer(state: dict) -> None:
+        state["broker"].update(
+            {
+                "generation": generation,
+                "connected": True,
+                "last_snapshot_at": "2020-01-01T00:00:00Z",
+            }
+        )
+
+    service.repository.mutate(writer)
+
+
 def test_final_validation_readiness_uses_fixed_pure_peek_and_hash_binds_facts() -> None:
     facts = _final_validation_facts()
     transport = _FinalValidationPeekTransport(facts)
@@ -408,6 +421,39 @@ def test_final_validation_reconcile_uses_only_pure_peek_snapshot() -> None:
     ]
 
 
+def test_final_validation_reconcile_accepts_equal_pure_peek_generation() -> None:
+    facts = _final_validation_facts()
+    facts["active_orders"] = {}
+    facts["execution"]["orders"] = {}
+    transport = _FinalValidationPeekTransport(facts)
+    service = _reconcile_service(_final_validation_gateway(transport))
+    _record_broker_generation(service, generation=0)
+
+    response = service.process_command(
+        _reconcile_command(
+            f"snapshot-peek-{sha256_json(facts)}", service.repository.state_version
+        )
+    )
+
+    assert response.result["accepted"] is True
+
+
+def test_final_validation_reconcile_rejects_regressed_pure_peek_generation() -> None:
+    facts = _final_validation_facts()
+    facts["active_orders"] = {}
+    facts["execution"]["orders"] = {}
+    transport = _FinalValidationPeekTransport(facts)
+    service = _reconcile_service(_final_validation_gateway(transport))
+    _record_broker_generation(service, generation=1)
+
+    with pytest.raises(SnapshotRejected, match="generation regressed"):
+        service.process_command(
+            _reconcile_command(
+                f"snapshot-peek-{sha256_json(facts)}", service.repository.state_version
+            )
+        )
+
+
 def test_normal_reconcile_keeps_durable_snapshot_transport() -> None:
     transport = _FinalValidationPeekTransport(_final_validation_facts())
     gateway = VnpyWindowsGateway(
@@ -429,6 +475,26 @@ def test_normal_reconcile_keeps_durable_snapshot_transport() -> None:
     assert [method for method, _payload, _context in transport.calls] == [
         "get_execution_snapshot_v1"
     ]
+
+
+def test_durable_reconcile_rejects_equal_generation() -> None:
+    transport = _FinalValidationPeekTransport(_final_validation_facts())
+    gateway = VnpyWindowsGateway(
+        req_address="tcp://127.0.0.1:2014",
+        pub_address="tcp://127.0.0.1:4102",
+        account_scope="account:prod",
+        environment="simnow",
+        transport=transport,
+        readonly_transport=transport,
+    )
+    gateway.start()
+    service = _reconcile_service(gateway)
+    _record_broker_generation(service, generation=7)
+
+    with pytest.raises(SnapshotRejected, match="generation is stale"):
+        service.process_command(
+            _reconcile_command("snapshot-durable", service.repository.state_version)
+        )
 
 
 def test_final_validation_reconcile_snapshot_mismatch_fails_closed() -> None:

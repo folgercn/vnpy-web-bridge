@@ -936,7 +936,13 @@ class ExecutionOrchestrator:
                 "broker snapshot id does not match reconcile command"
             )
         try:
-            self._validate_reconcile_snapshot(state, snapshot)
+            self._validate_reconcile_snapshot(
+                state,
+                snapshot,
+                require_generation_advance=(
+                    self.gateway.readiness_snapshot_uses_durable_generation()
+                ),
+            )
         except SnapshotRejected:
             self._mark_reconcile_halted(
                 reason="snapshot failed connected/scope/freshness/closure validation"
@@ -1789,6 +1795,8 @@ class ExecutionOrchestrator:
         self,
         state: Mapping[str, Any],
         snapshot: GatewaySnapshot,
+        *,
+        require_generation_advance: bool = True,
     ) -> None:
         if not isinstance(snapshot.snapshot_id, str) or not _is_identifier(
             snapshot.snapshot_id
@@ -1848,7 +1856,9 @@ class ExecutionOrchestrator:
         if initial_snapshot:
             if snapshot.generation < previous_generation:
                 raise SnapshotRejected("broker snapshot generation regressed")
-        elif snapshot.generation <= previous_generation:
+        elif snapshot.generation < previous_generation:
+            raise SnapshotRejected("broker snapshot generation regressed")
+        elif require_generation_advance and snapshot.generation == previous_generation:
             raise SnapshotRejected("broker snapshot generation is stale")
         if _timestamp(snapshot.observed_at) < _timestamp(previous_snapshot_at):
             raise SnapshotRejected("broker snapshot timestamp rolled back")
