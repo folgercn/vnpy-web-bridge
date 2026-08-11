@@ -43,13 +43,19 @@ into an evidence artifact.
 Before exposing any typed RPC, the attach verifies all of the following:
 
 - the runtime binding captured at the actual CTP connect has `柜台环境` exactly
-  `测试`, a non-empty canonical `用户名`, and one exact front pair:
+  `实盘`, `经纪商代码` exactly `9999`, a non-empty canonical `用户名`, and one
+  exact front pair:
   `180.168.146.187:10201` with `180.168.146.187:10211`,
   `180.168.146.187:10202` with `180.168.146.187:10212`, or
   `180.168.146.187:10130` with `180.168.146.187:10131` (an exact optional
   `tcp://` prefix is accepted).
   Independently allowlisted but mismatched ports fail. No attach caller input
   can replace this binding.
+- `柜台环境=实盘` is solely the `vnpy_ctp` API crypto-environment selection
+  required by the current SimNow fronts (production-key crypto). It is not a
+  production/live/countable authorization: the attach call above still requires
+  `production_authorized=False`, `live_trading_authorized=False`, and
+  `countable_forward=False` exactly.
 - `main_engine.get_gateway("CTP")` has matching td/md `userid` values and both
   td/md `login_status is True`.
 - the live OMS account mapping has exactly one key, exactly
