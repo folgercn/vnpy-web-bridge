@@ -12,6 +12,7 @@ from app.execution import (
     GatewaySnapshot,
     InMemoryExecutionRepository,
     MutationContext,
+    SendIntent,
     VnpyWindowsGateway,
 )
 from app.execution.errors import (
@@ -203,6 +204,131 @@ class _ReadonlyTransport:
             account_scope="account:prod",
             environment="simnow",
         ).as_dict()
+
+
+class _FinalAdmissionWireTransport:
+    def __init__(self) -> None:
+        from scripts.windows_fence_foundation.final_admission_v1 import (
+            WindowsRpcFencedAdmissionV1,
+        )
+
+        self.calls = []
+        self.admission = WindowsRpcFencedAdmissionV1(
+            account_scope="account:prod",
+            environment="simnow",
+            send_handler=lambda _request, _context: {
+                "state": "ACKNOWLEDGED",
+                "accepted": True,
+            },
+            cancel_handler=lambda _request, _context: {
+                "state": "CANCELLED",
+                "accepted": True,
+            },
+            query_handler=lambda _request, _context: {
+                "state": "REJECTED",
+                "accepted": False,
+                "account_scope": "account:prod",
+                "environment": "simnow",
+            },
+        )
+
+    def start(self) -> None:
+        return None
+
+    def stop(self) -> None:
+        return None
+
+    def call(self, method, payload, context=None):
+        self.calls.append((method, payload, context))
+        return getattr(self.admission, method)(payload, context)
+
+
+def test_simnow_durable_fence_wire_maps_only_windows_environment() -> None:
+    transport = _FinalAdmissionWireTransport()
+    gateway = VnpyWindowsGateway(
+        req_address="tcp://127.0.0.1:2014",
+        pub_address="tcp://127.0.0.1:4102",
+        account_scope="account:prod",
+        environment="SIMNOW",
+        transport=transport,
+        readonly_transport=transport,
+    )
+    gateway.start()
+    request = {"symbol": "RB"}
+    context = MutationContext(
+        account_scope="account:prod",
+        environment="SIMNOW",
+        leader_epoch=3,
+        fencing_token=7,
+        plan_id="plan-000001",
+        plan_hash="b" * 64,
+        intent_id="intent-000001",
+        idempotency_key="send-key-wire-00001",
+        action="send",
+        receipt_id="receipt-intent-000001",
+        receipt_hash=sha256_json(
+            {
+                "account_scope": "account:prod",
+                "environment": "SIMNOW",
+                "intent_id": "intent-000001",
+                "idempotency_key": "send-key-wire-00001",
+                "plan_id": "plan-000001",
+                "plan_hash": "b" * 64,
+                "request_hash": sha256_json(request),
+                "action": "send",
+            }
+        ),
+        request_hash=sha256_json(request),
+    )
+
+    send_result = gateway.send_order(request, context)
+    query_result = gateway.query_intent(
+        SendIntent(
+            intent_id=context.intent_id,
+            idempotency_key=context.idempotency_key,
+            state="UNKNOWN_OUTCOME",
+            plan_id=context.plan_id,
+            plan_hash=context.plan_hash,
+            leader_epoch=context.leader_epoch,
+            fencing_token=context.fencing_token,
+            created_at="2030-01-01T00:00:00Z",
+            request_hash=context.request_hash,
+            receipt_id=context.receipt_id,
+            receipt_hash=context.receipt_hash,
+        ),
+        context,
+    )
+
+    assert gateway.environment == context.environment == "SIMNOW"
+    assert send_result["environment"] == query_result["environment"] == "simnow"
+    assert send_result["receipt_hash"] != context.receipt_hash
+    assert transport.admission.snapshot()["receipt_intents"] == [context.intent_id]
+    install, register, send, query = transport.calls
+    assert install == (
+        "install_fence_v1",
+        {
+            "account_scope": "account:prod",
+            "environment": "simnow",
+            "leader_epoch": 3,
+            "fencing_token": 7,
+        },
+        None,
+    )
+    assert register[0] == "register_receipt_v1"
+    assert register[1]["receipt"]["environment"] == "simnow"
+    assert register[2] is None
+    assert send[0] == "send_order_fenced_v1"
+    assert send[2].environment == "simnow"
+    assert query == (
+        "query_intent_v1",
+        {
+            "account_scope": "account:prod",
+            "environment": "simnow",
+            "intent_id": "intent-000001",
+            "broker_order_id": None,
+        },
+        send[2],
+    )
 
 
 def test_readiness_snapshot_has_independent_socket_during_mutation() -> None:
