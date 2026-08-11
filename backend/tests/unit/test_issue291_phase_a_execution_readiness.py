@@ -10,6 +10,7 @@ from app.execution import (
     InMemoryGateway,
     VnpyWindowsGateway,
 )
+from app.execution.errors import SnapshotRejected
 from app.execution.models import format_utc
 from app.execution.orchestrator import ExecutionOrchestrator
 from app.execution.readiness import GatewayReadinessProbe
@@ -130,6 +131,32 @@ def test_readiness_rejects_stale_or_cross_scope_snapshot(snapshot) -> None:
     assert response.status_code == 503
     assert service.repository.state_version == before_version
     assert gateway.send_calls == [] and gateway.cancel_calls == []
+
+
+@pytest.mark.parametrize(
+    ("delta", "accepted"),
+    [
+        (timedelta(seconds=2), True),
+        (timedelta(seconds=2, microseconds=1), False),
+        (timedelta(seconds=-60), True),
+        (timedelta(seconds=-60, microseconds=-1), False),
+    ],
+)
+def test_readiness_snapshot_clock_skew_and_staleness_boundaries(
+    monkeypatch, delta: timedelta, accepted: bool
+) -> None:
+    now = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    monkeypatch.setattr("app.execution.readiness.utc_now", lambda: now)
+    gateway = InMemoryGateway(account_scope="account:readiness", environment="simnow")
+    snapshot = _snapshot(observed_at=format_utc(now + delta))
+    service = _ready_service(gateway)
+    probe = GatewayReadinessProbe(service, timeout_seconds=0.2)
+
+    if accepted:
+        assert probe._validate(snapshot) is snapshot
+    else:
+        with pytest.raises(SnapshotRejected, match="timestamp is stale"):
+            probe._validate(snapshot)
 
 
 def test_readiness_rejects_regressed_generation() -> None:

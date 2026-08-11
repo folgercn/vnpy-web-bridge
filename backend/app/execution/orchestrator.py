@@ -15,6 +15,7 @@ from threading import RLock
 from typing import Any
 from uuid import uuid4
 
+from .clock import FUTURE_SKEW_SECONDS, SNAPSHOT_STALE_SECONDS
 from .errors import (
     AuthorityRejected,
     CommandValidationError,
@@ -1800,7 +1801,9 @@ class ExecutionOrchestrator:
         if not snapshot.fresh:
             raise SnapshotRejected("broker snapshot is not fresh")
         now = utc_now()
-        if observed_at > now or (now - observed_at).total_seconds() > 60:
+        if (observed_at - now).total_seconds() > FUTURE_SKEW_SECONDS or (
+            now - observed_at
+        ).total_seconds() > SNAPSHOT_STALE_SECONDS:
             raise SnapshotRejected("broker snapshot timestamp is not fresh")
         if snapshot.account_scope and snapshot.account_scope != self.scope:
             raise SnapshotRejected("broker snapshot account scope mismatch")
