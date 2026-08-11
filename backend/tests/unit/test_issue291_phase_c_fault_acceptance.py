@@ -3,10 +3,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from app.execution.gateway import ExecutionGateway, GatewaySnapshot
 from app.execution.models import sha256_json
 from jsonschema import Draft202012Validator, RefResolver
 
 from scripts.phase_c_faults import run_fault_acceptance
+from scripts.phase_c_faults.process_runner import _LoopbackGateway
 
 ROOT = Path(__file__).resolve().parents[3]
 SCHEMA_DIR = ROOT / "docs" / "schemas"
@@ -25,6 +27,20 @@ def _validator() -> Draft202012Validator:
         store={SCENARIO_SCHEMA["$id"]: SCENARIO_SCHEMA},
     )
     return Draft202012Validator(BUNDLE_SCHEMA, resolver=resolver)
+
+
+def test_loopback_gateway_satisfies_readiness_snapshot_contract(monkeypatch) -> None:
+    gateway = _LoopbackGateway(1)
+    snapshot = GatewaySnapshot(
+        snapshot_id="snapshot-loopback-contract",
+        generation=1,
+        connected=True,
+    )
+    monkeypatch.setattr(gateway, "snapshot", lambda: snapshot)
+
+    assert isinstance(gateway, ExecutionGateway)
+    assert gateway.readiness_snapshot() is snapshot
+    assert gateway.readiness_snapshot_uses_durable_generation() is True
 
 
 def test_phase_c_fault_schemas_are_strict_draft202012_contracts() -> None:
