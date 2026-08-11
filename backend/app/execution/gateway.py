@@ -667,9 +667,14 @@ class VnpyWindowsGateway:
 
     def snapshot(self) -> GatewaySnapshot:
         self._require_started()
+        windows_environment = (
+            self._FINAL_VALIDATION_WINDOWS_ENVIRONMENT
+            if self.readiness_snapshot_source == self._FINAL_VALIDATION_PEEK_SOURCE
+            else self.environment
+        )
         result = self.readonly_transport.call(
             "get_execution_snapshot_v1",
-            {"environment": self.environment, "account_scope": self.account_scope},
+            {"environment": windows_environment, "account_scope": self.account_scope},
             None,
         )
         try:
@@ -729,7 +734,12 @@ class VnpyWindowsGateway:
                 orders=result["orders"],
                 positions=result["positions"],
                 account_scope=result["account_scope"],
-                environment=result["environment"],
+                environment=(
+                    self.environment
+                    if self.readiness_snapshot_source
+                    == self._FINAL_VALIDATION_PEEK_SOURCE
+                    else result["environment"]
+                ),
                 fresh=fresh,
             )
         except (KeyError, TypeError, ValueError) as exc:
