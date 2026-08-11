@@ -73,7 +73,9 @@ services:
       EXECUTION_SIMNOW_MAX_ORDER_VOLUME: "1"
       FINAL_EXECUTION_RUNTIME_REQUIRED: "true"
       EXECUTION_READINESS_SNAPSHOT_SOURCE: final-validation-peek-current-facts-v1
-      EXECUTION_ALLOW_SIMNOW_EXECUTION: "false"
+      # An authorised one-shot SimNow run must opt in at invocation time.
+      # Production/live/countable-forward/Web trade remain hard-disabled here.
+      EXECUTION_ALLOW_SIMNOW_EXECUTION: ${EXECUTION_ALLOW_SIMNOW_EXECUTION:-false}
       DATABASE_URL: ${EXECUTION_DATABASE_URL:?required}
       EXECUTION_RPC_REQ_ADDRESS: tcp://gateway-rpc-request-proxy:${GATEWAY_RPC_REQ_PROXY_PORT:?required}
       EXECUTION_RPC_PUB_ADDRESS: tcp://gateway-rpc-publish-proxy:${GATEWAY_RPC_PUB_PROXY_PORT:?required}

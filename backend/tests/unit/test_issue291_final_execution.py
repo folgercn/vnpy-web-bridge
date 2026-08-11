@@ -24,7 +24,9 @@ from app.execution.errors import GatewayConfigurationError, GatewayUnavailable
 from app.execution.final_runtime import FinalExecutionRuntime
 from app.execution_orchestrator import _HttpCustodyReadClient
 
+from shared.artifact_contracts.v1 import new_artifact_envelope
 from shared.commodity_execution import (
+    TARGET_PLAN_SCHEMA_VERSION,
     CommodityExecutionContractError,
     VerifiedCustodyReceipt,
     build_target_plan,
@@ -166,6 +168,21 @@ def command(
     }
 
 
+def target_artifact(target: dict) -> dict:
+    return new_artifact_envelope(
+        artifact_type="simnow-target-plan",
+        trust_domain="runtime_authorization",
+        producer_id="final-execution-fixture",
+        producer_version="v1",
+        schema_ref=TARGET_PLAN_SCHEMA_VERSION,
+        payload=target,
+        generated_at="2020-01-01T00:00:00Z",
+        scope=target["scope"],
+        predecessor_refs=[],
+        lineage=[],
+    )
+
+
 class Custody:
     """Read-only custody fixture with separately installed target artifacts."""
 
@@ -175,19 +192,19 @@ class Custody:
         self.artifacts: dict[str, dict] = {}
 
     def add_target(self, target: dict) -> dict:
-        artifact = {"payload": target}
-        artifact_hash = sha256_bytes(canonical_json_line(artifact))
+        artifact = target_artifact(target)
+        envelope_hash = sha256_bytes(canonical_json_line(artifact))
         target_receipt = self.authority | {
             "receipt_id": f"custody-plan-{len(self.artifacts) + 1:06d}",
-            "artifact_id": f"artifact-plan-{len(self.artifacts) + 1:06d}",
+            "artifact_id": artifact["artifact_id"],
             "artifact_type": "simnow-target-plan",
-            "schema_ref": "web-bridge-simnow-target-plan-v1",
-            "artifact_sha256": artifact_hash,
+            "schema_ref": TARGET_PLAN_SCHEMA_VERSION,
+            "artifact_sha256": artifact["raw_sha256"],
         }
         self.receipts[target_receipt["receipt_id"]] = target_receipt
         self.artifacts[target_receipt["artifact_id"]] = {
             "artifact_id": target_receipt["artifact_id"],
-            "artifact_raw_sha256": artifact_hash,
+            "artifact_raw_sha256": envelope_hash,
             "artifact": artifact,
         }
         return target_receipt
@@ -294,6 +311,21 @@ def test_receipt_tamper_scope_expiry_and_key_pin_block_install(field, value) -> 
     with pytest.raises(AuthorityRejected):
         service.install_target_plan(target)
     assert gateway.send_calls == []
+
+
+def test_target_plan_receipt_cannot_be_reused_as_plan_authority() -> None:
+    service, _core, _repo, gateway, _ = runtime()
+    target_plan_receipt = service.custody.add_target(plan())
+    poisoned_plan = plan(target_plan_receipt)
+    preview_receipt = service.custody.add_target(poisoned_plan)
+
+    with pytest.raises(AuthorityRejected, match="runtime authorization"):
+        service.preview_from_custody(preview_receipt["receipt_id"])
+    with pytest.raises(AuthorityRejected, match="runtime authorization"):
+        service.install_target_plan(poisoned_plan)
+    assert service.plans.get(poisoned_plan["plan_id"]) is None
+    assert gateway.send_calls == []
+    assert gateway.cancel_calls == []
 
 
 def test_target_plan_hash_and_order_refs_are_immutable() -> None:
@@ -626,14 +658,14 @@ def test_simnow_preview_proof_survives_execution_restart(tmp_path: Path) -> None
 def test_simnow_preview_fetches_receipt_then_exact_custody_artifact() -> None:
     authority = receipt()
     target = plan(authority)
-    artifact = {"payload": target}
-    artifact_hash = sha256_bytes(canonical_json_line(artifact))
+    artifact = target_artifact(target)
+    envelope_hash = sha256_bytes(canonical_json_line(artifact))
     plan_receipt = receipt() | {
         "receipt_id": "custody-plan-000001",
-        "artifact_id": "artifact-plan-000001",
+        "artifact_id": artifact["artifact_id"],
         "artifact_type": "simnow-target-plan",
-        "schema_ref": "web-bridge-simnow-target-plan-v1",
-        "artifact_sha256": artifact_hash,
+        "schema_ref": TARGET_PLAN_SCHEMA_VERSION,
+        "artifact_sha256": artifact["raw_sha256"],
     }
 
     class Custody:
@@ -648,7 +680,7 @@ def test_simnow_preview_fetches_receipt_then_exact_custody_artifact() -> None:
                 return None
             return {
                 "artifact_id": artifact_id,
-                "artifact_raw_sha256": artifact_hash,
+                "artifact_raw_sha256": envelope_hash,
                 "artifact": artifact,
             }
 
@@ -675,7 +707,7 @@ def test_simnow_preview_fetches_receipt_then_exact_custody_artifact() -> None:
         repo.state_version,
         {
             "plan_hash": target["plan_hash"],
-            "artifact_hash": artifact_hash,
+            "artifact_hash": artifact["raw_sha256"],
             "mode": "simnow_preview",
             "receipt_id": plan_receipt["receipt_id"],
         },
@@ -689,11 +721,31 @@ def test_simnow_preview_fetches_receipt_then_exact_custody_artifact() -> None:
     assert result.result["plan"] == state["plan"]
     assert result.receipt["result"]["plan"] == state["plan"]
     assert state["plan"]["preview_receipt_sha256"] != "0" * 64
-    assert state["plan"]["preview_artifact_sha256"] == artifact_hash
+    assert state["plan"]["preview_artifact_sha256"] == artifact["raw_sha256"]
     retry = service.process_command(envelope)
     assert retry.reused is True
     assert retry.receipt == result.receipt
     assert repo.state_version == before + 1
+
+
+@pytest.mark.parametrize(
+    "hash_field",
+    ["receipt_payload_raw", "response_envelope_raw"],
+)
+def test_simnow_preview_keeps_receipt_and_response_hashes_distinct(
+    hash_field: str,
+) -> None:
+    service, _core, _repo, gateway, _ = runtime()
+    target_receipt = service.custody.add_target(plan())
+    response = service.custody.artifacts[target_receipt["artifact_id"]]
+    if hash_field == "receipt_payload_raw":
+        target_receipt["artifact_sha256"] = response["artifact_raw_sha256"]
+    else:
+        response["artifact_raw_sha256"] = target_receipt["artifact_sha256"]
+
+    with pytest.raises(PlanRejected, match="artifact/receipt binding mismatch"):
+        service.preview_from_custody(target_receipt["receipt_id"])
+    assert gateway.send_calls == []
 
 
 def test_core_rejects_simnow_preview_without_internal_proof() -> None:

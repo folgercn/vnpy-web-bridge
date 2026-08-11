@@ -24,6 +24,7 @@ _UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$")
 _KEY_VERSION_RE = re.compile(r"^v[0-9]+$")
 _SYMBOL_RE = re.compile(r"^[A-Z][A-Z0-9]{0,31}$")
 _REFERENCE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$")
+_GATEWAY_NAME_RE = re.compile(r"^(?:CTP|[A-Za-z0-9][A-Za-z0-9._:-]{7,127})$")
 _EXCHANGES = frozenset({"CFFEX", "CZCE", "DCE", "GFEX", "INE", "SHFE"})
 
 
@@ -76,7 +77,7 @@ def _projection_position_fields(raw: Mapping[str, Any]) -> tuple[str, str, str, 
     exchange = _projection_text(raw.get("exchange"), "exchange")
     direction = _projection_text(raw.get("direction"), "direction")
     if (
-        _REFERENCE_RE.fullmatch(gateway_name) is None
+        _GATEWAY_NAME_RE.fullmatch(gateway_name) is None
         or _SYMBOL_RE.fullmatch(symbol) is None
         or exchange not in _EXCHANGES
         or direction not in {"LONG", "SHORT"}
@@ -254,7 +255,7 @@ class TargetPlanOrder:
             or price <= 0
             or offset not in {"CLOSE", "OPEN"}
             or not isinstance(gateway_name, str)
-            or _REFERENCE_RE.fullmatch(gateway_name) is None
+            or _GATEWAY_NAME_RE.fullmatch(gateway_name) is None
         ):
             raise CommodityExecutionContractError(
                 "target plan order is not a strict SIMNOW limit order"

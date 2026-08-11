@@ -10,9 +10,14 @@ from app.phase_c.adapters import (
     ExpectedVersionError,
     OfflineFakeWorkflowAdapter,
     UnknownOutcomeError,
+    WorkflowAdapterError,
 )
 from app.phase_c.client import OfflineFakeWorkflowClient
-from app.phase_c.models import AuthorizationCommandDTO, SignedArtifactUploadDTO
+from app.phase_c.models import (
+    AuthorizationCommandDTO,
+    CustodyReceiptDTO,
+    SignedArtifactUploadDTO,
+)
 from fastapi.testclient import TestClient
 from jsonschema import Draft202012Validator
 
@@ -143,6 +148,28 @@ def test_unknown_outcome_is_durable_and_same_key_can_be_queried_or_retried() -> 
     resolved = client.authorization_receipt(command.idempotency_key)
     assert resolved is not None and resolved.version == 1
     assert client.authorization_command(command).version == 1
+
+
+def test_offline_fake_enable_rejects_target_plan_custody_receipt() -> None:
+    adapter = OfflineFakeWorkflowAdapter()
+    target_receipt = CustodyReceiptDTO(
+        receipt_id="custody-install-target-0001",
+        receipt_type="install",
+        artifact_id="artifact-target-plan-0001",
+        artifact_type="simnow-target-plan",
+        trust_domain="runtime_authorization",
+        schema_ref="web-bridge-simnow-target-plan-v1",
+        artifact_sha256="a" * 64,
+        custody_version=1,
+        idempotency_key="custody-target-plan-key-0001",
+    )
+    command = _command(target_receipt.receipt_id).model_copy(
+        update={"authorization_artifact_id": target_receipt.artifact_id}
+    )
+
+    with pytest.raises(WorkflowAdapterError, match="runtime-authorization"):
+        adapter.execution.command(command, custody_receipt=target_receipt)
+    assert adapter.execution.version == 0
 
 
 def test_api_enforces_rbac_and_exposes_only_fake_safe_projections(monkeypatch) -> None:

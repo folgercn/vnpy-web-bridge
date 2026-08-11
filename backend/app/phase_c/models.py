@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from shared.phase_c_workflow.v1 import (
     AUTHORIZATION_COMMAND_SCHEMA_VERSION,
@@ -69,11 +69,13 @@ class CustodyReceiptDTO(AuthorityNegativeDTO):
     receipt_id: str
     receipt_type: Literal["install"]
     artifact_id: str
-    artifact_type: Literal["runtime-authorization"] = "runtime-authorization"
-    trust_domain: Literal["runtime_authorization"] = "runtime_authorization"
-    schema_ref: Literal["phase-c-runtime-authorization-v1"] = (
-        "phase-c-runtime-authorization-v1"
+    artifact_type: Literal["runtime-authorization", "simnow-target-plan"] = (
+        "runtime-authorization"
     )
+    trust_domain: Literal["runtime_authorization"] = "runtime_authorization"
+    schema_ref: Literal[
+        "phase-c-runtime-authorization-v1", "web-bridge-simnow-target-plan-v1"
+    ] = "phase-c-runtime-authorization-v1"
     artifact_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     signer_key_id: str = "test-only"
     signer_key_version: str = "v1"
@@ -86,6 +88,15 @@ class CustodyReceiptDTO(AuthorityNegativeDTO):
     verified: Literal[True] = True
     installed: Literal[True] = True
     custody_writer: Literal["artifact-custody"] = "artifact-custody"
+
+    @model_validator(mode="after")
+    def _artifact_type_schema_pair_is_supported(self) -> CustodyReceiptDTO:
+        if (self.artifact_type, self.schema_ref) not in {
+            ("runtime-authorization", "phase-c-runtime-authorization-v1"),
+            ("simnow-target-plan", "web-bridge-simnow-target-plan-v1"),
+        }:
+            raise ValueError("custody receipt artifact type/schema pair is invalid")
+        return self
 
 
 class AuthorizationCommandDTO(StrictDTO):
