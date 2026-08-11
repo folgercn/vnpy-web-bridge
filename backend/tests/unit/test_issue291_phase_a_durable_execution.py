@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from app.execution import (
@@ -337,6 +338,40 @@ def test_reconcile_rejects_stale_or_disconnected_broker_facts() -> None:
             )
         )
     assert disconnected.status()["lifecycle"] == "HALTED_RECONCILE_REQUIRED"
+
+
+@pytest.mark.parametrize(
+    ("delta", "accepted"),
+    [
+        (timedelta(seconds=2), True),
+        (timedelta(seconds=2, microseconds=1), False),
+        (timedelta(seconds=-60), True),
+        (timedelta(seconds=-60, microseconds=-1), False),
+    ],
+)
+def test_reconcile_snapshot_clock_skew_and_staleness_boundaries(
+    monkeypatch, delta: timedelta, accepted: bool
+) -> None:
+    from app.execution.models import format_utc
+
+    now = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    monkeypatch.setattr("app.execution.orchestrator.utc_now", lambda: now)
+    repository = InMemoryExecutionRepository()
+    service = ExecutionOrchestrator(repository, InMemoryGateway())
+    snapshot = GatewaySnapshot(
+        snapshot_id="snapshot-clock-boundary",
+        generation=1,
+        connected=True,
+        account_scope="account:default",
+        environment="test",
+        observed_at=format_utc(now + delta),
+    )
+
+    if accepted:
+        service._validate_reconcile_snapshot(repository.snapshot(), snapshot)
+    else:
+        with pytest.raises(SnapshotRejected, match="timestamp is not fresh"):
+            service._validate_reconcile_snapshot(repository.snapshot(), snapshot)
 
 
 def test_repository_hash_corruption_fails_closed_and_stop_archives_terminal_state(

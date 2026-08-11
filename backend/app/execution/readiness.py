@@ -7,6 +7,7 @@ from queue import Empty, Queue
 from threading import Lock, Thread
 from typing import TYPE_CHECKING, Any
 
+from .clock import FUTURE_SKEW_SECONDS, SNAPSHOT_STALE_SECONDS
 from .errors import ExecutionError, GatewayTimeout, GatewayUnavailable, SnapshotRejected
 from .models import parse_utc, utc_now, validate_identifier
 
@@ -96,7 +97,9 @@ class GatewayReadinessProbe:
         if not isinstance(snapshot.fresh, bool) or snapshot.fresh is not True:
             raise SnapshotRejected("gateway readiness snapshot is not fresh")
         now = utc_now()
-        if observed_at > now or (now - observed_at).total_seconds() > 60:
+        if (observed_at - now).total_seconds() > FUTURE_SKEW_SECONDS or (
+            now - observed_at
+        ).total_seconds() > SNAPSHOT_STALE_SECONDS:
             raise SnapshotRejected("gateway readiness snapshot timestamp is stale")
         if snapshot.account_scope != self._service.scope:
             raise SnapshotRejected("gateway readiness account scope mismatch")
