@@ -438,6 +438,72 @@ def test_final_validation_reconcile_accepts_equal_pure_peek_generation() -> None
     assert response.result["accepted"] is True
 
 
+def test_equal_pure_peek_reconcile_keeps_unknown_halted_without_new_send() -> None:
+    class UnknownIntentTransport(_FinalValidationPeekTransport):
+        def call(self, method, payload, context=None):
+            if method == "query_intent_v1":
+                self.calls.append((method, payload, context))
+                return {
+                    "intent_id": payload["intent_id"],
+                    "account_scope": payload["account_scope"],
+                    "environment": payload["environment"],
+                    "state": "UNKNOWN",
+                }
+            return super().call(method, payload, context)
+
+    facts = _final_validation_facts()
+    facts["active_orders"] = {}
+    facts["execution"]["orders"] = {}
+    transport = UnknownIntentTransport(facts)
+    service = _reconcile_service(_final_validation_gateway(transport))
+    intent_id = "intent-unknown-0001"
+    idempotency_key = "send-key-unknown-0001"
+
+    def record_unknown(state: dict) -> None:
+        state["broker"].update(
+            {
+                "generation": 0,
+                "connected": True,
+                "last_snapshot_at": "2020-01-01T00:00:00Z",
+            }
+        )
+        state["send_intents"][intent_id] = {
+            "intent_id": intent_id,
+            "idempotency_key": idempotency_key,
+            "state": "UNKNOWN_OUTCOME",
+            "plan_id": "plan-unknown-0001",
+            "plan_hash": "b" * 64,
+            "leader_epoch": 1,
+            "fencing_token": 1,
+            "created_at": "2020-01-01T00:00:00Z",
+        }
+        state["intent_keys"][idempotency_key] = intent_id
+        state["unknown_outcomes"][intent_id] = {"reason": "rpc timeout"}
+        state["reconciliation"].update({"state": "UNKNOWN", "unknown_outcomes": 1})
+        state["lifecycle"] = "HALTED_UNKNOWN_OUTCOME"
+
+    service.repository.mutate(record_unknown)
+    response = service.process_command(
+        _reconcile_command(
+            f"snapshot-peek-{sha256_json(facts)}", service.repository.state_version
+        )
+    )
+
+    state = service.repository.snapshot()
+    methods = [method for method, _payload, _context in transport.calls]
+    assert response.result == {
+        "accepted": False,
+        "snapshot_id": f"snapshot-peek-{sha256_json(facts)}",
+        "unknown_outcomes": 1,
+        "lifecycle": "HALTED_UNKNOWN_OUTCOME",
+    }
+    assert methods == ["peek_current_facts_v1", "query_intent_v1"]
+    assert "send_order_fenced_v1" not in methods
+    assert state["lifecycle"] == "HALTED_UNKNOWN_OUTCOME"
+    assert state["send_intents"][intent_id]["state"] == "UNKNOWN_OUTCOME"
+    assert intent_id in state["unknown_outcomes"]
+
+
 def test_final_validation_reconcile_rejects_regressed_pure_peek_generation() -> None:
     facts = _final_validation_facts()
     facts["active_orders"] = {}
