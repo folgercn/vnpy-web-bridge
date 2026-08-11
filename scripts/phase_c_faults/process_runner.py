@@ -160,6 +160,12 @@ class _LoopbackGateway:
     def snapshot(self) -> GatewaySnapshot:
         return GatewaySnapshot(**self._call("snapshot"))
 
+    def readiness_snapshot(self) -> GatewaySnapshot:
+        return self.snapshot()
+
+    def readiness_snapshot_uses_durable_generation(self) -> bool:
+        return True
+
     def start(self) -> None:
         return None
 
