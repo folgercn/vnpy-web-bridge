@@ -61,7 +61,11 @@ from pathlib import Path
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from shared.artifact_contracts.v1 import new_artifact_envelope
-from shared.commodity_execution import build_target_plan
+from shared.commodity_execution import (
+    build_target_plan,
+    sha256_json,
+    target_position_projection_hash,
+)
 from shared.trust_contracts.v1 import (
     build_signed_artifact,
     build_signing_request,
@@ -103,8 +107,23 @@ target = build_target_plan(
     scope={"account_scope": "account:smoke-final", "environment": "SIMNOW"},
     expires_at="2099-01-01T00:00:00Z",
     phase="OPEN",
-    expected_before_position_hash="0" * 64,
-    expected_after_position_hash="0" * 64,
+    # expected_before remains the complete empty broker-row hash.  expected_after
+    # is the TargetPlan v1 canonical target-position projection hash; old
+    # full-row expected-after fixtures must be regenerated and re-signed.
+    expected_before_position_hash=sha256_json({}),
+    expected_after_position_hash=target_position_projection_hash(
+        {
+            "RB.SHFE.LONG": {
+                "gateway_name": "smoke-gateway",
+                "symbol": "RB",
+                "exchange": "SHFE",
+                "direction": "LONG",
+                "volume": 1,
+            }
+        },
+        account_scope="account:smoke-final",
+        environment="SIMNOW",
+    ),
     orders=[{
         "symbol": "RB",
         "exchange": "SHFE",

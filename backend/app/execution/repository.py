@@ -204,7 +204,7 @@ def _validate_archive_entry(value: Any) -> None:
         _require_log_timestamp(value["archived_at"], "archived_at")
         return
     if kind == "final_plan_completed":
-        if set(value) != {
+        legacy_fields = {
             "kind",
             "plan_id",
             "plan_hash",
@@ -212,7 +212,10 @@ def _validate_archive_entry(value: Any) -> None:
             "receipt_id",
             "final_position_hash",
             "archived_at",
-        }:
+        }
+        new_fields = legacy_fields | {"target_position_hash", "positions"}
+        fields = set(value)
+        if fields != legacy_fields and fields != new_fields:
             raise RepositoryUnavailableError(
                 "durable final plan archive fields are invalid"
             )
@@ -230,6 +233,29 @@ def _validate_archive_entry(value: Any) -> None:
                 raise RepositoryUnavailableError(
                     f"durable final plan archive {field} is invalid"
                 )
+        if fields == new_fields:
+            if not isinstance(
+                value["target_position_hash"], str
+            ) or not SHA256_RE.fullmatch(value["target_position_hash"]):
+                raise RepositoryUnavailableError(
+                    "durable final plan archive target_position_hash is invalid"
+                )
+            if not isinstance(value["positions"], Mapping):
+                raise RepositoryUnavailableError(
+                    "durable final plan archive positions are invalid"
+                )
+            try:
+                if (
+                    sha256_json(dict(value["positions"]))
+                    != value["final_position_hash"]
+                ):
+                    raise RepositoryUnavailableError(
+                        "durable final plan archive full position hash is invalid"
+                    )
+            except (TypeError, ValueError) as exc:
+                raise RepositoryUnavailableError(
+                    "durable final plan archive positions are invalid"
+                ) from exc
         if (
             isinstance(value["plan_version"], bool)
             or not isinstance(value["plan_version"], int)

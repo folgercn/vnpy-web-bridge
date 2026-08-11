@@ -968,7 +968,7 @@ class InMemoryGateway:
             snapshot_id="snapshot-default",
             generation=self._snapshot_generation - 1,
             connected=True,
-            position_snapshot_hash=ZERO_HASH,
+            position_snapshot_hash=sha256_json({}),
             account_scope=self.account_scope,
             environment=self.environment,
         )

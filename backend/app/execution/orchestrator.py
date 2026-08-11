@@ -15,6 +15,11 @@ from threading import RLock
 from typing import Any
 from uuid import uuid4
 
+from shared.commodity_execution import (
+    CommodityExecutionContractError,
+    target_position_projection_hash,
+)
+
 from .clock import FUTURE_SKEW_SECONDS, SNAPSHOT_STALE_SECONDS
 from .errors import (
     AuthorityRejected,
@@ -1064,19 +1069,27 @@ class ExecutionOrchestrator:
         ):
             return {"state": "PENDING"}
         final_hash = state["broker"].get("position_snapshot_hash")
-        if final_hash != evidence["expected_after_position_hash"]:
+        positions = state["broker"].get("positions")
+        try:
+            target_hash = target_position_projection_hash(
+                positions, account_scope=self.scope, environment=self.environment
+            )
+        except CommodityExecutionContractError:
+            target_hash = None
+        if target_hash != evidence["expected_after_position_hash"]:
             state["lifecycle"] = "HALTED_RECONCILE_REQUIRED"
             state["reconciliation"]["state"] = "REQUIRED"
             state["audit"].append(
                 {
                     "kind": "fail_closed_halt",
-                    "reason": "SIMNOW final position does not match immutable target plan",
+                    "reason": "SIMNOW final target position does not match immutable target plan",
                     "observed_at": format_utc(utc_now()),
                 }
             )
             return {
                 "state": "POSITION_MISMATCH",
                 "final_position_hash": final_hash,
+                "target_position_hash": target_hash,
             }
         state["terminal_archive"].append(
             {
@@ -1086,6 +1099,8 @@ class ExecutionOrchestrator:
                 "plan_version": int(plan.get("version", 0)),
                 "receipt_id": evidence["authority_receipt_id"],
                 "final_position_hash": final_hash,
+                "target_position_hash": target_hash,
+                "positions": deepcopy(dict(positions)),
                 "archived_at": format_utc(utc_now()),
             }
         )
@@ -1110,6 +1125,7 @@ class ExecutionOrchestrator:
         return {
             "state": "COMPLETED",
             "final_position_hash": final_hash,
+            "target_position_hash": target_hash,
             "plan": deepcopy(state["plan"]),
         }
 
@@ -1888,8 +1904,7 @@ class ExecutionOrchestrator:
             if not candidates.intersection(known_values):
                 raise SnapshotRejected("broker active order has no durable send intent")
         if (
-            snapshot.positions
-            and sha256_json(_detached_json(snapshot.positions))
+            sha256_json(_detached_json(snapshot.positions))
             != snapshot.position_snapshot_hash
         ):
             raise SnapshotRejected(
