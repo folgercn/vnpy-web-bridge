@@ -22,8 +22,8 @@
   临时 JSON、fixture 或人工参数替代。
 - 每次 send/cancel 先持久化 durable intent；结果未知时为 `UNKNOWN`，只能查询和
   对账，绝不 replay。
-- 全程保持 `production=false`、`live=false`、`countable=false`；功能 E2E 不改变
-  这些值。
+- 全程保持 `production=false`、`live=false`、`countable_forward=false`；功能 E2E
+  不改变这些值。
 - 私钥只允许以 FD-only 方式提供给既有离线 signer；不得进入环境变量、命令行、
   容器层、日志、浏览器或普通运行进程。
 - 输出只使用脱敏事实、计数、状态和校验结果；不得输出账户明文、secret、私钥、
@@ -55,10 +55,10 @@ read-only discovery
 2. 对齐运行时源码、镜像与 Windows 服务版本后，重新读取账户、持仓、订单、交易日、
    交易时段和 fresh tick；旧快照不能签新 ceremony。
 3. MAP/C_FAST 只生成不可变候选；`scripts/commodity_c_fast_executable_target_adapter.py`
-   的 `--reduce-only-peek-current-facts` 路径仅用于受控 target=0 派生，不是通用
+   的 `--reduce-only-close` 路径仅用于受控 target=0 派生，不是通用
    交易入口。
-4. 签名和 custody 在事实冻结之后。不要预签未来 Event 证据；尤其 Event2 的真实
-   时序必须先发生、再记录和签收，不能用“先签好、将来补事实”的循环。
+4. 签名和 custody 在事实冻结之后。[PR #300](https://github.com/folgercn/vnpy-web-bridge/pull/300)
+   仍有 temporal contract blocker；未来不得预签尚未发生的事实。
 5. start 前先 preview、reconcile、取得唯一 leader/fencing，并确认 durable intent
    存储可用；`backend/app/execution/orchestrator.py` 之外不得发单或撤单。
 6. 以 broker callback 和后续事实确认结果；重启后对 `SUBMITTED` / `UNKNOWN` intent
@@ -92,12 +92,12 @@ read-only discovery
 | ceremony 要求的未来证据被提前签名 | Event2 时序被倒置 | 先签 Event2、以后补证据 | 事实发生后再 canonicalize、签名和 custody；未来事实缺失即停。 |
 | 没有 authoritative facts | 版本、主机或事实源未对齐 | 直接签 target 或继续执行 | 只做 discovery，核实 `peek_current_facts_v1` 的真实数据来源后重取 fresh facts。 |
 | blocker 被无限拆分 | 用新 schema/ledger 掩盖一个实机缺口 | 不断加 contract、表或 ledger | 一个真实 blocker 对应一个小 PR；先验证既有路径，不造平行状态。 |
-| Event5 审计不能追溯原始字节 | raw custody 丢失或只保留摘要 | 用派生字段替代原始 Event5 | 保留 Event5 raw custody；相关事实面见 [PR #301](https://github.com/folgercn/vnpy-web-bridge/pull/301)，重启审计原始记录见 [PR #302](https://github.com/folgercn/vnpy-web-bridge/pull/302)。 |
+| Event5 审计不能追溯原始字节 | raw custody 丢失或只保留摘要 | 用派生字段替代原始 Event5 | 保留 Event5 raw custody；只读 ceremony facts 见 [PR #301](https://github.com/folgercn/vnpy-web-bridge/pull/301)，raw custody 见 [PR #302](https://github.com/folgercn/vnpy-web-bridge/pull/302)。 |
 | M2 读到了不受控数据 | 任意 RPC 被当作只读方法 | 临时调用任意 RPC“看看” | 固定 M2 read-only method 和 allowlist；只用 `peek_current_facts_v1` / `get_execution_snapshot_v1`。 |
 | target 无法被原生网关识别 | native symbol 大小写被归一化 | 改成展示名或统一大小写 | 保留 native CTP symbol；参见 [PR #319](https://github.com/folgercn/vnpy-web-bridge/pull/319)。 |
 | 新 ceremony 被旧 plan 串扰 | 重用旧 `plan_id` | 为省事复用已归档 plan | 每个尝试有新 plan/intent identity；旧 identity 只读归档。 |
-| after 校验偶发错误 | `expected_after` 没覆盖完整动态行 | 只 hash 静态目标字段 | `expected_after` 使用完整动态 row hash，并与当次 fresh facts 对齐。 |
-| before 校验在未交易时也漂移 | `expected_before` 全行含 PnL 等动态字段 | 复用旧 full-row hash | 承认 full-row hash 会随 PnL 漂移；每次 preflight 重取、重新签，不放宽比较。 |
+| after 校验在交易前失败 | 交易前要求完整动态 broker row hash，结果不可预测 | 把完整动态 row hash 当作 `expected_after` | 使用既有 `target_position_projection_hash`：包含 `account_scope`、`environment` 和聚合非零 `gateway/symbol/exchange/direction/volume`，排除 `price/pnl/frozen/commission/id`；完整 row 另行 capture/archive。 |
+| before 校验无交易也漂移 | 交易前要求完整动态 broker row hash，PnL 等字段会变化 | 复用旧 full-row plan/hash | #321 已改为相同的 current-position projection；动态 PnL 不影响，但 `volume/direction/symbol/exchange/account_scope/environment` 变化必须 fail closed。旧 full-row plan 必须重新生成并重签。 |
 | 终态历史订单被再次处理 | 把历史 terminal order 当成待恢复工作 | cancel/replay 旧订单 | 历史 terminal order 只读；仅明确授权的 reduce-only 私有 CLI 可清理实际遗留仓位。 |
 | Windows 不识别 close | 旧 artifact-custody image 不认识 `CLOSE` contract | 临时绕过合同或混用镜像 | 先做 runtime version alignment，升级/回退到识别合同的已验证组合，再重新签。 |
 | HTTP allowlist 拒绝 custody 写入 | 上层路由未允许该安全路径 | 绕过签名、换成宽写接口 | 只可调用既有底层 verified custody writer，且保持 single writer、create-only；不能绕过签名。 |
@@ -132,7 +132,7 @@ read-only discovery
 ### T-120
 
 - 完成 read-only discovery：真实服务、运行版本、可用只读方法与权限边界。
-- 关闭 production/live/countable，确认无未解决 active intent 或未归档 unknown。
+- 关闭 production/live/countable_forward，确认无未解决 active intent 或未归档 unknown。
 - 核对签名 target、custody、schema/contract 和计划的 image/runtime 版本一致。
 - 确认 PR/CI 状态；最后 push 后的评论必须带 exact head SHA。
 
@@ -140,15 +140,16 @@ read-only discovery
 
 - 重新取得 authoritative fresh facts；核对交易日、交易时段、账户/持仓/订单和
   交易网关恢复。
-- 生成 MAP/C_FAST 候选，签名并写入 custody；不复用旧 plan_id 或旧 full-row hash。
+- 生成 MAP/C_FAST 候选，签名并写入 custody；重新生成新 plan 并使用 stable projection。
 - 完成 preview/reconcile，确认 single leader、fencing 和 durable intent 存储。
 
 ### T-5
 
 - 再取 fresh tick；限价必须可成交且仍属于授权范围。
-- 复核 `expected_before` / `expected_after` 的完整动态 row hash 和 target。
+- 复核 `expected_before` / `expected_after` 的两个 stable projection hash 和 target。
+- 单列 capture/archive 的完整 broker rows，不把它们用于预期 position hash。
 - 明确本次是 functional E2E；Windows full-fence 另行验收，且不启用 production/live/
-  countable。
+  countable_forward。
 
 ### 执行后
 
@@ -164,7 +165,7 @@ read-only discovery
 
 ```text
 [ ] authorization=verified_and_current
-[ ] production=false live=false countable=false
+[ ] production=false live=false countable_forward=false
 [ ] runtime_version_alignment=verified
 [ ] read_only_method_allowlist=verified
 [ ] fresh_facts=verified
@@ -173,8 +174,9 @@ read-only discovery
 [ ] map_c_fast_candidate=verified
 [ ] signed_target_and_create_only_custody=verified
 [ ] plan_id_and_intent_id=new
-[ ] expected_before_full_dynamic_row_hash=refreshed
-[ ] expected_after_full_dynamic_row_hash=verified
+[ ] expected_before_projection_hash=verified
+[ ] expected_after_projection_hash=verified
+[ ] full_broker_rows_captured_for_audit=verified
 [ ] preview_and_reconcile=passed
 [ ] single_leader_and_fencing=passed
 [ ] durable_intent_store=passed
@@ -218,6 +220,8 @@ preview/reconcile/leader 结果、durable intent、broker callback、重启后�
   “跑通”而放宽安全控制。
 - 盘中不临时继续架构开发；先 fail closed，盘后再做隔离的最小改动。
 - 所有输出永不包含账户明文、secret、私钥、key id、地址或 artifact hash。
+- 任何 contract/CLI 结论必须先用 `rg` 核对当前 `origin/main` 的实现与 tests；不得从
+  旧评论或记忆抄写。
 
 ## 12. 实现定位与历史 PR 索引
 
@@ -233,8 +237,8 @@ preview/reconcile/leader 结果、durable intent、broker callback、重启后�
 | PR | 历史角色 |
 | --- | --- |
 | [#300](https://github.com/folgercn/vnpy-web-bridge/pull/300) | Windows host observer 与安全 ceremony runner；不能替代 full-fence 完成证据。 |
-| [#301](https://github.com/folgercn/vnpy-web-bridge/pull/301) | 暴露只读 Windows/M2 ceremony facts，为事实和 Event5 raw custody 链提供上游输入。 |
-| [#302](https://github.com/folgercn/vnpy-web-bridge/pull/302) | 持久化 restart dispatch audit raw。 |
+| [#301](https://github.com/folgercn/vnpy-web-bridge/pull/301) | 暴露只读 Windows/M2 ceremony facts。 |
+| [#302](https://github.com/folgercn/vnpy-web-bridge/pull/302) | 持久化 restart dispatch audit raw / Event5 raw custody。 |
 | [#305](https://github.com/folgercn/vnpy-web-bridge/pull/305) | frozen Windows reconciliation-only attach。 |
 | [#306](https://github.com/folgercn/vnpy-web-bridge/pull/306) | 将 SimNow environment 绑定到 durable snapshot。 |
 | [#307](https://github.com/folgercn/vnpy-web-bridge/pull/307) | 处理有界 snapshot clock skew。 |
