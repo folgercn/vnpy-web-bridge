@@ -95,10 +95,13 @@ class MeasuredQuestDbWriter(QuestDbTickWriter):
         committed_at = datetime.now(timezone.utc)
         self.batches.append([str(tick.ingest_id) for tick in values])
         self.committed_ids.extend(str(tick.ingest_id) for tick in values)
-        self.commit_ages_ms.extend(
-            max(0.0, (committed_at - tick.received_at_utc).total_seconds() * 1000)
-            for tick in values
-        )
+        for tick in values:
+            received = datetime.fromisoformat(
+                str(tick.received_at_utc).replace("Z", "+00:00")
+            )
+            self.commit_ages_ms.append(
+                max(0.0, (committed_at - received).total_seconds() * 1000)
+            )
 
 
 def _event(index: int, generated_at: datetime) -> GatewayTickEnvelope:
