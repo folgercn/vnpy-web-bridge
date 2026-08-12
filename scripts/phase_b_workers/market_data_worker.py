@@ -12,6 +12,7 @@ import signal
 import stat
 import threading
 import time as monotonic_time
+from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
@@ -644,15 +645,28 @@ class QuestDbTickWriter:
                 _ = close_error
 
     def write_verified_tick(self, tick: VerifiedTick) -> None:
-        row = verified_tick_to_market_tick_v3(tick)
+        self.write_verified_ticks((tick,))
+
+    def write_verified_ticks(self, ticks: tuple[VerifiedTick, ...] | list[VerifiedTick]) -> None:
+        """Commit a bounded, already-durable tick batch as one transaction."""
+
+        values = tuple(ticks)
+        if not values:
+            return
         try:
             with self._lock:
                 connection = self._open()
                 self._ensure_schema(connection)
                 with connection.cursor() as cursor:
-                    cursor.execute(
+                    cursor.executemany(
                         _MARKET_TICK_INSERT,
-                        tuple(row[column] for column in MARKET_TICK_COLUMNS),
+                        [
+                            tuple(
+                                verified_tick_to_market_tick_v3(tick)[column]
+                                for column in MARKET_TICK_COLUMNS
+                            )
+                            for tick in values
+                        ],
                     )
                 connection.commit()
         except Exception:
@@ -800,6 +814,9 @@ class MarketDataWorker:
     _SOURCE_FENCE_EVENT_LIMIT = 4096
     _DETERMINISTIC_SOURCE_SERVICE = "gateway-publish-proxy"
     _PROJECTION_INTERVAL_SECONDS = 1.0
+    QUESTDB_BATCH_MAX_SIZE = 64
+    QUESTDB_BATCH_MAX_WAIT_SECONDS = 0.05
+    _BATCH_SAMPLE_LIMIT = 256
 
     def __init__(
         self,
@@ -855,6 +872,13 @@ class MarketDataWorker:
         self._last_error: str | None = None
         self._state_recovered = False
         self._next_projection_monotonic = 0.0
+        self._questdb_batch_sizes: deque[int] = deque(maxlen=self._BATCH_SAMPLE_LIMIT)
+        self._questdb_commit_latencies_ms: deque[float] = deque(
+            maxlen=self._BATCH_SAMPLE_LIMIT
+        )
+        self._questdb_pending: dict[str, VerifiedTick] = {}
+        self._questdb_batch_started_monotonic: float | None = None
+        self._questdb_pending_committed = False
         self.metrics = WorkerMetrics(
             self.service_id, isoformat(), worker_generation=config.stream_generation
         )
@@ -1024,7 +1048,7 @@ class MarketDataWorker:
         self.metrics.increment("ticks_persisted")
         self.metrics.last_success_at_utc = isoformat()
 
-    def ingest(self, raw: Mapping[str, object]) -> VerifiedTick:
+    def ingest(self, raw: Mapping[str, object], *, persist: bool = True) -> VerifiedTick:
         event_id = str(
             raw.get("source_event_id") or raw.get("event_id") or raw.get("id") or ""
         ).strip()
@@ -1049,26 +1073,30 @@ class MarketDataWorker:
                 raise DurableStateError(
                     "source_event_id was reused with different tick content"
                 )
-            try:
-                self._write(existing)
-            except Exception as exc:
-                self._last_error = type(exc).__name__
-                raise
+            if persist:
+                try:
+                    self._write(existing)
+                except Exception as exc:
+                    self._last_error = type(exc).__name__
+                    raise
             self.metrics.checkpoint_or_watermark = existing.ingest_seq
             return existing
         tick = candidate
         self.stream.append(tick)
         self.metrics.increment("ticks_durable")
-        try:
-            self._write(tick)
-        except Exception as exc:
-            self._last_error = type(exc).__name__
-            raise
+        if persist:
+            try:
+                self._write(tick)
+            except Exception as exc:
+                self._last_error = type(exc).__name__
+                raise
         self.metrics.checkpoint_or_watermark = tick.ingest_seq
         self._last_error = None
         return tick
 
-    def _process_envelope(self, event: GatewayTickEnvelope) -> VerifiedTick:
+    def _process_envelope(
+        self, event: GatewayTickEnvelope, *, persist: bool = True
+    ) -> VerifiedTick:
         self._assert_source_fence(event)
         raw = {**dict(event.payload), "source_event_id": event.event_id}
         candidate = VerifiedTick.from_raw(
@@ -1097,7 +1125,8 @@ class MarketDataWorker:
                     "source_event_id was reused with different tick content"
                 )
         self._record_source_fence(event)
-        self._write(tick)
+        if persist:
+            self._write(tick)
         self.metrics.checkpoint_or_watermark = tick.ingest_seq
         self._last_error = None
         return tick
@@ -1113,7 +1142,70 @@ class MarketDataWorker:
         self.metrics.increment("processed_total")
         return tick
 
-    def process_queue(self, *, limit: int | None = None) -> int:
+    @staticmethod
+    def _percentile(values: tuple[float, ...], percentile: float) -> float | None:
+        if not values:
+            return None
+        ordered = sorted(values)
+        return ordered[min(len(ordered) - 1, int((len(ordered) - 1) * percentile))]
+
+    def _record_questdb_batch(
+        self, rows: int, *, reason: str, commit_latency_ms: float
+    ) -> None:
+        self._questdb_batch_sizes.append(rows)
+        self._questdb_commit_latencies_ms.append(commit_latency_ms)
+        self.metrics.increment("questdb_batches_total")
+        self.metrics.increment("questdb_batch_rows_total", rows)
+        self.metrics.increment(f"questdb_flush_{reason}_total")
+
+    def _write_questdb_batch(
+        self,
+        ticks: list[VerifiedTick],
+        *,
+        reason: str,
+        replay: bool = False,
+        track_pending_commit: bool = False,
+    ) -> None:
+        if not ticks:
+            return
+        writer = self.writer
+        if not isinstance(writer, QuestDbTickWriter):  # pragma: no cover - caller guard
+            raise TypeError("QuestDB batch requires QuestDbTickWriter")
+        pending = [tick for tick in ticks if not self.stream.is_acknowledged(tick)]
+        if replay:
+            to_write: list[VerifiedTick] = []
+            for tick in pending:
+                persisted = writer.readback(tick)
+                if persisted is None:
+                    to_write.append(tick)
+                elif not _market_tick_row_matches(tick, persisted):
+                    raise DurableStateError("QuestDB readback does not match verified tick")
+                else:
+                    self.stream.acknowledge_tick_write(tick)
+                    self.metrics.increment("ticks_persisted")
+            pending = to_write
+        if not pending:
+            return
+        started = monotonic_time.monotonic()
+        # A failed execute/executemany/commit raises from the writer after its
+        # rollback/drop path.  Nothing below runs, so durable ticks stay pending.
+        writer.write_verified_ticks(pending)
+        if track_pending_commit:
+            # The transaction is known committed.  Keep this fence until
+            # every durable ack succeeds so retries never re-run the INSERTs.
+            self._questdb_pending_committed = True
+        latency_ms = (monotonic_time.monotonic() - started) * 1000
+        self._record_questdb_batch(len(pending), reason=reason, commit_latency_ms=latency_ms)
+        for tick in pending:
+            # Ack after the one successful transaction only.  If this fails
+            # midway, replay uses readback before any retry insert.
+            self.stream.acknowledge_tick_write(tick)
+            self.metrics.increment("ticks_persisted")
+            self.metrics.last_success_at_utc = isoformat()
+
+    def process_queue(self, *, limit: int | None = None, flush: bool = True) -> int:
+        if isinstance(self.writer, QuestDbTickWriter):
+            return self._process_questdb_queue(limit=limit, flush=flush)
         processed = 0
         while limit is None or processed < limit:
             try:
@@ -1129,7 +1221,90 @@ class MarketDataWorker:
             self._publish_projection_if_due()
         return processed
 
+    def _flush_questdb_pending(self, *, reason: str) -> None:
+        if not self._questdb_pending:
+            return
+        pending = list(self._questdb_pending.values())
+        if self._questdb_pending_committed:
+            for tick in pending:
+                if self.stream.is_acknowledged(tick):
+                    continue
+                self.stream.acknowledge_tick_write(tick)
+                self.metrics.increment("ticks_persisted")
+                self.metrics.last_success_at_utc = isoformat()
+        else:
+            self._write_questdb_batch(
+                pending,
+                reason=reason,
+                track_pending_commit=True,
+            )
+        self._questdb_pending.clear()
+        self._questdb_batch_started_monotonic = None
+        self._questdb_pending_committed = False
+
+    def _questdb_batch_due(self) -> bool:
+        return bool(self._questdb_pending) and (
+            len(self._questdb_pending) >= self.QUESTDB_BATCH_MAX_SIZE
+            or (
+                self._questdb_batch_started_monotonic is not None
+                and monotonic_time.monotonic() - self._questdb_batch_started_monotonic
+                >= self.QUESTDB_BATCH_MAX_WAIT_SECONDS
+            )
+        )
+
+    def _process_questdb_queue(self, *, limit: int | None, flush: bool) -> int:
+        if self._questdb_pending_committed:
+            # Never merge a fresh durable tick into a transaction that has
+            # already committed but is still finishing its acknowledgements.
+            self._flush_questdb_pending(reason="ack_retry")
+        processed = 0
+        while limit is None or processed < limit:
+            try:
+                value = self.ingress.get()
+            except Exception as exc:
+                if type(exc).__name__ == "Empty":
+                    break
+                raise
+            self.metrics.queue_depth = self.ingress.qsize()
+            try:
+                tick = (
+                    self._process_envelope(value, persist=False)
+                    if isinstance(value, GatewayTickEnvelope)
+                    else self.ingest(value, persist=False)
+                )
+            except Exception:
+                self._flush_questdb_pending(reason="processing_error")
+                raise
+            if not self._questdb_pending:
+                self._questdb_batch_started_monotonic = monotonic_time.monotonic()
+            # Replayed identical market content may resolve to the same
+            # durable tick before it has been acknowledged.  Preserve every
+            # source-fence transition but write/ack that ingest id once.
+            self._questdb_pending.setdefault(tick.ingest_id, tick)
+            processed += 1
+            self.metrics.increment("processed_total")
+            if len(self._questdb_pending) >= self.QUESTDB_BATCH_MAX_SIZE:
+                self._flush_questdb_pending(reason="max_size")
+            elif self._questdb_batch_due():
+                self._flush_questdb_pending(reason="max_wait")
+            self._publish_projection_if_due()
+        if flush:
+            self._flush_questdb_pending(reason="queue_drained")
+        return processed
+
     def replay_pending(self) -> int:
+        if isinstance(self.writer, QuestDbTickWriter):
+            pending = self.stream.pending_for_tick_writer()
+            for offset in range(0, len(pending), self.QUESTDB_BATCH_MAX_SIZE):
+                self._write_questdb_batch(
+                    pending[offset : offset + self.QUESTDB_BATCH_MAX_SIZE],
+                    reason="replay",
+                    replay=True,
+                )
+                self._publish_projection_if_due()
+            if pending:
+                self._last_error = None
+            return len(pending)
         recovered = 0
         for tick in self.stream.pending_for_tick_writer():
             self._write(tick)
@@ -1153,14 +1328,32 @@ class MarketDataWorker:
             self.bind_source()
             self._publish_projection_if_due(force=True)
             while not stop_event.is_set():
+                # A due/failed QuestDB batch blocks further socket draining.
+                # Retry the same bounded durable batch until it commits; this
+                # keeps both the DB batch and already-polled ingress bounded.
+                if (
+                    isinstance(self.writer, QuestDbTickWriter)
+                    and self._questdb_batch_due()
+                ):
+                    try:
+                        self._flush_questdb_pending(reason="max_wait")
+                    except Exception as exc:  # noqa: BLE001
+                        self._last_error = type(exc).__name__
+                        self._publish_projection_if_due()
+                        stop_event.wait(self.QUESTDB_BATCH_MAX_WAIT_SECONDS)
+                        continue
                 # Process durable ingress before receiving anything new.  A
                 # full bounded queue must be visible as backpressure, never a
                 # dropped socket message after an over-eager receive burst.
                 if self.ingress.qsize():
                     try:
-                        self.process_queue()
+                        self.process_queue(flush=False)
                     except Exception as exc:  # noqa: BLE001
                         self._last_error = type(exc).__name__
+                        if isinstance(self.writer, QuestDbTickWriter):
+                            self._publish_projection_if_due()
+                            stop_event.wait(self.QUESTDB_BATCH_MAX_WAIT_SECONDS)
+                            continue
                 try:
                     poll = getattr(self.source, "poll", None)
                     if (
@@ -1178,9 +1371,13 @@ class MarketDataWorker:
                 except Exception as exc:  # noqa: BLE001
                     self._last_error = type(exc).__name__
                 try:
-                    self.process_queue()
+                    self.process_queue(flush=False)
                 except Exception as exc:  # noqa: BLE001
                     self._last_error = type(exc).__name__
+                    if isinstance(self.writer, QuestDbTickWriter):
+                        self._publish_projection_if_due()
+                        stop_event.wait(self.QUESTDB_BATCH_MAX_WAIT_SECONDS)
+                        continue
                 self._publish_projection_if_due()
                 try:
                     has_backlog = getattr(self.source, "has_backlog", None)
@@ -1197,14 +1394,35 @@ class MarketDataWorker:
                 ):
                     # No active work: wait, but cap it at the projection
                     # heartbeat interval so <=1Hz projection freshness holds.
-                    stop_event.wait(min(1.0, max(0.01, float(idle_seconds))))
+                    remaining = self.QUESTDB_BATCH_MAX_WAIT_SECONDS
+                    if self._questdb_batch_started_monotonic is not None:
+                        remaining = max(
+                            0.0,
+                            self.QUESTDB_BATCH_MAX_WAIT_SECONDS
+                            - (
+                                monotonic_time.monotonic()
+                                - self._questdb_batch_started_monotonic
+                            ),
+                        )
+                    stop_event.wait(
+                        min(1.0, max(0.01, min(float(idle_seconds), remaining)))
+                    )
         finally:
+            shutdown_error: Exception | None = None
+            if isinstance(self.writer, QuestDbTickWriter):
+                try:
+                    self._flush_questdb_pending(reason="shutdown")
+                except Exception as exc:  # noqa: BLE001
+                    self._last_error = type(exc).__name__
+                    shutdown_error = exc
             close_source = getattr(self.source, "close", None)
             if callable(close_source):
                 close_source()
             close_writer = getattr(self.writer, "close", None)
             if callable(close_writer):
                 close_writer()
+            if shutdown_error is not None:
+                raise shutdown_error
 
     def health(self) -> HealthSnapshot:
         writer_health = getattr(self.writer, "health", None)
@@ -1247,7 +1465,20 @@ class MarketDataWorker:
         self.metrics.checkpoint_or_watermark = self.stream.stats().get(
             "last_ingest_seq", 0
         )
-        return self.metrics.as_dict()
+        snapshot = self.metrics.as_dict()
+        latencies = tuple(self._questdb_commit_latencies_ms)
+        snapshot["questdb_batch"] = {
+            "max_size": self.QUESTDB_BATCH_MAX_SIZE,
+            "max_wait_ms": self.QUESTDB_BATCH_MAX_WAIT_SECONDS * 1000,
+            "size_samples": list(self._questdb_batch_sizes),
+            "commit_latency_ms": {
+                "samples": list(latencies),
+                "p50": self._percentile(latencies, 0.50),
+                "p95": self._percentile(latencies, 0.95),
+                "p99": self._percentile(latencies, 0.99),
+            },
+        }
+        return snapshot
 
     def version(self) -> dict[str, object]:
         return self.identity.as_dict()

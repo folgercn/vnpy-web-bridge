@@ -114,6 +114,10 @@ class FakeCursor:
         if self.fail_execute:
             raise OSError("poisoned pgwire connection")
 
+    def executemany(self, sql, params_seq):
+        for params in params_seq:
+            self.execute(sql, params)
+
     def fetchone(self):
         if "WHERE ts = %s AND ingest_id = %s" in self.last_sql:
             return self.readbacks.pop(0) if self.readbacks else None
@@ -129,16 +133,19 @@ class FakeCursor:
 
 
 class FakeConnection:
-    def __init__(self, rows=(), fail_execute=False, readbacks=()):
+    def __init__(self, rows=(), fail_execute=False, fail_commit=False, readbacks=()):
         self.cursor_value = FakeCursor(rows, fail_execute, readbacks)
         self.closed = False
         self.commits = self.rollbacks = 0
+        self.fail_commit = fail_commit
 
     def cursor(self):
         return self.cursor_value
 
     def commit(self):
         self.commits += 1
+        if self.fail_commit:
+            raise OSError("commit failed")
 
     def rollback(self):
         self.rollbacks += 1
@@ -500,6 +507,143 @@ def test_questdb_writer_drops_poisoned_connection_and_reconnects_for_replay(tmp_
     assert poisoned.closed and poisoned.rollbacks == 1
     writer.write_verified_tick(tick)
     assert recovered.commits == 1
+
+
+def test_market_questdb_batches_commit_before_ack_and_replays_failure(tmp_path):
+    first = FakeConnection()
+    writer = QuestDbTickWriter("postgresql://not-logged", connect=lambda _dsn: first)
+    worker = MarketDataWorker(tmp_path / "market", generation="g1", writer=writer)
+    worker.recover()
+    for sequence in range(1, 4):
+        worker.accept(envelope(f"batch-{sequence}", sequence, last_price=sequence))
+    assert worker.process_queue() == 3
+    inserts = [
+        params
+        for sql, params in first.cursor_value.calls
+        if sql.startswith("INSERT INTO market_ticks")
+    ]
+    assert len(inserts) == 3 and first.commits == 1
+    assert not worker.stream.pending_for_tick_writer()
+    batch = worker.metrics_snapshot()["questdb_batch"]
+    assert batch["size_samples"] == [3]
+    assert batch["commit_latency_ms"]["p99"] is not None
+
+    failed = FakeConnection(fail_commit=True)
+    recovered = FakeConnection()
+    connections = [failed, recovered]
+    retry_writer = QuestDbTickWriter(
+        "postgresql://not-logged", connect=lambda _dsn: connections.pop(0)
+    )
+    retry = MarketDataWorker(tmp_path / "retry", generation="g1", writer=retry_writer)
+    retry.recover()
+    retry.accept(envelope("retry", 1))
+    with pytest.raises(OSError, match="commit failed"):
+        retry.process_queue()
+    assert failed.rollbacks == 1
+    assert len(retry.stream.pending_for_tick_writer()) == 1
+    assert retry.replay_pending() == 1
+    assert recovered.commits == 1
+    assert not retry.stream.pending_for_tick_writer()
+
+
+def test_market_questdb_partial_ack_retry_never_reinserts_committed_batch(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(market_data_module.monotonic_time, "monotonic", lambda: 0.0)
+    connection = FakeConnection()
+    writer = QuestDbTickWriter(
+        "postgresql://not-logged", connect=lambda _dsn: connection
+    )
+    worker = MarketDataWorker(tmp_path / "market", generation="g1", writer=writer)
+    worker.recover()
+    for sequence in range(1, 3):
+        worker.accept(
+            envelope(f"partial-{sequence}", sequence, last_price=sequence)
+        )
+
+    acknowledge = worker.stream.acknowledge_tick_write
+    calls = 0
+
+    def fail_second_ack(tick):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("ack failed after commit")
+        acknowledge(tick)
+
+    monkeypatch.setattr(worker.stream, "acknowledge_tick_write", fail_second_ack)
+    with pytest.raises(OSError, match="ack failed after commit"):
+        worker.process_queue()
+    assert connection.commits == 1
+    assert len(worker._questdb_pending) == 2
+
+    monkeypatch.setattr(worker.stream, "acknowledge_tick_write", acknowledge)
+    worker.accept(envelope("partial-3", 3, last_price=3))
+    assert worker.process_queue() == 1
+    assert connection.commits == 2
+    assert not worker.stream.pending_for_tick_writer()
+
+
+def test_market_questdb_failure_keeps_batch_bounded_and_shutdown_fails(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(market_data_module.monotonic_time, "monotonic", lambda: 0.0)
+    connections = []
+
+    def connect(_dsn):
+        connection = FakeConnection(fail_commit=True)
+        connections.append(connection)
+        return connection
+
+    writer = QuestDbTickWriter("postgresql://not-logged", connect=connect)
+
+    class BurstSource:
+        def __init__(self):
+            self.callback = None
+            self.polls = 0
+
+        def subscribe(self, callback):
+            self.callback = callback
+
+        def poll(self, _timeout_ms=0, *, limit=256):
+            self.polls += 1
+            if self.polls == 1:
+                for sequence in range(1, 101):
+                    self.callback(
+                        envelope(
+                            f"bounded-{sequence}", sequence, last_price=sequence
+                        )
+                    )
+                return min(100, limit)
+            return 0
+
+        def has_backlog(self):
+            return False
+
+        def close(self):
+            return None
+
+    class BoundedStop:
+        def __init__(self):
+            self.waits = 0
+
+        def is_set(self):
+            return self.waits >= 3
+
+        def wait(self, _seconds):
+            self.waits += 1
+            return self.is_set()
+
+    source = BurstSource()
+    worker = MarketDataWorker(
+        tmp_path / "market", generation="g1", writer=writer, source=source
+    )
+    with pytest.raises(OSError, match="commit failed"):
+        worker.run(stop_event=BoundedStop())
+    assert source.polls == 1
+    assert 0 < len(worker._questdb_pending) <= worker.QUESTDB_BATCH_MAX_SIZE
+    assert len(worker._questdb_pending) + worker.ingress.qsize() == 100
+    assert connections and all(connection.rollbacks == 1 for connection in connections)
 
 
 def test_zmq_publish_source_is_sub_only_and_recovers_after_poisoned_socket(tmp_path):
