@@ -80,6 +80,27 @@ class SyntheticQuestDbWriter(QuestDbTickWriter):
         return None
 
 
+class MeasuredQuestDbWriter(QuestDbTickWriter):
+    """Real QuestDB writer with benchmark-only batch and freshness samples."""
+
+    def __init__(self, dsn: str) -> None:
+        super().__init__(dsn)
+        self.committed_ids: list[str] = []
+        self.batches: list[list[str]] = []
+        self.commit_ages_ms: list[float] = []
+
+    def write_verified_ticks(self, ticks: tuple[Any, ...] | list[Any]) -> None:
+        values = list(ticks)
+        super().write_verified_ticks(values)
+        committed_at = datetime.now(timezone.utc)
+        self.batches.append([str(tick.ingest_id) for tick in values])
+        self.committed_ids.extend(str(tick.ingest_id) for tick in values)
+        self.commit_ages_ms.extend(
+            max(0.0, (committed_at - tick.received_at_utc).total_seconds() * 1000)
+            for tick in values
+        )
+
+
 def _event(index: int, generated_at: datetime) -> GatewayTickEnvelope:
     payload = {
         "vt_symbol": "SYNTH.LOCAL",
@@ -113,7 +134,7 @@ def run(rate: float, duration: float) -> dict[str, object]:
         root = Path(temporary)
         fake = SyntheticQuestDbWriter()
         dsn = os.getenv("ISSUE332_QUESTDB_DSN", "").strip()
-        writer: Any = QuestDbTickWriter(dsn) if dsn else fake
+        writer: Any = MeasuredQuestDbWriter(dsn) if dsn else fake
         config = MarketDataConfig(root, stream_generation="issue332-synthetic")
         worker = MarketDataWorker(config, writer=writer)
         worker.recover()
@@ -155,8 +176,7 @@ def run(rate: float, duration: float) -> dict[str, object]:
                 errors += 1
                 break
             rss.append(_rss_mib())
-        if isinstance(writer, SyntheticQuestDbWriter):
-            worker._flush_questdb_pending(reason="benchmark_end")
+        worker._flush_questdb_pending(reason="benchmark_end")
         elapsed = max(0.0, time.monotonic() - started)
         recovery_started = time.monotonic()
         restarted_writer = SyntheticQuestDbWriter() if not dsn else QuestDbTickWriter(dsn)
@@ -164,6 +184,7 @@ def run(rate: float, duration: float) -> dict[str, object]:
         restarted.recover()
         replayed = restarted.replay_pending()
         recovery_seconds = time.monotonic() - recovery_started
+        worker_batch_metrics = worker.metrics_snapshot()["questdb_batch"]
         return {
             "benchmark": "issue-332-synthetic-market-load",
             "rate_target_ticks_per_second": rate,
@@ -172,23 +193,28 @@ def run(rate: float, duration: float) -> dict[str, object]:
             "writer": "questdb" if dsn else "fake",
             "generated": generated,
             "processed": processed,
-            "persisted": len(fake.committed_ids) if not dsn else None,
+            "persisted": len(writer.committed_ids),
             "errors": errors,
             "queue_max": queue_max,
             "processed_ticks_per_second": processed / elapsed if elapsed else 0.0,
             "tick_age_ms": _quantiles(
-                writer.commit_ages_ms if isinstance(writer, SyntheticQuestDbWriter) else ages
+                writer.commit_ages_ms
+                if isinstance(writer, (SyntheticQuestDbWriter, MeasuredQuestDbWriter))
+                else ages
             ),
             "commit_age_ms": _quantiles(
-                writer.commit_ages_ms if isinstance(writer, SyntheticQuestDbWriter) else []
+                writer.commit_ages_ms
+                if isinstance(writer, (SyntheticQuestDbWriter, MeasuredQuestDbWriter))
+                else []
             ),
             "rss_mib": {"start": rss[0], "max": max(rss), "samples": rss},
             "worker_counters": dict(worker.metrics.counters),
             "group_metrics": {
-                "implemented": not bool(dsn),
-                "batch_sizes": [len(batch) for batch in fake.batches] if not dsn else [],
-                "commit_age_ms": _quantiles(fake.commit_ages_ms) if not dsn else {},
-                "flushes": len(fake.batches) if not dsn else None,
+                "implemented": True,
+                "batch_sizes": [len(batch) for batch in writer.batches],
+                "commit_age_ms": _quantiles(writer.commit_ages_ms),
+                "flushes": len(writer.batches),
+                "worker": worker_batch_metrics,
             },
             "durable_stream": {
                 "stats": worker.stream.stats(),
