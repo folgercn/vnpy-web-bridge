@@ -211,7 +211,10 @@ def _contract(value: Any) -> tuple[str, str]:
     match = _EXACT_CONTRACT.fullmatch(contract)
     if match is None:
         raise ExecutableTargetAdapterError("C_FAST exact_contract is invalid")
-    return match.group(1), match.group(2).upper()
+    # vn.py's CTP contract registry is keyed by the native symbol spelling
+    # carried in exact_contract (for example, ``ru2609``), not an uppercased
+    # equivalent.  Keep that spelling for the outbound TargetPlan order.
+    return match.group(1), match.group(2)
 
 
 def _validate_lineage(
@@ -452,7 +455,7 @@ def _current_contract_positions(
         volume = row.get("volume")
         if isinstance(volume, bool) or not isinstance(volume, int) or volume < 0:
             raise ExecutableTargetAdapterError("current position volume is invalid")
-        if str(row.get("symbol", "")).upper() != symbol or str(
+        if str(row.get("symbol", "")).upper() != symbol.upper() or str(
             row.get("exchange", "")
         ).upper() != exchange:
             continue

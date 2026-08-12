@@ -46,7 +46,12 @@ FALSE_FLAGS = {
 }
 
 
-def candidates(*, target_quantity: int = 1) -> tuple[dict, dict]:
+def candidates(
+    *,
+    target_quantity: int = 1,
+    product: str = "rb",
+    exact_contract: str = "SHFE.rb2601",
+) -> tuple[dict, dict]:
     map_candidate = {
         "schema_version": "commodity_map_signal_candidate_v1",
         "artifact_role": "unsigned_map_signal_candidate",
@@ -76,8 +81,8 @@ def candidates(*, target_quantity: int = 1) -> tuple[dict, dict]:
         },
         "targets": [
             {
-                "product": "rb",
-                "exact_contract": "SHFE.rb2601",
+                "product": product,
+                "exact_contract": exact_contract,
                 "target_quantity": target_quantity,
                 "reference_open_price": 3500.0,
             }
@@ -168,15 +173,21 @@ def adapt(
     current: GatewaySnapshot | None = None,
     receipt: dict | None = None,
     reconciliation: dict | None = None,
+    product: str = "rb",
+    exact_contract: str = "SHFE.rb2601",
 ) -> object:
-    map_candidate, c_fast_candidate = candidates(target_quantity=target_quantity)
+    map_candidate, c_fast_candidate = candidates(
+        target_quantity=target_quantity,
+        product=product,
+        exact_contract=exact_contract,
+    )
     return build_executable_target_plan(
         map_candidate=map_candidate,
         c_fast_candidate=c_fast_candidate,
         authority_receipt=authority() if receipt is None else receipt,
         current_facts=snapshot() if current is None else current,
         reconciliation=reconciliation or {"state": "RECONCILED", "unknown_outcomes": 0},
-        product="rb",
+        product=product,
         account_scope=SCOPE,
         environment="SIMNOW",
         gateway_name=GATEWAY,
@@ -235,7 +246,7 @@ def test_adapter_preserves_map_cfast_lineage_scope_expiry_and_delta() -> None:
     assert adapt().target_plan["orders"][0]["reference"] == identity
     assert plan["orders"] == [
         {
-            "symbol": "RB2601",
+            "symbol": "rb2601",
             "exchange": "SHFE",
             "direction": "LONG",
             "type": "LIMIT",
@@ -281,6 +292,47 @@ def test_adapter_derives_direction_and_open_close_from_target_minus_current(
     )
     assert handoff.target_plan["orders"][0]["direction"] == direction
     assert handoff.target_plan["orders"][0]["offset"] == offset
+
+
+@pytest.mark.parametrize(
+    ("product", "exact_contract"),
+    [
+        ("ag", "SHFE.ag2609"),
+        ("au", "SHFE.au2609"),
+        ("ru", "SHFE.ru2609"),
+    ],
+)
+def test_adapter_preserves_vnpy_native_symbol_case_from_exact_contract(
+    product: str, exact_contract: str
+) -> None:
+    handoff = adapt(product=product, exact_contract=exact_contract)
+
+    order = handoff.target_plan["orders"][0]
+    assert order["symbol"] == exact_contract.split(".", 1)[1]
+    assert order["exchange"] == "SHFE"
+
+
+def test_adapter_matches_existing_position_case_insensitively_and_emits_native_symbol() -> None:
+    handoff = adapt(
+        product="ru",
+        exact_contract="SHFE.ru2609",
+        target_quantity=0,
+        current=snapshot(
+            {
+                "RU2609.SHFE.LONG": {
+                    "gateway_name": GATEWAY,
+                    "symbol": "RU2609",
+                    "exchange": "SHFE",
+                    "direction": "LONG",
+                    "volume": 1,
+                }
+            }
+        ),
+    )
+
+    assert handoff.target_plan["orders"][0]["symbol"] == "ru2609"
+    assert handoff.target_plan["orders"][0]["direction"] == "SHORT"
+    assert handoff.target_plan["orders"][0]["offset"] == "CLOSE"
 
 
 def test_dynamic_broker_fields_do_not_change_expected_after_projection() -> None:
