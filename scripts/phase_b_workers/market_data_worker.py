@@ -11,6 +11,7 @@ import pickle
 import signal
 import stat
 import threading
+import time as monotonic_time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
@@ -82,6 +83,10 @@ except ImportError:  # pragma: no cover
 
 class ReadonlyTickSource(Protocol):
     def subscribe(self, callback: Callable[[Mapping[str, object]], None]) -> None: ...
+
+    def poll(self, timeout_ms: int = 0, *, limit: int = 256) -> int: ...
+
+    def has_backlog(self) -> bool: ...
 
     def close(self) -> None: ...
 
@@ -401,6 +406,11 @@ def _market_tick_row_matches(tick: VerifiedTick, actual: Mapping[str, object]) -
 class ZmqPublishTickSource:
     """A SUB-only adapter for the trusted RpcClient PUB ``(topic, TickData)`` wire."""
 
+    # Keep one receive pass below the normal ingress capacity.  The run loop
+    # drains/processes this bounded slice before receiving again, so a socket
+    # burst cannot silently consume beyond durable ingress backpressure.
+    DEFAULT_DRAIN_LIMIT = 256
+
     def __init__(
         self,
         endpoint: str,
@@ -546,19 +556,36 @@ class ZmqPublishTickSource:
             payload=payload,
         )
 
-    def poll(self, timeout_ms: int = 0) -> int:
-        if self._callback is None:
-            raise RuntimeError("market-data source has not been bound")
+    def has_backlog(self) -> bool:
+        """Return whether the subscribed socket already has another message."""
+
         self._connect()
         try:
-            if not self._socket.poll(max(0, int(timeout_ms))):
-                return 0
-            value = restricted_tick_wire_loads(self._socket.recv())
+            return bool(self._socket.poll(0))
         except self._zmq.ZMQError as exc:
             self._reset()
             raise OSError("market-data publish ingress disconnected") from exc
-        self._callback(self._decode_wire(value).as_dict())
-        return 1
+
+    def poll(self, timeout_ms: int = 0, *, limit: int = DEFAULT_DRAIN_LIMIT) -> int:
+        if self._callback is None:
+            raise RuntimeError("market-data source has not been bound")
+        if int(limit) < 1:
+            raise ValueError("market-data publish drain limit must be positive")
+        self._connect()
+        received = 0
+        try:
+            if not self._socket.poll(max(0, int(timeout_ms))):
+                return 0
+            while received < int(limit):
+                value = restricted_tick_wire_loads(self._socket.recv())
+                self._callback(self._decode_wire(value).as_dict())
+                received += 1
+                if received >= int(limit) or not self._socket.poll(0):
+                    break
+        except self._zmq.ZMQError as exc:
+            self._reset()
+            raise OSError("market-data publish ingress disconnected") from exc
+        return received
 
     def close(self) -> None:
         try:
@@ -769,6 +796,10 @@ def _read_secret_file(path: Path) -> str:
 
 class MarketDataWorker:
     service_id = "market-data-worker"
+    SOURCE_DRAIN_LIMIT = ZmqPublishTickSource.DEFAULT_DRAIN_LIMIT
+    _SOURCE_FENCE_EVENT_LIMIT = 4096
+    _DETERMINISTIC_SOURCE_SERVICE = "gateway-publish-proxy"
+    _PROJECTION_INTERVAL_SECONDS = 1.0
 
     def __init__(
         self,
@@ -802,6 +833,7 @@ class MarketDataWorker:
             config.state_dir / "source_fence.json",
             default={"worker_generation": config.stream_generation, "sources": {}},
         )
+        self._source_fence_state: dict[str, object] | None = None
         self.writer = writer or (
             QuestDbTickWriter(config.questdb_pg_dsn)
             if config.questdb_pg_dsn
@@ -822,6 +854,7 @@ class MarketDataWorker:
         self._source_bound = False
         self._last_error: str | None = None
         self._state_recovered = False
+        self._next_projection_monotonic = 0.0
         self.metrics = WorkerMetrics(
             self.service_id, isoformat(), worker_generation=config.stream_generation
         )
@@ -841,6 +874,13 @@ class MarketDataWorker:
                 raise GenerationMismatch(
                     "market-data generation changed without a new state directory"
                 )
+            if not isinstance(state.get("sources") or {}, Mapping) or not isinstance(
+                state.get("events") or {}, Mapping
+            ):
+                raise DurableStateError("market-data source fence state is invalid")
+            if len(dict(state.get("events") or {})) > self._SOURCE_FENCE_EVENT_LIMIT:
+                raise BackpressureError("source fence identity capacity exhausted")
+            self._source_fence_state = dict(state)
             writer_health = getattr(self.writer, "health", None)
             if callable(writer_health):
                 status = str(dict(writer_health()).get("status") or "")
@@ -883,9 +923,23 @@ class MarketDataWorker:
         self.metrics.queue_depth = self.ingress.qsize()
 
     def _assert_source_fence(self, event: GatewayTickEnvelope) -> None:
-        state = self.source_fence.read()
+        state = self._source_fence_state
+        if state is None:
+            raise DurableStateError("market-data source fence recovery is required")
         sources = dict(state.get("sources") or {})
         events = dict(state.get("events") or {})
+        deterministic = event.source_service == self._DETERMINISTIC_SOURCE_SERVICE
+        if deterministic:
+            expected_event_id = sha256_hex(
+                {
+                    "source_generation": event.source_generation,
+                    "source_seq": event.source_seq,
+                    "topic": f"eTick.{event.payload.get('vt_symbol')}",
+                    "payload": dict(event.payload),
+                }
+            )[:32]
+            if event.event_id != expected_event_id:
+                raise DurableStateError("deterministic source event identity mismatch")
         prior_event = events.get(event.event_id)
         if isinstance(prior_event, Mapping) and (
             prior_event.get("generation") != event.source_generation
@@ -893,6 +947,8 @@ class MarketDataWorker:
             or prior_event.get("event_hash") != event.envelope_hash
         ):
             raise DurableStateError("source_event_id was reused with different content")
+        if not deterministic and prior_event is None and len(events) >= self._SOURCE_FENCE_EVENT_LIMIT:
+            raise BackpressureError("source fence identity capacity exhausted")
         prior = dict(sources.get(event.source_service) or {})
         old_generation = str(prior.get("generation") or event.source_generation)
         old_seq = int(prior.get("seq") or 0)
@@ -916,26 +972,36 @@ class MarketDataWorker:
         source event id to be replayed with altered envelope metadata.
         """
 
-        state = self.source_fence.read()
+        state = self._source_fence_state
+        if state is None:
+            raise DurableStateError("market-data source fence recovery is required")
         sources = dict(state.get("sources") or {})
         events = dict(state.get("events") or {})
+        deterministic = event.source_service == self._DETERMINISTIC_SOURCE_SERVICE
+        if (
+            not deterministic
+            and event.event_id not in events
+            and len(events) >= self._SOURCE_FENCE_EVENT_LIMIT
+        ):
+            raise BackpressureError("source fence identity capacity exhausted")
         sources[event.source_service] = {
             "generation": event.source_generation,
             "seq": event.source_seq,
             "event_hash": event.envelope_hash,
         }
-        events[event.event_id] = {
-            "generation": event.source_generation,
-            "seq": event.source_seq,
-            "event_hash": event.envelope_hash,
-        }
-        self.source_fence.write(
-            {
-                "worker_generation": self.config.stream_generation,
-                "sources": sources,
-                "events": events,
+        if not deterministic:
+            events[event.event_id] = {
+                "generation": event.source_generation,
+                "seq": event.source_seq,
+                "event_hash": event.envelope_hash,
             }
-        )
+        next_state = {
+            "worker_generation": self.config.stream_generation,
+            "sources": sources,
+            "events": events,
+        }
+        self.source_fence.write(next_state)
+        self._source_fence_state = next_state
 
     def _write(self, tick: VerifiedTick) -> None:
         if self.stream.is_acknowledged(tick):
@@ -1039,11 +1105,13 @@ class MarketDataWorker:
     def process_one(self) -> VerifiedTick:
         value = self.ingress.get()
         self.metrics.queue_depth = self.ingress.qsize()
-        return (
+        tick = (
             self._process_envelope(value)
             if isinstance(value, GatewayTickEnvelope)
             else self.ingest(value)
         )
+        self.metrics.increment("processed_total")
+        return tick
 
     def process_queue(self, *, limit: int | None = None) -> int:
         processed = 0
@@ -1055,6 +1123,10 @@ class MarketDataWorker:
                     break
                 raise
             processed += 1
+            # A durable writer can be slower than the projection heartbeat.
+            # Keep publishing through the existing <=1Hz monotonic gate while
+            # a long queue drains, without changing sink commit semantics.
+            self._publish_projection_if_due()
         return processed
 
     def replay_pending(self) -> int:
@@ -1062,6 +1134,9 @@ class MarketDataWorker:
         for tick in self.stream.pending_for_tick_writer():
             self._write(tick)
             recovered += 1
+            # Recovery may replay a large slow-writer backlog before the run
+            # loop regains control; retain the same bounded heartbeat here.
+            self._publish_projection_if_due()
         if recovered:
             self._last_error = None
         return recovered
@@ -1076,17 +1151,53 @@ class MarketDataWorker:
         try:
             self.replay_pending()
             self.bind_source()
-            self.publish_projection()
+            self._publish_projection_if_due(force=True)
             while not stop_event.is_set():
+                # Process durable ingress before receiving anything new.  A
+                # full bounded queue must be visible as backpressure, never a
+                # dropped socket message after an over-eager receive burst.
+                if self.ingress.qsize():
+                    try:
+                        self.process_queue()
+                    except Exception as exc:  # noqa: BLE001
+                        self._last_error = type(exc).__name__
                 try:
                     poll = getattr(self.source, "poll", None)
-                    if callable(poll):
-                        poll(max(0, int(float(idle_seconds) * 1000)))
+                    if (
+                        not stop_event.is_set()
+                        and callable(poll)
+                        and self.ingress.qsize() == 0
+                    ):
+                        poll(
+                            0,
+                            limit=min(
+                                self.SOURCE_DRAIN_LIMIT,
+                                self.config.queue_maxsize,
+                            ),
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    self._last_error = type(exc).__name__
+                try:
                     self.process_queue()
                 except Exception as exc:  # noqa: BLE001
                     self._last_error = type(exc).__name__
-                self.publish_projection()
-                stop_event.wait(max(0.01, float(idle_seconds)))
+                self._publish_projection_if_due()
+                try:
+                    has_backlog = getattr(self.source, "has_backlog", None)
+                    source_backlog = (
+                        bool(has_backlog()) if callable(has_backlog) else False
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    source_backlog = False
+                    self._last_error = type(exc).__name__
+                if (
+                    not stop_event.is_set()
+                    and not source_backlog
+                    and self.ingress.qsize() == 0
+                ):
+                    # No active work: wait, but cap it at the projection
+                    # heartbeat interval so <=1Hz projection freshness holds.
+                    stop_event.wait(min(1.0, max(0.01, float(idle_seconds))))
         finally:
             close_source = getattr(self.source, "close", None)
             if callable(close_source):
@@ -1097,6 +1208,7 @@ class MarketDataWorker:
 
     def health(self) -> HealthSnapshot:
         writer_health = getattr(self.writer, "health", None)
+        metrics = self.metrics_snapshot()
         return HealthSnapshot(
             self.service_id,
             "healthy" if not self._last_error else "degraded",
@@ -1107,6 +1219,10 @@ class MarketDataWorker:
                 "tick_writer": writer_health()
                 if callable(writer_health)
                 else {"status": "configured"},
+                # Use this running worker's in-memory counters.  A separate
+                # CLI process has a fresh metrics object and must not be used
+                # as an operational substitute for this projection.
+                "worker_metrics": metrics,
             },
             self._last_error,
         )
@@ -1149,6 +1265,14 @@ class MarketDataWorker:
                 version=self.identity,
             ),
         )
+
+    def _publish_projection_if_due(self, *, force: bool = False) -> bool:
+        now = monotonic_time.monotonic()
+        if not force and now < self._next_projection_monotonic:
+            return False
+        self.publish_projection()
+        self._next_projection_monotonic = now + self._PROJECTION_INTERVAL_SECONDS
+        return True
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -23,9 +23,11 @@ from phase_b_workers.durable import (
     AppendOnlyJsonl,
     BackpressureError,
     BoundedIngressQueue,
+    DuplicateRecordError,
     DurableCorruptionError,
     DurableStateError,
     DurableVerifiedTickStream,
+    GenerationMismatch,
 )
 from phase_b_workers.execution_quality_worker import (
     ExecutionQualityConfig,
@@ -547,6 +549,91 @@ def test_zmq_publish_source_is_sub_only_and_recovers_after_poisoned_socket(tmp_p
     assert second.closed
 
 
+def test_zmq_source_drains_bounded_burst_without_reordering_or_loss(tmp_path):
+    socket = FakeSocket(
+        [
+            ["eTick.rb2610.SHFE", rpc_tick(last_price=float(index))]
+            for index in range(1, 6)
+        ]
+    )
+    source = ZmqPublishTickSource(
+        "tcp://publish-proxy:4102",
+        state_dir=tmp_path,
+        source_generation="gateway-g1",
+        context=FakeContext([socket]),
+        zmq_module=FakeZmq,
+    )
+    received = []
+    source.subscribe(received.append)
+    assert source.poll(limit=3) == 3
+    assert source.has_backlog()
+    assert source.poll(limit=3) == 2
+    assert not source.has_backlog()
+    envelopes = [GatewayTickEnvelope.from_dict(value) for value in received]
+    assert [event.source_seq for event in envelopes] == [1, 2, 3, 4, 5]
+    assert [event.payload["last_price"] for event in envelopes] == [1, 2, 3, 4, 5]
+    source.close()
+
+
+def test_market_run_drains_backlog_without_idle_wait(tmp_path, monkeypatch):
+    socket = FakeSocket(
+        [
+            ["eTick.rb2610.SHFE", rpc_tick(last_price=1.0)],
+            ["eTick.rb2610.SHFE", rpc_tick(last_price=2.0)],
+        ]
+    )
+    source = ZmqPublishTickSource(
+        "tcp://publish-proxy:4102",
+        state_dir=tmp_path / "market",
+        source_generation="gateway-g1",
+        context=FakeContext([socket]),
+        zmq_module=FakeZmq,
+    )
+
+    class StopAfterTwoWriter(Writer):
+        def write_verified_tick(self, tick):
+            super().write_verified_tick(tick)
+            if len(self.events) == 2:
+                stop.set()
+
+    stop = threading.Event()
+    monkeypatch.setattr(MarketDataWorker, "SOURCE_DRAIN_LIMIT", 1)
+    worker = MarketDataWorker(
+        tmp_path / "market", generation="g1", source=source, writer=StopAfterTwoWriter()
+    )
+    worker.run(stop_event=stop, idle_seconds=60)
+    assert [event.ingest_seq for event in worker.writer.events] == [1, 2]
+
+
+def test_market_run_processes_existing_ingress_before_receiving_more(tmp_path):
+    class Source:
+        def subscribe(self, _callback):
+            pass
+
+        def poll(self, *_args, **_kwargs):
+            pytest.fail("source must not receive while ingress is nonempty")
+
+        def has_backlog(self):
+            return False
+
+        def close(self):
+            pass
+
+    stop = threading.Event()
+
+    class StopAfterOneWriter(Writer):
+        def write_verified_tick(self, tick):
+            super().write_verified_tick(tick)
+            stop.set()
+
+    worker = MarketDataWorker(
+        tmp_path / "market", generation="g1", source=Source(), writer=StopAfterOneWriter()
+    )
+    worker.accept(envelope())
+    worker.run(stop_event=stop)
+    assert [event.ingest_seq for event in worker.writer.events] == [1]
+
+
 def test_market_worker_binds_typed_pub_source_through_envelope_validation(tmp_path):
     tick_data = rpc_tick()
     socket = FakeSocket(
@@ -565,9 +652,9 @@ def test_market_worker_binds_typed_pub_source_through_envelope_validation(tmp_pa
     )
     worker.recover()
     worker.bind_source()
-    assert source.poll() == 1
+    assert source.poll(limit=1) == 1
     worker.process_one()
-    assert source.poll() == 1
+    assert source.poll(limit=1) == 1
     worker.process_one()
     assert len(writer.events) == 1
     assert worker.metrics.counters["ticks_deduplicated"] == 1
@@ -815,6 +902,42 @@ def test_durable_state_rejects_symlink_noncanonical_and_unsafe_journals(tmp_path
         journal.read_all()
 
 
+def test_append_only_jsonl_streams_large_multibyte_and_chunked_lines(tmp_path, monkeypatch):
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    journal = AppendOnlyJsonl(state / "journal.jsonl")
+    large = "x" * (1024 * 1024 + 17)
+    expected = [{"payload": large}, {"text": "多字节 UTF-8"}]
+    for record in expected:
+        journal.append(record)
+    original_read = os.read
+
+    def tiny_reads(descriptor, size):
+        return original_read(descriptor, min(size, 3))
+
+    monkeypatch.setattr(os, "read", tiny_reads)
+    assert journal.read_all() == expected
+
+
+@pytest.mark.parametrize(
+    ("raw", "message"),
+    [
+        (b'{"value":1}', "noncanonical JSONL"),
+        (b'{"value":"' + bytes([255]) + b'"}\n', "invalid UTF-8 journal"),
+    ],
+)
+def test_append_only_jsonl_streaming_rejects_unterminated_and_invalid_utf8(
+    tmp_path, raw, message
+):
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    path = state / "journal.jsonl"
+    path.write_bytes(raw)
+    path.chmod(0o600)
+    with pytest.raises(DurableCorruptionError, match=message):
+        AppendOnlyJsonl(path).read_all()
+
+
 def test_verified_stream_rejects_gap_and_forged_ack_before_polluting_journal(tmp_path):
     market = MarketDataWorker(tmp_path / "market", generation="g1", writer=Writer())
     market.recover()
@@ -882,6 +1005,243 @@ def test_verified_stream_serializes_competing_producers_without_duplicate_sequen
     assert DurableVerifiedTickStream(stream_dir, generation="g1").stats()["events"] == 1
 
 
+def test_verified_stream_append_and_contiguous_ack_frontiers_are_incremental(
+    tmp_path, monkeypatch
+):
+    stream = DurableVerifiedTickStream(tmp_path / "stream", generation="g1")
+    stream.initialize()
+    calls = 0
+    original_records = AppendOnlyJsonl.records
+
+    def count_records(journal):
+        nonlocal calls
+        calls += 1
+        yield from original_records(journal)
+
+    monkeypatch.setattr(AppendOnlyJsonl, "records", count_records)
+    ticks = [
+        VerifiedTick.from_raw(
+            {
+                "source_event_id": f"event-{seq}",
+                "vt_symbol": "rb2610.SHFE",
+                "last_price": seq,
+            },
+            stream_generation="g1",
+            ingest_seq=seq,
+            source="gateway-market-reader",
+        )
+        for seq in range(1, 5)
+    ]
+    for tick in ticks:
+        assert stream.append(tick)
+    # Initial recovery reads tick and acknowledgement JSONL once each.  Later
+    # append/ack operations must advance their in-memory frontiers directly.
+    assert calls == 2
+
+    assert stream.acknowledge_tick_write(ticks[2])
+    assert stream._ack_frontier == 0
+    assert stream._ack_sparse == {3}
+    assert stream.acknowledge_tick_write(ticks[0])
+    assert stream._ack_frontier == 1
+    assert stream.acknowledge_tick_write(ticks[1])
+    assert stream._ack_frontier == 3
+    assert stream._ack_sparse == set()
+    assert stream.acknowledge_tick_write(ticks[3])
+    assert stream._ack_frontier == 4
+    assert calls == 2
+
+
+def test_verified_stream_ack_reloads_after_competing_producer_advances_frontier(
+    tmp_path,
+):
+    stream_dir = tmp_path / "stream"
+    producer = DurableVerifiedTickStream(stream_dir, generation="g1")
+    writer = DurableVerifiedTickStream(stream_dir, generation="g1")
+    producer.initialize()
+    first = VerifiedTick.from_raw(
+        {"source_event_id": "first", "vt_symbol": "rb2610.SHFE"},
+        stream_generation="g1",
+        ingest_seq=1,
+        source="gateway-market-reader",
+    )
+    second = VerifiedTick.from_raw(
+        {"source_event_id": "second", "vt_symbol": "rb2610.SHFE"},
+        stream_generation="g1",
+        ingest_seq=2,
+        source="gateway-market-reader",
+    )
+    assert producer.append(first)
+    assert writer.stats()["events"] == 1
+    assert producer.append(second)
+    assert writer.acknowledge_tick_write(second)
+    assert writer._indexed_watermark_seq == 2
+    assert writer.is_acknowledged(second)
+
+
+def test_verified_stream_ack_refreshes_cross_process_ack_only_drift(tmp_path):
+    stream_dir = tmp_path / "stream"
+    first = DurableVerifiedTickStream(stream_dir, generation="g1")
+    second = DurableVerifiedTickStream(stream_dir, generation="g1")
+    first.initialize()
+    tick = VerifiedTick.from_raw(
+        {"source_event_id": "same", "vt_symbol": "rb2610.SHFE", "last_price": 1},
+        stream_generation="g1",
+        ingest_seq=1,
+        source="gateway-market-reader",
+    )
+    assert first.append(tick)
+    # Both instances capture the same watermark and initial empty ack journal.
+    assert first.stats()["events"] == second.stats()["events"] == 1
+    assert first.acknowledge_tick_write(tick)
+    assert not second.acknowledge_tick_write(tick)
+    assert len(second.acknowledgements.journal.read_all()) == 1
+
+    altered = VerifiedTick.from_raw(
+        {"source_event_id": "same", "vt_symbol": "rb2610.SHFE", "last_price": 2},
+        stream_generation="g1",
+        ingest_seq=1,
+        source="gateway-market-reader",
+    )
+    with pytest.raises(DurableCorruptionError, match="does not bind to persisted tick"):
+        second.acknowledge_tick_write(altered)
+
+
+def test_verified_stream_sparse_ack_capacity_fails_before_durable_write(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(DurableVerifiedTickStream, "_ACK_SPARSE_LIMIT", 1)
+    stream = DurableVerifiedTickStream(tmp_path / "stream", generation="g1")
+    stream.initialize()
+    ticks = [
+        VerifiedTick.from_raw(
+            {
+                "source_event_id": f"event-{seq}",
+                "vt_symbol": "rb2610.SHFE",
+                "last_price": seq,
+            },
+            stream_generation="g1",
+            ingest_seq=seq,
+            source="gateway-market-reader",
+        )
+        for seq in range(1, 5)
+    ]
+    for tick in ticks:
+        assert stream.append(tick)
+    assert stream.acknowledge_tick_write(ticks[2])
+    with pytest.raises(BackpressureError, match="sparse frontier exhausted"):
+        stream.acknowledge_tick_write(ticks[3])
+    assert not stream.is_acknowledged(ticks[3])
+
+
+def test_verified_stream_uses_bounded_hot_cache_and_exact_durable_fallback(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(DurableVerifiedTickStream, "_TICK_CACHE_LIMIT", 2)
+    stream = DurableVerifiedTickStream(tmp_path / "stream", generation="g1")
+    stream.initialize()
+    ticks = [
+        VerifiedTick.from_raw(
+            {"source_event_id": f"event-{seq}", "vt_symbol": "rb2610.SHFE"},
+            stream_generation="g1",
+            ingest_seq=seq,
+            source="gateway-market-reader",
+        )
+        for seq in range(1, 5)
+    ]
+    for tick in ticks:
+        assert stream.append(tick)
+    assert len(stream._index or {}) == 2
+    assert stream.get(ticks[0].ingest_id) == ticks[0]
+    assert stream.find_by_source_event_id("event-1") == ticks[0]
+    assert stream.find_by_raw_hash(ticks[0].raw_hash) == ticks[0]
+    assert not stream.append(ticks[0])
+
+    altered = VerifiedTick.from_raw(
+        {"source_event_id": "event-1", "vt_symbol": "rb2610.SHFE", "last_price": 2},
+        stream_generation="g1",
+        ingest_seq=5,
+        source="gateway-market-reader",
+    )
+    with pytest.raises(DuplicateRecordError, match="ingest_id reused"):
+        stream.append(altered)
+
+
+def test_verified_stream_membership_capacity_fails_closed_before_append(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        "phase_b_workers.durable._BoundedMembershipFilter._CAPACITY", 2
+    )
+    stream = DurableVerifiedTickStream(tmp_path / "stream", generation="g1")
+    stream.initialize()
+    for seq in (1, 2):
+        assert stream.append(
+            VerifiedTick.from_raw(
+                {"source_event_id": f"event-{seq}", "vt_symbol": "rb2610.SHFE"},
+                stream_generation="g1",
+                ingest_seq=seq,
+                source="gateway-market-reader",
+            )
+        )
+    third = VerifiedTick.from_raw(
+        {"source_event_id": "event-3", "vt_symbol": "rb2610.SHFE"},
+        stream_generation="g1",
+        ingest_seq=3,
+        source="gateway-market-reader",
+    )
+    with pytest.raises(BackpressureError, match="membership filter capacity"):
+        stream.append(third)
+    assert stream.stats()["events"] == 2
+
+
+def test_verified_stream_recovery_rejects_ack_binding_tampering(tmp_path):
+    stream = DurableVerifiedTickStream(tmp_path / "stream", generation="g1")
+    stream.initialize()
+    tick = VerifiedTick.from_raw(
+        {"source_event_id": "one", "vt_symbol": "rb2610.SHFE"},
+        stream_generation="g1",
+        ingest_seq=1,
+        source="gateway-market-reader",
+    )
+    assert stream.append(tick)
+    assert stream.acknowledge_tick_write(tick)
+    stream.acknowledgements.journal.path.write_text(
+        json.dumps(
+            {
+                "ingest_id": tick.ingest_id,
+                "stream_generation": "g1",
+                "ingest_seq": 1,
+                "event_hash": "0" * 64,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    stream.acknowledgements.journal.path.chmod(0o600)
+    with pytest.raises(DurableCorruptionError, match="does not bind to tick"):
+        DurableVerifiedTickStream(tmp_path / "stream", generation="g1").stats()
+
+
+def test_verified_stream_recovery_rejects_exact_duplicate_ack_record(tmp_path):
+    stream = DurableVerifiedTickStream(tmp_path / "stream", generation="g1")
+    stream.initialize()
+    tick = VerifiedTick.from_raw(
+        {"source_event_id": "one", "vt_symbol": "rb2610.SHFE"},
+        stream_generation="g1",
+        ingest_seq=1,
+        source="gateway-market-reader",
+    )
+    assert stream.append(tick)
+    assert stream.acknowledge_tick_write(tick)
+    original = stream.acknowledgements.journal.path.read_text(encoding="utf-8")
+    stream.acknowledgements.journal.path.write_text(original + original, encoding="utf-8")
+    stream.acknowledgements.journal.path.chmod(0o600)
+    with pytest.raises(DurableCorruptionError, match="identity duplicated"):
+        DurableVerifiedTickStream(tmp_path / "stream", generation="g1").stats()
+
+
 def test_market_revalidates_constructed_envelopes_and_persists_event_fence_before_sink(
     tmp_path,
 ):
@@ -899,6 +1259,184 @@ def test_market_revalidates_constructed_envelopes_and_persists_event_fence_befor
     restarted.accept(envelope("same-id", 2))
     with pytest.raises(DurableStateError, match="reused with different content"):
         restarted.process_one()
+
+
+def test_market_source_fence_hotpath_uses_recovered_state_and_fails_closed_at_capacity(
+    tmp_path, monkeypatch
+):
+    worker = MarketDataWorker(tmp_path / "market", generation="g1", writer=Writer())
+    worker.recover()
+    monkeypatch.setattr(
+        worker.source_fence,
+        "read",
+        lambda: pytest.fail("source fence checkpoint must not be reread per event"),
+    )
+    worker.accept(envelope("one", 1))
+    worker.process_one()
+    worker.accept(envelope("two", 2))
+    worker.process_one()
+
+    monkeypatch.setattr(MarketDataWorker, "_SOURCE_FENCE_EVENT_LIMIT", 2)
+    worker.accept(envelope("three", 3))
+    with pytest.raises(BackpressureError, match="identity capacity exhausted"):
+        worker.process_one()
+    assert worker._source_fence_state is not None
+    assert set(worker._source_fence_state["events"]) == {"one", "two"}
+
+
+def test_market_source_fence_rejects_generation_sequence_and_identity_regressions(tmp_path):
+    worker = MarketDataWorker(tmp_path / "market", generation="g1", writer=Writer())
+    worker.recover()
+    worker.accept(envelope("one", 1))
+    worker.process_one()
+    worker.accept(envelope("two", 2, last_price=102))
+    worker.process_one()
+    worker.accept(envelope("old", 1))
+    with pytest.raises(DurableStateError, match="stale source sequence"):
+        worker.process_one()
+    worker.accept(
+        GatewayTickEnvelope.create(
+            event_id="new-generation",
+            source_service="gateway-market-reader",
+            source_generation="source-g2",
+            source_seq=3,
+            observed_at=datetime(2026, 8, 5, tzinfo=timezone.utc),
+            payload={"vt_symbol": "rb2610.SHFE", "bid_price": 100, "ask_price": 102},
+        )
+    )
+    with pytest.raises(GenerationMismatch):
+        worker.process_one()
+
+
+def test_market_deterministic_source_fence_keeps_event_state_compact(tmp_path):
+    worker = MarketDataWorker(tmp_path / "market", generation="g1", writer=Writer())
+    worker.recover()
+    checkpoint_sizes = []
+    for seq in range(1, 5):
+        payload = {
+            "vt_symbol": "rb2610.SHFE",
+            "bid_price": 100,
+            "ask_price": 102,
+            "last_price": seq,
+        }
+        event_id = market_data_module.sha256_hex(
+            {
+                "source_generation": "source-g1",
+                "source_seq": seq,
+                "topic": "eTick.rb2610.SHFE",
+                "payload": payload,
+            }
+        )[:32]
+        worker.accept(
+            GatewayTickEnvelope.create(
+                event_id=event_id,
+                source_service="gateway-publish-proxy",
+                source_generation="source-g1",
+                source_seq=seq,
+                observed_at=datetime(2026, 8, 5, tzinfo=timezone.utc),
+                payload=payload,
+            )
+        )
+        worker.process_one()
+        checkpoint_sizes.append(worker.source_fence.path.stat().st_size)
+    assert worker._source_fence_state is not None
+    assert worker._source_fence_state["events"] == {}
+    assert checkpoint_sizes == [checkpoint_sizes[0]] * 4
+
+    worker.accept(
+        GatewayTickEnvelope.create(
+            event_id="forged",
+            source_service="gateway-publish-proxy",
+            source_generation="source-g1",
+            source_seq=5,
+            observed_at=datetime(2026, 8, 5, tzinfo=timezone.utc),
+            payload={"vt_symbol": "rb2610.SHFE", "bid_price": 100, "ask_price": 102},
+        )
+    )
+    with pytest.raises(DurableStateError, match="deterministic source event identity"):
+        worker.process_one()
+
+    # A replay with the old deterministic identity but modified payload also
+    # fails before stream/sink processing; no historical event map is needed.
+    original_event_id = market_data_module.sha256_hex(
+        {
+            "source_generation": "source-g1",
+            "source_seq": 1,
+            "topic": "eTick.rb2610.SHFE",
+            "payload": {
+                "vt_symbol": "rb2610.SHFE",
+                "bid_price": 100,
+                "ask_price": 102,
+                "last_price": 1,
+            },
+        }
+    )[:32]
+    worker.accept(
+        GatewayTickEnvelope.create(
+            # Same historical ID with a different payload/envelope hash.
+            event_id=original_event_id,
+            source_service="gateway-publish-proxy",
+            source_generation="source-g1",
+            source_seq=1,
+            observed_at=datetime(2026, 8, 5, tzinfo=timezone.utc),
+            payload={"vt_symbol": "rb2610.SHFE", "bid_price": 999, "ask_price": 102},
+        )
+    )
+    with pytest.raises(DurableStateError, match="deterministic source event identity"):
+        worker.process_one()
+
+
+def test_market_projection_heartbeats_at_most_once_per_second(tmp_path, monkeypatch):
+    worker = MarketDataWorker(tmp_path / "market", generation="g1", writer=Writer())
+    published = []
+    monkeypatch.setattr(worker, "publish_projection", lambda: published.append(True))
+    clock = [100.0]
+    monkeypatch.setattr(market_data_module.monotonic_time, "monotonic", lambda: clock[0])
+    assert worker._publish_projection_if_due(force=True)
+    assert not worker._publish_projection_if_due()
+    clock[0] += 0.99
+    assert not worker._publish_projection_if_due()
+    clock[0] += 0.01
+    assert worker._publish_projection_if_due()
+    assert len(published) == 2
+
+
+def test_market_long_queue_and_replay_keep_projection_heartbeat(tmp_path, monkeypatch):
+    clock = [0.0]
+    monkeypatch.setattr(market_data_module.monotonic_time, "monotonic", lambda: clock[0])
+
+    class SlowWriter(Writer):
+        def write_verified_tick(self, tick):
+            super().write_verified_tick(tick)
+            clock[0] += 1.1
+
+    worker = MarketDataWorker(tmp_path / "market", generation="g1", writer=SlowWriter())
+    worker.recover()
+    published = []
+    monkeypatch.setattr(worker, "publish_projection", lambda: published.append(clock[0]))
+    for sequence in range(1, 4):
+        worker.accept(envelope(f"queue-{sequence}", sequence, last_price=sequence))
+    assert worker.process_queue() == 3
+    assert [tick.ingest_seq for tick in worker.writer.events] == [1, 2, 3]
+    assert len(published) == 3
+
+    failed = MarketDataWorker(tmp_path / "replay", generation="g1", writer=Writer(True))
+    failed.recover()
+    for sequence in range(1, 4):
+        failed.accept(envelope(f"replay-{sequence}", sequence, last_price=sequence))
+        with pytest.raises(OSError):
+            failed.process_one()
+    replayed = MarketDataWorker(
+        tmp_path / "replay", generation="g1", writer=SlowWriter()
+    )
+    replayed.recover()
+    replay_published = []
+    monkeypatch.setattr(
+        replayed, "publish_projection", lambda: replay_published.append(clock[0])
+    )
+    assert replayed.replay_pending() == 3
+    assert [tick.ingest_seq for tick in replayed.writer.events] == [1, 2, 3]
+    assert len(replay_published) == 3
 
 
 def test_market_run_recovers_and_replays_before_readiness(tmp_path):
@@ -1297,6 +1835,28 @@ def test_typed_producer_projections_make_monitor_ready_and_fail_closed_when_tamp
     payload["payload"]["health"]["status"] = "unhealthy"
     path.write_text(json.dumps(payload), encoding="utf-8")
     assert not monitor.readiness().ready
+
+
+def test_market_projection_health_exposes_running_queue_and_counter_metrics(tmp_path):
+    projection_dir = tmp_path / "projections" / "market-data-worker"
+    worker = MarketDataWorker(
+        MarketDataConfig(tmp_path / "market", "g1", projection_dir=projection_dir),
+        writer=Writer(),
+    )
+    worker.recover()
+    worker.accept(envelope("one", 1))
+    worker.accept(envelope("two", 2, last_price=102))
+    worker.process_one()
+    worker.publish_projection()
+
+    projection = json.loads(
+        (projection_dir / "market-data-worker.json").read_text(encoding="utf-8")
+    )
+    metrics = projection["payload"]["health"]["dependencies"]["worker_metrics"]
+    assert metrics["queue_depth"] == 1
+    assert metrics["counters"]["ingress_accepted"] == 2
+    assert metrics["counters"]["processed_total"] == 1
+    assert metrics["checkpoint_or_watermark"] == 1
 
 
 def test_queue_overflow_is_visible():
