@@ -29,7 +29,9 @@ from shared.commodity_execution import (
     TARGET_PLAN_SCHEMA_VERSION,
     CommodityExecutionContractError,
     VerifiedCustodyReceipt,
+    before_position_projection_hash,
     build_target_plan,
+    canonical_before_position_projection,
     sha256_json,
     target_position_projection_hash,
 )
@@ -74,6 +76,7 @@ def target_position_rows(**overrides: object) -> dict:
         "exchange": "SHFE",
         "direction": "LONG",
         "volume": 1,
+        "yd_volume": 0,
         "frozen": 0,
         "price": 1.0,
         "pnl": 0.0,
@@ -91,6 +94,19 @@ def target_position_hash(
     environment: str = "SIMNOW",
 ) -> str:
     return target_position_projection_hash(
+        target_position_rows() if positions is None else positions,
+        account_scope=account_scope,
+        environment=environment,
+    )
+
+
+def before_position_hash(
+    positions: dict | None = None,
+    *,
+    account_scope: str = SCOPE,
+    environment: str = "SIMNOW",
+) -> str:
+    return before_position_projection_hash(
         target_position_rows() if positions is None else positions,
         account_scope=account_scope,
         environment=environment,
@@ -119,7 +135,7 @@ def plan(
         scope=source["scope"],
         expires_at=source["expires_at"],
         phase="OPEN",
-        expected_before_position_hash=expected_before or target_position_hash({}),
+        expected_before_position_hash=expected_before or before_position_hash({}),
         expected_after_position_hash=expected_after or target_position_hash(),
         orders=[
             {
@@ -381,6 +397,27 @@ def test_target_plan_rejects_non_limit_overbound_nan_unknown_and_mixed_phase(
         TargetPlan.from_mapping(raw)
 
 
+@pytest.mark.parametrize(
+    ("exchange", "offset"),
+    (("CFFEX", "CLOSETODAY"), ("DCE", "CLOSEYESTERDAY")),
+)
+def test_target_plan_rejects_close_today_yesterday_outside_shfe_ine(
+    exchange: str,
+    offset: str,
+) -> None:
+    raw = plan()
+    raw["phase"] = "CLOSE"
+    raw["orders"][0].update({"exchange": exchange, "offset": offset})
+    raw["order_set_sha256"] = sha256_json(raw["orders"])
+    raw["plan_hash"] = sha256_json(
+        {key: value for key, value in raw.items() if key != "plan_hash"}
+    )
+    from shared.commodity_execution import TargetPlan
+
+    with pytest.raises(CommodityExecutionContractError, match="strict SIMNOW"):
+        TargetPlan.from_mapping(raw)
+
+
 def test_start_requires_installed_receipt_bound_plan() -> None:
     service, core, repo, gateway, _ = runtime(execute=True)
     target = plan()
@@ -473,21 +510,22 @@ def test_internal_order_uses_core_fence_and_local_gate() -> None:
     ("expected_before", "actual_positions", "should_start"),
     [
         (
-            target_position_hash(),
+            before_position_hash(),
             target_position_rows(frozen=9, price=999.5, pnl=-42.25, commission=123.45),
             True,
         ),
-        (target_position_hash(), target_position_rows(volume=2), False),
-        (target_position_hash(), target_position_rows(direction="SHORT"), False),
-        (target_position_hash(), target_position_rows(symbol="CU"), False),
-        (target_position_hash(), target_position_rows(exchange="DCE"), False),
+        (before_position_hash(), target_position_rows(volume=2), False),
+        (before_position_hash(), target_position_rows(direction="SHORT"), False),
+        (before_position_hash(), target_position_rows(symbol="CU"), False),
+        (before_position_hash(), target_position_rows(exchange="DCE"), False),
+        (before_position_hash(), target_position_rows(yd_volume=1), False),
         (
-            target_position_hash(account_scope="account:foreign"),
+            before_position_hash(account_scope="account:foreign"),
             target_position_rows(),
             False,
         ),
         (
-            target_position_hash(environment="foreign"),
+            before_position_hash(environment="foreign"),
             target_position_rows(),
             False,
         ),
@@ -992,7 +1030,7 @@ def test_reconcile_final_target_projection_completes_or_halts(
 ) -> None:
     service, core, repo, gateway, _ = runtime(execute=True)
     target = plan(expected_after=expected_after)
-    assert target["expected_before_position_hash"] == target_position_hash({})
+    assert target["expected_before_position_hash"] == before_position_hash({})
     reconcile_enable_start(service, core, repo, target)
     intent_id = next(iter(repo.snapshot()["send_intents"]))
 
@@ -1084,6 +1122,37 @@ def test_target_position_projection_normalizes_aggregates_and_rejects_bad_rows()
             target_position_hash(invalid)
     with pytest.raises(CommodityExecutionContractError):
         target_position_hash(account_scope="bad")
+
+
+def test_before_position_projection_binds_and_requires_shfe_ine_yd_volume() -> None:
+    today = target_position_rows(yd_volume=0)
+    yesterday = target_position_rows(yd_volume=1)
+
+    assert before_position_hash(today) != before_position_hash(yesterday)
+    missing = target_position_rows()
+    del next(iter(missing.values()))["yd_volume"]
+    with pytest.raises(CommodityExecutionContractError, match="yd_volume"):
+        before_position_hash(missing)
+
+
+def test_before_position_projection_aggregates_shfe_yd_volume_once_per_row() -> None:
+    first = target_position_rows(vt_positionid="first-row", yd_volume=1)
+    second = target_position_rows(vt_positionid="second-row", yd_volume=0)
+
+    projection = canonical_before_position_projection(
+        first | second, account_scope=SCOPE, environment="SIMNOW"
+    )
+
+    assert projection["positions"] == [
+        {
+            "gateway_name": "GATEWAY-0001",
+            "symbol": "RB",
+            "exchange": "SHFE",
+            "direction": "LONG",
+            "volume": 2,
+            "yd_volume": 1,
+        }
+    ]
 
 
 def test_durable_final_archive_accepts_legacy_readonly_and_requires_new_full_hash(

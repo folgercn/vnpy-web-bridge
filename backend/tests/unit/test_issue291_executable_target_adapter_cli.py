@@ -84,9 +84,7 @@ FALSE_AUTHORITY_FIELDS = {
 }
 
 
-def _signed(
-    artifact: dict, *, private: Ed25519PrivateKey, request_id: str
-) -> dict:
+def _signed(artifact: dict, *, private: Ed25519PrivateKey, request_id: str) -> dict:
     request = build_signing_request(
         artifact,
         domain="runtime_authorization",
@@ -108,7 +106,9 @@ def _signed(
     }
     return build_signed_artifact(
         request,
-        signature_base64=base64.b64encode(private.sign(signing_bytes(unsigned))).decode(),
+        signature_base64=base64.b64encode(
+            private.sign(signing_bytes(unsigned))
+        ).decode(),
     )
 
 
@@ -172,7 +172,9 @@ def _map_acceptance(map_result) -> tuple[dict, dict]:
     return (
         build_signed_artifact(
             request,
-            signature_base64=base64.b64encode(private.sign(signing_bytes(unsigned))).decode(),
+            signature_base64=base64.b64encode(
+                private.sign(signing_bytes(unsigned))
+            ).decode(),
         ),
         keyring,
     )
@@ -357,6 +359,7 @@ def test_cli_reduce_only_close_writes_one_opposite_close_target(tmp_path: Path) 
                 "exchange": "SHFE",
                 "direction": "SHORT",
                 "volume": 1,
+                "yd_volume": 0,
             }
         }
     )
@@ -400,7 +403,7 @@ def test_cli_reduce_only_close_writes_one_opposite_close_target(tmp_path: Path) 
         "type": "LIMIT",
         "volume": 1,
         "price": 3500.0,
-        "offset": "CLOSE",
+        "offset": "CLOSETODAY",
         "reference": order["reference"],
         "gateway_name": "CTP",
     }
@@ -566,41 +569,49 @@ def test_real_producer_cli_signing_custody_and_final_preview_are_mutation_free(
                 "volume": abs(target_quantity) + 1,
             }
         }
+    if exchange in {"INE", "SHFE"}:
+        next(iter(position.values()))["yd_volume"] = 0
     map_path, c_fast_path = tmp_path / "map.json", tmp_path / "cfast.json"
     receipt_path = tmp_path / "authority-receipt.json"
     authority_artifact_path = tmp_path / "authority-artifact.json"
     peek_path = tmp_path / "peek.json"
-    reconciliation_path, output_path = tmp_path / "reconcile.json", tmp_path / "target.json"
+    reconciliation_path, output_path = (
+        tmp_path / "reconcile.json",
+        tmp_path / "target.json",
+    )
     _write(map_path, map_result.raw)
     _write(c_fast_path, c_fast_result.raw)
     _write(receipt_path, authority_receipt)
     _write(authority_artifact_path, authority_artifact)
     _write(peek_path, _peek(position))
     _write(reconciliation_path, {"state": "RECONCILED", "unknown_outcomes": 0})
-    assert adapter_main(
-        [
-            "--map-candidate",
-            str(map_path),
-            "--c-fast-candidate",
-            str(c_fast_path),
-            "--authority-receipt",
-            str(receipt_path),
-            "--authority-artifact",
-            str(authority_artifact_path),
-            "--peek-current-facts",
-            str(peek_path),
-            "--reconciliation-state",
-            str(reconciliation_path),
-            "--product",
-            "rb",
-            "--account-scope",
-            SCOPE,
-            "--output",
-            str(output_path),
-            "--generated-at",
-            "2030-01-01T00:00:00Z",
-        ]
-    ) == 0
+    assert (
+        adapter_main(
+            [
+                "--map-candidate",
+                str(map_path),
+                "--c-fast-candidate",
+                str(c_fast_path),
+                "--authority-receipt",
+                str(receipt_path),
+                "--authority-artifact",
+                str(authority_artifact_path),
+                "--peek-current-facts",
+                str(peek_path),
+                "--reconciliation-state",
+                str(reconciliation_path),
+                "--product",
+                "rb",
+                "--account-scope",
+                SCOPE,
+                "--output",
+                str(output_path),
+                "--generated-at",
+                "2030-01-01T00:00:00Z",
+            ]
+        )
+        == 0
+    )
     envelope = json.loads(output_path.read_text(encoding="utf-8"))
     target_signed = _signed(envelope, private=private, request_id="target-plan-request")
     with ArtifactCustody(
