@@ -50,6 +50,7 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "backend/tests/unit"))
 
 from commodity_c_fast_executable_target_adapter import (  # noqa: E402
+    _reduce_only_peek_current_facts_to_snapshot,
     build_parser,
 )
 from commodity_c_fast_executable_target_adapter import (  # noqa: E402
@@ -245,36 +246,35 @@ def test_peek_default_mode_rejects_terminal_execution_order() -> None:
         peek_current_facts_to_snapshot(facts, account_scope=SCOPE)
 
 
-def test_peek_reduce_only_accepts_alltraded_execution_readback_only() -> None:
+def test_public_peek_cannot_enable_terminal_execution_order_bypass() -> None:
     facts = _peek({})
     facts["execution"]["orders"] = {
         "CTP.terminal": {"status": "ALLTRADED", "symbol": "ru2609"}
     }
 
-    peek = peek_current_facts_to_snapshot(
-        facts,
-        account_scope=SCOPE,
-        allow_terminal_execution_orders=True,
-    )
-
-    assert peek.snapshot.orders == {}
-    assert peek.snapshot.active_order_count == 0
+    with pytest.raises(TypeError, match="allow_terminal_execution_orders"):
+        peek_current_facts_to_snapshot(
+            facts,
+            account_scope=SCOPE,
+            allow_terminal_execution_orders=True,
+        )
 
 
 @pytest.mark.parametrize(
     "status",
     ("SUBMITTING", "SUBMITTED", "NOTTRADED", "PARTTRADED", "UNKNOWN", None),
 )
-def test_peek_reduce_only_rejects_nonterminal_execution_order(status: str | None) -> None:
+def test_reduce_only_cli_preprocessor_rejects_nonterminal_execution_order(
+    status: str | None,
+) -> None:
     facts = _peek({})
     row = {} if status is None else {"status": status}
     facts["execution"]["orders"] = {"CTP.nonterminal": row}
 
     with pytest.raises(ExecutableTargetAdapterError, match="not explicitly terminal"):
-        peek_current_facts_to_snapshot(
+        _reduce_only_peek_current_facts_to_snapshot(
             facts,
             account_scope=SCOPE,
-            allow_terminal_execution_orders=True,
         )
 
 
