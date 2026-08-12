@@ -14,6 +14,7 @@ import math
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from datetime import datetime
 from typing import Any
 
@@ -83,8 +84,6 @@ _AUTHORITY_LIKE_FIELDS = (
     "signing_requested",
     "custody_published",
 )
-
-
 @dataclass(frozen=True, slots=True)
 class ExecutableTargetPlanHandoff:
     """A plan and the immutable envelope material for existing offline signing.
@@ -283,6 +282,29 @@ def _selected_target(
     return row, exchange, symbol, normalized_price
 
 
+def _reduce_only_limit_price(value: Any, *, price_tick: Any) -> float:
+    """Validate one operator-supplied close price against signed C_FAST tick size."""
+
+    def decimal(value: Any, label: str) -> Decimal:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ExecutableTargetAdapterError(f"{label} is invalid")
+        try:
+            parsed = Decimal(str(value))
+        except (InvalidOperation, ValueError) as exc:
+            raise ExecutableTargetAdapterError(f"{label} is invalid") from exc
+        if not parsed.is_finite() or parsed <= 0:
+            raise ExecutableTargetAdapterError(f"{label} is invalid")
+        return parsed
+
+    limit_price = decimal(value, "reduce-only close limit price")
+    tick = decimal(price_tick, "C_FAST price tick")
+    if limit_price % tick != 0:
+        raise ExecutableTargetAdapterError(
+            "reduce-only close limit price is not aligned to C_FAST price tick"
+        )
+    return float(limit_price)
+
+
 def _validate_snapshot(
     snapshot: GatewaySnapshot,
     *,
@@ -320,12 +342,15 @@ def _validate_snapshot(
 
 
 def peek_current_facts_to_snapshot(
-    value: Mapping[str, Any], *, account_scope: str
+    value: Mapping[str, Any],
+    *,
+    account_scope: str,
 ) -> PeekCurrentFacts:
     """Convert one exact ``peek_current_facts_v1`` result without any RPC call.
 
     The final Windows bridge reports ``simnow`` while TargetPlan v1 and
     Execution use ``SIMNOW``.  This is the only deliberate normalization.
+    Any active or historical Windows execution order blocks adaptation.
     """
 
     facts = _mapping(value, "peek current facts")
@@ -369,7 +394,9 @@ def peek_current_facts_to_snapshot(
     execution = facts["execution"]
     if not isinstance(execution, Mapping) or set(execution) != {"orders"} or not isinstance(execution["orders"], Mapping):
         raise ExecutableTargetAdapterError("peek execution facts are invalid")
-    if facts["active_orders"] or execution["orders"]:
+    if facts["active_orders"]:
+        raise ExecutableTargetAdapterError("peek active or execution orders block adaptation")
+    if execution["orders"]:
         raise ExecutableTargetAdapterError("peek active or execution orders block adaptation")
     admission = facts["admission"]
     admission_fields = {
@@ -522,6 +549,25 @@ def _after_positions(
     return result
 
 
+def _require_single_reduce_only_position(
+    positions: Mapping[str, Any],
+    matching: list[tuple[str, dict[str, Any]]],
+    *,
+    long_volume: int,
+    short_volume: int,
+) -> None:
+    """Prove that a close can only remove the one peeked C_FAST position."""
+
+    if len(positions) != 1 or len(matching) != 1:
+        raise ExecutableTargetAdapterError(
+            "reduce-only close requires exactly one C_FAST contract position"
+        )
+    if (long_volume, short_volume) not in {(1, 0), (0, 1)}:
+        raise ExecutableTargetAdapterError(
+            "reduce-only close requires exactly one one-lot position"
+        )
+
+
 def build_executable_target_plan(
     *,
     map_candidate: Mapping[str, Any],
@@ -533,15 +579,20 @@ def build_executable_target_plan(
     account_scope: str,
     environment: str,
     gateway_name: str,
+    reduce_only_close: bool = False,
+    reduce_only_close_limit_price: float | None = None,
     now: datetime | None = None,
 ) -> ExecutableTargetPlanHandoff:
     """Convert one explicit MAP/C_FAST target delta into one TargetPlan v1.
 
-    It only permits an exact one-lot ``target - current`` delta.  A zero or
-    multi-lot delta, active order, unknown outcome, scope/gateway mismatch, or
-    malformed current fact fails closed.  The returned plan must still follow
-    the existing offline signing, custody install, preview, reconcile, enable,
-    fencing and local opt-in flow before Execution can submit it.
+    It only permits an exact one-lot ``target - current`` delta.  The explicit
+    reduce-only path is narrower still: it accepts the existing C_FAST -1
+    target only as lineage, replaces its effective target with zero, and can
+    close exactly one current position.  A zero or multi-lot delta, active
+    order, unknown outcome, scope/gateway mismatch, or malformed current fact
+    fails closed.  The returned plan must still follow the existing offline
+    signing, custody install, preview, reconcile, enable, fencing and local
+    opt-in flow before Execution can submit it.
     """
 
     normalized_scope = _require_text(account_scope, "account scope")
@@ -549,6 +600,10 @@ def build_executable_target_plan(
     normalized_gateway = _require_text(gateway_name, "gateway name")
     if normalized_environment != "SIMNOW":
         raise ExecutableTargetAdapterError("only SIMNOW target plans are supported")
+    if not reduce_only_close and reduce_only_close_limit_price is not None:
+        raise ExecutableTargetAdapterError(
+            "reduce-only close limit price requires reduce-only close mode"
+        )
     normalized_product = _require_text(product, "product").lower()
     map_hash, c_fast_hash = _validate_lineage(map_candidate, c_fast_candidate)
     candidate = _mapping(c_fast_candidate, "C_FAST candidate")
@@ -590,6 +645,23 @@ def build_executable_target_plan(
         gateway_name=normalized_gateway,
     )
     target_quantity = int(_target["target_quantity"])
+    order_price = price
+    if reduce_only_close:
+        if target_quantity != -1:
+            raise ExecutableTargetAdapterError(
+                "reduce-only close requires the existing C_FAST target to be -1"
+            )
+        _require_single_reduce_only_position(
+            positions,
+            matching,
+            long_volume=long_volume,
+            short_volume=short_volume,
+        )
+        order_price = _reduce_only_limit_price(
+            reduce_only_close_limit_price,
+            price_tick=_target.get("price_tick"),
+        )
+        target_quantity = 0
     current_quantity = long_volume - short_volume
     delta = target_quantity - current_quantity
     if delta == 0:
@@ -602,6 +674,8 @@ def build_executable_target_plan(
         if (delta > 0 and short_volume > 0) or (delta < 0 and long_volume > 0)
         else "OPEN"
     )
+    if reduce_only_close and offset != "CLOSE":  # defensive: never open here
+        raise ExecutableTargetAdapterError("reduce-only close would not close")
     expected_before = sha256_json(positions)
     after_positions = _after_positions(
         positions,
@@ -649,7 +723,7 @@ def build_executable_target_plan(
                 "direction": direction,
                 "type": "LIMIT",
                 "volume": 1,
-                "price": price,
+                "price": order_price,
                 "offset": offset,
                 # The Windows typed fence accepts at most 64 characters.  The
                 # full SHA-256 identity is already deterministic and binds the

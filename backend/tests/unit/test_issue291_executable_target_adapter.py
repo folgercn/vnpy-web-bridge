@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import math
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
@@ -51,6 +52,8 @@ def candidates(
     target_quantity: int = 1,
     product: str = "rb",
     exact_contract: str = "SHFE.rb2601",
+    reference_open_price: float = 3500.0,
+    price_tick: float = 5.0,
 ) -> tuple[dict, dict]:
     map_candidate = {
         "schema_version": "commodity_map_signal_candidate_v1",
@@ -84,7 +87,8 @@ def candidates(
                 "product": product,
                 "exact_contract": exact_contract,
                 "target_quantity": target_quantity,
-                "reference_open_price": 3500.0,
+                "reference_open_price": reference_open_price,
+                "price_tick": price_tick,
             }
         ],
         **FALSE_FLAGS,
@@ -175,11 +179,17 @@ def adapt(
     reconciliation: dict | None = None,
     product: str = "rb",
     exact_contract: str = "SHFE.rb2601",
+    reduce_only_close: bool = False,
+    reduce_only_close_limit_price: float | None = None,
+    reference_open_price: float = 3500.0,
+    price_tick: float = 5.0,
 ) -> object:
     map_candidate, c_fast_candidate = candidates(
         target_quantity=target_quantity,
         product=product,
         exact_contract=exact_contract,
+        reference_open_price=reference_open_price,
+        price_tick=price_tick,
     )
     return build_executable_target_plan(
         map_candidate=map_candidate,
@@ -191,6 +201,8 @@ def adapt(
         account_scope=SCOPE,
         environment="SIMNOW",
         gateway_name=GATEWAY,
+        reduce_only_close=reduce_only_close,
+        reduce_only_close_limit_price=reduce_only_close_limit_price,
         now=datetime(2030, 1, 1, tzinfo=timezone.utc),
     )
 
@@ -292,6 +304,170 @@ def test_adapter_derives_direction_and_open_close_from_target_minus_current(
     )
     assert handoff.target_plan["orders"][0]["direction"] == direction
     assert handoff.target_plan["orders"][0]["offset"] == offset
+
+
+@pytest.mark.parametrize(
+    ("current_positions", "direction"),
+    [
+        (positions(short=1), "LONG"),
+        (positions(long=1), "SHORT"),
+    ],
+)
+def test_reduce_only_close_derives_zero_target_and_opposite_close(
+    current_positions: dict, direction: str
+) -> None:
+    handoff = adapt(
+        target_quantity=-1,
+        current=snapshot(current_positions),
+        reduce_only_close=True,
+        reduce_only_close_limit_price=3500.0,
+    )
+
+    order = handoff.target_plan["orders"][0]
+    assert order["direction"] == direction
+    assert order["offset"] == "CLOSE"
+    assert order["volume"] == 1
+    assert handoff.target_plan["phase"] == "CLOSE"
+    assert handoff.target_plan["production_allowed"] is False
+    assert handoff.target_plan["live_trading_authorized"] is False
+    assert handoff.target_plan["countable_forward"] is False
+    assert handoff.target_plan["expected_after_position_hash"] == (
+        target_position_projection_hash(
+            {}, account_scope=SCOPE, environment="SIMNOW"
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("current_positions", "product", "exact_contract", "message"),
+    [
+        (positions(), "rb", "SHFE.rb2601", "exactly one C_FAST contract position"),
+        (positions(short=2), "rb", "SHFE.rb2601", "one-lot"),
+        (
+            positions(long=1, short=1),
+            "rb",
+            "SHFE.rb2601",
+            "exactly one C_FAST contract position",
+        ),
+        (
+            {
+                "RB2601.SHFE.LONG": {
+                    "gateway_name": GATEWAY,
+                    "symbol": "RB2601",
+                    "exchange": "SHFE",
+                    "direction": "LONG",
+                    "volume": 1,
+                }
+            },
+            "ru",
+            "SHFE.ru2609",
+            "exactly one C_FAST contract position",
+        ),
+    ],
+)
+def test_reduce_only_close_rejects_zero_multi_direction_and_symbol_mismatch(
+    current_positions: dict, product: str, exact_contract: str, message: str
+) -> None:
+    with pytest.raises(ExecutableTargetAdapterError, match=message):
+        adapt(
+            target_quantity=-1,
+            current=snapshot(current_positions),
+            product=product,
+            exact_contract=exact_contract,
+            reduce_only_close=True,
+            reduce_only_close_limit_price=3500.0,
+        )
+
+
+@pytest.mark.parametrize(
+    ("current", "reconciliation", "message"),
+    [
+        (snapshot(positions(short=1), active_orders={"active-1": {}}), None, "active orders"),
+        (snapshot(positions(short=1)), {"state": "RECONCILED", "unknown_outcomes": 1}, "unknown"),
+        (snapshot(positions(short=1), scope="account:other"), None, "scope/freshness"),
+    ],
+)
+def test_reduce_only_close_rejects_active_unknown_and_scope_mismatch(
+    current: GatewaySnapshot, reconciliation: dict | None, message: str
+) -> None:
+    with pytest.raises(ExecutableTargetAdapterError, match=message):
+        adapt(
+            target_quantity=-1,
+            current=current,
+            reconciliation=reconciliation,
+            reduce_only_close=True,
+            reduce_only_close_limit_price=3500.0,
+        )
+
+
+def test_reduce_only_close_requires_existing_cfast_short_target() -> None:
+    with pytest.raises(ExecutableTargetAdapterError, match="C_FAST target to be -1"):
+        adapt(
+            target_quantity=0,
+            current=snapshot(positions(short=1)),
+            reduce_only_close=True,
+            reduce_only_close_limit_price=3500.0,
+        )
+
+
+def test_reduce_only_close_requires_explicit_aligned_operator_limit_price() -> None:
+    with pytest.raises(ExecutableTargetAdapterError, match="limit price is invalid"):
+        adapt(
+            target_quantity=-1,
+            current=snapshot(positions(short=1)),
+            reduce_only_close=True,
+        )
+
+    current = snapshot(
+        {
+            "RU2609.SHFE.SHORT": {
+                "gateway_name": GATEWAY,
+                "symbol": "RU2609",
+                "exchange": "SHFE",
+                "direction": "SHORT",
+                "volume": 1,
+            }
+        }
+    )
+    at_17100 = adapt(
+        target_quantity=-1,
+        current=current,
+        product="ru",
+        exact_contract="SHFE.ru2609",
+        reference_open_price=16950.0,
+        price_tick=5.0,
+        reduce_only_close=True,
+        reduce_only_close_limit_price=17100.0,
+    )
+    at_17105 = adapt(
+        target_quantity=-1,
+        current=current,
+        product="ru",
+        exact_contract="SHFE.ru2609",
+        reference_open_price=16950.0,
+        price_tick=5.0,
+        reduce_only_close=True,
+        reduce_only_close_limit_price=17105.0,
+    )
+    assert at_17100.target_plan["orders"][0]["price"] == 17100.0
+    assert at_17100.target_plan["orders"][0]["price"] != 16950.0
+    assert at_17100.target_plan["plan_hash"] != at_17105.target_plan["plan_hash"]
+
+
+@pytest.mark.parametrize("limit_price", (17102.0, math.nan, 0.0, -5.0))
+def test_reduce_only_close_rejects_invalid_operator_limit_price(limit_price: float) -> None:
+    with pytest.raises(ExecutableTargetAdapterError, match="limit price"):
+        adapt(
+            target_quantity=-1,
+            current=snapshot(positions(short=1)),
+            reduce_only_close=True,
+            reduce_only_close_limit_price=limit_price,
+        )
+
+
+def test_normal_mode_rejects_reduce_only_limit_price() -> None:
+    with pytest.raises(ExecutableTargetAdapterError, match="requires reduce-only"):
+        adapt(reduce_only_close_limit_price=3500.0)
 
 
 @pytest.mark.parametrize(

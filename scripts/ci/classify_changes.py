@@ -532,6 +532,7 @@ PHASE_A_RULES = (
         exact=(
             "deployments/phase-a/Containerfile.execution-orchestrator",
             "backend/app/execution_orchestrator.py",
+            "scripts/commodity_c_fast_executable_target_adapter.py",
         ),
         prefix=(
             "backend/app/execution/",

@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,11 @@ from c_fast_producer.producer import (  # noqa: E402
 )
 
 from shared.trust_contracts.v1 import canonical_json_line  # noqa: E402
+
+
+_TERMINAL_EXECUTION_ORDER_STATUSES = frozenset(
+    {"ALLTRADED", "CANCELLED", "CANCELED", "REJECTED"}
+)
 
 
 def _object_from_file(path: Path, label: str) -> dict[str, Any]:
@@ -58,6 +64,41 @@ def _generated_at(value: str | None) -> str:
     return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _reduce_only_peek_current_facts_to_snapshot(
+    value: Mapping[str, Any], *, account_scope: str
+):
+    """Discard verified terminal readback only for this reduce-only CLI path."""
+
+    if not isinstance(value, Mapping):
+        raise ExecutableTargetAdapterError("peek current facts are invalid")
+    active_orders = value.get("active_orders")
+    if not isinstance(active_orders, Mapping) or active_orders:
+        raise ExecutableTargetAdapterError("peek active or execution orders block adaptation")
+    execution = value.get("execution")
+    if (
+        not isinstance(execution, Mapping)
+        or set(execution) != {"orders"}
+        or not isinstance(execution["orders"], Mapping)
+    ):
+        raise ExecutableTargetAdapterError("peek execution facts are invalid")
+    for order_id, row in execution["orders"].items():
+        if not isinstance(order_id, str) or not isinstance(row, Mapping):
+            raise ExecutableTargetAdapterError("peek execution order is invalid")
+        status = row.get("status")
+        normalized_status = (
+            status.upper().replace("_", "").replace(" ", "")
+            if isinstance(status, str)
+            else ""
+        )
+        if normalized_status not in _TERMINAL_EXECUTION_ORDER_STATUSES:
+            raise ExecutableTargetAdapterError(
+                "peek execution order is not explicitly terminal"
+            )
+    sanitized = dict(value)
+    sanitized["execution"] = {"orders": {}}
+    return peek_current_facts_to_snapshot(sanitized, account_scope=account_scope)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="offline MAP/C_FAST to unsigned SIMNOW TargetPlan handoff"
@@ -70,6 +111,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reconciliation-state", required=True, type=Path)
     parser.add_argument("--product", required=True)
     parser.add_argument("--account-scope", required=True)
+    parser.add_argument(
+        "--reduce-only-close",
+        action="store_true",
+        help="derive target=0 only to close one current C_FAST position",
+    )
+    parser.add_argument(
+        "--reduce-only-close-limit-price",
+        type=float,
+        help="operator-supplied fresh-tick limit price for reduce-only close",
+    )
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--generated-at")
     return parser
@@ -90,8 +141,14 @@ def main(argv: list[str] | None = None) -> int:
         )
         if set(reconciliation) != {"state", "unknown_outcomes"}:
             raise ExecutableTargetAdapterError("reconciliation state fields are invalid")
-        peek = peek_current_facts_to_snapshot(
-            peek_facts, account_scope=args.account_scope
+        peek = (
+            _reduce_only_peek_current_facts_to_snapshot(
+                peek_facts, account_scope=args.account_scope
+            )
+            if args.reduce_only_close
+            else peek_current_facts_to_snapshot(
+                peek_facts, account_scope=args.account_scope
+            )
         )
         handoff = build_executable_target_plan(
             map_candidate=map_candidate,
@@ -103,6 +160,8 @@ def main(argv: list[str] | None = None) -> int:
             account_scope=args.account_scope,
             environment="SIMNOW",
             gateway_name=peek.gateway_name,
+            reduce_only_close=args.reduce_only_close,
+            reduce_only_close_limit_price=args.reduce_only_close_limit_price,
         )
         envelope = handoff.artifact_envelope(
             generated_at=_generated_at(args.generated_at),
