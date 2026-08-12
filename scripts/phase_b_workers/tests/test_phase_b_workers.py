@@ -1018,6 +1018,126 @@ def test_read_only_tick_stream_never_mutates_producer_artifacts(tmp_path):
     assert after == before
 
 
+def test_default_tick_stream_scans_one_locked_producer_frontier(tmp_path, monkeypatch):
+    stream_dir = tmp_path / "stream"
+    producer = DurableVerifiedTickStream(stream_dir, generation="g1")
+    producer.initialize()
+    first = VerifiedTick.from_raw(
+        {"source_event_id": "first", "vt_symbol": "rb2610.SHFE"},
+        stream_generation="g1",
+        ingest_seq=1,
+        source="gateway-market-reader",
+    )
+    second = VerifiedTick.from_raw(
+        {"source_event_id": "second", "vt_symbol": "rb2610.SHFE"},
+        stream_generation="g1",
+        ingest_seq=2,
+        source="gateway-market-reader",
+    )
+    assert producer.append(first)
+
+    scan_started = threading.Event()
+    release_scan = threading.Event()
+    append_started = threading.Event()
+    append_finished = threading.Event()
+    original_records = AppendOnlyJsonl.records
+
+    def pause_stream_scan(journal):
+        if (
+            journal.path == producer.journal.path
+            and threading.current_thread().name == "stream-loader"
+        ):
+            scan_started.set()
+            assert release_scan.wait(timeout=5)
+        yield from original_records(journal)
+
+    monkeypatch.setattr(AppendOnlyJsonl, "records", pause_stream_scan)
+    snapshots = []
+    failures = []
+
+    def load_stream():
+        try:
+            consumer = DurableVerifiedTickStream(stream_dir, generation="g1")
+            snapshots.append([tick.ingest_seq for tick in consumer.iter_from()])
+        except (AssertionError, DurableStateError, OSError) as exc:
+            failures.append(exc)
+
+    def append_while_scanning():
+        try:
+            append_started.set()
+            assert producer.append(second)
+        except (AssertionError, DurableStateError, OSError) as exc:
+            failures.append(exc)
+        finally:
+            append_finished.set()
+
+    reader = threading.Thread(target=load_stream, name="stream-loader")
+    reader.start()
+    assert scan_started.wait(timeout=5)
+    writer = threading.Thread(target=append_while_scanning)
+    writer.start()
+    assert append_started.wait(timeout=5)
+    assert not append_finished.wait(timeout=0.2)
+    release_scan.set()
+    reader.join(timeout=5)
+    writer.join(timeout=5)
+
+    assert not reader.is_alive() and not writer.is_alive()
+    assert not failures
+    assert snapshots == [[1]]
+    assert [tick.ingest_seq for tick in producer.iter_from()] == [1, 2]
+
+
+def test_read_only_tick_stream_does_not_cache_ahead_watermark_failure(tmp_path):
+    stream_dir = tmp_path / "stream"
+    producer = DurableVerifiedTickStream(stream_dir, generation="g1")
+    producer.initialize()
+    tick = VerifiedTick.from_raw(
+        {"source_event_id": "tick", "vt_symbol": "rb2610.SHFE"},
+        stream_generation="g1",
+        ingest_seq=1,
+        source="gateway-market-reader",
+    )
+    assert producer.append(tick)
+    consumer = DurableVerifiedTickStream(stream_dir, generation="g1", read_only=True)
+    producer.watermark.write(
+        {
+            "stream_generation": "g1",
+            "last_ingest_seq": 2,
+            "last_event_hash": tick.event_hash,
+        }
+    )
+    consumer._index = None
+
+    for _ in range(2):
+        with pytest.raises(DurableCorruptionError, match="ahead of journal"):
+            consumer._load_index()
+        assert consumer._index is None
+
+
+def test_tick_stream_preserves_producer_repair_and_read_only_behind_semantics(tmp_path):
+    stream_dir = tmp_path / "stream"
+    producer = DurableVerifiedTickStream(stream_dir, generation="g1")
+    producer.initialize()
+    tick = VerifiedTick.from_raw(
+        {"source_event_id": "tick", "vt_symbol": "rb2610.SHFE"},
+        stream_generation="g1",
+        ingest_seq=1,
+        source="gateway-market-reader",
+    )
+    assert producer.append(tick)
+    producer.watermark.write(
+        {"stream_generation": "g1", "last_ingest_seq": 0, "last_event_hash": ""}
+    )
+
+    with pytest.raises(DurableCorruptionError, match="watermark is behind"):
+        DurableVerifiedTickStream(stream_dir, generation="g1", read_only=True)
+
+    restarted = DurableVerifiedTickStream(stream_dir, generation="g1")
+    assert restarted.stats()["last_ingest_seq"] == 1
+    assert producer.watermark.read()["last_ingest_seq"] == 1
+
+
 def test_read_only_tick_stream_rejects_missing_or_corrupt_producer_state(tmp_path):
     missing = tmp_path / "missing"
     missing.mkdir(mode=0o700)

@@ -579,6 +579,7 @@ class DurableVerifiedTickStream:
             self.journal.path,
             self.watermark.path,
             self.acknowledgements.journal.path,
+            self._lock_path,
         ):
             try:
                 info = path.lstat()
@@ -607,7 +608,7 @@ class DurableVerifiedTickStream:
 
     @contextmanager
     def _process_lock(self) -> Iterator[None]:
-        """Serialize producer/ack transitions across worker processes."""
+        """Hold one producer/consumer snapshot lock across worker processes."""
 
         try:
             import fcntl
@@ -618,8 +619,14 @@ class DurableVerifiedTickStream:
         parent_fd, _ = _open_parent(self._lock_path)
         descriptor = -1
         try:
-            flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0)
-            flags |= getattr(os, "O_NOFOLLOW", 0)
+            flags = getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+            if self.read_only:
+                # A consumer mount may be read-only.  It can take a shared
+                # flock on the producer-created lock without creating or
+                # opening the file for write access.
+                flags |= os.O_RDONLY
+            else:
+                flags |= os.O_RDWR | os.O_CREAT
             descriptor = os.open(self._lock_path.name, flags, 0o600, dir_fd=parent_fd)
             info = os.fstat(descriptor)
             if (
@@ -629,7 +636,7 @@ class DurableVerifiedTickStream:
                 or info.st_mode & 0o077
             ):
                 raise DurableCorruptionError("durable stream lock is invalid")
-            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            fcntl.flock(descriptor, fcntl.LOCK_SH if self.read_only else fcntl.LOCK_EX)
             yield
         except OSError as exc:
             raise DurableCorruptionError("cannot lock durable stream") from exc
@@ -642,6 +649,19 @@ class DurableVerifiedTickStream:
             os.close(parent_fd)
 
     def _load_index(self) -> dict[str, VerifiedTick]:
+        if self._index is None:
+            # Recovery readers, including the default health worker, scan the
+            # journal, watermark, and acknowledgement frontier as one
+            # snapshot.  Producers hold the exclusive side of this same flock
+            # for append and acknowledgement transitions, so a scan cannot
+            # combine an old journal tail with a newer checkpoint.
+            with self._process_lock():
+                return self._load_index_unlocked()
+        return self._index
+
+    def _load_index_unlocked(self) -> dict[str, VerifiedTick]:
+        """Validate and cache the stream while its caller owns any needed lock."""
+
         if self._index is None:
             index: dict[str, VerifiedTick] = {}
             expected_seq = 1
@@ -679,7 +699,6 @@ class DurableVerifiedTickStream:
                     source_events[tick.source_event_id] = tick.event_hash
                 index[tick.ingest_id] = tick
                 expected_seq += 1
-            self._index = index
             state = self.watermark.read()
             state_generation = str(state.get("stream_generation") or self.generation)
             if state_generation != self.generation:
@@ -715,6 +734,9 @@ class DurableVerifiedTickStream:
             elif watermark_hash != expected_hash:
                 raise DurableCorruptionError("verified tick watermark hash mismatch")
             self._validate_acknowledgements(index)
+            # Do not retain a partial journal if checkpoint or acknowledgement
+            # validation fails.  A later access must fail closed again.
+            self._index = index
         return self._index
 
     def _validate_acknowledgements(self, index: Mapping[str, VerifiedTick]) -> None:
@@ -739,8 +761,8 @@ class DurableVerifiedTickStream:
                 raise DurableCorruptionError("acknowledgement does not bind to tick")
 
     def next_sequence(self) -> int:
-        with self._lock:
-            index = self._load_index()
+        with self._lock, self._process_lock():
+            index = self._load_index_unlocked()
             state = self.watermark.read()
             return (
                 max(
@@ -760,13 +782,20 @@ class DurableVerifiedTickStream:
         with self._lock, self._process_lock():
             # Another producer can have appended while this object was idle.
             self._index = None
-            index = self._load_index()
+            index = self._load_index_unlocked()
             prior = index.get(tick.ingest_id)
             if prior:
                 if prior.event_hash != tick.event_hash:
                     raise DuplicateRecordError(f"ingest_id reused: {tick.ingest_id}")
                 return False
-            expected = self.next_sequence()
+            state = self.watermark.read()
+            expected = (
+                max(
+                    int(state.get("last_ingest_seq") or 0),
+                    max((item.ingest_seq for item in index.values()), default=0),
+                )
+                + 1
+            )
             if tick.ingest_seq != expected:
                 raise DurableStateError(
                     f"expected ingest_seq {expected}, got {tick.ingest_seq}"
@@ -853,7 +882,7 @@ class DurableVerifiedTickStream:
             self._index = None
             self.acknowledgements._values = None  # type: ignore[attr-defined]
             self.acknowledgements._records = None  # type: ignore[attr-defined]
-            persisted = self.get(tick.ingest_id)
+            persisted = self._load_index_unlocked().get(tick.ingest_id)
             if persisted is None:
                 raise DurableCorruptionError("acknowledgement references unknown tick")
             if (
