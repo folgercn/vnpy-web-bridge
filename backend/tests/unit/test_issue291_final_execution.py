@@ -97,7 +97,12 @@ def target_position_hash(
     )
 
 
-def plan(source: dict | None = None, *, expected_after: str | None = None) -> dict:
+def plan(
+    source: dict | None = None,
+    *,
+    expected_before: str | None = None,
+    expected_after: str | None = None,
+) -> dict:
     source = source or receipt()
     verified = VerifiedCustodyReceipt.from_mapping(source)
     return build_target_plan(
@@ -114,7 +119,7 @@ def plan(source: dict | None = None, *, expected_after: str | None = None) -> di
         scope=source["scope"],
         expires_at=source["expires_at"],
         phase="OPEN",
-        expected_before_position_hash=sha256_json({}),
+        expected_before_position_hash=expected_before or target_position_hash({}),
         expected_after_position_hash=expected_after or target_position_hash(),
         orders=[
             {
@@ -236,7 +241,9 @@ def runtime(*, execute: bool = False, receipt_value: dict | None = None):
     return service, core, repo, gateway, current
 
 
-def reconcile_enable_start(service, core, repo, target: dict):
+def reconcile_enable_start(
+    service, core, repo, target: dict, *, snapshot_id: str = "snapshot-default"
+):
     target_receipt = service.custody.add_target(target)
     service.process_command(
         command(
@@ -258,7 +265,7 @@ def reconcile_enable_start(service, core, repo, target: dict):
             repo.state_version,
             {
                 "reconciliation_run_id": "run-final-0001",
-                "snapshot_id": "snapshot-default",
+                "snapshot_id": snapshot_id,
                 "reason": "fresh SIMNOW facts",
             },
         )
@@ -460,6 +467,50 @@ def test_internal_order_uses_core_fence_and_local_gate() -> None:
             )
         )
     assert gateway.send_calls == []
+
+
+@pytest.mark.parametrize(
+    ("expected_before", "actual_positions", "should_start"),
+    [
+        (
+            target_position_hash(),
+            target_position_rows(frozen=9, price=999.5, pnl=-42.25, commission=123.45),
+            True,
+        ),
+        (target_position_hash(), target_position_rows(volume=2), False),
+        (target_position_hash(), target_position_rows(direction="SHORT"), False),
+        (target_position_hash(), target_position_rows(symbol="CU"), False),
+        (target_position_hash(), target_position_rows(exchange="DCE"), False),
+        (
+            target_position_hash(account_scope="account:foreign"),
+            target_position_rows(),
+            False,
+        ),
+        (
+            target_position_hash(environment="foreign"),
+            target_position_rows(),
+            False,
+        ),
+    ],
+)
+def test_start_uses_current_position_projection_and_fails_closed(
+    expected_before: str, actual_positions: dict, should_start: bool
+) -> None:
+    service, core, repo, gateway, _ = runtime(execute=True)
+    target = plan(expected_before=expected_before)
+    gateway.snapshots.append(final_position_snapshot(actual_positions))
+
+    if should_start:
+        reconcile_enable_start(
+            service, core, repo, target, snapshot_id="snapshot-final-0002"
+        )
+        assert len(gateway.send_calls) == 1
+    else:
+        with pytest.raises(PlanRejected, match="matching preview/reconciliation"):
+            reconcile_enable_start(
+                service, core, repo, target, snapshot_id="snapshot-final-0002"
+            )
+        assert gateway.send_calls == []
 
 
 def test_final_runtime_uses_only_plan_scoped_execution_mutation_delegates() -> None:
@@ -941,7 +992,7 @@ def test_reconcile_final_target_projection_completes_or_halts(
 ) -> None:
     service, core, repo, gateway, _ = runtime(execute=True)
     target = plan(expected_after=expected_after)
-    assert target["expected_before_position_hash"] == sha256_json({})
+    assert target["expected_before_position_hash"] == target_position_hash({})
     reconcile_enable_start(service, core, repo, target)
     intent_id = next(iter(repo.snapshot()["send_intents"]))
 
