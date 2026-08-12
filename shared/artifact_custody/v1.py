@@ -908,6 +908,16 @@ class ArtifactCustody:
                 return dict(signed)
         raise CustodyError("CUSTODY_SIGNED_ARTIFACT_NOT_FOUND")
 
+    def read_artifact(self, artifact_id: str) -> dict[str, Any]:
+        """Read one audited immutable envelope without exposing ledger records."""
+
+        wanted = _safe_id(artifact_id, "CUSTODY_ARTIFACT_ID_INVALID")
+        state = self._load_state()
+        artifact = state.artifacts.get(wanted)
+        if artifact is None:
+            raise CustodyError("CUSTODY_ARTIFACT_NOT_FOUND")
+        return dict(artifact)
+
     def read_receipt(self, receipt_id: str) -> dict[str, Any]:
         """Return one audited receipt without exposing custody records/artifacts."""
         wanted = _safe_id(receipt_id, "CUSTODY_RECEIPT_ID_INVALID")

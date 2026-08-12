@@ -26,11 +26,14 @@ from shared.artifact_contracts.v1 import (
     validate_artifact_envelope,
 )
 from shared.commodity_execution import (
+    KEYLESS_TARGET_PLAN_SCHEMA_VERSION,
     TARGET_PLAN_SCHEMA_VERSION,
+    TRUSTED_KEYLESS_SIMNOW_SCOPE,
     CommodityExecutionContractError,
     VerifiedCustodyReceipt,
     before_position_projection_hash,
     build_target_plan,
+    build_trusted_keyless_target_plan,
     canonical_before_position_projection,
     canonical_target_position_projection,
     sha256_json,
@@ -127,6 +130,29 @@ class ExecutableTargetPlanHandoff:
             scope=self.scope,
             predecessor_refs=[predecessor_ref],
             lineage=list(custody_lineage),
+        )
+
+    def trusted_keyless_custody_artifact(self) -> dict[str, Any]:
+        """Return the exact unsigned, create-only custody artifact.
+
+        MAP/C_FAST lineage remains inside the immutable TargetPlan.  It is not
+        projected into ArtifactCustody's predecessor graph because this mode
+        never publishes the candidates as custody artifacts.
+        """
+
+        if self.target_plan.get("schema_version") != KEYLESS_TARGET_PLAN_SCHEMA_VERSION:
+            raise ExecutableTargetAdapterError("target plan is not trusted keyless")
+        return new_artifact_envelope(
+            artifact_type="simnow-target-plan",
+            trust_domain="runtime_authorization",
+            producer_id="c-fast-executable-target-adapter",
+            producer_version="v1",
+            schema_ref=KEYLESS_TARGET_PLAN_SCHEMA_VERSION,
+            payload=self.target_plan,
+            generated_at=str(self.target_plan["generated_at"]),
+            scope=self.scope,
+            predecessor_refs=[],
+            lineage=[],
         )
 
 
@@ -645,7 +671,7 @@ def build_executable_target_plan(
     *,
     map_candidate: Mapping[str, Any],
     c_fast_candidate: Mapping[str, Any],
-    authority_receipt: Mapping[str, Any],
+    authority_receipt: Mapping[str, Any] | None,
     current_facts: GatewaySnapshot,
     reconciliation: Mapping[str, Any],
     product: str,
@@ -654,6 +680,7 @@ def build_executable_target_plan(
     gateway_name: str,
     reduce_only_close: bool = False,
     reduce_only_close_limit_price: float | None = None,
+    trusted_keyless_expires_at: str | None = None,
     now: datetime | None = None,
 ) -> ExecutableTargetPlanHandoff:
     """Convert one explicit MAP/C_FAST target delta into one TargetPlan v1.
@@ -683,32 +710,47 @@ def build_executable_target_plan(
     _target, exchange, symbol, price = _selected_target(
         candidate, product=normalized_product
     )
-    try:
-        receipt = VerifiedCustodyReceipt.from_mapping(authority_receipt)
-    except CommodityExecutionContractError as exc:
-        raise ExecutableTargetAdapterError(
-            "authority custody receipt is invalid"
-        ) from exc
-    if (
-        receipt.raw["artifact_type"] != "runtime-authorization"
-        or receipt.raw["trust_domain"] != "runtime_authorization"
-        or receipt.raw["schema_ref"] != "phase-c-runtime-authorization-v1"
-    ):
-        raise ExecutableTargetAdapterError("authority receipt type is invalid")
-    scope = receipt.scope
-    if (
-        scope.get("account_scope") != normalized_scope
-        or scope.get("environment") != normalized_environment
-        or scope.get("gateway_name") != normalized_gateway
-    ):
-        raise ExecutableTargetAdapterError(
-            "authority scope/gateway does not match target"
-        )
     current_time = utc_now() if now is None else now
     if current_time.tzinfo is None or current_time.utcoffset() is None:
         raise ExecutableTargetAdapterError("adapter clock must be timezone-aware")
-    if receipt.expires_at() <= current_time:
-        raise ExecutableTargetAdapterError("authority receipt is expired")
+    keyless = authority_receipt is None
+    if keyless:
+        if (
+            normalized_scope != "account:windows"
+            or normalized_environment != "SIMNOW"
+            or normalized_gateway != "CTP"
+            or trusted_keyless_expires_at is None
+        ):
+            raise ExecutableTargetAdapterError("trusted keyless tuple is invalid")
+        scope = dict(TRUSTED_KEYLESS_SIMNOW_SCOPE)
+        try:
+            expires_at = datetime.fromisoformat(trusted_keyless_expires_at.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ExecutableTargetAdapterError("trusted keyless expiry is invalid") from exc
+        if expires_at.tzinfo is None or expires_at <= current_time:
+            raise ExecutableTargetAdapterError("trusted keyless expiry is invalid")
+    else:
+        if trusted_keyless_expires_at is not None:
+            raise ExecutableTargetAdapterError("signed target plan cannot set keyless expiry")
+        try:
+            receipt = VerifiedCustodyReceipt.from_mapping(authority_receipt)
+        except CommodityExecutionContractError as exc:
+            raise ExecutableTargetAdapterError("authority custody receipt is invalid") from exc
+        if (
+            receipt.raw["artifact_type"] != "runtime-authorization"
+            or receipt.raw["trust_domain"] != "runtime_authorization"
+            or receipt.raw["schema_ref"] != "phase-c-runtime-authorization-v1"
+        ):
+            raise ExecutableTargetAdapterError("authority receipt type is invalid")
+        scope = receipt.scope
+        if (
+            scope.get("account_scope") != normalized_scope
+            or scope.get("environment") != normalized_environment
+            or scope.get("gateway_name") != normalized_gateway
+        ):
+            raise ExecutableTargetAdapterError("authority scope/gateway does not match target")
+        if receipt.expires_at() <= current_time:
+            raise ExecutableTargetAdapterError("authority receipt is expired")
     positions = _validate_snapshot(
         current_facts,
         account_scope=normalized_scope,
@@ -788,23 +830,16 @@ def build_executable_target_plan(
             "gateway_name": normalized_gateway,
         }
     )
-    plan = build_target_plan(
-        plan_id=f"cfast-target-plan-v1-{identity}",
-        account_scope=normalized_scope,
-        environment=normalized_environment,
-        authority_artifact_id=receipt.artifact_id,
-        authority_artifact_sha256=receipt.artifact_sha256,
-        authority_receipt_id=receipt.receipt_id,
-        authority_receipt_sha256=receipt.receipt_sha256,
-        signer_key_id=str(receipt.raw["signer_key_id"]),
-        signer_key_version=str(receipt.raw["signer_key_version"]),
-        keyring_raw_sha256=str(receipt.raw["keyring_raw_sha256"]),
-        scope=scope,
-        expires_at=str(receipt.raw["expires_at"]),
-        phase="CLOSE" if offset in _CLOSE_ORDER_OFFSETS else "OPEN",
-        expected_before_position_hash=expected_before,
-        expected_after_position_hash=expected_after,
-        orders=[
+    shared_fields = {
+        "plan_id": f"cfast-target-plan-v1-{identity}",
+        "account_scope": normalized_scope,
+        "environment": normalized_environment,
+        "scope": scope,
+        "expires_at": trusted_keyless_expires_at if keyless else str(receipt.raw["expires_at"]),
+        "phase": "CLOSE" if offset in _CLOSE_ORDER_OFFSETS else "OPEN",
+        "expected_before_position_hash": expected_before,
+        "expected_after_position_hash": expected_after,
+        "orders": [
             {
                 "symbol": symbol,
                 "exchange": exchange,
@@ -820,12 +855,61 @@ def build_executable_target_plan(
                 "gateway_name": normalized_gateway,
             }
         ],
-    )
+    }
+    if keyless:
+        plan = build_trusted_keyless_target_plan(
+            **shared_fields,
+            gateway_name="CTP",
+            lineage={"map_sha256": map_hash, "c_fast_sha256": c_fast_hash},
+            generated_at=current_time.isoformat().replace("+00:00", "Z"),
+        )
+    else:
+        plan = build_target_plan(
+            **shared_fields,
+            authority_artifact_id=receipt.artifact_id,
+            authority_artifact_sha256=receipt.artifact_sha256,
+            authority_receipt_id=receipt.receipt_id,
+            authority_receipt_sha256=receipt.receipt_sha256,
+            signer_key_id=str(receipt.raw["signer_key_id"]),
+            signer_key_version=str(receipt.raw["signer_key_version"]),
+            keyring_raw_sha256=str(receipt.raw["keyring_raw_sha256"]),
+        )
     return ExecutableTargetPlanHandoff(
         target_plan=plan,
         lineage=(map_hash, c_fast_hash),
         scope=scope,
-        expires_at=str(receipt.raw["expires_at"]),
+        expires_at=str(plan["expires_at"]),
+    )
+
+
+def build_trusted_keyless_executable_target_plan(
+    *,
+    map_candidate: Mapping[str, Any],
+    c_fast_candidate: Mapping[str, Any],
+    current_facts: GatewaySnapshot,
+    reconciliation: Mapping[str, Any],
+    product: str,
+    expires_at: str,
+    reduce_only_close: bool = False,
+    reduce_only_close_limit_price: float | None = None,
+    now: datetime | None = None,
+) -> ExecutableTargetPlanHandoff:
+    """Build the sole unsigned target path, pinned to the fixed SIMNOW tuple."""
+
+    return build_executable_target_plan(
+        map_candidate=map_candidate,
+        c_fast_candidate=c_fast_candidate,
+        authority_receipt=None,
+        current_facts=current_facts,
+        reconciliation=reconciliation,
+        product=product,
+        account_scope="account:windows",
+        environment="SIMNOW",
+        gateway_name="CTP",
+        reduce_only_close=reduce_only_close,
+        reduce_only_close_limit_price=reduce_only_close_limit_price,
+        trusted_keyless_expires_at=expires_at,
+        now=now,
     )
 
 
@@ -834,5 +918,6 @@ __all__ = [
     "ExecutableTargetPlanHandoff",
     "PeekCurrentFacts",
     "build_executable_target_plan",
+    "build_trusted_keyless_executable_target_plan",
     "peek_current_facts_to_snapshot",
 ]

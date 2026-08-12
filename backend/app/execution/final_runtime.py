@@ -25,9 +25,11 @@ from shared.artifact_contracts.v1 import (
     validate_artifact_envelope,
 )
 from shared.commodity_execution.v1 import (
+    KEYLESS_TARGET_PLAN_SCHEMA_VERSION,
     TARGET_PLAN_SCHEMA_VERSION,
     CommodityExecutionContractError,
     TargetPlan,
+    TrustedKeylessCustodyReceipt,
     VerifiedCustodyReceipt,
     before_position_projection_hash,
     canonical_json,
@@ -90,8 +92,8 @@ class InMemoryTargetPlanRepository:
         validate_identifier(artifact_id, "artifact_id")
         for plan in tuple(self._plans.values()):
             if (
-                plan.raw["authority_artifact_id"] == artifact_id
-                and plan.raw["authority_artifact_sha256"] == artifact_sha256
+                plan.authority_id == artifact_id
+                and plan.authority_hash == artifact_sha256
             ):
                 return plan
         return None
@@ -213,8 +215,8 @@ class DurableTargetPlanRepository:
         for path in sorted(self.root.glob("*.json")):
             plan = self._read(path)
             if plan is not None and (
-                plan.raw["authority_artifact_id"] == artifact_id
-                and plan.raw["authority_artifact_sha256"] == artifact_sha256
+                plan.authority_id == artifact_id
+                and plan.authority_hash == artifact_sha256
             ):
                 return plan
         return None
@@ -259,6 +261,7 @@ class FinalExecutionRuntime:
         custody_receipt: Callable[[str], Mapping[str, Any] | None] | None = None,
         allowed_scope: Mapping[str, Any] | None = None,
         allow_simnow_execution: bool = False,
+        allow_trusted_keyless_simnow: bool = False,
         max_order_volume: int = 1,
     ) -> None:
         if orchestrator.environment.upper() != "SIMNOW":
@@ -276,6 +279,7 @@ class FinalExecutionRuntime:
         self.custody = custody
         self.allowed_scope = dict(allowed_scope) if allowed_scope is not None else None
         self.allow_simnow_execution = bool(allow_simnow_execution)
+        self.allow_trusted_keyless_simnow = bool(allow_trusted_keyless_simnow)
         if (
             not isinstance(max_order_volume, int)
             or isinstance(max_order_volume, bool)
@@ -284,7 +288,21 @@ class FinalExecutionRuntime:
             raise ValueError("final execution max order volume must be positive")
         self.max_order_volume = max_order_volume
 
-    def _receipt_for(self, plan: TargetPlan) -> VerifiedCustodyReceipt:
+    def _receipt_for(self, plan: TargetPlan) -> VerifiedCustodyReceipt | None:
+        if plan.is_trusted_keyless_simnow:
+            if not self.allow_trusted_keyless_simnow:
+                raise AuthorityRejected("trusted keyless SIMNOW custody is disabled")
+            if (
+                self.allowed_scope is not None
+                and plan.raw["scope"] != self.allowed_scope
+            ):
+                raise AuthorityRejected(
+                    "keyless target plan scope is not locally allowlisted"
+                )
+            # Custody artifact/receipt bindings are rechecked during preview
+            # and again immediately before start.  Keyless plans carry no
+            # runtime-authorization receipt by design.
+            return None
         try:
             raw = self.custody.receipt(str(plan.raw["authority_receipt_id"]))
         except Exception as exc:  # custody response is unknown, never assume success
@@ -334,7 +352,7 @@ class FinalExecutionRuntime:
 
     def _preview_from_custody(
         self, receipt_id: str
-    ) -> tuple[TargetPlan, VerifiedCustodyReceipt]:
+    ) -> tuple[TargetPlan, VerifiedCustodyReceipt | TrustedKeylessCustodyReceipt]:
         """Fetch, cross-check and install a plan before a SIMNOW preview exists.
 
         The Control command supplies only a receipt id.  Order requests never
@@ -350,11 +368,18 @@ class FinalExecutionRuntime:
         if raw_receipt is None:
             raise AuthorityRejected("custody receipt is unavailable")
         try:
-            receipt = VerifiedCustodyReceipt.from_mapping(raw_receipt)
+            receipt = (
+                TrustedKeylessCustodyReceipt.from_mapping(raw_receipt)
+                if raw_receipt.get("schema_ref") == KEYLESS_TARGET_PLAN_SCHEMA_VERSION
+                else VerifiedCustodyReceipt.from_mapping(raw_receipt)
+            )
         except CommodityExecutionContractError as exc:
             raise AuthorityRejected(
                 "custody receipt is not strict verified evidence"
             ) from exc
+        keyless = isinstance(receipt, TrustedKeylessCustodyReceipt)
+        if keyless and not self.allow_trusted_keyless_simnow:
+            raise AuthorityRejected("trusted keyless SIMNOW custody is disabled")
         if (
             receipt.raw["artifact_type"],
             receipt.raw["trust_domain"],
@@ -362,7 +387,7 @@ class FinalExecutionRuntime:
         ) != (
             "simnow-target-plan",
             "runtime_authorization",
-            TARGET_PLAN_SCHEMA_VERSION,
+            KEYLESS_TARGET_PLAN_SCHEMA_VERSION if keyless else TARGET_PLAN_SCHEMA_VERSION,
         ):
             raise PlanRejected("SIMNOW preview receipt does not identify a target plan")
         try:
@@ -406,6 +431,9 @@ class FinalExecutionRuntime:
             or artifact["scope"] != plan.raw["scope"]
             or receipt.scope != plan.raw["scope"]
             or (self.allowed_scope is not None and receipt.scope != self.allowed_scope)
+            or (keyless and not plan.is_trusted_keyless_simnow)
+            or (not keyless and plan.is_trusted_keyless_simnow)
+            or (keyless and receipt.raw["expires_at"] != plan.raw["expires_at"])
             or receipt.expires_at() <= utc_now()
         ):
             raise PlanRejected("custody target plan receipt scope/expiry mismatch")
@@ -455,6 +483,8 @@ class FinalExecutionRuntime:
             plan = TargetPlan.from_mapping(raw, max_order_volume=self.max_order_volume)
         except CommodityExecutionContractError as exc:
             raise PlanRejected("target plan contract is invalid") from exc
+        if plan.is_trusted_keyless_simnow:
+            raise PlanRejected("keyless target plans must be installed from custody")
         self._plan_from_value(plan)
         self.plans.put(plan)
         return plan
@@ -525,10 +555,14 @@ class FinalExecutionRuntime:
             "expected_after_position_hash": str(
                 plan.raw["expected_after_position_hash"]
             ),
-            "authority_artifact_id": str(plan.raw["authority_artifact_id"]),
-            "authority_artifact_sha256": str(plan.raw["authority_artifact_sha256"]),
-            "authority_receipt_id": str(plan.raw["authority_receipt_id"]),
-            "authority_receipt_sha256": str(plan.raw["authority_receipt_sha256"]),
+            "authority_artifact_id": plan.authority_id,
+            "authority_artifact_sha256": plan.authority_hash,
+            "authority_receipt_id": str(
+                plan.raw.get("authority_receipt_id", "keyless-custody")
+            ),
+            "authority_receipt_sha256": str(
+                plan.raw.get("authority_receipt_sha256", "0" * 64)
+            ),
             "preview_receipt_id": str(proof["preview_receipt_id"]),
             "preview_receipt_sha256": str(proof["preview_receipt_sha256"]),
             "preview_artifact_id": str(proof["preview_artifact_id"]),

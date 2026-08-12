@@ -16,13 +16,14 @@ from pathlib import Path
 from typing import Any
 
 _ROOT = Path(__file__).resolve().parents[1]
-for _path in (_ROOT / "backend", _ROOT / "scripts"):
+for _path in (_ROOT, _ROOT / "backend", _ROOT / "scripts"):
     if str(_path) not in sys.path:
         sys.path.insert(0, str(_path))
 
 from app.execution.executable_target_adapter import (  # noqa: E402
     ExecutableTargetAdapterError,
     build_executable_target_plan,
+    build_trusted_keyless_executable_target_plan,
     peek_current_facts_to_snapshot,
 )
 from c_fast_producer.producer import (  # noqa: E402
@@ -33,7 +34,6 @@ from c_fast_producer.producer import (  # noqa: E402
 )
 
 from shared.trust_contracts.v1 import canonical_json_line  # noqa: E402
-
 
 _TERMINAL_EXECUTION_ORDER_STATUSES = frozenset(
     {"ALLTRADED", "CANCELLED", "CANCELED", "REJECTED"}
@@ -105,8 +105,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--map-candidate", required=True, type=Path)
     parser.add_argument("--c-fast-candidate", required=True, type=Path)
-    parser.add_argument("--authority-receipt", required=True, type=Path)
-    parser.add_argument("--authority-artifact", required=True, type=Path)
+    parser.add_argument("--authority-receipt", type=Path)
+    parser.add_argument("--authority-artifact", type=Path)
+    parser.add_argument(
+        "--trusted-keyless-simnow",
+        action="store_true",
+        help="fixed account:windows/CTP SIMNOW custody path; no signing inputs",
+    )
+    parser.add_argument(
+        "--expires-at",
+        help="required with --trusted-keyless-simnow",
+    )
     parser.add_argument("--peek-current-facts", required=True, type=Path)
     parser.add_argument("--reconciliation-state", required=True, type=Path)
     parser.add_argument("--product", required=True)
@@ -131,10 +140,6 @@ def main(argv: list[str] | None = None) -> int:
     try:
         map_candidate = _object_from_file(args.map_candidate, "MAP candidate")
         c_fast_candidate = _object_from_file(args.c_fast_candidate, "C_FAST candidate")
-        authority_receipt = _object_from_file(args.authority_receipt, "authority receipt")
-        authority_artifact = _object_from_file(
-            args.authority_artifact, "authority artifact"
-        )
         peek_facts = _object_from_file(args.peek_current_facts, "peek current facts")
         reconciliation = _object_from_file(
             args.reconciliation_state, "reconciliation state"
@@ -150,23 +155,55 @@ def main(argv: list[str] | None = None) -> int:
                 peek_facts, account_scope=args.account_scope
             )
         )
-        handoff = build_executable_target_plan(
-            map_candidate=map_candidate,
-            c_fast_candidate=c_fast_candidate,
-            authority_receipt=authority_receipt,
-            current_facts=peek.snapshot,
-            reconciliation=reconciliation,
-            product=args.product,
-            account_scope=args.account_scope,
-            environment="SIMNOW",
-            gateway_name=peek.gateway_name,
-            reduce_only_close=args.reduce_only_close,
-            reduce_only_close_limit_price=args.reduce_only_close_limit_price,
-        )
-        envelope = handoff.artifact_envelope(
-            generated_at=_generated_at(args.generated_at),
-            authority_artifact=authority_artifact,
-        )
+        if args.trusted_keyless_simnow:
+            if args.authority_receipt is not None or args.authority_artifact is not None:
+                raise ExecutableTargetAdapterError(
+                    "trusted keyless SIMNOW does not accept authority inputs"
+                )
+            if args.expires_at is None or args.account_scope != "account:windows":
+                raise ExecutableTargetAdapterError(
+                    "trusted keyless SIMNOW requires account:windows and expires_at"
+                )
+            handoff = build_trusted_keyless_executable_target_plan(
+                map_candidate=map_candidate,
+                c_fast_candidate=c_fast_candidate,
+                current_facts=peek.snapshot,
+                reconciliation=reconciliation,
+                product=args.product,
+                expires_at=args.expires_at,
+                reduce_only_close=args.reduce_only_close,
+                reduce_only_close_limit_price=args.reduce_only_close_limit_price,
+                now=datetime.fromisoformat(_generated_at(args.generated_at).replace("Z", "+00:00")),
+            )
+            envelope = handoff.trusted_keyless_custody_artifact()
+        else:
+            if args.authority_receipt is None or args.authority_artifact is None:
+                raise ExecutableTargetAdapterError(
+                    "signed target plan requires authority receipt and artifact"
+                )
+            authority_receipt = _object_from_file(
+                args.authority_receipt, "authority receipt"
+            )
+            authority_artifact = _object_from_file(
+                args.authority_artifact, "authority artifact"
+            )
+            handoff = build_executable_target_plan(
+                map_candidate=map_candidate,
+                c_fast_candidate=c_fast_candidate,
+                authority_receipt=authority_receipt,
+                current_facts=peek.snapshot,
+                reconciliation=reconciliation,
+                product=args.product,
+                account_scope=args.account_scope,
+                environment="SIMNOW",
+                gateway_name=peek.gateway_name,
+                reduce_only_close=args.reduce_only_close,
+                reduce_only_close_limit_price=args.reduce_only_close_limit_price,
+            )
+            envelope = handoff.artifact_envelope(
+                generated_at=_generated_at(args.generated_at),
+                authority_artifact=authority_artifact,
+            )
         _create_only_atomic(args.output, canonical_json_line(envelope))
     except (ExecutableTargetAdapterError, ProducerError) as exc:
         print(f"error: {exc}", file=sys.stderr)

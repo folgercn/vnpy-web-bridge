@@ -20,15 +20,22 @@ from .models import (
     CustodyReceiptDTO,
     ExecutionProjectionDTO,
     SignedArtifactUploadDTO,
+    TrustedKeylessCustodyReceiptDTO,
+    TrustedKeylessTargetPlanUploadDTO,
 )
+
+CustodyInstallReceipt = CustodyReceiptDTO | TrustedKeylessCustodyReceiptDTO
 
 
 class PhaseCWorkflowClient(Protocol):
     def install(self, request: SignedArtifactUploadDTO) -> CustodyReceiptDTO: ...
-    def custody_receipt(self, receipt_id: str) -> CustodyReceiptDTO | None: ...
+    def install_trusted_keyless_target_plan(
+        self, request: TrustedKeylessTargetPlanUploadDTO
+    ) -> TrustedKeylessCustodyReceiptDTO: ...
+    def custody_receipt(self, receipt_id: str) -> CustodyInstallReceipt | None: ...
     def custody_receipt_by_idempotency(
         self, idempotency_key: str
-    ) -> CustodyReceiptDTO | None: ...
+    ) -> CustodyInstallReceipt | None: ...
     def authorization_status(self) -> AuthorizationStatusDTO: ...
     def authorization_command(
         self, request: AuthorizationCommandDTO
@@ -48,12 +55,18 @@ class OfflineFakeWorkflowClient:
     def install(self, request: SignedArtifactUploadDTO) -> CustodyReceiptDTO:
         return self.adapter.custody.install(request)
 
-    def custody_receipt(self, receipt_id: str) -> CustodyReceiptDTO | None:
+    def install_trusted_keyless_target_plan(
+        self, request: TrustedKeylessTargetPlanUploadDTO
+    ) -> TrustedKeylessCustodyReceiptDTO:
+        del request
+        raise WorkflowAdapterError("trusted keyless custody is unavailable in offline fake")
+
+    def custody_receipt(self, receipt_id: str) -> CustodyInstallReceipt | None:
         return self.adapter.custody.receipt(receipt_id)
 
     def custody_receipt_by_idempotency(
         self, idempotency_key: str
-    ) -> CustodyReceiptDTO | None:
+    ) -> CustodyInstallReceipt | None:
         return None
 
     def authorization_status(self) -> AuthorizationStatusDTO:
@@ -171,25 +184,46 @@ class RemotePhaseCWorkflowClient:
         )
         return CustodyReceiptDTO.model_validate(raw)
 
-    def custody_receipt(self, receipt_id: str) -> CustodyReceiptDTO | None:
+    def install_trusted_keyless_target_plan(
+        self, request: TrustedKeylessTargetPlanUploadDTO
+    ) -> TrustedKeylessCustodyReceiptDTO:
+        raw = self._request(
+            self.settings.custody_url,
+            self.settings.custody_secret,
+            "POST",
+            "/internal/v1/publish-keyless-simnow-target-plan",
+            request.model_dump(mode="json"),
+            mutation=True,
+        )
+        return TrustedKeylessCustodyReceiptDTO.model_validate(raw)
+
+    @staticmethod
+    def _custody_receipt(raw: dict[str, Any] | None) -> CustodyInstallReceipt | None:
+        if raw is None:
+            return None
+        if raw.get("schema_ref") == "web-bridge-simnow-keyless-target-plan-v1":
+            return TrustedKeylessCustodyReceiptDTO.model_validate(raw)
+        return CustodyReceiptDTO.model_validate(raw)
+
+    def custody_receipt(self, receipt_id: str) -> CustodyInstallReceipt | None:
         raw = self._request(
             self.settings.custody_url,
             self.settings.custody_secret,
             "GET",
             f"/internal/v1/receipts/{receipt_id}",
         )
-        return CustodyReceiptDTO.model_validate(raw) if raw else None
+        return self._custody_receipt(raw)
 
     def custody_receipt_by_idempotency(
         self, idempotency_key: str
-    ) -> CustodyReceiptDTO | None:
+    ) -> CustodyInstallReceipt | None:
         raw = self._request(
             self.settings.custody_url,
             self.settings.custody_secret,
             "GET",
             f"/internal/v1/receipts-by-idempotency/{idempotency_key}",
         )
-        return CustodyReceiptDTO.model_validate(raw) if raw else None
+        return self._custody_receipt(raw)
 
     def authorization_status(self) -> AuthorizationStatusDTO:
         return AuthorizationStatusDTO.model_validate(
@@ -247,13 +281,19 @@ class UnconfiguredPhaseCWorkflowClient:
         del request
         self._unavailable()
 
-    def custody_receipt(self, receipt_id: str) -> CustodyReceiptDTO | None:
+    def install_trusted_keyless_target_plan(
+        self, request: TrustedKeylessTargetPlanUploadDTO
+    ) -> TrustedKeylessCustodyReceiptDTO:
+        del request
+        self._unavailable()
+
+    def custody_receipt(self, receipt_id: str) -> CustodyInstallReceipt | None:
         del receipt_id
         self._unavailable()
 
     def custody_receipt_by_idempotency(
         self, idempotency_key: str
-    ) -> CustodyReceiptDTO | None:
+    ) -> CustodyInstallReceipt | None:
         del idempotency_key
         self._unavailable()
 
