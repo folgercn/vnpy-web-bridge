@@ -676,7 +676,11 @@ def build_executable_target_plan(
     )
     if reduce_only_close and offset != "CLOSE":  # defensive: never open here
         raise ExecutableTargetAdapterError("reduce-only close would not close")
-    expected_before = sha256_json(positions)
+    expected_before = target_position_projection_hash(
+        positions,
+        account_scope=normalized_scope,
+        environment=normalized_environment,
+    )
     after_positions = _after_positions(
         positions,
         matching,

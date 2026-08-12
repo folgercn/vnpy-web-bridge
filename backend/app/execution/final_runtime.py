@@ -31,6 +31,7 @@ from shared.commodity_execution.v1 import (
     VerifiedCustodyReceipt,
     canonical_json,
     sha256_json,
+    target_position_projection_hash,
     utc_now,
 )
 from shared.trust_contracts.v1 import canonical_json_line, sha256_bytes
@@ -588,6 +589,16 @@ class FinalExecutionRuntime:
             )
             prior = self.orchestrator.repository.snapshot()
             expected_preview_id = f"preview-{plan.plan_hash[:16]}"
+            try:
+                current_position_hash = target_position_projection_hash(
+                    prior["broker"].get("positions"),
+                    account_scope=self.orchestrator.scope,
+                    environment=self.orchestrator.environment,
+                )
+            except CommodityExecutionContractError as exc:
+                raise PlanRejected(
+                    "SIMNOW start current position projection is invalid"
+                ) from exc
             if (
                 prior["plan"].get("state") != "PREVIEWED"
                 or prior["plan"].get("plan_id") != expected_preview_id
@@ -599,8 +610,7 @@ class FinalExecutionRuntime:
                 or prior["plan"].get("preview_artifact_id") == "unknown00"
                 or prior["plan"].get("preview_artifact_sha256") == "0" * 64
                 or prior["reconciliation"].get("state") != "RECONCILED"
-                or prior["broker"].get("position_snapshot_hash")
-                != plan.raw["expected_before_position_hash"]
+                or current_position_hash != plan.raw["expected_before_position_hash"]
             ):
                 raise PlanRejected(
                     "SIMNOW start lacks matching preview/reconciliation/position proof"

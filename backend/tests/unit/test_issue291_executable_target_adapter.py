@@ -242,12 +242,15 @@ def test_adapter_preserves_map_cfast_lineage_scope_expiry_and_delta() -> None:
     )
 
     plan = handoff.target_plan
-    assert plan["expected_before_position_hash"] == sha256_json({})
+    expected_before = target_position_projection_hash(
+        {}, account_scope=SCOPE, environment="SIMNOW"
+    )
+    assert plan["expected_before_position_hash"] == expected_before
     identity = sha256_json(
         {
             "map_sha256": sha256_json(map_candidate),
             "c_fast_sha256": sha256_json(c_fast_candidate),
-            "expected_before_position_hash": sha256_json({}),
+            "expected_before_position_hash": expected_before,
             "product": "rb",
             "gateway_name": GATEWAY,
         }
@@ -511,7 +514,7 @@ def test_adapter_matches_existing_position_case_insensitively_and_emits_native_s
     assert handoff.target_plan["orders"][0]["offset"] == "CLOSE"
 
 
-def test_dynamic_broker_fields_do_not_change_expected_after_projection() -> None:
+def test_dynamic_broker_fields_do_not_change_target_position_projections() -> None:
     static = adapt(target_quantity=2, current=snapshot(positions(long=1)))
     dynamic = adapt(target_quantity=2, current=snapshot(positions(long=1, dynamic=True)))
     assert (
@@ -523,7 +526,10 @@ def test_dynamic_broker_fields_do_not_change_expected_after_projection() -> None
     )
     assert (
         static.target_plan["expected_before_position_hash"]
-        != dynamic.target_plan["expected_before_position_hash"]
+        == dynamic.target_plan["expected_before_position_hash"]
+        == target_position_projection_hash(
+            positions(long=1), account_scope=SCOPE, environment="SIMNOW"
+        )
     )
 
 
