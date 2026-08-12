@@ -52,11 +52,20 @@ class FactSource:
     ) -> None:
         self.gateway = SimpleNamespace(
             td_api=SimpleNamespace(
-                userid=td_userid, connect_status=False, login_status=False
+                userid=td_userid,
+                brokerid="9999",
+                reqid=0,
+                contract_inited=True,
+                connect_status=False,
+                login_status=False,
+                reqQryOrder=lambda _request, _request_id: 0,
+                onRtnOrder=lambda _row: None,
+                gateway=SimpleNamespace(write_log=lambda _message: None),
             ),
             md_api=SimpleNamespace(
                 userid=md_userid, connect_status=False, login_status=False
             ),
+            query_functions=[],
         )
         self._td_login_status = td_login_status
         self._md_login_status = md_login_status

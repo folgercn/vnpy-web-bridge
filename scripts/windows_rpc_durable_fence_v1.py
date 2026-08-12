@@ -19,7 +19,7 @@ from enum import Enum
 from hashlib import sha256
 from pathlib import Path
 from threading import RLock
-from types import MappingProxyType
+from types import MappingProxyType, MethodType
 from typing import Any, ClassVar
 
 _FOUNDATION_ARCHIVE_NAME = "windows_fence_foundation_v1.pyz"
@@ -193,6 +193,7 @@ _ISSUE291_SIMNOW_TRADE_FRONTS = frozenset(_ISSUE291_SIMNOW_FRONT_PAIRS)
 _ISSUE291_SIMNOW_MARKET_FRONTS = frozenset(_ISSUE291_SIMNOW_FRONT_PAIRS.values())
 _SIMNOW_E2E_CONNECT_BINDING_ATTRIBUTE = "_windows_simnow_e2e_connect_binding_v1"
 _SIMNOW_E2E_CONNECT_BINDING_SEAL = object()
+_CTP_ORDER_RECOVERY_CALLBACK_MARKER = "_vnpy_current_day_order_recovery_v1"
 _VALIDATION_TRANSIENT_RPC_METHODS = frozenset(
     {
         "install_fence_v1",
@@ -1395,7 +1396,11 @@ def connect_windows_rpc_simnow_e2e_v1(
     # This private copy is both the exact mapping passed to vn.py and the only
     # source recorded below.  Attach receives no equivalent caller argument.
     connected_setting = dict(gateway_setting)
+    _install_ctp_current_day_order_callback_v1(td_api)
     connect(connected_setting, _VALIDATION_GATEWAY_NAME)
+    _arm_ctp_current_day_order_recovery_v1(
+        main_engine, gateway_name=_VALIDATION_GATEWAY_NAME
+    )
     _record_simnow_e2e_ctp_connect_binding_v1(main_engine, connected_setting)
 
 
@@ -1861,9 +1866,72 @@ def _build_fixed_vnpy_runtime(
 
 
 def _connect_fixed_vnpy_runtime(runtime: _WindowsRpcRuntimeV1) -> None:
+    gateway = runtime.main_engine.get_gateway(runtime.config.gateway_name)
+    td_api = getattr(gateway, "td_api", None)
+    if td_api is None:
+        raise RuntimeError("CTP_CURRENT_DAY_ORDER_RECOVERY_UNAVAILABLE")
+    _install_ctp_current_day_order_callback_v1(td_api)
     runtime.main_engine.connect(
         dict(runtime.config.gateway_setting), runtime.config.gateway_name
     )
+    _arm_ctp_current_day_order_recovery_v1(
+        runtime.main_engine, gateway_name=runtime.config.gateway_name
+    )
+
+
+def _install_ctp_current_day_order_callback_v1(ctp_td_api: Any) -> None:
+    """Publish broker query rows through vn.py's normal order-event path."""
+
+    if getattr(ctp_td_api, _CTP_ORDER_RECOVERY_CALLBACK_MARKER, False):
+        return
+
+    def on_rsp_qry_order(
+        subject: Any,
+        data: Mapping[str, Any],
+        error: Mapping[str, Any],
+        _request_id: int,
+        _last: bool,
+    ) -> None:
+        if not isinstance(error, Mapping) or error.get("ErrorID", 0):
+            subject.gateway.write_log("CTP current-day order recovery query failed")
+            return
+        if data:
+            subject.onRtnOrder(dict(data))
+
+    ctp_td_api.onRspQryOrder = MethodType(on_rsp_qry_order, ctp_td_api)
+    setattr(ctp_td_api, _CTP_ORDER_RECOVERY_CALLBACK_MARKER, True)
+
+
+def _arm_ctp_current_day_order_recovery_v1(
+    main_engine: Any, *, gateway_name: str
+) -> None:
+    """Schedule one successful read-only CTP current-day order query."""
+
+    gateway = main_engine.get_gateway(gateway_name)
+    td_api = getattr(gateway, "td_api", None)
+    query_functions = getattr(gateway, "query_functions", None)
+    if td_api is None or not isinstance(query_functions, list):
+        raise RuntimeError("CTP_CURRENT_DAY_ORDER_RECOVERY_UNAVAILABLE")
+
+    state = {"submitted": False}
+
+    def query_current_day_orders_once() -> None:
+        if state["submitted"]:
+            return
+        if not getattr(td_api, "login_status", False) or not getattr(
+            td_api, "contract_inited", False
+        ):
+            return
+        request = {
+            "BrokerID": td_api.brokerid,
+            "InvestorID": td_api.userid,
+        }
+        td_api.reqid += 1
+        result = td_api.reqQryOrder(request, td_api.reqid)
+        if result == 0:
+            state["submitted"] = True
+
+    query_functions.append(query_current_day_orders_once)
 
 
 def _listen_fixed_vnpy_runtime(runtime: _WindowsRpcRuntimeV1) -> bool:
