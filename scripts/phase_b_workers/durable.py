@@ -7,6 +7,7 @@ small protocols with a queue adapter while keeping the wire contracts intact.
 
 from __future__ import annotations
 
+import codecs
 import json
 import os
 import stat
@@ -14,6 +15,7 @@ import threading
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
+from hashlib import blake2b
 from pathlib import Path
 from typing import Generic, TypeVar
 
@@ -43,6 +45,53 @@ class GenerationMismatch(DurableStateError):
 
 class BackpressureError(DurableStateError):
     """Raised instead of silently dropping an item when a queue is full."""
+
+
+class _BoundedMembershipFilter:
+    """Fixed-memory, no-false-negative membership hint for one JSONL stream.
+
+    A positive is never treated as proof: callers must scan the durable JSONL
+    for the exact record.  This gives a fixed resident footprint while a
+    filter collision can only cost extra I/O, never admit an altered replay.
+    """
+
+    # Bloom sizing for 2,000,000 identities at <= 1e-9 false positives:
+    # m = -n ln(p) / ln(2)^2 = 86,253,012 bits, k ~= 30.  The 10.3 MiB
+    # resident filter makes a full journal fallback extraordinarily rare;
+    # crossing capacity fails closed rather than saturating into O(N) scans.
+    _CAPACITY = 2_000_000
+    _BITS = 86_253_016
+    _HASHES = 30
+
+    def __init__(self) -> None:
+        self._bits = bytearray(self._BITS // 8)
+        self.count = 0
+
+    def _positions(self, value: str) -> Iterator[int]:
+        digest = blake2b(str(value).encode("utf-8"), digest_size=16).digest()
+        first = int.from_bytes(digest[:8], "big")
+        step = int.from_bytes(digest[8:], "big") | 1
+        for offset in range(self._HASHES):
+            yield (first + offset * step) % self._BITS
+
+    def add(self, value: str) -> None:
+        for position in self._positions(value):
+            self._bits[position >> 3] |= 1 << (position & 7)
+
+    def note_identity(self) -> None:
+        if self.count >= self._CAPACITY:
+            raise BackpressureError("durable membership filter capacity exhausted")
+        self.count += 1
+
+    def require_capacity(self) -> None:
+        if self.count >= self._CAPACITY:
+            raise BackpressureError("durable membership filter capacity exhausted")
+
+    def may_contain(self, value: str) -> bool:
+        return all(
+            self._bits[position >> 3] & (1 << (position & 7))
+            for position in self._positions(value)
+        )
 
 
 def _fsync_directory(directory: Path) -> None:
@@ -422,30 +471,71 @@ class AppendOnlyJsonl:
                 raise DurableCorruptionError(
                     f"journal is not a regular file: {self.path}"
                 )
-            raw = bytearray()
+        except OSError as exc:
+            raise DurableCorruptionError(f"cannot read journal {self.path}") from exc
+        try:
+            decoder = codecs.getincrementaldecoder("utf-8")("strict")
+            buffered = ""
+            line_number = 0
             while True:
                 chunk = os.read(fd, 1024 * 1024)
                 if not chunk:
-                    break
-                raw.extend(chunk)
-        except OSError as exc:
-            raise DurableCorruptionError(f"cannot read journal {self.path}") from exc
+                    try:
+                        buffered += decoder.decode(b"", final=True)
+                    except UnicodeDecodeError as exc:
+                        raise DurableCorruptionError(
+                            f"invalid UTF-8 journal {self.path}"
+                        ) from exc
+                    if buffered:
+                        line_number += 1
+                        yield _strict_json_line(buffered, self.path, line_number)
+                    return
+                try:
+                    buffered += decoder.decode(chunk, final=False)
+                except UnicodeDecodeError as exc:
+                    raise DurableCorruptionError(
+                        f"invalid UTF-8 journal {self.path}"
+                    ) from exc
+                while True:
+                    newline = buffered.find("\n")
+                    if newline < 0:
+                        break
+                    line_number += 1
+                    line = buffered[: newline + 1]
+                    buffered = buffered[newline + 1 :]
+                    yield _strict_json_line(line, self.path, line_number)
         finally:
             if fd >= 0:
                 os.close(fd)
             os.close(parent_fd)
-        try:
-            text = bytes(raw).decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise DurableCorruptionError(f"invalid UTF-8 journal {self.path}") from exc
-        if not text:
-            return
-        lines = text.splitlines(keepends=True)
-        for line_number, line in enumerate(lines, 1):
-            yield _strict_json_line(line, self.path, line_number)
 
     def read_all(self) -> list[dict[str, object]]:
         return list(self.records())
+
+    def fingerprint(self) -> tuple[int, int, int, int] | None:
+        """Return an O(1), dirfd-validated snapshot for external append drift."""
+
+        parent_fd, _ = _open_parent(self.path)
+        try:
+            try:
+                info = os.stat(
+                    self.path.name, dir_fd=parent_fd, follow_symlinks=False
+                )
+            except FileNotFoundError:
+                return None
+            if (
+                stat.S_ISLNK(info.st_mode)
+                or not stat.S_ISREG(info.st_mode)
+                or info.st_uid != os.geteuid()
+                or info.st_nlink != 1
+                or info.st_mode & 0o077
+            ):
+                raise DurableCorruptionError(f"journal is not a regular file: {self.path}")
+            return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+        except OSError as exc:
+            raise DurableCorruptionError(f"cannot stat journal {self.path}") from exc
+        finally:
+            os.close(parent_fd)
 
 
 class AppendOnlySet:
@@ -515,6 +605,15 @@ class AppendOnlySet:
 class DurableVerifiedTickStream:
     """Producer-owned verified stream plus explicit writer acknowledgements."""
 
+    # These are deliberately bounded in-memory acceleration structures.  The
+    # JSONL files remain the authority: a filter hit is always confirmed from
+    # the durable journal after recovery or when it falls outside this window.
+    # Keeping the live sparse window bounded prevents an adversarial out of
+    # order writer from turning acknowledgement bookkeeping into an unbounded
+    # second index.
+    _ACK_SPARSE_LIMIT = 4096
+    _TICK_CACHE_LIMIT = 4096
+
     def __init__(
         self, directory: str | Path, *, generation: str, read_only: bool = False
     ) -> None:
@@ -541,6 +640,16 @@ class DurableVerifiedTickStream:
         self._lock_path = self.directory / ".stream.lock"
         self._lock = threading.RLock()
         self._index: dict[str, VerifiedTick] | None = None
+        self._indexed_watermark_seq = -1
+        self._ack_frontier = 0
+        self._ack_sparse: set[int] = set()
+        self._ack_fingerprint: tuple[int, int, int, int] | None = None
+        self._event_count = 0
+        self._ack_count = 0
+        self._ingest_membership = _BoundedMembershipFilter()
+        self._source_event_membership = _BoundedMembershipFilter()
+        self._raw_membership = _BoundedMembershipFilter()
+        self._ack_membership = _BoundedMembershipFilter()
         if self.read_only:
             self._validate_read_only_layout()
             # Strict consumers validate the complete producer state at open
@@ -663,9 +772,18 @@ class DurableVerifiedTickStream:
         """Validate and cache the stream while its caller owns any needed lock."""
 
         if self._index is None:
-            index: dict[str, VerifiedTick] = {}
+            cache: dict[str, VerifiedTick] = {}
+            self._ingest_membership = _BoundedMembershipFilter()
+            self._source_event_membership = _BoundedMembershipFilter()
+            self._raw_membership = _BoundedMembershipFilter()
+            self._ack_membership = _BoundedMembershipFilter()
             expected_seq = 1
-            source_events: dict[str, str] = {}
+            # Recovery-only fixed-width binding table.  It validates every
+            # acknowledgement against the exact persisted identity, sequence,
+            # and event hash without retaining unbounded Python objects; it is
+            # discarded before the worker accepts new ingress.
+            recovery_bindings = bytearray()
+            last_tick: VerifiedTick | None = None
             for record in self.journal.records():
                 if (
                     set(record) != {"record_type", "tick"}
@@ -688,16 +806,39 @@ class DurableVerifiedTickStream:
                     raise DurableCorruptionError(
                         f"verified tick ingest sequence gap/duplicate: expected {expected_seq}, got {tick.ingest_seq}"
                     )
-                if tick.ingest_id in index:
-                    raise DuplicateRecordError(f"ingest_id reused: {tick.ingest_id}")
+                if self._ingest_membership.may_contain(tick.ingest_id):
+                    prior = self._exact_tick_unlocked(
+                        lambda item, identity=tick.ingest_id: item.ingest_id == identity,
+                        before_sequence=tick.ingest_seq,
+                    )
+                    if prior is not None:
+                        raise DuplicateRecordError(f"ingest_id reused: {tick.ingest_id}")
                 if tick.source_event_id:
-                    prior_hash = source_events.get(tick.source_event_id)
-                    if prior_hash is not None:
+                    if self._source_event_membership.may_contain(tick.source_event_id):
+                        prior = self._exact_tick_unlocked(
+                            lambda item, identity=tick.source_event_id: item.source_event_id
+                            == identity,
+                            before_sequence=tick.ingest_seq,
+                        )
+                    else:
+                        prior = None
+                    if prior is not None:
                         raise DuplicateRecordError(
                             f"source_event_id reused: {tick.source_event_id}"
                         )
-                    source_events[tick.source_event_id] = tick.event_hash
-                index[tick.ingest_id] = tick
+                self._ingest_membership.note_identity()
+                self._ingest_membership.add(tick.ingest_id)
+                if tick.source_event_id:
+                    self._source_event_membership.note_identity()
+                    self._source_event_membership.add(tick.source_event_id)
+                if tick.raw_hash:
+                    self._raw_membership.note_identity()
+                    self._raw_membership.add(tick.raw_hash)
+                recovery_bindings.extend(self._ack_binding(tick))
+                cache[tick.ingest_id] = tick
+                while len(cache) > self._TICK_CACHE_LIMIT:
+                    cache.pop(next(iter(cache)))
+                last_tick = tick
                 expected_seq += 1
             state = self.watermark.read()
             state_generation = str(state.get("stream_generation") or self.generation)
@@ -708,11 +849,7 @@ class DurableVerifiedTickStream:
             max_seq = expected_seq - 1
             watermark_seq = int(state.get("last_ingest_seq") or 0)
             watermark_hash = str(state.get("last_event_hash") or "")
-            expected_hash = (
-                max(index.values(), key=lambda item: item.ingest_seq).event_hash
-                if index
-                else ""
-            )
+            expected_hash = last_tick.event_hash if last_tick is not None else ""
             if watermark_seq > max_seq:
                 raise DurableCorruptionError(
                     "verified tick watermark is ahead of journal"
@@ -733,11 +870,113 @@ class DurableVerifiedTickStream:
                 )
             elif watermark_hash != expected_hash:
                 raise DurableCorruptionError("verified tick watermark hash mismatch")
-            self._validate_acknowledgements(index)
+            self._rebuild_ack_frontier_unlocked(recovery_bindings)
+            self._ack_fingerprint = self.acknowledgements.journal.fingerprint()
             # Do not retain a partial journal if checkpoint or acknowledgement
             # validation fails.  A later access must fail closed again.
-            self._index = index
+            # Keep a bounded hot cache only.  Positive membership checks fall
+            # back to the authoritative JSONL for older identities.
+            self._index = cache
+            self._indexed_watermark_seq = max_seq
+            self._event_count = max_seq
         return self._index
+
+    @staticmethod
+    def _ack_binding(tick: VerifiedTick) -> bytes:
+        return blake2b(
+            canonical_json(
+                {
+                    "ingest_id": tick.ingest_id,
+                    "ingest_seq": tick.ingest_seq,
+                    "event_hash": tick.event_hash,
+                    "stream_generation": tick.stream_generation,
+                }
+            ).encode("utf-8"),
+            digest_size=32,
+        ).digest()
+
+    def _rebuild_ack_frontier_unlocked(self, bindings: bytes) -> None:
+        """Rebuild the compact acknowledgement frontier from durable JSONL.
+
+        This is recovery-only.  In the steady state ``acknowledge_tick_write``
+        advances the frontier incrementally.  A checkpoint is an optimisation,
+        never correctness authority: a crash after the acknowledgement fsync
+        and before the checkpoint is reconstructed here from the journal.
+        """
+
+        frontier = 0
+        sparse: set[int] = set()
+        ack_count = 0
+        seen = _BoundedMembershipFilter()
+        self._ack_membership = _BoundedMembershipFilter()
+        for record in self.acknowledgements.journal.records():
+            if set(record) != {"ingest_id", "stream_generation", "ingest_seq", "event_hash"}:
+                raise DurableCorruptionError("acknowledgement fields are invalid")
+            identity = str(record.get("ingest_id") or "")
+            sequence = int(record.get("ingest_seq") or 0)
+            if not identity or sequence < 1 or record.get("stream_generation") != self.generation:
+                raise DurableCorruptionError("acknowledgement does not bind to tick")
+            start = (sequence - 1) * 32
+            expected = bindings[start : start + 32]
+            actual = blake2b(
+                canonical_json(
+                    {
+                        "ingest_id": identity,
+                        "ingest_seq": sequence,
+                        "event_hash": record.get("event_hash"),
+                        "stream_generation": record.get("stream_generation"),
+                    }
+                ).encode("utf-8"),
+                digest_size=32,
+            ).digest()
+            if len(expected) != 32 or actual != expected:
+                raise DurableCorruptionError("acknowledgement does not bind to tick")
+            if seen.may_contain(identity) and self._exact_acknowledgement_by_id_unlocked(identity) != record:
+                raise DurableCorruptionError("acknowledgement identity duplicated")
+            seen.note_identity()
+            seen.add(identity)
+            self._ack_membership.note_identity()
+            self._ack_membership.add(identity)
+            ack_count += 1
+            if sequence == frontier + 1:
+                frontier += 1
+                while frontier + 1 in sparse:
+                    sparse.remove(frontier + 1)
+                    frontier += 1
+            elif sequence > frontier:
+                if len(sparse) >= self._ACK_SPARSE_LIMIT:
+                    raise BackpressureError("durable acknowledgement sparse frontier exhausted")
+                sparse.add(sequence)
+        self._ack_frontier = frontier
+        self._ack_sparse = sparse
+        self._ack_count = ack_count
+
+    def _ack_bindings_unlocked(self) -> bytes:
+        """Stream exact tick bindings only when another process changed acks."""
+
+        bindings = bytearray()
+        expected_sequence = 1
+        for record in self.journal.records():
+            if set(record) != {"record_type", "tick"} or record.get("record_type") != "verified_tick":
+                raise DurableCorruptionError("unexpected record type in verified tick stream")
+            try:
+                tick = VerifiedTick.from_dict(record["tick"])  # type: ignore[arg-type]
+            except (KeyError, TypeError, ValueError) as exc:
+                raise DurableCorruptionError("invalid verified tick record") from exc
+            if tick.stream_generation != self.generation or tick.ingest_seq != expected_sequence:
+                raise DurableCorruptionError("verified tick stream changed during acknowledgement refresh")
+            bindings.extend(self._ack_binding(tick))
+            expected_sequence += 1
+        if expected_sequence - 1 != self._indexed_watermark_seq:
+            raise DurableCorruptionError("verified tick stream changed during acknowledgement refresh")
+        return bytes(bindings)
+
+    def _refresh_ack_frontier_if_changed_unlocked(self) -> None:
+        fingerprint = self.acknowledgements.journal.fingerprint()
+        if self._ack_fingerprint == fingerprint:
+            return
+        self._rebuild_ack_frontier_unlocked(self._ack_bindings_unlocked())
+        self._ack_fingerprint = fingerprint
 
     def _validate_acknowledgements(self, index: Mapping[str, VerifiedTick]) -> None:
         self.acknowledgements._load()  # type: ignore[attr-defined]
@@ -760,17 +999,66 @@ class DurableVerifiedTickStream:
             ):
                 raise DurableCorruptionError("acknowledgement does not bind to tick")
 
+    def _exact_tick_unlocked(
+        self,
+        predicate: object,
+        *,
+        before_sequence: int | None = None,
+        unique: bool = True,
+    ) -> VerifiedTick | None:
+        """Resolve a filter hit from durable state while the stream is locked."""
+
+        matches = predicate
+        if not callable(matches):  # pragma: no cover - internal invariant
+            raise TypeError("tick predicate is invalid")
+        found: VerifiedTick | None = None
+        for record in self.journal.records():
+            if set(record) != {"record_type", "tick"} or record.get("record_type") != "verified_tick":
+                raise DurableCorruptionError("unexpected record type in verified tick stream")
+            try:
+                tick = VerifiedTick.from_dict(record["tick"])  # type: ignore[arg-type]
+            except (KeyError, TypeError, ValueError) as exc:
+                raise DurableCorruptionError("invalid verified tick record") from exc
+            if tick.stream_generation != self.generation:
+                raise GenerationMismatch("verified tick generation mismatch")
+            if (before_sequence is None or tick.ingest_seq < before_sequence) and matches(tick):
+                if found is not None and unique:
+                    raise DuplicateRecordError("verified tick identity reused")
+                if found is None:
+                    found = tick
+        return found
+
+    def _cache_tick(self, tick: VerifiedTick) -> None:
+        index = self._index
+        if index is None:  # pragma: no cover - callers load first
+            return
+        index.pop(tick.ingest_id, None)
+        index[tick.ingest_id] = tick
+        while len(index) > self._TICK_CACHE_LIMIT:
+            index.pop(next(iter(index)))
+
+    def _exact_acknowledgement_unlocked(
+        self, tick: VerifiedTick
+    ) -> dict[str, object] | None:
+        return self._exact_acknowledgement_by_id_unlocked(tick.ingest_id)
+
+    def _exact_acknowledgement_by_id_unlocked(
+        self, ingest_id: str
+    ) -> dict[str, object] | None:
+        found: dict[str, object] | None = None
+        for record in self.acknowledgements.journal.records():
+            if str(record.get("ingest_id") or "") != str(ingest_id):
+                continue
+            if found is not None:
+                raise DurableCorruptionError("acknowledgement identity duplicated")
+            found = record
+        return found
+
     def next_sequence(self) -> int:
         with self._lock, self._process_lock():
-            index = self._load_index_unlocked()
+            self._load_index_unlocked()
             state = self.watermark.read()
-            return (
-                max(
-                    int(state.get("last_ingest_seq") or 0),
-                    max((item.ingest_seq for item in index.values()), default=0),
-                )
-                + 1
-            )
+            return int(state.get("last_ingest_seq") or 0) + 1
 
     def append(self, tick: VerifiedTick) -> bool:
         if tick.stream_generation != self.generation:
@@ -780,30 +1068,47 @@ class DurableVerifiedTickStream:
         if tick.event_hash != tick.compute_event_hash():
             raise DurableCorruptionError(f"event hash mismatch for {tick.ingest_id}")
         with self._lock, self._process_lock():
-            # Another producer can have appended while this object was idle.
-            self._index = None
+            state = self.watermark.read()
+            # Preserve #327's competing-producer semantics without a steady
+            # state replay: only a watermark change made by another stream
+            # object invalidates our compact in-process frontier.
+            if self._indexed_watermark_seq != int(state.get("last_ingest_seq") or 0):
+                self._index = None
             index = self._load_index_unlocked()
             prior = index.get(tick.ingest_id)
+            if prior is None and self._ingest_membership.may_contain(tick.ingest_id):
+                prior = self._exact_tick_unlocked(
+                    lambda item: item.ingest_id == tick.ingest_id
+                )
             if prior:
                 if prior.event_hash != tick.event_hash:
                     raise DuplicateRecordError(f"ingest_id reused: {tick.ingest_id}")
                 return False
+            # Loading can repair a producer watermark left behind by a crash
+            # after the journal fsync, so use the post-recovery frontier.
             state = self.watermark.read()
-            expected = (
-                max(
-                    int(state.get("last_ingest_seq") or 0),
-                    max((item.ingest_seq for item in index.values()), default=0),
-                )
-                + 1
-            )
+            expected = int(state.get("last_ingest_seq") or 0) + 1
             if tick.ingest_seq != expected:
                 raise DurableStateError(
                     f"expected ingest_seq {expected}, got {tick.ingest_seq}"
                 )
+            self._ingest_membership.require_capacity()
+            if tick.source_event_id:
+                self._source_event_membership.require_capacity()
+            if tick.raw_hash:
+                self._raw_membership.require_capacity()
             self.journal.append(
                 {"record_type": "verified_tick", "tick": tick.as_dict()}
             )
-            index[tick.ingest_id] = tick
+            self._cache_tick(tick)
+            self._ingest_membership.note_identity()
+            self._ingest_membership.add(tick.ingest_id)
+            if tick.source_event_id:
+                self._source_event_membership.note_identity()
+                self._source_event_membership.add(tick.source_event_id)
+            if tick.raw_hash:
+                self._raw_membership.note_identity()
+                self._raw_membership.add(tick.raw_hash)
             self.watermark.write(
                 {
                     "stream_generation": self.generation,
@@ -811,43 +1116,72 @@ class DurableVerifiedTickStream:
                     "last_event_hash": tick.event_hash,
                 }
             )
+            self._indexed_watermark_seq = tick.ingest_seq
+            self._event_count += 1
             return True
 
     def iter_from(
         self, after_seq: int = 0, *, limit: int | None = None
     ) -> Iterator[VerifiedTick]:
-        with self._lock:
-            values = sorted(
-                self._load_index().values(), key=lambda item: item.ingest_seq
-            )
-            selected = [item for item in values if item.ingest_seq > int(after_seq)]
-        if limit is not None:
-            selected = selected[: max(0, int(limit))]
-        yield from selected
+        remaining = None if limit is None else max(0, int(limit))
+        with self._lock, self._process_lock():
+            self._load_index_unlocked()
+            for record in self.journal.records():
+                if set(record) != {"record_type", "tick"} or record.get("record_type") != "verified_tick":
+                    raise DurableCorruptionError("unexpected record type in verified tick stream")
+                try:
+                    tick = VerifiedTick.from_dict(record["tick"])  # type: ignore[arg-type]
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise DurableCorruptionError("invalid verified tick record") from exc
+                if tick.ingest_seq <= int(after_seq):
+                    continue
+                if remaining is not None and remaining <= 0:
+                    break
+                yield tick
+                if remaining is not None:
+                    remaining -= 1
 
     def pending_for_tick_writer(self) -> list[VerifiedTick]:
-        self._validate_acknowledgements(self._load_index())
-        return [
-            tick
-            for tick in self.iter_from()
-            if not self.acknowledgements.contains(tick.ingest_id)
-        ]
+        # Do not call the public ``is_acknowledged`` from ``iter_from``: that
+        # generator deliberately holds the process snapshot lock while it
+        # yields, and taking a second flock descriptor can deadlock on macOS.
+        with self._lock, self._process_lock():
+            self._load_index_unlocked()
+            self._refresh_ack_frontier_if_changed_unlocked()
+            pending: list[VerifiedTick] = []
+            for record in self.journal.records():
+                if set(record) != {"record_type", "tick"} or record.get("record_type") != "verified_tick":
+                    raise DurableCorruptionError("unexpected record type in verified tick stream")
+                try:
+                    tick = VerifiedTick.from_dict(record["tick"])  # type: ignore[arg-type]
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise DurableCorruptionError("invalid verified tick record") from exc
+                if not self._is_acknowledged_unlocked(tick):
+                    pending.append(tick)
+            return pending
 
     def get(self, ingest_id: str) -> VerifiedTick | None:
         with self._lock:
-            return self._load_index().get(str(ingest_id))
+            identity = str(ingest_id)
+            cached = self._load_index().get(identity)
+            if cached is not None or not self._ingest_membership.may_contain(identity):
+                return cached
+            with self._process_lock():
+                return self._exact_tick_unlocked(lambda item: item.ingest_id == identity)
 
     def get_by_sequence(self, ingest_seq: int) -> VerifiedTick | None:
         sequence = int(ingest_seq)
         with self._lock:
-            return next(
-                (
-                    tick
-                    for tick in self._load_index().values()
-                    if tick.ingest_seq == sequence
-                ),
+            cached = next(
+                (tick for tick in self._load_index().values() if tick.ingest_seq == sequence),
                 None,
             )
+            if cached is not None:
+                return cached
+            if sequence < 1 or sequence > self._indexed_watermark_seq:
+                return None
+            with self._process_lock():
+                return self._exact_tick_unlocked(lambda item: item.ingest_seq == sequence)
 
     def find_by_source_event_id(self, source_event_id: str) -> VerifiedTick | None:
         identity = str(source_event_id or "")
@@ -857,21 +1191,51 @@ class DurableVerifiedTickStream:
             for tick in self._load_index().values():
                 if tick.source_event_id == identity:
                     return tick
-        return None
+            if not self._source_event_membership.may_contain(identity):
+                return None
+            with self._process_lock():
+                return self._exact_tick_unlocked(
+                    lambda item: item.source_event_id == identity
+                )
 
     def find_by_raw_hash(self, raw_hash: str) -> VerifiedTick | None:
         digest = str(raw_hash or "")
         if not digest:
             return None
         with self._lock:
-            for tick in self._load_index().values():
-                if tick.raw_hash == digest:
-                    return tick
-        return None
+            self._load_index()
+            if not self._raw_membership.may_contain(digest):
+                return None
+            with self._process_lock():
+                return self._exact_tick_unlocked(
+                    lambda item: item.raw_hash == digest, unique=False
+                )
 
     def is_acknowledged(self, tick: VerifiedTick) -> bool:
-        self._validate_acknowledgements(self._load_index())
-        return self.acknowledgements.contains(tick.ingest_id)
+        with self._lock, self._process_lock():
+            self._load_index_unlocked()
+            self._refresh_ack_frontier_if_changed_unlocked()
+            return self._is_acknowledged_unlocked(tick)
+
+    def _is_acknowledged_unlocked(self, tick: VerifiedTick) -> bool:
+        if tick.ingest_seq <= self._ack_frontier:
+            return True
+        if tick.ingest_seq in self._ack_sparse:
+            return True
+        # A negative from the compact state is not used as durable proof:
+        # check the append-only journal before saying the item is pending.
+        # This covers a process crash between acknowledgement fsync and a
+        # later checkpoint/state update without any false negative.
+        if not self._ack_membership.may_contain(tick.ingest_id):
+            return False
+        record = self._exact_acknowledgement_unlocked(tick)
+        if record is None:
+            return False
+        return (
+            record.get("stream_generation") == tick.stream_generation
+            and int(record.get("ingest_seq") or 0) == tick.ingest_seq
+            and record.get("event_hash") == tick.event_hash
+        )
 
     def acknowledge_tick_write(self, tick: VerifiedTick) -> bool:
         if tick.stream_generation != self.generation:
@@ -879,10 +1243,20 @@ class DurableVerifiedTickStream:
         if tick.event_hash != tick.compute_event_hash():
             raise DurableCorruptionError("acknowledgement source hash mismatch")
         with self._lock, self._process_lock():
-            self._index = None
-            self.acknowledgements._values = None  # type: ignore[attr-defined]
-            self.acknowledgements._records = None  # type: ignore[attr-defined]
+            state = self.watermark.read()
+            if self._indexed_watermark_seq != int(state.get("last_ingest_seq") or 0):
+                # Another producer may have advanced the stream while this
+                # writer object was idle.  Revalidate its complete durable
+                # frontier before binding an acknowledgement to any tick.
+                self._index = None
+                self.acknowledgements._values = None  # type: ignore[attr-defined]
+                self.acknowledgements._records = None  # type: ignore[attr-defined]
             persisted = self._load_index_unlocked().get(tick.ingest_id)
+            self._refresh_ack_frontier_if_changed_unlocked()
+            if persisted is None and self._ingest_membership.may_contain(tick.ingest_id):
+                persisted = self._exact_tick_unlocked(
+                    lambda item: item.ingest_id == tick.ingest_id
+                )
             if persisted is None:
                 raise DurableCorruptionError("acknowledgement references unknown tick")
             if (
@@ -893,24 +1267,54 @@ class DurableVerifiedTickStream:
                 raise DurableCorruptionError(
                     "acknowledgement does not bind to persisted tick"
                 )
-            return self.acknowledgements.add(
-                tick.ingest_id,
-                stream_generation=tick.stream_generation,
-                ingest_seq=tick.ingest_seq,
-                event_hash=tick.event_hash,
+            if tick.ingest_seq > self._ack_frontier + 1 and (
+                tick.ingest_seq not in self._ack_sparse
+                and len(self._ack_sparse) >= self._ACK_SPARSE_LIMIT
+            ):
+                raise BackpressureError(
+                    "durable acknowledgement sparse frontier exhausted"
+                )
+            expected = {
+                "ingest_id": tick.ingest_id,
+                "stream_generation": tick.stream_generation,
+                "ingest_seq": tick.ingest_seq,
+                "event_hash": tick.event_hash,
+            }
+            prior = (
+                self._exact_acknowledgement_unlocked(tick)
+                if self._ack_membership.may_contain(tick.ingest_id)
+                else None
             )
+            if prior is not None:
+                if prior != expected:
+                    raise DuplicateRecordError(
+                        f"append-only set identity conflict: {tick.ingest_id}"
+                    )
+                return False
+            self._ack_membership.require_capacity()
+            self.acknowledgements.journal.append(expected)
+            self._ack_fingerprint = self.acknowledgements.journal.fingerprint()
+            self._ack_membership.note_identity()
+            self._ack_membership.add(tick.ingest_id)
+            self._ack_count += 1
+            if tick.ingest_seq == self._ack_frontier + 1:
+                self._ack_frontier += 1
+                while self._ack_frontier + 1 in self._ack_sparse:
+                    self._ack_sparse.remove(self._ack_frontier + 1)
+                    self._ack_frontier += 1
+            elif tick.ingest_seq > self._ack_frontier:
+                self._ack_sparse.add(tick.ingest_seq)
+            return True
 
     def stats(self) -> dict[str, object]:
-        values = list(self.iter_from())
-        state = self.watermark.read()
-        return {
-            "stream_generation": self.generation,
-            "events": len(values),
-            "last_ingest_seq": int(state.get("last_ingest_seq") or 0),
-            "pending_writer_acks": sum(
-                not self.acknowledgements.contains(item.ingest_id) for item in values
-            ),
-        }
+        with self._lock:
+            self._load_index()
+            return {
+                "stream_generation": self.generation,
+                "events": self._event_count,
+                "last_ingest_seq": self._indexed_watermark_seq,
+                "pending_writer_acks": self._event_count - self._ack_count,
+            }
 
 
 class AppendOnlyEvidenceLog:
