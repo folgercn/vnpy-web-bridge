@@ -38,3 +38,20 @@ empty; this is distinct from arbitrary-source capacity exhaustion. All writes
 use normal fsync durability (`"fsync": true`); no capacity-only numbers are
 mixed into the real-durability throughput result. `--json-out` stores
 machine-readable evidence.
+
+## Durable fsync breakdown (#332)
+
+`durable_fsync_breakdown.py` measures the current implementation in a real
+temporary directory. It reports elapsed time and syscall counts for journal
+append, checkpoint write, source-fence checkpoint write, and acknowledgement
+journal append (including payload write, file fsync, parent-directory fsync,
+and atomic replace where applicable).
+
+```sh
+python3 scripts/phase_b_workers/benchmarks/durable_fsync_breakdown.py \
+  --iterations 100 --groups 1,32,64 --json-out /tmp/issue332-fsync.json
+```
+
+`group_size` repeats the existing operation and is **not** group commit. The
+result is a baseline only; it never opens ZMQ, QuestDB, RPC, or trading
+connections. Use 100–1000 iterations for comparable measurements.
