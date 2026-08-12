@@ -55,3 +55,29 @@ python3 scripts/phase_b_workers/benchmarks/durable_fsync_breakdown.py \
 `group_size` repeats the existing operation and is **not** group commit. The
 result is a baseline only; it never opens ZMQ, QuestDB, RPC, or trading
 connections. Use 100–1000 iterations for comparable measurements.
+
+## Synthetic market load
+
+`synthetic_market_load.py` drives the real `MarketDataWorker.accept()` and
+`process_queue(flush=False)` path with deterministic envelopes in a fresh
+temporary state directory. It defaults to a fake writer. Set `ISSUE332_QUESTDB_DSN` explicitly
+to use `QuestDbTickWriter`; never put a DSN in source or output.
+
+```sh
+PYTHONPATH=. python3 scripts/phase_b_workers/benchmarks/synthetic_market_load.py \
+  --rate 55.5 --duration 5 --json-out /tmp/issue332-load.json
+```
+
+`--rate` accepts values such as `55.5`, `200`, or `500`. Results include
+generated/processed/persisted counts, queue max, tick-age p50/p95/p99/max,
+RSS, worker counters, actual QuestDB-shaped batch-size distribution, durable
+journal/ack/watermark counts, and restart recovery. The default synthetic
+writer subclasses `QuestDbTickWriter` but never opens a network connection, so
+the real worker QuestDB batch path is exercised safely offline. Input is
+The script uses 20ms slices to simulate raw collection and keeps the durable
+pending group across loops with `process_queue(flush=False)`. It is not direct
+`worker.run()` timer evidence; the production run-loop's 50ms behavior is
+covered by the corresponding tests. At 55.5 ticks/s, expect roughly 2–3 ticks
+per 50ms group when the sample is long enough. Tick age is measured at the
+synthetic writer's batch commit from the tick's durable receipt timestamp, not
+immediately after `accept()`.

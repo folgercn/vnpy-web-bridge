@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1].parent))
 
 from phase_b_artifact_custody import _publish_projection as publish_custody_projection
 
+import phase_b_workers.durable as durable_module
 import phase_b_workers.market_data_worker as market_data_module
 from phase_b_workers.contracts import GatewayTickEnvelope, VerifiedTick
 from phase_b_workers.durable import (
@@ -561,23 +562,26 @@ def test_market_questdb_partial_ack_retry_never_reinserts_committed_batch(
             envelope(f"partial-{sequence}", sequence, last_price=sequence)
         )
 
-    acknowledge = worker.stream.acknowledge_tick_write
-    calls = 0
+    acknowledge = worker.stream.acknowledge_tick_writes
+    failed = False
 
-    def fail_second_ack(tick):
-        nonlocal calls
-        calls += 1
-        if calls == 2:
+    def fail_after_first_durable_ack(ticks):
+        nonlocal failed
+        if not failed:
+            failed = True
+            acknowledge(tuple(ticks)[:1])
             raise OSError("ack failed after commit")
-        acknowledge(tick)
+        return acknowledge(ticks)
 
-    monkeypatch.setattr(worker.stream, "acknowledge_tick_write", fail_second_ack)
+    monkeypatch.setattr(
+        worker.stream, "acknowledge_tick_writes", fail_after_first_durable_ack
+    )
     with pytest.raises(OSError, match="ack failed after commit"):
         worker.process_queue()
     assert connection.commits == 1
     assert len(worker._questdb_pending) == 2
 
-    monkeypatch.setattr(worker.stream, "acknowledge_tick_write", acknowledge)
+    monkeypatch.setattr(worker.stream, "acknowledge_tick_writes", acknowledge)
     worker.accept(envelope("partial-3", 3, last_price=3))
     assert worker.process_queue() == 1
     assert connection.commits == 2
@@ -644,6 +648,316 @@ def test_market_questdb_failure_keeps_batch_bounded_and_shutdown_fails(
     assert 0 < len(worker._questdb_pending) <= worker.QUESTDB_BATCH_MAX_SIZE
     assert len(worker._questdb_pending) + worker.ingress.qsize() == 100
     assert connections and all(connection.rollbacks == 1 for connection in connections)
+
+
+def test_questdb_predrain_keeps_poison_and_tail_after_durable_prefix(tmp_path):
+    connection = FakeConnection()
+    worker = MarketDataWorker(
+        tmp_path / "market",
+        generation="g1",
+        writer=QuestDbTickWriter("postgresql://not-logged", connect=lambda _dsn: connection),
+    )
+    worker.recover()
+    worker.accept(envelope("valid", 1, last_price=1))
+    worker.accept(
+        GatewayTickEnvelope.create(
+            event_id="poison",
+            source_service="gateway-market-reader",
+            source_generation="source-g1",
+            source_seq=2,
+            observed_at=datetime(2026, 8, 5, tzinfo=timezone.utc),
+            payload={"bid_price": 100, "ask_price": 102},
+        )
+    )
+    worker.accept(envelope("tail", 3, last_price=3))
+    with pytest.raises(ValueError, match="vt_symbol is required"):
+        worker.process_queue()
+    assert worker.stream.stats()["events"] == 1
+    assert [worker.ingress.get().event_id, worker.ingress.get().event_id] == [
+        "poison",
+        "tail",
+    ]
+    assert connection.commits == 1
+
+
+def test_questdb_pending_capacity_splits_63_plus_64_without_loss(tmp_path):
+    connection = FakeConnection()
+    writer = QuestDbTickWriter("postgresql://not-logged", connect=lambda _dsn: connection)
+    worker = MarketDataWorker(tmp_path / "market", generation="g1", writer=writer)
+    worker.recover()
+    old = [
+        VerifiedTick.from_raw(
+            {"source_event_id": f"old-{sequence}", "vt_symbol": "rb2610.SHFE"},
+            stream_generation="g1",
+            ingest_seq=sequence,
+            source="gateway-market-reader",
+        )
+        for sequence in range(1, 64)
+    ]
+    assert all(worker.stream.append_many(old))
+    worker._questdb_pending = {tick.ingest_id: tick for tick in old}
+    batch_sizes = []
+    original_write = writer.write_verified_ticks
+
+    def record_batch(ticks):
+        batch_sizes.append(len(ticks))
+        original_write(ticks)
+
+    writer.write_verified_ticks = record_batch  # type: ignore[method-assign]
+    for sequence in range(1, 65):
+        worker.accept(envelope(f"new-{sequence}", sequence, last_price=sequence))
+    assert worker.process_queue() == 64
+    assert batch_sizes == [64, 63]
+    assert max(batch_sizes) == worker.QUESTDB_BATCH_MAX_SIZE
+    assert not worker.stream.pending_for_tick_writer()
+
+
+def test_finalize_failure_preserves_prepared_state_until_next_ingress_recovery(
+    tmp_path, monkeypatch
+):
+    connection = FakeConnection()
+    writer = QuestDbTickWriter(
+        "postgresql://not-logged", connect=lambda _dsn: connection
+    )
+    worker = MarketDataWorker(tmp_path / "market", generation="g1", writer=writer)
+    worker.recover()
+    original_write = worker.source_fence.write
+    failed = False
+
+    def fail_final(value):
+        nonlocal failed
+        if "prepared_batch" not in value and not failed:
+            failed = True
+            raise OSError("source fence final write failed")
+        original_write(value)
+
+    monkeypatch.setattr(worker.source_fence, "write", fail_final)
+    worker.accept(envelope("first", 1, last_price=1))
+    worker.accept(envelope("second", 2, last_price=2))
+    with pytest.raises(OSError, match="source fence final write failed"):
+        worker.process_queue()
+    assert worker._source_fence_state is not None
+    assert "prepared_batch" not in worker._source_fence_state
+    assert not worker.ingress.qsize()
+    assert len(worker._questdb_pending) == 2
+    assert len(worker.stream.pending_for_tick_writer()) == 2
+
+    assert worker.process_queue() == 0
+    assert connection.commits == 1
+    assert [record["ingest_seq"] for record in worker.stream.acknowledgements.journal.read_all()] == [1, 2]
+    assert not worker.stream.pending_for_tick_writer()
+
+
+def test_group_commit_apis_reject_65_without_consuming_or_writing(tmp_path):
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    journal = AppendOnlyJsonl(state / "journal.jsonl")
+    consumed = 0
+
+    def records():
+        nonlocal consumed
+        for sequence in range(100):
+            consumed += 1
+            yield {"sequence": sequence}
+
+    with pytest.raises(BackpressureError, match="group capacity exhausted"):
+        journal.append_many(records())
+    assert consumed == 65
+    assert not journal.path.exists()
+
+    stream = DurableVerifiedTickStream(tmp_path / "stream", generation="g1")
+    stream.initialize()
+    ticks = [
+        VerifiedTick.from_raw(
+            {"source_event_id": f"tick-{sequence}", "vt_symbol": "rb2610.SHFE"},
+            stream_generation="g1",
+            ingest_seq=sequence,
+            source="gateway-market-reader",
+        )
+        for sequence in range(1, 66)
+    ]
+    with pytest.raises(BackpressureError, match="tick group capacity exhausted"):
+        stream.append_many(iter(ticks))
+    assert stream.stats()["events"] == 0
+
+    assert all(stream.append_many(ticks[:64]))
+    with pytest.raises(BackpressureError, match="acknowledgement group capacity exhausted"):
+        stream.acknowledge_tick_writes(iter([*ticks[:64], ticks[0]]))
+    assert not stream.acknowledgements.journal.read_all()
+
+
+def test_append_only_jsonl_zero_write_poison_stops_same_instance(tmp_path, monkeypatch):
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    journal = AppendOnlyJsonl(state / "journal.jsonl")
+    original_write = durable_module.os.write
+    calls = 0
+
+    def zero_once(descriptor, value):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return 0
+        return original_write(descriptor, value)
+
+    monkeypatch.setattr(durable_module.os, "write", zero_once)
+    with pytest.raises(DurableCorruptionError, match="journal write failed"):
+        journal.append_many(({"first": 1},))
+    size = journal.path.stat().st_size
+    with pytest.raises(DurableStateError, match="writer is poisoned"):
+        journal.append_many(({"second": 2},))
+    assert journal.path.stat().st_size == size
+
+
+def test_append_only_jsonl_short_write_poison_requires_strict_restart_recovery(
+    tmp_path, monkeypatch
+):
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    journal = AppendOnlyJsonl(state / "journal.jsonl")
+    original_write = durable_module.os.write
+    calls = 0
+
+    def short_then_fail(descriptor, value):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return original_write(descriptor, value[:5])
+        raise OSError("short write interrupted")
+
+    monkeypatch.setattr(durable_module.os, "write", short_then_fail)
+    with pytest.raises(DurableCorruptionError, match="journal write failed"):
+        journal.append_many(({"first": 1},))
+    size = journal.path.stat().st_size
+    with pytest.raises(DurableStateError, match="writer is poisoned"):
+        journal.append_many(({"second": 2},))
+    assert journal.path.stat().st_size == size
+    with pytest.raises(DurableCorruptionError, match="noncanonical JSONL"):
+        AppendOnlyJsonl(journal.path).read_all()
+
+
+def test_stream_ack_and_watermark_write_failures_poison_same_instance(tmp_path, monkeypatch):
+    stream = DurableVerifiedTickStream(tmp_path / "stream", generation="g1")
+    stream.initialize()
+    first = VerifiedTick.from_raw(
+        {"source_event_id": "first", "vt_symbol": "rb2610.SHFE"},
+        stream_generation="g1",
+        ingest_seq=1,
+        source="gateway-market-reader",
+    )
+    monkeypatch.setattr(
+        stream.watermark,
+        "write",
+        lambda _value: (_ for _ in ()).throw(OSError("watermark interrupted")),
+    )
+    with pytest.raises(OSError, match="watermark interrupted"):
+        stream.append_many((first,))
+    with pytest.raises(DurableStateError, match="writer is poisoned"):
+        stream.append_many((first,))
+    # A fresh stream repairs the watermark from the complete journal prefix.
+    repaired = DurableVerifiedTickStream(tmp_path / "stream", generation="g1")
+    assert repaired.stats()["events"] == 1
+
+    second = VerifiedTick.from_raw(
+        {"source_event_id": "second", "vt_symbol": "rb2610.SHFE"},
+        stream_generation="g1",
+        ingest_seq=2,
+        source="gateway-market-reader",
+    )
+    assert repaired.append(second)
+    monkeypatch.setattr(
+        repaired.acknowledgements.journal,
+        "append_many",
+        lambda _values: (_ for _ in ()).throw(OSError("ack interrupted")),
+    )
+    with pytest.raises(OSError, match="ack interrupted"):
+        repaired.acknowledge_tick_writes((first, second))
+    assert repaired._ack_frontier == 0
+    with pytest.raises(DurableStateError, match="writer is poisoned"):
+        repaired.acknowledge_tick_writes((first,))
+
+
+@pytest.mark.parametrize(("count", "expected_batch"), [(3, 3), (64, 64)])
+def test_questdb_run_groups_raw_ingress_by_timer_or_size(
+    tmp_path, monkeypatch, count, expected_batch
+):
+    clock = [0.0]
+    monkeypatch.setattr(
+        market_data_module.monotonic_time, "monotonic", lambda: clock[0]
+    )
+    connection = FakeConnection()
+
+    class Source:
+        def __init__(self):
+            self.callback = None
+            self.remaining = list(range(1, count + 1))
+
+        def subscribe(self, callback):
+            self.callback = callback
+
+        def poll(self, _timeout_ms=0, *, limit=256):
+            for _ in range(min(limit, len(self.remaining))):
+                sequence = self.remaining.pop(0)
+                self.callback(envelope(f"run-{sequence}", sequence, last_price=sequence))
+            return 0
+
+        def has_backlog(self):
+            return bool(self.remaining)
+
+        def close(self):
+            return None
+
+    class ClockStop:
+        def __init__(self):
+            self.waits = 0
+
+        def is_set(self):
+            return self.waits >= 7
+
+        def wait(self, seconds):
+            self.waits += 1
+            clock[0] += max(float(seconds), 0.01)
+            return self.is_set()
+
+    writer = QuestDbTickWriter("postgresql://not-logged", connect=lambda _dsn: connection)
+    worker = MarketDataWorker(
+        tmp_path / "market", generation="g1", writer=writer, source=Source()
+    )
+    worker.run(stop_event=ClockStop(), idle_seconds=0.01)
+    assert worker.metrics_snapshot()["questdb_batch"]["size_samples"] == [expected_batch]
+    assert not worker.stream.pending_for_tick_writer()
+
+
+def test_questdb_run_shutdown_flushes_partial_raw_ingress(tmp_path, monkeypatch):
+    connection = FakeConnection()
+    stop = threading.Event()
+
+    class Source:
+        def subscribe(self, callback):
+            self.callback = callback
+
+        def poll(self, _timeout_ms=0, *, limit=256):
+            for sequence in range(1, 4):
+                self.callback(envelope(f"shutdown-{sequence}", sequence, last_price=sequence))
+            stop.set()
+            return 3
+
+        def has_backlog(self):
+            return False
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        market_data_module.monotonic_time, "monotonic", lambda: 0.0
+    )
+    writer = QuestDbTickWriter("postgresql://not-logged", connect=lambda _dsn: connection)
+    worker = MarketDataWorker(
+        tmp_path / "market", generation="g1", writer=writer, source=Source()
+    )
+    worker.run(stop_event=stop)
+    assert worker.metrics_snapshot()["questdb_batch"]["size_samples"] == [3]
+    assert not worker.stream.pending_for_tick_writer()
 
 
 def test_zmq_publish_source_is_sub_only_and_recovers_after_poisoned_socket(tmp_path):
@@ -1061,6 +1375,105 @@ def test_append_only_jsonl_streams_large_multibyte_and_chunked_lines(tmp_path, m
 
     monkeypatch.setattr(os, "read", tiny_reads)
     assert journal.read_all() == expected
+
+
+def test_append_only_jsonl_group_commit_fsyncs_existing_file_once(tmp_path, monkeypatch):
+    state = tmp_path / "state"
+    state.mkdir(mode=0o700)
+    journal = AppendOnlyJsonl(state / "journal.jsonl")
+    journal.ensure_exists()
+    calls = []
+    original_fsync = durable_module.os.fsync
+
+    def count_fsync(descriptor):
+        calls.append(descriptor)
+        return original_fsync(descriptor)
+
+    monkeypatch.setattr(durable_module.os, "fsync", count_fsync)
+    journal.append_many(({"record_type": "one"}, {"record_type": "two"}))
+    assert journal.read_all() == [{"record_type": "one"}, {"record_type": "two"}]
+    assert len(calls) == 1
+
+
+def test_verified_stream_group_append_and_ack_use_one_journal_write_each(tmp_path, monkeypatch):
+    stream = DurableVerifiedTickStream(tmp_path / "stream", generation="g1")
+    stream.initialize()
+    ticks = [
+        VerifiedTick.from_raw(
+            {"source_event_id": f"group-{seq}", "vt_symbol": "rb2610.SHFE"},
+            stream_generation="g1",
+            ingest_seq=seq,
+            source="gateway-market-reader",
+        )
+        for seq in range(1, 4)
+    ]
+    append_calls = []
+    original_append_many = stream.journal.append_many
+
+    def count_tick_append(records):
+        values = tuple(records)
+        append_calls.append(values)
+        return original_append_many(values)
+
+    monkeypatch.setattr(stream.journal, "append_many", count_tick_append)
+    assert stream.append_many(ticks) == (True, True, True)
+    assert len(append_calls) == 1 and len(append_calls[0]) == 3
+
+    ack_calls = []
+    original_ack_append_many = stream.acknowledgements.journal.append_many
+
+    def count_ack_append(records):
+        values = tuple(records)
+        ack_calls.append(values)
+        return original_ack_append_many(values)
+
+    monkeypatch.setattr(
+        stream.acknowledgements.journal, "append_many", count_ack_append
+    )
+    assert stream.acknowledge_tick_writes(ticks) == (True, True, True)
+    assert len(ack_calls) == 1 and len(ack_calls[0]) == 3
+
+
+def test_market_prepared_source_fence_recovers_complete_or_rejects_partial_batch(tmp_path):
+    worker = MarketDataWorker(tmp_path / "complete", generation="g1", writer=Writer())
+    worker.recover()
+    events = [envelope(f"prepared-{seq}", seq, last_price=seq) for seq in (1, 2)]
+    ticks = [
+        VerifiedTick.from_raw(
+            {**dict(event.payload), "source_event_id": event.event_id},
+            stream_generation="g1",
+            ingest_seq=seq,
+            source=event.source_service,
+        )
+        for seq, event in enumerate(events, start=1)
+    ]
+    prepare, _ = worker._prepare_source_fence_batch(list(zip(events, ticks)))
+    prepare()
+    worker.stream.append_many(ticks)
+    restarted = MarketDataWorker(tmp_path / "complete", generation="g1", writer=Writer())
+    restarted.recover()
+    assert restarted._source_fence_state is not None
+    assert "prepared_batch" not in restarted._source_fence_state
+    assert restarted._source_fence_state["sources"]["gateway-market-reader"]["seq"] == 2
+
+    partial = MarketDataWorker(tmp_path / "partial", generation="g1", writer=Writer())
+    partial.recover()
+    prepare, _ = partial._prepare_source_fence_batch(list(zip(events, ticks)))
+    prepare()
+    partial.stream.append(ticks[0])
+    with pytest.raises(DurableCorruptionError, match="batch is partial"):
+        MarketDataWorker(tmp_path / "partial", generation="g1", writer=Writer()).recover()
+
+    absent = MarketDataWorker(tmp_path / "absent", generation="g1", writer=Writer())
+    absent.recover()
+    prepare, _ = absent._prepare_source_fence_batch(list(zip(events, ticks)))
+    prepare()
+    restarted_absent = MarketDataWorker(
+        tmp_path / "absent", generation="g1", writer=Writer()
+    )
+    restarted_absent.recover()
+    assert restarted_absent._source_fence_state is not None
+    assert restarted_absent._source_fence_state["sources"] == {}
 
 
 @pytest.mark.parametrize(

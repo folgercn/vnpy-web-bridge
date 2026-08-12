@@ -47,6 +47,7 @@ try:
         AtomicCheckpoint,
         BackpressureError,
         BoundedIngressQueue,
+        DurableCorruptionError,
         DurableStateError,
         DurableVerifiedTickStream,
         GenerationMismatch,
@@ -74,6 +75,7 @@ except ImportError:  # pragma: no cover
         AtomicCheckpoint,
         BackpressureError,
         BoundedIngressQueue,
+        DurableCorruptionError,
         DurableStateError,
         DurableVerifiedTickStream,
         GenerationMismatch,
@@ -879,6 +881,8 @@ class MarketDataWorker:
         self._questdb_pending: dict[str, VerifiedTick] = {}
         self._questdb_batch_started_monotonic: float | None = None
         self._questdb_pending_committed = False
+        self._durable_ingress_started_monotonic: float | None = None
+        self._finalize_recovered_ticks: tuple[VerifiedTick, ...] = ()
         self.metrics = WorkerMetrics(
             self.service_id, isoformat(), worker_generation=config.stream_generation
         )
@@ -905,6 +909,7 @@ class MarketDataWorker:
             if len(dict(state.get("events") or {})) > self._SOURCE_FENCE_EVENT_LIMIT:
                 raise BackpressureError("source fence identity capacity exhausted")
             self._source_fence_state = dict(state)
+            self._recover_prepared_source_fence()
             writer_health = getattr(self.writer, "health", None)
             if callable(writer_health):
                 status = str(dict(writer_health()).get("status") or "")
@@ -946,8 +951,13 @@ class MarketDataWorker:
         self.metrics.increment("ingress_accepted")
         self.metrics.queue_depth = self.ingress.qsize()
 
-    def _assert_source_fence(self, event: GatewayTickEnvelope) -> None:
-        state = self._source_fence_state
+    def _assert_source_fence(
+        self,
+        event: GatewayTickEnvelope,
+        *,
+        state: Mapping[str, object] | None = None,
+    ) -> None:
+        state = state if state is not None else self._source_fence_state
         if state is None:
             raise DurableStateError("market-data source fence recovery is required")
         sources = dict(state.get("sources") or {})
@@ -989,16 +999,11 @@ class MarketDataWorker:
         ):
             raise DurableStateError("source sequence was reused with different content")
 
-    def _record_source_fence(self, event: GatewayTickEnvelope) -> None:
-        """Durably bind ingress identity before any fallible sink write.
+    def _next_source_fence_state(
+        self, state: Mapping[str, object], event: GatewayTickEnvelope
+    ) -> dict[str, object]:
+        """Return the compact source frontier after one validated envelope."""
 
-        A crash after the verified stream append must not permit the same
-        source event id to be replayed with altered envelope metadata.
-        """
-
-        state = self._source_fence_state
-        if state is None:
-            raise DurableStateError("market-data source fence recovery is required")
         sources = dict(state.get("sources") or {})
         events = dict(state.get("events") or {})
         deterministic = event.source_service == self._DETERMINISTIC_SOURCE_SERVICE
@@ -1019,13 +1024,117 @@ class MarketDataWorker:
                 "seq": event.source_seq,
                 "event_hash": event.envelope_hash,
             }
-        next_state = {
+        return {
             "worker_generation": self.config.stream_generation,
             "sources": sources,
             "events": events,
         }
+
+    def _record_source_fence(self, event: GatewayTickEnvelope) -> None:
+        """Durably bind ingress identity before any fallible sink write.
+
+        A crash after the verified stream append must not permit the same
+        source event id to be replayed with altered envelope metadata.
+        """
+
+        state = self._source_fence_state
+        if state is None:
+            raise DurableStateError("market-data source fence recovery is required")
+        next_state = self._next_source_fence_state(state, event)
         self.source_fence.write(next_state)
         self._source_fence_state = next_state
+
+    def _recover_prepared_source_fence(self) -> None:
+        """Resolve a source-fence intent left around a journal group commit."""
+
+        state = self._source_fence_state
+        if state is None:
+            raise DurableStateError("market-data source fence recovery is required")
+        prepared = state.get("prepared_batch")
+        if prepared is None:
+            return
+        if not isinstance(prepared, Mapping):
+            raise DurableCorruptionError("market-data source fence batch is invalid")
+        entries = prepared.get("entries")
+        final_sources = prepared.get("final_sources")
+        final_events = prepared.get("final_events")
+        if (
+            not isinstance(entries, list)
+            or not entries
+            or len(entries) > self.QUESTDB_BATCH_MAX_SIZE
+            or not isinstance(final_sources, Mapping)
+            or not isinstance(final_events, Mapping)
+        ):
+            raise DurableCorruptionError("market-data source fence batch is invalid")
+        present = 0
+        for entry in entries:
+            if not isinstance(entry, Mapping):
+                raise DurableCorruptionError("market-data source fence batch is invalid")
+            event_id = str(entry.get("event_id") or "")
+            tick_event_id = str(entry.get("tick_event_id") or "")
+            raw_hash = str(entry.get("raw_hash") or "")
+            if not event_id or not tick_event_id or not raw_hash:
+                raise DurableCorruptionError("market-data source fence batch is invalid")
+            tick = self.stream.find_by_source_event_id(tick_event_id)
+            if tick is None:
+                continue
+            if tick.raw_hash != raw_hash:
+                raise DurableCorruptionError("prepared source fence tick mismatch")
+            present += 1
+        if present not in {0, len(entries)}:
+            raise DurableCorruptionError("prepared source fence batch is partial")
+        resolved = {
+            "worker_generation": self.config.stream_generation,
+            "sources": dict(final_sources if present else state.get("sources") or {}),
+            "events": dict(final_events if present else state.get("events") or {}),
+        }
+        self.source_fence.write(resolved)
+        self._source_fence_state = resolved
+
+    def _prepare_source_fence_batch(
+        self,
+        pairs: list[tuple[GatewayTickEnvelope, VerifiedTick]],
+    ) -> tuple[Callable[[], None], Callable[[], None]]:
+        """Build a bounded prepare/finalize pair for a durable tick group."""
+
+        state = self._source_fence_state
+        if state is None:
+            raise DurableStateError("market-data source fence recovery is required")
+        if not pairs or len(pairs) > self.QUESTDB_BATCH_MAX_SIZE:
+            raise BackpressureError("source fence batch capacity exhausted")
+        final_state: Mapping[str, object] = state
+        entries: list[dict[str, object]] = []
+        for event, tick in pairs:
+            self._assert_source_fence(event, state=final_state)
+            final_state = self._next_source_fence_state(final_state, event)
+            entries.append(
+                {
+                    "event_id": event.event_id,
+                    "tick_event_id": tick.source_event_id,
+                    "raw_hash": tick.raw_hash,
+                }
+            )
+        prepared_state = {
+            "worker_generation": self.config.stream_generation,
+            "sources": dict(state.get("sources") or {}),
+            "events": dict(state.get("events") or {}),
+            "prepared_batch": {
+                "entries": entries,
+                "final_sources": dict(final_state.get("sources") or {}),
+                "final_events": dict(final_state.get("events") or {}),
+            },
+        }
+        committed_state = dict(final_state)
+
+        def prepare() -> None:
+            self.source_fence.write(prepared_state)
+            self._source_fence_state = prepared_state
+
+        def finalize() -> None:
+            self.source_fence.write(committed_state)
+            self._source_fence_state = committed_state
+
+        return prepare, finalize
 
     def _write(self, tick: VerifiedTick) -> None:
         if self.stream.is_acknowledged(tick):
@@ -1048,87 +1157,133 @@ class MarketDataWorker:
         self.metrics.increment("ticks_persisted")
         self.metrics.last_success_at_utc = isoformat()
 
-    def ingest(self, raw: Mapping[str, object], *, persist: bool = True) -> VerifiedTick:
-        event_id = str(
-            raw.get("source_event_id") or raw.get("event_id") or raw.get("id") or ""
-        ).strip()
-        candidate = VerifiedTick.from_raw(
-            raw,
-            stream_generation=self.config.stream_generation,
-            ingest_seq=self.stream.next_sequence(),
-            source=self.config.source_name,
-        )
-        existing = self.stream.find_by_source_event_id(event_id) if event_id else None
-        if existing is None:
-            existing = self.stream.find_by_raw_hash(candidate.raw_hash)
-        if existing is not None:
-            self.metrics.increment("ticks_deduplicated")
-            replay = VerifiedTick.from_raw(
+    def _durably_ingest_batch(
+        self, values: list[Mapping[str, object] | GatewayTickEnvelope]
+    ) -> list[VerifiedTick]:
+        """Stage a bounded ingress group before one verified-journal flush."""
+
+        if not values or len(values) > self.QUESTDB_BATCH_MAX_SIZE:
+            raise BackpressureError("market-data durable batch capacity exhausted")
+        if (
+            self._source_fence_state is not None
+            and self._source_fence_state.get("prepared_batch") is not None
+        ):
+            # A finalize failure after journal durability must be resolved
+            # before another source identity can be admitted.
+            self._recover_prepared_source_fence()
+        next_sequence = self.stream.next_sequence()
+        ticks: list[VerifiedTick] = []
+        new: list[VerifiedTick] = []
+        source_pairs: list[tuple[GatewayTickEnvelope, VerifiedTick]] = []
+        staged_by_event_id: dict[str, VerifiedTick] = {}
+        staged_by_raw_hash: dict[str, VerifiedTick] = {}
+        source_state: Mapping[str, object] | None = self._source_fence_state
+        for value in values:
+            event = value if isinstance(value, GatewayTickEnvelope) else None
+            if event is not None:
+                # Validate every source identity before stream content dedupe:
+                # altered deterministic replays must fail at the identity
+                # fence, and legacy capacity must reject the whole group.
+                if source_state is None:
+                    raise DurableStateError(
+                        "market-data source fence recovery is required"
+                    )
+                self._assert_source_fence(event, state=source_state)
+                source_state = self._next_source_fence_state(source_state, event)
+            raw = (
+                {**dict(event.payload), "source_event_id": event.event_id}
+                if event is not None
+                else dict(value)
+            )
+            source = event.source_service if event is not None else self.config.source_name
+            event_id = str(
+                raw.get("source_event_id") or raw.get("event_id") or raw.get("id") or ""
+            ).strip()
+            candidate = VerifiedTick.from_raw(
                 raw,
                 stream_generation=self.config.stream_generation,
-                ingest_seq=existing.ingest_seq,
-                source=self.config.source_name,
+                ingest_seq=next_sequence,
+                source=source,
             )
-            if replay.raw_hash != existing.raw_hash:
-                raise DurableStateError(
-                    "source_event_id was reused with different tick content"
+            existing = staged_by_event_id.get(event_id) if event_id else None
+            if existing is None:
+                existing = staged_by_raw_hash.get(candidate.raw_hash)
+            if existing is None:
+                existing = self.stream.find_by_source_event_id(event_id) if event_id else None
+            if existing is None:
+                existing = self.stream.find_by_raw_hash(candidate.raw_hash)
+            if existing is not None:
+                replay = VerifiedTick.from_raw(
+                    raw,
+                    stream_generation=self.config.stream_generation,
+                    ingest_seq=existing.ingest_seq,
+                    source=source,
                 )
-            if persist:
-                try:
-                    self._write(existing)
-                except Exception as exc:
-                    self._last_error = type(exc).__name__
-                    raise
-            self.metrics.checkpoint_or_watermark = existing.ingest_seq
-            return existing
-        tick = candidate
-        self.stream.append(tick)
-        self.metrics.increment("ticks_durable")
+                if replay.raw_hash != existing.raw_hash:
+                    raise DurableStateError(
+                        "source_event_id was reused with different tick content"
+                    )
+                tick = existing
+                self.metrics.increment("ticks_deduplicated")
+            else:
+                tick = candidate
+                new.append(tick)
+                if event_id:
+                    staged_by_event_id[event_id] = tick
+                staged_by_raw_hash[candidate.raw_hash] = tick
+                next_sequence += 1
+            ticks.append(tick)
+            if event is not None:
+                source_pairs.append((event, tick))
+        before_journal = after_journal = None
+        if source_pairs and not new:
+            # Content-deduplicated ticks do not need a journal intent, but
+            # their source frontier still must advance exactly once.
+            if source_state is None:  # pragma: no cover - checked above
+                raise DurableStateError("market-data source fence recovery is required")
+            finalized_state = dict(source_state)
+            self.source_fence.write(finalized_state)
+            self._source_fence_state = finalized_state
+        elif source_pairs:
+            before_journal, after_journal = self._prepare_source_fence_batch(source_pairs)
+        try:
+            appended = self.stream.append_many(
+                new,
+                before_journal=before_journal,
+                after_journal=after_journal,
+            )
+        except Exception:
+            if (
+                self._source_fence_state is not None
+                and self._source_fence_state.get("prepared_batch") is not None
+            ):
+                self._recover_prepared_source_fence()
+                # The journal/watermark group is durable and its source fence
+                # is now finalized.  Do not retry its raw envelopes: hand the
+                # exact durable group to the QuestDB pending path instead.
+                self._finalize_recovered_ticks = tuple(ticks)
+            raise
+        self.metrics.increment("ticks_durable", sum(appended))
+        self.metrics.checkpoint_or_watermark = ticks[-1].ingest_seq
+        self._last_error = None
+        return ticks
+
+    def ingest(self, raw: Mapping[str, object], *, persist: bool = True) -> VerifiedTick:
+        tick = self._durably_ingest_batch([raw])[0]
         if persist:
             try:
                 self._write(tick)
             except Exception as exc:
                 self._last_error = type(exc).__name__
                 raise
-        self.metrics.checkpoint_or_watermark = tick.ingest_seq
-        self._last_error = None
         return tick
 
     def _process_envelope(
         self, event: GatewayTickEnvelope, *, persist: bool = True
     ) -> VerifiedTick:
-        self._assert_source_fence(event)
-        raw = {**dict(event.payload), "source_event_id": event.event_id}
-        candidate = VerifiedTick.from_raw(
-            raw,
-            stream_generation=self.config.stream_generation,
-            ingest_seq=self.stream.next_sequence(),
-            source=event.source_service,
-        )
-        tick = self.stream.find_by_source_event_id(event.event_id)
-        if tick is None:
-            tick = self.stream.find_by_raw_hash(candidate.raw_hash)
-        if tick is None:
-            tick = candidate
-            self.stream.append(tick)
-            self.metrics.increment("ticks_durable")
-        else:
-            self.metrics.increment("ticks_deduplicated")
-            candidate = VerifiedTick.from_raw(
-                raw,
-                stream_generation=self.config.stream_generation,
-                ingest_seq=tick.ingest_seq,
-                source=event.source_service,
-            )
-            if candidate.raw_hash != tick.raw_hash:
-                raise DurableStateError(
-                    "source_event_id was reused with different tick content"
-                )
-        self._record_source_fence(event)
+        tick = self._durably_ingest_batch([event])[0]
         if persist:
             self._write(tick)
-        self.metrics.checkpoint_or_watermark = tick.ingest_seq
-        self._last_error = None
         return tick
 
     def process_one(self) -> VerifiedTick:
@@ -1196,12 +1351,11 @@ class MarketDataWorker:
             self._questdb_pending_committed = True
         latency_ms = (monotonic_time.monotonic() - started) * 1000
         self._record_questdb_batch(len(pending), reason=reason, commit_latency_ms=latency_ms)
-        for tick in pending:
-            # Ack after the one successful transaction only.  If this fails
-            # midway, replay uses readback before any retry insert.
-            self.stream.acknowledge_tick_write(tick)
-            self.metrics.increment("ticks_persisted")
-            self.metrics.last_success_at_utc = isoformat()
+        acknowledgements = self.stream.acknowledge_tick_writes(pending)
+        for acknowledged in acknowledgements:
+            if acknowledged:
+                self.metrics.increment("ticks_persisted")
+        self.metrics.last_success_at_utc = isoformat()
 
     def process_queue(self, *, limit: int | None = None, flush: bool = True) -> int:
         if isinstance(self.writer, QuestDbTickWriter):
@@ -1226,12 +1380,11 @@ class MarketDataWorker:
             return
         pending = list(self._questdb_pending.values())
         if self._questdb_pending_committed:
-            for tick in pending:
-                if self.stream.is_acknowledged(tick):
-                    continue
-                self.stream.acknowledge_tick_write(tick)
-                self.metrics.increment("ticks_persisted")
-                self.metrics.last_success_at_utc = isoformat()
+            acknowledgements = self.stream.acknowledge_tick_writes(pending)
+            for acknowledged in acknowledgements:
+                if acknowledged:
+                    self.metrics.increment("ticks_persisted")
+            self.metrics.last_success_at_utc = isoformat()
         else:
             self._write_questdb_batch(
                 pending,
@@ -1252,6 +1405,30 @@ class MarketDataWorker:
             )
         )
 
+    def _questdb_ingress_due(self) -> bool:
+        """Start/observe the bounded raw ingress group used only by run()."""
+
+        depth = self.ingress.qsize()
+        if not depth:
+            self._durable_ingress_started_monotonic = None
+            return False
+        now = monotonic_time.monotonic()
+        if self._durable_ingress_started_monotonic is None:
+            self._durable_ingress_started_monotonic = now
+        return depth >= self.QUESTDB_BATCH_MAX_SIZE or (
+            now - self._durable_ingress_started_monotonic
+            >= self.QUESTDB_BATCH_MAX_WAIT_SECONDS
+        )
+
+    def _questdb_ingress_wait_seconds(self) -> float:
+        if self._durable_ingress_started_monotonic is None:
+            return self.QUESTDB_BATCH_MAX_WAIT_SECONDS
+        return max(
+            0.0,
+            self.QUESTDB_BATCH_MAX_WAIT_SECONDS
+            - (monotonic_time.monotonic() - self._durable_ingress_started_monotonic),
+        )
+
     def _process_questdb_queue(self, *, limit: int | None, flush: bool) -> int:
         if self._questdb_pending_committed:
             # Never merge a fresh durable tick into a transaction that has
@@ -1259,30 +1436,77 @@ class MarketDataWorker:
             self._flush_questdb_pending(reason="ack_retry")
         processed = 0
         while limit is None or processed < limit:
-            try:
-                value = self.ingress.get()
-            except Exception as exc:
-                if type(exc).__name__ == "Empty":
-                    break
-                raise
+            remaining_pending = self.QUESTDB_BATCH_MAX_SIZE - len(
+                self._questdb_pending
+            )
+            if remaining_pending <= 0:
+                self._flush_questdb_pending(reason="max_size")
+                remaining_pending = self.QUESTDB_BATCH_MAX_SIZE
+            values: list[Mapping[str, object] | GatewayTickEnvelope] = []
+            batch_limit = min(
+                remaining_pending,
+                (limit - processed) if limit is not None else self.QUESTDB_BATCH_MAX_SIZE,
+            )
+            while len(values) < batch_limit:
+                try:
+                    values.append(self.ingress.get())
+                except Exception as exc:
+                    if type(exc).__name__ == "Empty":
+                        break
+                    raise
+            if not values:
+                break
             self.metrics.queue_depth = self.ingress.qsize()
             try:
-                tick = (
-                    self._process_envelope(value, persist=False)
-                    if isinstance(value, GatewayTickEnvelope)
-                    else self.ingest(value, persist=False)
-                )
+                ticks = self._durably_ingest_batch(values)
             except Exception:
-                self._flush_questdb_pending(reason="processing_error")
+                finalized_ticks = self._finalize_recovered_ticks
+                self._finalize_recovered_ticks = ()
+                if finalized_ticks:
+                    for tick in finalized_ticks:
+                        if not self._questdb_pending:
+                            self._questdb_batch_started_monotonic = (
+                                monotonic_time.monotonic()
+                            )
+                        self._questdb_pending.setdefault(tick.ingest_id, tick)
+                        processed += 1
+                        self.metrics.increment("processed_total")
+                    # Preserve the finalize error for the caller, but the raw
+                    # group was consumed exactly once and is retryable via the
+                    # normal pending flush on the next worker turn.
+                    raise
+                # The queue was predrained for group commit.  Commit the
+                # valid prefix one by one on this error path, then put the
+                # rejected record and untouched tail back in their original
+                # order so neither source identity is silently lost.
+                prefix: list[VerifiedTick] = []
+                failed_at = 0
+                for failed_at, value in enumerate(values):
+                    try:
+                        prefix.extend(self._durably_ingest_batch([value]))
+                    except Exception:  # noqa: BLE001 - retain rejected suffix
+                        self.ingress.put_front_many(values[failed_at:])
+                        break
+                else:  # pragma: no cover - batch failure must reproduce
+                    raise
+                for tick in prefix:
+                    if not self._questdb_pending:
+                        self._questdb_batch_started_monotonic = monotonic_time.monotonic()
+                    self._questdb_pending.setdefault(tick.ingest_id, tick)
+                    processed += 1
+                    self.metrics.increment("processed_total")
+                if self._questdb_pending:
+                    self._flush_questdb_pending(reason="processing_error")
                 raise
-            if not self._questdb_pending:
-                self._questdb_batch_started_monotonic = monotonic_time.monotonic()
-            # Replayed identical market content may resolve to the same
-            # durable tick before it has been acknowledged.  Preserve every
-            # source-fence transition but write/ack that ingest id once.
-            self._questdb_pending.setdefault(tick.ingest_id, tick)
-            processed += 1
-            self.metrics.increment("processed_total")
+            for tick in ticks:
+                if not self._questdb_pending:
+                    self._questdb_batch_started_monotonic = monotonic_time.monotonic()
+                # Replayed identical market content may resolve to the same
+                # durable tick before it has been acknowledged.  Preserve every
+                # source-fence transition but write/ack that ingest id once.
+                self._questdb_pending.setdefault(tick.ingest_id, tick)
+                processed += 1
+                self.metrics.increment("processed_total")
             if len(self._questdb_pending) >= self.QUESTDB_BATCH_MAX_SIZE:
                 self._flush_questdb_pending(reason="max_size")
             elif self._questdb_batch_due():
@@ -1328,6 +1552,76 @@ class MarketDataWorker:
             self.bind_source()
             self._publish_projection_if_due(force=True)
             while not stop_event.is_set():
+                if isinstance(self.writer, QuestDbTickWriter):
+                    # First drain a known DB batch.  A failed flush is an
+                    # explicit degraded/backpressure state: do not poll or
+                    # consume another raw ingress item until it succeeds.
+                    if self._questdb_batch_due():
+                        try:
+                            self._flush_questdb_pending(reason="max_wait")
+                        except Exception as exc:  # noqa: BLE001
+                            self._last_error = type(exc).__name__
+                            self.metrics.increment("backpressure_total")
+                            self._publish_projection_if_due()
+                            stop_event.wait(self.QUESTDB_BATCH_MAX_WAIT_SECONDS)
+                            continue
+
+                    # A raw ingress group is journaled only when full or when
+                    # its bounded 50ms window expires.  This is intentionally
+                    # separate from the already-durable QuestDB pending group.
+                    if self._questdb_ingress_due():
+                        try:
+                            self.process_queue(
+                                limit=self.QUESTDB_BATCH_MAX_SIZE, flush=True
+                            )
+                            self._durable_ingress_started_monotonic = (
+                                monotonic_time.monotonic()
+                                if self.ingress.qsize()
+                                else None
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            self._last_error = type(exc).__name__
+                            self.metrics.increment("backpressure_total")
+                            self._publish_projection_if_due()
+                            stop_event.wait(self.QUESTDB_BATCH_MAX_WAIT_SECONDS)
+                        continue
+
+                    poll = getattr(self.source, "poll", None)
+                    if callable(poll) and not stop_event.is_set():
+                        depth = self.ingress.qsize()
+                        capacity = max(0, self.config.queue_maxsize - depth)
+                        group_capacity = max(
+                            0, self.QUESTDB_BATCH_MAX_SIZE - min(depth, self.QUESTDB_BATCH_MAX_SIZE)
+                        )
+                        if capacity and group_capacity:
+                            timeout = 0
+                            if depth:
+                                remaining = self._questdb_ingress_wait_seconds()
+                                timeout = max(1, int(remaining * 1000 + 0.999))
+                            try:
+                                poll(
+                                    timeout,
+                                    limit=min(
+                                        self.SOURCE_DRAIN_LIMIT,
+                                        capacity,
+                                        group_capacity,
+                                    ),
+                                )
+                            except Exception as exc:  # noqa: BLE001
+                                self._last_error = type(exc).__name__
+                    if self.ingress.qsize() and self._durable_ingress_started_monotonic is None:
+                        self._durable_ingress_started_monotonic = monotonic_time.monotonic()
+                    self._publish_projection_if_due()
+                    if self.ingress.qsize():
+                        # Poll implementations may return early without data;
+                        # wait only to the group deadline, then journal it.
+                        stop_event.wait(
+                            min(0.01, self._questdb_ingress_wait_seconds())
+                        )
+                    else:
+                        stop_event.wait(min(1.0, max(0.01, float(idle_seconds))))
+                    continue
+
                 # A due/failed QuestDB batch blocks further socket draining.
                 # Retry the same bounded durable batch until it commits; this
                 # keeps both the DB batch and already-polled ingress bounded.
@@ -1411,6 +1705,13 @@ class MarketDataWorker:
             shutdown_error: Exception | None = None
             if isinstance(self.writer, QuestDbTickWriter):
                 try:
+                    # Stop polling first, then make every already accepted raw
+                    # ingress item durable before the final DB flush.
+                    while self.ingress.qsize():
+                        self.process_queue(
+                            limit=self.QUESTDB_BATCH_MAX_SIZE, flush=True
+                        )
+                    self._durable_ingress_started_monotonic = None
                     self._flush_questdb_pending(reason="shutdown")
                 except Exception as exc:  # noqa: BLE001
                     self._last_error = type(exc).__name__
