@@ -21,32 +21,32 @@ for candidate in (ROOT, ROOT / "backend", ROOT / "scripts"):
     if str(candidate) not in sys.path:
         sys.path.insert(0, str(candidate))
 
-from app.control_execution_client import (
+from app.control_execution_client import (  # noqa: E402
     ExecutionClient,
     ExecutionClientError,
 )
-from app.execution.executable_target_adapter import (
+from app.execution.executable_target_adapter import (  # noqa: E402
     build_trusted_keyless_executable_target_plan,
     peek_current_facts_to_snapshot,
 )
-from app.phase_c.client import RemotePhaseCWorkflowClient
-from app.phase_c.models import TrustedKeylessTargetPlanUploadDTO
-from c_fast_producer.producer import (
+from app.phase_c.client import RemotePhaseCWorkflowClient  # noqa: E402
+from app.phase_c.models import TrustedKeylessTargetPlanUploadDTO  # noqa: E402
+from c_fast_producer.producer import (  # noqa: E402
     MAP_ACCEPTANCE_TRUST_DOMAIN,
     ProducerError,
     produce_c_fast_candidate,
 )
-from c_fast_producer.producer import (
+from c_fast_producer.producer import (  # noqa: E402
     _read_pinned_file as read_cfast_source,
 )
-from map.producer import (
+from map.producer import (  # noqa: E402
     _read_pinned_file as read_map_source,
 )
-from map.producer import (
+from map.producer import (  # noqa: E402
     produce_map_candidate,
 )
 
-from shared.trust_contracts.v1 import (
+from shared.trust_contracts.v1 import (  # noqa: E402
     ContractError,
     canonical_json_line,
     load_keyring,

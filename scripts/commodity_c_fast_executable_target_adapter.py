@@ -16,24 +16,24 @@ from pathlib import Path
 from typing import Any
 
 _ROOT = Path(__file__).resolve().parents[1]
-for _path in (_ROOT / "backend", _ROOT / "scripts"):
+for _path in (_ROOT, _ROOT / "backend", _ROOT / "scripts"):
     if str(_path) not in sys.path:
         sys.path.insert(0, str(_path))
 
-from app.execution.executable_target_adapter import (
+from app.execution.executable_target_adapter import (  # noqa: E402
     ExecutableTargetAdapterError,
     build_executable_target_plan,
     build_trusted_keyless_executable_target_plan,
     peek_current_facts_to_snapshot,
 )
-from c_fast_producer.producer import (
+from c_fast_producer.producer import (  # noqa: E402
     ProducerError,
     _create_only_atomic,
     _decode_json,
     _read_pinned_file,
 )
 
-from shared.trust_contracts.v1 import canonical_json_line
+from shared.trust_contracts.v1 import canonical_json_line  # noqa: E402
 
 _TERMINAL_EXECUTION_ORDER_STATUSES = frozenset(
     {"ALLTRADED", "CANCELLED", "CANCELED", "REJECTED"}
