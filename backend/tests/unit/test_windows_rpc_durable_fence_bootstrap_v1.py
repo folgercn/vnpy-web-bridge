@@ -526,6 +526,109 @@ def test_fixed_listener_uses_server_activity_not_start_return_value() -> None:
     assert durable_module._listen_fixed_vnpy_runtime(runtime) is True
 
 
+def test_ctp_current_day_order_recovery_publishes_real_terminal_row_once() -> None:
+    class Gateway:
+        def __init__(self) -> None:
+            self.logs: list[str] = []
+            self.query_functions: list[Any] = []
+            self.td_api = TdApi(self)
+
+        def write_log(self, message: str) -> None:
+            self.logs.append(message)
+
+    class TdApi:
+        login_status = True
+        contract_inited = True
+        brokerid = "test-broker"
+        userid = "test-user"
+
+        def __init__(self, gateway: Gateway) -> None:
+            self.gateway = gateway
+            self.reqid = 7
+            self.query_calls: list[tuple[dict[str, str], int]] = []
+            self.rows: list[dict[str, Any]] = []
+
+        def reqQryOrder(self, request: dict[str, str], request_id: int) -> int:
+            self.query_calls.append((request, request_id))
+            return 0
+
+        def onRtnOrder(self, row: dict[str, Any]) -> None:
+            self.rows.append(row)
+
+    gateway = Gateway()
+    durable_module._install_ctp_current_day_order_callback_v1(gateway.td_api)
+    main_engine = SimpleNamespace(get_gateway=lambda _name: gateway)
+
+    durable_module._arm_ctp_current_day_order_recovery_v1(
+        main_engine, gateway_name="CTP"
+    )
+    query = gateway.query_functions[-1]
+    query()
+    query()
+    row = {"OrderStatus": "rejected", "OrderRef": "1"}
+    gateway.td_api.onRspQryOrder(row, {}, 8, True)
+
+    assert gateway.td_api.query_calls == [
+        ({"BrokerID": "test-broker", "InvestorID": "test-user"}, 8)
+    ]
+    assert gateway.td_api.rows == [row]
+    assert gateway.logs == []
+
+
+def test_ctp_current_day_order_recovery_waits_and_never_fabricates_on_error() -> None:
+    class Gateway:
+        def __init__(self) -> None:
+            self.logs: list[str] = []
+            self.query_functions: list[Any] = []
+            self.td_api = TdApi(self)
+
+        def write_log(self, message: str) -> None:
+            self.logs.append(message)
+
+    class TdApi:
+        login_status = False
+        contract_inited = False
+        brokerid = "test-broker"
+        userid = "test-user"
+
+        def __init__(self, gateway: Gateway) -> None:
+            self.gateway = gateway
+            self.reqid = 0
+            self.query_calls = 0
+            self.rows: list[dict[str, Any]] = []
+
+        def reqQryOrder(self, _request: dict[str, str], _request_id: int) -> int:
+            self.query_calls += 1
+            return 0
+
+        def onRtnOrder(self, row: dict[str, Any]) -> None:
+            self.rows.append(row)
+
+    gateway = Gateway()
+    durable_module._install_ctp_current_day_order_callback_v1(gateway.td_api)
+    main_engine = SimpleNamespace(get_gateway=lambda _name: gateway)
+
+    durable_module._arm_ctp_current_day_order_recovery_v1(
+        main_engine, gateway_name="CTP"
+    )
+    query = gateway.query_functions[-1]
+    query()
+    assert gateway.td_api.query_calls == 0
+    gateway.td_api.login_status = True
+    gateway.td_api.contract_inited = True
+    query()
+    gateway.td_api.onRspQryOrder(
+        {"OrderStatus": "rejected", "OrderRef": "1"},
+        {"ErrorID": 1},
+        1,
+        True,
+    )
+
+    assert gateway.td_api.query_calls == 1
+    assert gateway.td_api.rows == []
+    assert gateway.logs == ["CTP current-day order recovery query failed"]
+
+
 def test_production_launcher_uses_only_fixed_runtime_lifecycle(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
