@@ -49,10 +49,14 @@ from shared.trust_contracts.v1 import (
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "backend/tests/unit"))
 
-from commodity_c_fast_executable_target_adapter import (  # noqa: E402
+from commodity_c_fast_executable_target_adapter import (
+    build_parser,
+)
+from commodity_c_fast_executable_target_adapter import (
     main as adapter_main,
 )
-from test_commodity_c_fast_pure_producer_kernel import source_view  # noqa: E402
+from test_commodity_c_fast_pure_producer_kernel import source_view
+from test_issue291_executable_target_adapter import authority, candidates
 
 SCOPE = "account:simnow-cli"
 FALSE_AUTHORITY_FIELDS = {
@@ -231,6 +235,130 @@ def test_peek_current_facts_requires_live_ctp_account(
 
     with pytest.raises(ExecutableTargetAdapterError):
         peek_current_facts_to_snapshot(facts, account_scope=SCOPE)
+
+
+def test_cli_exposes_explicit_reduce_only_close_flag() -> None:
+    args = build_parser().parse_args(
+        [
+            "--map-candidate",
+            "map.json",
+            "--c-fast-candidate",
+            "cfast.json",
+            "--authority-receipt",
+            "receipt.json",
+            "--authority-artifact",
+            "artifact.json",
+            "--peek-current-facts",
+            "peek.json",
+            "--reconciliation-state",
+            "reconcile.json",
+            "--product",
+            "ru",
+            "--account-scope",
+            SCOPE,
+            "--reduce-only-close",
+            "--output",
+            "target.json",
+        ]
+    )
+
+    assert args.reduce_only_close is True
+
+
+def test_cli_reduce_only_close_writes_one_opposite_close_target(tmp_path: Path) -> None:
+    map_candidate, c_fast_candidate = candidates(
+        target_quantity=-1,
+        product="ru",
+        exact_contract="SHFE.ru2609",
+    )
+    scope = {
+        "account_scope": SCOPE,
+        "environment": "SIMNOW",
+        "gateway_name": "CTP",
+    }
+    authority_artifact = new_artifact_envelope(
+        artifact_type="runtime-authorization",
+        trust_domain="runtime_authorization",
+        producer_id="runtime-authority-fixture",
+        producer_version="v1",
+        schema_ref="phase-c-runtime-authorization-v1",
+        payload={
+            "production_allowed": False,
+            "live_trading_authorized": False,
+            "countable_forward": False,
+        },
+        generated_at="2020-01-01T00:00:00Z",
+        scope=scope,
+        predecessor_refs=[],
+        lineage=[],
+    )
+    authority_receipt = authority(scope=scope)
+    authority_receipt["artifact_id"] = authority_artifact["artifact_id"]
+    authority_receipt["artifact_sha256"] = authority_artifact["raw_sha256"]
+    map_path, c_fast_path = tmp_path / "map.json", tmp_path / "cfast.json"
+    receipt_path = tmp_path / "authority-receipt.json"
+    artifact_path = tmp_path / "authority-artifact.json"
+    peek_path = tmp_path / "peek.json"
+    reconciliation_path = tmp_path / "reconcile.json"
+    output_path = tmp_path / "target.json"
+    _write(map_path, map_candidate)
+    _write(c_fast_path, c_fast_candidate)
+    _write(receipt_path, authority_receipt)
+    _write(artifact_path, authority_artifact)
+    _write(
+        peek_path,
+        _peek(
+            {
+                "RU2609.SHFE.SHORT": {
+                    "gateway_name": "CTP",
+                    "symbol": "RU2609",
+                    "exchange": "SHFE",
+                    "direction": "SHORT",
+                    "volume": 1,
+                }
+            }
+        ),
+    )
+    _write(reconciliation_path, {"state": "RECONCILED", "unknown_outcomes": 0})
+
+    assert (
+        adapter_main(
+            [
+                "--map-candidate",
+                str(map_path),
+                "--c-fast-candidate",
+                str(c_fast_path),
+                "--authority-receipt",
+                str(receipt_path),
+                "--authority-artifact",
+                str(artifact_path),
+                "--peek-current-facts",
+                str(peek_path),
+                "--reconciliation-state",
+                str(reconciliation_path),
+                "--product",
+                "ru",
+                "--account-scope",
+                SCOPE,
+                "--reduce-only-close",
+                "--output",
+                str(output_path),
+            ]
+        )
+        == 0
+    )
+    order = json.loads(output_path.read_text(encoding="utf-8"))["payload"]["orders"][0]
+    assert order == {
+        "symbol": "ru2609",
+        "exchange": "SHFE",
+        "direction": "LONG",
+        "type": "LIMIT",
+        "volume": 1,
+        "price": 3500.0,
+        "offset": "CLOSE",
+        "reference": order["reference"],
+        "gateway_name": "CTP",
+    }
 
 
 def test_real_producer_cli_signing_custody_and_final_preview_are_mutation_free(

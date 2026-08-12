@@ -19,19 +19,19 @@ for _path in (_ROOT / "backend", _ROOT / "scripts"):
     if str(_path) not in sys.path:
         sys.path.insert(0, str(_path))
 
-from app.execution.executable_target_adapter import (  # noqa: E402
+from app.execution.executable_target_adapter import (
     ExecutableTargetAdapterError,
     build_executable_target_plan,
     peek_current_facts_to_snapshot,
 )
-from c_fast_producer.producer import (  # noqa: E402
+from c_fast_producer.producer import (
     ProducerError,
     _create_only_atomic,
     _decode_json,
     _read_pinned_file,
 )
 
-from shared.trust_contracts.v1 import canonical_json_line  # noqa: E402
+from shared.trust_contracts.v1 import canonical_json_line
 
 
 def _object_from_file(path: Path, label: str) -> dict[str, Any]:
@@ -70,6 +70,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reconciliation-state", required=True, type=Path)
     parser.add_argument("--product", required=True)
     parser.add_argument("--account-scope", required=True)
+    parser.add_argument(
+        "--reduce-only-close",
+        action="store_true",
+        help="derive target=0 only to close one current C_FAST position",
+    )
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--generated-at")
     return parser
@@ -103,6 +108,7 @@ def main(argv: list[str] | None = None) -> int:
             account_scope=args.account_scope,
             environment="SIMNOW",
             gateway_name=peek.gateway_name,
+            reduce_only_close=args.reduce_only_close,
         )
         envelope = handoff.artifact_envelope(
             generated_at=_generated_at(args.generated_at),

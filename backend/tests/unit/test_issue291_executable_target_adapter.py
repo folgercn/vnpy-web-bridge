@@ -175,6 +175,7 @@ def adapt(
     reconciliation: dict | None = None,
     product: str = "rb",
     exact_contract: str = "SHFE.rb2601",
+    reduce_only_close: bool = False,
 ) -> object:
     map_candidate, c_fast_candidate = candidates(
         target_quantity=target_quantity,
@@ -191,6 +192,7 @@ def adapt(
         account_scope=SCOPE,
         environment="SIMNOW",
         gateway_name=GATEWAY,
+        reduce_only_close=reduce_only_close,
         now=datetime(2030, 1, 1, tzinfo=timezone.utc),
     )
 
@@ -292,6 +294,106 @@ def test_adapter_derives_direction_and_open_close_from_target_minus_current(
     )
     assert handoff.target_plan["orders"][0]["direction"] == direction
     assert handoff.target_plan["orders"][0]["offset"] == offset
+
+
+@pytest.mark.parametrize(
+    ("current_positions", "direction"),
+    [
+        (positions(short=1), "LONG"),
+        (positions(long=1), "SHORT"),
+    ],
+)
+def test_reduce_only_close_derives_zero_target_and_opposite_close(
+    current_positions: dict, direction: str
+) -> None:
+    handoff = adapt(
+        target_quantity=-1,
+        current=snapshot(current_positions),
+        reduce_only_close=True,
+    )
+
+    order = handoff.target_plan["orders"][0]
+    assert order["direction"] == direction
+    assert order["offset"] == "CLOSE"
+    assert order["volume"] == 1
+    assert handoff.target_plan["phase"] == "CLOSE"
+    assert handoff.target_plan["production_allowed"] is False
+    assert handoff.target_plan["live_trading_authorized"] is False
+    assert handoff.target_plan["countable_forward"] is False
+    assert handoff.target_plan["expected_after_position_hash"] == (
+        target_position_projection_hash(
+            {}, account_scope=SCOPE, environment="SIMNOW"
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("current_positions", "product", "exact_contract", "message"),
+    [
+        (positions(), "rb", "SHFE.rb2601", "exactly one C_FAST contract position"),
+        (positions(short=2), "rb", "SHFE.rb2601", "one-lot"),
+        (
+            positions(long=1, short=1),
+            "rb",
+            "SHFE.rb2601",
+            "exactly one C_FAST contract position",
+        ),
+        (
+            {
+                "RB2601.SHFE.LONG": {
+                    "gateway_name": GATEWAY,
+                    "symbol": "RB2601",
+                    "exchange": "SHFE",
+                    "direction": "LONG",
+                    "volume": 1,
+                }
+            },
+            "ru",
+            "SHFE.ru2609",
+            "exactly one C_FAST contract position",
+        ),
+    ],
+)
+def test_reduce_only_close_rejects_zero_multi_direction_and_symbol_mismatch(
+    current_positions: dict, product: str, exact_contract: str, message: str
+) -> None:
+    with pytest.raises(ExecutableTargetAdapterError, match=message):
+        adapt(
+            target_quantity=-1,
+            current=snapshot(current_positions),
+            product=product,
+            exact_contract=exact_contract,
+            reduce_only_close=True,
+        )
+
+
+@pytest.mark.parametrize(
+    ("current", "reconciliation", "message"),
+    [
+        (snapshot(positions(short=1), active_orders={"active-1": {}}), None, "active orders"),
+        (snapshot(positions(short=1)), {"state": "RECONCILED", "unknown_outcomes": 1}, "unknown"),
+        (snapshot(positions(short=1), scope="account:other"), None, "scope/freshness"),
+    ],
+)
+def test_reduce_only_close_rejects_active_unknown_and_scope_mismatch(
+    current: GatewaySnapshot, reconciliation: dict | None, message: str
+) -> None:
+    with pytest.raises(ExecutableTargetAdapterError, match=message):
+        adapt(
+            target_quantity=-1,
+            current=current,
+            reconciliation=reconciliation,
+            reduce_only_close=True,
+        )
+
+
+def test_reduce_only_close_requires_existing_cfast_short_target() -> None:
+    with pytest.raises(ExecutableTargetAdapterError, match="C_FAST target to be -1"):
+        adapt(
+            target_quantity=0,
+            current=snapshot(positions(short=1)),
+            reduce_only_close=True,
+        )
 
 
 @pytest.mark.parametrize(

@@ -522,6 +522,25 @@ def _after_positions(
     return result
 
 
+def _require_single_reduce_only_position(
+    positions: Mapping[str, Any],
+    matching: list[tuple[str, dict[str, Any]]],
+    *,
+    long_volume: int,
+    short_volume: int,
+) -> None:
+    """Prove that a close can only remove the one peeked C_FAST position."""
+
+    if len(positions) != 1 or len(matching) != 1:
+        raise ExecutableTargetAdapterError(
+            "reduce-only close requires exactly one C_FAST contract position"
+        )
+    if (long_volume, short_volume) not in {(1, 0), (0, 1)}:
+        raise ExecutableTargetAdapterError(
+            "reduce-only close requires exactly one one-lot position"
+        )
+
+
 def build_executable_target_plan(
     *,
     map_candidate: Mapping[str, Any],
@@ -533,15 +552,19 @@ def build_executable_target_plan(
     account_scope: str,
     environment: str,
     gateway_name: str,
+    reduce_only_close: bool = False,
     now: datetime | None = None,
 ) -> ExecutableTargetPlanHandoff:
     """Convert one explicit MAP/C_FAST target delta into one TargetPlan v1.
 
-    It only permits an exact one-lot ``target - current`` delta.  A zero or
-    multi-lot delta, active order, unknown outcome, scope/gateway mismatch, or
-    malformed current fact fails closed.  The returned plan must still follow
-    the existing offline signing, custody install, preview, reconcile, enable,
-    fencing and local opt-in flow before Execution can submit it.
+    It only permits an exact one-lot ``target - current`` delta.  The explicit
+    reduce-only path is narrower still: it accepts the existing C_FAST -1
+    target only as lineage, replaces its effective target with zero, and can
+    close exactly one current position.  A zero or multi-lot delta, active
+    order, unknown outcome, scope/gateway mismatch, or malformed current fact
+    fails closed.  The returned plan must still follow the existing offline
+    signing, custody install, preview, reconcile, enable, fencing and local
+    opt-in flow before Execution can submit it.
     """
 
     normalized_scope = _require_text(account_scope, "account scope")
@@ -590,6 +613,18 @@ def build_executable_target_plan(
         gateway_name=normalized_gateway,
     )
     target_quantity = int(_target["target_quantity"])
+    if reduce_only_close:
+        if target_quantity != -1:
+            raise ExecutableTargetAdapterError(
+                "reduce-only close requires the existing C_FAST target to be -1"
+            )
+        _require_single_reduce_only_position(
+            positions,
+            matching,
+            long_volume=long_volume,
+            short_volume=short_volume,
+        )
+        target_quantity = 0
     current_quantity = long_volume - short_volume
     delta = target_quantity - current_quantity
     if delta == 0:
@@ -602,6 +637,8 @@ def build_executable_target_plan(
         if (delta > 0 and short_volume > 0) or (delta < 0 and long_volume > 0)
         else "OPEN"
     )
+    if reduce_only_close and offset != "CLOSE":  # defensive: never open here
+        raise ExecutableTargetAdapterError("reduce-only close would not close")
     expected_before = sha256_json(positions)
     after_positions = _after_positions(
         positions,
