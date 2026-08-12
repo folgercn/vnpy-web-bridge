@@ -12,10 +12,11 @@ import json
 import os
 import stat
 import threading
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from hashlib import blake2b
+from itertools import islice
 from pathlib import Path
 from typing import Generic, TypeVar
 
@@ -362,15 +363,43 @@ class AppendOnlyJsonl:
             os.chmod(self.path.parent, 0o700)
         _ensure_parent(self.path)
         self._lock = threading.RLock()
+        self._write_poisoned = False
 
     def append(self, value: Mapping[str, object]) -> None:
+        """Append one record with the historical fsync-on-append contract."""
+
+        self.append_many((value,))
+
+    def append_many(self, values: Iterable[Mapping[str, object]]) -> None:
+        """Append a bounded record group with one durable file flush.
+
+        The parent directory is stable for ordinary appends to an existing
+        journal.  Its fsync is therefore required only when this call creates
+        the directory entry; initialization deliberately performs that work
+        before the journal becomes visible to consumers.
+        """
+
         if self.read_only:
             raise DurableStateError(f"journal is read-only: {self.path}")
-        line = (canonical_json(dict(value)) + "\n").encode("utf-8")
+        if self._write_poisoned:
+            raise DurableStateError(f"journal writer is poisoned: {self.path}")
+        lines = tuple(
+            (canonical_json(dict(value)) + "\n").encode("utf-8")
+            for value in islice(values, DurableVerifiedTickStream._GROUP_COMMIT_LIMIT + 1)
+        )
+        if len(lines) > DurableVerifiedTickStream._GROUP_COMMIT_LIMIT:
+            raise BackpressureError("append-only journal group capacity exhausted")
+        if not lines:
+            return
         with self._lock:
             parent_fd, _ = _open_parent(self.path)
             fd = -1
             try:
+                try:
+                    os.stat(self.path.name, dir_fd=parent_fd, follow_symlinks=False)
+                    created = False
+                except FileNotFoundError:
+                    created = True
                 flags = (
                     os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, "O_CLOEXEC", 0)
                 )
@@ -388,17 +417,21 @@ class AppendOnlyJsonl:
                     raise DurableCorruptionError(
                         f"journal is not a regular file: {self.path}"
                     )
-                view = memoryview(line)
-                while view:
-                    written = os.write(fd, view)
-                    if written <= 0:
-                        raise DurableCorruptionError(
-                            f"journal write failed: {self.path}"
-                        )
-                    view = view[written:]
+                for line in lines:
+                    view = memoryview(line)
+                    while view:
+                        written = os.write(fd, view)
+                        if written <= 0:
+                            self._write_poisoned = True
+                            raise DurableCorruptionError(
+                                f"journal write failed: {self.path}"
+                            )
+                        view = view[written:]
                 os.fsync(fd)
-                os.fsync(parent_fd)
+                if created:
+                    os.fsync(parent_fd)
             except OSError as exc:
+                self._write_poisoned = True
                 raise DurableCorruptionError(
                     f"journal write failed: {self.path}"
                 ) from exc
@@ -412,6 +445,8 @@ class AppendOnlyJsonl:
 
         if self.read_only:
             raise DurableStateError(f"journal is read-only: {self.path}")
+        if self._write_poisoned:
+            raise DurableStateError(f"journal writer is poisoned: {self.path}")
         with self._lock:
             parent_fd, _ = _open_parent(self.path)
             fd = -1
@@ -436,6 +471,7 @@ class AppendOnlyJsonl:
                 os.fsync(fd)
                 os.fsync(parent_fd)
             except OSError as exc:
+                self._write_poisoned = True
                 raise DurableCorruptionError(
                     f"journal initialization failed: {self.path}"
                 ) from exc
@@ -613,6 +649,7 @@ class DurableVerifiedTickStream:
     # second index.
     _ACK_SPARSE_LIMIT = 4096
     _TICK_CACHE_LIMIT = 4096
+    _GROUP_COMMIT_LIMIT = 64
 
     def __init__(
         self, directory: str | Path, *, generation: str, read_only: bool = False
@@ -644,6 +681,7 @@ class DurableVerifiedTickStream:
         self._ack_frontier = 0
         self._ack_sparse: set[int] = set()
         self._ack_fingerprint: tuple[int, int, int, int] | None = None
+        self._write_poisoned = False
         self._event_count = 0
         self._ack_count = 0
         self._ingest_membership = _BoundedMembershipFilter()
@@ -728,27 +766,32 @@ class DurableVerifiedTickStream:
         parent_fd, _ = _open_parent(self._lock_path)
         descriptor = -1
         try:
-            flags = getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-            if self.read_only:
-                # A consumer mount may be read-only.  It can take a shared
-                # flock on the producer-created lock without creating or
-                # opening the file for write access.
-                flags |= os.O_RDONLY
-            else:
-                flags |= os.O_RDWR | os.O_CREAT
-            descriptor = os.open(self._lock_path.name, flags, 0o600, dir_fd=parent_fd)
-            info = os.fstat(descriptor)
-            if (
-                not stat.S_ISREG(info.st_mode)
-                or info.st_uid != os.geteuid()
-                or info.st_nlink != 1
-                or info.st_mode & 0o077
-            ):
-                raise DurableCorruptionError("durable stream lock is invalid")
-            fcntl.flock(descriptor, fcntl.LOCK_SH if self.read_only else fcntl.LOCK_EX)
+            try:
+                flags = getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+                if self.read_only:
+                    # A consumer mount may be read-only.  It can take a shared
+                    # flock on the producer-created lock without creating or
+                    # opening the file for write access.
+                    flags |= os.O_RDONLY
+                else:
+                    flags |= os.O_RDWR | os.O_CREAT
+                descriptor = os.open(
+                    self._lock_path.name, flags, 0o600, dir_fd=parent_fd
+                )
+                info = os.fstat(descriptor)
+                if (
+                    not stat.S_ISREG(info.st_mode)
+                    or info.st_uid != os.geteuid()
+                    or info.st_nlink != 1
+                    or info.st_mode & 0o077
+                ):
+                    raise DurableCorruptionError("durable stream lock is invalid")
+                fcntl.flock(
+                    descriptor, fcntl.LOCK_SH if self.read_only else fcntl.LOCK_EX
+                )
+            except OSError as exc:
+                raise DurableCorruptionError("cannot lock durable stream") from exc
             yield
-        except OSError as exc:
-            raise DurableCorruptionError("cannot lock durable stream") from exc
         finally:
             if descriptor >= 0:
                 try:
@@ -1061,12 +1104,39 @@ class DurableVerifiedTickStream:
             return int(state.get("last_ingest_seq") or 0) + 1
 
     def append(self, tick: VerifiedTick) -> bool:
-        if tick.stream_generation != self.generation:
-            raise GenerationMismatch(
-                f"tick generation {tick.stream_generation!r} != {self.generation!r}"
-            )
-        if tick.event_hash != tick.compute_event_hash():
-            raise DurableCorruptionError(f"event hash mismatch for {tick.ingest_id}")
+        return self.append_many((tick,))[0]
+
+    def append_many(
+        self,
+        ticks: Iterable[VerifiedTick],
+        *,
+        before_journal: Callable[[], None] | None = None,
+        after_journal: Callable[[], None] | None = None,
+    ) -> tuple[bool, ...]:
+        """Durably append one bounded, contiguous tick group.
+
+        A single verified-journal fsync establishes the complete group before
+        the watermark advances to its tail.  Callers must pre-stage any
+        companion checkpoint intent (such as the market source fence) before
+        invoking this method.
+        """
+
+        values = tuple(islice(ticks, self._GROUP_COMMIT_LIMIT + 1))
+        if self._write_poisoned:
+            raise DurableStateError("verified tick stream writer is poisoned")
+        if len(values) > self._GROUP_COMMIT_LIMIT:
+            raise BackpressureError("durable tick group capacity exhausted")
+        if not values:
+            return ()
+        for tick in values:
+            if tick.stream_generation != self.generation:
+                raise GenerationMismatch(
+                    f"tick generation {tick.stream_generation!r} != {self.generation!r}"
+                )
+            if tick.event_hash != tick.compute_event_hash():
+                raise DurableCorruptionError(
+                    f"event hash mismatch for {tick.ingest_id}"
+                )
         with self._lock, self._process_lock():
             state = self.watermark.read()
             # Preserve #327's competing-producer semantics without a steady
@@ -1075,50 +1145,88 @@ class DurableVerifiedTickStream:
             if self._indexed_watermark_seq != int(state.get("last_ingest_seq") or 0):
                 self._index = None
             index = self._load_index_unlocked()
-            prior = index.get(tick.ingest_id)
-            if prior is None and self._ingest_membership.may_contain(tick.ingest_id):
-                prior = self._exact_tick_unlocked(
-                    lambda item: item.ingest_id == tick.ingest_id
-                )
-            if prior:
-                if prior.event_hash != tick.event_hash:
-                    raise DuplicateRecordError(f"ingest_id reused: {tick.ingest_id}")
-                return False
             # Loading can repair a producer watermark left behind by a crash
             # after the journal fsync, so use the post-recovery frontier.
-            state = self.watermark.read()
-            expected = int(state.get("last_ingest_seq") or 0) + 1
-            if tick.ingest_seq != expected:
-                raise DurableStateError(
-                    f"expected ingest_seq {expected}, got {tick.ingest_seq}"
+            expected = int(self.watermark.read().get("last_ingest_seq") or 0) + 1
+            new: list[VerifiedTick] = []
+            results: list[bool] = []
+            staged: dict[str, VerifiedTick] = {}
+            for tick in values:
+                prior = staged.get(tick.ingest_id) or index.get(tick.ingest_id)
+                if prior is None and self._ingest_membership.may_contain(
+                    tick.ingest_id
+                ):
+                    prior = self._exact_tick_unlocked(
+                        lambda item, identity=tick.ingest_id: item.ingest_id == identity
+                    )
+                if prior is not None:
+                    if prior.event_hash != tick.event_hash:
+                        raise DuplicateRecordError(
+                            f"ingest_id reused: {tick.ingest_id}"
+                        )
+                    results.append(False)
+                    continue
+                if tick.ingest_seq != expected:
+                    raise DurableStateError(
+                        f"expected ingest_seq {expected}, got {tick.ingest_seq}"
+                    )
+                staged[tick.ingest_id] = tick
+                new.append(tick)
+                results.append(True)
+                expected += 1
+            for membership, identities in (
+                (self._ingest_membership, {tick.ingest_id for tick in new}),
+                (
+                    self._source_event_membership,
+                    {tick.source_event_id for tick in new if tick.source_event_id},
+                ),
+                (self._raw_membership, {tick.raw_hash for tick in new if tick.raw_hash}),
+            ):
+                if membership.count + len(identities) > membership._CAPACITY:
+                    raise BackpressureError("durable membership filter capacity exhausted")
+            if not new:
+                if before_journal is not None:
+                    before_journal()
+                if after_journal is not None:
+                    after_journal()
+                return tuple(results)
+            if before_journal is not None:
+                before_journal()
+            try:
+                self.journal.append_many(
+                    {"record_type": "verified_tick", "tick": tick.as_dict()}
+                    for tick in new
                 )
-            self._ingest_membership.require_capacity()
-            if tick.source_event_id:
-                self._source_event_membership.require_capacity()
-            if tick.raw_hash:
-                self._raw_membership.require_capacity()
-            self.journal.append(
-                {"record_type": "verified_tick", "tick": tick.as_dict()}
-            )
-            self._cache_tick(tick)
-            self._ingest_membership.note_identity()
-            self._ingest_membership.add(tick.ingest_id)
-            if tick.source_event_id:
-                self._source_event_membership.note_identity()
-                self._source_event_membership.add(tick.source_event_id)
-            if tick.raw_hash:
-                self._raw_membership.note_identity()
-                self._raw_membership.add(tick.raw_hash)
-            self.watermark.write(
-                {
-                    "stream_generation": self.generation,
-                    "last_ingest_seq": tick.ingest_seq,
-                    "last_event_hash": tick.event_hash,
-                }
-            )
-            self._indexed_watermark_seq = tick.ingest_seq
-            self._event_count += 1
-            return True
+            except Exception:
+                self._write_poisoned = True
+                raise
+            for tick in new:
+                self._cache_tick(tick)
+                self._ingest_membership.note_identity()
+                self._ingest_membership.add(tick.ingest_id)
+                if tick.source_event_id:
+                    self._source_event_membership.note_identity()
+                    self._source_event_membership.add(tick.source_event_id)
+                if tick.raw_hash:
+                    self._raw_membership.note_identity()
+                    self._raw_membership.add(tick.raw_hash)
+            tail = new[-1]
+            try:
+                self.watermark.write(
+                    {
+                        "stream_generation": self.generation,
+                        "last_ingest_seq": tail.ingest_seq,
+                        "last_event_hash": tail.event_hash,
+                    }
+                )
+            except Exception:
+                self._write_poisoned = True
+                raise
+            self._indexed_watermark_seq = tail.ingest_seq
+            self._event_count += len(new)
+            if after_journal is not None:
+                after_journal()
+            return tuple(results)
 
     def iter_from(
         self, after_seq: int = 0, *, limit: int | None = None
@@ -1238,10 +1346,25 @@ class DurableVerifiedTickStream:
         )
 
     def acknowledge_tick_write(self, tick: VerifiedTick) -> bool:
-        if tick.stream_generation != self.generation:
-            raise GenerationMismatch("acknowledgement generation mismatch")
-        if tick.event_hash != tick.compute_event_hash():
-            raise DurableCorruptionError("acknowledgement source hash mismatch")
+        return self.acknowledge_tick_writes((tick,))[0]
+
+    def acknowledge_tick_writes(
+        self, ticks: Iterable[VerifiedTick]
+    ) -> tuple[bool, ...]:
+        """Record a bounded committed writer group with one acknowledgement fsync."""
+
+        values = tuple(islice(ticks, self._GROUP_COMMIT_LIMIT + 1))
+        if self._write_poisoned:
+            raise DurableStateError("verified tick stream writer is poisoned")
+        if len(values) > self._GROUP_COMMIT_LIMIT:
+            raise BackpressureError("durable acknowledgement group capacity exhausted")
+        if not values:
+            return ()
+        for tick in values:
+            if tick.stream_generation != self.generation:
+                raise GenerationMismatch("acknowledgement generation mismatch")
+            if tick.event_hash != tick.compute_event_hash():
+                raise DurableCorruptionError("acknowledgement source hash mismatch")
         with self._lock, self._process_lock():
             state = self.watermark.read()
             if self._indexed_watermark_seq != int(state.get("last_ingest_seq") or 0):
@@ -1251,60 +1374,85 @@ class DurableVerifiedTickStream:
                 self._index = None
                 self.acknowledgements._values = None  # type: ignore[attr-defined]
                 self.acknowledgements._records = None  # type: ignore[attr-defined]
-            persisted = self._load_index_unlocked().get(tick.ingest_id)
+            index = self._load_index_unlocked()
             self._refresh_ack_frontier_if_changed_unlocked()
-            if persisted is None and self._ingest_membership.may_contain(tick.ingest_id):
-                persisted = self._exact_tick_unlocked(
-                    lambda item: item.ingest_id == tick.ingest_id
-                )
-            if persisted is None:
-                raise DurableCorruptionError("acknowledgement references unknown tick")
-            if (
-                persisted.stream_generation != tick.stream_generation
-                or persisted.ingest_seq != tick.ingest_seq
-                or persisted.event_hash != tick.event_hash
-            ):
-                raise DurableCorruptionError(
-                    "acknowledgement does not bind to persisted tick"
-                )
-            if tick.ingest_seq > self._ack_frontier + 1 and (
-                tick.ingest_seq not in self._ack_sparse
-                and len(self._ack_sparse) >= self._ACK_SPARSE_LIMIT
-            ):
-                raise BackpressureError(
-                    "durable acknowledgement sparse frontier exhausted"
-                )
-            expected = {
-                "ingest_id": tick.ingest_id,
-                "stream_generation": tick.stream_generation,
-                "ingest_seq": tick.ingest_seq,
-                "event_hash": tick.event_hash,
-            }
-            prior = (
-                self._exact_acknowledgement_unlocked(tick)
-                if self._ack_membership.may_contain(tick.ingest_id)
-                else None
-            )
-            if prior is not None:
-                if prior != expected:
-                    raise DuplicateRecordError(
-                        f"append-only set identity conflict: {tick.ingest_id}"
+            results: list[bool] = []
+            pending: list[tuple[VerifiedTick, dict[str, object]]] = []
+            staged: dict[str, dict[str, object]] = {}
+            for tick in values:
+                persisted = index.get(tick.ingest_id)
+                if persisted is None and self._ingest_membership.may_contain(
+                    tick.ingest_id
+                ):
+                    persisted = self._exact_tick_unlocked(
+                        lambda item, identity=tick.ingest_id: item.ingest_id == identity
                     )
-                return False
-            self._ack_membership.require_capacity()
-            self.acknowledgements.journal.append(expected)
+                if persisted is None:
+                    raise DurableCorruptionError("acknowledgement references unknown tick")
+                if (
+                    persisted.stream_generation != tick.stream_generation
+                    or persisted.ingest_seq != tick.ingest_seq
+                    or persisted.event_hash != tick.event_hash
+                ):
+                    raise DurableCorruptionError(
+                        "acknowledgement does not bind to persisted tick"
+                    )
+                expected = {
+                    "ingest_id": tick.ingest_id,
+                    "stream_generation": tick.stream_generation,
+                    "ingest_seq": tick.ingest_seq,
+                    "event_hash": tick.event_hash,
+                }
+                prior = staged.get(tick.ingest_id)
+                if prior is None and self._ack_membership.may_contain(tick.ingest_id):
+                    prior = self._exact_acknowledgement_unlocked(tick)
+                if prior is not None:
+                    if prior != expected:
+                        raise DuplicateRecordError(
+                            f"append-only set identity conflict: {tick.ingest_id}"
+                        )
+                    results.append(False)
+                    continue
+                if tick.ingest_seq <= self._ack_frontier:
+                    results.append(False)
+                    continue
+                staged[tick.ingest_id] = expected
+                pending.append((tick, expected))
+                results.append(True)
+            if self._ack_membership.count + len(pending) > self._ack_membership._CAPACITY:
+                raise BackpressureError("durable membership filter capacity exhausted")
+            frontier = self._ack_frontier
+            sparse = set(self._ack_sparse)
+            for tick, _ in sorted(pending, key=lambda item: item[0].ingest_seq):
+                if tick.ingest_seq == frontier + 1:
+                    frontier += 1
+                    while frontier + 1 in sparse:
+                        sparse.remove(frontier + 1)
+                        frontier += 1
+                elif tick.ingest_seq > frontier and tick.ingest_seq not in sparse:
+                    if len(sparse) >= self._ACK_SPARSE_LIMIT:
+                        raise BackpressureError(
+                            "durable acknowledgement sparse frontier exhausted"
+                        )
+                    sparse.add(tick.ingest_seq)
+            try:
+                self.acknowledgements.journal.append_many(
+                    expected
+                    for _, expected in sorted(
+                        pending, key=lambda item: item[0].ingest_seq
+                    )
+                )
+            except Exception:
+                self._write_poisoned = True
+                raise
             self._ack_fingerprint = self.acknowledgements.journal.fingerprint()
-            self._ack_membership.note_identity()
-            self._ack_membership.add(tick.ingest_id)
-            self._ack_count += 1
-            if tick.ingest_seq == self._ack_frontier + 1:
-                self._ack_frontier += 1
-                while self._ack_frontier + 1 in self._ack_sparse:
-                    self._ack_sparse.remove(self._ack_frontier + 1)
-                    self._ack_frontier += 1
-            elif tick.ingest_seq > self._ack_frontier:
-                self._ack_sparse.add(tick.ingest_seq)
-            return True
+            for tick, _ in pending:
+                self._ack_membership.note_identity()
+                self._ack_membership.add(tick.ingest_id)
+            self._ack_count += len(pending)
+            self._ack_frontier = frontier
+            self._ack_sparse = sparse
+            return tuple(results)
 
     def stats(self) -> dict[str, object]:
         with self._lock:
@@ -1449,6 +1597,21 @@ class BoundedIngressQueue(Generic[T]):
         value = self._queue.get_nowait()
         self.stats.dequeued += 1
         return value
+
+    def put_front_many(self, values: Iterable[T]) -> None:
+        """Return a predrained failure suffix without reordering or loss."""
+
+        items = tuple(values)
+        if not items:
+            return
+        queue = self._queue
+        with queue.mutex:
+            if queue.maxsize > 0 and queue._qsize() + len(items) > queue.maxsize:
+                raise BackpressureError("bounded ingress queue is full")
+            for value in reversed(items):
+                queue.queue.appendleft(value)
+            queue.unfinished_tasks += len(items)
+            queue.not_empty.notify_all()
 
     def qsize(self) -> int:
         return self._queue.qsize()
