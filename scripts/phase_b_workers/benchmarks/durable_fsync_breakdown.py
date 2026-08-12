@@ -7,6 +7,7 @@ and is only a comparison of the existing per-operation fsync cost.
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import stat
 import sys
@@ -20,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.phase_b_workers import durable
+durable = importlib.import_module("scripts.phase_b_workers.durable")
 
 
 @contextmanager
