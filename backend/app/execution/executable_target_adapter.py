@@ -14,6 +14,7 @@ import math
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from datetime import datetime
 from typing import Any
 
@@ -284,6 +285,29 @@ def _selected_target(
     if not math.isfinite(normalized_price) or normalized_price <= 0:
         raise ExecutableTargetAdapterError("C_FAST reference price is invalid")
     return row, exchange, symbol, normalized_price
+
+
+def _reduce_only_limit_price(value: Any, *, price_tick: Any) -> float:
+    """Validate one operator-supplied close price against signed C_FAST tick size."""
+
+    def decimal(value: Any, label: str) -> Decimal:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ExecutableTargetAdapterError(f"{label} is invalid")
+        try:
+            parsed = Decimal(str(value))
+        except (InvalidOperation, ValueError) as exc:
+            raise ExecutableTargetAdapterError(f"{label} is invalid") from exc
+        if not parsed.is_finite() or parsed <= 0:
+            raise ExecutableTargetAdapterError(f"{label} is invalid")
+        return parsed
+
+    limit_price = decimal(value, "reduce-only close limit price")
+    tick = decimal(price_tick, "C_FAST price tick")
+    if limit_price % tick != 0:
+        raise ExecutableTargetAdapterError(
+            "reduce-only close limit price is not aligned to C_FAST price tick"
+        )
+    return float(limit_price)
 
 
 def _validate_snapshot(
@@ -585,6 +609,7 @@ def build_executable_target_plan(
     environment: str,
     gateway_name: str,
     reduce_only_close: bool = False,
+    reduce_only_close_limit_price: float | None = None,
     now: datetime | None = None,
 ) -> ExecutableTargetPlanHandoff:
     """Convert one explicit MAP/C_FAST target delta into one TargetPlan v1.
@@ -604,6 +629,10 @@ def build_executable_target_plan(
     normalized_gateway = _require_text(gateway_name, "gateway name")
     if normalized_environment != "SIMNOW":
         raise ExecutableTargetAdapterError("only SIMNOW target plans are supported")
+    if not reduce_only_close and reduce_only_close_limit_price is not None:
+        raise ExecutableTargetAdapterError(
+            "reduce-only close limit price requires reduce-only close mode"
+        )
     normalized_product = _require_text(product, "product").lower()
     map_hash, c_fast_hash = _validate_lineage(map_candidate, c_fast_candidate)
     candidate = _mapping(c_fast_candidate, "C_FAST candidate")
@@ -645,6 +674,7 @@ def build_executable_target_plan(
         gateway_name=normalized_gateway,
     )
     target_quantity = int(_target["target_quantity"])
+    order_price = price
     if reduce_only_close:
         if target_quantity != -1:
             raise ExecutableTargetAdapterError(
@@ -655,6 +685,10 @@ def build_executable_target_plan(
             matching,
             long_volume=long_volume,
             short_volume=short_volume,
+        )
+        order_price = _reduce_only_limit_price(
+            reduce_only_close_limit_price,
+            price_tick=_target.get("price_tick"),
         )
         target_quantity = 0
     current_quantity = long_volume - short_volume
@@ -718,7 +752,7 @@ def build_executable_target_plan(
                 "direction": direction,
                 "type": "LIMIT",
                 "volume": 1,
-                "price": price,
+                "price": order_price,
                 "offset": offset,
                 # The Windows typed fence accepts at most 64 characters.  The
                 # full SHA-256 identity is already deterministic and binds the

@@ -75,6 +75,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="derive target=0 only to close one current C_FAST position",
     )
+    parser.add_argument(
+        "--reduce-only-close-limit-price",
+        type=float,
+        help="operator-supplied fresh-tick limit price for reduce-only close",
+    )
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--generated-at")
     return parser
@@ -111,6 +116,7 @@ def main(argv: list[str] | None = None) -> int:
             environment="SIMNOW",
             gateway_name=peek.gateway_name,
             reduce_only_close=args.reduce_only_close,
+            reduce_only_close_limit_price=args.reduce_only_close_limit_price,
         )
         envelope = handoff.artifact_envelope(
             generated_at=_generated_at(args.generated_at),

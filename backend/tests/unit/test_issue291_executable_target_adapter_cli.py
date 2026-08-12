@@ -298,12 +298,15 @@ def test_cli_exposes_explicit_reduce_only_close_flag() -> None:
             "--account-scope",
             SCOPE,
             "--reduce-only-close",
+            "--reduce-only-close-limit-price",
+            "17100",
             "--output",
             "target.json",
         ]
     )
 
     assert args.reduce_only_close is True
+    assert args.reduce_only_close_limit_price == 17100.0
 
 
 def test_cli_reduce_only_close_writes_one_opposite_close_target(tmp_path: Path) -> None:
@@ -381,6 +384,8 @@ def test_cli_reduce_only_close_writes_one_opposite_close_target(tmp_path: Path) 
                 "--account-scope",
                 SCOPE,
                 "--reduce-only-close",
+                "--reduce-only-close-limit-price",
+                "3500",
                 "--output",
                 str(output_path),
             ]
