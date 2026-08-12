@@ -45,6 +45,22 @@ def test_frontend_only_change_builds_only_its_exact_phase_a_unit() -> None:
     assert plan["phase_b"]["selected_units"] == []
 
 
+def test_executable_target_adapter_has_exact_execution_owner() -> None:
+    path = "scripts/commodity_c_fast_executable_target_adapter.py"
+    classified = classify_phase_a([path])
+    assert classified["release_blocked"] is False
+    assert classified["selected_rule_ids"] == ["phase-a-execution-build"]
+    assert classified["selected_units"] == ["execution-orchestrator"]
+
+    plan = create_plan([path], source_commit_sha=SHA)
+    assert plan["decision"] == "BUILD_ONLY"
+    assert _units(plan) == {
+        ("A", "execution-orchestrator"),
+        ("A", "gateway-rpc-request-proxy"),
+        ("A", "gateway-rpc-publish-proxy"),
+    }
+
+
 def test_phase_a_shared_contract_expands_only_its_real_consumer_closure() -> None:
     plan = create_plan(
         ["docs/schemas/web-bridge-control-execution-command-v1.schema.json"],
