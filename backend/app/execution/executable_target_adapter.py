@@ -83,6 +83,9 @@ _AUTHORITY_LIKE_FIELDS = (
     "signing_requested",
     "custody_published",
 )
+_TERMINAL_EXECUTION_ORDER_STATUSES = frozenset(
+    {"ALLTRADED", "CANCELLED", "CANCELED", "REJECTED"}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -319,13 +322,36 @@ def _validate_snapshot(
     return positions
 
 
+def _require_terminal_execution_orders(orders: Mapping[str, Any]) -> None:
+    """Accept only readback-only Windows terminal order rows."""
+
+    for order_id, row in orders.items():
+        if not isinstance(order_id, str) or not isinstance(row, Mapping):
+            raise ExecutableTargetAdapterError("peek execution order is invalid")
+        status = row.get("status")
+        normalized_status = (
+            status.upper().replace("_", "").replace(" ", "")
+            if isinstance(status, str)
+            else ""
+        )
+        if normalized_status not in _TERMINAL_EXECUTION_ORDER_STATUSES:
+            raise ExecutableTargetAdapterError(
+                "peek execution order is not explicitly terminal"
+            )
+
+
 def peek_current_facts_to_snapshot(
-    value: Mapping[str, Any], *, account_scope: str
+    value: Mapping[str, Any],
+    *,
+    account_scope: str,
+    allow_terminal_execution_orders: bool = False,
 ) -> PeekCurrentFacts:
     """Convert one exact ``peek_current_facts_v1`` result without any RPC call.
 
     The final Windows bridge reports ``simnow`` while TargetPlan v1 and
     Execution use ``SIMNOW``.  This is the only deliberate normalization.
+    Terminal Windows execution rows remain readback-only and never enter the
+    returned snapshot; callers must explicitly opt in to accept them.
     """
 
     facts = _mapping(value, "peek current facts")
@@ -369,8 +395,14 @@ def peek_current_facts_to_snapshot(
     execution = facts["execution"]
     if not isinstance(execution, Mapping) or set(execution) != {"orders"} or not isinstance(execution["orders"], Mapping):
         raise ExecutableTargetAdapterError("peek execution facts are invalid")
-    if facts["active_orders"] or execution["orders"]:
+    if facts["active_orders"]:
         raise ExecutableTargetAdapterError("peek active or execution orders block adaptation")
+    if execution["orders"]:
+        if not allow_terminal_execution_orders:
+            raise ExecutableTargetAdapterError(
+                "peek active or execution orders block adaptation"
+            )
+        _require_terminal_execution_orders(execution["orders"])
     admission = facts["admission"]
     admission_fields = {
         "account_scope",

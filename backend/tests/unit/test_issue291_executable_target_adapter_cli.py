@@ -237,6 +237,47 @@ def test_peek_current_facts_requires_live_ctp_account(
         peek_current_facts_to_snapshot(facts, account_scope=SCOPE)
 
 
+def test_peek_default_mode_rejects_terminal_execution_order() -> None:
+    facts = _peek({})
+    facts["execution"]["orders"] = {"CTP.terminal": {"status": "ALLTRADED"}}
+
+    with pytest.raises(ExecutableTargetAdapterError, match="execution orders"):
+        peek_current_facts_to_snapshot(facts, account_scope=SCOPE)
+
+
+def test_peek_reduce_only_accepts_alltraded_execution_readback_only() -> None:
+    facts = _peek({})
+    facts["execution"]["orders"] = {
+        "CTP.terminal": {"status": "ALLTRADED", "symbol": "ru2609"}
+    }
+
+    peek = peek_current_facts_to_snapshot(
+        facts,
+        account_scope=SCOPE,
+        allow_terminal_execution_orders=True,
+    )
+
+    assert peek.snapshot.orders == {}
+    assert peek.snapshot.active_order_count == 0
+
+
+@pytest.mark.parametrize(
+    "status",
+    ("SUBMITTING", "SUBMITTED", "NOTTRADED", "PARTTRADED", "UNKNOWN", None),
+)
+def test_peek_reduce_only_rejects_nonterminal_execution_order(status: str | None) -> None:
+    facts = _peek({})
+    row = {} if status is None else {"status": status}
+    facts["execution"]["orders"] = {"CTP.nonterminal": row}
+
+    with pytest.raises(ExecutableTargetAdapterError, match="not explicitly terminal"):
+        peek_current_facts_to_snapshot(
+            facts,
+            account_scope=SCOPE,
+            allow_terminal_execution_orders=True,
+        )
+
+
 def test_cli_exposes_explicit_reduce_only_close_flag() -> None:
     args = build_parser().parse_args(
         [
@@ -305,20 +346,19 @@ def test_cli_reduce_only_close_writes_one_opposite_close_target(tmp_path: Path) 
     _write(c_fast_path, c_fast_candidate)
     _write(receipt_path, authority_receipt)
     _write(artifact_path, authority_artifact)
-    _write(
-        peek_path,
-        _peek(
-            {
-                "RU2609.SHFE.SHORT": {
-                    "gateway_name": "CTP",
-                    "symbol": "RU2609",
-                    "exchange": "SHFE",
-                    "direction": "SHORT",
-                    "volume": 1,
-                }
+    peek_facts = _peek(
+        {
+            "RU2609.SHFE.SHORT": {
+                "gateway_name": "CTP",
+                "symbol": "RU2609",
+                "exchange": "SHFE",
+                "direction": "SHORT",
+                "volume": 1,
             }
-        ),
+        }
     )
+    peek_facts["execution"]["orders"] = {"CTP.historical": {"status": "ALLTRADED"}}
+    _write(peek_path, peek_facts)
     _write(reconciliation_path, {"state": "RECONCILED", "unknown_outcomes": 0})
 
     assert (

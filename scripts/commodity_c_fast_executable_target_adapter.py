@@ -96,7 +96,9 @@ def main(argv: list[str] | None = None) -> int:
         if set(reconciliation) != {"state", "unknown_outcomes"}:
             raise ExecutableTargetAdapterError("reconciliation state fields are invalid")
         peek = peek_current_facts_to_snapshot(
-            peek_facts, account_scope=args.account_scope
+            peek_facts,
+            account_scope=args.account_scope,
+            allow_terminal_execution_orders=args.reduce_only_close,
         )
         handoff = build_executable_target_plan(
             map_candidate=map_candidate,
