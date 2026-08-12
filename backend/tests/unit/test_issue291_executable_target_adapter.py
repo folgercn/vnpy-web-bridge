@@ -220,6 +220,19 @@ def test_adapter_preserves_map_cfast_lineage_scope_expiry_and_delta() -> None:
 
     plan = handoff.target_plan
     assert plan["expected_before_position_hash"] == sha256_json({})
+    identity = sha256_json(
+        {
+            "map_sha256": sha256_json(map_candidate),
+            "c_fast_sha256": sha256_json(c_fast_candidate),
+            "expected_before_position_hash": sha256_json({}),
+            "product": "rb",
+            "gateway_name": GATEWAY,
+        }
+    )
+    assert plan["plan_id"] == f"cfast-target-plan-v1-{identity}"
+    assert plan["orders"][0]["reference"] == identity
+    assert len(plan["orders"][0]["reference"]) == 64
+    assert adapt().target_plan["orders"][0]["reference"] == identity
     assert plan["orders"] == [
         {
             "symbol": "RB2601",

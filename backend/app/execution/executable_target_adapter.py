@@ -648,7 +648,10 @@ def build_executable_target_plan(
                 "volume": 1,
                 "price": price,
                 "offset": offset,
-                "reference": f"cfast-target-order-v1-{identity}",
+                # The Windows typed fence accepts at most 64 characters.  The
+                # full SHA-256 identity is already deterministic and binds the
+                # order to its MAP/C_FAST and expected-position inputs.
+                "reference": identity,
                 "gateway_name": normalized_gateway,
             }
         ],
