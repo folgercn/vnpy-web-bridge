@@ -22,7 +22,10 @@ _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$")
 _KEY_VERSION_RE = re.compile(r"^v[0-9]+$")
-_SYMBOL_RE = re.compile(r"^[A-Z][A-Z0-9]{0,31}$")
+# TargetPlan orders are sent directly to vn.py.  CTP registers commodity
+# symbols using their native lower-case spelling (for example, ``ru2609``),
+# while snapshots remain normalized independently for position projections.
+_SYMBOL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]{0,31}$")
 _REFERENCE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$")
 _GATEWAY_NAME_RE = re.compile(r"^(?:CTP|[A-Za-z0-9][A-Za-z0-9._:-]{7,127})$")
 _EXCHANGES = frozenset({"CFFEX", "CZCE", "DCE", "GFEX", "INE", "SHFE"})
