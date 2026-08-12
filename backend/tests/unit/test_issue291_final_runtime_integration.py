@@ -132,6 +132,14 @@ def test_final_compose_keeps_custody_single_writer_and_data_plane_isolated() -> 
         services["execution-orchestrator"]["environment"]["EXECUTION_ALLOW_SIMNOW_EXECUTION"]
         == "${EXECUTION_ALLOW_SIMNOW_EXECUTION:-false}"
     )
+    assert (
+        services["execution-orchestrator"]["environment"]["SIMNOW_EXECUTION_ENABLED"]
+        == "${SIMNOW_EXECUTION_ENABLED:-false}"
+    )
+    assert (
+        services["artifact-custody"]["environment"]["SIMNOW_TRUSTED_KEYLESS_CUSTODY_ENABLED"]
+        == "${SIMNOW_TRUSTED_KEYLESS_CUSTODY_ENABLED:-false}"
+    )
     assert "gateway-egress" not in services["execution-orchestrator"]["networks"]
     assert services["market-data-worker"]["networks"] == ["market-ingress", "questdb-data"]
     assert services["gateway-rpc-publish-proxy"]["networks"] == ["gateway-proxy", "gateway-egress", "market-ingress"]

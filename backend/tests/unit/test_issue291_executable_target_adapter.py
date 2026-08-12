@@ -10,6 +10,7 @@ import pytest
 from app.execution.executable_target_adapter import (
     ExecutableTargetAdapterError,
     build_executable_target_plan,
+    build_trusted_keyless_executable_target_plan,
 )
 from app.execution.gateway import GatewaySnapshot
 
@@ -217,6 +218,52 @@ def adapt(
         reduce_only_close_limit_price=reduce_only_close_limit_price,
         now=datetime(2030, 1, 1, tzinfo=timezone.utc),
     )
+
+
+def test_trusted_keyless_adapter_requires_fixed_tuple_and_preserves_lineage() -> None:
+    map_candidate, c_fast_candidate = candidates()
+    handoff = build_trusted_keyless_executable_target_plan(
+        map_candidate=map_candidate,
+        c_fast_candidate=c_fast_candidate,
+        current_facts=snapshot(scope="account:windows"),
+        reconciliation={"state": "RECONCILED", "unknown_outcomes": 0},
+        product="rb",
+        expires_at="2099-01-01T00:00:00Z",
+        now=datetime(2030, 1, 1, tzinfo=timezone.utc),
+    )
+    assert handoff.target_plan["scope"] == {
+        "account_scope": "account:windows",
+        "environment": "SIMNOW",
+        "gateway_name": "CTP",
+    }
+    assert set(handoff.target_plan["lineage"]) == {"map_sha256", "c_fast_sha256"}
+    assert handoff.trusted_keyless_custody_artifact()["payload"] == handoff.target_plan
+    with pytest.raises(ExecutableTargetAdapterError, match="active orders"):
+        build_trusted_keyless_executable_target_plan(
+            map_candidate=map_candidate,
+            c_fast_candidate=c_fast_candidate,
+            current_facts=snapshot(
+                active_orders={"working-order": {}}, scope="account:windows"
+            ),
+            reconciliation={"state": "RECONCILED", "unknown_outcomes": 0},
+            product="rb",
+            expires_at="2099-01-01T00:00:00Z",
+            now=datetime(2030, 1, 1, tzinfo=timezone.utc),
+        )
+    for reconciliation in (
+        {"state": "PENDING", "unknown_outcomes": 0},
+        {"state": "RECONCILED", "unknown_outcomes": 1},
+    ):
+        with pytest.raises(ExecutableTargetAdapterError, match="unknown or unreconciled"):
+            build_trusted_keyless_executable_target_plan(
+                map_candidate=map_candidate,
+                c_fast_candidate=c_fast_candidate,
+                current_facts=snapshot(scope="account:windows"),
+                reconciliation=reconciliation,
+                product="rb",
+                expires_at="2099-01-01T00:00:00Z",
+                now=datetime(2030, 1, 1, tzinfo=timezone.utc),
+            )
 
 
 def test_adapter_preserves_map_cfast_lineage_scope_expiry_and_delta() -> None:

@@ -18,6 +18,12 @@ from datetime import datetime, timezone
 from typing import Any
 
 TARGET_PLAN_SCHEMA_VERSION = "web-bridge-simnow-target-plan-v1"
+KEYLESS_TARGET_PLAN_SCHEMA_VERSION = "web-bridge-simnow-keyless-target-plan-v1"
+TRUSTED_KEYLESS_SIMNOW_SCOPE = {
+    "account_scope": "account:windows",
+    "environment": "SIMNOW",
+    "gateway_name": "CTP",
+}
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$")
@@ -497,6 +503,100 @@ class VerifiedCustodyReceipt:
         return _detached_mapping(self.raw, "custody receipt")
 
 
+_KEYLESS_RECEIPT_FIELDS = frozenset(
+    {
+        "receipt_id",
+        "receipt_type",
+        "artifact_id",
+        "artifact_type",
+        "trust_domain",
+        "schema_ref",
+        "artifact_sha256",
+        "scope",
+        "expires_at",
+        "custody_version",
+        "idempotency_key",
+        "verified",
+        "installed",
+        "custody_writer",
+        "production_allowed",
+        "live_trading_authorized",
+        "countable_forward",
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class TrustedKeylessCustodyReceipt:
+    """Exact create-only custody evidence for the fixed local SIMNOW tuple.
+
+    This is intentionally separate from :class:`VerifiedCustodyReceipt`: it
+    cannot carry a signer, keyring pin, or runtime-authorization artifact.
+    """
+
+    raw: dict[str, Any]
+    receipt_sha256: str
+
+    @classmethod
+    def from_mapping(cls, value: Any) -> TrustedKeylessCustodyReceipt:
+        raw = _detached_mapping(value, "keyless custody receipt")
+        if set(raw) != _KEYLESS_RECEIPT_FIELDS:
+            raise CommodityExecutionContractError(
+                "keyless custody receipt fields are not exact"
+            )
+        for field in ("receipt_id", "artifact_id", "idempotency_key", "custody_writer"):
+            _id(raw[field], f"keyless custody receipt {field}")
+        _sha(raw["artifact_sha256"], "keyless custody receipt artifact_sha256")
+        _utc(raw["expires_at"], "keyless custody receipt expires_at")
+        scope = _detached_mapping(raw["scope"], "keyless custody receipt scope")
+        if (
+            raw["receipt_type"] != "install"
+            or raw["artifact_type"] != "simnow-target-plan"
+            or raw["trust_domain"] != "runtime_authorization"
+            or raw["schema_ref"] != KEYLESS_TARGET_PLAN_SCHEMA_VERSION
+            or scope != TRUSTED_KEYLESS_SIMNOW_SCOPE
+            or raw["verified"] is not True
+            or raw["installed"] is not True
+            or any(
+                raw[field] is not False
+                for field in (
+                    "production_allowed",
+                    "live_trading_authorized",
+                    "countable_forward",
+                )
+            )
+            or isinstance(raw["custody_version"], bool)
+            or not isinstance(raw["custody_version"], int)
+            or raw["custody_version"] < 1
+        ):
+            raise CommodityExecutionContractError(
+                "keyless custody receipt is not fixed SIMNOW evidence"
+            )
+        return cls(raw=raw, receipt_sha256=sha256_json(raw))
+
+    @property
+    def receipt_id(self) -> str:
+        return str(self.raw["receipt_id"])
+
+    @property
+    def artifact_id(self) -> str:
+        return str(self.raw["artifact_id"])
+
+    @property
+    def artifact_sha256(self) -> str:
+        return str(self.raw["artifact_sha256"])
+
+    @property
+    def scope(self) -> dict[str, Any]:
+        return _detached_mapping(self.raw["scope"], "keyless custody receipt scope")
+
+    def expires_at(self) -> datetime:
+        return datetime.fromisoformat(str(self.raw["expires_at"])[:-1] + "+00:00")
+
+    def as_dict(self) -> dict[str, Any]:
+        return _detached_mapping(self.raw, "keyless custody receipt")
+
+
 _PLAN_FIELDS = frozenset(
     {
         "schema_version",
@@ -524,6 +624,30 @@ _PLAN_FIELDS = frozenset(
     }
 )
 
+_KEYLESS_PLAN_FIELDS = frozenset(
+    {
+        "schema_version",
+        "plan_id",
+        "plan_hash",
+        "custody_mode",
+        "account_scope",
+        "environment",
+        "gateway_name",
+        "lineage",
+        "scope",
+        "generated_at",
+        "expires_at",
+        "orders",
+        "phase",
+        "expected_before_position_hash",
+        "expected_after_position_hash",
+        "order_set_sha256",
+        "production_allowed",
+        "live_trading_authorized",
+        "countable_forward",
+    }
+)
+
 
 @dataclass(frozen=True, slots=True)
 class TargetPlan:
@@ -535,34 +659,29 @@ class TargetPlan:
     @classmethod
     def from_mapping(cls, value: Any, *, max_order_volume: int = 1) -> TargetPlan:
         raw = _detached_mapping(value, "target plan")
-        if set(raw) != _PLAN_FIELDS:
+        is_keyless = raw.get("schema_version") == KEYLESS_TARGET_PLAN_SCHEMA_VERSION
+        if set(raw) != (_KEYLESS_PLAN_FIELDS if is_keyless else _PLAN_FIELDS):
             raise CommodityExecutionContractError("target plan fields are not exact")
-        if raw["schema_version"] != TARGET_PLAN_SCHEMA_VERSION:
+        if raw["schema_version"] not in {
+            TARGET_PLAN_SCHEMA_VERSION,
+            KEYLESS_TARGET_PLAN_SCHEMA_VERSION,
+        }:
             raise CommodityExecutionContractError(
                 "target plan schema_version is invalid"
             )
-        for field in (
-            "plan_id",
-            "account_scope",
-            "authority_artifact_id",
-            "authority_receipt_id",
-        ):
+        for field in (("plan_id", "account_scope") if is_keyless else (
+            "plan_id", "account_scope", "authority_artifact_id", "authority_receipt_id"
+        )):
             _id(raw[field], f"target plan {field}")
-        _short_string(raw["signer_key_id"], "target plan signer_key_id")
-        _short_string(
-            raw["signer_key_version"],
-            "target plan signer_key_version",
-            pattern=_KEY_VERSION_RE,
-        )
-        for field in (
-            "plan_hash",
-            "authority_artifact_sha256",
-            "authority_receipt_sha256",
-            "keyring_raw_sha256",
-            "expected_before_position_hash",
-            "expected_after_position_hash",
-            "order_set_sha256",
-        ):
+        if not is_keyless:
+            _short_string(raw["signer_key_id"], "target plan signer_key_id")
+            _short_string(raw["signer_key_version"], "target plan signer_key_version", pattern=_KEY_VERSION_RE)
+        for field in ((
+            "plan_hash", "expected_before_position_hash", "expected_after_position_hash", "order_set_sha256"
+        ) if is_keyless else (
+            "plan_hash", "authority_artifact_sha256", "authority_receipt_sha256", "keyring_raw_sha256",
+            "expected_before_position_hash", "expected_after_position_hash", "order_set_sha256"
+        )):
             _sha(raw[field], f"target plan {field}")
         if raw["environment"] != "SIMNOW":
             raise CommodityExecutionContractError(
@@ -570,6 +689,20 @@ class TargetPlan:
             )
         _utc(raw["expires_at"], "target plan expires_at")
         scope = _detached_mapping(raw["scope"], "target plan scope")
+        if is_keyless:
+            _utc(raw["generated_at"], "keyless target plan generated_at")
+            if (
+                raw["custody_mode"] != "trusted-keyless-simnow"
+                or raw["gateway_name"] != "CTP"
+                or raw["account_scope"] != "account:windows"
+                or scope != TRUSTED_KEYLESS_SIMNOW_SCOPE
+            ):
+                raise CommodityExecutionContractError("keyless target plan scope is invalid")
+            lineage = _detached_mapping(raw["lineage"], "keyless target plan lineage")
+            if set(lineage) != {"map_sha256", "c_fast_sha256"}:
+                raise CommodityExecutionContractError("keyless target plan lineage is invalid")
+            _sha(lineage["map_sha256"], "keyless target plan MAP lineage")
+            _sha(lineage["c_fast_sha256"], "keyless target plan C_FAST lineage")
         if any(
             raw[field] is not False
             for field in (
@@ -594,6 +727,10 @@ class TargetPlan:
             TargetPlanOrder.from_mapping(item, max_order_volume=max_order_volume)
             for item in orders_raw
         )
+        if is_keyless and any(order.gateway_name != raw["gateway_name"] for order in orders):
+            raise CommodityExecutionContractError(
+                "keyless target plan order gateway is not scope-bound"
+            )
         if len({item.reference for item in orders}) != len(orders):
             raise CommodityExecutionContractError(
                 "target plan order references must be unique"
@@ -610,6 +747,14 @@ class TargetPlan:
             [order.as_dict() for order in orders]
         ):
             raise CommodityExecutionContractError("target plan order set hash mismatch")
+        if (
+            is_keyless
+            and raw["expected_before_position_hash"]
+            == raw["expected_after_position_hash"]
+        ):
+            raise CommodityExecutionContractError(
+                "keyless target plan order has no position transition"
+            )
         canonical = {key: raw[key] for key in raw if key != "plan_hash"}
         if sha256_json(canonical) != raw["plan_hash"]:
             raise CommodityExecutionContractError("target plan hash mismatch")
@@ -625,6 +770,18 @@ class TargetPlan:
     @property
     def plan_hash(self) -> str:
         return str(self.raw["plan_hash"])
+
+    @property
+    def is_trusted_keyless_simnow(self) -> bool:
+        return self.raw["schema_version"] == KEYLESS_TARGET_PLAN_SCHEMA_VERSION
+
+    @property
+    def authority_id(self) -> str:
+        return self.plan_id if self.is_trusted_keyless_simnow else str(self.raw["authority_artifact_id"])
+
+    @property
+    def authority_hash(self) -> str:
+        return self.plan_hash if self.is_trusted_keyless_simnow else str(self.raw["authority_artifact_sha256"])
 
     def order(self, order_ref: str) -> TargetPlanOrder:
         wanted = _id(order_ref, "order_ref")
@@ -647,6 +804,21 @@ def build_target_plan(**fields: Any) -> dict[str, Any]:
         "live_trading_authorized",
         "countable_forward",
     ):
+        raw.setdefault(flag, False)
+    raw.setdefault("order_set_sha256", sha256_json(raw.get("orders", [])))
+    raw.pop("plan_hash", None)
+    raw["plan_hash"] = sha256_json(raw)
+    return TargetPlan.from_mapping(raw).as_dict()
+
+
+def build_trusted_keyless_target_plan(**fields: Any) -> dict[str, Any]:
+    """Build the fixed-tuple, no-key/no-signature SIMNOW TargetPlan variant."""
+
+    raw = dict(fields)
+    raw.setdefault("schema_version", KEYLESS_TARGET_PLAN_SCHEMA_VERSION)
+    raw.setdefault("custody_mode", "trusted-keyless-simnow")
+    raw.setdefault("scope", dict(TRUSTED_KEYLESS_SIMNOW_SCOPE))
+    for flag in ("production_allowed", "live_trading_authorized", "countable_forward"):
         raw.setdefault(flag, False)
     raw.setdefault("order_set_sha256", sha256_json(raw.get("orders", [])))
     raw.pop("plan_hash", None)

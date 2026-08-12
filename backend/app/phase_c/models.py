@@ -65,6 +65,19 @@ class SignedArtifactUploadDTO(StrictDTO):
     signed_artifact: dict[str, Any]
 
 
+class TrustedKeylessTargetPlanUploadDTO(StrictDTO):
+    """The only unsigned custody input: fixed-tuple SIMNOW target plans."""
+
+    idempotency_key: str = Field(
+        min_length=8, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]+$"
+    )
+    expected_custody_version: int = Field(ge=0)
+    correlation_id: str = Field(
+        min_length=8, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]+$"
+    )
+    artifact: dict[str, Any]
+
+
 class CustodyReceiptDTO(AuthorityNegativeDTO):
     receipt_id: str
     receipt_type: Literal["install"]
@@ -97,6 +110,25 @@ class CustodyReceiptDTO(AuthorityNegativeDTO):
         }:
             raise ValueError("custody receipt artifact type/schema pair is invalid")
         return self
+
+
+class TrustedKeylessCustodyReceiptDTO(AuthorityNegativeDTO):
+    """Strict receipt returned only by the fixed-tuple keyless custody route."""
+
+    receipt_id: str
+    receipt_type: Literal["install"]
+    artifact_id: str
+    artifact_type: Literal["simnow-target-plan"]
+    trust_domain: Literal["runtime_authorization"]
+    schema_ref: Literal["web-bridge-simnow-keyless-target-plan-v1"]
+    artifact_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    scope: dict[str, Any]
+    expires_at: str
+    custody_version: int = Field(ge=1)
+    idempotency_key: str
+    verified: Literal[True]
+    installed: Literal[True]
+    custody_writer: Literal["artifact-custody"]
 
 
 class AuthorizationCommandDTO(StrictDTO):

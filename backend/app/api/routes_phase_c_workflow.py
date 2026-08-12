@@ -20,6 +20,7 @@ from app.phase_c.models import (
     AuthorizationCommandDTO,
     SignedArtifactUploadDTO,
     SigningRequestCreateDTO,
+    TrustedKeylessTargetPlanUploadDTO,
     WorkflowStatusDTO,
 )
 from shared.phase_c_workflow.v1 import PhaseCWorkflowError, build_signing_request
@@ -80,6 +81,21 @@ def upload_and_install_signed_artifact(
     """Forward a pre-signed offline handoff to custody; Control does not retain it."""
     try:
         return ok(phase_c_workflow_client.install(payload).model_dump(mode="json"))
+    except WorkflowAdapterError as exc:
+        raise _adapter_error(exc) from exc
+
+
+@router.post("/artifacts/upload-keyless-simnow-target-plan")
+def upload_keyless_simnow_target_plan(
+    payload: TrustedKeylessTargetPlanUploadDTO, _: Admin
+) -> dict[str, Any]:
+    """Forward only the fixed tuple to create-only custody; no signer involved."""
+    try:
+        return ok(
+            phase_c_workflow_client.install_trusted_keyless_target_plan(
+                payload
+            ).model_dump(mode="json")
+        )
     except WorkflowAdapterError as exc:
         raise _adapter_error(exc) from exc
 

@@ -24,9 +24,21 @@ from app.phase_c.adapters import (
     IdempotencyConflictError,
     WorkflowAdapterError,
 )
-from app.phase_c.models import CustodyReceiptDTO, SignedArtifactUploadDTO
+from app.phase_c.models import (
+    CustodyReceiptDTO,
+    SignedArtifactUploadDTO,
+    TrustedKeylessTargetPlanUploadDTO,
+)
+from shared.artifact_contracts.v1 import ContractError as ArtifactContractError
+from shared.artifact_contracts.v1 import validate_artifact_envelope
 from shared.artifact_custody.v1 import ArtifactCustody, CustodyError
-from shared.commodity_execution import TARGET_PLAN_SCHEMA_VERSION, TargetPlan
+from shared.commodity_execution import (
+    KEYLESS_TARGET_PLAN_SCHEMA_VERSION,
+    TARGET_PLAN_SCHEMA_VERSION,
+    TRUSTED_KEYLESS_SIMNOW_SCOPE,
+    CommodityExecutionContractError,
+    TargetPlan,
+)
 from shared.phase_c_workflow.v1 import (
     ARTIFACT_POLICY,
     PhaseCWorkflowError,
@@ -65,6 +77,7 @@ class CustodySettings:
     # can never be used to retrieve an order-bearing target-plan artifact.
     execution_read_secret: str = ""
     projection_dir: Path | None = None
+    trusted_keyless_simnow_enabled: bool = False
 
     @classmethod
     def from_env(cls) -> CustodySettings:
@@ -75,7 +88,13 @@ class CustodySettings:
         ].strip()
         projection_raw = os.getenv("PHASE_C_CUSTODY_PROJECTION_DIR", "").strip()
         projection_dir = Path(projection_raw) if projection_raw else None
-        raw = json.loads(os.environ["PHASE_C_CUSTODY_POLICIES_JSON"])
+        policies_json = os.getenv("PHASE_C_CUSTODY_POLICIES_JSON", "").strip()
+        keyless_only = os.getenv("SIMNOW_TRUSTED_KEYLESS_CUSTODY_ENABLED", "").lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+        raw = json.loads(policies_json) if policies_json else {}
         if (
             not root.is_absolute()
             or not secret
@@ -85,8 +104,12 @@ class CustodySettings:
             or (projection_dir is not None and not projection_dir.is_absolute())
         ):
             raise RuntimeError("Phase C custody configuration is invalid")
-        policies = {domain: CustodyPolicy(**raw[domain]) for domain in ARTIFACT_POLICY}
-        if set(raw) != set(ARTIFACT_POLICY) or any(
+        policies = (
+            {domain: CustodyPolicy(**raw[domain]) for domain in ARTIFACT_POLICY}
+            if raw
+            else {}
+        )
+        if (not raw and not keyless_only) or (raw and set(raw) != set(ARTIFACT_POLICY)) or any(
             not item.keyring_path.startswith("/")
             or len(item.keyring_raw_sha256) != 64
             or not item.key_purpose
@@ -104,6 +127,7 @@ class CustodySettings:
             policies,
             execution_read_secret,
             projection_dir,
+            keyless_only,
         )
 
 
@@ -124,6 +148,7 @@ class ArtifactCustodyService:
                     for _kind, schema, _purpose in ARTIFACT_POLICY.values()
                 },
                 TARGET_PLAN_SCHEMA_VERSION: _target_plan_schema,
+                KEYLESS_TARGET_PLAN_SCHEMA_VERSION: _target_plan_schema,
             },
         )
 
@@ -202,10 +227,81 @@ class ArtifactCustodyService:
                 "signed artifact violates Phase C allowlist"
             ) from exc
 
-    def receipt(self, receipt_id: str) -> CustodyReceiptDTO | None:
+    @staticmethod
+    def _keyless_receipt(raw: dict[str, Any], artifact: dict[str, Any]) -> dict[str, Any]:
+        payload = artifact["payload"]
+        return {
+            "receipt_id": raw["receipt_id"],
+            "receipt_type": "install",
+            "artifact_id": raw["artifact_id"],
+            "artifact_type": "simnow-target-plan",
+            "trust_domain": "runtime_authorization",
+            "schema_ref": KEYLESS_TARGET_PLAN_SCHEMA_VERSION,
+            "artifact_sha256": artifact["raw_sha256"],
+            "scope": payload["scope"],
+            "expires_at": payload["expires_at"],
+            "custody_version": raw["resulting_version"],
+            "idempotency_key": raw["idempotency_key"],
+            "verified": True,
+            "installed": True,
+            "custody_writer": "artifact-custody",
+            "production_allowed": False,
+            "live_trading_authorized": False,
+            "countable_forward": False,
+        }
+
+    def publish_trusted_keyless_target_plan(
+        self, payload: TrustedKeylessTargetPlanUploadDTO, *, principal: str
+    ) -> dict[str, Any]:
+        """Create-only custody install for the one fixed local SIMNOW tuple."""
+
+        if not self.settings.trusted_keyless_simnow_enabled:
+            raise WorkflowAdapterError("trusted keyless SIMNOW custody is disabled")
+        try:
+            artifact = validate_artifact_envelope(payload.artifact)
+            plan = TargetPlan.from_mapping(artifact["payload"])
+            if (
+                not plan.is_trusted_keyless_simnow
+                or artifact["artifact_type"] != "simnow-target-plan"
+                or artifact["trust_domain"] != "runtime_authorization"
+                or artifact["schema_ref"] != KEYLESS_TARGET_PLAN_SCHEMA_VERSION
+                or artifact["scope"] != TRUSTED_KEYLESS_SIMNOW_SCOPE
+                or artifact["scope"] != plan.raw["scope"]
+            ):
+                raise WorkflowAdapterError("keyless target plan tuple is invalid")
+            with self._custody() as custody:
+                published = custody.publish(
+                    artifact,
+                    actor_id=principal,
+                    idempotency_key=payload.idempotency_key,
+                    correlation_id=payload.correlation_id,
+                    expected_version=payload.expected_custody_version,
+                )
+                installed = custody.record(
+                    "install",
+                    str(published["artifact_id"]),
+                    actor_id=principal,
+                    idempotency_key=f"install-{payload.idempotency_key}",
+                    correlation_id=payload.correlation_id,
+                    expected_version=int(published["resulting_version"]),
+                )
+            return self._keyless_receipt(installed, artifact)
+        except CustodyError as exc:
+            if exc.code == "CUSTODY_EXPECTED_VERSION_MISMATCH":
+                raise ExpectedVersionError(exc.code) from exc
+            if "IDEMPOTENCY" in exc.code:
+                raise IdempotencyConflictError(exc.code) from exc
+            raise WorkflowAdapterError(exc.code) from exc
+        except (ArtifactContractError, CommodityExecutionContractError) as exc:
+            raise WorkflowAdapterError("keyless target plan artifact is invalid") from exc
+
+    def receipt(self, receipt_id: str) -> CustodyReceiptDTO | dict[str, Any] | None:
         try:
             with self._custody() as custody:
                 raw = custody.read_receipt(receipt_id)
+                artifact = custody.read_artifact(raw["artifact_id"])
+                if raw["receipt_type"] == "install" and artifact.get("schema_ref") == KEYLESS_TARGET_PLAN_SCHEMA_VERSION:
+                    return self._keyless_receipt(raw, artifact)
                 signed = custody.read_signed_artifact(raw["artifact_id"])
             policy = self.settings.policies[signed["domain"]]
             return (
@@ -220,10 +316,15 @@ class ArtifactCustodyService:
                 return None
             raise WorkflowAdapterError(exc.code) from exc
 
-    def receipt_by_idempotency(self, idempotency_key: str) -> CustodyReceiptDTO | None:
+    def receipt_by_idempotency(
+        self, idempotency_key: str
+    ) -> CustodyReceiptDTO | dict[str, Any] | None:
         try:
             with self._custody() as custody:
                 raw = custody.read_receipt_by_idempotency(f"install-{idempotency_key}")
+                artifact = custody.read_artifact(raw["artifact_id"])
+                if raw["receipt_type"] == "install" and artifact.get("schema_ref") == KEYLESS_TARGET_PLAN_SCHEMA_VERSION:
+                    return self._keyless_receipt(raw, artifact)
                 signed = custody.read_signed_artifact(raw["artifact_id"])
             policy = self.settings.policies[signed["domain"]]
             return (
@@ -247,13 +348,20 @@ class ArtifactCustodyService:
 
         try:
             with self._custody() as custody:
-                signed = custody.read_signed_artifact(artifact_id)
-            artifact = signed.get("artifact")
+                artifact = custody.read_artifact(artifact_id)
             if (
                 not isinstance(artifact, dict)
                 or artifact.get("artifact_type") != "simnow-target-plan"
                 or artifact.get("trust_domain") != "runtime_authorization"
             ):
+                raise WorkflowAdapterError("custody artifact is not an execution target plan")
+            if artifact.get("schema_ref") == TARGET_PLAN_SCHEMA_VERSION:
+                with self._custody() as custody:
+                    signed = custody.read_signed_artifact(artifact_id)
+                artifact = signed.get("artifact")
+            elif artifact.get("schema_ref") != KEYLESS_TARGET_PLAN_SCHEMA_VERSION:
+                raise WorkflowAdapterError("custody artifact is not an execution target plan")
+            if not isinstance(artifact, dict):
                 raise WorkflowAdapterError("custody artifact is not an execution target plan")
             raw = canonical_json_line(artifact)
             return {
@@ -263,6 +371,7 @@ class ArtifactCustodyService:
             }
         except CustodyError as exc:
             if exc.code in {
+                "CUSTODY_ARTIFACT_NOT_FOUND",
                 "CUSTODY_SIGNED_ARTIFACT_NOT_FOUND",
                 "CUSTODY_ARTIFACT_ID_INVALID",
             }:
@@ -348,6 +457,17 @@ def create_app(service: ArtifactCustodyService | None = None) -> FastAPI:
         except WorkflowAdapterError as exc:
             raise HTTPException(exc.status_code, detail={"code": exc.code}) from exc
 
+    @app.post("/internal/v1/publish-keyless-simnow-target-plan")
+    def publish_keyless_simnow_target_plan(
+        payload: TrustedKeylessTargetPlanUploadDTO, request: Request
+    ) -> dict[str, Any]:
+        try:
+            return target.publish_trusted_keyless_target_plan(
+                payload, principal=control_auth(request)
+            )
+        except WorkflowAdapterError as exc:
+            raise HTTPException(exc.status_code, detail={"code": exc.code}) from exc
+
     @app.get("/internal/v1/receipts/{receipt_id}")
     def receipt(receipt_id: str, request: Request) -> dict[str, Any]:
         # Control may retain receipt evidence; Execution reads the exact same
@@ -360,7 +480,7 @@ def create_app(service: ArtifactCustodyService | None = None) -> FastAPI:
         result = target.receipt(receipt_id)
         if result is None:
             raise HTTPException(404, "receipt not found")
-        return result.model_dump(mode="json")
+        return result if isinstance(result, dict) else result.model_dump(mode="json")
 
     @app.get("/internal/v1/receipts-by-idempotency/{idempotency_key}")
     def receipt_by_idempotency(
@@ -373,7 +493,7 @@ def create_app(service: ArtifactCustodyService | None = None) -> FastAPI:
         )
         if result is None:
             raise HTTPException(404, "receipt not found")
-        return result.model_dump(mode="json")
+        return result if isinstance(result, dict) else result.model_dump(mode="json")
 
     @app.get("/internal/v1/artifacts/{artifact_id}")
     def artifact(artifact_id: str, request: Request) -> dict[str, Any]:

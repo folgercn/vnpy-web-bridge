@@ -13,6 +13,8 @@ from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, build_opener
 from urllib.request import Request as UrlRequest
 
+from shared.commodity_execution import TRUSTED_KEYLESS_SIMNOW_SCOPE
+
 from .execution import (
     CommandEnvelope,
     CommandValidationError,
@@ -135,6 +137,14 @@ def _final_runtime_required() -> bool:
     }
 
 
+def _trusted_keyless_simnow_enabled() -> bool:
+    return os.getenv("SIMNOW_EXECUTION_ENABLED", "").lower() in {"1", "true", "yes"}
+
+
+def _false_env(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() not in {"1", "true", "yes"}
+
+
 class _HttpCustodyReadClient(CustodyReadClient):
     """Narrow read-only custody client used only by final Execution.
 
@@ -249,6 +259,19 @@ def build_execution_service() -> ExecutionOrchestrator | FinalExecutionRuntime:
         raise GatewayConfigurationError(
             "EXECUTION_SIMNOW_MAX_ORDER_VOLUME must be an integer"
         ) from exc
+    keyless_enabled = _trusted_keyless_simnow_enabled()
+    if keyless_enabled and (
+        core.scope != "account:windows"
+        or os.getenv("SIMNOW_ACCOUNT_SCOPE", "").strip() != "account:windows"
+        or os.getenv("SIMNOW_GATEWAY", "").strip() != "CTP"
+        or dict(allowed_scope) != TRUSTED_KEYLESS_SIMNOW_SCOPE
+        or not _false_env("SIMNOW_PRODUCTION")
+        or not _false_env("SIMNOW_LIVE_TRADING_AUTHORIZED")
+        or not _false_env("SIMNOW_COUNTABLE_FORWARD")
+    ):
+        raise GatewayConfigurationError(
+            "trusted keyless SIMNOW configuration is not the fixed safe tuple"
+        )
     return FinalExecutionRuntime(
         core,
         plans=DurableTargetPlanRepository(Path(root)),
@@ -256,6 +279,7 @@ def build_execution_service() -> ExecutionOrchestrator | FinalExecutionRuntime:
         allowed_scope=allowed_scope,
         allow_simnow_execution=os.getenv("EXECUTION_ALLOW_SIMNOW_EXECUTION", "").lower()
         in {"1", "true", "yes"},
+        allow_trusted_keyless_simnow=keyless_enabled,
         max_order_volume=max_order_volume,
     )
 

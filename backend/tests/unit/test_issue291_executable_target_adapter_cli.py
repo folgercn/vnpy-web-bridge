@@ -49,15 +49,15 @@ from shared.trust_contracts.v1 import (
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "backend/tests/unit"))
 
-from commodity_c_fast_executable_target_adapter import (  # noqa: E402
+from commodity_c_fast_executable_target_adapter import (
     _reduce_only_peek_current_facts_to_snapshot,
     build_parser,
 )
-from commodity_c_fast_executable_target_adapter import (  # noqa: E402
+from commodity_c_fast_executable_target_adapter import (
     main as adapter_main,
 )
-from test_commodity_c_fast_pure_producer_kernel import source_view  # noqa: E402
-from test_issue291_executable_target_adapter import authority, candidates  # noqa: E402
+from test_commodity_c_fast_pure_producer_kernel import source_view
+from test_issue291_executable_target_adapter import authority, candidates
 
 SCOPE = "account:simnow-cli"
 FALSE_AUTHORITY_FIELDS = {
@@ -758,3 +758,36 @@ def test_real_producer_authority_tampering_fails_closed(
         == 2
     )
     assert not output_path.exists()
+
+
+def test_cli_keyless_simnow_needs_no_authority_files(tmp_path: Path) -> None:
+    map_candidate, c_fast_candidate = candidates()
+    map_path, c_fast_path = tmp_path / "map.json", tmp_path / "cfast.json"
+    peek_path = tmp_path / "peek.json"
+    reconciliation_path = tmp_path / "reconcile.json"
+    output_path = tmp_path / "keyless-target.json"
+    _write(map_path, map_candidate)
+    _write(c_fast_path, c_fast_candidate)
+    peek_facts = _peek({})
+    peek_facts["gateway"]["account_scope"] = "account:windows"
+    peek_facts["admission"]["account_scope"] = "account:windows"
+    _write(peek_path, peek_facts)
+    _write(reconciliation_path, {"state": "RECONCILED", "unknown_outcomes": 0})
+
+    assert adapter_main(
+        [
+            "--map-candidate", str(map_path),
+            "--c-fast-candidate", str(c_fast_path),
+            "--peek-current-facts", str(peek_path),
+            "--reconciliation-state", str(reconciliation_path),
+            "--product", "rb",
+            "--account-scope", "account:windows",
+            "--trusted-keyless-simnow",
+            "--expires-at", "2099-01-01T00:00:00Z",
+            "--generated-at", "2030-01-01T00:00:00Z",
+            "--output", str(output_path),
+        ]
+    ) == 0
+    artifact = json.loads(output_path.read_text(encoding="utf-8"))
+    assert artifact["schema_ref"] == "web-bridge-simnow-keyless-target-plan-v1"
+    assert "signer_key_id" not in artifact["payload"]
