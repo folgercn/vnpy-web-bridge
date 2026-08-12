@@ -29,6 +29,8 @@ _SYMBOL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]{0,31}$")
 _REFERENCE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$")
 _GATEWAY_NAME_RE = re.compile(r"^(?:CTP|[A-Za-z0-9][A-Za-z0-9._:-]{7,127})$")
 _EXCHANGES = frozenset({"CFFEX", "CZCE", "DCE", "GFEX", "INE", "SHFE"})
+_CLOSE_ORDER_OFFSETS = frozenset({"CLOSE", "CLOSETODAY", "CLOSEYESTERDAY"})
+_YD_AWARE_EXCHANGES = frozenset({"INE", "SHFE"})
 
 
 class CommodityExecutionContractError(ValueError):
@@ -149,6 +151,92 @@ def target_position_projection_hash(
     )
 
 
+def canonical_before_position_projection(
+    positions: Any, *, account_scope: Any, environment: Any
+) -> dict[str, Any]:
+    """Return the deterministic current-position proof for TargetPlan start.
+
+    This keeps the target projection's account/environment and aggregated
+    position semantics, while binding SHFE/INE close availability to the
+    authoritative non-zero ``yd_volume`` facts.  Other broker fields remain
+    outside this narrow proof.
+    """
+
+    if not isinstance(positions, Mapping):
+        raise CommodityExecutionContractError("before positions must be an object")
+    normalized_scope = _projection_account_scope(account_scope)
+    normalized_environment = _projection_text(environment, "environment")
+    aggregates: dict[tuple[str, str, str, str], tuple[int, int | None]] = {}
+    for row_key, raw in positions.items():
+        if not isinstance(row_key, str) or not isinstance(raw, Mapping):
+            raise CommodityExecutionContractError("before position row is invalid")
+        volume = raw.get("volume")
+        if isinstance(volume, bool) or not isinstance(volume, int) or volume < 0:
+            raise CommodityExecutionContractError("before position volume is invalid")
+        if volume == 0:
+            continue
+        semantic_key = _projection_position_fields(raw)
+        exchange = semantic_key[2]
+        yd_volume: int | None = None
+        if exchange in _YD_AWARE_EXCHANGES:
+            yd_volume = raw.get("yd_volume")
+            if (
+                isinstance(yd_volume, bool)
+                or not isinstance(yd_volume, int)
+                or yd_volume < 0
+                or yd_volume > volume
+            ):
+                raise CommodityExecutionContractError(
+                    "before SHFE/INE position yd_volume is invalid"
+                )
+        prior_volume, prior_yd_volume = aggregates.get(
+            semantic_key, (0, 0 if exchange in _YD_AWARE_EXCHANGES else None)
+        )
+        if prior_yd_volume is None and yd_volume is not None:
+            raise CommodityExecutionContractError(
+                "before position yd_volume is invalid"
+            )
+        aggregates[semantic_key] = (
+            prior_volume + volume,
+            None if yd_volume is None else int(prior_yd_volume or 0) + yd_volume,
+        )
+    projection_rows: list[dict[str, Any]] = []
+    for (gateway_name, symbol, exchange, direction), (volume, yd_volume) in sorted(
+        aggregates.items()
+    ):
+        row = {
+            "gateway_name": gateway_name,
+            "symbol": symbol,
+            "exchange": exchange,
+            "direction": direction,
+            "volume": volume,
+        }
+        if exchange in _YD_AWARE_EXCHANGES:
+            if yd_volume is None:  # pragma: no cover - guarded above
+                raise CommodityExecutionContractError(
+                    "before position yd_volume is invalid"
+                )
+            row["yd_volume"] = yd_volume
+        projection_rows.append(row)
+    return {
+        "account_scope": normalized_scope,
+        "environment": normalized_environment,
+        "positions": projection_rows,
+    }
+
+
+def before_position_projection_hash(
+    positions: Any, *, account_scope: Any, environment: Any
+) -> str:
+    """Hash :func:`canonical_before_position_projection` for TargetPlan start."""
+
+    return sha256_json(
+        canonical_before_position_projection(
+            positions, account_scope=account_scope, environment=environment
+        )
+    )
+
+
 def _id(value: Any, field: str) -> str:
     if not isinstance(value, str) or _ID_RE.fullmatch(value) is None:
         raise CommodityExecutionContractError(f"{field} is invalid")
@@ -256,7 +344,11 @@ class TargetPlanOrder:
             or not isinstance(price, (int, float))
             or not math.isfinite(price)
             or price <= 0
-            or offset not in {"CLOSE", "OPEN"}
+            or offset not in _CLOSE_ORDER_OFFSETS | {"OPEN"}
+            or (
+                offset in _CLOSE_ORDER_OFFSETS - {"CLOSE"}
+                and exchange not in _YD_AWARE_EXCHANGES
+            )
             or not isinstance(gateway_name, str)
             or _GATEWAY_NAME_RE.fullmatch(gateway_name) is None
         ):
@@ -507,7 +599,9 @@ class TargetPlan:
                 "target plan order references must be unique"
             )
         if raw["phase"] not in {"CLOSE", "OPEN"} or any(
-            order.offset != raw["phase"] for order in orders
+            (raw["phase"] == "OPEN" and order.offset != "OPEN")
+            or (raw["phase"] == "CLOSE" and order.offset not in _CLOSE_ORDER_OFFSETS)
+            for order in orders
         ):
             raise CommodityExecutionContractError(
                 "target plan orders must be one phase"

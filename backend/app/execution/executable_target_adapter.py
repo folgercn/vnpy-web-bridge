@@ -14,8 +14,8 @@ import math
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from shared.artifact_contracts.v1 import (
@@ -29,7 +29,9 @@ from shared.commodity_execution import (
     TARGET_PLAN_SCHEMA_VERSION,
     CommodityExecutionContractError,
     VerifiedCustodyReceipt,
+    before_position_projection_hash,
     build_target_plan,
+    canonical_before_position_projection,
     canonical_target_position_projection,
     sha256_json,
     target_position_projection_hash,
@@ -44,6 +46,8 @@ class ExecutableTargetAdapterError(ValueError):
 
 
 _EXACT_CONTRACT = re.compile(r"^(CFFEX|CZCE|DCE|GFEX|INE|SHFE)\.([A-Za-z]+[0-9]{4})$")
+_CLOSE_ORDER_OFFSETS = frozenset({"CLOSE", "CLOSETODAY", "CLOSEYESTERDAY"})
+_CLOSE_OFFSET_EXCHANGES = frozenset({"INE", "SHFE"})
 _FALSE_AUTHORITY_FIELDS = frozenset(
     {
         "control_authorized",
@@ -84,6 +88,8 @@ _AUTHORITY_LIKE_FIELDS = (
     "signing_requested",
     "custody_published",
 )
+
+
 @dataclass(frozen=True, slots=True)
 class ExecutableTargetPlanHandoff:
     """A plan and the immutable envelope material for existing offline signing.
@@ -171,7 +177,9 @@ def _authority_custody_closure(
     try:
         artifact = validate_artifact_envelope(value)
     except ArtifactContractError as exc:
-        raise ExecutableTargetAdapterError("authority artifact envelope is invalid") from exc
+        raise ExecutableTargetAdapterError(
+            "authority artifact envelope is invalid"
+        ) from exc
     if (
         artifact["artifact_id"] != artifact_id
         or artifact["raw_sha256"] != artifact_raw_sha256
@@ -225,7 +233,8 @@ def _validate_lineage(
         map_payload.get("schema_version") != "commodity_map_signal_candidate_v1"
         or map_payload.get("artifact_role") != "unsigned_map_signal_candidate"
         or map_payload.get("status") != "UNSIGNED_MAP_SIGNAL_CANDIDATE"
-        or c_fast_payload.get("schema_version") != "commodity_c_fast_target_candidate_v1"
+        or c_fast_payload.get("schema_version")
+        != "commodity_c_fast_target_candidate_v1"
         or c_fast_payload.get("artifact_role") != "unsigned_c_fast_target_candidate"
         or c_fast_payload.get("status") != "UNSIGNED_C_FAST_TARGET_CANDIDATE"
     ):
@@ -265,7 +274,11 @@ def _selected_target(
     targets = candidate.get("targets")
     if not isinstance(targets, list):
         raise ExecutableTargetAdapterError("C_FAST targets are invalid")
-    rows = [row for row in targets if isinstance(row, Mapping) and row.get("product") == product]
+    rows = [
+        row
+        for row in targets
+        if isinstance(row, Mapping) and row.get("product") == product
+    ]
     if len(rows) != 1:
         raise ExecutableTargetAdapterError("selected C_FAST product is not unique")
     row = _mapping(rows[0], "selected C_FAST target")
@@ -327,7 +340,9 @@ def _validate_snapshot(
         reconciliation.get("state") != "RECONCILED"
         or reconciliation.get("unknown_outcomes") != 0
     ):
-        raise ExecutableTargetAdapterError("unknown or unreconciled outcomes block target adaptation")
+        raise ExecutableTargetAdapterError(
+            "unknown or unreconciled outcomes block target adaptation"
+        )
     positions = _mapping(snapshot.positions, "current positions")
     full_hash = sha256_json(positions)
     if snapshot.position_snapshot_hash != full_hash:
@@ -336,8 +351,13 @@ def _validate_snapshot(
         canonical_target_position_projection(
             positions, account_scope=account_scope, environment=environment
         )
+        canonical_before_position_projection(
+            positions, account_scope=account_scope, environment=environment
+        )
     except CommodityExecutionContractError as exc:
-        raise ExecutableTargetAdapterError("current position semantics are invalid") from exc
+        raise ExecutableTargetAdapterError(
+            f"current position semantics are invalid: {exc}"
+        ) from exc
     return positions
 
 
@@ -363,7 +383,10 @@ def peek_current_facts_to_snapshot(
         "execution",
         "admission",
     }
-    if set(facts) != required or facts["schema_version"] != "windows_execution_current_facts_v1":
+    if (
+        set(facts) != required
+        or facts["schema_version"] != "windows_execution_current_facts_v1"
+    ):
         raise ExecutableTargetAdapterError("peek current facts schema is invalid")
     for field in ("account", "positions", "active_orders"):
         if not isinstance(facts[field], Mapping) or any(
@@ -392,12 +415,20 @@ def peek_current_facts_to_snapshot(
     ):
         raise ExecutableTargetAdapterError("peek gateway binding is invalid")
     execution = facts["execution"]
-    if not isinstance(execution, Mapping) or set(execution) != {"orders"} or not isinstance(execution["orders"], Mapping):
+    if (
+        not isinstance(execution, Mapping)
+        or set(execution) != {"orders"}
+        or not isinstance(execution["orders"], Mapping)
+    ):
         raise ExecutableTargetAdapterError("peek execution facts are invalid")
     if facts["active_orders"]:
-        raise ExecutableTargetAdapterError("peek active or execution orders block adaptation")
+        raise ExecutableTargetAdapterError(
+            "peek active or execution orders block adaptation"
+        )
     if execution["orders"]:
-        raise ExecutableTargetAdapterError("peek active or execution orders block adaptation")
+        raise ExecutableTargetAdapterError(
+            "peek active or execution orders block adaptation"
+        )
     admission = facts["admission"]
     admission_fields = {
         "account_scope",
@@ -482,9 +513,10 @@ def _current_contract_positions(
         volume = row.get("volume")
         if isinstance(volume, bool) or not isinstance(volume, int) or volume < 0:
             raise ExecutableTargetAdapterError("current position volume is invalid")
-        if str(row.get("symbol", "")).upper() != symbol.upper() or str(
-            row.get("exchange", "")
-        ).upper() != exchange:
+        if (
+            str(row.get("symbol", "")).upper() != symbol.upper()
+            or str(row.get("exchange", "")).upper() != exchange
+        ):
             continue
         if str(row.get("gateway_name", "")).upper() != gateway_name.upper():
             raise ExecutableTargetAdapterError("current position gateway mismatch")
@@ -510,7 +542,7 @@ def _after_positions(
     offset: str,
 ) -> dict[str, Any]:
     result = _mapping(positions, "current positions")
-    if offset == "CLOSE":
+    if offset in _CLOSE_ORDER_OFFSETS:
         closing_direction = "SHORT" if direction == "LONG" else "LONG"
         candidates = sorted(
             (
@@ -522,7 +554,9 @@ def _after_positions(
             key=lambda item: item[0],
         )
         if not candidates:
-            raise ExecutableTargetAdapterError("close direction has no current position")
+            raise ExecutableTargetAdapterError(
+                "close direction has no current position"
+            )
         key, row = candidates[0]
         row["volume"] -= 1
         result[key] = row
@@ -547,6 +581,45 @@ def _after_positions(
         "volume": 1,
     }
     return result
+
+
+def _close_order_offset(
+    matching: list[tuple[str, dict[str, Any]]], *, exchange: str, direction: str
+) -> str:
+    """Choose an exact one-lot close offset from authoritative position facts."""
+
+    if exchange not in _CLOSE_OFFSET_EXCHANGES:
+        return "CLOSE"
+    closing_direction = "SHORT" if direction == "LONG" else "LONG"
+    candidates = [
+        row
+        for _key, row in matching
+        if row["direction"].upper() == closing_direction and row["volume"] > 0
+    ]
+    if not candidates:
+        raise ExecutableTargetAdapterError("close direction has no current position")
+    volume = 0
+    yd_volume = 0
+    for row in candidates:
+        raw_yd_volume = row.get("yd_volume")
+        if (
+            isinstance(raw_yd_volume, bool)
+            or not isinstance(raw_yd_volume, int)
+            or raw_yd_volume < 0
+            or raw_yd_volume > row["volume"]
+        ):
+            raise ExecutableTargetAdapterError(
+                "SHFE/INE current position yd_volume is missing or inconsistent"
+            )
+        volume += row["volume"]
+        yd_volume += raw_yd_volume
+    if volume - yd_volume >= 1:
+        return "CLOSETODAY"
+    if yd_volume >= 1:
+        return "CLOSEYESTERDAY"
+    raise ExecutableTargetAdapterError(
+        "SHFE/INE current position yd_volume is missing or inconsistent"
+    )
 
 
 def _require_single_reduce_only_position(
@@ -613,7 +686,9 @@ def build_executable_target_plan(
     try:
         receipt = VerifiedCustodyReceipt.from_mapping(authority_receipt)
     except CommodityExecutionContractError as exc:
-        raise ExecutableTargetAdapterError("authority custody receipt is invalid") from exc
+        raise ExecutableTargetAdapterError(
+            "authority custody receipt is invalid"
+        ) from exc
     if (
         receipt.raw["artifact_type"] != "runtime-authorization"
         or receipt.raw["trust_domain"] != "runtime_authorization"
@@ -626,7 +701,9 @@ def build_executable_target_plan(
         or scope.get("environment") != normalized_environment
         or scope.get("gateway_name") != normalized_gateway
     ):
-        raise ExecutableTargetAdapterError("authority scope/gateway does not match target")
+        raise ExecutableTargetAdapterError(
+            "authority scope/gateway does not match target"
+        )
     current_time = utc_now() if now is None else now
     if current_time.tzinfo is None or current_time.utcoffset() is None:
         raise ExecutableTargetAdapterError("adapter clock must be timezone-aware")
@@ -667,16 +744,23 @@ def build_executable_target_plan(
     if delta == 0:
         raise ExecutableTargetAdapterError("target-current delta is zero")
     if abs(delta) != 1:
-        raise ExecutableTargetAdapterError("only one-lot target-current deltas are allowed")
+        raise ExecutableTargetAdapterError(
+            "only one-lot target-current deltas are allowed"
+        )
     direction = "LONG" if delta > 0 else "SHORT"
+    closes_position = (delta > 0 and short_volume > 0) or (
+        delta < 0 and long_volume > 0
+    )
     offset = (
-        "CLOSE"
-        if (delta > 0 and short_volume > 0) or (delta < 0 and long_volume > 0)
+        _close_order_offset(matching, exchange=exchange, direction=direction)
+        if closes_position
         else "OPEN"
     )
-    if reduce_only_close and offset != "CLOSE":  # defensive: never open here
+    if (
+        reduce_only_close and offset not in _CLOSE_ORDER_OFFSETS
+    ):  # defensive: never open here
         raise ExecutableTargetAdapterError("reduce-only close would not close")
-    expected_before = target_position_projection_hash(
+    expected_before = before_position_projection_hash(
         positions,
         account_scope=normalized_scope,
         environment=normalized_environment,
@@ -717,7 +801,7 @@ def build_executable_target_plan(
         keyring_raw_sha256=str(receipt.raw["keyring_raw_sha256"]),
         scope=scope,
         expires_at=str(receipt.raw["expires_at"]),
-        phase=offset,
+        phase="CLOSE" if offset in _CLOSE_ORDER_OFFSETS else "OPEN",
         expected_before_position_hash=expected_before,
         expected_after_position_hash=expected_after,
         orders=[

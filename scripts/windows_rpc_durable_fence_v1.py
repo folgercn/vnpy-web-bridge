@@ -520,6 +520,7 @@ class _WindowsExecutionFactsV1:
         "exchange",
         "direction",
         "volume",
+        "yd_volume",
         "frozen",
         "price",
         "pnl",

@@ -1120,6 +1120,48 @@ def test_windows_execution_facts_gateway_validation_is_opt_in(tmp_path: Path) ->
         strict.peek_current_facts_v1(request)
 
 
+def test_windows_readonly_position_projection_preserves_native_yd_volume(
+    tmp_path: Path,
+) -> None:
+    from scripts.windows_fence_foundation.final_admission_v1 import (
+        WindowsRpcFencedAdmissionV1,
+    )
+
+    config = _runtime_config()
+
+    class PositionFacts(FactSource):
+        def get_all_positions(self) -> list[Any]:
+            return [
+                SimpleNamespace(
+                    vt_positionid="ru2609.SHFE.CTP.SHORT",
+                    symbol="ru2609",
+                    exchange="SHFE",
+                    direction="SHORT",
+                    volume=1,
+                    yd_volume=1,
+                    gateway_name="CTP",
+                )
+            ]
+
+    runtime = SimpleNamespace(config=config, fact_source=PositionFacts())
+    admission = WindowsRpcFencedAdmissionV1.bootstrap(
+        store_path=str(tmp_path / "execution-final-admission-v1.json"),
+        account_scope=config.account_scope,
+        environment=config.environment,
+        send_handler=lambda *_args: {"state": "ACKNOWLEDGED"},
+        cancel_handler=lambda *_args: {"state": "CANCELLED"},
+    )
+    facts = durable_module._WindowsExecutionFactsV1(runtime)
+    facts.bind_admission(admission)
+    request = {
+        "account_scope": config.account_scope,
+        "environment": config.environment,
+    }
+
+    projected = facts.peek_current_facts_v1(request)["positions"]
+    assert projected["ru2609.SHFE.CTP.SHORT"]["yd_volume"] == 1
+
+
 def test_windows_execution_query_is_bound_to_current_oms_order_facts() -> None:
     config = _runtime_config()
 
@@ -1282,6 +1324,8 @@ def test_windows_native_request_adapter_binds_fixed_gateway_and_oms_cancel(
 
     class Offset(Enum):
         OPEN = "OPEN"
+        CLOSETODAY = "CLOSETODAY"
+        CLOSEYESTERDAY = "CLOSEYESTERDAY"
         NONE = "NONE"
 
     class OrderType(Enum):
@@ -1462,3 +1506,16 @@ def test_windows_native_request_adapter_binds_fixed_gateway_and_oms_cancel(
     )
     with pytest.raises(WindowsRpcDurableFenceError, match="unknown outcome"):
         admission.cancel_order_fenced_v1(cancel_request, unknown_cancel_context)
+
+    for offset in ("CLOSETODAY", "CLOSEYESTERDAY"):
+        close_request = {**send_request, "offset": offset}
+        close_context = bound_context(
+            action="send",
+            intent_id=f"intent-send-{offset.lower()}",
+            request=close_request,
+        )
+        admission.register_receipt(
+            intent_id=close_context["intent_id"], receipt=close_context
+        )
+        admission.send_order_fenced_v1(close_request, close_context)
+        assert calls[-1][1].offset is Offset[offset]

@@ -15,6 +15,7 @@ from app.execution.gateway import GatewaySnapshot
 
 from shared.artifact_contracts.v1 import new_artifact_envelope
 from shared.commodity_execution import (
+    before_position_projection_hash,
     sha256_json,
     target_position_projection_hash,
 )
@@ -127,7 +128,14 @@ def authority(*, scope: dict | None = None) -> dict:
     }
 
 
-def positions(*, long: int = 0, short: int = 0, dynamic: bool = False) -> dict:
+def positions(
+    *,
+    long: int = 0,
+    short: int = 0,
+    yd_long: int | None = 0,
+    yd_short: int | None = 0,
+    dynamic: bool = False,
+) -> dict:
     result: dict[str, dict] = {}
     if long:
         result["RB2601.SHFE.LONG"] = {
@@ -141,6 +149,8 @@ def positions(*, long: int = 0, short: int = 0, dynamic: bool = False) -> dict:
             "frozen": 0 if not dynamic else 7,
             "commission": 0.0 if not dynamic else 9.0,
         }
+        if yd_long is not None:
+            result["RB2601.SHFE.LONG"]["yd_volume"] = yd_long
     if short:
         result["RB2601.SHFE.SHORT"] = {
             "gateway_name": GATEWAY,
@@ -149,6 +159,8 @@ def positions(*, long: int = 0, short: int = 0, dynamic: bool = False) -> dict:
             "direction": "SHORT",
             "volume": short,
         }
+        if yd_short is not None:
+            result["RB2601.SHFE.SHORT"]["yd_volume"] = yd_short
     return result
 
 
@@ -242,7 +254,7 @@ def test_adapter_preserves_map_cfast_lineage_scope_expiry_and_delta() -> None:
     )
 
     plan = handoff.target_plan
-    expected_before = target_position_projection_hash(
+    expected_before = before_position_projection_hash(
         {}, account_scope=SCOPE, environment="SIMNOW"
     )
     assert plan["expected_before_position_hash"] == expected_before
@@ -272,7 +284,10 @@ def test_adapter_preserves_map_cfast_lineage_scope_expiry_and_delta() -> None:
             "gateway_name": GATEWAY,
         }
     ]
-    assert handoff.lineage == (sha256_json(map_candidate), sha256_json(c_fast_candidate))
+    assert handoff.lineage == (
+        sha256_json(map_candidate),
+        sha256_json(c_fast_candidate),
+    )
     assert handoff.scope == authority()["scope"]
     assert handoff.expires_at == authority()["expires_at"]
     envelope = handoff.artifact_envelope(
@@ -293,8 +308,8 @@ def test_adapter_preserves_map_cfast_lineage_scope_expiry_and_delta() -> None:
     ("target_quantity", "current_positions", "direction", "offset"),
     [
         (1, positions(), "LONG", "OPEN"),
-        (0, positions(long=1), "SHORT", "CLOSE"),
-        (0, positions(short=1), "LONG", "CLOSE"),
+        (0, positions(long=1), "SHORT", "CLOSETODAY"),
+        (0, positions(short=1), "LONG", "CLOSETODAY"),
         (-1, positions(), "SHORT", "OPEN"),
     ],
 )
@@ -328,16 +343,14 @@ def test_reduce_only_close_derives_zero_target_and_opposite_close(
 
     order = handoff.target_plan["orders"][0]
     assert order["direction"] == direction
-    assert order["offset"] == "CLOSE"
+    assert order["offset"] == "CLOSETODAY"
     assert order["volume"] == 1
     assert handoff.target_plan["phase"] == "CLOSE"
     assert handoff.target_plan["production_allowed"] is False
     assert handoff.target_plan["live_trading_authorized"] is False
     assert handoff.target_plan["countable_forward"] is False
     assert handoff.target_plan["expected_after_position_hash"] == (
-        target_position_projection_hash(
-            {}, account_scope=SCOPE, environment="SIMNOW"
-        )
+        target_position_projection_hash({}, account_scope=SCOPE, environment="SIMNOW")
     )
 
 
@@ -360,6 +373,7 @@ def test_reduce_only_close_derives_zero_target_and_opposite_close(
                     "exchange": "SHFE",
                     "direction": "LONG",
                     "volume": 1,
+                    "yd_volume": 0,
                 }
             },
             "ru",
@@ -385,8 +399,16 @@ def test_reduce_only_close_rejects_zero_multi_direction_and_symbol_mismatch(
 @pytest.mark.parametrize(
     ("current", "reconciliation", "message"),
     [
-        (snapshot(positions(short=1), active_orders={"active-1": {}}), None, "active orders"),
-        (snapshot(positions(short=1)), {"state": "RECONCILED", "unknown_outcomes": 1}, "unknown"),
+        (
+            snapshot(positions(short=1), active_orders={"active-1": {}}),
+            None,
+            "active orders",
+        ),
+        (
+            snapshot(positions(short=1)),
+            {"state": "RECONCILED", "unknown_outcomes": 1},
+            "unknown",
+        ),
         (snapshot(positions(short=1), scope="account:other"), None, "scope/freshness"),
     ],
 )
@@ -429,6 +451,7 @@ def test_reduce_only_close_requires_explicit_aligned_operator_limit_price() -> N
                 "exchange": "SHFE",
                 "direction": "SHORT",
                 "volume": 1,
+                "yd_volume": 0,
             }
         }
     )
@@ -458,7 +481,9 @@ def test_reduce_only_close_requires_explicit_aligned_operator_limit_price() -> N
 
 
 @pytest.mark.parametrize("limit_price", (17102.0, math.nan, 0.0, -5.0))
-def test_reduce_only_close_rejects_invalid_operator_limit_price(limit_price: float) -> None:
+def test_reduce_only_close_rejects_invalid_operator_limit_price(
+    limit_price: float,
+) -> None:
     with pytest.raises(ExecutableTargetAdapterError, match="limit price"):
         adapt(
             target_quantity=-1,
@@ -491,7 +516,9 @@ def test_adapter_preserves_vnpy_native_symbol_case_from_exact_contract(
     assert order["exchange"] == "SHFE"
 
 
-def test_adapter_matches_existing_position_case_insensitively_and_emits_native_symbol() -> None:
+def test_adapter_matches_existing_position_case_insensitively_and_emits_native_symbol() -> (
+    None
+):
     handoff = adapt(
         product="ru",
         exact_contract="SHFE.ru2609",
@@ -504,6 +531,7 @@ def test_adapter_matches_existing_position_case_insensitively_and_emits_native_s
                     "exchange": "SHFE",
                     "direction": "LONG",
                     "volume": 1,
+                    "yd_volume": 0,
                 }
             }
         ),
@@ -511,12 +539,94 @@ def test_adapter_matches_existing_position_case_insensitively_and_emits_native_s
 
     assert handoff.target_plan["orders"][0]["symbol"] == "ru2609"
     assert handoff.target_plan["orders"][0]["direction"] == "SHORT"
+    assert handoff.target_plan["orders"][0]["offset"] == "CLOSETODAY"
+
+
+@pytest.mark.parametrize(
+    ("exact_contract", "product", "current_positions", "expected_offset"),
+    [
+        ("SHFE.rb2601", "rb", positions(short=1, yd_short=0), "CLOSETODAY"),
+        (
+            "SHFE.rb2601",
+            "rb",
+            positions(short=1, yd_short=1),
+            "CLOSEYESTERDAY",
+        ),
+        (
+            "INE.sc2601",
+            "sc",
+            {
+                "SC2601.INE.SHORT": {
+                    "gateway_name": GATEWAY,
+                    "symbol": "SC2601",
+                    "exchange": "INE",
+                    "direction": "SHORT",
+                    "volume": 1,
+                    "yd_volume": 0,
+                }
+            },
+            "CLOSETODAY",
+        ),
+    ],
+)
+def test_adapter_selects_shfe_ine_close_offset_from_authoritative_yd_volume(
+    exact_contract: str,
+    product: str,
+    current_positions: dict,
+    expected_offset: str,
+) -> None:
+    handoff = adapt(
+        target_quantity=0,
+        current=snapshot(current_positions),
+        product=product,
+        exact_contract=exact_contract,
+    )
+
+    assert handoff.target_plan["phase"] == "CLOSE"
+    assert handoff.target_plan["orders"][0]["offset"] == expected_offset
+
+
+@pytest.mark.parametrize(
+    "current_positions",
+    [
+        positions(short=1, yd_short=None),
+        positions(short=1, yd_short=2),
+    ],
+)
+def test_adapter_rejects_missing_or_inconsistent_shfe_yd_volume(
+    current_positions: dict,
+) -> None:
+    with pytest.raises(ExecutableTargetAdapterError, match="yd_volume"):
+        adapt(target_quantity=0, current=snapshot(current_positions))
+
+
+def test_adapter_keeps_generic_close_for_non_shfe_ine() -> None:
+    handoff = adapt(
+        target_quantity=0,
+        current=snapshot(
+            {
+                "I2601.DCE.SHORT": {
+                    "gateway_name": GATEWAY,
+                    "symbol": "I2601",
+                    "exchange": "DCE",
+                    "direction": "SHORT",
+                    "volume": 1,
+                }
+            }
+        ),
+        product="i",
+        exact_contract="DCE.i2601",
+    )
+
+    assert handoff.target_plan["phase"] == "CLOSE"
     assert handoff.target_plan["orders"][0]["offset"] == "CLOSE"
 
 
 def test_dynamic_broker_fields_do_not_change_target_position_projections() -> None:
     static = adapt(target_quantity=2, current=snapshot(positions(long=1)))
-    dynamic = adapt(target_quantity=2, current=snapshot(positions(long=1, dynamic=True)))
+    dynamic = adapt(
+        target_quantity=2, current=snapshot(positions(long=1, dynamic=True))
+    )
     assert (
         static.target_plan["expected_after_position_hash"]
         == dynamic.target_plan["expected_after_position_hash"]
@@ -527,9 +637,21 @@ def test_dynamic_broker_fields_do_not_change_target_position_projections() -> No
     assert (
         static.target_plan["expected_before_position_hash"]
         == dynamic.target_plan["expected_before_position_hash"]
-        == target_position_projection_hash(
+        == before_position_projection_hash(
             positions(long=1), account_scope=SCOPE, environment="SIMNOW"
         )
+    )
+
+
+def test_adapter_before_hash_binds_shfe_yd_volume() -> None:
+    today = adapt(target_quantity=0, current=snapshot(positions(short=1, yd_short=0)))
+    yesterday = adapt(
+        target_quantity=0, current=snapshot(positions(short=1, yd_short=1))
+    )
+
+    assert (
+        today.target_plan["expected_before_position_hash"]
+        != yesterday.target_plan["expected_before_position_hash"]
     )
 
 
@@ -537,8 +659,33 @@ def test_dynamic_broker_fields_do_not_change_target_position_projections() -> No
     ("current", "receipt", "message"),
     [
         (snapshot(scope="account:other"), None, "scope/freshness"),
-        (None, authority(scope={"account_scope": SCOPE, "environment": "SIMNOW", "gateway_name": "other"}), "scope/gateway"),
-        (snapshot({"RB2601.SHFE.LONG": {"gateway_name": "gateway-other", "symbol": "RB2601", "exchange": "SHFE", "direction": "LONG", "volume": 1}}), None, "gateway mismatch"),
+        (
+            None,
+            authority(
+                scope={
+                    "account_scope": SCOPE,
+                    "environment": "SIMNOW",
+                    "gateway_name": "other",
+                }
+            ),
+            "scope/gateway",
+        ),
+        (
+            snapshot(
+                {
+                    "RB2601.SHFE.LONG": {
+                        "gateway_name": "gateway-other",
+                        "symbol": "RB2601",
+                        "exchange": "SHFE",
+                        "direction": "LONG",
+                        "volume": 1,
+                        "yd_volume": 0,
+                    }
+                }
+            ),
+            None,
+            "gateway mismatch",
+        ),
     ],
 )
 def test_adapter_scope_gateway_and_account_mismatch_fail_closed(
@@ -553,7 +700,12 @@ def test_adapter_scope_gateway_and_account_mismatch_fail_closed(
     [
         (0, snapshot(), None, "delta is zero"),
         (2, snapshot(), None, "one-lot"),
-        (1, snapshot(active_orders={"active-1": {"state": "SUBMITTED"}}), None, "active orders"),
+        (
+            1,
+            snapshot(active_orders={"active-1": {"state": "SUBMITTED"}}),
+            None,
+            "active orders",
+        ),
         (1, snapshot(), {"state": "RECONCILED", "unknown_outcomes": 1}, "unknown"),
     ],
 )
@@ -582,9 +734,7 @@ def test_adapter_has_no_direct_rpc_or_execution_mutation_bypass() -> None:
         if isinstance(node, ast.Import)
         for alias in node.names
     } | {
-        node.module or ""
-        for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom)
+        node.module or "" for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
     }
     assert not any("rpc" in module.lower() for module in imported_modules)
     assert not {"ExecutionOrchestrator", "FinalExecutionRuntime"} & {
@@ -593,7 +743,8 @@ def test_adapter_has_no_direct_rpc_or_execution_mutation_bypass() -> None:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
     }
     assert not any(
-        isinstance(node, ast.Attribute) and node.attr in {"send_order", "cancel_order", "call"}
+        isinstance(node, ast.Attribute)
+        and node.attr in {"send_order", "cancel_order", "call"}
         for node in ast.walk(tree)
     )
 
@@ -637,7 +788,9 @@ def test_adapter_requires_exact_complete_false_authority_contract() -> None:
     for field in ("control_authorized", "signing_requested", "custody_published"):
         broken = deepcopy(c_fast_candidate)
         broken[field] = True
-        with pytest.raises(ExecutableTargetAdapterError, match="attempts to grant authority"):
+        with pytest.raises(
+            ExecutableTargetAdapterError, match="attempts to grant authority"
+        ):
             build_executable_target_plan(
                 map_candidate=map_candidate,
                 c_fast_candidate=broken,

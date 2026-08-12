@@ -29,9 +29,9 @@ from shared.commodity_execution.v1 import (
     CommodityExecutionContractError,
     TargetPlan,
     VerifiedCustodyReceipt,
+    before_position_projection_hash,
     canonical_json,
     sha256_json,
-    target_position_projection_hash,
     utc_now,
 )
 from shared.trust_contracts.v1 import canonical_json_line, sha256_bytes
@@ -490,9 +490,7 @@ class FinalExecutionRuntime:
         active = state["plan"]
         if active.get("state") != "ACTIVE":
             return None
-        plan = self._plan(
-            str(active["plan_id"]), plan_hash=str(active["plan_hash"])
-        )
+        plan = self._plan(str(active["plan_id"]), plan_hash=str(active["plan_hash"]))
         proof = {
             field: active.get(field)
             for field in (
@@ -528,13 +526,9 @@ class FinalExecutionRuntime:
                 plan.raw["expected_after_position_hash"]
             ),
             "authority_artifact_id": str(plan.raw["authority_artifact_id"]),
-            "authority_artifact_sha256": str(
-                plan.raw["authority_artifact_sha256"]
-            ),
+            "authority_artifact_sha256": str(plan.raw["authority_artifact_sha256"]),
             "authority_receipt_id": str(plan.raw["authority_receipt_id"]),
-            "authority_receipt_sha256": str(
-                plan.raw["authority_receipt_sha256"]
-            ),
+            "authority_receipt_sha256": str(plan.raw["authority_receipt_sha256"]),
             "preview_receipt_id": str(proof["preview_receipt_id"]),
             "preview_receipt_sha256": str(proof["preview_receipt_sha256"]),
             "preview_artifact_id": str(proof["preview_artifact_id"]),
@@ -590,7 +584,7 @@ class FinalExecutionRuntime:
             prior = self.orchestrator.repository.snapshot()
             expected_preview_id = f"preview-{plan.plan_hash[:16]}"
             try:
-                current_position_hash = target_position_projection_hash(
+                current_position_hash = before_position_projection_hash(
                     prior["broker"].get("positions"),
                     account_scope=self.orchestrator.scope,
                     environment=self.orchestrator.environment,
@@ -626,7 +620,9 @@ class FinalExecutionRuntime:
                 or preview_receipt.artifact_sha256
                 != prior["plan"]["preview_artifact_sha256"]
             ):
-                raise PlanRejected("SIMNOW preview custody evidence changed after restart")
+                raise PlanRejected(
+                    "SIMNOW preview custody evidence changed after restart"
+                )
             if (
                 envelope.expected.leader_epoch is None
                 or envelope.expected.fencing_token is None
@@ -665,9 +661,7 @@ class FinalExecutionRuntime:
                         )
             return response
         finalization_evidence = (
-            self._finalization_evidence()
-            if envelope.command == "reconcile"
-            else None
+            self._finalization_evidence() if envelope.command == "reconcile" else None
         )
         return self.orchestrator.process_command(
             envelope, finalization_evidence=finalization_evidence
