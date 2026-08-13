@@ -122,17 +122,27 @@ class KeylessCustody:
         }
 
     def receipt(self, receipt_id: str):
-        return self.receipt_value if receipt_id == self.receipt_value["receipt_id"] else None
+        return (
+            self.receipt_value
+            if receipt_id == self.receipt_value["receipt_id"]
+            else None
+        )
 
     def artifact_for_test(self):
         return {
             "artifact_id": self.artifact_value["artifact_id"],
-            "artifact_raw_sha256": sha256_bytes(canonical_json_line(self.artifact_value)),
+            "artifact_raw_sha256": sha256_bytes(
+                canonical_json_line(self.artifact_value)
+            ),
             "artifact": self.artifact_value,
         }
 
     def artifact(self, artifact_id: str):
-        return self.artifact_for_test() if artifact_id == self.artifact_value["artifact_id"] else None
+        return (
+            self.artifact_for_test()
+            if artifact_id == self.artifact_value["artifact_id"]
+            else None
+        )
 
     def probe(self):
         return None
@@ -155,7 +165,9 @@ def runtime(plan: dict, *, enabled: bool = True) -> FinalExecutionRuntime:
     )
 
 
-def command(name: str, key: str, version: int, payload: dict, *, fence: dict | None = None) -> dict:
+def command(
+    name: str, key: str, version: int, payload: dict, *, fence: dict | None = None
+) -> dict:
     expected = {"state_version": version}
     if fence:
         expected |= fence
@@ -165,20 +177,29 @@ def command(name: str, key: str, version: int, payload: dict, *, fence: dict | N
         "idempotency_key": key,
         "correlation_id": f"correlation-{key[-8:]}",
         "issued_at": "2030-01-01T00:00:00Z",
-        "actor": {"service": "control-api", "principal": "keyless-test", "operator": "keyless-test", "role": "admin"},
+        "actor": {
+            "service": "control-api",
+            "principal": "keyless-test",
+            "operator": "keyless-test",
+            "role": "admin",
+        },
         "command": name,
         "expected": expected,
         "payload": payload,
     }
 
 
-def test_keyless_plan_is_canonical_and_has_no_signing_or_runtime_authority_fields() -> None:
+def test_keyless_plan_is_canonical_and_has_no_signing_or_runtime_authority_fields() -> (
+    None
+):
     plan = keyless_plan()
     assert plan["schema_version"] == KEYLESS_TARGET_PLAN_SCHEMA_VERSION
     assert plan["plan_hash"] == sha256_json(
         {key: value for key, value in plan.items() if key != "plan_hash"}
     )
-    assert {"signer_key_id", "keyring_raw_sha256", "authority_receipt_id"}.isdisjoint(plan)
+    assert {"signer_key_id", "keyring_raw_sha256", "authority_receipt_id"}.isdisjoint(
+        plan
+    )
 
 
 def test_keyless_custody_preview_recomputes_artifact_and_plan_hashes() -> None:
@@ -203,21 +224,58 @@ def test_keyless_preview_enable_start_keeps_existing_fencing_and_send_intent() -
     repo = core.repository
     gateway = core.gateway
     receipt = service.custody.receipt_value
-    service.process_command(command("preview", "keyless-preview-0001", repo.state_version, {
-        "plan_hash": plan["plan_hash"], "artifact_hash": receipt["artifact_sha256"],
-        "mode": "simnow_preview", "receipt_id": receipt["receipt_id"],
-    }))
-    service.process_command(command("reconcile", "keyless-reconcile-001", repo.state_version, {
-        "reconciliation_run_id": "keyless-run-0001", "snapshot_id": "snapshot-default", "reason": "fresh SIMNOW facts",
-    }))
-    service.process_command(command("enable", "keyless-enable-00001", repo.state_version, {
-        "authority_artifact_id": plan["plan_id"], "authority_hash": plan["plan_hash"],
-        "expires_at": plan["expires_at"], "reason": "fixed keyless custody",
-    }))
+    service.process_command(
+        command(
+            "preview",
+            "keyless-preview-0001",
+            repo.state_version,
+            {
+                "plan_hash": plan["plan_hash"],
+                "artifact_hash": receipt["artifact_sha256"],
+                "mode": "simnow_preview",
+                "receipt_id": receipt["receipt_id"],
+            },
+        )
+    )
+    service.process_command(
+        command(
+            "reconcile",
+            "keyless-reconcile-001",
+            repo.state_version,
+            {
+                "reconciliation_run_id": "keyless-run-0001",
+                "snapshot_id": "snapshot-default",
+                "reason": "fresh SIMNOW facts",
+            },
+        )
+    )
+    service.process_command(
+        command(
+            "enable",
+            "keyless-enable-00001",
+            repo.state_version,
+            {
+                "authority_artifact_id": plan["plan_id"],
+                "authority_hash": plan["plan_hash"],
+                "expires_at": plan["expires_at"],
+                "reason": "fixed keyless custody",
+            },
+        )
+    )
     token = core.acquire_leader("keyless-leader-0001")
-    response = service.process_command(command("start", "keyless-start-000001", repo.state_version, {
-        "plan_id": plan["plan_id"], "plan_hash": plan["plan_hash"], "reason": "start keyless plan",
-    }, fence={"leader_epoch": token.epoch, "fencing_token": token.fencing_token}))
+    response = service.process_command(
+        command(
+            "start",
+            "keyless-start-000001",
+            repo.state_version,
+            {
+                "plan_id": plan["plan_id"],
+                "plan_hash": plan["plan_hash"],
+                "reason": "start keyless plan",
+            },
+            fence={"leader_epoch": token.epoch, "fencing_token": token.fencing_token},
+        )
+    )
     assert response.result["accepted"] is True
     assert len(gateway.send_calls) == 1
     assert repo.snapshot()["send_intents"]
@@ -234,10 +292,14 @@ def test_keyless_preview_enable_start_keeps_existing_fencing_and_send_intent() -
         ("countable_forward", True),
     ],
 )
-def test_keyless_plan_rejects_any_tuple_or_authority_flag_deviation(field: str, value: object) -> None:
+def test_keyless_plan_rejects_any_tuple_or_authority_flag_deviation(
+    field: str, value: object
+) -> None:
     raw = keyless_plan()
     raw[field] = value
-    raw["plan_hash"] = sha256_json({key: item for key, item in raw.items() if key != "plan_hash"})
+    raw["plan_hash"] = sha256_json(
+        {key: item for key, item in raw.items() if key != "plan_hash"}
+    )
     with pytest.raises(CommodityExecutionContractError):
         from shared.commodity_execution import TargetPlan
 
@@ -248,7 +310,9 @@ def test_keyless_plan_rejects_order_gateway_and_empty_position_transition() -> N
     raw = keyless_plan()
     raw["orders"][0]["gateway_name"] = "gateway-OTHER"
     raw["order_set_sha256"] = sha256_json(raw["orders"])
-    raw["plan_hash"] = sha256_json({key: item for key, item in raw.items() if key != "plan_hash"})
+    raw["plan_hash"] = sha256_json(
+        {key: item for key, item in raw.items() if key != "plan_hash"}
+    )
     with pytest.raises(CommodityExecutionContractError, match="order gateway"):
         from shared.commodity_execution import TargetPlan
 
@@ -256,14 +320,18 @@ def test_keyless_plan_rejects_order_gateway_and_empty_position_transition() -> N
 
     raw = keyless_plan()
     raw["expected_after_position_hash"] = raw["expected_before_position_hash"]
-    raw["plan_hash"] = sha256_json({key: item for key, item in raw.items() if key != "plan_hash"})
+    raw["plan_hash"] = sha256_json(
+        {key: item for key, item in raw.items() if key != "plan_hash"}
+    )
     with pytest.raises(CommodityExecutionContractError, match="position transition"):
         TargetPlan.from_mapping(raw)
 
 
 def test_keyless_custody_is_disabled_without_explicit_runtime_gate() -> None:
     with pytest.raises(AuthorityRejected, match="keyless SIMNOW custody is disabled"):
-        runtime(keyless_plan(), enabled=False).preview_from_custody("keyless-install-0001")
+        runtime(keyless_plan(), enabled=False).preview_from_custody(
+            "keyless-install-0001"
+        )
 
 
 def test_trusted_keyless_custody_is_create_only_and_returns_no_signing_fields(
@@ -278,12 +346,16 @@ def test_trusted_keyless_custody_is_create_only_and_returns_no_signing_fields(
             frozenset({"control-api"}),
             {
                 name: CustodyPolicy(str(tmp_path / f"{name}.json"), "0" * 64, "unused")
-                for name in ("map_acceptance", "c_fast_acceptance", "runtime_authorization")
-                },
-                "execution-read-secret",
-                None,
-                True,
-            )
+                for name in (
+                    "map_acceptance",
+                    "c_fast_acceptance",
+                    "runtime_authorization",
+                )
+            },
+            "execution-read-secret",
+            None,
+            True,
+        )
     )
     plan = keyless_plan()
     artifact = KeylessCustody(plan).artifact_value
@@ -297,8 +369,12 @@ def test_trusted_keyless_custody_is_create_only_and_returns_no_signing_fields(
         principal="control-api",
     )
     assert receipt["artifact_sha256"] == artifact["raw_sha256"]
-    assert {"signer_key_id", "keyring_raw_sha256", "signed_artifact_sha256"}.isdisjoint(receipt)
-    assert service.artifact_for_execution(receipt["artifact_id"])["artifact"] == artifact
+    assert {"signer_key_id", "keyring_raw_sha256", "signed_artifact_sha256"}.isdisjoint(
+        receipt
+    )
+    assert (
+        service.artifact_for_execution(receipt["artifact_id"])["artifact"] == artifact
+    )
     assert service.receipt_by_idempotency("keyless-publish-0001") == receipt
     with TestClient(create_app(service)) as client:
         recovered = client.get(
@@ -310,7 +386,9 @@ def test_trusted_keyless_custody_is_create_only_and_returns_no_signing_fields(
         )
     assert recovered.status_code == 200
     assert recovered.json()["receipt_id"] == receipt["receipt_id"]
-    with pytest.raises(WorkflowAdapterError, match="CUSTODY_ARTIFACT_ALREADY_PUBLISHED"):
+    with pytest.raises(
+        WorkflowAdapterError, match="CUSTODY_ARTIFACT_ALREADY_PUBLISHED"
+    ):
         service.publish_trusted_keyless_target_plan(
             TrustedKeylessTargetPlanUploadDTO(
                 idempotency_key="keyless-publish-0002",
@@ -322,7 +400,9 @@ def test_trusted_keyless_custody_is_create_only_and_returns_no_signing_fields(
         )
 
 
-def test_keyless_custody_publish_is_closed_without_settings_gate(tmp_path: Path) -> None:
+def test_keyless_custody_publish_is_closed_without_settings_gate(
+    tmp_path: Path,
+) -> None:
     service = ArtifactCustodyService(
         CustodySettings(
             tmp_path / "custody",
@@ -380,7 +460,9 @@ def test_simnow_run_once_uses_only_existing_custody_and_execution_clients() -> N
     assert "produce_c_fast_candidate(" in source
 
 
-def test_simnow_runner_image_keeps_the_real_import_closure_and_no_direct_gateway_rpc_or_order_import() -> None:
+def test_simnow_runner_image_keeps_the_real_import_closure_and_no_direct_gateway_rpc_or_order_import() -> (
+    None
+):
     root = Path(__file__).resolve().parents[3]
     source_path = root / "scripts" / "simnow_run_once.py"
     source = source_path.read_text(encoding="utf-8")
@@ -441,6 +523,9 @@ def test_simnow_runner_image_keeps_the_real_import_closure_and_no_direct_gateway
         "backend/app/phase_c/models.py",
         "scripts/simnow_keyless_pilot.py",
         "scripts/simnow_run_once.py",
+        "scripts/phase_b_workers/__init__.py",
+        "scripts/phase_b_workers/contracts.py",
+        "scripts/phase_b_workers/durable.py",
         "scripts/c_fast_producer",
         "scripts/map",
         "scripts/commodity_c_fast_pure_producer_kernel.py",
@@ -450,10 +535,12 @@ def test_simnow_runner_image_keeps_the_real_import_closure_and_no_direct_gateway
         "shared/trust_contracts",
     }
     assert "backend/app/execution/gateway.py" not in copied_sources
-    assert "ENTRYPOINT [\"python\", \"/app/scripts/simnow_run_once.py\"]" in containerfile
+    assert 'ENTRYPOINT ["python", "/app/scripts/simnow_run_once.py"]' in containerfile
 
 
-def test_simnow_run_once_accepts_canonical_sources_and_rejects_candidate_inputs() -> None:
+def test_simnow_run_once_accepts_canonical_sources_and_rejects_candidate_inputs() -> (
+    None
+):
     path = Path(__file__).resolve().parents[3] / "scripts" / "simnow_run_once.py"
     spec = importlib.util.spec_from_file_location("issue325_run_once", path)
     assert spec is not None and spec.loader is not None
@@ -462,14 +549,32 @@ def test_simnow_run_once_accepts_canonical_sources_and_rejects_candidate_inputs(
     parser = module.build_parser()
     args = parser.parse_args(
         [
-            "--map-source", "map-source.json", "--c-fast-source", "cfast-source.json",
-            "--map-acceptance", "map-acceptance.json",
-            "--map-acceptance-keyring", "map-keyring.json",
-            "--map-acceptance-keyring-sha256", "a" * 64,
-            "--peek-current-facts", "peek.json", "--reconciliation-state", "reconcile.json",
-            "--product", "rb", "--expires-at", "2099-01-01T00:00:00Z",
-            "--principal", "runner-admin", "--operator", "runner-admin",
-            "--idempotency-suffix", "run-0001", "--expected-custody-version", "0",
+            "--map-source",
+            "map-source.json",
+            "--c-fast-source",
+            "cfast-source.json",
+            "--map-acceptance",
+            "map-acceptance.json",
+            "--map-acceptance-keyring",
+            "map-keyring.json",
+            "--map-acceptance-keyring-sha256",
+            "a" * 64,
+            "--peek-current-facts",
+            "peek.json",
+            "--reconciliation-state",
+            "reconcile.json",
+            "--product",
+            "rb",
+            "--expires-at",
+            "2099-01-01T00:00:00Z",
+            "--principal",
+            "runner-admin",
+            "--operator",
+            "runner-admin",
+            "--idempotency-suffix",
+            "run-0001",
+            "--expected-custody-version",
+            "0",
         ]
     )
     assert args.map_source == Path("map-source.json")
@@ -491,7 +596,9 @@ def test_simnow_run_once_direct_python_help_has_no_external_pythonpath() -> None
     assert "--map-source" in completed.stdout
 
 
-def test_simnow_run_once_completion_fails_closed_for_pending_unknown_and_active() -> None:
+def test_simnow_run_once_completion_fails_closed_for_pending_unknown_and_active() -> (
+    None
+):
     path = Path(__file__).resolve().parents[3] / "scripts" / "simnow_run_once.py"
     spec = importlib.util.spec_from_file_location("issue325_completion", path)
     assert spec is not None and spec.loader is not None
@@ -501,13 +608,24 @@ def test_simnow_run_once_completion_fails_closed_for_pending_unknown_and_active(
         "lifecycle": "ACTIVE",
         "reconciliation": {"state": "RECONCILED", "unknown_outcomes": 0},
         "broker": {"active_order_count": 0},
-        "send_intents": [{"plan_id": "plan-0001", "plan_hash": "a" * 64, "state": "ACKNOWLEDGED"}],
+        "send_intents": [
+            {"plan_id": "plan-0001", "plan_hash": "a" * 64, "state": "ACKNOWLEDGED"}
+        ],
     }
-    assert module._completion_state(base, plan_id="plan-0001", plan_hash="a" * 64) == "pending_intents"
+    assert (
+        module._completion_state(base, plan_id="plan-0001", plan_hash="a" * 64)
+        == "pending_intents"
+    )
     unknown = {**base, "reconciliation": {"state": "UNKNOWN", "unknown_outcomes": 1}}
-    assert module._completion_state(unknown, plan_id="plan-0001", plan_hash="a" * 64) == "unknown_outcome"
+    assert (
+        module._completion_state(unknown, plan_id="plan-0001", plan_hash="a" * 64)
+        == "unknown_outcome"
+    )
     active = {**base, "broker": {"active_order_count": 1}}
-    assert module._completion_state(active, plan_id="plan-0001", plan_hash="a" * 64) == "active_orders"
+    assert (
+        module._completion_state(active, plan_id="plan-0001", plan_hash="a" * 64)
+        == "active_orders"
+    )
 
 
 def _run_once_module(name: str):
@@ -522,16 +640,37 @@ def _run_once_module(name: str):
 def _run_once_args(module, *, timeout: float = 1.0) -> object:
     return module.build_parser().parse_args(
         [
-            "--map-source", "map-source.json", "--c-fast-source", "cfast-source.json",
-            "--map-acceptance", "map-acceptance.json",
-            "--map-acceptance-keyring", "map-keyring.json",
-            "--map-acceptance-keyring-sha256", "a" * 64,
-            "--peek-current-facts", "peek.json", "--reconciliation-state", "reconcile.json",
-            "--product", "rb", "--expires-at", "2099-01-01T00:00:00Z",
-            "--principal", "runner-admin", "--operator", "runner-admin",
-            "--idempotency-suffix", "run-0001", "--expected-custody-version", "0",
-            "--execute", "--completion-timeout-seconds", str(timeout),
-            "--completion-poll-seconds", "0.001",
+            "--map-source",
+            "map-source.json",
+            "--c-fast-source",
+            "cfast-source.json",
+            "--map-acceptance",
+            "map-acceptance.json",
+            "--map-acceptance-keyring",
+            "map-keyring.json",
+            "--map-acceptance-keyring-sha256",
+            "a" * 64,
+            "--peek-current-facts",
+            "peek.json",
+            "--reconciliation-state",
+            "reconcile.json",
+            "--product",
+            "rb",
+            "--expires-at",
+            "2099-01-01T00:00:00Z",
+            "--principal",
+            "runner-admin",
+            "--operator",
+            "runner-admin",
+            "--idempotency-suffix",
+            "run-0001",
+            "--expected-custody-version",
+            "0",
+            "--execute",
+            "--completion-timeout-seconds",
+            str(timeout),
+            "--completion-poll-seconds",
+            "0.001",
         ]
     )
 
@@ -558,8 +697,13 @@ def _runner_status(
         },
         "lifecycle": "READY" if terminal else lifecycle,
         "safe_to_restart": terminal,
-        "reconciliation": {"state": reconciliation, "unknown_outcomes": unknown_outcomes},
-        "send_intents": [{"plan_id": plan_id, "plan_hash": plan_hash, "state": intent_state}],
+        "reconciliation": {
+            "state": reconciliation,
+            "unknown_outcomes": unknown_outcomes,
+        },
+        "send_intents": [
+            {"plan_id": plan_id, "plan_hash": plan_hash, "state": intent_state}
+        ],
         "plan": {
             "state": "TERMINAL" if terminal else "ACTIVE",
             "plan_id": plan_id,
@@ -615,24 +759,38 @@ def _install_fake_runner_dependencies(
                 )
             return {"accepted": True}
 
-    map_candidate = SimpleNamespace(raw=b"canonical-map", artifact_sha256="c" * 64, payload={})
+    map_candidate = SimpleNamespace(
+        raw=b"canonical-map", artifact_sha256="c" * 64, payload={}
+    )
     c_fast_candidate = SimpleNamespace(payload={})
     monkeypatch.setattr(module, "read_map_source", lambda _path: b"map-source")
     monkeypatch.setattr(module, "produce_map_candidate", lambda _raw: map_candidate)
     monkeypatch.setattr(module, "read_cfast_source", lambda _path: b"cfast-source")
-    monkeypatch.setattr(module, "produce_c_fast_candidate", lambda *_args, **_kwargs: c_fast_candidate)
-    monkeypatch.setattr(module, "load_keyring", lambda *_args, **_kwargs: ({}, b"", "d" * 64))
+    monkeypatch.setattr(
+        module, "produce_c_fast_candidate", lambda *_args, **_kwargs: c_fast_candidate
+    )
+    monkeypatch.setattr(
+        module, "load_keyring", lambda *_args, **_kwargs: ({}, b"", "d" * 64)
+    )
     monkeypatch.setattr(
         module,
         "_object",
-        lambda _path, label: {"state": "RECONCILED", "unknown_outcomes": 0}
-        if label == "reconciliation state"
-        else {},
+        lambda _path, label: (
+            {"state": "RECONCILED", "unknown_outcomes": 0}
+            if label == "reconciliation state"
+            else {}
+        ),
     )
     monkeypatch.setattr(
-        module, "peek_current_facts_to_snapshot", lambda *_args, **_kwargs: SimpleNamespace(snapshot={})
+        module,
+        "peek_current_facts_to_snapshot",
+        lambda *_args, **_kwargs: SimpleNamespace(snapshot={}),
     )
-    monkeypatch.setattr(module, "build_trusted_keyless_executable_target_plan", lambda **_kwargs: handoff)
+    monkeypatch.setattr(
+        module,
+        "build_trusted_keyless_executable_target_plan",
+        lambda **_kwargs: handoff,
+    )
     monkeypatch.setattr(module, "RemotePhaseCWorkflowClient", FakeCustody)
     monkeypatch.setattr(module, "ExecutionClient", FakeExecution)
     return SimpleNamespace(calls=calls)
@@ -686,7 +844,14 @@ def test_simnow_run_once_fake_e2e_final_reconcile_archives_after_terminal(
     assert result["executed"] is True
     assert result["completed"] is True
     assert result["archived"] is True
-    assert fake.calls == ["custody", "preview", "reconcile", "enable", "start", "reconcile"]
+    assert fake.calls == [
+        "custody",
+        "preview",
+        "reconcile",
+        "enable",
+        "start",
+        "reconcile",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -726,7 +891,14 @@ def test_simnow_run_once_rejects_finalization_position_hash_mismatch(
     assert result["completed"] is False
     assert result["archived"] is False
     assert result["reason"] == "final_reconcile_did_not_complete_final_plan"
-    assert fake.calls == ["custody", "preview", "reconcile", "enable", "start", "reconcile"]
+    assert fake.calls == [
+        "custody",
+        "preview",
+        "reconcile",
+        "enable",
+        "start",
+        "reconcile",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -744,8 +916,14 @@ def test_simnow_run_once_rejects_finalization_position_hash_mismatch(
             },
             "ordinary-terminal-without-finalization",
         ),
-        (_final_reconcile_response(finalization_state="STOPPED"), "emergency-stop-race"),
-        (_final_reconcile_response(receipt_status="REJECTED"), "halted-final-reconcile"),
+        (
+            _final_reconcile_response(finalization_state="STOPPED"),
+            "emergency-stop-race",
+        ),
+        (
+            _final_reconcile_response(receipt_status="REJECTED"),
+            "halted-final-reconcile",
+        ),
     ],
 )
 def test_simnow_run_once_rejects_terminal_or_stopped_race_without_final_plan_completion(
@@ -772,13 +950,23 @@ def test_simnow_run_once_rejects_terminal_or_stopped_race_without_final_plan_com
     assert result["completed"] is False
     assert result["archived"] is False
     assert result["reason"] == "final_reconcile_did_not_complete_final_plan"
-    assert fake.calls == ["custody", "preview", "reconcile", "enable", "start", "reconcile"]
+    assert fake.calls == [
+        "custody",
+        "preview",
+        "reconcile",
+        "enable",
+        "start",
+        "reconcile",
+    ]
 
 
 @pytest.mark.parametrize(
     ("status", "reason"),
     [
-        (_runner_status(version=4, intent_state="ACKNOWLEDGED"), "completion_timeout:pending_intents"),
+        (
+            _runner_status(version=4, intent_state="ACKNOWLEDGED"),
+            "completion_timeout:pending_intents",
+        ),
         (
             _runner_status(version=4, reconciliation="UNKNOWN", unknown_outcomes=1),
             "unknown_outcome",

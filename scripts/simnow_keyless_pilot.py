@@ -12,7 +12,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import re
 import sys
 from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
@@ -37,18 +36,16 @@ from app.execution.executable_target_adapter import (  # noqa: E402
 )
 from app.phase_c.client import RemotePhaseCWorkflowClient  # noqa: E402
 from app.phase_c.models import TrustedKeylessTargetPlanUploadDTO  # noqa: E402
-from simnow_run_once import (  # noqa: E402
-    _command,
-    _completed,
-    _completion_state,
-    _final_reconcile_completed,
-    _incomplete,
-    _now,
+from phase_b_workers.contracts import (  # noqa: E402
+    VerifiedTick,
 )
-from shared.trust_contracts.v1 import (  # noqa: E402
-    ContractError,
-    canonical_json_line,
+from phase_b_workers.durable import (  # noqa: E402
+    AtomicCheckpoint,
+    DurableStateError,
+    DurableVerifiedTickStream,
 )
+
+from shared.artifact_contracts.v1 import new_artifact_envelope  # noqa: E402
 from shared.commodity_execution import (  # noqa: E402
     TRUSTED_KEYLESS_SIMNOW_SCOPE,
     before_position_projection_hash,
@@ -56,12 +53,24 @@ from shared.commodity_execution import (  # noqa: E402
     sha256_json,
     target_position_projection_hash,
 )
-from shared.artifact_contracts.v1 import new_artifact_envelope  # noqa: E402
+from shared.trust_contracts.v1 import (  # noqa: E402
+    ContractError,
+    canonical_json_line,
+)
 
 _TARGETS = frozenset({"SHORT1", "FLAT"})
-_SYMBOL_PRODUCT = re.compile(r"^([A-Za-z]+)[0-9]{4}$")
+_FIXED_EXCHANGE = "SHFE"
+_FIXED_SYMBOL = "ru2609"
+_FIXED_VT_SYMBOL = f"{_FIXED_SYMBOL}.{_FIXED_EXCHANGE}"
+_FORMAL_MARKET_STATE_DIR = Path("/run/market-data")
 _STATUS_MAX_AGE_SECONDS = 60.0
 _STATUS_FUTURE_SKEW_SECONDS = 5.0
+# The live tick admission boundary is intentionally stricter than the normal
+# five-second quote policy: a pilot reference must be observed within two
+# seconds, while retaining the existing two-second future-skew rejection.
+_QUOTE_MAX_AGE_SECONDS = 2.0
+_QUOTE_FUTURE_SKEW_SECONDS = 2.0
+_TERMINAL_INTENT_STATES = frozenset({"TERMINAL", "RECONCILED", "CANCELLED"})
 
 
 def _object(path: Path, label: str) -> dict[str, Any]:
@@ -73,6 +82,136 @@ def _object(path: Path, label: str) -> dict[str, Any]:
     if not isinstance(value, dict) or canonical_json_line(value) != raw:
         raise ValueError(f"{label} must be canonical JSON")
     return value
+
+
+def _now() -> str:
+    return (
+        datetime.now(timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+
+
+def _command(
+    *,
+    name: str,
+    suffix: str,
+    version: int,
+    actor: dict[str, str],
+    payload: dict[str, Any],
+    now: str,
+    fence: dict[str, int] | None = None,
+) -> dict[str, Any]:
+    expected: dict[str, Any] = {"state_version": version}
+    if fence is not None:
+        expected.update(fence)
+    return {
+        "schema_version": "web_bridge_control_execution_command_v1",
+        "command_id": f"simnow-keyless-pilot-{suffix}",
+        "idempotency_key": f"simnow-keyless-pilot-{suffix}",
+        "correlation_id": f"simnow-keyless-pilot-{suffix}",
+        "issued_at": now,
+        "actor": actor,
+        "command": name,
+        "expected": expected,
+        "payload": payload,
+    }
+
+
+def _incomplete(
+    result: dict[str, Any], *, reason: str, status: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    response = dict(result)
+    response.update(
+        {"executed": False, "completed": False, "archived": False, "reason": reason}
+    )
+    if status is not None:
+        response["execution_status"] = status
+    return response
+
+
+def _completion_state(status: dict[str, Any], *, plan_id: str, plan_hash: str) -> str:
+    reconciliation = status.get("reconciliation", {})
+    broker = status.get("broker", {})
+    if (
+        status.get("lifecycle") == "HALTED_UNKNOWN_OUTCOME"
+        or reconciliation.get("state") == "UNKNOWN"
+        or reconciliation.get("unknown_outcomes") != 0
+    ):
+        return "unknown_outcome"
+    if broker.get("active_order_count") != 0:
+        return "active_orders"
+    intents = [
+        item
+        for item in status.get("send_intents", [])
+        if item.get("plan_id") == plan_id and item.get("plan_hash") == plan_hash
+    ]
+    if not intents:
+        return "missing_send_intent"
+    if any(item.get("state") == "UNKNOWN_OUTCOME" for item in intents):
+        return "unknown_outcome"
+    if any(item.get("state") not in _TERMINAL_INTENT_STATES for item in intents):
+        return "pending_intents"
+    return "ready_for_final_reconcile"
+
+
+def _completed(status: dict[str, Any], *, plan_id: str, plan_hash: str) -> bool:
+    intents = [
+        item
+        for item in status.get("send_intents", [])
+        if item.get("plan_id") == plan_id and item.get("plan_hash") == plan_hash
+    ]
+    return (
+        status.get("lifecycle") == "READY"
+        and status.get("plan", {}).get("state") == "TERMINAL"
+        and status.get("plan", {}).get("plan_id") == plan_id
+        and status.get("plan", {}).get("plan_hash") == plan_hash
+        and status.get("authority", {}).get("state") == "REVOKED"
+        and status.get("reconciliation", {}).get("state") == "RECONCILED"
+        and status.get("reconciliation", {}).get("unknown_outcomes") == 0
+        and status.get("broker", {}).get("active_order_count") == 0
+        and bool(status.get("safe_to_restart"))
+        and bool(intents)
+        and all(item.get("state") in _TERMINAL_INTENT_STATES for item in intents)
+    )
+
+
+def _final_reconcile_completed(
+    response: Any,
+    *,
+    plan_id: str,
+    plan_hash: str,
+    expected_after_position_hash: str,
+    final_status: dict[str, Any],
+    idempotency_key: str,
+) -> bool:
+    if not isinstance(response, dict):
+        return False
+    receipt, result = response.get("receipt"), response.get("result")
+    if (
+        not isinstance(receipt, dict)
+        or receipt.get("status") != "COMPLETED"
+        or receipt.get("idempotency_key") != idempotency_key
+        or not isinstance(result, dict)
+        or receipt.get("result") != result
+        or result.get("accepted") is not True
+    ):
+        return False
+    finalization = result.get("finalization")
+    final_plan = finalization.get("plan") if isinstance(finalization, dict) else None
+    final_broker_hash = final_status.get("broker", {}).get("position_snapshot_hash")
+    return (
+        isinstance(finalization, dict)
+        and finalization.get("state") == "COMPLETED"
+        and isinstance(final_plan, dict)
+        and final_plan.get("state") == "TERMINAL"
+        and final_plan.get("plan_id") == plan_id
+        and final_plan.get("plan_hash") == plan_hash
+        and finalization.get("target_position_hash") == expected_after_position_hash
+        and isinstance(final_broker_hash, str)
+        and finalization.get("final_position_hash") == final_broker_hash
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -100,35 +239,25 @@ def _require_reconciliation(value: Mapping[str, Any]) -> None:
         raise ValueError("reconciliation state is not clean")
 
 
-def _project_single_contract(positions: Mapping[str, Any]) -> tuple[str, str, str]:
-    """Return exactly one normalized CTP commodity contract, including zero rows."""
+def _require_fixed_position_rows(positions: Mapping[str, Any]) -> None:
+    """Admit only fixed-pilot CTP rows; empty/zero rows are a flat SHORT1 fact."""
 
-    projections: dict[tuple[str, str], tuple[str, str, str]] = {}
     for key, raw in positions.items():
         if not isinstance(key, str) or not isinstance(raw, Mapping):
-            raise ValueError("broker position projection is invalid")
+            raise TypeError("broker position projection is invalid")
         if str(raw.get("gateway_name", "")).upper() != "CTP":
             raise ValueError("broker position gateway is invalid")
         try:
             exchange, symbol = _contract(f"{raw.get('exchange')}.{raw.get('symbol')}")
         except ExecutableTargetAdapterError as exc:
             raise ValueError("broker position contract is invalid") from exc
-        product_match = _SYMBOL_PRODUCT.fullmatch(symbol)
-        if product_match is None:
-            raise ValueError("broker position contract is invalid")
+        if exchange != _FIXED_EXCHANGE or symbol != _FIXED_SYMBOL:
+            raise ValueError("broker position contract is not fixed ru2609.SHFE")
         volume = raw.get("volume")
         if isinstance(volume, bool) or not isinstance(volume, int) or volume < 0:
             raise ValueError("broker position volume is invalid")
         if str(raw.get("direction", "")).upper() not in {"LONG", "SHORT"}:
             raise ValueError("broker position direction is invalid")
-        product = product_match.group(1).lower()
-        normalized = (exchange, symbol.lower())
-        existing = projections.setdefault(normalized, (product, exchange, symbol))
-        if existing[0] != product:
-            raise ValueError("broker position contract is ambiguous")
-    if len(projections) != 1:
-        raise ValueError("require exactly one broker commodity contract projection")
-    return next(iter(projections.values()))
 
 
 def _current_position(
@@ -143,39 +272,96 @@ def _current_position(
     return long_volume, short_volume, matching
 
 
-def _pilot_price(positions: Mapping[str, Any], *, exchange: str, symbol: str) -> float:
-    """Require a broker-fact price; pilot mode never invents an opening price."""
+def _formal_tick_binding(
+    *, clock: Callable[[], datetime]
+) -> tuple[str, int, str, str, float]:
+    """Read one fixed-path, source-fenced, validated durable CTP tick."""
 
-    prices: set[float] = set()
-    for raw in positions.values():
-        if not isinstance(raw, Mapping):
-            continue
+    try:
+        watermark = AtomicCheckpoint(
+            _FORMAL_MARKET_STATE_DIR / "stream" / "producer_watermark.json",
+            read_only=True,
+        ).read()
+        generation = watermark.get("stream_generation")
+        if not isinstance(generation, str) or not generation:
+            raise ValueError("formal CTP tick generation is invalid")
+        fence = AtomicCheckpoint(
+            _FORMAL_MARKET_STATE_DIR / "source_fence.json", read_only=True
+        ).read()
+        sources = fence.get("sources") if isinstance(fence, Mapping) else None
+        source = (
+            sources.get("windows-tick-wire-v1")
+            if isinstance(sources, Mapping)
+            else None
+        )
         if (
-            str(raw.get("exchange", "")).upper() != exchange
-            or str(raw.get("symbol", "")).upper() != symbol.upper()
+            not isinstance(source, Mapping)
+            or fence.get("worker_generation") != generation
+            or not isinstance(source.get("generation"), str)
+            or not source["generation"]
+            or isinstance(source.get("seq"), bool)
+            or not isinstance(source.get("seq"), int)
+            or source["seq"] < 1
+            or not isinstance(source.get("event_hash"), str)
+            or len(source["event_hash"]) != 64
         ):
-            continue
-        price = raw.get("price")
-        if isinstance(price, bool) or not isinstance(price, (int, float)):
-            continue
-        normalized = float(price)
-        if normalized > 0 and normalized < float("inf"):
-            prices.add(normalized)
-    if len(prices) != 1:
-        raise ValueError("require one unambiguous broker position price")
-    return next(iter(prices))
+            raise ValueError("formal CTP source fence is invalid")
+        stream = DurableVerifiedTickStream(
+            _FORMAL_MARKET_STATE_DIR / "stream", generation=generation, read_only=True
+        )
+        tick: VerifiedTick | None = None
+        for item in stream.iter_from():
+            if (
+                item.source == "windows-tick-wire-v1"
+                and item.vt_symbol == _FIXED_VT_SYMBOL
+            ):
+                tick = item
+        if tick is None:
+            raise ValueError("formal CTP tick is unavailable")
+    except (OSError, TypeError, ValueError, DurableStateError) as exc:
+        raise ValueError("formal CTP durable tick state is invalid") from exc
+    if tick.source != "windows-tick-wire-v1":
+        raise ValueError("formal CTP tick source is invalid")
+    if tick.vt_symbol != _FIXED_VT_SYMBOL:
+        raise ValueError("formal CTP tick contract is not fixed ru2609.SHFE")
+    now = clock()
+    if now.tzinfo is None or now.utcoffset() != timezone.utc.utcoffset(now):
+        raise ValueError("tick clock must be explicit UTC")
+    received_at = _parse_explicit_utc(tick.received_at_utc, label="formal CTP tick")
+    age = (now - received_at).total_seconds()
+    if age < -_QUOTE_FUTURE_SKEW_SECONDS or age > _QUOTE_MAX_AGE_SECONDS:
+        raise ValueError("formal CTP tick is stale or from the future")
+    price = tick.last_price
+    if isinstance(price, bool) or not isinstance(price, (int, float)):
+        raise ValueError("formal CTP tick reference price is invalid")  # noqa: TRY004
+    normalized = float(price)
+    if not (0 < normalized < float("inf")):
+        raise ValueError("formal CTP tick reference price is invalid")
+    return (
+        tick.ingest_id,
+        tick.ingest_seq,
+        tick.event_hash,
+        tick.received_at_utc,
+        normalized,
+    )
+
+
+def _require_same_tick_binding(
+    expected: tuple[str, int, str, str, float],
+    observed: tuple[str, int, str, str, float],
+) -> None:
+    if observed != expected:
+        raise ValueError("formal CTP tick changed before pilot mutation")
 
 
 def _pilot_target_plan(
     *,
     positions: Mapping[str, Any],
-    product: str,
-    exchange: str,
-    symbol: str,
     long_volume: int,
     short_volume: int,
     matching: list[tuple[str, dict[str, Any]]],
     target: str,
+    price: float,
     expires_at: str,
     generated_at: str,
 ) -> dict[str, Any]:
@@ -187,10 +373,10 @@ def _pilot_target_plan(
             raise ValueError("SHORT1 requires a flat broker projection")
         direction, offset = "SHORT", "OPEN"
         after_positions = {
-            f"{symbol}.{exchange}.SHORT": {
+            f"{_FIXED_SYMBOL}.{_FIXED_EXCHANGE}.SHORT": {
                 "gateway_name": "CTP",
-                "symbol": symbol,
-                "exchange": exchange,
+                "symbol": _FIXED_SYMBOL,
+                "exchange": _FIXED_EXCHANGE,
                 "direction": "SHORT",
                 "volume": 1,
             }
@@ -199,17 +385,17 @@ def _pilot_target_plan(
         if (long_volume, short_volume) != (0, 1):
             raise ValueError("FLAT requires exactly one short broker position")
         direction, after_positions = "LONG", {}
-        offset = _close_order_offset(matching, exchange=exchange, direction=direction)
+        offset = _close_order_offset(
+            matching, exchange=_FIXED_EXCHANGE, direction=direction
+        )
     else:  # pragma: no cover - argparse and run enforce this first
         raise ValueError("pilot target is invalid")
-    price = _pilot_price(positions, exchange=exchange, symbol=symbol)
     identity = sha256_json(
         {
             "pilot": "SIMNOW-keyless-v1",
             "target": target,
-            "product": product,
-            "exchange": exchange,
-            "symbol": symbol,
+            "exchange": _FIXED_EXCHANGE,
+            "symbol": _FIXED_SYMBOL,
             "current_quantity": current_quantity,
             "expected_before_position_hash": before_position_projection_hash(
                 positions, account_scope="account:windows", environment="SIMNOW"
@@ -237,8 +423,8 @@ def _pilot_target_plan(
         ),
         orders=[
             {
-                "symbol": symbol,
-                "exchange": exchange,
+                "symbol": _FIXED_SYMBOL,
+                "exchange": _FIXED_EXCHANGE,
                 "direction": direction,
                 "type": "LIMIT",
                 "volume": 1,
@@ -261,7 +447,7 @@ def _utc_clock() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _fresh_utc(value: Any, *, label: str, now: datetime) -> str:
+def _parse_explicit_utc(value: Any, *, label: str) -> datetime:
     if not isinstance(value, str) or not value.endswith("Z"):
         raise ValueError(f"{label} must be an explicit UTC timestamp")
     try:
@@ -270,6 +456,11 @@ def _fresh_utc(value: Any, *, label: str, now: datetime) -> str:
         raise ValueError(f"{label} must be an explicit UTC timestamp") from exc
     if parsed.tzinfo is None or parsed.utcoffset() != timezone.utc.utcoffset(parsed):
         raise ValueError(f"{label} must be an explicit UTC timestamp")
+    return parsed
+
+
+def _fresh_utc(value: Any, *, label: str, now: datetime) -> str:
+    parsed = _parse_explicit_utc(value, label=label)
     age = (now - parsed).total_seconds()
     if age > _STATUS_MAX_AGE_SECONDS or age < -_STATUS_FUTURE_SKEW_SECONDS:
         raise ValueError(f"{label} is stale or from the future")
@@ -344,15 +535,17 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
     reconciliation = _object(args.reconciliation_state, "reconciliation state")
     _require_reconciliation(reconciliation)
     peek = peek_current_facts_to_snapshot(facts, account_scope="account:windows")
-    product, exchange, symbol = _project_single_contract(peek.snapshot.positions)
+    _require_fixed_position_rows(peek.snapshot.positions)
     long_volume, short_volume, matching = _current_position(
-        peek.snapshot, exchange=exchange, symbol=symbol
+        peek.snapshot, exchange=_FIXED_EXCHANGE, symbol=_FIXED_SYMBOL
     )
+    tick_binding = _formal_tick_binding(clock=_utc_clock)
+    price = tick_binding[-1]
     current_quantity = long_volume - short_volume
     desired_quantity = -1 if args.target == "SHORT1" else 0
     base_result = {
         "target": args.target,
-        "contract": f"{exchange}.{symbol}",
+        "contract": f"{_FIXED_EXCHANGE}.{_FIXED_SYMBOL}",
         "current_quantity": current_quantity,
         "target_quantity": desired_quantity,
         "executed": False,
@@ -378,13 +571,11 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
 
     target_plan = _pilot_target_plan(
         positions=peek.snapshot.positions,
-        product=product,
-        exchange=exchange,
-        symbol=symbol,
         long_volume=long_volume,
         short_volume=short_volume,
         matching=matching,
         target=args.target,
+        price=price,
         expires_at=args.expires_at,
         generated_at=now,
     )
@@ -403,6 +594,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             clock=_utc_clock,
         ),
     )
+    _require_same_tick_binding(tick_binding, _formal_tick_binding(clock=_utc_clock))
     custody = RemotePhaseCWorkflowClient()
     receipt = custody.install_trusted_keyless_target_plan(
         TrustedKeylessTargetPlanUploadDTO(
@@ -448,6 +640,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             clock=_utc_clock,
         ),
     )
+    _require_same_tick_binding(tick_binding, _formal_tick_binding(clock=_utc_clock))
     await execution.submit(
         _command(
             name="preview",
@@ -495,9 +688,15 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         )
     )
     status = (await execution.status()).as_dict()
+    _require_execution_hard_gates(
+        status,
+        expected_position_snapshot_hash=peek.snapshot.position_snapshot_hash,
+        clock=_utc_clock,
+    )
     leader = status["leader"]
     if not leader.get("held"):
         raise ValueError("Execution leader lease is not held; refusing start")
+    _require_same_tick_binding(tick_binding, _formal_tick_binding(clock=_utc_clock))
     try:
         await execution.submit(
             _command(

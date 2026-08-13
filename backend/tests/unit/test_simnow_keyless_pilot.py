@@ -9,7 +9,6 @@ from pathlib import Path
 
 import pytest
 
-
 ROOT = Path(__file__).resolve().parents[3]
 
 
@@ -79,16 +78,16 @@ def _module(name: str):
     return module
 
 
-def _positions(*, long: int = 0, short: int = 0) -> dict[str, dict]:
+def _positions(*, long: int = 0, short: int = 0, short_yd: int = 0) -> dict[str, dict]:
     rows: dict[str, dict] = {}
     for direction, volume in (("LONG", long), ("SHORT", short)):
-        rows[f"rb2601.SHFE.{direction}"] = {
+        rows[f"ru2609.SHFE.{direction}"] = {
             "gateway_name": "CTP",
             "exchange": "SHFE",
-            "symbol": "rb2601",
+            "symbol": "ru2609",
             "direction": direction,
             "volume": volume,
-            "yd_volume": 0,
+            "yd_volume": short_yd if direction == "SHORT" else 0,
             "price": 3500.0,
         }
     return rows
@@ -130,13 +129,13 @@ def test_pilot_cli_accepts_only_fixed_target_and_no_source_selection_inputs() ->
     source = (ROOT / "scripts/simnow_keyless_pilot.py").read_text(encoding="utf-8")
     assert 'status["broker"]["snapshot_id"]' not in source
     assert source.count('status["reconciliation"]["fresh_snapshot_id"]') == 2
+    assert "simnow_run_once" not in source
 
 
-def test_pilot_requires_one_unambiguous_position_contract_even_when_volume_zero() -> (
-    None
-):
+def test_pilot_accepts_only_fixed_ru2609_position_rows_and_empty_short1_facts() -> None:
     module = _module("simnow_keyless_pilot_projection")
-    assert module._project_single_contract(_positions()) == ("rb", "SHFE", "rb2601")
+    module._require_fixed_position_rows({})
+    module._require_fixed_position_rows(_positions())
     rows = _positions()
     rows["au2601.SHFE.LONG"] = {
         "gateway_name": "CTP",
@@ -147,32 +146,123 @@ def test_pilot_requires_one_unambiguous_position_contract_even_when_volume_zero(
         "yd_volume": 0,
         "price": 1.0,
     }
-    with pytest.raises(ValueError, match="exactly one"):
-        module._project_single_contract(rows)
+    with pytest.raises(ValueError, match="fixed ru2609"):
+        module._require_fixed_position_rows(rows)
+
+
+def _write_formal_tick_state(
+    module,
+    root: Path,
+    *,
+    vt_symbol: str = "ru2609.SHFE",
+    event_time_utc: str = "2030-01-01T00:00:00Z",
+    last_price: float | None = 3700.0,
+    source: str = "windows-tick-wire-v1",
+) -> None:
+    from phase_b_workers.contracts import VerifiedTick
+    from phase_b_workers.durable import AtomicCheckpoint, DurableVerifiedTickStream
+
+    tick = VerifiedTick.from_raw(
+        {
+            "ask_price": 3701.0,
+            "ask_volume": 1.0,
+            "bid_price": 3699.0,
+            "bid_volume": 1.0,
+            "event_time_utc": event_time_utc,
+            "last_price": last_price,
+            "last_volume": 1.0,
+            "source_event_id": "tick-event-0001",
+            "vt_symbol": vt_symbol,
+        },
+        stream_generation="tick-generation-0001",
+        ingest_seq=1,
+        source=source,
+        received_at=datetime.fromisoformat(event_time_utc.replace("Z", "+00:00")),
+    )
+    stream = DurableVerifiedTickStream(
+        root / "stream", generation="tick-generation-0001"
+    )
+    stream.initialize()
+    stream.append(tick)
+    AtomicCheckpoint(root / "source_fence.json").write(
+        {
+            "worker_generation": "tick-generation-0001",
+            "sources": {
+                "windows-tick-wire-v1": {
+                    "generation": "source-generation-0001",
+                    "seq": 1,
+                    "event_hash": "a" * 64,
+                }
+            },
+            "events": {},
+        }
+    )
+
+
+def test_pilot_requires_fresh_canonical_fixed_ctp_tick_for_reference_price(
+    tmp_path: Path,
+) -> None:
+    module = _module("simnow_keyless_pilot_formal_tick")
+    now = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    _write_formal_tick_state(module, tmp_path)
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(module, "_FORMAL_MARKET_STATE_DIR", tmp_path)
+    try:
+        assert module._formal_tick_binding(clock=lambda: now)[-1] == 3700.0
+        _write_formal_tick_state(
+            module, tmp_path / "forged", source="readonly_market_source"
+        )
+        monkeypatch.setattr(module, "_FORMAL_MARKET_STATE_DIR", tmp_path / "forged")
+        with pytest.raises(ValueError, match="durable tick state"):
+            module._formal_tick_binding(clock=lambda: now)
+        _write_formal_tick_state(
+            module, tmp_path / "stale", event_time_utc="2029-12-31T23:59:57Z"
+        )
+        monkeypatch.setattr(module, "_FORMAL_MARKET_STATE_DIR", tmp_path / "stale")
+        with pytest.raises(ValueError, match="stale"):
+            module._formal_tick_binding(clock=lambda: now)
+        _write_formal_tick_state(module, tmp_path / "fence")
+        from phase_b_workers.durable import AtomicCheckpoint
+
+        AtomicCheckpoint(tmp_path / "fence" / "source_fence.json").write(
+            {"worker_generation": "wrong", "sources": {}, "events": {}}
+        )
+        monkeypatch.setattr(module, "_FORMAL_MARKET_STATE_DIR", tmp_path / "fence")
+        with pytest.raises(ValueError, match="durable tick state"):
+            module._formal_tick_binding(clock=lambda: now)
+    finally:
+        monkeypatch.undo()
 
 
 @pytest.mark.parametrize(
-    ("target", "long", "short", "direction", "offset"),
+    ("target", "long", "short", "short_yd", "direction", "offset"),
     [
-        ("SHORT1", 0, 0, "SHORT", "OPEN"),
-        ("FLAT", 0, 1, "LONG", "CLOSETODAY"),
+        ("SHORT1", 0, 0, 0, "SHORT", "OPEN"),
+        ("FLAT", 0, 1, 0, "LONG", "CLOSETODAY"),
+        ("FLAT", 0, 1, 1, "LONG", "CLOSEYESTERDAY"),
     ],
 )
 def test_pilot_builds_only_short1_open_or_flat_close(
-    target: str, long: int, short: int, direction: str, offset: str
+    target: str,
+    long: int,
+    short: int,
+    short_yd: int,
+    direction: str,
+    offset: str,
 ) -> None:
     module = _module(f"simnow_keyless_pilot_{target}")
     plan = module._pilot_target_plan(
-        positions=_positions(long=long, short=short),
-        product="rb",
-        exchange="SHFE",
-        symbol="rb2601",
+        positions=_positions(long=long, short=short, short_yd=short_yd),
         long_volume=long,
         short_volume=short,
         matching=[
-            (key, row) for key, row in _positions(long=long, short=short).items()
+            (key, row)
+            for key, row in _positions(
+                long=long, short=short, short_yd=short_yd
+            ).items()
         ],
         target=target,
+        price=3700.0,
         expires_at="2099-01-01T00:00:00Z",
         generated_at="2030-01-01T00:00:00Z",
     )
@@ -184,6 +274,8 @@ def test_pilot_builds_only_short1_open_or_flat_close(
     assert plan["orders"][0]["direction"] == direction
     assert plan["orders"][0]["offset"] == offset
     assert plan["orders"][0]["volume"] == 1
+    assert plan["orders"][0]["symbol"] == "ru2609"
+    assert plan["orders"][0]["exchange"] == "SHFE"
 
 
 def test_pilot_rejects_hedged_long1_short1_for_flat() -> None:
@@ -191,13 +283,11 @@ def test_pilot_rejects_hedged_long1_short1_for_flat() -> None:
     with pytest.raises(ValueError, match="exactly one short"):
         module._pilot_target_plan(
             positions=_positions(long=1, short=1),
-            product="rb",
-            exchange="SHFE",
-            symbol="rb2601",
             long_volume=1,
             short_volume=1,
             matching=[(key, row) for key, row in _positions(long=1, short=1).items()],
             target="FLAT",
+            price=3700.0,
             expires_at="2099-01-01T00:00:00Z",
             generated_at="2030-01-01T00:00:00Z",
         )
@@ -291,11 +381,14 @@ def _stub_pilot_build(
             },
         )(),
     )
-    monkeypatch.setattr(
-        module, "_project_single_contract", lambda _positions: ("rb", "SHFE", "rb2601")
-    )
+    monkeypatch.setattr(module, "_require_fixed_position_rows", lambda _positions: None)
     monkeypatch.setattr(
         module, "_current_position", lambda *_args, **_kwargs: (0, 0, [])
+    )
+    monkeypatch.setattr(
+        module,
+        "_formal_tick_binding",
+        lambda **_kwargs: ("tick", 1, "a" * 64, "2030-01-01T00:00:00Z", 3700.0),
     )
     monkeypatch.setattr(
         module,
@@ -387,6 +480,95 @@ def test_pilot_rejects_state_version_change_before_custody_write(
     assert custody_calls == []
 
 
+def test_pilot_rechecks_the_same_fresh_durable_tick_before_custody(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module("simnow_keyless_pilot_tick_changed_before_custody")
+    position_hash = module.sha256_json({})
+    _stub_pilot_build(module, monkeypatch, position_hash=position_hash)
+    bindings = iter(
+        [
+            ("tick-1", 1, "a" * 64, "2030-01-01T00:00:00Z", 3700.0),
+            ("tick-2", 2, "b" * 64, "2030-01-01T00:00:00Z", 3701.0),
+        ]
+    )
+    monkeypatch.setattr(
+        module, "_formal_tick_binding", lambda **_kwargs: next(bindings)
+    )
+
+    class FakeExecution:
+        async def status(self):
+            return _execution_status(position_hash=position_hash)
+
+    monkeypatch.setattr(module, "ExecutionClient", FakeExecution)
+    monkeypatch.setattr(
+        module,
+        "RemotePhaseCWorkflowClient",
+        lambda: pytest.fail("changed tick must block custody"),
+    )
+    monkeypatch.setattr(module, "_now", lambda: "2030-01-01T00:00:00Z")
+    monkeypatch.setattr(
+        module, "_utc_clock", lambda: datetime(2030, 1, 1, tzinfo=timezone.utc)
+    )
+    with pytest.raises(ValueError, match="tick changed"):
+        asyncio.run(module.run(_pilot_args()))
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("active_order_count", 1),
+        ("unknown_outcomes", 1),
+        ("position_snapshot_hash", "f" * 64),
+    ],
+)
+def test_pilot_refuses_start_when_execution_hard_gates_change_after_enable(
+    monkeypatch: pytest.MonkeyPatch, field: str, value: object
+) -> None:
+    module = _module(f"simnow_keyless_pilot_start_hard_gate_{field}")
+    position_hash = module.sha256_json({})
+    _stub_pilot_build(module, monkeypatch, position_hash=position_hash)
+    commands: list[str] = []
+    enabled = False
+
+    class FakeExecution:
+        async def status(self):
+            projection = _execution_status(position_hash=position_hash).as_dict()
+            if enabled:
+                if field == "unknown_outcomes":
+                    projection["reconciliation"][field] = value
+                else:
+                    projection["broker"][field] = value
+            from app.schemas.control_execution import ExecutionStatusProjection
+
+            return ExecutionStatusProjection.model_validate(projection)
+
+        async def submit(self, command):
+            nonlocal enabled
+            commands.append(command["command"])
+            if command["command"] == "enable":
+                enabled = True
+            return {"accepted": True}
+
+    class FakeCustody:
+        def install_trusted_keyless_target_plan(self, _upload):
+            return type(
+                "Receipt",
+                (),
+                {"receipt_id": "receipt-0001", "artifact_sha256": "a" * 64},
+            )()
+
+    monkeypatch.setattr(module, "ExecutionClient", FakeExecution)
+    monkeypatch.setattr(module, "RemotePhaseCWorkflowClient", FakeCustody)
+    monkeypatch.setattr(module, "_now", lambda: "2030-01-01T00:00:00Z")
+    monkeypatch.setattr(
+        module, "_utc_clock", lambda: datetime(2030, 1, 1, tzinfo=timezone.utc)
+    )
+    with pytest.raises(ValueError, match="hard gates|snapshot binding"):
+        asyncio.run(module.run(_pilot_args()))
+    assert commands == ["preview", "reconcile", "enable"]
+
+
 def test_pilot_noop_does_not_create_custody_or_execution_intent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -423,9 +605,11 @@ def test_pilot_noop_does_not_create_custody_or_execution_intent(
     monkeypatch.setattr(
         module,
         "_object",
-        lambda _path, label: facts
-        if label == "peek current facts"
-        else {"state": "RECONCILED", "unknown_outcomes": 0},
+        lambda _path, label: (
+            facts
+            if label == "peek current facts"
+            else {"state": "RECONCILED", "unknown_outcomes": 0}
+        ),
     )
     status_calls: list[str] = []
     position_hash = module.sha256_json(_positions(short=1))
@@ -444,6 +628,11 @@ def test_pilot_noop_does_not_create_custody_or_execution_intent(
         module,
         "RemotePhaseCWorkflowClient",
         lambda: pytest.fail("NOOP must not construct custody client"),
+    )
+    monkeypatch.setattr(
+        module,
+        "_formal_tick_binding",
+        lambda **_kwargs: ("tick", 1, "a" * 64, "2030-01-01T00:00:00Z", 3700.0),
     )
     monkeypatch.setattr(module, "_now", lambda: "2030-01-01T00:00:00Z")
     monkeypatch.setattr(
@@ -501,15 +690,22 @@ def test_pilot_noop_rejects_dirty_execution_status_before_custody(
     monkeypatch.setattr(
         module,
         "_object",
-        lambda _path, label: facts
-        if label == "peek current facts"
-        else {"state": "RECONCILED", "unknown_outcomes": 0},
+        lambda _path, label: (
+            facts
+            if label == "peek current facts"
+            else {"state": "RECONCILED", "unknown_outcomes": 0}
+        ),
     )
     monkeypatch.setattr(module, "ExecutionClient", FakeExecution)
     monkeypatch.setattr(
         module,
         "RemotePhaseCWorkflowClient",
         lambda: pytest.fail("dirty NOOP must not construct custody client"),
+    )
+    monkeypatch.setattr(
+        module,
+        "_formal_tick_binding",
+        lambda **_kwargs: ("tick", 1, "a" * 64, "2030-01-01T00:00:00Z", 3700.0),
     )
     monkeypatch.setattr(module, "_now", lambda: "2030-01-01T00:00:00Z")
     monkeypatch.setattr(
@@ -569,11 +765,14 @@ def test_pilot_start_uncertainty_never_retries_start(
             },
         )(),
     )
-    monkeypatch.setattr(
-        module, "_project_single_contract", lambda _positions: ("rb", "SHFE", "rb2601")
-    )
+    monkeypatch.setattr(module, "_require_fixed_position_rows", lambda _positions: None)
     monkeypatch.setattr(
         module, "_current_position", lambda *_args, **_kwargs: (0, 0, [])
+    )
+    monkeypatch.setattr(
+        module,
+        "_formal_tick_binding",
+        lambda **_kwargs: ("tick", 1, "a" * 64, "2030-01-01T00:00:00Z", 3700.0),
     )
     monkeypatch.setattr(
         module,

@@ -28,6 +28,9 @@ COPY backend/app/phase_c/client.py /app/backend/app/phase_c/client.py
 COPY backend/app/phase_c/models.py /app/backend/app/phase_c/models.py
 COPY scripts/simnow_keyless_pilot.py /app/scripts/simnow_keyless_pilot.py
 COPY scripts/simnow_run_once.py /app/scripts/simnow_run_once.py
+COPY scripts/phase_b_workers/__init__.py /app/phase_b_workers/__init__.py
+COPY scripts/phase_b_workers/contracts.py /app/phase_b_workers/contracts.py
+COPY scripts/phase_b_workers/durable.py /app/phase_b_workers/durable.py
 COPY scripts/c_fast_producer /app/scripts/c_fast_producer
 COPY scripts/map /app/scripts/map
 COPY scripts/commodity_c_fast_pure_producer_kernel.py /app/scripts/commodity_c_fast_pure_producer_kernel.py
@@ -36,7 +39,7 @@ COPY shared/commodity_execution /app/shared/commodity_execution
 COPY shared/phase_c_workflow /app/shared/phase_c_workflow
 COPY shared/trust_contracts /app/shared/trust_contracts
 
-RUN python -m py_compile /app/scripts/simnow_run_once.py /app/scripts/simnow_keyless_pilot.py
+RUN python -m py_compile /app/scripts/simnow_run_once.py /app/scripts/simnow_keyless_pilot.py /app/phase_b_workers/contracts.py /app/phase_b_workers/durable.py
 
 USER 65532:65532
 ENTRYPOINT ["python", "/app/scripts/simnow_run_once.py"]

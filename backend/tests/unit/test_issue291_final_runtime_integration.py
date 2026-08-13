@@ -185,6 +185,7 @@ def test_final_compose_keeps_simnow_runner_profiled_and_boundary_limited() -> No
     assert runner["volumes"] == [
         "${SIMNOW_RUNNER_SOURCE_DIR:?required}:/run/sources:ro",
         "${PHASE_C_CUSTODY_PUBLIC_KEYRING_DIR:?required}:/run/keys:ro",
+        "market_data_state:/run/market-data:ro",
     ]
     assert runner["environment"] == {
         "PRODUCTION": "false",
