@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import asyncio
 import importlib.util
 import subprocess
@@ -377,6 +378,77 @@ def test_simnow_run_once_uses_only_existing_custody_and_execution_clients() -> N
     assert 'parser.add_argument("--c-fast-candidate"' not in source
     assert "produce_map_candidate(" in source
     assert "produce_c_fast_candidate(" in source
+
+
+def test_simnow_runner_image_keeps_the_real_import_closure_and_no_direct_gateway_rpc_or_order_import() -> None:
+    root = Path(__file__).resolve().parents[3]
+    source_path = root / "scripts" / "simnow_run_once.py"
+    source = source_path.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(source_path))
+    direct_modules = {
+        node.module
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module
+    }
+    direct_names = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Import, ast.ImportFrom))
+        for alias in node.names
+    }
+    forbidden_modules = {
+        "app.execution.gateway",
+        "app.execution.orchestrator",
+        "app.execution.repository",
+        "app.execution.final_runtime",
+        "zmq",
+        "vnpy",
+    }
+    forbidden_names = {
+        "ExecutionGateway",
+        "VnpyWindowsGateway",
+        "ZmqRpcTransport",
+        "send_order",
+        "cancel_order",
+    }
+    assert not direct_modules.intersection(forbidden_modules)
+    assert not direct_names.intersection(forbidden_names)
+
+    containerfile = (
+        root / "deployments" / "phase-b" / "Containerfile.simnow-runner"
+    ).read_text(encoding="utf-8")
+    copied_sources = {
+        line.split()[1]
+        for line in containerfile.splitlines()
+        if line.startswith("COPY ")
+    }
+    assert copied_sources == {
+        "deployments/phase-b/requirements-simnow-runner.txt",
+        "backend/app/__init__.py",
+        "backend/app/control_execution_client.py",
+        "backend/app/control_execution_projection.py",
+        "backend/app/schemas/__init__.py",
+        "backend/app/schemas/control_execution.py",
+        "backend/app/execution/__init__.py",
+        "backend/app/execution/errors.py",
+        "backend/app/execution/executable_target_adapter.py",
+        "backend/app/execution/gateway_contracts.py",
+        "backend/app/execution/models.py",
+        "backend/app/phase_c/__init__.py",
+        "backend/app/phase_c/adapters.py",
+        "backend/app/phase_c/client.py",
+        "backend/app/phase_c/models.py",
+        "scripts/simnow_run_once.py",
+        "scripts/c_fast_producer",
+        "scripts/map",
+        "scripts/commodity_c_fast_pure_producer_kernel.py",
+        "shared/artifact_contracts",
+        "shared/commodity_execution",
+        "shared/phase_c_workflow",
+        "shared/trust_contracts",
+    }
+    assert "backend/app/execution/gateway.py" not in copied_sources
+    assert "ENTRYPOINT [\"python\", \"/app/scripts/simnow_run_once.py\"]" in containerfile
 
 
 def test_simnow_run_once_accepts_canonical_sources_and_rejects_candidate_inputs() -> None:

@@ -41,7 +41,7 @@ from shared.commodity_execution import (
 )
 from shared.commodity_execution.v1 import canonical_json, utc_now
 
-from .gateway import GatewaySnapshot
+from .gateway_contracts import GatewaySnapshot
 
 
 class ExecutableTargetAdapterError(ValueError):

@@ -167,6 +167,50 @@ def test_final_compose_keeps_custody_single_writer_and_data_plane_isolated() -> 
     assert 'event_time_utc.isoformat() == "2026-08-08T01:02:03+00:00"' in smoke
 
 
+def test_final_compose_keeps_simnow_runner_profiled_and_boundary_limited() -> None:
+    compose = yaml.safe_load(
+        (ROOT / "deployments/docker-compose.final.yml").read_text(encoding="utf-8")
+    )
+    runner = compose["services"]["simnow-runner"]
+
+    assert runner["profiles"] == ["simnow-runner"]
+    assert runner["image"] == "${SIMNOW_RUNNER_IMAGE:-vnpy-web-bridge-simnow-runner:final}"
+    assert runner["build"] == {
+        "context": "..",
+        "dockerfile": "deployments/phase-b/Containerfile.simnow-runner",
+    }
+    assert runner["restart"] == "no"
+    assert runner["entrypoint"] == ["python", "/app/scripts/simnow_run_once.py"]
+    assert runner["networks"] == ["private-control", "control-custody"]
+    assert runner["volumes"] == [
+        "${SIMNOW_RUNNER_SOURCE_DIR:?required}:/run/sources:ro",
+        "${PHASE_C_CUSTODY_PUBLIC_KEYRING_DIR:?required}:/run/keys:ro",
+    ]
+    assert runner["environment"] == {
+        "PRODUCTION": "false",
+        "LIVE_TRADING_AUTHORIZED": "false",
+        "COUNTABLE_FORWARD": "false",
+        "CONTROL_EXECUTION_BASE_URL": "http://execution-orchestrator:8090",
+        "CONTROL_EXECUTION_SHARED_SECRET": "${CONTROL_EXECUTION_SHARED_SECRET:?required}",
+        "PHASE_C_CUSTODY_URL": "http://artifact-custody:8091",
+        "PHASE_C_CUSTODY_SHARED_SECRET": "${PHASE_C_CUSTODY_SHARED_SECRET:?required}",
+        "PHASE_C_EXECUTION_URL": "http://execution-orchestrator:8090",
+        "PHASE_C_EXECUTION_SHARED_SECRET": "${PHASE_C_EXECUTION_SHARED_SECRET:?required}",
+    }
+    assert runner["depends_on"] == {
+        "artifact-custody": {"condition": "service_healthy"},
+        "execution-orchestrator": {"condition": "service_started"},
+    }
+    assert runner["read_only"] is True
+    assert runner["cap_drop"] == ["ALL"]
+    assert runner["security_opt"] == ["no-new-privileges:true"]
+    assert runner["tmpfs"] == ["/tmp"]
+    assert "docker.sock" not in repr(runner)
+    assert not {"gateway-proxy", "gateway-egress", "market-ingress", "questdb-data"}.intersection(
+        runner["networks"]
+    )
+
+
 def test_final_compose_questdb_healthcheck_is_strict_and_readonly() -> None:
     compose = yaml.safe_load(
         (ROOT / "deployments/docker-compose.final.yml").read_text(encoding="utf-8")
