@@ -818,6 +818,7 @@ class VnpyWindowsGateway:
         try:
             required = {
                 "schema_version",
+                "position_query_complete",
                 "account",
                 "positions",
                 "active_orders",
@@ -829,6 +830,8 @@ class VnpyWindowsGateway:
                 raise TypeError("current facts fields are not exact")
             if result["schema_version"] != "windows_execution_current_facts_v1":
                 raise TypeError("current facts schema is invalid")
+            if result["position_query_complete"] is not True:
+                raise TypeError("current facts position query is not ready")
             self._canonical_fact_rows(result["account"], field="account")
             positions = self._canonical_fact_rows(result["positions"], field="position")
             active_orders = self._canonical_fact_rows(

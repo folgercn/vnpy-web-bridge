@@ -576,6 +576,8 @@ PHASE_A_RULES = (
         ),
         exact=(
             "scripts/windows_rpc_durable_fence_v1.py",
+            "scripts/windows_position_readiness_v1.py",
+            "scripts/windows_tick_wire_v1.py",
             "scripts/windows_fence_foundation/__init__.py",
             "scripts/windows_fence_foundation/assembly.py",
             "scripts/windows_fence_foundation/final_admission_v1.py",

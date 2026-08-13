@@ -67,7 +67,7 @@ def _parse_exact_target(
 ) -> tuple[str, int]:
     match = ADDRESS_RE.fullmatch(raw)
     if match is None:
-        environment_role = "REQ" if role == "request" else "PUB"
+        environment_role = {"request": "REQ", "publish": "PUB", "tick": "TICK"}[role]
         raise ProxyConfigurationError(
             f"WINDOWS_RPC_{environment_role}_ADDRESS must be tcp://<IPv4>:<port>"
         )
@@ -286,17 +286,13 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         return 0
-    if len(args) != 1 or args[0] not in {"request", "publish"}:
-        print("usage: gateway_proxy.py request|publish|health|version", file=sys.stderr)
+    if len(args) != 1 or args[0] not in {"request", "publish", "tick"}:
+        print("usage: gateway_proxy.py request|publish|tick|health|version", file=sys.stderr)
         return 64
     role = args[0]
     try:
         expected = _read_allowlist(role)
-        env_key = (
-            "WINDOWS_RPC_REQ_ADDRESS"
-            if role == "request"
-            else "WINDOWS_RPC_PUB_ADDRESS"
-        )
+        env_key = {"request": "WINDOWS_RPC_REQ_ADDRESS", "publish": "WINDOWS_RPC_PUB_ADDRESS", "tick": "WINDOWS_TICK_WIRE_ADDRESS"}[role]
         target_host, target_port = _parse_exact_target(
             os.getenv(env_key, ""), expected, role
         )

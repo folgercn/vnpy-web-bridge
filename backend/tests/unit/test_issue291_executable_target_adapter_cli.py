@@ -49,15 +49,15 @@ from shared.trust_contracts.v1 import (
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "backend/tests/unit"))
 
-from commodity_c_fast_executable_target_adapter import (  # noqa: E402
+from commodity_c_fast_executable_target_adapter import (
     _reduce_only_peek_current_facts_to_snapshot,
     build_parser,
 )
-from commodity_c_fast_executable_target_adapter import (  # noqa: E402
+from commodity_c_fast_executable_target_adapter import (
     main as adapter_main,
 )
-from test_commodity_c_fast_pure_producer_kernel import source_view  # noqa: E402
-from test_issue291_executable_target_adapter import authority, candidates  # noqa: E402
+from test_commodity_c_fast_pure_producer_kernel import source_view
+from test_issue291_executable_target_adapter import authority, candidates
 
 SCOPE = "account:simnow-cli"
 FALSE_AUTHORITY_FIELDS = {
@@ -187,6 +187,7 @@ def _write(path: Path, value: dict | bytes) -> None:
 def _peek(positions: dict) -> dict:
     return {
         "schema_version": "windows_execution_current_facts_v1",
+        "position_query_complete": True,
         "account": {
             "CTP.simnow-cli": {
                 "accountid": "simnow-cli",

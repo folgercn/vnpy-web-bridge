@@ -402,6 +402,7 @@ def peek_current_facts_to_snapshot(
     facts = _mapping(value, "peek current facts")
     required = {
         "schema_version",
+        "position_query_complete",
         "account",
         "positions",
         "active_orders",
@@ -412,6 +413,7 @@ def peek_current_facts_to_snapshot(
     if (
         set(facts) != required
         or facts["schema_version"] != "windows_execution_current_facts_v1"
+        or facts["position_query_complete"] is not True
     ):
         raise ExecutableTargetAdapterError("peek current facts schema is invalid")
     for field in ("account", "positions", "active_orders"):

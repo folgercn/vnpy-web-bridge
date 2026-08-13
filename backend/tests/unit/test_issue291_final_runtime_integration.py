@@ -156,7 +156,9 @@ def test_final_compose_keeps_custody_single_writer_and_data_plane_isolated() -> 
     smoke = (ROOT / "scripts/ci/final_runtime_compose_smoke.sh").read_text(
         encoding="utf-8"
     )
-    assert "datetime(2026, 8, 8, 1, 2, 3, tzinfo=timezone.utc)" in smoke_source
+    assert '"schema_version": "eTick.v1"' in smoke_source
+    assert 'b"eTick.v1.RB2601.SHFE"' in smoke_source
+    assert "send_multipart(wire)" in smoke_source
     assert smoke.index('assert int(fence["last_source_seq"]) >= 2') < smoke.index(
         "SELECT count(*)"
     )

@@ -25,6 +25,24 @@ from scripts.windows_fence_foundation.final_admission_v1 import (
 SIM_ACCOUNT = "synthetic-issue291-account"
 
 
+@pytest.fixture(autouse=True)
+def _fake_tick_wire(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Lifecycle tests must not bind the host's fixed TCP/4103 endpoint."""
+
+    import scripts.windows_tick_wire_v1 as tick_wire
+
+    def attach(gateway: Any) -> Any:
+        publisher = SimpleNamespace(publish_tick=lambda _tick: None, close=lambda: None)
+        gateway._windows_tick_wire_v1 = publisher
+        return publisher
+
+    def detach(gateway: Any) -> None:
+        del gateway._windows_tick_wire_v1
+
+    monkeypatch.setattr(tick_wire, "attach_windows_tick_wire_v1", attach)
+    monkeypatch.setattr(tick_wire, "detach_windows_tick_wire_v1", detach)
+
+
 def _gateway_setting() -> dict[str, Any]:
     return {
         "用户名": SIM_ACCOUNT,
@@ -51,6 +69,7 @@ class FactSource:
         orders: list[dict[str, Any]] | None = None,
     ) -> None:
         self.gateway = SimpleNamespace(
+            on_tick=lambda _tick: None,
             td_api=SimpleNamespace(
                 userid=td_userid,
                 brokerid="9999",
@@ -59,6 +78,11 @@ class FactSource:
                 connect_status=False,
                 login_status=False,
                 reqQryOrder=lambda _request, _request_id: 0,
+                reqQryInvestorPosition=lambda _request, _request_id: 0,
+                onRspQryInvestorPosition=lambda *_args: None,
+                onFrontConnected=lambda: None,
+                onFrontDisconnected=lambda _reason: None,
+                onRspUserLogin=lambda *_args: None,
                 onRtnOrder=lambda _row: None,
                 gateway=SimpleNamespace(write_log=lambda _message: None),
             ),

@@ -8,5 +8,10 @@
     "target_host": "192.168.100.187",
     "target_port": 4102,
     "listen_port": 4102
+  },
+  "tick": {
+    "target_host": "192.168.100.187",
+    "target_port": 4103,
+    "listen_port": 4103
   }
 }

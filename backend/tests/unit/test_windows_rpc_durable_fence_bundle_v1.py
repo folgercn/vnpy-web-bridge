@@ -11,8 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from backend.tests.unit.windows_fence_public_fixture_v1 import public_keyring_raw_v1
 import scripts.windows_rpc_durable_fence_v1 as durable_module
+from backend.tests.unit.windows_fence_public_fixture_v1 import public_keyring_raw_v1
 from scripts.windows_fence_foundation.bundle_v1 import (
     COMPONENT_PATHS,
     FIXED_FILE_MODE,
@@ -186,7 +186,9 @@ def test_outer_and_assembly_zip_have_exact_fixed_metadata(
             "scripts/windows_fence_foundation/target_contract_v1.py",
             "scripts/windows_fence_foundation/trust_pins_v1.py",
             "scripts/windows_fence_foundation/win32_fs.py",
+            "scripts/windows_position_readiness_v1.py",
             "scripts/windows_rpc_deployment_snapshot_v1.py",
+            "scripts/windows_tick_wire_v1.py",
         ]
         assert archive.read("scripts/__init__.py") == b""
         assert archive.read("scripts/windows_rpc_deployment_snapshot_v1.py") == (
@@ -361,6 +363,8 @@ def test_one_byte_component_change_changes_component_assembly_and_bundle(
     (scripts / "windows_rpc_durable_fence_v1.py").write_bytes(
         (ROOT / "scripts" / "windows_rpc_durable_fence_v1.py").read_bytes()
     )
+    for name in ("windows_position_readiness_v1.py", "windows_tick_wire_v1.py"):
+        (scripts / name).write_bytes((ROOT / "scripts" / name).read_bytes())
     (scripts / "windows_rpc_service_wrapper_v1.py").write_bytes(
         (ROOT / "scripts" / "windows_rpc_service_wrapper_v1.py").read_bytes()
     )

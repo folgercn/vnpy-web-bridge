@@ -63,6 +63,10 @@ FOUNDATION_SOURCE_NAMES = (
 )
 SYNTHETIC_SCRIPTS_INIT = "scripts/__init__.py"
 ASSEMBLY_EXTENSION_PATH = "scripts/windows_rpc_deployment_snapshot_v1.py"
+ASSEMBLY_AUXILIARY_PATHS = (
+    "scripts/windows_position_readiness_v1.py",
+    "scripts/windows_tick_wire_v1.py",
+)
 
 COMPONENT_PATHS = {
     "wrapper": "components/windows_rpc_service_wrapper_v1.py",
@@ -272,6 +276,8 @@ def _foundation_source_entries(
         entries[ASSEMBLY_EXTENSION_PATH] = (
             source_root / "scripts" / "windows_rpc_deployment_snapshot_v1.py"
         ).read_bytes()
+        for path in ASSEMBLY_AUXILIARY_PATHS:
+            entries[path] = (source_root / path).read_bytes()
         for name in FOUNDATION_SOURCE_NAMES:
             if name == "_installer_trust_anchor_generated_v1.py":
                 entries[f"scripts/windows_fence_foundation/{name}"] = (
@@ -438,7 +444,7 @@ def _validate_runtime_config(
 def _source_inventory(entries: Mapping[str, bytes]) -> list[dict[str, Any]]:
     expected = {
         f"scripts/windows_fence_foundation/{name}" for name in FOUNDATION_SOURCE_NAMES
-    }
+    } | set(ASSEMBLY_AUXILIARY_PATHS)
     actual = set(entries) - {SYNTHETIC_SCRIPTS_INIT, ASSEMBLY_EXTENSION_PATH}
     if actual != expected or entries.get(SYNTHETIC_SCRIPTS_INIT) != b"":
         raise WindowsFenceBundleError("ASSEMBLY_SOURCE_INVENTORY_INVALID")
@@ -711,6 +717,7 @@ def verify_windows_fence_bundle_v1(
     assembly_paths = {SYNTHETIC_SCRIPTS_INIT} | {
         f"scripts/windows_fence_foundation/{name}" for name in FOUNDATION_SOURCE_NAMES
     }
+    assembly_paths.update(ASSEMBLY_AUXILIARY_PATHS)
     assembly_paths.add(ASSEMBLY_EXTENSION_PATH)
     assembly_entries = _read_strict_zip(
         assembly_raw,
@@ -722,7 +729,7 @@ def verify_windows_fence_bundle_v1(
     assembly_inventory = _source_inventory(assembly_entries)
     supplied_sources = index.get("assembly_sources")
     if not isinstance(supplied_sources, list) or len(supplied_sources) != len(
-        FOUNDATION_SOURCE_NAMES
+        FOUNDATION_SOURCE_NAMES + ASSEMBLY_AUXILIARY_PATHS
     ):
         raise WindowsFenceBundleError("ASSEMBLY_SOURCE_INVENTORY_INVALID")
     for actual, supplied in zip(assembly_inventory, supplied_sources, strict=True):

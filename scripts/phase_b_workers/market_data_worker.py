@@ -597,6 +597,136 @@ class ZmqPublishTickSource:
             self._process_lock.release()
 
 
+class ZmqTickWireSourceV1:
+    """SUB-only reader for the fixed tick-only ``eTick.v1`` JSON wire.
+
+    Unlike :class:`ZmqPublishTickSource`, this reader never receives the
+    legacy RPC 4102 object stream and has no pickle decoder in its path.
+    """
+
+    DEFAULT_DRAIN_LIMIT = 256
+
+    def __init__(
+        self,
+        endpoint: str,
+        *,
+        state_dir: Path,
+        source_generation: str,
+        source_service: str = "windows-tick-wire-v1",
+        context: Any | None = None,
+        zmq_module: Any | None = None,
+    ) -> None:
+        from scripts.windows_tick_wire_v1 import TICK_WIRE_PREFIX
+
+        self.endpoint = str(endpoint).strip()
+        if not self.endpoint:
+            raise ValueError("market-data tick wire endpoint is required")
+        self._zmq = zmq_module or zmq
+        if self._zmq is None:
+            raise RuntimeError("pyzmq is required for market-data ingress")
+        self._context = context or self._zmq.Context.instance()
+        self.source_generation = str(source_generation).strip()
+        self.source_service = str(source_service).strip()
+        if not self.source_generation or not self.source_service:
+            raise ValueError("market-data source identity is required")
+        self._topic_prefix = TICK_WIRE_PREFIX.encode("ascii")
+        self._cursor = AtomicCheckpoint(
+            Path(state_dir) / "tick_wire_v1_cursor.json",
+            default={"source_generation": self.source_generation, "last_source_seq": 0},
+        )
+        self._process_lock = _SingleProcessFileLock(Path(state_dir) / "tick_wire_v1_source.lock")
+        self._sequence_lock = threading.RLock()
+        self._socket: Any | None = None
+        self._callback: Callable[[Mapping[str, object]], None] | None = None
+
+    def subscribe(self, callback: Callable[[Mapping[str, object]], None]) -> None:
+        self._process_lock.acquire()
+        try:
+            self._callback = callback
+            self._connect()
+        except Exception:
+            self._callback = None
+            self._process_lock.release()
+            raise
+
+    def _connect(self) -> None:
+        if self._socket is None:
+            socket = self._context.socket(self._zmq.SUB)
+            socket.setsockopt(self._zmq.SUBSCRIBE, self._topic_prefix)
+            socket.connect(self.endpoint)
+            self._socket = socket
+
+    def _reset(self) -> None:
+        socket, self._socket = self._socket, None
+        if socket is not None:
+            socket.close(linger=0)
+
+    def _next_source_seq(self) -> int:
+        with self._sequence_lock:
+            prior = self._cursor.read()
+            if str(prior.get("source_generation") or self.source_generation) != self.source_generation:
+                raise GenerationMismatch("tick wire source generation changed")
+            sequence = int(prior.get("last_source_seq") or 0) + 1
+            self._cursor.write({"source_generation": self.source_generation, "last_source_seq": sequence})
+            return sequence
+
+    def _decode_frames(self, frames: Any) -> GatewayTickEnvelope:
+        from scripts.windows_tick_wire_v1 import TickWireError, decode_tick_wire_v1
+
+        if not isinstance(frames, (list, tuple)) or len(frames) != 2:
+            raise TypeError("tick wire must contain exactly two frames")
+        topic, raw = frames
+        try:
+            payload = decode_tick_wire_v1(topic, raw)
+        except TickWireError as exc:
+            raise TypeError(f"tick wire rejected: {exc}") from exc
+        sequence = self._next_source_seq()
+        event_id = sha256_hex(
+            {"source_generation": self.source_generation, "source_seq": sequence, "topic": topic.decode("ascii"), "payload": payload}
+        )[:32]
+        return GatewayTickEnvelope.create(
+            event_id=event_id,
+            source_service=self.source_service,
+            source_generation=self.source_generation,
+            source_seq=sequence,
+            payload=payload,
+        )
+
+    def has_backlog(self) -> bool:
+        self._connect()
+        try:
+            return bool(self._socket.poll(0))
+        except self._zmq.ZMQError as exc:
+            self._reset()
+            raise OSError("market-data tick wire disconnected") from exc
+
+    def poll(self, timeout_ms: int = 0, *, limit: int = DEFAULT_DRAIN_LIMIT) -> int:
+        if self._callback is None:
+            raise RuntimeError("market-data source has not been bound")
+        if int(limit) < 1:
+            raise ValueError("market-data tick wire drain limit must be positive")
+        self._connect()
+        received = 0
+        try:
+            if not self._socket.poll(max(0, int(timeout_ms))):
+                return 0
+            while received < int(limit):
+                self._callback(self._decode_frames(self._socket.recv_multipart()).as_dict())
+                received += 1
+                if received >= int(limit) or not self._socket.poll(0):
+                    break
+        except self._zmq.ZMQError as exc:
+            self._reset()
+            raise OSError("market-data tick wire disconnected") from exc
+        return received
+
+    def close(self) -> None:
+        try:
+            self._reset()
+        finally:
+            self._process_lock.release()
+
+
 class QuestDbTickWriter:
     """Narrow PGWire writer for a schema that is owned/pre-created elsewhere.
 
@@ -814,7 +944,9 @@ class MarketDataWorker:
     service_id = "market-data-worker"
     SOURCE_DRAIN_LIMIT = ZmqPublishTickSource.DEFAULT_DRAIN_LIMIT
     _SOURCE_FENCE_EVENT_LIMIT = 4096
-    _DETERMINISTIC_SOURCE_SERVICE = "gateway-publish-proxy"
+    _DETERMINISTIC_SOURCE_SERVICES = frozenset(
+        {"gateway-publish-proxy", "windows-tick-wire-v1"}
+    )
     _PROJECTION_INTERVAL_SECONDS = 1.0
     QUESTDB_BATCH_MAX_SIZE = 64
     QUESTDB_BATCH_MAX_WAIT_SECONDS = 0.05
@@ -862,7 +994,7 @@ class MarketDataWorker:
             Mapping[str, object] | GatewayTickEnvelope
         ] = BoundedIngressQueue(config.queue_maxsize)
         self.source = source or (
-            ZmqPublishTickSource(
+            ZmqTickWireSourceV1(
                 config.publish_endpoint,
                 state_dir=config.state_dir,
                 source_generation=config.stream_generation,
@@ -962,13 +1094,17 @@ class MarketDataWorker:
             raise DurableStateError("market-data source fence recovery is required")
         sources = dict(state.get("sources") or {})
         events = dict(state.get("events") or {})
-        deterministic = event.source_service == self._DETERMINISTIC_SOURCE_SERVICE
+        deterministic = event.source_service in self._DETERMINISTIC_SOURCE_SERVICES
         if deterministic:
             expected_event_id = sha256_hex(
                 {
                     "source_generation": event.source_generation,
                     "source_seq": event.source_seq,
-                    "topic": f"eTick.{event.payload.get('vt_symbol')}",
+                    "topic": (
+                        f"eTick.v1.{event.payload.get('vt_symbol')}"
+                        if event.source_service == "windows-tick-wire-v1"
+                        else f"eTick.{event.payload.get('vt_symbol')}"
+                    ),
                     "payload": dict(event.payload),
                 }
             )[:32]
@@ -1006,7 +1142,7 @@ class MarketDataWorker:
 
         sources = dict(state.get("sources") or {})
         events = dict(state.get("events") or {})
-        deterministic = event.source_service == self._DETERMINISTIC_SOURCE_SERVICE
+        deterministic = event.source_service in self._DETERMINISTIC_SOURCE_SERVICES
         if (
             not deterministic
             and event.event_id not in events
