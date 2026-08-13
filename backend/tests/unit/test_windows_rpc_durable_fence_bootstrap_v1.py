@@ -140,7 +140,8 @@ def test_fixed_connect_attaches_before_connect_and_failure_restores_on_tick(
     import scripts.windows_tick_wire_v1 as tick_wire
 
     calls: list[str] = []
-    original = lambda _tick: calls.append("original")
+    def original(_tick: Any) -> None:
+        calls.append("original")
     gateway = SimpleNamespace(on_tick=original, td_api=SimpleNamespace())
     tracker = SimpleNamespace(is_ready=lambda: False)
     gateway.td_api._vnpy_position_readiness_v1 = tracker
