@@ -985,10 +985,11 @@ def test_windows_reconciliation_only_attach_uses_native_rpc_server(
         server.register(cancel_order)
         assert not server.is_active()
 
+        main_engine = FactSource()
         durable_module.attach_windows_rpc_reconciliation_only_v1(
             rpc_engine=SimpleNamespace(server=server),
             event_engine=SyncEventEngine(),
-            main_engine=FactSource(),
+            main_engine=main_engine,
         )
 
         assert not server.is_active()
@@ -1004,6 +1005,7 @@ def test_windows_reconciliation_only_attach_uses_native_rpc_server(
         assert calls == []
 
         request = {"account_scope": "account:windows", "environment": "simnow"}
+        main_engine.complete_position_query()
         first = server._functions["get_execution_snapshot_v1"](request)
         second = server._functions["get_execution_snapshot_v1"](request)
         assert (first["generation"], second["generation"]) == (1, 2)
