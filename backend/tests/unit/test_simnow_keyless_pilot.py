@@ -1,0 +1,616 @@
+from __future__ import annotations
+
+import argparse
+import asyncio
+import importlib.util
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+
+import pytest
+
+
+ROOT = Path(__file__).resolve().parents[3]
+
+
+def _execution_status(
+    *,
+    position_hash: str,
+    fresh_snapshot_id: str = "snapshot-run-0001",
+    timestamp: str = "2030-01-01T00:00:00Z",
+    state_version: int = 0,
+):
+    from app.schemas.control_execution import ExecutionStatusProjection
+
+    return ExecutionStatusProjection.model_validate(
+        {
+            "schema_version": "web_bridge_execution_status_v1",
+            "service": "execution-orchestrator",
+            "service_version": "pilot-test",
+            "observed_at": timestamp,
+            "lifecycle": "READY",
+            "state_version": state_version,
+            "leader": {
+                "scope": "account:windows",
+                "owner_id": "pilot-owner-0001",
+                "held": True,
+                "epoch": 1,
+                "fencing_token": 1,
+                "lease_expires_at": "2030-01-01T00:01:00Z",
+            },
+            "authority": {
+                "state": "DISABLED",
+                "artifact_id": "authority-0001",
+                "artifact_hash": "a" * 64,
+                "expires_at": "2030-01-01T00:00:00Z",
+            },
+            "plan": {
+                "state": "IDLE",
+                "plan_id": "plan-idle-0001",
+                "plan_hash": "b" * 64,
+                "version": 0,
+            },
+            "send_intents": [],
+            "reconciliation": {
+                "state": "RECONCILED",
+                "run_id": "reconcile-0001",
+                "last_completed_at": timestamp,
+                "unknown_outcomes": 0,
+                "fresh_snapshot_id": fresh_snapshot_id,
+            },
+            "safe_to_restart": True,
+            "broker": {
+                "connected": True,
+                "generation": 1,
+                "active_order_count": 0,
+                "position_snapshot_hash": position_hash,
+                "last_snapshot_at": timestamp,
+            },
+        }
+    )
+
+
+def _module(name: str):
+    path = ROOT / "scripts" / "simnow_keyless_pilot.py"
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _positions(*, long: int = 0, short: int = 0) -> dict[str, dict]:
+    rows: dict[str, dict] = {}
+    for direction, volume in (("LONG", long), ("SHORT", short)):
+        rows[f"rb2601.SHFE.{direction}"] = {
+            "gateway_name": "CTP",
+            "exchange": "SHFE",
+            "symbol": "rb2601",
+            "direction": direction,
+            "volume": volume,
+            "yd_volume": 0,
+            "price": 3500.0,
+        }
+    return rows
+
+
+def test_pilot_cli_accepts_only_fixed_target_and_no_source_selection_inputs() -> None:
+    module = _module("simnow_keyless_pilot_cli")
+    parser = module.build_parser()
+    target = parser.parse_args(
+        [
+            "--target",
+            "SHORT1",
+            "--peek-current-facts",
+            "peek.json",
+            "--reconciliation-state",
+            "reconcile.json",
+            "--expires-at",
+            "2099-01-01T00:00:00Z",
+            "--principal",
+            "pilot-admin",
+            "--operator",
+            "pilot-admin",
+            "--idempotency-suffix",
+            "pilot-0001",
+            "--expected-custody-version",
+            "0",
+        ]
+    )
+    assert target.target == "SHORT1"
+    for forbidden in (
+        "--product",
+        "--contract",
+        "--qty",
+        "--map-source",
+        "--c-fast-source",
+    ):
+        with pytest.raises(SystemExit):
+            parser.parse_args([forbidden, "x"])
+    source = (ROOT / "scripts/simnow_keyless_pilot.py").read_text(encoding="utf-8")
+    assert 'status["broker"]["snapshot_id"]' not in source
+    assert source.count('status["reconciliation"]["fresh_snapshot_id"]') == 2
+
+
+def test_pilot_requires_one_unambiguous_position_contract_even_when_volume_zero() -> (
+    None
+):
+    module = _module("simnow_keyless_pilot_projection")
+    assert module._project_single_contract(_positions()) == ("rb", "SHFE", "rb2601")
+    rows = _positions()
+    rows["au2601.SHFE.LONG"] = {
+        "gateway_name": "CTP",
+        "exchange": "SHFE",
+        "symbol": "au2601",
+        "direction": "LONG",
+        "volume": 0,
+        "yd_volume": 0,
+        "price": 1.0,
+    }
+    with pytest.raises(ValueError, match="exactly one"):
+        module._project_single_contract(rows)
+
+
+@pytest.mark.parametrize(
+    ("target", "long", "short", "direction", "offset"),
+    [
+        ("SHORT1", 0, 0, "SHORT", "OPEN"),
+        ("FLAT", 0, 1, "LONG", "CLOSETODAY"),
+    ],
+)
+def test_pilot_builds_only_short1_open_or_flat_close(
+    target: str, long: int, short: int, direction: str, offset: str
+) -> None:
+    module = _module(f"simnow_keyless_pilot_{target}")
+    plan = module._pilot_target_plan(
+        positions=_positions(long=long, short=short),
+        product="rb",
+        exchange="SHFE",
+        symbol="rb2601",
+        long_volume=long,
+        short_volume=short,
+        matching=[
+            (key, row) for key, row in _positions(long=long, short=short).items()
+        ],
+        target=target,
+        expires_at="2099-01-01T00:00:00Z",
+        generated_at="2030-01-01T00:00:00Z",
+    )
+    assert plan["scope"] == {
+        "account_scope": "account:windows",
+        "environment": "SIMNOW",
+        "gateway_name": "CTP",
+    }
+    assert plan["orders"][0]["direction"] == direction
+    assert plan["orders"][0]["offset"] == offset
+    assert plan["orders"][0]["volume"] == 1
+
+
+def test_pilot_rejects_hedged_long1_short1_for_flat() -> None:
+    module = _module("simnow_keyless_pilot_hedged_flat")
+    with pytest.raises(ValueError, match="exactly one short"):
+        module._pilot_target_plan(
+            positions=_positions(long=1, short=1),
+            product="rb",
+            exchange="SHFE",
+            symbol="rb2601",
+            long_volume=1,
+            short_volume=1,
+            matching=[(key, row) for key, row in _positions(long=1, short=1).items()],
+            target="FLAT",
+            expires_at="2099-01-01T00:00:00Z",
+            generated_at="2030-01-01T00:00:00Z",
+        )
+    assert not module._is_exact_target_gross(
+        target="FLAT", long_volume=1, short_volume=1
+    )
+
+
+def test_runner_packages_and_loads_frozen_execution_status_schema() -> None:
+    from app.schemas.control_execution import _SCHEMA_PATH, _STATUS_VALIDATOR
+
+    expected = ROOT / "docs/schemas/web-bridge-execution-status-v1.schema.json"
+    containerfile = (
+        ROOT / "deployments/phase-b/Containerfile.simnow-runner"
+    ).read_text(encoding="utf-8")
+    assert _SCHEMA_PATH == expected
+    assert _SCHEMA_PATH.is_file()
+    assert _STATUS_VALIDATOR.schema == json.loads(expected.read_text(encoding="utf-8"))
+    assert (
+        "COPY docs/schemas/web-bridge-execution-status-v1.schema.json "
+        "/app/docs/schemas/web-bridge-execution-status-v1.schema.json"
+    ) in containerfile
+
+
+def test_pilot_requires_execution_status_to_bind_peek_position_hash() -> None:
+    module = _module("simnow_keyless_pilot_snapshot_binding")
+    now = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    status = _execution_status(position_hash="a" * 64).as_dict()
+    module._require_execution_hard_gates(
+        status, expected_position_snapshot_hash="a" * 64, clock=lambda: now
+    )
+    with pytest.raises(ValueError, match="snapshot binding"):
+        module._require_execution_hard_gates(
+            status, expected_position_snapshot_hash="b" * 64, clock=lambda: now
+        )
+
+
+def test_pilot_rejects_stale_or_naive_execution_status_timestamps() -> None:
+    module = _module("simnow_keyless_pilot_status_freshness")
+    now = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    with pytest.raises(ValueError, match="stale"):
+        module._require_execution_hard_gates(
+            _execution_status(
+                position_hash="a" * 64, timestamp="2029-12-31T23:26:40Z"
+            ).as_dict(),
+            expected_position_snapshot_hash="a" * 64,
+            clock=lambda: now,
+        )
+    with pytest.raises(ValueError, match="explicit UTC"):
+        module._fresh_utc("2030-01-01T00:00:00", label="test", now=now)
+    module._require_execution_hard_gates(
+        _execution_status(position_hash="a" * 64).as_dict(),
+        expected_position_snapshot_hash="a" * 64,
+        clock=lambda: now,
+    )
+
+
+def _pilot_args() -> argparse.Namespace:
+    return argparse.Namespace(
+        target="SHORT1",
+        peek_current_facts=Path("peek.json"),
+        reconciliation_state=Path("reconcile.json"),
+        expires_at="2099-01-01T00:00:00Z",
+        principal="pilot-admin",
+        operator="pilot-admin",
+        idempotency_suffix="pilot-0001",
+        expected_custody_version=0,
+        execute=True,
+        completion_timeout_seconds=1.0,
+        completion_poll_seconds=0.1,
+    )
+
+
+def _stub_pilot_build(
+    module, monkeypatch: pytest.MonkeyPatch, *, position_hash: str
+) -> None:
+    monkeypatch.setattr(module, "_object", lambda _path, _label: {})
+    monkeypatch.setattr(module, "_require_reconciliation", lambda _value: None)
+    monkeypatch.setattr(
+        module,
+        "peek_current_facts_to_snapshot",
+        lambda *_args, **_kwargs: type(
+            "Peek",
+            (),
+            {
+                "snapshot": type(
+                    "Snapshot",
+                    (),
+                    {"positions": {}, "position_snapshot_hash": position_hash},
+                )()
+            },
+        )(),
+    )
+    monkeypatch.setattr(
+        module, "_project_single_contract", lambda _positions: ("rb", "SHFE", "rb2601")
+    )
+    monkeypatch.setattr(
+        module, "_current_position", lambda *_args, **_kwargs: (0, 0, [])
+    )
+    monkeypatch.setattr(
+        module,
+        "_pilot_target_plan",
+        lambda **_kwargs: {
+            "plan_id": "plan-0001",
+            "plan_hash": "b" * 64,
+            "generated_at": "2030-01-01T00:00:00Z",
+            "scope": {},
+            "expires_at": "2099-01-01T00:00:00Z",
+            "expected_after_position_hash": "c" * 64,
+        },
+    )
+    monkeypatch.setattr(module, "new_artifact_envelope", lambda **_kwargs: {})
+
+
+def test_pilot_rechecks_live_clock_after_custody_before_preview(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module("simnow_keyless_pilot_post_custody_freshness")
+    position_hash = module.sha256_json({})
+    _stub_pilot_build(module, monkeypatch, position_hash=position_hash)
+    statuses = _execution_status(
+        position_hash=position_hash, timestamp="2030-01-01T00:00:00Z"
+    )
+    custody_calls: list[str] = []
+    clocks = iter(
+        [
+            datetime(2030, 1, 1, 0, 0, 59, tzinfo=timezone.utc),
+            datetime(2030, 1, 1, 0, 0, 59, tzinfo=timezone.utc),
+            datetime(2030, 1, 1, 0, 1, 1, tzinfo=timezone.utc),
+        ]
+    )
+
+    class FakeExecution:
+        async def status(self):
+            return statuses
+
+    class FakeCustody:
+        def install_trusted_keyless_target_plan(self, _upload):
+            custody_calls.append("custody")
+            return type(
+                "Receipt",
+                (),
+                {"receipt_id": "receipt-0001", "artifact_sha256": "a" * 64},
+            )()
+
+    monkeypatch.setattr(module, "_now", lambda: "2030-01-01T00:00:59Z")
+    monkeypatch.setattr(module, "_utc_clock", lambda: next(clocks))
+    monkeypatch.setattr(module, "ExecutionClient", FakeExecution)
+    monkeypatch.setattr(module, "RemotePhaseCWorkflowClient", FakeCustody)
+
+    with pytest.raises(ValueError, match="stale"):
+        asyncio.run(module.run(_pilot_args()))
+    assert custody_calls == ["custody"]
+
+
+def test_pilot_rejects_state_version_change_before_custody_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module("simnow_keyless_pilot_state_version")
+    position_hash = module.sha256_json({})
+    _stub_pilot_build(module, monkeypatch, position_hash=position_hash)
+    statuses = iter(
+        [
+            _execution_status(position_hash=position_hash, state_version=3),
+            _execution_status(position_hash=position_hash, state_version=4),
+        ]
+    )
+    custody_calls: list[str] = []
+
+    class FakeExecution:
+        async def status(self):
+            return next(statuses)
+
+    class FakeCustody:
+        def install_trusted_keyless_target_plan(self, _upload):
+            custody_calls.append("custody")
+            raise AssertionError("custody must not be reached")
+
+    now = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    monkeypatch.setattr(module, "_now", lambda: "2030-01-01T00:00:00Z")
+    monkeypatch.setattr(module, "_utc_clock", lambda: now)
+    monkeypatch.setattr(module, "ExecutionClient", FakeExecution)
+    monkeypatch.setattr(module, "RemotePhaseCWorkflowClient", FakeCustody)
+
+    with pytest.raises(ValueError, match="status changed"):
+        asyncio.run(module.run(_pilot_args()))
+    assert custody_calls == []
+
+
+def test_pilot_noop_does_not_create_custody_or_execution_intent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module("simnow_keyless_pilot_noop")
+    facts = {
+        "schema_version": "windows_execution_current_facts_v1",
+        "position_query_complete": True,
+        "account": {"CTP.sim": {"gateway_name": "CTP"}},
+        "positions": _positions(short=1),
+        "active_orders": {},
+        "gateway": {
+            "gateway_name": "CTP",
+            "account_scope": "account:windows",
+            "environment": "simnow",
+            "connected": True,
+        },
+        "execution": {"orders": {}},
+        "admission": {
+            "account_scope": "account:windows",
+            "environment": "simnow",
+            "durable_state_version": 0,
+            "durable_state_hash": "0" * 64,
+            "snapshot_generation": 0,
+            "fence": {
+                "active": False,
+                "current_epoch": 0,
+                "current_fencing_token": 0,
+                "high_water_epoch": 0,
+                "high_water_fencing_token": 0,
+            },
+            "receipt_intents": [],
+        },
+    }
+    monkeypatch.setattr(
+        module,
+        "_object",
+        lambda _path, label: facts
+        if label == "peek current facts"
+        else {"state": "RECONCILED", "unknown_outcomes": 0},
+    )
+    status_calls: list[str] = []
+    position_hash = module.sha256_json(_positions(short=1))
+
+    class FakeExecution:
+        async def status(self):
+            status_calls.append("status")
+            return _execution_status(position_hash=position_hash)
+
+    monkeypatch.setattr(
+        module,
+        "ExecutionClient",
+        FakeExecution,
+    )
+    monkeypatch.setattr(
+        module,
+        "RemotePhaseCWorkflowClient",
+        lambda: pytest.fail("NOOP must not construct custody client"),
+    )
+    monkeypatch.setattr(module, "_now", lambda: "2030-01-01T00:00:00Z")
+    monkeypatch.setattr(
+        module, "_utc_clock", lambda: datetime(2030, 1, 1, tzinfo=timezone.utc)
+    )
+    result = asyncio.run(module.run(_pilot_args()))
+    assert result["no_op"] is True
+    assert result["reason"] == "target_already_current"
+    assert status_calls == ["status"]
+
+
+def test_pilot_noop_rejects_dirty_execution_status_before_custody(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.schemas.control_execution import ExecutionStatusProjection
+
+    module = _module("simnow_keyless_pilot_noop_dirty_status")
+    positions = _positions(short=1)
+    facts = {
+        "schema_version": "windows_execution_current_facts_v1",
+        "position_query_complete": True,
+        "account": {"CTP.sim": {"gateway_name": "CTP"}},
+        "positions": positions,
+        "active_orders": {},
+        "gateway": {
+            "gateway_name": "CTP",
+            "account_scope": "account:windows",
+            "environment": "simnow",
+            "connected": True,
+        },
+        "execution": {"orders": {}},
+        "admission": {
+            "account_scope": "account:windows",
+            "environment": "simnow",
+            "durable_state_version": 0,
+            "durable_state_hash": "0" * 64,
+            "snapshot_generation": 0,
+            "fence": {
+                "active": False,
+                "current_epoch": 0,
+                "current_fencing_token": 0,
+                "high_water_epoch": 0,
+                "high_water_fencing_token": 0,
+            },
+            "receipt_intents": [],
+        },
+    }
+    dirty = _execution_status(position_hash=module.sha256_json(positions)).as_dict()
+    dirty["broker"]["active_order_count"] = 1
+
+    class FakeExecution:
+        async def status(self):
+            return ExecutionStatusProjection.model_validate(dirty)
+
+    monkeypatch.setattr(
+        module,
+        "_object",
+        lambda _path, label: facts
+        if label == "peek current facts"
+        else {"state": "RECONCILED", "unknown_outcomes": 0},
+    )
+    monkeypatch.setattr(module, "ExecutionClient", FakeExecution)
+    monkeypatch.setattr(
+        module,
+        "RemotePhaseCWorkflowClient",
+        lambda: pytest.fail("dirty NOOP must not construct custody client"),
+    )
+    monkeypatch.setattr(module, "_now", lambda: "2030-01-01T00:00:00Z")
+    monkeypatch.setattr(
+        module, "_utc_clock", lambda: datetime(2030, 1, 1, tzinfo=timezone.utc)
+    )
+
+    with pytest.raises(ValueError, match="hard gates"):
+        asyncio.run(module.run(_pilot_args()))
+
+
+def test_pilot_start_uncertainty_never_retries_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module("simnow_keyless_pilot_start_uncertainty")
+    commands: list[dict] = []
+    status = _execution_status(position_hash=module.sha256_json({}))
+    monkeypatch.setattr(module, "_now", lambda: "2030-01-01T00:00:00Z")
+    monkeypatch.setattr(
+        module, "_utc_clock", lambda: datetime(2030, 1, 1, tzinfo=timezone.utc)
+    )
+
+    class FakeExecution:
+        async def status(self):
+            return status
+
+        async def submit(self, command):
+            commands.append(command)
+            if command["command"] == "start":
+                raise module.ExecutionClientError("timeout")
+            return {"accepted": True}
+
+    class FakeCustody:
+        def install_trusted_keyless_target_plan(self, _upload):
+            return type(
+                "Receipt",
+                (),
+                {"receipt_id": "receipt-0001", "artifact_sha256": "a" * 64},
+            )()
+
+    monkeypatch.setattr(module, "_object", lambda _path, _label: {})
+    monkeypatch.setattr(module, "_require_reconciliation", lambda _value: None)
+    monkeypatch.setattr(
+        module,
+        "peek_current_facts_to_snapshot",
+        lambda *_args, **_kwargs: type(
+            "Peek",
+            (),
+            {
+                "snapshot": type(
+                    "Snapshot",
+                    (),
+                    {
+                        "positions": {},
+                        "position_snapshot_hash": module.sha256_json({}),
+                    },
+                )()
+            },
+        )(),
+    )
+    monkeypatch.setattr(
+        module, "_project_single_contract", lambda _positions: ("rb", "SHFE", "rb2601")
+    )
+    monkeypatch.setattr(
+        module, "_current_position", lambda *_args, **_kwargs: (0, 0, [])
+    )
+    monkeypatch.setattr(
+        module,
+        "_pilot_target_plan",
+        lambda **_kwargs: {
+            "plan_id": "plan-0001",
+            "plan_hash": "b" * 64,
+            "generated_at": "2030-01-01T00:00:00Z",
+            "scope": {},
+            "expires_at": "2099-01-01T00:00:00Z",
+            "expected_after_position_hash": "c" * 64,
+        },
+    )
+    monkeypatch.setattr(module, "new_artifact_envelope", lambda **_kwargs: {})
+    monkeypatch.setattr(module, "ExecutionClient", FakeExecution)
+    monkeypatch.setattr(module, "RemotePhaseCWorkflowClient", FakeCustody)
+    args = argparse.Namespace(
+        target="SHORT1",
+        peek_current_facts=Path("peek.json"),
+        reconciliation_state=Path("reconcile.json"),
+        expires_at="2099-01-01T00:00:00Z",
+        principal="pilot-admin",
+        operator="pilot-admin",
+        idempotency_suffix="pilot-0001",
+        expected_custody_version=0,
+        execute=True,
+        completion_timeout_seconds=1.0,
+        completion_poll_seconds=0.1,
+    )
+
+    result = asyncio.run(module.run(args))
+
+    assert result["reason"] == "start_outcome_unknown"
+    assert [item["command"] for item in commands] == [
+        "preview",
+        "reconcile",
+        "enable",
+        "start",
+    ]
+    assert commands[1]["payload"]["snapshot_id"] == "snapshot-run-0001"

@@ -245,6 +245,7 @@ PHASE_B_RULES = (
         exact=(
             "deployments/phase-b/Containerfile.simnow-runner",
             "deployments/phase-b/requirements-simnow-runner.txt",
+            "scripts/simnow_keyless_pilot.py",
         ),
         shared=True,
     ),
@@ -402,6 +403,7 @@ PHASE_A_PHASE_C_PRESERVED_EXACT = (
     "deployments/final/market_source.py",
     "deployments/phase-b/Containerfile.simnow-runner",
     "deployments/phase-b/requirements-simnow-runner.txt",
+    "scripts/simnow_keyless_pilot.py",
     "scripts/simnow_run_once.py",
 )
 PHASE_A_PHASE_C_PRESERVED_PREFIXES = (

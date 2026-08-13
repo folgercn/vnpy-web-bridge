@@ -14,6 +14,7 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 COPY backend/app/__init__.py /app/backend/app/__init__.py
 COPY backend/app/control_execution_client.py /app/backend/app/control_execution_client.py
 COPY backend/app/control_execution_projection.py /app/backend/app/control_execution_projection.py
+COPY docs/schemas/web-bridge-execution-status-v1.schema.json /app/docs/schemas/web-bridge-execution-status-v1.schema.json
 COPY backend/app/schemas/__init__.py /app/backend/app/schemas/__init__.py
 COPY backend/app/schemas/control_execution.py /app/backend/app/schemas/control_execution.py
 COPY backend/app/execution/__init__.py /app/backend/app/execution/__init__.py
@@ -25,6 +26,7 @@ COPY backend/app/phase_c/__init__.py /app/backend/app/phase_c/__init__.py
 COPY backend/app/phase_c/adapters.py /app/backend/app/phase_c/adapters.py
 COPY backend/app/phase_c/client.py /app/backend/app/phase_c/client.py
 COPY backend/app/phase_c/models.py /app/backend/app/phase_c/models.py
+COPY scripts/simnow_keyless_pilot.py /app/scripts/simnow_keyless_pilot.py
 COPY scripts/simnow_run_once.py /app/scripts/simnow_run_once.py
 COPY scripts/c_fast_producer /app/scripts/c_fast_producer
 COPY scripts/map /app/scripts/map
@@ -34,7 +36,7 @@ COPY shared/commodity_execution /app/shared/commodity_execution
 COPY shared/phase_c_workflow /app/shared/phase_c_workflow
 COPY shared/trust_contracts /app/shared/trust_contracts
 
-RUN python -m py_compile /app/scripts/simnow_run_once.py
+RUN python -m py_compile /app/scripts/simnow_run_once.py /app/scripts/simnow_keyless_pilot.py
 
 USER 65532:65532
 ENTRYPOINT ["python", "/app/scripts/simnow_run_once.py"]
