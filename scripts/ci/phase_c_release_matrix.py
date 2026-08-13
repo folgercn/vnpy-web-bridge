@@ -118,6 +118,7 @@ PHASE_C_WORKFLOW_EXACT = (
     "scripts/ci/final_runtime_compose_smoke.sh",
     "backend/tests/unit/test_issue291_final_execution.py",
     "backend/tests/unit/test_issue291_final_runtime_integration.py",
+    "scripts/simnow_keyless_pilot.py",
     "scripts/simnow_run_once.py",
 )
 PHASE_C_SHARED_EXACT = (
