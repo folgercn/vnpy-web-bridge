@@ -3,13 +3,20 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from shared.artifact_contracts import new_artifact_envelope, validate_receipt
+from shared.artifact_contracts import (
+    new_artifact_envelope,
+    receipt_id,
+    validate_receipt,
+)
 from shared.artifact_custody import ArtifactCustody, CustodyError
 from shared.trust_contracts import (
     ContractError,
@@ -18,6 +25,7 @@ from shared.trust_contracts import (
     canonical_json_line,
     signing_bytes,
 )
+from shared.trust_contracts import v1 as trust_contracts_v1
 
 SCHEMA_REF = "issue-291-phase-b-test-payload-v1"
 SCHEMAS = {
@@ -608,3 +616,386 @@ def test_signed_custody_audit_rejects_wrapper_snapshot_domain_and_pin_tamper_aft
         rewrite(root, mutate)
         with pytest.raises(CustodyError):
             custody(root, epoch=3)
+
+
+def _historical_signed_fixture(
+    tmp_path: Path, *, requested_at: str, expires_at: str
+) -> tuple[dict, Path, str, dict]:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    private = Ed25519PrivateKey.generate()
+    public = private.public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw
+    )
+    keyring = {
+        "schema_version": "web-bridge-trust-keyring-v1",
+        "domain": "research",
+        "key_version": "v1",
+        "keys": [
+            {
+                "key_id": "historical-audit",
+                "domain": "research",
+                "purpose": "research-only",
+                "public_key_base64": base64.b64encode(public).decode("ascii"),
+                "status": "active",
+            }
+        ],
+    }
+    keyring_raw = canonical_json_line(keyring)
+    keyring_path = tmp_path / "historical-keyring.json"
+    keyring_path.write_bytes(keyring_raw)
+    envelope = artifact()
+    request = build_signing_request(
+        envelope,
+        domain="research",
+        key_id="historical-audit",
+        key_version="v1",
+        request_id="historical-audit-1",
+        requested_at=requested_at,
+        expires_at=expires_at,
+    )
+    unsigned = {
+        "schema_version": "web-bridge-signed-artifact-v1",
+        "request_id": request["request_id"],
+        "domain": request["domain"],
+        "signer_key_id": request["key_id"],
+        "signer_key_version": request["key_version"],
+        "requested_at": request["requested_at"],
+        "expires_at": request["expires_at"],
+        "artifact": request["artifact"],
+    }
+    signed = build_signed_artifact(
+        request,
+        signature_base64=base64.b64encode(private.sign(signing_bytes(unsigned))).decode(
+            "ascii"
+        ),
+    )
+    return signed, keyring_path, hashlib.sha256(keyring_raw).hexdigest(), envelope
+
+
+def _frozen_datetime(value: str) -> type[datetime]:
+    frozen = datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz: timezone | None = None) -> datetime:
+            return frozen if tz is None else frozen.astimezone(tz)
+
+    return FrozenDatetime
+
+
+def _publish_historical_signed(
+    root: Path,
+    signed: dict,
+    keyring_path: Path,
+    keyring_sha256: str,
+    *,
+    receipt_created_at: str,
+    live_now: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with monkeypatch.context() as frozen_clock:
+        frozen_clock.setattr(
+            trust_contracts_v1, "datetime", _frozen_datetime(live_now)
+        )
+        with ArtifactCustody(
+            root,
+            writer_id="custody-a",
+            writer_epoch=1,
+            schema_registry=SCHEMAS,
+            clock=lambda: receipt_created_at,
+        ) as store:
+            store.publish_signed(
+                signed,
+                keyring_path=keyring_path,
+                expected_domain="research",
+                expected_key_purpose="research-only",
+                expected_keyring_raw_sha256=keyring_sha256,
+                actor_id="research-runtime",
+                idempotency_key="historical-signed-1",
+                correlation_id="historical-audit-1",
+                expected_version=0,
+            )
+
+
+def _rewrite_receipt_created_at(root: Path, created_at: str) -> None:
+    record_path = next((root / "receipts").iterdir())
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    receipt = record["receipt"]
+    receipt["created_at"] = created_at
+    receipt["receipt_id"] = receipt_id(receipt)
+    record["receipt_sha256"] = hashlib.sha256(canonical_json_line(receipt)).hexdigest()
+    renamed_path = record_path.with_name(f"{1:020d}-{receipt['receipt_id']}.json")
+    record_path.unlink()
+    renamed_path.write_bytes(canonical_json_line(record))
+
+
+def test_historical_audit_accepts_signature_valid_at_durable_receipt_time_after_expiry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    signed, keyring_path, keyring_sha256, _envelope = _historical_signed_fixture(
+        tmp_path,
+        requested_at="2001-01-01T00:00:00Z",
+        expires_at="2001-01-03T00:00:00Z",
+    )
+    root = tmp_path / "custody"
+    _publish_historical_signed(
+        root,
+        signed,
+        keyring_path,
+        keyring_sha256,
+        receipt_created_at="2001-01-02T00:00:00Z",
+        live_now="2001-01-02T00:00:00Z",
+        monkeypatch=monkeypatch,
+    )
+
+    with custody(root, epoch=2) as reopened:
+        assert reopened.audit()["version"] == 1
+
+
+def test_historical_audit_rejects_receipt_that_proves_already_expired_publish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    signed, keyring_path, keyring_sha256, _envelope = _historical_signed_fixture(
+        tmp_path,
+        requested_at="2001-01-01T00:00:00Z",
+        expires_at="2001-01-03T00:00:00Z",
+    )
+    root = tmp_path / "custody"
+    _publish_historical_signed(
+        root,
+        signed,
+        keyring_path,
+        keyring_sha256,
+        receipt_created_at="2001-01-02T00:00:00Z",
+        live_now="2001-01-02T00:00:00Z",
+        monkeypatch=monkeypatch,
+    )
+    _rewrite_receipt_created_at(root, "2001-01-04T00:00:00Z")
+
+    with pytest.raises(
+        CustodyError,
+        match="CUSTODY_SIGNED_ARTIFACT_SIGNED_ARTIFACT_OUTSIDE_VALIDITY",
+    ):
+        custody(root, epoch=2)
+
+
+def test_historical_audit_rejects_receipt_that_proves_not_yet_valid_publish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    signed, keyring_path, keyring_sha256, _envelope = _historical_signed_fixture(
+        tmp_path,
+        requested_at="2001-01-02T00:00:00Z",
+        expires_at="2001-01-04T00:00:00Z",
+    )
+    root = tmp_path / "custody"
+    _publish_historical_signed(
+        root,
+        signed,
+        keyring_path,
+        keyring_sha256,
+        receipt_created_at="2001-01-03T00:00:00Z",
+        live_now="2001-01-03T00:00:00Z",
+        monkeypatch=monkeypatch,
+    )
+    _rewrite_receipt_created_at(root, "2001-01-01T00:00:00Z")
+
+    with pytest.raises(
+        CustodyError,
+        match="CUSTODY_SIGNED_ARTIFACT_SIGNED_ARTIFACT_OUTSIDE_VALIDITY",
+    ):
+        custody(root, epoch=2)
+
+
+@pytest.mark.parametrize("local_timezone", ("UTC", "America/Los_Angeles"))
+def test_historical_audit_rejects_naive_receipt_time_in_every_local_timezone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, local_timezone: str
+) -> None:
+    """A naive chained receipt must not be interpreted in the host timezone."""
+    signed, keyring_path, keyring_sha256, _envelope = _historical_signed_fixture(
+        tmp_path,
+        requested_at="2001-01-01T00:00:00Z",
+        expires_at="2001-01-02T00:00:00Z",
+    )
+    root = tmp_path / "custody"
+    _publish_historical_signed(
+        root,
+        signed,
+        keyring_path,
+        keyring_sha256,
+        receipt_created_at="2001-01-02T00:00:00Z",
+        live_now="2001-01-02T00:00:00Z",
+        monkeypatch=monkeypatch,
+    )
+    _rewrite_receipt_created_at(root, "2001-01-02T00:00:00")
+
+    previous_timezone = os.environ.get("TZ")
+    try:
+        monkeypatch.setenv("TZ", local_timezone)
+        time.tzset()
+        with pytest.raises(
+            CustodyError, match="CUSTODY_HISTORICAL_AUDIT_TIMESTAMP_INVALID"
+        ):
+            custody(root, epoch=2)
+    finally:
+        if previous_timezone is None:
+            monkeypatch.delenv("TZ", raising=False)
+        else:
+            monkeypatch.setenv("TZ", previous_timezone)
+        time.tzset()
+
+
+def test_historical_audit_rejects_signature_tamper(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    signed, keyring_path, keyring_sha256, _envelope = _historical_signed_fixture(
+        tmp_path,
+        requested_at="2001-01-01T00:00:00Z",
+        expires_at="2001-01-03T00:00:00Z",
+    )
+    root = tmp_path / "custody"
+    _publish_historical_signed(
+        root,
+        signed,
+        keyring_path,
+        keyring_sha256,
+        receipt_created_at="2001-01-02T00:00:00Z",
+        live_now="2001-01-02T00:00:00Z",
+        monkeypatch=monkeypatch,
+    )
+    record_path = next((root / "receipts").iterdir())
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    record["signed_artifact"]["signature"] = base64.b64encode(b"x" * 64).decode(
+        "ascii"
+    )
+    record_path.write_bytes(canonical_json_line(record))
+
+    with pytest.raises(
+        CustodyError,
+        match="CUSTODY_SIGNED_ARTIFACT_SIGNED_ARTIFACT_SIGNATURE_INVALID",
+    ):
+        custody(root, epoch=2)
+
+
+def test_historical_audit_rejects_artifact_or_signed_hash_tamper(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for name, mutate in (
+        ("artifact", lambda record: record.__setitem__("artifact", artifact(2))),
+        (
+            "signed-hash",
+            lambda record: record.__setitem__("signed_artifact_sha256", "0" * 64),
+        ),
+    ):
+        signed, keyring_path, keyring_sha256, _envelope = _historical_signed_fixture(
+            tmp_path / name,
+            requested_at="2001-01-01T00:00:00Z",
+            expires_at="2001-01-03T00:00:00Z",
+        )
+        root = tmp_path / name / "custody"
+        _publish_historical_signed(
+            root,
+            signed,
+            keyring_path,
+            keyring_sha256,
+            receipt_created_at="2001-01-02T00:00:00Z",
+            live_now="2001-01-02T00:00:00Z",
+            monkeypatch=monkeypatch,
+        )
+        record_path = next((root / "receipts").iterdir())
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+        mutate(record)
+        record_path.write_bytes(canonical_json_line(record))
+
+        with pytest.raises(CustodyError):
+            custody(root, epoch=2)
+
+
+def test_historical_audit_does_not_make_expired_signature_currently_authorized(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    signed, keyring_path, keyring_sha256, _envelope = _historical_signed_fixture(
+        tmp_path,
+        requested_at="2001-01-01T00:00:00Z",
+        expires_at="2001-01-03T00:00:00Z",
+    )
+    root = tmp_path / "custody"
+    _publish_historical_signed(
+        root,
+        signed,
+        keyring_path,
+        keyring_sha256,
+        receipt_created_at="2001-01-02T00:00:00Z",
+        live_now="2001-01-02T00:00:00Z",
+        monkeypatch=monkeypatch,
+    )
+
+    with custody(root, epoch=2) as reopened:
+        assert reopened.audit()["version"] == 1
+        with pytest.raises(
+            CustodyError,
+            match="CUSTODY_SIGNED_ARTIFACT_SIGNED_ARTIFACT_OUTSIDE_VALIDITY",
+        ):
+            reopened.read_signed_artifact(signed["artifact"]["artifact_id"])
+        with pytest.raises(
+            CustodyError,
+            match="CUSTODY_SIGNED_ARTIFACT_SIGNED_ARTIFACT_OUTSIDE_VALIDITY",
+        ):
+            reopened.record(
+                "install",
+                signed["artifact"]["artifact_id"],
+                actor_id="research-installer",
+                idempotency_key="historical-install-1",
+                correlation_id="historical-audit-1",
+                expected_version=1,
+            )
+
+    with monkeypatch.context() as frozen_clock:
+        frozen_clock.setattr(
+            trust_contracts_v1, "datetime", _frozen_datetime("2001-01-02T00:00:00Z")
+        )
+        with custody(root, epoch=3) as valid_then:
+            valid_then.record(
+                "install",
+                signed["artifact"]["artifact_id"],
+                actor_id="research-installer",
+                idempotency_key="historical-install-1",
+                correlation_id="historical-audit-1",
+                expected_version=1,
+            )
+    with custody(root, epoch=4) as reopened:
+        assert reopened.audit()["version"] == 2
+        with pytest.raises(
+            CustodyError,
+            match="CUSTODY_SIGNED_ARTIFACT_SIGNED_ARTIFACT_OUTSIDE_VALIDITY",
+        ):
+            reopened.record(
+                "consume",
+                signed["artifact"]["artifact_id"],
+                actor_id="research-consumer",
+                idempotency_key="historical-consume-1",
+                correlation_id="historical-audit-1",
+                expected_version=2,
+            )
+
+
+def test_historical_audit_keeps_nonexpired_signed_artifact_valid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    signed, keyring_path, keyring_sha256, _envelope = _historical_signed_fixture(
+        tmp_path,
+        requested_at="2026-08-01T00:00:00Z",
+        expires_at="2099-01-03T00:00:00Z",
+    )
+    root = tmp_path / "custody"
+    _publish_historical_signed(
+        root,
+        signed,
+        keyring_path,
+        keyring_sha256,
+        receipt_created_at="2026-08-02T00:00:00Z",
+        live_now="2026-08-02T00:00:00Z",
+        monkeypatch=monkeypatch,
+    )
+
+    with custody(root, epoch=2) as reopened:
+        assert reopened.read_signed_artifact(signed["artifact"]["artifact_id"]) == signed
