@@ -63,6 +63,19 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _historical_receipt_created_at(value: object) -> datetime:
+    """Parse an audit replay time without consulting the host timezone."""
+    if not isinstance(value, str):
+        raise CustodyError("CUSTODY_HISTORICAL_AUDIT_TIMESTAMP_INVALID")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise CustodyError("CUSTODY_HISTORICAL_AUDIT_TIMESTAMP_INVALID") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise CustodyError("CUSTODY_HISTORICAL_AUDIT_TIMESTAMP_INVALID")
+    return parsed.astimezone(timezone.utc)
+
+
 def _safe_id(value: str, code: str) -> str:
     if (
         not isinstance(value, str)
@@ -368,7 +381,7 @@ class ArtifactCustody:
         except Exception as exc:
             raise CustodyError("CUSTODY_SCHEMA_VALIDATION_FAILED") from exc
 
-    def _load_state(self) -> _State:
+    def _load_state(self, *, historical_audit: bool = False) -> _State:
         # A publish envelope is committed inside its receipt ledger record.
         # Keeping a second artifact file would reintroduce an unavoidable
         # crash window between two create-only files, leaving an orphan.
@@ -477,11 +490,20 @@ class ArtifactCustody:
                             "CUSTODY_SIGNED_ARTIFACT_TRUST_SNAPSHOT_INVALID"
                         )
                     try:
+                        # Only integrity audit replays validity at the receipt's
+                        # durably chained acceptance time.  All operational
+                        # reads and mutations retain current-time validation.
+                        receipt_created_at = (
+                            _historical_receipt_created_at(receipt["created_at"])
+                            if historical_audit
+                            else None
+                        )
                         verified = verify_signed_artifact(
                             signed,
                             keyring=keyring,
                             expected_domain=expected_domain,
                             expected_key_purpose=expected_key_purpose,
+                            now=receipt_created_at,
                         )
                     except ContractError as exc:
                         raise CustodyError(
@@ -586,7 +608,7 @@ class ArtifactCustody:
         )
 
     def audit(self) -> dict[str, Any]:
-        state = self._load_state()
+        state = self._load_state(historical_audit=True)
         return {
             "version": state.version,
             "artifact_count": len(state.artifacts),
