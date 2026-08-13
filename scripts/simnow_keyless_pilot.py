@@ -23,37 +23,37 @@ for candidate in (ROOT, ROOT / "backend", ROOT / "scripts"):
     if str(candidate) not in sys.path:
         sys.path.insert(0, str(candidate))
 
-from app.control_execution_client import (
+from app.control_execution_client import (  # noqa: E402
     ExecutionClient,
     ExecutionClientError,
 )
-from app.execution.executable_target_adapter import (
+from app.execution.executable_target_adapter import (  # noqa: E402
     ExecutableTargetAdapterError,
     _close_order_offset,
     _contract,
     _current_contract_positions,
     peek_current_facts_to_snapshot,
 )
-from app.phase_c.client import RemotePhaseCWorkflowClient
-from app.phase_c.models import TrustedKeylessTargetPlanUploadDTO
-from phase_b_workers.contracts import (
+from app.phase_c.client import RemotePhaseCWorkflowClient  # noqa: E402
+from app.phase_c.models import TrustedKeylessTargetPlanUploadDTO  # noqa: E402
+from phase_b_workers.contracts import (  # noqa: E402
     VerifiedTick,
 )
-from phase_b_workers.durable import (
+from phase_b_workers.durable import (  # noqa: E402
     AtomicCheckpoint,
     DurableStateError,
     DurableVerifiedTickStream,
 )
 
-from shared.artifact_contracts.v1 import new_artifact_envelope
-from shared.commodity_execution import (
+from shared.artifact_contracts.v1 import new_artifact_envelope  # noqa: E402
+from shared.commodity_execution import (  # noqa: E402
     TRUSTED_KEYLESS_SIMNOW_SCOPE,
     before_position_projection_hash,
     build_trusted_keyless_target_plan,
     sha256_json,
     target_position_projection_hash,
 )
-from shared.trust_contracts.v1 import (
+from shared.trust_contracts.v1 import (  # noqa: E402
     ContractError,
     canonical_json_line,
 )
