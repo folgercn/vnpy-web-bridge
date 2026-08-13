@@ -187,6 +187,7 @@ def _write(path: Path, value: dict | bytes) -> None:
 def _peek(positions: dict) -> dict:
     return {
         "schema_version": "windows_execution_current_facts_v1",
+        "position_query_complete": True,
         "account": {
             "CTP.simnow-cli": {
                 "accountid": "simnow-cli",

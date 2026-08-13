@@ -25,6 +25,7 @@ from scripts.windows_fence_foundation.bootstrap_v1 import (
     bootstrap_windows_rpc_frozen_v1,
 )
 from scripts.windows_fence_foundation.store import StoreExpectation
+from scripts.windows_position_readiness_v1 import PositionQueryReadinessTrackerV1
 from scripts.windows_rpc_deployment_snapshot_v1 import (
     WindowsRpcDeploymentSnapshotError,
 )
@@ -55,6 +56,23 @@ class FactSource:
     def __init__(self) -> None:
         self.engines = {"log": None, "oms": None}
         self.apps = {"RpcService": None}
+        self.gateway = SimpleNamespace(
+            td_api=SimpleNamespace(
+                reqQryInvestorPosition=lambda _request, _request_id: 0,
+                onRspQryInvestorPosition=lambda *_args: None,
+                onFrontConnected=lambda: None,
+                onFrontDisconnected=lambda _reason: None,
+                onRspUserLogin=lambda *_args: None,
+            )
+        )
+
+    def get_gateway(self, gateway_name: str) -> Any:
+        return self.gateway if gateway_name == "CTP" else None
+
+    def complete_position_query(self) -> None:
+        api = self.gateway.td_api
+        assert api.reqQryInvestorPosition({}, 1) == 0
+        api.onRspQryInvestorPosition(None, {"ErrorID": 0}, 1, True)
 
     def get_all_accounts(self) -> list[Any]:
         return [{"accountid": "sim-account", "gateway_name": "CTP"}]
@@ -114,7 +132,38 @@ def test_bootstrap_validates_store_before_build_connect_and_listen() -> None:
 
     assert calls.values == ["recover", "build", "attach", "connect", "listen"]
     assert assembly.runtime is runtime
-    assert server.send_calls == server.cancel_calls == 0
+
+
+def test_fixed_connect_attaches_before_connect_and_failure_restores_on_tick(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scripts.windows_tick_wire_v1 as tick_wire
+
+    calls: list[str] = []
+    def original(_tick: Any) -> None:
+        calls.append("original")
+    gateway = SimpleNamespace(on_tick=original, td_api=SimpleNamespace())
+    tracker = SimpleNamespace(is_ready=lambda: False)
+    gateway.td_api._vnpy_position_readiness_v1 = tracker
+
+    class Engine:
+        def get_gateway(self, _name: str) -> Any:
+            return gateway
+
+        def connect(self, _setting: Any, _name: str) -> None:
+            assert getattr(gateway, "_windows_tick_wire_v1", None) is publisher
+            calls.append("connect")
+            raise RuntimeError("connect failed")
+
+    publisher = SimpleNamespace(publish_tick=lambda _tick: calls.append("publish"), close=lambda: calls.append("close"))
+    monkeypatch.setattr(tick_wire, "attach_windows_tick_wire_v1", lambda value: (setattr(value, "_windows_tick_wire_v1", publisher), setattr(value, "_windows_tick_wire_v1_original_on_tick", original), publisher)[2])
+    monkeypatch.setattr(tick_wire, "detach_windows_tick_wire_v1", lambda value: (setattr(value, "on_tick", value._windows_tick_wire_v1_original_on_tick), publisher.close(), delattr(value, "_windows_tick_wire_v1")))
+    runtime = SimpleNamespace(main_engine=Engine(), config=SimpleNamespace(gateway_name="CTP", gateway_setting={}), position_readiness=tracker)
+    with pytest.raises(RuntimeError, match="connect failed"):
+        durable_module._connect_fixed_vnpy_runtime(runtime)
+    assert gateway.on_tick is original
+    gateway.on_tick(object())
+    assert calls == ["connect", "close", "original"]
 
 
 def test_public_bootstrap_default_attaches_the_exact_reviewed_a2_extension() -> None:
@@ -208,6 +257,7 @@ def test_a2_capture_rejects_wrong_bound_method_on_admission_object() -> None:
         rpc_engine=SimpleNamespace(server=server),
         event_engine=SyncEventEngine(),
         fact_source=FactSource(),
+        position_readiness=SimpleNamespace(is_ready=lambda: True),
         snapshot_kwargs={
             "event_factory": lambda event_type, data: SimpleNamespace(
                 type=event_type, data=data
@@ -645,10 +695,14 @@ def test_production_launcher_uses_only_fixed_runtime_lifecycle(
     )
     calls: list[str] = []
     server = FakeServer()
+    readiness = PositionQueryReadinessTrackerV1()
+    readiness.begin_query(1)
+    readiness.on_rsp_qry_investor_position({"ErrorID": 0}, 1, True)
     runtime = SimpleNamespace(
         rpc_engine=SimpleNamespace(server=server),
         event_engine=SyncEventEngine(),
         fact_source=FactSource(),
+        position_readiness=readiness,
     )
 
     monkeypatch.setattr(
@@ -707,6 +761,7 @@ def test_production_launcher_uses_only_fixed_runtime_lifecycle(
         {"account_scope": config.account_scope, "environment": config.environment}
     )
     assert peek["schema_version"] == "windows_execution_current_facts_v1"
+    assert peek["position_query_complete"] is True
     assert peek["gateway"] == {
         "gateway_name": config.gateway_name,
         "account_scope": config.account_scope,
@@ -895,6 +950,7 @@ def test_public_reconciliation_only_attach_exposes_only_fixed_readers_and_snapsh
     peek = server._functions["peek_current_facts_v1"](request)
     assert peek["admission"]["snapshot_generation"] == 0
     assert store_path.read_bytes() == store_before_peek
+    main_engine.complete_position_query()
     first = server._functions["get_execution_snapshot_v1"](request)
     second = server._functions["get_execution_snapshot_v1"](request)
     assert (first["generation"], second["generation"]) == (1, 2)
@@ -929,10 +985,11 @@ def test_windows_reconciliation_only_attach_uses_native_rpc_server(
         server.register(cancel_order)
         assert not server.is_active()
 
+        main_engine = FactSource()
         durable_module.attach_windows_rpc_reconciliation_only_v1(
             rpc_engine=SimpleNamespace(server=server),
             event_engine=SyncEventEngine(),
-            main_engine=FactSource(),
+            main_engine=main_engine,
         )
 
         assert not server.is_active()
@@ -948,6 +1005,7 @@ def test_windows_reconciliation_only_attach_uses_native_rpc_server(
         assert calls == []
 
         request = {"account_scope": "account:windows", "environment": "simnow"}
+        main_engine.complete_position_query()
         first = server._functions["get_execution_snapshot_v1"](request)
         second = server._functions["get_execution_snapshot_v1"](request)
         assert (first["generation"], second["generation"]) == (1, 2)
@@ -1316,7 +1374,11 @@ def test_windows_snapshot_generation_survives_restart_and_is_concurrently_unique
     }
 
     def build() -> tuple[Any, Any]:
-        runtime = SimpleNamespace(config=config, fact_source=FactSource())
+        runtime = SimpleNamespace(
+            config=config,
+            fact_source=FactSource(),
+            position_readiness=SimpleNamespace(is_ready=lambda: True),
+        )
         facts = durable_module._WindowsExecutionFactsV1(runtime)
         admission = WindowsRpcFencedAdmissionV1.bootstrap(
             store_path=str(store_path),

@@ -163,6 +163,22 @@ services:
     tmpfs: [/tmp]
     healthcheck: { test: ["CMD", "python", "/usr/local/bin/gateway_proxy.py", "health"], interval: 10s, timeout: 3s, retries: 6 }
 
+  gateway-tick-wire-proxy:
+    image: ${GATEWAY_PROXY_IMAGE:-vnpy-web-bridge-gateway-proxy:final}
+    build: { context: .., dockerfile: deployments/phase-a/Containerfile.gateway-proxy }
+    command: [tick]
+    environment:
+      <<: *negative_flags
+      PROXY_LISTEN_PORT: ${GATEWAY_TICK_WIRE_PROXY_PORT:?required}
+      PROXY_HEALTH_PORT: "18080"
+      WINDOWS_TICK_WIRE_ADDRESS: ${WINDOWS_TICK_WIRE_ADDRESS:?required}
+    networks: [gateway-egress, market-ingress]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: [/tmp]
+    healthcheck: { test: ["CMD", "python", "/usr/local/bin/gateway_proxy.py", "health"], interval: 10s, timeout: 3s, retries: 6 }
+
   questdb:
     image: questdb/questdb:9.4.3
     networks: [questdb-data]
@@ -190,11 +206,11 @@ services:
       PHASE_B_RUNTIME_MODE: final-validation
       PHASE_B_MARKET_DATA_STATE_DIR: /var/lib/phase-b/market-data
       PHASE_B_MARKET_PROJECTION_DIR: /var/lib/phase-b/projection
-      PHASE_B_MARKET_PUBLISH_ENDPOINT: tcp://gateway-rpc-publish-proxy:${GATEWAY_RPC_PUB_PROXY_PORT:?required}
+      PHASE_B_MARKET_PUBLISH_ENDPOINT: tcp://gateway-tick-wire-proxy:${GATEWAY_TICK_WIRE_PROXY_PORT:?required}
       PHASE_B_QUESTDB_PG_DSN_FILE: /run/secrets/questdb-writer.dsn
     secrets: [{ source: questdb_writer_dsn, target: questdb-writer.dsn, uid: "65532", gid: "65532", mode: 0400 }]
     networks: [market-ingress, questdb-data]
-    depends_on: { questdb-schema-bootstrap: { condition: service_completed_successfully } }
+    depends_on: { questdb-schema-bootstrap: { condition: service_completed_successfully }, gateway-tick-wire-proxy: { condition: service_healthy } }
     volumes: [market_data_state:/var/lib/phase-b/market-data, market_projection:/var/lib/phase-b/projection]
     healthcheck: { test: ["CMD-SHELL", "test -d /var/lib/phase-b/market-data/stream && test -f /var/lib/phase-b/market-data/stream/verified_ticks.jsonl && test -f /var/lib/phase-b/market-data/stream/producer_watermark.json && test -f /var/lib/phase-b/market-data/stream/tick_writer_acks.jsonl"], interval: 1s, timeout: 1s, retries: 10 }
     read_only: true

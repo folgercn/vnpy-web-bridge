@@ -188,6 +188,7 @@ def test_final_validation_pure_readiness_ignores_durable_generation_floor() -> N
             self.calls.append((method, payload, context))
             return {
                 "schema_version": "windows_execution_current_facts_v1",
+                "position_query_complete": True,
                 "account": {"CTP.sim-account": {"gateway_name": "CTP"}},
                 "positions": {},
                 "active_orders": {},

@@ -450,6 +450,7 @@ class _WindowsRpcRuntimeV1:
     rpc_engine: Any
     fact_source: Any
     config: WindowsRpcRuntimeConfigV1
+    position_readiness: Any | None = None
 
 
 def _execution_fact_value(value: Any) -> Any:
@@ -625,6 +626,18 @@ class _WindowsExecutionFactsV1:
                 code="WINDOWS_FENCE_SCOPE_INVALID",
             )
 
+    def _position_query_complete(self) -> bool:
+        tracker = getattr(self.runtime, "position_readiness", None)
+        ready = getattr(tracker, "is_ready", None)
+        return bool(callable(ready) and ready() is True)
+
+    def _require_position_ready(self) -> None:
+        if not self._position_query_complete():
+            raise WindowsRpcDurableFenceDenied(
+                "CTP investor-position query is not complete",
+                code="WINDOWS_POSITION_FACTS_NOT_READY",
+            )
+
     def peek_current_facts(self, request: Mapping[str, Any]) -> bytes:
         """Return canonical current facts without a disk write or generation bump."""
 
@@ -660,6 +673,7 @@ class _WindowsExecutionFactsV1:
         return canonical_json_bytes(
             {
                 "schema_version": "windows_execution_current_facts_v1",
+                "position_query_complete": self._position_query_complete(),
                 "account": accounts,
                 "positions": positions,
                 "active_orders": active_orders,
@@ -692,6 +706,7 @@ class _WindowsExecutionFactsV1:
                 "execution snapshot scope is foreign",
                 code="WINDOWS_FENCE_SCOPE_INVALID",
             )
+        self._require_position_ready()
         orders = self._orders()
         positions = self._positions()
         active_orders = self._facts("get_all_active_orders")
@@ -1396,8 +1411,25 @@ def connect_windows_rpc_simnow_e2e_v1(
     # This private copy is both the exact mapping passed to vn.py and the only
     # source recorded below.  Attach receives no equivalent caller argument.
     connected_setting = dict(gateway_setting)
+    from scripts.windows_position_readiness_v1 import attach_ctp_position_readiness_v1
+    from scripts.windows_tick_wire_v1 import (
+        attach_windows_tick_wire_v1,
+        detach_windows_tick_wire_v1,
+    )
+
+    if not callable(getattr(gateway, "on_tick", None)):
+        raise WindowsRpcDurableFenceDenied(
+            "SimNow E2E CTP gateway tick callback is unavailable",
+            code="WINDOWS_SIMNOW_E2E_GATEWAY_INVALID",
+        )
+    attach_ctp_position_readiness_v1(td_api)
+    attach_windows_tick_wire_v1(gateway)
     _install_ctp_current_day_order_callback_v1(td_api)
-    connect(connected_setting, _VALIDATION_GATEWAY_NAME)
+    try:
+        connect(connected_setting, _VALIDATION_GATEWAY_NAME)
+    except BaseException:
+        detach_windows_tick_wire_v1(gateway)
+        raise
     _arm_ctp_current_day_order_recovery_v1(
         main_engine, gateway_name=_VALIDATION_GATEWAY_NAME
     )
@@ -1583,18 +1615,33 @@ def attach_windows_rpc_simnow_e2e_v1(
         native_cancel_handler = functions.get("cancel_order")
         _replace_legacy_methods_with_permanent_frozen_denials_v1(server)
         _validate_simnow_e2e_runtime_v1(main_engine)
+        tick_gateway = main_engine.get_gateway(_VALIDATION_GATEWAY_NAME)
+        tick_publisher = getattr(tick_gateway, "_windows_tick_wire_v1", None)
+        if tick_publisher is None or not callable(getattr(tick_publisher, "publish_tick", None)):
+            raise WindowsRpcDurableFenceDenied(
+                "SimNow E2E tick wire was not attached before connect",
+                code="WINDOWS_SIMNOW_E2E_GATEWAY_INVALID",
+            )
         runtime_config = WindowsRpcRuntimeConfigV1(
             gateway_setting={"simnow_e2e": True},
             gateway_name=_VALIDATION_GATEWAY_NAME,
             account_scope=_VALIDATION_ACCOUNT_SCOPE,
             environment=_VALIDATION_ENVIRONMENT,
         )
+        gateway = main_engine.get_gateway(_VALIDATION_GATEWAY_NAME)
+        readiness = getattr(gateway.td_api, "_vnpy_position_readiness_v1", None)
+        if readiness is None or not callable(getattr(readiness, "is_ready", None)):
+            raise WindowsRpcDurableFenceDenied(
+                "SimNow E2E position readiness was not attached before connect",
+                code="WINDOWS_SIMNOW_E2E_GATEWAY_INVALID",
+            )
         runtime = _WindowsRpcRuntimeV1(
             event_engine=event_engine,
             main_engine=main_engine,
             rpc_engine=rpc_engine,
             fact_source=main_engine,
             config=runtime_config,
+            position_readiness=readiness,
         )
         _attach_fixed_typed_fenced_methods(
             runtime,
@@ -1676,6 +1723,7 @@ def attach_windows_rpc_validation_only_v1(
         rpc_engine=rpc_engine,
         fact_source=main_engine,
         config=runtime_config,
+        position_readiness=_attach_position_readiness_v1(main_engine),
     )
     try:
         # Freeze legacy names before any typed registration can occur.  The
@@ -1766,6 +1814,7 @@ def attach_windows_rpc_reconciliation_only_v1(
         rpc_engine=rpc_engine,
         fact_source=main_engine,
         config=runtime_config,
+        position_readiness=_attach_position_readiness_v1(main_engine),
     )
     try:
         _replace_legacy_methods_with_permanent_frozen_denials_v1(server)
@@ -1785,6 +1834,16 @@ def _production_windows_filesystem() -> WindowsFilesystemFactsAdapter:
     if os.name != "nt":
         raise OSError("launch_windows_rpc_durable_fence_v1 requires native Windows")
     return WindowsFilesystemFactsAdapter()
+
+
+def _attach_position_readiness_v1(main_engine: Any) -> Any:
+    """Bind the CTP tracker whenever a fixed facts surface is attached."""
+
+    from scripts.windows_position_readiness_v1 import attach_ctp_position_readiness_v1
+
+    gateway = main_engine.get_gateway(_VALIDATION_GATEWAY_NAME)
+    td_api = getattr(gateway, "td_api", None)
+    return attach_ctp_position_readiness_v1(td_api)
 
 
 def _recover_runtime_bound_store(
@@ -1856,12 +1915,17 @@ def _build_fixed_vnpy_runtime(
     main_engine = MainEngine(event_engine)
     main_engine.add_gateway(CtpGateway)
     rpc_engine = main_engine.add_app(RpcServiceApp)
+    from scripts.windows_position_readiness_v1 import attach_ctp_position_readiness_v1
+
+    gateway = main_engine.get_gateway(config.gateway_name)
+    position_readiness = attach_ctp_position_readiness_v1(gateway.td_api)
     return _WindowsRpcRuntimeV1(
         event_engine=event_engine,
         main_engine=main_engine,
         rpc_engine=rpc_engine,
         fact_source=main_engine,
         config=config,
+        position_readiness=position_readiness,
     )
 
 
@@ -1870,10 +1934,26 @@ def _connect_fixed_vnpy_runtime(runtime: _WindowsRpcRuntimeV1) -> None:
     td_api = getattr(gateway, "td_api", None)
     if td_api is None:
         raise RuntimeError("CTP_CURRENT_DAY_ORDER_RECOVERY_UNAVAILABLE")
-    _install_ctp_current_day_order_callback_v1(td_api)
-    runtime.main_engine.connect(
-        dict(runtime.config.gateway_setting), runtime.config.gateway_name
+    from scripts.windows_position_readiness_v1 import attach_ctp_position_readiness_v1
+    from scripts.windows_tick_wire_v1 import (
+        attach_windows_tick_wire_v1,
+        detach_windows_tick_wire_v1,
     )
+
+    if runtime.position_readiness is None:
+        runtime_readiness = attach_ctp_position_readiness_v1(td_api)
+        object.__setattr__(runtime, "position_readiness", runtime_readiness)
+    elif getattr(td_api, "_vnpy_position_readiness_v1", None) is not runtime.position_readiness:
+        raise RuntimeError("CTP_POSITION_READINESS_MARKER_INVALID")
+    attach_windows_tick_wire_v1(gateway)
+    _install_ctp_current_day_order_callback_v1(td_api)
+    try:
+        runtime.main_engine.connect(
+            dict(runtime.config.gateway_setting), runtime.config.gateway_name
+        )
+    except BaseException:
+        detach_windows_tick_wire_v1(gateway)
+        raise
     _arm_ctp_current_day_order_recovery_v1(
         runtime.main_engine, gateway_name=runtime.config.gateway_name
     )

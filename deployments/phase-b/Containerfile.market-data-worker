@@ -10,7 +10,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 COPY deployments/phase-b/requirements-market-data.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
-RUN mkdir -p /app/phase_b_workers/schemas
+RUN mkdir -p /app/phase_b_workers/schemas /app/scripts
+COPY scripts/windows_tick_wire_v1.py /app/scripts/windows_tick_wire_v1.py
 COPY scripts/phase_b_workers/__init__.py /app/phase_b_workers/__init__.py
 COPY scripts/phase_b_workers/contracts.py /app/phase_b_workers/contracts.py
 COPY scripts/phase_b_workers/durable.py /app/phase_b_workers/durable.py

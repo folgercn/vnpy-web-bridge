@@ -291,7 +291,7 @@ from pathlib import Path
 
 import psycopg
 
-fence = json.loads(Path("/var/lib/phase-b/market-data/publish_proxy_cursor.json").read_text())
+fence = json.loads(Path("/var/lib/phase-b/market-data/tick_wire_v1_cursor.json").read_text())
 # This assertion intentionally happens before the database query: count==1
 # only proves replay dedup after the worker has accepted at least two frames.
 assert int(fence["last_source_seq"]) >= 2, fence

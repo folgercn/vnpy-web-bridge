@@ -578,6 +578,7 @@ class _FinalValidationPeekTransport:
 def _final_validation_facts() -> dict:
     return {
         "schema_version": "windows_execution_current_facts_v1",
+        "position_query_complete": True,
         "account": {"CTP.sim-account": {"gateway_name": "CTP", "available": 90}},
         "positions": {"rb-long": {"symbol": "rb", "volume": 2}},
         "active_orders": {"CTP.1": {"symbol": "rb", "status": "NOTTRADED"}},
