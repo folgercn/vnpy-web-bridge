@@ -258,6 +258,34 @@ services:
     environment: *negative_flags
     network_mode: none
 
+  simnow-runner:
+    # The runner is invoked manually with its fixed CLI arguments.  It is not
+    # part of the normal final-validation graph and is never restarted.
+    profiles: [simnow-runner]
+    image: ${SIMNOW_RUNNER_IMAGE:-vnpy-web-bridge-simnow-runner:final}
+    build: { context: .., dockerfile: deployments/phase-b/Containerfile.simnow-runner }
+    restart: "no"
+    entrypoint: ["python", "/app/scripts/simnow_run_once.py"]
+    environment:
+      <<: *negative_flags
+      CONTROL_EXECUTION_BASE_URL: http://execution-orchestrator:8090
+      CONTROL_EXECUTION_SHARED_SECRET: ${CONTROL_EXECUTION_SHARED_SECRET:?required}
+      PHASE_C_CUSTODY_URL: http://artifact-custody:8091
+      PHASE_C_CUSTODY_SHARED_SECRET: ${PHASE_C_CUSTODY_SHARED_SECRET:?required}
+      PHASE_C_EXECUTION_URL: http://execution-orchestrator:8090
+      PHASE_C_EXECUTION_SHARED_SECRET: ${PHASE_C_EXECUTION_SHARED_SECRET:?required}
+    networks: [private-control, control-custody]
+    depends_on:
+      artifact-custody: { condition: service_healthy }
+      execution-orchestrator: { condition: service_started }
+    volumes:
+      - ${SIMNOW_RUNNER_SOURCE_DIR:?required}:/run/sources:ro
+      - ${PHASE_C_CUSTODY_PUBLIC_KEYRING_DIR:?required}:/run/keys:ro
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: [/tmp]
+
   signing-authority:
     profiles: [offline-signing]
     image: ${SIGNING_AUTHORITY_IMAGE:-vnpy-web-bridge-signing-authority:final}

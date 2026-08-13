@@ -240,6 +240,15 @@ PHASE_B_RULES = (
         exact=("deployments/phase-b/Containerfile.c-fast-producer",),
     ),
     _phase_b_rule(
+        "phase-b-simnow-runner-packaging",
+        units=PHASE_B_UNITS,
+        exact=(
+            "deployments/phase-b/Containerfile.simnow-runner",
+            "deployments/phase-b/requirements-simnow-runner.txt",
+        ),
+        shared=True,
+    ),
+    _phase_b_rule(
         "phase-b-execution-quality-image",
         units=("execution-quality-worker",),
         exact=("deployments/phase-b/Containerfile.execution-quality-worker",),
@@ -391,6 +400,9 @@ PHASE_A_PHASE_C_PRESERVED_EXACT = (
     "deployments/final/Containerfile.artifact-bootstrap",
     "deployments/final/artifact_bootstrap.py",
     "deployments/final/market_source.py",
+    "deployments/phase-b/Containerfile.simnow-runner",
+    "deployments/phase-b/requirements-simnow-runner.txt",
+    "scripts/simnow_run_once.py",
 )
 PHASE_A_PHASE_C_PRESERVED_PREFIXES = (
     "backend/app/api/routes_phase_c_",

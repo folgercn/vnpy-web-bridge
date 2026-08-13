@@ -61,6 +61,18 @@ def test_phase_b_artifact_image_dependency_selects_its_consumers() -> None:
     assert result["phase_b_gate_blocked"] is False
 
 
+def test_phase_b_simnow_runner_package_rebuilds_the_reviewed_dependency_group() -> None:
+    for path in (
+        "deployments/phase-b/Containerfile.simnow-runner",
+        "deployments/phase-b/requirements-simnow-runner.txt",
+    ):
+        result = classify_phase_b([path])
+        assert result["phase_b_changed"] is True
+        assert result["phase_b_shared_contract_changed"] is True
+        assert result["selected_units"] == list(PHASE_B_UNITS)
+        assert result["phase_b_gate_blocked"] is False
+
+
 def test_phase_b_unknown_and_ambiguous_owned_paths_fail_closed() -> None:
     unknown = classify_phase_b(["deployments/phase-b/unreviewed-entrypoint.sh"])
     assert unknown["phase_b_changed"] is True
