@@ -9,7 +9,10 @@ from app.execution.executable_target_adapter import (
     peek_current_facts_to_snapshot,
 )
 
-from scripts.windows_position_readiness_v1 import PositionQueryReadinessTrackerV1
+from scripts.windows_position_readiness_v1 import (
+    PositionQueryReadinessTrackerV1,
+    attach_ctp_position_readiness_v1,
+)
 from scripts.windows_tick_wire_v1 import (
     TICK_WIRE_PREFIX,
     TickWireError,
@@ -119,6 +122,63 @@ def test_position_tracker_rejects_stale_and_error_last_callbacks() -> None:
     assert tracker.is_ready()
     tracker.reset()
     assert not tracker.is_ready()
+
+
+def test_position_query_observability_logs_only_allowed_ctp_fields() -> None:
+    class Gateway:
+        def __init__(self) -> None:
+            self.messages: list[str] = []
+
+        def write_log(self, message: str) -> None:
+            self.messages.append(message)
+
+    class TdApi:
+        def __init__(self) -> None:
+            self.gateway = Gateway()
+            self.calls: list[tuple[object, ...]] = []
+
+        def reqQryInvestorPosition(self, request: object, request_id: int) -> int:
+            self.calls.append(("request", request, request_id))
+            return 0
+
+        def onRspQryInvestorPosition(
+            self,
+            data: object,
+            error: object,
+            request_id: int,
+            b_is_last: bool,
+        ) -> None:
+            self.calls.append(("callback", data, error, request_id, b_is_last))
+
+    api = TdApi()
+    tracker = attach_ctp_position_readiness_v1(api)
+    assert api.reqQryInvestorPosition({"secret": "must-not-log"}, 7) == 0
+    api.onRspQryInvestorPosition(
+        {"position": "must-not-log"}, {"ErrorID": 0, "detail": "must-not-log"}, 7, False
+    )
+    api.onRspQryInvestorPosition(
+        {"position": "must-not-log"}, {"ErrorID": 0, "detail": "must-not-log"}, 7, True
+    )
+
+    assert api.gateway.messages == [
+        "CTP_POSITION_QUERY_REQUEST request_id=7 req_return=0 "
+        + "tracker_generation=1 tracker_active_request_id=7 "
+        + "tracker_failed_request_id=None tracker_ready=False",
+        "CTP_POSITION_QUERY_CALLBACK callback_count=1 request_id=7 ErrorID=0 "
+        + "b_is_last=False tracker_generation=1 tracker_active_request_id=7 "
+        + "tracker_failed_request_id=None tracker_ready=False",
+        "CTP_POSITION_QUERY_CALLBACK callback_count=2 request_id=7 ErrorID=0 "
+        + "b_is_last=True tracker_generation=1 tracker_active_request_id=7 "
+        + "tracker_failed_request_id=None tracker_ready=True",
+    ]
+    assert tracker.observability_state_v1() == {
+        "generation": 1,
+        "active_request_id": 7,
+        "failed_request_id": None,
+        "ready": True,
+        "callback_count": 2,
+    }
+    assert all("must-not-log" not in message for message in api.gateway.messages)
 
 
 def test_executable_adapter_requires_explicit_completed_position_query() -> None:
