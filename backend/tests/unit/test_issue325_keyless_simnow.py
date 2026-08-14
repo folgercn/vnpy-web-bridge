@@ -5,12 +5,14 @@ import asyncio
 import importlib.util
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from app.execution import (
     ExecutionOrchestrator,
+    GatewaySnapshot,
     InMemoryExecutionRepository,
     InMemoryGateway,
 )
@@ -42,7 +44,11 @@ from shared.commodity_execution import (
 from shared.trust_contracts.v1 import canonical_json_line, sha256_bytes
 
 
-def keyless_plan() -> dict:
+def keyless_plan(
+    *,
+    generated_at: str = "2030-01-01T00:00:00Z",
+    expires_at: str = "2099-01-01T00:00:00Z",
+) -> dict:
     before = before_position_projection_hash(
         {}, account_scope="account:windows", environment="SIMNOW"
     )
@@ -66,8 +72,8 @@ def keyless_plan() -> dict:
         gateway_name="CTP",
         lineage={"map_sha256": "a" * 64, "c_fast_sha256": "b" * 64},
         scope=TRUSTED_KEYLESS_SIMNOW_SCOPE,
-        generated_at="2030-01-01T00:00:00Z",
-        expires_at="2099-01-01T00:00:00Z",
+        generated_at=generated_at,
+        expires_at=expires_at,
         phase="OPEN",
         expected_before_position_hash=before,
         expected_after_position_hash=after,
@@ -279,6 +285,126 @@ def test_keyless_preview_enable_start_keeps_existing_fencing_and_send_intent() -
     assert response.result["accepted"] is True
     assert len(gateway.send_calls) == 1
     assert repo.snapshot()["send_intents"]
+
+
+def test_keyless_expired_active_plan_reconciles_but_new_preview_stays_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = keyless_plan(expires_at="2030-01-01T00:00:00Z")
+    service = runtime(plan)
+    service.allow_simnow_execution = True
+    core = service.orchestrator
+    repo = core.repository
+    gateway = core.gateway
+    receipt = service.custody.receipt_value
+    service.process_command(
+        command(
+            "preview",
+            "keyless-expired-preview-0001",
+            repo.state_version,
+            {
+                "plan_hash": plan["plan_hash"],
+                "artifact_hash": receipt["artifact_sha256"],
+                "mode": "simnow_preview",
+                "receipt_id": receipt["receipt_id"],
+            },
+        )
+    )
+    service.process_command(
+        command(
+            "reconcile",
+            "keyless-expired-pre-0001",
+            repo.state_version,
+            {
+                "reconciliation_run_id": "keyless-expired-pre-run-0001",
+                "snapshot_id": "snapshot-default",
+                "reason": "fresh SIMNOW facts",
+            },
+        )
+    )
+    service.process_command(
+        command(
+            "enable",
+            "keyless-expired-enable-0001",
+            repo.state_version,
+            {
+                "authority_artifact_id": plan["plan_id"],
+                "authority_hash": plan["plan_hash"],
+                "expires_at": plan["expires_at"],
+                "reason": "fixed keyless custody",
+            },
+        )
+    )
+    token = core.acquire_leader("keyless-expired-leader-0001")
+    service.process_command(
+        command(
+            "start",
+            "keyless-expired-start-0001",
+            repo.state_version,
+            {
+                "plan_id": plan["plan_id"],
+                "plan_hash": plan["plan_hash"],
+                "reason": "start historical keyless plan",
+            },
+            fence={"leader_epoch": token.epoch, "fencing_token": token.fencing_token},
+        )
+    )
+    intent_id = next(iter(repo.snapshot()["send_intents"]))
+    target_positions = {
+        "RB2601.SHFE.LONG": {
+            "gateway_name": "CTP",
+            "symbol": "RB2601",
+            "exchange": "SHFE",
+            "direction": "LONG",
+            "volume": 1,
+        }
+    }
+
+    repo.mutate(
+        lambda state: state["send_intents"][intent_id].update({"state": "SUBMITTED"})
+    )
+    gateway.intent_outcomes[intent_id] = {"state": "TERMINAL", "resolved": True}
+    gateway.snapshots.append(
+        GatewaySnapshot(
+            snapshot_id="snapshot-keyless-final-0002",
+            generation=2,
+            connected=True,
+            position_snapshot_hash=sha256_json(target_positions),
+            positions=target_positions,
+            account_scope="account:windows",
+            environment="SIMNOW",
+        )
+    )
+    gateway.send_calls.clear()
+    gateway.cancel_calls.clear()
+    monkeypatch.setattr(
+        "app.execution.final_runtime.utc_now",
+        lambda: datetime(2031, 1, 1, tzinfo=timezone.utc),
+    )
+
+    with pytest.raises(PlanRejected, match="receipt scope/expiry mismatch"):
+        service.preview_from_custody("keyless-install-0001")
+
+    response = service.process_command(
+        command(
+            "reconcile",
+            "keyless-expired-final-0001",
+            repo.state_version,
+            {
+                "reconciliation_run_id": "keyless-expired-run-0001",
+                "snapshot_id": "snapshot-keyless-final-0002",
+                "reason": "query-only expired historical plan recovery",
+            },
+        )
+    )
+
+    state = repo.snapshot()
+    assert gateway.query_calls == [intent_id]
+    assert gateway.send_calls == []
+    assert gateway.cancel_calls == []
+    assert state["send_intents"][intent_id]["state"] == "TERMINAL"
+    assert response.result["finalization"]["state"] == "COMPLETED"
+    assert state["plan"]["state"] == "TERMINAL"
 
 
 @pytest.mark.parametrize(
