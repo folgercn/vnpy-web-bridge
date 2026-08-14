@@ -35,6 +35,7 @@ from app.execution.executable_target_adapter import (  # noqa: E402
     _close_order_offset,
     _contract,
     _current_contract_positions,
+    _without_terminal_execution_orders,
     peek_current_facts_to_snapshot,
 )
 from app.phase_c.client import RemotePhaseCWorkflowClient  # noqa: E402
@@ -895,7 +896,9 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
     facts = _object(args.peek_current_facts, "peek current facts")
     reconciliation = _object(args.reconciliation_state, "reconciliation state")
     _require_reconciliation(reconciliation)
-    peek = peek_current_facts_to_snapshot(facts, account_scope="account:windows")
+    peek = peek_current_facts_to_snapshot(
+        _without_terminal_execution_orders(facts), account_scope="account:windows"
+    )
     _require_fixed_position_rows(peek.snapshot.positions)
     long_volume, short_volume, matching = _current_position(
         peek.snapshot, exchange=_FIXED_EXCHANGE, symbol=_FIXED_SYMBOL

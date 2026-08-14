@@ -998,10 +998,50 @@ def _pilot_args() -> argparse.Namespace:
     )
 
 
+def _exact_peek_facts() -> dict:
+    return {
+        "schema_version": "windows_execution_current_facts_v1",
+        "position_query_complete": True,
+        "account": {"CTP.pilot": {"gateway_name": "CTP"}},
+        "positions": {},
+        "active_orders": {},
+        "gateway": {
+            "gateway_name": "CTP",
+            "account_scope": "account:windows",
+            "environment": "simnow",
+            "connected": True,
+        },
+        "execution": {"orders": {}},
+        "admission": {
+            "account_scope": "account:windows",
+            "environment": "simnow",
+            "durable_state_version": 0,
+            "durable_state_hash": "0" * 64,
+            "snapshot_generation": 0,
+            "fence": {
+                "active": False,
+                "current_epoch": 0,
+                "current_fencing_token": 0,
+                "high_water_epoch": 0,
+                "high_water_fencing_token": 0,
+            },
+            "receipt_intents": [],
+        },
+    }
+
+
 def _stub_pilot_build(
     module, monkeypatch: pytest.MonkeyPatch, *, position_hash: str
 ) -> None:
-    monkeypatch.setattr(module, "_object", lambda _path, _label: {})
+    monkeypatch.setattr(
+        module,
+        "_object",
+        lambda _path, label: (
+            _exact_peek_facts()
+            if label == "peek current facts"
+            else {"state": "RECONCILED", "unknown_outcomes": 0}
+        ),
+    )
     monkeypatch.setattr(module, "_require_reconciliation", lambda _value: None)
     monkeypatch.setattr(
         module,
@@ -1425,7 +1465,15 @@ def test_pilot_start_uncertainty_never_retries_start(
                 {"receipt_id": "receipt-0001", "artifact_sha256": "a" * 64},
             )()
 
-    monkeypatch.setattr(module, "_object", lambda _path, _label: {})
+    monkeypatch.setattr(
+        module,
+        "_object",
+        lambda _path, label: (
+            _exact_peek_facts()
+            if label == "peek current facts"
+            else {"state": "RECONCILED", "unknown_outcomes": 0}
+        ),
+    )
     monkeypatch.setattr(module, "_require_reconciliation", lambda _value: None)
     monkeypatch.setattr(
         module,

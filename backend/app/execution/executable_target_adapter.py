@@ -51,6 +51,9 @@ class ExecutableTargetAdapterError(ValueError):
 _EXACT_CONTRACT = re.compile(r"^(CFFEX|CZCE|DCE|GFEX|INE|SHFE)\.([A-Za-z]+[0-9]{4})$")
 _CLOSE_ORDER_OFFSETS = frozenset({"CLOSE", "CLOSETODAY", "CLOSEYESTERDAY"})
 _CLOSE_OFFSET_EXCHANGES = frozenset({"INE", "SHFE"})
+_TERMINAL_EXECUTION_ORDER_STATUSES = frozenset(
+    {"ALLTRADED", "CANCELLED", "CANCELED", "REJECTED"}
+)
 _FALSE_AUTHORITY_FIELDS = frozenset(
     {
         "control_authorized",
@@ -75,6 +78,36 @@ _FALSE_AUTHORITY_FIELDS = frozenset(
         "custody_published",
     }
 )
+
+
+def _without_terminal_execution_orders(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Return a copy with only explicitly terminal broker readback removed."""
+
+    if not isinstance(value, Mapping):
+        raise ExecutableTargetAdapterError("peek current facts are invalid")
+    execution = value.get("execution")
+    if (
+        not isinstance(execution, Mapping)
+        or set(execution) != {"orders"}
+        or not isinstance(execution["orders"], Mapping)
+    ):
+        raise ExecutableTargetAdapterError("peek execution facts are invalid")
+    for order_id, row in execution["orders"].items():
+        if not isinstance(order_id, str) or not isinstance(row, Mapping):
+            raise ExecutableTargetAdapterError("peek execution order is invalid")
+        status = row.get("status")
+        normalized_status = (
+            status.upper().replace("_", "").replace(" ", "")
+            if isinstance(status, str)
+            else ""
+        )
+        if normalized_status not in _TERMINAL_EXECUTION_ORDER_STATUSES:
+            raise ExecutableTargetAdapterError(
+                "peek execution order is not explicitly terminal"
+            )
+    sanitized = dict(value)
+    sanitized["execution"] = {"orders": {}}
+    return sanitized
 _AUTHORITY_SUFFIX = "_authorized"
 _AUTHORITY_LIKE_FIELDS = (
     "production_allowed",

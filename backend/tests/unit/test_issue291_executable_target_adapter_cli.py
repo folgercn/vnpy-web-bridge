@@ -10,6 +10,7 @@ import pytest
 from app.execution import ExecutionOrchestrator, InMemoryExecutionRepository
 from app.execution.executable_target_adapter import (
     ExecutableTargetAdapterError,
+    _without_terminal_execution_orders,
     peek_current_facts_to_snapshot,
 )
 from app.execution.final_runtime import (
@@ -248,7 +249,6 @@ def test_peek_default_mode_rejects_terminal_execution_order() -> None:
     with pytest.raises(ExecutableTargetAdapterError, match="execution orders"):
         peek_current_facts_to_snapshot(facts, account_scope=SCOPE)
 
-
 def test_public_peek_cannot_enable_terminal_execution_order_bypass() -> None:
     facts = _peek({})
     facts["execution"]["orders"] = {
@@ -260,6 +260,29 @@ def test_public_peek_cannot_enable_terminal_execution_order_bypass() -> None:
             facts,
             account_scope=SCOPE,
             allow_terminal_execution_orders=True,
+        )
+
+
+def test_pilot_terminal_execution_readback_is_removed_before_public_peek() -> None:
+    facts = _peek({})
+    facts["execution"]["orders"] = {"CTP.terminal": {"status": "ALLTRADED"}}
+
+    pilot_peek = peek_current_facts_to_snapshot(
+        _without_terminal_execution_orders(facts), account_scope=SCOPE
+    )
+
+    assert pilot_peek.snapshot.active_order_count == 0
+    assert pilot_peek.snapshot.orders == {}
+
+
+def test_pilot_terminal_execution_readback_does_not_override_active_order_block() -> None:
+    facts = _peek({})
+    facts["execution"]["orders"] = {"CTP.terminal": {"status": "ALLTRADED"}}
+    facts["active_orders"] = {"CTP.active": {"status": "SUBMITTED"}}
+
+    with pytest.raises(ExecutableTargetAdapterError, match="active or execution orders"):
+        peek_current_facts_to_snapshot(
+            _without_terminal_execution_orders(facts), account_scope=SCOPE
         )
 
 
@@ -279,6 +302,21 @@ def test_reduce_only_cli_preprocessor_rejects_nonterminal_execution_order(
             facts,
             account_scope=SCOPE,
         )
+
+
+@pytest.mark.parametrize(
+    "status",
+    ("SUBMITTING", "SUBMITTED", "NOTTRADED", "PARTTRADED", "UNKNOWN", None),
+)
+def test_pilot_terminal_execution_readback_rejects_nonterminal_order(
+    status: str | None,
+) -> None:
+    facts = _peek({})
+    row = {} if status is None else {"status": status}
+    facts["execution"]["orders"] = {"CTP.nonterminal": row}
+
+    with pytest.raises(ExecutableTargetAdapterError, match="not explicitly terminal"):
+        _without_terminal_execution_orders(facts)
 
 
 def test_cli_exposes_explicit_reduce_only_close_flag() -> None:
