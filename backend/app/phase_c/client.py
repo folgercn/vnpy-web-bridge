@@ -20,6 +20,7 @@ from .models import (
     CustodyReceiptDTO,
     ExecutionProjectionDTO,
     SignedArtifactUploadDTO,
+    TRUSTED_KEYLESS_TARGET_PLAN_SCHEMA_REFS,
     TrustedKeylessCustodyReceiptDTO,
     TrustedKeylessTargetPlanUploadDTO,
 )
@@ -201,7 +202,7 @@ class RemotePhaseCWorkflowClient:
     def _custody_receipt(raw: dict[str, Any] | None) -> CustodyInstallReceipt | None:
         if raw is None:
             return None
-        if raw.get("schema_ref") == "web-bridge-simnow-keyless-target-plan-v1":
+        if raw.get("schema_ref") in TRUSTED_KEYLESS_TARGET_PLAN_SCHEMA_REFS:
             return TrustedKeylessCustodyReceiptDTO.model_validate(raw)
         return CustodyReceiptDTO.model_validate(raw)
 

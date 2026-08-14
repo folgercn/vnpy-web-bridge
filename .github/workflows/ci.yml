@@ -847,7 +847,9 @@ jobs:
           image="vnpy-web-bridge-simnow-runner:ci-${GITHUB_SHA}"
           docker build --file deployments/phase-b/Containerfile.simnow-runner --tag "$image" .
           docker image inspect "$image" | python -c "import json,sys; config=json.load(sys.stdin)[0]['Config']; assert config['Entrypoint'] == ['python', '/app/scripts/simnow_run_once.py']; assert config['User'] == '65532:65532'"
-          docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --tmpfs /tmp:rw,noexec,nosuid,size=16m,uid=65532,gid=65532,mode=0700 "$image" --help | grep -F -- '--map-source'
+          docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --tmpfs /tmp:rw,noexec,nosuid,size=16m,uid=65532,gid=65532,mode=0700 "$image" --help | tee /tmp/simnow-runner-help.txt
+          grep -F -- '--static-core-source' /tmp/simnow-runner-help.txt
+          grep -F -- '--position-manager-source' /tmp/simnow-runner-help.txt
 
   backend:
     name: Backend tests (shard ${{ matrix.shard }})

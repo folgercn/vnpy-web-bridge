@@ -1,10 +1,11 @@
-"""Offline MAP/C_FAST to TargetPlan v1 adapter.
+"""Offline commodity target adapters for trusted SIMNOW execution.
 
 This module deliberately has no RPC, gateway client, signer, custody writer,
 or Execution lifecycle dependency.  A caller must hand it a fresh, already
 read-only ``GatewaySnapshot`` and a reconciled Execution state.  Its output is
-an immutable TargetPlan plus the existing artifact-envelope input which an
-offline signing ceremony may sign and install through custody.
+an immutable TargetPlan handoff for the existing custody and Execution path.
+The historical MAP/C_FAST v1 adapter remains byte-compatible; the v2 adapter
+binds the complete STATIC_CORE_EQUAL plus thermostat replay before masking.
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ from shared.artifact_contracts.v1 import (
 )
 from shared.commodity_execution import (
     KEYLESS_TARGET_PLAN_SCHEMA_VERSION,
+    KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION,
     TARGET_PLAN_SCHEMA_VERSION,
     TRUSTED_KEYLESS_SIMNOW_SCOPE,
     CommodityExecutionContractError,
@@ -34,6 +36,7 @@ from shared.commodity_execution import (
     before_position_projection_hash,
     build_target_plan,
     build_trusted_keyless_target_plan,
+    build_trusted_keyless_target_plan_v2,
     canonical_before_position_projection,
     canonical_target_position_projection,
     sha256_json,
@@ -41,6 +44,12 @@ from shared.commodity_execution import (
 )
 from shared.commodity_execution.v1 import canonical_json, utc_now
 
+from ..core.commodity_strategy_identity import (
+    COMMODITY_C_FAST_ALLOCATION_POLICY_IDENTITY_V1,
+    COMMODITY_FROZEN_SECTOR_MAP_V1,
+    COMMODITY_FROZEN_SECTOR_MAP_V1_ID,
+    COMMODITY_MAP_STRATEGY_IDENTITY_V1,
+)
 from .gateway_contracts import GatewaySnapshot
 
 
@@ -49,6 +58,7 @@ class ExecutableTargetAdapterError(ValueError):
 
 
 _EXACT_CONTRACT = re.compile(r"^(CFFEX|CZCE|DCE|GFEX|INE|SHFE)\.([A-Za-z]+[0-9]{4})$")
+_RUN_ID = re.compile(r"^[A-Za-z0-9._-]{8,128}$")
 _CLOSE_ORDER_OFFSETS = frozenset({"CLOSE", "CLOSETODAY", "CLOSEYESTERDAY"})
 _CLOSE_OFFSET_EXCHANGES = frozenset({"INE", "SHFE"})
 _TERMINAL_EXECUTION_ORDER_STATUSES = frozenset(
@@ -76,6 +86,38 @@ _FALSE_AUTHORITY_FIELDS = frozenset(
         "authority_granted",
         "signing_requested",
         "custody_published",
+    }
+)
+_STATIC_CORE_EQUAL_STATUS = "PURE_RESEARCH_PRODUCER_ONLY_NOT_REAL_ARTIFACT"
+_STATIC_CORE_EQUAL_KERNEL_ID = "commodity_static_core_equal_pure_producer_v1"
+_STATIC_CORE_EQUAL_PRODUCTS = tuple(COMMODITY_FROZEN_SECTOR_MAP_V1)
+_STATIC_CORE_EQUAL_ARTIFACT_ROLES = (
+    "freeze_contract",
+    "research_manifest",
+    "signal_evidence",
+    "target_evidence",
+    "allocation_evidence",
+    "daily_roll_evidence",
+    "reference_price_evidence",
+    "calendar_authority",
+    "contract_spec_evidence",
+)
+_STATIC_CORE_EQUAL_AUTHORITY_FIELDS = frozenset(
+    {
+        "control_authorized",
+        "deployment_authorized",
+        "execution_authorized",
+        "simnow_execution_authorized",
+        "runtime_activation_authorized",
+        "network_authorized",
+        "web_bridge_rpc_authorized",
+        "order_authorized",
+        "order_submission_authorized",
+        "position_mutation_authorized",
+        "dispatch_authorized",
+        "trading_authorized",
+        "production_authorized",
+        "automatic_promotion_authorized",
     }
 )
 
@@ -108,6 +150,8 @@ def _without_terminal_execution_orders(value: Mapping[str, Any]) -> dict[str, An
     sanitized = dict(value)
     sanitized["execution"] = {"orders": {}}
     return sanitized
+
+
 _AUTHORITY_SUFFIX = "_authorized"
 _AUTHORITY_LIKE_FIELDS = (
     "production_allowed",
@@ -136,7 +180,7 @@ class ExecutableTargetPlanHandoff:
     """
 
     target_plan: dict[str, Any]
-    lineage: tuple[str, str]
+    lineage: tuple[str, ...]
     scope: dict[str, Any]
     expires_at: str
 
@@ -173,20 +217,61 @@ class ExecutableTargetPlanHandoff:
         never publishes the candidates as custody artifacts.
         """
 
-        if self.target_plan.get("schema_version") != KEYLESS_TARGET_PLAN_SCHEMA_VERSION:
+        schema_version = self.target_plan.get("schema_version")
+        if schema_version not in {
+            KEYLESS_TARGET_PLAN_SCHEMA_VERSION,
+            KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION,
+        }:
             raise ExecutableTargetAdapterError("target plan is not trusted keyless")
         return new_artifact_envelope(
             artifact_type="simnow-target-plan",
             trust_domain="runtime_authorization",
-            producer_id="c-fast-executable-target-adapter",
-            producer_version="v1",
-            schema_ref=KEYLESS_TARGET_PLAN_SCHEMA_VERSION,
+            producer_id=(
+                "static-core-equal-final-target-adapter"
+                if schema_version == KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION
+                else "c-fast-executable-target-adapter"
+            ),
+            producer_version=(
+                "v2"
+                if schema_version == KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION
+                else "v1"
+            ),
+            schema_ref=str(schema_version),
             payload=self.target_plan,
             generated_at=str(self.target_plan["generated_at"]),
             scope=self.scope,
             predecessor_refs=[],
             lineage=[],
         )
+
+
+@dataclass(frozen=True, slots=True)
+class StaticCoreEqualKeylessDecision:
+    """Fully replay-bound ten-product target, optionally masked to one order.
+
+    ``final_target_projection`` and ``final_target_sha256`` are calculated
+    before the one-product execution mask.  A ``None`` handoff is either a
+    fully validated NOOP or a structured no-eligible-target STOP; neither may
+    enter custody or mutate Execution.
+    """
+
+    handoff: ExecutableTargetPlanHandoff | None
+    static_core_equal_sha256: str
+    position_manager_sha256: str
+    final_target_sha256: str
+    final_target_projection: dict[str, Any]
+    selected_product: str
+    selected_target_quantity: int
+    current_quantity: int | None
+    stop_reason: str | None
+
+    @property
+    def noop(self) -> bool:
+        return self.handoff is None and self.stop_reason is None
+
+    @property
+    def stopped(self) -> bool:
+        return self.stop_reason is not None
 
 
 @dataclass(frozen=True, slots=True)
@@ -222,6 +307,250 @@ def _require_false_authority(payload: Mapping[str, Any], label: str) -> None:
         )
     if any(payload[field] is not False for field in _FALSE_AUTHORITY_FIELDS):
         raise ExecutableTargetAdapterError(f"{label} attempts to grant authority")
+
+
+def _require_static_core_false_authority(
+    payload: Mapping[str, Any], label: str
+) -> None:
+    if any(
+        field not in payload or payload[field] is not False
+        for field in _STATIC_CORE_EQUAL_AUTHORITY_FIELDS
+    ):
+        raise ExecutableTargetAdapterError(f"{label} attempts to grant authority")
+    if any(
+        isinstance(field, str) and field.endswith("_authorized") and value is not False
+        for field, value in payload.items()
+    ):
+        raise ExecutableTargetAdapterError(f"{label} attempts to grant authority")
+
+
+def _static_core_equal_outputs(
+    *,
+    producer_projection: Mapping[str, Any],
+    freeze_contract: Mapping[str, Any],
+    target_evidence: Mapping[str, Any],
+) -> tuple[str, dict[str, dict[str, Any]], str]:
+    projection = _mapping(producer_projection, "STATIC_CORE_EQUAL projection")
+    freeze = _mapping(freeze_contract, "STATIC_CORE_EQUAL freeze contract")
+    target = _mapping(target_evidence, "STATIC_CORE_EQUAL target evidence")
+    if set(projection) != {
+        "projection_type",
+        "status",
+        "scheduler_id",
+        "producer_kernel_id",
+        "source_view_canonical_sha256",
+        "artifact_roles",
+        "artifact_digests",
+    }:
+        raise ExecutableTargetAdapterError(
+            "STATIC_CORE_EQUAL projection fields are invalid"
+        )
+    if (
+        projection["projection_type"] != "research_evidence_projection_v1"
+        or projection["status"] != _STATIC_CORE_EQUAL_STATUS
+        or projection["scheduler_id"] != "STATIC_CORE_EQUAL"
+        or projection["producer_kernel_id"] != _STATIC_CORE_EQUAL_KERNEL_ID
+        or projection["artifact_roles"] != list(_STATIC_CORE_EQUAL_ARTIFACT_ROLES)
+    ):
+        raise ExecutableTargetAdapterError(
+            "STATIC_CORE_EQUAL projection identity is invalid"
+        )
+    _sha(
+        projection["source_view_canonical_sha256"],
+        "STATIC_CORE_EQUAL source hash",
+    )
+    digests = projection["artifact_digests"]
+    if not isinstance(digests, list) or len(digests) != len(
+        _STATIC_CORE_EQUAL_ARTIFACT_ROLES
+    ):
+        raise ExecutableTargetAdapterError(
+            "STATIC_CORE_EQUAL artifact digests are invalid"
+        )
+    digest_by_role: dict[str, str] = {}
+    for index, item in enumerate(digests):
+        if (
+            not isinstance(item, Mapping)
+            or set(item) != {"role", "sha256"}
+            or item.get("role") != _STATIC_CORE_EQUAL_ARTIFACT_ROLES[index]
+        ):
+            raise ExecutableTargetAdapterError(
+                "STATIC_CORE_EQUAL artifact digests are invalid"
+            )
+        digest_by_role[str(item["role"])] = _sha(
+            item.get("sha256"), "STATIC_CORE_EQUAL artifact digest"
+        )
+    if digest_by_role["freeze_contract"] != sha256_json(freeze) or digest_by_role[
+        "target_evidence"
+    ] != sha256_json(target):
+        raise ExecutableTargetAdapterError(
+            "STATIC_CORE_EQUAL replay artifacts are cross-spliced"
+        )
+    for payload, role in ((freeze, "freeze contract"), (target, "target evidence")):
+        if (
+            payload.get("status") != _STATIC_CORE_EQUAL_STATUS
+            or payload.get("scheduler_id") != "STATIC_CORE_EQUAL"
+            or payload.get("producer_kernel_id") != _STATIC_CORE_EQUAL_KERNEL_ID
+            or payload.get("artifact_role") != role.replace(" ", "_")
+            or payload.get("source_view_canonical_sha256")
+            != projection["source_view_canonical_sha256"]
+            or payload.get("research_evidence_only") is not True
+        ):
+            raise ExecutableTargetAdapterError(
+                f"STATIC_CORE_EQUAL {role} identity is invalid"
+            )
+        _require_static_core_false_authority(payload, f"STATIC_CORE_EQUAL {role}")
+    if (
+        freeze.get("candidate_weights") != {"C": 0.5, "D": 0.5}
+        or freeze.get("C_candidate_id")
+        != COMMODITY_C_FAST_ALLOCATION_POLICY_IDENTITY_V1
+        or freeze.get("D_candidate_id") != "D_DONCHIAN20_EXIT10_NEUTRAL"
+        or freeze.get("sector_map_id") != COMMODITY_FROZEN_SECTOR_MAP_V1_ID
+        or freeze.get("sector_map") != dict(COMMODITY_FROZEN_SECTOR_MAP_V1)
+    ):
+        raise ExecutableTargetAdapterError(
+            "STATIC_CORE_EQUAL frozen identity is invalid"
+        )
+    rows = target.get("targets")
+    if not isinstance(rows, list) or len(rows) != len(_STATIC_CORE_EQUAL_PRODUCTS):
+        raise ExecutableTargetAdapterError(
+            "STATIC_CORE_EQUAL must contain the frozen ten targets"
+        )
+    by_product: dict[str, dict[str, Any]] = {}
+    for index, raw in enumerate(rows):
+        row = _mapping(raw, f"STATIC_CORE_EQUAL target[{index}]")
+        product = row.get("product")
+        if product != _STATIC_CORE_EQUAL_PRODUCTS[index] or product in by_product:
+            raise ExecutableTargetAdapterError(
+                "STATIC_CORE_EQUAL targets are incomplete or reordered"
+            )
+        if row.get("sector") != COMMODITY_FROZEN_SECTOR_MAP_V1[product]:
+            raise ExecutableTargetAdapterError(
+                "STATIC_CORE_EQUAL target sector map is invalid"
+            )
+        quantity = row.get("target_quantity")
+        if isinstance(quantity, bool) or not isinstance(quantity, int):
+            raise ExecutableTargetAdapterError(
+                "STATIC_CORE_EQUAL target quantity is invalid"
+            )
+        _contract(row.get("exact_contract"))
+        by_product[product] = row
+    execution_day = _require_text(
+        target.get("execution_day"), "STATIC_CORE_EQUAL execution day"
+    )
+    return sha256_json(projection), by_product, execution_day
+
+
+def _position_manager_final_projection(
+    *,
+    snapshot: Mapping[str, Any],
+    expected_sha256: str,
+    static_rows: Mapping[str, Mapping[str, Any]],
+    static_execution_day: str,
+) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+    value = _mapping(snapshot, "position-manager snapshot")
+    normalized_expected_sha256 = _sha(expected_sha256, "position-manager snapshot hash")
+    if sha256_json(value) != normalized_expected_sha256:
+        raise ExecutableTargetAdapterError("position-manager snapshot hash mismatch")
+    if (
+        value.get("schema_version")
+        != "commodity_relative_vol_position_manager_shadow_v2"
+        or value.get("position_manager_id") != "MONTHLY_RELATIVE_VOL_THERMOSTAT_V1"
+        or value.get("sector_map_id") != "POSITION_MANAGER_SECTOR_MAP_V1"
+        or value.get("baseline_scheduler_id") != "STATIC_CORE_EQUAL"
+        or value.get("mode") != "shadow_only"
+        or value.get("execution_lane") != "simnow_shakedown"
+        or value.get("countable_forward") is not False
+        or value.get("authority_granted") is not False
+        or value.get("dispatch_allowed") is not False
+        or value.get("execution_day") != static_execution_day
+    ):
+        raise ExecutableTargetAdapterError(
+            "position-manager snapshot identity is invalid"
+        )
+    targets = value.get("targets")
+    if not isinstance(targets, list) or len(targets) != len(
+        _STATIC_CORE_EQUAL_PRODUCTS
+    ):
+        raise ExecutableTargetAdapterError(
+            "position-manager snapshot must contain the frozen ten targets"
+        )
+    final_rows: list[dict[str, Any]] = []
+    by_product: dict[str, dict[str, Any]] = {}
+    for index, raw in enumerate(targets):
+        row = _mapping(raw, f"position-manager target[{index}]")
+        product = row.get("product")
+        if product != _STATIC_CORE_EQUAL_PRODUCTS[index] or product in by_product:
+            raise ExecutableTargetAdapterError(
+                "position-manager targets are incomplete or reordered"
+            )
+        static_row = static_rows[product]
+        baseline_binding = {
+            "product": product,
+            "exact_contract": row.get("exact_contract"),
+            "target_quantity": row.get("baseline_target_quantity"),
+            "source_target_weight": row.get("baseline_source_target_weight"),
+            "buffered_target_weight": row.get("baseline_buffered_target_weight"),
+            "reference_open_price": row.get("reference_open_price"),
+            "multiplier": row.get("multiplier"),
+            "price_tick": row.get("price_tick"),
+        }
+        static_binding = {
+            key: static_row.get(key)
+            for key in (
+                "product",
+                "exact_contract",
+                "target_quantity",
+                "source_target_weight",
+                "buffered_target_weight",
+                "reference_open_price",
+                "multiplier",
+                "price_tick",
+            )
+        }
+        if sha256_json(baseline_binding) != sha256_json(static_binding):
+            raise ExecutableTargetAdapterError(
+                f"position-manager baseline is not bound to STATIC_CORE_EQUAL: {product}"
+            )
+        shadow_quantity = row.get("shadow_target_quantity")
+        if isinstance(shadow_quantity, bool) or not isinstance(shadow_quantity, int):
+            raise ExecutableTargetAdapterError(
+                "position-manager shadow target quantity is invalid"
+            )
+        _contract(row.get("exact_contract"))
+        final_row = {
+            "product": product,
+            "sector": COMMODITY_FROZEN_SECTOR_MAP_V1[product],
+            "exact_contract": row["exact_contract"],
+            "target_quantity": shadow_quantity,
+            "reference_open_price": row["reference_open_price"],
+            "multiplier": row["multiplier"],
+            "price_tick": row["price_tick"],
+        }
+        final_rows.append(final_row)
+        by_product[product] = final_row
+    projection = {
+        "schema_version": "commodity_static_core_equal_final_target_projection_v1",
+        "strategy_id": "STATIC_CORE_EQUAL",
+        "baseline_scheduler_id": "STATIC_CORE_EQUAL",
+        "execution_lane": "simnow_shakedown",
+        "candidate_weights": {"C": 0.5, "D": 0.5},
+        "c_sleeve_id": COMMODITY_C_FAST_ALLOCATION_POLICY_IDENTITY_V1,
+        "c_map_rule_id": COMMODITY_MAP_STRATEGY_IDENTITY_V1,
+        "d_sleeve_id": "D_DONCHIAN20_EXIT10_NEUTRAL",
+        "sector_map_id": COMMODITY_FROZEN_SECTOR_MAP_V1_ID,
+        "position_manager_id": "MONTHLY_RELATIVE_VOL_THERMOSTAT_V1",
+        "source_month": value.get("source_month"),
+        "execution_day": value.get("execution_day"),
+        "authority_granted": False,
+        "dispatch_allowed": False,
+        "production_allowed": False,
+        "live_trading_authorized": False,
+        "countable_forward": False,
+        "targets": final_rows,
+    }
+    # Detach and prove the complete ten-product projection is canonical before
+    # any product is selected as an execution mask.
+    return _mapping(projection, "STATIC_CORE_EQUAL final target projection"), by_product
 
 
 def _authority_custody_closure(
@@ -948,11 +1277,207 @@ def build_trusted_keyless_executable_target_plan(
     )
 
 
+def build_static_core_equal_keyless_target_decision(
+    *,
+    static_core_equal_projection: Mapping[str, Any],
+    static_core_equal_freeze_contract: Mapping[str, Any],
+    static_core_equal_target_evidence: Mapping[str, Any],
+    position_manager_snapshot: Mapping[str, Any],
+    position_manager_sha256: str,
+    current_facts: GatewaySnapshot,
+    reconciliation: Mapping[str, Any],
+    product: str,
+    run_id: str,
+    expires_at: str,
+    now: datetime | None = None,
+) -> StaticCoreEqualKeylessDecision:
+    """Replay and bind STATIC_CORE_EQUAL plus thermostat before masking.
+
+    The full frozen ten-product final projection is built and hashed before
+    ``product`` is inspected.  Only a universe with no absolute-one target
+    returns a structured STOP; selecting a non-eligible product while another
+    eligible product exists fails closed.  A matching canonical one-lot current
+    position returns a NOOP decision without custody or Execution mutation.  A
+    real delta is admitted only from a flat account and produces one OPEN order.
+    """
+
+    normalized_product = _require_text(product, "product").lower()
+    if normalized_product not in _STATIC_CORE_EQUAL_PRODUCTS:
+        raise ExecutableTargetAdapterError("product is outside the frozen universe")
+    normalized_run_id = _require_text(run_id, "run id")
+    if _RUN_ID.fullmatch(normalized_run_id) is None:
+        raise ExecutableTargetAdapterError("run id is invalid")
+    current_time = utc_now() if now is None else now
+    if current_time.tzinfo is None or current_time.utcoffset() is None:
+        raise ExecutableTargetAdapterError("adapter clock must be timezone-aware")
+    try:
+        normalized_expiry = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+    except (AttributeError, ValueError) as exc:
+        raise ExecutableTargetAdapterError("trusted keyless expiry is invalid") from exc
+    if normalized_expiry.tzinfo is None or normalized_expiry <= current_time:
+        raise ExecutableTargetAdapterError("trusted keyless expiry is invalid")
+
+    static_sha256, static_rows, static_execution_day = _static_core_equal_outputs(
+        producer_projection=static_core_equal_projection,
+        freeze_contract=static_core_equal_freeze_contract,
+        target_evidence=static_core_equal_target_evidence,
+    )
+    final_projection, final_rows = _position_manager_final_projection(
+        snapshot=position_manager_snapshot,
+        expected_sha256=position_manager_sha256,
+        static_rows=static_rows,
+        static_execution_day=static_execution_day,
+    )
+    final_target_sha256 = sha256_json(final_projection)
+    eligible_products = tuple(
+        product
+        for product in _STATIC_CORE_EQUAL_PRODUCTS
+        if abs(final_rows[product]["target_quantity"]) == 1
+    )
+    selected = final_rows[normalized_product]
+    target_quantity = selected["target_quantity"]
+    source_decision_fields = {
+        "static_core_equal_sha256": static_sha256,
+        "position_manager_sha256": _sha(
+            position_manager_sha256, "position-manager snapshot hash"
+        ),
+        "final_target_sha256": final_target_sha256,
+        "final_target_projection": final_projection,
+        "selected_product": normalized_product,
+        "selected_target_quantity": target_quantity,
+    }
+    if eligible_products and normalized_product not in eligible_products:
+        raise ExecutableTargetAdapterError("selected product is not an abs-one target")
+    exchange, symbol = _contract(selected["exact_contract"])
+    positions = _validate_snapshot(
+        current_facts,
+        account_scope="account:windows",
+        environment="SIMNOW",
+        reconciliation=reconciliation,
+    )
+    long_volume, short_volume, matching = _current_contract_positions(
+        positions,
+        exchange=exchange,
+        symbol=symbol,
+        gateway_name="CTP",
+    )
+    current_quantity = long_volume - short_volume
+    if not eligible_products:
+        return StaticCoreEqualKeylessDecision(
+            handoff=None,
+            current_quantity=current_quantity,
+            stop_reason="no_abs_one_target",
+            **source_decision_fields,
+        )
+    delta = target_quantity - current_quantity
+    decision_fields = {
+        **source_decision_fields,
+        "current_quantity": current_quantity,
+        "stop_reason": None,
+    }
+    gross_position_volume = sum(
+        int(row.get("volume", 0))
+        for row in positions.values()
+        if isinstance(row, Mapping)
+    )
+    if delta == 0:
+        if (
+            gross_position_volume != 1
+            or long_volume + short_volume != 1
+            or (target_quantity > 0 and (long_volume, short_volume) != (1, 0))
+            or (target_quantity < 0 and (long_volume, short_volume) != (0, 1))
+        ):
+            raise ExecutableTargetAdapterError(
+                "NOOP requires the sole canonical one-lot target position"
+            )
+        return StaticCoreEqualKeylessDecision(handoff=None, **decision_fields)
+    if gross_position_volume != 0 or abs(delta) != 1:
+        raise ExecutableTargetAdapterError(
+            "STATIC_CORE_EQUAL Run A requires a flat account and one-lot delta"
+        )
+
+    expected_before = before_position_projection_hash(
+        positions,
+        account_scope="account:windows",
+        environment="SIMNOW",
+    )
+    direction = "LONG" if delta > 0 else "SHORT"
+    after_positions = _after_positions(
+        positions,
+        matching,
+        exchange=exchange,
+        symbol=symbol,
+        gateway_name="CTP",
+        direction=direction,
+        offset="OPEN",
+    )
+    expected_after = target_position_projection_hash(
+        after_positions,
+        account_scope="account:windows",
+        environment="SIMNOW",
+    )
+    identity = sha256_json(
+        {
+            "static_core_equal_sha256": static_sha256,
+            "position_manager_sha256": position_manager_sha256,
+            "final_target_sha256": final_target_sha256,
+            "expected_before_position_hash": expected_before,
+            "product": normalized_product,
+            "gateway_name": "CTP",
+            "run_id": normalized_run_id,
+        }
+    )
+    try:
+        plan = build_trusted_keyless_target_plan_v2(
+            plan_id=f"static-core-equal-target-plan-v2-{identity}",
+            account_scope="account:windows",
+            environment="SIMNOW",
+            gateway_name="CTP",
+            lineage={
+                "static_core_equal_sha256": static_sha256,
+                "position_manager_sha256": position_manager_sha256,
+                "final_target_sha256": final_target_sha256,
+            },
+            scope=dict(TRUSTED_KEYLESS_SIMNOW_SCOPE),
+            generated_at=current_time.isoformat().replace("+00:00", "Z"),
+            expires_at=expires_at,
+            phase="OPEN",
+            expected_before_position_hash=expected_before,
+            expected_after_position_hash=expected_after,
+            orders=[
+                {
+                    "symbol": symbol,
+                    "exchange": exchange,
+                    "direction": direction,
+                    "type": "LIMIT",
+                    "volume": 1,
+                    "price": selected["reference_open_price"],
+                    "offset": "OPEN",
+                    "reference": identity,
+                    "gateway_name": "CTP",
+                }
+            ],
+        )
+    except CommodityExecutionContractError as exc:
+        raise ExecutableTargetAdapterError(
+            f"STATIC_CORE_EQUAL TargetPlan v2 is invalid: {exc}"
+        ) from exc
+    handoff = ExecutableTargetPlanHandoff(
+        target_plan=plan,
+        lineage=(static_sha256, position_manager_sha256, final_target_sha256),
+        scope=dict(TRUSTED_KEYLESS_SIMNOW_SCOPE),
+        expires_at=str(plan["expires_at"]),
+    )
+    return StaticCoreEqualKeylessDecision(handoff=handoff, **decision_fields)
+
+
 __all__ = [
     "ExecutableTargetAdapterError",
     "ExecutableTargetPlanHandoff",
     "PeekCurrentFacts",
+    "StaticCoreEqualKeylessDecision",
     "build_executable_target_plan",
+    "build_static_core_equal_keyless_target_decision",
     "build_trusted_keyless_executable_target_plan",
     "peek_current_facts_to_snapshot",
 ]

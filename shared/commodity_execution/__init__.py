@@ -6,6 +6,7 @@ not know about FastAPI, RPC, signing keys, or the legacy trading services.
 
 from .v1 import (
     KEYLESS_TARGET_PLAN_SCHEMA_VERSION,
+    KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION,
     TARGET_PLAN_SCHEMA_VERSION,
     TRUSTED_KEYLESS_SIMNOW_SCOPE,
     CommodityExecutionContractError,
@@ -16,6 +17,7 @@ from .v1 import (
     before_position_projection_hash,
     build_target_plan,
     build_trusted_keyless_target_plan,
+    build_trusted_keyless_target_plan_v2,
     canonical_before_position_projection,
     canonical_target_position_projection,
     sha256_json,
@@ -24,6 +26,7 @@ from .v1 import (
 
 __all__ = [
     "KEYLESS_TARGET_PLAN_SCHEMA_VERSION",
+    "KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION",
     "TARGET_PLAN_SCHEMA_VERSION",
     "TRUSTED_KEYLESS_SIMNOW_SCOPE",
     "CommodityExecutionContractError",
@@ -34,6 +37,7 @@ __all__ = [
     "before_position_projection_hash",
     "build_target_plan",
     "build_trusted_keyless_target_plan",
+    "build_trusted_keyless_target_plan_v2",
     "canonical_before_position_projection",
     "canonical_target_position_projection",
     "sha256_json",

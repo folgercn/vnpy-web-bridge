@@ -26,6 +26,7 @@ from shared.artifact_contracts.v1 import (
 )
 from shared.commodity_execution.v1 import (
     KEYLESS_TARGET_PLAN_SCHEMA_VERSION,
+    KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION,
     TARGET_PLAN_SCHEMA_VERSION,
     CommodityExecutionContractError,
     TargetPlan,
@@ -370,7 +371,11 @@ class FinalExecutionRuntime:
         try:
             receipt = (
                 TrustedKeylessCustodyReceipt.from_mapping(raw_receipt)
-                if raw_receipt.get("schema_ref") == KEYLESS_TARGET_PLAN_SCHEMA_VERSION
+                if raw_receipt.get("schema_ref")
+                in {
+                    KEYLESS_TARGET_PLAN_SCHEMA_VERSION,
+                    KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION,
+                }
                 else VerifiedCustodyReceipt.from_mapping(raw_receipt)
             )
         except CommodityExecutionContractError as exc:
@@ -387,7 +392,7 @@ class FinalExecutionRuntime:
         ) != (
             "simnow-target-plan",
             "runtime_authorization",
-            KEYLESS_TARGET_PLAN_SCHEMA_VERSION if keyless else TARGET_PLAN_SCHEMA_VERSION,
+            receipt.raw["schema_ref"] if keyless else TARGET_PLAN_SCHEMA_VERSION,
         ):
             raise PlanRejected("SIMNOW preview receipt does not identify a target plan")
         try:
@@ -427,6 +432,7 @@ class FinalExecutionRuntime:
             or artifact["artifact_type"] != receipt.raw["artifact_type"]
             or artifact["trust_domain"] != receipt.raw["trust_domain"]
             or artifact["schema_ref"] != receipt.raw["schema_ref"]
+            or artifact["schema_ref"] != plan.raw["schema_version"]
             or artifact["scope"] != receipt.scope
             or artifact["scope"] != plan.raw["scope"]
             or receipt.scope != plan.raw["scope"]

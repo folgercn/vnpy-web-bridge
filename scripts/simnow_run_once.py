@@ -1,4 +1,4 @@
-"""One fixed-tuple SIMNOW run: MAP/C_FAST -> custody -> Execution lifecycle.
+"""One fixed-tuple SIMNOW run: STATIC_CORE_EQUAL -> custody -> Execution.
 
 The runner has no gateway/RPC import.  It uses the existing read-only facts,
 Phase-C custody client and private Execution command client only.  A held
@@ -26,30 +26,29 @@ from app.control_execution_client import (  # noqa: E402
     ExecutionClientError,
 )
 from app.execution.executable_target_adapter import (  # noqa: E402
-    build_trusted_keyless_executable_target_plan,
+    _without_terminal_execution_orders,
+    build_static_core_equal_keyless_target_decision,
     peek_current_facts_to_snapshot,
 )
 from app.phase_c.client import RemotePhaseCWorkflowClient  # noqa: E402
 from app.phase_c.models import TrustedKeylessTargetPlanUploadDTO  # noqa: E402
-from c_fast_producer.producer import (  # noqa: E402
-    MAP_ACCEPTANCE_TRUST_DOMAIN,
-    ProducerError,
-    produce_c_fast_candidate,
+from commodity_relative_vol_snapshot_producer import (  # noqa: E402
+    SnapshotProducerError,
+    produce_snapshot as produce_position_manager_snapshot,
 )
-from c_fast_producer.producer import (  # noqa: E402
-    _read_pinned_file as read_cfast_source,
+from commodity_static_core_equal_pure_producer import (  # noqa: E402
+    StaticCoreEqualProducerError,
+    produce_research_artifacts as produce_static_core_equal,
 )
-from map.producer import (  # noqa: E402
-    _read_pinned_file as read_map_source,
-)
-from map.producer import (  # noqa: E402
-    produce_map_candidate,
+from simnow_keyless_pilot import (  # noqa: E402
+    _require_execution_hard_gates,
+    _require_same_execution_binding,
+    _utc_clock,
 )
 
 from shared.trust_contracts.v1 import (  # noqa: E402
     ContractError,
     canonical_json_line,
-    load_keyring,
 )
 
 _TERMINAL_INTENT_STATES = frozenset({"TERMINAL", "RECONCILED", "CANCELLED"})
@@ -63,6 +62,26 @@ def _object(path: Path, label: str) -> dict[str, Any]:
         raise ValueError(f"{label} is invalid") from exc
     if not isinstance(value, dict) or canonical_json_line(value) != raw:
         raise ValueError(f"{label} must be canonical JSON")
+    return value
+
+
+def _source_bytes(path: Path, label: str) -> bytes:
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise ValueError(f"{label} cannot be read") from exc
+    if not raw:
+        raise ValueError(f"{label} is empty")
+    return raw
+
+
+def _generated_object(raw: bytes, label: str) -> dict[str, Any]:
+    try:
+        value = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"{label} is invalid") from exc
+    if not isinstance(value, dict) or canonical_json_line(value) != raw + b"\n":
+        raise ValueError(f"{label} is not canonical JSON")
     return value
 
 
@@ -93,11 +112,8 @@ def _command(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="fixed keyless SIMNOW run once")
-    parser.add_argument("--map-source", required=True, type=Path)
-    parser.add_argument("--c-fast-source", required=True, type=Path)
-    parser.add_argument("--map-acceptance", required=True, type=Path)
-    parser.add_argument("--map-acceptance-keyring", required=True, type=Path)
-    parser.add_argument("--map-acceptance-keyring-sha256", required=True)
+    parser.add_argument("--static-core-source", required=True, type=Path)
+    parser.add_argument("--position-manager-source", required=True, type=Path)
     parser.add_argument("--peek-current-facts", required=True, type=Path)
     parser.add_argument("--reconciliation-state", required=True, type=Path)
     parser.add_argument("--product", required=True)
@@ -170,6 +186,22 @@ def _completed(status: dict[str, Any], *, plan_id: str, plan_hash: str) -> bool:
     )
 
 
+def _execution_binding(
+    status: dict[str, Any], *, expected_position_snapshot_hash: str
+) -> tuple[Any, ...]:
+    intents = status.get("send_intents", [])
+    if not isinstance(intents, list) or any(
+        not isinstance(item, dict) or item.get("state") not in _TERMINAL_INTENT_STATES
+        for item in intents
+    ):
+        raise ValueError("Execution has a pending or invalid send intent")
+    return _require_execution_hard_gates(
+        status,
+        expected_position_snapshot_hash=expected_position_snapshot_hash,
+        clock=_utc_clock,
+    )
+
+
 def _final_reconcile_completed(
     response: Any,
     *,
@@ -226,37 +258,112 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
     ):
         raise ValueError("completion polling bounds are invalid")
     now = _now()
-    # Candidates are deliberately not CLI inputs: derive both from the
-    # existing canonical producer sources on every run.  This rejects a
-    # self-consistent local candidate that was not generated from those inputs.
-    map_candidate = produce_map_candidate(read_map_source(args.map_source))
-    map_acceptance = _object(args.map_acceptance, "MAP acceptance")
-    keyring, _keyring_raw, _keyring_sha256 = load_keyring(
-        args.map_acceptance_keyring,
-        expected_domain=MAP_ACCEPTANCE_TRUST_DOMAIN,
-        expected_raw_sha256=args.map_acceptance_keyring_sha256,
+    # Both official sources are replayed on every invocation.  The adapter
+    # binds the thermostat's baseline rows to this exact STATIC_CORE_EQUAL
+    # replay before it hashes the complete ten-product final target.
+    static_result = produce_static_core_equal(
+        _source_bytes(args.static_core_source, "STATIC_CORE_EQUAL source")
     )
-    c_fast_candidate = produce_c_fast_candidate(
-        map_candidate.raw,
-        read_cfast_source(args.c_fast_source),
-        map_acceptance=map_acceptance,
-        map_acceptance_keyring=keyring,
-        expected_map_sha256=map_candidate.artifact_sha256,
+    position_result = produce_position_manager_snapshot(
+        _source_bytes(args.position_manager_source, "position-manager source")
     )
     facts = _object(args.peek_current_facts, "peek current facts")
     reconciliation = _object(args.reconciliation_state, "reconciliation state")
     if set(reconciliation) != {"state", "unknown_outcomes"}:
         raise ValueError("reconciliation state fields are invalid")
-    peek = peek_current_facts_to_snapshot(facts, account_scope="account:windows")
-    handoff = build_trusted_keyless_executable_target_plan(
-        map_candidate=map_candidate.payload,
-        c_fast_candidate=c_fast_candidate.payload,
+    peek = peek_current_facts_to_snapshot(
+        _without_terminal_execution_orders(facts), account_scope="account:windows"
+    )
+    decision = build_static_core_equal_keyless_target_decision(
+        static_core_equal_projection=static_result.producer_projection,
+        static_core_equal_freeze_contract=_generated_object(
+            static_result.artifacts["freeze_contract"],
+            "STATIC_CORE_EQUAL freeze contract",
+        ),
+        static_core_equal_target_evidence=_generated_object(
+            static_result.artifacts["target_evidence"],
+            "STATIC_CORE_EQUAL target evidence",
+        ),
+        position_manager_snapshot=_generated_object(
+            position_result.snapshot_draft,
+            "position-manager snapshot",
+        ),
+        position_manager_sha256=position_result.snapshot_draft_sha256,
         current_facts=peek.snapshot,
         reconciliation=reconciliation,
         product=args.product,
+        run_id=args.idempotency_suffix,
         expires_at=args.expires_at,
         now=datetime.fromisoformat(now.replace("Z", "+00:00")),
     )
+    lineage_result = {
+        "static_core_equal_sha256": decision.static_core_equal_sha256,
+        "position_manager_sha256": decision.position_manager_sha256,
+        "final_target_sha256": decision.final_target_sha256,
+        "selected_product": decision.selected_product,
+        "selected_target_quantity": decision.selected_target_quantity,
+        "current_quantity": decision.current_quantity,
+    }
+    execution: ExecutionClient | None = None
+    initial_binding: tuple[Any, ...] | None = None
+    if args.execute:
+        execution = ExecutionClient()
+        try:
+            preflight_status = (await execution.status()).as_dict()
+        except ExecutionClientError as exc:
+            raise ValueError("Execution preflight is unavailable") from exc
+        initial_binding = _execution_binding(
+            preflight_status,
+            expected_position_snapshot_hash=peek.snapshot.position_snapshot_hash,
+        )
+    if getattr(decision, "stopped", False):
+        return {
+            **lineage_result,
+            "stopped": True,
+            "reason": str(decision.stop_reason),
+            "final_targets": [
+                {
+                    "product": row["product"],
+                    "target_quantity": row["target_quantity"],
+                }
+                for row in decision.final_target_projection["targets"]
+            ],
+            "executed": False,
+            "completed": False,
+            "archived": False,
+            "custody_mutated": False,
+            "execution_mutated": False,
+        }
+    if decision.noop:
+        return {
+            **lineage_result,
+            "noop": True,
+            "reason": "target_already_satisfied",
+            "executed": False,
+            "completed": args.execute,
+            "actual_execution_validated": args.execute,
+            "archived": False,
+            "custody_mutated": False,
+            "execution_mutated": False,
+        }
+    handoff = decision.handoff
+    if handoff is None:  # pragma: no cover - guarded by decision.noop
+        raise ValueError("STATIC_CORE_EQUAL target decision is inconsistent")
+
+    if args.execute:
+        if execution is None or initial_binding is None:  # pragma: no cover
+            raise ValueError("Execution preflight was not initialized")
+        try:
+            before_custody = (await execution.status()).as_dict()
+        except ExecutionClientError as exc:
+            raise ValueError("Execution pre-custody status is unavailable") from exc
+        _require_same_execution_binding(
+            initial_binding,
+            _execution_binding(
+                before_custody,
+                expected_position_snapshot_hash=peek.snapshot.position_snapshot_hash,
+            ),
+        )
     artifact = handoff.trusted_keyless_custody_artifact()
     custody = RemotePhaseCWorkflowClient()
     receipt = custody.install_trusted_keyless_target_plan(
@@ -268,6 +375,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         )
     )
     result: dict[str, Any] = {
+        **lineage_result,
         "plan_id": handoff.target_plan["plan_id"],
         "plan_hash": handoff.target_plan["plan_hash"],
         "receipt_id": receipt.receipt_id,
@@ -280,14 +388,29 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         return result
 
     actor = {"service": "control-api", "principal": args.principal, "operator": args.operator, "role": "admin"}
-    execution = ExecutionClient()
+    if execution is None:  # pragma: no cover - guarded by args.execute
+        raise ValueError("Execution client was not initialized")
     status = (await execution.status()).as_dict()
+    if initial_binding is None:  # pragma: no cover - guarded by args.execute
+        raise ValueError("Execution preflight binding is unavailable")
+    _require_same_execution_binding(
+        initial_binding,
+        _execution_binding(
+            status,
+            expected_position_snapshot_hash=peek.snapshot.position_snapshot_hash,
+        ),
+    )
     await execution.submit(_command(name="preview", suffix=f"preview-{args.idempotency_suffix}", version=status["state_version"], actor=actor, now=now, payload={"plan_hash": handoff.target_plan["plan_hash"], "artifact_hash": receipt.artifact_sha256, "mode": "simnow_preview", "receipt_id": receipt.receipt_id}))
     status = (await execution.status()).as_dict()
     await execution.submit(_command(name="reconcile", suffix=f"reconcile-{args.idempotency_suffix}", version=status["state_version"], actor=actor, now=now, payload={"reconciliation_run_id": f"simnow-run-once-reconcile-{args.idempotency_suffix}", "snapshot_id": str(status["broker"]["snapshot_id"]), "reason": "fresh fixed-tuple SIMNOW facts"}))
     status = (await execution.status()).as_dict()
     await execution.submit(_command(name="enable", suffix=f"enable-{args.idempotency_suffix}", version=status["state_version"], actor=actor, now=now, payload={"authority_artifact_id": handoff.target_plan["plan_id"], "authority_hash": handoff.target_plan["plan_hash"], "expires_at": handoff.target_plan["expires_at"], "reason": "trusted keyless custody"}))
     status = (await execution.status()).as_dict()
+    _require_execution_hard_gates(
+        status,
+        expected_position_snapshot_hash=peek.snapshot.position_snapshot_hash,
+        clock=_utc_clock,
+    )
     leader = status["leader"]
     if not leader.get("held"):
         raise ValueError("Execution leader lease is not held; refusing start")
@@ -355,7 +478,14 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
 def main(argv: list[str] | None = None) -> int:
     try:
         result = asyncio.run(run(build_parser().parse_args(argv)))
-    except (ContractError, ProducerError, ValueError, RuntimeError) as exc:
+    except (
+        ContractError,
+        ExecutionClientError,
+        SnapshotProducerError,
+        StaticCoreEqualProducerError,
+        ValueError,
+        RuntimeError,
+    ) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     print(json.dumps(result, sort_keys=True))
