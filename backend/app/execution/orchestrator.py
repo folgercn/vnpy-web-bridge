@@ -949,8 +949,20 @@ class ExecutionOrchestrator:
             )
             raise
         unknown_ids = list(state.get("unknown_outcomes", {}).keys())
+        unknown_id_set = set(unknown_ids)
+        submitted_ids = [
+            intent_id
+            for intent_id, raw_intent in state.get("send_intents", {}).items()
+            if intent_id not in unknown_id_set
+            and isinstance(raw_intent, Mapping)
+            and raw_intent.get("state") == "SUBMITTED"
+        ]
+        recovery_modes = {
+            **{intent_id: "unknown" for intent_id in unknown_ids},
+            **{intent_id: "submitted" for intent_id in submitted_ids},
+        }
         outcomes: dict[str, Any] = {}
-        for intent_id in unknown_ids:
+        for intent_id in recovery_modes:
             raw_intent = state.get("send_intents", {}).get(intent_id)
             if not isinstance(raw_intent, Mapping):
                 continue
@@ -958,6 +970,8 @@ class ExecutionOrchestrator:
             context = self._context_from_intent(intent)
             try:
                 outcome = self.gateway.query_intent(intent, context)
+                if not isinstance(outcome, Mapping):
+                    raise GatewayUnavailable("gateway returned an invalid intent outcome")
             except Exception as exc:  # noqa: BLE001 - any gateway exception leaves outcome unknown
                 outcomes[intent_id] = {"state": "UNKNOWN", "error": str(exc)}
                 continue
@@ -980,9 +994,30 @@ class ExecutionOrchestrator:
                     candidate["unknown_outcomes"][intent_id] = {
                         "reason": outcome.get("error", "outcome remains unknown")
                     }
-                else:
+                    continue
+                if recovery_modes[intent_id] == "unknown":
                     raw["state"] = "RECONCILED"
                     candidate["unknown_outcomes"].pop(intent_id, None)
+                    continue
+                state_name = str(outcome.get("state", "")).upper()
+                if state_name == "REJECTED":
+                    state_name = "TERMINAL"
+                if state_name in {"TERMINAL", "RECONCILED", "CANCELLED"}:
+                    self._apply_intent_result_transition(
+                        candidate,
+                        intent_id,
+                        state_name=state_name,
+                        broker_order_id=outcome.get("broker_order_id"),
+                    )
+                elif state_name not in {
+                    "SUBMITTED",
+                    "ACKNOWLEDGED",
+                    "CANCEL_REQUESTED",
+                }:
+                    raw["state"] = "UNKNOWN_OUTCOME"
+                    candidate["unknown_outcomes"][intent_id] = {
+                        "reason": "gateway returned an unsupported execution state"
+                    }
             unknown_count = len(candidate["unknown_outcomes"])
             candidate["reconciliation"].update(
                 {
@@ -1648,32 +1683,12 @@ class ExecutionOrchestrator:
         broker_order_id = result.get("broker_order_id")
 
         def writer(state: dict[str, Any]) -> None:
-            raw = state["send_intents"].get(intent_id)
-            if not isinstance(raw, dict):
-                raise RepositoryUnavailableError(
-                    "intent disappeared after gateway call"
-                )
-            prior_state = raw.get("state")
-            raw["state"] = state_name
-            if broker_order_id is not None:
-                raw["broker_order_id"] = str(broker_order_id)
-            if state_name in {"TERMINAL", "CANCELLED"} and prior_state not in {
-                "TERMINAL",
-                "CANCELLED",
-            }:
-                state["terminal_archive"].append(
-                    {
-                        "kind": "intent_terminal",
-                        "intent_id": intent_id,
-                        "idempotency_key": raw.get("idempotency_key"),
-                        "broker_order_id": raw.get("broker_order_id"),
-                        "archived_at": format_utc(utc_now()),
-                    }
-                )
-            if state_name == "UNKNOWN_OUTCOME":
-                state["unknown_outcomes"][intent_id] = {
-                    "reason": "gateway returned unknown"
-                }
+            self._apply_intent_result_transition(
+                state,
+                intent_id,
+                state_name=state_name,
+                broker_order_id=broker_order_id,
+            )
 
         try:
             self.repository.mutate(writer)
@@ -1682,6 +1697,41 @@ class ExecutionOrchestrator:
             raise RepositoryUnavailableError(
                 "cannot durably record gateway result"
             ) from exc
+
+    @staticmethod
+    def _apply_intent_result_transition(
+        state: dict[str, Any],
+        intent_id: str,
+        *,
+        state_name: str,
+        broker_order_id: Any,
+    ) -> None:
+        """Apply the durable result transition inside an existing state write."""
+
+        raw = state["send_intents"].get(intent_id)
+        if not isinstance(raw, dict):
+            raise RepositoryUnavailableError("intent disappeared after gateway call")
+        prior_state = raw.get("state")
+        raw["state"] = state_name
+        if broker_order_id is not None:
+            raw["broker_order_id"] = str(broker_order_id)
+        if state_name in {"TERMINAL", "CANCELLED"} and prior_state not in {
+            "TERMINAL",
+            "CANCELLED",
+        }:
+            state["terminal_archive"].append(
+                {
+                    "kind": "intent_terminal",
+                    "intent_id": intent_id,
+                    "idempotency_key": raw.get("idempotency_key"),
+                    "broker_order_id": raw.get("broker_order_id"),
+                    "archived_at": format_utc(utc_now()),
+                }
+            )
+        if state_name == "UNKNOWN_OUTCOME":
+            state["unknown_outcomes"][intent_id] = {
+                "reason": "gateway returned unknown"
+            }
 
     def _mark_unknown(self, intent_id: str, *, reason: str) -> None:
         def writer(state: dict[str, Any]) -> None:
