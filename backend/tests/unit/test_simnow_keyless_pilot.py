@@ -588,6 +588,204 @@ def test_pilot_reads_a_fresh_tail_without_replaying_310k_history(tmp_path: Path)
         monkeypatch.undo()
 
 
+def test_pilot_anchors_append_growth_to_the_initial_frontier(tmp_path: Path) -> None:
+    module = _module("simnow_keyless_pilot_append_frontier")
+    now = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    _write_formal_tick_state(module, tmp_path)
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(module, "_FORMAL_MARKET_STATE_DIR", tmp_path)
+    monkeypatch.setattr(module, "_FORMAL_MARKET_PROJECTION_DIR", tmp_path / "projection")
+    original_tail = module._bounded_verified_tick_tail
+    appended = False
+
+    def append_after_checkpoint(path: Path):
+        nonlocal appended
+        if not appended:
+            appended = True
+            _append_formal_tick(
+                tmp_path,
+                vt_symbol="ru2609.SHFE",
+                source_event_id="tick-event-0002",
+            )
+        return original_tail(path)
+
+    monkeypatch.setattr(module, "_bounded_verified_tick_tail", append_after_checkpoint)
+    try:
+        binding = module._formal_tick_binding(clock=lambda: now)
+        assert appended
+        assert binding[1:3] == ("tick-event-0001", 1)
+    finally:
+        monkeypatch.undo()
+
+
+def test_pilot_retries_a_partial_tail_record_within_snapshot_window(
+    tmp_path: Path,
+) -> None:
+    module = _module("simnow_keyless_pilot_partial_tail_retry")
+    now = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    _write_formal_tick_state(module, tmp_path)
+    journal = tmp_path / "stream" / "verified_ticks.jsonl"
+    journal.write_bytes(journal.read_bytes() + b"{")
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(module, "_FORMAL_MARKET_STATE_DIR", tmp_path)
+    monkeypatch.setattr(module, "_FORMAL_MARKET_PROJECTION_DIR", tmp_path / "projection")
+    waits = 0
+
+    def finish_partial_record(_deadline: float) -> bool:
+        nonlocal waits
+        waits += 1
+        journal.write_bytes(journal.read_bytes()[:-1])
+        return True
+
+    monkeypatch.setattr(module, "_wait_for_formal_snapshot", finish_partial_record)
+    try:
+        assert module._formal_tick_binding(clock=lambda: now)[-1] == 3700.0
+        assert waits == 1
+    finally:
+        monkeypatch.undo()
+
+
+def test_pilot_tail_accepts_append_after_captured_size(tmp_path: Path) -> None:
+    module = _module("simnow_keyless_pilot_tail_append")
+    _write_formal_tick_state(module, tmp_path)
+    acknowledgements = tmp_path / "stream" / "tick_writer_acks.jsonl"
+    original_read = module._read_bounded_range
+    reads = 0
+
+    def append_after_first_read(descriptor: int, *, offset: int, length: int) -> bytes:
+        nonlocal reads
+        reads += 1
+        result = original_read(descriptor, offset=offset, length=length)
+        if reads == 1:
+            with acknowledgements.open("ab") as output:
+                output.write(b'{"next":true}\n')
+        return result
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(module, "_read_bounded_range", append_after_first_read)
+    try:
+        records = module._bounded_jsonl_tail(acknowledgements)
+        assert reads == 3
+        assert len(records) == 1
+    finally:
+        monkeypatch.undo()
+
+
+@pytest.mark.parametrize("mutation", ["overwrite", "truncate", "replace", "mode"])
+def test_pilot_tail_rejects_non_append_mutation(
+    tmp_path: Path, mutation: str
+) -> None:
+    module = _module(f"simnow_keyless_pilot_tail_{mutation}")
+    _write_formal_tick_state(module, tmp_path)
+    acknowledgements = tmp_path / "stream" / "tick_writer_acks.jsonl"
+    original_read = module._read_bounded_range
+    reads = 0
+
+    def mutate_after_first_read(descriptor: int, *, offset: int, length: int) -> bytes:
+        nonlocal reads
+        reads += 1
+        result = original_read(descriptor, offset=offset, length=length)
+        if reads == 1:
+            if mutation == "overwrite":
+                with acknowledgements.open("r+b") as output:
+                    output.write(b"x")
+            elif mutation == "truncate":
+                acknowledgements.write_bytes(b"")
+            elif mutation == "mode":
+                acknowledgements.chmod(0o400)
+            else:
+                replacement = tmp_path / "replacement.jsonl"
+                replacement.write_bytes(acknowledgements.read_bytes())
+                replacement.chmod(0o600)
+                replacement.replace(acknowledgements)
+        return result
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(module, "_read_bounded_range", mutate_after_first_read)
+    try:
+        with pytest.raises(module.DurableCorruptionError):
+            module._bounded_jsonl_tail(acknowledgements)
+    finally:
+        monkeypatch.undo()
+
+
+def test_pilot_tail_rejects_overwrite_after_second_captured_read(
+    tmp_path: Path,
+) -> None:
+    module = _module("simnow_keyless_pilot_tail_second_read_overwrite")
+    _write_formal_tick_state(module, tmp_path)
+    acknowledgements = tmp_path / "stream" / "tick_writer_acks.jsonl"
+    original_read = module._read_bounded_range
+    reads = 0
+
+    def overwrite_after_second_read(
+        descriptor: int, *, offset: int, length: int
+    ) -> bytes:
+        nonlocal reads
+        reads += 1
+        result = original_read(descriptor, offset=offset, length=length)
+        if reads == 2:
+            with acknowledgements.open("r+b") as output:
+                output.write(b"x")
+        return result
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(module, "_read_bounded_range", overwrite_after_second_read)
+    try:
+        with pytest.raises(module.DurableCorruptionError):
+            module._bounded_jsonl_tail(acknowledgements)
+        assert reads == 3
+    finally:
+        monkeypatch.undo()
+
+
+def test_pilot_checkpoint_progress_requires_monotonic_same_generation() -> None:
+    module = _module("simnow_keyless_pilot_checkpoint_progress")
+    before_watermark = {
+        "stream_generation": "tick-generation-0001",
+        "last_ingest_seq": 1,
+        "last_event_hash": "a" * 64,
+    }
+    before_fence = {
+        "sources": {
+            "windows-tick-wire-v1": {
+                "generation": "source-generation-0001",
+                "seq": 1,
+                "event_hash": "b" * 64,
+            }
+        }
+    }
+    advanced_watermark = {
+        **before_watermark,
+        "last_ingest_seq": 2,
+        "last_event_hash": "c" * 64,
+    }
+    advanced_fence = {
+        "sources": {
+            "windows-tick-wire-v1": {
+                **before_fence["sources"]["windows-tick-wire-v1"],
+                "seq": 2,
+                "event_hash": "d" * 64,
+            }
+        }
+    }
+    assert module._checkpoint_progressed(
+        before_watermark, before_fence, advanced_watermark, advanced_fence
+    )
+    assert not module._checkpoint_progressed(
+        before_watermark,
+        before_fence,
+        {**before_watermark, "last_event_hash": "c" * 64},
+        before_fence,
+    )
+    assert not module._checkpoint_progressed(
+        before_watermark,
+        before_fence,
+        {**before_watermark, "last_ingest_seq": 0},
+        before_fence,
+    )
+
+
 @pytest.mark.parametrize(
     ("target", "long", "short", "short_yd", "direction", "offset"),
     [
