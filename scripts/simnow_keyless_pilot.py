@@ -468,7 +468,7 @@ def _formal_market_checkpoint() -> tuple[dict[str, Any], dict[str, Any], dict[st
         or not isinstance(watermark.get("last_event_hash"), str)
         or len(watermark["last_event_hash"]) != 64
         or stream["stream_generation"] != generation
-        or stream["last_ingest_seq"] != watermark["last_ingest_seq"]
+        or stream["last_ingest_seq"] > watermark["last_ingest_seq"]
     ):
         raise ValueError("formal CTP watermark/projection is invalid")
     fence = AtomicCheckpoint(
