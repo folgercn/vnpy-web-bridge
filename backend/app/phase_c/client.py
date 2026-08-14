@@ -9,6 +9,11 @@ from typing import Any, Protocol
 
 import httpx
 
+from shared.commodity_execution import (
+    KEYLESS_TARGET_PLAN_SCHEMA_VERSION,
+    KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION,
+)
+
 from .adapters import (
     OfflineFakeWorkflowAdapter,
     UnknownOutcomeError,
@@ -201,7 +206,10 @@ class RemotePhaseCWorkflowClient:
     def _custody_receipt(raw: dict[str, Any] | None) -> CustodyInstallReceipt | None:
         if raw is None:
             return None
-        if raw.get("schema_ref") == "web-bridge-simnow-keyless-target-plan-v1":
+        if raw.get("schema_ref") in {
+            KEYLESS_TARGET_PLAN_SCHEMA_VERSION,
+            KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION,
+        }:
             return TrustedKeylessCustodyReceiptDTO.model_validate(raw)
         return CustodyReceiptDTO.model_validate(raw)
 

@@ -120,7 +120,10 @@ class TrustedKeylessCustodyReceiptDTO(AuthorityNegativeDTO):
     artifact_id: str
     artifact_type: Literal["simnow-target-plan"]
     trust_domain: Literal["runtime_authorization"]
-    schema_ref: Literal["web-bridge-simnow-keyless-target-plan-v1"]
+    schema_ref: Literal[
+        "web-bridge-simnow-keyless-target-plan-v1",
+        "web-bridge-simnow-keyless-target-plan-v2",
+    ]
     artifact_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     scope: dict[str, Any]
     expires_at: str

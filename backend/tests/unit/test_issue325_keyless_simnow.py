@@ -582,8 +582,8 @@ def test_simnow_run_once_uses_only_existing_custody_and_execution_clients() -> N
     assert 'parser.add_argument("--execute", action="store_true")' in source
     assert 'parser.add_argument("--map-candidate"' not in source
     assert 'parser.add_argument("--c-fast-candidate"' not in source
-    assert "produce_map_candidate(" in source
-    assert "produce_c_fast_candidate(" in source
+    assert "produce_static_core_equal(" in source
+    assert "produce_position_manager_snapshot(" in source
 
 
 def test_simnow_runner_image_keeps_the_real_import_closure_and_no_direct_gateway_rpc_or_order_import() -> (
@@ -635,6 +635,8 @@ def test_simnow_runner_image_keeps_the_real_import_closure_and_no_direct_gateway
         "backend/app/__init__.py",
         "backend/app/control_execution_client.py",
         "backend/app/control_execution_projection.py",
+        "backend/app/core/__init__.py",
+        "backend/app/core/commodity_strategy_identity.py",
         "docs/schemas/web-bridge-execution-status-v1.schema.json",
         "backend/app/schemas/__init__.py",
         "backend/app/schemas/control_execution.py",
@@ -656,6 +658,9 @@ def test_simnow_runner_image_keeps_the_real_import_closure_and_no_direct_gateway
         "scripts/c_fast_producer",
         "scripts/map",
         "scripts/commodity_c_fast_pure_producer_kernel.py",
+        "scripts/commodity_static_core_equal_formula_v1.py",
+        "scripts/commodity_static_core_equal_pure_producer.py",
+        "scripts/commodity_relative_vol_snapshot_producer.py",
         "shared/artifact_contracts",
         "shared/commodity_execution",
         "shared/phase_c_workflow",
@@ -676,16 +681,10 @@ def test_simnow_run_once_accepts_canonical_sources_and_rejects_candidate_inputs(
     parser = module.build_parser()
     args = parser.parse_args(
         [
-            "--map-source",
-            "map-source.json",
-            "--c-fast-source",
-            "cfast-source.json",
-            "--map-acceptance",
-            "map-acceptance.json",
-            "--map-acceptance-keyring",
-            "map-keyring.json",
-            "--map-acceptance-keyring-sha256",
-            "a" * 64,
+            "--static-core-source",
+            "static-core-source.json",
+            "--position-manager-source",
+            "position-manager-source.json",
             "--peek-current-facts",
             "peek.json",
             "--reconciliation-state",
@@ -704,7 +703,8 @@ def test_simnow_run_once_accepts_canonical_sources_and_rejects_candidate_inputs(
             "0",
         ]
     )
-    assert args.map_source == Path("map-source.json")
+    assert args.static_core_source == Path("static-core-source.json")
+    assert args.position_manager_source == Path("position-manager-source.json")
     with pytest.raises(SystemExit):
         parser.parse_args(["--map-candidate", "arbitrary.json"])
 
@@ -720,7 +720,8 @@ def test_simnow_run_once_direct_python_help_has_no_external_pythonpath() -> None
         check=False,
     )
     assert completed.returncode == 0, completed.stderr
-    assert "--map-source" in completed.stdout
+    assert "--static-core-source" in completed.stdout
+    assert "--position-manager-source" in completed.stdout
 
 
 def test_simnow_run_once_completion_fails_closed_for_pending_unknown_and_active() -> (
@@ -767,16 +768,10 @@ def _run_once_module(name: str):
 def _run_once_args(module, *, timeout: float = 1.0) -> object:
     return module.build_parser().parse_args(
         [
-            "--map-source",
-            "map-source.json",
-            "--c-fast-source",
-            "cfast-source.json",
-            "--map-acceptance",
-            "map-acceptance.json",
-            "--map-acceptance-keyring",
-            "map-keyring.json",
-            "--map-acceptance-keyring-sha256",
-            "a" * 64,
+            "--static-core-source",
+            "static-core-source.json",
+            "--position-manager-source",
+            "position-manager-source.json",
             "--peek-current-facts",
             "peek.json",
             "--reconciliation-state",
@@ -809,7 +804,7 @@ def _runner_status(
     plan_hash: str = "a" * 64,
     intent_state: str = "ACKNOWLEDGED",
     active_orders: int = 0,
-    lifecycle: str = "ACTIVE",
+    lifecycle: str = "READY",
     reconciliation: str = "RECONCILED",
     unknown_outcomes: int = 0,
     terminal: bool = False,
@@ -819,24 +814,59 @@ def _runner_status(
         "leader": {"held": True, "epoch": 1, "fencing_token": 1},
         "broker": {
             "snapshot_id": f"snapshot-{version}",
+            "connected": True,
             "active_order_count": active_orders,
             "position_snapshot_hash": "c" * 64,
+            "last_snapshot_at": "2030-01-01T00:00:00Z",
         },
         "lifecycle": "READY" if terminal else lifecycle,
         "safe_to_restart": terminal,
         "reconciliation": {
             "state": reconciliation,
             "unknown_outcomes": unknown_outcomes,
+            "last_completed_at": "2030-01-01T00:00:00Z",
         },
-        "send_intents": [
-            {"plan_id": plan_id, "plan_hash": plan_hash, "state": intent_state}
-        ],
+        "send_intents": (
+            []
+            if version < 4
+            else [
+                {
+                    "plan_id": plan_id,
+                    "plan_hash": plan_hash,
+                    "state": intent_state,
+                }
+            ]
+        ),
         "plan": {
             "state": "TERMINAL" if terminal else "ACTIVE",
             "plan_id": plan_id,
             "plan_hash": plan_hash,
         },
         "authority": {"state": "REVOKED" if terminal else "ACTIVE"},
+    }
+
+
+def _runner_preflight_status() -> dict:
+    return {
+        "state_version": 0,
+        "leader": {"held": True, "epoch": 1, "fencing_token": 1},
+        "broker": {
+            "snapshot_id": "snapshot-preflight",
+            "connected": True,
+            "active_order_count": 0,
+            "position_snapshot_hash": "c" * 64,
+            "last_snapshot_at": "2030-01-01T00:00:00Z",
+        },
+        "lifecycle": "READY",
+        "safe_to_restart": True,
+        "reconciliation": {
+            "state": "RECONCILED",
+            "unknown_outcomes": 0,
+            "last_completed_at": "2030-01-01T00:00:00Z",
+        },
+        "send_intents": [],
+        "plan": {"state": "IDLE"},
+        "authority": {"state": "DISABLED"},
     }
 
 
@@ -868,7 +898,9 @@ def _install_fake_runner_dependencies(
 
     class FakeExecution:
         def __init__(self) -> None:
-            self.statuses = iter(statuses)
+            self.statuses = iter(
+                [_runner_preflight_status(), _runner_preflight_status(), *statuses]
+            )
             self.latest = statuses[-1]
 
         async def status(self):
@@ -886,40 +918,57 @@ def _install_fake_runner_dependencies(
                 )
             return {"accepted": True}
 
-    map_candidate = SimpleNamespace(
-        raw=b"canonical-map", artifact_sha256="c" * 64, payload={}
+    static_result = SimpleNamespace(
+        producer_projection={},
+        artifacts={"freeze_contract": b"{}", "target_evidence": b"{}"},
     )
-    c_fast_candidate = SimpleNamespace(payload={})
-    monkeypatch.setattr(module, "read_map_source", lambda _path: b"map-source")
-    monkeypatch.setattr(module, "produce_map_candidate", lambda _raw: map_candidate)
-    monkeypatch.setattr(module, "read_cfast_source", lambda _path: b"cfast-source")
+    position_result = SimpleNamespace(
+        snapshot_draft=b"{}", snapshot_draft_sha256="e" * 64
+    )
+    decision = SimpleNamespace(
+        handoff=handoff,
+        noop=False,
+        static_core_equal_sha256="1" * 64,
+        position_manager_sha256="2" * 64,
+        final_target_sha256="3" * 64,
+        selected_product="rb",
+        selected_target_quantity=-1,
+        current_quantity=0,
+    )
+    monkeypatch.setattr(module, "_source_bytes", lambda *_args: b"source")
+    monkeypatch.setattr(module, "produce_static_core_equal", lambda _raw: static_result)
     monkeypatch.setattr(
-        module, "produce_c_fast_candidate", lambda *_args, **_kwargs: c_fast_candidate
+        module,
+        "produce_position_manager_snapshot",
+        lambda _raw: position_result,
     )
-    monkeypatch.setattr(
-        module, "load_keyring", lambda *_args, **_kwargs: ({}, b"", "d" * 64)
-    )
+    monkeypatch.setattr(module, "_generated_object", lambda *_args: {})
     monkeypatch.setattr(
         module,
         "_object",
         lambda _path, label: (
             {"state": "RECONCILED", "unknown_outcomes": 0}
             if label == "reconciliation state"
-            else {}
+            else {"execution": {"orders": {}}}
         ),
     )
     monkeypatch.setattr(
         module,
         "peek_current_facts_to_snapshot",
-        lambda *_args, **_kwargs: SimpleNamespace(snapshot={}),
+        lambda *_args, **_kwargs: SimpleNamespace(
+            snapshot=SimpleNamespace(position_snapshot_hash="c" * 64)
+        ),
     )
     monkeypatch.setattr(
         module,
-        "build_trusted_keyless_executable_target_plan",
-        lambda **_kwargs: handoff,
+        "build_static_core_equal_keyless_target_decision",
+        lambda **_kwargs: decision,
     )
     monkeypatch.setattr(module, "RemotePhaseCWorkflowClient", FakeCustody)
     monkeypatch.setattr(module, "ExecutionClient", FakeExecution)
+    monkeypatch.setattr(
+        module, "_utc_clock", lambda: datetime(2030, 1, 1, tzinfo=timezone.utc)
+    )
     return SimpleNamespace(calls=calls)
 
 

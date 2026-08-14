@@ -19,6 +19,13 @@ from typing import Any
 
 TARGET_PLAN_SCHEMA_VERSION = "web-bridge-simnow-target-plan-v1"
 KEYLESS_TARGET_PLAN_SCHEMA_VERSION = "web-bridge-simnow-keyless-target-plan-v1"
+KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION = "web-bridge-simnow-keyless-target-plan-v2"
+_KEYLESS_TARGET_PLAN_SCHEMA_VERSIONS = frozenset(
+    {
+        KEYLESS_TARGET_PLAN_SCHEMA_VERSION,
+        KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION,
+    }
+)
 TRUSTED_KEYLESS_SIMNOW_SCOPE = {
     "account_scope": "account:windows",
     "environment": "SIMNOW",
@@ -553,7 +560,7 @@ class TrustedKeylessCustodyReceipt:
             raw["receipt_type"] != "install"
             or raw["artifact_type"] != "simnow-target-plan"
             or raw["trust_domain"] != "runtime_authorization"
-            or raw["schema_ref"] != KEYLESS_TARGET_PLAN_SCHEMA_VERSION
+            or raw["schema_ref"] not in _KEYLESS_TARGET_PLAN_SCHEMA_VERSIONS
             or scope != TRUSTED_KEYLESS_SIMNOW_SCOPE
             or raw["verified"] is not True
             or raw["installed"] is not True
@@ -659,12 +666,13 @@ class TargetPlan:
     @classmethod
     def from_mapping(cls, value: Any, *, max_order_volume: int = 1) -> TargetPlan:
         raw = _detached_mapping(value, "target plan")
-        is_keyless = raw.get("schema_version") == KEYLESS_TARGET_PLAN_SCHEMA_VERSION
+        is_keyless = raw.get("schema_version") in _KEYLESS_TARGET_PLAN_SCHEMA_VERSIONS
         if set(raw) != (_KEYLESS_PLAN_FIELDS if is_keyless else _PLAN_FIELDS):
             raise CommodityExecutionContractError("target plan fields are not exact")
         if raw["schema_version"] not in {
             TARGET_PLAN_SCHEMA_VERSION,
             KEYLESS_TARGET_PLAN_SCHEMA_VERSION,
+            KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION,
         }:
             raise CommodityExecutionContractError(
                 "target plan schema_version is invalid"
@@ -699,10 +707,25 @@ class TargetPlan:
             ):
                 raise CommodityExecutionContractError("keyless target plan scope is invalid")
             lineage = _detached_mapping(raw["lineage"], "keyless target plan lineage")
-            if set(lineage) != {"map_sha256", "c_fast_sha256"}:
-                raise CommodityExecutionContractError("keyless target plan lineage is invalid")
-            _sha(lineage["map_sha256"], "keyless target plan MAP lineage")
-            _sha(lineage["c_fast_sha256"], "keyless target plan C_FAST lineage")
+            if raw["schema_version"] == KEYLESS_TARGET_PLAN_SCHEMA_VERSION:
+                if set(lineage) != {"map_sha256", "c_fast_sha256"}:
+                    raise CommodityExecutionContractError(
+                        "keyless target plan lineage is invalid"
+                    )
+                _sha(lineage["map_sha256"], "keyless target plan MAP lineage")
+                _sha(lineage["c_fast_sha256"], "keyless target plan C_FAST lineage")
+            else:
+                lineage_fields = {
+                    "static_core_equal_sha256",
+                    "position_manager_sha256",
+                    "final_target_sha256",
+                }
+                if set(lineage) != lineage_fields:
+                    raise CommodityExecutionContractError(
+                        "keyless target plan lineage is invalid"
+                    )
+                for field in sorted(lineage_fields):
+                    _sha(lineage[field], f"keyless target plan {field} lineage")
         if any(
             raw[field] is not False
             for field in (
@@ -773,7 +796,7 @@ class TargetPlan:
 
     @property
     def is_trusted_keyless_simnow(self) -> bool:
-        return self.raw["schema_version"] == KEYLESS_TARGET_PLAN_SCHEMA_VERSION
+        return self.raw["schema_version"] in _KEYLESS_TARGET_PLAN_SCHEMA_VERSIONS
 
     @property
     def authority_id(self) -> str:
@@ -815,7 +838,34 @@ def build_trusted_keyless_target_plan(**fields: Any) -> dict[str, Any]:
     """Build the fixed-tuple, no-key/no-signature SIMNOW TargetPlan variant."""
 
     raw = dict(fields)
+    if raw.get("schema_version", KEYLESS_TARGET_PLAN_SCHEMA_VERSION) != (
+        KEYLESS_TARGET_PLAN_SCHEMA_VERSION
+    ):
+        raise CommodityExecutionContractError(
+            "keyless target plan v1 builder requires the v1 schema"
+        )
     raw.setdefault("schema_version", KEYLESS_TARGET_PLAN_SCHEMA_VERSION)
+    raw.setdefault("custody_mode", "trusted-keyless-simnow")
+    raw.setdefault("scope", dict(TRUSTED_KEYLESS_SIMNOW_SCOPE))
+    for flag in ("production_allowed", "live_trading_authorized", "countable_forward"):
+        raw.setdefault(flag, False)
+    raw.setdefault("order_set_sha256", sha256_json(raw.get("orders", [])))
+    raw.pop("plan_hash", None)
+    raw["plan_hash"] = sha256_json(raw)
+    return TargetPlan.from_mapping(raw).as_dict()
+
+
+def build_trusted_keyless_target_plan_v2(**fields: Any) -> dict[str, Any]:
+    """Build the full-strategy, no-key/no-signature SIMNOW TargetPlan v2."""
+
+    raw = dict(fields)
+    if raw.get("schema_version", KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION) != (
+        KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION
+    ):
+        raise CommodityExecutionContractError(
+            "keyless target plan v2 builder requires the v2 schema"
+        )
+    raw.setdefault("schema_version", KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION)
     raw.setdefault("custody_mode", "trusted-keyless-simnow")
     raw.setdefault("scope", dict(TRUSTED_KEYLESS_SIMNOW_SCOPE))
     for flag in ("production_allowed", "live_trading_authorized", "countable_forward"):

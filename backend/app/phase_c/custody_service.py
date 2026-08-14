@@ -34,6 +34,7 @@ from shared.artifact_contracts.v1 import validate_artifact_envelope
 from shared.artifact_custody.v1 import ArtifactCustody, CustodyError
 from shared.commodity_execution import (
     KEYLESS_TARGET_PLAN_SCHEMA_VERSION,
+    KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION,
     TARGET_PLAN_SCHEMA_VERSION,
     TRUSTED_KEYLESS_SIMNOW_SCOPE,
     CommodityExecutionContractError,
@@ -149,6 +150,7 @@ class ArtifactCustodyService:
                 },
                 TARGET_PLAN_SCHEMA_VERSION: _target_plan_schema,
                 KEYLESS_TARGET_PLAN_SCHEMA_VERSION: _target_plan_schema,
+                KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION: _target_plan_schema,
             },
         )
 
@@ -236,7 +238,7 @@ class ArtifactCustodyService:
             "artifact_id": raw["artifact_id"],
             "artifact_type": "simnow-target-plan",
             "trust_domain": "runtime_authorization",
-            "schema_ref": KEYLESS_TARGET_PLAN_SCHEMA_VERSION,
+            "schema_ref": artifact["schema_ref"],
             "artifact_sha256": artifact["raw_sha256"],
             "scope": payload["scope"],
             "expires_at": payload["expires_at"],
@@ -264,7 +266,12 @@ class ArtifactCustodyService:
                 not plan.is_trusted_keyless_simnow
                 or artifact["artifact_type"] != "simnow-target-plan"
                 or artifact["trust_domain"] != "runtime_authorization"
-                or artifact["schema_ref"] != KEYLESS_TARGET_PLAN_SCHEMA_VERSION
+                or artifact["schema_ref"]
+                not in {
+                    KEYLESS_TARGET_PLAN_SCHEMA_VERSION,
+                    KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION,
+                }
+                or artifact["schema_ref"] != plan.raw["schema_version"]
                 or artifact["scope"] != TRUSTED_KEYLESS_SIMNOW_SCOPE
                 or artifact["scope"] != plan.raw["scope"]
             ):
@@ -300,7 +307,10 @@ class ArtifactCustodyService:
             with self._custody() as custody:
                 raw = custody.read_receipt(receipt_id)
                 artifact = custody.read_artifact(raw["artifact_id"])
-                if raw["receipt_type"] == "install" and artifact.get("schema_ref") == KEYLESS_TARGET_PLAN_SCHEMA_VERSION:
+                if raw["receipt_type"] == "install" and artifact.get("schema_ref") in {
+                    KEYLESS_TARGET_PLAN_SCHEMA_VERSION,
+                    KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION,
+                }:
                     return self._keyless_receipt(raw, artifact)
                 signed = custody.read_signed_artifact(raw["artifact_id"])
             policy = self.settings.policies[signed["domain"]]
@@ -323,7 +333,10 @@ class ArtifactCustodyService:
             with self._custody() as custody:
                 raw = custody.read_receipt_by_idempotency(f"install-{idempotency_key}")
                 artifact = custody.read_artifact(raw["artifact_id"])
-                if raw["receipt_type"] == "install" and artifact.get("schema_ref") == KEYLESS_TARGET_PLAN_SCHEMA_VERSION:
+                if raw["receipt_type"] == "install" and artifact.get("schema_ref") in {
+                    KEYLESS_TARGET_PLAN_SCHEMA_VERSION,
+                    KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION,
+                }:
                     return self._keyless_receipt(raw, artifact)
                 signed = custody.read_signed_artifact(raw["artifact_id"])
             policy = self.settings.policies[signed["domain"]]
@@ -359,7 +372,10 @@ class ArtifactCustodyService:
                 with self._custody() as custody:
                     signed = custody.read_signed_artifact(artifact_id)
                 artifact = signed.get("artifact")
-            elif artifact.get("schema_ref") != KEYLESS_TARGET_PLAN_SCHEMA_VERSION:
+            elif artifact.get("schema_ref") not in {
+                KEYLESS_TARGET_PLAN_SCHEMA_VERSION,
+                KEYLESS_TARGET_PLAN_V2_SCHEMA_VERSION,
+            }:
                 raise WorkflowAdapterError("custody artifact is not an execution target plan")
             if not isinstance(artifact, dict):
                 raise WorkflowAdapterError("custody artifact is not an execution target plan")
