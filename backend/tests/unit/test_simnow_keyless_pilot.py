@@ -322,6 +322,48 @@ def test_pilot_requires_fresh_canonical_fixed_ctp_tick_for_reference_price(
         monkeypatch.undo()
 
 
+def test_pilot_accepts_projection_lagging_verified_watermark(tmp_path: Path) -> None:
+    module = _module("simnow_keyless_pilot_projection_lag")
+    now = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    _write_formal_tick_state(module, tmp_path)
+
+    from phase_b_workers.durable import DurableVerifiedTickStream
+    from phase_b_workers.projections import build_projection, publish_projection
+
+    stream = DurableVerifiedTickStream(
+        tmp_path / "stream", generation="tick-generation-0001"
+    )
+    projection_stats = stream.stats()
+    _append_formal_tick(
+        tmp_path, vt_symbol="sc2609.INE", source_event_id="tick-event-0002"
+    )
+    publish_projection(
+        tmp_path / "projection",
+        build_projection(
+            service_id="market-data-worker",
+            generation="test-revision:tick-generation-0001",
+            health={
+                "service_id": "market-data-worker",
+                "status": "healthy",
+                "dependencies": {"verified_stream": projection_stats},
+            },
+            readiness={"service_id": "market-data-worker", "ready": True},
+            version={
+                "service_id": "market-data-worker",
+                "contract_versions": ["phase_b_worker_contract_v1"],
+            },
+        ),
+    )
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(module, "_FORMAL_MARKET_STATE_DIR", tmp_path)
+    monkeypatch.setattr(module, "_FORMAL_MARKET_PROJECTION_DIR", tmp_path / "projection")
+    try:
+        assert module._formal_tick_binding(clock=lambda: now)[-1] == 3700.0
+    finally:
+        monkeypatch.undo()
+
+
 def test_pilot_waits_for_projection_watermark_to_converge(tmp_path: Path) -> None:
     module = _module("simnow_keyless_pilot_projection_wait")
     now = datetime(2030, 1, 1, tzinfo=timezone.utc)
