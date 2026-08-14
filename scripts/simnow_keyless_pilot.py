@@ -723,6 +723,7 @@ def _pilot_target_plan(
     price: float,
     expires_at: str,
     generated_at: str,
+    run_identity: str,
 ) -> dict[str, Any]:
     """Build only the two fixed pilot transitions; never generalize a delta."""
 
@@ -752,6 +753,7 @@ def _pilot_target_plan(
     identity = sha256_json(
         {
             "pilot": "SIMNOW-keyless-v1",
+            "run_identity": run_identity,
             "target": target,
             "exchange": _FIXED_EXCHANGE,
             "symbol": _FIXED_SYMBOL,
@@ -937,6 +939,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         price=price,
         expires_at=args.expires_at,
         generated_at=now,
+        run_identity=args.idempotency_suffix,
     )
     # Re-read immediately before the irreversible custody create.  The target
     # is bound to the first status; any intervening state/snapshot freshness
