@@ -752,6 +752,65 @@ def test_historical_audit_accepts_signature_valid_at_durable_receipt_time_after_
         assert reopened.audit()["version"] == 1
 
 
+def test_expired_historical_signed_record_does_not_block_keyless_append(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    signed, keyring_path, keyring_sha256, _envelope = _historical_signed_fixture(
+        tmp_path,
+        requested_at="2001-01-01T00:00:00Z",
+        expires_at="2001-01-03T00:00:00Z",
+    )
+    root = tmp_path / "custody"
+    _publish_historical_signed(
+        root,
+        signed,
+        keyring_path,
+        keyring_sha256,
+        receipt_created_at="2001-01-02T00:00:00Z",
+        live_now="2001-01-02T00:00:00Z",
+        monkeypatch=monkeypatch,
+    )
+
+    with custody(root, epoch=2) as reopened:
+        keyless = artifact(2)
+        receipt = reopened.publish(
+            keyless,
+            actor_id="keyless-producer",
+            idempotency_key="keyless-after-expiry-1",
+            correlation_id="historical-audit-1",
+            expected_version=1,
+        )
+        assert receipt["artifact_id"] == keyless["artifact_id"]
+        assert reopened.audit()["version"] == 2
+
+
+def test_publish_signed_rejects_new_expired_input_at_current_time(tmp_path: Path) -> None:
+    signed, keyring_path, keyring_sha256, _envelope = _historical_signed_fixture(
+        tmp_path,
+        requested_at="2001-01-01T00:00:00Z",
+        expires_at="2001-01-03T00:00:00Z",
+    )
+
+    with (
+        custody(tmp_path / "custody") as store,
+        pytest.raises(
+            CustodyError,
+            match="CUSTODY_SIGNED_ARTIFACT_SIGNED_ARTIFACT_OUTSIDE_VALIDITY",
+        ),
+    ):
+        store.publish_signed(
+            signed,
+            keyring_path=keyring_path,
+            expected_domain="research",
+            expected_key_purpose="research-only",
+            expected_keyring_raw_sha256=keyring_sha256,
+            actor_id="research-runtime",
+            idempotency_key="expired-signed-1",
+            correlation_id="historical-audit-1",
+            expected_version=0,
+        )
+
+
 def test_historical_audit_rejects_receipt_that_proves_already_expired_publish(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

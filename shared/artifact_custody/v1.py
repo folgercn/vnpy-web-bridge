@@ -381,7 +381,7 @@ class ArtifactCustody:
         except Exception as exc:
             raise CustodyError("CUSTODY_SCHEMA_VALIDATION_FAILED") from exc
 
-    def _load_state(self, *, historical_audit: bool = False) -> _State:
+    def _load_state(self) -> _State:
         # A publish envelope is committed inside its receipt ledger record.
         # Keeping a second artifact file would reintroduce an unavoidable
         # crash window between two create-only files, leaving an orphan.
@@ -490,13 +490,12 @@ class ArtifactCustody:
                             "CUSTODY_SIGNED_ARTIFACT_TRUST_SNAPSHOT_INVALID"
                         )
                     try:
-                        # Only integrity audit replays validity at the receipt's
-                        # durably chained acceptance time.  All operational
-                        # reads and mutations retain current-time validation.
-                        receipt_created_at = (
-                            _historical_receipt_created_at(receipt["created_at"])
-                            if historical_audit
-                            else None
+                        # Ledger reconstruction is an integrity audit.  The
+                        # signed artifact must have been valid when its
+                        # immutable publish receipt was accepted, not remain
+                        # operationally valid forever.
+                        receipt_created_at = _historical_receipt_created_at(
+                            receipt["created_at"]
                         )
                         verified = verify_signed_artifact(
                             signed,
@@ -608,7 +607,7 @@ class ArtifactCustody:
         )
 
     def audit(self) -> dict[str, Any]:
-        state = self._load_state(historical_audit=True)
+        state = self._load_state()
         return {
             "version": state.version,
             "artifact_count": len(state.artifacts),
@@ -618,6 +617,40 @@ class ArtifactCustody:
             "live": False,
             "countable_forward": False,
         }
+
+    @staticmethod
+    def _verify_current_signed_record(record: Mapping[str, Any]) -> None:
+        """Require a retained signed artifact to be usable at current UTC."""
+
+        signed = record["signed_artifact"]
+        if signed is None:
+            return
+        try:
+            verify_signed_artifact(
+                signed,
+                keyring=record["signed_artifact_keyring"],
+                expected_domain=record["signed_artifact_expected_domain"],
+                expected_key_purpose=record[
+                    "signed_artifact_expected_key_purpose"
+                ],
+            )
+        except ContractError as exc:
+            raise CustodyError(f"CUSTODY_SIGNED_ARTIFACT_{exc.code}") from exc
+
+    def _read_current_signed_artifact(
+        self, state: _State, artifact_id: str
+    ) -> dict[str, Any] | None:
+        for record in state.receipts:
+            receipt = record["receipt"]
+            if (
+                receipt["receipt_type"] == "publish"
+                and receipt["artifact_id"] == artifact_id
+            ):
+                if record["signed_artifact"] is None:
+                    return None
+                self._verify_current_signed_record(record)
+                return dict(record["signed_artifact"])
+        return None
 
     def _validate_lineage(self, artifact: Mapping[str, Any], state: _State) -> None:
         expected: set[str] = set()
@@ -912,22 +945,9 @@ class ArtifactCustody:
         """Read the canonical signed wrapper retained with a publish receipt."""
 
         wanted = _safe_id(artifact_id, "CUSTODY_ARTIFACT_ID_INVALID")
-        # Audit performs the strict snapshot pin/domain/purpose/signature
-        # verification before exposing a retained wrapper.
-        self._load_state()
-        for name in sorted(os.listdir(self._dirs["receipts"])):
-            record, _raw = self._read_json(self._dirs["receipts"], name)
-            signed = record.get("signed_artifact")
-            if (
-                isinstance(signed, dict)
-                and isinstance(record.get("artifact"), dict)
-                and record["artifact"].get("artifact_id") == wanted
-            ):
-                if record.get("signed_artifact_sha256") != sha256_bytes(
-                    canonical_json_line(signed)
-                ):
-                    raise CustodyError("CUSTODY_SIGNED_ARTIFACT_MISMATCH")
-                return dict(signed)
+        signed = self._read_current_signed_artifact(self._load_state(), wanted)
+        if signed is not None:
+            return signed
         raise CustodyError("CUSTODY_SIGNED_ARTIFACT_NOT_FOUND")
 
     def read_artifact(self, artifact_id: str) -> dict[str, Any]:
@@ -983,6 +1003,8 @@ class ArtifactCustody:
         )
         if artifact is None:
             raise CustodyError("CUSTODY_ARTIFACT_NOT_FOUND")
+        if receipt_type in {"install", "consume"}:
+            self._read_current_signed_artifact(state, artifact["artifact_id"])
         replay = self._replay(
             state,
             receipt_type=receipt_type,
