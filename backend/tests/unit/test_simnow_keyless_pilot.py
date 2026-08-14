@@ -817,6 +817,7 @@ def test_pilot_builds_only_short1_open_or_flat_close(
         price=3700.0,
         expires_at="2099-01-01T00:00:00Z",
         generated_at="2030-01-01T00:00:00Z",
+        run_identity="pilot-0001",
     )
     assert plan["scope"] == {
         "account_scope": "account:windows",
@@ -828,6 +829,89 @@ def test_pilot_builds_only_short1_open_or_flat_close(
     assert plan["orders"][0]["volume"] == 1
     assert plan["orders"][0]["symbol"] == "ru2609"
     assert plan["orders"][0]["exchange"] == "SHFE"
+
+
+def _short1_plan(
+    module,
+    *,
+    run_identity: str,
+    price: float = 3700.0,
+    generated_at: str = "2030-01-01T00:00:00Z",
+    expires_at: str = "2099-01-01T00:00:00Z",
+) -> dict:
+    return module._pilot_target_plan(
+        positions=_positions(),
+        long_volume=0,
+        short_volume=0,
+        matching=[(key, row) for key, row in _positions().items()],
+        target="SHORT1",
+        price=price,
+        expires_at=expires_at,
+        generated_at=generated_at,
+        run_identity=run_identity,
+    )
+
+
+def test_pilot_run_identity_changes_plan_id_and_order_reference() -> None:
+    module = _module("simnow_keyless_pilot_run_identity")
+    first = _short1_plan(module, run_identity="pilot-0001")
+    second = _short1_plan(module, run_identity="pilot-0002")
+
+    assert first["plan_id"] != second["plan_id"]
+    assert first["orders"][0]["reference"] != second["orders"][0]["reference"]
+
+
+def test_pilot_run_identity_is_deterministic_for_complete_equal_input() -> None:
+    module = _module("simnow_keyless_pilot_run_identity_deterministic")
+    first = _short1_plan(module, run_identity="pilot-0001")
+    second = _short1_plan(module, run_identity="pilot-0001")
+
+    assert first["plan_id"] == second["plan_id"]
+    assert first["plan_hash"] == second["plan_hash"]
+
+
+def test_pilot_new_run_identity_allows_distinct_create_only_plans() -> None:
+    from app.execution.final_runtime import InMemoryTargetPlanRepository
+
+    from shared.commodity_execution import TargetPlan
+
+    module = _module("simnow_keyless_pilot_run_identity_create_only")
+    first = _short1_plan(module, run_identity="pilot-0001")
+    second = _short1_plan(
+        module,
+        run_identity="pilot-0002",
+        price=3701.0,
+        generated_at="2030-01-01T00:00:01Z",
+        expires_at="2099-01-01T00:00:01Z",
+    )
+
+    assert first["plan_id"] != second["plan_id"]
+    repository = InMemoryTargetPlanRepository()
+    repository.put(TargetPlan.from_mapping(first))
+    repository.put(TargetPlan.from_mapping(second))
+
+
+def test_execution_rejects_same_plan_id_with_different_hash() -> None:
+    from app.execution.errors import PlanRejected
+    from app.execution.final_runtime import InMemoryTargetPlanRepository
+
+    from shared.commodity_execution import TargetPlan
+
+    module = _module("simnow_keyless_pilot_run_identity_collision")
+    first = _short1_plan(module, run_identity="pilot-0001")
+    altered = _short1_plan(
+        module,
+        run_identity="pilot-0001",
+        price=3701.0,
+        generated_at="2030-01-01T00:00:01Z",
+    )
+
+    assert first["plan_id"] == altered["plan_id"]
+    assert first["plan_hash"] != altered["plan_hash"]
+    repository = InMemoryTargetPlanRepository()
+    repository.put(TargetPlan.from_mapping(first))
+    with pytest.raises(PlanRejected, match="already bound to another hash"):
+        repository.put(TargetPlan.from_mapping(altered))
 
 
 def test_pilot_rejects_hedged_long1_short1_for_flat() -> None:
@@ -842,6 +926,7 @@ def test_pilot_rejects_hedged_long1_short1_for_flat() -> None:
             price=3700.0,
             expires_at="2099-01-01T00:00:00Z",
             generated_at="2030-01-01T00:00:00Z",
+            run_identity="pilot-0001",
         )
     assert not module._is_exact_target_gross(
         target="FLAT", long_volume=1, short_volume=1
