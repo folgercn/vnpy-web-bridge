@@ -465,6 +465,7 @@ def test_static_changed_paths_produce_allowed_dependency_closure() -> None:
         "frontend/src/App.tsx",
         "backend/app/control_api.py",
         "backend/app/execution/orchestrator.py",
+        "backend/app/services/commodity_c_fast_execution_quality_artifact_revalidation.py",
         "scripts/windows_fence_foundation/assembly.py",
     ]
     plan = create_plan(paths, source_commit_sha=SHA)

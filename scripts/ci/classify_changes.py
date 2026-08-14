@@ -546,6 +546,7 @@ PHASE_A_RULES = (
         exact=(
             "deployments/phase-a/Containerfile.execution-orchestrator",
             "backend/app/execution_orchestrator.py",
+            "backend/app/services/commodity_c_fast_execution_quality_artifact_revalidation.py",
             "scripts/commodity_c_fast_executable_target_adapter.py",
         ),
         prefix=(
