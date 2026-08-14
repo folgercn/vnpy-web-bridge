@@ -86,6 +86,10 @@ _FORMAL_TICK_SNAPSHOT_MAX_WAIT_SECONDS = 1.0
 _FORMAL_TICK_SNAPSHOT_RETRY_SECONDS = 0.05
 
 
+class _RetryableFormalTickTail(DurableCorruptionError):
+    """A writer may still be completing the final JSONL record."""
+
+
 def _object(path: Path, label: str) -> dict[str, Any]:
     try:
         raw = path.read_bytes()
@@ -285,8 +289,56 @@ def _current_position(
     return long_volume, short_volume, matching
 
 
+def _safe_bounded_tail_info(info: os.stat_result) -> bool:
+    return (
+        not stat.S_ISLNK(info.st_mode)
+        and stat.S_ISREG(info.st_mode)
+        and info.st_uid == os.geteuid()
+        and info.st_nlink == 1
+        and not info.st_mode & 0o077
+    )
+
+
+def _same_bounded_tail_file(
+    initial: os.stat_result, current: os.stat_result
+) -> bool:
+    return (
+        (
+            current.st_dev,
+            current.st_ino,
+            current.st_mode,
+            current.st_uid,
+            current.st_gid,
+            current.st_nlink,
+        )
+        == (
+            initial.st_dev,
+            initial.st_ino,
+            initial.st_mode,
+            initial.st_uid,
+            initial.st_gid,
+            initial.st_nlink,
+        )
+        and current.st_size >= initial.st_size
+        and _safe_bounded_tail_info(current)
+    )
+
+
+def _read_bounded_range(descriptor: int, *, offset: int, length: int) -> bytes:
+    os.lseek(descriptor, offset, os.SEEK_SET)
+    raw = bytearray()
+    while len(raw) < length:
+        chunk = os.read(descriptor, length - len(raw))
+        if not chunk:
+            break
+        raw.extend(chunk)
+    if len(raw) != length:
+        raise DurableCorruptionError("verified tick journal shrank during tail read")
+    return bytes(raw)
+
+
 def _bounded_jsonl_tail(path: Path) -> list[dict[str, object]]:
-    """Read only complete canonical records from a fixed-size journal tail."""
+    """Read a stable, bounded JSONL tail while allowing concurrent appends."""
 
     parent_fd, _ = _open_parent(path)
     descriptor = -1
@@ -296,29 +348,38 @@ def _bounded_jsonl_tail(path: Path) -> list[dict[str, object]]:
             flags |= os.O_NOFOLLOW
         descriptor = os.open(path.name, flags, dir_fd=parent_fd)
         info = os.fstat(descriptor)
-        if (
-            stat.S_ISLNK(info.st_mode)
-            or not stat.S_ISREG(info.st_mode)
-            or info.st_uid != os.geteuid()
-            or info.st_nlink != 1
-            or info.st_mode & 0o077
-        ):
+        if not _safe_bounded_tail_info(info):
             raise DurableCorruptionError("verified tick journal is unsafe")
         offset = max(0, info.st_size - _FORMAL_TICK_TAIL_BYTES)
-        os.lseek(descriptor, offset, os.SEEK_SET)
-        raw = bytearray()
-        while len(raw) < _FORMAL_TICK_TAIL_BYTES:
-            chunk = os.read(descriptor, _FORMAL_TICK_TAIL_BYTES - len(raw))
-            if not chunk:
-                break
-            raw.extend(chunk)
-        after = os.fstat(descriptor)
-        if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) != (
-            info.st_dev,
-            info.st_ino,
-            info.st_size,
-            info.st_mtime_ns,
-        ):
+        length = info.st_size - offset
+        raw = _read_bounded_range(descriptor, offset=offset, length=length)
+        after_first_read = os.fstat(descriptor)
+        named_after_first_read = os.stat(
+            path.name, dir_fd=parent_fd, follow_symlinks=False
+        )
+        if not _same_bounded_tail_file(
+            info, after_first_read
+        ) or not _same_bounded_tail_file(info, named_after_first_read):
+            raise DurableCorruptionError("verified tick journal changed during tail read")
+        if _read_bounded_range(descriptor, offset=offset, length=length) != raw:
+            raise DurableCorruptionError("verified tick journal changed during tail read")
+        after_second_read = os.fstat(descriptor)
+        named_after_second_read = os.stat(
+            path.name, dir_fd=parent_fd, follow_symlinks=False
+        )
+        if not _same_bounded_tail_file(
+            info, after_second_read
+        ) or not _same_bounded_tail_file(info, named_after_second_read):
+            raise DurableCorruptionError("verified tick journal changed during tail read")
+        if _read_bounded_range(descriptor, offset=offset, length=length) != raw:
+            raise DurableCorruptionError("verified tick journal changed during tail read")
+        after_final_read = os.fstat(descriptor)
+        named_after_final_read = os.stat(
+            path.name, dir_fd=parent_fd, follow_symlinks=False
+        )
+        if not _same_bounded_tail_file(
+            info, after_final_read
+        ) or not _same_bounded_tail_file(info, named_after_final_read):
             raise DurableCorruptionError("verified tick journal changed during tail read")
     except OSError as exc:
         raise DurableCorruptionError("cannot read verified tick journal tail") from exc
@@ -329,7 +390,7 @@ def _bounded_jsonl_tail(path: Path) -> list[dict[str, object]]:
     if not raw:
         return []
     try:
-        text = bytes(raw).decode("utf-8")
+        text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise DurableCorruptionError("invalid UTF-8 verified tick journal tail") from exc
     lines = text.splitlines(keepends=True)
@@ -337,6 +398,8 @@ def _bounded_jsonl_tail(path: Path) -> list[dict[str, object]]:
         if not lines or not lines[0].endswith("\n"):
             raise DurableCorruptionError("verified tick tail has no complete record")
         lines = lines[1:]
+    if lines and not lines[-1].endswith("\n"):
+        raise _RetryableFormalTickTail("verified tick tail has a partial record")
     records: list[dict[str, object]] = []
     for line in lines:
         records.append(_strict_json_line(line, path))
@@ -435,6 +498,43 @@ def _wait_for_formal_snapshot(deadline: float) -> bool:
     return True
 
 
+def _checkpoint_progressed(
+    before_watermark: Mapping[str, Any],
+    before_fence: Mapping[str, Any],
+    after_watermark: Mapping[str, Any],
+    after_fence: Mapping[str, Any],
+) -> bool:
+    """Permit append-only progress, but never a changed or regressed anchor."""
+
+    generation = before_watermark["stream_generation"]
+    if after_watermark["stream_generation"] != generation:
+        return False
+    before_sequence = before_watermark["last_ingest_seq"]
+    after_sequence = after_watermark["last_ingest_seq"]
+    if after_sequence < before_sequence:
+        return False
+    if (
+        after_sequence == before_sequence
+        and after_watermark["last_event_hash"] != before_watermark["last_event_hash"]
+    ):
+        return False
+    before_sources = before_fence["sources"]
+    after_sources = after_fence["sources"]
+    before_source = before_sources["windows-tick-wire-v1"]
+    after_source = after_sources["windows-tick-wire-v1"]
+    if after_source["generation"] != before_source["generation"]:
+        return False
+    before_fence_sequence = before_source["seq"]
+    after_fence_sequence = after_source["seq"]
+    return not (
+        after_fence_sequence < before_fence_sequence
+        or (
+            after_fence_sequence == before_fence_sequence
+            and after_source["event_hash"] != before_source["event_hash"]
+        )
+    )
+
+
 def _formal_tick_binding(
     *, clock: Callable[[], datetime]
 ) -> tuple[str, str, int, str, str, float]:
@@ -445,7 +545,7 @@ def _formal_tick_binding(
         deadline = time.monotonic() + _FORMAL_TICK_SNAPSHOT_MAX_WAIT_SECONDS
         while True:
             try:
-                before_projection, before_watermark, before_fence = (
+                _, before_watermark, before_fence = (
                     _formal_market_checkpoint()
                 )
             except ValueError as exc:
@@ -456,15 +556,28 @@ def _formal_tick_binding(
                 continue
             generation = before_watermark["stream_generation"]
             frontier = before_watermark["last_ingest_seq"]
-            tail_ticks = _bounded_verified_tick_tail(
-                _FORMAL_MARKET_STATE_DIR / "stream" / "verified_ticks.jsonl"
+            try:
+                tail_ticks = _bounded_verified_tick_tail(
+                    _FORMAL_MARKET_STATE_DIR / "stream" / "verified_ticks.jsonl"
+                )
+                acknowledgements = _bounded_jsonl_tail(
+                    _FORMAL_MARKET_STATE_DIR / "stream" / "tick_writer_acks.jsonl"
+                )
+            except _RetryableFormalTickTail:
+                if not _wait_for_formal_snapshot(deadline):
+                    raise
+                continue
+            frontier_tick = next(
+                (
+                    item
+                    for item in reversed(tail_ticks)
+                    if item.stream_generation == generation
+                    and item.ingest_seq == frontier
+                    and item.event_hash == before_watermark["last_event_hash"]
+                ),
+                None,
             )
-            if (
-                not tail_ticks
-                or tail_ticks[-1].stream_generation != generation
-                or tail_ticks[-1].ingest_seq != frontier
-                or tail_ticks[-1].event_hash != before_watermark["last_event_hash"]
-            ):
+            if frontier_tick is None:
                 raise ValueError("formal CTP verified journal tail is invalid")
             tick = next(
                 (
@@ -472,6 +585,8 @@ def _formal_tick_binding(
                     for item in reversed(tail_ticks)
                     if item.source == "windows-tick-wire-v1"
                     and item.vt_symbol == _FIXED_VT_SYMBOL
+                    and item.stream_generation == generation
+                    and item.ingest_seq <= frontier
                 ),
                 None,
             )
@@ -479,9 +594,6 @@ def _formal_tick_binding(
                 raise ValueError("formal CTP tick is unavailable")
             if tick.stream_generation != generation or tick.ingest_seq > frontier:
                 raise ValueError("formal CTP tick is beyond acknowledged frontier")
-            acknowledgements = _bounded_jsonl_tail(
-                _FORMAL_MARKET_STATE_DIR / "stream" / "tick_writer_acks.jsonl"
-            )
             expected_sequence: int | None = None
             for record in acknowledgements:
                 if (
@@ -491,23 +603,24 @@ def _formal_tick_binding(
                     or isinstance(record.get("ingest_seq"), bool)
                     or not isinstance(record.get("ingest_seq"), int)
                     or record["ingest_seq"] < 1
-                    or record["ingest_seq"] > frontier
                     or not isinstance(record.get("ingest_id"), str)
                     or not record["ingest_id"]
                     or not isinstance(record.get("event_hash"), str)
                     or len(record["event_hash"]) != 64
                 ):
                     raise ValueError("formal CTP acknowledgement tail is invalid")
+                if record["ingest_seq"] > frontier:
+                    continue
                 if expected_sequence is None:
                     expected_sequence = record["ingest_seq"]
                 if record["ingest_seq"] != expected_sequence:
                     raise ValueError("formal CTP acknowledgement tail is not contiguous")
                 expected_sequence += 1
             frontier_acknowledgement = {
-                "ingest_id": tail_ticks[-1].ingest_id,
+                "ingest_id": frontier_tick.ingest_id,
                 "stream_generation": generation,
                 "ingest_seq": frontier,
-                "event_hash": tail_ticks[-1].event_hash,
+                "event_hash": frontier_tick.event_hash,
             }
             tick_acknowledgement = {
                 "ingest_id": tick.ingest_id,
@@ -517,12 +630,12 @@ def _formal_tick_binding(
             }
             if (
                 not acknowledgements
-                or acknowledgements[-1] != frontier_acknowledgement
+                or frontier_acknowledgement not in acknowledgements
                 or tick_acknowledgement not in acknowledgements
             ):
                 raise ValueError("formal CTP acknowledgement tail is invalid")
             try:
-                after_projection, after_watermark, after_fence = (
+                _, after_watermark, after_fence = (
                     _formal_market_checkpoint()
                 )
             except ValueError as exc:
@@ -531,14 +644,11 @@ def _formal_tick_binding(
                 if not _wait_for_formal_snapshot(deadline):
                     raise
                 continue
-            if (
-                before_projection == after_projection
-                and before_watermark == after_watermark
-                and before_fence == after_fence
+            if _checkpoint_progressed(
+                before_watermark, before_fence, after_watermark, after_fence
             ):
                 break
-            if not _wait_for_formal_snapshot(deadline):
-                raise ValueError("formal CTP durable tick state changed during validation")
+            raise ValueError("formal CTP durable tick state changed during validation")
     except (
         OSError,
         ProjectionError,
