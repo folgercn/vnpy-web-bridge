@@ -861,9 +861,6 @@ def _require_execution_hard_gates(
         label="Execution reconciliation",
         now=now,
     )
-    fresh_snapshot_id = reconciliation.get("fresh_snapshot_id")
-    if not isinstance(fresh_snapshot_id, str) or not fresh_snapshot_id:
-        raise ValueError("Execution fresh snapshot id is invalid")
     return (
         int(status["state_version"]),
         str(status["lifecycle"]),
@@ -872,7 +869,6 @@ def _require_execution_hard_gates(
         str(reconciliation["state"]),
         str(reconciliation["unknown_outcomes"]),
         last_completed_at,
-        fresh_snapshot_id,
     )
 
 
@@ -881,6 +877,42 @@ def _require_same_execution_binding(
 ) -> None:
     if observed != expected:
         raise ValueError("Execution status changed before pilot mutation")
+
+
+async def _submit_reconcile_with_ready_snapshot(
+    execution: ExecutionClient,
+    *,
+    suffix: str,
+    version: int,
+    actor: Mapping[str, str],
+    now: str,
+    reconciliation_run_id: str,
+    reason: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Submit reconciliation only against the immediately probed Gateway snapshot."""
+
+    try:
+        readiness = await execution.ready()
+    except ExecutionClientError as exc:
+        raise ValueError("Execution readiness is unavailable; refusing reconciliation") from exc
+    if not isinstance(readiness, Mapping):
+        raise ExecutionClientError("Execution readiness response is invalid")
+    gateway_snapshot_id = readiness.get("gateway_snapshot_id")
+    if not isinstance(gateway_snapshot_id, str) or not gateway_snapshot_id:
+        raise ExecutionClientError("Execution readiness gateway snapshot id is invalid")
+    command = _command(
+        name="reconcile",
+        suffix=suffix,
+        version=version,
+        actor=actor,
+        now=now,
+        payload={
+            "reconciliation_run_id": reconciliation_run_id,
+            "snapshot_id": gateway_snapshot_id,
+            "reason": reason,
+        },
+    )
+    return command, await execution.submit(command)
 
 
 async def run(args: argparse.Namespace) -> dict[str, Any]:
@@ -1022,19 +1054,14 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         )
     )
     status = (await execution.status()).as_dict()
-    await execution.submit(
-        _command(
-            name="reconcile",
-            suffix=f"reconcile-{args.idempotency_suffix}",
-            version=status["state_version"],
-            actor=actor,
-            now=now,
-            payload={
-                "reconciliation_run_id": f"simnow-keyless-pilot-reconcile-{args.idempotency_suffix}",
-                "snapshot_id": str(status["reconciliation"]["fresh_snapshot_id"]),
-                "reason": "fresh fixed-tuple SIMNOW pilot facts",
-            },
-        )
+    await _submit_reconcile_with_ready_snapshot(
+        execution,
+        suffix=f"reconcile-{args.idempotency_suffix}",
+        version=status["state_version"],
+        actor=actor,
+        now=now,
+        reconciliation_run_id=f"simnow-keyless-pilot-reconcile-{args.idempotency_suffix}",
+        reason="fresh fixed-tuple SIMNOW pilot facts",
     )
     status = (await execution.status()).as_dict()
     await execution.submit(
@@ -1109,19 +1136,17 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
         await asyncio.sleep(args.completion_poll_seconds)
 
     try:
-        final_command = _command(
-            name="reconcile",
+        final_command, final_response = await _submit_reconcile_with_ready_snapshot(
+            execution,
             suffix=f"final-reconcile-{args.idempotency_suffix}",
             version=status["state_version"],
             actor=actor,
             now=_now(),
-            payload={
-                "reconciliation_run_id": f"simnow-keyless-pilot-final-reconcile-{args.idempotency_suffix}",
-                "snapshot_id": str(status["reconciliation"]["fresh_snapshot_id"]),
-                "reason": "post-start final SIMNOW pilot reconciliation",
-            },
+            reconciliation_run_id=(
+                f"simnow-keyless-pilot-final-reconcile-{args.idempotency_suffix}"
+            ),
+            reason="post-start final SIMNOW pilot reconciliation",
         )
-        final_response = await execution.submit(final_command)
         final_status = (await execution.status()).as_dict()
     except ExecutionClientError:
         return _incomplete(result, reason="final_reconcile_outcome_unknown")

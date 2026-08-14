@@ -129,7 +129,8 @@ def test_pilot_cli_accepts_only_fixed_target_and_no_source_selection_inputs() ->
             parser.parse_args([forbidden, "x"])
     source = (ROOT / "scripts/simnow_keyless_pilot.py").read_text(encoding="utf-8")
     assert 'status["broker"]["snapshot_id"]' not in source
-    assert source.count('status["reconciliation"]["fresh_snapshot_id"]') == 2
+    assert 'status["reconciliation"]["fresh_snapshot_id"]' not in source
+    assert source.count("await execution.ready()") == 1
     assert "simnow_run_once" not in source
 
 
@@ -1263,6 +1264,9 @@ def test_pilot_refuses_start_when_execution_hard_gates_change_after_enable(
 
             return ExecutionStatusProjection.model_validate(projection)
 
+        async def ready(self):
+            return {"gateway_snapshot_id": "gateway-ready-0001"}
+
         async def submit(self, command):
             nonlocal enabled
             commands.append(command["command"])
@@ -1451,6 +1455,9 @@ def test_pilot_start_uncertainty_never_retries_start(
         async def status(self):
             return status
 
+        async def ready(self):
+            return {"gateway_snapshot_id": "gateway-ready-0001"}
+
         async def submit(self, command):
             commands.append(command)
             if command["command"] == "start":
@@ -1540,4 +1547,85 @@ def test_pilot_start_uncertainty_never_retries_start(
         "enable",
         "start",
     ]
-    assert commands[1]["payload"]["snapshot_id"] == "snapshot-run-0001"
+    assert commands[1]["payload"]["snapshot_id"] == "gateway-ready-0001"
+
+
+@pytest.mark.parametrize("readiness", [{}, None])
+def test_pilot_refuses_reconcile_and_start_without_gateway_ready_snapshot(
+    monkeypatch: pytest.MonkeyPatch, readiness: object
+) -> None:
+    module = _module("simnow_keyless_pilot_ready_snapshot_missing")
+    position_hash = module.sha256_json({})
+    _stub_pilot_build(module, monkeypatch, position_hash=position_hash)
+    commands: list[str] = []
+
+    class FakeExecution:
+        async def status(self):
+            return _execution_status(position_hash=position_hash)
+
+        async def ready(self):
+            return readiness
+
+        async def submit(self, command):
+            commands.append(command["command"])
+            return {"accepted": True}
+
+    class FakeCustody:
+        def install_trusted_keyless_target_plan(self, _upload):
+            return type(
+                "Receipt",
+                (),
+                {"receipt_id": "receipt-0001", "artifact_sha256": "a" * 64},
+            )()
+
+    monkeypatch.setattr(module, "ExecutionClient", FakeExecution)
+    monkeypatch.setattr(module, "RemotePhaseCWorkflowClient", FakeCustody)
+    monkeypatch.setattr(module, "_now", lambda: "2030-01-01T00:00:00Z")
+    monkeypatch.setattr(
+        module, "_utc_clock", lambda: datetime(2030, 1, 1, tzinfo=timezone.utc)
+    )
+
+    with pytest.raises(
+        module.ExecutionClientError, match="readiness.*snapshot id|readiness response"
+    ):
+        asyncio.run(module.run(_pilot_args()))
+    assert commands == ["preview"]
+
+
+def test_pilot_refuses_reconcile_and_start_when_gateway_ready_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module("simnow_keyless_pilot_ready_failure")
+    position_hash = module.sha256_json({})
+    _stub_pilot_build(module, monkeypatch, position_hash=position_hash)
+    commands: list[str] = []
+
+    class FakeExecution:
+        async def status(self):
+            return _execution_status(position_hash=position_hash)
+
+        async def ready(self):
+            raise module.ExecutionClientError("gateway unavailable")
+
+        async def submit(self, command):
+            commands.append(command["command"])
+            return {"accepted": True}
+
+    class FakeCustody:
+        def install_trusted_keyless_target_plan(self, _upload):
+            return type(
+                "Receipt",
+                (),
+                {"receipt_id": "receipt-0001", "artifact_sha256": "a" * 64},
+            )()
+
+    monkeypatch.setattr(module, "ExecutionClient", FakeExecution)
+    monkeypatch.setattr(module, "RemotePhaseCWorkflowClient", FakeCustody)
+    monkeypatch.setattr(module, "_now", lambda: "2030-01-01T00:00:00Z")
+    monkeypatch.setattr(
+        module, "_utc_clock", lambda: datetime(2030, 1, 1, tzinfo=timezone.utc)
+    )
+
+    with pytest.raises(ValueError, match="readiness is unavailable"):
+        asyncio.run(module.run(_pilot_args()))
+    assert commands == ["preview"]
