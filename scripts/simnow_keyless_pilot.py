@@ -15,6 +15,7 @@ import json
 import os
 import stat
 import sys
+import time
 from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
@@ -81,7 +82,8 @@ _QUOTE_MAX_AGE_SECONDS = 2.0
 _QUOTE_FUTURE_SKEW_SECONDS = 2.0
 _TERMINAL_INTENT_STATES = frozenset({"TERMINAL", "RECONCILED", "CANCELLED"})
 _FORMAL_TICK_TAIL_BYTES = 512 * 1024
-_FORMAL_TICK_SNAPSHOT_ATTEMPTS = 3
+_FORMAL_TICK_SNAPSHOT_MAX_WAIT_SECONDS = 1.0
+_FORMAL_TICK_SNAPSHOT_RETRY_SECONDS = 0.05
 
 
 def _object(path: Path, label: str) -> dict[str, Any]:
@@ -425,6 +427,14 @@ def _formal_market_checkpoint() -> tuple[dict[str, Any], dict[str, Any], dict[st
     return projection, watermark, fence
 
 
+def _wait_for_formal_snapshot(deadline: float) -> bool:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return False
+    time.sleep(min(_FORMAL_TICK_SNAPSHOT_RETRY_SECONDS, remaining))
+    return True
+
+
 def _formal_tick_binding(
     *, clock: Callable[[], datetime]
 ) -> tuple[str, str, int, str, str, float]:
@@ -432,10 +442,18 @@ def _formal_tick_binding(
 
     try:
         tick: VerifiedTick | None = None
-        for _ in range(_FORMAL_TICK_SNAPSHOT_ATTEMPTS):
-            before_projection, before_watermark, before_fence = (
-                _formal_market_checkpoint()
-            )
+        deadline = time.monotonic() + _FORMAL_TICK_SNAPSHOT_MAX_WAIT_SECONDS
+        while True:
+            try:
+                before_projection, before_watermark, before_fence = (
+                    _formal_market_checkpoint()
+                )
+            except ValueError as exc:
+                if str(exc) != "formal CTP watermark/projection is invalid":
+                    raise
+                if not _wait_for_formal_snapshot(deadline):
+                    raise
+                continue
             generation = before_watermark["stream_generation"]
             frontier = before_watermark["last_ingest_seq"]
             tail_ticks = _bounded_verified_tick_tail(
@@ -503,15 +521,24 @@ def _formal_tick_binding(
                 or tick_acknowledgement not in acknowledgements
             ):
                 raise ValueError("formal CTP acknowledgement tail is invalid")
-            after_projection, after_watermark, after_fence = _formal_market_checkpoint()
+            try:
+                after_projection, after_watermark, after_fence = (
+                    _formal_market_checkpoint()
+                )
+            except ValueError as exc:
+                if str(exc) != "formal CTP watermark/projection is invalid":
+                    raise
+                if not _wait_for_formal_snapshot(deadline):
+                    raise
+                continue
             if (
                 before_projection == after_projection
                 and before_watermark == after_watermark
                 and before_fence == after_fence
             ):
                 break
-        else:
-            raise ValueError("formal CTP durable tick state changed during validation")
+            if not _wait_for_formal_snapshot(deadline):
+                raise ValueError("formal CTP durable tick state changed during validation")
     except (
         OSError,
         ProjectionError,
