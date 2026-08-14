@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import importlib.util
 import json
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -161,6 +162,7 @@ def _write_formal_tick_state(
 ) -> None:
     from phase_b_workers.contracts import VerifiedTick
     from phase_b_workers.durable import AtomicCheckpoint, DurableVerifiedTickStream
+    from phase_b_workers.projections import build_projection, publish_projection
 
     tick = VerifiedTick.from_raw(
         {
@@ -184,6 +186,7 @@ def _write_formal_tick_state(
     )
     stream.initialize()
     stream.append(tick)
+    stream.acknowledge_tick_write(tick)
     AtomicCheckpoint(root / "source_fence.json").write(
         {
             "worker_generation": "tick-generation-0001",
@@ -197,6 +200,80 @@ def _write_formal_tick_state(
             "events": {},
         }
     )
+    publish_projection(
+        root / "projection",
+        build_projection(
+            service_id="market-data-worker",
+            generation="test-revision:tick-generation-0001",
+            health={
+                "service_id": "market-data-worker",
+                "status": "healthy",
+                "dependencies": {"verified_stream": stream.stats()},
+            },
+            readiness={"service_id": "market-data-worker", "ready": True},
+            version={
+                "service_id": "market-data-worker",
+                "contract_versions": ["phase_b_worker_contract_v1"],
+            },
+        ),
+    )
+
+
+def _append_formal_tick(root: Path, *, vt_symbol: str, source_event_id: str) -> None:
+    from phase_b_workers.contracts import VerifiedTick
+    from phase_b_workers.durable import AtomicCheckpoint, DurableVerifiedTickStream
+    from phase_b_workers.projections import build_projection, publish_projection
+
+    generation = "tick-generation-0001"
+    stream = DurableVerifiedTickStream(root / "stream", generation=generation)
+    sequence = int(
+        AtomicCheckpoint(root / "stream" / "producer_watermark.json", read_only=True)
+        .read()["last_ingest_seq"]
+    ) + 1
+    tick = VerifiedTick.from_raw(
+        {
+            "event_time_utc": "2030-01-01T00:00:00Z",
+            "last_price": 3700.0,
+            "source_event_id": source_event_id,
+            "vt_symbol": vt_symbol,
+        },
+        stream_generation=generation,
+        ingest_seq=sequence,
+        source="windows-tick-wire-v1",
+        received_at=datetime(2030, 1, 1, tzinfo=timezone.utc),
+    )
+    stream.append(tick)
+    stream.acknowledge_tick_write(tick)
+    AtomicCheckpoint(root / "source_fence.json").write(
+        {
+            "worker_generation": generation,
+            "sources": {
+                "windows-tick-wire-v1": {
+                    "generation": "source-generation-0001",
+                    "seq": sequence,
+                    "event_hash": "a" * 64,
+                }
+            },
+            "events": {},
+        }
+    )
+    publish_projection(
+        root / "projection",
+        build_projection(
+            service_id="market-data-worker",
+            generation="test-revision:" + generation,
+            health={
+                "service_id": "market-data-worker",
+                "status": "healthy",
+                "dependencies": {"verified_stream": stream.stats()},
+            },
+            readiness={"service_id": "market-data-worker", "ready": True},
+            version={
+                "service_id": "market-data-worker",
+                "contract_versions": ["phase_b_worker_contract_v1"],
+            },
+        ),
+    )
 
 
 def test_pilot_requires_fresh_canonical_fixed_ctp_tick_for_reference_price(
@@ -207,18 +284,25 @@ def test_pilot_requires_fresh_canonical_fixed_ctp_tick_for_reference_price(
     _write_formal_tick_state(module, tmp_path)
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(module, "_FORMAL_MARKET_STATE_DIR", tmp_path)
+    monkeypatch.setattr(module, "_FORMAL_MARKET_PROJECTION_DIR", tmp_path / "projection")
     try:
         assert module._formal_tick_binding(clock=lambda: now)[-1] == 3700.0
         _write_formal_tick_state(
             module, tmp_path / "forged", source="readonly_market_source"
         )
         monkeypatch.setattr(module, "_FORMAL_MARKET_STATE_DIR", tmp_path / "forged")
+        monkeypatch.setattr(
+            module, "_FORMAL_MARKET_PROJECTION_DIR", tmp_path / "forged" / "projection"
+        )
         with pytest.raises(ValueError, match="durable tick state"):
             module._formal_tick_binding(clock=lambda: now)
         _write_formal_tick_state(
             module, tmp_path / "stale", event_time_utc="2029-12-31T23:59:57Z"
         )
         monkeypatch.setattr(module, "_FORMAL_MARKET_STATE_DIR", tmp_path / "stale")
+        monkeypatch.setattr(
+            module, "_FORMAL_MARKET_PROJECTION_DIR", tmp_path / "stale" / "projection"
+        )
         with pytest.raises(ValueError, match="stale"):
             module._formal_tick_binding(clock=lambda: now)
         _write_formal_tick_state(module, tmp_path / "fence")
@@ -228,8 +312,227 @@ def test_pilot_requires_fresh_canonical_fixed_ctp_tick_for_reference_price(
             {"worker_generation": "wrong", "sources": {}, "events": {}}
         )
         monkeypatch.setattr(module, "_FORMAL_MARKET_STATE_DIR", tmp_path / "fence")
+        monkeypatch.setattr(
+            module, "_FORMAL_MARKET_PROJECTION_DIR", tmp_path / "fence" / "projection"
+        )
         with pytest.raises(ValueError, match="durable tick state"):
             module._formal_tick_binding(clock=lambda: now)
+    finally:
+        monkeypatch.undo()
+
+
+@pytest.mark.parametrize(
+    "artifact",
+    [
+        "projection",
+        "watermark",
+        "fence",
+        "ack",
+        "ack_removed",
+        "ack_frontier",
+        "ack_gap",
+        "selected_ack_missing",
+        "events",
+        "tail",
+    ],
+)
+def test_pilot_rejects_tampered_formal_tick_state(
+    tmp_path: Path, artifact: str
+) -> None:
+    from phase_b_workers.contracts import canonical_json, sha256_hex
+    from phase_b_workers.durable import AtomicCheckpoint
+
+    module = _module(f"simnow_keyless_pilot_tamper_{artifact}")
+    now = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    _write_formal_tick_state(module, tmp_path)
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(module, "_FORMAL_MARKET_STATE_DIR", tmp_path)
+    monkeypatch.setattr(module, "_FORMAL_MARKET_PROJECTION_DIR", tmp_path / "projection")
+    try:
+        if artifact == "projection":
+            path = tmp_path / "projection" / "market-data-worker.json"
+            value = AtomicCheckpoint(path, read_only=True).read()
+            value["payload_sha256"] = "0" * 64
+            AtomicCheckpoint(path).write(value)
+        elif artifact == "watermark":
+            path = tmp_path / "stream" / "producer_watermark.json"
+            value = AtomicCheckpoint(path, read_only=True).read()
+            value["last_ingest_seq"] = 2
+            AtomicCheckpoint(path).write(value)
+        elif artifact == "fence":
+            path = tmp_path / "source_fence.json"
+            value = AtomicCheckpoint(path, read_only=True).read()
+            value["worker_generation"] = "other-generation"
+            AtomicCheckpoint(path).write(value)
+        elif artifact == "events":
+            path = tmp_path / "projection" / "market-data-worker.json"
+            value = AtomicCheckpoint(path, read_only=True).read()
+            stream = value["payload"]["health"]["dependencies"]["verified_stream"]
+            stream["events"] = 2
+            value["payload_sha256"] = sha256_hex(value["payload"])
+            AtomicCheckpoint(path).write(value)
+        elif artifact == "ack_removed":
+            path = tmp_path / "stream" / "tick_writer_acks.jsonl"
+            path.write_bytes(b"")
+        elif artifact == "ack_frontier":
+            path = tmp_path / "stream" / "tick_writer_acks.jsonl"
+            record = json.loads(path.read_text(encoding="utf-8"))
+            record["event_hash"] = "b" * 64
+            path.write_text(canonical_json(record) + "\n", encoding="utf-8")
+        elif artifact in {"ack_gap", "selected_ack_missing"}:
+            _append_formal_tick(
+                tmp_path, vt_symbol="au2601.SHFE", source_event_id="tick-event-0002"
+            )
+            if artifact == "ack_gap":
+                _append_formal_tick(
+                    tmp_path,
+                    vt_symbol="au2601.SHFE",
+                    source_event_id="tick-event-0003",
+                )
+                drop_sequence = 2
+            else:
+                drop_sequence = 1
+            path = tmp_path / "stream" / "tick_writer_acks.jsonl"
+            retained = [
+                line
+                for line in path.read_text(encoding="utf-8").splitlines()
+                if json.loads(line)["ingest_seq"] != drop_sequence
+            ]
+            path.write_text("\n".join(retained) + "\n", encoding="utf-8")
+        else:
+            name = "tick_writer_acks.jsonl" if artifact == "ack" else "verified_ticks.jsonl"
+            path = tmp_path / "stream" / name
+            path.write_bytes(path.read_bytes() + b"{}\n")
+        with pytest.raises(ValueError, match="durable tick state"):
+            module._formal_tick_binding(clock=lambda: now)
+    finally:
+        monkeypatch.undo()
+
+
+def test_pilot_reads_a_fresh_tail_without_replaying_310k_history(tmp_path: Path) -> None:
+    from phase_b_workers.contracts import VerifiedTick, canonical_json
+    from phase_b_workers.durable import AtomicCheckpoint, DurableVerifiedTickStream
+    from phase_b_workers.projections import build_projection, publish_projection
+
+    module = _module("simnow_keyless_pilot_bounded_tail")
+    generation = "tick-generation-310k"
+    stream = DurableVerifiedTickStream(tmp_path / "stream", generation=generation)
+    stream.initialize()
+    journal = tmp_path / "stream" / "verified_ticks.jsonl"
+    acknowledgements = tmp_path / "stream" / "tick_writer_acks.jsonl"
+    total = 310_000
+    with journal.open("wb") as journal_file, acknowledgements.open("wb") as ack_file:
+        for sequence in range(1, total + 1):
+            tick = VerifiedTick.from_raw(
+                {
+                    "event_time_utc": "2029-12-31T23:00:00Z",
+                    "last_price": 3600.0 + sequence / 1_000_000,
+                    "source_event_id": f"history-{sequence}",
+                    "vt_symbol": "au2601.SHFE",
+                },
+                stream_generation=generation,
+                ingest_seq=sequence,
+                source="windows-tick-wire-v1",
+                received_at=datetime(2029, 12, 31, 23, tzinfo=timezone.utc),
+            )
+            journal_file.write(
+                (canonical_json({"record_type": "verified_tick", "tick": tick.as_dict()}) + "\n").encode()
+            )
+            ack_file.write(
+                (
+                    canonical_json(
+                        {
+                            "ingest_id": tick.ingest_id,
+                            "stream_generation": generation,
+                            "ingest_seq": sequence,
+                            "event_hash": tick.event_hash,
+                        }
+                    )
+                    + "\n"
+                ).encode()
+            )
+        current = VerifiedTick.from_raw(
+            {
+                "event_time_utc": "2030-01-01T00:00:00Z",
+                "last_price": 3700.0,
+                "source_event_id": "current-ru2609",
+                "vt_symbol": "ru2609.SHFE",
+            },
+            stream_generation=generation,
+            ingest_seq=total + 1,
+            source="windows-tick-wire-v1",
+            received_at=datetime(2030, 1, 1, tzinfo=timezone.utc),
+        )
+        journal_file.write(
+            (canonical_json({"record_type": "verified_tick", "tick": current.as_dict()}) + "\n").encode()
+        )
+        ack_file.write(
+            (
+                canonical_json(
+                    {
+                        "ingest_id": current.ingest_id,
+                        "stream_generation": generation,
+                        "ingest_seq": current.ingest_seq,
+                        "event_hash": current.event_hash,
+                    }
+                )
+                + "\n"
+            ).encode()
+        )
+    AtomicCheckpoint(tmp_path / "stream" / "producer_watermark.json").write(
+        {
+            "stream_generation": generation,
+            "last_ingest_seq": total + 1,
+            "last_event_hash": current.event_hash,
+        }
+    )
+    AtomicCheckpoint(tmp_path / "source_fence.json").write(
+        {
+            "worker_generation": generation,
+            "sources": {
+                "windows-tick-wire-v1": {
+                    "generation": "source-generation-310k",
+                    "seq": total + 1,
+                    "event_hash": "a" * 64,
+                }
+            },
+            "events": {},
+        }
+    )
+    publish_projection(
+        tmp_path / "projection",
+        build_projection(
+            service_id="market-data-worker",
+            generation="test-revision:" + generation,
+            health={
+                "service_id": "market-data-worker",
+                "status": "healthy",
+                "dependencies": {
+                    "verified_stream": {
+                        "stream_generation": generation,
+                        "events": total + 1,
+                        "last_ingest_seq": total + 1,
+                        "pending_writer_acks": 0,
+                    }
+                },
+            },
+            readiness={"service_id": "market-data-worker", "ready": True},
+            version={
+                "service_id": "market-data-worker",
+                "contract_versions": ["phase_b_worker_contract_v1"],
+            },
+        ),
+    )
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(module, "_FORMAL_MARKET_STATE_DIR", tmp_path)
+    monkeypatch.setattr(module, "_FORMAL_MARKET_PROJECTION_DIR", tmp_path / "projection")
+    try:
+        started = time.monotonic()
+        binding = module._formal_tick_binding(
+            clock=lambda: datetime(2030, 1, 1, tzinfo=timezone.utc)
+        )
+        assert time.monotonic() - started < 2.0
+        assert binding[1:3] == ("current-ru2609", total + 1)
     finally:
         monkeypatch.undo()
 
@@ -388,7 +691,7 @@ def _stub_pilot_build(
     monkeypatch.setattr(
         module,
         "_formal_tick_binding",
-        lambda **_kwargs: ("tick", 1, "a" * 64, "2030-01-01T00:00:00Z", 3700.0),
+        lambda **_kwargs: ("tick-generation", "tick", 1, "a" * 64, "2030-01-01T00:00:00Z", 3700.0),
     )
     monkeypatch.setattr(
         module,
@@ -411,12 +714,26 @@ def test_pilot_rechecks_live_clock_after_custody_before_preview(
     module = _module("simnow_keyless_pilot_post_custody_freshness")
     position_hash = module.sha256_json({})
     _stub_pilot_build(module, monkeypatch, position_hash=position_hash)
+    monkeypatch.setattr(
+        module,
+        "_formal_tick_binding",
+        lambda **_kwargs: (
+            "tick-generation",
+            "tick",
+            1,
+            "a" * 64,
+            "2030-01-01T00:00:58Z",
+            3700.0,
+        ),
+    )
     statuses = _execution_status(
         position_hash=position_hash, timestamp="2030-01-01T00:00:00Z"
     )
     custody_calls: list[str] = []
     clocks = iter(
         [
+            datetime(2030, 1, 1, 0, 0, 59, tzinfo=timezone.utc),
+            datetime(2030, 1, 1, 0, 0, 59, tzinfo=timezone.utc),
             datetime(2030, 1, 1, 0, 0, 59, tzinfo=timezone.utc),
             datetime(2030, 1, 1, 0, 0, 59, tzinfo=timezone.utc),
             datetime(2030, 1, 1, 0, 1, 1, tzinfo=timezone.utc),
@@ -488,8 +805,8 @@ def test_pilot_rechecks_the_same_fresh_durable_tick_before_custody(
     _stub_pilot_build(module, monkeypatch, position_hash=position_hash)
     bindings = iter(
         [
-            ("tick-1", 1, "a" * 64, "2030-01-01T00:00:00Z", 3700.0),
-            ("tick-2", 2, "b" * 64, "2030-01-01T00:00:00Z", 3701.0),
+            ("tick-generation", "tick-1", 1, "a" * 64, "2030-01-01T00:00:00Z", 3700.0),
+            ("tick-generation", "tick-1", 1, "b" * 64, "2030-01-01T00:00:00Z", 3701.0),
         ]
     )
     monkeypatch.setattr(
@@ -512,6 +829,35 @@ def test_pilot_rechecks_the_same_fresh_durable_tick_before_custody(
     )
     with pytest.raises(ValueError, match="tick changed"):
         asyncio.run(module.run(_pilot_args()))
+
+
+def test_pilot_tick_boundary_accepts_a_newer_same_generation_tick(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _module("simnow_keyless_pilot_tick_advance")
+    initial = (
+        "tick-generation",
+        "tick-1",
+        1,
+        "a" * 64,
+        "2030-01-01T00:00:00Z",
+        3700.0,
+    )
+    monkeypatch.setattr(
+        module,
+        "_formal_tick_binding",
+        lambda **_kwargs: (
+            "tick-generation",
+            "tick-2",
+            2,
+            "b" * 64,
+            "2030-01-01T00:00:01Z",
+            3701.0,
+        ),
+    )
+    module._require_tick_boundary(
+        initial, clock=lambda: datetime(2030, 1, 1, 0, 0, 1, tzinfo=timezone.utc)
+    )
 
 
 @pytest.mark.parametrize(
@@ -632,7 +978,7 @@ def test_pilot_noop_does_not_create_custody_or_execution_intent(
     monkeypatch.setattr(
         module,
         "_formal_tick_binding",
-        lambda **_kwargs: ("tick", 1, "a" * 64, "2030-01-01T00:00:00Z", 3700.0),
+        lambda **_kwargs: ("tick-generation", "tick", 1, "a" * 64, "2030-01-01T00:00:00Z", 3700.0),
     )
     monkeypatch.setattr(module, "_now", lambda: "2030-01-01T00:00:00Z")
     monkeypatch.setattr(
@@ -705,7 +1051,7 @@ def test_pilot_noop_rejects_dirty_execution_status_before_custody(
     monkeypatch.setattr(
         module,
         "_formal_tick_binding",
-        lambda **_kwargs: ("tick", 1, "a" * 64, "2030-01-01T00:00:00Z", 3700.0),
+        lambda **_kwargs: ("tick-generation", "tick", 1, "a" * 64, "2030-01-01T00:00:00Z", 3700.0),
     )
     monkeypatch.setattr(module, "_now", lambda: "2030-01-01T00:00:00Z")
     monkeypatch.setattr(
@@ -772,7 +1118,7 @@ def test_pilot_start_uncertainty_never_retries_start(
     monkeypatch.setattr(
         module,
         "_formal_tick_binding",
-        lambda **_kwargs: ("tick", 1, "a" * 64, "2030-01-01T00:00:00Z", 3700.0),
+        lambda **_kwargs: ("tick-generation", "tick", 1, "a" * 64, "2030-01-01T00:00:00Z", 3700.0),
     )
     monkeypatch.setattr(
         module,

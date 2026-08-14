@@ -282,6 +282,7 @@ services:
       - ${SIMNOW_RUNNER_SOURCE_DIR:?required}:/run/sources:ro
       - ${PHASE_C_CUSTODY_PUBLIC_KEYRING_DIR:?required}:/run/keys:ro
       - market_data_state:/run/market-data:ro
+      - market_projection:/run/market-projection:ro
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]

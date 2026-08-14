@@ -12,6 +12,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
+import stat
 import sys
 from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
@@ -41,8 +43,14 @@ from phase_b_workers.contracts import (  # noqa: E402
 )
 from phase_b_workers.durable import (  # noqa: E402
     AtomicCheckpoint,
+    DurableCorruptionError,
     DurableStateError,
-    DurableVerifiedTickStream,
+    _open_parent,
+    _strict_json_line,
+)
+from phase_b_workers.projections import (  # noqa: E402
+    ProjectionError,
+    validate_projection,
 )
 
 from shared.artifact_contracts.v1 import new_artifact_envelope  # noqa: E402
@@ -63,6 +71,7 @@ _FIXED_EXCHANGE = "SHFE"
 _FIXED_SYMBOL = "ru2609"
 _FIXED_VT_SYMBOL = f"{_FIXED_SYMBOL}.{_FIXED_EXCHANGE}"
 _FORMAL_MARKET_STATE_DIR = Path("/run/market-data")
+_FORMAL_MARKET_PROJECTION_DIR = Path("/run/market-projection")
 _STATUS_MAX_AGE_SECONDS = 60.0
 _STATUS_FUTURE_SKEW_SECONDS = 5.0
 # The live tick admission boundary is intentionally stricter than the normal
@@ -71,6 +80,8 @@ _STATUS_FUTURE_SKEW_SECONDS = 5.0
 _QUOTE_MAX_AGE_SECONDS = 2.0
 _QUOTE_FUTURE_SKEW_SECONDS = 2.0
 _TERMINAL_INTENT_STATES = frozenset({"TERMINAL", "RECONCILED", "CANCELLED"})
+_FORMAL_TICK_TAIL_BYTES = 512 * 1024
+_FORMAL_TICK_SNAPSHOT_ATTEMPTS = 3
 
 
 def _object(path: Path, label: str) -> dict[str, Any]:
@@ -272,53 +283,242 @@ def _current_position(
     return long_volume, short_volume, matching
 
 
+def _bounded_jsonl_tail(path: Path) -> list[dict[str, object]]:
+    """Read only complete canonical records from a fixed-size journal tail."""
+
+    parent_fd, _ = _open_parent(path)
+    descriptor = -1
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(path.name, flags, dir_fd=parent_fd)
+        info = os.fstat(descriptor)
+        if (
+            stat.S_ISLNK(info.st_mode)
+            or not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.geteuid()
+            or info.st_nlink != 1
+            or info.st_mode & 0o077
+        ):
+            raise DurableCorruptionError("verified tick journal is unsafe")
+        offset = max(0, info.st_size - _FORMAL_TICK_TAIL_BYTES)
+        os.lseek(descriptor, offset, os.SEEK_SET)
+        raw = bytearray()
+        while len(raw) < _FORMAL_TICK_TAIL_BYTES:
+            chunk = os.read(descriptor, _FORMAL_TICK_TAIL_BYTES - len(raw))
+            if not chunk:
+                break
+            raw.extend(chunk)
+        after = os.fstat(descriptor)
+        if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) != (
+            info.st_dev,
+            info.st_ino,
+            info.st_size,
+            info.st_mtime_ns,
+        ):
+            raise DurableCorruptionError("verified tick journal changed during tail read")
+    except OSError as exc:
+        raise DurableCorruptionError("cannot read verified tick journal tail") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(parent_fd)
+    if not raw:
+        return []
+    try:
+        text = bytes(raw).decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise DurableCorruptionError("invalid UTF-8 verified tick journal tail") from exc
+    lines = text.splitlines(keepends=True)
+    if offset:
+        if not lines or not lines[0].endswith("\n"):
+            raise DurableCorruptionError("verified tick tail has no complete record")
+        lines = lines[1:]
+    records: list[dict[str, object]] = []
+    for line in lines:
+        records.append(_strict_json_line(line, path))
+    return records
+
+
+def _bounded_verified_tick_tail(path: Path) -> list[VerifiedTick]:
+    ticks: list[VerifiedTick] = []
+    for record in _bounded_jsonl_tail(path):
+        if set(record) != {"record_type", "tick"} or record.get("record_type") != "verified_tick":
+            raise DurableCorruptionError("verified tick tail record is invalid")
+        try:
+            ticks.append(VerifiedTick.from_dict(record["tick"]))  # type: ignore[arg-type]
+        except (TypeError, ValueError) as exc:
+            raise DurableCorruptionError("verified tick tail contract is invalid") from exc
+    return ticks
+
+
+def _formal_market_checkpoint() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    projection = AtomicCheckpoint(
+        _FORMAL_MARKET_PROJECTION_DIR / "market-data-worker.json", read_only=True
+    ).read()
+    projection = validate_projection(
+        projection, expected_service_id="market-data-worker"
+    )
+    payload = projection["payload"]
+    health = payload.get("health") if isinstance(payload, Mapping) else None
+    readiness = payload.get("readiness") if isinstance(payload, Mapping) else None
+    dependencies = health.get("dependencies") if isinstance(health, Mapping) else None
+    stream = dependencies.get("verified_stream") if isinstance(dependencies, Mapping) else None
+    if (
+        not isinstance(health, Mapping)
+        or health.get("status") != "healthy"
+        or not isinstance(readiness, Mapping)
+        or readiness.get("ready") is not True
+        or not isinstance(stream, Mapping)
+        or set(stream) != {
+            "stream_generation",
+            "events",
+            "last_ingest_seq",
+            "pending_writer_acks",
+        }
+        or not isinstance(stream.get("stream_generation"), str)
+        or not stream["stream_generation"]
+        or isinstance(stream.get("last_ingest_seq"), bool)
+        or not isinstance(stream.get("last_ingest_seq"), int)
+        or stream["last_ingest_seq"] < 1
+        or isinstance(stream.get("events"), bool)
+        or not isinstance(stream.get("events"), int)
+        or stream["events"] != stream["last_ingest_seq"]
+        or stream.get("pending_writer_acks") != 0
+    ):
+        raise ValueError("formal CTP market projection is not ready")
+    watermark = AtomicCheckpoint(
+        _FORMAL_MARKET_STATE_DIR / "stream" / "producer_watermark.json",
+        read_only=True,
+    ).read()
+    generation = watermark.get("stream_generation")
+    if (
+        not isinstance(generation, str)
+        or not generation
+        or isinstance(watermark.get("last_ingest_seq"), bool)
+        or not isinstance(watermark.get("last_ingest_seq"), int)
+        or watermark["last_ingest_seq"] < 1
+        or not isinstance(watermark.get("last_event_hash"), str)
+        or len(watermark["last_event_hash"]) != 64
+        or stream["stream_generation"] != generation
+        or stream["last_ingest_seq"] != watermark["last_ingest_seq"]
+    ):
+        raise ValueError("formal CTP watermark/projection is invalid")
+    fence = AtomicCheckpoint(
+        _FORMAL_MARKET_STATE_DIR / "source_fence.json", read_only=True
+    ).read()
+    sources = fence.get("sources") if isinstance(fence, Mapping) else None
+    source = sources.get("windows-tick-wire-v1") if isinstance(sources, Mapping) else None
+    if (
+        not isinstance(source, Mapping)
+        or fence.get("worker_generation") != generation
+        or not isinstance(source.get("generation"), str)
+        or not source["generation"]
+        or isinstance(source.get("seq"), bool)
+        or not isinstance(source.get("seq"), int)
+        or source["seq"] < 1
+        or not isinstance(source.get("event_hash"), str)
+        or len(source["event_hash"]) != 64
+    ):
+        raise ValueError("formal CTP source fence is invalid")
+    return projection, watermark, fence
+
+
 def _formal_tick_binding(
     *, clock: Callable[[], datetime]
-) -> tuple[str, int, str, str, float]:
-    """Read one fixed-path, source-fenced, validated durable CTP tick."""
+) -> tuple[str, str, int, str, str, float]:
+    """Read one fixed-path, source-fenced, bounded-tail CTP tick."""
 
     try:
-        watermark = AtomicCheckpoint(
-            _FORMAL_MARKET_STATE_DIR / "stream" / "producer_watermark.json",
-            read_only=True,
-        ).read()
-        generation = watermark.get("stream_generation")
-        if not isinstance(generation, str) or not generation:
-            raise ValueError("formal CTP tick generation is invalid")
-        fence = AtomicCheckpoint(
-            _FORMAL_MARKET_STATE_DIR / "source_fence.json", read_only=True
-        ).read()
-        sources = fence.get("sources") if isinstance(fence, Mapping) else None
-        source = (
-            sources.get("windows-tick-wire-v1")
-            if isinstance(sources, Mapping)
-            else None
-        )
-        if (
-            not isinstance(source, Mapping)
-            or fence.get("worker_generation") != generation
-            or not isinstance(source.get("generation"), str)
-            or not source["generation"]
-            or isinstance(source.get("seq"), bool)
-            or not isinstance(source.get("seq"), int)
-            or source["seq"] < 1
-            or not isinstance(source.get("event_hash"), str)
-            or len(source["event_hash"]) != 64
-        ):
-            raise ValueError("formal CTP source fence is invalid")
-        stream = DurableVerifiedTickStream(
-            _FORMAL_MARKET_STATE_DIR / "stream", generation=generation, read_only=True
-        )
         tick: VerifiedTick | None = None
-        for item in stream.iter_from():
+        for _ in range(_FORMAL_TICK_SNAPSHOT_ATTEMPTS):
+            before_projection, before_watermark, before_fence = (
+                _formal_market_checkpoint()
+            )
+            generation = before_watermark["stream_generation"]
+            frontier = before_watermark["last_ingest_seq"]
+            tail_ticks = _bounded_verified_tick_tail(
+                _FORMAL_MARKET_STATE_DIR / "stream" / "verified_ticks.jsonl"
+            )
             if (
-                item.source == "windows-tick-wire-v1"
-                and item.vt_symbol == _FIXED_VT_SYMBOL
+                not tail_ticks
+                or tail_ticks[-1].stream_generation != generation
+                or tail_ticks[-1].ingest_seq != frontier
+                or tail_ticks[-1].event_hash != before_watermark["last_event_hash"]
             ):
-                tick = item
-        if tick is None:
-            raise ValueError("formal CTP tick is unavailable")
-    except (OSError, TypeError, ValueError, DurableStateError) as exc:
+                raise ValueError("formal CTP verified journal tail is invalid")
+            tick = next(
+                (
+                    item
+                    for item in reversed(tail_ticks)
+                    if item.source == "windows-tick-wire-v1"
+                    and item.vt_symbol == _FIXED_VT_SYMBOL
+                ),
+                None,
+            )
+            if tick is None:
+                raise ValueError("formal CTP tick is unavailable")
+            if tick.stream_generation != generation or tick.ingest_seq > frontier:
+                raise ValueError("formal CTP tick is beyond acknowledged frontier")
+            acknowledgements = _bounded_jsonl_tail(
+                _FORMAL_MARKET_STATE_DIR / "stream" / "tick_writer_acks.jsonl"
+            )
+            expected_sequence: int | None = None
+            for record in acknowledgements:
+                if (
+                    set(record)
+                    != {"ingest_id", "stream_generation", "ingest_seq", "event_hash"}
+                    or record.get("stream_generation") != generation
+                    or isinstance(record.get("ingest_seq"), bool)
+                    or not isinstance(record.get("ingest_seq"), int)
+                    or record["ingest_seq"] < 1
+                    or record["ingest_seq"] > frontier
+                    or not isinstance(record.get("ingest_id"), str)
+                    or not record["ingest_id"]
+                    or not isinstance(record.get("event_hash"), str)
+                    or len(record["event_hash"]) != 64
+                ):
+                    raise ValueError("formal CTP acknowledgement tail is invalid")
+                if expected_sequence is None:
+                    expected_sequence = record["ingest_seq"]
+                if record["ingest_seq"] != expected_sequence:
+                    raise ValueError("formal CTP acknowledgement tail is not contiguous")
+                expected_sequence += 1
+            frontier_acknowledgement = {
+                "ingest_id": tail_ticks[-1].ingest_id,
+                "stream_generation": generation,
+                "ingest_seq": frontier,
+                "event_hash": tail_ticks[-1].event_hash,
+            }
+            tick_acknowledgement = {
+                "ingest_id": tick.ingest_id,
+                "stream_generation": generation,
+                "ingest_seq": tick.ingest_seq,
+                "event_hash": tick.event_hash,
+            }
+            if (
+                not acknowledgements
+                or acknowledgements[-1] != frontier_acknowledgement
+                or tick_acknowledgement not in acknowledgements
+            ):
+                raise ValueError("formal CTP acknowledgement tail is invalid")
+            after_projection, after_watermark, after_fence = _formal_market_checkpoint()
+            if (
+                before_projection == after_projection
+                and before_watermark == after_watermark
+                and before_fence == after_fence
+            ):
+                break
+        else:
+            raise ValueError("formal CTP durable tick state changed during validation")
+    except (
+        OSError,
+        ProjectionError,
+        TypeError,
+        ValueError,
+        DurableStateError,
+    ) as exc:
         raise ValueError("formal CTP durable tick state is invalid") from exc
     if tick.source != "windows-tick-wire-v1":
         raise ValueError("formal CTP tick source is invalid")
@@ -338,6 +538,7 @@ def _formal_tick_binding(
     if not (0 < normalized < float("inf")):
         raise ValueError("formal CTP tick reference price is invalid")
     return (
+        tick.stream_generation,
         tick.ingest_id,
         tick.ingest_seq,
         tick.event_hash,
@@ -346,12 +547,33 @@ def _formal_tick_binding(
     )
 
 
-def _require_same_tick_binding(
-    expected: tuple[str, int, str, str, float],
-    observed: tuple[str, int, str, str, float],
+def _require_tick_fresh(
+    binding: tuple[str, str, int, str, str, float], *, clock: Callable[[], datetime]
 ) -> None:
-    if observed != expected:
+    now = clock()
+    if now.tzinfo is None or now.utcoffset() != timezone.utc.utcoffset(now):
+        raise ValueError("tick clock must be explicit UTC")
+    received_at = _parse_explicit_utc(binding[4], label="formal CTP tick")
+    age = (now - received_at).total_seconds()
+    if age < -_QUOTE_FUTURE_SKEW_SECONDS or age > _QUOTE_MAX_AGE_SECONDS:
+        raise ValueError("formal CTP tick is stale or from the future")
+
+
+def _require_current_tick_binding(
+    expected: tuple[str, str, int, str, str, float],
+    observed: tuple[str, str, int, str, str, float],
+) -> None:
+    if observed[0] != expected[0] or observed[2] < expected[2]:
+        raise ValueError("formal CTP tick generation or sequence regressed")
+    if observed[2] == expected[2] and observed != expected:
         raise ValueError("formal CTP tick changed before pilot mutation")
+
+
+def _require_tick_boundary(
+    expected: tuple[str, str, int, str, str, float], *, clock: Callable[[], datetime]
+) -> None:
+    _require_tick_fresh(expected, clock=clock)
+    _require_current_tick_binding(expected, _formal_tick_binding(clock=clock))
 
 
 def _pilot_target_plan(
@@ -594,7 +816,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             clock=_utc_clock,
         ),
     )
-    _require_same_tick_binding(tick_binding, _formal_tick_binding(clock=_utc_clock))
+    _require_tick_boundary(tick_binding, clock=_utc_clock)
     custody = RemotePhaseCWorkflowClient()
     receipt = custody.install_trusted_keyless_target_plan(
         TrustedKeylessTargetPlanUploadDTO(
@@ -640,7 +862,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             clock=_utc_clock,
         ),
     )
-    _require_same_tick_binding(tick_binding, _formal_tick_binding(clock=_utc_clock))
+    _require_tick_boundary(tick_binding, clock=_utc_clock)
     await execution.submit(
         _command(
             name="preview",
@@ -696,7 +918,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
     leader = status["leader"]
     if not leader.get("held"):
         raise ValueError("Execution leader lease is not held; refusing start")
-    _require_same_tick_binding(tick_binding, _formal_tick_binding(clock=_utc_clock))
+    _require_tick_boundary(tick_binding, clock=_utc_clock)
     try:
         await execution.submit(
             _command(
