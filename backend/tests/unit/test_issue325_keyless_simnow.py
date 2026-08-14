@@ -723,6 +723,13 @@ def test_simnow_run_once_direct_python_help_has_no_external_pythonpath() -> None
     assert "--static-core-source" in completed.stdout
     assert "--position-manager-source" in completed.stdout
 
+    workflow = (
+        Path(__file__).resolve().parents[3] / ".github/workflows/ci.yml"
+    ).read_text(encoding="utf-8")
+    assert "grep -F -- '--static-core-source'" in workflow
+    assert "grep -F -- '--position-manager-source'" in workflow
+    assert "grep -F -- '--map-source'" not in workflow
+
 
 def test_simnow_run_once_completion_fails_closed_for_pending_unknown_and_active() -> (
     None
