@@ -1079,6 +1079,141 @@ def test_reconcile_final_target_projection_completes_or_halts(
         assert core.status()["lifecycle"] == "HALTED_RECONCILE_REQUIRED"
 
 
+def test_reconcile_query_only_terminal_submitted_intent_completes_finalization() -> None:
+    service, _core, repo, gateway, _ = runtime(execute=True)
+    target = plan()
+    reconcile_enable_start(service, _core, repo, target)
+    intent_id = next(iter(repo.snapshot()["send_intents"]))
+
+    repo.mutate(
+        lambda state: state["send_intents"][intent_id].update({"state": "SUBMITTED"})
+    )
+    gateway.intent_outcomes[intent_id] = {"state": "TERMINAL", "resolved": True}
+    gateway.snapshots.append(final_position_snapshot(target_position_rows()))
+    gateway.send_calls.clear()
+    gateway.cancel_calls.clear()
+    before = repo.state_version
+
+    command_value = command(
+        "reconcile",
+        "reconcile-submitted-terminal-0001",
+        repo.state_version,
+        {
+            "reconciliation_run_id": "run-submitted-terminal-0001",
+            "snapshot_id": "snapshot-final-0002",
+            "reason": "query-only submitted terminal recovery",
+        },
+    )
+    response = service.process_command(command_value)
+
+    state = repo.snapshot()
+    assert state["state_version"] == before + 1 == response.receipt["state_version"]
+    assert gateway.query_calls == [intent_id]
+    assert gateway.send_calls == []
+    assert gateway.cancel_calls == []
+    assert state["send_intents"][intent_id]["state"] == "TERMINAL"
+    assert response.result["finalization"]["state"] == "COMPLETED"
+    assert state["plan"]["state"] == "TERMINAL"
+    intent_archives = [
+        archive
+        for archive in state["terminal_archive"]
+        if archive["kind"] == "intent_terminal" and archive["intent_id"] == intent_id
+    ]
+    assert len(intent_archives) == 1
+    archive_count = len(state["terminal_archive"])
+    query_calls = list(gateway.query_calls)
+
+    retry = service.process_command(command_value)
+
+    assert retry.reused is True
+    assert retry.receipt == response.receipt
+    assert len(repo.snapshot()["terminal_archive"]) == archive_count
+    assert gateway.query_calls == query_calls
+    assert gateway.send_calls == []
+    assert gateway.cancel_calls == []
+
+
+def test_reconcile_query_only_nonterminal_submitted_intent_stays_pending() -> None:
+    service, core, repo, gateway, _ = runtime(execute=True)
+    target = plan()
+    reconcile_enable_start(service, core, repo, target)
+    intent_id = next(iter(repo.snapshot()["send_intents"]))
+
+    repo.mutate(
+        lambda state: state["send_intents"][intent_id].update({"state": "SUBMITTED"})
+    )
+    gateway.intent_outcomes[intent_id] = {"state": "ACKNOWLEDGED", "resolved": True}
+    gateway.snapshots.append(final_position_snapshot(target_position_rows()))
+    gateway.send_calls.clear()
+    gateway.cancel_calls.clear()
+
+    response = service.process_command(
+        command(
+            "reconcile",
+            "reconcile-submitted-pending-0001",
+            repo.state_version,
+            {
+                "reconciliation_run_id": "run-submitted-pending-0001",
+                "snapshot_id": "snapshot-final-0002",
+                "reason": "query-only submitted pending recovery",
+            },
+        )
+    )
+
+    state = repo.snapshot()
+    assert gateway.query_calls == [intent_id]
+    assert gateway.send_calls == []
+    assert gateway.cancel_calls == []
+    assert state["send_intents"][intent_id]["state"] == "SUBMITTED"
+    assert response.result["finalization"]["state"] == "PENDING"
+    assert state["plan"]["state"] == "ACTIVE"
+
+
+@pytest.mark.parametrize("query_failure", [None, GatewayTimeout("query unavailable")])
+def test_reconcile_query_only_submitted_unknown_or_error_fails_closed(
+    query_failure: Exception | None,
+) -> None:
+    service, core, repo, gateway, _ = runtime(execute=True)
+    target = plan()
+    reconcile_enable_start(service, core, repo, target)
+    intent_id = next(iter(repo.snapshot()["send_intents"]))
+
+    repo.mutate(
+        lambda state: state["send_intents"][intent_id].update({"state": "SUBMITTED"})
+    )
+    if query_failure is None:
+        gateway.intent_outcomes[intent_id] = {"state": "UNKNOWN"}
+    else:
+        gateway.fail_query = query_failure
+    gateway.snapshots.append(final_position_snapshot(target_position_rows()))
+    gateway.send_calls.clear()
+    gateway.cancel_calls.clear()
+
+    response = service.process_command(
+        command(
+            "reconcile",
+            "reconcile-submitted-unknown-0001",
+            repo.state_version,
+            {
+                "reconciliation_run_id": "run-submitted-unknown-0001",
+                "snapshot_id": "snapshot-final-0002",
+                "reason": "query-only submitted unknown recovery",
+            },
+        )
+    )
+
+    state = repo.snapshot()
+    assert gateway.query_calls == [intent_id]
+    assert gateway.send_calls == []
+    assert gateway.cancel_calls == []
+    assert state["send_intents"][intent_id]["state"] == "UNKNOWN_OUTCOME"
+    assert intent_id in state["unknown_outcomes"]
+    assert response.receipt["status"] == "REJECTED"
+    assert response.result["accepted"] is False
+    assert "finalization" not in response.result
+    assert core.status()["lifecycle"] == "HALTED_UNKNOWN_OUTCOME"
+
+
 def test_target_position_projection_normalizes_aggregates_and_rejects_bad_rows() -> (
     None
 ):
